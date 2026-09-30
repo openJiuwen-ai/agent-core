@@ -68,7 +68,7 @@ class ModelClientConfig(BaseModel):
     )
 
     max_retries: int = Field(
-        default=1,
+        default=3,
         description="Maximum number of thin SDK-level retries for transient HTTP failures "
                     "(connection drops, 429, 5xx). Whole-call retries are handled by LLMRetryRail."
     )
