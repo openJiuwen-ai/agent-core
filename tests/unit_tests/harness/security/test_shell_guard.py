@@ -322,6 +322,36 @@ def test_redirect_env_hits_file_guard(tmp_path: Path) -> None:
     assert level == PermissionLevel.DENY
 
 
+def test_bare_relative_env_read_hits_file_guard(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / ".env").write_text("TOKEN=secret", encoding="utf-8")
+    cfg = {
+        "enabled": True,
+        "tools": {"bash": "allow"},
+        "defaults": {"*": "allow"},
+        "file_guard": {
+            "enabled": True,
+            "defaults": {"read": "allow", "write": "allow", "exec": "allow"},
+            "paths": [
+                {
+                    "path": "**/.env",
+                    "read": "deny",
+                    "write": "deny",
+                    "exec": "deny",
+                    "match": "glob",
+                }
+            ],
+        },
+    }
+    engine = _engine(cfg, workspace_root=workspace)
+    level, _ = engine.evaluate_global_policy_directly(
+        "bash",
+        {"command": "cat .env", "workdir": str(workspace)},
+    )
+    assert level == PermissionLevel.DENY
+
+
 def test_powershell_tool_uses_command_extract(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
