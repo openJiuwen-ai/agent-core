@@ -2,8 +2,8 @@
 
 `openjiuwen.core.foundation.llm` 是 openJiuwen 中统一的**大模型调用与管理模块**，负责：
 
-- 提供 `Model` 统一调用入口，根据 `client_provider` 创建并委托给对应 ModelClient；
-- 定义 `BaseModelClient` 抽象基类及 `OpenAIModelClient`、`SiliconFlowModelClient` 实现；
+- 提供 `Model` 统一调用入口，根据 `client_provider` 选择协议实现（OpenAI 兼容或 Anthropic）；
+- 定义 `BaseModelClient` 抽象基类及 `OpenAIModelClient`、`AnthropicModelClient` 实现；旧厂商名是别名，见[LLM 协议收敛](../../../基础功能/LLM协议收敛.md)；
 - 提供模型请求/客户端配置（`ModelRequestConfig`、`ModelClientConfig`）及消息、流式块、工具调用等 Schema；
 - 提供输出解析器抽象（`BaseOutputParser`）及 `JsonOutputParser`实现。
 
@@ -150,21 +150,15 @@ class openjiuwen.core.foundation.llm.model.Model(model_client_config: ModelClien
 
 ### async generate_image(...) -> ImageGenerationResponse
 
-生成图像（文本生图或图生图）。**注意**：此方法仅在使用DashScope客户端时可用。
-
-详细文档请参见 [DashScopeModelClient.generate_image()](#class-openjiuwencorefoundationllmmodel_clientsdashscope_model_clientdashscopemodelclient)。
+生成图像（文本生图或图生图）。**注意**：仅在 `client_provider="DashScope"` 或 `endpoint_profile="dashscope"` 时可用，由 `OpenAIModelClient` 实现。
 
 ### async generate_speech(...) -> AudioGenerationResponse
 
-生成语音（文本转语音）。**注意**：此方法仅在使用DashScope客户端时可用。
-
-详细文档请参见 [DashScopeModelClient.generate_speech()](#class-openjiuwencorefoundationllmmodel_clientsdashscope_model_clientdashscopemodelclient)。
+生成语音（文本转语音）。**注意**：仅在 DashScope 别名 / `endpoint_profile="dashscope"` 时可用。
 
 ### async generate_video(...) -> VideoGenerationResponse
 
-生成视频（文本生视频或图生视频）。**注意**：此方法仅在使用DashScope客户端时可用。
-
-详细文档请参见 [DashScopeModelClient.generate_video()](#class-openjiuwencorefoundationllmmodel_clientsdashscope_model_clientdashscopemodelclient)。
+生成视频（文本生视频或图生视频）。**注意**：仅在 DashScope 别名 / `endpoint_profile="dashscope"` 时可用。
 
 ---
 
@@ -240,18 +234,9 @@ class openjiuwen.core.foundation.llm.model_clients.openai_model_client.OpenAIMod
 
 ---
 
-## class openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client.SiliconFlowModelClient
+## SiliconFlowModelClient（已删除）
 
-```
-class openjiuwen.core.foundation.llm.model_clients.siliconflow_model_client.SiliconFlowModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
-```
-
-继承 `BaseModelClient`，对接SiliconFlow厂商格式，配置方式与 OpenAI 类似。
-
-**参数**：
-
-* **model_config**(ModelRequestConfig)：模型请求参数。
-* **model_client_config**(ModelClientConfig)：客户端配置。
+请使用 `Model` + `client_provider="SiliconFlow"`。实现为 `OpenAIModelClient` 别名映射。
 
 ---
 
@@ -270,312 +255,11 @@ class openjiuwen.core.foundation.llm.model_clients.openai_account_model_client.O
 
 ---
 
-## class openjiuwen.core.foundation.llm.model_clients.dashscope_model_client.DashScopeModelClient
+## DashScopeModelClient（已删除）
 
-```
-class openjiuwen.core.foundation.llm.model_clients.dashscope_model_client.DashScopeModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
-```
-
-继承 `OpenAIModelClient`，对接阿里云DashScope（通义千问）服务，除了支持标准的对话能力外，还提供**多模态生成功能**，包括图像生成、语音合成和视频生成。
-
-**参数**：
-
-* **model_config**(ModelRequestConfig)：模型请求参数。
-* **model_client_config**(ModelClientConfig)：客户端配置。
-
-### async generate_image(messages: List[UserMessage], \*, model: Optional[str] = None, size: Optional[str] = "1664*928", negative_prompt: Optional[str] = None, n: Optional[int] = 1, prompt_extend: bool = True, watermark: bool = False, seed: int = 0, **kwargs) -> ImageGenerationResponse
-
-异步调用DashScope图像生成API，支持文本生成图像（text-to-image）和图像生成图像（image-to-image）。
-
-**参数**：
-
-* **messages**(List[UserMessage])：必须包含恰好一条`UserMessage`。内容可为：
-  - **字符串**：纯文本提示词（文本生图，T2I）
-  - **列表**：包含文本和图片的混合内容（图生图，I2I），支持1-3张参考图片
-* **model**(str，可选)：使用的模型名称。默认值：`None`，使用model_config中的model_name。
-  - `"qwen-image-max"`：高质量图像生成（**不支持n>1批量生成**）
-  - `"wan2.6-image"`：通用图像生成，支持图生图
-* **size**(str，可选)：生成图片的尺寸，格式为 `"宽度*高度"`。默认值：`"1664*928"`。
-  - 常用尺寸：`"1024*1024"`、`"1664*928"`、`"2048*2048"`等
-* **negative_prompt**(str，可选)：负面提示词，用于排除不想要的元素。建议使用英文，如：
-  - `"blurry, low quality, watermark, text, cropped, worst quality, jpeg artifacts"`
-  - 默认值：`None`
-* **n**(int，可选)：生成图片数量。默认值：`1`。
-  - **重要**：`qwen-image-max`模型仅支持`n=1`，否则会抛出`ValidationError`
-* **prompt_extend**(bool，可选)：是否自动扩展提示词以获得更好效果。默认值：`True`。
-* **watermark**(bool，可选)：是否添加水印。默认值：`False`。
-* **seed**(int，可选)：随机种子，用于生成可复现的结果。设置为`0`表示随机生成。默认值：`0`。
-* **kwargs**：其他DashScope特定参数。
-
-**返回**：
-
-**ImageGenerationResponse**，包含以下字段：
-* `model`(str): 使用的模型名称。
-* `images`(List[str]): 生成的图片URL列表。
-* `images_base64`(List[str]): Base64编码的图片列表（可选）。
-* `created`(int): 创建时间戳（可选）。
-
-**异常**：
-
-* **ValidationError**：当参数验证失败时抛出，包括：
-  - messages 列表长度不为 1
-  - 参考图片数量超过 3 张
-  - 使用`qwen-image-max`时 `n > 1`
-* **ModelError**：当API调用失败时抛出。
-
-**样例**：
-
-```python
->>> import os
->>> import asyncio
->>> from openjiuwen.core.foundation.llm import (
->>>     Model,
->>>     ModelRequestConfig,
->>>     ModelClientConfig,
->>>     UserMessage,
->>> )
->>>
->>> async def demo_generate_image():
->>>     # 1. 配置 DashScope 客户端
->>>     model_config = ModelRequestConfig(model_name="qwen-image-max")
->>>     client_config = ModelClientConfig(
->>>         client_id="dashscope_img",
->>>         client_provider="DashScope",
->>>         api_key=os.getenv("DASHSCOPE_API_KEY"),
->>>         api_base="https://example.com/api/v1"
->>>     )
->>>     model = Model(model_client_config=client_config, model_config=model_config)
->>>
->>>     # 2. 文本生成图片（T2I）
->>>     messages = [UserMessage(content="一只可爱的橘猫在阳光下的花园里玩耍，超高清画质")]
->>>     response = await model.generate_image(
->>>         messages=messages,
->>>         size="1024*1024",
->>>         negative_prompt="blurry, low quality, watermark, text",
->>>         seed=42
->>>     )
->>>     print(f"生成的图片URL: {response.images[0]}")
->>>
->>>     # 3. 图生图（I2I）- 使用多张参考图
->>>     messages_i2i = [UserMessage(content=[
->>>         {"text": "将这些图片融合，创造一个水彩画风格的新场景"},
->>>         {"image": "https://example.com/input1.jpg"},
->>>         {"image": "https://example.com/input2.jpg"}
->>>     ])]
->>>     response_i2i = await model.generate_image(
->>>         messages=messages_i2i,
->>>         model="wan2.6-image",
->>>         size="1664*928"
->>>     )
->>>     print(f"图生图结果: {response_i2i.images[0]}")
->>>
->>> asyncio.run(demo_generate_image())
-生成的图片URL: https://example.com/...
-图生图结果: https://example.com/...
-```
-
-### async generate_speech(messages: List[UserMessage], \*, model: Optional[str] = None, voice: Optional[str] = "Cherry", language_type: Optional[str] = "Auto", **kwargs) -> AudioGenerationResponse
-
-异步调用DashScope语音合成API，将文本转换为自然流畅的语音。
-
-**参数**：
-
-* **messages**(List[UserMessage])：必须包含至少一条`UserMessage`，内容为需要转换为语音的文本。
-* **model**(str，可选)：使用的模型名称。默认值：`None`，使用model_config中的model_name。
-  - `"qwen3-tts-flash"`：快速语音合成（推荐）
-  - `"qwen3-tts"`：标准语音合成
-* **voice**(str，可选)：语音角色选择，支持47种不同风格的声音。默认值：`"Cherry"`。
-  - **中文女声**：Cherry, Serena, Momo, Vivian, Moon, Mai 等
-  - **中文男声**：Kai, Nofish, Ethan, Ryan, Aiden等
-  - **英文声音**：Jennifer, Bella, Ryan, Ethan, Vincent等
-  - 完整列表见下方 **支持的声音列表**
-* **language_type**(str，可选)：语言类型。默认值：`"Auto"`自动检测。
-  - 可选值：`"Chinese"`, `"English"`, `"German"`, `"Italian"`, `"Portuguese"`, `"Spanish"`, `"Japanese"`, `"Korean"`, `"French"`, `"Russian"`
-* **kwargs**：其他DashScope特定参数。
-
-**返回**：
-
-**AudioGenerationResponse**，包含以下字段：
-* `model`(str): 使用的模型名称
-* `audio_url`(str): 生成的音频 URL（可选）
-* `audio_data`(bytes): 音频二进制数据（可选）
-* `duration`(float): 音频时长（秒）（可选）
-* `format`(str): 音频格式（如`"mp3"`、`"wav"`）（可选）
-
-**异常**：
-
-* **ValidationError**：当文本内容为空时抛出。
-* **ModelError**：当API调用失败时抛出。
-
-**样例**：
-
-```python
->>> import os
->>> import asyncio
->>> from openjiuwen.core.foundation.llm import (
->>>     Model,
->>>     ModelRequestConfig,
->>>     ModelClientConfig,
->>>     UserMessage,
->>> )
->>>
->>> async def demo_generate_speech():
->>>     # 1. 配置 DashScope 客户端
->>>     model_config = ModelRequestConfig(model_name="qwen3-tts-flash")
->>>     client_config = ModelClientConfig(
->>>         client_id="dashscope_tts",
->>>         client_provider="DashScope",
->>>         api_key=os.getenv("DASHSCOPE_API_KEY"),
->>>         api_base="https://example.com/api/v1",
->>>     )
->>>     model = Model(model_client_config=client_config, model_config=model_config)
->>>
->>>     # 2. 基础语音合成（中文）
->>>     messages = [UserMessage(content="你好，欢迎使用通义千问语音合成服务。这是一段测试语音。")]
->>>     response = await model.generate_speech(messages=messages)
->>>     print(f"音频URL: {response.audio_url}")
->>>     print(f"音频格式: {response.format}")
->>>     print(f"音频时长: {response.duration}秒")
->>>
->>>     # 3. 自定义声音和语言（英文男声）
->>>     messages_en = [UserMessage(content="Hello, welcome to our AI voice synthesis service. This is a demo.")]
->>>     response_en = await model.generate_speech(
->>>         messages=messages_en,
->>>         voice="Ethan",
->>>         language_type="English"
->>>     )
->>>     print(f"英文音频: {response_en.audio_url}")
->>>
->>>     # 4. 长文本语音合成
->>>     long_text = "人工智能技术正在快速发展。" * 50  # 模拟长文本
->>>     messages_long = [UserMessage(content=long_text)]
->>>     response_long = await model.generate_speech(
->>>         messages=messages_long,
->>>         voice="Serena"
->>>     )
->>>     print(f"长文本音频时长: {response_long.duration}秒")
->>>
->>> asyncio.run(demo_generate_speech())
-音频URL: https://example.com/...
-音频格式: mp3
-音频时长: 3.5秒
-英文音频: https://example.com/...
-长文本音频时长: 42.8秒
-```
-
-**支持的声音列表**：
-Cherry, Serena, Ethan, Chelsie, Momo, Vivian, Moon, Maia, Kai, Nofish, Bella, Jennifer, Ryan, Katerina, Aiden, Eldric Sage, Mia, Mochi, Bellona, Vincent, Bunny, Neil, Elias, Arthur, Nini, Ebona, Seren, Pip, Stella, Bodega, Sonrisa, Alek, Dolce, Sohee, Ono Anna, Lenn, Emilien, Andre, Radio Gol, Jada, Dylan, Li, Marcus, Roy, Peter, Sunny, Eric, Rocky, Kiki
-
-**支持的语言类型**：
-Chinese, English, German, Italian, Portuguese, Spanish, Japanese, Korean, French, Russian
-
-### async generate_video(messages: List[UserMessage], \*, img_url: Optional[str] = None, audio_url: Optional[str] = None, model: Optional[str] = None, size: Optional[str] = None, resolution: Optional[str] = None, duration: Optional[int] = 5, prompt_extend: bool = True, watermark: bool = False, negative_prompt: Optional[str] = None, seed: Optional[int] = None, **kwargs) -> VideoGenerationResponse
-
-异步调用DashScope视频生成 API，支持文本生成视频（text-to-video）和图像生成视频（image-to-video）。
-
-**参数**：
-
-* **messages**(List[UserMessage])：必须包含恰好一条`UserMessage`，内容为视频描述文本。
-* **img_url**(str，可选)：输入图片URL，用于图生视频（I2V）模式。默认值：`None`（使用文本生视频 T2V 模式）。
-  - 支持格式：公开 URL、本地文件路径（`file://` 前缀）、base64编码图片
-* **audio_url**(str，可选)：背景音频URL，可与文本或图片结合生成带音频的视频。默认值：`None`。
-* **model**(str，可选)：使用的模型名称。默认值：`None`，使用model_config中的model_name。
-  - `"wan2.6-t2v"`：文本生成视频（T2V）
-  - `"wan2.6-i2v-flash"`：图像生成视频（I2V，快速）
-  - `"wan2.6-i2v-standard"`：图像生成视频（I2V，标准质量）
-* **size**(str，可选)：视频尺寸，**仅用于文本生视频（T2V）**。格式为 `"宽度*高度"`，如`"1280*720"`。默认值：`None`。
-* **resolution**(str，可选)：视频分辨率，**仅用于图生视频（I2V）**。可选值：`"720P"`、`"1080P"`。默认值：`None`。
-* **duration**(int，可选)：视频时长（秒）。默认值：`5`。
-  - 支持范围：通常为5-10秒
-* **prompt_extend**(bool，可选)：是否自动扩展提示词以获得更好效果。默认值：`True`。
-* **watermark**(bool，可选)：是否添加水印。默认值：`False`。
-* **negative_prompt**(str，可选)：负面提示词，用于控制不需要的视频特征，如 `"blurry, low quality, shaky, distorted"`。默认值：`None`。
-* **seed**(int，可选)：随机种子，用于生成可复现的结果。默认值：`None`。
-* **kwargs**：其他 DashScope 特定参数。
-
-**返回**：
-
-**VideoGenerationResponse**，包含以下字段：
-* `model`(str): 使用的模型名称
-* `video_url`(str): 生成的视频URL
-* `video_data`(bytes): 视频二进制数据（可选）
-* `duration`(float): 视频时长（秒）（可选）
-* `resolution`(str): 视频分辨率（可选）
-* `format`(str): 视频格式（默认`"mp4"`）
-
-**异常**：
-
-* **ValidationError**：当参数验证失败时抛出（如消息数量不为1、内容为空等）。
-* **ModelError**：当API调用失败时抛出。
-
-**样例**：
-
-```python
->>> import os
->>> import asyncio
->>> from openjiuwen.core.foundation.llm import (
->>>     Model,
->>>     ModelRequestConfig,
->>>     ModelClientConfig,
->>>     UserMessage,
->>> )
->>>
->>> async def demo_generate_video():
->>>     # 1. 配置 DashScope 客户端
->>>     model_config = ModelRequestConfig(model_name="wan2.6-t2v")
->>>     client_config = ModelClientConfig(
->>>         client_id="dashscope_video",
->>>         client_provider="DashScope",
->>>         api_key=os.getenv("DASHSCOPE_API_KEY"),
->>>         api_base="https://example.com/api/v1",
->>>     )
->>>     model = Model(model_client_config=client_config, model_config=model_config)
->>>
->>>     # 2. 文本生成视频（T2V）
->>>     messages = [UserMessage(content="一只可爱的小白兔在绿色的草地上快乐地奔跑跳跃")]
->>>     response = await model.generate_video(
->>>         messages=messages,
->>>         size="1280*720",
->>>         duration=5,
->>>         negative_prompt="blurry, low quality, shaky, distorted"
->>>     )
->>>     print(f"生成的视频URL: {response.video_url}")
->>>     print(f"视频时长: {response.duration}秒")
->>>     print(f"视频分辨率: {response.resolution}")
->>>
->>>     # 3. 图生视频（I2V）
->>>     messages_i2v = [UserMessage(content="让图片中的场景动起来，云朵缓缓飘动，树叶轻轻摇曳")]
->>>     response_i2v = await model.generate_video(
->>>         messages=messages_i2v,
->>>         img_url="https://example.com/landscape.jpg",
->>>         model="wan2.6-i2v-flash",
->>>         resolution="720P",
->>>         duration=5
->>>     )
->>>     print(f"图生视频结果: {response_i2v.video_url}")
->>>
->>>     # 4. 图生视频 + 音频融合
->>>     messages_audio = [UserMessage(content="一个歌手在舞台上表演")]
->>>     response_audio = await model.generate_video(
->>>         messages=messages_audio,
->>>         img_url="https://example.com/singer.jpg",
->>>         audio_url="https://example.com/background_music.mp3",
->>>         model="wan2.6-i2v-standard",
->>>         resolution="1080P",
->>>         duration=10
->>>     )
->>>     print(f"带音频的视频: {response_audio.video_url}")
->>>
->>> asyncio.run(demo_generate_video())
-生成的视频URL: https://example.com/...
-视频时长: 5.0秒
-视频分辨率: 1280*720
-图生视频结果: https://example.com/...
-带音频的视频: https://example.com/...
-```
+请使用 `Model` + `client_provider="DashScope"`。多模态接口由 `OpenAIModelClient` 在 DashScope 别名下提供。
 
 ---
-
 ## class openjiuwen.core.foundation.llm.schema.config.ProviderType
 
 定义了支持的模型服务商类型。
@@ -830,6 +514,62 @@ class openjiuwen.core.foundation.llm.schema.generation_response.VideoGenerationR
 >>> print(response.resolution)
 1280*720
 ```
+
+---
+
+## class openjiuwen.core.foundation.llm.model_clients.anthropic_model_client.AnthropicModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.anthropic_model_client.AnthropicModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig)
+```
+
+继承 `BaseModelClient`，对接 Anthropic Messages API（Claude 系列模型）。实现 `invoke`、`stream`，支持 tool_calls、output_parser 与提示词缓存（`cache_control`）。
+
+该客户端维护进程级 `AsyncAnthropic` 客户端缓存池，按 `api_key`、`api_base`、`verify_ssl`、`ssl_cert` 分桶复用 httpx 长连接；可通过 `connection_key` 计算连接标识，通过 `aclose` / `aclose_connections` 关闭连接池。`_normalize_base_url` 会自动剥离 `api_base` 末尾的 `/v1`，避免与 SDK 自动追加的 `/v1/messages` 重复拼接。
+
+**参数**：
+
+* **model_config**(ModelRequestConfig)：模型请求参数。
+* **model_client_config**(ModelClientConfig)：客户端配置，`client_provider` 需为 `"Anthropic"`。
+
+---
+
+## 已删除的厂商客户端
+
+`DeepSeekModelClient`、`AscendAffinityModelClient`、`InferenceAffinityModelClient`、`OpenRouterModelClient` 已删除。请使用 `Model` + 对应 `client_provider` 字符串。
+
+---
+## class openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.IntelliRouterModelClient
+
+```
+class openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.IntelliRouterModelClient(model_config: ModelRequestConfig, model_client_config: ModelClientConfig, router: Optional[ReliableRouter] = None)
+```
+
+继承 `BaseModelClient`，封装 `intelli_router.ReliableRouter`，提供 API 池化、智能路由、自动重试、流式输出与多模态生成（图像/语音/视频）。实现 `invoke`、`stream`；`generate_image` / `generate_speech` / `generate_video` 会解析 provider 并委托 DashScope 执行。
+
+**参数**：
+
+* **model_config**(ModelRequestConfig)：模型请求参数。
+* **model_client_config**(ModelClientConfig)：客户端配置，`client_provider` 需为 `"intelli_router"`。路由相关参数从 `__pydantic_extra__` 提取（见下 `IntelliRouterClientConfig`）。
+* **router**(ReliableRouter，可选)：外部传入已构造的 `ReliableRouter` 实例；未传时按配置自动从模块级缓存获取或创建。
+
+> **依赖**：需安装 `intelli-router` 包，否则构造时抛出 `ModelError`（`MODEL_SERVICE_CONFIG_ERROR`）。
+
+---
+
+## class openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.IntelliRouterClientConfig
+
+```
+class IntelliRouterClientConfig(deployments: list[dict] = [], strategy: str = "simple-shuffle", num_retries: int = 3, timeout: float = 30.0, strategy_kwargs: dict = {}, enable_health_check: bool = False, health_check_interval: float = 300.0, verify_ssl: bool = True, enable_observability: bool = False, web_dashboard_port: int = 0)
+```
+
+从 `ModelClientConfig` 抽取的 IntelliRouter 类型化配置（`@dataclass`）。通过 `from_model_client_config(config)` 类方法从 `ModelClientConfig.__pydantic_extra__` 读取以下字段：
+
+* `intelli_router_deployments`：部署列表，每个部署含 `id`、`model_name`、`api_key`、`api_base`、`provider`、`tpm`、`rpm` 等。
+* `intelli_router_strategy`(默认 `"simple-shuffle"`)、`intelli_router_strategy_kwargs`：路由策略及其参数。
+* `intelli_router_num_retries`(默认 `3`)、`intelli_router_timeout`(默认 `30.0`)：重试次数与超时。
+* `intelli_router_enable_health_check`(默认 `False`)、`intelli_router_health_check_interval`(默认 `300.0`)：健康检查开关与间隔。
+* `intelli_router_enable_observability`(默认 `False`)、`intelli_router_web_dashboard_port`(默认 `0`)：可观测性与 Web 仪表盘端口。
 
 ---
 
