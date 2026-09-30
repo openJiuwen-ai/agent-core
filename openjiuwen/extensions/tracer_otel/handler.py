@@ -294,7 +294,9 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
     # Streaming / reasoning latency. first_token_time is declared on
     # UsageMetadata (no producer yet — parsed whenever it carries a number);
     # the *_ms keys are schema-transparent: raw-dict callers and future
-    # UsageMetadata fields flow through unchanged.
+    # UsageMetadata fields flow through unchanged. All parses are guarded —
+    # a malformed value skips its attribute; it must never raise and abort
+    # the span finalization that follows in on_llm_end.
     first_token_time = str(usage.get("first_token_time") or "")
     if first_token_time:
         try:
@@ -303,10 +305,16 @@ def _set_llm_response_attrs(otel_span: trace.Span, outputs: Any) -> None:
             pass
     inter_token = usage.get("inter_token_latency_ms")
     if inter_token is not None:
-        otel_span.set_attribute(OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS, float(inter_token))
+        try:
+            otel_span.set_attribute(OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS, float(inter_token))
+        except (TypeError, ValueError):
+            pass
     reasoning_duration = usage.get("reasoning_duration_ms")
     if reasoning_duration is not None:
-        otel_span.set_attribute(OJ_GEN_AI_REASONING_DURATION_MS, float(reasoning_duration))
+        try:
+            otel_span.set_attribute(OJ_GEN_AI_REASONING_DURATION_MS, float(reasoning_duration))
+        except (TypeError, ValueError):
+            pass
 
 
 # ---------------------------------------------------------------------------
