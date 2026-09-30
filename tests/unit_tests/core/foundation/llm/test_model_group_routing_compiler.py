@@ -14,7 +14,7 @@ from openjiuwen.core.foundation.llm.routing import (
 from openjiuwen.core.foundation.llm.schema.config import ProviderType
 
 
-def test_compile_single_model_preserves_explicit_request_defaults():
+def test_compile_single_model_preserves_explicit_request_defaults_and_none():
     compiled = compile_model_selection({
         "model_id": "m1",
         "model_name": "qwen-plus",
@@ -30,7 +30,21 @@ def test_compile_single_model_preserves_explicit_request_defaults():
     assert compiled.model_client_config.endpoint_profile == "dashscope"
     assert compiled.model_request_config.model_name == "qwen-plus"
     assert compiled.model_request_config.temperature == 0.4
+    # ``None`` means the caller did not set top_p.  The compiler must not
+    # invent a provider default (0.95); the downstream client owns defaults.
     assert compiled.model_request_config.top_p is None
+
+
+def test_compile_single_model_preserves_explicit_top_p_value():
+    compiled = compile_model_selection({
+        "model_id": "m1",
+        "model_name": "qwen-plus",
+        "provider": ProviderType.DashScope.value,
+        "api_key": "sk",
+        "api_base": "https://dashscope.aliyuncs.com/compatible-mode",
+        "request_defaults": {"top_p": 0.95},
+    })
+    assert compiled.model_request_config.top_p == 0.95
 
 
 def test_compile_single_model_ignores_model_request_default_aliases():
