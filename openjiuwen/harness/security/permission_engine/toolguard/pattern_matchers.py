@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 # - 置于开头避免被解析为范围
 # 含文件 glob 的 * ?；仍排除 ; | & ` < > $ 等拼接元字符
 _WILDCARD_CHARS = r'[-a-zA-Z0-9 \._/:"\'*?]'
+_SINGLE_WILDCARD_CHARS = r'[-a-zA-Z0-9 \._/:"\']'
 
 
 def match_wildcard(value: str, pattern: str) -> bool:
@@ -30,13 +31,18 @@ def match_wildcard(value: str, pattern: str) -> bool:
         return False
     val = value.replace("\\", "/")
     pat = pattern.replace("\\", "/")
-    to_escape = set(".+^${}()|[]\\")
-    escaped = "".join("\\" + c if c in to_escape else c for c in pat)
-    escaped = escaped.replace("?", _WILDCARD_CHARS)
-    if escaped.endswith(" *"):
-        escaped = escaped[:-2] + "( " + _WILDCARD_CHARS + "*)?"
-    else:
-        escaped = escaped.replace("*", _WILDCARD_CHARS + "*")
+    optional_args = pat.endswith(" *")
+    body = pat[:-2] if optional_args else pat
+    # Translate once: replacing '*' after '?' would corrupt the generated
+    # character class, which itself contains literal wildcard characters.
+    escaped = "".join(
+        _WILDCARD_CHARS + "*" if char == "*"
+        else _SINGLE_WILDCARD_CHARS if char == "?"
+        else re.escape(char)
+        for char in body
+    )
+    if optional_args:
+        escaped += "( " + _WILDCARD_CHARS + "*)?"
     flags = re.IGNORECASE if sys.platform == "win32" else 0
     try:
         return bool(re.fullmatch(escaped, val, flags))

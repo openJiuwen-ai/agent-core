@@ -50,6 +50,7 @@ from openjiuwen.harness.security.permission_engine.netguard.net_urls import (
 from openjiuwen.harness.security.permission_engine.toolguard.builtin_rules import (
     inline_package_command_rules,
     package_builtin_rules_enabled,
+    shell_builtin_rules_enabled,
 )
 from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
     evaluate_tiered_policy,
@@ -115,6 +116,9 @@ def prepare_permissions_for_engine(
     cfg: dict[str, Any] = cast(dict[str, Any], config or {})
     if not isinstance(cfg, dict):
         cfg = {}
+
+    if not shell_builtin_rules_enabled(cfg):
+        cfg = inline_package_command_rules(cfg)
 
     if not package_builtin_rules_enabled(cfg):
         logger.info("[PermissionEngine] permission.builtin_rules.skip_package_builtin_rules")
@@ -380,6 +384,13 @@ class PermissionEngine:
                 "[PermissionEngine] permission.net_guard.result tool=%s checked=false reason=disabled",
                 tool_name,
             )
+
+        if permission == PermissionLevel.ASK:
+            from openjiuwen.harness.security.permission_engine.approve.operation_grants import has_operation_grant
+
+            if has_operation_grant(self.config, tool_name, tool_args, self._workspace_root):
+                permission = PermissionLevel.ALLOW
+                matched_rule = "operation_grant"
 
         result = PermissionResult(
             permission=permission,
