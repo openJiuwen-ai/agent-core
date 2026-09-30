@@ -1,1 +1,1 @@
-向当前大群发表公开消息。发送者、群和 session 已绑定，不能冒充其他成员。content 是正文，client_message_id 是本次发送的稳定唯一 ID；相同 ID 和正文返回已有归档，不再次发送通知。mentions 填真实成员标识；为空只保存群历史，不唤醒任何成员。此工具用于大群公开交流；背后小团队的内部交流使用该团队自己的 send_message。
+向当前群发表公开消息，发送者、团队和 session 由运行时绑定。content 是正文，client_message_id 是稳定唯一 ID；重试复用原记录。mentions 填准确的成员标识。所有消息都广播保存，只有被 @ 的成员收到近期 5 条摘录和 history.jsonl 路径；没有 mentions 时不触发模型输入。普通定向消息和内部广播使用 send_message。

@@ -320,3 +320,45 @@ async def test_watch_wakes_on_inbound_message(team_db, make_descriptor):
             pass
 
     assert "wake up" in received
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_group_inbox_only_consumes_mentions(
+    team_db, make_descriptor, tmp_path, monkeypatch, isolated_group_home,
+):
+    from openjiuwen.agent_teams.tools.database import message_dao
+
+    timestamps = iter([100, 200])
+    monkeypatch.setattr(message_dao, "get_current_time", lambda: next(timestamps))
+    descriptor = make_descriptor(
+        member="dev-1", scope="member",
+        workspace_config=TeamWorkspaceConfig(enabled=True, root_path=str(tmp_path)),
+    )
+    async with ExternalTeamClient(descriptor) as client:
+        assert "group_send_message" in client.tools
+        await client._backend.append_group_message("user", "Earlier discussion", client_message_id="one")
+        assert (await client.fetch_inbox()).messages == []
+        assert await team_db.message.get_broadcast_read_at("ext_team", "dev-1") == 0
+        await client._backend.append_group_message(
+            "user", "Please review", client_message_id="two", mentions=["dev-1"],
+        )
+        preview = await client.fetch_inbox(mark_read=False)
+        assert len(preview.messages) == 1
+        assert "Earlier discussion" in preview.messages[0].content
+        assert "history.jsonl" in preview.messages[0].content
+        assert await team_db.message.get_broadcast_read_at("ext_team", "dev-1") == 0
+        assert len((await client.fetch_inbox()).messages) == 1
+        assert await team_db.message.get_broadcast_read_at("ext_team", "dev-1") == 200
+        assert (await client.fetch_inbox()).messages == []
+
+
+@pytest.fixture
+def isolated_group_home(tmp_path):
+    from openjiuwen.agent_teams.paths import reset_task_openjiuwen_home, set_task_openjiuwen_home
+
+    token = set_task_openjiuwen_home(tmp_path)
+    try:
+        yield
+    finally:
+        reset_task_openjiuwen_home(token)

@@ -596,6 +596,11 @@ class CoordinationKernel:
             mailbox_wakeup = event.event_type == TeamEvent.MESSAGE and (
                 host.role == TeamRole.LEADER or event.get_payload().to_member_name == local_member_name
             )
+            if event.event_type == TeamEvent.BROADCAST and event.sender_id == local_member_name:
+                from openjiuwen.agent_teams.group_chat.handler import group_metadata
+
+                row = await host.infra.team_backend.db.message.get_message(event.get_payload().message_id)
+                mailbox_wakeup = row is not None and bool(group_metadata(row))
             if local_member_name and event.sender_id == local_member_name and not mailbox_wakeup:
                 team_logger.debug("ignoring self-published event: {}", event.event_type)
                 # F_62: the scheduler must observe board changes the leader

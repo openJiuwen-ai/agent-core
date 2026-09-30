@@ -423,21 +423,17 @@ class TeamBackend:
         return self._enable_fork
 
     def bind_group_session(self, session_id: str) -> None:
-        if self.group_chat_spec is None or not self.group_chat_spec.enable_group_chat:
-            return
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError("Group chat requires a nonempty runtime session_id")
-        if self.group_session_id and self.group_session_id != session_id:
+        if self._group_conversation is not None and self.group_session_id != session_id:
             raise ValueError("A group backend cannot switch sessions; stop and rebuild the team")
         self.group_session_id = session_id
 
     async def group_conversation(self):
-        if self.group_chat_spec is None or not self.group_chat_spec.enable_group_chat:
-            raise ValueError("Group chat is disabled")
         if self._group_conversation is None:
-            from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+            from openjiuwen.agent_teams.group_chat.conversation import GroupConversationLog
 
-            workspace = self.group_chat_spec.workspace
+            workspace = getattr(self.group_chat_spec, "workspace", None)
             self._group_conversation = await asyncio.to_thread(
                 GroupConversationLog, self.team_name, self.group_session_id,
                 workspace_path=workspace.root_path if workspace else None,
@@ -446,10 +442,12 @@ class TeamBackend:
 
     async def append_group_message(self, sender, content, *, client_message_id, mentions=(), attachments=()):
         conversation = await self.group_conversation()
-        return await conversation.post(
+        from openjiuwen.agent_teams.group_chat.handler import post_message
+
+        return await post_message(
+            conversation,
             self.message_manager, sender, content, client_message_id=client_message_id,
-            mentions=mentions, attachments=attachments, tail_count=self.group_chat_spec.group_context_tail,
-            language=self.group_chat_spec.language or "cn",
+            mentions=mentions, attachments=attachments,
         )
 
     def set_snapshot_length(self, fn) -> None:
@@ -1621,7 +1619,8 @@ class TeamBackend:
             3. No message is left unread by any member, broadcasts
                included. Completion is judged strictly: any undelivered
                message -- direct or fan-out broadcast -- blocks the team
-               from concluding.
+               from concluding. In group mode, only explicitly mentioned
+               broadcasts count as pending input.
 
         Read-only; safe to call repeatedly. Queries the member DAO directly
         so the leader itself is part of the roster check (``list_members``

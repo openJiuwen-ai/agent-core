@@ -29,6 +29,7 @@ from openjiuwen.agent_teams.interaction import (
     DeliverResult,
     ExternalTeamEvent,
     GodViewMessage,
+    GroupChatMessage,
     HumanAgentInbox,
     HumanAgentMessage,
     HumanAgentNotEnabledError,
@@ -373,7 +374,7 @@ class TeamRuntimeManager:
 
         ``payload`` accepts an ``InteractiveInput`` for pending leader
         interrupts, an :class:`InteractPayload` (one of
-        ``GodViewMessage`` / ``OperatorMessage`` / ``HumanAgentMessage``),
+        ``GodViewMessage`` / ``OperatorMessage`` / ``HumanAgentMessage`` / ``GroupChatMessage``),
         or a free-form ``str``. String inputs are parsed by
         :func:`parse_interact_str` exactly once at this layer:
 
@@ -426,6 +427,13 @@ class TeamRuntimeManager:
             return DeliverResult.failure("invalid_external_event")
         if external_event is not None:
             return await self._route_external_team_event(entry, external_event)
+
+        try:
+            group_input = GroupChatMessage.from_wire(payload)
+        except ValueError:
+            return DeliverResult.failure("invalid_group_chat")
+        if group_input is not None:
+            payload = group_input
 
         if isinstance(payload, str):
             parsed = parse_interact_str(payload)
@@ -584,6 +592,10 @@ class TeamRuntimeManager:
         if backend is None and not isinstance(payload, GodViewMessage):
             return DeliverResult.failure("no_team_backend")
 
+        if isinstance(payload, GroupChatMessage):
+            from openjiuwen.agent_teams.group_chat.handler import deliver_group_message
+
+            return await deliver_group_message(backend, payload)
         if isinstance(payload, GodViewMessage):
             # GodView is the explicit "talk straight to the leader's
             # DeepAgent" channel — no mention parsing here. Routing
@@ -863,7 +875,7 @@ class TeamRuntimeManager:
                 team_names=[team_name],
                 db=db,
             )
-        from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+        from openjiuwen.agent_teams.group_chat.conversation import GroupConversationLog
 
         await asyncio.to_thread(GroupConversationLog.delete_registered, team_name)
         for session_id in session_ids:
@@ -955,7 +967,7 @@ class TeamRuntimeManager:
             team_names=release_info.team_names,
             db=db,
         )
-        from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+        from openjiuwen.agent_teams.group_chat.conversation import GroupConversationLog
 
         for team_name in release_info.team_names:
             await asyncio.to_thread(GroupConversationLog.delete_registered, team_name, session_id)

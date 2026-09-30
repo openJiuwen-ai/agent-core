@@ -106,7 +106,7 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
   伪成员标记已读（它没有 agent 进程去 poll 自己的邮箱），`_notify_human_agent_inbound` 通知
   SDK 侧回调。收件人按**可达**筛选 = status ∉ {`SHUTDOWN`}——`SHUTDOWN_REQUESTED` 必须留在
   可达集里，否则"你已被移出团队"这条通知恰好送不到该收它的人。
-- **启动未读定向消息的收件人**：leader 在 `MESSAGE` 与 `POLL_MAILBOX` 上检查现有邮箱，为有未读定向消息的 `UNSTARTED` / `ERROR` 成员调用 `auto_start_member`。启动和恢复沿用现有状态转换，失败时保留未读消息供后续处理；不为无消息的成员启动模型。
+- **群聊收件人启动**：`GroupMessageHandler.start_mentioned_members` 在群聊广播和 Leader 邮箱轮询时扫描未消费 mentions，通过既有 `auto_start_member` 启动 `UNSTARTED` / `ERROR` 成员。普通 `MessageHandler` 只消费本成员邮箱，不扫描其他成员；普通消息启动仍由发送工具和交互入口负责。
 - **投递前先 `_expand`**（`message_template.expand_message`，F_63）：普通消息原样过；框架
   模板消息（`content` 空 + `meta`）在**投递这一刻**按当前任务行渲染正文，所以排队很久的交接
   不会投出过期简报。**四个消费点都必须展开**：`_format_message`、`_notify_human_agent_inbound`

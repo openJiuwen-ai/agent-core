@@ -40,7 +40,7 @@ from openjiuwen.agent_teams.skill.rail_spec import (
     build_team_skill_rail_spec,
     complete_declared_team_skill_rails,
 )
-from openjiuwen.agent_teams.tools.tool_group_chat import group_chat_prompt
+from openjiuwen.agent_teams.group_chat.tools import group_chat_prompt
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import ProviderType

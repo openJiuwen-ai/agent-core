@@ -45,6 +45,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers import (
     WorkflowHandler,
 )
 from openjiuwen.agent_teams.agent.infra import TeamInfra
+from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
 from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -218,6 +219,7 @@ class EventDispatcher:
         self.lifecycle = AgentLifecycleHandler(host, blueprint, infra, poll_ctrl)
         self.member = MemberHandler(host, blueprint, infra, poll_ctrl)
         self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
+        self.group_message = GroupMessageHandler(host, blueprint, infra, poll_ctrl)
         # task_board / stale_task are the dispatch-mode-owned handler pair
         # (F_62): the mode is static spec configuration, so the variant is
         # chosen right here at construction, for every role alike.
@@ -293,7 +295,16 @@ class EventDispatcher:
 
         for handler in handlers:
             for event_key, callback in handler.get_callbacks().items():
+                if handler is self.message:
+                    callback = self._dispatch_mailbox
                 self._framework.register_sync(event_key, callback)
+
+    async def _dispatch_mailbox(self, event) -> None:
+        if event.event_type == InnerEventType.POLL_MAILBOX:
+            await self.group_message.start_mentioned_members()
+        handler = self.group_message if await self.group_message.handles(event) else self.message
+        method_name = MessageHandler.EVENT_METHOD_MAP[event.event_type]
+        await getattr(handler, method_name)(event)
 
     @property
     def dispatch_mode(self) -> str:

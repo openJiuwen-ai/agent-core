@@ -1,6 +1,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """SDK and tool boundaries: no mention means storage only, no free routing."""
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -9,16 +10,18 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import text
 
-from openjiuwen.agent_teams.context import get_session_id, reset_session_id, set_session_id
+from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.paths import reset_task_openjiuwen_home, set_task_openjiuwen_home
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
+from openjiuwen.agent_teams.schema.conversation import ConversationAppendResult
+from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, LeaderSpec, TeamAgentSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, TeamDatabase
-from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+from openjiuwen.agent_teams.group_chat.conversation import GroupConversationLog
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.agent_teams.tools.tool_group_chat import create_group_chat_tools, group_chat_prompt
+from openjiuwen.agent_teams.group_chat.tools import GroupSendMessageTool, group_chat_prompt
 from openjiuwen.core.runner.team_runner import _TeamRunnerMixin
 
 
@@ -32,7 +35,7 @@ async def runtime(tmp_path, monkeypatch):
     await db.member.create_member("alice", "group", "Expert", "{}", "unstarted", role="teammate")
     token = set_session_id("session")
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="group",
-                         leader=LeaderSpec(member_name="leader"), enable_group_chat=True)
+                         leader=LeaderSpec(member_name="leader"))
     backend = TeamBackend("group", "leader", True, db, AsyncMock())
     backend.group_chat_spec = spec
     backend.bind_group_session("session")
@@ -51,31 +54,39 @@ async def runtime(tmp_path, monkeypatch):
         reset_task_openjiuwen_home(home)
 
 
+async def post_group(runtime, content, *, team_name, session_id, client_message_id, mentions=()):
+    result = await runtime.sdk.interact_agent_team(
+        {"type": "group_chat", "body": content, "client_message_id": client_message_id,
+         "mentions": list(mentions)}, team_name=team_name, session_id=session_id,
+    )
+    assert result.ok, result.reason
+    return ConversationAppendResult.model_validate(result.data)
+
+
 @pytest.mark.asyncio
-async def test_sdk_plain_messages_archive_without_model_or_broadcast(runtime):
-    result = await runtime.sdk.post_group_message("Discussing", team_name="group", session_id="session",
+async def test_sdk_messages_broadcast_without_unmentioned_model_input(runtime):
+    result = await post_group(runtime, "Discussing", team_name="group", session_id="session",
                                                   client_message_id="m1")
     assert result.notified_members == []
     assert await asyncio.to_thread(Path(result.context_path).is_file)
-    assert Path(result.context_path).name == "history.json"
+    assert Path(result.context_path).name == "history.jsonl"
     log = await runtime.backend.group_conversation()
     assert not await asyncio.to_thread((log.path / ".notified.json").exists)
-    runtime.backend.messager.publish.assert_not_awaited()
+    runtime.backend.messager.publish.assert_awaited()
     runtime.agent.deliver_input.assert_not_awaited()
     runtime.agent.auto_start_all.assert_not_awaited()
-    second = await runtime.sdk.post_group_message("Act", team_name="group", session_id="session",
+    second = await post_group(runtime, "Act", team_name="group", session_id="session",
                                                   client_message_id="m2", mentions=["alice"])
     assert second.notified_members == ["alice"]
     event = runtime.backend.messager.publish.call_args.kwargs["message"]
-    assert event.event_type == "message"
+    assert event.event_type == "broadcast"
     assert "Act" not in str(event.payload)
     runtime.agent.deliver_input.assert_not_awaited()
     messages = await runtime.db.message.get_messages("group", "alice", unread_only=True)
-    assert len(messages) == 1
-    assert "Act" in messages[0].content
-    assert second.context_path in messages[0].content
-    assert not messages[0].broadcast
-    assert messages[0].from_member_name == "user"
+    assert messages == []
+    broadcasts = await runtime.db.message.get_team_messages("group", broadcast=True)
+    assert [m.content for m in broadcasts] == ["Discussing", "Act"]
+    assert await runtime.db.message.get_broadcast_read_at("group", "alice") == 0
     async with runtime.db._sessions.read() as session:
         tables = (await session.execute(text("SELECT name FROM sqlite_master WHERE type='table'"))).scalars().all()
     assert not any(name.startswith("group_conversation_") for name in tables)
@@ -83,35 +94,38 @@ async def test_sdk_plain_messages_archive_without_model_or_broadcast(runtime):
 
 
 @pytest.mark.asyncio
-async def test_offline_sdk_requires_storage_and_preserves_custom_workspace_and_session(runtime, tmp_path):
+async def test_group_input_requires_active_runtime(runtime):
     await runtime.manager.pool.remove("group")
-    with pytest.raises(ValueError, match="db_config"):
-        await runtime.sdk.post_group_message("hello", team_name="group", session_id="new", client_message_id="m1")
-    result = await runtime.sdk.post_group_message(
-        "saved", team_name="group", session_id="new", client_message_id="m2",
-        mentions=["alice"], db_config=runtime.db.config, workspace_path=str(tmp_path / "custom"),
+    result = await runtime.sdk.interact_agent_team(
+        GroupChatMessage("hello", "m1"), team_name="group", session_id="session",
     )
-    assert Path(result.context_path).is_relative_to(tmp_path / "custom")
-    target = GroupConversationLog("group", "new")
-    assert [item.content for item in target.list_messages()] == ["saved"]
-    assert GroupConversationLog("group", "session").list_messages() == []
-    with runtime.sdk._bind_interact_team_session("new"):
-        messages = await runtime.db.message.get_messages("group", "alice", unread_only=True)
-    assert len(messages) == 1 and "saved" in messages[0].content
-    assert result.context_path in messages[0].content
-    with runtime.sdk._bind_interact_team_session("session"):
-        await runtime.db.create_cur_session_tables()
-        assert await runtime.db.message.get_messages("group", "alice") == []
-    assert get_session_id() == "session"
-    runtime.backend.messager.publish.assert_not_awaited()
+    assert not result.ok and result.reason == "not_active"
+    assert not GroupConversationLog("group", "session").history_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_group_invalid_mentions_do_not_fall_back_to_leader(runtime):
+    result = await runtime.sdk.interact_agent_team(
+        GroupChatMessage("hello", "m1", ("unknown",)), team_name="group", session_id="session",
+    )
+    assert not result.ok and result.reason == "invalid_group_chat"
+    assert not GroupConversationLog("group", "session").history_path.exists()
+    runtime.agent.deliver_input.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_group_malformed_input_is_rejected(runtime):
+    result = await runtime.sdk.interact_agent_team(
+        {"type": "group_chat", "body": "hello", "client_message_id": "m1", "sender": "alice"},
+        team_name="group", session_id="session",
+    )
+    assert result.reason == "invalid_group_chat"
 
 
 @pytest.mark.asyncio
 async def test_tool_author_is_bound_and_rejects_arbitrary_routing(runtime):
     runtime.backend.member_name = "alice"
-    tools = {tool.card.name: tool for tool in create_group_chat_tools(runtime.backend, make_translator("cn"))}
-    assert set(tools) == {"group_send_message"}
-    sender = tools["group_send_message"]
+    sender = GroupSendMessageTool(runtime.backend, make_translator("cn"))
     rejected = await sender.invoke(dict(content="forged", client_message_id="x", sender="user"))
     assert not rejected.success
     rejected = await sender.invoke(dict(content="forged", client_message_id="x", team_name="other"))
@@ -121,43 +135,68 @@ async def test_tool_author_is_bound_and_rejects_arbitrary_routing(runtime):
     assert result.data["context_path"]
 
 
-def test_group_chat_config_controls_tools_and_role_hints():
+def test_group_chat_tools_and_role_hints_are_available():
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()})
     restored = TeamAgentSpec.model_validate_json(spec.model_dump_json())
-    assert not restored.enable_group_chat
-    assert group_chat_prompt(restored) == ""
-    assert create_group_chat_tools(SimpleNamespace(group_chat_spec=restored), make_translator("en")) == []
-    restored.enable_group_chat = True
     assert "group_send_message" in group_chat_prompt(restored)
     assert "group_read_messages" not in group_chat_prompt(restored)
 
 
 @pytest.mark.asyncio
 async def test_explicit_cleanup_removes_only_selected_scope(runtime, tmp_path):
-    result = await runtime.sdk.post_group_message("remove", team_name="group", session_id="session",
+    result = await post_group(runtime, "remove", team_name="group", session_id="session",
                                                   client_message_id="m1", mentions=["alice"])
-    other_result = await runtime.sdk.post_group_message(
-        "keep", team_name="group", session_id="other", client_message_id="m2",
-        db_config=runtime.db.config, workspace_path=str(tmp_path / "custom"),
-    )
-    selected = await runtime.backend.group_conversation()
+    other_backend = TeamBackend("group", "leader", True, runtime.db, AsyncMock())
+    other_backend.group_chat_spec = runtime.spec
+    other_backend.bind_group_session("other")
+    other_result = await other_backend.append_group_message("user", "keep", client_message_id="m2")
     other = GroupConversationLog("group", "other")
-    assert selected.last_notified("alice") == result.message.timestamp
-    await asyncio.to_thread(selected.delete_session)
-    assert selected.list_messages() == []
-    assert selected.last_notified("alice") == 0
+    await asyncio.to_thread(GroupConversationLog.delete_registered, "group", "session")
     assert not await asyncio.to_thread(Path(result.context_path).exists)
-    assert [message.content for message in other.list_messages()] == ["keep"]
+    assert [json.loads(line)["content"] for line in other.history_path.read_text().splitlines()] == ["keep"]
     assert await asyncio.to_thread(Path(other_result.context_path).is_file)
     await asyncio.to_thread(GroupConversationLog.delete_registered, "group")
-    assert other.list_messages() == []
     assert not await asyncio.to_thread(Path(other_result.context_path).exists)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("failure", [RuntimeError("queue unavailable"), OSError("disk unavailable")])
 async def test_group_tool_returns_failure_for_storage_errors(runtime, monkeypatch, failure):
-    tool = create_group_chat_tools(runtime.backend, make_translator("cn"))[0]
+    tool = GroupSendMessageTool(runtime.backend, make_translator("cn"))
     monkeypatch.setattr(runtime.backend, "append_group_message", AsyncMock(side_effect=failure))
     result = await tool.invoke(dict(content="message", client_message_id="failed"))
     assert not result.success and result.error == str(failure)
+
+
+@pytest.mark.asyncio
+async def test_initial_group_input_uses_same_dispatch_and_emits_acceptance(runtime):
+    from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    agent = runtime.agent
+    agent.role = TeamRole.LEADER
+    agent._stream_controller = SimpleNamespace(stream_queue=asyncio.Queue())
+    agent._member_name = lambda: "leader"
+    payloads = TeamAgent._initial_leader_route_payloads(
+        agent, {"query": {"type": "group_chat", "body": "first", "client_message_id": "first"}},
+    )
+    await TeamAgent._dispatch_initial_leader_route(agent, payloads)
+    event = await agent._stream_controller.stream_queue.get()
+    assert event.payload["event_type"] == "team.group_message.accepted"
+    assert event.payload["notified_members"] == []
+    history = GroupConversationLog("group", "session").history_path
+    assert [json.loads(line)["content"] for line in history.read_text().splitlines()] == ["first"]
+    agent.deliver_input.assert_not_awaited()
+    runtime.backend.messager.publish.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_first_group_message_registers_team_without_leader_input(runtime):
+    await runtime.db.team.delete_team("group")
+    result = await runtime.sdk.interact_agent_team(
+        GroupChatMessage("new group", "new"), team_name="group", session_id="session",
+    )
+    assert result.ok, result.reason
+    assert await runtime.db.team.get_team("group") is not None
+    runtime.agent.deliver_input.assert_not_awaited()
+    runtime.agent.auto_start_all.assert_not_awaited()

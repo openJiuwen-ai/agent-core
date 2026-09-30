@@ -223,6 +223,12 @@ class ExternalTeamClient:
             db=db,
             messager=self._messager,
         )
+        from types import SimpleNamespace
+
+        backend.group_chat_spec = SimpleNamespace(
+            workspace=self._descriptor.workspace_config, language=self._descriptor.language,
+        )
+        backend.bind_group_session(self.session_id)
         self._backend = backend
         self._tasks = backend.task_manager
         self._messages = backend.message_manager
@@ -417,11 +423,15 @@ class ExternalTeamClient:
         """
         messages = self._require_messages()
         direct = await messages.get_messages(to_member_name=self.member_name, unread_only=True)
+        from openjiuwen.agent_teams.group_chat.handler import context_for, group_metadata
+
         broadcast = await messages.get_broadcast_messages(member_name=self.member_name, unread_only=True)
         unread = [*direct, *broadcast]
-
-        if mark_read:
-            for msg in unread:
+        for index, msg in enumerate(unread):
+            if msg.broadcast and group_metadata(msg):
+                body = await context_for(self._backend, self.member_name, msg)
+                unread[index] = msg.model_copy(update={"content": body})
+            if mark_read:
                 await messages.mark_message_read(msg.message_id, self.member_name)
 
         tasks = await self.list_tasks()
