@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
@@ -285,7 +286,29 @@ class TaskTool(Tool):
                 }
                 if affinity_enabled:
                     subagent_inputs["parent_session_id"] = parent_session_id
-                result = await subagent.invoke(subagent_inputs)
+                invoke_timeout = float(
+                    getattr(getattr(subagent, "deep_config", None), "completion_timeout", 0)
+                    or 1800.0
+                )
+                try:
+                    result = await asyncio.wait_for(
+                        subagent.invoke(subagent_inputs), timeout=invoke_timeout
+                    )
+                except asyncio.TimeoutError:
+                    logger.error(
+                        "[TaskTool] Subagent invoke timeout: session=%s, type=%s, timeout=%ss",
+                        sub_session_id,
+                        subagent_type,
+                        invoke_timeout,
+                    )
+                    return ToolOutput(
+                        success=False,
+                        data={"output": "", "agent_id": subagent.card.id},
+                        error=(
+                            f"Subagent {subagent_type} invoke timeout after "
+                            f"{invoke_timeout:.0f}s (session={sub_session_id})"
+                        ),
+                    )
                 succeeded = True
                 if (
                     isinstance(result, dict)
