@@ -28,6 +28,10 @@ _USER_AGENT = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 _REQUEST_HEADERS = {"User-Agent": _USER_AGENT}
+# r.jina.ai sits behind Cloudflare, which answers a desktop-browser User-Agent from a plainly
+# non-browser client with HTTP 403. Kept separate from _REQUEST_HEADERS: the engines want the
+# browser User-Agent on their own endpoints, so the two hosts want opposite things.
+_JINA_READER_HEADERS = {"User-Agent": "Mozilla/5.0"}
 
 # Environment variable names (centralized so every module reads the same key).
 _FREE_SEARCH_DEBUG_ENV = "FREE_SEARCH_DEBUG"
