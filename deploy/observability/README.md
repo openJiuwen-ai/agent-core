@@ -215,9 +215,9 @@ export OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE=true
 
 Requirements and behavior:
 
-- Optional dependency: `pip install 'openjiuwen[otel-instrument]'`. When the
-  packages are missing, startup is unaffected — a `RuntimeWarning` is emitted
-  and only the missing library is skipped.
+- The instrumentation packages are installed with `openjiuwen` by default —
+  no extra install step. If a slim image strips them, startup is unaffected —
+  a `RuntimeWarning` is emitted and only the missing library is skipped.
 - The global `TracerProvider` is always set **before** the instrumentors run
   (they bind their tracer to the process-global provider).
 - The same switch exists on `OtelTracerConfig.global_instrument_enable` for
