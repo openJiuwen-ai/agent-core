@@ -168,6 +168,11 @@ class PregelGraph(Graph):
             for target in targets:
                 if target in nested_branch_nodes:
                     parent[target] = branch_node_id
+                else:
+                    reachable = self._forward_reachable(target)
+                    for reached in reachable:
+                        if reached in nested_branch_nodes and reached != target:
+                            parent[reached] = branch_node_id
         return parent
 
     @staticmethod
