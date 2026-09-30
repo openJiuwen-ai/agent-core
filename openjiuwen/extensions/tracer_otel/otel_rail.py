@@ -61,14 +61,14 @@ class OtelRail(AgentRail):
         """Identity + conversation fields forwarded on every tracer event.
 
         Source of truth for the GenAI identity attributes
-        (``gen_ai.agent.id`` / ``gen_ai.agent.description`` /
-        ``gen_ai.conversation.id``) and the session-carried project
-        extensions (``openjiuwen.gen_ai.user.id`` /
-        ``openjiuwen.gen_ai.metadata``). ``agent_name`` feeds the trace
-        display name (``openjiuwen.trace.name``) and tool-span
-        ``gen_ai.agent.name``; ``session_id`` mirrors the conversation id.
-        Shared by the root, LLM, and tool span builders so the three stay
-        in sync.
+        (``gen_ai.agent.id`` / ``gen_ai.agent.name`` /
+        ``gen_ai.agent.description`` / ``gen_ai.conversation.id``) and
+        the session-carried project extensions
+        (``openjiuwen.gen_ai.user.id`` / ``openjiuwen.gen_ai.metadata``).
+        ``agent_name`` also feeds the trace display name
+        (``openjiuwen.trace.name``); ``session_id`` mirrors the
+        conversation id. Shared by the root, LLM, and tool span builders
+        so the three stay in sync.
         """
         source_metadata = getattr(ctx.session, "_source_metadata", None) or {}
         card = getattr(ctx.agent, "card", None)
