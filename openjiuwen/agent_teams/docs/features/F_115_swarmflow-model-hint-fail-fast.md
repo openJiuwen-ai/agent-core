@@ -106,12 +106,3 @@ error_detail 管线。**该修复与 model fail-fast 无关**（有自己的文�
   合并为一个，仍十用例）
 
 变更区域针对性测试 292 passed（含 `agent_teams/workflow/` 邻近既有用例）。
-
-## 已知遗留
-
-- **移植注记（2026-09-30 develop 合并）**：引擎层校验先行（签名/事件/journal 之前）；
-  `release/v0.1.19-2` 带入的 resolver 层 `ValueError` fail-fast **原样保留**（resolver 有
-  引擎路径之外的消费方：CLI MCP 工具集 / tool gateway，见 D4）；文档编号自 release 分支的
-  F_112 重编为 F_115（本仓 F_112 已被 live-worker-activity 等占用）。
-- **`getattr` 鸭子探测**（D3）待 resolver 注入面正式化后收窄为 Protocol。
-- D6 的 TimeoutError 修复未独立提交，git 历史上无法单独 revert。
