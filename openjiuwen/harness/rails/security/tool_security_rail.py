@@ -383,7 +383,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                                       scope=authorization_scope)
         cfg = deepcopy(base_cfg)
         overrides = list(cfg.get("approval_overrides") or [])
-        cfg["approval_overrides"] = [g for g in overrides if isinstance(g, dict) and g.get("id") != grant["id"]] + [grant]
+        cfg["approval_overrides"] = [
+            g for g in overrides if isinstance(g, dict) and g.get("id") != grant["id"]
+        ] + [grant]
 
         prev_cfg = deepcopy(self._engine.config)
         self.update_config(cfg)

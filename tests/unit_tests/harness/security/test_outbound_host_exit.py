@@ -305,9 +305,9 @@ async def test_async_redirect_ask_stops_before_target_connection(defaults, rules
     assert len(session.calls) == 1
 
 
-def test_explicit_allow_redirect_exception_can_proceed():
+def test_explicit_allow_redirect_can_proceed_without_matching_ask():
     host_exit.publish_host_exit_policy({"net_guard": _section(defaults="ask", urls={
-        "*.example.com": "ask", "https://api.example.com/health": "allow",
+        "review.example": "ask", "https://api.example.com/health": "allow",
     })})
     final = _Resp(200)
     session = _Session([_Resp(302, "https://api.example.com/health"), final])

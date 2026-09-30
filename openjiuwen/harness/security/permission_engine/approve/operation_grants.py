@@ -100,10 +100,11 @@ def build_operation_grant(
     if scope == "parent":
         subject["accesses"] = sorted({(str(Path(p).parent), action) for p, action in subject["accesses"]})
     elif scope == "domain":
-        parsed = urlsplit(subject["url"])
+        url = subject.get("url", "")
+        parsed = urlsplit(url)
         subject = {
             "kind": "url",
-            "domain": _registrable_domain(subject["url"]),
+            "domain": _registrable_domain(url),
             "scheme": parsed.scheme,
             "port": parsed.port,
         }
