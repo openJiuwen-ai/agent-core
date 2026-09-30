@@ -714,10 +714,21 @@ async def test_resume_replays_spawn_create_options() -> None:
             metadata = control._registry.find_metadata(spawned.subagent_id)
             assert metadata is not None
             assert metadata.create_options.thinking == "off"
+
+            await control.close(spawned.subagent_id)
+            assert control._closed_records[spawned.subagent_id].create_options.thinking == "off"
+            with patch(
+                "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+            ) as get_checkpointer:
+                checkpointer = AsyncMock()
+                checkpointer.session_exists = AsyncMock(return_value=True)
+                get_checkpointer.return_value = checkpointer
+
+                await control.resume(spawned.subagent_id)
     finally:
         register_subagent_thinking_hook(None)
 
-    assert thinking_calls == ["off", "off"]
+    assert thinking_calls == ["off", "off", "off"]
 
 
 @pytest.mark.asyncio

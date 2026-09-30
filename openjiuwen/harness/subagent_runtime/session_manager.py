@@ -121,6 +121,7 @@ class SubagentSessionManager:
     ) -> Any:
         # Deferred: tools.subagent imports the runtime control, which imports this module.
         from openjiuwen.harness.tools.subagent.task_tool import resolve_task_tool_model
+        from openjiuwen.harness.tools.subagent.thinking_hook import apply_subagent_thinking
 
         create_kwargs: dict[str, Any] = {}
         model = resolve_task_tool_model(
@@ -137,12 +138,8 @@ class SubagentSessionManager:
             **create_kwargs,
         )
 
+        child_model = getattr(getattr(subagent, "deep_config", None), "model", None)
         try:
-            from openjiuwen.harness.tools.subagent.thinking_hook import (
-                apply_subagent_thinking,
-            )
-
-            child_model = getattr(getattr(subagent, "deep_config", None), "model", None)
             apply_subagent_thinking(subagent, thinking=options.thinking, model=child_model)
         except Exception as exc:  # noqa: BLE001 — never break spawn
             logger.warning("[SubagentSessionManager] subagent thinking hook skipped: %s", exc)
