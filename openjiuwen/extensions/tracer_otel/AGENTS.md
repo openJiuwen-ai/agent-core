@@ -12,6 +12,10 @@ registry); nothing inside `openjiuwen` imports this package.
 - `handler.py`: `OtelAgentHandler` / `OtelWorkflowHandler`. Every callback is
   try/except-guarded — OTel failures must never propagate into the business
   flow.
+- `otel_rail.py`: `OtelRail`, the agent-rail emitter that turns AgentRail
+  callbacks into `tracer.trigger` events. Callbacks carry the same
+  try/except guarantee — the rail dispatch layer would otherwise treat a
+  raising callback as a business failure (recorded in retry history).
 - `span_manager.py`: agent-span lifecycle bookkeeping for the handlers.
 - `setup.py`: builds a private `TracerProvider` from `OtelTracerConfig`. It
   deliberately never calls `trace.set_tracer_provider()`, so it cannot clash

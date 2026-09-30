@@ -1294,8 +1294,9 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[OJ_LLM_PREV_MESSAGE_COUNT] == 3
 
     async def test_llm_start_sets_agent_identity_attrs(self):
-        """agent_id / description / conversation_id / user_id / metadata ride
-        the same instance_info block from OtelRail._build_common_info."""
+        """agent_id / name / description / conversation_id / user_id /
+        metadata ride the same instance_info block from
+        OtelRail._build_common_info."""
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
 
@@ -1308,6 +1309,7 @@ class TestGenAiSemconvAttrs:
             instance_info={
                 "class_name": "TestModel",
                 "agent_id": "card-1",
+                "agent_name": "HelperAgent",
                 "agent_description": "A helper",
                 "conversation_id": "sess-42",
                 "user_id": "u-9",
@@ -1318,6 +1320,8 @@ class TestGenAiSemconvAttrs:
 
         s = _EXPORTER.get_finished_spans()[0]
         assert s.attributes[GEN_AI_AGENT_ID] == "card-1"
+        # Executing agent name — distinct from the span entity (the model).
+        assert s.attributes[GEN_AI_AGENT_NAME] == "HelperAgent"
         assert s.attributes[GEN_AI_AGENT_DESCRIPTION] == "A helper"
         assert s.attributes[GEN_AI_CONVERSATION_ID] == "sess-42"
         assert s.attributes[OJ_GEN_AI_USER_ID] == "u-9"
@@ -1486,6 +1490,7 @@ class TestGenAiSemconvAttrs:
                 "class_name": "MyAgent",
                 "type": "agent",
                 "agent_id": "abc123",
+                "agent_name": "MyAgent",
                 "agent_description": "Root agent",
                 "conversation_id": "sess-7",
                 "user_id": "u-1",
@@ -1496,6 +1501,7 @@ class TestGenAiSemconvAttrs:
 
         s = _EXPORTER.get_finished_spans()[0]
         assert s.attributes[GEN_AI_AGENT_ID] == "abc123"
+        assert s.attributes[GEN_AI_AGENT_NAME] == "MyAgent"
         assert s.attributes[GEN_AI_AGENT_DESCRIPTION] == "Root agent"
         assert s.attributes[GEN_AI_CONVERSATION_ID] == "sess-7"
         assert s.attributes[OJ_GEN_AI_USER_ID] == "u-1"

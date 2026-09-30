@@ -432,14 +432,20 @@ class OtelAgentHandler(TraceExtAgentHandler):
         """Set agent identity / conversation attributes from OtelRail common info.
 
         ``instance_info`` keys come from ``OtelRail._build_common_info``:
-        ``agent_id`` / ``agent_description`` / ``conversation_id`` /
-        ``user_id`` / ``metadata``. Events raised without them (other rails,
-        direct handler callers) simply skip the attributes.
+        ``agent_id`` / ``agent_name`` / ``agent_description`` /
+        ``conversation_id`` / ``user_id`` / ``metadata``. Events raised
+        without them (other rails, direct handler callers) simply skip the
+        attributes.
         """
         info = instance_info or {}
         agent_id = info.get("agent_id")
         if agent_id:
             otel_span.set_attribute(GEN_AI_AGENT_ID, str(agent_id))
+        # Executing agent name (not the span entity name — on tool spans the
+        # entity is the tool). Tool spans also set this via extra_attrs with a
+        # class_name fallback for direct callers; via the rail both agree.
+        if info.get("agent_name"):
+            otel_span.set_attribute(GEN_AI_AGENT_NAME, str(info["agent_name"]))
         if info.get("agent_description"):
             otel_span.set_attribute(GEN_AI_AGENT_DESCRIPTION, str(info["agent_description"]))
         if info.get("conversation_id"):
