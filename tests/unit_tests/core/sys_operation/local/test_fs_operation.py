@@ -1551,3 +1551,112 @@ async def test_concurrent_upload_download_mixed(sys_op, work_dir):
     assert final_content != "", "Final content empty after mixed upload/download"
     assert final_content.startswith("upload_task_") or final_content == base_content, \
         "Final content corrupted after mixed concurrency"
+
+
+# ── sandbox path checks (unit, no Runner) ──────────────────────────────────
+
+class _FakeRunConfig:
+    """Minimal stand-in for LocalWorkConfig used in sandbox unit tests."""
+
+    def __init__(self, *, restrict: bool, roots: list[str] | None = None):
+        self.restrict_to_sandbox = restrict
+        self.sandbox_root = roots
+        self.shell_allowlist = None
+        self.dangerous_patterns = None
+
+
+def _make_fs_op(restrict: bool, roots: list[str] | None = None) -> FsOperation:
+    """Return an FsOperation whose _run_config mimics sandbox settings."""
+    op = object.__new__(FsOperation)
+    op._run_config = _FakeRunConfig(restrict=restrict, roots=roots)
+    return op
+
+
+@pytest.fixture
+def cwd_state():
+    """Isolate the CwdState ContextVar so fallback tests do not leak into others."""
+    from openjiuwen.core.sys_operation import cwd as cwd_mod
+
+    token = cwd_mod._cwd_state.set(cwd_mod.CwdState())
+    yield cwd_mod
+    cwd_mod._cwd_state.reset(token)
+
+
+def test_resolve_path_deduplicates_overlapping_defaults(cwd_state, tmp_path):
+    """The [workspace, project_root, cwd] fallback overlaps and must collapse.
+
+    project_root defaults to cwd, and a subagent inherits both from its
+    parent, so the raw fallback lists the same root twice.  The denial message
+    renders this list verbatim, where a repeated entry reads like a bug.
+    """
+    workspace = tmp_path / "workspace" / "sub_agents" / "sub"
+    artifact_root = tmp_path / "workspace" / "projects"
+    outside = tmp_path / "workspace" / "elsewhere"
+    workspace.mkdir(parents=True)
+    artifact_root.mkdir(parents=True)
+    outside.mkdir(parents=True)
+
+    cwd_state.init_cwd(
+        str(artifact_root),
+        project_root=str(artifact_root),
+        workspace=str(workspace),
+    )
+    op = _make_fs_op(restrict=True)
+
+    with pytest.raises(Exception) as excinfo:
+        op._resolve_path(str(outside / "note.md"))
+
+    message = str(excinfo.value)
+    assert message.count(str(artifact_root.resolve())) == 1
+    assert str(workspace.resolve()) in message
+
+
+def _make_subagent_layout(tmp_path):
+    """Build the directory shape a delegated skill run has in production.
+
+    A subagent's workspace is a fresh directory under ``sub_agents/`` and its
+    cwd is the artifact root it inherited from its parent; the skill it was
+    told to run lives in the parent workspace's ``skills`` tree, outside both.
+    """
+    root = tmp_path / "workspace"
+    sub_workspace = root / "sub_agents" / "sub-1"
+    artifact_root = root / "projects"
+    skill = root / "skills" / "sample-skill"
+    unrelated = tmp_path / "elsewhere"
+    for directory in (sub_workspace, artifact_root, skill, unrelated):
+        directory.mkdir(parents=True)
+    return sub_workspace, artifact_root, skill, unrelated
+
+
+def test_resolve_path_allows_file_in_skill_root(cwd_state, tmp_path):
+    """A subagent must be able to read the SKILL.md of an inherited skill."""
+    sub_workspace, artifact_root, skill, _ = _make_subagent_layout(tmp_path)
+    skill_md = skill / "SKILL.md"
+    skill_md.write_text("# skill", encoding="utf-8")
+
+    cwd_state.init_cwd(
+        str(artifact_root),
+        project_root=str(artifact_root),
+        workspace=str(sub_workspace),
+        skill_roots=[str(skill.parent)],
+    )
+    op = _make_fs_op(restrict=True)
+
+    assert op._resolve_path(str(skill_md)) == skill_md.resolve()
+
+
+def test_resolve_path_still_denies_outside_skill_root(cwd_state, tmp_path):
+    """Widening the sandbox for skills must not widen it for anything else."""
+    sub_workspace, artifact_root, skill, unrelated = _make_subagent_layout(tmp_path)
+
+    cwd_state.init_cwd(
+        str(artifact_root),
+        project_root=str(artifact_root),
+        workspace=str(sub_workspace),
+        skill_roots=[str(skill.parent)],
+    )
+    op = _make_fs_op(restrict=True)
+
+    with pytest.raises(Exception) as excinfo:
+        op._resolve_path(str(unrelated / "secret.txt"))
+    assert "outside sandbox" in str(excinfo.value)

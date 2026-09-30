@@ -1053,17 +1053,21 @@ class FsOperation(BaseFsOperation):
         allowed root directories.  A path is accepted when it falls within
         any one of the entries.  When ``sandbox_root`` is ``None``, the
         effective list falls back to
-        ``[get_workspace(), get_project_root(), get_cwd()]`` read from the
-        per-agent CwdState ContextVar so every DeepAgent gets sensible
-        defaults without having to plumb paths through config.  ``get_cwd()``
-        is in the list because the three layers are independent: a team
-        member runs in the project dir (or an isolated worktree) while its
-        workspace stays a private artifact directory elsewhere, so cwd is not
-        necessarily inside either of the other two roots.
+        ``[get_workspace(), get_project_root(), get_cwd(), *get_skill_roots()]``
+        read from the per-agent CwdState ContextVar so every DeepAgent gets
+        sensible defaults without having to plumb paths through config.
+        ``get_cwd()`` is in the list because the three layers are independent:
+        a team member runs in the project dir (or an isolated worktree) while
+        its workspace stays a private artifact directory elsewhere, so cwd is
+        not necessarily inside either of the other two roots.
+        ``get_skill_roots()`` is in the list because a mounted skill tree can
+        sit outside all three -- always so for a subagent, whose workspace is
+        a fresh directory that contains no skills.
         """
         from openjiuwen.core.sys_operation.cwd import (
             get_cwd,
             get_project_root,
+            get_skill_roots,
             get_workspace,
         )
 
@@ -1083,8 +1087,20 @@ class FsOperation(BaseFsOperation):
                 roots = list(configured)
             else:
                 roots = [p for p in (get_workspace(), get_project_root(), get_cwd()) if p]
+                # Skill trees are their own roots: a skill's SKILL.md,
+                # references/ and assets/ must stay readable from an agent
+                # whose workspace does not contain the skill, and a
+                # subagent's workspace never does.
+                roots.extend(get_skill_roots())
 
-            resolved_roots = [pathlib.Path(r).expanduser().resolve() for r in roots]
+            # De-duplicate after resolution: the three fallback layers overlap
+            # by design (project_root defaults to cwd, and a subagent inherits
+            # both from its parent), so the raw list routinely repeats a root.
+            # Repetition changes no decision but is copied verbatim into the
+            # denial message, where a doubled entry reads like a bug.
+            resolved_roots = list(dict.fromkeys(
+                pathlib.Path(r).expanduser().resolve() for r in roots
+            ))
             if not any(self._is_within(normalized, root) for root in resolved_roots):
                 raise build_error(
                     status=StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
