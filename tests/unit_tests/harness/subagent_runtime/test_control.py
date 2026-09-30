@@ -19,9 +19,16 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.control import SubagentControl
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
-from openjiuwen.harness.subagent_runtime.models import SubagentRecord, SubagentStatus, SubagentStatusKind, UserInputOp
+from openjiuwen.harness.subagent_runtime.models import (
+    SubagentCreateOptions,
+    SubagentRecord,
+    SubagentStatus,
+    SubagentStatusKind,
+    UserInputOp,
+)
 from openjiuwen.harness.subagent_runtime.persistence import merge_subagent_bucket, read_subagent_bucket
 from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control, release_subagent_control
+from openjiuwen.harness.tools.subagent.thinking_hook import register_subagent_thinking_hook
 from tests.unit_tests.harness.subagent_runtime.test_instance import MockAgent
 from tests.unit_tests.harness.subagent_runtime.test_session_manager import MockParentAgent, MockSession as ManagerSession
 
@@ -672,6 +679,56 @@ async def test_resume_restores_closed_instance() -> None:
         assert payload is not None
         assert payload["status"] == "idle"
         assert payload["can_send_input"] is True
+
+
+@pytest.mark.asyncio
+async def test_resume_replays_spawn_create_options() -> None:
+    thinking_calls: list[str] = []
+
+    def _hook(subagent, *, thinking: str, model=None) -> None:
+        thinking_calls.append(thinking)
+
+    register_subagent_thinking_hook(_hook)
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    try:
+        async with _patched_control(parent=parent) as control:
+            spawned = await control.spawn(
+                "explore",
+                "hello",
+                create_options=SubagentCreateOptions(thinking="off"),
+            )
+            await _wait_for_turn(parent.mock_agent)
+            await control.wait([spawned.subagent_id], timeout_ms=500)
+            await control.close(spawned.subagent_id)
+            assert control._closed_records[spawned.subagent_id].create_options.thinking == "off"
+
+            with patch(
+                "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+            ) as get_checkpointer:
+                checkpointer = AsyncMock()
+                checkpointer.session_exists = AsyncMock(return_value=True)
+                get_checkpointer.return_value = checkpointer
+
+                await control.resume(spawned.subagent_id)
+
+            metadata = control._registry.find_metadata(spawned.subagent_id)
+            assert metadata is not None
+            assert metadata.create_options.thinking == "off"
+
+            await control.close(spawned.subagent_id)
+            assert control._closed_records[spawned.subagent_id].create_options.thinking == "off"
+            with patch(
+                "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+            ) as get_checkpointer:
+                checkpointer = AsyncMock()
+                checkpointer.session_exists = AsyncMock(return_value=True)
+                get_checkpointer.return_value = checkpointer
+
+                await control.resume(spawned.subagent_id)
+    finally:
+        register_subagent_thinking_hook(None)
+
+    assert thinking_calls == ["off", "off", "off"]
 
 
 @pytest.mark.asyncio

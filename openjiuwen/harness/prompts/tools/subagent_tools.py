@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from openjiuwen.harness.prompts.tools.base import ToolMetadataProvider
+from openjiuwen.harness.prompts.tools.task_tool import TASK_TOOL_PARAMS
 from openjiuwen.harness.subagent_runtime.config import (
     WAIT_TIMEOUT_MS_DEFAULT,
     WAIT_TIMEOUT_MS_MAX,
@@ -121,7 +122,9 @@ SUBAGENT_RESUME_DESCRIPTION: Dict[str, str] = {
 
 
 def get_subagent_spawn_input_params(language: str = "cn") -> Dict[str, Any]:
-    _ = language
+    def _task_tool_desc(name: str) -> str:
+        return TASK_TOOL_PARAMS[name].get(language, TASK_TOOL_PARAMS[name]["cn"])
+
     return {
         "type": "object",
         "properties": {
@@ -145,6 +148,18 @@ def get_subagent_spawn_input_params(language: str = "cn") -> Dict[str, Any]:
                 "type": "array",
                 "items": {"type": "string"},
                 "description": "Required for browser_agent only; empty list for core-only tasks.",
+            },
+            "thinking": {
+                "type": "string",
+                "description": _task_tool_desc("thinking"),
+            },
+            "model_name": {
+                "type": "string",
+                "description": _task_tool_desc("model_name"),
+            },
+            "model_tier": {
+                "type": "string",
+                "description": _task_tool_desc("model_tier"),
             },
         },
         "required": ["subagent_type", "task_description", "display_name", "role"],

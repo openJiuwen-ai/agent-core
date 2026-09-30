@@ -25,6 +25,7 @@ from openjiuwen.harness.subagent_runtime.models import (
     ResumeResult,
     SpawnResult,
     SubagentActivity,
+    SubagentCreateOptions,
     SubagentMessage,
     SubagentMetadata,
     SubagentMetadataBuildParams,
@@ -174,7 +175,9 @@ class SubagentControl:
         display_name: str | None = None,
         role: str | None = None,
         browser_capabilities: list[str] | None = None,
+        create_options: SubagentCreateOptions | None = None,
     ) -> SpawnResult:
+        options = create_options or SubagentCreateOptions()
         sticky = _runtime_sticky_subagent_type(subagent_type)
         sid = subagent_id or build_subagent_id(
             self._parent_session_id,
@@ -204,6 +207,7 @@ class SubagentControl:
                 display_name=resolved_name,
                 role=resolved_role,
                 browser_capabilities=browser_capabilities,
+                create_options=options,
             )
             reservation.commit(
                 SubagentMetadataBuildParams(
@@ -213,6 +217,7 @@ class SubagentControl:
                     display_name=resolved_name,
                     role=resolved_role,
                     task_description=task_description,
+                    create_options=options,
                 ).to_metadata(parent_session_id=self._parent_session_id),
             )
         except Exception:
@@ -479,6 +484,7 @@ class SubagentControl:
                 parent_session_id=self._parent_session_id,
                 display_name=record.display_name,
                 role=record.role,
+                create_options=record.create_options,
             )
             reservation.commit(
                 self._build_metadata_from_record(record, task_id=None),
@@ -533,6 +539,7 @@ class SubagentControl:
                 updated_at_ms=record.updated_at_ms or fallback_ms,
                 closed_at_ms=fallback_ms,
                 closed_reason="parent_ended",
+                create_options=record.create_options,
             )
         self._closed_records[sid] = record
 
@@ -751,6 +758,7 @@ class SubagentControl:
             task_description=record.task_description,
             created_at_ms=record.created_at_ms,
             updated_at_ms=now_ms,
+            create_options=record.create_options,
         )
 
     def _store_closed_record(
@@ -770,6 +778,7 @@ class SubagentControl:
             updated_at_ms=closed_at_ms,
             closed_at_ms=closed_at_ms,
             closed_reason=close_reason,
+            create_options=metadata.create_options,
         )
         self._trim_closed_records()
 
@@ -785,6 +794,7 @@ class SubagentControl:
             updated_at_ms=metadata.updated_at_ms,
             closed_at_ms=metadata.closed_at_ms,
             closed_reason=None,
+            create_options=metadata.create_options,
         )
 
     @staticmethod
