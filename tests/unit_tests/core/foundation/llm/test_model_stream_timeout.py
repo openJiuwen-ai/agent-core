@@ -141,3 +141,42 @@ async def test_model_stream_timeout_carries_error_message_into_callback():
     assert "stage=first_chunk" in error_message
     assert "chunk_count=0" in error_message
     assert "model=mock-model" in error_message
+
+
+@pytest.mark.asyncio
+async def test_model_stream_propagates_caller_cancellation_between_fast_chunks():
+    """A hard cancel of the consumer must stop the stream, never be dropped.
+
+    On 3.11 ``asyncio.wait_for`` loses the outer cancellation when the chunk it
+    waits on is already done in the same tick; a paused team member then kept
+    streaming (and running its ReAct loop) until the round ended on its own.
+    """
+    total_chunks = 2000
+
+    async def fast_stream(**kwargs):
+        for i in range(total_chunks):
+            await asyncio.sleep(0)
+            yield AssistantMessageChunk(content=str(i))
+
+    model = _build_model_with_stream(fast_stream, first_timeout=5.0, idle_timeout=5.0)
+
+    async def consume(started: asyncio.Event) -> int:
+        count = 0
+        async for _ in model.stream(messages=[]):
+            count += 1
+            if count == 5:
+                started.set()
+        return count
+
+    for delay_ticks in range(60):
+        started = asyncio.Event()
+        task = asyncio.create_task(consume(started))
+        await started.wait()
+        for _ in range(delay_ticks % 7):
+            await asyncio.sleep(0)
+        task.cancel()
+        try:
+            count = await task
+        except asyncio.CancelledError:
+            continue
+        raise AssertionError(f"cancellation swallowed; stream ran to {count} chunks")

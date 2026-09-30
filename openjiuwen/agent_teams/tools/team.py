@@ -306,6 +306,10 @@ class TeamBackend:
         self._on_member_started = on_member_started
         self._on_member_restarted = on_member_restarted
         self._on_member_stopped = on_member_stopped
+        # True while a voice pause holds the members down with the leader
+        # still running (``CoordinationKernel.pause_members``): no auto-start
+        # or recovery may launch a member until they are resumed.
+        self.members_paused: bool = False
 
         self.task_manager = TeamTaskManager(
             self.team_name,
@@ -852,6 +856,8 @@ class TeamBackend:
         Returns:
             List of member_names that were started.
         """
+        if self.members_paused:
+            return []
         unstarted = await self.db.member.get_team_members(self.team_name, status=MemberStatus.UNSTARTED)
         started: list[str] = []
         for member in unstarted:
@@ -904,6 +910,9 @@ class TeamBackend:
         Returns:
             True if the member was started, False otherwise.
         """
+        if self.members_paused:
+            team_logger.info("Members paused; not starting member {}", member_name)
+            return False
         transitioned = await self.db.member.try_transition_member_status(
             member_name, self.team_name, MemberStatus.UNSTARTED, MemberStatus.STARTING,
         )
@@ -935,6 +944,9 @@ class TeamBackend:
             True when this call restarted the member, otherwise False.
         """
         if not self.is_leader or self._on_member_restarted is None:
+            return False
+        if self.members_paused:
+            team_logger.info("Members paused; not recovering member {}", member_name)
             return False
 
         transitioned = await self.db.member.try_transition_member_status(

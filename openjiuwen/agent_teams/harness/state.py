@@ -138,6 +138,10 @@ class ActiveRound:
             for pause/abort — the nearest clean boundary.
         pause_ack: Deferred ack Future for a cooperative (tool-phase) pause,
             resolved by ``_on_round_done`` once the round settles to PAUSED.
+        pre_model_snapshot: Snapshot captured when the current model call
+            starts, after that iteration's user input (query, prelude notes,
+            steering) was admitted. Rollback target for a voice LLM-phase
+            pause, so the admitted input survives the rewind.
     """
 
     round_id: int
@@ -158,6 +162,7 @@ class ActiveRound:
     pause_requested: bool = False
     last_iter_snapshot: SafeStateSnapshot | None = None
     pause_ack: asyncio.Future | None = None
+    pre_model_snapshot: SafeStateSnapshot | None = None
 
 
 @dataclass(slots=True)

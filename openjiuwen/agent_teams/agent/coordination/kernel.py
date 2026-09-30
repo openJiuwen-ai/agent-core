@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
@@ -18,6 +19,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.runtime.voice import voice_pause_scope
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -53,6 +55,11 @@ class CoordinationKernel:
         # dormant at setup; armed when the team's effective dispatch mode is
         # "scheduled" (build_team choice / recovery restore).
         self._scheduler: Optional["TeamScheduler"] = None
+        # Teammates held down by ``pause_members`` while the leader keeps
+        # running; ``resume_members`` restarts exactly these.
+        self._paused_members: set[str] = set()
+        # One-shot: the next start() keeps paused teammates down (voice).
+        self._hold_members_on_start = False
         # Lifecycle state machine for pause/stop idempotency.
         # Transitions: idle -> running (start) -> paused (pause) -> stopped (stop).
         # ``stopped`` is terminal for this kernel instance; subsequent
@@ -130,6 +137,15 @@ class CoordinationKernel:
         """Whether the underlying event bus is running."""
         return self._event_bus is not None and self._event_bus.is_running
 
+    @property
+    def lifecycle_state(self) -> str:
+        """Current lifecycle state: idle / running / paused / stopped.
+
+        Stays ``idle`` (CREATE) or ``paused`` (RESUME_FROM_PAUSE) until start()
+        finishes, so ``!= "running"`` also covers a run cycle still starting.
+        """
+        return self._lifecycle_state
+
     async def start(self, session: Any = None) -> None:
         host = self._host
         if self._event_bus is None:
@@ -183,6 +199,9 @@ class CoordinationKernel:
                 # teams. Disbanding is an explicit act: the temporary leader's
                 # clean_team tool, or the operator's delete_agent_team.
                 team_row_present = True
+                if self._hold_members_on_start and infra.team_backend is not None:
+                    # Arm before recovery so recover_team leaves them down.
+                    infra.team_backend.members_paused = True
                 await host.recover_team()
 
         if infra.workspace_manager and not infra.workspace_initialized:
@@ -234,6 +253,14 @@ class CoordinationKernel:
         # database actually holds. No-op for every other role.
         await host.seed_member_registry()
         await host.update_status(MemberStatus.READY)
+        # A run cycle start recovers the whole roster; a members-only pause
+        # from the previous cycle no longer holds — unless a voice "pause the
+        # tasks" asked this start to keep the paused teammates down.
+        hold, self._hold_members_on_start = self._hold_members_on_start, False
+        if hold and team_row_present and self._members_pause_armed():
+            self._paused_members = await self._roster_paused_members()
+        else:
+            self._release_members_pause()
         # Re-base the idle clock before the poll timers come back. A member
         # that was already idle when the team paused keeps its idle stamp
         # while the monotonic clock runs through the entire pause window, and
@@ -261,7 +288,7 @@ class CoordinationKernel:
         # existing team (the scheduler only exists on scheduled-dispatch
         # leaders) — activation runs the recovery sweep (start pending
         # assignments, judge open reviews).
-        if self._scheduler is not None and team_row_present:
+        if self._scheduler is not None and team_row_present and not self._members_pause_armed():
             await self._scheduler.activate()
         self._lifecycle_state = "running"
         # Warm / cold resume: a lifecycle pause left this member's round
@@ -300,7 +327,126 @@ class CoordinationKernel:
         """
         if self._scheduler is None:
             return
+        if self._members_pause_armed():
+            # Held down by pause_members; resume_members re-arms it.
+            return
         await self._scheduler.activate()
+
+    async def pause_members(self) -> bool:
+        """Pause every live teammate while the leader keeps running.
+
+        The voice counterpart of ``pause`` for "pause the tasks": the leader's
+        round, event bus and stream stay live so it can answer the user right
+        away, while teammates are marked PAUSED and their runtimes torn down.
+        The scheduler is disarmed and the backend refuses auto-start /
+        recovery until ``resume_members``, which restarts exactly the members
+        paused here. Completed files, tool results and task board state stay.
+
+        Returns:
+            ``False`` when this kernel is not a running leader.
+        """
+        host = self._host
+        if self._lifecycle_state != "running" or host.role != TeamRole.LEADER:
+            return False
+        started = time.monotonic()
+        backend = host.infra.team_backend
+        if backend is not None:
+            backend.members_paused = True
+        if self._scheduler is not None:
+            self._scheduler.deactivate()
+        self._paused_members |= set(host.spawn_manager.spawned_handles.keys())
+        await self._mark_live_teammates(MemberStatus.PAUSED)
+        await host.spawn_manager.cancel_recovery_tasks()
+        with voice_pause_scope():
+            await host.spawn_manager.shutdown_all_handles()
+        team_logger.info(
+            "[{}] members paused: {} in {:.1f}s",
+            host.member_name or "?",
+            sorted(self._paused_members),
+            time.monotonic() - started,
+        )
+        return True
+
+    async def resume_members(self) -> list[str]:
+        """Restart the teammates ``pause_members`` held down.
+
+        Members that departed meanwhile are skipped. Re-arms auto-start,
+        recovery and the scheduler, whose activation sweep hands pending
+        assignments out again.
+
+        Returns:
+            The member names restarted.
+        """
+        host = self._host
+        if self._lifecycle_state != "running" or not self._members_pause_armed():
+            self._release_members_pause()
+            return []
+        paused, self._paused_members = self._paused_members, set()
+        backend = host.infra.team_backend
+        backend.members_paused = False
+        restarted: list[str] = []
+        team_name = host.team_name
+        if team_name:
+            roster = {m.member_name: m for m in await backend.list_member_roster()}
+            for member_name in sorted(paused):
+                member = roster.get(member_name)
+                if member is None or member.status != MemberStatus.PAUSED.value:
+                    continue
+                if host.spawn_manager.has_live_handle(member_name):
+                    continue
+                await backend.db.member.update_member_status(
+                    member_name,
+                    team_name,
+                    MemberStatus.RESTARTING.value,
+                )
+                if await host.spawn_manager.restart_teammate(member_name):
+                    restarted.append(member_name)
+        if self._scheduler is not None:
+            await self._scheduler.activate()
+        team_logger.info("[{}] members resumed: {}", host.member_name or "?", restarted)
+        return restarted
+
+    def hold_members_on_start(self) -> bool:
+        """Keep paused teammates down across the next ``start``.
+
+        Voice "pause the tasks" arriving while the whole team is already
+        paused: the leader restarts to answer the user, but the teammates
+        stay PAUSED until ``resume_members``. One-shot; only valid while the
+        kernel is paused.
+
+        Returns:
+            ``False`` when this kernel is not a paused leader.
+        """
+        if self._lifecycle_state != "paused" or self._host.role != TeamRole.LEADER:
+            return False
+        self._hold_members_on_start = True
+        return True
+
+    async def _roster_paused_members(self) -> set[str]:
+        host = self._host
+        backend = host.infra.team_backend
+        if backend is None:
+            return set()
+        return {
+            m.member_name
+            for m in await backend.list_member_roster()
+            if m.member_name != host.member_name and m.status == MemberStatus.PAUSED.value
+        }
+
+    @property
+    def members_paused(self) -> bool:
+        """Whether ``pause_members`` is holding the teammates down."""
+        return self._members_pause_armed()
+
+    def _members_pause_armed(self) -> bool:
+        backend = self._host.infra.team_backend
+        return bool(getattr(backend, "members_paused", False))
+
+    def _release_members_pause(self) -> None:
+        self._paused_members = set()
+        backend = self._host.infra.team_backend
+        if backend is not None and getattr(backend, "members_paused", False):
+            backend.members_paused = False
 
     async def pause(self) -> None:
         # Idempotent: ignore if not currently running. Pause is only a valid
@@ -313,11 +459,13 @@ class CoordinationKernel:
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
         if self._scheduler is not None:
             self._scheduler.deactivate()
+        started = time.monotonic()
         # Pause, do not tear down: the round stops at a clean inner-iteration
         # boundary and stays resumable in place. This used to hard-cancel via
         # ``drain_agent_task`` → ``abort(immediate=True)``, which threw away
         # everything the member had done in the round it interrupted mid-way.
         await self.pause_agent_round()
+        round_paused = time.monotonic()
         host.persist_allocator_state()
         # Extract team memories while the session is still bound and the DB
         # is accessible. Moved from finalize_round so extraction runs once
@@ -363,6 +511,12 @@ class CoordinationKernel:
         # permanent departure, while stopping a team leaves it recoverable;
         # ``STOPPED`` is the status that says so.
         self._lifecycle_state = "paused"
+        team_logger.info(
+            "[{}] coordination paused: round={:.1f}s total={:.1f}s",
+            host.member_name or "?",
+            round_paused - started,
+            time.monotonic() - started,
+        )
 
     async def _mark_live_teammates(self, target_status: MemberStatus) -> None:
         """Persist ``target_status`` for every spawned teammate before tearing down handles.

@@ -48,8 +48,10 @@ class AsyncStreamQueue:
 
         for attempt in range(0, max_retries):
             try:
-                await asyncio.wait_for(self._stream_queue.put(data),
-                                       attempt_timeout)
+                # Not ``wait_for``: on 3.11 it can swallow the caller's
+                # cancellation when ``put`` completes in the same tick.
+                async with asyncio.timeout(attempt_timeout):
+                    await self._stream_queue.put(data)
                 self._sent_count += 1
                 log_stream_chunk(
                     "Stream data sent successfully",

@@ -228,8 +228,23 @@ class ObservabilityRuntime:
         with self._lock:
             return self._provider is not None
 
-    def force_flush(self, timeout_millis: int = 5000) -> None:
-        """Flush all registered processors."""
+    def force_flush(self, timeout_millis: int = 5000, *, hold_lock: bool = True) -> None:
+        """Flush all registered processors.
+
+        ``hold_lock=False`` exports outside the lock, so a slow exporter on a
+        background thread does not stall get_tracer/get_tracker/is_initialized
+        callers on the event loop (voice background flush).
+        """
+        if not hold_lock:
+            with self._lock:
+                provider = self._provider
+            if provider is None:
+                return
+            try:
+                provider.force_flush(timeout_millis=timeout_millis)
+            except Exception as exc:
+                logger.warning("otel: force_flush failed - {}", exc)
+            return
         with self._lock:
             if self._provider is None:
                 return

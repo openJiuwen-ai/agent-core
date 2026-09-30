@@ -1652,6 +1652,37 @@ async def test_autostart_unstarted_starts_every_unstarted_member(db, message_bus
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_autostart_unstarted_waits_while_members_are_paused(db, message_bus):
+    """A members-only pause holds auto-start back until it is lifted."""
+    team_id = "autostart_paused_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Paused Team",
+        leader_member_name="leader1",
+    )
+    on_created = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_started=on_created,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+
+    backend.members_paused = True
+    assert await backend.autostart_unstarted() == []
+    assert await backend.startup_member("dev-1", on_created) is False
+    on_created.assert_not_awaited()
+
+    backend.members_paused = False
+    assert await backend.autostart_unstarted() == ["dev-1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_autostart_unstarted_is_idempotent(db, message_bus):
     """A second call finds nothing UNSTARTED and spawns nobody twice."""
     team_id = "autostart_idem_team"

@@ -858,6 +858,23 @@ class TeamAgent(BaseAgent):
         """Pause coordination without tearing down teammate processes."""
         await self._pause_coordination()
 
+    async def pause_members(self) -> bool:
+        """Pause the teammates while this leader keeps running (voice)."""
+        return await self._coordination.pause_members()
+
+    async def resume_members(self) -> list[str]:
+        """Restart the teammates ``pause_members`` held down."""
+        return await self._coordination.resume_members()
+
+    def hold_members_on_start(self) -> bool:
+        """Keep paused teammates down across the next resume start (voice)."""
+        return self._coordination.hold_members_on_start()
+
+    @property
+    def members_paused(self) -> bool:
+        """Whether ``pause_members`` is holding the teammates down."""
+        return self._coordination.members_paused
+
     async def _stop_coordination(
         self,
         *,

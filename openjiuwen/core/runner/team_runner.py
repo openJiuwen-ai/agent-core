@@ -196,7 +196,10 @@ class _TeamRunnerMixin:
                 self._maybe_attach_observability(activation.agent, activation.session.get_session_id())
                 return await activation.agent.invoke(inputs, session=activation.session)
             finally:
-                self._maybe_finalize_trace(team_name_for_finally)
+                self._maybe_finalize_trace(
+                    team_name_for_finally,
+                    blocking_flush=not self._consume_voice_pause(team_name_for_finally),
+                )
                 try:
                     await self._get_team_runtime_manager().finalize(
                         team_name=spec.team_name,
@@ -279,7 +282,10 @@ class _TeamRunnerMixin:
             finally:
                 if stream_logger is not None:
                     stream_logger.flush()
-                self._maybe_finalize_trace(team_name_for_finally)
+                self._maybe_finalize_trace(
+                    team_name_for_finally,
+                    blocking_flush=not self._consume_voice_pause(team_name_for_finally),
+                )
                 try:
                     await self._get_team_runtime_manager().finalize(
                         team_name=spec.team_name,
@@ -422,8 +428,11 @@ class _TeamRunnerMixin:
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        voice: bool = False,
     ):
         """Deliver an interact payload to an active TeamAgent runtime.
+
+        ``voice=True`` marks a voice follow-up (see ``TeamRuntimeManager.interact``).
 
         ``payload`` is either an ``InteractPayload`` (one of
         ``GodViewMessage`` / ``OperatorMessage`` / ``HumanAgentMessage``)
@@ -452,6 +461,7 @@ class _TeamRunnerMixin:
                 payload,
                 team_name=team_name,
                 session_id=session_id,
+                voice=voice,
             )
 
     async def post_group_message(
@@ -571,9 +581,51 @@ class _TeamRunnerMixin:
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        voice: bool = False,
     ) -> bool:
-        """Pause the active TeamAgent runtime for ``(team_name, session_id)``."""
-        return await self._get_team_runtime_manager().pause(team_name=team_name, session_id=session_id)
+        """Pause the active TeamAgent runtime for ``(team_name, session_id)``.
+
+        ``voice=True`` marks a voice barge-in (see ``TeamRuntimeManager.pause``).
+        """
+        return await self._get_team_runtime_manager().pause(
+            team_name=team_name, session_id=session_id, voice=voice
+        )
+
+    async def pause_agent_team_members(self, *, team_name: str, session_id: str) -> bool:
+        """Pause a running team's members; the leader keeps running."""
+        return await self._get_team_runtime_manager().pause_members(
+            team_name=team_name, session_id=session_id
+        )
+
+    async def resume_agent_team_members(self, *, team_name: str, session_id: str) -> list[str]:
+        """Restart the members ``pause_agent_team_members`` held down."""
+        return await self._get_team_runtime_manager().resume_members(
+            team_name=team_name, session_id=session_id
+        )
+
+    async def agent_team_members_paused(self, *, team_name: str, session_id: str) -> bool:
+        """Whether a team's members are held down by a members-only pause."""
+        return await self._get_team_runtime_manager().members_paused(
+            team_name=team_name, session_id=session_id
+        )
+
+    async def hold_agent_team_members_on_start(self, *, team_name: str, session_id: str) -> bool:
+        """Keep a paused team's members down when its leader next resumes."""
+        return await self._get_team_runtime_manager().hold_members_on_start(
+            team_name=team_name, session_id=session_id
+        )
+
+    async def add_agent_team_leader_note(
+        self,
+        text: str,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> bool:
+        """Queue a user note for the leader's next round (see ``TeamRuntimeManager.add_leader_note``)."""
+        return await self._get_team_runtime_manager().add_leader_note(
+            text, team_name=team_name, session_id=session_id
+        )
 
     async def stop_agent_team(
         self,
@@ -904,9 +956,22 @@ class _TeamRunnerMixin:
         except Exception as exc:
             logger.debug("observability attach skipped: {}", exc)
 
+    def _consume_voice_pause(self, team_name: str) -> bool:
+        """Whether this run cycle ended through a voice pause."""
+        try:
+            return self._get_team_runtime_manager().consume_voice_pause(team_name)
+        except Exception as exc:
+            logger.debug("voice pause lookup skipped: {}", exc)
+            return False
+
     @staticmethod
-    def _maybe_finalize_trace(team_name: str) -> None:
-        """Finalize observability trace for a team when the runner exits."""
+    def _maybe_finalize_trace(team_name: str, *, blocking_flush: bool = True) -> None:
+        """Finalize observability trace for a team when the runner exits.
+
+        ``blocking_flush=False`` when the run cycle ended through a voice
+        pause: the exporter flush then runs off the event loop so the
+        barge-in waiting on the pause is not stalled.
+        """
         try:
             from openjiuwen.agent_teams.observability.setup import (
                 finalize_team_trace,
@@ -914,7 +979,7 @@ class _TeamRunnerMixin:
             )
             if is_initialized():
                 logger.info("_maybe_finalize_trace: calling finalize_team_trace for team={}", team_name)
-                finalize_team_trace(team_name)
+                finalize_team_trace(team_name, blocking_flush=blocking_flush)
             else:
                 logger.debug("_maybe_finalize_trace: observability not initialized, skip team={}", team_name)
         except Exception as exc:
@@ -1057,12 +1122,14 @@ class _TeamRunnerClassMixin:
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        voice: bool = False,
     ):
         """Deliver an interact payload to an active TeamAgent runtime."""
         return await _global_runner().interact_agent_team(
             payload,
             team_name=team_name,
             session_id=session_id,
+            voice=voice,
         )
 
     @classmethod
@@ -1110,9 +1177,53 @@ class _TeamRunnerClassMixin:
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        voice: bool = False,
     ) -> bool:
         """Pause the active TeamAgent runtime for ``(team_name, session_id)``."""
-        return await _global_runner().pause_agent_team(team_name=team_name, session_id=session_id)
+        return await _global_runner().pause_agent_team(
+            team_name=team_name, session_id=session_id, voice=voice
+        )
+
+    @classmethod
+    async def pause_agent_team_members(cls, *, team_name: str, session_id: str) -> bool:
+        """Pause a running team's members; the leader keeps running."""
+        return await _global_runner().pause_agent_team_members(
+            team_name=team_name, session_id=session_id
+        )
+
+    @classmethod
+    async def resume_agent_team_members(cls, *, team_name: str, session_id: str) -> list[str]:
+        """Restart the members ``pause_agent_team_members`` held down."""
+        return await _global_runner().resume_agent_team_members(
+            team_name=team_name, session_id=session_id
+        )
+
+    @classmethod
+    async def agent_team_members_paused(cls, *, team_name: str, session_id: str) -> bool:
+        """Whether a team's members are held down by a members-only pause."""
+        return await _global_runner().agent_team_members_paused(
+            team_name=team_name, session_id=session_id
+        )
+
+    @classmethod
+    async def hold_agent_team_members_on_start(cls, *, team_name: str, session_id: str) -> bool:
+        """Keep a paused team's members down when its leader next resumes."""
+        return await _global_runner().hold_agent_team_members_on_start(
+            team_name=team_name, session_id=session_id
+        )
+
+    @classmethod
+    async def add_agent_team_leader_note(
+        cls,
+        text: str,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> bool:
+        """Queue a user note for the leader's next round of the active TeamAgent runtime."""
+        return await _global_runner().add_agent_team_leader_note(
+            text, team_name=team_name, session_id=session_id
+        )
 
     @classmethod
     async def get_agent_team_monitor(

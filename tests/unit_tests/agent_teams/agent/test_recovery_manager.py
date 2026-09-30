@@ -86,3 +86,25 @@ async def test_recover_team_restarts_error_but_not_departed_member() -> None:
         MemberStatus.RESTARTING.value,
     )
     spawn_manager.restart_teammate.assert_awaited_once_with("failed")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_recover_team_leaves_members_down_while_members_are_paused() -> None:
+    """A members-only pause keeps PAUSED teammates for resume_members."""
+    member_dao = SimpleNamespace(update_member_status=AsyncMock(return_value=True))
+    backend = SimpleNamespace(
+        restore_external_cli_specs_from_db=AsyncMock(),
+        list_member_roster=AsyncMock(return_value=[_member("leader", MemberStatus.READY), _member("writer", MemberStatus.PAUSED)]),
+        is_passive_human=AsyncMock(return_value=False),
+        members_paused=True,
+        db=SimpleNamespace(member=member_dao),
+    )
+    spawn_manager = MagicMock()
+    spawn_manager.has_live_handle.return_value = False
+    spawn_manager.restart_teammate = AsyncMock(return_value=True)
+    configurator = SimpleNamespace(team_backend=backend, member_name="leader", team_name="team")
+
+    assert await RecoveryManager(configurator, spawn_manager).recover_team() == []
+    member_dao.update_member_status.assert_not_awaited()
+    spawn_manager.restart_teammate.assert_not_awaited()

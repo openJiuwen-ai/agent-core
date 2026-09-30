@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import json
 
+import pytest
+
 from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 from openjiuwen.core.runner import Runner
@@ -332,3 +334,65 @@ def test_read_and_edit_equivalent_paths_share_one_execution_lane(tmp_path) -> No
         AbilityManager._tool_execution_resource_key(read_call)
         == AbilityManager._tool_execution_resource_key(edit_call)
     )
+
+
+@pytest.mark.parametrize("parallel_safe", [False, True])
+def test_caller_cancellation_during_tools_propagates(parallel_safe: bool) -> None:
+    """Cancelling the round while tools run must stop it, not become a result.
+
+    Otherwise a pause / abort hard-cancel is swallowed and the ReAct loop
+    keeps iterating until the round finishes on its own.
+    """
+
+    async def _run():
+        calls = [
+            ToolCall(id="c1", type="function", name="fetch_webpage", arguments="{}"),
+            ToolCall(id="c2", type="function", name="bash", arguments="{}"),
+        ]
+        started = asyncio.Event()
+        tool_cancelled = 0
+
+        async def slow_tool():
+            nonlocal tool_cancelled
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                tool_cancelled += 1
+                raise
+
+        cards = {
+            name: ToolCard(id=name, name=name, parallel_safe=parallel_safe)
+            for name in ("fetch_webpage", "bash")
+        }
+        run_task = asyncio.create_task(
+            AbilityManager._execute_parallel_tool_tasks(
+                calls,
+                [slow_tool(), slow_tool()],
+                tool_cards=cards,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        run_task.cancel()
+        try:
+            await asyncio.wait_for(run_task, timeout=1)
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("caller cancellation was swallowed")
+        assert tool_cancelled >= 1
+
+    asyncio.run(_run())
+
+
+def test_tool_own_cancellation_still_becomes_result() -> None:
+    async def _run():
+        calls = [ToolCall(id="c1", type="function", name="fetch_webpage", arguments="{}")]
+
+        async def self_cancelling_tool():
+            raise asyncio.CancelledError()
+
+        results = await AbilityManager._execute_parallel_tool_tasks(calls, [self_cancelling_tool()])
+        assert isinstance(results[0], asyncio.CancelledError)
+
+    asyncio.run(_run())

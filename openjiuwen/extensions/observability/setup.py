@@ -39,10 +39,10 @@ def shutdown_observability() -> None:
     _runtime.shutdown()
 
 
-def force_flush_provider(timeout_millis: int = 5000) -> None:
+def force_flush_provider(timeout_millis: int = 5000, *, hold_lock: bool = True) -> None:
     """Force flush the shared runtime."""
 
-    _runtime.force_flush(timeout_millis)
+    _runtime.force_flush(timeout_millis, hold_lock=hold_lock)
 
 
 def get_tracer(name: str) -> Any:

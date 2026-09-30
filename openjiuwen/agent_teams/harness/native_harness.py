@@ -76,6 +76,7 @@ from openjiuwen.agent_teams.harness.snapshot_rail import (
     PhaseSnapshotRail,
     capture_snapshot,
 )
+from openjiuwen.agent_teams.runtime.voice import is_voice_pause
 from openjiuwen.agent_teams.harness.state import (
     ActiveRound,
     HarnessInternalState,
@@ -175,6 +176,9 @@ class NativeHarness(DeepAgent):
         self._extra_rails: list[AgentRail] = list(extra_rails) if extra_rails else []
         self._session: Session | None = None
         self._owns_session: bool = False
+        # User notes admitted ahead of the next round's own input (see
+        # ``add_prelude_notes``).
+        self._prelude_notes: list[str] = []
         self._slow_round_log_after_seconds: float | None = parts.config.completion_timeout
         self._st = HarnessInternalState()
         self._control: asyncio.Queue = asyncio.Queue()
@@ -250,6 +254,15 @@ class NativeHarness(DeepAgent):
         the round: ``pause -> stop -> start`` becomes ``pause -> resume``.
         """
         return self._st.paused_query
+
+    def add_prelude_notes(self, notes: list[str]) -> None:
+        """Queue user notes for the next round to admit before its own input.
+
+        Each note becomes its own user turn at the start of that round —
+        including a continuation round, which otherwise appends none — so the
+        agent sees what the user said while it was paused.
+        """
+        self._prelude_notes.extend(note for note in notes if note)
 
     @property
     def active_round(self) -> ActiveRound | None:
@@ -598,7 +611,7 @@ class NativeHarness(DeepAgent):
         """
         self._require_alive()
         ack: asyncio.Future = asyncio.get_running_loop().create_future()
-        await self._control.put(_CmdPause(ack=ack))
+        await self._control.put(_CmdPause(ack=ack, voice=is_voice_pause()))
         await ack
 
     async def resume(self, *, query: str | None = None) -> None:
@@ -959,8 +972,12 @@ class NativeHarness(DeepAgent):
 
         if active.model_call_in_flight:
             await self._hard_cancel_round(active)
+            # A voice pause keeps the input admitted for the cancelled call; the
+            # iteration boundary predates it (on the first iteration the
+            # pre-round baseline even predates the round's own query).
+            voice_target = active.pre_model_snapshot if cmd.voice else None
             await self._rollback_to_snapshot(
-                active.last_iter_snapshot or active.pre_round_snapshot,
+                voice_target or active.last_iter_snapshot or active.pre_round_snapshot,
             )
             self._reset_coordinator()
             # The interrupted iteration's streamed chunks are void: its
@@ -1248,8 +1265,10 @@ class NativeHarness(DeepAgent):
             pre_round_snapshot=pre_round,
         )
 
+        prelude_notes, self._prelude_notes = self._prelude_notes, []
+
         async def _runner() -> None:
-            await self._run_round(active, is_follow_up, resume_continuation)
+            await self._run_round(active, is_follow_up, resume_continuation, prelude_notes)
 
         task = asyncio.create_task(_runner(), name=f"native_harness_round[{round_id}]")
         active.task = task
@@ -1269,6 +1288,7 @@ class NativeHarness(DeepAgent):
         active: ActiveRound,
         is_follow_up: bool,
         resume_continuation: bool = False,
+        prelude_notes: list[str] | None = None,
     ) -> None:
         """Drive one outer round through the task-loop kernel.
 
@@ -1283,6 +1303,8 @@ class NativeHarness(DeepAgent):
             is_follow_up: Whether this round is a follow-up continuation.
             resume_continuation: Whether this round continues a paused round's
                 preserved context (the inner loop appends no new user turn).
+            prelude_notes: User notes the inner loop admits before the round's
+                own input (see :meth:`add_prelude_notes`).
         """
         error: BaseException | None = None
         result: dict | None = None
@@ -1316,6 +1338,7 @@ class NativeHarness(DeepAgent):
                     is_follow_up=is_follow_up,
                     task_id=active.task_id,
                     resume_continuation=resume_continuation,
+                    prelude_notes=prelude_notes,
                 )
                 result = await self.loop_controller.wait_round_completion()
                 # Control results must never be streamed as answers:

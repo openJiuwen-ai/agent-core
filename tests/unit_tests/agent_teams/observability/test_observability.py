@@ -412,7 +412,7 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     # trigger does NOT carry finish_reason; content must never be mistaken for
     # one. Earlier the handler re-derived usage from `response` via getattr,
     # which returned None for a string and silently dropped reasoning_tokens
-    # from the reasoning span — a regression this test must guard against.
+    # from the reasoning span 閳?a regression this test must guard against.
     await fw.trigger(
         LLMCallEvents.LLM_OUTPUT,
         messages=messages,
@@ -450,7 +450,7 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     # chunk); non-zero because the two reasoning deltas are stamped at different times.
     rdur = _attr(rs, "openjiuwen.gen_ai.reasoning.duration_ms")
     assert rdur is not None and rdur > 0.0, "reasoning duration_ms must be recorded and > 0"
-    # The span's own start/end must reflect the measured interval — Langfuse UI
+    # The span's own start/end must reflect the measured interval 閳?Langfuse UI
     # shows span duration, not the attribute. Guard against the prior regression
     # where start==end (duration 0) despite the attribute being set.
     span_dur_ms = (rs.end_time - rs.start_time) / 1e6
@@ -556,7 +556,7 @@ async def test_streaming_content_not_mistaken_for_finish_reason(
         messages=messages,
         model="fake-llm-1",
     )
-    # Chunks without finish_reason — simulates a provider whose final chunk
+    # Chunks without finish_reason 閳?simulates a provider whose final chunk
     # omits it. Content is a short string that must not leak into finish_reason.
     await fw.trigger(
         LLMCallEvents.LLM_STREAM_OUTPUT,
@@ -1716,9 +1716,9 @@ async def test_span_tree_shape(
 ) -> None:
     """v15: Verify the correct span tree shape:
     team.{name} (root)
-      ├── agent.leader.task_iteration.1
-      │       ├── llm.call
-      │       └── tool.xxx
+      閳规壕鏀㈤埞鈧?agent.leader.task_iteration.1
+      閳?      閳规壕鏀㈤埞鈧?llm.call
+      閳?      閳规柡鏀㈤埞鈧?tool.xxx
     No duplicate team spans, no orphan spans.
     Team span is closed in finalize_team_trace."""
     from openjiuwen.agent_teams.observability.span_context import remove_team_span
@@ -1969,7 +1969,7 @@ async def test_cross_iteration_llm_span_carries_the_full_prompt(
     finalize_team_trace("test_team")
 
     # Iteration 2's llm.call span carries the FULL prompt (system + all user
-    # messages m1-m5) as attributes — not delta.
+    # messages m1-m5) as attributes 閳?not delta.
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     assert len(llm_spans) >= 2
     iter2_llm = llm_spans[-1]
@@ -2021,7 +2021,7 @@ async def test_a_long_conversation_costs_a_fixed_number_of_attributes(
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
 
-    # 1 system + 300 user messages → far exceeds the 200-attr cap.
+    # 1 system + 300 user messages 閳?far exceeds the 200-attr cap.
     big_messages = [{"role": "system", "content": "sys"}]
     big_messages += [{"role": "user", "content": f"msg-{i}"} for i in range(300)]
     await fw.trigger(
@@ -2092,9 +2092,9 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
     LLM call id (a model wrapper that bypasses ``Model``, or a test triggering
     the events directly):
 
-    1. **Cross-worker**: two workers each with one LLM span — parent
+    1. **Cross-worker**: two workers each with one LLM span 閳?parent
        matching picks the span whose parent is the current agent.
-    2. **Same-parent ambiguity**: one worker with two concurrent LLM spans —
+    2. **Same-parent ambiguity**: one worker with two concurrent LLM spans 閳?
        parent matching cannot tell them apart, so it answers None. Writing a
        completion onto the wrong span is worse than losing it; the id-based
        path covered by ``test_concurrent_llm_requests_never_cross_write``
@@ -2144,16 +2144,16 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
     llm_b.set_attribute(GEN_AI_OPERATION_NAME, "chat")
     llm_b.otel_llm_state = LlmSpanState(span=llm_b, start_ns=1_000)
 
-    # Cross-worker: ContextVar is agent_b → peek returns llm_b (parent match).
+    # Cross-worker: ContextVar is agent_b 閳?peek returns llm_b (parent match).
     peek_b = tracker.peek_current_llm_span()
     assert peek_b is not None and peek_b.context.span_id == llm_b.context.span_id
 
-    # Switch to agent_a → should return llm_a.
+    # Switch to agent_a 閳?should return llm_a.
     set_current_agent_span(agent_a)
     peek_a = tracker.peek_current_llm_span()
     assert peek_a is not None and peek_a.context.span_id == llm_a.context.span_id
 
-    # ── Same-parent ambiguity: two LLM spans under one worker ────────
+    # 閳光偓閳光偓 Same-parent ambiguity: two LLM spans under one worker 閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓閳光偓
     # Both share agent_a as parent and neither callback carries a call id,
     # so nothing in the current context says which of the two the caller
     # means. Guessing by recency is what used to write one request's
@@ -2201,7 +2201,7 @@ async def test_concurrent_llm_requests_never_cross_write(
     This is the image-modality probe against a member's streaming call. The
     probe runs in a detached background task that inherited the member's agent
     span, so both spans hang off the same parent. It opens *first* and answers
-    while the member's call is still streaming — so at the moment the probe's
+    while the member's call is still streaming 閳?so at the moment the probe's
     completion arrives, the most recently opened span in the trace is the
     member's. Resolving "the most recently opened llm.call span" therefore
     wrote the probe's one-word answer onto the member's span.
@@ -2235,7 +2235,7 @@ async def test_concurrent_llm_requests_never_cross_write(
 
     async def _probe_call() -> None:
         # The probe inherits the member's agent span through the context copy
-        # asyncio.create_task takes — exactly how schedule_image_support_probe
+        # asyncio.create_task takes 閳?exactly how schedule_image_support_probe
         # lands its background task.
         with LlmCallScope():
             await fw.trigger(
@@ -2322,7 +2322,7 @@ async def test_stream_callbacks_resolve_across_per_frame_task_hops(
     ``Model.stream`` pulls every frame through ``wait_for``, so each chunk
     callback runs in a fresh task with a *copied* context. The call id has to
     survive that hop, otherwise the chunk and completion callbacks fall back to
-    guessing — which is where a second open request gets robbed.
+    guessing 閳?which is where a second open request gets robbed.
     """
     from openjiuwen.agent_teams.observability.span_context import (
         remove_team_span,
@@ -2474,7 +2474,7 @@ async def test_ambient_root_span_keeps_llm_span_findable_across_tasks(
     from openjiuwen.agent_teams.observability.setup import get_tracer
 
     fw = Runner.callback_framework
-    # Snapshot a context taken before the root span exists — the supervisor task.
+    # Snapshot a context taken before the root span exists 閳?the supervisor task.
     supervisor_ctx = contextvars.copy_context()
 
     root_span = get_tracer("test").start_span(name="agent.code.normal.sess-1")
@@ -2668,7 +2668,7 @@ async def test_subagent_without_team_name_still_gets_an_agent_span(
 async def test_iterations_nest_under_the_invoke_span_of_the_same_agent(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """One invoke, N iterations — the rounds belong under the request, not beside it.
+    """One invoke, N iterations 閳?the rounds belong under the request, not beside it.
 
     Both hooks fire for an agent whose ``enable_task_loop`` the rail reads as
     false while the loop still runs. They used to produce sibling spans under
@@ -2802,7 +2802,7 @@ async def test_non_streaming_reasoning_span_sits_at_the_call_start(
     """A non-streaming call has no reasoning timing, and must not fake one.
 
     Reasoning time is measured from stream chunks. A sub-agent dispatched via
-    ``invoke`` produces none, and the span used to be created at finalize time —
+    ``invoke`` produces none, and the span used to be created at finalize time 閳?
     zero-length at the *end* of the llm.call, after the answer it preceded.
     """
     fw = Runner.callback_framework
@@ -2842,7 +2842,7 @@ def test_team_rail_runs_before_the_agent_rail():
     """The contribution must be parked before the span it decorates exists.
 
     Higher priority runs first in every hook chain, so this ordering is what
-    makes the ctx.extra handoff work in the before hooks — and it is the whole
+    makes the ctx.extra handoff work in the before hooks 閳?and it is the whole
     reason the team layer needs no subclass of the agent rail.
     """
     assert TeamObservabilityRail.priority > AgentObservabilityRail.priority
@@ -2850,7 +2850,7 @@ def test_team_rail_runs_before_the_agent_rail():
 
 @pytest.mark.asyncio
 async def test_agent_rail_alone_produces_a_span_with_no_team_identity(in_memory_exporter):
-    """The agent tier is team-agnostic — ``agentteam.*`` comes from the team rail."""
+    """The agent tier is team-agnostic 閳?``agentteam.*`` comes from the team rail."""
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
@@ -2939,7 +2939,7 @@ def test_neither_rail_is_built_while_observability_is_off():
 
 
 def test_a_subagent_spec_gets_the_agent_rail_only(in_memory_exporter):
-    """A sub-agent is dispatched work, not a member — no team identity on it.
+    """A sub-agent is dispatched work, not a member 閳?no team identity on it.
 
     Its ``agentteam.member.name`` would be the sub-agent *type*, asserting a
     membership it does not have. Team attribution stays structural: the
@@ -3125,3 +3125,41 @@ def test_team_rail_contributes_the_member_round_turn() -> None:
     assert running_attributes[OJ_TURN_NUMBER] == 4
     assert OJ_TURN_ID not in idle_attributes
     assert OJ_TURN_NUMBER not in idle_attributes
+def test_finalize_team_trace_non_blocking_flush_returns_before_export(
+    in_memory_exporter, monkeypatch
+):
+    """Runner finalizes from an async finally: a slow exporter flush must not
+    hold the caller (it would park the whole event loop)."""
+    import threading
+    import time
+
+    from openjiuwen.agent_teams.observability import setup as team_setup
+    from openjiuwen.agent_teams.observability.span_context import get_team_span
+
+    release = threading.Event()
+    flushed_on: list[str] = []
+
+    def _slow_flush(timeout_millis: int = 5000, *, hold_lock: bool = True) -> None:
+        assert hold_lock is False
+        flushed_on.append(threading.current_thread().name)
+        release.wait(5.0)
+
+    monkeypatch.setattr(team_setup, "force_flush_provider", _slow_flush)
+    _create_team_span("test_team")
+
+    started = time.monotonic()
+    team_setup.finalize_team_trace("test_team", blocking_flush=False)
+    elapsed = time.monotonic() - started
+    try:
+        assert elapsed < 1.0
+        assert get_team_span() is None
+        assert _spans_by_name(in_memory_exporter, "team.test_team")
+        thread = team_setup._background_flush_thread
+        assert thread is not None
+        # A second finalize while the first flush is in flight is coalesced.
+        team_setup.finalize_team_trace("test_team", blocking_flush=False)
+        assert team_setup._background_flush_thread is thread
+    finally:
+        release.set()
+    thread.join(5.0)
+    assert flushed_on == ["team-trace-flush"]

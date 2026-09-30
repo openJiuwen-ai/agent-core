@@ -15,6 +15,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.runtime.voice import is_voice_pause
 from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.team import (
     ExternalCliModelConfig,
@@ -483,11 +484,30 @@ class SpawnManager:
         # Route through cleanup_teammate so chunk forwarders are
         # detached the same way as the single-member teardown path —
         # otherwise inprocess observers would leak across team shutdowns.
+        if is_voice_pause():
+            await self._shutdown_all_handles_concurrently()
+            return
         for member_name in list(self.spawned_handles.keys()):
             try:
                 await self.cleanup_teammate(member_name)
             except Exception as e:
                 team_logger.error("Error shutting down teammate {}: {}", member_name, e)
+        self.spawned_handles.clear()
+
+    async def _shutdown_all_handles_concurrently(self) -> None:
+        """Voice pause: tear members down concurrently.
+
+        The user is waiting to be heard, so the pause waits for the slowest
+        member instead of the sum of all of them.
+        """
+
+        async def _cleanup(member_name: str) -> None:
+            try:
+                await self.cleanup_teammate(member_name)
+            except Exception as e:
+                team_logger.error("Error shutting down teammate {}: {}", member_name, e)
+
+        await asyncio.gather(*(_cleanup(name) for name in list(self.spawned_handles.keys())))
         self.spawned_handles.clear()
 
     async def cancel_recovery_tasks(self) -> None:

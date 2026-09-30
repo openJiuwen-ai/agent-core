@@ -386,6 +386,15 @@ class AbilityManager:
         )
         try:
             return await task
+        except asyncio.CancelledError as exc:
+            # A tool's own cancellation becomes a result, but when the caller
+            # itself is being cancelled (round abort / pause / teardown)
+            # returning a value would swallow it and keep the ReAct loop
+            # running until the round ends on its own.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() > 0:
+                raise
+            return exc
         except BaseException as exc:  # Match gather(return_exceptions=True).
             return exc
 
