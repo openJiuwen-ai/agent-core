@@ -121,8 +121,12 @@ async def _query_vote(
             logger=logger,
             vote_id=vote_id,
         )
-        choice = data.get("choices", [{}])[0]
-        content = _flatten_content(choice.get("message", {}).get("content", ""))
+        choices = data.get("choices") if isinstance(data, dict) else None
+        if not isinstance(choices, list) or not choices:
+            raise ValueError(f"Judge vote {vote_id} received no choices from model response")
+        choice = choices[0]
+        choice_message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        content = _flatten_content(choice_message.get("content", ""))
         scores = parse_judge_scores(content, raise_on_error=False)
 
         if scores is None and str(choice.get("finish_reason") or "") == "length":
@@ -136,8 +140,12 @@ async def _query_vote(
                 logger=logger,
                 vote_id=vote_id,
             )
-            retry_choice = retry_data.get("choices", [{}])[0]
-            retry_content = _flatten_content(retry_choice.get("message", {}).get("content", ""))
+            retry_choices = retry_data.get("choices") if isinstance(retry_data, dict) else None
+            if not isinstance(retry_choices, list) or not retry_choices:
+                raise ValueError(f"Judge vote {vote_id} received no choices from retry response")
+            retry_choice = retry_choices[0]
+            retry_message = retry_choice.get("message", {}) if isinstance(retry_choice, dict) else {}
+            retry_content = _flatten_content(retry_message.get("content", ""))
             retry_scores = parse_judge_scores(retry_content, raise_on_error=False)
             if retry_scores is not None:
                 return retry_scores
