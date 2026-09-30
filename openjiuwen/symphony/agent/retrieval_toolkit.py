@@ -75,10 +75,10 @@ class SkillIndexBuildConfig:
     postprocess_enabled: bool = True
     postprocess_max_passes: int = 1
     postprocess_min_skills: int = 6
-    equivalence_enabled: bool = True
+    equivalence_enabled: bool = False
     equivalence_max_groups_per_parent: int = 6
     equivalence_allow_singleton_groups: bool = True
-    equivalence_min_lexical_similarity: float = 0.12
+    equivalence_min_lexical_similarity: float = 0.0
     deterministic_prompts: bool = True
     prompt_fingerprint_version: str = "v1"
     cache_observability: bool = True
@@ -121,6 +121,13 @@ class _BuildTask:
     thread: threading.Thread
     cancel_event: threading.Event
     build_id: str
+
+
+@dataclass(frozen=True)
+class _IndexBuildPlan:
+    operation: str
+    records: tuple[SkillRecord, ...]
+    response_worker_ids: tuple[str, ...] = ()
 
 
 class SkillIndexBuildCancelled(RuntimeError):
@@ -209,6 +216,7 @@ class AgenticSkillRetrievalToolkit:
             return _result(False, "Skill index build failed: no enabled skills were provided.", data=state)
 
         if not force and self._is_fresh(fingerprint):
+            capability_category_paths: list[dict[str, Any]] = []
             state = _build_state(
                 status="success",
                 stage="reuse",
@@ -222,8 +230,13 @@ class AgenticSkillRetrievalToolkit:
                 finished=True,
                 elapsed_seconds=time.monotonic() - started,
             )
+            _set_capability_category_paths(state, capability_category_paths)
             self._write_state(state)
-            return _result(True, f"Skill index is fresh. {len(records)} skills indexed.", data=state)
+            return _result(
+                True,
+                f"Skill index is fresh. {len(records)} skills indexed.",
+                data={**state, "capability_category_paths": capability_category_paths},
+            )
 
         cancel_check = _cancel_check(cancel_token)
         build_check = _build_check(
@@ -299,8 +312,8 @@ class AgenticSkillRetrievalToolkit:
         with TemporaryDirectory(prefix="symphony-skill-index-") as tmp:
             tmp_root = Path(tmp)
             item_jsonl = tmp_root / "skills.jsonl"
-            operation, operation_records = self._select_build_plan(records=records, force=force)
-            _write_records_jsonl(operation_records, item_jsonl)
+            plan = self._select_build_plan(records=records, force=force)
+            _write_records_jsonl(plan.records, item_jsonl)
             output_dir = tmp_root / "index"
             try:
                 self._set_running_state(
@@ -318,9 +331,9 @@ class AgenticSkillRetrievalToolkit:
                 except SkillIndexBuildCancelled:
                     return self._cancelled_result(build_id=build_id, started=started, fingerprint=fingerprint)
                 config = _to_retrieval_build_config(build_cfg, llm_cfg)
-                if operation == "build":
+                if plan.operation == "build":
                     _run_index_builder(
-                        operation=operation,
+                        operation=plan.operation,
                         item_jsonl_path=item_jsonl,
                         output_dir=output_dir,
                         base_index_dir=self.index_dir,
@@ -329,7 +342,7 @@ class AgenticSkillRetrievalToolkit:
                 else:
                     try:
                         _run_index_builder(
-                            operation=operation,
+                            operation=plan.operation,
                             item_jsonl_path=item_jsonl,
                             output_dir=output_dir,
                             base_index_dir=self.index_dir,
@@ -360,6 +373,10 @@ class AgenticSkillRetrievalToolkit:
                     return self._cancelled_result(build_id=build_id, started=started, fingerprint=fingerprint)
                 if not _is_complete_index(output_dir):
                     raise RuntimeError("index artifacts are incomplete")
+                capability_category_paths = _load_capability_category_paths(
+                    output_dir,
+                    worker_ids=plan.response_worker_ids,
+                )
                 self._set_running_state(
                     build_id=build_id,
                     stage="publish",
@@ -384,12 +401,18 @@ class AgenticSkillRetrievalToolkit:
                     finished=True,
                     elapsed_seconds=elapsed,
                 )
+                _set_capability_category_paths(state, capability_category_paths)
                 self._write_state(state)
                 self._clear_loaded_index()
                 return _result(
                     True,
                     f"Skill index build completed. {len(records)} skills indexed.",
-                    data={**state, "index_dir": str(self.index_dir), "elapsed_seconds": elapsed},
+                    data={
+                        **state,
+                        "index_dir": str(self.index_dir),
+                        "elapsed_seconds": elapsed,
+                        "capability_category_paths": capability_category_paths,
+                    },
                 )
             except Exception as exc:
                 error = _normalize_error(exc)
@@ -511,6 +534,7 @@ class AgenticSkillRetrievalToolkit:
             build["message"] = "Skill index build cancellation requested."
             build["progress"] = 1.0
             build["finished_at"] = _now_iso()
+            build["capability_category_paths"] = []
             state["build"] = build
             self._write_state(state)
         if wait and cancelled:
@@ -567,6 +591,9 @@ class AgenticSkillRetrievalToolkit:
                 state["build"] = build
                 state["fingerprint"] = ""
                 self._write_state(state)
+        capability_category_paths: list[dict[str, Any]] = []
+        if build.get("status") == "success":
+            capability_category_paths = list(build.get("capability_category_paths") or [])
         status = {
             "status": str(build.get("status") or "idle"),
             "stage": str(build.get("stage") or ""),
@@ -586,6 +613,7 @@ class AgenticSkillRetrievalToolkit:
             == _index_fingerprint(self._current_records(refresh=refresh_inventory), self._build_config),
             "indexed_count": int(state.get("indexed_count") or 0) if index_exists else 0,
             "fingerprint": str(state.get("fingerprint") or ""),
+            "capability_category_paths": capability_category_paths,
         }
         if include_logs:
             status["logs"] = list(build.get("logs") or [])
@@ -795,26 +823,37 @@ class AgenticSkillRetrievalToolkit:
             self._skills = scan_skill_records(self._skills_dir)
         return [record for record in self._skills if record.enabled and record.resolved_worker_id]
 
-    def _select_build_plan(self, *, records: Sequence[SkillRecord], force: bool) -> tuple[str, list[SkillRecord]]:
+    def _select_build_plan(self, *, records: Sequence[SkillRecord], force: bool) -> _IndexBuildPlan:
         if force or not _is_complete_index(self.index_dir):
-            return "build", list(records)
+            return _IndexBuildPlan("build", tuple(records))
         state = self._read_state()
         previous_hashes = dict(state.get("record_hashes") or {})
         current_hashes = _record_hashes(records)
         if not previous_hashes:
-            return "build", list(records)
+            return _IndexBuildPlan("build", tuple(records))
         previous = set(previous_hashes)
         current = set(current_hashes)
         added = current - previous
         removed = previous - current
         changed = {key for key in current & previous if current_hashes.get(key) != previous_hashes.get(key)}
+        changed_or_added = added | changed
         if changed or (added and removed):
-            return "build", list(records)
+            return _IndexBuildPlan(
+                "build",
+                tuple(records),
+                response_worker_ids=tuple(sorted(changed_or_added)),
+            )
         if added and not removed:
-            return "add", [record for record in records if record.resolved_worker_id in added]
+            added_records = tuple(record for record in records if record.resolved_worker_id in added)
+            return _IndexBuildPlan(
+                "add",
+                added_records,
+                response_worker_ids=tuple(sorted(added)),
+            )
         if removed and not added:
-            return "delete", [SkillRecord(name=worker_id, worker_id=worker_id) for worker_id in sorted(removed)]
-        return "build", list(records)
+            removed_records = tuple(SkillRecord(name=worker_id, worker_id=worker_id) for worker_id in sorted(removed))
+            return _IndexBuildPlan("delete", removed_records)
+        return _IndexBuildPlan("build", tuple(records))
 
     def _is_fresh(self, fingerprint: str) -> bool:
         state = self._read_state()
@@ -1032,6 +1071,7 @@ class AgenticSkillRetrievalToolkit:
             "force": bool(force),
             "started_at": str(previous_build.get("started_at") or _now_iso()),
             "updated_at": _now_iso(),
+            "capability_category_paths": [],
             "logs": logs[-40:],
         }
         state.update(
@@ -1475,6 +1515,62 @@ def _build_state(
             "logs": [{"stage": stage, "status": status, "message": message, "time": now}],
         },
     }
+
+
+def _set_capability_category_paths(state: dict[str, Any], paths: Sequence[dict[str, Any]]) -> None:
+    build = dict(state.get("build") or {})
+    build["capability_category_paths"] = [dict(item) for item in paths]
+    state["build"] = build
+
+
+def _load_capability_category_paths(
+    index_dir: str | Path,
+    *,
+    worker_ids: Sequence[str],
+) -> list[dict[str, Any]]:
+    requested: list[str] = []
+    requested_set: set[str] = set()
+    for raw_worker_id in worker_ids:
+        worker_id = str(raw_worker_id).strip()
+        if not worker_id or worker_id in requested_set:
+            continue
+        requested.append(worker_id)
+        requested_set.add(worker_id)
+    if not requested:
+        return []
+
+    records_by_worker_id: dict[str, CatalogRecord] = {}
+    duplicate_worker_ids: set[str] = set()
+    for record in load_retriever_index(index_dir).catalog_records:
+        worker_id = str(record.worker_id or "").strip()
+        if worker_id not in requested_set:
+            continue
+        if worker_id in records_by_worker_id:
+            duplicate_worker_ids.add(worker_id)
+        records_by_worker_id[worker_id] = record
+    if duplicate_worker_ids:
+        joined = ", ".join(sorted(duplicate_worker_ids)[:5])
+        raise RuntimeError(f"built index contains duplicate catalog records for capability IDs: {joined}")
+
+    missing: list[str] = []
+    for worker_id in requested:
+        if worker_id not in records_by_worker_id:
+            missing.append(worker_id)
+    if missing:
+        joined = ", ".join(missing[:5])
+        raise RuntimeError(f"built index is missing category paths for updated capability IDs: {joined}")
+
+    paths: list[dict[str, Any]] = []
+    for worker_id in requested:
+        category_path: list[str] = []
+        for raw_part in records_by_worker_id[worker_id].branch_path:
+            part = str(raw_part).strip()
+            if part:
+                category_path.append(part)
+        if not category_path:
+            raise RuntimeError(f"built index contains an empty category path for updated capability ID: {worker_id}")
+        paths.append({"capability_id": worker_id, "category_path": category_path})
+    return paths
 
 
 def _set_failed_index_state(
