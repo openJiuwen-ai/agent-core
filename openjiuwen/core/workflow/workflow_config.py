@@ -4,9 +4,9 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.core.session import Transformer
 from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.workflow.components.base import ComponentAbility
-from openjiuwen.core.session import Transformer
 
 
 class CompIOConfig(BaseModel):
@@ -15,6 +15,7 @@ class CompIOConfig(BaseModel):
 
     Defines schemas and transformers for component data processing.
     """
+
     inputs_schema: Optional[Dict | Transformer] = None
     outputs_schema: Optional[Dict | Transformer] = None
 
@@ -26,6 +27,7 @@ class ExceptionConfig(BaseModel):
     Only ``handle_type`` is recognized by the framework. Users may attach
     arbitrary extra fields for their ``component_error_recovery`` handler.
     """
+
     model_config = {"extra": "allow"}
     handle_type: str = Field(default="interrupt")
 
@@ -36,9 +38,13 @@ class NodeSpec(BaseModel):
 
     Contains configuration for both regular and streaming I/O,
     along with component capabilities.
+
+    I/O configurations may be omitted or explicitly set to None. Both forms
+    preserve the default when serializing and validating a node specification.
     """
-    io_configs: CompIOConfig = None  # Configuration for regular (non-streaming) I/O
-    stream_io_configs: CompIOConfig = None  # Configuration for streaming I/O
+
+    io_configs: Optional[CompIOConfig] = None  # Configuration for regular (non-streaming) I/O
+    stream_io_configs: Optional[CompIOConfig] = None  # Configuration for streaming I/O
     abilities: List[ComponentAbility] = Field(default_factory=list)  # List of component abilities supported
     max_retries: int = Field(default=0, ge=0)
     timeout: float = Field(default=-1.0)  # Per-node execution timeout in seconds; <=0 means no timeout
@@ -52,26 +58,25 @@ class WorkflowSpec(BaseModel):
 
     Defines the graph structure, connections, and component configurations.
     """
+
     edges: Dict[str, list[str]] = Field(
-        default_factory=dict,
-        description="Regular data flow edges (source -> [targets])"
+        default_factory=dict, description="Regular data flow edges (source -> [targets])"
     )
     stream_edges: Dict[str, list[str]] = Field(
-        default_factory=dict,
-        description="Streaming data flow edges (source -> [targets])"
+        default_factory=dict, description="Streaming data flow edges (source -> [targets])"
     )
     comp_configs: Dict[str, NodeSpec] = Field(
-        default_factory=dict,
-        description="Configuration for each component in the workflow"
+        default_factory=dict, description="Configuration for each component in the workflow"
     )
     stream_source_groups: Dict[str, List[List[str]]] = Field(
-        default_factory=dict,
-        description="CNF source groups for streaming consumers, using producer_id-ABILITY keys"
+        default_factory=dict, description="CNF source groups for streaming consumers, using producer_id-ABILITY keys"
     )
     start_nodes: list[str] = Field(default_factory=list)
 
 
 class WorkflowConfig(BaseModel):
+    """Workflow identity, graph specification, and nesting limit."""
+
     card: WorkflowCard
     spec: Optional[WorkflowSpec] = Field(default_factory=WorkflowSpec)
     workflow_max_nesting_depth: int = Field(default=5, ge=0, le=10)
