@@ -54,6 +54,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.evide
     normalize_prior_paper_evidence,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex import (
+    assemble_document,
     escape_latex,
     render_prior_results_table,
     render_results_table,
@@ -1075,6 +1076,30 @@ class ReportingAgent:
         )
         notes.extend(figure_notes)
         figure_paths = [*figure_paths, *extra_figure_paths]
+
+        # Host-authored, always -- never trust whatever main.tex the agent's own
+        # session produced. assemble_document() inlines every verified section
+        # body directly (no \input/\include), so overwriting here is the one
+        # place that guarantees a self-contained main.tex regardless of whether
+        # the agent invoked ts-latex/compile.py at all (e.g. a missing skill
+        # deployment previously left the agent to hand-assemble a \input-based
+        # main.tex that generic previewers -- including the web UI -- can't
+        # resolve, since they only fetch the single selected file).
+        title_path = workspace / "title.txt"
+        if title_path.is_file():
+            keywords_path = workspace / "keywords.txt"
+            keywords = keywords_path.read_text(encoding="utf-8").strip() if keywords_path.is_file() else None
+            (workspace / "main.tex").write_text(
+                assemble_document(
+                    title=title_path.read_text(encoding="utf-8").strip(),
+                    section_bodies=drafts,
+                    document_order=DOCUMENT_ORDER,
+                    keywords=keywords,
+                ),
+                encoding="utf-8",
+            )
+        else:
+            notes.append("title.txt missing — could not regenerate a self-contained main.tex")
 
         final_pdf = paper_output_path(run_id)
         final_tex = paper_tex_path(run_id)
