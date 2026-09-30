@@ -709,7 +709,15 @@ def set_root_span(span: Span, *, session_id: str | None = None) -> None:
 
 
 def get_root_span(*, session_id: str | None = None) -> Span | None:
-    """Resolve a live root, preferring recording context then session registry."""
+    """Resolve a live root, preferring recording context then session registry.
+
+    The session registry is only ever consulted by session id. A caller with no
+    session in reach never adopts a root registered for some session: sessions
+    of different modes (single agent, Team) run side by side in one process,
+    and "the only live root" is merely whichever session happens to be running,
+    not the caller's. Hosts that cannot flow context opt in explicitly through
+    :func:`set_ambient_root_span`.
+    """
     requested_sid = _normalize_session_id(session_id)
     if not requested_sid:
         requested_sid = get_current_session_id()
@@ -720,27 +728,52 @@ def get_root_span(*, session_id: str | None = None) -> Span | None:
         if session_matches:
             return contextual
 
-    with _root_registry_lock:
-        if requested_sid:
-            registered = _root_registry.get(requested_sid)
-            if registered is not None and registered.is_recording():
-                return registered
-            if registered is not None:
-                _root_registry.pop(requested_sid, None)
-            return None
-
-        live: list[Span] = []
-        for sid, registered in list(_root_registry.items()):
-            if registered.is_recording():
-                if all(registered is not item for item in live):
-                    live.append(registered)
-            else:
-                _root_registry.pop(sid, None)
-        if len(live) == 1:
-            return live[0]
+    if requested_sid:
+        return _registered_root_span(requested_sid)
     if _ambient_root_span is not None and _ambient_root_span.is_recording():
         return _ambient_root_span
     return None
+
+
+def get_session_root_span(session_id: str) -> Span | None:
+    """Return the live root owned by exactly *session_id*, or None.
+
+    Unlike :func:`get_root_span`, nothing but that session's own root ever
+    answers: neither the ambient root nor any other session's registered root
+    is a fallback. A root bound to the current execution context counts unless
+    it was bound for a different session — a binding without a session is this
+    execution's own root, since a ContextVar never carries another task's
+    binding. Use it wherever the caller knows its session and adopting a
+    foreign root would merge two sessions' traces.
+
+    Args:
+        session_id: Session whose root is looked up; must be non-empty.
+
+    Returns:
+        The session's recording root span, or None when it has none.
+
+    Raises:
+        ValueError: If *session_id* is empty.
+    """
+    sid = _normalize_session_id(session_id)
+    if not sid:
+        raise ValueError("session_id is required")
+    contextual = _root_span_ctx.get()
+    contextual_sid = _root_session_ctx.get()
+    if contextual is not None and contextual.is_recording() and contextual_sid in ("", sid):
+        return contextual
+    return _registered_root_span(sid)
+
+
+def _registered_root_span(session_id: str) -> Span | None:
+    """Return the live root registered for *session_id*, dropping a stale entry."""
+    with _root_registry_lock:
+        registered = _root_registry.get(session_id)
+        if registered is not None and registered.is_recording():
+            return registered
+        if registered is not None:
+            _root_registry.pop(session_id, None)
+        return None
 
 
 def get_bound_root_span() -> Span | None:
