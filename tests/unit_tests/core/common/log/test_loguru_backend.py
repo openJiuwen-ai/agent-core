@@ -338,6 +338,29 @@ def test_event_object_event_first_json_preserves_metadata_and_context(tmp_path):
     assert "stale" not in payload["metadata"]["_log_context"]
 
 
+def test_event_object_logged_as_error_reports_a_failure_status(tmp_path):
+    """A structured event logged at ERROR must not report ``status: success``.
+
+    Observed in production: an operation that failed emitted an ERROR record
+    whose payload still carried the ``BaseLogEvent.status`` default, so log
+    analysis counted the failure as a success.
+    """
+    config_file_path = os.path.join(tmp_path, "loguru_event_first_error_status.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    event = create_log_event(LogEventType.AGENT_ERROR, module_id="agent_123")
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-EVENT-ERROR")
+        logger.error("Failed to run the agent", event=event)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+
+    assert payload["log_level"] == "ERROR"
+    assert payload["status"] == "failure"
+
+
 def test_plain_log_can_emit_event_first_json_payload(tmp_path, capsys):
     config_file_path = os.path.join(tmp_path, "loguru_event_first_plain.yaml")
     write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
