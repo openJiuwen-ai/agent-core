@@ -1,6 +1,5 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-import os
 from typing import Callable, Union
 
 from openjiuwen.core.common.exception.errors import build_error
@@ -44,9 +43,9 @@ class BranchRouter:
         self._branches: list[Branch] = []
         self._session: BaseSession = None
         self.report_trace = report_trace
-        self._drawable_branch_router = None
-        if os.environ.get(WORKFLOW_DRAWABLE, "false").lower() == "true":
-            self._drawable_branch_router = DrawableBranchRouter(targets=[], datas=[])
+        # A router may be constructed before its drawable workflow. Preserve
+        # branch metadata independently of the workflow's visualization flag.
+        self._drawable_branch_router = DrawableBranchRouter(targets=[], datas=[])
 
     def add_branch(self, condition: Union[str, Callable[[], bool], Condition], target: Union[str, list[str]],
                    branch_id: str = None):
@@ -68,7 +67,8 @@ class BranchRouter:
             raise build_error(StatusCode.COMPONENT_BRANCH_PARAM_INVALID, reason=str(e))
 
 
-    def get_drawable_branch_router(self):
+    def get_drawable_branch_router(self) -> DrawableBranchRouter:
+        """Return branch targets and labels, even if drawing was initially disabled."""
         return self._drawable_branch_router
 
     @property
