@@ -78,7 +78,7 @@ def test_open_registers_the_root_so_child_spans_find_a_parent(exporter) -> None:
     try:
         assert handle is not None
         assert shared_span_context.get_root_span(session_id="sess-A") is handle
-        assert agent_span_context.resolve_run_root_span() is handle
+        assert agent_span_context.resolve_run_root_span(session_id="sess-A") is handle
     finally:
         close_agent_run_span(handle, session_id="sess-A")
 

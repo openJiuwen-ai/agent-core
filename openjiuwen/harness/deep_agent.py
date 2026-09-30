@@ -3623,9 +3623,14 @@ class DeepAgent(BaseAgent):
             # prepare_interaction_task_loop().  Create the mutable worktree
             # holder first so the scheduler, supervisor, rounds, and tool
             # tasks all inherit the same object through their copied Context.
+            from openjiuwen.extensions.observability.span_context import set_current_session_id
             from openjiuwen.harness.tools.worktree.session import init_session_state
 
             init_session_state()
+            # Bind the observability session the same way, for the same reason:
+            # every task this loop spawns then resolves its run root by this
+            # session instead of guessing among the runs live in the process.
+            set_current_session_id(sid)
 
             self._interaction_session = session
             await self.prepare_interaction_task_loop(session)
