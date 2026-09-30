@@ -72,6 +72,8 @@ class TeamHarness:
         self._active_agent_session: Optional[Any] = None
         self._native_session_id: Optional[str] = None
         self._bg_controller: Optional[Any] = None
+        # User notes waiting for the next round (see ``add_prelude_note``).
+        self._prelude_notes: list[str] = []
 
     # ------------------------------------------------------------------
     # Construction
@@ -136,6 +138,7 @@ class TeamHarness:
         kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, child)
         await child.pre_run()
         await self._native.start(session=child)
+        self._flush_prelude_notes()
         self._native_session_id = self._session_id_of(team_session)
         self._active_agent_session = child
         self._seed_initial_plan_mode(child)
@@ -319,7 +322,25 @@ class TeamHarness:
         the native was rebuilt (see :meth:`NativeHarness.resume`).
         """
         if self._is_cycle_active():
+            self._flush_prelude_notes()
             await self._native.resume(query=query)
+
+    def add_prelude_note(self, text: str) -> None:
+        """Queue a user note for the next round to admit before its own input.
+
+        Used for what the user said while the team was paused: the note is kept
+        here, across the run cycle that ends with the pause, and handed to the
+        native when the next cycle starts (or a warm resume continues), so the
+        next round admits it as its own user turn.
+        """
+        if text:
+            self._prelude_notes.append(text)
+
+    def _flush_prelude_notes(self) -> None:
+        """Hand the queued user notes to the live native."""
+        if self._prelude_notes and self._native is not None:
+            notes, self._prelude_notes = self._prelude_notes, []
+            self._native.add_prelude_notes(notes)
 
     @property
     def paused_query(self) -> Optional[str]:

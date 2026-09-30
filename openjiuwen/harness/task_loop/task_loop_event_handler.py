@@ -334,6 +334,12 @@ class TaskLoopEventHandler(EventHandler):
             if event.metadata
             else False
         )
+        # Set by NativeHarness: user notes admitted ahead of the round's input.
+        prelude_notes = (
+            event.metadata.get("_prelude_notes")
+            if event.metadata
+            else None
+        )
 
         coordinator = agent.loop_coordinator
         if coordinator is None:
@@ -387,6 +393,8 @@ class TaskLoopEventHandler(EventHandler):
             "is_follow_up": is_follow_up,
             "_resume_continuation": resume_continuation,
         }
+        if prelude_notes:
+            task_metadata["_prelude_notes"] = list(prelude_notes)
 
         try:
             core_task = CoreTask(

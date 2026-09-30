@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-08-31 |
-| 关联 feature | N/A |
+| 最近一次修订日期 | 2026-09-15 |
+| 关联 feature | `F_04_authoritative-terminal-stream.md` |
 
 ## 范围 / 边界
 
@@ -71,6 +71,17 @@
 12. `run_one_round` 收到 `InteractiveInput` 时直接恢复内层 ReAct 单轮，不向 task-loop
     controller 重复提交任务；恢复调用仍须启用模型流式输出，使 token chunk、首 token 时间和
     最终结果继续写入同一个 session 输出流。
+13. 单轮 `invoke` / `stream` 未传入 session 但显式提供 conversation_id 时，由 DeepAgent
+    创建并恢复对应任务 session，外层生命周期和内层 ReAct 共用它；结束时由创建方持久化并
+    关闭。未传 session 也没有 conversation_id 的调用保留原有语义，不在外层虚构默认 session。
+    显式 session 仍由调用方管理；task-loop 的 session 必填约束不变。
+14. `stream` 的 `llm_output`、工具、usage 等是即时的中间事件。内层 `answer` 暂存，
+    `AFTER_INVOKE` 完成且 `save_state` / `clear_state` 执行后才发送一个最终 `answer`。
+    payload 使用收尾后的 `InvokeInputs.result`，保留原始 chunk 的 envelope 元数据。
+    中断事件继续即时透传，不将中断前文本补成成功 answer；取消时不在 finally 中补发 answer。
+15. 最终 payload 与 `invoke` 的返回契约一致，允许 rail 替换整个 result 对象。结构化 Browser
+    partial/blocked 不是传输异常，TaskTool 保留其 evidence、retryable 和恢复字段；没有结构化
+    结果的执行错误仍走框架异常路径。
 
 ## 接口契约
 

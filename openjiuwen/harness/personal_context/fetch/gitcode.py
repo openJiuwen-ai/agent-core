@@ -11,6 +11,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import logging
 import ntpath
 import os
 import re
@@ -39,6 +40,8 @@ from openjiuwen.harness.personal_context.fetch.retry import (
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
+
+_LOGGER = logging.getLogger(__name__)
 
 _API_ROOT = "https://api.gitcode.com/api/v5"
 _WEB_ROOT = "https://gitcode.com"
@@ -657,8 +660,12 @@ def _candidate(
     extra: Mapping[str, object] | None = None,
 ) -> dict[str, object] | None:
     if candidate_time is None:
+        # A single time-less item must not abort the whole run: dropping one item is better
+        # than losing the batch. Unfiltered runs keep an explicit "unknown, assume oldest"
+        # marker, and the warning keeps the skip visible instead of a silent empty run.
         if time_range.get("mode") != "all":
-            raise _fetch_error(f"GitCode {lane} candidate has no usable time")
+            _LOGGER.warning("GitCode %s candidate %s has no usable time; skipping it", lane, item.logical_id)
+            return None
         normalized_time = "1970-01-01T00:00:00Z"
     else:
         normalized_time = candidate_time

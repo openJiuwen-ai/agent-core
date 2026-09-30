@@ -175,7 +175,11 @@ class TranscriptProjector:
             success = not bool(info.get("is_error"))
         if success is None and info.get("status") is not None:
             success = str(info.get("status")).lower() not in {"error", "failed", "failure"}
-        result_text = _pick_str(info, "summary") or _pick_str(info, "result")
+        result_text = (
+            _pick_str(info, "summary")
+            or _pick_str(info, "rendered_result")
+            or _pick_str(info, "result")
+        )
         if result_text is None:
             result_text = json.dumps(info, ensure_ascii=False) if info else tool_name
         return self._make(

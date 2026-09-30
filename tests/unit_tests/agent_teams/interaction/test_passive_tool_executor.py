@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.tools.database import (
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
 async def _spawn_teammate(backend: TeamBackend, member_name: str) -> None:
@@ -248,3 +249,17 @@ async def test_role_row_persisted_as_passive(backend):
     assert member is not None
     assert member.role == TeamRole.PASSIVE_HUMAN.value
     assert member.status == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_map_output_uses_tool_rendering_and_falls_back_to_default(backend):
+    await backend.task_manager.add(title="look here", content="c", task_id="t-5")
+    executor = PassiveToolExecutor(backend)
+    output = await executor.execute("pm-1", "view_task", {"task_id": "t-5"})
+
+    text = executor.map_output("view_task", output)
+
+    assert "#t-5" in text
+    assert "look here" in text
+    assert executor.map_output("no_such_tool", ToolOutput(success=True, data={"content": "raw"})) == "raw"

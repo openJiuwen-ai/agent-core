@@ -111,18 +111,53 @@ def release_observability() -> None:
     release_observability_demand("team", finalizer=shutdown_observability)
 
 
-def finalize_team_trace(team_name: str) -> None:
-    """Close Team monitor spans and the Team root trace."""
+def finalize_team_trace(team_name: str, *, blocking_flush: bool = True) -> None:
+    """Close Team monitor spans and the Team root trace.
+
+    ``blocking_flush=False`` (voice pause only) hands the exporter flush to a
+    background thread. The Runner finalizes from an async ``finally``; a
+    synchronous flush there parks the whole event loop for as long as the
+    exporters take (tens of seconds observed with the file exporter), which
+    stalls a voice barge-in waiting on the pause.
+    """
     with _lifecycle_lock:
         if not team_name:
             return
 
         team_logger.info("otel: finalize_team_trace for team={}", team_name)
         if _monitor_handler is not None:
-            _monitor_handler.close_team_spans(team_name)
+            _monitor_handler.close_team_spans(team_name, flush=blocking_flush)
 
         finalize_trace(team_name)
-        force_flush_provider()
+        if blocking_flush:
+            force_flush_provider()
+    if not blocking_flush:
+        _flush_provider_in_background()
+
+
+_background_flush_lock = threading.Lock()
+_background_flush_thread: threading.Thread | None = None
+
+
+def _flush_provider_in_background() -> None:
+    """Flush the shared provider off the caller's thread, coalescing overlaps.
+
+    A flush already in flight is not duplicated: batch processors keep
+    exporting on their own schedule, so skipping only defers late spans.
+    """
+    global _background_flush_thread
+
+    with _background_flush_lock:
+        if _background_flush_thread is not None and _background_flush_thread.is_alive():
+            return
+        thread = threading.Thread(
+            target=force_flush_provider,
+            kwargs={"hold_lock": False},
+            name="team-trace-flush",
+            daemon=True,
+        )
+        _background_flush_thread = thread
+        thread.start()
 
 
 def shutdown_observability() -> None:

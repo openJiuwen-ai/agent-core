@@ -32,6 +32,13 @@ class OtelSpanState:
     inputs: Any | None = None
     # Track which workflow this span belongs to for cross-workflow isolation.
     workflow_id: str | None = None
+    # P0 perf: cache is_recording() result at construction time.
+    # Non-recording spans (the vast majority under low sample rates) skip
+    # all attribute serialisation and stream buffering.
+    recorded: bool = field(default=True, init=False)
+
+    def __post_init__(self) -> None:
+        self.recorded = self.span.is_recording()
 
 
 class OtelAgentSpanManager:
@@ -89,6 +96,9 @@ class OtelWorkflowSpanManager:
     # --- Incremental data buffers ---
 
     def append_on_invoke_data(self, invoke_id: str, data: dict) -> None:
+        state = self._spans.get(invoke_id)
+        if state is None or not state.recorded:
+            return
         buf = self._on_invoke_data.get(invoke_id)
         if buf is not None:
             buf.append(data)
@@ -97,6 +107,9 @@ class OtelWorkflowSpanManager:
         return self._on_invoke_data.get(invoke_id, [])
 
     def append_stream_input(self, invoke_id: str, chunk: dict) -> None:
+        state = self._spans.get(invoke_id)
+        if state is None or not state.recorded:
+            return
         buf = self._stream_inputs.get(invoke_id)
         if buf is not None:
             buf.append(chunk)
@@ -105,6 +118,9 @@ class OtelWorkflowSpanManager:
         return self._stream_inputs.get(invoke_id, [])
 
     def append_stream_output(self, invoke_id: str, chunk: dict) -> None:
+        state = self._spans.get(invoke_id)
+        if state is None or not state.recorded:
+            return
         buf = self._stream_outputs.get(invoke_id)
         if buf is not None:
             buf.append(chunk)

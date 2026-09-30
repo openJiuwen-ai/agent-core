@@ -343,9 +343,7 @@ async def test_skill_tool_directory_walk_tolerates_symlink_cycles(sys_op, temp_d
 
 @pytest.mark.asyncio
 async def test_skill_tool_media_hint_content_keeps_directory_layout(sys_op, temp_dir):
-    """AbilityManager uses data['content'] alone; layout must be embedded there."""
-    from openjiuwen.core.single_agent.ability_manager import AbilityManager
-
+    """The model reads data['content'] alone; layout must be embedded there."""
     skills_root = Path(temp_dir) / "skills"
     skills_root.mkdir(parents=True, exist_ok=True)
     parent = _write_skill(
@@ -368,7 +366,7 @@ async def test_skill_tool_media_hint_content_keeps_directory_layout(sys_op, temp
     assert "## Nested skills" in skill_res.data["content"]
     assert "designer/SKILL.md" in skill_res.data["content"]
 
-    model_text = AbilityManager._build_tool_message_content(skill_res)
+    model_text = skill_tool.render_for_llm(skill_res)
     assert "## Directory layout" in model_text
     assert "designer/SKILL.md" in model_text
     assert SKILL_TOOL_MARKDOWN_IMAGES_HINT in model_text

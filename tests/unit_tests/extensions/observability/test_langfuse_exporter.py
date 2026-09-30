@@ -49,7 +49,6 @@ from openjiuwen.extensions.observability.exporters.transforming import (
 )
 from openjiuwen.extensions.observability.runtime import (
     build_span_exporter,
-    resolve_exporter_selection,
 )
 from openjiuwen.extensions.observability.semconv import (
     OJ_SPAN_INPUT,
@@ -79,8 +78,7 @@ _COLLECTION_MODULES = (
     "openjiuwen/agent_teams/observability/monitor_handler.py",
     "openjiuwen/agent_teams/observability/span_context.py",
     "openjiuwen/agent_teams/observability/rail.py",
-    "openjiuwen/agent_teams/observability/claude/bridge.py",
-    "openjiuwen/agent_teams/observability/codex/bridge.py",
+    "openjiuwen/harness_providers/trajectory.py",
     "openjiuwen/harness/observability/rail.py",
     "openjiuwen/harness/observability/run_span.py",
     "openjiuwen/harness/observability/span_context.py",
@@ -477,31 +475,3 @@ def test_file_and_langfuse_exporters_share_identical_projection(tmp_path: Any) -
         LANGFUSE_SESSION_ID,
     ):
         assert wal_attrs[key] == otel_attrs[key]
-
-
-def test_deprecated_backend_is_translated_once_with_warning() -> None:
-    config = ObservabilityConfig(enabled=True, backend="langfuse")
-    with pytest.warns(DeprecationWarning, match="backend is deprecated"):
-        assert resolve_exporter_selection(config) == "langfuse"
-
-    modern = ObservabilityConfig(enabled=True, exporter="otlp_http")
-    with _no_warnings():
-        assert resolve_exporter_selection(modern) == "otlp_http"
-
-
-class _no_warnings:
-    """Context manager asserting that no warning is emitted."""
-
-    def __init__(self) -> None:
-        self._ctx: Any = None
-
-    def __enter__(self) -> "_no_warnings":
-        import warnings
-
-        self._ctx = warnings.catch_warnings()
-        self._ctx.__enter__()
-        warnings.simplefilter("error")
-        return self
-
-    def __exit__(self, *exc: Any) -> None:
-        self._ctx.__exit__(*exc)

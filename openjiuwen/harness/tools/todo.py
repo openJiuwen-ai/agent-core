@@ -14,6 +14,7 @@ from openjiuwen.core.foundation.tool import Tool, ToolCard, Input, Output
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.tools.base_tool import render_fields
 from openjiuwen.harness.schema.task import (
     STATUS_ICONS,
     TodoItem,
@@ -68,6 +69,14 @@ class TodoTool(Tool):
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
         pass
+
+    def render_for_llm(self, output: Dict[str, Any]) -> str:
+        """Render the ``message`` a create or modify call returns.
+
+        Todo tools return plain dicts rather than ``ToolOutput``; the CLI todo
+        view parses their ``str()`` form, so the dict shape stays unchanged.
+        """
+        return output["message"]
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass
@@ -386,6 +395,14 @@ class TodoListTool(TodoTool):
                 reason=str(e)
             ) from e
 
+    def render_for_llm(self, output: Dict[str, Any]) -> str:
+        """Render one active task per line with its status and dependencies."""
+        lines = []
+        for task in output["tasks"]:
+            depends = f" (depends on: {', '.join(task['depends_on'])})" if task["depends_on"] else ""
+            lines.append(f"- [{task['status']}] {task['id']}: {task['content']}{depends}")
+        return "\n".join(lines) or "No active tasks."
+
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         """Stream response handler (not supported for TodoList tool)"""
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)
@@ -444,6 +461,10 @@ class TodoGetTool(TodoTool):
                 StatusCode.TOOL_TODOS_INVOKE_FAILED,
                 reason=str(e)
             ) from e
+
+    def render_for_llm(self, output: Dict[str, Any]) -> str:
+        """Render the task's fields as ``key: value`` lines."""
+        return render_fields(output["todo"])
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         raise build_error(StatusCode.TOOL_STREAM_NOT_SUPPORTED, card=self._card)

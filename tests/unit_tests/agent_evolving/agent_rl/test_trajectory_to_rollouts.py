@@ -10,7 +10,6 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     write_llm_exchange,
 )
 from openjiuwen.extensions.observability import semconv
-from openjiuwen.agent_evolving.trajectory import legacy_semconv
 
 
 def test_trajectory_to_rollouts_converts_assistant_message_response():
@@ -46,6 +45,48 @@ def test_trajectory_to_rollouts_keeps_dict_response():
     assert rollouts[0].output_response == {"role": "assistant", "content": "ok"}
 
 
+def test_reasoning_is_its_own_field_of_the_response():
+    traj = _trajectory(
+        "e-reasoning",
+        {
+            semconv.GEN_AI_OUTPUT_MESSAGES: json.dumps(
+                [
+                    {
+                        "role": "assistant",
+                        "parts": [
+                            {"type": "reasoning", "content": "think first"},
+                            {"type": "text", "content": "answer"},
+                        ],
+                    }
+                ]
+            ),
+        },
+    )
+
+    rollouts = trajectory_to_rollouts(traj)
+
+    assert rollouts[0].output_response == {
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": "think first",
+    }
+
+
+def test_compaction_requests_are_not_rollouts():
+    traj = _trajectory(
+        "e-compaction",
+        {
+            semconv.OJ_REQUEST_PURPOSE: "compaction",
+            **write_llm_exchange(
+                [{"role": "user", "content": "summarize the conversation"}],
+                [{"role": "assistant", "content": "summary"}],
+            ),
+        },
+    )
+
+    assert trajectory_to_rollouts(traj) == []
+
+
 def test_trajectory_to_rollouts_projects_otlp_token_tools_and_meta_fields():
     tools = [
         {
@@ -76,9 +117,8 @@ def test_trajectory_to_rollouts_projects_otlp_token_tools_and_meta_fields():
                     {"role": "system", "content": "be concise"},
                     {"role": "user", "content": "hi"},
                 ],
-                [{"role": "assistant", "content": "calling lookup"}],
+                [{"role": "assistant", "content": "calling lookup", "tool_calls": response["tool_calls"]}],
             ),
-            legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS: json.dumps(response["tool_calls"]),
             semconv.GEN_AI_TOOL_DEFINITIONS: json.dumps(tools),
             "evolution.rl.prompt_token_ids": [101, 102, 103],
             "evolution.rl.completion_token_ids": [201, 202],
@@ -98,7 +138,12 @@ def test_trajectory_to_rollouts_projects_otlp_token_tools_and_meta_fields():
         ],
         "tools": tools,
     }
-    assert rollout.output_response == response
+    # Standard GenAI output messages carry a tool call as a flat part.
+    assert rollout.output_response == {
+        "role": "assistant",
+        "content": "calling lookup",
+        "tool_calls": [{"id": "call-1", "name": "lookup", "arguments": '{"q": "hi"}'}],
+    }
     assert rollout.input_prompt_ids == [101, 102, 103]
     assert rollout.output_response_ids == [201, 202]
     assert rollout.llm_config == {"temperature": 0.2}

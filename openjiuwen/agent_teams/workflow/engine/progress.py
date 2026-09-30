@@ -42,8 +42,17 @@ class ProgressKind:
     AGENT_STARTED = "agent_started"
     AGENT_COMPLETED = "agent_completed"
     AGENT_FAILED = "agent_failed"
+    #: Live mid-run activity from a single-shot worker (tool calls etc.). Carries
+    #: the node's ``agent_id`` / ``phase`` / ``label`` and a short narration in
+    #: ``message`` so a spectator UI can show what a worker is doing right now.
+    AGENT_ACTIVITY = "agent_activity"
     HUMAN_PROMPT = "human_prompt"
     HUMAN_REPLIED = "human_replied"
+    VERIFY_STARTED = "verify_started"
+    VERIFY_COMPLETED = "verify_completed"
+    #: Back-compat alias for ``VERIFY_COMPLETED`` — old runs in flight after an
+    #: upgrade still replay ``verify_settled``; consumers route both to one handler.
+    VERIFY_SETTLED = "verify_settled"
     LOG = "log"
     WORKFLOW_COMPLETED = "workflow_completed"
     WORKFLOW_FAILED = "workflow_failed"
@@ -62,17 +71,19 @@ class WorkflowProgressEvent:
     * ``description``         — the workflow script's META ``description``
       (``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED``); ``None`` on all other kinds.
     * ``phase``               — set by ``PHASE`` (the new phase title) and echoed
-      on ``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED`` so a consumer
-      can group agents under their phase without tracking state.
+      on ``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED`` /
+      ``AGENT_ACTIVITY`` so a consumer can group agents under their phase
+      without tracking state.
     * ``label``               — the ``agent()`` call's label (``AGENT_*``).
     * ``prompt``              — the agent's rendered prompt (``AGENT_STARTED``).
     * ``model``               — the ``agent(model=...)`` name hint (``AGENT_STARTED``).
     * ``outcome``             — a short preview of the agent's result
       (``AGENT_COMPLETED``); absent on ``AGENT_FAILED`` (use ``message`` instead).
-    * ``message``             — free narration text (``LOG``); a human-readable
-      term on ``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED`` (e.g. "Workflow started",
-      "Workflow completed"), and the error description on ``WORKFLOW_FAILED`` /
-      ``AGENT_FAILED``.
+    * ``message``             — free narration text (``LOG``); a short "what the
+      worker is doing" line such as ``tool: write_file`` (``AGENT_ACTIVITY``); a
+      human-readable term on ``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED`` (e.g.
+      "Workflow started", "Workflow completed"), and the error description on
+      ``WORKFLOW_FAILED`` / ``AGENT_FAILED``.
     * ``phases``              — the static phase plan from the script's ``META``
       dict (``WORKFLOW_STARTED``); ``None`` on all other kinds.
     * ``correlation_id``      — a pending human turn's id (``HUMAN_PROMPT`` /
@@ -93,13 +104,50 @@ class WorkflowProgressEvent:
       else ``kind="agent"`` (``None`` defaults to ``"agent"``); no separate
       ``is_human`` flag is emitted.
     * ``agent_id``            — a deterministic, resume-stable per-node id
-      (``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED``), reused from
-      the journal cache key. A consumer matches ``AGENT_COMPLETED`` /
-      ``AGENT_FAILED`` to its node by this id — the only sound way to
+      (``AGENT_STARTED`` / ``AGENT_COMPLETED`` / ``AGENT_FAILED`` /
+      ``AGENT_ACTIVITY``), reused from the journal cache key. A consumer matches
+      terminal / activity events to its node by this id — the only sound way to
       disambiguate same-label nodes in for-loops, multi-turn sessions, and
       ``parallel``.
     * ``answer``              — the person's raw reply text (``HUMAN_REPLIED``).
       Absent on all other kinds.
+    * ``parent_session_id`` — the parent session's avatar member name carried
+      by a fork child's ``AGENT_STARTED`` turns (``node_type="agent_session_fork"``),
+      so a UI can draw the parent→child fork edge. Unique per session (unlike
+      the label, which a fork inherits by default), so chained and same-label
+      forks resolve to the exact parent. ``None`` on non-fork nodes.
+    * ``member_name`` — the session's avatar member name on session-node
+      ``AGENT_STARTED`` turns (``agent_session`` / ``agent_session_fork`` /
+      ``human_session``); constant across a session's turns. The join key a
+      UI uses to map ``parent_session_id`` back to the parent session card.
+      ``None`` on one-shot ``agent()`` / ``human()`` turns.
+    * ``verify_reviewers`` / ``verify_threshold`` — the reviewer count and the
+      score threshold (``VERIFY_STARTED`` / ``VERIFY_COMPLETED``).
+    * ``verify_reviewer_labels`` — the reviewers' unique label roster
+      (``VERIFY_STARTED``): one label per reviewer, in fan-out order. Labels are
+      normalized inside ``verify()`` to carry the round's base label as a
+      prefix, so they are globally unique across rounds and match both the
+      reviewer agent nodes' labels and the settled votes' ``name``.
+    * ``verify_reviewer_roles`` — the reviewers' business role roster
+      (``VERIFY_STARTED``), same fan-out order as ``verify_reviewer_labels``:
+      ``verifier`` / ``inspector`` / ``challenger``. Display-only — judgement
+      reads the vote ``kind``, never a role.
+    * ``verify_verdict`` / ``verify_votes`` — the round verdict (``"pass"`` /
+      ``"fail"`` / ``None`` = undecided) and per-reviewer vote dicts
+      ``{name, agent_id, kind, role, decision, score, feedback, voted}``
+      (``VERIFY_COMPLETED``); ``agent_id`` is the reviewer ``agent()`` call's
+      deterministic node id — a second, name-independent join key. The complete
+      round output (``VerifyResult`` JSON) rides the generic ``outcome`` field.
+    * ``verify_id`` — the verify() call's own node id (``VERIFY_STARTED`` /
+      ``VERIFY_COMPLETED``), the verify analog of an agent node's ``agent_id``:
+      the structural call position. Concurrent same-label rounds stay
+      distinct by it; a consumer pairs started/completed by id, never by label.
+    * ``cache_tokens`` — prompt-cache-hit tokens of the call
+      (``AGENT_COMPLETED``), from ``AgentResult.cache_tokens``; ``None`` when
+      the provider reported none. A subset of ``tokens``, never billed twice.
+    * ``token_input`` / ``token_output`` — the prompt / completion split of
+      ``tokens`` for display (``AGENT_COMPLETED``); ``None`` when the provider
+      reported no split.
     """
 
     kind: str
@@ -124,6 +172,18 @@ class WorkflowProgressEvent:
     nested_phase: str | None = None
     parent_phase: str | None = None
     script_path: str | None = None
+    parent_session_id: str | None = None
+    member_name: str | None = None
+    verify_reviewers: int | None = None
+    verify_verdict: str | None = None
+    verify_threshold: float | None = None
+    verify_votes: list[dict] | None = None
+    verify_reviewer_labels: list[str] | None = None
+    verify_reviewer_roles: list[str | None] | None = None
+    verify_id: str | None = None
+    cache_tokens: int | None = None
+    token_input: int | None = None
+    token_output: int | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has

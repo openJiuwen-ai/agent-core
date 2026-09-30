@@ -153,6 +153,7 @@ class EventBus:
         if wake_callback is not None:
             self._wake_callback = wake_callback
         team_logger.info("EventBus[{}] starting", self._role.value)
+        self._drop_stale_shutdown()
         self._running = True
         self._loop_task = asyncio.create_task(self._run_loop())
         self._start_poll_tasks()
@@ -247,6 +248,28 @@ class EventBus:
     # ------------------------------------------------------
     # Internal
     # ------------------------------------------------------
+
+    def _drop_stale_shutdown(self) -> None:
+        """Remove SHUTDOWN sentinels a previous ``stop`` left in the queue.
+
+        The loop also leaves on ``_running = False``, so when ``stop`` lands
+        while a callback is running (or between two 1s polls of the queue)
+        the sentinel is never consumed. A restarted bus would read it first
+        and exit, and every later event would sit in the queue unhandled.
+        Other queued events are kept, in order.
+        """
+        kept: list[CoordinationEvent] = []
+        while True:
+            try:
+                event = self._event_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._event_queue.task_done()
+            if isinstance(event, InnerEventMessage) and event.event_type == InnerEventType.SHUTDOWN:
+                continue
+            kept.append(event)
+        for event in kept:
+            self._event_queue.put_nowait(event)
 
     def _start_poll_tasks(self) -> None:
         """Spawn the periodic mailbox/task poll loops, if enabled.

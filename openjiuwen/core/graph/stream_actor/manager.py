@@ -113,7 +113,7 @@ class ActorManager:
                 await actor.send({producer_id: message_content}, ability, first_frame=first_frame,
                                  producer_id=producer_id)
         else:
-            logger.warning(
+            logger.debug(
                 f"Discard chunk send from [{producer_id}] to none consumer",
                 event_type=LogEventType.GRAPH_SEND_STREAM_CHUNK,
                 chunk=message_content

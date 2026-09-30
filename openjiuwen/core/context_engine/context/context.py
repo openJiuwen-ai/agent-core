@@ -320,7 +320,7 @@ class SessionModelContext(ModelContext):
             self._message_buffer.add_back(messages_to_add)
             if messages_to_add:
                 self._mark_message_changed("append")
-                ContextUtils.invalidate_usage_metadata(retained_messages)
+                self._invalidate_usage_if_append_changed_retained_prefix(retained_messages)
             return messages_to_add
 
         async with self._guarded_processor_lock("add_messages"):
@@ -334,8 +334,42 @@ class SessionModelContext(ModelContext):
             self._message_buffer.add_back(messages_to_add)
             if messages_to_add:
                 self._mark_message_changed("append")
-                ContextUtils.invalidate_usage_metadata(retained_messages)
+                self._invalidate_usage_if_append_changed_retained_prefix(retained_messages)
             return messages_to_add
+
+    def _invalidate_usage_if_append_changed_retained_prefix(
+        self,
+        retained_messages_before_append: List[BaseMessage],
+    ) -> None:
+        """Invalidate usage only when an append also changed old context.
+
+        A provider usage record is a cumulative baseline for the messages that
+        were present at the corresponding model call.  Pure append operations
+        are safe because compressor counters add the messages after that
+        assistant as a tail estimate.  Context processors may rewrite the
+        existing buffer, and ``max_context_message_num`` may roll the buffer
+        forward after an append; both cases make the old cumulative baseline
+        invalid and must retain the stale marker.
+        """
+        current_messages = self._message_buffer.get_back()
+        if not self._retained_message_prefix_preserved(
+            retained_messages_before_append,
+            current_messages,
+        ):
+            ContextUtils.invalidate_usage_metadata(current_messages)
+
+    @staticmethod
+    def _retained_message_prefix_preserved(
+        previous_messages: List[BaseMessage],
+        current_messages: List[BaseMessage],
+    ) -> bool:
+        """Return whether the old retained messages remain an unchanged prefix."""
+        if len(current_messages) < len(previous_messages):
+            return False
+        return all(
+            current is previous
+            for current, previous in zip(current_messages, previous_messages)
+        )
 
     async def compress_context(
         self,

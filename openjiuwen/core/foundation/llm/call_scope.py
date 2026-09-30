@@ -10,13 +10,11 @@ chunk, the output event and the error event of one request all report the
 same id, and no two concurrent requests ever share one.
 
 Why the id is bound here and not inside the callback handlers:
-``Model.stream`` drives the underlying async generator through
-``asyncio.wait_for``, which runs each ``__anext__`` in its own task. A task
-copies the context, so a ``ContextVar`` bound *inside* a chunk callback is
-discarded the moment that chunk is delivered, and the next chunk starts from
-the context that existed before the stream began. Binding the id in the
-calling frame — before the first ``__anext__`` — puts it in exactly that
-context, which every per-chunk task then inherits.
+how each ``__anext__`` is scheduled is an implementation detail of
+``Model.stream`` (it used to run each one in its own ``wait_for`` task, which
+copies the context and discards anything a chunk callback bound). Binding the
+id in the calling frame — before the first ``__anext__`` — makes it visible
+to every chunk, the output event and the error event either way.
 """
 
 from __future__ import annotations

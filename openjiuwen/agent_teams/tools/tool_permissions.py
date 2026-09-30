@@ -17,6 +17,7 @@ LEADER_ONLY_TOOLS: set[str] = {
     "spawn_passive_human", # Spawn a passive human member, no avatar (HITT)
     "spawn_bridge_agent", # Spawn a bridge to a remote agent
     "spawn_external_cli", # Spawn a third-party CLI agent teammate
+    "set_member_model",   # Switch an external CLI member's built-in model / effort
     "shutdown_member",    # Shutdown a team member
     "approve_plan",       # Approve or reject a member's plan
     "approve_tool",       # Approve or reject a teammate tool call

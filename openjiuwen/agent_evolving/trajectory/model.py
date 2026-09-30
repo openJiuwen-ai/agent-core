@@ -134,12 +134,7 @@ class Trajectory:
 
     __slots__ = ("_payload", "_sealed")
 
-    def __init__(
-        self,
-        payload: Mapping[str, object],
-        *,
-        _allow_missing_session: bool = False,
-    ) -> None:
+    def __init__(self, payload: Mapping[str, object]) -> None:
         if not isinstance(payload, Mapping):
             raise TypeError("trajectory payload must be a mapping")
 
@@ -153,11 +148,9 @@ class Trajectory:
         if not attributes.get(TRAJECTORY_ID):
             raise ValueError("trajectory payload requires a non-empty trajectory_id")
 
-        if not _allow_missing_session:
-            has_team_or_member = any(key in attributes for key in (TEAM_ID, MEMBER_ID))
-            has_session = SESSION_ID in attributes
-            if has_team_or_member and not has_session:
-                raise ValueError("team_id/member_id requires session_id")
+        has_team_or_member = any(key in attributes for key in (TEAM_ID, MEMBER_ID))
+        if has_team_or_member and SESSION_ID not in attributes:
+            raise ValueError("team_id/member_id requires session_id")
 
         object.__setattr__(self, "_payload", _copy_json(payload))
         object.__setattr__(self, "_sealed", True)
@@ -167,12 +160,6 @@ class Trajectory:
         """Create a trajectory while taking ownership of a detached payload."""
 
         return cls(payload)
-
-    @classmethod
-    def from_historical_otlp(cls, payload: Mapping[str, object]) -> "Trajectory":
-        """Read a historical payload whose session identity may be absent."""
-
-        return cls(payload, _allow_missing_session=True)
 
     def to_otlp(self) -> dict[str, object]:
         """Return an independent JSON-like copy of the canonical payload."""

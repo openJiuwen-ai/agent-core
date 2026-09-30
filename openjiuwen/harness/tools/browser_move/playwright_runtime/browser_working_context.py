@@ -29,13 +29,17 @@ _ERROR_PREFIXES = (
 )
 _WORKING_CONTEXT_INSTRUCTIONS = {
     "en": (
-        "Runtime-owned browser context. Requirements, evidence, blockers, status, and recent semantic "
-        "changes are authoritative. Choose the next strategy or answer concisely; do not echo this "
-        "context or repeat an action that made no progress."
+        "Runtime-owned execution context. Inferred fields are extraction hints, not extra user requirements. "
+        "Use source observations to answer ordinary page questions even when field mapping is incomplete. "
+        "Never invent missing values, substitute shop ratings for product ratings, or merge comparison variants. "
+        "Respect actual blockers and terminal status; stop when the user's question is answered; "
+        "do not echo this context or maintain a second progress object."
     ),
     "cn": (
-        "这是 runtime 维护的浏览器上下文。请求字段、证据、阻断项、状态和最近语义变化均为权威信息。"
-        "请选择下一步策略或简洁作答；不要复述上下文，也不要重复没有产生进展的动作。"
+        "这是 runtime 维护的执行上下文。推断字段是提取提示，不是额外用户要求。"
+        "普通页面问答可根据有来源的已读原文作答，不必为字段映射不完整反复验证。"
+        "不得编造缺失值、用店铺评分替代商品评分或混合对比项；遵守实际阻断和终态，回答充分即可结束。"
+        "不要复述上下文或维护第二份进度对象。"
     ),
 }
 _EPHEMERAL_USER_MESSAGE_NAMES = frozenset(
@@ -496,12 +500,14 @@ class BrowserWorkingContextStore:
                 "status": task.get("status", "in_progress"),
                 "current_phase": task.get("current_phase"),
                 "requirements": {
+                    "source": requirements.get("source", "explicit"),
                     "missing": list(requirements.get("missing") or [])[:12],
                     "unavailable": list(requirements.get("unavailable") or [])[:8],
                     "evidence": list(requirements.get("evidence") or [])[-6:],
                 },
                 "blockers": list(task.get("blockers") or [])[:6],
                 "last_page": task.get("last_page") or {},
+                "observations": list(task.get("observations") or [])[-1:],
             },
             "runtime_directive": payload.get("runtime_directive", "continue"),
             "recent_actions": list(payload.get("recent_actions") or [])[-2:],
@@ -576,6 +582,10 @@ class BrowserWorkingContextStore:
             state.get("replan_trial_pending")
             and (progress.get("observable_progress") is True or progress_name == "progress")
         )
+        recent = state.get("recent_actions") or []
+        if recent and recent[-1].get("semantic_delta") == "evidence_added":
+            recovered = True
+            recent[-1]["semantic_delta"] = "progress"
         recovered = cls._reconcile_observed_action(state, progress) or recovered
         cls._apply_replan_observation(state, progress, recovered=recovered)
         session.update_state({BROWSER_TASK_STATE_KEY: state})
@@ -1050,11 +1060,18 @@ class BrowserWorkingContextStore:
                 "limit": int(current_phase_state.get("budget") or 0),
             },
             "requirements": {
+                "source": state.get("requirements_source", "explicit"),
                 "requested": required_slots,
                 "missing": missing_slots,
                 "unavailable": unavailable_slots,
                 "evidence": evidence_slots,
             },
+            "observations": [
+                {"source": item.get("source"), "generation_id": item.get("generation_id"),
+                 "raw_text": _bounded_text(item.get("raw_text"), 1_500)}
+                for item in state.get("structured_evidence") or []
+                if isinstance(item, dict) and item.get("kind") == "page_observation"
+            ][-2:],
             "blockers": list(state.get("blockers") or [])[:8],
             "replan_required": bool(state.get("replan_required")),
             "replan_count": int(state.get("replan_count") or 0),

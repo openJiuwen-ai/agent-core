@@ -325,10 +325,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             epoch_start_refs = current_refs
             epoch_start_score = _number(state.get("best_score"))
             epoch_start_retained_case_ids = set(working_retained_case_ids)
-            prior_eval_refs = [
-                str(state.get("baseline_eval_ref_path") or ""),
-                *[str(item["eval_ref_path"]) for item in state["epoch_checkpoints"]],
-            ]
+            prior_eval_refs = _prior_eval_refs_from_state(state)
             # Retention protects historical successes at promotion; it is not a
             # permanent exemption from analysis after a matching replay fails.
             source_selection_refs = current_refs
@@ -758,6 +755,58 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 _write_yaml_atomic(state_path, state)
                 await emit(on_event, progress_event(state, total_iterations=total_iterations))
 
+            epoch_provisional_gates = [
+                gate
+                for gate in state["candidate_gates"]
+                if int(gate.get("epoch", 0) or 0) == epoch and gate.get("status") == "provisional"
+            ]
+            provisional_target_case_ids: set[str] = set()
+            for gate in epoch_provisional_gates:
+                provisional_target_case_ids.update(
+                    str(case_id) for case_id in gate.get("target_case_ids", []) if str(case_id)
+                )
+            best_score = _number(state.get("best_score"))
+            previous_best_eval_ref = str(state.get("best_eval_ref_path", "") or "")
+            if best_score is not None and not epoch_provisional_gates:
+                checkpoint = {
+                    "epoch": epoch,
+                    "score": None,
+                    "eval_ref_path": "",
+                    "harness_refs_path": epoch_start_refs,
+                    "evaluation_input_mode": "not_evaluated",
+                    "status": "unchanged",
+                    "previous_best_score": best_score,
+                    "previous_best_eval_ref_path": previous_best_eval_ref,
+                    "regressed_best_case_ids": [],
+                    "failed_retention_case_ids": [],
+                    "failed_case_ids": [],
+                    "failed_target_case_ids": [],
+                    "failed_machine_evidence": [],
+                    "error_case_ids": [],
+                    "retained_candidate_action_ids": [],
+                    "removed_candidate_action_ids": [],
+                    "selected_harness_refs_path": epoch_start_refs,
+                    "post_checkpoint_replay_performed": False,
+                    "promotion_applied": False,
+                    "promotion_reason": "no_provisional_harness_change",
+                    "full_evaluation_skipped_reason": "no_retained_harness_change",
+                    "noop_initial_score_seed": False,
+                    "before_harness_refs_path": epoch_start_refs,
+                }
+                state["epoch_checkpoints"].append(checkpoint)
+                current_refs = epoch_start_refs
+                state["best_score"] = best_score
+                state["best_harness_refs_path"] = epoch_start_refs
+                state["retained_case_ids"] = sorted(epoch_start_retained_case_ids)
+                state["current_harness_refs_path"] = epoch_start_refs
+                state["working_harness_refs_path"] = epoch_start_refs
+                state["active_epoch"] = 0
+                _refresh_optimization_experience(state, output_dir)
+                _write_yaml_atomic(state_path, state)
+                await emit(on_event, epoch_node_event(state, checkpoint))
+                await emit(on_event, progress_event(state, total_iterations=total_iterations))
+                continue
+
             full_eval_ref = await self._evaluate(
                 cases=all_cases,
                 harness_refs_path=current_refs,
@@ -768,16 +817,6 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 on_event=on_event,
             )
             full_score = _eval_score(full_eval_ref)
-            epoch_provisional_gates = [
-                gate
-                for gate in state["candidate_gates"]
-                if int(gate.get("epoch", 0) or 0) == epoch and gate.get("status") == "provisional"
-            ]
-            provisional_target_case_ids = set()
-            for gate in epoch_provisional_gates:
-                provisional_target_case_ids.update(
-                    str(case_id) for case_id in gate.get("target_case_ids", []) if str(case_id)
-                )
             checkpoint = {
                 "epoch": epoch,
                 "score": full_score,
@@ -785,11 +824,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 "harness_refs_path": current_refs,
                 "evaluation_input_mode": "original_task",
             }
-            best_score = _number(state.get("best_score"))
             full_case_scores = _eval_case_scores(full_eval_ref)
             full_passing_case_ids = _passing_case_ids(full_eval_ref)
             full_failed_case_ids = sorted(set(full_case_scores) - full_passing_case_ids)
-            previous_best_eval_ref = str(state.get("best_eval_ref_path", "") or "")
             previous_best_case_scores = _eval_case_scores(previous_best_eval_ref) if previous_best_eval_ref else {}
             regressed_best_case_ids = []
             for case_id in state.get("retained_case_ids", []):
@@ -1725,6 +1762,16 @@ def _result_from_state(
         published_harness_refs_path=str(state.get("published_harness_refs_path", "")),
         best_score=_number(state.get("best_score")),
     )
+
+
+def _prior_eval_refs_from_state(state: dict[str, Any]) -> list[str]:
+    refs = [str(state.get("baseline_eval_ref_path") or "")]
+    refs.extend(
+        str(item.get("eval_ref_path") or "")
+        for item in state.get("epoch_checkpoints", [])
+        if isinstance(item, dict)
+    )
+    return [ref for ref in refs if ref]
 
 
 def _load_or_create_state(

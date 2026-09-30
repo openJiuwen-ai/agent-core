@@ -99,7 +99,7 @@ DeepAgent 内置工具实现。所有工具通过 Rails 或 `create_deep_agent()
 class ToolOutput: ...
 ```
 
-工具输出基类，定义工具返回结果的标准格式。
+工具输出基类，定义工具返回结果的标准格式（定义于 `openjiuwen.core.foundation.tool`，此处再导出）。模型看到的文本由工具的 `render_for_llm` 生成：默认成功时取 `data["content"]`、失败时取 `error`，各工具可覆写以定制。
 
 ---
 

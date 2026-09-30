@@ -269,6 +269,30 @@ async def test_resume_paused_round_cold_path_consumes_the_marker():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.parametrize("role", [TeamRole.TEAMMATE, TeamRole.EXTERNAL_CLI])
+async def test_resume_paused_round_cold_path_is_leader_only(role: TeamRole):
+    """A non-leader must not replay the leader's marker from the shared team bucket.
+
+    Every member of a team reads the same session bucket; an external CLI
+    harness without pause/resume support crashed on the leader's marker.
+    """
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.role = role
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.IDLE
+    merge_pending_resume(session, "test-team", {"query": "the leader's task"})
+    kernel = CoordinationKernel(host)
+
+    await kernel.resume_paused_round()
+
+    host.stream_controller.resume_agent.assert_not_awaited()
+    # Left intact for the leader, which is the only consumer.
+    assert read_pending_resume(session, "test-team") == {"query": "the leader's task"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_resume_paused_round_warm_path_ignores_the_marker():
     """A still-PAUSED harness resumes from memory, then drops the marker."""
     session = _StubSession()
@@ -415,3 +439,154 @@ async def test_finalize_round_does_not_extract_memory():
     host.stream_controller.stop.assert_awaited_once()
     host.resources.harness.stop.assert_awaited_once()
     assert host.stream_controller.stream_queue is None
+
+
+class _RosterBackend:
+    """Team backend double holding member statuses in memory."""
+
+    def __init__(self, statuses: dict[str, str]) -> None:
+        self.statuses = dict(statuses)
+        self.members_paused = False
+        self.db = SimpleNamespace(member=SimpleNamespace(update_member_status=self._update))
+
+    async def _update(self, member_name: str, team_name: str, status: str) -> None:
+        self.statuses[member_name] = status
+
+    async def list_member_roster(self) -> list:
+        return [SimpleNamespace(member_name=n, status=s) for n, s in self.statuses.items()]
+
+
+def _members_host(statuses: dict[str, str], spawned: list[str]) -> SimpleNamespace:
+    host = _make_kernel_host()
+    backend = _RosterBackend(statuses)
+    host.infra.team_backend = backend
+    handles = {name: object() for name in spawned}
+
+    async def _shutdown_all_handles() -> None:
+        handles.clear()
+
+    async def _restart_teammate(member_name: str) -> bool:
+        handles[member_name] = object()
+        return True
+
+    host.spawn_manager = SimpleNamespace(
+        spawned_handles=handles,
+        cancel_recovery_tasks=AsyncMock(),
+        shutdown_all_handles=AsyncMock(side_effect=_shutdown_all_handles),
+        has_live_handle=lambda name: name in handles,
+        restart_teammate=AsyncMock(side_effect=_restart_teammate),
+    )
+    return host
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_members_keeps_the_leader_running():
+    """pause_members parks the teammates only; the leader round stays live."""
+    host = _members_host({"leader-1": "busy", "writer": "busy", "reviewer": "unstarted"}, ["writer"])
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    assert await kernel.pause_members() is True
+
+    assert kernel.lifecycle_state == "running"
+    assert kernel.members_paused is True
+    host.stream_controller.pause_agent.assert_not_awaited()
+    host.stream_controller.close_stream.assert_not_called()
+    host.spawn_manager.shutdown_all_handles.assert_awaited_once()
+    backend = host.infra.team_backend
+    assert backend.members_paused is True
+    assert backend.statuses == {"leader-1": "busy", "writer": "paused", "reviewer": "unstarted"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_resume_members_restarts_only_the_paused_members():
+    """resume_members restarts the members it paused and lifts the guard."""
+    host = _members_host({"leader-1": "busy", "writer": "busy", "reviewer": "unstarted"}, ["writer"])
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    await kernel.pause_members()
+
+    assert await kernel.resume_members() == ["writer"]
+
+    assert kernel.members_paused is False
+    assert host.infra.team_backend.members_paused is False
+    assert host.infra.team_backend.statuses["writer"] == "restarting"
+    host.spawn_manager.restart_teammate.assert_awaited_once_with("writer")
+    assert await kernel.resume_members() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_members_is_a_noop_unless_the_leader_is_running():
+    """A paused or stopped kernel has no live members to pause."""
+    host = _members_host({"leader-1": "ready", "writer": "busy"}, ["writer"])
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "paused"
+
+    assert await kernel.pause_members() is False
+    host.spawn_manager.shutdown_all_handles.assert_not_awaited()
+    assert host.infra.team_backend.members_paused is False
+
+
+def _paused_team_kernel() -> tuple[CoordinationKernel, SimpleNamespace, list[bool]]:
+    """A paused leader kernel over a roster whose teammate a pause parked."""
+    host = _members_host({"leader-1": "ready", "writer": "paused", "gone": "shutdown"}, [])
+    session = _StubSession()
+    host.session_manager.team_session = session
+    kernel = _arm_kernel_for_start(host)
+    backend = host.infra.team_backend
+    backend.team_name = "test-team"
+    backend.db.initialize = AsyncMock()
+    backend.db.team = SimpleNamespace(get_team=AsyncMock(return_value=object()))
+    guard_at_recovery: list[bool] = []
+
+    async def _recover_team() -> list[str]:
+        guard_at_recovery.append(backend.members_paused)
+        return []
+
+    host.recover_team = AsyncMock(side_effect=_recover_team)
+    kernel._lifecycle_state = "paused"
+    return kernel, host, guard_at_recovery
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_held_start_keeps_paused_members_down_until_resume_members():
+    """A held start brings the leader back but not the teammates."""
+    kernel, host, guard_at_recovery = _paused_team_kernel()
+
+    assert kernel.hold_members_on_start() is True
+    await kernel.start(host.session_manager.team_session)
+
+    assert guard_at_recovery == [True]
+    assert kernel.lifecycle_state == "running"
+    assert kernel.members_paused is True
+    assert await kernel.resume_members() == ["writer"]
+    host.spawn_manager.restart_teammate.assert_awaited_once_with("writer")
+    assert host.infra.team_backend.members_paused is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_plain_start_recovers_members_and_the_hold_is_one_shot():
+    """Without a hold, start recovers the roster as before."""
+    kernel, host, guard_at_recovery = _paused_team_kernel()
+
+    await kernel.start(host.session_manager.team_session)
+
+    assert guard_at_recovery == [False]
+    assert kernel.members_paused is False
+    assert kernel.hold_members_on_start() is False  # running, not paused
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_hold_members_on_start_requires_a_paused_kernel():
+    """Only a paused leader can be asked to hold its members on start."""
+    host = _members_host({"leader-1": "busy", "writer": "busy"}, ["writer"])
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    assert kernel.hold_members_on_start() is False

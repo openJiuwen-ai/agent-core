@@ -1,4 +1,5 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Worktree tools for entering and exiting git worktree sessions.
 
@@ -20,7 +21,7 @@ from openjiuwen.core.common.exception.errors import ValidationError
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation.cwd import get_workspace
 from openjiuwen.harness.prompts.tools import build_tool_card
-from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.base_tool import ToolOutput, render_fields
 from openjiuwen.harness.tools.worktree.git import GitError
 from openjiuwen.harness.tools.worktree.session import (
     get_current_session,
@@ -39,6 +40,19 @@ class _WorktreeToolBase(Tool):
     Worktree operations are inherently single-shot lifecycle calls,
     so streaming is not supported.
     """
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the lifecycle message, followed by any discarded work counts."""
+        if not output.success:
+            return super().render_for_llm(output)
+        data = output.data
+        discarded = render_fields(
+            {
+                "discarded_files": data.get("discarded_files"),
+                "discarded_commits": data.get("discarded_commits"),
+            }
+        )
+        return f"{data['message']}\n{discarded}" if discarded else data["message"]
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
         """Streaming is not supported for worktree tools."""

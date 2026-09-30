@@ -291,22 +291,22 @@ class TestCheckpointTool:
         agent_team.publish_checkpoint_created.assert_not_awaited()
 
     @pytest.mark.level0
-    def test_map_result_success(self, agent_team):
+    def test_render_for_llm_success(self, agent_team):
         t = make_translator("cn")
         tool = CheckpointTool(agent_team, t)
         out = ToolOutput(
             success=True,
             data={"name": "cp", "message_count": 42},
         )
-        text = tool.map_result(out)
+        text = tool.render_for_llm(out)
         assert "cp" in text
 
     @pytest.mark.level1
-    def test_map_result_failure(self, agent_team):
+    def test_render_for_llm_failure(self, agent_team):
         t = make_translator("cn")
         tool = CheckpointTool(agent_team, t)
         out = ToolOutput(success=False, error="boom")
-        text = tool.map_result(out)
+        text = tool.render_for_llm(out)
         assert "boom" in text or "Failed" in text
 
 

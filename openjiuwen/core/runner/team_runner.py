@@ -41,6 +41,7 @@ Plus one method:
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
@@ -192,10 +193,13 @@ class _TeamRunnerMixin:
                         action.reason or "",
                     )
                     return None
-                self._maybe_attach_observability(activation.agent)
+                self._maybe_attach_observability(activation.agent, activation.session.get_session_id())
                 return await activation.agent.invoke(inputs, session=activation.session)
             finally:
-                self._maybe_finalize_trace(team_name_for_finally)
+                self._maybe_finalize_trace(
+                    team_name_for_finally,
+                    blocking_flush=not self._consume_voice_pause(team_name_for_finally),
+                )
                 try:
                     await self._get_team_runtime_manager().finalize(
                         team_name=spec.team_name,
@@ -266,7 +270,7 @@ class _TeamRunnerMixin:
                 if stream_logger is not None:
                     stream_logger.feed(ready_chunk)
                 yield ready_chunk
-                self._maybe_attach_observability(activation.agent)
+                self._maybe_attach_observability(activation.agent, activation.session.get_session_id())
                 if background_task_controller is not None:
                     # Attach the embedder's pause/resume control surface to the
                     # leader brain; SwarmflowTool reads it to register run handles.
@@ -278,7 +282,10 @@ class _TeamRunnerMixin:
             finally:
                 if stream_logger is not None:
                     stream_logger.flush()
-                self._maybe_finalize_trace(team_name_for_finally)
+                self._maybe_finalize_trace(
+                    team_name_for_finally,
+                    blocking_flush=not self._consume_voice_pause(team_name_for_finally),
+                )
                 try:
                     await self._get_team_runtime_manager().finalize(
                         team_name=spec.team_name,
@@ -421,8 +428,11 @@ class _TeamRunnerMixin:
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        voice: bool = False,
     ):
         """Deliver an interact payload to an active TeamAgent runtime.
+
+        ``voice=True`` marks a voice follow-up (see ``TeamRuntimeManager.interact``).
 
         ``payload`` is either an ``InteractPayload`` (one of
         ``GodViewMessage`` / ``OperatorMessage`` / ``HumanAgentMessage``)
@@ -438,11 +448,107 @@ class _TeamRunnerMixin:
         if team_name is None or session_id is None:
             return DeliverResult.failure("missing_target")
         with self._bind_interact_team_session(session_id):
+            # An interact wakes a member the same way a run does, and it is the
+            # only thing that happens when the user addresses one directly. The
+            # team root belongs to the team, not to the streaming run that
+            # usually opens it: without it here, everything the woken member
+            # does goes unrecorded.
+            await self._maybe_attach_interact_observability(
+                team_name=team_name,
+                session_id=session_id,
+            )
             return await self._get_team_runtime_manager().interact(
                 payload,
                 team_name=team_name,
                 session_id=session_id,
+                voice=voice,
             )
+
+    async def post_group_message(
+        self, content: str, *, team_name: str, session_id: str, client_message_id: str,
+        mentions: list[str] | None = None, sender: str = "user", attachments: list[dict] | None = None,
+        db_config=None, workspace_path: str | None = None,
+    ):
+        """Persist public group input; offline callers supply the existing team's DB config.
+
+        A queued delivery is not a model acknowledgement. The host starts or
+        resumes the existing Runner lifecycle when a dormant group is mentioned.
+        """
+        manager = self._get_team_runtime_manager()
+        entry = await manager.pool.get(team_name)
+        with self._bind_interact_team_session(session_id):
+            if entry is not None and entry.current_session_id == session_id:
+                return await entry.agent.team_backend.append_group_message(
+                    sender, content, client_message_id=client_message_id,
+                    mentions=mentions or (), attachments=attachments or (),
+                )
+            if db_config is None:
+                raise ValueError("Offline group messages require db_config for the registered core team")
+            from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+            from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+            from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+
+            conversation = await asyncio.to_thread(
+                GroupConversationLog, team_name, session_id, workspace_path=workspace_path,
+            )
+            message_manager = TeamMessageManager(team_name, sender, get_shared_db(db_config), None)
+            return await conversation.post(
+                message_manager, sender, content, client_message_id=client_message_id,
+                mentions=mentions or (), attachments=attachments or (),
+            )
+
+    async def post_member_input(
+        self, content: str, *, team_name: str, session_id: str, member_name: str, db_config=None,
+    ) -> dict:
+        """Save host input to the existing member mailbox, even when the team is offline.
+
+        ``queued`` means saved in the mailbox, not acknowledged by the model.
+        The host starts or resumes an offline team through the normal lifecycle.
+        """
+        from openjiuwen.agent_teams.schema.status import MEMBER_DEPARTED_STATUSES
+        from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
+
+        for name, value in (("team_name", team_name), ("session_id", session_id), ("member_name", member_name)):
+            if not isinstance(value, str) or not value.strip() or len(value) > 255:
+                raise ValueError(f"{name} must be a nonempty string of at most 255 characters")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError("Member input must be nonempty text")
+        entry = await self._get_team_runtime_manager().pool.get(team_name)
+        if entry is not None and entry.current_session_id == session_id:
+            message_manager = entry.agent.team_backend.message_manager
+        else:
+            if db_config is None:
+                raise ValueError("Offline member input requires db_config for the registered core team")
+            from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+
+            message_manager = TeamMessageManager(team_name, "user", get_shared_db(db_config), None)
+        with self._bind_interact_team_session(session_id):
+            db = message_manager.db
+            await db.initialize()
+            member = await db.member.get_member(member_name, team_name)
+            if member is None or member.status in MEMBER_DEPARTED_STATUSES:
+                raise ValueError(f"Unknown or departed member: {member_name}")
+            if member.role == "passive_human":
+                raise ValueError("Member input requires an agent recipient")
+            await db.create_cur_session_tables()
+            message_id = await message_manager.send_message(content, member_name, from_member_name="user")
+            if message_id is None:
+                raise RuntimeError(f"Could not queue input for {member_name}")
+            return {"message_id": message_id, "status": "queued"}
+
+    async def _maybe_attach_interact_observability(self, *, team_name: str, session_id: str) -> None:
+        """Open the team root for an interact that reaches a live runtime.
+
+        The streaming run closes the root in its ``finally``; an interact never
+        owns a run, so it only ever adds a root the next run finalizes.
+        """
+        try:
+            entry = await self._get_team_runtime_manager().pool.get(team_name)
+            if entry is None or entry.current_session_id != session_id:
+                return
+            self._maybe_attach_observability(entry.agent, session_id)
+        except Exception as exc:
+            logger.debug("interact observability attach skipped: {}", exc)
 
     async def register_human_agent_inbound(
         self,
@@ -475,9 +581,51 @@ class _TeamRunnerMixin:
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        voice: bool = False,
     ) -> bool:
-        """Pause the active TeamAgent runtime for ``(team_name, session_id)``."""
-        return await self._get_team_runtime_manager().pause(team_name=team_name, session_id=session_id)
+        """Pause the active TeamAgent runtime for ``(team_name, session_id)``.
+
+        ``voice=True`` marks a voice barge-in (see ``TeamRuntimeManager.pause``).
+        """
+        return await self._get_team_runtime_manager().pause(
+            team_name=team_name, session_id=session_id, voice=voice
+        )
+
+    async def pause_agent_team_members(self, *, team_name: str, session_id: str) -> bool:
+        """Pause a running team's members; the leader keeps running."""
+        return await self._get_team_runtime_manager().pause_members(
+            team_name=team_name, session_id=session_id
+        )
+
+    async def resume_agent_team_members(self, *, team_name: str, session_id: str) -> list[str]:
+        """Restart the members ``pause_agent_team_members`` held down."""
+        return await self._get_team_runtime_manager().resume_members(
+            team_name=team_name, session_id=session_id
+        )
+
+    async def agent_team_members_paused(self, *, team_name: str, session_id: str) -> bool:
+        """Whether a team's members are held down by a members-only pause."""
+        return await self._get_team_runtime_manager().members_paused(
+            team_name=team_name, session_id=session_id
+        )
+
+    async def hold_agent_team_members_on_start(self, *, team_name: str, session_id: str) -> bool:
+        """Keep a paused team's members down when its leader next resumes."""
+        return await self._get_team_runtime_manager().hold_members_on_start(
+            team_name=team_name, session_id=session_id
+        )
+
+    async def add_agent_team_leader_note(
+        self,
+        text: str,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> bool:
+        """Queue a user note for the leader's next round (see ``TeamRuntimeManager.add_leader_note``)."""
+        return await self._get_team_runtime_manager().add_leader_note(
+            text, team_name=team_name, session_id=session_id
+        )
 
     async def stop_agent_team(
         self,
@@ -753,13 +901,18 @@ class _TeamRunnerMixin:
         await entry.interact_gate.close_and_drain()
 
     @staticmethod
-    def _maybe_attach_observability(agent: Any) -> None:
+    def _maybe_attach_observability(agent: Any, session_id: str | None = None) -> None:
         """Attach observability to a leader agent.
 
         Creates the team span so that callback handlers see the correct identity.
         Team span lifecycle (create / close) is owned by the runner:
         - Created here (before agent.invoke/stream)
         - Closed in _maybe_finalize_trace (runner's finally block)
+
+        ``session_id`` is the session the root is registered under, so a
+        teammate running in a task of its own can resolve it. The runner knows
+        it; the context vars it would otherwise be read from may not be bound
+        on this path.
         """
         try:
             from openjiuwen.agent_teams.observability import (
@@ -795,13 +948,30 @@ class _TeamRunnerMixin:
                     )
                     from openjiuwen.agent_teams.observability.span_context import clear_team_span
                     clear_team_span()
-                get_or_create_team_span(team_name, get_tracer("openjiuwen.agent_teams.observability"))
+                get_or_create_team_span(
+                team_name,
+                get_tracer("openjiuwen.agent_teams.observability"),
+                session_id=session_id,
+            )
         except Exception as exc:
             logger.debug("observability attach skipped: {}", exc)
 
+    def _consume_voice_pause(self, team_name: str) -> bool:
+        """Whether this run cycle ended through a voice pause."""
+        try:
+            return self._get_team_runtime_manager().consume_voice_pause(team_name)
+        except Exception as exc:
+            logger.debug("voice pause lookup skipped: {}", exc)
+            return False
+
     @staticmethod
-    def _maybe_finalize_trace(team_name: str) -> None:
-        """Finalize observability trace for a team when the runner exits."""
+    def _maybe_finalize_trace(team_name: str, *, blocking_flush: bool = True) -> None:
+        """Finalize observability trace for a team when the runner exits.
+
+        ``blocking_flush=False`` when the run cycle ended through a voice
+        pause: the exporter flush then runs off the event loop so the
+        barge-in waiting on the pause is not stalled.
+        """
         try:
             from openjiuwen.agent_teams.observability.setup import (
                 finalize_team_trace,
@@ -809,7 +979,7 @@ class _TeamRunnerMixin:
             )
             if is_initialized():
                 logger.info("_maybe_finalize_trace: calling finalize_team_trace for team={}", team_name)
-                finalize_team_trace(team_name)
+                finalize_team_trace(team_name, blocking_flush=blocking_flush)
             else:
                 logger.debug("_maybe_finalize_trace: observability not initialized, skip team={}", team_name)
         except Exception as exc:
@@ -952,12 +1122,36 @@ class _TeamRunnerClassMixin:
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        voice: bool = False,
     ):
         """Deliver an interact payload to an active TeamAgent runtime."""
         return await _global_runner().interact_agent_team(
             payload,
             team_name=team_name,
             session_id=session_id,
+            voice=voice,
+        )
+
+    @classmethod
+    async def post_group_message(
+        cls, content: str, *, team_name: str, session_id: str, client_message_id: str,
+        mentions: list[str] | None = None, sender: str = "user", attachments: list[dict] | None = None,
+        db_config=None, workspace_path: str | None = None,
+    ):
+        """Save public group input without broadcasting it to internal mailboxes."""
+        return await _global_runner().post_group_message(
+            content, team_name=team_name, session_id=session_id, client_message_id=client_message_id,
+            mentions=mentions, sender=sender, attachments=attachments,
+            db_config=db_config, workspace_path=workspace_path,
+        )
+
+    @classmethod
+    async def post_member_input(
+        cls, content: str, *, team_name: str, session_id: str, member_name: str, db_config=None,
+    ) -> dict:
+        """Save input to one registered member's ordinary mailbox."""
+        return await _global_runner().post_member_input(
+            content, team_name=team_name, session_id=session_id, member_name=member_name, db_config=db_config,
         )
 
     @classmethod
@@ -983,9 +1177,53 @@ class _TeamRunnerClassMixin:
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        voice: bool = False,
     ) -> bool:
         """Pause the active TeamAgent runtime for ``(team_name, session_id)``."""
-        return await _global_runner().pause_agent_team(team_name=team_name, session_id=session_id)
+        return await _global_runner().pause_agent_team(
+            team_name=team_name, session_id=session_id, voice=voice
+        )
+
+    @classmethod
+    async def pause_agent_team_members(cls, *, team_name: str, session_id: str) -> bool:
+        """Pause a running team's members; the leader keeps running."""
+        return await _global_runner().pause_agent_team_members(
+            team_name=team_name, session_id=session_id
+        )
+
+    @classmethod
+    async def resume_agent_team_members(cls, *, team_name: str, session_id: str) -> list[str]:
+        """Restart the members ``pause_agent_team_members`` held down."""
+        return await _global_runner().resume_agent_team_members(
+            team_name=team_name, session_id=session_id
+        )
+
+    @classmethod
+    async def agent_team_members_paused(cls, *, team_name: str, session_id: str) -> bool:
+        """Whether a team's members are held down by a members-only pause."""
+        return await _global_runner().agent_team_members_paused(
+            team_name=team_name, session_id=session_id
+        )
+
+    @classmethod
+    async def hold_agent_team_members_on_start(cls, *, team_name: str, session_id: str) -> bool:
+        """Keep a paused team's members down when its leader next resumes."""
+        return await _global_runner().hold_agent_team_members_on_start(
+            team_name=team_name, session_id=session_id
+        )
+
+    @classmethod
+    async def add_agent_team_leader_note(
+        cls,
+        text: str,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> bool:
+        """Queue a user note for the leader's next round of the active TeamAgent runtime."""
+        return await _global_runner().add_agent_team_leader_note(
+            text, team_name=team_name, session_id=session_id
+        )
 
     @classmethod
     async def get_agent_team_monitor(

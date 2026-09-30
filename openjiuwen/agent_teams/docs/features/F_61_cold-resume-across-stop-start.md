@@ -31,6 +31,9 @@ context / task_plan / history 由共享的 session id 恢复。
 - `kernel.start` 尾部的 `resume_paused_round()` 分两路，续跑成功后都清掉 marker：
   - **warm**：harness 仍是 PAUSED（同进程，`pause` 从不 stop 它）→ `resume()`，读内存里的 query。
   - **cold**：harness 是 IDLE（已重建）且 marker 存在 → `resume(query=marker["query"])`。
+    **读端同样 leader-only**：marker 放在整个 team 共享的 session 分桶里，teammate 恢复时
+    `kernel.start` 也会走到这里；若不按角色拦截，每个成员都会拿 leader 的 query 续跑一轮，
+    不支持 pause/resume 的外部 CLI harness 会直接抛 `UnsupportedHarnessCapabilityError` 崩溃。
 - `NativeHarness.resume(*, query=None)`：PAUSED 用内存 query（warm）；IDLE + `query` 起
   continuation round（cold，context 来自 checkpoint）。其余状态 no-op。
 - `NativeHarness.paused_query` property 把该 query 暴露给协调层落盘。

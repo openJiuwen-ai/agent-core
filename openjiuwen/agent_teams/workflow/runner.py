@@ -57,18 +57,28 @@ def _workflow_name(script_path: str) -> str | None:
         return None
 
 
-def _resolve_journal_path(script_path: str, team_name: str, session_id: str | None) -> str:
+def _resolve_journal_path(
+    script_path: str,
+    team_name: str,
+    session_id: str | None,
+    run_id: str | None = None,
+) -> str:
     """Compute the resume-journal path for a swarmflow run.
 
     Reads the workflow name from the script ``META`` (required) and maps it
-    to the per-team, per-session journal file. Both ``resume`` and
-    ``journal_path`` use this single path, so a re-run of the same workflow
-    in the same session replays the prior run (cache-hit short-circuit).
+    to the per-team, per-session journal file. With a ``run_id`` the journal
+    is **per-run** (``journal-{run_id}.jsonl``): each run snapshots to its own
+    file, so two concurrent runs of the same workflow never overwrite each
+    other. Without one (offline / legacy callers) the shared ``journal.jsonl``
+    fallback is used. Both ``resume`` and ``journal_path`` use this single
+    path, so a resume of the same run replays the prior records (cache-hit
+    short-circuit).
 
     Args:
         script_path: Path to the swarmflow script.
         team_name: Team identifier.
         session_id: Current session id; falls back to ``"default"`` when empty.
+        run_id: Workflow run id; ``None`` falls back to the shared journal.
 
     Returns:
         Absolute journal file path as a string.
@@ -84,9 +94,86 @@ def _resolve_journal_path(script_path: str, team_name: str, session_id: str | No
             reason="swarmflow script META requires a 'name' to persist its resume journal",
         )
     sid = session_id or "default"
-    journal = paths.workflow_journal_path(team_name, sid, name)
+    journal = paths.workflow_run_journal_path(team_name, sid, name, run_id)
     journal.parent.mkdir(parents=True, exist_ok=True)
     return str(journal)
+
+
+def _resolve_wal_path(
+    script_path: str,
+    team_name: str,
+    session_id: str | None,
+    run_id: str | None = None,
+) -> str | None:
+    """Compute the per-run WAL path for a swarmflow run (``wal/{run_id}.wal``).
+
+    Splitting the WAL by run_id is the concurrency fix: two parallel runs of
+    the same workflow append to their own files, so neither a finalize-time
+    cleanup nor any shared-file rewrite can clobber the other run's records.
+    Without a ``run_id`` the legacy shared sidecar ``journal.jsonl.wal`` is
+    used. Returns ``None`` only when the script ``META`` is unreadable (the
+    engine then runs with durability off for this call site's journal).
+
+    Args:
+        script_path: Path to the swarmflow script (``META`` names the workflow).
+        team_name: Team identifier.
+        session_id: Current session id; falls back to ``"default"`` when empty.
+        run_id: Workflow run id; ``None`` falls back to the shared sidecar.
+
+    Returns:
+        Absolute WAL file path as a string, or ``None`` on an unreadable META.
+    """
+    try:
+        meta = load_workflow_meta(script_path)
+    except Exception:  # noqa: BLE001 - WAL path must never break the launch
+        return None
+    name = meta.get("name")
+    if not name:
+        return None
+    sid = session_id or "default"
+    wal = paths.workflow_run_wal_path(team_name, sid, name, run_id)
+    if run_id:
+        wal.parent.mkdir(parents=True, exist_ok=True)
+    return str(wal)
+
+
+def _resolve_legacy_resume(
+    script_path: str,
+    team_name: str,
+    session_id: str | None,
+    run_id: str | None,
+) -> str | None:
+    """Compute the pre-per-run shared journal path, for read-side back-compat.
+
+    Sessions created before the per-run split kept every run's records in one
+    shared ``journal.jsonl`` (+ its ``.wal`` sidecar). A resume of such a
+    session must still be able to replay those records, so the shared path is
+    returned here and read by ``Journal.load`` as a seed under the per-run
+    sources (per-run wins on key conflicts). It is strictly read-only: new
+    records always append to the per-run WAL / snapshot, so the legacy file is
+    frozen the moment the upgrade happens. Only meaningful with a ``run_id``
+    (no run_id means the caller already reads/writes the shared path itself).
+
+    Args:
+        script_path: Path to the swarmflow script (``META`` names the workflow).
+        team_name: Team identifier.
+        session_id: Current session id; falls back to ``"default"`` when empty.
+        run_id: Workflow run id; ``None`` / an unreadable ``META`` yields None.
+
+    Returns:
+        Absolute shared journal path as a string, or ``None``.
+    """
+    if not run_id:
+        return None
+    try:
+        meta = load_workflow_meta(script_path)
+    except Exception:  # noqa: BLE001 - back-compat seed must never break the launch
+        return None
+    name = meta.get("name")
+    if not name:
+        return None
+    sid = session_id or "default"
+    return str(paths.workflow_journal_path(team_name, sid, name))
 
 
 async def materialize_swarmflow_script(
@@ -247,7 +334,9 @@ async def run_swarmflow(
     )
     if on_backend_ready is not None:
         on_backend_ready(backend)
-    journal_path = _resolve_journal_path(script_path, team_name, session_id)
+    journal_path = _resolve_journal_path(script_path, team_name, session_id, run_id)
+    wal_path = _resolve_wal_path(script_path, team_name, session_id, run_id)
+    legacy_resume = _resolve_legacy_resume(script_path, team_name, session_id, run_id)
     return await run_workflow(
         script_path,
         args=args,
@@ -256,6 +345,8 @@ async def run_swarmflow(
         log_sink=log_sink or _team_log_sink,
         resume=journal_path,
         journal_path=journal_path,
+        wal_path=wal_path,
+        legacy_resume=legacy_resume,
         abort_event=abort_event,
         agent_gate=agent_gate,
         budget=budget,

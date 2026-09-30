@@ -11,7 +11,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/paths.py` · `context.py` · `i18n.py` · `timefmt.py` · `constants.py` · `worktree_remote.py` · `harness.py` |
-| 最近一次修订日期 | 2026-07-03 |
+| 最近一次修订日期 | 2026-09-16 |
 | 关联 feature | F_24_agent-time-awareness.md |
 
 ## 范围 / 边界
@@ -194,7 +194,7 @@ def format_time_context(timestamp_ms: int | None, now_ms: int) -> str
   `time.minutes_ago`；`< 24h` → `time.hours_ago`；否则 `time.days_ago`。
 - 复用点：`external/format.py`（`render_message` / `render_task_line`）、`agent/coordination/
   handlers/`（message / task_board / stale_task）、`tools/team_tools.py`（`view_task`
-  map_result）、`mcp/server.py`、`skill/cli.py`。这些是 `now_ms` 的注入方，各自取
+  render_for_llm）、`mcp/server.py`、`skill/cli.py`。这些是 `now_ms` 的注入方，各自取
   `get_current_time()`。
 
 ### constants.py

@@ -52,7 +52,7 @@ def test_list_tool_renders_tasks():
         while runtime.registry["a"].status == "running":
             await asyncio.sleep(0.005)
         tool = AsyncTasksListTool(_FakeHarness(runtime), t)
-        return tool.map_result(await tool.invoke({}))
+        return tool.render_for_llm(await tool.invoke({}))
 
     text = asyncio.run(_scenario())
     assert "task_id=a" in text
@@ -64,7 +64,7 @@ def test_list_tool_empty():
     t = make_translator("cn")
     tool = AsyncTasksListTool(_FakeHarness(_runtime()), t)
     out = asyncio.run(tool.invoke({}))
-    assert tool.map_result(out) == "No async tasks."
+    assert tool.render_for_llm(out) == "No async tasks."
 
 
 def test_list_tool_has_empty_object_schema():

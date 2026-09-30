@@ -73,7 +73,8 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "Choose the strategy at this agent level and use the available Playwright and runtime tools; "
     "the runtime validates targets and outcomes but does not replace your task judgment.\n"
     "Every model call includes one runtime-maintained <browser_working_context> followed by the latest "
-    "<browser_state>. Requirements, evidence, blockers, status, and runtime directive are authoritative. "
+    "<browser_state>. Runtime outcomes and blockers are authoritative; inferred fields are extraction hints, "
+    "not additional user requirements. Source observations also provide usable evidence. "
     "A fresh browser capture occurs initially and after a recognized page mutation; otherwise the cached "
     "observation is reused. When the runtime directive requires replanning, change the strategy materially.\n"
     "For a simple lookup, prefer a direct search-results URL when the engine and query are known. Use "
@@ -85,8 +86,9 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "browser_snapshot only when compact probes are insufficient, and browser_evaluate only for a small exact "
     "target or computation. If an older result has a <persisted-output> marker, recall it only when its preview "
     "does not contain the needed evidence; recalled targets are not executable after navigation.\n"
-    "Record requested values under the canonical requirement fields and use unknown for an inspected missing "
-    "value. One trustworthy page value or structured result is enough; do not verify the same fact with multiple "
+    "Use canonical fields when convenient, but do not reread a page just to rename already observed facts. "
+    "Report genuinely unavailable values as unknown. One trustworthy page value or structured result is enough; "
+    "do not verify the same fact with multiple "
     "tools. Stop immediately when the requested outcome is evidenced. The runtime determines final status, so "
     "return a concise natural-language result rather than another progress object.\n"
     "If an optional capability makes a browser_run_code tool visible, use it only when deterministic tools are "
@@ -98,7 +100,8 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "你是浏览器自动化代理，负责直接完成网页任务。请在当前代理层决定策略并使用可见的 Playwright "
     "和 runtime 工具；runtime 负责验证目标和结果，但不代替你的任务判断。\n"
     "每次模型调用都会依次提供 runtime 维护的 <browser_working_context> 和最新 <browser_state>。"
-    "其中的请求字段、证据、阻断项、状态和 runtime 指令是权威信息。系统仅在初始调用和已识别的"
+    "运行结果和阻断项是权威信息；推断字段只是提取提示，不是新增的用户要求。带来源的页面原文也可作为证据。"
+    "系统仅在初始调用和已识别的"
     "页面变更后重新观察；runtime 要求重新规划时，应实质改变策略。\n"
     "已知搜索引擎和关键词时，简单查询优先直接构造搜索结果 URL。页面控件使用 "
     "browser_probe_interactives，重复结果或商品使用 browser_probe_cards。直接使用 PageState 返回的 "
@@ -108,7 +111,7 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "优先等待可观察条件，不使用固定 sleep。紧凑 Probe 不足时再使用 browser_snapshot；"
     "browser_evaluate 仅用于小范围精确目标或计算。旧结果出现 <persisted-output> 且预览不足时才恢复；"
     "导航后恢复内容中的目标不可继续操作。\n"
-    "按 browser_working_context 中的规范字段记录证据；字段已检查但缺失时使用 unknown。"
+    "方便时使用规范字段，但不要仅为改写字段名而重读已经观察到的事实；字段确实不可获取时使用 unknown。"
     "一个可信页面值或结构化结果已经足够，不要用多个工具重复验证同一事实。请求结果有证据后立即结束。"
     "最终状态由 runtime 决定，只返回简洁自然语言结果，不再维护第二份进度对象。\n"
     "只有可选能力明确暴露 browser_run_code 时才使用，并且仅限确定性工具不足的情况；禁止转储完整页面。"
@@ -379,10 +382,10 @@ def create_browser_agent(
         "ToolResultWindowProcessor",
         ToolResultWindowProcessorConfig(
             tool_names=browser_windowed_tool_names,
-            keep_last_k=1,
+            keep_last_k=2,
             trim_size=1000,
-            min_offload_chars=4096,
-            small_result_trim_size=800,
+            min_offload_chars=1000,
+            small_result_trim_size=1000,
         ),
     )
     caller_context_rails = [rail for rail in (rails or []) if isinstance(rail, ContextProcessorRail)]

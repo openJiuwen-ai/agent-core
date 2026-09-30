@@ -101,6 +101,29 @@ def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"non-finite judge JSON value: {value}")
 
 
+def _contains_judge_payload(text: str) -> bool:
+    """Reject competing verdicts, not numeric vectors or data examples."""
+    decoder = json.JSONDecoder()
+    end = 0
+    for match in re.finditer(r"[\[{]", text):
+        if match.start() < end:
+            continue
+        try:
+            value, end = decoder.raw_decode(text, match.start())
+        except ValueError:
+            continue
+        items = value if isinstance(value, list) else [value]
+        if any(
+            isinstance(item, dict) and (
+                {"overall_reason", "behaviors", "forbidden_hits", "score"}.intersection(item)
+                or item.get("status") == "unavailable"
+            )
+            for item in items
+        ):
+            return True
+    return False
+
+
 def parse_judge_output(raw: str) -> dict[str, Any]:
     """Accept one complete JSON verdict, optionally fenced with surrounding prose."""
     text = raw.strip()
@@ -113,7 +136,7 @@ def parse_judge_output(raw: str) -> dict[str, Any]:
         if match is None:
             raise ValueError("judge output must contain one complete JSON fence")
         outside = text[:match.start()] + text[match.end():]
-        if "```" in outside or any(char in outside for char in "{}[]"):
+        if "```" in outside or _contains_judge_payload(outside):
             raise ValueError("ambiguous judge output: more than one structured payload")
         text = match[1].strip()
     parsed = json.loads(text, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)

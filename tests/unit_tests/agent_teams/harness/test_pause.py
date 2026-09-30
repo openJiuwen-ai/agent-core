@@ -19,6 +19,7 @@ import pytest
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.agent_teams.harness import HarnessState, NativeHarness
+from openjiuwen.agent_teams.runtime.voice import voice_pause_scope
 from tests.unit_tests.agent_teams.harness.fixtures import (
     drain_outputs,
     make_spec,
@@ -66,6 +67,67 @@ async def test_pause_in_model_phase_interrupts_and_rewinds_to_boundary() -> None
             # assistant message survive; nothing of iteration 1 remains.
             assert _contents(ctx) == ["first", "assistant-0"]
             assert fake.completed_iterations == 1
+        finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_first_model_call_pause_drops_the_round_query() -> None:
+    """Without voice, a first-iteration pause rewinds to the pre-round baseline."""
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, iterations=1, sleep_seconds=5.0)
+
+        ctx = fake.context_engine.get_context(session_id=harness.session_id)
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("first")
+            await wait_invoke_running(fake)
+            await harness.pause()
+            assert harness.state is HarnessState.PAUSED
+            assert _contents(ctx) == []
+        finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_voice_pause_in_first_model_call_keeps_the_round_query() -> None:
+    """A voice pause during the first model call keeps the round's own query.
+
+    The pre-round baseline predates the query, so rewinding there would lose
+    it; the voice pause rewinds to just before the cancelled model call and the
+    continuation answers the query.
+    """
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, iterations=1, sleep_seconds=5.0)
+
+        ctx = fake.context_engine.get_context(session_id=harness.session_id)
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("first")
+            await wait_invoke_running(fake)
+            with voice_pause_scope():
+                await harness.pause()
+            assert harness.state is HarnessState.PAUSED
+            assert fake.cancelled_count == 1
+            assert _contents(ctx) == ["first"]
+
+            fake.sleep_seconds = 0.0
+            await harness.resume()
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert fake.invocations[-1].get("_resume_continuation") is True
+            assert _contents(ctx) == ["first", "assistant-0"]
         finally:
             await harness.stop()
             await consumer
@@ -141,6 +203,52 @@ async def test_resume_continues_in_place_without_a_new_user_turn() -> None:
             # It carried the continuation flag and appended no duplicate turn.
             assert fake.invocations[-1].get("_resume_continuation") is True
             assert _contents(ctx).count("first") == 1
+        finally:
+            await harness.stop()
+            await consumer
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_prelude_note_is_admitted_as_its_own_turn_on_resume() -> None:
+    """A note queued while paused lands as its own user turn in the continuation.
+
+    The continuation still appends no copy of the original query, and the note
+    is consumed by that round only.
+    """
+    await Runner.start()
+    try:
+        harness = NativeHarness(make_spec())
+        fake = await start_harness(harness, iterations=2, sleep_seconds=5.0)
+        fake.sleep_from_iteration = 1
+
+        ctx = fake.context_engine.get_context(session_id=harness.session_id)
+        collected: list = []
+        consumer = asyncio.create_task(drain_outputs(harness, collected))
+        try:
+            await harness.send("first")
+            assert await wait_completed_iterations(fake, 1)
+            await wait_invoke_running(fake)
+            await harness.pause()
+            assert harness.state is HarnessState.PAUSED
+
+            harness.add_prelude_notes(["报表明天再整理。"])
+            fake.sleep_seconds = 0.0
+            fake.iterations = 1
+            await harness.resume()
+            assert await wait_for_state(harness, HarnessState.IDLE)
+
+            last = fake.invocations[-1]
+            assert last.get("_resume_continuation") is True
+            assert last.get("_prelude_notes") == ["报表明天再整理。"]
+            assert _contents(ctx).count("报表明天再整理。") == 1
+            assert _contents(ctx).count("first") == 1
+
+            await harness.send("second")
+            assert await wait_for_state(harness, HarnessState.IDLE)
+            assert not fake.invocations[-1].get("_prelude_notes")
+            assert _contents(ctx).count("报表明天再整理。") == 1
         finally:
             await harness.stop()
             await consumer

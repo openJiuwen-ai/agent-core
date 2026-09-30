@@ -61,6 +61,16 @@ class CodingMemoryWriteTool(Tool):
         return ToolOutput(success=success, data=result, error=result.get("error"))
 
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Report how the memory was written; the note carries redundancy or conflict guidance."""
+        if not output.success:
+            return super().render_for_llm(output)
+        data = output.data
+        action = {"create": "Created", "append": "Appended to", "skip": "Skipped writing"}[data["mode"]]
+        text = f"{action} coding memory file {data['path']}."
+        return f"{text}\n{data['note']}" if data.get("note") else text
+
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         pass
 
@@ -89,6 +99,13 @@ class CodingMemoryEditTool(Tool):
         )
         success = bool(result.get("success", False))
         return ToolOutput(success=success, data=result, error=result.get("error"))
+
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Confirm the edit without echoing the whole rewritten file."""
+        if not output.success:
+            return super().render_for_llm(output)
+        return f"Edited coding memory file {output.data['path']}."
 
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:

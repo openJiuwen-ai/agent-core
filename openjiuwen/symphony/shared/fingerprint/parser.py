@@ -155,7 +155,13 @@ class SkillManifestParser:
         source: str = "skill-folder",
         display_path: str | None = None,
     ) -> ParsedSkillManifest:
-        """Parse one entrypoint, returning diagnostics instead of item-level errors."""
+        """Parse one entrypoint, returning diagnostics instead of item-level errors.
+
+        ``capability_id_hint`` is the trusted identity supplied by a directory
+        scanner.  When present, it is preferred over the human-readable
+        frontmatter ``name`` for an implicitly generated ID.  An explicit
+        ``capability_id``/``id`` in frontmatter remains authoritative.
+        """
 
         path = Path(entrypoint)
         if _looks_like_directory(path):
@@ -300,7 +306,12 @@ class SkillManifestParser:
                 ),
             )
 
-        generated_id = _slugify_capability_id(raw_name or capability_id_hint or path.parent.name)
+        hinted_id = _string_value(capability_id_hint)
+        generated_id = (
+            hinted_id
+            if hinted_id and _is_safe_capability_id(hinted_id)
+            else _slugify_capability_id(raw_name or path.parent.name)
+        )
         capability_id = explicit_id or generated_id
         if not capability_id:
             return _failed_manifest(
@@ -410,23 +421,27 @@ def _construct_unique_mapping(
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
         try:
-            duplicate = key in mapping
+            hash(key)
         except TypeError as exc:
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                "found an unhashable mapping key",
-                key_node.start_mark,
-            ) from exc
-        if duplicate:
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                "found a duplicate mapping key",
-                key_node.start_mark,
-            )
+            error = _mapping_key_error(node, key_node, "found an unhashable mapping key")
+            raise error from exc
+        if key in mapping:
+            raise _mapping_key_error(node, key_node, "found a duplicate mapping key")
         mapping[key] = loader.construct_object(value_node, deep=deep)
     return mapping
+
+
+def _mapping_key_error(
+    node: yaml.nodes.MappingNode,
+    key_node: yaml.nodes.Node,
+    problem: str,
+) -> yaml.constructor.ConstructorError:
+    return yaml.constructor.ConstructorError(
+        "while constructing a mapping",
+        node.start_mark,
+        problem,
+        key_node.start_mark,
+    )
 
 
 _UniqueKeySafeLoader.add_constructor(

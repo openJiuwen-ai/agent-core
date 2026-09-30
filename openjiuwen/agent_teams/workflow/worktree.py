@@ -31,6 +31,7 @@ class SwarmflowWorkerWorktrees:
         self._build_context = build_context
         self._session_id = session_id
         self._active: dict[str, MemberWorktreeInfo] = {}
+        self._orphans_reconciled = False
 
     def get(self, member_name: str) -> MemberWorktreeInfo | None:
         """Return the active worker worktree metadata, if any."""
@@ -78,6 +79,7 @@ class SwarmflowWorkerWorktrees:
         """Create an owner-scoped worktree for ``agent(options={"isolation": "worktree"})``."""
         if not self.needs_worktree(opts):
             return None
+        await self._reconcile_orphans_once()
         manager = self._manager()
         project_dir = self._project_dir()
         project_hash = self._project_hash()
@@ -106,6 +108,76 @@ class SwarmflowWorkerWorktrees:
             result.worktree_branch,
         )
         return info
+
+    async def _reconcile_orphans_once(self) -> None:
+        """Remove clean unclaimed worktrees left by earlier runs (once per run).
+
+        Worktree slugs embed the worker member name, which carries the run_id, so
+        every relaunch builds fresh slugs and worktrees a previous run kept
+        ("Keeping … with N changed files") are never reclaimed by anyone. Before
+        this run creates its first worktree, sweep the session worktrees root:
+        anything not in ``self._active`` is checked like ``finalize`` does — clean
+        ones are removed, dirty ones (uncommitted changes / commits) stay for the
+        leader to merge, and unverifiable ones stay (fail-closed). Dirty
+        accumulation is bounded by the eventual ``delete_team`` sweep; removing
+        only clean residue is lossless.
+        """
+        if self._orphans_reconciled:
+            return
+        self._orphans_reconciled = True
+        if self._active:  # mid-run call: only sweep before the first creation
+            return
+        try:
+            entries = os.listdir(self._managed_root())
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            team_logger.debug("Skipping swarmflow worktree reconcile: %s", exc)
+            return
+        if not entries:
+            return
+        from openjiuwen.harness.tools.worktree.git import (
+            find_canonical_git_root,
+            is_ref_ancestor,
+            rev_parse,
+            status_porcelain,
+        )
+
+        try:
+            manager = self._manager()
+        except BackendError:
+            return  # no manager wired: nothing to sweep with (and nothing was created either)
+        for slug in entries:
+            wt_path = os.path.join(self._managed_root(), slug)
+            if not os.path.isdir(wt_path):
+                continue
+            if any(info.worktree_name == slug for info in self._active.values()):
+                continue
+            repo_root = await find_canonical_git_root(wt_path)
+            if repo_root is None:
+                team_logger.debug(
+                    "Skipping unclaimed swarmflow worktree without a git root: %s", wt_path
+                )
+                continue
+            try:
+                dirty = await status_porcelain(wt_path)
+                repo_head = await rev_parse("HEAD", repo_root)
+                wt_head = await rev_parse("HEAD", wt_path)
+                ancestor = None
+                if repo_head and wt_head:
+                    ancestor = await is_ref_ancestor(wt_head, repo_head, wt_path)
+            except Exception as exc:  # noqa: BLE001 - reconcile is best-effort
+                team_logger.debug("Skipping unclaimed swarmflow worktree %s: %s", slug, exc)
+                continue
+            # Remove only provably clean residue: no uncommitted changes and no
+            # commits of its own (its HEAD is contained in the repo's HEAD).
+            # Anything unverifiable or dirty stays (fail-closed) for the leader.
+            if dirty or ancestor is not True:
+                continue
+            if await manager.remove_worktree(wt_path, repo_root):
+                team_logger.info(
+                    "Removed unclaimed clean swarmflow worktree from a prior run: {}", wt_path
+                )
 
     async def finalize(self, member_name: str) -> None:
         """Remove a clean worker worktree, preserving changed or unverifiable ones."""

@@ -47,6 +47,10 @@ class RecoveryManager:
         await team_backend.restore_external_cli_specs_from_db()
         all_members = await team_backend.list_member_roster()
         restarted: list[str] = []
+        if getattr(team_backend, "members_paused", False):
+            # Voice members-only pause: resume_members restarts them later.
+            team_logger.info("[{}] members paused; skip team recovery", member_name or "?")
+            return restarted
 
         for member in all_members:
             if member.member_name == member_name:

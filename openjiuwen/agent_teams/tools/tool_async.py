@@ -82,7 +82,7 @@ class AsyncTasksListTool(TeamTool):
             return ToolOutput(success=False, error=f"Internal error: {exc}")
         return ToolOutput(success=True, data={"tasks": [_record_brief(r) for r in records]})
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to list async tasks"
         tasks = output.data.get("tasks", [])
@@ -161,7 +161,7 @@ class AsyncTaskOutputTool(TeamTool):
                 )
         return render_result_text(record.result)
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to get async task output"
         data = output.data
@@ -210,7 +210,7 @@ class AsyncTaskCancelTool(TeamTool):
             return ToolOutput(success=False, error=f"Task '{task_id}' not found")
         return ToolOutput(success=True, data={"task_id": task_id, "status": "cancelled"})
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to cancel async task"
         return f"[task {output.data['task_id']}] cancelled."

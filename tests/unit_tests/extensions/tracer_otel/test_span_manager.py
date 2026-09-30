@@ -22,6 +22,9 @@ class _MockSpan:
     def end(self):
         self._ended = True
 
+    def is_recording(self) -> bool:
+        return True
+
 
 class _MockToken:
     """Minimal mock for otel context attach token."""

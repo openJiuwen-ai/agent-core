@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import json
 
-from openjiuwen.agent_evolving.trajectory.legacy import upgrade_legacy_record
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, write_llm_exchange
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
     _is_runtime_workspace_metadata,
     _skip_trace_snapshot_path,
@@ -18,6 +20,20 @@ from openjiuwen.rsi.harness_rsi.evaluator.case_runner import (
 from openjiuwen.rsi.harness_rsi.evaluator.trajectory_paths import (
     RoleFileTrajectoryStore,
 )
+from openjiuwen.extensions.observability import semconv
+
+
+def _trajectory(trajectory_id: str, spans: list[dict]) -> Trajectory:
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: trajectory_id})},
+                    "scopeSpans": [{"scope": {}, "spans": spans}],
+                }
+            ]
+        }
+    )
 
 
 def test_role_file_trajectory_store_writes_bounded_latest_snapshot(tmp_path) -> None:
@@ -31,37 +47,47 @@ def test_role_file_trajectory_store_writes_bounded_latest_snapshot(tmp_path) -> 
             "parameters": {"type": "object", "properties": {"content": {"description": large_text}}},
         },
     }
-    first = upgrade_legacy_record(
-        {
-            "execution_id": "first",
-            "steps": [
-                {
-                    "kind": "llm",
-                    "detail": {
-                        "model": "deepseek-v4-flash",
-                        "messages": [
-                            {"role": "system", "content": large_text},
-                            {"role": "user", "content": "task"},
-                            {"role": "assistant", "content": large_text},
-                            {"role": "tool", "content": large_text},
-                            {"role": "user", "content": "latest"},
-                        ],
-                        "response": {"role": "assistant", "content": large_text},
-                        "tools": [large_tool_schema],
-                    },
-                },
-                {
-                    "kind": "tool",
-                    "detail": {
-                        "tool_name": "write_file",
-                        "call_args": {"content": large_text},
-                        "call_result": {"ok": True, "content": large_text},
-                    },
-                },
-            ],
-        }
+    first = _trajectory(
+        "first",
+        [
+            {
+                "traceId": "1" * 32,
+                "spanId": "1" * 16,
+                "name": "chat deepseek-v4-flash",
+                "attributes": attributes_from_map(
+                    {
+                        semconv.GEN_AI_OPERATION_NAME: "chat",
+                        semconv.GEN_AI_REQUEST_MODEL: "deepseek-v4-flash",
+                        semconv.GEN_AI_TOOL_DEFINITIONS: [large_tool_schema],
+                        **write_llm_exchange(
+                            [
+                                {"role": "system", "content": large_text},
+                                {"role": "user", "content": "task"},
+                                {"role": "assistant", "content": large_text},
+                                {"role": "tool", "content": large_text},
+                                {"role": "user", "content": "latest"},
+                            ],
+                            [{"role": "assistant", "content": large_text}],
+                        ),
+                    }
+                ),
+            },
+            {
+                "traceId": "1" * 32,
+                "spanId": "2" * 16,
+                "name": "execute_tool write_file",
+                "attributes": attributes_from_map(
+                    {
+                        semconv.GEN_AI_OPERATION_NAME: "execute_tool",
+                        semconv.GEN_AI_TOOL_NAME: "write_file",
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"content": large_text},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: {"ok": True, "content": large_text},
+                    }
+                ),
+            },
+        ],
     )
-    second = upgrade_legacy_record({"execution_id": "second", "steps": []})
+    second = _trajectory("second", [])
 
     store.save(first)
     store.save(second)

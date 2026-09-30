@@ -1,18 +1,24 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Configure / unconfigure API for skill evolution rails."""
+"""Configure / unconfigure API for skill evolution and TTSE rails."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EvolutionInterruptRail
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import SkillEvolutionRail
 from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import TeamSkillEvolutionRail
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.ttse.config import TTSEConfig
+    from openjiuwen.agent_evolving.ttse.success import SuccessDetector
+    from openjiuwen.harness.rails.evolution.ttse_rail import TTSERail
 
 
 @dataclass(frozen=True)
@@ -393,8 +399,125 @@ def unconfigure_skill_evolution(agent, *, team: bool | None = None) -> int:
     return agent.strip_rails_by_type(types_to_remove)
 
 
+def _load_ttse_rail_cls():
+    """Import TTSERail only when a TTSE configure/unconfigure call runs."""
+    from openjiuwen.harness.rails.evolution.ttse_rail import TTSERail
+
+    return TTSERail
+
+
+def _find_existing_ttse_rail(agent) -> Optional[TTSERail]:
+    """Return an existing TTSERail on ``agent`` (exact class), if any."""
+    ttse_rail_cls = _load_ttse_rail_cls()
+    rails = agent.find_rails_by_type((ttse_rail_cls,))
+    for rail in rails:
+        if rail.__class__ is ttse_rail_cls:
+            return rail
+    return None
+
+
+def configure_ttse_evolution(
+    agent,
+    *,
+    llm: Model,
+    model: str,
+    ttse_config: Optional[TTSEConfig] = None,
+    embedding=None,
+    success_detector: Optional[SuccessDetector] = None,
+    **rail_kwargs,
+):
+    """Attach a :class:`TTSERail` to ``agent``.
+
+    Idempotent: a no-op when a ``TTSERail`` is already present. The rail
+    drives the FACT / meta-TIP tracks only and can coexist with a skill
+    evolution rail — call :func:`configure_skill_evolution` separately if
+    the skill-body track is also wanted.
+
+    Args:
+        agent: The agent to configure.
+        llm: LLM client for induction / blame / synthesize.
+        model: Model name for the TTSE LLM calls.
+        ttse_config: Bank / retrieval / dedup knobs. Defaults to ``TTSEConfig()``.
+        embedding: Optional embedding provider for semantic dedup, Auto-dream
+            clustering, and ``ttse_consult`` hybrid recall.
+        success_detector: Optional success signal gating the blame/synthesize pass.
+        **rail_kwargs: Forwarded to :class:`EvolutionRail` (trajectory_store,
+            evolution_trigger, async_evolution, ...).
+
+    Returns:
+        The agent, for chaining.
+    """
+    from openjiuwen.agent_evolving.ttse.config import TTSEConfig as _TTSEConfig
+
+    ttse_rail_cls = _load_ttse_rail_cls()
+    existing = _find_existing_ttse_rail(agent)
+    if existing is not None:
+        logger.info("[TTSERail] already mounted; skipping duplicate configure")
+        return agent
+    cfg = ttse_config or _TTSEConfig()
+    rail = ttse_rail_cls(
+        llm=llm,
+        model=model,
+        ttse_config=cfg,
+        embedding=embedding,
+        success_detector=success_detector,
+        **rail_kwargs,
+    )
+    agent.add_rail(rail)
+    logger.info(
+        "[TTSERail] mounted evolve_enabled=%s inject_enabled=%s batch_size=%s store_path=%s",
+        cfg.evolve_enabled,
+        cfg.inject_enabled,
+        cfg.batch_size,
+        cfg.store_path,
+    )
+    return agent
+
+
+async def configure_ttse_evolution_runtime(
+    agent,
+    *,
+    llm: Model,
+    model: str,
+    ttse_config: Optional[TTSEConfig] = None,
+    embedding=None,
+    success_detector: Optional[SuccessDetector] = None,
+    **rail_kwargs,
+):
+    """Configure TTSERail and register it immediately when the agent is running."""
+    before_pending = _pending_rail_identities(agent)
+    configure_ttse_evolution(
+        agent,
+        llm=llm,
+        model=model,
+        ttse_config=ttse_config,
+        embedding=embedding,
+        success_detector=success_detector,
+        **rail_kwargs,
+    )
+    new_rails = [rail for rail in _pending_rails(agent) if id(rail) not in before_pending]
+    for rail in new_rails:
+        await agent.register_rail(rail)
+        _remove_pending_rail(agent, rail)
+    return agent
+
+
+def unconfigure_ttse_evolution(agent) -> int:
+    """Remove the TTSERail from ``agent``.
+
+    Returns the number of rails removed.
+    """
+    removed = agent.strip_rails_by_type((_load_ttse_rail_cls(),))
+    if removed:
+        logger.info("[TTSERail] unmounted (%s rail(s) removed)", removed)
+    return removed
+
+
 __all__ = [
     "configure_skill_evolution",
     "configure_skill_evolution_runtime",
     "unconfigure_skill_evolution",
+    "configure_ttse_evolution",
+    "configure_ttse_evolution_runtime",
+    "unconfigure_ttse_evolution",
 ]

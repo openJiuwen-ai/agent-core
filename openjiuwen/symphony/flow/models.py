@@ -119,6 +119,7 @@ class ExperienceRecipe:
     """可复用编排方案：任务描述 + skill pack（JGF）+ 执行过程文本。"""
 
     recipe_id: str
+    name: str
     version: int
     status: str
     grade: str
@@ -133,6 +134,7 @@ class ExperienceRecipe:
         return {
             "schema_version": self.schema_version,
             "recipe_id": self.recipe_id,
+            "name": self.name,
             "version": self.version,
             "status": self.status,
             "grade": self.grade,
@@ -147,6 +149,7 @@ class ExperienceRecipe:
     def from_dict(cls, payload: dict[str, Any]) -> "ExperienceRecipe":
         return cls(
             recipe_id=str(payload.get("recipe_id") or ""),
+            name=str(payload.get("name") or ""),
             version=int(payload.get("version") or 1),
             status=str(payload.get("status") or RECIPE_STATUS_DRAFT),
             grade=str(payload.get("grade") or RECIPE_GRADE_CANDIDATE),
@@ -175,6 +178,7 @@ class ExperienceRecipe:
         edges = structure.get("edges") if isinstance(structure, dict) else []
         return content_hash(
             {
+                "name": self.name,
                 "applicability": self.applicability,
                 "combination_structure": {
                     "type": structure.get("type") if isinstance(structure, dict) else None,

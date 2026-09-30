@@ -2,6 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Evolution rail implementations and their historical harness exports."""
 
+from importlib import import_module
+
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
     build_evolution_progress_event,
@@ -16,7 +18,10 @@ from openjiuwen.harness.rails.evolution.commands import (
 from openjiuwen.harness.rails.evolution.configuration import (
     configure_skill_evolution,
     configure_skill_evolution_runtime,
+    configure_ttse_evolution,
+    configure_ttse_evolution_runtime,
     unconfigure_skill_evolution,
+    unconfigure_ttse_evolution,
 )
 from openjiuwen.harness.rails.evolution.context_evolution_rail import (
     ContextEvolutionRail,
@@ -142,4 +147,39 @@ __all__ = [
     "ensure_evolution_review_agent_config",
     "remove_evolution_review_agent_config",
     "unconfigure_skill_evolution",
+    "configure_ttse_evolution",
+    "configure_ttse_evolution_runtime",
+    "unconfigure_ttse_evolution",
+    "TTSEConfig",
+    "TTSERail",
+    "TTSERecordStore",
+    "SuccessDetector",
+    "SuccessOutcome",
+    "TrajectoryErrorSuccessDetector",
+    "SignalBasedSuccessDetector",
 ]
+
+_TTSE_LAZY_ATTRS = {
+    "TTSERail": ("openjiuwen.harness.rails.evolution.ttse_rail", "TTSERail"),
+    "TTSEConfig": ("openjiuwen.agent_evolving.ttse", "TTSEConfig"),
+    "TTSERecordStore": ("openjiuwen.agent_evolving.ttse", "TTSERecordStore"),
+    "SuccessDetector": ("openjiuwen.agent_evolving.ttse", "SuccessDetector"),
+    "SuccessOutcome": ("openjiuwen.agent_evolving.ttse", "SuccessOutcome"),
+    "TrajectoryErrorSuccessDetector": ("openjiuwen.agent_evolving.ttse", "TrajectoryErrorSuccessDetector"),
+    "SignalBasedSuccessDetector": ("openjiuwen.agent_evolving.ttse", "SignalBasedSuccessDetector"),
+}
+
+
+def __getattr__(name: str):
+    """Load TTSE types only when an explicit TTSE export is requested."""
+    target = _TTSE_LAZY_ATTRS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = target
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted({*globals().keys(), *_TTSE_LAZY_ATTRS})

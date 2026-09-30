@@ -134,6 +134,61 @@ def test_personal_context_status_accepts_stopping_fetch_run_progress():
     assert status.fetch_run_progress["notes"]["run_state"] == "stopping"
 
 
+def test_personal_context_status_accepts_staged_progress_before_success():
+    status = PersonalContextStatus(
+        configured=True,
+        collection_enabled=True,
+        agent_use_enabled=False,
+        state="RUNNING",
+        pipeline_running=True,
+        pipeline_queue_size=0,
+        fetch_service_states={"notes": "RUNNING"},
+        fetch_service_errors={},
+        fetch_run_progress={
+            "notes": {
+                "service_id": "notes",
+                "run_state": "running",
+                "progress_percent": 80,
+                "total_items": 20,
+                "completed_items": 20,
+                "last_error": None,
+            }
+        },
+        context_root="C:/personal_context/workspace/context",
+        context_ready=False,
+        last_error=None,
+    )
+
+    assert status.fetch_run_progress["notes"]["progress_percent"] == 80
+
+
+def test_personal_context_status_rejects_100_percent_before_success():
+    with pytest.raises(ValidationError):
+        PersonalContextStatus(
+            configured=True,
+            collection_enabled=True,
+            agent_use_enabled=False,
+            state="RUNNING",
+            pipeline_running=True,
+            pipeline_queue_size=0,
+            fetch_service_states={"notes": "RUNNING"},
+            fetch_service_errors={},
+            fetch_run_progress={
+                "notes": {
+                    "service_id": "notes",
+                    "run_state": "running",
+                    "progress_percent": 100,
+                    "total_items": 20,
+                    "completed_items": 20,
+                    "last_error": None,
+                }
+            },
+            context_root="C:/personal_context/workspace/context",
+            context_ready=False,
+            last_error=None,
+        )
+
+
 def test_status_reports_independent_collection_and_agent_use_switches():
     status = PersonalContextStatus(
         configured=True,

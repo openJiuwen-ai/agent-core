@@ -41,11 +41,6 @@ class ObservabilityConfig(BaseModel):
             non-prompt attrs (top system + request params + team context +
             output-stage completion/usage/finish_reason); only the trailing
             N prompt messages are written so the top attrs survive.
-        backend: DEPRECATED. Kept only to translate legacy configs during
-            initialization: ``backend="langfuse"`` becomes
-            ``exporter="langfuse"`` with a deprecation warning. It never
-            reaches the collection layer (callback/bridge/rail) and no longer
-            influences telemetry shape.
         langfuse_ingestion_version: Langfuse ingestion protocol major
             version. v4 adds the ``x-langfuse-ingestion-version: 4`` header.
         langfuse_legacy_prompt_projection: Additionally emit the deprecated
@@ -72,8 +67,6 @@ class ObservabilityConfig(BaseModel):
     redact_completions: bool = False
     attribute_value_max_length: int = 40960
     max_attributes: int = 200
-    # Deprecated legacy selector; translated once at initialization.
-    backend: Literal["langfuse", "otlp"] | None = None
     langfuse_ingestion_version: Literal[3, 4] = 4
     langfuse_legacy_prompt_projection: bool = False
     export_timeout_ms: int = 5000

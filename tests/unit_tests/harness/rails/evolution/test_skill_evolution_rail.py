@@ -237,7 +237,6 @@ def _trajectory_from_steps(
         TRAJECTORY_SOURCE,
     )
     from openjiuwen.extensions.observability import semconv
-    from openjiuwen.agent_evolving.trajectory import legacy_semconv
 
     resource_attrs: dict[str, Any] = {TRAJECTORY_ID: execution_id, TRAJECTORY_SOURCE: source}
     if session_id is not None:
@@ -262,15 +261,14 @@ def _trajectory_from_steps(
                 tool_calls = getattr(message, "tool_calls", None) if not isinstance(message, dict) else message.get("tool_calls")
                 if tool_calls:
                     all_tool_calls.extend(tool_calls)
-            attrs.update(write_llm_exchange(prompts, completions))
             if all_tool_calls:
-                normalized_tool_calls = []
-                for call in all_tool_calls:
-                    item = dict(call) if isinstance(call, dict) else {"arguments": str(call)}
-                    normalized_tool_calls.append(item)
-                attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS] = json.dumps(
-                    normalized_tool_calls, ensure_ascii=False, default=str
-                )
+                if not completions:
+                    completions.append({"role": "assistant"})
+                completions[0]["tool_calls"] = [
+                    dict(call) if isinstance(call, dict) else {"arguments": str(call)} for call in all_tool_calls
+                ]
+            attrs.update(write_llm_exchange(prompts, completions))
+            attrs[semconv.GEN_AI_OPERATION_NAME] = "chat"
             name = "llm.call"
         else:
             detail = step.detail

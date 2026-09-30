@@ -438,3 +438,23 @@ class TestRenderStream:
             _async_iter(chunks), console
         )
         assert result.text == "Hello"
+
+
+@pytest.mark.asyncio
+async def test_tool_result_summary_prefers_rendered_result() -> None:
+    chunks = [
+        FakeChunk(
+            "tool_result",
+            0,
+            {
+                "tool_name": "grep",
+                "tool_args": {},
+                "tool_result": "success=True data={'stdout': 'a.py\\nb.py'} error=None",
+                "rendered_result": "a.py\nb.py",
+            },
+        ),
+    ]
+    buf = io.StringIO()
+    await render_stream(_async_iter(chunks), Console(file=buf))
+
+    assert "Found 2 matches" in buf.getvalue()

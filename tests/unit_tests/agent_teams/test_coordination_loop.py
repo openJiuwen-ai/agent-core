@@ -167,3 +167,44 @@ async def test_human_agent_resume_polls_stays_noop():
     assert loop._task_poll_task is None
 
     await loop.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_restart_after_stop_during_callback_still_dispatches():
+    """A stop that lands mid-callback must not leave the bus dead on restart.
+
+    The loop leaves on ``_running = False`` without consuming the SHUTDOWN
+    sentinel ``stop`` enqueued; a restarted bus (a paused leader resuming)
+    used to read that stale sentinel first and exit, silently dropping every
+    later event — the user's next message included.
+    """
+    woke: list[CoordinationEvent] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def on_wake(event: CoordinationEvent) -> None:
+        woke.append(event)
+        if len(woke) == 1:
+            entered.set()
+            await release.wait()
+
+    bus = EventBus(role=TeamRole.LEADER)
+    await bus.start(wake_callback=on_wake)
+    await bus.enqueue(EventMessage(event_type=TeamEvent.MESSAGE, payload={"content": "first"}))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+
+    stop_task = asyncio.create_task(bus.stop())
+    await asyncio.sleep(0.05)
+    release.set()
+    await asyncio.wait_for(stop_task, timeout=6)
+
+    await bus.start(wake_callback=on_wake)
+    await bus.enqueue(EventMessage(event_type=TeamEvent.MESSAGE, payload={"content": "second"}))
+    for _ in range(50):
+        if len(woke) == 2:
+            break
+        await asyncio.sleep(0.02)
+    await bus.stop()
+
+    assert [e.payload["content"] for e in woke] == ["first", "second"]

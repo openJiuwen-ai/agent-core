@@ -61,7 +61,7 @@ _PATH_TOOL_ARG: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 _REMINDER_SECTION_NAME = "verification_reminder"
-_REMINDER_PRIORITY = 95  # injected late so it sits near the end of the assembled prompt
+_REMINDER_PRIORITY = 97  # injected late so it sits near the end of the assembled prompt
 
 _REMINDER_EN = (
     "=== VERIFICATION AGENT — ACTIVE CONSTRAINTS ===\n"

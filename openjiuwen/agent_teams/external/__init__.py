@@ -26,6 +26,7 @@ from openjiuwen.agent_teams.external.descriptor import (
     TEAM_JOIN_ENV,
     TeamJoinDescriptor,
 )
+from openjiuwen.agent_teams.external.manifest import external_cli_agent_spec_from_template
 from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
 
 __all__ = [
@@ -33,4 +34,5 @@ __all__ = [
     "ExternalTeamClient",
     "ExternalHarnessMemberRuntime",
     "TeamJoinDescriptor",
+    "external_cli_agent_spec_from_template",
 ]

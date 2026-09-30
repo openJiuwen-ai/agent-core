@@ -18,12 +18,14 @@ MEMBER_ID = "agentteam.member.name"
 SESSION_ID = "gen_ai.conversation.id"
 TEAM_ID = "agentteam.team.id"
 
-# The schema version is intentionally unchanged during the S_004 migration.
-TRAJECTORY_SCHEMA_VERSION = "0.2"
+# Version of the projected ``Trajectory`` envelope (a resource attribute). It is
+# deliberately a different key from the span-level
+# ``openjiuwen.trajectory.schema_version``, which versions the span contract.
+TRAJECTORY_PROJECTION_VERSION = "1"
 TRAJECTORY_SCOPE_NAME = "openjiuwen.agent_evolving.trajectory"
 
 TRAJECTORY_ID = "openjiuwen.trajectory_id"
-TRAJECTORY_SCHEMA_VERSION_ATTR = "openjiuwen.trajectory.schema_version"
+TRAJECTORY_PROJECTION_VERSION_ATTR = "openjiuwen.trajectory.projection_version"
 TRAJECTORY_SOURCE = "openjiuwen.trajectory.source"
 CASE_ID = "case_id"
 
@@ -62,8 +64,8 @@ __all__ = [
     "SESSION_ID",
     "TEAM_ID",
     "TRAJECTORY_ID",
-    "TRAJECTORY_SCHEMA_VERSION",
-    "TRAJECTORY_SCHEMA_VERSION_ATTR",
+    "TRAJECTORY_PROJECTION_VERSION",
+    "TRAJECTORY_PROJECTION_VERSION_ATTR",
     "TRAJECTORY_SCOPE_NAME",
     "TRAJECTORY_SOURCE",
 ]

@@ -204,6 +204,24 @@ STRINGS: dict[str, str] = {
         "仅对运行时明确报告的认证失败生效。只有团队模型池中不存在兼容模型时才能传 null，"
         "此时仍可使用其自身默认模型，但不启用自动回退"
     ),
+    "spawn_external_cli.builtin_model": (
+        "可选。从下方目录中该 cli_agent 的条目里选择一个内置模型，使用 CLI 自身登录（如订阅）运行，"
+        "按成员工作量选择；与 model_name 互斥。省略时由 CLI 使用其自身默认模型"
+    ),
+    "spawn_external_cli.effort": (
+        "可选。推理强度，必须是所选 builtin_model 的 efforts 之一；需同时指定 builtin_model，"
+        "省略时取该模型的 default_effort"
+    ),
+    # ===== set_member_model ====================================================
+    # set_member_model._desc lives in descs/cn/member/set_member_model.md
+    "set_member_model.member_name": "要切换模型的外部 CLI 成员 member_name（语义化 slug，不是显示名）",
+    "set_member_model.model": (
+        "可选。新的内置模型，必须来自下方目录中该成员 cli_agent 的条目；省略时保持当前模型，只调整 effort"
+    ),
+    "set_member_model.effort": (
+        "可选。新的推理强度，必须是所选模型的 efforts 之一；指定了 model 而省略时取其 default_effort，"
+        "未指定 model 而省略时保持不变"
+    ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/member/shutdown_member.md
     "shutdown_member.member_name": "要请求关闭的成员 member_name（语义化 slug，不是显示名）",
@@ -379,10 +397,12 @@ STRINGS: dict[str, str] = {
     ),
     "swarmflow_worker.schema": (
         "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
-        "然后**必须**调用 `structured_output` 工具**恰好一次**，传入符合其输入 schema "
-        "的结构化结果。重要提示：`structured_output` 是**唯一**的结果提交方式——如果你"
-        "不调用它，任务被视为失败，你的文本输出将被丢弃。禁止将结果作为纯文本输出"
-        "——结果只能通过工具调用被捕获。调用 `structured_output` 后立即停止。"
+        "然后**必须**调用 `structured_output` 工具**恰好一次**，传入严格符合其输入 "
+        "schema 的结构化结果——每一层的必填属性都要逐个给出（数组内每个元素也一样），"
+        "属性名与嵌套结构和 schema 完全一致，不要增删字段或改变结构形状。重要提示："
+        "`structured_output` 是**唯一**的结果提交方式——如果你不调用它，任务被视为"
+        "失败，你的文本输出将被丢弃。禁止将结果作为纯文本输出——结果只能通过工具调用"
+        "被捕获。调用 `structured_output` 后立即停止。"
     ),
     "swarmflow_worker.free": (
         "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
@@ -390,7 +410,8 @@ STRINGS: dict[str, str] = {
     ),
     "structured_output.reminder": (
         "【重要提醒】你必须通过调用 `structured_output` 工具来提交结果，不要把结果"
-        "写在文本中。这是唯一的结果提交方式，不调用该工具=任务失败。"
+        "写在文本中。提交的参数必须严格符合该工具的 input schema——每层必填属性给全、"
+        "属性名与结构完全一致。这是唯一的结果提交方式，不调用该工具=任务失败。"
     ),
     # ===== async control tools (list / output / cancel) =======================
     # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc

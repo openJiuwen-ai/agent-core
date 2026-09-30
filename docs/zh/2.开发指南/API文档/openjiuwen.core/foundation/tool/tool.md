@@ -105,6 +105,31 @@ async def stream(inputs: Input, **kwargs) -> AsyncIterator[Output]
 
 **AsyncIterator[Output]**，工具执行过程中的增量结果迭代器。
 
+### render_for_llm
+
+```python
+def render_for_llm(output: Any) -> str
+```
+
+把 `invoke` 的结果渲染成模型读取的纯文本。Agent 构造工具结果消息（`ToolMessage`）时对每次工具调用调用一次；结构化结果本身原样保留给 rail、事件与日志等程序消费者。子类覆写该方法即可定制模型看到的文本。
+
+默认实现：
+
+* 结果为 `ToolOutput` 且 `success=True`：使用 `data["content"]`；`data` 是字符串时直接使用；没有 `content` 的其他载荷序列化为 JSON。
+* 结果为 `ToolOutput` 且 `success=False`：使用 `error`；`error` 为空时回落到载荷。
+* 渲染结果为空时返回简短占位文本，模型不会收到空白的工具结果。
+* 结果不是 `ToolOutput`（如普通函数、REST API 的返回值）：返回 `str(output)`。
+
+自定义实现抛出异常时，Agent 记录日志并回落到默认实现，不会把已执行完成的工具调用变成执行失败。
+
+**参数**：
+
+* **output**(Any)：`invoke` 的返回值，通常为 `ToolOutput`。
+
+**返回**：
+
+**str**，面向模型的工具结果文本。
+
 ## Auth
 
 tool默认注册了ssl认证和参数认证，并支持自定义注册认证方式，详情请参考[auth.md](./auth/auth.md)。
@@ -112,7 +137,7 @@ tool默认注册了ssl认证和参数认证，并支持自定义注册认证方�
 ## class LocalFunction
 
 ```python
-class LocalFunction(card: ToolCard, func: Callable)
+class LocalFunction(card: ToolCard, func: Callable, *, render: Callable[[Any], str] | None = None)
 ```
 
 本地函数工具类。
@@ -121,6 +146,7 @@ class LocalFunction(card: ToolCard, func: Callable)
 
 * **card**(ToolCard)：工具卡片。
 * **func**(Callable)：要封装的本地可调用对象。不可为 None。
+* **render**(Callable[[Any], str] | None, 可选)：结果渲染函数，替代默认的 `render_for_llm` 生成面向模型的文本，无需为定制渲染而子类化。默认值：`None`。
 
 ### invoke
 ```python

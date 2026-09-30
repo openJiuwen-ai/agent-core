@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/concurrency.py`、`workflow/engine/admission.py`、`workflow/engine/cap.py`、`workflow/engine/runtime.py`、`workflow/engine/primitives.py`、`workflow/engine/runner.py`、`workflow/tool_swarmflow.py`、`workflow/runner.py`、`workflow/backends/team_worker_backend.py`、`harness/async_tools.py`、`harness/native_harness.py`、`schema/blueprint.py`、`agent/agent_configurator.py`、`rails/team_context.py`、`rails/team_tool_rail.py`、`tools/tool_factory.py`、`agent/coordination/handlers/workflow.py`、`i18n.py` |
-| 最近一次修订日期 | 2026-08-04 |
+| 最近一次修订日期 | 2026-09-16 |
 | 关联 feature | `F_47_swarmflow-concurrency-governor.md`、`F_48_swarmflow-inline-script-execution.md` |
 
 ## 范围 / 边界
@@ -109,13 +109,13 @@ per-Leader 单例）。`agents_per_run_cap` 由 `validate_swarmflow_concurrency`
 5. enrich inputs：复制为可变 `enriched`，注入 4 个内部键（见下）。
 6. `launch_async_tool(..., format_completed=..., format_failed=...)` 闭包捕获 `run_id` + `completion_ctx`；
    launch 抛异常 → `release_workflow(ticket)`（与 finally 互斥）+ `ToolOutput(error="Internal error: {exc}")`。
-7. `map_result` → `swarmflow.launched`（`run_id` + `task_id`）。
+7. `render_for_llm` → `swarmflow.launched`（`run_id` + `task_id`）。
 
 Leader 并行局数只认 `run_id`，不认 `task_id`（resume 会换新 `task_id`）。
 
 **四个对外方法**（`tool_swarmflow.py`）：
 
-- `map_result(output) -> str`：启动期同步回执，成功调 `format_launched_message`，失败回退 `output.error`。
+- `render_for_llm(output) -> str`：启动期同步回执，成功调 `format_launched_message`，失败回退 `output.error`。
 - `format_launched_message(run_id, task_id) -> str`：`swarmflow.launched`（显式区分 run_id 与 task_id 用途）。
 - `format_completed_injection(result, *, run_id, completion_ctx=None) -> str`：终态成功文本，`swarmflow.completed`。
 - `format_failed_injection(error, *, run_id) -> str`：终态失败文本，`swarmflow.failed`。
@@ -178,7 +178,7 @@ swarmflow_concurrency:
 
 | Key | 阶段 | 含 `{run_id}` | 通道 |
 |-----|------|---|------|
-| `swarmflow.launched` | 启动 | ✅ `{run_id}` + `{task_id}` | `map_result`（当前 tool 轮闭合文案） |
+| `swarmflow.launched` | 启动 | ✅ `{run_id}` + `{task_id}` | `render_for_llm`（当前 tool 轮闭合文案） |
 | `workflow.started` | 中途 | ✅ `{run_id}`（置于 `{name}` 前） | `WorkflowHandler` ← `WORKFLOW_PROGRESS` |
 | `workflow.phase` | 中途 | ✅ `{run_id}`（置于 `{phase}` 前） | 同上 |
 | `swarmflow.completed` | 终态 | ✅ `{run_id}` + `{result}` | async `_run` → `format_completed` 闭包 → `harness.send` |

@@ -14,8 +14,8 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     SESSION_ID,
     TEAM_ID,
     TRAJECTORY_ID,
-    TRAJECTORY_SCHEMA_VERSION,
-    TRAJECTORY_SCHEMA_VERSION_ATTR,
+    TRAJECTORY_PROJECTION_VERSION,
+    TRAJECTORY_PROJECTION_VERSION_ATTR,
     TRAJECTORY_SOURCE,
 )
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
@@ -33,7 +33,7 @@ def _trajectory(
 ) -> Trajectory:
     attributes = {
         TRAJECTORY_ID: trajectory_id,
-        TRAJECTORY_SCHEMA_VERSION_ATTR: TRAJECTORY_SCHEMA_VERSION,
+        TRAJECTORY_PROJECTION_VERSION_ATTR: TRAJECTORY_PROJECTION_VERSION,
         SESSION_ID: session_id,
         TRAJECTORY_SOURCE: source,
     }
@@ -150,65 +150,35 @@ def test_file_store_loads_oldest_duplicate_and_skips_invalid_records(tmp_path) -
     assert [item.resource_attributes[CASE_ID] for item in store.query()] == ["first", "second"]
 
 
-def test_file_store_upgrades_all_historical_resource_aliases(tmp_path) -> None:
+def test_file_store_does_not_read_historical_records(tmp_path) -> None:
     path = tmp_path / "trajectories_default.jsonl"
-    path.write_text(
-        json.dumps(
+    alias_record = {
+        "resourceSpans": [
             {
-                "resourceSpans": [
-                    {
-                        "resource": {
-                            "attributes": [
-                                {"key": "openjiuwen.trajectory.id", "value": {"stringValue": "alias-id"}},
-                                {"key": "session.id", "value": {"stringValue": "alias-session"}},
-                                {"key": "team_id", "value": {"stringValue": "alias-team"}},
-                                {"key": "source", "value": {"stringValue": "alias-source"}},
-                            ]
-                        },
-                        "scopeSpans": [],
-                    }
-                ]
+                "resource": {
+                    "attributes": [
+                        {"key": "openjiuwen.trajectory.id", "value": {"stringValue": "alias-id"}},
+                        {"key": "session.id", "value": {"stringValue": "alias-session"}},
+                    ]
+                },
+                "scopeSpans": [],
             }
-        )
-        + "\n",
+        ]
+    }
+    step_record = {
+        "execution_id": "legacy-id",
+        "session_id": "legacy-session",
+        "steps": [{"kind": "llm", "detail": {"messages": [{"role": "user", "content": "hello"}]}}],
+    }
+    path.write_text(
+        "\n".join(json.dumps(record) for record in (alias_record, step_record)) + "\n",
         encoding="utf-8",
     )
     store = FileTrajectoryStore(tmp_path)
 
-    loaded = store.load("alias-id")
-    assert loaded is not None
-    assert loaded.session_id == "alias-session"
-    assert loaded.team_id == "alias-team"
-    assert loaded.resource_attributes[TRAJECTORY_SOURCE] == "alias-source"
-
-
-def test_file_store_upgrades_historical_jsonl_on_read(tmp_path) -> None:
-    path = tmp_path / "trajectories_default.jsonl"
-    path.write_text(
-        json.dumps(
-            {
-                "execution_id": "legacy-id",
-                "session_id": "legacy-session",
-                "steps": [
-                    {
-                        "kind": "llm",
-                        "detail": {
-                            "messages": [{"role": "user", "content": "hello"}],
-                            "response": {"role": "assistant", "content": "hi"},
-                        },
-                    }
-                ],
-            }
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    store = FileTrajectoryStore(tmp_path)
-
-    loaded = store.load("legacy-id")
-    assert loaded is not None
-    assert loaded.session_id == "legacy-session"
-    assert loaded.trajectory_id == "legacy-id"
+    assert store.load("alias-id") is None
+    assert store.load("legacy-id") is None
+    assert store.query() == []
 
 
 def test_file_store_writes_only_canonical_otlp(tmp_path) -> None:

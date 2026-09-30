@@ -71,14 +71,19 @@ def call_signature(
     before this parameter existed, so worker resume is unaffected. A stateful
     session turn folds its prior turns in, so a changed upstream turn cascades a
     re-run of every turn that depends on it.
+
+    ``isolation`` participates **only when set**: omitting it yields the exact
+    legacy byte sequence (existing caches stay valid), while flipping a call
+    to ``isolation='worktree'`` re-keys it. Without this, editing a script to
+    add isolation to an already-cached call would resume-hit the old record
+    and silently skip the worktree the caller now asked for.
     """
+    identity = {k: opts.get(k) for k in ("label", "phase", "model")}
+    if opts.get("isolation"):
+        identity["isolation"] = opts["isolation"]
     parts = [
         prompt,
-        json.dumps(
-            {k: opts.get(k) for k in ("label", "phase", "model")},
-            sort_keys=True,
-            ensure_ascii=False,
-        ),
+        json.dumps(identity, sort_keys=True, ensure_ascii=False),
         json.dumps(json_schema, sort_keys=True, ensure_ascii=False),
     ]
     if history:
@@ -90,31 +95,32 @@ def call_signature(
 class Journal:
     """Content-addressed call cache with a crash-durable write-ahead log (WAL).
 
-    Two on-disk artifacts share one stem (``<journal>`` and ``<journal>.wal``):
+    Two on-disk artifacts per run (the caller threads a per-run journal path
+    and its per-run WAL sidecar):
 
-    - The **journal** (``<journal>``) is the canonical, program-ordered snapshot.
-      :meth:`save` writes it **atomically** (temp file + ``os.replace``) and never
-      touches the WAL, so it is crash-safe and safe to call repeatedly (e.g. a
-      mid-run checkpoint).
-    - The **WAL** (``<journal>.wal``) is an append-only log: every freshly computed
-      record is appended the instant it is produced, so a mid-run process crash
-      (no chance to commit) still leaves the completed work recoverable.
-      :meth:`load` replays a residual WAL over the journal (WAL wins — it is newer)
+    - The **journal** is the canonical, program-ordered snapshot of one run.
+      :meth:`save` writes it **atomically** (temp file + ``os.replace``) and
+      never touches the WAL, so it is crash-safe and safe to call repeatedly
+      (e.g. a mid-run checkpoint).
+    - The **WAL** is an append-only log: every freshly computed record is
+      appended the instant it is produced, so a mid-run process crash (no
+      chance to commit) still leaves the completed work recoverable.
+      :meth:`load` replays the WAL over the journal (WAL wins — it is newer)
       and tolerates a torn trailing line (a crash mid-append).
 
-    Invariant — **WAL removal is terminal-only**: only :meth:`finalize` (called
-    once, after the workflow fully completes) deletes the WAL, and only after
-    verifying the journal durably holds every used record. A mid-run checkpoint
-    MUST use :meth:`save` (which keeps the WAL) so a later crash can still recover
-    the increment. Never delete the WAL from a non-terminal path.
+    Invariant — **the WAL is never actively deleted**: it is a log, and like
+    any log it ages out (rolling retention), it is not truncated by finalize
+    or compaction. Cleanup is the whole-tree ``delete_team`` sweep; a future
+    rolling policy may retire old WAL files by age/size, never by run state.
     """
 
     def __init__(self, prior: dict[str, dict] | None = None, wal_path: str | None = None) -> None:
         self.prior = prior or {}
         # Records actually used this run (cache-hit -> reused prior; miss -> fresh).
         self.used: dict[str, dict] = {}
-        # Append-only WAL path (``<journal>.wal``); None disables durability (e.g.
-        # the offline preview path that passes no journal_path).
+        # Append-only WAL path (per-run ``wal/{run_id}.wal`` in the swarmflow
+        # integration); None disables durability (e.g. the offline preview path
+        # that passes no journal_path). Never unlinked by the journal itself.
         self._wal_path = wal_path
         # Serialises WAL appends so concurrent parallel()/pipeline() completions
         # never interleave on disk; held across the aiofiles write, so the event
@@ -150,21 +156,36 @@ class Journal:
         return records
 
     @classmethod
-    async def load(cls, path: str | None, wal_path: str | None = None) -> "Journal":
-        """Load prior records, replaying a residual WAL on top (WAL is newer).
+    async def load(
+        cls,
+        path: str | None,
+        wal_path: str | None = None,
+        legacy_path: str | None = None,
+    ) -> "Journal":
+        """Load prior records, replaying the run's WAL on top (WAL is newer).
 
-        Reads the canonical journal first, then overlays any leftover WAL from a
-        crashed prior run — so if the journal is missing or incomplete, the WAL's
-        records still seed ``prior`` (last record wins across both sources). Reads
-        are async (``aiofiles``) so they never stall the shared event loop.
+        Reads the canonical journal first, then overlays this run's WAL — so if
+        the journal is missing or incomplete (a pause, a crash before save),
+        the WAL's records still seed ``prior`` (last record wins across both
+        sources). ``legacy_path`` (the pre-per-run shared ``journal.jsonl``)
+        and its ``.wal`` sidecar are read FIRST and only seed ``prior`` —
+        new records still append to the per-run WAL only, so an upgraded
+        session never writes the frozen legacy file. Reads are async
+        (``aiofiles``) so they never stall the shared event loop. The WAL
+        itself is left untouched: it is an append-only log that is never
+        actively cleaned (see the class docstring).
         """
+        legacy_sources: tuple[str, ...] = ()
+        if legacy_path:
+            legacy_sources = (legacy_path, f"{legacy_path}.wal")
         prior: dict[str, dict] = {}
-        for src in (path, wal_path):
-            if src and Path(src).exists():
-                async with aiofiles.open(src, "r", encoding="utf-8") as f:
-                    text = await f.read()
-                for rec in cls._parse_records(text):
-                    prior[rec["key"]] = rec  # last record wins (WAL overlays journal)
+        for src in (*legacy_sources, path, wal_path):
+            if not (src and Path(src).exists()):
+                continue
+            async with aiofiles.open(src, "r", encoding="utf-8") as f:
+                text = await f.read()
+            for rec in cls._parse_records(text):
+                prior[rec["key"]] = rec  # last record wins (WAL overlays journal)
         return cls(prior, wal_path=wal_path)
 
     def get_cached(self, ks: str, sig: str, run_id: str | None = None) -> dict | None:
@@ -261,7 +282,7 @@ class Journal:
         rename — a fast metadata syscall), so a crash mid-write leaves either the
         previous journal or the new one, never a torn file. Pure write with no
         destructive side effect, so it is safe to call repeatedly (e.g. a mid-run
-        checkpoint); WAL removal is the separate, terminal-only :meth:`finalize`.
+        checkpoint).
         """
         lines = [json.dumps(self.used[k], ensure_ascii=False) for k in sorted(self.used, key=_program_order)]
         body = ("\n".join(lines) + "\n") if lines else ""
@@ -272,34 +293,14 @@ class Journal:
         os.replace(tmp, path)
 
     async def finalize(self, path: str) -> None:
-        """Terminal commit: snapshot the journal, then drop the WAL once durable.
+        """Terminal commit: snapshot the journal. The WAL is kept.
 
-        Call ONLY when the workflow has fully completed. Deleting the WAL is what
-        makes this terminal — a mid-run checkpoint must use :meth:`save` (which
-        keeps the WAL) so a later crash can still recover the increment.
+        Call ONLY when the workflow has fully completed. The WAL is an
+        append-only log that is never actively deleted (see the class
+        docstring) — cleanup is the whole-tree ``delete_team`` sweep, or a
+        future log-rolling policy, never a per-run unlink.
         """
         await self.save(path)
-        await self._discard_wal_if_durable(path)
-
-    async def _discard_wal_if_durable(self, path: str) -> None:
-        """Drop the WAL once the saved journal durably holds every used record.
-
-        Verifies ``used ⊆ saved journal`` by ``(key, sig)`` (not ``WAL ⊆ journal``,
-        so stale WAL entries from a since-edited script never block cleanup). On a
-        mismatch (e.g. a partial/corrupt write) the WAL is kept as the safety net.
-        """
-        if not self._wal_path:
-            return
-        wal = Path(self._wal_path)
-        if not wal.exists():
-            return
-        async with aiofiles.open(path, "r", encoding="utf-8") as f:
-            text = await f.read()
-        saved = {rec["key"]: rec.get("sig") for rec in self._parse_records(text)}
-        for ks, record in self.used.items():
-            if saved.get(ks) != record.get("sig"):
-                return  # saved journal does not yet reflect this record — keep WAL
-        wal.unlink()
 
     # --- stats helpers (for tests / CLI) ---
     @property

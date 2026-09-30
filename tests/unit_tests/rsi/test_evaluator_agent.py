@@ -86,9 +86,9 @@ async def test_configured_threshold_reaches_case_reference(tmp_path, monkeypatch
     assert ref.score == float(passed)
     assert ref.metadata["evaluation_passed"] is passed
     assert ref.status == ("passed" if passed else "failed")
-    result = json.loads(Path(ref.result_path).read_text(encoding="utf-8"))
+    result = json.loads(await asyncio.to_thread(Path(ref.result_path).read_text, encoding="utf-8"))
     assert result["score"] == float(passed)
-    trace = json.loads(Path(ref.trace_path).read_text(encoding="utf-8"))
+    trace = json.loads(await asyncio.to_thread(Path(ref.trace_path).read_text, encoding="utf-8"))
     assert trace["evaluation"]["score"] == float(passed)
     metadata = result["evaluation"]["metadata"]
     assert metadata["parsed"]["overall_score"] == pytest.approx(score)
@@ -255,8 +255,8 @@ def test_json_parser_handles_braces_in_strings_and_fences():
 
 @pytest.mark.parametrize("raw", [
     '```json\n{}\n```\n```json\n{}\n```',
-    'Before {}\n```json\n{}\n```',
-    '```json\n{}\n```\nAfter {}',
+    'Before {"score": 0}\n```json\n{}\n```',
+    '```json\n{}\n```\nAfter {"score": 1}',
     '```json\n{"status": "completed"',
     '{"score": 0, "score": 1}',
     '{"behaviors": [{"score": 0, "score": 1}]}',
@@ -475,7 +475,7 @@ async def test_timeout_cancels_agent_instead_of_fabricating_score(tmp_path, monk
 
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", run)
     with pytest.raises(EvaluationInfrastructureError):
-        await LlmAsJudgeJudger(_config(judge_timeout_sec=1)).judge(
+        await LlmAsJudgeJudger(_config(judge_timeout_sec=1, judge_max_retries=0)).judge(
             case=_case(), execution_result=CaseExecutionResult("done", "passed"), output_dir=str(tmp_path)
         )
 

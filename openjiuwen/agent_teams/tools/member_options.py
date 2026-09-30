@@ -19,6 +19,13 @@ class MemberModelRef(BaseModel):
     model_index: int | None = None
 
 
+class MemberBuiltinModel(BaseModel):
+    """Built-in CLI model (and effort) an external-CLI member runs on its own login."""
+
+    model: str
+    effort: str | None = None
+
+
 class MemberWorktreeOptions(BaseModel):
     """Worktree isolation options stored on a team member."""
 
@@ -38,6 +45,7 @@ class TeamMemberOptions(BaseModel):
 
     model_ref: MemberModelRef | None = None
     fallback_model_ref: MemberModelRef | None = None
+    builtin_model: MemberBuiltinModel | None = None
     cli_agent: str | None = None
     worktree: MemberWorktreeOptions | None = None
     permissions_override: dict[str, str] | None = Field(
@@ -112,6 +120,7 @@ def build_member_options(
     *,
     model_ref: Mapping[str, Any] | None = None,
     fallback_model_ref: Mapping[str, Any] | None = None,
+    builtin_model: MemberBuiltinModel | None = None,
     cli_agent: str | None = None,
     worktree: MemberWorktreeOptions | None = None,
     worktree_isolation: str | None = None,
@@ -122,6 +131,7 @@ def build_member_options(
     parsed = TeamMemberOptions()
     parsed.model_ref = _model_ref_from_mapping(model_ref)
     parsed.fallback_model_ref = _model_ref_from_mapping(fallback_model_ref)
+    parsed.builtin_model = builtin_model
     parsed.cli_agent = cli_agent
     if worktree is not None:
         parsed.worktree = worktree
@@ -153,6 +163,13 @@ def set_member_worktree_options(
     return dump_member_options(parsed)
 
 
+def set_member_builtin_model(raw_options: str | None, builtin_model: MemberBuiltinModel | None) -> str | None:
+    """Replace the built-in model section inside a TeamMember.options JSON string."""
+    parsed = load_member_options(raw_options)
+    parsed.builtin_model = builtin_model
+    return dump_member_options(parsed)
+
+
 def set_member_permissions_override(
     raw_options: str | None,
     *,
@@ -180,12 +197,22 @@ def get_member_fallback_model_ref(record: object) -> MemberModelRef | None:
 
 
 def promote_member_fallback_model(raw_options: str | None) -> str | None:
-    """Promote a member's fallback model to its active model reference."""
+    """Promote a member's fallback model to its active model reference.
+
+    The fallback is an external endpoint, so a built-in model chosen for the
+    CLI's own login no longer applies and is dropped.
+    """
     parsed = load_member_options(raw_options)
     if parsed.fallback_model_ref is None:
         return raw_options
     parsed.model_ref = parsed.fallback_model_ref.model_copy()
+    parsed.builtin_model = None
     return dump_member_options(parsed)
+
+
+def get_member_builtin_model(record: object) -> MemberBuiltinModel | None:
+    """Return the member's built-in CLI model selection from options."""
+    return get_member_options(record).builtin_model
 
 
 def get_member_cli_agent(record: object) -> str | None:

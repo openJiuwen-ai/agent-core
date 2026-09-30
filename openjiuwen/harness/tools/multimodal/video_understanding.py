@@ -1,4 +1,6 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 from __future__ import annotations
 
 import base64
@@ -210,6 +212,12 @@ class VideoUnderstandingTool(Tool):
                 success=False,
                 error=f"video understanding failed: {exc}",
             )
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the answer about the video."""
+        if not output.success:
+            return super().render_for_llm(output)
+        return output.data["answer"] or "The video model returned no answer."
 
     async def stream(
         self,

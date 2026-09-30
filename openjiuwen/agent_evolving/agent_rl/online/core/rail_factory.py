@@ -155,7 +155,6 @@ def _online_observability_config() -> ObservabilityConfig:
     return ObservabilityConfig(
         exporter="file",
         traces_dir=traces_dir,
-        backend="otlp",
         service_name=os.getenv("ONLINE_RL_OBSERVABILITY_SERVICE_NAME", "openjiuwen-online-rl"),
     )
 

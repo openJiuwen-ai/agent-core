@@ -2630,6 +2630,10 @@ class ReActAgent(BaseAgent):
             # loop over the existing context, without a new user turn.
             if inputs.get("_resume_continuation"):
                 ctx.extra["_resume_continuation"] = True
+            # User notes that arrived while the agent was paused: each is
+            # admitted as its own user turn ahead of this round's input.
+            if inputs.get("_prelude_notes"):
+                ctx.extra["_prelude_notes"] = list(inputs["_prelude_notes"])
             # Several inputs queued up together and drive this one round. The
             # query is already their joined text; these are the same content
             # unjoined, so ON_USER_MESSAGE rails still see the seams.
@@ -2728,17 +2732,20 @@ class ReActAgent(BaseAgent):
                             pass  # invoke_inputs.result already set by _handle_resume/_commit_interrupt
                         else:
                             start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
-                elif not resume_continuation:
-                    await self._admit_user_message(
-                        ctx,
-                        context,
-                        self._extract_user_parts(ctx, user_input),
-                        source="query",
-                    )
+                else:
+                    for note in ctx.extra.pop("_prelude_notes", None) or []:
+                        await self._admit_user_message(ctx, context, [note], source="query")
+                    if not resume_continuation:
+                        await self._admit_user_message(
+                            ctx,
+                            context,
+                            self._extract_user_parts(ctx, user_input),
+                            source="query",
+                        )
 
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
-                        logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+                        logger.info(f"ReAct iteration {iteration + 1}")
                         ctx.extra["_react_iteration"] = iteration + 1
 
                         # Honor force_finish requests set at iteration boundary
@@ -2932,7 +2939,7 @@ class ReActAgent(BaseAgent):
             await session.write_stream(OutputSchema(
                 type="answer",
                 index=0,
-                payload={"output": result.get("output", ""), "result_type": result_type},
+                payload={**result, "output": result.get("output", ""), "result_type": result_type},
             ))
 
     async def stream(

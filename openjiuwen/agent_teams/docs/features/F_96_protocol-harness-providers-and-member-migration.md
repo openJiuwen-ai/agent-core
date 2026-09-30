@@ -89,12 +89,12 @@ provider 只实现 `_open_session` / `_close_session` / `_execute_turn`（可选
 member runtime 组合 IO adapter，负责：成员 child AgentSession（checkpoint sink 把 provider 信封写进
 `external_runtime` state；`TeamContextTracker` 基线）、legacy `harness.state` / `harness.round`
 回调、可靠性（`bind_reliability_context`：STARTED → `begin_attempt`，FAILED → `finalize_failure`，
-`retrying` 诊断 → `publish_retrying`，启动失败 → `mark_member_error`）、观测桥接
-（`bind_span_bridge`：`start_turn` / `finish_turn`，Claude 桥接另外消费投影 chunk，Codex 桥接经
-provider-private `notification_observer`）、认证 fallback 持久化（`bind_fallback_promotion`：runtime 以
+`retrying` 诊断 → `publish_retrying`，启动失败 → `mark_member_error`）、轨迹观测
+（`bind_trajectory_recorder`，协议事件驱动，见 [[F_112_harness-protocol-trajectory-observation]]；
+原观测桥接已删除）、认证 fallback 持久化（`bind_fallback_promotion`：runtime 以
 `HarnessIOAdapter(provider_interaction_handler=...)` 应答 `auth_fallback` 请求，`promote()` 返回 `True`
 才 `COMPLETED`，返回 `False` 或抛异常都 `DECLINED`，未绑定 promotion 时直接同意；其它 request type 一律
-`DECLINED`）、MCP 挂载（`bind_mcp_servers`）与 teardown hook（Codex OTel receiver / rollout reader）。
+`DECLINED`）、MCP 挂载（`bind_mcp_servers`）与 teardown hook。
 `resume_external_backend=True` 要求成员 checkpoint 存在并以 `REQUIRE_RESUME` 启动。
 
 `build_cli_runtime` 的 claude / codex 分支改为构造 provider + `HarnessContext` + member runtime；
@@ -117,9 +117,10 @@ provider-private `notification_observer`）、认证 fallback 持久化（`bind_
   F_94 的 interaction / checkpoint 平面永远进不了真实成员。
 - **让 `ExternalHarnessMemberRuntime` 直接投影事件**：投影是 provider-neutral 的宿主需求，团队之外
   的宿主（CLI / 平台）同样要用；放团队层会被复制。
-- **把 team 可靠性与观测搬进 provider**：`RuntimeReliabilityContext` / span bridge 依赖 team
-  messager、DB 与 OTel 团队 span；provider 只输出结构化 `TurnError` / `DiagnosticEvent` /
-  `ProviderEvent`，由团队层消费。
+- **把 team 可靠性搬进 provider**：`RuntimeReliabilityContext` 依赖 team messager 与 DB；provider
+  只输出结构化 `TurnError` / `DiagnosticEvent` / `ProviderEvent`，由团队层消费。（观测部分的同名
+  决策已被 [[F_112_harness-protocol-trajectory-observation]] 取代：厂商观测通道下沉到 provider，
+  以 `ModelRequestEvent` 交付，team 层只消费协议事件。）
 - **factory 对三方 provider 静默忽略 manifest 的 tools / rails / subagents**：会让同一份 manifest 在
   不同 provider 下"看似成功"却行为不同；显式拒绝。
 - **factory 放进 `openjiuwen/harness/manifest`**：需要 import 四个 vendor provider，造成 harness →
@@ -151,9 +152,7 @@ provider-private `notification_observer`）、认证 fallback 持久化（`bind_
   DeepSeek）暴露并修复了 `DeepAgentHarness` 未在 `start` 前 `ensure_initialized()` 的问题：交互循环
   不会自行初始化 agent，pending rails（含观测 rail）从未注册、cwd ContextVar 也未按 `cwd` 初始化。
   manifest 若要文件/shell 工具需显式声明 `core.sys_operation` rail（spec build 不默认挂载）。
-- Codex 观测接线（`observer.py` 的 notification → `CodexSpanBridge` 映射、`_start_codex_observability`
-  的 receiver / rollout reader 启动与 config/env 注入、`build_cli_runtime` 的绑定与 teardown hook）由
-  `test_codex_observability_wiring.py` 以假桥接覆盖。
+- 观测接线已改为协议事件驱动，验证见 [[F_112_harness-protocol-trajectory-observation]]。
 
 ## 已知遗留
 

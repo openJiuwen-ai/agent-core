@@ -850,3 +850,35 @@ def test_browser_bookmarks_new_overflow_stays_ahead_of_history(tmp_path: Path):
         ["new-6", "new-5"],
         ["new-4", "base-1"],
     ]
+
+
+def test_browser_bookmarks_bookmark_without_date_added_is_skipped_not_fatal(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = tmp_path / "BrokenDateBookmarks"
+    run_started_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    _write_bookmarks(
+        path,
+        [
+            _bookmark("broken", "broken", "https://example.com/broken", date_added=""),
+            _bookmark("kept", "kept", "https://example.com/kept", date_added=_edge_timestamp(run_started_at)),
+        ],
+    )
+    filtered = BrowserBookmarksFetchService(
+        _config(path, time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path / "filtered-home",
+    )
+
+    with caplog.at_level("WARNING", logger=browser_bookmarks.__name__):
+        filtered_batches = asyncio.run(_batches(filtered, run_started_at=run_started_at))
+
+    assert [item.title for item in _items(filtered_batches)] == ["kept"]
+    assert "broken" in caplog.text
+
+    unfiltered = BrowserBookmarksFetchService(_config(path), home=tmp_path / "unfiltered-home")
+    candidates = asyncio.run(unfiltered.prepare_run(run_id="run-1", run_started_at=run_started_at, cursor=None))
+    assert {candidate["locator"]: candidate["candidate_time"] for candidate in candidates} == {
+        "https://example.com/kept": run_started_at.isoformat().replace("+00:00", "Z"),
+        "https://example.com/broken": "1970-01-01T00:00:00Z",
+    }

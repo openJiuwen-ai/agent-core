@@ -10,7 +10,7 @@ first connect) — see :class:`TeamJoinDescriptor`:
   The server exposes the **real** team tools (``view_task`` / ``claim_task`` /
   ``send_message``) built by ``create_team_tools(role="teammate")``, so the
   external member calls the exact same ``TeamTool`` instances — same input
-  schema, same behaviour, same ``map_result()`` text — as a native in-process
+  schema, same behaviour, same ``render_for_llm()`` text — as a native in-process
   teammate. Inbound messages reach the member the native way too: the parent
   process's coordination layer pushes them into the CLI, so no pull tool is
   exposed. Server-level instructions are **empty**: the team system prompt is
@@ -24,7 +24,7 @@ first connect) — see :class:`TeamJoinDescriptor`:
 
 Built on the low-level :class:`mcp.server.lowlevel.Server` (not FastMCP) so the
 member tools can advertise their own raw ``card.input_params`` JSON schema and
-return their ``map_result()`` text verbatim. The descriptor is read from the
+return their ``render_for_llm()`` text verbatim. The descriptor is read from the
 ``OPENJIUWEN_TEAM_JOIN`` environment variable; the session-id / language
 contextvars are re-bound on every tool call (each call runs in its own task).
 """
@@ -276,13 +276,12 @@ def build_server(
                 tool = client.tools.get(name)
                 if tool is None:
                     return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
-                text = str(
-                    await tool.invoke(
-                        arguments,
-                        member_name=client.member_name,
-                        display_name=client.member_name,
-                    ),
+                result = await tool.invoke(
+                    arguments,
+                    member_name=client.member_name,
+                    display_name=client.member_name,
                 )
+                text = tool.render_for_llm(result)
             else:
                 text = await _dispatch_operator(client, name, arguments)
         except Exception as exc:  # noqa: BLE001 - never surface as an MCP protocol error

@@ -119,6 +119,6 @@ def build_task_section(
     return PromptSection(
         name=SectionName.TASK_TOOL,
         content={language: content},
-        priority=85,
+        priority=80,
         category="system_prompt",
     )

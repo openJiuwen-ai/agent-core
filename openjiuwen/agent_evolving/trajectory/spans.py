@@ -8,18 +8,23 @@ registry, or subscription.  Functions return detached dictionaries/lists and
 transformations create a new :class:`Trajectory` value through
 ``Trajectory.from_otlp``.
 
-Current attributes follow the observability conventions; migration-only
-fallbacks remain explicitly owned by the trajectory package.
+Attributes are read only under the current observability conventions; there
+is no fallback to keys that earlier producers wrote.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from copy import deepcopy
 from typing import Any, Iterator, TypeAlias
 
-from openjiuwen.agent_evolving.trajectory import legacy_semconv
+from openjiuwen.agent_evolving.trajectory.schema import (
+    RL_COMPLETION_TOKEN_IDS,
+    RL_LOGPROBS,
+    RL_PROMPT_TOKEN_IDS,
+    RL_REWARD,
+)
 from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.extensions.observability import semconv
 
@@ -403,6 +408,7 @@ def _trim_span_indices(
     *,
     start_time: int | None,
     end_time: int | None,
+    uncounted: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> list[int]:
     """Select positions so equal or repeated span identities remain distinct."""
 
@@ -415,11 +421,22 @@ def _trim_span_indices(
         selected.append(index)
 
     selected.sort(key=lambda index: span_sort_key(spans[index]))
-    if max_spans is not None:
-        if max_spans <= 0:
-            return []
-        selected = selected[-max_spans:]
-    return selected
+    if max_spans is None:
+        return selected
+    if max_spans <= 0:
+        return []
+    if uncounted is None:
+        return selected[-max_spans:]
+    counted = [index for index in selected if not uncounted(spans[index])]
+    kept = set(counted[-max_spans:])
+    if not kept:
+        return []
+    cutoff = min(_time_value(spans[index], "startTimeUnixNano") for index in kept)
+    return [
+        index
+        for index in selected
+        if index in kept or (uncounted(spans[index]) and _time_value(spans[index], "startTimeUnixNano") >= cutoff)
+    ]
 
 
 def trim_spans(
@@ -446,8 +463,13 @@ def trim_trajectory(
     *,
     start_time: int | None = None,
     end_time: int | None = None,
+    uncounted: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> Any:
-    """Return a globally trimmed trajectory preserving original resource/scope groups."""
+    """Return a globally trimmed trajectory preserving original resource/scope groups.
+
+    Spans ``uncounted`` accepts do not take a place in ``max_spans``; they are
+    kept when they start no earlier than the oldest span that was.
+    """
 
     payload = normalize_otlp(_payload_for(value))
     if max_spans is None and start_time is None and end_time is None:
@@ -459,6 +481,7 @@ def trim_trajectory(
         max_spans,
         start_time=start_time,
         end_time=end_time,
+        uncounted=uncounted,
     )
     result = deepcopy(payload)
     for resource_span in result.get("resourceSpans") or []:
@@ -564,17 +587,24 @@ def _flatten_structured_message(message: Mapping[str, Any]) -> dict[str, Any]:
     """
 
     flat = {key: deepcopy(value) for key, value in message.items() if key != "parts"}
+    parts = message.get("parts") if isinstance(message.get("parts"), list) else []
+    # Reasoning is what the model thought, not what it said: it is read back
+    # as ``reasoning_content`` and never folded into ``content``.
+    reasoning_parts = [
+        part for part in parts if isinstance(part, Mapping) and part.get("type") == "reasoning"
+    ]
+    said_parts = [
+        part for part in parts if isinstance(part, Mapping) and part.get("type") != "reasoning"
+    ]
+    if reasoning_parts and "reasoning_content" not in flat:
+        flat["reasoning_content"] = _structured_parts_text(reasoning_parts)
     if not isinstance(flat.get("content"), str):
-        parts = message.get("parts")
-        contents = [
-            part["content"] for part in parts
-            if isinstance(part, Mapping) and "content" in part
-        ] if isinstance(parts, list) else []
+        contents = [part["content"] for part in said_parts if "content" in part]
         if len(contents) == 1 and not isinstance(contents[0], str):
             # Multimodal content rides in one part and comes back whole.
             flat["content"] = deepcopy(contents[0])
         elif contents:
-            flat["content"] = _structured_parts_text(parts)
+            flat["content"] = _structured_parts_text(said_parts)
     if "tool_calls" not in flat:
         tool_calls = _tool_calls_from_parts(message.get("parts"))
         if tool_calls:
@@ -604,6 +634,9 @@ def _structure_message(message: Mapping[str, Any]) -> dict[str, Any]:
     parts: list[dict[str, Any]] = []
     content = message.get("content")
     role = str(message.get("role") or "unknown")
+    reasoning = message.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        parts.append({"type": "reasoning", "content": reasoning})
     if role == "tool" and content is not None:
         response: dict[str, Any] = {
             "type": "tool_call_response",
@@ -650,7 +683,7 @@ def write_llm_exchange(
 
     The inverse of :func:`read_llm_exchange`, for the trajectory producers that
     build span attribute dictionaries by hand rather than through
-    instrumentation: offline extraction, the RL rail, and legacy conversion.
+    instrumentation: offline extraction and the RL and SFT rails.
 
     Args:
         prompts: Flat request messages, system turns included.
@@ -711,6 +744,17 @@ def _standard_prompt_messages(attrs: Mapping[str, Any]) -> list[dict[str, Any]]:
     return messages
 
 
+def is_compaction_span(span: Mapping[str, Any]) -> bool:
+    """Whether a model request summarised the conversation instead of continuing it.
+
+    Such a request's prompt is about the context, not part of it, so readers
+    that rebuild a conversation or train on its turns leave it out. It stays in
+    the trajectory: the window it produced is committed separately.
+    """
+
+    return span_attributes(span).get(semconv.OJ_REQUEST_PURPOSE) == "compaction"
+
+
 def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Read detached LLM messages from the standard GenAI attributes."""
 
@@ -720,12 +764,6 @@ def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], li
         _flatten_structured_message(message)
         for message in _message_list(attrs.get(semconv.GEN_AI_OUTPUT_MESSAGES))
     ]
-    tool_calls = _decode_structured_attribute(attrs.get(legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS))
-    if tool_calls not in (None, ""):
-        if completions:
-            completions[0].setdefault("tool_calls", tool_calls)
-        else:
-            completions.append({"role": "assistant", "tool_calls": tool_calls})
     return deepcopy(prompts), deepcopy(completions)
 
 
@@ -745,19 +783,15 @@ def read_tool_call(span: Mapping[str, Any]) -> dict[str, Any]:
     attrs = span_attributes(span)
     result: dict[str, Any] = {}
     name = attrs.get(semconv.GEN_AI_TOOL_NAME)
-    tool_id = attrs.get(semconv.GEN_AI_TOOL_CALL_ID) or attrs.get(legacy_semconv.LEGACY_GEN_AI_TOOL_ID)
+    tool_id = attrs.get(semconv.GEN_AI_TOOL_CALL_ID)
     if name is not None:
         result["name"] = deepcopy(name)
     if tool_id is not None:
         result["id"] = deepcopy(tool_id)
     if semconv.GEN_AI_TOOL_CALL_ARGUMENTS in attrs:
         result["input"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_CALL_ARGUMENTS])
-    elif legacy_semconv.LEGACY_GEN_AI_TOOL_INPUT in attrs:
-        result["input"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_INPUT])
     if semconv.GEN_AI_TOOL_CALL_RESULT in attrs:
         result["output"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_CALL_RESULT])
-    elif legacy_semconv.LEGACY_GEN_AI_TOOL_OUTPUT in attrs:
-        result["output"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_OUTPUT])
     error = read_span_error(span)
     if error is not None:
         result["error"] = error
@@ -768,36 +802,18 @@ def read_usage(span: Mapping[str, Any]) -> dict[str, int]:
     """Return token usage using observability's canonical names."""
 
     attrs = span_attributes(span)
-    mapping = (
-        (
-            "prompt_tokens",
-            (semconv.GEN_AI_USAGE_INPUT_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_PROMPT_TOKENS),
-        ),
-        (
-            "completion_tokens",
-            (semconv.GEN_AI_USAGE_OUTPUT_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_COMPLETION_TOKENS),
-        ),
-        ("total_tokens", (legacy_semconv.LEGACY_GEN_AI_USAGE_TOTAL_TOKENS,)),
-    )
     result: dict[str, int] = {}
-    for output_key, input_keys in mapping:
-        value = next((attrs[key] for key in input_keys if key in attrs), None)
-        if value is None:
-            continue
+    for output_key, key in (
+        ("prompt_tokens", semconv.GEN_AI_USAGE_INPUT_TOKENS),
+        ("completion_tokens", semconv.GEN_AI_USAGE_OUTPUT_TOKENS),
+    ):
         try:
-            result[output_key] = int(value)
-        except (TypeError, ValueError):
+            result[output_key] = int(attrs[key])
+        except (KeyError, TypeError, ValueError):
             continue
-    if "total_tokens" not in result and ("prompt_tokens" in result or "completion_tokens" in result):
+    if result:
         result["total_tokens"] = result.get("prompt_tokens", 0) + result.get("completion_tokens", 0)
     return result
-
-
-def _first_suffix_attribute(attrs: Mapping[str, Any], suffixes: Sequence[str]) -> Any:
-    for key in suffixes:
-        if key in attrs:
-            return deepcopy(attrs[key])
-    return None
 
 
 def _coerce_int_list(value: Any) -> list[int] | None:
@@ -835,19 +851,13 @@ def read_rl_fields(span: Mapping[str, Any]) -> dict[str, Any]:
 
     attrs = span_attributes(span)
     fields: dict[str, Any] = {}
-    for output_key, suffixes in (
-        (
-            "prompt_token_ids",
-            ("evolution.rl.prompt_token_ids", "openjiuwen.rl.prompt_token_ids"),
-        ),
-        (
-            "completion_token_ids",
-            ("evolution.rl.completion_token_ids", "openjiuwen.rl.completion_token_ids"),
-        ),
-        ("logprobs", ("evolution.rl.logprobs", "openjiuwen.rl.logprobs")),
-        ("reward", ("evolution.rl.reward", "openjiuwen.rl.reward")),
+    for output_key, key in (
+        ("prompt_token_ids", RL_PROMPT_TOKEN_IDS),
+        ("completion_token_ids", RL_COMPLETION_TOKEN_IDS),
+        ("logprobs", RL_LOGPROBS),
+        ("reward", RL_REWARD),
     ):
-        value = _first_suffix_attribute(attrs, suffixes)
+        value = deepcopy(attrs.get(key))
         if value is None:
             continue
         if output_key in {"prompt_token_ids", "completion_token_ids"}:
@@ -897,6 +907,7 @@ __all__ = [
     "decode_json_attribute",
     "decode_otlp_value",
     "encode_otlp_value",
+    "is_compaction_span",
     "iter_spans",
     "merge_payloads",
     "merge_spans",

@@ -251,7 +251,13 @@ class SkillFolderScanner:
                 parsed = self.parser.parse(
                     entrypoint,
                     root=root,
-                    capability_id_hint=entrypoint.parent.name,
+                    # A Skill's installed directory is the application-facing
+                    # identity.  Do not use the scan root's name when a root
+                    # SKILL.md is itself the entrypoint; in that layout the
+                    # manifest name remains the only implicit ID available.
+                    capability_id_hint=(
+                        entrypoint.parent.name if entrypoint.parent != root else None
+                    ),
                     capability_type=self.capability_type,
                     source=self.source,
                     display_path=relative_entrypoint,

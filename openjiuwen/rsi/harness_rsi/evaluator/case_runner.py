@@ -888,15 +888,11 @@ def _messages_from_role_trajectory(trajectory: dict[str, Any]) -> list[dict[str,
         if not isinstance(detail, dict):
             continue
         response_message = _normalize_trajectory_message(detail.get("response"))
-        legacy_assistant_message: dict[str, Any] = {}
         for message in detail.get("messages") or []:
             normalized = _normalize_trajectory_message(message)
-            if not normalized:
-                continue
-            if normalized.get("role") == "assistant":
-                legacy_assistant_message = normalized
-                continue
-            if normalized.get("role") not in {"system", "user"}:
+            # A prompt's assistant turns are earlier responses, already kept at
+            # their own step; a request that produced no response has none.
+            if not normalized or normalized.get("role") not in {"system", "user"}:
                 continue
             identity = json.dumps(normalized, ensure_ascii=False, sort_keys=True)
             if identity in seen_control_messages:
@@ -904,7 +900,6 @@ def _messages_from_role_trajectory(trajectory: dict[str, Any]) -> list[dict[str,
             seen_control_messages.add(identity)
             normalized["step_pointer"] = f"trajectory_step_{step_index + 1}:input"
             messages.append(normalized)
-        response_message = response_message or legacy_assistant_message
         if response_message:
             response_message["step_pointer"] = f"trajectory_step_{step_index + 1}:response"
             messages.append(response_message)

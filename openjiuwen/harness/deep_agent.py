@@ -7,9 +7,8 @@ import asyncio
 import copy
 import dataclasses
 import os
-import sys
 import uuid
-from contextlib import AbstractAsyncContextManager, suppress
+from contextlib import AbstractAsyncContextManager, aclosing, suppress
 import warnings
 from pathlib import Path
 from typing import (
@@ -27,6 +26,7 @@ from typing import (
 
 import anyio
 
+from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
@@ -42,10 +42,11 @@ from openjiuwen.core.controller.schema.event import (
 from openjiuwen.core.controller.schema.task import TaskStatus
 from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage
 from openjiuwen.core.foundation.tool import Tool, ToolCard
+from openjiuwen.core.kv_cache.kv_cache_metadata import KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV
 from openjiuwen.core.runner import Runner
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.session.stream.base import StreamMode
+from openjiuwen.core.session.stream.base import OutputSchema, StreamMode
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.rail.base import (
@@ -68,7 +69,10 @@ from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
 )
-from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.harness.schema.config import (
+    DeepAgentConfig,
+    resolve_inner_react_max_iterations,
+)
 from openjiuwen.harness.schema.stop_condition import (
     NoProgressAnswerEvaluator,
     StopConditionEvaluator,
@@ -239,6 +243,20 @@ _DEFAULT_DIRECT_TOOL_NAMES = frozenset(
 _ROUND_BOUNDARY = object()
 
 FreshInputContextFactory = Callable[[], AbstractAsyncContextManager[None]]
+
+
+def _bind_inner_react_max_iterations(
+    react_config: ReActAgentConfig,
+    max_iterations: Optional[int],
+) -> int:
+    """Apply the inner ReAct cap and log the resolved value once."""
+    resolved = resolve_inner_react_max_iterations(max_iterations)
+    react_config.max_iterations = resolved
+    if max_iterations is None:
+        logger.info("[DeepAgent] inner ReAct max_iterations=unbounded (default)")
+    else:
+        logger.info("[DeepAgent] inner ReAct max_iterations=%s (configured)", resolved)
+    return resolved
 
 
 def _render_identity_prompt(prompt_builder: SystemPromptBuilder, language: str) -> str:
@@ -579,9 +597,7 @@ class DeepAgent(BaseAgent):
                     if hasattr(client_cfg.client_provider, "value")
                     else client_cfg.client_provider
                 )
-        new_react_config.max_iterations = (
-            sys.maxsize if config.enable_task_loop else config.max_iterations
-        )
+        _bind_inner_react_max_iterations(new_react_config, config.max_iterations)
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         if config.kv_cache_affinity_config is not None:
@@ -666,7 +682,10 @@ class DeepAgent(BaseAgent):
         language = resolve_language(config.language)
         mode = resolve_mode(config.prompt_mode)
         self.prompt_attachment_manager.language = language
+        priority_registry = getattr(self.system_prompt_builder, "priority_registry", None)
         prompt_builder = SystemPromptBuilder(language=language, mode=mode)
+        if priority_registry is not None:
+            prompt_builder.set_priority_registry(priority_registry)
         if config.system_prompt:
             prompt_builder.add_section(PromptSection(
                 name=SectionName.IDENTITY,
@@ -1101,11 +1120,7 @@ class DeepAgent(BaseAgent):
         )
 
         react_config = ReActAgentConfig()
-        react_config.max_iterations = (
-            sys.maxsize
-            if cfg.enable_task_loop
-            else cfg.max_iterations
-        )
+        _bind_inner_react_max_iterations(react_config, cfg.max_iterations)
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
         if cfg.kv_cache_affinity_config is not None:
@@ -1829,6 +1844,35 @@ class DeepAgent(BaseAgent):
                     result = None
         return result
 
+    @staticmethod
+    def _finalized_answer_chunk(chunk: Any, result: dict[str, Any]) -> Any:
+        """Keep transport metadata while replacing the pre-rail result."""
+        if isinstance(chunk, dict):
+            return {**chunk, "payload": result}
+        if isinstance(chunk, OutputSchema):
+            return chunk.model_copy(update={"payload": result})
+        return OutputSchema(type="answer", index=0, payload=result)
+
+    async def _prepare_single_round_session(
+        self, inputs: InvokeInputs, session: Session | None,
+    ) -> Session | None:
+        if session is not None or not inputs.conversation_id:
+            return session
+        if self._deep_config is not None and self._deep_config.enable_task_loop:
+            if not self._is_resume_input(inputs):
+                return None  # Task-loop sessions remain caller-owned.
+        envs = {}
+        if inputs.parent_session_id:
+            envs[KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV] = inputs.parent_session_id
+        session = create_agent_session(
+            session_id=inputs.conversation_id,
+            card=self.card,
+            envs=envs,
+        )
+        # Outer rails and the inner ReAct must see the same restored state.
+        await session.pre_run(inputs=self._to_effective_inputs(inputs))
+        return session
+
     def add_rail(self, rail: AgentRail) -> "DeepAgent":
         """Synchronously queue a rail for registration.
 
@@ -2241,17 +2285,17 @@ class DeepAgent(BaseAgent):
         for event, callback in callbacks.items():
             if event in _BRIDGE_EVENTS:
                 if self._react_agent is not None:
-                    await self._react_agent.register_callback(event, callback, rail.priority)
+                    await self._react_agent.register_callback(event, callback, rail.callback_priority(event))
                 continue
 
             if event in _OUTER_ONLY_EVENTS or event in _DEEP_EVENTS:
-                await self.register_callback(event, callback, rail.priority)
+                await self.register_callback(event, callback, rail.callback_priority(event))
                 continue
 
             logger.warning(
                 f"Unknown rail event {event}, registering on outer DeepAgent"
             )
-            await self.register_callback(event, callback, rail.priority)
+            await self.register_callback(event, callback, rail.callback_priority(event))
 
         self._registered_rails.append(rail)
 
@@ -2978,12 +3022,11 @@ class DeepAgent(BaseAgent):
                 error_msg="DeepAgent not configured. Call configure() first.",
             )
 
-        async for chunk in self._react_agent.stream(
-            self._to_effective_inputs(modified),
-            session,
-            stream_modes,
-        ):
-            yield chunk
+        async with aclosing(self._react_agent.stream(
+            self._to_effective_inputs(modified), session, stream_modes,
+        )) as chunks:
+            async for chunk in chunks:
+                yield chunk
 
     async def _sync_expert_role_attachment(
         self,
@@ -3057,6 +3100,8 @@ class DeepAgent(BaseAgent):
             )
 
         invoke_inputs = self._normalize_inputs(inputs)
+        owns_session = session is None
+        session = await self._prepare_single_round_session(invoke_inputs, session)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
 
         self._invoke_active = True
@@ -3080,9 +3125,11 @@ class DeepAgent(BaseAgent):
             if session is not None:
                 self.save_state(session)
                 self.clear_state(session)
-            return result
+            return invoke_inputs.result
         finally:
             self._invoke_active = False
+            if owns_session and session is not None:
+                await session.post_run()
 
     async def stream(
         self,
@@ -3101,12 +3148,16 @@ class DeepAgent(BaseAgent):
             )
 
         invoke_inputs = self._normalize_inputs(inputs)
+        owns_session = session is None
+        session = await self._prepare_single_round_session(invoke_inputs, session)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
 
         self._invoke_active = True
         try:
             stream_result: Optional[Dict[str, Any]] = None
             stream_output_parts: List[str] = []
+            terminal_chunk = None
+            interrupted = False
             async with ctx.lifecycle(
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
@@ -3117,27 +3168,24 @@ class DeepAgent(BaseAgent):
                     and self._deep_config.enable_task_loop
                     and not self._is_resume_input(invoke_inputs)
                 ):
-                    async for chunk in self._run_task_loop_stream(
-                        ctx, session, stream_modes
-                    ):
-                        chunk_result = self._result_from_stream_chunk(
-                            chunk, stream_output_parts
-                        )
-                        if chunk_result is not None:
-                            stream_result = chunk_result
-                        yield chunk
+                    chunks = self._run_task_loop_stream(ctx, session, stream_modes)
                 else:
-                    async for chunk in self._run_single_round_stream(
-                        ctx, session, stream_modes
-                    ):
-                        chunk_result = self._result_from_stream_chunk(
-                            chunk, stream_output_parts
-                        )
+                    chunks = self._run_single_round_stream(ctx, session, stream_modes)
+                async with aclosing(chunks):
+                    async for chunk in chunks:
+                        chunk_result = self._result_from_stream_chunk(chunk, stream_output_parts)
                         if chunk_result is not None:
                             stream_result = chunk_result
-                        yield chunk
+                            terminal_chunk = chunk
+                        else:
+                            chunk_type = chunk.get("type") if isinstance(chunk, dict) else getattr(chunk, "type", None)
+                            interrupted = interrupted or chunk_type == INTERACTION
+                            if chunk_type == INTERACTION:
+                                stream_result = None
+                                terminal_chunk = None
+                            yield chunk
 
-                if stream_result is None and stream_output_parts:
+                if stream_result is None and stream_output_parts and not interrupted:
                     stream_result = {
                         "output": "".join(stream_output_parts),
                         "result_type": "answer",
@@ -3148,8 +3196,14 @@ class DeepAgent(BaseAgent):
             if session is not None:
                 self.save_state(session)
                 self.clear_state(session)
+                if owns_session:
+                    await session.post_run()
+            if invoke_inputs.result is not None:
+                yield self._finalized_answer_chunk(terminal_chunk, invoke_inputs.result)
         finally:
             self._invoke_active = False
+            if owns_session and session is not None:
+                await session.post_run()
 
     async def follow_up(
         self,
@@ -3519,8 +3573,6 @@ class DeepAgent(BaseAgent):
                 raise RuntimeError("interaction_terminated")
 
             if session is None:
-                from openjiuwen.core.session.agent import create_agent_session
-
                 session = create_agent_session(
                     session_id="default",
                     card=getattr(self, "card", None),

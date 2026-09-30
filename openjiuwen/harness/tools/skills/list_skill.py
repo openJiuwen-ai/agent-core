@@ -85,6 +85,15 @@ class ListSkillTool(Tool):
                 error=str(exc),
             )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render one skill per line with its description and SKILL.md path."""
+        if not output.success:
+            return super().render_for_llm(output)
+        data = output.data
+        lines = [f"- {skill['name']}: {skill['description']} ({skill['skill_md_path']})" for skill in data["skills"]]
+        text = "\n".join(lines) or "No matching skills."
+        return f"{data['message']}\n{text}" if data.get("message") else text
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         if False:
             yield None

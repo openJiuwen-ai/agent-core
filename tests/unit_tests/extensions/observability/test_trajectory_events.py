@@ -31,7 +31,6 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_CONVERSATION_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
-    OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_EVENT_ID,
     OJ_TRAJECTORY_EVENT_KIND,
     OJ_TRAJECTORY_PAYLOAD,
@@ -43,7 +42,6 @@ from openjiuwen.extensions.observability.semconv import (
 )
 from openjiuwen.extensions.observability.span_context import (
     clear_root_span,
-    queue_context_window_compaction,
     reset_state,
     set_root_span,
     set_current_agent_span,
@@ -51,6 +49,7 @@ from openjiuwen.extensions.observability.span_context import (
 from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload, AskUserRail
 from openjiuwen.harness.tools.ask_user import AskUserTool
 from openjiuwen.extensions.observability.trajectory_events import (
+    emit_compaction_window_commit,
     emit_context_window_commit,
     emit_native_trajectory_event,
 )
@@ -207,7 +206,6 @@ async def test_canonical_request_and_v2_event_survive_legacy_attribute_pressure(
     )
     attrs = _attrs(event_span)
     payload = _payload(event_span)
-    assert attrs[OJ_TRACE_SCHEMA_VERSION] == "2"
     assert attrs[OJ_TRAJECTORY_SCHEMA_VERSION] == "2"
     assert attrs[OJ_TRAJECTORY_EVENT_KIND] == "context.window.commit"
     assert len(attrs[OJ_TRAJECTORY_SEQUENCE_EPOCH]) == 32
@@ -471,33 +469,25 @@ def test_context_window_first_commit_after_epoch_rotation_is_a_full_baseline() -
         assert payload["delta"] == []
 
 
-def test_epoch_baseline_preserves_compaction_correlation_independently() -> None:
+def test_compaction_before_any_request_commits_a_baseline_with_its_correlation() -> None:
     exporter = InMemorySpanExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("trajectory-baseline-compaction-test")
     parent = tracer.start_span(
-        "llm.call",
+        "agent.run",
         attributes={
             GEN_AI_CONVERSATION_ID: "baseline-compaction-session",
             OJ_EXECUTION_SUBJECT_ID: "baseline-compaction-subject",
-            OJ_REQUEST_ID: "request-1",
-            OJ_STEP_ID: "step-1",
         },
     )
     try:
-        queued = queue_context_window_compaction(
-            session_id="baseline-compaction-session",
-            subject_id="baseline-compaction-subject",
-            step_id="step-1",
-            operation_id="operation-1",
-        )
-        assert queued is True
-        emit_context_window_commit(
+        emit_compaction_window_commit(
             tracer=tracer,
-            llm_span=parent,
+            parent_span=parent,
             messages=[{"message_id": "summary", "role": "user", "content": "compacted"}],
-            request_purpose="assistant",
+            operation_id="operation-1",
+            model_requests=[],
         )
     finally:
         parent.end()
@@ -512,7 +502,107 @@ def test_epoch_baseline_preserves_compaction_correlation_independently() -> None
     assert payload["caused_by_operation_id"] == "operation-1"
     assert payload["input_window_id"] is None
     assert payload["output_window_id"] == payload["window_id"]
+    assert payload["model_requests"] == []
+    assert payload["request_purpose"] == "compaction"
     assert payload["delta"] == []
+
+
+def test_compaction_commits_its_output_window_and_the_next_request_continues_from_it() -> None:
+    """A compaction is a turn of its own; the window changes when it completes.
+
+    The commit hangs off the live run span (the compaction's own model call
+    has ended by then) and names that call through ``model_requests``. It
+    keeps the previous window's request system slot, removes what the
+    compaction dropped, inserts the summary, and the next real request is a
+    plain delta on top of it -- not a rebuilt window and not a guess about
+    which compaction it followed.
+    """
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("trajectory-compaction-turn-test")
+    attributes = {
+        GEN_AI_CONVERSATION_ID: "compaction-turn-session",
+        OJ_EXECUTION_SUBJECT_ID: "main",
+    }
+    system_slot = {
+        "message_id": "openjiuwen:request-system-slot:0",
+        "role": "system",
+        "content": "rules",
+    }
+    try:
+        before = tracer.start_span(
+            "llm.call",
+            attributes={**attributes, OJ_REQUEST_ID: "request-1", OJ_STEP_ID: "step-1"},
+        )
+        emit_context_window_commit(
+            tracer=tracer,
+            llm_span=before,
+            messages=[
+                system_slot,
+                {"message_id": "m1", "role": "user", "content": "hello"},
+                {"message_id": "m2", "role": "assistant", "content": "hi"},
+                {"message_id": "m3", "role": "user", "content": "more"},
+            ],
+            request_purpose="assistant",
+        )
+        before.end()
+        run = tracer.start_span("agent.run", attributes=attributes)
+        emit_compaction_window_commit(
+            tracer=tracer,
+            parent_span=run,
+            messages=[
+                {"message_id": "summary", "role": "user", "content": "compacted"},
+                {"message_id": "m3", "role": "user", "content": "more"},
+            ],
+            operation_id="manual-operation",
+            model_requests=[{"request_id": "request-c", "inference_id": "inference-c"}],
+        )
+        run.end()
+        after = tracer.start_span(
+            "llm.call",
+            attributes={**attributes, OJ_REQUEST_ID: "request-2", OJ_STEP_ID: "step-7"},
+        )
+        emit_context_window_commit(
+            tracer=tracer,
+            llm_span=after,
+            messages=[
+                system_slot,
+                {"message_id": "summary", "role": "user", "content": "compacted"},
+                {"message_id": "m3", "role": "user", "content": "more"},
+                {"message_id": "m4", "role": "user", "content": "next"},
+            ],
+            request_purpose="assistant",
+        )
+        after.end()
+    finally:
+        provider.shutdown()
+        reset_state()
+
+    commits = [span for span in exporter.get_finished_spans() if span.name == "context.window.commit"]
+    assert [_attrs(span)[OJ_TRAJECTORY_SUBJECT_SEQUENCE] for span in commits] == [1, 2, 3]
+    first, compaction, following = (_payload(span) for span in commits)
+
+    assert commits[1].parent.span_id == run.get_span_context().span_id
+    assert compaction["transition_kind"] == "compaction"
+    assert compaction["request_purpose"] == "compaction"
+    assert compaction["caused_by_operation_id"] == "manual-operation"
+    assert compaction["base_window_id"] == first["window_id"]
+    assert compaction["input_window_id"] == first["window_id"]
+    assert compaction["output_window_id"] == compaction["window_id"]
+    assert compaction["model_requests"] == [{"request_id": "request-c", "inference_id": "inference-c"}]
+    assert [(item["op"], item["message_id"]) for item in compaction["delta"]] == [
+        ("remove", "m1"),
+        ("remove", "m2"),
+        ("insert", "summary"),
+        ("move", "m3"),
+    ]
+
+    assert following["base_window_id"] == compaction["window_id"]
+    assert "transition_kind" not in following
+    assert [(item["op"], item["message_id"]) for item in following["delta"]] == [
+        ("insert", "m4"),
+    ]
 
 
 def test_native_events_share_one_epoch_and_keep_subject_sequences_dense_across_traces() -> None:
@@ -538,19 +628,19 @@ def test_native_events_share_one_epoch_and_keep_subject_sequences_dense_across_t
         emit_native_trajectory_event(
             tracer=tracer,
             parent_span=parents[0],
-            event_kind="test.first",
+            event_kind="ask_user.requested",
             payload={"index": 1},
         )
         emit_native_trajectory_event(
             tracer=tracer,
             parent_span=parents[1],
-            event_kind="test.second",
+            event_kind="ask_user.requested",
             payload={"index": 2},
         )
         emit_native_trajectory_event(
             tracer=tracer,
             parent_span=parents[2],
-            event_kind="test.other-subject",
+            event_kind="ask_user.requested",
             payload={"index": 3},
         )
     finally:
@@ -559,7 +649,7 @@ def test_native_events_share_one_epoch_and_keep_subject_sequences_dense_across_t
         provider.shutdown()
         reset_state()
 
-    events = [span for span in exporter.get_finished_spans() if span.name.startswith("test.")]
+    events = [span for span in exporter.get_finished_spans() if span.name == "ask_user.requested"]
     assert len({_attrs(span)[OJ_TRAJECTORY_SEQUENCE_EPOCH] for span in events}) == 1
     assert [_attrs(span)[OJ_TRAJECTORY_SUBJECT_SEQUENCE] for span in events] == [1, 2, 1]
 
@@ -580,14 +670,14 @@ def test_reset_state_rotates_epoch_and_restarts_subject_sequence() -> None:
         emit_native_trajectory_event(
             tracer=tracer,
             parent_span=parent,
-            event_kind="test.before-reset",
+            event_kind="ask_user.requested",
             payload={},
         )
         reset_state()
         emit_native_trajectory_event(
             tracer=tracer,
             parent_span=parent,
-            event_kind="test.after-reset",
+            event_kind="ask_user.requested",
             payload={},
         )
     finally:
@@ -596,7 +686,7 @@ def test_reset_state_rotates_epoch_and_restarts_subject_sequence() -> None:
         reset_state()
 
     before, after = [
-        span for span in exporter.get_finished_spans() if span.name.startswith("test.")
+        span for span in exporter.get_finished_spans() if span.name == "ask_user.requested"
     ]
     before_attrs = _attrs(before)
     after_attrs = _attrs(after)
@@ -664,6 +754,23 @@ async def test_concurrent_subjects_have_independent_sequence_and_window_state() 
             for operation in second["delta"]
             if "message" in operation
         )
+
+
+def test_unknown_event_kind_is_refused_at_emit() -> None:
+    provider = TracerProvider()
+    tracer = provider.get_tracer("trajectory-unknown-kind-test")
+    parent = tracer.start_span("agent.root")
+    try:
+        with pytest.raises(ValueError, match="unknown trajectory event kind"):
+            emit_native_trajectory_event(
+                tracer=tracer,
+                parent_span=parent,
+                event_kind="context.window.snapshot",
+                payload={},
+            )
+    finally:
+        parent.end()
+        provider.shutdown()
 
 
 def test_langfuse_only_span_is_not_a_native_v2_event() -> None:

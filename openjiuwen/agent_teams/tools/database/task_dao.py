@@ -79,6 +79,26 @@ _RESETTABLE_STATUSES = (
     TaskStatus.IN_REVIEW.value,
 )
 
+# Predecessor statuses from which a task may legally move to a terminal status.
+# Used by the CAS termination helper to ensure only the current holder/round can
+# complete or cancel a task. Mirrors TASK_TRANSITIONS:
+# - COMPLETED may only be reached from IN_PROGRESS and IN_REVIEW.
+# - CANCELLED may be reached from any non-terminal active status.
+_TERMINABLE_PREDECESSORS: Dict[TaskStatus, frozenset[str]] = {
+    TaskStatus.COMPLETED: frozenset(
+        (TaskStatus.IN_PROGRESS.value, TaskStatus.IN_REVIEW.value)
+    ),
+    TaskStatus.CANCELLED: frozenset(
+        (
+            TaskStatus.PENDING.value,
+            TaskStatus.BLOCKED.value,
+            TaskStatus.PLANNING.value,
+            TaskStatus.IN_PROGRESS.value,
+            TaskStatus.IN_REVIEW.value,
+        )
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Pure SQL helpers (no instance state).
@@ -141,34 +161,68 @@ async def _terminate_task_in_session(
     new_status: TaskStatus,
     now: int,
 ) -> Optional[tuple[TeamTaskBase, List[TeamTaskBase]]]:
-    """Terminate a task and propagate dependency resolution downstream."""
+    """Terminate a task and propagate dependency resolution downstream.
+
+    Uses a CAS (compare-and-set) UPDATE so that only a task whose current
+    status is a legal predecessor of ``new_status`` is moved. If another
+    flow has already reset/reassigned the task, the update matches no rows;
+    the helper returns ``None`` and the caller treats the operation as a
+    no-op race. This prevents recovery / pause / reset flows from racing
+    with an old completion/cancellation attempt (issue #4318).
+    """
     if new_status not in (TaskStatus.COMPLETED, TaskStatus.CANCELLED):
         raise ValueError(f"_terminate_task_in_session expects a terminal status, got {new_status}")
 
     team_task_model = _get_task_model()
     task_dependency_model = _get_task_dependency_model()
 
-    result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
-    task = result.scalar_one_or_none()
-    if task is None:
-        team_logger.error("Task %s not found", task_id)
-        return None
-
-    if task.status == new_status.value:
-        team_logger.debug("Task %s already %s", task_id, new_status.value)
-        return task, []
-
-    if not is_valid_transition(TaskStatus(task.status), new_status, TASK_TRANSITIONS):
-        team_logger.error(
-            "Invalid state transition for task %s: %s -> %s",
-            task_id,
-            task.status,
-            new_status.value,
+    # First, attempt the CAS status flip. The set of valid predecessor
+    # statuses depends on the target terminal status and mirrors
+    # TASK_TRANSITIONS.
+    terminable_predecessors = _TERMINABLE_PREDECESSORS[new_status]
+    cas_result = await session.execute(
+        update(team_task_model)
+        .where(
+            team_task_model.task_id == task_id,
+            team_task_model.status.in_(terminable_predecessors),
         )
+        .values(status=new_status.value, updated_at=now)
+    )
+
+    if cas_result.rowcount == 0:
+        # The task is either missing, already in the target terminal status,
+        # or its status changed concurrently (e.g. reset to PENDING). Refresh
+        # to return an precise, informative outcome.
+        result = await session.execute(
+            select(team_task_model).where(team_task_model.task_id == task_id)
+        )
+        task = result.scalar_one_or_none()
+        if task is None:
+            team_logger.error("Task %s not found", task_id)
+            return None
+        if task.status == new_status.value:
+            team_logger.debug("Task %s already %s", task_id, new_status.value)
+            return task, []
+        # Recovery / reset moved the task out from under us. This is an
+        # expected race on pause/resume, not an error.
+        if task.status == TaskStatus.PENDING.value:
+            team_logger.debug(
+                "Task %s is pending (released); ignoring terminal %s",
+                task_id,
+                new_status.value,
+            )
+        else:
+            team_logger.warning(
+                "Task %s status changed concurrently to %s; ignoring terminal %s",
+                task_id,
+                task.status,
+                new_status.value,
+            )
         return None
 
-    task.status = new_status.value
-    task.updated_at = now
+    # Row was updated; load it to run the dependency cascade in the same session.
+    result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
+    task = result.scalar_one()
     team_logger.info("Task %s %s at %s", task_id, new_status.value, now)
 
     dep_update_result = await session.execute(

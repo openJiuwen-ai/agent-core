@@ -1,3 +1,6 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 """PersonalContext-only filesystem tool assembly and bounded text search."""
 
 from __future__ import annotations
@@ -8,9 +11,10 @@ import ntpath
 import os
 import re
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Sequence
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
+from openjiuwen.core.foundation.tool.base import render_tool_output
 from openjiuwen.core.foundation.tool.function.function import LocalFunction
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.personal_context.config import (
@@ -32,6 +36,7 @@ from openjiuwen.harness.tools.filesystem import (
     ListDirTool,
     ReadFileTool,
     WriteFileTool,
+    render_grep_output,
 )
 
 _DEFAULT_HEAD_LIMIT = 250
@@ -173,7 +178,7 @@ def _make_personal_context_write_file_tool(
             return ToolOutput(success=False, error=error)
         return await delegate.invoke(inputs)
 
-    return LocalFunction(card=delegate.card, func=write_file)
+    return LocalFunction(card=delegate.card, func=write_file, render=delegate.render_for_llm)
 
 
 def _make_personal_context_edit_file_tool(
@@ -188,7 +193,7 @@ def _make_personal_context_edit_file_tool(
             return ToolOutput(success=False, error=error)
         return await delegate.invoke(inputs)
 
-    return LocalFunction(card=delegate.card, func=edit_file)
+    return LocalFunction(card=delegate.card, func=edit_file, render=delegate.render_for_llm)
 
 
 def _safe_relative_directory(sandbox: Path, directory: Path) -> str:
@@ -567,7 +572,7 @@ def _make_bounded_grep_tool(sandbox: Path) -> LocalFunction:
         "en",
         options=ToolCardBuildOptions(parallel_safe=True),
     )
-    return LocalFunction(card=card, func=grep)
+    return LocalFunction(card=card, func=grep, render=render_grep_output)
 
 
 def _assert_markdown_move_tree(source: Path) -> str:
@@ -602,9 +607,6 @@ def _assert_markdown_move_tree(source: Path) -> str:
 def _move_context_path(
     sandbox: Path,
     inputs: dict[str, Any],
-    *,
-    max_pages_per_directory: int = DEFAULT_MAX_PAGES_PER_DIRECTORY,
-    max_subdirectories_per_directory: int = DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
 ) -> ToolOutput:
     try:
         sandbox_root = sandbox.resolve(strict=True)
@@ -640,30 +642,6 @@ def _move_context_path(
             raise ValueError("Context directory cannot be moved into its own subtree")
         if source_kind == "file" and destination_parent == context_root:
             raise ValueError("ordinary Markdown pages cannot be placed directly under context/")
-        if destination_parent != source.parent:
-            if source_kind == "file":
-                ordinary_page_counts = []
-                for matched_entry in _directory_entries(destination_parent):
-                    if not (_path_is_file(matched_entry)):
-                        continue
-                    if _path_is_link_or_reparse(matched_entry):
-                        continue
-                    if matched_entry.suffix.casefold() != ".md":
-                        continue
-                    if matched_entry.name.casefold() == "description.md":
-                        continue
-                    ordinary_page_counts.append(1)
-                ordinary_pages = sum(ordinary_page_counts)
-                if ordinary_pages >= max_pages_per_directory:
-                    raise ValueError("Context destination directory has reached its Markdown page capacity")
-            else:
-                child_directories = sum(
-                    1
-                    for entry in _directory_entries(destination_parent)
-                    if _path_is_dir(entry) and not _path_is_link_or_reparse(entry)
-                )
-                if child_directories >= max_subdirectories_per_directory:
-                    raise ValueError("Context destination directory has reached its subdirectory capacity")
 
         os.replace(_extended_path(source), _extended_path(destination))
     except ValueError as exc:
@@ -681,19 +659,22 @@ def _move_context_path(
     )
 
 
-def _make_move_path_tool(
-    sandbox: Path,
-    *,
-    max_pages_per_directory: int = DEFAULT_MAX_PAGES_PER_DIRECTORY,
-    max_subdirectories_per_directory: int = DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
-) -> LocalFunction:
+def _render_move_path_output(output: ToolOutput) -> str:
+    if not output.success:
+        return render_tool_output(output)
+    data = output.data
+    return (
+        f"Moved {data['kind']} context/{data['source_path']} to context/{data['destination_path']}; "
+        "links were not rewritten."
+    )
+
+
+def _make_move_path_tool(sandbox: Path) -> LocalFunction:
     async def move_path(**inputs: Any) -> ToolOutput:
         return await asyncio.to_thread(
             _move_context_path,
             sandbox,
             inputs,
-            max_pages_per_directory=max_pages_per_directory,
-            max_subdirectories_per_directory=max_subdirectories_per_directory,
         )
 
     return LocalFunction(
@@ -717,6 +698,145 @@ def _make_move_path_tool(
             idempotent=False,
         ),
         func=move_path,
+        render=_render_move_path_output,
+    )
+
+
+_RECLUSTER_MAX_SCOPE_PATHS = 20
+_RECLUSTER_MAX_MAPPING_ENTRIES = 2_000
+
+# plan: scope paths -> proposed page-to-path mapping; apply: edited mapping +
+# scope -> changed paths.  Both are pipeline-provided so the tool never
+# reimplements placement machinery.
+_ReclusterPlan = Callable[[Sequence[str], Sequence[str] | None], Awaitable[Mapping[str, Any]]]
+_ReclusterApply = Callable[[Mapping[str, str], Sequence[str]], Awaitable[set[str]]]
+
+
+def _make_recluster_context_tool(plan: _ReclusterPlan, apply: _ReclusterApply) -> LocalFunction:
+    async def recluster_context(**inputs: Any) -> ToolOutput:
+        scope_value = inputs.get("scope_paths")
+        if scope_value is None:
+            scope_paths = ["."]
+        elif (
+            isinstance(scope_value, list)
+            and 0 < len(scope_value) <= _RECLUSTER_MAX_SCOPE_PATHS
+            and all(isinstance(item, str) for item in scope_value)
+        ):
+            scope_paths = [item for item in (str(item).strip() for item in scope_value) if item]
+        else:
+            return ToolOutput(
+                success=False,
+                error="scope_paths must be a list of at most 20 context-relative directory paths",
+            )
+        if not scope_paths:
+            return ToolOutput(success=False, error="scope_paths must name at least one directory")
+        group_value = inputs.get("group_names")
+        if group_value is None:
+            group_names = None
+        elif (
+            isinstance(group_value, list)
+            and 0 < len(group_value) <= _RECLUSTER_MAX_SCOPE_PATHS
+            and all(isinstance(item, str) and item.strip() for item in group_value)
+        ):
+            group_names = [str(item).strip() for item in group_value]
+        else:
+            return ToolOutput(
+                success=False,
+                error="group_names must be a list of at most 20 non-empty group directory names",
+            )
+        mapping_value = inputs.get("mapping")
+        if mapping_value is None:
+            try:
+                result = await plan(scope_paths, group_names)
+            except Exception as exc:
+                return ToolOutput(success=False, error=str(exc)[:300])
+            mapping = dict(result.get("mapping", {}))
+            unassigned = [str(item) for item in result.get("unassigned", [])]
+            over_capacity = [str(item) for item in result.get("over_capacity", [])]
+            if not mapping:
+                guidance = "选定范围内可整理的项目过少或无需调整。"
+            else:
+                guidance = (
+                    "审查并按需修改 mapping（键保持不动，仅调整目标路径；不带 .md 后缀的键值对表示整目录移动，"
+                    "其页面与 description.md 会一起迁移），再用 mapping 参数调用本工具以原子应用。"
+                )
+                if unassigned:
+                    guidance += " unassigned 中的条目与任何组都不足够相关，已留在原处；可将它们手动加入 mapping。"
+                if over_capacity:
+                    guidance += " over_capacity_groups 中的组预计超出容量，请先拆分或改名再应用。"
+            return ToolOutput(
+                success=True,
+                data={
+                    "phase": "planned",
+                    "entry_count": len(mapping),
+                    "mapping": mapping,
+                    "unassigned": unassigned,
+                    "over_capacity_groups": over_capacity,
+                    "guidance": guidance,
+                },
+            )
+        if not isinstance(mapping_value, dict) or not mapping_value:
+            return ToolOutput(success=False, error="mapping must be a non-empty JSON object of page/directory moves")
+        if len(mapping_value) > _RECLUSTER_MAX_MAPPING_ENTRIES:
+            return ToolOutput(success=False, error="mapping exceeds the 2000 entry limit")
+        if not all(isinstance(old, str) and isinstance(new, str) for old, new in mapping_value.items()):
+            return ToolOutput(success=False, error="mapping keys and values must all be strings")
+        try:
+            changed = await apply(mapping_value, scope_paths)
+        except Exception as exc:
+            return ToolOutput(success=False, error=str(exc)[:300])
+        return ToolOutput(
+            success=True,
+            data={"phase": "applied", "changed_count": len(changed)},
+        )
+
+    return LocalFunction(
+        card=ToolCard(
+            id="personal_context_recluster_context",
+            name="recluster_context",
+            description=(
+                "Reorganize Context pages and whole directories under selected scope directories. Call without "
+                "mapping to compute a proposed JSON mapping: keys are page paths or directory paths directly "
+                "under a scope, values are their targets (a directory value moves the whole directory, its "
+                "pages and description.md included). Pass group_names to dictate the target groups yourself — "
+                "a name matching an in-scope directory files peers into that existing directory, any other "
+                "name creates a new group directory; items matching no group stay put and are listed under "
+                "unassigned, and groups projected to exceed capacity are listed under over_capacity_groups. "
+                "Without group_names, semantic clustering proposes the groups. Review and edit the JSON (keep "
+                "keys unchanged, adjust only target paths), then call again with the edited mapping to apply "
+                "all moves atomically with links and description.md navigation rewritten. Use it to regroup "
+                "content when directory capacity validation requires a new hierarchy."
+            ),
+            input_params={
+                "type": "object",
+                "properties": {
+                    "scope_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Context-relative directories to reorganize; defaults to the whole context.",
+                    },
+                    "group_names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Target group directory names for the planning phase (at most 20); omit to let "
+                            "semantic clustering propose the groups."
+                        ),
+                    },
+                    "mapping": {
+                        "type": "object",
+                        "description": (
+                            "Edited page/directory-to-target mapping from the planning phase; omit to plan."
+                        ),
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+            parallel_safe=False,
+            idempotent=False,
+        ),
+        func=recluster_context,
     )
 
 
@@ -724,24 +844,23 @@ def make_personal_context_file_tools(
     operation: SysOperation,
     sandbox: Path,
     *,
-    max_pages_per_directory: int = DEFAULT_MAX_PAGES_PER_DIRECTORY,
-    max_subdirectories_per_directory: int = DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
+    recluster_plan: _ReclusterPlan | None = None,
+    recluster_apply: _ReclusterApply | None = None,
 ) -> list[Tool | ToolCard]:
     """Return the exact model-visible file tool set for PersonalContext."""
 
-    return [
+    tools: list[Tool | ToolCard] = [
         ReadFileTool(operation, "en", enable_image_multimodal=False),
         _make_personal_context_write_file_tool(operation, sandbox),
         _make_personal_context_edit_file_tool(operation, sandbox),
         GlobTool(operation, "en"),
         ListDirTool(operation, "en"),
         _make_bounded_grep_tool(sandbox),
-        _make_move_path_tool(
-            sandbox,
-            max_pages_per_directory=max_pages_per_directory,
-            max_subdirectories_per_directory=max_subdirectories_per_directory,
-        ),
+        _make_move_path_tool(sandbox),
     ]
+    if recluster_plan is not None and recluster_apply is not None:
+        tools.append(_make_recluster_context_tool(recluster_plan, recluster_apply))
+    return tools
 
 
 __all__ = ["make_personal_context_file_tools"]

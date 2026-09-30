@@ -46,7 +46,11 @@
    `tests/unit_tests/harness/test_deep_agent_rail_event_routing.py` 强制三个集合完全覆盖
    `set(AgentCallbackEvent)` 且互不相交。
 3. **priority 数值越大越先**；排序稳定，同 priority 保持注册顺序。`register_callback`
-   默认 priority 是 **100**。同一个数决定 init 顺序和回调链顺序。
+   默认 priority 是 **100**。同一个数决定 init 顺序和回调链顺序。唯一的例外入口是
+   `AgentRail.callback_priority(event)`：默认返回 `priority`，rail 可只为某一个 hook 换位置
+   而不改变 init 顺序。当前仅 `EvolutionRail` 用它：其 `after_tool_call` 以
+   `priority - 1_000_000` 注册，排在该链所有回调之后——它读取的 tool span 由观测 rail（10）
+   在同一链中结束，且记录的是其它回调可能改写后的结果。
 4. **priority 梯队是契约**（当前梯队，改它必须先 grep 是否有别的 rail 在注释里点名）：
    `100 SysOperationRail` → `95 McpRail / SkillUseRail / SubagentRail` →
    `90 TaskPlanningRail / ProgressiveToolRail / BaseInterruptRail / PermissionInterruptRail /

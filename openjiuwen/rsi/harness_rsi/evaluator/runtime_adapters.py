@@ -204,7 +204,7 @@ class RSISkillUseRail(SkillUseRail):
             },
         )
 
-    def _build_skills_section(self, skills=None):
+    def _build_skills_section(self, skills=None, query: str | None = None):
         skills = self.skills if skills is None else skills
         if self.skill_mode == self.SKILL_MODE_AUTO_LIST:
             content = (

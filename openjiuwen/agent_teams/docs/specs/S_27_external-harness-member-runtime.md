@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/spawn.py`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
-| 最近一次修订日期 | 2026-09-09 |
-| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md |
+| 最近一次修订日期 | 2026-09-18 |
+| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md |
 
 ## 范围 / 边界
 
@@ -44,10 +44,12 @@
    `UnsupportedHarnessCapabilityError`。
 7. **团队上下文搭车语义不变**。`send` 在投递前把 `TeamContextTracker.pending_text` 拼到正文最前，
    投递成功后才 `commit`；`announce_team_context` 单独投递；`InteractiveInput` 不搭车。
-8. **provider-private 观测接线不进公共协议**。Codex `notification_observer` 与 Claude
-   `transport_factory` 只在 `build_cli_runtime` 构造 harness 时注入；span bridge 经
-   `bind_span_bridge` 绑定，按 Protocol（`MemberSpanBridge` / `ChunkRecordingSpanBridge` /
-   `NativeObservationSpanBridge`）而非 `hasattr` 分派。
+8. **轨迹观测只消费协议事件**。runtime 不接任何厂商观测通道；`bind_trajectory_recorder` 绑定
+   `HarnessTrajectoryRecorder` 后，`_host_context` 声明 `HostCapability.MODEL_REQUEST_OBSERVATION`，
+   每个 envelope 原样交给 recorder，`TurnLifecycleEvent(STARTED)` 前先经 `resolve_member_turn` 开成员
+   turn 并 `record_turn_identity`，`send` 时 `record_input`，`stop` 时 `close`。recorder 异常只记
+   debug 日志，不影响成员。Claude `transport_factory` 仍只在 `build_cli_runtime` 构造 harness 时注入。
+   见 [[F_112_harness-protocol-trajectory-observation]]。
 9. **legacy 回调名保留**。`harness.state`（`old` / `new` / `session_id`）与 `harness.round`
    （`kind` / `round_id` = 协议 `turn_id` / `result` = `TurnResult | None`）是 `StreamController`
    的兼容契约；不得反向把 `round` 写进公共协议。
@@ -56,7 +58,14 @@
     `request_type == "auth_fallback"`：`bind_fallback_promotion` 绑定的 `promote()` 返回 `True` →
     `COMPLETED`，返回 `False` 或抛异常 → `DECLINED`（provider 随即回退原生端点）；未绑定 promotion
     时直接 `COMPLETED`；其它 request type 一律 `DECLINED`。`ProviderEvent("auth_fallback_activated")`
-    只作日志观测，不再触发持久化。
+    只作日志观测，不再触发持久化。认证 fallback 只挂给**原生端点**成员（`ExternalCliModelConfig`
+    的 `api_base` 与 `provider` 都为空：未配模型，或选了内置模型）；已在端点上的成员不挂。
+11. **内置模型先落库、再推活成员**（[[F_113_external-harness-builtin-model-selection]]）。
+    `TeamMember.options.builtin_model` 是单一事实来源：`build_context_from_db` 把它放进
+    `TeamRuntimeContext.builtin_model`，`external_cli_spawn` 按 **内置模型 > pool 分配 > 静态
+    `model_config`** 取成员模型。运行中切换只经 `set_model_selection` → `HarnessModelControl.set_model`，
+    正在跑的 turn 不换模型，下一个 turn 前生效；harness 未运行时返回 `False`，由下次启动读 options 生效。
+    认证 fallback 被持久化（`promote_member_fallback_model`）时同时清掉 `builtin_model`。
 
 ## 接口契约
 
@@ -67,7 +76,7 @@ class ExternalHarnessMemberRuntime:
                  resume_external_backend=False, agent_kind: str | None = None,
                  inject_mcp=False, mcp_server_name="openjiuwen-team") -> None
     # pre-start bindings
-    def bind_team_context_tracker(tracker) / bind_mcp_servers(servers) / bind_span_bridge(bridge)
+    def bind_team_context_tracker(tracker) / bind_mcp_servers(servers) / bind_trajectory_recorder(recorder)
     def bind_fallback_promotion(promote)   # promote: () -> Awaitable[bool]; answers the auth_fallback interaction
     def add_teardown_hook(hook)
     def bind_reliability_context(*, session_id, team_backend, leader_name, update_status_cb, messager)
@@ -75,10 +84,12 @@ class ExternalHarnessMemberRuntime:
     async start(*, team_session=None) / stop() / dispose(); state; session_id; outputs()
     async send(content, *, immediate=False) -> SendReceipt | None
     async announce_team_context() / abort(*, immediate=False) / pause() / resume(*, query=None)
+    async set_model_selection(selection: ModelSelection) -> bool   # False: harness not running
+                                                                   # raises if the card lacks MODEL_SELECTION
     async subscribe(*, on_state=None, on_round=None)
     has_pending_interrupt() / is_pending_interrupt_resume_valid(user_input)
     # read-only
-    provider_name; reliability_agent_kind; span_bridge; inject_mcp; mcp_server_name
+    provider_name; reliability_agent_kind; trajectory_recorder; inject_mcp; mcp_server_name
 ```
 
 `build_cli_runtime(ctx, ...)` 对 `ctx.cli_agent == "claude" | "codex"` 返回
@@ -98,6 +109,7 @@ class ExternalHarnessMemberRuntime:
 |---|---|---|
 | `external_runtime` state | 成员 child AgentSession | `{backend, checkpoint}`；`checkpoint` 是 `HarnessCheckpoint` 的 JSON 信封（`checkpoint_to_dict` / `checkpoint_from_dict`） |
 | `_extra_mcp_servers` | runtime 内存 | start 前绑定的 `McpServerConfig` 列表，start 时并入 context |
+| `builtin_model` | `TeamMember.options` | `{model, effort}`：成员在 CLI 自身登录上跑的内置模型；spawn / `set_member_model` 写入，fallback 提升时清除 |
 | `_round_seq` / `_current_round_id` | runtime 内存 | 可靠性 `round_id`（单调整数），与协议 `turn_id` 并存 |
 
 ## 与其它 spec 的关系

@@ -3,7 +3,11 @@
 
 """Claude Code (Claude Agent SDK) implementation of the harness protocol."""
 
-from openjiuwen.harness_providers.claudecode.config import ClaudeCodeHarnessConfig, ClaudeModelConfig
+from openjiuwen.harness_providers.claudecode.config import (
+    DEFAULT_CLAUDE_MAX_BUFFER_SIZE,
+    ClaudeCodeHarnessConfig,
+    ClaudeModelConfig,
+)
 from openjiuwen.harness_providers.claudecode.harness import ADAPTER_VERSION, ClaudeCodeHarness
 from openjiuwen.harness_providers.claudecode.provider import ClaudeCodeHarnessProvider
 
@@ -13,4 +17,5 @@ __all__ = [
     "ClaudeCodeHarnessConfig",
     "ClaudeCodeHarnessProvider",
     "ClaudeModelConfig",
+    "DEFAULT_CLAUDE_MAX_BUFFER_SIZE",
 ]

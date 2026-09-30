@@ -68,6 +68,7 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
         "remove_fetch_cursor",
         "restore_fetch_cursor",
         "remove_fetch_run_history",
+        "shutdown",
         "restore_fetch_run_history",
     }
     assert all(
@@ -76,7 +77,7 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
     )
     assert {name: str(inspect.signature(method)) for name, method in public_methods.items()} == {
         "activate_runtime": "(self) -> 'None'",
-        "authorize_provider": "(self, provider: 'str') -> 'dict[str, object]'",
+        "authorize_provider": "(self, provider: 'str', *, reauthorize: 'bool' = False) -> 'dict[str, object]'",
         "deactivate_runtime": "(self, *, timeout_seconds: 'float' = 30.0) -> 'None'",
         "get_authorization_status": "(self, provider: 'str') -> 'dict[str, object]'",
         "get_graph": "(self, *, root_id: 'str | None' = None, depth: 'int' = 3) -> 'dict[str, object]'",
@@ -85,6 +86,7 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
             "(self, service_id: 'str | None' = None, *, run_id: 'str | None' = None) -> 'dict[str, object]'"
         ),
         "remove_fetch_run_history": "(self, service_id: 'str') -> 'list[dict[str, object]]'",
+        "shutdown": "(self) -> 'None'",
         "restore_fetch_run_history": "(self, service_id: 'str', records: 'list[dict[str, object]]') -> 'None'",
         "get_source": "(self, source_id: 'str') -> 'dict[str, object]'",
         "get_tree": "(self, *, root_id: 'str | None' = None, depth: 'int' = 3) -> 'dict[str, object]'",

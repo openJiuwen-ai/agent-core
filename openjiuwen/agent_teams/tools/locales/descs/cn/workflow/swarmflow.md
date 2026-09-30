@@ -80,7 +80,7 @@ async def run(args):
   - `options` 是调优 / 前向兼容参数袋（dict），键经引擎 + backend 白名单校验，未知键 fail-fast。当前可用键：
     - `model` 覆盖本次 worker 的模型。**默认省略**——worker 继承团队 teammate 模型（几乎总是正确）；只有当你高度确信某 worker 需要不同档位时才设。
     - `timeout` 本次 worker 调用的超时秒数。
-    - `isolation='worktree'`：在全新 git worktree 里跑 worker，**昂贵**（每 worker 约 200-500ms 设置 + 磁盘开销），**仅当** worker 并行改文件且会互相冲突时才用；worktree 若无更改则自动回收。
+    - `isolation='worktree'`：在全新 git worktree 里跑 worker，**昂贵**（每 worker 约 200-500ms 设置 + 磁盘开销），**仅当** worker 并行改文件且会互相冲突时才用；worktree 若无更改则自动回收。**缓存命中重放时不重建 worktree**——resume/relaunch 命中的 `agent()` 调用直接复用 journal 结果、跳过 worker 执行，其 worktree 内的文件产物不会重新出现；worker 的产出应通过返回值（文本/schema）交付，不要假设 worktree 文件在重放后仍存在。**同 run_id 续跑复用**：pause 后 resume 重跑被打断的 `isolation` worker 时，它会在自己上次留下的同一个 worktree 里继续（含上次未完成的修改）；给已完成的调用新增/移除 `isolation` 会使该调用重算。
     - `agent_type`：用具名专家 subagent（如团队里某类 teammate）替代默认 worker，从与团队相同的注册表解析；与 `schema` 组合使用（专家系统提示词会被追加结构化输出指令）。（接口就位、执行推进中。）
 - `await verify(reviewers, *, threshold=0.85, label=None, phase=None, options=None)` —— 对一份产物跑一轮**多 reviewer 验收判定**并返回结构化 `VerifyResult`（`{verdict: "pass"|"fail"|None, votes, feedback, passed}`）。每个 reviewer 是并行的一次结构化 `agent()`：`verdict` 类投 pass/fail（一票否决），`score` 类投 0~1 分（平均分 ≥ `threshold` 才通过）。任一 reviewer 未投票 → `verdict=None`（undecided），脚本自行决定重试或放弃。**单次判定、不驱动返工**——返回 `feedback` 供脚本组织执行者重做后再 `verify()`。**推荐用业务辅助 `build_reviewers(deliverable, specs, ...)` 从 `type`（`verifier` / `inspector` / `challenger`）+ 产物（文本或文件路径）构建 reviewer**（省 token、提示词一致、自动映射 kind）；仅在需要完全定制提示词时才直接构造 `Reviewer{kind, prompt, label, options}`（见「验证（verify）」一节）。
 - `agent_session(label=, phase=, instructions=, options=)` + `await s.send(prompt, *, schema=, notify=False)` —— **有状态**多轮 agent，跨轮记忆，第二轮无需重述第一轮上下文。`notify=True` 单向推送、返回 `None`。
@@ -166,6 +166,16 @@ c = await parallel([... for x in b])
 | `challenger` | 无确定性验收标准、开放性 / 设计 / 规划 / 调研类，对下游有决定性 / 方针性影响的产物 | 此类必配；验证 / 测试类产物不配 |
 
 组合基调：**轻量把关** = 1 个 `verifier`；**重要交付物** = `verifier` + `inspector`（可多个 inspector 分维度）；**开放性 / 高风险设计** = `verifier` + `challenger`（视需要再加 `inspector`）。同一脚本对不同阶段产物可用不同组成多次调用。
+
+**reviewer 指定模型**：每个 reviewer 角色都是独立 agent，都可在自己的 spec 里用 `"options"` 键指定模型（覆盖该 reviewer 继承的团队 teammate 模型，也覆盖 `verify()` 级 `options`）：
+
+```python
+reviewers = build_reviewers(deliverable, [
+    {"type": "verifier",  "options": {"model": "flash-mini"}},
+    {"type": "inspector", "options": {"model": "pro"}},
+])
+r = await verify(reviewers, threshold=0.85)
+```
 
 **两道门槛**：`verifier` 是**最低门槛**——只问"验收标准满足了吗"（过了/没过）；`inspector` 是**质量门槛**——按维度打分、平均 ≥ 0.85 才过，会**拦下"功能全满足但质量平庸"的交付物**（如代码能编译但不可维护）。对**关键最终交付物 / 被下游消费的产物**，光 `verifier` 不够——加 `inspector` 强制质量；对一次性、轻量、用完即弃的中间产物，只 `verifier` 即可。
 

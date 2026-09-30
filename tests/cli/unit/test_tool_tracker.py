@@ -7,6 +7,9 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openjiuwen.core.foundation.llm import ToolMessage
+from openjiuwen.core.foundation.tool import ToolOutput
+from openjiuwen.core.single_agent.rail.base import ToolCallInputs
 from openjiuwen.harness.cli.rails.tool_tracker import (
     ToolTrackingRail,
 )
@@ -63,3 +66,25 @@ async def test_after_tool_call_non_read_file_keeps_stringified_result() -> None:
     event = session.write_stream.await_args.args[0]
     assert "stdout='/tmp'" in event.payload["tool_result"]
     assert "line_count" not in event.payload
+
+
+@pytest.mark.asyncio
+async def test_after_tool_call_adds_rendered_result_next_to_compat_field() -> None:
+    session = SimpleNamespace(write_stream=AsyncMock())
+    tool_result = ToolOutput(success=True, data={"matching_files": ["/a.py"]})
+    ctx = SimpleNamespace(
+        session=session,
+        exception=None,
+        inputs=ToolCallInputs(
+            tool_name="glob",
+            tool_args={"pattern": "*.py"},
+            tool_result=tool_result,
+            tool_msg=ToolMessage(content="/a.py", tool_call_id="call-1"),
+        ),
+    )
+
+    await ToolTrackingRail().after_tool_call(ctx)
+
+    payload = session.write_stream.await_args.args[0].payload
+    assert payload["tool_result"] == str(tool_result)
+    assert payload["rendered_result"] == "/a.py"

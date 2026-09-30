@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,14 @@ class TestRailSpecBuild:
         ).build(language="cn", context=caller)
         assert rail.marker == "ok"
         assert caller.extras == {"source_root": str(tmp_path), "marker": "keep"}
+
+    def test_unknown_rail_type_warns_and_skips(self, caplog) -> None:
+        """Unknown rail type logs a warning and builds to None instead of raising."""
+        ensure_builtin_elements_registered()
+        with caplog.at_level(logging.WARNING):
+            rail = RailSpec(type="core.not_a_real_rail").build(language="en")
+        assert rail is None
+        assert "core.not_a_real_rail" in caplog.text
 
 
 class TestBuiltinToolSpecBuild:

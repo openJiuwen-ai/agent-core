@@ -5,9 +5,9 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py` |
-| 最近一次修订日期 | 2026-09-09 |
-| 关联 feature | N/A |
+| 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
+| 最近一次修订日期 | 2026-09-16 |
+| 关联 feature | `F_04_tool-result-llm-rendering.md` |
 
 ## 范围 / 边界
 
@@ -17,7 +17,8 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 
 具体覆盖：
 
-- 工具返回形态 `ToolOutput`（`tools/base_tool.py`）。
+- 工具返回形态 `ToolOutput`（定义于 `core/foundation/tool/schema.py`，经 `tools/base_tool.py` 再导出）
+  与面向模型的结果渲染 `Tool.render_for_llm`。
 - 工具组：shell（`tools/shell/`）、web（`tools/web/`）、multimodal
   （`tools/multimodal/`）、subagent（`tools/subagent/`）、skills（`tools/skills/`）、
   worktree（`tools/worktree/`）、lsp_tool（`tools/lsp_tool/`）、browser_move /
@@ -35,9 +36,10 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 
 ## 不变量
 
-1. **`ToolOutput` 是工具的统一返回形态**（`tools/base_tool.py`）：
-   `success: bool`、`data`、`error`、`extracted_content`、`include_extracted_content_only_once`、
-   `long_term_memory`。工具失败必须 `success=False` + `error`，不抛裸异常上抛宿主。
+1. **`ToolOutput` 是工具的统一返回形态**（定义于 `core/foundation/tool/schema.py`，
+   `tools/base_tool.py` 再导出）：`success: bool`、`data`、`error`、`extracted_content`、
+   `include_extracted_content_only_once`、`long_term_memory`。工具失败必须 `success=False` +
+   `error`，不抛裸异常上抛宿主。
 2. **工具注册走 `DeepAgent` / rail 的卡片机制**：工具以 `Tool | ToolCard` 形态存在，
    `card.name` 是身份（`_tool_identity` / `ability_manager.get(name)` 强校验）；新增工具
    不得复用已有 card.name。卸载先校验 card 身份（见 `S_04` 不变量 7）。
@@ -88,17 +90,61 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 10. **Browser 可恢复错误不消耗模型回合**：generation 刷新、单步骤 Batch primitive 改写、
     primary link 导航、Probe JSON 一次重试和新标签页 URL 等待由 runtime 确定性处理；只有
     无法唯一解析目标或页面语义确实不充分时才把紧凑错误返回模型。
+11. **模型读到的工具结果文本只来自 `Tool.render_for_llm`**：`AbilityManager` 构造工具结果
+    `ToolMessage` 时对工具实例调用 `render_for_llm(result)`；结构化结果原样留在
+    `ToolCallInputs.tool_result` 给 rail / 事件 / 日志。默认实现（`render_tool_output`）：成功取
+    `data["content"]`（`data` 为字符串直接用，无 `content` 的其它载荷序列化为 JSON），失败取
+    `error`（为空回落载荷），空结果给占位文本；非 `ToolOutput` 结果为 `str(output)`。
+    - `data` 没有 `content` 的工具**必须覆写** `render_for_llm` 给出纯文本，JSON 兜底只是最后防线；
+      浏览器 runtime 工具例外——`BrowserRuntimeRail` 按 JSON 解析其消息，保持默认 JSON。
+    - 返回裸 dict 的工具（todo / goal）不改返回形态（CLI todo 视图解析其 `str()`），只覆写渲染。
+    - 函数式工具经 `LocalFunction(..., render=...)` 定制，无需子类化。
+    - 自定义渲染抛异常时记录日志并回落默认渲染：工具已执行（可能有副作用），不能因渲染失败
+      转成执行错误并触发重试。
+    - **渲染只作用于发给模型的 `ToolMessage.content`，绝不改写结构化结果**：流式出口
+      （`ToolTrackingRail` 的 `str(tool_result)`、native harness `_ObservationRail` 的
+      `to_json_safe(tool_result)`）与 observability 读的都是 `tool_result`，上层服务依赖其结构做
+      判断与展示。因此 `McpToolResult` 保持独立模型（不继承 `ToolOutput`，序列化不多字段）。
+    - **流式工具结果同时带结构化字段与渲染文本（独立字段）**：`tool_result` 流式块在原字段之外
+      增加 `rendered_result`——模型实际读到的文本，由 `resolve_tool_result_text(inputs, exception)`
+      取值（`core/single_agent/ability_manager.py`，与 `AbilityManager.execute` 共用
+      `resolve_tool_message` 这一条规则：正常 / 跳过取 `inputs.tool_msg`，工具抛异常取
+      `AbilityExecutionError.tool_message`）。展示侧（CLI 渲染器、subagent activity / transcript）
+      优先读 `rendered_result`，缺失才回落旧字段；不得再用 `str(tool_result)` 生成展示文本。
+    - 产出 `tool_result` 流式块的 rail（`ToolTrackingRail` / `_ObservationRail`，priority 5）必须
+      晚于所有改写 `tool_msg` 的 rail，`rendered_result` 才是最终文本。
+    - `structured_result` 暂不输出；`ToolTrackingRail` 的字符串 `tool_result` 是兼容字段。待 UI 迁移
+      到结构化数据后，该兼容字段与基于其字符串的解析逻辑全链路移除。
+    - `tool_call` 包装器不重新渲染目标结果：结构化结果保持 `{"name", "result"}` / 原 `error`，
+      目标工具已渲染（含 AFTER_TOOL_CALL 改写）的消息文本放在 `RelayedToolOutput` 的私有属性里，
+      不进 `model_dump` / `str()`，只由 `ToolCallTool.render_for_llm` 读取。
+    - 外部协议出口（team MCP server / Claude SDK MCP / skill CLI / 被动成员执行器）同样调用
+      `render_for_llm`，保证与进程内模型看到的文本一致。
 
 ## 接口契约
 
 ```python
+# core/foundation/tool/schema.py（harness 经 tools/base_tool.py 再导出）
 class ToolOutput(BaseModel):
     success: bool
-    data: Optional[Any] = None
-    error: Optional[str] = None
-    extracted_content: Optional[str] = None
+    data: Any | None = None
+    error: str | None = None
+    extracted_content: str | None = None
     include_extracted_content_only_once: bool = False
-    long_term_memory: Optional[str] = None
+    long_term_memory: str | None = None
+
+# core/single_agent/ability_manager.py
+def resolve_tool_message(inputs: ToolCallInputs, exception: BaseException | None) -> ToolMessage | None: ...
+def resolve_tool_result_text(inputs: ToolCallInputs, exception: BaseException | None) -> str | None: ...
+
+# core/foundation/tool/base.py
+class Tool:
+    def render_for_llm(self, output: Any) -> str: ...     # 子类覆写以定制模型文本
+def render_tool_output(output: ToolOutput) -> str: ...   # 默认渲染规则
+def render_payload_text(data: Any) -> str: ...           # data["content"] / 字符串 / JSON 兜底
+
+# harness/tools/base_tool.py
+def render_fields(fields: Mapping[str, Any], *, separator: str = "\n") -> str: ...  # 扁平记录 → key: value
 
 def create_web_tools(...) -> list[Tool]
 def create_vision_tools(...) -> list[Tool]

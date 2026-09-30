@@ -156,7 +156,9 @@ class MockBackend(AgentBackend):
         self.responder = responder
         self._sessions: dict[str, _MockSession] = {}
 
-    async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+    async def run(
+        self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
+    ) -> AgentResult:
         rng = random.Random(_seed(prompt, opts, schema_json))
         raw = self._pick_raw(prompt, opts, schema_json, rng)
         return self._report(self._result(prompt, opts.get("label"), raw, schema_json, rng))

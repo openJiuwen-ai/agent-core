@@ -265,6 +265,28 @@ STRINGS: dict[str, str] = {
         "authentication failures explicitly reported by the runtime. Use null only when the team model pool has "
         "no compatible model; the agent can then use its own default model without automatic fallback"
     ),
+    "spawn_external_cli.builtin_model": (
+        "Optional. A built-in model from this cli_agent's entry in the catalog below, running on the CLI's "
+        "own login (e.g. a subscription); pick it to fit the member's workload. Mutually exclusive with "
+        "model_name. Omit to let the CLI use its own default model"
+    ),
+    "spawn_external_cli.effort": (
+        "Optional. Reasoning effort, one of the chosen builtin_model's efforts; requires builtin_model. "
+        "Omit to take the model's default_effort"
+    ),
+    # ===== set_member_model ====================================================
+    # set_member_model._desc lives in descs/en/member/set_member_model.md
+    "set_member_model.member_name": (
+        "member_name of the external CLI member to switch (semantic slug, not display label)"
+    ),
+    "set_member_model.model": (
+        "Optional. The new built-in model, from the member's cli_agent entry in the catalog below; omit to "
+        "keep the current model and change only effort"
+    ),
+    "set_member_model.effort": (
+        "Optional. The new reasoning effort, one of the chosen model's efforts; omitted with model set it "
+        "takes the model's default_effort, omitted without model it stays unchanged"
+    ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/member/shutdown_member.md
     "shutdown_member.member_name": (
@@ -530,11 +552,13 @@ STRINGS: dict[str, str] = {
     "swarmflow_worker.schema": (
         "You are a single-shot swarmflow worker. Read the task in the user message, "
         "do the work, then call the `structured_output` tool EXACTLY ONCE with the "
-        "structured result conforming to its input schema. IMPORTANT: `structured_output` "
-        "is the ONLY way to submit your result — if you do NOT call it, the task is "
-        "considered FAILED and your text output is discarded. Do NOT write the result "
-        "as plain text — it is only captured through the tool call. After calling "
-        "`structured_output`, stop immediately."
+        "structured result conforming to its input schema: provide every required "
+        "property at every nesting level (including each item inside arrays), with "
+        "the exact property names and structure the schema defines. IMPORTANT: "
+        "`structured_output` is the ONLY way to submit your result — if you do NOT "
+        "call it, the task is considered FAILED and your text output is discarded. "
+        "Do NOT write the result as plain text — it is only captured through the "
+        "tool call. After calling `structured_output`, stop immediately."
     ),
     "swarmflow_worker.free": (
         "You are a single-shot swarmflow worker. Read the task in the user message, "
@@ -542,8 +566,10 @@ STRINGS: dict[str, str] = {
     ),
     "structured_output.reminder": (
         "[IMPORTANT] You MUST submit your result by calling the `structured_output` tool. "
-        "Do NOT write the result in your text. This is the ONLY way to submit — "
-        "not calling the tool = task failure."
+        "Do NOT write the result in your text. The arguments must strictly conform to "
+        "the tool's input schema: every required property at every nesting level, with "
+        "the exact names and structure. This is the ONLY way to submit — not calling "
+        "the tool = task failure."
     ),
     # ===== async control tools (list / output / cancel) =======================
     # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc

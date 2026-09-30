@@ -9,6 +9,7 @@ from .json_array_compressor import JsonArrayCompressor
 from .log_compressor import LogCompressor
 from .plain_text_compressor import PlainTextCompressor
 from .search_results_compressor import SearchResultsCompressor
+from .source_file_compressor import SourceFileCompressor
 
 __all__ = [
     "DiffCompressor",
@@ -20,4 +21,5 @@ __all__ = [
     "LogCompressor",
     "PlainTextCompressor",
     "SearchResultsCompressor",
+    "SourceFileCompressor",
 ]

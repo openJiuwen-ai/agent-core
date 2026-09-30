@@ -73,11 +73,14 @@ class PromptReport:
 
         section_infos: List[SectionInfo] = []
         total_chars = 0
-        for s in sorted(builder.get_all_sections().values(), key=lambda x: x.priority):
+        for s in sorted(
+            builder.get_all_sections().values(),
+            key=builder.get_section_sort_key,
+        ):
             chars = s.char_count(language)
             section_infos.append(SectionInfo(
                 name=s.name,
-                priority=s.priority,
+                priority=builder.get_effective_priority(s),
                 char_count=chars,
                 category=s.category or _DEFAULT_CATEGORY,
             ))

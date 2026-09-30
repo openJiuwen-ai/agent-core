@@ -863,3 +863,47 @@ def test_gitcode_rejects_hardlinked_worktree(tmp_path: Path) -> None:
 
     with pytest.raises(BaseError, match="hardlink"):
         gitcode_module._validate_worktree(candidate)
+
+
+@pytest.mark.asyncio
+async def test_gitcode_item_without_usable_time_is_skipped_not_fatal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import openjiuwen.harness.personal_context.fetch.gitcode as gitcode_module
+
+    base = "https://api.gitcode.com/api/v5/repos/acme/demo"
+    FakeSession.responses = {
+        base: [FakeResponse({"default_branch": "main", "pushed_at": "2026-01-01T00:00:00Z"})],
+        f"{base}/issues": [
+            FakeResponse(
+                [
+                    {"number": 7, "title": "No time", "body": "issue body"},
+                    {
+                        "number": 8,
+                        "title": "Kept",
+                        "body": "issue body",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "html_url": "https://gitcode.com/acme/demo/issues/8",
+                    },
+                ]
+            )
+        ],
+    }
+    monkeypatch.setattr(gitcode_module.aiohttp, "ClientSession", FakeSession)
+    provider = GitCodeFetchService(
+        gitcode_config(tmp_path, resources=["issues"], time_range={"mode": "recent", "recent_days": 30}),
+        home=tmp_path,
+    )
+
+    with caplog.at_level("WARNING", logger=gitcode_module.__name__):
+        batches = await _batches(
+            provider,
+            run_id="run-a",
+            cursor=None,
+            run_started_at=datetime(2026, 1, 2, tzinfo=UTC),
+        )
+
+    assert [item.logical_id for batch in batches for item in batch.items] == ["gitcode:acme/demo:issue:8"]
+    assert "has no usable time" in caplog.text

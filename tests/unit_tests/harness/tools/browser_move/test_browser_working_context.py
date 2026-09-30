@@ -542,8 +542,8 @@ def test_processor_guidance_defines_each_working_memory_field() -> None:
     processor = BrowserWorkingContextProcessor(BrowserWorkingContextProcessorConfig(language="en"))
     prompt = _inject(processor, _FakeContext(_FakeSession())).context_messages[-1].content
 
-    assert "Runtime-owned browser context" in prompt
-    assert "Requirements, evidence, blockers, status, and recent semantic changes are authoritative" in prompt
+    assert "Runtime-owned execution context" in prompt
+    assert "Inferred fields are extraction hints, not extra user requirements" in prompt
     assert "do not echo this context" in prompt
     assert '"runtime_directive":"continue"' in prompt
     assert '"request":{"kind":"initial"' in prompt
@@ -563,7 +563,8 @@ def test_processor_renders_chinese_guidance_with_stable_schema_keys() -> None:
 
     prompt = _inject(processor, context).context_messages[-1].content
 
-    assert "这是 runtime 维护的浏览器上下文" in prompt
+    assert "这是 runtime 维护的执行上下文" in prompt
+    assert "推断字段是提取提示，不是额外用户要求" in prompt
     assert "不要复述上下文" in prompt
     assert BROWSER_WORKING_MEMORY_RECORD_BEGIN not in prompt
     assert BROWSER_WORKING_MEMORY_RECORD_END not in prompt

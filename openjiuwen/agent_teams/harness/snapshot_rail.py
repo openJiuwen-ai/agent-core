@@ -154,6 +154,14 @@ class PhaseSnapshotRail(AgentRail):
             return
         active.iter_phase = RoundPhase.MODEL
         active.model_call_in_flight = True
+        if ctx.session is not None:
+            # Context now holds this iteration's admitted input; a voice pause
+            # that cancels the model call rewinds here instead of dropping it.
+            active.pre_model_snapshot = capture_snapshot(
+                active.deep_agent,
+                ctx.session,
+                previous=active.last_iter_snapshot,
+            )
         if active.pause_requested or active.graceful_abort:
             # A before-hook force_finish skips the LLM body entirely — the
             # cleanest boundary (no model call, no tool, no message change).

@@ -1,8 +1,8 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 import inspect
 from functools import wraps
-from typing import Callable, AsyncIterator
+from typing import Any, AsyncIterator, Callable
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -46,10 +46,21 @@ def support_args_param(arg_param_name: str, parameters, func: Callable) -> Calla
 
 
 class LocalFunction(Tool):
-    def __init__(self, card: ToolCard, func: Callable):
+    def __init__(self, card: ToolCard, func: Callable, *, render: Callable[[Any], str] | None = None):
+        """Wrap a plain function as a tool.
+
+        Args:
+            card: Tool metadata card.
+            func: The function executed by ``invoke`` / ``stream``.
+            render: Optional renderer producing the model-facing text of a
+                result, used instead of the default ``Tool.render_for_llm``.
+                Lets function-backed tools customize rendering without a
+                subclass.
+        """
         super().__init__(card)
         if func is None:
             raise build_error(StatusCode.TOOL_LOCAL_FUNCTION_FUNC_NOT_SUPPORTED, card=self._card)
+        self._render = render
 
         sig = inspect.signature(func)
         parameters = sig.parameters
@@ -84,6 +95,11 @@ class LocalFunction(Tool):
         else:
             res = self._func(**inputs)
         return res
+
+    def render_for_llm(self, output: Any) -> str:
+        if self._render is None:
+            return super().render_for_llm(output)
+        return self._render(output)
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         if self.card.input_params is not None:

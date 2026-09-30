@@ -176,7 +176,7 @@ class BuildTeamTool(TeamTool):
             data[self._VERIFY_PARAM] = self.team.task_verification_enabled()
         return ToolOutput(success=True, data=data)
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         """Render the outcome, then disclose the collaboration policy.
 
         The policy is appended only on success — a failed ``build_team`` leaves
@@ -250,7 +250,7 @@ class CleanTeamTool(TeamTool):
             team_logger.error(f"clean_team failed: {e}")
             return ToolOutput(success=False, error=f"Internal error: {e}")
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to clean team"
         return f"Team cleaned: team_name={output.data['team_name']}"

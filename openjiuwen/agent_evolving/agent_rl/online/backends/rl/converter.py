@@ -16,6 +16,7 @@ from openjiuwen.agent_evolving.trajectory.schema import CASE_ID, TRAJECTORY_SOUR
 from openjiuwen.agent_evolving.trajectory.spans import (
     decode_json_attribute,
     iter_spans,
+    is_compaction_span,
     read_llm_exchange,
     read_rl_fields,
     read_usage,
@@ -185,7 +186,11 @@ class OnlineTrajectoryConverter:
         samples: list[PerTurnSample] = []
         model_id = self.model_id or ""
 
-        for step_index, span in enumerate(span for span in iter_spans(trajectory) if span_category(span) == "llm"):
+        for step_index, span in enumerate(
+            span
+            for span in iter_spans(trajectory)
+            if span_category(span) == "llm" and not is_compaction_span(span)
+        ):
             attrs = span_attributes(span)
             prompt_messages, completion_messages = read_llm_exchange(span)
             model = str(attrs.get(semconv.GEN_AI_REQUEST_MODEL) or span.get("name") or "")
@@ -267,7 +272,7 @@ class OnlineTrajectoryConverter:
     def extract_prev_feedback(trajectory: Trajectory) -> Optional[dict[str, Any]]:
         """Use the first user message in the new batch as previous-turn feedback."""
         for span in iter_spans(trajectory):
-            if span_category(span) != "llm":
+            if span_category(span) != "llm" or is_compaction_span(span):
                 continue
             prompt_messages, _ = read_llm_exchange(span)
             for message in prompt_messages:

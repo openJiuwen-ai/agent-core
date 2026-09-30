@@ -26,7 +26,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.schema.config import DeepAgentConfig
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.tool_discovery.bm25 import BM25ToolIndex
-from openjiuwen.harness.tools.tool_discovery.tool_call import ToolCallTool
+from openjiuwen.harness.tools.tool_discovery.tool_call import RelayedToolOutput, ToolCallTool
 from openjiuwen.harness.tools.tool_discovery.tool_search import (
     DEFAULT_TOOL_SEARCH_LIMIT,
     ToolSearchTool,
@@ -563,29 +563,35 @@ class ProgressiveToolRail(DeepAgentRail):
         if isinstance(target_result, ToolInterruptException):
             raise target_result
 
+        # The target's message already holds its model-facing rendering (plus
+        # any AFTER_TOOL_CALL rewrite). The wrapper relays that text to the
+        # model out of band; the structured fields stay exactly what upper
+        # layers stream as the tool result.
+        target_message_content = str(getattr(target_message, "content", "") or "")
         target_success = getattr(target_result, "success", None)
         if target_success is False:
-            return ToolOutput(
+            return RelayedToolOutput(
                 success=False,
                 error=str(
                     getattr(target_result, "error", None)
                     or getattr(target_message, "content", None)
                     or target_result
                 ),
+                rendered_text=target_message_content,
             )
 
-        target_message_content = str(getattr(target_message, "content", "") or "")
         if target_result is None and target_message_content.startswith(
             ("Ability execution error:", "Tool execution error:", "[Interrupted]")
         ):
             return ToolOutput(success=False, error=target_message_content)
 
-        return ToolOutput(
+        return RelayedToolOutput(
             success=True,
             data={
                 "name": target_name,
                 "result": target_result,
             },
+            rendered_text=target_message_content,
         )
 
     def _authorize_discovered_tools(

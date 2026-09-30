@@ -288,7 +288,7 @@ def build_plan_mode_section(
 
     Returns:
         A :class:`PromptSection` with ``name=SectionName.MODE_INSTRUCTIONS``
-        and ``priority=85``.
+        and ``priority=84``.
     """
     if agent is not None and session is not None:
         enter_status = _build_enter_plan_mode_status(agent, session, language)
@@ -343,7 +343,7 @@ def build_plan_mode_section(
     return PromptSection(
         name=SectionName.MODE_INSTRUCTIONS,
         content={language: content},
-        priority=85,
+        priority=84,
     )
 
 

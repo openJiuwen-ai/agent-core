@@ -89,6 +89,9 @@ class WorkspaceStore:
         if evolved is not None:
             team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
             return evolved
+        unchanged = self._unchanged_content(target, text)
+        if unchanged is not None:
+            return unchanged
         meta = {
             "kind": "prompt",
             "name": "member_prompt",
@@ -127,6 +130,9 @@ class WorkspaceStore:
         if evolved is not None:
             team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
             return evolved
+        unchanged = self._unchanged_content(target, desc)
+        if unchanged is not None:
+            return unchanged
         meta = {
             "kind": "card",
             "name": "member_card",
@@ -156,6 +162,9 @@ class WorkspaceStore:
         if evolved is not None:
             team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
             return evolved
+        unchanged = self._unchanged_content(target, text)
+        if unchanged is not None:
+            return unchanged
         meta = {
             "kind": "prompt",
             "name": "team_prompt",
@@ -191,6 +200,9 @@ class WorkspaceStore:
         if evolved is not None:
             team_logger.info("[workspace] %s evolved — write skipped (evolution wins)", target)
             return evolved
+        unchanged = self._unchanged_content(target, desc)
+        if unchanged is not None:
+            return unchanged
         meta = {
             "kind": "team_card",
             "name": "team_card",
@@ -304,6 +316,28 @@ class WorkspaceStore:
             atomic_write(target, write_frontmatter(meta, body))
         except OSError as exc:
             team_logger.warning("workspace write %s failed (DB value stands): %s", target, exc)
+
+    @staticmethod
+    def _unchanged_content(path: Path, body: str) -> FileContent | None:
+        """Return the file's state when this write would change nothing.
+
+        A member is re-seeded on every spawn, and a spawn happens again every
+        time the member restarts. Rewriting an identical body with a fresh
+        ``updated_at`` would move the probe the identity channel reads as "the
+        private working agreement was hand-evolved", so the member would be
+        told its own agreement again after every restart. Only a body that
+        actually differs is a change.
+
+        A file that is evolved is handled by :meth:`_evolved_content` before
+        this; here an unchanged baseline simply keeps its timestamp.
+        """
+        try:
+            content = parse_file_content(path)
+        except ValueError:
+            return None
+        if content is None or content.baseline_sha256 != body_sha256(body):
+            return None
+        return content
 
     @staticmethod
     def _evolved_content(path: Path) -> FileContent | None:

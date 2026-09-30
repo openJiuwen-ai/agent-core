@@ -176,6 +176,19 @@ def get_cached_image_support(llm) -> Optional[bool]:
     return _probe_results.get(key)
 
 
+def set_cached_image_support(key: tuple[str, str], supported: bool) -> None:
+    """Pre-populate the probe cache with a known verdict.
+
+    Used when a model entry declares ``supports_vision`` explicitly in the
+    configuration, so no round-trip probe is needed.
+
+    Args:
+        key: The ``(api_base, model_name)`` cache key.
+        supported: The declared verdict.
+    """
+    _probe_results[key] = supported
+
+
 def reset_image_support_cache() -> None:
     """Drop cached verdicts and pending probes. For tests and reconfiguration."""
     _probe_results.clear()

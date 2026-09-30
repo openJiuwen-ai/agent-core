@@ -207,15 +207,20 @@ class FakeReactAgent:
         self.invocations.append(inputs if isinstance(inputs, dict) else {"query": inputs})
         query = inputs["query"] if isinstance(inputs, dict) else inputs
         resume_continuation = False
+        prelude_notes: list[str] = []
         if isinstance(inputs, dict):
             steering_q = inputs.get("_steering_queue")
             if steering_q is not None:
                 while not steering_q.empty():
                     self.seen_steers.append(steering_q.get_nowait())
             resume_continuation = bool(inputs.get("_resume_continuation"))
+            prelude_notes = list(inputs.get("_prelude_notes") or [])
 
         context = self.context_engine.get_context(session_id=session.get_session_id())
-        # Mirrors react_agent: a continuation resumes the preserved context.
+        # Mirrors react_agent: prelude notes land first, each as its own turn;
+        # a continuation then resumes the preserved context.
+        for note in prelude_notes:
+            context.add_message(UserMessage(content=note))
         if not resume_continuation:
             context.add_message(UserMessage(content=str(query)))
 

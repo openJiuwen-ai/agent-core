@@ -49,6 +49,10 @@
 - **能力上限 = 静态配置集**（用户定）：`spawn_external_cli_agent` 先校验 `cli_agent ∈
   _external_cli_configs`（未声明直接拒绝），再校验是已知 adapter。配置不在 spawn 调用里传，
   避免在工具参数上堆 CLI 启动细节。
+- **SDK 依赖在注册时校验**：SDK 型后端（claude / codex）在 `backends.py` 里声明
+  `SdkRequirement`，`spawn_external_cli_agent` 用 `missing_sdk_requirement` 以 `find_spec`
+  探测（不实际 import），缺失即拒绝注册并提示安装 `openjiuwen[<extra>]`。成员进程是在首条消息
+  触发的 autostart 里才拉起的，若不前置校验，缺依赖会被推迟成 `send_message` 的内部错误。
 - **MCP 注入下沉到 adapter + spawn 路径**（用户定）：`CliAgentAdapter.mcp_inject` 字段 +
   `mcp_launch_args(...)` 方法按 CLI 产出注册 argv——claude 用 `--mcp-config <inline-json>`，
   codex 用 `-c mcp_servers.<key>.command=...`（dotted key 把 `-` 归一为 `_`）。

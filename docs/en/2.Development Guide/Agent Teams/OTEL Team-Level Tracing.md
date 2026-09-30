@@ -126,15 +126,14 @@ Configure credentials when exporting to a Langfuse OTLP endpoint:
 
 ```python
 config = ObservabilityConfig(
-    exporter="otlp_http",
+    exporter="langfuse",
     endpoint="https://your-langfuse.example.com/api/public/otel/v1/traces",
-    backend="langfuse",
     langfuse_public_key="pk-lf-...",
     langfuse_secret_key="sk-lf-...",
 )
 ```
 
-`backend="langfuse"` avoids writing duplicate standard `gen_ai.*` and `langfuse.*` content attributes. Use `backend="otlp"` for a generic OTLP backend.
+Recorded spans have one shape regardless of the exporter. `exporter="langfuse"` (and `exporter="file"`, its offline WAL) projects standard `gen_ai.*` attributes to Langfuse-compatible fields at export time; `otlp_grpc` and `otlp_http` send the standard attributes unchanged.
 
 Do not commit credentials to configuration files. Load them from environment variables or a secret-management service in production.
 
@@ -144,14 +143,13 @@ Do not commit credentials to configuration files. Load them from environment var
 |--------|---------|-------------|
 | `enabled` | `True` | Master switch; initialization is a no-op when disabled |
 | `service_name` | `openjiuwen-agent-teams` | OTel Resource `service.name` |
-| `exporter` | `otlp_grpc` | `otlp_grpc`, `otlp_http`, `console`, or `file` |
+| `exporter` | `otlp_grpc` | `otlp_grpc`, `otlp_http`, `langfuse`, `console`, or `file` |
 | `endpoint` | `http://localhost:4317` | OTLP endpoint; ignored by the file exporter |
 | `sample_rate` | `1.0` | Parent-based ratio sampling from `0.0` to `1.0` |
 | `redact_prompts` | `False` | Hash and truncate prompt content |
 | `redact_completions` | `False` | Hash and truncate completion content |
 | `attribute_value_max_length` | `40960` | Maximum string attribute length |
 | `max_attributes` | `200` | Maximum attributes per span |
-| `backend` | `langfuse` | Attribute compatibility mode: `langfuse` or `otlp` |
 | `export_timeout_ms` | `5000` | Exporter flush and shutdown timeout |
 | `traces_dir` | `./traces` | File exporter output directory |
 | `file_retention_days` | `7` | File exporter retention period |
@@ -203,6 +201,6 @@ Prompts, completions, tool arguments, and tool results may contain user data or 
 | OTLP export fails | Confirm exporter protocol and port match; gRPC commonly uses 4317 and HTTP commonly uses 4318 |
 | Final spans are missing on exit | Call `shutdown_observability()` after `Runner.stop()` |
 | Attributes are truncated or missing | Check `attribute_value_max_length`, `max_attributes`, and redaction settings |
-| Duplicate content attributes in Langfuse | Use `backend="langfuse"` |
+| Langfuse shows raw `gen_ai.*` attributes instead of input/output | Use `exporter="langfuse"` so the Langfuse projection is applied |
 
 See `tests/system_tests/agent_swarm/agent_team_observability_e2e.py` for a complete runnable example.

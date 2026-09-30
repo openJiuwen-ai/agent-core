@@ -170,13 +170,13 @@ async def test_unknown_task_id_returns_not_found(tool):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_map_result_includes_note(tool, caller_task_manager):
+async def test_render_for_llm_includes_note(tool, caller_task_manager):
     """The mapped LLM-facing string is informative and stable."""
     task = await caller_task_manager.add(title="With note", content="...")
     await caller_task_manager.assign(task.task_id, HUMAN_NAME)
 
     result = await tool.invoke({"task_id": task.task_id, "note": "patched config"})
-    text = tool.map_result(result)
+    text = tool.render_for_llm(result)
 
     assert task.task_id in text
     assert "completed" in text.lower()

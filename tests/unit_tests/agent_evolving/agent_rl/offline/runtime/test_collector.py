@@ -21,14 +21,19 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     RL_PROMPT_TOKEN_IDS,
     TRAJECTORY_SOURCE,
 )
-from openjiuwen.agent_evolving.trajectory.spans import iter_spans, read_tool_call, span_attributes
+from openjiuwen.agent_evolving.trajectory.spans import (
+    iter_spans,
+    read_llm_exchange,
+    read_tool_call,
+    span_attributes,
+    write_llm_exchange,
+)
 from openjiuwen.extensions.observability import semconv
-from openjiuwen.agent_evolving.trajectory import legacy_semconv
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ModelCallInputs, ToolCallInputs
 
 
-def _span(span_id: int, *, name: str = "llm.call", attrs: dict | None = None) -> ReadableSpan:
+def _span(span_id: int, *, name: str = "chat test-model", attrs: dict | None = None) -> ReadableSpan:
     context = SpanContext(
         trace_id=1,
         span_id=span_id,
@@ -54,10 +59,11 @@ def _ctx(inputs) -> AgentCallbackContext:
 
 def _llm_attrs(prompt: str = "q", completion: str = "a") -> dict[str, str]:
     return {
-        f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.0.role": "user",
-        f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.0.content": prompt,
-        f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.0.role": "assistant",
-        f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.0.content": completion,
+        semconv.GEN_AI_OPERATION_NAME: "chat",
+        **write_llm_exchange(
+            [{"role": "user", "content": prompt}],
+            [{"role": "assistant", "content": completion}],
+        ),
     }
 
 
@@ -93,8 +99,9 @@ async def test_rl_rail_reads_tool_span_without_legacy_step_projection() -> None:
     processor.on_end(
         _span(
             2,
-            name="tool.lookup",
+            name="execute_tool lookup",
             attrs={
+                semconv.GEN_AI_OPERATION_NAME: "execute_tool",
                 semconv.GEN_AI_TOOL_NAME: "lookup",
                 semconv.GEN_AI_TOOL_CALL_ID: "call-1",
                 semconv.GEN_AI_TOOL_CALL_ARGUMENTS: '{"q":"x"}',
@@ -303,5 +310,5 @@ async def test_concurrent_runs_isolate_subscriptions_on_shared_processor() -> No
     first_spans = list(iter_spans(first))
     second_spans = list(iter_spans(second))
     assert len(first_spans) == len(second_spans) == 1
-    assert span_attributes(first_spans[0])[f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.0.content"] == "first"
-    assert span_attributes(second_spans[0])[f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.0.content"] == "second"
+    assert read_llm_exchange(first_spans[0])[0] == [{"role": "user", "content": "first"}]
+    assert read_llm_exchange(second_spans[0])[0] == [{"role": "user", "content": "second"}]

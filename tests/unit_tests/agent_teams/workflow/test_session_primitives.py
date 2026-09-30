@@ -47,7 +47,9 @@ class _RecordingBackend(AgentBackend):
         self.fork_data: dict | None = {"messages": [{"role": "user", "content": "forked"}]}
         self.named: list[str] = []  # member names reserved via ensure_member_name
 
-    async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+    async def run(
+        self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
+    ) -> AgentResult:
         if schema_json is not None:
             return AgentResult(structured={"v": prompt})
         return AgentResult(text=f"ran:{prompt}")

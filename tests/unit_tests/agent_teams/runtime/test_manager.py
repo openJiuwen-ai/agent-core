@@ -14,6 +14,7 @@ import pytest
 
 from openjiuwen.agent_teams import paths as apaths
 from openjiuwen.agent_teams.agent.member import TeamMember
+from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.interaction import ExternalTeamEvent
 from openjiuwen.agent_teams.messager.inprocess import InProcessMessager, cleanup_inprocess_bus
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
@@ -321,6 +322,91 @@ class TestExternalEventIngress:
         assert result.reason == "external_event_team_mismatch"
 
 
+class TestResumeMembers:
+    """TeamRuntimeManager.resume_members session-context binding."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_binds_session_contextvar_during_agent_resume(self):
+        """The session contextvar must be bound around the agent resume call.
+
+        ``restart_teammate`` resolves the spawn session from the session-id
+        contextvar, and the server-side task that reaches this manager carries
+        no session context. Without the binding the restarted members
+        reattach to fresh uuid4 sessions that can never see the leader's
+        messages.
+        """
+        manager = TeamRuntimeManager()
+        seen_sessions: list[str] = []
+        before = get_session_id()
+
+        async def fake_resume_members() -> list[str]:
+            seen_sessions.append(get_session_id())
+            return ["worker"]
+
+        agent = SimpleNamespace(resume_members=fake_resume_members)
+        await manager.pool.add(
+            ActiveTeam(
+                team_name="alpha",
+                agent=agent,
+                current_session_id="session-1",
+                state=RuntimeState.RUNNING,
+            )
+        )
+
+        restarted = await manager.resume_members(team_name="alpha", session_id="session-1")
+
+        assert restarted == ["worker"]
+        assert seen_sessions == ["session-1"]
+        # The binding is scoped to the call; the previous context is restored.
+        assert get_session_id() == before
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_unknown_session_returns_empty(self):
+        manager = TeamRuntimeManager()
+
+        restarted = await manager.resume_members(team_name="alpha", session_id="session-1")
+
+        assert restarted == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_session_mismatch_returns_empty(self):
+        manager = TeamRuntimeManager()
+        agent = SimpleNamespace(resume_members=AsyncMock(return_value=["worker"]))
+        await manager.pool.add(
+            ActiveTeam(
+                team_name="alpha",
+                agent=agent,
+                current_session_id="session-1",
+                state=RuntimeState.RUNNING,
+            )
+        )
+
+        restarted = await manager.resume_members(team_name="alpha", session_id="session-2")
+
+        assert restarted == []
+        agent.resume_members.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_agent_without_resume_members_returns_empty(self):
+        manager = TeamRuntimeManager()
+        await manager.pool.add(
+            ActiveTeam(
+                team_name="alpha",
+                agent=SimpleNamespace(),
+                current_session_id="session-1",
+                state=RuntimeState.RUNNING,
+            )
+        )
+
+        restarted = await manager.resume_members(team_name="alpha", session_id="session-1")
+
+        assert restarted == []
+
+
 class TestDeleteTeamFilesystemCleanup:
     """manager.delete_team runs block-C member cleanup before the rmtree."""
 
@@ -357,3 +443,11 @@ class TestDeleteTeamFilesystemCleanup:
             assert not apaths.team_home("teamA").is_dir(), "team home must be removed"
         finally:
             apaths.reset_openjiuwen_home()
+
+
+@pytest.fixture(autouse=True)
+def mock_group_history_cleanup(monkeypatch):
+    # Archive cleanup has its own scope tests; lifecycle tests use fake storage.
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.tools.group_conversation.GroupConversationLog.delete_registered", lambda *a: None,
+    )

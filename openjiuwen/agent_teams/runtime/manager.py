@@ -64,6 +64,7 @@ from openjiuwen.agent_teams.runtime.pool import (
     RuntimeState,
     TeamRuntimePool,
 )
+from openjiuwen.agent_teams.runtime.voice import voice_pause_scope
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
@@ -106,6 +107,9 @@ class TeamRuntimeManager:
 
     def __init__(self) -> None:
         self._pool: TeamRuntimePool = TeamRuntimePool()
+        # Teams whose run cycle ends through a voice pause; their trace is
+        # flushed off the event loop (see consume_voice_pause).
+        self._voice_paused_teams: set[str] = set()
 
     @property
     def pool(self) -> TeamRuntimePool:
@@ -165,13 +169,17 @@ class TeamRuntimeManager:
             team_db_state,
             pool_entry is not None,
         )
-        return await self._apply_action(
+        activation = await self._apply_action(
             action,
             spec=spec,
             team_session=team_session,
             pool_entry=pool_entry,
             inputs=inputs,
         )
+        backend = getattr(activation.agent, "team_backend", None)
+        if backend is not None and hasattr(backend, "bind_group_session"):
+            backend.bind_group_session(target_session_id)
+        return activation
 
     async def finalize(
         self,
@@ -338,12 +346,20 @@ class TeamRuntimeManager:
         *,
         team_name: str,
         session_id: str,
+        voice: bool = False,
     ) -> bool:
         """Pause the active runtime for ``(team_name, session_id)``.
 
-        Returns ``False`` when no matching pool entry is found; the call
-        is otherwise idempotent — pausing an already-PAUSED entry is a
-        no-op success.
+        Returns ``False`` when no matching pool entry is found. The call is
+        idempotent — pausing an already-PAUSED entry is a no-op success.
+
+        ``voice=True`` (voice barge-in) additionally:
+
+        - returns ``False`` while the run cycle is still starting (its input
+          has not reached the harness, so parking now would drop it); the
+          caller keeps the stream and delivers the next input as a follow-up;
+        - tears teammates down concurrently;
+        - flushes the run cycle's trace off the event loop.
         """
         entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
         if entry is None:
@@ -353,10 +369,158 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
-        await entry.agent.pause_coordination()
+        if not voice:
+            self._voice_paused_teams.discard(team_name)
+            await entry.agent.pause_coordination()
+            entry.state = RuntimeState.PAUSED
+            team_logger.info("pause: team {} session {} paused", team_name, session_id)
+            return True
+        if self._run_cycle_not_live(entry):
+            team_logger.info(
+                "pause(voice): team {} session {} run cycle not live yet; nothing to park",
+                team_name,
+                session_id,
+            )
+            return False
+        # Set before pausing: the stream's finally can run while
+        # pause_coordination is still tearing down.
+        if entry.state is RuntimeState.RUNNING:
+            self._voice_paused_teams.add(team_name)
+        with voice_pause_scope():
+            await entry.agent.pause_coordination()
         entry.state = RuntimeState.PAUSED
         team_logger.info("pause: team {} session {} paused", team_name, session_id)
         return True
+
+    async def pause_members(self, *, team_name: str, session_id: str) -> bool:
+        """Pause the teammates of a running team; the leader keeps running.
+
+        Voice "pause the tasks": the leader stays live and answers the user,
+        so the runtime entry stays RUNNING and its stream stays open.
+
+        Returns ``False`` when no running leader is found for the pair.
+        """
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None or entry.state is not RuntimeState.RUNNING:
+            team_logger.info(
+                "pause_members: no running team {} session {}; nothing to pause",
+                team_name,
+                session_id,
+            )
+            return False
+        pause_members = getattr(entry.agent, "pause_members", None)
+        if pause_members is None:
+            return False
+        paused = await pause_members()
+        team_logger.info("pause_members: team {} session {} paused={}", team_name, session_id, paused)
+        return paused
+
+    async def resume_members(self, *, team_name: str, session_id: str) -> list[str]:
+        """Restart the teammates ``pause_members`` held down; ``[]`` if none."""
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None:
+            return []
+        resume_members = getattr(entry.agent, "resume_members", None)
+        if resume_members is None:
+            return []
+        # ``restart_teammate`` resolves the spawn session from the session-id
+        # contextvar, and the server-side task that got us here carries no
+        # session context. Bind ours so the restarted members reattach to this
+        # session's topics and state instead of fresh uuid4 sessions that can
+        # never see the leader's messages.
+        token = set_session_id(session_id)
+        try:
+            restarted = await resume_members()
+        finally:
+            reset_session_id(token)
+        team_logger.info("resume_members: team {} session {} restarted={}", team_name, session_id, restarted)
+        return restarted
+
+    async def hold_members_on_start(self, *, team_name: str, session_id: str) -> bool:
+        """Keep a paused team's members down when its leader next resumes.
+
+        Voice "pause the tasks" after a whole-team pause: the next run cycle
+        brings back only the leader so it can answer; ``resume_members``
+        restarts the members later. ``False`` when the team is not paused.
+        """
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None or entry.state is not RuntimeState.PAUSED:
+            return False
+        hold = getattr(entry.agent, "hold_members_on_start", None)
+        if hold is None:
+            return False
+        held = hold()
+        team_logger.info("hold_members_on_start: team {} session {} held={}", team_name, session_id, held)
+        return held
+
+    async def members_paused(self, *, team_name: str, session_id: str) -> bool:
+        """Whether ``pause_members`` is holding the team's members down."""
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None:
+            return False
+        return bool(getattr(entry.agent, "members_paused", False))
+
+    async def add_leader_note(
+        self,
+        text: str,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> bool:
+        """Queue a user note for the leader's next round.
+
+        The note is admitted as its own user turn when the leader next runs a
+        round — a resume of the paused round or a new message — so the leader
+        (and the trajectory) sees what the user said while the team was paused.
+
+        Returns ``False`` when no matching pool entry (or leader harness) is
+        found; the note is then dropped.
+        """
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None:
+            team_logger.info(
+                "add_leader_note: no pool entry for team {} session {}; note dropped",
+                team_name,
+                session_id,
+            )
+            return False
+        resources = getattr(entry.agent, "resources", None)
+        harness = getattr(resources, "harness", None)
+        if harness is None or not hasattr(harness, "add_prelude_note"):
+            team_logger.info(
+                "add_leader_note: team {} session {} has no leader harness; note dropped",
+                team_name,
+                session_id,
+            )
+            return False
+        harness.add_prelude_note(text)
+        team_logger.info("add_leader_note: team {} session {} note queued", team_name, session_id)
+        return True
+
+    def consume_voice_pause(self, team_name: str) -> bool:
+        """Whether the ending run cycle was paused by voice (clears the mark)."""
+        if team_name in self._voice_paused_teams:
+            self._voice_paused_teams.discard(team_name)
+            return True
+        return False
+
+    @staticmethod
+    def _run_cycle_not_live(entry: ActiveTeam) -> bool:
+        """Whether the entry was activated for a run cycle that is not running yet.
+
+        Between activate (entry RUNNING, ``runtime_ready`` emitted) and the end
+        of ``kernel.start`` the kernel is idle (CREATE), still ``paused`` from
+        the previous cycle (RESUME_FROM_PAUSE); the cycle's
+        own input has not reached the harness yet. Parking the cycle then
+        drops that input, and admitting a follow-up can overtake it.
+        """
+        if entry.state is not RuntimeState.RUNNING:
+            return False
+        coordination = getattr(entry.agent, "coordination", None)
+        lifecycle_state = getattr(coordination, "lifecycle_state", None)
+        # Agents without a coordination kernel (or test doubles) expose no
+        # string state; treat them as live rather than blocking delivery.
+        return isinstance(lifecycle_state, str) and lifecycle_state != "running"
 
     async def interact(
         self,
@@ -364,6 +528,7 @@ class TeamRuntimeManager:
         *,
         team_name: str,
         session_id: str,
+        voice: bool = False,
     ) -> DeliverResult:
         """Route an interact payload through the active team's gate.
 
@@ -401,8 +566,10 @@ class TeamRuntimeManager:
             ``DeliverResult.success(...)`` when the payload was handed off
             to the team. ``DeliverResult.failure("not_active")`` when no
             pool entry matches; ``DeliverResult.failure("gate_closed")``
-            when the runtime is shutting down. Other failure reasons
-            propagate from the underlying inbox.
+            when the runtime is shutting down;
+            ``DeliverResult.failure("runtime_starting")`` while the run
+            cycle is still starting (``voice=True`` only; transient, retry).
+            Other failure reasons propagate from the underlying inbox.
         """
         entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
         if entry is None:
@@ -438,6 +605,12 @@ class TeamRuntimeManager:
             return await self._route_swarmflow_human_reply(
                 entry, reply[0], reply[1], reply[2]
             )
+
+        # Voice: while the run cycle is starting, its own input is not
+        # enqueued yet; admitting now could reach the harness first and
+        # reorder the user's spoken turns. Callers retry once it is running.
+        if voice and self._run_cycle_not_live(entry):
+            return DeliverResult.failure("runtime_starting")
 
         ticket = await entry.interact_gate.admit()
         if ticket is None:
@@ -725,15 +898,13 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
+        # A failed shutdown is still a live, owned runtime. Preserve the entry
+        # and propagate the failure so callers can retry instead of orphaning it.
+        token = set_session_id(session_id)
         try:
             await entry.agent.stop_coordination()
-        except Exception as exc:
-            team_logger.warning(
-                "Failed to stop team {} on session {}: {}",
-                team_name,
-                session_id,
-                exc,
-            )
+        finally:
+            reset_session_id(token)
         await self._pool.remove(team_name)
         team_logger.info(
             "stop_team: team {} session {} stopped and removed from pool",
@@ -861,6 +1032,9 @@ class TeamRuntimeManager:
                 team_names=[team_name],
                 db=db,
             )
+        from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+
+        await asyncio.to_thread(GroupConversationLog.delete_registered, team_name)
         for session_id in session_ids:
             await db.drop_session_tables_by_id(session_id)
             if not await remove_session_worktrees(team_name, session_id):
@@ -950,6 +1124,10 @@ class TeamRuntimeManager:
             team_names=release_info.team_names,
             db=db,
         )
+        from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+
+        for team_name in release_info.team_names:
+            await asyncio.to_thread(GroupConversationLog.delete_registered, team_name, session_id)
         await db.drop_session_tables_by_id(session_id)
         for team_name in release_info.team_names:
             if not await remove_session_worktrees(team_name, session_id):

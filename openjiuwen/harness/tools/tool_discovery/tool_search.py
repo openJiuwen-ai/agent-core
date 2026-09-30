@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -84,6 +85,24 @@ class ToolSearchTool(Tool):
                 str(exc),
             )
             return ToolOutput(success=False, error=str(exc))
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render each matched tool's name, description and parameter schema.
+
+        The schema must stay exact JSON: the model passes arguments matching it
+        to ``tool_call``.
+        """
+        if not output.success:
+            return super().render_for_llm(output)
+        data = output.data
+        if not data["results"]:
+            return f'No tools matched "{data["query"]}".'
+        sections = [
+            f"## {item['name']}\n{item['description']}\n"
+            f"Parameters: {json.dumps(item['parameters'], ensure_ascii=False)}"
+            for item in data["results"]
+        ]
+        return f'{data["count"]} tool(s) matched "{data["query"]}".\n\n' + "\n\n".join(sections)
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         if False:

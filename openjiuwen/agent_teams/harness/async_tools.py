@@ -487,7 +487,7 @@ class AsyncTool(TeamTool):
             return ToolOutput(success=False, error=f"Internal error: {exc}")
         return ToolOutput(success=True, data={"status": "launched", "task_id": task_id})
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to launch async tool"
         return t("async_tool.launched", tool=self.card.name, task_id=output.data["task_id"])

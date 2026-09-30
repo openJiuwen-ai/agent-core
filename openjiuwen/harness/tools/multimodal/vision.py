@@ -212,6 +212,12 @@ class ImageOCRTool(Tool):
             },
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the recognized text."""
+        if not output.success:
+            return super().render_for_llm(output)
+        return output.data["text"] or "No text recognized."
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         _ = inputs, kwargs
         if False:
@@ -275,6 +281,12 @@ class VisualQuestionAnsweringTool(Tool):
                 "model": model,
             },
         )
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the answer to the visual question."""
+        if not output.success:
+            return super().render_for_llm(output)
+        return output.data["answer"] or "The vision model returned no answer."
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         _ = inputs, kwargs

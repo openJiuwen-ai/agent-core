@@ -253,6 +253,12 @@ class BashTool(Tool):
             error=content if is_error else None,
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """A background launch carries only its pid; describe it in words."""
+        if output.success and "pid" in output.data:
+            return f"Command started in background (pid {output.data['pid']})."
+        return super().render_for_llm(output)
+
     # ── stream ────────────────────────────────────────────────
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[ToolOutput]:

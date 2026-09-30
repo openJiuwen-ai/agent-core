@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime
@@ -31,6 +32,8 @@ from openjiuwen.harness.personal_context.fetch.retry import (
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
+
+_LOGGER = logging.getLogger(__name__)
 
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 20
@@ -307,8 +310,17 @@ def _entry_candidate(
     dates = _date_values(entry)
     candidate_datetime = max((parsed for _name, _value, parsed in dates), default=None)
     if candidate_datetime is None:
+        # A single time-less entry must not abort the whole run: dropping one entry is
+        # better than losing the feed. The warning keeps the skip visible instead of a
+        # silent empty run. Unfiltered runs keep an explicit "unknown, assume oldest"
+        # marker.
         if time_range.get("mode") != "all":
-            raise ValueError("RSS feed entry has no usable published or updated time")
+            _LOGGER.warning(
+                "RSS feed entry %r (%s) has no usable published or updated time; skipping it",
+                title,
+                link,
+            )
+            return None
         candidate_time = "1970-01-01T00:00:00Z"
     else:
         candidate_time = candidate_datetime.astimezone(UTC).isoformat().replace("+00:00", "Z")

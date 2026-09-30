@@ -112,3 +112,50 @@ async def test_empty_query_without_continuation_is_rejected() -> None:
                 {"conversation_id": "sess", "query": ""},
                 session=_make_session(),
             )
+
+
+@pytest.mark.asyncio
+async def test_prelude_notes_precede_the_continuation() -> None:
+    """Prelude notes are appended as their own user turns, even when continuing."""
+    agent, mock_context = _make_agent()
+    mock_llm = MockLLMModel()
+    mock_llm.set_responses([create_text_response("continued")])
+
+    with patch.object(agent, "_get_llm", return_value=mock_llm):
+        await agent.invoke(
+            {
+                "conversation_id": "sess",
+                "query": "",
+                "_resume_continuation": True,
+                "_prelude_notes": ["会议改到下午三点。", "报表明天再整理。"],
+            },
+            session=_make_session(),
+        )
+
+    assert [m.content for m in _appended_user_turns(mock_context)] == [
+        "会议改到下午三点。",
+        "报表明天再整理。",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prelude_notes_precede_the_query() -> None:
+    """On a normal round the notes come before the round's own query."""
+    agent, mock_context = _make_agent()
+    mock_llm = MockLLMModel()
+    mock_llm.set_responses([create_text_response("hi")])
+
+    with patch.object(agent, "_get_llm", return_value=mock_llm):
+        await agent.invoke(
+            {
+                "conversation_id": "sess",
+                "query": "hello",
+                "_prelude_notes": ["会议改到下午三点。"],
+            },
+            session=_make_session(),
+        )
+
+    assert [m.content for m in _appended_user_turns(mock_context)] == [
+        "会议改到下午三点。",
+        "hello",
+    ]

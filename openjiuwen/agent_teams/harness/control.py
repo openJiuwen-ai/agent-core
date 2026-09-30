@@ -52,9 +52,14 @@ class _CmdPause:
             For an LLM-phase pause this is synchronous; for a tool-phase pause
             it is deferred until the current iteration completes cooperatively
             (the supervisor stashes it on ``ActiveRound.pause_ack``).
+        voice: Whether this is a voice barge-in pause. An LLM-phase voice pause
+            rewinds to just before the interrupted model call instead of the
+            previous iteration boundary, keeping the user input admitted for
+            that call (see ``ActiveRound.pre_model_snapshot``).
     """
 
     ack: asyncio.Future
+    voice: bool = False
 
 
 @dataclass(frozen=True, slots=True)

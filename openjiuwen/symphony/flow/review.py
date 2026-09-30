@@ -33,8 +33,19 @@ _ARTIFACT_ESCAPE_PATTERN = ".."
 _FORBIDDEN_PERMISSIONS = frozenset({"credential_access", "filesystem_write", "process", "shell"})
 _ALLOWED_LICENSES = frozenset({"Apache-2.0", "BSD-3-Clause", "MIT", "Proprietary"})
 _REVIEW_SYSTEM_PROMPT = (
-    "Review the supplied immutable capability package using only its contents. "
-    "Return JSON with verdict set to approved, rejected, or needs_human_review."
+    "You are the final semantic reviewer for an immutable capability package. "
+    "A deterministic gate has already validated its structure, dependencies, code safety, "
+    "secrets, artifact paths, integrity, naming, materials, permissions, and license. "
+    "Review only concrete contradictions or unsafe instructions that remain visible in the "
+    "package; never infer missing facts. The Proprietary license is explicitly allowed and "
+    "must not block approval. Referenced member capabilities intentionally keep credentials, "
+    "permissions, and runtime configuration outside this package, so an API or service "
+    "reference alone is not evidence of a missing dependency or unsafe behavior. Do not use "
+    "package timestamps to infer that content is future-dated or suspicious because no trusted "
+    "current time is supplied. Return rejected only for a concrete harmful or contradictory "
+    "instruction. Return needs_human_review only for a concrete unresolved ambiguity present "
+    "in the package. Otherwise return approved. Return JSON only, with verdict set to approved, "
+    "rejected, or needs_human_review."
 )
 
 

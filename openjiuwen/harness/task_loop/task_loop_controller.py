@@ -53,6 +53,7 @@ class TaskLoopController(Controller):
         *,
         task_id: Optional[str] = None,
         resume_continuation: bool = False,
+        prelude_notes: Optional[list[str]] = None,
     ) -> None:
         """Prepare a round, build InputEvent, publish it.
 
@@ -76,6 +77,9 @@ class TaskLoopController(Controller):
                 ``NativeHarness.resume`` to pick a paused round back up in
                 place). The flag rides the event metadata down to the inner
                 ReAct loop.
+            prelude_notes: User notes the inner ReAct loop admits as their own
+                user turns before the round's input (or before the continuation
+                when ``resume_continuation``). Rides the event metadata too.
         """
         handler = self._event_handler
         round_id = handler.prepare_round()
@@ -93,6 +97,8 @@ class TaskLoopController(Controller):
             event.metadata["task_id"] = task_id
         if resume_continuation:
             event.metadata["_resume_continuation"] = True
+        if prelude_notes:
+            event.metadata["_prelude_notes"] = list(prelude_notes)
 
         # Register synchronously so the caller cannot start its completion
         # timeout before a scheduler task exists. Keep input submission on the

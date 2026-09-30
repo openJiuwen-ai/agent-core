@@ -3,10 +3,19 @@
 
 """Tests for external CLI backend registry."""
 
+from dataclasses import replace
+
 import pytest
 from pydantic import ValidationError
 
-from openjiuwen.agent_teams.external.cli_agent.backends import available_backends, backend_for, is_known_backend
+from openjiuwen.agent_teams.external.cli_agent import backends
+from openjiuwen.agent_teams.external.cli_agent.backends import (
+    SdkRequirement,
+    available_backends,
+    backend_for,
+    is_known_backend,
+    missing_sdk_requirement,
+)
 from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
 
 
@@ -157,6 +166,57 @@ def test_claude_turn_stall_policy_is_validated_and_claude_only():
 
     with pytest.raises(ValidationError, match="claude_turn_idle_timeout_s is only valid"):
         ExternalCliAgentSpec(cli_agent="codex", claude_turn_idle_timeout_s=45.0)
+
+
+def test_claude_max_buffer_size_is_validated_and_claude_only():
+    config = ExternalCliAgentSpec(cli_agent="claude", claude_max_buffer_size=1024)
+    assert config.claude_max_buffer_size == 1024
+
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        ExternalCliAgentSpec(cli_agent="claude", claude_max_buffer_size=0)
+
+    with pytest.raises(ValidationError, match="claude_max_buffer_size is only valid"):
+        ExternalCliAgentSpec(cli_agent="codex", claude_max_buffer_size=1024)
+
+
+@pytest.mark.parametrize("cli_agent", ["claude", "codex", "generic"])
+def test_spec_survives_model_dump_round_trip(cli_agent: str):
+    """Spawn payloads and checkpoints re-validate a full ``model_dump``."""
+    config = ExternalCliAgentSpec(cli_agent=cli_agent)
+
+    restored = ExternalCliAgentSpec.model_validate(config.model_dump(mode="json", by_alias=True))
+
+    assert restored == config
+
+
+def test_sdk_backends_declare_their_optional_sdk():
+    claude = backend_for("claude")
+    codex = backend_for("codex")
+
+    assert claude is not None and claude.sdk_requirement is not None
+    assert claude.sdk_requirement.module == "claude_agent_sdk"
+    assert codex is not None and codex.sdk_requirement is not None
+    assert codex.sdk_requirement.module == "openai_codex"
+
+
+def test_missing_sdk_requirement_probes_import_without_importing(monkeypatch: pytest.MonkeyPatch):
+    requirement = SdkRequirement(
+        module="openjiuwen_absent_sdk_probe",
+        distribution="absent-sdk",
+        extra="absent",
+    )
+    backend = backend_for("claude")
+    assert backend is not None
+    monkeypatch.setitem(backends._SDK_BACKENDS, "claude", replace(backend, sdk_requirement=requirement))
+    assert missing_sdk_requirement("claude") == requirement
+
+    present = replace(requirement, module="json")
+    monkeypatch.setitem(backends._SDK_BACKENDS, "claude", replace(backend, sdk_requirement=present))
+    assert missing_sdk_requirement("claude") is None
+
+
+def test_missing_sdk_requirement_ignores_backends_without_sdk():
+    assert missing_sdk_requirement("not-a-real-cli") is None
 
 
 def test_unknown_backend_returns_none():

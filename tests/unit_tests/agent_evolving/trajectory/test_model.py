@@ -155,23 +155,12 @@ def test_schema_exposes_canonical_and_rl_fields_only() -> None:
         assert hasattr(schema, name)
 
 
-def test_migration_semantic_keys_are_isolated_from_current_conventions() -> None:
-    from openjiuwen.agent_evolving.trajectory import legacy_semconv
-    from openjiuwen.extensions.observability import semconv as observability_semconv
+def test_legacy_trajectory_modules_are_gone() -> None:
+    import importlib
 
-    migration_keys = (
-        "LEGACY_GEN_AI_TOOL_CALLS",
-        "LEGACY_GEN_AI_TOOL_ID",
-        "LEGACY_GEN_AI_TOOL_INPUT",
-        "LEGACY_GEN_AI_TOOL_OUTPUT",
-        "LEGACY_GEN_AI_USAGE_PROMPT_TOKENS",
-        "LEGACY_GEN_AI_USAGE_COMPLETION_TOKENS",
-        "LEGACY_GEN_AI_USAGE_TOTAL_TOKENS",
-        "LEGACY_TRAJECTORY_STEP_KIND",
-        "LEGACY_STEP_META",
-    )
-    assert all(hasattr(legacy_semconv, name) for name in migration_keys)
-    assert all(not hasattr(observability_semconv, name) for name in migration_keys)
+    for name in ("legacy", "legacy_semconv"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(f"openjiuwen.agent_evolving.trajectory.{name}")
 
 
 def test_schema_team_identity_values_match_observability_without_runtime_dependency() -> None:

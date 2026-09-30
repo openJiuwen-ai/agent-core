@@ -105,6 +105,31 @@ This is an abstract method that supports partial result returns for long-running
 
 **AsyncIterator[Output]**, an iterator of incremental results during tool execution.
 
+### render_for_llm
+
+```python
+def render_for_llm(output: Any) -> str
+```
+
+Render an `invoke` result into the plain text the model reads. The agent calls it once per tool call when building the tool-result message (`ToolMessage`); the structured result itself stays intact for program consumers such as rails, events and logs. Override it in a subclass to customize the text the model sees.
+
+Default behavior:
+
+* A `ToolOutput` with `success=True` renders `data["content"]`; a string `data` is used as-is, and any other payload without `content` is serialized as JSON.
+* A `ToolOutput` with `success=False` renders `error`, falling back to the payload when `error` is empty.
+* An empty rendering becomes a short placeholder, so the model never receives a blank tool result.
+* A result that is not a `ToolOutput` (e.g. from a plain function or a REST API) renders as `str(output)`.
+
+If a custom implementation raises, the agent logs it and falls back to the default rendering instead of turning a finished tool call into an execution failure.
+
+**Parameters**:
+
+* **output** (Any): The value returned by `invoke`, normally a `ToolOutput`.
+
+**Returns**:
+
+**str**, the model-facing text of the tool result.
+
 ## Auth
 
 Tools are registered with SSL authentication and parameter authentication by default, and support custom registration of authentication methods. For details, please refer to [auth.md](./auth/auth.md).
@@ -112,7 +137,7 @@ Tools are registered with SSL authentication and parameter authentication by def
 ## class LocalFunction
 
 ```python
-class LocalFunction(card: ToolCard, func: Callable)
+class LocalFunction(card: ToolCard, func: Callable, *, render: Callable[[Any], str] | None = None)
 ```
 
 Local function tool class.
@@ -121,6 +146,7 @@ Local function tool class.
 
 * **card** (ToolCard): Tool card.
 * **func** (Callable): Local callable object to be wrapped. Cannot be None.
+* **render** (Callable[[Any], str] | None, optional): Result renderer used instead of the default `render_for_llm` to produce the model-facing text, so function-backed tools can customize rendering without a subclass. Default: `None`.
 
 ### invoke
 ```python

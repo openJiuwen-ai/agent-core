@@ -24,6 +24,36 @@ from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.kv_cache.kv_cache_model_hook import KVCacheModelHook
 
 
+_llm_route_stream_writer_framework_id: Optional[int] = None
+
+
+def _ensure_llm_route_stream_writer_registered() -> None:
+    """Register the default frontend stream bridge for LLM route events."""
+    from openjiuwen.core.runner import Runner
+    from openjiuwen.core.runner.callback.events import LLMCallEvents
+    from openjiuwen.core.session.stream import OutputSchema
+
+    global _llm_route_stream_writer_framework_id
+    framework = Runner.callback_framework
+    framework_id = id(framework)
+    if _llm_route_stream_writer_framework_id == framework_id:
+        return
+
+    async def write_llm_route(route_metadata: dict | None = None, session=None, **kwargs) -> None:
+        if not route_metadata or session is None or not hasattr(session, "write_stream"):
+            return
+        payload = dict(route_metadata)
+        payload.setdefault("result_type", "answer")
+        await session.write_stream(OutputSchema(type="llm_route", index=0, payload=payload))
+
+    framework.register_sync(
+        LLMCallEvents.LLM_ROUTE,
+        write_llm_route,
+        namespace="core_llm_route_stream_writer",
+    )
+    _llm_route_stream_writer_framework_id = framework_id
+
+
 class Model:
     """Unified LLM invocation entry point
 
@@ -62,6 +92,7 @@ class Model:
 
         from openjiuwen.core.runner import Runner
         from openjiuwen.core.runner.callback.events import LLMCallEvents
+        _ensure_llm_route_stream_writer_registered()
         _fw = Runner.callback_framework
         _extra = {
             "model_config": model_config,
@@ -198,10 +229,9 @@ class Model:
         idle_timeout = self._resolve_stream_timeout("stream_idle_timeout")
 
         # The scope is opened here, in the frame that drives the stream, and
-        # not further down inside the callback handlers: every ``__anext__``
-        # below runs in its own ``asyncio.wait_for`` task, and such a task
-        # copies the context, so an id bound inside a chunk callback would be
-        # gone by the time the next chunk arrives. See ``call_scope``.
+        # not further down inside the callback handlers, so the id stays
+        # bound for the whole stream regardless of how each ``__anext__`` is
+        # scheduled. See ``call_scope``.
         with LlmCallScope(unified_completion=True):
             model_config = getattr(self, "model_config", None)
             effective_model_name = model or getattr(model_config, "model_name", None)
@@ -231,10 +261,13 @@ class Model:
                     next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
 
                     try:
-                        if next_timeout is None:
+                        # ``asyncio.timeout`` rather than ``wait_for``: on 3.11
+                        # ``wait_for`` drops the caller's cancellation when the
+                        # chunk lands in the same tick (gh-86296), so a hard
+                        # cancel of the round is swallowed and the stream (and
+                        # the ReAct loop above it) keeps running to completion.
+                        async with asyncio.timeout(next_timeout):
                             chunk = await stream_iterator.__anext__()
-                        else:
-                            chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
                     except StopAsyncIteration:
                         succeeded = True
                         break

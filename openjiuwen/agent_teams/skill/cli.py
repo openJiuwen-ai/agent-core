@@ -9,7 +9,7 @@ Two scenarios, picked from the join descriptor's ``scope`` (see
 * ``member`` — a third-party CLI acting as a first-class team member. The CLI
   drives the **real** team tools (``view_task`` / ``claim_task`` /
   ``send_message``) built by ``create_team_tools(role="teammate")``, so output
-  is the same ``map_result()`` text a native teammate sees. Plus ``inbox``
+  is the same ``render_for_llm()`` text a native teammate sees. Plus ``inbox``
   (the external-only pull op).
 * ``operator`` (default) — an external, non-member interface that controls the
   team (task board + messaging + roster + ``create_task``).
@@ -152,7 +152,7 @@ async def _dispatch_member(client: ExternalTeamClient, args: argparse.Namespace)
         inputs = {}
 
     result = await tool.invoke(inputs)
-    print(str(result))
+    print(tool.render_for_llm(result))
     return 0
 
 

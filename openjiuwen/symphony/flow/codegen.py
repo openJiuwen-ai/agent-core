@@ -49,6 +49,7 @@ def generate_swarmflow_script(
     skill_pack: dict[str, Any],
     *,
     recipe_id: str,
+    name: str | None = None,
     task_description: str = "",
     member_descriptions: dict[str, str] | None = None,
 ) -> str:
@@ -67,7 +68,11 @@ def generate_swarmflow_script(
         if source in order and target in order:
             upstream.setdefault(target, []).append(source)
 
-    meta_name = swarmflow_identifier(skill_pack, recipe_id=recipe_id)
+    meta_name = (
+        normalize_meta_name(name, fallback="skill-pack")
+        if name
+        else swarmflow_identifier(skill_pack, recipe_id=recipe_id)
+    )
     phases = [f"step_{index}" for index in range(1, len(order) + 1)]
     lines: list[str] = []
     lines.append(f'"""SwarmFlow script generated from recipe {recipe_id}."""')

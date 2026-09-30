@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 import uuid
 from typing import Any, AsyncIterator, Dict, Optional
 
@@ -8,7 +8,14 @@ from pydantic import Field, BaseModel
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.utils.schema_utils import SchemaUtils
-from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
+from openjiuwen.core.foundation.tool.base import (
+    EMPTY_SUCCESS_TEXT,
+    Input,
+    Output,
+    Tool,
+    ToolCard,
+    render_payload_text,
+)
 from openjiuwen.core.foundation.tool.schema import McpToolInfo
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import ToolCallEvents
@@ -24,6 +31,26 @@ def mcp_model_tool_prefix(server_name: str) -> str:
 def mcp_model_tool_name(server_name: str, tool_name: str) -> str:
     """Model-facing name AbilityManager registers for an MCP tool."""
     return f"{mcp_model_tool_prefix(server_name)}{tool_name}"
+
+
+def preserve_mcp_tool_result_status(tool_result: Any, content: Any) -> Any:
+    """Carry explicit MCP failures through extraction without changing successful values."""
+    if getattr(tool_result, "isError", False) is not True:
+        return content
+
+    error_parts = []
+    for item in (getattr(tool_result, "content", None) or []):
+        text = getattr(item, "text", None)
+        if isinstance(text, str) and text:
+            error_parts.append(text)
+    error = "\n\n".join(error_parts)
+    if not error.strip():
+        error = "MCP tool reported an error."
+
+    # MCPTool.invoke passes this type through instead of hiding the status in {"result": ...}.
+    if isinstance(content, McpToolResult):
+        return content.model_copy(update={"success": False, "error": error})
+    return McpToolResult(success=False, data={"result": content}, error=error)
 
 
 def extract_mcp_tool_result_content(
@@ -43,10 +70,13 @@ def extract_mcp_tool_result_content(
     the result is then an ``McpToolResult`` whose ``data`` holds the text
     plus data-URL image items, which the multimodal tool-result pipeline
     delivers to the model.
+
+    Explicit MCP errors return ``McpToolResult(success=False)`` with the
+    converted content and server error text preserved.
     """
     content = getattr(tool_result, "content", None)
     if not content:
-        return None
+        return preserve_mcp_tool_result_status(tool_result, None)
 
     text_parts = []
     images = []
@@ -66,7 +96,7 @@ def extract_mcp_tool_result_content(
                     text_parts.append(f"[image content: {mime_type}, {len(str(data))} base64 chars]")
                 continue
             if len(content) == 1:
-                return data
+                return preserve_mcp_tool_result_status(tool_result, data)
             text_parts.append(str(data))
             continue
 
@@ -74,18 +104,18 @@ def extract_mcp_tool_result_content(
             dumped = item.model_dump(exclude_none=True)
             dumped.pop("data", None)
             if len(content) == 1:
-                return dumped
+                return preserve_mcp_tool_result_status(tool_result, dumped)
             text_parts.append(str(dumped))
             continue
         if len(content) == 1:
-            return str(item)
+            return preserve_mcp_tool_result_status(tool_result, str(item))
         text_parts.append(str(item))
 
     text = "\n\n".join(text_parts)
 
     if images:
         note = f"{len(images)} image(s) attached as multimodal input."
-        return McpToolResult(
+        result = McpToolResult(
             data={
                 "content": f"{text}\n\n{note}" if text else note,
                 "multimodal": [
@@ -100,7 +130,8 @@ def extract_mcp_tool_result_content(
                 ],
             }
         )
-    return text
+        return preserve_mcp_tool_result_status(tool_result, result)
+    return preserve_mcp_tool_result_status(tool_result, text)
 
 
 class McpServerConfig(BaseModel):
@@ -121,12 +152,13 @@ class McpServerConfig(BaseModel):
 
 
 class McpToolResult(BaseModel):
-    """Tool result carrying multimodal data from an MCP server.
+    """Tool result carrying failure status or multimodal data from an MCP server.
 
     Duck-type-compatible with the harness ``ToolOutput`` shape
     (``success`` / ``data`` / ``error``) so the react-agent multimodal
-    pipeline and tool-message building consume it without core importing
-    harness.
+    pipeline consumes it without core importing harness. It deliberately
+    stays a separate model: its serialized form is streamed to upper layers
+    as the structured tool result and must not grow ``ToolOutput`` fields.
     """
 
     success: bool = True
@@ -191,3 +223,13 @@ class MCPTool(Tool):
         except Exception as e:
             raise build_error(StatusCode.TOOL_MCP_EXECUTION_ERROR, cause=e, reason=str(e), method="invoke",
                               card=self._card)
+
+    def render_for_llm(self, output: Any) -> str:
+        """Render an MCP call result as its extracted content.
+
+        ``invoke`` wraps a plain result as ``{"result": value}``; the model reads
+        the value itself (text as-is, structured values as JSON) instead of the
+        wrapper. A multimodal ``McpToolResult`` renders its ``content`` text.
+        """
+        payload = output.data if isinstance(output, McpToolResult) else output["result"]
+        return render_payload_text(payload) or EMPTY_SUCCESS_TEXT

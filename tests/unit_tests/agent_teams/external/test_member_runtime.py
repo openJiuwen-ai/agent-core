@@ -621,6 +621,111 @@ async def test_concurrent_sends_deliver_pending_team_context_once() -> None:
     await runtime.stop()
 
 
+class _RecordingTrajectoryRecorder:
+    """Capture what the runtime hands to a trajectory recorder, in order."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+        self.observed = asyncio.Event()
+
+    def record_input(self, turn_id: str, text: str) -> None:
+        self.calls.append(("input", (turn_id, text)))
+
+    def record_turn_identity(self, protocol_turn_id: str, *, turn_id: str, turn_number: int) -> None:
+        self.calls.append(("identity", (protocol_turn_id, turn_id, turn_number)))
+
+    def observe(self, envelope: HarnessEvent) -> None:
+        self.calls.append(("observe", type(envelope.event).__name__))
+        if isinstance(envelope.event, TurnLifecycleEvent) and envelope.event.kind is TurnEventKind.FINISHED:
+            self.observed.set()
+
+    def close(self) -> None:
+        self.calls.append(("close", None))
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_team_context_riding_along_is_recorded_as_its_own_input() -> None:
+    """Both halves of one delivery are inputs the host sent."""
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    recorder = _RecordingTrajectoryRecorder()
+    runtime.bind_trajectory_recorder(recorder)  # type: ignore[arg-type]
+    await runtime.start(team_session=_FakeTeamSession())
+
+    pending = "<team-context>\nteam state\n</team-context>"
+
+    async def _pending() -> str:
+        return pending
+
+    async def _commit() -> None:
+        return None
+
+    runtime._pending_team_context = _pending  # type: ignore[assignment]
+    runtime._commit_team_context = _commit  # type: ignore[assignment]
+
+    await runtime.send("review the parser")
+    await runtime.stop()
+
+    inputs = [call for call in recorder.calls if call[0] == "input"]
+    logger.info("recorded inputs: {}", inputs)
+    # A provider splits the delivery into a message per block, so each half
+    # has to be stated on its own to match one; the message comes first so it
+    # is what the turn reports as its input.
+    assert inputs == [
+        ("input", ("turn-1", "review the parser")),
+        ("input", ("turn-1", pending)),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_trajectory_recorder_receives_inputs_member_turns_and_every_event() -> None:
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    recorder = _RecordingTrajectoryRecorder()
+    runtime.bind_trajectory_recorder(recorder)  # type: ignore[arg-type]
+    team_session = _FakeTeamSession()
+    await runtime.start(team_session=team_session)
+
+    await runtime.send("list the files")
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), turn_id="turn-1")
+    await harness.emit(
+        ItemLifecycleEvent(kind=ItemEventKind.STARTED, item_type="tool", data={"name": "ls"}),
+        turn_id="turn-1",
+        item_id="call-1",
+    )
+    await harness.emit(
+        TurnLifecycleEvent(kind=TurnEventKind.FINISHED, result=TurnResult(status=TurnStatus.COMPLETED)),
+        turn_id="turn-1",
+    )
+    await asyncio.wait_for(recorder.observed.wait(), timeout=1)
+    member_turn = team_session.member_session.state["trajectory_member_turn"]
+    await runtime.stop()
+
+    logger.info("recorder calls: {}", recorder.calls)
+    assert HostCapability.MODEL_REQUEST_OBSERVATION in harness.start_contexts[0].host_capabilities
+    assert recorder.calls == [
+        ("input", ("turn-1", "list the files")),
+        ("identity", ("turn-1", member_turn["turn_id"], 1)),
+        ("observe", "TurnLifecycleEvent"),
+        ("observe", "ItemLifecycleEvent"),
+        ("observe", "TurnLifecycleEvent"),
+        ("close", None),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_runtime_without_recorder_does_not_request_model_observation() -> None:
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    await runtime.start()
+    await runtime.stop()
+
+    assert HostCapability.MODEL_REQUEST_OBSERVATION not in harness.start_contexts[0].host_capabilities
+
+
 @pytest.mark.level1
 def test_runtime_satisfies_member_and_team_context_protocols() -> None:
     harness = _FakeHarness()

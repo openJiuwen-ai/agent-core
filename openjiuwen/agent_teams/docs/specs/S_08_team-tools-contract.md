@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-09-01 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md |
+| 最近一次修订日期 | 2026-09-18 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md |
 
 ## 范围 / 边界
 
@@ -135,18 +135,29 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     比缺失的提示词更糟。属性级门控同样保留 `invoke` 内的防御性检查：MCP
     客户端直接调 `invoke`、不校验 schema，被省略的属性必须在那里被拒，且
     要拒在写成员行之前。
+    `spawn_external_cli` 的 `builtin_model` / `effort` 是同一模式（F_113）：
+    信号是 `builtin_models_enabled()`（某个声明的 CLI kind 带
+    `builtin_models` 目录），同时门控这两个属性、描述槽
+    `{{builtin_model_param_rows}}` / `{{builtin_model_usage}}` 与 leader 工具
+    `set_member_model` 的注册。`builtin_model` 与 `model_name` 互斥（前者跑
+    CLI 自身登录，后者跑 pool 端点），`effort` 必须伴随 `builtin_model`，名字与
+    强度只接受目录中声明的值。`set_member_model` 先落库再推活成员，返回的
+    `applied_live` 告诉 leader 是下一 turn 生效还是下次启动生效；`model_ref`
+    非空的成员（pool 端点或已持久化的认证 fallback）一律拒绝。
 13. **每个 `TeamTool.invoke` 必须返回 `ToolOutput`，永不抛**。工具内部
     `try / except` 捕获后端异常，落 `team_logger.error`，转成
     `ToolOutput(success=False, error=...)` 返回；不允许把 `Exception`
     透出到 ability 层。
-14. **`map_result` 是 LLM 看到的唯一文本**：工厂的 `_wrap_invoke_with_logging`
-    会在 `invoke` 返回后调用 `tool.map_result(output)`，把结果包成
-    `MappedToolOutput`，其 `__str__` 返回该文本。`ToolOutput.data` 仍保留
-    给事件 / 日志等程序消费者用。新工具如果不显式覆盖 `map_result`，
-    就只会得到 `json.dumps(data)` 的兜底——意味着 token 浪费，应当显式覆盖。
+14. **`render_for_llm` 是 LLM 看到的唯一文本**：它是 core `Tool` 上的渲染方法
+    （harness `S_05` 不变量 11），ability 层构造工具结果 `ToolMessage` 时直接调用
+    `tool.render_for_llm(output)`；外部出口（team MCP server、Claude SDK MCP、skill
+    CLI、被动成员执行器）也调用它，文本与进程内一致。`invoke` 返回的 `ToolOutput`
+    原样保留给事件 / 日志等程序消费者用。新工具如果不显式覆盖 `render_for_llm`，
+    就只会得到 core 默认渲染（有 `data["content"]` 取它，否则 JSON 兜底）——意味着
+    token 浪费，应当显式覆盖。
     `view_task` 的 list / detail 两级输出都把 `updated_at` 经
     `timefmt.format_time_context` 渲染为「绝对本地时间 + 相对差」，给 LLM
-    任务停留时长的时间感（`map_result` 签名不可加参，内部取 `get_current_time()`，
+    任务停留时长的时间感（`render_for_llm` 签名不可加参，内部取 `get_current_time()`，
     用 `updated_at is not None` 守卫 `exclude_none` 剔除的情况）。
 15. **Card / Config 分层**：`ToolCard` 只承载可序列化的 `id` / `name` /
     `description` / `input_params`；`teammate_mode` / `model_config_allocator` /
@@ -190,7 +201,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     查表——形态是闭集，缺失组合抛 `KeyError`，不做注册表、不静默回退。
     形态间怎么共享代码**取决于共享的是数据还是行为**，用最轻的手段：`create_task`
     的两个形态各自独立，只共享模块级纯函数（`_task_node_schema` / `_validate_task_batch`），
-    `invoke` / `map_result` 各写一遍；`send_message` 的两个形态共享 `_SendMessageBase`，
+    `invoke` / `render_for_llm` 各写一遍；`send_message` 的两个形态共享 `_SendMessageBase`，
     因为共享的是真实投递行为（`_send` / `_multicast` / `_broadcast`），子类只有自己的
     收件参数 schema 与一条直线 `_dispatch`。**不为「形态就该有基类」的对称感去造 `_XxxBase`**。
     无论哪种，形态子类里都**零形态分支**，因此不变量 12（schema 扁平、invoke 直线、
@@ -254,7 +265,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 
 21a. **`build_team` 的返回值承载 leader 的全部协同准则**（[[F_76]]）。leader 的系统提示词只留
     一段 bootstrap（身份 + build_team/swarmflow 分流 + "先建队"），role / workflow / dispatch /
-    lifecycle / HITT / inbound-tags 全部由 `map_result` 附在建队结果之后下发，内容经
+    lifecycle / HITT / inbound-tags 全部由 `render_for_llm` 附在建队结果之后下发，内容经
     `prompts.build_leader_policy_disclosure(...)` 按本次调用选定的模式裁剪。三条约束：
     **只在成功路径附加**；**HITT 段按 `output.data["enable_hitt"]` 即实际生效值 gate，不是 spec
     天花板**；`BuildTeamTool` 因此需要构造期拿到 `language` / `lifecycle` / `teammate_mode` /
@@ -295,7 +306,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `update_task` 剥 reviewer、`TeamScheduler._reconcile_reviews` 短路——没有一个在 autonomous 下
     可达）。所以 autonomous 时它既不进 schema，`{{build_team_verify_gate}}` 那节散文也一起消失，
     `invoke` 对偷传同样报错拒掉。**scheduled 时返回结果必须回带实际生效值**
-    （`data["enable_task_verification"]` + `map_result` 的 `task_verification=`）：spec 天花板会把
+    （`data["enable_task_verification"]` + `render_for_llm` 的 `task_verification=`）：spec 天花板会把
     leader 要的 `True` 收窄成 `False`（`effective = spec and (arg if arg is not None else True)`），
     而这个开关**不像 `enable_hitt` / `enable_bridge` 那样撞天花板就 `raise_error`，是静默收窄**——
     回带生效值是 leader 唯一能发现自己没拿到验证闸的通道，否则它会围绕一个不存在的闸去配 reviewer。
@@ -373,9 +384,8 @@ def create_team_tools(
 返回值：
 
 - 顺序按工厂内 `all_tools` 字典声明序遍历后过滤；调用方不应该依赖具体顺序。
-- 每个返回 `Tool` 的 `invoke` 已被 `_wrap_invoke_with_logging` 包过，
-  调用一次会经历：debug 日志 → 原 `invoke` → `map_result` → 包成
-  `MappedToolOutput`。
+- 每个返回 `Tool` 的 `invoke` 已被 `_wrap_invoke_with_logging` 包过，只加 debug
+  日志，返回值是原 `invoke` 的 `ToolOutput`，不做文本映射。
 
 错误语义：
 
@@ -504,29 +514,13 @@ if teammate_mode != "plan_mode":
 
 ```python
 class TeamTool(Tool, ABC):
-    def map_result(self, output: ToolOutput) -> str: ...
     async def stream(self, inputs, **kwargs): raise NotImplementedError
+    # 子类覆写 core Tool.render_for_llm(self, output: ToolOutput) -> str
 ```
 
-- 抽象基类。所有团队工具继承它，`invoke` 由各子类自己实现。
+- 抽象基类。所有团队工具继承它，`invoke` 与 `render_for_llm` 由各子类自己实现；
+  基类不提供自己的默认渲染，未覆写时走 core 默认实现。
 - 不支持 streaming——`stream` 显式抛，避免被通用调用路径误调用。
-
-### `MappedToolOutput`
-
-```python
-class MappedToolOutput(ToolOutput):
-    _mapped_content: str = PrivateAttr(default="")
-
-    @classmethod
-    def from_output(cls, output: ToolOutput, mapped_content: str) -> "MappedToolOutput": ...
-
-    def __str__(self) -> str: return self._mapped_content
-```
-
-- `_wrap_invoke_with_logging` 构造它包住 `invoke` 的返回值。
-- ability 层最终把工具结果转成 `ToolMessage.content` 是通过 `str(result)`，
-  这里覆盖 `__str__` 是该约定的入口。`data` / `success` / `error`
-  从原 `ToolOutput` 拷过来，程序消费路径无变化。
 
 ### `ToolCard`（每个团队工具构造时填）
 

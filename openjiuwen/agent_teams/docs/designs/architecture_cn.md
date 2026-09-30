@@ -904,13 +904,11 @@ Worktree 工具（`enter_worktree` / `exit_worktree`）已下沉到 `openjiuwen.
 
 ### 11.2 工具输出契约
 
-所有 `TeamTool` 子类 `invoke()` 返回 `ToolOutput`；工厂用 `_wrap_invoke_with_logging` 包装：
+所有 `TeamTool` 子类 `invoke()` 返回 `ToolOutput`；工厂用 `_wrap_invoke_with_logging` 包装，只加调试日志、原样返回结果。
 
-1. 调试日志
-2. 调 `tool.map_result(output)` 产出 model-facing 文本
-3. 包成 `MappedToolOutput`，其 `__str__` 就是 LLM 看到的 `ToolMessage.content`
+model-facing 文本由各工具覆写的 core `Tool.render_for_llm(output)` 产出：ability 层构造 `ToolMessage.content` 时直接调用它，外部 MCP / CLI 出口同样调用它。
 
-`map_result` 策略：纯文本确认 / 结构化文本行 / detail 文本 / 文本 + 行为引导（如 `claim_task(completed)` 自动追加 "Call view_task now…" 维持自主任务循环）/ 默认 JSON。
+`render_for_llm` 策略：纯文本确认 / 结构化文本行 / detail 文本 / 文本 + 行为引导（如 `claim_task(completed)` 自动追加 "Call view_task now…" 维持自主任务循环）/ 未覆写时走 core 默认渲染（`data["content"]` 或 JSON）。
 
 ### 11.3 描述即行为契约
 

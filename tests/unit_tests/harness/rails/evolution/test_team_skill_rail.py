@@ -413,7 +413,7 @@ def _trajectory_from_steps(
         TRAJECTORY_SOURCE,
     )
     from openjiuwen.extensions.observability import semconv
-    from openjiuwen.agent_evolving.trajectory import legacy_semconv
+    from openjiuwen.agent_evolving.trajectory.spans import write_llm_exchange
 
     resource_attrs: dict[str, Any] = {TRAJECTORY_ID: execution_id, TRAJECTORY_SOURCE: source}
     if session_id is not None:
@@ -424,27 +424,25 @@ def _trajectory_from_steps(
     for index, step in enumerate(steps):
         attrs: dict[str, Any] = {}
         if step.kind == "llm":
-            prompt_index = 0
-            completion_index = 0
             all_tool_calls: list[Any] = []
+            prompts: list[dict[str, Any]] = []
+            completions: list[dict[str, Any]] = []
             for message in step.detail.messages:
                 role = getattr(message, "role", None) if not isinstance(message, dict) else message.get("role")
                 content = getattr(message, "content", None) if not isinstance(message, dict) else message.get("content")
-                if role == "assistant":
-                    message_prefix = f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.{completion_index}"
-                    completion_index += 1
-                else:
-                    message_prefix = f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.{prompt_index}"
-                    prompt_index += 1
-                attrs[f"{message_prefix}.role"] = role or ""
-                attrs[f"{message_prefix}.content"] = content or ""
+                flat = {"role": role or "", "content": content or ""}
+                (completions if role == "assistant" else prompts).append(flat)
                 tool_calls = (
                     getattr(message, "tool_calls", None) if not isinstance(message, dict) else message.get("tool_calls")
                 )
                 if tool_calls:
                     all_tool_calls.extend(tool_calls)
             if all_tool_calls:
-                attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS] = json.dumps(all_tool_calls, ensure_ascii=False, default=str)
+                if not completions:
+                    completions.append({"role": "assistant"})
+                completions[0]["tool_calls"] = [dict(call) for call in all_tool_calls]
+            attrs.update(write_llm_exchange(prompts, completions))
+            attrs[semconv.GEN_AI_OPERATION_NAME] = "chat"
             name = "llm.call"
         else:
             detail = step.detail

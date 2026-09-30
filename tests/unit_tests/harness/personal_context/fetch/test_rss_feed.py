@@ -258,7 +258,7 @@ async def test_rss_feed_falls_back_to_link_or_feed_url_and_epoch_time(
 
 
 @pytest.mark.asyncio
-async def test_rss_feed_missing_time_fails_filtered_run_but_allows_all(
+async def test_rss_feed_missing_time_is_skipped_but_allows_all(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -272,12 +272,36 @@ async def test_rss_feed_missing_time_fails_filtered_run_but_allows_all(
         _config(time_range={"mode": "recent", "recent_days": 3}),
         home=tmp_path,
     )
-    with pytest.raises(BaseError):
+    assert (
         await filtered.prepare_run(
             run_id="filtered",
             run_started_at=datetime(2026, 8, 30, tzinfo=UTC),
             cursor=None,
         )
+        == ()
+    )
+
+    mixed_fixture = """\
+    <rss version="2.0"><channel>
+      <item><title>无时间</title></item>
+      <item>
+        <guid>kept</guid><title>有时间</title>
+        <pubDate>Fri, 28 Aug 2026 08:00:00 +0800</pubDate>
+        <description>kept</description>
+      </item>
+    </channel></rss>
+    """
+    _set_responses(monkeypatch, [_Response(mixed_fixture)])
+    mixed = RssFeedFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path,
+    )
+    candidates = await mixed.prepare_run(
+        run_id="mixed",
+        run_started_at=datetime(2026, 8, 30, tzinfo=UTC),
+        cursor=None,
+    )
+    assert [candidate["stable_id"] for candidate in candidates] == ["kept"]
 
 
 @pytest.mark.asyncio

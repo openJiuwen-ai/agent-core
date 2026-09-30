@@ -80,3 +80,17 @@ journal 只作为 `Runtime.journal` 内存对象活一次 run，run 完即弃。
 - **avatar session checkpoint 与 journal 的协同**：journal 是 agent 调用级缓存，
   avatar `Session` checkpoint 是有状态会话上下文（见 `F_37`），两层正交；部分-hit 续跑
   仍依赖 avatar checkpoint 落地（`F_37` 已知遗留）。
+
+## 修订 2026-09-16：布局已演进为 per-run 文件（见 F_40 修订 3/4）
+
+> **上方「目录布局」与「决策 1」描述的共享 `journal.jsonl` 布局已被取代**（2026-09-15
+> per-run 拆分，`F_40` 修订 3）：journal/WAL 现为 `journal-{run_id}.jsonl` +
+> `wal/{run_id}.wal`，`resume`/`journal_path`/`wal_path` 三参分立。本特性建立的"接线点在
+> `run_swarmflow`、`META["name"]` 必填、`_safe_segment` sanitize、`preprocess` 不落盘"等
+> 决策全部保留；路径单一真相源仍在 `paths.py`（新增 `workflow_run_journal_path` /
+> `workflow_run_wal_path`，无 run_id 时回退本文档的共享路径）。
+>
+> 共享 `journal.jsonl` + `journal.jsonl.wal` 保留了**只读种子**角色（2026-09-16，`F_40`
+> 修订 4）：带 run_id 的 resume 经 `_resolve_legacy_resume` 把共享文件读进 prior（只读，
+> 永不再写），升级前 pause 的老 session 照常命中缓存。"已知遗留"的跨 run 清理问题演进为
+> per-run 文件对的按 run 数累积——治理方案见 F_40 已知遗留与滚动老化设计文档。

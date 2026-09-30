@@ -146,7 +146,7 @@ class OtelTeamMonitorHandler:
         self._task_spans.clear()
         self._force_flush_provider()
 
-    def close_team_spans(self, team_name: str) -> None:
+    def close_team_spans(self, team_name: str, *, flush: bool = True) -> None:
         """Close task spans for a specific team."""
         for task_id, span in list(self._task_spans.items()):
             if span.is_recording():
@@ -155,7 +155,8 @@ class OtelTeamMonitorHandler:
                     span.set_status(Status(StatusCode.OK))
                     span.end()
                     self._task_spans.pop(task_id, None)
-        self._force_flush_provider()
+        if flush:
+            self._force_flush_provider()
 
     @staticmethod
     def _force_flush_provider() -> None:

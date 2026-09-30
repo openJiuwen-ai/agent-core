@@ -88,6 +88,10 @@ class HarnessCapability(str, Enum):
     NATIVE_TOOLS = "native_tools"
     MCP_TOOLS = "mcp_tools"
     HOOKS = "hooks"
+    # ``HarnessModelControl.set_model`` switches model / effort mid-session.
+    MODEL_SELECTION = "model_selection"
+    # ``HarnessModelControl.list_models`` probes the provider's model catalog.
+    MODEL_DISCOVERY = "model_discovery"
 
 
 class HostCapability(str, Enum):
@@ -103,6 +107,9 @@ class HostCapability(str, Enum):
     DYNAMIC_TOOL_CALL = "dynamic_tool_call"
     PROVIDER_INTERACTION = "provider_interaction"
     TELEMETRY = "telemetry"
+    # The host consumes ``ModelRequestEvent`` observations; providers open
+    # their vendor-side observation channels only when it is declared.
+    MODEL_REQUEST_OBSERVATION = "model_request_observation"
 
 
 class DeliveryMode(str, Enum):
@@ -202,6 +209,56 @@ class SendReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelSelection:
+    """Model and reasoning effort a harness should run its next turns on.
+
+    ``None`` keeps the current value of that field, so a selection may switch
+    only the model, only the effort, or both. Effort values are provider
+    vocabulary (for example ``"low"`` / ``"high"``); the provider validates
+    them, the protocol does not enumerate them.
+    """
+
+    model: str | None = None
+    effort: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.model is None and self.effort is None:
+            raise ValueError("model selection must set a model, an effort, or both")
+        for name in ("model", "effort"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"model selection {name} must be a non-empty string when provided")
+
+
+@dataclass(frozen=True, slots=True)
+class ModelOption:
+    """One model a provider offers, as reported by its own catalog.
+
+    ``efforts`` is empty when the model has no adjustable reasoning effort.
+    ``extensions`` keeps vendor-specific catalog data (resolved model id,
+    feature flags) without widening the shared fields.
+    """
+
+    model_id: str
+    display_name: str = ""
+    description: str = ""
+    efforts: tuple[str, ...] = ()
+    default_effort: str | None = None
+    is_default: bool = False
+    extensions: JsonObject = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.model_id:
+            raise ValueError("model option model_id must not be empty")
+        object.__setattr__(self, "efforts", tuple(self.efforts))
+        if any(not isinstance(item, str) or not item for item in self.efforts):
+            raise ValueError("model option efforts must be non-empty strings")
+        if self.default_effort is not None and self.efforts and self.default_effort not in self.efforts:
+            raise ValueError("model option default_effort must be one of its efforts")
+        object.__setattr__(self, "extensions", freeze_json_object(self.extensions))
+
+
+@dataclass(frozen=True, slots=True)
 class HarnessContext:
     """Per-agent runtime context supplied when a third-party harness starts.
 
@@ -259,6 +316,8 @@ __all__ = [
     "HostCapability",
     "JsonObject",
     "JsonValue",
+    "ModelOption",
+    "ModelSelection",
     "ResumePolicy",
     "SendReceipt",
     "freeze_json_object",

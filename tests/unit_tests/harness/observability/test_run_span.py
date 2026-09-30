@@ -32,7 +32,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRACE_COMPLETE,
     OJ_TRACE_FORCED_CLOSE,
     OJ_TRACE_ROOT,
-    OJ_TRACE_SCHEMA_VERSION,
+    OJ_TRAJECTORY_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
@@ -115,7 +115,7 @@ def test_root_routing_attributes_exist_during_processor_on_start(monkeypatch) ->
             {
                 OJ_AGENT_MODE: "agent.fast",
                 OJ_TRACE_ROOT: True,
-                OJ_TRACE_SCHEMA_VERSION: "1",
+                OJ_TRAJECTORY_SCHEMA_VERSION: "2",
                 GEN_AI_OPERATION_NAME: "invoke_agent",
                 OJ_TRAJECTORY_RECORD_KIND: "turn",
                 OJ_EXECUTION_SUBJECT_ID: "main",
@@ -182,7 +182,7 @@ def test_close_ends_the_span_stamps_the_output_and_clears_the_root(exporter) -> 
     assert finished[0].attributes[OJ_TURN_NUMBER] == 2
     assert finished[0].attributes[OJ_AGENT_MODE] == "agent.fast"
     assert finished[0].attributes[OJ_TRACE_ROOT] is True
-    assert finished[0].attributes[OJ_TRACE_SCHEMA_VERSION] == "1"
+    assert finished[0].attributes[OJ_TRAJECTORY_SCHEMA_VERSION] == "2"
     assert finished[0].attributes[OJ_TRACE_COMPLETE] is True
     assert shared_span_context.get_root_span(session_id="sess-A") is None
     assert agent_span_context.resolve_run_root_span() is None

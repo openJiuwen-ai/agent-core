@@ -103,3 +103,23 @@ await agent("write code", label="sum-agent", isolation="worktree")
 ## 已知遗留
 
 - worktree 冲突合并仍由 leader / 上层 workflow 负责，本次只解决 worker 的隔离创建与收尾。
+
+## 修订 2026-09-11:session 级孤儿 worktree 对账
+
+原"保留的 worktree 交由 leader 后续集成"存在无人认领的缺口：worktree slug 内嵌 worker
+成员名，而成员名携带 run_id（F_47），**每次 relaunch 都生成全新 slug**——上一 run 保留的
+worktree 对后续 run 不可寻址，与 journal 缓存命中毫无关系，只能等 `delete_team` 整树删除。
+跨 run 反复 relaunch 时磁盘上累积大量孤儿。
+
+- **对账点**：`SwarmflowWorkerWorktrees.ensure` 在本 run 创建**第一个** worktree 前对
+  session worktrees 根（`team_session_worktrees_dir`）做一次对账（每 run 一次，幂等标志）。
+  只清本 run `_active` 之外的条目——本 run 自己的 worktree 不受影响。
+- **判据 fail-closed**：只有**可证明干净**的孤儿才删——无未提交修改（`git status
+  --porcelain` 为空）且无自有提交（worktree HEAD 是仓库 HEAD 的祖先或相等，
+  `git merge-base --is-ancestor`；方向用"worktree ⊆ repo"而非创建时基点，跨 run 拿不到
+  当时的 head_commit 也能判）。脏的、不可验证的、无 git root 的一律保留。这与既有
+  "保留的 worktree 交由 leader 集成"语义一致：删干净残留无损，删脏的会丢工作。
+- **修复收益**：磁盘止血（孤儿不再无限累积）；每轮 relaunch 对上一 run 的干净残留不再重复
+  占用 checkout 空间。
+- **验证**：`test_reconcile_removes_clean_orphan_and_keeps_dirty`（真 git 仓 + stub
+  manager：干净孤儿进 removed、脏孤儿保留、第二次调用幂等 no-op）。
