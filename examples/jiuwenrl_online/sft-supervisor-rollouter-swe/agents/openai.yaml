@@ -1,0 +1,4 @@
+interface:
+  display_name: "SWE YuanRong Supervisor Docker Lite"
+  short_description: "使用 supervisor 模型在 YuanRong 沙箱执行 SWE 并采集 SFT 轨迹"
+  default_prompt: "使用 $sft-supervisor-rollouter-swe，通过 test_suite/mini5 的 suite 配置执行 1 道 SWE-bench YuanRong rollout，并采集 SFTOnlineRail 轨迹。"
