@@ -51,6 +51,7 @@ class _PowerShellInputs:
     workdir: str
     background: bool
     max_output_chars: int
+    head_ratio: float
     description: str
 
 
@@ -112,6 +113,26 @@ class PowerShellTool(Tool):
         return max(200, min(value, max_chars))
 
     @staticmethod
+    def _resolve_head_ratio(raw_value: Any, default: float = 0.6) -> float:
+        """Parse and clamp the head/tail split ratio used for truncated output.
+
+        The head shares are given to the start of the output (setup / context);
+        the remainder keeps the tail (typically the error or final status).
+        ``POWER_SHELL_TOOL_HEAD_RATIO`` overrides the default when the caller
+        omits it.
+        """
+        try:
+            env_default = float(os.getenv("POWER_SHELL_TOOL_HEAD_RATIO") or default)
+        except ValueError:
+            env_default = default
+        default = max(0.0, min(1.0, env_default))
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            value = default
+        return max(0.0, min(1.0, value))
+
+    @staticmethod
     def _parse_inputs(inputs: Dict[str, Any]) -> _PowerShellInputs:
         """Parse and clamp tool inputs."""
         return _PowerShellInputs(
@@ -120,6 +141,7 @@ class PowerShellTool(Tool):
             workdir=inputs.get("workdir", ""),
             background=bool(inputs.get("background", False)),
             max_output_chars=PowerShellTool._resolve_max_output_chars(inputs.get("max_output_chars", 20000)),
+            head_ratio=PowerShellTool._resolve_head_ratio(inputs.get("head_ratio")),
             description=inputs.get("description", ""),
         )
 
@@ -190,6 +212,7 @@ class PowerShellTool(Tool):
                         exit_code=res.data.exit_code if res.data.exit_code is not None else -1,
                         warning=warning,
                         max_output_chars=p.max_output_chars,
+                        head_ratio=p.head_ratio,
                     ),
                     res.message,
                 )
@@ -215,6 +238,7 @@ class PowerShellTool(Tool):
                 exit_code=exit_code,
                 warning=warning,
                 max_output_chars=p.max_output_chars,
+                head_ratio=p.head_ratio,
             ),
             meaning.is_error,
         )
@@ -314,6 +338,7 @@ class PowerShellTool(Tool):
                 exit_code=final_exit_code,
                 warning=warning,
                 max_output_chars=p.max_output_chars,
+                head_ratio=p.head_ratio,
             ),
             meaning.is_error,
         )
