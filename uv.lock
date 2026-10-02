@@ -3116,6 +3116,7 @@ dependencies = [
     { name = "agentdescent" },
     { name = "aiofiles" },
     { name = "aiohttp" },
+    { name = "aiosqlite" },
     { name = "alembic" },
     { name = "anthropic" },
     { name = "anyio" },
@@ -3143,6 +3144,8 @@ dependencies = [
     { name = "pycryptodome" },
     { name = "pymilvus" },
     { name = "pyoxigraph" },
+    { name = "pypdf" },
+    { name = "pypdfium2" },
     { name = "pysbd" },
     { name = "python-dateutil" },
     { name = "python-docx" },
@@ -3346,6 +3349,7 @@ requires-dist = [
     { name = "aiofiles", specifier = ">=25.1.0" },
     { name = "aiohttp", specifier = ">=3.11.12" },
     { name = "aiomysql", marker = "extra == 'mysql'", specifier = ">=0.3.2" },
+    { name = "aiosqlite", specifier = ">=0.22.1" },
     { name = "aiosqlite", marker = "extra == 'sqlite'", specifier = ">=0.22.1" },
     { name = "alembic", specifier = ">=1.13.1" },
     { name = "anthropic", specifier = ">=0.120.2" },
@@ -3408,6 +3412,8 @@ requires-dist = [
     { name = "pycryptodome", specifier = ">=3.23.0" },
     { name = "pymilvus", specifier = ">=2.6.2,<2.6.10" },
     { name = "pyoxigraph", specifier = ">=0.5.8" },
+    { name = "pypdf", specifier = ">=6.0.0" },
+    { name = "pypdfium2", specifier = ">=5.5.0" },
     { name = "pysbd", specifier = ">=0.3.4" },
     { name = "python-dateutil", specifier = ">=2.9.0.post0" },
     { name = "python-docx", specifier = ">=1.2.0" },
@@ -4606,6 +4612,15 @@ source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/f3/91/9c6ee907786a473bf81c5f53cf703ba0957b23ab84c264080fb5a450416f/pyparsing-3.3.2.tar.gz", hash = "sha256:c777f4d763f140633dcb6d8a3eda953bf7a214dc4eff598413c070bcdc117cbc" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/10/bd/c038d7cc38edc1aa5bf91ab8068b63d4308c66c4c8bb3cbba7dfbc049f9c/pyparsing-3.3.2-py3-none-any.whl", hash = "sha256:850ba148bd908d7e2411587e247a1e4f0327839c40e2e5e6d05a007ecc69911d" },
+]
+
+[[package]]
+name = "pypdf"
+version = "6.19.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/1f/ac/63d71aaedb59acbcdef491e6ca6469165e3771c9c74358204818fd9bc5a6/pypdf-6.19.0.tar.gz", hash = "sha256:bbc43aca292369ccc6cbc8a921991ecf2538a3587ab5a116eff06c321d647155" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/3c/2c/c43c03eaf630435f023f1dc61ec4a4a78951ad5530a62c71cc89bde307b7/pypdf-6.19.0-py3-none-any.whl", hash = "sha256:7e5d6e730e7dae87d560a2cee218b852f6498c8be61966f3cd02ead971e48d14" },
 ]
 
 [[package]]
