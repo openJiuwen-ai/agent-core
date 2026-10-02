@@ -9,7 +9,7 @@ _CST = timezone(timedelta(hours=8))
 from pathlib import Path
 from typing import Any
 
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import current_context
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import current_context, get_logger
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     EXPERIMENTS_ROOT,
     ensure_manager_dir,
@@ -20,11 +20,16 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     manager_rounds_path,
     manager_state_path,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import (
+    summarize_model_usage,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas import (
     ManagerSnapshot,
     PersistedManagerState,
     TerminalReport,
 )
+
+_logger = get_logger(__name__)
 
 SCHEMA_VERSION = 1
 
@@ -110,6 +115,15 @@ def write_manager_round_snapshot(
     _atomic_write_text(round_dir / "query.txt", query)
 
 
+def _model_usage(run_id: str) -> dict[str, dict[str, int]]:
+    """Per-module model usage for the terminal report; a trace read error never blocks the report."""
+    try:
+        return summarize_model_usage(run_id)
+    except Exception:  # noqa: BLE001 — usage accounting must not break terminal reporting
+        _logger.exception("could not summarize model usage for run %s", run_id)
+        return {}
+
+
 def write_terminal_report(state: PersistedManagerState) -> Path:
     if state.terminal is None:
         raise ValueError("cannot write terminal report without TerminalReport")
@@ -126,6 +140,7 @@ def write_terminal_report(state: PersistedManagerState) -> Path:
         "topic": state.original_task.topic,
         "phase": state.task_state.phase,
         "unresolved_issues": list(state.task_state.unresolved_issues),
+        "model_usage": _model_usage(state.task_state.run_id),
     }
     _atomic_write_text(path, _json_dump(payload))
     save_state(state)
@@ -202,6 +217,7 @@ def write_crash_terminal(
                 "summary": reason,
                 "completion_satisfied": False,
                 "exception_type": exception_type,
+                "model_usage": _model_usage(run_id),
             }
         ),
     )
