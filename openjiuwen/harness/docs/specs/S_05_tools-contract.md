@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-09-23 |
+| 最近一次修订日期 | 2026-10-02 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md` |
 
 ## 范围 / 边界
@@ -97,12 +97,23 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
    `unsafe_dev` 与 `advanced_code` 同选时以前者替换后者。不支持图像输入时过滤截图工具。
    取消、健康检查、custom-action discovery 是可显式装配的 Python Tool，不是 capability
    自动注入的工具。runtime 内部 transport 的代码执行器不等于模型可见工具面。
+   `browser_evaluate` 不进入 capability 工具列表；页面读取使用 Probe、snapshot、find 和 Batch 提取，
+   runtime 内部仍可调用该 MCP 工具完成目标标记。
+   `browser_probe_cards`、`browser_probe_interactives`、`browser_snapshot`、`browser_find`
+   共享显式 observation 分类（`BROWSER_OBSERVATION_TOOL_NAMES` / `is_browser_observation_tool`）。
+   未带来新语义信息的读取不增加或清除交互失败计数、不挤出交互循环历史，
+   也不消耗 replan trial 或将待观察的交互 trial 判为失败；新工具证据仍走现有进度恢复路径。
+   observation 分类不豁免 phase / 全局执行上限或 terminal guard；包含修改动作的组仍按交互检查。
    完整清单和当前行为统一见[浏览器子智能体](../../../../docs/zh/2.开发指南/API文档/openjiuwen.harness/subagents/浏览器子智能体.md)。
 10. **Browser 可恢复错误不消耗模型回合**：generation 刷新、单步骤 Batch primitive 改写、
     真实详情链接导航、无歧义参数别名和新标签页 URL 等待由 runtime 确定性处理；只有
     无法唯一解析目标或页面语义确实不充分时才把紧凑错误返回模型。
     Probe 确定性脚本异常保留原错且不重跑；当前页 fragment、JavaScript 链接和状态控件保留 click。
     Batch 接受当前 generation 的原生 AX ref 或 PageState target；排序等待消费已解析目标的实时状态。
+    Browser 的 stdio / Streamable HTTP adapter 提取 MCP 内容时都保留 `isError=True`，
+    复用 `preserve_mcp_tool_result_status` 返回 `McpToolResult(success=False)`；`MCPTool`
+    原样传递该对象，避免 native 调用或单步骤 Batch 把失败当成成功。失败判定不依赖错误文本
+    前缀；空内容错误同样保留失败状态，成功响应保持原有内容形态。
 11. **模型读到的工具结果文本只来自 `Tool.render_for_llm`**：`AbilityManager` 构造工具结果
     `ToolMessage` 时对工具实例调用 `render_for_llm(result)`；结构化结果原样留在
     `ToolCallInputs.tool_result` 给 rail / 事件 / 日志。默认实现（`render_tool_output`）：成功取

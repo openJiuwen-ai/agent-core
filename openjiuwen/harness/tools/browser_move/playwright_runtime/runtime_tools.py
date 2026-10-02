@@ -138,7 +138,7 @@ _PROBE_CARDS_DESC = (
     "If this returns the fields needed "
     "for the task, including article/search-result title/link/author/source/summary fields, "
     "use the compact card result directly instead of taking screenshots/snapshots or running "
-    "broad DOM evaluation. Only evaluate again when a required field is missing."
+    "broad DOM scans. Only inspect further when a required field is missing."
 )
 _PROBE_CARDS_PARAMS: Dict[str, Any] = {
     "type": "object",
