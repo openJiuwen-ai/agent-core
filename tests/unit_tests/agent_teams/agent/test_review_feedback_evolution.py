@@ -107,6 +107,7 @@ def _coordinator(
     trajectory,
     creation_rail=None,
     event_sink=None,
+    attribution_sink=None,
     enabled=True,
 ):
     team_rail = _rail(tmp_path, llm, trajectory)
@@ -116,6 +117,7 @@ def _coordinator(
         team_rail_provider=lambda: team_rail,
         skill_create_rail_provider=lambda: creation_rail,
         event_sink=event_sink,
+        attribution_sink=attribution_sink,
         enabled=enabled,
         min_confidence=0.7,
     )
@@ -164,6 +166,125 @@ async def test_failed_review_is_retained_until_team_evolution(tmp_path):
         "session_id": "sess-1",
         "team_id": "team-1",
     }
+
+
+@pytest.mark.asyncio
+async def test_attribution_sink_observes_every_settled_attribution(tmp_path):
+    llm = _AttributionLLM(
+        {
+            "classification": "skill_issue",
+            "skill_name": "xlsx",
+            "target": "body",
+            "reason": "validation guidance is incomplete",
+            "reusable_guidance": "Reopen and validate before delivery.",
+            "is_reusable": True,
+            "confidence": 0.93,
+        }
+    )
+    # as_posix: the SKILL.md-read evidence regex cannot match JSON-escaped
+    # backslashes, so a native Windows path would prove no read in this env.
+    skill_md = (tmp_path / "xlsx" / "SKILL.md").as_posix()
+    sink = AsyncMock()
+    coordinator, _ = _coordinator(
+        tmp_path=tmp_path,
+        llm=llm,
+        trajectory=_trajectory(skill_md),
+        attribution_sink=sink,
+    )
+
+    await coordinator(
+        {
+            "task_id": "task-1",
+            "review_round": 1,
+            "task_title": "Create workbook",
+            "assignee": "worker-1",
+            "feedback": "The workbook was not validated.",
+        }
+    )
+
+    sink.assert_awaited_once()
+    attribution, task_id, review_round = sink.await_args.args
+    assert attribution.skill_name == "xlsx"
+    assert attribution.action.value == "evolve_existing_skill"
+    assert task_id == "task-1"
+    assert review_round == 1
+
+
+@pytest.mark.asyncio
+async def test_attribution_sink_sees_evanescent_attributions_too(tmp_path):
+    # Below-threshold attributions are dropped from the evolution pipeline but
+    # the sink still observes the decision: audit surfaces record the "why not".
+    llm = _AttributionLLM(
+        {
+            "classification": "skill_issue",
+            "skill_name": "xlsx",
+            "target": "body",
+            "reason": "weak signal",
+            "is_reusable": False,
+            "confidence": 0.31,
+        }
+    )
+    # as_posix: the SKILL.md-read evidence regex cannot match JSON-escaped
+    # backslashes, so a native Windows path would prove no read in this env.
+    skill_md = (tmp_path / "xlsx" / "SKILL.md").as_posix()
+    sink = AsyncMock()
+    coordinator, _ = _coordinator(
+        tmp_path=tmp_path,
+        llm=llm,
+        trajectory=_trajectory(skill_md),
+        attribution_sink=sink,
+    )
+
+    await coordinator(
+        {
+            "task_id": "task-1",
+            "review_round": 2,
+            "task_title": "Create workbook",
+            "assignee": "worker-1",
+            "feedback": "Looks off but unclear.",
+        }
+    )
+
+    sink.assert_awaited_once()
+    assert sink.await_args.args[1:] == ("task-1", 2)
+    assert await coordinator.on_team_completed() is False
+
+
+@pytest.mark.asyncio
+async def test_attribution_sink_failure_does_not_break_evolution(tmp_path):
+    llm = _AttributionLLM(
+        {
+            "classification": "skill_issue",
+            "skill_name": "xlsx",
+            "target": "body",
+            "reason": "validation guidance is incomplete",
+            "reusable_guidance": "Reopen and validate before delivery.",
+            "is_reusable": True,
+            "confidence": 0.93,
+        }
+    )
+    # as_posix: keep the read evidence regex-matchable on Windows too.
+    skill_md = (tmp_path / "xlsx" / "SKILL.md").as_posix()
+    sink = AsyncMock(side_effect=RuntimeError("journal unavailable"))
+    coordinator, team_rail = _coordinator(
+        tmp_path=tmp_path,
+        llm=llm,
+        trajectory=_trajectory(skill_md),
+        attribution_sink=sink,
+    )
+
+    await coordinator(
+        {
+            "task_id": "task-1",
+            "review_round": 1,
+            "task_title": "Create workbook",
+            "assignee": "worker-1",
+            "feedback": "The workbook was not validated.",
+        }
+    )
+
+    assert await coordinator.on_team_completed() is True
+    team_rail.evolve_from_external_signals.assert_awaited_once()
 
 
 @pytest.mark.asyncio
