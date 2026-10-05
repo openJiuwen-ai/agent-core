@@ -22,10 +22,10 @@ from typing import Any, AsyncIterator
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.env import load_project_dotenv
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
+    paper_dist_dir,
     paper_output_path,
     paper_scoring_dir,
     paper_tex_path,
-    paper_workspace_dir,
     set_project_root,
     to_project_relative,
 )
@@ -263,14 +263,19 @@ def _artifact_ref_for_node(node_id: str, run_id: str) -> ArtifactRef | None:
         node_id=node_id,
         name=primary.name,
         kind="paper_snapshot",
-        # The whole workspace directory, not just `primary` -- a generic file
-        # browser resolving a *file* path only exposes that one file (see
-        # RsiArtifactFilesService.list_files()'s file-vs-directory branch), so
-        # pointing here at main.tex/main.pdf alone hid sections/*.tex,
-        # figures/*.pdf, and refs.bib from any consumer that browses this ref
-        # (file tree, "download" action). sha256 stays keyed on `primary`
+        # A curated directory, not just `primary` and not the raw scratch
+        # workspace either -- a generic file browser resolving a *file* path
+        # only exposes that one file (see RsiArtifactFilesService.list_files()'s
+        # file-vs-directory branch), so pointing at main.tex/main.pdf alone
+        # hid sections/*.tex, figures/*.pdf, and refs.bib from any consumer
+        # that browses this ref (file tree, "download" action). Pointing at
+        # paper_workspace_dir directly fixed that but also surfaced the
+        # reporting agent's own scratch/bookkeeping files (.skills/, lint
+        # overrides, LaTeX compile byproducts) -- see
+        # ReportingAgent._populate_dist_dir, which stages only the paper's
+        # real content into paper_dist_dir. sha256 stays keyed on `primary`
         # since a directory has no single content hash to dedupe against.
-        path=str(paper_workspace_dir(run_id)),
+        path=str(paper_dist_dir(run_id)),
         sha256=sha256,
         download_url=None,
     )

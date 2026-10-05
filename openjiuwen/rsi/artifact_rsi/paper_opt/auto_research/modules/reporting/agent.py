@@ -27,6 +27,7 @@ from typing import Any
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import get_logger
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import resolve_metric
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
+    paper_dist_dir,
     paper_figures_dir,
     paper_output_path,
     paper_refs_bib_path,
@@ -1020,6 +1021,48 @@ class ReportingAgent:
 
         return notes, extra_paths
 
+    @staticmethod
+    def _populate_dist_dir(
+        *,
+        dist_dir: Path,
+        final_tex: Path,
+        final_pdf: Path,
+        sections_dir: Path,
+        figures_dir: Path,
+        refs_bib_path: Path,
+    ) -> None:
+        """Stage only the paper's real content into a clean directory.
+
+        paper_workspace_dir also holds the reporting agent's own scratch
+        files (.skills/, lint/citation bookkeeping, LaTeX compile
+        byproducts) — tree_provider/orchestrator.py points ArtifactRef.path
+        at dist_dir instead so the front-end file tree/download only ever
+        sees the paper itself.
+        """
+        if dist_dir.exists():
+            shutil.rmtree(dist_dir)
+        dist_dir.mkdir(parents=True, exist_ok=True)
+
+        if final_tex.is_file():
+            shutil.copy2(final_tex, dist_dir / final_tex.name)
+        if final_pdf.is_file():
+            shutil.copy2(final_pdf, dist_dir / final_pdf.name)
+        if refs_bib_path.is_file():
+            shutil.copy2(refs_bib_path, dist_dir / refs_bib_path.name)
+
+        if sections_dir.is_dir():
+            dist_sections = dist_dir / "sections"
+            dist_sections.mkdir(exist_ok=True)
+            for tex_file in sections_dir.glob("*.tex"):
+                shutil.copy2(tex_file, dist_sections / tex_file.name)
+
+        if figures_dir.is_dir():
+            dist_figures = dist_dir / "figures"
+            dist_figures.mkdir(exist_ok=True)
+            for fig_file in figures_dir.iterdir():
+                if fig_file.is_file() and fig_file.suffix.lower() != ".py":
+                    shutil.copy2(fig_file, dist_figures / fig_file.name)
+
     # -- final verification: never trust the agent's own report of "done" --
     # (same rule code_implementation applies to its smoke tests)
 
@@ -1124,6 +1167,15 @@ class ReportingAgent:
                 if tex_only
                 else "no compiled PDF found at end of session — ts-latex did not report success"
             )
+
+        self._populate_dist_dir(
+            dist_dir=paper_dist_dir(run_id),
+            final_tex=final_tex,
+            final_pdf=final_pdf,
+            sections_dir=sections_dir,
+            figures_dir=workspace / "figures",
+            refs_bib_path=refs_bib_path,
+        )
 
         if hallucinated or (not final_pdf.is_file() and not tex_only):
             return ReportingOutput(
