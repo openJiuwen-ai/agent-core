@@ -296,6 +296,7 @@ class ReportingAgent:
             specs=specs,
             session_error=session_error,
             preflight_note=latex_preflight_note,
+            is_final_attempt=inputs.is_final_attempt,
         )
         # Persist for the next retry to read back above — overwritten every
         # attempt (this attempt's outcome, not an accumulating history) so a
@@ -1080,6 +1081,7 @@ class ReportingAgent:
         specs=None,
         session_error: str | None = None,
         preflight_note: str | None = None,
+        is_final_attempt: bool = False,
     ) -> ReportingOutput:
         drafts: dict[str, str] = {}
         for section_id in DOCUMENT_ORDER:
@@ -1147,11 +1149,10 @@ class ReportingAgent:
         final_pdf = paper_output_path(run_id)
         final_tex = paper_tex_path(run_id)
         # A missing PDF is only acceptable when the *environment* can't
-        # produce one at all (no latexmk/pdflatex on PATH or LATEX_BIN_DIR)
-        # and ts-latex still got far enough to assemble a real main.tex --
-        # a genuine unresolved compile error with the toolchain present must
-        # keep failing, since a retry can plausibly fix that but can never
-        # fix a missing binary. Reuse the runtime _run_async already
+        # produce one at all -- a genuine unresolved compile error with a
+        # working toolchain and an intact ts-latex skill must keep failing,
+        # since a retry can plausibly fix that but can never fix a missing
+        # binary or a missing script. Reuse the runtime _run_async already
         # resolved (via preflight_latex_runtime/discover_latex_runtime)
         # instead of probing PATH a second time; same None-guard as
         # _build_paper_agent's own fallback, for latex_preflight=False.
@@ -1159,14 +1160,46 @@ class ReportingAgent:
             latex_bin_dir = self._pw_config.get("latex_bin_dir") or os.environ.get("LATEX_BIN_DIR")
             self._latex_runtime = discover_latex_runtime(latex_bin_dir)
         toolchain_missing = not self._latex_runtime.available
-        tex_only = not final_pdf.is_file() and toolchain_missing and final_tex.is_file()
+        # The host believing a toolchain is on PATH does not mean the
+        # agent's own sandboxed shell can reach it -- the one deterministic
+        # bridge between the two is ts-latex/scripts/compile.py (it reads
+        # .latex-runtime.json and shells out itself, so the agent's shell
+        # PATH never needs to carry the compiler). If a skill deployment
+        # materializes ts-latex without its scripts/ directory, that bridge
+        # is severed and every attempt will fail the same way regardless of
+        # what discover_latex_runtime() found on this host -- no number of
+        # retries fixes a file that was never copied.
+        latex_skill_incomplete = not (
+            workspace / _MATERIALIZED_SKILLS_DIRNAME / "ts-latex" / "scripts" / "compile.py"
+        ).is_file()
+        latex_bridge_broken = toolchain_missing or latex_skill_incomplete
+        # Even when neither of the above is detected, exhausting every
+        # reporting retry on the same "no compiled PDF" outcome means
+        # whatever is actually wrong is not getting fixed by trying again
+        # either -- the manager has no further attempt left to spend, so
+        # losing the whole node over a rendering-only gap is worse than
+        # shipping the tex it already verified.
+        tex_only = not final_pdf.is_file() and final_tex.is_file() and (latex_bridge_broken or is_final_attempt)
         if not final_pdf.is_file():
-            notes.append(
-                "no LaTeX toolchain found in this environment (latexmk/pdflatex not on PATH) "
-                "— shipping main.tex as the final artifact instead of a compiled PDF"
-                if tex_only
-                else "no compiled PDF found at end of session — ts-latex did not report success"
-            )
+            if tex_only and latex_skill_incomplete:
+                notes.append(
+                    "ts-latex skill deployment is missing its scripts/ directory (compile.py not "
+                    "found) — this environment cannot compile a PDF at all; shipping main.tex as "
+                    "the final artifact instead"
+                )
+            elif tex_only and toolchain_missing:
+                notes.append(
+                    "no LaTeX toolchain found in this environment (latexmk/pdflatex not on PATH) "
+                    "— shipping main.tex as the final artifact instead of a compiled PDF"
+                )
+            elif tex_only:
+                notes.append(
+                    "no compiled PDF after exhausting all reporting retries — shipping main.tex as "
+                    "the final artifact instead; likely a rendering/environment problem rather than "
+                    "a content problem"
+                )
+            else:
+                notes.append("no compiled PDF found at end of session — ts-latex did not report success")
 
         self._populate_dist_dir(
             dist_dir=paper_dist_dir(run_id),
