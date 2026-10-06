@@ -1,12 +1,16 @@
 """Covers ReportingAgent._verify_and_build_output's tex-only fallback: a
 clean main.tex should still ship as status="compiled" instead of failing
 and burning the manager's reporting retry budget on a problem retrying
-can never fix. Three independent triggers are covered: no latexmk/pdflatex
-on PATH, a ts-latex skill deployment missing its scripts/ directory, and
-the manager's reporting retry budget being exhausted. Toolchain discovery
-itself (LatexRuntime/discover_latex_runtime/preflight_latex_runtime) is
-covered by test_paper_latex_runtime.py; this file only covers the
-success/failure gate in reporting/agent.py::_verify_and_build_output.
+can never fix. Two independent triggers short-circuit immediately: no
+latexmk/pdflatex on PATH at all, and the manager's reporting retry budget
+being exhausted. A ts-latex skill deployment missing its scripts/
+directory does *not* short-circuit on its own -- the agent's general
+shell/python tools can still work around it while a real toolchain is
+present -- so it only shows up once one of the two triggers above is
+already true. Toolchain discovery itself (LatexRuntime/
+discover_latex_runtime/preflight_latex_runtime) is covered by
+test_paper_latex_runtime.py; this file only covers the success/failure
+gate in reporting/agent.py::_verify_and_build_output.
 """
 
 from __future__ import annotations
@@ -169,22 +173,39 @@ def test_failed_output_exposes_lint_issues_as_a_list():
     assert any("no compiled PDF" in issue for issue in output.lint_issues)
 
 
-def test_latex_skill_missing_scripts_ships_tex_even_with_toolchain_present():
+def test_latex_skill_missing_scripts_still_retries_when_toolchain_present():
     # A skill deployment that materializes ts-latex without its scripts/
-    # directory severs the only bridge between a host-discovered toolchain
-    # and the agent's own shell -- no retry fixes a file that was never
-    # copied, so this must ship tex-only on the very first attempt rather
-    # than waiting for the manager's reporting retry budget to run out.
+    # directory does not sever the agent's only path to a compiler: with a
+    # real toolchain on the host, the agent's own general shell/python
+    # tools can still invoke pdflatex/latexmk directly once it notices the
+    # canned script isn't where {SKILLS_DIR} said it would be (observed
+    # against real task history). So this alone must not short-circuit to
+    # tex-only on a non-final attempt -- it should keep failing/retrying
+    # exactly like test_toolchain_present_pdf_missing_still_fails, giving
+    # the agent a real chance across the manager's reporting retry budget.
     run_id = "rsi-test-skill-incomplete"
     _write_minimal_sections(run_id)
     paper_tex_path(run_id).write_text("\\documentclass{article}\\begin{document}x\\end{document}", encoding="utf-8")
 
     output = _verify(run_id, toolchain_available=True, skill_scripts_present=False)
 
+    assert output.status == "failed"
+    assert output.paper_pdf_path is None
+
+
+def test_latex_skill_missing_scripts_ships_tex_on_final_attempt():
+    # Once the manager's reporting retries are exhausted, the final-attempt
+    # safety net still applies regardless of *why* no PDF ever appeared --
+    # including a persistently incomplete ts-latex skill deployment.
+    run_id = "rsi-test-skill-incomplete-final-attempt"
+    _write_minimal_sections(run_id)
+    paper_tex_path(run_id).write_text("\\documentclass{article}\\begin{document}x\\end{document}", encoding="utf-8")
+
+    output = _verify(run_id, toolchain_available=True, skill_scripts_present=False, is_final_attempt=True)
+
     assert output.status == "compiled"
     assert output.paper_pdf_path is not None
     assert output.paper_pdf_path.endswith(".tex")
-    assert "scripts/ directory" in (output.notes or "")
 
 
 def test_final_attempt_with_valid_tex_ships_even_though_pdf_missing():

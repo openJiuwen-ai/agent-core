@@ -1150,36 +1150,39 @@ class ReportingAgent:
         final_tex = paper_tex_path(run_id)
         # A missing PDF is only acceptable when the *environment* can't
         # produce one at all -- a genuine unresolved compile error with a
-        # working toolchain and an intact ts-latex skill must keep failing,
-        # since a retry can plausibly fix that but can never fix a missing
-        # binary or a missing script. Reuse the runtime _run_async already
-        # resolved (via preflight_latex_runtime/discover_latex_runtime)
-        # instead of probing PATH a second time; same None-guard as
-        # _build_paper_agent's own fallback, for latex_preflight=False.
+        # working toolchain must keep failing, since a retry can plausibly
+        # fix that but can never fix a missing binary. Reuse the runtime
+        # _run_async already resolved (via preflight_latex_runtime/
+        # discover_latex_runtime) instead of probing PATH a second time;
+        # same None-guard as _build_paper_agent's own fallback, for
+        # latex_preflight=False.
         if self._latex_runtime is None:
             latex_bin_dir = self._pw_config.get("latex_bin_dir") or os.environ.get("LATEX_BIN_DIR")
             self._latex_runtime = discover_latex_runtime(latex_bin_dir)
         toolchain_missing = not self._latex_runtime.available
-        # The host believing a toolchain is on PATH does not mean the
-        # agent's own sandboxed shell can reach it -- the one deterministic
-        # bridge between the two is ts-latex/scripts/compile.py (it reads
-        # .latex-runtime.json and shells out itself, so the agent's shell
-        # PATH never needs to carry the compiler). If a skill deployment
-        # materializes ts-latex without its scripts/ directory, that bridge
-        # is severed and every attempt will fail the same way regardless of
-        # what discover_latex_runtime() found on this host -- no number of
-        # retries fixes a file that was never copied.
+        # ts-latex/scripts/compile.py is the deterministic bridge between a
+        # host-found toolchain and the agent's own sandboxed shell (it reads
+        # .latex-runtime.json and shells out itself). A skill deployment
+        # missing that script does *not* mean every retry is doomed though:
+        # the agent still has general shell/python tool access and has been
+        # observed to compile successfully by invoking pdflatex/latexmk
+        # itself once it notices the canned script isn't where {SKILLS_DIR}
+        # said it would be -- confirmed against real task history on a host
+        # with a working MiKTeX install but a packaging gap that drops
+        # every skill's scripts/ (and assets/) from the distributed build.
+        # So this alone no longer forces an immediate give-up; it only
+        # feeds the diagnostic message once tex_only is already true for
+        # one of the two reasons below.
         latex_skill_incomplete = not (
             workspace / _MATERIALIZED_SKILLS_DIRNAME / "ts-latex" / "scripts" / "compile.py"
         ).is_file()
-        latex_bridge_broken = toolchain_missing or latex_skill_incomplete
-        # Even when neither of the above is detected, exhausting every
-        # reporting retry on the same "no compiled PDF" outcome means
-        # whatever is actually wrong is not getting fixed by trying again
-        # either -- the manager has no further attempt left to spend, so
-        # losing the whole node over a rendering-only gap is worse than
-        # shipping the tex it already verified.
-        tex_only = not final_pdf.is_file() and final_tex.is_file() and (latex_bridge_broken or is_final_attempt)
+        # Even when the toolchain is intact, exhausting every reporting
+        # retry on the same "no compiled PDF" outcome means whatever is
+        # actually wrong is not getting fixed by trying again either -- the
+        # manager has no further attempt left to spend, so losing the whole
+        # node over a rendering-only gap is worse than shipping the tex it
+        # already verified.
+        tex_only = not final_pdf.is_file() and final_tex.is_file() and (toolchain_missing or is_final_attempt)
         if not final_pdf.is_file():
             if tex_only and latex_skill_incomplete:
                 notes.append(
