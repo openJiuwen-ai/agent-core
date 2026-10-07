@@ -184,11 +184,17 @@ def _absorb_cancel() -> None:
         task.uncancel()
 
 
+def _lock(control: ExecutionControl, outcome: _Outcome) -> _Outcome:
+    """Lock the ending synchronously; a control accepted before the lock decides it."""
+    reason = control.lock_outcome()
+    return _abort_outcome(reason) if reason is not None else outcome
+
+
 async def _run_native(agent, context: PersistentBuildContext, native_input) -> _Outcome:
-    """Run one native stream and map it; an abort ends it as cancelled or stopped."""
+    """Run one native stream and map it; the returned outcome is locked against later controls."""
     control = context.binding.control
     if control.abort_reason is not None:
-        return _abort_outcome(control.abort_reason)
+        return _lock(control, _abort_outcome(control.abort_reason))
     emitter = control.emitter
     result, intercepted = None, []
     try:
@@ -211,13 +217,12 @@ async def _run_native(agent, context: PersistentBuildContext, native_input) -> _
         if control.fatal is not None:
             raise control.fatal from exc
         if control.abort_reason is None:
-            return _Outcome("error", detail=_detail(f"{type(exc).__name__}: {exc}", type(exc).__name__))
+            return _lock(control, _Outcome("error", detail=_detail(f"{type(exc).__name__}: {exc}", type(exc).__name__)))
     if control.fatal is not None:
         raise control.fatal
     if control.abort_reason is not None:
         _absorb_cancel()
-        return _abort_outcome(control.abort_reason)
-    return _outcome_from_result(result, intercepted)
+    return _lock(control, _outcome_from_result(result, intercepted))
 
 
 def _output_id(context: PersistentBuildContext) -> str:
@@ -394,7 +399,10 @@ async def resume_persistent_request(spec, context, confirm_reply) -> AsyncIterat
 
 
 async def abort_persistent_request(context, *, reason: AbortReason) -> None:
-    """Record why the Execution must end, then request native interruption; the entry finishes it."""
+    """Record why the Execution must end, then request native interruption; the entry finishes it.
+
+    Once the outcome is locked, the control is not accepted: no reason is recorded and abort_bound is not called.
+    """
     if reason not in ("cancel", "stop"):
         raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "abort reason must be 'cancel' or 'stop'")
     if not isinstance(context, PersistentBuildContext):
