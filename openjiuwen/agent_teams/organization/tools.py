@@ -1,0 +1,1472 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Leader-only tools for organization-level collaboration."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from openjiuwen.agent_teams.organization.schema import (
+    OrgSummaryExecutionStatus,
+    OrgTaskAggregationMode,
+    OrgTaskCreator,
+    OrgTaskFailureCode,
+    OrgTaskOutputContext,
+    OrgTaskOutputSpec,
+    OrgTaskReviewStatus,
+    OrgTaskStatus,
+    OrgUnclaimedTaskPolicy,
+)
+from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager, _normalize_parent_task_id
+from openjiuwen.agent_teams.tools.tool_base import TeamTool
+from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.foundation.tool.base import ToolCard
+from openjiuwen.harness.tools.base_tool import ToolOutput
+
+logger = team_logger
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.organization.message_service import OrgMessageService
+    from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
+
+_ORG_TASK_POOL_NEXT_ACTION = (
+    "Organization task-pool tools are now available to this leader on the next model call. "
+    "Use org_create_task, org_view_tasks, org_view_child_tasks, and org_review_task; "
+    "do not replace member teams with local teammates."
+)
+
+
+class _OrgLeaderTool(TeamTool):
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService | None" = None,
+    ) -> None:
+        super().__init__(ToolCard(id=f"team_org.{name}", name=name, description=description))
+        self.manager = manager
+        self.message_service = message_service
+        self.team_id = team_id
+        self.leader_id = leader_id
+
+    async def _ensure_registered(self) -> None:
+        await self.manager.register_leader(
+            team_id=self.team_id,
+            leader_id=self.leader_id,
+            leader_member_name=self.leader_id,
+        )
+
+
+class _OrgControlTool(TeamTool):
+    """Leader tool for creating an organization and admitting active teams."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        description: str,
+        runtime_manager: "OrganizationRuntimeManager",
+        team_id: str,
+        session_id: str,
+    ) -> None:
+        super().__init__(ToolCard(id=f"team_org_control.{name}", name=name, description=description))
+        self.runtime_manager = runtime_manager
+        self.team_id = team_id
+        self.session_id = session_id
+
+
+class OrgCreateOrganizationTool(_OrgControlTool):
+    """Create an organization from the leader's already-active team."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_create_organization",
+            description="Create a team organization owned by this active team.",
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "organization_id": {"type": "string"},
+                "unclaimed_task_policy": OrgUnclaimedTaskPolicy.model_json_schema(),
+                "display_name": {"type": "string"},
+                "description": {"type": "string"},
+            },
+            "required": ["organization_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        try:
+            organization = await self.runtime_manager.create_organization(
+                organization_id=inputs.get("organization_id", ""),
+                owner_team_id=self.team_id,
+                session_id=self.session_id,
+                display_name=inputs.get("display_name"),
+                description=inputs.get("description"),
+                unclaimed_task_policy=OrgUnclaimedTaskPolicy.model_validate(inputs["unclaimed_task_policy"])
+                if "unclaimed_task_policy" in inputs
+                else None,
+            )
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+        data = organization.model_dump()
+        data["next_action"] = _ORG_TASK_POOL_NEXT_ACTION
+        return ToolOutput(success=True, data=data)
+
+
+class OrgInviteTeamTool(_OrgControlTool):
+    """Invite another active team; invitation acceptance is automatic in v1."""
+
+    _tool_name = "org_invite_team"
+    _tool_description = (
+        "Invite an active team in this session to the organization. The invitation is accepted automatically."
+    )
+    _target_team_param_description = "Active team to add."
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name=self._tool_name,
+            description=self._tool_description,
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "organization_id": {"type": "string"},
+                "team_id": {
+                    "type": "string",
+                    "description": self._target_team_param_description,
+                },
+            },
+            "required": ["organization_id", "team_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        try:
+            organization = await self.runtime_manager.invite_team(
+                organization_id=inputs.get("organization_id", ""),
+                inviter_team_id=self.team_id,
+                target_team_id=inputs.get("team_id", ""),
+                session_id=self.session_id,
+            )
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+        data = organization.model_dump()
+        data["next_action"] = _ORG_TASK_POOL_NEXT_ACTION
+        return ToolOutput(success=True, data=data)
+
+
+class OrgDissolveOrganizationTool(_OrgControlTool):
+    """Dissolve an owner-controlled organization and erase its persisted state."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_dissolve_organization",
+            description=(
+                "Dissolve an organization owned by this team, remove its members, and delete its task-pool data."
+            ),
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {"organization_id": {"type": "string"}},
+            "required": ["organization_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        try:
+            result = await self.runtime_manager.dissolve_organization(
+                organization_id=inputs.get("organization_id", ""),
+                owner_team_id=self.team_id,
+                session_id=self.session_id,
+            )
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+        return ToolOutput(success=True, data=result)
+
+
+class OrgListAvailableTeamsTool(_OrgControlTool):
+    """List active teams in the current process/session for organization setup."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_list_available_teams",
+            description="List active same-session teams that can be invited into an organization.",
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {"type": "object", "properties": {}, "required": []}
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        teams = await self.runtime_manager.list_available_teams(session_id=self.session_id)
+        return ToolOutput(success=True, data={"teams": teams})
+
+
+class OrgListConfiguredTeamsTool(_OrgControlTool):
+    """List dormant host-configured teams that may be activated and invited."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_list_configured_teams",
+            description="List configured same-process teams that can be activated and invited.",
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {"type": "object", "properties": {}, "required": []}
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        teams = await self.runtime_manager.list_configured_teams(session_id=self.session_id)
+        return ToolOutput(success=True, data={"teams": teams})
+
+
+class OrgActivateAndInviteTeamTool(OrgInviteTeamTool):
+    """Activate a configured team when necessary, then invite it into the organization."""
+
+    _tool_name = "org_activate_and_invite_team"
+    _tool_description = "Activate a configured team if dormant, then invite it into the organization."
+    _target_team_param_description = "Configured profile or active team to add."
+
+
+class OrgListExpertGroupsTool(_OrgControlTool):
+    """List host-validated AgentGroup templates available for on-demand launch."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_list_expert_groups",
+            description=(
+                "List available expert-group (AgentGroup) templates. "
+                "Returns package metadata only; does not create or start a Team."
+            ),
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "capabilities": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional capability tags; return groups that include all of them.",
+                },
+            },
+            "required": [],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        raw_capabilities = inputs.get("capabilities")
+        capability_filter: set[str] | None = None
+        if isinstance(raw_capabilities, list):
+            capability_filter = {str(item).strip() for item in raw_capabilities if str(item).strip()}
+            if not capability_filter:
+                capability_filter = None
+        groups = await self.runtime_manager.list_expert_groups(capabilities=capability_filter)
+        return ToolOutput(success=True, data={"expert_groups": groups})
+
+
+class OrgCreateAndInviteExpertTeamTool(_OrgControlTool):
+    """Launch an expert Team from an AgentGroup package and invite it as owner."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_create_and_invite_expert_team",
+            description=(
+                "Create a Team from an expert-group (AgentGroup) package and invite it "
+                "into this organization. Only the organization owner may call this."
+            ),
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "organization_id": {"type": "string"},
+                "agent_group_name": {
+                    "type": "string",
+                    "description": "AgentGroup package name from org_list_expert_groups.",
+                },
+                "display_name": {"type": "string"},
+            },
+            "required": ["organization_id", "agent_group_name"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        try:
+            data = await self.runtime_manager.create_and_invite_expert_team(
+                organization_id=inputs.get("organization_id", ""),
+                owner_team_id=self.team_id,
+                agent_group_name=inputs.get("agent_group_name", ""),
+                session_id=self.session_id,
+                display_name=inputs.get("display_name"),
+            )
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+        data["next_action"] = (
+            "The expert Team is now an organization member. "
+            "Use org_create_task / org_delegate_task to assign work; "
+            "do not treat the AgentGroup package name as a running team_id."
+        )
+        return ToolOutput(success=True, data=data)
+
+
+class OrgViewOrganizationTool(_OrgControlTool):
+    """Read organization ownership and members from the shared database."""
+
+    def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
+        super().__init__(
+            name="org_view_organization",
+            description="View an organization and its registered team leaders.",
+            runtime_manager=runtime_manager,
+            team_id=team_id,
+            session_id=session_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {"organization_id": {"type": "string"}},
+            "required": ["organization_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        try:
+            organization = await self.runtime_manager.get_organization(
+                organization_id=inputs.get("organization_id", ""),
+                team_id=self.team_id,
+                session_id=self.session_id,
+            )
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+        if organization is None:
+            return ToolOutput(success=False, error="organization not found")
+        data = organization.model_dump()
+        data["next_action"] = (
+            "The invited team's leader now has organization task-pool tools and can claim matching tasks."
+        )
+        return ToolOutput(success=True, data=data)
+
+
+class OrgViewTasksTool(_OrgLeaderTool):
+    """View organization-level tasks for LLM claim/delegate decisions."""
+
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService | None" = None,
+    ) -> None:
+        super().__init__(
+            name="org_view_tasks",
+            description="View organization-level tasks and leader messages.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+            message_service=message_service,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["list", "open", "assigned", "get", "messages"],
+                    "description": "What to view.",
+                },
+                "task_id": {"type": "string", "description": "Required for action=get."},
+                "status": {"type": "string", "description": "Optional task status filter for action=list."},
+                "limit": {"type": "integer", "description": "Maximum number of rows to return."},
+            },
+            "required": ["action"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        action = inputs.get("action")
+        limit = int(inputs.get("limit") or 50)
+        if action == "get":
+            task_id = inputs.get("task_id")
+            if not task_id:
+                return ToolOutput(success=False, error="'task_id' is required for action=get")
+            task = await self.manager.get_task(task_id)
+            if task is None:
+                return ToolOutput(success=False, error=f"org task not found: {task_id}")
+            return ToolOutput(success=True, data=task.model_dump())
+        if action == "open":
+            tasks = await self.manager.list_open_tasks(limit=limit)
+            return ToolOutput(success=True, data={"tasks": [task.brief() for task in tasks]})
+        if action == "assigned":
+            tasks = await self.manager.list_tasks_for_team(self.team_id, include_open=False, limit=limit)
+            return ToolOutput(success=True, data={"tasks": [task.brief() for task in tasks]})
+        if action == "messages":
+            if self.message_service is None:
+                return ToolOutput(success=False, error="organization message service is not bound")
+            messages = await self.message_service.list_leader_messages(team_id=self.team_id, limit=limit)
+            return ToolOutput(success=True, data={"messages": messages})
+        if action == "list":
+            tasks = await self.manager.list_tasks(status=inputs.get("status"), limit=limit)
+            return ToolOutput(success=True, data={"tasks": [task.brief() for task in tasks]})
+        return ToolOutput(success=False, error=f"unsupported action: {action}")
+
+
+class OrgCreateTaskTool(_OrgLeaderTool):
+    """Create a root org task or a child task in the same pool."""
+
+    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+        super().__init__(
+            name="org_create_task",
+            description=(
+                "Create an organization task. required_capabilities is required and must contain at least "
+                "one non-empty capability label, for example ['analysis'] or ['writing']. "
+                "A Team Leader must not create another root while an active root exists. "
+                "For every work item split from that root, "
+                "set parent_task_id to the active root task ID, including work done by your own Team. "
+                "Select the root aggregation mode and start the root before creating its children."
+            ),
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "parent_task_id": {
+                    "type": "string",
+                    "description": "Required for any work split from the active root task; omit only for a new root.",
+                },
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "required_capabilities": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string"},
+                    "description": (
+                        "Required. Provide at least one non-empty capability label that an eligible Team has, "
+                        "for example ['analysis'], ['writing'], or ['summary']."
+                    ),
+                },
+                "output_spec": {"type": "object"},
+                "metadata": {"type": "object"},
+                "repairs_task_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional. When creating a repair child, set to the FAILED or "
+                        "REJECTED/NEEDS_REVISION original sibling this repair supersedes. "
+                        "Only this parameter establishes the link (not metadata). "
+                        "Must point at the original child, never another repair task. "
+                        "On repeated repairs, always set repairs_task_id to that same original. "
+                        "Once an accepted repair exists, the original no longer blocks parent complete."
+                    ),
+                },
+                "recreation_request_id": {
+                    "type": "string",
+                    "description": (
+                        "Expiration notification message_id. Recreate once; parent and repair link are derived."
+                    ),
+                },
+                "delegated_to_team_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional org team_id to assign immediately. Must be a registered organization "
+                        "member team; do not pass in-team teammate member names."
+                    ),
+                },
+            },
+            "required": ["title", "description", "required_capabilities"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        """Create ordinary root or child work; Summary Tasks use the dedicated execution tool."""
+        if not inputs.get("title") or not inputs.get("description"):
+            return ToolOutput(success=False, error="'title' and 'description' are required")
+        capabilities = inputs.get("required_capabilities")
+        if (
+            not isinstance(capabilities, list)
+            or not capabilities
+            or any(not isinstance(capability, str) or not capability.strip() for capability in capabilities)
+        ):
+            return ToolOutput(
+                success=False,
+                error="'required_capabilities' must contain at least one non-empty capability",
+            )
+        await self._ensure_registered()
+        parent_task_id = _normalize_parent_task_id(inputs.get("parent_task_id"))
+        result = await self.manager.create_task(
+            task_id=inputs.get("task_id"),
+            parent_task_id=parent_task_id,
+            title=inputs["title"],
+            description=inputs["description"],
+            required_capabilities=capabilities,
+            output_spec=OrgTaskOutputSpec.model_validate(inputs["output_spec"]) if inputs.get("output_spec") else None,
+            metadata=inputs.get("metadata") or {},
+            repairs_task_id=inputs.get("repairs_task_id"),
+            recreation_request_id=inputs.get("recreation_request_id"),
+            created_by=OrgTaskCreator(
+                creator_type="team_leader",
+                creator_id=self.leader_id,
+                organization_id=self.manager.organization_id,
+                team_id=self.team_id,
+            ),
+            delegated_to_team_id=inputs.get("delegated_to_team_id"),
+        )
+        if not result.ok or result.task is None:
+            return ToolOutput(success=False, error=result.reason)
+        return ToolOutput(success=True, data=result.task.brief())
+
+
+class OrgClaimTaskTool(_OrgLeaderTool):
+    """Claim one OPEN org task for the current leader's team."""
+
+    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+        super().__init__(
+            name="org_claim_task",
+            description="Claim an open organization task for this team.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        result = await self.manager.claim_task(
+            task_id=inputs.get("task_id", ""),
+            team_id=self.team_id,
+        )
+        if not result.ok or result.task is None:
+            return ToolOutput(success=False, error=result.reason)
+        return ToolOutput(success=True, data=result.task.brief())
+
+
+class OrgDelegateTaskTool(_OrgLeaderTool):
+    """Delegate an org task assigned to this team to another team."""
+
+    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+        super().__init__(
+            name="org_delegate_task",
+            description=(
+                "Delegate a non-root organization child task to another organization team "
+                "(org team_id). Do not pass in-team teammate member names. "
+                "Never use this on a root task; create children with "
+                "org_create_task(parent_task_id=..., delegated_to_team_id=...) instead."
+            ),
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "to_team_id": {"type": "string"},
+            },
+            "required": ["task_id", "to_team_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        result = await self.manager.delegate_task(
+            task_id=inputs.get("task_id", ""),
+            from_team_id=self.team_id,
+            to_team_id=inputs.get("to_team_id", ""),
+        )
+        if not result.ok or result.task is None:
+            return ToolOutput(success=False, error=result.reason)
+        return ToolOutput(success=True, data=result.task.brief())
+
+
+class OrgUpdateTaskTool(_OrgLeaderTool):
+    """Update an assigned task, including its Root Leader-selected aggregation mode."""
+
+    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+        super().__init__(
+            name="org_update_task",
+            description=(
+                "Start, complete, or fail an assigned task. Completing a child task requires "
+                "output_context.description, output_context.result_uri, or output_abstract; "
+                "an output field is not supported. set_aggregation_mode lets the Root Leader "
+                "explicitly choose HIERARCHICAL or SUMMARY_TEAM after claiming a root task; "
+                "SUMMARY_TEAM is preferred unless other Teams supply only small supporting pieces "
+                "and this Team owns the root's core work and final judgment; "
+                "revise_description lets the creator "
+                "supplement an unclaimed task once when requested by the organization."
+            ),
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["start", "complete", "failed", "set_aggregation_mode", "revise_description"],
+                },
+                "task_id": {"type": "string"},
+                "aggregation_mode": {
+                    "type": "string",
+                    "enum": [
+                        OrgTaskAggregationMode.HIERARCHICAL.value,
+                        OrgTaskAggregationMode.SUMMARY_TEAM.value,
+                    ],
+                    "description": "Required when action=set_aggregation_mode on a claimed root task.",
+                },
+                "request_id": {"type": "string"},
+                "expected_description_revision": {"type": "integer", "minimum": 0},
+                "description": {"type": "string"},
+                "output_context": {"type": "object"},
+                "output_abstract": {"type": "string"},
+                "failure_code": {
+                    "type": "string",
+                    "enum": [OrgTaskFailureCode.EXECUTION_FAILED.value],
+                    "description": (
+                        "Required when action=failed. Leader-reported execution failure only; "
+                        "other failure codes are reserved for system/internal fail_task calls."
+                    ),
+                },
+                "failure_reason": {
+                    "type": "string",
+                    "description": "Required when action=failed. Non-empty human-readable failure reason.",
+                },
+            },
+            "required": ["action", "task_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        action = inputs.get("action")
+        task_id = inputs.get("task_id", "")
+        if action == "revise_description":
+            if not self._has_valid_description_revision_inputs(inputs):
+                return ToolOutput(
+                    success=False, error="description, request_id and expected_description_revision required"
+                )
+            result = await self.manager.revise_unclaimed_task_description(
+                task_id=task_id,
+                team_id=self.team_id,
+                leader_id=self.leader_id,
+                request_id=inputs["request_id"],
+                expected_description_revision=inputs["expected_description_revision"],
+                description=inputs["description"],
+            )
+        elif action == "set_aggregation_mode":
+            result = await self.manager.set_root_aggregation_mode(
+                task_id=task_id,
+                team_id=self.team_id,
+                leader_id=self.leader_id,
+                aggregation_mode=inputs.get("aggregation_mode"),
+            )
+        elif action == "start":
+            result = await self.manager.start_task(task_id=task_id, team_id=self.team_id)
+        elif action == "complete":
+            result = await self.manager.complete_task(
+                task_id=task_id,
+                team_id=self.team_id,
+                output_context=OrgTaskOutputContext.model_validate(inputs["output_context"])
+                if inputs.get("output_context")
+                else None,
+                output_abstract=inputs.get("output_abstract"),
+            )
+        elif action == "failed":
+            result = await self.manager.fail_task(
+                task_id=task_id,
+                team_id=self.team_id,
+                failure_code=inputs.get("failure_code", ""),
+                failure_reason=inputs.get("failure_reason", ""),
+                output_context=OrgTaskOutputContext.model_validate(inputs["output_context"])
+                if inputs.get("output_context")
+                else None,
+            )
+        else:
+            return ToolOutput(success=False, error=f"unsupported action: {action}")
+        if not result.ok or result.task is None:
+            return ToolOutput(success=False, error=result.reason)
+        return ToolOutput(success=True, data=result.task.brief())
+
+    @staticmethod
+    def _has_valid_description_revision_inputs(inputs: dict[str, Any]) -> bool:
+        revision = inputs.get("expected_description_revision")
+        return (
+            isinstance(inputs.get("description"), str)
+            and isinstance(inputs.get("request_id"), str)
+            and isinstance(revision, int)
+            and not isinstance(revision, bool)
+        )
+
+
+class OrgSendLeaderMessageTool(_OrgLeaderTool):
+    """Persist and announce a leader-to-leader message."""
+
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService",
+    ) -> None:
+        super().__init__(
+            name="org_send_leader_message",
+            description=(
+                "Send a DB-backed message to another organization team leader "
+                "(org team_id) or all leaders. Do not pass in-team teammate member names."
+            ),
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+            message_service=message_service,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "to_team_id": {"type": "string"},
+                "to_leader_id": {"type": "string"},
+                "metadata": {"type": "object"},
+            },
+            "required": ["content"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        content = inputs.get("content")
+        if not content:
+            return ToolOutput(success=False, error="'content' is required")
+        if self.message_service is None:
+            return ToolOutput(success=False, error="organization message service is not bound")
+
+        result = await self.message_service.send_leader_message(
+            from_team_id=self.team_id,
+            from_leader_id=self.leader_id,
+            content=content,
+            to_team_id=inputs.get("to_team_id"),
+            to_leader_id=inputs.get("to_leader_id"),
+            metadata=inputs.get("metadata") or {},
+        )
+        if not result.ok or not result.data:
+            return ToolOutput(success=False, error=result.reason or "failed to send leader message")
+        return ToolOutput(success=True, data=result.data)
+
+
+class OrgGetLeaderMessageTool(_OrgLeaderTool):
+    """Get one persisted leader message for this team."""
+
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService",
+    ) -> None:
+        super().__init__(
+            name="org_get_leader_message",
+            description="Get one leader inbox message by message_id without acknowledging it.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+            message_service=message_service,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {"message_id": {"type": "string"}},
+            "required": ["message_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        message_id = inputs.get("message_id")
+        if not message_id:
+            return ToolOutput(success=False, error="'message_id' is required")
+        message = await self.message_service.get_leader_message(
+            message_id=message_id,
+            team_id=self.team_id,
+        )
+        if message is None:
+            return ToolOutput(success=False, error=f"leader message not found: {message_id}")
+        return ToolOutput(success=True, data=message)
+
+
+class OrgListLeaderMessagesTool(_OrgLeaderTool):
+    """List persisted leader messages for this team."""
+
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService",
+    ) -> None:
+        super().__init__(
+            name="org_list_leader_messages",
+            description="List this team's leader inbox messages without acknowledging them.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+            message_service=message_service,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "unread_only": {"type": "boolean"},
+                "limit": {"type": "integer"},
+                "offset": {"type": "integer"},
+            },
+            "required": [],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        messages = await self.message_service.list_leader_messages(
+            team_id=self.team_id,
+            unread_only=bool(inputs.get("unread_only", False)),
+            limit=int(inputs.get("limit") or 50),
+            offset=int(inputs.get("offset") or 0),
+        )
+        return ToolOutput(success=True, data={"messages": messages})
+
+
+class OrgAckLeaderMessageTool(_OrgLeaderTool):
+    """Acknowledge one leader message after this team handles it."""
+
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService",
+    ) -> None:
+        super().__init__(
+            name="org_ack_leader_message",
+            description="Mark one leader inbox message handled after completing the required action.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+            message_service=message_service,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "message_id": {"type": "string"},
+                "handling_result": {"type": "string"},
+            },
+            "required": ["message_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        message_id = inputs.get("message_id")
+        if not message_id:
+            return ToolOutput(success=False, error="'message_id' is required")
+        result = await self.message_service.ack_leader_message(
+            message_id=message_id,
+            team_id=self.team_id,
+            leader_id=self.leader_id,
+            handling_result=inputs.get("handling_result"),
+        )
+        if not result.ok:
+            return ToolOutput(success=False, error=result.reason)
+        return ToolOutput(success=True, data=result.data)
+
+
+class OrgViewChildTasksTool(_OrgLeaderTool):
+    """View direct child tasks created for a parent task."""
+
+    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+        super().__init__(
+            name="org_view_child_tasks",
+            description=(
+                "View direct child tasks for a parent organization task, including "
+                "status, assignment, and the latest review summary."
+            ),
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "parent_task_id": {"type": "string"},
+                "only_mine": {"type": "boolean"},
+            },
+            "required": ["parent_task_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        parent_task_id = inputs.get("parent_task_id")
+        if not parent_task_id:
+            return ToolOutput(success=False, error="'parent_task_id' is required")
+        tasks = await self.manager.list_child_task_views(
+            parent_task_id=parent_task_id,
+            creator_team_id=self.team_id if inputs.get("only_mine", True) else None,
+        )
+        return ToolOutput(success=True, data={"tasks": tasks})
+
+
+class OrgViewPendingReviewsTool(_OrgLeaderTool):
+    """View child task results waiting for this team to review."""
+
+    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+        super().__init__(
+            name="org_view_pending_reviews",
+            description="View completed child tasks waiting for this team to review.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {"limit": {"type": "integer"}},
+            "required": [],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        reviews = await self.manager.list_pending_reviews(team_id=self.team_id, limit=int(inputs.get("limit") or 50))
+        return ToolOutput(success=True, data={"pending_reviews": reviews})
+
+
+class OrgReviewTaskTool(_OrgLeaderTool):
+    """Accept or reject a completed child task result."""
+
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        runtime_manager: "OrganizationRuntimeManager | None" = None,
+        session_id: str = "",
+    ) -> None:
+        super().__init__(
+            name="org_review_task",
+            description="Review a completed child task created by this team.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+        )
+        self.runtime_manager = runtime_manager
+        self.session_id = session_id
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "review_status": {
+                    "type": "string",
+                    "enum": ["ACCEPTED", "REJECTED", "NEEDS_REVISION"],
+                },
+                "verdict": {"type": "string"},
+                "required_changes": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["task_id", "review_status"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        await self._ensure_registered()
+        try:
+            review_status = OrgTaskReviewStatus(inputs.get("review_status", ""))
+        except ValueError:
+            return ToolOutput(
+                success=False,
+                error=f"invalid review_status: {inputs.get('review_status')!r}",
+            )
+        result = await self.manager.review_task(
+            task_id=inputs.get("task_id", ""),
+            reviewer_team_id=self.team_id,
+            review_status=review_status,
+            verdict=inputs.get("verdict"),
+            required_changes=inputs.get("required_changes") or [],
+        )
+        if not result.ok:
+            return ToolOutput(success=False, error=result.reason)
+        publish_progress = getattr(self.runtime_manager, "publish_organization_progress", None)
+        if review_status is OrgTaskReviewStatus.ACCEPTED and callable(publish_progress):
+            task = await self.manager.get_task(inputs.get("task_id", ""))
+            if task is not None and task.root_task_id:
+                root = await self.manager.get_task(task.root_task_id)
+                if root is not None and root.assignment.team_id:
+                    await publish_progress(
+                        self.session_id,
+                        root.assignment.team_id,
+                        {
+                            "phase": "source_accepted",
+                            "root_task_id": root.task_id,
+                            "source_task_id": task.task_id,
+                        },
+                    )
+        return ToolOutput(success=True, data=result.data)
+
+
+class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
+    """Create the SUMMARY_TEAM-mode execution bound to the shared Summary Team."""
+
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        runtime_manager: "OrganizationRuntimeManager",
+        session_id: str,
+    ) -> None:
+        """Build the leader tool with the runtime needed to lazily launch the shared team."""
+        super().__init__(
+            name="org_create_summary_execution",
+            description=(
+                "Create the one Summary Team execution for a claimed root task that already selected "
+                "SUMMARY_TEAM aggregation. Do not use this tool for HIERARCHICAL roots; their Root Leader "
+                "must integrate accepted child outputs and complete the root directly."
+            ),
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+        )
+        self.runtime_manager = runtime_manager
+        self.session_id = session_id
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "root_task_id": {
+                    "type": "string",
+                    "description": "A claimed root task whose aggregation mode is SUMMARY_TEAM.",
+                },
+                "task_id": {"type": "string"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "source_task_ids": {"type": "array", "items": {"type": "string"}},
+                "output_spec": {"type": "object"},
+                "metadata": {"type": "object"},
+            },
+            "required": ["root_task_id", "title", "description", "source_task_ids"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        """Launch the singleton if needed, then atomically bind the root's source tasks."""
+        await self._ensure_registered()
+        root_task_id = inputs.get("root_task_id", "")
+        root = await self.manager.get_task(root_task_id)
+        if root is None or root.assignment.team_id != self.team_id:
+            return ToolOutput(success=False, error="only the claimed root task leader can create its summary execution")
+        if root.aggregation is None or root.aggregation.mode is not OrgTaskAggregationMode.SUMMARY_TEAM:
+            return ToolOutput(success=False, error="root task is not configured for SUMMARY_TEAM aggregation")
+        publish_progress = getattr(self.runtime_manager, "publish_organization_progress", None)
+        if callable(publish_progress):
+            await publish_progress(
+                self.session_id,
+                self.team_id,
+                {"phase": "summary_execution_creating", "root_task_id": root_task_id},
+            )
+        result = await self.manager.create_summary_execution(
+            root_task_id=root_task_id,
+            task_id=inputs.get("task_id"),
+            title=inputs["title"],
+            description=inputs["description"],
+            source_task_ids=inputs["source_task_ids"],
+            output_spec=OrgTaskOutputSpec.model_validate(inputs["output_spec"]) if inputs.get("output_spec") else None,
+            metadata=inputs.get("metadata") or {},
+            created_by=OrgTaskCreator(
+                creator_type="team_leader",
+                creator_id=self.leader_id,
+                organization_id=self.manager.organization_id,
+                team_id=self.team_id,
+            ),
+        )
+        if not result.ok or result.task is None:
+            return ToolOutput(success=False, error=result.reason)
+        try:
+            summary_team_id, _ = await self.runtime_manager.ensure_summary_team(
+                organization_id=self.manager.organization_id,
+                root_team_id=root.assignment.team_id,
+                session_id=self.session_id,
+            )
+            bound = await self.manager.bind_summary_execution(
+                summary_task_id=result.task.task_id,
+                summary_team_id=summary_team_id,
+            )
+            if not bound.ok or bound.task is None:
+                raise RuntimeError(bound.reason or "summary execution binding failed")
+            execution = await self.manager.get_summary_execution(summary_task_id=bound.task.task_id)
+            summary_task = await self.manager.get_task(bound.task.task_id)
+            if execution is not None and summary_task is not None:
+                if (
+                    execution.status == OrgSummaryExecutionStatus.RUNNING.value
+                    and summary_task.status is OrgTaskStatus.DELEGATED
+                ):
+                    # ``bind_summary_execution`` may return a pre-activation task snapshot.
+                    # Read it again so the initial turn never relies on event delivery.
+                    self.runtime_manager.schedule_summary_execution(
+                        team_id=summary_team_id,
+                        session_id=self.session_id,
+                        task_id=bound.task.task_id,
+                        organization_id=self.manager.organization_id,
+                        execution_id=execution.execution_id,
+                        root_task_id=execution.root_task_id,
+                    )
+            if callable(publish_progress):
+                await publish_progress(
+                    self.session_id,
+                    self.team_id,
+                    {
+                        "phase": "summary_execution_delegated",
+                        "root_task_id": root_task_id,
+                        "summary_task_id": bound.task.task_id,
+                    },
+                )
+            return ToolOutput(
+                success=True,
+                data={
+                    **bound.task.brief(),
+                    "next_action": (
+                        "Summary Team is responsible for final delivery. End this turn instead of polling; "
+                        "you may send a focused message to its leader if clarification is needed."
+                    ),
+                },
+            )
+        except Exception as exc:
+            reason = f"summary team provisioning failed: {exc}"
+            logger.error(
+                "summary provision failed for %s (root=%s): %s",
+                result.task.task_id,
+                root_task_id,
+                exc,
+                exc_info=True,
+            )
+            await self.manager.fail_summary_execution(
+                summary_task_id=result.task.task_id,
+                failure_reason=reason,
+            )
+            await self.manager.mark_summary_team_failed()
+            await self.runtime_manager.notify_summary_provision_failure(
+                organization_id=self.manager.organization_id,
+                root_team_id=self.team_id,
+                root_leader_id=self.leader_id,
+                summary_task_id=result.task.task_id,
+                reason=reason,
+                session_id=self.session_id,
+            )
+            return ToolOutput(success=False, error=reason)
+
+
+class OrgSummaryGetInputsTool(_OrgLeaderTool):
+    """Read the current Summary Team's authorized execution inputs."""
+
+    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+        """Expose a Summary Team-only name for reading bound source snapshots."""
+        super().__init__(
+            name="org_summary_get_inputs",
+            description="Read only the bound, accepted inputs for this Summary Team execution.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+        )
+        self.card.input_params = {
+            "type": "object",
+            "properties": {"summary_task_id": {"type": "string"}},
+            "required": ["summary_task_id"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        """Return only source snapshots bound to the calling Summary Team execution."""
+        await self._ensure_registered()
+        summary_task_id = inputs.get("summary_task_id")
+        if not summary_task_id:
+            return ToolOutput(success=False, error="'summary_task_id' is required")
+        data = await self.manager.get_summary_inputs(
+            summary_task_id=summary_task_id,
+            requester_team_id=self.team_id,
+        )
+        if data is None:
+            return ToolOutput(
+                success=False,
+                error=f"summary task not found or not assigned to this Summary Team: {summary_task_id}",
+            )
+        return ToolOutput(success=True, data=data)
+
+
+class OrgSummaryCompleteTool(_OrgLeaderTool):
+    """Complete only the calling Summary Team's assigned Summary Task."""
+
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService | None" = None,
+        runtime_manager: "OrganizationRuntimeManager | None" = None,
+        session_id: str = "",
+    ) -> None:
+        """Create the restricted final-delivery tool for a Summary Team leader."""
+        super().__init__(
+            name="org_summary_complete",
+            description="Complete the assigned Summary Task with the final user-facing result.",
+            manager=manager,
+            team_id=team_id,
+            leader_id=leader_id,
+            message_service=message_service,
+        )
+        self.runtime_manager = runtime_manager
+        self.session_id = session_id
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "summary_task_id": {"type": "string"},
+                "output_context": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string", "minLength": 1},
+                        "result_uri": {"type": "string"},
+                        "result_hash": {"type": "string"},
+                        "result_type": {"type": "string"},
+                    },
+                    "required": ["description"],
+                },
+                "output_abstract": {"type": "string"},
+            },
+            "required": ["summary_task_id", "output_context", "output_abstract"],
+        }
+
+    # SDK Tool.invoke has unbound Input/Output TypeVars; specialize its JSON tool contract.
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:  # type: ignore[override]
+        """Start the assigned Summary Task if needed and atomically publish its final output."""
+        await self._ensure_registered()
+        task_id = inputs.get("summary_task_id", "")
+        task = await self.manager.get_task(task_id)
+        if task is None or task.task_type != "organization.summary" or task.assignment.team_id != self.team_id:
+            return ToolOutput(success=False, error="summary task is not assigned to this Summary Team")
+        context = inputs.get("output_context")
+        if not isinstance(context, dict) or not str(context.get("description") or "").strip():
+            return ToolOutput(success=False, error="output_context.description must contain the final report")
+        result_uri = str(context.get("result_uri") or "").strip()
+        if result_uri:
+            from pathlib import Path
+
+            from openjiuwen.agent_teams.organization.workspace import (
+                get_organization_workspace_manager,
+            )
+
+            workspace = get_organization_workspace_manager(self.manager.organization_id, self.session_id)
+            try:
+                relative = workspace.relative_path(result_uri)
+            except ValueError as exc:
+                return ToolOutput(success=False, error=str(exc))
+            if not relative.startswith("summary/"):
+                return ToolOutput(
+                    success=False,
+                    error="Summary Team final result_uri must be under the Organization summary/ directory",
+                )
+            if not (Path(workspace.workspace_path) / relative).is_file():
+                return ToolOutput(success=False, error=f"summary result file does not exist: {result_uri}")
+        if not str(inputs.get("output_abstract") or "").strip():
+            return ToolOutput(success=False, error="output_abstract is required")
+        if task.status is OrgTaskStatus.DELEGATED:
+            started = await self.manager.start_task(task_id=task_id, team_id=self.team_id)
+            if not started.ok:
+                return ToolOutput(success=False, error=started.reason)
+        result = await self.manager.complete_task(
+            task_id=task_id,
+            team_id=self.team_id,
+            output_context=OrgTaskOutputContext.model_validate(context),
+            output_abstract=inputs.get("output_abstract"),
+        )
+        if not result.ok or result.task is None:
+            return ToolOutput(success=False, error=result.reason)
+        execution = await self.manager.get_summary_execution(summary_task_id=task_id)
+        root = await self.manager.get_task(task.root_task_id)
+        if execution is not None and root is not None and root.assignment.team_id:
+            if self.message_service is not None:
+                try:
+                    metadata = {
+                        "kind": "summary_completed",
+                        "execution_id": execution.execution_id,
+                        "root_task_id": root.task_id,
+                        "summary_task_id": task_id,
+                    }
+                    notice = await self.message_service.send_leader_message(
+                        from_team_id=self.team_id,
+                        from_leader_id=self.leader_id,
+                        to_team_id=root.assignment.team_id,
+                        content=(
+                            f"Summary Task {task_id} completed root task {root.task_id}. "
+                            "The final report is in the root task output_context.description."
+                        ),
+                        metadata=metadata,
+                    )
+                    if not notice.ok:
+                        logger.warning("Summary completion notice was not delivered: %s", notice.reason)
+                    if self.runtime_manager is not None and notice.data is not None:
+                        self.runtime_manager.schedule_summary_completion_delivery(
+                            team_id=root.assignment.team_id,
+                            session_id=self.session_id,
+                            message_id=notice.data["message_id"],
+                            organization_id=self.manager.organization_id,
+                            metadata=metadata,
+                        )
+                except Exception:
+                    logger.exception("Failed to notify Root Leader of summary completion")
+            if self.runtime_manager is not None:
+                try:
+                    publish_progress = getattr(self.runtime_manager, "publish_organization_progress", None)
+                    if callable(publish_progress):
+                        await publish_progress(
+                            self.session_id,
+                            root.assignment.team_id,
+                            {
+                                "phase": "summary_completed",
+                                "root_task_id": root.task_id,
+                                "summary_task_id": task_id,
+                            },
+                        )
+                except Exception:
+                    logger.exception("Failed to publish completed summary progress to the host")
+        return ToolOutput(success=True, data=result.task.brief())
+
+
+def create_summary_leader_tools(
+    *,
+    manager: OrgTaskManager,
+    team_id: str,
+    leader_id: str,
+    message_service: "OrgMessageService | None" = None,
+    runtime_manager: "OrganizationRuntimeManager | None" = None,
+    session_id: str = "",
+) -> list[TeamTool]:
+    """Return the only organization tools available to an internal Summary Team leader."""
+    return [
+        OrgSummaryGetInputsTool(manager, team_id, leader_id),
+        OrgSummaryCompleteTool(manager, team_id, leader_id, message_service, runtime_manager, session_id),
+    ]
+
+
+def create_org_leader_tools(
+    *,
+    manager: OrgTaskManager,
+    team_id: str,
+    leader_id: str,
+    message_service: "OrgMessageService",
+    runtime_manager: "OrganizationRuntimeManager | None" = None,
+    session_id: str | None = None,
+) -> list[TeamTool]:
+    return [
+        OrgViewTasksTool(manager, team_id, leader_id, message_service=message_service),
+        OrgCreateTaskTool(manager, team_id, leader_id),
+        OrgClaimTaskTool(manager, team_id, leader_id),
+        OrgDelegateTaskTool(manager, team_id, leader_id),
+        OrgUpdateTaskTool(manager, team_id, leader_id),
+        OrgSendLeaderMessageTool(manager, team_id, leader_id, message_service=message_service),
+        OrgGetLeaderMessageTool(manager, team_id, leader_id, message_service),
+        OrgListLeaderMessagesTool(manager, team_id, leader_id, message_service),
+        OrgAckLeaderMessageTool(manager, team_id, leader_id, message_service),
+        OrgViewChildTasksTool(manager, team_id, leader_id),
+        OrgViewPendingReviewsTool(manager, team_id, leader_id),
+        OrgReviewTaskTool(manager, team_id, leader_id, runtime_manager, session_id or ""),
+        *(
+            [OrgCreateSummaryExecutionTool(manager, team_id, leader_id, runtime_manager, session_id)]
+            if runtime_manager is not None and session_id is not None
+            else []
+        ),
+    ]
+
+
+def create_org_control_tools(
+    *,
+    runtime_manager: "OrganizationRuntimeManager",
+    team_id: str,
+    session_id: str,
+) -> list[TeamTool]:
+    return [
+        OrgCreateOrganizationTool(runtime_manager, team_id, session_id),
+        OrgInviteTeamTool(runtime_manager, team_id, session_id),
+        OrgDissolveOrganizationTool(runtime_manager, team_id, session_id),
+        OrgListAvailableTeamsTool(runtime_manager, team_id, session_id),
+        OrgListConfiguredTeamsTool(runtime_manager, team_id, session_id),
+        OrgActivateAndInviteTeamTool(runtime_manager, team_id, session_id),
+        OrgListExpertGroupsTool(runtime_manager, team_id, session_id),
+        OrgCreateAndInviteExpertTeamTool(runtime_manager, team_id, session_id),
+        OrgViewOrganizationTool(runtime_manager, team_id, session_id),
+    ]
+
+
+ORG_LEADER_TOOL_NAMES = {
+    "org_view_tasks",
+    "org_create_task",
+    "org_claim_task",
+    "org_delegate_task",
+    "org_update_task",
+    "org_send_leader_message",
+    "org_get_leader_message",
+    "org_list_leader_messages",
+    "org_ack_leader_message",
+    "org_view_child_tasks",
+    "org_view_pending_reviews",
+    "org_review_task",
+    "org_create_summary_execution",
+    "org_summary_get_inputs",
+    "org_summary_complete",
+}
+
+
+__all__ = [
+    "ORG_LEADER_TOOL_NAMES",
+    "OrgCreateOrganizationTool",
+    "OrgDissolveOrganizationTool",
+    "OrgInviteTeamTool",
+    "OrgListAvailableTeamsTool",
+    "OrgListConfiguredTeamsTool",
+    "OrgActivateAndInviteTeamTool",
+    "OrgListExpertGroupsTool",
+    "OrgCreateAndInviteExpertTeamTool",
+    "OrgViewOrganizationTool",
+    "OrgClaimTaskTool",
+    "OrgCreateTaskTool",
+    "OrgDelegateTaskTool",
+    "OrgSummaryCompleteTool",
+    "OrgSummaryGetInputsTool",
+    "OrgCreateSummaryExecutionTool",
+    "OrgReviewTaskTool",
+    "OrgAckLeaderMessageTool",
+    "OrgGetLeaderMessageTool",
+    "OrgListLeaderMessagesTool",
+    "OrgSendLeaderMessageTool",
+    "OrgUpdateTaskTool",
+    "OrgViewChildTasksTool",
+    "OrgViewPendingReviewsTool",
+    "OrgViewTasksTool",
+    "create_org_leader_tools",
+    "create_summary_leader_tools",
+    "create_org_control_tools",
+]

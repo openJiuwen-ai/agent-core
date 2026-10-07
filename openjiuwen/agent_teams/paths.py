@@ -32,6 +32,7 @@ def reset_task_openjiuwen_home(token: Token[Path | None]) -> None:
     """Restore the enclosing task's runtime home, including on cancellation."""
     _task_openjiuwen_home.reset(token)
 
+
 # Per-workspace Skill visibility declaration file name. Skills live in exactly
 # one physical library (``global_skills_dir()``); which team member may see
 # which Skill is recorded in this file at the workspace root, not as a
@@ -193,6 +194,16 @@ def team_member_workspace_dir(team_name: str, member_name: str) -> Path:
     return team_home(team_name) / "workspaces" / f"{member_name}_workspace"
 
 
+def organization_home(organization_id: str) -> Path:
+    """Return the persistent root for one organization."""
+    return get_openjiuwen_home() / ".organizations" / safe_path_segment(organization_id)
+
+
+def organization_workspace_dir(organization_id: str, session_id: str) -> Path:
+    """Return the session-scoped shared workspace for an organization."""
+    return organization_home(organization_id) / "sessions" / _safe_segment(session_id) / "organization-workspace"
+
+
 def member_skill_visibility_path(team_name: str, member_name: str) -> Path:
     """Return the Skill visibility declaration path of one team member.
 
@@ -258,6 +269,11 @@ def _safe_segment(value: str, fallback: str = "_") -> str:
     return normalized[:96] or fallback
 
 
+def safe_path_segment(value: str, fallback: str = "_") -> str:
+    """Return the canonical filesystem-safe form of an untrusted path segment."""
+    return _safe_segment(value, fallback)
+
+
 def team_sessions_dir(team_name: str) -> Path:
     """Return the directory holding all per-session state for a team.
 
@@ -291,7 +307,10 @@ def group_conversation_registry_dir(team_name: str) -> Path:
 
 
 def group_conversation_dir(
-    team_name: str, session_id: str, *, workspace_path: str | Path | None = None,
+    team_name: str,
+    session_id: str,
+    *,
+    workspace_path: str | Path | None = None,
 ) -> Path:
     """Return a team/session-isolated public archive inside the shared workspace."""
     group_conversation_registry_dir(team_name)
@@ -357,9 +376,7 @@ def workflow_journal_path(team_name: str, session_id: str, workflow_name: str) -
     return workflow_run_dir(team_name, session_id, workflow_name) / "journal.jsonl"
 
 
-def workflow_run_journal_path(
-    team_name: str, session_id: str, workflow_name: str, run_id: str | None
-) -> Path:
+def workflow_run_journal_path(team_name: str, session_id: str, workflow_name: str, run_id: str | None) -> Path:
     """Return the per-run journal snapshot path for a swarmflow run.
 
     Layout:
@@ -382,9 +399,7 @@ def workflow_run_journal_path(
     return workflow_run_dir(team_name, session_id, workflow_name) / f"journal-{_safe_segment(run_id)}.jsonl"
 
 
-def workflow_run_wal_path(
-    team_name: str, session_id: str, workflow_name: str, run_id: str | None
-) -> Path:
+def workflow_run_wal_path(team_name: str, session_id: str, workflow_name: str, run_id: str | None) -> Path:
     """Return the per-run WAL path for a swarmflow run.
 
     Layout:
