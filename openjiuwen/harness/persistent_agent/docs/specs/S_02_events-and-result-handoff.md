@@ -5,13 +5,13 @@
 | 项 | 值 |
 | --- | --- |
 | 类型 | spec |
-| 状态 | 事件 DTO 和记账 / 执行日志端口契约已按 v2 实现（PA-22）；事件映射、记账调用和暂停收尾待 PA-04 |
-| 关联模块 | 内部 `persistent_agent/{ports.py,schema/{protocol,events,port_results}.py}` |
+| 状态 | 事件 DTO 和记账 / 执行日志端口契约已按 v2 实现（PA-22）；事件映射、记账调用、结局判定和最终回答交接已实现（PA-04）；`tool.intent / tool.completed`（PA-14）、`window.switched`（PA-10）、`participation.decided`（PA-06）待接入 |
+| 关联模块 | 内部 `persistent_agent/{ports.py,schema/{protocol,events,port_results}.py,execution/{emitter,model_rail,entries}.py}` |
 | 最近一次修订日期 | 2026-10-07 |
-| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)；开发计划 PA-04、PA-07、PA-14、PA-16、PA-22 |
+| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)；开发计划 PA-04、PA-07、PA-14、PA-16、PA-22 |
 | 设计依据 | [Persistent Agent 设计（v2）](../designs/persistent-agent-design-v2.md) §9、§13 第 5、12 条、§14 |
 
-当前可以构造 `AgentEvent` 及其 11 种类型化负载，并已定义 `CommitPort.record / read_execution_log` 协议。尚没有把原生流映射为事件的执行适配，也没有生产记账后端；下文的记账时序和交接约束是 PA-04 及服务端要满足的运行契约。
+当前可以构造 `AgentEvent` 及其 11 种类型化负载，并已定义 `CommitPort.record / read_execution_log` 协议。PA-04 的执行入口已把原生流映射为事件并按下文时序记账（见“事件映射与结局”）；生产记账后端由服务端实现，下文的记账时序和交接约束也是服务端要满足的运行契约。
 
 ## 范围 / 边界
 
@@ -27,7 +27,7 @@
 2. 所有事件统一 `await record()`。`tool.intent`、`execution.paused`、`execution.final` 等自身落盘后返回，失败停止当前执行；final 还须确认 output_refs 所引用的候选输出已可靠保存。普通事件入队后即可继续，失败只记诊断，不阻塞后续关键事件。
 3. `local_seq` 在一个 Execution 内递增，`event_id` 由完整调用归属和 `local_seq` 确定；重传复用原 local_seq、event_id 和内容，服务端按 event_id 去重。
 4. 事件流结束、文件存在、模型完成都不等于 Request 终态；终态以记账成功的 `execution.final` 或 `execution.paused` 为准。
-5. 执行入口返回的事件流由 AgentServer 持续消费到结束，前端断开只结束展示订阅；停止或取消通过 `abort_bound` 发起，不通过关闭事件流（v2 §13 第 12 条）。
+5. 执行入口返回的事件流由 AgentServer 持续消费到结束，前端断开只结束展示订阅；停止或取消通过 `abort_persistent_request` 发起，不通过关闭事件流（v2 §13 第 12 条）。提前关闭事件流时入口等待原生流和清理结束，不产生结束事件。
 6. 已接收、处理完成、允许发送、渠道送达分别确认。候选群消息或文件引用在服务端授权检查和投递回执前不是公开记录。
 
 ## 接口契约与错误语义
@@ -74,6 +74,32 @@ AgentEvent {
 执行适配须先对服务端返回的值重新 `model_validate`，再使用。
 
 `record` 是唯一持久化通道，入口返回的事件流只用于实时展示，AgentServer 消费流时不再保存同一事件。
+
+### 事件映射与结局
+
+每个 Execution 由 `execution/emitter.py` 的 `EventEmitter` 唯一调用 `record`：在锁内分配 `local_seq`、构造事件、等待 `record` 返回，再放入展示队列，因此展示顺序与记账顺序一致。普通事件记账失败时仍会展示，只是日志出现缺口。
+
+| 来源 | 事件 |
+| --- | --- |
+| 入口开始执行（恢复时不记） | `execution.started`，目标为任务正文 |
+| 原生 `llm_output` 片段 | `reply.delta`；超过 65536 字符的片段拆成多段，不截断 |
+| 模型调用结束且正文与工具调用同时存在 | `progress.updated`，正文截断到 500 字符 |
+| 每次模型调用结束或失败 | `model.completed`：本次 `model_call_id`、配置版本，响应带用量时为实际用量，否则为未知 |
+| 原生 `__interaction__` 片段 | 收集为 `paused(awaiting_confirmation)` 的被拦截调用：交互 ID、工具名、脱敏参数 |
+| 结局 | `output.proposed`、`execution.paused` 或 `execution.final` |
+
+模型调用的预算准入与用量回报由 `PersistentModelCallRail` 完成。它在 `PersistentAgentSpec.resolve_parts` 中加入，优先级 10，是模型调用前最后执行的钩子；没有执行入口时不生效，个人版和其他 DeepAgent 不受影响。每次调用生成新的 `model_call_id` 并先调用 `admit`：被拒绝或已收到停止 / 取消时，通过 force-finish 跳过模型调用并带回结构化标记；`admit` 抛异常时同样跳过，结局为 `paused(error)`。`report` 抛异常只记诊断，执行继续。
+
+结局按优先级判定：
+
+1. 关键事件记账失败：抛运行异常，不降级为 `paused(error)`。
+2. 收到 cancel：`final(cancelled)`；收到 stop：`paused(stopped)`。
+3. 有被拦截调用：`paused(awaiting_confirmation)`。
+4. 预算拒绝或准入异常：`paused(budget_denied)` / `paused(error)`。
+5. 原生结果为 answer：`final(completed)`。正文非空时先交出 `output.proposed`（`output_id` 由 `execution_id` 派生，`target_ref` 为回复目标，`share_mode=message`），并列入 `output_refs`；正文超过 65536 字符时改为 `paused(error)`，不静默截断。
+6. 原生错误结果（含迭代次数耗尽）、原生异常或没有结果：`paused(error)`，错误文本不作为候选输出。
+
+最终回答交接、会话状态记录保存、结束事件记账按此顺序进行。工具参数脱敏规则为：键名（不区分大小写）含 password、secret、token、key、credential、authorization 的值替换为 `***`，嵌套对象和列表同样处理。
 
 ## 状态及数据生命周期
 

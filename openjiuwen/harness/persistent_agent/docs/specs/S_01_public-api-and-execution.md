@@ -5,18 +5,20 @@
 | 项 | 值 |
 | --- | --- |
 | 类型 | spec |
-| 状态 | PA-01 契约、PA-02 DeepAgent 构造、PA-03 实例内 Session 隔离已按各自边界验收；PA-22 已按 v2 收敛执行上下文与宿主端口；真实运行时闭环待接入 |
+| 状态 | PA-01 契约、PA-02 DeepAgent 构造、PA-03 实例内 Session 隔离已按各自边界验收；PA-22 已按 v2 收敛执行上下文与宿主端口；PA-04 执行、恢复与控制入口已实现，会话状态记录（PA-09）与交互适配（PA-08）接入前正式入口明确拒绝 |
 | 关联模块 | 外层 `persistent_agent/__init__.py` 与内部 `persistent_agent/persistent_agent/{factory.py,ports.py,schema/,execution/}` |
 | 最近一次修订日期 | 2026-10-07 |
-| 关联 feature | [F_01 Spec 与 DeepAgent 装配](../features/F_01_spec-and-deep-agent-construction.md)、[F_02 执行协议](../features/F_02_execution-protocol.md)、[F_03 执行绑定](../features/F_03_invocation-binding-and-isolation.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)；开发计划 PA-01～PA-06、PA-08、PA-22 |
+| 关联 feature | [F_01 Spec 与 DeepAgent 装配](../features/F_01_spec-and-deep-agent-construction.md)、[F_02 执行协议](../features/F_02_execution-protocol.md)、[F_03 执行绑定](../features/F_03_invocation-binding-and-isolation.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)；开发计划 PA-01～PA-06、PA-08、PA-22 |
 | 设计依据 | [Persistent Agent 设计（v2）](../designs/persistent-agent-design-v2.md) §4、§5、§13、§14；[旧版详细架构](../designs/persistent-agent-architecture.md) §4～7 仅供参考 |
 
-当前已实现并独立验证 PA-01 的契约层、PA-02 的构造入口及 PA-03 的实例内调用绑定 / 单轮流生命周期，PA-22 已把执行上下文和宿主端口收敛到 v2。下文事件生产、宿主后端、窗口存储、上下文装配和续做仍是目标协议，不代表已经可运行。“范围 / 边界”之后尚未修订的段落仍沿用旧版架构的表述，与 v2 冲突时以 v2 设计为准，随对应特性修订。实际构造接口如下：
+当前已实现并独立验证 PA-01 的契约层、PA-02 的构造入口及 PA-03 的实例内调用绑定 / 单轮流生命周期，PA-22 已把执行上下文和宿主端口收敛到 v2，PA-04 已实现执行、恢复与控制入口及事件映射。下文宿主后端、窗口存储、上下文装配和续做仍是目标协议，不代表已经可运行。“范围 / 边界”之后尚未修订的段落仍沿用旧版架构的表述，与 v2 冲突时以 v2 设计为准，随对应特性修订。实际构造接口如下：
 
 ```python
 from openjiuwen.harness.persistent_agent import (
     PersistentAgentSpec, PersistentBuildContext, ExecutionContext,
     PersistentPorts, create_persistent_agent,
+    execute_persistent_request, resume_persistent_request, abort_persistent_request,
+    RequestInput, DirectMessageSource, ConfirmReply, PermissionResponse, AnswerResponse,
 )
 ```
 
@@ -41,17 +43,25 @@ PersistentPorts 已定义异步方法及类型化返回值；工厂仍仅验证�
 
 每个上下文自动分配随机唯一 tool_owner_id，不允许外部指定。一次构造后（包括已开始后失败）不能复用，derive 复制 extras 容器但共享同一次调用的绑定。`context.validate_binding(agent)` 校验原对象与 Session / 完整 Execution / 端口 / owner，不能用新的上下文重新绑定。
 
-PA-03 的内部 `execution/binding.py` 已提供 invoke_bound、stream_bound、abort_bound、close_bound。invoke / stream 在进入原生 API 前校验绑定，并固定传入原构造 Session；无授权、预算或提交端口调用，不返回 AgentEvent。Persistent 构造通过 parts.config.stream_task_lifecycle 注入独立 NativeStreamTaskLifecycle，单轮流的生产者经原生可选接缝登记，取消 / 提前关闭时等待生产者和原生 Session 收尾退出。普通 DeepAgent 默认句柄为 None，个人版保持旧路径。它们不是外层公开 API，也不是可靠执行入口；不能把内部 native result 当成业务完成或送达。第四步 execute_persistent_request 将组合这些接缝及事件协议。
+PA-03 的内部 `execution/binding.py` 已提供 invoke_bound、stream_bound、abort_bound、close_bound。invoke / stream 在进入原生 API 前校验绑定，并固定传入原构造 Session；无授权、预算或提交端口调用，不返回 AgentEvent。Persistent 构造通过 parts.config.stream_task_lifecycle 注入独立 NativeStreamTaskLifecycle，单轮流的生产者经原生可选接缝登记，取消 / 提前关闭时等待生产者和原生 Session 收尾退出。普通 DeepAgent 默认句柄为 None，个人版保持旧路径。它们不是外层公开 API，也不是可靠执行入口；不能把内部 native result 当成业务完成或送达。PA-04 的执行入口组合这些接缝及事件协议。
 
 构造绑定自动保存调用私有 InvocationState，持有原 live config / model / AbilityManager 身份及关键声明值快照。关键声明包括 Card ID、owner、系统提示词、cwd / project_root、循环及迭代配置、工作空间自动创建开关、超时、Skills 和工具 Card 身份。替换或漂移在下一调用前拒绝，不重新解释为新的配置版本。模型 / Rail 等可信句柄的内部变化不是完整防篡改检查；不得在固定配置调用中直接热重配、加载插件或绕过接缝调用原生 API。
 
 内部 invocation_scope 原子占用本实例，重叠调用立即失败，不等待宿主业务队列；不同 Session 使用不同构造实例可并行。首次使用固定事件循环，跨循环重用拒绝。活动占用保持到普通调用或原生流生产者收尾退出，finally 使用原绑定释放；调用返回 / 每个流片段交接前复核绑定和停止标记，停止后的迟到结果不当作正常成功。流消费者提前退出须显式 aclose / aclosing；重复取消不能打断后台生产者的取消 checkpoint 和 Session.commit / close_stream。后台不合作时继续保留占用，不把等待超时或消费者停止视为已收敛。
 
-abort_bound 须由独立控制任务发起，只设置原绑定停止标记、取消活动任务并调用原生 abort；停止后不重用本绑定。控制尚在进行或 native call 未退出时 close_bound 拒绝；空闲关闭仅清理捕获的 owner 工具和原生临时资源，不调用 Session.post_run、不清空持久状态、不删除文件。关闭不证明任意外部工具进程或副作用已收敛。停止与取消由 AgentServer 直接调用 `abort_bound`（v2 §10.4），不经控制端口；工具收敛留后续阶段。原生 DeepAgent 方法不加全局检查，个人版保持原行为；完整可靠执行仍待 PA-04。
+abort_bound 须由独立控制任务发起，只设置原绑定停止标记、取消活动任务并调用原生 abort；停止后不重用本绑定。控制尚在进行或 native call 未退出时 close_bound 拒绝；空闲关闭仅清理捕获的 owner 工具和原生临时资源，不调用 Session.post_run、不清空持久状态、不删除文件。关闭不证明任意外部工具进程或副作用已收敛。服务端不直接调用 `abort_bound`：停止与取消经 `abort_persistent_request` 发起（v2 §10.4），由它在实例构造后、关闭前复用 `abort_bound`；工具收敛留后续阶段。原生 DeepAgent 方法不加全局检查，个人版保持原行为。
 
 工厂仍通过 DeepAgentSpec.build 的 parts / Config 路径返回原生 DeepAgent，不新增运行类。构造不调用模型或宿主端口，不投递消息；使用 WorkspaceSpec 时宿主须预建根目录并设置 auto_create_workspace=False。自定义 provider 是可信装配扩展，须遵守构造期无外部业务副作用，并为有状态工具 / Rails 返回独立实例。Persistent 的顶层 tools 拒绝 stateful ToolCard 引用（否则仍指向全局同一实例），应使用 BuiltinToolSpec provider 构造；stateless ToolCard 保留共享 ID。子代理在惰性执行时的全链路隔离仍待后续验证。部分注册失败只回收本次 owner 的 stateful 工具，保留共享工具及其他调用；失败不关闭宿主 Session。形状 / 归属错误映射 DEEPAGENT_CONTEXT_PARAM_ERROR，配置或装配错误映射 DEEPAGENT_CONFIG_PARAM_ERROR，Spec 字段校验沿用 Pydantic。
 
-`execute_persistent_request` 尚未实现或导出。其余本规约中的执行接口和状态为后续目标。
+PA-04 的执行、恢复与控制入口（`execution/entries.py`，详见 [F_05](../features/F_05_execution-entries.md)）：
+
+- **输入**：`RequestInput` 的 `kind` 为 `group_message / direct_message / scheduled`，`source` 分别是 `GroupMessage`、`DirectMessageSource` 和空；`continue_instruction` 只能随 `recovery_ref` 出现。`ConfirmReply` 含 1～64 项、`tool_call_id` 不重复的 `PermissionResponse`（approve / approve_for_session / reject）或 `AnswerResponse`（answered / timed_out，超时不带回答）。
+- **前置拒绝**：在任何事件和构造之前，以下情况抛校验拒绝（`ValidationError` 类）：Spec 未显式关闭 task-loop 或开启了任何子代理开关；Session 未注入 `NoopCheckpointer`；群消息（PA-06 前）、带 `recovery_ref`（PA-17 前）；会话状态记录（PA-09）或恢复时的交互适配（PA-08）接入点不可用。构造后还核对装配结果中 task-loop 和子代理确实未开启。
+- **编排**：生成器在内部执行任务中运行原生流，自身只转交已记账的事件；构造上下文仍只能使用一次。执行时依次记 `execution.started`、加载会话状态记录、运行原生流、交出 `output.proposed`、保存会话状态记录、记结束事件，最后关闭实例。会话状态记录加载或保存失败、关键事件记账失败、实例清理失败都抛运行异常（`ExecutionError` 类）；保存失败时不记结束事件。服务端提前关闭事件流时，入口取消内部任务并等待原生流和清理结束，不产生结束事件。
+- **恢复**：从会话状态记录取得等待现场，核对所属 Request、交互 ID、回复类型与问题文本后，按交互 ID 组装原生 `InteractiveInput`；回复无效时抛校验拒绝，不记账、不保存。恢复不记 `execution.started`，回复目标取自等待现场。
+- **控制**：`abort_persistent_request(context, *, reason)` 把第一个 cancel / stop 记在构造上下文上，之后到达的原因忽略；实例构造后、关闭前复用 `abort_bound`。它不发事件，结局由执行入口给出：cancel 为 `final(cancelled)`，stop 为 `paused(stopped)`。实例清理会等待正在进行的原生停止返回。
+
+`enabled_features` 暂不增加 `execution`，M1 集成接入 PA-05、PA-07、PA-08、PA-09 并验证后再声明。其余本规约中的执行接口和状态为后续目标。
 
 ## 范围 / 边界
 
@@ -78,7 +88,7 @@ Persistent Agent 只添加业务 Session 归属、宿主端口和可靠交接适
 3. Request 固定启动时的配置版本、指纹和权限上限；恢复沿用原版本。当前撤权立即收紧可用能力，新增授权不扩张原 Request 的上限。
 4. Agent、Session、Request、Execution、Window、Checkpoint 和 Operation 使用各自身份。新恢复 Execution 仍属于原 Request，不把新消息当作旧请求的续写。
 5. `Runner.resource_mgr` 是进程级共享状态；各活动实例须有独立 `tool_owner_id`，并只清理本实例资源。Rail、工具包装器和带凭证客户端的可变状态不跨调用共享。
-6. 一次 Execution 内配置与授权快照固定，撤权在下一个 Execution 生效（v2 §7.1）；停止与取消通过 `abort_bound` 收敛，已发出的外部效果由续做规则查证。
+6. 一次 Execution 内配置与授权快照固定，撤权在下一个 Execution 生效（v2 §7.1）；停止与取消经 `abort_persistent_request` 发起、由入口内部的 `abort_bound` 收敛，已发出的外部效果由续做规则查证。
 7. 运行主体保持 DeepAgent，不新增 PersistentAgent 类、DeepAgent 子类或 Agent 包装门面。专用能力通过 Spec、Rails、工具和可靠交接适配组合。
 
 ## 接口契约与错误语义
@@ -88,17 +98,18 @@ Persistent Agent 只添加业务 Session 归属、宿主端口和可靠交接适
 ```text
 create_persistent_agent(spec: PersistentAgentSpec, *, context: PersistentBuildContext)
     -> DeepAgent
-execute_persistent_request(spec, context, inputs) -> AsyncIterator[AgentEvent]
-resume_persistent_request(spec, context, confirm_reply) -> AsyncIterator[AgentEvent]
+execute_persistent_request(spec, context, inputs: RequestInput) -> AsyncIterator[AgentEvent]
+resume_persistent_request(spec, context, confirm_reply: ConfirmReply) -> AsyncIterator[AgentEvent]
+abort_persistent_request(context, *, reason: "cancel" | "stop") -> None
 ```
 
 构造不启动任务，返回原生 DeepAgent。配置类 PersistentAgentSpec 继承已有 [DeepAgentSpec](../../../schema/deep_agent_spec.py)，直接沿用通用字段，只新增 Persistent 专属策略 / 技术限制及能力描述；不包含 deep_agent 子对象，不要求第二份 Spec。运行句柄经 PersistentBuildContext 注入，不进入序列化配置。
 
 仅配置类继承，运行类不继承。PersistentAgentSpec.build 委托 create_persistent_agent，在副本上调用 DeepAgentSpec.build(snapshot, context=working) 复用父类 parts / Config 装配，最终返回 DeepAgent。父类 Spec.build 与 create_deep_agent 共用装配逻辑，并非直接调用关系。不在本模块直接 new Agent 或构造模板后复制；子类的扁平序列化、校验及指纹覆盖专属字段。
 
-两个入口是薄适配函数，不是新 Agent 方法：内部组合构造、绑定接缝和事件映射，消费 DeepAgent 公开 stream 的输出并映射 S_02 事件，不另建模型循环。原生 API 保留，但原生流结束不承担业务终态确认。inputs 是宿主已持久化的 Request 内容值；崩溃续做和非确认暂停后继续仍走 `execute_persistent_request`，由 `context.execution.recovery_ref` 区分；确认恢复走 `resume_persistent_request`。公开导出待 PA-04 实现时审定。
+两个入口是薄适配函数，不是新 Agent 方法：内部组合构造、绑定接缝和事件映射，消费 DeepAgent 公开 stream 的输出并映射 S_02 事件，不另建模型循环。原生 API 保留，但原生流结束不承担业务终态确认。inputs 是宿主已持久化的 Request 内容值；崩溃续做和非确认暂停后继续仍走 `execute_persistent_request`，由 `context.execution.recovery_ref` 区分；确认恢复走 `resume_persistent_request`。三个入口及输入值对象经外层包懒导出。
 
-Spec、构造上下文、能力检查和验收详见 [F_01](../features/F_01_spec-and-deep-agent-construction.md)。构造绑定固定一个 Session / Execution / 配置，不接受另一 context 重绑；通用 Spec 的 owner 传递接缝已在工具注册前接入，未设置 owner 的旧消费者保持原行为。内部 native-call 接缝已使用绑定校验，正式事件执行入口仍待 PA-04。
+Spec、构造上下文、能力检查和验收详见 [F_01](../features/F_01_spec-and-deep-agent-construction.md)。构造绑定固定一个 Session / Execution / 配置，不接受另一 context 重绑；通用 Spec 的 owner 传递接缝已在工具注册前接入，未设置 owner 的旧消费者保持原行为。内部 native-call 接缝已使用绑定校验，正式执行入口在其上组合事件映射（PA-04）。
 
 | `ExecutionContext` 逻辑部分 | 必须携带或可验证的内容 |
 | --- | --- |
