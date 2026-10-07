@@ -514,6 +514,26 @@ async def test_abort_during_native_stream(harness, reason, ending):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("turns", [[], ["tool"]])
+async def test_stop_saves_the_context_reached_so_far(harness, turns):
+    """v2 appendix C item 5, partly: a stop during a model call keeps the context reached so far."""
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    harness.model.turns = list(turns)
+    harness.model.release.clear()
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    await asyncio.wait_for(harness.model.streaming.wait(), 5)
+    await harness.api.abort_persistent_request(ctx, reason="stop")
+    events = await asyncio.wait_for(consumer, 5)
+    assert events[-1].payload.reason == "stopped"
+    messages = harness.store.record["state"]["context"]["default_context_id"]["messages"]
+    assert messages[0].content == "please summarize"
+    if turns:
+        assert [type(message).__name__ for message in messages] == ["UserMessage", "AssistantMessage", "ToolMessage"]
+        assert messages[1].tool_calls[0].id == "call-1" and messages[2].tool_call_id == "call-1"
+
+
+@pytest.mark.asyncio
 async def test_abort_before_construction_still_finishes(harness):
     spec = harness.spec()
     ctx, host = harness.context(spec)
@@ -541,6 +561,49 @@ async def test_repeated_abort_during_stream_keeps_first_reason(harness):
     )
     events = await asyncio.wait_for(consumer, 5)
     assert [event.payload.reason for event in events if event.event_type == "execution.paused"] == ["stopped"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("reason", "save_fails"), [("cancel", False), ("stop", False), ("cancel", True)])
+async def test_control_after_the_outcome_is_locked_is_not_accepted(harness, monkeypatch, reason, save_fails):
+    from openjiuwen.harness.deep_agent import DeepAgent
+
+    native_aborts = []
+    native_abort = DeepAgent.abort
+
+    async def spy_abort(self, session=None):
+        native_aborts.append(session)
+        await native_abort(self, session=session)
+
+    monkeypatch.setattr(DeepAgent, "abort", spy_abort)
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    saving, release, store_save = asyncio.Event(), asyncio.Event(), harness.store.save
+
+    async def slow_save(context, ending):
+        saving.set()
+        await release.wait()
+        if save_fails:
+            raise RuntimeError("window store down")
+        await store_save(context, ending)
+
+    harness.store.save = slow_save
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    await asyncio.wait_for(saving.wait(), 5)
+    await harness.api.abort_persistent_request(ctx, reason=reason)
+    control = ctx.binding.control
+    assert control.outcome_locked and control.abort_reason is None, "the control reason is not modified"
+    assert native_aborts == [] and not ctx.binding.runtime.stopped, "abort_bound is not called"
+    release.set()
+    if save_fails:
+        with pytest.raises(BaseError) as exc_info:
+            await asyncio.wait_for(consumer, 5)
+        assert_rejected(exc_info, StatusCode.DEEPAGENT_RUNTIME_ERROR)
+        assert not {"execution.final", "execution.paused"} & set(kinds(host.events)), "locking is not persistence"
+        return
+    events = await asyncio.wait_for(consumer, 5)
+    assert events[-1].payload.status == "completed" and events[-1].payload.output_refs
+    assert harness.store.endings[-1].outcome == "completed"
 
 
 @pytest.mark.asyncio
