@@ -35,6 +35,8 @@ class ExecutionEnding:
     request_id: str
     reply_target: str | None
     output_refs: tuple[str, ...] = ()
+    # A final answer too large for one output event; must be saved so a later handoff needs no rerun.
+    pending_answer: str | None = None
 
 
 class SessionStateStore(Protocol):

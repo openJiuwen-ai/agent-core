@@ -15,9 +15,21 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 
 from .execution import ExecutionContext
-from .protocol import Digest, Identifier, InvocationRef, ModelUsage, Positive, ProtocolModel, Reason, Text
+from .protocol import (
+    TEXT_MAX_CHARS,
+    Digest,
+    Identifier,
+    InvocationRef,
+    ModelUsage,
+    Positive,
+    ProtocolModel,
+    Reason,
+    Text,
+)
 
 References = Annotated[tuple[Identifier, ...], Field(max_length=128)]
+# UTF-8 bytes of one canonical event proposal, counting every field, not only text.
+EVENT_MAX_BYTES = 262144
 
 
 class EventType(StrEnum):
@@ -61,7 +73,7 @@ class TextPayload(ProtocolModel):
 class ReplyDeltaPayload(ProtocolModel):
     """Nonempty stream fragments preserve whitespace, unlike complete prose."""
 
-    text: Annotated[str, Field(min_length=1, max_length=65536)]
+    text: Annotated[str, Field(min_length=1, max_length=TEXT_MAX_CHARS)]
 
 
 class OutputPayload(ProtocolModel):
@@ -248,7 +260,7 @@ class AgentEvent(InvocationRef):
             size = len(self._canonical().encode("utf-8"))
         except UnicodeError as exc:
             raise PydanticCustomError("persistent_protocol", "event content must be valid UTF-8") from exc
-        if size > 262144:
+        if size > EVENT_MAX_BYTES:
             raise PydanticCustomError(
                 "persistent_protocol", "event proposal exceeds 256 KiB; use controlled references"
             )
@@ -258,6 +270,10 @@ class AgentEvent(InvocationRef):
     def create(cls, execution: ExecutionContext, **fields) -> "AgentEvent":
         """Make one proposal; execution adapter, not this DTO, allocates local_seq."""
         return cls(**InvocationRef.from_execution(execution).model_dump(), **fields)
+
+    def proposal_size(self) -> int:
+        """UTF-8 bytes of the canonical proposal, the measure EVENT_MAX_BYTES bounds."""
+        return len(self._canonical().encode("utf-8"))
 
     def _canonical(self) -> str:
         """Return deterministic JSON used for identity and digest checks."""

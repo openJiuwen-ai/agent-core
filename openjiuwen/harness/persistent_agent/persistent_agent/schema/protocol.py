@@ -12,8 +12,11 @@ from openjiuwen.core.common.exception.errors import build_error
 
 from .execution import ExecutionContext
 
+# Character limit of one text field; a whole event is also bounded in bytes (events.EVENT_MAX_BYTES).
+TEXT_MAX_CHARS = 65536
+
 Identifier = Annotated[str, StringConstraints(min_length=1, max_length=512, pattern=r"^[^\s\x00-\x1f\x7f]+$")]
-Text = Annotated[str, StringConstraints(min_length=1, max_length=65536, pattern=r"\S")]
+Text = Annotated[str, StringConstraints(min_length=1, max_length=TEXT_MAX_CHARS, pattern=r"\S")]
 Reason = Annotated[str, StringConstraints(min_length=1, max_length=4096, pattern=r"\S")]
 Digest = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{64}$")]
 Positive = Annotated[int, Field(gt=0, strict=True)]

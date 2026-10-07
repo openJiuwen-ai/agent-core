@@ -40,13 +40,17 @@ class PersistentModelCallRail(DeepAgentRail):
     def _emitter(self):
         return self._binding.control.emitter
 
+    def _stop_requested(self, ctx) -> bool:
+        """End the native loop once a critical failure or control is registered; the entry decides the outcome."""
+        control = self._binding.control
+        if control.fatal is None and control.abort_reason is None:
+            return False
+        ctx.request_force_finish(pause_result("error", "execution is stopping"))
+        return True
+
     async def before_model_call(self, ctx) -> None:
         """Skip the call after a control or critical failure; otherwise ask for budget."""
-        if self._emitter() is None:
-            return
-        control = self._binding.control
-        if control.fatal is not None or control.abort_reason is not None:
-            ctx.request_force_finish(pause_result("error", "execution is stopping"))
+        if self._emitter() is None or self._stop_requested(ctx):
             return
         execution, budget = self._binding.execution, self._binding.ports.budget
         model_call_id = "mc_" + uuid4().hex
@@ -60,6 +64,11 @@ class PersistentModelCallRail(DeepAgentRail):
             ctx.request_force_finish(pause_result("budget_denied", admission.reason))
             return
         ctx.extra[_CALL_KEY] = model_call_id
+
+    async def before_tool_call(self, ctx) -> None:
+        """Skip every tool not yet started, read-only ones included, after a control or critical failure."""
+        if self._emitter() is not None:
+            self._stop_requested(ctx)
 
     async def after_model_call(self, ctx) -> None:
         """Report usage and record the call; text beside tool calls is an intermediate conclusion."""
