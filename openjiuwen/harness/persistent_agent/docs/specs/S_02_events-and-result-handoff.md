@@ -23,9 +23,9 @@
 
 ## 不变量
 
-1. 同一 Execution 的所有事件按产生顺序进入服务端维护的同一个有序队列；关键事件不能越过尚未落盘的前序事件（v2 §9.1）。
-2. 所有事件统一 `await record()`。`tool.intent`、`execution.paused`、`execution.final` 返回时，此前事件和本事件已全部落盘，调用失败停止当前执行；普通事件入队后即可继续，调用失败只记诊断。
-3. `local_seq` 在一个 Execution 内递增，`event_id` 由完整调用归属和 `local_seq` 确定，重传复用原 `event_id`。
+1. 同一 Execution 的事件按产生顺序调用 record；服务端按 local_seq 维护已保存日志，允许普通日志缺失，不以序号连续性作为关键记账成功条件（v2 §9.1）。
+2. 所有事件统一 `await record()`。`tool.intent`、`execution.paused`、`execution.final` 等自身落盘后返回，失败停止当前执行；final 还须确认 output_refs 所引用的候选输出已可靠保存。普通事件入队后即可继续，失败只记诊断，不阻塞后续关键事件。
+3. `local_seq` 在一个 Execution 内递增，`event_id` 由完整调用归属和 `local_seq` 确定；重传复用原 local_seq、event_id 和内容，服务端按 event_id 去重。
 4. 事件流结束、文件存在、模型完成都不等于 Request 终态；终态以记账成功的 `execution.final` 或 `execution.paused` 为准。
 5. 执行入口返回的事件流由 AgentServer 持续消费到结束，前端断开只结束展示订阅；停止或取消通过 `abort_bound` 发起，不通过关闭事件流（v2 §13 第 12 条）。
 6. 已接收、处理完成、允许发送、渠道送达分别确认。候选群消息或文件引用在服务端授权检查和投递回执前不是公开记录。
@@ -43,7 +43,7 @@ AgentEvent {
 }
 ```
 
-`occurred_at` 只用于展示，排序以服务端队列顺序为准。同一 `event_id` 对应不同负载是冲突，不能覆盖。`visibility` 是建议标签，最终展示由服务端按当前授权和脱敏策略决定。
+`occurred_at` 只用于展示，日志读取按 local_seq 排序，序号缺口只记诊断，不要求全部补齐。同一 `event_id` 对应不同负载是冲突，不能覆盖。`visibility` 是建议标签，最终展示由服务端按当前授权和脱敏策略决定。
 
 `AgentEvent.create(execution, ...)` 从 ExecutionContext 复制归属。`schema_version` 只支持严格整数 1，`local_seq` 为严格正整数；`occurred_at` 必须带时区并转为 UTC。`event_id` 为 `evt_` 加完整归属（含 `source_ref`）和 `local_seq` 的规范 JSON SHA-256；完整提案摘要另覆盖时间、类型、visibility、关联引用和负载。DTO 不分配序号、不保存去重状态。
 
@@ -60,7 +60,7 @@ AgentEvent {
 | `tool.intent` | `operation_id`、`tool_call_id`、工具名、可选目标、参数哈希、脱敏后的可读参数摘要 | 关键（仅写操作） |
 | `tool.completed` | `tool_call_id`、工具名、参数摘要、成功 / 失败 / 未知、结果摘要、结果引用；写操作带对应的 `operation_id` | 只记录 |
 | `window.switched` | 旧窗归档引用、新窗序号 | 只记录 |
-| `output.proposed` | 稳定 `output_id`、目标、候选正文或文件引用、来源依赖 | 只记录 |
+| `output.proposed` | 稳定 `output_id`、目标、候选正文或文件引用、来源依赖 | 只记录（入队后返回；final 成功前检查其引用的候选输出已保存） |
 | `execution.paused` | 暂停原因；等待确认时附被拦截的调用 | 关键 |
 | `execution.final` | `completed / ignored / cancelled / failed`、产物和输出引用 | 关键 |
 
@@ -68,8 +68,8 @@ AgentEvent {
 
 | 端口方法 | 契约 |
 | --- | --- |
-| `record(execution, event) -> None` | 所有事件统一 await record；普通事件入队后返回，调用失败只记诊断并继续；关键事件等此前事件和本事件全部落盘后返回，调用失败停止当前 Execution；前序事件未成功保存时关键屏障不得返回成功 |
-| `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按产生顺序返回该次执行已保存的事件；服务端只允许读取同一 Session、同一 Request 下的执行。读取失败抛异常；续做时读不到或没有事件，按“上一次记录缺失”处理（PA-16） |
+| `record(execution, event) -> None` | 所有事件统一 await record；普通事件入队后返回，失败只记诊断，日志缺失不阻塞关键记账；关键事件等待自身落盘，final 还须确认 output_refs 所引用的候选内容与交接信息已可靠保存，关键调用失败停止当前 Execution |
+| `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按 local_seq 返回该次执行已保存的事件，允许缺口，非空不保证完整；服务端只允许读取同一 Session、同一 Request 下的执行。读取失败抛异常；续做时读不到或没有事件，按“上一次记录缺失”处理（PA-16）；工具结果缺失时先查证 |
 
 执行适配须先对服务端返回的值重新 `model_validate`，再使用。
 
@@ -80,13 +80,13 @@ AgentEvent {
 ```text
 执行入口产出事件 → record() 进入服务端有序队列
   → 普通事件：入队即返回
-  → 关键事件：等此前事件和本事件全部落盘后返回
-  → 服务端按 execution_id 保存，构成执行日志
+  → 关键事件：等自身落盘后返回；final 另查所引用候选输出已保存
+  → 服务端按 execution_id 保存，按 local_seq 返回已有日志，允许缺口
 ```
 
-普通事件的调用失败由执行侧只记诊断并继续，异步保存失败由服务端记诊断，可以重试，但不能跳过失败事件。前序事件（包括曾入队失败的普通事件）未补回、未保存时，关键屏障不得成功返回；关键调用抛异常后执行侧停止当前 Execution。队列由服务端维护，不随 Agent 实例清理而取消。崩溃发生在下一次关键记账成功之前时，尚未落盘的普通事件可能缺失，续做按查证规则处理。
+普通事件的调用失败由执行侧只记诊断并继续，异步保存失败由服务端记诊断，可以重试或跳过，不能卡住后续关键记账。不要求在关键事件前补回所有普通日志。关键事件自身保存失败，或 final 必需的候选输出未保存时，关键调用抛异常，执行侧停止当前 Execution。队列由服务端维护，不随 Agent 实例清理而取消；关键事件成功也不保证前序日志完整。续做时缺少 tool.completed 的写操作先查证，查不清询问发起人，不把缺失记录当作未执行。
 
-正常完成时，`execution.final` 记账成功即表示此前的 `output.proposed` 等事件也已落盘，服务端据此处理候选输出。每项输出有稳定 `output_id`，按 `output_id + target_ref + share_mode` 去重。只有文件结果的任务仍可 `completed`；若要群成员感知文件，`output.proposed` 须携带目标群、文件引用和共享方式（上传群空间，或作为群消息附件 / 可访问引用发送）。文件写入成功不自动形成群公开记录。
+需要交接的候选回复或文件必须列入 final.output_refs。`execution.final` 记账成功时，其引用的候选内容、目标和共享方式已可靠保存，服务端据此处理候选输出；其他普通日志无需全部保存。缺少被引用候选时 final 必须失败，不能删除输出引用后宣告完成。PA-04 / PA-07 可按原 event_id / output_id 重交候选，服务端去重，不重跑业务任务；沿用现有引用字段，不把完整正文加入 final。每项输出按 `output_id + target_ref + share_mode` 去重。只有文件结果的任务仍可 `completed`；若要群成员感知文件，`output.proposed` 须携带目标群、文件引用和共享方式（上传群空间，或作为群消息附件 / 可访问引用发送）。文件写入成功不自动形成群公开记录。
 
 候选可先处于 `pending_check / held`。服务端发送检查与发送前复核通过才允许发送；平台回执才证明送达。投递等待或失败不重开业务 Execution，按原 `output_id` 重试交接。群回复沿相同的事件和结果链路，不允许通过普通 IM 工具绕过当前协作群的发送检查。Agent 停止后的旧候选不因重启自动补发，撤权内容不能继续投递。
 

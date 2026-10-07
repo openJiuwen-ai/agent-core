@@ -14,7 +14,7 @@
 1. **不再按"每一步都必须能从崩溃中恢复"来设计。** 执行中正常记录日志；崩溃后由新的 Execution 读取上一次的日志，让 Agent 自己判断进度并继续。
 2. **删除旧版自建的 Checkpoint，也不使用 agent-core 的 checkpointer。** 跨 Execution 需要保留的状态，由窗口管理按白名单保存为一条"会话状态记录"。
 3. **Persistent Agent 与 AgentServer 分成两部分写。** AgentServer 部分只写"必须保证什么"，不写怎么实现。
-4. **前提假设**：Persistent Agent 运行在 AgentServer 进程内，向服务端直接调用记账接口；所有事件统一 `await record()`；普通事件入队后返回，调用失败只记诊断，关键事件等待落盘，调用失败停止，不设计"结果未知"状态。
+4. **前提假设**：Persistent Agent 运行在 AgentServer 进程内，向服务端直接调用记账接口；所有事件统一 `await record()`；普通日志允许缺失，失败只记诊断，不阻塞后续关键事件；关键事件等待自身落盘，final 还须确认所引用的候选输出已保存，失败停止，不设计记账"结果未知"状态。
 5. **用户确认直接复用 harness 现有的 `PermissionInterruptRail` 和中断恢复机制**，由这件事的发起人在群里点击确认卡片。
 6. **上下文按 Execution 的生命周期管理**：开始时加载窗口，执行中只追加，容量达到 70% 时换窗，结束时保存。不再像旧版那样每次模型调用都重新组装，以保护模型的前缀缓存。
 
@@ -497,25 +497,25 @@ flowchart LR
 | 级别 | 事件 | 处理方式 |
 | --- | --- | --- |
 | **用户确认** | 权限引擎判定为 `ask` 的操作；Agent 主动提问 | 复用中断机制，见第 10 节 |
-| **同步记账** | `tool.intent`（仅限写操作）、`execution.paused`、`execution.final` | 此前事件和本事件全部落盘成功才继续；失败就停止当前执行 |
-| **只记录** | 其他所有事件 | 服务端接收入队后即可继续，不等待落盘；同时构成执行日志 |
+| **同步记账** | `tool.intent`（仅限写操作）、`execution.paused`、`execution.final` | 本事件落盘成功才继续；final 还须确认所引用的候选输出已可靠保存；失败就停止当前执行 |
+| **只记录** | 其他所有事件 | 服务端接收入队后即可继续，不等待落盘；普通日志允许缺失；候选输出的可靠交接单独由 final 保证 |
 
 **唯一持久化通道：** Persistent Agent 对所有事件统一 `await record(event)`；入口返回的事件流只用于实时展示，AgentServer 消费流时不再次保存同一事件。
 
-**事件如何排队：** 同一 Execution 的普通事件和关键事件进入同一个有序队列，按产生顺序保存，关键事件不能越过尚未落盘的前序事件。不同 Execution 可以分别处理；队列由 AgentServer 维护，具体实现由服务端决定。
+**事件如何排队：** 同一 Execution 的事件按产生顺序调用 record，服务端按 local_seq 维护日志顺序，允许序号缺口。普通事件入队或保存失败后可以记诊断并跳过，其重试不得卡住后续关键记账；关键事件不等待无关的前序普通日志全部落盘。不同 Execution 可以分别处理；队列由 AgentServer 维护，具体实现由服务端决定。
 
 | 情况 | 处理方式 |
 | --- | --- |
 | 普通事件 | `record(event)` 在接收入队后返回，由服务端异步保存 |
-| 关键事件 | `record(event)` 等待此前事件和本事件全部落盘后返回；例如 `execution.final` 成功时，前面的 `output.proposed` 已经保存 |
-| 普通事件调用失败 | `record(event)` 抛异常，Agent 只记诊断并继续，不立即停止当前执行 |
+| 关键事件 | `record(event)` 等待本事件落盘后返回；final 还须确认 output_refs 所引用的候选内容及交接信息已可靠保存 |
+| 普通事件调用失败 | `record(event)` 抛异常，Agent 只记诊断并继续；普通日志缺失不导致后续关键事件失败 |
 | 关键事件调用失败 | `record(event)` 抛异常，Agent 停止当前执行 |
-| 保存失败 | 普通事件异步保存失败由服务端记诊断，可以重试，但不能跳过失败事件；前序事件未成功保存时，关键记账调用抛异常，后续关键事件也不能返回成功 |
+| 保存失败 | 普通日志异步保存失败由服务端记诊断，可以重试或跳过，不阻塞后续关键事件；关键事件自身或 final 所引用的候选输出无法保存时，关键记账抛异常 |
 | 实例清理 | 不取消服务端已经接收的事件，队列不随 Agent 实例销毁 |
 
-**屏障仍须完整：** 普通事件调用失败只记诊断，并不意味着可以跳过它。前序普通事件曾入队失败、且尚未补回并成功保存时，关键记账也不得返回成功；关键调用失败后 Agent 停止执行。
+**最终输出单独保障：** 沿用 final 的 output_refs，不在 final 中另加完整候选正文。需要交接的候选回复或文件必须列入 output_refs；AgentServer 在 final 记账成功前确认这些引用对应的候选内容、目标和共享方式已可靠保存。候选缺失时 final 必须失败，不能删除引用后宣告完成。PA-04 / PA-07 可按原 event_id / output_id 补交候选内容，服务端去重；补交失败不能改为重跑业务任务。此要求只覆盖 final 引用的输出，不扩展为所有前序日志的落盘屏障。
 
-**入队不等于落盘。** 在下一次关键记账成功前发生进程崩溃，尚未落盘的普通事件可能缺失；续做仍按第 11.1 节查证结果不明的写操作。`execution.paused` / `execution.final` 记账成功时，此前的执行日志已经保存完整。
+**执行日志尽力保存，不保证完整。** 普通日志即使永久缺失，也不阻塞后续关键事件；无需在关键事件前重发所有失败的普通日志。local_seq 缺口用于日志诊断，不作为关键记账的失败条件。paused 成功只证明本事件已保存；final 成功还证明所引用的候选输出已保存，不能推断全部前序日志完整。续做仍按第 11.1 节查证结果不明的写操作。
 
 **为什么写操作必须先记账：** 防止"写操作已经执行，但没留下任何记录就崩溃了"。执行前登记了意图，续做时就一定能发现这一项没有结果，从而先查证、再决定，而不是盲目重做。
 
@@ -526,14 +526,14 @@ flowchart LR
 | 事件 | 用途 | 级别 |
 | --- | --- | --- |
 | `participation.decided` | 参与判断结果 | 只记录 |
-| `execution.started` | 正式开始，服务端据此生成任务 | 只记录 |
+| `execution.started` | 正式开始及执行目标，用于任务展示 | 只记录 |
 | `progress.updated` | 进度，以及模型在工具调用之间输出的**中间结论**（每条约 500 字以内） | 只记录 |
 | `reply.delta` | 流式回复片段 | 只记录 |
 | `model.completed` | 模型调用及实际用量 | 只记录 |
 | `tool.intent` | 写操作意图：`operation_id`、工具名、目标、参数哈希，以及**可读的参数摘要**（敏感参数脱敏） | **同步记账** |
 | `tool.completed` | **所有工具**的调用结果：工具名、可读的参数摘要、状态（成功 / 失败 / 未知）、**必填的非空白结果摘要**（每条约 500 字以内，成功 / 失败 / 未知均需提供，引用不能替代摘要）、结果引用 | 只记录 |
 | `window.switched` | 换窗：旧窗归档引用、新窗序号 | 只记录 |
-| `output.proposed` | 候选回复或文件交接 | 只记录（随 final 一起由服务端处理） |
+| `output.proposed` | 候选回复或文件交接 | 只记录（入队后返回；final 成功前须可靠保存其引用的候选输出，再由服务端处理） |
 | `execution.paused` | 暂停原因：`awaiting_confirmation / stopped / budget_denied / context_unfit / error`；等待确认时附带被拦截的工具名和参数，供生成卡片 | **同步记账** |
 | `execution.final` | 最终结果：completed / ignored / cancelled / failed | **同步记账** |
 
@@ -561,12 +561,14 @@ PA-22 定义原因枚举和负载校验；PA-04 实现暂停收尾与事件映�
 
 | 方面 | 做法 |
 | --- | --- |
-| 保存 | 所有事件交给 AgentServer，按 `execution_id` 归档，同一 Execution 内按产生顺序保存；关键事件记账成功时，此前事件已经全部落盘 |
-| 用途 | 崩溃后，那次执行的窗口内容已经丢失，执行日志是 Agent 了解"上次做了什么、得到了什么"的**唯一来源** |
+| 保存 | 所有事件交给 AgentServer，按 `execution_id` 归档，读取时按 local_seq 返回已保存事件；普通日志允许缺失，关键记账成功不保证日志完整 |
+| 用途 | 崩溃后，本次未保存的窗口内容可能丢失；结合已保存日志、窗口和归档了解进度，信息缺失时查证，不推断操作未执行 |
 | 读取权限 | 只能读取**同一 Session、同一 Request** 下的执行日志 |
 | 为什么不写本地文件 | 本地文件放在 Agent 工具可访问的位置，模型可以改写（与附录 A 第 17 条冲突）；换机器或沙箱回收后可能丢失；和事件流是两份记录，可能不一致 |
 
 **Agent 怎么看到日志：** 不需要模型自己去查。崩溃续做和非确认暂停后继续的 Execution 开始时，由 Persistent Agent（程序）调用 `read_execution_log(recovery_ref)`，把事件整理成一段简短的执行记录，作为临时背景块追加到窗口末尾。停止清理可能删除没有结果的工具调用，所以即使窗口保存成功，也要读日志，不能只根据窗口判断写操作的进度。
+
+**日志非空也可能不完整。** 缺少 tool.completed 时，已登记的写操作仍按“有意图、无结果”先查证；查不清就询问发起人，不能因为没有结果记录而直接重做。中间结论缺失可能需要重新分析；model.completed 缺失不代替预算端口的用量回报，实际用量仍由 BudgetPort.report 负责。
 
 **整理规则：**
 
@@ -790,7 +792,7 @@ sequenceDiagram
 2. **排队**：同一 Session 的 Request（包括补充消息）串行执行；**有任务等待确认时，Session 阻塞**，直到确认完成或超时。其他暂停不阻塞后续 Request，继续时重新排队。
 3. **Session 的使用方式**：每次执行提供一个新的空 Session，服务端不额外调用 `pre_run / post_run`。原生执行路径仍会调用 Session 生命周期方法，由 PA-04 隔离 checkpointer 的状态恢复和保存；流关闭、取消收敛和资源清理照常，个人版默认行为不变。跨 Execution 的状态只由 `WindowStore` 保存和加载，见第 7.8 节。
 4. **固定配置**：一件事从开始到结束使用同一版本的 Spec（含确认规则），包括确认恢复和续做。
-5. **记账**：同一 Execution 的所有事件按产生顺序进入同一个有序队列；普通事件接收入队后返回，`tool.intent`、`execution.paused`、`execution.final` 等待此前事件和本事件全部落盘后返回。普通事件调用失败只记诊断，关键事件调用失败停止执行；前序事件未保存（包括入队失败后尚未补回）时，不能宣告关键记账成功。record 是唯一持久化通道，入口流只展示。队列由服务端维护，不随 Agent 实例清理而取消；已保存事件按 `execution_id` 可查询。
+5. **记账**：同一 Execution 的事件经 record 顺序提交，服务端按 local_seq 维护已保存日志，允许序号缺口。普通事件接收入队后返回；普通日志入队或保存失败只记诊断，可跳过，不阻塞后续关键记账。`tool.intent`、`execution.paused`、`execution.final` 等待自身落盘后返回；final 还须确认 output_refs 所引用的候选内容与交接信息已可靠保存，否则抛异常，不能确认完成。按 event_id 去重，重交候选内容沿用原 event_id / output_id。record 是唯一持久化通道，入口流只展示；队列不随 Agent 实例清理而取消；已保存事件按 execution_id 查询、按 local_seq 返回，返回非空不保证日志完整。
 6. **群聊记录**：存储群消息，提供最近消息和搜索接口，并按授权过滤（Agent 入群时间、撤回、成员权限）。
 7. **窗口存储后端**：提供持久化的 `BaseKVStore` 实例，并满足第 7.8 节的三条要求；保证 Session 之间的命名空间隔离；按 Agent 配置的保留期清理归档；Agent 或 Session 删除时清空对应数据。服务端不需要理解其中存储的内容。
 8. **确认卡片**：只根据 `execution.paused(awaiting_confirmation)` 生成确认卡片，只发给发起人、只接受发起人点击；点击后调用 `resume_persistent_request`；超时后以"拒绝"调用。
@@ -805,13 +807,15 @@ sequenceDiagram
 | 端口 | 方向 | 操作 | 失败语义 |
 | --- | --- | --- | --- |
 | **窗口存储后端** | Server → Agent（必需注入） | `BaseKVStore`（`set / get / delete / get_by_prefix / delete_by_prefix` 等） | 读写失败按第 7.8 节 `WindowStore` 的失败语义处理 |
-| **群聊记录** `GroupChatPort` | Agent → Server | `recent_messages(group, cursor, limit)`、`search_messages(group, query, 时间范围, 发送者, cursor, limit)` | 区分"确定没有"和"没查完或失败" |
-| **记账** | Agent → Server | `record(event)`：普通事件接收入队后返回；关键事件等待此前事件和本事件全部落盘后返回（第 9.1 节） | 普通事件调用异常：Agent 只记诊断并继续；关键事件调用异常：Agent 停止当前执行；前序未保存时关键屏障不得成功 |
-| **执行日志** | Agent → Server | `read_execution_log(execution_id)`：按产生顺序返回该次执行的全部已保存事件；只允许读取同一 Session、同一 Request 下的执行 | 读不到：续做时提示 Agent "上一次记录缺失"，由 Agent 向发起人确认 |
+| **群聊记录** `GroupChatPort` | Agent → Server | `recent_messages(execution, cursor=None, limit=20)`、`search_messages(execution, query: GroupMessageQuery)`，均返回 `GroupMessagesResult` | 区分"确定没有"和"没查完或失败" |
+| **记账** | Agent → Server | `record(event)`：普通事件接收入队后返回，普通日志缺失不阻塞；关键事件等待自身落盘后返回，final 还须确认所引用的候选输出已可靠保存（第 9.1 节） | 普通日志失败：只记诊断并继续；关键事件自身或必要候选输出保存失败：停止当前执行 |
+| **执行日志** | Agent → Server | `read_execution_log(execution_id)`：按 local_seq 返回该次执行的已保存事件，允许缺口；只允许读取同一 Session、同一 Request 下的执行 | 读不到：提示 Agent "上一次记录缺失"；非空日志也可能不完整，工具结果缺失时先查证，查不清询问发起人 |
 | **预算** | Agent → Server | `admit(model_call_id)`、`report(model_call_id, usage)` | 拒绝准入：不调用模型，产出 `execution.paused(budget_denied)` |
 | **知识** `KnowledgePort` | Agent → Server | 解析授权和知识版本、读取正文（PA-12） | 无权限与不存在要能区分 |
 | **执行与恢复** | Server → Agent | `execute_persistent_request`、`resume_persistent_request`、`abort_bound` | 入口抛异常：服务端按第 13 节核对本次执行的结束记录，符合条件的按第 11.2 节续做；停止与取消按第 10.4 节处理 |
 | **确认规则查询** | Server → Agent | `describe_confirmable_operations(spec)` | — |
+
+`GroupChatPort` 的两个方法均接收 `ExecutionContext`，由 AgentServer 根据其中的 Session 定位对应群并检查授权，不单独传入 `group`。搜索条件统一通过 `GroupMessageQuery` 传入，与 PA-22 的端口契约及 F_04 一致。
 
 `WindowStore` 是本模块的内部组件，不是对外端口（第 7.8 节）。由于有单一执行者保证，它**不需要旧版的版本号、条件更新和 epoch**。
 
@@ -836,7 +840,7 @@ sequenceDiagram
 15. 窗口装满且换窗后最小必要内容仍放不下时，暂停并说明原因，不静默截断。
 16. 不使用 checkpointer；跨执行状态只保存白名单字段，一次写入。
 17. 会话状态记录和归档不能放在 Agent 工具可访问的位置（办公空间、Agent 工具所用的 SysOperation）。
-18. 同一 Execution 的事件按产生顺序保存；关键记账成功时，此前事件和本事件必须全部落盘。
+18. 普通日志允许缺失，不阻塞关键事件；关键事件须保证自身落盘，final 还须保证其引用的候选输出已可靠保存；local_seq 缺口不作为关键记账失败条件。
 19. 崩溃续做与停止后继续统一读取执行日志；带旧中断状态时先补齐工具结果、清除中断状态，正常确认恢复保留中断现场。
 
 ## 附录 B：新旧设计对照
@@ -929,3 +933,5 @@ sequenceDiagram
 | 2026-10-07 | 修正 checkpointer 隔离说明：服务端不额外调用生命周期方法，原生路径仍有 pre_run / commit 等调用，由 PA-04 隔离状态恢复和保存；保留流关闭、取消收敛及资源清理，个人版默认行为不变 | 仅靠服务端不调用不足以阻止原生路径使用 checkpointer；保证跨 Execution 状态只有 WindowStore 一个来源，避免旧记录覆盖和重复保存 |
 | 2026-10-07 | 入口异常由 AgentServer 接住并核对本次 Execution 的结束记录；无 final / paused 且未被主动停止或取消时按崩溃中断续做，不必等服务重启；已有结果保持，续做前确认旧执行退出及清理完成 | 避免记账失败等入口异常使 Request 一直悬着；保留任务已有结局和主动控制语义，不增加恢复流程 |
 | 2026-10-07 | 按审阅确认恢复 D1 原策略：所有事件 await record，普通事件失败只记诊断，关键事件失败停止；前序未保存时屏障仍不能成功；tool.completed 的结果摘要在所有状态下必填 | 对齐用户确认的失败策略，并落实日志续做所需的可读结果摘要，引用不能替代摘要 |
+| 2026-10-07 | 第 14 节群聊端口改为接收 ExecutionContext，由 AgentServer 按 Session 定位群；搜索条件统一使用 GroupMessageQuery，不单独传 group | 同步 PA-22 已实现的端口契约与 F_04 决策，修正设计文档中的旧签名 |
+| 2026-10-07 | 取消全部前序事件落盘屏障：普通日志允许缺失，关键事件保证自身落盘，final 额外确认 output_refs 引用的候选输出已可靠保存；日志允许 local_seq 缺口，续做接受不完整记录并查证 | 避免展示或普通日志丢失阻断业务；保留写操作意图、执行结局与最终输出交接的可靠性；运行实现与验收归 PA-04、PA-07、PA-16、PA-17 和 AgentServer |

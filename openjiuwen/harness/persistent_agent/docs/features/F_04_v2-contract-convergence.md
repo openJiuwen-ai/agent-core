@@ -27,8 +27,8 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 
 | 端口 | 方法 | 约定 |
 | --- | --- | --- |
-| `CommitPort`（必需） | `record(execution, event) -> None` | 所有事件统一 await record；普通事件入队后返回，调用失败只记诊断并继续；`tool.intent`、`execution.paused`、`execution.final` 等此前事件和本事件全部落盘后返回，调用失败停止当前执行。前序事件未保存时屏障不能返回成功（v2 §9.1） |
-| | `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按产生顺序返回该次执行已保存的事件；服务端只允许读取同一 Session、同一 Request 下的执行。读取失败抛异常，没有事件时返回空元组，PA-16 两者都按“上一次记录缺失”处理 |
+| `CommitPort`（必需） | `record(execution, event) -> None` | 所有事件统一 await record；普通事件入队后返回，失败只记诊断，日志缺失不阻塞后续关键记账；`tool.intent`、`execution.paused`、`execution.final` 等本事件落盘后返回，失败停止当前执行；final 还须确认 output_refs 引用的候选输出已可靠保存（v2 §9.1） |
+| | `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按 local_seq 返回该次执行已保存的事件，允许缺口，非空不保证完整；服务端只允许读取同一 Session、同一 Request 下的执行。读取失败抛异常，没有事件时返回空元组，PA-16 两者都按“上一次记录缺失”处理 |
 | `BudgetPort`（必需） | `admit` / `report` | 去掉 `unknown`：准入只有 `admitted / denied`，用量回报只有 `confirmed / rejected`；调用失败抛异常 |
 | 窗口存储后端（必需） | `window_backend: BaseKVStore` | 构造时只检查是否为 `BaseKVStore` 实例，不读写存储；专用 SysOperation 后端不在本期 |
 | `GroupChatPort`（可选） | `recent_messages(execution, cursor, limit)`、`search_messages(execution, query)` | 服务端按执行上下文里的 Session 定位群，不再单独传 `group` 参数。结果区分 `found / empty / incomplete` |
@@ -36,7 +36,9 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 
 删除 `ExecutionAuthority`、`ControlPort`、`ContextStore`、`HistoryPort`、`GroupMaterialPort`。构造时的必需依赖从“执行权 / 提交 / 控制 / 预算”改为“记账 / 预算 / 窗口存储后端”。
 
-`record` 是唯一持久化通道；入口事件流只用于实时展示，服务端消费流时不再次保存同一事件。普通事件失败不立即停止执行，但前序事件未补回、未成功保存时，后续关键记账必须失败，不能跨过缺失事件宣告屏障成功。实际调用与异常处理由 PA-04 实现，服务端队列与屏障由 AgentServer 实现，PA-22 只明确契约。
+`record` 是唯一持久化通道；入口事件流只用于实时展示，服务端消费流时不再次保存同一事件。普通日志允许永久缺失，不要求在关键事件前补回；服务端允许 local_seq 有缺口，普通事件的保存失败或重试不得卡住后续关键记账。日志读取按 local_seq 返回已保存事件，非空日志不代表完整；缺少工具结果时仍按续做规则查证，不推断未执行。
+
+**最终输出单独保障**：本次需要交接的候选输出必须列入 final.output_refs。AgentServer 在 final 记账成功前确认这些候选内容及交接信息已可靠保存；缺失时 final 必须失败，不能删除引用后宣告完成。候选内容可按原 event_id / output_id 重交，服务端去重，不重跑业务任务。沿用现有 FinalPayload 的引用字段，不把完整候选正文加入 final，也不新增事件类型。实际调用与异常处理由 PA-04 实现，候选交接由 PA-07 实现，服务端队列、输出持久化与 final 检查由 AgentServer 实现；PA-22 只明确契约。
 
 ### 3. 事件
 
@@ -81,6 +83,7 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 | PA-22 一并定义会话状态记录和归档结构 | 没有使用方；会在 PA-09、PA-10 确定白名单字段、JSON 字段编码和对象还原规则之前就把格式定死；本项只记录已确认的 JSON / 不使用 pickle 约束 |
 | 预算端口保留 `unknown` | 同进程调用失败直接抛异常，与 v2“不设计结果未知状态”的前提一致 |
 | 把 `CommitPort` 改名为记账或日志端口 | v2 中它仍是“记账”接口，保留名称可以减少无关改动 |
+| 所有关键事件等待全部前序事件落盘 | 流式展示或普通日志缺失会使任务无法完成；改为关键事件保证自身落盘，final 只额外检查所引用的候选输出 |
 
 ## 对契约与状态的影响
 
@@ -111,6 +114,8 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
    - 其余行为不变。
 4. **回归**：PA 包、F_01～F_03 使用的共享回归集、改动范围的 Ruff check 与 format 检查。
 
+后续运行验收（PA-04、PA-07、PA-16、PA-17 与 AgentServer，待实现）：普通事件入队失败或异步保存失败后，后续 tool.intent / paused / final 不因日志缺口失败；tool.intent 保存失败时不执行写操作；final 引用的候选输出未保存时不得完成，按原标识补交成功后不重复投递；已有 tool.intent 而 tool.completed 缺失时，续做先查证，不盲目重做。
+
 实际结果：
 
 | 验证 | 结果 |
@@ -123,7 +128,9 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 
 构造测试用一个所有读写方法都抛错的 `BaseKVStore` 替身作为窗口存储后端，证明构造过程不读写存储；绑定测试使用 `InMemoryKVStore`。
 
-2026-10-07 审阅修订：恢复 D1 原失败策略并保留关键事件屏障；`tool.completed.result_summary` 在三种结果状态下均必填，增加 12 项缺省、空值、空白摘要及 JSON 往返用例。PA 包与共享回归合计 386 passed。记账异常处理与服务端队列不在本项实现范围。
+2026-10-07 首次审阅修订：恢复 D1 原失败策略，当时保留全部前序落盘屏障（该屏障已被下述新决策取代）；`tool.completed.result_summary` 在三种结果状态下均必填，增加 12 项缺省、空值、空白摘要及 JSON 往返用例。PA 包与共享回归合计 386 passed。记账异常处理与服务端队列不在本项实现范围。
+
+2026-10-07 后续确认：普通日志允许缺失，不阻塞关键事件；关键事件等待自身落盘，final 额外确认所引用候选输出已可靠保存。同步端口说明、v2 设计、相关 spec 和计划；事件结构及函数签名不变。既有 PA 包 173 passed，Ruff check / format 通过；本次未新增运行代码，运行行为与上述场景仍待对应 PA 和 AgentServer 实现验收。
 
 ## 已知遗留
 
