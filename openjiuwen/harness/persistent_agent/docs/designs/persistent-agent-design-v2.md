@@ -3,18 +3,18 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 | 目标设计草案；标注"已实现"的部分以代码为准，其余均为拟议 |
-| 最近一次修订日期 | 2026-10-04 |
+| 最近一次修订日期 | 2026-10-07 |
 | 关联模块 | `openjiuwen.harness.persistent_agent` |
 | 设计概览 | [Persistent Agent 设计概览](persistent-agent-overview.md)（目标与原则不变） |
 | 旧版详细设计 | [persistent-agent-architecture.md](persistent-agent-architecture.md)（保留不改，本文替代其作为详细设计讨论稿） |
-| 开发计划 | [persistent-agent-development-plan.md](persistent-agent-development-plan.md) |
+| 开发计划 | [persistent-agent-development-plan-v2.md](persistent-agent-development-plan-v2.md) |
 
 **本文与旧版的核心区别**（详见附录 B）：
 
 1. **不再按"每一步都必须能从崩溃中恢复"来设计。** 执行中正常记录日志；崩溃后由新的 Execution 读取上一次的日志，让 Agent 自己判断进度并继续。
 2. **删除旧版自建的 Checkpoint，也不使用 agent-core 的 checkpointer。** 跨 Execution 需要保留的状态，由窗口管理按白名单保存为一条"会话状态记录"。
 3. **Persistent Agent 与 AgentServer 分成两部分写。** AgentServer 部分只写"必须保证什么"，不写怎么实现。
-4. **前提假设**：Persistent Agent 运行在 AgentServer 进程内，向服务端记账是同步调用，失败就停止，不设计"结果未知"状态。
+4. **前提假设**：Persistent Agent 运行在 AgentServer 进程内，向服务端直接调用记账接口；普通事件入队后返回，关键事件等待落盘，调用失败就停止，不设计"结果未知"状态。
 5. **用户确认直接复用 harness 现有的 `PermissionInterruptRail` 和中断恢复机制**，由这件事的发起人在群里点击确认卡片。
 6. **上下文按 Execution 的生命周期管理**：开始时加载窗口，执行中只追加，容量达到 70% 时换窗，结束时保存。不再像旧版那样每次模型调用都重新组装，以保护模型的前缀缓存。
 
@@ -90,7 +90,7 @@ flowchart LR
     subgraph S["AgentServer（同一进程）"]
         Q["接收、排队、调度"]
         G["群聊记录"]
-        WS["窗口存储后端<br/>KV / 专用文件系统"]
+        WS["窗口存储后端<br/>BaseKVStore"]
         B["预算账户"]
         R["记账与执行日志"]
         D["发送与投递"]
@@ -122,9 +122,9 @@ flowchart LR
 | --- | --- |
 | 收消息，判定属于哪个 Session，排队 | 接到指定的一件事，然后执行 |
 | **保证同一 Session 同时只有一个执行者** | 一个实例只绑定一个 Session 和一次 Execution |
-| 每次执行提供一个新的空 Session (runtime)，不调用 `pre_run / post_run` | 自己加载和保存会话状态记录 |
+| 每次执行提供一个新的空 Session (runtime)，服务端不额外调用 `pre_run / post_run` | 由 PA-04 隔离原生执行路径的 checkpointer 状态读写，自己加载和保存会话状态记录 |
 | 存储群聊记录，提供最近消息和搜索接口 | 执行开始时取最近消息作为背景；执行中按需搜索 |
-| 提供窗口存储后端（`BaseKVStore` 或专用的持久化文件系统），负责命名空间隔离、保留期和删除 | 实现窗口存储（`WindowStore`）：会话状态记录和归档的格式、读写与检索；决定窗口内容、何时换窗 |
+| 提供窗口存储后端（`BaseKVStore`），负责命名空间隔离、保留期和删除 | 实现窗口存储（`WindowStore`）：会话状态记录和归档的格式、读写与检索；决定窗口内容、何时换窗 |
 | 预算账户：预占、结算 | 每次调模型前申请额度，调用后回报实际用量 |
 | 保存事件和执行日志 | 产出事件；关键事件等待记账成功后再继续 |
 | 向发起人展示确认卡片，鉴别点击人身份，回调恢复入口 | 关键操作前中断并给出确认内容，恢复后继续或跳过 |
@@ -161,6 +161,8 @@ execute_persistent_request(spec, context, inputs) -> AsyncIterator[AgentEvent]
 resume_persistent_request(spec, context, confirm_reply) -> AsyncIterator[AgentEvent]
 ```
 
+两个入口返回的事件流由 AgentServer 持有并持续消费，直到流结束或明确抛出异常；收到 `final` 或 `paused` 后仍继续消费，让执行入口完成收尾和资源清理。前端只订阅服务端转发的展示通道，断开只结束订阅，见第 13 节。
+
 | 入口 | 用于 | 调用方 |
 | --- | --- | --- |
 | `execute_persistent_request` | 新的 Request、崩溃续做、停止后继续 | AgentServer 调度 |
@@ -170,7 +172,7 @@ resume_persistent_request(spec, context, confirm_reply) -> AsyncIterator[AgentEv
 
 1. `create_persistent_agent(spec, context)`：构造实例；
 2. （仅 `execute`，且为群消息）参与判断（第 6 节）；选择忽略的直接结束；
-3. **加载会话状态记录**，写回 Session state（第 7.8 节）；`execute` 在窗口末尾追加本次执行信息（第 7.4 节），`resume` 不追加任何内容；
+3. **加载会话状态记录**，写回 Session state（第 7.8 节）；崩溃续做与停止后继续先处理旧中断状态、读取执行日志，再追加本次执行信息（第 11.2 节）；新的 Request 按第 7.4 节追加，`resume` 保留中断状态，不追加任何内容；
 4. `stream_bound(...)`：运行 DeepAgent（`resume` 以卡片回复作为恢复输入），把原生流式输出映射成 `AgentEvent`；执行中需要时换窗（第 7.6 节）；
 5. **整理窗口 → 保存会话状态记录 → 记账 `paused` / `final`**，顺序固定（第 7.7 节）；再调用 `close_bound` 清理资源。
 
@@ -301,11 +303,12 @@ flowchart LR
 | --- | --- | --- | --- |
 | **新的 Request** | 类型为"新任务" | 最近群消息（含被忽略的消息）、知识导航 | 用户的新请求 |
 | **确认恢复** | **不追加**（执行信息记在结束标记里） | **不追加** | 卡片回复**作为中断恢复的输入**，不作为消息 |
-| **崩溃续做** | 类型为"续做"，注明上一次的 `execution_id` | 上一次的执行日志，以及按其 `execution_id` 查到的归档引用 | **重新注入原任务输入**（它在没保存的那一段里） |
-| **停止后继续** | 类型为"停止后继续" | 停止期间新增的群消息 | 继续的指示 |
+| **崩溃续做、非确认暂停后继续** | 类型为"续做"，注明 `recovery_ref` 指向的 `execution_id` | 最近群消息、知识导航，以及该次执行的日志和归档引用 | **重新注入原任务输入**，有继续指示时一并追加 |
 | **群消息参与判断** | 不加载窗口，见第 6 节 | — | — |
 
 **确认恢复为什么不追加任何内容：** 等待确认时，窗口末尾是模型发起、还在等结果的工具调用。按模型协议，工具结果必须紧跟在工具调用后面，中间插入任何消息都会被模型 API 拒绝。
+
+**续做为什么要先处理旧中断状态：** 确认恢复后如果崩溃，加载到的可能仍是更早的等待确认记录；必须先补齐悬空工具结果、清除过期中断状态，再追加执行头和背景，不能直接把日志插在工具调用后面。正常确认恢复不做这个处理，见第 11.2 节。
 
 **其他规则：**
 
@@ -344,7 +347,7 @@ flowchart LR
 | **当前的执行头和任务输入** | **重新注入**，因为原来那份已随旧窗换出 |
 | 最近几轮原文 | 保证工具调用和结果完整成对 |
 
-如果新窗的最小必要内容仍然放不下，暂停并说明原因，不静默截断。
+如果新窗的最小必要内容仍然放不下，产出 `execution.paused(context_unfit)` 并说明原因，不静默截断。
 
 **旧窗持久化**，不能只作为当前 Execution 的临时文件，原因有三：
 
@@ -379,7 +382,7 @@ flowchart LR
 | **临时背景块** | **删除** | 群消息和知识导航下次会重新注入最新版本；续做日志用完即失效 |
 | 用户输入、确认结果 | 保留 | 对话事实 |
 | 模型回复、工具调用和结果 | 保留；可以重新获取的大结果换成来源引用 | 工作过程，后续 Request 可能用到 |
-| **执行结束标记** | **新增** | 简短记录：结局（完成 / 暂停等待确认 / 取消 / 失败 / 被停止）、交出的产物、本次看到的最后一条群消息 ID |
+| **执行结束标记** | **新增** | 简短记录：结局（完成 / 暂停并注明原因 / 取消 / 失败）、交出的产物、本次看到的最后一条群消息 ID |
 
 **等待确认时的特殊规则：** 末尾那个等待结果的工具调用**一律不动**，结束标记记在会话状态记录的元信息里，不追加到窗口中。临时背景块在工具调用之前，可以照常删除。
 
@@ -390,6 +393,7 @@ flowchart LR
 | 完成、取消、失败 | 保存 |
 | 暂停等待确认 | 保存，并包含中断状态 |
 | 被停止 | 保存（取决于停止路径能否拿到上下文，见附录 C） |
+| 预算不足、容量不足、可恢复错误导致的暂停 | 保存 |
 | 参与判断后忽略 | 没有写入窗口，无需保存 |
 | 崩溃 | 无法保存，靠执行日志续做 |
 
@@ -401,7 +405,11 @@ flowchart LR
 - checkpointer 保存的是整个 Session state，如果再由窗口管理另存一份当前窗口，就会出现两份上下文，加载时不知道以哪份为准；
 - 默认的内存实现重启即丢失，而且数据格式完全跟随 core 内部实现。
 
-**做法：** AgentServer 每次执行都提供**新的空 Session**，并且**不调用** `pre_run / post_run`，因此 checkpointer 不参与。窗口管理在执行开始时把会话状态记录写回 Session state，结束时按白名单取出、整理后保存。
+**做法：** AgentServer 每次执行都提供**新的空 Session**，服务端不额外调用 `pre_run / post_run`。跨 Execution 的状态只由窗口管理（`WindowStore`）保存和加载：执行开始时把会话状态记录写回 Session state，结束时按白名单取出、整理后保存。
+
+**服务端不调用，不等于原生执行路径不调用。** ReAct 流式路径仍会调用 `pre_run` 和 `commit`（[react_agent.py:2984](../../../../core/single_agent/agents/react_agent.py:2984)、[react_agent.py:3050](../../../../core/single_agent/agents/react_agent.py:3050)），进入 checkpointer 的恢复和保存逻辑。新的空 Session 仍可能按 Session ID 读回旧记录，覆盖 `WindowStore` 加载的状态。
+
+**执行路径隔离（PA-04，待实现）：** 正常结束、确认暂停与恢复、取消、停止、异常和提前关闭流时，都不从 checkpointer 恢复、也不向其保存 Session 状态；流关闭、取消收敛和资源清理照常执行，个人版默认行为不变。具体隔离方式在 PA-04 的特性设计中确定。
 
 | Session state 字段 | 作用 | 什么时候存 |
 | --- | --- | --- |
@@ -421,20 +429,21 @@ flowchart LR
 
 这样划分的原因：记录里存的是 ContextEngine 上下文和 ReAct 中断状态等 agent-core 内部格式，检索也要理解消息结构，这些应由本模块掌握；而存储基础设施本来就由服务端运维。本模块可以用内存实现的后端完成全部单元测试。
 
-**存储后端（二选一，由服务端决定）：**
+**存储后端（本期只支持 `BaseKVStore`）：**
 
 | 后端 | 适用场景 | 要求 |
 | --- | --- | --- |
-| [`BaseKVStore`](../../../../core/foundation/store/base_kv_store.py)（默认） | 服务端已有 Redis 或数据库 | 服务端注入实例 |
-| 专用的 SysOperation 文件系统 | 服务端希望统一使用远程文件存储 | **单独创建一个实例**，不注册给 Agent 的工具使用；指向持久化的存储根目录，不使用会被回收的沙箱容器 |
+| [`BaseKVStore`](../../../../core/foundation/store/base_kv_store.py) | 服务端通过统一 KV 接口提供 Redis、数据库等存储实现 | 服务端注入实例，保证持久化和隔离 |
 
-**无论哪种后端，都必须满足三条：**
+窗口存储后端是必需依赖，构造时检查其符合 `BaseKVStore` 契约，不读取或写入存储。接口类型符合不等于数据持久化，跨重启保存由服务端提供的具体实现保证；内存后端只用于测试。专用 SysOperation 文件系统后端不在本期开发和验收范围。
+
+**后端必须满足三条：**
 
 1. **Agent 的工具访问不到**：不在办公空间里，也不在 Agent 工具所用的 SysOperation 里。否则模型可以改写中断状态或"本会话记住"的选择，绕过发起人确认。
 2. **持久化**：跨 Request、跨重启都在。沙箱是计算环境，容器会按配置回收，不能用作窗口存储。
-3. **会话状态记录一次写入**：KV 的 `set`、文件的 `write_file` 写整条记录。
+3. **会话状态记录一次写入**：用 `set` 写整条记录。
 
-**键的设计（以 KV 为例，由本模块定义）：**
+**键的设计（由本模块定义）：**
 
 | 键 | 内容 |
 | --- | --- |
@@ -488,8 +497,20 @@ flowchart LR
 | 级别 | 事件 | 处理方式 |
 | --- | --- | --- |
 | **用户确认** | 权限引擎判定为 `ask` 的操作；Agent 主动提问 | 复用中断机制，见第 10 节 |
-| **同步记账** | `tool.intent`（仅限写操作）、`execution.paused`、`execution.final` | 记账成功才继续；失败就停止当前执行 |
-| **只记录** | 其他所有事件 | 发出即可，不阻塞执行；同时构成执行日志 |
+| **同步记账** | `tool.intent`（仅限写操作）、`execution.paused`、`execution.final` | 此前事件和本事件全部落盘成功才继续；失败就停止当前执行 |
+| **只记录** | 其他所有事件 | 服务端接收入队后即可继续，不等待落盘；同时构成执行日志 |
+
+**事件如何排队：** 同一 Execution 的普通事件和关键事件进入同一个有序队列，按产生顺序保存，关键事件不能越过尚未落盘的前序事件。不同 Execution 可以分别处理；队列由 AgentServer 维护，具体实现由服务端决定。
+
+| 情况 | 处理方式 |
+| --- | --- |
+| 普通事件 | `record(event)` 在接收入队后返回，由服务端异步保存 |
+| 关键事件 | `record(event)` 等待此前事件和本事件全部落盘后返回；例如 `execution.final` 成功时，前面的 `output.proposed` 已经保存 |
+| 入队失败 | `record(event)` 抛异常，Agent 停止当前执行 |
+| 保存失败 | 服务端可以重试，但不能跳过失败事件；重试仍失败时，等待中的关键记账调用抛异常，后续关键事件也不能返回成功 |
+| 实例清理 | 不取消服务端已经接收的事件，队列不随 Agent 实例销毁 |
+
+**入队不等于落盘。** 在下一次关键记账成功前发生进程崩溃，尚未落盘的普通事件可能缺失；续做仍按第 11.1 节查证结果不明的写操作。`execution.paused` / `execution.final` 记账成功时，此前的执行日志已经保存完整。
 
 **为什么写操作必须先记账：** 防止"写操作已经执行，但没留下任何记录就崩溃了"。执行前登记了意图，续做时就一定能发现这一项没有结果，从而先查证、再决定，而不是盲目重做。
 
@@ -508,10 +529,24 @@ flowchart LR
 | `tool.completed` | **所有工具**的调用结果：工具名、可读的参数摘要、状态（成功 / 失败 / 未知）、**简短结果摘要**（每条约 500 字以内）、结果引用 | 只记录 |
 | `window.switched` | 换窗：旧窗归档引用、新窗序号 | 只记录 |
 | `output.proposed` | 候选回复或文件交接 | 只记录（随 final 一起由服务端处理） |
-| `execution.paused` | 暂停：等待确认（附带被拦截的工具名和参数，供生成卡片）、被停止或出错 | **同步记账** |
+| `execution.paused` | 暂停原因：`awaiting_confirmation / stopped / budget_denied / context_unfit / error`；等待确认时附带被拦截的工具名和参数，供生成卡片 | **同步记账** |
 | `execution.final` | 最终结果：completed / ignored / cancelled / failed | **同步记账** |
 
 与已实现的代码相比：删除 `checkpoint.proposed`；`window.activated` 改为 `window.switched`；`control.waiting` 与 `execution.suspended` 合并为 `execution.paused`。见附录 E。
+
+**暂停原因（固定枚举）：**
+
+| 原因 | 含义 |
+| --- | --- |
+| `awaiting_confirmation` | 等待发起人确认，保留中断现场 |
+| `stopped` | 被主动停止，需要明确要求继续 |
+| `budget_denied` | 模型额度准入被拒，本次不调用模型 |
+| `context_unfit` | 换窗后最小必要内容仍无法放入上下文 |
+| `error` | 可恢复的异常导致执行暂停，条件恢复后仍可接续原任务 |
+
+`execution.paused` 结束当前 Execution，原 Request 仍可接续；继续方式见第 11 节。**`paused(error)` 与 `final(failed)` 按任务是否仍可接续区分**：例如模型服务持续不可用、恢复后还能继续原任务，用 `paused(error)`；已确定原任务无法完成、需要结束并告知用户，用 `final(failed)`。
+
+PA-22 定义原因枚举和负载校验；PA-04 实现暂停收尾与事件映射，非确认暂停后的继续复用 PA-17 的统一流程。
 
 崩溃续做查找归档**不依赖 `window.switched` 事件**，而是直接按 `execution_id` 查询窗口存储（第 7.6 节）。
 
@@ -521,12 +556,12 @@ flowchart LR
 
 | 方面 | 做法 |
 | --- | --- |
-| 保存 | 所有事件交给 AgentServer，按 `execution_id` 归档 |
+| 保存 | 所有事件交给 AgentServer，按 `execution_id` 归档，同一 Execution 内按产生顺序保存；关键事件记账成功时，此前事件已经全部落盘 |
 | 用途 | 崩溃后，那次执行的窗口内容已经丢失，执行日志是 Agent 了解"上次做了什么、得到了什么"的**唯一来源** |
 | 读取权限 | 只能读取**同一 Session、同一 Request** 下的执行日志 |
 | 为什么不写本地文件 | 本地文件放在 Agent 工具可访问的位置，模型可以改写（与附录 A 第 17 条冲突）；换机器或沙箱回收后可能丢失；和事件流是两份记录，可能不一致 |
 
-**Agent 怎么看到日志：** 不需要模型自己去查。崩溃续做的 Execution 开始时，由 Persistent Agent（程序）调用 `read_execution_log(上一次的 execution_id)`，把事件整理成一段简短的执行记录，作为临时背景块追加到窗口末尾。
+**Agent 怎么看到日志：** 不需要模型自己去查。崩溃续做和非确认暂停后继续的 Execution 开始时，由 Persistent Agent（程序）调用 `read_execution_log(recovery_ref)`，把事件整理成一段简短的执行记录，作为临时背景块追加到窗口末尾。停止清理可能删除没有结果的工具调用，所以即使窗口保存成功，也要读日志，不能只根据窗口判断写操作的进度。
 
 **整理规则：**
 
@@ -566,7 +601,7 @@ flowchart LR
 
 | 环节 | 做法 |
 | --- | --- |
-| **卡片内容** | 服务端根据 `execution.paused` 中被拦截的工具名和参数生成卡片；rail 默认的提示语不直接展示给用户 |
+| **卡片内容** | 服务端只根据 `execution.paused(awaiting_confirmation)` 中被拦截的工具名和参数生成确认卡片；rail 默认的提示语不直接展示给用户 |
 | **卡片选项** | **同意 / 同意并本会话记住 / 拒绝（可附反馈）**，对应 `ConfirmPayload`。不提供"永久允许"：全局规则由服务端通过 Spec 发布，不能被一次点击改写，因此服务端也不提供 `persist_allow_rule` 回调 |
 | **谁能点** | 只有这件事的发起人；服务端鉴别点击人身份，其他人的点击无效 |
 | **恢复** | 服务端回调 `resume_persistent_request`，传入卡片回复；新实例放回会话状态记录，以回复作为恢复输入调用 DeepAgent。**不往窗口追加任何消息** |
@@ -598,25 +633,37 @@ flowchart LR
 | 取消这件事 | `abort_bound` | 保存会话状态记录，`execution.final(cancelled)`；已发生的外部效果不自动撤销 |
 | 停止 Agent | 对所有活动执行调用 `abort_bound` | 保存会话状态记录，`execution.paused(stopped)`；重启后**不自动续做**，需要明确继续或结束 |
 
+**被停止的任务不阻塞后续 Request。** Agent 重新接收任务后，同一 Session 可以先做其他事情，再明确继续原任务；继续时加载的仍是 Session 最新窗口，不回退到停止时的旧窗口。等待确认的任务仍按第 10.2 节阻塞 Session。
+
 **补充消息一律作为新的 Request。** 张三在 Q1 执行过程中说"只算本月的"，这条消息按普通 Request 排队；等 Q1 结束后，Agent 结合当前窗口和历史归档，自己判断它是对 Q1 的补充还是一件新事情。不使用 DeepAgent 的 `follow_up / steer`。代价是补充信息无法作用于正在执行的任务，必要时 Agent 会修改上一件事的结果。
 
-## 11. 三种"继续执行"
+## 11. 继续执行
 
-| | 确认恢复 | 崩溃续做 | 停止后继续 |
+| | 确认恢复 | 崩溃续做 | 非确认暂停后继续 |
 | --- | --- | --- | --- |
-| **性质** | 计划内的暂停 | 计划外的中断 | 人为叫停 |
-| **触发** | 发起人点击卡片，或确认超时 | 服务端重启后自动发起 | 必须有人明确要求继续 |
-| **现场** | **完整保存**：窗口和中断状态在同一条记录里 | **没有保存**：会话状态记录停在本次执行开始前 | 窗口保存到停止那一刻，但没有中断点 |
-| **从哪里继续** | 精确地从被拦截的工具调用继续 | Agent 读执行日志，自己判断进度 | Agent 根据窗口内容判断下一步 |
-| **入口** | `resume_persistent_request` | `execute_persistent_request`，`recovery_ref` 指向崩溃的那次执行 | `execute_persistent_request`，执行头标明"停止后继续" |
-| **是否读执行日志** | 不需要 | **需要** | 一般不需要 |
-| **复用的机制** | harness 中断恢复 | 执行日志 + 续做规则 | 已保存的窗口 |
+| **性质** | 计划内的暂停 | 计划外的中断 | 主动停止、预算或容量限制、可恢复错误 |
+| **触发** | 发起人点击卡片，或确认超时 | 服务端重启后自动发起 | 主动停止须明确要求继续；其余原因可明确继续，或由服务端确认条件恢复后发起 |
+| **现场** | **完整保存**：窗口和中断状态在同一条记录里 | 加载最后保存的记录，可能仍带有更早的中断状态 | 加载最新记录；暂停时保存失败或中间执行其他任务时，现场可能不完整 |
+| **从哪里继续** | 精确地从被拦截的工具调用继续 | Agent 根据最新窗口、执行日志和归档判断进度 | 与崩溃续做相同 |
+| **入口** | `resume_persistent_request` | `execute_persistent_request`，`recovery_ref` 指向待续做的执行 | 与崩溃续做相同 |
+| **是否读执行日志** | 不需要 | **需要** | **需要** |
+| **复用的机制** | harness 中断恢复 | 最新窗口 + 执行日志 + 续做规则 | 与崩溃续做相同 |
 
 "轮与轮之间"（上一件事正常结束，下一件事开始）不属于以上任何一种，只是正常加载窗口。
 
-### 11.1 崩溃续做规则
+### 11.1 续做触发与规则
 
-**触发（简单方案）：** 服务端重启后，对所有"已派发、但既没有 `final` 也没有 `paused`"的 Request **自动续做**，不按停机时长区分，也不额外询问用户。被停止的任务不在此列。
+**触发（简单方案）：** 服务端重启后，对最近一次已派发的 Execution 既没有 `final` 也没有 `paused`、且未被主动停止的 Request **自动续做**，不按停机时长区分，也不额外询问用户。被停止的任务不在此列。
+
+**入口异常不必等服务重启。** 执行或确认恢复入口抛出异常（包括记账失败）时，服务端核对**本次 Execution** 已成功落盘的结束记录：已有 `final` 或 `paused`，保留结果并按对应状态处理；没有结束记录、且原任务未被主动停止或取消，按崩溃中断处理，沿用原 Request，走第 11.2 节。主动停止或取消按第 10.4 节处理，不能因收尾异常自动续做。
+
+**续做时机由 AgentServer 决定。** 安排新的 Execution 前，必须确认旧 Execution 已退出、相关清理完成，保证同一 Session 仍只有一个执行者；`recovery_ref` 指向本次异常中断的执行。已落盘 `final` 后清理报错，不能因此重新执行已完成任务。
+
+停止后继续必须有人明确要求；停止事实由 AgentServer 保存，即使停止时保存窗口或暂停记账失败，也不因此自动续做。
+
+`budget_denied / context_unfit / error` 暂停后，可以明确要求继续，或由服务端确认对应条件恢复后发起。判断与调度由 AgentServer 自行设计，条件未变化时不反复自动续做，不能仅因服务重启就再次执行。
+
+**非确认暂停不阻塞后续 Request。** 继续时重新排队，沿用原 Request；崩溃续做和所有非确认暂停后继续都走第 11.2 节，不增加新的入口或 `continuation` 字段。`awaiting_confirmation` 仍阻塞 Session，走第 10.2 节的原生确认恢复。
 
 **续做规则（写入提示词）：**
 
@@ -626,7 +673,28 @@ flowchart LR
 
 **代价：** 进度是"尽力记录"，不是"已确认"。最坏情况是部分只读步骤被重做，多花一些 token；写操作有意图记账兜底，不会被悄悄重复执行。
 
-**已知风险：** 崩溃检测依赖服务端重启后的扫描。如果进程卡死而不是退出，服务端不会触发续做；一旦人工另起执行，可能出现两个执行者。这属于跨进程部署要解决的问题（附录 C）。
+**已知风险：** 进程崩溃后的发现仍依赖服务端重启扫描，入口异常可按上述规则直接处理。如果进程卡死而没有退出或抛出异常，服务端不会触发续做；一旦人工另起执行，可能出现两个执行者。这属于跨进程部署要解决的问题（附录 C）。
+
+### 11.2 崩溃续做与非确认暂停后继续的统一流程
+
+**恢复引用：** `recovery_ref` 指向同一 Session、同一 Request 下本次要接续的 Execution，由 AgentServer 根据原任务的执行记录填写。继续过后再次暂停或异常中断，下次引用更新为该任务最近一次待接续的执行，不能取 Session 中其他任务的执行。新的 Request 或尚未执行过的任务没有恢复引用；续做时无法定位引用的，先按"上一次记录缺失"处理，不猜造 ID，也不当作新任务直接重做。
+
+**步骤（顺序固定）：**
+
+1. 沿用原 Request，由 AgentServer 提供新的 `execution_id`、原 Request 的 Spec 和 `recovery_ref`。
+2. 加载 **Session 最新的会话状态记录**，写回新的空 Session。即使暂停期间执行过其他任务，也不加载原任务的旧窗口。
+3. **如果加载的记录带有中断状态，先处理过期现场**：为窗口里每个缺少结果的工具调用补一条匹配 `tool_call_id` 的工具结果，说明"上次执行已中断，实际结果需结合执行日志查证"；已有真实结果原样保留，不重复补齐。然后清掉 `__react_agent_interruption__`，保留已保存的 `__interrupt_auto_confirm__`。
+4. 调用 `read_execution_log(recovery_ref)`，并按该 `execution_id` 查询归档，按第 9.3 节整理进度；日志读不到时明确提示"上一次记录缺失"，由 Agent 向发起人确认。
+5. 在窗口末尾追加续做执行头（含 `recovery_ref` 指向的执行 ID）、临时背景块和原任务输入；有用户的继续指示时一并追加。
+6. 调用 DeepAgent，**先由模型按续做规则判断进度**。其他任务可能改变了文件或外部状态，需要重新查证；"已登记意图、无结果"的写操作不能直接重做。
+
+**为什么清除旧中断状态：** E1 等待确认时保存的记录包含中断状态；E2 收到同意后可能已经执行写操作，但在保存新记录前崩溃，E3 加载到的仍是 E1 的记录。原生 ReAct 发现中断状态后，会先恢复保存的工具调用，再进入模型循环（[react_agent.py:2654](../../../../core/single_agent/agents/react_agent.py:2654)、[handler.py:334](../../../../core/single_agent/interrupt/handler.py:334)）。若不先处理，日志里的"结果不明先查证"来不及生效；会话内已记住的授权还可能让旧调用直接放行。
+
+**补结果只修复上下文，不代表工具执行成功或失败。** 不把这条说明记成实际工具执行的 `tool.completed`，真实进度以执行日志和查证结果为准。会话授权保留，但是否需要执行某个操作仍由续做规则判断。
+
+**正常确认恢复不做第 3 步。** `resume_persistent_request` 保留中断现场，以卡片回复交给原生恢复；没有崩溃时，恢复执行正常保存的新记录会覆盖旧记录。不能仅因加载到中断状态就清除它。
+
+这部分由 PA-17 实现，在 M2c 验收；PA-22 只保留恢复引用和日志读取契约，不实现续做行为。
 
 ## 12. 关键流程
 
@@ -688,8 +756,9 @@ sequenceDiagram
     participant A as DeepAgent
     H->>H: 重启后扫描：已派发、无 final 也无 paused 的 Request
     H->>E: 同一 Request，新 execution_id，recovery_ref = 崩溃的那次执行
-    E->>H: 读取那次执行的日志
-    E->>M: 加载会话状态记录（崩溃前最后一次保存的版本）
+    E->>M: 加载 Session 最新会话状态记录
+    M->>M: 若有旧中断状态，补齐悬空工具结果并清除状态<br/>保留会话授权
+    E->>H: 读取 recovery_ref 指向的执行日志
     M->>H: 按崩溃那次的 execution_id 查询归档
     M->>M: 末尾追加：续做执行头、执行日志、归档引用、原任务输入
     E->>A: 运行
@@ -699,9 +768,10 @@ sequenceDiagram
 
 ### 12.5 停止后继续
 
-1. 停止时，服务端对活动执行调用 `abort_bound`；Persistent Agent 尽量保存会话状态记录，记账 `paused(stopped)`。
-2. 重启后不自动续做。有人明确要求继续时，服务端调用 `execute_persistent_request`，执行头标明"停止后继续"。
-3. Agent 根据窗口内容判断下一步；如果停止时没能保存窗口，就退化为崩溃续做，读取执行日志。
+1. 停止时，服务端记录原任务的停止事实，再对活动执行调用 `abort_bound`；Persistent Agent 尽量保存会话状态记录，记账 `paused(stopped)`。停止收尾失败也不自动续做。
+2. 被停止的任务退出活动队列，保留待继续状态；同一 Session 可以执行其他 Request。有人明确要求继续时，服务端先关联到原 Request：卡片可以直接携带 `request_id`；自然语言指示可以用独立的轻量模型调用，根据停止任务的列表和摘要匹配，无法确定时向用户澄清。
+3. 服务端校验目标 Request 的 Session 归属和状态，取该任务最近一次待接续的 Execution 作为 `recovery_ref`，沿用原 Request 创建新的 Execution，调用 `execute_persistent_request`。
+4. 按第 11.2 节统一流程加载最新窗口、处理旧中断状态、读取日志和归档，再追加续做信息。停止时保存成功或失败都走这个流程，不只根据窗口判断进度。
 
 ---
 
@@ -712,28 +782,30 @@ sequenceDiagram
 ## 13. AgentServer 必须保证的事
 
 1. **单一执行者**：同一 Session 同时只有一个活动 Execution。这是会话状态记录不需要并发控制的前提。
-2. **排队**：同一 Session 的 Request（包括补充消息）串行执行；**有任务等待确认时，Session 阻塞**，直到确认完成或超时。
-3. **Session 的使用方式**：每次执行提供一个新的空 Session，**不调用 `pre_run / post_run`**，不让 checkpointer 参与。
+2. **排队**：同一 Session 的 Request（包括补充消息）串行执行；**有任务等待确认时，Session 阻塞**，直到确认完成或超时。其他暂停不阻塞后续 Request，继续时重新排队。
+3. **Session 的使用方式**：每次执行提供一个新的空 Session，服务端不额外调用 `pre_run / post_run`。原生执行路径仍会调用 Session 生命周期方法，由 PA-04 隔离 checkpointer 的状态恢复和保存；流关闭、取消收敛和资源清理照常，个人版默认行为不变。跨 Execution 的状态只由 `WindowStore` 保存和加载，见第 7.8 节。
 4. **固定配置**：一件事从开始到结束使用同一版本的 Spec（含确认规则），包括确认恢复和续做。
-5. **记账**：同步保存 `tool.intent`、`execution.paused`、`execution.final`，保存成功才返回；同时保存所有其他事件，按 `execution_id` 可查询。
+5. **记账**：同一 Execution 的所有事件按产生顺序进入同一个有序队列；普通事件接收入队后返回，`tool.intent`、`execution.paused`、`execution.final` 等待此前事件和本事件全部落盘后返回。不能跳过保存失败的事件后宣告关键记账成功。队列由服务端维护，不随 Agent 实例清理而取消；已保存事件按 `execution_id` 可查询。
 6. **群聊记录**：存储群消息，提供最近消息和搜索接口，并按授权过滤（Agent 入群时间、撤回、成员权限）。
-7. **窗口存储后端**：提供 `BaseKVStore` 实例，或者一个专用的、持久化的 SysOperation 文件系统，并满足第 7.8 节的三条要求；保证 Session 之间的命名空间隔离；按 Agent 配置的保留期清理归档；Agent 或 Session 删除时清空对应数据。服务端不需要理解其中存储的内容。
-8. **确认卡片**：根据 `execution.paused` 生成卡片，只发给发起人、只接受发起人点击；点击后调用 `resume_persistent_request`；超时后以"拒绝"调用。
-9. **续做**：重启后对"已派发、无 `final` 也无 `paused`"的 Request 自动发起续做，传入 `recovery_ref`；被停止的任务不自动续做。
+7. **窗口存储后端**：提供持久化的 `BaseKVStore` 实例，并满足第 7.8 节的三条要求；保证 Session 之间的命名空间隔离；按 Agent 配置的保留期清理归档；Agent 或 Session 删除时清空对应数据。服务端不需要理解其中存储的内容。
+8. **确认卡片**：只根据 `execution.paused(awaiting_confirmation)` 生成确认卡片，只发给发起人、只接受发起人点击；点击后调用 `resume_persistent_request`；超时后以"拒绝"调用。
+9. **续做**：重启后对最近一次已派发的 Execution 无 `final` 也无 `paused`、且未被主动停止的 Request 自动发起续做；被停止的任务只在明确继续时重新排队；预算、容量或可恢复错误导致的暂停，在明确继续或服务端确认对应条件恢复时重新排队，条件未变化时不反复自动续做。以上均沿用原 Request、传入对应的 `recovery_ref` 和原任务输入，走第 11.2 节。服务端保留停止事实、原任务及其最近一次待接续的执行关联，停止收尾失败也不能误判为自动续做；继续指示先定位原 Request，再填写恢复引用，见第 12.5 节。
 10. **发送**：处理 `output.proposed`，负责发送回复和上传文件。发送失败只重试发送，不重新执行任务。
 11. **预算**：管理模型额度账户，额度不足时拒绝准入。
+12. **事件流消费**：服务端持续消费执行入口返回的事件流，直到流结束或明确抛出异常；收到 `execution.final` 或 `execution.paused` 后仍继续消费，让入口完成收尾和资源清理。消费任务独立于前端连接生命周期；前端只订阅服务端转发的展示通道，断开只结束订阅，不关闭 Agent 事件流，也不取消服务端消费任务。用户明确停止或取消时，由独立控制任务调用 `abort_bound`，由执行入口完成收尾。
+13. **执行异常**：接住执行或确认恢复入口抛出的异常（包括记账失败），核对本次 Execution 已成功落盘的 `final / paused`。已有结束记录，保留结果并按对应状态处理；没有结束记录、且未被主动停止或取消，按崩溃中断处理，沿用原 Request，传入指向本次中断执行的 `recovery_ref`，走第 11.2 节，不必等服务重启。续做时机由服务端决定，发起前确认旧执行已退出、相关清理完成。主动停止或取消按第 10.4 节处理，收尾异常不触发自动续做。
 
 ## 14. 端口契约
 
 | 端口 | 方向 | 操作 | 失败语义 |
 | --- | --- | --- | --- |
-| **窗口存储后端** | Server → Agent（注入） | `BaseKVStore`（`set / get / delete / get_by_prefix / delete_by_prefix` 等），或专用 SysOperation 文件系统（`read_file / write_file / list_files`） | 读写失败按第 7.8 节 `WindowStore` 的失败语义处理 |
+| **窗口存储后端** | Server → Agent（必需注入） | `BaseKVStore`（`set / get / delete / get_by_prefix / delete_by_prefix` 等） | 读写失败按第 7.8 节 `WindowStore` 的失败语义处理 |
 | **群聊记录** `GroupChatPort` | Agent → Server | `recent_messages(group, cursor, limit)`、`search_messages(group, query, 时间范围, 发送者, cursor, limit)` | 区分"确定没有"和"没查完或失败" |
-| **记账** | Agent → Server | `record(event)`：同步，成功才返回 | 抛异常：Agent 停止当前执行 |
-| **执行日志** | Agent → Server | `read_execution_log(execution_id)`：返回该次执行的全部事件；只允许读取同一 Session、同一 Request 下的执行 | 读不到：续做时提示 Agent "上一次记录缺失"，由 Agent 向发起人确认 |
-| **预算** | Agent → Server | `admit(model_call_id)`、`report(model_call_id, usage)` | 拒绝准入：不调用模型，产出 `paused` |
+| **记账** | Agent → Server | `record(event)`：普通事件接收入队后返回；关键事件等待此前事件和本事件全部落盘后返回（第 9.1 节） | 入队失败，或关键事件及其前序事件无法保存：抛异常，Agent 停止当前执行 |
+| **执行日志** | Agent → Server | `read_execution_log(execution_id)`：按产生顺序返回该次执行的全部已保存事件；只允许读取同一 Session、同一 Request 下的执行 | 读不到：续做时提示 Agent "上一次记录缺失"，由 Agent 向发起人确认 |
+| **预算** | Agent → Server | `admit(model_call_id)`、`report(model_call_id, usage)` | 拒绝准入：不调用模型，产出 `execution.paused(budget_denied)` |
 | **知识** `KnowledgePort` | Agent → Server | 解析授权和知识版本、读取正文（PA-12） | 无权限与不存在要能区分 |
-| **执行与恢复** | Server → Agent | `execute_persistent_request`、`resume_persistent_request`、`abort_bound` | — |
+| **执行与恢复** | Server → Agent | `execute_persistent_request`、`resume_persistent_request`、`abort_bound` | 入口抛异常：服务端按第 13 节核对本次执行的结束记录，符合条件的按第 11.2 节续做；停止与取消按第 10.4 节处理 |
 | **确认规则查询** | Server → Agent | `describe_confirmable_operations(spec)` | — |
 
 `WindowStore` 是本模块的内部组件，不是对外端口（第 7.8 节）。由于有单一执行者保证，它**不需要旧版的版本号、条件更新和 epoch**。
@@ -759,6 +831,8 @@ sequenceDiagram
 15. 窗口装满且换窗后最小必要内容仍放不下时，暂停并说明原因，不静默截断。
 16. 不使用 checkpointer；跨执行状态只保存白名单字段，一次写入。
 17. 会话状态记录和归档不能放在 Agent 工具可访问的位置（办公空间、Agent 工具所用的 SysOperation）。
+18. 同一 Execution 的事件按产生顺序保存；关键记账成功时，此前事件和本事件必须全部落盘。
+19. 崩溃续做与停止后继续统一读取执行日志；带旧中断状态时先补齐工具结果、清除中断状态，正常确认恢复保留中断现场。
 
 ## 附录 B：新旧设计对照
 
@@ -768,10 +842,10 @@ sequenceDiagram
 | §2 架构总览与责任边界 | 改写为 §3，分为两部分 |
 | §3 模块结构与现有基础 | §4 按代码现状重写；删除拟议目录 |
 | §4 核心对象、不变量、配置生效、来源重放 | 对象简化为 §2，新增状态归属 §2.1；不变量集中到附录 A；来源去重与重放移交 AgentServer |
-| §5 调用 API 与宿主端口 | 改为同进程同步调用，执行与恢复两个入口（§5.1），端口见 §14 |
+| §5 调用 API 与宿主端口 | 改为同进程直接调用，执行与恢复两个入口（§5.1），端口见 §14 |
 | §6 状态机、停止与交互 | 确认复用 `PermissionInterruptRail` 和中断恢复（§10）；结束方式简化为 paused / final；三种继续执行见 §11 |
 | §7 参与决策、发送检查、群预算 | 参与判断保留（§6，改为独立调用）；发送检查与预算账户移交 AgentServer |
-| §8 事件确认与背压 | 改为三级处理（§9.1）；删除背压、事件水位、epoch |
+| §8 事件确认与背压 | 改为三级处理和 Execution 内有序保存（§9.1）；删除旧版背压协议、事件水位、epoch |
 | §9 每次模型调用前的上下文装配 | **改为按 Execution 生命周期管理**（§7.3～7.7）：开始时一次性组装，执行中只追加，以保护前缀缓存 |
 | §10 ContextStore 与逻辑数据模型 | 简化为本模块内部组件 `WindowStore`（§7.8）：会话状态记录 + 归档，无版本号、无条件更新；后端由服务端注入（§14） |
 | §11 活动窗口与安全换窗 | 保留"旧窗先归档、再生成新窗"（§7.6）；删除指针条件更新和 epoch 围栏；新增"可重新获取的内容只存引用"和 70% 阈值 |
@@ -803,8 +877,9 @@ sequenceDiagram
 | 2 | 卡片回复能转换成 DeepAgent 识别的恢复输入（`InteractiveInput`，按工具调用 ID 对应），task loop 能识别出这是一次恢复 | 确认恢复依赖它 |
 | 3 | 中断时上下文末尾的结构（工具调用消息是否在上下文里、有没有占位的工具结果） | 整理规则不能碰到它们 |
 | 4 | 调用方传入 Session 时，正常结束的执行是否会把上下文写回 Session state；不会的话由窗口管理主动调用 `save_contexts` 或直接从 ContextEngine 读取 | 结束时保存依赖它 |
-| 5 | 停止（`abort_bound`）路径能否拿到当时的上下文并保存 | 决定停止后继续能否不读日志 |
+| 5 | 停止（`abort_bound`）路径能否拿到当时的上下文并保存，以及是否清掉了不完整工具调用 | 停止后继续仍须读日志，不能因窗口缺少调用就遗漏已登记意图的写操作 |
 | 6 | 换窗阈值与新窗保留的原文轮数 | 按模型上下文长度和实测缓存效果确定 |
+| 7 | 确认恢复后崩溃，续做加载旧中断记录时能否补齐工具结果、清除旧中断状态并保留会话授权 | 防止原生恢复分支直接重放写操作；由 PA-17 实现，在 M2c 验收，正常确认恢复不受影响 |
 
 ## 附录 D：后续扩展点
 
@@ -822,9 +897,9 @@ sequenceDiagram
 | --- | --- |
 | `PersistentAgentSpec` | 新增 `permissions` 字段，构造时传入 DeepAgent 配置（§10.3） |
 | `ExecutionContext` | `epoch`、`authority_handle` 在同进程前提下可以简化；`recovery_ref` 继续用于续做 |
-| `PersistentPorts`（[ports.py](../../persistent_agent/ports.py)） | `ExecutionAuthority` 可移除（单一执行者由 AgentServer 保证）；`ControlPort` 改为直接调用；`CommitPort` 简化为同步 `record`，并增加执行日志读取；**`ContextStore` 和 `HistoryPort` 不再是对外端口，改为内部组件 `WindowStore`，依赖服务端注入的存储后端**；**`GroupMaterialPort` 替换为 `GroupChatPort`** |
-| `schema/context.py` | `WindowHead`、`HeadAdvance`、`WindowSwitch` 等带版本和条件更新的结构不再需要；`MaterialQuery / MaterialSnapshot` 改为群消息、会话状态记录和归档的专用结构 |
-| `AgentEvent` | 按 §9.2 合并或删除部分事件类型 |
+| `PersistentPorts`（[ports.py](../../persistent_agent/ports.py)） | `ExecutionAuthority` 可移除（单一执行者由 AgentServer 保证）；`ControlPort` 改为直接调用；`CommitPort` 简化为 `record`，按事件级别等待入队或落盘（§9.1），并增加执行日志读取；**`ContextStore` 和 `HistoryPort` 不再是对外端口，改为内部组件 `WindowStore`，依赖服务端注入的存储后端**；**`GroupMaterialPort` 替换为 `GroupChatPort`** |
+| `schema/context.py` | `WindowHead`、`HeadAdvance`、`WindowSwitch` 等带版本和条件更新的结构不再需要；PA-22 新增 `GroupChatPort` 所需的群消息结构，`MaterialQuery / MaterialSnapshot / MaterialReadResult` 只用于知识端口；完整会话状态记录的结构、白名单字段和序列化方式由 PA-09 定义，完整归档记录与归档索引的结构和序列化方式由 PA-10 定义，不在 PA-22 预设 |
+| `AgentEvent` | 按 §9.2 合并或删除部分事件类型；PA-22 定义事件必需字段、五种暂停原因及负载校验，PA-04 实现暂停收尾与事件映射；`window.switched` 只包含旧窗归档引用和新窗序号，不要求定义完整归档结构 |
 | 开发计划 | PA-05 改为 Execution 级装配；PA-08 改为复用 `PermissionInterruptRail` 加会话状态记录；PA-09 / PA-10 改为会话状态记录、换窗与归档；PA-11 拆为群聊检索与历史归档检索；PA-14 简化为意图记账；PA-16 / PA-17 由"执行日志 + 续做规则"替代；PA-21 的撤权失效改为 Execution 级生效 |
 
 以上调整等本文确认后，再按 harness 文档规约同步修订 specs 和开发计划。
@@ -840,3 +915,11 @@ sequenceDiagram
 | 2026-10-04 | 流程推演后的修正：确认恢复不追加任何内容；等待确认时 Session 阻塞，超时视为拒绝；换窗阈值 70%，先归档再摘要；归档带 `execution_id`；结束顺序"整理 → 保存 → 记账"；补充消息作为新 Request；崩溃后自动续做 | 推演"接收消息、确认、换窗、崩溃续做"四个流程时发现工具调用配对被破坏、窗口来源不唯一、保存顺序未定义等问题 |
 | 2026-10-04 | 窗口存储改为本模块实现的内部组件，存储后端（`BaseKVStore` 或专用持久化文件系统）由 AgentServer 注入；状态记录不得放在 Agent 工具可访问的位置 | 记录格式和检索逻辑依赖 agent-core 内部格式，应由本模块掌握；存储基础设施由服务端运维；若复用 Agent 工作环境的 SysOperation，模型可篡改确认状态，且沙箱容器会被回收 |
 | 2026-10-04 | 执行日志确定为服务端保存的事件流，续做时由程序取回、整理后注入窗口；`tool.completed` 改为所有工具都发，并补充可读参数摘要和结果摘要；`progress.updated` 记录中间结论 | 崩溃后窗口内容丢失，日志是唯一的进度来源，原事件只有引用和哈希，信息不足；本地日志文件可被模型篡改，也可能随沙箱回收丢失 |
+| 2026-10-06 | 同一 Execution 的事件进入服务端有序队列；普通事件入队后返回，关键事件等待此前事件和本事件全部落盘；明确失败处理和队列归属 | 防止关键事件越过未保存的日志或产物交接；使 paused / final 记账成功同时保证此前执行记录完整 |
+| 2026-10-06 | 崩溃续做和停止后继续统一使用 recovery_ref 读取日志，不新增 continuation；续做前补齐悬空工具结果、清除旧中断状态，保留会话授权；明确停止不阻塞后续任务及原任务定位 | 覆盖停止清理导致窗口遗漏写操作，以及确认恢复后崩溃加载旧中断现场导致工具重放；实现归 PA-17，M2c 增加验收，PA-22 不承担运行行为 |
+| 2026-10-07 | 本期窗口存储后端收窄为必需注入的 `BaseKVStore`，专用 SysOperation 文件系统后端不在本期范围；构造只检查契约，持久化与隔离仍由服务端保证 | 固定 PA-22 的注入类型和校验范围，避免 PA-09、PA-10 同时实现两套存储路径 |
+| 2026-10-07 | PA-22 新增群消息结构并定义事件必需字段；完整会话状态记录和归档结构分别随 PA-09、PA-10 定义，知识端口保留 `MaterialQuery / MaterialSnapshot / MaterialReadResult` | 存储格式随实际读写能力确定，不在契约调整阶段预设；`window.switched` 只需要归档引用和新窗序号 |
+| 2026-10-07 | 暂停原因固定为 awaiting_confirmation、stopped、budget_denied、context_unfit、error；非确认暂停不阻塞后续任务并复用统一续做，主动停止仍须明确继续，其余原因可由服务端确认条件恢复后发起；区分 paused(error) 与 final(failed) | 补齐预算和容量暂停的原因及续做语义；PA-22 定义枚举与负载校验，PA-04 实现暂停收尾，不增加新的恢复流程 |
+| 2026-10-07 | AgentServer 持有并持续消费事件流，收到 final 或 paused 后仍读到结束；前端断开只结束展示订阅，主动停止或取消通过独立控制任务调用 abort_bound | PA-03 的提前关闭流会取消原生执行；避免前端连接生命周期中断任务，并让执行入口完成收尾和资源清理 |
+| 2026-10-07 | 修正 checkpointer 隔离说明：服务端不额外调用生命周期方法，原生路径仍有 pre_run / commit 等调用，由 PA-04 隔离状态恢复和保存；保留流关闭、取消收敛及资源清理，个人版默认行为不变 | 仅靠服务端不调用不足以阻止原生路径使用 checkpointer；保证跨 Execution 状态只有 WindowStore 一个来源，避免旧记录覆盖和重复保存 |
+| 2026-10-07 | 入口异常由 AgentServer 接住并核对本次 Execution 的结束记录；无 final / paused 且未被主动停止或取消时按崩溃中断续做，不必等服务重启；已有结果保持，续做前确认旧执行退出及清理完成 | 避免记账失败等入口异常使 Request 一直悬着；保留任务已有结局和主动控制语义，不增加恢复流程 |
