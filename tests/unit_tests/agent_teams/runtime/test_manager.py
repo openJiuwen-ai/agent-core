@@ -22,6 +22,7 @@ from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
 from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.team_workspace import (
     MEMBER_MODE_DYNAMIC,
     MEMBER_MODE_PREDEFINED,
@@ -365,7 +366,8 @@ class TestDeleteTeamFilesystemCleanup:
 def mock_group_history_cleanup(monkeypatch):
     # Archive cleanup has its own scope tests; lifecycle tests use fake storage.
     monkeypatch.setattr(
-        "openjiuwen.agent_teams.group_chat.conversation.GroupConversationLog.delete_registered", lambda *a: None,
+        "openjiuwen.agent_teams.group_chat.conversation.GroupConversationLog.delete_registered",
+        lambda *a: None,
     )
 
 
@@ -409,3 +411,179 @@ async def test_cold_recovery_resets_leader_execution_before_activation(monkeypat
     )
 
     assert calls == ["initialize", "reset", "activate"]
+
+
+class TestRunOrganizationTurn:
+    @staticmethod
+    def _paused_entry(
+        *, team_name: str = "team-a", session_id: str = "session-1"
+    ) -> tuple[TeamRuntimeManager, ActiveTeam, AsyncMock]:
+        manager = TeamRuntimeManager()
+        agent = MagicMock()
+        agent.spec = MagicMock()
+        agent.invoke = AsyncMock()
+        entry = ActiveTeam(
+            team_name=team_name,
+            agent=agent,
+            current_session_id=session_id,
+            state=RuntimeState.PAUSED,
+        )
+        entry.interact_gate.close_and_drain = AsyncMock()
+        return manager, entry, agent
+
+    @pytest.mark.asyncio
+    async def test_reject_activation_skips_finalize_and_gate_drain(self):
+        from openjiuwen.agent_teams.runtime.dispatch import RunAction, RunActionKind
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeActivation
+
+        manager, entry, agent = self._paused_entry()
+        await manager.pool.add(entry)
+        session = MagicMock()
+        session.post_run = AsyncMock()
+        manager.activate = AsyncMock(
+            return_value=TeamRuntimeActivation(
+                agent=agent,
+                session=session,
+                action=RunAction(kind=RunActionKind.REJECT_RUNNING, require_spec=False),
+            )
+        )
+        manager.finalize = AsyncMock()
+
+        result = await manager.run_organization_turn(
+            team_name="team-a",
+            session_id="session-1",
+            inputs={"query": "claim task"},
+        )
+
+        assert result is False
+        manager.finalize.assert_not_called()
+        entry.interact_gate.close_and_drain.assert_not_called()
+        session.post_run.assert_not_called()
+        agent.invoke.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_idle_marker_ends_turn_and_runs_finalize(self):
+        from openjiuwen.agent_teams.runtime.dispatch import RunAction, RunActionKind
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeActivation
+
+        manager, entry, agent = self._paused_entry()
+        await manager.pool.add(entry)
+        chunks_consumed = []
+        lifecycle_events = []
+
+        async def stream(*_args, **_kwargs):
+            try:
+                chunks_consumed.append("content")
+                yield TeamOutputSchema(type="llm_output", index=0, payload={"content": "done"})
+                chunks_consumed.append("idle")
+                yield TeamOutputSchema(type="message", index=0, payload={"event_type": "team.idle"})
+                chunks_consumed.append("after-idle")
+                yield TeamOutputSchema(type="llm_output", index=1, payload={"content": "unexpected"})
+            finally:
+                lifecycle_events.append("stream_closed")
+
+        async def finalize(**_kwargs):
+            lifecycle_events.append("finalized")
+
+        agent.stream = MagicMock(side_effect=stream)
+        session = MagicMock()
+        session.post_run = AsyncMock()
+        manager.activate = AsyncMock(
+            return_value=TeamRuntimeActivation(
+                agent=agent,
+                session=session,
+                action=RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False),
+            )
+        )
+        manager.finalize = AsyncMock(side_effect=finalize)
+
+        result = await manager.run_organization_turn(
+            team_name="team-a",
+            session_id="session-1",
+            inputs={"query": "claim task"},
+        )
+
+        assert result is True
+        agent.stream.assert_called_once()
+        agent.invoke.assert_not_awaited()
+        assert chunks_consumed == ["content", "idle"]
+        assert lifecycle_events == ["finalized", "stream_closed"]
+        manager.finalize.assert_awaited_once_with(team_name="team-a", session_id="session-1")
+        entry.interact_gate.close_and_drain.assert_awaited_once()
+        session.post_run.assert_awaited_once()
+
+
+class _OrganizationLeaderTurnHarness:
+    def __init__(self, runtime_manager: TeamRuntimeManager) -> None:
+        from openjiuwen.core.runner.team_runner import _TeamRunnerMixin
+
+        self._mixin = _TeamRunnerMixin()
+        self._mixin._team_runtime_manager = runtime_manager
+
+    async def run(self, team_name: str, session_id: str, inputs: object) -> bool:
+        self._mixin._resolve_team_agent_spec = AsyncMock(return_value=SimpleNamespace(team_name=team_name))
+        self._mixin._maybe_attach_observability = MagicMock()
+        return await self._mixin._run_organization_leader_turn(team_name, session_id, inputs)
+
+
+class TestRunOrganizationLeaderTurn:
+    @pytest.mark.asyncio
+    async def test_reject_activation_skips_finalize_and_post_run(self):
+        from openjiuwen.agent_teams.runtime.dispatch import RunAction, RunActionKind
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeActivation
+
+        runtime_manager = TeamRuntimeManager()
+        agent = MagicMock()
+        agent.invoke = AsyncMock()
+        session = MagicMock()
+        session.get_session_id.return_value = "session-1"
+        session.post_run = AsyncMock()
+        runtime_manager.activate = AsyncMock(
+            return_value=TeamRuntimeActivation(
+                agent=agent,
+                session=session,
+                action=RunAction(kind=RunActionKind.REJECT_RUNNING, require_spec=False),
+            )
+        )
+        runtime_manager.finalize = AsyncMock()
+        runtime_manager.organization_runtime_manager.ensure_team_binding = AsyncMock()
+
+        harness = _OrganizationLeaderTurnHarness(runtime_manager)
+        result = await harness.run("team-a", "session-1", {"query": "review"})
+
+        assert result is False
+        runtime_manager.finalize.assert_not_called()
+        session.post_run.assert_not_called()
+        agent.invoke.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_successful_turn_runs_finalize_and_post_run(self):
+        from openjiuwen.agent_teams.runtime.dispatch import RunAction, RunActionKind
+        from openjiuwen.agent_teams.runtime.manager import TeamRuntimeActivation
+
+        runtime_manager = TeamRuntimeManager()
+        agent = MagicMock()
+        agent.invoke = AsyncMock(return_value=True)
+        session = MagicMock()
+        session.get_session_id.return_value = "session-1"
+        session.post_run = AsyncMock()
+        runtime_manager.activate = AsyncMock(
+            return_value=TeamRuntimeActivation(
+                agent=agent,
+                session=session,
+                action=RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False),
+            )
+        )
+        runtime_manager.finalize = AsyncMock()
+        runtime_manager.organization_runtime_manager.ensure_team_binding = AsyncMock()
+
+        harness = _OrganizationLeaderTurnHarness(runtime_manager)
+        result = await harness.run("team-a", "session-1", {"query": "review"})
+
+        assert result is True
+        agent.invoke.assert_awaited_once()
+        runtime_manager.finalize.assert_awaited_once_with(
+            team_name="team-a",
+            session_id="session-1",
+        )
+        session.post_run.assert_awaited_once()

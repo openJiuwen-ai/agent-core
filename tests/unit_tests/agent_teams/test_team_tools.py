@@ -3,7 +3,7 @@
 
 """Unit tests for team_tools module"""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
@@ -19,17 +19,16 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     TaskStatus,
 )
-from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, ModelPoolEntry, TeamRole
+from openjiuwen.agent_teams.tools import locales as team_locales
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
     TeamDatabase,
 )
-from openjiuwen.agent_teams.tools import locales as team_locales
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.tools.member_options import get_member_fallback_model_ref
-from openjiuwen.agent_teams.tools.tool_member import ListCheckpointsTool
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, ModelPoolEntry, TeamRole
+from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApprovePlanTool,
@@ -47,6 +46,7 @@ from openjiuwen.agent_teams.tools.team_tools import (
     UpdateTaskTool,
     ViewTaskToolV2,
 )
+from openjiuwen.agent_teams.tools.tool_member import ListCheckpointsTool
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -390,6 +390,18 @@ class TestCleanTeamTool:
         assert result.success is False
         assert "shutdown_member" in result.error
 
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_blocks_when_organization_check_fails(self, agent_team, t):
+        manager = MagicMock()
+        manager.get_organization = AsyncMock(side_effect=RuntimeError("db down"))
+        agent_team.org_task_manager = manager
+
+        result = await CleanTeamTool(agent_team, t).invoke({})
+
+        assert result.success is False
+        assert "Could not verify organization ownership" in result.error
+
 
 class TestCleanTeamLifecycleGate:
     """clean_team is wired only when lifecycle == 'temporary'."""
@@ -461,9 +473,7 @@ class TestSpawnTools:
             return None
 
         tool = SpawnTeammateTool(agent_team, t, model_config_allocator=allocator)
-        result = await tool.invoke(
-            {"member_name": "member-m", "display_name": "M", "desc": "d", "model_name": "gpt-4"}
-        )
+        result = await tool.invoke({"member_name": "member-m", "display_name": "M", "desc": "d", "model_name": "gpt-4"})
         assert result.success is True, result.error
         assert seen == ["gpt-4"]
 
@@ -1539,8 +1549,7 @@ class TestUpdateTaskTool:
         revoked = [
             call.kwargs["message"]
             for call in agent_team.messager.publish.call_args_list
-            if call.kwargs.get("message") is not None
-            and call.kwargs["message"].event_type == TeamEvent.TASK_REVOKED
+            if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_REVOKED
         ]
         assert len(revoked) == 1
         assert revoked[0].payload["member_name"] == "dev-1"
@@ -2602,10 +2611,10 @@ async def test_reliability_factory_reuses_injected_components_across_cycles(agen
     """The reliability factory builds a fresh rail per cycle but wraps the same
     injected (stateful) components, so detector windows survive native rebuilds.
     """
-    from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
-    from openjiuwen.agent_teams.reliability.factory import build_reliability_components
     from openjiuwen.agent_teams.rails.elements import build_team_reliability_rail
     from openjiuwen.agent_teams.rails.team_context import inject_team_handles
+    from openjiuwen.agent_teams.reliability.config import ReliabilityConfig
+    from openjiuwen.agent_teams.reliability.factory import build_reliability_components
 
     cfg = ReliabilityConfig()
     components = build_reliability_components(

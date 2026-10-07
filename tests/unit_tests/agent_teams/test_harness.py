@@ -201,6 +201,34 @@ def test_outputs_delegates_to_native() -> None:
     native.outputs.assert_called_once_with()
 
 
+def test_dynamic_tools_survive_native_rebuild() -> None:
+    first_native = _stub_native()
+    second_native = _stub_native()
+    harness = _make_harness(first_native)
+    tool = SimpleNamespace(card=SimpleNamespace(name="org_dissolve_organization"))
+
+    harness.add_tool(tool)
+    harness._native = second_native
+    harness._remount_dynamic_tools()
+
+    first_native.ability_manager.add_ability.assert_called_once_with(tool.card, tool)
+    second_native.ability_manager.add_ability.assert_called_once_with(tool.card, tool)
+
+
+def test_remove_dynamic_tool_prevents_rebuild_remount() -> None:
+    first_native = _stub_native()
+    second_native = _stub_native()
+    harness = _make_harness(first_native)
+    tool = SimpleNamespace(card=SimpleNamespace(name="org_dissolve_organization"))
+
+    harness.add_tool(tool)
+    harness.remove_tool("org_dissolve_organization")
+    harness._native = second_native
+    harness._remount_dynamic_tools()
+
+    second_native.ability_manager.add_ability.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_subscribe_forwards_to_native() -> None:
     native = _stub_native()
