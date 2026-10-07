@@ -102,7 +102,7 @@ class ConfidenceGatedSkillEvolutionRail(DeepAgentRail):
         """最近 window 个任务的成功率；样本不足返回 -1（表示数据不足）。"""
         if len(self._outcomes) < self._min_samples:
             return -1.0
-        return sum(1 for o in self._outcomes if o.success) / len(self._outcomes)
+        return sum(1 for outcome in self._outcomes if outcome.success) / len(self._outcomes)
 
     def should_evolve(self) -> tuple[bool, str]:
         """成功率滑窗门控：是否进入"置信度评估"阶段。

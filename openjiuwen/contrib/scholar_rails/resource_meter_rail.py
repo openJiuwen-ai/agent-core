@@ -151,17 +151,22 @@ class ResourceMeterRail(DeepAgentRail):
     # ------------------------------------------------------------ analysis
     def estimate_cost_cny(self, events: list[MeterEvent]) -> float:
         """按价目估算总成本（仅统计 model_call 事件）。"""
-        cost = 0.0
-        for e in events:
-            if e.kind != "model_call":
-                continue
-            uncached_in = max(e.input_tokens - e.cached_input_tokens, 0)
-            cost += (
-                uncached_in / 1e6 * self._pricing["input_per_mtok"]
-                + e.cached_input_tokens / 1e6 * self._pricing["input_cached_per_mtok"]
-                + e.output_tokens / 1e6 * self._pricing["output_per_mtok"]
-            )
-        return cost
+        return estimate_events_cost_cny(events, self._pricing)
+
+
+def estimate_events_cost_cny(events: list[MeterEvent], pricing: dict[str, float]) -> float:
+    """模块级成本估算，供 rail 实例与离线聚合（summarize）共用。"""
+    cost = 0.0
+    for e in events:
+        if e.kind != "model_call":
+            continue
+        uncached_in = max(e.input_tokens - e.cached_input_tokens, 0)
+        cost += (
+            uncached_in / 1e6 * pricing["input_per_mtok"]
+            + e.cached_input_tokens / 1e6 * pricing["input_cached_per_mtok"]
+            + e.output_tokens / 1e6 * pricing["output_per_mtok"]
+        )
+    return cost
 
 
 # --------------------------------------------------------------------------
@@ -187,8 +192,6 @@ def summarize(log_path: str | Path, *, pricing: Optional[dict[str, float]] = Non
     """聚合一份 JSONL 计量日志，返回 resource_report 所需的全部统计量。"""
     events = load_events(log_path)
     pricing = {**_DEFAULT_PRICING, **(pricing or {})}
-    meter = ResourceMeterRail.__new__(ResourceMeterRail)  # 仅复用 estimate_cost_cny
-    meter._pricing = pricing
 
     model_calls = [e for e in events if e.kind == "model_call"]
     tool_calls = [e for e in events if e.kind == "tool_call"]
@@ -221,7 +224,7 @@ def summarize(log_path: str | Path, *, pricing: Optional[dict[str, float]] = Non
         "total_output_tokens": total_out,
         "total_cached_input_tokens": total_cached,
         "total_tokens": total_in + total_out,
-        "estimated_cost_cny": round(meter.estimate_cost_cny(events), 4),
+        "estimated_cost_cny": round(estimate_events_cost_cny(events, pricing), 4),
         "wall_time_sec": round(wall_time, 2),
         "by_stage": by_stage,
         "tool_counts": tool_counts,

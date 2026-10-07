@@ -71,9 +71,12 @@ class LiteratureGroundingRail(DeepAgentRail):
         openJiuwen 的 Tool 需要 ToolCard + 可调用入口。这里用最小封装，
         通过 ``ability_manager.add_ability(card, tool)`` 注册元数据和执行实例。
         """
-        rail = self
+        # 嵌套闭包经局部绑定访问内部状态，避免跨对象受保护成员访问。
+        registry = self._registry
+        registry_path = self._registry_path
+        default_max_results = self._max_results
 
-        def _FnTool(name: str, description: str, parameters: dict, fn):
+        def _fn_tool(name: str, description: str, parameters: dict, fn):
             async def invoke(**kwargs):
                 # arXiv rate limiting and network I/O must not block the agent loop.
                 return await asyncio.to_thread(fn, **kwargs)
@@ -90,7 +93,7 @@ class LiteratureGroundingRail(DeepAgentRail):
             )
 
         def arxiv_search(query: str, max_results: Optional[int] = None) -> str:
-            records = search_arxiv(query, max_results=max_results or rail._max_results)
+            records = search_arxiv(query, max_results=max_results or default_max_results)
             return json.dumps([r.to_dict() for r in records], ensure_ascii=False, indent=2)
 
         def arxiv_fetch(arxiv_id: str) -> str:
@@ -104,15 +107,15 @@ class LiteratureGroundingRail(DeepAgentRail):
                 rec = fetch_arxiv_by_id(aid)
                 if rec is None:
                     continue
-                keys.append(rail._registry.add_record(rec))
-            rail._registry.persist(rail._registry_path)
+                keys.append(registry.add_record(rec))
+            registry.persist(registry_path)
             return json.dumps({"registered": keys}, ensure_ascii=False)
 
         def list_citable_keys() -> str:
-            return json.dumps({"citable_keys": rail._registry.keys()}, ensure_ascii=False)
+            return json.dumps({"citable_keys": registry.keys()}, ensure_ascii=False)
 
         return [
-            _FnTool(
+            _fn_tool(
                 "arxiv_search",
                 "Search arXiv for real, verifiable papers. Returns JSON list of records "
                 "with arxiv_id/title/authors/year/abstract. Use ONLY these records as citations.",
@@ -126,7 +129,7 @@ class LiteratureGroundingRail(DeepAgentRail):
                 },
                 arxiv_search,
             ),
-            _FnTool(
+            _fn_tool(
                 "arxiv_fetch",
                 "Fetch a single arXiv record by id to verify its existence and metadata.",
                 {
@@ -136,7 +139,7 @@ class LiteratureGroundingRail(DeepAgentRail):
                 },
                 arxiv_fetch,
             ),
-            _FnTool(
+            _fn_tool(
                 "register_citations",
                 "Verify & register arXiv ids into the citation registry; returns assigned bibtex keys. "
                 "Only registered keys may be cited in the final paper.",
@@ -153,7 +156,7 @@ class LiteratureGroundingRail(DeepAgentRail):
                 },
                 register_citations,
             ),
-            _FnTool(
+            _fn_tool(
                 "list_citable_keys",
                 "List all bibtex keys currently allowed for citation.",
                 {"type": "object", "properties": {}},
