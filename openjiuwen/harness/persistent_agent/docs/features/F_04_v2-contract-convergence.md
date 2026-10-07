@@ -6,7 +6,7 @@
 | 日期 | 2026-10-07 |
 | 负责人 | Song Haoran |
 | 范围 | 内部 `persistent_agent/{ports.py, schema/{execution,protocol,events,port_results,context}.py}`，以及外层 `__init__.py` 导出和对应单测；`schema/build_context.py`、`factory.py` 只修正过时的文档字符串。不改共享 harness / core 代码 |
-| 测试基线 | 改动前：`tests/unit_tests/harness/persistent_agent` 132 passed，F_01～F_03 使用的共享回归集 213 passed。改动后：PA 包 161 passed，共享回归 213 passed，改动范围 Ruff check / format 通过（Python 3.11.17，uv 按 `uv.lock` 同步的 `.venv`） |
+| 测试基线 | 改动前：`tests/unit_tests/harness/persistent_agent` 132 passed，F_01～F_03 使用的共享回归集 213 passed。审阅修订后：PA 包 173 passed，共享回归 213 passed，改动范围 Ruff check / format 通过（Python 3.11.17，uv 按 `uv.lock` 同步的 `.venv`） |
 | 关联 | [v2 设计](../designs/persistent-agent-design-v2.md) §7.8、§7.9、§9.1～9.3、§11.2、§14、附录 E；[开发计划](../designs/persistent-agent-development-plan-v2.md) PA-22；规约 S_01～S_03 |
 
 ## 背景
@@ -27,7 +27,7 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 
 | 端口 | 方法 | 约定 |
 | --- | --- | --- |
-| `CommitPort`（必需） | `record(execution, event) -> None` | 普通事件进入服务端有序队列后返回；`tool.intent`、`execution.paused`、`execution.final` 要等此前事件和本事件全部落盘才返回。任何失败都抛异常，调用方停止当前执行（v2 §9.1） |
+| `CommitPort`（必需） | `record(execution, event) -> None` | 所有事件统一 await record；普通事件入队后返回，调用失败只记诊断并继续；`tool.intent`、`execution.paused`、`execution.final` 等此前事件和本事件全部落盘后返回，调用失败停止当前执行。前序事件未保存时屏障不能返回成功（v2 §9.1） |
 | | `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按产生顺序返回该次执行已保存的事件；服务端只允许读取同一 Session、同一 Request 下的执行。读取失败抛异常，没有事件时返回空元组，PA-16 两者都按“上一次记录缺失”处理 |
 | `BudgetPort`（必需） | `admit` / `report` | 去掉 `unknown`：准入只有 `admitted / denied`，用量回报只有 `confirmed / rejected`；调用失败抛异常 |
 | 窗口存储后端（必需） | `window_backend: BaseKVStore` | 构造时只检查是否为 `BaseKVStore` 实例，不读写存储；专用 SysOperation 后端不在本期 |
@@ -35,6 +35,8 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 | `KnowledgePort`（可选） | `resolve` / `read` | 不变，继续使用 `MaterialQuery / MaterialSnapshot / MaterialReadResult`，由 PA-12 细化 |
 
 删除 `ExecutionAuthority`、`ControlPort`、`ContextStore`、`HistoryPort`、`GroupMaterialPort`。构造时的必需依赖从“执行权 / 提交 / 控制 / 预算”改为“记账 / 预算 / 窗口存储后端”。
+
+`record` 是唯一持久化通道；入口事件流只用于实时展示，服务端消费流时不再次保存同一事件。普通事件失败不立即停止执行，但前序事件未补回、未成功保存时，后续关键记账必须失败，不能跨过缺失事件宣告屏障成功。实际调用与异常处理由 PA-04 实现，服务端队列与屏障由 AgentServer 实现，PA-22 只明确契约。
 
 ### 3. 事件
 
@@ -46,7 +48,7 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 | `execution.started` | `goal`、可选的 `decision_event_id` | 私聊和定时任务不做参与判断，`decision_event_id` 改为可选 |
 | `progress.updated`、`reply.delta`、`model.completed`、`output.proposed` | 不变 | — |
 | `tool.intent` | `operation_id`、`tool_call_id`、`tool_name`、可选的 `target_ref`、`params_digest`、`args_summary` | 增加可读参数摘要（敏感参数脱敏）和 `tool_call_id`；删除旧恢复协议用的 `tool_version`、`args_ref`、`authorization_ref` |
-| `tool.completed` | `tool_call_id`、`tool_name`、`args_summary`、`status`、`result_summary`、`result_refs`、可选的 `operation_id`、`reason` | 所有工具都发；只读工具没有登记意图，所以 `operation_id` 可选；删除 `receipt_ref`。成功时需要结果摘要或结果引用，失败和未知需要原因 |
+| `tool.completed` | `tool_call_id`、`tool_name`、`args_summary`、`status`、必填的 `result_summary`、`result_refs`、可选的 `operation_id`、`reason` | 所有工具都发；成功、失败、未知都必须有非空白的可读结果摘要，结果引用不能替代摘要；只读工具的 `operation_id` 可选；删除 `receipt_ref`。失败和未知仍需原因 |
 | `window.switched` | `archive_ref`、`window_seq` | 取代 `window.activated`；只包含旧窗归档引用和新窗序号，不定义完整归档结构 |
 | `execution.paused` | `reason`、`intercepted`、`detail` | 合并 `control.waiting` 和 `execution.suspended`。`reason` 固定为五种：`awaiting_confirmation / stopped / budget_denied / context_unfit / error`；只有 `awaiting_confirmation` 携带被拦截的调用，且至少一项；`budget_denied`、`context_unfit`、`error` 必须说明原因 |
 | `execution.final` | 不变，状态改为 `completed / ignored / cancelled / failed` | `failed-final` 改名为 `failed` |
@@ -67,6 +69,7 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
   - `GroupMessageQuery`：关键词、时间范围、发送者、游标、条数。
   - `GroupMessagesResult`：`found` 至少带一条消息，可以带下一页游标；`empty` 表示已查完且确定没有；`incomplete` 表示没查完或查询失败，必须说明原因，可以带已拿到的部分消息，不能当作“没有”。
 - 会话状态记录和归档的结构不在本项定义，分别由 PA-09、PA-10 定义。
+- **已确认的序列化约束**：会话状态记录与历史窗口归档统一使用 JSON，不使用 pickle；不直接序列化整个 Session 或运行对象。保存时按白名单提取字段并转换成 JSON 数据，读取时校验字段并显式还原所需对象（包括中断状态）。PA-22 只记录该约束；会话状态记录的编码与还原由 PA-09 实现，归档的编码与读取由 PA-10 实现，目前均待实现。
 
 ## 拒绝的方案及原因
 
@@ -75,7 +78,7 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 | 保留 `epoch` 留给将来跨进程部署 | 现在没有任何使用方。跨进程需要的是执行者代次加超时查询的整套协议（v2 附录 C），届时再整体设计 |
 | 把 `record` 拆成“入队”和“落盘”两个方法 | v2 §14 规定是同一个接口，等待方式由事件类型决定、由服务端实现；拆开反而要求 Agent 自己判断该调哪个 |
 | `GroupChatPort` 显式传入 `group` | 执行上下文里没有群标识，新增字段等于要求服务端再传一份可以由 Session 推出的信息；按 Session 定位与其他端口一致 |
-| PA-22 一并定义会话状态记录和归档结构 | 没有使用方；会在 PA-09、PA-10 确定白名单字段和序列化方式之前就把格式定死 |
+| PA-22 一并定义会话状态记录和归档结构 | 没有使用方；会在 PA-09、PA-10 确定白名单字段、JSON 字段编码和对象还原规则之前就把格式定死；本项只记录已确认的 JSON / 不使用 pickle 约束 |
 | 预算端口保留 `unknown` | 同进程调用失败直接抛异常，与 v2“不设计结果未知状态”的前提一致 |
 | 把 `CommitPort` 改名为记账或日志端口 | v2 中它仍是“记账”接口，保留名称可以减少无关改动 |
 
@@ -95,7 +98,7 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
    - 执行上下文拒绝 `epoch`、`authority_handle`，以及等于自身 `execution_id` 的 `recovery_ref`。
    - 事件只接受 11 种类型，被删除的 4 种类型被拒绝。
    - 五种暂停原因及其负载规则；`failed-final` 被拒绝。
-   - `tool.intent` 拒绝旧字段；`tool.completed` 的成功证据规则。
+   - `tool.intent` 拒绝旧字段；`tool.completed` 在成功、失败、未知三种状态下都要求非空白结果摘要，即使有结果引用也不能缺省。
    - 群消息的撤回规则，以及结果三种状态的区分。
    - 预算结果不再接受 `unknown`。
    - 删除的符号不再从外层包导出。
@@ -112,13 +115,15 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 
 | 验证 | 结果 |
 | --- | --- |
-| `tests/unit_tests/harness/persistent_agent` | 161 passed：协议 87、构造 40、绑定 34（绑定测试数与 F_03 一致） |
+| `tests/unit_tests/harness/persistent_agent` | 173 passed：协议 99、构造 40、绑定 34（绑定测试数与 F_03 一致） |
 | 共享回归集（`test_leaf_spec_build`、`test_spec_ownership`、`test_factory_model_anomaly_detection_rail`、`test_deep_agent_cold_build`、`test_deep_agent_workspace`、`test_ability_manager_add_ability`、`tests/unit_tests/agent/react_agent`） | 213 passed，与改动前相同 |
 | Ruff check / format --check（`openjiuwen/harness/persistent_agent`、对应测试目录） | 通过 |
 | 外层包导出 | 31 个导出全部可以解析；仓库中没有本包以外的代码引用被删除的符号 |
 | mypy（改动的源文件） | 2 个报错，均为改动前已有：`events.py` 中按事件类型选负载模型的 `model_validate` 调用，以及 `build_context.py` 中 `derive` 的返回类型。与本特性无关，未修改 |
 
 构造测试用一个所有读写方法都抛错的 `BaseKVStore` 替身作为窗口存储后端，证明构造过程不读写存储；绑定测试使用 `InMemoryKVStore`。
+
+2026-10-07 审阅修订：恢复 D1 原失败策略并保留关键事件屏障；`tool.completed.result_summary` 在三种结果状态下均必填，增加 12 项缺省、空值、空白摘要及 JSON 往返用例。PA 包与共享回归合计 386 passed。记账异常处理与服务端队列不在本项实现范围。
 
 ## 已知遗留
 

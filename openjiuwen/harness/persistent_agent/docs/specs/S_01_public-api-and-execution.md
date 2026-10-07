@@ -28,7 +28,7 @@ PersistentPorts 已定义异步方法及类型化返回值；工厂仍仅验证�
 
 | 依赖 | 方法 / 类型 | 要点 |
 | --- | --- | --- |
-| `commit`（必需） | `record(execution, event) -> None` | 普通事件进入服务端按 Execution 维护的有序队列后返回；`tool.intent`、`execution.paused`、`execution.final` 等此前事件和本事件全部落盘后返回；任何失败抛异常，调用方停止当前执行（v2 §9.1） |
+| `commit`（必需） | `record(execution, event) -> None` | 所有事件统一 await record；普通事件入队后返回，调用失败只记诊断并继续；`tool.intent`、`execution.paused`、`execution.final` 等此前事件和本事件全部落盘后返回，调用失败停止当前执行；前序未保存时屏障不能成功（v2 §9.1） |
 | | `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按产生顺序返回同一 Session、同一 Request 下该次执行已保存的事件；失败抛异常 |
 | `budget`（必需） | `admit` → `BudgetAdmission`；`report` → `BudgetReport` | 准入只有 admitted / denied，准入须含 reservation_ref；回报只有 confirmed / rejected，确认须含 receipt_ref；调用失败抛异常 |
 | `window_backend`（必需） | `BaseKVStore` 实例 | 会话状态记录与窗口归档的存储后端；构造时只检查类型。持久化、命名空间隔离以及 Agent 工具不可访问由服务端保证 |
