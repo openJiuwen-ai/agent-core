@@ -270,6 +270,7 @@ def test_event_and_nested_payload_are_immutable(api):
                 "tool_name": "write_file",
                 "args_summary": "path=reports/0930.xlsx",
                 "status": "unknown",
+                "result_summary": "写入超时，实际文件状态需查证",
                 "operation_id": "op1",
                 "reason": "timed out",
             },
@@ -357,17 +358,56 @@ def test_tool_intent_is_redacted_summary_without_old_recovery_fields(api):
         api.ToolIntentPayload(**{**intent, "args_summary": " "})
 
 
-def test_tool_success_requires_result_evidence(api):
+def test_tool_success_requires_a_summary_even_with_references(api):
     done = dict(tool_call_id="call-1", tool_name="read_file", args_summary="path=a.txt", status="succeeded")
     with pytest.raises(ValidationError):
         api.ToolCompletedPayload(**done)
     read = api.ToolCompletedPayload(**done, result_summary="12 行")
     assert read.operation_id is None and read.result_summary == "12 行"
-    assert api.ToolCompletedPayload(**done, result_refs=("blob-1",)).result_refs == ("blob-1",)
     with pytest.raises(ValidationError):
-        api.ToolCompletedPayload(**done, receipt_ref="receipt")
+        api.ToolCompletedPayload(**done, result_refs=("blob-1",))
+    referenced = api.ToolCompletedPayload(**done, result_summary="12 行", result_refs=("blob-1",))
+    assert referenced.result_refs == ("blob-1",) and referenced.result_summary == "12 行"
     with pytest.raises(ValidationError):
-        api.ToolCompletedPayload(**{**done, "status": "failed"})
+        api.ToolCompletedPayload(**done, result_summary="12 行", receipt_ref="receipt")
+    with pytest.raises(ValidationError):
+        api.ToolCompletedPayload(**{**done, "status": "failed"}, result_summary="读取失败")
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "unknown"])
+@pytest.mark.parametrize("summary", [None, "", " \n\t"])
+def test_all_tool_outcomes_reject_empty_summaries_even_with_references(api, status, summary):
+    payload = dict(
+        tool_call_id="call-1",
+        tool_name="read_file",
+        args_summary="path=a.txt",
+        status=status,
+        result_summary=summary,
+        result_refs=("blob-1",),
+        reason="读取超时" if status != "succeeded" else None,
+    )
+    with pytest.raises(ValidationError):
+        api.ToolCompletedPayload(**payload)
+
+
+@pytest.mark.parametrize("status", ["succeeded", "failed", "unknown"])
+def test_all_tool_outcomes_require_and_roundtrip_a_readable_summary(api, status):
+    payload = dict(
+        tool_call_id="call-1",
+        tool_name="read_file",
+        args_summary="path=a.txt",
+        status=status,
+        result_refs=("blob-1",),
+        reason="读取超时" if status != "succeeded" else None,
+    )
+    with pytest.raises(ValidationError):
+        api.ToolCompletedPayload(**payload)
+    outcome = api.ToolCompletedPayload(
+        **payload, result_summary="读取 12 行" if status == "succeeded" else "读取未完成"
+    )
+    restored = api.ToolCompletedPayload.model_validate_json(outcome.model_dump_json())
+    assert restored.result_summary == outcome.result_summary
+    assert restored.status == status
 
 
 def test_unknown_usage_is_not_zero(api):
