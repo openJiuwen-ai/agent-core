@@ -1,9 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Immutable host-supplied invocation references; not proof of a live lease."""
+"""Immutable host-supplied invocation references for one Execution."""
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -22,12 +22,11 @@ class ExecutionContext:
     config_version: str
     config_fingerprint: str
     principal_ref: str
-    authority_handle: str = field(repr=False)
     startup_scope: frozenset[str]
     source_scope: frozenset[str]
     policy_revision: str
-    epoch: int
     capability_snapshot: frozenset[str]
+    # Earlier Execution of the same Request that this one continues; None for a new Request.
     recovery_ref: str | None = None
 
     def __post_init__(self):
@@ -41,7 +40,6 @@ class ExecutionContext:
             "source_ref",
             "config_version",
             "principal_ref",
-            "authority_handle",
             "policy_revision",
         ):
             value = getattr(self, name)
@@ -49,8 +47,6 @@ class ExecutionContext:
                 raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg=f"missing {name}")
         if not isinstance(self.config_fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", self.config_fingerprint):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid config_fingerprint")
-        if type(self.epoch) is not int or self.epoch < 1:
-            raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="epoch must be positive")
         for name in ("startup_scope", "source_scope", "capability_snapshot"):
             values = getattr(self, name)
             if not isinstance(values, (set, frozenset)) or any(not isinstance(x, str) or not x.strip() for x in values):
@@ -60,3 +56,7 @@ class ExecutionContext:
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="permission/source scope is required")
         if self.recovery_ref is not None and (not isinstance(self.recovery_ref, str) or not self.recovery_ref.strip()):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid recovery_ref")
+        if self.recovery_ref == self.execution_id:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="recovery_ref must name an earlier Execution"
+            )

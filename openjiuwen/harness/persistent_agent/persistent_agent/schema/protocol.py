@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Immutable protocol primitives; validation never grants execution authority."""
+"""Immutable protocol primitives shared by events and host responses."""
 
 from typing import Annotated, Literal, Self
 
@@ -35,7 +35,6 @@ class InvocationRef(ProtocolModel):
     request_id: Identifier
     execution_id: Identifier
     source_ref: Identifier
-    epoch: Positive
 
     @classmethod
     def from_execution(cls, execution: ExecutionContext) -> "InvocationRef":
@@ -45,10 +44,10 @@ class InvocationRef(ProtocolModel):
         return cls(**{name: getattr(execution, name) for name in InvocationRef.model_fields})
 
     def assert_matches(self, execution: ExecutionContext) -> None:
-        """Reject protocol data associated with another invocation or epoch."""
+        """Reject protocol data associated with another invocation."""
         expected = InvocationRef.from_execution(execution)
         if any(getattr(self, name) != getattr(expected, name) for name in InvocationRef.model_fields):
-            raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="protocol invocation/epoch mismatch")
+            raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="protocol invocation mismatch")
 
 
 class ModelUsage(ProtocolModel):

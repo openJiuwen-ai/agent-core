@@ -20,8 +20,8 @@ from .schema.spec import PersistentAgentSpec
 def create_persistent_agent(spec: PersistentAgentSpec, *, context: PersistentBuildContext) -> DeepAgent:
     """Build exactly one native DeepAgent, without starting a Persistent task.
 
-    A host-provisioned workspace must already exist. Port methods are not called;
-    lease/authorization rechecks and policy enforcement belong to PA-03/PA-04.
+    A host-provisioned workspace must already exist. Port methods and the window
+    backend are not called; execution behavior belongs to the execution entries.
     Only trusted, side-effect-free construction providers may be supplied.
     """
     if not isinstance(spec, PersistentAgentSpec) or not isinstance(context, PersistentBuildContext):

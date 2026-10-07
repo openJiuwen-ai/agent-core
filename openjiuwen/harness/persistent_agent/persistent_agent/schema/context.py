@@ -1,162 +1,88 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Typed window and versioned-material contracts; no storage implementation."""
+"""Group-message and knowledge-material contracts; no storage or retrieval implementation."""
 
+from datetime import timezone
 from typing import Annotated, Literal, Self
 
-from pydantic import Field, model_validator
+from pydantic import AwareDatetime, Field, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
-from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
-
-from .protocol import Digest, Identifier, InvocationRef, Nonnegative, Positive, ProtocolModel, Reason
+from .protocol import Digest, Identifier, InvocationRef, Nonnegative, ProtocolModel, Reason
 
 
-class WindowHead(ProtocolModel):
-    """Authoritative active-window pointer returned by the host store."""
+class GroupMessage(ProtocolModel):
+    """One group message as authorized for this Session; recalled messages carry no body."""
 
-    active_window_ref: Identifier
-    active_window_revision: Positive
-    head_revision: Nonnegative
-    authority_epoch: Positive
+    message_id: Identifier
+    sender_id: Identifier
+    sender_name: Annotated[str, Field(min_length=1, max_length=512)]
+    sender_kind: Literal["human", "agent"]
+    received_at: AwareDatetime
+    text: Annotated[str, Field(max_length=65536)] | None = None
+    mention_ids: Annotated[tuple[Identifier, ...], Field(max_length=128)] = ()
+    reply_to: Identifier | None = None
+    attachment_refs: Annotated[tuple[Identifier, ...], Field(max_length=128)] = ()
+    status: Literal["normal", "edited", "recalled"] = "normal"
+    # Background only: a queued request must never become the current task's instruction.
+    queued_request: bool = Field(default=False, strict=True)
 
-
-class WindowRecord(ProtocolModel):
-    """Immutable, addressable version of one private context window."""
-
-    window_ref: Identifier
-    window_revision: Positive
-    predecessor_ref: Identifier | None = None
-    content_ref: Identifier
-    content_digest: Digest
-    source_refs: Annotated[tuple[Identifier, ...], Field(max_length=128)] = ()
-    event_refs: Annotated[tuple[Identifier, ...], Field(max_length=128)] = ()
-
-
-class ContextHeadResult(InvocationRef):
-    """Outcome of resolving the authoritative active-window pointer."""
-
-    status: Literal["found", "empty", "unknown", "unavailable"]
-    head: WindowHead | None = None
-    query_complete: bool = Field(default=False, strict=True)
-    watermark: Nonnegative | None = None
-    reason: Reason | None = None
+    @field_validator("received_at")
+    @classmethod
+    def normalize_time(cls, value):
+        """Normalize server receive time to UTC."""
+        return value.astimezone(timezone.utc)
 
     @model_validator(mode="after")
-    def validate_head_result(self) -> Self:
-        """Keep empty, unknown, and found head outcomes unambiguous."""
-        if self.status == "found":
-            if self.head is None or self.head.authority_epoch != self.epoch:
-                raise PydanticCustomError("persistent_context", "found head must match the execution epoch")
-        elif self.head is not None:
-            raise PydanticCustomError("persistent_context", "non-found head result cannot carry a head")
-        if self.status == "empty" and (not self.query_complete or self.watermark is None):
-            raise PydanticCustomError("persistent_context", "empty head requires a complete query and watermark")
-        if self.status in ("unknown", "unavailable") and self.reason is None:
-            raise PydanticCustomError("persistent_context", "unknown/unavailable head requires a reason")
-        if self.query_complete != (self.watermark is not None):
-            raise PydanticCustomError("persistent_context", "head completeness and watermark must be paired")
+    def validate_recall(self) -> Self:
+        """Never expose the body of a recalled message."""
+        if self.status == "recalled" and self.text is not None:
+            raise PydanticCustomError("persistent_context", "recalled message cannot carry text")
         return self
 
 
-class WindowReadResult(InvocationRef):
-    """Outcome of reading one exact immutable window version."""
+class GroupMessageQuery(ProtocolModel):
+    """Bounded search over the Session's group history."""
 
-    status: Literal["found", "not_found", "forbidden", "unavailable", "unknown"]
-    window_ref: Identifier
-    window_revision: Positive
-    record: WindowRecord | None = None
-    query_complete: bool = Field(default=False, strict=True)
-    watermark: Nonnegative | None = None
-    reason: Reason | None = None
+    query: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
+    since: AwareDatetime | None = None
+    until: AwareDatetime | None = None
+    sender_id: Identifier | None = None
+    cursor: Identifier | None = None
+    limit: Annotated[int, Field(strict=True, gt=0, le=500)] = 50
 
     @model_validator(mode="after")
-    def validate_window_read(self) -> Self:
-        """Require returned content and completeness to match the requested version."""
-        if self.status == "found":
-            if (
-                self.record is None
-                or self.record.window_ref != self.window_ref
-                or self.record.window_revision != self.window_revision
-            ):
-                raise PydanticCustomError("persistent_context", "window result must match the requested version")
-        elif self.record is not None:
-            raise PydanticCustomError("persistent_context", "non-found window result cannot carry a record")
-        if self.status == "not_found" and (not self.query_complete or self.watermark is None):
-            raise PydanticCustomError("persistent_context", "not_found requires a complete query and watermark")
-        if self.status in ("forbidden", "unavailable", "unknown") and self.reason is None:
-            raise PydanticCustomError("persistent_context", "failed window read requires a reason")
-        if self.query_complete != (self.watermark is not None):
-            raise PydanticCustomError("persistent_context", "window query completeness and watermark must be paired")
+    def validate_query(self) -> Self:
+        """Require at least one criterion and an ordered time range."""
+        if self.query is None and self.since is None and self.until is None and self.sender_id is None:
+            raise PydanticCustomError("persistent_context", "group search requires a query, time range, or sender")
+        if self.since is not None and self.until is not None and self.since > self.until:
+            raise PydanticCustomError("persistent_context", "group search time range is reversed")
         return self
 
 
-class WindowWrite(ProtocolModel):
-    """Idempotent request to persist a versioned private window."""
+class GroupMessagesResult(InvocationRef):
+    """Found, confirmed absent, or incomplete; incomplete never means "no messages"."""
 
-    operation_id: Identifier
-    record: WindowRecord
-
-
-class HeadAdvance(ProtocolModel):
-    """Conditional request to move the active pointer to a saved window."""
-
-    operation_id: Identifier
-    expected_head_revision: Nonnegative
-    authority_epoch: Positive
-    window_ref: Identifier
-    window_revision: Positive
-
-
-class WindowSwitch(ProtocolModel):
-    """Atomic request to create and activate a new private window."""
-
-    switch_id: Identifier
-    expected_head_revision: Nonnegative
-    authority_epoch: Positive
-    new_window: WindowRecord
-
-
-class WindowMutationResult(InvocationRef):
-    """Host receipt or uncertainty result for a window mutation operation."""
-
-    operation_id: Identifier
-    status: Literal["applied", "conflict", "rejected", "unknown", "not_found"]
-    receipt_ref: Identifier | None = None
-    head: WindowHead | None = None
-    query_complete: bool = Field(default=False, strict=True)
-    watermark: Nonnegative | None = None
+    status: Literal["found", "empty", "incomplete"]
+    messages: Annotated[tuple[GroupMessage, ...], Field(max_length=500)] = ()
+    next_cursor: Identifier | None = None
     reason: Reason | None = None
 
     @model_validator(mode="after")
-    def validate_mutation(self) -> Self:
-        """Validate receipt, epoch, reason, and query-completeness invariants."""
-        if self.status == "applied" and self.receipt_ref is None:
-            raise PydanticCustomError("persistent_context", "applied window mutation requires a receipt")
-        if self.head is not None and self.head.authority_epoch != self.epoch:
-            raise PydanticCustomError("persistent_context", "window head receipt epoch mismatch")
-        if self.status in ("conflict", "rejected", "unknown") and self.reason is None:
-            raise PydanticCustomError("persistent_context", "failed window mutation requires a reason")
-        if self.status == "not_found" and (not self.query_complete or self.watermark is None):
-            raise PydanticCustomError("persistent_context", "not_found requires a complete query and watermark")
-        if self.query_complete != (self.watermark is not None):
-            raise PydanticCustomError("persistent_context", "mutation completeness and watermark must be paired")
+    def validate_messages(self) -> Self:
+        """Keep confirmed absence distinct from an unfinished or failed lookup."""
+        if self.status == "found" and not self.messages:
+            raise PydanticCustomError("persistent_context", "found group result requires messages")
+        if self.status == "empty" and (self.messages or self.next_cursor is not None):
+            raise PydanticCustomError("persistent_context", "empty group result must be a complete absence")
+        if self.status == "incomplete" and self.reason is None:
+            raise PydanticCustomError("persistent_context", "incomplete group result requires a reason")
         return self
-
-    def assert_operation(self, execution, operation_id: str, *, query: bool = False) -> None:
-        """Match a mutation response to its invocation and requested operation."""
-        self.assert_matches(execution)
-        if self.operation_id != operation_id:
-            raise build_error(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, error_msg="window operation receipt mismatch")
-        if self.status == "not_found" and not query:
-            raise build_error(
-                StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, error_msg="not_found is a window operation query result only"
-            )
 
 
 class MaterialQuery(ProtocolModel):
-    """Bounded query for authorized history, knowledge, or group material."""
+    """Bounded query for authorized knowledge material."""
 
     query: Annotated[str, Field(min_length=1, max_length=4096)]
     source_ref: Identifier | None = None
