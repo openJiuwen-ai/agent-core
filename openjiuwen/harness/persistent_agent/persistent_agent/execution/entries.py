@@ -27,6 +27,7 @@ from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY, ToolI
 from ..factory import create_persistent_agent
 from ..schema.build_context import PersistentBuildContext
 from ..schema.events import AgentEvent, EventType
+from ..schema.protocol import TEXT_MAX_CHARS
 from ..schema.request import ConfirmReply, RequestInput
 from ..schema.spec import PersistentAgentSpec
 from . import seams
@@ -37,9 +38,9 @@ from .model_rail import PAUSE_MARKER
 
 _UNSUPPORTED_FLAGS = ("enable_async_subagent", "enable_subagent_runtime", "add_general_purpose_agent")
 _SENSITIVE_KEYS = ("password", "secret", "token", "key", "credential", "authorization")
-_TEXT_LIMIT = 65536
 _DETAIL_LIMIT = 4096
 _END: Any = object()
+_CAPACITY_DETAIL = "final answer exceeds the event size limit; kept in the session state record for handoff"
 
 
 @dataclass(frozen=True)
@@ -69,9 +70,9 @@ def redact_arguments(arguments: Any) -> str:
         try:
             arguments = json.loads(arguments)
         except ValueError:
-            return arguments.strip()[:_TEXT_LIMIT] or "{}"
+            return arguments.strip()[:TEXT_MAX_CHARS] or "{}"
     text = json.dumps(scrub(arguments if arguments is not None else {}), ensure_ascii=False, default=str)
-    return text[:_TEXT_LIMIT] or "{}"
+    return text[:TEXT_MAX_CHARS] or "{}"
 
 
 def _reject(code: StatusCode, message: str, cause: BaseException | None = None):
@@ -167,11 +168,7 @@ def _outcome_from_result(result: dict | None, intercepted: list[dict]) -> _Outco
         reason = result.get("reason") or "error"
         return _Outcome(reason, detail=_detail(result.get("detail"), f"model call skipped: {reason}"))
     if result_type == "answer":
-        text = output if isinstance(output, str) else ""
-        if len(text) <= _TEXT_LIMIT:
-            return _Outcome("completed", text=text)
-        # Never truncate a final answer silently; the Request can continue with a shorter one.
-        return _Outcome("error", detail=f"final answer exceeds {_TEXT_LIMIT} characters")
+        return _Outcome("completed", text=output if isinstance(output, str) else "")
     fallback = f"native result_type {result_type!r}" if result else "native execution ended without a result"
     # Errors, including an exhausted iteration budget, are never handed off as an answer.
     return _Outcome("error", detail=_detail(output, fallback))
@@ -204,8 +201,7 @@ async def _run_native(agent, context: PersistentBuildContext, native_input) -> _
                 if chunk_type == "llm_output" and isinstance(payload, dict):
                     text = payload.get("content")
                     if isinstance(text, str):
-                        for start in range(0, len(text), _TEXT_LIMIT):
-                            await emitter.emit(EventType.REPLY_DELTA, {"text": text[start : start + _TEXT_LIMIT]})
+                        await emitter.emit_text(EventType.REPLY_DELTA, text)
                 elif chunk_type == INTERACTION:
                     intercepted.append(_intercepted_call(payload))
                 elif chunk_type == "answer" and isinstance(payload, dict):
@@ -234,15 +230,25 @@ async def _finish(context: PersistentBuildContext, store, outcome: _Outcome, rep
     """Hand off the answer, save the state record, then record the ending, in this order."""
     emitter = context.binding.control.emitter
     output_refs: tuple[str, ...] = ()
+    pending_answer = None
     try:
         if outcome.kind == "completed" and outcome.text.strip():
             output_id = _output_id(context)
-            await emitter.emit(
-                EventType.OUTPUT_PROPOSED,
-                {"output_id": output_id, "target_ref": reply_target, "share_mode": "message", "text": outcome.text},
-            )
-            output_refs = (output_id,)
-        ending = seams.ExecutionEnding(outcome.kind, context.execution.request_id, reply_target, output_refs)
+            payload = {
+                "output_id": output_id,
+                "target_ref": reply_target,
+                "share_mode": "message",
+                "text": outcome.text,
+            }
+            if await emitter.emit_if_fits(EventType.OUTPUT_PROPOSED, payload) is None:
+                # Only exceeding capacity pauses; the answer is never truncated and is kept for a later handoff.
+                pending_answer = outcome.text
+                outcome = _Outcome("error", detail=_CAPACITY_DETAIL)
+            else:
+                output_refs = (output_id,)
+        ending = seams.ExecutionEnding(
+            outcome.kind, context.execution.request_id, reply_target, output_refs, pending_answer
+        )
         await _store_call("save", store.save(context, ending))
         if outcome.kind in ("completed", "cancelled"):
             final = {"status": outcome.kind, "output_refs": output_refs}
@@ -284,6 +290,8 @@ async def _run(context: PersistentBuildContext, spec, body) -> None:
         _require_assembled_modes(agent)
         await body(agent)
     except BaseException:
+        # Stop accepting controls before any awaited cleanup; the original error and reason stay as they are.
+        context.binding.control.lock_outcome()
         if agent is not None:
             await _close(agent, context, failing=True)
         raise
