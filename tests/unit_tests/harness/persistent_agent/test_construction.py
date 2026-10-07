@@ -9,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.single_agent import AgentCard, create_agent_session
 from openjiuwen.harness.schema.deep_agent_spec import DeepAgentSpec
 
@@ -21,23 +22,34 @@ def api():
 
 
 class Port:
-    async def check(self, *args):
-        raise AssertionError("construction must not check a lease")
+    async def record(self, *args):
+        raise AssertionError("construction must not record events")
 
-    async def submit(self, *args):
-        raise AssertionError("construction must not submit events")
-
-    async def query(self, *args):
-        raise AssertionError("construction must not query events")
-
-    async def poll(self, *args):
-        raise AssertionError("construction must not poll controls")
+    async def read_execution_log(self, *args):
+        raise AssertionError("construction must not read execution logs")
 
     async def admit(self, *args):
         raise AssertionError("construction must not call a model")
 
     async def report(self, *args):
         raise AssertionError("construction must not report model usage")
+
+
+class UntouchedKVStore(BaseKVStore):
+    """Window backend whose every operation fails, proving construction does no storage I/O."""
+
+    def _touched(self, *args, **kwargs):
+        raise AssertionError("construction must not read or write the window backend")
+
+    set = exclusive_set = get = exists = delete = get_by_prefix = _touched
+    delete_by_prefix = mget = batch_delete = pipeline = _touched
+
+
+def ports_for(api, **overrides):
+    port = Port()
+    args = dict(commit=port, budget=port, window_backend=UntouchedKVStore())
+    args.update(overrides)
+    return api.PersistentPorts(**args)
 
 
 def spec_for(api, **kwargs):
@@ -51,7 +63,6 @@ def spec_for(api, **kwargs):
 
 
 def context_for(api, spec, session_id="session-a", **overrides):
-    port = Port()
     execution = api.ExecutionContext(
         namespace_id="tenant",
         agent_id=spec.card.id,
@@ -62,17 +73,15 @@ def context_for(api, spec, session_id="session-a", **overrides):
         config_fingerprint=spec.fingerprint(),
         source_ref="source:message-1",
         principal_ref="user",
-        authority_handle="lease-handle-1",
         startup_scope=frozenset({"read"}),
         source_scope=frozenset({"read"}),
         policy_revision="p1",
-        epoch=1,
         capability_snapshot=spec.enabled_features,
     )
     return api.PersistentBuildContext(
         execution=execution,
         session=create_agent_session(session_id=session_id),
-        ports=api.PersistentPorts(authority=port, commit=port, control=port, budget=port),
+        ports=ports_for(api),
         **overrides,
     )
 
@@ -149,7 +158,7 @@ def test_mismatch_rejected_before_build(api, monkeypatch, bad):
     elif bad == "capabilities":
         ctx.execution = replace(ctx.execution, capability_snapshot=frozenset({"history"}))
     else:
-        ctx.ports = api.PersistentPorts(authority=object(), commit=Port(), control=Port(), budget=Port())
+        ctx.ports = ports_for(api, commit=object())
 
     def forbidden(*args, **kwargs):
         pytest.fail("invalid construction reached DeepAgent build")
@@ -159,39 +168,78 @@ def test_mismatch_rejected_before_build(api, monkeypatch, bad):
         api.create_persistent_agent(spec, context=ctx)
 
 
-@pytest.mark.parametrize("missing", ["authority", "commit", "control", "budget"])
-def test_missing_required_port_fails_before_deep_agent_build(api, monkeypatch, missing):
+@pytest.mark.parametrize(
+    ("missing", "message"),
+    [
+        ("commit", "missing async port commit.record"),
+        ("budget", "missing async port budget.admit"),
+        ("window_backend", "window_backend must be a BaseKVStore"),
+    ],
+)
+def test_missing_required_dependency_fails_before_deep_agent_build(api, monkeypatch, missing, message):
     spec = spec_for(api)
     ctx = context_for(api, spec)
-    port = Port()
-    supplied = {name: port for name in ("authority", "commit", "control", "budget") if name != missing}
-    ctx.ports = api.PersistentPorts(**supplied)
+    ctx.ports = ports_for(api, **{missing: None})
 
     def forbidden(*args, **kwargs):
-        pytest.fail("missing required host port reached DeepAgent build")
+        pytest.fail("missing required host dependency reached DeepAgent build")
 
     monkeypatch.setattr(DeepAgentSpec, "build", forbidden)
-    with pytest.raises(BaseError, match=f"missing async port {missing}."):
+    with pytest.raises(BaseError, match=message):
         api.create_persistent_agent(spec, context=ctx)
 
 
-def test_injected_context_store_must_satisfy_its_contract_before_build(api, monkeypatch):
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"window_backend": object()}, "window_backend must be a BaseKVStore"),
+        ({"commit": type("SyncLog", (Port,), {"read_execution_log": lambda *a: ()})()}, "commit.read_execution_log"),
+        ({"group_chat": object()}, "missing async port group_chat.recent_messages"),
+        ({"knowledge": object()}, "missing async port knowledge.resolve"),
+    ],
+)
+def test_injected_dependencies_must_satisfy_their_contract_before_build(api, monkeypatch, overrides, message):
     spec = spec_for(api)
     ctx = context_for(api, spec)
-    ctx.ports = api.PersistentPorts(
-        authority=Port(),
-        commit=Port(),
-        control=Port(),
-        budget=Port(),
-        context_store=object(),
-    )
+    ctx.ports = ports_for(api, **overrides)
 
     def forbidden(*args, **kwargs):
-        pytest.fail("invalid ContextStore reached DeepAgent build")
+        pytest.fail("malformed host dependency reached DeepAgent build")
 
     monkeypatch.setattr(DeepAgentSpec, "build", forbidden)
-    with pytest.raises(BaseError, match="missing async port context_store.read_head"):
+    with pytest.raises(BaseError, match=message):
         api.create_persistent_agent(spec, context=ctx)
+
+
+def test_optional_group_chat_and_knowledge_ports_are_accepted(api):
+    class GroupChat:
+        async def recent_messages(self, *args):
+            raise AssertionError("construction must not read group messages")
+
+        async def search_messages(self, *args):
+            raise AssertionError("construction must not search group messages")
+
+    class Knowledge:
+        async def resolve(self, *args):
+            raise AssertionError("construction must not resolve knowledge")
+
+        async def read(self, *args):
+            raise AssertionError("construction must not read knowledge")
+
+    spec = spec_for(api)
+    ctx = context_for(api, spec)
+    ctx.ports = ports_for(api, group_chat=GroupChat(), knowledge=Knowledge())
+    agent = api.create_persistent_agent(spec, context=ctx)
+    try:
+        ctx.validate_binding(agent)
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
+@pytest.mark.parametrize("removed", ["authority", "control", "context_store", "history", "group_material"])
+def test_ports_removed_by_v2_are_rejected(api, removed):
+    with pytest.raises(TypeError):
+        ports_for(api, **{removed: Port()})
 
 
 def test_one_context_cannot_be_reused_or_rebound(api):
@@ -257,7 +305,7 @@ def test_workspace_is_not_created_or_populated(api, tmp_path, missing):
         agent.ability_manager.teardown_tools()
 
 
-@pytest.mark.parametrize("field,value", [("namespace_id", ""), ("epoch", 0), ("startup_scope", set())])
+@pytest.mark.parametrize("field,value", [("namespace_id", ""), ("recovery_ref", " "), ("startup_scope", set())])
 def test_invalid_execution_identity(api, field, value):
     spec = spec_for(api)
     ctx = context_for(api, spec)

@@ -12,6 +12,7 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.store import InMemoryKVStore
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import AgentCard, create_agent_session
@@ -68,10 +69,10 @@ class LocalModel:
 
 
 class NoHostCalls:
-    async def check(self, *args):
-        raise AssertionError("binding does not grant authority")
+    async def record(self, *args):
+        raise AssertionError("binding does not record events or call the budget")
 
-    submit = query = poll = admit = report = check
+    read_execution_log = admit = report = record
 
 
 @pytest.fixture
@@ -108,18 +109,16 @@ def built(monkeypatch):
             config_fingerprint=spec.fingerprint(),
             source_ref="source:message-1",
             principal_ref="user",
-            authority_handle="lease-handle-1",
             startup_scope=frozenset({"read"}),
             source_scope=frozenset({"read"}),
             policy_revision="p1",
-            epoch=1,
             capability_snapshot=spec.enabled_features,
         )
         host = NoHostCalls()
         ctx = api.PersistentBuildContext(
             execution=execution,
             session=create_agent_session(session_id=session_id, card=spec.card),
-            ports=api.PersistentPorts(authority=host, commit=host, control=host, budget=host),
+            ports=api.PersistentPorts(commit=host, budget=host, window_backend=InMemoryKVStore()),
         )
         agent = api.create_persistent_agent(spec, context=ctx)
         pairs.append(agent)
@@ -144,7 +143,7 @@ async def test_bound_invoke_runs_real_native_agent(built):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "mismatch", ["session", "same-id-session", "execution", "epoch", "config-version", "ports", "owner"]
+    "mismatch", ["session", "same-id-session", "execution", "request", "config-version", "ports", "owner"]
 )
 async def test_mismatch_is_rejected_before_model_or_state_change(built, mismatch):
     agent, ctx, model = built()
@@ -153,8 +152,8 @@ async def test_mismatch_is_rejected_before_model_or_state_change(built, mismatch
         ctx.session = create_agent_session(session_id="other" if mismatch == "session" else "session-a")
     elif mismatch == "execution":
         ctx.execution = replace(ctx.execution, execution_id="other")
-    elif mismatch == "epoch":
-        ctx.execution = replace(ctx.execution, epoch=2)
+    elif mismatch == "request":
+        ctx.execution = replace(ctx.execution, request_id="other-request")
     elif mismatch == "config-version":
         ctx.execution = replace(ctx.execution, config_version="v2")
     elif mismatch == "ports":
@@ -576,7 +575,7 @@ async def test_context_changed_during_native_call_is_rejected_on_return(built):
     task = asyncio.create_task(runtime().invoke_bound(agent, {"query": "waiting"}, context=ctx))
     try:
         await asyncio.wait_for(model.started.wait(), 5)
-        ctx.execution = replace(ctx.execution, epoch=2)
+        ctx.execution = replace(ctx.execution, request_id="other-request")
         model.release.set()
         with pytest.raises(BaseError):
             await task
