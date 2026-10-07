@@ -48,9 +48,12 @@ class PersistentAgentSpec(DeepAgentSpec):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="use Persistent construction entry")
         parts = super().resolve_parts(context)
         context.binding.parts = parts
+        from ..execution.model_rail import PersistentModelCallRail
         from ..execution.stream_lifecycle import NativeStreamTaskLifecycle
 
         parts.config.stream_task_lifecycle = NativeStreamTaskLifecycle()
+        # Inert until an execution entry attaches its emitter to this binding.
+        parts.rails.append(PersistentModelCallRail(context.binding))
         return parts
 
     def build(self, context: "PersistentBuildContext | None" = None) -> "DeepAgent":
