@@ -10,6 +10,7 @@
 
 Rail 只新增工具、不改写 prompt，符合 Harness 的 Rail 扩展范式。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -17,14 +18,13 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
-from openjiuwen.harness.rails.base import DeepAgentRail
-
 from openjiuwen.contrib.scholar_rails.arxiv_tool import (
     CitationRegistry,
     fetch_arxiv_by_id,
     search_arxiv,
 )
+from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
+from openjiuwen.harness.rails.base import DeepAgentRail
 
 
 class LiteratureGroundingRail(DeepAgentRail):
@@ -43,9 +43,7 @@ class LiteratureGroundingRail(DeepAgentRail):
         self._registry_path.parent.mkdir(parents=True, exist_ok=True)
         self._max_results = max_results
         self._registry = (
-            CitationRegistry.load(self._registry_path)
-            if self._registry_path.exists()
-            else CitationRegistry()
+            CitationRegistry.load(self._registry_path) if self._registry_path.exists() else CitationRegistry()
         )
         self._tools: list[Any] = []
 
@@ -79,10 +77,17 @@ class LiteratureGroundingRail(DeepAgentRail):
             async def invoke(**kwargs):
                 # arXiv rate limiting and network I/O must not block the agent loop.
                 return await asyncio.to_thread(fn, **kwargs)
-            return LocalFunction(ToolCard(
-                name=name, description=description, input_params=parameters,
-                parallel_safe=False, idempotent=True,
-            ), invoke)
+
+            return LocalFunction(
+                ToolCard(
+                    name=name,
+                    description=description,
+                    input_params=parameters,
+                    parallel_safe=False,
+                    idempotent=True,
+                ),
+                invoke,
+            )
 
         def arxiv_search(query: str, max_results: Optional[int] = None) -> str:
             records = search_arxiv(query, max_results=max_results or rail._max_results)

@@ -14,30 +14,31 @@
 四个 Rail 均为**纯新增、零侵入**：不修改 Harness 任何现有类，仅通过
 Rail 生命周期钩子注入能力，完全遵循 ``Agent = Model + Harness`` 的扩展范式。
 """
+
 from __future__ import annotations
 
-from openjiuwen.contrib.scholar_rails.resource_meter_rail import (
-    MeterEvent,
-    ResourceMeterRail,
-    load_events,
-    summarize,
-)
-from openjiuwen.contrib.scholar_rails.literature_grounding_rail import (
-    LiteratureGroundingRail,
-)
-from openjiuwen.contrib.scholar_rails.iclr_review_rail import (
-    ICLRReviewRail,
-    ReviewScore,
+from openjiuwen.contrib.scholar_rails.admission_evidence import (
+    EvidenceBundle,
+    ThreeCriticAdmission,
+    emit_evidence,
 )
 from openjiuwen.contrib.scholar_rails.confidence_gated_evolution_rail import (
     ConfidenceGatedSkillEvolutionRail,
     EvolutionGateLog,
     TaskOutcome,
 )
-from openjiuwen.contrib.scholar_rails.admission_evidence import (
-    EvidenceBundle,
-    ThreeCriticAdmission,
-    emit_evidence,
+from openjiuwen.contrib.scholar_rails.iclr_review_rail import (
+    ICLRReviewRail,
+    ReviewScore,
+)
+from openjiuwen.contrib.scholar_rails.literature_grounding_rail import (
+    LiteratureGroundingRail,
+)
+from openjiuwen.contrib.scholar_rails.resource_meter_rail import (
+    MeterEvent,
+    ResourceMeterRail,
+    load_events,
+    summarize,
 )
 from openjiuwen.contrib.scholar_rails.skill_invocation import (
     compare_prompt_vs_invoke,

@@ -12,34 +12,34 @@
 该 Rail 只读回调上下文，不改写任何 prompt / tool 行为，因此对被观测的
 Agent 透明（零侵入），符合 Harness 的 Rail 生命周期扩展范式。
 """
+
 from __future__ import annotations
 
 import json
 import threading
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.base import DeepAgentRail
-
 
 # DeepSeek 公开价目（人民币 / 百万 token），可通过构造参数覆盖
 # 参考 https://api-docs.deepseek.com/quick_start/pricing （deepseek-chat，缓存命中/未命中区分）
 _DEFAULT_PRICING = {
-    "input_per_mtok": 2.0,          # ¥2 / 1M input（缓存未命中）
-    "input_cached_per_mtok": 0.5,   # ¥0.5 / 1M input（缓存命中）
-    "output_per_mtok": 8.0,         # ¥8 / 1M output
+    "input_per_mtok": 2.0,  # ¥2 / 1M input（缓存未命中）
+    "input_cached_per_mtok": 0.5,  # ¥0.5 / 1M input（缓存命中）
+    "output_per_mtok": 8.0,  # ¥8 / 1M output
 }
 
 
 @dataclass
 class MeterEvent:
     """单条计量事件。"""
-    ts: float                 # unix 时间戳
-    kind: str                 # model_call | tool_call | task_iteration | invoke
-    name: str = ""            # 模型名 / 工具名 / "task_loop" / agent name
+
+    ts: float  # unix 时间戳
+    kind: str  # model_call | tool_call | task_iteration | invoke
+    name: str = ""  # 模型名 / 工具名 / "task_loop" / agent name
     input_tokens: int = 0
     output_tokens: int = 0
     cached_input_tokens: int = 0
@@ -138,9 +138,7 @@ class ResourceMeterRail(DeepAgentRail):
         dur = self._tock(key)
         inputs = getattr(ctx, "inputs", None)
         tool = getattr(inputs, "tool_name", "") if inputs is not None else ""
-        self._emit(
-            MeterEvent(ts=time.time(), kind="tool_call", name=str(tool), duration_sec=dur)
-        )
+        self._emit(MeterEvent(ts=time.time(), kind="tool_call", name=str(tool), duration_sec=dur))
 
     async def before_task_iteration(self, ctx: Any) -> None:  # noqa: D102
         self._tick(ctx)
@@ -212,7 +210,7 @@ def summarize(log_path: str | Path, *, pricing: Optional[dict[str, float]] = Non
     for e in tool_calls:
         tool_counts[e.name] = tool_counts.get(e.name, 0) + 1
 
-    wall_time = (max((e.ts for e in events), default=0) - min((e.ts for e in events), default=0))
+    wall_time = max((e.ts for e in events), default=0) - min((e.ts for e in events), default=0)
 
     return {
         "event_count": len(events),

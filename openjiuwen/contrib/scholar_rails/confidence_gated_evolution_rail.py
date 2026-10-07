@@ -21,14 +21,15 @@ script_artifact）后即触发 LLM 生成演进记录。这在长任务序列上
 该 Rail 通过组合（持有一个原生 ``SkillEvolutionRail`` 的引用并在其
 信号回调前/后插入门控逻辑）工作，不 fork 原生实现，保证兼容性。
 """
+
 from __future__ import annotations
 
 import json
 import time
 from collections import deque
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Optional
+from typing import Any, Deque
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -38,6 +39,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 @dataclass
 class TaskOutcome:
     """单任务结果（供成功率滑窗统计）。"""
+
     task_id: str
     success: bool
     ts: float = field(default_factory=time.time)
@@ -46,6 +48,7 @@ class TaskOutcome:
 @dataclass
 class EvolutionGateLog:
     """一次门控判定的审计记录。"""
+
     ts: float
     allowed: bool
     reason: str
@@ -143,13 +146,15 @@ class ConfidenceGatedSkillEvolutionRail(DeepAgentRail):
         prompt = (
             "You are evaluating whether the following distilled experience is "
             "GENERAL and REUSABLE for FUTURE similar tasks (not a one-off fix).\n"
-            "Reply with ONLY a JSON object: {\"confidence\": <float 0-1>, \"reason\": \"<short>\"}\n\n"
+            'Reply with ONLY a JSON object: {"confidence": <float 0-1>, "reason": "<short>"}\n\n'
             "=== EXPERIENCE ===\n" + record_text[:8000]
         )
         try:
             resp = await self._judge.generate(messages=[{"role": "user", "content": prompt}])
             text = getattr(resp, "content", None) or (resp if isinstance(resp, str) else str(resp))
-            import json as _json, re as _re
+            import json as _json
+            import re as _re
+
             m = _re.search(r"\{.*\}", text, _re.DOTALL)
             if m:
                 payload = _json.loads(m.group(0))

@@ -1,5 +1,6 @@
 # coding: utf-8
 """Native scholar tool registration and review dispatch regressions; no network."""
+
 import json
 import threading
 from types import SimpleNamespace
@@ -7,11 +8,11 @@ from uuid import uuid4
 
 import pytest
 
+from openjiuwen.contrib.scholar_rails import iclr_review_rail as review
+from openjiuwen.contrib.scholar_rails import literature_grounding_rail as grounding
 from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
-from openjiuwen.contrib.scholar_rails import literature_grounding_rail as grounding
-from openjiuwen.contrib.scholar_rails import iclr_review_rail as review
 
 
 def test_grounding_builds_native_tool_cards(tmp_path):
@@ -30,7 +31,8 @@ async def test_real_manager_registers_executes_and_unregisters(tmp_path):
         rail.init(agent)
         assert isinstance(manager.get("arxiv_search"), ToolCard)
         result, _ = await manager._execute_single_tool_call(
-            ToolCall(id="list-keys", type="function", name="list_citable_keys", arguments="{}"), session=None,
+            ToolCall(id="list-keys", type="function", name="list_citable_keys", arguments="{}"),
+            session=None,
         )
         assert json.loads(result) == {"citable_keys": []}
         rail.uninit(agent)
@@ -58,8 +60,10 @@ def test_uninit_preserves_another_rail_replacement(tmp_path):
 def test_registration_failure_propagates(tmp_path, monkeypatch):
     rail = grounding.LiteratureGroundingRail(tmp_path / "registry.json")
     manager = AbilityManager(owner_id="scholar-patch-" + uuid4().hex)
+
     def reject(card, tool):
         raise RuntimeError("registration unavailable")
+
     monkeypatch.setattr(manager, "add_ability", reject)
     with pytest.raises(RuntimeError, match="registration unavailable"):
         rail.init(SimpleNamespace(ability_manager=manager))
@@ -69,9 +73,11 @@ def test_registration_failure_propagates(tmp_path, monkeypatch):
 async def test_arxiv_io_runs_off_the_agent_event_loop(tmp_path, monkeypatch):
     main_thread = threading.get_ident()
     calls = []
+
     def offline_search(query, max_results):
         calls.append((query, max_results, threading.get_ident()))
         return []
+
     monkeypatch.setattr(grounding, "search_arxiv", offline_search)
     tool = grounding.LiteratureGroundingRail(tmp_path / "registry.json")._build_tools()[0]
     assert json.loads(await tool.invoke({"query": "test"})) == []
@@ -91,12 +97,23 @@ async def test_review_supports_native_and_legacy_model_methods(tmp_path, monkeyp
     # Keep dispatch independent from the separate literal-brace regression.
     monkeypatch.setattr(review, "_REVIEW_PROMPT", "Review draft: {draft}")
     calls = []
+
     async def endpoint(messages):
         calls.append(messages)
-        return SimpleNamespace(content=json.dumps({
-            "soundness": 7, "contribution": 7, "clarity": 7, "reproducibility": 7,
-            "overall": 7, "decision": "accept", "comments": "Explicit test result",
-        }))
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "soundness": 7,
+                    "contribution": 7,
+                    "clarity": 7,
+                    "reproducibility": 7,
+                    "overall": 7,
+                    "decision": "accept",
+                    "comments": "Explicit test result",
+                }
+            )
+        )
+
     judge = SimpleNamespace(**{method: endpoint})
     rail = review.ICLRReviewRail(judge, report_path=tmp_path / "review.jsonl")
     score = await rail._run_review("real draft content")

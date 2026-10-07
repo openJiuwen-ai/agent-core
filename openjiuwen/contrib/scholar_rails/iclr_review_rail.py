@@ -9,14 +9,15 @@
 
 同时暴露 ``export_review_report`` 供 pipeline 汇总每轮评分曲线。
 """
+
 from __future__ import annotations
 
 import json
 import re
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -26,13 +27,14 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 @dataclass
 class ReviewScore:
     """一轮结构化评审结果。"""
+
     round_idx: int
     soundness: float
     contribution: float
     clarity: float
     reproducibility: float
     overall: float
-    decision: str                 # accept / borderline / reject
+    decision: str  # accept / borderline / reject
     comments: str = ""
     ts: float = field(default_factory=time.time)
 
@@ -120,11 +122,13 @@ class ICLRReviewRail(DeepAgentRail):
                 payload = json.loads(m.group(0))
             except Exception:  # noqa: BLE001
                 payload = {}
+
         def _f(name: str) -> float:
             try:
                 return float(payload.get(name, 5.0))
             except Exception:  # noqa: BLE001
                 return 5.0
+
         return ReviewScore(
             round_idx=self._round,
             soundness=_f("soundness"),
@@ -154,8 +158,7 @@ class ICLRReviewRail(DeepAgentRail):
             followup = (
                 "[ICLR Review Gate] The current draft scored overall="
                 f"{score.overall:.1f} (< {self._accept_overall}). "
-                "Revise the draft addressing these reviewer comments, then resubmit:\n"
-                + score.comments
+                "Revise the draft addressing these reviewer comments, then resubmit:\n" + score.comments
             )
             agent = getattr(ctx, "agent", None)
             controller = getattr(agent, "_loop_controller", None)

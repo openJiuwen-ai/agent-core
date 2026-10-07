@@ -8,6 +8,7 @@ MUSE 都把「执行」当作准入或复用的证据；本模块把 tool_call �
 
 不改变 agent 行为，只读 Harness ``after_tool_call`` / JSONL。
 """
+
 from __future__ import annotations
 
 import json
@@ -98,6 +99,7 @@ class InvocationSummary:
 
     def to_dict(self) -> dict[str, Any]:
         from dataclasses import asdict
+
         return asdict(self)
 
 
@@ -123,8 +125,9 @@ def compare_prompt_vs_invoke(
     )
 
 
-def invocations_from_meter_events(events: Iterable[Any], *, since_ts: float = 0.0,
-                                  until_ts: Optional[float] = None) -> list[str]:
+def invocations_from_meter_events(
+    events: Iterable[Any], *, since_ts: float = 0.0, until_ts: Optional[float] = None
+) -> list[str]:
     """从 ResourceMeter JSONL 事件提取本段 skill_tool 调用。"""
     names: list[str] = []
     for e in events:

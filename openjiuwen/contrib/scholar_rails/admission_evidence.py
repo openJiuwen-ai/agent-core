@@ -13,6 +13,7 @@
 主基准 45×3×3 仍走 Gate1 余量门（when-gate）。``strict=True`` 才强制
 执行向重放（对应 ``evolve_probe`` / utility k，live 上为诚实负结果）。
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -78,8 +79,7 @@ class ThreeCriticAdmission:
     ``strict=True``：replay 必须提供且不低于基线。
     """
 
-    def __init__(self, *, min_confidence: float = 0.6, slack: float = 0.0,
-                 strict: bool = False) -> None:
+    def __init__(self, *, min_confidence: float = 0.6, slack: float = 0.0, strict: bool = False) -> None:
         if not 0.0 <= min_confidence <= 1.0:
             raise ValueError("min_confidence must be in [0, 1]")
         self.min_confidence = min_confidence
@@ -104,58 +104,77 @@ class ThreeCriticAdmission:
         if not text:
             critics.append(CriticResult("schema", "skipped", "empty_rule"))
         elif len(text) < MIN_RULE_CHARS:
-            critics.append(CriticResult(
-                "schema", "fail", "empty_or_short_rule",
-                {"n_chars": len(text), "min_chars": MIN_RULE_CHARS},
-            ))
+            critics.append(
+                CriticResult(
+                    "schema",
+                    "fail",
+                    "empty_or_short_rule",
+                    {"n_chars": len(text), "min_chars": MIN_RULE_CHARS},
+                )
+            )
         else:
-            critics.append(CriticResult(
-                "schema", "pass", "schema_ok", {"n_chars": len(text)},
-            ))
+            critics.append(
+                CriticResult(
+                    "schema",
+                    "pass",
+                    "schema_ok",
+                    {"n_chars": len(text)},
+                )
+            )
 
-        critics.append(CriticResult(
-            "when_gate",
-            "pass" if when_allowed else "fail",
-            when_reason or ("improvable" if when_allowed else "suppressed"),
-        ))
+        critics.append(
+            CriticResult(
+                "when_gate",
+                "pass" if when_allowed else "fail",
+                when_reason or ("improvable" if when_allowed else "suppressed"),
+            )
+        )
 
         if confidence is None:
-            critics.append(CriticResult(
-                "semantic", "skipped", "confidence_gate_disabled",
-            ))
+            critics.append(
+                CriticResult(
+                    "semantic",
+                    "skipped",
+                    "confidence_gate_disabled",
+                )
+            )
         else:
             ok = float(confidence) + 1e-12 >= self.min_confidence
-            critics.append(CriticResult(
-                "semantic",
-                "pass" if ok else "fail",
-                f"confidence={float(confidence):.2f} vs {self.min_confidence}",
-                {"confidence": float(confidence), "threshold": self.min_confidence},
-            ))
+            critics.append(
+                CriticResult(
+                    "semantic",
+                    "pass" if ok else "fail",
+                    f"confidence={float(confidence):.2f} vs {self.min_confidence}",
+                    {"confidence": float(confidence), "threshold": self.min_confidence},
+                )
+            )
 
         if replayed is None:
-            critics.append(CriticResult(
-                "replay",
-                "fail" if self.strict else "skipped",
-                "unevaluated_no_replay" if self.strict else "replay_not_required",
-            ))
+            critics.append(
+                CriticResult(
+                    "replay",
+                    "fail" if self.strict else "skipped",
+                    "unevaluated_no_replay" if self.strict else "replay_not_required",
+                )
+            )
         else:
             base = -1.0 if baseline is None else float(baseline)
             r = float(replayed)
             ok = (base < 0.0) or (r + 1e-12 >= base - self.slack)
-            critics.append(CriticResult(
-                "replay",
-                "pass" if ok else "fail",
-                "replay_ok" if ok else "replay_drop",
-                {"replayed": r, "baseline": base, "slack": self.slack},
-            ))
+            critics.append(
+                CriticResult(
+                    "replay",
+                    "pass" if ok else "fail",
+                    "replay_ok" if ok else "replay_drop",
+                    {"replayed": r, "baseline": base, "slack": self.slack},
+                )
+            )
 
         tested = [c for c in critics if c.status != "skipped"]
         n_pass = sum(1 for c in tested if c.status == "pass")
         failed = [c for c in tested if c.status == "fail"]
         verified = not failed
-        reason = "all_critics_pass" if verified else (
-            "fail:" + ",".join(c.name for c in failed)
-        )
+        reason = "all_critics_pass" if verified else ("fail:" + ",".join(c.name for c in failed))
         checked = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         return EvidenceBundle(
             verified=verified,

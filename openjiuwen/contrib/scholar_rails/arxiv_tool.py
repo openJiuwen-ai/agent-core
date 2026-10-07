@@ -7,6 +7,7 @@
    中存在的 key，从机制上杜绝 LLM 编造参考文献。
 3. 零第三方依赖（仅 urllib + xml.etree），保证评测环境可复现。
 """
+
 from __future__ import annotations
 
 import json
@@ -15,7 +16,7 @@ import time
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -31,14 +32,15 @@ _MIN_INTERVAL_SEC = 3.0  # arXiv 建议 ≥3s
 @dataclass
 class PaperRecord:
     """一条已验证的文献记录。"""
-    arxiv_id: str                 # e.g. "1706.03762"（不含版本号）
+
+    arxiv_id: str  # e.g. "1706.03762"（不含版本号）
     title: str
     authors: list[str]
     year: int
     abstract: str = ""
     url: str = ""
-    venue: str = ""               # 若已知（如 "ICLR 2024"），否则空
-    bibtex_key: str = ""          # 由注册表分配，如 "vaswani2017attention"
+    venue: str = ""  # 若已知（如 "ICLR 2024"），否则空
+    bibtex_key: str = ""  # 由注册表分配，如 "vaswani2017attention"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -128,10 +130,7 @@ def _parse_feed(raw: bytes) -> list[PaperRecord]:
         abstract = re.sub(r"\s+", " ", (entry.findtext(f"{_ATOM_NS}summary") or "")).strip()
         published = (entry.findtext(f"{_ATOM_NS}published") or "").strip()
         year = int(published[:4]) if published[:4].isdigit() else 0
-        authors = [
-            (a.findtext(f"{_ATOM_NS}name") or "").strip()
-            for a in entry.findall(f"{_ATOM_NS}author")
-        ]
+        authors = [(a.findtext(f"{_ATOM_NS}name") or "").strip() for a in entry.findall(f"{_ATOM_NS}author")]
         authors = [a for a in authors if a]
         records.append(
             PaperRecord(
@@ -225,7 +224,7 @@ class CitationRegistry:
                 + f"  author = {{{authors}}},\n"
                 + f"  year = {{{r.year}}},\n"
                 + f"  eprint = {{{r.arxiv_id}}},\n"
-                + f"  archivePrefix = {{arXiv}},\n"
+                + "  archivePrefix = {arXiv},\n"
                 + f"  url = {{{r.url}}}\n"
                 + "}"
             )
