@@ -8,7 +8,7 @@
 | 上一版计划 | [persistent-agent-development-plan.md](persistent-agent-development-plan.md)（按旧版架构编制，保留不改） |
 | 更新日期 | 2026-10-07 |
 | 交付分类 | 本期 20 项（PA-01～PA-17、PA-21～PA-23）；独立学习扩展 3 项（PA-18～PA-20） |
-| 当前进度 | 共 3/23 项完成：本期 3/20、学习扩展 0/3；PA-01～03 已按各自独立验收边界完成，按 v2 对已实现契约的调整由 PA-22 承接，PA-04 起的运行时闭环仍待开发 |
+| 当前进度 | 共 4/23 项完成：本期 4/20、学习扩展 0/3；PA-01～03 已按各自独立验收边界完成，PA-22 已按 v2 收敛已实现的契约，M0 完成；PA-04 起的运行时闭环仍待开发 |
 
 ## 1. 怎么读这份计划
 
@@ -57,7 +57,7 @@ Persistent Agent 接收一次已经确定归属的任务，在对应会话中运
 | PA-06 | 判断是否参与一条群消息 | 人类与其他 Agent 消息走同一判断流程，保留发送者、@、回复关系及附件依据；被 @ 可忽略，未被 @ 可回复或介入。判断是一次独立的轻量模型调用，只带职责、当前消息和少量最近群消息，不加载或写入窗口，不开放写工具；忽略时记账 `execution.final(ignored)`，不产生公开回复、正式任务或改写当前工作目标，被忽略的消息不进入窗口；判断失败有限次重试后报失败，不记为忽略；私聊和已受理定时任务走直接执行路径 | PA-22 | 待开始 | 待分配 | — |
 | PA-07 | 可靠交接候选回复和文件结果 | 群聊与其他回复从同一事件出口返回，以稳定 output_id 关联候选内容、来源和目标；私有判断、工具明细与模型片段不直接作为群公开回复。文件须注明目标群及“上传群空间”或“发到群内”的共享方式；`output.proposed` 入队后返回，`execution.final` 记账成功时前面的候选产物已经落盘，再由服务端处理；交接不等于已送达，办公空间保存不等于群内可见；与宿主验证重复交接不重复投递，投递失败只重试发送、不重跑任务 | PA-01 | 待开始 | 待分配 | — |
 | PA-08 | 复用 PermissionInterruptRail 处理用户确认，并响应停止与取消 | 确认完全复用 harness 的 `PermissionInterruptRail` 与原生中断恢复，不新写确认 rail；Spec 新增 `permissions` 字段（复用 `PermissionsSection`，构造时传入 DeepAgent 配置并纳入指纹），提供 `describe_confirmable_operations(spec)`；判定 ask 时保存含中断状态的会话状态记录，并同步记账 `execution.paused(awaiting_confirmation)`（附被拦截的工具名和参数）；`resume_persistent_request` 由新实例放回记录、以卡片回复作为恢复输入，不向窗口追加任何内容；卡片回复在恢复入口统一转换：同意为 `approved=True`，同意并本会话记住为 `approved=True, auto_confirm=True, persist_allow=False`，拒绝为 `approved=False` 并附反馈，其他组合（含 `auto_confirm=True` 而 `persist_allow` 为空或为真）一律拒绝，不能进入永久允许分支；同意时执行被拦截的调用（写操作照常先记账），拒绝时把反馈作为工具结果，超时按拒绝处理；本会话记住的选择写入 `INTERRUPT_AUTO_CONFIRM_KEY` 并随记录保存，同一 Session 在新 Execution、新实例中仍有效，其他 Session 不继承，不写入全局权限配置或权限 YAML；取消时调用 `abort_bound`、保存记录并记账 `final(cancelled)`，停止时保存记录并记账 `paused(stopped)`；补充消息一律作为新 Request，不使用 follow_up / steer；续做中的询问复用 AskUserRail | PA-04、PA-09 | 待开始 | 待分配 | — |
-| PA-22 | 按 v2 收敛已实现的契约 | `ExecutionContext` 按 v2 简化 `epoch`、`authority_handle`，保留 `recovery_ref`，明确崩溃续做与非确认暂停后继续均引用原任务待接续的 Execution，不新增 `continuation`；`PersistentPorts` 移除 `ExecutionAuthority` 与 `ControlPort`，`CommitPort` 改为 `record(event)`，普通事件接收入队后返回，关键事件等待此前事件和本事件全部落盘，并增加按产生顺序读取的 `read_execution_log(execution_id)`；`ContextStore`、`HistoryPort` 不再作为对外端口、改为注入必需的窗口存储后端（`BaseKVStore`，构造时校验契约，不读写存储；专用 SysOperation 文件系统后端不在本期范围），`GroupMaterialPort` 替换为 `GroupChatPort`（`recent_messages`、`search_messages` 及 v2 §7.9 的消息结构），保留预算与知识端口；`AgentEvent` 按 v2 §9.2 收敛为 11 类，`tool.intent`、`tool.completed`、`execution.paused` 补齐 v2 要求的字段；暂停原因固定为 `awaiting_confirmation / stopped / budget_denied / context_unfit / error` 并校验负载，暂停收尾与事件映射留给 PA-04；`window.switched` 只定义旧窗归档引用和新窗序号；`schema/context.py` 删除带版本和条件更新的窗口结构，新增群消息结构，`MaterialQuery / MaterialSnapshot / MaterialReadResult` 只用于知识端口；完整会话状态记录和归档结构分别随 PA-09、PA-10 定义，不在本项预设；不再使用的端口结果同步删减，群聊和知识端口仍区分“确定没有”与“没查完或失败”；构造的必需端口检查和现有测试随之更新，个人版行为不变。只调整契约，不实现事件队列或 PA-17 的恢复行为 | PA-01 | 待开始 | 待分配 | — |
+| PA-22 | 按 v2 收敛已实现的契约 | `ExecutionContext` 按 v2 简化 `epoch`、`authority_handle`，保留 `recovery_ref`，明确崩溃续做与非确认暂停后继续均引用原任务待接续的 Execution，不新增 `continuation`；`PersistentPorts` 移除 `ExecutionAuthority` 与 `ControlPort`，`CommitPort` 改为 `record(event)`，普通事件接收入队后返回，关键事件等待此前事件和本事件全部落盘，并增加按产生顺序读取的 `read_execution_log(execution_id)`；`ContextStore`、`HistoryPort` 不再作为对外端口、改为注入必需的窗口存储后端（`BaseKVStore`，构造时校验契约，不读写存储；专用 SysOperation 文件系统后端不在本期范围），`GroupMaterialPort` 替换为 `GroupChatPort`（`recent_messages`、`search_messages` 及 v2 §7.9 的消息结构），保留预算与知识端口；`AgentEvent` 按 v2 §9.2 收敛为 11 类，`tool.intent`、`tool.completed`、`execution.paused` 补齐 v2 要求的字段；暂停原因固定为 `awaiting_confirmation / stopped / budget_denied / context_unfit / error` 并校验负载，暂停收尾与事件映射留给 PA-04；`window.switched` 只定义旧窗归档引用和新窗序号；`schema/context.py` 删除带版本和条件更新的窗口结构，新增群消息结构，`MaterialQuery / MaterialSnapshot / MaterialReadResult` 只用于知识端口；完整会话状态记录和归档结构分别随 PA-09、PA-10 定义，不在本项预设；不再使用的端口结果同步删减，群聊和知识端口仍区分“确定没有”与“没查完或失败”；构造的必需端口检查和现有测试随之更新，个人版行为不变。只调整契约，不实现事件队列或 PA-17 的恢复行为 | PA-01 | 已完成 | Song Haoran | 契约按 v2 收敛：执行上下文去掉 epoch / authority_handle，recovery_ref 不能指向本次执行；端口收敛为必需的 commit（record / read_execution_log）、budget、window_backend（BaseKVStore）和可选的 group_chat、knowledge；事件收敛为 11 类并固定五种暂停原因；新增群消息结构，删除旧窗口、提交、执行权和控制结构。代码：`openjiuwen/harness/persistent_agent/persistent_agent/ports.py`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/{execution,protocol,events,port_results,context}.py`、`openjiuwen/harness/persistent_agent/__init__.py`；测试：`tests/unit_tests/harness/persistent_agent/{test_protocol,test_construction,test_binding}.py`，PA 包 161 passed（协议 87、构造 40、绑定 34）；F_01～F_03 共享回归 213 passed；改动范围 Ruff check / format 通过。设计与验证见 [F_04](../features/F_04_v2-contract-convergence.md)。事件映射、记账调用、暂停收尾及窗口存储读写不属于本项，分别归 PA-04、PA-09、PA-10 |
 
 PA-02 只验证构造入口；PA-03 验证实例内部的归属校验与状态隔离；PA-22 先把已实现的契约收敛到 v2；PA-04 验证执行与恢复入口到事件出口的完整链路。PA-04 不重写 DeepAgent 的任务循环或另建一套流式输出；事件映射及按事件级别等待入队或落盘由 Persistent Agent 适配。AgentServer 负责调用执行与恢复入口、保证同一 Session 同时只有一个执行者、为并行 Session 分配不同实例并管理实例生命周期；PA-03 不实现这些调度工作。群内模型调用额度由 AgentServer 管理，本模块仅遵守宿主准入结果并回传实际用量，不维护预算账户。
 
@@ -138,7 +138,7 @@ PA-18～PA-20 在独立学习作业中运行，不挤占业务会话，不作为
 | M2c：崩溃后续做原任务 | 本期 | PA-16、PA-17 与 M1 执行链、PA-10 归档、PA-14 意图记账就绪后汇合；文件写操作续做再联合 M2b | 崩溃续做与非确认暂停后继续统一加载 Session 最新记录，注入 recovery_ref 对应的执行日志、归档引用和原任务输入；已成功步骤不重做，已登记意图但无结果的写操作先查证、查不清问发起人，已产出最终结果的直接交出；日志缺失时提示并向发起人确认；被停止的任务不自动续做，也不阻塞后续任务；预算、容量或可恢复错误暂停后，明确继续或服务端确认条件恢复时复用统一流程，条件未变化时不反复自动续做。必须演示：关键记账失败使入口抛异常，服务端不等重启，确认旧执行退出和清理完成后续做原 Request，恢复引用指向本次中断执行，更早 Execution 的 paused 不作为本次结局；final / paused 已落盘后清理报错，保留已有结果并按对应状态处理，主动停止或取消后收尾报错不自动续做；E1 等待确认并保存中断状态，E2 同意后登记写意图、可能已执行但无结果记录时崩溃，E3 加载旧记录后补齐工具结果、清除旧中断状态，先查证而不直接重放写工具；已保存的会话授权保留，正常确认恢复不受影响。与 AgentServer 联调：审计 A 停止、审计 B 停止、审计 C 完成后继续 A，沿用 A 的 Request 和恢复引用，加载最新窗口并读取 A 的日志；发布新版配置后，崩溃续做与停止后继续仍使用原 Request 的 Spec |
 | M2d：主动学习 | 独立学习扩展 | E 线 PA-18～PA-20 完成后独立汇合；不作为本期节点前置 | 仅从授权记录创建目标；处理批次和反馈可追溯；处理失败不显示为知识更新 |
 
-M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c 均通过；M2d 单独跟踪，不阻塞本期。AgentServer、PersonalContext 和办公空间提供本模块所需接口与验证环境，它们自身的开发不在本计划内。对端尚未就绪时先记录模拟端口验证，真实对端联调列为节点待验收项；模块验证通过不等于产品联合交付完成。当前 M0 中按旧版架构的契约（PA-01）已完成，按 v2 收敛（PA-22）待开始；M1、M2a、M2b、M2c、M2d 尚未完成。
+M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c 均通过；M2d 单独跟踪，不阻塞本期。AgentServer、PersonalContext 和办公空间提供本模块所需接口与验证环境，它们自身的开发不在本计划内。对端尚未就绪时先记录模拟端口验证，真实对端联调列为节点待验收项；模块验证通过不等于产品联合交付完成。当前 M0 已完成：PA-01 按旧版架构定义契约，PA-22 按 v2 收敛；M1、M2a、M2b、M2c、M2d 尚未完成。
 
 ### 3.4 验收范围与能力开放
 
@@ -171,11 +171,11 @@ v2 尚未覆盖、需先补充设计并确认的事项：
 
 ## 4. 进度怎么更新
 
-实现或验证有变化时，修改第 2 节对应特性的“状态”“负责人”“证据”三列和下方交付节点的状态，并在变更记录中追加一条。分别统计本期 20 项、独立学习扩展 3 项及总计 23 项；范围变更不能记为完成。硬前置尚未完成的特性保持“待开始”；已经开工但自身验收或必要联调未过的特性标“进行中”或“待验收”，并写明待验证项及其交付范围。扩展未排期仍为“待开始”，不因此标为“阻塞”。完成项附上实现和测试或联调链接；v2 附录 C 的验证点按第 3.4 节登记结论。调用方及 PersonalContext 自身的开发进度在各自目录维护。后续用户交由我修改的特性，负责人统一填写“yan_zj”。
+实现或验证有变化时，修改第 2 节对应特性的“状态”“负责人”“证据”三列和下方交付节点的状态，并在变更记录中追加一条。分别统计本期 20 项、独立学习扩展 3 项及总计 23 项；范围变更不能记为完成。硬前置尚未完成的特性保持“待开始”；已经开工但自身验收或必要联调未过的特性标“进行中”或“待验收”，并写明待验证项及其交付范围。扩展未排期仍为“待开始”，不因此标为“阻塞”。完成项附上实现和测试或联调链接；v2 附录 C 的验证点按第 3.4 节登记结论。调用方及 PersonalContext 自身的开发进度在各自目录维护。后续用户交由我修改的特性，负责人统一填写“Song Haoran”；此前已登记为 yan_zj 的条目保持不变。
 
 | 交付节点 | 交付分类 | 状态 | 负责人 | 验收证据或待办 |
 | --- | --- | --- | --- | --- |
-| M0：接口基线 | 本期 | 进行中 | yan_zj | PA-01 的调用身份、结果语义及宿主端口协议已按旧版架构固化并通过协议 / 构造测试；按 v2 收敛端口、事件与执行上下文（PA-22）待开始。实际宿主适配和存储后端不属于接口基线，列在 PA-04、PA-09～12、PA-23 |
+| M0：接口基线 | 本期 | 已完成 | yan_zj | PA-01 按旧版架构定义调用身份与宿主端口协议；PA-22 按 v2 收敛执行上下文、端口、事件与群消息结构，PA 包 161 passed、共享回归 213 passed，见 [F_04](../features/F_04_v2-contract-convergence.md)。实际宿主适配和存储后端不属于接口基线，列在 PA-04、PA-09～12、PA-23 |
 | M1：可执行任务 | 本期 | 待开始 | 待分配 | 执行与恢复入口、会话状态记录、确认与控制、结果交接 |
 | M2a：群消息与长上下文 | 本期 | 待开始 | 待分配 | 群消息判断、换窗与归档、群聊与历史检索、知识与 PA-21 失效联调 |
 | M2b：办公空间读写 | 本期 | 待开始 | 待分配 | 文件读写、写操作意图记账、并发修改及 PA-21 文件失效联调 |
@@ -225,6 +225,7 @@ v2 尚未覆盖、需先补充设计并确认的事项：
 | 2026-10-07 | PA-04、M1 | 同步 checkpointer 隔离说明：服务端不额外调用 pre_run / post_run，原生生命周期中的状态恢复和保存由 PA-04 隔离；M1 增加旧 checkpointer 状态不覆盖 WindowStore 记录及清理照常的验收 | 跨 Execution 状态只由 WindowStore 管理；保留原生生命周期清理和个人版默认行为，进度不变 |
 | 2026-10-07 | PA-04、PA-17、M2c | 入口异常（含记账失败）由服务端接住并核对本次 Execution 的结束记录，无 final / paused 且未被主动停止或取消时按崩溃中断续做；已有结果保持，续做前确认旧执行退出和清理完成，M2c 增加对应验收 | 避免 Request 等待服务重启才处理；沿用原 Request 和统一流程，进度不变 |
 | 2026-10-07 | M0、第 2、5 节 | 将记账的概括表述统一为普通事件入队、关键事件等待落盘，保留写操作等关键事件的同步记账要求 | 对齐已确认的事件级别与有序保存契约；只修正表述，进度不变 |
+| 2026-10-07 | PA-22、M0 | 按 v2 收敛已实现的契约：执行上下文、宿主端口、11 类事件与五种暂停原因、群消息结构；删除旧窗口、提交、执行权和控制结构；同步 S_01～S_03 并新增 F_04 | PA 包 161 passed；共享回归 213 passed；Ruff 通过。总计 4/23：本期 4/20、学习 0/3；M0 完成 |
 
 ## 5. 从 JiuwenSwarm 迁移时的补充安排
 
