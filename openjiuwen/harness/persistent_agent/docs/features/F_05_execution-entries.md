@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 状态 | feature；PA-04，已实现（组件验收；正式入口在 PA-08、PA-09 接入前明确拒绝） |
-| 日期 | 2026-10-07 |
+| 日期 | 2026-10-08 |
 | 负责人 | Song Haoran |
 | 范围 | 内部 `persistent_agent/{schema/request.py, execution/{control,emitter,model_rail,seams,entries}.py, schema/spec.py}`、外层 `__init__.py` 导出及对应单测；依赖共享 Session 接缝 harness [F_07](../../../docs/features/F_07_session-checkpointer-injection.md) |
 | 测试基线 | 改动前：PA 包 173 passed，F_01～F_03 共享回归集 213 passed。改动后：PA 包 224 passed（结局锁定及附录 C 验证点 5 补充后 229 passed），共享回归集 213 passed，`tests/unit_tests/core/session` 411 passed，`tests/unit_tests/harness` 5426 passed / 39 skipped（Python 3.11.17） |
@@ -72,22 +72,30 @@ runner 的步骤：
 
 事件按记账顺序进入展示队列，由生成器 yield 给服务端。
 
+**事件容量**：所有事件共用两条限额，常量定义在 schema 中：文本字段最多 `TEXT_MAX_CHARS`（65536）个字符，完整事件按规范 JSON 计算最多 `EVENT_MAX_BYTES`（262144）个 UTF-8 字节，包括身份、序号、时间、目标等全部字段。只看字符数不够：65536 个四字节字符本身就超过字节上限，控制字符经 JSON 转义后每个占 6 字节。emitter 用同一套检查服务两种场景：
+
+- **`emit_text`**（`reply.delta`）：每段按两条限额取最长前缀，按 Python 字符边界切分，各段拼接后与原文完全一致。
+- **`emit_if_fits`**（最终回答的 `output.proposed`）：两条限额都满足才编号、记账、展示，否则返回空，由入口改判暂停。
+
+试探只构造候选事件，不调用 `record`、不占用正式 `local_seq`。候选事件使用与正式事件相同的序号和时间，正文换成一个字符的占位；由于正文在规范 JSON 中只出现一次，完整事件的字节数等于占位事件的字节数减 1，再加正文转义后的字节数，结果精确。非法代理字符等字段错误不算容量超限，构造正式事件时按原规则抛出。
+
 | 来源 | 事件 |
 | --- | --- |
 | runner 开始 | `execution.started`（目标为任务正文） |
-| 原生 `llm_output` 块 | `reply.delta` |
+| 原生 `llm_output` 块 | `reply.delta`，超过任一限额时拆成多段 |
 | 模型调用结束且同时带工具调用的正文 | `progress.updated`（中间结论，截断到约 500 字） |
 | 模型调用结束 | `model.completed`（`model_call_id`、配置版本、实际或未知用量） |
 | 原生 `__interaction__` 块 | 收集被拦截调用，用于 `paused(awaiting_confirmation)` |
 | 结局 | `output.proposed`、`execution.paused / final` |
 
-模型调用相关的事件由 `execution/model_rail.py` 的 `PersistentModelCallRail` 产生。这个 rail 在 `PersistentAgentSpec.resolve_parts` 中加入 parts，优先级为 10：数值越大越先执行，10 保证它是模型调用前最后决定的那个钩子。它挂在三个模型调用钩子上：
+模型调用相关的事件由 `execution/model_rail.py` 的 `PersistentModelCallRail` 产生。这个 rail 在 `PersistentAgentSpec.resolve_parts` 中加入 parts，优先级为 10：数值越大越先执行，10 保证它是模型调用前最后决定的那个钩子。它挂在三个模型调用钩子和一个工具调用钩子上：
 
 - **调用前**：先检查控制对象，已有致命错误或 cancel / stop 时，请求 force-finish 并跳过本次调用。然后生成 `model_call_id` 并调用 `admit`：
   - 被拒绝：force-finish，标记为 `budget_denied`。
   - `admit` 抛异常：force-finish，标记为 `error`。
 - **调用后**：用响应中的用量调用 `report`（异常只记诊断），再记 `model.completed`；正文和工具调用同时存在时，再记 `progress.updated`。
 - **调用失败**：以未知用量调用 `report`，并记 `model.completed`。
+- **工具调用前**：与模型调用前共用同一个检查。已有致命错误或 cancel / stop 时，请求 force-finish，原生跳过该工具的执行体，并带着这个标记结束循环。检查覆盖每个尚未开始的工具，只读工具也包括在内；已经开始的并行调用按现有取消机制收敛。这个标记只用于结束原生循环：有致命错误时，入口仍抛出最初登记的异常，不会降级为 `paused(error)`。
 
 `tool.intent` / `tool.completed` 归 PA-14，`window.switched` 归 PA-10，`participation.decided` 归 PA-06。
 
@@ -99,10 +107,10 @@ runner 的步骤：
 2. 结局锁定前接受了 cancel → `final(cancelled)`；接受了 stop → `paused(stopped)`。原生流被取消时，runner 先接住取消信号再收尾。
 3. 原生结果 `result_type="interrupt"` → `paused(awaiting_confirmation)`，`intercepted` 来自中断块：`tool_call_id` 用交互 ID，参数按键名脱敏后呈现。
 4. rail 的 force-finish 标记 → `paused(budget_denied)` 或 `paused(error)`。
-5. 原生结果 `result_type="answer"` → `final(completed)`；回答正文非空时先交出 `output.proposed`，并列入 `output_refs`。正文超过事件文本上限（65536 字符）时改为 `paused(error)` 并说明原因，不静默截断。
+5. 原生结果 `result_type="answer"` → `final(completed)`；回答正文非空时先交出 `output.proposed`，并列入 `output_refs`。检查的是 after_invoke rail 之后的最终答案：外层 DeepAgent 在 after_invoke 之后才交出 `answer` 片段。字符数或完整事件字节数超限时改判 `paused(error)`，再执行“保存 → 暂停记账”。答案不截断，完整放进 `ExecutionEnding.pending_answer` 交给会话状态记录保存；PA-09 必须保存该字段，后续交接据此继续，不重跑已完成的业务。原生窗口上下文只保存模型原始回复，不反映 after_invoke 的改写，所以需要这个字段。只有容量超限会改判暂停：字段错误、保存失败和关键记账失败仍按原异常规则处理。
 6. 原生结果 `result_type="error"`（含最大迭代次数耗尽）、原生异常，或没有最终结果 → `paused(error)`。
 
-`output_id` 由 `execution_id` 派生，同一 Execution 内保持稳定。`reply.delta` 只用于展示，超过 65536 字符的原生片段拆成多段事件，不截断。参数脱敏规则是：键名含 password、secret、token、key、credential、authorization 的值替换为 `***`。PA-14 的参数摘要复用同一函数。
+`output_id` 由 `execution_id` 派生，同一 Execution 内保持稳定。`reply.delta` 只用于展示，超过任一限额的原生片段拆成多段事件，不截断。参数脱敏规则是：键名含 password、secret、token、key、credential、authorization 的值替换为 `***`。PA-14 的参数摘要复用同一函数。
 
 ### 5. 确认恢复
 
@@ -117,6 +125,7 @@ runner 的步骤：
 - `abort_persistent_request` 把原因记在构造上下文的控制对象上。这个对象在上下文创建时就存在，所以实例构造前到达的控制也能记下。
 - 同一种原因重复到达时忽略；不同原因只保留第一次。
 - **结局锁定**：执行入口在原生调用退出、确定执行结果后，同步锁定本次 Execution 的结局。锁定前接受的控制参与结局判定；锁定后不再接受活动执行的停止或取消，不修改控制原因，也不调用 `abort_bound`。结局锁定不代表持久化成功，状态保存和结束记账仍按原失败规则处理。实现上，`_run_native` 在每个确定结局的出口调用 `ExecutionControl.lock_outcome()`，它与最后一次检查控制原因之间没有让出点；锁定后 `request_abort` 返回 False，控制入口直接返回。此前，原生返回后、收尾保存期间到达的控制会被接受并调用 `abort_bound`，结局却仍按原生结果，状态自相矛盾。
+- **异常退出同样锁定**：runner 因异常退出时（致命错误、加载失败、回复校验拒绝、服务端提前关闭等），`_run` 在进入任何异步清理之前同步调用 `lock_outcome()`。这只是关闭控制接收：保留已有的控制原因和原异常，不产生结束事件，也不表示持久化成功。清理失败仍按原规则处理，已有异常时只记诊断。此前，`close_bound` 虽会同步标记关闭中、不再调用 `abort_bound`，但迟到的控制仍会改写控制原因。
 - 实例已构造且尚未关闭时，复用 `abort_bound`：runner 正在原生调用中则取消该调用；尚未进入原生调用则使之后的原生调用直接拒绝，入口按控制原因收尾。中断已在进行或实例已关闭时，不重复中断。
 - `abort_bound` 在等待原生 `abort` 返回期间把绑定标为停止中，此时 `close_bound` 会拒绝。控制入口在调用 `abort_bound` 前登记一个完成信号，runner 清理前先等待它，避免清理与正在进行的原生停止重叠。
 - 控制入口不发任何事件；结束事件统一由执行入口发出。
@@ -125,7 +134,7 @@ runner 的步骤：
 
 `execution/seams.py` 集中放置后续特性的接入点：
 
-- `session_state_store(context)`：会话状态记录的加载、整理和保存，PA-09。
+- `session_state_store(context)`：会话状态记录的加载、整理和保存，PA-09。保存时收到的 `ExecutionEnding` 含结局、所属 Request、回复目标、`output_refs`，以及容量超限时未交接的完整最终答案 `pending_answer`；PA-09 须原样保存 `pending_answer`。
 - `native_reply_adapter()`：交互回复到原生输入的转换，PA-08。
 
 两者未接入时都抛校验拒绝，正式入口因此明确拒绝。单测通过替身验证 PA-04 自身的编排，替身不能替代正式实现。
@@ -148,6 +157,8 @@ runner 的步骤：
 | 扩展原生 `AskUserPayload` 表示超时 | 已确认改用 `ConfirmReply` 的 `outcome` 加标记文本，不改共享类型 |
 
 ## 验证
+
+2026-10-08 审计修复验证：`tests/unit_tests/harness/persistent_agent` 249 passed；`tests/unit_tests/harness` 与 `tests/unit_tests/core/session` 联合回归 5863 passed / 39 skipped。新增 `test_emitter.py` 验证字符数与完整事件字节数边界、文本分段后原文保持、容量试探不占事件序号和字段错误分类；`test_entries.py` 补充致命错误阻止未开始的工具调用、异常清理期间拒绝控制、超限答案经结束信息完整交给存储接入点、after_invoke 改写答案和保存失败仍抛异常的用例。
 
 测试文件：`tests/unit_tests/harness/persistent_agent/test_request.py`（值对象）与 `test_entries.py`（入口）。入口测试使用真实 DeepAgent、本地流式模型、注入 `NoopCheckpointer` 的 Session，会话状态记录与交互适配用替身（替身在两个 Session 间搬运白名单状态和等待现场）。
 
@@ -175,4 +186,5 @@ runner 的步骤：
 - 参与判断（PA-06）、窗口组装（PA-05）、文件候选与补交（PA-07）、交互适配（PA-08）、会话状态记录（PA-09）、意图记账（PA-14）、续做（PA-17）接入前，对应能力在正式入口明确拒绝或不可用。
 - task-loop 与子代理由 PA-24～PA-26 开放。
 - 原生 rail 之外的内部模型调用（例如 task planning 的独立模型）不经过本 rail 的预算准入；一期配置不启用这类 rail，开放时再评估。
-- 超过 65536 字符的最终回答目前以 `paused(error)` 结束。是否改为拆成多条候选或转为文件交接，待 PA-07 设计文件候选时一并决定。
+- 字符数或完整事件字节数超限的最终回答目前以 `paused(error)` 结束，完整答案经 `ExecutionEnding.pending_answer` 交给 PA-09 保存。是否改为拆成多条候选或转为文件交接，以及如何从保存的答案继续交接，待 PA-07 设计时一并决定。
+- 工具调用前的守卫与 `PersistentModelCallRail` 同一优先级（10），在其他 rail 的工具调用前钩子之后执行。PA-14 的意图记账若在更早的钩子中执行，须自行检查致命错误，或排在守卫之后，避免为不会执行的工具登记意图。

@@ -47,7 +47,7 @@ AgentEvent {
 
 `AgentEvent.create(execution, ...)` 从 ExecutionContext 复制归属。`schema_version` 只支持严格整数 1，`local_seq` 为严格正整数；`occurred_at` 必须带时区并转为 UTC。`event_id` 为 `evt_` 加完整归属（含 `source_ref`）和 `local_seq` 的规范 JSON SHA-256；完整提案摘要另覆盖时间、类型、visibility、关联引用和负载。DTO 不分配序号、不保存去重状态。
 
-事件及嵌套负载不可变，按 `event_type` 选择对应模型，拒绝错配和额外字段。标识最长 512 字符，文本最长 65536 字符，原因最长 4096 字符，引用最多 128 项；规范 UTF-8 提案上限 256 KiB，超限改用受控引用。visibility 只能是 private / progress / candidate，不允许 delivered。工具参数只以脱敏后的可读摘要出现，不直接携带凭证或原始参数。
+事件及嵌套负载不可变，按 `event_type` 选择对应模型，拒绝错配和额外字段。标识最长 512 字符，文本最长 65536 字符（`TEXT_MAX_CHARS`），原因最长 4096 字符，引用最多 128 项；规范 UTF-8 提案上限 256 KiB（`EVENT_MAX_BYTES`，按规范 JSON 计算完整事件，含身份、序号、时间、目标等全部字段），超限改用受控引用。两条限额相互独立：字符数合法的文本，完整事件仍可能超出字节上限（例如四字节字符、经 JSON 转义变长的控制字符）。`AgentEvent.proposal_size()` 返回完整事件的规范字节数。visibility 只能是 private / progress / candidate，不允许 delivered。工具参数只以脱敏后的可读摘要出现，不直接携带凭证或原始参数。
 
 `reply.delta` 使用 ReplyDeltaPayload，保留非空的空格、换行、制表符片段；完整正文和进度使用非空白文本。空字符串片段由流适配忽略，不生成事件。
 
@@ -77,18 +77,18 @@ AgentEvent {
 
 ### 事件映射与结局
 
-每个 Execution 由 `execution/emitter.py` 的 `EventEmitter` 唯一调用 `record`：在锁内分配 `local_seq`、构造事件、等待 `record` 返回，再放入展示队列，因此展示顺序与记账顺序一致。普通事件记账失败时仍会展示，只是日志出现缺口。
+每个 Execution 由 `execution/emitter.py` 的 `EventEmitter` 唯一调用 `record`：在锁内分配 `local_seq`、构造事件、等待 `record` 返回，再放入展示队列，因此展示顺序与记账顺序一致。普通事件记账失败时仍会展示，只是日志出现缺口。容量检查由 emitter 统一完成：按两条限额拆分展示文本，或在记账前判断事件能否容纳；试探不调用 `record`，也不占用 `local_seq`。字段错误不算容量超限，仍按原规则抛出。
 
 | 来源 | 事件 |
 | --- | --- |
 | 入口开始执行（恢复时不记） | `execution.started`，目标为任务正文 |
-| 原生 `llm_output` 片段 | `reply.delta`；超过 65536 字符的片段拆成多段，不截断 |
+| 原生 `llm_output` 片段 | `reply.delta`；超过字符或完整事件字节上限的片段按字符边界拆成多段，拼接后与原文一致，不截断 |
 | 模型调用结束且正文与工具调用同时存在 | `progress.updated`，正文截断到 500 字符 |
 | 每次模型调用结束或失败 | `model.completed`：本次 `model_call_id`、配置版本，响应带用量时为实际用量，否则为未知 |
 | 原生 `__interaction__` 片段 | 收集为 `paused(awaiting_confirmation)` 的被拦截调用：交互 ID、工具名、脱敏参数 |
 | 结局 | `output.proposed`、`execution.paused` 或 `execution.final` |
 
-模型调用的预算准入与用量回报由 `PersistentModelCallRail` 完成。它在 `PersistentAgentSpec.resolve_parts` 中加入，优先级 10，是模型调用前最后执行的钩子；没有执行入口时不生效，个人版和其他 DeepAgent 不受影响。每次调用生成新的 `model_call_id` 并先调用 `admit`：被拒绝或已收到停止 / 取消时，通过 force-finish 跳过模型调用并带回结构化标记；`admit` 抛异常时同样跳过，结局为 `paused(error)`。`report` 抛异常只记诊断，执行继续。
+模型调用的预算准入与用量回报由 `PersistentModelCallRail` 完成。它在 `PersistentAgentSpec.resolve_parts` 中加入，优先级 10，是模型调用前最后执行的钩子；没有执行入口时不生效，个人版和其他 DeepAgent 不受影响。每次调用生成新的 `model_call_id` 并先调用 `admit`：被拒绝或已收到停止 / 取消时，通过 force-finish 跳过模型调用并带回结构化标记；`admit` 抛异常时同样跳过，结局为 `paused(error)`。`report` 抛异常只记诊断，执行继续。同一个 rail 在工具调用前做相同的检查：已有致命错误或停止 / 取消时，force-finish 跳过每个尚未开始的工具（含只读工具），已经开始的并行调用按现有取消机制收敛；这个标记只用于结束原生循环，致命错误仍由入口原样抛出。
 
 结局按优先级判定：
 
@@ -96,7 +96,7 @@ AgentEvent {
 2. 结局锁定前接受了 cancel：`final(cancelled)`；接受了 stop：`paused(stopped)`。原生调用退出、确定执行结果后同步锁定结局，此后到达的控制不被接受，不改变结局；锁定不代表持久化成功，会话状态记录保存和结束记账失败仍按原规则抛运行异常（见 [S_01](S_01_public-api-and-execution.md) 的执行入口编排）。
 3. 有被拦截调用：`paused(awaiting_confirmation)`。
 4. 预算拒绝或准入异常：`paused(budget_denied)` / `paused(error)`。
-5. 原生结果为 answer：`final(completed)`。正文非空时先交出 `output.proposed`（`output_id` 由 `execution_id` 派生，`target_ref` 为回复目标，`share_mode=message`），并列入 `output_refs`；正文超过 65536 字符时改为 `paused(error)`，不静默截断。
+5. 原生结果为 answer：`final(completed)`。正文非空时先交出 `output.proposed`（`output_id` 由 `execution_id` 派生，`target_ref` 为回复目标，`share_mode=message`），并列入 `output_refs`。检查的是 after_invoke rail 之后的最终答案。字符数或完整事件字节数超限时改为 `paused(error)`，不截断；完整答案经会话状态记录保存（`ExecutionEnding.pending_answer`，PA-09），供后续交接继续使用。
 6. 原生错误结果（含迭代次数耗尽）、原生异常或没有结果：`paused(error)`，错误文本不作为候选输出。
 
 最终回答交接、会话状态记录保存、结束事件记账按此顺序进行。工具参数脱敏规则为：键名（不区分大小写）含 password、secret、token、key、credential、authorization 的值替换为 `***`，嵌套对象和列表同样处理。
