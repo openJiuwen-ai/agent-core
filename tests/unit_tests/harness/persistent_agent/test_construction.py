@@ -141,7 +141,7 @@ def test_factory_returns_native_deep_agent_without_side_effects(api):
     ctx.validate_binding(agent)
     assert ctx.binding.execution == ctx.execution
     assert not hasattr(api, "PersistentAgent")
-    assert not hasattr(api, "execute_persistent_request")
+    assert {"execute_persistent_request", "resume_persistent_request", "abort_persistent_request"} <= set(api.__all__)
     agent.ability_manager.teardown_tools()
 
 
