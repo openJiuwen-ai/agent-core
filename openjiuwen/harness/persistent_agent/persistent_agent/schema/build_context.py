@@ -13,6 +13,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.single_agent import Session
 from openjiuwen.harness.schema.build_context import BuildContext
 
+from ..execution.control import ExecutionControl
 from ..ports import PersistentPorts
 from .execution import ExecutionContext
 
@@ -36,6 +37,7 @@ class ConstructionBinding:
     agent_ref: weakref.ReferenceType | None = field(default=None, repr=False)
     parts: "DeepAgentParts | None" = field(default=None, repr=False)
     runtime: object | None = field(default=None, repr=False)
+    control: ExecutionControl = field(default_factory=ExecutionControl, repr=False)
 
 
 @dataclass(kw_only=True)

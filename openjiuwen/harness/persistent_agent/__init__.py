@@ -12,6 +12,14 @@ __all__ = [
     "KnowledgePort",
     "GroupChatPort",
     "create_persistent_agent",
+    "execute_persistent_request",
+    "resume_persistent_request",
+    "abort_persistent_request",
+    "RequestInput",
+    "DirectMessageSource",
+    "ConfirmReply",
+    "PermissionResponse",
+    "AnswerResponse",
     "InvocationRef",
     "ModelUsage",
     "GroupMessage",
@@ -45,6 +53,13 @@ _MODULES = {
     "PersistentPorts": "ports",
     **dict.fromkeys(("KnowledgePort", "GroupChatPort"), "ports"),
     "create_persistent_agent": "factory",
+    **dict.fromkeys(
+        ("execute_persistent_request", "resume_persistent_request", "abort_persistent_request"), "execution.entries"
+    ),
+    **dict.fromkeys(
+        ("RequestInput", "DirectMessageSource", "ConfirmReply", "PermissionResponse", "AnswerResponse"),
+        "schema.request",
+    ),
     **dict.fromkeys(("InvocationRef", "ModelUsage"), "schema.protocol"),
     **dict.fromkeys(
         (
