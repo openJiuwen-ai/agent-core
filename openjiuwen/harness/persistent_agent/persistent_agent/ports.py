@@ -27,10 +27,12 @@ class CommitPort(Protocol):
     async def record(self, execution: ExecutionContext, event: AgentEvent) -> None:
         """Hand one event to the host's ordered queue for its Execution.
 
-        Ordinary events return once enqueued. ``tool.intent``,
+        All events are awaited. Ordinary events return once enqueued; a
+        failed call is diagnosed without stopping the Execution. ``tool.intent``,
         ``execution.paused`` and ``execution.final`` return only after this
-        event and every earlier event of the Execution are durable. Any
-        failure raises, and the caller stops the current Execution.
+        event and every earlier event of the Execution are durable; a failed
+        call stops the Execution. Missing earlier events prevent barrier success,
+        including ordinary events that failed to enqueue and were not restored.
         """
         ...
 
