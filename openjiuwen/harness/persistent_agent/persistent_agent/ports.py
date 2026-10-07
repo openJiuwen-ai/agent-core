@@ -22,22 +22,28 @@ from .schema.protocol import ModelUsage
 
 
 class CommitPort(Protocol):
-    """Host port that keeps each Execution's events in one ordered queue."""
+    """Host port for ordered Execution logs that may have ordinary-event gaps."""
 
     async def record(self, execution: ExecutionContext, event: AgentEvent) -> None:
-        """Hand one event to the host's ordered queue for its Execution.
+        """Hand one event to the host for its Execution.
 
-        All events are awaited. Ordinary events return once enqueued; a
-        failed call is diagnosed without stopping the Execution. ``tool.intent``,
-        ``execution.paused`` and ``execution.final`` return only after this
-        event and every earlier event of the Execution are durable; a failed
-        call stops the Execution. Missing earlier events prevent barrier success,
-        including ordinary events that failed to enqueue and were not restored.
+        All calls are awaited. Ordinary events return once enqueued; failures
+        are diagnosed without stopping the Execution. Ordinary log gaps or
+        persistence retries do not block later critical calls. ``tool.intent``,
+        ``execution.paused`` and ``execution.final`` return after this event is
+        durable; failures stop the Execution. Final also requires every candidate
+        output referenced by its ``output_refs`` to be durably stored, including
+        its content and handoff information. Hosts deduplicate by ``event_id``;
+        resubmitted candidates retain their original event and output IDs.
         """
         ...
 
     async def read_execution_log(self, execution: ExecutionContext, execution_id: str) -> tuple[AgentEvent, ...]:
-        """Return saved events of an Execution of the same Session and Request, in production order."""
+        """Return saved events of the same Session and Request ordered by local_seq.
+
+        Ordinary events may be missing; a nonempty log does not establish
+        completeness. Missing tool results do not imply the operation never ran.
+        """
         ...
 
 
