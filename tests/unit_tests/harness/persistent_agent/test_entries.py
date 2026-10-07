@@ -22,6 +22,8 @@ from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.session.checkpointer import CheckpointerFactory, NoopCheckpointer
 from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 from openjiuwen.core.single_agent import AgentCard, Session, create_agent_session
+from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail, ConfirmPayload
 from openjiuwen.harness.schema.deep_agent_spec import (
     _RAIL_PROVIDER_REGISTRY,
@@ -50,12 +52,24 @@ def kinds(events):
     return [str(event.event_type) for event in events]
 
 
+def emoji_text(count):
+    """Four-byte characters whose period (251) is longer than any repeat the anomaly rail detects."""
+    return "".join(chr(0x1F300 + (index * 37) % 251) for index in range(count))
+
+
+def assert_within_limits(events):
+    limits = module("schema.events").EVENT_MAX_BYTES, module("schema.protocol").TEXT_MAX_CHARS
+    for event in events:
+        assert event.proposal_size() <= limits[0]
+        assert len(getattr(event.payload, "text", None) or "") <= limits[1]
+
+
 def usage(input_tokens, output_tokens):
     return UsageMetadata(input_tokens=input_tokens, output_tokens=output_tokens)
 
 
 class LocalModel:
-    """Streams one queued turn per call: an answer by default, or "tool" / "fail"."""
+    """Streams one queued turn per call: an answer by default, or "tool" / "two_tools" / "fail"."""
 
     model_client_config = None
     model_config = None
@@ -81,9 +95,10 @@ class LocalModel:
         turn = self.turns.pop(0) if self.turns else "answer"
         if turn == "fail":
             raise RuntimeError("local model failure")
-        if turn == "tool":
-            call = ToolCall(id=f"call-{self.calls}", type="function", name="remember", arguments=TOOL_ARGS)
-            yield AssistantMessageChunk(content="checking ", tool_calls=[call], usage_metadata=usage(3, 4))
+        if turn in ("tool", "two_tools"):
+            ids = [f"call-{self.calls}"] if turn == "tool" else ["call-a", "call-b"]
+            calls = [ToolCall(id=tool_id, type="function", name="remember", arguments=TOOL_ARGS) for tool_id in ids]
+            yield AssistantMessageChunk(content="checking ", tool_calls=calls, usage_metadata=usage(3, 4))
             return
         try:
             yield AssistantMessageChunk(content="local ")
@@ -98,18 +113,24 @@ class LocalModel:
 
 
 class Remember(Tool):
-    def __init__(self, calls):
+    """Not parallel-safe, so several calls in one turn run one after another."""
+
+    def __init__(self, calls, hooks):
         super().__init__(
             card=ToolCard(
                 id="remember",
                 name="remember",
                 input_params={"type": "object", "properties": {"value": {"type": "string"}}},
+                parallel_safe=False,
             )
         )
         self.calls = calls
+        self.hooks = hooks
 
     async def invoke(self, inputs, **kwargs):
         self.calls.append(inputs)
+        if self.hooks.get("on_invoke") is not None:
+            self.hooks["on_invoke"]()
         return {"remembered": inputs.get("value")}
 
     async def stream(self, inputs, **kwargs):
@@ -193,6 +214,18 @@ class ReplyAdapter:
         return ConfirmPayload(approved=response.choice != "reject", feedback=response.feedback or "")
 
 
+class RewriteAnswer(DeepAgentRail):
+    """Replaces the final result in after_invoke, as an outer rail may."""
+
+    def __init__(self, rewrite):
+        super().__init__()
+        self.rewrite = rewrite
+
+    async def after_invoke(self, ctx) -> None:
+        if self.rewrite.get("output") is not None:
+            ctx.inputs.result = {"output": self.rewrite["output"], "result_type": "answer"}
+
+
 class Harness:
     def __init__(self, api, model, store, tool_calls):
         self.api = api
@@ -200,8 +233,10 @@ class Harness:
         self.store = store
         self.tool_calls = tool_calls
         self.log = store.log
+        self.tool_hooks = {}
+        self.rewrite = {}
 
-    def spec(self, confirm=False, **overrides):
+    def spec(self, confirm=False, rewrite=False, **overrides):
         fields = dict(
             card=AgentCard(id="business-agent", name="test"),
             model=ModelSpec(
@@ -218,8 +253,11 @@ class Harness:
             auto_create_workspace=False,
             tools=[BuiltinToolSpec(type="test.entries.remember")],
         )
-        if confirm:
-            fields["rails"] = [RailSpec(type="test.entries.confirm")]
+        rails = [RailSpec(type="test.entries.confirm")] if confirm else []
+        if rewrite:
+            rails.append(RailSpec(type="test.entries.rewrite"))
+        if rails:
+            fields["rails"] = rails
         fields.update(overrides)
         return self.api.PersistentAgentSpec(**fields)
 
@@ -266,14 +304,22 @@ def harness(monkeypatch):
     api = import_module(PKG)
     model, tool_calls = LocalModel(), []
     store = StateStore([])
+    harness = Harness(api, model, store, tool_calls)
     monkeypatch.setattr(ModelSpec, "build", lambda self: model)
-    monkeypatch.setitem(_TOOL_PROVIDER_REGISTRY, "test.entries.remember", lambda params, context: Remember(tool_calls))
+    monkeypatch.setitem(
+        _TOOL_PROVIDER_REGISTRY,
+        "test.entries.remember",
+        lambda params, context: Remember(tool_calls, harness.tool_hooks),
+    )
     monkeypatch.setitem(
         _RAIL_PROVIDER_REGISTRY, "test.entries.confirm", lambda params, context: ConfirmInterruptRail(["remember"])
     )
+    monkeypatch.setitem(
+        _RAIL_PROVIDER_REGISTRY, "test.entries.rewrite", lambda params, context: RewriteAnswer(harness.rewrite)
+    )
     monkeypatch.setattr(SEAMS, "session_state_store", lambda context: store)
     monkeypatch.setattr(SEAMS, "native_reply_adapter", ReplyAdapter)
-    return Harness(api, model, store, tool_calls)
+    return harness
 
 
 def assert_rejected(exc_info, code):
@@ -365,16 +411,58 @@ async def test_native_failures_pause_without_output(harness, failure):
     assert harness.store.endings[-1].outcome == "error"
 
 
+CAPACITY_DETAIL = "final answer exceeds the event size limit; kept in the session state record for handoff"
+
+
 @pytest.mark.asyncio
-async def test_oversized_answer_pauses_instead_of_truncating(harness):
+@pytest.mark.parametrize("limit", ["characters", "event_bytes"])
+async def test_oversized_answer_pauses_and_is_kept_for_handoff(harness, limit):
     spec = harness.spec()
-    ctx, _ = harness.context(spec)
-    harness.model.answer = "".join(f"{index:06d}" for index in range(11000))
+    ctx, host = harness.context(spec)
+    if limit == "characters":
+        harness.model.answer = "".join(f"{index:06d}" for index in range(11000))
+    else:
+        # Within the character limit, but four bytes per character exceed the whole-event byte limit.
+        harness.model.answer = emoji_text(65500)
+    answer = "local " + harness.model.answer
     events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
-    deltas = [event.payload.text for event in events if event.event_type == "reply.delta"]
-    assert "".join(deltas) == "local " + harness.model.answer, "long chunks are split, not cut"
+    deltas = [event for event in events if event.event_type == "reply.delta"]
+    assert "".join(event.payload.text for event in deltas) == answer, "display is split, never cut"
+    assert len(deltas) >= 3
+    assert_within_limits(events)
     assert "output.proposed" not in kinds(events)
-    assert events[-1].payload.reason == "error" and "65536" in events[-1].payload.detail
+    assert (events[-1].payload.reason, events[-1].payload.detail) == ("error", CAPACITY_DETAIL)
+    ending = harness.store.endings[-1]
+    assert (ending.outcome, ending.output_refs, ending.pending_answer) == ("error", (), answer)
+    assert harness.log.index("save") < harness.log.index("execution.paused")
+    assert [event.local_seq for event in host.events] == list(range(1, len(host.events) + 1))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rewritten", ["short rewritten answer", "oversized"])
+async def test_answer_rewritten_in_after_invoke_is_the_one_checked(harness, rewritten):
+    spec = harness.spec(rewrite=True)
+    ctx, _ = harness.context(spec)
+    harness.rewrite["output"] = emoji_text(65500) if rewritten == "oversized" else rewritten
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    if rewritten == "oversized":
+        assert events[-1].payload.detail == CAPACITY_DETAIL
+        assert harness.store.endings[-1].pending_answer == harness.rewrite["output"]
+    else:
+        output = next(event for event in events if event.event_type == "output.proposed")
+        assert output.payload.text == rewritten and events[-1].payload.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_state_save_failure_is_not_absorbed_by_capacity_handling(harness):
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    harness.model.answer = emoji_text(65500)
+    harness.store.save_error = RuntimeError("window store down")
+    with pytest.raises(BaseError) as exc_info:
+        await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert_rejected(exc_info, StatusCode.DEEPAGENT_RUNTIME_ERROR)
+    assert not {"output.proposed", "execution.final", "execution.paused"} & set(kinds(host.events))
 
 
 @pytest.mark.asyncio
@@ -416,6 +504,84 @@ async def test_critical_failure_swallowed_by_native_code_still_raises(harness):
     assert exc_info.value is critical
     assert not {"output.proposed", "execution.final", "execution.paused"} & set(kinds(host.events))
     assert harness.store.record is None, "no state is saved after a critical failure"
+    assert ctx.binding.runtime.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("when", ["during_model_call", "between_tools"])
+async def test_critical_failure_skips_tools_not_yet_started(harness, when):
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    critical = RuntimeError("critical record failed")
+    if when == "during_model_call":
+        harness.model.turns = ["tool"]
+        harness.model.on_call = lambda: ctx.binding.control.mark_fatal(critical)
+    else:
+        harness.model.turns = ["two_tools"]
+        harness.tool_hooks["on_invoke"] = lambda: ctx.binding.control.mark_fatal(critical)
+    with pytest.raises(RuntimeError) as exc_info:
+        await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert exc_info.value is critical, "the registered critical error is raised, not a paused(error)"
+    assert len(harness.tool_calls) == (0 if when == "during_model_call" else 1)
+    assert harness.model.calls == 1, "no model call follows a critical failure"
+    assert not {"output.proposed", "execution.final", "execution.paused"} & set(kinds(host.events))
+    assert harness.store.record is None
+
+
+@pytest.mark.asyncio
+async def test_two_tool_calls_run_normally_without_a_critical_failure(harness):
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    harness.model.turns = ["two_tools"]
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert len(harness.tool_calls) == 2 and events[-1].payload.status == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["critical", "state_load", "invalid_reply"])
+async def test_failed_execution_accepts_no_control_during_cleanup(harness, monkeypatch, failure):
+    spec = harness.spec(confirm=failure == "invalid_reply")
+    if failure == "invalid_reply":
+        await pause_for_confirmation(harness, spec)
+    native_cleanup, native_abort = DeepAgent.cleanup_task_resources, DeepAgent.abort
+    cleaning, release, native_aborts = asyncio.Event(), asyncio.Event(), []
+
+    async def slow_cleanup(self):
+        cleaning.set()
+        await release.wait()
+        await native_cleanup(self)
+
+    async def spy_abort(self, session=None):
+        native_aborts.append(session)
+        await native_abort(self, session=session)
+
+    monkeypatch.setattr(DeepAgent, "cleanup_task_resources", slow_cleanup)
+    monkeypatch.setattr(DeepAgent, "abort", spy_abort)
+    ctx, _ = harness.context(spec, execution_id="execution-2")
+    critical = RuntimeError("critical record failed")
+    if failure == "critical":
+        harness.model.on_call = lambda: ctx.binding.control.mark_fatal(critical)
+        stream = harness.api.execute_persistent_request(spec, ctx, request())
+    elif failure == "state_load":
+        harness.store.load_error = RuntimeError("window store down")
+        stream = harness.api.execute_persistent_request(spec, ctx, request())
+    else:
+        stream = harness.api.resume_persistent_request(spec, ctx, permission("call-9"))
+    consumer = asyncio.create_task(collect(stream))
+    await asyncio.wait_for(cleaning.wait(), 5)
+    for reason in ("cancel", "stop"):
+        await harness.api.abort_persistent_request(ctx, reason=reason)
+    control = ctx.binding.control
+    assert control.outcome_locked and control.abort_reason is None, "no control is accepted during cleanup"
+    assert native_aborts == []
+    release.set()
+    with pytest.raises(Exception) as exc_info:
+        await asyncio.wait_for(consumer, 5)
+    if failure == "critical":
+        assert exc_info.value is critical
+    else:
+        code = StatusCode.DEEPAGENT_RUNTIME_ERROR if failure == "state_load" else StatusCode.DEEPAGENT_INPUT_PARAM_ERROR
+        assert_rejected(exc_info, code)
     assert ctx.binding.runtime.closed
 
 
