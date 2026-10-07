@@ -6,10 +6,13 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/runtime/`、`openjiuwen/core/runner/team_runner.py`（`_resolve_team_agent_spec` 入参归一化） |
-| 最近一次修订日期 | 2026-07-14 |
+| 最近一次修订日期 | 2026-10-07 |
 | 关联 feature | `F_05_lifecycle-finalize-relocation.md`、`F_06_name-old-session-recover.md` |
 
 ## 范围 / 边界
+
+Organization 的进程内绑定、owner 与关联释放约定见 [S_29](S_29_team-organization.md)。
+未绑定组织的团队仍走本规约中的原有派发与生命周期路径。
 
 ### 管的事
 
