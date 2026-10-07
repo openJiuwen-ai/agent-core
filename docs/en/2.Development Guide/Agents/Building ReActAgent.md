@@ -211,6 +211,15 @@ Current weather conditions in Hangzhou:
 
 It is recommended to bring rain gear when going out, pay attention to rain and slip prevention. If you need other weather information, feel free to tell me~
 ```
+## Streaming usage accounting
+
+`ReActAgent.stream()` emits an `llm_usage` frame when a completed model stream
+includes provider usage counters. Its payload contains `usage_metadata` and
+`total_latency_ms`. A provider response marked as an error emits this frame
+before entering the exception/retry hooks, so consumers can include the failed
+attempt's reported tokens. A response or exception without counters emits no
+`llm_usage` frame; missing usage must not be treated as zero consumption.
+
 # Complete Example Code Using MCP Service
 
 ```python
