@@ -62,7 +62,7 @@ class PersistentBuildContext(BuildContext):
         return clone
 
     def validate(self, spec: "PersistentAgentSpec") -> None:
-        """Static validation only; authority must be checked again before execution."""
+        """Static validation only; host ports and the window backend are not contacted."""
         if not isinstance(self.execution, ExecutionContext) or not isinstance(self.session, Session):
             raise build_error(
                 StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="real execution and Agent Session required"

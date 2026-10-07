@@ -1,9 +1,9 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Typed host contracts. No backend, fallback, commit, or execution implementation.
+"""Typed host contracts. No backend, fallback, queue, or execution implementation.
 
-Construction validates method shape only. Host responses must be validated and
-matched at the execution boundary; annotations cannot attest reliability.
+Construction validates shape only. Host responses must be validated at the
+execution boundary; annotations cannot attest durability or authorization.
 """
 
 from dataclasses import dataclass
@@ -12,48 +12,30 @@ from typing import Protocol
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 
-from .schema.context import (
-    ContextHeadResult,
-    HeadAdvance,
-    MaterialQuery,
-    MaterialReadResult,
-    WindowMutationResult,
-    WindowReadResult,
-    WindowSwitch,
-    WindowWrite,
-)
+from .schema.context import GroupMessageQuery, GroupMessagesResult, MaterialQuery, MaterialReadResult
 from .schema.events import AgentEvent
 from .schema.execution import ExecutionContext
-from .schema.port_results import AuthorityResult, BudgetAdmission, BudgetReport, CommitResult, ControlResult
+from .schema.port_results import BudgetAdmission, BudgetReport
 from .schema.protocol import ModelUsage
 
 
-class ExecutionAuthority(Protocol):
-    """Host port for checking the current execution's authority."""
-
-    async def check(self, execution: ExecutionContext) -> AuthorityResult:
-        """Return the host's authority result for this execution."""
-        ...
-
-
 class CommitPort(Protocol):
-    """Host port for submitting and querying execution event proposals."""
+    """Host port that keeps each Execution's events in one ordered queue."""
 
-    async def submit(self, execution: ExecutionContext, event: AgentEvent) -> CommitResult:
-        """Submit one event proposal and return its commit status."""
+    async def record(self, execution: ExecutionContext, event: AgentEvent) -> None:
+        """Hand one event to the host's ordered queue for its Execution.
+
+        Ordinary events return once enqueued. ``tool.intent``,
+        ``execution.paused`` and ``execution.final`` return only after this
+        event and every earlier event of the Execution are durable. Any
+        failure raises, and the caller stops the current Execution.
+        """
         ...
 
-    async def query(self, execution: ExecutionContext, event_id: str) -> CommitResult:
-        """Query the host for the durable outcome of one event proposal."""
-        ...
-
-
-class ControlPort(Protocol):
-    """Host port for polling controls addressed to one execution."""
-
-    async def poll(self, execution: ExecutionContext) -> ControlResult:
-        """Poll controls addressed to this invocation."""
+    async def read_execution_log(self, execution: ExecutionContext, execution_id: str) -> tuple[AgentEvent, ...]:
+        """Return saved events of an Execution of the same Session and Request, in production order."""
         ...
 
 
@@ -69,45 +51,17 @@ class BudgetPort(Protocol):
         ...
 
 
-class ContextStore(Protocol):
-    """Host port for reading and conditionally updating private windows."""
+class GroupChatPort(Protocol):
+    """Host port for the group history of the Session's group; the host resolves the group."""
 
-    async def read_head(self, execution: ExecutionContext) -> ContextHeadResult:
-        """Read the active-window pointer for this invocation."""
+    async def recent_messages(
+        self, execution: ExecutionContext, cursor: str | None = None, limit: int = 20
+    ) -> GroupMessagesResult:
+        """Return recent authorized group messages, after ``cursor`` when given."""
         ...
 
-    async def read_window(self, execution: ExecutionContext, window_ref: str, window_revision: int) -> WindowReadResult:
-        """Read one exact private-window revision."""
-        ...
-
-    async def save_window(self, execution: ExecutionContext, write: WindowWrite) -> WindowMutationResult:
-        """Persist an immutable private-window version."""
-        ...
-
-    async def advance_head(self, execution: ExecutionContext, advance: HeadAdvance) -> WindowMutationResult:
-        """Conditionally advance the active-window pointer."""
-        ...
-
-    async def create_and_activate_window(
-        self, execution: ExecutionContext, switch: WindowSwitch
-    ) -> WindowMutationResult:
-        """Create and activate a new private window as one host operation."""
-        ...
-
-    async def query_operation(self, execution: ExecutionContext, operation_id: str) -> WindowMutationResult:
-        """Query the host for the outcome of a window mutation."""
-        ...
-
-
-class HistoryPort(Protocol):
-    """Host port for authorized search and reads of archived history."""
-
-    async def search(self, execution: ExecutionContext, query: MaterialQuery) -> MaterialReadResult:
-        """Search authorized archived history for matching source references."""
-        ...
-
-    async def read(self, execution: ExecutionContext, material_ref: str, version_ref: str) -> MaterialReadResult:
-        """Read one exact archived-history version."""
+    async def search_messages(self, execution: ExecutionContext, query: GroupMessageQuery) -> GroupMessagesResult:
+        """Search authorized group history of the Session's group."""
         ...
 
 
@@ -123,53 +77,24 @@ class KnowledgePort(Protocol):
         ...
 
 
-class GroupMaterialPort(Protocol):
-    """Host port for authorized search and reads of shared group material."""
-
-    async def search(self, execution: ExecutionContext, query: MaterialQuery) -> MaterialReadResult:
-        """Search material shared in groups authorized for this invocation."""
-        ...
-
-    async def read(self, execution: ExecutionContext, material_ref: str, version_ref: str) -> MaterialReadResult:
-        """Read one exact authorized group-material version."""
-        ...
-
-
 @dataclass(frozen=True, kw_only=True)
 class PersistentPorts:
     """Collection of host contracts required or optionally enabled at build time."""
 
-    authority: ExecutionAuthority | None = None
     commit: CommitPort | None = None
-    control: ControlPort | None = None
     budget: BudgetPort | None = None
-    context_store: ContextStore | None = None
-    history: HistoryPort | None = None
+    # Session state records and window archives; must be persistent and unreachable from Agent tools.
+    window_backend: BaseKVStore | None = None
+    group_chat: GroupChatPort | None = None
     knowledge: KnowledgePort | None = None
-    group_material: GroupMaterialPort | None = None
 
     def validate(self) -> None:
-        """Reject missing/non-async port methods without contacting the host."""
+        """Reject missing or malformed dependencies without contacting the host or storage."""
         for name, methods, required in (
-            ("authority", ("check",), True),
-            ("commit", ("submit", "query"), True),
-            ("control", ("poll",), True),
+            ("commit", ("record", "read_execution_log"), True),
             ("budget", ("admit", "report"), True),
-            (
-                "context_store",
-                (
-                    "read_head",
-                    "read_window",
-                    "save_window",
-                    "advance_head",
-                    "create_and_activate_window",
-                    "query_operation",
-                ),
-                False,
-            ),
-            ("history", ("search", "read"), False),
+            ("group_chat", ("recent_messages", "search_messages"), False),
             ("knowledge", ("resolve", "read"), False),
-            ("group_material", ("search", "read"), False),
         ):
             port = getattr(self, name)
             if port is None:
@@ -185,3 +110,7 @@ class PersistentPorts:
                         StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
                         error_msg=f"missing async port {name}.{method}",
                     )
+        if not isinstance(self.window_backend, BaseKVStore):
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="window_backend must be a BaseKVStore"
+            )

@@ -15,7 +15,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 
 from .execution import ExecutionContext
-from .protocol import Digest, Identifier, InvocationRef, ModelUsage, Nonnegative, Positive, ProtocolModel, Reason, Text
+from .protocol import Digest, Identifier, InvocationRef, ModelUsage, Positive, ProtocolModel, Reason, Text
 
 References = Annotated[tuple[Identifier, ...], Field(max_length=128)]
 
@@ -27,14 +27,12 @@ class EventType(StrEnum):
     EXECUTION_STARTED = "execution.started"
     PROGRESS_UPDATED = "progress.updated"
     REPLY_DELTA = "reply.delta"
-    OUTPUT_PROPOSED = "output.proposed"
     MODEL_COMPLETED = "model.completed"
     TOOL_INTENT = "tool.intent"
     TOOL_COMPLETED = "tool.completed"
-    CHECKPOINT_PROPOSED = "checkpoint.proposed"
-    CONTROL_WAITING = "control.waiting"
-    EXECUTION_SUSPENDED = "execution.suspended"
-    WINDOW_ACTIVATED = "window.activated"
+    WINDOW_SWITCHED = "window.switched"
+    OUTPUT_PROPOSED = "output.proposed"
+    EXECUTION_PAUSED = "execution.paused"
     EXECUTION_FINAL = "execution.final"
 
 
@@ -48,10 +46,10 @@ class ParticipationPayload(ProtocolModel):
 
 
 class StartedPayload(ProtocolModel):
-    """Goal and decision reference that begin an execution proposal stream."""
+    """Goal that begins an execution; direct tasks have no participation decision."""
 
     goal: Text
-    decision_event_id: Identifier
+    decision_event_id: Identifier | None = None
 
 
 class TextPayload(ProtocolModel):
@@ -96,24 +94,26 @@ class ModelCompletedPayload(ProtocolModel):
 
 
 class ToolIntentPayload(ProtocolModel):
-    """Pre-execution description of a proposed tool operation."""
+    """Write intent recorded before execution; arguments appear only as a redacted summary."""
 
     operation_id: Identifier
+    tool_call_id: Identifier
     tool_name: Identifier
-    tool_version: Identifier
-    target_ref: Identifier
+    target_ref: Identifier | None = None
     params_digest: Digest
-    args_ref: Identifier
-    authorization_ref: Identifier | None = None
+    args_summary: Text
 
 
 class ToolCompletedPayload(ProtocolModel):
-    """Tool outcome proposal with explicit success, failure, or uncertainty."""
+    """Outcome of any tool call; only writes carry the operation_id of a prior intent."""
 
-    operation_id: Identifier
+    tool_call_id: Identifier
+    tool_name: Identifier
+    args_summary: Text
     status: Literal["succeeded", "failed", "unknown"]
+    result_summary: Text | None = None
     result_refs: References = ()
-    receipt_ref: Identifier | None = None
+    operation_id: Identifier | None = None
     reason: Reason | None = None
 
     @model_validator(mode="after")
@@ -121,47 +121,54 @@ class ToolCompletedPayload(ProtocolModel):
         """Require a reason for uncertain outcomes and evidence for success."""
         if self.status != "succeeded" and self.reason is None:
             raise PydanticCustomError("persistent_protocol", "failed/unknown tool result requires a reason")
-        if self.status == "succeeded" and not self.result_refs and self.receipt_ref is None:
+        if self.status == "succeeded" and self.result_summary is None and not self.result_refs:
             raise PydanticCustomError(
-                "persistent_protocol", "successful tool result requires a result/receipt reference"
+                "persistent_protocol", "successful tool result requires a result summary or reference"
             )
         return self
 
 
-class CheckpointPayload(ProtocolModel):
-    """Reference to a host-persisted checkpoint and its covered event sequence."""
+class WindowSwitchedPayload(ProtocolModel):
+    """Archive of the replaced window and the sequence number of the new one."""
 
-    checkpoint_ref: Identifier
-    covered_request_event_seq: Nonnegative
-
-
-class WaitingPayload(ProtocolModel):
-    """Condition and recovery references for an execution awaiting input."""
-
-    condition_ref: Identifier
-    recovery_ref: Identifier
-    reason: Reason
+    archive_ref: Identifier
+    window_seq: Positive
 
 
-class SuspendedPayload(ProtocolModel):
-    """Recovery reference and reason for a suspended execution proposal."""
+class InterceptedToolCall(ProtocolModel):
+    """One tool call awaiting the initiator's confirmation."""
 
-    recovery_ref: Identifier
-    reason: Reason
+    tool_call_id: Identifier
+    tool_name: Identifier
+    # Readable arguments for the confirmation card, with sensitive values redacted.
+    arguments: Text
 
 
-class WindowPayload(ProtocolModel):
-    """Activated private-window reference and resulting head revision."""
+class PausedPayload(ProtocolModel):
+    """Why an Execution ended without a final outcome; the Request can still continue."""
 
-    window_ref: Identifier
-    window_version: Identifier
-    head_revision: Identifier
+    reason: Literal["awaiting_confirmation", "stopped", "budget_denied", "context_unfit", "error"]
+    intercepted: Annotated[tuple[InterceptedToolCall, ...], Field(max_length=64)] = ()
+    detail: Reason | None = None
+
+    @model_validator(mode="after")
+    def validate_pause(self) -> Self:
+        """Only confirmation pauses carry tool calls; condition pauses must explain themselves."""
+        if (self.reason == "awaiting_confirmation") != bool(self.intercepted):
+            raise PydanticCustomError(
+                "persistent_protocol", "awaiting_confirmation requires intercepted calls; other pauses carry none"
+            )
+        if len({call.tool_call_id for call in self.intercepted}) != len(self.intercepted):
+            raise PydanticCustomError("persistent_protocol", "duplicate intercepted tool_call_id")
+        if self.reason in ("budget_denied", "context_unfit", "error") and self.detail is None:
+            raise PydanticCustomError("persistent_protocol", f"{self.reason} pause requires a detail")
+        return self
 
 
 class FinalPayload(ProtocolModel):
     """Proposed terminal outcome with references to outputs and artifacts."""
 
-    status: Literal["completed", "ignored", "cancelled", "failed-final"]
+    status: Literal["completed", "ignored", "cancelled", "failed"]
     output_refs: References = ()
     artifact_refs: References = ()
     reason: Reason | None = None
@@ -183,10 +190,8 @@ Payload = (
     | ModelCompletedPayload
     | ToolIntentPayload
     | ToolCompletedPayload
-    | CheckpointPayload
-    | WaitingPayload
-    | SuspendedPayload
-    | WindowPayload
+    | WindowSwitchedPayload
+    | PausedPayload
     | FinalPayload
 )
 
@@ -195,14 +200,12 @@ _PAYLOAD_TYPES = {
     EventType.EXECUTION_STARTED: StartedPayload,
     EventType.PROGRESS_UPDATED: TextPayload,
     EventType.REPLY_DELTA: ReplyDeltaPayload,
-    EventType.OUTPUT_PROPOSED: OutputPayload,
     EventType.MODEL_COMPLETED: ModelCompletedPayload,
     EventType.TOOL_INTENT: ToolIntentPayload,
     EventType.TOOL_COMPLETED: ToolCompletedPayload,
-    EventType.CHECKPOINT_PROPOSED: CheckpointPayload,
-    EventType.CONTROL_WAITING: WaitingPayload,
-    EventType.EXECUTION_SUSPENDED: SuspendedPayload,
-    EventType.WINDOW_ACTIVATED: WindowPayload,
+    EventType.WINDOW_SWITCHED: WindowSwitchedPayload,
+    EventType.OUTPUT_PROPOSED: OutputPayload,
+    EventType.EXECUTION_PAUSED: PausedPayload,
     EventType.EXECUTION_FINAL: FinalPayload,
 }
 
