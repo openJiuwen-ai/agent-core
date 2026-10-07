@@ -24,7 +24,7 @@
 ## 不变量
 
 1. 同一 Execution 的所有事件按产生顺序进入服务端维护的同一个有序队列；关键事件不能越过尚未落盘的前序事件（v2 §9.1）。
-2. `tool.intent`、`execution.paused`、`execution.final` 记账返回时，此前事件和本事件已全部落盘；记账失败就停止当前执行。其他事件入队即可继续。
+2. 所有事件统一 `await record()`。`tool.intent`、`execution.paused`、`execution.final` 返回时，此前事件和本事件已全部落盘，调用失败停止当前执行；普通事件入队后即可继续，调用失败只记诊断。
 3. `local_seq` 在一个 Execution 内递增，`event_id` 由完整调用归属和 `local_seq` 确定，重传复用原 `event_id`。
 4. 事件流结束、文件存在、模型完成都不等于 Request 终态；终态以记账成功的 `execution.final` 或 `execution.paused` 为准。
 5. 执行入口返回的事件流由 AgentServer 持续消费到结束，前端断开只结束展示订阅；停止或取消通过 `abort_bound` 发起，不通过关闭事件流（v2 §13 第 12 条）。
@@ -64,14 +64,16 @@ AgentEvent {
 | `execution.paused` | 暂停原因；等待确认时附被拦截的调用 | 关键 |
 | `execution.final` | `completed / ignored / cancelled / failed`、产物和输出引用 | 关键 |
 
-`execution.paused` 的原因固定为五种：`awaiting_confirmation / stopped / budget_denied / context_unfit / error`。只有 `awaiting_confirmation` 携带被拦截的调用列表，且至少一项；每项含 `tool_call_id`、工具名和脱敏后的可读参数，同一 `tool_call_id` 不能重复。`budget_denied`、`context_unfit`、`error` 必须说明原因。非完成终态和失败 / 未知的工具结果必须带原因；成功的工具结果必须带结果摘要或结果引用。
+`execution.paused` 的原因固定为五种：`awaiting_confirmation / stopped / budget_denied / context_unfit / error`。只有 `awaiting_confirmation` 携带被拦截的调用列表，且至少一项；每项含 `tool_call_id`、工具名和脱敏后的可读参数，同一 `tool_call_id` 不能重复。`budget_denied`、`context_unfit`、`error` 必须说明原因。非完成终态和失败 / 未知的工具结果必须带原因；所有工具结果都必须有非空白的可读结果摘要，结果引用不能替代摘要。
 
 | 端口方法 | 契约 |
 | --- | --- |
-| `record(execution, event) -> None` | 普通事件进入服务端有序队列后返回；关键事件等此前事件和本事件全部落盘后返回。入队失败，或关键事件及其前序事件无法保存，都抛异常，执行侧停止当前 Execution |
+| `record(execution, event) -> None` | 所有事件统一 await record；普通事件入队后返回，调用失败只记诊断并继续；关键事件等此前事件和本事件全部落盘后返回，调用失败停止当前 Execution；前序事件未成功保存时关键屏障不得返回成功 |
 | `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按产生顺序返回该次执行已保存的事件；服务端只允许读取同一 Session、同一 Request 下的执行。读取失败抛异常；续做时读不到或没有事件，按“上一次记录缺失”处理（PA-16） |
 
 执行适配须先对服务端返回的值重新 `model_validate`，再使用。
+
+`record` 是唯一持久化通道，入口返回的事件流只用于实时展示，AgentServer 消费流时不再保存同一事件。
 
 ## 状态及数据生命周期
 
@@ -82,7 +84,7 @@ AgentEvent {
   → 服务端按 execution_id 保存，构成执行日志
 ```
 
-服务端保存失败时可以重试，但不能跳过失败事件；重试仍失败时，等待中的关键记账调用抛异常，后续关键事件也不能返回成功。队列由服务端维护，不随 Agent 实例清理而取消。崩溃发生在下一次关键记账成功之前时，尚未落盘的普通事件可能缺失，续做按查证规则处理。
+普通事件的调用失败由执行侧只记诊断并继续，异步保存失败由服务端记诊断，可以重试，但不能跳过失败事件。前序事件（包括曾入队失败的普通事件）未补回、未保存时，关键屏障不得成功返回；关键调用抛异常后执行侧停止当前 Execution。队列由服务端维护，不随 Agent 实例清理而取消。崩溃发生在下一次关键记账成功之前时，尚未落盘的普通事件可能缺失，续做按查证规则处理。
 
 正常完成时，`execution.final` 记账成功即表示此前的 `output.proposed` 等事件也已落盘，服务端据此处理候选输出。每项输出有稳定 `output_id`，按 `output_id + target_ref + share_mode` 去重。只有文件结果的任务仍可 `completed`；若要群成员感知文件，`output.proposed` 须携带目标群、文件引用和共享方式（上传群空间，或作为群消息附件 / 可访问引用发送）。文件写入成功不自动形成群公开记录。
 
