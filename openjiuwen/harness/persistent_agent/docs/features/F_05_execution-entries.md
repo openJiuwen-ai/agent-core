@@ -6,7 +6,7 @@
 | 日期 | 2026-10-07 |
 | 负责人 | Song Haoran |
 | 范围 | 内部 `persistent_agent/{schema/request.py, execution/{control,emitter,model_rail,seams,entries}.py, schema/spec.py}`、外层 `__init__.py` 导出及对应单测；依赖共享 Session 接缝 harness [F_07](../../../docs/features/F_07_session-checkpointer-injection.md) |
-| 测试基线 | 改动前：PA 包 173 passed，F_01～F_03 共享回归集 213 passed。改动后：PA 包 224 passed，共享回归集 213 passed，`tests/unit_tests/core/session` 411 passed，`tests/unit_tests/harness` 5426 passed / 39 skipped（Python 3.11.17） |
+| 测试基线 | 改动前：PA 包 173 passed，F_01～F_03 共享回归集 213 passed。改动后：PA 包 224 passed（结局锁定及附录 C 验证点 5 补充后 229 passed），共享回归集 213 passed，`tests/unit_tests/core/session` 411 passed，`tests/unit_tests/harness` 5426 passed / 39 skipped（Python 3.11.17） |
 | 关联 | [v2 设计](../designs/persistent-agent-design-v2.md) §5.1、§7.8、§9.1～9.2、§10.2、§10.4、§13、§14；[开发计划](../designs/persistent-agent-development-plan-v2.md) PA-04；规约 S_01、S_02 |
 
 ## 背景
@@ -96,7 +96,7 @@ runner 的步骤：
 按优先级从高到低：
 
 1. 控制对象登记了致命错误 → 抛运行异常，不能降级为 `paused(error)`。
-2. 收到 cancel → `final(cancelled)`；收到 stop → `paused(stopped)`。原生流被取消时，runner 先接住取消信号再收尾。
+2. 结局锁定前接受了 cancel → `final(cancelled)`；接受了 stop → `paused(stopped)`。原生流被取消时，runner 先接住取消信号再收尾。
 3. 原生结果 `result_type="interrupt"` → `paused(awaiting_confirmation)`，`intercepted` 来自中断块：`tool_call_id` 用交互 ID，参数按键名脱敏后呈现。
 4. rail 的 force-finish 标记 → `paused(budget_denied)` 或 `paused(error)`。
 5. 原生结果 `result_type="answer"` → `final(completed)`；回答正文非空时先交出 `output.proposed`，并列入 `output_refs`。正文超过事件文本上限（65536 字符）时改为 `paused(error)` 并说明原因，不静默截断。
@@ -116,6 +116,7 @@ runner 的步骤：
 
 - `abort_persistent_request` 把原因记在构造上下文的控制对象上。这个对象在上下文创建时就存在，所以实例构造前到达的控制也能记下。
 - 同一种原因重复到达时忽略；不同原因只保留第一次。
+- **结局锁定**：执行入口在原生调用退出、确定执行结果后，同步锁定本次 Execution 的结局。锁定前接受的控制参与结局判定；锁定后不再接受活动执行的停止或取消，不修改控制原因，也不调用 `abort_bound`。结局锁定不代表持久化成功，状态保存和结束记账仍按原失败规则处理。实现上，`_run_native` 在每个确定结局的出口调用 `ExecutionControl.lock_outcome()`，它与最后一次检查控制原因之间没有让出点；锁定后 `request_abort` 返回 False，控制入口直接返回。此前，原生返回后、收尾保存期间到达的控制会被接受并调用 `abort_bound`，结局却仍按原生结果，状态自相矛盾。
 - 实例已构造且尚未关闭时，复用 `abort_bound`：runner 正在原生调用中则取消该调用；尚未进入原生调用则使之后的原生调用直接拒绝，入口按控制原因收尾。中断已在进行或实例已关闭时，不重复中断。
 - `abort_bound` 在等待原生 `abort` 返回期间把绑定标为停止中，此时 `close_bound` 会拒绝。控制入口在调用 `abort_bound` 前登记一个完成信号，runner 清理前先等待它，避免清理与正在进行的原生停止重叠。
 - 控制入口不发任何事件；结束事件统一由执行入口发出。
@@ -159,12 +160,13 @@ runner 的步骤：
 | 5. 错误 | 模型异常、最大迭代次数耗尽都产出 `paused(error)`，不交出候选；超长回答产出 `paused(error)`，展示片段拆分后完整 |
 | 6. 记账与保存失败 | 普通事件失败仍展示、仍完成；final 记账失败与保存失败都抛运行异常，保存失败时不记结束事件；原生代码内部登记的致命错误照样抛出，不保存、不记结束事件；加载失败在模型调用前抛运行异常 |
 | 7. 确认 | 权限中断产出 `paused(awaiting_confirmation)`，带交互 ID、工具名和脱敏参数，并有 `progress.updated`；新 Session、新实例恢复后工具执行并完成，回复目标取自等待现场；未知 ID、回答发给权限确认、所属 Request 不一致、没有等待现场都抛校验拒绝，不记事件、不保存、不调用模型 |
-| 8. 停止与取消 | 执行中 cancel → `final(cancelled)`，stop → `paused(stopped)`，模型流被取消；构造前到达的控制在模型调用前收尾；重复或并发控制只保留第一个原因；原生停止较慢时清理等它返回 |
+| 8. 停止与取消 | 执行中 cancel → `final(cancelled)`，stop → `paused(stopped)`，模型流被取消；构造前到达的控制在模型调用前收尾；重复或并发控制只保留第一个原因；原生停止较慢时清理等它返回；结局锁定后（收尾保存期间）到达的 cancel / stop 不被接受：控制原因不变、不调用原生 `abort`，结局仍为 `final(completed)`；锁定后保存失败照常抛运行异常、不记结束事件 |
 | 9. 提前关闭流 | 原生流被取消，实例占用释放并关闭，不保存、不记结束事件 |
 | 10. checkpointer 隔离 | 全局内存 checkpointer 中同 session_id 的旧状态不会进入执行，执行后也没有新快照 |
-| 11. 回归 | PA 包 224 passed（新增 51）；共享回归集 213 passed；`tests/unit_tests/core/session` 411 passed；`tests/unit_tests/harness` 5426 passed / 39 skipped。同一套件连续运行 5 次结果一致 |
+| v2 附录 C 验证点 5（部分） | 模型调用中途停止时，已有上下文（含已完成的工具调用及结果）经会话状态记录接入点保存后记 `paused(stopped)`；第一次模型调用中途停止时，原生在上下文末尾追加“[Request cancelled by user]”占位回复。工具执行中途停止的不完整工具调用归 PA-17 |
+| 11. 回归 | PA 包 224 passed（新增 51），结局锁定及附录 C 验证点 5 补充后 229 passed、`tests/unit_tests/harness` 5432 passed / 39 skipped；共享回归集 213 passed；`tests/unit_tests/core/session` 411 passed；`tests/unit_tests/harness` 5426 passed / 39 skipped。同一套件连续运行 5 次结果一致 |
 
-变异检查：去掉清理前的停止等待、去掉内层生成器的 `aclosing`、去掉原生调用后的致命错误检查，对应用例都会失败。
+变异检查：去掉清理前的停止等待、去掉内层生成器的 `aclosing`、去掉原生调用后的致命错误检查、去掉 `request_abort` 的结局锁定检查，对应用例都会失败。
 
 其他检查：改动文件 Ruff check / format 通过。mypy 在改动文件中报 2 个改动前已有的问题（`build_context.py` 的 `derive` 返回类型、`spec.py` 中 `build` 的参数类型覆盖），与本特性无关，未修改。原 PA-01 构造测试中“执行入口尚未导出”的断言改为检查三个入口已导出。
 
