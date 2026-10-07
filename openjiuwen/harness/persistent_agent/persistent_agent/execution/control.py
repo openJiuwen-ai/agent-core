@@ -23,13 +23,20 @@ class ExecutionControl:
     emitter: "EventEmitter | None" = field(default=None, repr=False)
     # Resolved when the native stop request returns; cleanup must not overlap it.
     stop_settled: "asyncio.Future[None] | None" = field(default=None, repr=False)
+    # Set once the native call has exited and the outcome is determined; not a persistence receipt.
+    outcome_locked: bool = False
 
     def request_abort(self, reason: AbortReason) -> bool:
-        """Record the first control reason; later requests keep it and report False."""
-        if self.abort_reason is not None:
+        """Record the first control reason before the outcome is locked; otherwise report False."""
+        if self.outcome_locked or self.abort_reason is not None:
             return False
         self.abort_reason = reason
         return True
+
+    def lock_outcome(self) -> AbortReason | None:
+        """Lock the outcome; return the control reason accepted before the lock, if any."""
+        self.outcome_locked = True
+        return self.abort_reason
 
     def mark_fatal(self, error: BaseException) -> None:
         """Keep the first critical failure."""
