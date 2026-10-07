@@ -111,20 +111,16 @@ class ToolCompletedPayload(ProtocolModel):
     tool_name: Identifier
     args_summary: Text
     status: Literal["succeeded", "failed", "unknown"]
-    result_summary: Text | None = None
+    result_summary: Text
     result_refs: References = ()
     operation_id: Identifier | None = None
     reason: Reason | None = None
 
     @model_validator(mode="after")
     def validate_result(self) -> Self:
-        """Require a reason for uncertain outcomes and evidence for success."""
+        """Require a reason for failed/unknown outcomes in addition to their summary."""
         if self.status != "succeeded" and self.reason is None:
             raise PydanticCustomError("persistent_protocol", "failed/unknown tool result requires a reason")
-        if self.status == "succeeded" and self.result_summary is None and not self.result_refs:
-            raise PydanticCustomError(
-                "persistent_protocol", "successful tool result requires a result summary or reference"
-            )
         return self
 
 
