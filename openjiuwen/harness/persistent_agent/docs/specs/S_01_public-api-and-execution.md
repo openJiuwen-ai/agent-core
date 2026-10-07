@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 状态 | PA-01 契约、PA-02 DeepAgent 构造、PA-03 实例内 Session 隔离已按各自边界验收；PA-22 已按 v2 收敛执行上下文与宿主端口；PA-04 执行、恢复与控制入口已实现，会话状态记录（PA-09）与交互适配（PA-08）接入前正式入口明确拒绝 |
 | 关联模块 | 外层 `persistent_agent/__init__.py` 与内部 `persistent_agent/persistent_agent/{factory.py,ports.py,schema/,execution/}` |
-| 最近一次修订日期 | 2026-10-07 |
+| 最近一次修订日期 | 2026-10-08 |
 | 关联 feature | [F_01 Spec 与 DeepAgent 装配](../features/F_01_spec-and-deep-agent-construction.md)、[F_02 执行协议](../features/F_02_execution-protocol.md)、[F_03 执行绑定](../features/F_03_invocation-binding-and-isolation.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)；开发计划 PA-01～PA-06、PA-08、PA-22 |
 | 设计依据 | [Persistent Agent 设计（v2）](../designs/persistent-agent-design-v2.md) §4、§5、§13、§14；[旧版详细架构](../designs/persistent-agent-architecture.md) §4～7 仅供参考 |
 
@@ -59,7 +59,7 @@ PA-04 的执行、恢复与控制入口（`execution/entries.py`，详见 [F_05]
 - **前置拒绝**：在任何事件和构造之前，以下情况抛校验拒绝（`ValidationError` 类）：Spec 未显式关闭 task-loop 或开启了任何子代理开关；Session 未注入 `NoopCheckpointer`；群消息（PA-06 前）、带 `recovery_ref`（PA-17 前）；会话状态记录（PA-09）或恢复时的交互适配（PA-08）接入点不可用。构造后还核对装配结果中 task-loop 和子代理确实未开启。
 - **编排**：生成器在内部执行任务中运行原生流，自身只转交已记账的事件；构造上下文仍只能使用一次。执行时依次记 `execution.started`、加载会话状态记录、运行原生流、交出 `output.proposed`、保存会话状态记录、记结束事件，最后关闭实例。会话状态记录加载或保存失败、关键事件记账失败、实例清理失败都抛运行异常（`ExecutionError` 类）；保存失败时不记结束事件。服务端提前关闭事件流时，入口取消内部任务并等待原生流和清理结束，不产生结束事件。
 - **恢复**：从会话状态记录取得等待现场，核对所属 Request、交互 ID、回复类型与问题文本后，按交互 ID 组装原生 `InteractiveInput`；回复无效时抛校验拒绝，不记账、不保存。恢复不记 `execution.started`，回复目标取自等待现场。
-- **控制**：`abort_persistent_request(context, *, reason)` 把第一个 cancel / stop 记在构造上下文上，之后到达的原因忽略；实例构造后、关闭前复用 `abort_bound`。它不发事件，结局由执行入口给出：cancel 为 `final(cancelled)`，stop 为 `paused(stopped)`。实例清理会等待正在进行的原生停止返回。
+- **控制**：`abort_persistent_request(context, *, reason)` 把第一个 cancel / stop 记在构造上下文上，之后到达的原因忽略；实例构造后、关闭前复用 `abort_bound`。它不发事件，结局由执行入口给出：cancel 为 `final(cancelled)`，stop 为 `paused(stopped)`。实例清理会等待正在进行的原生停止返回。执行入口在原生调用退出、确定执行结果后，同步锁定本次 Execution 的结局。锁定前接受的控制参与结局判定；锁定后不再接受活动执行的停止或取消，不修改控制原因，也不调用 `abort_bound`。结局锁定不代表持久化成功，状态保存和结束记账仍按原失败规则处理。
 
 `enabled_features` 暂不增加 `execution`，M1 集成接入 PA-05、PA-07、PA-08、PA-09 并验证后再声明。其余本规约中的执行接口和状态为后续目标。
 

@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 状态 | 事件 DTO 和记账 / 执行日志端口契约已按 v2 实现（PA-22）；事件映射、记账调用、结局判定和最终回答交接已实现（PA-04）；`tool.intent / tool.completed`（PA-14）、`window.switched`（PA-10）、`participation.decided`（PA-06）待接入 |
 | 关联模块 | 内部 `persistent_agent/{ports.py,schema/{protocol,events,port_results}.py,execution/{emitter,model_rail,entries}.py}` |
-| 最近一次修订日期 | 2026-10-07 |
+| 最近一次修订日期 | 2026-10-08 |
 | 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)；开发计划 PA-04、PA-07、PA-14、PA-16、PA-22 |
 | 设计依据 | [Persistent Agent 设计（v2）](../designs/persistent-agent-design-v2.md) §9、§13 第 5、12 条、§14 |
 
@@ -93,7 +93,7 @@ AgentEvent {
 结局按优先级判定：
 
 1. 关键事件记账失败：抛运行异常，不降级为 `paused(error)`。
-2. 收到 cancel：`final(cancelled)`；收到 stop：`paused(stopped)`。
+2. 结局锁定前接受了 cancel：`final(cancelled)`；接受了 stop：`paused(stopped)`。原生调用退出、确定执行结果后同步锁定结局，此后到达的控制不被接受，不改变结局；锁定不代表持久化成功，会话状态记录保存和结束记账失败仍按原规则抛运行异常（见 [S_01](S_01_public-api-and-execution.md) 的执行入口编排）。
 3. 有被拦截调用：`paused(awaiting_confirmation)`。
 4. 预算拒绝或准入异常：`paused(budget_denied)` / `paused(error)`。
 5. 原生结果为 answer：`final(completed)`。正文非空时先交出 `output.proposed`（`output_id` 由 `execution_id` 派生，`target_ref` 为回复目标，`share_mode=message`），并列入 `output_refs`；正文超过 65536 字符时改为 `paused(error)`，不静默截断。
