@@ -55,6 +55,11 @@ OJ_STEP_NUMBER = "openjiuwen.step.number"
 OJ_INFERENCE_ID = "openjiuwen.inference.id"
 OJ_REQUEST_NUMBER = "openjiuwen.request.number"
 OJ_REQUEST_PURPOSE = "openjiuwen.request.purpose"
+# Transport-level retries the provider SDK made inside this one LLM request
+# before the response that was streamed (connection errors, 429, 5xx). Their
+# time is part of every request-relative duration, so a reader needs the count
+# to tell a slow provider from a retried one.
+OJ_REQUEST_RETRY_COUNT = "openjiuwen.request.retry_count"
 OJ_CONTEXT_OPERATION_ID = "openjiuwen.context.operation.id"
 # Which compaction this is for its subject, counting operations rather than
 # model calls: a compaction the provider throttles is retried, and all of its
@@ -95,9 +100,24 @@ OJ_GEN_AI_REASONING_TIMING = "openjiuwen.gen_ai.reasoning.timing"
 
 # Durations, in milliseconds. The GenAI standard states durations in seconds:
 # ``gen_ai.response.time_to_first_chunk`` is the only duration attribute in the
-# pinned registry and the handler writes it in seconds. These three stay in
+# pinned registry and the handler writes it in seconds. These stay in
 # milliseconds on purpose, and the ``_ms`` suffix is load-bearing -- it is the
 # only thing telling a reader the unit differs from the standard's.
+#
+# All request-relative durations share one origin: the moment the LLM span
+# opens, before the client builds the request. They are client-side, end-to-end
+# measurements and include local request preparation, network and gateway time:
+#
+# - ``time_to_first_byte_ms``: until the provider's response headers arrive.
+#   A large value points at the network, the gateway, or SDK retries.
+# - ``gen_ai.response.time_to_first_chunk`` (standard, seconds): until the
+#   first parsed stream chunk, which may be a role-only or heartbeat delta.
+# - ``time_to_first_token_ms``: until the first chunk that carries model
+#   output -- content, reasoning, or a tool call fragment. This is the TTFT a
+#   latency dashboard wants; on reasoning models it can be seconds later than
+#   the first chunk.
+# - ``tpot_ms``: mean time per output token between the first and the last
+#   token-carrying chunk.
 #
 # No standard *attribute* means the same thing as any of these, so none is a
 # duplicate. The nearest relative is ``total_latency_ms``: it measures the whole
@@ -107,6 +127,8 @@ OJ_GEN_AI_REASONING_TIMING = "openjiuwen.gen_ai.reasoning.timing"
 # drop the project key rather than writing both.
 OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS = "openjiuwen.gen_ai.response.total_latency_ms"
 OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
+OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_BYTE_MS = "openjiuwen.gen_ai.response.time_to_first_byte_ms"
+OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS = "openjiuwen.gen_ai.response.time_to_first_token_ms"
 OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
 
 OJ_EVENT_SEQUENCE = "openjiuwen.event.sequence"

@@ -292,6 +292,7 @@ class ObservabilityRuntime:
                 context_compression_handler.on_llm_request_input,
             ),
             (LLMCallEvents.LLM_INPUT, handler.on_llm_input),
+            (LLMCallEvents.LLM_RESPONSE_STARTED, handler.on_llm_response_started),
             (LLMCallEvents.LLM_STREAM_OUTPUT, handler.on_llm_stream_output),
             (LLMCallEvents.LLM_STREAM_COMPLETED, handler.on_llm_stream_completed),
             (LLMCallEvents.LLM_INVOKE_OUTPUT, handler.on_llm_invoke_output),
