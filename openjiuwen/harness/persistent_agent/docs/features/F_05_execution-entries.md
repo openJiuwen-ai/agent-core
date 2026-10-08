@@ -134,12 +134,16 @@ runner 的步骤：
 
 `execution/seams.py` 集中放置后续特性的接入点：
 
-- `session_state_store(context)`：会话状态记录的加载、整理和保存，PA-10。保存时收到的 `ExecutionEnding` 含结局、所属 Request、回复目标、`output_refs`，以及容量超限时未交接的完整最终答案 `pending_answer`；PA-10 须原样保存 `pending_answer`。
+- `session_state_store(context)`：会话状态记录的加载、整理和保存，PA-10。
+  - `load` 把最新记录写回新 Session，返回 `LoadedRecord`：等待现场 `waiting`（仅等待确认时有）和群消息游标 `last_group_message_id`（上一次执行看到的最后一条群消息）。没有记录时返回空的 `LoadedRecord`；返回其他类型按运行异常处理。
+  - `save` 收到的 `ExecutionEnding` 含结局、所属 Request、回复目标、`output_refs`、容量超限时未交接的完整最终答案 `pending_answer`，以及本次的群消息游标 `last_group_message_id`。PA-10 须原样保存这两个字段，后者写进执行结束标记。
+- `window_assembler(context)`：新 Request 的窗口组装，PA-06。执行入口在加载记录之后调用 `assemble(context, request, record)`，拿到 `WindowAssembly`：原生输入 `native_input`，以及本次背景中最后一条群消息 ID（作为新的游标写入结束信息）。组装抛出的非框架异常按运行异常处理，原生调用不会在不完整的窗口上运行。确认恢复不调用组装，结束信息沿用加载时的游标。
+- `group_message_reader(context)`：本 Session 所在群的最近消息读取，PA-23。`recent_messages(context, after=游标, exclude_message_id=触发消息)` 返回 `GroupMessagesResult`：游标之后的新消息，再往前多取几条作为衔接，不含触发消息。PA-06 组装背景和 PA-07 参与判断都通过它读取，不各自实现。
 - `native_reply_adapter()`：交互回复到原生输入的转换，PA-09。
 
-两者未接入时都抛校验拒绝，正式入口因此明确拒绝。单测通过替身验证 PA-05 自身的编排，替身不能替代正式实现。
+**窗口标记约定（PA-06 写，PA-10 整理）**：PA-06 在追加的消息元信息中设置 `WINDOW_PART_KEY`（`persistent_window_part`）。值为 `execution_header` 的执行头在结束时保留并压缩成一行；值为 `temporary_background` 的临时背景块在结束时删除。没有该标记的消息按普通窗口内容保留。
 
-窗口组装（PA-06）未接入时，原生输入就是任务正文。由于会话状态记录未接入时正式入口本来就不可用，这不会形成“降级执行”。
+各接入点未接入时都抛校验拒绝，正式入口因此明确拒绝。单测通过替身验证 PA-05 自身的编排，替身不能替代正式实现。值对象、标记和接口集中定义在 `seams.py`，使 PA-06、PA-07、PA-08、PA-10、PA-23 可以并行开发而不改动执行入口的同一段编排。
 
 ### 8. 能力声明
 

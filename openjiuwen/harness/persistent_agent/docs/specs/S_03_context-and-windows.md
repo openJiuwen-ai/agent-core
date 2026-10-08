@@ -17,6 +17,14 @@
 - **群聊记录**：`GroupChatPort.recent_messages / search_messages` 返回 `GroupMessagesResult`，结果分为 found / empty / incomplete，incomplete（没查完或查询失败）不能当作“没有”。`GroupMessage` 按架构设计 §7.9 携带稳定发送者身份、服务端接收时间、@、回复、附件引用、状态和是否属于排队中的请求；已撤回的消息不返回正文。读取与检索的行为由 PA-23 实现。
 - **知识**：`KnowledgePort.resolve / read` 继续使用 `MaterialQuery / MaterialSnapshot / MaterialReadResult`，`unknown`、`unavailable`、`forbidden`、`partial` 与具备完整查询水位的 `empty` 区分，由 PA-13 细化。
 
+PA-05 在 `execution/seams.py` 定义了窗口相关的接入约定，供 PA-06、PA-07、PA-10、PA-23 并行实现（详见 [F_05](../features/F_05_execution-entries.md) §7）：
+
+- **加载结果**：会话状态记录加载后返回 `LoadedRecord`，包含等待现场和群消息游标（上一次执行看到的最后一条群消息 ID）。
+- **窗口组装**：新 Request 在加载之后由 `WindowAssembler.assemble(context, request, record)` 追加执行头、临时背景块和任务输入，返回原生输入和本次的群消息游标；确认恢复不组装。
+- **窗口标记**：追加的执行头和临时背景块在消息元信息 `persistent_window_part` 中分别标为 `execution_header`、`temporary_background`，PA-10 结束整理时据此压缩执行头、删除临时背景块。
+- **结束信息**：`ExecutionEnding` 携带群消息游标和容量超限时未交接的最终答案，PA-10 写入执行结束标记和记录。
+- **群消息读取**：`GroupMessageReader.recent_messages(context, after, exclude_message_id)` 由 PA-23 实现，PA-06 与 PA-07 共用。
+
 以下章节仍按旧版架构编写，描述每次模型调用前的装配、活动指针和 Checkpoint 等已被架构设计取代的目标行为；与架构设计冲突时以架构设计 §7（按 Execution 生命周期管理上下文、会话状态记录、换窗与归档）为准，随 PA-06、PA-10～PA-13 修订。
 
 ## 范围 / 边界
