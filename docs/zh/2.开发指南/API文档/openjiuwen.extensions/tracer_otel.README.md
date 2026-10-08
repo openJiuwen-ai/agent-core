@@ -2,6 +2,12 @@
 
 `openjiuwen.extensions.tracer_otel` 提供可选的 OpenTelemetry 链路追踪扩展，将框架内置 Tracer 产生的 Agent 与工作流执行事件转换为 OTel span，导出到 Jaeger、Zipkin、OTLP Collector 等后端。
 
+使用前安装可选依赖：
+
+```bash
+pip install "openjiuwen[tracer-otel]"
+```
+
 该扩展独立于 `agent_teams.observability`，不调用全局 `trace.set_tracer_provider()`，因此可以与 `init_observability()` 共存，互不冲突。
 
 **Modules**：
