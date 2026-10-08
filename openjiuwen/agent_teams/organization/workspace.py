@@ -130,7 +130,8 @@ class OrganizationWorkspaceManager(TeamWorkspaceManager):
         prefix = f".organization/{self.mount_name}/"
         if not normalized.startswith(prefix):
             raise ValueError("path is outside the current organization workspace")
-        relative_text = normalized[len(prefix) :]
+        prefix_length = len(prefix)
+        relative_text = normalized[prefix_length:]
         pure = PurePosixPath(relative_text)
         if not relative_text or pure.is_absolute() or ".." in pure.parts:
             raise ValueError("invalid organization workspace path")

@@ -2383,23 +2383,17 @@ class ReActAgent(BaseAgent):
         if isinstance(tool_result, WorkflowOutput) and isinstance(tool_result.result, list):
             ids = []
             for item in tool_result.result:
-                if (
-                    hasattr(item, "type")
-                    and item.type == "__interaction__"
-                    and hasattr(item, "payload")
-                    and hasattr(item.payload, "id")
-                ):
+                if not hasattr(item, "type") or item.type != "__interaction__":
+                    continue
+                if hasattr(item, "payload") and hasattr(item.payload, "id"):
                     ids.append(item.payload.id)
             return sorted(ids)
         if isinstance(tool_result, list):
             ids = []
             for item in tool_result:
-                if (
-                    hasattr(item, "type")
-                    and item.type == "__interaction__"
-                    and hasattr(item, "payload")
-                    and isinstance(item.payload, dict)
-                ):
+                if not hasattr(item, "type") or item.type != "__interaction__":
+                    continue
+                if hasattr(item, "payload") and isinstance(item.payload, dict):
                     ids.append(item.payload.get("component_id", ""))
             return sorted(ids)
         return []
@@ -3120,7 +3114,10 @@ class ReActAgent(BaseAgent):
                     else []
                 )
                 for schema in schemas:
-                    if pending_id is None or (
+                    if pending_id is None:
+                        await session.write_stream(schema)
+                        continue
+                    if (
                         hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id
                     ):
                         await session.write_stream(schema)
