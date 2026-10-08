@@ -41,7 +41,7 @@ def extract_fetch_url(tool_args: Mapping[str, Any] | None) -> str | None:
     return None
 
 
-def _hostname(url: str) -> str | None:
+def url_hostname(url: str) -> str | None:
     text = url.strip()
     if not text:
         return None
@@ -78,7 +78,7 @@ def match_net_pattern(pattern: str, url: str) -> bool:
         if "*" in pat or "?" in pat:
             return _match_url_glob(normalized, pat)
         return normalized == pat or normalized.startswith(pat)
-    host = _hostname(normalized)
+    host = url_hostname(normalized)
     if not host:
         return False
     return match_wildcard(host, pat.lower())
@@ -102,10 +102,16 @@ class NetGuardChecker:
                     continue
                 compiled[pattern.strip()] = action
         self._urls = compiled
+        raw_enforce = section.get("enforce_host_exit")
+        self._enforce_host_exit = True if raw_enforce is None else bool(raw_enforce)
 
     @property
     def enabled(self) -> bool:
         return self._enabled
+
+    @property
+    def enforce_host_exit(self) -> bool:
+        return self._enforce_host_exit
 
     def evaluate(
         self,
@@ -116,7 +122,12 @@ class NetGuardChecker:
             return None
         if str(tool_name or "").strip() not in _FETCH_TOOLS:
             return None
-        url = extract_fetch_url(tool_args)
+        return self.check_url(extract_fetch_url(tool_args))
+
+    def check_url(self, url: str | None) -> PermissionResult | None:
+        """Tool-agnostic URL check; returns a DENY result or ``None`` (allowed)."""
+        if not self._enabled:
+            return None
         hits: list[tuple[str, str]] = []
         if url:
             for pattern, action in self._urls.items():
@@ -155,4 +166,5 @@ __all__ = [
     "build_net_guard_checker",
     "extract_fetch_url",
     "match_net_pattern",
+    "url_hostname",
 ]
