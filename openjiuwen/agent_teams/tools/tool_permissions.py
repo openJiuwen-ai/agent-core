@@ -14,6 +14,7 @@ LEADER_ONLY_TOOLS: set[str] = {
     "clean_team",         # Clean up a team
     "spawn_teammate",     # Spawn an ordinary LLM teammate
     "spawn_human_agent",  # Spawn a human member (HITT)
+    "spawn_passive_human",  # Spawn a passive human member (HITT, no harness)
     "spawn_bridge_agent", # Spawn a bridge to a remote agent
     "spawn_external_cli", # Spawn a third-party CLI agent teammate
     "shutdown_member",    # Shutdown a team member
@@ -46,6 +47,7 @@ SHARED_TOOLS: set[str] = {
     "view_task",      # View tasks (unified - supports get/list/claimable)
     # Messaging tools
     "send_message",   # Send a message (point-to-point or broadcast)
+    "group_send_message",  # Post into the public group chat
     "workspace_meta", # Workspace lock management and version history
 }
 

@@ -104,6 +104,7 @@ class TeamRole(str, Enum):
     LEADER = "leader"
     TEAMMATE = "teammate"
     HUMAN_AGENT = "human_agent"
+    PASSIVE_HUMAN = "passive_human"
     BRIDGE_AGENT = "bridge_agent"
     WORKER = "worker"
 
@@ -182,6 +183,7 @@ class TeamMemberSpec(MemberSpecBase):
         TeamRole.LEADER,
         TeamRole.TEAMMATE,
         TeamRole.HUMAN_AGENT,
+        TeamRole.PASSIVE_HUMAN,
     ] = TeamRole.TEAMMATE
 
 

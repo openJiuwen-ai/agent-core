@@ -531,7 +531,13 @@ class AgentConfigurator:
         # Predefined teams pin their roster — strip every dynamic spawn tool
         # (one per role_type) from the leader's tool set.
         exclude = (
-            ["spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"]
+            [
+                "spawn_teammate",
+                "spawn_human_agent",
+                "spawn_passive_human",
+                "spawn_bridge_agent",
+                "spawn_external_cli",
+            ]
             if _resolve_team_mode(spec) == "predefined"
             else []
         )
@@ -902,6 +908,7 @@ class AgentConfigurator:
             on_team_built=on_team_built,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
         )
+        agent_team.group_chat_spec = spec
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager
         self.message_manager = agent_team.message_manager

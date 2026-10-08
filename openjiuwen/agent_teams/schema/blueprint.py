@@ -911,17 +911,18 @@ class TeamAgentSpec(BaseModel):
         """
         if self.enable_hitt:
             return
-        if not any(m.role_type == TeamRole.HUMAN_AGENT for m in self.predefined_members):
+        human_roles = (TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN)
+        if not any(m.role_type in human_roles for m in self.predefined_members):
             return
 
         from openjiuwen.core.common.exception.codes import StatusCode
         from openjiuwen.core.common.exception.errors import raise_error
 
-        offenders = [m.member_name for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT]
+        offenders = [m.member_name for m in self.predefined_members if m.role_type in human_roles]
         raise_error(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason=(
-                f"predefined_members contains HUMAN_AGENT role(s) {offenders} "
+                f"predefined_members contains human role(s) {offenders} "
                 f"but enable_hitt=False; set enable_hitt=True (capability ceiling) "
                 f"or remove the human member(s)"
             ),
