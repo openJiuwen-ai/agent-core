@@ -455,8 +455,15 @@ class LlmSpanState:
             its later callbacks resolve by parent matching instead.
         is_streaming: Whether this is a streaming (chunk-by-chunk) call.
         first_chunk_ns: Monotonic-ns of the first stream chunk; None until
-            the first chunk arrives.
+            the first chunk arrives. The chunk may carry no model output
+            (a role-only or heartbeat delta).
         last_chunk_ns: Monotonic-ns of the most recent stream chunk.
+        response_started_ns: Monotonic-ns of when the provider's response
+            headers arrived (time to first byte); None until reported.
+        first_token_ns: Monotonic-ns of the first stream chunk that carries
+            model output (content, reasoning, or a tool call fragment).
+        last_token_ns: Monotonic-ns of the most recent chunk that carries
+            model output.
         stream_event_sequence: Sequence number for additive stream events.
         reasoning_first_ns: Monotonic-ns of the first reasoning chunk.
         reasoning_last_ns: Monotonic-ns of the last reasoning chunk.
@@ -477,6 +484,9 @@ class LlmSpanState:
     is_streaming: bool = False
     first_chunk_ns: int | None = None
     last_chunk_ns: int | None = None
+    response_started_ns: int | None = None
+    first_token_ns: int | None = None
+    last_token_ns: int | None = None
     stream_event_sequence: int = 0
     request_purpose: str = "assistant"
     message_occurrence_ids: tuple[str, ...] = ()

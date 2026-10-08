@@ -262,7 +262,12 @@ flush / close**，**不走 `team_logger`**。
 - token 使用 `gen_ai.usage.input_tokens`、`output_tokens`、`cache_read.input_tokens`、
   `cache_write.input_tokens`、`reasoning.output_tokens`；不推导 total，也不按 exporter 扣减。
 - 首包耗时以秒写入 `gen_ai.response.time_to_first_chunk`，结束原因写入数组
-  `gen_ai.response.finish_reasons`。
+  `gen_ai.response.finish_reasons`。首包可能是不含输出的空 delta（如仅含 role 的首帧），
+  因此首 token 耗时另以毫秒写入 `openjiuwen.gen_ai.response.time_to_first_token_ms`
+  （首个含 content、reasoning 或 tool call 片段的 chunk），响应头到达耗时写入
+  `openjiuwen.gen_ai.response.time_to_first_byte_ms`，SDK 传输层重试次数写入
+  `openjiuwen.request.retry_count`；`openjiuwen.gen_ai.response.tpot_ms` 在首尾两个含输出的
+  chunk 之间计算。以上耗时均以 LLM span 打开时刻为起点，属于客户端端到端测量。
 - request id、消息计数、reasoning wall-clock 等非标准信息使用 `openjiuwen.*`，不得占用
   `gen_ai.*` 命名空间。
 

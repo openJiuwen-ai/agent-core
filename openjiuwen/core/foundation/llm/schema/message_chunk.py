@@ -239,6 +239,22 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
             ),
         )
 
+    def carries_output_token(self) -> bool:
+        """Return whether this chunk carries model output rather than stream framing.
+
+        A chunk counts once it holds a non-empty content or reasoning fragment
+        (whitespace included, since it is still a generated token), or a tool
+        call fragment that names the tool or extends its arguments. Role-only
+        deltas, heartbeat deltas, and usage-only or finish-only frames do not
+        count. Latency metrics (time to first token) and the stream idle
+        timeout share this definition so both measure the same progress.
+        """
+        if self.content:
+            return True
+        if self.reasoning_content:
+            return True
+        return any(call.name or call.arguments for call in self.tool_calls or ())
+
 
 def _concat_token_ids(left: Any, right: Any) -> Any:
     """Concatenate streaming completion_token_ids deltas."""
