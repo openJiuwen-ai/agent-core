@@ -2,8 +2,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Execution, resume and abort entries with a real DeepAgent, a local model and seam doubles.
 
-The session state store and reply adapter doubles stand in for PA-09 / PA-08 so the
-orchestration can be verified; they never replace the formal implementations.
+The session state store, window assembler and reply adapter doubles stand in for
+PA-10 / PA-06 / PA-09 so the orchestration can be verified; they never replace the
+formal implementations.
 """
 
 import asyncio
@@ -46,6 +47,7 @@ def module(name):
 
 SEAMS = module("execution.seams")
 UNINTEGRATED_STORE, UNINTEGRATED_ADAPTER = SEAMS.session_state_store, SEAMS.native_reply_adapter
+UNINTEGRATED_ASSEMBLER = SEAMS.window_assembler
 
 
 def kinds(events):
@@ -177,7 +179,7 @@ class Host:
 
 
 class StateStore:
-    """PA-09 double: carries the whitelisted Session state and the waiting scene between Executions."""
+    """PA-10 double: carries the whitelisted Session state, waiting scene and cursor between Executions."""
 
     def __init__(self, log):
         self.log = log
@@ -192,10 +194,13 @@ class StateStore:
             raise self.load_error
         self.loaded_marker = context.session.get_state("marker")
         if self.record is None:
-            return None
+            return SEAMS.LoadedRecord()
         context.session.update_state(dict(self.record["state"]))
-        waiting = self.record["ending"]
-        return SEAMS.WaitingScene(waiting.request_id, waiting.reply_target)
+        ending = self.record["ending"]
+        waiting = None
+        if ending.outcome == "awaiting_confirmation":
+            waiting = SEAMS.WaitingScene(ending.request_id, ending.reply_target)
+        return SEAMS.LoadedRecord(waiting, ending.last_group_message_id)
 
     async def save(self, context, ending):
         if self.save_error is not None:
@@ -207,8 +212,23 @@ class StateStore:
         self.log.append("save")
 
 
+class WindowAssembler:
+    """PA-06 double: passes the task text through and reports a fixed group-message cursor."""
+
+    def __init__(self):
+        self.calls = []
+        self.cursor = "gm-1"
+        self.error = None
+
+    async def assemble(self, context, request, record):
+        self.calls.append((request.text, record))
+        if self.error is not None:
+            raise self.error
+        return SEAMS.WindowAssembly({"query": request.text}, last_group_message_id=self.cursor)
+
+
 class ReplyAdapter:
-    """PA-08 double for permission replies only."""
+    """PA-09 double for permission replies only."""
 
     def to_native(self, response, request):
         return ConfirmPayload(approved=response.choice != "reject", feedback=response.feedback or "")
@@ -235,6 +255,7 @@ class Harness:
         self.log = store.log
         self.tool_hooks = {}
         self.rewrite = {}
+        self.assembler = WindowAssembler()
 
     def spec(self, confirm=False, rewrite=False, **overrides):
         fields = dict(
@@ -318,6 +339,7 @@ def harness(monkeypatch):
         _RAIL_PROVIDER_REGISTRY, "test.entries.rewrite", lambda params, context: RewriteAnswer(harness.rewrite)
     )
     monkeypatch.setattr(SEAMS, "session_state_store", lambda context: store)
+    monkeypatch.setattr(SEAMS, "window_assembler", lambda context: harness.assembler)
     monkeypatch.setattr(SEAMS, "native_reply_adapter", ReplyAdapter)
     return harness
 
@@ -356,6 +378,53 @@ async def test_completed_execution_records_events_in_order(harness):
     assert harness.store.endings[-1].outcome == "completed"
     assert harness.store.endings[-1].output_refs == (output.payload.output_id,)
     assert ctx.binding.runtime.closed
+
+
+@pytest.mark.asyncio
+async def test_window_assembly_runs_after_load_and_feeds_the_native_call(harness):
+    spec = harness.spec()
+    harness.store.record = {"state": {}, "ending": SEAMS.ExecutionEnding("completed", "request-0", "chat-1")}
+    ctx, _ = harness.context(spec)
+    harness.assembler.cursor = "gm-9"
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    ((text, record),) = harness.assembler.calls
+    assert text == "please summarize" and record == SEAMS.LoadedRecord(None, None)
+    assert events[-1].payload.status == "completed"
+    assert harness.store.endings[-1].last_group_message_id == "gm-9", "the ending keeps the new cursor"
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_the_previous_cursor_without_assembling(harness):
+    spec = harness.spec(confirm=True)
+    harness.assembler.cursor = "gm-3"
+    await pause_for_confirmation(harness, spec)
+    assert harness.store.endings[-1].last_group_message_id == "gm-3"
+    ctx, _ = harness.context(spec, execution_id="execution-2")
+    events = await collect(harness.api.resume_persistent_request(spec, ctx, permission()))
+    assert events[-1].payload.status == "completed"
+    assert len(harness.assembler.calls) == 1, "a confirmation resume appends nothing to the window"
+    assert harness.store.endings[-1].last_group_message_id == "gm-3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["assembly_error", "not_a_record"])
+async def test_assembly_and_load_contract_failures_are_runtime_errors(harness, monkeypatch, failure):
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    if failure == "assembly_error":
+        harness.assembler.error = RuntimeError("group chat unavailable")
+    else:
+
+        async def no_record(context):
+            return None
+
+        monkeypatch.setattr(harness.store, "load", no_record)
+    with pytest.raises(BaseError) as exc_info:
+        await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert_rejected(exc_info, StatusCode.DEEPAGENT_RUNTIME_ERROR)
+    assert harness.model.calls == 0
+    assert kinds(host.events) == ["execution.started"]
+    assert harness.store.endings == []
 
 
 @pytest.mark.asyncio
@@ -861,15 +930,17 @@ async def test_old_checkpointer_state_is_neither_restored_nor_saved(harness, mon
             },
             StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
         ),
-        ({"seams": True}, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR),
+        ({"seams": "session_state_store"}, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR),
+        ({"seams": "window_assembler"}, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR),
     ],
 )
 @pytest.mark.asyncio
 async def test_execute_rejects_before_any_event(harness, monkeypatch, change, code):
     spec = harness.spec(**change.get("spec", {}))
     ctx, host = harness.context(spec, **change.get("context", {}))
+    unintegrated = {"session_state_store": UNINTEGRATED_STORE, "window_assembler": UNINTEGRATED_ASSEMBLER}
     if change.get("seams"):
-        monkeypatch.setattr(SEAMS, "session_state_store", UNINTEGRATED_STORE)
+        monkeypatch.setattr(SEAMS, change["seams"], unintegrated[change["seams"]])
     with pytest.raises(BaseError) as exc_info:
         await collect(harness.api.execute_persistent_request(spec, ctx, request(**change.get("request", {}))))
     assert_rejected(exc_info, code)
