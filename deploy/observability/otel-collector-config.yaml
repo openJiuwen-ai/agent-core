@@ -3,11 +3,15 @@
 # Pipeline:  application(otlp/grpc) -> memory_limiter -> batch
 #                                   -> transform/limit_strings
 #                                   -> langfuse / debug
+#            application(otlp)     -> memory_limiter -> batch
+#                                   -> prometheus / debug
 #
 # - The transform processor caps any string attribute at 16 KiB so that
 #   accidentally enormous prompts cannot OOM the backend.
 # - "debug" exporter prints a one-line span summary; remove from the
 #   pipeline once production traffic stabilises.
+# - The "prometheus" exporter exposes OTel metrics on :8889 for the
+#   bundled Prometheus scraper (see prometheus.yml).
 
 receivers:
   otlp:
@@ -45,9 +49,16 @@ exporters:
   debug:
     verbosity: basic
 
+  prometheus:
+    endpoint: 0.0.0.0:8889
+
 service:
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch, transform/limit_strings]
       exporters: [otlphttp/langfuse, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus, debug]
