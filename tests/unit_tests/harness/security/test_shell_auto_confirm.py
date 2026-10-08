@@ -31,8 +31,10 @@ def test_powershell_auto_confirm_key_is_command_based_like_bash() -> None:
     )
     bash_key = rail._get_auto_confirm_key(_call("bash", "Get-ChildItem"))
     ps_key = rail._get_auto_confirm_key(_call("powershell", "Get-ChildItem"))
-    assert bash_key == "bash:Get-ChildItem"
-    assert ps_key == "powershell:Get-ChildItem"
+    assert bash_key.startswith("operation_")
+    assert ps_key.startswith("operation_")
+    assert bash_key != ps_key
+    assert ps_key != rail._get_auto_confirm_key(_call("powershell", "Get-ChildItem -Force"))
     assert ps_key != "powershell"
 
 
@@ -47,4 +49,5 @@ def test_injected_shell_tool_auto_confirm_key_is_command_based() -> None:
         }
     )
     key = rail._get_auto_confirm_key(_call("run_cmd", "ls"))
-    assert key == "run_cmd:ls"
+    assert key.startswith("operation_")
+    assert key != rail._get_auto_confirm_key(_call("run_cmd", "ls -a"))

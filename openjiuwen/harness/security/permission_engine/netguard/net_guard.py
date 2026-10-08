@@ -1,6 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Fetch-tool network policy (Pipeline C). ``allow`` / ``deny`` only; no ASK."""
+"""Fetch-tool network policy (Pipeline C). ASK interrupts before tool execution."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 _FETCH_TOOLS = frozenset({"mcp_fetch_webpage", "fetch_webpage", "web_fetch_webpage"})
 _URL_ARG_KEYS = ("url", "uri", "href", "webpage", "page_url", "target_url")
-_VALID_ACTIONS = frozenset({"allow", "deny"})
+_VALID_ACTIONS = frozenset({"allow", "ask", "deny"})
 # URL glob may include query/fragment characters that command wildcards reject.
 _URL_WILDCARD_CHARS = r"[-a-zA-Z0-9._/:?#&=%+~@,;\[\]']"
 
@@ -85,7 +85,7 @@ def match_net_pattern(pattern: str, url: str) -> bool:
 
 
 class NetGuardChecker:
-    """Network deny/allow for fetch tools. ALLOW does not lift Pipeline A."""
+    """Network allow/ask/deny for fetch tools. ALLOW does not lift Pipeline A."""
 
     def __init__(self, section: Mapping[str, Any]):
         self._enabled = bool(section.get("enabled"))
@@ -125,7 +125,7 @@ class NetGuardChecker:
         return self.check_url(extract_fetch_url(tool_args))
 
     def check_url(self, url: str | None) -> PermissionResult | None:
-        """Tool-agnostic URL check; returns a DENY result or ``None`` (allowed)."""
+        """Return ASK/DENY or ``None`` (allowed); callers handle ASK before tools."""
         if not self._enabled:
             return None
         hits: list[tuple[str, str]] = []
@@ -141,12 +141,16 @@ class NetGuardChecker:
                     matched_rule=f"net_guard:url:{pattern}",
                     reason=f"net_guard denied: {pattern}",
                 )
+            if any(action == "ask" for _pattern, action in hits):
+                pattern = next(p for p, action in hits if action == "ask")
+                return PermissionResult(PermissionLevel.ASK, f"net_guard:url:{pattern}",
+                                        f"net_guard requires approval: {pattern}")
             return None
-        if self._defaults == "deny":
+        if self._defaults in {"deny", "ask"}:
             return PermissionResult(
-                permission=PermissionLevel.DENY,
+                permission=PermissionLevel(self._defaults),
                 matched_rule="net_guard:defaults",
-                reason="net_guard denied: defaults",
+                reason=f"net_guard {self._defaults}: defaults",
             )
         return None
 

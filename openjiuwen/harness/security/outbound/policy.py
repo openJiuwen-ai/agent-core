@@ -134,7 +134,7 @@ def reset_host_exit_policy() -> None:
     _set_state(HostExitState(mode=STATE_UNSET))
 
 
-def check_outbound_url(url: str) -> None:
+def check_outbound_url(url: str, *, is_redirect: bool = False) -> None:
     """Validate one hop before connecting; raise :class:`OutboundBlockedError` on deny."""
     state = _state
     if state.mode == STATE_ERROR:
@@ -148,9 +148,16 @@ def check_outbound_url(url: str) -> None:
     if not host:
         raise OutboundBlockedError(url, "missing host", "host_exit:host")
     result = state.checker.check_url(url)
-    if result is not None:
+    if result is not None and result.is_denied:
         logger.warning("[HostExit] host_exit.deny url=%s matched_rule=%s", url, result.matched_rule)
         raise OutboundBlockedError(url, result.reason or "net_guard denied", result.matched_rule)
+    if result is not None and result.needs_approval and is_redirect:
+        # The tool approval covers its input URL, not an arbitrary server-chosen
+        # destination. The synchronous exit cannot open a permission interrupt.
+        raise OutboundBlockedError(
+            url, "Redirect target requires approval; request this URL in a separate tool call",
+            result.matched_rule,
+        )
 
 
 def _is_loopback_host(host: str | None) -> bool:
