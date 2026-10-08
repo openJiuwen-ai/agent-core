@@ -2,9 +2,9 @@
 
 | 项 | 值 |
 |---|---|
-| 状态 | 块 A 已按本文实现。块 B 仍是需求说明，未改代码 |
+| 状态 | 块 A 与块 B 已按本文实现 |
 | 基线 | `dev-stable` @ `117b9d9d1`，分支 `feat/project-space-agent-core` |
-| 迁移依据 | `develop` 上 `docs/specs/S_28`（2026-09-30）及 `group_chat/` 实现。caozhenhua 工作区只作被动真人与点名规则的参考 |
+| 迁移依据 | 块 A 依据 `develop` 的 `docs/specs/S_28`（2026-09-30）及 `group_chat/`。块 B 参考 caozhenhua 工作区的门面，差异见 B6 |
 | 范围 | 只做 `agent-core`。jiuwenswarm 的 profile、讨论结束判定、项目级记忆，以及 relay-claw 的页面，不在本文 |
 
 产品要的是项目空间里的多智能体协作。agent-core 只提供团队运行时。需求分成两块：
@@ -286,9 +286,23 @@ caozhenhua 工作区按 2026-09-28 的文档实现。下面这些不迁。
 
 ## B. 新增
 
+这一块挂在 `TeamAgentSpec` 和 `Runner` 上。公开讨论区找不到团时仍返回 `invalid_group_chat`，不在那条路径上建团。
+
+caozhenhua 工作区已经有这四项的一版实现。下面按当前 `feat/project-space-agent-core` 的代码写开发顺序。能对上的接入点沿用，B6 列出要改掉的行为。
+
+### 开发顺序
+
+按这个顺序做，每一步都能单独测：
+
+1. **规格字段。** `TeamAgentSpec` 增加 `ensure_team_on_start`、`team_desc`、`prompt_overrides`。`TeamMemberSpec` 增加可选 `agent_spec`。`prompt_overrides` 在 `TeamAgentSpec.build()` 里校验。这一步不改变运行时。
+2. **提示词替换。** 在 `build_team_static_sections` 返回前应用覆盖。`TeamPolicyRail` 和 `build_team_member_system_prompt` 都经过这个函数。
+3. **声明即成团。** 改 `Kernel.start` 和 `TeamBackend.build_team` 的“团已存在”分支。
+4. **宿主加减成员。** 在 `team_runner.py` 增加两个门面，内部调用现有 `spawn_human_agent`、`spawn_passive_human`、`spawn_member`、`auto_start_member`、`shutdown_member`。
+5. **进展汇报。** 新增只读服务，再挂到 `Runner.get_progress_report`。
+
 ### B1. 声明即成团
 
-现有团队仍由 leader 调用 `build_team`。项目空间要在开跑前成团，用新字段控制，默认关闭，避免改变 `dev-stable` 上已有团队。
+现有团队仍由 leader 调用 `build_team`。项目空间要在开跑前成团，用新字段控制，默认关闭，避免改变已有团队。字段放在 `lifecycle` 附近。
 
 ```python
 class TeamAgentSpec:
@@ -296,19 +310,44 @@ class TeamAgentSpec:
     team_desc: str = ""
 ```
 
-`ensure_team_on_start=True` 时，`Kernel.start` 发现没有团队行就调用 `TeamAgent.ensure_team_built()`：用 `team_name`、`team_desc`、`leader` 和 `predefined_members` 落库并注册成员。失败向上抛，leader 不得以单代理继续。`team_backend is None` 同样是失败，不能空返回。块 A 的群聊投递不承担这件事：没有团队行时群聊直接失败。
+`Kernel.start` 里 leader 的探测已经存在：`host.role == LEADER` 且 `team_backend` 存在时 `get_team`；非 leader 全是 `SHUTDOWN` 则 `clean_team` 并把 `team_row_present` 置假，否则 `recover_team`。这段保持不动。探测结束之后再看旗标。
 
-团队行已经存在时，`build_team` 工具返回成功且不改名册，避免模型再建一次。`ensure_team_on_start=False` 时保持今天的行为：没有团队行就等 leader 调工具。
+| `ensure_team_on_start` | 探测结束后有团行 | 行为 |
+|---|---|---|
+| `False` | 否 | 保持现状，leader 第一轮自己调 `build_team` |
+| `True` | 否 | `await host.ensure_team_built()` |
+| 任意 | 是 | 不重建 |
+
+旗标为真时的调用要放在 `if team_backend is not None` 外面。这个条件为假时现有分支直接跳过，缺后端会静默变成单代理。
+
+`TeamAgent.ensure_team_built`：
+
+- `team_backend is None` 或 `spec is None`：抛 `RuntimeError`。
+- 调用现有 `backend.build_team(display_name=spec.team_name, desc=spec.team_desc, leader_display_name=leader.display_name, leader_desc=leader.desc, overrides=None)`。leader 规格缺失时，显示名用 `"Team Leader"`，描述用 `""`。
+- `overrides=None` 表示能力开关沿用 spec 上限。名册不用再传，`build_team` 读 backend 上已经装好的 `predefined_members`，其中的 `human_agent` / `passive_human` 仍走现有 HITT 分支。
+- `build_team` 末尾已有的 `on_team_built` 会写入团队已创建状态。这里不要再调一次。
+- 建团异常继续往上抛。`Kernel.start` 不捕获，`invoke` / `stream` 失败，leader 不进入模型回合。
+
+**团已存在时的工具。** 现在 `create_team` 失败会抛 `RuntimeError`。改成：能力上限校验之后、改写 `self._enable_hitt` 和 `create_team` 之前，若 `team_exists(team_name)` 为真，直接返回。不改名册、不改描述、不套用这次传入的开关。`BuildTeamTool` 仍返回 `success=True`，`display_name` 读库里的原值。第一次调用、库里没有行时，仍走现在的创建路径。
+
+全员停机后的 `clean_team` 会把团行清掉。旗标为真时，下一次 `Kernel.start` 会重新建团。这是探测顺序的结果。
 
 ```mermaid
 flowchart TD
-    S["Kernel.start"] --> Q{"已有团队行?"}
-    Q -->|是| Run["进入 leader 回合"]
-    Q -->|否| F{"ensure_team_on_start?"}
-    F -->|否| Run
-    F -->|是| B["ensure_team_built"]
+    S["Kernel.start，leader"] --> P["get_team"]
+    P --> Has{"有团队行?"}
+    Has -->|否| Q{"ensure_team_on_start?"}
+    Has -->|是| C{"非 leader 全是 SHUTDOWN?"}
+    C -->|是| Clean["clean_team，视为没有团队行"]
+    C -->|否| Rec["recover_team"]
+    Clean --> Q
+    Rec --> Run["进入 leader 回合"]
+    Q -->|否| Run
+    Q -->|是| Be{"team_backend 和 spec 都在?"}
+    Be -->|否| E["抛错，不降级为单代理"]
+    Be -->|是| B["ensure_team_built"]
     B -->|成功| Run
-    B -->|失败| E["错误返回宿主，不降级为单代理"]
+    B -->|失败| E
 ```
 
 ### B2. 提示词可插拔
@@ -320,7 +359,7 @@ class TeamAgentSpec:
 
 键是 section 名，值是整段替换正文。空字符串表示该 section 不渲染。未出现的 section 用框架默认。未知键在 `TeamAgentSpec.build()` 抛 `AGENT_TEAM_CONFIG_INVALID`，列出非法名和合法名。
 
-合法名就是当前 `dev-stable` 的 `TeamSectionName`：
+当前 `TeamSectionName` 没有 `ALL`。补一个只含下面九个常量的集合，`build()` 的校验读这个集合，不要在校验函数里再写一份名单。合法名就是这九个：
 
 | section | 谁有 | 建议 |
 |---|---|---|
@@ -335,6 +374,17 @@ class TeamAgentSpec:
 | `team_inbound_tags` | 全员 | 不建议关，关掉后模型读不懂入站 XML |
 
 角色归属仍由框架决定。覆盖 `team_workflow` 只影响本来会渲染它的角色。关掉提示词不关掉 rail 和工具：关 `team_dispatch` 不会把自主认领变成调度指派。
+
+应用函数放在 `prompts/sections.py`，在 `build_team_static_sections` 收齐非空段之后调用，再返回。`build_team_member_system_prompt` 已经调用它，外部 CLI 因此一起生效。
+
+- 字典为空则原样返回。
+- 某一段的名字在字典里且值为 `""`：从列表去掉。
+- 非空：用新的 `PromptSection` 换掉正文，`priority` 保持原段。标题由调用方写进字符串。
+- 字典里有一个名字，但这个角色本来就没生成该段：跳过，不补一段。
+
+`TeamPolicyInput` 增加 `prompt_overrides` 字段。`agent_configurator.py` 里 `TEAM_POLICY` 的 params 在现有 `base_prompt` 旁传入 `spec.prompt_overrides`。`TeamPolicyRail._build_static_sections` 把它交给 `build_team_static_sections`。不要在 rail 里再写第二套替换。
+
+`team_extra` 的默认正文仍是 `base_prompt`；只有键存在且值为 `""` 时这段才不出现。`team_inbound_tags` 允许被替换。实现不对空字符串做特殊拒绝；调用方应保留这段，否则模型读不懂入站 XML。测试覆盖“空字符串去掉一段之后，对应工具仍在”。
 
 ### B3. 宿主加减成员
 
@@ -357,11 +407,35 @@ async def remove_team_member(
     """软停。返回 {"ok": bool, "reason": str}。"""
 ```
 
-`spawn_team_member` 的 `spec.role_type` 允许 `teammate`、`human_agent`、`passive_human`。后两者要求团队已打开 HITT，否则 `reason` 说明开关未开。`teammate` 与 `human_agent` 注册后经 `auto_start_member` 拉起；`passive_human` 注册即 `READY`。重名、团队未激活、角色不支持，都是 `ok=False`，不抛业务异常。
+方法加在 `team_runner.py` 的 `interact_agent_team` 旁，并加与其他团队方法相同的模块级包装。当前分支没有 `_resolve_team_session_id`：补一个静态方法，`str` 原样返回，`AgentTeamSession` 取 `get_session_id()`，`None` 得到 `None`。
 
-`TeamMemberSpec` 增加可选 `agent_spec: DeepAgentSpec | None`。有值时写入该次运行的 `agents[member_name]`，供已有的 `resolve_agent_spec` 命中。不新造一套成员装配。
+**团必须正在跑。** `pool.get(team_name)` 的条目要存在。`session` 解析出 id 时，还要等于 `current_session_id`。否则 `ok=False`，`reason="team_not_active"`。`session` 省略时，用池里这一场。`team_backend is None` 时 `reason="team_backend_unavailable"`。`spec` 不是 `TeamMemberSpec` 时 `ok=False`，原因写明实际类型。成功时 `reason=""`。
 
-`remove_team_member` 是软停：成员不再运行，也不能再被点名；名册行和历史保留。已经离队或不存在，幂等 `ok=True`。真人仍持有进行中的任务且 `force=False` 时拒绝。软停之后再点名该成员，群聊请求按未知或已离队失败。
+`spawn_team_member` 的 `spec.role_type`：
+
+| `role_type` | 做法 |
+|---|---|
+| `teammate` | `UNSTARTED`、按 `model_name` 分配模型、`spawn_member`，然后 `auto_start_member` |
+| `human_agent` | `spawn_human_agent`，成功后 `auto_start_member` |
+| `passive_human` | `spawn_passive_human`，保持 `READY`，不调用 `auto_start_member` |
+| `leader`、`bridge_agent`、`worker`、`external_agent` | `ok=False`，`reason="unsupported_role_type"` |
+
+HITT 关闭时，`spawn_human_agent` / `spawn_passive_human` 已经返回带 `enable_hitt=False` 的失败原因。门面把 `MemberOpResult.reason` 原样放进返回值。预定义团会从 leader 工具列表拿掉 `spawn_teammate`、`spawn_human_agent`、`spawn_passive_human`；这个门面是宿主调用，不受那份排除列表影响，仍受 HITT 和成员名校验约束。
+
+重名时后端返回失败，门面 `ok=False`，原因沿用后端的 already exists。不要把重名改成成功。
+
+`TeamMemberSpec` 增加可选 `agent_spec: DeepAgentSpec | None`。类型从 `schema/deep_agent_spec.py` 引用，避免 `schema/team.py` 和 `schema/blueprint.py` 循环导入。`BridgeMemberSpec` 会继承该字段；桥接成员仍走原有 leader 工具，不走这个门面。
+
+有值时，在 `auto_start_member` 之前写入当前 leader 的 `spec.agents[member_name]`。`resolve_agent_spec` 已经优先查这个键。`SpawnPayloadBuilder` 在 leader 配置时拿到的是同一份 spec；实现时确认拉起成员时读取的是 `agents` 字典，而不是初始化时的拷贝。写完后调用现有 `RecoveryManager.persist_leader_config`，否则冷启动从 session bucket 恢复时会退回角色默认模型。
+
+注册成功但 `auto_start_member` 失败：`ok=False`，`reason` 写明该成员已注册但未能启动。名册行保留。宿主要先 `remove_team_member` 再重试。不要在失败分支里删行。
+
+`remove_team_member` 是软停：成员不再运行，也不能再被点名；名册行和历史保留。
+
+- 先 `get_member`。成员不存在，或状态已在 `MEMBER_DEPARTED_STATUSES`（`SHUTDOWN` / `SHUTDOWN_REQUESTED`）：`ok=True`，`reason=""`。这一步要在 `shutdown_member` 之前做，因为后者对不存在的成员返回失败。
+- 其他状态调用现有 `shutdown_member(member_name, force=force)`，把 `MemberOpResult` 转成返回字典。
+- 真人名下有 `PLANNING` / `IN_PROGRESS` / `IN_REVIEW` 任务且 `force=False` 时，现有停机锁会拒绝。`is_live_human_agent` 已经把被动真人算进去，门面不要再写一套任务查询。
+- 停机后公开讨论再点名该成员，块 A 会返回 `invalid_group_chat`。这里不要加第二套点名校验。
 
 ### B4. 进展汇报
 
@@ -394,7 +468,47 @@ async def get_progress_report(
 | 配了汇报但没有可用模型 | 稳定错误，原因 `report_model_unavailable` |
 | 有团队但没有任务、没有讨论、没有成员产出 | 返回明确的「暂无进展」，不调用模型 |
 
-`scope="member"` 且指定了 `member_name` 时，只展开该成员，整体段可省略。
+`scope="member"` 且指定了 `member_name` 时，只展开该成员，整体段可省略。`member_name` 省略时，展开 `scope` 要求的全体。
+
+实现放在新的 `agent_teams/progress_report/service.py`。`Runner.get_progress_report` 只负责解析 spec 和转交错误。判定顺序：
+
+1. `scope` 不是 `team`、`member`、`all`：`ValueError`。这一步不读库。
+2. 解析 spec。池里有该团且 leader 的 spec 存在时用池中的 spec，否则用现有 `_resolve_spec_from_session_bucket(team_name, session_id)`。两者都没有：`ValueError("team_not_found")`。汇报不要求团正在跑，也不因为池里的会话和入参不一致就拒绝。
+3. 只读收集材料。有任务、有本场 `history.jsonl` 记录，或有成员产出，才算有材料。三者都没有：返回「暂无进展」，不调用模型。
+4. 有材料但建不出模型：`ValueError("report_model_unavailable")`。模型顺序：`agents["leader"].model`，其次 `agents["teammate"].model`，其次 `model_pool[0]`。
+5. 材料拼好后一次模型调用，按目标、计划、进度、进展质量四段作答。材料里没有的段落写「材料不足」，不编造成员发言。
+
+| 来源 | 读什么 |
+|---|---|
+| 团队行 | `display_name`、`desc`（声明即成团时来自 `team_desc`）、`leader_member_name` |
+| 名册 | 成员名、`display_name`、`desc`、`status`、`role` |
+| 任务板 | 状态、标题、描述、负责人 |
+| 本场公开讨论 | `GroupConversationLog(team_name, session_id).read()` |
+
+文件不存在就当作没有公开讨论。不扫描每个成员的私有 checkpoint。数据库用 `spec.resolve_db_config()` 打开，读完关闭。
+
+### B6. 与 caozhenhua 版本的差异
+
+caozhenhua 的门面位置（`team_runner.py` 的 `spawn_team_member` / `remove_team_member` / `get_progress_report`）、`prompt_overrides` 的空字符串语义、`session` 归一成 id、以及 spawn 前写入 `spec.agents[member_name]`，这几项保持同一形状。下面按当前分支改。
+
+| 点 | caozhenhua | 本方案 |
+|---|---|---|
+| `ensure_team_built` 缺后端 | `team_backend is None` 时直接 `return`，leader 会当成单代理继续跑 | 抛 `RuntimeError`，不进入模型回合 |
+| `ensure_team_built` 缺 spec | 用 `"agent_team"` / `"Team Leader"` 一类默认值继续 `build_team` | `spec is None` 抛错 |
+| 团已存在时的 `build_team` | 注释写“只在没有团行时调用”，工具本身在 `create_team` 失败时仍抛 `RuntimeError` | 工具显式成功返回，名册、描述和本次开关都不改 |
+| 提示词段名单 | `TeamSectionName.ALL` 已存在 | 当前分支没有 `ALL`，按现有九个常量补上 |
+| 覆盖应用点 | `build_team_static_sections` 返回前的 `_apply_prompt_overrides` | 加在同一位置。当前分支还没有这个覆盖函数；params 从 `agent_configurator.py` 的 `TEAM_POLICY` 传入 |
+| 加减成员的会话 | `pool.get(team_name)`，仅当解析出 session id 时才比 `current_session_id` | 相同。本分支池的 `get` 仍是按团名取一条。当前没有 `_resolve_team_session_id`，按同样规则补上 |
+| 被动真人 | 门面已有分支：`spawn_passive_human` 后直接返回，不 `auto_start_member` | 沿用这个分支，接到块 A 已落地的 `spawn_passive_human` |
+| 不支持的角色 | `reason` 为 `unsupported role_type: {role}` | 稳定值 `unsupported_role_type` |
+| 真人停机锁 | 注释写 avatar 和 passive 都算 | 沿用块 A 已扩展的 `is_live_human_agent`，门面不再查任务 |
+| 找不到成员的 `remove` | 门面先判断，不存在或已离队则 `ok=True`、`reason=""` | 保持这个顺序。不改 `shutdown_member` 对 leader 工具的“找不到即失败” |
+| 启动失败后的名册行 | 行留下，再次 spawn 报已存在 | 保持。原因写明已注册但未启动 |
+| `agent_spec` 的持久化 | 只写入内存中的 `spec.agents` | 写入后再 `persist_leader_config`，冷启动仍能命中 |
+| 汇报的空结果 | spec 缺失、模型缺失、没有 leader 私有历史，三处都返回「暂无进展」 | 三者分开：`team_not_found`、`report_model_unavailable`、真正无材料才返回「暂无进展」 |
+| 汇报材料 | 从每个成员的 checkpoint 恢复私有对话；没有 leader 历史就当空 | 本场 `history.jsonl` 加任务板和名册。没有公开讨论时仍可根据任务板作答 |
+| 汇报结构 | map-reduce，多次模型调用 | 材料拼好后一次调用。空材料不调用模型 |
+| 与块 A 的边界 | 同一工作区里讨论区投递和建团写在一起 | 讨论区投递已完成，且不会建团。本块不改 `post_message`、水位和投影 |
 
 ---
 
@@ -402,6 +516,6 @@ async def get_progress_report(
 
 块 A 至少覆盖：无 mention 只归档且不挡完成判定；点名后只该成员收到 5 条摘录，触发消息是追加而不是替换；未知或已离队 mention 整次失败；相同 `client_message_id` 且内容一致不插第二行，内容不一致失败；删掉 `history.jsonl` 后能从本会话的数据库行投影回来；两个 session 不写进同一个文件；没有团队行时不自动 `build_team`；`passive_human` 出现在 `mentions` 里不被叫醒，群广播也不进真人入站回调；`group_send_message` 与宿主输入进入同一条广播，作者分别是当前成员和 `user`；leader 未被点名时流在确认包之后结束，同时未启动或出错的被点名成员仍会被拉起。
 
-块 B 至少覆盖：`ensure_team_on_start=False` 时旧团队仍等 leader 调 `build_team`；为 `True` 且建队失败时调用方看到错误；未知 `prompt_overrides` 键失败；空字符串去掉对应 section 且工具仍在；加减成员的幂等与真人持有任务时的拒绝；汇报在无模型、无团队、暂无进展三种情况下结果不同。
+块 B 至少覆盖：`ensure_team_on_start=False` 时旧团队仍等 leader 调 `build_team`；为 `True` 且建队失败，或 `team_backend is None` 时，调用方看到错误，leader 不会当单代理跑完；团行已在时再调 `build_team` 返回成功，名册和描述不变；未知 `prompt_overrides` 键失败；空字符串去掉对应 section 且工具仍在，该角色本来没有的段不会被补出来；重复 `spawn_team_member` 失败，重复 `remove_team_member` 成功，真人（含被动真人）持有进行中任务且未强制时拒绝；汇报在无模型、无团队、暂无进展三种情况下结果不同，无进展不调用模型。
 
 普通团队的 `send_message`、任务板和 `human_agent` 的 avatar 驱动保持现有单测通过。

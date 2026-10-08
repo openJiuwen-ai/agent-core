@@ -566,6 +566,7 @@ class AgentConfigurator:
                     "team_mode": _resolve_team_mode(spec),
                     "dispatch_mode": spec.dispatch_mode,
                     "base_prompt": agent_spec.system_prompt,
+                    "prompt_overrides": spec.prompt_overrides,
                     "team_workspace_mount": team_workspace_mount,
                     "team_workspace_path": team_workspace_path,
                     "expose_human_agents_to_teammates": spec.expose_human_agents_to_teammates,

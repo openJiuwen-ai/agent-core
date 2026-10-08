@@ -1282,6 +1282,25 @@ class TeamAgent(BaseAgent):
     async def recover_team(self) -> list[str]:
         return await self._recovery_manager.recover_team()
 
+    async def ensure_team_built(self) -> None:
+        """Create the team row from the static spec before the leader model runs.
+
+        ``predefined_members`` stay on the backend. ``build_team`` registers
+        them, and its ``on_team_built`` callback records the created state.
+        """
+        spec = self.spec
+        backend = self.team_backend
+        if backend is None or spec is None:
+            raise RuntimeError("ensure_team_on_start requires a team spec and a team backend")
+        leader = spec.leader
+        await backend.build_team(
+            display_name=spec.team_name,
+            desc=spec.team_desc,
+            leader_display_name=leader.display_name if leader is not None else "Team Leader",
+            leader_desc=leader.desc if leader is not None else "",
+            overrides=None,
+        )
+
     # ------------------------------------------------------------------
     # Leader config persistence / recovery
     # ------------------------------------------------------------------

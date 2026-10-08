@@ -196,6 +196,16 @@ class CoordinationKernel:
                 else:
                     await host.recover_team()
 
+        spec = getattr(host, "spec", None)
+        if (
+            host.role == TeamRole.LEADER
+            and spec is not None
+            and spec.ensure_team_on_start
+            and not team_row_present
+        ):
+            await host.ensure_team_built()
+            team_row_present = True
+
         if infra.workspace_manager and not infra.workspace_initialized:
             spec = blueprint.spec if blueprint else None
             remote_url = spec.workspace.remote_url if spec and spec.workspace else None

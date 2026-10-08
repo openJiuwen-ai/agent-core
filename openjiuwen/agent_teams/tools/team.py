@@ -1233,6 +1233,11 @@ class TeamBackend:
                 ),
             )
 
+        # An existing row is success. Leave the roster, description, and the
+        # runtime capability flags from the first build untouched.
+        if await self.db.team.team_exists(self.team_name):
+            return
+
         # Step B: compute effective flag and persist on backend so all
         # downstream spawn paths see a single source of truth.
         effective_enable_hitt = self._spec_enable_hitt if enable_hitt is None else enable_hitt
