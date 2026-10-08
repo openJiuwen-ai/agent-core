@@ -16,6 +16,12 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Literal
 
+from openjiuwen.core.sys_operation.cwd import get_cwd
+from openjiuwen.harness.security.permission_engine.fileguard.outbound_paths import (
+    is_public_file_url,
+    normalize_file_path_list,
+    resolve_outbound_path,
+)
 from openjiuwen.harness.security.permission_engine.fileguard.file_tool_specs import (
     FileToolSpec,
     lookup_file_tool_specs,
@@ -180,7 +186,7 @@ def _segments_for_extract(command: str) -> list[str]:
 
 
 def _path_aware_one_segment(
-    segment: str, cwd: Path, *, include_cd_reads: bool = True,
+    segment: str, cwd: Path, *, include_cd_reads: bool = True, shell_type: str = "auto",
 ) -> tuple[list[tuple[Path, FileAction]], Path | None]:
     try:
         tokens = shlex.split(segment.strip(), posix=False)
@@ -188,7 +194,7 @@ def _path_aware_one_segment(
         tokens = segment.strip().split()
     if not tokens:
         return [], None
-    cmd0 = _basename_lower(tokens[0])
+    cmd0 = _basename_lower(tokens[0].strip('"').strip("'"))
     if cmd0 not in _PATH_AWARE_COMMANDS:
         return [], None
     base = _resolve_extract_path(cwd)
@@ -216,7 +222,9 @@ def _path_aware_one_segment(
         tok = tok.strip().strip('"').strip("'")
         if not tok or _is_shell_flag_token(tok, cmd0=cmd0):
             continue
-        _append_path_token(tok, idx, require_path_shape=True)
+        # Only widen read-command operands; write command values are not paths.
+        bare_read_operand = shell_type in {"cmd", "powershell"} and cmd0 in _READ_CMDS
+        _append_path_token(tok, idx, require_path_shape=not bare_read_operand)
 
     if cmd0 in (
         "get-content", "gc", "set-content", "add-content", "out-file",
@@ -268,6 +276,7 @@ def extract_path_aware_command_accesses(
     workdir: str | Path,
     *,
     include_cd_reads: bool = True,
+    shell_type: str = "auto",
 ) -> list[tuple[Path, FileAction]]:
     if not command or not isinstance(command, str):
         return []
@@ -276,7 +285,7 @@ def extract_path_aware_command_accesses(
     combined: list[tuple[Path, FileAction]] = []
     for seg in _segments_for_extract(command):
         part, new_cwd = _path_aware_one_segment(
-            seg, cwd, include_cd_reads=include_cd_reads,
+            seg, cwd, include_cd_reads=include_cd_reads, shell_type=shell_type,
         )
         combined.extend(part)
         if new_cwd is not None:
@@ -289,9 +298,17 @@ def extract_shell_path_accesses(
     workdir: str | Path,
     *,
     include_cd_reads: bool = True,
+    shell_type: str = "auto",
 ) -> list[tuple[Path, FileAction]]:
     if not command or not isinstance(command, str):
         return []
+    if shell_type == "cmd":
+        # Match cmd /s /c: remove the first and last double quotes when the
+        # command starts with a quote. This is a permission-view copy only.
+        command = command.strip()
+        last_quote = command.rfind('"')
+        if command.startswith('"') and last_quote > 0:
+            command = command[1:last_quote] + command[last_quote + 1:]
     command = canonicalize_shell_command_for_permission(command)
     base = Path(workdir).resolve()
     results: list[tuple[Path, FileAction]] = []
@@ -312,7 +329,7 @@ def extract_shell_path_accesses(
             return None
 
     for p, act in extract_path_aware_command_accesses(
-        command, workdir, include_cd_reads=include_cd_reads,
+        command, workdir, include_cd_reads=include_cd_reads, shell_type=shell_type,
     ):
         results.append((p, act))
 
@@ -361,6 +378,12 @@ def _specs_for_tool(tool_name: str) -> list[FileToolSpec] | None:
     return lookup_file_tool_specs(tool_name)
 
 
+def shell_type_for_file_access(tool_name: str, tool_args: Mapping[str, Any]) -> str:
+    if tool_name in {"powershell", "core.powershell"}:
+        return "powershell"
+    return str(tool_args.get("shell_type") or "auto").strip().lower()
+
+
 def extract_accesses_native(
     tool_name: str,
     tool_args: Mapping[str, Any],
@@ -369,6 +392,15 @@ def extract_accesses_native(
 ) -> list[tuple[Path, FileAction, str]]:
     """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex``。"""
     out: list[tuple[Path, FileAction, str]] = []
+
+    if tool_name == "send_file_to_user":
+        return [(resolve_outbound_path(p), "read", "tool_arg")
+                for p in normalize_file_path_list(tool_args.get("abs_file_path_list"))]
+    if tool_name in {"save_media_to_gallery", "save_file_to_file_manager"}:
+        raw = tool_args.get("url")
+        if isinstance(raw, str) and raw.strip() and not is_public_file_url(raw):
+            return [(resolve_outbound_path(raw), "read", "tool_arg")]
+        return []
 
     from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
         is_shell_tool,
@@ -391,7 +423,9 @@ def extract_accesses_native(
             except (OSError, RuntimeError):
                 pass
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
-        for p, act in extract_shell_path_accesses(cmd, workdir_resolved):
+        for p, act in extract_shell_path_accesses(
+            cmd, workdir_resolved, shell_type=shell_type_for_file_access(tool_name, tool_args),
+        ):
             out.append((p, act, "shlex"))
         return out
 
@@ -399,6 +433,17 @@ def extract_accesses_native(
     if specs:
         for spec in specs:
             raw = tool_args.get(spec.arg_name)
+            if tool_name == "glob" and spec.arg_name == "path":
+                # Match GlobTool: omitted/empty path searches the agent CWD;
+                # relative paths also resolve against CWD, not the workspace.
+                raw = raw or "."
+                if isinstance(raw, str):
+                    try:
+                        root = Path(get_cwd()).expanduser().resolve()
+                        out.append(((root / Path(raw).expanduser()).resolve(), spec.action, "tool_arg"))
+                    except (OSError, RuntimeError):
+                        pass
+                continue
             if not isinstance(raw, str) or not raw.strip():
                 continue
             rp = _resolve_path_str(raw, workspace)
