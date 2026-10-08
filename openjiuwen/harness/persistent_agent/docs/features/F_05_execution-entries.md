@@ -7,13 +7,13 @@
 | 负责人 | Song Haoran |
 | 范围 | 内部 `persistent_agent/{schema/request.py, execution/{control,emitter,model_rail,seams,entries}.py, schema/spec.py}`、外层 `__init__.py` 导出及对应单测；依赖共享 Session 接缝 harness [F_07](../../../docs/features/F_07_session-checkpointer-injection.md) |
 | 测试基线 | 改动前：PA 包 173 passed，F_01～F_03 共享回归集 213 passed。改动后：PA 包 224 passed（结局锁定及附录 C 验证点 5 补充后 229 passed），共享回归集 213 passed，`tests/unit_tests/core/session` 411 passed，`tests/unit_tests/harness` 5426 passed / 39 skipped（Python 3.11.17） |
-| 关联 | [v2 设计](../designs/persistent-agent-architecture.md) §5.1、§7.8、§9.1～9.2、§10.2、§10.4、§13、§14；[开发计划](../designs/persistent-agent-development-plan.md) PA-05；规约 S_01、S_02 |
+| 关联 | [架构设计](../designs/persistent-agent-architecture.md) §5.1、§7.8、§9.1～9.2、§10.2、§10.4、§13、§14；[开发计划](../designs/persistent-agent-development-plan.md) PA-05；规约 S_01、S_02 |
 
 ## 背景
 
-PA-01～PA-03 和 PA-04 提供了构造、实例隔离和 v2 契约，但还没有对外的执行入口。PA-05 把它们编排成三个入口：执行、确认恢复、停止 / 取消，并把原生流式输出映射为 v2 事件。需要依赖其他特性的部分（参与判断 PA-07、窗口组装 PA-06、会话状态记录 PA-10、交互适配 PA-09、续做 PA-18）只保留接入点；在对应特性接入前，正式入口明确拒绝，不降级。
+PA-01～PA-03 和 PA-04 提供了构造、实例隔离和当前契约，但还没有对外的执行入口。PA-05 把它们编排成三个入口：执行、确认恢复、停止 / 取消，并把原生流式输出映射为设计规定的事件。需要依赖其他特性的部分（参与判断 PA-07、窗口组装 PA-06、会话状态记录 PA-10、交互适配 PA-09、续做 PA-18）只保留接入点；在对应特性接入前，正式入口明确拒绝，不降级。
 
-设计决策 D1～D7 已与用户确认，见 v2 §5.1、§9.2、§10.4 和计划 PA-05。本文记录实现方案。
+设计决策 D1～D7 已与用户确认，见架构设计 §5.1、§9.2、§10.4 和计划 PA-05。本文记录实现方案。
 
 ## 决策
 
@@ -114,7 +114,7 @@ runner 的步骤：
 
 ### 5. 确认恢复
 
-- `resume` 从会话状态记录取得等待现场：中断状态、所属 `request_id` 和 `reply_target`。核对 `request_id` 与执行上下文一致，再按 v2 §5.1 校验回复。
+- `resume` 从会话状态记录取得等待现场：中断状态、所属 `request_id` 和 `reply_target`。核对 `request_id` 与执行上下文一致，再按架构设计 §5.1 校验回复。
 - 校验失败抛校验拒绝，不记录任何事件、不保存、不改动现场。
 - 回复内容到原生 `ConfirmPayload` / `AskUserPayload` 的转换（含“未回答”和“超时”标记）由 PA-09 的交互适配接入点完成。
 - PA-05 只负责按交互 ID 组装 `InteractiveInput`，并编排恢复流程。
@@ -174,7 +174,7 @@ runner 的步骤：
 | 8. 停止与取消 | 执行中 cancel → `final(cancelled)`，stop → `paused(stopped)`，模型流被取消；构造前到达的控制在模型调用前收尾；重复或并发控制只保留第一个原因；原生停止较慢时清理等它返回；结局锁定后（收尾保存期间）到达的 cancel / stop 不被接受：控制原因不变、不调用原生 `abort`，结局仍为 `final(completed)`；锁定后保存失败照常抛运行异常、不记结束事件 |
 | 9. 提前关闭流 | 原生流被取消，实例占用释放并关闭，不保存、不记结束事件 |
 | 10. checkpointer 隔离 | 全局内存 checkpointer 中同 session_id 的旧状态不会进入执行，执行后也没有新快照 |
-| v2 附录 C 验证点 5（部分） | 模型调用中途停止时，已有上下文（含已完成的工具调用及结果）经会话状态记录接入点保存后记 `paused(stopped)`；第一次模型调用中途停止时，原生在上下文末尾追加“[Request cancelled by user]”占位回复。工具执行中途停止的不完整工具调用归 PA-18 |
+| 架构设计附录 C 验证点 5（部分） | 模型调用中途停止时，已有上下文（含已完成的工具调用及结果）经会话状态记录接入点保存后记 `paused(stopped)`；第一次模型调用中途停止时，原生在上下文末尾追加“[Request cancelled by user]”占位回复。工具执行中途停止的不完整工具调用归 PA-18 |
 | 11. 回归 | PA 包 224 passed（新增 51），结局锁定及附录 C 验证点 5 补充后 229 passed、`tests/unit_tests/harness` 5432 passed / 39 skipped；共享回归集 213 passed；`tests/unit_tests/core/session` 411 passed；`tests/unit_tests/harness` 5426 passed / 39 skipped。同一套件连续运行 5 次结果一致 |
 
 变异检查：去掉清理前的停止等待、去掉内层生成器的 `aclosing`、去掉原生调用后的致命错误检查、去掉 `request_abort` 的结局锁定检查，对应用例都会失败。
