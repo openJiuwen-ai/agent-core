@@ -85,6 +85,7 @@ dependencies = [
 # A2A: required for `openjiuwen.remote_clients` / `openjiuwen.server_adapters` A2A entry
 # points (`pip install "openjiuwen[all-a2a]"` — entry points do not auto-install deps).
 [project.optional-dependencies]
+google = ["google-genai==1.75.0"]
 # Parallel to `all-mq` / `all-storage` / `all-vector` (integration bundle name).
 all-a2a = ["a2a-sdk[http-server]==1.0.0"]
 pulsar = ["pulsar-client>=3.5.0"]
@@ -144,6 +145,7 @@ all = ["openjiuwen[all-mq,all-storage,all-vector,all-a2a]"]
 [dependency-groups]
 # Testing
 test = [
+    "google-genai==1.75.0",
     "pytest>=8.3.5",
     "pytest-asyncio>=1.0.0",
     "pytest-html>=4.1.1",
