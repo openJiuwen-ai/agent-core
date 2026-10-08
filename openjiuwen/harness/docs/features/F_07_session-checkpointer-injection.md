@@ -7,7 +7,7 @@
 | 负责人 | Song Haoran |
 | 测试基线 | 新增 5 项单测；回归 6609 passed、44 skipped（harness、core single_agent / runner / session、agent 全量单测） |
 | 范围 | `openjiuwen/core/session/agent.py`（`Session`、`create_agent_session`）、`openjiuwen/core/session/checkpointer/`（新增 `NoopCheckpointer` 并导出） |
-| 关联 | [Persistent Agent 设计（v2）](../../persistent_agent/docs/designs/persistent-agent-design-v2.md) §7.8；Persistent [F_05](../../persistent_agent/docs/features/F_05_execution-entries.md)（PA-04） |
+| 关联 | [Persistent Agent 设计（v2）](../../persistent_agent/docs/designs/persistent-agent-architecture.md) §7.8；Persistent [F_05](../../persistent_agent/docs/features/F_05_execution-entries.md)（PA-05） |
 
 ## 背景与决策
 
@@ -27,7 +27,7 @@ Persistent Agent 的跨 Execution 状态只能来自 `WindowStore`。但原生 R
 - 新增 `NoopCheckpointer`：所有恢复、保存、中断和清理方法都不读写存储，`session_exists` 返回 False；`graph_store()` 返回该实例自带的内存 Store，只供同一 Session 内的工作流组件使用，不跨 Session 共享。从 `openjiuwen.core.session.checkpointer` 导出。
 - 原生生命周期照常运行：`pre_run` 仍触发 Session 创建回调，`close_stream`、取消收敛和资源清理不受影响；只是注入空实现后，其中的 checkpointer 恢复和保存不读写存储。执行过程中仍正常读写当前 Session state。
 
-Persistent 的用法：AgentServer 为每次 Execution 创建新的空 Session 并显式注入 `NoopCheckpointer`；PA-04 在执行前检查 `session.checkpointer()` 是不是 `NoopCheckpointer`，不是就拒绝开始。隔离按 Session 生效，不修改全局 checkpointer 配置。
+Persistent 的用法：AgentServer 为每次 Execution 创建新的空 Session 并显式注入 `NoopCheckpointer`；PA-05 在执行前检查 `session.checkpointer()` 是不是 `NoopCheckpointer`，不是就拒绝开始。隔离按 Session 生效，不修改全局 checkpointer 配置。
 
 ## 拒绝的方案
 
@@ -37,7 +37,7 @@ Persistent 的用法：AgentServer 为每次 Execution 创建新的空 Session �
 | 修改全局 `CheckpointerFactory` 默认实现 | 影响同进程的其他 Agent 和个人版 |
 | 未注入时也让 `pre_run` 改用 Session 自带的 checkpointer | 会改变默认路径选择 checkpointer 的时机；当前调用方可能在构造 Session 后才替换全局默认实现 |
 | 用 `InMemoryCheckpointer` 代替空实现 | 它仍会按 session_id 恢复和保存状态，不能提供隔离 |
-| 改走原生 invoke 路径避开 `pre_run` | 只规避流式路径，取消和异常路径仍会提交；PA-04 需要流式输出 |
+| 改走原生 invoke 路径避开 `pre_run` | 只规避流式路径，取消和异常路径仍会提交；PA-05 需要流式输出 |
 
 ## 已核实的原生行为
 

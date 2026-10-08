@@ -8,6 +8,8 @@
 | 范围 | 内部 execution/binding.py、构造绑定接缝和隔离测试；不实现 PA-04 业务事件执行闭环 |
 | 规约 | S_01；开发计划 PA-03 |
 
+编号说明：本文保留开发当时的历史 PA 编号；与当前计划对照时，旧 PA-22 对应 PA-04，旧 PA-04～PA-21 对应 PA-05～PA-22，其余编号不变。旧版架构内容可从 Git 历史查阅。
+
 ## 设计与范围
 
 沿用原生 DeepAgent，不新增 Agent 类或门面，不 monkey-patch 原生方法。Persistent 内部 invoke / stream 接缝在进入原生 API 前校验原构造的 Agent、Session 对象、完整 ExecutionContext、端口及 owner；传给原生 API 的 Session 固定为构造 Session。内部接口不作外层公开导出，PA-04 后续组合这些函数。Persistent.resolve_parts 注入 NativeStreamTaskLifecycle；普通 DeepAgentConfig 默认句柄为 None，个人版不启用此分支。

@@ -7,9 +7,9 @@
 | 类型 | spec |
 | 状态 | 拟议契约；尚未实现 |
 | 关联模块 | `openjiuwen/harness/persistent_agent/{learning/,schema/learning.py}`（拟议路径） |
-| 最近一次修订日期 | 2026-09-25 |
-| 关联 feature | N/A；开发计划 PA-18～PA-20 |
-| 设计依据 | [详细架构设计](../designs/persistent-agent-architecture.md) §13 |
+| 最近一次修订日期 | 2026-10-08 |
+| 关联 feature | N/A；开发计划 PA-19～PA-21 |
+| 设计依据 | 旧版详细架构 §13（见 Git 历史）；当前设计为 [Persistent Agent 设计（v2）](../designs/persistent-agent-architecture.md) |
 
 当前没有本模块的 LearningCoordinator 或 LearningJobPort 实现；本规约描述独立学习作业的拟议契约。
 

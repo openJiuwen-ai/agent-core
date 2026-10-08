@@ -291,3 +291,6 @@ tests/unit_tests/extensions/context_evolver/memory_file/
 /records/
 /auto_harness/
 /.idea_bak/
+
+# Local Persistent Agent development visualization
+/persistent_agents_development_visualisation/
