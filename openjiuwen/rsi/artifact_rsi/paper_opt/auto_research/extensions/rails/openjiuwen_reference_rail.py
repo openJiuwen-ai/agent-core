@@ -55,6 +55,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import (
     LocalWorkConfig,
     OperationMode,
@@ -78,6 +79,15 @@ from openjiuwen.harness.prompts.tools.filesystem import (
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.filesystem import GlobTool, ListDirTool, ReadFileTool
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.reference_index import (
+    ReferencePathError as IndexPathError,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.reference_index import (
+    ReferenceRoots,
+    default_roots,
+    resolve_reference_path,
+    search_reference,
+)
 
 # File-relative (like reporting/agent.py's _SKILLS_DIR), not CWD-relative --
 # points at agent-core-rsi's own real docs/ directory, not a vendored
@@ -91,6 +101,7 @@ _DEFAULT_ASSETS_ROOT = Path(__file__).resolve().parents[7] / "docs"
 _READ_NAME = "openjiuwen_ref_read_file"
 _GLOB_NAME = "openjiuwen_ref_glob"
 _LIST_NAME = "openjiuwen_ref_list_files"
+_SEARCH_NAME = "openjiuwen_ref_search"
 
 _SCOPE_SUFFIX = {
     "cn": "（只读，范围限定于 OpenJiuwen 参考文档，不可用于其他目录）",
@@ -136,11 +147,54 @@ class _RefListDirProvider(ToolMetadataProvider):
         return get_list_dir_input_params(language)
 
 
+class _RefSearchProvider(ToolMetadataProvider):
+    def get_name(self) -> str:
+        return _SEARCH_NAME
+
+    def get_description(self, language: str = "cn") -> str:
+        text = {
+            "cn": (
+                "默认在 OpenJiuwen 源码中搜索符号或文本。显式传入 scopes 后才会搜索示例或文档。"
+                "返回虚拟路径、行号、权威级别和片段。"
+            ),
+            "en": (
+                "Search OpenJiuwen source by default. Pass scopes to include examples or docs. "
+                "Returns a virtual path, line range, authority label, and snippet."
+            ),
+        }
+        return text.get(language, text["en"])
+
+    def get_input_params(self, language: str = "cn") -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Literal text or symbol to find."},
+                "scopes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional namespaces: source, examples, docs. Defaults to source.",
+                },
+                "path_glob": {"type": "string", "description": "Optional glob matched against virtual paths."},
+                "max_results": {"type": "integer", "description": "Maximum hits, capped at 20."},
+                "use_regex": {
+                    "type": "boolean",
+                    "description": "Interpret query as a bounded regular expression.",
+                },
+            },
+            "required": ["query"],
+        }
+
+
 # Runtime registration is idempotent (register_tool_provider just overwrites
 # the registry entry by name) and only needs to happen once per process, but
 # doing it at import time keeps it colocated with the names it registers
 # rather than requiring callers to remember a setup step.
-for _provider in (_RefReadFileProvider(), _RefGlobProvider(), _RefListDirProvider()):
+for _provider in (
+    _RefReadFileProvider(),
+    _RefGlobProvider(),
+    _RefListDirProvider(),
+    _RefSearchProvider(),
+):
     register_tool_provider(_provider)
 
 
@@ -174,14 +228,23 @@ def _strip_virtual_prefix(posix: str) -> str:
     return text
 
 
-def normalize_reference_path(raw: str | None, assets_root: Path) -> Path:
-    """Map a virtual or relative SDK path onto the configured assets root.
+def normalize_reference_path(
+    raw: str | None,
+    assets_root: Path,
+    *,
+    roots: ReferenceRoots | None = None,
+) -> Path:
+    """Map a virtual or relative SDK path onto one reference root.
 
-    Accepts a bare path relative to the real docs/ root (e.g.
-    ``en/SUMMARY.md``), the legacy ``docs/...`` or ``assets/openjiuwen/...``
-    forms (see `_strip_virtual_prefix`), and absolute paths already inside
-    the assets root. Rejects traversal and anything outside.
+    Virtual paths (``examples/...``, ``source/openjiuwen/...``, ``docs/...``)
+    resolve against ``roots``. A bare docs-relative path still
+    resolves against ``assets_root`` when ``roots`` is omitted.
     """
+    if roots is not None:
+        try:
+            return resolve_reference_path(raw or "", roots)
+        except IndexPathError as exc:
+            raise ReferencePathError(str(exc)) from exc
     text = (raw or "").strip()
     if not text:
         raise ReferencePathError("Access denied: empty reference path")
@@ -225,6 +288,7 @@ def rewrite_reference_inputs(
     path_keys: tuple[str, ...] = (),
     default_missing_path: bool = False,
     rewrite_pattern: bool = False,
+    roots: ReferenceRoots | None = None,
 ) -> dict[str, Any]:
     rewritten = dict(inputs)
     for key in path_keys:
@@ -233,7 +297,7 @@ def rewrite_reference_inputs(
             if default_missing_path:
                 rewritten[key] = str(assets_root.resolve())
             continue
-        rewritten[key] = str(normalize_reference_path(str(value), assets_root))
+        rewritten[key] = str(normalize_reference_path(str(value), assets_root, roots=roots))
     if rewrite_pattern and rewritten.get("pattern"):
         rewritten["pattern"] = rewrite_glob_pattern(str(rewritten["pattern"]))
     return rewritten
@@ -241,6 +305,7 @@ def rewrite_reference_inputs(
 
 class _ReferencePathMixin:
     _assets_root: Path
+    _roots: ReferenceRoots | None = None
     _path_keys: tuple[str, ...] = ()
     _default_missing_path = False
     _rewrite_pattern = False
@@ -253,6 +318,7 @@ class _ReferencePathMixin:
                 path_keys=self._path_keys,
                 default_missing_path=self._default_missing_path,
                 rewrite_pattern=self._rewrite_pattern,
+                roots=self._roots,
             )
         except ReferencePathError as exc:
             return ToolOutput(success=False, data=None, error=str(exc))
@@ -268,6 +334,7 @@ class _RefReadFileTool(_ReferencePathMixin, ReadFileTool):
         language: str,
         agent_id: str | None,
         assets_root: Path,
+        roots: ReferenceRoots | None = None,
     ):
         # Calls the real parent __init__ (satisfies G.CLS.01 / pylint's
         # super-init-not-called) then replaces the resulting card:
@@ -284,6 +351,7 @@ class _RefReadFileTool(_ReferencePathMixin, ReadFileTool):
             options=ToolCardBuildOptions(parallel_safe=True),
         )
         self._assets_root = assets_root
+        self._roots = roots
 
 
 class _RefGlobTool(_ReferencePathMixin, GlobTool):
@@ -297,6 +365,7 @@ class _RefGlobTool(_ReferencePathMixin, GlobTool):
         language: str,
         agent_id: str | None,
         assets_root: Path,
+        roots: ReferenceRoots | None = None,
     ):
         GlobTool.__init__(self, operation, language, agent_id)
         self._card = build_tool_card(
@@ -307,6 +376,7 @@ class _RefGlobTool(_ReferencePathMixin, GlobTool):
             options=ToolCardBuildOptions(parallel_safe=True),
         )
         self._assets_root = assets_root
+        self._roots = roots
 
 
 class _RefListDirTool(_ReferencePathMixin, ListDirTool):
@@ -319,6 +389,7 @@ class _RefListDirTool(_ReferencePathMixin, ListDirTool):
         language: str,
         agent_id: str | None,
         assets_root: Path,
+        roots: ReferenceRoots | None = None,
     ):
         ListDirTool.__init__(self, operation, language, agent_id)
         self._card = build_tool_card(
@@ -329,6 +400,68 @@ class _RefListDirTool(_ReferencePathMixin, ListDirTool):
             options=ToolCardBuildOptions(parallel_safe=True),
         )
         self._assets_root = assets_root
+        self._roots = roots
+
+
+class _RefSearchTool(Tool):
+    """In-process search. This does not shell out, so the Windows grep sandbox bug does not apply."""
+
+    def __init__(self, language: str, agent_id: str | None, roots: ReferenceRoots) -> None:
+        super().__init__(
+            build_tool_card(
+                _SEARCH_NAME,
+                "OpenJiuwenRefSearchTool",
+                language,
+                agent_id=agent_id,
+                options=ToolCardBuildOptions(parallel_safe=True),
+            )
+        )
+        self._roots = roots
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        del kwargs
+        query = str((inputs or {}).get("query") or "").strip()
+        if not query:
+            return ToolOutput(success=False, data=None, error="query is required")
+        scopes = (inputs or {}).get("scopes") or ()
+        if isinstance(scopes, str):
+            scopes = [scopes]
+        try:
+            hits = search_reference(
+                query,
+                self._roots,
+                scopes=tuple(str(item) for item in scopes),
+                path_glob=str((inputs or {}).get("path_glob") or ""),
+                max_results=int((inputs or {}).get("max_results") or 8),
+                use_regex=bool((inputs or {}).get("use_regex")),
+            )
+        except (TypeError, ValueError) as exc:
+            return ToolOutput(success=False, data=None, error=str(exc))
+        payload = [
+            {
+                "virtual_path": hit.virtual_path,
+                "start_line": hit.start_line,
+                "end_line": hit.end_line,
+                "label": hit.label,
+                "symbol": hit.symbol,
+                "snippet": hit.snippet,
+            }
+            for hit in hits
+        ]
+        lines = [
+            f"{item['virtual_path']}:{item['start_line']}-{item['end_line']} "
+            f"[{item['label']}] {item['symbol']}\n{item['snippet']}"
+            for item in payload
+        ]
+        return ToolOutput(
+            success=True,
+            data={"hits": payload},
+            error=None,
+            extracted_content="\n\n".join(lines),
+        )
+
+    async def stream(self, inputs: dict[str, Any], **kwargs: Any):
+        yield await self.invoke(inputs, **kwargs)
 
 
 class OpenJiuwenReferenceRail(DeepAgentRail):
@@ -340,29 +473,47 @@ class OpenJiuwenReferenceRail(DeepAgentRail):
 
     priority = 100  # same as SysOperationRail — no ordering dependency between them, just registered up front like it
 
-    def __init__(self, *, assets_root: Path = _DEFAULT_ASSETS_ROOT) -> None:
+    def __init__(
+        self,
+        *,
+        assets_root: Path = _DEFAULT_ASSETS_ROOT,
+        roots: ReferenceRoots | None = None,
+    ) -> None:
         super().__init__()
-        self._assets_root = assets_root.resolve()
+        base = roots or default_roots()
+        docs_root = assets_root.resolve() if roots is None else base.docs
+        self._roots = ReferenceRoots(
+            examples=base.examples,
+            source=base.source,
+            docs=docs_root,
+        )
+        self._assets_root = self._roots.docs
         self.tools: list[Any] | None = None
 
     def init(self, agent) -> None:
         lang = agent.system_prompt_builder.language
         agent_id = getattr(getattr(agent, "card", None), "id", None)
 
+        sandbox_roots = [
+            str(path.resolve())
+            for _, path in self._roots.namespaces()
+            if path.exists()
+        ]
         card = SysOperationCard(
             id=f"openjiuwen_ref_{agent_id or 'default'}",
             mode=OperationMode.LOCAL,
             work_config=LocalWorkConfig(
-                sandbox_root=[str(self._assets_root)],
+                sandbox_root=sandbox_roots or [str(self._assets_root)],
                 restrict_to_sandbox=True,
             ),
         )
         reference_operation = SysOperation(card)
 
         self.tools = [
-            _RefReadFileTool(reference_operation, lang, agent_id, self._assets_root),
-            _RefGlobTool(reference_operation, lang, agent_id, self._assets_root),
-            _RefListDirTool(reference_operation, lang, agent_id, self._assets_root),
+            _RefReadFileTool(reference_operation, lang, agent_id, self._assets_root, self._roots),
+            _RefGlobTool(reference_operation, lang, agent_id, self._assets_root, self._roots),
+            _RefListDirTool(reference_operation, lang, agent_id, self._assets_root, self._roots),
+            _RefSearchTool(lang, agent_id, self._roots),
         ]
         for tool in self.tools:
             agent.ability_manager.add_ability(tool.card, tool)

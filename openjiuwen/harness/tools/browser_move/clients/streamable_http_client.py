@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
 from contextlib import AsyncExitStack
-from typing import Any, List, Optional, Dict
+from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
@@ -11,7 +11,9 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging im
     browser_agent_log_info,
     browser_agent_log_warning,
 )
+
 from .logging_utils import summarize_tool_arguments_for_log
+
 try:
     from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import StreamableHttpClient
 except ModuleNotFoundError:
@@ -60,41 +62,31 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
 
     async def connect(self, *, retry_times: int = 1, timeout: float = NO_TIMEOUT) -> bool:
         """Connect to Streamable HTTP server, optionally retrying on failure."""
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamable_http_client
-
         actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
         attempts = max(1, int(retry_times))
         for attempt in range(1, attempts + 1):
             try:
                 await self.disconnect(timeout=timeout)
-                self._client = streamable_http_client(
-                    self._server_path,
-                    timeout=actual_timeout,
-                    auth=self._auth_provider,
+                async with asyncio.timeout(actual_timeout):
+                    connected = await super().connect(timeout=timeout)
+                if connected:
+                    logger.info(f"Streamable HTTP client connected successfully to {self._server_path}")
+                    return True
+                logger.error(
+                    f"Streamable HTTP connection failed to {self._server_path} "
+                    f"(attempt {attempt}/{attempts}): {self._last_connect_error}"
                 )
-                self._read, self._write, self._get_session_id = await self._exit_stack.enter_async_context(
-                    self._client
-                )
-                self._session = await self._exit_stack.enter_async_context(
-                    ClientSession(self._read, self._write, sampling_callback=None)
-                )
-                await asyncio.wait_for(self._session.initialize(), timeout=actual_timeout)
-                self._is_disconnected = False
-                logger.info(f"Streamable HTTP client connected successfully to {self._server_path}")
-                return True
             except asyncio.TimeoutError:
                 logger.error(
                     f"Streamable HTTP connection timed out after {actual_timeout:.1f}s "
                     f"(attempt {attempt}/{attempts}): {self._server_path}"
                 )
-                await self.disconnect(timeout=timeout)
             except Exception as e:
                 logger.error(
                     f"Streamable HTTP connection failed to {self._server_path} "
                     f"(attempt {attempt}/{attempts}): {e}"
                 )
-                await self.disconnect(timeout=timeout)
+            await self.disconnect(timeout=timeout)
         return False
 
     async def disconnect(self, *, timeout: float = NO_TIMEOUT) -> bool:

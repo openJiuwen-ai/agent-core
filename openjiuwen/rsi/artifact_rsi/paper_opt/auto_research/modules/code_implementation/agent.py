@@ -8,7 +8,6 @@ import logging
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import traceback
@@ -16,6 +15,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.error_tree import python_error_tree
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import active_artifact_dir
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     validate_metrics_contract,
@@ -29,9 +29,12 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     resolve_project_reference,
     smoke_test_dir,
 )
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.grounding import (
-    docs_index_path,
-    gather_reference_excerpts,
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.checkpoint import (
+    current_commit,
+    force_rmtree,
+    host_commit,
+    seed_output_from_head,
+    sync_tree_into_repo,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
     CodeImplementationInput,
@@ -53,7 +56,6 @@ _CONVENTIONS_PATH = (
     / "prompts"
     / "openjiuwen_conventions.md"
 )
-_EXTENSIONS_REGISTRY_PATH = Path("auto_research/extensions/registry.py")
 _PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
 
 _ENTRY_POINT = "run.py"
@@ -61,10 +63,12 @@ _REQUIREMENTS_FILE = "requirements.txt"
 _ASSUMPTIONS_FILE = "ASSUMPTIONS.md"
 _OUTPUT_SUBDIR = "output"
 _PROMOTION_LOG = "promotion.log"
-# Git history stays in agent_workspace/output/. generated_code/ is a runnable
-# snapshot, not a nested repo — copying .git then rmtree'ing it fails on
-# Windows because object files are read-only (WinError 5).
-_PROMOTION_SKIP_NAMES = {".git", "__pycache__"}
+# Host git lives on generated_code/. Agent output/.git is never the
+# checkpoint — skip it on copy so a host seed cannot be overwritten by an
+# agent-created repo, and so Windows read-only git objects are not rmtree'd
+# as part of the deliverable snapshot.
+_PROMOTION_SKIP_NAMES = {".git", "__pycache__", "logs"}
+_PROMOTE_ATTEMPTS = 3
 # Cap on how much of a failing variant's stderr/stdout gets inlined into
 # CodeImplementationManifest.notes — enough to capture a real Python
 # traceback's tail (where the actual exception line lives), without letting
@@ -109,6 +113,22 @@ _ARGPARSE_CHOICES_RE = re.compile(r"choose from ([^\n)]+)")
 # user home directory -- see _extract_path_candidates/_stage_referenced_paths.
 _WINDOWS_ABS_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'<>|]+")
 _POSIX_ABS_PATH_RE = re.compile(r"(?<![:\w])/(?:[^\s\"'<>|]+)")
+# A dataset path is often named without a drive letter (e.g.
+# "demo-input\sentiment_icl_v1.json") -- the two absolute-path patterns above
+# never match that, so the pre-verification/staging below silently skips it
+# and the coding agent has to rediscover it itself via an unbounded
+# find/grep across every drive (observed directly: several tool calls per
+# retry spent on `find`/`ls` across C:\ and other drives before the dataset
+# was located). Resolved against _referenced_path_roots, not treated as a
+# host-relative path on its own.
+_RELATIVE_PATH_RE = re.compile(r"(?<![:/\\\w.])[\w.-]+(?:[\\/][\w.-]+)+\.[A-Za-z0-9]{1,8}\b")
+# Candidates are extracted from free text that may have been authored on a
+# different OS than the one this runs on (e.g. a "\"-separated path mentioned
+# in a design doc, staged on a Linux/Mac sandbox). pathlib splits only on the
+# host's own separator(s), so joining a raw candidate onto a root via `/`
+# silently fails to resolve on the "other" platform. Split on both
+# separators ourselves before rejoining with the host's own Path semantics.
+_PATH_SEP_RE = re.compile(r"[\\/]+")
 _REFERENCED_PATH_TRAILING_PUNCT = ".,;:)]'\"\\"
 _MAX_REFERENCED_CANDIDATES = 8
 _MAX_REFERENCED_FILE_BYTES = 50 * 1024 * 1024
@@ -142,6 +162,7 @@ class CandidateValidation:
     stderr_tail: str = ""
     variants: list[ImplementedVariant] = field(default_factory=list)
     failures: dict[str, str] = field(default_factory=dict)
+    error_trees: dict[str, str] = field(default_factory=dict)
     candidate_hash: str = ""
     cycle: int = 1
     skipped_redundant_smoke: bool = False
@@ -198,6 +219,41 @@ def _hash_staged_deliverable(root: Path) -> str:
     return digest.hexdigest()[:16]
 
 
+_SMOKE_METRICS_STDOUT_MARKER = "SMOKE_METRICS_JSON:"
+
+
+def _extract_stdout_metrics(stdout: str) -> tuple[bool, dict[str, Any] | None]:
+    """Pull the smoke-test metrics payload out of stdout, if the candidate
+    printed one (see the "Required entry-point contract" prompt section).
+
+    This is a second, filesystem-independent channel for the same payload
+    the candidate also writes to `--output`: the packaged desktop host has
+    been observed changing its own process's cwd before running the
+    candidate script, so a relative `--output` value can silently resolve
+    somewhere other than the path the host asked for. Stdout is not subject
+    to that.
+
+    Returns ``(found, payload)``: ``found`` is True whenever a marker line
+    exists at all, even with unparsable JSON after it -- callers must treat
+    "no marker" (fall back to the file) differently from "marker present but
+    broken" (a real bug worth surfacing, not masking). Scans every line, not
+    just the tail, and keeps the last match in case the candidate's own
+    logging prints the marker more than once.
+    """
+    marker_line: str | None = None
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_SMOKE_METRICS_STDOUT_MARKER):
+            marker_line = stripped[len(_SMOKE_METRICS_STDOUT_MARKER):].strip()
+    if marker_line is None:
+        return False, None
+    try:
+        payload = json.loads(marker_line)
+    except json.JSONDecodeError:
+        return True, None
+    return True, (payload if isinstance(payload, dict) else None)
+
+
 def _discover_variant_names(code_dir: Path, *, timeout: float = 30) -> list[str]:
     """Ask the entry point's own argparse --method flag what it actually
     supports, instead of trusting a separately-tracked list. The task
@@ -236,25 +292,44 @@ def _discover_variant_names(code_dir: Path, *, timeout: float = 30) -> list[str]
     return [item for item in items if item]
 
 
-def _windows_cmd_shim(path: str) -> bool:
-    return path.lower().endswith((".cmd", ".bat"))
-
-
 def _pyright_lsp_command() -> tuple[str, list[str]] | None:
     """Argv that can be Popen'd without a Windows shell (not a .cmd shim).
 
-    OpenJiuwen's default Pyright spawn uses the `pyright` console script; on
-    Windows that is often `pyright.cmd`, and CreateProcess on a .cmd without
-    `shell=True` fails with WinError 87 — observed as
-    `[LSP] Server 'pyright' failed` while the coding agent kept running with
-    no diagnostics. Prefer `python -m pyright.langserver` when the module is
-    installed; otherwise a non-shim `pyright-langserver` on PATH.
+    Delegates to the harness's own pyright resolution first
+    (`harness.lsp.servers.servers.python._resolve_pyright_command`): it
+    covers both an npm-global install (spawned via `node`, sidestepping
+    Python entirely) and a `pyright-langserver` `.cmd` shim on Windows by
+    parsing the actual `node ... langserver.index.js` invocation out of it
+    -- a bare `.cmd` fails CreateProcess with WinError 87 without
+    `shell=True`, observed as `[LSP] Server 'pyright' failed` while the
+    coding agent kept running with no diagnostics. Reusing it here instead
+    of re-deriving a weaker version keeps the two in sync.
+
+    Only fall back to `sys.executable -m pyright.langserver` (a
+    pip-installed `pyright`) when the harness resolution finds nothing --
+    on the packaged desktop host, `sys.executable` is the launcher binary
+    itself, which has no `-m` module-runner (the same class of failure
+    `_compile_staged_python` hit with `-m compileall`; see that method's
+    docstring). This fallback is kept only because it is harmless when it
+    fails: `_try_lsp_rail` treats a broken LSP as "no diagnostics", not a
+    hard error.
+
+    The delegation itself is wrapped: the harness resolver shells out to
+    `npm`/reads a `.cmd` file, and an import or resolution failure there
+    must degrade to "no pyright found", not crash agent construction --
+    that would turn an optional dev-tooling feature into a hard dependency
+    for the coding agent to even start.
     """
+    try:
+        from openjiuwen.harness.lsp.servers.servers.python import _resolve_pyright_command
+
+        resolved = _resolve_pyright_command()
+    except Exception:
+        resolved = None
+    if resolved is not None:
+        return resolved
     if importlib.util.find_spec("pyright") is not None:
         return sys.executable, ["-m", "pyright.langserver", "--stdio"]
-    found = shutil.which("pyright-langserver")
-    if found and not _windows_cmd_shim(found):
-        return found, ["--stdio"]
     return None
 
 
@@ -324,11 +399,15 @@ class CodeImplementationAgent:
         # cwd boundary with an absolute path.
         agent_workspace = agent_workspace_dir(plan.run_id).resolve()
         output_dir = agent_workspace / _OUTPUT_SUBDIR
-        output_dir.mkdir(parents=True, exist_ok=True)
         code_dir = generated_code_dir(plan.run_id).resolve()
+        # Seed the working copy from generated_code HEAD at the start of each
+        # manager code round (not inner smoke cycles). Drops output/.git so
+        # the coding agent cannot treat a leftover workspace repo as truth.
+        seed_output_from_head(code_dir, output_dir)
         agent_artifact_path = self._stage_artifact_input(inputs.artifact_path, agent_workspace)
         referenced_candidates = self._extract_path_candidates(design_context, inputs.extra_host_instructions)
-        referenced_paths = self._stage_referenced_paths(referenced_candidates, agent_workspace)
+        referenced_roots = self._referenced_path_roots(inputs.artifact_path)
+        referenced_paths = self._stage_referenced_paths(referenced_candidates, agent_workspace, roots=referenced_roots)
         referenced_prompt = self._build_referenced_paths_prompt(referenced_paths)
 
         # Only a last-resort fallback now — see _build_output, which discovers
@@ -441,15 +520,23 @@ class CodeImplementationAgent:
             await shutdown_lsp()
 
         if validation is not None and validation.ok:
-            try:
-                self._promote_output(
-                    output_dir,
-                    code_dir,
-                    log_path=smoke_root / _PROMOTION_LOG,
-                )
-            except Exception as exc:  # noqa: BLE001
+            last_exc: BaseException | None = None
+            for promote_attempt in range(_PROMOTE_ATTEMPTS):
+                try:
+                    self.promote_output(
+                        output_dir,
+                        code_dir,
+                        log_path=smoke_root / _PROMOTION_LOG,
+                    )
+                    last_exc = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    if promote_attempt + 1 < _PROMOTE_ATTEMPTS:
+                        await asyncio.sleep(0.05 * (2 ** promote_attempt))
+            if last_exc is not None:
                 return self._promotion_failure_output(
-                    plan, code_dir, validation, agent_message, exc
+                    plan, code_dir, validation, agent_message, last_exc
                 )
             return self._build_output(
                 plan,
@@ -458,13 +545,21 @@ class CodeImplementationAgent:
                 agent_message,
                 validation=validation,
             )
+        # workspace_dir must name the same directory `files` was just listed
+        # from (output_dir, on any failure where the agent wrote something) —
+        # not generated_code/, which was never touched this cycle. This field
+        # flows verbatim into the manager's CodeHandoff and gets echoed into
+        # the next repair contract; reporting generated_code/ here previously
+        # sent repair instructions at a directory the coding agent's own
+        # prompt forbids writing to and the sandbox denies access to
+        # (observed directly: retries burning tool calls probing write access
+        # to generated_code/ instead of fixing output/run.py).
         return self._build_output(
             plan,
             output_dir if output_dir.exists() else code_dir,
             variant_names,
             agent_message,
             validation=validation,
-            workspace_dir=str(code_dir),
         )
 
     # -- promoting the deliverable out of the agent's scratch workspace ------
@@ -472,22 +567,7 @@ class CodeImplementationAgent:
     @staticmethod
     def _force_rmtree(path: Path) -> None:
         """Delete a tree that may contain read-only Git objects (Windows)."""
-
-        def _unlock_and_retry(func, target, exc):
-            error = exc if isinstance(exc, BaseException) else exc[1]
-            try:
-                os.chmod(target, stat.S_IWRITE)
-                func(target)
-            except OSError as retry_exc:
-                raise error from retry_exc
-
-        if sys.version_info >= (3, 12):
-            shutil.rmtree(path, onexc=_unlock_and_retry)
-        else:
-            shutil.rmtree(
-                path,
-                onerror=lambda func, target, exc_info: _unlock_and_retry(func, target, exc_info),
-            )
+        force_rmtree(path)
 
     @staticmethod
     def _promotion_ignore(_directory: str, names: list[str]) -> list[str]:
@@ -517,29 +597,17 @@ class CodeImplementationAgent:
 
     @classmethod
     def _copy_deliverable(cls, source_dir: Path, destination_dir: Path) -> list[str]:
-        skipped: list[str] = []
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        for item in source_dir.iterdir():
-            if item.name in _PROMOTION_SKIP_NAMES or item.suffix == ".pyc":
-                skipped.append(item.name)
-                continue
-            destination = destination_dir / item.name
-            if item.is_dir():
-                shutil.copytree(item, destination, ignore=cls._promotion_ignore)
-            else:
-                shutil.copy2(item, destination)
-        return skipped
+        return sync_tree_into_repo(source_dir, destination_dir)
 
     @classmethod
-    def _promote_output(
+    def promote_output(
         cls, output_dir: Path, code_dir: Path, *, log_path: Path | None = None
     ) -> None:
-        """Atomically replace generated_code/ with a passing staged candidate.
+        """Copy a passing staged candidate into generated_code/ in place.
 
-        Copies into a temporary sibling, then swaps it into place so a copy
-        or replace failure leaves the previous runnable snapshot intact.
-        Git history stays in agent_workspace/output/; `.git` and caches are
-        skipped.
+        ``generated_code/.git`` stays put. Files from ``output/`` overwrite the
+        working tree (skipping ``.git`` and ``logs/``), extras are deleted, then
+        the host commits. Agent ``output/.git`` is not the checkpoint.
         """
         lines = [
             "--- promotion ---",
@@ -548,10 +616,6 @@ class CodeImplementationAgent:
         ]
         skipped: list[str] = []
         stage = "start"
-        parent = code_dir.parent
-        parent.mkdir(parents=True, exist_ok=True)
-        tmp_dir = parent / f".{code_dir.name}.promoting-{os.getpid()}"
-        backup_dir = parent / f".{code_dir.name}.previous-{os.getpid()}"
         try:
             if not output_dir.exists():
                 stage = "copy"
@@ -568,31 +632,17 @@ class CodeImplementationAgent:
                 cls._write_promotion_log(log_path, lines)
                 raise FileNotFoundError(f"promotion source missing: {output_dir}")
 
-            stage = "copy"
-            if tmp_dir.exists():
-                cls._force_rmtree(tmp_dir)
-            skipped = cls._copy_deliverable(output_dir, tmp_dir)
+            stage = "sync"
+            skipped = sync_tree_into_repo(output_dir, code_dir)
 
-            stage = "replace"
-            if backup_dir.exists():
-                cls._force_rmtree(backup_dir)
-            replaced_existing = code_dir.exists()
-            if replaced_existing:
-                os.replace(code_dir, backup_dir)
-            try:
-                os.replace(tmp_dir, code_dir)
-            except Exception:
-                if replaced_existing and backup_dir.exists() and not code_dir.exists():
-                    os.replace(backup_dir, code_dir)
-                raise
-            if backup_dir.exists():
-                cls._force_rmtree(backup_dir)
-
+            stage = "commit"
+            sha = host_commit(code_dir, "code_implementation promote")
             stage = "done"
             lines.extend(
                 [
-                    "stage=replace",
+                    "stage=sync",
                     "status=ok",
+                    f"code_commit={sha or '(none)'}",
                     f"skipped={', '.join(skipped) or '(none)'}",
                     f"source_files: {cls._file_manifest(output_dir)}",
                     f"destination_files: {cls._file_manifest(code_dir)}",
@@ -613,17 +663,6 @@ class CodeImplementationAgent:
             )
             cls._write_promotion_log(log_path, lines)
             raise
-        finally:
-            if tmp_dir.exists() and tmp_dir.resolve() != code_dir.resolve():
-                try:
-                    cls._force_rmtree(tmp_dir)
-                except OSError:
-                    pass
-            if backup_dir.exists() and backup_dir.resolve() != code_dir.resolve():
-                try:
-                    cls._force_rmtree(backup_dir)
-                except OSError:
-                    pass
 
     # -- design context -----------------------------------------------------
 
@@ -688,6 +727,7 @@ class CodeImplementationAgent:
 
     @staticmethod
     def _render_design_report(plan: ExperimentPlan) -> str:
+        observations = [f"- {item}" for item in plan.observations] or ["- (none)"]
         lines = [
             f"# Experiment design report — {plan.run_id}",
             "",
@@ -703,6 +743,12 @@ class CodeImplementationAgent:
             "## Metrics",
             *(f"- {m}" for m in plan.metrics),
             "",
+            "## Primary metric",
+            f"{plan.primary_metric or '(unspecified)'} ({plan.primary_direction or 'unspecified'})",
+            "",
+            "## Observations to log (advisory)",
+            *observations,
+            "",
             "## Expected outcomes",
             plan.expected_outcomes,
             "",
@@ -714,11 +760,17 @@ class CodeImplementationAgent:
     def _build_coding_agent(self, agent_workspace: Path, *, run_id: str, cycle: int = 1):
         from openjiuwen.core.foundation.llm import init_model
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-        from openjiuwen.harness.subagents import create_code_agent
         from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
-
+        from openjiuwen.harness.subagents import create_code_agent
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.python_runtime import (
+            discover_python_runtime,
+            ensure_on_path,
+        )
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.design_reference_rail import (
             DesignReferenceRail,
+        )
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.exploration_budget_rail import (
+            ExplorationBudgetRail,
         )
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.guarded_sys_operation_rail import (
             GuardedSysOperationRail,
@@ -736,6 +788,17 @@ class CodeImplementationAgent:
         # explicit override (e.g. OPENJIUWEN_BASH_STRICT=0 for local debugging)
         # is respected.
         os.environ.setdefault("OPENJIUWEN_BASH_STRICT", "1")
+
+        # On the packaged desktop host, a bare `python`/`py` typed in this
+        # agent's bash tool can resolve to Windows' own App Execution Alias
+        # placeholder instead of a real interpreter (prints a "go install
+        # from the Microsoft Store" message rather than running anything) —
+        # observed directly burning an attempt's entire retry budget on the
+        # agent re-locating a real interpreter from scratch instead of ever
+        # writing `output/run.py`. Prepend a verified real interpreter's
+        # directory to PATH once so every bash call in this process resolves
+        # correctly without the agent having to rediscover it each attempt.
+        ensure_on_path(discover_python_runtime())
 
         model = self._injected_model or init_model(
             provider=self._setting("provider", "MODEL_PROVIDER", default="OpenAI"),
@@ -762,10 +825,16 @@ class CodeImplementationAgent:
                 GuardedSysOperationRail(bash_deny_patterns=_GIT_DENY_PATTERNS),
                 OpenJiuwenReferenceRail(),
                 DesignReferenceRail(design_root=design_root),
-                # Inner ReAct stays unbounded when max_iterations is omitted.
-                # The pipeline's configured cap is applied to the outer loop
-                # via TaskCompletionRail, otherwise a stuck tool/model session
-                # can run until the Provider's much larger watchdog fires.
+                # Nudges toward attempting an implementation once too many
+                # tool calls have passed with no write under output/ — see
+                # module docstring for the repeated failure pattern this
+                # addresses (environment/SDK exploration burning the whole
+                # attempt's budget before run.py ever gets written).
+                ExplorationBudgetRail(),
+                # The pipeline's configured cap is also applied to the outer
+                # loop via TaskCompletionRail, otherwise a stuck tool/model
+                # session can run until the Provider's much larger watchdog
+                # fires.
                 TaskCompletionRail(max_rounds=max_iterations),
             ]
         )
@@ -781,6 +850,16 @@ class CodeImplementationAgent:
             system_prompt=self._render_system_prompt(),
             rails=rails,
             enable_task_loop=True,
+            # create_code_agent's own signature defaults max_iterations to 15
+            # when omitted -- NOT unbounded (only DeepAgentConfig.max_iterations
+            # =None means unbounded, since the 2026-09-22 harness fix made this
+            # value genuinely enforced even under enable_task_loop=True). Must
+            # pass the pipeline's configured value through explicitly, or every
+            # coding session silently reverts to a 15-round inner ReAct cap
+            # regardless of this module's own config (observed directly: every
+            # retry after 2026-09-22 capped at ~15 rounds / 24-33 tool calls,
+            # never reaching a write_file(output/run.py) call).
+            max_iterations=max_iterations,
             tool_owner_id=f"rsi-code-{run_id}-cycle-{cycle}",
             workspace=str(agent_workspace),
             # Code implementation can legitimately take longer than the
@@ -856,12 +935,7 @@ class CodeImplementationAgent:
         conventions = (
             _CONVENTIONS_PATH.read_text(encoding="utf-8") if _CONVENTIONS_PATH.exists() else ""
         )
-        registry = (
-            _EXTENSIONS_REGISTRY_PATH.read_text(encoding="utf-8")
-            if _EXTENSIONS_REGISTRY_PATH.exists()
-            else "(auto_research/extensions/registry.py not found)"
-        )
-        return template.format(openjiuwen_conventions=conventions, extensions_registry=registry)
+        return template.format(openjiuwen_conventions=conventions)
 
     # -- task prompt ---------------------------------------------------------
 
@@ -917,7 +991,7 @@ class CodeImplementationAgent:
         for text in texts:
             if not text:
                 continue
-            for pattern in (_WINDOWS_ABS_PATH_RE, _POSIX_ABS_PATH_RE):
+            for pattern in (_WINDOWS_ABS_PATH_RE, _POSIX_ABS_PATH_RE, _RELATIVE_PATH_RE):
                 for match in pattern.finditer(text):
                     candidate = match.group(0).rstrip(_REFERENCED_PATH_TRAILING_PUNCT)
                     if candidate and candidate not in seen:
@@ -927,7 +1001,44 @@ class CodeImplementationAgent:
         return list(seen)
 
     @staticmethod
-    def _stage_referenced_paths(candidates: list[str], agent_workspace: Path) -> list["_ReferencedPath"]:
+    def _referenced_path_roots(artifact_path: str | None, *, max_levels: int = 3) -> list[Path]:
+        """Ancestor directories of the staged artifact_path, used to resolve
+        a relative path token (e.g. "demo-input/sentiment_icl_v1.json")
+        named in the instructions without a drive letter. A same-run dataset
+        file has been observed sitting a couple of levels above artifact_path
+        (artifact_path itself pointing at a paper/ subfolder, the dataset at
+        a demo-input/ sibling of that subfolder's parent), so climbing a
+        bounded number of ancestors covers that layout without an unbounded
+        filesystem walk.
+        """
+        if not artifact_path:
+            return []
+        roots: list[Path] = []
+        try:
+            current = Path(artifact_path).expanduser().resolve()
+        except (OSError, ValueError):
+            return []
+        if current.is_file():
+            current = current.parent
+        for _ in range(max_levels + 1):
+            roots.append(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        return roots
+
+    @staticmethod
+    def _split_relative_candidate(candidate: str) -> list[str]:
+        """Split a possibly foreign-separator relative path into components,
+        dropping empty segments and any ``..`` so a root can only resolve to
+        a descendant of itself, never escape it."""
+        return [part for part in _PATH_SEP_RE.split(candidate) if part and part != ".." and part != "."]
+
+    @staticmethod
+    def _stage_referenced_paths(
+        candidates: list[str], agent_workspace: Path, *, roots: list[Path] | None = None
+    ) -> list["_ReferencedPath"]:
         """Verify each candidate path actually exists on the host, and stage
         existing files into the sandbox (mirroring _stage_artifact_input) so
         the coding agent can read them without depending on whether its
@@ -937,12 +1048,35 @@ class CodeImplementationAgent:
         string can raise almost anything when handed to Path()/.exists() on
         Windows, and continuing past one bad candidate matters more than
         being precise about which exception type to catch.
+
+        A candidate that is not itself absolute (see _RELATIVE_PATH_RE) is
+        tried against each of ``roots`` in order and resolved to the first
+        hit; it is dropped, not passed through as a host-relative path, if
+        none of them contain it.
         """
         results: list[_ReferencedPath] = []
         referenced_root = agent_workspace / _REFERENCED_PATHS_SUBDIR
+        search_roots = roots or []
         for candidate in candidates:
             try:
                 path = Path(candidate)
+                if not path.is_absolute():
+                    parts = CodeImplementationAgent._split_relative_candidate(candidate)
+                    resolved = (
+                        next(
+                            (
+                                root.joinpath(*parts)
+                                for root in search_roots
+                                if root.joinpath(*parts).is_file()
+                            ),
+                            None,
+                        )
+                        if parts
+                        else None
+                    )
+                    if resolved is None:
+                        continue
+                    path = resolved
                 if not path.exists():
                     continue
                 if path.is_dir():
@@ -1000,14 +1134,6 @@ class CodeImplementationAgent:
         )
 
     def _build_task_prompt(self, plan: ExperimentPlan, design_context: str) -> str:
-        docs_index = docs_index_path()
-        reference = gather_reference_excerpts(plan)
-        reference_block = "\n".join(
-            f"- {'[reusable capability]' if is_capability else '[reference/example]'} "
-            f"`{path}` — {' '.join(excerpt.split())[:160]}..."
-            for path, excerpt, is_capability in reference
-        ) or "(no starting-point candidates matched this plan's keywords)"
-
         living = self._living_design_note(plan)
         return (
             "Implement the following experiment design as a runnable OpenJiuwen codebase.\n\n"
@@ -1032,8 +1158,8 @@ class CodeImplementationAgent:
             f"every file that matters for actually running the experiment — must be written under "
             f"`{_OUTPUT_SUBDIR}/`, not the workspace root. Only what's inside `{_OUTPUT_SUBDIR}/` "
             "gets used afterwards; anything you leave outside it (notes, scratch scripts, etc.) is "
-            f"discarded. Keep git history inside `{_OUTPUT_SUBDIR}/` with `git init` / `git commit`; "
-            "do not copy files into `generated_code/` — the host promotes a snapshot without `.git`. "
+            f"discarded. Do not copy files into `generated_code/` and do not create a git repo in "
+            f"`{_OUTPUT_SUBDIR}/` — the host owns checkpoint/restore on `generated_code/`. "
             f"If you run a local check, use `{_OUTPUT_SUBDIR}/` as the working directory "
             f"(e.g. `cd {_OUTPUT_SUBDIR} && python {_ENTRY_POINT} ...`) so you are testing "
             "exactly what the host will validate later — not a version that also sees files "
@@ -1069,20 +1195,58 @@ class CodeImplementationAgent:
             "per_question=[<one item-result object>] and model_call_count >= 1, "
             "and exit 0/1 — no full-dataset run. Parser-only stubs and dummy model replies "
             "are invalid.\n"
-            "  --output <path>   write a metrics.json to this path\n\n"
+            "  --output <path>   a complete path (may be absolute) chosen by the host — "
+            "treat it as opaque and use it exactly as given for `open(...)`/file writing. "
+            "Do not reinterpret it as a bare filename, do not join it with a directory "
+            "convention of your own, and do not derive your own path from just its "
+            "basename: the host may run you under a launcher whose current working "
+            "directory is not what you expect, so anything other than the literal "
+            "`--output` value can silently write the file somewhere the host will never "
+            "look.\n\n"
             "The host invokes each variant separately as "
-            f"`{_ENTRY_POINT} --method <name> --output <name>.metrics.json`. "
+            f"`{_ENTRY_POINT} --method <name> --output /abs/path/to/<name>.metrics.json`. "
             "Do not require `--method all`. Do not refuse a full (non-smoke) "
             "`--method proposed` or `--method <baseline>` run. Each invocation "
             "must write exactly that variant's JSON to `--output`.\n\n"
-            f"Metrics to compute, identically across all variants: {', '.join(plan.metrics)}.\n\n"
+            "Redundant recovery channel for `--smoke-test` only (skip this on a full, "
+            "non-smoke run): after writing `--output`, also print one line to stdout — "
+            f"`{_SMOKE_METRICS_STDOUT_MARKER}<the same JSON object, compact, one line>` — "
+            "so the host can recover the result even if the file above did not end up "
+            "where it asked. If you print this line more than once, only the last one "
+            "is read.\n\n"
+            f"Declared plan metrics, identically across all variants: {', '.join(plan.metrics) or '(none)'}.\n"
+            + (
+                f"Primary metric (must always be present as a finite number): "
+                f"`{plan.primary_metric}` ({plan.primary_direction or 'unspecified'}).\n"
+                if plan.primary_metric
+                else ""
+            )
+            + (
+                "Requested observations (best effort, under `metrics.observations.<name>`; "
+                "missing ones are noted by reflection, never rejected by the host): "
+                + ", ".join(plan.observations)
+                + ".\n"
+                if plan.observations
+                else ""
+            )
+            + "Write every declared plan metric under a top-level `metrics` object keyed by "
+            "that exact name, as a JSON number or `{\"value\": <number>}`. Operational "
+            "metadata (`method`, `status`, `n_questions`, `model_call_count`, item records) "
+            "stays at the root. You may also duplicate scalars at the root, but "
+            "`metrics.<name>` is the canonical location the host reads.\n"
+            "Unknown extra keys are never rejected. Log anything else that would help a "
+            "later judge: per-item records, parse-failure counts (`parsed_count`), latency, "
+            "token/call counts. An unparseable model reply is a number to record, not a "
+            "fatal error — do not raise and exit non-zero for a bad completion; exit "
+            "non-zero only for infrastructure faults (dataset download, agent init, "
+            "metrics write, runtime setup).\n\n"
             "If the non-smoke path fails, still write `--output` as JSON so the host can "
             "diagnose it, and print one stderr line: "
             "`Harness failed at {failure_stage}/{failure_substage}: {detail}`. "
             "The JSON must include:\n"
             "  - `status`: `failed`\n"
-            "  - `failure_stage`: one of `dataset_download`, `agent_init`, `tool_call`, "
-            "`metrics_write`, `runtime_setup`\n"
+            "  - `failure_stage`: short snake_case stage (for example `dataset_download`, "
+            "`agent_init`, `tool_call`, `metrics_write`, `runtime_setup`)\n"
             "  - `failure_substage`: short snake_case name of the step that actually failed\n"
             "  - `error_type`: exception class name\n"
             "  - `error_code`: stable token derived from that same cause\n"
@@ -1113,33 +1277,32 @@ class CodeImplementationAgent:
             "context or the first dataset row, but must not skip construction or "
             "substitute a parser-only stub. The non-smoke path must actually run the "
             "method on the full requested set.\n\n"
-            "## OpenJiuwen reference map\n\n"
-            + (
-                f"Docs table of contents: `{docs_index}` — open it with your "
-                "openjiuwen_ref_read_file tool first (path relative to the OpenJiuwen "
-                "docs root, e.g. `en/SUMMARY.md`) for how OpenJiuwen APIs actually "
-                "work, before writing custom code that reimplements something the SDK "
-                "already documents.\n\n"
-                if docs_index
-                else "\n"
-            )
-            + "## OpenJiuwen SDK reference — possibly-relevant starting points\n\n"
-            "A local keyword search turned up these candidates (may or may not actually be "
-            "useful — read the full file/example with your openjiuwen_ref_read_file tool "
-            f"before trusting it):\n\n{reference_block}\n\n"
-            "SDK-reading **subagents cannot access the OpenJiuwen reference docs**. Their "
-            "workspace sandbox hides `openjiuwen_ref_*`. You (the parent) must call "
-            "`openjiuwen_ref_read_file`, `openjiuwen_ref_glob`, and "
-            "`openjiuwen_ref_list_files` directly.\n\n"
-            "**Decision policy:** check the map and the candidates above before writing code "
-            "for a given piece of functionality. Reuse a `[reusable capability]` hit only "
-            "after actually opening it and confirming it's a genuine, direct fit — not just "
-            "related vocabulary. If nothing above fits, including if the candidate list is "
-            "empty, write plain Python instead of importing an OpenJiuwen class that only "
-            "loosely relates; forcing a mismatched abstraction into the design produces worse "
-            "code than a clean custom implementation. `[reference/example]` hits are context "
-            "for how OpenJiuwen is used elsewhere, not something to import just because it "
-            "showed up in this search.\n\n"
+            "## Explore OpenJiuwen source before writing SDK calls\n\n"
+            "You choose the files. The host does not inject a preselected file list. "
+            "Do not start at `en/SUMMARY.md`.\n\n"
+            "1. When the instruction names a symbol, search that symbol with "
+            "`openjiuwen_ref_search` and `scopes: [\"source\"]`. When it does not, "
+            "infer one short query from the required behavior. Do not paste the "
+            "whole task into one query.\n"
+            "2. Open the `public-export` hit with `openjiuwen_ref_read_file` on "
+            "`source/openjiuwen/...`. Read the signature, return value, and imports. "
+            "A public export is the API to call. An implementation detail explains "
+            "behavior and is not copied when a public export is in the hits. Then "
+            "search and read each imported name until the constructor, invoke method, "
+            "and result location are known.\n"
+            "3. If the signature does not show how to unpack a result, open one "
+            "in-repo caller. An example is a usage sample, not a higher authority "
+            "than the definition.\n"
+            "4. On an empty source result, search one smaller reusable OpenJiuwen "
+            "piece (a public model client rather than a full agent, a single tool "
+            "rather than a workflow) and use only that piece. Do not invent a class "
+            "from the task wording.\n"
+            "5. If that also misses, or the public export does not fit, write plain "
+            "Python.\n\n"
+            "Call `openjiuwen_ref_search` and `openjiuwen_ref_read_file` yourself. "
+            "SDK-reading **subagents cannot access these tools**. After a smoke "
+            "error names a missing attribute, search that exact name and read it "
+            "before editing.\n\n"
             "## Before you stop\n\n"
             f"1. Optional: from inside `{_OUTPUT_SUBDIR}/`, run a local "
             f"`python {_ENTRY_POINT} --method <name> --smoke-test` check. The host will "
@@ -1152,9 +1315,8 @@ class CodeImplementationAgent:
             f"3. Inside `{_OUTPUT_SUBDIR}/`, write `{_ASSUMPTIONS_FILE}` as a bullet list of the "
             "judgment calls you made to turn the abstract design above into concrete code (library "
             "choices, synthetic data shape, hyperparameter defaults, anything not fully specified "
-            "by the report) — including, for each variant, which OpenJiuwen capability (if any) "
-            "you reused from the reference map/candidates above and why, or that you checked and "
-            "nothing fit so you wrote it directly.\n"
+            "by the report) — including, for each variant, which OpenJiuwen symbol you reused "
+            "and why, or that source search found nothing reusable.\n"
         )
 
     # -- acceptance gate -------------------------------------------------
@@ -1174,6 +1336,64 @@ class CodeImplementationAgent:
         if len(cleaned) <= limit:
             return cleaned
         return "...(truncated; see full log on disk)...\n" + cleaned[-limit:]
+
+    @staticmethod
+    def _resolve_smoke_metrics(
+        stdout: str, metrics_path: Path, variant_name: str
+    ) -> tuple[dict[str, Any], str]:
+        """Recover one variant's smoke metrics, preferring stdout over the
+        `--output` file the candidate was asked to write.
+
+        The file channel alone is not trustworthy end-to-end: the
+        candidate's own `open(args.output, ...)` runs inside a subprocess
+        whose actual cwd we do not fully control (the packaged desktop host
+        has been observed changing it before the candidate script runs), so
+        a relative interpretation of `--output` can silently land elsewhere.
+        `smoke_test_dir` is documented as a kept-on-disk debugging/
+        reflection artifact (see workspace.smoke_test_dir), so when stdout
+        saves the validation but the file never showed up, repair it here
+        from this (trusted) host process instead of leaving a silent gap
+        that would only surface much later.
+        """
+        file_metrics: dict[str, Any] | None = None
+        file_state = "present"
+        if not metrics_path.is_file():
+            file_state = "missing"
+        else:
+            try:
+                payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeError):
+                file_state = "invalid_json"
+            else:
+                if isinstance(payload, dict):
+                    file_metrics = payload
+                else:
+                    file_state = "invalid_json"
+
+        stdout_found, stdout_metrics = _extract_stdout_metrics(stdout)
+        if not stdout_found:
+            return (file_metrics or {}), file_state
+        if stdout_metrics is None:
+            return {}, "invalid_json"
+
+        if file_metrics is None:
+            try:
+                metrics_path.parent.mkdir(parents=True, exist_ok=True)
+                metrics_path.write_text(
+                    json.dumps(stdout_metrics, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+            except OSError as exc:
+                logger.warning(
+                    "could not repair missing smoke metrics file variant=%s path=%s: %s",
+                    variant_name, metrics_path, exc,
+                )
+            else:
+                logger.warning(
+                    "smoke metrics file missing/invalid at %s; recovered from stdout "
+                    "and repaired variant=%s",
+                    metrics_path, variant_name,
+                )
+        return stdout_metrics, "present"
 
     @staticmethod
     def _write_validation_artifact(log_dir: Path, validation: CandidateValidation) -> None:
@@ -1220,6 +1440,7 @@ class CodeImplementationAgent:
         stderr_tail: str = "",
         variants: list[ImplementedVariant] | None = None,
         failures: dict[str, str] | None = None,
+        error_trees: dict[str, str] | None = None,
         candidate_hash: str = "",
     ) -> CandidateValidation:
         return CandidateValidation(
@@ -1233,6 +1454,7 @@ class CodeImplementationAgent:
             stderr_tail=stderr_tail,
             variants=list(variants or []),
             failures=dict(failures or {}),
+            error_trees=dict(error_trees or {}),
             candidate_hash=candidate_hash,
             cycle=cycle,
             log_dir=str(log_dir),
@@ -1315,6 +1537,17 @@ class CodeImplementationAgent:
         )
 
     def _compile_staged_python(self, code_dir: Path) -> str:
+        """Syntax-check every staged .py file.
+
+        Deliberately in-process (``compile()``) rather than shelling out to
+        ``sys.executable -m compileall``: under a frozen desktop host,
+        ``sys.executable`` resolves to the host launcher binary, which has no
+        ``-m`` module-runner and no bundled ``compileall`` -- the subprocess
+        always failed with ImportError there regardless of whether the staged
+        code was actually valid. Compiling in-process needs no interpreter
+        subprocess at all, so it works the same from source and from the
+        packaged build.
+        """
         py_files = [
             path
             for path in code_dir.rglob("*.py")
@@ -1322,25 +1555,20 @@ class CodeImplementationAgent:
         ]
         if not py_files:
             return "no Python files to compile"
-        module_cfg = self.config.get("code_implementation", {}) or {}
-        timeout = module_cfg.get("smoke_test_timeout_seconds", 60)
-        command = [PYTHON_EXE, "-m", "compileall", "-q", str(code_dir)]
-        try:
-            proc = subprocess.run(
-                command,
-                cwd=code_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            return f"static compile failed: {exc}"
-        if proc.returncode == 0:
+        errors: list[str] = []
+        for path in py_files:
+            try:
+                source = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                errors.append(f"{path}: {exc}")
+                continue
+            try:
+                compile(source, str(path), "exec")
+            except SyntaxError as exc:
+                errors.append(f"{path}:{exc.lineno}: {exc.msg}")
+        if not errors:
             return ""
-        return self._tail(proc.stderr) or self._tail(proc.stdout) or (
-            f"compileall exit_code={proc.returncode}"
-        )
+        return self._tail("\n".join(errors))
 
     def _run_smoke_and_metrics(
         self,
@@ -1364,6 +1592,7 @@ class CodeImplementationAgent:
         module_cfg = self.config.get("code_implementation", {}) or {}
         timeout = module_cfg.get("smoke_test_timeout_seconds")
         failures: dict[str, str] = {}
+        error_trees: dict[str, str] = {}
         first_stage = "smoke"
         first_variant = ""
         first_command: list[str] = []
@@ -1372,7 +1601,7 @@ class CodeImplementationAgent:
         errors: list[str] = []
 
         for variant in variants:
-            metrics_path = log_dir / f"{variant.name}.metrics.json"
+            metrics_path = (log_dir / f"{variant.name}.metrics.json").resolve()
             log_path = log_dir / f"{variant.name}.log"
             command = [*variant.invocation, "--smoke-test", "--output", str(metrics_path)]
             try:
@@ -1391,11 +1620,21 @@ class CodeImplementationAgent:
                     encoding="utf-8",
                 )
             except (subprocess.TimeoutExpired, OSError) as exc:
+                stdout = getattr(exc, "stdout", "") or ""
+                stderr = getattr(exc, "stderr", "") or ""
+                if isinstance(stdout, bytes):
+                    stdout = stdout.decode("utf-8", errors="replace")
+                if isinstance(stderr, bytes):
+                    stderr = stderr.decode("utf-8", errors="replace")
                 log_path.write_text(
                     f"$ {' '.join(command)}\n\n--- execution failed ---\n{exc}",
                     encoding="utf-8",
                 )
+                tree = python_error_tree(stderr) or python_error_tree(stdout)
                 detail = f"execution failed: {exc}"
+                if tree:
+                    detail = f"{detail}\n{tree}"
+                    error_trees[variant.name] = tree
                 failures[variant.name] = detail
                 errors.append(f"{variant.name}: {detail}")
                 if not first_variant:
@@ -1405,10 +1644,13 @@ class CodeImplementationAgent:
                     first_stderr = detail
                 continue
 
-            diagnostic = self._tail(proc.stderr) or self._tail(proc.stdout)
+            tree = python_error_tree(proc.stderr) or python_error_tree(proc.stdout)
+            diagnostic = tree or self._tail(proc.stderr) or self._tail(proc.stdout)
             if proc.returncode != 0:
                 detail = f"exit_code={proc.returncode}\n{diagnostic or '(no output captured)'}"
                 failures[variant.name] = detail
+                if tree:
+                    error_trees[variant.name] = tree
                 errors.append(f"{variant.name}: exit_code={proc.returncode}")
                 if not first_variant:
                     first_stage = "smoke"
@@ -1418,21 +1660,9 @@ class CodeImplementationAgent:
                     first_stderr = diagnostic
                 continue
 
-            metrics_state = "present"
-            metrics: dict[str, Any] = {}
-            if not metrics_path.is_file():
-                metrics_state = "missing"
-            else:
-                try:
-                    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError, UnicodeError):
-                    metrics_state = "invalid_json"
-                    payload = None
-                if metrics_state == "present":
-                    if not isinstance(payload, dict):
-                        metrics_state = "invalid_json"
-                    else:
-                        metrics = payload
+            metrics, metrics_state = self._resolve_smoke_metrics(
+                proc.stdout, metrics_path, variant.name
+            )
 
             contract = validate_metrics_contract(
                 metrics, expected_method=variant.name, metrics_state=metrics_state
@@ -1466,6 +1696,7 @@ class CodeImplementationAgent:
                 stderr_tail=first_stderr,
                 variants=variants,
                 failures=failures,
+                error_trees=error_trees,
                 candidate_hash=candidate_hash,
             )
         return CandidateValidation(
@@ -1548,7 +1779,9 @@ class CodeImplementationAgent:
         files: list[str] = []
         if code_dir.exists():
             files = sorted(
-                str(path.relative_to(code_dir)) for path in code_dir.rglob("*") if path.is_file()
+                str(path.relative_to(code_dir))
+                for path in code_dir.rglob("*")
+                if path.is_file() and ".git" not in path.parts
             )
         notes = (
             f"promotion failed after a passing candidate; previous generated_code/ retained.\n"
@@ -1563,10 +1796,11 @@ class CodeImplementationAgent:
                 workspace_dir=str(code_dir),
                 files=files,
                 variants=list(validation.variants),
-                smoke_test_passed=False,
+                smoke_test_passed=True,
                 status="failed",
-                readiness="failed",
+                readiness="promotion_failed",
                 smoke_failures={"promotion": f"{type(exc).__name__}: {exc}"},
+                error_trees=dict(validation.error_trees),
                 notes=notes,
             )
         )
@@ -1627,7 +1861,9 @@ class CodeImplementationAgent:
             status=status,
             readiness="smoke_ready" if status == "ready" else "failed",
             smoke_failures=failures,
+            error_trees=dict(validation.error_trees),
             notes=notes.strip(),
+            code_commit=current_commit(code_dir) if smoke_test_passed else "",
         )
         return CodeImplementationOutput(implementation=manifest)
 

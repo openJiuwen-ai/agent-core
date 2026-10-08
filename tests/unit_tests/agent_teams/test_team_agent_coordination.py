@@ -261,6 +261,7 @@ async def test_wake_feeds_messages_to_agent():
     fake_msg.timestamp = 1000
     agent._configurator.message_manager = MagicMock()
     agent._configurator.message_manager.mark_message_read = AsyncMock(return_value=True)
+    agent._configurator.message_manager.get_broadcast_messages = AsyncMock(return_value=[])
     agent._coordination.dispatcher.message._read_all_unread = AsyncMock(
         side_effect=[[fake_msg], []],
     )

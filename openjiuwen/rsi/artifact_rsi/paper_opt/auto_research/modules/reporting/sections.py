@@ -40,6 +40,21 @@ SECTIONS: tuple[SectionSpec, ...] = (
     SectionSpec("conclusion", "Conclusion", "discussion", 200, 280, allow_citations=False),
 )
 
+# modify_paper still writes a new draft, but from a prior paper plus one
+# follow-up rather than a from-scratch 2000-word Method. Same maxima;
+# lower floors so a complete compiled PDF beats padding.
+_MODIFY_MIN_WORDS: dict[str, int] = {
+    "abstract": 120,
+    "introduction": 500,
+    "related_work": 400,
+    "method": 800,
+    "experiments": 500,
+    "discussion": 500,
+    "conclusion": 180,
+}
+
+LINT_OVERRIDES_FILENAME = "lint_overrides.json"
+
 # Document order == SECTIONS order above; this is a separate list only
 # because agent.py needs to draft "abstract" last while still emitting it
 # first in the compiled document.
@@ -51,3 +66,44 @@ def section_by_id(section_id: str) -> SectionSpec:
         if section.id == section_id:
             return section
     raise KeyError(f"unknown section id: {section_id!r}")
+
+
+def section_specs(*, modify_paper: bool = False) -> tuple[SectionSpec, ...]:
+    if not modify_paper:
+        return SECTIONS
+    return tuple(
+        SectionSpec(
+            spec.id,
+            spec.title,
+            spec.evidence_key,
+            _MODIFY_MIN_WORDS.get(spec.id, spec.min_words),
+            spec.max_words,
+            spec.allow_citations,
+        )
+        for spec in SECTIONS
+    )
+
+
+def apply_word_band_overrides(spec: SectionSpec, overrides: dict | None) -> SectionSpec:
+    """Apply host-written ``lint_overrides.json`` bands to a section spec."""
+    if not overrides:
+        return spec
+    mins = overrides.get("min_words") or {}
+    maxs = overrides.get("max_words") or {}
+    return SectionSpec(
+        spec.id,
+        spec.title,
+        spec.evidence_key,
+        int(mins.get(spec.id, spec.min_words)),
+        int(maxs.get(spec.id, spec.max_words)),
+        spec.allow_citations,
+    )
+
+
+def word_band_instructions(specs: tuple[SectionSpec, ...]) -> str:
+    bands = "; ".join(f"{spec.title} {spec.min_words}-{spec.max_words}" for spec in specs)
+    return (
+        "Word-count targets for this modify_paper run override ts-write's create-paper "
+        f"defaults. Host lint uses the same bands: {bands}. Prefer a complete compiled "
+        "paper over stretching Method to 2000 words."
+    )

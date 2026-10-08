@@ -11,10 +11,8 @@ from pathlib import Path
 
 from urllib.parse import urlparse
 
-# 限制性字符类：仅允许命令参数和路径常见字符，排除 ; | & ` < > $ 等 shell 元字符防注入
-# - 置于开头避免被解析为范围
-# 含文件 glob 的 * ?；仍排除 ; | & ` < > $ 等拼接元字符
-_WILDCARD_CHARS = r'[-a-zA-Z0-9 \._/:"\'*?]'
+# 仅排除 shell 元字符、换行、null byte 防白名单绕过；其余（含中文）允许。Issue #4814。
+_WILDCARD_CHARS = r"[^;|&`$()<>\\\n\r\x00]"
 
 
 def match_wildcard(value: str, pattern: str) -> bool:

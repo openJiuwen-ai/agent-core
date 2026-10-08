@@ -161,6 +161,23 @@ class PrefixCompactProcessor(ContextProcessor):
             self._model = Model(model_client, model)
             self._compression_executor = CompressionExecutor(self._model)
 
+    def rebind_model(
+        self,
+        *,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
+    ) -> bool:
+        """Move the cached compression executor to the active agent model."""
+        changed = self._rebind_model_reference(
+            model=model,
+            model_config=model_config,
+            model_client_config=model_client_config,
+        )
+        if self._model is not None and (changed or self._compression_executor is None):
+            self._compression_executor = CompressionExecutor(self._model)
+        return changed
+
     async def trigger_get_context_window(
         self,
         context: ModelContext,

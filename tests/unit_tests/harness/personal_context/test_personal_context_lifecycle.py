@@ -85,7 +85,7 @@ def _mock_authorization_io(
     *,
     granted_scopes: set[str],
 ) -> tuple[AsyncMock, AsyncMock, AsyncMock]:
-    status = AsyncMock(return_value=(False, set(granted_scopes)))
+    status = AsyncMock(return_value=(False, set(granted_scopes), True))
     begin = AsyncMock()
     finish = AsyncMock()
     monkeypatch.setattr(personal_context_module, "_lark_cli_auth_status", status)
@@ -244,8 +244,8 @@ def test_cursor_transaction_rejects_symlink_without_touching_target(
         assert str(outside) not in str(error)
 
 
-@pytest.mark.parametrize("service_id", ["../escape", "nested/service", ".."])
-def test_cursor_transaction_rejects_unsafe_service_id(
+@pytest.mark.parametrize("service_id", ["", "   ", "a" * 501])
+def test_cursor_transaction_rejects_invalid_service_id(
     tmp_path: Path,
     service_id: str,
 ) -> None:
@@ -275,7 +275,7 @@ async def test_authorize_feishu_returns_authorized_when_lark_cli_scope_is_ready(
 ) -> None:
     import openjiuwen.harness.personal_context.personal_context as personal_context_module
 
-    async def ready_auth_status(_scopes: tuple[str, ...]) -> tuple[bool, set[str]]:
+    async def ready_auth_status(_scopes: tuple[str, ...]) -> tuple[bool, set[str], bool]:
         return _ready_auth_status()
 
     monkeypatch.setattr(personal_context_module, "_lark_cli_auth_status", ready_auth_status)
@@ -306,6 +306,7 @@ async def test_authorize_feishu_returns_authorized_when_lark_cli_scope_is_ready(
     assert result == {
         "provider": "feishu",
         "state": "authorized",
+        "authorization_step": None,
         "verification_url": None,
         "expires_at": None,
         "error": None,
@@ -346,6 +347,7 @@ async def test_reauthorize_feishu_starts_and_reuses_challenge_when_scopes_are_re
 
     assert first == second
     assert first["state"] == "authorizing"
+    assert first["authorization_step"] == "device_authorization"
     assert first["verification_url"] == "https://open.feishu.cn/authorize"
     status.assert_awaited_once()
     begin.assert_awaited_once()
@@ -373,20 +375,28 @@ async def test_reauthorize_feishu_requires_boolean(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("granted_scopes", "authorization_error", "expected_state", "expected_error"),
+    ("granted_scopes", "authorization_error", "expected_state", "expected_step", "expected_error"),
     [
-        (set(), None, "not_authorized", None),
-        ({"docs:document.content:read"}, None, "authorization_required", None),
+        (set(), None, "not_authorized", "device_authorization", None),
+        (
+            {"docs:document.content:read"},
+            None,
+            "authorization_required",
+            "device_authorization",
+            None,
+        ),
         (
             set(_ALL_FEISHU_READ_SCOPES),
             None,
             "authorized",
+            None,
             None,
         ),
         (
             set(_ALL_FEISHU_READ_SCOPES),
             "Feishu authorization failed",
             "authorization_failed",
+            "device_authorization",
             "Feishu authorization failed",
         ),
     ],
@@ -397,11 +407,14 @@ async def test_get_authorization_status_normalizes_static_states_without_authori
     granted_scopes: set[str],
     authorization_error: str | None,
     expected_state: str,
+    expected_step: str | None,
     expected_error: str | None,
 ) -> None:
     personal_context = PersonalContext(home=tmp_path)
     await personal_context.set_configuration(_feishu_config(("docs", "calendar")))
     personal_context._authorization_error = authorization_error
+    if authorization_error is not None:
+        personal_context._authorization_error_step = "device_authorization"
     status, begin, finish = _mock_authorization_io(monkeypatch, granted_scopes=granted_scopes)
 
     result = await personal_context.get_authorization_status("feishu")
@@ -409,6 +422,7 @@ async def test_get_authorization_status_normalizes_static_states_without_authori
     assert result == {
         "provider": "feishu",
         "state": expected_state,
+        "authorization_step": expected_step,
         "verification_url": None,
         "expires_at": None,
         "error": expected_error,
@@ -417,6 +431,30 @@ async def test_get_authorization_status_normalizes_static_states_without_authori
         status.assert_awaited_once()
     else:
         status.assert_not_awaited()
+    begin.assert_not_awaited()
+    finish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_get_authorization_status_reports_config_init_when_lark_cli_is_not_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+    status, begin, finish = _mock_authorization_io(monkeypatch, granted_scopes=set())
+    status.return_value = (False, set(), False)
+
+    result = await personal_context.get_authorization_status("feishu")
+
+    assert result == {
+        "provider": "feishu",
+        "state": "not_authorized",
+        "authorization_step": "config_init",
+        "verification_url": None,
+        "expires_at": None,
+        "error": None,
+    }
     begin.assert_not_awaited()
     finish.assert_not_awaited()
 
@@ -439,6 +477,7 @@ async def test_get_authorization_status_reports_authorizing_without_side_effects
     task = asyncio.create_task(pending_authorization())
     personal_context._authorization_task = task
     personal_context._authorization_challenge = {
+        "authorization_step": "device_authorization",
         "verification_url": "https://open.feishu.cn/authorize",
         "expires_at": "2026-08-18T12:00:00Z",
         "expires_monotonic": asyncio.get_running_loop().time() + 60.0,
@@ -451,6 +490,7 @@ async def test_get_authorization_status_reports_authorizing_without_side_effects
         assert result == {
             "provider": "feishu",
             "state": "authorizing",
+            "authorization_step": "device_authorization",
             "verification_url": "https://open.feishu.cn/authorize",
             "expires_at": "2026-08-18T12:00:00Z",
             "error": None,
@@ -480,6 +520,7 @@ async def test_get_authorization_status_returns_stable_failure_when_read_only_st
     assert result == {
         "provider": "feishu",
         "state": "authorization_failed",
+        "authorization_step": None,
         "verification_url": None,
         "expires_at": None,
         "error": "Feishu authorization status is unavailable",
@@ -506,6 +547,7 @@ async def test_get_authorization_status_requires_core_config_but_not_a_feishu_se
         await personal_context.get_authorization_status("github")
     result = await personal_context.get_authorization_status("feishu")
     assert result["state"] == "not_authorized"
+    assert result["authorization_step"] == "device_authorization"
 
     status.assert_awaited_once_with(tuple(sorted(_ALL_FEISHU_READ_SCOPES)))
     begin.assert_not_awaited()
@@ -542,9 +584,11 @@ async def test_finished_authorization_task_records_only_stable_sanitized_failure
     result = await personal_context.get_authorization_status("feishu")
 
     assert started["state"] == "authorizing"
+    assert started["authorization_step"] == "device_authorization"
     assert result == {
         "provider": "feishu",
         "state": "authorization_failed",
+        "authorization_step": "device_authorization",
         "verification_url": None,
         "expires_at": None,
         "error": "Feishu authorization failed",
@@ -553,6 +597,153 @@ async def test_finished_authorization_task_records_only_stable_sanitized_failure
     for secret in ("top-secret", "device-secret", "example.invalid", "C:/private/user"):
         assert secret not in serialized
     status.assert_not_awaited()
+    begin.assert_not_awaited()
+    finish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_authorize_feishu_starts_config_init_when_lark_cli_not_configured(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+    status, begin, finish = _mock_authorization_io(monkeypatch, granted_scopes=set())
+    status.return_value = (False, set(), False)
+    begin_init = AsyncMock(return_value=(object(), "https://accounts.feishu.cn/activate?ticket=init-1"))
+    finish_init = AsyncMock()
+    monkeypatch.setattr(personal_context_module, "_lark_cli_begin_config_init", begin_init)
+    monkeypatch.setattr(personal_context_module, "_lark_cli_finish_config_init", finish_init)
+
+    started = await personal_context.authorize_provider("feishu")
+
+    assert started["state"] == "authorizing"
+    assert started["authorization_step"] == "config_init"
+    assert started["verification_url"] == "https://accounts.feishu.cn/activate?ticket=init-1"
+    assert started["error"] is None
+    assert isinstance(started["expires_at"], str)
+    begin_init.assert_awaited_once()
+    begin.assert_not_awaited()
+    finish.assert_not_awaited()
+
+    task = personal_context._authorization_task
+    assert task is not None
+    await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+    finish_init.assert_awaited_once()
+    assert personal_context._authorization_task is None
+    assert personal_context._authorization_challenge is None
+
+    status.return_value = (False, set(), True)
+    result = await personal_context.get_authorization_status("feishu")
+
+    assert result == {
+        "provider": "feishu",
+        "state": "not_authorized",
+        "authorization_step": "device_authorization",
+        "verification_url": None,
+        "expires_at": None,
+        "error": None,
+    }
+    begin.assert_not_awaited()
+    finish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_finished_config_init_task_retains_config_step_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+    status, begin, finish = _mock_authorization_io(monkeypatch, granted_scopes=set())
+    status.return_value = (False, set(), False)
+    begin_init = AsyncMock(return_value=(object(), "https://accounts.feishu.cn/activate"))
+    finish_init = AsyncMock(side_effect=RuntimeError("token=top-secret C:/private/user"))
+    monkeypatch.setattr(personal_context_module, "_lark_cli_begin_config_init", begin_init)
+    monkeypatch.setattr(personal_context_module, "_lark_cli_finish_config_init", finish_init)
+
+    started = await personal_context.authorize_provider("feishu")
+    task = personal_context._authorization_task
+    assert task is not None
+    await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+    status.reset_mock()
+
+    result = await personal_context.get_authorization_status("feishu")
+
+    assert started["authorization_step"] == "config_init"
+    assert result["state"] == "authorization_failed"
+    assert result["authorization_step"] == "config_init"
+    assert result["error"] == "Feishu authorization failed"
+    assert "top-secret" not in repr(result)
+    assert "C:/private/user" not in repr(result)
+    status.assert_not_awaited()
+    begin.assert_not_awaited()
+    finish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_authorize_feishu_config_init_failure_surfaces_sanitized_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+    status, begin, finish = _mock_authorization_io(monkeypatch, granted_scopes=set())
+    status.return_value = (False, set(), False)
+    begin_init = AsyncMock(
+        side_effect=build_error(
+            StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR,
+            error_msg=(
+                "lark-cli config init failed: app registration begin failed: "
+                'Post "https://accounts.feishu.cn/oauth/v1/app/registration": dial tcp'
+            ),
+        )
+    )
+    monkeypatch.setattr(personal_context_module, "_lark_cli_begin_config_init", begin_init)
+
+    result = await personal_context.authorize_provider("feishu")
+
+    assert result["state"] == "authorization_failed"
+    assert result["authorization_step"] == "config_init"
+    assert result["verification_url"] is None
+    assert result["expires_at"] is None
+    error = result["error"]
+    assert isinstance(error, str)
+    assert error.startswith("Feishu authorization failed: ")
+    assert "app registration begin failed" in error
+    assert "accounts.feishu.cn" not in error
+    assert "<redacted-url>" in error
+    assert personal_context._authorization_task is None
+    begin_init.assert_awaited_once()
+    begin.assert_not_awaited()
+    finish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_authorize_feishu_config_init_hides_arbitrary_exception_detail(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+    status, begin, finish = _mock_authorization_io(monkeypatch, granted_scopes=set())
+    status.return_value = (False, set(), False)
+    begin_init = AsyncMock(side_effect=RuntimeError("token=top-secret https://example.invalid/init C:/private/user"))
+    monkeypatch.setattr(personal_context_module, "_lark_cli_begin_config_init", begin_init)
+
+    result = await personal_context.authorize_provider("feishu")
+
+    assert result == {
+        "provider": "feishu",
+        "state": "authorization_failed",
+        "authorization_step": "config_init",
+        "verification_url": None,
+        "expires_at": None,
+        "error": "Feishu authorization failed",
+    }
+    serialized = repr(result)
+    for secret in ("top-secret", "example.invalid", "C:/private/user"):
+        assert secret not in serialized
     begin.assert_not_awaited()
     finish.assert_not_awaited()
 
@@ -593,13 +784,14 @@ async def test_successful_authorization_task_releases_challenge_and_rechecks_rea
     status.reset_mock()
     begin.reset_mock()
     finish.reset_mock()
-    status.return_value = (True, set(_ALL_FEISHU_READ_SCOPES))
+    status.return_value = (True, set(_ALL_FEISHU_READ_SCOPES), True)
 
     result = await personal_context.get_authorization_status("feishu")
 
     assert result == {
         "provider": "feishu",
         "state": "authorized",
+        "authorization_step": None,
         "verification_url": None,
         "expires_at": None,
         "error": None,
@@ -653,6 +845,7 @@ async def test_cancelled_authorization_task_releases_challenge_and_propagates_ca
         assert result == {
             "provider": "feishu",
             "state": "not_authorized",
+            "authorization_step": "device_authorization",
             "verification_url": None,
             "expires_at": None,
             "error": None,
@@ -713,6 +906,7 @@ async def test_feishu_scope_set_is_fixed_across_service_configuration_changes(
         assert authorization == {
             "provider": "feishu",
             "state": "authorizing",
+            "authorization_step": "device_authorization",
             "verification_url": "https://open.feishu.cn/authorize",
             "expires_at": "2026-08-18T12:00:00Z",
             "error": None,
@@ -723,6 +917,80 @@ async def test_feishu_scope_set_is_fixed_across_service_configuration_changes(
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_slow_authorization_status_does_not_block_lifecycle_or_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_status(_scopes: tuple[str, ...]) -> tuple[bool, set[str], bool]:
+        started.set()
+        await release.wait()
+        return False, set(), True
+
+    monkeypatch.setattr(personal_context_module, "_lark_cli_auth_status", slow_status)
+    query = asyncio.create_task(personal_context.get_authorization_status("feishu"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await asyncio.wait_for(personal_context.snapshot(), timeout=0.1)
+        await asyncio.wait_for(personal_context.start_agent_use(), timeout=0.1)
+        await asyncio.wait_for(personal_context.stop_collection(timeout_seconds=0.1), timeout=0.2)
+        await asyncio.wait_for(
+            personal_context.set_configuration(_feishu_config(("docs",), ("calendar",))),
+            timeout=0.1,
+        )
+        assert not query.done()
+        release.set()
+        assert (await asyncio.wait_for(query, timeout=1.0))["state"] == "not_authorized"
+    finally:
+        release.set()
+        await asyncio.gather(query, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_slow_authorization_status_preserves_new_authorization_challenge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+    status, begin, finish = _mock_authorization_io(monkeypatch, granted_scopes=set())
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finish_release = asyncio.Event()
+
+    async def check_status(_scopes: tuple[str, ...]) -> tuple[bool, set[str], bool]:
+        if not started.is_set():
+            started.set()
+            await release.wait()
+        return False, set(), True
+
+    async def finish_authorization(_device_code: str, *, timeout_seconds: float) -> None:
+        del timeout_seconds
+        await finish_release.wait()
+
+    status.side_effect = check_status
+    begin.return_value = (
+        "device-secret", "https://open.feishu.cn/authorize", "2026-09-29T12:00:00Z"
+    )
+    finish.side_effect = finish_authorization
+    query = asyncio.create_task(personal_context.get_authorization_status("feishu"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        authorization = await asyncio.wait_for(personal_context.authorize_provider("feishu"), timeout=0.1)
+        assert authorization["state"] == "authorizing"
+        release.set()
+        assert await asyncio.wait_for(query, timeout=1.0) == authorization
+    finally:
+        release.set()
+        await asyncio.gather(query, return_exceptions=True)
+        await personal_context._cancel_authorization()
 
 
 @pytest.mark.asyncio
@@ -858,8 +1126,8 @@ async def test_identical_configuration_keeps_active_authorization_task_and_chall
             await asyncio.wait_for(task, timeout=1.0)
 
 
-def _ready_auth_status() -> tuple[bool, set[str]]:
-    return True, set(_ALL_FEISHU_READ_SCOPES)
+def _ready_auth_status() -> tuple[bool, set[str], bool]:
+    return True, set(_ALL_FEISHU_READ_SCOPES), True
 
 
 @pytest.mark.asyncio
@@ -1224,6 +1492,55 @@ async def test_deactivate_retains_pipeline_when_stop_does_not_finish(tmp_path: P
     await asyncio.sleep(0)
     await personal_context.deactivate_runtime(timeout_seconds=1)
     assert personal_context._pipeline_service is None
+
+
+@pytest.mark.asyncio
+async def test_stop_collection_cancels_pipeline_before_waiting_for_fetch_cleanup(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    pipeline_cancelled = asyncio.Event()
+
+    class BlockingPipeline:
+        def __init__(self) -> None:
+            self.running = True
+            self.cancelled_runs: list[tuple[str, str]] = []
+
+        def is_running(self) -> bool:
+            return self.running
+
+        async def cancel_run(self, service_id: str, run_id: str) -> None:
+            self.cancelled_runs.append((service_id, run_id))
+            pipeline_cancelled.set()
+
+        async def stop(self, *, timeout_seconds: float) -> None:
+            del timeout_seconds
+            self.running = False
+
+    async def fetch_round() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await pipeline_cancelled.wait()
+
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config())
+    personal_context._state = "RUNNING"
+    pipeline = BlockingPipeline()
+    personal_context._pipeline_service = pipeline  # type: ignore[assignment]
+    task = asyncio.create_task(fetch_round())
+    personal_context._manual_fetch_tasks["notes"] = task
+    personal_context._active_fetch_run_tasks["notes"] = task
+    personal_context._fetch_run_identity["notes"] = {"run_id": "shutdown-run"}
+    await started.wait()
+    try:
+        await personal_context.stop_collection(timeout_seconds=0.1)
+        assert pipeline.cancelled_runs == [("notes", "shutdown-run")]
+        assert task.done()
+        assert (await personal_context.snapshot()).state == "STOPPED"
+    finally:
+        pipeline_cancelled.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await personal_context.deactivate_runtime(timeout_seconds=1)
 
 
 @pytest.mark.asyncio

@@ -85,6 +85,57 @@ async def _empty_outputs() -> Any:
         yield None
 
 
+def test_bind_protocol_member_team_tools_uses_codex_dynamic_gateway(monkeypatch) -> None:
+    """Codex should bind local team tools through its native gateway."""
+    runtime = Mock()
+    runtime.inject_mcp = True
+    runtime.provider_name = "codex"
+    teammate = Mock()
+    teammate.infra.workspace_manager = None
+    teammate.infra.messager = Mock()
+    teammate_backend = Mock()
+    gateway = Mock()
+    captured: dict[str, Any] = {}
+
+    def _fake_build_external_team_tool_gateway(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return gateway
+
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.external.tool_gateway.build_external_team_tool_gateway",
+        _fake_build_external_team_tool_gateway,
+    )
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="ext_team",
+        display_name="Ext",
+        lifecycle=TeamLifecycle.PERSISTENT,
+        teammate_mode=MemberMode.BUILD_MODE,
+    )
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_name="codex-1",
+        cli_agent="codex",
+        team_spec=TeamSpec(team_name="ext_team", display_name="Ext"),
+    )
+
+    spawn_mod._bind_protocol_member_team_tools(
+        runtime,
+        teammate=teammate,
+        teammate_backend=teammate_backend,
+        spec=spec,
+        ctx=ctx,
+        team_name="ext_team",
+        session_id="sess-1",
+    )
+
+    assert captured["session_id"] == "sess-1"
+    assert captured["team_backend"] is teammate_backend
+    assert captured["messager"] is teammate.infra.messager
+    runtime.bind_tools.assert_called_once_with(gateway)
+    runtime.bind_mcp_servers.assert_not_called()
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_external_cli_spawn_stops_runtime_on_cancel(monkeypatch):

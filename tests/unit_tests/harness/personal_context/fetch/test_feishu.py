@@ -13,6 +13,7 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
+from openjiuwen.harness.personal_context.fetch import feishu as feishu_module
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
 from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.feishu import (
@@ -82,6 +83,85 @@ def _items(batches: list[FetchBatch]) -> list[RawChangeItem]:
 
 async def _no_retry_sleep(_delay: float) -> None:
     return None
+
+
+def _fetch_candidate(index: int) -> dict[str, object]:
+    return {
+        "stable_id": f"feishu:doc:{index}",
+        "revision_id": f"revision-{index}",
+        "candidate_time": "2026-09-21T12:00:00Z",
+        "resource_lane": "docs",
+        "locator": f"feishu://doc/{index}",
+        "kind": "doc",
+        "document_id": str(index),
+        "metadata": {"title": f"Doc {index}"},
+    }
+
+
+def _fetch_item(index: int) -> RawChangeItem:
+    return RawChangeItem(
+        logical_id=f"feishu:doc:{index}",
+        revision_id=f"revision-{index}",
+        operation="upsert",
+        title=f"Doc {index}",
+        content=f"Body {index}",
+        original_ref=f"feishu://doc/{index}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_feishu_fetch_isolates_one_candidate_timeout_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FeishuFetchService(feishu_config(), home=tmp_path)
+
+    async def read(candidate):
+        if candidate["stable_id"] == "feishu:doc:0":
+            raise feishu_module._fetch_error("Feishu document read failed", TimeoutError("private timeout"))
+        return _fetch_item(1)
+
+    monkeypatch.setattr(service, "_read_candidate", read)
+
+    batch = await service.fetch(
+        run_id="run-1",
+        cursor=None,
+        candidates=(_fetch_candidate(0), _fetch_candidate(1)),
+    ).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert batch.items == (_fetch_item(1),)
+    assert batch.failures == (
+        {
+            "offset": 0,
+            "item_ref": "feishu:doc:0",
+            "code": 154003,
+            "message": "条目读取或解析失败",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_feishu_fetch_does_not_quarantine_authorization_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FeishuFetchService(feishu_config(), home=tmp_path)
+
+    async def denied(_candidate):
+        payload = b'{"error":{"status":403,"code":"missing_scope"}}'
+        cause = subprocess.CalledProcessError(1, ["lark-cli"], output=payload, stderr=b"")
+        raise feishu_module._fetch_error("Feishu document read failed", cause)
+
+    monkeypatch.setattr(service, "_read_candidate", denied)
+
+    with pytest.raises(BaseError):
+        await service.fetch(
+            run_id="run-1",
+            cursor=None,
+            candidates=(_fetch_candidate(0),),
+        ).__anext__()
 
 
 def _fake_cli(monkeypatch: pytest.MonkeyPatch, responses: dict[tuple[str, ...], list[object]]) -> list[list[str]]:
@@ -1336,3 +1416,252 @@ async def test_pagination_rejects_repeated_token(
 
     with pytest.raises(BaseError, match="token"):
         await _batches(FeishuFetchService(feishu_config(query="x"), home=tmp_path))
+
+
+_NOT_CONFIGURED_PAYLOAD = {
+    "ok": False,
+    "error": {
+        "type": "config",
+        "subtype": "not_configured",
+        "message": "not configured",
+        "hint": "run `lark-cli config init --new` in the background.",
+    },
+}
+
+
+@pytest.mark.asyncio
+async def test_auth_status_detects_not_configured_from_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    raw = json.dumps(_NOT_CONFIGURED_PAYLOAD).encode()
+
+    async def _fail(argv: list[str], *, timeout_seconds: float = 30.0) -> object:
+        del timeout_seconds
+        raise _feishu_module._coerce_lark_cli_error(
+            subprocess.CalledProcessError(1, argv, output=raw, stderr=b"")
+        )
+
+    monkeypatch.setattr(_feishu_module, "_run_lark_cli_json", _fail)
+
+    ready, granted, configured = await _feishu_module._lark_cli_auth_status(
+        ("docs:document.content:read",)
+    )
+
+    assert (ready, granted, configured) == (False, set(), False)
+
+
+@pytest.mark.asyncio
+async def test_auth_status_detects_not_configured_from_ok_false_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    async def _status(argv: list[str], *, timeout_seconds: float = 30.0) -> object:
+        del argv, timeout_seconds
+        return dict(_NOT_CONFIGURED_PAYLOAD)
+
+    monkeypatch.setattr(_feishu_module, "_run_lark_cli_json", _status)
+
+    ready, granted, configured = await _feishu_module._lark_cli_auth_status(
+        ("docs:document.content:read",)
+    )
+
+    assert (ready, granted, configured) == (False, set(), False)
+
+
+@pytest.mark.asyncio
+async def test_auth_status_reraises_unrelated_nonzero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    raw = json.dumps(
+        {"ok": False, "error": {"type": "auth", "subtype": "token_expired", "message": "expired"}}
+    ).encode()
+
+    async def _fail(argv: list[str], *, timeout_seconds: float = 30.0) -> object:
+        del timeout_seconds
+        raise _feishu_module._coerce_lark_cli_error(
+            subprocess.CalledProcessError(1, argv, output=raw, stderr=b"")
+        )
+
+    monkeypatch.setattr(_feishu_module, "_run_lark_cli_json", _fail)
+
+    with pytest.raises(BaseError, match="expired"):
+        await _feishu_module._lark_cli_auth_status(("docs:document.content:read",))
+
+
+@pytest.mark.asyncio
+async def test_auth_status_raises_for_other_ok_false_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    async def _status(argv: list[str], *, timeout_seconds: float = 30.0) -> object:
+        del argv, timeout_seconds
+        return {
+            "ok": False,
+            "error": {"type": "auth", "subtype": "token_expired", "message": "token expired"},
+        }
+
+    monkeypatch.setattr(_feishu_module, "_run_lark_cli_json", _status)
+
+    with pytest.raises(BaseError, match="lark-cli auth status failed"):
+        await _feishu_module._lark_cli_auth_status(("docs:document.content:read",))
+
+
+@pytest.mark.asyncio
+async def test_auth_status_returns_ready_granted_and_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    async def _status(argv: list[str], *, timeout_seconds: float = 30.0) -> object:
+        del argv, timeout_seconds
+        return {
+            "identities": {
+                "user": {
+                    "available": True,
+                    "tokenStatus": "valid",
+                    "scope": "docs:document.content:read wiki:node:retrieve",
+                }
+            }
+        }
+
+    monkeypatch.setattr(_feishu_module, "_run_lark_cli_json", _status)
+
+    ready, granted, configured = await _feishu_module._lark_cli_auth_status(
+        ("docs:document.content:read",)
+    )
+
+    assert ready is True
+    assert granted == {"docs:document.content:read", "wiki:node:retrieve"}
+    assert configured is True
+
+
+def test_extract_config_init_url_picks_first_feishu_url() -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    text = (
+        "fork https://github.com/openjiuwen/lark-cli for source\n"
+        'Open "https://accounts.feishu.cn/oauth/v1/app/registration?ticket=init-1" to finish.\n'
+    )
+
+    assert (
+        _feishu_module._extract_config_init_url(text)
+        == "https://accounts.feishu.cn/oauth/v1/app/registration?ticket=init-1"
+    )
+
+
+def test_extract_config_init_url_ignores_non_feishu_hosts() -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    text = "see https://github.com/x and https://example.com/y for details"
+
+    assert _feishu_module._extract_config_init_url(text) is None
+
+
+class _MockInitProcess:
+    """Process mock whose stdout streams preset chunks like ``config init`` output."""
+
+    def __init__(
+        self,
+        chunks: list[bytes],
+        *,
+        returncode: int = 0,
+        final_output: bytes = b"",
+    ) -> None:
+        self._chunks = list(chunks)
+        self.returncode = returncode
+        self._final_output = final_output
+        self.killed = False
+        self.stdout = self
+
+    async def read(self, _size: int = -1) -> bytes:
+        return self._chunks.pop(0) if self._chunks else b""
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._final_output, b""
+
+    def kill(self) -> None:
+        self.killed = True
+
+
+@pytest.mark.asyncio
+async def test_begin_config_init_captures_verification_url_from_merged_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    monkeypatch.setattr(
+        _feishu_module.shutil,
+        "which",
+        lambda name: "/usr/bin/lark-cli" if name == "lark-cli" else None,
+    )
+    process = _MockInitProcess(
+        [
+            b"lark-cli config init --new\n",
+            b'{"url": "https://accounts.feishu.cn/oauth/v1/app/registration?ticket=init-1"}\n',
+        ]
+    )
+
+    async def _spawn(*args: object, **kwargs: object) -> _MockInitProcess:
+        return process
+
+    monkeypatch.setattr(_feishu_module.asyncio, "create_subprocess_exec", _spawn)
+
+    spawned, url = await _feishu_module._lark_cli_begin_config_init()
+
+    assert spawned is process
+    assert url == "https://accounts.feishu.cn/oauth/v1/app/registration?ticket=init-1"
+    assert not process.killed
+
+
+@pytest.mark.asyncio
+async def test_begin_config_init_kills_process_when_output_has_no_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    monkeypatch.setattr(
+        _feishu_module.shutil,
+        "which",
+        lambda name: "/usr/bin/lark-cli" if name == "lark-cli" else None,
+    )
+    process = _MockInitProcess([b"config init boom\n", b""])
+
+    async def _spawn(*args: object, **kwargs: object) -> _MockInitProcess:
+        return process
+
+    monkeypatch.setattr(_feishu_module.asyncio, "create_subprocess_exec", _spawn)
+
+    with pytest.raises(BaseError, match="config init boom"):
+        await _feishu_module._lark_cli_begin_config_init()
+    assert process.killed
+
+
+@pytest.mark.asyncio
+async def test_finish_config_init_raises_on_nonzero_exit() -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    process = _MockInitProcess(
+        [],
+        returncode=4,
+        final_output=b'{"ok": false, "error": {"message": "app registration failed"}}',
+    )
+
+    with pytest.raises(BaseError, match="app registration failed"):
+        await _feishu_module._lark_cli_finish_config_init(process, timeout_seconds=1.0)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_finish_config_init_returns_after_clean_exit() -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    process = _MockInitProcess([], returncode=0)
+
+    await _feishu_module._lark_cli_finish_config_init(process, timeout_seconds=1.0)  # type: ignore[arg-type]
+
+    assert not process.killed

@@ -32,7 +32,7 @@ def _make_connector() -> aiohttp.TCPConnector:
     """Build a TCP connector honoring the SSL-verify configuration.
 
     ``ssl=True`` uses aiohttp's default verification (equivalent to requests
-    ``verify=True``); ``ssl=False`` disables it (default, for intranet usage).
+    ``verify=True``); ``ssl=False`` disables it when explicitly configured.
     """
     if _free_search_ssl_verify():
         return aiohttp.TCPConnector(ssl=True)

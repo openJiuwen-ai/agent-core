@@ -12,12 +12,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.foundation.tool import McpServerConfig, ToolInfo
 from openjiuwen.core.foundation.llm import ToolCall
 from openjiuwen.core.foundation.llm.schema.message import ToolMessage, UserMessage
+from openjiuwen.core.foundation.tool import McpServerConfig, ToolInfo
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentRail,
+    InvokeInputs,
+    ModelCallInputs,
+    ToolCallInputs,
+)
+from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.browser_move.playwright_runtime import runtime as runtime_module
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
     CORE_BROWSER_TOOL_NAMES,
     resolve_browser_capabilities,
@@ -25,12 +34,8 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabiliti
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context import (
     BrowserWorkingContextStore,
 )
-from openjiuwen.harness.tools.browser_move.playwright_runtime import runtime as runtime_module
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime, BrowserRuntimeRail
 from openjiuwen.harness.tools.browser_move.playwright_runtime.service import MAX_ITERATION_MESSAGE
-from openjiuwen.harness.tools.base_tool import ToolOutput
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
-from openjiuwen.core.single_agent.rail.base import InvokeInputs, ModelCallInputs, ToolCallInputs
 
 
 def _run(coro):
@@ -377,6 +382,7 @@ def test_before_tool_call_rewrites_card_primary_link_click_to_navigation() -> No
 
 def test_before_tool_call_rejects_batch_screenshot_without_image_support() -> None:
     runtime = MagicMock(spec=BrowserAgentRuntime)
+    runtime.normalize_model_batch_steps.side_effect = lambda steps: steps
     rail = BrowserRuntimeRail(runtime)
     agent = MagicMock()
     agent.deep_config = SimpleNamespace(enable_read_image_multimodal=False)
@@ -423,7 +429,7 @@ def test_navigation_invalidates_snapshot_refs_from_older_generation() -> None:
         runtime.validate_reference_values(("f1e2",))
 
 
-def test_after_snapshot_attaches_compact_page_state_to_tool_message() -> None:
+def test_after_snapshot_preserves_native_text_and_attaches_page_summary() -> None:
     runtime = _make_bare_runtime()
     rail = BrowserRuntimeRail(runtime)
     tool_message = ToolMessage(
@@ -442,10 +448,10 @@ def test_after_snapshot_attaches_compact_page_state_to_tool_message() -> None:
 
     _run(rail.after_tool_call(ctx))
 
-    assert '"observation":"compact_page_state"' in tool_message.content
+    assert '"observation":"compact_page_state"' not in tool_message.content
     assert '"generation_id":"g0"' in tool_message.content
-    assert '"target_id":"t_g0_1"' in tool_message.content
-    assert "[ref=f1e2]" not in tool_message.content
+    assert "[ref=f1e2]" in tool_message.content
+    runtime.validate_reference_values(("f1e2",))
     assert '"ref":"f1e2"' not in tool_message.content
 
 
@@ -978,7 +984,10 @@ def test_comparison_evidence_requires_distinct_bilibili_sort_slots() -> None:
     assert {slot["variant"] for slot in state["evidence_slots"]} == {"comprehensive", "latest"}
     latest_slot = next(slot for slot in state["evidence_slots"] if slot["variant"] == "latest")
     assert latest_slot == {
+        "query_id": state["task_id"],
+        "entity_source": "https://search.bilibili.com/all?keyword=Python&order=pubdate",
         "entity": "bilibili_search_result",
+        "evidence_scope": "listing",
         "variant": "latest",
         "field": "title",
         "value": "Latest result",
@@ -1045,7 +1054,7 @@ def test_ability_manager_consumes_per_call_skip_without_executing_tool() -> None
     manager._execute_single_tool_call.assert_not_awaited()
 
 
-def test_worker_cannot_claim_completion_without_runtime_field_evidence() -> None:
+def test_worker_cannot_claim_completion_from_field_names_without_observations() -> None:
     session = _FakeSession()
     state = BrowserRuntimeRail._build_phase_state("Extract product title and price")
     state["phases"]["navigation"]["status"] = "completed"
@@ -1061,10 +1070,8 @@ def test_worker_cannot_claim_completion_without_runtime_field_evidence() -> None
 
     updated = session.get_state("__browser_phase_budget_state__")
     assert updated["status"] == "partial"
-    assert updated["blockers"] == [
-        "missing_required_field:price",
-        "missing_required_field:evidence_slot:task_result:default:title",
-    ]
+    assert updated["blockers"] == []
+    assert updated["terminal_reason"] == "no_task_observation"
     assert updated["worker_reported_status"] == "completed"
 
 
@@ -1189,7 +1196,7 @@ def test_ambiguous_evaluate_alias_requires_explicit_target_contract() -> None:
     assert state["field_coverage"] == []
 
 
-def test_missing_evaluate_value_closes_slot_as_unavailable() -> None:
+def test_empty_evaluate_lookup_does_not_prove_field_unavailable() -> None:
     state = BrowserRuntimeRail._build_phase_state("返回商品评分")
 
     BrowserRuntimeRail._record_structured_evidence(
@@ -1199,15 +1206,15 @@ def test_missing_evaluate_value_closes_slot_as_unavailable() -> None:
         tool_args={"target": ".product-rating"},
     )
 
-    assert BrowserRuntimeRail._missing_evidence_slots(state) == []
-    assert BrowserRuntimeRail._unavailable_evidence_slots(state) == [
+    assert BrowserRuntimeRail._missing_evidence_slots(state) == [
         {
             "entity": "product",
             "variant": "default",
             "field": "product_rating",
-            "status": "missing",
         }
     ]
+    assert BrowserRuntimeRail._unavailable_evidence_slots(state) == []
+    assert state["evidence_slots"][0]["observation_status"] == "not_observed"
     assert state["evidence_slots"][0]["source"] == "browser_evaluate"
     assert state["evidence_slots"][0]["generation"] == "g3"
 
@@ -1418,7 +1425,8 @@ def test_extraction_phase_waits_for_all_inferred_required_fields() -> None:
     )
     completed = session.get_state("__browser_phase_budget_state__")
     assert completed["phases"]["extraction"]["status"] == "completed"
-    assert completed["status"] == "completed"
+    assert completed["status"] == "in_progress"
+    assert completed["next_action_class"] == "may_finish"
 
 
 def test_known_url_gate_allows_extraction_when_browser_is_already_on_target() -> None:
@@ -1783,6 +1791,7 @@ def test_required_fields_use_requested_output_clause_not_operation_preconditions
 
 def test_cart_action_feedback_is_sufficient_completion_evidence() -> None:
     state = BrowserRuntimeRail._build_phase_state("打开淘宝把蓝牙耳机加入购物车")
+    state["recent_actions"] = [{"action_class": "form", "outcome": "success"}]
     BrowserWorkingContextStore._merge_semantic_evidence(
         state,
         {
@@ -1804,7 +1813,7 @@ def test_cart_action_feedback_is_sufficient_completion_evidence() -> None:
 
     updated = session.get_state("__browser_phase_budget_state__")
     assert updated["status"] == "completed"
-    assert updated["terminal_reason"] == "runtime_completion_validated"
+    assert updated["terminal_reason"] == "worker_completed_with_observations"
     assert updated["structured_evidence"][-1]["fields"] == ["action_confirmation"]
 
 
@@ -1813,6 +1822,7 @@ def test_large_evaluate_observation_is_bounded() -> None:
     tool_message = ToolMessage(
         content=json.dumps({"value": "x" * 20_000}),
         tool_call_id="evaluate-1",
+        metadata={"browser_raw_handle": "a" * 32},
     )
     inputs = SimpleNamespace(tool_msg=tool_message)
     tool_result = {"ok": True, "value": "x" * 20_000}
@@ -1827,6 +1837,7 @@ def test_large_evaluate_observation_is_bounded() -> None:
     assert len(tool_message.content) <= 12_000
     assert payload["observation"] == "bounded_browser_tool_result"
     assert payload["original_chars"] > 20_000
+    assert payload["recall_handle"] == "a" * 32
 
 
 def test_comprehensive_and_latest_create_distinct_title_slots_without_compare_word() -> None:
@@ -2276,7 +2287,7 @@ def test_after_invoke_renders_authoritative_max_iteration_result() -> None:
     authoritative = result["authoritative_browser_result"]
     assert authoritative["status"] == "partial"
     assert authoritative["terminal_reason"] == "max_iterations_reached"
-    assert "price" in authoritative["missing_fields"]
+    assert "price" in authoritative["unverified_fields"]
     assert "max_iterations_reached" in authoritative["blockers"]
     assert result["error"] == "browser_task_incomplete"
 

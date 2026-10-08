@@ -128,7 +128,9 @@ async def _build_member_system_prompt(
     CLI member sees: its tools arrive through MCP, under a namespace. The
     prompt therefore declares which server they come from, so the bare names
     resolve to the team's tools and not to a built-in of the CLI that happens
-    to be named alike.
+    to be named alike. Codex is the exception: its team tools are registered
+    as top-level dynamic tools under their bare names, so there is no server
+    to declare and the policy is left unwrapped.
 
     Args:
         spec: The team spec carrying lifecycle / teammate_mode / team_mode /
@@ -160,7 +162,7 @@ async def _build_member_system_prompt(
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         workspace_prompt_variant="external",
-        mcp_server_name=TEAM_MCP_SERVER_NAME,
+        mcp_server_name=None if ctx.cli_agent == "codex" else TEAM_MCP_SERVER_NAME,
         loader=make_template_loader(ws_cache),
     )
     return prompt or None
@@ -281,34 +283,60 @@ def _bind_protocol_member_team_tools(
     spec: "TeamAgentSpec",
     ctx: "TeamRuntimeContext",
     team_name: str,
+    session_id: str,
 ) -> None:
-    """Mount the in-process team MCP tool set on a Claude Code protocol member.
-
-    Codex members receive the team MCP server as a stdio ``McpServerConfig``
-    inside ``build_cli_runtime``; Claude runs the collaboration tools in
-    process through the SDK MCP server, which needs the member's own
-    ``TeamBackend`` and therefore can only be built after ``configure``.
-    """
-    if not runtime.inject_mcp or runtime.provider_name != "claude-code":
+    """Bind local team tools through the protocol provider's native channel."""
+    if not runtime.inject_mcp:
         return
-    from openjiuwen.agent_teams.external.cli_agent.claude import build_claude_sdk_mcp_tool_set
-    from openjiuwen.harness_protocol import McpServerConfig, McpTransport
 
-    tool_set = build_claude_sdk_mcp_tool_set(
-        server_name=runtime.mcp_server_name,
-        team_backend=teammate_backend,
-        role=ctx.role.value,
-        teammate_mode=spec.teammate_mode,
-        dispatch_mode=spec.dispatch_mode,
-        lifecycle=spec.lifecycle,
-        language=(ctx.team_spec.language if ctx.team_spec else None) or "cn",
-        workspace_manager=teammate.infra.workspace_manager,
-        messager=teammate.infra.messager,
-        team_name=team_name,
-        team_permissions_enabled=spec.enable_permissions,
-    )
-    runtime.bind_mcp_servers(
-        [McpServerConfig(name=runtime.mcp_server_name, transport=McpTransport.IN_PROCESS, instance=tool_set.server)]
+    language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
+    if runtime.provider_name == "claude-code":
+        from openjiuwen.agent_teams.external.cli_agent.claude import build_claude_sdk_mcp_tool_set
+        from openjiuwen.harness_protocol import McpServerConfig, McpTransport
+
+        tool_set = build_claude_sdk_mcp_tool_set(
+            server_name=runtime.mcp_server_name,
+            team_backend=teammate_backend,
+            role=ctx.role.value,
+            teammate_mode=spec.teammate_mode,
+            dispatch_mode=spec.dispatch_mode,
+            lifecycle=spec.lifecycle,
+            language=language,
+            workspace_manager=teammate.infra.workspace_manager,
+            messager=teammate.infra.messager,
+            team_name=team_name,
+            team_permissions_enabled=spec.enable_permissions,
+        )
+        runtime.bind_mcp_servers(
+            [
+                McpServerConfig(
+                    name=runtime.mcp_server_name,
+                    transport=McpTransport.IN_PROCESS,
+                    instance=tool_set.server,
+                )
+            ]
+        )
+        return
+
+    if runtime.provider_name != "codex":
+        return
+
+    from openjiuwen.agent_teams.external.tool_gateway import build_external_team_tool_gateway
+
+    runtime.bind_tools(
+        build_external_team_tool_gateway(
+            session_id=session_id,
+            team_backend=teammate_backend,
+            role=ctx.role.value,
+            teammate_mode=spec.teammate_mode,
+            dispatch_mode=spec.dispatch_mode,
+            lifecycle=spec.lifecycle,
+            language=language,
+            workspace_manager=teammate.infra.workspace_manager,
+            messager=teammate.infra.messager,
+            team_name=team_name,
+            team_permissions_enabled=spec.enable_permissions,
+        )
     )
 
 
@@ -377,7 +405,7 @@ async def external_cli_spawn(
         An :class:`InProcessSpawnHandle` wrapping the member task.
     """
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
-    from openjiuwen.agent_teams.context import set_session_id
+    from openjiuwen.agent_teams.context import get_session_id, set_session_id
     from openjiuwen.core.runner.runner import Runner
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -571,6 +599,7 @@ async def external_cli_spawn(
             spec=spec,
             ctx=ctx,
             team_name=team_name,
+            session_id=session_id or get_session_id(),
         )
         # Inject the reliability delivery surface (failed message to the
         # leader mailbox + member ERROR status) for SDK-backed members only.

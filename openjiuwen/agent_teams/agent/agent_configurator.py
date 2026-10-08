@@ -40,8 +40,8 @@ from openjiuwen.agent_teams.skill.rail_spec import (
     build_team_skill_rail_spec,
     complete_declared_team_skill_rails,
 )
+from openjiuwen.agent_teams.group_chat.tools import group_chat_prompt
 from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.agent_teams.tools.tool_group_chat import group_chat_prompt
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import ProviderType
 from openjiuwen.core.runner.spawn.agent_config import (
@@ -57,6 +57,26 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.harness.tools.worktree import WorktreeManager
+
+
+async def _validate_member_worktree_isolation(
+    spec: TeamAgentSpec,
+    team_name: str,
+    member_name: str,
+) -> None:
+    """Check the project scope and Git repository before registering a member."""
+    from openjiuwen.agent_teams.worktree.session_scope import build_worktree_owner_scope
+    from openjiuwen.harness.tools.worktree.git import find_canonical_git_root
+
+    scope = build_worktree_owner_scope(
+        team_name=team_name,
+        member_name=member_name,
+        spec=spec,
+    )
+    if await find_canonical_git_root(scope.project_dir) is None:
+        raise RuntimeError(
+            f"Team worktree isolation project_dir is not in a git repository: {scope.project_dir}"
+        )
 
 
 _TEAM_WORKTREE_BASH_DENY_PATTERNS = [
@@ -734,9 +754,10 @@ class AgentConfigurator:
                 project_dir=member_project_dir,
             )
         # Swarmflow worker-model resolver (leader + enable_swarmflow only). A
-        # positional pool lookup by ``agent(model=...)`` name hint; None when the
-        # team spec is absent so the worker falls back to the leader's model. The
-        # leader-only async ``swarmflow`` tool is gated on this being non-None.
+        # positional pool lookup by ``agent(model=...)`` name hint; no hint
+        # resolves to None so the worker falls back to the leader's model, but
+        # an explicit name that misses the pool raises (no silent downgrade).
+        # The leader-only async ``swarmflow`` tool is gated on this being non-None.
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
         swarmflow_worker_base_spec = None
         swarmflow_human_base_spec = None
@@ -750,14 +771,24 @@ class AgentConfigurator:
 
                 Returns a model *config* (not a built ``Model``): swarmflow workers
                 go through the spec build path, where ``DeepAgentSpec.model`` is a
-                ``TeamModelConfig`` resolved at construction. ``None`` falls back to
-                the worker base spec's own model.
-                """
-                if _spec is None:
-                    return None
-                from openjiuwen.agent_teams.models.allocator import resolve_member_model
+                ``TeamModelConfig`` resolved at construction. ``None`` (no hint)
+                falls back to the worker base spec's own model.
 
-                return resolve_member_model(_spec, model_name=model_name, model_index=None)
+                An explicit name that does not resolve RAISES instead of falling
+                back: a typo'd model would otherwise silently run on the default
+                model while the UI keeps showing the requested name.
+                """
+                resolved = None
+                if _spec is not None:
+                    from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+                    resolved = resolve_member_model(_spec, model_name=model_name, model_index=None)
+                if resolved is None and model_name:
+                    raise ValueError(
+                        f"swarmflow model {model_name!r} not found in the team model pool; "
+                        "an explicitly requested model never falls back to the default"
+                    )
+                return resolved
 
             # Workers are "a teammate without team tools": derive each worker from
             # the team's teammate spec (or the leader spec when no teammate exists).
@@ -1008,6 +1039,11 @@ class AgentConfigurator:
                 current_model_name = request_config.model_name
             provider = current_model_config.model_client_config.client_provider
             current_model_provider = provider.value if isinstance(provider, ProviderType) else provider
+
+        async def validate_worktree_isolation(member_name: str) -> None:
+            """Validate the member's worktree scope and repository before registration."""
+            await _validate_member_worktree_isolation(spec, team_name, member_name)
+
         agent_team = TeamBackend(
             team_name=team_name,
             member_name=current_member_name,
@@ -1036,6 +1072,7 @@ class AgentConfigurator:
             on_member_started=self._on_teammate_created,
             on_member_restarted=on_member_restarted,
             on_member_stopped=on_member_stopped,
+            validate_worktree_isolation=validate_worktree_isolation,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
         )
 

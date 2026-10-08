@@ -746,7 +746,7 @@ async def test_pipeline_failure_sets_completion_exception_and_cleans_sandbox(tmp
 
     completion = asyncio.get_running_loop().create_future()
     invalid = _batch(_item())
-    await queue.put(("batch", "../escape", "run-1", invalid, completion))
+    await queue.put(("batch", "", "run-1", invalid, completion))
     with pytest.raises(Exception):
         await asyncio.wait_for(completion, timeout=2)
     assert not list((tmp_path / "workspace" / "sandboxes").rglob("*"))
@@ -1443,9 +1443,9 @@ async def test_finish_reports_validation_and_commit_phases(tmp_path: Path) -> No
         await service.stop(timeout_seconds=1)
 
     assert phases == [
-        ("local", "run-progress", "organizing", 50),
-        ("local", "run-progress", "organizing", 60),
-        ("local", "run-progress", "organizing", 85),
+        ("local", "run-progress", "organizing", 25),
+        ("local", "run-progress", "organizing", 30),
+        ("local", "run-progress", "organizing", 88),
         ("local", "run-progress", "validating", 90),
         ("local", "run-progress", "committing", 97),
     ]

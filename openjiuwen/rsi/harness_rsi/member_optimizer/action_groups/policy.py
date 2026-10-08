@@ -103,16 +103,17 @@ Prompt rules:
 - Surface selection:
   - `identity.md` is only for role identity and duty-boundary changes.
   - `soul.md` is only for a small number of durable operating principles.
-  - Specific workflows, checklists, verification procedures, and task recovery
-    routines belong in `prompt_sections/files/*.md`, not in `identity.md` or
-    `soul.md`.
-  - Skills hold reusable methodology or domain capability. A new Skill requires
-    the same causal mechanism in at least two distinct cases and a trigger that
-    is observable from the public task input or early runtime evidence. One
-    verifier subitem, literal case IDs, fixed expected row counts, and known
-    answer filenames are not reusable Skill content. Use a prompt section for a
-    single-case instruction hypothesis.
-  - Tools are only for deterministic executable capability.
+  - Prompt sections clarify interpretation, priority, or a local constraint
+    when the necessary capability already exists.
+  - Skills organize reusable multi-step methods using existing capabilities.
+    One case may motivate a provisional method; cross-case evidence tests its
+    scope later and is not a Skill-only creation prerequisite.
+  - Tools implement repeatable calculation, conversion, retrieval, or checks.
+    Reuse existing execution tools or a Skill-local script when sufficient.
+  - Choose from the missing operation, not the number of cases or target_ref
+    label. One intervention may need connected actions across component types.
+    Do not create a quota of types. Case IDs, fixed answers, or private rubric
+    literals are not reusable content on any surface.
 
 Tool rules:
 - `tool/add` must target a loadable Python file under `tools/*.py`, declare

@@ -13,6 +13,9 @@ bug that previously required a process-global monkey-patch to work around.
 import base64
 import json
 import random
+from unittest.mock import Mock
+
+import pytest
 
 from openjiuwen.core.context_engine.token.tiktoken_counter import (
     DEFAULT_IMAGE_PLACEHOLDER_TOKENS,
@@ -31,6 +34,23 @@ _FAKE_DATA_URL = "data:image/jpeg;base64," + base64.b64encode(random.Random(0).r
 
 def _counter() -> TiktokenCounter:
     return TiktokenCounter()
+
+
+@pytest.mark.parametrize("model", ["gpt-4", "gpt-4o"])
+def test_counter_is_available_without_vocab_or_network(monkeypatch, tmp_path, model) -> None:
+    """Count messages without a cached vocab or a vocab download."""
+    import tiktoken.load
+    import tiktoken.registry
+
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path / "empty-cache"))
+    monkeypatch.setattr(tiktoken.registry, "ENCODINGS", {})
+    read_file = Mock(side_effect=AssertionError("vocab access"))
+    monkeypatch.setattr(tiktoken.load, "read_file", read_file)
+
+    counter = TiktokenCounter(model=model)
+    assert counter.measurement_source == "tiktoken"
+    assert counter.count("hello") > 0
+    read_file.assert_not_called()
 
 
 def _png_data_url(width: int, height: int) -> str:

@@ -204,6 +204,83 @@ class TaskManager:
                 root_tasks=self._root_tasks.copy()
             )
 
+    async def get_session_state(self, session_id: str) -> TaskManagerState:
+        """Snapshot only the tasks and indexes owned by one session."""
+        async with self._lock:
+            task_ids = {task_id for task_id, task in self.tasks.items() if task.session_id == session_id}
+            priority_index = {}
+            for priority, ids in self._priority_index.items():
+                session_ids = [task_id for task_id in ids if task_id in task_ids]
+                if session_ids:
+                    priority_index[priority] = session_ids
+            return TaskManagerState(
+                tasks={
+                    task_id: task.model_copy(deep=True)
+                    for task_id, task in self.tasks.items() if task_id in task_ids
+                },
+                priority_index=priority_index,
+                parent_to_children={
+                    parent: children & task_ids
+                    for parent, children in self._parent_to_children.items()
+                    if parent in task_ids
+                },
+                children_to_parent={
+                    child: parent for child, parent in self._child_to_parent.items()
+                    if child in task_ids and parent in task_ids
+                },
+                root_tasks=self._root_tasks & task_ids,
+            )
+
+    async def replace_session_state(self, session_id: str, state: Optional[TaskManagerState]) -> None:
+        """Atomically replace one session's tasks without changing other sessions."""
+        async with self._lock:
+            restored = {
+                task_id: task.model_copy(deep=True)
+                for task_id, task in (state.tasks.items() if state is not None else ())
+                if task.session_id == session_id
+            }
+            other_tasks = {
+                task_id: task for task_id, task in self.tasks.items()
+                if task.session_id != session_id
+            }
+            collision = restored.keys() & other_tasks.keys()
+            if collision:
+                raise build_error(
+                    StatusCode.AGENT_CONTROLLER_TASK_PARAM_ERROR,
+                    error_msg=f"Task ID already belongs to another session: {next(iter(collision))}"
+                )
+
+            # Keep the existing priority order of other sessions, then append
+            # this session's saved order. Older snapshots may contain other
+            # sessions' tasks, so only use IDs from `restored`.
+            priority_index = defaultdict(list, {
+                priority: [task_id for task_id in ids if task_id in other_tasks]
+                for priority, ids in self._priority_index.items()
+            })
+            restored_ids = set()
+            if state is not None:
+                for priority, ids in state.priority_index.items():
+                    for task_id in ids:
+                        if (task_id in restored and task_id not in restored_ids
+                                and restored[task_id].priority == priority):
+                            priority_index[priority].append(task_id)
+                            restored_ids.add(task_id)
+            for task_id, task in restored.items():
+                if task_id not in restored_ids:
+                    priority_index[task.priority].append(task_id)
+
+            self.tasks = {**other_tasks, **restored}
+            self._priority_index = priority_index
+            self._parent_to_children = defaultdict(set)
+            self._child_to_parent = {}
+            self._root_tasks = set()
+            for task_id, task in self.tasks.items():
+                if task.parent_task_id:
+                    self._parent_to_children[task.parent_task_id].add(task_id)
+                    self._child_to_parent[task_id] = task.parent_task_id
+                else:
+                    self._root_tasks.add(task_id)
+
     async def load_state(self, state: TaskManagerState) -> None:
         """Load task manager state
 

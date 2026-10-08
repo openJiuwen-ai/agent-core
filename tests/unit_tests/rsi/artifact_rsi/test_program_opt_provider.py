@@ -4131,3 +4131,140 @@ def test_the_run_reports_the_cards_iterations_as_its_total(
 
     assert provider.read_state(request.task_id).total_iterations == 2
 
+
+def _solving_reporter(tmp_path: Path, scorecard: dict) -> tuple:
+    """A real `_Reporter` over a real tree, and the events it emits."""
+    from types import SimpleNamespace
+    from openjiuwen.rsi.artifact_rsi.program_opt.tree import PuctTree
+    from openjiuwen.rsi.artifact_rsi.program_opt.candidates import CandidateStore
+    from openjiuwen.rsi.artifact_rsi.program_opt.engine import RunSpec
+    from openjiuwen.rsi.artifact_rsi.program_opt.puct_engine import _Reporter, _Usage
+
+    spec = RunSpec(search_id="run-1", algorithm="puct", expansions=6,
+                   scorecard_hash="sha256:x", scorecard=scorecard,
+                   statement="", baseline_code="x = 1\n", script="s")
+    tree = PuctTree()
+    emitted: list = []
+    reporter = _Reporter(spec, tree, object(), CandidateStore(tmp_path, flat=True),
+                         _Usage(), emitted.append)
+
+    def land(index: int, score: float) -> None:
+        node = SimpleNamespace(index=index, parent_index=None, promise=None,
+                               program=SimpleNamespace(valid=True, error=""))
+        reporter._node({"node": node, "metrics": {"score": score},
+                        "ops": {"code": "x = 2\n", "iteration": index}})
+
+    return reporter, tree, emitted, land
+
+
+def test_a_search_stops_once_a_candidate_reaches_the_solved_threshold(tmp_path: Path) -> None:
+    """Past the solved threshold there is nothing left to win.
+
+    Measured on an anagram task: the first expansion scored 1.0 on the gate,
+    and the next five went on to "clarified the module docstring only;
+    behavior remains the same" — each scoring 1.0 again, each a model call and
+    an evaluation spent on a program that could not do better. The
+    framework's own solved check is switched off (it skips *rollouts*, which
+    is wrong for a single-artifact tree), and nothing stopped the *search*.
+    """
+    reporter, tree, emitted, land = _solving_reporter(tmp_path, {"criteria": []})
+
+    land(1, 0.62)
+    assert reporter.solved_at is None, "a score below the threshold ended the search"
+    assert getattr(tree, "candidate_limit", None) != 0
+
+    land(2, 1.0)
+    assert reporter.solved_at == 2
+    assert tree.candidate_limit == 0, "no further expansions should be started"
+    assert any(e.get("type") == "log" and "solved threshold" in str(e.get("message", ""))
+               for e in emitted if isinstance(e, dict)), "the reader is not told why it stopped"
+
+    # The first node to get there is the one on record; later ones do not move it.
+    land(3, 1.0)
+    assert reporter.solved_at == 2
+
+
+def test_the_cards_solved_threshold_is_the_one_that_stops_the_search(tmp_path: Path) -> None:
+    """`solvedThreshold` on the card governs, and so does its default."""
+    reporter, tree, _emitted, land = _solving_reporter(
+        tmp_path, {"criteria": [], "solvedThreshold": 0.9})
+    land(1, 0.91)
+    assert reporter.solved_at == 1 and tree.candidate_limit == 0
+
+    reporter, tree, _emitted, land = _solving_reporter(tmp_path, {"criteria": []})
+    land(1, 0.998)
+    assert reporter.solved_at is None, "0.998 is below the 0.999 default"
+
+
+def test_a_solved_search_reports_solved_as_its_stop_reason(tmp_path: Path) -> None:
+    """The framework calls the wind-down whatever it calls running out of
+    candidates; the reason on the record is that the task was solved."""
+    from types import SimpleNamespace
+
+    reporter, _tree, _emitted, land = _solving_reporter(tmp_path, {"criteria": []})
+    land(1, 1.0)
+    reporter.note_outcome(SimpleNamespace(stop_reason="max_iters", error="",
+                                          retired_workers=0), planned=6)
+    assert reporter._stop_reason == "solved"
+
+
+def test_a_real_search_stops_early_once_it_is_solved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end: the framework's loop really does wind down on the signal.
+
+    The reporter-level tests prove the flag is set; this proves setting it is
+    enough — that a search planned for eight expansions, whose first candidate
+    already scores full marks, does not go on to make the other seven.
+    """
+    _no_probe(monkeypatch)
+    _no_runtime_probe(monkeypatch)
+    script = (
+        '"""Score a program that must define answer() returning 42."""\n'
+        "import importlib, json, os\n"
+        "out = os.environ['SCIENCE_AGENT_RESULT']\n"
+        "mod = importlib.import_module(os.environ['SCIENCE_AGENT_CANDIDATE'][:-3])\n"
+        "score = 1.0 if mod.answer() == 42 else 0.3\n"
+        "json.dump({'valid': True, 'metrics': {'score': score}, 'error': ''}, open(out, 'w'))\n"
+    )
+    solved = "def answer():\n    return 42\n"
+    calls = {"n": 0}
+
+    class SolvingModel:
+        async def invoke(self, messages, **_kwargs):
+            calls["n"] += 1
+
+            class _Usage:
+                input_tokens, output_tokens = 10, 5
+
+            class _Message:
+                content = f"```python name=candidate.py\n{solved}```"
+                usage_metadata = _Usage()
+
+            return _Message()
+
+    # Not `seed.py`: `_request` writes its own default seed there.
+    seed = tmp_path / "answer_seed.py"
+    seed.write_text("def answer():\n    return 0\n", encoding="utf-8")
+    request = _request(tmp_path, artifact_path=str(seed), model=SolvingModel(), max_iterations=8)
+    _scorecard(Path(request.run_dir), script=script, workers=1, scorecard={
+        "aggregate": "weighted_sum", "constraints": [],
+        "criteria": [{"id": "score", "name": "score", "direction": "maximize", "weight": 1.0,
+                      "normalize": {"kind": "identity"},
+                      "measure": {"kind": "custom_script", "scriptCas": "sha256:x",
+                                  "timeoutSeconds": 30,
+                                  "split": {"gateShards": 4, "rolloutShards": 2,
+                                            "testShards": 2, "seed": 1}}}]})
+
+    provider = PuctProgramArtifactProvider(execution=_local_execution)
+
+    async def drive() -> object:
+        async def sink(event: object) -> None:
+            pass
+        return await provider.run(request, sink)
+
+    result = asyncio.run(drive())
+
+    assert result.status == "completed", result
+    assert calls["n"] < 8, f"a solved search still made {calls['n']} of 8 model calls"
+

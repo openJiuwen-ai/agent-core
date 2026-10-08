@@ -1219,7 +1219,7 @@ class EvolutionRail(DeepAgentRail):
         self._bg_tasks.clear()
         for task in pending:
             try:
-                await asyncio.wait_for(task.wait(), timeout=120.0)
+                await asyncio.wait_for(task.wait(), timeout=600.0)
             except TimeoutError:
                 logger.warning("[EvolutionRail] background task still running after wait timeout; cancelling")
                 await task.cancel(reason="evolution_rail_wait_timeout")

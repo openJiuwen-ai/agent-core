@@ -10,6 +10,7 @@ import re
 from typing import Any, Dict, Mapping
 from urllib.parse import urlsplit
 
+from .evidence import author_is_action_label, today_temperature_fields
 from .page_state import CARD_EVIDENCE_FIELDS
 from .site_profiles import (
     apply_site_card_semantics,
@@ -41,7 +42,7 @@ def _host(value: Any) -> str:
 
 
 def _generic_card_semantics(card: Mapping[str, Any]) -> tuple[str, str, bool]:
-    href = _text(card.get("primary_link") or card.get("href"), 500).lower()
+    href = str(card.get("primary_link") or card.get("href") or "").lower()
     selector = _text(card.get("selector_hint"), 500).lower()
     badges = " ".join(_text(item, 100) for item in (card.get("semantic_badges") or []))
     title = _text(card.get("title"), 240)
@@ -65,14 +66,16 @@ def _generic_card_semantics(card: Mapping[str, Any]) -> tuple[str, str, bool]:
             region = "sidebar"
         if card.get("primary_link") and re.search(r"/(?:item|product|goods)(?:[./]|$)", href):
             kind = "product"
-        if region not in {"main_result", "sidebar", "hot_search", "chat", "activity", "sponsored_result"}:
-            region = "main_result"
+        if region in {"navigation", "header", "footer"}:
+            kind = "navigation_link"
+        elif region in {"ai_answer", "ai_overview"}:
+            kind = region
         if not title and not preview and kind == "result":
             kind = "unknown"
     return region, kind, is_ad
 
 
-def _attach_field_contract(card: Dict[str, Any], generation_id: str) -> None:
+def _attach_field_contract(card: Dict[str, Any], generation_id: str, source_url: str) -> None:
     statuses = card.get("field_status")
     field_status = dict(statuses) if isinstance(statuses, Mapping) else {}
     provenance = card.get("field_provenance")
@@ -100,16 +103,28 @@ def _attach_field_contract(card: Dict[str, Any], generation_id: str) -> None:
             continue
         entry.update(
             {
-                "selector": _text(selector, 600),
+                "selector": str(selector or "").strip(),
                 "raw_text": _text(raw_text, 600),
                 "generation_id": generation_id,
-                "source": "browser_probe_cards",
+                "source": source_url,
             }
         )
+        if field_name == "duration":
+            entry["scope"] = str(card.get("duration_scope") or "unknown")
         field_provenance[field_name] = entry
 
     card["field_status"] = field_status
     card["field_provenance"] = field_provenance
+
+
+def _normalize_today_temperatures(card: Dict[str, Any]) -> None:
+    text = " ".join(str(card.get(key) or "") for key in ("title", "summary", "text_preview"))
+    values, raw_text = today_temperature_fields(text)
+    for field_name, value in values.items():
+        if card.get(field_name) in (None, ""):
+            card[field_name] = value
+            card[f"{field_name}_raw_text"] = raw_text
+            card[f"{field_name}_selector_hint"] = card.get("summary_selector_hint") or card.get("selector_hint") or ""
 
 
 def normalize_card_probe_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -122,6 +137,7 @@ def normalize_card_probe_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload["cards"] = cards
     generation_id = str(payload.get("generation_id") or "g0")
     result_index = 0
+    observed_identities: set[str] = set()
     classifications: Dict[str, set[tuple[str, str, bool]]] = {}
     for card in cards:
         if not isinstance(card, dict):
@@ -137,18 +153,28 @@ def normalize_card_probe_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         card["region"] = region
         card["kind"] = kind
         card["is_ad"] = is_ad
+        card["ad_status"] = "ad" if is_ad else "unknown"
+        card.setdefault("classification_reason", f"page_region:{region}")
         normalize_site_card_fields(card, host=host)
-        _attach_field_contract(card, generation_id)
+        if author_is_action_label(card.get("author")):
+            card["author_raw_text"] = card["author"]
+            card["author"] = ""
+            card.setdefault("field_status", {})["author"] = "unknown"
+        _normalize_today_temperatures(card)
+        _attach_field_contract(card, generation_id, str(payload.get("url") or ""))
 
         is_natural_result = region == "main_result" and kind in {"result", "product", "hotel"} and not is_ad
-        if is_natural_result:
+        if is_natural_result and card.get("order_known") is not False:
             result_index += 1
             card["result_index"] = result_index
         else:
             card["result_index"] = None
-        identity = _text(card.get("primary_link") or card.get("href") or card.get("title"), 500).lower()
+        identity = str(card.get("primary_link") or card.get("href") or "").strip()
+        identity = identity or _text(card.get("title"), 500).lower()
         if identity:
             classifications.setdefault(identity, set()).add((region, kind, is_ad))
+            if is_natural_result:
+                observed_identities.add(identity)
     conflicts = [
         {
             "identity": identity[:240],
@@ -164,14 +190,15 @@ def normalize_card_probe_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     diagnostics = dict(diagnostics) if isinstance(diagnostics, Mapping) else {}
     diagnostics.update(
         {
-            "observed_count": result_index,
+            "observed_count": len(observed_identities),
+            "ranked_count": result_index,
             "classification_conflict": bool(conflicts),
         }
     )
     if conflicts:
         diagnostics["classification_conflicts"] = conflicts
         diagnostics["recommended_fallback"] = "one_precise_probe"
-    payload["observed_count"] = result_index
+    payload["observed_count"] = len(observed_identities)
     payload["diagnostics"] = diagnostics
     return payload
 

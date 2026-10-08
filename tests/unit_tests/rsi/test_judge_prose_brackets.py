@@ -22,6 +22,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import parse_judge_outp
 def test_code_brackets_do_not_create_another_verdict(prose):
     verdict = {"overall_reason": "Checked best_action[h]", "behaviors": [], "forbidden_hits": []}
     assert parse_judge_output(f"{prose}\n```json\n{json.dumps(verdict)}\n```\n{prose}") == verdict
+    assert parse_judge_output(f"{prose}\n{json.dumps(verdict)}\n{prose}") == verdict
 
 
 @pytest.mark.parametrize(

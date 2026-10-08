@@ -10,7 +10,6 @@ import subprocess
 import textwrap
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
 
 import pytest
 
@@ -347,10 +346,10 @@ def test_batch_interact_validates_schema_before_executor(
         ),
         (
             [
-                {"op": "type", "selector": "#toolbar-search", "text": "query"},
+                {"op": "type", "selector": "#toolbar-search", "text": "query", "value": "different query"},
                 {"op": "press", "key": "Enter"},
             ],
-            "use value, not text",
+            "exactly one locator strategy",
         ),
         (
             [
@@ -685,7 +684,7 @@ def test_wait_for_url_switches_to_matching_new_tab(tmp_path: Path) -> None:
     assert payload["calls"] == ["activated"]
 
 
-def test_batch_preflight_rejects_later_ambiguous_target_before_any_click(tmp_path: Path) -> None:
+def test_batch_validates_each_target_after_preceding_steps(tmp_path: Path) -> None:
     node = shutil.which("node")
     if node is None:
         pytest.skip("node is not installed; skipping generated JavaScript execution test")
@@ -730,10 +729,12 @@ def test_batch_preflight_rejects_later_ambiguous_target_before_any_click(tmp_pat
     payload = json.loads(completed.stdout)
 
     assert payload["result"]["ok"] is False
-    assert payload["result"]["status"] == "failed"
-    assert payload["result"]["steps"][0]["phase"] == "preflight"
+    assert payload["result"]["status"] == "partial"
+    assert payload["result"]["executed"] is True
+    assert payload["result"]["steps"][0]["executed"] is True
+    assert payload["result"]["steps"][1]["executed"] is False
     assert "matched 2" in payload["result"]["error"]
-    assert payload["clicks"] == []
+    assert payload["clicks"] == ["#first"]
 
 
 def test_batch_interact_script_runs_against_playwright_like_form_stub(tmp_path: Path) -> None:
@@ -815,32 +816,12 @@ def test_batch_interact_script_runs_against_playwright_like_form_stub(tmp_path: 
     assert ["setChecked", "label", "Male", True, 3000] in payload["calls"]
 
 
-def test_safe_read_selector_preflight_requires_one_visible_match() -> None:
-    runtime = BrowserAgentRuntime.__new__(BrowserAgentRuntime)
-    runtime._call_playwright_run_code_unsafe = AsyncMock(
-        return_value='{"ok":true,"results":[{"index":0,"selector":".title","match_count":1,"visible":true}]}'
-    )
-
-    _run(runtime._validate_safe_read_locators(
-        [{"op": "extract_text", "selector": ".title", "field": "title"}]
-    ))
-
-    runtime._call_playwright_run_code_unsafe.return_value = (
-        '{"ok":true,"results":[{"index":0,"selector":".title",'
-        '"match_count":2,"visible":true}]}'
-    )
-    with pytest.raises(ValueError, match="exactly one visible element"):
-        _run(runtime._validate_safe_read_locators(
-            [{"op": "extract_text", "selector": ".title", "field": "title"}]
-        ))
-
-
 def test_batch_target_contract_requires_target_id_for_mutations() -> None:
     errors = BrowserAgentRuntime._validate_batch_target_contract(
         [{"op": "click", "selector": "#submit"}]
     )
 
-    assert errors == ["steps[0] op=click requires target_id from the current PageState"]
+    assert errors == ["steps[0] op=click requires target_id or native ref from the current PageState"]
     assert BrowserAgentRuntime._validate_batch_target_contract(
         [{"op": "extract_text", "selector": ".title", "field": "title"}]
     ) == []

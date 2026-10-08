@@ -397,10 +397,12 @@ STRINGS: dict[str, str] = {
     ),
     "swarmflow_worker.schema": (
         "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
-        "然后**必须**调用 `structured_output` 工具**恰好一次**，传入符合其输入 schema "
-        "的结构化结果。重要提示：`structured_output` 是**唯一**的结果提交方式——如果你"
-        "不调用它，任务被视为失败，你的文本输出将被丢弃。禁止将结果作为纯文本输出"
-        "——结果只能通过工具调用被捕获。调用 `structured_output` 后立即停止。"
+        "然后**必须**调用 `structured_output` 工具**恰好一次**，传入严格符合其输入 "
+        "schema 的结构化结果——每一层的必填属性都要逐个给出（数组内每个元素也一样），"
+        "属性名与嵌套结构和 schema 完全一致，不要增删字段或改变结构形状。重要提示："
+        "`structured_output` 是**唯一**的结果提交方式——如果你不调用它，任务被视为"
+        "失败，你的文本输出将被丢弃。禁止将结果作为纯文本输出——结果只能通过工具调用"
+        "被捕获。调用 `structured_output` 后立即停止。"
     ),
     "swarmflow_worker.free": (
         "你是一名单次执行的 swarmflow 工作节点。阅读用户消息中的任务，完成工作，"
@@ -408,7 +410,8 @@ STRINGS: dict[str, str] = {
     ),
     "structured_output.reminder": (
         "【重要提醒】你必须通过调用 `structured_output` 工具来提交结果，不要把结果"
-        "写在文本中。这是唯一的结果提交方式，不调用该工具=任务失败。"
+        "写在文本中。提交的参数必须严格符合该工具的 input schema——每层必填属性给全、"
+        "属性名与结构完全一致。这是唯一的结果提交方式，不调用该工具=任务失败。"
     ),
     # ===== async control tools (list / output / cancel) =======================
     # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc

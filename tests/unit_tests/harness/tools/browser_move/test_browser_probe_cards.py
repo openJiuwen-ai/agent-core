@@ -91,6 +91,8 @@ def test_build_card_probe_js_contains_card_extraction_terms() -> None:
 @pytest.mark.parametrize("error", [
     "### Error\nReferenceError: missingHelper is not defined",
     {"isError": True, "content": [{"type": "text", "text": "ReferenceError: missingHelper is not defined"}]},
+    {"result": "### Error\nReferenceError: visible is not defined"},
+    {"data": {"result": "### Error\nReferenceError: visible is not defined"}},
 ])
 def test_probe_reports_executor_error_without_repeating_identical_script(error) -> None:
     runtime = _make_runtime()
@@ -100,6 +102,17 @@ def test_probe_reports_executor_error_without_repeating_identical_script(error) 
     ))
     assert parsed["ok"] is False
     assert "ReferenceError" in parsed["error"]
+    assert retries == 0
+    runtime._code_executor.assert_awaited_once()
+
+
+def test_empty_card_result_is_not_a_script_error_or_retried() -> None:
+    runtime = _make_runtime()
+    runtime._code_executor = AsyncMock(return_value={"ok": True, "cards": []})
+    result, _, retries = _run(runtime._execute_probe_json(
+        "async (page) => ({ok: true, cards: []})", artifact_kind="card_probe",
+    ))
+    assert result == {"ok": True, "cards": []}
     assert retries == 0
     runtime._code_executor.assert_awaited_once()
 

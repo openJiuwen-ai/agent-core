@@ -43,6 +43,7 @@ from .engine import RunSpec
 from .execution import EvaluationExecution
 from .logging_config import get_logger
 from .program import DEFAULT_ENTRYPOINT, bundle, files_of
+from .scorecard import solved_threshold
 
 log = get_logger("probe")
 
@@ -197,7 +198,7 @@ def _refuse_saturated(spec: RunSpec, baseline: float, worsened: Optional[float] 
     were all easy: the fixed 5-point rule it was supposed to improve on scored
     0.9999999 out of the gate.
     """
-    threshold = float(spec.scorecard.get("solvedThreshold") or 0.999)
+    threshold = solved_threshold(spec.scorecard)
     if baseline < threshold:
         _refuse_thin_headroom(baseline, worsened, threshold)
         return

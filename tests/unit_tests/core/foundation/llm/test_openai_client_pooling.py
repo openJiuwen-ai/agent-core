@@ -58,6 +58,25 @@ def _clear_client_cache():
     OpenAIModelClient._client_cache.clear()
 
 
+def test_sdk_client_is_created_with_max_retries_zero_even_when_config_sets_it():
+    model = _make_model(use_shared=False)
+    model._client.model_client_config.max_retries = 3
+    with (
+        patch("openai.AsyncOpenAI") as openai_cls,
+        patch(
+            "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+            return_value=MagicMock(),
+        ),
+    ):
+        model._client._build_async_openai_client()
+    assert openai_cls.call_args.kwargs["max_retries"] == 0
+    assert ModelClientConfig(
+        client_provider=ProviderType.OpenAI,
+        api_key="sk-test",
+        api_base="https://api.openai.com/v1",
+    ).max_retries == 0
+
+
 class TestSharedClientPooling:
     @pytest.mark.asyncio
     async def test_shared_client_is_built_once_and_reused_without_hot_path_close(self):

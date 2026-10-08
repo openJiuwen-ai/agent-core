@@ -1,0 +1,111 @@
+"""Host pairing of subset experiment rows."""
+
+from __future__ import annotations
+
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
+    infer_proposed_name,
+    overlay_paired_metrics,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
+    VariantResult,
+)
+
+
+def _variant(name: str, metrics: dict, *, status: str = "completed") -> VariantResult:
+    return VariantResult(
+        name=name,
+        metrics=metrics,
+        exit_code=0,
+        log_path="",
+        process_status=status,  # type: ignore[arg-type]
+        metrics_state="present",
+    )
+
+
+def test_infer_proposed_prefers_metric_prefix_over_zero_shot():
+    assert (
+        infer_proposed_name(
+            ["zero_shot", "one_shot", "icl_1shot"],
+            metric_names=["one_shot_accuracy_gain"],
+        )
+        == "one_shot"
+    )
+
+
+def test_overlay_leaves_unpaired_row_indeterminate():
+    rows = overlay_paired_metrics(
+        [_variant("one_shot", {"metrics": {"accuracy": 1.0, "one_shot_accuracy_gain": None}})],
+        ["one_shot_accuracy_gain"],
+    )
+    assert rows[0].metrics["metrics"]["one_shot_accuracy_gain"] is None
+
+
+def test_overlay_computes_gain_from_zero_shot_sibling():
+    rows = overlay_paired_metrics(
+        [
+            _variant(
+                "zero_shot",
+                {"metrics": {"accuracy": 0.75, "one_shot_accuracy_gain": None}},
+            ),
+            _variant(
+                "one_shot",
+                {"metrics": {"accuracy": 1.0, "one_shot_accuracy_gain": None}},
+            ),
+        ],
+        ["accuracy", "one_shot_accuracy_gain"],
+    )
+    names = {item.name: item for item in rows}
+    assert names["one_shot"].metrics["one_shot_accuracy_gain"] == 0.25
+    assert names["one_shot"].metrics["metrics"]["one_shot_accuracy_gain"] == 0.25
+    assert names["zero_shot"].metrics["metrics"]["one_shot_accuracy_gain"] is None
+
+
+def test_overlay_uses_plan_baselines_not_method_vocabulary():
+    rows = overlay_paired_metrics(
+        [
+            _variant("control", {"metrics": {"accuracy": 0.5, "delta": None}}),
+            _variant("treatment", {"metrics": {"accuracy": 0.75, "delta": None}}),
+        ],
+        ["accuracy", "delta"],
+        baselines=["control"],
+    )
+    names = {item.name: item for item in rows}
+    assert names["treatment"].metrics["delta"] == 0.25
+    assert names["control"].metrics["metrics"]["delta"] is None
+
+
+def test_overlay_skips_when_sibling_deltas_disagree():
+    rows = overlay_paired_metrics(
+        [
+            _variant("a", {"metrics": {"accuracy": 0.5, "delta": None}}),
+            _variant("b", {"metrics": {"accuracy": 0.75, "delta": None}}),
+            _variant("c", {"metrics": {"accuracy": 1.0, "delta": None}}),
+        ],
+        ["accuracy", "delta"],
+    )
+    names = {item.name: item for item in rows}
+    assert names["c"].metrics["metrics"]["delta"] is None
+
+
+def test_overlay_fills_gain_from_nested_plan_score():
+    rows = overlay_paired_metrics(
+        [
+            _variant("zero_shot", {"evaluation": {"accuracy": 0.5}}),
+            _variant("one_shot", {"evaluation": {"accuracy": 0.75}}),
+        ],
+        ["accuracy", "one_shot_accuracy_gain"],
+    )
+    names = {item.name: item for item in rows}
+    assert names["one_shot"].metrics["one_shot_accuracy_gain"] == 0.25
+
+
+def test_overlay_does_not_hunt_undeclared_accuracy():
+    rows = overlay_paired_metrics(
+        [
+            _variant("zero_shot", {"evaluation": {"accuracy": 0.5}}),
+            _variant("one_shot", {"evaluation": {"accuracy": 0.75}}),
+        ],
+        ["one_shot_accuracy_gain"],
+    )
+    names = {item.name: item for item in rows}
+    assert "one_shot_accuracy_gain" not in names["one_shot"].metrics

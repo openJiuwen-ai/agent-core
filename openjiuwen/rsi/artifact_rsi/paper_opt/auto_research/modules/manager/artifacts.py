@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
+
+_CST = timezone(timedelta(hours=8))
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +66,7 @@ def append_event(run_id: str, event: str, payload: dict[str, Any] | None = None)
     ensure_manager_dir(run_id)
     record: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "ts": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+        "ts": datetime.now(_CST).isoformat(),
         "event": event,
         "run_id": run_id,
     }

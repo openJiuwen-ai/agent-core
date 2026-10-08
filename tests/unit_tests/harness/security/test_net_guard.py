@@ -12,6 +12,7 @@ from openjiuwen.harness.security.models import PermissionLevel
 from openjiuwen.harness.security.permission_engine.netguard.net_guard import (
     NetGuardChecker,
     build_net_guard_checker,
+    match_net_pattern,
 )
 
 
@@ -93,7 +94,27 @@ def test_url_glob_and_prefix() -> None:
     prefix_hit = checker.evaluate("mcp_fetch_webpage", {"url": "https://blocked.example/secret/token"})
     assert prefix_hit is not None
     assert prefix_hit.permission == PermissionLevel.DENY
+    assert checker.evaluate("mcp_fetch_webpage", {"url": "https://blocked.example/secretly"}) is not None
     assert checker.evaluate("mcp_fetch_webpage", {"url": "https://blocked.example/public"}) is None
+
+
+def test_url_allow_requires_same_authority() -> None:
+    checker = _checker(defaults="deny", urls={"https://example.com": "allow"})
+    for url in ("https://example.com", "https://example.com/path"):
+        assert checker.evaluate("mcp_fetch_webpage", {"url": url}) is None, url
+    for url in (
+        "https://example.com.evil.com/x",
+        "https://example.com@evil.com/x",
+        "https://example.com:8443/x",
+    ):
+        result = checker.evaluate("mcp_fetch_webpage", {"url": url})
+        assert result is not None, url
+        assert result.permission == PermissionLevel.DENY, url
+        assert result.matched_rule == "net_guard:defaults", url
+
+    slash_checker = _checker(defaults="deny", urls={"https://example.com/": "allow"})
+    assert slash_checker.evaluate("mcp_fetch_webpage", {"url": "https://example.com/path"}) is None
+    assert not match_net_pattern("https://[", "https://[")
 
 
 def test_ask_url_entry_is_skipped() -> None:
@@ -143,6 +164,27 @@ async def test_engine_allow_plus_net_deny_is_deny() -> None:
     )
     assert result.permission == PermissionLevel.DENY
     assert "net_guard" in (result.matched_rule or "")
+
+
+@pytest.mark.asyncio
+async def test_engine_url_allow_does_not_lift_default_deny_for_other_authority() -> None:
+    engine = PermissionEngine(
+        {
+            "enabled": True,
+            "tools": {"mcp_fetch_webpage": "allow"},
+            "defaults": {"*": "allow"},
+            "net_guard": {
+                "enabled": True,
+                "defaults": "deny",
+                "urls": {"https://example.com": "allow"},
+            },
+        }
+    )
+    allowed = await engine.check_permission("mcp_fetch_webpage", {"url": "https://example.com/path"})
+    denied = await engine.check_permission("mcp_fetch_webpage", {"url": "https://example.com.evil.com/x"})
+    assert allowed.permission == PermissionLevel.ALLOW
+    assert denied.permission == PermissionLevel.DENY
+    assert "net_guard:defaults" in (denied.matched_rule or "")
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,6 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime, BrowserRuntimeRail
 from tests.unit_tests.harness.tools.browser_move.test_browser_runtime_rail import _FakeSession, _run
 
-
 STATE_KEY = "__browser_phase_budget_state__"
 WEATHER_URL = "https://www.bing.com/search?q=Singapore+weather"
 WEATHER_TEXT = "Singapore: partly sunny, 31 C; high 33 C, low 26 C; humidity 65%; wind 14 km/h."
@@ -88,10 +87,16 @@ def test_raw_observations_do_not_override_hard_requirements(case):
         "comparison": "对比B站综合和最新结果的标题",
     }.get(case, "Report low_temperature")
     state = _observed_state(task)
+    if case in {"rating", "comparison", "count"}:
+        state["requirements_source"] = "explicit"
     if case == "count":
         state.update(requested_result_count=3, observed_result_count=1)
     elif case == "unavailable":
-        state["evidence_slots"] = [{**state["required_evidence_slots"][0], "status": "unknown", "value": None}]
+        state["evidence_slots"] = [{
+            **state["required_evidence_slots"][0], "status": "unknown", "value": None,
+            "observation_status": "explicit_absence", "source": WEATHER_URL,
+            "raw_text": "The requested field is not provided on this page.",
+        }]
     elif case == "blocker":
         state["blockers"] = ["login_required"]
     elif case == "explicit":

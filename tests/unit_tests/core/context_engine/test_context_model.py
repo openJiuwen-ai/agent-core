@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 
+from types import SimpleNamespace
 from typing import List, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -796,7 +797,11 @@ class TestModelContext:
 
     # ---------- token_counter ----------
     @pytest.mark.asyncio
-    async def test_token_counter_returns_tokens(self):
+    async def test_token_counter_returns_tokens(self, monkeypatch):
+        import tiktoken
+
+        encoding = SimpleNamespace(name="cl100k_base", encode=MagicMock(return_value=list(range(13))))
+        monkeypatch.setattr(tiktoken, "get_encoding", MagicMock(return_value=encoding))
         context = await self.create_context(enable_tiktoken_counter=True)
         await context.add_messages([UserMessage(content="hi")])
         stat = context.statistic()

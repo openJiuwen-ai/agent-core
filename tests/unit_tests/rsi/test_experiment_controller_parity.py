@@ -128,6 +128,9 @@ def test_partial_verifier_progress_reenters_analysis_with_candidate_feedback(
                             "optimization_target": "member_harness",
                             "metadata": {
                                 "attribution": {
+                                    "decision_contract": {
+                                        "acceptance_observable": "Replay satisfies the remaining contract branch.",
+                                    },
                                     "target_ref": "member_harness.solver.skill",
                                     "root_cause": "the same defect remains after partial progress",
                                 }

@@ -60,6 +60,12 @@ SLOW_RAIL_INIT_SECONDS = 0.1
 # so the batch bar sits higher than the per-rail one.
 SLOW_RAIL_INIT_BATCH_SECONDS = 0.25
 
+# Set on ``AgentCallbackContext.extra`` by the streaming model call once
+# user-visible reasoning or content has been written to the session.
+# Transient provider retries must not run after this, or the same answer
+# is written twice.
+MODEL_VISIBLE_OUTPUT_EMITTED_KEY = "_model_visible_output_emitted"
+
 _CURRENT_USAGE_INVOCATION_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "current_usage_invocation_id",
     default=None,

@@ -122,3 +122,69 @@ jiuwenswarm 用群 manifest 中的 `proxy_teams` 绑定大群代理人与目标�
 ## 7. 验证范围
 
 验证重点是：归档去重与内容冲突、team/session 路径隔离、无 @ 只归档、定向通知、按成员时间生成摘录、离线写邮箱及历史清理。成员运行和通知处理复用现有邮箱测试；模拟运行时测试不替代真实模型与平台 UI 的端到端验收。
+
+
+## 2026-09-24：统一输入与群聊模块
+
+当前接口契约以 [S_28](../specs/S_28_group-conversation-and-delegation.md) 为准。
+公开输入使用 `type=group_chat` / `GroupChatMessage`，首条 run 输入和后续 interact
+共用 runtime 派发及 `group_chat/handler.py`。群聊文件实现与工具分别位于
+`group_chat/conversation.py` 和 `group_chat/tools.py`，现有邮箱消费者保持不变。
+两个独立 Runner 投递接口及其离线直写分支已移除，宿主通过现有运行入口启动或恢复团队。
+jiuwenswarm 保存会话的 `conversation_mode`，在两个 Team 输入入口透传结构化消息，
+没有 mentions 的首条请求以归档确认结束，无须等待 Leader 模型输出。
+
+
+## 2026-09-29：复用广播存储与消费水位
+
+当前契约见 [S_28](../specs/S_28_group-conversation-and-delegation.md)。
+
+- 决策：每条公开消息写一条现有 DB 广播，history.json 为投影，发布既有 BROADCAST 事件。群聊消费者只处理明确 mentions，投递成功后推进原有广播 read_at；定时轮询和外部收件箱遵循同一筛选。
+- 决策：从 read_at 到触发消息取近期摘录，保留触发消息并给出完整文件路径。无 @ 不写模型上下文，不推进水位，也不阻塞团队完成。
+- 拒绝的方案：继续维护 .notified.json 和额外定向通知会形成两套消费进度与重复存储，所以移除；没有新增队列、序列号或 Runner 投递 API。
+- 验证：覆盖无 mentions、逐成员增量、首条触发、投递失败水位、幂等重试、文件恢复、离线成员启动、真实事件唤醒、外部收件箱及普通团队回归。
+- 边界：沿用时间戳精度与非事务投递；不增加恰好一次协议。文件同步读取全量历史，后续确有大群负载时再优化。
+
+回归结果：670 passed、19 skipped；覆盖群聊、数据库、外部 CLI、Team、Runner 和统一输入派发。
+
+
+### 2026-09-29：删除残留文件筛选与重复输入准备
+
+删除仅供测试使用的文件时间窗口筛选及单会话删除包装；测试直接检查 JSON，清理统一走 delete_registered。invoke/stream 共用初始输入准备，群聊筛选仍只在 DB 消费链路实现。保留历史同步与恢复语义，不为精简引入新的管理层。
+
+
+## 2026-09-30：按消息类型分类，固定近期摘录
+
+决策：移除 enable_group_chat/group_context_tail，type=group_chat 是唯一群聊路由标记，摘录固定 5 条。工具统一注册；数据库按每条广播的 metadata 筛选收件人，启动扫描和完成判定同样遵循 mentions。混合批次按时间消费，共用既有 read_at。
+
+拒绝的方案：团队开关与消息类型重复声明，容易遗漏配置；可配置摘录条数没有当前需求。没有增加第二套广播水位。测试覆盖普通消息和群聊混用、失败不跳过早先 @、固定 5 条摘录以及外部工具注册。
+
+## 2026-09-30：群历史使用 JSON Lines
+
+决策：历史写入 `history.jsonl`，每个 JSON 对象占一行，正文换行由 JSON 转义。读取逐行解析，保留原有文件锁、原子替换和消息 ID 去重。
+
+拒绝的方案：继续使用整个 JSON 数组不符合逐行检索需求；本次不同时改为追加写入，以保留既有同步与恢复语义。已有 DB 消息会在下次同步时生成 JSONL，旧 `history.json` 不自动删除。
+
+验证：覆盖多条消息、中文、多行正文、引号、Unicode 分隔符和重复发送；群聊通知、工具说明及设计规约同步使用新路径。
+
+## 2026-09-30：独立群聊消费 handler
+
+决策：将群聊消费策略集中到 group_chat/message_handler.py 的 GroupMessageHandler。派发层根据消息选择普通或群聊 handler，每次只调用一个；原 MessageHandler 移除群聊判断，群聊子类复用生命周期、桥接和中断投递流程。
+
+拒绝的方案：同时广播给两个邮箱 handler 会重复消费或让普通广播提前推进共享水位；复制整个通用处理循环会重复维护退出和中断规则。群聊策略按时间逐条读取并标记消费，普通消息混入时保持同一顺序。
+
+验证：覆盖事件唤醒、轮询选择、投递失败水位、混合广播及原有退出行为。
+
+## 2026-09-30：清理重复包装和分支
+
+移除 MessageHandler 对 DAO 已去重成员的二次去重，普通 handler 恢复原实现。工具注册直接构造 GroupSendMessageTool，删除只返回单元素列表的工厂包装。摘录固定 5 条，删除可变条数的遗留分支；保留并发文件合并和投递后更新水位。
+
+验证：相关回归 267 passed、19 skipped。
+
+## 2026-09-30：群聊启动扫描与普通邮箱分离
+
+将早期提交 6dfda0121 中加入普通 MessageHandler 的启动扫描迁至 GroupMessageHandler.start_mentioned_members。DAO 更名为 get_unread_group_members，仅查询未消费的群聊 mentions，删除定向消息的补偿扫描。广播触发和 Leader 轮询均可启动被 @ 的成员，Leader 自己无需被 @；普通消息仍由既有发送工具和交互入口启动收件人。
+
+检查旧提交残留：独立 Runner 投递接口、群聊配置开关和第二套通知水位已移除；当前归档依赖的会话绑定与 workspace 登记保留。本次不改普通 MESSAGE 自唤醒和无 transport 的消息管理器行为。
+
+验证：197 passed、19 skipped，覆盖普通邮箱不启动其他成员、群聊事件唤醒，以及 Leader 未被 @ 时轮询拉起 UNSTARTED/ERROR 专家。

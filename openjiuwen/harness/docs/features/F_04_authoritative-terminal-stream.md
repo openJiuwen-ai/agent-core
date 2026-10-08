@@ -62,9 +62,8 @@ max-iteration outputs. Unstructured errors still raise.
 - This fixes delivery, not evidence inference. Weather text returned as
   `{sel, text}` may still require evidence normalization; no unsupported
   completed status is fabricated to hide that separate issue.
-- The generic BaseAgent callback decorators do not immediately close nested
-  generators on instance-level aclose. Method-level DeepAgent closing is tested;
-  a broader callback-wrapper cancellation change is outside this fix.
+- Instance-level aclose and producer cancellation were subsequently closed in
+  F_05_browser-task-integrity, including public ReAct stream regression tests.
 - Caller-owned sessions keep their existing persistence ownership. No Chrome,
   profile, cookie, MCP cold-start, locator, replan or timeout policy is changed.
 - Packaged applications must include this SDK change; editing the source checkout

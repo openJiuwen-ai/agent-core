@@ -36,6 +36,23 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.compress
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 
 
+def _fail_get_encoding(*_args, **_kwargs):
+    raise RuntimeError("tiktoken disabled in tests: unit tests must not make network calls")
+
+
+@pytest.fixture(autouse=True)
+def _no_network_tokenizer(monkeypatch):
+    """archive.py's _split_text lazily calls tiktoken.get_encoding("cl100k_base"),
+    which downloads its BPE vocab file over HTTPS on first use -- on a sandboxed/
+    offline CI runner this blocks until pytest-timeout kills it (observed: a
+    60s timeout inside tiktoken's own requests.get, failing the whole test).
+    _split_text already has a deterministic character-based fallback for
+    exactly this case (see its `except Exception` branch); force that path
+    instead of ever touching the network from a unit test.
+    """
+    monkeypatch.setattr("tiktoken.get_encoding", _fail_get_encoding)
+
+
 def _context(
     tmp_path: Path,
     session_id: str = "session-1",
@@ -102,6 +119,33 @@ def test_archive_writes_turn_index_raw_messages_and_readable_chunks(tmp_path):
     assert "## User" in chunk
     assert "## Assistant" in chunk
     assert raw_messages[0]["content"] == "How should database retries work?"
+
+
+def test_recall_is_offline(tmp_path, monkeypatch):
+    import tiktoken
+
+    get_encoding_calls: list[str] = []
+
+    def unavailable_encoding(name: str):
+        get_encoding_calls.append(name)
+        raise RuntimeError("encoding asset is unavailable offline")
+
+    monkeypatch.setattr(tiktoken, "get_encoding", unavailable_encoding)
+    messages = [
+        UserMessage(content="database"),
+        AssistantMessage(content="retry database"),
+    ]
+
+    archive = _archive(tmp_path, messages)
+    result = recall_compressed_context(
+        workspace_dir=str(tmp_path),
+        session_id="session-1",
+        memory_id=archive.memory_id,
+        query="database retry",
+    )
+
+    assert result["chunks"]
+    assert get_encoding_calls == []
 
 
 def test_archive_extracts_query_text_from_structured_user_content(tmp_path):

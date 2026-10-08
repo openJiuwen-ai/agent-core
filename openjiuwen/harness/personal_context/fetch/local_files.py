@@ -46,6 +46,7 @@ class LocalFilesFetchService(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         del run_id
         try:
@@ -77,7 +78,9 @@ class LocalFilesFetchService(ContextFetchService):
                 if candidate_in_time_range(candidate_time, self._config.time_range, run_started_at):
                     candidates.append(candidate)
             limit = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
-            return select_latest_candidates(tuple(candidates), cursor, limit)
+            return select_latest_candidates(
+                tuple(candidates), cursor, limit, retry_quarantined=include_failed
+            )
         except asyncio.CancelledError:
             raise
         except BaseError:
@@ -107,20 +110,46 @@ class LocalFilesFetchService(ContextFetchService):
             for start in range(0, len(candidates), _BATCH_SIZE):
                 end = start + _BATCH_SIZE
                 chunk = candidates[start:end]
-                materialized: list[dict[str, Any]] = []
-                for candidate in chunk:
-                    materialized.append(
-                        await retry_provider_read(
+                items: list[RawChangeItem] = []
+                success_offsets: list[int] = []
+                skipped_offsets: list[int] = []
+                failures: list[dict[str, object]] = []
+                for offset, candidate in enumerate(chunk):
+                    item_ref = _candidate_item_ref(candidate, root=root)
+                    try:
+                        materialized = await retry_provider_read(
                             partial(asyncio.to_thread, _materialize_candidate, candidate),
                             provider="local_files",
                             operation_name="file_read",
                             classify=classify_file_error,
                         )
-                    )
-                items = tuple(_change_item(root, change) for change in materialized)
+                    except BaseError as exc:
+                        if exc.code != StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR.code:
+                            raise
+                        failures.append(
+                            {
+                                "offset": offset,
+                                "item_ref": item_ref,
+                                "code": StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR.code,
+                                "message": "文件读取或解析失败",
+                            }
+                        )
+                        continue
+                    content = materialized.get("content")
+                    if not isinstance(content, str):
+                        raise _fetch_error("local file materialization returned invalid content")
+                    if not content.strip():
+                        skipped_offsets.append(offset)
+                        continue
+                    items.append(_change_item(root, materialized))
+                    success_offsets.append(offset)
                 yield FetchBatch(
                     batch_id=f"batch-{batch_index}",
-                    items=items,
+                    items=tuple(items),
+                    attempted_count=len(chunk),
+                    success_offsets=tuple(success_offsets),
+                    skipped_offsets=tuple(skipped_offsets),
+                    failures=tuple(failures),
                     next_cursor=next_cursor,
                 )
                 batch_index += 1
@@ -138,6 +167,10 @@ class LocalFilesFetchService(ContextFetchService):
 
 def _file_error(message: str, cause: BaseException | None = None) -> BaseError:
     return build_error(StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR, error_msg=message, cause=cause)
+
+
+def _fetch_error(message: str, cause: BaseException | None = None) -> BaseError:
+    return build_error(StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR, error_msg=message, cause=cause)
 
 
 def _root_dir(config: PersonalContextFetchServiceConfig) -> Path:
@@ -161,6 +194,22 @@ def _integer(value: object, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"cursor {name} is invalid")
     return value
+
+
+def _candidate_item_ref(candidate: Mapping[str, object], *, root: Path) -> str:
+    relative_path = candidate.get("relative_path")
+    path_value = candidate.get("path")
+    extension = candidate.get("extension")
+    if not isinstance(relative_path, str) or not relative_path.strip() or len(relative_path) > 256:
+        raise _fetch_error("local file candidate relative path is invalid")
+    if not isinstance(path_value, (str, Path)) or not isinstance(extension, str):
+        raise _fetch_error("local file candidate shape is invalid")
+    path = Path(path_value).resolve()
+    if not _inside(path, root) or path.relative_to(root).as_posix() != relative_path:
+        raise _fetch_error("local file candidate path is invalid")
+    _integer(candidate.get("mtime_ns"), name="mtime_ns")
+    _integer(candidate.get("size"), name="size")
+    return relative_path
 
 
 def _inside(path: Path, root: Path) -> bool:

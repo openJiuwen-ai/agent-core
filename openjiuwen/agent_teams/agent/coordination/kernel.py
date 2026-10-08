@@ -326,9 +326,13 @@ class CoordinationKernel:
         if memory_manager:
             await memory_manager.extract_after_round()
         if host.role == TeamRole.LEADER:
+            paused_teammates = tuple(host.spawn_manager.spawned_handles)
             await self._mark_live_teammates(MemberStatus.PAUSED)
             await host.spawn_manager.cancel_recovery_tasks()
             await host.spawn_manager.shutdown_all_handles()
+            team_backend = host.infra.team_backend
+            if team_backend is not None and host.team_name is not None:
+                await team_backend.db.member.reset_paused_member_execution_status(host.team_name, paused_teammates)
             self._persist_team_lifecycle("paused")
             # Make a later cold start (pause -> stop -> start) continue this
             # round rather than idle waiting for a new message.
@@ -592,6 +596,11 @@ class CoordinationKernel:
             mailbox_wakeup = event.event_type == TeamEvent.MESSAGE and (
                 host.role == TeamRole.LEADER or event.get_payload().to_member_name == local_member_name
             )
+            if event.event_type == TeamEvent.BROADCAST and event.sender_id == local_member_name:
+                from openjiuwen.agent_teams.group_chat.handler import group_metadata
+
+                row = await host.infra.team_backend.db.message.get_message(event.get_payload().message_id)
+                mailbox_wakeup = row is not None and bool(group_metadata(row))
             if local_member_name and event.sender_id == local_member_name and not mailbox_wakeup:
                 team_logger.debug("ignoring self-published event: {}", event.event_type)
                 # F_62: the scheduler must observe board changes the leader

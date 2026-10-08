@@ -82,3 +82,92 @@ def test_smoke_subprocess_receives_supplied_paper(tmp_path):
         log_dir=log_dir, candidate_hash="test", artifact_path=str(paper),
     )
     assert result.ok, result.errors
+
+
+_TRACE_SCRIPT = (
+    "import argparse\n"
+    "p = argparse.ArgumentParser()\n"
+    "p.add_argument('--method')\n"
+    "p.add_argument('--smoke-test', action='store_true')\n"
+    "p.add_argument('--output')\n"
+    "p.parse_args()\n"
+    "raise ValueError('paired_discordance')\n"
+)
+
+_CONTRACT_FAIL_SCRIPT = (
+    "import argparse, json\n"
+    "from pathlib import Path\n"
+    "p = argparse.ArgumentParser()\n"
+    "p.add_argument('--method')\n"
+    "p.add_argument('--smoke-test', action='store_true')\n"
+    "p.add_argument('--output')\n"
+    "args = p.parse_args()\n"
+    "Path(args.output).write_text(json.dumps({\n"
+    "    'method': args.method, 'n_questions': 0,\n"
+    "    'model_call_count': 0, 'per_question': [],\n"
+    "}))\n"
+)
+
+
+def test_smoke_nonzero_exit_stores_error_tree_on_validation_and_manifest(tmp_path):
+    from datetime import UTC, datetime
+
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.schemas import (
+        ExperimentPlan,
+    )
+
+    code_dir = tmp_path / "code"
+    code_dir.mkdir()
+    (code_dir / "run.py").write_text(_TRACE_SCRIPT, encoding="utf-8")
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    agent = CodeImplementationAgent({"code_implementation": {"smoke_test_timeout_seconds": 10}})
+    validation = agent._run_smoke_and_metrics(
+        "error-tree",
+        code_dir,
+        ["proposed"],
+        cycle=1,
+        log_dir=log_dir,
+        candidate_hash="test",
+    )
+    assert not validation.ok
+    tree = validation.error_trees["proposed"]
+    assert tree.startswith("Traceback (most recent call last):")
+    assert "ValueError: paired_discordance" in tree
+    now = datetime.now(UTC)
+    output = agent._build_output(
+        ExperimentPlan(
+            run_id="error-tree",
+            design_session_id="experiment-design:error-tree",
+            design_path="design.md",
+            code_agent_instruction_path="instruction.md",
+            created_at=now,
+            updated_at=now,
+        ),
+        code_dir,
+        ["proposed"],
+        "agent done",
+        validation=validation,
+    )
+    assert output.implementation.error_trees["proposed"] == tree
+    assert "exit_code=" in output.implementation.smoke_failures["proposed"]
+
+
+def test_smoke_metrics_contract_failure_omits_error_tree(tmp_path):
+    code_dir = tmp_path / "code"
+    code_dir.mkdir()
+    (code_dir / "run.py").write_text(_CONTRACT_FAIL_SCRIPT, encoding="utf-8")
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    agent = CodeImplementationAgent({"code_implementation": {"smoke_test_timeout_seconds": 10}})
+    validation = agent._run_smoke_and_metrics(
+        "contract-fail",
+        code_dir,
+        ["proposed"],
+        cycle=1,
+        log_dir=log_dir,
+        candidate_hash="test",
+    )
+    assert not validation.ok
+    assert "proposed" not in validation.error_trees
+    assert "metrics contract failed" in validation.failures["proposed"]

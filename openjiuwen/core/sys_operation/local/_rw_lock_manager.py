@@ -94,11 +94,14 @@ class ReadWriteLockManager:
         task = cls._cleanup_task
         cls._cleanup_task = None
         if task is not None and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+            # A stale task is bound to a previous (closed) event loop and can
+            # never progress again; only cancel/await a task on this loop.
+            if task.get_loop() is asyncio.get_running_loop():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
         await cls.close_locks()
         await cls.cleanup_expired_locks()
@@ -110,8 +113,13 @@ class ReadWriteLockManager:
     @classmethod
     def start(cls) -> None:
         """Start the periodic cleanup task."""
-        if cls._cleanup_task is not None and not cls._cleanup_task.done():
-            return
+        task = cls._cleanup_task
+        if task is not None and not task.done():
+            # A task left over from a previous (closed) event loop is dead
+            # weight; discard it and start a fresh one on the current loop.
+            if task.get_loop() is asyncio.get_running_loop():
+                return
+            cls._cleanup_task = None
 
         lock_dir = cls.ensure_lock_dir()
         cls._cleanup_task = asyncio.get_running_loop().create_task(cls._run_cleanup())

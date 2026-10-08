@@ -992,13 +992,19 @@ class BrowserService:
         except asyncio.CancelledError:
             pass
 
-    def _clear_task_scoped_state(self) -> None:
+    async def _clear_task_scoped_state(self) -> None:
         """Drop observers and task/session state without touching the profile."""
         self._browser_agent = None
+        current = asyncio.current_task()
+        pending = set()
         for tasks in self._inflight_tasks.values():
             for task in tuple(tasks):
-                if not task.done():
-                    task.cancel()
+                if task is not current and not task.done():
+                    pending.add(task)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         self._inflight_tasks.clear()
         self._locks.clear()
         self._sessions.clear()
@@ -1013,7 +1019,7 @@ class BrowserService:
             return False
         if not self._registry_acquired:
             await self._stop_heartbeat()
-            self._clear_task_scoped_state()
+            await self._clear_task_scoped_state()
             self.started = False
             self._registered_cdp_endpoint = ""
             self._connection_healthy = False
@@ -1037,7 +1043,7 @@ class BrowserService:
         self._registered_cdp_endpoint = ""
         self._connection_healthy = False
         self._last_heartbeat_ok = None
-        self._clear_task_scoped_state()
+        await self._clear_task_scoped_state()
 
         next_owner = release.next_heartbeat_owner
         if next_owner is not None and next_owner.started:

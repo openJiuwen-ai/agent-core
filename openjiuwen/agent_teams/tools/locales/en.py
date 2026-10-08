@@ -552,11 +552,13 @@ STRINGS: dict[str, str] = {
     "swarmflow_worker.schema": (
         "You are a single-shot swarmflow worker. Read the task in the user message, "
         "do the work, then call the `structured_output` tool EXACTLY ONCE with the "
-        "structured result conforming to its input schema. IMPORTANT: `structured_output` "
-        "is the ONLY way to submit your result — if you do NOT call it, the task is "
-        "considered FAILED and your text output is discarded. Do NOT write the result "
-        "as plain text — it is only captured through the tool call. After calling "
-        "`structured_output`, stop immediately."
+        "structured result conforming to its input schema: provide every required "
+        "property at every nesting level (including each item inside arrays), with "
+        "the exact property names and structure the schema defines. IMPORTANT: "
+        "`structured_output` is the ONLY way to submit your result — if you do NOT "
+        "call it, the task is considered FAILED and your text output is discarded. "
+        "Do NOT write the result as plain text — it is only captured through the "
+        "tool call. After calling `structured_output`, stop immediately."
     ),
     "swarmflow_worker.free": (
         "You are a single-shot swarmflow worker. Read the task in the user message, "
@@ -564,8 +566,10 @@ STRINGS: dict[str, str] = {
     ),
     "structured_output.reminder": (
         "[IMPORTANT] You MUST submit your result by calling the `structured_output` tool. "
-        "Do NOT write the result in your text. This is the ONLY way to submit — "
-        "not calling the tool = task failure."
+        "Do NOT write the result in your text. The arguments must strictly conform to "
+        "the tool's input schema: every required property at every nesting level, with "
+        "the exact names and structure. This is the ONLY way to submit — not calling "
+        "the tool = task failure."
     ),
     # ===== async control tools (list / output / cancel) =======================
     # async_tasks_list._desc / async_task_output._desc / async_task_cancel._desc

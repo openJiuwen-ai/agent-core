@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Public group conversation records, separate from the team's internal mailbox."""
+"""Public group conversation projections of persisted broadcast messages."""
 
 from typing import Any
 
@@ -24,6 +24,7 @@ class ConversationMessage(BaseModel):
 
 class ConversationAppendResult(BaseModel):
     message: ConversationMessage
+    # Eligible mentioned agents, not a Harness delivery acknowledgement.
     notified_members: list[str] = Field(default_factory=list)
     duplicate: bool = False
     context_path: str

@@ -9,7 +9,11 @@ import pytest
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.llm.reasoning import resolve_reasoning_plan
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import load_member_optimizer_model
-from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import load_model_config_ref, with_rsi_reasoning_policy
+from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import (
+    load_model_config_ref,
+    with_rsi_output_budget,
+    with_rsi_reasoning_policy,
+)
 
 
 @pytest.mark.parametrize("nested", [False, True])
@@ -29,10 +33,10 @@ def test_frontend_enabled_is_overridden_without_mutating_config(tmp_path, nested
     assert source == original
     path = tmp_path / "model.json"
     path.write_text(json.dumps(source), encoding="utf-8")
-    assert load_model_config_ref(str(path)) == adjusted
+    assert load_model_config_ref(str(path)) == with_rsi_output_budget(adjusted)
     built = load_member_optimizer_model(str(path))
     assert built.model_config.reasoning.mode == "disabled"
-    assert built.model_config.max_tokens == 100000
+    assert built.model_config.max_tokens is None
     request = adjusted.get("model", adjusted)["model_request_config"]
     assert request["extra_body"] == {"custom_option": "keep"}
     plan = resolve_reasoning_plan(ModelClientConfig(**model["model_client_config"]), ModelRequestConfig(**request))

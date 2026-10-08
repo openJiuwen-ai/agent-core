@@ -23,18 +23,18 @@ from openjiuwen.harness.subagents.browser_agent import (
     build_browser_agent_config,
     create_browser_agent,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    CORE_BROWSER_TOOL_NAMES,
+)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_rail import (
+    BrowserWorkingContextRail,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserRunGuardrails,
     RuntimeSettings,
 )
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
-    CORE_BROWSER_TOOL_NAMES,
-)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserRuntimeRail,
-)
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_rail import (
-    BrowserWorkingContextRail,
 )
 
 
@@ -173,14 +173,19 @@ def test_browser_agent_prompt_enforces_convergent_browser_strategy() -> None:
     assert "direct search-results URL" in english
     assert "browser_batch_interact" in english
     assert "observable condition waits" in english
-    assert "navigate directly to that URL" in english
-    assert "Stop immediately" in english
+    assert "Navigate genuine detail hrefs directly" in english
+    assert "user's actual goal" in english
+    assert "not slot coverage" in english
     assert "one runtime-maintained <browser_working_context>" in english
     assert "A fresh browser capture occurs initially" in english
     assert "runtime directive requires replanning" in english
     assert "直接构造搜索结果 URL" in chinese
     assert "可观察条件" in chinese
-    assert "直接导航该 URL" in chinese
+    assert "导航真实详情 URL" in chinese
+    assert "AI/knowledge/weather panels are usable" in english
+    assert "AI/知识/天气答案卡" in chinese
+    assert "no traditional" in english
+    assert "推断字段齐全只代表可以结束" in chinese
     assert "立即结束" in chinese
     assert "<browser_working_context>" in chinese
     assert "runtime 要求重新规划" in chinese

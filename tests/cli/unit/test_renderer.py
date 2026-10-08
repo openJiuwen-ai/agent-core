@@ -47,32 +47,57 @@ async def _async_iter(
 class TestRenderStream:
     """Tests for stream rendering logic."""
 
-    def test_write_terminal_uses_stdout_encoding_with_os_write(
+    def test_write_terminal_uses_stdout_text_stream(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Terminal writes should respect the active stdout encoding."""
+        """Unicode output should use and flush the active text stream."""
 
         module = sys.modules[render_stream.__module__]
-        payloads: list[tuple[int, bytes]] = []
 
         class FakeStdout:
             encoding = "utf-8"
             errors = "strict"
 
+            def __init__(self) -> None:
+                self.writes: list[str] = []
+                self.flush_count = 0
+
+            def write(self, text: str) -> None:
+                self.writes.append(text)
+
+            def flush(self) -> None:
+                self.flush_count += 1
+
+        stdout = FakeStdout()
+
         monkeypatch.setattr(
             module,
             "sys",
-            type("FakeSys", (), {"stdout": FakeStdout()})(),
-        )
-        monkeypatch.setattr(
-            module.os,
-            "write",
-            lambda fd, data: payloads.append((fd, data)),
+            type("FakeSys", (), {"stdout": stdout})(),
         )
 
-        module._write_terminal("中文")
+        module._write_terminal("中文🙂")
 
-        assert payloads == [(1, "中文".encode("utf-8"))]
+        assert stdout.writes == ["中文🙂"]
+        assert stdout.flush_count == 1
+
+    @pytest.mark.asyncio
+    async def test_unicode_stream_uses_stdout_text_stream(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """LLM chunks should reach the same text stream as Rich output."""
+        output = io.StringIO()
+        monkeypatch.setattr(sys, "stdout", output)
+        console = Console(file=output, force_terminal=False)
+
+        result = await render_stream(
+            _async_iter([FakeChunk("llm_output", 0, {"content": "你好🙂"})]),
+            console,
+        )
+
+        assert result.text == "你好🙂"
+        assert output.getvalue().count("你好🙂") == 1
+        assert output.getvalue().endswith("\n")
 
     @pytest.mark.asyncio
     async def test_llm_output_accumulated(self) -> None:

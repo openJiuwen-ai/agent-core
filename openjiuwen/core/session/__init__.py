@@ -4,6 +4,7 @@ import asyncio
 import contextvars
 import functools
 import inspect
+from contextlib import aclosing
 from typing import Any
 
 from openjiuwen.core.session.checkpointer import Checkpointer
@@ -122,8 +123,9 @@ def with_session(session: Any = None):
                 previous = _current_session.get()
                 token = _current_session.set(target_session)
                 try:
-                    async for value in func(*args, **kwargs):
-                        yield value
+                    async with aclosing(func(*args, **kwargs)) as source:
+                        async for value in source:
+                            yield value
                 finally:
                     _reset_current_session(token, previous, target_session)
 

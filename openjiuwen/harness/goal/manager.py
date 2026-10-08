@@ -14,8 +14,9 @@ from openjiuwen.harness.goal.schema import (
     GoalRecord,
     GoalStatus,
 )
-from openjiuwen.harness.task_loop.event_manager import EventManager
+from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.schema.interaction import InteractionEvent, RoundWorkItem
+from openjiuwen.harness.task_loop.event_manager import EventManager
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,15 @@ class GoalManager:
         self._cancel_active_round = cancel_active_round
         self._emit_event = emit_event
         self._notify_work = notify_work
-        self._language = language
+        self.language = language
+
+    @property
+    def language(self) -> str:
+        return self._language
+
+    @language.setter
+    def language(self, value: str) -> None:
+        self._language = resolve_language(value)
 
     def get_store(self, session_id: str | None = None) -> GoalStore:
         """Expose the session store for read-only tools and rails only."""

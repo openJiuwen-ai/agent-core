@@ -749,12 +749,7 @@ class TeamAgent(BaseAgent):
     async def invoke(self, inputs, session=None):
         team_logger.info("[{}] invoke start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
-        # Cache the user query so CoordinationManager can pass it to the
-        # memory pipeline during start(). ``.get`` default does not cover a
-        # present-but-None value, so normalize an empty/None query to "".
-        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
-        self._state.pending_user_query = raw_query
-        routed_payloads = self._initial_leader_route_payloads(raw_query)
+        raw_query, routed_payloads = self._prepare_initial_input(inputs)
         with self._observability_execution_scope(session):
             await self._coordination.start(session)
             try:
@@ -812,12 +807,7 @@ class TeamAgent(BaseAgent):
     async def stream(self, inputs, session=None, stream_modes=None):
         team_logger.info("[{}] stream start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
-        # ``.get`` default does not cover a present-but-None value, so
-        # normalize an empty/None query to "".
-        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
-        self._state.pending_user_query = raw_query
-        routed_payloads = self._initial_leader_route_payloads(raw_query)
-
+        raw_query, routed_payloads = self._prepare_initial_input(inputs)
         with self._observability_execution_scope(session):
             await self._coordination.start(session)
             try:
@@ -945,13 +935,30 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             await harness.send(initial_message)
 
-    def _initial_leader_route_payloads(self, raw_query: str) -> list["InteractPayload"] | None:
-        """Parse leader initial input when it uses explicit team routing."""
-        if not raw_query or self.role != TeamRole.LEADER or self.team_backend is None:
+    def _prepare_initial_input(self, inputs):
+        """Prepare routing and cache only non-group input for the memory pipeline."""
+        from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
+
+        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
+        payloads = self._initial_leader_route_payloads(inputs)
+        is_group_input = payloads and isinstance(payloads[0], GroupChatMessage)
+        self._state.pending_user_query = "" if is_group_input else raw_query
+        return raw_query, payloads
+
+    def _initial_leader_route_payloads(self, inputs) -> list["InteractPayload"] | None:
+        """Route initial structured group input and existing text directives."""
+        if self.role != TeamRole.LEADER or self.team_backend is None:
             return None
 
+        from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
         from openjiuwen.agent_teams.interaction.router import parse_interact_str
 
+        raw_query = inputs.get("query", inputs) if isinstance(inputs, dict) else inputs
+        group_input = GroupChatMessage.from_wire(raw_query)
+        if group_input is not None:
+            return [group_input]
+        if not isinstance(raw_query, str) or not raw_query:
+            return None
         parsed = parse_interact_str(raw_query)
         if parsed and any(not isinstance(payload, GodViewMessage) for payload in parsed):
             return parsed
@@ -963,6 +970,15 @@ class TeamAgent(BaseAgent):
 
         result = await TeamRuntimeManager.dispatch_payloads(self, payloads)
         if result.ok:
+            from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
+            from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
+
+            if isinstance(payloads[0], GroupChatMessage):
+                await self._stream_controller.stream_queue.put(TeamOutputSchema(
+                    type="message", index=0,
+                    payload={"event_type": "team.group_message.accepted", **(result.data or {})},
+                    source_member=self._member_name(), role=self.role,
+                ))
             return
 
         await self._emit_interact_failed(result.reason)

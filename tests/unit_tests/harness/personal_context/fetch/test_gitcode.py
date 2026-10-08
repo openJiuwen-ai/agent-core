@@ -19,9 +19,11 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
+from openjiuwen.harness.personal_context.fetch import gitcode as gitcode_module
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
 from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.gitcode import GitCodeFetchService
+from openjiuwen.harness.personal_context.models import RawChangeItem
 
 
 def gitcode_config(
@@ -123,6 +125,88 @@ async def _batches(
 
 async def _no_retry_sleep(_delay: float) -> None:
     return None
+
+
+def _fetch_item(index: int) -> RawChangeItem:
+    return RawChangeItem(
+        logical_id=f"gitcode:item:{index}",
+        revision_id=f"revision-{index}",
+        operation="upsert",
+        title=f"Item {index}",
+        content=f"Body {index}",
+        original_ref=f"https://gitcode.com/acme/demo/items/{index}",
+    )
+
+
+def _fetch_candidate(tmp_path: Path, index: int, *, code: bool = False) -> dict[str, object]:
+    candidate: dict[str, object] = {
+        "stable_id": f"gitcode:item:{index}",
+        "revision_id": f"revision-{index}",
+        "candidate_time": "2026-09-21T12:00:00Z",
+        "resource_lane": "code" if code else "issue",
+        "locator": f"https://gitcode.com/acme/demo/items/{index}",
+        "item": _fetch_item(index),
+    }
+    if code:
+        candidate.update(
+            owner="acme",
+            repo="demo",
+            default_branch="main",
+            head_sha="a" * 40,
+            materialized_source_path=str((tmp_path / "candidate").resolve()),
+        )
+    return candidate
+
+
+@pytest.mark.asyncio
+async def test_gitcode_fetch_isolates_one_code_materialization_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = GitCodeFetchService(gitcode_config(tmp_path), home=tmp_path)
+
+    async def fail(*_args):
+        raise gitcode_module._fetch_error("GitCode code materialization failed", TimeoutError("private"))
+
+    monkeypatch.setattr(service, "_materialize_code", fail)
+    candidates = (_fetch_candidate(tmp_path, 0, code=True), _fetch_candidate(tmp_path, 1))
+
+    batch = await service.fetch(run_id="run-1", cursor=None, candidates=candidates).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert batch.items == (_fetch_item(1),)
+    assert batch.failures[0] == {
+        "offset": 0,
+        "item_ref": "gitcode:item:0",
+        "code": 154003,
+        "message": "条目读取或解析失败",
+    }
+
+
+@pytest.mark.asyncio
+async def test_gitcode_fetch_does_not_quarantine_authorization_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = GitCodeFetchService(gitcode_config(tmp_path), home=tmp_path)
+
+    async def denied(*_args):
+        cause = aiohttp.ClientResponseError(
+            request_info=SimpleNamespace(real_url="https://api.gitcode.com/fake"),
+            history=(),
+            status=403,
+        )
+        raise gitcode_module._fetch_error("GitCode repository read failed", cause)
+
+    monkeypatch.setattr(service, "_materialize_code", denied)
+
+    with pytest.raises(BaseError):
+        await service.fetch(
+            run_id="run-1",
+            cursor=None,
+            candidates=(_fetch_candidate(tmp_path, 0, code=True),),
+        ).__anext__()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows read-only cleanup regression")

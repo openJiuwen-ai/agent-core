@@ -361,13 +361,16 @@ class TeamHarness:
 {OPENJIUWEN_HOME}/                                  # 默认 ~/.openjiuwen
 ├── {member_name}_workspace/                        # independent DeepAgent
 └── .agent_teams/                                   # AGENT_TEAMS_HOME
+    ├── jiuwen_team_members/                        # 成员真实目录（block C 拉平）
+    │   ├── {member}/                               # predefined（跨 team 共享）
+    │   └── {team}#{member}/                        # dynamic（prefix 开）
     ├── remote_repos/                               # worktree_remote shallow clones
     │   └── <sha256(repo_url)[:12]>/
     └── {team_name}/
         ├── team-workspace/
         │   └── team-memory/                        # team_memory_dir
         ├── workspaces/
-        │   └── {member}_workspace/                 # stable_base 成员工作区
+        │   └── {member}_workspace/                 # stable_base 成员工作区（link → jiuwen_team_members/）
         └── team.db                                 # 默认 sqlite
 ```
 

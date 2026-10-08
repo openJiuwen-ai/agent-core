@@ -18,8 +18,8 @@ from openjiuwen.rsi.harness_rsi.member_optimizer import action_executor
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("configured,expected", [(4096, 4096), (16384, 16384), (None, 8192)])
-async def test_artifact_generation_respects_configured_budget(monkeypatch, configured, expected):
+@pytest.mark.parametrize("configured", [4096, 16384, None])
+async def test_artifact_generation_does_not_add_output_cap(monkeypatch, configured):
     model = SimpleNamespace(
         model_config=ModelRequestConfig(max_tokens=configured),
         invoke=AsyncMock(return_value=SimpleNamespace(content='{"status":"succeeded"}')),
@@ -31,7 +31,7 @@ async def test_artifact_generation_respects_configured_budget(monkeypatch, confi
 
     assert output == '{"status":"succeeded"}'
     assert model.invoke.await_count == 1
-    assert model.invoke.await_args.kwargs["max_tokens"] == expected
+    assert "max_tokens" not in model.invoke.await_args.kwargs
     assert model.invoke.await_args.kwargs["tools"] is None
 
 
@@ -108,7 +108,8 @@ async def test_artifact_generation_preserves_wire_model_options(
     assert len(requests) == 1
     body = requests[0]
     assert body["model"] == model_name
-    assert body["max_tokens"] == 100000
+    assert "max_tokens" not in body
+    assert "max_completion_tokens" not in body
     if model_name.startswith("deepseek"):
         assert body["thinking"] == {"type": "disabled"}
     elif model_name == "qwen-plus":

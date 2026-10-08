@@ -23,6 +23,7 @@ transformation for both regular functions and generators.
 """
 
 import inspect
+from contextlib import aclosing
 from functools import lru_cache, wraps
 from typing import (
     Any,
@@ -264,8 +265,9 @@ def create_emit_before_decorator(
                 await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
                                   extra_kwargs=extra_kwargs)
                 _remove_session_if_not_needed(func, kwargs)
-                async for item in func(*args, **kwargs):
-                    yield item
+                async with aclosing(func(*args, **kwargs)) as source:
+                    async for item in source:
+                        yield item
 
             return async_gen_wrapper
 
@@ -343,9 +345,10 @@ def create_emit_after_decorator(
                 async def async_gen_once_wrapper(*args: Any, **kwargs: Any) -> Any:
                     collected: list[Any] = []
                     _remove_session_if_not_needed(func, kwargs)
-                    async for item in func(*args, **kwargs):
-                        collected.append(item)
-                        yield item
+                    async with aclosing(func(*args, **kwargs)) as source:
+                        async for item in source:
+                            collected.append(item)
+                            yield item
                     await _do_trigger(
                         framework, event, args, kwargs,
                         pass_args=pass_args,
@@ -358,14 +361,15 @@ def create_emit_after_decorator(
             @wraps(func)
             async def async_gen_per_item_wrapper(*args: Any, **kwargs: Any) -> Any:
                 _remove_session_if_not_needed(func, kwargs)
-                async for item in func(*args, **kwargs):
-                    await _do_trigger(
-                        framework, event, args, kwargs,
-                        pass_args=pass_args,
-                        extra={item_key: item},
-                        extra_kwargs=extra_kwargs,
-                    )
-                    yield item
+                async with aclosing(func(*args, **kwargs)) as source:
+                    async for item in source:
+                        await _do_trigger(
+                            framework, event, args, kwargs,
+                            pass_args=pass_args,
+                            extra={item_key: item},
+                            extra_kwargs=extra_kwargs,
+                        )
+                        yield item
 
             return async_gen_per_item_wrapper
 
@@ -652,8 +656,9 @@ def _make_transform_io_decorator(
                     "expected async generator function, "
                     f"got {type(async_gen)}"
                 )
-            async for item in async_gen:
-                yield await output_fn(item)
+            async with aclosing(async_gen) as source:
+                async for item in source:
+                    yield await output_fn(item)
 
         return async_gen_wrapper  # type: ignore[return-value]
 

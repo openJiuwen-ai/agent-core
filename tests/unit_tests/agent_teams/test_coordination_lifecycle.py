@@ -25,6 +25,12 @@ from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TeamEvent,
 )
+from openjiuwen.agent_teams.schema.status import (
+    EXECUTION_TRANSITIONS,
+    ExecutionStatus,
+    MemberStatus,
+    is_valid_transition,
+)
 from openjiuwen.agent_teams.schema.team import TeamRole
 
 
@@ -212,6 +218,58 @@ async def test_stop_hard_cancels_the_round():
 
     host.stream_controller.drain_agent_task.assert_awaited_once()
     host.stream_controller.pause_agent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_pause_settles_stopped_teammate_execution_before_restart() -> None:
+    """A paused teammate reaches IDLE after its runtime stops, then can restart."""
+    member = SimpleNamespace(
+        member_name="poet-3",
+        status=MemberStatus.BUSY.value,
+        execution_status=ExecutionStatus.RUNNING.value,
+    )
+    events: list[str] = []
+
+    async def update_status(member_name: str, team_name: str, status: str) -> bool:
+        assert (member_name, team_name) == ("poet-3", "test-team")
+        member.status = status
+        return True
+
+    async def reset_execution(team_name: str, member_names: tuple[str, ...]) -> int:
+        assert (team_name, member_names) == ("test-team", ("poet-3",))
+        events.append("reset")
+        member.execution_status = ExecutionStatus.IDLE.value
+        return 1
+
+    async def shutdown_handles() -> None:
+        events.append("shutdown")
+        host.spawn_manager.spawned_handles.clear()
+
+    dao = SimpleNamespace(
+        update_member_status=update_status,
+        reset_paused_member_execution_status=reset_execution,
+    )
+    host = _make_kernel_host()
+    host.infra.team_backend = SimpleNamespace(
+        list_member_roster=AsyncMock(return_value=[member]),
+        db=SimpleNamespace(member=dao),
+    )
+    host.spawn_manager.spawned_handles = {"poet-3": object()}
+    host.spawn_manager.shutdown_all_handles = AsyncMock(side_effect=shutdown_handles)
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    await kernel.pause()
+
+    assert member.status == MemberStatus.PAUSED.value
+    assert member.execution_status == ExecutionStatus.IDLE.value
+    assert events == ["shutdown", "reset"]
+    assert is_valid_transition(
+        ExecutionStatus(member.execution_status),
+        ExecutionStatus.STARTING,
+        EXECUTION_TRANSITIONS,
+    )
 
 
 @pytest.mark.asyncio

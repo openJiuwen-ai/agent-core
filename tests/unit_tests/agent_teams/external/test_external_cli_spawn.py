@@ -380,10 +380,10 @@ async def test_build_cli_runtime_dispatches_codex_to_protocol_harness():
     assert config.turn_idle_retries == 2
     assert config.mcp_default_tools_approval_mode == "approve"
     assert "OPENJIUWEN_TEAM_JOIN" in config.env
-    mcp_servers = runtime._extra_mcp_servers
-    assert [server.name for server in mcp_servers] == ["openjiuwen-team"]
-    assert mcp_servers[0].command == ("openjiuwen-team-mcp",)
+    assert runtime._extra_mcp_servers == []
     context = runtime._context_source
+    assert context.tools is None
+    assert runtime._bound_tools is None
     assert context.agent_id == "ext_team_dev-1"
     assert context.system_prompt == "ROLE: isolated developer"
     assert context.host_session_id == "sess-1"

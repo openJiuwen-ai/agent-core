@@ -13,6 +13,7 @@ from json_repair import repair_json
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import Model
+from openjiuwen.core.foundation.llm.request_context import disabled_thinking_fallback_scope
 from openjiuwen.symphony.shared.identity import sanitize_metadata, stable_metadata_sha256
 
 LOGGER = logging.getLogger(__name__)
@@ -52,13 +53,14 @@ async def invoke_json(
     if timeout is not None:
         invoke_kwargs["timeout"] = timeout
     try:
-        response = await model.invoke(
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            **invoke_kwargs,
-        )
+        with disabled_thinking_fallback_scope():
+            response = await model.invoke(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                **invoke_kwargs,
+            )
         content = _extract_text_content(response)
         if not content:
             raise ValueError("response content is empty")

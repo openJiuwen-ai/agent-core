@@ -9,10 +9,10 @@ import pytest
 
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-
 from tests.unit_tests.fixtures.mock_llm import MockLLMModel
 
 
@@ -240,6 +240,44 @@ async def test_stream_unexpected_exception_saves_context_and_emits_error():
     # This stream was explicitly marked as workflow-owned, so the agent must
     # not commit the caller's session in the abort path.
     session.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owned_session", [False, True])
+async def test_stream_abort_error_propagates_without_error_result(owned_session):
+    """Framework aborts must reach stream callers after context persistence."""
+    agent = ReActAgent(card=AgentCard(name="stream_abort_error_agent"))
+    context = MagicMock()
+    context.get_messages.return_value = [UserMessage(content="查一下热搜")]
+    agent.context_engine = MagicMock()
+    agent.context_engine.get_context.return_value = context
+    agent.context_engine.save_contexts = AsyncMock()
+    agent.is_agent_session = owned_session
+    abort = AbortError("blocked by guardrail")
+    agent.invoke = AsyncMock(side_effect=abort)
+    agent._write_invoke_result_to_stream = AsyncMock()
+    session = MagicMock()
+    session.close_stream = AsyncMock()
+    session.stream_iterator.return_value = _EmptyAsyncIterator()
+
+    with pytest.raises(AbortError) as exc_info:
+        async for _ in agent._inner_stream(
+                session=session,
+                inputs={"query": "查一下热搜"},
+                need_cleanup=owned_session,
+        ):
+            pass
+
+    assert exc_info.value is abort
+    agent._write_invoke_result_to_stream.assert_not_awaited()
+    agent.context_engine.save_contexts.assert_awaited_once_with(session)
+    context.set_messages.assert_called_once()
+    if owned_session:
+        session.close_stream.assert_awaited_once()
+        session.commit.assert_called_once()
+    else:
+        session.close_stream.assert_not_awaited()
+        session.commit.assert_not_called()
 
 
 @pytest.mark.asyncio

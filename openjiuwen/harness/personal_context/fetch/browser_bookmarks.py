@@ -119,7 +119,10 @@ def _redact_userinfo_url(url: str) -> str | None:
 def _normalize_folder_path(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("bookmark folder path must be a string")
-    return "/".join(part.strip() for part in value.replace("\\", "/").split("/") if part.strip())
+    parts = [part.strip() for part in value.replace("\\", "/").split("/") if part.strip()]
+    if parts and parts[0] == "收藏栏":
+        parts[0] = _ROOT_NAMES["bookmark_bar"]
+    return "/".join(parts)
 
 
 def _folder_matches(path: str, filters: tuple[str, ...], *, include_subfolders: bool) -> bool:
@@ -182,9 +185,12 @@ def _source_values(config: Any) -> tuple[Path, str, tuple[str, ...], bool, bool]
     try:
         normalized_filters: list[str] = []
         for item in raw_filters:
-            filter_path = _normalize_folder_path(item)
-            if filter_path:
-                normalized_filters.append(filter_path)
+            if not isinstance(item, str):
+                raise ValueError("bookmark folder path must be a string")
+            for path in re.split(r"[,，]", item):
+                filter_path = _normalize_folder_path(path)
+                if filter_path and filter_path not in normalized_filters:
+                    normalized_filters.append(filter_path)
         filters = tuple(normalized_filters)
     except ValueError as exc:
         raise _fetch_error("bookmark folder path is invalid", exc) from None
@@ -515,6 +521,7 @@ class BrowserBookmarksFetchService(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         del run_id
         try:
@@ -568,7 +575,9 @@ class BrowserBookmarksFetchService(ContextFetchService):
                 if candidate_in_time_range(candidate_time, self._config.time_range, run_started_at):
                     current[logical_id] = candidate
             max_items = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
-            return select_latest_candidates(tuple(current.values()), cursor, max_items)
+            return select_latest_candidates(
+                tuple(current.values()), cursor, max_items, retry_quarantined=include_failed
+            )
         except asyncio.CancelledError:
             raise
         except BaseError:
@@ -593,17 +602,10 @@ class BrowserBookmarksFetchService(ContextFetchService):
                 end = batch_index + _BATCH_SIZE
                 chunk = candidates[batch_index:end]
                 items: list[RawChangeItem] = []
-                for candidate in chunk:
-                    raw_bookmark = candidate.get("bookmark")
-                    if not isinstance(raw_bookmark, Mapping):
-                        raise _fetch_error("bookmark candidate has no source item")
-                    bookmark = {str(key): str(value) for key, value in raw_bookmark.items()}
-                    profile = candidate.get("profile")
-                    if not isinstance(profile, str):
-                        raise _fetch_error("bookmark candidate profile is invalid")
-                    fetch_page_content = candidate.get("fetch_page_content")
-                    if not isinstance(fetch_page_content, bool):
-                        raise _fetch_error("bookmark candidate page setting is invalid")
+                success_offsets: list[int] = []
+                failures: list[dict[str, object]] = []
+                for offset, candidate in enumerate(chunk):
+                    bookmark, profile, fetch_page_content, item_ref = _validated_bookmark_candidate(candidate)
                     page: object = {
                         "status": "disabled",
                         "final_url": None,
@@ -626,10 +628,25 @@ class BrowserBookmarksFetchService(ContextFetchService):
                             "text": None,
                             "error": "unsupported URL scheme",
                         }
-                    items.append(_bookmark_item(bookmark, profile=profile, page=page))
+                    try:
+                        items.append(_bookmark_item(bookmark, profile=profile, page=page))
+                    except (TypeError, ValueError):
+                        failures.append(
+                            {
+                                "offset": offset,
+                                "item_ref": item_ref,
+                                "code": StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR.code,
+                                "message": "条目读取或解析失败",
+                            }
+                        )
+                        continue
+                    success_offsets.append(offset)
                 yield FetchBatch(
                     batch_id=f"batch-{batch_index // _BATCH_SIZE}",
                     items=tuple(items),
+                    attempted_count=len(chunk),
+                    success_offsets=tuple(success_offsets),
+                    failures=tuple(failures),
                     next_cursor=next_cursor,
                 )
         except asyncio.CancelledError:
@@ -638,3 +655,25 @@ class BrowserBookmarksFetchService(ContextFetchService):
             raise
         except Exception as exc:
             raise _fetch_error("Edge Bookmarks fetch failed", exc) from None
+
+
+def _validated_bookmark_candidate(
+    candidate: Mapping[str, object],
+) -> tuple[dict[str, str], str, bool, str]:
+    raw_bookmark = candidate.get("bookmark")
+    if not isinstance(raw_bookmark, Mapping):
+        raise _fetch_error("bookmark candidate has no source item")
+    bookmark = {str(key): str(value) for key, value in raw_bookmark.items()}
+    for field_name in ("bookmark_id", "title", "url", "folder_path", "date_added"):
+        if not bookmark.get(field_name, "").strip():
+            raise _fetch_error("bookmark candidate source item is invalid")
+    profile = candidate.get("profile")
+    if not isinstance(profile, str) or not profile.strip():
+        raise _fetch_error("bookmark candidate profile is invalid")
+    fetch_page_content = candidate.get("fetch_page_content")
+    if not isinstance(fetch_page_content, bool):
+        raise _fetch_error("bookmark candidate page setting is invalid")
+    item_ref = candidate.get("stable_id")
+    if not isinstance(item_ref, str) or not item_ref.strip() or len(item_ref) > 256:
+        raise _fetch_error("bookmark candidate stable ID is invalid")
+    return bookmark, profile, fetch_page_content, item_ref

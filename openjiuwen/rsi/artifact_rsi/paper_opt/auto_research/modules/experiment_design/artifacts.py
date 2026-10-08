@@ -43,7 +43,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
     utc_now,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 DESIGN_REQUIRED_HEADINGS = (
     "# Experiment Design",
@@ -51,11 +51,13 @@ DESIGN_REQUIRED_HEADINGS = (
     "## Research Grounding",
     "## Current Experiment",
     "## Decision Metrics",
+    "## Observations to log",
     "## Evaluation and Revision Log",
 )
 
 LOG_HEADING = "## Evaluation and Revision Log"
 DECISION_METRICS_HEADING = "## Decision Metrics"
+OBSERVATIONS_HEADING = "## Observations to log"
 CURRENT_EXPERIMENT_HEADING = "## Current Experiment"
 RESEARCH_GROUNDING_HEADING = "## Research Grounding"
 
@@ -66,6 +68,7 @@ TOP_LEVEL_SECTION_HEADINGS = (
     RESEARCH_GROUNDING_HEADING,
     CURRENT_EXPERIMENT_HEADING,
     DECISION_METRICS_HEADING,
+    OBSERVATIONS_HEADING,
     "## Expected Outcomes",  # legacy schema ≤4
     "## Reproducibility and Output Contract",  # legacy schema ≤4
     "## Risks and Assumptions",  # legacy schema ≤4
@@ -337,7 +340,7 @@ def ensure_claim_block(body: str, slot: str) -> str:
             raise ValueError("cannot insert Decision Metrics: missing revision log")
         insertion = (
             f"{DECISION_METRICS_HEADING}\n\n"
-            "Falsifiable decision thresholds. Each metric is versioned like "
+            "Named metrics to log. Each metric is versioned like "
             "hypotheses; outcomes are tagged after experiments.\n\n"
         )
         body = body[:idx] + insertion + body[idx:]
@@ -450,7 +453,7 @@ def render_current_experiment_inner(draft: ExperimentDesignDraft) -> str:
     """Render the freeform Current Experiment section body."""
     text = _demote_experiment_h2(draft.experiment.strip())
     pointer = (
-        "\n\nVersioned thresholds live under `## Decision Metrics` "
+        "\n\nNamed metrics live under `## Decision Metrics` "
         f"({', '.join(m.name for m in draft.metrics)})."
     )
     if "`## Decision Metrics`" in text or "Decision Metrics" in text:
@@ -458,12 +461,24 @@ def render_current_experiment_inner(draft: ExperimentDesignDraft) -> str:
     return text + pointer + "\n"
 
 
-def render_decision_metrics_section(metrics: list[MetricDefinition]) -> str:
+def render_decision_metrics_section(
+    metrics: list[MetricDefinition],
+    *,
+    primary_metric: str = "",
+    primary_direction: str = "",
+) -> str:
+    primary_line = ""
+    if primary_metric:
+        direction = primary_direction or "unspecified"
+        primary_line = f"Primary metric: `{primary_metric}` ({direction}).\n\n"
     blocks = [
         (
             f"{DECISION_METRICS_HEADING}\n\n"
-            "Falsifiable decision thresholds. Each metric is versioned like hypotheses; "
-            "outcomes are tagged after experiments.\n\n"
+            "Named metrics to log. The primary metric is the one reflection must "
+            "judge the hypothesis against; other metrics are supporting context. "
+            "Each metric is versioned like hypotheses; outcomes are tagged after "
+            "experiments.\n\n"
+            f"{primary_line}"
         )
     ]
     for metric in metrics:
@@ -477,7 +492,21 @@ def render_decision_metrics_section(metrics: list[MetricDefinition]) -> str:
     return "".join(blocks)
 
 
+def render_observations_section(observations: list[str]) -> str:
+    return (
+        f"{OBSERVATIONS_HEADING}\n\n"
+        "Advisory logging requests for the implementation. Missing ones are "
+        "noted by reflection, not rejected by the host.\n\n"
+        f"{_bullet_list(observations)}"
+    )
+
+
 def render_living_summary_body(draft: ExperimentDesignDraft) -> str:
+    metrics_section = render_decision_metrics_section(
+        draft.metrics,
+        primary_metric=draft.primary_metric,
+        primary_direction=draft.primary_direction,
+    )
     return (
         "# Experiment Design\n\n"
         "## Objective and Hypothesis\n\n"
@@ -487,7 +516,8 @@ def render_living_summary_body(draft: ExperimentDesignDraft) -> str:
         f"{_bullet_list(draft.grounding)}\n"
         f"{CURRENT_EXPERIMENT_HEADING}\n\n"
         f"{render_current_experiment_inner(draft)}"
-        f"{render_decision_metrics_section(draft.metrics)}"
+        f"{metrics_section}"
+        f"{render_observations_section(draft.observations)}"
     )
 
 
@@ -626,13 +656,26 @@ def validate_markdown_headings(text: str, required: tuple[str, ...], *, label: s
 
 def validate_design_markdown(text: str) -> ParsedDesignDocument:
     parsed = parse_design_document(text)
-    if parsed.frontmatter.schema_version not in (1, 2, 3, 4, SCHEMA_VERSION):
+    if parsed.frontmatter.schema_version not in (1, 2, 3, 4, 5, SCHEMA_VERSION):
         raise ValueError(
             f"unsupported schema_version {parsed.frontmatter.schema_version}; "
             f"expected 1–{SCHEMA_VERSION}"
         )
-    if parsed.frontmatter.schema_version >= 5:
+    if parsed.frontmatter.schema_version >= 6:
         validate_markdown_headings(text, DESIGN_REQUIRED_HEADINGS, label="experiment_design.md")
+    elif parsed.frontmatter.schema_version >= 5:
+        validate_markdown_headings(
+            text,
+            (
+                "# Experiment Design",
+                "## Objective and Hypothesis",
+                "## Research Grounding",
+                "## Current Experiment",
+                "## Decision Metrics",
+                "## Evaluation and Revision Log",
+            ),
+            label="experiment_design.md",
+        )
     elif parsed.frontmatter.schema_version >= 4:
         validate_markdown_headings(
             text,
@@ -765,6 +808,9 @@ def build_plan_reference(
         variables=[],
         baselines=baselines,
         metrics=[m.name for m in draft.metrics],
+        primary_metric=draft.primary_metric,
+        primary_direction=draft.primary_direction,
+        observations=list(draft.observations),
         expected_outcomes=draft.hypothesis,
     )
 
@@ -806,6 +852,7 @@ def _apply_section_updates(
         effective = SectionUpdates(
             grounding=draft.grounding,
             experiment=draft.experiment,
+            observations=draft.observations,
         )
 
     if effective.grounding is not None:
@@ -822,6 +869,18 @@ def _apply_section_updates(
         if old.strip() != new_inner.strip():
             body = replace_section_body(body, CURRENT_EXPERIMENT_HEADING, new_inner)
             changed.append("experiment")
+
+    if effective.observations is not None:
+        if OBSERVATIONS_HEADING not in body:
+            idx = body.find(LOG_HEADING)
+            if idx < 0:
+                raise ValueError("cannot insert Observations to log: missing revision log")
+            body = body[:idx] + render_observations_section([]) + "\n" + body[idx:]
+        old = read_section_inner(body, OBSERVATIONS_HEADING)
+        new_inner = _merge_append_bullets(old, effective.observations)
+        if old.strip() != new_inner.strip():
+            body = replace_section_body(body, OBSERVATIONS_HEADING, new_inner)
+            changed.append("observations")
 
     return body, changed
 
@@ -871,7 +930,15 @@ def apply_living_summary_update(
         idx = body.find(LOG_HEADING)
         if idx < 0:
             raise ValueError("cannot migrate Decision Metrics: missing revision log")
-        body = body[:idx] + render_decision_metrics_section(draft.metrics) + body[idx:]
+        body = (
+            body[:idx]
+            + render_decision_metrics_section(
+                draft.metrics,
+                primary_metric=draft.primary_metric,
+                primary_direction=draft.primary_direction,
+            )
+            + body[idx:]
+        )
 
     closed, new_claims = _resolve_claim_updates(body, draft, feedback)
     notes: list[str] = []

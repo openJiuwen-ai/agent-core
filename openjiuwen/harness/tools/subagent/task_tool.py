@@ -6,9 +6,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import time
 import uuid
+from contextlib import aclosing, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Collection, List, Optional
 
@@ -20,7 +22,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.foundation.tool.base import render_payload_text
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.single_agent.rail.base import (
     bind_usage_delegation,
     build_usage_delegation_attribution,
@@ -51,6 +53,8 @@ except Exception:  # pragma: no cover - browser runtime is optional here
 # Keep one delegation above the browser runtime's 540-second complex-task
 # slice so startup, state reconciliation, and final result assembly can finish.
 DEFAULT_SUBAGENT_TASK_TIMEOUT_S = 720.0
+EXECUTION_DEADLINE_STATE_KEY = "__subagent_execution_deadline_at__"
+BROWSER_PARENT_QUERY_STATE_KEY = "__browser_parent_user_query__"
 _BROWSER_QUERY_STATE_KEY = "__browser_query_delegation_state__"
 _BROWSER_SIMPLE_QUERY_BUDGET_S = 240.0
 _BROWSER_COMPLEX_QUERY_BUDGET_S = 600.0
@@ -92,27 +96,30 @@ async def _run_subagent_with_observable_stream(
 
     output_parts: list[str] = []
     terminal_result: dict[str, Any] | None = None
-    async for chunk in stream(inputs, **invoke_kwargs):
-        chunk_type = getattr(chunk, "type", None)
-        payload = getattr(chunk, "payload", None)
-        if isinstance(chunk, dict):
-            chunk_type = chunk.get("type", chunk_type)
-            payload = chunk.get("payload", payload)
-        if not isinstance(payload, dict):
-            continue
-        if chunk_type == "llm_output":
-            content = payload.get("content")
-            if isinstance(content, str):
-                output_parts.append(content)
-            continue
-        if chunk_type != "answer":
-            continue
-        terminal_result = dict(payload)
-        terminal_result.setdefault("result_type", "answer")
-        if "output" not in terminal_result:
-            content = terminal_result.get("content")
-            if isinstance(content, str):
-                terminal_result["output"] = content
+    chunks = stream(inputs, **invoke_kwargs)
+    stream_context = aclosing(chunks) if callable(getattr(chunks, "aclose", None)) else nullcontext(chunks)
+    async with stream_context:
+        async for chunk in chunks:
+            chunk_type = getattr(chunk, "type", None)
+            payload = getattr(chunk, "payload", None)
+            if isinstance(chunk, dict):
+                chunk_type = chunk.get("type", chunk_type)
+                payload = chunk.get("payload", payload)
+            if not isinstance(payload, dict):
+                continue
+            if chunk_type == "llm_output":
+                content = payload.get("content")
+                if isinstance(content, str):
+                    output_parts.append(content)
+                continue
+            if chunk_type != "answer":
+                continue
+            terminal_result = dict(payload)
+            terminal_result.setdefault("result_type", "answer")
+            if "output" not in terminal_result:
+                content = terminal_result.get("content")
+                if isinstance(content, str):
+                    terminal_result["output"] = content
 
     if terminal_result is None:
         terminal_result = {
@@ -332,7 +339,7 @@ class TaskTool(Tool):
         return query_id, None
 
     @staticmethod
-    def _focused_browser_resume_task(record: dict[str, Any]) -> str:
+    def _focused_browser_resume_task(record: dict[str, Any], repair_instruction: str = "") -> str:
         browser_result = record.get("browser_result")
         browser_result = browser_result if isinstance(browser_result, dict) else {}
         missing_slots = [
@@ -347,11 +354,15 @@ class TaskTool(Tool):
                 if str(field_name).strip()
             ][:12]
         recovery = str(browser_result.get("recommended_recovery") or "").strip()
+        original_goal = record.get("original_user_goal") or record.get("original_task", "")
         return (
             "Resume the same browser task from its current page and retained evidence. "
-            f"Collect only these unresolved evidence slots: {json.dumps(missing_slots, ensure_ascii=False)}. "
+            f"Original user goal and constraints: {original_goal}. "
+            f"Focused repair instruction: {repair_instruction}. "
+            f"Optional extraction hints (not a completion checklist): {json.dumps(missing_slots, ensure_ascii=False)}. "
             f"Recovery hint: {recovery or 'collect_missing_evidence_from_current_page'}. "
-            "Do not repeat satisfied fields, restart navigation, or expand the task scope."
+            "Repair only what is needed for the original goal; inferred slots are not extra requirements. "
+            "Keep valid evidence, correct contradicted evidence, and do not repeat satisfied work or expand scope."
         )
 
     @classmethod
@@ -485,15 +496,20 @@ class TaskTool(Tool):
                 )
             started_at = time.time()
             budget_s = self._browser_query_budget(task_description)
+            outer_deadline = parent_session.get_state(EXECUTION_DEADLINE_STATE_KEY)
+            deadline_at = started_at + budget_s
+            if isinstance(outer_deadline, (int, float)) and outer_deadline > 0:
+                deadline_at = min(deadline_at, outer_deadline)
             record = {
                 "query_id": query_id,
                 "status": "running",
                 "retryable": False,
                 "resume_count": 0,
                 "started_at": started_at,
-                "deadline_at": started_at + budget_s,
+                "deadline_at": deadline_at,
                 "budget_s": budget_s,
                 "original_task": str(task_description),
+                "original_user_goal": str(parent_session.get_state(BROWSER_PARENT_QUERY_STATE_KEY) or task_description),
                 "updated_at": started_at,
             }
             return _BrowserQueryContext(records, record, key, task_description, "")
@@ -505,6 +521,9 @@ class TaskTool(Tool):
             task_description=task_description,
             resume_task_id=requested_resume_id,
         )
+        outer_deadline = parent_session.get_state(EXECUTION_DEADLINE_STATE_KEY)
+        if isinstance(outer_deadline, (int, float)) and outer_deadline > 0:
+            query.record["deadline_at"] = min(query.record["deadline_at"], outer_deadline)
         return self._prepare_existing_browser_query(parent_session, query)
 
     def _prepare_existing_browser_query(
@@ -545,7 +564,17 @@ class TaskTool(Tool):
             )
 
         terminal_status = str(browser_result.get("status") or existing_query.get("status") or "")
+        from openjiuwen.harness.tools.browser_move.playwright_runtime.evidence import completion_contradiction
+
+        correction = completion_contradiction(
+            browser_result, str(existing_query.get("original_user_goal") or existing_query.get("original_task") or ""),
+        )
+        if terminal_status == "completed" and correction:
+            browser_result = {**browser_result, "status": "partial", "retryable": True, "correction_reason": correction}
+            existing_query["browser_result"] = browser_result
+            terminal_status = "partial"
         can_resume = bool(browser_result.get("retryable")) and terminal_status in {"partial", "blocked"}
+        can_resume = can_resume and float(existing_query.get("deadline_at") or 0) > time.time()
         resume_count = int(existing_query.get("resume_count") or 0)
         if not can_resume or resume_count >= _BROWSER_QUERY_RESUME_LIMIT:
             return _BrowserQueryContext(
@@ -570,7 +599,7 @@ class TaskTool(Tool):
             records,
             existing_query,
             query.key,
-            self._focused_browser_resume_task(existing_query),
+            self._focused_browser_resume_task(existing_query, str(query.task_description)),
             stored_resume_id,
         )
 
@@ -619,6 +648,9 @@ class TaskTool(Tool):
             "browser_query_deadline_at": query.record["deadline_at"],
             "browser_query_budget_s": query.record["budget_s"],
             "browser_resume": bool(query.resume_task_id),
+            "browser_original_user_goal": (
+                query.record.get("original_user_goal") or query.record.get("original_task", "")
+            ),
             "resume_task_id": query.record["sub_session_id"],
         }
 
@@ -804,6 +836,7 @@ class TaskTool(Tool):
             session_id=sub_session_id,
         )
         owner_root = None
+        task_timeout = None
         try:
             from openjiuwen.extensions.observability.span_context import get_root_span
             from openjiuwen.harness.observability.span_context import (
@@ -833,6 +866,8 @@ class TaskTool(Tool):
                         parent_cache_id=parent_cache_id,
                         card=subagent.card,
                     )
+                elif browser_query is not None and self._accepts_runtime_session(subagent):
+                    child_session = create_agent_session(session_id=sub_session_id, card=subagent.card)
                 subagent_inputs = self._build_subagent_inputs(
                     task_description,
                     _SubagentInputContext(
@@ -845,18 +880,27 @@ class TaskTool(Tool):
                 )
                 if child_session is not None:
                     await child_session.pre_run(inputs=subagent_inputs)
+                if child_session is not None and affinity_enabled:
                     await kv_cache_subagent_lifecycle.prepare_subagent(
                         child_session,
                         subagent_type=normalized_type,
                     )
-                result = await self._invoke_with_usage_delegation(
-                    subagent,
-                    subagent_inputs,
-                    parent_session_id=parent_session_id,
-                    sub_session_id=sub_session_id,
-                    parent_invocation_id=parent_invocation_id,
-                    session=child_session,
-                )
+                remaining = None
+                if browser_query is not None:
+                    remaining = max(0.0, min(
+                        DEFAULT_SUBAGENT_TASK_TIMEOUT_S - 5.0,
+                        float(browser_query.record["deadline_at"]) - time.time() - 1.0,
+                    ))
+                task_timeout = asyncio.timeout(remaining)
+                async with task_timeout:
+                    result = await self._invoke_with_usage_delegation(
+                        subagent,
+                        subagent_inputs,
+                        parent_session_id=parent_session_id,
+                        sub_session_id=sub_session_id,
+                        parent_invocation_id=parent_invocation_id,
+                        session=child_session,
+                    )
                 succeeded = True
                 return self._build_task_output(
                     result,
@@ -866,12 +910,28 @@ class TaskTool(Tool):
                     browser_query=browser_query,
                     subagent=subagent,
                 )
-            except asyncio.CancelledError:
-                self._record_browser_execution_failure(
-                    parent_session,
-                    browser_query,
-                    "browser_subagent_cancelled",
+            except TimeoutError:
+                if browser_query is None:
+                    raise
+                from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
+
+                reason = (
+                    "task_deadline_exhausted" if task_timeout is not None and task_timeout.expired()
+                    else "model_provider_unavailable"
                 )
+                result = BrowserRuntimeRail.interrupted_task_result(child_session, reason)
+                return self._build_task_output(
+                    result, normalized_type=normalized_type, sub_session_id=sub_session_id,
+                    parent_session=parent_session, browser_query=browser_query, subagent=subagent,
+                )
+            except asyncio.CancelledError:
+                if browser_query is not None:
+                    from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
+
+                    expired = float(browser_query.record["deadline_at"]) <= time.time()
+                    reason = "task_deadline_exhausted" if expired else "browser_subagent_cancelled"
+                    result = BrowserRuntimeRail.interrupted_task_result(child_session, reason)
+                    self._save_browser_result(parent_session, browser_query, result["authoritative_browser_result"])
                 raise
             except Exception as exc:
                 self._record_browser_execution_failure(
@@ -892,16 +952,32 @@ class TaskTool(Tool):
                         owner_root,
                         session_id=sub_session_id,
                     )
-                await cleanup_subagent_task_resources(subagent)
-                if browser_query is not None:
-                    self._active_browser_queries.discard(browser_query.key)
-                if child_session is not None:
-                    await kv_cache_subagent_lifecycle.finish_subagent(
-                        child_session,
-                        subagent_type=normalized_type,
-                        succeeded=succeeded,
-                    )
-                    await child_session.post_run()
+                try:
+                    await cleanup_subagent_task_resources(subagent)
+                finally:
+                    if browser_query is not None:
+                        self._active_browser_queries.discard(browser_query.key)
+                    try:
+                        if child_session is not None and affinity_enabled:
+                            await kv_cache_subagent_lifecycle.finish_subagent(
+                                child_session,
+                                subagent_type=normalized_type,
+                                succeeded=succeeded,
+                            )
+                    finally:
+                        if child_session is not None:
+                            await child_session.post_run()
+
+    @staticmethod
+    def _accepts_runtime_session(subagent: Any) -> bool:
+        method = getattr(subagent, "stream", None) or subagent.invoke
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return False
+        return "session" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+        )
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         """Execute task by delegating to a subagent.
@@ -990,17 +1066,35 @@ class TaskTool(Tool):
             parent_session=parent_session,
             browser_query=browser_query,
         )
-        return await self._invoke_created_subagent(
-            subagent,
-            normalized_type=normalized_type,
-            task_description=task_description,
-            sub_session_id=sub_session_id,
-            parent_session_id=runtime_parent_session_id,
-            parent_cache_id=parent_cache_id,
-            parent_session=parent_session,
-            browser_query=browser_query,
-            affinity_enabled=affinity_enabled,
-        )
+        outer_deadline = parent_session.get_state(EXECUTION_DEADLINE_STATE_KEY)
+        remaining = None
+        if isinstance(outer_deadline, (int, float)) and outer_deadline > 0:
+            remaining = max(0.0, outer_deadline - time.time())
+        outer_timeout = asyncio.timeout(remaining)
+        try:
+            async with outer_timeout:
+                return await self._invoke_created_subagent(
+                    subagent,
+                    normalized_type=normalized_type,
+                    task_description=task_description,
+                    sub_session_id=sub_session_id,
+                    parent_session_id=runtime_parent_session_id,
+                    parent_cache_id=parent_cache_id,
+                    parent_session=parent_session,
+                    browser_query=browser_query,
+                    affinity_enabled=affinity_enabled,
+                )
+        except TimeoutError:
+            if browser_query is None or not outer_timeout.expired():
+                raise
+            # The child may have finished reading but hit the host deadline during cleanup.
+            # Preserve the runtime payload saved before that cleanup, never an empty timeout.
+            browser_result = browser_query.record.get("browser_result")
+            if not isinstance(browser_result, dict):
+                browser_result = self._failed_browser_result("task_deadline_exhausted")
+            browser_result = {**browser_result, "retryable": False}
+            self._save_browser_result(parent_session, browser_query, browser_result)
+            return self._existing_browser_query_output(browser_query.record, code="browser_query_deadline_expired")
 
     def render_for_llm(self, output: ToolOutput) -> str:
         """Render the subagent's answer; browser tasks keep their orchestration fields.

@@ -130,6 +130,7 @@ class TeamBackend:
         on_member_started: Callable[[str], Awaitable[None]] | None = None,
         on_member_restarted: Callable[[str], Awaitable[bool]] | None = None,
         on_member_stopped: Callable[[str], Awaitable[None]] | None = None,
+        validate_worktree_isolation: Callable[[str], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
         leader_member_name: str | None = None,
@@ -221,6 +222,8 @@ class TeamBackend:
                 member runtime. Used after an atomic ERROR→RESTARTING claim.
             on_member_stopped: Optional async callback that removes a dead
                 member's stale runtime handle after ERROR→SHUTDOWN settles.
+            validate_worktree_isolation: Validate a member's worktree scope
+                before its database row is created.
             leader_prompt: The leader's private prompt (``LeaderSpec.prompt``
                 via ``ctx.prompt``). Persisted on the leader's DB row at
                 ``build_team`` so cold-recovery — which rebuilds the leader
@@ -308,6 +311,7 @@ class TeamBackend:
         self._on_member_started = on_member_started
         self._on_member_restarted = on_member_restarted
         self._on_member_stopped = on_member_stopped
+        self._validate_worktree_isolation = validate_worktree_isolation
 
         self.task_manager = TeamTaskManager(
             self.team_name,
@@ -458,21 +462,17 @@ class TeamBackend:
         return self._enable_fork
 
     def bind_group_session(self, session_id: str) -> None:
-        if self.group_chat_spec is None or not self.group_chat_spec.enable_group_chat:
-            return
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError("Group chat requires a nonempty runtime session_id")
-        if self.group_session_id and self.group_session_id != session_id:
+        if self._group_conversation is not None and self.group_session_id != session_id:
             raise ValueError("A group backend cannot switch sessions; stop and rebuild the team")
         self.group_session_id = session_id
 
     async def group_conversation(self):
-        if self.group_chat_spec is None or not self.group_chat_spec.enable_group_chat:
-            raise ValueError("Group chat is disabled")
         if self._group_conversation is None:
-            from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+            from openjiuwen.agent_teams.group_chat.conversation import GroupConversationLog
 
-            workspace = self.group_chat_spec.workspace
+            workspace = getattr(self.group_chat_spec, "workspace", None)
             self._group_conversation = await asyncio.to_thread(
                 GroupConversationLog, self.team_name, self.group_session_id,
                 workspace_path=workspace.root_path if workspace else None,
@@ -481,10 +481,12 @@ class TeamBackend:
 
     async def append_group_message(self, sender, content, *, client_message_id, mentions=(), attachments=()):
         conversation = await self.group_conversation()
-        return await conversation.post(
+        from openjiuwen.agent_teams.group_chat.handler import post_message
+
+        return await post_message(
+            conversation,
             self.message_manager, sender, content, client_message_id=client_message_id,
-            mentions=mentions, attachments=attachments, tail_count=self.group_chat_spec.group_context_tail,
-            language=self.group_chat_spec.language or "cn",
+            mentions=mentions, attachments=attachments,
         )
 
     def set_snapshot_length(self, fn) -> None:
@@ -766,6 +768,15 @@ class TeamBackend:
             return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
         if isolation is not None and isolation != "worktree":
             return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
+        if isolation == "worktree":
+            if self._validate_worktree_isolation is None:
+                return MemberOpResult.fail(
+                    "Team worktree isolation is unavailable: no worktree validator was configured",
+                )
+            try:
+                await self._validate_worktree_isolation(member_name)
+            except RuntimeError as exc:
+                return MemberOpResult.fail(str(exc))
 
         if not await self.db.team.team_exists(self.team_name):
             return MemberOpResult.fail(
@@ -1647,7 +1658,8 @@ class TeamBackend:
             3. No message is left unread by any member, broadcasts
                included. Completion is judged strictly: any undelivered
                message -- direct or fan-out broadcast -- blocks the team
-               from concluding.
+               from concluding. In group mode, only explicitly mentioned
+               broadcasts count as pending input.
 
         Read-only; safe to call repeatedly. Queries the member DAO directly
         so the leader itself is part of the roster check (``list_members``

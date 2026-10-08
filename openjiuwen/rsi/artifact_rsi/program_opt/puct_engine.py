@@ -68,7 +68,7 @@ from .provision import (
 )
 from .reply_format import ReplyFormatError, format_for
 from .restore import RestoreError, restore_baseline, restore_tree
-from .scorecard import KNOWN_NORMALIZE, SCORE_KEY
+from .scorecard import KNOWN_NORMALIZE, SCORE_KEY, solved_threshold
 from .script_domain import ScriptError, script_domain
 from .search import (
     REPAIR_ATTEMPTS,
@@ -565,6 +565,13 @@ class _Reporter:
         # distinguishable from a reason the framework declined to give.
         self._stop_reason = ""
         self._framework_error = ""
+        #: The score at which the task counts as solved — the same number the
+        #: probe refuses a seed for reaching. Past it there is nothing left to
+        #: win, and every further expansion is a model call spent restating a
+        #: program that already scores full marks.
+        self._solved_threshold = solved_threshold(spec.scorecard)
+        #: The first node that reached it, or ``None`` while the search is live.
+        self.solved_at: Optional[int] = None
         self._planned = spec.expansions
         self.attempted = 0
         self.scored = 0
@@ -777,7 +784,32 @@ class _Reporter:
                 rollout_score=float(metrics[SCORE_KEY]),
             ))
         self._sweep.append((node, metrics))
+        if valid and self.solved_at is None and float(metrics[SCORE_KEY]) >= self._solved_threshold:
+            self._stop_when_solved(node, float(metrics[SCORE_KEY]))
         self._report_usage()
+
+    def _stop_when_solved(self, node: Node, score: float) -> None:
+        """End the search: a node has reached the solved threshold.
+
+        The framework's own `solved_threshold` is switched off above (it skips
+        a *rollout* whose shard is solved, which is wrong for a single-artifact
+        tree), and that left nothing stopping the *search* once the task was
+        done. Measured on an anagram task: a candidate reached 1.0 on the gate
+        at the first expansion, and the next five spent their model calls on
+        edits like "clarified the module docstring only; behavior remains the
+        same" — each scoring 1.0 again, none of them able to do better.
+
+        The lever is the one `should_stop` already uses: a candidate limit of
+        zero makes `select_parent` return nothing, the workers wind down, and
+        an expansion already in flight still lands and is recorded.
+        """
+        self.solved_at = node.index
+        self.tree.candidate_limit = 0
+        self.emit(events.log(
+            "info",
+            f"node {node.index} scored {score:.4f}, at or past the solved threshold "
+            f"{self._solved_threshold:g}; no further expansions will be started.",
+        ))
 
     def _report_usage(self) -> None:
         """The run's model bill so far, as an event.
@@ -842,7 +874,7 @@ class _Reporter:
         error = str(getattr(outcome, "error", "") or "")
         retired = int(getattr(outcome, "retired_workers", 0) or 0)
         done = len(self.tree.nodes) - 1  # the seed is not an expansion
-        self._stop_reason = reason
+        self._stop_reason = "solved" if self.solved_at is not None else reason
         self._planned = planned
         # Kept, because `finish` has to know. Logged at "warn" and forgotten,
         # the framework's own error left a run that made zero model calls

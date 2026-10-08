@@ -118,6 +118,18 @@ def check_structure(section_id: str, text: str) -> list[str]:
 _ROUNDING_PRECISIONS = (1, 2, 3, 4, 6)
 
 
+def expand_known_numbers(values: list[float] | set[float]) -> set[float]:
+    """Metric values plus percent-of-fraction and rounded forms used in prose."""
+    numbers: set[float] = set()
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        for candidate in (float(value), float(value) * 100):
+            for precision in _ROUNDING_PRECISIONS:
+                numbers.add(round(candidate, precision))
+    return numbers
+
+
 def known_numbers(result: ExperimentResult) -> set[float]:
     """Same construction as ``reporting.agent.ReportingAgent._known_numbers``
     — every real metric value, plus its ``* 100`` percent-of-fraction
@@ -135,15 +147,30 @@ def known_numbers(result: ExperimentResult) -> set[float]:
     a fraction metric to a bare integer (0 or 1) would make the check
     accept almost anything in range and defeat its purpose.
     """
-    numbers: set[float] = set()
+    raw: list[float] = []
     for variant in result.variants:
         for value in variant.metrics.values():
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 continue
-            for candidate in (float(value), float(value) * 100):
-                for precision in _ROUNDING_PRECISIONS:
-                    numbers.add(round(candidate, precision))
-    return numbers
+            raw.append(float(value))
+    return expand_known_numbers(raw)
+
+
+def known_numbers_from_context(context: object) -> set[float]:
+    """Numbers extracted from a prior-paper ``ResearchContext`` for linting."""
+    raw: list[float] = []
+    extracted = getattr(context, "extracted_numbers", None) or []
+    raw.extend(
+        float(value) for value in extracted if isinstance(value, (int, float)) and not isinstance(value, bool)
+    )
+    for claim in getattr(context, "claims", None) or []:
+        value = getattr(claim, "value", None)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            raw.append(float(value))
+        for extra in getattr(claim, "values", None) or []:
+            if isinstance(extra, (int, float)) and not isinstance(extra, bool):
+                raw.append(float(extra))
+    return expand_known_numbers(raw)
 
 
 def _extract_unmatched_numbers(text: str, known: set[float]) -> list[float]:
@@ -165,7 +192,9 @@ def _extract_unmatched_numbers(text: str, known: set[float]) -> list[float]:
     return values
 
 
-def lint_section(text: str, spec: SectionSpec, result: ExperimentResult) -> list[str]:
+def lint_section(
+    text: str, spec: SectionSpec, result: ExperimentResult, extra_known: set[float] | None = None
+) -> list[str]:
     """Returns human-readable violations, empty if the section passes.
     Never raises — a lint failure is something for the bounded repair
     completion (docs/paper_writing_design.md §8's sibling mechanism for the
@@ -180,10 +209,13 @@ def lint_section(text: str, spec: SectionSpec, result: ExperimentResult) -> list
         violations.append(f"too long: {word_count} words, expected at most {spec.max_words}")
 
     known = known_numbers(result)
+    if extra_known:
+        known = known | extra_known
     unmatched = sorted(set(_extract_unmatched_numbers(text, known)))
     if unmatched:
         shown = ", ".join(str(n) for n in unmatched[:10])
-        violations.append(f"number(s) not found in result.variants: {shown}")
+        source = "result.variants or previous_context" if extra_known else "result.variants"
+        violations.append(f"number(s) not found in {source}: {shown}")
 
     found_phrases = sorted({m.group(0).lower() for m in _AI_TELLS_RE.finditer(text)})
     if found_phrases:

@@ -16,7 +16,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas
 async def test_stage_is_observable_before_module_finishes(tmp_path, monkeypatch, module, mode):
     stages = []
 
-    async def on_stage(stage):
+    async def on_stage(stage, note=None):
         stages.append(stage)
 
     async def ainvoke(*args, **kwargs):

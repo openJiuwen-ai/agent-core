@@ -374,3 +374,43 @@ async def test_affinity_stream_rejects_usage_only_response(monkeypatch):
             chunk
             async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})
         ]
+
+
+@pytest.mark.asyncio
+async def test_affinity_stream_summarizes_html_error_page(monkeypatch):
+    client = _affinity_client()
+    html = (
+        "<!DOCTYPE html><html><head><title>Not Found | opencode</title></head>"
+        "<body><h1>404 - Page Not Found</h1></body></html>"
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        _mock_http_client(_FakeResponse(status_code=404, body=html.encode("utf-8"))),
+    )
+
+    with pytest.raises(ValueError) as caught:
+        _ = [
+            chunk
+            async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})
+        ]
+
+    message = str(caught.value)
+    assert message.startswith("API returned error 404:")
+    assert "HTTP 404" in message
+    assert "Not Found | opencode" in message
+    assert "<!DOCTYPE" not in message
+
+
+@pytest.mark.asyncio
+async def test_affinity_stream_keeps_plain_http_error_body(monkeypatch):
+    client = _affinity_client()
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        _mock_http_client(_FakeResponse(status_code=400, body=b"model not found")),
+    )
+
+    with pytest.raises(ValueError, match=r"API returned error 400: model not found"):
+        _ = [
+            chunk
+            async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})
+        ]

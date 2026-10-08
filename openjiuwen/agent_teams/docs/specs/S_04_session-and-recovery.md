@@ -280,7 +280,8 @@ class RecoveryManager:
 
 - **`recover_team` 不等于复活整份名册**：`SHUTDOWN_REQUESTED` / `SHUTDOWN` 都由关闭链路
   拥有，冷恢复只跳过、不代写状态也不清 runtime handle。其余无 live handle 的成员延续
-  既有流程：尝试更新为 `RESTARTING`，再调用 `restart_teammate`。
+  队员恢复先用一条带旧状态条件的 SQL 将其状态置为 `RESTARTING`、执行状态置为 `IDLE`；
+  只有更新成功才调用 `restart_teammate`。队长在激活前用另一条 SQL 将执行状态置为 `IDLE`。
 - **`collect_live_teammates_for_session_switch`** 只对 `role == LEADER` 且
   `team_backend` 存在的情况下返回非空。它的判定条件是
   "DB 里 status 不在 `{UNSTARTED, SHUTDOWN, STOPPED}`" **且** "spawn_manager 上仍持有

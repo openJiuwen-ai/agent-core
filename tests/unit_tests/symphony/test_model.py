@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
@@ -9,6 +10,7 @@ import pytest
 import openjiuwen.symphony as symphony
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.foundation.llm.request_context import is_disabled_thinking_fallback_allowed
 from openjiuwen.symphony.orchestration.model import invoke_json, model_identity, model_usage_context
 from openjiuwen.symphony.shared.identity import endpoint_sha256, sanitize_metadata
 
@@ -210,6 +212,58 @@ async def test_invoke_json_uses_model_and_repairs_json() -> None:
             },
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_invoke_json_scopes_symphony_disabled_thinking_fallback() -> None:
+    observed = []
+
+    class _ContextModel(_FakeModel):
+        async def invoke(self, messages, **kwargs):
+            observed.append(is_disabled_thinking_fallback_allowed())
+            return SimpleNamespace(content='{"ok": true}')
+
+    await invoke_json(
+        _ContextModel(),
+        system_prompt="system",
+        user_content="payload",
+        request_overrides={"extra_body": {"thinking": {"type": "disabled"}}},
+    )
+
+    assert observed == [True]
+    assert not is_disabled_thinking_fallback_allowed()
+
+
+@pytest.mark.asyncio
+async def test_symphony_fallback_context_is_task_local_and_restored_after_failure() -> None:
+    observed: list[tuple[str, bool]] = []
+
+    class _ContextModel(_FakeModel):
+        def __init__(self, label: str, error: Exception | None = None) -> None:
+            super().__init__(error=error)
+            self.label = label
+
+        async def invoke(self, messages, **kwargs):
+            await asyncio.sleep(0)
+            observed.append((self.label, is_disabled_thinking_fallback_allowed()))
+            if self.error is not None:
+                raise self.error
+            return SimpleNamespace(content='{"ok": true}')
+
+    symphony_model = _ContextModel("symphony")
+    direct_model = _ContextModel("direct")
+    await asyncio.gather(
+        invoke_json(symphony_model, system_prompt="system", user_content="payload"),
+        direct_model.invoke("payload"),
+    )
+
+    assert sorted(observed) == [("direct", False), ("symphony", True)]
+    assert not is_disabled_thinking_fallback_allowed()
+
+    failing_model = _ContextModel("failure", error=TimeoutError("slow"))
+    with pytest.raises(RuntimeError, match="Model request failed: slow"):
+        await invoke_json(failing_model, system_prompt="system", user_content="payload")
+    assert not is_disabled_thinking_fallback_allowed()
 
 
 @pytest.mark.asyncio

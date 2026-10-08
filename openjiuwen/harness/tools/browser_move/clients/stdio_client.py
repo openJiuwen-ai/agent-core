@@ -316,6 +316,10 @@ class BrowserMoveStdioClient(StdioClient):
                 raise RuntimeError("Not connected to Stdio server")
 
         effective_timeout = self._resolve_timeout(timeout)
+        action = tool_name.rsplit("browser_", 1)[-1]
+        if action in {"mouse_wheel", "scroll"}:
+            effective_timeout = min(effective_timeout, 15.0)
+        retry_safe = action in {"snapshot", "find", "console_messages", "network_requests"}
         for attempt in range(2):
             try:
                 browser_agent_log_info(
@@ -357,7 +361,7 @@ class BrowserMoveStdioClient(StdioClient):
                 browser_agent_log_info(f"Tool '{tool_name}' call completed via Stdio")
                 return preserve_mcp_tool_result_status(tool_result, result_content)
             except asyncio.TimeoutError as e:
-                if attempt == 0:
+                if attempt == 0 and retry_safe:
                     browser_agent_log_warning(
                         f"Stdio tool call '{tool_name}' timed out after"
                         f" {effective_timeout:.1f}s, retrying after reconnect"
@@ -369,10 +373,11 @@ class BrowserMoveStdioClient(StdioClient):
                     f"Tool call timed out via Stdio: tool='{tool_name}', timeout={effective_timeout:.1f}s"
                 )
                 raise RuntimeError(
-                    f"Stdio tool call timed out for '{tool_name}' after {effective_timeout:.1f}s"
+                    f"Stdio tool call timed out for '{tool_name}' after {effective_timeout:.1f}s; "
+                    "execution may have occurred, reconcile state before repeating an action"
                 ) from e
             except Exception as e:
-                if attempt == 0 and self._is_retryable_transport_error(e):
+                if attempt == 0 and retry_safe and self._is_retryable_transport_error(e):
                     browser_agent_log_warning(
                         f"Stdio tool call '{tool_name}' retry after reconnect: type={type(e).__name__}, repr={e!r}"
                     )

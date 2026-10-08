@@ -71,6 +71,69 @@ def test_fetch_batch_enforces_size_pairing_and_cursor_json_boundary():
     json.dumps(batch.model_dump(mode="json"))
 
 
+def test_fetch_batch_requires_complete_disjoint_candidate_outcomes():
+    item = RawChangeItem(**_item())
+    batch = FetchBatch(
+        batch_id="batch-1",
+        items=[item],
+        attempted_count=3,
+        success_offsets=[0],
+        skipped_offsets=[1],
+        failures=[
+            {
+                "offset": 2,
+                "item_ref": "notes/broken.pdf",
+                "code": 154002,
+                "message": "文件读取或解析失败",
+            }
+        ],
+    )
+
+    assert batch.attempted_count == 3
+    assert batch.success_offsets == (0,)
+    assert batch.skipped_offsets == (1,)
+    assert batch.failures == (
+        {
+            "offset": 2,
+            "item_ref": "notes/broken.pdf",
+            "code": 154002,
+            "message": "文件读取或解析失败",
+        },
+    )
+
+    invalid_batches = (
+        {"attempted_count": 2, "success_offsets": [0], "skipped_offsets": [], "failures": []},
+        {"attempted_count": 1, "success_offsets": [0], "skipped_offsets": [0], "failures": []},
+        {"attempted_count": 1, "success_offsets": [], "skipped_offsets": [1], "failures": []},
+        {
+            "attempted_count": 1,
+            "success_offsets": [],
+            "skipped_offsets": [],
+            "failures": [{"offset": 0, "item_ref": "", "code": 154002, "message": "bad"}],
+        },
+        {
+            "attempted_count": 1,
+            "success_offsets": [],
+            "skipped_offsets": [],
+            "failures": [{"offset": 0, "item_ref": "item", "code": True, "message": "bad"}],
+        },
+    )
+    for outcome in invalid_batches:
+        with pytest.raises(ValidationError):
+            FetchBatch(batch_id="batch-1", items=[item], **outcome)
+
+
+def test_fetch_batch_keeps_legacy_items_as_implicit_success_outcomes():
+    item = RawChangeItem(**_item())
+
+    batch = FetchBatch(batch_id="batch-1", items=[item])
+
+    assert batch.attempted_count == 1
+    assert batch.success_offsets == (0,)
+    assert batch.skipped_offsets == ()
+    assert batch.failures == ()
+
+
 def test_personal_context_status_is_frozen_and_copies_nested_state():
     states = {"notes": "RUNNING"}
     progress = {
@@ -132,6 +195,90 @@ def test_personal_context_status_accepts_stopping_fetch_run_progress():
     )
 
     assert status.fetch_run_progress["notes"]["run_state"] == "stopping"
+
+
+@pytest.mark.parametrize(
+    ("run_state", "completed_items", "failed_items", "last_error"),
+    (
+        ("partial_succeeded", 17, 3, None),
+        ("failed", 0, 20, None),
+    ),
+)
+def test_personal_context_status_accepts_terminal_item_failure_outcomes(
+    run_state,
+    completed_items,
+    failed_items,
+    last_error,
+):
+    status = PersonalContextStatus(
+        configured=True,
+        collection_enabled=True,
+        agent_use_enabled=False,
+        state="RUNNING",
+        pipeline_running=True,
+        pipeline_queue_size=0,
+        fetch_service_states={"notes": "RUNNING"},
+        fetch_service_errors={},
+        fetch_run_progress={
+            "notes": {
+                "service_id": "notes",
+                "run_state": run_state,
+                "progress_percent": 100,
+                "total_items": 20,
+                "completed_items": completed_items,
+                "failed_items": failed_items,
+                "quarantined_items": failed_items,
+                "item_errors": [
+                    {
+                        "item_ref": "notes/broken.pdf",
+                        "code": 154002,
+                        "message": "文件读取或解析失败",
+                        "failed_at": "2026-09-21T12:00:00Z",
+                    }
+                ],
+                "omitted_item_errors": failed_items - 1,
+                "last_error": last_error,
+            }
+        },
+        context_root="C:/personal_context/workspace/context",
+        context_ready=True,
+        last_error=None,
+    )
+
+    progress = status.fetch_run_progress["notes"]
+    assert progress["run_state"] == run_state
+    assert progress["failed_items"] == failed_items
+
+
+def test_personal_context_status_rejects_inconsistent_item_failure_diagnostics():
+    progress = {
+        "service_id": "notes",
+        "run_state": "partial_succeeded",
+        "progress_percent": 100,
+        "total_items": 2,
+        "completed_items": 1,
+        "failed_items": 1,
+        "quarantined_items": 1,
+        "item_errors": [],
+        "omitted_item_errors": 0,
+        "last_error": None,
+    }
+
+    with pytest.raises(ValidationError, match="quarantined diagnostics"):
+        PersonalContextStatus(
+            configured=True,
+            collection_enabled=True,
+            agent_use_enabled=False,
+            state="RUNNING",
+            pipeline_running=True,
+            pipeline_queue_size=0,
+            fetch_service_states={"notes": "RUNNING"},
+            fetch_service_errors={},
+            fetch_run_progress={"notes": progress},
+            context_root="C:/personal_context/workspace/context",
+            context_ready=True,
+            last_error=None,
+        )
 
 
 def test_personal_context_status_accepts_staged_progress_before_success():

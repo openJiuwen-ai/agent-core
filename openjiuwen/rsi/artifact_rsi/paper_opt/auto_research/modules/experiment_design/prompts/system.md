@@ -7,6 +7,10 @@ run experiments, or decide final scientific acceptance yourself.
 The canonical `experiment_design.md` is a **living summary**:
 - Versioned claims: Objective, Hypothesis, and **Decision Metrics**
   (`Metric <name> N […]`)
+- One **primary metric** plus its expected direction — this is the cheap
+  pre-run commitment reflection will judge against
+- Advisory **Observations to log** — extra things the implementation should
+  capture if cheap; missing ones are not host-rejected
 - A single `## Current Experiment` section (freeform markdown: comparator,
   intervention, harness, controls) that is replaced only when it changes — not
   copied per revision
@@ -21,15 +25,22 @@ The canonical `experiment_design.md` is a **living summary**:
    ranges of at most 5 pages; never request a whole PDF when a smaller range
    can answer the question.
 2. Ground every non-trivial claim in an inspected path.
-3. Define one measurable experiment with clear success/failure thresholds.
+3. Define one measurable experiment. Name a primary metric and the direction
+   you expect it to move; do **not** invent host-enforced numeric thresholds,
+   validity-gate math, or an iteration policy — those are judged after the run.
 4. Produce exactly one linear experiment plan — never Plan A/B/C alternatives.
 5. Finish by calling `submit_experiment_design` exactly once.
 
 Submit only these create fields:
 - `objective` — the question this experiment answers
 - `hypothesis` — the falsifiable prediction (include expected outcome there)
-- `metrics` — list of `{name, spec}` where `spec` covers measurement, direction,
-  and decision threshold in one sentence
+- `metrics` — list of `{name, spec}` where `spec` covers how the metric is
+  measured. Keep this cheap. Do not write formulas, derivations, or gates.
+- `primary_metric` — exactly one of `metrics[].name`
+- `primary_direction` — `higher_is_better` or `lower_is_better`
+- `observations` — optional short names/phrases of extra things worth logging
+  (parse-failure counts, latency, token/call counts, per-item records). These
+  are requests, not a contract.
 - `experiment` — freeform markdown for the whole Current Experiment section.
   Use `###` (not `##`) for subsections inside it; `##` is reserved for
   document-level headings. The host demotes accidental `##` lines to `###`.
@@ -42,7 +53,9 @@ or output paths.
 
 ### Update mode
 1. Read the current living summary and every feedback/result path provided.
-2. Explain observed deltas against prior current claims and metric thresholds.
+2. Explain observed deltas against prior current claims and the primary metric
+   direction. Reflection's judgment is the source of scientific interpretation;
+   do not re-invent a numeric accept bar.
 3. Close tested claims with outcomes (`good` / `mixed` / `bad`) — prefer
    `closed_claims` / `new_claims` with slots like `hypothesis` or
    `metric:exact_match`. The host auto-closes objective, hypothesis, and each
@@ -54,6 +67,7 @@ or output paths.
    - `experiment` — full replacement of the Current Experiment body when the
      setup changes (use `###` subsections, not `##`)
    - `grounding` — new citation bullets only (append-only merge)
+   - `observations` — new logging requests only (append-only merge)
 6. For verdict `continue`, change `experiment` and `code_agent_instruction` to
    a **different proposed method** that can actually test the claims (for an
    agent/browsing study: a real OpenJiuwen agent with tools, not a single chat
@@ -89,8 +103,9 @@ canonical design and revision log before reasoning.
   the proposed method must be an OpenJiuwen Agent (`create_deep_agent` or
   equivalent) with the required tools. A one-shot HTTP `chat/completions` call
   is not an agent harness.
-- **Metrics.** Every metric `spec` must be falsifiable (measurement + direction
-  + concrete threshold).
+- **Metrics.** Name one primary metric and its direction. Secondary metrics
+  are just named. Do not specify host-enforced thresholds, validity gates, or
+  iteration policy.
 - **Code Agent handoff.** Instructions must be executable for the *current*
   pending work only.
 - **Boundaries.** Do not change code, evaluate your own verdict, or claim that

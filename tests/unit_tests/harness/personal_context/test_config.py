@@ -280,12 +280,12 @@ def test_config_counts_github_and_gitcode_provider_limits_independently():
     assert len(config.fetch_services) == 40
 
 
-def test_service_id_is_bounded_to_128_safe_segment_characters():
+def test_service_id_is_bounded_to_500_characters():
     with pytest.raises(JiuwenValidationError):
-        PersonalContextConfig.from_dict(_valid_config(_local_service("a" * 129)))
+        PersonalContextConfig.from_dict(_valid_config(_local_service("a" * 501)))
 
-    config = PersonalContextConfig.from_dict(_valid_config(_local_service("a" * 128)))
-    assert config.fetch_services[0].service_id == "a" * 128
+    config = PersonalContextConfig.from_dict(_valid_config(_local_service("a" * 500)))
+    assert config.fetch_services[0].service_id == "a" * 500
 
 
 @pytest.mark.parametrize(

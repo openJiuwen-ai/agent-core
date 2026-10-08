@@ -20,23 +20,23 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.rails.context_engineer import ContextProcessorRail
 from openjiuwen.harness.schema.config import SubAgentConfig
+from openjiuwen.harness.tools.browser_move.offload_recall import BrowserOffloadRecallTool
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
+    DEFAULT_BROWSER_CAPABILITIES,
+    resolve_browser_capabilities,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_state_context_processor import (
     BrowserStateContextProcessorConfig,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_processor import (
     BrowserWorkingContextProcessorConfig,
 )
-from openjiuwen.harness.tools.browser_move.offload_recall import BrowserOffloadRecallTool
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
     RuntimeSettings,
     build_browser_guardrails,
     build_playwright_mcp_config,
     build_runtime_settings,
-)
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabilities import (
-    DEFAULT_BROWSER_CAPABILITIES,
-    resolve_browser_capabilities,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserAgentRuntime,
@@ -80,17 +80,35 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "For a simple lookup, prefer a direct search-results URL when the engine and query are known. Use "
     "browser_probe_interactives for page controls and browser_probe_cards for repeated results or products. "
     "Use the compact PageState target_id with its generation_id directly; never reconstruct guessed CSS from "
-    "a target ID. When a card has primary_link or href, navigate directly to that URL.\n"
+    "a target ID. Navigate genuine detail hrefs directly; fragment links and state controls still need clicks. "
+    "A targeted Probe returns query matches, not the global control index. Native snapshot/find remain valid "
+    "fallbacks when Probe misses a control; snapshots are returned inline, with task-scoped recall for large output.\n"
     "Use browser_batch_interact when two or more deterministic actions or same-page field extractions are already "
-    "known. Use a primitive for one uncertain action. Prefer observable condition waits over fixed sleep. Use "
+    "known. Use a native primitive for a single action. For a known sorting target, use wait_for_sort_state "
+    "with that target_id rather than inventing a DOM-text selector. "
+    "Never replay a successful click to fix a later wait. Use "
+    "observable condition waits instead of fixed sleeps. Use "
     "browser_snapshot only when compact probes are insufficient, and browser_evaluate only for a small exact "
     "target or computation. If an older result has a <persisted-output> marker, recall it only when its preview "
     "does not contain the needed evidence; recalled targets are not executable after navigation.\n"
     "Use canonical fields when convenient, but do not reread a page just to rename already observed facts. "
+    "For targeted extraction, a short {fields: {author: {value, selector, raw_text}}} result is sufficient; "
+    "use the requested field names, not a progress protocol. Inferred coverage means you may finish only if "
+    "the actual user goal is met; correct contradictions and perform any still-required destination visit. "
+    "For answer lookups, AI/knowledge/weather panels are usable with source and any displayed date; no traditional "
+    "widget or independent cross-check is required. They do not count as natural search results or replace "
+    "a requested detail visit. Do not add reverse conversions, dates/weekdays, or verification not requested. "
+    "ad_status=unknown means no positive ad marker was detected, not proof that a result is non-advertising. "
+    "Keep video current_part versus collection duration and hotel stars versus guest ratings distinct. "
+    "When extracting duration, include scope when the page identifies it; "
+    "do not infer part duration from a collection. "
     "Report genuinely unavailable values as unknown. One trustworthy page value or structured result is enough; "
     "do not verify the same fact with multiple "
-    "tools. Stop immediately when the requested outcome is evidenced. The runtime determines final status, so "
-    "return a concise natural-language result rather than another progress object.\n"
+    "tools. Decide completion against the user's actual goal using this task's observations, not slot coverage. "
+    "Return a concise answer; do not repeat actions merely to fill inferred fields. Runtime preserves execution "
+    "failures, source identity, cancellation and deadlines. If genuinely unfinished, use the existing "
+    '<browser_progress>{"status":"partial","next_action":"remaining user goal"}</browser_progress> '
+    "text once; it is not a tool, and must not repeat fields or evidence.\n"
     "If an optional capability makes a browser_run_code tool visible, use it only when deterministic tools are "
     "insufficient, and never dump the full document. Preserve session continuity and report a concrete blocker "
     "when the available browser state or tools cannot complete the task."
@@ -106,14 +124,26 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "已知搜索引擎和关键词时，简单查询优先直接构造搜索结果 URL。页面控件使用 "
     "browser_probe_interactives，重复结果或商品使用 browser_probe_cards。直接使用 PageState 返回的 "
     "target_id 和 generation_id，禁止把 target_id 改写成猜测的 CSS。卡片包含 primary_link 或 href "
-    "时直接导航该 URL。\n"
-    "只有两个及以上确定动作或同页多字段提取时使用 browser_batch_interact；单个不确定动作使用基础工具。"
+    "时优先导航真实详情 URL；片段链接和状态控件仍用点击。定向 Probe 仅返回本次匹配，不是全页索引。"
+    "Probe 漏掉控件时用原生 snapshot/find 回退；快照内联返回，大结果可在任务内按需恢复。\n"
+    "只有两个及以上确定动作或同页多字段提取时使用 browser_batch_interact；单个动作使用原生基础工具。"
+    "已知排序 target_id 时用 wait_for_sort_state，不另猜 DOM 文本 selector；后续等待失败不要重放成功的点击。"
     "优先等待可观察条件，不使用固定 sleep。紧凑 Probe 不足时再使用 browser_snapshot；"
     "browser_evaluate 仅用于小范围精确目标或计算。旧结果出现 <persisted-output> 且预览不足时才恢复；"
     "导航后恢复内容中的目标不可继续操作。\n"
     "方便时使用规范字段，但不要仅为改写字段名而重读已经观察到的事实；字段确实不可获取时使用 unknown。"
+    "定向提取可返回简短的 {fields: {author: {value, selector, raw_text}}}，不用输出复杂进度协议。"
+    "推断字段齐全只代表可以结束；若用户目标或详情访问尚未满足，或发现反证，继续必要的操作和纠正。"
+    "普通问答可直接读 AI/知识/天气答案卡并注明来源及页面已显示的日期，不强求传统组件；AI 卡不能充当自然结果序号"
+    "或代替用户要求的详情访问。不自行增加换向汇率、日期星期或独立交叉验证。"
+    "ad_status=unknown 表示未识别到明确广告标记，不是非广告证明。"
+    "区分分集与合集时长、酒店星级与住客评分；时长有明确页面依据时标注 scope=current_part/collection，"
+    "不能用合集总时长代替当前分集。"
     "一个可信页面值或结构化结果已经足够，不要用多个工具重复验证同一事实。请求结果有证据后立即结束。"
-    "最终状态由 runtime 决定，只返回简洁自然语言结果，不再维护第二份进度对象。\n"
+    "根据原始用户目标和本任务观察判断是否完成，不以推断 slot 是否填满为准。不要仅为填字段重复操作。"
+    "runtime 保留真实执行失败、来源归属、取消和期限约束。若确有未完成目标，可在最终回答使用现有 "
+    '<browser_progress>{"status":"partial","next_action":"未完成的用户目标"}</browser_progress> '
+    "文本标签，不是工具调用，也不重写字段、证据或逐轮进度。\n"
     "只有可选能力明确暴露 browser_run_code 时才使用，并且仅限确定性工具不足的情况；禁止转储完整页面。"
     "保持浏览器会话连续；现有页面或工具确实无法完成时，报告具体 blocker。"
 )
@@ -358,10 +388,9 @@ def create_browser_agent(
         language=resolved_language,
         runtime_projection_only=True,
     )
-    injected_rails: List[AgentRail] = [
-        BrowserRuntimeRail(browser_backend),
-    ]
-    injected_tools.append(BrowserOffloadRecallTool(workspace, language=resolved_language))
+    recall_tool = BrowserOffloadRecallTool(workspace, language=resolved_language)
+    injected_rails: List[AgentRail] = [BrowserRuntimeRail(browser_backend, recall_tool=recall_tool)]
+    injected_tools.append(recall_tool)
 
     browser_state_processor = (
         "BrowserStateContextProcessor",

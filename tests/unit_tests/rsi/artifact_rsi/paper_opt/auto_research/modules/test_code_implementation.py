@@ -7,9 +7,14 @@ _build_referenced_paths_prompt in modules/code_implementation/agent.py.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import set_project_root
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation import agent as agent_module
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
     CodeImplementationAgent,
+    _extract_stdout_metrics,
+    _pyright_lsp_command,
     _ReferencedPath,
 )
 
@@ -127,6 +132,111 @@ def test_stage_referenced_paths_is_idempotent_across_repeated_calls(tmp_path):
     assert staged.read_text(encoding="utf-8") == "v2"
 
 
+def test_extract_path_candidates_finds_relative_path_with_backslash():
+    text = "The dataset is at demo-input\\sentiment_icl_v1.json for this run."
+    candidates = CodeImplementationAgent._extract_path_candidates(text)
+    assert "demo-input\\sentiment_icl_v1.json" in candidates
+
+
+def test_extract_path_candidates_finds_relative_path_with_forward_slash():
+    text = "The dataset is at demo-input/sentiment_icl_v1.json for this run."
+    candidates = CodeImplementationAgent._extract_path_candidates(text)
+    assert "demo-input/sentiment_icl_v1.json" in candidates
+
+
+# -- _referenced_path_roots ----------------------------------------------------
+
+
+def test_referenced_path_roots_climbs_ancestors_of_artifact_path(tmp_path):
+    artifact_path = tmp_path / "demo-input-pkg" / "demo-input" / "paper"
+    artifact_path.mkdir(parents=True)
+
+    roots = CodeImplementationAgent._referenced_path_roots(str(artifact_path))
+
+    assert artifact_path in roots
+    assert (tmp_path / "demo-input-pkg" / "demo-input") in roots
+    assert (tmp_path / "demo-input-pkg") in roots
+
+
+def test_referenced_path_roots_empty_for_no_artifact_path():
+    assert CodeImplementationAgent._referenced_path_roots(None) == []
+    assert CodeImplementationAgent._referenced_path_roots("") == []
+
+
+def test_stage_referenced_paths_resolves_relative_candidate_against_roots(tmp_path):
+    artifact_path = tmp_path / "demo-input-pkg" / "demo-input" / "paper"
+    artifact_path.mkdir(parents=True)
+    dataset = tmp_path / "demo-input-pkg" / "demo-input" / "sentiment_icl_v1.json"
+    dataset.write_text('{"items": []}', encoding="utf-8")
+    agent_workspace = tmp_path / "agent_workspace"
+    agent_workspace.mkdir()
+
+    roots = CodeImplementationAgent._referenced_path_roots(str(artifact_path))
+    results = CodeImplementationAgent._stage_referenced_paths(
+        ["demo-input\\sentiment_icl_v1.json"], agent_workspace, roots=roots
+    )
+
+    assert len(results) == 1
+    assert results[0].kind == "file"
+    assert results[0].host_path == str(dataset)
+
+
+def test_stage_referenced_paths_drops_relative_candidate_with_no_matching_root(tmp_path):
+    agent_workspace = tmp_path / "agent_workspace"
+    agent_workspace.mkdir()
+
+    results = CodeImplementationAgent._stage_referenced_paths(
+        ["demo-input\\sentiment_icl_v1.json"], agent_workspace, roots=[tmp_path]
+    )
+
+    assert results == []
+
+
+# -- _split_relative_candidate (cross-platform separators) -------------------
+
+
+def test_split_relative_candidate_accepts_backslash_forwardslash_and_mixed():
+    assert CodeImplementationAgent._split_relative_candidate(
+        "demo-input\\sentiment_icl_v1.json"
+    ) == ["demo-input", "sentiment_icl_v1.json"]
+    assert CodeImplementationAgent._split_relative_candidate(
+        "demo-input/sentiment_icl_v1.json"
+    ) == ["demo-input", "sentiment_icl_v1.json"]
+    assert CodeImplementationAgent._split_relative_candidate(
+        "a\\b/c.json"
+    ) == ["a", "b", "c.json"]
+
+
+def test_split_relative_candidate_drops_dot_and_dotdot_segments():
+    assert CodeImplementationAgent._split_relative_candidate(
+        "..\\..\\etc\\passwd.json"
+    ) == ["etc", "passwd.json"]
+    assert CodeImplementationAgent._split_relative_candidate(
+        ".\\demo-input\\x.json"
+    ) == ["demo-input", "x.json"]
+
+
+def test_stage_referenced_paths_resolves_forward_slash_candidate_against_roots(tmp_path):
+    """The candidate's separator style must resolve the same way regardless
+    of which separator the coding host itself uses (Windows dev box vs a
+    Linux/Mac sandbox in production)."""
+    artifact_path = tmp_path / "demo-input-pkg" / "demo-input" / "paper"
+    artifact_path.mkdir(parents=True)
+    dataset = tmp_path / "demo-input-pkg" / "demo-input" / "sentiment_icl_v1.json"
+    dataset.write_text('{"items": []}', encoding="utf-8")
+    agent_workspace = tmp_path / "agent_workspace"
+    agent_workspace.mkdir()
+
+    roots = CodeImplementationAgent._referenced_path_roots(str(artifact_path))
+    results = CodeImplementationAgent._stage_referenced_paths(
+        ["demo-input/sentiment_icl_v1.json"], agent_workspace, roots=roots
+    )
+
+    assert len(results) == 1
+    assert results[0].kind == "file"
+    assert results[0].host_path == str(dataset)
+
+
 def test_stage_referenced_paths_skips_malformed_candidate_without_raising(tmp_path):
     agent_workspace = tmp_path / "agent_workspace"
     agent_workspace.mkdir()
@@ -167,3 +277,209 @@ def test_build_referenced_paths_prompt_describes_oversized_file():
     prompt = CodeImplementationAgent._build_referenced_paths_prompt([record])
     assert "/data/huge.bin" in prompt
     assert "not copied" in prompt.lower()
+
+
+# -- _extract_stdout_metrics ---------------------------------------------------
+# Smoke-test result recovery channel added after a packaged-desktop-host
+# incident where the candidate's own --output file write silently landed
+# under the host's home directory instead of the requested path (the
+# launcher was observed changing its process cwd before running the
+# candidate script). Stdout is not subject to that.
+
+
+def test_extract_stdout_metrics_finds_marker_among_noisy_log_lines():
+    stdout = (
+        "2026-09-21 | INFO | Registered connector pool type: default\n"
+        'SMOKE_METRICS_JSON:{"method": "proposed", "n_questions": 1}\n'
+        "2026-09-21 | INFO | done\n"
+    )
+    found, payload = _extract_stdout_metrics(stdout)
+    assert found is True
+    assert payload == {"method": "proposed", "n_questions": 1}
+
+
+def test_extract_stdout_metrics_no_marker_returns_not_found():
+    found, payload = _extract_stdout_metrics("just some ordinary log output\n")
+    assert found is False
+    assert payload is None
+
+
+def test_extract_stdout_metrics_malformed_json_reports_found_with_no_payload():
+    found, payload = _extract_stdout_metrics("SMOKE_METRICS_JSON:{not valid json\n")
+    assert found is True
+    assert payload is None
+
+
+def test_extract_stdout_metrics_keeps_last_of_repeated_markers():
+    stdout = 'SMOKE_METRICS_JSON:{"n": 1}\nSMOKE_METRICS_JSON:{"n": 2}\n'
+    found, payload = _extract_stdout_metrics(stdout)
+    assert found is True
+    assert payload == {"n": 2}
+
+
+def test_extract_stdout_metrics_non_dict_payload_treated_as_not_found_content():
+    found, payload = _extract_stdout_metrics("SMOKE_METRICS_JSON:[1, 2, 3]\n")
+    assert found is True
+    assert payload is None
+
+
+# -- _resolve_smoke_metrics -----------------------------------------------------
+
+
+def test_resolve_smoke_metrics_no_marker_falls_back_to_file(tmp_path):
+    metrics_path = tmp_path / "proposed.metrics.json"
+    metrics_path.write_text('{"method": "proposed", "n_questions": 1}', encoding="utf-8")
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(
+        "plain log output, no marker", metrics_path, "proposed"
+    )
+    assert state == "present"
+    assert metrics == {"method": "proposed", "n_questions": 1}
+
+
+def test_resolve_smoke_metrics_no_marker_and_missing_file_reports_missing(tmp_path):
+    metrics_path = tmp_path / "proposed.metrics.json"
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(
+        "plain log output, no marker", metrics_path, "proposed"
+    )
+    assert state == "missing"
+    assert metrics == {}
+
+
+def test_resolve_smoke_metrics_marker_present_and_file_missing_repairs_file(tmp_path):
+    metrics_path = tmp_path / "smoke" / "proposed.metrics.json"
+    stdout = 'SMOKE_METRICS_JSON:{"method": "proposed", "n_questions": 1}\n'
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(stdout, metrics_path, "proposed")
+    assert state == "present"
+    assert metrics == {"method": "proposed", "n_questions": 1}
+    # The candidate's own file write never landed -- the host must repair it,
+    # since smoke_test_dir's metrics.json is a kept-on-disk debugging artifact.
+    assert metrics_path.is_file()
+    assert metrics_path.read_text(encoding="utf-8").strip().startswith("{")
+
+
+def test_resolve_smoke_metrics_marker_and_file_both_present_prefers_stdout(tmp_path):
+    metrics_path = tmp_path / "proposed.metrics.json"
+    metrics_path.write_text('{"method": "proposed", "n_questions": 99}', encoding="utf-8")
+    stdout = 'SMOKE_METRICS_JSON:{"method": "proposed", "n_questions": 1}\n'
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(stdout, metrics_path, "proposed")
+    assert state == "present"
+    assert metrics == {"method": "proposed", "n_questions": 1}
+
+
+def test_resolve_smoke_metrics_marker_malformed_reports_invalid_json_without_touching_file(tmp_path):
+    metrics_path = tmp_path / "proposed.metrics.json"
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(
+        "SMOKE_METRICS_JSON:{not valid", metrics_path, "proposed"
+    )
+    assert state == "invalid_json"
+    assert metrics == {}
+    assert not metrics_path.exists()
+
+
+# -- _pyright_lsp_command -------------------------------------------------------
+# On the packaged desktop host, sys.executable is the launcher binary itself,
+# which has no -m module-runner (same class of failure _compile_staged_python
+# hit with -m compileall). harness.lsp.servers.servers.python's own pyright
+# resolution already handles both an npm-global install (spawned via node,
+# no Python involved) and a Windows .cmd shim by parsing it -- reuse that
+# instead of re-deriving a weaker version here, and only fall back to the
+# pip-installed `-m pyright.langserver` path when it finds nothing. The
+# delegation itself must be exception-safe: a broken/renamed harness resolver
+# should degrade to "no pyright found", not crash agent construction.
+
+_HARNESS_RESOLVE_PYRIGHT_PATH = "openjiuwen.harness.lsp.servers.servers.python._resolve_pyright_command"
+
+
+def test_pyright_lsp_command_prefers_harness_resolution(monkeypatch):
+    resolved = ("/usr/bin/node", ["/opt/pyright/langserver.index.js", "--stdio"])
+    monkeypatch.setattr(_HARNESS_RESOLVE_PYRIGHT_PATH, lambda: resolved)
+    monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: object())
+
+    command = _pyright_lsp_command()
+
+    assert command == resolved
+
+
+def test_pyright_lsp_command_falls_back_to_module_when_harness_finds_nothing(monkeypatch):
+    monkeypatch.setattr(_HARNESS_RESOLVE_PYRIGHT_PATH, lambda: None)
+    monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: object())
+
+    command = _pyright_lsp_command()
+
+    assert command == (agent_module.sys.executable, ["-m", "pyright.langserver", "--stdio"])
+
+
+def test_pyright_lsp_command_none_when_nothing_available(monkeypatch):
+    monkeypatch.setattr(_HARNESS_RESOLVE_PYRIGHT_PATH, lambda: None)
+    monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: None)
+
+    assert _pyright_lsp_command() is None
+
+
+def test_pyright_lsp_command_survives_harness_resolver_raising(monkeypatch):
+    def _boom():
+        raise RuntimeError("npm list blew up")
+
+    monkeypatch.setattr(_HARNESS_RESOLVE_PYRIGHT_PATH, _boom)
+    monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: object())
+
+    command = _pyright_lsp_command()
+
+    assert command == (agent_module.sys.executable, ["-m", "pyright.langserver", "--stdio"])
+
+
+def test_pyright_lsp_command_survives_harness_import_failure(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _fail_on_harness_python(name, *args, **kwargs):
+        if name == "openjiuwen.harness.lsp.servers.servers.python":
+            raise ImportError("simulated import failure")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fail_on_harness_python)
+    monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: None)
+
+    assert _pyright_lsp_command() is None
+
+
+# -- _build_coding_agent: max_iterations wiring --------------------------------
+#
+# Regression coverage for the 2026-09-22 harness change (`fix(react): Honor
+# configured inner ReAct max_iterations; default to unbounded when unset.`):
+# before that change, DeepAgentConfig.max_iterations was silently ignored
+# whenever enable_task_loop=True (the inner ReAct loop was always forced to
+# sys.maxsize), so omitting the kwarg here was harmless. After that change the
+# value is genuinely honored, but create_code_agent's own default is 15 (not
+# unbounded) -- omitting the kwarg now silently caps every coding session's
+# inner ReAct loop at 15 rounds regardless of this module's own config,
+# reproducing the "code_implementation never writes output/run.py" failure.
+
+
+def test_build_coding_agent_forwards_configured_max_iterations(tmp_path):
+    set_project_root(tmp_path)
+    try:
+        agent = CodeImplementationAgent(
+            config={"code_implementation": {"max_iterations": 77}}, model=MagicMock()
+        )
+        with patch.object(agent_module, "_try_lsp_rail", return_value=None), patch(
+            "openjiuwen.harness.subagents.create_code_agent", return_value=MagicMock()
+        ) as mock_create:
+            agent._build_coding_agent(tmp_path / "agent_workspace", run_id="rsi-test-run", cycle=1)
+        assert mock_create.call_args.kwargs["max_iterations"] == 77
+    finally:
+        set_project_root(None)
+
+
+def test_build_coding_agent_defaults_max_iterations_to_forty(tmp_path):
+    set_project_root(tmp_path)
+    try:
+        agent = CodeImplementationAgent(config={}, model=MagicMock())
+        with patch.object(agent_module, "_try_lsp_rail", return_value=None), patch(
+            "openjiuwen.harness.subagents.create_code_agent", return_value=MagicMock()
+        ) as mock_create:
+            agent._build_coding_agent(tmp_path / "agent_workspace", run_id="rsi-test-run", cycle=1)
+        assert mock_create.call_args.kwargs["max_iterations"] == 40
+    finally:
+        set_project_root(None)

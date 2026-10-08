@@ -64,11 +64,13 @@ class RSISysOperationRail(SysOperationRail):
         *,
         shell_only: bool = False,
         bash_pipefail: bool = False,
+        allow_shell: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
         self._shell_only = bool(shell_only)
         self._bash_pipefail = bool(bash_pipefail)
+        self._allow_shell = bool(allow_shell)
 
     def init(self, agent: Any) -> None:
         lang = agent.system_prompt_builder.language
@@ -98,8 +100,9 @@ class RSISysOperationRail(SysOperationRail):
                 GlobTool(self.sys_operation, lang, agent_id),
                 ListDirTool(self.sys_operation, lang, agent_id),
                 GrepTool(self.sys_operation, lang, agent_id),
-                bash_tool,
             ]
+            if self._allow_shell:
+                shared.append(bash_tool)
             if self._read_only:
                 self.tools = [read_tool, *shared]
             else:
@@ -131,6 +134,7 @@ class RSISkillUseRail(SkillUseRail):
         self.trigger_at_task_start = bool(trigger_at_task_start)
         self._runtime_skill_tool: SkillTool | None = None
         self._task_trigger_evidence: dict[str, Any] = {}
+        self._task_skill_loads: list[dict[str, Any]] = []
 
     def init(self, agent: Any) -> None:
         super().init(agent)
@@ -189,8 +193,9 @@ class RSISkillUseRail(SkillUseRail):
         writer = self.attachment_manager.bind_context(ctx)
         if not writer.session_id:
             return
+        section = f"{_ACTIVE_SKILL_SECTION}:{hashlib.sha256(skill_name.encode('utf-8')).hexdigest()[:16]}"
         await writer.add_section(
-            section=_ACTIVE_SKILL_SECTION,
+            section=section,
             content=memo,
             kind=PromptAttachmentKind.SKILL,
             source="rsi.skill_delivery",
@@ -203,6 +208,9 @@ class RSISkillUseRail(SkillUseRail):
                 "delivery_mode": ("decision_capsule" if decision_capsule else "full_fallback"),
             },
         )
+        sections = ctx.extra.setdefault("_rsi_active_skill_sections", [])
+        if section not in sections:
+            sections.append(section)
 
     def _build_skills_section(self, skills=None, query: str | None = None):
         skills = self.skills if skills is None else skills
@@ -235,6 +243,7 @@ class RSISkillUseRail(SkillUseRail):
         )
 
     async def _trigger_relevant_skill(self, ctx: AgentCallbackContext) -> None:
+        self._task_skill_loads = []
         self._task_trigger_evidence = {
             "mode": "task_start_metadata_trigger",
             "attempted": False,
@@ -282,15 +291,22 @@ class RSISkillUseRail(SkillUseRail):
             self._task_trigger_evidence["reason"] = "no_relevant_skill"
             return
 
-        skill_name = selected_names[0]
+        for skill_name in dict.fromkeys(selected_names):
+            evidence = dict(self._task_trigger_evidence, selected_skill_name=skill_name)
+            self._task_skill_loads.append(evidence)
+            await self._load_task_start_skill(ctx, skill_name, evidence)
+        self._task_trigger_evidence = dict(self._task_skill_loads[0])
+
+    async def _load_task_start_skill(
+        self, ctx: AgentCallbackContext, skill_name: str, evidence: dict[str, Any],
+    ) -> None:
         load_args = {"skill_name": skill_name, "relative_file_path": "SKILL.md"}
         load_result = await self._runtime_skill_tool.invoke(
             load_args,
             session=getattr(ctx, "session", None),
         )
-        self._task_trigger_evidence["selected_skill_name"] = skill_name
         if not load_result.success:
-            self._task_trigger_evidence.update(
+            evidence.update(
                 reason="skill_load_failed",
                 error=str(load_result.error or "skill load failed"),
             )
@@ -309,11 +325,15 @@ class RSISkillUseRail(SkillUseRail):
                 extra=ctx.extra,
             )
         )
-        self._task_trigger_evidence.update(delivered=True, reason="loaded")
+        evidence.update(delivered=True, reason="loaded")
         logger.info("[RSISkillUseRail] task-start Skill loaded: %s", skill_name)
 
     def task_trigger_evidence(self) -> dict[str, Any]:
         return dict(self._task_trigger_evidence)
+
+    def task_trigger_records(self) -> list[dict[str, Any]]:
+        """Preserve one existing-format outcome for every selected Skill."""
+        return [dict(record) for record in self._task_skill_loads] or [self.task_trigger_evidence()]
 
     @staticmethod
     def _task_query(raw: object) -> str:
@@ -374,6 +394,8 @@ class RSISkillUseRail(SkillUseRail):
         writer = self.attachment_manager.bind_context(ctx)
         if writer.session_id:
             await writer.clear_section(_ACTIVE_SKILL_SECTION)
+            for section in ctx.extra.pop("_rsi_active_skill_sections", []):
+                await writer.clear_section(section)
 
 
 async def run_agent_with_empty_response_recovery(

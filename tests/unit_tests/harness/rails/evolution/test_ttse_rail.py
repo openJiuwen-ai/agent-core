@@ -42,13 +42,21 @@ from openjiuwen.harness.rails.evolution import (
     configure_ttse_evolution_runtime,
     unconfigure_ttse_evolution,
 )
-from openjiuwen.agent_evolving.ttse.stores import reset_shared_stores, shared_store, _new_record
+from openjiuwen.agent_evolving.ttse.stores import (
+    reset_shared_stores,
+    shared_store,
+    _new_record,
+    format_ts,
+    parse_ts,
+)
 from openjiuwen.agent_evolving.ttse.catalog import project_catalog
 from openjiuwen.agent_evolving.ttse.dream import load_dream_state
 from openjiuwen.agent_evolving.ttse.classify import parse_assignments
 from openjiuwen.agent_evolving.ttse.consult import (
-    MAX_CONSULT_CATEGORIES,
+    CONSULT_ALL_CATEGORY,
+    consult_arg_errors,
     parse_consult_categories,
+    parse_consult_category,
     render_consult_result,
     render_consult_result_async,
 )
@@ -69,10 +77,26 @@ from openjiuwen.agent_evolving.ttse.induction import (
     parse_verdict,
     synthesize,
 )
-from openjiuwen.harness.rails.evolution.ttse_rail import _TTSEPreparedEvolutionInput
+from openjiuwen.harness.rails.evolution.ttse_rail import _TTSEPreparedEvolutionInput, _consulted_rules
 
 _POLICY = GENERATE_RECORDS_LLM_POLICY
 _PROCESSOR = TrajectorySpanProcessor()
+
+
+def _consult_message(facts: list[str] | None = None, tips: list[str] | None = None, *, category: str = "office") -> dict:
+    """Tool result in the shape ``ttse_consult`` actually returns."""
+    blocks: list[str] = []
+    if facts:
+        lines = ["# FACT", ""]
+        lines.extend(f"{i}. {text}" for i, text in enumerate(facts, 1))
+        blocks.append("\n".join(lines))
+    if tips:
+        lines = ["# TIP", ""]
+        lines.extend(f"{i}. {text}" for i, text in enumerate(tips, 1))
+        blocks.append("\n".join(lines))
+    body = "\n\n".join(blocks)
+    content = f"## `{category}`\n\n{body}\n" if category else body + "\n"
+    return {"role": "tool", "name": "ttse_consult", "tool_call_id": "tc-consult", "content": content}
 
 
 def _empty_trajectory(*, execution_id: str = "e1", session_id: str = "s1") -> Trajectory:
@@ -254,7 +278,8 @@ async def test_induce_parses_rules():
         model="m",
         policy=_POLICY,
         task_prompt="t",
-        traj_text="tr",
+        conversation_snippet="[user] t",
+        tool_call_chain="[Turn 1] assistant → grep({})",
         capabilities="- grep",
         existing_facts=[],
         existing_tips=[],
@@ -447,7 +472,8 @@ def test_inject_debounce_reschedules_after_event_loop_replaced(tmp_path):
     _run(on_second_loop())
     reloaded = TTSERecordStore(TTSEConfig(store_path=path))
     assert reloaded.facts[0]["inject_hits"] == 2
-    assert reloaded.facts[0]["last_injected_at"] == pytest.approx(now)
+    assert parse_ts(reloaded.facts[0]["last_injected_at"]) == pytest.approx(now, abs=1)
+    assert reloaded.facts[0]["last_injected_at"] == format_ts(now)
     reset_shared_stores()
 
 
@@ -552,11 +578,34 @@ async def test_rail_success_path_induces_without_blame(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rail_dedup_judge_bumps_count_for_paraphrase(tmp_path):
+    def handler(p: str) -> str:
+        if "SAME reusable experience" in p:
+            return "MATCH: 0"
+        if "extracting" in p:
+            return "[FACT] CSV 评分器区分列名大小写"
+        return "NONE"
+
+    llm = ScriptedLLM(handler)
+    rail = _make_rail(tmp_path, llm)
+    await rail._ttse_store.add_fact("the csv grader is case-sensitive")
+    snap = {
+        "messages": [{"role": "user", "content": "grade csv"}, {"role": "assistant", "content": "done"}],
+        "ttse_capabilities": "- python_exec",
+        "ttse_task_query": "grade csv",
+    }
+    await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
+    facts = rail._ttse_store.facts_records()
+    assert [record["text"] for record in facts] == ["the csv grader is case-sensitive"]
+    assert facts[0]["count"] == 2
+
+
+@pytest.mark.asyncio
 async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
     def handler(p: str) -> str:
         if "diagnosing" in p:
             return "VERDICT: 1\nREASON: rule 1 misled the agent"
-        if "review a rule bank" in p:
+        if "RETIRED rules" in p:
             return "[TIP] When logs are large: use grep to scan before reading"
         if "extracting" in p:
             return "[FACT] rustc fails when source files are encoded as GBK"
@@ -564,22 +613,87 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
 
     llm = ScriptedLLM(handler)
     rail = _make_rail(tmp_path, llm)
+    await rail._ttse_store.add_fact("old conflicting fact")
+    await rail._ttse_store.retire("old conflicting fact", "fact", "earlier", "")
     await rail._ttse_store.add_fact("the grader rejects lowercase column names")
     await rail._ttse_store.add_fact("PresentBench expects slides.md on disk")
-    await rail._ttse_store.add_tip("T1 keeper tip")  # so >= 2 rules remain after retire
+    await rail._ttse_store.add_tip("T1 keeper tip")
+    blamed = "the grader rejects lowercase column names"
     snap = {
-        "messages": [{"role": "user", "content": "q"}],
+        "messages": [
+            {"role": "user", "content": "q"},
+            _consult_message([blamed, "PresentBench expects slides.md on disk"], ["T1 keeper tip"]),
+        ],
         "ttse_capabilities": "- grep",
         "ttse_task_query": "q",
         "ttse_score": 0.0,  # force FAIL
     }
     await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
 
-    assert [r["text"] for r in rail._ttse_store.retired] == ["the grader rejects lowercase column names"]
+    assert [r["text"] for r in rail._ttse_store.retired] == [
+        "old conflicting fact",
+        "the grader rejects lowercase column names",
+    ]
     assert "the grader rejects lowercase column names" not in rail._ttse_store.facts_texts()
+    assert "PresentBench expects slides.md on disk" in rail._ttse_store.facts_texts()
     assert "rustc fails when source files are encoded as GBK" in rail._ttse_store.facts_texts()
     assert any("grep" in t for t in rail._ttse_store.tips_texts())
-    assert len(llm.calls) == 5  # blame -> synth -> classify tip -> induce -> classify fact
+    synth = next(call for call in llm.calls if "RETIRED rules" in call)
+    assert "old conflicting fact" in synth
+    assert "the grader rejects lowercase column names" in synth
+    assert "PresentBench expects slides.md on disk" not in synth
+    assert "T1 keeper tip" not in synth
+    assert len(llm.calls) == 7  # blame -> dedup tip -> synth -> classify tip -> induce -> dedup fact -> classify fact
+
+
+def test_consulted_rules_intersect_bank_and_drop_truncated():
+    flat = [
+        ("the grader rejects lowercase column names", "fact"),
+        ("unrelated cpp toolchain fact", "fact"),
+        ("When logs are large: use grep", "tip"),
+    ]
+    messages = [
+        {"role": "user", "content": "q"},
+        _consult_message(
+            ["The Grader   Rejects Lowercase Column Names", "unrelated cpp toolchain fac"],
+            ["When logs are large: use grep"],
+        ),
+        {
+            "role": "tool",
+            "name": "ttse_consult",
+            "content": "# FACT\n\n1. unrelated cpp toolchain fac\n… [truncated]\n",
+        },
+        {"role": "tool", "name": "bash", "content": "# FACT\n\n1. unrelated cpp toolchain fact\n"},
+    ]
+    assert _consulted_rules(messages, flat) == [
+        ("the grader rejects lowercase column names", "fact"),
+        ("When logs are large: use grep", "tip"),
+    ]
+    assert _consulted_rules([{"role": "user", "content": "q"}], flat) == []
+
+
+@pytest.mark.asyncio
+async def test_rail_fail_without_consult_does_not_blame(tmp_path):
+    def handler(p: str) -> str:
+        if "diagnosing" in p:
+            return "VERDICT: 1\nREASON: should not run"
+        if "extracting" in p:
+            return "[FACT] lesson"
+        return "NONE"
+
+    rail = _make_rail(tmp_path, ScriptedLLM(handler))
+    await rail._ttse_store.add_fact("unrelated fact")
+    await rail._ttse_store.add_fact("another fact")
+    snap = {
+        "messages": [{"role": "user", "content": "q"}],
+        "ttse_capabilities": "- grep",
+        "ttse_task_query": "q",
+        "ttse_score": 0.0,
+    }
+    await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
+    assert rail._ttse_store.retired == []
+    assert "unrelated fact" in rail._ttse_store.facts_texts()
+    assert not any("diagnosing" in call for call in rail._ttse_llm.calls)
 
 
 @pytest.mark.asyncio
@@ -587,7 +701,7 @@ async def test_rail_blame_none_does_not_retire(tmp_path):
     def handler(p: str) -> str:
         if "diagnosing" in p:
             return "VERDICT: NONE\nREASON: no rule is at fault"
-        if "review a rule bank" in p:
+        if "RETIRED rules" in p:
             return "NONE"
         if "extracting" in p:
             return "[FACT] lesson"
@@ -597,7 +711,10 @@ async def test_rail_blame_none_does_not_retire(tmp_path):
     await rail._ttse_store.add_fact("F1")
     await rail._ttse_store.add_fact("F2")
     snap = {
-        "messages": [{"role": "user", "content": "q"}],
+        "messages": [
+            {"role": "user", "content": "q"},
+            _consult_message(["F1", "F2"]),
+        ],
         "ttse_capabilities": "- grep",
         "ttse_task_query": "q",
         "ttse_score": 0.0,
@@ -710,8 +827,20 @@ async def test_configure_and_unconfigure_ttse_evolution(tmp_path):
 async def test_induce_batch_parses_rules():
     llm = ScriptedLLM(lambda p: "[FACT] batch fact\n[TIP] When x: use grep to y" if "BATCH" in p else "NONE")
     group = [
-        {"task_id": "t1", "task_prompt": "q1", "traj_text": "tr1", "outcome": "success"},
-        {"task_id": "t2", "task_prompt": "q2", "traj_text": "tr2", "outcome": "fail"},
+        {
+            "task_id": "t1",
+            "task_prompt": "q1",
+            "conversation_snippet": "[user] q1",
+            "tool_call_chain": "tr1",
+            "outcome": "success",
+        },
+        {
+            "task_id": "t2",
+            "task_prompt": "q2",
+            "conversation_snippet": "[user] q2",
+            "tool_call_chain": "tr2",
+            "outcome": "fail",
+        },
     ]
     facts, tips = await induce_batch(
         llm=llm,
@@ -762,7 +891,10 @@ async def test_rail_batch_blame_runs_per_failed_task_before_flush(tmp_path):
     await rail._ttse_store.add_fact("F1 bad fact")
     await rail._ttse_store.add_fact("F2 keeper")
     fail_snap = {
-        "messages": [{"role": "user", "content": "q"}],
+        "messages": [
+            {"role": "user", "content": "q"},
+            _consult_message(["F1 bad fact"]),
+        ],
         "ttse_capabilities": "- grep",
         "ttse_task_query": "q",
         "ttse_score": 0.0,  # FAIL
@@ -777,7 +909,7 @@ async def test_rail_batch_blame_runs_per_failed_task_before_flush(tmp_path):
         "ttse_task_query": "q2",
     }
     await rail._run_ttse_induction(None, ctx=None, snapshot=ok_snap)  # buffer 2/2 -> flush
-    assert len(llm.calls) == 3  # blame + induce_batch + classify
+    assert len(llm.calls) == 4  # blame + induce_batch + dedup fact + classify
     assert "lesson" in rail._ttse_store.facts_texts()
 
 
@@ -1501,12 +1633,30 @@ async def test_disk_catalog_injects_guidance_not_rule_body(tmp_path):
     await rail.before_model_call(ctx)
     section = builder.get_section(SectionName.TTSE_FACTS_TIPS)
     text = section.content["cn"]
-    assert "ttse_consult(category=" in text
-    assert "query=" in text
-    assert "无参" in text
+    assert "ttse_consult" in text
+    assert "ttse_consult(category=" not in text
+    assert "处境短句" not in text
+    assert "不要套 When/use" not in text
+    assert "CMakeLists" not in text
     assert text.strip() == DISK_CATALOG_GUIDANCE_CN.strip()
     assert "PresentBench grades slides.md" not in text
     assert "documents-office-and-records" not in text
+
+
+def test_catalog_guidance_explains_function_not_tool_args(tmp_path):
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
+    builder = SystemPromptBuilder()
+    rail._apply_catalog_guidance(builder)
+    text = builder.get_section(SectionName.TTSE_FACTS_TIPS).content["cn"]
+    assert "经验目录" in text
+    assert "ttse_consult" in text
+    assert "处境短句" not in text
+    assert "不要套 When/use" not in text
+    assert "CMakeLists" not in text
+    assert "不要堆关键词" not in text
+    rail._ttse_config.inject_enabled = False
+    rail._apply_catalog_guidance(builder)
+    assert builder.get_section(SectionName.TTSE_FACTS_TIPS) is None
 
 
 @pytest.mark.asyncio
@@ -1557,24 +1707,35 @@ def test_parse_assignments_illegal_id_becomes_other():
 
 
 @pytest.mark.asyncio
-async def test_consult_lists_catalog_and_opens_category(tmp_path):
+async def test_consult_requires_category_and_query(tmp_path):
     store = TTSERecordStore(TTSEConfig(store_path=str(tmp_path / "bank.json")))
     await store.add_fact("PresentBench grades slides.md")
     await store.set_categories([("PresentBench grades slides.md", "fact", "documents-office-and-records")])
-    listing = render_consult_result(store)
-    assert "documents-office-and-records" in listing
-    assert "PresentBench grades slides.md" not in listing
-    opened = render_consult_result(store, category="documents-office-and-records")
-    assert "PresentBench grades slides.md" in opened
-    unknown = render_consult_result(store, category="world.pptx")
+    missing = render_consult_result(store)
+    assert "category is required" in missing
+    assert "query is required" in missing
+    assert "already attached" in missing
+    assert "PresentBench grades slides.md" not in missing
+    missing_query = render_consult_result(store, category="documents-office-and-records")
+    assert "query is required" in missing_query
+    unknown = render_consult_result(
+        store, category="world.pptx", query="PresentBench slides.md"
+    )
     assert "Unknown category" in unknown
-    assert "trailing catalog" in unknown
+    assert CONSULT_ALL_CATEGORY in unknown
+    opened = await render_consult_result_async(
+        store,
+        category="documents-office-and-records",
+        query="PresentBench slides.md",
+    )
+    assert "PresentBench grades slides.md" in opened
     project_catalog(store)
     assert (tmp_path / "by_cat" / "documents-office-and-records" / "SUMMARY.md").is_file()
 
 
 def test_parse_consult_categories_splits_comma_list_and_json():
-    assert parse_consult_categories("documents-office-and-records") == ["documents-office-and-records"]
+    assert parse_consult_category("documents-office-and-records") == "documents-office-and-records"
+    assert parse_consult_category("all") == "all"
     assert parse_consult_categories("documents-office-and-records, software-engineering-devops") == [
         "documents-office-and-records",
         "software-engineering-devops",
@@ -1588,6 +1749,8 @@ def test_parse_consult_categories_splits_comma_list_and_json():
         "other",
     ]
     assert parse_consult_categories("") == []
+    errors = consult_arg_errors("all, documents-office-and-records", "When compiling: use utf-8")
+    assert any("Do not mix" in line for line in errors)
 
 
 @pytest.mark.asyncio
@@ -1601,9 +1764,10 @@ async def test_consult_opens_multiple_categories_in_one_call(tmp_path):
             ("When compiling C++: use cl /utf-8", "tip", "software-engineering-devops"),
         ]
     )
-    opened = render_consult_result(
+    opened = await render_consult_result_async(
         store,
         category="documents-office-and-records, software-engineering-devops",
+        query="csv bom utf-8 compile",
     )
     assert "csv bom needed" in opened
     assert "When compiling C++: use cl /utf-8" in opened
@@ -1612,37 +1776,24 @@ async def test_consult_opens_multiple_categories_in_one_call(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_consult_caps_categories_and_skips_unknown(tmp_path):
+async def test_consult_skips_unknown_and_rejects_all_mixed_with_ids(tmp_path):
     store = TTSERecordStore(TTSEConfig(store_path=str(tmp_path / "bank.json")))
     await store.add_fact("csv bom needed")
-    await store.add_fact("go run works")
-    await store.add_fact("pptx timeout")
-    await store.set_categories(
-        [
-            ("csv bom needed", "fact", "documents-office-and-records"),
-            ("go run works", "fact", "software-engineering-devops"),
-            ("pptx timeout", "fact", "other"),
-        ]
-    )
-    mixed = render_consult_result(
+    await store.set_categories([("csv bom needed", "fact", "documents-office-and-records")])
+    mixed = await render_consult_result_async(
         store,
         category="documents-office-and-records, not-a-real-id",
+        query="csv bom",
     )
     assert "csv bom needed" in mixed
     assert "Unknown category `not-a-real-id`" in mixed
-    ids = [
-        "documents-office-and-records",
-        "software-engineering-devops",
-        "other",
-        "skill-agent-meta-workflows",
-    ]
-    assert len(ids) > MAX_CONSULT_CATEGORIES
-    capped = render_consult_result(store, category=", ".join(ids))
-    assert "csv bom needed" in capped
-    assert "go run works" in capped
-    assert "pptx timeout" in capped
-    assert "Opened the first 3 categories" in capped
-    assert "`skill-agent-meta-workflows`" in capped
+    blocked = render_consult_result(
+        store,
+        category="all, documents-office-and-records",
+        query="csv bom",
+    )
+    assert "Do not mix" in blocked
+    assert "csv bom needed" not in blocked
 
 
 @pytest.mark.asyncio
@@ -1670,7 +1821,7 @@ async def test_disk_catalog_trails_listing_not_rule_body(tmp_path):
     assert attached[0].section == "ttse_catalog"
     body = attached[0].content or ""
     assert "documents-office-and-records" in body
-    assert "ttse_consult(category=" in body
+    assert "ttse_consult(category=" not in body
     assert "PresentBench grades slides.md" not in body
     rendered = manager.render(attached)
     assert "documents-office-and-records" in rendered
@@ -1920,10 +2071,10 @@ async def test_run_dream_projects_catalog_after_prune(tmp_path):
     rail = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"), cfg=cfg)
     now = time.time()
     stale = _new_record("stale slides fact", now=now - 91 * 86400)
-    stale["last_injected_at"] = now - 91 * 86400
+    stale["last_injected_at"] = format_ts(now - 91 * 86400)
     stale["category"] = "documents-office-and-records"
     keep = _new_record("keep devops fact", now=now - 10 * 86400)
-    keep["last_injected_at"] = now - 10 * 86400
+    keep["last_injected_at"] = format_ts(now - 10 * 86400)
     keep["category"] = "software-engineering-devops"
     rail._ttse_store.facts = [stale, keep]
     await rail._ttse_store.save()

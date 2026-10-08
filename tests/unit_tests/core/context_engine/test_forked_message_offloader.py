@@ -329,9 +329,12 @@ class TestMessageOffloaderAddTrigger:
         context = await create_context(
             MessageSummaryOffloaderConfig(add_message_threshold_ratio=0.5),
             context_window_tokens=100,
+            token_counter=_metadata_token_counter(),
         )
 
-        await context.add_messages(ToolMessage(content="x" * 100, tool_call_id="tc-large"))
+        await context.add_messages(
+            ToolMessage(content="x" * 100, tool_call_id="tc-large", metadata={"test_token_count": 25})
+        )
 
         message = context.get_messages()[0]
         assert message.content == "x" * 100
@@ -460,13 +463,14 @@ class TestMessageOffloaderTtl:
                 ttl_message_threshold_ratio=0.25,
             ),
             context_window_tokens=100,
+            token_counter=_metadata_token_counter(),
         )
         processor = context._processors[0]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)
         await context.add_messages(
             [
-                ToolMessage(content="a" * 100, tool_call_id="tc-a"),
-                ToolMessage(content="b" * 100, tool_call_id="tc-b"),
+                ToolMessage(content="a" * 100, tool_call_id="tc-a", metadata={"test_token_count": 30}),
+                ToolMessage(content="b" * 100, tool_call_id="tc-b", metadata={"test_token_count": 30}),
             ]
         )
         await context.get_context_window()
@@ -502,6 +506,8 @@ class TestMessageOffloaderTtl:
 
     @pytest.mark.asyncio
     async def test_ttl_rule_compression_offloads_original_even_when_compressed_fits_budget(self):
+        counter = MagicMock()
+        counter.count_messages.side_effect = lambda messages: sum(len(message.content) // 3 for message in messages)
         context = await create_context(
             MessageSummaryOffloaderConfig(
                 ttl_seconds=10,
@@ -509,6 +515,7 @@ class TestMessageOffloaderTtl:
                 ttl_context_occupancy_ratio=0.1,
             ),
             context_window_tokens=100,
+            token_counter=counter,
         )
         processor = context._processors[0]
         processor._rule_pipeline._time_func = MagicMock(return_value=100.0)

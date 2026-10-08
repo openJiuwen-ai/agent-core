@@ -107,13 +107,13 @@ def test_execution_budget_has_an_explicit_configuration_lever() -> None:
     assert target_ref_lever("member_harness.solver.rail") == "control"
 
 
-def test_instruction_lever_exposes_only_instruction_surfaces() -> None:
+def test_instruction_recommendation_does_not_exclude_executable_surfaces() -> None:
     lever = target_ref_lever("member_harness.solver.skill")
 
     assert available_surfaces_for_lever(
         lever,
         ["prompt", "skill", "tool"],
-    ) == ["prompt_section", "skill"]
+    ) == ["prompt_section", "skill", "tool"]
 
 
 def test_sibling_generation_prompt_treats_prior_proposals_as_pre_execution_plans() -> None:
@@ -164,7 +164,7 @@ def test_sibling_generation_prompt_treats_prior_proposals_as_pre_execution_plans
     assert "Require a bounded decision checkpoint." in message
     assert '"selected_lever": "instruction"' in message
     assert "not execution feedback" in message
-    assert "Never cross levers just to manufacture" in message
+    assert "Do not change components merely to manufacture" in message
 
 
 def test_improver_policy_prompt_is_frozen_and_strips_training_evidence() -> None:
@@ -215,6 +215,10 @@ async def test_sibling_candidates_use_isolated_planner_sessions(
 
     async def fake_invoke(**kwargs):  # type: ignore[no-untyped-def]
         session_ids.append(str(kwargs["session_id"]))
+        assert kwargs["retry_limit"] <= 1
+        retry = kwargs["build_retry_message"]({}, "invalid mapping")
+        assert kwargs["user_message"] in retry
+        assert "Original task:\n{}" not in retry
         return {}
 
     monkeypatch.setattr(
@@ -583,17 +587,20 @@ def test_member_optimizer_agent_factory_renders_planner_prompt(monkeypatch, tmp_
 
     assert agent == {"agent": captured}
     assert captured["card"].name == "member_action_planner"
-    assert captured["max_iterations"] == 3
+    assert captured["max_iterations"] == 15
+    evidence_rail = captured["rails"][-1]
+    assert evidence_rail._read_only is True
+    assert evidence_rail._allow_shell is False
     prompt = str(captured["system_prompt"])
     assert "{{ACTION_POLICY_PROMPT}}" not in prompt
     assert "{{ACTION_DEFINITIONS}}" not in prompt
     assert "Allowed action_group values" not in prompt
     assert "prompt/modify: Modify prompt" not in prompt
-    assert "Evidence-To-Component Selection" in prompt
-    assert "Do not collapse" in prompt
-    assert "`soul.md` or `identity.md`" in prompt
-    assert "return an empty plan. Do not guess `soul.md`" in prompt
-    assert "workflow" in prompt
+    assert "Component choice" in prompt
+    assert "advice, not hard channel restrictions" in prompt
+    assert "identity.md" in prompt and "soul.md" in prompt
+    assert "empty actions list" in prompt
+    assert "ONE behavior intervention" in prompt
     assert "act_s_workflow_prompt_1" not in prompt
 
 
@@ -4294,6 +4301,11 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
                                     "probe its direct operation."
                                 ),
                                 "critical_mistake": ("Do not substitute a returned iterator for direct __next__."),
+                                "decision_contract": {
+                                    "acceptance_observable": (
+                                        "Direct next succeeds before and after iterator initialization."
+                                    )
+                                },
                                 "causal_coverage": {
                                     "explained_requirement_ids": ["verifier:FAIL_TO_PASS:test_next"],
                                     "residual_requirement_ids": [],
@@ -4343,7 +4355,7 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
         "wrong_decision": "Do not substitute a returned iterator for direct __next__.",
         "causal_distinction": ("A directly requested stateful protocol must implement and probe its direct operation."),
         "required_action": "Implement and probe stateful direct __next__ semantics.",
-        "acceptance_observable": "The direct iterator protocol remains incomplete.",
+        "acceptance_observable": "Direct next succeeds before and after iterator initialization.",
         "scope_boundary": ["Treat __iter__ alone as sufficient."],
         "activation_phase": "task_start",
     }
@@ -4359,7 +4371,7 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
     ]
     assert hypotheses[0]["lever_policy"]["recommended_lever"] == "instruction"
     assert hypotheses[0]["lever_policy"]["predicted_affected_case_ids"] == ["case_pydicom"]
-    assert "action" in hypotheses[0]["lever_policy"]["why_not_other_levers"]
+    assert hypotheses[0]["lever_policy"]["why_not_other_levers"] == {}
 
     tampered = yaml.safe_load(Path(hypothesis_path).read_text(encoding="utf-8"))
     tampered["hypotheses"][0]["required_behavior"] = "Only implement __iter__."
@@ -4392,6 +4404,7 @@ def test_optimization_hypothesis_preserves_diagnosis_without_legacy_reaudit(
     attribution: dict[str, object],
     affected_cases: list[str],
 ) -> None:
+    attribution = {**attribution, "decision_contract": {"acceptance_observable": "Replay satisfies the task contract."}}
     analysis_ref = tmp_path / "analysis_ref.yaml"
     analysis_ref.write_text(
         yaml.safe_dump(
@@ -4457,6 +4470,9 @@ def test_optimization_hypothesis_keeps_supported_local_issue_with_unresolved_alt
                                     {"hypothesis_id": "h2", "status": "unresolved"},
                                 ],
                                 "general_mechanism": "Select values only after observing their source provenance.",
+                                "decision_contract": {
+                                    "acceptance_observable": "The selected value matches the observed source."
+                                },
                                 "causal_coverage": {
                                     "explained_requirement_ids": ["criterion:value"],
                                     "residual_requirement_ids": [],
@@ -4516,6 +4532,7 @@ def test_supported_diagnosis_does_not_require_a_second_verifier(
                                 "target_ref": "member_harness.solver.prompt",
                                 "evidence_status": "supported_hypothesis",
                                 "selected_hypothesis_id": "h1",
+                                "decision_contract": {"acceptance_observable": "The requested routing branch is used."},
                                 "hypothesis_assessment": [assessment],
                             }
                         },
@@ -4641,7 +4658,7 @@ def test_planner_binding_records_lever_decision_without_exposing_it_as_skill() -
     assert decision["predicted_affected_case_ids"] == ["case_target"]
 
 
-def test_planner_binding_rejects_cross_lever_compensation() -> None:
+def test_planner_binding_preserves_goal_but_allows_a_different_carrier() -> None:
     plan_data = {
         "actions": [
             {
@@ -4672,8 +4689,9 @@ def test_planner_binding_rejects_cross_lever_compensation() -> None:
         }
     ]
 
-    with pytest.raises(RuntimeError, match="crosses the diagnosed optimization lever"):
-        _bind_immutable_hypotheses(plan_data, hypotheses)
+    _bind_immutable_hypotheses(plan_data, hypotheses)
+    assert plan_data["actions"][0]["expected_effect"] == "Provide a deterministic parser."
+    assert not plan_data["actions"][0]["constraints"]["lever_decision"]["lever_matches_diagnosis"]
 
 
 def test_generated_skill_contract_accepts_native_flexible_skill_body() -> None:

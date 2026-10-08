@@ -20,7 +20,7 @@ from openjiuwen.agent_teams.mcp.server import build_server
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 
-_MEMBER_TOOLS = {"view_task", "claim_task", "verify_task", "send_message"}
+_MEMBER_TOOLS = {"view_task", "claim_task", "verify_task", "send_message", "group_send_message"}
 _OPERATOR_TOOLS = {
     "read_inbox",
     "send_message",

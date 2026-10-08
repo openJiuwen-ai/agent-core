@@ -287,6 +287,17 @@ def _build_model_from_config(config: dict[str, Any]):
     )
 
 
+def _manager_contract_section(brief: str) -> str:
+    cleaned = (brief or "").strip()
+    if not cleaned:
+        return ""
+    return (
+        "\nMANAGER SUBTASK CONTRACT:\n"
+        "The host inlined this assignment. Follow it; do not rediscover it by searching the workspace.\n\n"
+        f"{cleaned}\n"
+    )
+
+
 def _build_create_query(inputs: ExperimentDesignInput, *, request_id: str) -> str:
     resources = "\n".join(f"- {path}" for path in inputs.research.resource_paths)
     branch = inputs.branch or "null"
@@ -306,6 +317,7 @@ def _build_create_query(inputs: ExperimentDesignInput, *, request_id: str) -> st
         "Use read/search tools to inspect the resource paths. "
         "Call submit_experiment_design exactly once when done.\n\n"
         f"RESOURCE PATHS:\n{resources}\n"
+        f"{_manager_contract_section(inputs.contract_brief)}"
     )
 
 
@@ -347,6 +359,7 @@ def _build_update_query(
         f"EVALUATOR SUMMARY:\n{feedback.summary}\n\n"
         f"OBSERVED METRICS:\n{metrics}\n\n"
         f"RESULT PATHS:\n{results}\n"
+        f"{_manager_contract_section(inputs.contract_brief)}"
     )
 
 
@@ -380,6 +393,7 @@ def _build_revise_research_query(
         "Call submit_experiment_design exactly once when done.\n\n"
         f"REASON:\n{inputs.reason}\n\n"
         f"RESOURCE PATHS:\n{resources}\n"
+        f"{_manager_contract_section(inputs.contract_brief)}"
     )
 
 
@@ -593,6 +607,8 @@ class ExperimentDesignAgent:
             run_id=inputs.run_id,
             feedback=feedback,
             allow_after_terminal=inputs.allow_after_terminal,
+            session_epoch=inputs.session_epoch,
+            contract_brief=inputs.contract_brief,
         )
         submit_tool = SubmitExperimentDesignTool()
         draft, recovery = await self._execute_session_turn(
@@ -642,6 +658,8 @@ class ExperimentDesignAgent:
             run_id=inputs.run_id,
             additional_research_paths=extra_paths,
             reason=inputs.reason,
+            session_epoch=inputs.session_epoch,
+            contract_brief=inputs.contract_brief,
         )
         submit_tool = SubmitExperimentDesignTool()
         draft, recovery = await self._execute_session_turn(
