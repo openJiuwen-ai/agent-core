@@ -2,18 +2,18 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 类型 / 状态 | feature；PA-04，已实现（组件验收；正式入口在 PA-08、PA-09 接入前明确拒绝） |
+| 类型 / 状态 | feature；PA-05，已实现（组件验收；正式入口在 PA-09、PA-10 接入前明确拒绝） |
 | 日期 | 2026-10-08 |
 | 负责人 | Song Haoran |
 | 范围 | 内部 `persistent_agent/{schema/request.py, execution/{control,emitter,model_rail,seams,entries}.py, schema/spec.py}`、外层 `__init__.py` 导出及对应单测；依赖共享 Session 接缝 harness [F_07](../../../docs/features/F_07_session-checkpointer-injection.md) |
 | 测试基线 | 改动前：PA 包 173 passed，F_01～F_03 共享回归集 213 passed。改动后：PA 包 224 passed（结局锁定及附录 C 验证点 5 补充后 229 passed），共享回归集 213 passed，`tests/unit_tests/core/session` 411 passed，`tests/unit_tests/harness` 5426 passed / 39 skipped（Python 3.11.17） |
-| 关联 | [v2 设计](../designs/persistent-agent-design-v2.md) §5.1、§7.8、§9.1～9.2、§10.2、§10.4、§13、§14；[开发计划](../designs/persistent-agent-development-plan-v2.md) PA-04；规约 S_01、S_02 |
+| 关联 | [v2 设计](../designs/persistent-agent-architecture.md) §5.1、§7.8、§9.1～9.2、§10.2、§10.4、§13、§14；[开发计划](../designs/persistent-agent-development-plan.md) PA-05；规约 S_01、S_02 |
 
 ## 背景
 
-PA-01～03 和 PA-22 提供了构造、实例隔离和 v2 契约，但还没有对外的执行入口。PA-04 把它们编排成三个入口：执行、确认恢复、停止 / 取消，并把原生流式输出映射为 v2 事件。需要依赖其他特性的部分（参与判断 PA-06、窗口组装 PA-05、会话状态记录 PA-09、交互适配 PA-08、续做 PA-17）只保留接入点；在对应特性接入前，正式入口明确拒绝，不降级。
+PA-01～PA-03 和 PA-04 提供了构造、实例隔离和 v2 契约，但还没有对外的执行入口。PA-05 把它们编排成三个入口：执行、确认恢复、停止 / 取消，并把原生流式输出映射为 v2 事件。需要依赖其他特性的部分（参与判断 PA-07、窗口组装 PA-06、会话状态记录 PA-10、交互适配 PA-09、续做 PA-18）只保留接入点；在对应特性接入前，正式入口明确拒绝，不降级。
 
-设计决策 D1～D7 已与用户确认，见 v2 §5.1、§9.2、§10.4 和计划 PA-04。本文记录实现方案。
+设计决策 D1～D7 已与用户确认，见 v2 §5.1、§9.2、§10.4 和计划 PA-05。本文记录实现方案。
 
 ## 决策
 
@@ -47,15 +47,15 @@ runner 的步骤：
 1. **前置检查**（任何事件之前，失败抛校验拒绝 `DEEPAGENT_CONFIG_PARAM_ERROR` / `DEEPAGENT_INPUT_PARAM_ERROR`）：
    - 执行模式符合一期要求：`enable_task_loop=False`，不启用任何子代理。
    - Session 注入了 `NoopCheckpointer`。
-   - 输入与执行上下文匹配：群消息在 PA-06 接入前拒绝；带 `recovery_ref` 的执行在 PA-17 接入前拒绝；`continue_instruction` 只能随 `recovery_ref` 出现。
+   - 输入与执行上下文匹配：群消息在 PA-07 接入前拒绝；带 `recovery_ref` 的执行在 PA-18 接入前拒绝；`continue_instruction` 只能随 `recovery_ref` 出现。
    - 依赖的接入点可用：会话状态记录，以及恢复时的交互适配。
 2. 构造实例，并核对装配结果：`deep_config` 中 task-loop 和子代理确实都没有开启。
 3. `execute` 记录 `execution.started`。
-4. 加载会话状态记录（PA-09 接入点），写回 Session state；加载失败抛运行异常。`resume` 加载后核对等待现场、校验回复（见第 5 节）。
+4. 加载会话状态记录（PA-10 接入点），写回 Session state；加载失败抛运行异常。`resume` 加载后核对等待现场、校验回复（见第 5 节）。
 5. 检查控制原因：如果已经收到 cancel / stop，直接进入收尾。
 6. 通过 `stream_bound` 运行原生流，并映射输出（见第 3 节）。
 7. 判定结局（见第 4 节）；如果有最终回答，交出 `output.proposed`。
-8. 整理并保存会话状态记录（PA-09 接入点）；保存失败抛运行异常，不记结束事件。
+8. 整理并保存会话状态记录（PA-10 接入点）；保存失败抛运行异常，不记结束事件。
 9. 记账 `execution.paused` 或 `execution.final`；失败抛运行异常。
 10. `close_bound` 清理资源。如果结束事件已落盘后清理失败，仍然抛运行异常，让服务端知道旧执行没有完成清理；服务端看到已有结束记录，会保留结果、不重新执行。如果此前已有异常在抛出，清理失败只记诊断，不覆盖原异常。
 
@@ -97,7 +97,7 @@ runner 的步骤：
 - **调用失败**：以未知用量调用 `report`，并记 `model.completed`。
 - **工具调用前**：与模型调用前共用同一个检查。已有致命错误或 cancel / stop 时，请求 force-finish，原生跳过该工具的执行体，并带着这个标记结束循环。检查覆盖每个尚未开始的工具，只读工具也包括在内；已经开始的并行调用按现有取消机制收敛。这个标记只用于结束原生循环：有致命错误时，入口仍抛出最初登记的异常，不会降级为 `paused(error)`。
 
-`tool.intent` / `tool.completed` 归 PA-14，`window.switched` 归 PA-10，`participation.decided` 归 PA-06。
+`tool.intent` / `tool.completed` 归 PA-15，`window.switched` 归 PA-11，`participation.decided` 归 PA-07。
 
 ### 4. 结局判定
 
@@ -107,17 +107,17 @@ runner 的步骤：
 2. 结局锁定前接受了 cancel → `final(cancelled)`；接受了 stop → `paused(stopped)`。原生流被取消时，runner 先接住取消信号再收尾。
 3. 原生结果 `result_type="interrupt"` → `paused(awaiting_confirmation)`，`intercepted` 来自中断块：`tool_call_id` 用交互 ID，参数按键名脱敏后呈现。
 4. rail 的 force-finish 标记 → `paused(budget_denied)` 或 `paused(error)`。
-5. 原生结果 `result_type="answer"` → `final(completed)`；回答正文非空时先交出 `output.proposed`，并列入 `output_refs`。检查的是 after_invoke rail 之后的最终答案：外层 DeepAgent 在 after_invoke 之后才交出 `answer` 片段。字符数或完整事件字节数超限时改判 `paused(error)`，再执行“保存 → 暂停记账”。答案不截断，完整放进 `ExecutionEnding.pending_answer` 交给会话状态记录保存；PA-09 必须保存该字段，后续交接据此继续，不重跑已完成的业务。原生窗口上下文只保存模型原始回复，不反映 after_invoke 的改写，所以需要这个字段。只有容量超限会改判暂停：字段错误、保存失败和关键记账失败仍按原异常规则处理。
+5. 原生结果 `result_type="answer"` → `final(completed)`；回答正文非空时先交出 `output.proposed`，并列入 `output_refs`。检查的是 after_invoke rail 之后的最终答案：外层 DeepAgent 在 after_invoke 之后才交出 `answer` 片段。字符数或完整事件字节数超限时改判 `paused(error)`，再执行“保存 → 暂停记账”。答案不截断，完整放进 `ExecutionEnding.pending_answer` 交给会话状态记录保存；PA-10 必须保存该字段，后续交接据此继续，不重跑已完成的业务。原生窗口上下文只保存模型原始回复，不反映 after_invoke 的改写，所以需要这个字段。只有容量超限会改判暂停：字段错误、保存失败和关键记账失败仍按原异常规则处理。
 6. 原生结果 `result_type="error"`（含最大迭代次数耗尽）、原生异常，或没有最终结果 → `paused(error)`。
 
-`output_id` 由 `execution_id` 派生，同一 Execution 内保持稳定。`reply.delta` 只用于展示，超过任一限额的原生片段拆成多段事件，不截断。参数脱敏规则是：键名含 password、secret、token、key、credential、authorization 的值替换为 `***`。PA-14 的参数摘要复用同一函数。
+`output_id` 由 `execution_id` 派生，同一 Execution 内保持稳定。`reply.delta` 只用于展示，超过任一限额的原生片段拆成多段事件，不截断。参数脱敏规则是：键名含 password、secret、token、key、credential、authorization 的值替换为 `***`。PA-15 的参数摘要复用同一函数。
 
 ### 5. 确认恢复
 
 - `resume` 从会话状态记录取得等待现场：中断状态、所属 `request_id` 和 `reply_target`。核对 `request_id` 与执行上下文一致，再按 v2 §5.1 校验回复。
 - 校验失败抛校验拒绝，不记录任何事件、不保存、不改动现场。
-- 回复内容到原生 `ConfirmPayload` / `AskUserPayload` 的转换（含“未回答”和“超时”标记）由 PA-08 的交互适配接入点完成。
-- PA-04 只负责按交互 ID 组装 `InteractiveInput`，并编排恢复流程。
+- 回复内容到原生 `ConfirmPayload` / `AskUserPayload` 的转换（含“未回答”和“超时”标记）由 PA-09 的交互适配接入点完成。
+- PA-05 只负责按交互 ID 组装 `InteractiveInput`，并编排恢复流程。
 - 恢复不向窗口追加任何内容，也不记 `execution.started`。
 
 ### 6. 停止与取消
@@ -134,16 +134,16 @@ runner 的步骤：
 
 `execution/seams.py` 集中放置后续特性的接入点：
 
-- `session_state_store(context)`：会话状态记录的加载、整理和保存，PA-09。保存时收到的 `ExecutionEnding` 含结局、所属 Request、回复目标、`output_refs`，以及容量超限时未交接的完整最终答案 `pending_answer`；PA-09 须原样保存 `pending_answer`。
-- `native_reply_adapter()`：交互回复到原生输入的转换，PA-08。
+- `session_state_store(context)`：会话状态记录的加载、整理和保存，PA-10。保存时收到的 `ExecutionEnding` 含结局、所属 Request、回复目标、`output_refs`，以及容量超限时未交接的完整最终答案 `pending_answer`；PA-10 须原样保存 `pending_answer`。
+- `native_reply_adapter()`：交互回复到原生输入的转换，PA-09。
 
-两者未接入时都抛校验拒绝，正式入口因此明确拒绝。单测通过替身验证 PA-04 自身的编排，替身不能替代正式实现。
+两者未接入时都抛校验拒绝，正式入口因此明确拒绝。单测通过替身验证 PA-05 自身的编排，替身不能替代正式实现。
 
-窗口组装（PA-05）未接入时，原生输入就是任务正文。由于会话状态记录未接入时正式入口本来就不可用，这不会形成“降级执行”。
+窗口组装（PA-06）未接入时，原生输入就是任务正文。由于会话状态记录未接入时正式入口本来就不可用，这不会形成“降级执行”。
 
 ### 8. 能力声明
 
-按 F_01 的约定，`enabled_features` 暂不增加 `execution`。M1 集成接入 PA-05、PA-07、PA-08、PA-09 并验证后，再声明执行能力。
+按 F_01 的约定，`enabled_features` 暂不增加 `execution`。M1 集成接入 PA-06、PA-08、PA-09、PA-10 并验证后，再声明执行能力。
 
 ## 拒绝的方案及原因
 
@@ -152,8 +152,8 @@ runner 的步骤：
 | 直接在服务端的消费任务里运行原生流 | `abort_bound` 会取消占用实例的任务，取消信号可能落在服务端代码里，入口无法收尾并交出结束事件 |
 | 让服务端直接调用 `abort_bound` | 服务端拿不到入口内部构造的实例，也无法区分 cancel 和 stop |
 | 在模型调用前的 rail 里抛异常来拒绝预算 | 原生循环会把异常转成错误结果，丢失原因分类；force-finish 能带回结构化标记 |
-| PA-09 接入前用新的空窗口执行 | 违反“加载失败不能降级为空窗口”，会让任务在没有会话记忆的情况下运行 |
-| 在 PA-04 中实现回复到原生载荷的转换 | 已确认由 PA-08 负责原生交互适配；PA-04 只做校验和编排 |
+| PA-10 接入前用新的空窗口执行 | 违反“加载失败不能降级为空窗口”，会让任务在没有会话记忆的情况下运行 |
+| 在 PA-05 中实现回复到原生载荷的转换 | 已确认由 PA-09 负责原生交互适配；PA-05 只做校验和编排 |
 | 扩展原生 `AskUserPayload` 表示超时 | 已确认改用 `ConfirmReply` 的 `outcome` 加标记文本，不改共享类型 |
 
 ## 验证
@@ -174,7 +174,7 @@ runner 的步骤：
 | 8. 停止与取消 | 执行中 cancel → `final(cancelled)`，stop → `paused(stopped)`，模型流被取消；构造前到达的控制在模型调用前收尾；重复或并发控制只保留第一个原因；原生停止较慢时清理等它返回；结局锁定后（收尾保存期间）到达的 cancel / stop 不被接受：控制原因不变、不调用原生 `abort`，结局仍为 `final(completed)`；锁定后保存失败照常抛运行异常、不记结束事件 |
 | 9. 提前关闭流 | 原生流被取消，实例占用释放并关闭，不保存、不记结束事件 |
 | 10. checkpointer 隔离 | 全局内存 checkpointer 中同 session_id 的旧状态不会进入执行，执行后也没有新快照 |
-| v2 附录 C 验证点 5（部分） | 模型调用中途停止时，已有上下文（含已完成的工具调用及结果）经会话状态记录接入点保存后记 `paused(stopped)`；第一次模型调用中途停止时，原生在上下文末尾追加“[Request cancelled by user]”占位回复。工具执行中途停止的不完整工具调用归 PA-17 |
+| v2 附录 C 验证点 5（部分） | 模型调用中途停止时，已有上下文（含已完成的工具调用及结果）经会话状态记录接入点保存后记 `paused(stopped)`；第一次模型调用中途停止时，原生在上下文末尾追加“[Request cancelled by user]”占位回复。工具执行中途停止的不完整工具调用归 PA-18 |
 | 11. 回归 | PA 包 224 passed（新增 51），结局锁定及附录 C 验证点 5 补充后 229 passed、`tests/unit_tests/harness` 5432 passed / 39 skipped；共享回归集 213 passed；`tests/unit_tests/core/session` 411 passed；`tests/unit_tests/harness` 5426 passed / 39 skipped。同一套件连续运行 5 次结果一致 |
 
 变异检查：去掉清理前的停止等待、去掉内层生成器的 `aclosing`、去掉原生调用后的致命错误检查、去掉 `request_abort` 的结局锁定检查，对应用例都会失败。
@@ -183,8 +183,8 @@ runner 的步骤：
 
 ## 已知遗留
 
-- 参与判断（PA-06）、窗口组装（PA-05）、文件候选与补交（PA-07）、交互适配（PA-08）、会话状态记录（PA-09）、意图记账（PA-14）、续做（PA-17）接入前，对应能力在正式入口明确拒绝或不可用。
+- 参与判断（PA-07）、窗口组装（PA-06）、文件候选与补交（PA-08）、交互适配（PA-09）、会话状态记录（PA-10）、意图记账（PA-15）、续做（PA-18）接入前，对应能力在正式入口明确拒绝或不可用。
 - task-loop 与子代理由 PA-24～PA-26 开放。
 - 原生 rail 之外的内部模型调用（例如 task planning 的独立模型）不经过本 rail 的预算准入；一期配置不启用这类 rail，开放时再评估。
-- 字符数或完整事件字节数超限的最终回答目前以 `paused(error)` 结束，完整答案经 `ExecutionEnding.pending_answer` 交给 PA-09 保存。是否改为拆成多条候选或转为文件交接，以及如何从保存的答案继续交接，待 PA-07 设计时一并决定。
-- 工具调用前的守卫与 `PersistentModelCallRail` 同一优先级（10），在其他 rail 的工具调用前钩子之后执行。PA-14 的意图记账若在更早的钩子中执行，须自行检查致命错误，或排在守卫之后，避免为不会执行的工具登记意图。
+- 字符数或完整事件字节数超限的最终回答目前以 `paused(error)` 结束，完整答案经 `ExecutionEnding.pending_answer` 交给 PA-10 保存。是否改为拆成多条候选或转为文件交接，以及如何从保存的答案继续交接，待 PA-08 设计时一并决定。
+- 工具调用前的守卫与 `PersistentModelCallRail` 同一优先级（10），在其他 rail 的工具调用前钩子之后执行。PA-15 的意图记账若在更早的钩子中执行，须自行检查致命错误，或排在守卫之后，避免为不会执行的工具登记意图。

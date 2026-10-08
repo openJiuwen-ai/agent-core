@@ -293,3 +293,5 @@ tests/unit_tests/extensions/context_evolver/memory_file/
 
 # Local design testing material is not versioned.
 /.agents/agent-docs/designs/testing/
+# Local Persistent Agent development visualization
+/persistent_agents_development_visualisation/

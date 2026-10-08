@@ -2,18 +2,18 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 类型 / 状态 | feature；PA-22，已完成 |
+| 类型 / 状态 | feature；PA-04，已完成 |
 | 日期 | 2026-10-07 |
 | 负责人 | Song Haoran |
 | 范围 | 内部 `persistent_agent/{ports.py, schema/{execution,protocol,events,port_results,context}.py}`，以及外层 `__init__.py` 导出和对应单测；`schema/build_context.py`、`factory.py` 只修正过时的文档字符串。不改共享 harness / core 代码 |
 | 测试基线 | 改动前：`tests/unit_tests/harness/persistent_agent` 132 passed，F_01～F_03 使用的共享回归集 213 passed。审阅修订后：PA 包 173 passed，共享回归 213 passed，改动范围 Ruff check / format 通过（Python 3.11.17，uv 按 `uv.lock` 同步的 `.venv`） |
-| 关联 | [v2 设计](../designs/persistent-agent-design-v2.md) §7.8、§7.9、§9.1～9.3、§11.2、§14、附录 E；[开发计划](../designs/persistent-agent-development-plan-v2.md) PA-22；规约 S_01～S_03 |
+| 关联 | [v2 设计](../designs/persistent-agent-architecture.md) §7.8、§7.9、§9.1～9.3、§11.2、§14、附录 E；[开发计划](../designs/persistent-agent-development-plan.md) PA-04；规约 S_01～S_03 |
 
 ## 背景
 
 PA-01 按旧版架构定义了执行上下文、宿主端口、事件和端口返回值（[F_02](F_02_execution-protocol.md)）。v2 改为：Persistent Agent 与 AgentServer 同进程运行，同一 Session 只有一个执行者；事件进入服务端按 Execution 维护的有序队列；跨 Execution 的状态由内部组件 `WindowStore` 保存在服务端注入的 `BaseKVStore` 中；崩溃续做靠执行日志。旧契约中的执行代次、执行权检查、控制轮询、提交结果查询、外部窗口存储和群资料端口都已没有使用方。
 
-PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。本特性只调整契约，也就是类型定义、端口协议和构造时的校验，不实现任何运行行为。
+PA-05、PA-06、PA-07、PA-10、PA-13、PA-15、PA-17、PA-22、PA-23 都以新契约为开工前置。本特性只调整契约，也就是类型定义、端口协议和构造时的校验，不实现任何运行行为。
 
 ## 决策
 
@@ -28,17 +28,17 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 | 端口 | 方法 | 约定 |
 | --- | --- | --- |
 | `CommitPort`（必需） | `record(execution, event) -> None` | 所有事件统一 await record；普通事件入队后返回，失败只记诊断，日志缺失不阻塞后续关键记账；`tool.intent`、`execution.paused`、`execution.final` 等本事件落盘后返回，失败停止当前执行；final 还须确认 output_refs 引用的候选输出已可靠保存（v2 §9.1） |
-| | `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按 local_seq 返回该次执行已保存的事件，允许缺口，非空不保证完整；服务端只允许读取同一 Session、同一 Request 下的执行。读取失败抛异常，没有事件时返回空元组，PA-16 两者都按“上一次记录缺失”处理 |
+| | `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按 local_seq 返回该次执行已保存的事件，允许缺口，非空不保证完整；服务端只允许读取同一 Session、同一 Request 下的执行。读取失败抛异常，没有事件时返回空元组，PA-17 两者都按“上一次记录缺失”处理 |
 | `BudgetPort`（必需） | `admit` / `report` | 去掉 `unknown`：准入只有 `admitted / denied`，用量回报只有 `confirmed / rejected`；调用失败抛异常 |
 | 窗口存储后端（必需） | `window_backend: BaseKVStore` | 构造时只检查是否为 `BaseKVStore` 实例，不读写存储；专用 SysOperation 后端不在本期 |
 | `GroupChatPort`（可选） | `recent_messages(execution, cursor, limit)`、`search_messages(execution, query)` | 服务端按执行上下文里的 Session 定位群，不再单独传 `group` 参数。结果区分 `found / empty / incomplete` |
-| `KnowledgePort`（可选） | `resolve` / `read` | 不变，继续使用 `MaterialQuery / MaterialSnapshot / MaterialReadResult`，由 PA-12 细化 |
+| `KnowledgePort`（可选） | `resolve` / `read` | 不变，继续使用 `MaterialQuery / MaterialSnapshot / MaterialReadResult`，由 PA-13 细化 |
 
 删除 `ExecutionAuthority`、`ControlPort`、`ContextStore`、`HistoryPort`、`GroupMaterialPort`。构造时的必需依赖从“执行权 / 提交 / 控制 / 预算”改为“记账 / 预算 / 窗口存储后端”。
 
 `record` 是唯一持久化通道；入口事件流只用于实时展示，服务端消费流时不再次保存同一事件。普通日志允许永久缺失，不要求在关键事件前补回；服务端允许 local_seq 有缺口，普通事件的保存失败或重试不得卡住后续关键记账。日志读取按 local_seq 返回已保存事件，非空日志不代表完整；缺少工具结果时仍按续做规则查证，不推断未执行。
 
-**最终输出单独保障**：本次需要交接的候选输出必须列入 final.output_refs。AgentServer 在 final 记账成功前确认这些候选内容及交接信息已可靠保存；缺失时 final 必须失败，不能删除引用后宣告完成。候选内容可按原 event_id / output_id 重交，服务端去重，不重跑业务任务。沿用现有 FinalPayload 的引用字段，不把完整候选正文加入 final，也不新增事件类型。实际调用与异常处理由 PA-04 实现，候选交接由 PA-07 实现，服务端队列、输出持久化与 final 检查由 AgentServer 实现；PA-22 只明确契约。
+**最终输出单独保障**：本次需要交接的候选输出必须列入 final.output_refs。AgentServer 在 final 记账成功前确认这些候选内容及交接信息已可靠保存；缺失时 final 必须失败，不能删除引用后宣告完成。候选内容可按原 event_id / output_id 重交，服务端去重，不重跑业务任务。沿用现有 FinalPayload 的引用字段，不把完整候选正文加入 final，也不新增事件类型。实际调用与异常处理由 PA-05 实现，候选交接由 PA-08 实现，服务端队列、输出持久化与 final 检查由 AgentServer 实现；PA-04 只明确契约。
 
 ### 3. 事件
 
@@ -61,7 +61,7 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 
 `tool_call_id` 同时出现在 `tool.intent` 和 `tool.completed` 中。窗口里的工具调用、执行日志和续做时补齐的工具结果（v2 §11.2），都通过它对应起来。
 
-事件的 `schema_version` 仍为 1。旧契约的事件从未在生产环境落盘，没有需要兼容的旧数据。`progress.updated` 和 `tool.completed` 中“每条约 500 字”的要求，由 PA-04、PA-14 在生成事件时控制；DTO 只保留现有的长度上限。
+事件的 `schema_version` 仍为 1。旧契约的事件从未在生产环境落盘，没有需要兼容的旧数据。`progress.updated` 和 `tool.completed` 中“每条约 500 字”的要求，由 PA-05、PA-15 在生成事件时控制；DTO 只保留现有的长度上限。
 
 ### 4. 数据结构的删改
 
@@ -70,8 +70,8 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
   - `GroupMessage`：发送者身份（稳定 ID、显示名、人或 Agent）、服务端接收时间、正文、@ 的对象、回复的消息、附件引用、状态、是否属于排队中的请求。已撤回的消息不带正文。
   - `GroupMessageQuery`：关键词、时间范围、发送者、游标、条数。
   - `GroupMessagesResult`：`found` 至少带一条消息，可以带下一页游标；`empty` 表示已查完且确定没有；`incomplete` 表示没查完或查询失败，必须说明原因，可以带已拿到的部分消息，不能当作“没有”。
-- 会话状态记录和归档的结构不在本项定义，分别由 PA-09、PA-10 定义。
-- **已确认的序列化约束**：会话状态记录与历史窗口归档统一使用 JSON，不使用 pickle；不直接序列化整个 Session 或运行对象。保存时按白名单提取字段并转换成 JSON 数据，读取时校验字段并显式还原所需对象（包括中断状态）。PA-22 只记录该约束；会话状态记录的编码与还原由 PA-09 实现，归档的编码与读取由 PA-10 实现，目前均待实现。
+- 会话状态记录和归档的结构不在本项定义，分别由 PA-10、PA-11 定义。
+- **已确认的序列化约束**：会话状态记录与历史窗口归档统一使用 JSON，不使用 pickle；不直接序列化整个 Session 或运行对象。保存时按白名单提取字段并转换成 JSON 数据，读取时校验字段并显式还原所需对象（包括中断状态）。PA-04 只记录该约束；会话状态记录的编码与还原由 PA-10 实现，归档的编码与读取由 PA-11 实现，目前均待实现。
 
 ## 拒绝的方案及原因
 
@@ -80,7 +80,7 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 | 保留 `epoch` 留给将来跨进程部署 | 现在没有任何使用方。跨进程需要的是执行者代次加超时查询的整套协议（v2 附录 C），届时再整体设计 |
 | 把 `record` 拆成“入队”和“落盘”两个方法 | v2 §14 规定是同一个接口，等待方式由事件类型决定、由服务端实现；拆开反而要求 Agent 自己判断该调哪个 |
 | `GroupChatPort` 显式传入 `group` | 执行上下文里没有群标识，新增字段等于要求服务端再传一份可以由 Session 推出的信息；按 Session 定位与其他端口一致 |
-| PA-22 一并定义会话状态记录和归档结构 | 没有使用方；会在 PA-09、PA-10 确定白名单字段、JSON 字段编码和对象还原规则之前就把格式定死；本项只记录已确认的 JSON / 不使用 pickle 约束 |
+| PA-04 一并定义会话状态记录和归档结构 | 没有使用方；会在 PA-10、PA-11 确定白名单字段、JSON 字段编码和对象还原规则之前就把格式定死；本项只记录已确认的 JSON / 不使用 pickle 约束 |
 | 预算端口保留 `unknown` | 同进程调用失败直接抛异常，与 v2“不设计结果未知状态”的前提一致 |
 | 把 `CommitPort` 改名为记账或日志端口 | v2 中它仍是“记账”接口，保留名称可以减少无关改动 |
 | 所有关键事件等待全部前序事件落盘 | 流式展示或普通日志缺失会使任务无法完成；改为关键事件保证自身落盘，final 只额外检查所引用的候选输出 |
@@ -90,7 +90,7 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 - **外层公开导出**：
   - 删除 `ContextStore`、`HistoryPort`、`GroupMaterialPort`，8 个窗口结构，`CheckpointPayload`、`WaitingPayload`、`SuspendedPayload`、`WindowPayload`，以及 `CommitResult`、`AuthorityResult`、`ControlCommand`、`ControlResult`。
   - 新增 `GroupChatPort`、`GroupMessage`、`GroupMessageQuery`、`GroupMessagesResult`、`PausedPayload`、`InterceptedToolCall`、`WindowSwitchedPayload`。
-- **不变的部分**：`create_persistent_agent` 的签名和行为不变，仍返回原生 `DeepAgent`；`spec.py`（`permissions` 归 PA-08）、`execution/binding.py`、`execution/stream_lifecycle.py` 不改；个人版不受影响。
+- **不变的部分**：`create_persistent_agent` 的签名和行为不变，仍返回原生 `DeepAgent`；`spec.py`（`permissions` 归 PA-09）、`execution/binding.py`、`execution/stream_lifecycle.py` 不改；个人版不受影响。
 - **对外部调用方的要求**：不再传入执行权和控制端口，改为必须提供 `window_backend`。
 
 ## 验证
@@ -114,7 +114,7 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
    - 其余行为不变。
 4. **回归**：PA 包、F_01～F_03 使用的共享回归集、改动范围的 Ruff check 与 format 检查。
 
-后续运行验收（PA-04、PA-07、PA-16、PA-17 与 AgentServer，待实现）：普通事件入队失败或异步保存失败后，后续 tool.intent / paused / final 不因日志缺口失败；tool.intent 保存失败时不执行写操作；final 引用的候选输出未保存时不得完成，按原标识补交成功后不重复投递；已有 tool.intent 而 tool.completed 缺失时，续做先查证，不盲目重做。
+后续运行验收（PA-05、PA-08、PA-17、PA-18 与 AgentServer，待实现）：普通事件入队失败或异步保存失败后，后续 tool.intent / paused / final 不因日志缺口失败；tool.intent 保存失败时不执行写操作；final 引用的候选输出未保存时不得完成，按原标识补交成功后不重复投递；已有 tool.intent 而 tool.completed 缺失时，续做先查证，不盲目重做。
 
 实际结果：
 
@@ -134,8 +134,8 @@ PA-04、05、06、09、12、14、16、21、23 都以新契约为开工前置。�
 
 ## 已知遗留
 
-- 事件映射、记账调用和暂停收尾由 PA-04 实现。
-- 意图记账由 PA-14 实现；工具只读 / 有副作用的声明来源仍待确认。
-- 续做时补齐悬空工具结果由 PA-17 实现。
-- 会话状态记录和归档结构由 PA-09、PA-10 定义。
+- 事件映射、记账调用和暂停收尾由 PA-05 实现。
+- 意图记账由 PA-15 实现；工具只读 / 有副作用的声明来源仍待确认。
+- 续做时补齐悬空工具结果由 PA-18 实现。
+- 会话状态记录和归档结构由 PA-10、PA-11 定义。
 - 容量边界的设计尚待在 v2 中补充（见计划 §3.4）。

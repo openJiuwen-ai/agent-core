@@ -5,19 +5,19 @@
 | 项 | 值 |
 | --- | --- |
 | 类型 | spec |
-| 状态 | PA-22 已按 v2 定义窗口存储后端注入位、群聊与知识端口及其数据结构；窗口管理、会话状态记录、换窗和检索尚未实现 |
+| 状态 | PA-04 已按 v2 定义窗口存储后端注入位、群聊与知识端口及其数据结构；窗口管理、会话状态记录、换窗和检索尚未实现 |
 | 关联模块 | `openjiuwen/harness/persistent_agent/persistent_agent/{ports.py,schema/context.py}` |
-| 最近一次修订日期 | 2026-10-07 |
-| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)；开发计划 PA-05、PA-09～PA-12、PA-22、PA-23 |
-| 设计依据 | [Persistent Agent 设计（v2）](../designs/persistent-agent-design-v2.md) §7；[旧版详细架构](../designs/persistent-agent-architecture.md) §9～11 仅供参考 |
+| 最近一次修订日期 | 2026-10-08 |
+| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)；开发计划 PA-06、PA-10～PA-13、PA-04、PA-23 |
+| 设计依据 | [Persistent Agent 设计（v2）](../designs/persistent-agent-architecture.md) §7；旧版详细架构 §9～11 仅供参考（见 Git 历史） |
 
 当前已实现的只有契约，不提供存储、检索、授权判定或运行行为：
 
-- **窗口存储后端**：`PersistentPorts.window_backend` 必须是服务端注入的 `BaseKVStore` 实例，构造时只检查类型、不读写。会话状态记录与窗口归档的格式、序列化和检索由内部组件 `WindowStore` 在 PA-09、PA-10、PA-11 定义，v2 不再有外部 ContextStore、活动指针条件更新或执行代次。
+- **窗口存储后端**：`PersistentPorts.window_backend` 必须是服务端注入的 `BaseKVStore` 实例，构造时只检查类型、不读写。会话状态记录与窗口归档的格式、序列化和检索由内部组件 `WindowStore` 在 PA-10、PA-11、PA-12 定义，v2 不再有外部 ContextStore、活动指针条件更新或执行代次。
 - **群聊记录**：`GroupChatPort.recent_messages / search_messages` 返回 `GroupMessagesResult`，结果分为 found / empty / incomplete，incomplete（没查完或查询失败）不能当作“没有”。`GroupMessage` 按 v2 §7.9 携带稳定发送者身份、服务端接收时间、@、回复、附件引用、状态和是否属于排队中的请求；已撤回的消息不返回正文。读取与检索的行为由 PA-23 实现。
-- **知识**：`KnowledgePort.resolve / read` 继续使用 `MaterialQuery / MaterialSnapshot / MaterialReadResult`，`unknown`、`unavailable`、`forbidden`、`partial` 与具备完整查询水位的 `empty` 区分，由 PA-12 细化。
+- **知识**：`KnowledgePort.resolve / read` 继续使用 `MaterialQuery / MaterialSnapshot / MaterialReadResult`，`unknown`、`unavailable`、`forbidden`、`partial` 与具备完整查询水位的 `empty` 区分，由 PA-13 细化。
 
-以下章节仍按旧版架构编写，描述每次模型调用前的装配、活动指针和 Checkpoint 等已被 v2 取代的目标行为；与 v2 冲突时以 v2 §7（按 Execution 生命周期管理上下文、会话状态记录、换窗与归档）为准，随 PA-05、PA-09～PA-12 修订。
+以下章节仍按旧版架构编写，描述每次模型调用前的装配、活动指针和 Checkpoint 等已被 v2 取代的目标行为；与 v2 冲突时以 v2 §7（按 Execution 生命周期管理上下文、会话状态记录、换窗与归档）为准，随 PA-06、PA-10～PA-13 修订。
 
 ## 范围 / 边界
 

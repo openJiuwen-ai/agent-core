@@ -5,13 +5,13 @@
 | 项 | 值 |
 | --- | --- |
 | 类型 | spec |
-| 状态 | 事件 DTO 和记账 / 执行日志端口契约已按 v2 实现（PA-22）；事件映射、记账调用、结局判定和最终回答交接已实现（PA-04）；`tool.intent / tool.completed`（PA-14）、`window.switched`（PA-10）、`participation.decided`（PA-06）待接入 |
+| 状态 | 事件 DTO 和记账 / 执行日志端口契约已按 v2 实现（PA-04）；事件映射、记账调用、结局判定和最终回答交接已实现（PA-05）；`tool.intent / tool.completed`（PA-15）、`window.switched`（PA-11）、`participation.decided`（PA-07）待接入 |
 | 关联模块 | 内部 `persistent_agent/{ports.py,schema/{protocol,events,port_results}.py,execution/{emitter,model_rail,entries}.py}` |
 | 最近一次修订日期 | 2026-10-08 |
-| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)；开发计划 PA-04、PA-07、PA-14、PA-16、PA-22 |
-| 设计依据 | [Persistent Agent 设计（v2）](../designs/persistent-agent-design-v2.md) §9、§13 第 5、12 条、§14 |
+| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)；开发计划 PA-05、PA-08、PA-15、PA-17、PA-04 |
+| 设计依据 | [Persistent Agent 设计（v2）](../designs/persistent-agent-architecture.md) §9、§13 第 5、12 条、§14 |
 
-当前可以构造 `AgentEvent` 及其 11 种类型化负载，并已定义 `CommitPort.record / read_execution_log` 协议。PA-04 的执行入口已把原生流映射为事件并按下文时序记账（见“事件映射与结局”）；生产记账后端由服务端实现，下文的记账时序和交接约束也是服务端要满足的运行契约。
+当前可以构造 `AgentEvent` 及其 11 种类型化负载，并已定义 `CommitPort.record / read_execution_log` 协议。PA-05 的执行入口已把原生流映射为事件并按下文时序记账（见“事件映射与结局”）；生产记账后端由服务端实现，下文的记账时序和交接约束也是服务端要满足的运行契约。
 
 ## 范围 / 边界
 
@@ -69,7 +69,7 @@ AgentEvent {
 | 端口方法 | 契约 |
 | --- | --- |
 | `record(execution, event) -> None` | 所有事件统一 await record；普通事件入队后返回，失败只记诊断，日志缺失不阻塞关键记账；关键事件等待自身落盘，final 还须确认 output_refs 所引用的候选内容与交接信息已可靠保存，关键调用失败停止当前 Execution |
-| `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按 local_seq 返回该次执行已保存的事件，允许缺口，非空不保证完整；服务端只允许读取同一 Session、同一 Request 下的执行。读取失败抛异常；续做时读不到或没有事件，按“上一次记录缺失”处理（PA-16）；工具结果缺失时先查证 |
+| `read_execution_log(execution, execution_id) -> tuple[AgentEvent, ...]` | 按 local_seq 返回该次执行已保存的事件，允许缺口，非空不保证完整；服务端只允许读取同一 Session、同一 Request 下的执行。读取失败抛异常；续做时读不到或没有事件，按“上一次记录缺失”处理（PA-17）；工具结果缺失时先查证 |
 
 执行适配须先对服务端返回的值重新 `model_validate`，再使用。
 
@@ -96,7 +96,7 @@ AgentEvent {
 2. 结局锁定前接受了 cancel：`final(cancelled)`；接受了 stop：`paused(stopped)`。原生调用退出、确定执行结果后同步锁定结局，此后到达的控制不被接受，不改变结局；锁定不代表持久化成功，会话状态记录保存和结束记账失败仍按原规则抛运行异常（见 [S_01](S_01_public-api-and-execution.md) 的执行入口编排）。
 3. 有被拦截调用：`paused(awaiting_confirmation)`。
 4. 预算拒绝或准入异常：`paused(budget_denied)` / `paused(error)`。
-5. 原生结果为 answer：`final(completed)`。正文非空时先交出 `output.proposed`（`output_id` 由 `execution_id` 派生，`target_ref` 为回复目标，`share_mode=message`），并列入 `output_refs`。检查的是 after_invoke rail 之后的最终答案。字符数或完整事件字节数超限时改为 `paused(error)`，不截断；完整答案经会话状态记录保存（`ExecutionEnding.pending_answer`，PA-09），供后续交接继续使用。
+5. 原生结果为 answer：`final(completed)`。正文非空时先交出 `output.proposed`（`output_id` 由 `execution_id` 派生，`target_ref` 为回复目标，`share_mode=message`），并列入 `output_refs`。检查的是 after_invoke rail 之后的最终答案。字符数或完整事件字节数超限时改为 `paused(error)`，不截断；完整答案经会话状态记录保存（`ExecutionEnding.pending_answer`，PA-10），供后续交接继续使用。
 6. 原生错误结果（含迭代次数耗尽）、原生异常或没有结果：`paused(error)`，错误文本不作为候选输出。
 
 最终回答交接、会话状态记录保存、结束事件记账按此顺序进行。工具参数脱敏规则为：键名（不区分大小写）含 password、secret、token、key、credential、authorization 的值替换为 `***`，嵌套对象和列表同样处理。
@@ -112,7 +112,7 @@ AgentEvent {
 
 普通事件的调用失败由执行侧只记诊断并继续，异步保存失败由服务端记诊断，可以重试或跳过，不能卡住后续关键记账。不要求在关键事件前补回所有普通日志。关键事件自身保存失败，或 final 必需的候选输出未保存时，关键调用抛异常，执行侧停止当前 Execution。队列由服务端维护，不随 Agent 实例清理而取消；关键事件成功也不保证前序日志完整。续做时缺少 tool.completed 的写操作先查证，查不清询问发起人，不把缺失记录当作未执行。
 
-需要交接的候选回复或文件必须列入 final.output_refs。`execution.final` 记账成功时，其引用的候选内容、目标和共享方式已可靠保存，服务端据此处理候选输出；其他普通日志无需全部保存。缺少被引用候选时 final 必须失败，不能删除输出引用后宣告完成。PA-04 / PA-07 可按原 event_id / output_id 重交候选，服务端去重，不重跑业务任务；沿用现有引用字段，不把完整正文加入 final。每项输出按 `output_id + target_ref + share_mode` 去重。只有文件结果的任务仍可 `completed`；若要群成员感知文件，`output.proposed` 须携带目标群、文件引用和共享方式（上传群空间，或作为群消息附件 / 可访问引用发送）。文件写入成功不自动形成群公开记录。
+需要交接的候选回复或文件必须列入 final.output_refs。`execution.final` 记账成功时，其引用的候选内容、目标和共享方式已可靠保存，服务端据此处理候选输出；其他普通日志无需全部保存。缺少被引用候选时 final 必须失败，不能删除输出引用后宣告完成。PA-05 / PA-08 可按原 event_id / output_id 重交候选，服务端去重，不重跑业务任务；沿用现有引用字段，不把完整正文加入 final。每项输出按 `output_id + target_ref + share_mode` 去重。只有文件结果的任务仍可 `completed`；若要群成员感知文件，`output.proposed` 须携带目标群、文件引用和共享方式（上传群空间，或作为群消息附件 / 可访问引用发送）。文件写入成功不自动形成群公开记录。
 
 候选可先处于 `pending_check / held`。服务端发送检查与发送前复核通过才允许发送；平台回执才证明送达。投递等待或失败不重开业务 Execution，按原 `output_id` 重试交接。群回复沿相同的事件和结果链路，不允许通过普通 IM 工具绕过当前协作群的发送检查。Agent 停止后的旧候选不因重启自动补发，撤权内容不能继续投递。
 
@@ -120,4 +120,4 @@ AgentEvent {
 
 - [S_01](S_01_public-api-and-execution.md) 定义执行上下文、执行入口和宿主端口集合。
 - [S_04](S_04_tools-and-workspace.md) 定义工具副作用与办公空间；写操作的意图记账见 v2 §9.1。
-- 续做时的日志整理与恢复流程见 v2 §9.3、§11.2；S_05 尚按旧版架构编写，待 PA-16、PA-17 修订。
+- 续做时的日志整理与恢复流程见 v2 §9.3、§11.2；S_05 尚按旧版架构编写，待 PA-17、PA-18 修订。
