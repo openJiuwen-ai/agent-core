@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -18,6 +18,8 @@ class ConfirmPayload(BaseModel):
     approved: bool
     feedback: str = Field(default="")
     auto_confirm: bool = Field(default=False)
+    authorization_mode: Literal["allow", "allow_with_scope"] = "allow"
+    authorization_scope: Literal["exact", "parent", "domain"] = "exact"
     persist_allow: Optional[bool] = Field(
         default=None,
         description="Whether to persist the allow rule to disk. "

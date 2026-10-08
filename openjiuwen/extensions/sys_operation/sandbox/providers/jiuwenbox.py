@@ -1432,6 +1432,59 @@ def _command_matches_exclude(command: str, patterns: list[str] | None) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# fallback_policy（沙箱不可用时的本地回落策略）
+# ---------------------------------------------------------------------------
+
+_FALLBACK_POLICIES = {"never", "inline_only", "always"}
+
+_FALLBACK_AUDIT_HOOK: Callable[..., Any] | None = None
+
+
+def set_fallback_audit_hook(hook: Callable[..., Any] | None) -> None:
+    """注册沙箱兜底审计回调（由宿主应用接入；best-effort，异常仅告警）。"""
+    global _FALLBACK_AUDIT_HOOK
+    _FALLBACK_AUDIT_HOOK = hook
+
+
+def _emit_fallback_audit(**fields: Any) -> None:
+    hook = _FALLBACK_AUDIT_HOOK
+    if hook is None:
+        return
+    try:
+        hook(**fields)
+    except Exception:  # noqa: BLE001
+        logger.warning("[jiuwenbox] fallback audit hook failed", exc_info=True)
+
+
+def _read_fallback_policy(extra: Any) -> str:
+    """Read fallback_policy from launcher extra_params.
+
+    新键 ``fallback_policy``（``never`` | ``inline_only`` | ``always``）优先；
+    非法值告警按 ``inline_only``；未配置时按旧键 ``fallback_on_failure``
+    兼容映射（True→``always``，False/缺失→``never``，保持存量语义）。
+    """
+    if not isinstance(extra, dict):
+        return "never"
+    raw = str(extra.get("fallback_policy") or "").strip()
+    if raw in _FALLBACK_POLICIES:
+        return raw
+    if raw:
+        logger.warning("[jiuwenbox] invalid fallback_policy=%r, using inline_only", raw)
+        return "inline_only"
+    return "always" if bool(extra.get("fallback_on_failure", False)) else "never"
+
+
+def _is_inline_shell_command(command: str) -> bool:
+    """单行命令视为内联脚本；含换行（多行/heredoc）为非内联。"""
+    return "\n" not in (command or "").strip()
+
+
+def _local_fallback_allowed(policy: str, *, is_inline: bool) -> bool:
+    """策略裁决：``always`` 全回落；``inline_only`` 仅内联脚本回落；``never`` 不回落。"""
+    return policy == "always" or (policy == "inline_only" and is_inline)
+
+
 def _item_from_payload(item: dict[str, Any]) -> FileSystemItem:
     return FileSystemItem(
         name=item.get("name", ""),
@@ -1852,7 +1905,10 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
 
         extra = self._launcher_extra_params()
         exclude_patterns = _read_excluded_commands(extra)
-        fallback_on_failure = bool(extra.get("fallback_on_failure", False)) if isinstance(extra, dict) else False
+        fallback_policy = _read_fallback_policy(extra)
+        explicit_policy = isinstance(extra, dict) and "fallback_policy" in extra
+        is_inline = _is_inline_shell_command(command)
+        allow_fallback = _local_fallback_allowed(fallback_policy, is_inline=is_inline)
 
         # (a) Pre-route excluded commands to local execution
         if _command_matches_exclude(command, exclude_patterns):
@@ -1885,11 +1941,33 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
                 env=environment,
                 timeout=exec_timeout,
             ),
-            fallback_on_failure=fallback_on_failure,
+            fallback_on_failure=allow_fallback,
         )
         if pipeline_error:
+            if explicit_policy and not allow_fallback:
+                _emit_fallback_audit(
+                    domain="sandbox",
+                    op="execute_cmd",
+                    policy=fallback_policy,
+                    inline=is_inline,
+                    action_taken="reject",
+                    reason=str(pipeline_error),
+                )
+                pipeline_error = (
+                    "[SANDBOX_UNAVAILABLE_NO_FALLBACK] 沙箱不可用，按兜底策略 "
+                    f"fallback_policy={fallback_policy} 未回落本地执行"
+                    f"（{'内联' if is_inline else '非内联'}脚本）: {pipeline_error}"
+                )
             return _build_shell_error_result("execute_cmd", pipeline_error, ExecuteCmdResult)
         if result.get("local"):
+            if explicit_policy:
+                _emit_fallback_audit(
+                    domain="sandbox",
+                    op="execute_cmd",
+                    policy=fallback_policy,
+                    inline=is_inline,
+                    action_taken="local_fallback",
+                )
             return self._wrap_shell_local_result(command, cwd, timeout, result)
 
         stdout = result.get("stdout") or ""
@@ -2031,7 +2109,8 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
         if language not in {"python", "javascript"}:
             return _build_code_error_result("execute_code", f"{language} is not supported",
                                             ExecuteCodeResult, data=data)
-        command = self._build_code_command(code, language, force_file=bool((options or {}).get("force_file", False)))
+        force_file = bool((options or {}).get("force_file", False))
+        command = self._build_code_command(code, language, force_file=force_file)
         if command is None:
             return _build_code_error_result("execute_code", "subprocess cmd can not be none",
                                             ExecuteCodeResult, data=data)
@@ -2040,7 +2119,10 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
 
         extra = self._launcher_extra_params()
         exclude_patterns = _read_excluded_commands(extra)
-        fallback_on_failure = bool(extra.get("fallback_on_failure", False)) if isinstance(extra, dict) else False
+        fallback_policy = _read_fallback_policy(extra)
+        explicit_policy = isinstance(extra, dict) and "fallback_policy" in extra
+        is_inline = not force_file  # 脚本文件执行（force_file）为非内联
+        allow_fallback = _local_fallback_allowed(fallback_policy, is_inline=is_inline)
 
         # (a) Pre-route when first line matches exclude pattern
         first_line = code.splitlines()[0] if code else ""
@@ -2074,11 +2156,33 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
                 env=merged_env,
                 timeout=exec_timeout,
             ),
-            fallback_on_failure=fallback_on_failure,
+            fallback_on_failure=allow_fallback,
         )
         if pipeline_error:
+            if explicit_policy and not allow_fallback:
+                _emit_fallback_audit(
+                    domain="sandbox",
+                    op="execute_code",
+                    policy=fallback_policy,
+                    inline=is_inline,
+                    action_taken="reject",
+                    reason=str(pipeline_error),
+                )
+                pipeline_error = (
+                    "[SANDBOX_UNAVAILABLE_NO_FALLBACK] 沙箱不可用，按兜底策略 "
+                    f"fallback_policy={fallback_policy} 未回落本地执行"
+                    f"（{'内联' if is_inline else '非内联'}脚本）: {pipeline_error}"
+                )
             return _build_code_error_result("execute_code", pipeline_error, ExecuteCodeResult, data=data)
         if result.get("local"):
+            if explicit_policy:
+                _emit_fallback_audit(
+                    domain="sandbox",
+                    op="execute_code",
+                    policy=fallback_policy,
+                    inline=is_inline,
+                    action_taken="local_fallback",
+                )
             return self._wrap_code_local_result(code, language, timeout, result)
 
         result_data = ExecuteCodeData(

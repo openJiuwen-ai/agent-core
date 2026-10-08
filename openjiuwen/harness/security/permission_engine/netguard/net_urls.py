@@ -3,7 +3,7 @@
 """Load package net_urls and merge them into ``net_guard.urls``.
 
 Engine evaluation consumes the merged ``urls`` dict. Overlay cannot widen a
-package deny to allow. ``ask`` is not a net_guard action.
+package deny to allow or ask.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from openjiuwen.harness.security.permission_engine.toolguard.builtin_rules impor
 logger = logging.getLogger(__name__)
 
 _NET_URLS_CACHE: tuple[str, float, dict[str, str]] | None = None
-_VALID_ACTIONS = frozenset({"allow", "deny"})
+_VALID_ACTIONS = frozenset({"allow", "ask", "deny"})
 
 
 def _package_rules_yaml_path() -> Path:
@@ -109,6 +109,8 @@ def _has_package_net_urls(urls: Any) -> bool:
 def _stricter(left: str, right: str) -> str:
     if left == "deny" or right == "deny":
         return "deny"
+    if left == "ask" or right == "ask":
+        return "ask"
     return "allow"
 
 

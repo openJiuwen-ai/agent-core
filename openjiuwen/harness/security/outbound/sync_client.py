@@ -58,7 +58,7 @@ def request(
     current_url = url
     try:
         for _hop in range(max_redirects + 1):
-            check_outbound_url(current_url)
+            check_outbound_url(current_url, is_redirect=_hop > 0)
             resp = sess.request(current_method, current_url, allow_redirects=False, **kwargs)
             if not resp.is_redirect:
                 return resp
