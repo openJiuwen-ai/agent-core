@@ -5,11 +5,11 @@
 | 项 | 值 |
 | --- | --- |
 | 类型 | spec |
-| 状态 | 事件 DTO 和记账 / 执行日志端口契约已按 v2 实现（PA-04）；事件映射、记账调用、结局判定和最终回答交接已实现（PA-05）；`tool.intent / tool.completed`（PA-15）、`window.switched`（PA-11）、`participation.decided`（PA-07）待接入 |
+| 状态 | 事件 DTO 和记账 / 执行日志端口契约已按架构设计实现（PA-04）；事件映射、记账调用、结局判定和最终回答交接已实现（PA-05）；`tool.intent / tool.completed`（PA-15）、`window.switched`（PA-11）、`participation.decided`（PA-07）待接入 |
 | 关联模块 | 内部 `persistent_agent/{ports.py,schema/{protocol,events,port_results}.py,execution/{emitter,model_rail,entries}.py}` |
 | 最近一次修订日期 | 2026-10-08 |
-| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 按 v2 收敛契约](../features/F_04_v2-contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)；开发计划 PA-05、PA-08、PA-15、PA-17、PA-04 |
-| 设计依据 | [Persistent Agent 设计（v2）](../designs/persistent-agent-architecture.md) §9、§13 第 5、12 条、§14 |
+| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 契约收敛](../features/F_04_contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)；开发计划 PA-05、PA-08、PA-15、PA-17、PA-04 |
+| 设计依据 | [Persistent Agent 详细架构设计](../designs/persistent-agent-architecture.md) §9、§13 第 5、12 条、§14 |
 
 当前可以构造 `AgentEvent` 及其 11 种类型化负载，并已定义 `CommitPort.record / read_execution_log` 协议。PA-05 的执行入口已把原生流映射为事件并按下文时序记账（见“事件映射与结局”）；生产记账后端由服务端实现，下文的记账时序和交接约束也是服务端要满足的运行契约。
 
@@ -23,11 +23,11 @@
 
 ## 不变量
 
-1. 同一 Execution 的事件按产生顺序调用 record；服务端按 local_seq 维护已保存日志，允许普通日志缺失，不以序号连续性作为关键记账成功条件（v2 §9.1）。
+1. 同一 Execution 的事件按产生顺序调用 record；服务端按 local_seq 维护已保存日志，允许普通日志缺失，不以序号连续性作为关键记账成功条件（架构设计 §9.1）。
 2. 所有事件统一 `await record()`。`tool.intent`、`execution.paused`、`execution.final` 等自身落盘后返回，失败停止当前执行；final 还须确认 output_refs 所引用的候选输出已可靠保存。普通事件入队后即可继续，失败只记诊断，不阻塞后续关键事件。
 3. `local_seq` 在一个 Execution 内递增，`event_id` 由完整调用归属和 `local_seq` 确定；重传复用原 local_seq、event_id 和内容，服务端按 event_id 去重。
 4. 事件流结束、文件存在、模型完成都不等于 Request 终态；终态以记账成功的 `execution.final` 或 `execution.paused` 为准。
-5. 执行入口返回的事件流由 AgentServer 持续消费到结束，前端断开只结束展示订阅；停止或取消通过 `abort_persistent_request` 发起，不通过关闭事件流（v2 §13 第 12 条）。提前关闭事件流时入口等待原生流和清理结束，不产生结束事件。
+5. 执行入口返回的事件流由 AgentServer 持续消费到结束，前端断开只结束展示订阅；停止或取消通过 `abort_persistent_request` 发起，不通过关闭事件流（架构设计 §13 第 12 条）。提前关闭事件流时入口等待原生流和清理结束，不产生结束事件。
 6. 已接收、处理完成、允许发送、渠道送达分别确认。候选群消息或文件引用在服务端授权检查和投递回执前不是公开记录。
 
 ## 接口契约与错误语义
@@ -119,5 +119,5 @@ AgentEvent {
 ## 与其它 spec 的关系
 
 - [S_01](S_01_public-api-and-execution.md) 定义执行上下文、执行入口和宿主端口集合。
-- [S_04](S_04_tools-and-workspace.md) 定义工具副作用与办公空间；写操作的意图记账见 v2 §9.1。
-- 续做时的日志整理与恢复流程见 v2 §9.3、§11.2；S_05 尚按旧版架构编写，待 PA-17、PA-18 修订。
+- [S_04](S_04_tools-and-workspace.md) 定义工具副作用与办公空间；写操作的意图记账见架构设计 §9.1。
+- 续做时的日志整理与恢复流程见架构设计 §9.3、§11.2；S_05 尚按旧版架构编写，待 PA-17、PA-18 修订。

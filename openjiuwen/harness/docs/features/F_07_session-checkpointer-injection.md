@@ -7,7 +7,7 @@
 | 负责人 | Song Haoran |
 | 测试基线 | 新增 5 项单测；回归 6609 passed、44 skipped（harness、core single_agent / runner / session、agent 全量单测） |
 | 范围 | `openjiuwen/core/session/agent.py`（`Session`、`create_agent_session`）、`openjiuwen/core/session/checkpointer/`（新增 `NoopCheckpointer` 并导出） |
-| 关联 | [Persistent Agent 设计（v2）](../../persistent_agent/docs/designs/persistent-agent-architecture.md) §7.8；Persistent [F_05](../../persistent_agent/docs/features/F_05_execution-entries.md)（PA-05） |
+| 关联 | [Persistent Agent 详细架构设计](../../persistent_agent/docs/designs/persistent-agent-architecture.md) §7.8；Persistent [F_05](../../persistent_agent/docs/features/F_05_execution-entries.md)（PA-05） |
 
 ## 背景与决策
 
