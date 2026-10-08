@@ -160,6 +160,16 @@ class Tracer:
         # Normalize parent_node_id: None means root (same as "")
         effective_parent = parent_node_id if parent_node_id is not None else ""
 
+        # Inject the owning tracer's identity into every event so that globally
+        # shared extension handlers (see TracerHandlerRegistry) can attribute the
+        # event deterministically. Relying on handler.set_trace_id() alone is
+        # racy: Tracer.init() mutates the shared handler singleton, so when two
+        # tracers are alive at the same time the later init() overwrites the
+        # earlier tracer's id and events get mis-attributed. setdefault keeps
+        # any explicit value already passed by the caller.
+        kwargs.setdefault("trace_id", self._trace_id)
+        kwargs.setdefault("session_id", self._session_id)
+
         if handler_class_name == TracerHandlerName.TRACE_AGENT.value:
             # Iterate over all agent handlers (built-in + extension)
             for _name, handler in self._agent_handlers.items():
