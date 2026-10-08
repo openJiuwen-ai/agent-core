@@ -18,7 +18,7 @@ from pydantic import ValidationError
 
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.checkpointer import NoopCheckpointer
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -117,9 +117,9 @@ def _require_request(context: PersistentBuildContext, inputs) -> RequestInput:
     if request.continue_instruction is not None and recovery_ref is None:
         raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "continue_instruction requires a recovery_ref")
     if recovery_ref is not None:
-        raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "continuation is not integrated yet (PA-17)")
+        raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "continuation is not integrated yet (PA-18)")
     if request.kind == "group_message":
-        raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "group participation is not integrated yet (PA-06)")
+        raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "group participation is not integrated yet (PA-07)")
     return request
 
 
@@ -137,6 +137,26 @@ async def _store_call(operation: str, call) -> Any:
         return await call
     except Exception as exc:
         raise _reject(StatusCode.DEEPAGENT_RUNTIME_ERROR, f"session state record {operation} failed", exc) from exc
+
+
+async def _load(context: PersistentBuildContext, store) -> seams.LoadedRecord:
+    record = await _store_call("load", store.load(context))
+    if not isinstance(record, seams.LoadedRecord):
+        raise _reject(StatusCode.DEEPAGENT_RUNTIME_ERROR, "session state record load returned no LoadedRecord")
+    return record
+
+
+async def _assemble(assembler, context: PersistentBuildContext, request: RequestInput, record) -> seams.WindowAssembly:
+    """Window assembly failures are runtime errors; the native call never runs on a partial window."""
+    try:
+        assembly = await assembler.assemble(context, request, record)
+    except BaseError:
+        raise
+    except Exception as exc:
+        raise _reject(StatusCode.DEEPAGENT_RUNTIME_ERROR, "window assembly failed", exc) from exc
+    if not isinstance(assembly, seams.WindowAssembly):
+        raise _reject(StatusCode.DEEPAGENT_RUNTIME_ERROR, "window assembly returned no WindowAssembly")
+    return assembly
 
 
 def _chunk_parts(chunk) -> tuple[Any, Any]:
@@ -226,7 +246,13 @@ def _output_id(context: PersistentBuildContext) -> str:
     return "out_" + digest[:32]
 
 
-async def _finish(context: PersistentBuildContext, store, outcome: _Outcome, reply_target: str | None) -> None:
+async def _finish(
+    context: PersistentBuildContext,
+    store,
+    outcome: _Outcome,
+    reply_target: str | None,
+    last_group_message_id: str | None,
+) -> None:
     """Hand off the answer, save the state record, then record the ending, in this order."""
     emitter = context.binding.control.emitter
     output_refs: tuple[str, ...] = ()
@@ -247,7 +273,12 @@ async def _finish(context: PersistentBuildContext, store, outcome: _Outcome, rep
             else:
                 output_refs = (output_id,)
         ending = seams.ExecutionEnding(
-            outcome.kind, context.execution.request_id, reply_target, output_refs, pending_answer
+            outcome.kind,
+            context.execution.request_id,
+            reply_target,
+            output_refs,
+            pending_answer=pending_answer,
+            last_group_message_id=last_group_message_id,
         )
         await _store_call("save", store.save(context, ending))
         if outcome.kind in ("completed", "cancelled"):
@@ -325,19 +356,20 @@ async def _drive(control: ExecutionControl, runner) -> AsyncGenerator[AgentEvent
 
 
 async def execute_persistent_request(spec, context, inputs) -> AsyncIterator[AgentEvent]:
-    """Run a new Request; the host consumes the stream to its end (v2 §13)."""
+    """Run a new Request; the host consumes the stream to its end (architecture §13)."""
     _require_supported_modes(spec)
     _require_isolation(context)
     request = _require_request(context, inputs)
     store = seams.session_state_store(context)
+    assembler = seams.window_assembler(context)
     control = _start(context)
 
     async def body(agent):
         await control.emitter.emit(EventType.EXECUTION_STARTED, {"goal": request.text})
-        await _store_call("load", store.load(context))
-        # Window assembly (execution header, background) arrives with PA-05.
-        outcome = await _run_native(agent, context, {"query": request.text})
-        await _finish(context, store, outcome, request.reply_target)
+        record = await _load(context, store)
+        assembly = await _assemble(assembler, context, request, record)
+        outcome = await _run_native(agent, context, assembly.native_input)
+        await _finish(context, store, outcome, request.reply_target, assembly.last_group_message_id)
 
     async with aclosing(_drive(control, _run(context, spec, body))) as events:
         async for event in events:
@@ -395,11 +427,12 @@ async def resume_persistent_request(spec, context, confirm_reply) -> AsyncIterat
     control = _start(context)
 
     async def body(agent):
-        waiting = await _store_call("load", store.load(context))
+        record = await _load(context, store)
         # An invalid reply is rejected before anything is recorded or saved; the scene keeps waiting.
-        native_input = _native_resume_input(context, reply, waiting, adapter)
+        native_input = _native_resume_input(context, reply, record.waiting, adapter)
         outcome = await _run_native(agent, context, native_input)
-        await _finish(context, store, outcome, waiting.reply_target)
+        # Resume reads no group messages, so the previous cursor is kept.
+        await _finish(context, store, outcome, record.waiting.reply_target, record.last_group_message_id)
 
     async with aclosing(_drive(control, _run(context, spec, body))) as events:
         async for event in events:
