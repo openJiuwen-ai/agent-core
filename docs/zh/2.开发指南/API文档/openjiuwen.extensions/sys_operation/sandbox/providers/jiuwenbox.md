@@ -2,6 +2,8 @@
 
 `openjiuwen.extensions.sys_operation.sandbox.providers.jiuwenbox` 是 openJiuwen 中对接 **JiuwenBox 沙箱服务**的 provider 实现。它通过 HTTP 网关与远端 JiuwenBox 实例通信，向 `SysOperation` 暴露 **文件系统（fs）/ 命令行（shell）/ 代码执行（code）** 三类能力，并经由 `SandboxRegistry` 以名字 `"jiuwenbox"` 注册。
 
+首次文件或执行操作可能触发沙箱懒创建；同步创建请求在工作线程执行，不阻塞调用方的事件循环。同一共享 scope 的并发操作复用一次创建结果。创建失败后，该 scope 在 30 秒内快速返回创建错误，避免连续文件读取反复等待超时；冷却到期或显式清理共享缓存后可以重试。
+
 模块对外暴露：
 
 - 三个 provider 类：`JiuwenBoxFSProvider`、`JiuwenBoxShellProvider`、`JiuwenBoxCodeProvider`；
