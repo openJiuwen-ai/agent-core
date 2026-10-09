@@ -53,6 +53,11 @@ OJ_TURN_NUMBER = "openjiuwen.turn.number"
 OJ_STEP_ID = "openjiuwen.step.id"
 OJ_STEP_NUMBER = "openjiuwen.step.number"
 OJ_INFERENCE_ID = "openjiuwen.inference.id"
+# False when the inference was reported without observing the request it
+# answered: a harness whose request logs never arrived rebuilds the call from
+# the reply alone, so its input is unknown and its output may be partial.
+# Absent means the request was observed.
+OJ_INFERENCE_INPUT_OBSERVED = "openjiuwen.inference.input_observed"
 OJ_REQUEST_NUMBER = "openjiuwen.request.number"
 OJ_REQUEST_PURPOSE = "openjiuwen.request.purpose"
 # Transport-level retries the provider SDK made inside this one LLM request

@@ -75,6 +75,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS,
     OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INFERENCE_ID,
+    OJ_INFERENCE_INPUT_OBSERVED,
     OJ_REQUEST_ID,
     OJ_REQUEST_PURPOSE,
     OJ_SPAN_INPUT,
@@ -457,6 +458,10 @@ class HarnessTrajectoryRecorder:
                 list(event.finish_reasons),
                 ensure_ascii=False,
             )
+        if not event.input_observed:
+            # Stated only when it is false: every in-process inference observes
+            # its own request, so absence keeps the common case unchanged.
+            attributes[OJ_INFERENCE_INPUT_OBSERVED] = False
         attributes[OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS] = (event.ended_at - event.started_at) * 1000
         if event.time_to_first_chunk is not None:
             attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] = event.time_to_first_chunk
