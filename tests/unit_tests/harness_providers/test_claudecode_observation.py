@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -836,3 +837,97 @@ def test_reasoning_the_cli_withheld_is_still_reported() -> None:
     # Reasoning the CLI did state is reported as itself.
     stated = _content_block("b3", {"type": "thinking", "thinking": "check the tree"})
     assert stated is not None and stated.content == "check the tree" and not stated.data
+
+
+@pytest.mark.asyncio
+async def test_a_reply_still_streaming_waits_past_the_observation_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reply that thinks before it calls a tool is reported whole, from its logs.
+
+    The SDK yields one assistant message per content block, and the CLI logs
+    the response body only when the call finishes. A long tool input keeps the
+    reply streaming well after its thinking block arrived; the wait for logs
+    must start from the reply's end, not from its first block.
+    """
+    sdk, state = _install_fake_sdk(monkeypatch)
+    receiver = _FakeReceiver()
+    _install_receiver(monkeypatch, receiver)
+
+    async def slow_tool_input(client: Any) -> None:
+        await asyncio.sleep(0.3)
+
+    async def bodies(client: Any) -> None:
+        request = {"model": "claude-x", "system": _SYSTEM, "tools": _TOOLS, "messages": [_USER]}
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_request_body",
+            request,
+            time_ns=1_000_000_000_000,
+            request_body_id="body-1",
+        )
+        response = {
+            "id": "msg-1",
+            "model": "claude-x",
+            "content": [{"type": "thinking", "thinking": "plan"}, *_FIRST_REPLY],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 30, "output_tokens": 4},
+        }
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_response_body",
+            response,
+            time_ns=1_002_000_000_000,
+            request_body_id="body-1",
+        )
+
+    state.scripts.append(
+        [
+            sdk.StreamEvent(uuid="s1", session_id="s", event={"type": "message_start"}, parent_tool_use_id=None),
+            sdk.AssistantMessage(
+                content=[sdk.ThinkingBlock(thinking="plan")],
+                model="claude-x",
+                parent_tool_use_id=None,
+                error=None,
+                usage={"input_tokens": 30, "output_tokens": 1},
+                message_id="msg-1",
+                stop_reason=None,
+                session_id="s",
+            ),
+            slow_tool_input,
+            sdk.AssistantMessage(
+                content=[sdk.ToolUseBlock(id="tool-1", name="Bash", input={"command": "ls"})],
+                model="claude-x",
+                parent_tool_use_id=None,
+                error=None,
+                usage={"input_tokens": 30, "output_tokens": 4},
+                message_id="msg-1",
+                stop_reason="tool_use",
+                session_id="s",
+            ),
+            sdk.StreamEvent(uuid="s2", session_id="s", event={"type": "message_stop"}, parent_tool_use_id=None),
+            bodies,
+            sdk.UserMessage(
+                content=[sdk.ToolResultBlock(tool_use_id="tool-1", content="a.py", is_error=False)],
+                uuid="um-1",
+                parent_tool_use_id=None,
+                tool_use_result=None,
+            ),
+            _result(sdk, result="a.py"),
+        ]
+    )
+    harness = ClaudeCodeHarness(
+        ClaudeCodeHarnessConfig(inherit_process_env=False, cwd="/tmp", request_observation_wait_s=0.05),
+    )
+    await harness.start(_context(host_capabilities=_OBSERVED))
+
+    receipt = await harness.send(HarnessInput(content="list files"))
+    events = await _turn(harness, receipt.turn_id)
+    logger.info("observed claude events: {}", _kinds(events))
+
+    assert _kinds(events)[:3] == ["turn:started", "request:msg-1", "tool:tool-1:started"]
+    request = next(event.event for event in events if isinstance(event.event, ModelRequestEvent))
+    assert request.data["claude-code"]["observation"] == "api_bodies"
+    assert request.input_observed
+    assert [block.kind for block in request.output_message.content] == ["reasoning", "tool_call"]
+    await harness.stop()

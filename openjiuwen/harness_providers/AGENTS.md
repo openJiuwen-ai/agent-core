@@ -90,7 +90,10 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    caused are held until that request is reported and cite it in
    `causation_ids`; a request whose vendor record does not arrive within
    `request_observation_wait_s` is reported from its reply
-   (`input_observed=False`). A tool call the vendor never announces as an item
+   (`input_observed=False`). That wait starts once the reply has finished
+   streaming (Claude Code: `message_stop` or the next top-level message), not
+   at its first content block, because the response body is logged only after
+   the whole call. A tool call the vendor never announces as an item
    (Codex answers its own tool search, and a code cell that invokes nothing) is
    reported from the response that made it and the request that read its
    result, between those two requests. Codex states first-token latency on

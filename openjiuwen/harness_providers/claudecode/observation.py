@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
 import shutil
 import tempfile
 import time
@@ -180,12 +181,17 @@ class _ToolFacts:
 
 @dataclass
 class _ReplySnapshot:
-    """What the SDK stream showed of one top-level assistant reply."""
+    """What the SDK stream showed of one top-level assistant reply.
+
+    ``deadline`` stays infinite while the reply is still streaming: the CLI
+    logs the response body only once the whole call has finished, so the wait
+    for it can only start when the reply has.
+    """
 
     message_id: str
     started_at: float
     ended_at: float
-    deadline: float
+    deadline: float = math.inf
     model: str | None = None
     usage: TurnUsage | None = None
     blocks: list[ContentBlock] = field(default_factory=list)
@@ -349,6 +355,7 @@ class ClaudeRequestObserver:
                 logs; ``False`` (an aborted or failed turn) reports at once.
         """
         await self._stop_drain()
+        self._close_reply(time.time())
         if wait and self.logs_attached:
             while True:
                 async with self._lock:
@@ -378,23 +385,35 @@ class ClaudeRequestObserver:
         self._call_owners: dict[str, str | None] = {}
         self._current_owner: str | None = None
         self._next_started_at: float | None = None
+        # The reply whose SDK messages are still arriving. The SDK yields one
+        # assistant message per content block, so a reply that thinks before
+        # it calls a tool shows its first block long before its last one.
+        self._open_reply: str | None = None
 
     def _note_message(self, message: Any, accumulator: ClaudeTurnAccumulator, now: float) -> None:
         if getattr(message, "parent_tool_use_id", None):
             return
         event = getattr(message, "event", None)
         if isinstance(event, Mapping):
-            if event.get("type") == "message_start" and self._next_started_at is None:
+            event_type = event.get("type")
+            if event_type == "message_start" and self._next_started_at is None:
                 self._next_started_at = now
+            if event_type in ("message_start", "message_stop"):
+                self._close_reply(now)
             return
         if not isinstance(message, self._sdk.AssistantMessage) or not accumulator.messages:
+            # Anything else on the top-level stream (tool results, the turn's
+            # result) comes after the reply has finished.
+            self._close_reply(now)
             return
         normalized = accumulator.messages[-1]
         message_id = normalized.message_id
+        if message_id != self._open_reply:
+            self._close_reply(now)
         snapshot = self._replies.get(message_id)
         if snapshot is None:
             started_at = self._next_started_at if self._next_started_at is not None else now
-            snapshot = _ReplySnapshot(message_id=message_id, started_at=started_at, ended_at=now, deadline=now)
+            snapshot = _ReplySnapshot(message_id=message_id, started_at=started_at, ended_at=now)
             self._replies[message_id] = snapshot
             self._order.append(message_id)
             self._next_started_at = None
@@ -404,9 +423,21 @@ class ClaudeRequestObserver:
         snapshot.usage = claude_turn_usage(getattr(message, "usage", None)) or snapshot.usage
         if getattr(message, "error", None):
             snapshot.error = accumulator.pending_error or TurnError(message=str(message.error))
+        self._current_owner = message_id
+        self._open_reply = message_id
+        if snapshot.error is not None:
+            # A failed call logs no response body; there is nothing to wait for.
+            self._close_reply(now)
+
+    def _close_reply(self, now: float) -> None:
+        """Mark the open reply as finished and start its wait for request logs."""
+        message_id = self._open_reply
+        self._open_reply = None
+        snapshot = self._replies.get(message_id) if message_id else None
+        if snapshot is None or snapshot.deadline != math.inf:
+            return
         waits = self.logs_attached and snapshot.error is None
         snapshot.deadline = now + self._wait_s if waits else now
-        self._current_owner = message_id
 
     def _item_owner(self, event: MappedClaudeEvent) -> str | None:
         payload = event.payload
