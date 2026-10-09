@@ -17,9 +17,9 @@ layer an external member is indistinguishable from an in-process one.
 from __future__ import annotations
 
 import asyncio
-from contextvars import Token
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, NoReturn
+from functools import wraps
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Concatenate, NoReturn, ParamSpec, TypeVar
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
@@ -50,6 +50,26 @@ BROADCAST_TARGET = "*"
 
 # Wakeup callback invoked on each relevant transport event during ``watch``.
 InboxObserver = Callable[["InboxView"], Awaitable[None]]
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _bind_client_session(
+    method: Callable[Concatenate["ExternalTeamClient", _P], Awaitable[_R]],
+) -> Callable[Concatenate["ExternalTeamClient", _P], Awaitable[_R]]:
+    """Run one client operation with a task-local team session binding."""
+
+    @wraps(method)
+    async def _wrapped(self: "ExternalTeamClient", /, *args: _P.args, **kwargs: _P.kwargs) -> _R:
+        set_language(self.language)  # type: ignore[arg-type]
+        token = set_session_id(self.session_id)
+        try:
+            return await method(self, *args, **kwargs)
+        finally:
+            reset_session_id(token)
+
+    return _wrapped
 
 
 @dataclass(slots=True)
@@ -87,7 +107,6 @@ class ExternalTeamClient:
         self._messages: TeamMessageManager | None = None
         self._db: "TeamDatabase | None" = None
         self._workspace_manager: "TeamWorkspaceManager | None" = None
-        self._session_token: Token[str] | None = None
         # Member-scope real team tools, keyed by card.name. Built at connect()
         # for the ``member`` scope so an external CLI member calls the exact
         # same TeamTool instances (same schema + render_for_llm text) as a native
@@ -102,8 +121,7 @@ class ExternalTeamClient:
         Drives the per-session dynamic table names. Callers that dispatch
         operations across task boundaries (e.g. an MCP server handling each
         tool call in its own task) must re-assert this on the session-id
-        contextvar before each operation, since the bind done in
-        ``connect()`` only lives in that call's task context.
+        contextvar before each operation.
         """
         return self._descriptor.session_id
 
@@ -152,16 +170,15 @@ class ExternalTeamClient:
     def bind_session_context(self) -> None:
         """Re-assert the session-id + language contextvars for this call.
 
-        A dispatcher that runs each operation in its own ``asyncio.Task``
-        (e.g. an MCP server handling each tool call in a fresh task) must call
-        this before every operation: the bind done in :meth:`connect` only
-        lives in that connect call's task context, so without re-binding a
-        later call sees an empty session id and targets a non-existent
-        per-session dynamic table.
+        A dispatcher that invokes the exposed ``TeamTool`` objects directly,
+        outside the decorated client methods, must call this before every
+        operation. MCP and native-tool dispatchers run each call in a fresh
+        task, so that task owns the resulting context binding.
         """
         set_session_id(self._descriptor.session_id)
         set_language(self._descriptor.language)  # type: ignore[arg-type]
 
+    @_bind_client_session
     async def connect(self) -> None:
         """Open the team database and messager and wire up the managers.
 
@@ -175,9 +192,6 @@ class ExternalTeamClient:
 
         from openjiuwen.agent_teams.tools.team import TeamBackend
         from openjiuwen.agent_teams.tools.team_tools import create_team_tools
-
-        set_language(self._descriptor.language)  # type: ignore[arg-type]
-        self._session_token = set_session_id(self._descriptor.session_id)
 
         db = get_shared_db(self._descriptor.db_config)
         await db.initialize()
@@ -209,6 +223,12 @@ class ExternalTeamClient:
             db=db,
             messager=self._messager,
         )
+        from types import SimpleNamespace
+
+        backend.group_chat_spec = SimpleNamespace(
+            workspace=self._descriptor.workspace_config, language=self._descriptor.language,
+        )
+        backend.bind_group_session(self.session_id)
         self._backend = backend
         self._tasks = backend.task_manager
         self._messages = backend.message_manager
@@ -247,13 +267,10 @@ class ExternalTeamClient:
         )
 
     async def close(self) -> None:
-        """Stop the messager and release the session context. Idempotent."""
+        """Stop the messager and release owned resources. Idempotent."""
         if self._messager is not None:
             await self._messager.stop()
             self._messager = None
-        if self._session_token is not None:
-            reset_session_id(self._session_token)
-            self._session_token = None
         self._tasks = None
         self._messages = None
         self._backend = None
@@ -308,6 +325,7 @@ class ExternalTeamClient:
 
     # ---- messaging ------------------------------------------------------
 
+    @_bind_client_session
     async def send_message(self, to: str, content: str) -> str | None:
         """Send a direct message, or broadcast when ``to == "*"``.
 
@@ -325,6 +343,7 @@ class ExternalTeamClient:
 
     # ---- task board -----------------------------------------------------
 
+    @_bind_client_session
     async def create_task(
         self,
         *,
@@ -346,26 +365,32 @@ class ExternalTeamClient:
             dependencies=dependencies,
         )
 
+    @_bind_client_session
     async def list_tasks(self, status: str | None = None) -> list[TeamTaskBase]:
         """List team tasks, optionally filtered by status."""
         return await self._require_tasks().list_tasks(status=status)
 
+    @_bind_client_session
     async def claimable_tasks(self) -> list[TeamTaskBase]:
         """List pending tasks available to claim."""
         return await self._require_tasks().get_claimable_tasks()
 
+    @_bind_client_session
     async def get_task(self, task_id: str) -> TaskDetail | None:
         """Get full detail for a single task, or ``None`` if absent."""
         return await self._require_tasks().get_task_detail(task_id)
 
+    @_bind_client_session
     async def claim_task(self, task_id: str) -> TaskOpResult:
         """Claim a pending task for this member."""
         return await self._require_tasks().claim(task_id)
 
+    @_bind_client_session
     async def complete_task(self, task_id: str) -> TaskOpResult:
         """Mark a claimed task complete."""
         return await self._require_tasks().complete(task_id)
 
+    @_bind_client_session
     async def update_task(
         self,
         task_id: str,
@@ -378,12 +403,14 @@ class ExternalTeamClient:
 
     # ---- roster ---------------------------------------------------------
 
+    @_bind_client_session
     async def list_members(self) -> list[TeamMember]:
         """List all team member rows."""
         return await self._require_db().member.get_team_members(self.team_name)
 
     # ---- inbox ----------------------------------------------------------
 
+    @_bind_client_session
     async def fetch_inbox(self, *, mark_read: bool = True) -> InboxView:
         """Read unread messages and the current task board for this member.
 
@@ -396,16 +423,21 @@ class ExternalTeamClient:
         """
         messages = self._require_messages()
         direct = await messages.get_messages(to_member_name=self.member_name, unread_only=True)
+        from openjiuwen.agent_teams.group_chat.handler import context_for, group_metadata
+
         broadcast = await messages.get_broadcast_messages(member_name=self.member_name, unread_only=True)
         unread = [*direct, *broadcast]
-
-        if mark_read:
-            for msg in unread:
+        for index, msg in enumerate(unread):
+            if msg.broadcast and group_metadata(msg):
+                body = await context_for(self._backend, self.member_name, msg)
+                unread[index] = msg.model_copy(update={"content": body})
+            if mark_read:
                 await messages.mark_message_read(msg.message_id, self.member_name)
 
         tasks = await self.list_tasks()
         return InboxView(messages=unread, tasks=tasks)
 
+    @_bind_client_session
     async def read_inbox(self, *, mark_read: bool = True) -> str:
         """Render unread messages + the task board as one text block.
 
@@ -461,6 +493,7 @@ class ExternalTeamClient:
                 bodies[msg.message_id] = expanded.body
         return bodies
 
+    @_bind_client_session
     async def watch(self, observer: InboxObserver) -> None:
         """Block on team events, invoking ``observer`` with a fresh inbox.
 

@@ -43,8 +43,9 @@ subscribe(scope) → on_end(span) → drain(scope) → clean Trajectory
   completion 在后续窗口中重现时保留模型原始输出；tool 结果以窗口内容（模型实际看到的）为准、
   名称取自 tool span。无窗口的请求原样贡献 prompt 并报告 `missing_context_window`，不做启发式回退。
   compaction 请求（`openjiuwen.request.purpose=compaction`）不贡献消息。
-  TTSE detect/induce 传 `invoke_local=True`：无窗口 prompt / 窗口从最后一条 `user` 切开，后续
-  span 不再把整段 prompt 追加进去；这是切片，不是 overlap merge。
+  TTSE detect/induce 传 `invoke_local=True`：无窗口 prompt / 窗口从最后一条真实 `user`
+  切开（跳过 `<system-reminder>` prompt-attachment user），后续 span 不再把整段 prompt
+  追加进去；这是切片，不是 overlap merge。
 - 裁剪 clean window 用 `windows.trim_trajectory_window()`：事件 span 不占 `max_trajectory_spans`
   配额，被裁断的提交链由 `trim_baseline` 重新给出可重放的链首。
 - `TrajectoryBuilder` / `TrajectoryExtractor` 只属于 `trajectory.offline`。不要恢复旧顶层导出，

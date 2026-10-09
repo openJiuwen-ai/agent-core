@@ -22,7 +22,22 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_exec
     ExperimentResult,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting import lint
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.sections import section_by_id
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.sections import (
+    LINT_OVERRIDES_FILENAME,
+    apply_word_band_overrides,
+    section_by_id,
+)
+
+
+def _load_overrides(workspace: Path) -> dict | None:
+    path = workspace / LINT_OVERRIDES_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def main() -> None:
@@ -55,9 +70,19 @@ def main() -> None:
         logging.info(json.dumps({"error": f"results.json not found under {workspace}"}))
         raise SystemExit(1)
 
+    overrides = _load_overrides(workspace)
+    spec = apply_word_band_overrides(spec, overrides)
+    extra_known = None
+    if overrides and overrides.get("extra_known"):
+        extra_known = {
+            float(value)
+            for value in overrides["extra_known"]
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        }
+
     result = ExperimentResult.model_validate_json(results_path.read_text(encoding="utf-8"))
     text = section_path.read_text(encoding="utf-8")
-    violations = lint.lint_section(text, spec, result)
+    violations = lint.lint_section(text, spec, result, extra_known=extra_known)
     logging.info(json.dumps({"violations": violations}))
 
 

@@ -7,18 +7,18 @@ a retired pool, JSON-persisted) onto jiuwen primitives:
 
 * I/O is async via :func:`asyncio.to_thread` with an atomic ``tmp`` + ``os.replace``.
 * Dedup is **embedding-based** (cosine >= ``dedup_threshold``) when a provider
-  is configured, falling back to self-normalized BM25
-  (>= ``bm25_sim_threshold``, default 0.5) otherwise. Exact normalized
-  equality is always a hit. The scan is O(n) in bank size (capped by
-  ``max_facts`` / ``max_tips``); a process-local embedding cache makes
-  repeat adds CPU-only when a provider is set. Cold cache fills with
+  is configured, falling back to the reference's substring dedup otherwise.
+  Exact normalized equality is always a hit. The scan is O(n) in bank size
+  (capped by ``max_facts`` / ``max_tips``); a process-local embedding cache
+  makes repeat adds CPU-only when a provider is set. Cold cache fills with
   batched ``embed_documents``, not one RPC per row. n<=400 is a linear
   scan; an ANN index is not used.
 * Embeddings are cached by normalized text so dedup and Auto-dream reuse them.
   The cache is an LRU capped at ``max_facts + max_tips + 100`` and is pruned
   when records leave the bank (retire / delete / cap / reload).
 * Records carry display/TTL metadata (``created_at``, ``updated_at``,
-  ``last_injected_at``, ``inject_hits``) for Auto-dream prune. Consult
+  ``last_injected_at``, ``inject_hits``) for Auto-dream prune, plus
+  ``form_checked`` on tips after the LLM form/over-generic pass. Consult
   hits update those clocks in memory; they flush on bank writes and on a
   debounce (``inject_persist_min_secs`` / ``inject_persist_min_hits``).
   Reloading a newer disk snapshot overlays in-memory inject clocks so a
@@ -30,7 +30,7 @@ tests / ``asyncio.run`` / ephemeral workers may replace that loop. Bank mutexes
 are therefore :class:`threading.Lock`-backed so they are not bound to the loop
 of first acquire. Distinct :class:`TTSEConfig` objects that resolve to the same
 path share one instance; the first config wins (later callers only backfill a
-missing embedding provider).
+missing embedding provider, or replace it when the fingerprint changes).
 """
 
 from __future__ import annotations
@@ -42,12 +42,12 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
 
-from .bm25_sim import bm25_best_match, pairwise_bm25_sims
 from .categories import OTHER_CATEGORY, normalize_category
 from .config import TTSEConfig
 
@@ -72,31 +72,81 @@ def _cosine(a: List[float], b: List[float]) -> float:
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
+_TS_FMT = "%Y-%m-%d %H:%M:%S"
+
+
 def _now() -> float:
     return time.time()
 
 
-def _as_ts(value: Any) -> Optional[float]:
-    if value is None:
+def format_ts(epoch: float) -> str:
+    """Format an epoch second as local ``YYYY-MM-DD HH:MM:SS``."""
+    return datetime.fromtimestamp(float(epoch)).strftime(_TS_FMT)
+
+
+def parse_ts(value: Any) -> Optional[float]:
+    """Parse a persisted timestamp to epoch seconds.
+
+    Accepts legacy Unix floats/ints and ``YYYY-MM-DD HH:MM:SS`` strings.
+    """
+    if value is None or value == "":
         return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text, _TS_FMT).timestamp()
+        except ValueError:
+            pass
+        try:
+            return float(text)
+        except ValueError:
+            return None
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
 
 
+def _as_ts(value: Any) -> Optional[float]:
+    return parse_ts(value)
+
+
+def _normalize_ts_value(value: Any, *, default_epoch: Optional[float] = None) -> Any:
+    """Rewrite a timestamp field to the display string form when possible."""
+    if value is None:
+        if default_epoch is None:
+            return None
+        return format_ts(default_epoch)
+    parsed = parse_ts(value)
+    if parsed is None:
+        return value
+    return format_ts(parsed)
+
+
 def _later_ts(left: Any, right: Any) -> Any:
-    """Return the later of two timestamps; ``None`` loses to a real value."""
+    """Return the later of two timestamps; ``None`` loses to a real value.
+
+    Prefer the display-string form when both sides parse; otherwise keep the
+    original winner so callers can persist a normalized clock.
+    """
     left_ts, right_ts = _as_ts(left), _as_ts(right)
     if left_ts is None:
-        return right if right_ts is not None else left
+        return _normalize_ts_value(right) if right_ts is not None else left
     if right_ts is None:
-        return left
-    return left if left_ts >= right_ts else right
+        return _normalize_ts_value(left)
+    winner_epoch = left_ts if left_ts >= right_ts else right_ts
+    return format_ts(winner_epoch)
 
 
 def _new_record(text: str, *, count: int = 1, now: Optional[float] = None) -> Dict[str, Any]:
-    ts = now if now is not None else _now()
+    epoch = now if now is not None else _now()
+    ts = format_ts(epoch)
     return {
         "text": text,
         "count": count,
@@ -104,6 +154,8 @@ def _new_record(text: str, *, count: int = 1, now: Optional[float] = None) -> Di
         "updated_at": ts,
         "last_injected_at": None,
         "inject_hits": 0,
+        # Auto-dream LLM form/over-generic check; False until KEEP.
+        "form_checked": False,
     }
 
 
@@ -111,19 +163,31 @@ def _migrate_record(record: Dict[str, Any], default_ts: float) -> Dict[str, Any]
     """Fill missing TTL/display fields for legacy bank entries.
 
     Conservative migration: treat missing ``last_injected_at`` as ``default_ts``
-    (file mtime or now) so an upgrade does not mass-prune overnight.
+    (file mtime or now) so an upgrade does not mass-prune overnight. Legacy
+    Unix-float clocks are rewritten to ``YYYY-MM-DD HH:MM:SS``.
     """
+    default_display = format_ts(default_ts)
     if "count" not in record:
         record["count"] = 1
     if "created_at" not in record:
-        record["created_at"] = default_ts
+        record["created_at"] = default_display
+    else:
+        record["created_at"] = _normalize_ts_value(record["created_at"], default_epoch=default_ts)
     if "updated_at" not in record:
-        record["updated_at"] = record.get("created_at", default_ts)
+        record["updated_at"] = record.get("created_at", default_display)
+    else:
+        record["updated_at"] = _normalize_ts_value(record["updated_at"], default_epoch=default_ts)
     if "last_injected_at" not in record:
         # Legacy banks: assume recently shown to avoid one-shot wipe.
-        record["last_injected_at"] = record.get("created_at", default_ts)
+        record["last_injected_at"] = record.get("created_at", default_display)
+    elif record["last_injected_at"] is not None:
+        record["last_injected_at"] = _normalize_ts_value(record["last_injected_at"])
     if "inject_hits" not in record:
         record["inject_hits"] = 0
+    if "form_checked" not in record:
+        record["form_checked"] = False
+    else:
+        record["form_checked"] = bool(record["form_checked"])
     return record
 
 
@@ -192,7 +256,8 @@ def shared_store(
 
     Empty ``store_path`` is not cached. Two configs that normalize to the same
     path share one object; knobs on the second config (caps, dedup, RPS, …)
-    are ignored except that a missing embedding provider may be backfilled.
+    are ignored except that a missing embedding provider may be backfilled,
+    and a different embedding fingerprint replaces the provider and rebuilds ANN.
     """
     key = _store_key(config.store_path)
     if not key:
@@ -246,11 +311,32 @@ class TTSERecordStore:
         self._inject_save_task: Optional[asyncio.Task] = None
         self._inject_save_handle: Optional[asyncio.TimerHandle] = None
         self._load_sync()
+        from .index import TTSEIndex
+
+        TTSEIndex.bind(self)
 
     def attach_embedding(self, embedding: EmbeddingProvider) -> None:
-        """Bind an embedding provider if this bank was created without one."""
-        if self._embedding is None:
-            self._embedding = embedding
+        """Bind or replace the embedding provider and mark ANN for rebuild.
+
+        A missing provider is backfilled. A different fingerprint (late config
+        or model swap) replaces the provider, drops the in-memory cache, and
+        lets ``TTSEIndex`` batch-rebuild Chroma from the current bank.
+        """
+        if embedding is None:
+            return
+        from .index import _fingerprint
+
+        incoming = _fingerprint(embedding)
+        current = _fingerprint(self._embedding)
+        if self._embedding is not None and incoming == current:
+            return
+        if self._embedding is not None:
+            self._emb_cache.clear()
+        self._embedding = embedding
+        index = getattr(self, "index", None)
+        note = getattr(index, "note_embedding", None)
+        if callable(note):
+            note(embedding)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -559,8 +645,8 @@ class TTSERecordStore:
             logger.debug("[TTSERail] embedding model=%s text=%s", model, text[:60])
             await self._wait_embedding_slot()
             vec = await self._embedding.embed_query(text)
-        except Exception as exc:  # noqa: BLE001 - degrade to BM25 dedup
-            logger.warning("[TTSERail] embedding failed, falling back to BM25 dedup: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - degrade to substring dedup
+            logger.warning("[TTSERail] embedding failed, falling back to substring dedup: %s", exc)
             return None
         if vec:
             self._store_embedding(key, vec)
@@ -620,9 +706,9 @@ class TTSERecordStore:
         """Return the matching record if ``text`` duplicates an existing rule.
 
         Cosine match when an embedding provider is available; otherwise
-        self-normalized BM25 (>= ``bm25_sim_threshold``). Exact normalized
-        equality is always treated as a duplicate. Scans are O(n) in
-        ``store`` (n capped by max_facts/max_tips).
+        substring match (reference behavior). Exact normalized equality is
+        always treated as a duplicate. Scans are O(n) in ``store`` (n capped
+        by max_facts/max_tips).
         """
         n = _norm(text)
         if not n:
@@ -648,16 +734,12 @@ class TTSERecordStore:
                         best, best_sim = record, sim
                 return best
 
-        # BM25 fallback (no provider, or embedding produced no query vector).
-        docs = [str(record.get("text") or "") for record in store]
-        idx = bm25_best_match(
-            text,
-            docs,
-            threshold=float(self._config.bm25_sim_threshold),
-        )
-        if idx is None:
-            return None
-        return store[idx]
+        # Substring dedup (reference behavior when no embedding provider).
+        for record in store:
+            rn = _norm(record.get("text", ""))
+            if rn and (n in rn or rn in n):
+                return record
+        return None
 
     # ------------------------------------------------------------------
     # Soft clustering (Auto-dream)
@@ -670,16 +752,20 @@ class TTSERecordStore:
         soft_lo: float,
         min_size: int = 2,
     ) -> List[List[Dict[str, Any]]]:
-        """Union-find clusters by pairwise similarity >= threshold.
+        """Union-find clusters by pairwise cosine >= ``soft_lo``.
 
-        With an embedding provider, edges use cosine >= ``soft_lo``.
-        Without one, edges use self-normalized BM25 >= ``bm25_sim_threshold``
-        (``soft_lo`` is ignored on that path). Returns only components with
-        ``len >= min_size``.
+        Returns only components with ``len >= min_size``. Empty when no
+        embedding provider or fewer than ``min_size`` embeddable records.
+
+        Auto-dream merge without an embedding provider uses LLM clustering
+        instead of calling this helper.
         """
-        if len(records) < min_size:
+        if not self.has_embedding_provider() or len(records) < min_size:
             return []
         n = len(records)
+        vectors: List[Optional[List[float]]] = []
+        for record in records:
+            vectors.append(await self._embedding_of(record["text"]))
         parent = list(range(n))
 
         def find(i: int) -> int:
@@ -693,46 +779,26 @@ class TTSERecordStore:
             if ri != rj:
                 parent[rj] = ri
 
-        if self.has_embedding_provider():
-            vectors: List[Optional[List[float]]] = []
-            for record in records:
-                vectors.append(await self._embedding_of(record["text"]))
-            for i in range(n):
-                if vectors[i] is None:
+        for i in range(n):
+            if vectors[i] is None:
+                continue
+            for j in range(i + 1, n):
+                if vectors[j] is None:
                     continue
-                for j in range(i + 1, n):
-                    if vectors[j] is None:
-                        continue
-                    if _cosine(vectors[i], vectors[j]) >= soft_lo:
-                        union(i, j)
-            buckets: Dict[int, List[Dict[str, Any]]] = {}
-            for i, record in enumerate(records):
-                if vectors[i] is None:
-                    continue
-                buckets.setdefault(find(i), []).append(record)
-        else:
-            threshold = float(self._config.bm25_sim_threshold)
-            texts = [str(record.get("text") or "") for record in records]
-            for i, j, sim in pairwise_bm25_sims(texts):
-                if sim >= threshold:
+                if _cosine(vectors[i], vectors[j]) >= soft_lo:
                     union(i, j)
-            buckets = {}
-            for i, record in enumerate(records):
-                buckets.setdefault(find(i), []).append(record)
 
+        buckets: Dict[int, List[Dict[str, Any]]] = {}
+        for i, record in enumerate(records):
+            if vectors[i] is None:
+                continue
+            buckets.setdefault(find(i), []).append(record)
         clusters = [members for members in buckets.values() if len(members) >= min_size]
         clusters.sort(key=lambda c: -len(c))
         return clusters
 
     async def pairwise_sims(self, records: Sequence[Dict[str, Any]]) -> List[Tuple[int, int, float]]:
-        """Pairwise similarities for LLM merge context (i < j).
-
-        Cosine when an embedding provider is set; otherwise self-normalized
-        BM25.
-        """
-        if not self.has_embedding_provider():
-            texts = [str(record.get("text") or "") for record in records]
-            return pairwise_bm25_sims(texts)
+        """Pairwise cosine similarities for LLM merge context (i < j)."""
         out: List[Tuple[int, int, float]] = []
         vectors: List[Optional[List[float]]] = []
         for record in records:
@@ -754,7 +820,7 @@ class TTSERecordStore:
         """Add or merge a rule.
 
         Returns ``"added"`` for a new rule, ``"merged"`` when an existing rule's
-        count was bumped (BM25/semantic duplicate), or ``None`` when the
+        count was bumped (substring/semantic duplicate), or ``None`` when the
         text was empty. Mirrors the reference: the bank mutates on both ``added``
         and ``merged``, but only ``added`` counts as a new rule.
         """
@@ -766,7 +832,7 @@ class TTSERecordStore:
             if matched is not None:
                 matched["count"] = matched.get("count", 0) + 1
                 # Keep the surviving record's category; do not reclassify on merge.
-                matched["updated_at"] = _now()
+                matched["updated_at"] = format_ts(_now())
                 store.sort(key=lambda x: -x.get("count", 0))
                 return "merged"
             store.append(_new_record(text))
@@ -786,6 +852,29 @@ class TTSERecordStore:
             logger.debug("[TTSERail] merged duplicate fact: %s", text[:80])
         return result == "added"
 
+    async def bump_count(self, rtype: str, text: str) -> int:
+        """Increment ``count`` on the rule whose normalized text equals ``text``.
+
+        Returns the new count, or 0 when no rule matches. Does not insert.
+        """
+        store = self.facts if rtype == "fact" else self.tips
+        target = _norm(text)
+        if not target:
+            return 0
+        new_count = 0
+        async with self._lock:
+            for record in store:
+                if _norm(record.get("text", "")) != target:
+                    continue
+                record["count"] = int(record.get("count") or 0) + 1
+                record["updated_at"] = format_ts(_now())
+                new_count = int(record["count"])
+                store.sort(key=lambda item: -item.get("count", 0))
+                break
+        if new_count:
+            await self.save()
+        return new_count
+
     async def add_tip(self, text: str) -> bool:
         result = await self._add(self.tips, text, self._config.max_tips)
         if result is not None:
@@ -795,6 +884,12 @@ class TTSERecordStore:
         elif result == "merged":
             logger.debug("[TTSERail] merged duplicate tip: %s", text[:80])
         return result == "added"
+
+    def replace_mutator(self, name: str, replacement: Any) -> Any:
+        """Swap a mutation method. Used by ``TTSEIndex.bind``."""
+        original = getattr(self, name)
+        setattr(self, name, replacement)
+        return original
 
     async def add_record_direct(
         self,
@@ -828,7 +923,8 @@ class TTSERecordStore:
         were updated. Persistence is debounced; call
         :meth:`flush_inject_metadata` to force a write.
         """
-        ts = now if now is not None else _now()
+        epoch = now if now is not None else _now()
+        ts = format_ts(epoch)
         updated = 0
         for record in records:
             if not isinstance(record, dict) or "text" not in record:
@@ -922,6 +1018,16 @@ class TTSERecordStore:
         tips = [r for r in self.tips_records() if self.record_category(r) == cid]
         return facts, tips
 
+    async def consult_pool(
+        self, category: Optional[str] = None
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Locked FACT/TIP snapshot for consult (one category or the whole bank)."""
+        async with self._lock:
+            if category:
+                facts, tips = self.records_for_category(category)
+                return list(facts), list(tips)
+            return list(self.facts_records()), list(self.tips_records())
+
     async def set_categories(self, assignments: List[Tuple[str, str, str]]) -> int:
         """Patch ``category`` on matching records. Returns how many were updated."""
         if not assignments:
@@ -949,6 +1055,8 @@ __all__ = [
     "TTSERecordStore",
     "shared_store",
     "reset_shared_stores",
+    "format_ts",
+    "parse_ts",
     "_cosine",
     "_norm",
     "_new_record",

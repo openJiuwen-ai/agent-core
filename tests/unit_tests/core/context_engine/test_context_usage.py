@@ -10,12 +10,39 @@ from openjiuwen.core.context_engine import (
     ContextWindow,
     RequestKVCacheUsage,
     SessionKVCacheAggregator,
+    StringLengthCounter,
     TiktokenCounter,
 )
+from openjiuwen.core.context_engine.token.base import TokenCounter
 import pytest
 from openjiuwen.core.context_engine.usage.provider_usage import request_usage_from_metadata
 from openjiuwen.core.foundation.llm import SystemMessage, UsageMetadata, UserMessage
 from openjiuwen.core.foundation.tool import ToolInfo
+
+
+class _StableTokenCounter(TokenCounter):
+    """Provider-aligned test counter used for residual attribution coverage."""
+
+    measurement_source = "native_tokenizer"
+    measurement_estimated = True
+    measurement_tokenizer = "test-native"
+
+    def count(self, text, *, model="", **kwargs):
+        return len(str(text)) // 3
+
+    def count_messages(self, messages, *, model="", **kwargs):
+        if not messages:
+            return 0
+        return (
+            sum(
+                self.count(f"<|start|>{message.role}\n{message.content}<|end|>")
+                for message in messages
+            )
+            + 3
+        )
+
+    def count_tools(self, tools, *, model="", **kwargs):
+        return 7 * len(tools) if tools else 0
 
 
 class _CountingStringCounter:
@@ -63,7 +90,7 @@ def test_analyzer_emits_four_categories_and_provider_reconciliation() -> None:
     )
 
     snapshot = ContextUsageAnalyzer(
-        TiktokenCounter(),
+        _StableTokenCounter(),
         model="gpt-4o",
         context_window_limit=1_000,
     ).analyze(
@@ -92,6 +119,47 @@ def test_analyzer_emits_four_categories_and_provider_reconciliation() -> None:
     assert sum(part.percentage_of_input or 0 for part in snapshot.parts.values()) == pytest.approx(1.0)
     assert snapshot.parts["messages"].source == "provider_usage_residual"
     assert snapshot.parts["messages"].fallback_reason == "provider_total_residual"
+
+
+def test_fallback_provider_reconciliation_scales_all_categories() -> None:
+    analyzer = ContextUsageAnalyzer(
+        StringLengthCounter(fallback_reason="test_no_tokenizer"),
+        model="unknown-model",
+        context_window_limit=1_000,
+    )
+    window = ContextWindow(
+        system_messages=[SystemMessage(content="system rules " * 20)],
+        tools=[ToolInfo(name="read_file", description="read file " * 20, parameters={})],
+        context_messages=[UserMessage(content="history message " * 20)],
+    )
+    local = analyzer.analyze(
+        window,
+        request_id="req-fallback-local",
+        session_id="session-fallback",
+    )
+    local_total = local.context_window.local_estimated_input_tokens
+    provider_total = local_total // 2
+
+    snapshot = analyzer.analyze_from_report(
+        local,
+        request_id="req-fallback-provider",
+        session_id="session-fallback",
+        provider_input_tokens=provider_total,
+    )
+
+    assert snapshot.context_window.input_tokens == provider_total
+    assert snapshot.measurement.authoritative_total is True
+    assert snapshot.parts["messages"].tokens > 0
+    assert sum(part.tokens for part in snapshot.parts.values()) == provider_total
+    assert all(
+        snapshot.parts[name].source == "provider_usage_proportional"
+        for name in ("system_prompt", "tools", "messages")
+    )
+    for name in ("system_prompt", "tools", "messages"):
+        assert snapshot.parts[name].tokens / provider_total == pytest.approx(
+            local.parts[name].tokens / local_total,
+            abs=1 / provider_total,
+        )
 
 
 def test_report_post_call_reconciles_messages_without_remeasuring_other_parts() -> None:

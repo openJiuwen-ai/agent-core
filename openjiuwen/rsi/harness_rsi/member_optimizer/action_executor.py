@@ -821,7 +821,6 @@ class MemberActionExecutorAgent:
     async def _invoke_direct_action(self, message: str) -> str:
         async def call_once() -> str:
             model = load_member_optimizer_model(self._model_config_ref)
-            output_budget = model.model_config.max_tokens if model.model_config else None
             # Keep provider-specific reasoning controls from the model configuration.
             response = await model.invoke(
                 messages=[
@@ -830,7 +829,6 @@ class MemberActionExecutorAgent:
                 ],
                 tools=None,
                 temperature=0.0,
-                max_tokens=output_budget if output_budget is not None else 8192,
             )
             if getattr(response, "finish_reason", None) == "length":
                 raise RuntimeError(

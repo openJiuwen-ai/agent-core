@@ -22,6 +22,7 @@ from openjiuwen.core.foundation.llm.schema.message import (
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.foundation.llm.utils.provider_error import summarize_provider_error_text
 
 
 class OpenAIAccountResponsesError(Exception):
@@ -289,6 +290,10 @@ def raise_for_http_error(response: httpx.Response) -> None:
         return
 
     message = _http_error_message(response)
+    if not message:
+        body = (response.text or "").strip()
+        if body:
+            message = summarize_provider_error_text(body, status_code=response.status_code)
     if not message:
         message = f"OpenAI account Responses request failed with status {response.status_code}."
     raise OpenAIAccountResponsesError(message, status_code=response.status_code)

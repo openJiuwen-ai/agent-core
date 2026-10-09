@@ -180,6 +180,14 @@ def prepare_harness_context(
             target = out / f"skill_{number:03d}.md"
             target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
             row["skills"].append({"name": source.parent.name, "path": target.relative_to(runtime_dir).as_posix()})
+        for group in ("tools", "rails"):
+            for number, item in enumerate(row[group], 1):
+                if not item.get("file"):
+                    continue
+                source = _local_path(root, item["file"])
+                target = out / f"{group}_{number:03d}.py"
+                target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+                item["path"] = target.relative_to(runtime_dir).as_posix()
         result["roles"].append(row)
     (destination / "index.json").write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     return result

@@ -25,10 +25,11 @@ class ContextFetchService(ABC):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         """Return the complete in-memory candidate list for one run."""
 
-        del run_id, run_started_at, cursor
+        del run_id, run_started_at, cursor, include_failed
         return ()
 
     @abstractmethod

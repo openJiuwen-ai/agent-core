@@ -15,7 +15,10 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
 )
 from openjiuwen.core.single_agent import AgentCard, ReActAgent, ReActAgentConfig
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import (
+    MODEL_VISIBLE_OUTPUT_EMITTED_KEY,
+    AgentCallbackContext,
+)
 from openjiuwen.harness.rails.model_anomaly_detection_rail import ModelAnomalyDetectionRail
 
 
@@ -64,7 +67,29 @@ class _RetryStreamModel:
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg="LLM stream timeout: stream frame timeout: stage=idle_chunk",
             )
+        if self.mode == "rate_limit" and self.call_count == 1:
+            raise _wrapped_status_error(429, "too many requests")
+        if self.mode == "rate_limit_after_text" and self.call_count == 1:
+            yield AssistantMessageChunk(content="partial")
+            raise _wrapped_status_error(429, "too many requests")
         yield AssistantMessageChunk(content="recovered")
+
+
+class _ProviderError(Exception):
+    def __init__(self, status_code, message, headers=None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.headers = headers or {}
+
+
+def _wrapped_status_error(status_code, message, headers=None, details=None):
+    cause = _ProviderError(status_code, message, headers)
+    return build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg=message,
+        cause=cause,
+        details=details,
+    )
 
 
 @pytest.mark.asyncio
@@ -172,11 +197,13 @@ async def test_before_invoke_resets_retry_counters():
     rail = ModelAnomalyDetectionRail()
     rail.repeat_retry_count = 1
     rail.stream_timeout_retry_count = 1
+    rail.transient_retry_count = 2
 
     await rail.before_invoke(_make_ctx())
 
     assert rail.repeat_retry_count == 0
     assert rail.stream_timeout_retry_count == 0
+    assert rail.transient_retry_count == 0
 
 
 @pytest.mark.asyncio
@@ -237,3 +264,203 @@ async def test_rail_propagates_stream_timeout_after_retry_exhaustion():
 
     assert "LLM stream timeout" in str(exc_info.value)
     assert model.call_count == 3
+
+
+def _retry_ctx(extra=None):
+    ctx = _make_ctx()
+    ctx.request_retry = MagicMock()
+    if extra:
+        ctx.extra.update(extra)
+    return ctx
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [408, 409, 429, 503])
+async def test_transient_status_requests_retry(status_code):
+    rail = ModelAnomalyDetectionRail()
+    ctx = _retry_ctx()
+    ctx.exception = _wrapped_status_error(status_code, "provider failed")
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_called_once_with(delay_seconds=2.0)
+    assert rail.transient_retry_count == 1
+    assert rail.repeat_retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_transient_retries_use_exponential_base_then_reset():
+    rail = ModelAnomalyDetectionRail()
+    ctx = _retry_ctx()
+    ctx.exception = _wrapped_status_error(429, "too many requests")
+
+    for _ in range(4):
+        await rail.on_model_exception(ctx)
+
+    assert [call.kwargs["delay_seconds"] for call in ctx.request_retry.call_args_list] == [2.0, 4.0, 8.0]
+    assert rail.transient_retry_count == 0
+    assert rail.repeat_retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_transient_retry_count_and_base_are_configurable():
+    rail = ModelAnomalyDetectionRail(transient_max_retries=1, transient_base_delay_seconds=3.0)
+    ctx = _retry_ctx()
+    ctx.exception = _wrapped_status_error(429, "too many requests")
+
+    await rail.on_model_exception(ctx)
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_called_once_with(delay_seconds=3.0)
+    assert rail.transient_retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_provider_code_in_details_is_retryable():
+    rail = ModelAnomalyDetectionRail()
+    ctx = _retry_ctx()
+    ctx.exception = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="provider response error: code=429",
+        details={"provider_code": 429},
+    )
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_called_once_with(delay_seconds=2.0)
+
+
+@pytest.mark.asyncio
+async def test_connection_error_without_status_is_retryable():
+    rail = ModelAnomalyDetectionRail()
+    ctx = _retry_ctx()
+    ctx.exception = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="connection reset",
+        cause=ConnectionError("connection reset"),
+    )
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_called_once_with(delay_seconds=2.0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    [
+        (400, "bad request"),
+        (401, "unauthorized"),
+        (429, "insufficient_quota"),
+        (400, "maximum context length exceeded"),
+    ],
+)
+async def test_non_retryable_provider_failures_do_not_retry(status_code, message):
+    rail = ModelAnomalyDetectionRail()
+    ctx = _retry_ctx()
+    ctx.exception = _wrapped_status_error(status_code, message)
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_not_called()
+    assert rail.transient_retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_x_should_retry_false_blocks_429():
+    rail = ModelAnomalyDetectionRail()
+    ctx = _retry_ctx()
+    ctx.exception = _wrapped_status_error(
+        429,
+        "too many requests",
+        headers={"x-should-retry": "false"},
+    )
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_header_overrides_exponential_delay():
+    rail = ModelAnomalyDetectionRail()
+    ctx = _retry_ctx()
+    ctx.exception = _wrapped_status_error(
+        429,
+        "too many requests",
+        headers={"Retry-After": "5"},
+    )
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_called_once_with(delay_seconds=5.0)
+
+
+@pytest.mark.asyncio
+async def test_retry_after_ms_is_converted_to_seconds():
+    rail = ModelAnomalyDetectionRail()
+    ctx = _retry_ctx()
+    ctx.exception = _wrapped_status_error(
+        429,
+        "too many requests",
+        headers={"retry-after-ms": "1500"},
+    )
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_called_once_with(delay_seconds=1.5)
+
+
+@pytest.mark.asyncio
+async def test_retry_after_above_cap_does_not_retry():
+    rail = ModelAnomalyDetectionRail()
+    ctx = _retry_ctx()
+    ctx.exception = _wrapped_status_error(
+        429,
+        "too many requests",
+        headers={"Retry-After": "90"},
+    )
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_not_called()
+    assert rail.transient_retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_visible_output_blocks_transient_retry():
+    rail = ModelAnomalyDetectionRail()
+    ctx = _retry_ctx(extra={MODEL_VISIBLE_OUTPUT_EMITTED_KEY: True})
+    ctx.exception = _wrapped_status_error(429, "too many requests")
+
+    await rail.on_model_exception(ctx)
+
+    ctx.request_retry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rail_retries_rate_limit_before_visible_output():
+    agent = _make_agent()
+    rail = ModelAnomalyDetectionRail(transient_base_delay_seconds=0.0)
+    await agent.register_rail(rail)
+    model = _RetryStreamModel("rate_limit")
+    agent.set_llm(model)
+
+    result = await agent.invoke({"query": "rate limit once"}, _streaming=True)
+
+    assert result["output"] == "recovered"
+    assert model.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_rail_does_not_retry_rate_limit_after_visible_output():
+    agent = _make_agent()
+    rail = ModelAnomalyDetectionRail(transient_base_delay_seconds=0.0)
+    await agent.register_rail(rail)
+    model = _RetryStreamModel("rate_limit_after_text")
+    agent.set_llm(model)
+
+    with pytest.raises(BaseError):
+        await agent.invoke({"query": "rate limit after text"}, _streaming=True)
+
+    assert model.call_count == 1

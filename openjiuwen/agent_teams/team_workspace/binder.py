@@ -6,9 +6,19 @@
 Creates the on-disk member workspace at spawn time (never at ``build_team``):
 
 - leader:     real directory inside the team, no link
-- predefined: ``.agent_teams/<member>`` + link ``workspaces/<member>_workspace``
-- dynamic:    ``.agent_teams/<team>#<member>/`` (prefix on) or
-              ``.agent_teams/<member>/`` (prefix off) + link + refcount
+- predefined: ``.agent_teams/jiuwen_team_members/<member>`` + link ``workspaces/<member>_workspace``
+- dynamic:    ``jiuwen_team_members/<team>#<member>/`` (prefix on) or
+              ``jiuwen_team_members/<member>/`` (prefix off) + link + refcount
+
+Real directories left by the original layout (directly under
+``.agent_teams/``) are migrated into ``jiuwen_team_members/`` on the next
+``setup`` — best effort under a cross-process lock: the directory is
+renamed, then every in-team link pointing at the old location is re-created
+against the new one (a predefined dir is shared across teams, so *all*
+teams' links are fixed, not just the spawning team's). A rename that fails
+(e.g. a Windows handle holds a file inside the dir) logs and keeps the legacy
+location — probing in ``member_real_dir`` resolves it in place, so
+correctness never depends on the migration succeeding.
 
 ``setup`` is idempotent — an existing directory or link is left as-is, so
 spawn and session recovery converge on the same path. It always returns the
@@ -25,8 +35,13 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from openjiuwen.agent_teams.paths import team_home, team_member_workspace_dir
+from openjiuwen.agent_teams.paths import (
+    get_agent_teams_home,
+    team_home,
+    team_member_workspace_dir,
+)
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.skill.file_lock import cross_process_file_lock
 from openjiuwen.agent_teams.team_workspace.dir_links import (
     create_dir_link,
     is_dir_link,
@@ -37,6 +52,7 @@ from openjiuwen.agent_teams.team_workspace.paths import (
     MEMBER_MODE_LEADER,
     MEMBER_MODE_PREDEFINED,
     member_real_dir,
+    members_home,
 )
 from openjiuwen.agent_teams.team_workspace.ref_store import (
     REFS_FILE_NAME,
@@ -91,9 +107,8 @@ class MemberWorkspaceBinder:
 
     def _setup_predefined(self, binding: TeamMemberBinding) -> Path:
         root = team_member_workspace_dir(binding.team_name, binding.member_name)
-        real_dir = member_real_dir(
-            binding.team_name,
-            binding.member_name,
+        real_dir = self._resolve_and_migrate_real_dir(
+            binding,
             MEMBER_MODE_PREDEFINED,
         )
         if self._ensure_real_dir_and_link(binding, root, real_dir):
@@ -106,11 +121,9 @@ class MemberWorkspaceBinder:
 
     def _setup_dynamic(self, binding: TeamMemberBinding) -> Path:
         root = team_member_workspace_dir(binding.team_name, binding.member_name)
-        real_dir = member_real_dir(
-            binding.team_name,
-            binding.member_name,
+        real_dir = self._resolve_and_migrate_real_dir(
+            binding,
             MEMBER_MODE_DYNAMIC,
-            member_workspace_prefix=binding.member_workspace_prefix,
         )
         if self._ensure_real_dir_and_link(binding, root, real_dir):
             self._ref_store.add_ref(
@@ -120,6 +133,58 @@ class MemberWorkspaceBinder:
                 member_workspace_prefix=binding.member_workspace_prefix,
             )
         return root
+
+    @staticmethod
+    def _resolve_and_migrate_real_dir(
+        binding: TeamMemberBinding,
+        mode: str,
+    ) -> Path:
+        """Resolve the member's real dir, migrating an old-layout dir into place.
+
+        ``member_real_dir`` probes the current layout first, so when it
+        returns a path outside ``jiuwen_team_members/`` the dir physically
+        sits in an older layout and this is the moment to move it. The
+        migration runs under the single cross-process migration lock with a
+        re-probe inside, so concurrent setups converge (the loser finds the
+        target already populated and uses it). Best effort: on any
+        ``OSError`` the legacy location is returned as-is — probing keeps it
+        a valid home until a later spawn retries.
+        """
+        real_dir = member_real_dir(
+            binding.team_name,
+            binding.member_name,
+            mode,
+            member_workspace_prefix=binding.member_workspace_prefix,
+        )
+        members_dir = members_home()
+        if real_dir.parent == members_dir:
+            # Current layout — existing dir or the fresh-creation target
+            # when no probe hit. Nothing to migrate.
+            return real_dir
+        # member_real_dir returns an old-layout path only when the dir
+        # physically exists there (probe checks is_dir), so migrate it now.
+        target = members_dir / real_dir.name
+        try:
+            with cross_process_file_lock(members_dir):
+                # Re-probe under the lock: another process may have migrated
+                # this same dir while we were waiting.
+                if target.is_dir():
+                    return target
+                members_dir.mkdir(parents=True, exist_ok=True)
+                real_dir.rename(target)
+                _fix_links_to_real_dir(real_dir, target)
+        except OSError as exc:
+            team_logger.warning(
+                "jiuwen_team_members/ migration failed for %s; keeping legacy dir %s: %s",
+                binding.member_name,
+                real_dir,
+                exc,
+            )
+            return real_dir
+        team_logger.info(
+            "migrated member dir %s -> %s", real_dir.name, target
+        )
+        return target
 
     @staticmethod
     def _ensure_real_dir_and_link(
@@ -319,6 +384,52 @@ class MemberWorkspaceBinder:
         remove_dir_link(link)
 
 
+def _fix_links_to_real_dir(old_dir: Path, new_dir: Path) -> None:
+    """Re-create every in-team link that pointed at ``old_dir``.
+
+    A predefined real dir is shared across teams, so renaming it orphans the
+    links of *every* team that references it — not just the team triggering
+    the migration. Scan all ``<team>/workspaces/`` entries at the
+    ``.agent_teams/`` root, read each link's target, and rebuild the ones
+    matching ``old_dir`` against ``new_dir``. Fail-soft: an entry that
+    cannot be read or re-linked is logged and skipped.
+    """
+    root = get_agent_teams_home()
+    try:
+        team_dirs = sorted(entry for entry in root.iterdir() if entry.is_dir())
+    except OSError as exc:
+        team_logger.warning("link-fix scan of %s failed: %s", root, exc)
+        return
+    for team_dir in team_dirs:
+        workspaces = team_dir / "workspaces"
+        if not workspaces.is_dir():
+            continue
+        try:
+            entries = list(workspaces.iterdir())
+        except OSError as exc:
+            team_logger.warning("link-fix scan of %s failed: %s", workspaces, exc)
+            continue
+        for link in entries:
+            try:
+                # os.readlink on a Windows junction returns the target with
+                # the extended-length ``\\?\`` prefix; strip it so the plain
+                # path comparison matches.
+                target = os.readlink(link)
+                if target.startswith("\\\\?\\"):
+                    target = target[4:]
+            except OSError:
+                continue  # not a link, or unreadable
+            if os.path.normcase(target) != os.path.normcase(str(old_dir)):
+                continue
+            try:
+                if remove_dir_link(link):
+                    create_dir_link(new_dir, link)
+            except OSError as exc:
+                team_logger.warning(
+                    "link-fix could not rebuild %s -> %s: %s", link, new_dir, exc
+                )
+
+
 def prepare_member_workspace(
     *,
     team_name: str,
@@ -332,7 +443,7 @@ def prepare_member_workspace(
 
     Classification is a **role whitelist**: only a ``TEAMMATE`` or
     ``HUMAN_AGENT`` is flattened into a dynamic real directory
-    (``.agent_teams/<team>#<m>/``) and linked out of the team tree; a leader
+    (``jiuwen_team_members/<team>#<m>/``) and linked out of the team tree; a leader
     (by role or name) keeps its real directory in-team; a predefined member
     shares the independent workspace across teams. Every other role — notably
     ``EXTERNAL_CLI`` — stays in-team like a leader, so an external CLI member's

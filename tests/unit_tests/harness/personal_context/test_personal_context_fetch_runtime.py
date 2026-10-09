@@ -16,7 +16,12 @@ from openjiuwen.harness.personal_context.config import PersonalContextConfig, Pe
 from openjiuwen.harness.personal_context.fetch import local_files
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
 from openjiuwen.harness.personal_context.fetch.base import ContextFetchService
-from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
+from openjiuwen.harness.personal_context.fetch.cursor_selection import (
+    quarantined_candidate_diagnostics,
+    record_completed_candidates,
+    record_failed_candidates,
+    select_latest_candidates,
+)
 from openjiuwen.harness.personal_context.fetch.gitcode import GitCodeFetchService
 from openjiuwen.harness.personal_context.fetch.local_files import LocalFilesFetchService
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
@@ -139,8 +144,9 @@ class _EmptyPreparedProvider(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
-        del run_id, run_started_at, cursor
+        del run_id, run_started_at, cursor, include_failed
         return ()
 
 
@@ -336,6 +342,62 @@ async def test_append_fetch_service_updates_live_config_without_restarting_exist
     assert "bookmarks" not in personal_context._fetch_run_progress
 
 
+@pytest.mark.asyncio
+async def test_update_fetch_service_config_changes_only_named_service_schedule(
+    tmp_path: Path,
+) -> None:
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _manual_config(tmp_path, services={"notes": True, "bookmarks": True}),
+    )
+    pipeline = personal_context._pipeline_service
+    assert isinstance(pipeline, _RunningPipeline)
+    original = personal_context._config
+    notes = next(
+        service
+        for service in original.fetch_services
+        if service.service_id == "notes"
+    )
+    updated = notes.model_copy(
+        update={"interval_seconds": 7200.0, "max_items_per_run": 42}
+    )
+
+    await personal_context._update_fetch_service_config(updated)
+
+    by_id = {
+        service.service_id: service
+        for service in personal_context._config.fetch_services
+    }
+    assert by_id["notes"].interval_seconds == 7200.0
+    assert by_id["notes"].max_items_per_run == 42
+    assert by_id["bookmarks"].interval_seconds == 3600.0
+    assert pipeline.configurations[-1] is personal_context._config
+
+
+@pytest.mark.asyncio
+async def test_update_fetch_service_config_rejects_non_schedule_and_unknown_fields(
+    tmp_path: Path,
+) -> None:
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _manual_config(tmp_path, services={"notes": True}),
+    )
+    original = personal_context._config
+    notes = original.fetch_services[0]
+
+    with pytest.raises(BaseError, match="only fetch service schedule fields"):
+        await personal_context._update_fetch_service_config(
+            notes.model_copy(update={"enabled": False})
+        )
+
+    with pytest.raises(BaseError, match="unknown fetch service"):
+        await personal_context._update_fetch_service_config(
+            notes.model_copy(update={"service_id": "missing"})
+        )
+
+    assert personal_context._config is original
+
+
 def _gitcode_runtime_service() -> PersonalContextFetchServiceConfig:
     return PersonalContextFetchServiceConfig.model_validate(
         {
@@ -387,8 +449,9 @@ async def test_gitcode_prepare_failure_isolated_from_other_manual_service(
             run_id: str,
             run_started_at: datetime,
             cursor: dict[str, object] | None,
+            include_failed: bool = False,
         ) -> tuple[dict[str, object], ...]:
-            del run_id, run_started_at, cursor
+            del run_id, run_started_at, cursor, include_failed
             return (_run_candidate(1),)
 
         async def fetch(
@@ -414,8 +477,9 @@ async def test_gitcode_prepare_failure_isolated_from_other_manual_service(
             run_id: str,
             run_started_at: datetime,
             cursor: dict[str, object] | None,
+            include_failed: bool = False,
         ) -> tuple[dict[str, object], ...]:
-            del run_id, run_started_at, cursor
+            del run_id, run_started_at, cursor, include_failed
             raise RuntimeError("injected GitCode prepare failure")
 
     config = PersonalContextConfig.from_dict(
@@ -552,8 +616,9 @@ class _ProgressProvider(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
-        del run_id, run_started_at, cursor
+        del run_id, run_started_at, cursor, include_failed
         self.events.append("prepare_started")
         self.prepare_started.set()
         await self.release_prepare.wait()
@@ -576,6 +641,302 @@ class _ProgressProvider(ContextFetchService):
                 items=tuple(_run_item(index) for index in indexes),
                 next_cursor={"batch": batch_index},
             )
+
+
+class _OutcomeProvider(ContextFetchService):
+    def __init__(
+        self,
+        config: PersonalContextFetchServiceConfig,
+        *,
+        home: Path,
+        batch: FetchBatch,
+    ) -> None:
+        super().__init__(config, home=home)
+        self.batch = batch
+        self.commit_calls: list[str] = []
+        self.abort_calls: list[str] = []
+
+    async def prepare_run(
+        self,
+        *,
+        run_id: str,
+        run_started_at: datetime,
+        cursor: dict[str, object] | None,
+        include_failed: bool = False,
+    ) -> tuple[dict[str, object], ...]:
+        del run_id, run_started_at, cursor, include_failed
+        return tuple(_run_candidate(index) for index in range(self.batch.attempted_count))
+
+    async def fetch(
+        self,
+        *,
+        run_id: str,
+        cursor: dict[str, object] | None,
+        candidates: tuple[dict[str, object], ...],
+    ):
+        del run_id, cursor, candidates
+        yield self.batch
+
+    async def commit_run(self, *, run_id: str) -> None:
+        self.commit_calls.append(run_id)
+
+    async def abort_run(self, *, run_id: str) -> None:
+        self.abort_calls.append(run_id)
+
+
+@pytest.mark.asyncio
+async def test_partial_item_failure_publishes_success_and_commits_quarantine(tmp_path: Path) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path))
+    assert personal_context._config is not None
+    batch = FetchBatch(
+        batch_id="partial",
+        items=(_run_item(0), _run_item(2)),
+        attempted_count=3,
+        success_offsets=(0, 2),
+        failures=(
+            {
+                "offset": 1,
+                "item_ref": "file:///notes/item-1",
+                "code": 154002,
+                "message": "文件读取或解析失败",
+            },
+        ),
+        next_cursor={"provider_page": "done"},
+    )
+    provider = _OutcomeProvider(
+        personal_context._config.fetch_services[0],
+        home=tmp_path,
+        batch=batch,
+    )
+    submitted: list[FetchBatch] = []
+    finished: list[tuple[str, str]] = []
+
+    async def submit_batch(service_id, run_id, submitted_batch, *, enqueued=None):
+        del service_id, run_id
+        submitted.append(submitted_batch)
+        if enqueued is not None:
+            enqueued.set()
+
+    async def finish_run(service_id, run_id):
+        finished.append((service_id, run_id))
+
+    personal_context._submit_batch = submit_batch  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = finish_run  # type: ignore[method-assign]
+
+    await personal_context._run_fetch_once("notes", provider)
+
+    status = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert status["run_state"] == "partial_succeeded"
+    assert (status["completed_items"], status["failed_items"], status["progress_percent"]) == (2, 1, 100)
+    assert status["last_error"] is None
+    assert len(submitted) == 1
+    assert len(finished) == 1
+    assert len(provider.commit_calls) == 1
+    assert provider.abort_calls == []
+    cursor = personal_context._read_cursor("notes")
+    assert cursor is not None
+    assert cursor["provider_page"] == "done"
+    selection = cursor["_selection"]
+    assert isinstance(selection, dict)
+    assert len(selection["completed"]) == 2
+    assert quarantined_candidate_diagnostics(cursor)[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_cursor_is_rejected_before_pipeline_publication(tmp_path: Path) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path))
+    assert personal_context._config is not None
+    provider = _OutcomeProvider(
+        personal_context._config.fetch_services[0],
+        home=tmp_path,
+        batch=FetchBatch(
+            batch_id="invalid-cursor",
+            items=(_run_item(0),),
+            next_cursor={"too_large": "x" * (600 * 1024)},
+        ),
+    )
+    pipeline_events: list[str] = []
+
+    async def submit_batch(_service_id, _run_id, _batch, *, enqueued=None):
+        pipeline_events.append("submit")
+        if enqueued is not None:
+            enqueued.set()
+
+    async def finish_run(*_args, **_kwargs):
+        pipeline_events.append("finish")
+
+    async def abort_run(*_args, **_kwargs):
+        pipeline_events.append("abort")
+
+    personal_context._submit_batch = submit_batch  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = finish_run  # type: ignore[method-assign]
+    personal_context._abort_pipeline_run = abort_run  # type: ignore[method-assign]
+
+    with pytest.raises(Exception):
+        await personal_context._run_fetch_once("notes", provider)
+
+    assert pipeline_events == ["submit", "abort"]
+    assert provider.commit_calls == []
+    assert len(provider.abort_calls) == 1
+    assert personal_context._read_cursor("notes") is None
+
+
+@pytest.mark.asyncio
+async def test_all_item_failures_commit_quarantine_without_waking_pipeline(tmp_path: Path) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path))
+    assert personal_context._config is not None
+    batch = FetchBatch(
+        batch_id="failed",
+        items=(),
+        attempted_count=2,
+        failures=tuple(
+            {
+                "offset": index,
+                "item_ref": f"file:///notes/item-{index}",
+                "code": 154002,
+                "message": "文件读取或解析失败",
+            }
+            for index in range(2)
+        ),
+        next_cursor={"provider_page": "done"},
+    )
+    provider = _OutcomeProvider(
+        personal_context._config.fetch_services[0],
+        home=tmp_path,
+        batch=batch,
+    )
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("all-item failure must not wake the pipeline")
+
+    personal_context._submit_batch = unexpected  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = unexpected  # type: ignore[method-assign]
+
+    await personal_context._run_fetch_once("notes", provider)
+
+    status = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert status["run_state"] == "failed"
+    assert (status["completed_items"], status["failed_items"], status["progress_percent"]) == (0, 2, 100)
+    assert status["last_error"] is None
+    assert len(provider.commit_calls) == 1
+    assert provider.abort_calls == []
+    cursor = personal_context._read_cursor("notes")
+    assert cursor is not None
+    assert quarantined_candidate_diagnostics(cursor)[0] == 2
+
+
+@pytest.mark.asyncio
+async def test_skipped_candidate_commits_without_waking_pipeline(tmp_path: Path) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path))
+    assert personal_context._config is not None
+    batch = FetchBatch(
+        batch_id="skipped",
+        items=(),
+        attempted_count=1,
+        skipped_offsets=(0,),
+        next_cursor={"provider_page": "done"},
+    )
+    provider = _OutcomeProvider(
+        personal_context._config.fetch_services[0],
+        home=tmp_path,
+        batch=batch,
+    )
+
+    async def unexpected(*_args, **_kwargs):
+        raise AssertionError("skipped content must not wake the pipeline")
+
+    personal_context._submit_batch = unexpected  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = unexpected  # type: ignore[method-assign]
+
+    await personal_context._run_fetch_once("notes", provider)
+
+    status = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert status["run_state"] == "succeeded"
+    assert (status["completed_items"], status["failed_items"]) == (1, 0)
+    cursor = personal_context._read_cursor("notes")
+    assert cursor is not None
+    selection = cursor["_selection"]
+    assert isinstance(selection, dict)
+    assert len(selection["completed"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_manual_run_retries_a_quarantined_revision(tmp_path: Path) -> None:
+    class SelectingProvider(ContextFetchService):
+        async def prepare_run(
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+            include_failed: bool = False,
+        ) -> tuple[dict[str, object], ...]:
+            del run_id, run_started_at
+            return select_latest_candidates(
+                (_run_candidate(0),),
+                cursor,
+                20,
+                retry_quarantined=include_failed,
+            )
+
+        async def fetch(self, *, run_id, cursor, candidates):
+            del run_id
+            if not candidates:
+                yield FetchBatch(batch_id="empty", next_cursor=cursor or {})
+                return
+            yield FetchBatch(
+                batch_id="retry",
+                items=(_run_item(0),),
+                next_cursor=cursor or {},
+            )
+
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path))
+    assert personal_context._config is not None
+    candidate = _run_candidate(0)
+    cursor = record_failed_candidates(
+        None,
+        (
+            {
+                **candidate,
+                "item_ref": str(candidate["locator"]),
+                "code": 154002,
+                "message": "文件读取或解析失败",
+            },
+        ),
+        failed_at="2026-09-21T12:00:00Z",
+    )
+    personal_context._write_cursor("notes", cursor)
+    provider = SelectingProvider(personal_context._config.fetch_services[0], home=tmp_path)
+
+    await personal_context._run_fetch_once("notes", provider)
+    automatic = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert automatic["total_items"] == 0
+    assert automatic["quarantined_items"] == 1
+
+    async def submit_batch(*_args, **kwargs):
+        enqueued = kwargs.get("enqueued")
+        if isinstance(enqueued, asyncio.Event):
+            enqueued.set()
+
+    async def finish_run(*_args):
+        return None
+
+    personal_context._submit_batch = submit_batch  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = finish_run  # type: ignore[method-assign]
+    await personal_context._run_fetch_once("notes", provider, retry_quarantined=True)
+
+    manual = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert (manual["run_state"], manual["total_items"], manual["completed_items"]) == (
+        "succeeded",
+        1,
+        1,
+    )
+    assert manual["quarantined_items"] == 0
 
 
 @pytest.mark.asyncio
@@ -622,6 +983,10 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
         "progress_percent": 0,
         "total_items": 0,
         "completed_items": 0,
+        "failed_items": 0,
+        "quarantined_items": 0,
+        "item_errors": [],
+        "omitted_item_errors": 0,
         "last_error": None,
     }
     provider.release_prepare.set()
@@ -635,17 +1000,17 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
     submit_release[0].set()
     await asyncio.wait_for(submit_entered[1].wait(), timeout=1)
     first = (await personal_context.snapshot()).fetch_run_progress["notes"]
-    assert (first["completed_items"], first["progress_percent"]) == (2, 12)
+    assert (first["completed_items"], first["progress_percent"]) == (2, 6)
 
     submit_release[1].set()
     await asyncio.wait_for(submit_entered[2].wait(), timeout=1)
     second = (await personal_context.snapshot()).fetch_run_progress["notes"]
-    assert (second["completed_items"], second["progress_percent"]) == (3, 15)
+    assert (second["completed_items"], second["progress_percent"]) == (3, 7)
 
     submit_release[2].set()
     await asyncio.wait_for(finish_entered.wait(), timeout=1)
     publishing = (await personal_context.snapshot()).fetch_run_progress["notes"]
-    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 45)
+    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 25)
 
     finish_release.set()
     await asyncio.wait_for(task, timeout=1)
@@ -655,6 +1020,13 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
         "progress_percent": 100,
         "total_items": 20,
         "completed_items": 20,
+        "created_node_count": 0,
+        "updated_node_count": 0,
+        "no_new_content": True,
+        "failed_items": 0,
+        "quarantined_items": 0,
+        "item_errors": [],
+        "omitted_item_errors": 0,
         "last_error": None,
     }
     committed_cursor = personal_context._read_cursor("notes")
@@ -714,7 +1086,7 @@ async def test_run_progress_preserves_counts_for_failure_and_cancellation(tmp_pa
         await personal_context._run_fetch_once("notes", failed)
     failed_status = (await personal_context.snapshot()).fetch_run_progress["notes"]
     assert failed_status["run_state"] == "failed"
-    assert (failed_status["completed_items"], failed_status["progress_percent"]) == (2, 12)
+    assert (failed_status["completed_items"], failed_status["progress_percent"]) == (2, 6)
     assert isinstance(failed_status["last_error"], str)
 
     cancelled = CancelledProvider(service_config, home=tmp_path)
@@ -726,7 +1098,7 @@ async def test_run_progress_preserves_counts_for_failure_and_cancellation(tmp_pa
         await task
     cancelled_status = (await personal_context.snapshot()).fetch_run_progress["notes"]
     assert cancelled_status["run_state"] == "cancelled"
-    assert (cancelled_status["completed_items"], cancelled_status["progress_percent"]) == (2, 12)
+    assert (cancelled_status["completed_items"], cancelled_status["progress_percent"]) == (2, 6)
     assert cancelled_status["last_error"] is None
 
 
@@ -772,8 +1144,9 @@ async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_pa
             run_id: str,
             run_started_at: datetime,
             cursor: dict[str, object] | None,
+            include_failed: bool = False,
         ) -> tuple[dict[str, object], ...]:
-            del run_id, run_started_at, cursor
+            del run_id, run_started_at, cursor, include_failed
             return ()
 
         async def fetch(
@@ -797,8 +1170,9 @@ async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_pa
             run_id: str,
             run_started_at: datetime,
             cursor: dict[str, object] | None,
+            include_failed: bool = False,
         ) -> tuple[dict[str, object], ...]:
-            del run_id, run_started_at, cursor
+            del run_id, run_started_at, cursor, include_failed
             self.started.set()
             await asyncio.Event().wait()
             return ()
@@ -818,6 +1192,13 @@ async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_pa
         "progress_percent": 100,
         "total_items": 0,
         "completed_items": 0,
+        "created_node_count": 0,
+        "updated_node_count": 0,
+        "no_new_content": True,
+        "failed_items": 0,
+        "quarantined_items": 0,
+        "item_errors": [],
+        "omitted_item_errors": 0,
         "last_error": None,
     }
 
@@ -831,6 +1212,39 @@ async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_pa
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_restart_restores_idle_quarantine_from_cursor(tmp_path: Path) -> None:
+    configured = PersonalContext(home=tmp_path)
+    await configured.set_configuration(_config(tmp_path))
+    failed_candidate = {
+        **_run_candidate(0),
+        "item_ref": "notes/broken.pdf",
+        "code": 154002,
+        "message": "文件读取或解析失败",
+    }
+    cursor = record_failed_candidates(
+        None,
+        (failed_candidate,),
+        failed_at="2026-09-21T08:00:00+00:00",
+    )
+    configured._write_cursor("notes", cursor)
+
+    restored = PersonalContext(home=tmp_path)
+    await restored.set_configuration(_config(tmp_path))
+
+    progress = (await restored.snapshot()).fetch_run_progress["notes"]
+    assert progress["run_state"] == "idle"
+    assert progress["quarantined_items"] == 1
+    assert progress["item_errors"] == [
+        {
+            "item_ref": "notes/broken.pdf",
+            "code": 154002,
+            "message": "文件读取或解析失败",
+            "failed_at": "2026-09-21T08:00:00Z",
+        }
+    ]
 
 
 def test_write_cursor_compacts_selection_and_atomically_preserves_old_bytes_on_failure(
@@ -1336,8 +1750,9 @@ class _TwoBatchProvider(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
-        del run_id, run_started_at, cursor
+        del run_id, run_started_at, cursor, include_failed
         return tuple(_item_candidate(item) for batch in self.batches for item in batch.items)
 
     async def fetch(
@@ -1943,8 +2358,9 @@ async def test_failed_finish_keeps_old_context_cursor_and_source_metadata(
             run_id: str,
             run_started_at: datetime,
             cursor: dict[str, object] | None,
+            include_failed: bool = False,
         ) -> tuple[dict[str, object], ...]:
-            del run_id, run_started_at, cursor
+            del run_id, run_started_at, cursor, include_failed
             return tuple(_item_candidate(item) for item in self.batch.items)
 
         async def fetch(
@@ -2064,8 +2480,9 @@ async def test_retry_replaces_failed_same_revision_context_without_persistent_so
             run_id: str,
             run_started_at: datetime,
             cursor: dict[str, object] | None,
+            include_failed: bool = False,
         ) -> tuple[dict[str, object], ...]:
-            del run_id, run_started_at, cursor
+            del run_id, run_started_at, cursor, include_failed
             return (
                 {
                     "stable_id": "notes/one",
@@ -2363,8 +2780,9 @@ class _PartialStopProvider(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
-        del run_id, run_started_at, cursor
+        del run_id, run_started_at, cursor, include_failed
         return (_run_candidate(1), _run_candidate(2))
 
     async def fetch(
@@ -2383,6 +2801,11 @@ class _PartialStopProvider(ContextFetchService):
 
     async def abort_run(self, *, run_id: str) -> None:
         self.abort_calls.append(run_id)
+
+
+def test_stop_fetch_run_total_budget_is_sixty_seconds() -> None:
+    assert personal_context_module._STOP_FINALIZE_TIMEOUT_SECONDS == 60.0
+    assert personal_context_module._PIPELINE_CANCEL_GRACE_SECONDS == 5.0
 
 
 @pytest.mark.asyncio
@@ -2444,13 +2867,73 @@ async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
     assert (progress["run_state"], progress["completed_items"], progress["progress_percent"]) == (
         "cancelled",
         1,
-        40,
+        12,
     )
     assert personal_context._config is not None
     assert personal_context._config.fetch_services[0].enabled is True
     assert "notes" not in personal_context._fetch_running
 
     await personal_context.stop_fetch_run("notes")
+
+
+@pytest.mark.asyncio
+async def test_stop_timeout_during_retain_fences_late_cursor_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _PartialStopProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _PartialStopProvider)
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    personal_context._write_cursor("notes", {"n": 0})
+    before = (tmp_path / "state" / "cursors" / "notes.json").read_bytes()
+    second_entered = asyncio.Event()
+    retain_entered = asyncio.Event()
+    release_retain = asyncio.Event()
+
+    async def submit(
+        _service_id: str,
+        _run_id: str,
+        batch: FetchBatch,
+        *,
+        enqueued: asyncio.Event | None = None,
+    ) -> None:
+        if enqueued is not None:
+            enqueued.set()
+        if batch.batch_id == "partial-2":
+            second_entered.set()
+            await asyncio.Event().wait()
+
+    async def retain(_service_id: str, _run_id: str) -> None:
+        retain_entered.set()
+        await release_retain.wait()
+
+    async def no_op(_service_id: str, _run_id: str) -> None:
+        return None
+
+    personal_context._submit_batch = submit  # type: ignore[method-assign]
+    personal_context._retain_pipeline_run = retain  # type: ignore[method-assign]
+    personal_context._rollback_pipeline_run = no_op  # type: ignore[method-assign]
+    personal_context._cancel_pipeline_run = no_op  # type: ignore[method-assign]
+    monkeypatch.setattr(personal_context_module, "_STOP_FINALIZE_TIMEOUT_SECONDS", 0.05)
+
+    await personal_context.run_fetch(service_id="notes")
+    await asyncio.wait_for(second_entered.wait(), timeout=1)
+    task = personal_context._active_fetch_run_tasks["notes"]
+    try:
+        with pytest.raises(BaseError, match="stage=retain_pipeline"):
+            await personal_context.stop_fetch_run("notes")
+        await asyncio.wait_for(retain_entered.wait(), timeout=1)
+        assert (await personal_context.snapshot()).fetch_run_progress["notes"]["run_state"] == "failed"
+    finally:
+        release_retain.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert progress["run_state"] == "failed"
+    assert "stage=retain_pipeline" in progress["last_error"]
+    assert personal_context._read_run_history("notes")[0]["run_state"] == "failed"
+    assert (tmp_path / "state" / "cursors" / "notes.json").read_bytes() == before
+    assert _PartialStopProvider.instances["notes"].commit_calls == []
 
 
 @pytest.mark.asyncio
@@ -2500,6 +2983,7 @@ async def test_stop_fetch_run_immediately_after_acceptance_reports_cancelled(
 async def test_stop_fetch_run_timeout_never_leaves_stopping_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
     release = asyncio.Event()
@@ -2540,16 +3024,28 @@ async def test_stop_fetch_run_timeout_never_leaves_stopping_state(
 
     personal_context._cancel_pipeline_run = ignore_pipeline_cancel  # type: ignore[method-assign]
     try:
-        with pytest.raises(BaseError):
+        with pytest.raises(BaseError, match="stage=cancel_requested"):
             await asyncio.wait_for(personal_context.stop_fetch_run("notes"), timeout=0.5)
         await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
         progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
         assert progress["run_state"] == "failed"
-        assert progress["progress_percent"] == 45
+        assert "stage=cancel_requested" in progress["last_error"]
+        assert progress["progress_percent"] == 25
         assert personal_context._fetch_states["notes"] == "FAILED"
+        assert "pipeline cancellation grace exceeded" in caplog.text
     finally:
         release.set()
         await asyncio.wait_for(task, timeout=1)
+
+
+def test_runtime_timeout_message_has_no_missing_template_parameter() -> None:
+    error = personal_context_module._error(
+        personal_context_module.StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT,
+        "fetch run stop finalization timed out",
+    )
+
+    assert "fetch run stop finalization timed out" in str(error)
+    assert "<missing:" not in str(error)
 
 
 @pytest.mark.asyncio
@@ -2643,8 +3139,9 @@ async def test_timed_out_run_cannot_commit_after_provider_ignores_cancellation(
             run_id: str,
             run_started_at: datetime,
             cursor: dict[str, object] | None,
+            include_failed: bool = False,
         ) -> tuple[dict[str, object], ...]:
-            del run_id, run_started_at, cursor
+            del run_id, run_started_at, cursor, include_failed
             return (_run_candidate(1),)
 
         async def fetch(
@@ -2721,8 +3218,9 @@ async def test_stop_fetch_run_keeps_scheduler_and_allows_its_next_round(
             run_id: str,
             run_started_at: datetime,
             cursor: dict[str, object] | None,
+            include_failed: bool = False,
         ) -> tuple[dict[str, object], ...]:
-            del run_id, run_started_at, cursor
+            del run_id, run_started_at, cursor, include_failed
             self.prepare_calls += 1
             if self.prepare_calls == 1:
                 self.first_started.set()
@@ -2876,7 +3374,7 @@ async def test_stop_fetch_run_cancels_finish_and_retains_completed_batches(
     assert (progress["run_state"], progress["completed_items"], progress["progress_percent"]) == (
         "cancelled",
         2,
-        45,
+        25,
     )
 
 
@@ -3147,6 +3645,8 @@ async def test_retained_run_history_round_trips_optional_actual_profile(tmp_path
     history_path = tmp_path / "state" / "run-history" / "notes.json"
     history_path.parent.mkdir(parents=True)
     legacy = _terminal_history_record("a" * 32)
+    for field_name in ("failed_items", "quarantined_items", "item_errors", "omitted_item_errors"):
+        legacy.pop(field_name)
     degraded = _terminal_history_record("b" * 32, actual_profile="balanced")
     history_path.write_text(
         json.dumps({"schema_version": 1, "runs": [degraded, legacy]}, ensure_ascii=False),
@@ -3160,6 +3660,10 @@ async def test_retained_run_history_round_trips_optional_actual_profile(tmp_path
     # shape stay readable; the field is optional on purpose.
     assert records[0]["actual_profile"] == "balanced"
     assert "actual_profile" not in records[1]
+    assert records[1]["failed_items"] == 0
+    assert records[1]["quarantined_items"] == 0
+    assert records[1]["item_errors"] == []
+    assert records[1]["omitted_item_errors"] == 0
 
     history_path.write_text(
         json.dumps(
@@ -3228,3 +3732,88 @@ async def test_retained_run_history_stop_during_result_write_keeps_success(tmp_p
     assert progress["run_state"] == "succeeded"
     result = await core.get_fetch_run_status("notes", run_id=accepted["runs"][0]["run_id"])
     assert result["run_state"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_stop_timeout_during_history_write_keeps_failed_history(tmp_path, monkeypatch):
+    import threading
+
+    _BlockingManualProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    core = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    writing = threading.Event()
+    release = threading.Event()
+    original_write = core._write_run_history
+
+    def blocked_write(service_id, records):
+        writing.set()
+        assert release.wait(3)
+        original_write(service_id, records)
+
+    monkeypatch.setattr(core, "_write_run_history", blocked_write)
+    monkeypatch.setattr(personal_context_module, "_STOP_FINALIZE_TIMEOUT_SECONDS", 0.05)
+    await core.run_fetch(service_id="notes")
+    provider = _BlockingManualProvider.instances["notes"]
+    await asyncio.wait_for(provider.started.wait(), timeout=1)
+    core._fetch_run_results["notes"] = {
+        "created_node_count": 3, "updated_node_count": 1, "no_new_content": False,
+    }
+    task = core._active_fetch_run_tasks["notes"]
+    stop_task = asyncio.create_task(core.stop_fetch_run("notes"))
+    try:
+        assert await asyncio.to_thread(writing.wait, 1)
+        with pytest.raises(BaseError, match="stage=history_write"):
+            await asyncio.wait_for(stop_task, timeout=1)
+        progress = (await core.snapshot()).fetch_run_progress["notes"]
+        assert progress["run_state"] == "failed"
+        assert progress["created_node_count"] == 3
+        assert progress["updated_node_count"] == 1
+        assert progress["no_new_content"] is False
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    history = core._read_run_history("notes")[0]
+    assert history["run_state"] == "failed"
+    assert history["created_node_count"] == progress["created_node_count"]
+    assert history["updated_node_count"] == progress["updated_node_count"]
+
+
+@pytest.mark.asyncio
+async def test_report_pipeline_phase_never_moves_percent_backwards(tmp_path: Path) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path, interval=3600))
+    await personal_context.activate_runtime()
+    try:
+        pipeline = personal_context._pipeline_service
+        assert pipeline is not None
+        report = pipeline._progress_callback
+        assert report is not None
+        personal_context._fetch_run_identity["notes"] = {"run_id": "run-1"}
+        personal_context._fetch_run_progress["notes"] = personal_context_module._fetch_run_status(
+            "notes",
+            run_state="running",
+            total_items=20,
+            completed_items=20,
+            phase="organizing",
+        )
+
+        report("notes", "run-1", "organizing", 60)
+        progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+        assert progress["progress_percent"] == 60
+
+        # Profile fallback replays lower milestones; the bar must not regress.
+        report("notes", "run-1", "organizing", 30)
+        progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+        assert progress["progress_percent"] == 60
+
+        report("notes", "run-1", "organizing", 85)
+        progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+        assert progress["progress_percent"] == 85
+
+        # Stale run ids are still ignored entirely.
+        report("notes", "run-other", "organizing", 99)
+        progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+        assert progress["progress_percent"] == 85
+    finally:
+        await personal_context.deactivate_runtime(timeout_seconds=1)

@@ -262,7 +262,7 @@ def build_interactive_probe_js(
     }
     params_json = json.dumps(params, ensure_ascii=False)
 
-    return f"""
+    return rf"""
 async (page) => {{
   const params = {params_json};
 
@@ -380,7 +380,7 @@ async (page) => {{
       if (style.visibility === 'hidden') return false;
       if (Number(style.opacity) === 0) return false;
 
-      if (viewportOnly) {{
+      if (viewportOnly && !query) {{
         if (rect.bottom < 0) return false;
         if (rect.right < 0) return false;
         if (rect.top > window.innerHeight) return false;
@@ -449,7 +449,7 @@ async (page) => {{
       let node = el;
       let depth = 0;
 
-      while (node && node.nodeType === Node.ELEMENT_NODE && depth < 4) {{
+      while (node && node.nodeType === Node.ELEMENT_NODE && depth < 12) {{
         const nodeTag = node.tagName.toLowerCase();
         let index = 1;
         let prev = node.previousElementSibling;
@@ -458,6 +458,8 @@ async (page) => {{
           prev = prev.previousElementSibling;
         }}
         path.unshift(`${{nodeTag}}:nth-of-type(${{index}})`);
+        const validated = validateSelectorHint(el, path.join(' > '));
+        if (validated) return validated;
         node = node.parentElement;
         depth += 1;
       }}
@@ -465,17 +467,18 @@ async (page) => {{
       return validateSelectorHint(el, path.join(' > '));
     }};
 
-    const isActionable = (el, rect) => {{
-      if (!el || !rect) return false;
-      if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
-      if (el.hasAttribute('inert')) return false;
+    const inViewport = (rect) => rect.bottom > 0 && rect.right > 0 &&
+      rect.top < window.innerHeight && rect.left < window.innerWidth;
+    const actionabilityReason = (el, rect) => {{
+      if (!el || !rect) return 'not_visible';
+      if (el.disabled || el.matches(':disabled') || el.closest('[inert],[aria-disabled="true"]')) return 'disabled';
       const style = window.getComputedStyle(el);
-      if (!style || style.pointerEvents === 'none') return false;
-
-      const x = Math.max(0, Math.min(window.innerWidth - 1, rect.left + rect.width / 2));
-      const y = Math.max(0, Math.min(window.innerHeight - 1, rect.top + rect.height / 2));
+      if (!style || style.pointerEvents === 'none') return 'pointer_events_none';
+      if (!inViewport(rect)) return 'requires_scroll';
+      const x = (Math.max(0, rect.left) + Math.min(window.innerWidth - 1, rect.right)) / 2;
+      const y = (Math.max(0, rect.top) + Math.min(window.innerHeight - 1, rect.bottom)) / 2;
       const hit = document.elementFromPoint(x, y);
-      return !hit || hit === el || el.contains(hit) || hit.contains(el);
+      return hit && hit !== el && !el.contains(hit) ? 'occluded' : '';
     }};
 
     const elementText = (el) => {{
@@ -774,14 +777,20 @@ async (page) => {{
       const kind = classifyControlKind(el, text, name);
       const actionLikelihood = classifyActionLikelihood(el, searchable, kind);
       const selectorHint = buildSelectorHint(el);
-      const actionable = isActionable(el, rect);
+      let reason = actionabilityReason(el, rect);
+      const isControl = Boolean(['button', 'link', 'textbox', 'searchbox', 'checkbox', 'radio',
+        'tab', 'option', 'menuitem', 'gridcell', 'combobox', 'slider', 'spinbutton'].includes(role) ||
+        el.hasAttribute('onclick') || el.tabIndex >= 0 ||
+        ['calendar_date', 'sort_tab', 'rating_filter'].includes(kind));
+      if (!isControl) reason = 'not_control';
+      const actionable = !reason || reason === 'requires_scroll';
       const matchCount = selectorHint
         ? document.querySelectorAll(selectorHint).length
         : 0;
       const enabled = !(
         el.disabled ||
         el.getAttribute('aria-disabled') === 'true' ||
-        el.hasAttribute('inert')
+        el.closest('[inert],[aria-disabled="true"]') || el.matches(':disabled')
       );
       const clickable = Boolean(
         actionable && enabled && selectorHint && matchCount === 1
@@ -791,7 +800,7 @@ async (page) => {{
         el.getAttribute('aria-checked') === 'true' ? 'aria-checked' :
         el.getAttribute('aria-current') === 'true' ? 'aria-current' :
         ['active', 'selected', 'checked'].includes(String(el.getAttribute('data-state') || '').toLowerCase()) ? 'data-state' :
-        /(^|\\s)(active|selected|checked)(\\s|$)/i.test(className) ? 'class' :
+        /(^|[\\s_-])(active|selected|checked)([\\s_-]|$)/i.test(className) ? 'class' :
         selectionSourceFromUrl(el, kind);
 
       const candidate = {{
@@ -807,13 +816,16 @@ async (page) => {{
         input_type: normalize(type),
         name: normalize(nameAttr),
         placeholder: normalize(placeholder),
-        href: normalize(el.getAttribute('href') || '', 180),
+        href: String(el.href || el.getAttribute('href') || '').trim(),
         disabled: Boolean(el.disabled || el.getAttribute('aria-disabled') === 'true'),
         selected: Boolean(selectedSource),
         selected_source: selectedSource,
         visible: true,
         enabled,
         actionable,
+        in_viewport: inViewport(rect),
+        requires_scroll: reason === 'requires_scroll',
+        actionability_reason: reason || (matchCount === 1 ? '' : 'selector_not_unique'),
         clickable,
         match_count: matchCount,
         generation_id: generationId,
@@ -832,6 +844,8 @@ async (page) => {{
 
     const selectedCandidates = candidates.length ? candidates : widenedCandidates;
     selectedCandidates.sort((a, b) => {{
+      if (a.clickable !== b.clickable) return Number(b.clickable) - Number(a.clickable);
+      if (a.in_viewport !== b.in_viewport) return Number(b.in_viewport) - Number(a.in_viewport);
       if (b.score !== a.score) return b.score - a.score;
       if (a.bbox[1] !== b.bbox[1]) return a.bbox[1] - b.bbox[1];
       return a.bbox[0] - b.bbox[0];
@@ -861,6 +875,10 @@ async (page) => {{
       query_widened: Boolean(exactQuery && !candidates.length && widenedCandidates.length),
       returned: elements.length,
       elements,
+      local_excerpt: elements.filter((item) => !item.clickable).slice(0, 5)
+        .map((item) => `${{item.role || item.tag}} "${{item.accessible_name || item.text}}" ` +
+          `(${{item.actionability_reason}})`)
+        .join('\\n').slice(0, 1200),
       error: null
     }};
   }}, params);
@@ -1476,9 +1494,21 @@ async (page) => {
 
     const linkResult = (link) => {
       if (!link) return { text: '', href: '', selector_hint: '' };
+      const href = String(link.href || link.getAttribute('href') || '').trim();
+      const role = String(link.getAttribute('role') || '').toLowerCase();
+      let navigation = false;
+      try {
+        const destination = new URL(href, window.location.href);
+        const current = new URL(window.location.href);
+        destination.hash = '';
+        current.hash = '';
+        navigation = /^https?:$/.test(destination.protocol) && destination.href !== current.href;
+      } catch (_) {}
+      if (['button', 'tab', 'radio', 'checkbox', 'option', 'switch'].includes(role)) navigation = false;
       return {
         text: textOf(link, 180),
-        href: normalize(link.href || link.getAttribute('href') || '', 260),
+        href,
+        navigation,
         selector_hint: buildSelectorHint(link)
       };
     };
@@ -1589,10 +1619,16 @@ async (page) => {
       const isHotel = detailLink?.kind === 'hotel';
       const isSidebar = Boolean(el.closest && el.closest('aside,[role="complementary"]')) ||
         /(sidebar|side-bar|right-rail|right-panel|container-right|main-right)/.test(own);
+      const isNavigation = Boolean(el.closest?.('nav,[role="navigation"],header,footer'));
+      const isControlRegion = Boolean(el.closest?.(
+        'fieldset,[role="search"],[role="listbox"],[role="menu"],[role="dialog"][aria-label*="calendar" i]'
+      )) || /(?:^|\s)(?:filter|filters|facet|calendar|datepicker)(?:-panel|-group|-bar|-options)?(?:\s|$)/i.test(own);
+      const isAiAnswer = /(^|[\s_-])ai[-_ ]?(answer|overview|summary)([\s_-]|$)/.test(own);
       const genericPaidLink = /\/(?:paid|premium|sponsored|promotion)(?:[_\-/]|$)/.test(href);
       const genericActivity = /精选活动/.test(badgeText) ||
         /(^|[\s_-])(activity|campaign|event)([\s_-]|$)/.test(own);
       let isAd = Boolean(
+        el.closest?.('[data-adid],[data-is-ad="true"],.ad-card,.ad_card') ||
         el.matches?.('[data-ad],[data-adid],[data-is-ad="true"],[class*="sponsored" i]') ||
         el.querySelector?.('[data-ad],[data-adid],[data-is-ad="true"],[class*="sponsored" i]') ||
         /(^|[\s_-])(ad|ads|sponsored|promoted|promotion)([\s_-]|$)|广告|推广/.test(`${own} ${badgeText}`) ||
@@ -1616,9 +1652,30 @@ async (page) => {
       else if (isHotSearch) region = 'hot_search';
       else if (isSidebar) region = 'sidebar';
       else if (kind === 'chat') region = 'chat';
+      if (isNavigation && !isAd) {
+        region = 'navigation';
+        kind = 'navigation_link';
+      } else if (isControlRegion && !isAd) {
+        region = 'filter';
+        kind = 'control_group';
+      } else if (isAiAnswer && !isAd) {
+        region = 'ai_answer';
+        kind = 'ai_answer';
+      }
 
       // Profile rules are intentionally last and only resolve known ambiguity.
       for (const rules of semanticRules) {
+        const special = (rules.non_result_rules || []).find((rule) => (!rule.require_no_link || !href) && (
+          matchesProfilePattern(href, rule.link_patterns) ||
+          matchesProfilePattern(`${own} ${context}`, rule.selector_patterns) ||
+          matchesProfilePattern(`${textOf(el.querySelector('h1,h2,h3,[role="heading"]'), 240)} ${badgeText}`,
+                                rule.text_patterns) ||
+          (rule.require_no_link && matchesProfilePattern(normalizedRootText, rule.text_patterns))));
+        if (special) {
+          return {region: special.region || 'non_result', kind: special.kind || 'non_result',
+                  is_ad: special.is_ad === true || isAd, semantic_badges: badges,
+                  classification_reason: 'site_profile:' + (special.kind || 'non_result')};
+        }
         if (matchesProfilePattern(href, rules.paid_link_patterns)) {
           region = 'sponsored_result';
           kind = 'paid_column';
@@ -1637,8 +1694,7 @@ async (page) => {
         }
       }
 
-      if (isHotel && !isAd) region = 'main_result';
-      return { region, kind, is_ad: isAd, semantic_badges: badges };
+      return { region, kind, is_ad: isAd, semantic_badges: badges, classification_reason: 'page_region:' + region };
     };
 
     const labeledText = (rootText, labels, limit = 120) => {
@@ -1655,7 +1711,7 @@ async (page) => {
     };
 
     const extractAuthor = (rootText, root) => {
-      const authorEl = findFirst(root, mergeSelectors(
+      const authorSelectors = mergeSelectors(
         profileSelectors('author_selectors'),
         [
           '[rel="author"]',
@@ -1675,13 +1731,22 @@ async (page) => {
           'a[href*="/people"]',
           'a[href*="/u/"]'
         ]
-      ));
-
+      );
+      const isAuthor = (value) => value &&
+        !/^(?:查看(?:个人)?主页|个人主页|关注|已关注|作者主页|view\s+profile|follow|subscribe)$/i.test(value);
+      let authorEl = null;
+      for (const selector of authorSelectors) {
+        try {
+          authorEl = Array.from(root.querySelectorAll(selector)).find((el) => isAuthor(textOf(el, 120)));
+        } catch (_) { continue; }
+        if (authorEl) break;
+      }
       const fromElement = textOf(authorEl, 120);
-      const fromLabel = labeledText(rootText, ['author', 'by', 'writer', 'posted by', '作者', '博主', '发布者', '發布者'], 120);
+      const fromLabel = labeledText(
+        rootText, ['author', 'by', 'writer', 'posted by', '作者', '博主', '发布者', '發布者'], 120);
 
       return {
-        value: fromElement || fromLabel,
+        value: fromElement || (isAuthor(fromLabel) ? fromLabel : ''),
         selector_hint: authorEl ? buildSelectorHint(authorEl) : ''
       };
     };
@@ -1697,20 +1762,35 @@ async (page) => {
     ) => {
       const fieldEl = findFirst(root, selectors);
       const elementText = textOf(fieldEl, limit);
+      if (requirePattern) {
+        // Never join a count label to a date or another field elsewhere in the card.
+        const nodes = fieldEl ? [fieldEl] : [];
+        nodes.push(...Array.from(root.querySelectorAll('span,button,a,time,p,div'))
+          .filter((el) => el.children.length === 0).slice(0, 250));
+        for (const el of nodes) {
+          const raw = normalize(el.innerText || el.textContent || '', limit);
+          if (!raw || /\b(?:19|20)\d{2}[-/.年]\d/.test(raw)) continue;
+          const label = el.getAttribute('aria-label') || '';
+          const match = `${label} ${raw}`.match(pattern);
+          const numeric = el === fieldEl && /^[\d,.]+\s*[万亿kKmM]?$/.test(raw);
+          const emptyComments = labels.includes('评论') && /^(?:还没有评论|暂无评论|没有评论|no comments\b)/i.test(raw);
+          if (!match && !numeric && !emptyComments) continue;
+          return {
+            value: emptyComments ? '0' : normalize(match ? match[0] : raw, limit),
+            raw_text: normalize(`${label} ${raw}`, 240),
+            selector_hint: buildSelectorHint(el)
+          };
+        }
+        return {value: '', raw_text: '', selector_hint: ''};
+      }
       const labeled = labeledText(rootText, labels, limit);
       const searchable = `${elementText} ${labeled} ${rootText}`;
       const match = searchable.match(pattern);
-      const value = requirePattern
-        ? (match ? normalize(match[0], limit) : '')
-        : (elementText || labeled || (match ? normalize(match[0], limit) : ''));
+      const value = elementText || labeled || (match ? normalize(match[0], limit) : '');
       return {
         value,
-        raw_text: value
-          ? normalize(requirePattern ? (match?.[0] || '') : (elementText || labeled || match?.[0] || ''), 240)
-          : '',
-        selector_hint: fieldEl && (!requirePattern || pattern.test(elementText))
-          ? buildSelectorHint(fieldEl)
-          : ''
+        raw_text: value ? normalize(elementText || labeled || match?.[0] || '', 240) : '',
+        selector_hint: fieldEl ? buildSelectorHint(fieldEl) : ''
       };
     };
 
@@ -1786,7 +1866,8 @@ async (page) => {
       /(?:shop|store|merchant|seller|店铺|商家|卖家)\s*[:：-]?\s*[^\n|·•,，;；]{2,80}/i
     );
 
-    const extractDuration = (rootText, root) => extractMetricField(
+    const extractDuration = (rootText, root) => {
+      const metric = extractMetricField(
       rootText,
       root,
       [
@@ -1799,7 +1880,22 @@ async (page) => {
       /(?:\d{1,2}:)?\d{1,2}:\d{2}|(?:duration|时长)\s*[:：]?\s*\d+\s*(?:h|m|s|小时|分钟|秒)/i,
       120,
       true
-    );
+      );
+      let scope = 'unknown';
+      let element = null;
+      try { element = metric.selector_hint ? document.querySelector(metric.selector_hint) : null; } catch (_) {}
+      if (element?.closest('[data-duration-scope="current_part"],[data-duration-scope="collection"]')) {
+        scope = element.closest('[data-duration-scope]').getAttribute('data-duration-scope');
+      }
+      for (const rules of semanticRules) {
+        for (const rule of rules.duration_scopes || []) {
+          if ((rule.selectors || []).some((selector) => {
+            try { return element?.matches(selector); } catch (_) { return false; }
+          })) scope = rule.scope;
+        }
+      }
+      return {...metric, scope};
+    };
 
     const extractTemperature = (rootText, root, kind) => {
       const high = kind === 'high';
@@ -1833,7 +1929,7 @@ async (page) => {
       ];
       const semanticLabel = /(?:sales?|volume|price|latest|newest|relevance|comprehensive|销量|价格|最新|综合|评分)/i;
       for (const candidate of Array.from(document.querySelectorAll(selectors.join(','))).slice(0, 40)) {
-        if (!visible(candidate)) continue;
+        if (!isElementVisible(candidate, candidate.getBoundingClientRect())) continue;
         const value = textOf(candidate, 120) || normalize(candidate.getAttribute('aria-label') || '', 120);
         const context = normalize([
           candidate.getAttribute('class') || '',
@@ -1939,9 +2035,24 @@ async (page) => {
       /(?:S\$|US\$|A\$|HK\$|\$|£|€|¥|￥|Rp|RM|SGD|USD|IDR|MYR)\s?\d[\d,.]*(?:\.\d+)?|\d[\d,.]*(?:\.\d+)?\s?(?:SGD|USD|IDR|MYR|円)/i;
 
     const normalizePriceValue = (value) => {
-      const cleaned = normalize(value, 120);
+      const cleaned = normalize(value, 120).replace(/(\d)\s*\.\s*(\d{1,2})(?!\d)/g, '$1.$2');
       const match = cleaned.match(PRICE_RE);
-      return match ? normalize(match[0], 80) : '';
+      if (!match || /^\s*%/.test(cleaned.slice(match.index + match[0].length))) return '';
+      return normalize(match[0], 80);
+    };
+
+    const localPriceText = (root) => {
+      if (!root) return '';
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      const parts = [];
+      let node;
+      while ((node = walker.nextNode()) && parts.length < 100) {
+        const parent = node.parentElement;
+        if (parent?.closest('del,s,[class*="discount" i],[class*="percent" i],script,style')) continue;
+        const value = String(node.textContent || '').trim();
+        if (value) parts.push(value);
+      }
+      return normalize(parts.join(' '), 1200);
     };
 
     const extractPrice = (rootText, root) => {
@@ -1955,16 +2066,16 @@ async (page) => {
         ]
       ));
 
-      const fromElement = normalizePriceValue(textOf(priceEl, 120));
+      const fromElement = normalizePriceValue(localPriceText(priceEl));
       if (fromElement) {
         return {
           value: fromElement,
-          raw_text: textOf(priceEl, 240),
+          raw_text: localPriceText(priceEl).slice(0, 240),
           selector_hint: buildSelectorHint(priceEl)
         };
       }
 
-      const fromText = normalizePriceValue(rootText);
+      const fromText = normalizePriceValue(localPriceText(root));
 
       return {
         value: fromText,
@@ -2013,6 +2124,10 @@ async (page) => {
       const ratingRules = semanticRules
         .map((rules) => rules.rating)
         .filter((rules) => rules && typeof rules === 'object');
+      if (ratingRules.some((rules) => matchesProfilePattern(
+        `${elementDescriptor(ratingEl)} ${textOf(ratingEl, 120)}`, rules.classification_patterns))) {
+        return 'hotel_stars';
+      }
       const shopRating = ratingRules.some((rules) => {
         return matchesProfilePattern(context, rules.shop_patterns);
       });
@@ -2120,7 +2235,7 @@ async (page) => {
           const selectorHint = buildSelectorHint(el);
           const selectorMeta = selectorMetadata(selectorHint);
           const actionable = isActionable(el, rect);
-          const href = normalize(el.href || el.getAttribute('href') || '', 260);
+          const href = String(el.href || el.getAttribute('href') || '').trim();
           const semanticText = `${text} ${href}`.toLowerCase();
           let kind = 'control';
           if (siteDetailLink(href)?.kind === 'product') kind = 'product';
@@ -2265,6 +2380,7 @@ async (page) => {
     };
 
     const looksLikePageChrome = (data) => {
+      if (['navigation', 'filter'].includes(data.region)) return true;
       if (['account', 'hot_search', 'shop', 'chat', 'product'].includes(String(data.kind || ''))) {
         return false;
       }
@@ -2289,6 +2405,9 @@ async (page) => {
         "today's deals",
         'new releases',
         'help',
+        'download the app',
+        'skip to content',
+        'go to main content',
         'login',
         'sign in',
         '会员中心',
@@ -2516,7 +2635,7 @@ async (page) => {
         const fields = {
           title: title.value,
           price: price.value,
-          rating: rating.kind === 'shop_rating' || rating.kind === 'unknown' ? '' : rating.value,
+          rating: ['shop_rating', 'unknown', 'hotel_stars'].includes(rating.kind) ? '' : rating.value,
           product_rating: rating.kind === 'product_rating' ? rating.value : '',
           shop_rating: rating.kind === 'shop_rating' ? rating.value : '',
           review_count: reviewCount,
@@ -2587,6 +2706,7 @@ async (page) => {
           region: semantics.region,
           kind: semantics.kind,
           is_ad: semantics.is_ad,
+          classification_reason: semantics.classification_reason,
           semantic_badges: semantics.semantic_badges,
           selector_hint: cardSelectorHint,
           selector_hint_validated: cardSelectorValidated,
@@ -2601,7 +2721,10 @@ async (page) => {
           price: price.value,
           price_selector_hint: price.selector_hint,
           price_raw_text: price.raw_text,
-          rating: rating.kind === 'shop_rating' || rating.kind === 'unknown' ? null : (rating.value || null),
+          rating: ['shop_rating', 'unknown', 'hotel_stars'].includes(rating.kind) ? null : (rating.value || null),
+          hotel_stars: rating.kind === 'hotel_stars' ? (rating.value || null) : null,
+          hotel_stars_selector_hint: rating.kind === 'hotel_stars' ? rating.selector_hint : '',
+          hotel_stars_raw_text: rating.kind === 'hotel_stars' ? rating.raw_text : '',
           product_rating: rating.kind === 'product_rating' ? (rating.value || null) : null,
           shop_rating: rating.kind === 'shop_rating' ? (rating.value || null) : null,
           rating_candidate: rating.value || null,
@@ -2627,6 +2750,7 @@ async (page) => {
           duration: duration.value,
           duration_selector_hint: duration.selector_hint,
           duration_raw_text: duration.raw_text,
+          duration_scope: duration.value ? duration.scope : '',
           high_temperature: highTemperature.value,
           high_temperature_selector_hint: highTemperature.selector_hint,
           high_temperature_raw_text: highTemperature.raw_text,
@@ -2667,7 +2791,7 @@ async (page) => {
             primary_link: selectorDescriptor(primaryLinkSelectorHint)
           },
           recommended_action: primaryLink.href
-            ? 'navigate_primary_link'
+            ? (primaryLink.navigation ? 'navigate_primary_link' : 'click')
             : (cardClickable ? 'use_validated_selector' : 'use_actionable_child_control'),
           has_image: imagePresent,
           buttons,
@@ -2934,7 +3058,6 @@ async (page) => {
       }
 
       selected.push(item);
-      if (selected.length >= maxCards) break;
     }
 
     const deduplicated = [];
@@ -2948,15 +3071,56 @@ async (page) => {
       deduplicated.push(item);
     }
 
+    // Quality selects containers, not result rank. Identify a repeated list before
+    // ordering its entries; equally plausible regions must not invent a global #1.
+    const naturalItems = deduplicated.filter((item) =>
+      item.data.region === 'main_result' && !item.data.is_ad &&
+      ['result', 'product', 'hotel'].includes(item.data.kind));
+    const regions = new Map();
+    const itemRegions = new Map();
+    for (const item of naturalItems) {
+      let parent = item.el.parentElement;
+      // Cards may each sit inside their own wrapper. Find the nearest shared list.
+      while (parent && parent.parentElement && parent !== document.body &&
+             !naturalItems.some((other) => other !== item && parent.contains(other.el))) {
+        parent = parent.parentElement;
+      }
+      itemRegions.set(item, parent);
+      if (!regions.has(parent)) regions.set(parent, []);
+      regions.get(parent).push(item);
+    }
+    const candidateRegions = Array.from(regions.keys());
+    const semanticMain = candidateRegions.filter((region) => region?.closest('main, [role="main"]'));
+    const plausibleRegions = semanticMain.length ? semanticMain : candidateRegions;
+    const repeatedRegions = plausibleRegions.filter((region) => regions.get(region).length >= 2);
+    const primaryRegion = repeatedRegions.length === 1 ? repeatedRegions[0] :
+      (plausibleRegions.length === 1 ? plausibleRegions[0] : null);
+    const regionIds = new Map(Array.from(regions.keys()).map((el, index) => [el, `list_${index + 1}`]));
+    deduplicated.sort((a, b) => {
+      const primary = Number(itemRegions.get(b) === primaryRegion) - Number(itemRegions.get(a) === primaryRegion);
+      if (primary) return primary;
+      if (Math.abs(a.top - b.top) > 3) return a.top - b.top;
+      if (Math.abs(a.left - b.left) > 3) return a.left - b.left;
+      return a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1;
+    });
     let resultIndex = 0;
-    const cards = deduplicated.map((item, index) => {
+    const completeListOrder = !query && !(viewportOnly && window.scrollY > 0);
+    const resultItems = primaryRegion ? deduplicated.filter((item) =>
+      itemRegions.get(item) === primaryRegion || item.data.region === 'ai_answer' || item.data.is_ad
+    ) : deduplicated;
+    const cards = resultItems.slice(0, maxCards).map((item, index) => {
       const isMainResult = item.data.region === 'main_result' &&
-        ['result', 'product', 'hotel'].includes(item.data.kind) && !item.data.is_ad;
+        ['result', 'product', 'hotel'].includes(item.data.kind) && !item.data.is_ad &&
+        itemRegions.get(item) === primaryRegion && completeListOrder;
       if (isMainResult) resultIndex += 1;
       return {
         id: `card_${index + 1}`,
         group_count: item.groupCount,
         ...item.data,
+        region_id: regionIds.get(itemRegions.get(item)) || '',
+        order_known: isMainResult,
+        order_source: isMainResult ? 'rendered_list' :
+          (completeListOrder ? 'ambiguous_or_secondary_region' : 'filtered_or_partial_list'),
         result_index: isMainResult ? resultIndex : null
       };
     });
@@ -2989,6 +3153,9 @@ async (page) => {
       cached_container_selectors: cachedContainerSelectors.length,
       profile_container_selectors: profileContainerSelectors.length,
       total_candidates: candidates.length,
+      local_excerpt: cards.length ? '' : normalize(
+        (document.querySelector('main,[role="main"]') || document.body)?.innerText || '', 1200
+      ),
       returned: cards.length,
       recurring_signatures: recurringSignatures,
       cards,

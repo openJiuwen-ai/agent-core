@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -11,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.rsi.harness_rsi.evaluator import runtime_adapters
 from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import (
     RSIBashTool,
@@ -116,3 +119,53 @@ async def test_empty_response_recovery_is_owned_by_rsi(
     assert len(calls) == 2
     assert calls[0]["inputs"] == {"query": "solve"}
     assert "[RECOVERY]" in calls[1]["inputs"]["query"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_fails", [False, True])
+async def test_all_routed_skills_are_delivered_retained_and_reported(tmp_path, monkeypatch, first_fails):
+    from openjiuwen.rsi.harness_rsi.single_harness.iterative import _task_start_triggered_skill_names
+
+    rail = RSISkillUseRail(skills_dir=str(tmp_path), trigger_at_task_start=True)
+    rail.skills = [SimpleNamespace(name="baseline"), SimpleNamespace(name="specific")]
+    rail.list_skill_model = MagicMock()
+    rail.attachment_manager = PromptAttachmentManager()
+    selector = AsyncMock(return_value=SimpleNamespace(
+        success=True, data={"selected_skill_names": ["baseline", "specific", "specific"]},
+    ))
+    monkeypatch.setattr(runtime_adapters.ListSkillTool, "invoke", selector)
+
+    async def load(arguments, **kwargs):
+        name = arguments["skill_name"]
+        return SimpleNamespace(
+            success=not (first_fails and name == "baseline"), error="unreadable" if first_fails else "",
+            data={"skill_content": f"Instructions for {name}."},
+        )
+
+    rail._runtime_skill_tool = SimpleNamespace(invoke=AsyncMock(side_effect=load))
+    ctx = AgentCallbackContext(
+        agent=None, inputs=SimpleNamespace(query="Solve the task"),
+        session=SimpleNamespace(session_id="test-session"), context=None, extra={},
+    )
+    await rail._trigger_relevant_skill(ctx)
+
+    assert selector.await_count == 1
+    assert [call.args[0]["skill_name"] for call in rail._runtime_skill_tool.invoke.await_args_list] == [
+        "baseline", "specific",
+    ]
+    records = rail.task_trigger_records()
+    assert [record["selected_skill_name"] for record in records] == ["baseline", "specific"]
+    assert [record["delivered"] for record in records] == [not first_fails, True]
+    expected = {"specific"} if first_fails else {"baseline", "specific"}
+    attachments = await rail.attachment_manager.list_by_filter(session_id="test-session")
+    assert {item.metadata["skill_name"] for item in attachments} == expected
+    result_path = tmp_path / "result.json"
+    result_path.write_text(json.dumps({"metadata": {"execution": {"skill_triggers": records}}}), encoding="utf-8")
+    assert _task_start_triggered_skill_names({"result_path": str(result_path)}) == expected
+    await rail._clear_active_skill_attachment(ctx)
+    assert not await rail.attachment_manager.list_by_filter(session_id="test-session")
+
+    selector.return_value = SimpleNamespace(success=True, data={"selected_skill_names": []})
+    await rail._trigger_relevant_skill(ctx)
+    assert rail.task_trigger_records()[0]["delivered"] is False
+    assert rail.task_trigger_records()[0]["reason"] == "no_relevant_skill"

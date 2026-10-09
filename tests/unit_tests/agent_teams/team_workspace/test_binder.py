@@ -19,7 +19,7 @@ from openjiuwen.agent_teams.team_workspace import (
     prepare_member_workspace,
 )
 from openjiuwen.agent_teams.skill.file_lock import lock_path_for
-from openjiuwen.agent_teams.team_workspace.dir_links import is_dir_link
+from openjiuwen.agent_teams.team_workspace.dir_links import create_dir_link, is_dir_link
 from openjiuwen.agent_teams.team_workspace.paths import member_real_dir
 from openjiuwen.agent_teams.team_workspace.ref_store import REFS_FILE_NAME, MemberRefStore
 
@@ -59,7 +59,7 @@ def test_predefined_creates_link_to_independent() -> None:
     binder = MemberWorkspaceBinder()
     root = binder.setup(_binding("teamA", "shared", MEMBER_MODE_PREDEFINED))
     assert is_dir_link(root)
-    assert (apaths.get_agent_teams_home() / "shared").is_dir()
+    assert (apaths.get_agent_teams_home() / "jiuwen_team_members" / "shared").is_dir()
     refs = MemberRefStore().get_ref_teams("teamA", "shared", mode=MEMBER_MODE_PREDEFINED)
     assert refs == ["teamA"]
 
@@ -211,7 +211,7 @@ def test_cleanup_team_releases_dynamic_preserves_predefined() -> None:
     binder = MemberWorkspaceBinder()
     binder.setup(_binding("teamA", "shared", MEMBER_MODE_PREDEFINED))
     binder.setup(_binding("teamA", "worker", MEMBER_MODE_DYNAMIC))
-    shared_real = apaths.get_agent_teams_home() / "shared"
+    shared_real = apaths.get_agent_teams_home() / "jiuwen_team_members" / "shared"
     worker_real = member_real_dir("teamA", "worker", MEMBER_MODE_DYNAMIC)
 
     binder.cleanup_team("teamA")
@@ -234,7 +234,7 @@ def test_cleanup_team_drops_only_the_disbanded_team_from_shared_predefined() -> 
     # Same predefined member shared across two teams.
     binder.setup(_binding("teamA", "shared", MEMBER_MODE_PREDEFINED))
     binder.setup(_binding("teamB", "shared", MEMBER_MODE_PREDEFINED))
-    shared_real = apaths.get_agent_teams_home() / "shared"
+    shared_real = apaths.get_agent_teams_home() / "jiuwen_team_members" / "shared"
 
     binder.cleanup_team("teamA")
 
@@ -348,7 +348,7 @@ def test_cleanup_team_prefix_off_predefined_preserves_shared_dir() -> None:
     the disbanded team is dropped from the ref list."""
     binder = MemberWorkspaceBinder()
     binder.setup(_binding_prefix_off("teamA", "shared", MEMBER_MODE_PREDEFINED))
-    indep = apaths.get_agent_teams_home() / "shared"
+    indep = apaths.get_agent_teams_home() / "jiuwen_team_members" / "shared"
 
     binder.cleanup_team("teamA")
 
@@ -414,3 +414,97 @@ def test_cleanup_team_drops_lock_sidecar_for_predefined_without_rmtree() -> None
     assert real.is_dir(), "predefined shared dir preserved (not rmtree'd)"
     assert not (real / REFS_FILE_NAME).exists(), "predefined refs file dropped on zero"
     assert not lock_sidecar.exists(), "lock sidecar removed even when dir is kept"
+
+
+# ── jiuwen_team_members/ layout migration (older-layout dirs) ───────────────
+
+
+@pytest.mark.level0
+def test_setup_migrates_legacy_root_dir_into_members() -> None:
+    """A member real dir left at the .agent_teams/ root (original layout) is
+    renamed into jiuwen_team_members/ on the next setup, and the spawning
+    team's link points at the new location."""
+    home = apaths.get_agent_teams_home()
+    legacy = home / "teamA#worker"
+    legacy.mkdir(parents=True)
+    (legacy / "artifact.txt").write_text("kept", encoding="utf-8")
+
+    root = MemberWorkspaceBinder().setup(_binding("teamA", "worker", MEMBER_MODE_DYNAMIC))
+
+    new = home / "jiuwen_team_members" / "teamA#worker"
+    assert new.is_dir(), "dir migrated into jiuwen_team_members/"
+    assert not legacy.exists(), "legacy root dir gone"
+    assert (new / "artifact.txt").read_text(encoding="utf-8") == "kept"
+    assert is_dir_link(root)
+    assert MemberRefStore().get_ref_count("teamA", "worker") == 1
+
+
+@pytest.mark.level0
+def test_setup_migrates_legacy_predefined_and_fixes_all_teams_links() -> None:
+    """Migrating a predefined shared dir re-links EVERY team that referenced
+    it, not just the team triggering the migration — a predefined dir is
+    shared across teams and each team's in-team link pointed at the old root
+    location."""
+    home = apaths.get_agent_teams_home()
+    legacy = home / "shared"
+    legacy.mkdir(parents=True)
+    # Two teams linked to the legacy dir (links created directly, mirroring
+    # the old binder layout).
+    for team in ("teamA", "teamB"):
+        ws = apaths.team_member_workspace_dir(team, "shared")
+        ws.parent.mkdir(parents=True, exist_ok=True)
+        create_dir_link(legacy, ws)
+    (legacy / "asset.md").write_text("shared", encoding="utf-8")
+
+    # teamC's setup triggers the migration.
+    MemberWorkspaceBinder().setup(_binding("teamC", "shared", MEMBER_MODE_PREDEFINED))
+
+    new = home / "jiuwen_team_members" / "shared"
+    assert new.is_dir(), "shared dir migrated"
+    assert not legacy.exists(), "legacy location gone"
+    for team in ("teamA", "teamB", "teamC"):
+        link = apaths.team_member_workspace_dir(team, "shared")
+        assert is_dir_link(link), f"{team} link still present"
+        assert (link / "asset.md").read_text(encoding="utf-8") == "shared", (
+            f"{team} link resolves to the migrated dir"
+        )
+
+
+@pytest.mark.level0
+def test_setup_keeps_legacy_dir_when_rename_fails(monkeypatch) -> None:
+    """A rename that fails (e.g. a Windows handle holds a file inside the
+    dir) must not break setup: the legacy dir stays in place and everything
+    keeps working through probe-first resolution."""
+    home = apaths.get_agent_teams_home()
+    legacy = home / "teamA#worker"
+    legacy.mkdir(parents=True)
+
+    def fail_rename(*_args, **_kwargs):
+        raise OSError(errno.EACCES, "rename blocked")
+
+    monkeypatch.setattr(Path, "rename", fail_rename)
+
+    root = MemberWorkspaceBinder().setup(_binding("teamA", "worker", MEMBER_MODE_DYNAMIC))
+
+    assert legacy.is_dir(), "legacy dir kept on migration failure"
+    assert not (home / "jiuwen_team_members" / "teamA#worker").exists()
+    assert is_dir_link(root), "link still created against the legacy dir"
+    assert MemberRefStore().get_ref_count("teamA", "worker") == 1
+
+
+@pytest.mark.level0
+def test_setup_after_migration_uses_members_dir_without_retrying() -> None:
+    """The first session migrates; a later setup of the same member resolves
+    jiuwen_team_members/ directly and does not touch the (now gone) legacy location."""
+    home = apaths.get_agent_teams_home()
+    legacy = home / "teamA#worker"
+    legacy.mkdir(parents=True)
+    binder = MemberWorkspaceBinder()
+    binder.setup(_binding("teamA", "worker", MEMBER_MODE_DYNAMIC))
+    new = home / "jiuwen_team_members" / "teamA#worker"
+    assert new.is_dir()
+
+    binder.setup(_binding("teamA", "worker", MEMBER_MODE_DYNAMIC))
+
+    assert new.is_dir(), "jiuwen_team_members/ dir still there"
+    assert MemberRefStore().get_ref_count("teamA", "worker") == 1, "ref not double-added"

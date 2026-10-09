@@ -168,6 +168,16 @@ When you need quality gating on your own deliverable, use `verify()` instead of 
 
 Composition baseline: **light gate** = 1 `verifier`; **key deliverable** = `verifier` + `inspector` (multiple inspectors can split dimensions); **open / high-risk design** = `verifier` + `challenger` (add `inspector` if needed). A script may call `verify()` repeatedly with different compositions for deliverables at different stages.
 
+**Per-reviewer model**: every reviewer role is an independent agent and can pin its model via the `"options"` key in its spec (overriding the team teammate model that reviewer inherits, and the `verify()`-level `options`):
+
+```python
+reviewers = build_reviewers(deliverable, [
+    {"type": "verifier",  "options": {"model": "flash-mini"}},
+    {"type": "inspector", "options": {"model": "pro"}},
+])
+r = await verify(reviewers, threshold=0.85)
+```
+
 **Two gates**: `verifier` is the **minimum bar** — it only asks "are the acceptance criteria met" (pass/fail). `inspector` is the **quality bar** — it scores each dimension and fails unless the average reaches 0.85, catching deliverables that are **functionally complete but mediocre** (e.g. code that compiles but is unmaintainable). For **key final / downstream-consumed deliverables**, `verifier` alone is not enough — add `inspector` to enforce quality; for one-off, light, disposable intermediate artifacts, `verifier` alone suffices.
 
 **Default composition**: **design documents / architecture / final deliverables** → `verifier` + `inspector` (functional floor + enforced quality — this is the default, don't use `verifier` alone); **implementation code** → `verifier` (compile/run acceptance) plus `inspector` if consumed downstream; **open-ended design / no deterministic bar** → add `challenger` on top. When unsure, default to `verifier` + `inspector`.

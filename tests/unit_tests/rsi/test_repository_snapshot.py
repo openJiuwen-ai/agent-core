@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import repository_snapshot as snapshot
+from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer
+from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import CaseReader
 
 
 def test_unreadable_entry_preserves_source_patch_and_readable_files(tmp_path, monkeypatch):
@@ -70,3 +72,62 @@ def test_long_paths_and_runtime_exclusions(tmp_path):
     assert (runtime / "repository" / "src/messages/domain.py").is_file()
     copied = snapshot._io_path(runtime / "repository" / nested.relative_to(source) / "code.py")
     assert copied.read_text(encoding="utf-8") == "long path"
+
+
+@pytest.mark.parametrize("workspace_exists", [True, False])
+def test_archived_outputs_remain_readable_independently_of_workspace(tmp_path, workspace_exists):
+    case_dir = tmp_path / "cases" / "case_1"
+    artifacts = case_dir / "artifacts"
+    artifacts.mkdir(parents=True)
+    (artifacts / "solver.py").write_text("answer = 3\n", encoding="utf-8")
+    (artifacts / "results.json").write_text('{"answer": 3}', encoding="utf-8")
+    workspace = case_dir / "workspace"
+    if workspace_exists:
+        workspace.mkdir()
+        (workspace / "solver.py").write_text("answer = 2\n", encoding="utf-8")
+    (case_dir / "result.json").write_text(json.dumps({
+        "case_id": "case_1", "workspace_dir": str(workspace),
+    }), encoding="utf-8")
+    (case_dir / "trace.json").write_text('{"input": "Deliver a program and a report."}', encoding="utf-8")
+    (case_dir / "judge").mkdir()
+    (case_dir / "judge" / "private_reference.json").write_text('"not agent evidence"', encoding="utf-8")
+    case = CaseReader.read_case_inputs(str(case_dir.parent))[0]
+    runtime = tmp_path / "diagnosis"
+
+    assert analyzer._prepare_diagnosis_evidence(case=case, runtime_dir=runtime)
+
+    manifest = json.loads((runtime / "repository_snapshot.json").read_text(encoding="utf-8"))
+    assert manifest["repository"] == ("complete" if workspace_exists else "unavailable")
+    assert manifest["artifacts"] == "complete"
+    assert (runtime / "artifacts/solver.py").read_bytes() == (artifacts / "solver.py").read_bytes()
+    assert (runtime / "artifacts/results.json").is_file()
+    assert not (runtime / "judge").exists()
+    assert not (runtime / "result.json").exists()
+    if workspace_exists:
+        assert (runtime / "repository/solver.py").read_text(encoding="utf-8") == "answer = 2\n"
+    else:
+        assert not (runtime / "repository").exists()
+    assert "artifacts/" in (runtime / "evidence_summary.md").read_text(encoding="utf-8")
+
+
+def test_partial_artifact_copy_keeps_readable_evidence(tmp_path, monkeypatch):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "ok.py").write_text("pass\n", encoding="utf-8")
+    (artifacts / "bad.bin").touch()
+    copy2 = snapshot.shutil.copy2
+
+    def fail_one(src, dst, **kwargs):
+        if Path(src).name == "bad.bin":
+            raise PermissionError("unreadable artifact")
+        return copy2(src, dst, **kwargs)
+
+    monkeypatch.setattr(snapshot.shutil, "copy2", fail_one)
+    runtime = tmp_path / "diagnosis"
+    result = snapshot.prepare_repository_snapshot(
+        workspace=None, patch=None, artifacts=str(artifacts), runtime_dir=runtime,
+    )
+    assert result["repository"] == "unavailable"
+    assert result["artifacts"] == "partial"
+    assert (runtime / "artifacts/ok.py").is_file()
+    assert result["errors"][0]["path"] == "artifacts/bad.bin"

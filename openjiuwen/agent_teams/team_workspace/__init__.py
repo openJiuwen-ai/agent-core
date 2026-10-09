@@ -15,7 +15,7 @@ Two families of functionality merged in this package:
   ``prepare_member_workspace``, ``MemberWorkspaceBinder``,
   ``TeamMemberBinding``, ``MemberRefStore``,
   ``MEMBER_MODE_*``, ``member_dir_name``, ``member_real_dir``,
-  ``create_dir_link``, ``is_dir_link``, ``remove_dir_link``.
+  ``members_home``, ``create_dir_link``, ``is_dir_link``, ``remove_dir_link``.
 """
 
 from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
@@ -42,6 +42,7 @@ from openjiuwen.agent_teams.team_workspace.paths import (
     MEMBER_MODE_PREDEFINED,
     member_dir_name,
     member_real_dir,
+    members_home,
 )
 from openjiuwen.agent_teams.team_workspace.rails import TeamWorkspaceRail
 from openjiuwen.agent_teams.team_workspace.ref_store import MemberRefStore
@@ -74,6 +75,7 @@ __all__ = [
     "MEMBER_MODE_PREDEFINED",
     "member_dir_name",
     "member_real_dir",
+    "members_home",
     "create_dir_link",
     "is_dir_link",
     "remove_dir_link",

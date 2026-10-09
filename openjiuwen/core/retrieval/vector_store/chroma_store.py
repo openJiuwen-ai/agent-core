@@ -30,6 +30,18 @@ from openjiuwen.core.retrieval.utils.fusion import rrf_fusion
 from openjiuwen.core.retrieval.vector_store.base import VectorStore
 
 
+def _as_chroma_where(filters: dict) -> dict:
+    """Chroma ``where`` allows one top-level operator. AND multiple equalities."""
+    if not filters:
+        return {}
+    if any(str(key).startswith("$") for key in filters):
+        return dict(filters)
+    clauses = [{str(key): value} for key, value in filters.items()]
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
+
+
 class ChromaVectorStore(VectorStore):
     """ChromaDB vector store implementation"""
 
@@ -263,13 +275,9 @@ class ChromaVectorStore(VectorStore):
         # Build where filter conditions
         query_args = {}
         if isinstance(filters, dict):
-            where = {}
-            for key, value in filters.items():
-                if isinstance(value, str):
-                    where[key] = value
-                else:
-                    where[key] = value
-            query_args["where"] = where
+            where = _as_chroma_where(filters)
+            if where:
+                query_args["where"] = where
         elif isinstance(filters, QueryExpr):
             query_args.update({k: v for k, v in filters.to_expr("chroma").items() if v})
 
@@ -301,13 +309,9 @@ class ChromaVectorStore(VectorStore):
         # Build where filter conditions
         query_args = {}
         if isinstance(filters, dict):
-            where = {}
-            for key, value in filters.items():
-                if isinstance(value, str):
-                    where[key] = value
-                else:
-                    where[key] = value
-            query_args["where"] = where
+            where = _as_chroma_where(filters)
+            if where:
+                query_args["where"] = where
         elif isinstance(filters, QueryExpr):
             query_args.update({k: v for k, v in filters.to_expr("chroma").items() if v})
 

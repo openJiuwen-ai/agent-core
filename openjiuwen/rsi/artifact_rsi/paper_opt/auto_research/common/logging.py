@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+import time
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -138,6 +139,20 @@ _FORMAT = (
 )
 
 
+def _cst_gmtime(seconds: float | None = None) -> time.struct_time:
+    """`logging.Formatter.converter` pinned to China Standard Time (UTC+8),
+    regardless of the host OS timezone -- keeps %(asctime)s in these run
+    logs on the same clock as the JSON event/trace timestamps, which are
+    also CST."""
+    return time.gmtime((seconds if seconds is not None else time.time()) + 8 * 3600)
+
+
+def _make_formatter() -> logging.Formatter:
+    formatter = logging.Formatter(_FORMAT)
+    formatter.converter = _cst_gmtime
+    return formatter
+
+
 def current_context() -> RunLogContext | None:
     return _context.get()
 
@@ -259,7 +274,7 @@ def get_logger(name: str) -> logging.Logger:
         logger.setLevel(getattr(logging, current_settings().level, logging.INFO))
         return logger
     handler = logging.StreamHandler()
-    handler.setFormatter(logging.Formatter(_FORMAT))
+    handler.setFormatter(_make_formatter())
     handler.addFilter(ContextFilter())
     logger.addHandler(handler)
     logger.setLevel(logging.INFO)
@@ -287,7 +302,7 @@ def configure_run_logging(run_id: str, config: dict[str, Any] | None = None) -> 
             backupCount=settings.backup_count,
             encoding="utf-8",
         )
-        handler.setFormatter(logging.Formatter(_FORMAT))
+        handler.setFormatter(_make_formatter())
         handler.addFilter(ContextFilter())
         pipeline_logger = logging.getLogger("auto_research")
         pipeline_logger.setLevel(getattr(logging, settings.level, logging.INFO))

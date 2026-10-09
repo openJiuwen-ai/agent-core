@@ -194,8 +194,8 @@ class Controller:
     async def _restore_task_manager_state(self, session: Session) -> bool:
         """Restore TaskManager state from session.
 
-        If restoration fails, clear the current task_manager state without
-        raising errors so that new tasks are not affected.
+        If restoration fails, clear only this session's task state without
+        raising errors so that other sessions are not affected.
 
         Args:
             session: session object
@@ -206,9 +206,8 @@ class Controller:
         """
         controller_state = session.get_state("controller")
         if not controller_state or "task_manager_state" not in controller_state:
-            # No saved state, clear all task manager state
-            logger.info(f"No saved state found for session {session.get_session_id()}, clearing task manager")
-            await self._task_manager.clear_state()
+            logger.info(f"No saved state found for session {session.get_session_id()}, clearing session tasks")
+            await self._task_manager.replace_session_state(session.get_session_id(), None)
             return False
 
         try:
@@ -218,8 +217,8 @@ class Controller:
             state_dict = controller_state["task_manager_state"]
             task_manager_state = TaskManagerState.model_validate(state_dict)
 
-            # Load state into task_manager
-            await self._task_manager.load_state(task_manager_state)
+            # Replace only this session's state in the shared task manager.
+            await self._task_manager.replace_session_state(session.get_session_id(), task_manager_state)
             logger.info(
                 f"Successfully restored TaskManager state: "
                 f"{len(task_manager_state.tasks)} tasks, "
@@ -230,11 +229,10 @@ class Controller:
         except Exception as e:
             logger.error(
                 f"Failed to restore TaskManager state for session {session.get_session_id()}: {e}, "
-                f"clearing task manager state instead",
+                f"clearing session task state instead",
                 exc_info=True
             )
-            # Fallback: clear all task manager state to allow user to continue
-            await self._task_manager.clear_state()
+            await self._task_manager.replace_session_state(session.get_session_id(), None)
             return False
 
     async def _save_task_manager_state(self, session: Session) -> None:
@@ -247,7 +245,7 @@ class Controller:
             logger.info("Task persistence disabled, no need to save TaskManager state for session")
             return
         try:
-            task_manager_state = await self._task_manager.get_state()
+            task_manager_state = await self._task_manager.get_session_state(session.get_session_id())
             controller_state = {
                 "task_manager_state": task_manager_state.model_dump()
             }

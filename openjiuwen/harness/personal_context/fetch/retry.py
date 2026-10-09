@@ -44,7 +44,9 @@ def _jitter_seconds() -> float:
     return random.random() * _MAX_JITTER_SECONDS
 
 
-def _root_cause(exc: BaseException) -> BaseException:
+def root_provider_error(exc: BaseException) -> BaseException:
+    """Return the deepest provider error without exposing its message."""
+
     current = exc
     seen: set[int] = set()
     while id(current) not in seen:
@@ -71,7 +73,7 @@ def retry_reason_from_http_status(status: int) -> str | None:
 def classify_transport_error(exc: BaseException) -> str | None:
     """Classify retryable transport failures without exposing their detail."""
 
-    root = _root_cause(exc)
+    root = root_provider_error(exc)
     if isinstance(root, (asyncio.TimeoutError, TimeoutError)):
         return "timeout"
     if isinstance(root, aiohttp.ClientResponseError):
@@ -84,7 +86,7 @@ def classify_transport_error(exc: BaseException) -> str | None:
 def classify_file_error(exc: BaseException) -> str | None:
     """Classify only transient file sharing and concurrent-change failures."""
 
-    root = _root_cause(exc)
+    root = root_provider_error(exc)
     if isinstance(root, OSError) and root.errno == _FILE_CHANGED_ERRNO:
         return "file_changed"
     if not isinstance(root, OSError):
@@ -99,12 +101,32 @@ def classify_file_error(exc: BaseException) -> str | None:
 def classify_payload_error(exc: BaseException) -> str | None:
     """Classify an empty or temporarily undecodable payload."""
 
-    root = _root_cause(exc)
+    root = root_provider_error(exc)
     if isinstance(root, EOFError):
         return "empty_response"
     if isinstance(root, json.JSONDecodeError):
         return "invalid_json"
     return None
+
+
+def is_candidate_read_error(exc: BaseException) -> bool:
+    """Classify only errors that a provider has already scoped to one candidate read."""
+
+    root = root_provider_error(exc)
+    if isinstance(root, aiohttp.ClientResponseError):
+        if root.status in {401, 403}:
+            return False
+        return root.status in {404, 408, 410, 429} or 500 <= root.status <= 599
+    return isinstance(
+        root,
+        (
+            asyncio.TimeoutError,
+            TimeoutError,
+            EOFError,
+            json.JSONDecodeError,
+            UnicodeError,
+        ),
+    )
 
 
 def _safe_label(value: str) -> str:

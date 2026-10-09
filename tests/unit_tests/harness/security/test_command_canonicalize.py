@@ -273,3 +273,170 @@ def test_override_on_original_cmd_wrap_still_allows() -> None:
     level, matched = evaluate_tiered_policy(cfg, "bash", {"command": _WRAPPED})
     assert level == PermissionLevel.ALLOW
     assert "approval_overrides" in matched
+
+
+# ---------- POSIX shell launcher (bash -c and friends) ----------
+
+_POSIX_WRAPS = (
+    ('bash -c "rm -rf x"', "rm -rf x"),
+    ("bash -lc 'rm -v x'", "rm -v x"),
+    ('bash -l -c "rm -v x"', "rm -v x"),
+    ('bash --norc -c "rm x"', "rm x"),
+    ('bash -ic "rm x"', "rm x"),
+    ("sh -c 'rm -rf x'", "rm -rf x"),
+    ('zsh -c "rm x"', "rm x"),
+    ('dash -c "rm x"', "rm x"),
+    ('ash -c "rm x"', "rm x"),
+    ('bash -c rm', "rm"),
+    ('BASH -C "rm x"', "rm x"),
+    ('"/mnt/c/x/bash.exe" -c "rm -v x"', "rm -v x"),
+    ("'/mnt/c/x/bash.exe' -c 'rm -v x'", "rm -v x"),
+    ('/bin/bash -c "rm x"', "rm x"),
+)
+
+
+def test_canonicalize_unwraps_posix_shell_launcher() -> None:
+    for wrapped, inner in _POSIX_WRAPS:
+        assert canonicalize_shell_command_for_permission(wrapped) == inner, wrapped
+
+
+def test_posix_wrap_keeps_prefix_and_unwraps_one_layer() -> None:
+    assert canonicalize_shell_command_for_permission(
+        'cd d && bash -c "rm -rf x"',
+    ) == "cd d && rm -rf x"
+    assert canonicalize_shell_command_for_permission(
+        'echo hi; sh -c "rm x"',
+    ) == "echo hi; rm x"
+    # Unwrap only one layer; inner nesting is left for the next canonicalize pass.
+    assert canonicalize_shell_command_for_permission(
+        'bash -c "sh -c \'rm -rf /\'"',
+    ) == "sh -c 'rm -rf /'"
+
+
+def test_canonicalize_preserves_space_between_separator_and_launcher() -> None:
+    """``_SH_LAUNCHER_RE`` consumes the whitespace after a separator with an
+    explicit ``\\s*``; the subn must restore one space so the prefix is not
+    glued to the unwrapped command (``cd d &&rm x`` would mis-align the
+    ``rm *`` anchored match against an otherwise legitimate ``cd d &&``)."""
+    assert canonicalize_shell_command_for_permission(
+        'cd d && bash -c "rm -rf x"',
+    ) == "cd d && rm -rf x"
+    assert canonicalize_shell_command_for_permission(
+        'true && sh -c "rm x"',
+    ) == "true && rm x"
+    assert canonicalize_shell_command_for_permission(
+        'echo hi; sh -c "rm x"',
+    ) == "echo hi; rm x"
+
+
+def test_canonicalize_leaves_non_launchers_untouched() -> None:
+    for raw in (
+        "rm -rf x",
+        "grep -c bash file",
+        "bash --version",
+        "man bash",
+        "sh -c",
+        "echo \"bash -c 'rm -rf /'\"",
+        # An unquoted argument that happens to look like a launcher must not
+        # be unwrapped (review feedback: whitespace-only prefix is rejected so
+        # ``echo bash -c 'rm'`` does not become ``echo rm``).
+        "echo bash -c 'rm -rf /'",
+        "echo /bin/bash -c 'rm'",
+        "xargs bash -c 'rm -rf /'",
+        "python -c \"import os\"",
+        "cd /tmp && ls",
+    ):
+        assert canonicalize_shell_command_for_permission(raw) == raw, raw
+
+
+def test_posix_shell_wrap_rm_is_asked() -> None:
+    """Wrapping the command must not let `rm` bypass product rules (all three were ALLOW before the fix)."""
+    cfg = inline_package_command_rules({
+        "enabled": True,
+        "tools": {"bash": "allow"},
+        "defaults": {"*": "allow"},
+        "file_guard": {"enabled": False},
+        "rules": [
+            {"id": "shell_ask_rm", "tools": ["bash"], "pattern": "rm *", "action": "ask"},
+        ],
+    })
+    for cmd in (
+        'bash -c "rm -v /tmp/target"',
+        "bash -lc 'rm -v /tmp/target'",
+        "sh -c 'rm -v /tmp/target'",
+        '"C:\\Program Files\\Git\\bin\\bash.exe" -c "rm -v /tmp/target"',
+    ):
+        level, matched = evaluate_tiered_policy(cfg, "bash", {"command": cmd})
+        assert level == PermissionLevel.ASK, (cmd, matched)
+
+
+def test_posix_shell_wrap_recursive_delete_hits_builtin() -> None:
+    cfg = inline_package_command_rules({
+        "enabled": True,
+        "tools": {"bash": "allow"},
+        "defaults": {"*": "allow"},
+        "file_guard": {"enabled": False},
+    })
+    for cmd in (
+        'bash -c "rm -rf /tmp/target"',
+        "sh -c 'rm -rf /tmp/target'",
+        'bash -c "rm -rf /"',
+        'bash -c "rm -rf /*"',
+    ):
+        level, matched = evaluate_tiered_policy(cfg, "bash", {"command": cmd})
+        assert level == PermissionLevel.ASK, (cmd, matched)
+        assert "builtin" in matched, (cmd, matched)
+
+
+# ---------- PowerShell launchers with leading switches / leading separators after unwrap ----------
+
+
+def test_canonicalize_unwraps_powershell_with_leading_switches() -> None:
+    for wrapped, inner in (
+        ('powershell -NoProfile -Command "rm x"', "rm x"),
+        ('pwsh -NoProfile -NonInteractive -Command "rm x"', "rm x"),
+        ('POWERSHELL -NoLogo -Command "rm x"', "rm x"),
+    ):
+        assert canonicalize_shell_command_for_permission(wrapped) == inner, wrapped
+
+
+def test_canonicalize_drops_leading_separators_after_unwrap() -> None:
+    assert canonicalize_shell_command_for_permission(
+        "& 'C:\\Program Files\\Git\\bin\\bash.exe' -c 'rm \"x\"'",
+    ) == 'rm "x"'
+    assert canonicalize_shell_command_for_permission('; bash -c "rm x"') == "rm x"
+    # A prefix that actually carries a command must be preserved.
+    assert canonicalize_shell_command_for_permission(
+        'true && sh -c "rm x"',
+    ) == "true && rm x"
+
+
+def test_canonicalize_leaves_ps_without_command_switch() -> None:
+    for raw in (
+        "powershell -NoProfile",
+        "pwsh -NoProfile -Command",
+        "powershell -File x.ps1",
+    ):
+        assert canonicalize_shell_command_for_permission(raw) == raw, raw
+
+
+def test_ps_launcher_with_switches_hits_remove_item_rule() -> None:
+    cfg = inline_package_command_rules({
+        "enabled": True,
+        "tools": {"bash": "allow"},
+        "defaults": {"*": "allow"},
+        "file_guard": {"enabled": False},
+        "rules": [
+            {
+                "id": "shell_ask_remove_item",
+                "tools": ["bash"],
+                "pattern": "Remove-Item *",
+                "action": "ask",
+            },
+        ],
+    })
+    level, matched = evaluate_tiered_policy(
+        cfg, "bash",
+        {"command": 'powershell -NoProfile -Command "Remove-Item \'C:\\\\x.txt\'"'},
+    )
+    assert level == PermissionLevel.ASK, matched

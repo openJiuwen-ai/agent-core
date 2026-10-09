@@ -206,8 +206,6 @@ class TeamAgentSpec(BaseModel):
 
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
-    enable_group_chat: bool = False
-    group_context_tail: int = Field(default=5, ge=1, le=20)
     lifecycle: str = TeamLifecycle.TEMPORARY
     evolution_enabled: bool = True
     """Team switch for self-evolution coverage.
@@ -296,17 +294,15 @@ class TeamAgentSpec(BaseModel):
     deployment tpm / rpm budgets and (optionally) health checks.
 
     At ``build()`` time the config expands into ``TeamSpec.model_pool``
-    (one entry per logical model name, each carrying the full deployment
-    list) and ``model_pool_strategy`` is set to ``"intelli_router"``, so
+    (one logical ``"*"`` entry carrying the full deployment list) and
+    ``model_pool_strategy`` is set to ``"intelli_router"``, so
     all downstream machinery (``resolve_member_model``,
     ``inherit_pool_ids``, ``update_model_pool``) keeps working against
     the flat pool view.
 
     Mutually exclusive with ``model_pool`` and ``model_router``. The
-    first resolved model name — ``"*"`` (unified routing) unless
-    ``model_names`` overrides the order — is the team default, so a
-    leader without an explicit ``leader.model_name`` gets the broadest
-    failover.
+    The sole logical model name is ``"*"`` (unified routing), so a leader
+    without an explicit ``leader.model_name`` gets the broadest failover.
     """
     model_pool_strategy: Literal["round_robin", "by_model_name", "router", "intelli_router"] = "round_robin"
     """Allocation strategy applied to ``model_pool``.

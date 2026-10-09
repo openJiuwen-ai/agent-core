@@ -21,13 +21,31 @@ _RESPONSE_PAGE_LINES = 1000
 def judge_protocol_identity() -> dict[str, str]:
     """Invalidate cached grades when the evidence layout or grading policy changes."""
     return {
-        "evidence_layout": "paged_response_v2",
+        "evidence_layout": "complete_evidence_closeout_v7",
         "prompt_sha256": hashlib.sha256(Path(__file__).with_name("judge_prompt.md").read_bytes()).hexdigest(),
     }
 
 
+def _json_safe_response(response: Any) -> Any:
+    """Preserve model message responses as grading evidence without leaking Python objects."""
+    if hasattr(response, "model_dump"):
+        try:
+            response = response.model_dump(mode="json", exclude_none=True)
+        except (TypeError, ValueError):
+            response = response.model_dump()
+    try:
+        json.dumps(response, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError):
+        return {
+            "response_type": type(response).__name__,
+            "text": str(response),
+        }
+    return response
+
+
 def _response_evidence(response: Any, workspace: Path) -> tuple[Any, list[str]]:
     """Provide lossless bounded pages instead of one giant escaped JSON line."""
+    response = _json_safe_response(response)
     text = response
     if isinstance(response, dict) and isinstance(response.get("output"), str):
         text = response["output"]

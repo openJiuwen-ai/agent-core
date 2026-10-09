@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Callable, Collection, List, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable, Collection, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import ToolCard
@@ -20,6 +20,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabiliti
 )
 from openjiuwen.harness.tools.subagent._control_registry import release_all_subagent_controls
 from openjiuwen.harness.tools.subagent.subagent_tools import build_subagent_tools
+from openjiuwen.harness.tools.subagent.task_tool import BROWSER_PARENT_QUERY_STATE_KEY, EXECUTION_DEADLINE_STATE_KEY
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -80,6 +81,21 @@ class SubagentRail(DeepAgentRail):
 
     def _runtime_mode(self) -> bool:
         return self.enable_subagent_runtime
+
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Carry an optional host deadline into synchronous task delegation."""
+        context = getattr(ctx.inputs, "run_context", None)
+        extra = getattr(context, "extra", {})
+        if isinstance(context, dict):
+            extra = context.get("extra", {})
+        deadline = extra.get("execution_deadline_at") if isinstance(extra, dict) else None
+        if ctx.session is not None:
+            value = deadline if isinstance(deadline, (int, float)) and deadline > 0 else None
+            query = getattr(ctx.inputs, "query", None)
+            ctx.session.update_state({
+                EXECUTION_DEADLINE_STATE_KEY: value,
+                BROWSER_PARENT_QUERY_STATE_KEY: query if isinstance(query, str) else None,
+            })
 
     def _async_mode(self) -> bool:
         return not self.enable_subagent_runtime and self.enable_async_subagent

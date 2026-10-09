@@ -1,12 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import asyncio
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     OpenAIModelClient,
     _chat_completions_url,
@@ -15,6 +16,7 @@ from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     _parse_gateway_stream_line,
     _should_omit_authorization,
 )
+from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode, ModelClientConfig, ModelRequestConfig
 
 
 class _Obj:
@@ -147,21 +149,173 @@ def test_normal_affinity_request_keeps_explicit_max_tokens():
         stream=True,
         session_id="sess",
         parent_session_id="parent",
+        turn_num=3,
     )
     assert params["max_tokens"] == 512
+    assert params["agent_hint"] == {
+        "session_id": "sess",
+        "parent_session_id": "parent",
+        "turn_num": 3,
+    }
+
+
+def test_affinity_invoke_kwargs_keep_explicit_turn_num():
+    client = _affinity_client()
+
+    kwargs = client.build_kv_cache_affinity_invoke_kwargs(
+        session_id="sess",
+        parent_session_id="parent",
+        turn_num=4,
+        enable_kv_cache_affinity=True,
+    )
+
+    assert kwargs == {
+        "session_id": "sess",
+        "parent_session_id": "parent",
+        "turn_num": 4,
+    }
+
+
+@pytest.mark.parametrize("turn_num", [0, -1, True, "3"])
+def test_invalid_turn_num_is_ignored_without_blocking_inference(turn_num):
+    client = _affinity_client()
+
+    params = client._build_request_params(
+        messages="hello",
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model="test-model",
+        stop=None,
+        max_tokens=None,
+        stream=False,
+        session_id="sess",
+        parent_session_id="parent",
+        turn_num=turn_num,
+    )
+
+    assert params["agent_hint"] == {
+        "session_id": "sess",
+        "parent_session_id": "parent",
+    }
+
+
+def test_invalid_normal_affinity_hint_is_omitted_without_blocking_inference():
+    client = _affinity_client()
+
+    params = client._build_request_params(
+        messages="hello",
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model="test-model",
+        stop=None,
+        max_tokens=None,
+        stream=False,
+        session_id="sess",
+        parent_session_id="parent",
+        manage_request=True,
+    )
+
+    assert "agent_hint" not in params
+
+
+def test_missing_session_id_disables_affinity_without_blocking_inference():
+    client = _affinity_client()
+
+    result = client.build_kv_cache_affinity_invoke_kwargs(
+        enable_kv_cache_affinity=True,
+    )
+
+    assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_invalid_management_action_returns_false_without_http_request():
+    client = _affinity_client()
+    model = object.__new__(Model)
+    model._client = client
+    sdk_client = AsyncMock()
+
+    with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+        result = await model.evict_kvc(
+            session_id="sess",
+            parent_session_id="parent",
+            target="invalid-target",
+        )
+
+    assert result is False
+    sdk_client.chat.completions.create.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_management_http_failure_returns_false():
+    client = _affinity_client()
+    model = object.__new__(Model)
+    model._client = client
+    sdk_client = AsyncMock()
+    sdk_client.chat.completions.create = AsyncMock(side_effect=RuntimeError("provider unavailable"))
+
+    with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+        result = await model.prefetch_kvc(
+            session_id="sess",
+            parent_session_id="parent",
+        )
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_model_kvc_api_contains_client_failure():
+    model = object.__new__(Model)
+    model._client = AsyncMock()
+    model._client.evict_kvc = AsyncMock(side_effect=RuntimeError("client failure"))
+
+    result = await model.evict_kvc(session_id="sess", parent_session_id="parent")
+
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_model_kvc_api_does_not_swallow_task_cancellation():
+    model = object.__new__(Model)
+    model._client = AsyncMock()
+    model._client.evict_kvc = AsyncMock(side_effect=asyncio.CancelledError)
+
+    with pytest.raises(asyncio.CancelledError):
+        await model.evict_kvc(session_id="sess", parent_session_id="parent")
+
+
+def test_model_affinity_hint_builder_contains_client_failure():
+    model = object.__new__(Model)
+    model._client = AsyncMock()
+    model._client.build_kv_cache_affinity_invoke_kwargs = MagicMock(
+        side_effect=RuntimeError("invalid affinity metadata")
+    )
+
+    result = model.build_kv_cache_affinity_invoke_kwargs(
+        session_id="sess",
+        parent_session_id="parent",
+        enable_kv_cache_affinity=True,
+    )
+
+    assert result == {}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["evict_kvc", "offload_kvc", "prefetch_kvc"])
 async def test_session_affinity_action_builds_one_messages_argument(action):
     client = _affinity_client()
+    model = object.__new__(Model)
+    model._client = client
     sdk_client = AsyncMock()
     sdk_client.chat.completions.create = AsyncMock(return_value=_Obj())
 
     with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
-        result = await getattr(client, action)(
+        result = await getattr(model, action)(
             session_id="child",
             parent_session_id="parent",
+            turn_num=5,
             messages=None,
             tools=None,
         )
@@ -172,6 +326,7 @@ async def test_session_affinity_action_builds_one_messages_argument(action):
     assert sent["extra_body"]["agent_hint"] == {
         "session_id": "child",
         "parent_session_id": "parent",
+        "turn_num": 5,
         "context_management": {
             "edits": [{"type": action.removesuffix("_kvc"), "target": "session"}],
             "manage_request": True,
@@ -370,6 +525,46 @@ async def test_affinity_stream_rejects_usage_only_response(monkeypatch):
         )),
     )
     with pytest.raises(ValueError, match="raw_samples="):
+        _ = [
+            chunk
+            async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})
+        ]
+
+
+@pytest.mark.asyncio
+async def test_affinity_stream_summarizes_html_error_page(monkeypatch):
+    client = _affinity_client()
+    html = (
+        "<!DOCTYPE html><html><head><title>Not Found | opencode</title></head>"
+        "<body><h1>404 - Page Not Found</h1></body></html>"
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        _mock_http_client(_FakeResponse(status_code=404, body=html.encode("utf-8"))),
+    )
+
+    with pytest.raises(ValueError) as caught:
+        _ = [
+            chunk
+            async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})
+        ]
+
+    message = str(caught.value)
+    assert message.startswith("API returned error 404:")
+    assert "HTTP 404" in message
+    assert "Not Found | opencode" in message
+    assert "<!DOCTYPE" not in message
+
+
+@pytest.mark.asyncio
+async def test_affinity_stream_keeps_plain_http_error_body(monkeypatch):
+    client = _affinity_client()
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        _mock_http_client(_FakeResponse(status_code=400, body=b"model not found")),
+    )
+
+    with pytest.raises(ValueError, match=r"API returned error 400: model not found"):
         _ = [
             chunk
             async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})

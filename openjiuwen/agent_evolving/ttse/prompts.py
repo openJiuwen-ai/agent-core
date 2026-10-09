@@ -3,10 +3,11 @@
 """Prompt building blocks for TTSE (Two-Track Self-Evolution).
 
 Ported from the TTSE reference implementation (``ttseopenclaw/ttse/prompts.py``).
-``FACT_TIP_DEFINITION`` is the frozen dual-judgment core. Induce / blame no
-longer paste a separate task-brief copy: ``traj_text`` already includes the
-USER turn (see ``messages_to_trajectory_text``). ``ExistingBank`` bundles
-correlated ``induce_prompt`` parameters to stay under G.FNM.03.
+``FACT_TIP_DEFINITION`` is the frozen dual-judgment core. Induce feeds a
+SkillEvolution-aligned evidence layout (user query, conversation snippet,
+tool-call chain) rather than a flattened trajectory blob. ``ExistingBank``
+and ``InduceTaskEvidence`` bundle correlated ``induce_prompt`` parameters to
+stay under G.FNM.03.
 
 A FACT is a declarative statement about THIS environment; a TIP is a procedural
 rule of the form ``When <condition>: use <capability> to <action>``.
@@ -51,7 +52,7 @@ When unsure, default to TIP.
 Do NOT extract:
 - this turn's user request restated as a rule
 - names, secrets, account ids, one-off URLs, or ticket numbers
-- guesses not verified in the trajectory"""
+- guesses not verified in the conversation snippet or tool call chain"""
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,22 @@ class ExistingBank:
     tips: str
 
 
-def induce_prompt(_task_prompt: str, traj_text: str, capabilities: str, bank: ExistingBank, outcome: str) -> str:
+@dataclass(frozen=True)
+class InduceTaskEvidence:
+    """Per-task evidence slots for :func:`induce_prompt` (G.FNM.03 bundling)."""
+
+    task_query: str
+    conversation_snippet: str
+    tool_call_chain: str
+    grader_note: str = ""
+
+
+def induce_prompt(
+    evidence: InduceTaskEvidence,
+    capabilities: str,
+    bank: ExistingBank,
+    outcome: str,
+) -> str:
     if outcome == "success":
         outcome_lbl = "SOLVED SUCCESSFULLY"
         guidance = "Extract the tactics and environment facts that LED to this success."
@@ -79,31 +95,45 @@ def induce_prompt(_task_prompt: str, traj_text: str, capabilities: str, bank: Ex
             "This task FAILED. Extract LESSONS: (1) FACTS about the environment that CAUSED "
             "or contributed to the failure (a tool that errored, a missing file, an "
             "environmental constraint the agent missed) - only verified observations from "
-            "the trajectory, not guesses; (2) TIPs about what the agent SHOULD have done "
-            "instead, reframing the mistake as the correct positive action: 'When <cond>: "
-            "use <capability> to <correct action>'. Do NOT extract the wrong actions "
-            "themselves as tips."
+            "the conversation snippet and tool call chain, not guesses; (2) TIPs about what "
+            "the agent SHOULD have done instead, reframing the mistake as the correct "
+            "positive action: 'When <cond>: use <capability> to <correct action>'. Do NOT "
+            "extract the wrong actions themselves as tips."
         )
+    grader_block = f"\n{evidence.grader_note}\n" if evidence.grader_note else "\n"
     return f"""You are extracting reusable knowledge from an agent task that was {outcome_lbl}.
 
 {FACT_TIP_DEFINITION}
 
+How to use the evidence sections below:
+- User query = the task goal (do NOT restate it as a rule).
+- Conversation snippet = dialogue intent and reasoning.
+- Tool call chain = verifiable tool evidence; prefer it when checking facts.
+- Existing FACTS / TIPS = dedup boundary; do not repeat or subsume them.
+
+User query (task):
+{evidence.task_query or "(none)"}
+
+Conversation snippet:
+{evidence.conversation_snippet or "(none)"}
+
+Tool call chain:
+{evidence.tool_call_chain or "(none)"}
+
 Available Capabilities (TIPs may only reference these names):
 {capabilities}
 
-Existing bank — do NOT output rules that duplicate or are subsumed by these:
-FACTS:
+Existing FACTS:
 {bank.facts or "(none)"}
-TIPS:
+
+Existing TIPS:
 {bank.tips or "(none)"}
 
-Agent trajectory (USER turn is the task; then what the agent actually did):
-{traj_text}
-
-{guidance}
+Outcome: {outcome_lbl}
+{grader_block}{guidance}
 
 Extract NEW rules that would help a future agent on SIMILAR tasks in THIS environment.
-Write each rule in the same language as the USER turn.
+Write each rule in the same language as the User query.
 Prefer specific, verified observations over vague generalities. Output ONLY new rules,
 each on its own line, prefixed [FACT] or [TIP]:
 [FACT] <declarative fact about this environment>
@@ -123,30 +153,43 @@ _OUTCOME_LBL = {
 
 
 def induce_batch_prompt(group, capabilities: str, existing_facts: str, existing_tips: str) -> str:
-    """group: list of (task_id, task_prompt, traj_text, outcome_lbl). One GLM call."""
+    """group: list of (task_id, evidence: InduceTaskEvidence, outcome_lbl). One GLM call."""
     n = len(group)
     blocks = []
-    for i, (tid, _prompt, traj, lbl) in enumerate(group, 1):
-        blocks.append(f"=== Task {i}/{n} [{tid}] — {lbl} ===\nTrajectory excerpt:\n{traj}")
+    for i, (tid, evidence, lbl) in enumerate(group, 1):
+        grader = f"\n{evidence.grader_note}" if evidence.grader_note else ""
+        blocks.append(
+            f"=== Task {i}/{n} [{tid}] — {lbl} ===\n"
+            f"User query (task):\n{evidence.task_query or '(none)'}\n\n"
+            f"Conversation snippet:\n{evidence.conversation_snippet or '(none)'}\n\n"
+            f"Tool call chain:\n{evidence.tool_call_chain or '(none)'}\n"
+            f"Outcome: {lbl}{grader}"
+        )
     tasks_block = "\n\n".join(blocks)
     return f"""You are extracting reusable knowledge from a BATCH of {n} agent tasks.
 
 {FACT_TIP_DEFINITION}
 
+How to use the evidence sections below:
+- User query = the task goal (do NOT restate it as a rule).
+- Conversation snippet = dialogue intent and reasoning.
+- Tool call chain = verifiable tool evidence; prefer it when checking facts.
+- Existing FACTS / TIPS = dedup boundary; do not repeat or subsume them.
+
 Available Capabilities (TIPs may only reference these names):
 {capabilities}
 
-Existing bank — do NOT output rules that duplicate or are subsumed by these:
-FACTS:
+Existing FACTS:
 {existing_facts or "(none)"}
-TIPS:
+
+Existing TIPS:
 {existing_tips or "(none)"}
 
-The {n} tasks in this batch (outcome + trajectory excerpt each; USER turn is the task):
+The {n} tasks in this batch (each with User query, conversation snippet, tool call chain, outcome):
 {tasks_block}
 
 Extract NEW rules that would help a future agent on SIMILAR tasks in THIS environment.
-Write each rule in the same language as the USER turn.
+Write each rule in the same language as the User query.
 Prioritize rules that GENERALIZE across tasks. For FAILED tasks, extract the lesson (what
 the environment required or what the agent SHOULD have done), not the wrong action itself.
 
@@ -183,14 +226,15 @@ REASON: <one sentence tying the rule to a concrete wrong step, or why none apply
 
 
 SYNTH_SYSTEM = (
-    "You review a rule bank for CONTRADICTIONS (two rules that conflict) or near-DUPLICATES. "
+    "You review RETIRED rules removed from the active bank for CONTRADICTIONS "
+    "(two rules that conflict) or near-DUPLICATES. "
     "If you find a contradiction, propose AT MOST ONE synthesized TIP that resolves it. "
     "If there are no contradictions, output NONE."
 )
 
 
 def synthesize_prompt(rules_numbered: str, capabilities: str) -> str:
-    return f"""Current rules in the bank (numbered, facts then tips):
+    return f"""Retired rules removed from the active bank (numbered, facts then tips):
 {rules_numbered}
 
 Available Capabilities (a synthesized TIP may only reference these):
@@ -212,6 +256,24 @@ DREAM_MERGE_SYSTEM = (
 )
 
 
+DREAM_CLUSTER_SYSTEM = (
+    "You partition near-duplicate rules within ONE business-scenario category of an "
+    "agent experience bank. You only ASSIGN indices into clusters. Do NOT merge, "
+    "rewrite, or invent rule text. Always write THINKING first, then REASON, then "
+    "GROUPS (and ATTACH when existing clusters are listed). Output the format exactly."
+)
+
+
+DREAM_CATEGORY_MERGE_SYSTEM = (
+    "You consolidate near-duplicate rule clusters within ONE business-scenario "
+    "category of an agent experience bank. Reduce redundancy without dropping "
+    "mutually exclusive conditions. Clusters were proposed by a prior step; decide "
+    "MERGE, KEEP_DISTINCT, or REWRITE inside each cluster only. Do not merge across "
+    "clusters. Always write THINKING first, then REASON, then DECISIONS. Output the "
+    "format exactly."
+)
+
+
 def dream_merge_prompt(
     track: str,
     rules_block: str,
@@ -227,7 +289,8 @@ def dream_merge_prompt(
 TIP constraints:
 - CANONICAL (for MERGE/REWRITE) MUST be exactly: When <condition>: use <capability> to <action>
 - <capability> MUST be ONE name from Available Capabilities below.
-- If conditions are mutually exclusive or meaningfully different, choose KEEP_DISTINCT.
+- If conditions are mutually exclusive or meaningfully different, choose KEEP_DISTINCT
+  (or MERGE a subset and KEEP the rest via MERGE_INDICES/KEEP_INDICES).
 - Do NOT invent capabilities not listed.
 
 Available Capabilities:
@@ -247,6 +310,9 @@ same idea; KEEP_DISTINCT when conditions conflict or cover different cases. The 
 is only an importance hint — never override "different conditions" just because one count
 is higher.
 
+At most ONE merge per reply: fold one subset into a single CANONICAL; leave the rest
+unchanged. Do not emit multiple canonicals.
+
 Cluster rules (0-based index, text, count):
 {rules_block}
 
@@ -259,9 +325,202 @@ THINKING:
 REASON: <one-sentence decision summary>
 VERDICT: MERGE | KEEP_DISTINCT | REWRITE
 CANONICAL: <single retained or rewritten text; empty allowed for KEEP_DISTINCT>
-KEEP_INDICES: <comma-separated 0-based indices to keep when KEEP_DISTINCT; else empty>
+MERGE_INDICES: <comma-separated 0-based indices folded into CANONICAL when MERGE/REWRITE; empty = all>
+KEEP_INDICES: <comma-separated 0-based indices left unchanged; for KEEP_DISTINCT audit-only; for MERGE/REWRITE empty = complement of MERGE_INDICES>
 
 THINKING is the comparison/trade-off process (required, non-empty). REASON is the final conclusion sentence (required, non-empty).
+For full-cluster MERGE/REWRITE leave MERGE_INDICES and KEEP_INDICES empty.
+For subset MERGE (e.g. merge 0,1 keep 2): MERGE_INDICES: 0,1 and KEEP_INDICES: 2.
+"""
+
+
+def dream_cluster_prompt(
+    track: str,
+    category_id: str,
+    rules_block: str,
+    *,
+    min_size: int = 2,
+    existing_clusters_block: str = "",
+) -> str:
+    """Phase 1 user prompt: partition near-duplicates within one category."""
+    track_u = (track or "fact").upper()
+    if track_u == "TIP":
+        track_extra = (
+            "TIP note: different capabilities or mutually exclusive When-conditions "
+            "must NOT share a cluster."
+        )
+    else:
+        track_extra = (
+            "FACT note: cluster only declarative paraphrases; do not mix unrelated "
+            "environment claims."
+        )
+    attach_section = ""
+    if (existing_clusters_block or "").strip():
+        attach_section = f"""
+Existing clusters in this category (id + description only; members already clustered):
+{existing_clusters_block.strip()}
+
+You MAY attach new rule indices to an existing cluster when they clearly belong:
+ATTACH:
+- cluster=<id> | ids=3,5
+Omit ATTACH (or write ATTACH:\\nNONE) when no attachment applies.
+"""
+    return f"""You are clustering {track_u} rules that already share business-scenario category `{category_id}`.
+
+Goal: group rules that are paraphrases / near-duplicates of the SAME idea.
+Do NOT put mutually exclusive conditions, different capabilities, or clearly
+different cases in the same cluster.
+
+Rules (0-based index, count, text):
+{rules_block}
+{attach_section}
+Clustering rules:
+- A cluster means "these might be the same knowledge item" (paraphrase,
+  subsumption, or trivial wording difference).
+- Prefer SMALL, high-precision clusters over large mixed bags.
+- Singleton rules may be omitted (recommended) or listed as size-1; the
+  server ignores groups with size < {min_size}.
+- Every index appears in at most ONE group (or one ATTACH). Do not reuse an index.
+- Do not invent indices. Only use indices present above.
+- The count field is an importance hint only; do not cluster solely because
+  counts are high.
+- Do NOT output CANONICAL, MERGE, REWRITE, or rewritten rule text.
+
+{track_extra}
+
+Reply in EXACTLY this format (field order mandatory):
+THINKING:
+<multi-line: compare conditions/capabilities/scope; justify groups vs kept apart>
+REASON: <one-sentence summary of the partition>
+GROUPS:
+- 0,3,5
+- 1,4
+
+Each GROUPS line is one cluster: comma-separated 0-based indices.
+If there are no near-duplicate groups, output:
+GROUPS:
+NONE
+"""
+
+
+def _tip_or_fact_merge_constraints(track: str, *, capabilities: str = "") -> str:
+    track_u = (track or "fact").upper()
+    if track_u == "TIP":
+        return f"""
+TIP constraints:
+- CANONICAL (for MERGE/REWRITE) MUST be exactly: When <condition>: use <capability> to <action>
+- <capability> MUST be ONE name from Available Capabilities below.
+- If conditions are mutually exclusive or meaningfully different, choose KEEP_DISTINCT
+  or MERGE only the paraphrase subset (MERGE_INDICES) and KEEP the rest.
+- Do NOT invent capabilities not listed.
+- KEEP_DISTINCT leaves all members in the bank unchanged; KEEP_INDICES is audit-only then.
+- For MERGE/REWRITE: MERGE_INDICES lists members folded into CANONICAL (empty = all);
+  KEEP_INDICES lists members left unchanged (empty = complement of MERGE_INDICES).
+  At most one merge subset per group (one CANONICAL).
+
+Available Capabilities:
+{capabilities or "(none)"}
+"""
+    return """
+FACT constraints:
+- CANONICAL must remain a DECLARATIVE environment statement (no "you should", no TIP form).
+- Never convert a FACT into a TIP.
+- KEEP_DISTINCT leaves all members in the bank unchanged; KEEP_INDICES is audit-only then.
+- For MERGE/REWRITE: MERGE_INDICES lists members folded into CANONICAL (empty = all);
+  KEEP_INDICES lists members left unchanged (empty = complement of MERGE_INDICES).
+  At most one merge subset per group (one CANONICAL).
+"""
+
+
+def dream_category_merge_prompt(
+    track: str,
+    category_id: str,
+    rules_block: str,
+    clusters_block: str,
+    *,
+    capabilities: str = "",
+    invalid_tip_hint: bool = False,
+) -> str:
+    """Phase 2 user prompt: merge decisions for all proposed groups in one category."""
+    track_u = (track or "fact").upper()
+    tip_or_fact = _tip_or_fact_merge_constraints(track, capabilities=capabilities)
+    retry_hint = ""
+    if invalid_tip_hint:
+        retry_hint = """
+Previous CANONICAL was invalid for TIP shape; rewrite as a valid TIP
+(When <condition>: use <capability> to <action>) or KEEP_DISTINCT.
+"""
+    return f"""You are consolidating {track_u} rules in category `{category_id}`.
+
+These rules already share the same business-scenario category. A prior clustering
+step proposed the near-duplicate groups below. Your job:
+- For EACH proposed group with 2+ members: choose MERGE | KEEP_DISTINCT | REWRITE.
+- Do NOT move indices across groups.
+- Do NOT create new groups that mix indices from different proposed groups.
+- You MAY KEEP_DISTINCT when a proposed group was over-merged.
+- You MAY MERGE a subset: set MERGE_INDICES to the paraphrase members and
+  KEEP_INDICES to the rest (at most one subset → one CANONICAL per group).
+- Prefer MERGE or REWRITE when members are paraphrases of the same idea.
+- The count field is only an importance hint — never override "different
+  conditions" just because one count is higher.
+{retry_hint}
+All rules (0-based index, count, text):
+{rules_block}
+
+Proposed clusters (0-based group id → member indices):
+{clusters_block}
+{tip_or_fact}
+Reply in EXACTLY this format (field order mandatory):
+THINKING:
+<multi-line: per group, compare members and justify verdict>
+REASON: <one-sentence category-level summary>
+DECISIONS:
+- group=0 | ids=0,3,5 | VERDICT: MERGE | CANONICAL: <text> | MERGE_INDICES: 0,3 | KEEP_INDICES: 5
+- group=1 | ids=1,4 | VERDICT: KEEP_DISTINCT | CANONICAL: | MERGE_INDICES: | KEEP_INDICES: 1,4
+- group=2 | ids=2,7 | VERDICT: REWRITE | CANONICAL: <text> | MERGE_INDICES: | KEEP_INDICES:
+
+Field rules:
+- Include exactly one DECISIONS line per proposed group (same group ids as above).
+- ids MUST equal the proposed member set for that group (order may differ).
+- VERDICT is one of MERGE | KEEP_DISTINCT | REWRITE.
+- CANONICAL required for MERGE/REWRITE (single retained or rewritten text);
+  empty allowed for KEEP_DISTINCT.
+- MERGE_INDICES: members folded into CANONICAL for MERGE/REWRITE (subset of ids;
+  empty = merge all ids). Empty for KEEP_DISTINCT.
+- KEEP_INDICES: members left unchanged. For KEEP_DISTINCT may list all ids
+  (audit). For MERGE/REWRITE must be a subset of ids disjoint from MERGE_INDICES;
+  empty = complement of MERGE_INDICES (or empty when merging all).
+- THINKING and REASON are required and non-empty.
+"""
+
+
+DREAM_PURGE_SYSTEM = (
+    "You quality-check TIP rules in an agent experience bank. "
+    "Judge format validity and over-genericity only. "
+    "Do not require capabilities to appear on any whitelist. "
+    "Output one structured line per tip index exactly."
+)
+
+
+def dream_purge_prompt(tips_block: str) -> str:
+    """Prompt for Auto-dream batch TIP form / over-generic quality check."""
+    return f"""You are reviewing TIP rules from an agent experience bank.
+
+For each tip, decide KEEP or PURGE using ONLY these criteria:
+1. Format: a valid TIP is shaped like
+   When <condition>: use <capability> to <action>
+   Fullwidth colon (：) is acceptable. Declarative statements without this shape
+   are tip_fact_shaped. Broken When/use/to structure is tip_malformed.
+2. Over-generic: purge when the condition is empty/vacuous (e.g. "any task",
+   "always", "in general") — tip_too_generic_condition — or the action is empty
+   / vague with no concrete object (e.g. "check", "handle it") — tip_too_generic_action.
+3. Do NOT purge merely because <capability> is unfamiliar or not on a list.
+
+Tips (0-based index):
+{tips_block}
+
+Reply with EXACTLY one line per tip, in index order, no other text:
+INDEX: <i> | VERDICT: KEEP|PURGE | REASON: tip_malformed|tip_fact_shaped|tip_too_generic_condition|tip_too_generic_action|ok
 """
 
 
@@ -290,3 +549,27 @@ For each goal use verdict SATISFIED or UNSATISFIED with a concise justification.
 Output ONLY a single JSON object (no markdown fence):
 {{"goals":[{{"goal":"<short goal>","verdict":"SATISFIED|UNSATISFIED","reason":"<brief evidence>"}}],"delivery":"answer","outcome":"success|partial|fail","reason":"<one-sentence overall justification>"}}
 """
+
+
+def dedup_judge_prompt(kind: str, existing_block: str, new_text: str) -> str:
+    """Ask whether a new rule is the same experience as one existing rule."""
+    return (
+        f"You decide whether a newly extracted {kind} is the SAME reusable "
+        "experience as exactly one existing rule, only worded differently.\n"
+        "\n"
+        "SAME means the claim is the same: same condition and same fact or action. "
+        "Wording, language, and minor phrasing may differ.\n"
+        "NOT the same when the topic is merely related, or when names, numbers, "
+        "paths, or one-off details change what the rule asserts.\n"
+        "\n"
+        "Existing rules (0-based index):\n"
+        f"{existing_block}\n"
+        "\n"
+        "New rule:\n"
+        f"{new_text}\n"
+        "\n"
+        "Reply with EXACTLY one line and no other text:\n"
+        "MATCH: <index>\n"
+        "or\n"
+        "MATCH: NONE\n"
+    )

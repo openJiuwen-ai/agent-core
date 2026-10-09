@@ -199,9 +199,7 @@ async def test_stream_cancellation_finalizes_without_late_answer(close_mode):
     agent = make_agent(WaitingInner())
     rail = FinalizingRail()
     agent.add_rail(rail)
-    # The class entry tests DeepAgent's close contract separately from the
-    # generic callback decorators installed on instance.stream by BaseAgent.
-    stream = DeepAgent.stream(agent, "read") if close_mode == "aclose" else agent.stream("read")
+    stream = agent.stream("read")
     assert (await anext(stream)).type == "llm_output"
     if close_mode == "aclose":
         await stream.aclose()
@@ -294,7 +292,8 @@ async def test_real_browser_rail_stream_reaches_tasktool(monkeypatch, outcome):
         assert authority["evidence"][0]["value"] == "Weather"
         assert authority["missing_fields"] == []
     elif outcome == "partial":
-        assert "title" in authority["missing_fields"]
+        assert "title" in authority["unverified_fields"]
+        assert authority["terminal_reason"] == "no_task_observation"
         assert authority["retryable"]
         assert authority["summary"] == "Weather"
     elif outcome == "raw_weather":
@@ -358,7 +357,13 @@ async def test_focused_tasktool_resume_preserves_real_browser_requirements(monke
             )
             ctx.session.update_state({"__browser_phase_budget_state__": state})
             observed_states.append(dict(state))
-            return AssistantMessage(content="Keyboard found" if len(observed_states) == 1 else "Keyboard, rated 4.8")
+            content = "Keyboard, rated 4.8"
+            if len(observed_states) == 1:
+                content = (
+                    "Keyboard found; product rating is not read yet."
+                    '<browser_progress>{"status":"partial","next_action":"read product rating"}</browser_progress>'
+                )
+            return AssistantMessage(content=content)
 
         monkeypatch.setattr(browser.react_agent, "_call_model", call_model)
         return browser

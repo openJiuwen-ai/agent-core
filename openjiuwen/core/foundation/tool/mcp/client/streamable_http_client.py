@@ -4,12 +4,13 @@ import asyncio
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
+import httpx
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
 from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.mcp_client import McpClient
-from openjiuwen.core.foundation.tool.auth.auth import ToolAuthConfig, ToolAuthResult
 from openjiuwen.core.runner.callback.events import ToolCallEvents
 
 
@@ -97,14 +98,25 @@ class StreamableHttpClient(McpClient):
                         self._auth_provider = item.auth_data.get("auth_provider")
                         break
             actual_timeout = timeout if timeout != NO_TIMEOUT else 60.0
-            streamable_http_client = getattr(streamable_http_module, "streamablehttp_client", None)
-            if streamable_http_client is None:
-                streamable_http_client = getattr(streamable_http_module, "streamable_http_client")
-            self._client = streamable_http_client(
-                self._server_path,
-                timeout=actual_timeout,
-                auth=self._auth_provider
-            )
+            legacy_client = getattr(streamable_http_module, "streamablehttp_client", None)
+            if legacy_client is not None:
+                self._client = legacy_client(
+                    self._server_path,
+                    timeout=actual_timeout,
+                    auth=self._auth_provider,
+                )
+            else:
+                http_client = await self._exit_stack.enter_async_context(
+                    httpx.AsyncClient(
+                        timeout=httpx.Timeout(actual_timeout, read=300.0),
+                        auth=self._auth_provider,
+                        follow_redirects=True,
+                    )
+                )
+                self._client = streamable_http_module.streamable_http_client(
+                    self._server_path,
+                    http_client=http_client,
+                )
             client_tuple = await self._exit_stack.enter_async_context(self._client)
             self._read, self._write, *_ = client_tuple
             self._session = await self._exit_stack.enter_async_context(

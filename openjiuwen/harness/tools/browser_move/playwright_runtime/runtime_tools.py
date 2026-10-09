@@ -169,8 +169,10 @@ _BATCH_INTERACT_DESC = (
     "known targets, such as three or more form fields, click+type+choose autocomplete, dropdown or "
     "date-picker selection, filter panels, search submit plus result wait, or compact extraction. "
     "This is a first-class helper like the probe tools; do not route this through browser_custom_action. "
-    "Pass the current PageState generation_id and use target_id from probes for actions. "
+    "Pass the current PageState generation_id and use target_id or a current native AX ref for actions. "
     "Only read-only extraction and explicit wait operations accept a validated selector. "
+    "wait_for_sort_state accepts the same target_id/ref as click and checks its live selected state; "
+    "an explicit attribute requires an expected_value. Do not repeat successful steps after a later wait fails. "
     "Locator strategies are mutually exclusive. "
     "A one-step call is rewritten by the runtime to an equivalent official browser primitive when "
     "one exists, so it does not fail and require another model turn. Multi-step calls are preflighted "
@@ -391,7 +393,10 @@ _BATCH_INTERACT_PARAMS: Dict[str, Any] = {
                     },
                     "attribute": {
                         "type": "string",
-                        "description": "Attribute inspected by wait_for_sort_state; defaults to aria-sort.",
+                        "description": (
+                            "Optional sort-state attribute with expected_value. Without it, inspect the target's "
+                            "live ARIA/data-state/active class; reuse the clicked target_id or native ref."
+                        ),
                     },
                     "expected_value": {
                         "type": "string",

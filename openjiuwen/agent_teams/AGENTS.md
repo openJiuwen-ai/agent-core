@@ -103,7 +103,8 @@ agent_teams/
 成员的工具走 MCP、带命名空间，且 CLI 自带工具可能重名（Claude Code 的 `SendMessage`、Codex 的
 `collaboration.send_message`），所以 `build_team_member_system_prompt(mcp_server_name=...)` 把提示词包进
 `<team-policy tools="...">`，用 `tool_namespace.md` 声明一次：本区域与所有 `team-*` 消息块里的裸名都归这个
-MCP server。**不要**逐条把模板里的工具名改成全限定名——两家 CLI 的全限定形式不同，声明作用域是一处改动，
+MCP server。Codex 例外：团队工具以裸名注册为顶层 Dynamic Tools，没有 server 可声明，spawn 时不传
+`mcp_server_name`、提示词不包 `<team-policy>`。**不要**逐条把模板里的工具名改成全限定名——两家 CLI 的全限定形式不同，声明作用域是一处改动，
 改名是全量改动，而且会把厂商细节焊进模板。裸名到真实调用名的翻译由 provider 声明（见
 `harness_providers/AGENTS.md` 不变式 12）。
 
@@ -324,10 +325,10 @@ effort（落库到 `options.builtin_model`，经 `HarnessModelControl.set_model`
 未声明则行为不变。见 [[F_113_external-harness-builtin-model-selection]]。当前内置 backend：claude / codex（`harness_providers` 协议 provider +
 `ExternalHarnessMemberRuntime`）与 adapter 型 gemini / openclaw / hermes / generic
 （`CliRuntimeBase` 子进程 runtime）。spawn 路径（`external_cli_spawn` → `build_cli_runtime`）按 backend
-注入团队 MCP server——claude 走 SDK 进程内 MCP（`_bind_protocol_member_team_tools` 在 `configure`
-后把 `build_claude_sdk_mcp_tool_set` 的 server 作为 `McpServerConfig(IN_PROCESS)` 挂上）、codex 走
-stdio `McpServerConfig`（`CodexHarnessConfig.mcp_env_passthrough` 带上 `MCP_SERVER_ENV_VARS`）；无
-flag 的 gemini / hermes 由 spawn 路径跑一次 `<cli> mcp add ...` 带外注册（`mcp_register_command`），
+注入进程内团队工具——claude 走 SDK 进程内 MCP（`_bind_protocol_member_team_tools` 在 `configure`
+后把 `build_claude_sdk_mcp_tool_set` 的 server 作为 `McpServerConfig(IN_PROCESS)` 挂上）、codex 在同一
+时点把真实 teammate `TeamBackend` 构造的 `ExternalTeamToolGateway` 绑定为 Dynamic Tools；Codex
+gateway 在每次调用期间显式绑定父团队 session（恢复时重新构造），两者都不经过外部传输。未设置该 flag 的 gemini / hermes 由 spawn 路径跑一次 `<cli> mcp add ...` 带外注册（`mcp_register_command`），
 openclaw 无已知注册方式则 `mcp_inject=none` + 大声告警。MCP server 是 CLI 子进程，继承
 `OPENJIUWEN_TEAM_JOIN` env，自动绑定成员身份。`ssh_transport` 配置后 CLI 进程在远程 SSH 端点
 启动，`command` / `cwd` / `mcp_server_command` 均按远程主机解释；DB / messager 可达性由部署保证。

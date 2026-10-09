@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openjiuwen"
-version = "0.1.18"
+version = "0.1.19"
 description = "openJiuwen agent-core is a feature-rich AI agent SDK for developing, running, tuning, and improving your AI agents."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -80,6 +80,17 @@ dependencies = [
     # under fastmcp 2.x it was provided transitively, but fastmcp 3.x (fastmcp-slim)
     # no longer pulls it, so declare it explicitly to keep imports working.
     "opentelemetry-sdk>=1.25.0",
+    # OTel HTTP auto-instrumentation for W3C traceparent propagation. Base
+    # dependencies (not an extra) so deployments get the feature by simply
+    # installing openjiuwen; the switch itself stays off by default (gated by
+    # ObservabilityConfig.global_instrument_enable / the
+    # OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE environment variable).
+    "opentelemetry-instrumentation-httpx>=0.44b0",
+    "opentelemetry-instrumentation-requests>=0.44b0",
+    # PyPI name is ``aiohttp-client`` (module opentelemetry.instrumentation.aiohttp_client).
+    "opentelemetry-instrumentation-aiohttp-client>=0.44b0",
+    # Server-side (inbound traceparent extraction) for FastAPI services.
+    "opentelemetry-instrumentation-fastapi>=0.44b0",
 ]
 
 # A2A: required for `openjiuwen.remote_clients` / `openjiuwen.server_adapters` A2A entry

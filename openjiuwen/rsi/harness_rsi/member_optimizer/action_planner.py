@@ -30,14 +30,17 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     create_action_planning_agent,
+    load_member_optimizer_model,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.output import (
     invoke_member_optimizer_agent_structured,
     parse_yaml_or_json_object_response,
 )
+from openjiuwen.rsi.harness_rsi.member_optimizer.agents.profiles import ACTION_PLANNING
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.rails import (
     HarnessStructureRail,
 )
+from openjiuwen.rsi.harness_rsi.member_optimizer.agents.rails.planner_evidence import PlannerEvidenceRail
 from openjiuwen.rsi.harness_rsi.member_optimizer.lever import (
     build_action_lever_decision,
 )
@@ -644,12 +647,14 @@ class MemberActionPlannerAgent:
         """
         harness_summaries = harness_summaries or self._build_harness_summaries(targets)
         self._harness_structure_rail.update_harness_summaries(harness_summaries)
+        evidence_rail = PlannerEvidenceRail(ACTION_PLANNING.max_iterations)
         agent = create_action_planning_agent(
             model_config_ref=self._model_config_ref,
             workspace=self._workspace or ".",
             action_definitions=action_definitions,
             agent_skills_dirs=self._agent_skills_dirs,
             extra_rails=[self._harness_structure_rail],
+            evidence_rail=evidence_rail,
         )
 
         user_message = self._build_user_message(
@@ -663,14 +668,23 @@ class MemberActionPlannerAgent:
             optimization_experience=optimization_experience,
         )
 
+        async def finalize(message: str, previous: str) -> str:
+            model = load_member_optimizer_model(self._model_config_ref)
+            response = await model.invoke(
+                messages=evidence_rail.finalization_messages(message, previous),
+                tools=None,
+            )
+            return response.content or ""
+
         return await invoke_member_optimizer_agent_structured(
             agent=agent,
             agent_name="MemberActionPlannerAgent",
             user_message=user_message,
             session_id=_planner_session_id(optimization_experience),
-            retry_limit=self._retry_limit,
+            retry_limit=min(self._retry_limit, 1),
             parse_response=parse_yaml_or_json_object_response,
-            build_retry_message=self._build_retry_message,
+            build_retry_message=lambda _previous, error: self._build_retry_message(user_message, error),
+            recover_response=finalize,
         )
 
     @staticmethod
@@ -806,6 +820,7 @@ action_group and target_path that match the diagnosed optimization_surface.
                 f"expected_effect={item.get('expected_effect', '')}, "
                 f"rejection_reason={item.get('rejection_reason', '')}, "
                 f"failure_class={item.get('failure_class', '')}, "
+                f"candidate_behavior_by_case={item.get('candidate_behavior_by_case', {})}, "
                 f"target_case_ids={item.get('target_case_ids', [])}, "
                 f"verifier_deltas_by_case={item.get('verifier_deltas_by_case', {})}, "
                 f"candidate_failure_diagnoses={item.get('candidate_failure_diagnoses', {})}, "
@@ -822,11 +837,10 @@ action_group and target_path that match the diagnosed optimization_surface.
 Do not add the same capability under a different file name. If the prior
 capability was not invoked, repair activation/discoverability through a modify
 action; do not create another tool/add candidate with equivalent intent.
-If the prior candidate worked once but failed confirmation or epoch replay
-because no edit was produced, do not write a synonymous Skill. Use the adapted
-prompt_section surface to create a bounded decision-to-edit checkpoint. If an
-edit was produced but the official semantic observable still failed, keep the
-evidence-backed surface and repair the causal discriminator instead.
+Use the recorded behavior checks to separate availability, action, and outcome.
+Missing evidence is unknown. If the method was available but not followed,
+inspect executable control; if behavior changed but remained wrong, repair the
+implementation or return counterevidence. Do not default failed Skills to Prompt.
 """
 
         hypothesis_contract = ""
@@ -843,6 +857,8 @@ evidence-backed surface and repair the causal discriminator instead.
                     "public_trigger": item.get("public_trigger", []),
                     "decisive_probe": item.get("decisive_probe", {}),
                     "decision_contract": item.get("decision_contract", {}),
+                    "evidence_refs": item.get("evidence_refs", []),
+                    "lever_policy": item.get("lever_policy", {}),
                 }
                 for item in optimization_hypotheses
                 if isinstance(item, dict)
@@ -852,13 +868,11 @@ evidence-backed surface and repair the causal discriminator instead.
 
 {json.dumps(compact_hypotheses, ensure_ascii=False, indent=2)}
 
-These analyzer-authored contracts are semantic source of truth. Prefer one
-allowed runtime surface. When the same required_behavior needs implementation,
-registration, and routing, plan at most three connected actions that all retain
-the same source_issue_id. Do not weaken, reverse, or paraphrase away the
-required_behavior or decision_contract. Never connect actions for different
-issues. Every action must teach the selected required_action; do not turn it
-back into a menu containing the recorded wrong_decision.
+Freeze observed failure facts, the behavior objective and check expectations,
+not an unproven cause or carrier preference. Read evidence/ when needed.
+At most three necessary connected actions may implement one issue. If the cause
+is contradicted, return counterevidence in an empty plan for reanalysis; do not
+silently change the objective or the independent check.
 """
         experience_context = ""
         if optimization_experience:
@@ -878,10 +892,9 @@ Lever scoreboard:
 Recent experiments:
 {json.dumps(recent, ensure_ascii=False, indent=2)}
 
-Use outcomes only to choose among surfaces inside the diagnosed lever. Do not
-rename and retry an equivalent rejected capability. A different lever requires
-a new analyzer diagnosis; never compensate for an unavailable Control or
-Configuration lever with a Skill or Prompt.
+Use observed behavior and outcomes to choose supported components, including a
+different carrier. Do not rename an equivalent rejected capability. Do not
+disguise an unavailable environment or configuration change as instructions.
 When verifier_deltas_by_case shows newly passing FAIL_TO_PASS operations, keep
 that behavior and narrow the next action to remaining_failed_fail_to_pass.
 Do not describe a binary 0-to-0 case score as "no effect" when the official
@@ -991,13 +1004,6 @@ def _bind_immutable_hypotheses(
             selected_surface=_action_optimization_surface(action),
             policies=policies,
         )
-        if lever_decision["recommended_levers"] and not lever_decision["lever_matches_diagnosis"]:
-            raise RuntimeError(
-                "planned action crosses the diagnosed optimization lever: "
-                f"action={action.get('action_id', '')}, "
-                f"selected={lever_decision['selected_lever']}, "
-                f"recommended={lever_decision['recommended_levers']}"
-            )
         if policies:
             constraints["lever_decision"] = lever_decision
         action["constraints"] = constraints
@@ -1632,9 +1638,9 @@ def _build_improver_policy_context(
 
 This is the versioned pre-execution policy for the current Improver. It is not
 sibling execution feedback and contains no result for the current cohort.
-Apply its generation directives only within the immutable hypothesis, diagnosed
-lever, run-specific action contract, and available Harness surfaces. A diversity
-directive never permits an unsupported cross-lever change. An activation-evidence
+Apply its generation directives within the frozen failure facts, behavioral goal,
+run-specific action contract, and available Harness surfaces. The diagnosed lever
+is advisory, not a component restriction. An activation-evidence
 directive requires concrete current execution or Harness-path evidence before
 choosing that surface. Do not invent evidence merely to satisfy the policy.
 """
@@ -1677,8 +1683,8 @@ only after every sibling proposal exists.
 
 Generate the proposal assigned to the current generation slot. Make it
 materially different from the prior proposal summaries in its intervention,
-not merely in action IDs, wording, or file names. Stay inside the immutable
-hypothesis and its diagnosed lever. Never cross levers just to manufacture
+not merely in action IDs, wording, or file names. Preserve the frozen failure
+facts and behavioral goal. Do not change components merely to manufacture
 diversity. If no evidence-backed materially distinct proposal exists, keep the
 evidence contract even if the resulting proposal is a duplicate; the cohort
 ranker will identify that duplicate without pretending it is a new strategy.

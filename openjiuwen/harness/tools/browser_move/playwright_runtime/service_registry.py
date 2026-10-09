@@ -4,8 +4,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import weakref
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -60,6 +62,35 @@ class BrowserServiceRegistry:
     def __init__(self) -> None:
         self._entries: dict[BrowserServiceIdentity, _BrowserServiceEntry] = {}
         self._lock = threading.RLock()
+        self._task_turns: dict[str, tuple[Any, int]] = {}
+
+    @asynccontextmanager
+    async def task_turn(self, identity: BrowserServiceIdentity):
+        """Hold the shared browser for a whole task, across event-loop threads.
+
+        Nonblocking acquisition keeps cancellation immediate without leaving a
+        background thread that might acquire the lock after its waiter exits.
+        """
+        key = identity.browser_key or identity.server_id
+        with self._lock:
+            lock, users = self._task_turns.get(key, (threading.Lock(), 0))
+            self._task_turns[key] = (lock, users + 1)
+        acquired = False
+        try:
+            # asyncio synchronization objects cannot wake waiters on other loops.
+            while not lock.acquire(blocking=False):  # noqa: ASYNC110
+                await asyncio.sleep(0.025)
+            acquired = True
+            yield
+        finally:
+            if acquired:
+                lock.release()
+            with self._lock:
+                _, users = self._task_turns[key]
+                if users == 1:
+                    del self._task_turns[key]
+                else:
+                    self._task_turns[key] = (lock, users - 1)
 
     def acquire(self, identity: BrowserServiceIdentity, service: Any) -> None:
         with self._lock:

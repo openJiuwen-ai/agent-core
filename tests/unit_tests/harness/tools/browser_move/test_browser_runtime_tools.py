@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -388,7 +389,10 @@ def test_single_batch_wait_preserves_mcp_outcome_through_browser_client_and_rail
         assert native_result.data == {"result": response_text}
         assert native_result.error == response_text
         assert result.error == response_text
-        assert response_text in inputs.tool_msg.content
+        if inputs.tool_msg.content.startswith("{"):
+            assert json.loads(inputs.tool_msg.content)["error"] == response_text
+        else:
+            assert response_text in inputs.tool_msg.content
     else:
         assert native_result == {"result": response_text}
         assert result.error is None

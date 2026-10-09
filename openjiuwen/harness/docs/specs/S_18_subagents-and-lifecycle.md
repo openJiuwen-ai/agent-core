@@ -6,10 +6,14 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（8 文件）、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-09-03 |
-| 关联 feature | N/A |
+| 最近一次修订日期 | 2026-09-22 |
+| 关联 feature | F_05_browser-task-integrity |
 
 ## 范围 / 边界
+
+Browser 的完整工具、Rails、运行时与宿主接入统一见
+[浏览器子智能体](../../../../docs/zh/2.开发指南/API文档/openjiuwen.harness/subagents/浏览器子智能体.md)。
+本 spec 保留生命周期不变量；统一说明包含本地未提交实现，不表示已发布版本全部支持。
 
 本规约定义 harness 的**预设子代理**及其生命周期辅助：五类预置 agent 的配置构建、
 创建、任务资源生命周期。`S_10` 是异步运行时（状态机 / 容量 / snapshot），本 spec 是
@@ -60,15 +64,47 @@
    同步构造，`S_01` 不变量 3）；`enable_subagent_runtime` 时才进 `S_10` 的异步控制面。
 8. **manifest 侧预设与 `subagents/` 预设同源**：`S_12` 的 `build_*_subagent` 是
    `subagents/` 预设的 catalog 注册形态；二者共享 `SubAgentSpec` 装配语义，不新造预设。
-9. **browser 上下文权威边界**：runtime 以 requested evidence slots、已解析 evidence 和
-   blockers 计算任务状态；模型负责策略与自然语言结果，不负责维护第二套进度 JSON。模型可见
-   PageState 与 WorkingContext 必须先按结构裁剪后序列化，保持合法 JSON。offload 保存可恢复的
-   有界旧结果；预截断的完整原始观察仅在显式开启 raw audit 时进入审计层。PageState 的
+9. **browser 上下文权威边界**：runtime 负责执行真值、来源归属、明确 blocker 与统一结果传输；
+   模型按原始目标和本任务观察判断业务完成。自动推断的字段/数量/比较槽仅是提取提示，不能因
+   适配器未入账就制造 partial；明确的缺失、反证和显式结构化契约仍参与校验。模型可见
+   PageState 与 WorkingContext 必须先按结构投影后序列化，保持合法 JSON。推断字段齐全仅提示
+   `may_finish_if_user_goal_met`，不自动完成或清空工具；明确终态仍由 runtime 统一传输。PageState 的
    `page_blockers` 仅表示页面启发式信号，不能直接覆盖 runtime 的权威任务终态。
 10. **browser 观察采用统一窗口**：Probe、snapshot、find、evaluate 先由 runtime 提取证据并将
-    当前结果限制在 12 KB 内，再统一交给 `ToolResultWindowProcessor`；模型只保留最近一个有界结果，
+    当前结果投影到既有约 12K 字符预算，再交给 `ToolResultWindowProcessor` 的配置窗口，
     并发只读结果的合并结构由 PageState 提供。WorkingContext 默认只投影 runtime 权威状态，
-    不再要求模型维护第二份记忆。
+    不再要求模型维护第二份记忆。原生 AX 先解包装再注册 refs，不被不完整 Probe 替换；工具消息
+    只携带新数据和 PageState 摘要，不重复附加旧 Cards。确认排序/筛选变化时废弃旧列表目标，
+    不因每次只读观察递增 generation。
+    有损投影前保存任务内可恢复原文，handle 不跨 session；临时观察文件有效期 24 小时，
+    写入时惰性清理过期文件，跨任务扫描每工作区最多每小时一次；每任务上限 128 个 / 64 MiB。
+    停止运行时不保证物理文件即时删除。存储失败时保留原文。
+    永久 raw audit 仍需显式开启，临时 recall 不是全局文件系统能力。
+11. **共享浏览器按任务占用**：同进程同 `browser_key`（未配置时按 MCP server id）的任务
+    通过现有 BrowserService registry 排队，覆盖初始化至 cleanup，不只锁单次工具调用。
+    不同 key 保持独立；不关闭共享 Chrome、不清除 Cookie。跨进程/多个 key 指向同一 CDP
+    不在此保证范围内，需宿主显式配置统一身份。
+12. **取消必须停止执行者**：ReAct stream 消费者取消或 `aclose` 时取消并等待 producer；
+    TaskTool 和 callback/session 包装器关闭内层生成器。清理任务 observer 后才释放占用。
+    宿主可在 `run.context.extra.execution_deadline_at` 传入 epoch 秒；TaskTool 将其传给
+    Browser query 并限制调用剩余时长。未设置时保持原有任务预算。
+    Browser TaskTool 持有显式 child Session，使超时可返回既有证据的 partial；取消保存已读结果
+    后继续传播 CancelledError，不能继续网页动作。非 Browser 子代理仍沿用原有派发行为。
+13. **证据属于任务和实体**：沿用现有 slot，绑定 query、entity URL、variant、field 和来源。
+    初始复用页面不自动证明新任务已完成；同实体同口径纠正旧值，不同商品不能拼接字段，
+    不同日期/报价口径保留区分。resume 清除旧的模型摘要，最终使用本次有效结果。
+    同实体详情证据可以替换较弱搜索卡证据；明确作者操作标签、仍停留搜索页等反证只允许
+    在原 query deadline 和既有一次 resume 配额内修正，不创建新验证器或重置任务期限。
+14. **需求不由页面按钮扩张**：原始用户目标通过既有 TaskTool run context 传递；低置信字段
+    仅作提取提示。导航首页不要求商品字段，搜索卡标题不证明已进入详情页，页面按钮枚举不创建比较槽。
+    未执行的 DSML 工具意图不能认证完成，同 run 至多纠正一次。定向恢复保留原始约束和修复指令，
+    不重置共享期限，也不因推断字段适配不完整而强迫普通信息任务重复读取。
+    “地点不限”“评分若有”等局部否定/可选条件不生成硬性字段；星级与住客评分分开。
+    replan_required 是执行指导，收尾时不能单独制造网页 blocker。原生读取、Card 和 evaluate
+    的带来源观察采用同一完成判断，保留 typed evidence 与未结构化观察的区别，不虚构字段覆盖。
+    `unverified_fields` 仅是未映射诊断，不能触发填表式续跑。确有未完成用户目标时，可在收尾一次使用
+    现有 browser_progress 文本标注 partial/next_action，不要求逐轮进度或另一个验证模型。
+    支付/登录接管必须有当前页正证据；取消、截止期限和已有明确终态仍保持不变。
 
 ## 接口契约
 

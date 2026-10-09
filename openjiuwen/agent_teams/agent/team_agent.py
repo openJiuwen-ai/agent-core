@@ -749,12 +749,7 @@ class TeamAgent(BaseAgent):
     async def invoke(self, inputs, session=None):
         team_logger.info("[{}] invoke start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
-        # Cache the user query so CoordinationManager can pass it to the
-        # memory pipeline during start(). ``.get`` default does not cover a
-        # present-but-None value, so normalize an empty/None query to "".
-        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
-        self._state.pending_user_query = raw_query
-        routed_payloads = self._initial_leader_route_payloads(raw_query)
+        raw_query, routed_payloads = self._prepare_initial_input(inputs)
         with self._observability_execution_scope(session):
             await self._coordination.start(session)
             try:
@@ -812,12 +807,7 @@ class TeamAgent(BaseAgent):
     async def stream(self, inputs, session=None, stream_modes=None):
         team_logger.info("[{}] stream start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
-        # ``.get`` default does not cover a present-but-None value, so
-        # normalize an empty/None query to "".
-        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
-        self._state.pending_user_query = raw_query
-        routed_payloads = self._initial_leader_route_payloads(raw_query)
-
+        raw_query, routed_payloads = self._prepare_initial_input(inputs)
         with self._observability_execution_scope(session):
             await self._coordination.start(session)
             try:
@@ -945,13 +935,30 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             await harness.send(initial_message)
 
-    def _initial_leader_route_payloads(self, raw_query: str) -> list["InteractPayload"] | None:
-        """Parse leader initial input when it uses explicit team routing."""
-        if not raw_query or self.role != TeamRole.LEADER or self.team_backend is None:
+    def _prepare_initial_input(self, inputs):
+        """Prepare routing and cache only non-group input for the memory pipeline."""
+        from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
+
+        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
+        payloads = self._initial_leader_route_payloads(inputs)
+        is_group_input = payloads and isinstance(payloads[0], GroupChatMessage)
+        self._state.pending_user_query = "" if is_group_input else raw_query
+        return raw_query, payloads
+
+    def _initial_leader_route_payloads(self, inputs) -> list["InteractPayload"] | None:
+        """Route initial structured group input and existing text directives."""
+        if self.role != TeamRole.LEADER or self.team_backend is None:
             return None
 
+        from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
         from openjiuwen.agent_teams.interaction.router import parse_interact_str
 
+        raw_query = inputs.get("query", inputs) if isinstance(inputs, dict) else inputs
+        group_input = GroupChatMessage.from_wire(raw_query)
+        if group_input is not None:
+            return [group_input]
+        if not isinstance(raw_query, str) or not raw_query:
+            return None
         parsed = parse_interact_str(raw_query)
         if parsed and any(not isinstance(payload, GodViewMessage) for payload in parsed):
             return parsed
@@ -963,6 +970,15 @@ class TeamAgent(BaseAgent):
 
         result = await TeamRuntimeManager.dispatch_payloads(self, payloads)
         if result.ok:
+            from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
+            from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
+
+            if isinstance(payloads[0], GroupChatMessage):
+                await self._stream_controller.stream_queue.put(TeamOutputSchema(
+                    type="message", index=0,
+                    payload={"event_type": "team.group_message.accepted", **(result.data or {})},
+                    source_member=self._member_name(), role=self.role,
+                ))
             return
 
         await self._emit_interact_failed(result.reason)
@@ -1747,6 +1763,88 @@ class TeamAgent(BaseAgent):
                 spec.memory.embedding_config = runtime_spec.memory.embedding_config
         spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
+
+        # A checkpoint contains the model pool that was active when the team
+        # was first built.  The runtime spec is assembled for the current
+        # request, and may carry a newly selected compiler-driven model group.
+        # Keep the conversational/session state from the checkpoint, but use
+        # the current model selection for all newly configured runtimes.
+        # Without this merge a cold recovery silently rebuilt the old
+        # by-model-name allocator even though the UI had selected a model
+        # group for the current request.
+        if runtime_spec is not None and runtime_spec.model_pool:
+            current_pool = list(runtime_spec.model_pool)
+            current_strategy = runtime_spec.model_pool_strategy
+            if context.team_spec is None:
+                raise ValueError(f"No team spec found for '{team_name}' recovery")
+            context.team_spec = context.team_spec.model_copy(
+                update={
+                    "model_pool": current_pool,
+                    "model_pool_strategy": current_strategy,
+                }
+            )
+            # ``TeamAgentSpec.model_pool`` is persisted again at the next
+            # lifecycle boundary.  Clear convenience inputs so the snapshot
+            # cannot contain two competing model sources.
+            spec.model_pool = current_pool
+            spec.model_pool_strategy = current_strategy
+            spec.model_router = None
+            spec.model_intelli_router = None
+            # ``ctx.member_model`` takes precedence over the per-agent model in
+            # AgentConfigurator. Re-materialize it from the current pool
+            # instead of retaining the checkpoint's old client.  Name-routed
+            # strategies need an explicit logical name; IntelliRouter always
+            # uses its single wildcard entry.
+            checkpoint_name = None
+            checkpoint_model = context.member_model
+            if checkpoint_model is not None and checkpoint_model.model_request_config is not None:
+                checkpoint_name = checkpoint_model.model_request_config.model_name
+            allocation_name = checkpoint_name
+            allocation = None
+            resolved_model = None
+            if current_strategy == "intelli_router":
+                allocation_name = "*"
+                spec.leader.model_name = "*"
+            elif current_strategy == "by_model_name" and current_pool:
+                from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+                allocation = (
+                    resolve_member_model(
+                        context.team_spec,
+                        model_name=allocation_name,
+                        model_index=0,
+                    )
+                    if allocation_name
+                    else None
+                )
+                if allocation is None:
+                    allocation_name = current_pool[0].model_name
+                    team_logger.warning(
+                        "[{}] checkpoint model {!r} is unavailable; falling back to pool model {!r}",
+                        team_name,
+                        checkpoint_name,
+                        allocation_name,
+                    )
+                spec.leader.model_name = allocation_name
+                resolved_model = resolve_member_model(
+                    context.team_spec,
+                    model_name=allocation_name,
+                    model_index=0,
+                )
+
+            if current_strategy == "intelli_router":
+                from openjiuwen.agent_teams.models.allocator import build_model_allocator
+
+                allocator = build_model_allocator(spec, context.team_spec)
+                allocation = allocator.allocate(allocation_name) if allocator is not None else None
+            else:
+                from openjiuwen.agent_teams.models.allocator import build_model_allocator
+
+                allocator = build_model_allocator(spec, context.team_spec)
+                allocation = allocator.allocate(None) if allocator is not None else None
+            context.member_model = (
+                allocation.to_team_model_config() if allocation is not None else resolved_model
+            )
 
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
         card_id = f"{team_name}_{context.member_name}" if context.member_name else "leader"

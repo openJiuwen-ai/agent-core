@@ -1,12 +1,6 @@
-# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Public workspace history and mention notifications over the existing mailbox."""
-
-import asyncio
+"""Group broadcasts use the existing DB watermark, never a second inbox row."""
 import json
-import uuid
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -14,100 +8,11 @@ import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
 from openjiuwen.agent_teams.paths import reset_task_openjiuwen_home, set_task_openjiuwen_home
-from openjiuwen.agent_teams.schema.conversation import ConversationMessage
+from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, TeamDatabase
-from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
 from openjiuwen.agent_teams.tools.team import TeamBackend
-
-
-def message(log, identity, *, timestamp=10, content="hello"):
-    return ConversationMessage(
-        message_id=str(uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(
-            [log.team_name, log.session_id, identity], ensure_ascii=False))),
-        team_name=log.team_name, session_id=log.session_id, client_message_id=identity,
-        sender="user", sender_name="user", content=content, timestamp=timestamp,
-    )
-
-
-def read_archive(path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
-
-
-@pytest.fixture
-def log(tmp_path):
-    token = set_task_openjiuwen_home(tmp_path / "home")
-    try:
-        yield GroupConversationLog("group", "session", workspace_path=tmp_path / "workspace")
-    finally:
-        reset_task_openjiuwen_home(token)
-
-
-def test_log_persists_original_text_and_idempotency_across_instances(log):
-    original = message(log, "same", content="前文" * 3000)
-    original.attachments = [{"name": "brief.txt", "path": "/shared/brief.txt"}]
-    stored, duplicate = log.append(original)
-    assert stored == original and not duplicate
-    reopened = GroupConversationLog("group", "session")
-    assert reopened.path == log.path
-    assert reopened.history_path == log.history_path == log.path / "history.json"
-    retry = original.model_copy(update={"timestamp": 20})
-    stored_again, duplicate = reopened.append(retry)
-    assert duplicate and stored_again == stored
-    assert reopened.list_messages() == [stored]
-    assert read_archive(log.history_path)[0]["content"] == original.content
-    with pytest.raises(ValueError, match="different|conflict"):
-        reopened.append(original.model_copy(update={"content": "changed"}))
-    assert reopened.list_messages() == [stored]
-
-
-def test_log_concurrent_instances_preserve_complete_records(log, tmp_path):
-    other = GroupConversationLog("group", "session", workspace_path=tmp_path / "workspace")
-    def append(index):
-        target = log if index % 2 else other
-        return target.append(message(target, str(index % 12), content=f"message {index % 12}"))
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(append, range(48)))
-    assert sum(not duplicate for _, duplicate in results) == 12
-    records = read_archive(log.history_path)
-    assert len(records) == 12
-    assert {record["client_message_id"] for record in records} == {str(n) for n in range(12)}
-
-
-def test_log_time_range_tail_and_same_timestamp_trigger(log):
-    for number in range(1, 7):
-        log.append(message(log, str(number), timestamp=number * 10, content=str(number)))
-    assert [m.content for m in log.list_messages(after_timestamp=20, through_timestamp=50)] == ["3", "4", "5"]
-    assert [m.content for m in log.list_messages(limit=2, latest=True)] == ["5", "6"]
-    for latest, identity in ((True, "1"), (False, "6")):
-        trigger_id = message(log, identity).message_id
-        selected = log.list_messages(
-            after_timestamp=20, through_timestamp=50, limit=2, latest=latest, trigger_message_id=trigger_id,
-        )
-        assert len(selected) == 2 and trigger_id in {item.message_id for item in selected}
-    trigger = message(log, "same-ms", timestamp=60, content="same millisecond")
-    log.append(trigger)
-    assert log.list_messages(after_timestamp=60) == []
-    assert log.list_messages(after_timestamp=60, through_timestamp=60,
-                             trigger_message_id=trigger.message_id) == [trigger]
-    # A clock rollback must not drop the message which explicitly mentions the member.
-    assert log.list_messages(after_timestamp=70, through_timestamp=60,
-                             trigger_message_id=trigger.message_id) == [trigger]
-
-
-def test_log_cleanup_isolated_by_session_and_team(log):
-    sessions = [GroupConversationLog("group", session) for session in ("a/b", "a_b")]
-    other = GroupConversationLog("other-group", "session")
-    for current in [log, *sessions, other]:
-        current.append(message(current, "same"))
-    assert len({str(current.path) for current in [log, *sessions, other]}) == 4
-    sessions[0].delete_session()
-    assert sessions[0].list_messages() == []
-    assert len(sessions[1].list_messages()) == 1
-    GroupConversationLog.delete_registered("group")
-    assert log.list_messages() == []
-    assert sessions[1].list_messages() == []
-    assert len(other.list_messages()) == 1
 
 
 @pytest_asyncio.fixture
@@ -116,183 +21,255 @@ async def group(tmp_path, monkeypatch):
     token = set_session_id("session")
     db = TeamDatabase(DatabaseConfig(connection_string=":memory:"))
     await db.initialize()
-    await db.team.create_team("group", "Group", "team_leader")
-    for name, role in (("team_leader", "leader"), ("alice", "teammate"),
-                       ("bob", "teammate"), ("human", "passive_human")):
-        await db.member.create_member(name, "group", name, "{}", "ready", role=role)
-    backend = TeamBackend("group", "alice", False, db, SimpleNamespace(publish=AsyncMock()))
+    await db.team.create_team("group", "Group", "leader")
+    for name, role in (("leader", "leader"), ("alice", "teammate"), ("bob", "teammate")):
+        await db.member.create_member(name, "group", name, "{}", "unstarted", role=role)
+    backend = TeamBackend("group", "leader", True, db, SimpleNamespace(publish=AsyncMock()))
     backend.group_chat_spec = SimpleNamespace(
-        enable_group_chat=True, language="cn", group_context_tail=5, workspace=None,
+        language="cn", workspace=None,
     )
     backend.bind_group_session("session")
     clock = {"timestamp": 10}
-    monkeypatch.setattr("openjiuwen.agent_teams.tools.database.engine.get_current_time", lambda: clock["timestamp"])
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.tools.database.message_dao.get_current_time", lambda: clock["timestamp"],
+    )
+    host = SimpleNamespace(deliver_input=AsyncMock(), has_pending_interrupt=lambda: False,
+                           auto_start_member=AsyncMock())
+    blueprint = SimpleNamespace(member_name="alice", role=TeamRole.TEAMMATE, team_spec=backend.group_chat_spec)
+    infra = SimpleNamespace(team_backend=backend, message_manager=backend.message_manager)
+    handler = GroupMessageHandler(host, blueprint, infra, AsyncMock())
     try:
-        yield SimpleNamespace(backend=backend, db=db, clock=clock)
+        yield SimpleNamespace(backend=backend, db=db, clock=clock, host=host, handler=handler)
     finally:
-        await db.close()
         reset_session_id(token)
+        await db.close()
         reset_task_openjiuwen_home(home)
 
 
-@pytest.mark.asyncio
-async def test_mentions_send_latest_delta_and_full_history_path(group):
-    backend = group.backend
-    for number in range(1, 51):
-        group.clock["timestamp"] = number
-        first = await backend.append_group_message(
-            "user", f"[message {number}]", client_message_id=str(number),
-            mentions=["alice"] if number == 50 else [],
-        )
-        if number < 50:
-            assert first.notified_members == []
-    log = await backend.group_conversation()
-    rows = await group.db.message.get_messages("group", "alice", unread_only=True)
-    assert len(rows) == 1 and first.notified_members == ["alice"]
-    assert str(first.context_path) in rows[0].content and "read_file" in rows[0].content
-    assert "(0, 50]" in rows[0].content and "[message 45]" not in rows[0].content
-    for number in range(46, 51):
-        assert f"[message {number}]" in rows[0].content
-    assert log.last_notified("alice") == 50
-    for number in range(51, 101):
-        group.clock["timestamp"] = number
-        second = await backend.append_group_message(
-            "user", f"[message {number}]", client_message_id=str(number),
-            mentions=["alice"] if number == 100 else [],
-        )
-    rows = await group.db.message.get_messages("group", "alice", unread_only=True)
-    assert len(rows) == 2 and "(50, 100]" in rows[-1].content
-    assert "[message 50]" not in rows[-1].content
-    for number in range(96, 101):
-        assert f"[message {number}]" in rows[-1].content
-    assert log.last_notified("alice") == 100
-    assert first.context_path == second.context_path == str(log.history_path)
-    archived = await asyncio.to_thread(read_archive, second.context_path)
-    assert [m["timestamp"] for m in archived] == list(range(1, 101))
-    files = await asyncio.to_thread(lambda: {item.name for item in log.path.glob("*.json")})
-    assert files == {"history.json", ".notified.json"}
+async def post(group, content, mentions=()):
+    return await group.backend.append_group_message("user", content, client_message_id=content, mentions=mentions)
 
 
 @pytest.mark.asyncio
-async def test_duplicate_public_messages_validate_members_and_skip_passive_humans(group):
-    backend = group.backend
-    results = await asyncio.gather(*(
-        backend.append_group_message("user", "hello", client_message_id="same", mentions=["alice", "alice", "human"])
-        for _ in range(8)
-    ))
-    assert sum(not result.duplicate for result in results) == 1
-    assert sum(result.notified_members == ["alice"] for result in results) == 1
-    assert results[0].message.mentions == ["alice", "human"]
-    assert len(await group.db.message.get_messages("group", "alice")) == 1
-    assert await group.db.message.get_messages("group", "human") == []
-    with pytest.raises(ValueError, match="different|conflict"):
-        await backend.append_group_message("user", "changed", client_message_id="same", mentions=["alice", "human"])
-    for sender, mentions in (("stranger", []), ("user", ["stranger"])):
-        with pytest.raises(ValueError, match="Unknown"):
-            await backend.append_group_message(sender, "invalid", client_message_id="invalid", mentions=mentions)
-    assert len((await backend.group_conversation()).list_messages()) == 1
+async def test_dispatcher_selects_only_one_mailbox_handler(group, monkeypatch):
+    from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
+    from openjiuwen.agent_teams.agent.coordination.event_bus import InnerEventMessage, InnerEventType
 
-
-@pytest.mark.asyncio
-async def test_independent_member_watermarks_survive_reopening(group):
-    await group.backend.append_group_message("user", "first", client_message_id="1", mentions=["alice"])
+    ordinary = SimpleNamespace(on_poll_mailbox=AsyncMock())
+    routed = SimpleNamespace(message=ordinary, group_message=group.handler)
+    poll = InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX)
+    group_poll = AsyncMock(wraps=group.handler.on_poll_mailbox)
+    monkeypatch.setattr(group.handler, "on_poll_mailbox", group_poll)
+    await post(group, "public only")
+    await EventDispatcher._dispatch_mailbox(routed, poll)
+    ordinary.on_poll_mailbox.assert_awaited_once()
+    group_poll.assert_not_awaited()
     group.clock["timestamp"] = 20
-    await group.backend.append_group_message("user", "both", client_message_id="2", mentions=["alice", "bob"])
-    alice = (await group.db.message.get_messages("group", "alice"))[-1].content
-    bob = (await group.db.message.get_messages("group", "bob"))[-1].content
-    assert "(10, 20]" in alice and "(0, 20]" in bob
-    log = GroupConversationLog("group", "session")
-    assert log.last_notified("alice") == log.last_notified("bob") == 20
-    assert log.last_notified("team_leader") == 0
+    await post(group, "review now", ["alice"])
+    await EventDispatcher._dispatch_mailbox(routed, poll)
+    group_poll.assert_awaited_once()
+    ordinary.on_poll_mailbox.assert_awaited_once()
+    group.host.deliver_input.assert_awaited_once()
+    await EventDispatcher._dispatch_mailbox(routed, poll)
+    assert ordinary.on_poll_mailbox.await_count == 2
+    group_poll.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_same_timestamp_trigger_and_bounded_excerpts(group):
-    backend = group.backend
-    await backend.append_group_message("user", "first mention", client_message_id="first", mentions=["alice"])
-    await backend.append_group_message("user", "late ordinary message", client_message_id="late")
-    content = "前文" * 3000
-    await backend.append_group_message("user", content, client_message_id="second", mentions=["alice"])
-    rows = await group.db.message.get_messages("group", "alice")
-    notice = next(row.content for row in rows if content[:2000] in row.content)
-    assert "(10, 10]" in notice and "late ordinary message" not in notice
-    assert content not in notice
-    assert any(m.content == content for m in (await backend.group_conversation()).list_messages())
-
-
-@pytest.mark.asyncio
-async def test_queue_failure_preserves_archive_without_advancing_cursor(group, monkeypatch):
-    monkeypatch.setattr(group.backend.message_manager, "send_message", AsyncMock(return_value=None))
-    with pytest.raises(RuntimeError, match="Could not queue"):
-        await group.backend.append_group_message("user", "saved", client_message_id="failed", mentions=["alice"])
+async def test_history_jsonl_keeps_multiline_content_in_one_record(group):
+    contents = ['第一行\n第二行 "引用"', '另一条\u2028消息']
+    for content in contents:
+        await post(group, content)
+        group.clock["timestamp"] += 10
+    await post(group, contents[0])
     log = await group.backend.group_conversation()
-    assert [m.content for m in log.list_messages()] == ["saved"]
-    assert log.last_notified("alice") == 0
+    lines = log.history_path.read_text().split("\n")
+    assert log.history_path.name == "history.jsonl"
+    assert lines[-1] == ""
+    assert len(lines[:-1]) == 2
+    assert [json.loads(line)["content"] for line in lines[:-1]] == contents
 
 
-@pytest.mark.parametrize("corruption", ["invalid_json", "non_array", "foreign_message"])
-def test_invalid_history_is_not_overwritten(log, corruption):
-    log.append(message(log, "original"))
-    if corruption == "invalid_json":
-        content = "["
-    elif corruption == "non_array":
-        content = "{}"
-    else:
-        foreign = message(log, "foreign").model_dump()
-        foreign["team_name"] = "other-group"
-        content = json.dumps([foreign])
-    log.history_path.write_text(content, encoding="utf-8")
-    with pytest.raises(ValueError):
-        log.list_messages()
-    with pytest.raises(ValueError):
-        log.append(message(log, "new"))
-    assert log.history_path.read_text(encoding="utf-8") == content
+@pytest.mark.asyncio
+async def test_no_mentions_broadcasts_and_archives_without_consuming(group):
+    result = await post(group, "discussion")
+    group.backend.messager.publish.assert_awaited_once()
+    assert group.backend.messager.publish.call_args.kwargs["message"].event_type == "broadcast"
+    await group.handler.on_poll_mailbox(None)
+    group.host.deliver_input.assert_not_awaited()
+    assert await group.db.message.get_broadcast_read_at("group", "alice") == 0
+    assert await group.db.message.get_messages("group", "alice") == []
+    log = await group.backend.group_conversation()
+    records = [json.loads(line) for line in log.history_path.read_text().splitlines()]
+    assert records[0]["content"] == "discussion"
+    assert result.message.message_id == records[0]["message_id"]
+    assert not (log.path / ".notified.json").exists()
 
 
-def test_legacy_message_files_are_preserved_until_explicit_conversion(log):
-    original = message(log, "legacy")
-    log.append(original)
+@pytest.mark.asyncio
+async def test_excerpt_and_watermark_advance_only_after_delivery(group):
+    for timestamp, content in ((1, "old"), (5, "two"), (10, "three"), (15, "four"), (20, "recent"), (30, "trigger")):
+        group.clock["timestamp"] = timestamp
+        await post(group, content, ["alice"] if timestamp == 30 else [])
+    await group.handler.on_poll_mailbox(None)
+    text = group.host.deliver_input.call_args.args[0]
+    assert text.count('"content":') == 5
+    assert '"content": "old"' not in text
+    assert '"content": "recent"' in text and '"content": "trigger"' in text
+    assert "history.jsonl" in text
+    assert await group.db.message.get_broadcast_read_at("group", "alice") == 30
+    assert await group.db.message.get_broadcast_read_at("group", "bob") == 0
+    group.clock["timestamp"] = 40
+    await post(group, "next", ["alice", "bob"])
+    await group.handler.on_poll_mailbox(None)
+    text = group.host.deliver_input.call_args.args[0]
+    assert '"content": "trigger"' not in text and '"content": "next"' in text
+    assert await group.db.message.get_broadcast_read_at("group", "alice") == 40
+    assert len(await group.backend.message_manager.get_broadcast_messages("bob", unread_only=True)) == 1
+    await group.handler.on_poll_mailbox(None)
+    assert group.host.deliver_input.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_delivery_keeps_trigger_pending_and_ordered(group):
+    await post(group, "first", ["alice"])
+    group.clock["timestamp"] = 20
+    await post(group, "second", ["alice"])
+    group.host.deliver_input.side_effect = [None, RuntimeError("harness unavailable")]
+    with pytest.raises(RuntimeError, match="harness"):
+        await group.handler.on_poll_mailbox(None)
+    assert '"content": "first"' in group.host.deliver_input.call_args_list[0].args[0]
+    assert await group.db.message.get_broadcast_read_at("group", "alice") == 10
+    pending = await group.backend.message_manager.get_broadcast_messages("alice", unread_only=True)
+    assert [m.content for m in pending] == ["second"]
+    group.host.deliver_input.side_effect = None
+    await group.handler.on_poll_mailbox(None)
+    assert await group.db.message.get_broadcast_read_at("group", "alice") == 20
+
+
+@pytest.mark.asyncio
+async def test_retry_repairs_history_without_duplicate_db_or_input(group, monkeypatch):
+    log = await group.backend.group_conversation()
+    original = log.sync
+    def fail(_messages):
+        raise OSError("history unavailable")
+    monkeypatch.setattr(log, "sync", fail)
+    with pytest.raises(OSError):
+        await post(group, "retry", ["alice"])
+    group.backend.messager.publish.assert_not_awaited()
+    assert len(await group.db.message.get_team_messages("group", broadcast=True)) == 1
+    monkeypatch.setattr(log, "sync", original)
+    result = await post(group, "retry", ["alice"])
+    assert result.duplicate
+    assert len(log.history_path.read_text().splitlines()) == 1
+    await group.handler.on_poll_mailbox(None)
+    await post(group, "retry", ["alice"])
+    await group.handler.on_poll_mailbox(None)
+    group.host.deliver_input.assert_awaited_once()
+    with pytest.raises(ValueError, match="different"):
+        await group.backend.append_group_message("user", "conflict", client_message_id="retry", mentions=["alice"])
+
+
+@pytest.mark.asyncio
+async def test_history_can_be_rebuilt_from_db_and_sessions_are_isolated(group):
+    await post(group, "stored", ["alice"])
+    log = await group.backend.group_conversation()
     log.history_path.unlink()
-    legacy_path = log.path / f"{original.timestamp:020d}_{original.message_id}.json"
-    legacy_path.write_text(original.model_dump_json(), encoding="utf-8")
-    with pytest.raises(ValueError, match="Legacy per-message history"):
-        log.list_messages()
-    with pytest.raises(ValueError, match="Legacy per-message history"):
-        log.append(message(log, "new"))
-    assert legacy_path.read_text(encoding="utf-8") == original.model_dump_json()
-    assert not log.history_path.exists()
+    await group.handler.on_poll_mailbox(None)
+    assert json.loads(log.history_path.read_text().splitlines()[0])["content"] == "stored"
+    token = set_session_id("other")
+    try:
+        await group.db.create_cur_session_tables()
+        assert await group.db.message.get_broadcast_read_at("group", "alice") == 0
+        assert await group.db.message.get_team_messages("group", broadcast=True) == []
+    finally:
+        reset_session_id(token)
 
 
-def test_history_path_cannot_escape_archive(log, tmp_path):
-    log.append(message(log, "original"))
-    outside = tmp_path / "outside-history.json"
-    outside.write_text("[]", encoding="utf-8")
-    history_path = log.history_path
-    history_path.unlink()
-    history_path.symlink_to(outside)
-    with pytest.raises(ValueError, match="escape"):
-        log.list_messages()
-    with pytest.raises(ValueError, match="escape"):
-        log.append(message(log, "new"))
-    assert outside.read_text(encoding="utf-8") == "[]"
+@pytest.mark.asyncio
+async def test_unmentioned_broadcasts_cannot_advance_group_watermark(group):
+    await post(group, "hidden until mention")
+    group.clock["timestamp"] = 20
+    await post(group, "another public message")
+    await group.handler.on_poll_mailbox(None)
+    group.host.deliver_input.assert_not_awaited()
+    assert await group.db.message.get_broadcast_read_at("group", "alice") == 0
+    group.clock["timestamp"] = 30
+    await post(group, "ask", ["alice"])
+    await group.handler.on_poll_mailbox(None)
+    assert '"content": "hidden until mention"' in group.host.deliver_input.call_args.args[0]
 
 
-def test_watermark_path_cannot_escape_archive(log, tmp_path):
-    log.append(message(log, "m1"))
-    other = tmp_path / "outside.json"
-    other.write_text('{"alice": 99}')
-    (log.path / ".notified.json").symlink_to(other)
-    with pytest.raises(ValueError, match="escape"):
-        log.last_notified("alice")
-    with pytest.raises(ValueError, match="escape"):
-        log.mark_notified("alice", 100)
-    assert other.read_text() == '{"alice": 99}'
+@pytest.mark.asyncio
+async def test_startup_scan_only_starts_mentioned_members(group):
+    group.handler._blueprint.role = TeamRole.LEADER
+    group.handler._blueprint.member_name = "leader"
+    await post(group, "public")
+    await group.handler.start_mentioned_members()
+    group.host.auto_start_member.assert_not_awaited()
+    group.clock["timestamp"] = 20
+    await post(group, "wake alice", ["alice"])
+    await group.handler.start_mentioned_members()
+    group.host.auto_start_member.assert_awaited_once_with("alice")
 
 
-def test_registered_cleanup_skips_ordinary_sessions_and_preserves_other_group_scopes(log):
-    log.append(message(log, "keep"))
-    GroupConversationLog.delete_registered("group", "legacy-session-" + "x" * 300)
-    GroupConversationLog.delete_registered("ordinary-team", "x" * 300)
-    assert len(log.list_messages()) == 1
-    GroupConversationLog.delete_registered("group", "session")
-    assert log.list_messages() == []
+@pytest.mark.asyncio
+async def test_leader_poll_starts_mentions_without_leader_input(group):
+    from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
+    from openjiuwen.agent_teams.agent.coordination.event_bus import InnerEventMessage, InnerEventType
+    from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
+
+    group.handler._blueprint.role = TeamRole.LEADER
+    group.handler._blueprint.member_name = "leader"
+    await group.db.member.create_member("failed", "group", "Failed", "{}", "error", role="teammate")
+    await post(group, "start experts", ["alice", "failed"])
+    ordinary = SimpleNamespace(on_poll_mailbox=AsyncMock())
+    routed = SimpleNamespace(message=ordinary, group_message=group.handler)
+    await EventDispatcher._dispatch_mailbox(routed, InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX))
+    assert {call.args[0] for call in group.host.auto_start_member.await_args_list} == {"alice", "failed"}
+    ordinary.on_poll_mailbox.assert_awaited_once()
+    group.host.deliver_input.assert_not_awaited()
+    assert not hasattr(MessageHandler, "_start_unread_members")
+
+
+@pytest.mark.asyncio
+async def test_ordinary_team_broadcast_behavior_is_unchanged(group):
+    await group.db.create_cur_session_tables()
+    await group.backend.message_manager.broadcast_message("normal broadcast")
+    group.handler._expand = AsyncMock(return_value=SimpleNamespace(body="normal broadcast", is_template=False))
+    await group.handler.on_poll_mailbox(None)
+    assert "normal broadcast" in group.host.deliver_input.call_args.args[0]
+    assert await group.db.message.get_broadcast_read_at("group", "alice") == 10
+
+
+@pytest.mark.asyncio
+async def test_completion_only_waits_for_mentioned_broadcasts(group, monkeypatch):
+    monkeypatch.setattr(group.backend.task_manager, "list_tasks", AsyncMock(
+        return_value=[SimpleNamespace(status="completed")],
+    ))
+    monkeypatch.setattr(group.db.member, "get_team_members", AsyncMock(
+        return_value=[SimpleNamespace(member_name="alice", role="teammate", status="ready")],
+    ))
+    await post(group, "public discussion")
+    assert await group.backend.is_team_completed() is not None
+    group.clock["timestamp"] = 20
+    await post(group, "review", ["alice"])
+    assert await group.backend.is_team_completed() is None
+    await group.handler.on_poll_mailbox(None)
+    assert await group.backend.is_team_completed() is not None
+
+
+@pytest.mark.asyncio
+async def test_mixed_broadcasts_do_not_skip_a_failed_mention(group):
+    await post(group, "please review", ["alice"])
+    group.clock["timestamp"] = 20
+    await group.backend.message_manager.broadcast_message("normal announcement")
+    group.host.deliver_input.side_effect = RuntimeError("delivery failed")
+    with pytest.raises(RuntimeError, match="delivery failed"):
+        await group.handler.on_poll_mailbox(None)
+    assert await group.db.message.get_broadcast_read_at("group", "alice") == 0
+    group.host.deliver_input.side_effect = None
+    await group.handler.on_poll_mailbox(None)
+    assert "please review" in group.host.deliver_input.call_args_list[-2].args[0]
+    assert "normal announcement" in group.host.deliver_input.call_args_list[-1].args[0]
+    assert await group.db.message.get_broadcast_read_at("group", "alice") == 20

@@ -14,7 +14,6 @@ from typing import Any
 import yaml
 
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)}")
-RSI_MAX_OUTPUT_TOKENS = 100000
 
 
 def with_rsi_reasoning_policy(config_data: dict[str, Any]) -> dict[str, Any]:
@@ -49,7 +48,7 @@ def with_rsi_reasoning_policy(config_data: dict[str, Any]) -> dict[str, Any]:
 
 
 def with_rsi_output_budget(config_data: dict[str, Any]) -> dict[str, Any]:
-    """Apply the shared Harness RSI output limit without changing the source config."""
+    """Let the provider choose output length for RSI, including legacy task files."""
     data = deepcopy(config_data)
     model_data = data.get("model", data)
     if isinstance(model_data, dict):
@@ -58,7 +57,12 @@ def with_rsi_output_budget(config_data: dict[str, Any]) -> dict[str, Any]:
             request = {}
             model_data["model_request_config"] = request
         if isinstance(request, dict):
-            request["max_tokens"] = RSI_MAX_OUTPUT_TOKENS
+            request["max_tokens"] = None
+            request.pop("max_completion_tokens", None)
+            extra = request.get("extra_body")
+            if isinstance(extra, dict):
+                extra.pop("max_tokens", None)
+                extra.pop("max_completion_tokens", None)
     return data
 
 
@@ -83,11 +87,13 @@ def build_deep_agent_from_model_config(config_data: dict[str, Any]) -> Any:
     from openjiuwen.harness.deep_agent import DeepAgent
     from openjiuwen.harness.schema.config import DeepAgentConfig
     from openjiuwen.harness.workspace.workspace import Workspace
+    from openjiuwen.rsi.harness_rsi.member_optimizer.budget_model import BudgetedRsiModel
 
     config_data = with_rsi_reasoning_policy(with_rsi_output_budget(config_data))
     model = None
     if "model" in config_data:
-        model = TeamModelConfig.model_validate(without_inner_sdk_retries(config_data["model"])).build()
+        built = TeamModelConfig.model_validate(without_inner_sdk_retries(config_data["model"])).build()
+        model = BudgetedRsiModel(model_client_config=built.model_client_config, model_config=built.model_config)
 
     workspace = Workspace(root_path="./", language="en")
     if "workspace" in config_data and isinstance(config_data["workspace"], dict):

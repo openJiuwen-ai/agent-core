@@ -88,6 +88,32 @@ async def test_retries_when_model_gateway_returns_502() -> None:
 
 
 @pytest.mark.asyncio
+async def test_retries_when_model_gateway_returns_summarized_502() -> None:
+    attempts = 0
+
+    async def call_model() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError(
+                "openAI API async invoke error: NotFoundError: HTTP 502, "
+                'HTML error page "502 Bad Gateway" (80 chars); '
+                "response body is an HTML/XML document, not an API error payload"
+            )
+        return '{"ok": true}'
+
+    result = await run_model_call_with_retries(
+        call_model,
+        operation_name="diagnosis agent",
+        max_retries=2,
+        initial_retry_delay_seconds=0,
+    )
+
+    assert result == '{"ok": true}'
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
 async def test_retries_rate_limit_but_not_exhausted_budget() -> None:
     attempts = 0
 

@@ -543,6 +543,38 @@ def test_invoke_local_trims_first_llm_prompt_to_last_user() -> None:
     ]
 
 
+def test_invoke_local_skips_system_reminder_when_trimming_to_last_user() -> None:
+    """Prompt-attachment users must not steal the invoke-local cut point."""
+    reminder = (
+        "<system-reminder>\n"
+        "以下内容不是用户的意图。\n\n"
+        "# TTSE catalog\n"
+        "</system-reminder>"
+    )
+    trajectory = _trajectory(
+        [
+            _llm_span(
+                "llm-1",
+                start=10,
+                prompt=[
+                    {"role": "system", "content": "rules"},
+                    {"role": "user", "content": "make xlsx"},
+                    {"role": "assistant", "content": "done"},
+                    {"role": "user", "content": "查询杭州今天天气"},
+                    {"role": "user", "content": reminder},
+                ],
+                completion={"role": "assistant", "content": "杭州今天晴。"},
+            )
+        ]
+    )
+
+    local = trajectory_to_messages(trajectory, invoke_local=True)
+    assert local[0] == {"role": "user", "content": "查询杭州今天天气"}
+    assert local[1] == {"role": "user", "content": reminder}
+    assert local[-1] == {"role": "assistant", "content": "杭州今天晴。"}
+    assert not any(m.get("content") == "make xlsx" for m in local)
+
+
 def test_invoke_local_keeps_same_invoke_react_steps_via_overlap() -> None:
     """After the first trimmed prompt, later spans still merge invoke-local tools."""
     first = _llm_span(

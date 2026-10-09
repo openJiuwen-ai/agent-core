@@ -5,10 +5,58 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 # Top-level schema keys that OpenAI-compatible APIs (including Dashscope) reject.
 _UNSUPPORTED_SCHEMA_KEYS = {"$schema", "$id", "$defs", "definitions", "$comment", "$anchor", "$vocabulary"}
+
+
+def decode_mcp_result(value: Any) -> Any:
+    """Decode the result envelope, never JSON embedded in executed code or page text."""
+    for _ in range(8):
+        if isinstance(value, dict):
+            if value.get("isError") is True or value.get("ok") is False or value.get("error"):
+                return value
+            if value.get("__browser_compact_rpc__") is True:
+                value = value.get("payload")
+                continue
+            content = value.get("content")
+            if isinstance(content, list):
+                texts = [str(item.get("text") or "") for item in content
+                         if isinstance(item, dict) and item.get("type") == "text"]
+                if texts:
+                    value = "\n".join(texts)
+                    continue
+            key = next((key for key in ("result", "value", "data", "text") if key in value), None)
+            envelope_keys = {"result", "value", "data", "text", "ok", "isError", "page_state", "metrics"}
+            if key is not None and (key == "result" or set(value) <= envelope_keys):
+                value = value.get(key)
+                continue
+            return value
+        if not isinstance(value, str):
+            return value
+        raw = value.strip()
+        result_section = re.search(r"(?m)^### Result\s*\n", raw)
+        if result_section:
+            raw = re.split(r"(?m)^### ", raw[result_section.end():], maxsplit=1)[0].strip()
+        if raw.startswith("```"):
+            fenced = re.fullmatch(r"```(?:json)?\s*\n(.*?)\n```", raw, re.DOTALL)
+            if fenced:
+                raw = fenced.group(1).strip()
+        try:
+            decoded = json.loads(raw)
+        except (ValueError, TypeError):
+            try:
+                decoded, end = json.JSONDecoder().raw_decode(raw)
+            except (ValueError, TypeError):
+                return raw if result_section else value
+            if not raw[end:].lstrip().startswith("### "):
+                return raw if result_section else value
+        if decoded == value:
+            return decoded
+        value = decoded
+    return value
 
 
 def sanitize_json_schema(schema: Any) -> Any:

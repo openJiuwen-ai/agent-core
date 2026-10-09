@@ -379,7 +379,7 @@ async def test_processor_reuses_cached_browser_state_without_navigation() -> Non
     assert '"scroll_y":400' in state_message.content
     assert '"page_change"' not in state_message.content
     assert '"target_id":"t_g0_1"' in state_message.content
-    assert "[ref=e7]" not in state_message.content
+    assert "[ref=e7]" in state_message.content
     assert "image_url" not in state_message.content
     assert all(message.name != "browser_state_progress" for message in window.context_messages)
     provider.capture_browser_state.assert_awaited_with()
@@ -739,7 +739,7 @@ async def test_runtime_combines_snapshot_with_page_metadata() -> None:
     assert "page.screenshot" not in run_code
     assert state["ok"] is True
     assert state["url"] == "https://example.test/docs"
-    assert state["dom"] == ""
+    assert state["dom"] == '- link "Docs" [ref=e3]'
     assert state["page_state"]["interactives"][0]["text"] == "Docs"
     assert "screenshot" not in state
     target = runtime._ensure_page_state().resolve_target(generation_id="g0", ref="e3")
@@ -817,8 +817,8 @@ async def test_runtime_automatic_capture_replaces_refs_after_url_generation_sync
     first_state = await runtime.capture_browser_state()
     second_state = await runtime.capture_browser_state()
 
-    assert first_state["dom"] == ""
-    assert second_state["dom"] == ""
+    assert first_state["dom"] == '- button "First" [ref=e1]'
+    assert second_state["dom"] == '- button "Second" [ref=e2]'
     assert first_state["page_state"]["interactives"][0]["text"] == "First"
     assert second_state["page_state"]["interactives"][0]["text"] == "Second"
     assert runtime.generation_id == "g1"

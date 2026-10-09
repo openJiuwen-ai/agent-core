@@ -113,7 +113,7 @@ async def test_six_tool_lifecycle_chain_uses_real_control() -> None:
     session = Session(session_id="parent_chain_lifecycle")
     session.write_stream = AsyncMock()
     tools = build_subagent_tools(parent, language="cn")
-    spawn_tool, wait_tool, _list_tool, send_input_tool, close_tool, resume_tool = tools
+    spawn_tool, wait_tool, list_tool, send_input_tool, close_tool, resume_tool = tools
 
     with _patch_create_session(), patch(
         "openjiuwen.harness.subagent_runtime.control.WAIT_TIMEOUT_MS_MIN",
@@ -175,8 +175,25 @@ async def test_six_tool_lifecycle_chain_uses_real_control() -> None:
             assert resume_result.data["turn_outcome"] == "completed"
             assert resume_result.data["restored"] is True
 
-            parent.mock_agent.output = "turn-3"
-            instance = get_subagent_control(parent, session)._manager.get(subagent_id)
+            control = get_subagent_control(parent, session)
+            instance = control._manager.get(subagent_id)
+            await asyncio.sleep(0)
+            assert instance._agent.stream_calls == 0
+            assert instance.has_active_turn() is False
+            assert instance.is_closed() is False
+            listed = await list_tool.invoke({}, session=session)
+            assert listed.data["summary"] == {"live_count": 1, "closed_count": 0}
+            assert listed.data["live_subagents"][0]["can_send_input"] is True
+            assert listed.data["live_subagents"][0]["needs_resume"] is False
+
+            # Repeating resume is a successful no-op, not a reason to close
+            # and restore again. Follow-up input must use the same instance.
+            repeated = await resume_tool.invoke({"subagent_id": subagent_id}, session=session)
+            assert repeated.data["restored"] is False
+            assert repeated.data["status"] == "idle"
+            assert control._manager.get(subagent_id) is instance
+            assert instance._agent.stream_calls == 0
+
             instance._agent.output = "turn-3"
             await send_input_tool.invoke(
                 {"subagent_id": subagent_id, "query": "third turn"},
@@ -189,7 +206,7 @@ async def test_six_tool_lifecycle_chain_uses_real_control() -> None:
             )
             assert wait_result.data["results"][subagent_id] == "turn-3"
 
-            control = get_subagent_control(parent, session)
-            assert control._manager.get(subagent_id)._agent.stream_calls == 1
+            assert control._manager.get(subagent_id) is instance
+            assert instance._agent.stream_calls == 1
         finally:
             await release_subagent_control(parent, session.get_session_id(), reason="test")

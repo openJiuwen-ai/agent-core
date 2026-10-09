@@ -83,6 +83,7 @@ SUBAGENT_CLOSE_DESCRIPTION: Dict[str, str] = {
     "cn": (
         "在子代理不再需要时关闭实例并释放常驻名额；返回关闭前的状态。"
         "已完成任务的子代理仍会占用名额，不要长期保留不再需要的实例。"
+        "用户刚要求恢复或还有待发送的后续消息时，应保留实例；不要仅因 idle/completed 就关闭。"
         "会话上下文保留在 checkpointer，之后可用 subagent_resume 恢复。"
         "RUNNING 实例会被拒绝，请先 subagent_wait 或 subagent_send_input(interrupt=true)。"
     ),
@@ -91,6 +92,8 @@ SUBAGENT_CLOSE_DESCRIPTION: Dict[str, str] = {
         "returns the target's previous status before shutdown was requested. "
         "Completed subagents remain open and count toward the capacity limit until closed—"
         "don't keep instances around longer than necessary. "
+        "Keep an instance the user just asked to restore or that has follow-up input to send; "
+        "idle/completed alone is not a reason to close it. "
         "Conversation history stays in checkpointer and can be restored with subagent_resume. "
         "RUNNING instances are rejected—subagent_wait or subagent_send_input(interrupt=true) first."
     ),
@@ -100,13 +103,35 @@ SUBAGENT_RESUME_DESCRIPTION: Dict[str, str] = {
     "cn": (
         "从 checkpointer 恢复 status=closed（manual/evicted）的 subagent，重新占用名额，不自动投递任务。"
         "status=idle 的存活实例无需 resume，直接 subagent_send_input。"
-        "返回 restored=false 表示实例本就在内存中。恢复后须再 subagent_send_input 并 subagent_wait。"
+        "返回 restored=false 表示实例本就在内存中，不是恢复失败，无需 close 后重试。"
+        "仅要求恢复时保持实例待命；有后续消息时直接 subagent_send_input，再 subagent_wait。"
+        "恢复后的 idle/completed 不代表新请求已执行，不要因此立即 close 或再次 resume。"
     ),
     "en": (
         "Restore a status=closed (manual/evicted) subagent from checkpointer and reclaim a slot; "
         "does not enqueue work. Live status=idle instances need subagent_send_input, not resume. "
-        "restored=false means the instance was already in memory. "
-        "Follow with subagent_send_input and subagent_wait after a true restore."
+        "restored=false means the instance was already in memory, not a restore failure; do not close and retry. "
+        "If only restoration was requested, leave the instance idle. "
+        "For follow-up work, use subagent_send_input, then subagent_wait. "
+        "idle/completed after resume does not mean a new request was executed; "
+        "do not immediately close or resume again."
+    ),
+}
+
+SUBAGENT_RESUME_IDLE_MESSAGE: dict[str, str] = {
+    "cn": (
+        "实例已就绪，本次 resume 未投递新任务；turn_outcome 描述恢复前的上一轮结果，"
+        "不代表本次 resume 执行了新请求。"
+        "仅要求恢复时保持待命；有后续消息时直接 subagent_send_input，再 subagent_wait。"
+        "不要仅因 idle/completed 关闭实例或再次 resume。"
+    ),
+    "en": (
+        "Instance is ready; this resume call did not enqueue new work. "
+        "turn_outcome describes the previous turn before restoration; "
+        "it does not mean this resume call executed a new request. "
+        "If only restoration was requested, leave it idle. "
+        "For follow-up work, use subagent_send_input, then subagent_wait. "
+        "Do not close or resume it again just because it is idle/completed."
     ),
 }
 

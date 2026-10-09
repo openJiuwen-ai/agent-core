@@ -36,9 +36,11 @@ from openjiuwen.harness.personal_context.fetch.cursor_selection import (
 from openjiuwen.harness.personal_context.fetch.retry import (
     classify_payload_error,
     classify_transport_error,
+    is_candidate_read_error,
     retry_provider_read,
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
+from openjiuwen.harness.personal_context.path_safety import service_storage_segment
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 _LOGGER = logging.getLogger(__name__)
@@ -91,7 +93,7 @@ def _safe_detail(exc: BaseException, pat: str) -> str:
 
 
 def _service_root(home: Path, service_id: str) -> Path:
-    return home / "materialized-sources" / "gitcode" / service_id
+    return home / "materialized-sources" / "gitcode" / service_storage_segment(service_id)
 
 
 def _candidate_path(home: Path, service_id: str) -> Path:
@@ -700,10 +702,19 @@ def _select_fair_candidates(
     candidates: tuple[dict[str, object], ...],
     cursor: dict[str, object] | None,
     limit: int,
+    *,
+    include_failed: bool = False,
 ) -> tuple[dict[str, object], ...]:
     """Keep singleton lanes and share the remaining quota across repeatable lanes."""
 
-    pending = list(select_latest_candidates(candidates, cursor, max(1, len(candidates))))
+    pending = list(
+        select_latest_candidates(
+            candidates,
+            cursor,
+            max(1, len(candidates)),
+            retry_quarantined=include_failed,
+        )
+    )
     if len(pending) <= limit:
         return tuple(pending)
 
@@ -762,6 +773,31 @@ def _select_fair_candidates(
     return tuple(selected)
 
 
+def _validated_fetch_candidate(candidate: Mapping[str, object]) -> tuple[RawChangeItem, str]:
+    for field_name in ("stable_id", "revision_id", "candidate_time", "resource_lane", "locator"):
+        value = candidate.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise _fetch_error("GitCode candidate is invalid")
+    item_ref = str(candidate["stable_id"])
+    if len(item_ref) > 256:
+        raise _fetch_error("GitCode candidate stable ID is too long")
+    item = candidate.get("item")
+    if not isinstance(item, RawChangeItem):
+        raise _fetch_error("GitCode candidate item is invalid")
+    if candidate["resource_lane"] == "code":
+        owner = candidate.get("owner")
+        repo = candidate.get("repo")
+        branch = candidate.get("default_branch")
+        head_sha = candidate.get("head_sha")
+        materialized_path = candidate.get("materialized_source_path")
+        strings_valid = all(isinstance(value, str) and bool(value.strip()) for value in (owner, repo, branch))
+        sha_valid = isinstance(head_sha, str) and _SHA.fullmatch(head_sha) is not None
+        path_valid = isinstance(materialized_path, str) and Path(materialized_path).is_absolute()
+        if not strings_valid or not sha_valid or not path_valid:
+            raise _fetch_error("GitCode code candidate is invalid")
+    return item, item_ref
+
+
 class GitCodeFetchService(ContextFetchService):
     """Fetch one GitCode repository and optionally materialize its selected code snapshot."""
 
@@ -771,6 +807,7 @@ class GitCodeFetchService(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         del run_id
         try:
@@ -947,7 +984,9 @@ class GitCodeFetchService(ContextFetchService):
                     candidates.append(code_candidate)
 
             max_items = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
-            return _select_fair_candidates(tuple(candidates), cursor, max_items)
+            return _select_fair_candidates(
+                tuple(candidates), cursor, max_items, include_failed=include_failed
+            )
         except asyncio.CancelledError:
             raise
         except BaseError:
@@ -972,24 +1011,41 @@ class GitCodeFetchService(ContextFetchService):
             for index in range(0, len(candidates), _BATCH_SIZE):
                 chunk = candidates[slice(index, index + _BATCH_SIZE)]
                 items: list[RawChangeItem] = []
+                success_offsets: list[int] = []
+                failures: list[dict[str, object]] = []
                 materialized_path: str | None = None
                 materialized_revision: str | None = None
-                for candidate in chunk:
-                    item = candidate.get("item")
-                    if not isinstance(item, RawChangeItem):
-                        raise _fetch_error("GitCode candidate item is invalid")
+                for offset, candidate in enumerate(chunk):
+                    item, item_ref = _validated_fetch_candidate(candidate)
                     if candidate.get("resource_lane") == "code":
                         owner = str(candidate.get("owner", ""))
                         repo = str(candidate.get("repo", ""))
                         default_branch = str(candidate.get("default_branch", ""))
                         head_sha = str(candidate.get("head_sha", ""))
-                        await self._materialize_code(run_id, (owner, repo), default_branch, head_sha, pat)
+                        try:
+                            await self._materialize_code(run_id, (owner, repo), default_branch, head_sha, pat)
+                        except BaseError as exc:
+                            if not is_candidate_read_error(exc):
+                                raise
+                            failures.append(
+                                {
+                                    "offset": offset,
+                                    "item_ref": item_ref,
+                                    "code": StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR.code,
+                                    "message": "条目读取或解析失败",
+                                }
+                            )
+                            continue
                         materialized_path = str(candidate.get("materialized_source_path", ""))
                         materialized_revision = head_sha
                     items.append(item)
+                    success_offsets.append(offset)
                 yield FetchBatch(
                     batch_id=f"batch-{index // _BATCH_SIZE}",
                     items=tuple(items),
+                    attempted_count=len(chunk),
+                    success_offsets=tuple(success_offsets),
+                    failures=tuple(failures),
                     next_cursor=next_cursor,
                     materialized_source_path=materialized_path,
                     materialized_revision=materialized_revision,

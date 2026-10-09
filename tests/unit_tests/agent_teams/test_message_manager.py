@@ -772,8 +772,8 @@ async def test_has_unread_messages_broadcast_partial_read(db, team_messaging):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_offline_direct_messages_start_only_waiting_recipients(db, team_messaging, monkeypatch):
-    """Offline host/@ input rides the existing mailbox, startup, and read flags."""
+async def test_direct_messages_do_not_trigger_group_startup(db, team_messaging, monkeypatch):
+    """Ordinary mailbox handlers do not scan and start other recipients."""
     from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
     from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent
     from openjiuwen.agent_teams.schema.team import TeamRole
@@ -806,9 +806,7 @@ async def test_offline_direct_messages_start_only_waiting_recipients(db, team_me
         raise AssertionError("Startup query read mailbox bodies")
 
     monkeypatch.setattr(db.message, "_hydrate_rows", no_hydration)
-    targets = await db.message.get_unread_startable_members(team_name)
-    assert set(targets) == {"offline", "failed"}
-    assert len(targets) == 2
+    assert await db.message.get_unread_group_members(team_name) == []
     handler = object.__new__(MessageHandler)
     handler._blueprint = SimpleNamespace(role=TeamRole.LEADER, member_name="leader")
     handler._infra = SimpleNamespace(
@@ -820,7 +818,7 @@ async def test_offline_direct_messages_start_only_waiting_recipients(db, team_me
     handler._ack_user_bound_message = AsyncMock()
     handler._notify_human_agent_inbound = AsyncMock()
     await handler.on_poll_mailbox(None)
-    assert {call.args[0] for call in handler._lifecycle.auto_start_member.await_args_list} == {"offline", "failed"}
+    handler._lifecycle.auto_start_member.assert_not_awaited()
     handler._process_unread_messages.assert_awaited_once_with("leader")
 
     handler._lifecycle.auto_start_member.reset_mock()
@@ -828,7 +826,7 @@ async def test_offline_direct_messages_start_only_waiting_recipients(db, team_me
         team_name=team_name, message_id=message_id, from_member_name="user", to_member_name="offline",
     ))
     await handler.on_message_or_broadcast(event)
-    assert {call.args[0] for call in handler._lifecycle.auto_start_member.await_args_list} == {"offline", "failed"}
+    handler._lifecycle.auto_start_member.assert_not_awaited()
 
     handler._lifecycle.auto_start_member.reset_mock()
     handler._blueprint.role = TeamRole.TEAMMATE

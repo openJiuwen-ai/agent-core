@@ -60,6 +60,12 @@ SLOW_RAIL_INIT_SECONDS = 0.1
 # so the batch bar sits higher than the per-rail one.
 SLOW_RAIL_INIT_BATCH_SECONDS = 0.25
 
+# Set on ``AgentCallbackContext.extra`` by the streaming model call once
+# user-visible reasoning or content has been written to the session.
+# Transient provider retries must not run after this, or the same answer
+# is written twice.
+MODEL_VISIBLE_OUTPUT_EMITTED_KEY = "_model_visible_output_emitted"
+
 _CURRENT_USAGE_INVOCATION_ID: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
     "current_usage_invocation_id",
     default=None,
@@ -270,6 +276,7 @@ class InvokeInputs:
         delegation_id: Optional task/delegation id
         agent_path: Optional root-to-current agent path
         depth: Invocation tree depth
+        turn_number: 1-based number of the logical user turn
     """
     query: Optional[str, InteractiveInput]
     conversation_id: Optional[str] = None
@@ -282,6 +289,7 @@ class InvokeInputs:
     delegation_id: Optional[str] = None
     agent_path: Optional[List[str]] = None
     depth: int = 0
+    turn_number: Optional[int] = None
 
     def is_heartbeat(self) -> bool:
         """Check if this is a heartbeat run."""

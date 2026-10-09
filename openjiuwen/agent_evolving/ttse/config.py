@@ -14,13 +14,24 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Literal, Optional
 
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     GENERATE_RECORDS_LLM_POLICY,
 )
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
+
+CONSULT_RETRIEVE_MODES = ("hybrid", "embed", "bm25")
+ConsultRetrieveMode = Literal["hybrid", "embed", "bm25"]
+
+
+def normalize_consult_retrieve_mode(value: Any) -> ConsultRetrieveMode:
+    """Map yaml/config text to a scoring mode; unknown values become hybrid."""
+    raw = str(value or "").strip().lower()
+    if raw in CONSULT_RETRIEVE_MODES:
+        return raw  # type: ignore[return-value]
+    return "hybrid"
 
 
 @dataclass
@@ -31,17 +42,18 @@ class TTSEConfig:
         store_path: JSON path for the shared FACT/TIP bank (created on first write).
         embedding: Optional embedding provider. When set, induction dedup and
             Auto-dream soft clustering use cosine similarity. When ``None``
-            (or embedding fails), both fall back to self-normalized BM25 with
-            ``bm25_sim_threshold`` (default ``0.5``). FACT/TIP are disclosed
+            (or embedding fails), induction dedup falls back to substring
+            matching; Auto-dream merge uses LLM Phase1/Phase2 clustering when
+            ``dream_llm_cluster_enabled`` is True. FACT/TIP are disclosed
             via ``ttse_consult``, not dumped into the system prompt.
             Semantic dedup / consult recall scan the in-memory bank in O(n)
             (n <= max_facts or max_tips, default 400). After the process-local
             embedding cache is warm this is CPU cosine only; a cold bank is
             filled with batched ``embed_documents`` (not one RPC per row).
-            An ANN index (faiss et al.) is intentionally not used at this n.
-            The same provider is reused by ``ttse_consult`` for BM25+embedding
-            hybrid recall when ``query`` is set; missing/failed embedding
-            degrades to BM25. Callers typically construct
+            Dedup/dream still scan the in-memory bank at this n. ``ttse_consult``
+            ranks from persisted BM25 sidecars plus Chroma HNSW when embeddings
+            exist. The same provider is reused for BM25+embedding hybrid recall;
+            missing/failed embedding degrades to BM25. Callers typically construct
             ``OpenAICompatibleEmbeddingProvider(api_key=..., base_url=..., model=...)``
             (e.g. Huawei MaaS ``bge-m3`` at ``https://api.modelarts-maas.com/v1``)
             and assign it here; do not put raw url/key strings on TTSEConfig.
@@ -50,9 +62,6 @@ class TTSEConfig:
             matches ModelArts rate limits. ``<= 0`` disables throttling.
         dedup_threshold: Cosine threshold above which two rules are treated as
             duplicates during induction. Only used when ``embedding`` is set.
-        bm25_sim_threshold: Self-normalized BM25 similarity floor for
-            induction dedup and dream soft clustering when no embedding
-            provider is available. Default ``0.5``.
         max_facts / max_tips: Hard caps on bank size (highest-count kept).
             Also the O(n) bound for semantic dedup / consult embedding scans.
         traj_char_budget: Max chars of trajectory text fed to the induce prompt.
@@ -78,7 +87,13 @@ class TTSEConfig:
             flatten. When set, each task's excerpt is capped before the batch
             induce call.
         consult_max_chars / consult_max_rules: Truncation for ``ttse_consult``.
-        consult_top_k: Default per-track hit count when the tool omits ``top_k``.
+        consult_top_k: Per-track FACT/TIP hit count for ``ttse_consult`` (not a
+            tool argument; change this config to tune recall size).
+        consult_retrieve_mode: Scoring path for ``ttse_consult`` when the pool
+            is larger than ``consult_top_k``: ``hybrid`` (BM25+ANN RRF, default),
+            ``embed`` (ANN first), or ``bm25`` (keywords only). Empty pool,
+            ``pool <= top_k``, empty query, and no-score dumps still apply.
+            BM25 sidecars always score; embedding miss/fail falls back to BM25.
         consult_rrf_k: RRF constant for BM25+embedding fusion (KB hybrid uses 60).
         inject_persist_min_secs / inject_persist_min_hits: Consult hits refresh
             ``last_injected_at`` / ``inject_hits`` in memory immediately.
@@ -97,24 +112,39 @@ class TTSEConfig:
         dream_min_hours: Min hours since last successful dream.
         dream_min_rules: Skip LLM merge when facts+tips below this (prune/purge still run).
         dream_soft_lo: Cosine edge threshold for soft clustering near-duplicates
-            when an embedding provider is set. Ignored for the BM25 fallback
-            path (uses ``bm25_sim_threshold`` instead).
+            when an embedding provider is set. Ignored on the no-embedding
+            LLM clustering path.
         dream_cluster_min_size: Min cluster size to consider for merge.
-        dream_max_llm_merges: Cap LLM merge calls per dream run.
+        dream_max_llm_merges: Cap on per-cluster LLM merge invokes per track
+            on the embedding soft-cluster path (default ``15``). Unused on the
+            no-embedding LLM Phase1/Phase2 path.
+        dream_merge_max_rules: Cap on rules sent to one per-cluster LLM merge
+            prompt on the embedding path (highest-count kept). Soft clusters
+            larger than this are truncated before the merge invoke so the
+            pairwise similarity table stays bounded. Default ``20``.
+        dream_category_max_rules: Cap on rules sent to LLM Phase1/Phase2
+            prompts on the no-embedding path (random shuffle then take first N).
+        dream_llm_cluster_enabled: When True (default) and no embedding
+            provider is set, Auto-dream uses LLM Phase1/Phase2 clustering.
+            When False and no embedding, merge clustering is skipped.
         dream_ttl_days: Delete rules not injected for this many days.
             Uses ``last_injected_at`` (else ``created_at``). Consult hits
             persist on the debounce described by ``inject_persist_min_secs``
             / ``inject_persist_min_hits``.
         dream_prune_enabled: Enable TTL prune pass.
-        dream_purge_tips_enabled: Enable deterministic low-quality TIP purge.
+        dream_purge_tips_enabled: Enable LLM form/over-generic TIP quality purge.
+        dream_purge_batch_size: Max unchecked tips sent to the quality LLM per dream
+            pass (one invoke). Packing also respects ``dream_purge_max_chars``.
+        dream_purge_max_chars: Cumulative tip-text char budget for one quality invoke.
         dream_state_path: Optional path for dream-state.json; derived from store_path when empty.
+        dream_clusters_path: Optional path for incremental LLM cluster cache;
+            default ``{dirname(store_path)}/dream/dream-clusters.json``.
     """
 
     store_path: str = ".ttse/bank.json"
     embedding: Optional[EmbeddingProvider] = None
     embedding_max_rps: float = 4.0
     dedup_threshold: float = 0.88
-    bm25_sim_threshold: float = 0.5
     max_facts: int = 400
     max_tips: int = 400
     traj_char_budget: Optional[int] = None
@@ -129,6 +159,7 @@ class TTSEConfig:
     consult_max_chars: int = 8000
     consult_max_rules: int = 40
     consult_top_k: int = 8
+    consult_retrieve_mode: str = "hybrid"
     consult_rrf_k: int = 60
     inject_persist_min_secs: float = 30.0
     inject_persist_min_hits: int = 16
@@ -149,11 +180,17 @@ class TTSEConfig:
     dream_min_rules: int = 8
     dream_soft_lo: float = 0.72
     dream_cluster_min_size: int = 2
-    dream_max_llm_merges: int = 10
+    dream_max_llm_merges: int = 15
+    dream_merge_max_rules: int = 20
+    dream_category_max_rules: int = 80
+    dream_llm_cluster_enabled: bool = True
     dream_ttl_days: int = 90
     dream_prune_enabled: bool = True
     dream_purge_tips_enabled: bool = True
+    dream_purge_batch_size: int = 100
+    dream_purge_max_chars: int = 16000
     dream_state_path: str = ""
+    dream_clusters_path: str = ""
 
     def resolved_dream_state_path(self) -> str:
         """Path for dream-state.json (same directory as the bank by default)."""
@@ -162,5 +199,17 @@ class TTSEConfig:
         directory = os.path.dirname(self.store_path) or ".ttse"
         return os.path.join(directory, "dream-state.json")
 
+    def resolved_dream_clusters_path(self) -> str:
+        """Path for LLM-path dream-clusters.json under a ``dream/`` subdir."""
+        if self.dream_clusters_path:
+            return self.dream_clusters_path
+        directory = os.path.dirname(self.store_path) or ".ttse"
+        return os.path.join(directory, "dream", "dream-clusters.json")
 
-__all__ = ["TTSEConfig"]
+
+__all__ = [
+    "CONSULT_RETRIEVE_MODES",
+    "ConsultRetrieveMode",
+    "TTSEConfig",
+    "normalize_consult_retrieve_mode",
+]

@@ -222,3 +222,13 @@ class TestChromaVectorStore:
         # Should raise error showing both matches and mismatches
         with pytest.raises(BaseError, match="database actual config differs from current knowledge base"):
             store.check_vector_field()
+
+
+def test_as_chroma_where_ands_multiple_equalities():
+    from openjiuwen.core.retrieval.vector_store.chroma_store import _as_chroma_where
+
+    assert _as_chroma_where({"track": "fact"}) == {"track": "fact"}
+    assert _as_chroma_where({"track": "fact", "category": "software-engineering-devops"}) == {
+        "$and": [{"track": "fact"}, {"category": "software-engineering-devops"}]
+    }
+    assert _as_chroma_where({"$and": [{"track": "fact"}]}) == {"$and": [{"track": "fact"}]}

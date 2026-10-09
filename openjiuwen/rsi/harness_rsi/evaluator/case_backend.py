@@ -285,7 +285,7 @@ class SingleHarnessExecutionBackend:
                 controlled_skill_treatment=(
                     controlled_skill_treatment.evidence() if controlled_skill_treatment is not None else None
                 ),
-                skill_triggers=[rail.task_trigger_evidence() for rail in skill_use_rails],
+                skill_triggers=[record for rail in skill_use_rails for record in rail.task_trigger_records()],
                 command_recorder=command_recorder,
                 swebench_model_patch_path=swebench_model_patch_path,
             ),

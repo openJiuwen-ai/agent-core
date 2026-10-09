@@ -17,7 +17,6 @@ import asyncio
 import dataclasses
 import inspect
 import json
-import uuid
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -58,6 +57,7 @@ from openjiuwen.harness_protocol import (
     ResumePolicy,
     SendReceipt,
     StateChangedEvent,
+    ToolGateway,
     TurnError,
     TurnEventKind,
     TurnLifecycleEvent,
@@ -248,6 +248,7 @@ class ExternalHarnessMemberRuntime:
         self._context_delivery_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self._extra_mcp_servers: list[McpServerConfig] = []
+        self._bound_tools: ToolGateway | None = None
         self._reliability_ctx: Any = None
         self._trajectory: HarnessTrajectoryRecorder | None = None
         self._promote_fallback_model: PromoteFallbackModel | None = None
@@ -295,6 +296,10 @@ class ExternalHarnessMemberRuntime:
     def bind_mcp_servers(self, servers: Sequence[McpServerConfig]) -> None:
         """Mount additional MCP servers on the next ``start``."""
         self._extra_mcp_servers.extend(servers)
+
+    def bind_tools(self, tools: ToolGateway) -> None:
+        """Mount a native tool gateway on the next start."""
+        self._bound_tools = tools
 
     def bind_trajectory_recorder(self, recorder: "HarnessTrajectoryRecorder | None") -> None:
         """Record this member's protocol event stream as trajectory spans.
@@ -409,6 +414,9 @@ class ExternalHarnessMemberRuntime:
             capabilities.add(HostCapability.MCP_SERVERS)
         if self._trajectory is not None:
             capabilities.add(HostCapability.MODEL_REQUEST_OBSERVATION)
+        tools = self._bound_tools
+        if tools is not None:
+            capabilities.update({HostCapability.NATIVE_TOOL_GATEWAY, HostCapability.DYNAMIC_TOOL_CALL})
         return dataclasses.replace(
             context,
             host_capabilities=frozenset(capabilities),
@@ -416,6 +424,7 @@ class ExternalHarnessMemberRuntime:
             checkpoint=checkpoint,
             checkpoint_sink=checkpoint_sink,
             mcp_servers=mcp_servers,
+            tools=tools,
         )
 
     async def stop(self) -> None:

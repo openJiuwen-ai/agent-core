@@ -335,17 +335,18 @@ def test_stale_generation_condition_waits_refresh_without_reusing_action_selecto
             [
                 {"op": "wait_for_url", "url_contains": "/results"},
                 {"op": "wait_for_selector", "selector": ".result-card"},
+                {"op": "extract_text", "selector": ".result-card", "field": "title"},
             ],
             generation_id="g0",
         )
     )
-    assert len(refreshed) == 2
+    assert len(refreshed) == 3
     assert recovered_from == "g0"
 
     with pytest.raises(ValueError, match="Model-authored selectors cannot refresh"):
         _run(
             runtime._refresh_stale_batch_targets(
-                [{"op": "extract_text", "selector": ".result-card", "field": "title"}],
+                [{"op": "click", "selector": ".result-card"}],
                 generation_id="g0",
             )
         )
@@ -618,7 +619,7 @@ def test_runtime_materializes_native_ax_ref_inside_runtime() -> None:
     assert evaluate_tool.invoke.await_args.args[0]["target"] == "f1e174"
 
 
-def test_card_primary_link_target_requires_direct_navigation() -> None:
+def test_card_primary_link_remains_clickable_in_a_multi_step_batch() -> None:
     runtime = _make_bare_runtime()
     payload = {
         "cards": [
@@ -637,16 +638,12 @@ def test_card_primary_link_target_requires_direct_navigation() -> None:
     }
     runtime._ensure_page_state().register_cards(payload)
 
-    with pytest.raises(ValueError, match="browser_navigate"):
-        _run(
-            runtime._resolve_batch_steps(
-                [
-                    {"op": "click", "target_id": payload["cards"][0]["target_id"]},
-                    {"op": "press", "key": "Enter"},
-                ],
-                generation_id="g0",
-            )
-        )
+    steps = _run(runtime._resolve_batch_steps(
+        [{"op": "click", "target_id": payload["cards"][0]["target_id"]}, {"op": "press", "key": "Enter"}],
+        generation_id="g0",
+    ))
+    assert steps[0]["selector"] == ".card:nth-of-type(1)"
+    assert "_navigate_url" not in steps[0]
 
 
 def test_runtime_reset_invalidates_current_page_state() -> None:

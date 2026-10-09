@@ -23,9 +23,9 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.schema.team import ModelPoolEntry
-    from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
+    from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
@@ -130,10 +130,12 @@ class TeamBackend:
         on_member_started: Callable[[str], Awaitable[None]] | None = None,
         on_member_restarted: Callable[[str], Awaitable[bool]] | None = None,
         on_member_stopped: Callable[[str], Awaitable[None]] | None = None,
+        validate_worktree_isolation: Callable[[str], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
         leader_member_name: str | None = None,
         leader_prompt: str = "",
+        model_allocator: Any | None = None,
     ):
         """Initialize agent team manager.
 
@@ -220,6 +222,8 @@ class TeamBackend:
                 member runtime. Used after an atomic ERROR→RESTARTING claim.
             on_member_stopped: Optional async callback that removes a dead
                 member's stale runtime handle after ERROR→SHUTDOWN settles.
+            validate_worktree_isolation: Validate a member's worktree scope
+                before its database row is created.
             leader_prompt: The leader's private prompt (``LeaderSpec.prompt``
                 via ``ctx.prompt``). Persisted on the leader's DB row at
                 ``build_team`` so cold-recovery — which rebuilds the leader
@@ -246,6 +250,7 @@ class TeamBackend:
         self.messager = messager
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
+        self._model_allocator = model_allocator
         self._allocate_model_config = model_config_allocator
         self._model_pool_provider = model_pool_provider
         self.current_model_name = str(current_model_name or "").strip() or None
@@ -306,6 +311,7 @@ class TeamBackend:
         self._on_member_started = on_member_started
         self._on_member_restarted = on_member_restarted
         self._on_member_stopped = on_member_stopped
+        self._validate_worktree_isolation = validate_worktree_isolation
 
         self.task_manager = TeamTaskManager(
             self.team_name,
@@ -393,6 +399,43 @@ class TeamBackend:
             return []
         return list(self._model_pool_provider())
 
+    def allocate_model(self, model_name=None, **kwargs):
+        """Allocate through the current allocator (kept stable across updates)."""
+        if self._model_allocator is not None:
+            return self._model_allocator.allocate(model_name, **kwargs)
+        if self._allocate_model_config is None:
+            return None
+        return self._allocate_model_config(model_name, **kwargs)
+
+    def is_model_group_pool(self) -> bool:
+        pool = self.get_model_pool()
+        return bool(
+            pool
+            and len(pool) == 1
+            and pool[0].model_name == "*"
+            and pool[0].api_provider == "intelli_router"
+            and isinstance((pool[0].metadata.get("client") or {}).get("intelli_router"), dict)
+        )
+
+    def update_model_allocator(self, allocator: Any | None) -> None:
+        """Replace the allocator without rebuilding team tools."""
+        self._model_allocator = allocator
+        self._allocate_model_config = allocator.allocate if allocator is not None else None
+
+    def list_cli_models(self, provider_filter=None) -> list[Any]:
+        from openjiuwen.agent_teams.models.allocator import CliModelCatalog
+
+        if isinstance(self._model_allocator, CliModelCatalog):
+            return list(self._model_allocator.list_cli_models(provider_filter=provider_filter))
+        return []
+
+    def resolve_cli_models(self, model_name: str, provider_filter=None) -> list[Any]:
+        from openjiuwen.agent_teams.models.allocator import CliModelCatalog
+
+        if isinstance(self._model_allocator, CliModelCatalog):
+            return list(self._model_allocator.resolve_cli_models(model_name, provider_filter=provider_filter))
+        return []
+
     def register_cleanup_path(self, path: Optional[str]) -> None:
         """Register a filesystem path to remove on ``clean_team``.
 
@@ -419,21 +462,17 @@ class TeamBackend:
         return self._enable_fork
 
     def bind_group_session(self, session_id: str) -> None:
-        if self.group_chat_spec is None or not self.group_chat_spec.enable_group_chat:
-            return
         if not isinstance(session_id, str) or not session_id.strip():
             raise ValueError("Group chat requires a nonempty runtime session_id")
-        if self.group_session_id and self.group_session_id != session_id:
+        if self._group_conversation is not None and self.group_session_id != session_id:
             raise ValueError("A group backend cannot switch sessions; stop and rebuild the team")
         self.group_session_id = session_id
 
     async def group_conversation(self):
-        if self.group_chat_spec is None or not self.group_chat_spec.enable_group_chat:
-            raise ValueError("Group chat is disabled")
         if self._group_conversation is None:
-            from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+            from openjiuwen.agent_teams.group_chat.conversation import GroupConversationLog
 
-            workspace = self.group_chat_spec.workspace
+            workspace = getattr(self.group_chat_spec, "workspace", None)
             self._group_conversation = await asyncio.to_thread(
                 GroupConversationLog, self.team_name, self.group_session_id,
                 workspace_path=workspace.root_path if workspace else None,
@@ -442,10 +481,12 @@ class TeamBackend:
 
     async def append_group_message(self, sender, content, *, client_message_id, mentions=(), attachments=()):
         conversation = await self.group_conversation()
-        return await conversation.post(
+        from openjiuwen.agent_teams.group_chat.handler import post_message
+
+        return await post_message(
+            conversation,
             self.message_manager, sender, content, client_message_id=client_message_id,
-            mentions=mentions, attachments=attachments, tail_count=self.group_chat_spec.group_context_tail,
-            language=self.group_chat_spec.language or "cn",
+            mentions=mentions, attachments=attachments,
         )
 
     def set_snapshot_length(self, fn) -> None:
@@ -727,6 +768,15 @@ class TeamBackend:
             return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
         if isolation is not None and isolation != "worktree":
             return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
+        if isolation == "worktree":
+            if self._validate_worktree_isolation is None:
+                return MemberOpResult.fail(
+                    "Team worktree isolation is unavailable: no worktree validator was configured",
+                )
+            try:
+                await self._validate_worktree_isolation(member_name)
+            except RuntimeError as exc:
+                return MemberOpResult.fail(str(exc))
 
         if not await self.db.team.team_exists(self.team_name):
             return MemberOpResult.fail(
@@ -1608,7 +1658,8 @@ class TeamBackend:
             3. No message is left unread by any member, broadcasts
                included. Completion is judged strictly: any undelivered
                message -- direct or fan-out broadcast -- blocks the team
-               from concluding.
+               from concluding. In group mode, only explicitly mentioned
+               broadcasts count as pending input.
 
         Read-only; safe to call repeatedly. Queries the member DAO directly
         so the leader itself is part of the roster check (``list_members``
@@ -2092,7 +2143,7 @@ class TeamBackend:
                 name=member_spec.display_name,
                 description=member_spec.desc,
             )
-            allocation = self._allocate_model_config(member_spec.model_name) if self._allocate_model_config else None
+            allocation = self.allocate_model(member_spec.model_name)
             cli_agent = (
                 member_spec.external_cli.cli_agent
                 if isinstance(member_spec, ExternalCliMemberSpec)
@@ -2665,7 +2716,7 @@ class TeamBackend:
             name=display_name,
             description=desc,
         )
-        allocation = self._allocate_model_config(model_name) if self._allocate_model_config else None
+        allocation = self.allocate_model(model_name)
         result = await self.spawn_member(
             member_name=member_name,
             display_name=display_name,

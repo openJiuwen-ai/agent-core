@@ -168,13 +168,14 @@ async def test_runtime_failures_do_not_override_success_result() -> None:
 
 
 @pytest.mark.asyncio
-async def test_affinity_disabled_preserves_baseline_invoke() -> None:
-    subagent = _FakeSubAgent("browser")
+@pytest.mark.parametrize("subagent_type", ["code", "verification_agent"])
+async def test_affinity_disabled_preserves_baseline_invoke(subagent_type: str) -> None:
+    subagent = _FakeSubAgent(subagent_type)
     subagent.invoke = AsyncMock(wraps=subagent.invoke)
     tool = _make_tool(enabled=False, subagent=subagent)
 
     result = await tool.invoke(
-        {"subagent_type": "browser_agent", "task_description": "run task"},
+        {"subagent_type": subagent_type, "task_description": "run task"},
         session=Session(session_id="parent_session"),
     )
 
@@ -182,6 +183,51 @@ async def test_affinity_disabled_preserves_baseline_invoke() -> None:
     assert "session" not in subagent.invoke.await_args.kwargs
     assert subagent.sessions == [None]
     assert len(subagent.inputs) == 1
+    inputs = subagent.inputs[0]
+    assert set(inputs) == {"query", "conversation_id"}
+    assert inputs["query"] == "run task"
+    if subagent_type == "verification_agent":
+        assert inputs["conversation_id"] == "parent_session_sub_verification_agent"
+    else:
+        assert re.fullmatch(r"parent_session_sub_code_[0-9a-f]{8}", inputs["conversation_id"])
+
+
+@pytest.mark.asyncio
+async def test_affinity_disabled_browser_keeps_runtime_session_without_kvc() -> None:
+    subagent = _FakeSubAgent("browser")
+    subagent.invoke = AsyncMock(wraps=subagent.invoke)
+    tool = _make_tool(enabled=False, subagent=subagent)
+    runtime = SimpleNamespace(prepare=AsyncMock(), suspend=AsyncMock(), release=AsyncMock())
+    parent = Session(session_id="parent_session", kv_cache_runtime=runtime)
+
+    with (
+        patch.object(Session, "prepare_kvc", new=AsyncMock()) as prepare,
+        patch.object(Session, "suspend_kvc", new=AsyncMock()) as suspend,
+        patch.object(Session, "release_kvc", new=AsyncMock()) as release,
+    ):
+        result = await tool.invoke(
+            {"subagent_type": "browser_agent", "task_description": "run task"},
+            session=parent,
+        )
+
+    assert result.success is True
+    assert len(subagent.sessions) == 1
+    child = subagent.sessions[0]
+    assert isinstance(child, Session)
+    assert child is not parent
+    assert subagent.invoke.await_args.kwargs["session"] is child
+    assert child.get_session_id() == subagent.inputs[0]["conversation_id"]
+    assert child.get_parent_session_id() is None
+    assert child.get_kv_cache_runtime() is None
+    assert parent.get_kv_cache_runtime() is runtime
+    prepare.assert_not_awaited()
+    suspend.assert_not_awaited()
+    release.assert_not_awaited()
+    runtime.prepare.assert_not_awaited()
+    runtime.suspend.assert_not_awaited()
+    runtime.release.assert_not_awaited()
+    assert len(subagent.inputs) == 1
+    assert set(subagent.inputs[0]) == {"query", "conversation_id", "run"}
     assert subagent.inputs[0]["query"] == "run task"
     normalized = DeepAgent(AgentCard(name="normalizer"))._normalize_inputs(subagent.inputs[0])
     assert normalized.run_context.extra["browser_query_budget_s"] == 240.0
@@ -190,3 +236,24 @@ async def test_affinity_disabled_preserves_baseline_invoke() -> None:
         r"parent_session_sub_browser_agent_[0-9a-f]{8}",
         subagent.inputs[0]["conversation_id"],
     )
+
+
+@pytest.mark.asyncio
+async def test_affinity_disabled_browser_without_session_parameter_still_runs() -> None:
+    subagent = _FakeSubAgent("browser")
+    original_invoke = subagent.invoke
+
+    async def invoke_without_session(inputs: dict) -> dict:
+        return await original_invoke(inputs)
+
+    subagent.invoke = invoke_without_session
+    tool = _make_tool(enabled=False, subagent=subagent)
+
+    result = await tool.invoke(
+        {"subagent_type": "browser_agent", "task_description": "run task"},
+        session=Session(session_id="parent_session"),
+    )
+
+    assert result.success is True
+    assert subagent.sessions == [None]
+    assert subagent.inputs[0]["query"] == "run task"

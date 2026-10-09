@@ -38,7 +38,12 @@ SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具
 - wait 超时且方向不对时，用 subagent_send_input(interrupt=true) 纠正后再 wait。
 - 确认不再需要时用 subagent_close 释放占用名额；idle 实例仍会占名额，不要长期保留无用实例。
 - 满 10 个会 LRU 淘汰，可用 subagent_resume 恢复。
-- 仅 status=closed（manual/evicted/parent_ended）时须先 subagent_resume，再 subagent_send_input + subagent_wait。
+- 仅 status=closed（manual/evicted/parent_ended）时须先 subagent_resume；
+  有后续消息时再 subagent_send_input + subagent_wait。
+- 用户只要求恢复时，恢复后保持实例待命，不要自行投递任务或立即 close。
+  恢复后的 idle/completed 不代表新请求已完成，不能据此清理实例；
+  有待发送消息时直接 send_input，不要插入 close / resume。
+- restored=false 表示实例已经存活，不是恢复失败，不要通过 close → resume 重试。
 - subagent_list 区分 live_subagents（存活）与 closed_subagents（已关闭、可 resume）；summary 含 live_count / closed_count。向用户说明时须同时报两栏计数；两者皆空才表示当前无任何 subagent 记录。勿凭历史消息列出 subagent。
 - 按 can_send_input / needs_resume 决定用 send_input 还是 resume。
 """
@@ -70,7 +75,12 @@ SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools
 - After a timed-out wait with the wrong direction, use subagent_send_input(interrupt=true), then wait again.
 - Call subagent_close when an instance is no longer needed; idle instances still occupy slots until closed.
 - LRU may evict when full (max 10)—use subagent_resume to bring it back.
-- Only when status=closed (manual/evicted/parent_ended) call subagent_resume before subagent_send_input + subagent_wait.
+- Only when status=closed (manual/evicted/parent_ended) call subagent_resume;
+  follow with subagent_send_input + subagent_wait when there is follow-up input.
+- If the user only asks to restore, leave the instance idle without submitting work or immediately closing it.
+  idle/completed after resume does not mean a new request was completed and is not a reason to clean up the instance.
+  Send pending follow-up input directly; do not insert close / resume calls.
+- restored=false means the instance is already live, not a restore failure; do not retry through close → resume.
 - subagent_list separates live_subagents (live) from closed_subagents (closed, resumable); summary has live_count / closed_count. When reporting to the user, state both counts; only when both lists are empty is there no subagent record. Do not list subagents from chat history.
 - Follow can_send_input / needs_resume to choose send_input vs resume.
 """

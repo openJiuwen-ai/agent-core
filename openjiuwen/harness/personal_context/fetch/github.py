@@ -35,9 +35,11 @@ from openjiuwen.harness.personal_context.fetch.cursor_selection import (
 from openjiuwen.harness.personal_context.fetch.retry import (
     classify_payload_error,
     classify_transport_error,
+    is_candidate_read_error,
     retry_provider_read,
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
+from openjiuwen.harness.personal_context.path_safety import service_storage_segment
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 _API_ROOT = "https://api.github.com"
@@ -73,7 +75,7 @@ def _safe_detail(exc: BaseException, token: str) -> str:
 
 
 def _service_root(home: Path, service_id: str) -> Path:
-    return home / "materialized-sources" / "github" / service_id
+    return home / "materialized-sources" / "github" / service_storage_segment(service_id)
 
 
 def _candidate_path(home: Path, service_id: str) -> Path:
@@ -571,8 +573,16 @@ def _bounded_lane_candidates(
     *,
     cursor: dict[str, object] | None,
     limit: int,
+    include_failed: bool = False,
 ) -> None:
-    candidates[:] = list(select_latest_candidates(tuple(candidates), cursor, limit))
+    candidates[:] = list(
+        select_latest_candidates(
+            tuple(candidates),
+            cursor,
+            limit,
+            retry_quarantined=include_failed,
+        )
+    )
 
 
 def _lane_can_stop(
@@ -583,8 +593,14 @@ def _lane_can_stop(
     unread_time_upper_bound: datetime,
     known_ids: set[str],
     seen_known_ids: set[str],
+    include_failed: bool = False,
 ) -> bool:
-    selected = select_latest_candidates(tuple(candidates), cursor, limit)
+    selected = select_latest_candidates(
+        tuple(candidates),
+        cursor,
+        limit,
+        retry_quarantined=include_failed,
+    )
     if len(selected) < limit:
         return False
     nth = selected[-1]
@@ -674,6 +690,7 @@ async def _discover_resource_list(
     run_started_at: datetime,
     cursor: dict[str, object] | None,
     limit: int,
+    include_failed: bool = False,
 ) -> list[dict[str, object]]:
     requires_complete_listing = resource == "pull_requests"
     candidates: list[dict[str, object]] = []
@@ -754,7 +771,12 @@ async def _discover_resource_list(
             )
             if candidate is not None:
                 candidates.append(candidate)
-        _bounded_lane_candidates(candidates, cursor=cursor, limit=limit)
+        _bounded_lane_candidates(
+            candidates,
+            cursor=cursor,
+            limit=limit,
+            include_failed=include_failed,
+        )
         if not advanced:
             raise _fetch_error(f"GitHub {endpoint_name} pagination did not advance")
         if len(current) < 100:
@@ -770,6 +792,7 @@ async def _discover_resource_list(
             unread_time_upper_bound=previous_time,
             known_ids=known_ids,
             seen_known_ids=seen_known_ids,
+            include_failed=include_failed,
         ):
             return candidates
     raise _fetch_error(f"GitHub {endpoint_name} pagination exceeded the metadata request budget")
@@ -787,6 +810,7 @@ async def _discover_commits(
     run_started_at: datetime,
     cursor: dict[str, object] | None,
     limit: int,
+    include_failed: bool = False,
 ) -> list[dict[str, object]]:
     candidates: list[dict[str, object]] = []
     known_ids = _known_lane_ids(
@@ -869,7 +893,12 @@ async def _discover_commits(
                 )
                 if candidate is not None:
                     candidates.append(candidate)
-            _bounded_lane_candidates(candidates, cursor=cursor, limit=limit)
+            _bounded_lane_candidates(
+                candidates,
+                cursor=cursor,
+                limit=limit,
+                include_failed=include_failed,
+            )
             if current and not advanced:
                 raise _fetch_error("GitHub commits pagination did not advance")
             if len(current) < 100:
@@ -886,6 +915,7 @@ async def _discover_commits(
             unread_time_upper_bound=start,
             known_ids=known_ids,
             seen_known_ids=seen_known_ids,
+            include_failed=include_failed,
         )
 
     mode = time_range.get("mode")
@@ -923,6 +953,30 @@ async def _discover_commits(
     return candidates
 
 
+def _validated_fetch_candidate(candidate: Mapping[str, object]) -> tuple[RawChangeItem, str]:
+    for field_name in ("stable_id", "revision_id", "candidate_time", "resource_lane", "locator"):
+        value = candidate.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise _fetch_error("GitHub candidate is invalid")
+    item_ref = str(candidate["stable_id"])
+    if len(item_ref) > 256:
+        raise _fetch_error("GitHub candidate stable ID is too long")
+    item = candidate.get("item")
+    if not isinstance(item, RawChangeItem):
+        raise _fetch_error("GitHub candidate item is invalid")
+    if candidate["resource_lane"] == "code":
+        owner = candidate.get("owner")
+        repo = candidate.get("repo")
+        head_sha = candidate.get("head_sha")
+        materialized_path = candidate.get("materialized_source_path")
+        strings_valid = all(isinstance(value, str) and bool(value.strip()) for value in (owner, repo))
+        sha_valid = isinstance(head_sha, str) and _SHA.fullmatch(head_sha) is not None
+        path_valid = isinstance(materialized_path, str) and Path(materialized_path).is_absolute()
+        if not strings_valid or not sha_valid or not path_valid:
+            raise _fetch_error("GitHub code candidate is invalid")
+    return item, item_ref
+
+
 class GitHubFetchService(ContextFetchService):
     """Fetch one GitHub repository and optionally materialize its selected code snapshot."""
 
@@ -932,6 +986,7 @@ class GitHubFetchService(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         del run_id
         try:
@@ -1059,6 +1114,7 @@ class GitHubFetchService(ContextFetchService):
                             run_started_at=run_started_at,
                             cursor=cursor,
                             limit=max_items,
+                            include_failed=include_failed,
                         )
                     )
                     continue
@@ -1075,6 +1131,7 @@ class GitHubFetchService(ContextFetchService):
                         run_started_at=run_started_at,
                         cursor=cursor,
                         limit=max_items,
+                        include_failed=include_failed,
                     )
                 )
 
@@ -1111,7 +1168,12 @@ class GitHubFetchService(ContextFetchService):
                 if candidate is not None:
                     candidates.append(candidate)
 
-            return select_latest_candidates(tuple(candidates), cursor, max_items)
+            return select_latest_candidates(
+                tuple(candidates),
+                cursor,
+                max_items,
+                retry_quarantined=include_failed,
+            )
         except asyncio.CancelledError:
             raise
         except BaseError:
@@ -1137,23 +1199,40 @@ class GitHubFetchService(ContextFetchService):
                 end = index + _BATCH_SIZE
                 chunk = candidates[index:end]
                 items: list[RawChangeItem] = []
+                success_offsets: list[int] = []
+                failures: list[dict[str, object]] = []
                 materialized_path: str | None = None
                 materialized_revision: str | None = None
-                for candidate in chunk:
-                    item = candidate.get("item")
-                    if not isinstance(item, RawChangeItem):
-                        raise _fetch_error("GitHub candidate item is invalid")
+                for offset, candidate in enumerate(chunk):
+                    item, item_ref = _validated_fetch_candidate(candidate)
                     if candidate.get("resource_lane") == "code":
                         owner = str(candidate.get("owner", ""))
                         repo = str(candidate.get("repo", ""))
                         head_sha = str(candidate.get("head_sha", ""))
-                        await self._materialize_code(run_id, owner, repo, head_sha, token)
+                        try:
+                            await self._materialize_code(run_id, owner, repo, head_sha, token)
+                        except BaseError as exc:
+                            if not is_candidate_read_error(exc):
+                                raise
+                            failures.append(
+                                {
+                                    "offset": offset,
+                                    "item_ref": item_ref,
+                                    "code": StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR.code,
+                                    "message": "条目读取或解析失败",
+                                }
+                            )
+                            continue
                         materialized_path = str(candidate.get("materialized_source_path", ""))
                         materialized_revision = head_sha
                     items.append(item)
+                    success_offsets.append(offset)
                 yield FetchBatch(
                     batch_id=f"batch-{index // _BATCH_SIZE}",
                     items=tuple(items),
+                    attempted_count=len(chunk),
+                    success_offsets=tuple(success_offsets),
+                    failures=tuple(failures),
                     next_cursor=next_cursor,
                     materialized_source_path=materialized_path,
                     materialized_revision=materialized_revision,

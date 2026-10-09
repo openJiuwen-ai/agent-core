@@ -17,28 +17,20 @@ from openjiuwen.agent_teams.tools.team import TeamBackend
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ambient", ["", "unrelated-parent-session"])
-@pytest.mark.parametrize("group_chat", [True, False])
-async def test_real_activation_binds_requested_session_without_host_contextvar(tmp_path, ambient, group_chat):
+async def test_real_activation_binds_requested_session_without_host_contextvar(tmp_path, ambient):
     home = set_task_openjiuwen_home(tmp_path)
     token = set_session_id(ambient)
     manager = TeamRuntimeManager()
     spec = TeamAgentSpec(
         agents={"leader": DeepAgentSpec()}, team_name="bound-group", spawn_mode="inprocess",
-        enable_group_chat=group_chat, evolution_enabled=False,
+        evolution_enabled=False,
         storage=StorageSpec(type="sqlite", params={"connection_string": str(tmp_path / "scope.sqlite")}),
     )
     activation = None
     try:
         activation = await manager.activate(spec, "requested-session", {"query": ""})
         backend = activation.agent.team_backend
-        if group_chat:
-            assert backend.group_session_id == "requested-session"
-            conversation = await backend.group_conversation()
-            assert conversation.session_id == "requested-session"
-        else:
-            assert backend.group_session_id == ""
-            with pytest.raises(ValueError, match="disabled"):
-                await backend.group_conversation()
+        assert backend.group_session_id == "requested-session"
         assert get_session_id() == ambient
     finally:
         if activation is not None:
@@ -52,7 +44,7 @@ async def test_real_activation_binds_requested_session_without_host_contextvar(t
 async def test_group_history_uses_bound_member_session_not_ambient_scope(tmp_path):
     home = set_task_openjiuwen_home(tmp_path)
     token = set_session_id("parent-session")
-    spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="outer", enable_group_chat=True)
+    spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="outer")
     backend = TeamBackend("outer", "representative", False,
                           SimpleNamespace(create_cur_session_tables=AsyncMock()), AsyncMock())
     backend.group_chat_spec = spec

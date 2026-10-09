@@ -6,6 +6,7 @@ Covers:
 - _streaming=True  -> llm.stream() called, llm_output chunks written
 - _streaming=False -> fallback to llm.invoke(), no stream writes
 """
+import asyncio
 import os
 import unittest
 from unittest.mock import patch
@@ -46,6 +47,44 @@ class _StreamingFinishReasonRail(AgentRail):
 
     async def after_model_call(self, ctx):
         self.finish_reasons.append(ctx.inputs.response.finish_reason)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["aclose", "cancel"])
+async def test_public_stream_joins_producer_when_consumer_stops(mode):
+    stopped = asyncio.Event()
+    waiting = asyncio.Event()
+
+    async def model_stream(*args, **kwargs):
+        try:
+            yield AssistantMessageChunk(content="partial", finish_reason="null")
+            waiting.set()
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+
+    await Runner.start()
+    try:
+        agent = _make_agent("producer-cancel-test")
+        with patch("openjiuwen.core.foundation.llm.model.Model.stream", side_effect=model_stream):
+            stream = agent.stream({"query": "read", "conversation_id": "producer-test"})
+            chunk = await anext(stream)
+            assert chunk.type == "llm_output"
+            await asyncio.wait_for(waiting.wait(), 1)
+            if mode == "aclose":
+                await stream.aclose()
+            else:
+                consumer = asyncio.create_task(anext(stream))
+                await asyncio.sleep(0)
+                consumer.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await consumer
+            assert stopped.is_set()
+            assert stream.ag_frame is None
+            with pytest.raises(StopAsyncIteration):
+                await anext(stream)
+    finally:
+        await Runner.stop()
 
 
 class _FakeContext:

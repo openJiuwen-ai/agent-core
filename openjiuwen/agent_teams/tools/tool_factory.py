@@ -4,7 +4,7 @@
 """Factory function that assembles role-filtered tool lists for team agents."""
 
 from functools import wraps
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_async import (
@@ -305,12 +305,12 @@ def create_team_tools(
     # spawn tools.
     if swarmflow_model_resolver is None:
         allowed = allowed - {"swarmflow"}
-    if getattr(getattr(agent_team, "group_chat_spec", None), "enable_group_chat", False) is True:
-        from openjiuwen.agent_teams.tools.tool_group_chat import create_group_chat_tools
+    if role != "human_agent":
+        from openjiuwen.agent_teams.group_chat.tools import GroupSendMessageTool
 
-        extra = create_group_chat_tools(agent_team, t)
-        all_tools.update({tool.card.name: tool for tool in extra})
-        allowed = allowed | {tool.card.name for tool in extra}
+        tool = GroupSendMessageTool(agent_team, t)
+        all_tools[tool.card.name] = tool
+        allowed = allowed | {tool.card.name}
     if exclude_tools:
         allowed = allowed - exclude_tools
     tools = [tool for name, tool in all_tools.items() if name in allowed]

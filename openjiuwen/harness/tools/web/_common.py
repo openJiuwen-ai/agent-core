@@ -271,8 +271,8 @@ def _get_web_proxy_url(configured_proxy: str | None = None) -> str:
 
 
 def _free_search_ssl_verify() -> bool:
-    """Whether to verify TLS certificates (default off for intranet usage)."""
-    return _env_flag(_FREE_SEARCH_SSL_VERIFY_ENV, default=False)
+    """Whether to verify TLS certificates (default on)."""
+    return _env_flag(_FREE_SEARCH_SSL_VERIFY_ENV, default=True)
 
 
 def _no_proxy_entries() -> list[str]:

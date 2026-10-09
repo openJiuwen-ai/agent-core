@@ -37,9 +37,7 @@ async def running_coordination(tmp_path, role):
     messager = InProcessMessager(config=MessagerTransportConfig(node_id=name))
     backend = TeamBackend("wakeup-team", name, role == TeamRole.LEADER, db, messager)
     spec = SimpleNamespace(
-        enable_group_chat=True,
         workspace=None,
-        group_context_tail=5,
         language="cn",
         dispatch_mode="autonomous",
         reliability=None,
@@ -98,7 +96,7 @@ async def test_self_published_mention_uses_mailbox_and_resumes_polls(tmp_path, r
         )
         await asyncio.wait_for(state.bus._event_queue.join(), timeout=2)
         assert result.notified_members == [target]
-        assert [event.event_type for event in state.seen] == [TeamEvent.MESSAGE]
+        assert [event.event_type for event in state.seen] == [TeamEvent.BROADCAST]
         assert state.seen[0].sender_id == state.host.member_name
         assert not state.bus.polls_paused
         if target == "expert":
@@ -115,23 +113,23 @@ async def test_self_published_mention_uses_mailbox_and_resumes_polls(tmp_path, r
 
 
 @pytest.mark.asyncio
-async def test_plain_chat_has_no_wakeup_and_other_self_events_remain_filtered(tmp_path):
+async def test_plain_chat_broadcasts_without_model_input_and_other_self_events_remain_filtered(tmp_path):
     async with running_coordination(tmp_path, TeamRole.LEADER) as state:
         result = await state.backend.append_group_message(
             "user", "just chatting", client_message_id="no-mention",
         )
         await asyncio.wait_for(state.bus._event_queue.join(), timeout=2)
         assert result.notified_members == []
-        assert state.seen == []
-        state.listener.assert_not_awaited()
+        assert [event.event_type for event in state.seen] == [TeamEvent.BROADCAST]
+        state.listener.assert_awaited_once()
         state.host.deliver_input.assert_not_awaited()
-        assert state.bus.polls_paused
+        assert not state.bus.polls_paused
         await state.backend.messager.publish(
             TeamTopic.TEAM.build("wakeup-session", "wakeup-team"),
             EventMessage(event_type=TeamEvent.CLEANED, payload={"team_name": "wakeup-team"}),
         )
         await asyncio.wait_for(state.bus._event_queue.join(), timeout=2)
-        state.listener.assert_awaited_once()
+        assert state.listener.await_count == 2
         assert state.listener.call_args.args[0].sender_id == "team_leader"
-        assert state.seen == []
+        assert [event.event_type for event in state.seen] == [TeamEvent.BROADCAST]
         state.host.deliver_input.assert_not_awaited()

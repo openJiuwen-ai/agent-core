@@ -162,6 +162,7 @@ class MessageDao:
         is_read: bool = False,
         protocol: str = "plain",
         meta: Optional[dict] = None,
+        inline_content: bool = False,
     ) -> bool:
         """Create a new team message.
 
@@ -185,7 +186,7 @@ class MessageDao:
             KIND_DIRECT,
         )
 
-        stored_content = self._to_stored(
+        stored_content = content if inline_content else self._to_stored(
             team_name,
             content,
             object_id=message_id,
@@ -334,23 +335,40 @@ class MessageDao:
 
             return self._hydrate_rows(rows)
 
-    async def get_unread_startable_members(self, team_name: str) -> List[str]:
-        """Read only the names of offline members with direct work waiting."""
+    async def get_unread_group_members(self, team_name: str) -> List[str]:
+        """Read unstarted or failed recipients of explicit group mentions."""
         message_model = _get_message_model()
         async with self._sessions.read() as session:
+            read_model = _get_message_read_status_model()
             result = await session.execute(
-                select(message_model.to_member_name).join(
-                    TeamMember,
-                    (TeamMember.team_name == message_model.team_name)
-                    & (TeamMember.member_name == message_model.to_member_name),
-                ).where(
+                select(message_model.meta, TeamMember.member_name)
+                .join(TeamMember, TeamMember.team_name == message_model.team_name)
+                .outerjoin(read_model, (read_model.team_name == TeamMember.team_name)
+                           & (read_model.member_name == TeamMember.member_name))
+                .where(
                     message_model.team_name == team_name,
-                    message_model.broadcast.is_(False),
-                    message_model.is_read.is_(False),
+                    message_model.broadcast.is_(True),
                     TeamMember.status.in_((MemberStatus.UNSTARTED.value, MemberStatus.ERROR.value)),
-                ).distinct()
+                    TeamMember.role != "passive_human",
+                    (read_model.read_at.is_(None)) | (message_model.timestamp > read_model.read_at),
+                )
             )
-            return list(result.scalars().all())
+            from openjiuwen.agent_teams.group_chat.handler import group_metadata
+
+            members = set()
+            for row in result.all():
+                if row.member_name in group_metadata(row).get("mentions", []):
+                    members.add(row.member_name)
+            return list(members)
+
+    async def get_broadcast_read_at(self, team_name: str, member_name: str) -> int:
+        """Return the existing per-member broadcast watermark in this session."""
+        model = _get_message_read_status_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(select(model.read_at).where(
+                model.team_name == team_name, model.member_name == member_name,
+            ))
+            return result.scalar_one_or_none() or 0
 
     async def get_broadcast_messages(
         self,
@@ -366,7 +384,6 @@ class MessageDao:
             query = select(message_model).where(
                 message_model.team_name == team_name,
                 message_model.broadcast.is_(True),
-                message_model.from_member_name != member_name,
             )
 
             if from_member_name is not None:
@@ -374,7 +391,14 @@ class MessageDao:
 
             query = query.order_by(message_model.timestamp)
             result = await session.execute(query)
-            rows = result.scalars().all()
+            from openjiuwen.agent_teams.group_chat.handler import group_metadata
+
+            rows = []
+            for row in result.scalars().all():
+                meta = group_metadata(row)
+                addressed = member_name in meta["mentions"] if meta else row.from_member_name != member_name
+                if addressed:
+                    rows.append(row)
 
             read_result = await session.execute(
                 select(read_status_model).where(
@@ -456,14 +480,8 @@ class MessageDao:
             if not include_broadcast:
                 return False
 
-            # Broadcast messages: a broadcast B is unread by member M when M
-            # is not its sender and M has no read watermark covering B's
-            # timestamp. Push the whole "does any such (member, broadcast)
-            # pair exist?" check into one correlated EXISTS query instead of
-            # loading every broadcast + member + watermark row and doing an
-            # O(members x broadcasts) scan in Python. A NULL / absent
-            # watermark never satisfies ``read_at >= B.timestamp`` (SQL
-            # three-valued logic), so it correctly counts as uncovered.
+            # Apply the common watermark in SQL, then check explicit group
+            # recipients from metadata without loading message bodies.
             covered_by_watermark = (
                 select(read_status_model.member_name)
                 .where(
@@ -474,18 +492,25 @@ class MessageDao:
                 .exists()
             )
             unread_broadcast = await session.execute(
-                select(message_model.message_id)
+                select(message_model.meta, message_model.from_member_name, TeamMember.member_name, TeamMember.role)
                 .join(TeamMember, TeamMember.team_name == message_model.team_name)
                 .where(
                     message_model.team_name == team_name,
                     message_model.broadcast.is_(True),
                     TeamMember.status != MemberStatus.SHUTDOWN.value,
-                    TeamMember.member_name != message_model.from_member_name,
                     ~covered_by_watermark,
                 )
-                .limit(1)
             )
-            return unread_broadcast.first() is not None
+            from openjiuwen.agent_teams.group_chat.handler import group_metadata
+
+            for row in unread_broadcast.all():
+                meta = group_metadata(row)
+                if meta:
+                    if row.role != "passive_human" and row.member_name in meta["mentions"]:
+                        return True
+                elif row.member_name != row.from_member_name:
+                    return True
+            return False
 
     async def _mark_read_in_session(
         self,

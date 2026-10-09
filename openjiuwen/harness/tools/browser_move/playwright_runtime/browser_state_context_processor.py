@@ -153,6 +153,7 @@ class BrowserStateContextProcessor(ContextProcessor):
                 captured_state = await self._capture_compact_state(action_group_id=action_group_id)
             else:
                 captured_state = await self._capture_state(action_group_id=action_group_id or "initial")
+            await self._preserve_projected_state(captured_state)
             self._page_change = self._classify_page_change(captured_state)
             semantic_progress = captured_state.get("semantic_progress")
             if isinstance(semantic_progress, dict):
@@ -487,12 +488,12 @@ class BrowserStateContextProcessor(ContextProcessor):
             content=text,
         )
 
-    def _format_state_text(self, state: Dict[str, Any]) -> str:
+    @staticmethod
+    def _state_header(state: Dict[str, Any]) -> Dict[str, Any]:
         page_state = state.get("page_state")
         if not isinstance(page_state, dict):
             page_state = {}
-
-        state_header = self._fit_state_header({
+        return {
             "ok": bool(state.get("ok")),
             "error": state.get("error"),
             "url": state.get("url") or "",
@@ -501,15 +502,38 @@ class BrowserStateContextProcessor(ContextProcessor):
             "page_position": state.get("page_position") or {},
             "semantic_state": state.get("semantic_state") or {},
             "dom_error": state.get("dom_error"),
+            "native_ax": state.get("dom") or "",
             "page_state": page_state,
-        })
+            "recall_handle": state.get("projection_recall_handle"),
+        }
+
+    async def _preserve_projected_state(self, state: Dict[str, Any]) -> None:
+        header = self._state_header(state)
+        page = header["page_state"]
+        oversized = self._serialized_size(header) > self.config.max_dom_chars
+        oversized = oversized or len(page.get("cards") or []) > 8 or len(page.get("interactives") or []) > 20
+        persist = getattr(self.config.provider, "persist_observation", None)
+        if not oversized or not callable(persist):
+            return
+        try:
+            state["projection_recall_handle"] = await persist(
+                json.dumps(header, ensure_ascii=False, default=str), "browser_page_state",
+            )
+        except (OSError, ValueError) as exc:
+            state["projection_storage_failed"] = True
+            browser_agent_log_warning("Cannot preserve browser state before projection: %s", exc)
+
+    def _format_state_text(self, state: Dict[str, Any]) -> str:
+        header = self._state_header(state)
+        state_header = header if state.get("projection_storage_failed") else self._fit_state_header(header)
         return (
             "<browser_state>\n"
             "This observation was captured initially or after the latest detected browser mutation and "
             "replaces any previous browser state. It is reused until another state-invalidating browser "
             "tool completes; element references may become stale if the page changes independently. "
-            "Change status is provided separately after this compact observation. Raw AX/Card data is "
-            "available only in the browser audit trace.\n"
+            "Probe supplements native AX; it does not replace it. Use persisted-output handles to recall "
+            "omitted native text; recall_handle also recovers omitted structured state. "
+            "Listing targets marked stale need a fresh listing observation.\n"
             f"{json.dumps(state_header, ensure_ascii=False, separators=(',', ':'))}\n"
             "</browser_state>"
         )
@@ -589,18 +613,26 @@ class BrowserStateContextProcessor(ContextProcessor):
             if isinstance(page_state, dict) and page_state.get(key) not in (None, "", [], {})
         }
         if isinstance(page_state, dict):
-            for key, limit in (("url", 600), ("title", 200)):
+            for key, limit in (("url", self.config.max_dom_chars // 4), ("title", 200)):
                 if page_state.get(key) not in (None, ""):
-                    compact_page[key] = str(page_state[key])[:limit]
+                    value = str(page_state[key])
+                    if key != "url" or len(value) <= limit:
+                        compact_page[key] = value if key == "url" else value[:limit]
+                    else:
+                        compact_page["url_omitted"] = True
+        current_url = str(payload.get("url") or "")
+        if len(current_url) > self.config.max_dom_chars // 4:
+            current_url = ""
         fallback = {
             "ok": payload.get("ok"),
             "error": payload.get("error"),
-            "url": str(payload.get("url") or "")[:1_000],
+            "url": current_url,
             "title": str(payload.get("title") or "")[:300],
             "tabs": payload.get("tabs") or [],
             "semantic_state": payload.get("semantic_state") or {},
             "dom_error": payload.get("dom_error"),
             "page_state": compact_page,
+            "recall_handle": payload.get("recall_handle"),
             "truncated": True,
         }
         if self._serialized_size(fallback) <= self.config.max_dom_chars:
@@ -609,16 +641,19 @@ class BrowserStateContextProcessor(ContextProcessor):
         fallback_semantic = fallback.get("semantic_state")
         if isinstance(fallback_semantic, dict):
             if fallback_semantic.get("url"):
-                final_semantic["url"] = str(fallback_semantic["url"])[:400]
+                semantic_url = str(fallback_semantic["url"])
+                if len(semantic_url) <= self.config.max_dom_chars // 4:
+                    final_semantic["url"] = semantic_url
             if fallback_semantic.get("result_count") not in (None, ""):
                 final_semantic["result_count"] = fallback_semantic["result_count"]
         return {
             "ok": payload.get("ok"),
             "error": str(payload.get("error") or "")[:300] or None,
-            "url": str(payload.get("url") or "")[:600],
+            "url": current_url,
             "title": str(payload.get("title") or "")[:200],
             "semantic_state": final_semantic,
             "page_state": compact_page,
+            "recall_handle": payload.get("recall_handle"),
             "truncated": True,
         }
 

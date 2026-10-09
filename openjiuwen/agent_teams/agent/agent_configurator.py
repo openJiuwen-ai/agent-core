@@ -23,10 +23,10 @@ from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
 )
-from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
+from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec, SysOperationSpec, WorkspaceSpec
@@ -40,7 +40,7 @@ from openjiuwen.agent_teams.skill.rail_spec import (
     build_team_skill_rail_spec,
     complete_declared_team_skill_rails,
 )
-from openjiuwen.agent_teams.tools.tool_group_chat import group_chat_prompt
+from openjiuwen.agent_teams.group_chat.tools import group_chat_prompt
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import ProviderType
@@ -57,6 +57,26 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation, ModelAllocator
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.harness.tools.worktree import WorktreeManager
+
+
+async def _validate_member_worktree_isolation(
+    spec: TeamAgentSpec,
+    team_name: str,
+    member_name: str,
+) -> None:
+    """Check the project scope and Git repository before registering a member."""
+    from openjiuwen.agent_teams.worktree.session_scope import build_worktree_owner_scope
+    from openjiuwen.harness.tools.worktree.git import find_canonical_git_root
+
+    scope = build_worktree_owner_scope(
+        team_name=team_name,
+        member_name=member_name,
+        spec=spec,
+    )
+    if await find_canonical_git_root(scope.project_dir) is None:
+        raise RuntimeError(
+            f"Team worktree isolation project_dir is not in a git repository: {scope.project_dir}"
+        )
 
 
 _TEAM_WORKTREE_BASH_DENY_PATTERNS = [
@@ -341,10 +361,10 @@ class AgentConfigurator:
         )
 
     def create_worktree_manager(self, spec: TeamAgentSpec) -> WorktreeManager:
+        from openjiuwen.harness.tools.worktree import WorktreeCreatedEvent as HarnessWorktreeCreatedEvent
         from openjiuwen.harness.tools.worktree import (
             WorktreeManager,
         )
-        from openjiuwen.harness.tools.worktree import WorktreeCreatedEvent as HarnessWorktreeCreatedEvent
         from openjiuwen.harness.tools.worktree import WorktreeRemovedEvent as HarnessWorktreeRemovedEvent
 
         ws_mgr = self.workspace_manager
@@ -734,9 +754,10 @@ class AgentConfigurator:
                 project_dir=member_project_dir,
             )
         # Swarmflow worker-model resolver (leader + enable_swarmflow only). A
-        # positional pool lookup by ``agent(model=...)`` name hint; None when the
-        # team spec is absent so the worker falls back to the leader's model. The
-        # leader-only async ``swarmflow`` tool is gated on this being non-None.
+        # positional pool lookup by ``agent(model=...)`` name hint; no hint
+        # resolves to None so the worker falls back to the leader's model, but
+        # an explicit name that misses the pool raises (no silent downgrade).
+        # The leader-only async ``swarmflow`` tool is gated on this being non-None.
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
         swarmflow_worker_base_spec = None
         swarmflow_human_base_spec = None
@@ -750,14 +771,24 @@ class AgentConfigurator:
 
                 Returns a model *config* (not a built ``Model``): swarmflow workers
                 go through the spec build path, where ``DeepAgentSpec.model`` is a
-                ``TeamModelConfig`` resolved at construction. ``None`` falls back to
-                the worker base spec's own model.
-                """
-                if _spec is None:
-                    return None
-                from openjiuwen.agent_teams.models.allocator import resolve_member_model
+                ``TeamModelConfig`` resolved at construction. ``None`` (no hint)
+                falls back to the worker base spec's own model.
 
-                return resolve_member_model(_spec, model_name=model_name, model_index=None)
+                An explicit name that does not resolve RAISES instead of falling
+                back: a typo'd model would otherwise silently run on the default
+                model while the UI keeps showing the requested name.
+                """
+                resolved = None
+                if _spec is not None:
+                    from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+                    resolved = resolve_member_model(_spec, model_name=model_name, model_index=None)
+                if resolved is None and model_name:
+                    raise ValueError(
+                        f"swarmflow model {model_name!r} not found in the team model pool; "
+                        "an explicitly requested model never falls back to the default"
+                    )
+                return resolved
 
             # Workers are "a teammate without team tools": derive each worker from
             # the team's teammate spec (or the leader spec when no teammate exists).
@@ -1008,6 +1039,11 @@ class AgentConfigurator:
                 current_model_name = request_config.model_name
             provider = current_model_config.model_client_config.client_provider
             current_model_provider = provider.value if isinstance(provider, ProviderType) else provider
+
+        async def validate_worktree_isolation(member_name: str) -> None:
+            """Validate the member's worktree scope and repository before registration."""
+            await _validate_member_worktree_isolation(spec, team_name, member_name)
+
         agent_team = TeamBackend(
             team_name=team_name,
             member_name=current_member_name,
@@ -1016,7 +1052,7 @@ class AgentConfigurator:
             messager=messager,
             teammate_mode=MemberMode(str(spec.teammate_mode)),
             predefined_members=spec.predefined_members or None,
-            model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
+            model_allocator=self.model_allocator,
             leader_allocation=self.leader_allocation if is_leader else None,
             model_pool_provider=lambda: list(ctx.team_spec.model_pool) if ctx.team_spec is not None else [],
             current_model_name=current_model_name,
@@ -1036,6 +1072,7 @@ class AgentConfigurator:
             on_member_started=self._on_teammate_created,
             on_member_restarted=on_member_restarted,
             on_member_stopped=on_member_stopped,
+            validate_worktree_isolation=validate_worktree_isolation,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
         )
 
@@ -1065,8 +1102,13 @@ class AgentConfigurator:
         from openjiuwen.agent_teams.models import build_model_allocator, inherit_pool_ids
 
         merged = inherit_pool_ids(self.ctx.team_spec.model_pool, list(new_pool))
+        # Build and validate the replacement before mutating the live spec.
+        candidate_spec = self.ctx.team_spec.model_copy(update={"model_pool": merged})
+        new_allocator = build_model_allocator(self.spec, candidate_spec)
         self.ctx.team_spec.model_pool = merged
-        self.model_allocator = build_model_allocator(self.spec, self.ctx.team_spec)
+        self.model_allocator = new_allocator
+        if self.team_backend is not None:
+            self.team_backend.update_model_allocator(new_allocator)
 
     def attach_model_allocator(
         self,

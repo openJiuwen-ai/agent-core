@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping
 from urllib.parse import parse_qsl, urlparse
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +62,22 @@ BUILTIN_SITE_PROFILES: List[Dict[str, Any]] = [
         "domains": ["bilibili.com"],
         "task_aliases": ["bilibili", "b站", "哔哩哔哩"],
         "evidence_entity": "bilibili_search_result",
+        "semantic_rules": {
+            "duration_source": {
+                "expression_pattern": (
+                    r"__INITIAL_STATE__\s*\.\s*videoData\s*\.\s*duration\b|"
+                    r"\b(?:const|let|var)\s+(?P<state_alias>[A-Za-z_$][\w$]*)\s*=\s*"
+                    r"window\.__INITIAL_STATE__\s*;[\s\S]{0,2000}?\b(?P=state_alias)\.videoData\.duration\b"
+                ),
+                "seconds_field": "durationSec", "scope": "collection",
+            },
+            "duration_scopes": [
+                {"scope": "current_part", "selectors": [
+                    ".bpx-player-ctrl-time-duration", ".video-pod__item.active .duration", ".list-box li.on .duration",
+                ]},
+                {"scope": "collection", "selectors": [".video-pod__header .duration", ".collection-duration"]},
+            ],
+        },
     },
     {
         "id": "taobao_marketplace",
@@ -74,6 +89,12 @@ BUILTIN_SITE_PROFILES: List[Dict[str, Any]] = [
             "a[href*='shop.tmall.com']",
         ],
         "semantic_rules": {
+            "non_result_rules": [
+                {
+                    "region": "sponsored_result", "kind": "promotion", "is_ad": True,
+                    "link_patterns": [r"^https?://click\.simba\.taobao\.com/", r"[?&]xxc=ad_ztc(?:&|$)"],
+                },
+            ],
             "detail_link": {
                 "domains": ["taobao.com", "tmall.com"],
                 "path_patterns": [r"/item\.htm$"],
@@ -125,6 +146,17 @@ BUILTIN_SITE_PROFILES: List[Dict[str, Any]] = [
             "paid_link_patterns": [r"/market/paid_column/", r"/paid_column/"],
             "activity_text_patterns": [r"精选活动"],
             "promotion_text_patterns": [r"(?:^|\s)(?:推广|广告)(?:\s|$)"],
+            "non_result_rules": [
+                {
+                    "region": "ai_answer", "kind": "ai_answer",
+                    "selector_patterns": [r"(?:^|[-_ ])ai[-_ ]?(?:answer|summary)(?:$|[-_ ])", r"zhida-answer"],
+                    "text_patterns": [r"^\s*(?:AI\s*(?:智能\s*)?(?:回答|总结|摘要)|知乎直答)(?:\s|[:：]|$)"],
+                },
+                {
+                    "region": "ai_answer", "kind": "ai_answer", "require_no_link": True,
+                    "text_patterns": [r"AI\s*智能总结"],
+                },
+            ],
             "natural_result_kind": "result",
         },
     },
@@ -187,7 +219,9 @@ BUILTIN_SITE_PROFILES: List[Dict[str, Any]] = [
                     "region": "ai_overview",
                     "kind": "ai_overview",
                     "selector_patterns": [r"ai-overview", r"m-x-content", r"wob-ai"],
-                    "text_patterns": [r"AI Overview", r"AI 概览", r"AI 摘要"],
+                    "text_patterns": [
+                        r"AI Overview", r"AI 概览", r"AI 摘要", r"^\s*AI\s*模式针对[^\n]{1,100}的回复",
+                    ],
                 },
                 {
                     "region": "question_module",
@@ -233,6 +267,14 @@ BUILTIN_SITE_PROFILES: List[Dict[str, Any]] = [
         "task_aliases": ["ctrip", "trip.com", "携程"],
         "evidence_entity": "hotel",
         "semantic_rules": {
+            "rating": {"classification_patterns": [r"hotel[-_ ]?(?:star|diamond)", r"星级|钻级"]},
+            "non_result_rules": [
+                {
+                    "region": "navigation", "kind": "navigation_link",
+                    "link_patterns": [r"^https?://(?:flights?|trains?|trains?\.ctrip)\.(?:ctrip|trip)\.com/"],
+                    "selector_patterns": [r"global[-_]?nav", r"header[-_]?nav"],
+                },
+            ],
             "detail_link": {
                 "domains": ["ctrip.com", "trip.com"],
                 "path_patterns": [
@@ -412,9 +454,9 @@ def profile_detail_link_key(profile: Mapping[str, Any] | None, value: Any) -> st
 
 
 def _card_semantic_inputs(card: Mapping[str, Any]) -> tuple[str, str, str]:
-    href = str(card.get("primary_link") or card.get("href") or "")[:500]
+    href = str(card.get("primary_link") or card.get("href") or "")
     title = " ".join(str(card.get("title") or "").split())[:240]
-    preview = " ".join(str(card.get("text_preview") or "").split())[:500]
+    preview = " ".join(str(card.get("text_preview") or card.get("summary") or "").split())[:500]
     badges = " ".join(
         " ".join(str(item or "").split())[:100]
         for item in (card.get("semantic_badges") or [])
@@ -438,6 +480,8 @@ def _matching_non_result_semantics(
 ) -> tuple[str, str, bool] | None:
     for non_result_rule in rules.get("non_result_rules") or []:
         if not isinstance(non_result_rule, Mapping):
+            continue
+        if non_result_rule.get("require_no_link") and href:
             continue
         pattern_groups = (
             (href, non_result_rule.get("link_patterns")),
@@ -477,8 +521,10 @@ def _profile_card_semantics(
         semantics = ("sponsored_result", "promotion", True)
     detail_key = profile_detail_link_key(profile, href)
     detail = rules.get("detail_link")
-    if semantics is None and detail_key and isinstance(detail, Mapping):
-        semantics = ("main_result", str(detail.get("kind") or kind), is_ad)
+    eligible_region = region == "main_result" and not is_ad
+    if semantics is None and eligible_region:
+        if detail_key and isinstance(detail, Mapping):
+            semantics = ("main_result", str(detail.get("kind") or kind), is_ad)
     if semantics is None:
         natural_kind = str(rules.get("natural_result_kind") or "").strip()
         excluded_kinds = {"account", "hot_search", "sidebar"}
@@ -514,6 +560,7 @@ def apply_site_card_semantics(
         is_ad=is_ad,
     )
     if non_result is not None:
+        card["classification_reason"] = f"site_profile:{profile.get('id')}:{non_result[1]}"
         return non_result
     return _profile_card_semantics(
         card,
@@ -535,6 +582,14 @@ def normalize_site_card_fields(card: Dict[str, Any], *, host: str) -> None:
         return
     rating = card.get("rating")
     rating_kind = " ".join(str(card.get("rating_kind") or "").split()).lower()[:80]
+    classification = " ".join(str(card.get(key) or "") for key in ("rating_selector_hint", "rating_raw_text"))
+    if rating_kind == "hotel_stars" or _matches_any(classification, rating_rules.get("classification_patterns")):
+        card["hotel_stars"] = card.get("hotel_stars") or rating
+        card["rating"] = None
+        card["rating_kind"] = "hotel_stars"
+        return
+    if not (rating_rules.get("product_patterns") or rating_rules.get("shop_patterns")):
+        return
     if rating_kind == "unknown":
         statuses = card.get("field_status")
         field_status = dict(statuses) if isinstance(statuses, Mapping) else {}
@@ -563,6 +618,30 @@ def normalize_site_card_fields(card: Dict[str, Any], *, host: str) -> None:
     if rating not in (None, ""):
         card["product_rating"] = rating
         card["rating_kind"] = "product_rating"
+
+
+def normalize_profile_evaluate_fields(value: Any, *, source: str, expression: str) -> Any:
+    """Annotate a known site data source; explicit field contracts always win."""
+    if not isinstance(value, dict) or value.get("fields"):
+        return value
+    try:
+        profile = site_profile_for_host(urlparse(source).hostname or "")
+    except ValueError:
+        return value
+    rule = _semantic_rules(profile).get("duration_source")
+    if not isinstance(rule, Mapping) or not _matches_any(expression, [rule.get("expression_pattern")]):
+        return value
+    seconds = value.get(str(rule.get("seconds_field") or ""))
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)):
+        return value
+    if not 0 < seconds < 1_000_000 or int(seconds) != seconds:
+        return value
+    minutes, remainder = divmod(int(seconds), 60)
+    hours, minutes = divmod(minutes, 60)
+    duration = f"{hours}:{minutes:02d}:{remainder:02d}" if hours else f"{minutes}:{remainder:02d}"
+    return {**value, "fields": {"duration": {
+        "value": duration, "scope": str(rule.get("scope") or "unknown"), "raw_text": str(seconds),
+    }}}
 
 
 def deduplicate_site_cards(cards: List[Any], *, host: str) -> List[Any]:

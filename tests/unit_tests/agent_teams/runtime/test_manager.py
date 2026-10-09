@@ -14,8 +14,10 @@ import pytest
 
 from openjiuwen.agent_teams import paths as apaths
 from openjiuwen.agent_teams.agent.member import TeamMember
+from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.interaction import ExternalTeamEvent
 from openjiuwen.agent_teams.messager.inprocess import InProcessMessager, cleanup_inprocess_bus
+from openjiuwen.agent_teams.runtime.dispatch import RunAction, RunActionKind
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
@@ -333,7 +335,7 @@ class TestDeleteTeamFilesystemCleanup:
             binder.setup(TeamMemberBinding(team_name="teamA", member_name="worker", mode=MEMBER_MODE_DYNAMIC))
             binder.setup(TeamMemberBinding(team_name="teamA", member_name="shared", mode=MEMBER_MODE_PREDEFINED))
             worker_real = member_real_dir("teamA", "worker", MEMBER_MODE_DYNAMIC)
-            shared_real = apaths.get_agent_teams_home() / "shared"
+            shared_real = apaths.get_agent_teams_home() / "jiuwen_team_members" / "shared"
             assert worker_real.is_dir()
 
             fake_db = SimpleNamespace(
@@ -363,5 +365,47 @@ class TestDeleteTeamFilesystemCleanup:
 def mock_group_history_cleanup(monkeypatch):
     # Archive cleanup has its own scope tests; lifecycle tests use fake storage.
     monkeypatch.setattr(
-        "openjiuwen.agent_teams.tools.group_conversation.GroupConversationLog.delete_registered", lambda *a: None,
+        "openjiuwen.agent_teams.group_chat.conversation.GroupConversationLog.delete_registered", lambda *a: None,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cold_recovery_resets_leader_execution_before_activation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leader starts a new runtime only after the stale execution snapshot is reset."""
+    calls: list[str] = []
+
+    async def initialize() -> None:
+        calls.append("initialize")
+
+    async def reset_execution(team_name: str, member_names: tuple[str, ...]) -> int:
+        assert (team_name, member_names) == ("team", ("leader",))
+        calls.append("reset")
+        return 1
+
+    async def add_to_pool(entry: ActiveTeam) -> None:
+        assert entry.agent is agent
+        calls.append("activate")
+
+    backend = SimpleNamespace(
+        db=SimpleNamespace(
+            initialize=initialize,
+            member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
+        )
+    )
+    agent = SimpleNamespace(team_backend=backend, member_name="leader")
+    monkeypatch.setattr(TeamAgent, "recover_from_session", lambda *args, **kwargs: agent)
+    manager = TeamRuntimeManager()
+    monkeypatch.setattr(manager._pool, "add", add_to_pool)
+    session = SimpleNamespace(get_session_id=lambda: "session")
+    spec = SimpleNamespace(team_name="team")
+
+    await manager._apply_action(
+        RunAction(kind=RunActionKind.COLD_RECOVER, require_spec=False),
+        spec=spec,
+        team_session=session,
+        pool_entry=None,
+        inputs=None,
+    )
+
+    assert calls == ["initialize", "reset", "activate"]

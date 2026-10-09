@@ -167,6 +167,16 @@ c = await parallel([... for x in b])
 
 组合基调：**轻量把关** = 1 个 `verifier`；**重要交付物** = `verifier` + `inspector`（可多个 inspector 分维度）；**开放性 / 高风险设计** = `verifier` + `challenger`（视需要再加 `inspector`）。同一脚本对不同阶段产物可用不同组成多次调用。
 
+**reviewer 指定模型**：每个 reviewer 角色都是独立 agent，都可在自己的 spec 里用 `"options"` 键指定模型（覆盖该 reviewer 继承的团队 teammate 模型，也覆盖 `verify()` 级 `options`）：
+
+```python
+reviewers = build_reviewers(deliverable, [
+    {"type": "verifier",  "options": {"model": "flash-mini"}},
+    {"type": "inspector", "options": {"model": "pro"}},
+])
+r = await verify(reviewers, threshold=0.85)
+```
+
 **两道门槛**：`verifier` 是**最低门槛**——只问"验收标准满足了吗"（过了/没过）；`inspector` 是**质量门槛**——按维度打分、平均 ≥ 0.85 才过，会**拦下"功能全满足但质量平庸"的交付物**（如代码能编译但不可维护）。对**关键最终交付物 / 被下游消费的产物**，光 `verifier` 不够——加 `inspector` 强制质量；对一次性、轻量、用完即弃的中间产物，只 `verifier` 即可。
 
 **默认组合**：**设计文档 / 架构方案 / 最终交付物** → `verifier` + `inspector`（保底功能 + 强制质量，这是默认，不要只用 verifier）；**实现代码** → `verifier`（编译运行验收）+ 若被下游消费再加 `inspector`；**开放性设计 / 无确定验收标准** → 上面组合再加 `challenger`。拿不准时，优先 `verifier` + `inspector`。

@@ -8,6 +8,8 @@ from .schemas import (
     PaperPreprocessError,
     PaperPreprocessInput,
     PaperPreprocessOutput,
+    ResearchClaim,
+    ResearchContext,
 )
 
 __all__ = [
@@ -17,6 +19,8 @@ __all__ = [
     "PaperPreprocessError",
     "PaperPreprocessInput",
     "PaperPreprocessOutput",
+    "ResearchClaim",
+    "ResearchContext",
     "preprocess_paper",
     "validate_latex_paper",
 ]

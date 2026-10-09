@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .extractor import build_initial_prompt, extract_paper_evidence
+from .extractor import build_initial_prompt, extract_paper_evidence, paper_evidence_to_research_context
 from .latex_validation import validate_latex_paper
 from .schemas import LatexPaperDocument, PaperPreprocessInput, PaperPreprocessOutput
 
@@ -21,7 +21,10 @@ class PaperPreprocessAgent:
         document = document or validate_latex_paper(inputs.paper_dir)
         evidence = extract_paper_evidence(document)
         return PaperPreprocessOutput(
-            document=document, evidence=evidence, initial_prompt=build_initial_prompt(document, evidence)
+            document=document,
+            evidence=evidence,
+            initial_prompt=build_initial_prompt(document, evidence),
+            research_context=paper_evidence_to_research_context(document, evidence),
         )
 
 

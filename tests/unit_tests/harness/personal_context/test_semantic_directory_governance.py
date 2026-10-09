@@ -2968,12 +2968,22 @@ def test_recluster_apply_moves_pages_rewrites_links_and_keeps_source_meta_unchan
         "旧主题/受管二.md": "新主题/受管二.md",
         "旧主题/Agent综合页.md": "新主题/综合/Agent综合页.md",
     }
+    nodes_before = context_pipeline._snapshot_context_nodes(context_root)
+    relocations = {}
 
     context_pipeline._apply_context_reclustering(
         context_root,
         source_root=source_root,
         mapping=mapping,
+        relocations=relocations,
     )
+
+    nodes_after = context_pipeline._snapshot_context_nodes(context_root)
+    result = context_pipeline._count_published_nodes(nodes_before, nodes_after, relocations=relocations)
+    new_descriptions = {
+        path for path in nodes_after.keys() - nodes_before.keys() if path.endswith("/description.md")
+    }
+    assert result["created_node_count"] == len(new_descriptions)
 
     assert _source_meta_snapshot(source_root) == source_before
     moved_agent_page = context_root / "新主题" / "综合" / "Agent综合页.md"

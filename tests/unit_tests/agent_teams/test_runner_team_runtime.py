@@ -107,6 +107,7 @@ class FakeTeamAgent:
         self.team_name = team_name
         self.stream_label = stream_label
         self.spec = spec
+        self.runtime_context = SimpleNamespace(team_spec=spec)
         self.resume_calls: list[str] = []
         self.pause_calls = 0
         self.cancel_calls = 0
@@ -584,6 +585,14 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     session_id = f"cold_recover_{uuid.uuid4().hex}"
     spec = _runtime_spec("cold_recover_team")
     agent = FakeTeamAgent("cold_recover_team", stream_label="team.chunk")
+    reset_execution = AsyncMock(return_value=1)
+    agent.team_backend = SimpleNamespace(
+        db=SimpleNamespace(
+            initialize=AsyncMock(),
+            member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
+        )
+    )
+    agent.member_name = "leader"
 
     manager = TeamRuntimeManager()
     manager._pool.add = AsyncMock()
@@ -608,6 +617,7 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     # Call site: TeamAgent.recover_from_session(team_session, team_name, runtime_spec=spec)
     assert args[1] == "cold_recover_team"
     assert kwargs["runtime_spec"] is spec
+    reset_execution.assert_awaited_once_with("cold_recover_team", ("leader",))
     # COLD_RECOVER recovers only the leader here; teammate recovery is owned by
     # the leader's coordination.start (the activation is streamed right after),
     # so the manager no longer eagerly calls recover_team.
@@ -2363,5 +2373,5 @@ async def test_run_agent_team_base_true_resolves_team_id_via_resource_mgr(isolat
 def mock_group_history_cleanup(monkeypatch):
     # Archive cleanup has its own scope tests; lifecycle tests use fake storage.
     monkeypatch.setattr(
-        "openjiuwen.agent_teams.tools.group_conversation.GroupConversationLog.delete_registered", lambda *a: None,
+        "openjiuwen.agent_teams.group_chat.conversation.GroupConversationLog.delete_registered", lambda *a: None,
     )

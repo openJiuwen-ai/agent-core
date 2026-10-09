@@ -33,13 +33,8 @@ class GroupSendMessageTool(TeamTool):
             return ToolOutput(success=False, error=str(exc))
 
 
-def create_group_chat_tools(backend, t) -> list[TeamTool]:
-    if not backend.group_chat_spec.enable_group_chat:
-        return []
-    return [GroupSendMessageTool(backend, t)]
-
-
 def group_chat_prompt(spec) -> str:
     from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.harness.prompts import resolve_language
 
-    return "\n\n" + make_translator(spec.language or "cn")("group_role") if spec.enable_group_chat else ""
+    return "\n\n" + make_translator(resolve_language(spec.language))("group_role")

@@ -1315,6 +1315,7 @@ class NativeHarness(DeepAgent):
                     active.original_query,
                     is_follow_up=is_follow_up,
                     task_id=active.task_id,
+                    turn_number=active.turn.turn_number,
                     resume_continuation=resume_continuation,
                 )
                 result = await self.loop_controller.wait_round_completion()

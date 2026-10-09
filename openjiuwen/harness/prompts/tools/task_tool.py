@@ -75,8 +75,9 @@ concise summary of the result.
 Even a partial result can contain useful answers. unverified_fields means fields were not mapped to typed slots, \
 not that the observed answer is false. Do not repeat a lookup merely to reformat or independently verify it.
 - retryable=true permits, but does not require, at most one focused continuation with the same resume_task_id. \
-Continue only for genuinely unanswered user requirements, using missing_slots and recommended_recovery; \
-do not restart the full task or expand requested_slots. If retryable=false, report the available result.
+Continue only for genuinely unanswered user requirements; missing_slots and recommended_recovery are hints, \
+not a second completion checklist. Do not restart satisfied work or add requirements. \
+If retryable=false, report the available result.
 - The subagent's outputs should generally be trusted.
 - Clearly tell the subagent whether you expect it to write code or just to do \
 research (search, file reads, web fetches, etc.), since it is not aware of \
@@ -147,8 +148,8 @@ task_tool 启动专门的子代理来自主处理复杂任务。每种子代理�
 partial 中也可能已有可用答案。unverified_fields 表示未映射到结构化字段，不代表已观察到的答案错误；\
 不要仅为改写字段名或交叉验证而重复查询。
 - retryable=true 只是允许续跑，不是要求续跑。只有用户要求确实尚未回答时，\
-才可使用同一 resume_task_id，针对 missing_slots 和 recommended_recovery 至多续跑一次；\
-不要重做整个任务或扩大 requested_slots。retryable=false 时直接报告已有结果。
+才可使用同一 resume_task_id 至多续跑一次；missing_slots 和 recommended_recovery 只是提示，不是第二套完成清单。\
+不要重做已满足的目标或新增要求。retryable=false 时直接报告已有结果。
 - 子代理的输出通常应当被信任。
 - 明确告知子代理你期望它写代码还是仅做调研\
 （搜索、读文件、抓取网页等），因为它不知道用户的意图。

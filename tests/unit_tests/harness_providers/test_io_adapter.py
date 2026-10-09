@@ -15,6 +15,8 @@ from openjiuwen.core.session.interaction.interactive_input import InteractiveInp
 from openjiuwen.harness_protocol import (
     AbortMode,
     DeliveryMode,
+    DynamicToolCallRequest,
+    DynamicToolCallResponse,
     EventBufferConfig,
     HarnessCapability,
     HarnessCard,
@@ -35,6 +37,9 @@ from openjiuwen.harness_protocol import (
     SendReceipt,
     ToolApprovalDecision,
     ToolApprovalRequest,
+    ToolDefinition,
+    ToolExecutionResult,
+    ToolInvocation,
     UnsupportedHarnessCapabilityError,
     UserInputRequest,
 )
@@ -145,8 +150,54 @@ def _context() -> HarnessContext:
     return HarnessContext(agent_name="worker", agent_id="agent", host_session_id="host", system_prompt="")
 
 
+class _FakeToolGateway:
+    def __init__(self) -> None:
+        self.invocations: list[ToolInvocation] = []
+
+    async def definitions(self) -> tuple[ToolDefinition, ...]:
+        return ()
+
+    async def invoke(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        self.invocations.append(invocation)
+        return ToolExecutionResult(content={"ok": True})
+
+
 async def _drain(adapter: HarnessIOAdapter) -> list[Any]:
     return [chunk async for chunk in adapter.outputs()]
+
+
+@pytest.mark.asyncio
+async def test_dynamic_tool_call_routes_to_context_tool_gateway() -> None:
+    harness = _FakeHarness()
+    gateway = _FakeToolGateway()
+    adapter = HarnessIOAdapter(harness)
+    await adapter.start(
+        HarnessContext(
+            agent_name="worker",
+            agent_id="agent",
+            host_session_id="host",
+            system_prompt="",
+            tools=gateway,
+        )
+    )
+
+    response = await adapter.handle(
+        DynamicToolCallRequest(
+            request_id="request-1",
+            call_id="call-1",
+            tool_name="view_task",
+            arguments={"task_id": "task-1"},
+        )
+    )
+
+    assert isinstance(response, DynamicToolCallResponse)
+    assert response.status is InteractionResponseStatus.COMPLETED
+    assert response.result == {"ok": True}
+    assert response.is_error is False
+    assert gateway.invocations == [
+        ToolInvocation(call_id="call-1", name="view_task", arguments={"task_id": "task-1"})
+    ]
+    await adapter.stop()
 
 
 @pytest.mark.asyncio

@@ -479,3 +479,75 @@ async def test_subagent_resume_delegates_to_control() -> None:
     control.emit_status_update.assert_awaited_once_with("sub1", session=session)
     assert result.data["status"] == "running"
     assert result.data["restored"] is True
+    assert "message" not in result.data
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restored", [True, False])
+@pytest.mark.parametrize(
+    ("language", "no_work", "previous_turn", "keep_idle"),
+    [
+        ("cn", "未投递新任务", "恢复前的上一轮结果", "仅要求恢复时保持待命"),
+        (
+            "en",
+            "did not enqueue new work",
+            "previous turn before restoration",
+            "If only restoration was requested, leave it idle",
+        ),
+        ("unknown", "未投递新任务", "恢复前的上一轮结果", "仅要求恢复时保持待命"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("status", "turn_outcome"),
+    [
+        (SubagentStatus.completed(), "completed"),
+        (SubagentStatus.interrupted(), "cancelled"),
+        (SubagentStatus.errored("failed"), "failed"),
+    ],
+)
+async def test_subagent_resume_idle_guidance_reaches_model(
+    restored: bool,
+    language: str,
+    no_work: str,
+    previous_turn: str,
+    keep_idle: str,
+    status: SubagentStatus,
+    turn_outcome: str,
+) -> None:
+    tool = SubagentResumeTool(
+        ToolCard(id="subagent_resume", name="subagent_resume", description="resume"),
+        _parent(),
+        language=language,
+    )
+    message = "" if restored else "Instance is already live; use subagent_send_input directly."
+    control = _control_mock(
+        resume=AsyncMock(
+            return_value=ResumeResult(
+                status=status,
+                restored=restored,
+                message=message,
+            ),
+        ),
+        close=AsyncMock(),
+        send_input=AsyncMock(),
+    )
+    with patch(
+        "openjiuwen.harness.tools.subagent.subagent_tools.get_subagent_control",
+        return_value=control,
+    ):
+        result = await tool.invoke({"subagent_id": "sub1"}, session=Session(session_id="parent_sess"))
+
+    assert result.success is True
+    assert result.data["status"] == "idle"
+    assert result.data["turn_outcome"] == turn_outcome
+    assert result.data["restored"] is restored
+    rendered = tool.render_for_llm(result)
+    assert no_work in rendered
+    assert previous_turn in rendered
+    assert keep_idle in rendered
+    assert "subagent_send_input" in rendered
+    assert "subagent_wait" in rendered
+    if message:
+        assert message in rendered
+    control.close.assert_not_awaited()
+    control.send_input.assert_not_awaited()

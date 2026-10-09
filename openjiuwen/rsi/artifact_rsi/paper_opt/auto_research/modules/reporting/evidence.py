@@ -16,10 +16,12 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import resolve_plan_metrics
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
     ExperimentResult,
     VariantResult,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_preprocess.schemas import ResearchContext
 
 EvidenceSource = Literal["prior_paper", "current_run"]
 
@@ -68,7 +70,11 @@ def _cell_numeric_items(cell: dict) -> dict[str, float]:
     return {name: value for name, value in cell.items() if _is_reportable_numeric(name, value)}
 
 
-def normalize_current_run_evidence(result: ExperimentResult) -> list[Evidence]:
+def normalize_current_run_evidence(
+    result: ExperimentResult,
+    *,
+    plan_metrics: list[str] | None = None,
+) -> list[Evidence]:
     """Flatten ``ExperimentResult.variants`` into ``Evidence`` rows with
     ``source="current_run"``. Handles both a flat single-condition variant
     (metrics as top-level scalars) and a multi-condition variant (metrics
@@ -79,9 +85,33 @@ def normalize_current_run_evidence(result: ExperimentResult) -> list[Evidence]:
     make for the same reason.
     """
     evidence: list[Evidence] = []
+    declared = [str(name).strip() for name in (plan_metrics or []) if str(name).strip()]
     for variant in result.variants:
+        if declared:
+            planned = _plan_metric_evidence(variant, declared)
+            if planned:
+                evidence.extend(planned)
+                continue
         evidence.extend(_variant_evidence(variant))
     return evidence
+
+
+def _plan_metric_evidence(variant: VariantResult, names: list[str]) -> list[Evidence]:
+    rows: list[Evidence] = []
+    for name, hit in resolve_plan_metrics(dict(variant.metrics), names).items():
+        if hit.status != "resolved" or hit.value is None:
+            continue
+        rows.append(
+            Evidence(
+                evidence_id=f"{variant.name}:{name}",
+                source="current_run",
+                method=variant.name,
+                metric=name,
+                value=hit.value,
+                provenance={"variant": variant.name, "path": hit.path},
+            )
+        )
+    return rows
 
 
 def _variant_evidence(variant: VariantResult) -> list[Evidence]:
@@ -188,3 +218,64 @@ def classify_numeric_status(old: Evidence, new: Evidence) -> ClaimStatus:
     if abs(delta) < _NO_CI_DELTA_THRESHOLD:
         return "no_significant_change"
     return "tentative"
+
+
+def normalize_prior_paper_evidence(context: ResearchContext) -> list[Evidence]:
+    """Flatten typed prior-paper claims into ``Evidence`` rows with
+    ``source="prior_paper"``. Qualitative claims keep their text as
+    ``value``; unmatched claims stay prior-only until a later metric match.
+    """
+    evidence: list[Evidence] = []
+    for claim in context.claims:
+        numeric = claim.value if isinstance(claim.value, (int, float)) and not isinstance(claim.value, bool) else None
+        evidence.append(
+            Evidence(
+                evidence_id=claim.claim_id,
+                source="prior_paper",
+                method="prior_paper",
+                metric=claim.metric,
+                value=numeric if numeric is not None else claim.text,
+                provenance={
+                    "section": claim.source_section,
+                    "kind": claim.kind,
+                    **claim.provenance,
+                },
+            )
+        )
+    return evidence
+
+
+def _is_numeric_value(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def classify_prior_vs_current(
+    prior: list[Evidence], current: list[Evidence]
+) -> list[tuple[Evidence | None, Evidence | None, ClaimStatus | None]]:
+    """Pair prior/current numeric evidence only when both sides share a metric.
+
+    Unmatched rows stay explicitly prior-only or current-only; they are not
+    classified. A metric-less prior claim never matches a current measurement.
+    """
+    unused: dict[str, list[Evidence]] = {}
+    for item in current:
+        if item.metric:
+            unused.setdefault(item.metric, []).append(item)
+
+    pairs: list[tuple[Evidence | None, Evidence | None, ClaimStatus | None]] = []
+    used_ids: set[str] = set()
+    for old in prior:
+        match: Evidence | None = None
+        bucket = unused.get(old.metric) if old.metric else None
+        if bucket:
+            match = bucket.pop(0)
+            used_ids.add(match.evidence_id)
+        status: ClaimStatus | None = None
+        if match is not None and _is_numeric_value(old.value) and _is_numeric_value(match.value):
+            status = classify_numeric_status(old, match)
+        pairs.append((old, match, status))
+
+    for item in current:
+        if item.evidence_id not in used_ids:
+            pairs.append((None, item, None))
+    return pairs

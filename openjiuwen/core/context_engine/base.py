@@ -225,6 +225,9 @@ class ModelContext(ABC):
         config: "ContextEngineConfig",
         *,
         token_counter: TokenCounter = None,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
     ) -> bool:
         """Rebind model-specific context state without replacing messages.
 

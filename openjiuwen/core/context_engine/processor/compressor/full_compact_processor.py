@@ -288,6 +288,20 @@ class FullCompactProcessor(ContextProcessor):
         if config.model is not None and config.model_client is not None:
             self._model = Model(config.model_client, config.model)
 
+    def rebind_model(
+        self,
+        *,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
+    ) -> bool:
+        """Refresh the model used for full context compaction."""
+        return self._rebind_model_reference(
+            model=model,
+            model_config=model_config,
+            model_client_config=model_client_config,
+        )
+
     @property
     def config(self) -> FullCompactProcessorConfig:
         return self._config

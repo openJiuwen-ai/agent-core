@@ -13,6 +13,10 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.base import _reference_answer
 from openjiuwen.rsi.harness_rsi.evaluator.requirement_results import requirement_results_contract
 
 
+class MissingJudgeVerdictError(ValueError):
+    """The model returned no structured verdict to validate or repair."""
+
+
 def finite_number(value: Any, *, minimum: float, maximum: float, name: str) -> float:
     """Reject booleans, coercible strings and non-finite model scores."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -139,7 +143,29 @@ def parse_judge_output(raw: str) -> dict[str, Any]:
         if "```" in outside or _contains_judge_payload(outside):
             raise ValueError("ambiguous judge output: more than one structured payload")
         text = match[1].strip()
-    parsed = json.loads(text, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
+    decoder = json.JSONDecoder(object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
+    if not text.startswith(("{", "[")):
+        candidates = []
+        end = 0
+        for match in re.finditer(r"[\[{]", text):
+            if match.start() < end:
+                continue
+            try:
+                value, end = decoder.raw_decode(text, match.start())
+            except ValueError:
+                if re.match(r'\{\s*"(?:status|overall_reason|behaviors|forbidden_hits|score)"\s*:',
+                            text[match.start():]):
+                    raise
+                continue
+            if _contains_judge_payload(text[match.start():end]):
+                candidates.append(value)
+        if not candidates:
+            raise MissingJudgeVerdictError("judge output contains no JSON verdict")
+        if len(candidates) != 1:
+            raise ValueError("ambiguous judge output: more than one structured payload")
+        parsed = candidates[0]
+    else:
+        parsed = decoder.decode(text)
     if not isinstance(parsed, dict):
         raise ValueError("judge output must be an object")
     return parsed
