@@ -95,6 +95,10 @@ class _SummaryCloseoutRail(DeepAgentRail):
         self._summary_task_id: str | None = None
         self._draft_dispatches: dict[str, int] = {}
 
+    def stop_drafting(self, summary_task_id: str) -> None:
+        """Exhaust the drafting budget for a blocked Summary task."""
+        self._draft_dispatches[summary_task_id] = 2
+
     def callback_priority(self, event: AgentCallbackEvent) -> int:
         # Disclose last, but reject execution before permission/approval side effects.
         return -100 if event == AgentCallbackEvent.BEFORE_MODEL_CALL else 1000
@@ -2414,11 +2418,13 @@ class OrganizationRuntimeManager:
             return
         from openjiuwen.agent_teams.prompts.loader import load_template
 
-        active = [
-            execution for execution in await manager.list_incomplete_summary_executions()
-            if execution.summary_team_id == team_id
-            and execution.status == OrgSummaryExecutionStatus.RUNNING.value
-        ]
+        active = []
+        for execution in await manager.list_incomplete_summary_executions():
+            if execution.summary_team_id != team_id:
+                continue
+            if execution.status != OrgSummaryExecutionStatus.RUNNING.value:
+                continue
+            active.append(execution)
         if summary_task_id is not None:
             active = [execution for execution in active if execution.summary_task_id == summary_task_id]
         elif len(active) != 1:
@@ -2438,7 +2444,7 @@ class OrganizationRuntimeManager:
                 find_rails = getattr(getattr(entry.agent, "harness", None), "find_rails_by_type", None)
                 if callable(find_rails):
                     for rail in find_rails((_SummaryCloseoutRail,)):
-                        rail._draft_dispatches[execution.summary_task_id] = 2
+                        rail.stop_drafting(execution.summary_task_id)
             language = getattr(entry.agent.spec, "language", None) or "cn"
             prompt = cast(str, load_template("org_summary_member_failure", language).format({
                 "summary_task_id": execution.summary_task_id, "execution_id": execution.execution_id,

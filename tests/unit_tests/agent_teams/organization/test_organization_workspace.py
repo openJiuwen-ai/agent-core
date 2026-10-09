@@ -75,7 +75,9 @@ async def test_summary_budget_does_not_reset_when_switching_tasks():
 async def test_summary_failure_wakes_leader_without_settled_board_and_escalates_once():
     from unittest.mock import AsyncMock
 
-    from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
+    from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager, _SummaryCloseoutRail
+    from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+    from openjiuwen.harness.tools.base_tool import ToolOutput
 
     execution = SimpleNamespace(
         execution_id="exec", summary_task_id="summary-task", root_task_id="root",
@@ -91,6 +93,8 @@ async def test_summary_failure_wakes_leader_without_settled_board_and_escalates_
     messages = SimpleNamespace(send_message=AsyncMock())
     backend = SimpleNamespace(org_task_manager=manager, message_manager=messages, leader_member_name="leader")
     agent = SimpleNamespace(team_backend=backend, spec=SimpleNamespace(metadata={"summary_team": True}, language="cn"))
+    rail = _SummaryCloseoutRail("summary")
+    agent.harness = SimpleNamespace(find_rails_by_type=lambda _types: [rail])
     pool = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(
         agent=agent, current_session_id="session", state=RuntimeState.RUNNING,
     )))
@@ -114,6 +118,15 @@ async def test_summary_failure_wakes_leader_without_settled_board_and_escalates_
     runtime._notify_summary_blocker.assert_awaited_once()
     assert runtime._summary_closeout_attempts[("session", "summary", "exec")] == 2
     assert ("session", "summary", "other") not in runtime._summary_member_failures
+    await rail.after_tool_call(AgentCallbackContext(event="after_tool_call", agent=None, inputs=ToolCallInputs(
+        tool_name="org_summary_get_inputs", tool_args={"summary_task_id": "summary-task"},
+        tool_result=ToolOutput(success=True),
+    )))
+    send = AgentCallbackContext(event="before_tool_call", agent=None, inputs=ToolCallInputs(
+        tool_name="send_message", tool_args={"to": "delivery-drafter"},
+    ))
+    await rail.before_tool_call(send)
+    assert send.extra["_skip_tool"] is True
     agent.spec.metadata = {}
     await runtime.notify_summary_member_failure(
         team_id="summary", session_id="session", member_name="delivery-drafter", reason="error", turn_id="normal",
