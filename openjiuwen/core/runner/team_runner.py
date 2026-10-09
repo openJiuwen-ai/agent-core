@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 """Team-runtime surface mixed into the Runner.
 
@@ -776,7 +776,7 @@ class _TeamRunnerMixin:
         await entry.interact_gate.close_and_drain()
 
     @staticmethod
-    def _maybe_attach_observability(agent: Any, session_id: str | None = None) -> None:
+    def _maybe_attach_observability(agent: Any, session_id: str) -> None:
         """Attach observability to a leader agent.
 
         Creates the team span so that callback handlers see the correct identity.
@@ -787,8 +787,14 @@ class _TeamRunnerMixin:
         ``session_id`` is the session the root is registered under, so a
         teammate running in a task of its own can resolve it. The runner knows
         it; the context vars it would otherwise be read from may not be bound
-        on this path.
+        on this path. The existing-root check is scoped to exactly this
+        session: a live root of any other session (for instance a concurrent
+        single-agent run) must never be mistaken for this Team's root, or the
+        Team's own root is never created and its whole trace is lost.
         """
+        if not session_id:
+            logger.warning("observability attach skipped: session_id is required")
+            return
         try:
             from openjiuwen.agent_teams.observability import (
                 attach_to_team_agent,
@@ -806,24 +812,18 @@ class _TeamRunnerMixin:
                 get_team_span,
             )
             from openjiuwen.agent_teams.observability.setup import get_tracer
-            existing = get_team_span()
+            # Only a still-recording root of this very session is returned, so an
+            # ended root simply reads as absent and a fresh one is opened below.
+            existing = get_team_span(session_id=session_id)
             if existing is not None:
                 logger.info(
                     "_maybe_attach_observability: found existing team span name={} "
-                    "is_recording={} trace_id={:032x} span_id={:016x}",
-                    existing.name, existing.is_recording(),
+                    "session_id={} trace_id={:032x} span_id={:016x}",
+                    existing.name, session_id,
                     existing.context.trace_id, existing.context.span_id,
                 )
-            if existing is None or not existing.is_recording():
-                if existing is not None:
-                    logger.warning(
-                        "_maybe_attach_observability: team span ENDED, will create new one. "
-                        "old trace_id={:032x}",
-                        existing.context.trace_id,
-                    )
-                    from openjiuwen.agent_teams.observability.span_context import clear_team_span
-                    clear_team_span()
-                get_or_create_team_span(
+                return
+            get_or_create_team_span(
                 team_name,
                 get_tracer("openjiuwen.agent_teams.observability"),
                 session_id=session_id,

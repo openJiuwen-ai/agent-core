@@ -9,6 +9,8 @@ agent executes in a session-setup supervisor task the request's ContextVar does
 not reach, so lookups from there see nothing. This module keeps a registry
 keyed by session id — readable regardless of task boundary — and wraps the
 shared ``get_root_span`` accessor so every parent lookup falls back to it.
+The supervisor task carries its session id (``DeepAgent.start`` binds it before
+spawning the loop's tasks), so the fallback is always an exact session lookup.
 
 The registry is keyed rather than a single "current run" slot because sessions
 overlap: a process serves several chats at once, and one slot made them fight
@@ -85,30 +87,20 @@ def reset_run_root_spans() -> None:
 def resolve_run_root_span(*, session_id: str | None = None) -> Any:
     """Return the root span of the run the calling task belongs to, or None.
 
-    Resolution is by session id first: the session id is set around agent
+    Resolution is by session id only: the session id is set around agent
     execution, so it is readable from the tasks the ContextVar cannot reach —
-    which is exactly where this fallback is needed.
+    which is exactly where this fallback is needed. A caller with no session
+    in reach only matches a run registered without one.
 
-    When no session id is in reach, a single run in flight is unambiguous and
-    answers. Several in flight with no way to tell them apart returns None
-    rather than a guess: attaching one run's spans to another run's trace is
-    worse than the span being missing.
+    The only run in flight is never adopted as a guess: it is merely whichever
+    session happens to be running, and a late callback of a finished run would
+    otherwise land in that other session's trace. A missing span is better than
+    a span in the wrong trace.
     """
     requested_session_id = str(session_id or current_session_id() or "")
-
     span = _ROOT_SPANS.get(requested_session_id)
     if _is_recording(span):
         return span
-
-    # A concrete owner that is not registered is not ambiguous: it has no
-    # live run root.  Never let a late callback from that operation adopt the
-    # sole root of a different conversation.
-    if requested_session_id:
-        return None
-
-    live = [candidate for candidate in list(_ROOT_SPANS.values()) if _is_recording(candidate)]
-    if len(live) == 1:
-        return live[0]
     return None
 
 

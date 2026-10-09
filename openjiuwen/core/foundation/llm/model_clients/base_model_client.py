@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 from abc import (
     ABC,
     abstractmethod,
@@ -12,6 +12,8 @@ from typing import (
     Optional,
     Union,
 )
+
+import httpx
 
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -384,6 +386,36 @@ class BaseModelClient(ABC):
             if not total_cost:
                 total_cost = detail_total or (input_cost + output_cost)
         return input_cost, output_cost, total_cost
+
+    @staticmethod
+    def _sdk_retry_count(http_response: httpx.Response | None) -> int | None:
+        """Return how many transport retries the provider SDK made before this response.
+
+        The OpenAI and Anthropic SDKs retry connection errors, 408/409/429 and
+        5xx internally and stamp every attempt with an ``x-stainless-retry-count``
+        request header, so the request that produced the final response carries
+        the retry count. Those retries happen inside the awaited call and would
+        otherwise silently inflate time to first byte and first token.
+
+        Args:
+            http_response: The raw HTTP response of the final attempt.
+
+        Returns:
+            The retry count, or None when the response or header is unavailable.
+        """
+        if http_response is None:
+            return None
+        try:
+            raw_value = http_response.request.headers.get("x-stainless-retry-count")
+        except RuntimeError:
+            # httpx raises when the response was built without a request.
+            return None
+        if raw_value is None:
+            return None
+        try:
+            return max(int(raw_value), 0)
+        except ValueError:
+            return None
 
     def _get_client_name(self) -> str:
         """Get client name for error messages (subclasses can override)

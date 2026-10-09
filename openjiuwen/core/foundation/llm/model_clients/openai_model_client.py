@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import inspect
 import json
@@ -580,6 +580,13 @@ class OpenAIModelClient(BaseModelClient):
                         f"API returned error {response.status_code}: "
                         f"{summarize_provider_error_text(error_text, status_code=response.status_code)}"
                     )
+                # A bare httpx stream makes exactly one attempt.
+                await trigger(
+                    LLMCallEvents.LLM_RESPONSE_STARTED,
+                    model_name=params.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                    retry_count=0,
+                )
                 content_type = str(response.headers.get("Content-Type", "")).lower()
                 if "text/event-stream" in content_type:
                     async for raw_line in response.aiter_lines():
@@ -2127,6 +2134,13 @@ class OpenAIModelClient(BaseModelClient):
                     async_client,
                     params,
                     is_stream=True,
+                )
+                # The awaited create returns once the response headers arrive.
+                await trigger(
+                    LLMCallEvents.LLM_RESPONSE_STARTED,
+                    model_name=params.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                    retry_count=self._sdk_retry_count(getattr(response_stream, "response", None)),
                 )
                 if output_parser:
                     async for parsed_result in self._astream_with_parser(response_stream, output_parser):
