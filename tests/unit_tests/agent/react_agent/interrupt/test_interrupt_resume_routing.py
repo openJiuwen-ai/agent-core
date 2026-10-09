@@ -12,7 +12,7 @@ from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
-from openjiuwen.core.single_agent.interrupt.handler import ResumeContext, ToolInterruptHandler
+from openjiuwen.core.single_agent.interrupt.handler import HitlBuildArgs, ResumeContext, ToolInterruptHandler
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import (
     RESUME_USER_INPUT_KEY,
@@ -164,7 +164,7 @@ def test_wrapped_interrupt_stores_outer_call_and_keeps_inner_request_id():
         results=[(interrupt, None)],
         tool_calls=[outer_call],
         ai_message=AssistantMessage(content="", tool_calls=[outer_call]),
-        iteration=0,
+        hitl_args=HitlBuildArgs(iteration=0),
     )
 
     assert state is not None
