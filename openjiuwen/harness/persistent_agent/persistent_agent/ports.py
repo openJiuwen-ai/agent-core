@@ -19,6 +19,7 @@ from .schema.events import AgentEvent
 from .schema.execution import ExecutionContext
 from .schema.port_results import BudgetAdmission, BudgetReport
 from .schema.protocol import ModelUsage
+from .workspace.access import WorkspaceAccessPort
 
 
 class CommitPort(Protocol):
@@ -95,6 +96,7 @@ class PersistentPorts:
     window_backend: BaseKVStore | None = None
     group_chat: GroupChatPort | None = None
     knowledge: KnowledgePort | None = None
+    workspace_access: WorkspaceAccessPort | None = None
 
     def validate(self) -> None:
         """Reject missing or malformed dependencies without contacting the host or storage."""
@@ -103,6 +105,7 @@ class PersistentPorts:
             ("budget", ("admit", "report"), True),
             ("group_chat", ("recent_messages", "search_messages"), False),
             ("knowledge", ("resolve", "read"), False),
+            ("workspace_access", ("resolve_read_scope",), False),
         ):
             port = getattr(self, name)
             if port is None:

@@ -81,6 +81,16 @@ class PersistentBuildContext(BuildContext):
             raise build_error(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, error_msg="capability snapshot mismatch")
         if self.tool_owner_id != self.binding.owner_id:
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="owner mismatch")
+        if "workspace_read" in spec.enabled_features and self.ports.workspace_access is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg="workspace_access is required for workspace_read",
+            )
+        if "workspace_read" in spec.enabled_features and not spec.enable_sys_operation:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg="workspace_read requires enable_sys_operation",
+            )
         self.ports.validate()
 
     def claim(self, spec: "PersistentAgentSpec") -> None:
