@@ -62,7 +62,9 @@ def test_sdk_client_is_created_with_max_retries_zero_even_when_config_sets_it():
     model = _make_model(use_shared=False)
     model._client.model_client_config.max_retries = 3
     with (
-        patch("openai.AsyncOpenAI") as openai_cls,
+        patch(
+            "openjiuwen.core.foundation.llm.model_clients.openai_model_client.create_encoding_aware_openai_client"
+        ) as openai_cls,
         patch(
             "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
             return_value=MagicMock(),
