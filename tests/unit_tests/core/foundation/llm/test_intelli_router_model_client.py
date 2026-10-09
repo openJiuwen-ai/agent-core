@@ -465,12 +465,18 @@ class TestRouterCache:
         mock_trigger.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_default_route_stream_writer_writes_output_schema(self):
+    async def test_default_route_stream_writer_writes_output_schema(self, monkeypatch):
         """The default LLM_ROUTE subscriber writes a frontend stream event."""
+        from openjiuwen.core.foundation.llm import model as model_module
         from openjiuwen.core.foundation.llm.model import _ensure_llm_route_stream_writer_registered
-        from openjiuwen.core.runner.callback import trigger
+        from openjiuwen.core.runner.callback import AsyncCallbackFramework, trigger
         from openjiuwen.core.runner.callback.events import LLMCallEvents
+        from openjiuwen.core.runner.runner import GLOBAL_RUNNER
         from openjiuwen.core.session import _current_session
+
+        # Isolate the process-global subscriber and its registration cache.
+        monkeypatch.setattr(GLOBAL_RUNNER, "_callback_framework", AsyncCallbackFramework())
+        monkeypatch.setattr(model_module, "_llm_route_stream_writer_framework_id", None)
 
         session = FakeSession()
         token = _current_session.set(session)

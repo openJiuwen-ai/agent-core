@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import signal
 import subprocess
@@ -1410,6 +1411,7 @@ def test_sft_executor_exports_verl_checkpoint_to_lora_adapter(tmp_path, monkeypa
     assert "--use_cpu_initialization" in commands[0]
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group signals are required")
 def test_managed_training_process_request_stop_terminates_process_group(tmp_path):
     import textwrap
     import threading
@@ -1427,13 +1429,13 @@ def test_managed_training_process_request_stop_terminates_process_group(tmp_path
             import time
 
             ready = pathlib.Path(sys.argv[1])
-            ready.write_text("ready", encoding="utf-8")
 
             def _exit(_signum, _frame):
                 sys.exit(0)
 
             signal.signal(signal.SIGINT, _exit)
             signal.signal(signal.SIGTERM, _exit)
+            ready.write_text("ready", encoding="utf-8")
 
             while True:
                 time.sleep(0.1)
