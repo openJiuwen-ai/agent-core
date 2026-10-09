@@ -1,4 +1,14 @@
-"""Distill schedule: due decision, single-home lease tick, and poll loop."""
+"""Distill schedule: due decision, single-home lease tick, and poll loop.
+
+Auto-trigger predicate:
+
+    volume_ok   = pending >= message_threshold   # hard min new eligible msgs
+    cooldown_ok = (last_attempt <= 0) OR (age >= interval_ms)
+    due         = enabled AND volume_ok AND cooldown_ok
+
+Field names ``period_due`` / ``volume_due`` are kept for callers; only ``due``
+means the tick should run.
+"""
 
 from __future__ import annotations
 
@@ -34,8 +44,8 @@ class DistillScheduleConfig:
 @dataclass(frozen=True, slots=True)
 class DistillDueDecision:
     due: bool
-    period_due: bool
-    volume_due: bool
+    period_due: bool  # cooldown_ok: age >= interval (or never attempted)
+    volume_due: bool  # volume_ok: pending >= message_threshold
     pending_count: int
 
 
@@ -68,15 +78,36 @@ def evaluate_distill_due(
     pending_count: int,
     message_threshold: int,
 ) -> DistillDueDecision:
-    period_due = (int(now_ms) - int(last_attempt_at_ms)) >= int(interval_ms)
+    """Return due iff enabled AND min-volume AND cooldown (AND, not OR)."""
+    last = int(last_attempt_at_ms)
+    if last <= 0:
+        period_due = True  # cooldown_ok
+    else:
+        age_ms = max(0, int(now_ms) - last)
+        period_due = age_ms >= int(interval_ms)
     volume_due = int(pending_count) >= int(message_threshold)
-    due = bool(enabled) and (period_due or volume_due)
+    due = bool(enabled) and volume_due and period_due
     return DistillDueDecision(
         due=due,
         period_due=period_due,
         volume_due=volume_due,
         pending_count=int(pending_count),
     )
+
+
+def _skip_reason_when_not_due(
+    *,
+    enabled: bool,
+    volume_due: bool,
+    period_due: bool,
+) -> str:
+    if not enabled:
+        return "disabled"
+    if not volume_due:
+        return "below_threshold"
+    if not period_due:
+        return "cooldown"
+    return "not_due"
 
 
 async def tick_distill_schedule(
@@ -99,7 +130,14 @@ async def tick_distill_schedule(
         message_threshold=config.message_threshold,
     )
     if not decision.due:
-        return DistillTickResult(action="skipped", reason="not_due")
+        return DistillTickResult(
+            action="skipped",
+            reason=_skip_reason_when_not_due(
+                enabled=config.enabled,
+                volume_due=decision.volume_due,
+                period_due=decision.period_due,
+            ),
+        )
 
     token = try_claim_distill_lease(home, now_ms=now_ms, lease_ms=config.lease_ms)
     if token is None:
