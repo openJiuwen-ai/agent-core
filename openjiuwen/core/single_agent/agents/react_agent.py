@@ -1973,7 +1973,6 @@ class ReActAgent(BaseAgent):
             phase="post_call",
             usage_metadata=ai_message.usage_metadata,
         )
-        self._raise_for_model_response_error(ai_message)
         if ai_message.usage_metadata:
 
             perf_metrics = {}
@@ -1996,6 +1995,7 @@ class ReActAgent(BaseAgent):
                     **perf_metrics,
                 },
             ))
+        self._raise_for_model_response_error(ai_message)
         return ai_message
 
     @staticmethod
