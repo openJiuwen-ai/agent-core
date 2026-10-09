@@ -11,6 +11,8 @@ __all__ = [
     "PersistentPorts",
     "KnowledgePort",
     "GroupChatPort",
+    "WorkspaceAccessPort",
+    "WorkspaceReadScope",
     "create_persistent_agent",
     "execute_persistent_request",
     "resume_persistent_request",
@@ -52,6 +54,7 @@ _MODULES = {
     "ExecutionContext": "schema.execution",
     "PersistentPorts": "ports",
     **dict.fromkeys(("KnowledgePort", "GroupChatPort"), "ports"),
+    **dict.fromkeys(("WorkspaceAccessPort", "WorkspaceReadScope"), "persistent_agent.workspace.access"),
     "create_persistent_agent": "factory",
     **dict.fromkeys(
         ("execute_persistent_request", "resume_persistent_request", "abort_persistent_request"), "execution.entries"

@@ -26,7 +26,9 @@ class PersistentAgentSpec(DeepAgentSpec):
     # Identifies this serialized Spec shape so unsupported configuration versions fail closed.
     schema_version: Literal[1] = 1
     # Advertises only capabilities the runtime can validate and bind for this Agent.
-    enabled_features: frozenset[Literal["construction"]] = Field(default=frozenset({"construction"}), min_length=1)
+    enabled_features: frozenset[Literal["construction", "workspace_read"]] = Field(
+        default=frozenset({"construction"}), min_length=1
+    )
 
     def fingerprint(self) -> str:
         """Hash the entire JSON publication, not runtime handles or only base fields."""
@@ -48,6 +50,21 @@ class PersistentAgentSpec(DeepAgentSpec):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="use Persistent construction entry")
         parts = super().resolve_parts(context)
         context.binding.parts = parts
+        if "workspace_read" in self.enabled_features:
+            if not self.enable_sys_operation:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="workspace_read requires enable_sys_operation",
+                )
+            workspace_access = context.ports.workspace_access
+            if workspace_access is None:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="workspace_access is required for workspace_read",
+                )
+            from ..workspace.rail import PersistentWorkspaceReadRail
+
+            parts.rails.append(PersistentWorkspaceReadRail(context.execution, workspace_access))
         from ..execution.model_rail import PersistentModelCallRail
         from ..execution.stream_lifecycle import NativeStreamTaskLifecycle
 
