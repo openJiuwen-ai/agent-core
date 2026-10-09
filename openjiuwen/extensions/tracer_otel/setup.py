@@ -24,6 +24,10 @@ from opentelemetry.sdk.trace.sampling import ParentBasedTraceIdRatio
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.extensions.observability.instrumentation import (
+    ensure_global_http_instrumentation,
+    resolve_global_instrument_flag,
+)
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 
 
@@ -44,6 +48,25 @@ def init_otel_tracer(config: OtelTracerConfig) -> trace.Tracer:
     Returns:
         An ``opentelemetry.trace.Tracer`` ready for use in handlers.
     """
+    provider = _build_provider(config)
+
+    # Optional process-wide HTTP instrumentation (traceparent propagation).
+    # Global-state ownership stays in extensions.observability.instrumentation;
+    # this package only supplies a provider factory pointing at the same
+    # collector. The factory runs only when no global SDK provider exists yet,
+    # so coexistence with the observability stack stays order-independent.
+    if resolve_global_instrument_flag(config.global_instrument_enable):
+        ensure_global_http_instrumentation(provider_factory=lambda: _build_provider(config))
+
+    # The private provider above is unaffected by the global flag: tracer_otel
+    # handlers hold a direct tracer reference, so global provider state is not
+    # needed for them.
+    return provider.get_tracer(config.tracer_name)
+
+
+def _build_provider(config: OtelTracerConfig) -> TracerProvider:
+    """Build the private TracerProvider for the tracer_otel handlers."""
+
     resource = Resource.create({
         "service.name": config.service_name,
         "service.version": config.service_version or "unknown",
@@ -68,13 +91,7 @@ def init_otel_tracer(config: OtelTracerConfig) -> trace.Tracer:
                      error_msg=f"unknown exporter_type '{config.exporter_type}', supported: console, otlp")
 
     provider.add_span_processor(processor)
-
-    # Intentionally NOT calling trace.set_tracer_provider() here.
-    # tracer_otel handlers hold a direct tracer reference, so global
-    # provider state is not needed. This avoids conflicts with
-    # agent_teams.observability.init_observability() which also calls
-    # set_tracer_provider (one-shot per process).
-    return provider.get_tracer(config.tracer_name)
+    return provider
 
 
 def _create_otlp_exporter(config: OtelTracerConfig) -> SpanExporter:

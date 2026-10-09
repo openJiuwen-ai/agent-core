@@ -54,6 +54,7 @@ from typing import Callable, Optional, Protocol, TYPE_CHECKING, runtime_checkabl
 
 from openjiuwen.agent_teams.models.pool import (
     INTELLI_ROUTER_PROVIDER,
+    INTELLI_ROUTER_UNIFIED_MODEL,
     ModelPoolEntry,
 )
 
@@ -74,6 +75,7 @@ class Allocation:
 
     entry: ModelPoolEntry
     group_index: int
+    persistence_model_name: str | None = None
 
     def to_team_model_config(self) -> "TeamModelConfig":
         """Materialize the live ``TeamModelConfig`` for runtime use."""
@@ -81,7 +83,45 @@ class Allocation:
 
     def to_db_ref(self) -> dict:
         """Produce the lightweight ``{model_name, model_index}`` ref for DB persistence."""
-        return {"model_name": self.entry.model_name, "model_index": self.group_index}
+        return {
+            "model_name": self.persistence_model_name or self.entry.model_name,
+            "model_index": self.group_index,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CliModelAllocation:
+    """A real deployment projected for an external CLI process."""
+
+    model: str
+    provider: str
+    api_base: str
+    api_key: str
+    route_id: str | None = None
+
+    def to_external_config(self):
+        from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
+
+        return ExternalCliModelConfig(
+            model=self.model or None,
+            provider=self.provider or None,
+            api_base=self.api_base or None,
+            api_key=self.api_key or None,
+        )
+
+    def to_team_model_config(self):
+        """Materialize a physical deployment as a team model config."""
+        from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+        from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+
+        return TeamModelConfig(
+            model_client_config=ModelClientConfig(
+                client_provider=self.provider,
+                api_base=self.api_base,
+                api_key=self.api_key,
+            ),
+            model_request_config=ModelRequestConfig(model=self.model),
+        )
 
 
 @runtime_checkable
@@ -144,6 +184,26 @@ class ModelAllocator(Protocol):
         new ones at zero, optionally reset everything when the pool
         digest differs).
         """
+        ...
+
+
+@runtime_checkable
+class CliModelCatalog(Protocol):
+    """Catalog of physical models projected to external CLI agents."""
+
+    def list_cli_models(
+        self,
+        provider_filter: Callable[[str], bool] | None = None,
+    ) -> list[CliModelAllocation]:
+        """List physical models available to external CLI agents."""
+        ...
+
+    def resolve_cli_models(
+        self,
+        model_name: str,
+        provider_filter: Callable[[str], bool] | None = None,
+    ) -> list[CliModelAllocation]:
+        """Resolve physical models by name."""
         ...
 
 
@@ -449,7 +509,7 @@ class RouterAllocator:
         # since there is no rotation counter.
 
 
-class IntelliRouterAllocator(RouterAllocator):
+class IntelliRouterAllocator:
     """Allocator over an IntelliRouter-backed pool.
 
     Allocation is deliberately identical to ``RouterAllocator``: an
@@ -460,7 +520,7 @@ class IntelliRouterAllocator(RouterAllocator):
     ``RouterAllocator`` it is one remote endpoint, here it is the whole
     deployment list plus a model name to ask the router for. That is a
     property of how the pool was built, not of how it is allocated,
-    which is why this subclass adds validation rather than behavior.
+    which is why this allocator adds validation rather than behavior.
 
     The validation matters because the pool can also be hand-written
     (``model_pool=[...]`` plus ``model_pool_strategy="intelli_router"``)
@@ -479,42 +539,114 @@ class IntelliRouterAllocator(RouterAllocator):
                 ``IntelliRouterConfig.to_pool_entries``. Each entry must
                 declare ``api_provider == "intelli_router"`` and carry a
                 non-empty deployment list under
-                ``metadata.client.intelli_router_deployments``.
+                ``metadata.client.intelli_router.deployments``.
 
         Raises:
-            ValueError: when the pool is empty or has duplicate
-                ``model_name`` values (inherited from
-                ``RouterAllocator``), when any entry names a different
-                provider, or when any entry carries no deployments.
+            ValueError: when the pool is not exactly one logical ``"*"``
+                entry, when the provider is wrong, or when a deployment is
+                malformed.
         """
-        super().__init__(pool)
-        self._validate_intelli_router_pool(pool)
+        if not pool:
+            raise ValueError("IntelliRouterAllocator requires a non-empty pool")
+        self._pool = list(pool)
+        if len(self._pool) != 1 or self._pool[0].model_name != INTELLI_ROUTER_UNIFIED_MODEL:
+            raise ValueError(
+                "IntelliRouterAllocator requires exactly one logical '*' entry",
+            )
+        entry = self._pool[0]
+        self._pool_digest = _pool_digest(self._pool)
+        if entry.api_provider != INTELLI_ROUTER_PROVIDER:
+            raise ValueError(
+                "IntelliRouterAllocator requires its logical '*' entry to declare "
+                f"api_provider='{INTELLI_ROUTER_PROVIDER}'",
+            )
+        self._deployments = self._validate_deployment_catalog(entry)
 
-    @staticmethod
-    def _validate_intelli_router_pool(pool: list[ModelPoolEntry]) -> None:
-        """Reject entries that cannot reach an IntelliRouter client."""
-        mismatched = sorted(
-            f"{entry.model_name} declares {entry.api_provider}"
-            for entry in pool
-            if entry.api_provider != INTELLI_ROUTER_PROVIDER
+    def allocate(
+        self,
+        model_name: Optional[str] = None,
+        *,
+        provider_filter: Optional[Callable[[str], bool]] = None,
+    ) -> Optional[Allocation]:
+        """Return a logical entry; physical deployments are never allocated."""
+        # Provider filtering applies to physical CLI deployments, not the
+        # logical IntelliRouter entry. Empty and wildcard hints select it.
+        entry = (
+            self._pool[0]
+            if model_name in (None, "", INTELLI_ROUTER_UNIFIED_MODEL)
+            else None
         )
-        if mismatched:
+        return Allocation(entry=entry, group_index=0) if entry is not None else None
+
+    def state_dict(self) -> dict:
+        return {"pool_digest": self._pool_digest}
+
+    def load_state_dict(self, state: dict) -> None:
+        """No-op restore; IntelliRouter has no rotating counter."""
+        if state.get("pool_digest") == self._pool_digest:
+            return
+        # Pool composition changes do not require a counter reset.
+
+    @classmethod
+    def _validate_deployment_catalog(cls, entry: ModelPoolEntry) -> tuple[dict, ...]:
+        """Reject malformed deployments while the allocator is constructed.
+
+        An invalid Team configuration must fail during construction rather
+        than later when an external CLI member is spawned.
+        """
+        client = entry.metadata.get("client") or {}
+        router = client.get("intelli_router")
+        raw = router.get("deployments") if isinstance(router, dict) else None
+        if not isinstance(raw, list) or not raw:
             raise ValueError(
-                f"model_pool_strategy='intelli_router' requires every entry to declare "
-                f"api_provider='{INTELLI_ROUTER_PROVIDER}'; offending entries: {mismatched}",
+                "IntelliRouterAllocator requires a non-empty deployments list",
             )
-        empty = sorted(
-            {
-                entry.model_name
-                for entry in pool
-                if not (entry.metadata.get("client") or {}).get("intelli_router_deployments")
-            }
-        )
-        if empty:
-            raise ValueError(
-                "model_pool_strategy='intelli_router' requires every entry to carry a non-empty "
-                f"metadata.client.intelli_router_deployments list; missing for: {empty}",
+        for index, item in enumerate(raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"IntelliRouterAllocator deployment at index {index} must be an object")
+            model = str(item.get("model_name") or "").strip()
+            provider = str(item.get("provider") or "").strip()
+            if not model or not provider:
+                raise ValueError(
+                    "IntelliRouterAllocator deployment at index "
+                    f"{index} requires non-empty model_name and provider: {item!r}"
+                )
+        # Keep one immutable-by-convention snapshot for all CLI catalog
+        # queries.  The allocator must not observe later mutation of entry
+        # metadata while a spawn request is being resolved.
+        import copy
+
+        return tuple(copy.deepcopy(item) for item in raw)
+
+    def list_cli_models(
+        self,
+        provider_filter: Optional[Callable[[str], bool]] = None,
+    ) -> list[CliModelAllocation]:
+        """List real deployment candidates for external CLI projection."""
+        catalog = [
+            CliModelAllocation(
+                model=str(item.get("model_name") or "").strip(),
+                provider=str(item.get("provider") or "").strip(),
+                api_base=str(item.get("api_base") or ""),
+                api_key=str(item.get("api_key") or ""),
+                route_id=str(item.get("route_id") or "") or None,
             )
+            for item in self._deployments
+        ]
+        if provider_filter is None:
+            return catalog
+        return [item for item in catalog if provider_filter(item.provider)]
+
+    def resolve_cli_models(
+        self,
+        model_name: str,
+        provider_filter: Optional[Callable[[str], bool]] = None,
+    ) -> list[CliModelAllocation]:
+        """Resolve a real deployment name, never the Team ``"*"`` entry."""
+        name = str(model_name or "").strip()
+        if not name or name == "*":
+            return []
+        return [item for item in self.list_cli_models(provider_filter) if item.model == name]
 
 
 def resolve_member_model(
@@ -603,6 +735,8 @@ def build_model_allocator(
 
 __all__ = [
     "Allocation",
+    "CliModelAllocation",
+    "CliModelCatalog",
     "ByModelNameAllocator",
     "IntelliRouterAllocator",
     "ModelAllocator",

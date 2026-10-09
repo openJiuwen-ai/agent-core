@@ -12,6 +12,7 @@ from typing import Any, Iterable, Optional, Union
 import httpx
 from pydantic import BaseModel
 
+from openjiuwen.core.common.logging import llm_logger as logger
 from openjiuwen.core.common.utils.header_utils import sanitize_headers
 from openjiuwen.core.foundation.llm.schema.message import (
     AssistantMessage,
@@ -203,27 +204,126 @@ def parse_response(payload: dict[str, Any], *, model_name: str = "") -> Assistan
     )
 
 
-def parse_stream_event(
-    event: Optional[dict[str, Any]],
-    *,
-    model_name: str = "",
-) -> Optional[AssistantMessageChunk]:
-    """Turn one Responses SSE event into an ``AssistantMessageChunk``."""
-    if not event:
+class ResponsesStreamParser:
+    """Turn the Responses SSE events of one streamed response into chunks.
+
+    Function-call arguments are streamed as they are generated
+    (``response.output_item.added`` names the call, each
+    ``response.function_call_arguments.delta`` extends it), so a long tool
+    call shows progress instead of arriving all at once when its item
+    completes; that progress is what time to first token and the stream idle
+    timeout observe. ``response.output_item.done`` repeats the full arguments,
+    and streamed chunks are concatenated downstream, so the parser remembers
+    what it already emitted per item and the done event only contributes the
+    part that was never streamed. A backend that skips the delta events still
+    yields the complete call from the done event.
+
+    One parser instance serves exactly one response stream.
+    """
+
+    def __init__(self, *, model_name: str = "") -> None:
+        self._model_name = model_name
+        # Response item id -> (tool call id, arguments emitted so far).
+        self._streamed_calls: dict[str, tuple[str, str]] = {}
+
+    def parse(self, event: Optional[dict[str, Any]]) -> Optional[AssistantMessageChunk]:
+        """Turn one Responses SSE event into an ``AssistantMessageChunk``.
+
+        Args:
+            event: One decoded SSE event, or None for an empty block.
+
+        Returns:
+            The chunk the event contributes, or None when it carries nothing.
+
+        Raises:
+            OpenAIAccountResponsesError: When the event reports a failed response.
+        """
+        if not event:
+            return None
+
+        event_type = str(event.get("type") or event.get("event") or "")
+        if event_type in {"response.output_text.delta", "response.refusal.delta"}:
+            return _text_delta_chunk(event)
+        if event_type in {"response.reasoning_text.delta", "response.reasoning_summary_text.delta"}:
+            return _reasoning_delta_chunk(event)
+        if event_type == "response.output_item.added":
+            return self._added_function_call_chunk(event)
+        if event_type == "response.function_call_arguments.delta":
+            return self._function_call_arguments_delta_chunk(event)
+        if event_type == "response.output_item.done":
+            return self._done_output_item_chunk(event)
+        if event_type in {"response.completed", "response.incomplete"}:
+            return _terminal_stream_chunk(event, event_type=event_type, model_name=self._model_name)
+        if event_type in {"response.failed", "error"}:
+            raise OpenAIAccountResponsesError(_stream_error_message(event))
         return None
 
-    event_type = str(event.get("type") or event.get("event") or "")
-    if event_type in {"response.output_text.delta", "response.refusal.delta"}:
-        return _text_delta_chunk(event)
-    if event_type in {"response.reasoning_text.delta", "response.reasoning_summary_text.delta"}:
-        return _reasoning_delta_chunk(event)
-    if event_type == "response.output_item.done":
-        return _done_output_item_chunk(event)
-    if event_type in {"response.completed", "response.incomplete"}:
-        return _terminal_stream_chunk(event, event_type=event_type, model_name=model_name)
-    if event_type in {"response.failed", "error"}:
-        raise OpenAIAccountResponsesError(_stream_error_message(event))
-    return None
+    def _added_function_call_chunk(self, event: dict[str, Any]) -> Optional[AssistantMessageChunk]:
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            return None
+        item_id = str(item.get("id") or "").strip()
+        if not item_id:
+            # Without an item id the deltas cannot be attributed; the done
+            # event will deliver the whole call instead.
+            return None
+        tool_call = _tool_call_from_response_item(item, index=0)
+        initial_arguments = _json_argument_string(item.get("arguments") or "")
+        tool_call.arguments = initial_arguments
+        self._streamed_calls[item_id] = (tool_call.id or "", initial_arguments)
+        return AssistantMessageChunk(content="", tool_calls=[tool_call], finish_reason="null")
+
+    def _function_call_arguments_delta_chunk(self, event: dict[str, Any]) -> Optional[AssistantMessageChunk]:
+        item_id = str(event.get("item_id") or "").strip()
+        delta = str(event.get("delta") or "")
+        streamed = self._streamed_calls.get(item_id)
+        if streamed is None or not delta:
+            return None
+        call_id, emitted_arguments = streamed
+        self._streamed_calls[item_id] = (call_id, emitted_arguments + delta)
+        return AssistantMessageChunk(
+            content="",
+            tool_calls=[
+                ToolCall(
+                    id=call_id,
+                    type="function",
+                    name="",
+                    arguments=delta,
+                    index=0,
+                    response_item_id=item_id,
+                ),
+            ],
+            finish_reason="null",
+        )
+
+    def _done_output_item_chunk(self, event: dict[str, Any]) -> Optional[AssistantMessageChunk]:
+        item = event.get("item")
+        if not isinstance(item, dict) or item.get("type") != "function_call":
+            return None
+
+        tool_call = _tool_call_from_response_item(item, index=0)
+        item_id = str(item.get("id") or "").strip()
+        streamed = self._streamed_calls.pop(item_id, None)
+        if streamed is not None:
+            _, emitted_arguments = streamed
+            if not tool_call.arguments.startswith(emitted_arguments):
+                # The streamed fragments are already concatenated downstream
+                # and cannot be retracted; keep them rather than duplicate.
+                logger.warning(
+                    "Responses function call %s arguments diverged from the streamed deltas; "
+                    "keeping the streamed arguments.",
+                    item_id,
+                )
+                remainder = ""
+            else:
+                remainder = tool_call.arguments[len(emitted_arguments):]
+            tool_call.name = ""
+            tool_call.arguments = remainder
+        return AssistantMessageChunk(
+            content="",
+            tool_calls=[tool_call],
+            finish_reason="tool_calls",
+        )
 
 
 def iter_sse_events(lines: Iterable[str]) -> Iterable[dict[str, Any]]:
@@ -531,18 +631,6 @@ def _reasoning_delta_chunk(event: dict[str, Any]) -> Optional[AssistantMessageCh
     if not delta:
         return None
     return AssistantMessageChunk(content="", reasoning_content=delta, finish_reason="null")
-
-
-def _done_output_item_chunk(event: dict[str, Any]) -> Optional[AssistantMessageChunk]:
-    item = event.get("item")
-    if not isinstance(item, dict) or item.get("type") != "function_call":
-        return None
-
-    return AssistantMessageChunk(
-        content="",
-        tool_calls=[_tool_call_from_response_item(item, index=0)],
-        finish_reason="tool_calls",
-    )
 
 
 def _terminal_stream_chunk(

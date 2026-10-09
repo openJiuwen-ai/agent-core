@@ -1086,7 +1086,7 @@ class AgentConfigurator:
             messager=messager,
             teammate_mode=MemberMode(str(spec.teammate_mode)),
             predefined_members=spec.predefined_members or None,
-            model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
+            model_allocator=self.model_allocator,
             leader_allocation=self.leader_allocation if is_leader else None,
             model_pool_provider=lambda: list(ctx.team_spec.model_pool) if ctx.team_spec is not None else [],
             current_model_name=current_model_name,
@@ -1139,8 +1139,13 @@ class AgentConfigurator:
         from openjiuwen.agent_teams.models import build_model_allocator, inherit_pool_ids
 
         merged = inherit_pool_ids(self.ctx.team_spec.model_pool, list(new_pool))
+        # Build and validate the replacement before mutating the live spec.
+        candidate_spec = self.ctx.team_spec.model_copy(update={"model_pool": merged})
+        new_allocator = build_model_allocator(self.spec, candidate_spec)
         self.ctx.team_spec.model_pool = merged
-        self.model_allocator = build_model_allocator(self.spec, self.ctx.team_spec)
+        self.model_allocator = new_allocator
+        if self.team_backend is not None:
+            self.team_backend.update_model_allocator(new_allocator)
 
     def attach_model_allocator(
         self,

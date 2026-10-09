@@ -42,7 +42,6 @@ from openjiuwen.harness.manifest.builtin_elements import (
 )
 from openjiuwen.agent_teams.rails.team_context import (
     get_messager,
-    get_model_allocator,
     get_reliability_components,
     get_swarmflow_budget,
     get_swarmflow_concurrency_governor,
@@ -106,8 +105,6 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
     from openjiuwen.agent_teams.rails.team_tool_rail import TeamToolRail
 
     inp = TeamToolInput.resolve(params, context)
-    allocator = get_model_allocator(context)
-    model_config_allocator = allocator.allocate if allocator is not None else None
     return TeamToolRail(
         team_backend=backend,
         role=inp.role,
@@ -116,7 +113,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         lifecycle=inp.lifecycle,
         team_mode=inp.team_mode,
         language=inp.language,
-        model_config_allocator=model_config_allocator,
+        model_config_allocator=backend.allocate_model,
         exclude_tools=set(inp.exclude_tools) or None,
         workspace_manager=get_workspace_manager(context),
         qualify_ids=inp.qualify_ids,

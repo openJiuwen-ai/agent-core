@@ -276,6 +276,7 @@ class InvokeInputs:
         delegation_id: Optional task/delegation id
         agent_path: Optional root-to-current agent path
         depth: Invocation tree depth
+        turn_number: 1-based number of the logical user turn
     """
     query: Optional[str, InteractiveInput]
     conversation_id: Optional[str] = None
@@ -288,6 +289,7 @@ class InvokeInputs:
     delegation_id: Optional[str] = None
     agent_path: Optional[List[str]] = None
     depth: int = 0
+    turn_number: Optional[int] = None
 
     def is_heartbeat(self) -> bool:
         """Check if this is a heartbeat run."""

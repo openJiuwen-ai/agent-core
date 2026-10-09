@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 import asyncio
 import time
 from typing import Union, List, Optional, AsyncIterator
@@ -254,18 +254,30 @@ class Model:
                 )
                 stream_iterator = stream_iterable.__aiter__()
                 started_at = time.monotonic()
-                last_chunk_at = started_at
                 chunk_count = 0
+                token_chunk_count = 0
+                # Seconds spent waiting on the provider since the last chunk
+                # that carried model output. Only time inside ``__anext__``
+                # counts: the consumer's own processing between chunks must not
+                # eat into the provider's budget. Framing-only chunks (role-only
+                # or heartbeat deltas, usage-only frames) keep accumulating, so
+                # they can neither satisfy the first-token budget nor keep a
+                # stalled stream alive past the idle budget.
+                waited_since_progress = 0.0
 
                 while True:
-                    stage = "first_chunk" if chunk_count == 0 else "idle_chunk"
-                    next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
+                    stage = "first_token" if token_chunk_count == 0 else "idle_token"
+                    budget = first_chunk_timeout if token_chunk_count == 0 else idle_timeout
+                    wait_started_at = time.monotonic()
 
                     try:
-                        if next_timeout is None:
+                        if budget is None:
                             chunk = await stream_iterator.__anext__()
                         else:
-                            chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
+                            chunk = await asyncio.wait_for(
+                                stream_iterator.__anext__(),
+                                timeout=max(budget - waited_since_progress, 0.0),
+                            )
                     except StopAsyncIteration:
                         succeeded = True
                         break
@@ -276,13 +288,14 @@ class Model:
 
                         now = time.monotonic()
                         total_elapsed_seconds = now - started_at
-                        wait_elapsed_seconds = now - (started_at if chunk_count == 0 else last_chunk_at)
-                        timeout_seconds = next_timeout if next_timeout is not None else 0
+                        wait_elapsed_seconds = waited_since_progress + (now - wait_started_at)
+                        timeout_seconds = budget if budget is not None else 0
                         model_provider = getattr(self.model_client_config, "client_provider", None)
-                        elapsed_label = "first_chunk_elapsed" if chunk_count == 0 else "idle_elapsed"
+                        elapsed_label = "first_token_elapsed" if token_chunk_count == 0 else "idle_elapsed"
                         error_detail = (
                             f"stream frame timeout: stage={stage}, timeout={timeout_seconds}s, "
-                            f"chunk_count={chunk_count}, {elapsed_label}={wait_elapsed_seconds:.2f}s, "
+                            f"chunk_count={chunk_count}, token_chunk_count={token_chunk_count}, "
+                            f"{elapsed_label}={wait_elapsed_seconds:.2f}s, "
                             f"total_elapsed={total_elapsed_seconds:.2f}s, "
                             f"model={effective_model_name or ''}"
                         )
@@ -314,7 +327,13 @@ class Model:
                         ) from exc
 
                     chunk_count += 1
-                    last_chunk_at = time.monotonic()
+                    waited_since_progress += time.monotonic() - wait_started_at
+                    # Anything other than a message chunk (e.g. a transformed
+                    # callback result) cannot be inspected, so it counts as
+                    # progress rather than risking a false timeout.
+                    if not isinstance(chunk, AssistantMessageChunk) or chunk.carries_output_token():
+                        token_chunk_count += 1
+                        waited_since_progress = 0.0
                     # A client (or an LLM_STREAM_OUTPUT transform callback ahead
                     # of this frame) may yield something other than a message
                     # chunk; only real chunks accumulate into the completion.
@@ -357,18 +376,42 @@ class Model:
             session: object = None,
             session_id: Optional[str] = None,
             parent_session_id: Optional[str] = None,
+            turn_num: Optional[int] = None,
             enable_kv_cache_affinity: bool = False,
     ) -> dict:
         """Build AscendAffinity agent_hint kwargs for normal invoke/stream."""
         build_fn = getattr(self._client, "build_kv_cache_affinity_invoke_kwargs", None)
         if not callable(build_fn):
             return {}
-        return build_fn(
-            session=session,
-            session_id=session_id,
-            parent_session_id=parent_session_id,
-            enable_kv_cache_affinity=enable_kv_cache_affinity,
-        )
+        try:
+            return build_fn(
+                session=session,
+                session_id=session_id,
+                parent_session_id=parent_session_id,
+                turn_num=turn_num,
+                enable_kv_cache_affinity=enable_kv_cache_affinity,
+            )
+        except Exception as exc:
+            llm_logger.warning(
+                "KVC affinity hint construction failed; continue without affinity: %s",
+                exc,
+            )
+            return {}
+
+    async def _run_kv_cache_action(self, action: str, **kwargs) -> bool:
+        """Run an optional KVC action without exposing failures to business code."""
+        action_fn = getattr(self._client, f"{action}_kvc", None)
+        if not callable(action_fn):
+            return False
+        try:
+            return bool(await action_fn(**kwargs))
+        except Exception as exc:
+            llm_logger.warning(
+                "KVC %s failed; continue normal flow: %s",
+                action,
+                exc,
+            )
+            return False
 
     async def evict_kvc(
             self,
@@ -384,13 +427,12 @@ class Model:
             tools_start: Optional[int] = None,
             tools_end: Optional[int] = None,
             include_tools: bool = False,
+            turn_num: Optional[int] = None,
             timeout: Optional[float] = None,
     ) -> bool:
         """Evict KV cache through the underlying affinity-capable client."""
-        evict_fn = getattr(self._client, "evict_kvc", None)
-        if not callable(evict_fn):
-            return False
-        return bool(await evict_fn(
+        return await self._run_kv_cache_action(
+            "evict",
             session_id=session_id,
             parent_session_id=parent_session_id,
             target=target,
@@ -402,8 +444,9 @@ class Model:
             tools_start=tools_start,
             tools_end=tools_end,
             include_tools=include_tools,
+            turn_num=turn_num,
             timeout=timeout,
-        ))
+        )
 
     async def offload_kvc(
             self,
@@ -419,13 +462,12 @@ class Model:
             tools_start: Optional[int] = None,
             tools_end: Optional[int] = None,
             include_tools: bool = False,
+            turn_num: Optional[int] = None,
             timeout: Optional[float] = None,
     ) -> bool:
         """Offload KV cache through the underlying affinity-capable client."""
-        offload_fn = getattr(self._client, "offload_kvc", None)
-        if not callable(offload_fn):
-            return False
-        return bool(await offload_fn(
+        return await self._run_kv_cache_action(
+            "offload",
             session_id=session_id,
             parent_session_id=parent_session_id,
             target=target,
@@ -437,8 +479,9 @@ class Model:
             tools_start=tools_start,
             tools_end=tools_end,
             include_tools=include_tools,
+            turn_num=turn_num,
             timeout=timeout,
-        ))
+        )
 
     async def prefetch_kvc(
             self,
@@ -454,13 +497,12 @@ class Model:
             tools_start: Optional[int] = None,
             tools_end: Optional[int] = None,
             include_tools: bool = False,
+            turn_num: Optional[int] = None,
             timeout: Optional[float] = None,
     ) -> bool:
         """Prefetch KV cache through the underlying affinity-capable client."""
-        prefetch_fn = getattr(self._client, "prefetch_kvc", None)
-        if not callable(prefetch_fn):
-            return False
-        return bool(await prefetch_fn(
+        return await self._run_kv_cache_action(
+            "prefetch",
             session_id=session_id,
             parent_session_id=parent_session_id,
             target=target,
@@ -472,8 +514,9 @@ class Model:
             tools_start=tools_start,
             tools_end=tools_end,
             include_tools=include_tools,
+            turn_num=turn_num,
             timeout=timeout,
-        ))
+        )
 
     async def generate_image(
             self,

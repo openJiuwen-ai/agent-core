@@ -98,6 +98,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
     OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS,
     OJ_GEN_AI_RESPONSE_PROVIDER_METADATA,
+    OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_BYTE_MS,
+    OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS,
     OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS,
     OJ_GEN_AI_RESPONSE_TPOT_MS,
     OJ_GEN_AI_USAGE_INPUT_COST,
@@ -108,6 +110,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_REQUEST_MESSAGE_COUNT,
     OJ_REQUEST_NUMBER,
     OJ_REQUEST_PURPOSE,
+    OJ_REQUEST_RETRY_COUNT,
     OJ_RUN_ID,
     OJ_SPAN_INPUT,
     OJ_SPAN_OUTPUT,
@@ -160,6 +163,7 @@ from openjiuwen.core.foundation.llm.schema.message import (
     OPENJIUWEN_MESSAGE_PROVENANCE_METADATA,
     OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
 )
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.call_scope import (
     expects_unified_llm_completion,
     get_current_llm_call_id,
@@ -565,10 +569,19 @@ class OtelCallbackHandler:
             now_ns = time.monotonic_ns()
             if state.first_chunk_ns is None:
                 state.first_chunk_ns = now_ns
-                ttft_ms = (state.first_chunk_ns - state.start_ns) / 1_000_000.0
-                if state.span.is_recording():
-                    state.span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, ttft_ms / 1000.0)
+                ttfc_ms = (state.first_chunk_ns - state.start_ns) / 1_000_000.0
+                state.span.set_attribute(GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK, ttfc_ms / 1000.0)
             state.last_chunk_ns = now_ns
+            # The first chunk may be pure framing (a role-only delta sent before
+            # prefill finishes); time to first token waits for real output.
+            if isinstance(chunk, AssistantMessageChunk) and chunk.carries_output_token():
+                if state.first_token_ns is None:
+                    state.first_token_ns = now_ns
+                    state.span.set_attribute(
+                        OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_TOKEN_MS,
+                        (now_ns - state.start_ns) / 1_000_000.0,
+                    )
+                state.last_token_ns = now_ns
             delta = _coerce_message_content(_message_content(chunk))
             reasoning_chunk = str(getattr(chunk, "reasoning_content", "") or "")
             if reasoning_chunk:
@@ -585,6 +598,24 @@ class OtelCallbackHandler:
         except Exception as exc:
             logger.warning("otel: on_llm_stream_output failed: {}", exc)
         return kwargs.get("result")
+
+    async def on_llm_response_started(self, *args: Any, **kwargs: Any) -> None:
+        """Record time to first byte and SDK retries when response headers arrive."""
+        try:
+            span = get_current_llm_span()
+            state = getattr(span, "otel_llm_state", None) if span else None
+            if state is None or not state.span.is_recording() or state.response_started_ns is not None:
+                return
+            state.response_started_ns = time.monotonic_ns()
+            state.span.set_attribute(
+                OJ_GEN_AI_RESPONSE_TIME_TO_FIRST_BYTE_MS,
+                (state.response_started_ns - state.start_ns) / 1_000_000.0,
+            )
+            retry_count = kwargs.get("retry_count")
+            if isinstance(retry_count, int) and not isinstance(retry_count, bool):
+                state.span.set_attribute(OJ_REQUEST_RETRY_COUNT, retry_count)
+        except Exception as exc:
+            logger.warning("otel: on_llm_response_started failed: {}", exc)
 
     async def on_llm_output(self, *args: Any, **kwargs: Any) -> None:
         """Apply provider output facts and preserve the legacy terminal event.
@@ -1313,14 +1344,16 @@ class OtelCallbackHandler:
                 state.span.set_attribute(dst_attr, value)
 
         raw_output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
-        has_chunk_window = (
-            state.first_chunk_ns is not None
-            and state.last_chunk_ns is not None
-            and state.last_chunk_ns >= state.first_chunk_ns
+        # Measure between token-carrying chunks: a framing-only first chunk
+        # would otherwise fold the wait for the first token into decode time.
+        has_token_window = (
+            state.first_token_ns is not None
+            and state.last_token_ns is not None
+            and state.last_token_ns >= state.first_token_ns
         )
-        if raw_output_tokens > 1 and has_chunk_window:
+        if raw_output_tokens > 1 and has_token_window:
             tpot_ms = (
-                (state.last_chunk_ns - state.first_chunk_ns)
+                (state.last_token_ns - state.first_token_ns)
                 / (raw_output_tokens - 1)
                 / 1_000_000.0
             )

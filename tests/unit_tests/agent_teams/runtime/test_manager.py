@@ -582,6 +582,7 @@ class TestRunOrganizationLeaderTurn:
 
         assert result is True
         agent.invoke.assert_awaited_once()
+        harness._mixin._maybe_attach_observability.assert_called_once_with(agent, "session-1")
         runtime_manager.finalize.assert_awaited_once_with(
             team_name="team-a",
             session_id="session-1",

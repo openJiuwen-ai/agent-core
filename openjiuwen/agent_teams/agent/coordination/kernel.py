@@ -582,12 +582,26 @@ class CoordinationKernel:
         messager = host.infra.messager
         if not messager or not self._event_bus:
             return
-        from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.context import get_session_id, reset_session_id, set_session_id
         from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent, TeamTopic
 
         local_member_name = host.member_name or ""
+        # The topics below are scoped to this session, so every event they
+        # deliver belongs to it. The messager invokes the handler from its own
+        # receive loop or from the publisher's task, neither of which is bound
+        # to this session; listeners (observability included) and the
+        # per-session DB tables resolve the session through the contextvar, so
+        # the whole delivery runs with it bound.
+        session_id = get_session_id()
 
         async def _filter_self(event: EventMessage) -> None:
+            token = set_session_id(session_id)
+            try:
+                await _deliver(event)
+            finally:
+                reset_session_id(token)
+
+        async def _deliver(event: EventMessage) -> None:
             for listener in host.state.event_listeners:
                 try:
                     await listener(event)
@@ -618,7 +632,6 @@ class CoordinationKernel:
                 return
             await self._event_bus.enqueue(event)
 
-        session_id = get_session_id()
         await messager.register_direct_message_handler(self._event_bus.enqueue)
         for topic in TeamTopic:
             topic_str = topic.build(session_id, team_name)
