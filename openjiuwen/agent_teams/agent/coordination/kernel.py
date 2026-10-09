@@ -286,61 +286,76 @@ class CoordinationKernel:
         # Runner-level finally can safely call pause even after an external
         # stop_coordination has already torn things down.
         if self._lifecycle_state != "running":
+            # 防御：历史上半途中断的 teardown 可能留下 state 非 running 但
+            # EventBus 仍活的残留态——stop 幂等，顺手收掉周期轮询
+            if self._event_bus is not None:
+                await self._event_bus.stop()
             return
         host = self._host
         team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
         if self._scheduler is not None:
             self._scheduler.deactivate()
-        # Pause, do not tear down: the round stops at a clean inner-iteration
-        # boundary and stays resumable in place. This used to hard-cancel via
-        # ``drain_agent_task`` → ``abort(immediate=True)``, which threw away
-        # everything the member had done in the round it interrupted mid-way.
-        await self.pause_agent_round()
-        host.persist_allocator_state()
-        # Extract team memories while the session is still bound and the DB
-        # is accessible. Moved from finalize_round so extraction runs once
-        # per run cycle instead of on every streaming round.
-        memory_manager = host.resources.memory_manager
-        if memory_manager:
-            await memory_manager.extract_after_round()
-        if host.role == TeamRole.LEADER:
-            await self._mark_live_teammates(MemberStatus.PAUSED)
-            await host.spawn_manager.cancel_recovery_tasks()
-            await host.spawn_manager.shutdown_all_handles()
-            self._persist_team_lifecycle("paused")
-            # Make a later cold start (pause -> stop -> start) continue this
-            # round rather than idle waiting for a new message.
-            self._persist_pending_resume()
-        messager = host.infra.messager
-        if messager and host.role == TeamRole.LEADER:
-            from openjiuwen.agent_teams.context import get_session_id
-            from openjiuwen.agent_teams.schema.events import (
-                EventMessage,
-                TeamStandbyEvent,
-                TeamTopic,
-            )
+        # 周期轮询是最便宜的资源、也是 teardown 中段失败时的泄漏载体（删除会话
+        # 删表后僵尸轮询无限报 no such table）——先停轮询；run_loop 保留到
+        # finally 的 stop，不改变中段的事件处理语义。pause_polls/stop 均幂等。
+        if self._event_bus is not None:
+            await self._event_bus.pause_polls()
+        try:
+            # Pause, do not tear down: the round stops at a clean inner-iteration
+            # boundary and stays resumable in place. This used to hard-cancel via
+            # ``drain_agent_task`` → ``abort(immediate=True)``, which threw away
+            # everything the member had done in the round it interrupted mid-way.
+            await self.pause_agent_round()
+            host.persist_allocator_state()
+            # Extract team memories while the session is still bound and the DB
+            # is accessible. Moved from finalize_round so extraction runs once
+            # per run cycle instead of on every streaming round.
+            memory_manager = host.resources.memory_manager
+            if memory_manager:
+                await memory_manager.extract_after_round()
+            if host.role == TeamRole.LEADER:
+                await self._mark_live_teammates(MemberStatus.PAUSED)
+                await host.spawn_manager.cancel_recovery_tasks()
+                await host.spawn_manager.shutdown_all_handles()
+                self._persist_team_lifecycle("paused")
+                # Make a later cold start (pause -> stop -> start) continue this
+                # round rather than idle waiting for a new message.
+                self._persist_pending_resume()
+            messager = host.infra.messager
+            if messager and host.role == TeamRole.LEADER:
+                from openjiuwen.agent_teams.context import get_session_id
+                from openjiuwen.agent_teams.schema.events import (
+                    EventMessage,
+                    TeamStandbyEvent,
+                    TeamTopic,
+                )
 
-            team_name = host.team_name
-            if team_name:
-                try:
-                    await messager.publish(
-                        topic_id=TeamTopic.TEAM.build(get_session_id(), team_name),
-                        message=EventMessage.from_event(TeamStandbyEvent(team_name=team_name)),
-                    )
-                except Exception as e:
-                    team_logger.error("Failed to publish TEAM_STANDBY: {}", e)
-        await self.unsubscribe_transport()
-        if self._event_bus:
-            await self._event_bus.stop()
-        self.close_stream()
-        host.session_manager.release_session()
-        # team_member status update is owned by ``TeamRuntimeManager.finalize_member``
-        # so persistence-layer status (lives across restarts) stays decoupled
-        # from kernel runtime teardown (volatile). External stop_coordination
-        # from leader path must not silently mark teammates SHUTDOWN — that
-        # would trip the kernel.start ``all-SHUTDOWN -> clean_team`` guard and
-        # delete a team that should be recoverable.
-        self._lifecycle_state = "paused"
+                team_name = host.team_name
+                if team_name:
+                    try:
+                        await messager.publish(
+                            topic_id=TeamTopic.TEAM.build(get_session_id(), team_name),
+                            message=EventMessage.from_event(TeamStandbyEvent(team_name=team_name)),
+                        )
+                    except Exception as e:
+                        team_logger.error("Failed to publish TEAM_STANDBY: {}", e)
+            await self.unsubscribe_transport()
+            if self._event_bus is not None:
+                await self._event_bus.stop()
+            self.close_stream()
+            host.session_manager.release_session()
+            # team_member status update is owned by ``TeamRuntimeManager.finalize_member``
+            # so persistence-layer status (lives across restarts) stays decoupled
+            # from kernel runtime teardown (volatile). External stop_coordination
+            # from leader path must not silently mark teammates SHUTDOWN — that
+            # would trip the kernel.start ``all-SHUTDOWN -> clean_team`` guard and
+            # delete a team that should be recoverable.
+            self._lifecycle_state = "paused"
+        finally:
+            # EventBus 必停：中段任何一步失败都不能留下周期轮询——否则池条目
+            # 被移除后僵尸内核无限轮询已删除的团队表（no such table 刷屏）。
+            if self._event_bus is not None:
+                await self._event_bus.stop()
 
     async def _mark_live_teammates(self, target_status: MemberStatus) -> None:
         """Persist ``target_status`` for every spawned teammate before tearing down handles.
@@ -498,59 +513,72 @@ class CoordinationKernel:
         # still need close), running -> stop is the normal path, idle/stopped
         # are no-ops.
         if self._lifecycle_state in ("idle", "stopped"):
+            # 防御：同 pause——半途中断的历史 teardown 残留态顺手收轮询（幂等）
+            if self._event_bus is not None:
+                await self._event_bus.stop()
             return
         host = self._host
         team_logger.info("[{}] coordination stopping", host.member_name or "?")
         if self._scheduler is not None:
             self._scheduler.deactivate()
-        await self.drain_agent_task()
-        host.persist_allocator_state()
-        if on_quiesced is not None:
-            try:
-                await on_quiesced()
-            except Exception as exc:
-                team_logger.warning("[{}] quiesced stop hook failed: {}", host.member_name or "?", exc)
-        # Final memory extraction before permanent teardown. Only extract
-        # when transitioning directly from running (session still bound).
-        # When coming from paused, extraction already happened in pause()
-        # and the session is already released — the DB query would fail.
-        memory_manager = host.resources.memory_manager
-        if memory_manager and self._lifecycle_state == "running":
-            await memory_manager.extract_after_round()
-        if host.role == TeamRole.LEADER:
-            # Mirror of the pause path: mark every spawned teammate so the
-            # persistence layer captures why the runtime went away. STOPPED
-            # is a non-disbanding teardown — ``recover_team`` re-spawns from
-            # here. Done before ``shutdown_all_handles`` so the in-process
-            # task cancellations cannot race with the status write.
-            await self._mark_live_teammates(MemberStatus.STOPPED)
-        await self.unsubscribe_transport()
-        await host.spawn_manager.cancel_recovery_tasks()
-        await host.spawn_manager.shutdown_all_handles()
-        if memory_manager:
-            await memory_manager.close()
+        # 同 pause：先停周期轮询（teardown 中段失败时的泄漏载体），run_loop
+        # 保留到 finally 的 stop。pause_polls/stop 均幂等。
         if self._event_bus is not None:
-            await self._event_bus.stop()
-        self.close_stream()
-        # Permanent teardown (not round-end): stop the native and drop its
-        # process-global sys_operation so a stopped/discarded member does not
-        # leak it. The round-end ``finalize_round`` path only calls
-        # ``harness.stop`` (kept for reuse on the same session); this stop is
-        # where the runtime goes away. Done before ``release_session`` because
-        # ``dispose`` tears the native down over its bound session, and it does
-        # not always follow a ``finalize_round`` (e.g. external stop_team).
-        if host.resources.harness is not None:
-            await host.resources.harness.dispose()
-        messager = host.infra.messager
-        if messager is not None:
-            await messager.stop()
-        host.session_manager.release_session()
-        # See pause(): team_member status update for the agent's own
-        # ``team_member`` handle is owned by
-        # ``TeamRuntimeManager.finalize_member`` so stop_coordination on a
-        # teammate kernel only tears down runtime and leaves persisted
-        # status alone — that is what makes stop -> recover possible.
-        self._lifecycle_state = "stopped"
+            await self._event_bus.pause_polls()
+        try:
+            await self.drain_agent_task()
+            host.persist_allocator_state()
+            if on_quiesced is not None:
+                try:
+                    await on_quiesced()
+                except Exception as exc:
+                    team_logger.warning("[{}] quiesced stop hook failed: {}", host.member_name or "?", exc)
+            # Final memory extraction before permanent teardown. Only extract
+            # when transitioning directly from running (session still bound).
+            # When coming from paused, extraction already happened in pause()
+            # and the session is already released — the DB query would fail.
+            memory_manager = host.resources.memory_manager
+            if memory_manager and self._lifecycle_state == "running":
+                await memory_manager.extract_after_round()
+            if host.role == TeamRole.LEADER:
+                # Mirror of the pause path: mark every spawned teammate so the
+                # persistence layer captures why the runtime went away. STOPPED
+                # is a non-disbanding teardown — ``recover_team`` re-spawns from
+                # here. Done before ``shutdown_all_handles`` so the in-process
+                # task cancellations cannot race with the status write.
+                await self._mark_live_teammates(MemberStatus.STOPPED)
+            await self.unsubscribe_transport()
+            await host.spawn_manager.cancel_recovery_tasks()
+            await host.spawn_manager.shutdown_all_handles()
+            if memory_manager:
+                await memory_manager.close()
+            if self._event_bus is not None:
+                await self._event_bus.stop()
+            self.close_stream()
+            # Permanent teardown (not round-end): stop the native and drop its
+            # process-global sys_operation so a stopped/discarded member does not
+            # leak it. The round-end ``finalize_round`` path only calls
+            # ``harness.stop`` (kept for reuse on the same session); this stop is
+            # where the runtime goes away. Done before ``release_session`` because
+            # ``dispose`` tears the native down over its bound session, and it does
+            # not always follow a ``finalize_round`` (e.g. external stop_team).
+            if host.resources.harness is not None:
+                await host.resources.harness.dispose()
+            messager = host.infra.messager
+            if messager is not None:
+                await messager.stop()
+            host.session_manager.release_session()
+            # See pause(): team_member status update for the agent's own
+            # ``team_member`` handle is owned by
+            # ``TeamRuntimeManager.finalize_member`` so stop_coordination on a
+            # teammate kernel only tears down runtime and leaves persisted
+            # status alone — that is what makes stop -> recover possible.
+            self._lifecycle_state = "stopped"
+        finally:
+            # EventBus 必停：中段任何一步失败都不能留下周期轮询（僵尸内核
+            # 会持续查询已删除的团队表）。stop 幂等。
+            if self._event_bus is not None:
+                await self._event_bus.stop()
 
     async def subscribe_transport(self, team_name: str) -> None:
         host = self._host

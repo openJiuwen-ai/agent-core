@@ -101,8 +101,14 @@ class StaleTaskHandler(BaseCoordinationHandler):
         member_name = self._blueprint.member_name
         team_logger.debug("poll task: member_name={}, agent_running={}", member_name, self._round.is_agent_running())
         if member_name and self._infra.task_manager:
-            await self._check_stale_claimed_tasks()
-            await self._check_stale_pending_tasks()
+            try:
+                await self._check_stale_claimed_tasks()
+                await self._check_stale_pending_tasks()
+            except Exception as exc:
+                # 团队存储已被删除（session.delete 删表）→ 自我停轮，不再刷屏
+                if await self._retire_polls_if_storage_gone(exc):
+                    return
+                raise
             # if not host.is_agent_running():
             #     await self._nudge_idle_agent(member_name, from_poll=True)
 

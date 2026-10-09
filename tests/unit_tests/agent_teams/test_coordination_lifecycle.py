@@ -44,9 +44,21 @@ class _StubSession:
 
 
 def _make_kernel_host(
-    memory_manager: object | None = None,
-    messager: object | None = None,
+        memory_manager: object | None = None,
+        messager: object | None = None,
 ) -> SimpleNamespace:
+    stream_controller = SimpleNamespace(
+        stream_queue=object(),
+        drain_agent_task=AsyncMock(),
+        pause_agent=AsyncMock(),
+        resume_agent=AsyncMock(),
+        close_stream=MagicMock(),
+        stop=AsyncMock(),
+    )
+    # 真实 StreamController.close_stream 会清空 stream_queue——stub 对齐该语义
+    stream_controller.close_stream.side_effect = lambda: setattr(
+        stream_controller, "stream_queue", None
+    )
     return SimpleNamespace(
         member_name="leader-1",
         role=TeamRole.LEADER,
@@ -73,14 +85,7 @@ def _make_kernel_host(
             team_session=None,
             release_session=MagicMock(),
         ),
-        stream_controller=SimpleNamespace(
-            stream_queue=object(),
-            drain_agent_task=AsyncMock(),
-            pause_agent=AsyncMock(),
-            resume_agent=AsyncMock(),
-            close_stream=MagicMock(),
-            stop=AsyncMock(),
-        ),
+        stream_controller=stream_controller,
         persist_allocator_state=MagicMock(),
     )
 
@@ -409,4 +414,100 @@ async def test_finalize_round_does_not_extract_memory():
     memory_manager.extract_after_round.assert_not_awaited()
     host.stream_controller.stop.assert_awaited_once()
     host.resources.harness.stop.assert_awaited_once()
+
+
+def _kernel_with_live_bus(host) -> tuple:
+    """kernel + 已启动的 EventBus（默认长间隔，测试内不会真的触发轮询）。"""
+    kernel = CoordinationKernel(host)
+    bus = EventBus(role=TeamRole.LEADER, mailbox_poll_interval=60.0, task_poll_interval=60.0)
+    kernel._event_bus = bus
+    return kernel, bus
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pause_stops_polls_and_bus_on_normal_path():
+    host = _make_kernel_host()
+    kernel, bus = _kernel_with_live_bus(host)
+    kernel._lifecycle_state = "running"
+    await bus.start()
+
+    await kernel.pause()
+
+    assert kernel._lifecycle_state == "paused"
+    assert bus.is_running is False
+    assert bus._task_poll_task is None and bus._mailbox_poll_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pause_stops_event_bus_even_when_midstep_fails():
+    """pause 中段失败（memory extract 抛异常）也必须停掉 EventBus，异常原样上抛。"""
+    memory_manager = SimpleNamespace(
+        extract_after_round=AsyncMock(side_effect=RuntimeError("db gone")),
+        close=AsyncMock(),
+    )
+    host = _make_kernel_host(memory_manager)
+    kernel, bus = _kernel_with_live_bus(host)
+    kernel._lifecycle_state = "running"
+    await bus.start()
+
+    with pytest.raises(RuntimeError, match="db gone"):
+        await kernel.pause()
+
+    assert bus.is_running is False
+    assert bus._task_poll_task is None and bus._mailbox_poll_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_stop_stops_event_bus_even_when_drain_fails():
+    """stop 中段失败（drain_agent_task 抛异常）也必须停掉 EventBus。"""
+    host = _make_kernel_host()
+    host.stream_controller.drain_agent_task = AsyncMock(side_effect=RuntimeError("drain boom"))
+    kernel, bus = _kernel_with_live_bus(host)
+    kernel._lifecycle_state = "running"
+    await bus.start()
+
+    with pytest.raises(RuntimeError, match="drain boom"):
+        await kernel.stop()
+
+    assert bus.is_running is False
+    assert bus._task_poll_task is None and bus._mailbox_poll_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pause_early_return_still_stops_bus():
+    """state 非 running 的早退路径：幂等收掉历史半途中断残留的活 bus。"""
+    host = _make_kernel_host()
+    kernel, bus = _kernel_with_live_bus(host)
+    kernel._lifecycle_state = "paused"  # 残留态：state 已非 running 但 bus 还活着
+    await bus.start()
+
+    await kernel.pause()  # 早退
+
+    assert bus.is_running is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_pause_pauses_polls_before_midsteps():
+    """轮询在 teardown 中段之前即被停（泄漏载体先行关闭）。"""
+    host = _make_kernel_host()
+    kernel, bus = _kernel_with_live_bus(host)
+    kernel._lifecycle_state = "running"
+    await bus.start()
+    assert bus._task_poll_task is not None
+
+    # 在中段（pause_agent）观察：此刻轮询应已被 pause_polls 取消
+    seen = {}
+
+    async def _observe():
+        seen["polls_paused"] = bus.polls_paused
+
+    host.stream_controller.pause_agent = AsyncMock(side_effect=_observe)
+    await kernel.pause()
+
+    assert seen.get("polls_paused") is True
     assert host.stream_controller.stream_queue is None

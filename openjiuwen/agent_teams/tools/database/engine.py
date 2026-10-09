@@ -27,6 +27,7 @@ from openjiuwen.agent_teams.tools.database.config import DatabaseConfig, Databas
 from openjiuwen.agent_teams.tools.models import (
     TEAM_DYNAMIC_TABLE_PREFIXES,
     TEAM_STATIC_TABLES_TO_CLEAR,
+    _clear_session_model_cache,
     _get_message_model,
     _get_message_read_status_model,
     _get_review_vote_model,
@@ -762,6 +763,10 @@ async def drop_cur_session_tables(engine: AsyncEngine) -> None:
         for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
             await conn.run_sync(model.__table__.drop, checkfirst=True)
 
+    # The tables are gone for good; drop the cached classes (and their
+    # SQLModel.metadata registrations) so they don't outlive the session.
+    _clear_session_model_cache(session_id)
+
     team_logger.info("Dropped dynamic tables for session %s", session_id)
 
 
@@ -808,6 +813,11 @@ async def drop_session_tables_by_id(engine: AsyncEngine, session_id: str) -> lis
     tables when the session context is not active (e.g. after the agent
     has finished executing).
 
+    Also clears the process-wide dynamic-model caches for the session
+    (``_clear_session_model_cache``): the cached classes and their
+    ``SQLModel.metadata`` table registrations are per-session state and
+    would otherwise accumulate for the lifetime of the process.
+
     Args:
         engine: Database engine.
         session_id: Session identifier to clean up.
@@ -815,7 +825,12 @@ async def drop_session_tables_by_id(engine: AsyncEngine, session_id: str) -> lis
     Returns:
         List of dropped table names.
     """
-    if engine is None or not session_id:
+    if not session_id:
+        return []
+
+    _clear_session_model_cache(session_id)
+
+    if engine is None:
         return []
 
     suffix = _sanitize_session_id_for_table(session_id)

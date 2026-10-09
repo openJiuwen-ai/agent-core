@@ -658,8 +658,13 @@ class TeamRuntimeManager:
         try:
             await entry.agent.stop_coordination()
         except Exception as exc:
-            team_logger.warning(
-                "Failed to stop team {} on session {}: {}",
+            # 拆除中段失败 → 运行时可能部分残留（zombie）。EventBus 轮询由
+            # kernel.stop 的 finally 保证停止（另见 handler 层存储消失自愈），
+            # 但 harness/session 等资源可能未释放。池条目仍移除——pool.add 按
+            # team_name 覆盖，不阻塞同团重建；残留资源靠进程退出兜底。
+            team_logger.error(
+                "Failed to stop team {} on session {} (runtime may be partially "
+                "torn down — zombie resources possible): {}",
                 team_name,
                 session_id,
                 exc,
