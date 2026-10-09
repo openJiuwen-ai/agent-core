@@ -383,6 +383,7 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
                 maxBytes=max_bytes,
                 backupCount=backup_count,
                 encoding="utf-8",
+                errors="backslashreplace",
                 log_file_pattern=log_file_pattern,
                 backup_file_pattern=backup_file_pattern,
             )
