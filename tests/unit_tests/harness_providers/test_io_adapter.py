@@ -40,10 +40,21 @@ from openjiuwen.harness_protocol import (
     ToolDefinition,
     ToolExecutionResult,
     ToolInvocation,
+    TurnError,
+    TurnEventKind,
+    TurnLifecycleEvent,
+    TurnResult,
+    TurnStatus,
+    TurnTermination,
+    TurnTerminationKind,
     UnsupportedHarnessCapabilityError,
     UserInputRequest,
 )
-from openjiuwen.harness_providers.io_adapter import INTERACTIVE_INPUT_KIND, HarnessIOAdapter
+from openjiuwen.harness_providers.io_adapter import (
+    INTERACTIVE_INPUT_KIND,
+    TURN_LIFECYCLE,
+    HarnessIOAdapter,
+)
 from tests.test_logger import logger
 
 
@@ -194,9 +205,7 @@ async def test_dynamic_tool_call_routes_to_context_tool_gateway() -> None:
     assert response.status is InteractionResponseStatus.COMPLETED
     assert response.result == {"ok": True}
     assert response.is_error is False
-    assert gateway.invocations == [
-        ToolInvocation(call_id="call-1", name="view_task", arguments={"task_id": "task-1"})
-    ]
+    assert gateway.invocations == [ToolInvocation(call_id="call-1", name="view_task", arguments={"task_id": "task-1"})]
     await adapter.stop()
 
 
@@ -206,14 +215,22 @@ async def test_outputs_and_tool_items_project_to_deepagent_chunks() -> None:
     adapter = HarnessIOAdapter(harness)
     await adapter.start(_context())
     await harness.emit(OutputEvent(output_id="a", kind=OutputKind.TEXT, content="Hel", operation=OutputOperation.DELTA))
-    await harness.emit(OutputEvent(output_id="a", kind=OutputKind.TEXT, content="Hello", operation=OutputOperation.FINAL))
+    await harness.emit(
+        OutputEvent(output_id="a", kind=OutputKind.TEXT, content="Hello", operation=OutputOperation.FINAL)
+    )
     await harness.emit(
         OutputEvent(
-            output_id="r", kind=OutputKind.TEXT, content="think", operation=OutputOperation.FINAL, channel=OutputChannel.REASONING
+            output_id="r",
+            kind=OutputKind.TEXT,
+            content="think",
+            operation=OutputOperation.FINAL,
+            channel=OutputChannel.REASONING,
         )
     )
     await harness.emit(
-        ItemLifecycleEvent(kind=ItemEventKind.STARTED, item_type="tool", data={"name": "shell", "arguments": {"cmd": "ls"}}),
+        ItemLifecycleEvent(
+            kind=ItemEventKind.STARTED, item_type="tool", data={"name": "shell", "arguments": {"cmd": "ls"}}
+        ),
         item_id="call-1",
     )
     await harness.emit(
@@ -236,6 +253,114 @@ async def test_outputs_and_tool_items_project_to_deepagent_chunks() -> None:
     started = harness.contexts[0]
     assert HostCapability.USER_INPUT in started.host_capabilities
     assert started.interactions is adapter
+
+
+@pytest.mark.asyncio
+async def test_turn_lifecycle_projection_is_disabled_by_default() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness)
+    await adapter.start(_context())
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED))
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FINISHED,
+            result=TurnResult(status=TurnStatus.COMPLETED, final_output="done"),
+        )
+    )
+
+    await adapter.stop()
+
+    assert await _drain(adapter) == []
+
+
+@pytest.mark.asyncio
+async def test_turn_lifecycle_projection_preserves_output_order_and_ignores_pause_resume() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness, emit_turn_lifecycle=True)
+    await adapter.start(_context())
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED))
+    await harness.emit(
+        OutputEvent(
+            output_id="answer",
+            kind=OutputKind.TEXT,
+            content="hello",
+            operation=OutputOperation.DELTA,
+        )
+    )
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.PAUSED))
+    await harness.emit(TurnLifecycleEvent(kind=TurnEventKind.RESUMED))
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FINISHED,
+            result=TurnResult(status=TurnStatus.COMPLETED, final_output="complete"),
+        )
+    )
+
+    await adapter.stop()
+    chunks = await _drain(adapter)
+
+    assert [(chunk.type, chunk.index) for chunk in chunks] == [
+        (TURN_LIFECYCLE, 0),
+        ("llm_output", 1),
+        (TURN_LIFECYCLE, 2),
+    ]
+    assert chunks[0].payload == {"turn_id": "turn-1", "kind": "started"}
+    assert chunks[2].payload == {
+        "turn_id": "turn-1",
+        "kind": "finished",
+        "final_output": "complete",
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_lifecycle_marker_keeps_error_details() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness, emit_turn_lifecycle=True)
+    await adapter.start(_context())
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FAILED,
+            result=TurnResult(
+                status=TurnStatus.FAILED,
+                error=TurnError(message="provider failed", code="provider_error"),
+            ),
+        )
+    )
+
+    await adapter.stop()
+    chunks = await _drain(adapter)
+
+    assert chunks[0].payload == {
+        "turn_id": "turn-1",
+        "kind": "failed",
+        "error_message": "provider failed",
+        "error_code": "provider_error",
+    }
+
+
+@pytest.mark.asyncio
+async def test_aborted_turn_lifecycle_marker_keeps_termination_kind() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness, emit_turn_lifecycle=True)
+    await adapter.start(_context())
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.ABORTED,
+            result=TurnResult(
+                status=TurnStatus.INTERRUPTED,
+                termination=TurnTermination(kind=TurnTerminationKind.USER_ABORT),
+            ),
+        )
+    )
+
+    await adapter.stop()
+    chunks = await _drain(adapter)
+
+    assert chunks[0].payload == {
+        "turn_id": "turn-1",
+        "kind": "aborted",
+        "termination_kind": "user_abort",
+    }
 
 
 @pytest.mark.asyncio

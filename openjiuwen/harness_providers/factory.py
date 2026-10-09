@@ -90,7 +90,7 @@ def _mcp_server_config(spec: McpServerSpec) -> McpServerConfig:
         return McpServerConfig(
             name=name,
             transport=McpTransport.STDIO,
-            command=(spec.command, *spec.args),
+            command=_stdio_command(spec),
             env=dict(spec.env),
         )
     if not spec.url:
@@ -101,6 +101,21 @@ def _mcp_server_config(spec: McpServerSpec) -> McpServerConfig:
         url=spec.url,
         headers=dict(spec.auth_headers),
     )
+
+
+def _stdio_command(spec: McpServerSpec) -> tuple[str, ...]:
+    """Resolve package-relative stdio script args against the MCP directory."""
+    cwd = Path(spec.cwd).expanduser() if spec.cwd else None
+    args: list[str] = []
+    for arg in spec.args:
+        candidate = Path(arg)
+        if cwd is not None and not candidate.is_absolute():
+            located = cwd / candidate
+            if located.is_file():
+                args.append(str(located.resolve()))
+                continue
+        args.append(arg)
+    return (spec.command, *args)
 
 
 def manifest_provider_config(

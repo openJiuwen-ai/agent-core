@@ -314,6 +314,11 @@ def _load_agent_subtemplate(subagent_dir: Path, *, package_root: Path) -> AgentT
             f"Subagent template {manifest} must not declare 'subagents' "
             "(only the root agent_template may declare direct subagents)"
         )
+    if "runtime" in payload:
+        raise ValueError(
+            f"Subagent template {manifest} must not declare 'runtime' "
+            "(only the root agent_template may select an external runtime)"
+        )
     agent_name = payload.get("agent_name")
     if not agent_name:
         raise ValueError(f"Subagent template {manifest} is missing required 'agent_name'")

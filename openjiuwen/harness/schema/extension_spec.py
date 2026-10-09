@@ -84,15 +84,26 @@ class SkillSpec(_ExtensionSpecModel):
 class AgentRuntimeSpec(_ExtensionSpecModel):
     """External Harness runtime declared by an AgentTemplate package."""
 
-    provider_name: str = Field(min_length=1)
-    provider_version: str = Field(min_length=1)
+    provider_name: str
+    provider_version: str | None = None
     sdk_paths: list[str] = Field(default_factory=list)
     config: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("provider_name")
+    @classmethod
+    def _provider_name_is_not_empty(cls, value: str) -> str:
+        provider_name = value.strip()
+        if not provider_name:
+            raise ValueError("provider_name must be a non-empty string")
+        return provider_name
 
     @field_validator("config")
     @classmethod
     def _config_is_plain_data(cls, value: dict[str, Any]) -> dict[str, Any]:
         return _validate_plain_mapping(value)
+
+
+RuntimeSpec = AgentRuntimeSpec
 
 
 class PromptSectionSpec(_ExtensionSpecModel):
@@ -234,6 +245,7 @@ __all__ = [
     "PluginSpec",
     "PromptSectionSpec",
     "RubricSpec",
+    "RuntimeSpec",
     "SkillSpec",
     "validate_plugin_paths",
 ]
