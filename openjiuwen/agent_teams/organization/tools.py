@@ -1065,7 +1065,13 @@ class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
                 },
                 "task_id": {"type": "string"},
                 "title": {"type": "string"},
-                "description": {"type": "string"},
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "Summary deliverable requirements. Require org_summary_complete for submission; "
+                        "do not instruct the Summary Team to use org_update_task(action='complete')."
+                    ),
+                },
                 "source_task_ids": {"type": "array", "items": {"type": "string"}},
                 "output_spec": {"type": "object"},
                 "metadata": {"type": "object"},

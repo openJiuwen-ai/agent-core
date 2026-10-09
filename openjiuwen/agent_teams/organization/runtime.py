@@ -8,12 +8,16 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import deque
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.messager.inprocess import InProcessMessager
 from openjiuwen.agent_teams.organization.events import (
     OrgEvent,
+    OrgEventMessage,
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
@@ -53,8 +57,96 @@ from openjiuwen.agent_teams.organization.unclaimed import OrgUnclaimedTaskServic
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.foundation.llm.schema.message import ToolMessage
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentCallbackEvent,
+    ModelCallInputs,
+    ToolCallInputs,
+)
+from openjiuwen.harness.rails.base import DeepAgentRail
 
 logger = team_logger
+
+_closeout_team: ContextVar[str | None] = ContextVar("organization_summary_closeout_team", default=None)
+_SUBMISSION_TOOLS = frozenset({"read_file", "org_summary_get_inputs", "org_summary_complete"})
+
+
+@contextmanager
+def _summary_closeout_scope(team_id: str | None) -> Iterator[None]:
+    """Cover host activation and its agent tasks, restoring normal policy on exit."""
+    token = _closeout_team.set(team_id)
+    try:
+        yield
+    finally:
+        _closeout_team.reset(token)
+
+
+def _is_summary_closeout(team_id: str) -> bool:
+    return _closeout_team.get() == team_id
+
+
+class _SummaryCloseoutRail(DeepAgentRail):
+    """Bound Summary drafting and submission; narrow tool access only in recovery."""
+
+    def __init__(self, team_id: str) -> None:
+        super().__init__()
+        self._team_id = team_id
+        self._summary_task_id: str | None = None
+        self._draft_dispatches: dict[str, int] = {}
+
+    def callback_priority(self, event: AgentCallbackEvent) -> int:
+        # Disclose last, but reject execution before permission/approval side effects.
+        return -100 if event == AgentCallbackEvent.BEFORE_MODEL_CALL else 1000
+
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        inputs = cast(ModelCallInputs, ctx.inputs)
+        if _is_summary_closeout(self._team_id) and isinstance(inputs.tools, list):
+            inputs.tools = [tool for tool in inputs.tools if tool.name in _SUBMISSION_TOOLS]
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        inputs = cast(ToolCallInputs, ctx.inputs)
+        args = inputs.tool_args if isinstance(inputs.tool_args, dict) else {}
+        if inputs.tool_name == "send_message" and args.get("to") == "delivery-drafter":
+            task_id = self._summary_task_id or ""
+            dispatches = self._draft_dispatches.get(task_id, 0)
+            if dispatches >= 2:
+                self._reject(ctx, "Summary permits only the initial draft and one focused revision.")
+                return
+            # Reserve before awaiting execution so parallel sends cannot exceed the bound.
+            self._draft_dispatches[task_id] = dispatches + 1
+        if not _is_summary_closeout(self._team_id) or inputs.tool_name in _SUBMISSION_TOOLS:
+            return
+        reason = "Summary closeout only permits read_file, org_summary_get_inputs and org_summary_complete."
+        self._reject(ctx, reason)
+
+    @staticmethod
+    def _reject(ctx: AgentCallbackContext, reason: str) -> None:
+        inputs = cast(ToolCallInputs, ctx.inputs)
+        tool_call_id = inputs.tool_call.id if inputs.tool_call is not None else ""
+        ctx.extra["_skip_tool"] = True
+        inputs.tool_result = {"error": reason}
+        inputs.tool_msg = ToolMessage(content=reason, tool_call_id=tool_call_id)
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Formal submission is terminal; failures remain available for correction."""
+        inputs = cast(ToolCallInputs, ctx.inputs)
+        if ctx.exception is not None:
+            return
+        result = inputs.tool_result
+        success = result.get("success") if isinstance(result, dict) else getattr(result, "success", False)
+        if success is not True:
+            return
+        args = inputs.tool_args if isinstance(inputs.tool_args, dict) else {}
+        if inputs.tool_name == "org_summary_get_inputs":
+            task_id = str(args.get("summary_task_id") or "")
+            if task_id and task_id != self._summary_task_id:
+                self._summary_task_id = task_id
+            return
+        if inputs.tool_name != "org_summary_complete":
+            return
+        context = args.get("output_context") or {}
+        ctx.request_force_finish({"output": context.get("description", ""), "result_type": "answer"})
 
 _ORG_OWNER_LIFECYCLE_SECTION = "organization_owner_lifecycle"
 _ORG_COLLABORATION_SECTION = "organization_collaboration"
@@ -178,6 +270,8 @@ class OrganizationRuntimeManager:
         self._scheduled_leader_messages: set[tuple[str, str, str]] = set()
         self._scheduled_parent_reviews: set[tuple[str, str, str]] = set()
         self._scheduled_summary_executions: set[tuple[str, str, str]] = set()
+        self._summary_closeout_attempts: dict[tuple[str, str, str], int] = {}
+        self._summary_member_failures: dict[tuple[str, str, str], set[str]] = {}
         self._leader_turn_runner: Callable[[str, str, object], Awaitable[bool]] | None = None
         self._summary_turn_runner: Callable[[str, str, object], Awaitable[bool]] | None = None
         self._configured_team_provider: Callable[[str], Awaitable[list[dict[str, Any]]]] | None = None
@@ -840,6 +934,12 @@ class OrganizationRuntimeManager:
             )
             for tool in tools:
                 add_tool(tool)
+        if is_summary_team:
+            add_rail = getattr(harness, "add_rail", None)
+            find_rail = getattr(harness, "find_rails_by_type", None)
+            existing = find_rail((_SummaryCloseoutRail,)) if callable(find_rail) else []
+            if callable(add_rail) and not existing:
+                add_rail(_SummaryCloseoutRail(backend.team_name))
         await self._subscribe_team_events(
             backend,
             manager,
@@ -942,6 +1042,15 @@ class OrganizationRuntimeManager:
         """Release background work before the last bound team or its database stops."""
         key = (session_id, team_id)
         organization_id = self._team_organizations.pop(key, None)
+        self._summary_closeout_attempts = {
+            attempt_key: attempts
+            for attempt_key, attempts in self._summary_closeout_attempts.items()
+            if attempt_key[:2] != key
+        }
+        self._summary_member_failures = {
+            failure_key: failures for failure_key, failures in self._summary_member_failures.items()
+            if failure_key[:2] != key
+        }
         worker = self._leader_turn_workers.pop(key, None)
         if worker is not None and worker is not asyncio.current_task():
             worker.cancel()
@@ -972,6 +1081,8 @@ class OrganizationRuntimeManager:
         self._scheduled_leader_messages.clear()
         self._scheduled_parent_reviews.clear()
         self._scheduled_summary_executions.clear()
+        self._summary_closeout_attempts.clear()
+        self._summary_member_failures.clear()
         for session_id, organization_id, team_id in tuple(self._org_subscribers):
             await self._release_org_subscriber(organization_id, session_id, team_id)
 
@@ -1390,7 +1501,7 @@ class OrganizationRuntimeManager:
             self._org_subscriber_sources[subscriber_key] = id(backend_messager)
 
         async def _on_task_event(message: Any) -> None:
-            event = message.get_payload()
+            event = OrgEventMessage.model_validate(message.model_dump()).get_payload()
             if isinstance(event, (OrgTaskCreatedEvent, OrgTaskDescriptionRevisedEvent)):
                 if event.team_id == backend.team_name:
                     return
@@ -1513,7 +1624,7 @@ class OrganizationRuntimeManager:
         async def _on_inbox_event(message: Any) -> None:
             event_type = getattr(message, "event_type", None)
             if event_type == OrgEvent.TASK_DELEGATED:
-                event = message.get_payload()
+                event = OrgEventMessage.model_validate(message.model_dump()).get_payload()
                 if not isinstance(event, OrgTaskDelegatedEvent):
                     return
                 task = await manager.task_pool.get_task(event.task_id)
@@ -1552,6 +1663,20 @@ class OrganizationRuntimeManager:
                 if persisted is None or persisted["handled_at"] is not None:
                     return
                 metadata = persisted.get("metadata") or {}
+                if metadata.get("kind") == "summary_submission_blocked":
+                    message_key = (session_id, backend.team_name, message_id)
+                    self._scheduled_leader_messages.add(message_key)
+                    self._schedule_leader_turn(
+                        team_id=backend.team_name,
+                        session_id=session_id,
+                        prompt=(f"Summary submission blocker notice {message_id} arrived. "
+                                "Read it with org_get_leader_message, acknowledge it with org_ack_leader_message, "
+                                "and report the concrete blocker to the user now. Do not claim completion, "
+                                "poll, restart the Summary Team or launch new research."),
+                        message_key=message_key,
+                        relay_source="org_root_delivery",
+                    )
+                    return
                 if metadata.get("kind") == "summary_completed":
                     self._schedule_summary_completion_delivery_turn(
                         team_id=backend.team_name,
@@ -1722,6 +1847,8 @@ class OrganizationRuntimeManager:
     ) -> None:
         """Queue one final-aggregation turn and suppress duplicate event deliveries."""
 
+        if self._summary_closeout_attempts.get((session_id, team_id, execution_id), 0) > 1:
+            return
         summary_key = (session_id, team_id, task_id)
         if summary_key in self._scheduled_summary_executions:
             self._ensure_leader_turn_worker(team_id, session_id)
@@ -2141,6 +2268,7 @@ class OrganizationRuntimeManager:
                 ready_parent_task_id = None
                 queued_at = None
                 turn_failed = False
+                summary_requeued = False
                 if isinstance(inputs, dict):
                     message_key = inputs.pop("_org_message_key", None)
                     review_key = inputs.pop("_org_review_key", None)
@@ -2245,6 +2373,9 @@ class OrganizationRuntimeManager:
                             team_id,
                             time.monotonic() - started_at,
                         )
+                        summary_requeued = await self._check_summary_closeout(
+                            team_id, session_id, summary_key, queue, original_inputs
+                        )
                 except Exception:
                     turn_failed = True
                     queue.appendleft(original_inputs)
@@ -2257,12 +2388,154 @@ class OrganizationRuntimeManager:
                         self._scheduled_leader_messages.discard(message_key)
                     if not turn_failed and review_key is not None:
                         self._scheduled_parent_reviews.discard(review_key)
-                    if not turn_failed and summary_key is not None:
+                    if not turn_failed and not summary_requeued and summary_key is not None:
                         self._scheduled_summary_executions.discard(summary_key)
         finally:
             self._leader_turn_workers.pop(key, None)
             if not self._leader_turn_queues.get(key):
                 self._leader_turn_queues.pop(key, None)
+
+    async def notify_summary_member_failure(
+        self, *, team_id: str, session_id: str, member_name: str, reason: str, turn_id: str,
+        summary_task_id: str | None = None,
+    ) -> None:
+        """Wake Summary's leader once on failure, without waiting for a settled task board."""
+        entry = await self._team_runtime_manager.pool.get(team_id)
+        if entry is None or entry.current_session_id != session_id or not self._is_summary_team(entry.agent):
+            return
+        if entry.state not in (RuntimeState.RUNNING, RuntimeState.PAUSED):
+            return
+        shutdown = getattr(entry.agent, "is_shutdown_requested", None)
+        if callable(shutdown) and await shutdown():
+            return
+        backend = entry.agent.team_backend
+        manager = getattr(backend, "org_task_manager", None)
+        if manager is None:
+            return
+        from openjiuwen.agent_teams.prompts.loader import load_template
+
+        active = [
+            execution for execution in await manager.list_incomplete_summary_executions()
+            if execution.summary_team_id == team_id
+            and execution.status == OrgSummaryExecutionStatus.RUNNING.value
+        ]
+        if summary_task_id is not None:
+            active = [execution for execution in active if execution.summary_task_id == summary_task_id]
+        elif len(active) != 1:
+            # A shared Summary Team may serve several roots. Never guess which failed.
+            return
+        for execution in active:
+            key = (session_id, team_id, execution.execution_id)
+            failures = self._summary_member_failures.setdefault(key, set())
+            if turn_id in failures or len(failures) >= 2:
+                continue
+            failures.add(turn_id)
+            leader_id = self._leader_id(entry.agent, backend)
+            blocked = len(failures) > 1 or member_name == leader_id
+            if blocked:
+                # Exhaustion must also suppress the later natural-pause recovery.
+                self._summary_closeout_attempts[key] = 2
+                find_rails = getattr(getattr(entry.agent, "harness", None), "find_rails_by_type", None)
+                if callable(find_rails):
+                    for rail in find_rails((_SummaryCloseoutRail,)):
+                        rail._draft_dispatches[execution.summary_task_id] = 2
+            language = getattr(entry.agent.spec, "language", None) or "cn"
+            prompt = cast(str, load_template("org_summary_member_failure", language).format({
+                "summary_task_id": execution.summary_task_id, "execution_id": execution.execution_id,
+                "member_name": member_name, "reason": reason, "blocked": str(blocked),
+            }).content)
+            if member_name != leader_id:
+                await backend.message_manager.send_message(content=prompt, to_member_name=leader_id)
+            if blocked:
+                task = await manager.get_task(execution.summary_task_id)
+                if task is not None:
+                    await self._notify_summary_blocker(backend, execution, task, prompt)
+
+    async def _check_summary_closeout(
+        self,
+        team_id: str,
+        session_id: str,
+        summary_key: tuple[str, str, str],
+        queue: deque[object],
+        original_inputs: object,
+    ) -> bool:
+        """Give a naturally paused Summary Execution one bounded submission-only turn."""
+        if not isinstance(original_inputs, dict):
+            return False
+        entry = await self._team_runtime_manager.pool.get(team_id)
+        if entry is None or entry.current_session_id != session_id or entry.state is not RuntimeState.PAUSED:
+            return False
+        shutdown_requested = getattr(entry.agent, "is_shutdown_requested", None)
+        if callable(shutdown_requested) and await shutdown_requested():
+            return False
+        backend = entry.agent.team_backend
+        task_manager = getattr(backend, "org_task_manager", None)
+        if task_manager is None:
+            return False
+        execution = await task_manager.get_summary_execution(summary_task_id=summary_key[2])
+        if execution is None or execution.status != OrgSummaryExecutionStatus.RUNNING.value:
+            return False
+        task = await task_manager.get_task(summary_key[2])
+        if task is None or task.status is not OrgTaskStatus.IN_PROGRESS:
+            return False
+        attempt_key = (session_id, team_id, execution.execution_id)
+        attempts = self._summary_closeout_attempts.get(attempt_key, 0)
+        if attempts == 0:
+            self._summary_closeout_attempts[attempt_key] = 1
+            closeout_inputs = dict(original_inputs)
+            closeout_inputs["_org_summary_closeout"] = True
+            from openjiuwen.agent_teams.prompts.loader import load_template
+
+            language = getattr(getattr(entry.agent, "spec", None), "language", None) or "cn"
+            workspace = getattr(getattr(entry.agent, "harness", None), "workspace", None)
+            workspace_path = getattr(workspace, "root_path", None) or "(unavailable)"
+            closeout_inputs["query"] = (
+                load_template("org_summary_closeout", language)
+                .format({
+                    "summary_task_id": summary_key[2],
+                    "execution_id": execution.execution_id,
+                    "workspace_path": str(workspace_path),
+                })
+                .content
+            )
+            closeout_inputs["_org_queued_at"] = time.monotonic()
+            queue.appendleft(closeout_inputs)
+            logger.warning(
+                "Summary closeout recovery queued: task={} execution={}", task.task_id, execution.execution_id
+            )
+            return True
+        if attempts > 1:
+            return False
+        self._summary_closeout_attempts[attempt_key] = 2
+        reason = f"Summary Task {task.task_id} remains unsubmitted after its single closeout recovery turn."
+        logger.error("{} execution={}", reason, execution.execution_id)
+        await self._notify_summary_blocker(backend, execution, task, reason)
+        return False
+
+    async def _notify_summary_blocker(self, backend: Any, execution: Any, task: Any, reason: str) -> None:
+        root = await backend.org_task_manager.get_task(execution.root_task_id)
+        messages = getattr(backend, "org_message_service", None)
+        if root is None or messages is None or root.assignment is None:
+            return
+        try:
+            # The message service resolves the registered Leader of the assigned Team.
+            # The creator is not necessarily the Team that claimed this root.
+            notice = await messages.send_leader_message(
+                from_team_id="__organization__",
+                from_leader_id="__organization__",
+                to_team_id=root.assignment.team_id,
+                content=reason + " Report the blocker to the user; do not automatically restart the Summary Team.",
+                metadata={
+                    "kind": "summary_submission_blocked",
+                    "task_id": task.task_id,
+                    "execution_id": execution.execution_id,
+                },
+            )
+        except Exception:
+            logger.exception("Summary closeout notice failed: task={}", task.task_id)
+            return
+        if not notice.ok:
+            logger.warning("Summary closeout notice delivery failed: task={}", task.task_id)
 
     @staticmethod
     def _summary_root_handed_off(task: Any) -> bool:
@@ -2340,8 +2613,17 @@ class OrganizationRuntimeManager:
         return True
 
     async def _run_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:
+        closeout = isinstance(inputs, dict) and inputs.get("_org_summary_closeout") is True
+        with _summary_closeout_scope(team_id if closeout else None):
+            return await self._run_scoped_leader_turn(team_id, session_id, inputs)
+
+    async def _run_scoped_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:
         entry = await self._team_runtime_manager.pool.get(team_id)
         if entry is None or entry.current_session_id != session_id:
+            return False
+        # An interact wake runs in an existing task context, so it cannot inherit
+        # the submission-only policy. Keep recovery queued until a paused turn.
+        if isinstance(inputs, dict) and inputs.get("_org_summary_closeout") and entry.state is not RuntimeState.PAUSED:
             return False
         if entry.state is RuntimeState.PAUSED:
             if self._is_summary_team(entry.agent) and self._summary_turn_runner is not None:

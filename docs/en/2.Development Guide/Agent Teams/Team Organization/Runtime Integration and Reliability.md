@@ -25,6 +25,12 @@ On activation or rebinding, recover membership and tools, matching `OPEN` tasks,
 
 ## Integration checklist
 
+Organization listeners decode events with `OrgEventMessage`, even when the transport supplies a regular `EventMessage`. The regular Team event map must not decode `org_*` events.
+
+Writing an artifact or reaching Team idle does not complete a Summary Execution: the Leader must call `org_summary_complete`. After a natural pause, an execution still marked `RUNNING` gets at most one closeout turn to verify and submit existing work. If it remains unsubmitted, the Root Leader receives a blocker notice rather than unlimited retries. This budget is runtime-local, not persisted across process restarts. Cancellation, shutdown, Team removal, and host teardown do not trigger this recovery.
+
+The closeout turn only exposes `read_file`, `org_summary_get_inputs`, and `org_summary_complete`; normal summary collaboration is unaffected. Blocker notices target the Root Task's currently assigned Team Leader, not its creator.
+
 - Members share one organization database and session.
 - Paused Teams can be resumed for background Leader turns.
 - Failed expert launches are rolled back.

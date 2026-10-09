@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/organization/`、`runtime/manager.py` |
-| 最近一次修订日期 | 2026-10-07 |
+| 最近一次修订日期 | 2026-10-08 |
 | 关联 feature | `F_115_team-organization-develop-integration.md` |
 
 ## 范围 / 边界
@@ -26,6 +26,16 @@ Organization 在已有 Team 之上提供跨团队任务池、消息、专家团�
 6. 组织工具只向具备对应角色的 Leader 暴露，不赋予普通成员组织管理权限。
 7. 共享工作空间允许读取组织资料；写入限制在本团队发布目录或允许的共享目录。
    Git 初始化、配置和初始提交使用同一个互斥锁；文件锁在工具成功、失败和异常路径均释放。
+8. 组织订阅入口按 `OrgEventMessage` 解析组织事件，不依赖传输消息的普通 Team 事件映射。
+9. Summary Execution 的正式完成以 `org_summary_complete` 持久化提交为准，不以文件生成或 Team idle 为准。
+   同一运行时、同一执行在自然暂停后最多补偿一次提交轮；仍未提交时通知 Root Leader，
+   不自动重启研究。取消、shutdown、移除或非暂停 Team 不触发补偿，补偿预算不跨进程持久化。
+   提交补偿轮只允许 `read_file`、`org_summary_get_inputs` 和 `org_summary_complete`；普通汇总轮不受此限制。
+   阻塞通知发送给根任务当前 assignment 对应的已注册 Leader，通知异常不能重新排队汇总轮。
+10. 宿主 Summary 输出转发器将成员执行错误投递给 Summary Leader，不以内部任务板已收敛为前提。
+    同一执行的同一错误帧去重；最多一次故障恢复通知，再失败则向根任务 Leader 报告阻塞。
+    Summary Leader 的撰稿交接最多一次初稿、一次定向修订；正式提交成功立即结束当前 Agent Turn。
+    宿主各 Summary 角色继承有限正整数迭代预算；缺失或非法预算使用有限默认值，不配置无限循环。
 
 ## 接口契约
 

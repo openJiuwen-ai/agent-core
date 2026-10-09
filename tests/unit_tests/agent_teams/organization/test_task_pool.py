@@ -57,6 +57,7 @@ from openjiuwen.agent_teams.organization.tools import (
 )
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
+from openjiuwen.agent_teams.schema.events import EventMessage
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 
@@ -317,7 +318,7 @@ async def _emit_team_task_event(agents, session_id: str, org_id: str, event, *, 
     handler = next(
         handler for topic, handler in agents[team_id].team_backend.messager.subscriptions if topic == topic_id
     )
-    await handler(OrgEventMessage.from_event(event))
+    await handler(EventMessage.model_validate(OrgEventMessage.from_event(event).model_dump()))
     # A wake now re-reads durable task/review state before running its turn.
     await asyncio.sleep(0.05)
 
@@ -374,12 +375,14 @@ async def test_organization_events_reach_teams_with_same_leader_node_id():
         for team_id in ("team-a", "team-b"):
             await publisher.publish(
                 OrgTopic.TASK.build(session_id, manager.organization_id),
-                OrgEventMessage.from_event(
-                    OrgTaskClaimedEvent(
-                        organization_id=manager.organization_id,
-                        task_id=f"task-{team_id}",
-                        claimed_by_team_id=team_id,
-                    )
+                EventMessage.model_validate(
+                    OrgEventMessage.from_event(
+                        OrgTaskClaimedEvent(
+                            organization_id=manager.organization_id,
+                            task_id=f"task-{team_id}",
+                            claimed_by_team_id=team_id,
+                        )
+                    ).model_dump()
                 ),
             )
         assert captured == ["team-a", "team-b"]
@@ -1127,9 +1130,29 @@ async def test_summary_execution_waits_for_accepted_sources_then_completes_root(
     assert not reassigned.ok
     assert "execution binding" in reassigned.reason
     assert (await manager.start_task(task_id="summary-sibling", team_id="summary-team")).ok
-    assert (await manager.complete_task(task_id="summary-sibling", team_id="summary-team")).ok
+    from unittest.mock import AsyncMock
+
+    runtime = OrganizationRuntimeManager(SimpleNamespace())
+    runtime._ensure_leader_turn_worker = lambda *_: None
+    messages = SimpleNamespace(
+        send_leader_message=AsyncMock(return_value=SimpleNamespace(ok=True, data={"message_id": "final-notice"}))
+    )
+    tool = OrgSummaryCompleteTool(manager, "summary-team", "summary-leader", messages, runtime, "session")
+    result = await tool.invoke({
+        "summary_task_id": "summary-sibling",
+        "output_context": {"description": "Verified final investment report"},
+        "output_abstract": "Final report",
+    })
+    assert result.success
     completed_root = await manager.get_task("summary-root")
     assert completed_root is not None and completed_root.status is OrgTaskStatus.COMPLETED
+    assert completed_root.output_context.description == "Verified final investment report"
+    completed_summary = await manager.get_task("summary-sibling")
+    assert completed_summary.status is OrgTaskStatus.COMPLETED
+    assert messages.send_leader_message.call_args.kwargs["to_team_id"] == "team-a"
+    delivery = runtime._leader_turn_queues[("session", "team-a")][0]
+    assert delivery["_org_relay_source"] == "org_root_delivery"
+    assert "directly deliver the verified final report" in delivery["query"]
 
 
 @pytest.mark.asyncio
@@ -3587,6 +3610,7 @@ async def test_summary_turn_skips_completed_execution_and_starts_active_task():
 
     async def run_turn(team_id, session_id, inputs):
         turns.append(inputs)
+        execution.status = OrgSummaryExecutionStatus.COMPLETED.value
         return True
 
     runtime._run_leader_turn = run_turn
@@ -3615,6 +3639,121 @@ async def test_summary_turn_skips_completed_execution_and_starts_active_task():
     assert started == ["summary-task"]
     assert len(turns) == 1
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_closeout_scope_covers_host_activation_and_restores_on_exit(cancelled):
+    from unittest.mock import AsyncMock
+
+    from openjiuwen.agent_teams.organization.runtime import _is_summary_closeout
+
+    entry = SimpleNamespace(current_session_id="session", state=RuntimeState.PAUSED,
+                            agent=SimpleNamespace(spec=SimpleNamespace(metadata={"summary_team": True})))
+    runtime = OrganizationRuntimeManager(SimpleNamespace(pool=SimpleNamespace(get=AsyncMock(return_value=entry))))
+
+    async def run_turn(team_id, session_id, inputs):
+        assert _is_summary_closeout(team_id)
+        assert not _is_summary_closeout("owner")
+        if cancelled:
+            raise asyncio.CancelledError
+        return True
+
+    runtime._summary_turn_runner = run_turn
+    if cancelled:
+        with pytest.raises(asyncio.CancelledError):
+            await runtime._run_leader_turn("summary", "session", {"_org_summary_closeout": True})
+    else:
+        assert await runtime._run_leader_turn("summary", "session", {"_org_summary_closeout": True})
+    assert not _is_summary_closeout("summary")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome",
+    ["completed", "recovered", "unfinished", "notice_failed", "shutdown", "removed", "cancelled", "running", "failed"],
+)
+async def test_summary_closeout_is_bounded_and_respects_stop(outcome):
+    """Only a naturally paused, unfinished execution gets one closeout turn."""
+    from unittest.mock import AsyncMock
+
+    task = SimpleNamespace(task_id="summary", status=OrgTaskStatus.IN_PROGRESS)
+    execution = SimpleNamespace(execution_id="execution", status="RUNNING", root_task_id="root")
+    root = SimpleNamespace(
+        created_by=OrgTaskCreator(
+            creator_type="leader", creator_id="creator", organization_id="org", team_id="creator-team"
+        ),
+        assignment=SimpleNamespace(team_id="owner"),
+    )
+    task_manager = SimpleNamespace(
+        get_task=AsyncMock(side_effect=lambda task_id: root if task_id == "root" else task),
+        get_summary_execution=AsyncMock(return_value=execution),
+    )
+    messages = SimpleNamespace(send_leader_message=AsyncMock(return_value=SimpleNamespace(ok=True)))
+    if outcome == "notice_failed":
+        messages.send_leader_message.side_effect = RuntimeError("transport unavailable")
+    agent = SimpleNamespace(
+        spec=SimpleNamespace(language="en"),
+        is_shutdown_requested=AsyncMock(return_value=outcome == "shutdown"),
+        team_backend=SimpleNamespace(org_task_manager=task_manager, org_message_service=messages),
+    )
+    entry = SimpleNamespace(current_session_id="session", state=RuntimeState.PAUSED, agent=agent)
+    pool = SimpleNamespace(get=AsyncMock(return_value=entry))
+    runtime = OrganizationRuntimeManager(SimpleNamespace(pool=pool))
+    turns = []
+
+    async def run_turn(team_id, session_id, inputs):
+        turns.append(inputs)
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+        if outcome == "completed" or (outcome == "recovered" and len(turns) == 2):
+            execution.status = "COMPLETED"
+            task.status = OrgTaskStatus.COMPLETED
+        if outcome == "removed":
+            pool.get.return_value = None
+        if outcome == "running":
+            entry.state = RuntimeState.RUNNING
+        if outcome == "failed":
+            execution.status = "FAILED"
+        runtime.schedule_summary_execution(
+            team_id="summary-team",
+            session_id="session",
+            task_id="summary",
+            organization_id="org",
+            execution_id="execution",
+            root_task_id="root",
+        )
+        return True
+
+    runtime._run_leader_turn = run_turn
+    try:
+        runtime.schedule_summary_execution(
+            team_id="summary-team",
+            session_id="session",
+            task_id="summary",
+            organization_id="org",
+            execution_id="execution",
+            root_task_id="root",
+        )
+        worker = runtime._leader_turn_workers[("session", "summary-team")]
+        await asyncio.gather(worker, return_exceptions=True)
+        assert len(turns) == (2 if outcome in {"unfinished", "recovered", "notice_failed"} else 1)
+        assert messages.send_leader_message.await_count == (1 if outcome in {"unfinished", "notice_failed"} else 0)
+        if outcome in {"unfinished", "notice_failed"}:
+            assert messages.send_leader_message.call_args.kwargs["to_team_id"] == "owner"
+            assert turns[1]["_org_summary_closeout"] is True
+            assert "org_summary_complete" in turns[1]["query"]
+            assert "Do not restart research" in turns[1]["query"]
+            runtime.schedule_summary_execution(
+                team_id="summary-team",
+                session_id="session",
+                task_id="summary",
+                organization_id="org",
+                execution_id="execution",
+                root_task_id="root",
+            )
+            assert not runtime._leader_turn_queues
+    finally:
+        await runtime.close()
 
 @pytest.mark.asyncio
 async def test_recreated_leader_regains_org_tools_and_subscription(active_organization_runtime):

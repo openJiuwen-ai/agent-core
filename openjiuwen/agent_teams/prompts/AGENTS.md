@@ -55,6 +55,14 @@ Teammate 不消费 workflow / lifecycle 模板；`sections.py` 在 `role != LEAD
 
 ## Runtime Assembly 路径
 
+Organization 的单次汇总收尾补偿使用 `org_summary_closeout.md`（cn/en 成对），由
+`OrganizationRuntimeManager` 在自然暂停且汇总尚未提交时投递到对话，动态字段为
+`{{summary_task_id}}`、`{{execution_id}}`、`{{workspace_path}}`。它不参与常驻系统提示词装配。
+
+Summary 成员错误经宿主转发到 `org_summary_member_failure.md`（cn/en），使用已有内部消息
+直接唤醒 Summary Leader，不等待任务板收敛。同一错误帧去重，最多一次恢复通知，再失败
+通知根任务 Leader 报告阻塞；不自动重放成员任务。
+
 唯一装配入口是 `sections.build_team_*_section`：每个模板独立产出一个 `PromptSection`，由 `agent_teams/rails/team_policy_rail.py` 的 `TeamPolicyRail` 按优先级合并进 `SystemPromptBuilder`（外部 CLI 成员则经 `build_team_member_system_prompt` 渲染成独立字符串）。各 builder 直接 `load_template` 读对应 `.md`（如 `build_team_role_section` 读 `leader_policy` / `teammate_policy`）。
 
 **leader 的投递时刻与其他角色不同（[[F_76]] 渐进式披露）**：同样这批 section，teammate / human_agent / bridge 在构造期全部进系统提示词，而 leader 只拿 `team_bootstrap` + `team_extra`，其余经 `build_leader_policy_disclosure` 拼成 `build_team` 的 ToolResult 文本，由 `tools/tool_team.py` 的 `BuildTeamTool.render_for_llm` 附在建队结果之后下发。
