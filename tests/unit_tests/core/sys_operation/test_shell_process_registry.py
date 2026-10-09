@@ -5,14 +5,16 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import unittest.mock
 
 import pytest
 
 from openjiuwen.core.sys_operation.shell_process_registry import (
     SHELL_PROCESS_REGISTRY,
     kill_shell_processes_for_session,
-    set_shell_session_id,
     reset_shell_session_id,
+    resolve_shell_session_id,
+    set_shell_session_id,
     terminate_shell_process,
 )
 
@@ -135,3 +137,38 @@ async def test_kill_tracked_asyncio_process_for_session() -> None:
     assert killed == 1
     await asyncio.wait_for(proc.wait(), timeout=3)
     reset_shell_session_id(token)
+
+
+def test_resolve_shell_session_id_prefers_contextvar() -> None:
+    token = set_shell_session_id("sess_ctx")
+    try:
+        assert resolve_shell_session_id() == "sess_ctx"
+    finally:
+        reset_shell_session_id(token)
+
+
+def test_resolve_shell_session_id_falls_back_to_current_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = unittest.mock.Mock()
+    session.get_session_id.return_value = "sess_current"
+    monkeypatch.setattr("openjiuwen.core.session.get_current_session", lambda: session)
+    assert resolve_shell_session_id() == "sess_current"
+
+
+def test_resolve_shell_session_id_returns_none_and_warns_when_all_sources_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warnings_logged: list[str] = []
+    monkeypatch.setattr("openjiuwen.core.session.get_current_session", lambda: None)
+    monkeypatch.setattr(
+        "openjiuwen.core.common.logging.utils.get_session_id",
+        lambda: "default_trace_id",
+    )
+    fake_logger = unittest.mock.Mock()
+    fake_logger.warning.side_effect = lambda msg: warnings_logged.append(str(msg))
+    monkeypatch.setattr(
+        "openjiuwen.core.sys_operation.shell_process_registry.sys_operation_logger",
+        fake_logger,
+    )
+
+    assert resolve_shell_session_id() is None
+    assert any("not be registered" in msg for msg in warnings_logged)

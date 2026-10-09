@@ -43,14 +43,33 @@ def resolve_shell_session_id() -> str | None:
     sid = (get_shell_session_id() or "").strip()
     if sid:
         return sid
+    # rail 回调注入的 _shell_session_id 与工具执行可能不在同一 asyncio 上下文，
+    # 此时 spawn 现场解析结果为 None，register 静默 no-op，导致击杀扑空。回退到
+    # session.invoke 入口注入的 current_session 兜底；全部来源失败时打 WARNING。
+    fallback_sid = None
+    try:
+        from openjiuwen.core.session import get_current_session
+
+        session = get_current_session()
+        if session is not None:
+            fallback_sid = str(session.get_session_id() or "").strip()
+    except Exception:
+        fallback_sid = None
+    if fallback_sid:
+        return fallback_sid
+    trace = None
     try:
         from openjiuwen.core.common.logging.utils import get_session_id
-    except ImportError:
-        return None
 
-    trace = (get_session_id() or "").strip()
+        trace = (get_session_id() or "").strip() or None
+    except ImportError:
+        trace = None
     if trace and trace != "default_trace_id":
         return trace
+    sys_operation_logger.warning(
+        "resolve_shell_session_id: all sources failed (contextvar/session/trace); "
+        "shell process will not be registered for kill-on-interrupt/delete"
+    )
     return None
 
 
@@ -101,10 +120,7 @@ class ShellProcessRegistry:
             return 0
         prefix = f"{sid}_"
         with self._lock:
-            matching_keys = [
-                key for key in list(self._processes)
-                if key == sid or key.startswith(prefix)
-            ]
+            matching_keys = [key for key in list(self._processes) if key == sid or key.startswith(prefix)]
             for key in matching_keys:
                 self._cancelled_sessions.add(key)
         killed = 0
@@ -230,7 +246,5 @@ def terminate_shell_process(proc: ProcessHandle) -> bool:
         try:
             proc.wait(timeout=1)
         except subprocess.TimeoutExpired as e:
-            sys_operation_logger.warning(
-                f"Timeout expired waiting for shell process {proc.pid} termination: {e}"
-            )
+            sys_operation_logger.warning(f"Timeout expired waiting for shell process {proc.pid} termination: {e}")
     return True
