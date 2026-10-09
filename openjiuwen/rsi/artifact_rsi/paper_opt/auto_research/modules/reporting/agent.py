@@ -27,6 +27,7 @@ from typing import Any
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import get_logger
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import resolve_metric
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
+    paper_dist_dir,
     paper_figures_dir,
     paper_output_path,
     paper_refs_bib_path,
@@ -54,6 +55,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.evide
     normalize_prior_paper_evidence,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex import (
+    assemble_document,
     escape_latex,
     render_prior_results_table,
     render_results_table,
@@ -294,6 +296,7 @@ class ReportingAgent:
             specs=specs,
             session_error=session_error,
             preflight_note=latex_preflight_note,
+            is_final_attempt=inputs.is_final_attempt,
         )
         # Persist for the next retry to read back above — overwritten every
         # attempt (this attempt's outcome, not an accumulating history) so a
@@ -1019,6 +1022,48 @@ class ReportingAgent:
 
         return notes, extra_paths
 
+    @staticmethod
+    def _populate_dist_dir(
+        *,
+        dist_dir: Path,
+        final_tex: Path,
+        final_pdf: Path,
+        sections_dir: Path,
+        figures_dir: Path,
+        refs_bib_path: Path,
+    ) -> None:
+        """Stage only the paper's real content into a clean directory.
+
+        paper_workspace_dir also holds the reporting agent's own scratch
+        files (.skills/, lint/citation bookkeeping, LaTeX compile
+        byproducts) — tree_provider/orchestrator.py points ArtifactRef.path
+        at dist_dir instead so the front-end file tree/download only ever
+        sees the paper itself.
+        """
+        if dist_dir.exists():
+            shutil.rmtree(dist_dir)
+        dist_dir.mkdir(parents=True, exist_ok=True)
+
+        if final_tex.is_file():
+            shutil.copy2(final_tex, dist_dir / final_tex.name)
+        if final_pdf.is_file():
+            shutil.copy2(final_pdf, dist_dir / final_pdf.name)
+        if refs_bib_path.is_file():
+            shutil.copy2(refs_bib_path, dist_dir / refs_bib_path.name)
+
+        if sections_dir.is_dir():
+            dist_sections = dist_dir / "sections"
+            dist_sections.mkdir(exist_ok=True)
+            for tex_file in sections_dir.glob("*.tex"):
+                shutil.copy2(tex_file, dist_sections / tex_file.name)
+
+        if figures_dir.is_dir():
+            dist_figures = dist_dir / "figures"
+            dist_figures.mkdir(exist_ok=True)
+            for fig_file in figures_dir.iterdir():
+                if fig_file.is_file() and fig_file.suffix.lower() != ".py":
+                    shutil.copy2(fig_file, dist_figures / fig_file.name)
+
     # -- final verification: never trust the agent's own report of "done" --
     # (same rule code_implementation applies to its smoke tests)
 
@@ -1036,6 +1081,7 @@ class ReportingAgent:
         specs=None,
         session_error: str | None = None,
         preflight_note: str | None = None,
+        is_final_attempt: bool = False,
     ) -> ReportingOutput:
         drafts: dict[str, str] = {}
         for section_id in DOCUMENT_ORDER:
@@ -1076,29 +1122,96 @@ class ReportingAgent:
         notes.extend(figure_notes)
         figure_paths = [*figure_paths, *extra_figure_paths]
 
+        # Host-authored, always -- never trust whatever main.tex the agent's own
+        # session produced. assemble_document() inlines every verified section
+        # body directly (no \input/\include), so overwriting here is the one
+        # place that guarantees a self-contained main.tex regardless of whether
+        # the agent invoked ts-latex/compile.py at all (e.g. a missing skill
+        # deployment previously left the agent to hand-assemble a \input-based
+        # main.tex that generic previewers -- including the web UI -- can't
+        # resolve, since they only fetch the single selected file).
+        title_path = workspace / "title.txt"
+        if title_path.is_file():
+            keywords_path = workspace / "keywords.txt"
+            keywords = keywords_path.read_text(encoding="utf-8").strip() if keywords_path.is_file() else None
+            (workspace / "main.tex").write_text(
+                assemble_document(
+                    title=title_path.read_text(encoding="utf-8").strip(),
+                    section_bodies=drafts,
+                    document_order=DOCUMENT_ORDER,
+                    keywords=keywords,
+                ),
+                encoding="utf-8",
+            )
+        else:
+            notes.append("title.txt missing — could not regenerate a self-contained main.tex")
+
         final_pdf = paper_output_path(run_id)
         final_tex = paper_tex_path(run_id)
         # A missing PDF is only acceptable when the *environment* can't
-        # produce one at all (no latexmk/pdflatex on PATH or LATEX_BIN_DIR)
-        # and ts-latex still got far enough to assemble a real main.tex --
-        # a genuine unresolved compile error with the toolchain present must
-        # keep failing, since a retry can plausibly fix that but can never
-        # fix a missing binary. Reuse the runtime _run_async already
-        # resolved (via preflight_latex_runtime/discover_latex_runtime)
-        # instead of probing PATH a second time; same None-guard as
-        # _build_paper_agent's own fallback, for latex_preflight=False.
+        # produce one at all -- a genuine unresolved compile error with a
+        # working toolchain must keep failing, since a retry can plausibly
+        # fix that but can never fix a missing binary. Reuse the runtime
+        # _run_async already resolved (via preflight_latex_runtime/
+        # discover_latex_runtime) instead of probing PATH a second time;
+        # same None-guard as _build_paper_agent's own fallback, for
+        # latex_preflight=False.
         if self._latex_runtime is None:
             latex_bin_dir = self._pw_config.get("latex_bin_dir") or os.environ.get("LATEX_BIN_DIR")
             self._latex_runtime = discover_latex_runtime(latex_bin_dir)
         toolchain_missing = not self._latex_runtime.available
-        tex_only = not final_pdf.is_file() and toolchain_missing and final_tex.is_file()
+        # ts-latex/scripts/compile.py is the deterministic bridge between a
+        # host-found toolchain and the agent's own sandboxed shell (it reads
+        # .latex-runtime.json and shells out itself). A skill deployment
+        # missing that script does *not* mean every retry is doomed though:
+        # the agent still has general shell/python tool access and has been
+        # observed to compile successfully by invoking pdflatex/latexmk
+        # itself once it notices the canned script isn't where {SKILLS_DIR}
+        # said it would be -- confirmed against real task history on a host
+        # with a working MiKTeX install but a packaging gap that drops
+        # every skill's scripts/ (and assets/) from the distributed build.
+        # So this alone no longer forces an immediate give-up; it only
+        # feeds the diagnostic message once tex_only is already true for
+        # one of the two reasons below.
+        latex_skill_incomplete = not (
+            workspace / _MATERIALIZED_SKILLS_DIRNAME / "ts-latex" / "scripts" / "compile.py"
+        ).is_file()
+        # Even when the toolchain is intact, exhausting every reporting
+        # retry on the same "no compiled PDF" outcome means whatever is
+        # actually wrong is not getting fixed by trying again either -- the
+        # manager has no further attempt left to spend, so losing the whole
+        # node over a rendering-only gap is worse than shipping the tex it
+        # already verified.
+        tex_only = not final_pdf.is_file() and final_tex.is_file() and (toolchain_missing or is_final_attempt)
         if not final_pdf.is_file():
-            notes.append(
-                "no LaTeX toolchain found in this environment (latexmk/pdflatex not on PATH) "
-                "— shipping main.tex as the final artifact instead of a compiled PDF"
-                if tex_only
-                else "no compiled PDF found at end of session — ts-latex did not report success"
-            )
+            if tex_only and latex_skill_incomplete:
+                notes.append(
+                    "ts-latex skill deployment is missing its scripts/ directory (compile.py not "
+                    "found) — this environment cannot compile a PDF at all; shipping main.tex as "
+                    "the final artifact instead"
+                )
+            elif tex_only and toolchain_missing:
+                notes.append(
+                    "no LaTeX toolchain found in this environment (latexmk/pdflatex not on PATH) "
+                    "— shipping main.tex as the final artifact instead of a compiled PDF"
+                )
+            elif tex_only:
+                notes.append(
+                    "no compiled PDF after exhausting all reporting retries — shipping main.tex as "
+                    "the final artifact instead; likely a rendering/environment problem rather than "
+                    "a content problem"
+                )
+            else:
+                notes.append("no compiled PDF found at end of session — ts-latex did not report success")
+
+        self._populate_dist_dir(
+            dist_dir=paper_dist_dir(run_id),
+            final_tex=final_tex,
+            final_pdf=final_pdf,
+            sections_dir=sections_dir,
+            figures_dir=workspace / "figures",
+            refs_bib_path=refs_bib_path,
+        )
 
         if hallucinated or (not final_pdf.is_file() and not tex_only):
             return ReportingOutput(

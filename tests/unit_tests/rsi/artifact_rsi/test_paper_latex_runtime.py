@@ -125,6 +125,7 @@ async def test_reporting_agent_continues_after_preflight_failure(tmp_path, monke
         survey=SimpleNamespace(resource_paths=["missing-summary.md"]),
         result=_Result(),
         attempt=1,
+        is_final_attempt=False,
         repair_instruction="",
         previous_context=None,
     )

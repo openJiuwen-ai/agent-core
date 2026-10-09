@@ -2124,6 +2124,7 @@ class ReportingAdapter:
                     repair_instruction=contract.repair_instruction,
                     contract_brief=_contract_brief(contract),
                     attempt=attempt,
+                    is_final_attempt=attempt >= state.task_state.limits.max_reporting_retries + 1,
                 )
             )
         except Exception as exc:  # noqa: BLE001
