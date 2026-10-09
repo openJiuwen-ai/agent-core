@@ -19,7 +19,7 @@ return types per channel.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import (
     Any,
     Optional,
@@ -94,7 +94,62 @@ class ExternalTeamEvent:
         return cls(topic=TeamTopic(topic), event=EventMessage.model_validate(event))
 
 
-InteractPayload = Union[GodViewMessage, OperatorMessage, HumanAgentMessage, ExternalTeamEvent]
+@dataclass(frozen=True, slots=True)
+class GroupChatMessage:
+    """One public message posted by the host. The author is always ``user``."""
+
+    body: str
+    client_message_id: str
+    mentions: tuple[str, ...] = ()
+    attachments: tuple[dict[str, Any], ...] = ()
+
+    @classmethod
+    def from_wire(cls, raw: Any) -> "GroupChatMessage | None":
+        """Parse a ``type=group_chat`` dict. Other shapes return None."""
+        if isinstance(raw, cls):
+            return raw
+        if not isinstance(raw, dict) or raw.get("type") != "group_chat":
+            return None
+        allowed = {"type", "body", "client_message_id", "mentions", "attachments"}
+        if set(raw) - allowed:
+            raise ValueError("invalid_group_chat")
+        body = raw.get("body")
+        identity = raw.get("client_message_id")
+        mentions = raw.get("mentions", ())
+        attachments = raw.get("attachments", ())
+        if not isinstance(body, str) or not isinstance(identity, str) or not identity.strip():
+            raise ValueError("invalid_group_chat")
+        if not isinstance(mentions, (list, tuple)) or not isinstance(attachments, (list, tuple)):
+            raise ValueError("invalid_group_chat")
+        if any(not isinstance(name, str) for name in mentions):
+            raise ValueError("invalid_group_chat")
+        if any(not isinstance(item, dict) for item in attachments):
+            raise ValueError("invalid_group_chat")
+        return cls(
+            body=body,
+            client_message_id=identity,
+            mentions=tuple(mentions),
+            attachments=tuple(attachments),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class HumanAgentToolCall:
+    """A tool invocation made by a passive human, executed under their identity."""
+
+    sender: str
+    tool_name: str
+    tool_args: dict[str, Any] = field(default_factory=dict)
+
+
+InteractPayload = Union[
+    GodViewMessage,
+    OperatorMessage,
+    HumanAgentMessage,
+    ExternalTeamEvent,
+    GroupChatMessage,
+    HumanAgentToolCall,
+]
 """Discriminated union of supported interact payload shapes."""
 
 
@@ -144,11 +199,22 @@ class DeliverResult:
     ok: bool
     message_id: Optional[str] = None
     reason: Optional[str] = None
+    output: Optional[str] = None
+    data: Optional[dict[str, Any]] = None
 
     @classmethod
-    def success(cls, message_id: Optional[str] = None) -> "DeliverResult":
+    def success(
+        cls,
+        message_id: Optional[str] = None,
+        data: Optional[dict[str, Any]] = None,
+    ) -> "DeliverResult":
         """Build a success result, optionally carrying a message id."""
-        return cls(ok=True, message_id=message_id)
+        return cls(ok=True, message_id=message_id, data=data)
+
+    @classmethod
+    def tool_success(cls, output: str, data: Optional[dict[str, Any]] = None) -> "DeliverResult":
+        """Build a success result for a passive-human tool call."""
+        return cls(ok=True, output=output, data=data)
 
     @classmethod
     def failure(cls, reason: str) -> "DeliverResult":
@@ -163,8 +229,10 @@ __all__ = [
     "DeliverResult",
     "ExternalTeamEvent",
     "GodViewMessage",
+    "GroupChatMessage",
     "HumanAgentInboundEvent",
     "HumanAgentMessage",
+    "HumanAgentToolCall",
     "InteractPayload",
     "OperatorMessage",
 ]

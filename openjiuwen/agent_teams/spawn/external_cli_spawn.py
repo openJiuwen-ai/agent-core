@@ -72,6 +72,7 @@ async def _build_member_system_prompt(
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         workspace_prompt_variant="external",
+        prompt_overrides=spec.prompt_overrides,
     )
     return prompt or None
 

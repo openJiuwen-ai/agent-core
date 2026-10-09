@@ -29,8 +29,10 @@ from openjiuwen.agent_teams.interaction import (
     DeliverResult,
     ExternalTeamEvent,
     GodViewMessage,
+    GroupChatMessage,
     HumanAgentInbox,
     HumanAgentMessage,
+    HumanAgentToolCall,
     HumanAgentNotEnabledError,
     InteractPayload,
     OperatorMessage,
@@ -514,6 +516,13 @@ class TeamRuntimeManager:
         if external_event is not None:
             return await self._route_external_team_event(entry, external_event)
 
+        try:
+            group_input = payload if isinstance(payload, GroupChatMessage) else GroupChatMessage.from_wire(payload)
+        except ValueError:
+            return DeliverResult.failure("invalid_group_chat")
+        if group_input is not None:
+            payload = group_input
+
         if isinstance(payload, str):
             parsed = parse_interact_str(payload)
             payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
@@ -698,8 +707,25 @@ class TeamRuntimeManager:
                 await _reset_finalized_debate()
             result = await inbox.direct(payload.target, payload.body)
             return result
+        if isinstance(payload, GroupChatMessage):
+            from openjiuwen.agent_teams.group_chat.handler import deliver_group_message
+
+            result = await deliver_group_message(backend, payload)
+            if result.ok:
+                starter = getattr(agent, "start_mentioned_members", None)
+                if starter is not None:
+                    await starter()
+            return result
+        if isinstance(payload, HumanAgentToolCall):
+            return await TeamRuntimeManager._dispatch_passive_tool(agent, payload)
         if isinstance(payload, HumanAgentMessage):
             try:
+                if not backend.hitt_enabled():
+                    return DeliverResult.failure("human_agent_not_enabled")
+                if payload.target is None and await backend.is_passive_human(payload.sender):
+                    return DeliverResult.failure("passive_member_no_avatar")
+                if await backend.is_passive_human(payload.sender):
+                    return await TeamRuntimeManager._dispatch_passive_message(agent, payload)
                 if payload.target is not None:
                     if payload.target in {"all", "*"}:
                         await agent.auto_start_all()
@@ -720,6 +746,52 @@ class TeamRuntimeManager:
             except UnknownHumanAgentError:
                 return DeliverResult.failure("unknown_human_agent")
         return DeliverResult.failure(f"unknown_payload:{type(payload).__name__}")
+
+    @staticmethod
+    async def _dispatch_passive_message(agent: "TeamAgent", payload: HumanAgentMessage) -> DeliverResult:
+        """Deliver a passive human's directed message without treating them as an avatar."""
+        backend = agent.team_backend
+        target = payload.target or ""
+        if target in {"all", "*"}:
+            await agent.auto_start_all()
+            message_id = await backend.message_manager.broadcast_message(
+                payload.body,
+                from_member_name=payload.sender,
+            )
+            if message_id is None:
+                return DeliverResult.failure("send_failed")
+            return DeliverResult.success(message_id)
+        if not await backend.member_exists(target):
+            return DeliverResult.failure(f"unknown_member:{target}")
+        await agent.auto_start_member(target)
+        message_id = await backend.message_manager.send_message(
+            payload.body,
+            to_member_name=target,
+            from_member_name=payload.sender,
+        )
+        if message_id is None:
+            return DeliverResult.failure("send_failed")
+        return DeliverResult.success(message_id)
+
+    @staticmethod
+    async def _dispatch_passive_tool(agent: "TeamAgent", payload: HumanAgentToolCall) -> DeliverResult:
+        """Execute a passive-human tool call, or refuse an avatar and an unknown sender."""
+        backend = agent.team_backend
+        if backend is None or not backend.hitt_enabled():
+            return DeliverResult.failure("human_agent_not_enabled")
+        if await backend.is_passive_human(payload.sender):
+            output = await backend.passive_tool_executor().execute(
+                payload.sender,
+                payload.tool_name,
+                payload.tool_args,
+            )
+            if output.success:
+                data = output.data if isinstance(output.data, dict) else None
+                return DeliverResult.tool_success(str(output), data)
+            return DeliverResult.failure(output.error or "tool_failed")
+        if await backend.is_human_agent(payload.sender):
+            return DeliverResult.failure("tool_passthrough_avatar_not_supported")
+        return DeliverResult.failure("unknown_human_agent")
 
     async def register_human_agent_inbound(
         self,

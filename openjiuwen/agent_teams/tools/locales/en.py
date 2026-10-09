@@ -100,6 +100,13 @@ STRINGS: dict[str, str] = {
         "Injected into every other member's system prompt and returned by "
         "list_members — do not put private content here"
     ),
+    "group_send_message.content": "Public message body. @ mentions inside the text are not parsed",
+    "group_send_message.client_message_id": (
+        "Idempotency key within one team session. Retries must reuse the same id"
+    ),
+    "group_send_message.mentions": (
+        "Member names to mention. An unknown or departed name fails the whole send"
+    ),
     "spawn_human_agent.desc": (
         "[PUBLIC] Role profile and responsibilities of the human member, used "
         "for display and description persistence and injected into other members' "

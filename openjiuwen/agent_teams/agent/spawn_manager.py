@@ -118,8 +118,16 @@ class SpawnManager:
         session: Optional[Any] = None,
         spawn_config: Optional[SpawnConfig] = None,
         resume_external_backend: bool = False,
-    ) -> SpawnedProcessHandle:
+    ) -> SpawnedProcessHandle | None:
         member_name = ctx.member_name
+        role = getattr(ctx, "role", None)
+        if role == TeamRole.PASSIVE_HUMAN or getattr(role, "value", None) == TeamRole.PASSIVE_HUMAN.value:
+            team_logger.info(
+                "[{}] skip harness spawn for passive human {}",
+                self._configurator.member_name or "?",
+                member_name,
+            )
+            return None
         team_logger.info("[{}] spawning teammate: {}", self._configurator.member_name or "?", member_name)
 
         spec = self._configurator.spec

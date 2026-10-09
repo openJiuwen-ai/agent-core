@@ -1,0 +1,1 @@
+Post one message to the public group chat. The author is the current member. `client_message_id` is required and retries must reuse it. `mentions` are member names; `@` inside the body is not parsed. `human_agent` and `passive_human` do not receive this tool.

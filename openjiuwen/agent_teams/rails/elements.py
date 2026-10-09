@@ -160,6 +160,10 @@ class TeamPolicyInput(ConstructionInput):
         default=False,
         description="Whether teammates see the concrete human-agent roster.",
     )
+    prompt_overrides: dict[str, str] = param_field(
+        default_factory=dict,
+        description="Per-section prompt replacements applied by TeamSectionName.",
+    )
 
 
 @harness_element(
@@ -190,6 +194,7 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         team_workspace_path=inp.team_workspace_path,
         team_backend=get_team_backend(context),
         expose_human_agents_to_teammates=inp.expose_human_agents_to_teammates,
+        prompt_overrides=inp.prompt_overrides,
     )
 
 

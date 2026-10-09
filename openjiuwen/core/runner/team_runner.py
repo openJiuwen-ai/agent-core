@@ -453,6 +453,158 @@ class _TeamRunnerMixin:
                 session_id=session_id,
             )
 
+    @staticmethod
+    def _resolve_team_session_id(session: Optional[Union[str, AgentTeamSession]]) -> Optional[str]:
+        """Normalize a session argument to a session id."""
+        if session is None or isinstance(session, str):
+            return session
+        return session.get_session_id()
+
+    async def spawn_team_member(
+        self,
+        spec: Any,
+        team_name: str,
+        session: Optional[Union[str, AgentTeamSession]] = None,
+    ) -> dict[str, Any]:
+        """Register a member on the team that is already running."""
+        from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
+
+        if not isinstance(spec, TeamMemberSpec):
+            return {"ok": False, "reason": f"spec must be a TeamMemberSpec, got {type(spec).__name__}"}
+
+        session_id = self._resolve_team_session_id(session)
+        entry = await self._get_team_runtime_manager().pool.get(team_name)
+        if entry is None or (session_id is not None and entry.current_session_id != session_id):
+            return {"ok": False, "reason": "team_not_active"}
+
+        agent = entry.agent
+        backend = agent.team_backend
+        if backend is None:
+            return {"ok": False, "reason": "team_backend_unavailable"}
+
+        role = spec.role_type
+        if role not in (TeamRole.PASSIVE_HUMAN, TeamRole.HUMAN_AGENT, TeamRole.TEAMMATE):
+            return {"ok": False, "reason": "unsupported_role_type"}
+
+        if spec.agent_spec is not None and agent.spec is not None:
+            agent.spec.agents[spec.member_name] = spec.agent_spec
+            team_session = agent.session_manager.team_session
+            if team_session is not None:
+                agent.persist_session_manifest(team_session)
+
+        if role == TeamRole.PASSIVE_HUMAN:
+            result = await backend.spawn_passive_human(
+                member_name=spec.member_name,
+                display_name=spec.display_name,
+                desc=spec.desc,
+            )
+            return {"ok": result.ok, "reason": result.reason or ""}
+
+        if role == TeamRole.HUMAN_AGENT:
+            result = await backend.spawn_human_agent(
+                member_name=spec.member_name,
+                display_name=spec.display_name,
+                desc=spec.desc,
+                prompt=spec.prompt,
+            )
+        else:
+            result = await self._spawn_teammate_member(backend, spec)
+
+        if not result.ok:
+            return {"ok": False, "reason": result.reason or ""}
+
+        started = await agent.auto_start_member(spec.member_name)
+        if not started:
+            return {
+                "ok": False,
+                "reason": f"member {spec.member_name} registered but failed to start",
+            }
+        return {"ok": True, "reason": ""}
+
+    async def _spawn_teammate_member(self, backend: Any, spec: Any) -> Any:
+        """Register an ordinary teammate as UNSTARTED."""
+        from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
+        from openjiuwen.agent_teams.schema.team import TeamRole
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+        allocate = getattr(backend, "_allocate_model_config", None)
+        allocation = allocate(spec.model_name) if allocate else None
+        member_card = AgentCard(
+            id=f"{backend.team_name}_{spec.member_name}",
+            name=spec.display_name,
+            description=spec.desc,
+        )
+        return await backend.spawn_member(
+            member_name=spec.member_name,
+            display_name=spec.display_name,
+            agent_card=member_card,
+            desc=spec.desc,
+            prompt=spec.prompt,
+            status=MemberStatus.UNSTARTED,
+            execution_status=ExecutionStatus.IDLE,
+            mode=backend.teammate_mode,
+            allocation=allocation,
+            role=TeamRole.TEAMMATE,
+        )
+
+    async def remove_team_member(
+        self,
+        team_name: str,
+        member_name: str,
+        session: Optional[Union[str, AgentTeamSession]] = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Soft-stop a member. The roster row and history stay."""
+        from openjiuwen.agent_teams.schema.status import MEMBER_DEPARTED_STATUSES
+
+        session_id = self._resolve_team_session_id(session)
+        entry = await self._get_team_runtime_manager().pool.get(team_name)
+        if entry is None or (session_id is not None and entry.current_session_id != session_id):
+            return {"ok": False, "reason": "team_not_active"}
+
+        backend = entry.agent.team_backend
+        if backend is None:
+            return {"ok": False, "reason": "team_backend_unavailable"}
+
+        departed = {status.value for status in MEMBER_DEPARTED_STATUSES}
+        member = await backend.get_member(member_name)
+        if member is None or member.status in departed:
+            return {"ok": True, "reason": ""}
+
+        result = await backend.shutdown_member(member_name, force=force)
+        return {"ok": result.ok, "reason": result.reason or ""}
+
+    async def get_progress_report(
+        self,
+        *,
+        team_name: str,
+        session_id: str,
+        scope: str = "all",
+        member_name: Optional[str] = None,
+    ) -> str:
+        """Build an on-demand progress report for one session."""
+        from openjiuwen.agent_teams.progress_report.service import ProgressReportService
+
+        if scope not in ("team", "member", "all"):
+            raise ValueError(f"invalid scope: {scope!r} (expected team|member|all)")
+        spec = await self._resolve_report_spec(team_name, session_id)
+        if spec is None:
+            raise ValueError("team_not_found")
+        return await ProgressReportService(
+            team_name=team_name,
+            session_id=session_id,
+            scope=scope,
+            member_name=member_name,
+            spec=spec,
+        ).generate()
+
+    async def _resolve_report_spec(self, team_name: str, session_id: str):
+        """Return a stored spec for reporting, or None when none can be recovered."""
+        entry = await self._get_team_runtime_manager().pool.get(team_name)
+        if entry is not None and getattr(entry.agent, "spec", None) is not None:
+            return entry.agent.spec
+        return await self._resolve_spec_from_session_bucket(team_name=team_name, session=session_id)
+
     async def register_human_agent_inbound(
         self,
         *,
@@ -1092,6 +1244,49 @@ class _TeamRunnerClassMixin:
             payload,
             team_name=team_name,
             session_id=session_id,
+        )
+
+    @classmethod
+    async def spawn_team_member(
+        cls,
+        spec: Any,
+        team_name: str,
+        session: Optional[Union[str, AgentTeamSession]] = None,
+    ) -> dict[str, Any]:
+        """Register a member on the team that is already running."""
+        return await _global_runner().spawn_team_member(spec, team_name, session)
+
+    @classmethod
+    async def remove_team_member(
+        cls,
+        team_name: str,
+        member_name: str,
+        session: Optional[Union[str, AgentTeamSession]] = None,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Soft-stop a member. The roster row and history stay."""
+        return await _global_runner().remove_team_member(
+            team_name,
+            member_name,
+            session,
+            force,
+        )
+
+    @classmethod
+    async def get_progress_report(
+        cls,
+        *,
+        team_name: str,
+        session_id: str,
+        scope: str = "all",
+        member_name: Optional[str] = None,
+    ) -> str:
+        """Build an on-demand progress report for one session."""
+        return await _global_runner().get_progress_report(
+            team_name=team_name,
+            session_id=session_id,
+            scope=scope,
+            member_name=member_name,
         )
 
     @classmethod

@@ -613,6 +613,11 @@ class MessageHandler(BaseCoordinationHandler):
         # A human agent can be a scheduled team's assignee or reviewer, so the
         # row may be a framework template whose content is empty — expand it
         # here too, or the controller would be pushed a blank message (F_63).
+        from openjiuwen.agent_teams.group_chat.meta import group_metadata
+
+        if is_broadcast and group_metadata(row):
+            return
+
         body = (await self._expand(row)).body
         ts = row.timestamp
 
@@ -623,10 +628,20 @@ class MessageHandler(BaseCoordinationHandler):
         # excluding it here would drop the one message that tells its controller
         # it was removed.
         if is_broadcast:
-            recipients = [name for name in await backend.reachable_human_agent_names() if name != sender]
+            recipients = [
+                name
+                for name in (
+                    await backend.reachable_human_agent_names()
+                    | await backend.reachable_passive_human_names()
+                )
+                if name != sender
+            ]
         else:
             target = payload.to_member_name
-            if not await backend.is_reachable_human_agent(target):
+            reachable = await backend.is_reachable_human_agent(target)
+            if not reachable:
+                reachable = await backend.is_reachable_passive_human(target)
+            if not reachable:
                 return
             recipients = [target]
 

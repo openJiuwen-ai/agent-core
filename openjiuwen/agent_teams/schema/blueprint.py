@@ -207,6 +207,13 @@ class TeamAgentSpec(BaseModel):
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
+    ensure_team_on_start: bool = False
+    """When True, ``Kernel.start`` builds the team row if none exists.
+
+    False keeps the existing path: the leader calls ``build_team`` itself.
+    """
+    team_desc: str = ""
+    """Team goal stored as the team row description when the runtime builds the team."""
     enable_team_plan: bool = False
     """Whether the leader starts in single-agent plan mode for this run.
 
@@ -515,6 +522,14 @@ class TeamAgentSpec(BaseModel):
     at ``build()`` time via ``resolve_language()``.
     """
 
+    prompt_overrides: dict[str, str] = Field(default_factory=dict)
+    """Per-section replacement for team prompt sections.
+
+    Keys must be ``TeamSectionName`` values. An empty string drops that
+    section. A non-empty string replaces the whole section, heading included.
+    Missing keys keep the template. Rails and tools are unchanged.
+    """
+
     build_context: Optional[Any] = Field(
         default=None,
         exclude=True,
@@ -708,6 +723,7 @@ class TeamAgentSpec(BaseModel):
         self._validate_reserved_names()
         self._validate_hitt_consistency()
         self._validate_bridge_consistency()
+        self._validate_prompt_overrides()
         if self.enable_swarmflow:
             validate_swarmflow_concurrency(self.swarmflow_concurrency)
             self._validate_swarmflow_budget()
@@ -900,6 +916,28 @@ class TeamAgentSpec(BaseModel):
                     f"{sorted(RESERVED_MEMBER_NAMES)})"
                 )
 
+    def _validate_prompt_overrides(self) -> None:
+        """Reject ``prompt_overrides`` keys outside ``TeamSectionName.ALL``."""
+        if not self.prompt_overrides:
+            return
+        from openjiuwen.agent_teams.prompts.sections import TeamSectionName
+
+        known = TeamSectionName.ALL
+        unknown = sorted(set(self.prompt_overrides) - known)
+        if not unknown:
+            return
+
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason=(
+                f"prompt_overrides contains unknown section name(s) {unknown}; "
+                f"valid names are {sorted(known)}"
+            ),
+        )
+
     def _validate_hitt_consistency(self) -> None:
         """Reject configs where predefined HUMAN_AGENT members exist without HITT enabled.
 
@@ -911,17 +949,18 @@ class TeamAgentSpec(BaseModel):
         """
         if self.enable_hitt:
             return
-        if not any(m.role_type == TeamRole.HUMAN_AGENT for m in self.predefined_members):
+        human_roles = (TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN)
+        if not any(m.role_type in human_roles for m in self.predefined_members):
             return
 
         from openjiuwen.core.common.exception.codes import StatusCode
         from openjiuwen.core.common.exception.errors import raise_error
 
-        offenders = [m.member_name for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT]
+        offenders = [m.member_name for m in self.predefined_members if m.role_type in human_roles]
         raise_error(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason=(
-                f"predefined_members contains HUMAN_AGENT role(s) {offenders} "
+                f"predefined_members contains human role(s) {offenders} "
                 f"but enable_hitt=False; set enable_hitt=True (capability ceiling) "
                 f"or remove the human member(s)"
             ),

@@ -20,8 +20,10 @@ from openjiuwen.agent_teams.tools.tool_member import (
     SpawnBridgeAgentTool,
     SpawnExternalCliTool,
     SpawnHumanAgentTool,
+    SpawnPassiveHumanTool,
     SpawnTeammateTool,
 )
+from openjiuwen.agent_teams.group_chat.tools import GroupSendMessageTool
 from openjiuwen.agent_teams.tools.tool_message import ReportToLeaderTool, SendMessageTool
 from openjiuwen.agent_teams.tools.tool_permissions import (
     HUMAN_AGENT_TOOLS,
@@ -193,6 +195,11 @@ def create_team_tools(
             model_config_allocator=model_config_allocator,
             desc_key=entry_desc_keys["spawn_teammate"],
         ),
+        "spawn_passive_human": SpawnPassiveHumanTool(
+            agent_team,
+            t,
+            desc_key="spawn_passive_human",
+        ),
         "spawn_human_agent": SpawnHumanAgentTool(
             agent_team,
             t,
@@ -222,6 +229,7 @@ def create_team_tools(
             task_mgr, t, desc_key=_MEMBER_COMPLETE_DESC_KEY[dispatch_mode]
         ),
         # Messaging
+        "group_send_message": GroupSendMessageTool(agent_team, t),
         "send_message": send_message_cls(
             msg_mgr,
             t,
@@ -283,7 +291,7 @@ def create_team_tools(
     # Unconditional set subtraction is idempotent — teammate / human_agent
     # ``allowed`` sets don't contain these leader-only tools anyway.
     if not agent_team.hitt_enabled():
-        allowed = allowed - {"spawn_human_agent"}
+        allowed = allowed - {"spawn_human_agent", "spawn_passive_human"}
     if not agent_team.bridge_enabled():
         allowed = allowed - {"spawn_bridge_agent"}
     if not agent_team.external_cli_kinds():
