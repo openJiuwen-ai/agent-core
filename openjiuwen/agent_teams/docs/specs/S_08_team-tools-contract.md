@@ -1,5 +1,11 @@
 # Team Tools Contract
 
+## Organization 工具
+
+Organization 工具复用 TeamTool、现有工厂和 Leader 权限装配，使用独立的组织工具命名空间。
+普通成员不能通过创建组织获得 Leader 管理权限；完整组织约定见 [S_29](S_29_team-organization.md)，
+工具用途、角色限制及使用顺序见中英文 Team Organization 指南，不另生成 API 文档。
+
 ## `TeamBackend` lifecycle callbacks
 
 `TeamBackend.__init__` accepts `on_team_built` and `on_team_cleaned`
@@ -19,7 +25,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-09-18 |
+| 最近一次修订日期 | 2026-10-07 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md |
 
 ## 范围 / 边界

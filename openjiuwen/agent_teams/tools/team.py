@@ -22,6 +22,8 @@ from typing import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.organization.message_service import OrgMessageService
+    from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
     from openjiuwen.agent_teams.schema.team import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
@@ -135,6 +137,9 @@ class TeamBackend:
         plan_id: str | None = None,
         leader_member_name: str | None = None,
         leader_prompt: str = "",
+        org_task_manager: "OrgTaskManager | None" = None,
+        org_message_service: "OrgMessageService | None" = None,
+        organization_workspace_manager: Any | None = None,
         model_allocator: Any | None = None,
     ):
         """Initialize agent team manager.
@@ -323,6 +328,10 @@ class TeamBackend:
             leader_member_name=self.leader_member_name,
             dispatch_mode=dispatch_mode,
         )
+        self.org_task_manager = org_task_manager
+        self.org_message_service = org_message_service
+        self.organization_workspace_manager = organization_workspace_manager
+        self.organization_workspace_rail_key: tuple[str, str] | None = None
         # Per-human-agent callback fired by the leader's dispatcher when
         # a team-side message reaches the avatar — see
         # ``register_human_agent_inbound`` for the registration surface.
@@ -382,8 +391,8 @@ class TeamBackend:
         # and whether ``spawn_teammate`` exposes the fork properties at all,
         # so everything below stays dormant when fork is off.
         self._enable_fork: bool = enable_fork
-        self._pending_forks: dict[str, dict] = {}    # member_name → {fork, since, source}
-        self._checkpoints: dict[str, dict] = {}      # name → {count, description, created_by}
+        self._pending_forks: dict[str, dict] = {}  # member_name → {fork, since, source}
+        self._checkpoints: dict[str, dict] = {}  # name → {count, description, created_by}
         self._snapshot_length: Callable[[], int] | None = None
         self._store_checkpoint_fn: Callable[..., dict | None] | None = None
         self._checkpoint_list_fn: Callable[[], dict] | None = None
@@ -474,7 +483,9 @@ class TeamBackend:
 
             workspace = getattr(self.group_chat_spec, "workspace", None)
             self._group_conversation = await asyncio.to_thread(
-                GroupConversationLog, self.team_name, self.group_session_id,
+                GroupConversationLog,
+                self.team_name,
+                self.group_session_id,
                 workspace_path=workspace.root_path if workspace else None,
             )
         return self._group_conversation
@@ -485,8 +496,12 @@ class TeamBackend:
 
         return await post_message(
             conversation,
-            self.message_manager, sender, content, client_message_id=client_message_id,
-            mentions=mentions, attachments=attachments,
+            self.message_manager,
+            sender,
+            content,
+            client_message_id=client_message_id,
+            mentions=mentions,
+            attachments=attachments,
         )
 
     def set_snapshot_length(self, fn) -> None:
@@ -529,18 +544,22 @@ class TeamBackend:
             "fork_mode": fork_mode,
         }
         team_logger.debug(
-            "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s "
-            "fork_mode=%s team_name=%s pending_keys=%s",
-            member, fork_value, fork_source, fork_mode,
-            self.team_name, list(self._pending_forks.keys()),
+            "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s fork_mode=%s team_name=%s pending_keys=%s",
+            member,
+            fork_value,
+            fork_source,
+            fork_mode,
+            self.team_name,
+            list(self._pending_forks.keys()),
         )
 
     def consume_fork_on_spawn(self, member: str) -> dict | None:
         result = self._pending_forks.pop(member, None)
         team_logger.debug(
-            "[fork] consume_fork_on_spawn: member=%s result=%s "
-            "remaining_pending=%s team_name=%s",
-            member, result, list(self._pending_forks.keys()),
+            "[fork] consume_fork_on_spawn: member=%s result=%s remaining_pending=%s team_name=%s",
+            member,
+            result,
+            list(self._pending_forks.keys()),
             self.team_name,
         )
         return result
@@ -550,7 +569,8 @@ class TeamBackend:
             result = self._snapshot_length()
             team_logger.debug(
                 "[fork] snapshot_context_length: member=%s len=%d",
-                self.member_name, result,
+                self.member_name,
+                result,
             )
             return result
         team_logger.debug(
@@ -575,9 +595,10 @@ class TeamBackend:
         an actionable error message.
         """
         team_logger.debug(
-            "[fork] store_checkpoint: member=%s name=%s count=%d "
-            "has_store_fn=%s",
-            self.member_name, name, count,
+            "[fork] store_checkpoint: member=%s name=%s count=%d has_store_fn=%s",
+            self.member_name,
+            name,
+            count,
             self._store_checkpoint_fn is not None,
         )
         created_by = created_by or self.member_name
@@ -639,7 +660,8 @@ class TeamBackend:
         except Exception as exc:  # noqa: BLE001 - best-effort, never break the tool call
             team_logger.warning(
                 "[checkpoint] failed to publish checkpoint_created event '%s': %s",
-                name, exc,
+                name,
+                exc,
             )
 
     # ------------------------------------------------------------------
@@ -695,7 +717,7 @@ class TeamBackend:
                     continue
                 team_logger.info(f"Removed team directory link: {target}")
                 continue
-            if not target.is_dir():
+            if not await asyncio.to_thread(target.is_dir):
                 continue
             try:
                 await asyncio.to_thread(shutil.rmtree, str(target))
@@ -779,9 +801,7 @@ class TeamBackend:
                 return MemberOpResult.fail(str(exc))
 
         if not await self.db.team.team_exists(self.team_name):
-            return MemberOpResult.fail(
-                f"Team {self.team_name} does not exist; call build_team first"
-            )
+            return MemberOpResult.fail(f"Team {self.team_name} does not exist; call build_team first")
 
         from openjiuwen.agent_teams.tools.member_options import build_member_options
 
@@ -817,16 +837,12 @@ class TeamBackend:
                 member_name=member_name,
                 role=role,
                 leader_member_name=self.leader_member_name,
-                predefined_members={
-                    m.member_name for m in self.predefined_members
-                },
+                predefined_members={m.member_name for m in self.predefined_members},
                 member_workspace_prefix=self._member_workspace_prefix,
             )
             from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
 
-            resolved_desc, resolved_prompt = WorkspaceAssembler(
-                cache=self.workspace_cache
-            ).write_member_identity(
+            resolved_desc, resolved_prompt = WorkspaceAssembler(cache=self.workspace_cache).write_member_identity(
                 team_name=self.team_name,
                 member_name=member_name,
                 member_desc=desc,
@@ -955,7 +971,10 @@ class TeamBackend:
             True if the member was started, False otherwise.
         """
         transitioned = await self.db.member.try_transition_member_status(
-            member_name, self.team_name, MemberStatus.UNSTARTED, MemberStatus.STARTING,
+            member_name,
+            self.team_name,
+            MemberStatus.UNSTARTED,
+            MemberStatus.STARTING,
         )
         if not transitioned:
             return False
@@ -964,7 +983,10 @@ class TeamBackend:
             await self._spawn_and_publish(member_name, on_created)
         except Exception:
             await self.db.member.try_transition_member_status(
-                member_name, self.team_name, MemberStatus.STARTING, MemberStatus.UNSTARTED,
+                member_name,
+                self.team_name,
+                MemberStatus.STARTING,
+                MemberStatus.UNSTARTED,
             )
             raise
 
@@ -1094,13 +1116,15 @@ class TeamBackend:
         # DB message (protocol=json): carries detailed approval data for
         # teammate to read when resuming from interrupt.  This is the
         # fallback delivery path if the pub-sub event is lost.
-        approval_payload = json.dumps({
-            "type": "tool_approval_result",
-            "tool_call_id": tool_call_id,
-            "approved": approved,
-            "feedback": feedback or "",
-            "auto_confirm": auto_confirm,
-        })
+        approval_payload = json.dumps(
+            {
+                "type": "tool_approval_result",
+                "tool_call_id": tool_call_id,
+                "approved": approved,
+                "feedback": feedback or "",
+                "auto_confirm": auto_confirm,
+            }
+        )
         await self.message_manager.send_message(
             content=approval_payload,
             to_member_name=member_name,
@@ -1198,8 +1222,12 @@ class TeamBackend:
             if active_tasks:
                 task_ids = ", ".join(t.task_id for t in active_tasks)
                 return MemberOpResult.fail(
-                    t("team.shutdown_human_active_tasks",
-                      member_name=member_name, count=str(len(active_tasks)), task_ids=task_ids)
+                    t(
+                        "team.shutdown_human_active_tasks",
+                        member_name=member_name,
+                        count=str(len(active_tasks)),
+                        task_ids=task_ids,
+                    )
                 )
 
         # ERROR means the member runtime has already failed and cannot consume
@@ -1396,6 +1424,21 @@ class TeamBackend:
         Example:
             success = team.clean_team()
         """
+        try:
+            if await self.owns_active_organization():
+                team_logger.error(
+                    "Cannot clean organization owner team {} before org_dissolve_organization succeeds",
+                    self.team_name,
+                )
+                return False
+        except Exception as exc:
+            team_logger.warning(
+                "Could not check organization ownership for {}: {}",
+                self.team_name,
+                exc,
+            )
+            return False
+
         # Check if all members are shutdown
         all_shutdown = True
         members = await self.db.member.get_team_members(self.team_name)
@@ -1458,6 +1501,15 @@ class TeamBackend:
         team_logger.info(f"Team {self.team_name} cleaned successfully")
 
         return True
+
+    async def owns_active_organization(self) -> bool:
+        """Return whether this Team is the owner of a persisted organization."""
+
+        manager = self.org_task_manager
+        if manager is None:
+            return False
+        organization = await manager.get_organization()
+        return organization is not None and organization.owner_team_id == self.team_name
 
     async def force_clean_team(self, shutdown_members: bool = True) -> bool:
         """Force cleanup for the current session's team state.
@@ -1778,9 +1830,7 @@ class TeamBackend:
             return 0
         return cache.get_member_updated_at(member_name, field)
 
-    async def get_member_updated_at_state(
-        self, member_name: str, field: str
-    ) -> tuple[int, bool]:
+    async def get_member_updated_at_state(self, member_name: str, field: str) -> tuple[int, bool]:
         """Probe one member's md ``updated_at`` plus its presence flag.
 
         Counterpart of :meth:`get_member_updated_at` that also returns whether
@@ -1798,9 +1848,7 @@ class TeamBackend:
             return (0, True)
         return cache.get_member_updated_at_state(member_name, field)
 
-    async def stamp_member_prompt_updated_at(
-        self, member_name: str, ts: int
-    ) -> None:
+    async def stamp_member_prompt_updated_at(self, member_name: str, ts: int) -> None:
         """Stamp ``ts`` into ``member_prompt.md``'s ``updated_at`` (meta only).
 
         Thin forward to the workspace cache, which owns all md-file IO. Called
@@ -2069,9 +2117,8 @@ class TeamBackend:
         self._enable_hitt = effective_enable_hitt
         effective_enable_bridge = self._spec_enable_bridge if enable_bridge is None else enable_bridge
         self._enable_bridge = effective_enable_bridge
-        effective_task_verification = (
-            self._spec_enable_task_verification
-            and (enable_task_verification if enable_task_verification is not None else True)
+        effective_task_verification = self._spec_enable_task_verification and (
+            enable_task_verification if enable_task_verification is not None else True
         )
         self._enable_task_verification = effective_task_verification
 
@@ -2482,8 +2529,7 @@ class TeamBackend:
         if not await self.is_human_agent(member_name):
             names = await self.human_agent_names()
             raise KeyError(
-                f"'{member_name}' is not a registered human-agent member; "
-                f"registered members: {sorted(names)}"
+                f"'{member_name}' is not a registered human-agent member; registered members: {sorted(names)}"
             )
         if callback is None:
             self._human_agent_inbound_callbacks.pop(member_name, None)

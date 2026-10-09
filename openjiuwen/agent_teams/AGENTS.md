@@ -65,6 +65,7 @@ agent_teams/
 ├── rails/               # 团队 Rail + manifest 元素声明（team rail / 内置 rail·tool / context handle / team confirm payload）
 ├── security/            # Team 权限安全辅助（permission narrowing 等）
 ├── runtime/             # Runner 进程内 TeamAgent 对象池 + 派发决策 + Run/Interact 并发门禁
+├── organization/        # 进程内跨团队组织、任务池、消息、专家与汇总团队、共享工作空间；见 docs/specs/S_29_team-organization.md
 ├── interaction/         # 外部交互入口（UserInbox / HumanAgentInbox / @ 路由）
 ├── tools/               # 团队工具（Leader / Teammate / Human Agent 可调用的原子操作）
 ├── messager/            # 消息传输层（inprocess / pyzmq）

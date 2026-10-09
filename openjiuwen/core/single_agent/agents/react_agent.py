@@ -7,6 +7,7 @@ ReAct (Reasoning + Acting) paradigm Agent implementation
 Created on: 2025-11-25
 Author: huenrui1@huawei.com
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -20,11 +21,12 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 
-from pydantic import Field, BaseModel
+from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error, raise_error
 from openjiuwen.core.common.logging import logger
+
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
         browser_agent_log_info,
@@ -32,11 +34,6 @@ try:
 except Exception:  # pragma: no cover - browser runtime is optional here
     browser_agent_log_info = None
 from openjiuwen.core.common.security.user_config import UserConfig
-from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm.schema.config import (
-    ModelClientConfig,
-    ModelRequestConfig,
-)
 from openjiuwen.core.context_engine import (
     ContextEngine,
     ContextEngineConfig,
@@ -51,36 +48,46 @@ from openjiuwen.core.context_engine.usage import (
     request_usage_from_metadata,
 )
 from openjiuwen.core.foundation.llm import (
-    AssistantMessage,
-    Model,
     OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
     OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
     OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+    AssistantMessage,
+    Model,
+    SystemMessage,
     ToolMessage,
     UserMessage,
-    SystemMessage
 )
+from openjiuwen.core.foundation.llm.schema.config import (
+    ModelClientConfig,
+    ModelRequestConfig,
+)
+from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
 )
-from openjiuwen.core.single_agent.kv_cache import kv_cache_react_model_call_hook
-from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
-from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext
+from openjiuwen.core.single_agent.interrupt.handler import ResumeContext, ToolInterruptHandler
 from openjiuwen.core.single_agent.interrupt.state import (
-    BaseInterruptionState,
+    INTERRUPTION_KEY,
     RESUME_START_ITERATION_KEY,
+    BaseInterruptionState,
     ToolInterruptionState,
-    INTERRUPTION_KEY
+)
+from openjiuwen.core.single_agent.kv_cache import kv_cache_react_model_call_hook
+from openjiuwen.core.single_agent.prompts.builder import (
+    PromptSection,
+    SystemPromptBuilder,
 )
 from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackEvent,
+    MODEL_VISIBLE_OUTPUT_EMITTED_KEY,
     AgentCallbackContext,
+    AgentCallbackEvent,
     InvokeInputs,
     ModelCallInputs,
     SteeringDrainInputs,
@@ -88,16 +95,11 @@ from openjiuwen.core.single_agent.rail.base import (
     bind_usage_attribution,
     bind_usage_invocation_id,
     current_usage_attribution,
-    current_usage_invocation_id,
     current_usage_delegation,
+    current_usage_invocation_id,
+    rail,
     reset_usage_attribution,
     reset_usage_invocation_id,
-    MODEL_VISIBLE_OUTPUT_EMITTED_KEY,
-    rail,
-)
-from openjiuwen.core.single_agent.prompts.builder import (
-    PromptSection,
-    SystemPromptBuilder,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -151,17 +153,14 @@ def _summarize_tool_call(tc: Any) -> str:
 
 
 def log_llm_request(
-        log: Any,
-        messages: Optional[List[Any]],
-        tools: Optional[List[Any]],
+    log: Any,
+    messages: Optional[List[Any]],
+    tools: Optional[List[Any]],
 ) -> None:
     """Log LLM request messages and tools."""
     msgs = messages or []
     tool_count = len(tools) if tools else 0
-    log.info(
-        f"[LLM] >>> request: msg_count={len(msgs)}, "
-        f"tool_count={tool_count}"
-    )
+    log.info(f"[LLM] >>> request: msg_count={len(msgs)}, tool_count={tool_count}")
     if UserConfig.is_sensitive():
         return
     for idx, msg in enumerate(msgs):
@@ -244,27 +243,18 @@ def log_llm_response(log: Any, ai_message: Any) -> None:
     usage_str = ""
     if usage:
         usage_str = (
-            f", tokens={{input={getattr(usage, 'input_tokens', '?')}, "
-            f"output={getattr(usage, 'output_tokens', '?')}}}"
+            f", tokens={{input={getattr(usage, 'input_tokens', '?')}, output={getattr(usage, 'output_tokens', '?')}}}"
         )
     if UserConfig.is_sensitive():
         tc_count = len(ai_message.tool_calls) if ai_message.tool_calls else 0
         log.info(
-            f"[LLM] <<< response: "
-            f"content_len={len(ai_message.content or '')}, "
-            f"tool_call_count={tc_count}{usage_str}"
+            f"[LLM] <<< response: content_len={len(ai_message.content or '')}, tool_call_count={tc_count}{usage_str}"
         )
     else:
-        log.info(
-            f"[LLM] <<< response: "
-            f"content={ai_message.content or ''}{usage_str}"
-        )
+        log.info(f"[LLM] <<< response: content={ai_message.content or ''}{usage_str}")
         if ai_message.tool_calls:
             for tc in ai_message.tool_calls:
-                log.info(
-                    f"[LLM]   tool_call: "
-                    f"{tc.name}({tc.arguments})"
-                )
+                log.info(f"[LLM]   tool_call: {tc.name}({tc.arguments})")
 
 
 class ReActAgentConfig(BaseModel):
@@ -273,26 +263,20 @@ class ReActAgentConfig(BaseModel):
     Attributes:
         max_iterations: Maximum number of ReAct loop iterations
     """
+
     mem_scope_id: str = Field(default="", description="Memory scope ID")
     model_name: str = Field(default="", description="Model name")
     model_provider: str = Field(default="openai", description="Model provider")
     api_key: str = Field(default="", description="API key")
     api_base: str = Field(default="", description="API base URL")
     custom_headers: Optional[dict[str, Any]] = Field(default=None, description="Additional headers for LLM requests")
-    prompt_template_name: str = Field(
-        default="",
-        description="Prompt template name"
-    )
-    prompt_template: List[Dict] = Field(
-        default_factory=list,
-        description="Prompt template list"
-    )
+    prompt_template_name: str = Field(default="", description="Prompt template name")
+    prompt_template: List[Dict] = Field(default_factory=list, description="Prompt template list")
 
     max_iterations: int = Field(default=5, description="Maximum iterations")
 
     llm_return_token_ids: bool = Field(
-        default=False,
-        description="Whether to request token IDs from LLM (for RL trajectory collection)"
+        default=False, description="Whether to request token IDs from LLM (for RL trajectory collection)"
     )
     llm_logprobs: bool = Field(
         default=False,
@@ -306,23 +290,14 @@ class ReActAgentConfig(BaseModel):
     )
 
     # LLM configuration objects (for Model initialization)
-    model_client_config: Optional[ModelClientConfig] = Field(
-        default=None,
-        description="Model client configuration"
-    )
-    model_config_obj: Optional[ModelRequestConfig] = Field(
-        default=None,
-        description="Model request configuration"
-    )
+    model_client_config: Optional[ModelClientConfig] = Field(default=None, description="Model client configuration")
+    model_config_obj: Optional[ModelRequestConfig] = Field(default=None, description="Model request configuration")
 
     sys_operation_id: Optional[str] = None
 
     context_engine_config: ContextEngineConfig = Field(
-        default=ContextEngineConfig(
-            max_context_message_num=None,
-            default_window_round_num=None
-        ),
-        description="Context engine configuration"
+        default=ContextEngineConfig(max_context_message_num=None, default_window_round_num=None),
+        description="Context engine configuration",
     )
     kv_cache_affinity_config: KVCacheAffinityConfig = Field(
         default_factory=KVCacheAffinityConfig,
@@ -330,8 +305,7 @@ class ReActAgentConfig(BaseModel):
     )
 
     context_processors: List[Tuple[str, BaseModel]] = Field(
-        default=None,
-        description="Context processors configuration"
+        default=None, description="Context processors configuration"
     )
 
     workspace: Optional[Any] = Field(default=None, description="Workspace instance for filesystem operations")
@@ -341,7 +315,7 @@ class ReActAgentConfig(BaseModel):
         description="Whether to execute tool calls in parallel (as opposed to in sequence)",
     )
 
-    def configure_model(self, model_name: str) -> 'ReActAgentConfig':
+    def configure_model(self, model_name: str) -> "ReActAgentConfig":
         """Configure model name
 
         Args:
@@ -353,12 +327,7 @@ class ReActAgentConfig(BaseModel):
         self.model_name = model_name
         return self
 
-    def configure_model_provider(
-            self,
-            provider: str,
-            api_key: str,
-            api_base: str
-    ) -> 'ReActAgentConfig':
+    def configure_model_provider(self, provider: str, api_key: str, api_base: str) -> "ReActAgentConfig":
         """Configure model provider details
 
         Args:
@@ -374,7 +343,7 @@ class ReActAgentConfig(BaseModel):
         self.api_base = api_base
         return self
 
-    def configure_prompt(self, prompt_name: str) -> 'ReActAgentConfig':
+    def configure_prompt(self, prompt_name: str) -> "ReActAgentConfig":
         """Configure prompt template name
 
         Args:
@@ -386,10 +355,7 @@ class ReActAgentConfig(BaseModel):
         self.prompt_template_name = prompt_name
         return self
 
-    def configure_prompt_template(
-            self,
-            prompt_template: List[Dict]
-    ) -> 'ReActAgentConfig':
+    def configure_prompt_template(self, prompt_template: List[Dict]) -> "ReActAgentConfig":
         """Configure prompt template directly
 
         Args:
@@ -403,11 +369,11 @@ class ReActAgentConfig(BaseModel):
         return self
 
     def configure_context_engine(
-            self,
-            max_context_message_num: Optional[int] = None,
-            default_window_round_num: Optional[int] = None,
-            enable_reload: bool = False,
-    ) -> 'ReActAgentConfig':
+        self,
+        max_context_message_num: Optional[int] = None,
+        default_window_round_num: Optional[int] = None,
+        enable_reload: bool = False,
+    ) -> "ReActAgentConfig":
         """
         Configure the context-engine parameters that control how conversation history
         is truncated and offloaded.
@@ -436,17 +402,17 @@ class ReActAgentConfig(BaseModel):
         return self
 
     def configure_kv_cache_affinity(
-            self,
-            *,
-            enable_kv_cache_affinity: bool = False,
-    ) -> 'ReActAgentConfig':
+        self,
+        *,
+        enable_kv_cache_affinity: bool = False,
+    ) -> "ReActAgentConfig":
         """Configure the unified Ascend KV-cache affinity protocol."""
         self.kv_cache_affinity_config = KVCacheAffinityConfig(
             enable_kv_cache_affinity=enable_kv_cache_affinity,
         )
         return self
 
-    def configure_mem_scope(self, mem_scope_id: str) -> 'ReActAgentConfig':
+    def configure_mem_scope(self, mem_scope_id: str) -> "ReActAgentConfig":
         """Configure memory scope ID
 
         Args:
@@ -458,10 +424,7 @@ class ReActAgentConfig(BaseModel):
         self.mem_scope_id = mem_scope_id
         return self
 
-    def configure_max_iterations(
-            self,
-            max_iterations: int
-    ) -> 'ReActAgentConfig':
+    def configure_max_iterations(self, max_iterations: int) -> "ReActAgentConfig":
         """Configure maximum iterations
 
         Args:
@@ -474,13 +437,13 @@ class ReActAgentConfig(BaseModel):
         return self
 
     def configure_model_client(
-            self,
-            provider: str,
-            api_key: str,
-            api_base: str,
-            model_name: str,
-            verify_ssl: bool = False,
-    ) -> 'ReActAgentConfig':
+        self,
+        provider: str,
+        api_key: str,
+        api_base: str,
+        model_name: str,
+        verify_ssl: bool = False,
+    ) -> "ReActAgentConfig":
         """Configure model client for LLM initialization
 
         This method creates ModelClientConfig and ModelRequestConfig
@@ -515,9 +478,9 @@ class ReActAgentConfig(BaseModel):
         return self
 
     def configure_custom_headers(
-            self,
-            custom_headers: Optional[dict[str, Any]] = None,
-    ) -> 'ReActAgentConfig':
+        self,
+        custom_headers: Optional[dict[str, Any]] = None,
+    ) -> "ReActAgentConfig":
         """Configure additional headers sent with each model request.
 
         Args:
@@ -531,17 +494,11 @@ class ReActAgentConfig(BaseModel):
             self.model_client_config.custom_headers = custom_headers
         return self
 
-    def configure_context_processors(
-            self,
-            processors: List[Tuple[str, BaseModel]]
-    ) -> 'ReActAgentConfig':
+    def configure_context_processors(self, processors: List[Tuple[str, BaseModel]]) -> "ReActAgentConfig":
         self.context_processors = processors
         return self
 
-    def configure_parallel_tool_calls(
-            self,
-            parallel_tool_calls: bool
-    ) -> 'ReActAgentConfig':
+    def configure_parallel_tool_calls(self, parallel_tool_calls: bool) -> "ReActAgentConfig":
         self.parallel_tool_calls = parallel_tool_calls
         return self
 
@@ -549,6 +506,7 @@ class ReActAgentConfig(BaseModel):
 @dataclass
 class WorkflowInterruptEntry:
     """Per-workflow interruption record."""
+
     tool_call: Any
     component_ids: List[str]
     workflow_execution_state: Any
@@ -563,6 +521,7 @@ class InterruptionState(BaseInterruptionState):
     pending_component_id: component_id currently waiting for user feedback
     original_query: the original user query from the first invoke (before any resume)
     """
+
     interrupted_workflows: Dict[str, WorkflowInterruptEntry]
     pending_workflow_id: str
     pending_component_id: str
@@ -585,8 +544,8 @@ class ReActAgent(BaseAgent):
     """
 
     def __init__(
-            self,
-            card: AgentCard,
+        self,
+        card: AgentCard,
     ):
         """Initialize ReActAgent
 
@@ -598,6 +557,7 @@ class ReActAgent(BaseAgent):
         sys_operation = None
         if self._config.sys_operation_id:
             from openjiuwen.core.runner import Runner
+
             sys_operation = Runner.resource_mgr.get_sys_operation(self._config.sys_operation_id)
         self.context_engine = ContextEngine(
             self._config.context_engine_config,
@@ -669,11 +629,7 @@ class ReActAgent(BaseAgent):
         if not context_updates:
             return config
 
-        return config.model_copy(
-            update={
-                "context_engine_config": context_config.model_copy(update=context_updates)
-            }
-        )
+        return config.model_copy(update={"context_engine_config": context_config.model_copy(update=context_updates)})
 
     @classmethod
     def _with_context_engine_model_window(cls, config: ReActAgentConfig) -> ReActAgentConfig:
@@ -681,10 +637,7 @@ class ReActAgent(BaseAgent):
         model_config = getattr(config, "model_config_obj", None)
         model_context_window = getattr(model_config, "context_window", None)
         context_config = config.context_engine_config
-        if not (
-            isinstance(model_context_window, int)
-            and model_context_window > 0
-        ):
+        if not (isinstance(model_context_window, int) and model_context_window > 0):
             # No model metadata is available. Preserve an explicit context
             # engine override instead of clearing it during configure().
             return config
@@ -702,7 +655,7 @@ class ReActAgent(BaseAgent):
             }
         )
 
-    def configure(self, config: ReActAgentConfig) -> 'BaseAgent':
+    def configure(self, config: ReActAgentConfig) -> "BaseAgent":
         """Set configuration
 
         Args:
@@ -723,9 +676,11 @@ class ReActAgent(BaseAgent):
         kv_config_changed = old_config.kv_cache_affinity_config != config.kv_cache_affinity_config
 
         # Reset LLM if model config changed
-        if (old_config.model_provider != config.model_provider or
-                old_config.api_key != config.api_key or
-                old_config.api_base != config.api_base):
+        if (
+            old_config.model_provider != config.model_provider
+            or old_config.api_key != config.api_key
+            or old_config.api_base != config.api_base
+        ):
             self._llm = None
             self._kv_cache_model_call_hook.reset_warnings()
         elif kv_config_changed:
@@ -735,13 +690,14 @@ class ReActAgent(BaseAgent):
         sys_operation = None
         if config.sys_operation_id:
             from openjiuwen.core.runner import Runner
+
             sys_operation = Runner.resource_mgr.get_sys_operation(config.sys_operation_id)
 
         # Update context_engine if context settings or runtime dependencies changed.
         context_engine_runtime_changed = (
-                old_config.context_engine_config != config.context_engine_config
-                or old_config.workspace != config.workspace
-                or old_config.sys_operation_id != config.sys_operation_id
+            old_config.context_engine_config != config.context_engine_config
+            or old_config.workspace != config.workspace
+            or old_config.sys_operation_id != config.sys_operation_id
         )
         if context_engine_runtime_changed:
             self.context_engine = ContextEngine(
@@ -758,9 +714,7 @@ class ReActAgent(BaseAgent):
         # new config. DeepAgent will replace this with the shared builder after
         # calling configure().
         system_content = "\n\n".join(
-            msg["content"]
-            for msg in config.prompt_template
-            if msg.get("role") == "system" and msg.get("content")
+            msg["content"] for msg in config.prompt_template if msg.get("role") == "system" and msg.get("content")
         )
         self.prompt_builder = SystemPromptBuilder()
         self.system_prompt_builder = self.prompt_builder
@@ -796,16 +750,12 @@ class ReActAgent(BaseAgent):
         context_updates = {
             "model_name": model_name or None,
             "model_context_window_tokens_override": (
-                context_window_tokens
-                if isinstance(context_window_tokens, int) and context_window_tokens > 0
-                else None
+                context_window_tokens if isinstance(context_window_tokens, int) and context_window_tokens > 0 else None
             ),
         }
         if model_provider:
             context_updates["model_provider"] = str(model_provider)
-        self._config.context_engine_config = self._config.context_engine_config.model_copy(
-            update=context_updates
-        )
+        self._config.context_engine_config = self._config.context_engine_config.model_copy(update=context_updates)
         self.context_engine.update_model_context(
             model_name=model_name,
             context_window_tokens=context_window_tokens,
@@ -845,9 +795,7 @@ class ReActAgent(BaseAgent):
         self.update_model_context(
             model_name=model_name,
             context_window_tokens=(
-                context_window_tokens
-                if isinstance(context_window_tokens, int) and context_window_tokens > 0
-                else None
+                context_window_tokens if isinstance(context_window_tokens, int) and context_window_tokens > 0 else None
             ),
             model=llm,
             model_config=model_config,
@@ -865,13 +813,9 @@ class ReActAgent(BaseAgent):
         """
         if self._llm is None:
             if self._config.model_client_config is None:
-                raise ValueError(
-                    "model_client_config is required. "
-                    "Use configure_model_client() to set it."
-                )
+                raise ValueError("model_client_config is required. Use configure_model_client() to set it.")
             self._llm = Model(
-                model_client_config=self._config.model_client_config,
-                model_config=self._config.model_config_obj
+                model_client_config=self._config.model_client_config, model_config=self._config.model_config_obj
             )
         return self._llm
 
@@ -901,9 +845,9 @@ class ReActAgent(BaseAgent):
         )
 
     def _build_rendered_system_prompt(
-            self,
-            inputs: Any,
-            extra_render_fields: Optional[Dict[str, str]] = None,
+        self,
+        inputs: Any,
+        extra_render_fields: Optional[Dict[str, str]] = None,
     ) -> str:
         """Render system prompt_template messages and join them into one string."""
         system_messages = [
@@ -916,14 +860,11 @@ class ReActAgent(BaseAgent):
             inputs,
             extra_render_fields=extra_render_fields,
         )
-        return "\n\n".join(
-            msg.content for msg in system_messages
-            if isinstance(msg.content, str) and msg.content
-        )
+        return "\n\n".join(msg.content for msg in system_messages if isinstance(msg.content, str) and msg.content)
 
     async def _update_skill_prompt_builder_section(
-            self,
-            rendered_system_prompt: str,
+        self,
+        rendered_system_prompt: str,
     ) -> None:
         """Update skills section on prompt_builder in the invoke-stage flow."""
         if self._skill_util is None:
@@ -942,13 +883,13 @@ class ReActAgent(BaseAgent):
         )
 
     async def _admit_user_message(
-            self,
-            ctx: AgentCallbackContext,
-            context: ModelContext,
-            parts: List[str],
-            *,
-            source: str,
-            prefix: str = "",
+        self,
+        ctx: AgentCallbackContext,
+        context: ModelContext,
+        parts: List[str],
+        *,
+        source: str,
+        prefix: str = "",
     ) -> None:
         """Join one batch of consumed inputs into the conversation, rails first.
 
@@ -982,13 +923,15 @@ class ReActAgent(BaseAgent):
             return
         await self._sync_prompt_attachments(ctx, context)
         body = "\n".join(parts)
-        await context.add_messages(UserMessage(
-            content=f"{prefix}{body}",
-            metadata={
-                OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
-                OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: source,
-            },
-        ))
+        await context.add_messages(
+            UserMessage(
+                content=f"{prefix}{body}",
+                metadata={
+                    OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+                    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: source,
+                },
+            )
+        )
 
     async def _drain_steering_batch(self, ctx: AgentCallbackContext) -> List[str]:
         """Take the share of the steering backlog this model call absorbs.
@@ -1046,10 +989,10 @@ class ReActAgent(BaseAgent):
         return preview_messages
 
     async def _call_model(
-            self,
-            ctx: AgentCallbackContext,
-            context: ModelContext,
-            tools: Optional[List[ToolInfo]],
+        self,
+        ctx: AgentCallbackContext,
+        context: ModelContext,
+        tools: Optional[List[ToolInfo]],
     ) -> AssistantMessage:
         """Fire before_model_call rails then invoke the LLM.
 
@@ -1086,8 +1029,7 @@ class ReActAgent(BaseAgent):
                 )
             except Exception as recovery_exc:
                 logger.warning(
-                    "Model exception recovery hook failed; preserving the original "
-                    "model exception: %s",
+                    "Model exception recovery hook failed; preserving the original model exception: %s",
                     recovery_exc,
                     exc_info=True,
                 )
@@ -1115,11 +1057,11 @@ class ReActAgent(BaseAgent):
         return ai_message
 
     async def _recover_from_model_exception(
-            self,
-            ctx: AgentCallbackContext,
-            *,
-            context: ModelContext,
-            exception: Exception,
+        self,
+        ctx: AgentCallbackContext,
+        *,
+        context: ModelContext,
+        exception: Exception,
     ) -> bool:
         """Extension point for context-aware recovery before one model retry.
 
@@ -1143,19 +1085,21 @@ class ReActAgent(BaseAgent):
         if not callable(recover):
             return False
 
-        return bool(await recover(
-            context_id=context.context_id(),
-            session=ctx.session,
-            context=context,
-            exception=exception,
-            streaming=bool(ctx.extra.get("_streaming")),
-            stream_chunks_emitted=int(ctx.extra.get("_stream_chunks_emitted", 0) or 0),
-        ))
+        return bool(
+            await recover(
+                context_id=context.context_id(),
+                session=ctx.session,
+                context=context,
+                exception=exception,
+                streaming=bool(ctx.extra.get("_streaming")),
+                stream_chunks_emitted=int(ctx.extra.get("_stream_chunks_emitted", 0) or 0),
+            )
+        )
 
     def _build_context_window_kwargs(
-            self,
-            ctx: AgentCallbackContext,
-            final_system: List[SystemMessage],
+        self,
+        ctx: AgentCallbackContext,
+        final_system: List[SystemMessage],
     ) -> dict:
         """Build the final ContextWindow inputs after model-call rails run.
 
@@ -1172,20 +1116,16 @@ class ReActAgent(BaseAgent):
         }
 
     async def _sync_prompt_attachments(
-            self,
-            ctx: AgentCallbackContext,
-            context: ModelContext,
+        self,
+        ctx: AgentCallbackContext,
+        context: ModelContext,
     ) -> None:
         """Append changed prompt attachments to conversation history."""
         manager = getattr(self, "prompt_attachment_manager", None)
         sync_to_context = getattr(manager, "sync_to_context", None)
         if not callable(sync_to_context):
             return
-        session_id = (
-            ctx.session.get_session_id()
-            if ctx.session is not None
-            else context.session_id()
-        )
+        session_id = ctx.session.get_session_id() if ctx.session is not None else context.session_id()
         try:
             await sync_to_context(context, session_id)
         except Exception as exc:  # noqa: BLE001 - attachment updates must not block the model
@@ -1239,9 +1179,7 @@ class ReActAgent(BaseAgent):
         build_window_mutator = getattr(attachment_manager, "build_model_window_mutator", None)
         if callable(build_window_mutator):
             attachment_session_id = (
-                ctx.session.get_session_id()
-                if ctx.session is not None
-                else ctx.context.session_id()
+                ctx.session.get_session_id() if ctx.session is not None else ctx.context.session_id()
             )
             if model_client_config is None:
                 model_client_config = getattr(self._llm, "model_client_config", None)
@@ -1254,9 +1192,7 @@ class ReActAgent(BaseAgent):
                 )
             ]
 
-        context_window = await ctx.context.get_context_window(
-            **context_window_kwargs
-        )
+        context_window = await ctx.context.get_context_window(**context_window_kwargs)
         # Keep callback inputs aligned with the exact window sent to the
         # provider.  Rails and the usage report both consume these values.
         ctx.inputs.messages = context_window.get_messages()
@@ -1367,9 +1303,8 @@ class ReActAgent(BaseAgent):
 
         execution_session_id = self._usage_session_id(ctx)
         parent_session_id_getter = getattr(session, "get_parent_session_id", None)
-        parent_session_id = (
-            values.get("parent_session_id")
-            or (parent_session_id_getter() if callable(parent_session_id_getter) else None)
+        parent_session_id = values.get("parent_session_id") or (
+            parent_session_id_getter() if callable(parent_session_id_getter) else None
         )
         if not parent_session_id:
             get_env = getattr(session, "get_env", None)
@@ -1554,9 +1489,7 @@ class ReActAgent(BaseAgent):
                     else {
                         "status": "not_reported",
                         "source": (
-                            "manual_context_operation"
-                            if phase == "post_compact"
-                            else "awaiting_provider_response"
+                            "manual_context_operation" if phase == "post_compact" else "awaiting_provider_response"
                         ),
                     }
                 ),
@@ -1684,11 +1617,7 @@ class ReActAgent(BaseAgent):
         if callable(build_report):
             try:
                 context_config = self._config.context_engine_config
-                model_name = str(
-                    getattr(context_config, "model_name", None)
-                    or self._config.model_name
-                    or ""
-                )
+                model_name = str(getattr(context_config, "model_name", None) or self._config.model_name or "")
                 model_provider = str(
                     getattr(context_config, "model_provider", None)
                     or self._resolve_context_engine_model_provider(self._config)
@@ -1761,11 +1690,7 @@ class ReActAgent(BaseAgent):
         ctx.context_usage_attribution.update(usage_attribution)
         self._begin_context_usage_request(ctx)
         usage_context_config = self._config.context_engine_config
-        usage_model_name = str(
-            getattr(usage_context_config, "model_name", None)
-            or self._config.model_name
-            or ""
-        )
+        usage_model_name = str(getattr(usage_context_config, "model_name", None) or self._config.model_name or "")
         usage_model_provider = str(
             getattr(usage_context_config, "model_provider", None)
             or self._resolve_context_engine_model_provider(self._config)
@@ -1885,10 +1810,10 @@ class ReActAgent(BaseAgent):
         ctx.extra[MODEL_VISIBLE_OUTPUT_EMITTED_KEY] = False
         try:
             async for chunk in llm.stream(
-                    model=self._config.model_name,
-                    messages=ctx.inputs.messages,
-                    tools=ctx.inputs.tools or None,
-                    **extra_kwargs,
+                model=self._config.model_name,
+                messages=ctx.inputs.messages,
+                tools=ctx.inputs.tools or None,
+                **extra_kwargs,
             ):
                 if accumulated_chunk is None:
                     accumulated_chunk = chunk
@@ -1913,19 +1838,23 @@ class ReActAgent(BaseAgent):
 
                 if chunk.reasoning_content:
                     ctx.extra[MODEL_VISIBLE_OUTPUT_EMITTED_KEY] = True
-                    await session.write_stream(OutputSchema(
-                        type="llm_reasoning",
-                        index=chunk_index,
-                        payload={"content": chunk.reasoning_content, "result_type": "answer"},
-                    ))
+                    await session.write_stream(
+                        OutputSchema(
+                            type="llm_reasoning",
+                            index=chunk_index,
+                            payload={"content": chunk.reasoning_content, "result_type": "answer"},
+                        )
+                    )
                     chunk_index += 1
                 if chunk.content:
                     ctx.extra[MODEL_VISIBLE_OUTPUT_EMITTED_KEY] = True
-                    await session.write_stream(OutputSchema(
-                        type="llm_output",
-                        index=chunk_index,
-                        payload={"content": chunk.content, "result_type": "answer"},
-                    ))
+                    await session.write_stream(
+                        OutputSchema(
+                            type="llm_output",
+                            index=chunk_index,
+                            payload={"content": chunk.content, "result_type": "answer"},
+                        )
+                    )
                     chunk_index += 1
         except Exception as exc:
             if image_input_present and self._is_image_input_unsupported_error(exc):
@@ -1975,7 +1904,6 @@ class ReActAgent(BaseAgent):
         )
         self._raise_for_model_response_error(ai_message)
         if ai_message.usage_metadata:
-
             perf_metrics = {}
             call_latency = (time.monotonic() - call_start_time) * 1000
             perf_metrics["total_latency_ms"] = round(call_latency, 2)
@@ -1987,15 +1915,17 @@ class ReActAgent(BaseAgent):
                     (call_last_token_time - call_first_token_time) / (output_tokens - 1) * 1000, 2
                 )
 
-            await session.write_stream(OutputSchema(
-                type="llm_usage",
-                index=0,
-                payload={
-                    "usage_metadata": ai_message.usage_metadata.model_dump(),
-                    "result_type": "answer",
-                    **perf_metrics,
-                },
-            ))
+            await session.write_stream(
+                OutputSchema(
+                    type="llm_usage",
+                    index=0,
+                    payload={
+                        "usage_metadata": ai_message.usage_metadata.model_dump(),
+                        "result_type": "answer",
+                        **perf_metrics,
+                    },
+                )
+            )
         return ai_message
 
     @staticmethod
@@ -2037,8 +1967,8 @@ class ReActAgent(BaseAgent):
 
     @staticmethod
     def _json_like_contains_image_input(
-            value: Any,
-            depth: int = 0,
+        value: Any,
+        depth: int = 0,
     ) -> bool:
         if depth > _IMAGE_INPUT_SCAN_MAX_DEPTH:
             return False
@@ -2095,11 +2025,7 @@ class ReActAgent(BaseAgent):
 
         response = getattr(exc, "response", None)
         if response is not None:
-            values.extend(
-                ReActAgent._iter_exception_error_values(
-                    getattr(response, "status_code", None)
-                )
-            )
+            values.extend(ReActAgent._iter_exception_error_values(getattr(response, "status_code", None)))
             json_fn = getattr(response, "json", None)
             if callable(json_fn):
                 try:
@@ -2150,10 +2076,10 @@ class ReActAgent(BaseAgent):
 
     @staticmethod
     def _render_system_messages(
-            system_messages: List,
-            inputs: Any,
-            *,
-            extra_render_fields: Optional[Dict[str, str]] = None,
+        system_messages: List,
+        inputs: Any,
+        *,
+        extra_render_fields: Optional[Dict[str, str]] = None,
     ) -> None:
         """Render inputs fields into system message placeholders in-place."""
         from openjiuwen.core.session import InteractiveInput
@@ -2164,10 +2090,7 @@ class ReActAgent(BaseAgent):
         elif not isinstance(inputs, InteractiveInput):
             render_fields["query"] = str(inputs)
         if extra_render_fields:
-            render_fields.update({
-                key: value for key, value in extra_render_fields.items()
-                if isinstance(value, str)
-            })
+            render_fields.update({key: value for key, value in extra_render_fields.items() if isinstance(value, str)})
         if not render_fields:
             return
         for msg in system_messages:
@@ -2177,7 +2100,6 @@ class ReActAgent(BaseAgent):
                 msg.content = PromptTemplate(content=msg.content).format(render_fields).content
             except BaseError as e:
                 logger.warning("Failed to render system message placeholder: %s", e)
-
 
     @staticmethod
     def _is_browser_tool_name(tool_name: str) -> bool:
@@ -2223,9 +2145,7 @@ class ReActAgent(BaseAgent):
             if "subagent_type" in parsed:
                 summary["subagent_type"] = str(parsed.get("subagent_type") or "")[:120]
             if task_text:
-                task_hash = hashlib.sha256(
-                    task_text.encode("utf-8", errors="ignore")
-                ).hexdigest()[:12]
+                task_hash = hashlib.sha256(task_text.encode("utf-8", errors="ignore")).hexdigest()[:12]
                 summary["task_description"] = {
                     "redacted": True,
                     "length": len(task_text),
@@ -2245,12 +2165,28 @@ class ReActAgent(BaseAgent):
             op_counts: Dict[str, int] = {}
             preview = []
             value_keys = {
-                "value", "text", "choose_text", "option_text", "option_label",
-                "option_value", "label_value", "option_name", "values",
+                "value",
+                "text",
+                "choose_text",
+                "option_text",
+                "option_label",
+                "option_value",
+                "label_value",
+                "option_name",
+                "values",
             }
             target_keys = {
-                "selector", "label", "placeholder", "role", "name", "testid",
-                "option_selector", "option_role", "year_selector", "month_selector", "day_selector",
+                "selector",
+                "label",
+                "placeholder",
+                "role",
+                "name",
+                "testid",
+                "option_selector",
+                "option_role",
+                "year_selector",
+                "month_selector",
+                "day_selector",
             }
             for index, step in enumerate(steps[:10]):
                 if not isinstance(step, dict):
@@ -2259,12 +2195,14 @@ class ReActAgent(BaseAgent):
                 op = str(step.get("op") or "<missing>")
                 op_counts[op] = op_counts.get(op, 0) + 1
                 keys = {str(key) for key in step.keys()}
-                preview.append({
-                    "index": index,
-                    "op": op[:80],
-                    "target_keys": sorted(keys & target_keys),
-                    "value_keys_redacted": sorted(keys & value_keys),
-                })
+                preview.append(
+                    {
+                        "index": index,
+                        "op": op[:80],
+                        "target_keys": sorted(keys & target_keys),
+                        "value_keys_redacted": sorted(keys & value_keys),
+                    }
+                )
             for step in steps[10:]:
                 if isinstance(step, dict):
                     op = str(step.get("op") or "<missing>")
@@ -2293,8 +2231,18 @@ class ReActAgent(BaseAgent):
         safe_values: Dict[str, Any] = {}
         redacted_values: Dict[str, Any] = {}
         text_keys = {
-            "value", "text", "query", "name", "email", "phone",
-            "mobile", "password", "address", "code", "script", "js",
+            "value",
+            "text",
+            "query",
+            "name",
+            "email",
+            "phone",
+            "mobile",
+            "password",
+            "address",
+            "code",
+            "script",
+            "js",
         }
         for key, value in parsed.items():
             key_str = str(key)
@@ -2302,7 +2250,14 @@ class ReActAgent(BaseAgent):
             if key_lower in text_keys or any(token in key_lower for token in ("password", "token", "secret")):
                 redacted_values[key_str] = redact_text(value)
             elif key_lower in {
-                "selector", "role", "label", "placeholder", "checked", "timeout", "timeout_ms", "max_items"
+                "selector",
+                "role",
+                "label",
+                "placeholder",
+                "checked",
+                "timeout",
+                "timeout_ms",
+                "max_items",
             }:
                 safe_values[key_str] = value if isinstance(value, (bool, int, float)) else str(value)[:120]
         if safe_values:
@@ -2312,11 +2267,11 @@ class ReActAgent(BaseAgent):
         return summary
 
     async def _execute_tool_call(
-            self,
-            ctx: AgentCallbackContext,
-            tool_calls: List,
-            session: Optional[Session],
-            context: ModelContext,
+        self,
+        ctx: AgentCallbackContext,
+        tool_calls: List,
+        session: Optional[Session],
+        context: ModelContext,
     ) -> list:
         """Execute tool calls in parallel and commit tool messages into context.
 
@@ -2346,9 +2301,7 @@ class ReActAgent(BaseAgent):
             if tool_message is not None:
                 await context.add_messages(tool_message)
 
-        multimodal_message = self._build_multimodal_tool_results_message(
-            tool_result for tool_result, _ in results
-        )
+        multimodal_message = self._build_multimodal_tool_results_message(tool_result for tool_result, _ in results)
         if multimodal_message is not None:
             await context.add_messages(multimodal_message)
 
@@ -2422,31 +2375,32 @@ class ReActAgent(BaseAgent):
 
     def _is_interrupted(self, tool_result: Any) -> bool:
         """Detect whether a tool result signals workflow interruption."""
-        from openjiuwen.core.workflow import WorkflowOutput, WorkflowExecutionState
+        from openjiuwen.core.workflow import WorkflowExecutionState, WorkflowOutput
+
         if isinstance(tool_result, WorkflowOutput):
             return tool_result.state == WorkflowExecutionState.INPUT_REQUIRED
         if isinstance(tool_result, list):
-            return any(
-                hasattr(item, "type") and item.type == "__interaction__"
-                for item in tool_result
-            )
+            return any(hasattr(item, "type") and item.type == "__interaction__" for item in tool_result)
         return False
 
     def _extract_component_ids(self, tool_result: Any) -> List[str]:
         """Extract component IDs from an interrupted workflow result, sorted for stability."""
         from openjiuwen.core.workflow import WorkflowOutput
+
         if isinstance(tool_result, WorkflowOutput) and isinstance(tool_result.result, list):
             ids = []
             for item in tool_result.result:
-                if (hasattr(item, "type") and item.type == "__interaction__" and
-                        hasattr(item, "payload") and hasattr(item.payload, "id")):
+                if not hasattr(item, "type") or item.type != "__interaction__":
+                    continue
+                if hasattr(item, "payload") and hasattr(item.payload, "id"):
                     ids.append(item.payload.id)
             return sorted(ids)
         if isinstance(tool_result, list):
             ids = []
             for item in tool_result:
-                if (hasattr(item, "type") and item.type == "__interaction__" and
-                        hasattr(item, "payload") and isinstance(item.payload, dict)):
+                if not hasattr(item, "type") or item.type != "__interaction__":
+                    continue
+                if hasattr(item, "payload") and isinstance(item.payload, dict):
                     ids.append(item.payload.get("component_id", ""))
             return sorted(ids)
         return []
@@ -2459,12 +2413,12 @@ class ReActAgent(BaseAgent):
         return tool_call.name  # fallback
 
     def _after_execute_tool_call(
-            self,
-            results: list,
-            tool_calls: list,
-            ai_message: AssistantMessage,
-            iteration: int,
-            original_query: str = "",
+        self,
+        results: list,
+        tool_calls: list,
+        ai_message: AssistantMessage,
+        iteration: int,
+        original_query: str = "",
     ) -> Optional[InterruptionState]:
         """Check tool results for workflow interruption and build InterruptionState if found.
 
@@ -2504,13 +2458,13 @@ class ReActAgent(BaseAgent):
         )
 
     def _after_execute_tool_call_for_hitl(
-            self,
-            results: list,
-            tool_calls: list,
-            ai_message: AssistantMessage,
-            iteration: int,
-            original_query: str = "",
-    ) -> tuple[Optional['ToolInterruptionState'], list]:
+        self,
+        results: list,
+        tool_calls: list,
+        ai_message: AssistantMessage,
+        iteration: int,
+        original_query: str = "",
+    ) -> tuple[Optional["ToolInterruptionState"], list]:
         return self._hitl_handler.build_interrupt_state(
             results, tool_calls, ai_message, iteration, original_query=original_query
         )
@@ -2538,12 +2492,12 @@ class ReActAgent(BaseAgent):
         }
 
     async def _commit_interrupt(
-            self,
-            interrupt: Union[InterruptionState, 'ToolInterruptionState'],
-            context: ModelContext,
-            session: Optional[Session],
-            invoke_inputs: InvokeInputs,
-            sub_agent_outputs: list = None,
+        self,
+        interrupt: Union[InterruptionState, "ToolInterruptionState"],
+        context: ModelContext,
+        session: Optional[Session],
+        invoke_inputs: InvokeInputs,
+        sub_agent_outputs: list = None,
     ) -> Dict[str, Any]:
         """Persist interruption state and return the interrupt result dict.
 
@@ -2555,10 +2509,12 @@ class ReActAgent(BaseAgent):
             )
 
         pending_entry = interrupt.interrupted_workflows[interrupt.pending_workflow_id]
-        await context.add_messages(ToolMessage(
-            tool_call_id=pending_entry.tool_call.id,
-            content="[INTERRUPTED - Waiting for user input]",
-        ))
+        await context.add_messages(
+            ToolMessage(
+                tool_call_id=pending_entry.tool_call.id,
+                content="[INTERRUPTED - Waiting for user input]",
+            )
+        )
         await self.context_engine.save_contexts(session)
         self._save_interruption_state(interrupt, session)
         result = self._build_interrupt_result(interrupt)
@@ -2566,14 +2522,14 @@ class ReActAgent(BaseAgent):
         return result
 
     async def _handle_resume(
-            self,
-            interruption_state: Union[InterruptionState, 'ToolInterruptionState'],
-            user_input: Any,
-            ctx: AgentCallbackContext,
-            context: ModelContext,
-            session: Optional[Session],
-            *,
-            invoke_inputs: InvokeInputs,
+        self,
+        interruption_state: Union[InterruptionState, "ToolInterruptionState"],
+        user_input: Any,
+        ctx: AgentCallbackContext,
+        context: ModelContext,
+        session: Optional[Session],
+        *,
+        invoke_inputs: InvokeInputs,
     ) -> Optional[Dict[str, Any]]:
         """Process one resume step.
 
@@ -2607,8 +2563,7 @@ class ReActAgent(BaseAgent):
 
         # Step 2: check if all interrupted workflows have collected feedback
         all_collected = all(
-            entry.collected_input is not None
-            for entry in interruption_state.interrupted_workflows.values()
+            entry.collected_input is not None for entry in interruption_state.interrupted_workflows.values()
         )
 
         if not all_collected:
@@ -2632,7 +2587,10 @@ class ReActAgent(BaseAgent):
 
         results = await self._execute_tool_call(ctx, all_tool_calls, session, context)
         workflow_interrupt = self._after_execute_tool_call(
-            results, all_tool_calls, resume_ai_message, resume_iteration,
+            results,
+            all_tool_calls,
+            resume_ai_message,
+            resume_iteration,
             original_query=interruption_state.original_query,
         )
         if workflow_interrupt:
@@ -2645,6 +2603,7 @@ class ReActAgent(BaseAgent):
     def _extract_user_text(self, user_input: Any) -> str:
         """Extract plain text from user_input (supports InteractiveInput or str)."""
         from openjiuwen.core.session import InteractiveInput
+
         if isinstance(user_input, InteractiveInput):
             if user_input.user_inputs:
                 return str(next(iter(user_input.user_inputs.values())))
@@ -2656,6 +2615,7 @@ class ReActAgent(BaseAgent):
     def _build_interactive_input(self, user_query: Any, component_ids: List[str]) -> Any:
         """Build an InteractiveInput from user feedback and component IDs."""
         from openjiuwen.core.session import InteractiveInput
+
         if isinstance(user_query, InteractiveInput):
             provided_ids = set(user_query.user_inputs.keys())
             fallback = next(iter(user_query.user_inputs.values()), "") if provided_ids else ""
@@ -2695,30 +2655,25 @@ class ReActAgent(BaseAgent):
             error_msg=(
                 "skill prompt requires tool 'read_file' but it is not found in ability_manager. "
                 f"existing_tools={sorted(set(existing_tool_names))}"
-            )
+            ),
         )
         logger.warning(str(err))
 
-    async def _init_context(
-            self,
-            session: Optional[Session]
-    ) -> ModelContext:
+    async def _init_context(self, session: Optional[Session]) -> ModelContext:
         if self._config.context_processors:
             context = await self.context_engine.create_context(
                 session=session,
                 processors=self._config.context_processors,
             )
         else:
-            context = await self.context_engine.create_context(
-                session=session
-            )
+            context = await self.context_engine.create_context(session=session)
         return context
 
     async def invoke(
-            self,
-            inputs: Any,
-            session: Optional[Session] = None,
-            **kwargs,
+        self,
+        inputs: Any,
+        session: Optional[Session] = None,
+        **kwargs,
     ) -> Dict[str, Any]:
         """Execute ReAct process
 
@@ -2748,24 +2703,26 @@ class ReActAgent(BaseAgent):
         if session is None:
             session_id = conversation_id or "default_session"
             parent_session_id = (
-                inputs.get("parent_session_id")
-                if isinstance(inputs, dict)
-                else None
-            ) or getattr(self, "_usage_parent_session_id", None) or current_usage_delegation().get(
-                "parent_session_id"
+                (inputs.get("parent_session_id") if isinstance(inputs, dict) else None)
+                or getattr(self, "_usage_parent_session_id", None)
+                or current_usage_delegation().get("parent_session_id")
             )
             session_kwargs: dict[str, Any] = {}
             if parent_session_id:
                 session_kwargs["envs"] = {
                     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,
                 }
-            session = create_agent_session(
-                session_id=session_id, card=self.card, **session_kwargs
-            )
+            session = create_agent_session(session_id=session_id, card=self.card, **session_kwargs)
             await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
             need_cleanup = True
-        return await self._inner_invoke(session=session, inputs=inputs, query=query, conversation_id=conversation_id,
-                                        need_cleanup=need_cleanup, **kwargs)
+        return await self._inner_invoke(
+            session=session,
+            inputs=inputs,
+            query=query,
+            conversation_id=conversation_id,
+            need_cleanup=need_cleanup,
+            **kwargs,
+        )
 
     @with_session()
     async def _inner_invoke(self, session, inputs, query, need_cleanup, conversation_id, **kwargs):
@@ -2782,21 +2739,26 @@ class ReActAgent(BaseAgent):
         )
         invocation_id = str(raw_invocation_id or uuid.uuid4().hex)
         parent_session_id = (
-            inputs.get("parent_session_id") if isinstance(inputs, dict) else None
-        ) or getattr(self, "_usage_parent_session_id", None) or delegation_attribution.get("parent_session_id")
+            (inputs.get("parent_session_id") if isinstance(inputs, dict) else None)
+            or getattr(self, "_usage_parent_session_id", None)
+            or delegation_attribution.get("parent_session_id")
+        )
         parent_invocation_id = (
-            inputs.get("parent_invocation_id")
-            if isinstance(inputs, dict)
-            else None
-        ) or getattr(self, "_usage_parent_invocation_id", None) or delegation_attribution.get(
-            "parent_invocation_id"
-        ) or current_usage_invocation_id()
+            (inputs.get("parent_invocation_id") if isinstance(inputs, dict) else None)
+            or getattr(self, "_usage_parent_invocation_id", None)
+            or delegation_attribution.get("parent_invocation_id")
+            or current_usage_invocation_id()
+        )
         delegation_id = (
-            inputs.get("delegation_id") if isinstance(inputs, dict) else None
-        ) or getattr(self, "_usage_delegation_id", None) or delegation_attribution.get("delegation_id")
+            (inputs.get("delegation_id") if isinstance(inputs, dict) else None)
+            or getattr(self, "_usage_delegation_id", None)
+            or delegation_attribution.get("delegation_id")
+        )
         raw_agent_path = (
-            inputs.get("agent_path") if isinstance(inputs, dict) else None
-        ) or getattr(self, "_usage_agent_path", None) or delegation_attribution.get("agent_path")
+            (inputs.get("agent_path") if isinstance(inputs, dict) else None)
+            or getattr(self, "_usage_agent_path", None)
+            or delegation_attribution.get("agent_path")
+        )
         if isinstance(raw_agent_path, (list, tuple)):
             agent_path = list(raw_agent_path)
         elif parent_usage_attribution.get("agent_path"):
@@ -2917,6 +2879,7 @@ class ReActAgent(BaseAgent):
                 skills_ready_at = time.monotonic()
 
                 tools = await self.ability_manager.list_tool_info()
+                tools_revision = self.ability_manager.registry_revision
                 tools_ready_at = time.monotonic()
 
                 prep_elapsed = tools_ready_at - prep_started_at
@@ -2999,6 +2962,10 @@ class ReActAgent(BaseAgent):
                                 prefix="[STEERING] ",
                             )
 
+                        if self.ability_manager.registry_revision != tools_revision:
+                            tools = await self.ability_manager.list_tool_info()
+                            tools_revision = self.ability_manager.registry_revision
+
                         ai_message = await self._call_model(
                             ctx,
                             context,
@@ -3055,16 +3022,23 @@ class ReActAgent(BaseAgent):
                             break
 
                         hitl_interrupt, sub_agent_outputs = self._after_execute_tool_call_for_hitl(
-                            results, ai_message.tool_calls, ai_message, iteration,
+                            results,
+                            ai_message.tool_calls,
+                            ai_message,
+                            iteration,
                             original_query=ctx.extra.get("_original_query", ""),
                         )
                         if hitl_interrupt:
-                            await self._commit_interrupt(hitl_interrupt, context, session, invoke_inputs,
-                                                         sub_agent_outputs)
+                            await self._commit_interrupt(
+                                hitl_interrupt, context, session, invoke_inputs, sub_agent_outputs
+                            )
                             break
 
                         workflow_interrupt = self._after_execute_tool_call(
-                            results, ai_message.tool_calls, ai_message, iteration,
+                            results,
+                            ai_message.tool_calls,
+                            ai_message,
+                            iteration,
                             original_query=ctx.extra.get("_original_query", ""),
                         )
                         if workflow_interrupt:
@@ -3127,17 +3101,17 @@ class ReActAgent(BaseAgent):
                 reset_usage_invocation_id(invocation_token)
 
     async def write_invoke_result_to_stream(
-            self,
-            result: Dict[str, Any],
-            session: Session,
+        self,
+        result: Dict[str, Any],
+        session: Session,
     ) -> None:
         """Public wrapper — delegates to the internal implementation."""
         await self._write_invoke_result_to_stream(result, session)
 
     async def _write_invoke_result_to_stream(
-            self,
-            result: Dict[str, Any],
-            session: Session,
+        self,
+        result: Dict[str, Any],
+        session: Session,
     ) -> None:
         """Write the final invoke result to the session stream.
 
@@ -3154,28 +3128,28 @@ class ReActAgent(BaseAgent):
                 pending_id = component_ids[0] if component_ids else None
                 schemas = (
                     workflow_state.result
-                    if workflow_state is not None
-                    and isinstance(getattr(workflow_state, "result", None), list)
+                    if workflow_state is not None and isinstance(getattr(workflow_state, "result", None), list)
                     else []
                 )
                 for schema in schemas:
-                    if (pending_id is None
-                            or (hasattr(schema, "payload")
-                                and hasattr(schema.payload, "id")
-                                and schema.payload.id == pending_id)):
+                    if pending_id is None:
+                        await session.write_stream(schema)
+                        continue
+                    if (
+                        hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id
+                    ):
                         await session.write_stream(schema)
         else:
-            await session.write_stream(OutputSchema(
-                type="answer",
-                index=0,
-                payload={**result, "output": result.get("output", ""), "result_type": result_type},
-            ))
+            await session.write_stream(
+                OutputSchema(
+                    type="answer",
+                    index=0,
+                    payload={**result, "output": result.get("output", ""), "result_type": result_type},
+                )
+            )
 
     async def stream(
-            self,
-            inputs: Any,
-            session: Optional[Session] = None,
-            stream_modes: Optional[List[StreamMode]] = None
+        self, inputs: Any, session: Optional[Session] = None, stream_modes: Optional[List[StreamMode]] = None
     ) -> AsyncIterator[Any]:
         """Stream execute ReAct process
 
@@ -3195,28 +3169,20 @@ class ReActAgent(BaseAgent):
             else:
                 conversation_id = None
             session_id = conversation_id or "default_session"
-            parent_session_id = (
-                inputs.get("parent_session_id")
-                if isinstance(inputs, dict)
-                else None
-            )
+            parent_session_id = inputs.get("parent_session_id") if isinstance(inputs, dict) else None
             session_kwargs: dict[str, Any] = {}
             if parent_session_id:
                 session_kwargs["envs"] = {
                     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,
                 }
-            session = create_agent_session(
-                session_id=session_id, card=self.card, **session_kwargs
-            )
+            session = create_agent_session(session_id=session_id, card=self.card, **session_kwargs)
             need_cleanup = True
 
         # Only manage agent-session stream lifecycle, not workflow sessions.
         self.is_agent_session = self._session_supports_agent_lifecycle(session)
         # self.is_agent_session = isinstance(session, AgentSession)
         if self.is_agent_session:
-            await session.pre_run(
-                inputs=inputs if isinstance(inputs, dict) else None
-            )
+            await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
 
         async with aclosing(self._inner_stream(session=session, inputs=inputs, need_cleanup=need_cleanup)) as chunks:
             async for chunk in chunks:
@@ -3239,9 +3205,7 @@ class ReActAgent(BaseAgent):
                     for schema in final_result:
                         await session.write_stream(schema)
                 else:
-                    await self._write_invoke_result_to_stream(
-                        final_result, session
-                    )
+                    await self._write_invoke_result_to_stream(final_result, session)
             except asyncio.CancelledError:
                 abort_persisted = await self._handle_context_abort(
                     session,
@@ -3264,9 +3228,7 @@ class ReActAgent(BaseAgent):
                     commit_session=self.is_agent_session,
                 )
                 error_result = {"output": str(e), "result_type": "error"}
-                await self._write_invoke_result_to_stream(
-                    error_result, session
-                )
+                await self._write_invoke_result_to_stream(error_result, session)
             finally:
                 if need_cleanup and not abort_persisted:
                     await self.context_engine.save_contexts(session)
@@ -3296,6 +3258,7 @@ class ReActAgent(BaseAgent):
     async def clear_session(self, session_id: str = "default_session"):
         """Release session resources and clear context cache."""
         from openjiuwen.core.runner import Runner
+
         await Runner.release(session_id=session_id)
         await self.context_engine.clear_context(session_id=session_id)
         # A session ID is the aggregation scope.  Clearing the in-memory
@@ -3303,9 +3266,9 @@ class ReActAgent(BaseAgent):
         # sequence remain cumulative when the ID is reused.
 
     async def clear_context_messages(
-            self,
-            session_id: str = "default_session_id",
-            context_id: str = "default_context_id",
+        self,
+        session_id: str = "default_session_id",
+        context_id: str = "default_context_id",
     ) -> bool:
         """Clear messages in context without removing the context instance.
 
@@ -3337,16 +3300,15 @@ class ReActAgent(BaseAgent):
     def _session_supports_agent_lifecycle(session: Session) -> bool:
         """Return whether ReAct owns the agent-session persistence lifecycle."""
         return session is not None and all(
-            callable(getattr(session, method_name, None))
-            for method_name in ("pre_run", "close_stream", "commit")
+            callable(getattr(session, method_name, None)) for method_name in ("pre_run", "close_stream", "commit")
         )
 
     async def _handle_context_abort(
-            self,
-            session: Session,
-            *,
-            marker: str,
-            commit_session: Optional[bool] = None,
+        self,
+        session: Session,
+        *,
+        marker: str,
+        commit_session: Optional[bool] = None,
     ) -> bool:
         """Clean and persist the current turn after cancellation or failure.
 
@@ -3356,9 +3318,7 @@ class ReActAgent(BaseAgent):
         the caller.
         """
         try:
-            await asyncio.shield(
-                self._cleanup_context_after_abort(session, marker=marker)
-            )
+            await asyncio.shield(self._cleanup_context_after_abort(session, marker=marker))
         except asyncio.CancelledError:
             logger.info(
                 "Context cleanup was shielded but the caller was cancelled again for session %s",
@@ -3377,10 +3337,10 @@ class ReActAgent(BaseAgent):
         )
 
     async def _cleanup_context_after_abort(
-            self,
-            session: Session,
-            *,
-            marker: str,
+        self,
+        session: Session,
+        *,
+        marker: str,
     ) -> None:
         """Keep the aborted turn's user query; drop incomplete tool debris.
 
@@ -3401,10 +3361,10 @@ class ReActAgent(BaseAgent):
         context.set_messages(kept, with_history=False)
 
     async def _persist_context_after_abort(
-            self,
-            session: Session,
-            *,
-            commit_session: Optional[bool] = None,
+        self,
+        session: Session,
+        *,
+        commit_session: Optional[bool] = None,
     ) -> bool:
         """Persist cleaned context and commit only agent-owned sessions.
 
@@ -3472,8 +3432,8 @@ class ReActAgent(BaseAgent):
 
     @staticmethod
     def _sanitize_cancelled_turn_messages(
-            messages: List[Any],
-            marker: str = "[Request cancelled by user]",
+        messages: List[Any],
+        marker: str = "[Request cancelled by user]",
     ) -> List[Any]:
         """Return a LLM-safe prefix of an aborted turn's messages.
 
@@ -3487,9 +3447,7 @@ class ReActAgent(BaseAgent):
         while i < n:
             msg = messages[i]
             if isinstance(msg, AssistantMessage) and msg.tool_calls:
-                tool_ids = [
-                    getattr(tc, "id", None) for tc in msg.tool_calls if getattr(tc, "id", None)
-                ]
+                tool_ids = [getattr(tc, "id", None) for tc in msg.tool_calls if getattr(tc, "id", None)]
                 needed = set(tool_ids)
                 found: Dict[str, ToolMessage] = {}
                 j = i + 1

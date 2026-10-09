@@ -124,7 +124,42 @@ class _TeamRunnerMixin:
             from openjiuwen.agent_teams.runtime import TeamRuntimeManager
 
             self._team_runtime_manager = TeamRuntimeManager()
+            self._team_runtime_manager.organization_runtime_manager.set_leader_turn_runner(
+                self._run_organization_leader_turn
+            )
         return self._team_runtime_manager
+
+    async def _run_organization_leader_turn(
+        self,
+        team_name: str,
+        session_id: str,
+        inputs: object,
+    ) -> bool:
+        """Run a background organization turn through the normal Runner path."""
+
+        spec = await self._resolve_team_agent_spec(team_name, session=session_id)
+        runtime_manager = self._get_team_runtime_manager()
+        activation = await runtime_manager.activate(spec, session_id, inputs)
+        ran_turn = False
+        try:
+            if _is_team_reject_kind(activation.action.kind) or activation.agent is None:
+                return False
+            await runtime_manager.organization_runtime_manager.ensure_team_binding(
+                team_id=team_name,
+                session_id=activation.session.get_session_id(),
+                agent=activation.agent,
+            )
+            self._maybe_attach_observability(activation.agent, activation.session.get_session_id())
+            ran_turn = True
+            result = await activation.agent.invoke(inputs, session=activation.session)
+            return result is not None
+        finally:
+            if ran_turn:
+                await runtime_manager.finalize(
+                    team_name=spec.team_name,
+                    session_id=activation.session.get_session_id(),
+                )
+                await activation.session.post_run()
 
     @staticmethod
     @contextmanager
@@ -800,6 +835,7 @@ class _TeamRunnerMixin:
                 attach_to_team_agent,
                 is_initialized,
             )
+
             if not is_initialized():
                 return
             attach_to_team_agent(agent)
@@ -807,11 +843,11 @@ class _TeamRunnerMixin:
             if not team_name:
                 return
             # No longer set team_name ContextVar - read from agent.team_name directly
+            from openjiuwen.agent_teams.observability.setup import get_tracer
             from openjiuwen.agent_teams.observability.span_context import (
                 get_or_create_team_span,
                 get_team_span,
             )
-            from openjiuwen.agent_teams.observability.setup import get_tracer
             # Only a still-recording root of this very session is returned, so an
             # ended root simply reads as absent and a fresh one is opened below.
             existing = get_team_span(session_id=session_id)
@@ -839,6 +875,7 @@ class _TeamRunnerMixin:
                 finalize_team_trace,
                 is_initialized,
             )
+
             if is_initialized():
                 logger.info("_maybe_finalize_trace: calling finalize_team_trace for team={}", team_name)
                 finalize_team_trace(team_name)

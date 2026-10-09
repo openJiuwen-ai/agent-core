@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.infra import TeamInfra
 from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
+from openjiuwen.agent_teams.group_chat.tools import group_chat_prompt
 from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.messager import (
     Messager,
@@ -40,7 +41,6 @@ from openjiuwen.agent_teams.skill.rail_spec import (
     build_team_skill_rail_spec,
     complete_declared_team_skill_rails,
 )
-from openjiuwen.agent_teams.group_chat.tools import group_chat_prompt
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import ProviderType
@@ -74,9 +74,7 @@ async def _validate_member_worktree_isolation(
         spec=spec,
     )
     if await find_canonical_git_root(scope.project_dir) is None:
-        raise RuntimeError(
-            f"Team worktree isolation project_dir is not in a git repository: {scope.project_dir}"
-        )
+        raise RuntimeError(f"Team worktree isolation project_dir is not in a git repository: {scope.project_dir}")
 
 
 _TEAM_WORKTREE_BASH_DENY_PATTERNS = [
@@ -583,11 +581,7 @@ class AgentConfigurator:
         # context (platform-filled for projectless members, None for members
         # bound to a project). Surfaced to the team info body by the policy
         # rail only when set, so members with a project keep the bullet off.
-        team_outputs_dir: str | None = (
-            spec.build_context.team_outputs_dir
-            if spec.build_context is not None
-            else None
-        )
+        team_outputs_dir: str | None = spec.build_context.team_outputs_dir if spec.build_context is not None else None
 
         # Decide which team rails this member gets, as declarative RailSpecs.
         # Live handles ride on the build context's extras (injected below); only
@@ -913,6 +907,21 @@ class AgentConfigurator:
             from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 
             self.harness.add_rail(SwarmflowBudgetRail(swarmflow_budget, workflow_budget=None))
+        organization_workspace_manager = getattr(self.team_backend, "organization_workspace_manager", None)
+        if organization_workspace_manager is not None and workspace_root_path:
+            organization_workspace_manager.mount_into_workspace(workspace_root_path)
+            from openjiuwen.agent_teams.organization.workspace_rail import (
+                OrganizationWorkspaceRail,
+            )
+
+            self.harness.add_rail(
+                OrganizationWorkspaceRail(
+                    organization_workspace_manager,
+                    team_id=resolved_team_name,
+                    member_name=member_name,
+                    summary_team=bool((spec.metadata or {}).get("summary_team")),
+                )
+            )
 
         # Team memory manager (only when explicitly enabled in the spec).
         self.memory_manager = self._build_memory_manager(spec, ctx, agent_spec, resolved_language, member_name)
@@ -1026,6 +1035,31 @@ class AgentConfigurator:
 
         team_name = (ctx.team_spec.team_name if ctx.team_spec else None) or "default"
         db = get_shared_db(ctx.db_config)
+        organization_id = None
+        if spec.metadata:
+            organization_id = spec.metadata.get("organization_id")
+        org_task_manager = None
+        org_message_service = None
+        organization_workspace_manager = None
+        if organization_id:
+            from openjiuwen.agent_teams.context import get_session_id
+            from openjiuwen.agent_teams.organization.pool import get_process_org_manager
+            from openjiuwen.agent_teams.organization.workspace import (
+                get_organization_workspace_manager,
+            )
+
+            organization_session_id = get_session_id() or "default"
+            org_manager = get_process_org_manager(
+                organization_id=str(organization_id),
+                db=db,
+                messager=messager,
+                session_id=organization_session_id,
+            )
+            org_task_manager = org_manager.task_pool
+            org_message_service = org_manager.message_service
+            organization_workspace_manager = get_organization_workspace_manager(
+                str(organization_id), organization_session_id
+            )
 
         is_leader = ctx.role == TeamRole.LEADER
         current_member_name = ctx.member_name or (ctx.team_spec.leader_member_name if ctx.team_spec else "")
@@ -1074,6 +1108,9 @@ class AgentConfigurator:
             on_member_stopped=on_member_stopped,
             validate_worktree_isolation=validate_worktree_isolation,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
+            org_task_manager=org_task_manager,
+            org_message_service=org_message_service,
+            organization_workspace_manager=organization_workspace_manager,
         )
 
         def _snapshot_length() -> int:
@@ -1298,9 +1335,7 @@ class AgentConfigurator:
         # Pure in-team directory (same layout as the leader's): mkdir, no link.
         from openjiuwen.agent_teams.paths import team_member_workspace_dir
 
-        team_member_workspace_dir(team_name, member_name).mkdir(
-            parents=True, exist_ok=True
-        )
+        team_member_workspace_dir(team_name, member_name).mkdir(parents=True, exist_ok=True)
         # B-class identity md write + cache prime. ``resolved_language`` is
         # unused for member identity (no lang suffix); pass empty string.
         self._assemble_member_workspace(spec, ctx, "")
