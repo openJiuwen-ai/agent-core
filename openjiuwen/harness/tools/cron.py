@@ -132,7 +132,7 @@ async def _dispatch_cron_action(
     if action_name == "status":
         return await backend.status()
     if action_name == "list":
-        return {"jobs": await backend.list_jobs(include_disabled=bool(includeDisabled))}
+        return {"jobs": await backend.list_jobs()}
     if action_name == "add":
         create_input = dict(job or {})
         if not create_input:
