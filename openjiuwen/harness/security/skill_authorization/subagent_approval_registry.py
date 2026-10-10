@@ -77,16 +77,23 @@ class SubagentApprovalRegistry:
         self,
         *,
         max_pending_per_session: int = 5,
+        max_queued_per_scope: int = 8,
         turn_wait_timeout: float | None = None,
     ) -> None:
         if max_pending_per_session <= 0:
             raise ValueError("max_pending_per_session 必须大于 0")
+        if max_queued_per_scope <= 0:
+            raise ValueError("max_queued_per_scope 必须大于 0")
         if turn_wait_timeout is not None and turn_wait_timeout <= 0:
             raise ValueError("turn_wait_timeout 必须大于 0 或为 None")
         self._guard = threading.RLock()
         self._pending: dict[str, _PendingApproval] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._max_pending_per_session = max_pending_per_session
+        # 同 scope 排队深度（持卡者之外的额外注册数）。默认 8 是给调大了
+        # session 上限的部署的 scope 维度护栏；默认 max_pending_per_session=5
+        # 下同 scope 有效深度本就受 session 配额约束。
+        self._max_queued_per_scope = max_queued_per_scope
         # 排队等锁（等前一个审批 settle）的上限；None = 按调用方 timeout×2。
         # 单个前驱正常最坏占用 ≈ TTL + 发卡 + 有界收尾，2×TTL 覆盖并留裕量。
         self._turn_wait_timeout = turn_wait_timeout
@@ -150,12 +157,21 @@ class SubagentApprovalRegistry:
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         with self._guard:
-            if any(
-                item.request.session_id == sid and item.request.agent_scope_id == scope
+            # 同 scope 并发请求排队而非硬拒：排队者就是 session_lock 的 FIFO
+            # 等待者，_pending 仍是唯一路由表（resolve/cancel 对排队者同样生效，
+            # Step-3 的三路竞速保证排队者被 settle 时立即返回、被 cancel 冲刷时
+            # 不再傻等锁）。仅当同 scope 注册数（持卡者 + 排队者）超过
+            # 1 + max_queued_per_scope 时才拒绝（2026-09-28 事故：子代理单轮
+            # N 个工具调用并发请求审批，硬拒 ×5 直接丢卡）。
+            scope_registered = sum(
+                1
                 for item in self._pending.values()
-            ):
+                if item.request.session_id == sid and item.request.agent_scope_id == scope
+            )
+            if scope_registered >= 1 + self._max_queued_per_scope:
                 raise SubagentApprovalCapacityError(
-                    f"scope already has a pending approval: session={sid!r} scope={scope!r}",
+                    f"scope approval queue limit reached: "
+                    f"session={sid!r} scope={scope!r} limit={self._max_queued_per_scope}",
                 )
             session_count = sum(item.request.session_id == sid for item in self._pending.values())
             if session_count >= self._max_pending_per_session:

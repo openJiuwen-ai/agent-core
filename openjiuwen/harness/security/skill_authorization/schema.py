@@ -13,9 +13,7 @@ from typing import Any
 # Shell-like tools cannot be granted wholesale by a Skill manifest.  Keep this
 # list in the generic authorization schema so agent-core does not depend on a
 # product's credential-injection rail.
-SHELL_PERMISSION_TOOLS = frozenset(
-    {"bash", "shell", "mcp_exec_command", "create_terminal", "exec_command"}
-)
+SHELL_PERMISSION_TOOLS = frozenset({"bash", "shell", "mcp_exec_command", "create_terminal", "exec_command"})
 
 SKILL_PERMISSION_FILENAME = "skill_permissions.json"
 SKILL_AUTHORIZATION_ENABLED_ENV = "SKILL_AUTHORIZATION_ENABLED"
@@ -31,8 +29,7 @@ def _log_enabled_field_deprecated_once() -> None:
     global _enabled_field_deprecation_logged
     if not _enabled_field_deprecation_logged:
         logger.info(
-            "[skill_authorization] permissions.enabled 为冗余字段，可不配置；"
-            "配置了也不参与权限裁决，不影响功能",
+            "[skill_authorization] permissions.enabled 为冗余字段，可不配置；配置了也不参与权限裁决，不影响功能",
         )
         _enabled_field_deprecation_logged = True
 
@@ -48,16 +45,18 @@ _ALLOWED_TOP_KEYS = frozenset({"risk", "permissions"})
 _ALLOWED_PERMISSIONS_KEYS = frozenset({"enabled", "tools", "rules", "file_guard"})
 
 #: 单独成集合以便命中时报更具体的错误。
-_FORBIDDEN_TOP_KEYS = frozenset({
-    "enabled",
-    "defaults",
-    "approval_overrides",
-    "owner_scopes",
-    "command_intent",
-    "tools",
-    "rules",
-    "file_guard",
-})
+_FORBIDDEN_TOP_KEYS = frozenset(
+    {
+        "enabled",
+        "defaults",
+        "approval_overrides",
+        "owner_scopes",
+        "command_intent",
+        "tools",
+        "rules",
+        "file_guard",
+    }
+)
 
 #: ``file_guard`` 下仅允许 ``global``。
 _FORBIDDEN_FILE_GUARD_KEYS = frozenset({"workspace", "tool_bindings"})
@@ -90,8 +89,7 @@ def _validate_tools(tools: Any, errors: list[str]) -> None:
             continue
         if tool_name in SHELL_PERMISSION_TOOLS and level.strip().lower() == "allow":
             errors.append(
-                f"tools.{tool_name} 禁止 shell 类工具整工具 allow;"
-                "请改用 rules[*].action=allow 按命令模式申请",
+                f"tools.{tool_name} 禁止 shell 类工具整工具 allow;请改用 rules[*].action=allow 按命令模式申请",
             )
 
 
@@ -113,9 +111,7 @@ def _validate_rules(rules: Any, errors: list[str]) -> None:
         if not isinstance(action, str) or action.strip().lower() not in _RULE_ACTIONS:
             errors.append(f"rules[{index}].action 必须为 allow|deny,实际为 {action!r}")
         scope = rule.get("scope")
-        if scope is not None and (
-            not isinstance(scope, str) or scope.strip().lower() not in _RULE_SCOPES
-        ):
+        if scope is not None and (not isinstance(scope, str) or scope.strip().lower() not in _RULE_SCOPES):
             errors.append(f"rules[{index}].scope 必须为 exact|head|regex|wildcard,实际为 {scope!r}")
         for key in ("id", "description"):
             value = rule.get(key)
@@ -160,11 +156,7 @@ def _extract_permissions_payload(data: dict[str, Any]) -> dict[str, Any]:
     permissions = data.get("permissions")
     if not isinstance(permissions, dict):
         return {}
-    payload = {
-        key: permissions[key]
-        for key in ("tools", "rules", "file_guard")
-        if key in permissions
-    }
+    payload = {key: permissions[key] for key in ("tools", "rules", "file_guard") if key in permissions}
     if "risk" in data:
         payload["risk"] = data["risk"]
     return payload
@@ -219,9 +211,7 @@ def normalize_skill_permission(data: dict[str, Any]) -> dict[str, Any]:
 
     tools = payload.get("tools")
     if isinstance(tools, dict) and tools:
-        normalized["tools"] = {
-            name.strip(): str(level).strip().lower() for name, level in tools.items()
-        }
+        normalized["tools"] = {name.strip(): str(level).strip().lower() for name, level in tools.items()}
 
     rules = payload.get("rules")
     if isinstance(rules, list) and rules:

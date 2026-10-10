@@ -19,6 +19,8 @@ import logging
 import pytest
 
 from openjiuwen.harness.security.skill_authorization.subagent_approval_registry import (
+    SubagentApprovalCancelled,
+    SubagentApprovalCapacityError,
     SubagentApprovalKind,
     SubagentApprovalRegistry,
     SubagentApprovalRequest,
@@ -261,3 +263,119 @@ def test_resolve_returns_false_for_unknown_or_mismatched(fresh_registry):
         )
         is False
     )
+
+
+@pytest.mark.asyncio
+async def test_queued_request_resolved_before_turn_returns_answer(fresh_registry):
+    """排队期间被直接 resolve：立即返回答案，不等锁；锁无泄漏。"""
+    card_shown = asyncio.Event()
+
+    async def hanging_sender(_request):
+        card_shown.set()
+        await asyncio.Event().wait()
+
+    task_a = _make_request_task(fresh_registry, "call-a", sender=hanging_sender, timeout=5.0)
+    await asyncio.wait_for(card_shown.wait(), timeout=2)
+
+    task_b = _make_request_task(fresh_registry, "call-b", sender=hanging_sender, timeout=5.0)
+    await _wait_for_pending(fresh_registry, count=2)
+    b_id = [r.approval_id for r in fresh_registry.pending_requests() if r.tool_call_id == "call-b"][0]
+
+    assert fresh_registry.resolve(session_id="session-1", approval_id=b_id, kind=_KIND, answer="b-answer")
+    # B 立即返回（A 仍持锁），不等 turn。
+    assert await asyncio.wait_for(task_b, timeout=1) == "b-answer"
+
+    # A settle 后锁正常释放：第三个请求能正常进入并完成。
+    a_id = [r.approval_id for r in fresh_registry.pending_requests() if r.tool_call_id == "call-a"][0]
+    assert fresh_registry.resolve(session_id="session-1", approval_id=a_id, kind=_KIND, answer="a-answer")
+    assert await asyncio.wait_for(task_a, timeout=1) == "a-answer"
+
+    task_c = _make_request_task(fresh_registry, "call-c", sender=hanging_sender, timeout=5.0)
+    await asyncio.wait_for(card_shown.wait(), timeout=2)
+    c_id = [r.approval_id for r in fresh_registry.pending_requests() if r.tool_call_id == "call-c"][0]
+    assert fresh_registry.resolve(session_id="session-1", approval_id=c_id, kind=_KIND, answer="c-answer")
+    assert await asyncio.wait_for(task_c, timeout=1) == "c-answer"
+
+
+@pytest.mark.asyncio
+async def test_same_scope_requests_queue_and_deliver_in_order(fresh_registry):
+    """同 scope 并发请求排队（FIFO），逐卡顺序投递，互不丢弃。"""
+    send_order: list[str] = []
+    gate = asyncio.Event()
+
+    async def gated_sender(request):
+        send_order.append(request.tool_call_id)
+        await gate.wait()
+
+    task_a = _make_request_task(fresh_registry, "call-a", sender=gated_sender, timeout=5.0)
+    await _wait_for_pending(fresh_registry)
+    task_b = _make_request_task(fresh_registry, "call-b", sender=gated_sender, timeout=5.0)
+    await _wait_for_pending(fresh_registry, count=2)
+    await asyncio.sleep(0.1)
+    assert send_order == ["call-a"], "B must not display a card while A holds the session lock"
+
+    # A 的 sender 完成（放行 gate）→ A 进入 TTL 等待 → resolve A → B 接卡。
+    gate.set()
+    a_id = [r.approval_id for r in fresh_registry.pending_requests() if r.tool_call_id == "call-a"][0]
+    assert fresh_registry.resolve(session_id="session-1", approval_id=a_id, kind=_KIND, answer="a-yes")
+    assert await asyncio.wait_for(task_a, timeout=2) == "a-yes"
+
+    await asyncio.wait_for(_wait_for_sender(send_order, "call-b"), timeout=2)
+    b_id = [r.approval_id for r in fresh_registry.pending_requests() if r.tool_call_id == "call-b"][0]
+    assert fresh_registry.resolve(session_id="session-1", approval_id=b_id, kind=_KIND, answer="b-yes")
+    assert await asyncio.wait_for(task_b, timeout=2) == "b-yes"
+    assert send_order == ["call-a", "call-b"]
+
+
+async def _wait_for_sender(send_order, call_id, timeout=2.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while call_id not in send_order:
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(f"sender for {call_id} never ran; order={send_order}")
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_scope_queue_is_bounded(fresh_registry):
+    """同 scope 注册数超过 1 + max_queued_per_scope 时才拒绝。"""
+
+    async def hanging_sender(_request):
+        await asyncio.Event().wait()
+
+    fresh_registry._max_queued_per_scope = 1
+    task_a = _make_request_task(fresh_registry, "call-a", sender=hanging_sender, timeout=30.0)
+    await _wait_for_pending(fresh_registry)
+    task_b = _make_request_task(fresh_registry, "call-b", sender=hanging_sender, timeout=30.0)
+    await _wait_for_pending(fresh_registry, count=2)
+
+    with pytest.raises(SubagentApprovalCapacityError):
+        await _make_request_task(fresh_registry, "call-c", sender=hanging_sender, timeout=30.0)
+
+    # 已注册的两个不受影响：cancel 冲刷。
+    assert fresh_registry.cancel_scope("session-1", "scope-1") == 2
+    for task in (task_a, task_b):
+        with pytest.raises(SubagentApprovalCancelled):
+            await asyncio.wait_for(task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_cancel_scope_flushes_active_and_queued(fresh_registry):
+    """cancel_scope 冲刷持卡者与排队者；排队者的 sender 从未被调用。"""
+    send_order: list[str] = []
+    gate = asyncio.Event()
+
+    async def gated_sender(request):
+        send_order.append(request.tool_call_id)
+        await gate.wait()
+
+    task_a = _make_request_task(fresh_registry, "call-a", sender=gated_sender, timeout=30.0)
+    await _wait_for_pending(fresh_registry)
+    task_b = _make_request_task(fresh_registry, "call-b", sender=gated_sender, timeout=30.0)
+    await _wait_for_pending(fresh_registry, count=2)
+
+    assert fresh_registry.cancel_scope("session-1", "scope-1") == 2
+    for task in (task_a, task_b):
+        with pytest.raises(SubagentApprovalCancelled):
+            await asyncio.wait_for(task, timeout=2)
+    assert send_order == ["call-a"], "queued request's sender must never run"
+    assert fresh_registry.pending_requests() == ()
