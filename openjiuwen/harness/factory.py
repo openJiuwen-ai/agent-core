@@ -144,10 +144,17 @@ def _inject_general_purpose_subagent(
     if not any(isinstance(r, SysOperationRail) for r in gp_rails):
         gp_rails = [SysOperationRail(), *gp_rails]
     gp_rails = gp_rails or None
+    # SubagentRail renders ``spec.tools`` verbatim into the task_tool description, while
+    # ``create_subagent`` re-enters ``create_deep_agent``, where a disabled free_search is
+    # dropped again. Advertise only what the child will actually receive, and keep ``Tool``
+    # instances as they are: downgrading them to cards would stop the child from binding its
+    # own instances, and reusing the caller's ``normalized_tools`` would also leak the
+    # vision tool cards (parent-scoped ids, and no ``vision_model_config`` is forwarded).
+    inherited_tools = [tool for tool in (tools or []) if not _is_disabled_free_search_tool(tool)]
     effective_subagents.insert(0, SubAgentConfig(
         agent_card=AgentCard(name="general-purpose", description=desc),
         system_prompt=system_prompt or "",
-        tools=list(tools or []),
+        tools=inherited_tools,
         mcps=list(mcps or []),
         model=model,
         skills=skills,
