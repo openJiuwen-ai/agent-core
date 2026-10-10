@@ -81,6 +81,27 @@ def _schema_fetch_webpage(lang: str) -> Dict[str, Any]:
     }
 
 
+def _search_pairing(language: str) -> str:
+    """Sentence naming the search tools fetch_webpage is meant to follow, empty when none is enabled."""
+    # Import lazily: web tool implementations also import this metadata package.
+    from openjiuwen.harness.tools.web._common import is_free_search_enabled, is_paid_search_enabled
+
+    enabled = []
+    if is_paid_search_enabled():
+        enabled.append("paid_search")
+    if is_free_search_enabled():
+        enabled.append("free_search")
+    if not enabled:
+        return ""
+    names = " 或 ".join(enabled) if language == "cn" else " or ".join(enabled)
+    if language == "cn":
+        return f"通常配合 {names} 使用：先搜索，再抓取结果页，不要只依赖摘要。"
+    return (
+        f"Usually used after {names}: search first, then fetch the top few result pages "
+        "instead of reasoning only from snippets. "
+    )
+
+
 class FreeSearchMetadataProvider(ToolMetadataProvider):
     def get_name(self) -> str:
         return "free_search"
@@ -141,28 +162,25 @@ class FetchWebpageMetadataProvider(ToolMetadataProvider):
         return "fetch_webpage"
 
     def get_description(self, language: str = "cn") -> str:
-        return {
-            "cn": (
-                "通常配合 paid_search 或 free_search 使用：先搜索，再抓取结果页，不要只依赖摘要。"
-                "抓取网页文本，返回状态码、标题和正文文本。通常配合 free_search 使用：先搜索，再抓取"
-                "前几个结果页，而不是只依赖搜索摘要。可设置 max_chars=0 关闭截断，也可以调大 "
+        pairing = _search_pairing(language)
+        if language == "cn":
+            return (
+                pairing + "抓取网页文本，返回状态码、标题和正文文本。可设置 max_chars=0 关闭截断，也可以调大 "
                 "timeout_seconds 处理慢站点。"
                 "适用场景：文档、博客、新闻、API 参考等普通网页。"
                 "代码仓地址（GitHub/GitLab/Gitee/Gitcode/Bitbucket 等）一般不适合用本工具——"
                 "网页只能看到渲染后的目录页;要读源码、看历史、跨文件搜索，"
                 "更顺手的方式是用 shell 工具(bash 或 powershell)执行 `git clone` 拉到本地。"
-            ),
-            "en": (
-                "Fetch webpage text content from a URL and return status, title, and plain text. "
-                "Usually used after paid_search or free_search: search first, then fetch the top few result pages "
-                "instead of reasoning only from snippets. Set max_chars=0 to disable clipping and "
-                "use a larger timeout_seconds for slow pages. "
-                "Best fit: documentation, blog posts, news, API references, and similar general web content. "
-                "Git repository URLs (GitHub/GitLab/Gitee/Gitcode/Bitbucket, etc.) are usually a poor fit - "
-                "the webpage only shows a rendered file tree, while reading source, history, or searching across "
-                "files is far easier after a local `git clone` via the shell tool (bash or powershell)."
-            ),
-        }[language]
+            )
+        return (
+            "Fetch webpage text content from a URL and return status, title, and plain text. "
+            + pairing
+            + "Set max_chars=0 to disable clipping and use a larger timeout_seconds for slow pages. "
+            "Best fit: documentation, blog posts, news, API references, and similar general web content. "
+            "Git repository URLs (GitHub/GitLab/Gitee/Gitcode/Bitbucket, etc.) are usually a poor fit - "
+            "the webpage only shows a rendered file tree, while reading source, history, or searching across "
+            "files is far easier after a local `git clone` via the shell tool (bash or powershell)."
+        )
 
     def get_input_params(self, language: str = "cn") -> Dict[str, Any]:
         return _schema_fetch_webpage(language)
