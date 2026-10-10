@@ -90,8 +90,8 @@ class ClaudeCodeHarnessConfig:
     settings: str | None = None
     settings_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     event_buffer_capacity: int = 1024
-    # How long a reply waits for the CLI's request logs before its model
-    # request is reported from the SDK message alone.
+    # How long a finished reply waits for the CLI's request logs before its
+    # model request is reported from the SDK message alone.
     request_observation_wait_s: float = 5.0
     # How long a turn waits, after a result, for a delivery receipt on a
     # message the CLI has not acknowledged at all.
