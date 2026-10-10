@@ -35,6 +35,7 @@ from .binding import InvocationState, abort_bound, close_bound, stream_bound
 from .control import AbortReason, ExecutionControl
 from .emitter import EventEmitter
 from .model_rail import PAUSE_MARKER
+from .participation import judge_participation
 
 _UNSUPPORTED_FLAGS = ("enable_async_subagent", "enable_subagent_runtime", "add_general_purpose_agent")
 _SENSITIVE_KEYS = ("password", "secret", "token", "key", "credential", "authorization")
@@ -118,8 +119,6 @@ def _require_request(context: PersistentBuildContext, inputs) -> RequestInput:
         raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "continue_instruction requires a recovery_ref")
     if recovery_ref is not None:
         raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "continuation is not integrated yet (PA-18)")
-    if request.kind == "group_message":
-        raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "group participation is not integrated yet (PA-07)")
     return request
 
 
@@ -360,18 +359,34 @@ async def execute_persistent_request(spec, context, inputs) -> AsyncIterator[Age
     _require_supported_modes(spec)
     _require_isolation(context)
     request = _require_request(context, inputs)
-    store = seams.session_state_store(context)
-    assembler = seams.window_assembler(context)
+    if request.kind == "group_message" and context.ports.group_chat is None:
+        raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "group chat port is required for group participation")
     control = _start(context)
 
-    async def body(agent):
-        await control.emitter.emit(EventType.EXECUTION_STARTED, {"goal": request.text})
-        record = await _load(context, store)
-        assembly = await _assemble(assembler, context, request, record)
-        outcome = await _run_native(agent, context, assembly.native_input)
-        await _finish(context, store, outcome, request.reply_target, assembly.last_group_message_id)
+    async def runner():
+        decision_event_id = None
+        if request.kind == "group_message":
+            # Judgment reads GroupChatPort itself and must finish before the window store is touched.
+            judged = await judge_participation(spec, context, request, control.emitter)
+            if judged.terminal:
+                return
+            decision_event_id = judged.event_id
+        store = seams.session_state_store(context)
+        assembler = seams.window_assembler(context)
 
-    async with aclosing(_drive(control, _run(context, spec, body))) as events:
+        async def body(agent):
+            started = {"goal": request.text}
+            if decision_event_id is not None:
+                started["decision_event_id"] = decision_event_id
+            await control.emitter.emit(EventType.EXECUTION_STARTED, started)
+            record = await _load(context, store)
+            assembly = await _assemble(assembler, context, request, record)
+            outcome = await _run_native(agent, context, assembly.native_input)
+            await _finish(context, store, outcome, request.reply_target, assembly.last_group_message_id)
+
+        await _run(context, spec, body)
+
+    async with aclosing(_drive(control, runner())) as events:
         async for event in events:
             yield event
 

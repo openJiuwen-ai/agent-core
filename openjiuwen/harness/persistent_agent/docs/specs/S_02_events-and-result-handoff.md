@@ -5,10 +5,10 @@
 | 项 | 值 |
 | --- | --- |
 | 类型 | spec |
-| 状态 | 事件 DTO 和记账 / 执行日志端口契约已按架构设计实现（PA-04）；事件映射、记账调用、结局判定和最终回答交接已实现（PA-05）；`tool.intent / tool.completed`（PA-15）、`window.switched`（PA-11）、`participation.decided`（PA-07）待接入 |
+| 状态 | 事件 DTO 和记账 / 执行日志端口契约已按架构设计实现（PA-04）；事件映射、记账调用、结局判定和最终回答交接已实现（PA-05）；`participation.decided` 已由 PA-07 记账；`tool.intent / tool.completed`（PA-15）、`window.switched`（PA-11）待接入 |
 | 关联模块 | 内部 `persistent_agent/{ports.py,schema/{protocol,events,port_results}.py,execution/{emitter,model_rail,entries}.py}` |
-| 最近一次修订日期 | 2026-10-08 |
-| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 契约收敛](../features/F_04_contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)；开发计划 PA-05、PA-08、PA-15、PA-17、PA-04 |
+| 最近一次修订日期 | 2026-10-09 |
+| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 契约收敛](../features/F_04_contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)、[F_07 群消息参与判断](../features/F_07_group-participation.md)；开发计划 PA-05、PA-07、PA-08、PA-15、PA-17、PA-04 |
 | 设计依据 | [Persistent Agent 详细架构设计](../designs/persistent-agent-architecture.md) §9、§13 第 5、12 条、§14 |
 
 当前可以构造 `AgentEvent` 及其 11 种类型化负载，并已定义 `CommitPort.record / read_execution_log` 协议。PA-05 的执行入口已把原生流映射为事件并按下文时序记账（见“事件映射与结局”）；生产记账后端由服务端实现，下文的记账时序和交接约束也是服务端要满足的运行契约。
