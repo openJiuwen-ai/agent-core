@@ -61,6 +61,15 @@ class PrefixCompactSpan:
 
 class PrefixCompactProcessorConfig(BaseModel):
     trigger_context_ratio: float = Field(default=0.4, gt=0.0, lt=1.0)
+    # Absolute token cap on the ratio trigger: the effective threshold is
+    # min(ratio_threshold, absolute). Ratio-only triggers let history grow
+    # unbounded on large-window models (a 1M-window deployment only compacts at
+    # ~800K tokens; 2026-09-30 incident: leader planning calls accumulated to
+    # 1.28M tokens with compaction never firing). Default aligns with
+    # FullCompactProcessor's trigger_total_tokens so the repo has one
+    # "compact around ~180K" story. None restores pure-ratio behavior for
+    # deployments that genuinely want window-relative compaction.
+    trigger_absolute_tokens: int | None = Field(default=180000, ge=1)
     min_target_context_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
     model: ModelRequestConfig | None = None
     model_client: ModelClientConfig | None = None
@@ -82,10 +91,7 @@ class PrefixCompactProcessorConfig(BaseModel):
         }
         configured_fields = sorted(legacy_fields.intersection(value))
         if configured_fields:
-            raise ValueError(
-                f"{', '.join(configured_fields)} moved to "
-                "ContextEngineConfig.compression_recall_config"
-            )
+            raise ValueError(f"{', '.join(configured_fields)} moved to ContextEngineConfig.compression_recall_config")
         return value
 
 
@@ -182,11 +188,13 @@ class PrefixCompactProcessor(ContextProcessor):
             return False
 
         logger.info(
-            "[%s triggered] context tokens %s reached threshold %s of max %s",
+            "[%s triggered] context tokens %s reached threshold %s of max %s (ratio_limit=%s absolute_limit=%s)",
             self.processor_type(),
             total_tokens,
             absolute_threshold,
             context_max,
+            resolve_ratio_token_threshold(context_max, self.config.trigger_context_ratio),
+            getattr(self.config, "trigger_absolute_tokens", None),
         )
         return True
 
@@ -489,7 +497,11 @@ class PrefixCompactProcessor(ContextProcessor):
         return trace_context
 
     def _resolve_trigger_token_limit(self, context_max: int) -> int:
-        return resolve_ratio_token_threshold(context_max, self.config.trigger_context_ratio)
+        ratio_threshold = resolve_ratio_token_threshold(context_max, self.config.trigger_context_ratio)
+        absolute = getattr(self.config, "trigger_absolute_tokens", None)
+        if absolute is not None:
+            return min(ratio_threshold, absolute)
+        return ratio_threshold
 
     def _build_prompt(self, span: PrefixCompactSpan, *, preserve_instruction: str | None = None) -> str:
         _ = span
