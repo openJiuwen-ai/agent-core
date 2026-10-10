@@ -3,6 +3,7 @@
 
 import inspect
 import json
+import re
 from collections.abc import Mapping as MappingABC
 from copy import deepcopy
 from dataclasses import dataclass
@@ -13,6 +14,31 @@ import httpx
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ModelError, build_error
 from openjiuwen.core.common.logging import LogEventType, llm_logger, logger
+# lone-surrogate sanitization
+_surrogates_re = re.compile("[\ud800-\udfff]")
+
+
+def _sanitize_lone_surrogates(payload):
+    """Recursively replace lone surrogate code points (U+D800-U+DFFF) with
+    U+FFFD in str leaves of a messages/tools payload.
+
+    Python ``str`` never contains legal surrogate pairs, so any surrogate in a
+    message is a lone fragment left over from upstream UTF-16 truncation (e.g.
+    a search snippet or pagination splitting an emoji that then went through
+    JSON.stringify and json.loads). Such a character fails .encode() at
+    request-build time it was previously reported as a model failure while
+    also breaking the error-log record itself. Replace before the body or the
+    logger sees it.
+    """
+    if isinstance(payload, str):
+        return _surrogates_re.sub("\ufffd", payload)
+    if isinstance(payload, list):
+        return [_sanitize_lone_surrogates(item) for item in payload]
+    if isinstance(payload, dict):
+        return {k: _sanitize_lone_surrogates(v) for k, v in payload.items()}
+    return payload
+
+
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
 from openjiuwen.core.foundation.llm.headers_helper import (
@@ -1853,6 +1879,12 @@ class OpenAIModelClient(BaseModelClient):
         Returns:
             AssistantMessage: Model response
         """
+        # Lone-surrogate sanitization: upstream UTF-16 truncation can hand us
+        # half an emoji inside a message. Replace it before it reaches the
+        # request body or the logger, so a bad string cannot turn a local
+        # encode error into a misleading model-failure.
+        messages = _sanitize_lone_surrogates(messages)
+        tools = _sanitize_lone_surrogates(tools)
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
 
@@ -2033,6 +2065,12 @@ class OpenAIModelClient(BaseModelClient):
         Yields:
             AssistantMessageChunk: Streaming response chunk
         """
+        # Lone-surrogate sanitization: upstream UTF-16 truncation can hand us
+        # half an emoji inside a message. Replace it before it reaches the
+        # request body or the logger, so a bad string cannot turn a local
+        # encode error into a misleading model-failure.
+        messages = _sanitize_lone_surrogates(messages)
+        tools = _sanitize_lone_surrogates(tools)
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
 
@@ -2180,6 +2218,21 @@ class OpenAIModelClient(BaseModelClient):
                 usage=final_message.usage_metadata if final_message else None,
                 tool_calls=final_message.tool_calls if final_message else None)
 
+        except UnicodeEncodeError as e:
+            # A UnicodeEncodeError here means the request never reached the
+            # model server — it failed while serializing the local request
+            # body (e.g. a lone surrogate slipped past sanitization). Surface
+            # the original exception type instead of wrapping it as a model
+            # failure, so callers/retry rails/monitoring can tell "request was
+            # never sent" apart from "provider returned an error".
+            await trigger(
+                LLMCallEvents.LLM_CALL_ERROR,
+                model_name=params.get("model"),
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+                error=e,
+                error_message=None)
+            raise
         except Exception as e:
             # Many stream-layer exceptions (httpx.RemoteProtocolError,
             # APIConnectionError wrappers, asyncio.CancelledError) return an
