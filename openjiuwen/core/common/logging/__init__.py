@@ -40,6 +40,7 @@ from openjiuwen.core.common.logging.protocol import LoggerProtocol
 from openjiuwen.core.common.logging.utils import (
     get_member_id,
     get_session_id,
+    reset_session_id,
     set_member_id,
     set_session_id,
 )
@@ -192,6 +193,7 @@ __all__ = [
     "LoggerProtocol",
     "LogManager",
     "set_session_id",
+    "reset_session_id",
     "get_session_id",
     "set_member_id",
     "get_member_id",
