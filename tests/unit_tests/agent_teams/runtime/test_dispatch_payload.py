@@ -47,6 +47,7 @@ def _make_agent(*, known_members: set[str] | None = None) -> MagicMock:
     members = known_members or set()
     agent = MagicMock(name="TeamAgent")
     agent.team_backend = MagicMock(name="TeamBackend")
+    agent.team_backend.conversation_mode = "team"
     agent.team_backend.message_manager = MagicMock(name="TeamMessageManager")
     agent.team_backend.message_manager.send_message = AsyncMock(return_value="msg-id")
     agent.team_backend.message_manager.broadcast_message = AsyncMock(return_value="bcast-id")

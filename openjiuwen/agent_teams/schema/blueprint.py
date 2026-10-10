@@ -732,7 +732,7 @@ class TeamAgentSpec(BaseModel):
             db_config.connection_string = str(get_agent_teams_home() / "team.db")
         return db_config
 
-    def build(self) -> "TeamAgent":
+    def build(self, *, conversation_mode: Literal["team", "group_chat"] = "team") -> "TeamAgent":
         """Materialize a configured TeamAgent from this spec."""
         from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
         from openjiuwen.harness.prompts import resolve_language
@@ -773,6 +773,7 @@ class TeamAgentSpec(BaseModel):
         team_spec = TeamSpec(
             team_name=self.team_name,
             display_name=self.team_name,
+            conversation_mode=conversation_mode,
             leader_member_name=self.leader.member_name,
             language=resolved_language,
             dispatch_mode=self.dispatch_mode,

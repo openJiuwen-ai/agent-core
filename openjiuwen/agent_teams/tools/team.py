@@ -237,6 +237,7 @@ class TeamBackend:
                 ``build_team`` caller (LLM-filled tool arg).
         """
         self.team_name = team_name
+        self.conversation_mode = "team"
         self.group_chat_spec = None
         self.group_session_id = ""
         self._group_conversation = None

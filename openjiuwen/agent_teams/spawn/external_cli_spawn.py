@@ -165,6 +165,10 @@ async def _build_member_system_prompt(
         mcp_server_name=None if ctx.cli_agent == "codex" else TEAM_MCP_SERVER_NAME,
         loader=make_template_loader(ws_cache),
     )
+    if ctx.team_spec and ctx.team_spec.conversation_mode == "group_chat":
+        from openjiuwen.agent_teams.group_chat.tools import group_chat_prompt
+
+        prompt = (prompt or "") + group_chat_prompt(spec)
     return prompt or None
 
 

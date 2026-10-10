@@ -687,7 +687,9 @@ class AgentConfigurator:
             RailSpec(
                 type=TEAM_POLICY,
                 params={
-                    "prompt": (ctx.prompt or "") + group_chat_prompt(spec),
+                    "prompt": (ctx.prompt or "") + (
+                        group_chat_prompt(spec) if ctx.team_spec.conversation_mode == "group_chat" else ""
+                    ),
                     "display_name": ctx.display_name or "",
                     "member_workspace_path": workspace_root_path,
                     "lifecycle": spec.lifecycle,
@@ -1149,6 +1151,7 @@ class AgentConfigurator:
                     return len(native.get_current_context())
             return 0
 
+        agent_team.conversation_mode = ctx.team_spec.conversation_mode if ctx.team_spec else "team"
         agent_team.group_chat_spec = spec
         agent_team.set_snapshot_length(_snapshot_length)
 
