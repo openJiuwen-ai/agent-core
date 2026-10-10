@@ -70,8 +70,8 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         self._context = None
         self._session: NodeSession = None
         self._stream_called_timeout = 10
-        # if stream_call is available, call should wait for it
-        self._stream_done = asyncio.Future()
+        # Allocate stream completion on the execution loop, not during construction.
+        self._stream_done: Optional[asyncio.Future] = None
         self._call_count: int = 0
         self._stream_call_count: int = 0
         self.is_end_node = False
@@ -720,7 +720,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                      event_type=LogEventType.GRAPH_VERTEX_STREAM_CALL_START,
                      **self._log_message)
         self._stream_call_count += 1
-        self._stream_done = asyncio.Future()
+        self._stream_done = asyncio.get_running_loop().create_future()
 
         if self._session is None or self._session.actor_manager() is None:
             error = build_error(StatusCode.GRAPH_VERTEX_STREAM_CALL_ERROR,
@@ -814,7 +814,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         if not self._trace_enable():
             return
         self._is_call_started.set()
-        need_send = (not self._has_stream_call) or self._stream_done.done()
+        need_send = (not self._has_stream_call) or (self._stream_done is not None and self._stream_done.done())
         await TracerWorkflowUtils.trace_component_inputs(self._session, inputs, send=need_send)
         if self._executable.component_type() == SUB_WORKFLOW_COMPONENT:
             self._session.tracer().register_workflow_span_manager(self._session.executable_id())
@@ -868,9 +868,10 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
     async def reset(self):
         self._call_count = 0
         self._stream_call_count = 0
-        self._stream_done.cancel()
-        try:
-            await self._stream_done
-        except CancelledError:
-            pass
-        self._stream_done = asyncio.Future()
+        if self._stream_done is not None:
+            self._stream_done.cancel()
+            try:
+                await self._stream_done
+            except CancelledError:
+                pass
+        self._stream_done = None
