@@ -70,6 +70,14 @@ class PrefixCompactProcessorConfig(BaseModel):
     # "compact around ~180K" story. None restores pure-ratio behavior for
     # deployments that genuinely want window-relative compaction.
     trigger_absolute_tokens: int | None = Field(default=180000, ge=1)
+    # Proactive token budget for the compression model call input. The
+    # summarization request must never carry the full oversized context it is
+    # meant to compact (2026-10-09 incident: a 748K-token compression call
+    # timed out after 300s x3 attempts, compacting nothing). Messages that do
+    # not fit the budget stay in the main context (moved to the protected
+    # tail) — no data loss. 0 disables the proactive shrink; the reactive
+    # context-overflow retry then remains the only bound.
+    compression_call_max_tokens: int = Field(default=200000, gt=0)
     min_target_context_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
     model: ModelRequestConfig | None = None
     model_client: ModelClientConfig | None = None
@@ -284,6 +292,34 @@ class PrefixCompactProcessor(ContextProcessor):
         if self._compression_executor is None:
             return None
 
+        # Proactive budget shrink: bound the compression call's input before the
+        # first attempt so the summarization request itself never carries the
+        # full oversized context. Only replace the span when it actually shrinks
+        # (within budget -> keep everything; nothing fits -> keep everything and
+        # let the reactive overflow retry bound it).
+        budget_tokens = int(getattr(self.config, "compression_call_max_tokens", 0) or 0)
+        if budget_tokens > 0:
+            shrunk = self._shrink_span_to_budget(
+                context=context,
+                context_window=context_window,
+                span=span,
+                prompt=prompt,
+                budget_tokens=budget_tokens,
+            )
+            if (
+                shrunk is not None
+                and shrunk.has_target
+                and len(shrunk.messages_to_compress) < len(span.messages_to_compress)
+            ):
+                logger.info(
+                    "[%s] compression input proactively shrunk to budget=%d messages %d -> %d",
+                    self.processor_type(),
+                    budget_tokens,
+                    len(span.messages_to_compress),
+                    len(shrunk.messages_to_compress),
+                )
+                span = shrunk
+
         overflow_retry_index = 0
         transient_retry_count = 0
         while True:
@@ -371,16 +407,41 @@ class PrefixCompactProcessor(ContextProcessor):
         prompt: str,
         budget_ratio: float,
     ) -> PrefixCompactSpan | None:
+        context_max = self._resolve_context_max(context, {})
+        budget_tokens = max(int(context_max * budget_ratio), 1)
+        return self._shrink_span_to_budget(
+            context=context,
+            context_window=context_window,
+            span=span,
+            prompt=prompt,
+            budget_tokens=budget_tokens,
+            force_shrink=True,
+        )
+
+    def _shrink_span_to_budget(
+        self,
+        *,
+        context: ModelContext,
+        context_window: ContextWindow,
+        span: PrefixCompactSpan,
+        prompt: str,
+        budget_tokens: int,
+        force_shrink: bool = False,
+    ) -> PrefixCompactSpan | None:
+        """按预算截断压缩目标：装不下的最旧消息移入 protected_tail（留在主上下文，不丢数据）。
+
+        ``force_shrink=True``（反应式 overflow 重试路径）保持既有语义：即使
+        估算显示全部装得下也至少移出一条，保证重试有实际进展；False（主动
+        预算路径）在装得下时返回 None（无需截断）。tools 不再计入固定开销
+        ——压缩调用已不带工具定义（见 CompressionExecutor.invoke）。
+        """
         if not span.messages_to_compress:
             return None
 
-        context_max = self._resolve_context_max(context, {})
-        budget_tokens = max(int(context_max * budget_ratio), 1)
         fixed_tokens = self._count_messages_tokens(
             list(context_window.system_messages or []) + list(span.preserved_prefix) + [UserMessage(content=prompt)],
             context,
         )
-        fixed_tokens += self._count_tools_tokens(list(context_window.tools or []), context)
         target_tokens = budget_tokens - fixed_tokens
         if target_tokens <= 0:
             return None
@@ -389,14 +450,14 @@ class PrefixCompactProcessor(ContextProcessor):
         running_tokens = 0
         for message in span.messages_to_compress:
             message_tokens = self._count_messages_tokens([message], context)
-            if fit_count > 0 and running_tokens + message_tokens > target_tokens:
-                break
             if running_tokens + message_tokens > target_tokens:
                 break
             running_tokens += message_tokens
             fit_count += 1
 
         if fit_count >= len(span.messages_to_compress):
+            if not force_shrink:
+                return None
             fit_count = max(len(span.messages_to_compress) - 1, 0)
         if fit_count <= 0 and len(span.messages_to_compress) > 1:
             fit_count = 1
