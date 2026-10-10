@@ -73,13 +73,23 @@ class SubagentApprovalRegistry:
 
     _instance: ClassVar["SubagentApprovalRegistry | None"] = None
 
-    def __init__(self, *, max_pending_per_session: int = 5) -> None:
+    def __init__(
+        self,
+        *,
+        max_pending_per_session: int = 5,
+        turn_wait_timeout: float | None = None,
+    ) -> None:
         if max_pending_per_session <= 0:
             raise ValueError("max_pending_per_session 必须大于 0")
+        if turn_wait_timeout is not None and turn_wait_timeout <= 0:
+            raise ValueError("turn_wait_timeout 必须大于 0 或为 None")
         self._guard = threading.RLock()
         self._pending: dict[str, _PendingApproval] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
         self._max_pending_per_session = max_pending_per_session
+        # 排队等锁（等前一个审批 settle）的上限；None = 按调用方 timeout×2。
+        # 单个前驱正常最坏占用 ≈ TTL + 发卡 + 有界收尾，2×TTL 覆盖并留裕量。
+        self._turn_wait_timeout = turn_wait_timeout
 
     @classmethod
     def get_instance(cls) -> "SubagentApprovalRegistry":
@@ -155,56 +165,85 @@ class SubagentApprovalRegistry:
             self._pending[approval_id] = _PendingApproval(request, future, loop)
             session_lock = self._session_locks.setdefault(sid, asyncio.Lock())
         sender_task: asyncio.Task[None] | None = None
+        # 锁获取三路竞速：等锁 / future 先完成（排队期间被 resolve 或被取消
+        # 冲刷，直接返回不再傻等锁）/ turn 超时（前驱卡死的安全阀——本 MR 已
+        # 把前驱各等待全部有界化，正常排队不应触到这里）。锁的释放统一收敛
+        # 到外层 finally：排队者被 settle 时若 acquire 恰好已完成，锁也必须
+        # 释放，否则下一个排队者永久等待。
+        turn_timeout = self._turn_wait_timeout if self._turn_wait_timeout is not None else timeout * 2.0
+        acquire_task = asyncio.ensure_future(session_lock.acquire())
+        lock_held = False
         try:
-            async with session_lock:
-                if future.done():
-                    return await future
-                # sender 耗时（前端展示）不计入响应 TTL，但生命周期取消必须能
-                # 立即打断一个尚未返回的 sender，不能等发送链路自己结束。
-                sender_task = asyncio.create_task(sender(request))
-                done, _pending = await asyncio.wait(
-                    {sender_task, future},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-                if future in done:
-                    sender_completed = sender_task in done
-                    sender_succeeded = False
-                    if sender_completed and not sender_task.cancelled():
-                        sender_succeeded = sender_task.exception() is None
-                    if not sender_task.done():
-                        sender_task.cancel()
-                    await self._drain_sender_task(sender_task, request)
-                    try:
-                        return await future
-                    except SubagentApprovalCancelled:
-                        if sender_succeeded:
-                            await self._notify_expiry(
-                                expiry_sender,
-                                request,
-                                "cancelled",
-                            )
-                        raise
-                await sender_task
-                # future 已完成时 wait_for 会立即返回结果或重抛其异常，
-                # 由下方 except 分支统一收口，无需单独的 done() 快路径。
+            done, _ = await asyncio.wait(
+                {acquire_task, future},
+                return_when=asyncio.FIRST_COMPLETED,
+                timeout=turn_timeout,
+            )
+            if acquire_task in done and not acquire_task.cancelled() and acquire_task.exception() is None:
+                lock_held = True
+            if future in done:
+                # 排队期间已 settle：直接返回，锁由外层 finally 释放。
+                return await future
+            if not done:
+                # turn 超时：卡片从未展示，无 UI 终态需要通知。
+                self._discard_pending(approval_id, future)
+                raise SubagentApprovalTimeout("delegated approval turn wait timed out")
+            if future.done():
+                return await future
+            # sender 耗时（前端展示）不计入响应 TTL，但生命周期取消必须能
+            # 立即打断一个尚未返回的 sender，不能等发送链路自己结束。
+            sender_task = asyncio.create_task(sender(request))
+            done, _pending = await asyncio.wait(
+                {sender_task, future},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if future in done:
+                sender_completed = sender_task in done
+                sender_succeeded = False
+                if sender_completed and not sender_task.cancelled():
+                    sender_succeeded = sender_task.exception() is None
+                if not sender_task.done():
+                    sender_task.cancel()
+                await self._drain_sender_task(sender_task, request)
                 try:
-                    return await asyncio.wait_for(future, timeout=timeout)
-                except asyncio.TimeoutError as exc:
-                    # 先让迟到点击变为无效，再通知前端移除卡片；通知期间仍持有
-                    # 当前 session 交互锁，避免下一张卡先于过期终态展示。
-                    self._discard_pending(approval_id, future)
-                    await self._notify_expiry(expiry_sender, request, "timeout")
-                    raise SubagentApprovalTimeout(
-                        "delegated approval response timed out",
-                    ) from exc
+                    return await future
                 except SubagentApprovalCancelled:
-                    await self._notify_expiry(expiry_sender, request, "cancelled")
+                    if sender_succeeded:
+                        await self._notify_expiry(
+                            expiry_sender,
+                            request,
+                            "cancelled",
+                        )
                     raise
-                except asyncio.CancelledError:
-                    self._discard_pending(approval_id, future)
-                    await self._notify_expiry(expiry_sender, request, "cancelled")
-                    raise
+            await sender_task
+            # future 已完成时 wait_for 会立即返回结果或重抛其异常，
+            # 由下方 except 分支统一收口，无需单独的 done() 快路径。
+            try:
+                return await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError as exc:
+                # 先让迟到点击变为无效，再通知前端移除卡片；通知期间仍持有
+                # 当前 session 交互锁，避免下一张卡先于过期终态展示。
+                self._discard_pending(approval_id, future)
+                await self._notify_expiry(expiry_sender, request, "timeout")
+                raise SubagentApprovalTimeout(
+                    "delegated approval response timed out",
+                ) from exc
+            except SubagentApprovalCancelled:
+                await self._notify_expiry(expiry_sender, request, "cancelled")
+                raise
+            except asyncio.CancelledError:
+                self._discard_pending(approval_id, future)
+                await self._notify_expiry(expiry_sender, request, "cancelled")
+                raise
         finally:
+            if not acquire_task.done():
+                acquire_task.cancel()
+                await asyncio.gather(acquire_task, return_exceptions=True)
+                if not acquire_task.cancelled() and acquire_task.exception() is None:
+                    # cancel 与完成赛跑时可能恰好已拿到锁。
+                    lock_held = True
+            if lock_held:
+                session_lock.release()
             if sender_task is not None and not sender_task.done():
                 sender_task.cancel()
                 await self._drain_sender_task(sender_task, request)

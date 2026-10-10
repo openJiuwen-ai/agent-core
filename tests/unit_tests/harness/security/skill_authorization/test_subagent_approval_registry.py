@@ -22,6 +22,7 @@ from openjiuwen.harness.security.skill_authorization.subagent_approval_registry 
     SubagentApprovalKind,
     SubagentApprovalRegistry,
     SubagentApprovalRequest,
+    SubagentApprovalTimeout,
 )
 
 _KIND = SubagentApprovalKind.TOOL_PERMISSION
@@ -186,3 +187,77 @@ async def test_sender_drain_completes_quickly_when_cooperative(fresh_registry):
 
     assert fresh_registry.resolve(session_id="session-1", approval_id=approval_id, kind=_KIND, answer="yes")
     assert await asyncio.wait_for(request_task, timeout=1) == "yes"
+
+
+def _make_request_task(registry, call_id, *, sender, timeout=5.0, scope="scope-1"):
+    return asyncio.create_task(
+        registry.request(
+            kind=_KIND,
+            session_id="session-1",
+            agent_scope_id=scope,
+            tool_call_id=call_id,
+            payload={},
+            sender=sender,
+            timeout=timeout,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_wait_timeout_raises_approval_timeout(fresh_registry):
+    """前驱持锁超过 turn 上限时，排队者抛 SubagentApprovalTimeout 且不留痕。"""
+    card_shown = asyncio.Event()
+
+    async def hanging_sender(_request):
+        card_shown.set()
+        await asyncio.Event().wait()  # 卡片"已展示"，sender 立即让位
+
+    # A：长 TTL 持锁等待应答。
+    task_a = _make_request_task(fresh_registry, "call-a", sender=hanging_sender, timeout=5.0)
+    await asyncio.wait_for(card_shown.wait(), timeout=2)
+
+    # B：同 session 不同 scope（当前实现同 scope 并发仍硬拒，后续提交改排队），
+    # 排队等同一把 session 锁，turn 上限 0.3s。
+    fresh_registry._turn_wait_timeout = 0.3
+    task_b = _make_request_task(fresh_registry, "call-b", sender=hanging_sender, timeout=5.0, scope="scope-2")
+
+    with pytest.raises(SubagentApprovalTimeout):
+        await asyncio.wait_for(task_b, timeout=2)
+    assert "turn wait timed out" in str(task_b.exception())
+    # B 已摘除：迟到 resolve 返回 False。
+    b_ids = [r.approval_id for r in fresh_registry.pending_requests() if r.tool_call_id == "call-b"]
+    assert b_ids == [], "timed-out queued request must be discarded"
+
+    # A 不受影响，正常 resolve。
+    a_id = [r.approval_id for r in fresh_registry.pending_requests() if r.tool_call_id == "call-a"][0]
+    assert fresh_registry.resolve(session_id="session-1", approval_id=a_id, kind=_KIND, answer="yes")
+    assert await asyncio.wait_for(task_a, timeout=2) == "yes"
+
+
+@pytest.mark.asyncio
+async def test_ttl_discards_before_late_click_returns_false(fresh_registry):
+    """TTL 超时先摘除：迟到点击 resolve 返回 False（既有语义防回归）。"""
+
+    async def quick_sender(_request):
+        return None
+
+    task = _make_request_task(fresh_registry, "call-a", sender=quick_sender, timeout=0.1)
+    await _wait_for_pending(fresh_registry)
+    approval_id = fresh_registry.pending_requests()[0].approval_id
+
+    with pytest.raises(SubagentApprovalTimeout):
+        await asyncio.wait_for(task, timeout=2)
+    assert fresh_registry.resolve(session_id="session-1", approval_id=approval_id, kind=_KIND, answer="late") is False
+
+
+def test_resolve_returns_false_for_unknown_or_mismatched(fresh_registry):
+    """未知 id / kind 不匹配 / scope 不匹配均返回 False（既有语义防回归）。"""
+    assert (
+        fresh_registry.resolve(
+            session_id="session-1",
+            approval_id="subagent_tool_permission_nope",
+            kind=_KIND,
+            answer="x",
+        )
+        is False
+    )
