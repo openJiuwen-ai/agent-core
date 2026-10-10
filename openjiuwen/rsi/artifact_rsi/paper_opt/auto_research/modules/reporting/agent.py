@@ -782,25 +782,17 @@ class ReportingAgent:
         # (evidence blocks, prior tool results, read-back section files) and
         # can legitimately take a while per completion — same reasoning
         # code_implementation's coding agent already settled on for its own
-        # timeout. Computed once and reused for both knobs below: init_model's
-        # timeout= only bounds the raw HTTP call to the model provider — it
-        # does NOT touch the DeepAgent harness's own per-completion watchdog
-        # (DeepAgentConfig.completion_timeout, default 600.0s, enforced by
-        # task_loop_event_handler independently of the model client). Without
-        # passing completion_timeout= explicitly to create_deep_agent below,
-        # that harness-level 600s default silently overrides this setting on
-        # exactly the large completions (full Method section draft, a
-        # paper-reviewer subagent reading the whole draft) it was raised for
-        # — confirmed against a live run that failed every attempt with
-        # {"error": "completion_timeout"} well under 900s despite this
-        # setting already resolving to 900.
-        completion_timeout = float(self._setting("timeout", "MODEL_TIMEOUT", default="600"))
+        # timeout. This value bounds each model call (init_model's timeout=,
+        # the raw HTTP call to the provider) and nothing else; see the
+        # completion_timeout=None comment on create_deep_agent below for why
+        # it must not also be used as the session watchdog.
+        model_timeout = float(self._setting("timeout", "MODEL_TIMEOUT", default="600"))
         model = self._injected_model or init_model(
             provider=self._setting("provider", "MODEL_PROVIDER", default="OpenAI"),
             model_name=self._setting("model", "MODEL_NAME", default="default"),
             api_key=self._setting("api_key", "API_KEY", required=True, secret=True),
             api_base=self._setting("base_url", "API_BASE", required=True),
-            timeout=completion_timeout,
+            timeout=model_timeout,
         )
 
         # ts-latex/scripts/compile.py reads the workspace runtime config written below.
@@ -902,7 +894,19 @@ class ReportingAgent:
             # command list, as the actual boundary.
             rails=with_observability([SysOperationRail(with_code_tool=False)]),
             enable_task_loop=True,
-            completion_timeout=completion_timeout,
+            # DeepAgentConfig.completion_timeout is NOT a per-completion
+            # limit: task_loop_controller.wait_round_completion() applies it
+            # to a whole task-loop round, and this session is one round —
+            # every ts-plan/ts-write/ts-review/ts-latex step, up to
+            # max_iterations model calls plus the paper-reviewer subagent
+            # calls. Passing the per-call timeout here killed the entire
+            # session at exactly that many seconds: every failed attempt of a
+            # real run lasted 900.0s (timeout 900) or 1800.0s (timeout 1800)
+            # after ~90-115 model calls, before ts-latex was reached, so no
+            # PDF was produced. Same fix code_implementation already made:
+            # max_iterations bounds the session, model_timeout bounds each
+            # call, and no second wall-clock timeout is imposed.
+            completion_timeout=None,
             max_iterations=int(self._pw_config.get("max_iterations", 40)),
             workspace=str(workspace),
             restrict_to_work_dir=True,
