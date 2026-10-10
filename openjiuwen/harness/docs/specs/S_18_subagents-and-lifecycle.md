@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（8 文件）、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-09-22 |
+| 最近一次修订日期 | 2026-10-02 |
 | 关联 feature | F_05_browser-task-integrity |
 
 ## 范围 / 边界
@@ -70,13 +70,22 @@ Browser 的完整工具、Rails、运行时与宿主接入统一见
    PageState 与 WorkingContext 必须先按结构投影后序列化，保持合法 JSON。推断字段齐全仅提示
    `may_finish_if_user_goal_met`，不自动完成或清空工具；明确终态仍由 runtime 统一传输。PageState 的
    `page_blockers` 仅表示页面启发式信号，不能直接覆盖 runtime 的权威任务终态。
-10. **browser 观察采用统一窗口**：Probe、snapshot、find、evaluate 先由 runtime 提取证据并将
-    当前结果投影到既有约 12K 字符预算，再交给 `ToolResultWindowProcessor` 的配置窗口，
-    并发只读结果的合并结构由 PageState 提供。WorkingContext 默认只投影 runtime 权威状态，
-    不再要求模型维护第二份记忆。原生 AX 先解包装再注册 refs，不被不完整 Probe 替换；工具消息
-    只携带新数据和 PageState 摘要，不重复附加旧 Cards。确认排序/筛选变化时废弃旧列表目标，
-    不因每次只读观察递增 generation。
-    有损投影前保存任务内可恢复原文，handle 不跨 session；临时观察文件有效期 24 小时，
+10. **browser 观察采用统一窗口**：Probe、snapshot、find 先由 runtime 提取证据和注册目标，
+    再交给 `ToolResultWindowProcessor`；默认在这些工具共享的窗口内保留最近两个工具消息，
+    更旧的大结果保存到本地文件并以预览和 handle 替换。`browser_evaluate` 不向模型暴露。
+    最近的 snapshot/find 工具消息保持完整，不替换为 `compact_page_state`，也不执行 12,000 字符
+    的首尾预览压缩。Probe 等其他结构化结果仍按既有约 12K 字符预算投影，只携带新数据和
+    PageState 摘要，不重复附加旧 Cards；有损投影前保存可恢复原文。
+    补充的 `browser_state` 消息采用独立的结构化投影，默认约 12K 字符、最多 8 个 Cards 和
+    20 个 interactives。裁剪前保存完整组装状态，`recall_handle` 可恢复省略的目标和元数据；
+    runtime 自动捕获的原生 AX 超过 6K 字符时，先保存完整原文再提供带恢复 handle 的摘录。
+    这些补充投影不替换完整的最近 snapshot/find 工具结果。恢复使用受限的
+    `browser_recall_offload`；保存内容不是新的页面观察，目标仍须通过 generation 校验。
+    完整捕获先计算完整原始 snapshot 的指纹，再解包装、解码 AX 和注册 refs；不完整 Probe
+    不替换原生 AX。确认排序/筛选变化时废弃旧列表目标，不因每次只读观察递增 generation。
+    并发只读结果的合并结构由 PageState 提供；语义进度由 runtime 统一维护，context processor
+    不另建页面变化分类器。WorkingContext 默认只投影 runtime 权威状态，不要求模型维护第二份记忆。
+    恢复 handle 不跨 session；预投影保存的 `BrowserObservation_*` 临时文件有效期 24 小时，
     写入时惰性清理过期文件，跨任务扫描每工作区最多每小时一次；每任务上限 128 个 / 64 MiB。
     停止运行时不保证物理文件即时删除。存储失败时保留原文。
     永久 raw audit 仍需显式开启，临时 recall 不是全局文件系统能力。
@@ -100,7 +109,7 @@ Browser 的完整工具、Rails、运行时与宿主接入统一见
     未执行的 DSML 工具意图不能认证完成，同 run 至多纠正一次。定向恢复保留原始约束和修复指令，
     不重置共享期限，也不因推断字段适配不完整而强迫普通信息任务重复读取。
     “地点不限”“评分若有”等局部否定/可选条件不生成硬性字段；星级与住客评分分开。
-    replan_required 是执行指导，收尾时不能单独制造网页 blocker。原生读取、Card 和 evaluate
+    replan_required 是执行指导，收尾时不能单独制造网页 blocker。原生读取、Card 和 Batch 提取
     的带来源观察采用同一完成判断，保留 typed evidence 与未结构化观察的区别，不虚构字段覆盖。
     `unverified_fields` 仅是未映射诊断，不能触发填表式续跑。确有未完成用户目标时，可在收尾一次使用
     现有 browser_progress 文本标注 partial/next_action，不要求逐轮进度或另一个验证模型。

@@ -10,14 +10,17 @@ import json
 import uuid
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
 
 from openjiuwen.core.context_engine import ContextEngine, ContextWindow
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackEvent,
     AgentCallbackContext,
+    AgentCallbackEvent,
     InvokeInputs,
     ModelCallInputs,
     ToolCallInputs,
@@ -39,6 +42,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_co
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_rail import (
     BrowserWorkingContextRail,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime
 
 
 class _FakeSession:
@@ -1037,6 +1041,60 @@ def test_processor_projects_runtime_task_state_before_current_page_state() -> No
     assert "script_exploration" in prompt
 
 
+@pytest.mark.parametrize("pending", [False, True])
+@pytest.mark.parametrize("progress_name", ["inspection", "unknown"])
+def test_read_observation_preserves_active_interaction_replan(pending: bool, progress_name: str) -> None:
+    session = _FakeSession()
+    preserved = {
+        "status": "replan_trial" if pending else "replan_required",
+        "replan_required": True,
+        "replan_trial_pending": pending,
+        "replan_count": 1,
+        "trial_strategy": "new-click" if pending else "",
+        "blocked_strategy": "failed-click",
+        "failed_strategies": ["failed-click"],
+        "next_action_class": "materially_different_strategy",
+    }
+    state = {"task_id": "read-replan", **preserved}
+    session.update_state({BROWSER_TASK_STATE_KEY: state})
+    progress = {
+        "revision": 1,
+        "progress": progress_name,
+        "observation_only": True,
+        "observable_progress": False,
+        "replan_required": True,
+        "consecutive_no_progress": 3,
+        "semantic_state": {"url": "https://example.test/form"},
+    }
+
+    assert BrowserWorkingContextStore.sync_semantic_progress(session, progress) is False
+
+    updated = session.get_state(BROWSER_TASK_STATE_KEY)
+    assert {key: updated[key] for key in preserved} == preserved
+    assert updated["semantic_progress"]["observation_only"] is True
+    assert BrowserWorkingContextStore._project_task_state(updated)["semantic_progress"]["observation_only"] is True
+
+
+def test_new_evidence_from_read_observation_can_recover_pending_trial() -> None:
+    session = _FakeSession()
+    session.update_state({BROWSER_TASK_STATE_KEY: {
+        "task_id": "read-evidence", "status": "replan_trial", "replan_required": True,
+        "replan_trial_pending": True, "trial_strategy": "click-search", "replan_count": 1,
+    }})
+    progress = {
+        "revision": 1, "progress": "progress", "observation_only": True,
+        "observable_progress": True, "changed_fields": ["field_coverage"],
+        "semantic_state": {"url": "https://example.test/results", "field_coverage": ["title"]},
+    }
+
+    assert BrowserWorkingContextStore.sync_semantic_progress(session, progress) is True
+
+    updated = session.get_state(BROWSER_TASK_STATE_KEY)
+    assert updated["replan_required"] is False
+    assert updated["replan_trial_pending"] is False
+    assert updated["replan_count"] == 1
+
+
 def test_semantic_observation_closes_sort_evidence_before_replan_gate() -> None:
     session = _FakeSession()
     session.update_state(
@@ -1179,3 +1237,134 @@ def test_changed_first_result_does_not_confirm_an_unrelated_click() -> None:
     )
 
     assert inferred is None
+
+
+@pytest.mark.parametrize("outcome_status", ["ambiguous", "success"])
+@pytest.mark.parametrize("replan_pending", [False, True])
+def test_content_only_progress_does_not_prove_action_success_or_task_evidence(
+    outcome_status: str,
+    replan_pending: bool,
+) -> None:
+    session = _FakeSession()
+    session.update_state(
+        {
+            BROWSER_TASK_STATE_KEY: {
+                "task_id": "content-progress",
+                "status": "replan_required" if replan_pending else "in_progress",
+                "current_phase": "filtering",
+                "phases": {"filtering": {"status": "in_progress"}},
+                "required_fields": ["sort_state"],
+                "required_evidence_slots": [],
+                "field_coverage": [],
+                "structured_evidence": [],
+                "evidence_slots": [],
+                "replan_required": replan_pending,
+                "replan_trial_pending": replan_pending,
+                "trial_strategy": "click sales sort" if replan_pending else "",
+                "recent_actions": [
+                    {
+                        "phase": "filtering",
+                        "outcome_status": outcome_status,
+                        "outcome": "timeout" if outcome_status == "ambiguous" else "success",
+                        "semantic_delta": "pending",
+                        "target_summary": json.dumps(
+                            {"tool": "browser_click", "element": "sales", "target_id": "t-sort"}
+                        ),
+                    }
+                ],
+            }
+        }
+    )
+
+    recovered = BrowserWorkingContextStore.sync_semantic_progress(
+        session,
+        {
+            "revision": 1,
+            "progress": "progress",
+            "observable_progress": True,
+            "changed_fields": ["page_content_hash"],
+            "semantic_state": {
+                "url": "https://tenders.example/results",
+                "page_content_hash": "b" * 64,
+                "first_result_text": "Pinned tender",
+                "selected_filters": [],
+            },
+        },
+    )
+
+    state = session.get_state(BROWSER_TASK_STATE_KEY)
+    assert state["recent_actions"][-1]["outcome_status"] == outcome_status
+    assert state["phases"]["filtering"]["status"] == "in_progress"
+    assert state["field_coverage"] == []
+    assert state["structured_evidence"] == []
+    assert state["evidence_slots"] == []
+    assert state["status"] == "in_progress"
+    assert recovered is replan_pending
+
+
+@pytest.mark.parametrize("outcome_status", ["ambiguous", "success"])
+def test_first_complete_capture_after_failure_cannot_verify_action_or_complete_phase(outcome_status: str) -> None:
+    runtime = object.__new__(BrowserAgentRuntime)
+    runtime._page_generation = 0
+    runtime._reference_generations = {}
+    runtime._selector_primary_links = {}
+    runtime._last_observed_url = ""
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime._call_playwright_tool = AsyncMock(
+        side_effect=[RuntimeError("initial snapshot timeout"), '- article "Existing tender" [ref=e1]']
+    )
+    runtime._call_playwright_run_code_unsafe = AsyncMock(
+        return_value={
+            "ok": True,
+            "url": "https://tenders.example/results",
+            "semantic_state": {"result_count": 2, "first_result_text": "Existing tender"},
+        }
+    )
+    session = _FakeSession()
+    session.update_state(
+        {
+            BROWSER_TASK_STATE_KEY: {
+                "status": "in_progress",
+                "current_phase": "filtering",
+                "phases": {"filtering": {"status": "in_progress"}},
+                "recent_actions": [],
+            }
+        }
+    )
+
+    failed = _run(runtime.capture_browser_state(action_group_id="initial"))
+    assert failed["semantic_progress"]["progress"] == "unknown"
+    assert runtime.semantic_progress == {}
+    assert BrowserWorkingContextStore.sync_semantic_progress(session, failed["semantic_progress"]) is False
+    session.get_state(BROWSER_TASK_STATE_KEY)["recent_actions"].append(
+        {"phase": "filtering", "outcome_status": outcome_status, "semantic_delta": "pending"}
+    )
+
+    captured = _run(runtime.capture_browser_state(action_group_id="click-results"))
+    progress = captured["semantic_progress"]
+    assert progress["progress"] == "initial"
+    assert {"url", "result_count", "first_result_text", "page_content_hash"} <= set(progress["changed_fields"])
+    assert BrowserWorkingContextStore.sync_semantic_progress(session, progress) is False
+
+    state = session.get_state(BROWSER_TASK_STATE_KEY)
+    assert state["recent_actions"][-1]["outcome_status"] == outcome_status
+    assert state["recent_actions"][-1]["semantic_delta"] == "initial"
+    assert state["phases"]["filtering"]["status"] == "in_progress"
+    assert "completion_evidence" not in state["phases"]["filtering"]
+
+
+def test_metadata_only_initial_observation_retains_legacy_reconciliation() -> None:
+    state = {
+        "phases": {"navigation": {"status": "in_progress"}},
+        "recent_actions": [{"phase": "navigation", "outcome_status": "ambiguous"}],
+    }
+    progress = {
+        "progress": "initial",
+        "observable_progress": True,
+        "changed_fields": ["url"],
+        "semantic_state": {"url": "https://example.test"},
+    }
+
+    assert BrowserWorkingContextStore._reconcile_observed_action(state, progress) is True
+    assert state["recent_actions"][-1]["outcome_status"] == "success_after_observation"
+    assert state["phases"]["navigation"]["status"] == "completed"
