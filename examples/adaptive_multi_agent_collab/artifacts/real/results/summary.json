@@ -1,0 +1,2157 @@
+{
+  "data_status": "REAL LLM OUTPUTS",
+  "manifest": "/Users/IDLE_And_R/Downloads/Huawei/agent-core/examples/adaptive_multi_agent_collab/artifacts/real/cache/manifest.json",
+  "run_fingerprint": "57f61469b27a93665079c616bdec3739c2738cb0bf6433fc57657e2ed8e2b459",
+  "dataset": "tau/commonsense_qa",
+  "sizes": {
+    "train": 30,
+    "validation": 10,
+    "test": 20
+  },
+  "seed": 42,
+  "provider": "OpenAI",
+  "model_name": "gpt-5-mini",
+  "encoder": "deterministic normalized signed hashing (BLAKE2b), 96 dimensions",
+  "generation": {
+    "generation_settings": {
+      "adjustments": [
+        "max_tokens removed after provider rejection",
+        "temperature removed after provider rejection"
+      ]
+    },
+    "generation_adjustments": [
+      "max_tokens removed after provider rejection",
+      "temperature removed after provider rejection"
+    ],
+    "api_attempts_this_run": 341,
+    "cache_valid_records": 782,
+    "completed_examples": 60,
+    "expected_examples": 60,
+    "generation_seconds": 943.4677218750585,
+    "resume_command": "/Users/IDLE_And_R/.virtualenvs/openjiuwen-agent-core/bin/python -m examples.adaptive_multi_agent_collab.run_experiment all --train-size 30 --val-size 10 --test-size 20 --seed 42 --concurrency 3 --max-api-calls 650 --request-timeout 90.0 --epochs 200 --patience 25 --learning-rate 0.001 --weight-decay 0.0001 --artifact-root /Users/IDLE_And_R/Downloads/Huawei/agent-core/examples/adaptive_multi_agent_collab/artifacts",
+    "current_fingerprint_cache": {
+      "records": 374,
+      "valid_records": 373,
+      "invalid_records": 1,
+      "malformed_lines": 0,
+      "attempt_errors": 6,
+      "stages": {
+        "initial": 180,
+        "review": 181,
+        "revision": 13
+      },
+      "parse_methods": {
+        "structured": 373,
+        "unparsed": 1
+      }
+    }
+  },
+  "training": {
+    "device": "mps",
+    "best_epoch": 200,
+    "best_train_loss": 1.004848837852478,
+    "best_validation_loss": 1.1049630641937256,
+    "training_seconds": 2.3074427919927984,
+    "checkpoint": "/Users/IDLE_And_R/Downloads/Huawei/agent-core/examples/adaptive_multi_agent_collab/artifacts/real/checkpoints/weighting.pt",
+    "configuration": {
+      "query_dim": 96,
+      "history_dim": 96,
+      "agent_embedding_dim": 12,
+      "hidden_dim": 48,
+      "dropout": 0.05,
+      "learning_rate": 0.001,
+      "weight_decay": 0.0001,
+      "epochs": 200,
+      "patience": 25,
+      "batch_size": 8,
+      "seed": 42
+    },
+    "train_examples": 30,
+    "validation_examples": 10,
+    "selection": "minimum validation cross-entropy; held-out test unused",
+    "data_status": "REAL LLM OUTPUTS",
+    "test_loss": 1.004701852798462
+  },
+  "evaluation": {
+    "predictions": [
+      {
+        "example_id": "8bbfe8cd056d612e9d3190f278bef287",
+        "gold": "C",
+        "single_agent": "C",
+        "independent_majority": "C",
+        "collaboration_uniform": "C",
+        "collaboration_learned": "C",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "C",
+          "C",
+          "C"
+        ],
+        "terminal_answers": [
+          "C",
+          "C",
+          "C"
+        ],
+        "weights": [
+          0.0013734603999182582,
+          0.0001691248471615836,
+          0.9984574317932129
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 129.0,
+            "output_tokens": 237.0,
+            "total_tokens": 366.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 14.83494854089804,
+            "latency": 14.83494854089804,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 394.0,
+            "output_tokens": 927.0,
+            "total_tokens": 1321.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 53.15992395905778,
+            "latency": 53.15992395905778,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 992.0,
+            "output_tokens": 2308.0,
+            "total_tokens": 3300.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 89.82709824992344,
+            "latency": 89.82709824992344,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 992.0,
+            "output_tokens": 2308.0,
+            "total_tokens": 3300.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 89.82709824992344,
+            "latency": 89.82709824992344,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "410f907f817dd7aa8e73291a918d3d86",
+        "gold": "D",
+        "single_agent": "D",
+        "independent_majority": "D",
+        "collaboration_uniform": "E",
+        "collaboration_learned": "E",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "D",
+          "D",
+          "D"
+        ],
+        "terminal_answers": [
+          "D",
+          "E",
+          "E"
+        ],
+        "weights": [
+          0.002080820268020034,
+          0.00022545015963260084,
+          0.9976937174797058
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 123.0,
+            "output_tokens": 516.0,
+            "total_tokens": 639.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 15.347102666040882,
+            "latency": 15.347102666040882,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 376.0,
+            "output_tokens": 1254.0,
+            "total_tokens": 1630.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 46.25102149811573,
+            "latency": 46.25102149811573,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1620.0,
+            "output_tokens": 5022.0,
+            "total_tokens": 6642.0,
+            "cache_tokens": 0.0,
+            "calls": 8,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 107.25406078924425,
+            "latency": 107.25406078924425,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1620.0,
+            "output_tokens": 5022.0,
+            "total_tokens": 6642.0,
+            "cache_tokens": 0.0,
+            "calls": 8,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 107.25406078924425,
+            "latency": 107.25406078924425,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "ec79ef747bb89281923edb89ba26786d",
+        "gold": "A",
+        "single_agent": "A",
+        "independent_majority": "A",
+        "collaboration_uniform": "A",
+        "collaboration_learned": "A",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "terminal_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "weights": [
+          0.0011987844482064247,
+          0.00014932508929632604,
+          0.998651921749115
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 126.0,
+            "output_tokens": 251.0,
+            "total_tokens": 377.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 26.571679833112285,
+            "latency": 26.571679833112285,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 385.0,
+            "output_tokens": 842.0,
+            "total_tokens": 1227.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 88.66567070921883,
+            "latency": 88.66567070921883,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1017.0,
+            "output_tokens": 2503.0,
+            "total_tokens": 3520.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 141.89736821013503,
+            "latency": 141.89736821013503,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1017.0,
+            "output_tokens": 2503.0,
+            "total_tokens": 3520.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 141.89736821013503,
+            "latency": 141.89736821013503,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "820df15b615d221e38a71fcc44461085",
+        "gold": "D",
+        "single_agent": "B",
+        "independent_majority": "D",
+        "collaboration_uniform": "D",
+        "collaboration_learned": "D",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "B",
+          "D",
+          "D"
+        ],
+        "terminal_answers": [
+          "D",
+          "D",
+          "D"
+        ],
+        "weights": [
+          0.0012656502658501267,
+          0.00016864339704625309,
+          0.9985657334327698
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 129.0,
+            "output_tokens": 640.0,
+            "total_tokens": 769.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 23.79332199995406,
+            "latency": 23.79332199995406,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 394.0,
+            "output_tokens": 2068.0,
+            "total_tokens": 2462.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 78.116405707784,
+            "latency": 78.116405707784,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1375.0,
+            "output_tokens": 5548.0,
+            "total_tokens": 6923.0,
+            "cache_tokens": 0.0,
+            "calls": 7,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 158.96500720828772,
+            "latency": 158.96500720828772,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1375.0,
+            "output_tokens": 5548.0,
+            "total_tokens": 6923.0,
+            "cache_tokens": 0.0,
+            "calls": 7,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 158.96500720828772,
+            "latency": 158.96500720828772,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "11416df796f63d2f0dddc846b9c139d3",
+        "gold": "D",
+        "single_agent": "D",
+        "independent_majority": "D",
+        "collaboration_uniform": "D",
+        "collaboration_learned": "D",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "D",
+          "D",
+          "D"
+        ],
+        "terminal_answers": [
+          "D",
+          "D",
+          "D"
+        ],
+        "weights": [
+          0.001036209287121892,
+          0.0001346161006949842,
+          0.998829185962677
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 126.0,
+            "output_tokens": 305.0,
+            "total_tokens": 431.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 20.976749083027244,
+            "latency": 20.976749083027244,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 385.0,
+            "output_tokens": 1575.0,
+            "total_tokens": 1960.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 80.7503633738961,
+            "latency": 80.7503633738961,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 982.0,
+            "output_tokens": 4573.0,
+            "total_tokens": 5555.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 134.7834343740251,
+            "latency": 134.7834343740251,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 982.0,
+            "output_tokens": 4573.0,
+            "total_tokens": 5555.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 134.7834343740251,
+            "latency": 134.7834343740251,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "26d7d59ef7b9f2e0c2d47419fa5bca91",
+        "gold": "D",
+        "single_agent": "D",
+        "independent_majority": "D",
+        "collaboration_uniform": "D",
+        "collaboration_learned": "D",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "D",
+          "C",
+          "D"
+        ],
+        "terminal_answers": [
+          "D",
+          "D",
+          "D"
+        ],
+        "weights": [
+          0.001954179024323821,
+          0.00022618393995799124,
+          0.9978196620941162
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 122.0,
+            "output_tokens": 508.0,
+            "total_tokens": 630.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 25.112013041973114,
+            "latency": 25.112013041973114,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 373.0,
+            "output_tokens": 1719.0,
+            "total_tokens": 2092.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 84.85720995790325,
+            "latency": 84.85720995790325,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1335.0,
+            "output_tokens": 4713.0,
+            "total_tokens": 6048.0,
+            "cache_tokens": 0.0,
+            "calls": 7,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 179.44242478953674,
+            "latency": 179.44242478953674,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1335.0,
+            "output_tokens": 4713.0,
+            "total_tokens": 6048.0,
+            "cache_tokens": 0.0,
+            "calls": 7,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 179.44242478953674,
+            "latency": 179.44242478953674,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "f0d473701d52125dd055d23042de1b0d",
+        "gold": "A",
+        "single_agent": "A",
+        "independent_majority": "A",
+        "collaboration_uniform": "A",
+        "collaboration_learned": "A",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "terminal_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "weights": [
+          0.0014894978376105428,
+          0.0001768818183336407,
+          0.9983336329460144
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 132.0,
+            "output_tokens": 322.0,
+            "total_tokens": 454.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 14.148249041987583,
+            "latency": 14.148249041987583,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 403.0,
+            "output_tokens": 935.0,
+            "total_tokens": 1338.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 47.87038441724144,
+            "latency": 47.87038441724144,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1076.0,
+            "output_tokens": 2978.0,
+            "total_tokens": 4054.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 110.39814220904373,
+            "latency": 110.39814220904373,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1076.0,
+            "output_tokens": 2978.0,
+            "total_tokens": 4054.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 110.39814220904373,
+            "latency": 110.39814220904373,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "f48528156632b9c5b18af9ce2095509b",
+        "gold": "C",
+        "single_agent": "C",
+        "independent_majority": "C",
+        "collaboration_uniform": "C",
+        "collaboration_learned": "C",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "C",
+          "C",
+          "C"
+        ],
+        "terminal_answers": [
+          "C",
+          "C",
+          "C"
+        ],
+        "weights": [
+          0.001667168689891696,
+          0.0002471510961186141,
+          0.9980857372283936
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 127.0,
+            "output_tokens": 170.0,
+            "total_tokens": 297.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 19.442461709026247,
+            "latency": 19.442461709026247,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 388.0,
+            "output_tokens": 688.0,
+            "total_tokens": 1076.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 65.29962229332887,
+            "latency": 65.29962229332887,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 997.0,
+            "output_tokens": 1822.0,
+            "total_tokens": 2819.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 84.63697537756525,
+            "latency": 84.63697537756525,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 997.0,
+            "output_tokens": 1822.0,
+            "total_tokens": 2819.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 84.63697537756525,
+            "latency": 84.63697537756525,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "91e0f4ab62c9d2fd440d73a3f5308d96",
+        "gold": "C",
+        "single_agent": "C",
+        "independent_majority": "C",
+        "collaboration_uniform": "C",
+        "collaboration_learned": "C",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "C",
+          "C",
+          "C"
+        ],
+        "terminal_answers": [
+          "C",
+          "C",
+          "C"
+        ],
+        "weights": [
+          0.0014492350164800882,
+          0.00020504930580500513,
+          0.9983457326889038
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 138.0,
+            "output_tokens": 243.0,
+            "total_tokens": 381.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 10.421033292077482,
+            "latency": 10.421033292077482,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 421.0,
+            "output_tokens": 890.0,
+            "total_tokens": 1311.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 35.919354416197166,
+            "latency": 35.919354416197166,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1073.0,
+            "output_tokens": 2388.0,
+            "total_tokens": 3461.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 102.83494933322072,
+            "latency": 102.83494933322072,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1073.0,
+            "output_tokens": 2388.0,
+            "total_tokens": 3461.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 102.83494933322072,
+            "latency": 102.83494933322072,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "c96a86957a9ab1d8ca0aeeb7f040d87a_1",
+        "gold": "B",
+        "single_agent": "B",
+        "independent_majority": "B",
+        "collaboration_uniform": "B",
+        "collaboration_learned": "B",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "B",
+          "B",
+          "B"
+        ],
+        "terminal_answers": [
+          "B",
+          "B",
+          "B"
+        ],
+        "weights": [
+          0.0013334212126210332,
+          0.00017911482427734882,
+          0.9984874725341797
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 132.0,
+            "output_tokens": 705.0,
+            "total_tokens": 837.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 13.297351041808724,
+            "latency": 13.297351041808724,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 403.0,
+            "output_tokens": 2134.0,
+            "total_tokens": 2537.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 43.858746541896835,
+            "latency": 43.858746541896835,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1064.0,
+            "output_tokens": 4373.0,
+            "total_tokens": 5437.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 118.30803645798005,
+            "latency": 118.30803645798005,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1064.0,
+            "output_tokens": 4373.0,
+            "total_tokens": 5437.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 118.30803645798005,
+            "latency": 118.30803645798005,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "c74ae684ba6c76e2a913493483678c9d",
+        "gold": "A",
+        "single_agent": "A",
+        "independent_majority": "A",
+        "collaboration_uniform": "A",
+        "collaboration_learned": "A",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "A",
+          "A",
+          "B"
+        ],
+        "terminal_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "weights": [
+          0.001424439949914813,
+          0.00017594761447981,
+          0.998399555683136
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 120.0,
+            "output_tokens": 317.0,
+            "total_tokens": 437.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 15.890350208152086,
+            "latency": 15.890350208152086,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 367.0,
+            "output_tokens": 1366.0,
+            "total_tokens": 1733.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 53.337873542215675,
+            "latency": 53.337873542215675,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1268.0,
+            "output_tokens": 3661.0,
+            "total_tokens": 4929.0,
+            "cache_tokens": 0.0,
+            "calls": 7,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 144.23312237509526,
+            "latency": 144.23312237509526,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1268.0,
+            "output_tokens": 3661.0,
+            "total_tokens": 4929.0,
+            "cache_tokens": 0.0,
+            "calls": 7,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 144.23312237509526,
+            "latency": 144.23312237509526,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "34b2d6aecdb5af8efacf0b0aa7e3989f",
+        "gold": "A",
+        "single_agent": "A",
+        "independent_majority": "A",
+        "collaboration_uniform": "A",
+        "collaboration_learned": "A",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "terminal_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "weights": [
+          0.0012405579909682274,
+          0.00019122955563943833,
+          0.9985681772232056
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 125.0,
+            "output_tokens": 176.0,
+            "total_tokens": 301.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 20.255938374903053,
+            "latency": 20.255938374903053,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 382.0,
+            "output_tokens": 694.0,
+            "total_tokens": 1076.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 66.51569054089487,
+            "latency": 66.51569054089487,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 985.0,
+            "output_tokens": 2272.0,
+            "total_tokens": 3257.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 107.3242015838623,
+            "latency": 107.3242015838623,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 985.0,
+            "output_tokens": 2272.0,
+            "total_tokens": 3257.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 107.3242015838623,
+            "latency": 107.3242015838623,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "c611875b43b67b91030b889b267bbcb3",
+        "gold": "B",
+        "single_agent": "B",
+        "independent_majority": "B",
+        "collaboration_uniform": "B",
+        "collaboration_learned": "B",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "B",
+          "B",
+          "B"
+        ],
+        "terminal_answers": [
+          "B",
+          "B",
+          "B"
+        ],
+        "weights": [
+          0.0015705482801422477,
+          0.0002495805383659899,
+          0.9981799125671387
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 134.0,
+            "output_tokens": 237.0,
+            "total_tokens": 371.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 16.024798249825835,
+            "latency": 16.024798249825835,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 409.0,
+            "output_tokens": 1198.0,
+            "total_tokens": 1607.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 52.554324708878994,
+            "latency": 52.554324708878994,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1034.0,
+            "output_tokens": 3183.0,
+            "total_tokens": 4217.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 117.78073016810231,
+            "latency": 117.78073016810231,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1034.0,
+            "output_tokens": 3183.0,
+            "total_tokens": 4217.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 117.78073016810231,
+            "latency": 117.78073016810231,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "0b90c6710a65eb55fea4cc92895bf601",
+        "gold": "E",
+        "single_agent": "E",
+        "independent_majority": "E",
+        "collaboration_uniform": "E",
+        "collaboration_learned": "E",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "E",
+          "E",
+          "E"
+        ],
+        "terminal_answers": [
+          "E",
+          "E",
+          "E"
+        ],
+        "weights": [
+          0.0016584901604801416,
+          0.00025834565167315304,
+          0.998083233833313
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 126.0,
+            "output_tokens": 649.0,
+            "total_tokens": 775.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 13.499765499960631,
+            "latency": 13.499765499960631,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 385.0,
+            "output_tokens": 1616.0,
+            "total_tokens": 2001.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 42.25264924997464,
+            "latency": 42.25264924997464,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1023.0,
+            "output_tokens": 3929.0,
+            "total_tokens": 4952.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 140.998389209155,
+            "latency": 140.998389209155,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1023.0,
+            "output_tokens": 3929.0,
+            "total_tokens": 4952.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 140.998389209155,
+            "latency": 140.998389209155,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "5169f7ae0781b15161551de3a189ebef",
+        "gold": "E",
+        "single_agent": "C",
+        "independent_majority": "E",
+        "collaboration_uniform": "E",
+        "collaboration_learned": "E",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "C",
+          "E",
+          "E"
+        ],
+        "terminal_answers": [
+          "E",
+          "E",
+          "E"
+        ],
+        "weights": [
+          0.002079474739730358,
+          0.0002518224064260721,
+          0.9976686835289001
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 125.0,
+            "output_tokens": 691.0,
+            "total_tokens": 816.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 38.41425729193725,
+            "latency": 38.41425729193725,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 382.0,
+            "output_tokens": 2176.0,
+            "total_tokens": 2558.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 91.40900433296338,
+            "latency": 91.40900433296338,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1356.0,
+            "output_tokens": 6473.0,
+            "total_tokens": 7829.0,
+            "cache_tokens": 0.0,
+            "calls": 7,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 178.8250967906788,
+            "latency": 178.8250967906788,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1356.0,
+            "output_tokens": 6473.0,
+            "total_tokens": 7829.0,
+            "cache_tokens": 0.0,
+            "calls": 7,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 178.8250967906788,
+            "latency": 178.8250967906788,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "a2daf73d33541af0846673afd8e49abe",
+        "gold": "A",
+        "single_agent": "A",
+        "independent_majority": "A",
+        "collaboration_uniform": "A",
+        "collaboration_learned": "A",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "terminal_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "weights": [
+          0.0012883285526186228,
+          0.00015746839926578104,
+          0.9985541701316833
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 125.0,
+            "output_tokens": 182.0,
+            "total_tokens": 307.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 25.58932466711849,
+            "latency": 25.58932466711849,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 382.0,
+            "output_tokens": 736.0,
+            "total_tokens": 1118.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 81.76463133422658,
+            "latency": 81.76463133422658,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 968.0,
+            "output_tokens": 2285.0,
+            "total_tokens": 3253.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 160.36496241623536,
+            "latency": 160.36496241623536,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 968.0,
+            "output_tokens": 2285.0,
+            "total_tokens": 3253.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 160.36496241623536,
+            "latency": 160.36496241623536,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "fad197409a977126c9587eccd240ceea",
+        "gold": "C",
+        "single_agent": "C",
+        "independent_majority": "C",
+        "collaboration_uniform": "C",
+        "collaboration_learned": "C",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "C",
+          "C",
+          "C"
+        ],
+        "terminal_answers": [
+          "C",
+          "C",
+          "C"
+        ],
+        "weights": [
+          0.0017110283952206373,
+          0.00020679891167674214,
+          0.998082160949707
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 121.0,
+            "output_tokens": 176.0,
+            "total_tokens": 297.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 16.043319000164047,
+            "latency": 16.043319000164047,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 370.0,
+            "output_tokens": 811.0,
+            "total_tokens": 1181.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 56.67132399906404,
+            "latency": 56.67132399906404,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1360.0,
+            "output_tokens": 3706.0,
+            "total_tokens": 5066.0,
+            "cache_tokens": 0.0,
+            "calls": 7,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 130.9113374578301,
+            "latency": 130.9113374578301,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1360.0,
+            "output_tokens": 3706.0,
+            "total_tokens": 5066.0,
+            "cache_tokens": 0.0,
+            "calls": 7,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 130.9113374578301,
+            "latency": 130.9113374578301,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "2987db72e66f5fa0015ac64f9b3614ec",
+        "gold": "A",
+        "single_agent": "A",
+        "independent_majority": "A",
+        "collaboration_uniform": "A",
+        "collaboration_learned": "A",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "terminal_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "weights": [
+          0.0016345285112038255,
+          0.0001853452413342893,
+          0.9981801509857178
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 126.0,
+            "output_tokens": 316.0,
+            "total_tokens": 442.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 15.757137124892324,
+            "latency": 15.757137124892324,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 385.0,
+            "output_tokens": 959.0,
+            "total_tokens": 1344.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 58.94506520894356,
+            "latency": 58.94506520894356,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1006.0,
+            "output_tokens": 3401.0,
+            "total_tokens": 4407.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 106.03990608407184,
+            "latency": 106.03990608407184,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1006.0,
+            "output_tokens": 3401.0,
+            "total_tokens": 4407.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 106.03990608407184,
+            "latency": 106.03990608407184,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "08d3175de59a639be02f2ebc032d56bd",
+        "gold": "E",
+        "single_agent": "A",
+        "independent_majority": "A",
+        "collaboration_uniform": "A",
+        "collaboration_learned": "A",
+        "initial_oracle": false,
+        "terminal_oracle": false,
+        "initial_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "terminal_answers": [
+          "A",
+          "A",
+          "A"
+        ],
+        "weights": [
+          0.001482866588048637,
+          0.00017606520850677043,
+          0.9983410835266113
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 126.0,
+            "output_tokens": 309.0,
+            "total_tokens": 435.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 12.65715245809406,
+            "latency": 12.65715245809406,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 385.0,
+            "output_tokens": 1093.0,
+            "total_tokens": 1478.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 43.21754829119891,
+            "latency": 43.21754829119891,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 1006.0,
+            "output_tokens": 2942.0,
+            "total_tokens": 3948.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 103.4813768339809,
+            "latency": 103.4813768339809,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 1006.0,
+            "output_tokens": 2942.0,
+            "total_tokens": 3948.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 103.4813768339809,
+            "latency": 103.4813768339809,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      },
+      {
+        "example_id": "e3c9e83c0c62d842de2dfe229f5e6d41",
+        "gold": "E",
+        "single_agent": "E",
+        "independent_majority": "E",
+        "collaboration_uniform": "E",
+        "collaboration_learned": "E",
+        "initial_oracle": true,
+        "terminal_oracle": true,
+        "initial_answers": [
+          "E",
+          "E",
+          "E"
+        ],
+        "terminal_answers": [
+          "E",
+          "E",
+          "E"
+        ],
+        "weights": [
+          0.001935475505888462,
+          0.0002613694523461163,
+          0.9978031516075134
+        ],
+        "ties": {
+          "independent_majority": false,
+          "collaboration_uniform": false,
+          "collaboration_learned": false
+        },
+        "usage": {
+          "single_agent": {
+            "input_tokens": 122.0,
+            "output_tokens": 235.0,
+            "total_tokens": 357.0,
+            "cache_tokens": 0.0,
+            "calls": 1,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 18.609490541974083,
+            "latency": 18.609490541974083,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "independent_majority": {
+            "input_tokens": 373.0,
+            "output_tokens": 1022.0,
+            "total_tokens": 1395.0,
+            "cache_tokens": 0.0,
+            "calls": 3,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 62.469404875067994,
+            "latency": 62.469404875067994,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_uniform": {
+            "input_tokens": 981.0,
+            "output_tokens": 2866.0,
+            "total_tokens": 3847.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 88.37792204204015,
+            "latency": 88.37792204204015,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          },
+          "collaboration_learned": {
+            "input_tokens": 981.0,
+            "output_tokens": 2866.0,
+            "total_tokens": 3847.0,
+            "cache_tokens": 0.0,
+            "calls": 6,
+            "total_cost": null,
+            "provider_latency": null,
+            "wall_latency": 88.37792204204015,
+            "latency": 88.37792204204015,
+            "parse_fallback_rate": 0.0,
+            "parse_failure_rate": 0.0
+          }
+        }
+      }
+    ],
+    "methods": {
+      "single_agent": {
+        "correct": 17,
+        "evaluated": 20,
+        "failed": 0,
+        "accuracy": 0.85,
+        "bootstrap_95_ci": [
+          0.7,
+          1.0
+        ],
+        "average_calls": 1.0,
+        "average_input_tokens": 126.7,
+        "average_output_tokens": 359.25,
+        "average_total_tokens": 485.95,
+        "average_cached_tokens": 0.0,
+        "average_total_cost": null,
+        "average_wall_latency": 18.834322183346377,
+        "average_provider_latency": null,
+        "average_latency": 18.834322183346377,
+        "parse_fallback_rate": 0.0,
+        "parse_failure_rate": 0.0,
+        "tie_rate": 0.0
+      },
+      "independent_majority": {
+        "correct": 19,
+        "evaluated": 20,
+        "failed": 0,
+        "accuracy": 0.95,
+        "bootstrap_95_ci": [
+          0.85,
+          1.0
+        ],
+        "average_calls": 3.0,
+        "average_input_tokens": 387.1,
+        "average_output_tokens": 1235.15,
+        "average_total_tokens": 1622.25,
+        "average_cached_tokens": 0.0,
+        "average_total_cost": null,
+        "average_wall_latency": 61.69431094790343,
+        "average_provider_latency": null,
+        "average_latency": 61.69431094790343,
+        "parse_fallback_rate": 0.0,
+        "parse_failure_rate": 0.0,
+        "tie_rate": 0.0
+      },
+      "collaboration_uniform": {
+        "correct": 18,
+        "evaluated": 20,
+        "failed": 0,
+        "accuracy": 0.9,
+        "bootstrap_95_ci": [
+          0.75,
+          1.0
+        ],
+        "average_calls": 6.35,
+        "average_input_tokens": 1125.9,
+        "average_output_tokens": 3547.3,
+        "average_total_tokens": 4673.2,
+        "average_cached_tokens": 0.0,
+        "average_total_cost": null,
+        "average_wall_latency": 125.3342270980007,
+        "average_provider_latency": null,
+        "average_latency": 125.3342270980007,
+        "parse_fallback_rate": 0.0,
+        "parse_failure_rate": 0.0,
+        "tie_rate": 0.0
+      },
+      "collaboration_learned": {
+        "correct": 18,
+        "evaluated": 20,
+        "failed": 0,
+        "accuracy": 0.9,
+        "bootstrap_95_ci": [
+          0.75,
+          1.0
+        ],
+        "average_calls": 6.35,
+        "average_input_tokens": 1125.9,
+        "average_output_tokens": 3547.3,
+        "average_total_tokens": 4673.2,
+        "average_cached_tokens": 0.0,
+        "average_total_cost": null,
+        "average_wall_latency": 125.3342270980007,
+        "average_provider_latency": null,
+        "average_latency": 125.3342270980007,
+        "parse_fallback_rate": 0.0,
+        "parse_failure_rate": 0.0,
+        "tie_rate": 0.0
+      }
+    },
+    "oracles": {
+      "label": "ORACLE DIAGNOSTIC - NOT A DEPLOYABLE BASELINE",
+      "initial_accuracy": 0.95,
+      "terminal_accuracy": 0.95
+    },
+    "agents": {
+      "0": {
+        "initial_accuracy": 0.85,
+        "terminal_accuracy": 0.95
+      },
+      "1": {
+        "initial_accuracy": 0.9,
+        "terminal_accuracy": 0.9
+      },
+      "2": {
+        "initial_accuracy": 0.9,
+        "terminal_accuracy": 0.9
+      }
+    },
+    "agreement": {
+      "initial_disagreement_rate": 0.2,
+      "terminal_disagreement_rate": 0.05,
+      "initial_unanimous_rate": 0.8,
+      "terminal_unanimous_rate": 0.95
+    },
+    "transitions": {
+      "0": {
+        "unchanged": 18,
+        "incorrect -> correct": 2
+      },
+      "1": {
+        "unchanged": 18,
+        "correct -> incorrect": 1,
+        "incorrect -> correct": 1
+      },
+      "2": {
+        "unchanged": 18,
+        "correct -> incorrect": 1,
+        "incorrect -> correct": 1
+      }
+    },
+    "transition_percentages": {
+      "0": {
+        "unchanged": 0.9,
+        "incorrect -> correct": 0.1
+      },
+      "1": {
+        "unchanged": 0.9,
+        "correct -> incorrect": 0.05,
+        "incorrect -> correct": 0.05
+      },
+      "2": {
+        "unchanged": 0.9,
+        "correct -> incorrect": 0.05,
+        "incorrect -> correct": 0.05
+      }
+    },
+    "transition_examples": {
+      "0": {
+        "unchanged": [
+          {
+            "example_id": "8bbfe8cd056d612e9d3190f278bef287",
+            "initial": "C",
+            "terminal": "C",
+            "gold": "C"
+          },
+          {
+            "example_id": "410f907f817dd7aa8e73291a918d3d86",
+            "initial": "D",
+            "terminal": "D",
+            "gold": "D"
+          },
+          {
+            "example_id": "ec79ef747bb89281923edb89ba26786d",
+            "initial": "A",
+            "terminal": "A",
+            "gold": "A"
+          }
+        ],
+        "incorrect -> correct": [
+          {
+            "example_id": "820df15b615d221e38a71fcc44461085",
+            "initial": "B",
+            "terminal": "D",
+            "gold": "D"
+          },
+          {
+            "example_id": "5169f7ae0781b15161551de3a189ebef",
+            "initial": "C",
+            "terminal": "E",
+            "gold": "E"
+          }
+        ]
+      },
+      "1": {
+        "unchanged": [
+          {
+            "example_id": "8bbfe8cd056d612e9d3190f278bef287",
+            "initial": "C",
+            "terminal": "C",
+            "gold": "C"
+          },
+          {
+            "example_id": "ec79ef747bb89281923edb89ba26786d",
+            "initial": "A",
+            "terminal": "A",
+            "gold": "A"
+          },
+          {
+            "example_id": "820df15b615d221e38a71fcc44461085",
+            "initial": "D",
+            "terminal": "D",
+            "gold": "D"
+          }
+        ],
+        "correct -> incorrect": [
+          {
+            "example_id": "410f907f817dd7aa8e73291a918d3d86",
+            "initial": "D",
+            "terminal": "E",
+            "gold": "D"
+          }
+        ],
+        "incorrect -> correct": [
+          {
+            "example_id": "26d7d59ef7b9f2e0c2d47419fa5bca91",
+            "initial": "C",
+            "terminal": "D",
+            "gold": "D"
+          }
+        ]
+      },
+      "2": {
+        "unchanged": [
+          {
+            "example_id": "8bbfe8cd056d612e9d3190f278bef287",
+            "initial": "C",
+            "terminal": "C",
+            "gold": "C"
+          },
+          {
+            "example_id": "ec79ef747bb89281923edb89ba26786d",
+            "initial": "A",
+            "terminal": "A",
+            "gold": "A"
+          },
+          {
+            "example_id": "820df15b615d221e38a71fcc44461085",
+            "initial": "D",
+            "terminal": "D",
+            "gold": "D"
+          }
+        ],
+        "correct -> incorrect": [
+          {
+            "example_id": "410f907f817dd7aa8e73291a918d3d86",
+            "initial": "D",
+            "terminal": "E",
+            "gold": "D"
+          }
+        ],
+        "incorrect -> correct": [
+          {
+            "example_id": "c74ae684ba6c76e2a913493483678c9d",
+            "initial": "B",
+            "terminal": "A",
+            "gold": "A"
+          }
+        ]
+      }
+    },
+    "weights": {
+      "per_query": {
+        "8bbfe8cd056d612e9d3190f278bef287": [
+          0.0013734603999182582,
+          0.0001691248471615836,
+          0.9984574317932129
+        ],
+        "410f907f817dd7aa8e73291a918d3d86": [
+          0.002080820268020034,
+          0.00022545015963260084,
+          0.9976937174797058
+        ],
+        "ec79ef747bb89281923edb89ba26786d": [
+          0.0011987844482064247,
+          0.00014932508929632604,
+          0.998651921749115
+        ],
+        "820df15b615d221e38a71fcc44461085": [
+          0.0012656502658501267,
+          0.00016864339704625309,
+          0.9985657334327698
+        ],
+        "11416df796f63d2f0dddc846b9c139d3": [
+          0.001036209287121892,
+          0.0001346161006949842,
+          0.998829185962677
+        ],
+        "26d7d59ef7b9f2e0c2d47419fa5bca91": [
+          0.001954179024323821,
+          0.00022618393995799124,
+          0.9978196620941162
+        ],
+        "f0d473701d52125dd055d23042de1b0d": [
+          0.0014894978376105428,
+          0.0001768818183336407,
+          0.9983336329460144
+        ],
+        "f48528156632b9c5b18af9ce2095509b": [
+          0.001667168689891696,
+          0.0002471510961186141,
+          0.9980857372283936
+        ],
+        "91e0f4ab62c9d2fd440d73a3f5308d96": [
+          0.0014492350164800882,
+          0.00020504930580500513,
+          0.9983457326889038
+        ],
+        "c96a86957a9ab1d8ca0aeeb7f040d87a_1": [
+          0.0013334212126210332,
+          0.00017911482427734882,
+          0.9984874725341797
+        ],
+        "c74ae684ba6c76e2a913493483678c9d": [
+          0.001424439949914813,
+          0.00017594761447981,
+          0.998399555683136
+        ],
+        "34b2d6aecdb5af8efacf0b0aa7e3989f": [
+          0.0012405579909682274,
+          0.00019122955563943833,
+          0.9985681772232056
+        ],
+        "c611875b43b67b91030b889b267bbcb3": [
+          0.0015705482801422477,
+          0.0002495805383659899,
+          0.9981799125671387
+        ],
+        "0b90c6710a65eb55fea4cc92895bf601": [
+          0.0016584901604801416,
+          0.00025834565167315304,
+          0.998083233833313
+        ],
+        "5169f7ae0781b15161551de3a189ebef": [
+          0.002079474739730358,
+          0.0002518224064260721,
+          0.9976686835289001
+        ],
+        "a2daf73d33541af0846673afd8e49abe": [
+          0.0012883285526186228,
+          0.00015746839926578104,
+          0.9985541701316833
+        ],
+        "fad197409a977126c9587eccd240ceea": [
+          0.0017110283952206373,
+          0.00020679891167674214,
+          0.998082160949707
+        ],
+        "2987db72e66f5fa0015ac64f9b3614ec": [
+          0.0016345285112038255,
+          0.0001853452413342893,
+          0.9981801509857178
+        ],
+        "08d3175de59a639be02f2ebc032d56bd": [
+          0.001482866588048637,
+          0.00017606520850677043,
+          0.9983410835266113
+        ],
+        "e3c9e83c0c62d842de2dfe229f5e6d41": [
+          0.001935475505888462,
+          0.0002613694523461163,
+          0.9978031516075134
+        ]
+      },
+      "average_by_agent": [
+        0.0015437082562129944,
+        0.00019977567790192553,
+        0.9982565253973007
+      ],
+      "stdev_by_agent": [
+        0.00028955511554599675,
+        3.8041839065229254e-05,
+        0.00032100083534182484
+      ],
+      "by_terminal_disagreement": {
+        "agreement": {
+          "count": 19,
+          "average_by_agent": [
+            0.0015154392029599923,
+            0.0001984243893897847,
+            0.9982861468666478
+          ]
+        },
+        "disagreement": {
+          "count": 1,
+          "average_by_agent": [
+            0.002080820268020034,
+            0.00022545015963260084,
+            0.9976937174797058
+          ]
+        }
+      },
+      "inference_seconds": 0.11487158085219562
+    }
+  },
+  "learned_weight_changes": [],
+  "identical_terminal_answers": 19,
+  "runtime_failures": [],
+  "command_wall_seconds": 951.0226839580573
+}
