@@ -127,7 +127,11 @@ class CompressionExecutor:
 
     async def invoke(self, request: CompressionRequest) -> CompressionResult:
         messages = self.build_messages(request)
-        kwargs: dict[str, Any] = {"messages": messages, "tools": request.tools}
+        # Summarization is a single pure-text turn: tool definitions only bloat
+        # the request (large harness tool tables run to thousands of tokens)
+        # and can coax tool_call-shaped output. FullCompactProcessor already
+        # calls its model with tools=None for the same reason.
+        kwargs: dict[str, Any] = {"messages": messages, "tools": None}
         if request.output_parser is not None:
             kwargs["output_parser"] = request.output_parser
         try:
