@@ -106,3 +106,20 @@ class TestAttachWorkspaceCacheCreatesEmptyCache:
         assert ws_mgr.workspace_cache is shared_cache
         ws_mgr.attach_workspace_cache.assert_not_called()
         backend.attach_workspace_manager.assert_called_once_with(ws_mgr)
+
+
+class TestTaskLoopBudgetRailSpecs:
+    """Every team member gets an outer-loop ceiling and a budget notice."""
+
+    def test_specs_cap_rounds_at_member_max_iterations(self) -> None:
+        specs = AgentConfigurator._task_loop_budget_rail_specs(
+            SimpleNamespace(max_iterations=25)
+        )
+        by_type = {spec.type: spec for spec in specs}
+        assert by_type["core.task_completion"].params == {"max_rounds": 25}
+        assert "core.budget_notice" in by_type
+
+    def test_specs_tolerate_missing_max_iterations(self) -> None:
+        specs = AgentConfigurator._task_loop_budget_rail_specs(SimpleNamespace())
+        by_type = {spec.type: spec for spec in specs}
+        assert by_type["core.task_completion"].params == {"max_rounds": None}

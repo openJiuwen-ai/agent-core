@@ -13,6 +13,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from openjiuwen.harness.schema.stop_condition import (
+    BudgetLimit,
     CompletionPromiseEvaluator,
     StopConditionEvaluator,
     StopEvaluationContext,
@@ -65,6 +66,33 @@ class LoopCoordinator:
     def stop_reason(self) -> Optional[str]:
         """Name of the evaluator that stopped the loop."""
         return self._stop_reason
+
+    @property
+    def token_usage(self) -> int:
+        """Cumulative token usage across all completed rounds."""
+        return self._token_usage
+
+    @property
+    def elapsed_seconds(self) -> float:
+        """Wall-clock seconds since the loop started (0 before reset)."""
+        if not self._start_time:
+            return 0.0
+        return max(0.0, time.monotonic() - self._start_time)
+
+    def budget_limits(self) -> tuple[BudgetLimit, ...]:
+        """Return the hard budgets the evaluator chain enforces.
+
+        Only evaluators that model a countable resource (rounds / tokens /
+        seconds) contribute; predicate-style evaluators return ``None`` and
+        are skipped. Consumers use this as the single source of truth for
+        budget warnings, so warnings cannot drift from what stops the loop.
+        """
+        limits: list[BudgetLimit] = []
+        for ev in self._evaluators:
+            limit = ev.budget()
+            if limit is not None:
+                limits.append(limit)
+        return tuple(limits)
 
     # -- mutation --
 
