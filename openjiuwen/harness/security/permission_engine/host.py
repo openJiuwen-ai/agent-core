@@ -4,11 +4,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Literal
 
 from openjiuwen.harness.security.permission_engine.models import PermissionConfirmResponse, PermissionResult
+from openjiuwen.harness.security.permission_engine.prompt_texts import PermissionPromptTexts
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,13 @@ class ToolPermissionHost:
 
     permission_scene_hook: PermissionSceneHook | None = None
     """宿主场景钩子（如数字分身）；见 :data:`PermissionSceneHook`。"""
+
+    prompt_texts: PermissionPromptTexts = field(default_factory=PermissionPromptTexts)
+    """内置 ASK 确认界面的文案模板；见 :class:`PermissionPromptTexts`。
+
+    默认值与该确认界面历来的输出逐字一致；面向其它语言用户的宿主传入自己的实例。
+    走 ``request_permission_confirmation`` 自行渲染确认界面的宿主用不到本字段。
+    """
 
 
 __all__ = [
