@@ -360,10 +360,14 @@ class CoordinationKernel:
     async def _mark_live_teammates(self, target_status: MemberStatus) -> None:
         """Persist ``target_status`` for every spawned teammate before tearing down handles.
 
-        Members that were never started (UNSTARTED) or already gone (SHUTDOWN)
-        keep their existing status — the mark only applies to runtime that
-        was actually live during this round. Used by both pause (writes
-        PAUSED — natural round-end idle) and stop (writes STOPPED —
+        Members that were never started (UNSTARTED), are still spawning
+        (STARTING), or are already gone (SHUTDOWN) keep their existing
+        status — the mark only applies to runtime that was actually live
+        during this round. STARTING in particular has no PAUSED/STOPPED
+        edge in ``MEMBER_TRANSITIONS`` (a spawning member has no live
+        round to pause), so marking it would only bounce off the DAO
+        guard with a misleading error log (PM-40). Used by both pause
+        (writes PAUSED — natural round-end idle) and stop (writes STOPPED —
         external teardown without disbanding the team) so the persistence
         layer captures *why* the teammate runtime went away.
         """
@@ -386,7 +390,7 @@ class CoordinationKernel:
                 current = MemberStatus(member.status)
             except ValueError:
                 continue
-            if current in {MemberStatus.UNSTARTED, MemberStatus.SHUTDOWN}:
+            if current in {MemberStatus.UNSTARTED, MemberStatus.STARTING, MemberStatus.SHUTDOWN}:
                 continue
             try:
                 # set_member_status：DAO 直写补发 MemberStatusChangedEvent，

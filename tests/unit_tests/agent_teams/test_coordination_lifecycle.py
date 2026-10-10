@@ -26,6 +26,7 @@ from openjiuwen.agent_teams.schema.events import (
     TeamEvent,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.schema.status import MemberStatus
 
 
 class _StubSession:
@@ -511,3 +512,38 @@ async def test_pause_pauses_polls_before_midsteps():
 
     assert seen.get("polls_paused") is True
     assert host.stream_controller.stream_queue is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_mark_live_teammates_skips_starting_member():
+    """pause/stop 命中 spawn 中（STARTING）的成员 → 跳过不标。
+
+    STARTING 在 MEMBER_TRANSITIONS 中无 PAUSED/STOPPED 边（成员现场还没建起来，
+    谈不上暂停它），标记只会被 DAO CAS 守卫拒绝并刷误导性 error 日志；
+    spawn 完成自会落 READY。READY 成员不受影响照标。
+    """
+    host = _make_kernel_host()
+    host.spawn_manager.spawned_handles = {
+        "m-ready": object(),
+        "m-starting": object(),
+        "m-unstarted": object(),
+    }
+    roster = [
+        SimpleNamespace(member_name="leader-1", status="busy"),  # leader 跳过
+        SimpleNamespace(member_name="m-ready", status="ready"),
+        SimpleNamespace(member_name="m-starting", status="starting"),
+        SimpleNamespace(member_name="m-unstarted", status="unstarted"),
+        SimpleNamespace(member_name="m-not-spawned", status="ready"),  # 不在 spawned_handles 跳过
+    ]
+    team_backend = SimpleNamespace(
+        list_member_roster=AsyncMock(return_value=roster),
+        set_member_status=AsyncMock(return_value=True),
+    )
+    host.infra.team_backend = team_backend
+    kernel = CoordinationKernel(host)
+
+    await kernel._mark_live_teammates(MemberStatus.PAUSED)
+
+    marked = [c.args[0] for c in team_backend.set_member_status.call_args_list]
+    assert marked == ["m-ready"]
