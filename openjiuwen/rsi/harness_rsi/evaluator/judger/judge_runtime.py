@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import Model, SystemMessage, UserMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -194,13 +195,25 @@ async def run_judge_agent(
         except MissingJudgeVerdictError as exc:
             if budget.turns >= budget.iterations:
                 raise JudgeIterationLimitError("Judge reading iteration limit reached without a verdict") from exc
+        except ValueError:
+            # The evaluator persists raw output and owns format repair and scoring validation.
+            pass
         return raw
     finally:
         for rail in agent.configured_rails():
             if isinstance(rail, JudgeReadOnlyRail):
-                rail.uninit(agent)
-        await agent.cleanup_task_resources()
-        Runner.resource_mgr.remove_sys_operation(f"{agent.card.name}_{agent.card.id}")
+                try:
+                    rail.uninit(agent)
+                except Exception as exc:  # noqa: BLE001 - cleanup must not mask the verdict or primary failure
+                    logger.warning("Judge rail cleanup failed ({})", type(exc).__name__)
+        try:
+            await agent.cleanup_task_resources()
+        except Exception as exc:  # noqa: BLE001 - continue releasing remaining resources
+            logger.warning("Judge task cleanup failed ({})", type(exc).__name__)
+        try:
+            Runner.resource_mgr.remove_sys_operation(f"{agent.card.name}_{agent.card.id}")
+        except Exception as exc:  # noqa: BLE001 - cleanup must not replace the primary outcome
+            logger.warning("Judge resource removal failed ({})", type(exc).__name__)
 
 
 async def run_judge_closeout(config: EvaluatorConfig, workspace: Path) -> str:

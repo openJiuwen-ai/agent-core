@@ -41,8 +41,16 @@ async def _parse_with_format_repair(
     try:
         return parse_judge_output(output)
     except ValueError as parse_error:
-        async with asyncio.timeout(config.judge_timeout_sec):
-            repaired = await repair_judge_json(config, output, str(parse_error))
+        error = str(parse_error)
+        write_judge_json(judge_dir / "format_error.json", {"error_type": type(parse_error).__name__, "message": error})
+
+        async def invoke_repair() -> str:
+            async with asyncio.timeout(config.judge_timeout_sec):
+                return await repair_judge_json(config, output, error)
+
+        repaired = await run_model_call_with_retries(
+            invoke_repair, operation_name="judge format repair", max_retries=config.judge_max_retries,
+        )
         write_judge_json(judge_dir / "format_repair.json", {"raw_output": repaired})
         return parse_judge_output(repaired)
 

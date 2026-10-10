@@ -21,6 +21,23 @@ def test_default_model_call_retry_budget_is_twenty() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [asyncio.CancelledError, KeyboardInterrupt, SystemExit])
+async def test_control_flow_exceptions_are_never_retried(error_type) -> None:
+    attempts = 0
+
+    async def call_model() -> str:
+        nonlocal attempts
+        attempts += 1
+        raise error_type("timeout cancellation")
+
+    with pytest.raises(error_type):
+        await run_model_call_with_retries(
+            call_model, operation_name="judge", max_retries=1, initial_retry_delay_seconds=0,
+        )
+    assert attempts == 1
+
+
+@pytest.mark.asyncio
 async def test_retries_when_model_output_contains_mojibake() -> None:
     attempts = 0
 
