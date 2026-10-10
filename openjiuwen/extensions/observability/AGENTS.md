@@ -33,8 +33,9 @@ Nothing inside `openjiuwen` imports it.
 The relationship between the two packages is fixed:
 
 - The dependency is one-way and narrow. `tracer_otel/semconv.py` re-exports
-  exactly six standard GenAI keys from `semconv.py` here so there is one
-  authoritative definition per standard key. This package imports nothing from
+  standard GenAI keys from `semconv.py` here (grew from the original six with
+  the GenAI semconv completion work) so there is one authoritative definition
+  per standard key. This package imports nothing from
   `tracer_otel`, at any time.
 - The two vocabularies overlap and stay separate on purpose. `tracer_otel`
   owns `openjiuwen.workflow.*` / `openjiuwen.agent.*` and its own span shape;

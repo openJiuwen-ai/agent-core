@@ -16,6 +16,8 @@ work correctly without relying on global state.
 
 from __future__ import annotations
 
+import os
+
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
@@ -67,10 +69,17 @@ def init_otel_tracer(config: OtelTracerConfig) -> trace.Tracer:
 def _build_provider(config: OtelTracerConfig) -> TracerProvider:
     """Build the private TracerProvider for the tracer_otel handlers."""
 
-    resource = Resource.create({
+    resource_attrs = {
         "service.name": config.service_name,
         "service.version": config.service_version or "unknown",
-    })
+    }
+    # In k8s pods HOSTNAME is the pod name. Gate on the service env so hosts
+    # that merely happen to set HOSTNAME (bare metal, plain CI containers,
+    # where it is a container/hostname id) don't pollute the resource.
+    pod_name = os.environ.get("HOSTNAME", "")
+    if pod_name and os.environ.get("KUBERNETES_SERVICE_HOST"):
+        resource_attrs["k8s.pod.name"] = pod_name
+    resource = Resource.create(resource_attrs)
 
     sampler = ParentBasedTraceIdRatio(rate=config.sample_rate)
     provider = TracerProvider(sampler=sampler, resource=resource)

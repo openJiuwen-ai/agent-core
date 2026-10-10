@@ -107,12 +107,25 @@ class TestInitOtelTracer:
         )
         tracer = init_otel_tracer(config)
         assert tracer is not None
-        # Verify tracer can produce spans (Resource attributes are embedded
-        # in the provider, not directly accessible from the Tracer object)
-        span = tracer.start_span("test_resource_span")
-        # Resource attributes are propagated to spans via the provider
-        assert span is not None
-        span.end()
+        # Resource attributes are readable off the SDK Tracer
+        assert tracer.resource.attributes["service.name"] == "my-service"
+        assert tracer.resource.attributes["service.version"] == "1.2.3"
+
+    def test_pod_name_added_to_resource_in_k8s(self, monkeypatch):
+        """Inside a k8s pod HOSTNAME is the pod name; both service env vars
+        present → k8s.pod.name rides the Resource."""
+        monkeypatch.setenv("HOSTNAME", "agent-core-7f9c-6d8f9")
+        monkeypatch.setenv("KUBERNETES_SERVICE_HOST", "10.96.0.1")
+        tracer = init_otel_tracer(OtelTracerConfig(exporter_type="console"))
+        assert tracer.resource.attributes["k8s.pod.name"] == "agent-core-7f9c-6d8f9"
+
+    def test_pod_name_absent_outside_k8s(self, monkeypatch):
+        """HOSTNAME exists on bare metal and plain containers too — without
+        the k8s service env it must not leak into the Resource."""
+        monkeypatch.setenv("HOSTNAME", "agent-core-7f9c-6d8f9")
+        monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+        tracer = init_otel_tracer(OtelTracerConfig(exporter_type="console"))
+        assert "k8s.pod.name" not in tracer.resource.attributes
 
 
 class TestSampleRateValidation:

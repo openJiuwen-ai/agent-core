@@ -12,6 +12,10 @@ registry); nothing inside `openjiuwen` imports this package.
 - `handler.py`: `OtelAgentHandler` / `OtelWorkflowHandler`. Every callback is
   try/except-guarded — OTel failures must never propagate into the business
   flow.
+- `otel_rail.py`: `OtelRail`, the agent-rail emitter that turns AgentRail
+  callbacks into `tracer.trigger` events. Callbacks carry the same
+  try/except guarantee — the rail dispatch layer would otherwise treat a
+  raising callback as a business failure (recorded in retry history).
 - `span_manager.py`: agent-span lifecycle bookkeeping for the handlers.
 - `setup.py`: builds a private `TracerProvider` from `OtelTracerConfig`. It
   deliberately never calls `trace.set_tracer_provider()` itself, so it cannot
@@ -33,8 +37,17 @@ facts with different wire formats, and that is intentional:
 
 - GenAI keys (`gen_ai.input.messages`, `gen_ai.operation.name`, ...) are
   re-exported from `extensions.observability.semconv` so there is exactly one
-  authoritative definition per standard key. These six are the only shared
-  symbols; do not grow this list casually.
+  authoritative definition per standard key. Only standard keys carried by the
+  pinned registry in `observability/gen_ai_semconv.py` may be re-exported this
+  way; facts the registry does not model are defined here as this package's own
+  `openjiuwen.*` extensions (`openjiuwen.gen_ai.usage.*_cost`,
+  `openjiuwen.llm.prev_message_count`, `openjiuwen.gen_ai.user.id`,
+  `openjiuwen.gen_ai.metadata`, `openjiuwen.trace.name`,
+  `openjiuwen.gen_ai.response.inter_token_latency_ms`,
+  `openjiuwen.gen_ai.reasoning.duration_ms`) — project extensions never ride
+  the `gen_ai.*` prefix. Do not grow the re-export list casually.
+  `gen_ai.provider.name` (`"openjiuwen"`) is set on every span; the
+  non-standard `gen_ai.system` key is deliberately absent on this stack.
 - Project keys (`openjiuwen.workflow.*`, `openjiuwen.agent.*`,
   `openjiuwen.invoke_id`, `openjiuwen.session_id` — note the underscore — and
   the base-span block `OJ_INVOKE_ID` … `OJ_META_DATA`) are this package's own
