@@ -134,20 +134,16 @@ class SubagentApprovalRegistry:
         future = loop.create_future()
         with self._guard:
             if any(
-                item.request.session_id == sid
-                and item.request.agent_scope_id == scope
+                item.request.session_id == sid and item.request.agent_scope_id == scope
                 for item in self._pending.values()
             ):
                 raise SubagentApprovalCapacityError(
                     f"scope already has a pending approval: session={sid!r} scope={scope!r}",
                 )
-            session_count = sum(
-                item.request.session_id == sid for item in self._pending.values()
-            )
+            session_count = sum(item.request.session_id == sid for item in self._pending.values())
             if session_count >= self._max_pending_per_session:
                 raise SubagentApprovalCapacityError(
-                    f"session pending approval limit reached: session={sid!r} "
-                    f"limit={self._max_pending_per_session}",
+                    f"session pending approval limit reached: session={sid!r} limit={self._max_pending_per_session}",
                 )
             self._pending[approval_id] = _PendingApproval(request, future, loop)
             session_lock = self._session_locks.setdefault(sid, asyncio.Lock())
@@ -210,9 +206,7 @@ class SubagentApprovalRegistry:
                 if current is not None and current.future is future:
                     self._pending.pop(approval_id, None)
                 # 该 session 已无 pending 时回收锁，避免长跑进程泄漏。
-                if not any(
-                    item.request.session_id == sid for item in self._pending.values()
-                ):
+                if not any(item.request.session_id == sid for item in self._pending.values()):
                     self._session_locks.pop(sid, None)
             if not future.done():
                 future.cancel()
@@ -244,7 +238,10 @@ class SubagentApprovalRegistry:
                 logger.warning(
                     "[skill_authorization] subagent.approval_scope_mismatch "
                     "session=%s expected_scope=%s got_scope=%s kind=%s",
-                    sid, request.agent_scope_id, scope, kind.value,
+                    sid,
+                    request.agent_scope_id,
+                    scope,
+                    kind.value,
                 )
                 return False
             self._pending.pop(rid, None)
@@ -253,6 +250,8 @@ class SubagentApprovalRegistry:
             pending.future,
             answer,
             None,
+            request=request,
+            via="resolve",
         )
         logger.info(
             "[skill_authorization] subagent.approval_resolved kind=%s session=%s scope=%s",
@@ -266,8 +265,7 @@ class SubagentApprovalRegistry:
         sid = str(session_id or "").strip()
         scope = str(agent_scope_id or "").strip()
         return self._cancel_matching(
-            lambda item: item.request.session_id == sid
-            and item.request.agent_scope_id == scope,
+            lambda item: item.request.session_id == sid and item.request.agent_scope_id == scope,
         )
 
     def cancel_session(self, session_id: str) -> int:
@@ -289,6 +287,8 @@ class SubagentApprovalRegistry:
                 item.future,
                 None,
                 SubagentApprovalCancelled("delegated approval was cancelled"),
+                request=item.request,
+                via="cancel",
             )
         return len(pending)
 
@@ -318,8 +318,7 @@ class SubagentApprovalRegistry:
             )
         except Exception:  # noqa: BLE001 — UI终态通知失败不能覆盖原超时/取消语义
             logger.warning(
-                "[skill_authorization] subagent.approval_expiry_notify_failed "
-                "kind=%s session=%s scope=%s reason=%s",
+                "[skill_authorization] subagent.approval_expiry_notify_failed kind=%s session=%s scope=%s reason=%s",
                 request.kind.value,
                 request.session_id,
                 request.agent_scope_id,
@@ -332,9 +331,27 @@ class SubagentApprovalRegistry:
         future: asyncio.Future[Any],
         result: Any,
         error: BaseException | None,
+        *,
+        request: SubagentApprovalRequest | None = None,
+        via: str = "",
     ) -> None:
-        """只在 Future 所属事件循环完成终态，避免跨线程直接变更。"""
+        """只在 Future 所属事件循环完成终态，避免跨线程直接变更。
+
+        Future 已终态（等待协程被取消/超时先收口）时，答案会凭空蒸发且
+        调用方（resolve/cancel）仍返回成功——这正是审批结果丢失事故的
+        静默形态。这里至少留下可归因的 warning（含 approval_id/scope/kind），
+        供线上统计丢失率并驱动后续是否需要答案缓存。
+        """
         if future.done():
+            if request is not None:
+                logger.warning(
+                    "[skill_authorization] subagent.approval_completion_dropped "
+                    "future_already_done via=%s approval_id=%s scope=%s kind=%s",
+                    via or "<unknown>",
+                    request.approval_id,
+                    request.agent_scope_id,
+                    request.kind.value,
+                )
             return
         if error is not None:
             future.set_exception(error)
