@@ -2,6 +2,8 @@
 
 The JiuwenBox sandbox provider adapts SysOperation file-system, shell, and code-execution interfaces to the JiuwenBox HTTP API. Importing the module registers `fs`, `shell`, and `code` providers for `sandbox_type="jiuwenbox"`.
 
+The first file or execution operation may lazily create a sandbox. Blocking creation runs in a worker thread, and concurrent operations in the same shared scope reuse one creation result. After creation fails, that scope returns the creation error immediately for 30 seconds instead of repeatedly waiting for timeouts. Creation can be retried after the cooldown expires or the shared cache is explicitly cleared.
+
 See [BaseFSProvider, BaseShellProvider, and BaseCodeProvider](../../../../openjiuwen.core/sys_operation/sandbox/providers/base_provider.md) for the base contracts. Return types are defined in [sys_operation.result](../../../../openjiuwen.core/sys_operation/result.md).
 
 ## Configuration Example

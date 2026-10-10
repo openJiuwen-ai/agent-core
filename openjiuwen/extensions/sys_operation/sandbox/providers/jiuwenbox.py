@@ -12,6 +12,7 @@ import re
 import shlex
 import subprocess
 import threading
+import time
 from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple, TypeVar
 
@@ -287,6 +288,7 @@ def _is_sandbox_exec_delivered(
 
 
 _ENV_API_TOKEN = "JIUWENBOX_API_TOKEN"
+_CREATE_SANDBOX_MIN_TIMEOUT_SECONDS = 180.0
 
 
 def _resolve_api_token(api_token: str | None) -> str | None:
@@ -338,7 +340,12 @@ class _JiuwenBoxClient:
         if policy_mode is not None:
             body["policy_mode"] = policy_mode
 
-        response = self._client.post("/api/v1/sandboxes", json=body)
+        # Windows create applies workspace ACLs synchronously before responding.
+        response = self._client.post(
+            "/api/v1/sandboxes",
+            json=body,
+            timeout=max(self._client.timeout.read or 0, _CREATE_SANDBOX_MIN_TIMEOUT_SECONDS),
+        )
         _raise_for_status(response)
         return response.json()["id"]
 
@@ -552,6 +559,9 @@ _T = TypeVar("_T")
 class _JiuwenBoxProviderMixin:
     _shared_lock = threading.Lock()
     _shared_sandbox_ids: Dict[str, str] = {}
+    # Acquired only by worker threads; never hold the cache lock across HTTP.
+    _creation_locks: ClassVar[Dict[str, threading.Lock]] = {}
+    _creation_failures: ClassVar[Dict[str, Tuple[float, str]]] = {}
     # Cache shared_scope_key -> lifecycle_hook captured at create time, so teardown
     # (delete_jiuwenbox_sandbox) can fire delete hooks without being passed them.
     _lifecycle_hooks: ClassVar[Dict[str, Callable[[str, dict], None]]] = {}
@@ -701,6 +711,7 @@ class _JiuwenBoxProviderMixin:
         """Register sandbox_id in the cross-instance shared cache under shared_key."""
         with cls._shared_lock:
             cls._shared_sandbox_ids[shared_key] = sandbox_id
+            cls._creation_failures.pop(shared_key, None)
 
     @classmethod
     def register_lifecycle_hook(
@@ -723,6 +734,8 @@ class _JiuwenBoxProviderMixin:
         """Remove one cached sandbox_id entry; return the removed id if any."""
         with cls._shared_lock:
             value = cls._shared_sandbox_ids.pop(shared_key, None)
+            cls._creation_failures.pop(shared_key, None)
+            cls._creation_locks.pop(shared_key, None)
         return value if isinstance(value, str) and value else None
 
     @classmethod
@@ -738,11 +751,13 @@ class _JiuwenBoxProviderMixin:
         removed: list[str] = []
         with cls._shared_lock:
             keys_to_delete = [
-                key for key in cls._shared_sandbox_ids
-                if key.startswith(shared_key)
+                key for key in set(cls._shared_sandbox_ids) | set(cls._creation_locks) | set(cls._creation_failures)
+                if key == shared_key or key.startswith(shared_key + "|")
             ]
             for key in keys_to_delete:
                 value = cls._shared_sandbox_ids.pop(key, None)
+                cls._creation_failures.pop(key, None)
+                cls._creation_locks.pop(key, None)
                 if isinstance(value, str) and value and value not in removed:
                     removed.append(value)
         return removed
@@ -756,6 +771,8 @@ class _JiuwenBoxProviderMixin:
         with cls._shared_lock:
             sandbox_id = cls._shared_sandbox_ids.pop(shared_key, None)
             hook = cls._lifecycle_hooks.pop(shared_key, None)
+            cls._creation_failures.pop(shared_key, None)
+            cls._creation_locks.pop(shared_key, None)
         if isinstance(sandbox_id, str) and sandbox_id:
             return sandbox_id, hook
         return None
@@ -770,6 +787,8 @@ class _JiuwenBoxProviderMixin:
             for shared_key, cached_id in list(cls._shared_sandbox_ids.items()):
                 if cached_id == sandbox_id:
                     cls._shared_sandbox_ids.pop(shared_key, None)
+                    cls._creation_failures.pop(shared_key, None)
+                    cls._creation_locks.pop(shared_key, None)
                     hook = cls._lifecycle_hooks.pop(shared_key, None)
                     return shared_key, sandbox_id, hook
         return None
@@ -786,6 +805,8 @@ class _JiuwenBoxProviderMixin:
                 if isinstance(sandbox_id, str) and sandbox_id
             ]
             cls._shared_sandbox_ids.clear()
+            cls._creation_failures.clear()
+            cls._creation_locks.clear()
         return entries
 
     def _get_sandbox_id(self) -> str:
@@ -805,34 +826,56 @@ class _JiuwenBoxProviderMixin:
             shared_key = self._shared_scope_key()
             self.register_lifecycle_hook(shared_key, lifecycle_hook)
             with self._shared_lock:
-                self._sandbox_id = self._shared_sandbox_ids.get(shared_key)
-                newly_created = False
+                create_lock = self._creation_locks.setdefault(shared_key, threading.Lock())
+            with create_lock:
+                with self._shared_lock:
+                    self._sandbox_id = self._shared_sandbox_ids.get(shared_key)
+                    failure = self._creation_failures.get(shared_key)
+                if self._sandbox_id is None and failure and time.monotonic() < failure[0]:
+                    raise RuntimeError(f"jiuwenbox sandbox creation temporarily unavailable: {failure[1]}")
                 if self._sandbox_id is None:
-                    # before_create under _shared_lock before first lazy create.
-                    _invoke_lifecycle_hook(
-                        lifecycle_hook, "before_create", {"reason": "initial"},
-                    )
-                    # PUT root idle policy before create (reaper ignores per-sandbox timeout).
-                    self._configure_server_idle_timeout()
-                    self._sandbox_id = self._get_client().create_sandbox(
-                        **self._sandbox_create_options_from_launcher_extra_params(),
-                    )
-                    newly_created = True
-                self._shared_sandbox_ids[shared_key] = self._sandbox_id
+                    sandbox_id = None
+                    try:
+                        _invoke_lifecycle_hook(
+                            lifecycle_hook, "before_create", {"reason": "initial"},
+                        )
+                        self._configure_server_idle_timeout()
+                        sandbox_id = self._get_client().create_sandbox(
+                            **self._sandbox_create_options_from_launcher_extra_params(),
+                        )
+                        _try_upload_preserve_files(
+                            self._get_client(), sandbox_id,
+                            self._launcher_extra_params().get("preserve_files_upload"),
+                        )
+                        _invoke_lifecycle_hook(
+                            lifecycle_hook, "after_create", {"reason": "initial", "sandbox_id": sandbox_id},
+                        )
+                    except Exception as exc:
+                        if sandbox_id is not None:
+                            try:
+                                self._get_client().delete_sandbox(sandbox_id)
+                            except Exception:
+                                logger.warning(
+                                    "[jiuwenbox] cleanup after failed create hook/upload failed",
+                                    exc_info=True,
+                                )
+                        with self._shared_lock:
+                            if self._creation_locks.get(shared_key) is create_lock:
+                                self._creation_failures[shared_key] = (time.monotonic() + 30.0, str(exc))
+                        raise
+                    with self._shared_lock:
+                        valid = (
+                            self._creation_locks.get(shared_key) is create_lock
+                            and self._shared_sandbox_ids.get(shared_key) in (None, sandbox_id)
+                        )
+                        if valid:
+                            self._sandbox_id = sandbox_id
+                            self._shared_sandbox_ids[shared_key] = sandbox_id
+                            self._creation_failures.pop(shared_key, None)
+                    if not valid:
+                        self._get_client().delete_sandbox(sandbox_id)
+                        raise RuntimeError("jiuwenbox sandbox creation invalidated by teardown")
                 self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
-            # Sync upload preserve_files only when this process just created the sandbox.
-            if newly_created:
-                _try_upload_preserve_files(
-                    self._get_client(),
-                    self._sandbox_id,
-                    self._launcher_extra_params().get("preserve_files_upload"),
-                )
-                # after_create after preserve_files upload completes.
-                _invoke_lifecycle_hook(
-                    lifecycle_hook,
-                    "after_create",
-                    {"reason": "initial", "sandbox_id": self._sandbox_id},
-                )
         else:
             shared_key = self._shared_scope_key()
             with self._shared_lock:
@@ -853,7 +896,7 @@ class _JiuwenBoxProviderMixin:
         """Run op with auto sandbox recreate on sandbox-not-found 404."""
         max_retries = _resolve_recreate_retries()
         last_exc: Optional[httpx.HTTPStatusError] = None
-        stale_sandbox_id = self._get_sandbox_id()
+        stale_sandbox_id = await asyncio.to_thread(self._get_sandbox_id)
         for attempt in range(max_retries + 1):
             if attempt == 0:
                 sandbox_id = stale_sandbox_id
@@ -940,7 +983,7 @@ class _JiuwenBoxProviderMixin:
         when the pipeline failed and local fallback was not used.
         """
         max_retries = _resolve_recreate_retries()
-        stale_sandbox_id = self._get_sandbox_id()
+        stale_sandbox_id = await asyncio.to_thread(self._get_sandbox_id)
         last_error: Optional[str] = None
 
         for attempt in range(max_retries + 1):
