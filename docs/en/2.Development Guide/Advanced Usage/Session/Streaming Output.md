@@ -124,7 +124,6 @@ from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent import BaseAgent
 from openjiuwen.core.single_agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema, CustomSchema, StreamMode
-from openjiuwen.core.session import get_default_inmemory_checkpointer
 
 class MockModel:
     def __init__(self, model_name: str):
@@ -174,8 +173,8 @@ class CustomAgent(BaseAgent):
         # Create current runtime
         session = create_agent_session(session_id=session_id, card=self.card)
 
-        # Temporary solution, will be removed in future versions
-        await get_default_inmemory_checkpointer().pre_agent_execute(getattr(getattr(session, "_inner"), "_inner"), inputs)
+        # Restore session state via checkpointer (default InMemory)
+        await session.pre_run(inputs=inputs)
 
         async def stream_process():
             try:
