@@ -77,7 +77,9 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
      （`tools/subagent/subagent_tools.py`），消费 `subagent_runtime` —— `S_10`。
    - worktree：`WorktreeManager` / `WorktreeConfig` / `WorktreeLifecyclePolicy` +
      `EnterWorktreeTool` / `ExitWorktreeTool`（`tools/worktree/`）。
-   - shell：`BashTool` / `PowerShellTool` / `CodeTool`（`tools/shell/` + `code.py`）。
+   - shell：`BashTool` / `PowerShellTool` / `CodeTool`（`tools/shell/` + `code.py`）；
+     大输出（> `max_output_chars`，默认 20000）落盘并在 `<persisted-output>` 中以 head+tail
+     预览回显（`truncate_output`，`head_ratio` 默认 0.6），保证尾部错误/结束状态可见。
    - cron：`create_cron_tools()` + `CronToolContext` / `CronToolBackend`(Protocol)。
    - memory：`MemorySearchTool` / `MemoryGetTool` / `ReadMemoryTool` / `WriteMemoryTool` /
      `EditMemoryTool` + `CompressionRecallTool` + `CodingMemory{Read,Write,Edit}Tool`。
@@ -140,6 +142,10 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 13. **可执行数据不是展示文本**：URL、selector、target/generation 标识完整保留；紧凑投影
     超过容量时删除整项或省略字段，不产生貌似可执行的截断链接。滚动 transport 最长等待
     15 秒（仍受更短的任务期限约束），点击和脚本等副作用操作超时不能自动重放。
+14. **Shell 大输出以 head+tail 回显**：`BashTool` / `PowerShellTool` 对超过
+    `max_output_chars`（默认 20000）的输出落盘并在 `<persisted-output>` 块中回显带缺口标记的
+    head+tail 预览（`truncate_output`，`head_ratio` 默认 0.6），使尾部错误/结束状态可见；
+    小输出内联、不落盘。
 
 ## 接口契约
 

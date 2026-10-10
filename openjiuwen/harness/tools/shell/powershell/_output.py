@@ -56,7 +56,6 @@ def persist_large_output(stdout: str, stderr: str) -> tuple[str, int]:
 
 _PERSISTED_OUTPUT_TAG = "<persisted-output>"
 _PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
-_PREVIEW_SIZE_BYTES = 2000
 _LEADING_BLANK_LINES = re.compile(r"^(\s*\n)+")
 
 
@@ -77,23 +76,13 @@ def _format_file_size(size_in_bytes: float) -> str:
     return f"{text[:-2] if text.endswith('.0') else text}GB"
 
 
-def _generate_preview(content: str, max_bytes: int) -> tuple[str, bool]:
-    """Return (preview, has_more), cutting on a line boundary when possible."""
-    if len(content) <= max_bytes:
-        return content, False
-    truncated = content[:max_bytes]
-    last_newline = truncated.rfind("\n")
-    cut = last_newline if last_newline > max_bytes * 0.5 else max_bytes
-    return content[:cut], True
-
-
-def _build_persisted_message(filepath: str, original_size: int, preview: str, has_more: bool) -> str:
-    """Wrap an oversized-output preview in a <persisted-output> block."""
+def _build_persisted_message(filepath: str, original_size: int, preview: str) -> str:
+    """Wrap an oversized-output head+tail preview in a <persisted-output> block."""
     msg = f"{_PERSISTED_OUTPUT_TAG}\n"
     msg += f"Output too large ({_format_file_size(original_size)}). Full output saved to: {filepath}\n\n"
-    msg += f"Preview (first {_format_file_size(_PREVIEW_SIZE_BYTES)}):\n"
+    msg += "Head+tail preview:\n"
     msg += preview
-    msg += "\n...\n" if has_more else "\n"
+    msg += "\n"
     msg += _PERSISTED_OUTPUT_CLOSING_TAG
     return msg
 
@@ -124,6 +113,7 @@ class CommandOutput:
     exit_code: int
     warning: str | None
     max_output_chars: int
+    head_ratio: float = 0.6
 
 
 def render_tool_content(
@@ -135,8 +125,9 @@ def render_tool_content(
     Mirrors the bash_v2 post-processing without depending on the anyshell engine:
     stdout and stderr are merged (the error path surfaces the merged stream after
     an ``Exit code N`` header), oversized output is persisted to disk and shown as
-    a ``<persisted-output>`` preview, and any destructive-command warning is
-    prepended so it stays visible to the model.
+    a head+tail ``<persisted-output>`` preview (so both setup context and trailing
+    errors stay visible), and any destructive-command warning is prepended so it
+    stays visible to the model.
 
     Args:
         output: Bundled command result and rendering configuration.
@@ -149,8 +140,9 @@ def render_tool_content(
     merged = _merge(output.stdout, output.stderr)
     if output.max_output_chars > 0 and len(merged) > output.max_output_chars:
         path, size = persist_large_output(output.stdout, output.stderr)
-        preview, has_more = _generate_preview(_LEADING_BLANK_LINES.sub("", merged).rstrip(), _PREVIEW_SIZE_BYTES)
-        stdout = _build_persisted_message(path, size, preview, has_more)
+        cleaned = _LEADING_BLANK_LINES.sub("", merged).rstrip()
+        preview = truncate_output(cleaned, output.max_output_chars, head_ratio=output.head_ratio)
+        stdout = _build_persisted_message(path, size, preview)
         stderr = "(see persisted output)" if output.stderr else "(empty)"
     else:
         stdout = _LEADING_BLANK_LINES.sub("", output.stdout).rstrip() if output.stdout else "(empty)"
