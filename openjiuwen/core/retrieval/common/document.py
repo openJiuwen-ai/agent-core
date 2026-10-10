@@ -124,7 +124,14 @@ class MultimodalDocument(Document):
                         }
                     )
                 case "audio":
-                    file_format = re.match(r"data:audio/(.+?);base64,", data).group(1)
+                    match = re.match(r"data:audio/(.+?);base64,", data)
+                    if not match:
+                        _raise_validation_error_with_info(
+                            error_type="invalid_audio_data",
+                            message='Audio data must be a base64 data URI starting with "data:audio/"',
+                            context=dict(data=data[:100] if isinstance(data, str) else data),
+                        )
+                    file_format = match.group(1)
                     content.append(
                         {
                             "type": "input_audio",
