@@ -83,10 +83,11 @@ def load_skill_self_evolution_map(
     *,
     skills_dirs: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
 ) -> dict[str, SkillSelfEvolutionMode]:
-    """Return ``{skill_id: selfEvolution}`` for *external* skill entries.
+    """Return ``{skill_id: selfEvolution}`` for skill entries in capabilities.
 
-    Builtin skills (``source: builtin``) are omitted — they never self-evolve via
-    this map. Entries without ``selfEvolution`` are also omitted.
+    Builtin skills (``source: builtin``) are always mapped to ``off`` so online
+    evolution cannot fall through to the rail ``auto_save`` default. External
+    entries without ``selfEvolution`` are omitted (caller uses rail default).
     """
     path = (
         capabilities_path
@@ -110,7 +111,9 @@ def load_skill_self_evolution_map(
         name = str(item.get("id") or "").strip()
         if not name:
             continue
+        # Product rule: official/builtin skills never self-evolve.
         if str(item.get("source") or "").strip().lower() == "builtin":
+            result[name] = "off"
             continue
         if "selfEvolution" not in item:
             continue
@@ -124,7 +127,10 @@ def get_skill_self_evolution_mode(
     capabilities_path: Optional[Path] = None,
     skills_dirs: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
 ) -> Optional[SkillSelfEvolutionMode]:
-    """Return recorded mode for a skill, or ``None`` if unlisted/builtin."""
+    """Return recorded mode for a skill, or ``None`` if unlisted.
+
+    Builtin skills are recorded as ``off`` (see :func:`load_skill_self_evolution_map`).
+    """
     name = (skill_name or "").strip()
     if not name:
         return None
@@ -132,6 +138,56 @@ def get_skill_self_evolution_mode(
         capabilities_path,
         skills_dirs=skills_dirs,
     ).get(name)
+
+
+def load_capabilities_builtin_skill_names(
+    capabilities_path: Optional[Path] = None,
+    *,
+    skills_dirs: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
+) -> set[str]:
+    """Return skill ids with ``source: builtin`` in capabilities.json."""
+    path = (
+        capabilities_path
+        if capabilities_path is not None
+        else resolve_capabilities_config_path(skills_dirs)
+    )
+    if path is None:
+        return set()
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("[skill_self_evolution] failed to read %s: %s", path, exc)
+        return set()
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("capabilities"), list):
+        return set()
+
+    names: set[str] = set()
+    for item in parsed["capabilities"]:
+        if not isinstance(item, dict) or item.get("type") != "skill":
+            continue
+        name = str(item.get("id") or "").strip()
+        if not name:
+            continue
+        if str(item.get("source") or "").strip().lower() == "builtin":
+            names.add(name)
+    return names
+
+
+def is_capabilities_builtin_skill(
+    skill_name: str,
+    *,
+    capabilities_path: Optional[Path] = None,
+    skills_dirs: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
+) -> bool:
+    """Whether *skill_name* is an official builtin in capabilities.json."""
+    name = (skill_name or "").strip()
+    if not name:
+        return False
+    builtins = load_capabilities_builtin_skill_names(
+        capabilities_path,
+        skills_dirs=skills_dirs,
+    )
+    return name in builtins or name.lower() in {item.lower() for item in builtins}
 
 
 def resolve_skill_evolution_action(
@@ -143,7 +199,7 @@ def resolve_skill_evolution_action(
 ) -> SkillEvolutionAction:
     """Decide post-attribution action for a skill.
 
-    - ``off``: ``selfEvolution=off``
+    - ``off``: ``selfEvolution=off``, or ``source: builtin`` in capabilities
     - ``auto``: ``selfEvolution=auto``, or unlisted with ``default_auto_save=True``
     - ``suggest``: ``selfEvolution=suggest``, or unlisted with ``default_auto_save=False``
     """
@@ -200,6 +256,8 @@ __all__ = [
     "SkillSelfEvolutionMode",
     "filter_skill_groups_by_self_evolution",
     "get_skill_self_evolution_mode",
+    "is_capabilities_builtin_skill",
+    "load_capabilities_builtin_skill_names",
     "load_skill_self_evolution_map",
     "normalize_skill_self_evolution",
     "resolve_capabilities_config_path",
