@@ -49,6 +49,7 @@ from openjiuwen.harness.tools.web._common import (
 )
 from openjiuwen.harness.tools.web import _http
 from openjiuwen.harness.tools.web._decode import _decode_response_text
+from openjiuwen.harness.tools.web._reachability import host_from, is_dead
 
 _QUERY_STOPWORDS = {
     "the",
@@ -108,6 +109,23 @@ _DOMESTIC_SEARCH_DOMAINS = (
     "wanfangdata.com.cn",
 )
 _DOMESTIC_ENGINE_NAMES = frozenset({"baidu-scholar", "baidu-web", "cnki", "wanfang"})
+_DOMESTIC_ENGINE_HOSTS = {
+    "baidu-scholar": "xueshu.baidu.com",
+    "baidu-web": "www.baidu.com",
+    "cnki": "kns.cnki.net",
+    "wanfang": "s.wanfangdata.com.cn",
+}
+
+
+def _engine_host(engine_name: str) -> str:
+    """Return the network host a free-search engine will connect to."""
+    if engine_name == "duckduckgo":
+        return host_from(_duckduckgo_search_url("q"))
+    if engine_name == "duckduckgo-jina":
+        return "r.jina.ai"
+    if engine_name == "bing":
+        return "www.bing.com"
+    return _DOMESTIC_ENGINE_HOSTS.get(engine_name, "")
 
 
 @dataclass(frozen=True)
@@ -938,7 +956,7 @@ class WebFreeSearchTool(Tool):
         best_engine = ""
         best_rows: list[dict[str, str]] = []
 
-        engines: list[tuple[str, Any]] = []
+        engines: list[tuple[str, str, Any]] = []
         configured_engines = (
             frozenset(str(engine).strip().lower() for engine in enabled_engines)
             if enabled_engines is not None
@@ -957,16 +975,22 @@ class WebFreeSearchTool(Tool):
         domestic_scope = _domestic_scope_requested(allowed_domains)
         if domestic_scope:
             for engine_name in ("baidu-scholar", "baidu-web", "cnki", "wanfang"):
-                engines.append((engine_name, WebFreeSearchTool._search_domestic))
+                engines.append(
+                    (engine_name, _engine_host(engine_name), WebFreeSearchTool._search_domestic)
+                )
         if not domestic_scope and ddg_enabled:
             engines.extend(
                 [
-                    ("duckduckgo", WebFreeSearchTool._search_duckduckgo),
-                    ("duckduckgo-jina", WebFreeSearchTool._search_duckduckgo_via_jina),
+                    ("duckduckgo", _engine_host("duckduckgo"), WebFreeSearchTool._search_duckduckgo),
+                    (
+                        "duckduckgo-jina",
+                        _engine_host("duckduckgo-jina"),
+                        WebFreeSearchTool._search_duckduckgo_via_jina,
+                    ),
                 ]
             )
         if not domestic_scope and bing_enabled:
-            engines.append(("bing", WebFreeSearchTool._search_bing))
+            engines.append(("bing", _engine_host("bing"), WebFreeSearchTool._search_bing))
 
         if not engines:
             raise build_error(
@@ -974,7 +998,14 @@ class WebFreeSearchTool(Tool):
                 errors="all free search engines are disabled",
             )
 
-        for engine_name, runner in engines:
+        # Skip engines whose endpoint is currently known unreachable. If that
+        # would leave nothing to try (as opposed to nothing being configured),
+        # retry them all anyway so a transient all-dead state can self-heal.
+        candidates = [entry for entry in engines if not is_dead(entry[1])]
+        if not candidates:
+            candidates = engines
+
+        for engine_name, _host, runner in candidates:
             candidate_queries = [query]
             if engine_name == "bing":
                 candidate_queries = WebFreeSearchTool._bing_query_candidates(query)

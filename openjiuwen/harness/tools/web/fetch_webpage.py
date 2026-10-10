@@ -36,6 +36,10 @@ from openjiuwen.harness.tools.web._common import (
     _safe_int,
 )
 from openjiuwen.harness.tools.web._decode import _decode_response_text
+from openjiuwen.harness.tools.web._reachability import is_dead
+
+# Host of the jina.ai reader proxy used as the fallback fetch path.
+_JINA_READER_HOST = "r.jina.ai"
 
 
 def _raise_fetch_http_error(url: str, status: int, body: bytes) -> None:
@@ -227,6 +231,8 @@ class WebFetchWebpageTool(Tool):
                 raise ValueError(
                     "reader proxy fallback is disabled for the configured domestic source scope"
                 )
+            if is_dead(_JINA_READER_HOST):
+                raise ValueError("reader proxy is currently unreachable")
             return await WebFetchWebpageTool._fetch_via_jina_reader(
                 request.session,
                 request.url,
@@ -247,6 +253,8 @@ class WebFetchWebpageTool(Tool):
             # A JS-rendered page returns an HTML shell with no extractable text;
             # only fall back when there actually was a body to render.
             if not title.strip() and not text.strip() and body:
+                if is_dead(_JINA_READER_HOST):
+                    raise ValueError("reader proxy is currently unreachable")
                 return await WebFetchWebpageTool._fetch_via_jina_reader(
                     request.session,
                     request.url,
