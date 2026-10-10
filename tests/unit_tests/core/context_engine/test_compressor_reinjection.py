@@ -434,11 +434,14 @@ async def test_context_overflow_retry_stops_after_budget_retries_without_mutatin
 
 @pytest.mark.asyncio
 async def test_transient_compression_error_retries_without_changing_request():
+    # TIMEOUT 已移出同款重试（预算截断后超时≠请求太大，跨轮自然恢复）；
+    # 本用例验证的是 transient 重试不改请求的语义，用仍属 transient 的
+    # RATE_LIMIT 作为代表。
     compressor = DialogueCompressor(DialogueCompressorConfig())
     executor = MagicMock()
     executor.invoke = AsyncMock(
         side_effect=[
-            _compression_error(CompressionErrorKind.TIMEOUT),
+            _compression_error(CompressionErrorKind.RATE_LIMIT),
             CompressionResult(AssistantMessage(content="retried compact state")),
         ]
     )

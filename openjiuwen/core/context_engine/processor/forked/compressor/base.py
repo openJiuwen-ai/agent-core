@@ -38,9 +38,14 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.tool import ToolInfo
 
 _CONTEXT_OVERFLOW_RETRY_BUDGET_RATIOS = (0.85, 0.65, 0.5)
+# TIMEOUT 不在其中：预算截断后压缩输入 ≤ compression_call_max_tokens，超时
+# 不再是「请求太大」的信号，同款重试大概率再超时（每次代价一个完整流超时
+# ——2026-10-09④ 事故中 300s×3 连烧）；缩 span 重试对超时也不对症。压缩
+# noop 后主调用照常进行，下一轮 get_context_window 时 total 仍超阈值会
+# 再次触发压缩——暂时性抖动跨轮自然恢复，持久性故障同请求内重试只是把
+# 失败推迟。RATE_LIMIT 等快速失败类保留同款重试。
 _TRANSIENT_COMPRESSION_ERROR_KINDS = {
     CompressionErrorKind.RATE_LIMIT,
-    CompressionErrorKind.TIMEOUT,
     CompressionErrorKind.SERVER_UNSTABLE,
     CompressionErrorKind.UNKNOWN,
 }

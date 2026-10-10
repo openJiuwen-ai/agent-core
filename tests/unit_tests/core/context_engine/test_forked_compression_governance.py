@@ -14,6 +14,7 @@ import pytest
 from openjiuwen.core.context_engine.processor.forked.compressor.base import (
     PrefixCompactProcessorConfig,
 )
+from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.context_engine.processor.forked.compressor.current_round_compressor import (
     CurrentRoundCompressorConfig,
 )
@@ -237,3 +238,106 @@ async def test_executor_invoke_passes_no_tools():
     executor = CompressionExecutor(_StubModel())
     await executor.invoke(request)
     assert captured_kwargs["tools"] is None
+
+
+def _retries_executor(kind_sequence):
+    """按序抛指定 kind 的 CompressionError 的 stub executor，记录调用次数。"""
+    from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
+        CompressionError,
+    )
+
+    calls = {"count": 0}
+
+    class _Executor:
+        async def invoke(self, request):
+            calls["count"] += 1
+            kind = kind_sequence[min(calls["count"] - 1, len(kind_sequence) - 1)]
+            raise CompressionError(
+                kind=kind,
+                message=f"stub {kind.value}",
+                original_error=RuntimeError(f"stub {kind.value}"),
+            )
+
+    return _Executor(), calls
+
+
+@pytest.mark.asyncio
+async def test_timeout_not_retried_same_request():
+    """TIMEOUT：恰好一次调用后放弃（不再同款重试 ×2）。"""
+    from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
+        CompressionErrorKind,
+    )
+
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    executor, calls = _retries_executor([CompressionErrorKind.TIMEOUT])
+    compressor._compression_executor = executor
+    context = _budget_context()
+    window = _context_window_with()
+    span = _make_span([UserMessage(content="m")])
+
+    outcome = await compressor._invoke_compression_with_retries(
+        context=context, context_window=window, span=span, prompt="p"
+    )
+    assert outcome is None
+    assert calls["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_still_retried():
+    """RATE_LIMIT 保留同款重试（1+2 次）后放弃。"""
+    from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
+        CompressionErrorKind,
+    )
+
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    executor, calls = _retries_executor([CompressionErrorKind.RATE_LIMIT])
+    compressor._compression_executor = executor
+    context = _budget_context()
+    window = _context_window_with()
+    span = _make_span([UserMessage(content="m")])
+
+    outcome = await compressor._invoke_compression_with_retries(
+        context=context, context_window=window, span=span, prompt="p"
+    )
+    assert outcome is None
+    assert calls["count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_still_shrinks():
+    """CONTEXT_OVERFLOW 仍走缩 span 重试（重构后行为保持）。"""
+    from openjiuwen.core.context_engine.processor.forked.compressor.base import PrefixCompactSpan
+    from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
+        CompressionError,
+        CompressionErrorKind,
+    )
+
+    compressor = DialogueCompressor(DialogueCompressorConfig())
+    calls = {"count": 0}
+
+    class _Executor:
+        async def invoke(self, request):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise CompressionError(
+                    kind=CompressionErrorKind.CONTEXT_OVERFLOW,
+                    message="overflow",
+                    original_error=RuntimeError("overflow"),
+                )
+            result = MagicMock()
+            result.response = MagicMock()
+            return result
+
+    compressor._compression_executor = _Executor()
+    context = _budget_context()
+    window = _context_window_with()
+    msgs = [UserMessage(content=f"M{i} " + "x" * 300) for i in range(6)]
+    span = PrefixCompactSpan(preserved_prefix=[], messages_to_compress=list(msgs), protected_tail=[])
+
+    outcome = await compressor._invoke_compression_with_retries(
+        context=context, context_window=window, span=span, prompt="p"
+    )
+    assert outcome is not None
+    assert calls["count"] == 2, "overflow must retry after shrinking the span"
+    _result, used_span, _request = outcome
+    assert len(used_span.messages_to_compress) < 6, "retry span must be shrunk"
