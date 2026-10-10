@@ -378,11 +378,16 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
             backup_file_pattern = self.config.get("backup_file_pattern", None)
 
             # Create file handler
+            # errors="backslashreplace": on-disk records must never be dropped
+            # because a message being logged contains a code point (e.g. a
+            # lone surrogate from upstream truncation) that utf-8 cannot
+            # encode. Escape instead of losing the record.
             file_handler = SafeRotatingFileHandler(
                 filename=abs_log_file,
                 maxBytes=max_bytes,
                 backupCount=backup_count,
                 encoding="utf-8",
+                errors="backslashreplace",
                 log_file_pattern=log_file_pattern,
                 backup_file_pattern=backup_file_pattern,
             )
