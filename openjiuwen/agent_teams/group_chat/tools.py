@@ -21,6 +21,8 @@ class GroupSendMessageTool(TeamTool):
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         try:
+            if getattr(self.backend, "conversation_mode", "team") != "group_chat":
+                raise ValueError("group_send_message requires a group_chat runtime")
             if set(inputs) - {"content", "client_message_id", "mentions"}:
                 raise ValueError("Only content, client_message_id and mentions are supported")
             result = await self.backend.append_group_message(

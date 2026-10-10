@@ -37,6 +37,7 @@ async def runtime(tmp_path, monkeypatch):
     spec = TeamAgentSpec(agents={"leader": DeepAgentSpec()}, team_name="group",
                          leader=LeaderSpec(member_name="leader"))
     backend = TeamBackend("group", "leader", True, db, AsyncMock())
+    backend.conversation_mode = "group_chat"
     backend.group_chat_spec = spec
     backend.bind_group_session("session")
     manager = TeamRuntimeManager()
@@ -200,3 +201,69 @@ async def test_first_group_message_registers_team_without_leader_input(runtime):
     assert await runtime.db.team.get_team("group") is not None
     runtime.agent.deliver_input.assert_not_awaited()
     runtime.agent.auto_start_all.assert_not_awaited()
+
+
+@pytest.mark.parametrize("mode,role,excluded,expected", [
+    ("team", "leader", None, False),
+    ("group_chat", "leader", None, True),
+    ("group_chat", "teammate", None, True),
+    ("group_chat", "human_agent", None, False),
+    ("group_chat", "leader", {"group_send_message"}, False),
+])
+@pytest.mark.asyncio
+async def test_group_tool_is_assembled_once_for_runtime_mode(runtime, mode, role, excluded, expected):
+    from openjiuwen.agent_teams.tools.tool_factory import create_team_tools
+    from openjiuwen.agent_teams.rails.team_tool_rail import TeamToolRail
+    from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
+
+    runtime.backend.conversation_mode = mode
+    tools = create_team_tools(role=role, agent_team=runtime.backend, exclude_tools=excluded)
+    assert ("group_send_message" in {tool.card.name for tool in tools}) == expected
+    callbacks = TeamToolRail(team_backend=runtime.backend, role=role).get_callbacks()
+    assert AgentCallbackEvent.ON_USER_MESSAGE not in callbacks
+    assert AgentCallbackEvent.BEFORE_MODEL_CALL not in callbacks
+    if mode == "team":
+        result = await GroupSendMessageTool(runtime.backend, make_translator("cn")).invoke(
+            {"content": "wrong mode", "client_message_id": "x"})
+        assert not result.success and "requires a group_chat runtime" in result.error
+
+
+@pytest.mark.asyncio
+async def test_group_runtime_rejects_ordinary_input_without_switching_mode(runtime):
+    result = await runtime.manager.interact("ordinary", team_name="group", session_id="session")
+    assert not result.ok and result.reason == "conversation_mode_mismatch"
+    assert runtime.backend.conversation_mode == "group_chat"
+    runtime.agent.deliver_input.assert_not_awaited()
+    runtime.backend.conversation_mode = "team"
+    result = await runtime.manager.interact(GroupChatMessage("hello", "x"),
+                                            team_name="group", session_id="session")
+    assert not result.ok and result.reason == "conversation_mode_mismatch"
+    assert not GroupConversationLog("group", "session").history_path.exists()
+
+
+@pytest.mark.parametrize("incoming,expected", [
+    ({"query": {"type": "group_chat", "body": "hello", "client_message_id": "m1"}}, "group_chat"),
+    (GroupChatMessage("hello", "m1"), "group_chat"),
+    ('<team-inbound type="group_chat">ordinary</team-inbound>', "team"),
+    ({"query": "ordinary"}, "team"),
+    ({"query": ""}, None),
+    (None, None),
+])
+def test_runtime_mode_is_selected_only_at_entry(incoming, expected):
+    assert TeamRuntimeManager._conversation_mode(incoming) == expected
+
+
+@pytest.mark.asyncio
+async def test_group_runtime_context_and_cli_policy_keep_fixed_mode(runtime):
+    from openjiuwen.agent_teams.schema.team import TeamSpec, TeamRuntimeContext, TeamRole, TeamMemberSpec
+    from openjiuwen.agent_teams.spawn.external_cli_spawn import _build_member_system_prompt
+    from openjiuwen.agent_teams.agent.payload import SpawnPayloadBuilder
+
+    team = TeamSpec(team_name="group", display_name="Group", conversation_mode="group_chat")
+    ctx = TeamRuntimeContext(team_spec=team, role=TeamRole.LEADER, member_name="leader")
+    builder = SpawnPayloadBuilder(runtime.spec, ctx)
+    member = builder.build_member_context(TeamMemberSpec(member_name="alice", display_name="Alice"))
+    restored = TeamRuntimeContext.model_validate_json(member.model_dump_json())
+    assert restored.team_spec.conversation_mode == "group_chat"
+    prompt = await _build_member_system_prompt(runtime.spec, restored, "alice", hitt_enabled=False)
+    assert group_chat_prompt(runtime.spec) in prompt

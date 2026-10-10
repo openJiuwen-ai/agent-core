@@ -328,7 +328,7 @@ def create_team_tools(
     # spawn tools.
     if swarmflow_model_resolver is None:
         allowed = allowed - {"swarmflow"}
-    if role != "human_agent":
+    if role != "human_agent" and getattr(agent_team, "conversation_mode", "team") == "group_chat":
         from openjiuwen.agent_teams.group_chat.tools import GroupSendMessageTool
 
         tool = GroupSendMessageTool(agent_team, t)

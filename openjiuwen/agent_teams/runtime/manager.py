@@ -187,6 +187,10 @@ class TeamRuntimeManager:
                 )
                 await self.stop_team(team_name=team_name, session_id=target_session_id)
                 pool_entry = None
+        requested_mode = self._conversation_mode(inputs)
+        if pool_entry is not None and requested_mode is not None:
+            if getattr(getattr(pool_entry.agent, "team_backend", None), "conversation_mode", "team") != requested_mode:
+                raise ValueError("Team conversation mode cannot change within a session")
         team_in_session, team_in_db, team_db_state = await self._inspect_session(
             spec,
             team_session,
@@ -554,6 +558,12 @@ class TeamRuntimeManager:
         if group_input is not None:
             payload = group_input
 
+        backend = getattr(entry.agent, "team_backend", None)
+        requested_mode = self._conversation_mode(payload)
+        if backend is not None and requested_mode is not None:
+            if getattr(backend, "conversation_mode", "team") != requested_mode:
+                return DeliverResult.failure("conversation_mode_mismatch")
+
         if isinstance(payload, str):
             parsed = parse_interact_str(payload)
             payloads: list[InteractPayload] = parsed or [GodViewMessage(body=payload)]
@@ -709,6 +719,8 @@ class TeamRuntimeManager:
             return DeliverResult.failure("no_team_backend")
 
         if isinstance(payload, GroupChatMessage):
+            if getattr(backend, "conversation_mode", "team") != "group_chat":
+                return DeliverResult.failure("conversation_mode_mismatch")
             from openjiuwen.agent_teams.group_chat.handler import deliver_group_message
 
             return await deliver_group_message(backend, payload)
@@ -1246,6 +1258,7 @@ class TeamRuntimeManager:
         team_name = spec.team_name
         session_id = team_session.get_session_id()
         kind = action.kind
+        requested_mode = self._conversation_mode(inputs)
 
         if kind in _REJECT_KINDS:
             agent = pool_entry.agent if pool_entry is not None else None
@@ -1283,11 +1296,15 @@ class TeamRuntimeManager:
             leader_name = agent.member_name
             if backend is None or leader_name is None:
                 raise RuntimeError("Cold recovery requires a configured leader and team backend")
+            if requested_mode is not None and backend.conversation_mode != requested_mode:
+                raise ValueError("Team conversation mode cannot change within a session")
             await backend.db.initialize()
             await backend.db.member.reset_cold_recovery_execution_status(team_name, (leader_name,))
         elif kind is RunActionKind.NEW_TEAM_IN_SESSION:
             await self._pre_run_with_inputs(team_session, inputs)
-            agent = spec.build()
+            agent = (
+                spec.build(conversation_mode="group_chat") if requested_mode == "group_chat" else spec.build()
+            )
             await agent.resume_for_new_session(team_session)
             # team_in_db is True at this point — the team row exists, so there
             # may be teammate rows left over from before the stop (status
@@ -1301,7 +1318,9 @@ class TeamRuntimeManager:
             await self._flush_team_manifest(agent, team_session)
         elif kind is RunActionKind.CREATE:
             await self._pre_run_with_inputs(team_session, inputs)
-            agent = spec.build()
+            agent = (
+                spec.build(conversation_mode="group_chat") if requested_mode == "group_chat" else spec.build()
+            )
             await self._flush_team_manifest(agent, team_session)
         else:
             raise RuntimeError(f"Unhandled RunActionKind: {kind!r}")
@@ -1315,6 +1334,15 @@ class TeamRuntimeManager:
             )
         )
         return TeamRuntimeActivation(agent=agent, session=team_session, action=action)
+
+    @staticmethod
+    def _conversation_mode(inputs: object) -> str | None:
+        query = inputs.get("query", inputs) if isinstance(inputs, dict) else inputs
+        if GroupChatMessage.from_wire(query) is not None:
+            return "group_chat"
+        if isinstance(query, (str, dict, GodViewMessage, OperatorMessage, HumanAgentMessage)) and query:
+            return "team"
+        return None
 
     @staticmethod
     def _build_session(

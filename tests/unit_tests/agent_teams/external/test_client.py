@@ -336,7 +336,7 @@ async def test_group_inbox_only_consumes_mentions(
         workspace_config=TeamWorkspaceConfig(enabled=True, root_path=str(tmp_path)),
     )
     async with ExternalTeamClient(descriptor) as client:
-        assert "group_send_message" in client.tools
+        assert "group_send_message" not in client.tools
         await client._backend.append_group_message("user", "Earlier discussion", client_message_id="one")
         assert (await client.fetch_inbox()).messages == []
         assert await team_db.message.get_broadcast_read_at("ext_team", "dev-1") == 0

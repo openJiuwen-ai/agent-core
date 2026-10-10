@@ -544,6 +544,8 @@ class TeamSpec(BaseModel):
 
     team_name: str
     display_name: str
+    conversation_mode: Literal["team", "group_chat"] = "team"
+    """Fixed runtime mode, inherited by members and persisted with their context."""
     leader_member_name: Optional[str] = None
     language: Optional[str] = None
     dispatch_mode: str = "autonomous"

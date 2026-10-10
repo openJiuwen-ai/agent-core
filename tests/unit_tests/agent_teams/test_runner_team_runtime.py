@@ -587,6 +587,7 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     agent = FakeTeamAgent("cold_recover_team", stream_label="team.chunk")
     reset_execution = AsyncMock(return_value=1)
     agent.team_backend = SimpleNamespace(
+        conversation_mode="team",
         db=SimpleNamespace(
             initialize=AsyncMock(),
             member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),

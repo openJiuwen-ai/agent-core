@@ -1,6 +1,6 @@
 # S_28 群聊输入与文件归档
 
-最近修订：2026-09-30。关联特性：[F_112](../features/F_112_group-conversation-and-delegation.md)。
+最近修订：2026-10-10。关联特性：[F_112](../features/F_112_group-conversation-and-delegation.md)。
 
 ## 职责与入口
 
@@ -81,7 +81,15 @@ GroupMessageHandler 位于群聊目录，继承 MessageHandler 的生命周期�
 
 ## 配置与历史
 
-无需团队群聊开关。输入 type=group_chat 决定该消息走群聊处理，group_send_message 工具统一注册。摘录条数在群聊模块固定为 5，不暴露配置。
+普通 Team 与群聊是两个独立的运行时模式。首次运行的结构化输入 `type=group_chat` 建立群聊运行时，普通输入建立普通 Team；无输入的新运行时默认普通 Team。无需 enable_group_chat 开关，摘录条数固定为 5。
+
+模式保存在 `TeamRuntimeContext.team_spec.conversation_mode`，取值为 team 或 group_chat；成员启动通过现有上下文继承，checkpoint 恢复时保留模式。已有运行时不因后续消息切换模式；入口拒绝与模式不一致的外部业务消息，interact 返回 conversation_mode_mismatch。空输入恢复保留现有模式。
+
+工具和提示词在装配时固定。工具工厂只向群聊运行时注册 group_send_message；普通 Team 的工具集和默认 policy 不含群聊工具或提示。human_agent 与显式工具排除配置仍按既有规则处理。工具执行保护检查运行时模式。
+
+内部投递沿用正文字符串与既有 steering/follow-up 队列。普通消息可继续渲染为 team-inbound，群聊投递近期摘录与 history.jsonl 路径；不向单 agent 透传每条消息的类型，也不解析正文判断工具模式。TeamToolRail 不动态增删工具，不在模型请求前同步群聊 schema；任务看板等框架通知不会改变工具集。
+
+由 core 装配的外部 CLI 成员也继承固定模式，在启动时构造对应工具 schema 与群聊 policy。独立 ExternalTeamClient 默认普通模式，可以拉取群聊摘录，但不会根据收件箱消息自动切换工具集。
 
 Agent 使用 `group_send_message(content, client_message_id, mentions=[])` 发表公开回复，与宿主输入复用同一归档和通知逻辑。
 
