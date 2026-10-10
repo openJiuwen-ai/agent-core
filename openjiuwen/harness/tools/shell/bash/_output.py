@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import tempfile
 from dataclasses import dataclass
@@ -178,8 +177,19 @@ def render_tool_content(
     if is_error:
         # Error path: stderr leads so the failure detail comes first.
         merged = _merge(output.stderr, output.stdout)
-        parts = [f"Exit code {output.exit_code}", merged]
-        return _prepend_warning("\n".join(p for p in parts if p), output.warning), True
+        header = f"Exit code {output.exit_code}"
+        body = f"{header}\n{merged}" if merged else header
+        # Failed/timed-out commands can emit unbounded stderr+stdout (build logs,
+        # verbose stack traces); oversized error output must be persisted and
+        # previewed exactly like the data path, otherwise it enters the context
+        # window whole (2026-10-09 incident: 26h browser-automation session where
+        # every failed bash result flowed in untruncated). The exit-code header
+        # stays outside the persisted block so the code is always visible.
+        if output.max_output_chars > 0 and len(body) > output.max_output_chars:
+            path, size = persist_large_output(output.stdout, output.stderr)
+            preview, has_more = _generate_preview(merged, _PREVIEW_SIZE_BYTES)
+            body = f"{header}\n" + _build_persisted_message(path, size, preview, has_more)
+        return _prepend_warning(body, output.warning), True
 
     # Data path: stdout leads.
     merged = _merge(output.stdout, output.stderr)
