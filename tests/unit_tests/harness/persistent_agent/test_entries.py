@@ -84,6 +84,7 @@ class LocalModel:
         self.judge_calls = 0
         self.judge_messages = []
         self.judge_kwargs = []
+        self.tool_name = "remember"
         self.answer = "answer"
         self.with_usage = True
         self.release = asyncio.Event()
@@ -113,7 +114,7 @@ class LocalModel:
             raise RuntimeError("local model failure")
         if turn in ("tool", "two_tools"):
             ids = [f"call-{self.calls}"] if turn == "tool" else ["call-a", "call-b"]
-            calls = [ToolCall(id=tool_id, type="function", name="remember", arguments=TOOL_ARGS) for tool_id in ids]
+            calls = [ToolCall(id=tool_id, type="function", name=self.tool_name, arguments=TOOL_ARGS) for tool_id in ids]
             yield AssistantMessageChunk(content="checking ", tool_calls=calls, usage_metadata=usage(3, 4))
             return
         try:
@@ -131,13 +132,14 @@ class LocalModel:
 class Remember(Tool):
     """Not parallel-safe, so several calls in one turn run one after another."""
 
-    def __init__(self, calls, hooks):
+    def __init__(self, calls, hooks, name="remember"):
         super().__init__(
             card=ToolCard(
-                id="remember",
-                name="remember",
+                id=name,
+                name=name,
                 input_params={"type": "object", "properties": {"value": {"type": "string"}}},
                 parallel_safe=False,
+                idempotent=hooks.get("idempotent", False),
             )
         )
         self.calls = calls
@@ -147,6 +149,9 @@ class Remember(Tool):
         self.calls.append(inputs)
         if self.hooks.get("on_invoke") is not None:
             self.hooks["on_invoke"]()
+        if self.hooks.get("fail_once"):
+            self.hooks["fail_once"] = False
+            raise TimeoutError("temporary tool timeout")
         return {"remembered": inputs.get("value")}
 
     async def stream(self, inputs, **kwargs):
@@ -348,7 +353,7 @@ def harness(monkeypatch):
     monkeypatch.setitem(
         _TOOL_PROVIDER_REGISTRY,
         "test.entries.remember",
-        lambda params, context: Remember(tool_calls, harness.tool_hooks),
+        lambda params, context: Remember(tool_calls, harness.tool_hooks, name=model.tool_name),
     )
     monkeypatch.setitem(
         _RAIL_PROVIDER_REGISTRY, "test.entries.confirm", lambda params, context: ConfirmInterruptRail(["remember"])
@@ -703,6 +708,7 @@ async def test_confirmation_pause_then_resume_completes(harness):
         "execution.paused",
     ]
     assert events[3].payload.text == "checking"
+    assert "tool.intent" not in kinds(events) and "tool.completed" not in kinds(events)
     paused = events[-1].payload
     assert paused.reason == "awaiting_confirmation" and paused.detail is None
     call = paused.intercepted[0]
@@ -711,12 +717,107 @@ async def test_confirmation_pause_then_resume_completes(harness):
     assert harness.tool_calls == [], "the intercepted tool has not run"
 
     ctx, host = harness.context(spec, execution_id="execution-2")
+    harness.tool_hooks["on_invoke"] = lambda: harness.log.append("tool.dispatched")
     resumed = await collect(harness.api.resume_persistent_request(spec, ctx, permission()))
-    assert kinds(resumed) == ["reply.delta", "reply.delta", "model.completed", "output.proposed", "execution.final"]
+    resumed_kinds = kinds(resumed)
+    assert resumed_kinds.count("tool.intent") == 1
+    assert resumed_kinds.count("tool.completed") == 1
+    assert resumed_kinds.index("tool.intent") < resumed_kinds.index("tool.completed")
     assert resumed == host.events
     assert harness.tool_calls == [{"value": "x", "api_token": "secret-value"}]
+    intent = next(event.payload for event in resumed if str(event.event_type) == "tool.intent")
+    completed = next(event.payload for event in resumed if str(event.event_type) == "tool.completed")
+    assert completed.operation_id == intent.operation_id
+    assert harness.log.index("tool.intent") < harness.log.index("tool.dispatched") < harness.log.index("tool.completed")
     assert resumed[-2].payload.target_ref == "chat-1", "the reply target comes from the waiting scene"
     assert resumed[-1].payload.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_permission_rejection_records_no_write_intent_or_completion(harness):
+    spec = harness.spec(confirm=True)
+    await pause_for_confirmation(harness, spec)
+    ctx, host = harness.context(spec, execution_id="execution-2")
+
+    events = await collect(harness.api.resume_persistent_request(spec, ctx, permission(choice="reject")))
+
+    assert harness.tool_calls == []
+    assert "tool.intent" not in kinds(events)
+    assert "tool.completed" not in kinds(events)
+    assert events == host.events
+
+
+@pytest.mark.asyncio
+async def test_write_intent_is_recorded_before_tool_dispatch(harness):
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    harness.model.turns = ["tool"]
+    harness.tool_hooks["on_invoke"] = lambda: harness.log.append("tool.dispatched")
+
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+
+    assert harness.tool_calls == [{"value": "x", "api_token": "secret-value"}]
+    intent_index = harness.log.index("tool.intent")
+    dispatch_index = harness.log.index("tool.dispatched")
+    completed_index = harness.log.index("tool.completed")
+    assert intent_index < dispatch_index < completed_index
+    intent = next(event.payload for event in events if str(event.event_type) == "tool.intent")
+    completed = next(event.payload for event in events if str(event.event_type) == "tool.completed")
+    assert intent.tool_call_id == completed.tool_call_id == "call-1"
+    assert completed.operation_id == intent.operation_id
+    assert "secret-value" not in intent.args_summary and "secret-value" not in completed.args_summary
+    assert events == host.events
+
+
+@pytest.mark.asyncio
+async def test_native_idempotent_retry_reuses_one_intent_and_final_completion(harness):
+    harness.tool_hooks.update(idempotent=True, fail_once=True)
+    spec = harness.spec(enable_tool_resilience_rail=True)
+    ctx, host = harness.context(spec)
+    harness.model.turns = ["tool"]
+
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+
+    intents = [event.payload for event in events if str(event.event_type) == "tool.intent"]
+    completions = [event.payload for event in events if str(event.event_type) == "tool.completed"]
+    assert len(harness.tool_calls) == 2, "the explicitly idempotent tool is retried once"
+    assert len(intents) == len(completions) == 1
+    assert completions[0].operation_id == intents[0].operation_id
+    assert completions[0].status == "succeeded"
+    assert events == host.events
+
+
+@pytest.mark.asyncio
+async def test_intent_persistence_failure_prevents_tool_and_raises_fatal(harness):
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    harness.model.turns = ["tool"]
+    host.fail_record.add(module("schema.events").EventType.TOOL_INTENT)
+
+    with pytest.raises(BaseError) as exc_info:
+        await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+
+    assert harness.tool_calls == []
+    assert ctx.binding.control.fatal is exc_info.value
+    assert "tool.completed" not in kinds(host.events)
+    assert "execution.paused" not in kinds(host.events)
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_read_tool_records_completion_without_intent(harness):
+    harness.model.tool_name = "read_file"
+    harness.model.turns = ["tool"]
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+
+    assert harness.tool_calls == [{"value": "x", "api_token": "secret-value"}]
+    assert "tool.intent" not in kinds(events)
+    completed = next(event.payload for event in events if str(event.event_type) == "tool.completed")
+    assert completed.tool_name == "read_file"
+    assert completed.operation_id is None
+    assert events == host.events
 
 
 @pytest.mark.asyncio

@@ -9,6 +9,8 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.single_agent import AgentCard, create_agent_session
+from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.persistent_agent.persistent_agent.execution.tool_intent_rail import PersistentToolIntentRail
 from openjiuwen.harness.persistent_agent.persistent_agent.ports import PersistentPorts
 from openjiuwen.harness.persistent_agent.persistent_agent.schema.build_context import PersistentBuildContext
 from openjiuwen.harness.persistent_agent.persistent_agent.schema.execution import ExecutionContext
@@ -159,5 +161,32 @@ def test_spec_mounts_workspace_read_rail_only_when_feature_is_enabled():
     agent = spec.build(context=context)
     try:
         assert len(agent.find_rails_by_type((PersistentWorkspaceReadRail,))) == 1
+        assert len(agent.find_rails_by_type((PersistentToolIntentRail,))) == 1
     finally:
         agent.ability_manager.teardown_tools()
+
+
+def test_spec_mounts_tool_intent_rail_without_workspace_read():
+    spec = PersistentAgentSpec(
+        card=AgentCard(id="agent-a", name="test"),
+        enable_task_loop=False,
+        auto_create_workspace=False,
+    )
+    execution = execution_for(spec)
+    context = PersistentBuildContext(
+        execution=execution,
+        session=create_agent_session(session_id=execution.session_id),
+        ports=ports_for(StaticWorkspaceAccess()),
+    )
+
+    agent = spec.build(context=context)
+    try:
+        assert len(agent.find_rails_by_type((PersistentToolIntentRail,))) == 1
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
+def test_regular_deep_agent_does_not_mount_persistent_tool_intent_rail():
+    agent = DeepAgent(AgentCard(id="regular-agent", name="regular"))
+
+    assert agent.find_rails_by_type((PersistentToolIntentRail,)) == []

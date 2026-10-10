@@ -67,10 +67,13 @@ class PersistentAgentSpec(DeepAgentSpec):
             parts.rails.append(PersistentWorkspaceReadRail(context.execution, workspace_access))
         from ..execution.model_rail import PersistentModelCallRail
         from ..execution.stream_lifecycle import NativeStreamTaskLifecycle
+        from ..execution.tool_intent_rail import PersistentToolIntentRail
 
         parts.config.stream_task_lifecycle = NativeStreamTaskLifecycle()
         # Inert until an execution entry attaches its emitter to this binding.
         parts.rails.append(PersistentModelCallRail(context.binding))
+        # Every Persistent tool call passes through the write-intent barrier.
+        parts.rails.append(PersistentToolIntentRail(context.binding))
         return parts
 
     def build(self, context: "PersistentBuildContext | None" = None) -> "DeepAgent":

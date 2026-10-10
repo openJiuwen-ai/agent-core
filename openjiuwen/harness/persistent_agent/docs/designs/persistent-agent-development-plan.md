@@ -72,7 +72,7 @@ PA-02 只验证构造入口；PA-03 验证实例内部的归属校验与状态�
 | PA-23 | 读取与检索群聊记录 | 经 `GroupChatPort` 在 Execution 开始和参与判断时读取最近群消息，以上次执行结束标记中的最后消息 ID 为游标增量获取，并排除触发本次执行的消息；提供 `search_group_messages` 工具供模型按需搜索；消息带稳定发送者身份、服务端接收时间、@、回复、附件引用和状态，已撤回的不返回正文，排队中的请求只作背景；结果区分找到、确定没有、没查完或失败；私聊 Session 不需要该端口 | PA-04 | 待开始 | Yan Zhijun | — |
 | PA-13 | 读取 PersonalContext 的授权知识版本 | 不挂载 PersonalContextRail；经 `KnowledgePort` 在 Execution 开始时解析一次授权范围和知识版本，知识导航放入临时背景块，执行中不刷新，正文由模型按需读取；无权限与不存在可区分；发布或授权变化在下一个 Execution 生效，并向 PA-22 提供来源依赖及失效信息 | PA-04 | 待开始 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
 | PA-14 | 按调用授权读取办公空间文件 | 复用 Workspace 与文件工具，能列出和读取当前授权范围内文件并保留来源及观察到的内容版本；越界路径、其他 Session 私有目录被拒绝；权限未知不读取 | PA-01 | 进行中 | Yan Zhijun | agent-core 组件已实现：`WorkspaceReadScope` / `WorkspaceAccessPort` 绑定 `ExecutionContext` 的 Agent、Session、principal 和 `policy_revision`；`resolve_read_path` 做相对路径、越界、兄弟 Session 私有目录与符号链接检查，`PersistentWorkspaceReadRail` 复用 Harness 的 `ReadFileTool` / `ListDirTool`，读取结果补充逻辑路径、`source_refs`、观察版本和完整性，`unknown` / `forbidden` 在后端访问前失败。代码：`openjiuwen/harness/persistent_agent/persistent_agent/workspace/access.py:18,67,75`、`openjiuwen/harness/persistent_agent/persistent_agent/workspace/path_policy.py:36,100`、`openjiuwen/harness/persistent_agent/persistent_agent/workspace/rail.py:17`、`openjiuwen/harness/persistent_agent/persistent_agent/tools/workspace_read.py:43,153`、`openjiuwen/harness/persistent_agent/persistent_agent/{ports.py:99,105,schema/build_context.py:84,schema/spec.py:29,53}`；测试：`tests/unit_tests/harness/persistent_agent/test_workspace_access.py:95,114,126,139,155`、`tests/unit_tests/harness/persistent_agent/test_workspace_path_policy.py:35,47,70,77,88,105`、`tests/unit_tests/harness/persistent_agent/test_workspace_read_rail.py:108,129,146`、`tests/unit_tests/harness/persistent_agent/test_workspace_read_tools.py:83,110,127,148,170,189`，定向测试 24 passed、1 skipped（2 个既有 Pydantic 弃用警告）。设计与验证见 [F_14](../features/F_14_workspace-file-read.md)；JiuwenSwarm 侧 `WorkspaceAccessPort`、目录授权映射和跨仓联调尚未完成，PA-15 / PA-16 不因本项提前开放 |
-| PA-15 | 写操作执行前同步记账意图 | 以工具声明的副作用属性判定写操作，未声明的一律按写操作处理；写操作执行前产出 `tool.intent`（operation_id、工具名、目标、参数哈希及敏感参数脱敏后的可读摘要）并同步记账，按架构设计 §9.1 等待本条意图落盘，不因前序普通日志缺失而失败，成功才执行，失败停止当前执行；所有工具调用结束后产出 `tool.completed`（工具名、可读参数摘要、成功 / 失败 / 未知、必填的非空白结果摘要（所有状态均需提供，约 500 字以内）、可选的结果引用）；确认恢复后的写操作同样先记账；Persistent 不另加查询或重试，结果不明交 PA-18 的续做规则处理。与原生 ToolCallResilienceRail 衔接：该 rail 只重试声明 `idempotent=True` 的工具，未声明或非幂等的写操作在超时、断连后不被再次调用；重试会再次触发工具调用前的回调，同一工具调用沿用原 operation_id，不重复登记意图 | PA-04 | 待开始 | Yan Zhijun | — |
+| PA-15 | 写操作执行前同步记账意图 | 由 agent-core 内部精确工具名白名单判定副作用：精确命中 `read_file`、`list_files` 才按只读；名单外、未知、自定义和 MCP 工具均按有副作用处理。写操作执行前产出 `tool.intent`（operation_id、工具名、目标、参数哈希及敏感参数脱敏后的可读摘要）并同步记账，按架构设计 §9.1 等待本条意图落盘，不因前序普通日志缺失而失败，成功才执行，失败停止当前执行；所有工具调用结束后产出 `tool.completed`（工具名、可读参数摘要、成功 / 失败 / 未知、必填的非空白结果摘要（所有状态均需提供，约 500 字以内）、可选的结果引用）；确认恢复后的写操作同样先记账；Persistent 不另加查询或重试，结果不明交 PA-18 的续做规则处理。与原生 ToolCallResilienceRail 衔接：只重试显式声明 `idempotent=True` 的工具；重试会再次触发工具调用前的回调，同一工具调用沿用原 operation_id，不重复登记意图 | PA-04 | 进行中 | Yan Zhijun | agent-core 已新增精确只读名单 `read_file` / `list_files`、并为 Persistent Agent 装配 `PersistentToolIntentRail`；写意图先等待关键事件记账，失败设置 fatal 并 force-finish 原生工具回调，且在意图等待返回后复查共享停止状态，阻断并行兄弟调用；完成事件带稳定 `operation_id`，确认中断 / 拒绝前不记账，确认恢复后再过写前屏障；Persistent 侧仅显式 `idempotent=True` 保留重试。代码：`persistent_agent/tools/effect_policy.py`、`persistent_agent/execution/tool_intent_rail.py`、`persistent_agent/schema/spec.py`；测试：`test_effect_policy.py`、`test_tool_intent_rail.py`、`test_entries.py`、`test_workspace_read_rail.py`，PA 包 325 passed / 1 skipped，共享重试 Rail 11 passed。JiuwenSwarm 的真实 `CommitPort.record` 持久化确认与跨仓联调尚未完成，PA-15 保持进行中，PA-16 不因此提前放行；详见 [F_15](../features/F_15_tool-intent-before-side-effect.md) |
 | PA-16 | 适配办公空间文件修改 | 复用文件工具按授权创建和修改文件，写入前按 PA-15 记账意图；会话草稿放在 `sessions/<session_id>/` 下，其他 Session 不能访问；两个任务同时改同一文件时冲突可识别；文件落盘不等于任务完成，也不等于群内可见，任务失败不自动回滚文件 | PA-14、PA-15 | 待开始 | Yan Zhijun | — |
 | PA-22 | 跟踪上下文来源版本并处理失效内容 | 对消息、历史归档、文件、知识及派生摘要记录来源依赖；资料更新和撤权在下一个 Execution 生效：临时背景块每次按最新版本重新注入，归档中可重新获取的内容只存来源引用、读取时重新检查权限；执行中不改写系统提示词和工具定义，执行中立即生效列为后续扩展（架构设计附录 D）；权限或版本无法确认时不读取 | PA-04 | 待开始 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
 
@@ -132,7 +132,7 @@ PA-05 一期只开放单轮执行。以下执行模式各自验证生命周期�
 | 缩写 | 负责人 | 本轮特性与协作范围 | 可以并行与需要等待的部分 |
 | --- | --- | --- | --- |
 | SHR / CR | Song Haoran、Chen Ran | PA-05、PA-06、PA-08、PA-10、PA-17、PA-18 | PA-05 已完成组件验收，继续负责接入与联调；PA-06、PA-08、PA-10、PA-17 可以并行开发；PA-18 等 PA-06、PA-10、PA-17 |
-| YZJ | Yan Zhijun | PA-11、PA-12、PA-14、PA-15、PA-16、PA-23 | PA-14、PA-15、PA-23 可并行安排，PA-15 开工前先确认副作用声明来源；PA-11 等 PA-10，PA-12 等 PA-11；PA-16 等 PA-14、PA-15 |
+| YZJ | Yan Zhijun | PA-11、PA-12、PA-14、PA-15、PA-16、PA-23 | PA-14、PA-15、PA-23 可并行安排；PA-15 的副作用声明来源已按 F_15 确认为 agent-core 精确名称白名单；PA-11 等 PA-10，PA-12 等 PA-11；PA-16 等 PA-14、PA-15 |
 | CYC | Chang Yucong | PA-07 独立参与判断模块；与 AgentServer 配合的接口对齐和联合验证 | PA-07 满足 PA-04 后可独立开发，与其他工作线并行；AgentServer 接口准备也可并行，联调时等待对应组件就绪 |
 
 | 暂缓部分 | 本轮安排 |
@@ -180,7 +180,7 @@ flowchart TB
     end
 
     subgraph TEAM_YZJ["YZJ：归档、文件与群聊记录"]
-        subgraph YZJ_PARALLEL["可并行安排；PA-15 先确认声明来源"]
+        subgraph YZJ_PARALLEL["可并行安排；PA-15 声明来源已确认"]
             P14["PA-14 办公文件读取"]
             P15["PA-15 写操作意图记账"]
             P23["PA-23 群聊记录检索"]
@@ -216,7 +216,7 @@ flowchart TB
     P04 --> P23
 ```
 
-当前已满足代码契约硬前置的并行项为 SHR / CR 的 PA-06、PA-08、PA-10、PA-17，YZJ 的 PA-14、PA-15、PA-23，以及 CYC 的 PA-07；PA-15 仍须先完成第 3.4 节的声明来源确认。PA-10 完成后可同时推进 PA-11 与其他已经具备前置的工作；PA-18 开工还须等 PA-06、PA-17。
+当前已满足代码契约硬前置的并行项为 SHR / CR 的 PA-06、PA-08、PA-10、PA-17，YZJ 的 PA-14、PA-15、PA-23，以及 CYC 的 PA-07；PA-15 声明来源已确认，agent-core 实现进行中，JiuwenSwarm 持久化验证待后续联调。PA-10 完成后可同时推进 PA-11 与其他已经具备前置的工作；PA-18 开工还须等 PA-06、PA-17。
 
 #### 3.2.3 PA-07 独立模块与 AgentServer 配合
 
@@ -311,7 +311,7 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 架构设计尚未覆盖、需先补充设计并确认的事项：
 
 - **容量边界**（影响 PA-06、PA-11、PA-17、PA-18）：70% 阈值只在两次模型调用之间检查，挡不住单个或多个工具结果一次性超限、续做时注入的日志和背景超限，以及摘要调用自身的输入超限。需在架构设计中补充：容量计算包含哪些开销、各检查点放在哪里、超大结果如何以引用加必要内容进入窗口。确认前，上述特性的容量相关验收不能关闭。
-- **写操作的声明来源**（影响 PA-15）：ToolCard 目前只有 `idempotent`，没有只读 / 有副作用的字段。PA-15 开工前确定声明从哪里来。
+- **写操作的声明来源**（影响 PA-15）：已确定由 agent-core 内部精确工具名白名单声明；仅 `read_file`、`list_files` 精确命中才按只读处理，不额外校验实现类；其他一律按写操作处理，ToolCard 不增加副作用字段。具体分类和宿主持久化边界见 [F_15](../features/F_15_tool-intent-before-side-effect.md)。
 
 能力开放遵循以下条件：
 
@@ -391,6 +391,9 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 | 2026-10-09 | 本轮分工、PA-07 独立模块及暂缓安排 | PA-05、PA-06、PA-08、PA-10、PA-17、PA-18 由 Song Haoran、Chen Ran 负责；PA-11、PA-12、PA-14、PA-15、PA-16、PA-23 由 Yan Zhijun 负责；PA-07 与 AgentServer 配合由 Chang Yucong 负责。PA-09、PA-13、PA-22、PA-19～PA-21、PA-24～PA-26 暂不开发，条目及验收保留；新增 Mermaid 硬依赖分工图和对接联调图 | 仅本地计划调整，原硬前置和验收标准保留；总计仍为 5/26、本期 5/20，分工不计为开工或完成 |
 | 2026-10-09 | PA-14 | 新增 [F_14](../features/F_14_workspace-file-read.md)，明确调用级授权范围、路径 / 私有 Session 边界、Harness 读取工具适配和 JiuwenSwarm 端口责任；agent-core 只读组件已实现 | 组件验证通过，但宿主适配和跨仓联调仍待完成；PA-15、PA-16 不因本项提前开放 |
 | 2026-10-09 | PA-07 | 群消息在加载窗口前完成参与判断：直接读取 `GroupChatPort`，不等待 PA-23 的 `group_message_reader`；忽略与失败都不记为对方，回应和插话才进入既有执行入口 | PA 包 289 passed；总计 6/26：本期 6/20、学习 0/3、执行模式扩展 0/3。AgentServer 联调仍待进行 |
+| 2026-10-10 | PA-15 | 确认使用 agent-core 只读工具身份白名单；精确名称和已登记实现均匹配才按只读，其他按写操作处理；不修改 ToolCard 副作用字段；新增 [F_15](../features/F_15_tool-intent-before-side-effect.md) 记录意图记账 Rail、失败关闭、重试和 JiuwenSwarm 持久化边界 | 仅确认设计方向并补充方案文档；PA-15 仍待开始，代码、测试及宿主持久化联调未完成 |
+| 2026-10-10 | PA-15 | 按用户反馈简化副作用分类：白名单仅按精确工具名识别 `read_file`、`list_files`，不再核验实现类；名单外仍按有副作用处理 | 同步 [F_15](../features/F_15_tool-intent-before-side-effect.md) 与 PA-15 计划描述；PA-15 仍待开始，未改代码 |
+| 2026-10-10 | PA-15 | agent-core 实现并装配 `PersistentToolIntentRail`；增加只读精确名称策略、关键意图记账前置、完成事件、稳定操作关联、失败关闭与 Persistent 专属幂等重试约束；补充深嵌套参数、异常摘要脱敏、循环结果兜底、原生重试、确认中断 / 拒绝、并发失败和非 Persistent 装配测试 | PA 包 325 passed / 1 skipped，共享 ToolCallResilienceRail 11 passed，Ruff 检查与格式检查通过；JiuwenSwarm `CommitPort.record` 持久化确认及跨仓联调未完成，状态为进行中，见 [F_15](../features/F_15_tool-intent-before-side-effect.md) |
 
 ## 5. 从 JiuwenSwarm 迁移时的补充安排
 

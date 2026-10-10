@@ -496,6 +496,41 @@ async def test_tools_and_cleanup_are_owner_scoped(built, monkeypatch):
     tools = [BuiltinToolSpec(type="test.binding.remember")]
     first, one, _ = built("session-a", tools=tools)
     second, two, _ = built("session-b", tools=tools)
+
+    class TestEmitter:
+        async def emit(self, *_args, **_kwargs):
+            return None
+
+    api = import_module("openjiuwen.harness.persistent_agent")
+
+    def attach_test_capabilities(context):
+        execution = context.execution
+        scope = api.InvocationRef.from_execution(execution).model_dump()
+
+        async def admit(_execution, model_call_id):
+            return api.BudgetAdmission(
+                **scope,
+                model_call_id=model_call_id,
+                status="admitted",
+                reservation_ref="test-reservation",
+            )
+
+        async def report(_execution, model_call_id, _usage):
+            return api.BudgetReport(
+                **scope,
+                model_call_id=model_call_id,
+                status="confirmed",
+                receipt_ref="test-receipt",
+            )
+
+        context.binding.control.emitter = TestEmitter()
+        context.binding.ports.budget.admit = admit
+        context.binding.ports.budget.report = report
+
+    # This test exercises direct native binding and owner-scoped cleanup, not
+    # the PA-04 event path; provide the event capability required by PA-15.
+    attach_test_capabilities(one)
+    attach_test_capabilities(two)
     id_a, id_b = "remember_" + one.tool_owner_id, "remember_" + two.tool_owner_id
     tool_a, tool_b = Runner.resource_mgr.get_tool(id_a), Runner.resource_mgr.get_tool(id_b)
     await runtime().invoke_bound(first, {"query": "run-tool"}, context=one)
