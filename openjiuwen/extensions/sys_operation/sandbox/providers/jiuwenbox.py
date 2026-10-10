@@ -855,7 +855,10 @@ class _JiuwenBoxProviderMixin:
                             try:
                                 self._get_client().delete_sandbox(sandbox_id)
                             except Exception:
-                                logger.warning("[jiuwenbox] cleanup after failed create hook/upload failed", exc_info=True)
+                                logger.warning(
+                                    "[jiuwenbox] cleanup after failed create hook/upload failed",
+                                    exc_info=True,
+                                )
                         with self._shared_lock:
                             if self._creation_locks.get(shared_key) is create_lock:
                                 self._creation_failures[shared_key] = (time.monotonic() + 30.0, str(exc))

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import textwrap
 from typing import Literal
@@ -29,6 +30,29 @@ from tests.unit_tests.core.workflow.mock_nodes import AddTenNode, MockEndNode, M
 
 
 WORKFLOW_DRAWABLE = "WORKFLOW_DRAWABLE"
+
+
+@pytest.fixture(autouse=True)
+def _sync_draw_event_loop():
+    """Node setup creates asyncio primitives before any coroutine runs.
+
+    pytest-asyncio leaves the thread without a loop after an async test, and
+    Python 3.11 then refuses asyncio.Future() on the main thread.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = None
+    if loop is not None and not loop.is_closed():
+        yield
+        return
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        yield
+    finally:
+        asyncio.set_event_loop(None)
+        loop.close()
 
 
 @patch.dict(os.environ, {WORKFLOW_DRAWABLE: "true"})
