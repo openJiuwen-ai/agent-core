@@ -90,3 +90,99 @@ def test_complete_future_still_sets_pending_future():
         assert future.result() == "answer"
     finally:
         loop.close()
+
+
+async def _wait_for_pending(registry, count: int = 1, timeout: float = 2.0) -> None:
+    """轮询直到 registry 里有足够 pending（模拟卡片下发后外部可 resolve）。"""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while len(registry.pending_requests()) < count:
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(f"expected {count} pending approvals, got {registry.pending_requests()}")
+        await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_sender_drain_timeout_does_not_block_settlement(fresh_registry, monkeypatch, caplog):
+    """sender 吞掉 CancelledError 死循环时，收尾超时即放弃，请求仍能结算。
+
+    2026-09-28 事故机制 A：resolve 后等待方卡死在无界的 sender 收尾 gather
+    （持 session 交互锁）。收尾有界后，请求必须在短时间内返回答案。
+    """
+    from openjiuwen.harness.security.skill_authorization import subagent_approval_registry as mod
+
+    monkeypatch.setattr(mod, "_SENDER_DRAIN_TIMEOUT_SECONDS", 0.2)
+    sender_started = asyncio.Event()
+    # 可停止的吞取消轮询：测试收尾时置 stop 让 sender 退出，否则它会连
+    # 事件循环关闭时的最终取消也吞掉，把整个 pytest 进程挂死。
+    stop = asyncio.Event()
+    sender_tasks: list[asyncio.Task] = []
+
+    async def swallow_cancel_sender(_request):
+        sender_tasks.append(asyncio.current_task())
+        sender_started.set()
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(asyncio.Event().wait(), 0.05)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                continue
+
+    request_task = asyncio.create_task(
+        fresh_registry.request(
+            kind=_KIND,
+            session_id="session-1",
+            agent_scope_id="scope-1",
+            tool_call_id="call-1",
+            payload={},
+            sender=swallow_cancel_sender,
+            timeout=5.0,
+        )
+    )
+    await asyncio.wait_for(sender_started.wait(), timeout=2)
+    await _wait_for_pending(fresh_registry)
+    approval_id = fresh_registry.pending_requests()[0].approval_id
+
+    assert fresh_registry.resolve(
+        session_id="session-1",
+        approval_id=approval_id,
+        kind=_KIND,
+        answer={"approved": True},
+    )
+
+    try:
+        answer = await asyncio.wait_for(request_task, timeout=2)
+        assert answer == {"approved": True}
+        abandoned = [r for r in caplog.records if "approval_sender_drain_abandoned" in r.message]
+        assert abandoned, "expected sender drain abandonment warning"
+    finally:
+        stop.set()
+        for task in sender_tasks:
+            task.cancel()
+        await asyncio.gather(*sender_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_sender_drain_completes_quickly_when_cooperative(fresh_registry):
+    """正常协作的 sender（被取消即退出）路径不受影响——收尾立即完成。"""
+    sender_started = asyncio.Event()
+
+    async def cooperative_sender(_request):
+        sender_started.set()
+        await asyncio.Event().wait()
+
+    request_task = asyncio.create_task(
+        fresh_registry.request(
+            kind=_KIND,
+            session_id="session-1",
+            agent_scope_id="scope-1",
+            tool_call_id="call-1",
+            payload={},
+            sender=cooperative_sender,
+            timeout=5.0,
+        )
+    )
+    await asyncio.wait_for(sender_started.wait(), timeout=2)
+    await _wait_for_pending(fresh_registry)
+    approval_id = fresh_registry.pending_requests()[0].approval_id
+
+    assert fresh_registry.resolve(session_id="session-1", approval_id=approval_id, kind=_KIND, answer="yes")
+    assert await asyncio.wait_for(request_task, timeout=1) == "yes"

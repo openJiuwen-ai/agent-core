@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import threading
 import time
@@ -18,6 +19,12 @@ logger = logging.getLogger(__name__)
 
 # 过期事件只是 UI 终态通知，不能反过来阻塞子 Agent 的超时/取消收口。
 _EXPIRY_NOTIFY_TIMEOUT_SECONDS = 1.0
+
+# 已取消 sender 的收尾上限。sender 走父会话 write_stream（websocket 背压时
+# 可能长时间不 yield），被 cancel 后正常应立即返回；超时即放弃收尾——此时
+# 卡片已被应答或请求已终态，sender 的结果没有消费价值，但等待它会持着
+# session 交互锁把同会话后续审批全部卡死（2026-09-28 事故机制 A）。
+_SENDER_DRAIN_TIMEOUT_SECONDS = 5.0
 
 
 class SubagentApprovalCancelled(RuntimeError):
@@ -166,7 +173,7 @@ class SubagentApprovalRegistry:
                         sender_succeeded = sender_task.exception() is None
                     if not sender_task.done():
                         sender_task.cancel()
-                    await asyncio.gather(sender_task, return_exceptions=True)
+                    await self._drain_sender_task(sender_task, request)
                     try:
                         return await future
                     except SubagentApprovalCancelled:
@@ -200,7 +207,7 @@ class SubagentApprovalRegistry:
         finally:
             if sender_task is not None and not sender_task.done():
                 sender_task.cancel()
-                await asyncio.gather(sender_task, return_exceptions=True)
+                await self._drain_sender_task(sender_task, request)
             with self._guard:
                 current = self._pending.get(approval_id)
                 if current is not None and current.future is future:
@@ -245,13 +252,16 @@ class SubagentApprovalRegistry:
                 )
                 return False
             self._pending.pop(rid, None)
+        # call_soon_threadsafe 只收位置参数；带 kwargs 的完成回调用 partial 包装。
         pending.loop.call_soon_threadsafe(
-            self._complete_future,
-            pending.future,
-            answer,
-            None,
-            request=request,
-            via="resolve",
+            functools.partial(
+                self._complete_future,
+                pending.future,
+                answer,
+                None,
+                request=request,
+                via="resolve",
+            )
         )
         logger.info(
             "[skill_authorization] subagent.approval_resolved kind=%s session=%s scope=%s",
@@ -283,12 +293,14 @@ class SubagentApprovalRegistry:
             # 先发送终态事件。request.finally 会在协程退出后安全回收。
         for item in pending:
             item.loop.call_soon_threadsafe(
-                self._complete_future,
-                item.future,
-                None,
-                SubagentApprovalCancelled("delegated approval was cancelled"),
-                request=item.request,
-                via="cancel",
+                functools.partial(
+                    self._complete_future,
+                    item.future,
+                    None,
+                    SubagentApprovalCancelled("delegated approval was cancelled"),
+                    request=item.request,
+                    via="cancel",
+                )
             )
         return len(pending)
 
@@ -302,6 +314,42 @@ class SubagentApprovalRegistry:
             current = self._pending.get(approval_id)
             if current is not None and current.future is future:
                 self._pending.pop(approval_id, None)
+
+    async def _drain_sender_task(
+        self,
+        sender_task: asyncio.Task[None],
+        request: SubagentApprovalRequest,
+    ) -> None:
+        """收尾已取消的 sender；超时即放弃并留下可观测告警。
+
+        sender 只负责把卡片送到前端；请求已终态（应答/超时/取消）后它的
+        结果没有任何消费价值，但无界等待它返回会持有 session 交互锁，把
+        同会话的全部后续审批卡死。注意不能用 ``wait_for``：它超时后会在
+        内部等待取消真正完成，sender 吞掉 CancelledError 时它自己就挂死；
+        ``asyncio.wait`` 带超时只返回、不取消被等待者。放弃收尾后挂一个
+        done_callback 消费异常，避免 "exception was never retrieved" 噪音。
+        """
+        done, pending = await asyncio.wait({sender_task}, timeout=_SENDER_DRAIN_TIMEOUT_SECONDS)
+        if not pending:
+            return
+        logger.warning(
+            "[skill_authorization] subagent.approval_sender_drain_abandoned "
+            "approval_id=%s scope=%s kind=%s timeout=%.1fs",
+            request.approval_id,
+            request.agent_scope_id,
+            request.kind.value,
+            _SENDER_DRAIN_TIMEOUT_SECONDS,
+        )
+
+        def _consume(task: asyncio.Task[None]) -> None:
+            if not task.cancelled() and task.exception() is not None:
+                logger.warning(
+                    "[skill_authorization] subagent.approval_sender_final_failure approval_id=%s",
+                    request.approval_id,
+                    exc_info=task.exception(),
+                )
+
+        sender_task.add_done_callback(_consume)
 
     @staticmethod
     async def _notify_expiry(
