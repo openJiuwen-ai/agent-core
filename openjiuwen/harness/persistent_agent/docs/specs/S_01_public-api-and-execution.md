@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 状态 | PA-01 契约、PA-02 DeepAgent 构造、PA-03 实例内 Session 隔离已按各自边界验收；PA-04 已按架构设计收敛执行上下文与宿主端口；PA-05 执行、恢复与控制入口已实现，会话状态记录（PA-10）与交互适配（PA-09）接入前正式入口明确拒绝 |
 | 关联模块 | 外层 `persistent_agent/__init__.py` 与内部 `persistent_agent/persistent_agent/{factory.py,ports.py,schema/,execution/}` |
-| 最近一次修订日期 | 2026-10-08 |
-| 关联 feature | [F_01 Spec 与 DeepAgent 装配](../features/F_01_spec-and-deep-agent-construction.md)、[F_02 执行协议](../features/F_02_execution-protocol.md)、[F_03 执行绑定](../features/F_03_invocation-binding-and-isolation.md)、[F_04 契约收敛](../features/F_04_contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)；开发计划 PA-01～PA-03、PA-05～PA-07、PA-09、PA-04 |
+| 最近一次修订日期 | 2026-10-09 |
+| 关联 feature | [F_01 Spec 与 DeepAgent 装配](../features/F_01_spec-and-deep-agent-construction.md)、[F_02 执行协议](../features/F_02_execution-protocol.md)、[F_03 执行绑定](../features/F_03_invocation-binding-and-isolation.md)、[F_04 契约收敛](../features/F_04_contract-convergence.md)、[F_05 执行、恢复与控制入口](../features/F_05_execution-entries.md)、[F_07 群消息参与判断](../features/F_07_group-participation.md)；开发计划 PA-01～PA-03、PA-05～PA-07、PA-09、PA-04 |
 | 设计依据 | [Persistent Agent 详细架构设计](../designs/persistent-agent-architecture.md) §4、§5、§13、§14；旧版详细架构 §4～7 仅供参考（见 Git 历史） |
 
 当前已实现并独立验证 PA-01 的契约层、PA-02 的构造入口及 PA-03 的实例内调用绑定 / 单轮流生命周期，PA-04 已把执行上下文和宿主端口与架构设计对齐，PA-05 已实现执行、恢复与控制入口及事件映射。下文宿主后端、窗口存储、上下文装配和续做仍是目标协议，不代表已经可运行。“范围 / 边界”之后尚未修订的段落仍沿用旧版架构的表述，与架构设计冲突时以架构设计为准，随对应特性修订。实际构造接口如下：
@@ -56,7 +56,7 @@ abort_bound 须由独立控制任务发起，只设置原绑定停止标记、�
 PA-05 的执行、恢复与控制入口（`execution/entries.py`，详见 [F_05](../features/F_05_execution-entries.md)）：
 
 - **输入**：`RequestInput` 的 `kind` 为 `group_message / direct_message / scheduled`，`source` 分别是 `GroupMessage`、`DirectMessageSource` 和空；`continue_instruction` 只能随 `recovery_ref` 出现。`ConfirmReply` 含 1～64 项、`tool_call_id` 不重复的 `PermissionResponse`（approve / approve_for_session / reject）或 `AnswerResponse`（answered / timed_out，超时不带回答）。
-- **前置拒绝**：在任何事件和构造之前，以下情况抛校验拒绝（`ValidationError` 类）：Spec 未显式关闭 task-loop 或开启了任何子代理开关；Session 未注入 `NoopCheckpointer`；群消息（PA-07 前）、带 `recovery_ref`（PA-18 前）；会话状态记录（PA-10）或恢复时的交互适配（PA-09）接入点不可用。构造后还核对装配结果中 task-loop 和子代理确实未开启。
+- **前置拒绝**：在任何事件和构造之前，以下情况抛校验拒绝（`ValidationError` 类）：Spec 未显式关闭 task-loop 或开启了任何子代理开关；Session 未注入 `NoopCheckpointer`；群消息未注入 `GroupChatPort`；带 `recovery_ref`（PA-18 前）；会话状态记录（PA-10）或恢复时的交互适配（PA-09）接入点不可用。构造后还核对装配结果中 task-loop 和子代理确实未开启。已注入群端口时，群消息先做参与判断（[F_07](../features/F_07_group-participation.md)）：忽略和判断失败在构造 DeepAgent 与加载窗口之前结束。
 - **编排**：生成器在内部执行任务中运行原生流，自身只转交已记账的事件；构造上下文仍只能使用一次。执行时依次记 `execution.started`、加载会话状态记录、组装窗口（PA-06 接入点）、运行原生流、交出 `output.proposed`、保存会话状态记录、记结束事件，最后关闭实例；确认恢复不组装窗口。窗口组装、群消息读取与结束信息的接入约定见 [S_03](S_03_context-and-windows.md) 与 [F_05](../features/F_05_execution-entries.md) §7，窗口组装和群消息读取（PA-23）未接入时同样明确拒绝。会话状态记录加载或保存失败、关键事件记账失败、实例清理失败都抛运行异常（`ExecutionError` 类）；保存失败时不记结束事件。最终答案超出事件容量（字符数或完整事件字节数，见 [S_02](S_02_events-and-result-handoff.md)）时改判 `paused(error)`，完整答案放进交给会话状态记录的结束信息（`ExecutionEnding.pending_answer`）保存；只有容量超限改判暂停，字段错误和保存失败仍按上述规则抛异常。致命错误登记后，尚未开始的模型调用和工具调用都被跳过，入口抛出最初的致命异常。服务端提前关闭事件流时，入口取消内部任务并等待原生流和清理结束，不产生结束事件。
 - **恢复**：从会话状态记录取得等待现场，核对所属 Request、交互 ID、回复类型与问题文本后，按交互 ID 组装原生 `InteractiveInput`；回复无效时抛校验拒绝，不记账、不保存。恢复不记 `execution.started`，回复目标取自等待现场。
 - **控制**：`abort_persistent_request(context, *, reason)` 把第一个 cancel / stop 记在构造上下文上，之后到达的原因忽略；实例构造后、关闭前复用 `abort_bound`。它不发事件，结局由执行入口给出：cancel 为 `final(cancelled)`，stop 为 `paused(stopped)`。实例清理会等待正在进行的原生停止返回。执行入口在原生调用退出、确定执行结果后，同步锁定本次 Execution 的结局。锁定前接受的控制参与结局判定；锁定后不再接受活动执行的停止或取消，不修改控制原因，也不调用 `abort_bound`。结局锁定不代表持久化成功，状态保存和结束记账仍按原失败规则处理。执行入口因异常退出、进入清理之前，同样同步关闭控制接收：保留已有控制原因和原异常，不产生结束事件。

@@ -47,7 +47,7 @@ runner 的步骤：
 1. **前置检查**（任何事件之前，失败抛校验拒绝 `DEEPAGENT_CONFIG_PARAM_ERROR` / `DEEPAGENT_INPUT_PARAM_ERROR`）：
    - 执行模式符合一期要求：`enable_task_loop=False`，不启用任何子代理。
    - Session 注入了 `NoopCheckpointer`。
-   - 输入与执行上下文匹配：群消息在 PA-07 接入前拒绝；带 `recovery_ref` 的执行在 PA-18 接入前拒绝；`continue_instruction` 只能随 `recovery_ref` 出现。
+   - 输入与执行上下文匹配：群消息在 PA-07 接入前拒绝；PA-07 接入后，缺少 `GroupChatPort` 的群消息仍在事件之前拒绝，已注入端口的群消息先判断再决定是否进入执行体。带 `recovery_ref` 的执行在 PA-18 接入前拒绝；`continue_instruction` 只能随 `recovery_ref` 出现。
    - 依赖的接入点可用：会话状态记录，以及恢复时的交互适配。
 2. 构造实例，并核对装配结果：`deep_config` 中 task-loop 和子代理确实都没有开启。
 3. `execute` 记录 `execution.started`。
@@ -138,7 +138,7 @@ runner 的步骤：
   - `load` 把最新记录写回新 Session，返回 `LoadedRecord`：等待现场 `waiting`（仅等待确认时有）和群消息游标 `last_group_message_id`（上一次执行看到的最后一条群消息）。没有记录时返回空的 `LoadedRecord`；返回其他类型按运行异常处理。
   - `save` 收到的 `ExecutionEnding` 含结局、所属 Request、回复目标、`output_refs`、容量超限时未交接的完整最终答案 `pending_answer`，以及本次的群消息游标 `last_group_message_id`。PA-10 须原样保存这两个字段，后者写进执行结束标记。
 - `window_assembler(context)`：新 Request 的窗口组装，PA-06。执行入口在加载记录之后调用 `assemble(context, request, record)`，拿到 `WindowAssembly`：原生输入 `native_input`，以及本次背景中最后一条群消息 ID（作为新的游标写入结束信息）。组装抛出的非框架异常按运行异常处理，原生调用不会在不完整的窗口上运行。确认恢复不调用组装，结束信息沿用加载时的游标。
-- `group_message_reader(context)`：本 Session 所在群的最近消息读取，PA-23。`recent_messages(context, after=游标, exclude_message_id=触发消息)` 返回 `GroupMessagesResult`：游标之后的新消息，再往前多取几条作为衔接，不含触发消息。PA-06 组装背景和 PA-07 参与判断都通过它读取，不各自实现。
+- `group_message_reader(context)`：本 Session 所在群的最近消息读取，PA-23。`recent_messages(context, after=游标, exclude_message_id=触发消息)` 返回 `GroupMessagesResult`：游标之后的新消息，再往前多取几条作为衔接，不含触发消息。PA-06 组装背景通过它读取。PA-07 不调用该接入点，判断直接使用 `GroupChatPort`，以免等待 PA-23。
 - `native_reply_adapter()`：交互回复到原生输入的转换，PA-09。
 
 **窗口标记约定（PA-06 写，PA-10 整理）**：PA-06 在追加的消息元信息中设置 `WINDOW_PART_KEY`（`persistent_window_part`）。值为 `execution_header` 的执行头在结束时保留并压缩成一行；值为 `temporary_background` 的临时背景块在结束时删除。没有该标记的消息按普通窗口内容保留。
@@ -187,7 +187,7 @@ runner 的步骤：
 
 ## 已知遗留
 
-- 参与判断（PA-07）、窗口组装（PA-06）、文件候选与补交（PA-08）、交互适配（PA-09）、会话状态记录（PA-10）、意图记账（PA-15）、续做（PA-18）接入前，对应能力在正式入口明确拒绝或不可用。
+- 窗口组装（PA-06）、文件候选与补交（PA-08）、交互适配（PA-09）、会话状态记录（PA-10）、意图记账（PA-15）、续做（PA-18）接入前，对应能力在正式入口明确拒绝或不可用。群消息参与判断已由 [F_07](F_07_group-participation.md) 接入；忽略和判断失败不经过上述接入点。
 - task-loop 与子代理由 PA-24～PA-26 开放。
 - 原生 rail 之外的内部模型调用（例如 task planning 的独立模型）不经过本 rail 的预算准入；一期配置不启用这类 rail，开放时再评估。
 - 字符数或完整事件字节数超限的最终回答目前以 `paused(error)` 结束，完整答案经 `ExecutionEnding.pending_answer` 交给 PA-10 保存。是否改为拆成多条候选或转为文件交接，以及如何从保存的答案继续交接，待 PA-08 设计时一并决定。

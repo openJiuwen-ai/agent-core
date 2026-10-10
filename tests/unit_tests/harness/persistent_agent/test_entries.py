@@ -8,6 +8,7 @@ formal implementations.
 """
 
 import asyncio
+import json
 from dataclasses import replace
 from importlib import import_module
 
@@ -15,7 +16,7 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.foundation.llm.schema.message import UsageMetadata
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.store import InMemoryKVStore
@@ -79,6 +80,10 @@ class LocalModel:
     def __init__(self):
         self.turns = []
         self.calls = 0
+        self.judgments = []
+        self.judge_calls = 0
+        self.judge_messages = []
+        self.judge_kwargs = []
         self.answer = "answer"
         self.with_usage = True
         self.release = asyncio.Event()
@@ -88,7 +93,16 @@ class LocalModel:
         self.on_call = None
 
     async def invoke(self, messages, **kwargs):
-        raise AssertionError("entries always stream the native agent")
+        """Participation judgment only. Native execution always streams."""
+        self.judge_calls += 1
+        self.judge_messages.append(messages)
+        self.judge_kwargs.append(kwargs)
+        if not self.judgments:
+            raise AssertionError("entries always stream the native agent")
+        item = self.judgments.pop(0)
+        if isinstance(item, BaseException):
+            raise item
+        return AssistantMessage(content=item, usage_metadata=usage(2, 3))
 
     async def stream(self, messages, **kwargs):
         self.calls += 1
@@ -282,7 +296,9 @@ class Harness:
         fields.update(overrides)
         return self.api.PersistentAgentSpec(**fields)
 
-    def context(self, spec, *, execution_id="execution-1", request_id="request-1", isolated=True, **changes):
+    def context(
+        self, spec, *, execution_id="execution-1", request_id="request-1", isolated=True, group_chat=None, **changes
+    ):
         execution = self.api.ExecutionContext(
             namespace_id="tenant",
             agent_id=spec.card.id,
@@ -303,7 +319,9 @@ class Harness:
         ctx = self.api.PersistentBuildContext(
             execution=replace(execution, **changes),
             session=create_agent_session(session_id="session-a", card=spec.card, checkpointer=checkpointer),
-            ports=self.api.PersistentPorts(commit=host, budget=host, window_backend=InMemoryKVStore()),
+            ports=self.api.PersistentPorts(
+                commit=host, budget=host, window_backend=InMemoryKVStore(), group_chat=group_chat
+            ),
         )
         return ctx, host
 
@@ -971,3 +989,201 @@ def test_redaction_masks_sensitive_keys_at_any_depth():
     assert redact('{"password": "p"}') == '{"password": "***"}'
     assert redact("not json") == "not json"
     assert redact(None) == "{}"
+
+
+class GroupChat:
+    """PA-23 double: returns a fixed recent-message page for participation."""
+
+    def __init__(self, messages, status="found"):
+        self.messages = messages
+        self.status = status
+        self.calls = []
+
+    async def recent_messages(self, execution, cursor=None, limit=20):
+        self.calls.append((cursor, limit))
+        ref = module("schema.protocol").InvocationRef.from_execution(execution).model_dump()
+        payload = {**ref, "status": self.status, "messages": ()}
+        if self.status == "found":
+            payload["messages"] = tuple(self.messages)
+        elif self.status == "incomplete":
+            payload["reason"] = "group history unavailable"
+        return payload
+
+    async def search_messages(self, execution, query):
+        raise AssertionError("participation does not search group history")
+
+
+def group_message(**overrides):
+    message = {
+        "message_id": "m-0",
+        "sender_id": "u-0",
+        "sender_name": "王五",
+        "sender_kind": "human",
+        "received_at": "2026-10-07T07:00:00+08:00",
+        "text": "EARLIER-CONTEXT",
+    }
+    message.update(overrides)
+    return message
+
+
+def group_request(**source_overrides):
+    source = {
+        "message_id": "m-1",
+        "sender_id": "u-1",
+        "sender_name": "李四",
+        "sender_kind": "human",
+        "received_at": "2026-10-07T08:00:00+08:00",
+        "text": "大家好",
+        "mention_ids": (),
+        "reply_to": "m-0",
+        "attachment_refs": ("att-1",),
+    }
+    source.update(source_overrides)
+    return request(kind="group_message", source=source)
+
+
+def judgment(decision, reason="需要处理"):
+    return json.dumps({"decision": decision, "reason": reason}, ensure_ascii=False)
+
+
+def prompt_text(model):
+    parts = []
+    for messages in model.judge_messages:
+        for message in messages:
+            parts.append(message["content"] if isinstance(message, dict) else message.content)
+    return "\n".join(parts)
+
+
+def direct_request():
+    return request(
+        kind="direct_message",
+        source={
+            "message_id": "dm-1",
+            "sender_id": "u-1",
+            "sender_name": "李四",
+            "received_at": "2026-10-07T08:00:00+08:00",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_message_without_port_is_rejected_before_events(harness):
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    with pytest.raises(BaseError) as exc_info:
+        await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    assert_rejected(exc_info, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR)
+    assert "group chat port is required for group participation" in str(exc_info.value)
+    assert host.events == [] and harness.model.calls == 0 and harness.model.judge_calls == 0
+    assert not ctx.binding.attempted
+
+
+@pytest.mark.asyncio
+async def test_mentioned_group_message_can_be_ignored_without_opening_a_task(harness):
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    chat = GroupChat(
+        (
+            group_message(message_id="m-1", text="TRIGGER-SHOULD-BE-EXCLUDED"),
+            group_message(),
+        )
+    )
+    ctx, host = harness.context(spec, group_chat=chat)
+    harness.model.judgments = [judgment("ignore", "与当前职责无关")]
+    events = await collect(
+        harness.api.execute_persistent_request(spec, ctx, group_request(mention_ids=("business-agent",)))
+    )
+    assert kinds(events) == ["model.completed", "participation.decided", "execution.final"]
+    assert events[1].payload.decision == "ignore"
+    assert events[1].payload.model_call_id == events[0].payload.model_call_id
+    assert events[2].payload.status == "ignored" and events[2].payload.output_refs == ()
+    assert "output.proposed" not in kinds(events) and "execution.started" not in kinds(events)
+    assert harness.model.calls == 0 and harness.model.judge_calls == 1
+    assert harness.model.judge_kwargs[0]["tools"] is None
+    assert chat.calls == [(None, 8)]
+    text = prompt_text(harness.model)
+    assert "你是团队里的调研专家。" in text
+    assert "被提及: 是" in text and "李四" in text and "att-1" in text and "reply_to: m-0" in text
+    assert "EARLIER-CONTEXT" in text and "TRIGGER-SHOULD-BE-EXCLUDED" not in text
+    assert harness.assembler.calls == [] and harness.store.loaded_marker == "never loaded"
+    assert harness.store.endings == [] and not ctx.binding.attempted
+    assert host.reports[0].status == "known"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["respond", "intervene"])
+async def test_unmentioned_group_message_can_continue_into_execution(harness, decision):
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    chat = GroupChat((group_message(),))
+    ctx, _ = harness.context(spec, group_chat=chat)
+    harness.model.judgments = [judgment(decision)]
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request(mention_ids=())))
+    decided = next(event for event in events if event.event_type == "participation.decided")
+    started = next(event for event in events if event.event_type == "execution.started")
+    assert decided.payload.decision == decision
+    assert started.payload.decision_event_id == decided.event_id
+    assert "被提及: 否" in prompt_text(harness.model)
+    assert events[-1].payload.status == "completed"
+    assert "output.proposed" in kinds(events)
+    assert harness.model.judge_calls == 1 and harness.model.calls == 1
+    assert len(harness.assembler.calls) == 1
+    assert kinds(events).index("participation.decided") < kinds(events).index("execution.started")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "judgments",
+    [["nope", "{", "[]"], [RuntimeError("down"), RuntimeError("down"), RuntimeError("down")]],
+)
+async def test_participation_failure_after_retries_is_not_ignored(harness, judgments):
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    chat = GroupChat((group_message(),))
+    ctx, _ = harness.context(spec, group_chat=chat)
+    harness.model.judgments = list(judgments)
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    assert events[-1].event_type == "execution.final" and events[-1].payload.status == "failed"
+    assert "participation.decided" not in kinds(events) and "ignored" not in {
+        getattr(event.payload, "status", None) for event in events
+    }
+    assert harness.model.judge_calls == 3 and harness.model.calls == 0
+    assert harness.assembler.calls == [] and harness.store.loaded_marker == "never loaded"
+    assert not ctx.binding.attempted
+
+
+@pytest.mark.asyncio
+async def test_budget_denial_skips_the_participation_model(harness):
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    chat = GroupChat((group_message(),))
+    ctx, host = harness.context(spec, group_chat=chat)
+    host.admission = "denied"
+    harness.model.judgments = [judgment("ignore")]
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    assert kinds(events) == ["execution.paused"]
+    assert events[0].payload.reason == "budget_denied"
+    assert harness.model.judge_calls == 0 and host.reports == []
+    assert harness.store.loaded_marker == "never loaded"
+
+
+@pytest.mark.asyncio
+async def test_incomplete_group_history_is_not_treated_as_ignore(harness):
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    chat = GroupChat((), status="incomplete")
+    ctx, _ = harness.context(spec, group_chat=chat)
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    assert events[-1].payload.status == "failed"
+    assert "participation.decided" not in kinds(events)
+    assert harness.model.judge_calls == 0 and len(chat.calls) == 3
+    assert harness.store.loaded_marker == "never loaded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload", ["direct", "scheduled"])
+async def test_direct_and_scheduled_requests_skip_participation(harness, payload):
+    spec = harness.spec()
+    chat = GroupChat((group_message(),))
+    ctx, _ = harness.context(spec, group_chat=chat)
+    incoming = direct_request() if payload == "direct" else request()
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, incoming))
+    assert chat.calls == [] and harness.model.judge_calls == 0
+    assert "participation.decided" not in kinds(events)
+    assert events[0].event_type == "execution.started" and events[0].payload.decision_event_id is None
+    assert events[-1].payload.status == "completed"

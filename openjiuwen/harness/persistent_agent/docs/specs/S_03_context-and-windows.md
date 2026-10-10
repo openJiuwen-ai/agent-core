@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 状态 | PA-04 已按架构设计定义窗口存储后端注入位、群聊与知识端口及其数据结构；窗口管理、会话状态记录、换窗和检索尚未实现 |
 | 关联模块 | `openjiuwen/harness/persistent_agent/persistent_agent/{ports.py,schema/context.py}` |
-| 最近一次修订日期 | 2026-10-08 |
+| 最近一次修订日期 | 2026-10-09 |
 | 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 契约收敛](../features/F_04_contract-convergence.md)；开发计划 PA-06、PA-10～PA-13、PA-04、PA-23 |
 | 设计依据 | [Persistent Agent 详细架构设计](../designs/persistent-agent-architecture.md) §7；旧版详细架构 §9～11 仅供参考（见 Git 历史） |
 
@@ -23,7 +23,7 @@ PA-05 在 `execution/seams.py` 定义了窗口相关的接入约定，供 PA-06�
 - **窗口组装**：新 Request 在加载之后由 `WindowAssembler.assemble(context, request, record)` 追加执行头、临时背景块和任务输入，返回原生输入和本次的群消息游标；确认恢复不组装。
 - **窗口标记**：追加的执行头和临时背景块在消息元信息 `persistent_window_part` 中分别标为 `execution_header`、`temporary_background`，PA-10 结束整理时据此压缩执行头、删除临时背景块。
 - **结束信息**：`ExecutionEnding` 携带群消息游标和容量超限时未交接的最终答案，PA-10 写入执行结束标记和记录。
-- **群消息读取**：`GroupMessageReader.recent_messages(context, after, exclude_message_id)` 由 PA-23 实现，PA-06 与 PA-07 共用。
+- **群消息读取**：`GroupMessageReader.recent_messages(context, after, exclude_message_id)` 由 PA-23 实现，供 PA-06 组装窗口背景。PA-07 不调用该接入点，判断时直接读取已注入的 `GroupChatPort.recent_messages`。
 
 以下章节仍按旧版架构编写，描述每次模型调用前的装配、活动指针和 Checkpoint 等已被架构设计取代的目标行为；与架构设计冲突时以架构设计 §7（按 Execution 生命周期管理上下文、会话状态记录、换窗与归档）为准，随 PA-06、PA-10～PA-13 修订。
 
