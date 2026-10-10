@@ -83,10 +83,11 @@ def load_skill_self_evolution_map(
     *,
     skills_dirs: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
 ) -> dict[str, SkillSelfEvolutionMode]:
-    """Return ``{skill_id: selfEvolution}`` for *external* skill entries.
+    """Return ``{skill_id: selfEvolution}`` for skill entries in capabilities.
 
-    Builtin skills (``source: builtin``) are omitted — they never self-evolve via
-    this map. Entries without ``selfEvolution`` are also omitted.
+    Builtin skills (``source: builtin``) are always mapped to ``off`` so online
+    evolution cannot fall through to the rail ``auto_save`` default. External
+    entries without ``selfEvolution`` are omitted (caller uses rail default).
     """
     path = (
         capabilities_path
@@ -110,7 +111,9 @@ def load_skill_self_evolution_map(
         name = str(item.get("id") or "").strip()
         if not name:
             continue
+        # Product rule: official/builtin skills never self-evolve.
         if str(item.get("source") or "").strip().lower() == "builtin":
+            result[name] = "off"
             continue
         if "selfEvolution" not in item:
             continue
@@ -124,7 +127,10 @@ def get_skill_self_evolution_mode(
     capabilities_path: Optional[Path] = None,
     skills_dirs: Optional[Union[Path, str, Sequence[Union[Path, str]]]] = None,
 ) -> Optional[SkillSelfEvolutionMode]:
-    """Return recorded mode for a skill, or ``None`` if unlisted/builtin."""
+    """Return recorded mode for a skill, or ``None`` if unlisted.
+
+    Builtin skills are recorded as ``off`` (see :func:`load_skill_self_evolution_map`).
+    """
     name = (skill_name or "").strip()
     if not name:
         return None
@@ -143,7 +149,7 @@ def resolve_skill_evolution_action(
 ) -> SkillEvolutionAction:
     """Decide post-attribution action for a skill.
 
-    - ``off``: ``selfEvolution=off``
+    - ``off``: ``selfEvolution=off``, or ``source: builtin`` in capabilities
     - ``auto``: ``selfEvolution=auto``, or unlisted with ``default_auto_save=True``
     - ``suggest``: ``selfEvolution=suggest``, or unlisted with ``default_auto_save=False``
     """

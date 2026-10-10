@@ -946,9 +946,31 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 for s in unattributed:
                     s.skill_name = fallback_skill
 
+            # Resolve capabilities dirs before grouping so source:builtin can be
+            # dropped at attribution (host does not need a separate deny-list).
+            skills_dirs = self._resolve_skills_dirs_for_self_evolution()
             skill_groups: dict[str, List[EvolutionSignal]] = {}
             for signal in signals:
                 if not signal.skill_name:
+                    continue
+                # Session / feedback attribution can name skills outside the
+                # detection allow-list (e.g. disabled / capabilities builtin).
+                if self._disabled_skills and signal.skill_name in self._disabled_skills:
+                    logger.info(
+                        "[SkillEvolutionRail] skip disabled skill after attribution skill=%s",
+                        signal.skill_name,
+                    )
+                    continue
+                action = resolve_skill_evolution_action(
+                    signal.skill_name,
+                    default_auto_save=self._auto_save,
+                    skills_dirs=skills_dirs,
+                )
+                if action == "off":
+                    logger.info(
+                        "[SkillEvolutionRail] skip selfEvolution=off after attribution skill=%s",
+                        signal.skill_name,
+                    )
                     continue
                 skill_groups.setdefault(signal.skill_name, []).append(signal)
 
@@ -986,7 +1008,6 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 )
 
             # Evolve existing skills (when signals are attributed to known skills)
-            skills_dirs = self._resolve_skills_dirs_for_self_evolution()
             deferred_cancelled: List[tuple[str, str]] = []
             for skill_name, skill_signals in skill_groups.items():
                 action = resolve_skill_evolution_action(
@@ -1075,6 +1096,21 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 skill_name=skill_name,
                 status="skipped_skill_not_found",
                 message=f"external evolution skipped because skill '{skill_name}' is disabled",
+            )
+        skills_dirs = self._resolve_skills_dirs_for_self_evolution()
+        action = resolve_skill_evolution_action(
+            skill_name,
+            default_auto_save=self._auto_save,
+            skills_dirs=skills_dirs,
+        )
+        if action == "off":
+            return OnlineEvolutionResult(
+                skill_name=skill_name,
+                status="skipped_skill_not_found",
+                message=(
+                    f"external evolution skipped because skill '{skill_name}' "
+                    "has selfEvolution=off (including capabilities source:builtin)"
+                ),
             )
         if not self._evolution_store.skill_exists(skill_name) or not self._is_regular_skill(skill_name):
             return OnlineEvolutionResult(
