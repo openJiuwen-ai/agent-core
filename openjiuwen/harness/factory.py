@@ -128,7 +128,8 @@ def _inject_general_purpose_subagent(
         system_prompt=system_prompt or "",
         tools=list(tools or []),
         mcps=list(mcps or []),
-        model=model,
+        # Resolve the parent's current model at spawn, not its startup model.
+        model=None,
         skills=skills,
         rails=gp_rails,
         restrict_to_work_dir=False,
