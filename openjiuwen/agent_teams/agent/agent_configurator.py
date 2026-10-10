@@ -141,6 +141,52 @@ def _has_team_worktree_shell_guard(rails: list[Any]) -> bool:
     return False
 
 
+class _SwarmflowModelResolver:
+    """Resolves ``agent(model=...)`` hints against the live team pool.
+
+    Callable (same contract as the historical closure) so it flows unchanged
+    through inject_team_handles → rails → tool_factory → runner → backend.
+    ``pool_names`` exposes accepted names so the engine can fail fast on an
+    unknown hint before the start event is emitted.
+    """
+
+    def __init__(self, team_spec: Any) -> None:
+        self._spec = team_spec
+
+    def __call__(self, model_name: str) -> Any:
+        """Resolve a ``model`` hint to a worker ``TeamModelConfig``.
+
+        Returns a model *config* (not a built ``Model``): swarmflow workers
+        go through the spec build path, where ``DeepAgentSpec.model`` is a
+        ``TeamModelConfig`` resolved at construction. ``None`` (no hint)
+        falls back to the worker base spec's own model.
+
+        An explicit name that does not resolve RAISES instead of falling
+        back: a typo'd model would otherwise silently run on the default
+        model while the UI keeps showing the requested name. The engine's
+        pre-flight check rejects unknown hints before any side effect;
+        this raise backs the non-engine callers (CLI MCP tool set, tool
+        gateway) and the shrunk-pool window behind that check.
+        """
+        resolved = None
+        if self._spec is not None:
+            from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+            resolved = resolve_member_model(self._spec, model_name=model_name, model_index=None)
+        if resolved is None and model_name:
+            raise ValueError(
+                f"swarmflow model {model_name!r} not found in the team model pool; "
+                "an explicitly requested model never falls back to the default"
+            )
+        return resolved
+
+    def pool_names(self) -> list[str]:
+        """Accepted ``model`` hint names (live read; pool refresh stays visible)."""
+        if self._spec is None:
+            return []
+        return [e.model_name for e in (self._spec.model_pool or [])]
+
+
 class AgentConfigurator:
     """Handles agent configuration, setup, and initialization.
 
@@ -758,31 +804,13 @@ class AgentConfigurator:
         swarmflow_concurrency_governor = None
         swarmflow_budget = None
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
-            team_spec_for_models = ctx.team_spec
-
-            def swarmflow_model_resolver(model_name: str, _spec=team_spec_for_models) -> Any:
-                """Resolve an ``agent(model=...)`` name hint to a worker ``TeamModelConfig``.
-
-                Returns a model *config* (not a built ``Model``): swarmflow workers
-                go through the spec build path, where ``DeepAgentSpec.model`` is a
-                ``TeamModelConfig`` resolved at construction. ``None`` (no hint)
-                falls back to the worker base spec's own model.
-
-                An explicit name that does not resolve RAISES instead of falling
-                back: a typo'd model would otherwise silently run on the default
-                model while the UI keeps showing the requested name.
-                """
-                resolved = None
-                if _spec is not None:
-                    from openjiuwen.agent_teams.models.allocator import resolve_member_model
-
-                    resolved = resolve_member_model(_spec, model_name=model_name, model_index=None)
-                if resolved is None and model_name:
-                    raise ValueError(
-                        f"swarmflow model {model_name!r} not found in the team model pool; "
-                        "an explicitly requested model never falls back to the default"
-                    )
-                return resolved
+            # Callable class (same call contract as the historical closure) so
+            # the inject chain stays unchanged, plus pool_names for the
+            # engine's fail-fast model-hint check. The resolver-level
+            # ValueError raise from release/v0.1.19-2 is kept verbatim: it
+            # backs the non-engine callers (CLI MCP tool set, tool gateway)
+            # and the shrunk-pool window behind the engine's pre-flight.
+            swarmflow_model_resolver = _SwarmflowModelResolver(ctx.team_spec)
 
             # Workers are "a teammate without team tools": derive each worker from
             # the team's teammate spec (or the leader spec when no teammate exists).
