@@ -23,7 +23,22 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Iterator, Mapping
 
-from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
+try:
+    from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
+except ImportError:  # pragma: no cover - exercised via the optional-otel test
+    # The OpenTelemetry SDK ships with the optional ``observability`` extra.
+    # Without it no observability spans are ever produced, so span capture is
+    # disabled: the processor stays importable and inert instead of breaking
+    # every ``openjiuwen.harness.rails`` import at module load time.
+    ReadableSpan = Any  # type: ignore[assignment,misc]
+
+    class SpanProcessor:  # type: ignore[no-redef]
+        """Minimal stand-in for ``opentelemetry.sdk.trace.SpanProcessor``."""
+
+    logging.getLogger(__name__).warning(
+        "opentelemetry-sdk is not installed; trajectory span capture is disabled. "
+        "Install the 'observability' extra (pip install 'openjiuwen[observability]') to enable it."
+    )
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
