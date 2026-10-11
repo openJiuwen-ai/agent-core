@@ -1501,7 +1501,20 @@ class AnthropicModelClient(BaseModelClient):
                 )
             if self._is_tool_input_json_delta(dtype, idx, tool_use_acc):
                 tool_use_acc[idx]["args_str"] += getattr(delta, "partial_json", "") or ""
-                return None
+                # 工具参数只由 input_json_delta 推进，这里一旦 return None，整段
+                # 参数流期间上游一个 chunk 都收不到。而 Model.stream 用
+                # stream_idle_timeout（默认 60s）在「已产出 chunk 之间」计时，
+                # 长参数流会被 asyncio.wait_for 直接判为 idle 并掐断，整次工具
+                # 调用丢失。与 signature_delta / content_block_stop 一致，返回
+                # 仅带 metadata 的空 chunk 作为进度心跳。
+                return AssistantMessageChunk(
+                    content="",
+                    reasoning_content=None,
+                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    tool_calls=None,
+                    usage_metadata=None,
+                    finish_reason="null",
+                )
             return None
 
         if etype == "content_block_stop":

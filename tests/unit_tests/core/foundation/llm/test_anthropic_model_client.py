@@ -22,6 +22,7 @@ from openjiuwen.core.foundation.llm import (
     ProviderType,
 )
 from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
+from openjiuwen.core.foundation.llm.schema.message import ToolCall
 from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
     _ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY,
     AnthropicModelClient,
@@ -855,6 +856,61 @@ class TestResponseReasoning:
             "type": "thinking",
             "thinking": "plan",
             "signature": "sig",
+        }]
+
+    def test_tool_input_json_delta_emits_progress_chunk(self):
+        """``input_json_delta`` must not be swallowed.
+
+        Tool arguments are advanced exclusively by ``input_json_delta``.  When
+        that handler returned ``None`` the whole argument stream produced zero
+        chunks, so ``Model.stream``'s ``stream_idle_timeout`` (default 60s,
+        measured between emitted chunks) aborted the call and the tool use was
+        lost.  Every delta must therefore surface as a metadata-only chunk.
+        """
+        client = _make_client()
+        state = {}
+
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.id = "t1"
+        tool_block.name = "lookup"
+        tool_block.input = {}
+        start = MagicMock(type="content_block_start", index=0)
+        start.content_block = tool_block
+        assert client._event_to_chunk(start, state) is None
+
+        for partial in ('{"loc', 'ation": ', '"NY"}'):
+            delta_event = MagicMock(type="content_block_delta", index=0)
+            delta_event.delta = MagicMock(type="input_json_delta", partial_json=partial)
+            progress = client._event_to_chunk(delta_event, state)
+            assert progress is not None, "每个 input_json_delta 都必须产出进度 chunk"
+            assert progress.content == ""
+            assert progress.tool_calls is None
+            # _sanitize_replay_block 对 tool_use 只保留 type/id/name/input，
+            # 因此 args_str 的累积不会泄漏进 metadata。
+            assert progress.metadata[_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY] == [{
+                "type": "tool_use",
+                "id": "t1",
+                "name": "lookup",
+                "input": {},
+            }]
+
+        stop = MagicMock(type="content_block_stop", index=0)
+        final = client._event_to_chunk(stop, state)
+        assert final.tool_calls == [
+            ToolCall(
+                id="t1",
+                type="function",
+                name="lookup",
+                arguments='{"location": "NY"}',
+                index=0,
+            )
+        ]
+        assert final.metadata[_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY] == [{
+            "type": "tool_use",
+            "id": "t1",
+            "name": "lookup",
+            "input": {"location": "NY"},
         }]
 
 
