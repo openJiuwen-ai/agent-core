@@ -611,7 +611,74 @@ class DeepAgent(BaseAgent):
             new_react_config.kv_cache_affinity_config = config.kv_cache_affinity_config
         self._react_agent.configure(new_react_config)
         self._sync_prompt_builder_references()
+        # Propagate the new model to context-processor configs (compressors,
+        # offloaders) so they don't stay pinned to the model that was active
+        # when ContextProcessorRail.init() first injected them. Without this,
+        # a hot-reload that switches the primary model leaves compressors using
+        # the old model — if that endpoint is down, compression silently fails
+        # (status=noop) and the context window grows unbounded.
+        self._hot_reload_context_processor_models(config)
         logger.info("[DeepAgent] Model configuration hot reloaded")
+
+    def _hot_reload_context_processor_models(self, config: DeepAgentConfig) -> None:
+        """Update ``model`` / ``model_client`` on all context-processor configs.
+
+        ``ContextProcessorRail.init()`` injects the primary model into each
+        processor config (compressors, offloaders) at init time.  A subsequent
+        hot-reload changes ``react_agent._config.model_client_config`` but the
+        processor configs already carry the old model — they are no longer
+        ``None`` so ``_merge_processors`` won't overwrite them.  This method
+        force-updates every processor config that has ``model`` / ``model_client``
+        fields so compressors follow the live primary model.
+        """
+        if self._react_agent is None or config.model is None:
+            return
+        new_model_config = config.model.model_config
+        new_model_client_config = config.model.model_client_config
+        processors = getattr(self._react_agent.config, "context_processors", None)
+        if not processors:
+            return
+        updated = 0
+        for _key, cfg in processors:
+            changed = False
+            if hasattr(cfg, "model") and getattr(cfg, "model", None) is not None:
+                cfg.model = new_model_config
+                changed = True
+            if hasattr(cfg, "model_client") and getattr(cfg, "model_client", None) is not None:
+                cfg.model_client = new_model_client_config
+                changed = True
+            if changed:
+                updated += 1
+        if updated:
+            logger.info(
+                "[DeepAgent] Context processor models updated: %d processors "
+                "rebound to new primary model", updated,
+            )
+            # Also rebind the Model instance on already-instantiated processors
+            # living in the ContextEngine's cached context pool.  Updating the
+            # config alone is not enough: each processor built its ``Model`` in
+            # ``__init__`` and holds a direct reference.
+            context_engine = getattr(self._react_agent, "context_engine", None)
+            if context_engine is not None:
+                from openjiuwen.core.foundation.llm.model import Model as _Model
+                for ctx in getattr(context_engine, "_context_pool", {}).values():
+                    for processor in getattr(ctx, "_processors", []) or []:
+                        cfg = getattr(processor, "config", None)
+                        if cfg is None:
+                            continue
+                        mc = getattr(cfg, "model_client", None)
+                        mcfg = getattr(cfg, "model", None)
+                        if mc is not None and mcfg is not None:
+                            try:
+                                processor._model = _Model(mc, mcfg)
+                            except Exception:
+                                logger.warning(
+                                    "[DeepAgent] Failed to rebind model for "
+                                    "processor %s during hot reload",
+                                    getattr(processor, "processor_type",
+                                            lambda: type(processor).__name__)(),
+                                    exc_info=True,
+                                )
 
     def _extension_bound_tool_names(self) -> set[str]:
         """Return tool names owned by successful Plugin / AgentTemplate loads."""
