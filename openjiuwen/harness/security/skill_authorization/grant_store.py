@@ -40,7 +40,11 @@ class _RetiredSessionFilter:
         digest = hashlib.sha256(session_id.encode("utf-8")).digest()
         bit_count = _RETIRED_SESSION_FILTER_BYTES * 8
         for offset in range(0, _RETIRED_SESSION_HASH_COUNT * 4, 4):
-            yield int.from_bytes(digest[offset : offset + 4], "big") % bit_count
+            # 简单名切片（两侧都是标识符）同时满足 ruff format 与 G.FMT.04
+            # 检视（禁止切片冒号前空格）：复杂表达式切片会被格式化器改写成
+            # ``[offset : offset + 4]``，与检视规则冲突。
+            end = offset + 4
+            yield int.from_bytes(digest[offset:end], "big") % bit_count
 
     def add(self, session_id: str) -> None:
         for index in self._indexes(session_id):
