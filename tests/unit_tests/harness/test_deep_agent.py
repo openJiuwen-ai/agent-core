@@ -1949,7 +1949,7 @@ def test_hot_reload_model_updates_context_processor_config() -> None:
 
 
 def test_hot_reload_model_rebinds_processor_model_instances() -> None:
-    """Hot-reload should rebind ``_model`` on processors in the context pool."""
+    """Hot-reload should call ``rebind_model`` on processors in the context pool."""
     from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
         DialogueCompressorConfig,
     )
@@ -1979,7 +1979,6 @@ def test_hot_reload_model_rebinds_processor_model_instances() -> None:
     fake_ctx = MagicMock()
     fake_processor = MagicMock()
     fake_processor.config = dialogue_cfg
-    fake_processor._model = old_model
     fake_processor.processor_type = MagicMock(return_value="DialogueCompressor")
     fake_ctx._processors = [fake_processor]
 
@@ -1995,9 +1994,11 @@ def test_hot_reload_model_rebinds_processor_model_instances() -> None:
         enable_task_loop=False,
     ))
 
-    # The processor's _model should have been rebound
-    assert fake_processor._model is not old_model
-    assert fake_processor._model.model_config.model_name == "new-model"
+    # rebind_model should have been called with the new model config
+    fake_processor.rebind_model.assert_called_once()
+    call_kwargs = fake_processor.rebind_model.call_args.kwargs
+    assert call_kwargs["model_config"] is new_model.model_config
+    assert call_kwargs["model_client_config"] is new_model.model_client_config
 
 
 def test_hot_reload_context_processor_models_noop_without_model() -> None:

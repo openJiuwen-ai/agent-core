@@ -657,28 +657,28 @@ class DeepAgent(BaseAgent):
             # Also rebind the Model instance on already-instantiated processors
             # living in the ContextEngine's cached context pool.  Updating the
             # config alone is not enough: each processor built its ``Model`` in
-            # ``__init__`` and holds a direct reference.
+            # ``__init__`` and holds a direct reference.  Use the public
+            # ``rebind_model`` API instead of touching ``_model`` directly.
             context_engine = getattr(self._react_agent, "context_engine", None)
             if context_engine is not None:
-                from openjiuwen.core.foundation.llm.model import Model as _Model
                 for ctx in getattr(context_engine, "_context_pool", {}).values():
                     for processor in getattr(ctx, "_processors", []) or []:
-                        cfg = getattr(processor, "config", None)
-                        if cfg is None:
+                        rebind = getattr(processor, "rebind_model", None)
+                        if rebind is None:
                             continue
-                        mc = getattr(cfg, "model_client", None)
-                        mcfg = getattr(cfg, "model", None)
-                        if mc is not None and mcfg is not None:
-                            try:
-                                processor._model = _Model(mc, mcfg)
-                            except Exception:
-                                logger.warning(
-                                    "[DeepAgent] Failed to rebind model for "
-                                    "processor %s during hot reload",
-                                    getattr(processor, "processor_type",
-                                            lambda: type(processor).__name__)(),
-                                    exc_info=True,
-                                )
+                        try:
+                            rebind(
+                                model_config=new_model_config,
+                                model_client_config=new_model_client_config,
+                            )
+                        except Exception:
+                            logger.warning(
+                                "[DeepAgent] Failed to rebind model for "
+                                "processor %s during hot reload",
+                                getattr(processor, "processor_type",
+                                        lambda: type(processor).__name__)(),
+                                exc_info=True,
+                            )
 
     def _extension_bound_tool_names(self) -> set[str]:
         """Return tool names owned by successful Plugin / AgentTemplate loads."""
