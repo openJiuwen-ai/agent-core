@@ -870,7 +870,9 @@ class ReActAgent(BaseAgent):
         if self._skill_util is None:
             return
 
-        if not rendered_system_prompt or not self._skill_util.has_skill():
+        # Skills are injected whenever any skill is registered; an empty
+        # rendered system prompt must not silently drop the skills section.
+        if not self._skill_util.has_skill():
             self.prompt_builder.remove_section(_SKILLS_SECTION)
             return
 
