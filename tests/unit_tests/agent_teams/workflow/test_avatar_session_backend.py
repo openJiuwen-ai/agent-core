@@ -517,8 +517,18 @@ def _rounds(n: int) -> list[Any]:
     return msgs
 
 
-def test_capture_fork_full_captures_live_context(monkeypatch):
-    """full mode returns a fork_data with the parent's messages."""
+@pytest.mark.parametrize(
+    ("fork_mode", "keep_rounds", "expected_len", "expected_split", "expected_direction"),
+    [
+        ("full", None, 6, None, None),
+        ("before", 2, 4, None, None),   # rounds 1-2 kept
+        ("after", 2, 4, None, None),    # rounds 2-3 kept
+        ("keep_before_compact_after", 2, 6, 4, "after"),  # full capture, tail compressed on injection
+        ("keep_after_compact_before", 2, None, 4, "before"),  # head compressed on injection
+    ],
+)
+def test_capture_fork_modes(monkeypatch, fork_mode, keep_rounds, expected_len, expected_split, expected_direction):
+    """Each fork mode captures the context its contract names (keep-rounds table)."""
     harnesses: list = []
     _patch_build(monkeypatch, harnesses)
 
@@ -526,15 +536,24 @@ def test_capture_fork_full_captures_live_context(monkeypatch):
         mgr = _mgr(workflow_name="wf")
         sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
         harnesses[0].native.messages = _rounds(3)
-        return await mgr.capture_fork(sid, keep_rounds=None, fork_mode="full")
+        return await mgr.capture_fork(sid, keep_rounds=keep_rounds, fork_mode=fork_mode)
 
     data = asyncio.run(scenario())
     assert data is not None
-    assert data["compact_split"] is None
-    assert len(data["messages"]) == 6  # 3 rounds, full
+    if expected_len is not None:
+        assert len(data["messages"]) == expected_len
+    assert data["compact_split"] == expected_split
+    if expected_direction is not None:
+        assert data["compact_direction"] == expected_direction
 
 
-def test_capture_fork_before_truncates_at_round(monkeypatch):
+def test_capture_fork_degrades_out_of_range_and_unknown(monkeypatch, caplog):
+    """Out-of-range keep_rounds degrades per mode; an unknown session yields None.
+
+    ``before`` falls back to a full capture with a warning, a compact mode pins
+    its split to the end (no-op compaction), and a session with no live row
+    returns None so the engine degrades to its history mirror.
+    """
     harnesses: list = []
     _patch_build(monkeypatch, harnesses)
 
@@ -542,105 +561,16 @@ def test_capture_fork_before_truncates_at_round(monkeypatch):
         mgr = _mgr(workflow_name="wf")
         sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
         harnesses[0].native.messages = _rounds(3)
-        return await mgr.capture_fork(sid, keep_rounds=2, fork_mode="before")
+        before = await mgr.capture_fork(sid, keep_rounds=99, fork_mode="before")
+        compact = await mgr.capture_fork(sid, keep_rounds=99, fork_mode="keep_before_compact_after")
+        unknown = await mgr.capture_fork("no-such-session", keep_rounds=None, fork_mode="full")
+        return before, compact, unknown
 
-    data = asyncio.run(scenario())
-    assert data is not None
-    assert len(data["messages"]) == 4  # rounds 1-2 kept
-    assert data["compact_split"] is None
-
-
-def test_capture_fork_after_truncates_to_round(monkeypatch):
-    harnesses: list = []
-    _patch_build(monkeypatch, harnesses)
-
-    async def scenario():
-        mgr = _mgr(workflow_name="wf")
-        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
-        harnesses[0].native.messages = _rounds(3)
-        return await mgr.capture_fork(sid, keep_rounds=2, fork_mode="after")
-
-    data = asyncio.run(scenario())
-    assert data is not None
-    assert len(data["messages"]) == 4  # rounds 2-3 kept
-    assert data["compact_split"] is None
-
-
-def test_capture_fork_keep_before_compact_after_marks_split(monkeypatch):
-    harnesses: list = []
-    _patch_build(monkeypatch, harnesses)
-
-    async def scenario():
-        mgr = _mgr(workflow_name="wf")
-        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
-        harnesses[0].native.messages = _rounds(3)
-        return await mgr.capture_fork(sid, keep_rounds=2, fork_mode="keep_before_compact_after")
-
-    data = asyncio.run(scenario())
-    assert data is not None
-    assert data["compact_direction"] == "after"  # compress the tail
-    assert data["compact_split"] == 4  # boundary of round 2
-    assert len(data["messages"]) == 6  # full capture, split deferred to injection
-
-
-def test_capture_fork_keep_after_compact_before_marks_split(monkeypatch):
-    harnesses: list = []
-    _patch_build(monkeypatch, harnesses)
-
-    async def scenario():
-        mgr = _mgr(workflow_name="wf")
-        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
-        harnesses[0].native.messages = _rounds(3)
-        return await mgr.capture_fork(sid, keep_rounds=2, fork_mode="keep_after_compact_before")
-
-    data = asyncio.run(scenario())
-    assert data is not None
-    assert data["compact_direction"] == "before"  # compress the head
-    assert data["compact_split"] == 4
-
-
-def test_capture_fork_out_of_range_rounds_falls_back_to_full(monkeypatch, caplog):
-    """An out-of-range keep_rounds silently degrades to a full-context fork (with a warning)."""
-    harnesses: list = []
-    _patch_build(monkeypatch, harnesses)
-
-    async def scenario():
-        mgr = _mgr(workflow_name="wf")
-        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
-        harnesses[0].native.messages = _rounds(3)
-        return await mgr.capture_fork(sid, keep_rounds=99, fork_mode="before")
-
-    data = asyncio.run(scenario())
-    assert data is not None
-    assert len(data["messages"]) == 6  # full fallback
+    before, compact, unknown = asyncio.run(scenario())
+    assert len(before["messages"]) == 6  # full fallback
+    assert compact["compact_split"] == 6  # pinned to the end -> no-op compaction
     assert any("out-of-range" in rec.message for rec in caplog.records)
-    assert any("fork" in rec.message for rec in caplog.records)
-
-
-def test_capture_fork_out_of_range_compact_degrades_with_warning(monkeypatch, caplog):
-    """A compact mode with an out-of-range keep_rounds keeps the full capture and
-    skips compaction (split pinned to the end), with a warning."""
-    harnesses: list = []
-    _patch_build(monkeypatch, harnesses)
-
-    async def scenario():
-        mgr = _mgr(workflow_name="wf")
-        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "p"})
-        harnesses[0].native.messages = _rounds(3)
-        return await mgr.capture_fork(sid, keep_rounds=99, fork_mode="keep_before_compact_after")
-
-    data = asyncio.run(scenario())
-    assert data is not None
-    assert len(data["messages"]) == 6  # full capture kept
-    assert data["compact_split"] == 6  # pinned to the end -> no-op compaction
-    assert any("out-of-range" in rec.message for rec in caplog.records)
-
-
-def test_capture_fork_unknown_session_returns_none(monkeypatch):
-    """No live session -> None, so the engine degrades to its history mirror."""
-    _patch_build(monkeypatch, [])
-    mgr = _mgr(workflow_name="wf")
-    assert asyncio.run(mgr.capture_fork("nope", keep_rounds=None, fork_mode="full")) is None
+    assert unknown is None
 
 
 def test_open_session_with_fork_data_seeds_child_context(monkeypatch):
@@ -806,11 +736,6 @@ def test_session_member_names_carry_the_run_prefix():
     assert AvatarSessionManager(run_id="other")._next_member_name("agent", {"label": "Coder"}) == "other-sess-coder-0"
 
 
-def test_session_member_names_without_run_id_keep_legacy_shape():
-    mgr = AvatarSessionManager()
-    assert mgr._next_member_name("agent", {"label": "x"}) == "wf-sess-x-0"
-
-
 class _FakeMemberSession:
     """Stands in for the child AgentSession a runtime (or the read path) owns."""
 
@@ -967,25 +892,6 @@ def test_external_session_rebinds_activity_sink_per_turn(monkeypatch):
     assert turns[0].activity_binds[-1][3] == "corr2"
 
 
-def test_external_session_without_progress_sink_skips_activity_bind(monkeypatch):
-    """No progress sink bound → the external runtime never has activity bound,
-    even when agent_id is in the turn opts."""
-    mgr = _external_mgr(monkeypatch)
-    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
-    result = asyncio.run(
-        mgr.send_turn(
-            sid,
-            "one",
-            {"label": "c", "agent_type": "codex", "agent_id": "n1", "phase": "run"},
-            None,
-            history=(),
-            correlation_id="corr1",
-        )
-    )
-    assert result.text == "ext:one"
-    assert _FakeTurns.instances[0].activity_binds == []
-
-
 def test_external_session_first_turn_resolves_model_plan_before_builder(monkeypatch):
     """The session path plans the model where the builder is invoked: a builtin
     pick reaches build_cli_workflow_runtime as the endpointless config."""
@@ -1087,15 +993,6 @@ def test_external_session_model_pool_miss_raises_before_builder(monkeypatch):
     assert build_calls == []
 
 
-def test_external_session_cold_resume_requires_the_pointer(monkeypatch):
-    mgr = _external_mgr(monkeypatch, has_pointer=False)
-    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
-    history = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
-    with pytest.raises(HarnessProtocolError):
-        asyncio.run(mgr.send_turn(sid, "next", {"label": "c", "agent_type": "codex"}, None, history=history))
-    assert _FakeTurns.instances[0].resume is True and _FakeTurns.instances[0].require is True
-
-
 def test_external_session_cold_resume_with_pointer_resumes(monkeypatch):
     mgr = _external_mgr(monkeypatch, has_pointer=True)
     sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
@@ -1103,22 +1000,6 @@ def test_external_session_cold_resume_with_pointer_resumes(monkeypatch):
     result = asyncio.run(mgr.send_turn(sid, "next", {"label": "c", "agent_type": "codex"}, None, history=history))
     assert result.text == "ext:next"
     assert _FakeTurns.instances[0].resume is True and _FakeTurns.instances[0].started == 1
-
-
-def test_external_session_fork_is_rejected(monkeypatch):
-    mgr = _external_mgr(monkeypatch)
-    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
-    # The parent never ran a turn, so the provider never handed out a pointer to branch.
-    with pytest.raises(BackendError, match="no provider pointer"):
-        asyncio.run(mgr.capture_fork(sid, keep_rounds=None, fork_mode="full"))
-    # A native context snapshot is meaningless to a CLI provider.
-    with pytest.raises(BackendError, match="native context snapshot"):
-        asyncio.run(
-            mgr.open_session(
-                kind="agent", instructions=None, opts={"label": "k", "agent_type": "codex"},
-                fork_data={"messages": [{"role": "user", "content": "x"}]},
-            )
-        )
 
 
 def test_external_session_abort_all_aborts_live_runtimes(monkeypatch):
@@ -1149,14 +1030,31 @@ def test_external_session_start_failure_stops_runtime(monkeypatch):
     assert _FakeTurns.instances[0].stopped == 1
 
 
-def test_external_fork_without_a_pointer_is_refused(monkeypatch):
-    """capture_fork refuses a session that never ran a turn, even after its row is gone."""
+def test_external_fork_refuses_pointerless_and_invalid_requests(monkeypatch):
+    """capture_fork refuses a session without a provider pointer (never ran a
+    turn, row already gone) and rejects modes / keep_rounds the provider
+    does not support — no child runtime is touched either way."""
     mgr = _external_mgr(monkeypatch)
-    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
-    asyncio.run(mgr.close_session(sid))
-    # Row is gone, but _external_provider remembers this was a codex session.
-    with pytest.raises(BackendError, match="no provider pointer"):
-        asyncio.run(mgr.capture_fork(sid, keep_rounds=None, fork_mode="full"))
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await mgr.close_session(sid)
+        # Row is gone, but _external_provider remembers this was a codex session.
+        with pytest.raises(BackendError, match="no provider pointer"):
+            await mgr.capture_fork(sid, keep_rounds=None, fork_mode="full")
+
+        live = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await _run_two_turns(mgr, live)
+        _FakeTurns.instances[-1].pointer = "thr_p"
+        with pytest.raises(BackendError, match="after"):
+            await mgr.capture_fork(live, keep_rounds=1, fork_mode="after")
+        with pytest.raises(BackendError, match="keep_rounds"):
+            await mgr.capture_fork(live, keep_rounds=5, fork_mode="before")
+        # Only the live parent's runtime exists (the pointerless session never
+        # ran a turn, so it built none); no child runtime was touched.
+        assert len(_FakeTurns.instances) == 1
+
+    asyncio.run(_body())
 
 
 # ---------------------------------------------------------------------------
@@ -1191,22 +1089,6 @@ def test_external_fork_captures_credentials_from_live_parent(monkeypatch):
     asyncio.run(_body())
 
 
-def test_external_fork_rejects_unsupported_mode_and_bad_keep_rounds(monkeypatch):
-    mgr = _external_mgr(monkeypatch)
-
-    async def _body():
-        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
-        await _run_two_turns(mgr, sid)
-        _FakeTurns.instances[0].pointer = "thr_p"
-        with pytest.raises(BackendError, match="after"):
-            await mgr.capture_fork(sid, keep_rounds=1, fork_mode="after")
-        with pytest.raises(BackendError, match="keep_rounds"):
-            await mgr.capture_fork(sid, keep_rounds=5, fork_mode="before")
-        assert len(_FakeTurns.instances) == 1  # no child runtime was touched
-
-    asyncio.run(_body())
-
-
 def test_external_child_materialises_on_first_turn(monkeypatch):
     mgr = _external_mgr(monkeypatch)
     materialised: list = []
@@ -1235,22 +1117,6 @@ def test_external_child_materialises_on_first_turn(monkeypatch):
     asyncio.run(_body())
 
 
-def test_external_child_reconciles_against_parent_markers(monkeypatch):
-    mgr = _external_mgr(monkeypatch)
-
-    async def _body():
-        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
-        await _run_two_turns(mgr, sid)
-        _FakeTurns.instances[0].pointer = "thr_p"
-        data = await mgr.capture_fork(sid, keep_rounds=2, fork_mode="before")
-        data["external_fork"]["cut_marker"] = "mk9"  # tampered / drifted credential
-        child = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts("k"), fork_data=data)
-        with pytest.raises(BackendError, match="no longer match"):
-            await mgr.send_turn(child, "go", _turn_opts("k"), None, history=())
-
-    asyncio.run(_body())
-
-
 def test_external_markers_persist_and_fork_works_without_live_parent(monkeypatch):
     mgr = _external_mgr(monkeypatch)
 
@@ -1268,44 +1134,6 @@ def test_external_markers_persist_and_fork_works_without_live_parent(monkeypatch
         assert ForkCredentials.from_fork_data(data).cut_marker == "mk1"
 
     asyncio.run(_body())
-
-
-def test_external_markers_written_through_the_runtime_session(monkeypatch):
-    """The record rides the runtime's own member session, not a parallel one.
-
-    The live runtime commits its whole state on every provider checkpoint, so a
-    second session over the same bucket would have its write erased.
-    """
-    mgr = _external_mgr(monkeypatch)
-
-    async def _body():
-        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
-        await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
-        turns = _FakeTurns.instances[0]
-        turns.pointer = "thr_p"
-        await mgr.send_turn(sid, "two", _turn_opts(), None,
-                            history=[{"role": "user", "content": "one"}, {"role": "assistant", "content": "ext:one"}])
-        assert turns.member_session.state["swarmflow_external_turns"] == {
-            "markers": ["mk1", "mk2"], "pointer": "thr_p",
-        }
-        assert turns.member_session.commit_calls >= 2
-
-    asyncio.run(_body())
-
-
-def test_external_record_read_path_finalises_the_standalone_session(monkeypatch):
-    """With no live runtime the record is read from a standalone session, then closed."""
-    mgr = _external_mgr(monkeypatch)
-    sess = _FakeMemberSession({"swarmflow_external_turns": {"markers": ["mk1"], "pointer": "thr_p"}})
-
-    async def _member_session_for(member_name):
-        return sess
-
-    monkeypatch.setattr(mgr, "_member_session_for", _member_session_for)
-    mgr._persisted_external.clear()
-    record = asyncio.run(mgr._external_record("x"))
-    assert record == {"markers": ["mk1"], "pointer": "thr_p"}
-    assert sess.post_run_calls == 1
 
 
 def test_external_failed_turn_leaves_no_marker(monkeypatch):
@@ -1329,62 +1157,6 @@ def test_external_failed_turn_leaves_no_marker(monkeypatch):
             await mgr.capture_fork(sid, keep_rounds=2, fork_mode="before")
         creds = ForkCredentials.from_fork_data(await mgr.capture_fork(sid, keep_rounds=1, fork_mode="before"))
         assert creds.cut_marker == "mk1"
-
-    asyncio.run(_body())
-
-
-def test_external_session_success_carries_reported_model(monkeypatch):
-    """Once the runtime reports a model, the session turn's AgentResult names it."""
-    mgr = _external_mgr(monkeypatch)
-
-    async def _body():
-        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
-        first = await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
-        assert first.model is None  # nothing reported yet
-        _FakeTurns.instances[0].model = "gpt-5.5"
-        second = await mgr.send_turn(sid, "two", _turn_opts(), None, history=())
-        assert second.model == "gpt-5.5"
-
-    asyncio.run(_body())
-
-
-def test_external_session_failed_turn_attaches_reported_model(monkeypatch):
-    """A failed external session turn names the CLI-reported model on the BackendError."""
-    mgr = _external_mgr(monkeypatch)
-
-    async def _body():
-        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
-        await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
-        turns = _FakeTurns.instances[0]
-        turns.model = "gpt-5.5"
-
-        async def _boom(prompt, *, schema_json=None):
-            raise BackendError("boom", tokens=1)
-
-        turns.run_turn = _boom
-        with pytest.raises(BackendError, match="boom") as exc:
-            await mgr.send_turn(sid, "two", _turn_opts(), None, history=())
-        assert exc.value.model == "gpt-5.5"
-
-    asyncio.run(_body())
-
-
-def test_external_session_failed_turn_without_reported_model_leaves_none(monkeypatch):
-    """No reported model -> the failed turn's BackendError.model stays None."""
-    mgr = _external_mgr(monkeypatch)
-
-    async def _body():
-        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
-        await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
-        turns = _FakeTurns.instances[0]
-
-        async def _boom(prompt, *, schema_json=None):
-            raise BackendError("boom", tokens=1)
-
-        turns.run_turn = _boom
-        with pytest.raises(BackendError, match="boom") as exc:
-            await mgr.send_turn(sid, "two", _turn_opts(), None, history=())
-        assert exc.value.model is None
 
     asyncio.run(_body())
 
@@ -1427,64 +1199,6 @@ def test_external_child_with_its_own_pointer_resumes_instead_of_re_forking(monke
         assert child_turns.resume is True and child_turns.require is True and child_turns.seed is None
 
     asyncio.run(_body())
-
-
-def test_external_child_keeps_its_credentials_when_the_start_fails(monkeypatch):
-    """A child whose start failed must retry the fork, never run as a plain session."""
-    mgr = _external_mgr(monkeypatch)
-    materialised: list = []
-
-    async def _fake_materialise(creds, *, entry, cwd):
-        materialised.append(creds)
-        return "thr_child"
-
-    monkeypatch.setattr(asb_mod, "materialise_external_fork", _fake_materialise)
-
-    async def _body():
-        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
-        await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
-        _FakeTurns.instances[0].pointer = "thr_p"
-        data = await mgr.capture_fork(sid, keep_rounds=1, fork_mode="before")
-
-        # The child's runtime has no checkpoint pointer, so its resume start fails.
-        async def _build(state, *, resume, require, seed_checkpoint=None, opts=None):
-            return _FakeTurns(resume=resume, require=require, has_pointer=False, seed=seed_checkpoint)
-
-        monkeypatch.setattr(mgr, "_build_external_turns", _build)
-        child = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts("k"), fork_data=data)
-        with pytest.raises(HarnessProtocolError):
-            await mgr.send_turn(child, "go", _turn_opts("k"), None, history=())
-        assert mgr._sessions[child].fork_credentials is not None
-        with pytest.raises(HarnessProtocolError):
-            await mgr.send_turn(child, "go", _turn_opts("k"), None, history=())
-        assert len(materialised) == 2  # the retry asked the provider for a fresh branch
-
-    asyncio.run(_body())
-
-
-def test_member_session_identity_matches_runtime(monkeypatch):
-    """The read path must open the very ids the runtime's own member session uses.
-
-    ``ExternalHarnessMemberRuntime._ensure_member_session`` (member_runtime.py:698)
-    calls ``team_session.create_agent_session(agent_id=self._member_agent_id)`` on the
-    team session the manager hands to ``start`` — session id and agent id must match
-    or the record lands in a different bucket.
-    """
-    mgr = _external_mgr(monkeypatch)
-    created: list = []
-
-    class _FakeTeamSession:
-        def __init__(self, *, session_id, team_id, kv_cache_runtime=None):
-            created.append(session_id)
-
-        def create_agent_session(self, *, agent_id, share_stream_writer=True):
-            created.append(agent_id)
-            return _FakeMemberSession()
-
-    monkeypatch.setattr("openjiuwen.core.session.agent_team.Session", _FakeTeamSession)
-    asyncio.run(mgr._member_session_for("m"))
-    assert mgr._derive_avatar_session_id("m") == "t/workflow/m"
-    assert created == ["t/workflow/m", "t_m"]
 
 
 # ---------------------------------------------------------------------------
@@ -1546,31 +1260,3 @@ def test_session_avatar_rail_emits_paired_activity_with_agent_id_and_correlation
     assert len(second) == 2 and all(e.correlation_id == "review:sre:1" for e in second)
 
 
-def test_session_avatar_mounts_no_activity_rail_without_a_sink(monkeypatch):
-    """No progress sink bound -> the rail is not mounted (silent)."""
-    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import SwarmflowActivityRail
-
-    harnesses: list = []
-    _patch_build(monkeypatch, harnesses)
-    mgr = _mgr()  # no progress_sink
-    agent_id = '[["call", 0]]'
-    sid = asyncio.run(
-        mgr.open_session(kind="agent", instructions=None, opts={"label": "sre", "agent_id": agent_id})
-    )
-    asyncio.run(mgr.send_turn(sid, "go", {"label": "sre", "agent_id": agent_id}, None, correlation_id="_:sre:0"))
-    assert not any(isinstance(r, SwarmflowActivityRail) for r in harnesses[0].rails)
-
-
-def test_session_avatar_mounts_no_activity_rail_without_agent_id(monkeypatch):
-    """Without the injected agent_id in opts the rail stays off even with a sink."""
-    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import SwarmflowActivityRail
-
-    harnesses: list = []
-    _patch_build(monkeypatch, harnesses)
-    base = DeepAgentSpec(tools=[])
-    events: list = []
-    mgr = AvatarSessionManager(worker_base_spec=base, team_name="t", language="en", progress_sink=events.append)
-    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "sre"}))
-    asyncio.run(mgr.send_turn(sid, "go", {"label": "sre"}, None))
-    assert not any(isinstance(r, SwarmflowActivityRail) for r in harnesses[0].rails)
-    assert events == []

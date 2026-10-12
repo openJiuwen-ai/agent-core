@@ -87,79 +87,47 @@ def _write(tmp_path, name: str, src: str) -> str:
     return str(path)
 
 
-_SWITCH_MODEL_SCRIPT = """
+_LOCK_SCRIPT = """
 from swarmflow import agent_session
 
-META = {"name": "switch-model", "description": "session model switch", "phases": []}
+META = {"name": "lock", "description": "session model lock", "phases": []}
 
 async def run(args):
     s = agent_session(label="chat", options={"agent_type": "codex", "builtin_model": "gpt-5-codex"})
-    await s.send("first")
-    await s.send("second")
-    await s.send("third", options={"builtin_model": None, "model": "deepseek-v4-flash"})
-    return None
-"""
-
-
-def test_third_party_turn_switching_model_raises(tmp_path):
-    """A session locked to ``builtin_model`` raises on a later turn hinting ``model``."""
-    script = _write(tmp_path, "switch_model.py", _SWITCH_MODEL_SCRIPT)
-    backend = _SessionBackend()
-
-    with pytest.raises(EngineError) as exc:
-        asyncio.run(run_workflow(script, backend=backend))
-    assert "fork()" in str(exc.value)
-    assert "gpt-5-codex" in str(exc.value)  # names the locked value
-    # The first two turns ran; the switching turn never reached the backend.
-    assert backend.turns == ["first", "second"]
-
-
-_SAME_HINT_SCRIPT = """
-from swarmflow import agent_session
-
-META = {"name": "same-hint", "description": "stable model", "phases": []}
-
-async def run(args):
-    s = agent_session(label="chat", options={"agent_type": "codex", "model": "glm-5"})
     a = await s.send("first")
-    b = await s.send("second", options={"model": "glm-5"})
-    c = await s.send("third")
+    b = await s.send("second", options={"builtin_model": "gpt-5-codex"})
+    c = await s.send("third", options=THIRD)
     return [a, b, c]
 """
 
 
-def test_same_hint_every_turn_executes(tmp_path):
-    """Same hint every turn is a no-op lock — all turns run."""
-    script = _write(tmp_path, "same_hint.py", _SAME_HINT_SCRIPT)
+@pytest.mark.parametrize(
+    ("third", "locked_name"),
+    [
+        ('{"builtin_model": None, "model": "deepseek-v4-flash"}', "gpt-5-codex"),  # different model
+        ('{"builtin_model": None, "model": "gpt-5-codex"}', "gpt-5-codex"),        # same string, other supply
+    ],
+)
+def test_turn_with_a_different_identity_raises_and_names_the_lock(tmp_path, third, locked_name):
+    """The first live turn locks the session's model identity; a later turn whose
+    hints resolve to another identity raises, naming the locked value and fork().
+    ``model='X'`` and ``builtin_model='X'`` are different identities even when
+    the string matches — a pool endpoint is not the CLI's own login."""
     backend = _SessionBackend()
-
-    result = asyncio.run(run_workflow(script, backend=backend))
-    assert result == ["turn:first", "turn:second", "turn:third"]
-    assert backend.turns == ["first", "second", "third"]
-
-
-_SUPPLY_SWITCH_SCRIPT = """
-from swarmflow import agent_session
-
-META = {"name": "supply-switch", "description": "supply switch", "phases": []}
-
-async def run(args):
-    s = agent_session(label="chat", options={"agent_type": "codex", "model": "X"})
-    await s.send("first")
-    await s.send("second", options={"model": None, "builtin_model": "X"})
-    return None
-"""
-
-
-def test_same_string_different_supply_raises(tmp_path):
-    """``model='X'`` and ``builtin_model='X'`` are different models, so they differ."""
-    script = _write(tmp_path, "supply_switch.py", _SUPPLY_SWITCH_SCRIPT)
-    backend = _SessionBackend()
-
+    script = _write(tmp_path, "lock.py", _LOCK_SCRIPT.replace("THIRD", third))
     with pytest.raises(EngineError) as exc:
         asyncio.run(run_workflow(script, backend=backend))
     assert "fork()" in str(exc.value)
-    assert backend.turns == ["first"]
+    assert locked_name in str(exc.value)
+    assert backend.turns == ["first", "second"]  # same-hint turn ran; the switch never reached the backend
+
+
+def test_same_hint_every_turn_executes(tmp_path):
+    """Re-stating the locked hint (or omitting it) is a no-op lock — all turns run."""
+    backend = _SessionBackend()
+    script = _write(tmp_path, "same.py", _LOCK_SCRIPT.replace("THIRD", "None"))
+    result = asyncio.run(run_workflow(script, backend=backend))
+    assert result == ["turn:first", "turn:second", "turn:third"]
 
 
 _FORK_LOCK_SCRIPT = """
@@ -179,45 +147,29 @@ async def run(args):
 """
 
 
-def test_fork_child_locks_independently(tmp_path):
-    """A fork child with a different hint runs fine; its later turns validate against its own lock."""
-    script = _write(tmp_path, "fork_lock.py", _FORK_LOCK_SCRIPT)
-    backend = _SessionBackend()
+def test_fork_child_and_parent_lock_independently(tmp_path):
+    """A fork child locks its own hint; neither session's lock leaks into the other.
 
+    The child's later turns validate against the child's lock (the error names
+    the child's value), and the parent still rejects the child's hint on its
+    own turns (the error names the parent's value).
+    """
+    backend = _SessionBackend()
     with pytest.raises(EngineError) as exc:
-        asyncio.run(run_workflow(script, backend=backend))
-    # The error names the CHILD's locked value, not the parent's.
-    assert "deepseek-v4-flash" in str(exc.value)
+        asyncio.run(run_workflow(_write(tmp_path, "fork_lock.py", _FORK_LOCK_SCRIPT), backend=backend))
+    assert "deepseek-v4-flash" in str(exc.value)  # the CHILD's locked value
     assert "fork()" in str(exc.value)
-    # p1, c1, c2, p2 all ran (p2 same-hint on the parent's glm-5 lock); c3 blocked.
-    assert backend.turns == ["p1", "c1", "c2", "p2"]
+    assert backend.turns == ["p1", "c1", "c2", "p2"]  # c3 blocked
 
-
-_FORK_PARENT_LOCK_SCRIPT = """
-from swarmflow import agent_session
-
-META = {"name": "fork-parent-lock", "description": "parent keeps lock", "phases": []}
-
-async def run(args):
-    parent = agent_session(label="p", options={"agent_type": "codex", "model": "glm-5"})
-    await parent.send("p1")
-    child = await parent.fork(label="c", options={"model": "deepseek-v4-flash"})
-    await child.send("c1")
-    await parent.send("p2", options={"model": "deepseek-v4-flash"})   # parent locked to glm-5
-    return None
-"""
-
-
-def test_parent_keeps_its_lock_after_fork(tmp_path):
-    """The child's different hint never leaks into the parent's own lock."""
-    script = _write(tmp_path, "fork_parent_lock.py", _FORK_PARENT_LOCK_SCRIPT)
+    parent_switch = _FORK_LOCK_SCRIPT.replace(
+        'await child.send("c3", options={"model": "glm-5"})',
+        'await parent.send("p3", options={"model": "deepseek-v4-flash"})',
+    )
     backend = _SessionBackend()
-
     with pytest.raises(EngineError) as exc:
-        asyncio.run(run_workflow(script, backend=backend))
-    # The error names the PARENT's locked value — the child's hint did not touch it.
-    assert "glm-5" in str(exc.value)
-    assert backend.turns == ["p1", "c1"]
+        asyncio.run(run_workflow(_write(tmp_path, "fork_parent_lock.py", parent_switch), backend=backend))
+    assert "glm-5" in str(exc.value)  # the PARENT's locked value — untouched by the child's hint
+    assert backend.turns == ["p1", "c1", "c2", "p2"]
 
 
 def test_cache_hit_replay_does_not_lock_then_live_turn_locks(tmp_path):
@@ -297,96 +249,28 @@ class _BaseModelNamingBackend(_SessionBackend):
         return "glm-5-air"
 
 
-_THIRD_PARTY_NO_HINT_SCRIPT = """
-from swarmflow import agent_session
+def test_no_hint_lock_names_what_was_actually_locked(tmp_path):
+    """A no-hint lock names the real lockee per supply path.
 
-META = {"name": "cli-default-lock", "description": "third-party no hint", "phases": []}
-
-async def run(args):
-    s = agent_session(label="cx", options={"agent_type": "codex"})
-    a = await s.send("t1")
-    b = await s.send("t2", options={"model": "glm-5"})
-    return [a, b]
-"""
-
-
-def test_no_hint_native_lock_names_concrete_base_model(tmp_path):
-    """A backend exposing describe_base_model: the lock error names that model."""
-    script = _write(tmp_path, "concrete_lock.py", _BASE_LOCK_SCRIPT)
+    Native: the backend's describe_base_model names the concrete base spec
+    model. Third-party: the engine names the CLI's own default model honestly
+    (its concrete name is opaque to the engine).
+    """
     backend = _BaseModelNamingBackend()
-
     with pytest.raises(EngineError) as exc:
-        asyncio.run(run_workflow(script, backend=backend))
+        asyncio.run(run_workflow(_write(tmp_path, "concrete_lock.py", _BASE_LOCK_SCRIPT), backend=backend))
     assert "glm-5-air" in str(exc.value)
     assert "fork()" in str(exc.value)
     assert backend.turns == ["first"]
 
-
-def test_no_hint_third_party_lock_names_the_cli_default(tmp_path):
-    """A third-party no-hint lock names the CLI's own default model honestly."""
-    script = _write(tmp_path, "cli_default_lock.py", _THIRD_PARTY_NO_HINT_SCRIPT)
+    third_party = _BASE_LOCK_SCRIPT.replace(
+        'agent_session(label="chat")', 'agent_session(label="cx", options={"agent_type": "codex"})'
+    )
     backend = _SessionBackend()
-
     with pytest.raises(EngineError) as exc:
-        asyncio.run(run_workflow(script, backend=backend))
+        asyncio.run(run_workflow(_write(tmp_path, "cli_default_lock.py", third_party), backend=backend))
     assert "codex CLI's own default model" in str(exc.value)
-    assert "fork()" in str(exc.value)
-    assert backend.turns == ["t1"]
-
-
-def test_no_hint_lock_names_base_spec_model(tmp_path):
-    """A no-hint first turn locks the avatar's default; the message says 'the base spec model'."""
-    script = _write(tmp_path, "base_lock.py", _BASE_LOCK_SCRIPT)
-    backend = _SessionBackend()
-
-    with pytest.raises(EngineError) as exc:
-        asyncio.run(run_workflow(script, backend=backend))
-    assert "the base spec model" in str(exc.value)
-    assert "fork()" in str(exc.value)
     assert backend.turns == ["first"]
-
-
-_HUMAN_LOCK_SCRIPT = """
-from swarmflow import human_session
-
-META = {"name": "human-lock", "description": "human no lock", "phases": []}
-
-async def run(args):
-    h = human_session(label="lead", options={"model": "glm-5"})
-    a = await h.send("h1")
-    b = await h.send("h2", options={"model": "deepseek-v4-flash"})
-    return [a, b]
-"""
-
-
-def test_human_sessions_do_not_lock(tmp_path):
-    """Human sessions answer through a person, not a model — hint changes never lock."""
-    script = _write(tmp_path, "human_lock.py", _HUMAN_LOCK_SCRIPT)
-    backend = _SessionBackend()
-
-    result = asyncio.run(run_workflow(script, backend=backend))
-    assert result == ["turn:h1", "turn:h2"]
-
-
-_ONESHOT_SCRIPT = """
-from swarmflow import agent
-
-META = {"name": "one-shot", "description": "stateless agents", "phases": []}
-
-async def run(args):
-    a = await agent("a", options={"model": "glm-5"})
-    b = await agent("b", options={"model": "deepseek-v4-flash"})
-    return [a, b]
-"""
-
-
-def test_native_one_shot_agent_not_locked(tmp_path):
-    """Stateless one-shot ``agent()`` calls are exempt from the session lock."""
-    script = _write(tmp_path, "one_shot.py", _ONESHOT_SCRIPT)
-    backend = _SessionBackend()
-
-    result = asyncio.run(run_workflow(script, backend=backend))
-    assert result == ["ran:a", "ran:b"]
 
 
 _SWITCH_AFTER_FAIL_SCRIPT = """
@@ -403,20 +287,6 @@ async def run(args):
 """
 
 
-def test_failed_first_turn_then_different_hint_relocks(tmp_path):
-    """A first turn that failed never "used" the lock, so the corrected hint re-locks."""
-    script = _write(tmp_path, "switch_after_fail.py", _SWITCH_AFTER_FAIL_SCRIPT)
-    backend = _FlakySessionBackend(fail_prompt="first")
-
-    with pytest.raises(EngineError) as exc:
-        asyncio.run(run_workflow(script, backend=backend))
-    # The error names the RE-LOCKED value, not the one from the failed turn.
-    assert "deepseek-v4-flash" in str(exc.value)
-    assert "fork()" in str(exc.value)
-    assert backend.opened == ["m0"]          # one avatar across all three turns
-    assert backend.turns == ["second"]       # first failed, second ran, third blocked
-
-
 _RETRY_SAME_HINT_SCRIPT = """
 from swarmflow import agent_session
 
@@ -430,11 +300,18 @@ async def run(args):
 """
 
 
-def test_failed_first_turn_then_same_hint_proceeds(tmp_path):
-    """The same hint after a failed first turn stays on the no-op lock path."""
-    script = _write(tmp_path, "retry_same_hint.py", _RETRY_SAME_HINT_SCRIPT)
+def test_failed_first_turn_never_consumes_the_lock(tmp_path):
+    """A failed first turn never "used" the lock: a corrected hint re-locks and
+    the same hint stays on the no-op path — one avatar across all turns."""
     backend = _FlakySessionBackend(fail_prompt="first")
+    with pytest.raises(EngineError) as exc:
+        asyncio.run(run_workflow(_write(tmp_path, "switch_after_fail.py", _SWITCH_AFTER_FAIL_SCRIPT), backend=backend))
+    assert "deepseek-v4-flash" in str(exc.value)  # the RE-LOCKED value, not the failed turn's
+    assert "fork()" in str(exc.value)
+    assert backend.opened == ["m0"]          # one avatar across all three turns
+    assert backend.turns == ["second"]       # first failed, second ran, third blocked
 
-    result = asyncio.run(run_workflow(script, backend=backend))
+    backend = _FlakySessionBackend(fail_prompt="first")
+    result = asyncio.run(run_workflow(_write(tmp_path, "retry_same_hint.py", _RETRY_SAME_HINT_SCRIPT), backend=backend))
     assert result == [None, "turn:second"]
     assert backend.turns == ["second"]

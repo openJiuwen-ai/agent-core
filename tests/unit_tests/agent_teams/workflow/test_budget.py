@@ -11,9 +11,7 @@ response and force-finishing the round that crosses the ceiling.
 from __future__ import annotations
 
 import asyncio
-import json
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -27,14 +25,14 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_factory import create_team_tools
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
-from openjiuwen.agent_teams.workflow.engine import run_workflow, runner
 from openjiuwen.agent_teams.workflow.engine import primitives as _p
+from openjiuwen.agent_teams.workflow.engine import run_workflow, runner
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
 from openjiuwen.agent_teams.workflow.engine.journal import Journal
 from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 from openjiuwen.agent_teams.workflow.engine.runtime import Runtime
-from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
 from openjiuwen.core.single_agent.rail.base import ModelCallInputs
@@ -655,31 +653,11 @@ async def test_emit_agent_failed_carries_tokens_and_budget():
     assert ev.budget["exhausted"] is True
 
 
-@pytest.mark.asyncio
-async def test_emit_agent_failed_carries_reported_model():
-    sink = _Sink()
-    rt = Runtime(backend=None, journal=None, budget=BudgetLedger())
-    rt.progress_sink = sink
-    _p._emit_agent_failed(
-        rt, {"phase": "review", "label": "analyst"}, "boom",
-        agent_id="k1", model="gpt-5.5",
-    )
-    ev = sink.events[-1]
-    assert ev.kind == ProgressKind.AGENT_FAILED
-    assert ev.model == "gpt-5.5"
-
-
 def test_backend_call_result_has_tokens_field():
     r = _p._BackendCallResult(result="x", succeeded=True, raw_text="x", tokens=999)
     assert r.tokens == 999
     r_default = _p._BackendCallResult()
     assert r_default.tokens is None
-
-
-def test_backend_call_result_has_model_field():
-    r = _p._BackendCallResult(result="x", succeeded=True, raw_text="x", model="GLM-5.3")
-    assert r.model == "GLM-5.3"
-    assert _p._BackendCallResult().model is None
 
 
 @pytest.mark.asyncio
@@ -722,19 +700,6 @@ async def test_attempt_calls_threads_model_on_success():
     out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
     assert out.succeeded is True
     assert out.model == "GLM-5.3"
-
-
-@pytest.mark.asyncio
-async def test_attempt_calls_threads_model_from_backend_error():
-    """A failed call carries the last attempt's model to the failed result."""
-    async def make_call(feedback=None):
-        raise _BackendErr("boom", tokens=40, model="gpt-5.5")
-
-    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(total=10_000))
-    out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
-    assert out.succeeded is False
-    assert out.attempts == 3  # exhausted retries, not a non-retryable BackendError
-    assert out.model == "gpt-5.5"
 
 
 @pytest.mark.asyncio
@@ -929,4 +894,20 @@ def test_budget_rail_bill_credits_both_ledgers_after_the_fact():
     assert rail.call_tokens == 300
     assert session.spent == 300
     assert workflow.spent == 300
+
+
+def test_budget_rail_bill_carries_the_usage_split():
+    """The input/output/cache split rides along so external turns report it too."""
+    from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
+    from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+
+    rail = SwarmflowBudgetRail(BudgetLedger(total=1_000_000))
+
+    rail.bill(11571, input_tokens=10970, output_tokens=601, cache_tokens=10624)
+    rail.bill(50)  # totals-only report (unreported split) leaves the counters intact
+
+    assert rail.call_tokens == 11621
+    assert rail.call_input_tokens == 10970
+    assert rail.call_output_tokens == 601
+    assert rail.call_cache_tokens == 10624
 

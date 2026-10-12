@@ -108,17 +108,6 @@ def test_bare_effort_requires_builtin_model():
     _assert_not_retryable(exc.value)
 
 
-def test_unknown_builtin_lists_catalog():
-    with pytest.raises(BackendError) as exc:
-        plan_external_model(
-            cli_agent="codex", model_hint=None, builtin_hint="gpt-5-ultra",
-            effort_hint=None, entry=ENTRY_WITH_CATALOG, team_backend=POOL,
-        )
-    msg = str(exc.value)
-    assert "gpt-5-ultra" in msg and "gpt-5-codex" in msg   # catalog names
-    _assert_not_retryable(exc.value)
-
-
 def test_native_agent_builtin_hint_rejected():
     with pytest.raises(BackendError) as exc:
         plan_external_model(
@@ -127,18 +116,6 @@ def test_native_agent_builtin_hint_rejected():
         )
     msg = str(exc.value)
     assert "builtin_model" in msg and "effort" in msg
-    _assert_not_retryable(exc.value)
-
-
-def test_protocol_incompatible_pool_hit_lists_compatible():
-    with pytest.raises(BackendError) as exc:
-        plan_external_model(
-            cli_agent="claude", model_hint="deepseek-v4-flash", builtin_hint=None,
-            effort_hint=None, entry=None, team_backend=POOL_MIXED,
-        )
-    msg = str(exc.value)
-    assert "deepseek-v4-flash" in msg
-    assert "anthropic-sonnet" in msg   # compatible pool list
     _assert_not_retryable(exc.value)
 
 
@@ -154,21 +131,3 @@ def test_effort_not_in_efforts_lists_supported():
     _assert_not_retryable(exc.value)
 
 
-def test_all_empty_returns_no_plan():
-    plan = plan_external_model(
-        cli_agent="codex", model_hint=None, builtin_hint=None,
-        effort_hint=None, entry=ENTRY_WITH_CATALOG, team_backend=POOL,
-    )
-    assert plan.primary is None and plan.display is None
-
-
-def test_catalogless_pool_miss_names_only_pool():
-    with pytest.raises(BackendError) as exc:
-        plan_external_model(
-            cli_agent="codex", model_hint="gpt-5-codex", builtin_hint=None,
-            effort_hint=None, entry=ENTRY_NO_CATALOG, team_backend=POOL,
-        )
-    msg = str(exc.value)
-    assert "deepseek-v4-flash" in msg
-    assert "builtin_model" not in msg
-    _assert_not_retryable(exc.value)

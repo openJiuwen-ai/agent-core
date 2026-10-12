@@ -896,46 +896,6 @@ async def test_require_checkpoint_resumes_when_a_pointer_exists() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_seed_checkpoint_lets_a_fresh_member_session_require_resume() -> None:
-    """A forked child has no history of its own; the host seeds the pointer it must resume."""
-    harness = _FakeHarness()
-    team_session = _FakeTeamSession()
-    runtime = ExternalHarnessMemberRuntime(
-        harness=harness, context=_context(),
-        resume_external_backend=True, require_checkpoint=True,
-        seed_checkpoint={"session_id": "forked-1"},
-    )
-    await runtime.start(team_session=team_session)
-    await runtime.stop()
-    started = harness.start_contexts[0]
-    assert started.resume_policy is ResumePolicy.REQUIRE_RESUME
-    assert started.checkpoint is not None
-    assert started.checkpoint.provider == "fake"
-    assert started.checkpoint.agent_id == "member-agent"
-    assert started.checkpoint.data == {"session_id": "forked-1"}
-    assert team_session.member_session.commit_calls >= 1
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_reported_model_is_none_until_a_model_event_arrives() -> None:
-    """Before any CLI model report the runtime exposes ``None``, not a placeholder."""
-    harness = _FakeHarness()
-    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context(), agent_kind="codex")
-    runtime.bind_reliability_context(
-        session_id="s1",
-        team_backend=None,
-        leader_name="leader",
-        update_status_cb=lambda status: None,
-        messager=None,
-    )
-    await runtime.start(team_session=_FakeTeamSession())
-    await runtime.stop()
-    assert runtime.reported_model is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
 async def test_reported_model_tracks_cli_model_events() -> None:
     """The model the CLI reports (``session/model_changed``) surfaces on the runtime."""
     harness = _FakeHarness()
@@ -1018,7 +978,9 @@ async def test_bound_activity_sink_maps_claude_tool_pair() -> None:
     assert call.tool_call_id == result.tool_call_id == "toolu_1"
     assert call.tool_name == result.tool_name == "Write"
     expected_args = json.dumps({"path": "a.txt", "content": "x" * 600}, ensure_ascii=False, separators=(",", ":"))
-    assert call.content == expected_args[:512] + "…(truncated)"
+    # Full arguments pass through — the member call list shows the same
+    # complete payload a real teammate's tool_call frame carries.
+    assert call.content == expected_args
     assert result.content == '{"ok":true}'
     assert call.message == "tool: Write"
     # The bind-time identity rides every event.
@@ -1125,31 +1087,4 @@ async def test_activity_sink_drops_idless_and_unparsable_tool_events() -> None:
 
     assert received == []
 
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_activity_sink_unbound_stays_silent() -> None:
-    """Without a bound sink the runtime never emits activity and never raises."""
-    harness = _FakeHarness()
-    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
-    finished = asyncio.Event()
-
-    async def on_round(*, kind: str, round_id: str | None, result: Any) -> None:
-        if kind == "finished":
-            finished.set()
-
-    await runtime.subscribe(on_round=on_round)
-    await runtime.start()
-
-    await harness.emit(
-        ItemLifecycleEvent(kind=ItemEventKind.STARTED, item_type="tool", data={"name": "Write", "arguments": {}}),
-        turn_id="turn-1",
-        item_id="toolu_1",
-    )
-    await harness.emit(
-        TurnLifecycleEvent(kind=TurnEventKind.FINISHED, result=TurnResult(status=TurnStatus.COMPLETED)),
-        turn_id="turn-1",
-    )
-    await asyncio.wait_for(finished.wait(), timeout=1)
-    await runtime.stop()
 

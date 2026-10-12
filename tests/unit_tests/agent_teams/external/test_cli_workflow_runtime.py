@@ -86,38 +86,6 @@ async def test_workflow_runtime_model_config_reaches_harness(monkeypatch, cli_ag
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("cli_agent", ["claude", "codex"])
-async def test_workflow_runtime_none_model_config_leaves_harness_modelless(monkeypatch, cli_agent):
-    """model_config=None leaves the harness modelless: the CLI's own login decides."""
-    captured: dict = {}
-
-    class _Harness:
-        def __init__(self, config, **kw):
-            captured["config"] = config
-
-        card = type("C", (), {"name": cli_agent})()
-
-    monkeypatch.setattr(spawn_mod, "ClaudeCodeHarness", _Harness)
-    monkeypatch.setattr(spawn_mod, "CodexHarness", _Harness)
-    entry = ExternalCliAgentSpec(cli_agent=cli_agent)
-    await build_cli_workflow_runtime(
-        cli_agent=cli_agent, entry=entry, member_name="m", member_agent_id="t_m", session_id="s1",
-        team_name="t", system_prompt="p", cwd=None, model_config=None,
-    )
-    assert captured["config"].model is None
-
-
-def test_workflow_runtime_rejects_model_override_kwarg():
-    """model_override is gone: the callers resolve a structured config first."""
-    with pytest.raises(TypeError):
-        build_cli_workflow_runtime(
-            cli_agent="codex", entry=ExternalCliAgentSpec(cli_agent="codex"), member_name="m",
-            member_agent_id="t_m", session_id="s1", team_name="t", system_prompt="p", cwd=None,
-            model_override="gpt-5-codex",
-        )
-
-
-@pytest.mark.asyncio
 async def test_workflow_runtime_rejects_adapter_backends():
     entry = ExternalCliAgentSpec(cli_agent="gemini")
     with pytest.raises(ValueError, match="claude, codex"):

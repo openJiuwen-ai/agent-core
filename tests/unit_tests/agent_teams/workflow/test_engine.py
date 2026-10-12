@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from openjiuwen.agent_teams.workflow.engine import (
     MockBackend,
     ProgressKind,
@@ -19,8 +21,6 @@ from openjiuwen.agent_teams.workflow.engine import (
     run_workflow,
 )
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
-
-import pytest
 
 _FANOUT_SCRIPT = '''
 from swarmflow import agent, parallel, phase, log
