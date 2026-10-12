@@ -142,3 +142,90 @@ async def test_skill_tool_failure_does_not_set_name():
     assert result.success is False
     assert get_current_skill_name() == "previous"
     assert get_current_skill_name(session) == "previous"
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_directory_name_fallback_sets_name(tmp_path, monkeypatch):
+    """Directory-name fallback: frontmatter name ≠ install directory name.
+
+    Third-party marketplace skills (e.g. agentcenter installs) land under
+    ``skills/<install-name>/`` with an arbitrary SKILL.md frontmatter name,
+    while the SkillUseRail allowlist filters by directory name — a loaded
+    skill must resolve when the model passes the install (directory) name.
+    """
+    from openjiuwen.core.single_agent.skills.skill_manager import Skill
+    from openjiuwen.harness.tools.skills.skill_tool import SkillTool
+
+    skill_dir = tmp_path / "customer-intel"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\ndescription: d\n---\n\n# customer intel\n", encoding="utf-8"
+    )
+    skill = Skill(name="Customer Intelligence Insight", description="d", directory=skill_dir)
+    session = _FakeSession()
+
+    op = SimpleNamespace(
+        fs=lambda: SimpleNamespace(
+            read_file=AsyncMock(
+                return_value=SimpleNamespace(
+                    code=0,
+                    message="",
+                    data=SimpleNamespace(content="# customer intel\n"),
+                )
+            )
+        )
+    )
+    tool = SkillTool(op, lambda: [skill])
+    monkeypatch.setattr(
+        "openjiuwen.harness.tools.skills.skill_tool._skill_layout_metadata",
+        lambda _path: {
+            "directory_tree": "customer-intel/",
+            "discovered_skill_names": [],
+            "tree_truncated": False,
+            "nested_skills_truncated": False,
+        },
+    )
+
+    result = await tool.invoke({"skill_name": "customer-intel"}, session=session)
+    assert result.success is True, f"directory-name lookup must fall back: {result.error}"
+    # Attribution uses the resolved Skill object's frontmatter name.
+    assert get_current_skill_name() == "Customer Intelligence Insight"
+
+    # Regression: frontmatter name remains the primary lookup key.
+    clear_current_skill_name()
+    result_by_frontmatter = await tool.invoke(
+        {"skill_name": "Customer Intelligence Insight"}, session=session
+    )
+    assert result_by_frontmatter.success is True
+
+    # Regression: a name matching neither system still reports not found.
+    result_missing = await tool.invoke({"skill_name": "no-such-skill"}, session=session)
+    assert result_missing.success is False
+    assert "no-such-skill" in result_missing.error
+
+
+@pytest.mark.asyncio
+async def test_fetch_evolution_texts_falls_back_to_directory_name(tmp_path):
+    """Evolution store keys by directory name; injection must fall back on frontmatter miss."""
+    from openjiuwen.core.single_agent.skills.skill_manager import Skill
+    from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
+
+    skill_dir = tmp_path / "customer-intel"
+    skill = Skill(name="Customer Intelligence Insight", description="d", directory=skill_dir)
+
+    calls: list[str] = []
+
+    class _FakeStore:
+        async def format_desc_experience_text(self, name: str, max_items: int = 5) -> str:
+            calls.append(name)
+            return "evolved insight" if name == "customer-intel" else ""
+
+    rail = SkillUseRail(skills_dir=str(tmp_path), include_tools=False)
+    rail.evolution_store = _FakeStore()
+    rail.skills = [skill]
+
+    await rail._fetch_evolution_texts()
+
+    # Frontmatter name was tried first, directory name second; cache keyed by frontmatter.
+    assert calls == ["Customer Intelligence Insight", "customer-intel"]
+    assert rail._evolution_texts["Customer Intelligence Insight"] == "evolved insight"

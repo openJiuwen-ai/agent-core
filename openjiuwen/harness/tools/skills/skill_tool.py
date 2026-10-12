@@ -456,7 +456,16 @@ class SkillTool(Tool):
             yield None
 
     def _get_skill_by_name(self, skill_name: str, session: Any = None) -> Optional[Skill]:
-        """Select skill object by name."""
+        """Select skill object by name.
+
+        Primary lookup uses the SKILL.md frontmatter ``name``. Third-party
+        marketplace skills (e.g. agentcenter installs) do not guarantee the
+        frontmatter name equals the install directory name, while the
+        SkillUseRail enabled/disabled allowlist filters by directory name —
+        the two name systems disagree, a loaded skill then answers "Skill not
+        found" for the name the user/installer used. Fall back to matching the
+        skill's install directory name, which is the install identifier.
+        """
         if not skill_name:
             return None
 
@@ -466,7 +475,13 @@ class SkillTool(Tool):
             # Keep compatibility with callers that provide the original no-arg callback.
             skills = self.get_skills() or []
         skill_map = {skill.name: skill for skill in skills}
-        return skill_map.get(skill_name)
+        hit = skill_map.get(skill_name)
+        if hit is not None:
+            return hit
+        for skill in skills:
+            if Path(skill.directory).name == skill_name:
+                return skill
+        return None
 
 
 __all__ = [
