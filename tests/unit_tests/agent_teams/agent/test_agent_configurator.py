@@ -155,3 +155,22 @@ def test_worker_base_spec_prefers_teammate_over_leader():
     assert base.enable_task_planning is True
     assert base.progressive_tool is not None
     assert spec.agents["teammate"].progressive_tool is None
+
+
+# --- swarmflow external CLI allowlist: read from the blueprint, not the runtime spec ---
+
+
+def test_external_cli_allowlist_comes_from_the_blueprint_spec():
+    """The allowlist is declared on ``TeamAgentSpec.external_cli_agents``; the runtime
+    ``TeamSpec`` carries no such field, so deriving it from ``ctx.team_spec`` raises
+    ``AttributeError`` on every swarmflow leader setup."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _derive_swarmflow_external_cli_agents
+    from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamSpec
+
+    spec = _swarmflow_team(external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")])
+
+    entries = _derive_swarmflow_external_cli_agents(spec)
+
+    assert isinstance(entries, tuple)
+    assert [e.cli_agent for e in entries] == ["claude"]
+    assert "external_cli_agents" not in TeamSpec.model_fields

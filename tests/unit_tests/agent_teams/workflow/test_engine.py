@@ -444,3 +444,57 @@ def test_pipeline_rejects_fan_out_beyond_cap(tmp_path):
     script = _write(tmp_path, "over_pipe.py", _OVERLIMIT_PIPELINE_SCRIPT)
     with pytest.raises(EngineError):
         asyncio.run(run_workflow(script, backend=MockBackend()))
+
+
+# ── reported model flows into AGENT_COMPLETED / AGENT_FAILED ─────────────────
+_ONE_AGENT_SCRIPT = '''
+from swarmflow import agent
+
+META = {"name": "one", "description": "single agent", "phases": []}
+
+async def run(args):
+    return await agent("say ok", label="x")
+'''
+
+
+def test_agent_completed_carries_reported_model(tmp_path):
+    """A backend reporting a model puts it on the AGENT_COMPLETED event."""
+    class _ModelBackend(AgentBackend):
+        async def run(self, prompt, opts, schema_json, *, call_key=None):
+            return AgentResult(text="ok", model="GLM-5.3")
+
+    script = _write(tmp_path, "model_ok.py", _ONE_AGENT_SCRIPT)
+    events: list[WorkflowProgressEvent] = []
+    asyncio.run(run_workflow(script, backend=_ModelBackend(), progress_sink=events.append))
+
+    completed = [e for e in events if e.kind == ProgressKind.AGENT_COMPLETED]
+    assert len(completed) == 1
+    assert completed[0].model == "GLM-5.3"
+
+
+def test_agent_failed_carries_reported_model(tmp_path):
+    """A backend error carrying a model puts it on the AGENT_FAILED event."""
+    from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+
+    class _FailingModelBackend(AgentBackend):
+        async def run(self, prompt, opts, schema_json, *, call_key=None):
+            raise BackendError("model call failed", model="gpt-5.5")
+
+    script = _write(tmp_path, "model_fail.py", _ONE_AGENT_SCRIPT)
+    events: list[WorkflowProgressEvent] = []
+    asyncio.run(run_workflow(script, backend=_FailingModelBackend(), progress_sink=events.append))
+
+    failed = [e for e in events if e.kind == ProgressKind.AGENT_FAILED]
+    assert len(failed) == 1
+    assert failed[0].model == "gpt-5.5"
+
+
+def test_native_result_leaves_reported_model_none(tmp_path):
+    """A backend that never reports a model leaves the field None (native semantics)."""
+    script = _write(tmp_path, "native.py", _ONE_AGENT_SCRIPT)
+    events: list[WorkflowProgressEvent] = []
+    asyncio.run(run_workflow(script, backend=MockBackend(), progress_sink=events.append))
+
+    completed = [e for e in events if e.kind == ProgressKind.AGENT_COMPLETED]
+    assert len(completed) == 1
+    assert completed[0].model is None

@@ -627,6 +627,20 @@ async def test_emit_agent_completed_carries_tokens_and_budget():
 
 
 @pytest.mark.asyncio
+async def test_emit_agent_completed_carries_reported_model():
+    sink = _Sink()
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger())
+    rt.progress_sink = sink
+    _p._emit_agent_completed(
+        rt, {"phase": "review", "label": "analyst"}, "ok",
+        agent_id="k1", model="GLM-5.3",
+    )
+    ev = sink.events[-1]
+    assert ev.kind == ProgressKind.AGENT_COMPLETED
+    assert ev.model == "GLM-5.3"
+
+
+@pytest.mark.asyncio
 async def test_emit_agent_failed_carries_tokens_and_budget():
     sink = _Sink()
     rt = Runtime(backend=None, journal=None, budget=BudgetLedger(total=100, spent=100))
@@ -641,11 +655,31 @@ async def test_emit_agent_failed_carries_tokens_and_budget():
     assert ev.budget["exhausted"] is True
 
 
+@pytest.mark.asyncio
+async def test_emit_agent_failed_carries_reported_model():
+    sink = _Sink()
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger())
+    rt.progress_sink = sink
+    _p._emit_agent_failed(
+        rt, {"phase": "review", "label": "analyst"}, "boom",
+        agent_id="k1", model="gpt-5.5",
+    )
+    ev = sink.events[-1]
+    assert ev.kind == ProgressKind.AGENT_FAILED
+    assert ev.model == "gpt-5.5"
+
+
 def test_backend_call_result_has_tokens_field():
     r = _p._BackendCallResult(result="x", succeeded=True, raw_text="x", tokens=999)
     assert r.tokens == 999
     r_default = _p._BackendCallResult()
     assert r_default.tokens is None
+
+
+def test_backend_call_result_has_model_field():
+    r = _p._BackendCallResult(result="x", succeeded=True, raw_text="x", model="GLM-5.3")
+    assert r.model == "GLM-5.3"
+    assert _p._BackendCallResult().model is None
 
 
 @pytest.mark.asyncio
@@ -667,6 +701,40 @@ async def test_attempt_calls_threads_tokens_on_success():
     assert out.succeeded is True
     assert out.result == "hello"
     assert out.tokens == 4321
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_threads_model_on_success():
+    class _Res:
+        skipped = False
+        text = "hello"
+        structured = None
+        tokens = 4321
+        cache_tokens = None
+        input_tokens = None
+        output_tokens = None
+        model = "GLM-5.3"
+
+    async def make_call(feedback=None):
+        return _Res()
+
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger())
+    out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
+    assert out.succeeded is True
+    assert out.model == "GLM-5.3"
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_threads_model_from_backend_error():
+    """A failed call carries the last attempt's model to the failed result."""
+    async def make_call(feedback=None):
+        raise _BackendErr("boom", tokens=40, model="gpt-5.5")
+
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(total=10_000))
+    out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
+    assert out.succeeded is False
+    assert out.attempts == 3  # exhausted retries, not a non-retryable BackendError
+    assert out.model == "gpt-5.5"
 
 
 @pytest.mark.asyncio
@@ -696,9 +764,10 @@ async def test_attempt_calls_skipped_branch_keeps_tokens_none():
 class _BackendErr(Exception):
     """Backend error carrying tokens, mirroring BackendError.tokens."""
 
-    def __init__(self, msg: str, tokens: int = 0) -> None:
+    def __init__(self, msg: str, tokens: int = 0, model: str | None = None) -> None:
         super().__init__(msg)
         self.tokens = tokens
+        self.model = model
 
 
 @pytest.mark.asyncio

@@ -575,3 +575,19 @@ def test_call_signature_folds_agent_type_when_set():
     assert claude != plain
     assert codex != claude
     assert call_signature("task A", {"label": "A", "agent_type": None}, None) == plain
+
+
+def test_call_signature_folds_builtin_model_and_effort():
+    """builtin_model / effort re-key a third-party call on top of agent_type.
+    Absent / None stays byte-identical to the agent_type-only signature (a native
+    opts dict never carries these keys, so existing caches stay valid)."""
+    base = {"label": "x", "agent_type": "codex"}
+    plain = call_signature("task A", base, None)
+    third_party = call_signature(
+        "task A", {**base, "builtin_model": "gpt-5-codex", "effort": "high"}, None,
+    )
+    assert third_party != plain
+    # Explicit None is the same as absent (option bag strips None before opts).
+    assert call_signature(
+        "task A", {**base, "builtin_model": None, "effort": None}, None,
+    ) == plain

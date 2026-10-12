@@ -29,7 +29,6 @@ async def test_workflow_runtime_has_no_team_join_and_no_mcp(monkeypatch, cli_age
         cli_agent=cli_agent,
         cwd="C:/proj",
         env={"MY_VAR": "1"},
-        external_model_config=ExternalCliModelConfig(model="declared-model"),
     )
     runtime = await build_cli_workflow_runtime(
         cli_agent=cli_agent,
@@ -40,6 +39,7 @@ async def test_workflow_runtime_has_no_team_join_and_no_mcp(monkeypatch, cli_age
         team_name="t",
         system_prompt="you are a swarmflow worker",
         cwd="C:/proj/wt",
+        model_config=ExternalCliModelConfig(model="declared-model"),
     )
     config = captured["config"]
     assert "OPENJIUWEN_TEAM_JOIN" not in config.env
@@ -57,22 +57,64 @@ async def test_workflow_runtime_has_no_team_join_and_no_mcp(monkeypatch, cli_age
 
 
 @pytest.mark.asyncio
-async def test_workflow_runtime_model_override_beats_declared(monkeypatch):
+@pytest.mark.parametrize("cli_agent", ["claude", "codex"])
+async def test_workflow_runtime_model_config_reaches_harness(monkeypatch, cli_agent):
+    """model_config is used verbatim: name+effort pass through, endpoint fields stay empty."""
     captured: dict = {}
 
     class _Harness:
         def __init__(self, config, **kw):
             captured["config"] = config
 
-        card = type("C", (), {"name": "codex"})()
+        card = type("C", (), {"name": cli_agent})()
 
+    monkeypatch.setattr(spawn_mod, "ClaudeCodeHarness", _Harness)
     monkeypatch.setattr(spawn_mod, "CodexHarness", _Harness)
-    entry = ExternalCliAgentSpec(cli_agent="codex", external_model_config=ExternalCliModelConfig(model="declared"))
+    entry = ExternalCliAgentSpec(cli_agent=cli_agent)
     await build_cli_workflow_runtime(
-        cli_agent="codex", entry=entry, member_name="m", member_agent_id="t_m", session_id="s1",
-        team_name="t", system_prompt="p", cwd=None, model_override="gpt-5-codex",
+        cli_agent=cli_agent, entry=entry, member_name="m", member_agent_id="t_m", session_id="s1",
+        team_name="t", system_prompt="p", cwd=None,
+        model_config=ExternalCliModelConfig(model="gpt-5-codex", effort="medium"),
     )
-    assert captured["config"].model.model == "gpt-5-codex"
+    config = captured["config"].model
+    assert config.model == "gpt-5-codex"
+    assert config.effort == "medium"
+    assert config.api_base is None
+    assert config.api_key is None
+    if cli_agent == "codex":  # Claude's model config has no provider field
+        assert config.provider is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cli_agent", ["claude", "codex"])
+async def test_workflow_runtime_none_model_config_leaves_harness_modelless(monkeypatch, cli_agent):
+    """model_config=None leaves the harness modelless: the CLI's own login decides."""
+    captured: dict = {}
+
+    class _Harness:
+        def __init__(self, config, **kw):
+            captured["config"] = config
+
+        card = type("C", (), {"name": cli_agent})()
+
+    monkeypatch.setattr(spawn_mod, "ClaudeCodeHarness", _Harness)
+    monkeypatch.setattr(spawn_mod, "CodexHarness", _Harness)
+    entry = ExternalCliAgentSpec(cli_agent=cli_agent)
+    await build_cli_workflow_runtime(
+        cli_agent=cli_agent, entry=entry, member_name="m", member_agent_id="t_m", session_id="s1",
+        team_name="t", system_prompt="p", cwd=None, model_config=None,
+    )
+    assert captured["config"].model is None
+
+
+def test_workflow_runtime_rejects_model_override_kwarg():
+    """model_override is gone: the callers resolve a structured config first."""
+    with pytest.raises(TypeError):
+        build_cli_workflow_runtime(
+            cli_agent="codex", entry=ExternalCliAgentSpec(cli_agent="codex"), member_name="m",
+            member_agent_id="t_m", session_id="s1", team_name="t", system_prompt="p", cwd=None,
+            model_override="gpt-5-codex",
+        )
 
 
 @pytest.mark.asyncio
@@ -91,7 +133,7 @@ async def test_workflow_runtime_forwards_seed_checkpoint(monkeypatch):
         def __init__(self, config, **kw):
             pass
 
-        card = type("C", (), {"name": "codex"})()
+        card = type("C", (), {"name": "codex"})
 
     monkeypatch.setattr(spawn_mod, "CodexHarness", _Harness)
     runtime = await build_cli_workflow_runtime(

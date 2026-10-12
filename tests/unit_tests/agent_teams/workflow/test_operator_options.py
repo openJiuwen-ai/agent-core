@@ -221,7 +221,7 @@ def test_session_second_turn_different_model_raises(tmp_path):
     """A session's model is fixed at the first turn; a different later hint raises."""
     script = _write(tmp_path, "switch.py", _SESSION_SWITCH_MODEL_SCRIPT)
 
-    with pytest.raises(EngineError, match="fixed at the first turn"):
+    with pytest.raises(EngineError, match="first live turn"):
         asyncio.run(run_workflow(script, backend=_PoolBackend(["m1", "m2"])))
 
 

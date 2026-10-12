@@ -13,6 +13,7 @@ turns, and dispose lifecycle are all exercised deterministically.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -848,13 +849,22 @@ class _FakeTurns:
         self.stopped = 0
         self.aborted = 0
         self.prompts: list[tuple[str, dict | None]] = []
+        self.model: str | None = None  # what the CLI reported this member runs on
+        self.activity_binds: list[tuple] = []  # recorded bind_activity_sink identity tuples
         _FakeTurns.instances.append(self)
 
     provider_name = "codex"
 
+    def bind_activity_sink(self, sink, *, agent_id=None, phase=None, label=None, correlation_id=None):
+        self.activity_binds.append((agent_id, phase, label, correlation_id))
+
     @property
     def session_id(self) -> str | None:
         return self.pointer
+
+    @property
+    def reported_model(self) -> str | None:
+        return self.model
 
     async def start(self, team_session):
         if self.resume and self.require and not self.has_pointer:
@@ -877,7 +887,28 @@ class _FakeTurns:
         self.stopped += 1
 
 
-def _external_mgr(monkeypatch, *, has_pointer: bool = True) -> AvatarSessionManager:
+def _pool(*names: str) -> SimpleNamespace:
+    """Mirror test_external_model.py's fake team backend: get_model_pool only."""
+    return SimpleNamespace(
+        get_model_pool=lambda: [
+            SimpleNamespace(
+                model_name=name,
+                api_key="k1",
+                api_base_url="https://api.jiuwen.example/v1",
+                api_provider="deepseek",
+            )
+            for name in names
+        ],
+    )
+
+
+def _external_mgr(
+    monkeypatch,
+    *,
+    has_pointer: bool = True,
+    team_backend: Any = None,
+    progress_sink: Any = None,
+) -> AvatarSessionManager:
     _FakeTurns.instances.clear()
     mgr = AvatarSessionManager(
         team_name="t",
@@ -885,9 +916,11 @@ def _external_mgr(monkeypatch, *, has_pointer: bool = True) -> AvatarSessionMana
         external_cli_agents=(ExternalCliAgentSpec(cli_agent="codex"),),
         gate_agent_type=lambda name: ExternalCliAgentSpec(cli_agent=name),
         external_cwd=lambda member, entry: None,
+        team_backend=team_backend,
+        progress_sink=progress_sink,
     )
 
-    async def _build(state, *, resume, require, seed_checkpoint=None):
+    async def _build(state, *, resume, require, seed_checkpoint=None, opts=None):
         return _FakeTurns(resume=resume, require=require, has_pointer=has_pointer, seed=seed_checkpoint)
 
     monkeypatch.setattr(mgr, "_build_external_turns", _build)
@@ -912,6 +945,146 @@ def test_external_session_first_turn_starts_fresh_and_reuses_runtime(monkeypatch
     assert [p for p, _ in turns[0].prompts] == ["one", "two"]
     asyncio.run(mgr.close_session(sid))
     assert turns[0].stopped == 1
+
+
+def test_external_session_rebinds_activity_sink_per_turn(monkeypatch):
+    """Turn 2 rebinds the runtime's sink with turn 2's correlation id; turn 1's
+    does not stick (correlation ids are per-turn)."""
+    sink = object()
+    mgr = _external_mgr(monkeypatch, progress_sink=sink)
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    opts = {"label": "c", "agent_type": "codex", "agent_id": "n1", "phase": "run"}
+    first = asyncio.run(mgr.send_turn(sid, "one", opts, None, history=(), correlation_id="corr1"))
+    second = asyncio.run(mgr.send_turn(sid, "two", opts, None, history=(), correlation_id="corr2"))
+    assert first.text == "ext:one" and second.text == "ext:two"
+    turns = _FakeTurns.instances
+    assert len(turns) == 1
+    assert turns[0].activity_binds == [
+        ("n1", "run", "c", "corr1"),
+        ("n1", "run", "c", "corr2"),
+    ]
+    # Turn 1's id is gone once turn 2 ran (rebind, not accumulate).
+    assert turns[0].activity_binds[-1][3] == "corr2"
+
+
+def test_external_session_without_progress_sink_skips_activity_bind(monkeypatch):
+    """No progress sink bound → the external runtime never has activity bound,
+    even when agent_id is in the turn opts."""
+    mgr = _external_mgr(monkeypatch)
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    result = asyncio.run(
+        mgr.send_turn(
+            sid,
+            "one",
+            {"label": "c", "agent_type": "codex", "agent_id": "n1", "phase": "run"},
+            None,
+            history=(),
+            correlation_id="corr1",
+        )
+    )
+    assert result.text == "ext:one"
+    assert _FakeTurns.instances[0].activity_binds == []
+
+
+def test_external_session_first_turn_resolves_model_plan_before_builder(monkeypatch):
+    """The session path plans the model where the builder is invoked: a builtin
+    pick reaches build_cli_workflow_runtime as the endpointless config."""
+    from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, ExternalCliBuiltinModel
+
+    builtin = ExternalCliBuiltinModel(name="gpt-5-codex", efforts=["medium"], default_effort="medium")
+    entry = ExternalCliAgentSpec(cli_agent="codex", builtin_models=[builtin])
+    captured: dict = {}
+
+    class _RecTurns:
+        def __init__(self, runtime, *, member_name, auth_hint_models=None):
+            captured["member"] = member_name
+
+        member_session = _FakeMemberSession()
+        session_id = None
+
+        async def start(self, team_session):
+            return None
+
+        async def run_turn(self, prompt, *, schema_json=None):
+            return ExternalTurnOutcome(text="ext", structured=None, tokens=7, marker="mk1")
+
+        async def stop(self):
+            return None
+
+    async def _fake_build(**kwargs: Any) -> object:
+        captured["build"] = dict(kwargs)
+        return object()
+
+    monkeypatch.setattr(asb_mod, "ExternalMemberTurns", _RecTurns)
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.external.cli_agent.spawn.build_cli_workflow_runtime",
+        _fake_build,
+    )
+
+    mgr = AvatarSessionManager(
+        team_name="t",
+        run_id="r1",
+        external_cli_agents=(entry,),
+        gate_agent_type=lambda name: entry,
+        external_cwd=lambda member, e: None,
+    )
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    result = asyncio.run(
+        mgr.send_turn(
+            sid,
+            "one",
+            {"label": "c", "agent_type": "codex", "builtin_model": "gpt-5-codex"},
+            None,
+            history=(),
+        )
+    )
+    assert result.text == "ext"
+    cfg = captured["build"]["model_config"]
+    assert cfg is not None
+    assert cfg.model == "gpt-5-codex" and cfg.effort == "medium"
+    assert cfg.provider is None and cfg.api_base is None and cfg.api_key is None
+
+
+def test_external_session_model_pool_miss_raises_before_builder(monkeypatch):
+    """A session turn with an unresolvable model hint fails non-retryably before
+    the builder is ever invoked."""
+    from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, ExternalCliBuiltinModel
+
+    builtin = ExternalCliBuiltinModel(name="gpt-5-codex", efforts=["medium"], default_effort="medium")
+    entry = ExternalCliAgentSpec(cli_agent="codex", builtin_models=[builtin])
+    build_calls: list = []
+
+    async def _fake_build(**kwargs: Any) -> object:
+        build_calls.append(dict(kwargs))
+        return object()
+
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.external.cli_agent.spawn.build_cli_workflow_runtime",
+        _fake_build,
+    )
+
+    mgr = AvatarSessionManager(
+        team_name="t",
+        run_id="r1",
+        external_cli_agents=(entry,),
+        gate_agent_type=lambda name: entry,
+        external_cwd=lambda member, e: None,
+        team_backend=_pool("deepseek-v4-flash"),
+    )
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    with pytest.raises(BackendError) as exc:
+        asyncio.run(
+            mgr.send_turn(
+                sid,
+                "one",
+                {"label": "c", "agent_type": "codex", "model": "X"},
+                None,
+                history=(),
+            )
+        )
+    assert exc.value.retryable is False
+    assert "deepseek-v4-flash" in str(exc.value)
+    assert build_calls == []
 
 
 def test_external_session_cold_resume_requires_the_pointer(monkeypatch):
@@ -1160,6 +1333,62 @@ def test_external_failed_turn_leaves_no_marker(monkeypatch):
     asyncio.run(_body())
 
 
+def test_external_session_success_carries_reported_model(monkeypatch):
+    """Once the runtime reports a model, the session turn's AgentResult names it."""
+    mgr = _external_mgr(monkeypatch)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        first = await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
+        assert first.model is None  # nothing reported yet
+        _FakeTurns.instances[0].model = "gpt-5.5"
+        second = await mgr.send_turn(sid, "two", _turn_opts(), None, history=())
+        assert second.model == "gpt-5.5"
+
+    asyncio.run(_body())
+
+
+def test_external_session_failed_turn_attaches_reported_model(monkeypatch):
+    """A failed external session turn names the CLI-reported model on the BackendError."""
+    mgr = _external_mgr(monkeypatch)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
+        turns = _FakeTurns.instances[0]
+        turns.model = "gpt-5.5"
+
+        async def _boom(prompt, *, schema_json=None):
+            raise BackendError("boom", tokens=1)
+
+        turns.run_turn = _boom
+        with pytest.raises(BackendError, match="boom") as exc:
+            await mgr.send_turn(sid, "two", _turn_opts(), None, history=())
+        assert exc.value.model == "gpt-5.5"
+
+    asyncio.run(_body())
+
+
+def test_external_session_failed_turn_without_reported_model_leaves_none(monkeypatch):
+    """No reported model -> the failed turn's BackendError.model stays None."""
+    mgr = _external_mgr(monkeypatch)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
+        turns = _FakeTurns.instances[0]
+
+        async def _boom(prompt, *, schema_json=None):
+            raise BackendError("boom", tokens=1)
+
+        turns.run_turn = _boom
+        with pytest.raises(BackendError, match="boom") as exc:
+            await mgr.send_turn(sid, "two", _turn_opts(), None, history=())
+        assert exc.value.model is None
+
+    asyncio.run(_body())
+
+
 def test_external_member_is_registered_on_name_reservation(monkeypatch):
     """A fully-hit parent never reaches open_session, so the name reservation must register it."""
     mgr = _external_mgr(monkeypatch)
@@ -1218,7 +1447,7 @@ def test_external_child_keeps_its_credentials_when_the_start_fails(monkeypatch):
         data = await mgr.capture_fork(sid, keep_rounds=1, fork_mode="before")
 
         # The child's runtime has no checkpoint pointer, so its resume start fails.
-        async def _build(state, *, resume, require, seed_checkpoint=None):
+        async def _build(state, *, resume, require, seed_checkpoint=None, opts=None):
             return _FakeTurns(resume=resume, require=require, has_pointer=False, seed=seed_checkpoint)
 
         monkeypatch.setattr(mgr, "_build_external_turns", _build)
@@ -1256,3 +1485,92 @@ def test_member_session_identity_matches_runtime(monkeypatch):
     asyncio.run(mgr._member_session_for("m"))
     assert mgr._derive_avatar_session_id("m") == "t/workflow/m"
     assert created == ["t/workflow/m", "t_m"]
+
+
+# ---------------------------------------------------------------------------
+# live activity: session avatar rail (Task 2)
+# ---------------------------------------------------------------------------
+
+
+def test_session_avatar_rail_emits_paired_activity_with_agent_id_and_correlation(monkeypatch):
+    """A session avatar's rail forwards tool activity as paired AGENT_ACTIVITY
+    events, tagged with the session node key and the CURRENT turn's correlation id."""
+    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import SwarmflowActivityRail
+    from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
+    from openjiuwen.core.single_agent.rail.base import ToolCallInputs
+
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+    events: list = []
+    base = DeepAgentSpec(enable_task_loop=True, enable_task_planning=True, tools=[])
+    mgr = AvatarSessionManager(worker_base_spec=base, team_name="t", language="en", progress_sink=events.append)
+    agent_id = '[["call", 0]]'
+    opts = {"label": "sre", "agent_id": agent_id, "phase": "review"}
+
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts=opts))
+    asyncio.run(mgr.send_turn(sid, "first", opts, None, correlation_id="review:sre:0"))
+
+    rail = next(r for r in harnesses[0].rails if isinstance(r, SwarmflowActivityRail))
+
+    class _Ctx:
+        inputs = ToolCallInputs(
+            tool_call=SimpleNamespace(id="call-9"),
+            tool_name="write_file",
+            tool_args={"path": "a.txt"},
+        )
+        exception = None
+
+    asyncio.run(rail.before_tool_call(_Ctx()))
+    ctx = _Ctx()
+    ctx.inputs.tool_result = "wrote a.txt"
+    asyncio.run(rail.after_tool_call(ctx))
+
+    first = [e for e in events if e.kind == ProgressKind.AGENT_ACTIVITY]
+    assert [e.activity_type for e in first] == ["tool_call", "tool_result"]
+    assert all(e.agent_id == agent_id for e in first)
+    assert all(e.correlation_id == "review:sre:0" for e in first)  # matches the turn's started/completed id
+    assert all(e.phase == "review" and e.label == "sre" for e in first)
+    assert all(e.tool_call_id == "call-9" and e.tool_name == "write_file" for e in first)
+    assert first[0].content == '{"path": "a.txt"}'
+    assert first[1].content == "wrote a.txt"
+    assert first[0].message == "tool: write_file"
+
+    # A later turn's tool activity carries THAT turn's correlation id.
+    events.clear()
+    asyncio.run(mgr.send_turn(sid, "second", opts, None, correlation_id="review:sre:1"))
+    asyncio.run(rail.before_tool_call(_Ctx()))
+    ctx = _Ctx()
+    ctx.inputs.tool_result = "again"
+    asyncio.run(rail.after_tool_call(ctx))
+    second = [e for e in events if e.kind == ProgressKind.AGENT_ACTIVITY]
+    assert len(second) == 2 and all(e.correlation_id == "review:sre:1" for e in second)
+
+
+def test_session_avatar_mounts_no_activity_rail_without_a_sink(monkeypatch):
+    """No progress sink bound -> the rail is not mounted (silent)."""
+    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import SwarmflowActivityRail
+
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+    mgr = _mgr()  # no progress_sink
+    agent_id = '[["call", 0]]'
+    sid = asyncio.run(
+        mgr.open_session(kind="agent", instructions=None, opts={"label": "sre", "agent_id": agent_id})
+    )
+    asyncio.run(mgr.send_turn(sid, "go", {"label": "sre", "agent_id": agent_id}, None, correlation_id="_:sre:0"))
+    assert not any(isinstance(r, SwarmflowActivityRail) for r in harnesses[0].rails)
+
+
+def test_session_avatar_mounts_no_activity_rail_without_agent_id(monkeypatch):
+    """Without the injected agent_id in opts the rail stays off even with a sink."""
+    from openjiuwen.agent_teams.workflow.backends.team_worker_backend import SwarmflowActivityRail
+
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+    base = DeepAgentSpec(tools=[])
+    events: list = []
+    mgr = AvatarSessionManager(worker_base_spec=base, team_name="t", language="en", progress_sink=events.append)
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "sre"}))
+    asyncio.run(mgr.send_turn(sid, "go", {"label": "sre"}, None))
+    assert not any(isinstance(r, SwarmflowActivityRail) for r in harnesses[0].rails)
+    assert events == []

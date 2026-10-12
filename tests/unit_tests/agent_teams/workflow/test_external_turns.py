@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Sequence
 
 import pytest
 
@@ -20,9 +21,10 @@ from openjiuwen.harness_protocol import (
     HarnessContext,
     HarnessState,
     MessageRole,
+    ProviderEvent,
     StateChangedEvent,
-    TurnEventKind,
     TurnError,
+    TurnEventKind,
     TurnLifecycleEvent,
     TurnMessage,
     TurnResult,
@@ -41,12 +43,30 @@ def _context() -> HarnessContext:
     )
 
 
-def _driver(name: str = "fake") -> tuple[_FakeHarness, ExternalMemberTurns]:
+def _driver(
+    name: str = "fake",
+    auth_hint_models: Sequence[str] | None = None,
+) -> tuple[_FakeHarness, ExternalMemberTurns]:
     # Both abort capabilities: the IO adapter only forwards abort() to a
     # provider that declares them (and only while the harness is RUNNING).
     harness = _FakeHarness(capabilities=frozenset({HarnessCapability.GRACEFUL_ABORT, HarnessCapability.FORCE_ABORT}))
     harness._card = HarnessCard(name=name, implementation_version="1.0", capabilities=harness._card.capabilities)
     runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    return harness, ExternalMemberTurns(runtime, member_name="wf-r1-ext-abc", auth_hint_models=auth_hint_models)
+
+
+def _model_driver(name: str = "codex") -> tuple[_FakeHarness, ExternalMemberTurns]:
+    """A driver whose runtime keeps a reliability context (so model events land)."""
+    harness = _FakeHarness(capabilities=frozenset({HarnessCapability.GRACEFUL_ABORT, HarnessCapability.FORCE_ABORT}))
+    harness._card = HarnessCard(name=name, implementation_version="1.0", capabilities=harness._card.capabilities)
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context(), agent_kind=name)
+    runtime.bind_reliability_context(
+        session_id="s1",
+        team_backend=None,
+        leader_name="leader",
+        update_status_cb=lambda status: None,
+        messager=None,
+    )
     return harness, ExternalMemberTurns(runtime, member_name="wf-r1-ext-abc")
 
 
@@ -132,6 +152,27 @@ async def test_failed_turn_raises_backend_error_with_provider_message():
     with pytest.raises(BackendError, match="rate limited"):
         await task
     await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_reported_model_reflects_model_event_after_run_turn():
+    """A model-reporting event mid-turn is visible on the driver once the turn ends."""
+    harness, driver = _model_driver()
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("do it"))
+    await asyncio.sleep(0)
+    await harness.emit(
+        ProviderEvent(
+            provider="codex",
+            event_type="session/model_changed",
+            schema_version="1",
+            payload={"model": "GLM-5.3"},
+        )
+    )
+    await _finish(harness, "done", total_tokens=1200)
+    await task
+    await driver.stop()
+    assert driver.reported_model == "GLM-5.3"
 
 
 @pytest.mark.asyncio
@@ -267,4 +308,139 @@ async def test_marker_is_none_when_provider_reports_nothing():
     await asyncio.sleep(0)
     await _finish(harness, "ok")
     assert (await task).marker is None
+    await driver.stop()
+
+
+# ---------------------------------------------------------------------------
+# Auth-classified failure wrapping (two-audience copy)
+# ---------------------------------------------------------------------------
+
+_AUTH_ERROR_TEXT = (
+    "Reconnecting... 2/5 unexpected status 401 Unauthorized: Missing bearer or basic "
+    "authentication in header, url: https://api.openai.com/v1/responses"
+)
+
+
+async def _fail_auth(harness: _FakeHarness) -> None:
+    # The real signal: reconnect exhaustion surfaces a FAILED turn whose
+    # TurnError carries ``category="auth_required"`` (the same gate
+    # ``_fallback_applies`` / auth_fallback promotion key on).
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FAILED,
+            result=TurnResult(
+                status=TurnStatus.FAILED,
+                error=TurnError(message=_AUTH_ERROR_TEXT, code="CODEX_FALLBACK_EXHAUSTED", category="auth_required"),
+            ),
+        ),
+        turn_id="turn-1",
+    )
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_is_wrapped_two_audience_with_compatible_list():
+    """The surfaced message front-loads the root cause and appends the workaround + pool list."""
+    harness, driver = _driver("codex", auth_hint_models=["GLM-5.3", "sonnet"])
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("x"))
+    await asyncio.sleep(0)
+    await _fail_auth(harness)
+    with pytest.raises(BackendError) as exc:
+        await task
+    msg = str(exc.value)
+    assert msg.startswith("codex CLI login failed (Reconnecting... 2/5 unexpected status 401 Unauthorized")
+    assert "401" in msg and "https://api.openai.com/v1/responses" in msg
+    assert "environment problem, not a script error" in msg
+    assert msg.endswith("workaround: add model=<pool model> to this node (compatible: GLM-5.3, sonnet)")
+    await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_without_compatible_list_says_fix_the_login():
+    harness, driver = _driver("codex", auth_hint_models=[])
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("x"))
+    await asyncio.sleep(0)
+    await _fail_auth(harness)
+    with pytest.raises(BackendError) as exc:
+        await task
+    msg = str(exc.value)
+    assert msg.endswith("fix the CLI login on this machine and re-run")
+    assert "(compatible:" not in msg
+    await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_without_constructor_hint_also_says_fix_the_login():
+    harness, driver = _driver("claude-code")  # auth_hint_models defaults to None
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("x"))
+    await asyncio.sleep(0)
+    await _fail_auth(harness)
+    with pytest.raises(BackendError) as exc:
+        await task
+    msg = str(exc.value)
+    assert msg.startswith("claude-code CLI login failed (Reconnecting...")
+    assert msg.endswith("fix the CLI login on this machine and re-run")
+    await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_non_auth_failure_passes_through_unwrapped():
+    """A generic (rate_limited) failure must NOT get the 'CLI login failed' copy."""
+    harness, driver = _driver("codex", auth_hint_models=["GLM-5.3"])
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("x"))
+    await asyncio.sleep(0)
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FAILED,
+            result=TurnResult(
+                status=TurnStatus.FAILED,
+                error=TurnError(message="rate limited", category="rate_limited"),
+            ),
+        ),
+        turn_id="turn-1",
+    )
+    with pytest.raises(BackendError, match="^external member 'wf-r1-ext-abc' failed: rate limited$"):
+        await task
+    await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_wrap_survives_truncation_to_160_chars():
+    harness, driver = _driver("codex", auth_hint_models=["GLM-5.3", "sonnet"])
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("x"))
+    await asyncio.sleep(0)
+    await _fail_auth(harness)
+    with pytest.raises(BackendError) as exc:
+        await task
+    head = str(exc.value)[:160]
+    assert "401" in head
+    assert "url: https://api" in head
+    await driver.stop()
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_wrap_keeps_model_slot_for_the_backend():
+    """The wrap must not disturb Task 5's model plumbing: the runtime still reports the model
+    the backend attaches to the BackendError (the slot is filled backend-side, not here)."""
+    harness, driver = _model_driver()
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("x"))
+    await asyncio.sleep(0)
+    await harness.emit(
+        ProviderEvent(
+            provider="codex",
+            event_type="session/model_changed",
+            schema_version="1",
+            payload={"model": "GLM-5.3"},
+        )
+    )
+    await _fail_auth(harness)
+    with pytest.raises(BackendError) as exc:
+        await task
+    assert exc.value.model is None  # attached by the backend (Task 5), not by the driver
+    assert driver.reported_model == "GLM-5.3"
     await driver.stop()

@@ -46,6 +46,8 @@ class _RecordingBackend(AgentBackend):
         self.seeded: list[tuple[str, dict | None]] = []  # (sid, fork_data) via open_session
         self.fork_data: dict | None = {"messages": [{"role": "user", "content": "forked"}]}
         self.named: list[str] = []  # member names reserved via ensure_member_name
+        self.opened_opts: list[dict] = []  # opts received per open_session
+        self.turn_opts: list[dict] = []  # opts received per send_turn
 
     async def run(
         self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
@@ -77,11 +79,13 @@ class _RecordingBackend(AgentBackend):
         if member_name is None:
             self._sid_n += 1
         self.opened.append((sid, kind, instructions))
+        self.opened_opts.append(dict(opts))
         self.seeded.append((sid, fork_data))
         return sid
 
     async def send_turn(self, session_id, prompt, opts, schema_json, *, history=(), correlation_id=None) -> AgentResult:
         self.turns.append((session_id, prompt, len(history)))
+        self.turn_opts.append(dict(opts))
         self.correlations.append(correlation_id)
         if schema_json is not None:
             return AgentResult(structured={"echo": prompt, "n": len(history)})
@@ -737,3 +741,39 @@ def test_agent_started_carries_agent_type_and_described_model(tmp_path):
     assert started["ext"].model == "codex-default-model"
     assert started["ext_sess"].agent_type == "claude"
     assert started["ext_sess"].model == "claude-default-model"
+
+
+def test_session_backend_opts_carry_node_agent_id_and_journal_stays_raw(tmp_path):
+    """Session backend calls receive the node's deterministic key in a COPY of opts
+    (journal keeps the raw opts); the correlation_id seen matches the started event."""
+    import json
+    from pathlib import Path
+
+    script = _write(tmp_path, "sess.py", _MULTI_TURN_SCRIPT)
+    backend = _RecordingBackend()
+    events: list[WorkflowProgressEvent] = []
+    journal = str(tmp_path / "run.jsonl")
+
+    asyncio.run(run_workflow(script, backend=backend, progress_sink=events.append, journal_path=journal))
+
+    started = [e for e in events if e.kind == ProgressKind.AGENT_STARTED]
+    ids = [e.agent_id for e in started]
+    assert len(ids) == 3
+    # open_session and every send_turn see the injected node key (a copy, never
+    # the journaled original).
+    assert backend.opened_opts[0]["agent_id"] == ids[0]
+    assert [t["agent_id"] for t in backend.turn_opts] == ids
+    assert [t["label"] for t in backend.turn_opts] == ["chat"] * 3
+    # The correlation_id the backend received matches the turn's started event.
+    assert backend.correlations == [e.correlation_id for e in started]
+
+    # The journal record keeps the raw opts: no agent_id anywhere, label intact.
+    records = [
+        json.loads(line)
+        for line in Path(journal).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    call_recs = [r for r in records if "kind" in r]
+    assert call_recs
+    assert "agent_id" not in json.dumps(call_recs)
+    assert all(r["label"] == "chat" for r in call_recs)
