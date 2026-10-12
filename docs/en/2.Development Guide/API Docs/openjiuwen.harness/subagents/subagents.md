@@ -72,7 +72,7 @@ create_code_agent(
     subagents: list[SubAgentConfig] | None = None,
     rails: list[Rail] | None = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 15,
+    max_iterations: int = 50,
     workspace: Workspace | str | None = None,
     skills: list[str] | None = None,
     backend: str | None = None,
@@ -95,7 +95,7 @@ Create a sub-agent specialized for coding tasks. Comes pre-configured with file 
 - **subagents** (list[[SubAgentConfig](../schema/config.md#class-openjiuwenharnessschemasubagentconfig)], optional): Nested sub-agents. Default: `None`.
 - **rails** (list[Rail], optional): Guardrails. Default: `None`.
 - **enable_task_loop** (bool, optional): Enable the task loop. Default: `False`.
-- **max_iterations** (int, optional): Maximum iterations. Default: `15`.
+- **max_iterations** (int, optional): Maximum iterations. Default: `50`.
 - **workspace** ([Workspace](../workspace/workspace.md#class-openjiuwenharnessworkspaceworkspace) | str, optional): Workspace. Default: `None`.
 - **skills** (list[str], optional): Skills. Default: `None`.
 - **backend** (str, optional): LLM backend. Default: `None`.
@@ -123,7 +123,7 @@ create_research_agent(
     subagents: list[SubAgentConfig] | None = None,
     rails: list[Rail] | None = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 15,
+    max_iterations: int = 50,
     workspace: Workspace | str | None = None,
     skills: list[str] | None = None,
     backend: str | None = None,
@@ -146,7 +146,7 @@ Create a sub-agent specialized for research tasks. Comes pre-configured with web
 - **subagents** (list[[SubAgentConfig](../schema/config.md#class-openjiuwenharnessschemasubagentconfig)], optional): Nested sub-agents. Default: `None`.
 - **rails** (list[Rail], optional): Guardrails. Default: `None`.
 - **enable_task_loop** (bool, optional): Enable the task loop. Default: `False`.
-- **max_iterations** (int, optional): Maximum iterations. Default: `15`.
+- **max_iterations** (int, optional): Maximum iterations. Default: `50`.
 - **workspace** ([Workspace](../workspace/workspace.md#class-openjiuwenharnessworkspaceworkspace) | str, optional): Workspace. Default: `None`.
 - **skills** (list[str], optional): Skills. Default: `None`.
 - **backend** (str, optional): LLM backend. Default: `None`.
