@@ -66,7 +66,11 @@ class GroupChatPort(Protocol):
     async def recent_messages(
         self, execution: ExecutionContext, cursor: str | None = None, limit: int = 20
     ) -> GroupMessagesResult:
-        """Return recent authorized group messages, after ``cursor`` when given."""
+        """Return recent authorized group messages, after ``cursor`` when given.
+
+        A reader backfilling a queued Request passes its trigger message as ``cursor`` to read everything
+        after the trigger. ``scanned_through`` in the result is the position the host confirms it scanned.
+        """
         ...
 
     async def search_messages(self, execution: ExecutionContext, query: GroupMessageQuery) -> GroupMessagesResult:

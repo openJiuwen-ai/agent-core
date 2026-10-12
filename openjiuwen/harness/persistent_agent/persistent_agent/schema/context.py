@@ -12,7 +12,7 @@ from .protocol import Digest, Identifier, InvocationRef, Nonnegative, ProtocolMo
 
 
 class GroupMessage(ProtocolModel):
-    """One group message as authorized for this Session; recalled messages carry no body."""
+    """One group message as authorized for this Session; recalled or unavailable messages carry no body."""
 
     message_id: Identifier
     sender_id: Identifier
@@ -23,7 +23,8 @@ class GroupMessage(ProtocolModel):
     mention_ids: Annotated[tuple[Identifier, ...], Field(max_length=128)] = ()
     reply_to: Identifier | None = None
     attachment_refs: Annotated[tuple[Identifier, ...], Field(max_length=128)] = ()
-    status: Literal["normal", "edited", "recalled"] = "normal"
+    # "unavailable": the message exists but its body cannot be read now; unlike "recalled", it may return.
+    status: Literal["normal", "edited", "recalled", "unavailable"] = "normal"
     # Background only: a queued request must never become the current task's instruction.
     queued_request: bool = Field(default=False, strict=True)
 
@@ -35,9 +36,9 @@ class GroupMessage(ProtocolModel):
 
     @model_validator(mode="after")
     def validate_recall(self) -> Self:
-        """Never expose the body of a recalled message."""
-        if self.status == "recalled" and self.text is not None:
-            raise PydanticCustomError("persistent_context", "recalled message cannot carry text")
+        """Never expose the body of a recalled message, nor invent one for an unavailable message."""
+        if self.status in ("recalled", "unavailable") and self.text is not None:
+            raise PydanticCustomError("persistent_context", f"{self.status} message cannot carry text")
         return self
 
 
@@ -66,7 +67,11 @@ class GroupMessagesResult(InvocationRef):
 
     status: Literal["found", "empty", "incomplete"]
     messages: Annotated[tuple[GroupMessage, ...], Field(max_length=500)] = ()
+    # Paging position for the next read; not a statement about how far the host scanned.
     next_cursor: Identifier | None = None
+    # Message position the host confirms it scanned through, including messages whose body is unavailable.
+    # None means no trusted progress: a reader keeps its previous cursor.
+    scanned_through: Identifier | None = None
     reason: Reason | None = None
 
     @model_validator(mode="after")
