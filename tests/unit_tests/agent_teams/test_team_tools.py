@@ -888,6 +888,90 @@ async def test_external_cli_without_auth_fallback_only_accepts_an_omitted_fallba
         assert "omit 'fallback_model_name'" in (result.error or "")
 
 
+async def _model_group_codex_tool(db, message_bus, t):
+    """A leader on a model group (current model is the logical "*") spawning Codex."""
+    from openjiuwen.agent_teams.models.allocator import IntelliRouterAllocator
+    from openjiuwen.agent_teams.models.pool import IntelliRouterConfig, IntelliRouterDeployment
+
+    await db.team.create_team(
+        team_name="ext_cli_model_group_team",
+        display_name="Ext Model Group",
+        leader_member_name="leader1",
+    )
+    pool = IntelliRouterConfig(
+        deployments=[
+            IntelliRouterDeployment(
+                model_name="glm-flash", api_key="secret", api_base="https://glm.example", provider="openai",
+            ),
+            IntelliRouterDeployment(
+                model_name="deepseek-flash", api_key="secret", api_base="https://ds.example", provider="openai",
+            ),
+        ],
+    ).to_pool_entries()
+    team = TeamBackend(
+        team_name="ext_cli_model_group_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: pool,
+        current_model_name="*",
+        current_model_provider="intelli_router",
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="codex")],
+    )
+    team.update_model_allocator(IntelliRouterAllocator(pool))
+    return team, SpawnExternalCliTool(team, t, model_config_allocator=team.allocate_model)
+
+
+@pytest.mark.asyncio
+async def test_external_cli_in_model_group_accepts_a_real_fallback_model(db, message_bus, t):
+    """The logical "*" current model must not be forced as an external CLI fallback."""
+    team, tool = await _model_group_codex_tool(db, message_bus, t)
+
+    result = await tool.invoke(
+        {
+            "member_name": "codex-group",
+            "display_name": "Codex Group",
+            "prompt": "reviewer",
+            "cli_agent": "codex",
+            "fallback_model_name": "deepseek-flash",
+        }
+    )
+
+    assert result.success is True, result.error
+    fallback_ref = get_member_fallback_model_ref(await team.get_member("codex-group"))
+    assert fallback_ref is not None
+    assert fallback_ref.model_name == "deepseek-flash"
+
+
+@pytest.mark.asyncio
+async def test_external_cli_in_model_group_still_rejects_the_logical_entry(db, message_bus, t):
+    _team, tool = await _model_group_codex_tool(db, message_bus, t)
+
+    result = await tool.invoke(
+        {
+            "member_name": "codex-star",
+            "display_name": "Codex Star",
+            "prompt": "reviewer",
+            "cli_agent": "codex",
+            "fallback_model_name": "*",
+        }
+    )
+
+    assert result.success is False
+    assert "logical entry" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_external_cli_in_model_group_catalog_hides_the_logical_current_model(db, message_bus, t):
+    _team, tool = await _model_group_codex_tool(db, message_bus, t)
+
+    description = tool.card.input_params["properties"]["fallback_model_name"]["description"]
+
+    assert '"current_model": null' in description
+    assert '"deepseek-flash"' in description and '"glm-flash"' in description
+
+
 @pytest.mark.asyncio
 async def test_external_cli_rejects_null_when_compatible_fallback_exists(db, message_bus, t):
     """Null cannot bypass an available protocol-compatible fallback."""

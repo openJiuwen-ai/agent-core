@@ -440,6 +440,11 @@ class TeamBackend:
             return list(self._model_allocator.list_cli_models(provider_filter=provider_filter))
         return []
 
+    def list_route_tags(self) -> list[str]:
+        """Tags a model-group member can be pinned to (empty outside model groups)."""
+        lister = getattr(self._model_allocator, "list_route_tags", None)
+        return list(lister()) if callable(lister) else []
+
     def resolve_cli_models(self, model_name: str, provider_filter=None) -> list[Any]:
         from openjiuwen.agent_teams.models.allocator import CliModelCatalog
 
@@ -2227,6 +2232,10 @@ class TeamBackend:
                 if isinstance(member_spec, ExternalCliMemberSpec)
                 else None
             )
+            if cli_agent and allocation is not None and allocation.route_tag:
+                # Route tags pin in-process model-group members; an external CLI
+                # cannot run on the logical "*" entry, so keep it unallocated.
+                allocation = None
             await self.spawn_member(
                 member_name=member_spec.member_name,
                 display_name=member_spec.display_name,

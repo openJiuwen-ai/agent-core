@@ -93,6 +93,21 @@ STRINGS: dict[str, str] = {
         "(e.g. gpt-4, claude-sonnet-4); "
         "the system picks an appropriate model when omitted"
     ),
+    "spawn_teammate.model_name_group": (
+        "Optional. Set only when the user explicitly asks for this member to use a "
+        "specific model, and copy the value verbatim from selectable_models below. "
+        "Omit it when the user did not mention a model; the model group chooses.\n"
+        "Before setting it, compare the user's wording with each entry in "
+        "selectable_models (ignoring case, spaces and hyphens):\n"
+        "- Exactly equal to one entry: that entry is the only match; use it.\n"
+        "- Otherwise, every entry whose name contains the user's wording is a match. "
+        "Use it when there is exactly one; when there are several, call ask_user to "
+        "ask the user to choose among them, and never pick the shortest or "
+        "closest-looking one yourself. For example, if the user says \"use GLM\" "
+        "and the list has GLM-5.3 and GLM-5.3-Flash, you must ask.\n"
+        "- No match: call ask_user to tell the user which models are selectable, "
+        "and never substitute another model"
+    ),
     "spawn_teammate.permissions": (
         "Narrow the teammate's tool permissions (only tightening, never loosening). "
         "Keys are tool names, values are permission levels: 'allow', 'ask', or 'deny'. "

@@ -266,6 +266,11 @@ class SpawnTeammateTool(_SpawnToolBase):
         )
         self._allocate_model_config = model_config_allocator
         self._fork_enabled = fork_enabled
+        model_name_description = t("spawn_teammate", "model_name")
+        if team.is_model_group_pool():
+            model_name_description = (
+                f"{t('spawn_teammate', 'model_name_group')}\n\n{self._selectable_models_context()}"
+            )
         properties: dict[str, Any] = {
             "member_name": {
                 "type": "string",
@@ -279,7 +284,7 @@ class SpawnTeammateTool(_SpawnToolBase):
             "prompt": {"type": "string", "description": t("spawn_teammate", "prompt")},
             "model_name": {
                 "type": "string",
-                "description": t("spawn_teammate", "model_name"),
+                "description": model_name_description,
             },
             "isolation": {
                 "type": "string",
@@ -325,6 +330,11 @@ class SpawnTeammateTool(_SpawnToolBase):
             "required": ["member_name", "display_name", "desc"],
         }
 
+    def _selectable_models_context(self) -> str:
+        """Render the models a model-group member can be pinned to."""
+        catalog = {"selectable_models": [str(tag) for tag in self.team.list_route_tags()]}
+        return f"<selectable_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</selectable_model_catalog>"
+
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         err = validate_member_name(inputs.get("member_name"))
         if err:
@@ -350,6 +360,16 @@ class SpawnTeammateTool(_SpawnToolBase):
         allocation = (
             self._allocate_model_config(inputs.get("model_name")) if self._allocate_model_config else None
         )
+        # In a model group an explicit model is a hard requirement: running the
+        # member on the whole group instead would silently ignore the user.
+        model_name = _optional_text(inputs.get("model_name"))
+        if allocation is None and model_name and self.team.is_model_group_pool():
+            selectable = ", ".join(self.team.list_route_tags()) or "<none>"
+            return self._fail(
+                f"model_name '{model_name}' is not selectable in the current model group "
+                f"(selectable: {selectable}). Do not pick a substitute yourself: ask the user "
+                "which model to use, or omit model_name to let the model group choose."
+            )
         result = await register_teammate(
             self.team,
             member_name=member_name,
@@ -820,6 +840,11 @@ class SpawnExternalCliTool(_SpawnToolBase):
 
     def _preferred_current_model(self, cli_agent: str, entries: list["ModelPoolEntry"]) -> str | None:
         """Return the current model when the pool can allocate it compatibly."""
+        # In a model group the current model is the logical "*" entry, not a
+        # concrete model an external CLI can run; the fallback must be one of
+        # the real deployments instead.
+        if self.team.is_model_group_pool():
+            return None
         current_name = self.team.current_model_name
         current_provider = self.team.current_model_provider
         if current_name is None or current_provider is None:
@@ -835,7 +860,11 @@ class SpawnExternalCliTool(_SpawnToolBase):
     def _model_catalog_context(self) -> str:
         """Render safe current-model and pool protocol data for the model."""
         current_model = None
-        if self.team.current_model_name is not None and self.team.current_model_provider is not None:
+        if (
+            not self.team.is_model_group_pool()
+            and self.team.current_model_name is not None
+            and self.team.current_model_provider is not None
+        ):
             current_model = {
                 "model_name": self.team.current_model_name,
                 "protocol": _model_api_protocol(self.team.current_model_provider),
