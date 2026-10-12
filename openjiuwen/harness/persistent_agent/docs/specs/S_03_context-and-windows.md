@@ -21,7 +21,7 @@ PA-05 定义的窗口共享契约经 PA-06 整理后集中在 `schema/integratio
 
 - **加载结果**：会话状态记录加载后返回 `LoadedRecord`，包含等待现场和群消息游标。游标字段名为 `last_group_message_id`，含义是服务端确认已扫描到的消息位置，与正文是否读全、实际展示范围分开。
 - **窗口组装**：新 Request 在加载之后由 `WindowAssembler.assemble(context, request, record)` 追加执行头、临时背景块和任务输入，返回原生输入和本次的群消息游标；确认恢复不组装。
-- **窗口标记**：追加的执行头和临时背景块在消息元信息 `persistent_window_part` 中分别标为 `execution_header`、`temporary_background`，PA-10 结束整理时据此压缩执行头、删除临时背景块。
+- **窗口标记**：追加的执行头和临时背景块在消息元信息 `persistent_window_part` 中分别标为 `execution_header`、`temporary_background`，PA-10 结束整理时据此压缩执行头、删除临时背景块。PA-10 为停止时缺失结果的工具调用补位时，补位的工具结果标为 `stopped_tool_placeholder`，内容为“执行已停止，结果未取得，实际效果需核实”，不冒充真实结果，也不认定工具失败；正常等待确认的调用不补位。
 - **结束信息**：`ExecutionEnding` 携带群消息游标和容量超限时未交接的最终答案，PA-10 写入执行结束标记和记录。
 - **群消息读取**：`GroupMessageReader.recent_messages(context, after, trigger_message_id)` 由 PA-23 实现，供 PA-06 组装窗口背景：游标之后的增量与“触发消息之后至本次读取上界”的回补合并去重、排除触发消息；`scanned_through` 取增量读取确认的位置作为新游标，为空时保留旧游标。例：R2 由 M120 触发；R1 执行期间，群里在 M130 补充了 R2 的要求；R1 结束时游标为 M180。R2 执行时须读到 M130：它不在游标之后，也只出现在 R1 的临时背景里，已随结束整理删除。PA-07 不调用该接入点，判断时直接读取已注入的 `GroupChatPort.recent_messages`。
 - **窗口安全**：PA-10 保存时保证窗口可以安全追加，加载已知停止的旧记录时幂等修补；PA-06 加载后仍发现未配对的工具调用时，以 `DEEPAGENT_CONTEXT_PARAM_ERROR` 校验拒绝并记 error 日志，不追加任何内容。
