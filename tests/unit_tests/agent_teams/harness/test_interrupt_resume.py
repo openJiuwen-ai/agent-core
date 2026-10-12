@@ -237,6 +237,56 @@ async def test_stopped_controller_drops_new_approvals():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_stale_approval_is_cached_for_tool_call_id_retry():
+    """An approval whose interrupt rotated (no match, no round) must not be dropped.
+
+    The member retries the same ``tool_call_id``; the leader would reject the
+    re-approval ("already approved"), so dropping the answer here deadlocks the
+    member forever. The answer is cached and delivered when the retry's ask
+    re-commits (IDLE settle with a matching pending interrupt).
+    """
+    approval = InteractiveInput()
+    approval.update("tool-approval", {"approved": True})
+    sent = []
+    valid = False
+    has_pending = False
+
+    async def send(value):
+        sent.append(value)
+
+    runtime = SimpleNamespace(
+        state=HarnessState.IDLE,
+        send=send,
+        has_pending_interrupt=lambda: has_pending,
+        is_pending_interrupt_resume_valid=lambda _value: valid,
+    )
+    sc = _controller(runtime)
+    try:
+        # Stale arrival: interrupt has rotated/expired, no in-flight round.
+        assert await sc.resume_interrupt(approval) == "queued"
+        assert sent == []
+        assert sc._pending_interrupt_resumes == [approval]
+
+        # Round ends without re-committing the ask: orphan cleanup drops it.
+        await sc._drain_pending_interrupt_resumes()
+        assert sent == []
+        assert sc._pending_interrupt_resumes == []
+
+        # Cache again, then the member retries and the ask re-commits.
+        assert await sc.resume_interrupt(approval) == "queued"
+        valid = True
+        has_pending = True
+        await sc._drain_pending_interrupt_resumes()
+        assert sent == [approval]
+        assert sc._pending_interrupt_resumes == []
+    finally:
+        if sc._drain_task is not None:
+            sc._drain_task.cancel()
+            await asyncio.gather(sc._drain_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_idle_after_stop_does_not_restart_drain_until_next_start():
     """Late state callbacks cannot restart teardown; a new cycle can resume."""
 

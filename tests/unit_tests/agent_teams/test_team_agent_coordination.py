@@ -970,18 +970,25 @@ async def test_queued_interrupt_drained_when_ask_committed():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_resume_interrupt_dropped_when_stale():
-    """An approval with no pending interrupt and no in-flight round is dropped."""
+    """A stale approval (no pending interrupt, no in-flight round) is cached for retry.
+
+    The member typically retries the same ``tool_call_id`` and the leader would
+    reject a re-approval, so dropping the answer here would deadlock the member.
+    It is queued instead; the orphan cleanup in the drain drops it if the ask
+    never re-commits.
+    """
     agent = _make_leader()
     harness = _wire_harness(agent)
     sc = agent._stream_controller
     sc.is_valid_interrupt_resume = MagicMock(return_value=False)
     sc.has_in_flight_round = MagicMock(return_value=False)
 
-    status = await agent.resume_interrupt(_interactive_input("call-x"))
+    approval = _interactive_input("call-x")
+    status = await agent.resume_interrupt(approval)
 
-    assert status == "dropped"
+    assert status == "queued"
     harness.send.assert_not_called()
-    assert sc._pending_interrupt_resumes == []
+    assert sc._pending_interrupt_resumes == [approval]
 
 
 @pytest.mark.asyncio
