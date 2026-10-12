@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
 | 最近一次修订日期 | 2026-09-30 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md`、`F_96_swarmflow-worker-name-stability-and-isolation-sig.md`、`F_112_swarmflow-live-worker-activity.md`、`F_115_swarmflow-model-hint-fail-fast.md` |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md`、`F_96_swarmflow-worker-name-stability-and-isolation-sig.md`、`F_112_swarmflow-live-worker-activity.md`、`F_113_swarmflow-worker-progressive-tool.md`、`F_115_swarmflow-model-hint-fail-fast.md` |
 
 ## 范围 / 边界
 
@@ -116,6 +116,12 @@
    分支和提交信息完成提交、合并和冲突处理。**缓存命中重放不重建 worktree**——命中路径
    跳过 worker 执行（"no semaphore, no backend"），脚本不得假设 worktree 文件产物在
    resume/relaunch 后仍存在（工具描述已注明）。
+7. **渐进式工具暴露是 team 级 opt-in**：`TeamAgentSpec.progressive_tool=True` 时，`agent_configurator`
+   的 `_derive_swarmflow_worker_base_spec` 在 worker 基 spec 副本上写 `ProgressiveToolSpec(enabled=True)`；
+   `derive_member_spec` 不覆盖该字段，一次性 worker 与 `agent_session` avatar 同样继承，harness 据
+   `DeepAgentConfig.progressive_tool_enabled` 自行挂 `ProgressiveToolRail`。为 False（默认）时**不写入**，
+   基 spec 保持配置原值——字节兼容。该字段**不进** `call_signature` identity。不读单 Agent 全局
+   `progressive_tool_enabled`（`F_113`）。
 
 ## Resume Journal 持久化（`run_swarmflow`）
 
