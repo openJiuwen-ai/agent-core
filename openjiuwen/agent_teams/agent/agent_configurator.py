@@ -30,7 +30,12 @@ from openjiuwen.agent_teams.paths import (
 from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
-from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec, SysOperationSpec, WorkspaceSpec
+from openjiuwen.agent_teams.schema.deep_agent_spec import (
+    ProgressiveToolSpec,
+    RailSpec,
+    SysOperationSpec,
+    WorkspaceSpec,
+)
 from openjiuwen.agent_teams.schema.team import (
     TeamMemberSpec,
     TeamRole,
@@ -185,6 +190,27 @@ class _SwarmflowModelResolver:
         if self._spec is None:
             return []
         return [e.model_name for e in (self._spec.model_pool or [])]
+
+
+def _derive_swarmflow_worker_base_spec(
+    spec: TeamAgentSpec,
+    observability_rail_specs: list[Any],
+) -> Any:
+    """Worker base = teammate spec (leader fallback) + observability rails.
+
+    Workers are "a teammate without team tools": the raw agents[...] spec
+    carries teammate capabilities but not the team rails (those are injected
+    per member), so a worker built from it has no team tools by construction.
+    ``progressive_tool`` is only written when the team opts in, so a team that
+    leaves it off keeps the base spec exactly as configured.
+    """
+    base = spec.agents.get("teammate") or spec.agents.get("leader")
+    if base is None:
+        return None
+    update: dict[str, Any] = {"rails": list(base.rails or []) + observability_rail_specs}
+    if spec.progressive_tool:
+        update["progressive_tool"] = ProgressiveToolSpec(enabled=True)
+    return base.model_copy(update=update)
 
 
 class AgentConfigurator:
@@ -814,25 +840,14 @@ class AgentConfigurator:
             # and the shrunk-pool window behind the engine's pre-flight.
             swarmflow_model_resolver = _SwarmflowModelResolver(ctx.team_spec)
 
-            # Workers are "a teammate without team tools": derive each worker from
-            # the team's teammate spec (or the leader spec when no teammate exists).
-            # The raw agents[...] spec carries teammate capabilities but NOT the
-            # team rails (those are injected here, per member), so a worker built
-            # straight from it has no team tools by construction.
             base_specs = spec.agents
-            swarmflow_worker_base_spec = base_specs.get("teammate") or base_specs.get("leader")
+            swarmflow_worker_base_spec = _derive_swarmflow_worker_base_spec(spec, observability_rail_specs)
             # Human-session avatars derive from the human_agent spec; fall back to
-            # the worker base spec so human_session still works when no dedicated
+            # the raw worker base so human_session still works when no dedicated
             # human_agent spec is configured (it just lacks human-tuned desc).
-            swarmflow_human_base_spec = base_specs.get("human_agent") or swarmflow_worker_base_spec
-
-            # Workers also need the observability rail for agent spans.
-            if swarmflow_worker_base_spec is not None:
-                swarmflow_worker_base_spec = swarmflow_worker_base_spec.model_copy(
-                    update={
-                        "rails": list(swarmflow_worker_base_spec.rails or []) + observability_rail_specs,
-                    },
-                )
+            swarmflow_human_base_spec = (
+                base_specs.get("human_agent") or base_specs.get("teammate") or base_specs.get("leader")
+            )
 
             from openjiuwen.agent_teams.workflow.concurrency import (
                 ConcurrencyGovernor,

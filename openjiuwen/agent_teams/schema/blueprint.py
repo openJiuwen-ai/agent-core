@@ -533,6 +533,17 @@ class TeamAgentSpec(BaseModel):
     runs draw down one pool rather than getting a ceiling each.
     """
 
+    progressive_tool: bool = False
+    """Opt swarmflow worker avatars into progressive tool exposure.
+
+    True writes ``ProgressiveToolSpec(enabled=True)`` into the worker base spec
+    so each worker mounts the harness ``ProgressiveToolRail`` (``tool_search``
+    meta-tool + deferred tools). Team-level and independent of the single-agent
+    global ``progressive_tool_enabled`` switch: the two member kinds expose
+    different tool surfaces, so one deployment may want them set differently.
+    Only meaningful when ``enable_swarmflow`` is True; ignored otherwise.
+    """
+
     enable_permissions: bool = False
     """Team-specific permission control."""
 
