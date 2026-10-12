@@ -4,104 +4,50 @@
 
 The formal entries call these and reject the request while they raise, so no
 execution silently runs without session state, window assembly or interactive
-adaptation. The value types and markers here are the contracts those features
-share, so they can be developed in parallel.
+adaptation. Shared contracts live in schema.integration and are re-exported here
+for existing callers. Window assembly (PA-06) is integrated.
 """
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 
+from ..schema.integration import (
+    EXECUTION_HEADER,
+    TEMPORARY_BACKGROUND,
+    WINDOW_PART_KEY,
+    ExecutionEnding,
+    GroupMessageReader,
+    LoadedRecord,
+    NativeReplyAdapter,
+    SessionStateStore,
+    WaitingScene,
+    WindowAssembler,
+    WindowAssembly,
+)
+from .window_assembly import ExecutionWindowAssembler
+
 if TYPE_CHECKING:
-    from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-
     from ..schema.build_context import PersistentBuildContext
-    from ..schema.context import GroupMessagesResult
-    from ..schema.request import AnswerResponse, PermissionResponse, RequestInput
 
-# Metadata key PA-06 sets on the window messages it appends; PA-10 tidies the window by it at the end.
-WINDOW_PART_KEY = "persistent_window_part"
-# Kept and compressed to one line when the Execution ends.
-EXECUTION_HEADER = "execution_header"
-# Deleted when the Execution ends; injected again with the latest content next time.
-TEMPORARY_BACKGROUND = "temporary_background"
-
-
-@dataclass(frozen=True)
-class WaitingScene:
-    """The Request a paused Execution waits for, as stored with the session state record."""
-
-    request_id: str
-    reply_target: str
-
-
-@dataclass(frozen=True)
-class LoadedRecord:
-    """What the entry needs from the latest record once it has been written into the new Session."""
-
-    waiting: WaitingScene | None = None
-    # Last group message the previous Execution saw; recent messages are read after it (PA-23).
-    last_group_message_id: str | None = None
-
-
-@dataclass(frozen=True)
-class ExecutionEnding:
-    """How an Execution ended, so the state record can store its end marker."""
-
-    outcome: str
-    request_id: str
-    reply_target: str | None
-    output_refs: tuple[str, ...] = ()
-    # A final answer too large for one output event; must be saved so a later handoff needs no rerun.
-    pending_answer: str | None = None
-    # Cursor for the next Execution's recent group messages, kept in the end marker.
-    last_group_message_id: str | None = None
-
-
-@dataclass(frozen=True)
-class WindowAssembly:
-    """Native input for a new Request once its header, background and task input are arranged."""
-
-    native_input: Any
-    # Last group message placed in this Execution's background; None keeps no cursor.
-    last_group_message_id: str | None = None
-
-
-class SessionStateStore(Protocol):
-    """Loads and saves the whitelisted session state record (PA-10)."""
-
-    async def load(self, context: "PersistentBuildContext") -> LoadedRecord:
-        """Write the latest record into the new Session; an empty LoadedRecord when there is none."""
-
-    async def save(self, context: "PersistentBuildContext", ending: ExecutionEnding) -> None:
-        """Tidy the window and save the record in one write."""
-
-
-class WindowAssembler(Protocol):
-    """Arranges the window of a new Request after the loaded record (PA-06)."""
-
-    async def assemble(
-        self, context: "PersistentBuildContext", request: "RequestInput", record: LoadedRecord
-    ) -> WindowAssembly:
-        """Append the execution header and temporary background, marked by WINDOW_PART_KEY; return native input."""
-
-
-class GroupMessageReader(Protocol):
-    """Reads this Session's group messages through GroupChatPort (PA-23); shared by PA-06 and PA-07."""
-
-    async def recent_messages(
-        self, context: "PersistentBuildContext", *, after: str | None = None, exclude_message_id: str | None = None
-    ) -> "GroupMessagesResult":
-        """Messages after the cursor plus a few before it for continuity, without the trigger message."""
-
-
-class NativeReplyAdapter(Protocol):
-    """Converts one validated reply into native interrupt input (PA-09)."""
-
-    def to_native(self, response: "PermissionResponse | AnswerResponse", request: "InterruptRequest") -> Any:
-        """Return the value for InteractiveInput.user_inputs[tool_call_id]."""
+__all__ = [
+    "EXECUTION_HEADER",
+    "TEMPORARY_BACKGROUND",
+    "WINDOW_PART_KEY",
+    "ExecutionEnding",
+    "GroupMessageReader",
+    "LoadedRecord",
+    "NativeReplyAdapter",
+    "SessionStateStore",
+    "WaitingScene",
+    "WindowAssembler",
+    "WindowAssembly",
+    "group_message_reader",
+    "native_reply_adapter",
+    "session_state_store",
+    "window_assembler",
+]
 
 
 def _not_integrated(what: str, feature: str):
@@ -114,8 +60,17 @@ def session_state_store(context: "PersistentBuildContext") -> SessionStateStore:
 
 
 def window_assembler(context: "PersistentBuildContext") -> WindowAssembler:
-    """Return the window assembler for new Requests."""
-    raise _not_integrated("window assembly", "PA-06")
+    """Return the window assembler for new Requests.
+
+    An injected port means its background is expected: a group Session (GroupChatPort) needs the
+    group message reader, and knowledge navigation (KnowledgePort) is not integrated yet. Either
+    missing piece is rejected before any event instead of running without that background.
+    """
+    ports = context.ports
+    if getattr(ports, "knowledge", None) is not None:
+        raise _not_integrated("knowledge navigation", "PA-13")
+    reader = group_message_reader(context) if getattr(ports, "group_chat", None) is not None else None
+    return ExecutionWindowAssembler(reader)
 
 
 def group_message_reader(context: "PersistentBuildContext") -> GroupMessageReader:

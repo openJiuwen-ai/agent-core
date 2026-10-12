@@ -17,6 +17,17 @@ if TYPE_CHECKING:
 
     from .build_context import PersistentBuildContext
 
+# Native context-engine limits that silently drop window messages by count.
+_WINDOW_TRUNCATION_LIMITS = ("max_context_message_num", "default_window_message_num", "default_window_round_num")
+
+
+def _truncating_limits(config) -> list[str]:
+    """Names of count-based truncation limits set in a context engine config, given as an object or a dict."""
+    if config is None:
+        return []
+    read = config.get if isinstance(config, dict) else lambda name: getattr(config, name, None)
+    return [name for name in _WINDOW_TRUNCATION_LIMITS if read(name) is not None]
+
 
 class PersistentAgentSpec(DeepAgentSpec):
     """Construction-only v1 spec. Declaring a policy does not implement execution."""
@@ -66,6 +77,25 @@ class PersistentAgentSpec(DeepAgentSpec):
                 )
         parts = super().resolve_parts(context)
         context.binding.parts = parts
+        from openjiuwen.harness.rails.context_engineer import ContextAssembleRail, ContextProcessorRail
+        from openjiuwen.harness.rails.personal_context import PersonalContextRail
+
+        # The window is managed per Execution: these rails refresh prompt content or compress history
+        # on every model call, which breaks the cacheable prefix and Persistent's own switch timing.
+        # Rejected rather than dropped, so a published rail is never switched off silently.
+        unsupported = (ContextAssembleRail, PersonalContextRail, ContextProcessorRail)
+        mounted = sorted({type(rail).__name__ for rail in parts.rails if isinstance(rail, unsupported)})
+        if mounted:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                error_msg=f"Persistent windows are managed per Execution; remove {', '.join(mounted)}",
+            )
+        truncating = _truncating_limits(self.context_engine_config)
+        if truncating:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                error_msg=f"Persistent windows are not truncated by count; unset {', '.join(truncating)}",
+            )
         if "workspace_read" in self.enabled_features:
             if not self.enable_sys_operation:
                 raise build_error(
