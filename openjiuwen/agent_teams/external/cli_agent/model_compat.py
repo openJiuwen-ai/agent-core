@@ -40,14 +40,14 @@ def compatible_pool_model_names(cli_agent: str, pool: Sequence[Any]) -> list[str
     the compatible-pool notion lives in exactly one place.
     """
     provider_filter = provider_filter_for_cli(cli_agent)
-    return sorted(
-        {
-            getattr(entry, "model_name", "")
-            for entry in pool
-            if getattr(entry, "model_name", "")
-            and (provider_filter is None or provider_filter(getattr(entry, "api_provider", "")))
-        },
-    )
+    names: set[str] = set()
+    for entry in pool:
+        name = getattr(entry, "model_name", "")
+        if not name:
+            continue
+        if provider_filter is None or provider_filter(getattr(entry, "api_provider", "")):
+            names.add(name)
+    return sorted(names)
 
 
 def model_api_protocol(provider: str) -> str:

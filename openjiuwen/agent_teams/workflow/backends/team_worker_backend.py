@@ -278,7 +278,9 @@ class TeamWorkerBackend(AgentBackend):
     ) -> AgentResult:
         member_name = self._next_member_name(opts, call_key)
         agent_type = opts.get("agent_type")
-        # Gate before any resource is touched: a bad agent_type is a script error; the engine still retries it (cheap, deterministic) before AGENT_FAILED reaches the leader.
+        # Gate before any resource is touched: a bad agent_type is a script
+        # error; the engine still retries it (cheap, deterministic) before
+        # AGENT_FAILED reaches the leader.
         entry = self._gate_agent_type(agent_type) if agent_type else None
         # The engine tags the worker's started/completed events with the
         # deterministic call-path key; reuse it so live activity events resolve
@@ -561,6 +563,7 @@ class TeamWorkerBackend(AgentBackend):
             return None
         pool_names = getattr(self._model_resolver, "pool_names", None)
         return list(pool_names()) if callable(pool_names) else None
+
     def describe_base_model(self) -> str | None:
         """Name the worker base spec's model (same extraction as the converter)."""
         config = getattr(self._worker_base_spec, "model", None) if self._worker_base_spec is not None else None

@@ -159,22 +159,23 @@ def _codex_config_for(sdk: Any, entry: Any, cwd: str | None) -> Any:
 async def _fork_codex(credentials: ForkCredentials, *, entry: Any, cwd: str | None) -> str:
     """Branch the parent thread on the app server; a short-lived client is enough."""
     sdk = load_codex_sdk()
-    api = sdk.AsyncCodex(config=_codex_config_for(sdk, entry, cwd))
+    # The AsyncCodex facade's thread_fork() has no last_turn_id parameter; the
+    # raw app-server client accepts the wire-level params directly.
+    client = sdk.async_client.AsyncCodexClient(config=_codex_config_for(sdk, entry, cwd))
     params: dict[str, Any] = {}
     if credentials.cut_marker is not None:
         params["lastTurnId"] = credentials.cut_marker
     if cwd:
         params["cwd"] = cwd
     try:
-        await api._ensure_initialized()
-        # The facade's thread_fork() has no last_turn_id parameter; the raw
-        # client accepts the wire-level params directly.
-        forked = await api._client.thread_fork(credentials.parent_pointer, params)
+        await client.start()
+        await client.initialize()
+        forked = await client.thread_fork(credentials.parent_pointer, params)
     except Exception as e:  # noqa: BLE001
         raise BackendError(f"Codex fork failed for {credentials.parent_member!r}: {e}") from e
     finally:
         try:
-            await api.close()
+            await client.close()
         except Exception:  # noqa: BLE001 - best effort
             pass
     return str(forked.thread.id)

@@ -578,7 +578,8 @@ async def build_cli_workflow_runtime(
             config_kwargs["turn_idle_timeout_s"] = entry.codex_turn_idle_timeout_s
         if entry.codex_turn_idle_retries is not None:
             config_kwargs["turn_idle_retries"] = entry.codex_turn_idle_retries
-        harness = CodexHarness(CodexHarnessConfig(**config_kwargs))  # notification_observer stays at its default (no OTel bridge for workflow members)
+        # notification_observer stays at its default (no OTel bridge for workflow members)
+        harness = CodexHarness(CodexHarnessConfig(**config_kwargs))
         agent_kind, cli_path = "codex", entry.codex_bin or entry.cli_path
     team_logger.info(
         "[swarmflow] external member {} provider={} cwd={} resume={} require_checkpoint={}",

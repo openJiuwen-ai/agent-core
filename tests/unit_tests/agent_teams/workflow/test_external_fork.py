@@ -89,24 +89,27 @@ async def test_codex_fork_calls_thread_fork_with_entry_env_and_last_turn_id(monk
     seen: dict = {}
 
     class _RawClient:
+        def __init__(self, config=None):
+            seen["lifecycle"] = []
+
+        async def start(self):
+            seen["lifecycle"].append("start")
+
+        async def initialize(self):
+            seen["lifecycle"].append("initialize")
+
         async def thread_fork(self, thread_id, params):
             seen.update(thread_id=thread_id, params=params)
             return type("R", (), {"thread": type("T", (), {"id": "thr_child"})()})()
 
-    class _Api:
-        def __init__(self, config=None):
-            self._client = _RawClient()
-
-        async def _ensure_initialized(self):
-            return None
-
         async def close(self):
-            seen["closed"] = True
+            seen["lifecycle"].append("close")
 
-    monkeypatch.setattr(external_fork, "load_codex_sdk", lambda: type("S", (), {"AsyncCodex": _Api}))
+    fake_sdk = type("S", (), {"async_client": type("M", (), {"AsyncCodexClient": _RawClient})})
+    monkeypatch.setattr(external_fork, "load_codex_sdk", lambda: fake_sdk)
     monkeypatch.setattr(external_fork, "_codex_config_for", lambda sdk, entry, cwd: {"cwd": cwd})
     child = await external_fork._fork_codex(_creds(), entry=entry, cwd="C:/p")
     assert child == "thr_child"
     assert seen["thread_id"] == "thr_p"
     assert seen["params"] == {"lastTurnId": "turn_2", "cwd": "C:/p"}
-    assert seen["closed"] is True
+    assert seen["lifecycle"] == ["start", "initialize", "close"]

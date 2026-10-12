@@ -69,7 +69,7 @@ def parse_structured_text(text: str) -> Any:
     candidates.extend(reversed(fenced))
     start, end = text.find("{"), text.rfind("}")
     if 0 <= start < end:
-        candidates.append(text[start : end + 1])
+        candidates.append(text[start:end + 1])
     for candidate in candidates:
         try:
             value = json.loads(candidate)

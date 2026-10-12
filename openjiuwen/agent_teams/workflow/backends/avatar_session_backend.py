@@ -267,10 +267,6 @@ class AvatarSessionManager:
         # checkpoint: {"markers": [...], "pointer": str | None}. Authoritative
         # within a run (the member-session write is best-effort).
         self._persisted_external: dict[str, dict] = {}
-        # Local import: team_worker_backend imports this module lazily (circular).
-        from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
-
-        self._run_prefix = TeamWorkerBackend._run_id_prefix(run_id)
 
     # ------------------------------------------------------------------
     # Engine session-backend surface (delegated from TeamWorkerBackend)
@@ -330,7 +326,8 @@ class AvatarSessionManager:
                     )
                 if creds.provider != agent_type:
                     raise BackendError(
-                        f"fork credentials are for {creds.provider}, not {agent_type}; a fork keeps the parent's provider"
+                        f"fork credentials are for {creds.provider}, not {agent_type}; "
+                        "a fork keeps the parent's provider"
                     )
         if entry is None and base is None:
             raise BackendError(f"no base spec available for {kind!r} sessions")
@@ -450,7 +447,9 @@ class AvatarSessionManager:
         }
         self._persisted_external[state.member_name] = record
         sess = state.external.member_session if state.external is not None else None
-        if sess is None:  # no member session on the runtime: mirror only — a cross-process fork then finds no record and is refused
+        # No member session on the runtime: mirror only — a cross-process fork
+        # then finds no record and is refused.
+        if sess is None:
             return
         try:
             sess.update_state({self._EXTERNAL_TURNS_KEY: record})
@@ -1135,7 +1134,9 @@ class AvatarSessionManager:
                 try:
                     await state.external.stop()
                 except Exception:
-                    team_logger.debug("[swarmflow] external session cleanup failed for %s", state.member_name, exc_info=True)
+                    team_logger.debug(
+                        "[swarmflow] external session cleanup failed for %s", state.member_name, exc_info=True
+                    )
                 state.external = None
                 team_logger.exception(
                     "[swarmflow] external session start failed for %s (provider=%s, run=%s, resume=%s)",
@@ -1513,9 +1514,6 @@ class AvatarSessionManager:
         if self._run_id:
             run_prefix = _SLUG_RE.sub("-", self._run_id.lower()).strip("-") or "wf"
         return f"{run_prefix}-{kind_prefix}-{slug}-{n}"
-        family = "human" if kind == "human" else "sess"
-        prefix = self._run_prefix or "wf"
-        return f"{prefix}-{family}-{slug}-{n}"
 
 
 def _output_text(result: Any) -> str:

@@ -1325,7 +1325,25 @@ def _warn_concurrent_session(rt) -> None:
 _NOT_LOCKED = object()
 
 
-def _session_model_identity(opts: dict) -> tuple:
+@dataclass(frozen=True)
+class _ModelIdentity:
+    """Comparable model identity of one session turn (see ``_session_model_identity``).
+
+    ``supply`` keeps the external supply paths apart: ``"pool"`` (a pool
+    endpoint via ``model=``), ``"builtin"`` (the CLI's own login via
+    ``builtin_model=``), ``"both"`` (an invalid combo that can never equal a
+    single-supply lock) and ``"none"`` (no hint — the CLI's default).
+    """
+
+    kind: str
+    agent_type: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    supply: str | None = None
+    builtin: str | None = None
+
+
+def _session_model_identity(opts: dict) -> _ModelIdentity:
     """Comparable model identity of one session turn (one avatar = one model).
 
     Differs across supply paths so ``model="X"`` (a pool endpoint) never equals
@@ -1336,7 +1354,7 @@ def _session_model_identity(opts: dict) -> tuple:
     the launch backend rejects invalid combos anyway.
     """
     if not opts.get("agent_type"):
-        return ("native", opts.get("model"))
+        return _ModelIdentity("native", model=opts.get("model"))
     agent_type = opts["agent_type"]
     model_hint = opts.get("model")
     builtin_hint = opts.get("builtin_model")
@@ -1357,19 +1375,20 @@ def _session_model_identity(opts: dict) -> tuple:
     except BackendError:
         primary = None  # planner has no pool/catalog here; lock by raw hints
     if primary is not None:
-        return ("external", agent_type, False, primary.model, primary.effort, primary.api_base is not None)
+        supply = "pool" if primary.api_base is not None else "builtin"
+        return _ModelIdentity("external", agent_type, primary.model, primary.effort, supply)
     if model_hint is not None and builtin_hint is not None:
         # Mutually exclusive to the planner: an invalid combo can never equal a
         # single-supply lock, so a both-supplied turn reads as a model switch.
-        return ("external", agent_type, "both", model_hint, builtin_hint, effort)
+        return _ModelIdentity("external", agent_type, model_hint, effort, "both", builtin=builtin_hint)
     if model_hint is not None:
-        return ("external", agent_type, False, model_hint, None, True)
+        return _ModelIdentity("external", agent_type, model_hint, None, "pool")
     if builtin_hint is not None:
-        return ("external", agent_type, False, builtin_hint, effort, False)
-    return ("external", agent_type, True, None, None, False)
+        return _ModelIdentity("external", agent_type, builtin_hint, effort, "builtin")
+    return _ModelIdentity("external", agent_type, None, None, "none")
 
 
-def _locked_model_display(identity: tuple, backend: Any = None) -> str:
+def _locked_model_display(identity: _ModelIdentity, backend: Any = None) -> str:
     """Human-readable name of a locked identity.
 
     A no-hint lock names what actually runs: the backend's base-spec model
@@ -1377,14 +1396,10 @@ def _locked_model_display(identity: tuple, backend: Any = None) -> str:
     default for a third-party avatar (opaque to the engine — named honestly
     by kind), and the generic phrase as the hookless fallback.
     """
-    if identity[0] == "external":
-        value = identity[3]
-        if value:
-            return value
-        return f"the {identity[1]} CLI's own default model"
-    value = identity[1] if identity else None
-    if value:
-        return value
+    if identity.model:
+        return identity.model
+    if identity.kind == "external":
+        return f"the {identity.agent_type} CLI's own default model"
     describe = getattr(backend, "describe_base_model", None)
     named = describe() if callable(describe) else None
     return named or "the base spec model"
@@ -1768,9 +1783,10 @@ class AgentSession:
                     # corrected hint re-locks instead of bricking the session.
                     self._opened_model = identity
                     return
+                locked = _locked_model_display(self._opened_model, backend=getattr(rt, "backend", None))
                 raise EngineError(
                     f"agent session {opts.get('label') or 'agent'!r} is locked to model "
-                    f"{_locked_model_display(self._opened_model, backend=getattr(rt, 'backend', None))!r} (set by its first live "
+                    f"{locked!r} (set by its first live "
                     f"turn); one avatar runs one model, so switching models needs a new "
                     f"session — fork() it instead"
                 )
