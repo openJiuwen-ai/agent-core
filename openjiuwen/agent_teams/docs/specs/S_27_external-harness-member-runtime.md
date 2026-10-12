@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/spawn.py`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
-| 最近一次修订日期 | 2026-09-18 |
-| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md |
+| 最近一次修订日期 | 2026-09-21 |
+| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md、F_114_swarmflow-thirdparty-agent.md |
 
 ## 范围 / 边界
 
@@ -34,6 +34,11 @@
    checkpoint: <envelope>}`；`resume_external_backend=True` 时必须读到同 backend 的 checkpoint，否则
    `HarnessStateError`，且以 `ResumePolicy.REQUIRE_RESUME` 启动；有 checkpoint 但非严格模式时用
    `RESUME_IF_AVAILABLE`。
+   `require_checkpoint=True`（默认 `False`）与 `resume_external_backend` 联用：指针缺失时 `start()` 抛
+   `HarnessProtocolError` 而非告警后新开会话——供已知成员有历史的宿主（swarmflow 冷续跑）使用；团队对话
+   场景保持默认。`build_cli_workflow_runtime()`（`external/cli_agent/spawn.py`）是 `build_cli_runtime()` 的
+   工作流兄弟：`HarnessContext` 直构、无 `OPENJIUWEN_TEAM_JOIN`、`inject_mcp=False`、无团队系统提示词，
+   启动件取自 `ExternalCliAgentSpec` 条目（`F_114`）。
 5. **可靠性只由结构化事件驱动**。`TurnLifecycleEvent(STARTED)` → `begin_attempt(phase="turn")`；
    `FAILED` → 用 `TurnResult.error`（`category` / `code` / `provider_data.sdk_error_type` /
    `http_status`）`finalize_failure` 一次；`DiagnosticEvent(data.kind == "retrying")` →
