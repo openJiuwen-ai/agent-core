@@ -106,3 +106,52 @@ class TestAttachWorkspaceCacheCreatesEmptyCache:
         assert ws_mgr.workspace_cache is shared_cache
         ws_mgr.attach_workspace_cache.assert_not_called()
         backend.attach_workspace_manager.assert_called_once_with(ws_mgr)
+
+
+# --- swarmflow worker base spec: team-level progressive tool opt-in ---------
+
+
+def _swarmflow_team(**overrides):
+    from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    agents = overrides.pop("agents", {"leader": DeepAgentSpec()})
+    return TeamAgentSpec(agents=agents, team_name="wf_team", enable_swarmflow=True, **overrides)
+
+
+def test_worker_base_spec_gets_progressive_tool_when_team_opts_in():
+    """progressive_tool=True on the team spec lands on the worker base spec as an enabled ProgressiveToolSpec."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _derive_swarmflow_worker_base_spec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import ProgressiveToolSpec
+
+    base = _derive_swarmflow_worker_base_spec(_swarmflow_team(progressive_tool=True), [])
+
+    assert base.progressive_tool == ProgressiveToolSpec(enabled=True)
+
+
+def test_worker_base_spec_untouched_when_team_key_off():
+    """Default (False) leaves the base spec's progressive_tool exactly as configured — byte-compatible."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _derive_swarmflow_worker_base_spec
+
+    spec = _swarmflow_team()
+    base = _derive_swarmflow_worker_base_spec(spec, [])
+
+    assert spec.progressive_tool is False
+    assert base.progressive_tool is None
+    assert spec.agents["leader"].progressive_tool is None
+
+
+def test_worker_base_spec_prefers_teammate_over_leader():
+    """The worker derives from the teammate spec when one exists, keeping its capabilities."""
+    from openjiuwen.agent_teams.agent.agent_configurator import _derive_swarmflow_worker_base_spec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    spec = _swarmflow_team(
+        agents={"leader": DeepAgentSpec(), "teammate": DeepAgentSpec(enable_task_planning=True)},
+        progressive_tool=True,
+    )
+    base = _derive_swarmflow_worker_base_spec(spec, [])
+
+    assert base.enable_task_planning is True
+    assert base.progressive_tool is not None
+    assert spec.agents["teammate"].progressive_tool is None

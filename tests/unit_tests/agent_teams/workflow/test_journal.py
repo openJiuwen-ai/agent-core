@@ -554,3 +554,12 @@ def test_new_records_go_to_per_run_wal_not_legacy(tmp_path):
     )
     assert reloaded.get_cached(key_str([["call", 0]]), "s", "run-A") is not None
     assert reloaded.get_cached(key_str([["call", 1]]), "s", "run-A") is not None
+
+
+def test_call_signature_ignores_progressive_tool_key():
+    """Flipping the team's progressive-tool switch must not invalidate cached rounds:
+    only label/phase/model(/isolation) identify a call."""
+    base_opts = {"label": "coder", "phase": "build", "model": "m1"}
+    with_switch = {**base_opts, "progressive_tool": True}
+
+    assert call_signature("p", base_opts, None) == call_signature("p", with_switch, None)
