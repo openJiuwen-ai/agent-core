@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import json
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,36 @@ def new_swarmflow_run_id() -> str:
     return f"wf_{uuid.uuid4().hex[:12]}"
 
 
+def _builtin_model_catalog(team_backend: Any) -> str | None:
+    """Render the built-in models each CLI kind declares, or None when none do.
+
+    Mirror of ``tools.tool_member._builtin_model_catalog`` with a lazy twist:
+    the blob is appended to the tool description only when at least one kind
+    declares built-in models, so the ``builtin_model`` option's catalog is
+    visible exactly when the option is usable (``None`` keeps the description
+    free of a dangling reference).
+    """
+    if team_backend is None:
+        return None
+    catalog: dict[str, list[dict[str, Any]]] = {}
+    for cli_agent in sorted(team_backend.external_cli_kinds()):
+        config = team_backend.external_cli_config(cli_agent)
+        if config is None or not config.builtin_models:
+            continue
+        catalog[cli_agent] = [
+            {
+                "name": model.name,
+                "description": model.description,
+                "efforts": model.efforts,
+                "default_effort": model.default_effort,
+            }
+            for model in config.builtin_models
+        ]
+    if not catalog:
+        return None
+    return f"<builtin_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</builtin_model_catalog>"
+
+
 @dataclass
 class _StructuralDiff:
     """AST-level structural delta between two script sources.
@@ -89,6 +120,7 @@ class SwarmflowTool(AsyncTool):
         budget: BudgetLedger | None = None,
         t: Translator | None = None,
         language: str = "cn",
+        team_backend: Any = None,
     ) -> None:
         lang = language if language in ("cn", "en") else "cn"
         translator = t if t is not None else make_translator(lang)
@@ -104,10 +136,17 @@ class SwarmflowTool(AsyncTool):
         self._messager = messager
         self._team_name = team_name or "swarmflow"
         self._model_resolver = model_resolver
+        self._team_backend = team_backend
         self._worker_base_spec = worker_base_spec
         self._human_base_spec = human_base_spec
         self._governor = concurrency_governor
         self._budget = budget
+        # Append the built-in model catalog when any CLI kind declares one, so
+        # the ``builtin_model`` option's pickable names ride the description
+        # exactly when the option is usable (see ``_builtin_model_catalog``).
+        catalog = _builtin_model_catalog(team_backend)
+        if catalog is not None:
+            self.card.description = f"{self.card.description}\n\n{catalog}"
         # Each leader NativeHarness build creates a fresh SwarmflowTool (the
         # team tool rail is per-harness). Register as the controller's relaunch
         # host so paused runs resume on THIS cycle's harness, not the one that
@@ -693,6 +732,7 @@ class SwarmflowTool(AsyncTool):
                 external_cli_agents=get_swarmflow_external_cli_agents(
                     getattr(self._parent_agent, "build_context", None)
                 ),
+                team_backend=self._team_backend,
             )
         # BudgetExhausted is a BaseException: no ``except`` here on purpose —
         # wrapping it would discard its structured fields, and the async-tool

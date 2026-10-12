@@ -246,6 +246,7 @@ def create_team_tools(
             budget=swarmflow_budget,
             t=t,
             language=lang,
+            team_backend=agent_team,
         ),
         # Async-tool control tools (list / output / cancel background tasks).
         # Leader-only (in LEADER_ONLY_TOOLS); always wired — harmless when the

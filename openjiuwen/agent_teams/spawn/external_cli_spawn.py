@@ -20,11 +20,16 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
+from openjiuwen.agent_teams.external.cli_agent.model_compat import (
+    _external_cli_provider_name,  # noqa: F401  re-exported for test_external_cli_model_provider
+)
+from openjiuwen.agent_teams.external.cli_agent.model_compat import (
+    team_model_config_to_external as _team_model_config_to_external,
+)
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
 from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 from openjiuwen.agent_teams.schema.status import MemberStatus
-from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.harness_providers.skills import install_skills, normalize_skills
@@ -38,53 +43,6 @@ if TYPE_CHECKING:
     )
     from openjiuwen.agent_teams.team_context import TeamContextTracker
     from openjiuwen.agent_teams.tools.team import TeamBackend
-
-
-_JIUWEN_EXTERNAL_PROVIDER = "jiuwen"
-
-
-def _external_cli_provider_name(client_config: Any, *, cli_agent: str | None = None) -> str:
-    """Resolve the CLI-side provider identity for a model client config.
-
-    Codex-style CLI runtimes gate server-side behaviors (remote compaction,
-    request-body compression) on the provider *name* matching their official
-    endpoint ("OpenAI"). A pool entry's ``client_provider`` is only the wire
-    protocol label — mostly "OpenAI" for OpenAI-compatible gateways — so
-    passing it through verbatim makes every external gateway look official and
-    breaks the gated protocols against endpoints that do not implement them.
-
-    Codex's OpenAI-compatible non-official endpoints use ``jiuwen``; other
-    CLI backends retain their configured provider identity.
-    """
-    api_base = str(getattr(client_config, "api_base", "") or "").strip()
-    provider = str(getattr(client_config, "client_provider", "") or "").strip()
-    if cli_agent == "codex" and provider.lower() == "openai" and api_base:
-        return _JIUWEN_EXTERNAL_PROVIDER
-    return provider
-
-
-def _team_model_config_to_external(
-    member_model: Any,
-    *,
-    cli_agent: str | None = None,
-) -> Optional[ExternalCliModelConfig]:
-    """Convert a pool-allocated TeamModelConfig to ExternalCliModelConfig."""
-    client_config = getattr(member_model, "model_client_config", None)
-    request_config = getattr(member_model, "model_request_config", None)
-    if client_config is None:
-        return None
-    if str(getattr(client_config, "client_provider", "")) == "intelli_router":
-        return None
-    provider = _external_cli_provider_name(client_config, cli_agent=cli_agent)
-    model = ""
-    if request_config is not None:
-        model = str(getattr(request_config, "model_name", "") or getattr(request_config, "model", "") or "")
-    return ExternalCliModelConfig(
-        provider=provider or None,
-        model=model or None,
-        api_base=str(getattr(client_config, "api_base", "") or "") or None,
-        api_key=str(getattr(client_config, "api_key", "") or "") or None,
-    )
 
 
 def _external_cli_config_for_member(

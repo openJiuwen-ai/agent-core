@@ -37,13 +37,13 @@ override it without standing up a real LLM.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
-import time
 from typing import Any, Callable, Sequence
 
 from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
-from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig, TeamRole
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
@@ -52,23 +52,51 @@ from openjiuwen.agent_teams.tools.structured_output_tool import (
 from openjiuwen.agent_teams.workflow.backends._result_text import (
     prefer_natural_or_structured_text,
 )
+from openjiuwen.agent_teams.workflow.backends.activity_emitter import build_activity_event
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 from openjiuwen.agent_teams.workflow.backends.external_turns import ExternalMemberTurns, ExternalTurnOutcome
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
-from openjiuwen.agent_teams.workflow.engine.progress import (
-    ProgressKind,
-    WorkflowProgressEvent,
-)
 from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.single_agent.ability_manager import resolve_tool_result_text
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
+    AgentCallbackEvent,
     AgentRail,
     ToolCallInputs,
 )
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _tool_call_id(inputs: ToolCallInputs) -> str | None:
+    """Return the native tool-call id on one tool execution, or ``None``."""
+    tool_call = getattr(inputs, "tool_call", None)
+    if tool_call is None:
+        return None
+    call_id = getattr(tool_call, "id", None)
+    return str(call_id) if call_id else None
+
+
+def _tool_args_preview(args: Any) -> str | None:
+    """Render tool arguments as a compact preview for the activity event.
+
+    Raw JSON-string arguments (how ``before_tool_call`` sees them) are parsed
+    and re-dumped on one line; structured dicts dump as-is. Plain text passes
+    through untouched. ``None`` (no arguments) stays ``None``.
+    """
+    if args is None:
+        return None
+    if isinstance(args, str):
+        try:
+            parsed = json.loads(args)
+        except (ValueError, TypeError):
+            return args
+        args = parsed
+    if isinstance(args, str) or isinstance(args, (int, float, bool)):
+        return str(args)
+    return json.dumps(args, ensure_ascii=False, default=str)
 
 
 def _text_from_invoke_result(result: Any, *, member_name: str) -> str:
@@ -92,19 +120,32 @@ class SwarmflowActivityRail(AgentRail):
     """Emit live tool activity from a worker to the run's progress stream.
 
     A single-shot worker executes as one opaque ``run_once``, so without this
-    rail the run's only visibility into it is started/completed. This rail hooks
-    each tool execution and forwards a short ``agent_activity`` progress event
-    (throttled per worker) so a spectator UI — e.g. the Swarm Map — can show
-    what a worker is doing mid-run instead of just start/finish.
+    rail the run's only visibility into it is started/completed. This rail
+    hooks every tool execution twice — before and after — and forwards an
+    unthrottled ``agent_activity`` event per hook so a spectator UI (e.g. the
+    Swarm Map) can show what a worker is doing mid-run instead of just
+    start/finish. The two events of one tool execution pair on
+    ``tool_call_id``; the payload is structured (``activity_type`` /
+    ``tool_name`` / ``content``), ``message="tool: <name>"`` stays for legacy
+    consumers.
     """
 
     priority: int = 500
 
-    def __init__(self, emit: Callable[[str], None], min_interval_s: float = 1.5) -> None:
+    #: ``after_tool_call`` reads the tool message other rails may still rewrite
+    #: (e.g. ``StructuredOutputFinishRail``), so that one hook runs after every
+    #: rail in its chain while ``init`` keeps the plain priority order.
+    _AFTER_TOOL_CALL_READER_OFFSET = 1_000_000
+
+    def __init__(self, emit: Callable[[str, str | None, str | None, str | None], None]) -> None:
         super().__init__()
         self._emit = emit
-        self._min_interval = min_interval_s
-        self._last = 0.0
+
+    def callback_priority(self, event: AgentCallbackEvent) -> int:
+        """Run after_tool_call after every rail that produces the tool result."""
+        if event == AgentCallbackEvent.AFTER_TOOL_CALL:
+            return self.priority - self._AFTER_TOOL_CALL_READER_OFFSET
+        return self.priority
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         inputs = ctx.inputs
@@ -113,11 +154,25 @@ class SwarmflowActivityRail(AgentRail):
         tool_name = (getattr(inputs, "tool_name", "") or "").strip()
         if not tool_name:
             return
-        now = time.monotonic()
-        if now - self._last < self._min_interval:
+        self._emit("tool_call", _tool_call_id(inputs), tool_name, _tool_args_preview(inputs.tool_args))
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        inputs = ctx.inputs
+        if not isinstance(inputs, ToolCallInputs):
             return
-        self._last = now
-        self._emit(tool_name)
+        tool_name = (getattr(inputs, "tool_name", "") or "").strip()
+        if not tool_name:
+            return
+        # The text the model reads is the single fact source; a non-tool
+        # exception (no AbilityExecutionError tool message) falls back to its
+        # own text, and a bare raw result (no tool_msg) to its repr — so the
+        # tool_result event always previews what the call produced.
+        content = resolve_tool_result_text(inputs, ctx.exception)
+        if content is None and ctx.exception is not None:
+            content = str(ctx.exception)
+        if content is None and inputs.tool_result is not None:
+            content = str(inputs.tool_result)
+        self._emit("tool_result", _tool_call_id(inputs), tool_name, content)
 
 
 class TeamWorkerBackend(AgentBackend):
@@ -132,16 +187,19 @@ class TeamWorkerBackend(AgentBackend):
         max_iterations: Reserved hard cap on a worker's turns.
         model_resolver: Optional callback mapping an ``agent(model=...)`` name
             hint (or ``None`` for the default) to a worker ``TeamModelConfig``.
-            Returns ``None`` when the name is unknown / no pool is configured, in
-            which case the worker inherits its base spec's model. Keeps the
-            pool/allocator lookup in the team layer — the backend only asks
-            "name in, config out".
+            Returns ``None`` when the name is unknown / no pool is configured —
+            :meth:`_resolve_model` then raises a non-retryable pool-miss error
+            instead of silently inheriting. Keeps the pool/allocator lookup in
+            the team layer — the backend only asks "name in, config out".
         worker_base_spec: The base ``DeepAgentSpec`` each worker derives from
             (the team's teammate spec, or the leader spec). Required by the
             harness path; ``None`` is only valid when :meth:`_execute_worker` is
             overridden (tests).
         build_context: Optional ``BuildContext`` forwarded to the worker harness
             build (worker specs carry no team rails, so this is usually unused).
+        team_backend: The host team backend handle — source of the team model
+            pool for third-party model planning and native pool-miss messages.
+            ``None`` (tests / a backend without a team) leaves the pool empty.
     """
 
     def __init__(
@@ -162,6 +220,7 @@ class TeamWorkerBackend(AgentBackend):
         run_id: str | None = None,
         workflow_name: str | None = None,
         external_cli_agents: Sequence[Any] = (),
+        team_backend: Any = None,
     ) -> None:
         super().__init__()
         self._model = model
@@ -172,6 +231,7 @@ class TeamWorkerBackend(AgentBackend):
         self._worker_base_spec = worker_base_spec
         self._human_base_spec = human_base_spec
         self._build_context = build_context
+        self._team_backend = team_backend
         self._messager = messager
         self._session_id = session_id
         from openjiuwen.core.session import get_current_session
@@ -231,6 +291,40 @@ class TeamWorkerBackend(AgentBackend):
         # while its own tally is what this ``agent()`` call reports as its cost.
         budget_rail = SwarmflowBudgetRail(self.budget, workflow_budget=self.workflow_budget)
         try:
+            # Third-party calls validate their model options BEFORE any resource
+            # is touched: a rule violation (pool miss, mutual exclusion, bad
+            # effort) is a script error that must not have spent a worktree slot.
+            model_config = None
+            if entry is not None:
+                # Imported lazily: external_model lives under agent_teams.external,
+                # whose package __init__ eagerly imports tool_gateway ->
+                # team_workspace.tools, which re-enters this module mid-init
+                # through workflow/__init__ (same reason tool_member defers it).
+                from openjiuwen.agent_teams.workflow.backends.external_model import plan_external_model
+
+                model_config = plan_external_model(
+                    cli_agent=agent_type,
+                    model_hint=opts.get("model"),
+                    builtin_hint=opts.get("builtin_model"),
+                    effort_hint=opts.get("effort"),
+                    entry=entry,
+                    team_backend=self._team_backend,
+                ).primary
+            elif opts.get("builtin_model") is not None or opts.get("effort") is not None:
+                # A native call offering builtin_model / effort is a script error
+                # (only external CLI agents run models on their own login); the
+                # resolver's cli_agent=None rule raises it non-retryably before
+                # any resource is spent. Plain native calls skip this entirely.
+                from openjiuwen.agent_teams.workflow.backends.external_model import plan_external_model
+
+                plan_external_model(
+                    cli_agent=None,
+                    model_hint=opts.get("model"),
+                    builtin_hint=opts.get("builtin_model"),
+                    effort_hint=opts.get("effort"),
+                    entry=None,
+                    team_backend=self._team_backend,
+                )
             await self._worktrees.ensure(member_name, opts)
             if entry is not None:
                 outcome = await self._execute_external_worker(
@@ -241,8 +335,14 @@ class TeamWorkerBackend(AgentBackend):
                     opts=opts,
                     schema_json=schema_json,
                     budget_rail=budget_rail,
+                    model_config=model_config,
                 )
-                return AgentResult(text=outcome.text, structured=outcome.structured, tokens=budget_rail.call_tokens)
+                return AgentResult(
+                    text=outcome.text,
+                    structured=outcome.structured,
+                    tokens=budget_rail.call_tokens,
+                    model=outcome.model,
+                )
             model = self._resolve_model(opts.get("model"))
             if schema_json is not None:
                 # The harness's ability manager re-qualifies the tool id per owner
@@ -340,6 +440,8 @@ class TeamWorkerBackend(AgentBackend):
                 external_cli_agents=self._external_cli_agents,
                 gate_agent_type=self._gate_agent_type,
                 external_cwd=self._external_cwd,
+                team_backend=self._team_backend,
+                progress_sink=self.progress_sink,
             )
         return self._session_mgr
 
@@ -413,12 +515,36 @@ class TeamWorkerBackend(AgentBackend):
 
         Returns:
             A ``TeamModelConfig`` when the injected resolver maps the hint (or the
-            default) to a pool entry; otherwise ``None`` so the worker inherits
-            its base spec's model.
+            default) to a pool entry; ``None`` for an absent hint so the worker
+            inherits its base spec's model.
+
+        Raises:
+            BackendError: a non-empty hint the resolver cannot map is a pool
+                miss — deterministic, so it is non-retryable and names the pool's
+                compatible models instead of silently falling back.
         """
         if self._model_resolver is None:
             return None
-        return self._model_resolver(model_name) if model_name else self._model_resolver(None)
+        if model_name:
+            resolved = self._model_resolver(model_name)
+            if resolved is None:
+                raise BackendError(self._pool_miss_message(model_name), retryable=False)
+            return resolved
+        return self._model_resolver(None)
+
+    def _pool_miss_message(self, model_name: str) -> str:
+        """Compose the native pool-miss error: the hint plus the pool's model names."""
+        pool = self._team_backend.get_model_pool() if self._team_backend is not None else []
+        names = sorted({getattr(e, "model_name", "") for e in pool if getattr(e, "model_name", "")})
+        if names:
+            return (
+                f"model '{model_name}' is not offered by the team model pool; "
+                f"the team model pool offers: {', '.join(names)}"
+            )
+        return (
+            f"model '{model_name}' is not offered by the team model pool; "
+            "the team model pool has no compatible model"
+        )
 
     def model_pool_names(self) -> list[str] | None:
         """Accepted ``model`` hint names, for the engine's fail-fast check.
@@ -432,23 +558,38 @@ class TeamWorkerBackend(AgentBackend):
             return None
         pool_names = getattr(self._model_resolver, "pool_names", None)
         return list(pool_names()) if callable(pool_names) else None
+    def describe_base_model(self) -> str | None:
+        """Name the worker base spec's model (same extraction as the converter)."""
+        config = getattr(self._worker_base_spec, "model", None) if self._worker_base_spec is not None else None
+        request = getattr(config, "model_request_config", None)
+        name = getattr(request, "model_name", None) or getattr(request, "model", None)
+        return str(name) if name else None
+
     def describe_model(self, opts: dict) -> str | None:
         """Return the effective model string for an external agent call, or None for native.
 
-        Priority: explicit ``model`` hint > declared entry's model config > agent_type string.
-        Returns None when no ``agent_type`` is present (native path).
+        Third-party calls resolve the same plan the launch uses, so the display
+        tracks the *validated* model (pool hit name, catalog builtin). An
+        invalid combo never raises here — it surfaces loudly at launch — so the
+        fallback is the best-known hint.
         """
         agent_type = opts.get("agent_type")
         if not agent_type:
             return None
-        if opts.get("model"):
-            return str(opts["model"])
+        from openjiuwen.agent_teams.workflow.backends.external_model import plan_external_model
+
         entry = next((e for e in self._external_cli_agents if e.cli_agent == agent_type), None)
-        if entry is not None and entry.external_model_config is not None:
-            model = entry.external_model_config.model
-            if model:
-                return model
-        return agent_type
+        try:
+            return plan_external_model(
+                cli_agent=agent_type,
+                model_hint=opts.get("model"),
+                builtin_hint=opts.get("builtin_model"),
+                effort_hint=opts.get("effort"),
+                entry=entry,
+                team_backend=self._team_backend,
+            ).display
+        except BackendError:
+            return str(opts.get("model") or opts.get("builtin_model") or "") or None
 
     def _gate_agent_type(self, agent_type: str) -> Any:
         """Validate ``agent_type`` against the SDK registry and team declaration.
@@ -644,11 +785,14 @@ class TeamWorkerBackend(AgentBackend):
         opts: dict,
         schema_json: dict | None,
         budget_rail: SwarmflowBudgetRail,
+        model_config: ExternalCliModelConfig | None = None,
     ) -> ExternalTurnOutcome:
         """Run one prompt on a fresh external CLI member and tear it down.
 
         Single-shot like a native worker: build, one turn, stop. Usage arrives
         with the terminal turn result and is billed after the fact.
+        ``model_config`` is the already-resolved third-party model plan (see
+        :meth:`run` — it plans before any resource is touched).
         Override in tests to record calls without launching a real CLI.
         """
         from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_workflow_runtime
@@ -664,12 +808,31 @@ class TeamWorkerBackend(AgentBackend):
                 team_name=self._team_name,
                 system_prompt=self._t("swarmflow_worker", key="free"),
                 cwd=self._external_cwd(member_name, entry),
-                model_override=opts.get("model"),
+                model_config=model_config,
             )
         except Exception as e:
             team_logger.exception("external worker build failed for %s", member_name)
             raise BackendError(f"external worker build failed for {member_name}: {e}") from e
-        turns = ExternalMemberTurns(runtime, member_name=member_name)
+        # Lazy: model_compat lives under agent_teams.external, whose package
+        # __init__ re-enters this module mid-init (same reason plan_external_model
+        # is deferred). The pool names back the auth-failure workaround list.
+        from openjiuwen.agent_teams.external.cli_agent.model_compat import compatible_pool_model_names
+
+        pool = self._team_backend.get_model_pool() if self._team_backend is not None else []
+        # Mirrors the native rail's ``if agent_id:`` gate so third-party workers
+        # emit AGENT_ACTIVITY events too; single-shot carries no correlation id.
+        if opts.get("agent_id"):
+            runtime.bind_activity_sink(
+                self.progress_sink,
+                agent_id=opts.get("agent_id"),
+                phase=opts.get("phase"),
+                label=opts.get("label"),
+            )
+        turns = ExternalMemberTurns(
+            runtime,
+            member_name=member_name,
+            auth_hint_models=compatible_pool_model_names(agent_type, pool),
+        )
         team_session = TeamSession(
             session_id=self._session_id,
             team_id=self._team_name,
@@ -680,6 +843,10 @@ class TeamWorkerBackend(AgentBackend):
             outcome = await turns.run_turn(prompt, schema_json=schema_json)
         except BackendError as e:
             budget_rail.bill(e.tokens or 0)
+            # Attribute the failed turn to the model the CLI reported, so
+            # AGENT_FAILED names the real endpoint instead of the option hint.
+            if e.model is None:
+                e.model = getattr(turns, "reported_model", None)
             raise
         finally:
             try:
@@ -687,6 +854,7 @@ class TeamWorkerBackend(AgentBackend):
             except Exception:
                 team_logger.debug("external worker stop failed for %s", member_name, exc_info=True)
         budget_rail.bill(outcome.tokens)
+        outcome.model = getattr(turns, "reported_model", None)
         return outcome
 
     # ------------------------------------------------------------------
@@ -824,33 +992,41 @@ class TeamWorkerBackend(AgentBackend):
 
     def _make_activity_emitter(
         self, agent_id: str, phase: str | None, label: str | None
-    ) -> Callable[[str], None]:
-        """Return a sink that forwards one worker tool call to the progress stream.
+    ) -> Callable[[str, str | None, str | None, str | None], None]:
+        """Return a sink that forwards one worker tool activity to the progress stream.
 
-        The rail calls this on (throttled) tool executions; the event carries the
-        node's ``agent_id`` / ``phase`` / ``label`` (mirroring ``agent_started``)
-        plus a short ``tool: <name>`` narration in ``message``. ``None`` when the
-        backend has no bound progress sink (e.g. tests) — the closure no-ops.
+        The rail calls this on every tool execution (before and after); the
+        event carries the node's ``agent_id`` / ``phase`` / ``label`` (mirroring
+        ``agent_started``), the structured ``activity_type`` / ``tool_call_id`` /
+        ``tool_name`` / ``content`` payload, and a short ``tool: <name>``
+        narration in ``message`` for legacy consumers. ``content`` is truncated
+        here — the one engine-side cap every consumer can rely on. The closure
+        no-ops when the backend has no bound progress sink (e.g. tests).
         """
         sink = self.progress_sink
 
-        def emit(tool_name: str) -> None:
+        def emit(
+            activity_type: str,
+            tool_call_id: str | None,
+            tool_name: str | None,
+            content: str | None,
+        ) -> None:
             if sink is None:
                 return
             try:
                 sink(
-                    WorkflowProgressEvent(
-                        kind=ProgressKind.AGENT_ACTIVITY,
+                    build_activity_event(
+                        activity_type=activity_type,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        content=content,
+                        agent_id=agent_id,
                         phase=phase,
                         label=label,
-                        agent_id=agent_id,
-                        message=f"tool: {tool_name}",
                     )
                 )
             except Exception:
-                team_logger.debug(
-                    "[swarmflow] worker activity emit failed: agent_id=%s", agent_id, exc_info=True
-                )
+                team_logger.debug("[swarmflow] worker activity emit failed: agent_id=%s", agent_id, exc_info=True)
 
         return emit
 

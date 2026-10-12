@@ -28,14 +28,17 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
+from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import (
     cancellation_safe_release_then_dispose,
 )
-from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
-from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
+from openjiuwen.agent_teams.tools.structured_output_tool import (
+    StructuredOutputFinishRail,
+    StructuredOutputTool,
+)
 from openjiuwen.agent_teams.workflow.backends._member_spec import (
     derive_member_build_context,
     derive_member_spec,
@@ -43,15 +46,7 @@ from openjiuwen.agent_teams.workflow.backends._member_spec import (
 from openjiuwen.agent_teams.workflow.backends._result_text import (
     prefer_natural_or_structured_text,
 )
-from openjiuwen.agent_teams.tools.structured_output_tool import (
-    StructuredOutputFinishRail,
-    StructuredOutputTool,
-)
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
-from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
-from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
-from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
-from openjiuwen.agent_teams.workflow.backends.external_turns import ExternalMemberTurns
 from openjiuwen.agent_teams.workflow.backends.external_fork import (
     ForkCredentials,
     check_fork_mode,
@@ -59,8 +54,13 @@ from openjiuwen.agent_teams.workflow.backends.external_fork import (
     materialise_external_fork,
     reconcile,
 )
+from openjiuwen.agent_teams.workflow.backends.external_turns import ExternalMemberTurns
+from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
+from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.core.session.vcs.codec import encode_message
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -159,6 +159,11 @@ class _SessionState:
     # and, on a forked child, the credentials to materialise on its first turn.
     turn_markers: list[str | None] = field(default_factory=list)
     fork_credentials: ForkCredentials | None = None
+    # The engine-assigned correlation id of the turn currently driving this
+    # avatar (set per ``send_turn``). The activity rail tags live tool events
+    # with it at emit time, so a spectator can match activity to that turn's
+    # started/completed events.
+    current_correlation_id: str | None = None
 
 
 class AvatarSessionManager:
@@ -177,6 +182,9 @@ class AvatarSessionManager:
         budget: The run's shared token ledger — every avatar bills its model
             calls to it and is cut short once it is dry, so sessions draw down
             the same pool as single-shot workers. ``None`` runs unbounded.
+        team_backend: The host team backend handle — source of the team model
+            pool for third-party session planning. ``None`` (tests / a backend
+            without a team) leaves the pool empty.
     """
 
     def __init__(
@@ -203,6 +211,8 @@ class AvatarSessionManager:
         external_cli_agents: Sequence[Any] = (),
         gate_agent_type: Callable[[str], Any] | None = None,
         external_cwd: Callable[[str, Any], str | None] | None = None,
+        team_backend: Any = None,
+        progress_sink: Any = None,
     ) -> None:
         self._budget = budget if budget is not None else BudgetLedger()
         self._workflow_budget = workflow_budget
@@ -243,6 +253,11 @@ class AvatarSessionManager:
         self._external_cli_agents: tuple[Any, ...] = tuple(external_cli_agents)
         self._gate_agent_type = gate_agent_type
         self._external_cwd = external_cwd
+        self._team_backend = team_backend
+        # The host backend's run progress sink, forwarded from
+        # ``TeamWorkerBackend`` (None = tests / a backend without one). The
+        # session avatar's activity rail emits through it.
+        self._progress_sink = progress_sink
         # Tracks external-session member names so the fork guard survives close_session.
         self._external_members: set[str] = set()
         # Provider per external member, kept past close_session so a later fork
@@ -662,6 +677,11 @@ class AvatarSessionManager:
         if state is None:
             raise BackendError(f"unknown session {session_id!r}")
         async with state.lock:
+            # Track the turn's correlation id so the avatar's activity rail tags
+            # live tool events with the same id this turn's started/completed
+            # events carry, and the external per-turn rebind rides it
+            # (see ``_SessionState.current_correlation_id``).
+            state.current_correlation_id = correlation_id
             if state.entry is not None:
                 return await self._external_turn(state, prompt, opts, schema_json, history)
             await self._seed_mirror_fallback(state, history)
@@ -876,6 +896,19 @@ class AvatarSessionManager:
             # End each schema turn's round as soon as structured_output is
             # captured (added before start so it registers with the harness).
             harness.add_rail(StructuredOutputFinishRail())
+            # Live activity: mirror the single-shot worker's rail (opts carry the
+            # injected engine node key in ``agent_id``). The emitter tags events
+            # with the CURRENT turn's correlation id, read off the state row, so
+            # a spectator can match them to that turn's started/completed events.
+            agent_id = opts.get("agent_id")
+            if agent_id and self._progress_sink is not None:
+                from openjiuwen.agent_teams.workflow.backends.team_worker_backend import SwarmflowActivityRail
+
+                harness.add_rail(
+                    SwarmflowActivityRail(
+                        emit=self._make_activity_emitter(state, agent_id, opts.get("phase"), opts.get("label")),
+                    )
+                )
             # Cold start: bind a stable child session (F_37 decision 3) so the
             # avatar's DeepAgentState / context persist across this session's
             # turns *and* across a same-process resume (pre_run recovery needs a
@@ -1094,7 +1127,7 @@ class AvatarSessionManager:
                 seed = {"thread_id": child_pointer} if creds.provider == "codex" else {"session_id": child_pointer}
                 resume = True
             state.external = await self._build_external_turns(
-                state, resume=resume, require=resume, seed_checkpoint=seed
+                state, resume=resume, require=resume, seed_checkpoint=seed, opts=opts
             )
             try:
                 await state.external.start(self._team_session_for(state))
@@ -1117,11 +1150,26 @@ class AvatarSessionManager:
             # continuing as a plain session that forgot the parent (the orphaned
             # provider branch from the failed attempt is the accepted cost).
             state.fork_credentials = None
+        # Rebind per turn: correlation ids are per-turn, so a bind-once would
+        # ride turn 1's id for every later turn's activity events. Mirrors the
+        # native rail's ``if agent_id:`` gate.
+        if opts.get("agent_id") and self._progress_sink is not None:
+            state.external.bind_activity_sink(
+                self._progress_sink,
+                agent_id=opts.get("agent_id"),
+                phase=opts.get("phase"),
+                label=opts.get("label"),
+                correlation_id=state.current_correlation_id,
+            )
         tokens_before = state.budget_rail.call_tokens
         try:
             outcome = await state.external.run_turn(prompt, schema_json=schema_json)
         except BackendError as e:
             state.budget_rail.bill(e.tokens or 0)
+            # Name the CLI-reported model on the failure so AGENT_FAILED shows
+            # the endpoint that actually failed, not the option hint.
+            if e.model is None:
+                e.model = getattr(state.external, "reported_model", None)
             # No marker is recorded: the engine retries this turn inside the same
             # round, so a placeholder would shift every later round's keep_rounds.
             raise
@@ -1134,14 +1182,40 @@ class AvatarSessionManager:
             text=outcome.text,
             structured=outcome.structured,
             tokens=state.budget_rail.call_tokens - tokens_before,
+            model=getattr(state.external, "reported_model", None),
         )
 
     async def _build_external_turns(
-        self, state: _SessionState, *, resume: bool, require: bool, seed_checkpoint: dict | None = None
+        self,
+        state: _SessionState,
+        *,
+        resume: bool,
+        require: bool,
+        seed_checkpoint: dict | None = None,
+        opts: dict | None = None,
     ) -> ExternalMemberTurns:
-        """Build the runtime for an external session (override point for tests)."""
+        """Build the runtime for an external session (override point for tests).
+
+        The model options are planned on the FIRST turn — where the builder is
+        invoked — and a plan violation (pool miss, mutual exclusion, bad effort)
+        raises non-retryably before the CLI is ever built.
+        """
         from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_workflow_runtime
 
+        # Imported lazily: external_model lives under agent_teams.external,
+        # whose package __init__ eagerly imports tool_gateway ->
+        # team_workspace.tools, which re-enters this module mid-init through
+        # workflow/__init__ (same reason tool_member defers it).
+        from openjiuwen.agent_teams.workflow.backends.external_model import plan_external_model
+
+        plan = plan_external_model(
+            cli_agent=state.agent_type or "",
+            model_hint=opts.get("model") if opts else None,
+            builtin_hint=opts.get("builtin_model") if opts else None,
+            effort_hint=opts.get("effort") if opts else None,
+            entry=state.entry,
+            team_backend=self._team_backend,
+        )
         cwd = self._external_cwd(state.member_name, state.entry) if self._external_cwd is not None else None
         try:
             runtime = await build_cli_workflow_runtime(
@@ -1156,10 +1230,21 @@ class AvatarSessionManager:
                 resume_external_backend=resume,
                 require_checkpoint=require,
                 seed_checkpoint=seed_checkpoint,
+                model_config=plan.primary,
             )
         except Exception as e:
             raise BackendError(f"external session build failed for {state.member_name}: {e}") from e
-        return ExternalMemberTurns(runtime, member_name=state.member_name)
+        # Same lazy-import constraint as plan_external_model above: model_compat
+        # lives under agent_teams.external. The pool names back the auth-failure
+        # workaround list the two-audience copy needs.
+        from openjiuwen.agent_teams.external.cli_agent.model_compat import compatible_pool_model_names
+
+        pool = self._team_backend.get_model_pool() if self._team_backend is not None else []
+        return ExternalMemberTurns(
+            runtime,
+            member_name=state.member_name,
+            auth_hint_models=compatible_pool_model_names(state.agent_type or "", pool),
+        )
 
     @staticmethod
     async def _drive_round(state: _SessionState, prompt: str) -> dict | None:
@@ -1240,8 +1325,8 @@ class AvatarSessionManager:
         auto-dispose. Returns None when there is no base model or on any failure
         (degrades to existing formatting path).
         """
-        from openjiuwen.agent_teams.tiny_agent import TinyAgent
         from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+        from openjiuwen.agent_teams.tiny_agent import TinyAgent
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
         from openjiuwen.harness.prompts import PromptMode
 
@@ -1332,6 +1417,47 @@ class AvatarSessionManager:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _make_activity_emitter(
+        self, state: _SessionState, agent_id: str, phase: str | None, label: str | None
+    ) -> Callable[[str, str | None, str | None, str | None], None]:
+        """Return a sink for the session avatar's activity rail.
+
+        Mirrors ``TeamWorkerBackend._make_activity_emitter`` (same structured
+        payload, same truncation cap, ``message`` kept for legacy consumers) and
+        adds the CURRENT turn's ``correlation_id`` — read off ``state`` at emit
+        time, so every turn's tool events carry that turn's id. The closure
+        no-ops when no sink is bound (tests / a backend without one).
+        """
+        from openjiuwen.agent_teams.workflow.backends.activity_emitter import build_activity_event
+
+        sink = self._progress_sink
+
+        def emit(
+            activity_type: str,
+            tool_call_id: str | None,
+            tool_name: str | None,
+            content: str | None,
+        ) -> None:
+            if sink is None:
+                return
+            try:
+                sink(
+                    build_activity_event(
+                        activity_type=activity_type,
+                        tool_call_id=tool_call_id,
+                        tool_name=tool_name,
+                        content=content,
+                        agent_id=agent_id,
+                        phase=phase,
+                        label=label,
+                        correlation_id=state.current_correlation_id,
+                    )
+                )
+            except Exception:
+                team_logger.debug("[swarmflow] session activity emit failed: agent_id=%s", agent_id, exc_info=True)
+
+        return emit
 
     @staticmethod
     def _session_system_prompt(state: _SessionState) -> str:

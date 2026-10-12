@@ -24,21 +24,27 @@ if TYPE_CHECKING:
 
 def _is_anthropic_provider(provider: str) -> bool:
     """Return whether a provider name is Anthropic-compatible."""
-    return "anthropic" in provider.lower()
+    from openjiuwen.agent_teams.external.cli_agent.model_compat import is_anthropic_provider
+
+    return is_anthropic_provider(provider)
 
 
 def _provider_filter_for_cli(cli_agent: str) -> Callable[[str], bool] | None:
     """Return a provider filter for the CLI kind, or None for unknown kinds."""
-    if cli_agent == "claude":
-        return _is_anthropic_provider
-    if cli_agent == "codex":
-        return lambda p: not _is_anthropic_provider(p)
-    return None
+    # Imported lazily: model_compat lives under agent_teams.external, whose
+    # package __init__ eagerly imports tool_gateway -> team_workspace.tools.
+    # tool_member is itself imported while team_workspace.tools is still
+    # mid-initialization, so a top-level import would re-enter it and deadlock.
+    from openjiuwen.agent_teams.external.cli_agent.model_compat import provider_filter_for_cli
+
+    return provider_filter_for_cli(cli_agent)
 
 
 def _model_api_protocol(provider: str) -> str:
     """Return the external CLI protocol label for a model provider."""
-    return "Anthropic" if _is_anthropic_provider(provider) else "OpenAI"
+    from openjiuwen.agent_teams.external.cli_agent.model_compat import model_api_protocol
+
+    return model_api_protocol(provider)
 
 
 def _builtin_model_catalog(team: TeamBackend) -> str:

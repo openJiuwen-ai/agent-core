@@ -28,6 +28,10 @@ class AgentResult:
       does **not** accumulate it — see :meth:`AgentBackend.bind_budget`.
     * ``input_tokens`` / ``output_tokens`` - the prompt / completion split of
       ``tokens`` for display (``None`` when the provider reported no split).
+    * ``model``      - the model the backend actually ran this call on, as
+      reported by the provider (an external CLI); display-only for
+      ``AGENT_COMPLETED`` / ``AGENT_FAILED``, never journaled. ``None`` for
+      native backends (they do not report it).
     * ``skipped``    - the backend declined to answer; the call returns ``None``
       (also how a human turn signals a timeout / no answer).
     """
@@ -38,6 +42,7 @@ class AgentResult:
     cache_tokens: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    model: str | None = None
     skipped: bool = False
 
 
@@ -128,6 +133,14 @@ class AgentBackend(abc.ABC):
         silent (a no-op), which is fine for test backends.
         """
         self._progress_sink = progress_sink
+
+    def describe_base_model(self) -> str | None:
+        """Name the model a no-hint native call runs on, for lock messages.
+
+        ``None`` = "cannot name it" — the engine falls back to the generic
+        phrase. Overridden by backends that hold a base spec.
+        """
+        return None
 
     def describe_model(self, opts: dict) -> str | None:
         """Name the model this backend would assemble for ``opts``, for progress events.

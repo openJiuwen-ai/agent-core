@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -39,6 +40,8 @@ class ExternalTurnOutcome:
     tokens: int = 0
     marker: str | None = None
     """Provider-side identifier of this turn — the cut point a later fork may reference."""
+    model: str | None = None
+    """The model the CLI reported for this member (display-only, never journaled)."""
 
 
 def schema_instruction(schema_json: dict) -> str:
@@ -96,11 +99,21 @@ class ExternalMemberTurns:
     Args:
         runtime: The started-or-not member runtime to drive.
         member_name: Minted swarmflow identity, for error messages.
+        auth_hint_models: Team model pool names compatible with this member's
+            CLI kind, for the two-audience copy on an auth-classified failure.
+            ``None``/empty means the copy degrades to "fix the CLI login".
     """
 
-    def __init__(self, runtime: Any, *, member_name: str) -> None:
+    def __init__(
+        self,
+        runtime: Any,
+        *,
+        member_name: str,
+        auth_hint_models: Sequence[str] | None = None,
+    ) -> None:
         self._runtime = runtime
         self._member_name = member_name
+        self._auth_hint_models = auth_hint_models
         self._turn_future: asyncio.Future | None = None
         self._active_turn_id: str | None = None
         self._cumulative = runtime.provider_name in _CUMULATIVE_USAGE_PROVIDERS
@@ -111,6 +124,11 @@ class ExternalMemberTurns:
         return self._runtime.provider_name
 
     @property
+    def reported_model(self) -> str | None:
+        """The model the CLI reported for this member, if the runtime has seen one."""
+        return getattr(self._runtime, "reported_model", None)
+
+    @property
     def session_id(self) -> str | None:
         """The provider's own session / thread pointer (available once started)."""
         return self._runtime.session_id
@@ -119,6 +137,28 @@ class ExternalMemberTurns:
     def member_session(self) -> Any:
         """The runtime's own child session — the only safe place to persist host state."""
         return self._runtime.member_session
+
+    def bind_activity_sink(
+        self,
+        sink: Callable[[Any], None] | None,
+        *,
+        agent_id: str | None = None,
+        phase: str | None = None,
+        label: str | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        """Bind the runtime's activity sink with the swarmflow node identity.
+
+        Passthrough to the member runtime; the backend rebinds per turn so the
+        correlation id tracks the current turn.
+        """
+        self._runtime.bind_activity_sink(
+            sink,
+            agent_id=agent_id,
+            phase=phase,
+            label=label,
+            correlation_id=correlation_id,
+        )
 
     async def start(self, team_session: Any) -> None:
         """Start the runtime (the member session comes from ``team_session``) and listen for turn ends."""
@@ -174,12 +214,35 @@ class ExternalMemberTurns:
         if fut is not None and not fut.done():
             fut.set_result(result)
 
+    def _auth_failure_message(self, detail: str) -> str:
+        """Rebuild an auth-classified failure as two-audience copy.
+
+        The CLI's own error text (status, reason, url) stays verbatim inside the
+        parenthetical so the frontend shows the real root cause; the workaround
+        and the compatible pool models come last so a Leader reading the message
+        still sees the fix. No compatible pool models -> the workaround degrades
+        to fixing the machine's CLI login.
+        """
+        head = f"{self.provider_name} CLI login failed ({detail}) — environment problem, not a script error"
+        names = self._auth_hint_models or ()
+        if names:
+            return f"{head}; workaround: add model=<pool model> to this node (compatible: {', '.join(names)})"
+        return f"{head}; fix the CLI login on this machine and re-run"
+
     def _outcome(self, result: Any, schema_json: dict | None) -> ExternalTurnOutcome:
         if not isinstance(result, TurnResult):
             raise BackendError(f"external member '{self._member_name}' ended its turn without a result")
         tokens = self._turn_tokens(result.usage)
         if result.status is TurnStatus.FAILED:
-            message = result.error.message if result.error is not None else "turn failed"
+            error = result.error
+            message = error.message if error is not None else "turn failed"
+            # The same classification the harness's auth fallback keys on: the
+            # request never reached the model, so this is an environment problem
+            # (CLI login / credentials), not a script error. Rebuild the copy for
+            # two audiences — root cause first so a truncated message still names
+            # the endpoint, workaround + compatible pool names last for the Leader.
+            if error is not None and error.category == "auth_required":
+                raise BackendError(self._auth_failure_message(message), tokens=tokens or None)
             raise BackendError(f"external member '{self._member_name}' failed: {message}", tokens=tokens or None)
         if result.status is TurnStatus.INTERRUPTED:
             raise BackendError(f"external member '{self._member_name}' turn was interrupted", tokens=tokens or None)

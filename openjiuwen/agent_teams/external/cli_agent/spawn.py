@@ -500,7 +500,7 @@ async def build_cli_workflow_runtime(
     team_name: str,
     system_prompt: str,
     cwd: str | None,
-    model_override: str | None = None,
+    model_config: ExternalCliModelConfig | None = None,
     resume_external_backend: bool = False,
     require_checkpoint: bool = False,
     seed_checkpoint: dict | None = None,
@@ -522,7 +522,10 @@ async def build_cli_workflow_runtime(
         team_name: Team name (context metadata only).
         system_prompt: The swarmflow worker / session prompt.
         cwd: Working directory (worktree when isolated).
-        model_override: ``agent(model=...)`` hint; beats the entry's model.
+        model_config: Resolved model options for this call; ``None`` leaves the
+            model to the CLI's own default on its own login. Callers resolve
+            the entry's declared config first — there is no entry-level default
+            here.
         resume_external_backend: Resume the CLI session from the checkpoint pointer.
         require_checkpoint: With resume, refuse to start when no pointer is stored.
     """
@@ -531,13 +534,6 @@ async def build_cli_workflow_runtime(
         raise ValueError(
             f"agent_type {cli_agent!r} is not an SDK backend; workflow members support: "
             f"{', '.join(sorted(_SDK_BACKENDS))}"
-        )
-    model_config = entry.external_model_config
-    if model_override:
-        model_config = (
-            model_config.model_copy(update={"model": model_override})
-            if model_config is not None
-            else ExternalCliModelConfig(model=model_override)
         )
     skills = normalize_skills(entry.skills, entry.skill_conflict)
     context = HarnessContext(

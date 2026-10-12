@@ -213,6 +213,12 @@ def _derive_swarmflow_worker_base_spec(
     return base.model_copy(update=update)
 
 
+def _derive_swarmflow_external_cli_agents(spec: TeamAgentSpec) -> tuple[Any, ...]:
+    """The swarmflow third-party allowlist lives on the blueprint spec only —
+    the runtime ``TeamSpec`` never carries ``external_cli_agents``."""
+    return tuple(spec.external_cli_agents)
+
+
 class AgentConfigurator:
     """Handles agent configuration, setup, and initialization.
 
@@ -867,9 +873,7 @@ class AgentConfigurator:
             # governor's L3): concurrent runs draw down one pool. ``total=None``
             # keeps it unbounded while still giving scripts a live ``spent()``.
             swarmflow_budget = BudgetLedger(total=spec.swarmflow_budget)
-            swarmflow_external_cli_agents = (
-                tuple(ctx.team_spec.external_cli_agents) if ctx.team_spec is not None else ()
-            )
+            swarmflow_external_cli_agents = _derive_swarmflow_external_cli_agents(spec)
 
         inject_team_handles(
             member_build_context.extras,

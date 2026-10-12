@@ -17,6 +17,7 @@ import asyncio
 import dataclasses
 import inspect
 import json
+import uuid
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -28,7 +29,6 @@ from typing import (
     Sequence,
     runtime_checkable,
 )
-import uuid
 
 from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn
@@ -40,9 +40,9 @@ from openjiuwen.harness_protocol import (
     CheckpointReason,
     CheckpointSaveReceipt,
     DiagnosticEvent,
+    HarnessCapability,
     HarnessCheckpoint,
     HarnessContext,
-    HarnessCapability,
     HarnessEvent,
     HarnessModelControl,
     HarnessProtocol,
@@ -51,6 +51,8 @@ from openjiuwen.harness_protocol import (
     HarnessStateError,
     HostCapability,
     InteractionResponseStatus,
+    ItemEventKind,
+    ItemLifecycleEvent,
     McpServerConfig,
     ModelSelection,
     ProviderEvent,
@@ -264,6 +266,13 @@ class ExternalHarnessMemberRuntime:
         self._teardown_hooks: list[Callable[[], Awaitable[None]]] = []
         self._round_seq = 0
         self._current_round_id: int | None = None
+        self._activity_sink: Callable[[Any], None] | None = None
+        self._activity_identity: tuple[str | None, str | None, str | None, str | None] = (
+            None,
+            None,
+            None,
+            None,
+        )
 
     # ------------------------------------------------------------------
     # Read-only surface
@@ -285,6 +294,17 @@ class ExternalHarnessMemberRuntime:
     @property
     def session_id(self) -> str | None:
         return self._harness.provider_session_id
+
+    @property
+    def reported_model(self) -> str | None:
+        """The model this member's CLI reported it runs on (``None`` until one is seen).
+
+        Fed from Claude ``system/init`` / Codex ``session/model_changed`` events
+        into the reliability context; ``None`` when no reliability loop is bound
+        or no model event has arrived yet.
+        """
+        ctx = self._reliability_ctx
+        return ctx.model or None if ctx is not None else None
 
     @property
     def trajectory_recorder(self) -> "HarnessTrajectoryRecorder | None":
@@ -337,6 +357,24 @@ class ExternalHarnessMemberRuntime:
         the provider restores its native endpoint.
         """
         self._promote_fallback_model = promote
+
+    def bind_activity_sink(
+        self,
+        sink: Callable[[Any], None] | None,
+        *,
+        agent_id: str | None = None,
+        phase: str | None = None,
+        label: str | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        """Bind the sink receiving this member's structured ``AGENT_ACTIVITY`` events.
+
+        Mirrors ``AgentBackend.bind_progress_sink``: ``None`` keeps the runtime
+        silent. The identity tuple rides every event so a consumer locates the
+        node by the same ``agent_id`` the session injection provides.
+        """
+        self._activity_sink = sink
+        self._activity_identity = (agent_id, phase, label, correlation_id)
 
     def add_teardown_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
         """Run ``hook`` after the harness stopped (observability receivers...)."""
@@ -593,6 +631,8 @@ class ExternalHarnessMemberRuntime:
             await self._on_turn_event(envelope, payload)
         elif isinstance(payload, DiagnosticEvent):
             await self._on_diagnostic(payload)
+        elif isinstance(payload, ItemLifecycleEvent):
+            self._on_tool_item(envelope, payload)
         elif isinstance(payload, ProviderEvent) and payload.event_type == _AUTH_FALLBACK_EVENT:
             team_logger.info(
                 "[external-cli] member {} switched to the authentication fallback {}",
@@ -634,6 +674,101 @@ class ExternalHarnessMemberRuntime:
             reason=_failure_reason(message=payload.message, code=data.get("code")),
             summary=f"{self._member_name} {self._agent_kind} SDK retrying: {category}",
         )
+
+    def _on_tool_item(self, envelope: HarnessEvent, payload: ItemLifecycleEvent) -> None:
+        """Forward one tool-class item as the tool_call / tool_result pair half.
+
+        Both providers already normalize their native tool events into this
+        shape — Claude ``tool_use`` / ``tool_result`` content blocks and Codex
+        ``item/started`` / ``item/completed`` for the tool-class item kinds —
+        with the envelope ``item_id`` carrying the pair key. A tool item whose
+        other half can never be matched (no pair id, no dict data, a kind that
+        is not a lifecycle endpoint) is dropped with a debug note, never raised.
+        """
+        if payload.item_type != "tool":
+            return
+        data = json_value_to_builtin(payload.data)
+        if not isinstance(data, dict):
+            team_logger.debug(
+                "[external-cli] member {} dropped a tool item with unparsable data ({} {})",
+                self._member_name,
+                payload.kind.value,
+                payload.item_type,
+            )
+            return
+        item_id = envelope.item_id
+        if item_id is None:
+            team_logger.debug(
+                "[external-cli] member {} dropped an id-less tool item ({} {})",
+                self._member_name,
+                payload.kind.value,
+                payload.item_type,
+            )
+            return
+        name = _activity_name(data.get("tool_name") or data.get("name"))
+        if name is None:
+            team_logger.debug(
+                "[external-cli] member {} dropped a tool item without a tool name ({} {})",
+                self._member_name,
+                payload.kind.value,
+                payload.item_type,
+            )
+            return
+        if payload.kind is ItemEventKind.STARTED:
+            pair = (
+                "tool_call",
+                item_id,
+                name,
+                _activity_preview(data.get("arguments")),
+            )
+        elif payload.kind is ItemEventKind.COMPLETED:
+            pair = (
+                "tool_result",
+                item_id,
+                name,
+                _activity_preview(data.get("result")),
+            )
+        else:
+            team_logger.debug(
+                "[external-cli] member {} dropped a tool item with an unmapped kind ({} {})",
+                self._member_name,
+                payload.kind.value,
+                payload.item_type,
+            )
+            return
+        self._emit_activity(*pair)
+
+    def _emit_activity(
+        self,
+        activity_type: str,
+        tool_call_id: str,
+        tool_name: str | None,
+        content: str | None,
+    ) -> None:
+        """Build the structured ``AGENT_ACTIVITY`` event and push it to the sink."""
+        sink = self._activity_sink
+        if sink is None:
+            return
+        agent_id, phase, label, correlation_id = self._activity_identity
+        try:
+            # Lazy: importing workflow.backends at module load would re-enter
+            # agent_teams.external through the package __init__.
+            from openjiuwen.agent_teams.workflow.backends.activity_emitter import build_activity_event
+
+            sink(
+                build_activity_event(
+                    activity_type=activity_type,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    content=content,
+                    agent_id=agent_id,
+                    phase=phase,
+                    label=label,
+                    correlation_id=correlation_id,
+                )
+            )
+        except Exception:
+            team_logger.debug("[external-cli] member {} activity emit failed", self._member_name, exc_info=True)
 
     async def _on_provider_interaction(self, request: ProviderInteractionRequest) -> ProviderInteractionResponse:
         """Answer provider extension requests; only ``auth_fallback`` is understood."""
@@ -843,6 +978,26 @@ def _member_round_kind(kind: TurnEventKind) -> str:
         TurnEventKind.ABORTED: "aborted",
         TurnEventKind.FAILED: "failed",
     }[kind]
+
+
+def _activity_name(value: Any) -> str | None:
+    """Coerce a provider tool name to a string; ``None`` when absent."""
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _activity_preview(value: Any) -> str | None:
+    """Render a tool call/result payload as a compact one-line preview.
+
+    Strings pass through untouched; structured payloads dump on one line so a
+    spectator shows a preview, not a wall of JSON.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def _failure_reason(*, message: str, code: Any = None, sdk_error_type: Any = None, http_status: Any = None) -> Any:
