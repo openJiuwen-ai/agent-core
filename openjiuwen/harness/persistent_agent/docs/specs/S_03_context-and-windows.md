@@ -5,27 +5,41 @@
 | 项 | 值 |
 | --- | --- |
 | 类型 | spec |
-| 状态 | PA-04 已按架构设计定义窗口存储后端注入位、群聊与知识端口及其数据结构；窗口管理、会话状态记录、换窗和检索尚未实现 |
-| 关联模块 | `openjiuwen/harness/persistent_agent/persistent_agent/{ports.py,schema/context.py}` |
+| 状态 | PA-04 已按架构设计定义窗口存储后端注入位、群聊与知识端口及其数据结构；PA-06 已实现新 Request 的窗口组装，并在 Persistent 构造中拒绝挂载三个上下文 rail；会话状态记录、换窗和检索尚未实现 |
+| 关联模块 | `openjiuwen/harness/persistent_agent/persistent_agent/{ports.py,schema/context.py,schema/integration.py,schema/spec.py,execution/seams.py,execution/window_assembly.py}` |
 | 最近一次修订日期 | 2026-10-12 |
-| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 契约收敛](../features/F_04_contract-convergence.md)；开发计划 PA-06、PA-10～PA-13、PA-04、PA-23 |
+| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)、[F_04 契约收敛](../features/F_04_contract-convergence.md)、[F_05 执行入口](../features/F_05_execution-entries.md)、[F_06 窗口组装](../features/F_06_window-assembly.md)；开发计划 PA-06、PA-10～PA-13、PA-04、PA-23 |
 | 设计依据 | [Persistent Agent 详细架构设计](../designs/persistent-agent-architecture.md) §7；旧版详细架构 §9～11 仅供参考（见 Git 历史） |
 
-当前已实现的只有契约，不提供存储、检索、授权判定或运行行为：
+PA-04 定义的端口契约如下，本身不提供存储、检索或授权判定：
 
 - **窗口存储后端**：`PersistentPorts.window_backend` 必须是服务端注入的 `BaseKVStore` 实例，构造时只检查类型、不读写。会话状态记录与窗口归档的格式、序列化和检索由内部组件 `WindowStore` 在 PA-10、PA-11、PA-12 定义，架构设计不再有外部 ContextStore、活动指针条件更新或执行代次。
 - **群聊记录**：`GroupChatPort.recent_messages / search_messages` 返回 `GroupMessagesResult`，结果分为 found / empty / incomplete，incomplete（没查完或查询失败）不能当作“没有”。`GroupMessage` 按架构设计 §7.9 携带稳定发送者身份、服务端接收时间、@、回复、附件引用、状态和是否属于排队中的请求；已撤回和正文暂缺（`unavailable`，消息存在但暂时读不到）的消息都不返回正文。`recent_messages` 按游标读取之后的消息，回补时以触发消息为游标读取；结果中的 `scanned_through` 是服务端确认已扫描到的位置，与分页用的 `next_cursor` 分开，进度不可信时为空。读取与检索的行为由 PA-23 实现。
 - **知识**：`KnowledgePort.resolve / read` 继续使用 `MaterialQuery / MaterialSnapshot / MaterialReadResult`，`unknown`、`unavailable`、`forbidden`、`partial` 与具备完整查询水位的 `empty` 区分，由 PA-13 细化。
 
-PA-05 在 `execution/seams.py` 定义了窗口相关的接入约定，供 PA-06、PA-07、PA-10、PA-23 并行实现（详见 [F_05](../features/F_05_execution-entries.md) §7）：
+PA-05 定义的窗口共享契约经 PA-06 整理后集中在 `schema/integration.py`，`execution/seams.py` 提供接入点并兼容再导出原有契约名称，供 PA-06、PA-07、PA-10、PA-23 并行实现（详见 [F_05](../features/F_05_execution-entries.md) §7、[F_06](../features/F_06_window-assembly.md) 决策 8）：
 
-- **加载结果**：会话状态记录加载后返回 `LoadedRecord`，包含等待现场和群消息游标（上一次执行看到的最后一条群消息 ID）。
+- **加载结果**：会话状态记录加载后返回 `LoadedRecord`，包含等待现场和群消息游标。游标字段名为 `last_group_message_id`，含义是服务端确认已扫描到的消息位置，与正文是否读全、实际展示范围分开。
 - **窗口组装**：新 Request 在加载之后由 `WindowAssembler.assemble(context, request, record)` 追加执行头、临时背景块和任务输入，返回原生输入和本次的群消息游标；确认恢复不组装。
 - **窗口标记**：追加的执行头和临时背景块在消息元信息 `persistent_window_part` 中分别标为 `execution_header`、`temporary_background`，PA-10 结束整理时据此压缩执行头、删除临时背景块。
 - **结束信息**：`ExecutionEnding` 携带群消息游标和容量超限时未交接的最终答案，PA-10 写入执行结束标记和记录。
-- **群消息读取**：`GroupMessageReader.recent_messages(context, after, exclude_message_id)` 由 PA-23 实现，供 PA-06 组装窗口背景。PA-07 不调用该接入点，判断时直接读取已注入的 `GroupChatPort.recent_messages`。
+- **群消息读取**：`GroupMessageReader.recent_messages(context, after, trigger_message_id)` 由 PA-23 实现，供 PA-06 组装窗口背景：游标之后的增量与“触发消息之后至本次读取上界”的回补合并去重、排除触发消息；`scanned_through` 取增量读取确认的位置作为新游标，为空时保留旧游标。例：R2 由 M120 触发；R1 执行期间，群里在 M130 补充了 R2 的要求；R1 结束时游标为 M180。R2 执行时须读到 M130：它不在游标之后，也只出现在 R1 的临时背景里，已随结束整理删除。PA-07 不调用该接入点，判断时直接读取已注入的 `GroupChatPort.recent_messages`。
+- **窗口安全**：PA-10 保存时保证窗口可以安全追加，加载已知停止的旧记录时幂等修补；PA-06 加载后仍发现未配对的工具调用时，以 `DEEPAGENT_CONTEXT_PARAM_ERROR` 校验拒绝并记 error 日志，不追加任何内容。
+- **构造限制**：Persistent 构造拒绝三个上下文 rail，也拒绝显式启用 `max_context_message_num`、`default_window_message_num`、`default_window_round_num`（默认均为空，不截断）。
 
-以下章节仍按旧版架构编写，描述每次模型调用前的装配、活动指针和 Checkpoint 等已被架构设计取代的目标行为；与架构设计冲突时以架构设计 §7（按 Execution 生命周期管理上下文、会话状态记录、换窗与归档）为准，随 PA-06、PA-10～PA-13 修订。
+PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.window_assembler`），设计与取舍见 [F_06](../features/F_06_window-assembly.md)：
+
+- **组成与位置**：加载会话状态记录之后，在 Session state `context` 中已保存窗口的末尾依次追加执行头、临时背景块（均为 `UserMessage`，带上述标记），任务输入作为原生输入 `{"query": RequestInput.text}` 由原生 ReAct 加在最后。系统提示词和工具定义不变；此后执行中只追加。
+- **执行头**：一行，`【本次执行】类型：新任务；request_id：…；execution_id：…；来源：私聊|群消息|定时任务`，有触发消息时再加消息 ID、发送者（显示名、ID，群消息另注人或 Agent）、接收时间，有附件时加附件引用。续做（PA-18）沿用同一格式，类型为“续做”并加 `recovery_ref`；在此之前带 `recovery_ref` 的上下文不组装。
+- **群 Session**：注入了 `GroupChatPort` 的 Session。只有群 Session 读取最近群消息：以加载的游标为 `after`、以触发消息为 `trigger_message_id` 读取（增量与触发位置回补合并去重、排除触发消息），结果须属于本次执行；组装器再排除触发消息并按接收时间排序。被忽略的消息照常列出，排队中的请求逐条标注且说明只作背景、不是指令，已撤回的不显示正文，正文暂缺的标注“正文暂缺，需要时可查询群聊记录”。`empty` 不加背景块；`incomplete` 仍加背景块并注明没有读取完整，不能当作“没有消息”。
+- **游标**：取读取结果中服务端确认的扫描位置 `scanned_through`，与展示范围无关；结果不带该位置时以及私聊 Session 沿用加载时的游标。
+- **未接入的来源**：群 Session 在群消息读取（PA-23）接入前、注入 `KnowledgePort` 的执行在知识导航（PA-13）接入前，于接入点明确拒绝（`DEEPAGENT_CONFIG_PARAM_ERROR`）。群消息 Request 例外：PA-07 先完成参与判断才取接入点，此时已有判断事件，会话状态记录（PA-10）未接入时同样如此；群里的定时任务和私聊仍在任何事件之前拒绝。
+- **等待中的调用**：加载的记录带等待现场，或 Session state 带 `__react_agent_interruption__` 时，新 Request 不组装，校验拒绝（`DEEPAGENT_CONTEXT_PARAM_ERROR`），窗口不追加；窗口有未配对的工具调用时同样拒绝，并记 error 日志（见上文“窗口安全”）。
+- **上下文 rail**：Persistent 构造（`PersistentAgentSpec.resolve_parts`）拒绝挂载 `ContextAssembleRail`、`PersonalContextRail`、`ContextProcessorRail`（含子类），`ContextProcessorRail` 的默认压缩链因此也不会挂载；`DeepAgentSpec` / `create_deep_agent` 不变。
+- **增量通道**：保留原生 `PromptAttachmentManager.sync_to_context`（首次快照、之后只追加变化）；一期 Persistent 自身没有执行中追加的动态内容。
+- **容量**：组装不做容量检查。超限时优先展示最新消息、标明省略范围、保留历史查询定位的选择逻辑，待共享容量计算的提供方和最终请求的检查位置对齐后实现（开发计划第 3.4 节）。
+
+以下章节仍按旧版架构编写，描述每次模型调用前的装配、活动指针和 Checkpoint 等已被架构设计取代的目标行为；与架构设计冲突时以架构设计 §7（按 Execution 生命周期管理上下文、会话状态记录、换窗与归档）为准，随 PA-10～PA-13 修订。PA-06 已按上文改为每个 Execution 开始时组装一次，并据此修订了下面的复用边界表。
 
 ## 范围 / 边界
 
@@ -35,12 +49,12 @@ PA-05 在 `execution/seams.py` 定义了窗口相关的接入约定，供 PA-06�
 
 | 现有实现 | 复用方式 | 仍需适配 |
 | --- | --- | --- |
-| Harness [Prompt 及 Rail 契约](../../../docs/specs/S_06_prompts-and-l10n.md) | 沿用已有 Prompt 构建和模型调用前 Rail 事件，不另建平行注入通道 | 在最终请求成形、附件注入后检查总容量；验证 Rail 事件路由和优先级 |
-| [`PersonalContextRail`](../../../rails/personal_context.py) | 复用 `before_model_call` 的临时附件注入以及 `after_model_call/after_invoke` 清理 | 现有 Rail 只读取本地开关与 `description.md`；多主体授权、不可变发布版本和失效传播须经 `KnowledgePort` 适配验证，不能仅凭该 Rail 宣称满足 |
+| Harness [Prompt 及 Rail 契约](../../../docs/specs/S_06_prompts-and-l10n.md) | 系统提示词和工具定义沿用原生构建，一次 Execution 内不变；`PromptAttachmentManager` 的增量通道保留原生行为（PA-06） | 容量检查待补设计 |
+| [`ContextAssembleRail`、`ContextProcessorRail`](../../../rails/context_engineer/)、[`PersonalContextRail`](../../../rails/personal_context.py) | 不复用：Persistent 构造拒绝挂载（PA-06），默认压缩链随之不挂载 | 知识导航改由 PA-13 经 `KnowledgePort` 在 Execution 开始时放入临时背景块 |
 | [`PersonalContext`](../../../personal_context/personal_context.py) | 复用来源采集、查询和内容组织基础 | 本模块只读取获授权发布视图，不复制采集游标或直接改写来源文件 |
 | [`DeepAgent.save_state/load_state`](../../../deep_agent.py) | 保存其当前 Session 的内部运行状态 | Window 原文、索引、唯一活动指针和换窗条件更新属于 ContextStore 新契约，不重命名内部状态为 Window |
 
-已有 Harness 上下文压缩或截断能力若启用，须与本规约的完整容量检查和证据归档协调；不能在检查前后静默丢弃必要事实或工具消息组。初期无法接管最终模型请求时，不声明支持可靠换窗。
+Persistent 不挂载 `ContextProcessorRail` 的压缩链；`context_engine_config` 中显式设置 `max_context_message_num`、`default_window_message_num` 或 `default_window_round_num` 时构造拒绝（见 F_06）。不能在检查前后静默丢弃必要事实或工具消息组。初期无法接管最终模型请求时，不声明支持可靠换窗。
 
 ## 不变量
 
