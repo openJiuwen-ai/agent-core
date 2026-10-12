@@ -143,7 +143,7 @@ runner 的步骤：
 - `group_message_reader(context)`：本 Session 所在群的最近消息读取，PA-23。`recent_messages(context, after=游标, trigger_message_id=触发消息)` 返回 `GroupMessagesResult`：游标之后的增量与“触发消息之后至本次读取上界”的回补合并去重，不含触发消息；`scanned_through` 为服务端对增量读取确认的扫描位置，作为新游标，为空时保留旧游标。PA-06 组装背景通过它读取。PA-07 不调用该接入点，判断直接使用 `GroupChatPort`，以免等待 PA-23。
 - `native_reply_adapter()`：交互回复到原生输入的转换，PA-09。
 
-**窗口标记约定（PA-06 写，PA-10 整理）**：PA-06 在追加的消息元信息中设置 `WINDOW_PART_KEY`（`persistent_window_part`）。值为 `execution_header` 的执行头在结束时保留并压缩成一行；值为 `temporary_background` 的临时背景块在结束时删除。没有该标记的消息按普通窗口内容保留。
+**窗口标记约定（PA-06 写，PA-10 整理）**：PA-06 在追加的消息元信息中设置 `WINDOW_PART_KEY`（`persistent_window_part`）。值为 `execution_header` 的执行头在结束时保留并压缩成一行；值为 `temporary_background` 的临时背景块在结束时删除。没有该标记的消息按普通窗口内容保留。PA-10 为停止时缺失结果的工具调用补位时，用取值 `stopped_tool_placeholder` 标记补位的工具结果，PA-06、PA-17、PA-18 和 PA-11 据此识别它不是真实结果。
 
 各接入点未接入时都抛校验拒绝，正式入口因此明确拒绝。单测通过替身验证 PA-05 自身的编排，替身不能替代正式实现。共享值对象、标记和协议集中定义在 `schema/integration.py`，`seams.py` 保留接入点并兼容再导出原有名称，供 PA-06、PA-07、PA-08、PA-10、PA-23 并行开发而不改动执行入口的同一段编排。此拆分由 F_06 的共享契约整理完成，不改变原契约的字段和语义。
 
