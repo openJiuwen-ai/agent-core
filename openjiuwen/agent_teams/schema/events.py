@@ -600,6 +600,27 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
             "display split of tokens, None when the provider reported no split."
         ),
     )
+    activity_type: Optional[str] = Field(
+        default=None,
+        description=(
+            "AGENT_ACTIVITY only: 'tool_call' / 'tool_result' — which half of the "
+            "activity pair this event carries."
+        ),
+    )
+    tool_call_id: Optional[str] = Field(
+        default=None,
+        description="AGENT_ACTIVITY only: pairs a tool_call with its tool_result.",
+    )
+    tool_name: Optional[str] = Field(
+        default=None,
+        description="AGENT_ACTIVITY only: the invoked tool's name.",
+    )
+    content: Optional[str] = Field(
+        default=None,
+        description=(
+            "AGENT_ACTIVITY only: 512-char args/result preview (engine-truncated)."
+        ),
+    )
 
 
 class WorktreeCreatedEvent(BaseEventMessage):

@@ -6,7 +6,7 @@
 The worker rail (``team_worker_backend``), the session avatar rail
 (``avatar_session_backend``) and the external harness runtime
 (``external.member_runtime``) all emit the same ``WorkflowProgressEvent`` with
-the same 512-char content cap; this module keeps the cap and the event shape in
+the same content cap; this module keeps the cap and the event shape in
 exactly one place so a fourth emitter cannot drift.
 """
 
@@ -14,10 +14,13 @@ from __future__ import annotations
 
 from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind, WorkflowProgressEvent
 
-#: The one engine-side cap for tool-activity ``content`` previews; consumers
-#: display it as-is instead of re-truncating. A cut preview keeps the marker so
-#: it reads as "I stopped early", not as a complete text.
-ACTIVITY_CONTENT_LIMIT = 512
+#: The one engine-side cap for tool-activity ``content``. Arguments and
+#: results pass through in full — the member call list shows the same complete
+#: payload a real teammate's tool_call frame carries — with this bound only as
+#: a guard against pathological payloads (a multi-MB command output) exploding
+#: the event, the checkpointed activity rows and the broadcast. A cut preview
+#: keeps the marker so it reads as "I stopped early", not as a complete text.
+ACTIVITY_CONTENT_LIMIT = 65536
 ACTIVITY_TRUNCATED_MARKER = "…(truncated)"
 
 

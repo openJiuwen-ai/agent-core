@@ -42,6 +42,11 @@ class ExternalTurnOutcome:
     """Provider-side identifier of this turn — the cut point a later fork may reference."""
     model: str | None = None
     """The model the CLI reported for this member (display-only, never journaled)."""
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cache_tokens: int | None = None
+    """Prompt / completion / prompt-cache split of ``tokens``; None when the
+    CLI reported no split (the backend then keeps only the total)."""
 
 
 def schema_instruction(schema_json: dict) -> str:
@@ -93,6 +98,10 @@ def turn_marker(provider_name: str, result: TurnResult) -> str | None:
     return None
 
 
+def _opt_int(value: int | None) -> int | None:
+    return int(value) if value is not None else None
+
+
 class ExternalMemberTurns:
     """Turn-level façade over an ``ExternalHarnessMemberRuntime``.
 
@@ -117,7 +126,7 @@ class ExternalMemberTurns:
         self._turn_future: asyncio.Future | None = None
         self._active_turn_id: str | None = None
         self._cumulative = runtime.provider_name in _CUMULATIVE_USAGE_PROVIDERS
-        self._last_total_seen = 0
+        self._last_seen: dict[str, int] = {}
 
     @property
     def provider_name(self) -> str:
@@ -232,7 +241,7 @@ class ExternalMemberTurns:
     def _outcome(self, result: Any, schema_json: dict | None) -> ExternalTurnOutcome:
         if not isinstance(result, TurnResult):
             raise BackendError(f"external member '{self._member_name}' ended its turn without a result")
-        tokens = self._turn_tokens(result.usage)
+        tokens, in_n, out_n, cache_n = self._turn_usage(result.usage)
         if result.status is TurnStatus.FAILED:
             error = result.error
             message = error.message if error is not None else "turn failed"
@@ -256,19 +265,51 @@ class ExternalMemberTurns:
                     f"external member '{self._member_name}' did not return a JSON object for the schema: {e}",
                     tokens=tokens or None,
                 ) from e
-        return ExternalTurnOutcome(text=text, structured=structured, tokens=tokens,
-                                   marker=turn_marker(self.provider_name, result))
+        return ExternalTurnOutcome(
+            text=text,
+            structured=structured,
+            tokens=tokens,
+            marker=turn_marker(self.provider_name, result),
+            input_tokens=in_n,
+            output_tokens=out_n,
+            cache_tokens=cache_n,
+        )
 
-    def _turn_tokens(self, usage: TurnUsage | None) -> int:
-        total = int(usage.total_tokens or 0) if usage is not None else 0
+    def _turn_usage(
+        self, usage: TurnUsage | None
+    ) -> tuple[int, int | None, int | None, int | None]:
+        """This turn's total tokens plus the input / output / cache split.
+
+        Cumulative providers report the CLI session's running totals, so every
+        counter is diffed against the last turn's value; a counter that went
+        backwards means the provider reset its conversation, so the whole new
+        value belongs to this turn. A ``None`` split counter (provider reported
+        no split) stays ``None`` so callers can tell "unreported" from zero.
+        """
+        if usage is None:
+            return 0, None, None, None
         if not self._cumulative:
-            return total
-        # Cumulative providers: the turn's share is the growth since last turn;
-        # a smaller total means the provider reset its conversation counter, so
-        # the whole new total belongs to this turn.
-        delta = total - self._last_total_seen if total >= self._last_total_seen else total
-        self._last_total_seen = total
-        return max(delta, 0)
+            return (
+                int(usage.total_tokens or 0),
+                _opt_int(usage.input_tokens),
+                _opt_int(usage.output_tokens),
+                _opt_int(usage.cached_input_tokens),
+            )
+        return (
+            self._delta("total", usage.total_tokens or 0),
+            self._delta("input", usage.input_tokens),
+            self._delta("output", usage.output_tokens),
+            self._delta("cache", usage.cached_input_tokens),
+        )
+
+    def _delta(self, key: str, value: int | None) -> int | None:
+        """Per-turn share of one cumulative usage counter (see ``_turn_usage``)."""
+        if value is None:
+            return None
+        last = self._last_seen.get(key, 0)
+        share = value - last if value >= last else value
+        self._last_seen[key] = value
+        return max(share, 0)
 
 
 __all__ = ["ExternalMemberTurns", "ExternalTurnOutcome", "parse_structured_text", "schema_instruction", "turn_marker"]

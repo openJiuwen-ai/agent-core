@@ -341,6 +341,9 @@ class TeamWorkerBackend(AgentBackend):
                     text=outcome.text,
                     structured=outcome.structured,
                     tokens=budget_rail.call_tokens,
+                    cache_tokens=budget_rail.call_cache_tokens or None,
+                    input_tokens=budget_rail.call_input_tokens or None,
+                    output_tokens=budget_rail.call_output_tokens or None,
                     model=outcome.model,
                 )
             model = self._resolve_model(opts.get("model"))
@@ -853,7 +856,12 @@ class TeamWorkerBackend(AgentBackend):
                 await turns.stop()
             except Exception:
                 team_logger.debug("external worker stop failed for %s", member_name, exc_info=True)
-        budget_rail.bill(outcome.tokens)
+        budget_rail.bill(
+            outcome.tokens,
+            cache_tokens=outcome.cache_tokens or 0,
+            input_tokens=outcome.input_tokens or 0,
+            output_tokens=outcome.output_tokens or 0,
+        )
         outcome.model = getattr(turns, "reported_model", None)
         return outcome
 

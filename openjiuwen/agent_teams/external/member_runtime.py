@@ -266,6 +266,7 @@ class ExternalHarnessMemberRuntime:
         self._teardown_hooks: list[Callable[[], Awaitable[None]]] = []
         self._round_seq = 0
         self._current_round_id: int | None = None
+        self._reported_model: str | None = None
         self._activity_sink: Callable[[Any], None] | None = None
         self._activity_identity: tuple[str | None, str | None, str | None, str | None] = (
             None,
@@ -299,12 +300,12 @@ class ExternalHarnessMemberRuntime:
     def reported_model(self) -> str | None:
         """The model this member's CLI reported it runs on (``None`` until one is seen).
 
-        Fed from Claude ``system/init`` / Codex ``session/model_changed`` events
-        into the reliability context; ``None`` when no reliability loop is bound
-        or no model event has arrived yet.
+        Captured directly from Claude ``system/init`` / Codex
+        ``session/model_changed`` events; the reliability context (when bound)
+        is kept in sync but is no longer the source — swarmflow workers bind
+        none, and their reports must still carry the real endpoint.
         """
-        ctx = self._reliability_ctx
-        return ctx.model or None if ctx is not None else None
+        return self._reported_model
 
     @property
     def trajectory_recorder(self) -> "HarnessTrajectoryRecorder | None":
@@ -642,10 +643,16 @@ class ExternalHarnessMemberRuntime:
         elif isinstance(payload, ProviderEvent) and (
             payload.event_type == _MODEL_CHANGED_EVENT or payload.event_type == _SYSTEM_INIT_EVENT
         ):
-            ctx = self._reliability_ctx
             model = payload.payload.get("model")
-            if ctx is not None and isinstance(model, str) and model.strip():
-                ctx.update_model(model)
+            if isinstance(model, str) and model.strip():
+                # Captured on the runtime itself: swarmflow workers run with no
+                # reliability context bound, and their AGENT_COMPLETED model
+                # must still name the endpoint the CLI actually served (the
+                # plan's hint goes stale on auth fallback / CLI defaults).
+                self._reported_model = model.strip()
+                ctx = self._reliability_ctx
+                if ctx is not None:
+                    ctx.update_model(model)
 
     async def _on_turn_event(self, envelope: HarnessEvent, payload: TurnLifecycleEvent) -> None:
         kind = _member_round_kind(payload.kind)

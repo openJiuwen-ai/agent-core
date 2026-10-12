@@ -1162,6 +1162,9 @@ class AvatarSessionManager:
                 correlation_id=state.current_correlation_id,
             )
         tokens_before = state.budget_rail.call_tokens
+        cache_before = state.budget_rail.call_cache_tokens
+        input_before = state.budget_rail.call_input_tokens
+        output_before = state.budget_rail.call_output_tokens
         try:
             outcome = await state.external.run_turn(prompt, schema_json=schema_json)
         except BackendError as e:
@@ -1175,13 +1178,21 @@ class AvatarSessionManager:
             raise
         finally:
             state.turns_executed += 1
-        state.budget_rail.bill(outcome.tokens)
+        state.budget_rail.bill(
+            outcome.tokens,
+            cache_tokens=outcome.cache_tokens or 0,
+            input_tokens=outcome.input_tokens or 0,
+            output_tokens=outcome.output_tokens or 0,
+        )
         state.turn_markers.append(outcome.marker)
         await self._persist_external_turns(state)
         return AgentResult(
             text=outcome.text,
             structured=outcome.structured,
             tokens=state.budget_rail.call_tokens - tokens_before,
+            cache_tokens=state.budget_rail.call_cache_tokens - cache_before or None,
+            input_tokens=state.budget_rail.call_input_tokens - input_before or None,
+            output_tokens=state.budget_rail.call_output_tokens - output_before or None,
             model=getattr(state.external, "reported_model", None),
         )
 

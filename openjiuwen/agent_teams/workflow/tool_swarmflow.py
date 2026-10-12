@@ -57,6 +57,23 @@ def new_swarmflow_run_id() -> str:
     return f"wf_{uuid.uuid4().hex[:12]}"
 
 
+def resolve_progress_model(progress: Any, parent_model: str | None) -> str | None:
+    """The model a progress event names for its node, with the base-spec fallback.
+
+    A native ``agent_started`` with no model hint inherits the base spec (the
+    leader's model), so it shows that. A third-party node with no hint runs on
+    the CLI's own default — the leader's model would be a wrong name until the
+    CLI reports the real one, so it stays unset. Terminal events carry no
+    ``agent_type`` and never fall back: a model-less completion must not
+    overwrite what the node already shows.
+    """
+    if progress.model is not None:
+        return progress.model
+    if progress.kind == "agent_started" and not getattr(progress, "agent_type", None):
+        return parent_model
+    return None
+
+
 def _builtin_model_catalog(team_backend: Any) -> str | None:
     """Render the built-in models each CLI kind declares, or None when none do.
 
@@ -632,9 +649,7 @@ class SwarmflowTool(AsyncTool):
             if progress.kind == "workflow_started":
                 name_box["name"] = progress.name
                 name_box["description"] = progress.description
-            # When the engine's progress.model is None (no model hint on
-            # agent_started), fall back to the parent agent's own model.
-            resolved_model = progress.model if progress.model is not None else self._parent_agent.model
+            resolved_model = resolve_progress_model(progress, self._parent_agent.model)
             team_event = WorkflowProgressTeamEvent(
                 team_name=team_name,
                 kind=progress.kind,
@@ -674,6 +689,10 @@ class SwarmflowTool(AsyncTool):
                 cache_tokens=progress.cache_tokens,
                 token_input=progress.token_input,
                 token_output=progress.token_output,
+                activity_type=progress.activity_type,
+                tool_call_id=progress.tool_call_id,
+                tool_name=progress.tool_name,
+                content=progress.content,
             )
             message = EventMessage(
                 event_type=TeamEvent.WORKFLOW_PROGRESS,
