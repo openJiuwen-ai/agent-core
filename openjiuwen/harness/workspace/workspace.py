@@ -16,13 +16,6 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.utils.windows_junction import create_windows_junction
 
-try:
-    import winerror
-except ImportError:  # pragma: no cover - unavailable outside Windows
-    ERROR_PRIVILEGE_NOT_HELD = 1314
-else:
-    ERROR_PRIVILEGE_NOT_HELD = winerror.ERROR_PRIVILEGE_NOT_HELD
-
 
 # =============================================================================
 # Default Content Loading
@@ -205,7 +198,11 @@ class Workspace:
         try:
             os.symlink(target_path, str(link_path), target_is_directory=True)
         except OSError as exc:
-            if sys.platform == "win32" and getattr(exc, "winerror", None) == ERROR_PRIVILEGE_NOT_HELD:
+            # Windows 无特权建 symlink 的错误码不止 1314（ERROR_PRIVILEGE_NOT_HELD）：
+            # 服务进程/沙箱环境下同一调用也可能以 WinError 2/5 等「找不到文件/拒绝
+            # 访问」形态出现（实测 agentserver 内 WinError 2，交互进程 1314）。junction
+            # 创建自带存在性校验且失败会抛出——统一兜底不会掩盖真实错误。
+            if sys.platform == "win32":
                 try:
                     self._create_windows_junction(target_path, str(link_path))
                 except OSError as junction_error:
