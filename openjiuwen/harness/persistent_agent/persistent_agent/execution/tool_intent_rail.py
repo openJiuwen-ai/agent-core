@@ -60,6 +60,13 @@ class PersistentToolIntentRail(DeepAgentRail):
             self._fail_closed(ctx, "tool arguments could not be canonicalized", exc)
 
         read_only = is_read_only_tool_name(tool_name)
+        target_ref = self._target_ref(tool_args)
+        prepared_target_ref = ctx.extra.get("_persistent_tool_target_ref")
+        if self._is_identifier(prepared_target_ref):
+            target_ref = prepared_target_ref
+        prepared_summary = ctx.extra.get("_persistent_tool_args_summary")
+        if isinstance(prepared_summary, str) and prepared_summary:
+            args_summary = prepared_summary[:_SUMMARY_LIMIT]
         state = self._state(ctx)
         if state is not None:
             if (
@@ -91,7 +98,7 @@ class PersistentToolIntentRail(DeepAgentRail):
                     "operation_id": operation_id,
                     "tool_call_id": tool_call_id,
                     "tool_name": tool_name,
-                    "target_ref": self._target_ref(tool_args),
+                    "target_ref": target_ref,
                     "params_digest": params_digest,
                     "args_summary": args_summary,
                 },

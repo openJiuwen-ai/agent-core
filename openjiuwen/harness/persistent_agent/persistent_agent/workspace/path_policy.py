@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Literal
 
-from .access import WorkspaceReadScope
+from .access import WorkspaceReadScope, WorkspaceWriteScope
 
 PathDecisionStatus = Literal["forbidden", "unknown"]
 
@@ -47,12 +47,7 @@ def resolve_read_path(scope: WorkspaceReadScope, requested_path: str) -> Resolve
         normalized = "."
     posix_path = PurePosixPath(normalized)
     windows_path = PureWindowsPath(requested_path)
-    if (
-        posix_path.is_absolute()
-        or windows_path.is_absolute()
-        or bool(windows_path.drive)
-        or normalized.startswith("/")
-    ):
+    if posix_path.is_absolute() or windows_path.is_absolute() or bool(windows_path.drive) or normalized.startswith("/"):
         raise WorkspacePathError("forbidden")
 
     parts = tuple(part for part in normalized.split("/") if part not in ("", "."))
@@ -64,8 +59,10 @@ def resolve_read_path(scope: WorkspaceReadScope, requested_path: str) -> Resolve
     private_root = _absolute_optional(scope.private_sessions_root)
     current_root = _absolute_optional(scope.current_session_root)
 
-    if private_root is not None and _is_within(lexical_candidate, private_root) and not (
-        current_root is not None and _is_within(lexical_candidate, current_root)
+    if (
+        private_root is not None
+        and _is_within(lexical_candidate, private_root)
+        and not (current_root is not None and _is_within(lexical_candidate, current_root))
     ):
         raise WorkspacePathError("forbidden")
 
@@ -79,8 +76,10 @@ def resolve_read_path(scope: WorkspaceReadScope, requested_path: str) -> Resolve
     candidate = _canonical(lexical_candidate)
     private_root = _canonical_optional(scope.private_sessions_root)
     current_root = _canonical_optional(scope.current_session_root)
-    if private_root is not None and _is_within(candidate, private_root) and not (
-        current_root is not None and _is_within(candidate, current_root)
+    if (
+        private_root is not None
+        and _is_within(candidate, private_root)
+        and not (current_root is not None and _is_within(candidate, current_root))
     ):
         raise WorkspacePathError("forbidden")
     allowed_roots = tuple(_canonical(root) for root in scope.allowed_roots)
@@ -136,3 +135,76 @@ def _is_within(candidate: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
+
+
+def resolve_write_path(scope: WorkspaceWriteScope, requested_path: str) -> ResolvedWorkspacePath:
+    """Resolve one model path inside the host-granted write scope."""
+    if scope.status == "unknown":
+        raise WorkspacePathError("unknown", "workspace write authorization is unknown")
+    if scope.status != "allowed":
+        raise WorkspacePathError("forbidden", "workspace path is not writable")
+    if not isinstance(requested_path, str) or not requested_path or "\x00" in requested_path:
+        raise WorkspacePathError("forbidden", "workspace path is not writable")
+    if any(ord(character) < 32 or ord(character) == 127 for character in requested_path):
+        raise WorkspacePathError("forbidden", "workspace path is not writable")
+
+    normalized = requested_path.replace("\\", "/")
+    posix_path = PurePosixPath(normalized)
+    windows_path = PureWindowsPath(requested_path)
+    if posix_path.is_absolute() or windows_path.is_absolute() or bool(windows_path.drive) or normalized.startswith("/"):
+        raise WorkspacePathError("forbidden", "workspace path is not writable")
+
+    parts = tuple(part for part in normalized.split("/") if part not in ("", "."))
+    if not parts or ".." in parts or any(":" in part for part in parts):
+        raise WorkspacePathError("forbidden", "workspace path is not writable")
+
+    workspace_root = _absolute(scope.workspace_root)
+    lexical_candidate = workspace_root.joinpath(*parts)
+    private_root = _absolute_optional(scope.private_sessions_root)
+    current_root = _absolute_optional(scope.current_session_root)
+
+    if _is_private_session_path(lexical_candidate, private_root, current_root):
+        raise WorkspacePathError("forbidden", "workspace path is not writable")
+    allowed_roots = tuple(_absolute(root) for root in scope.allowed_write_roots)
+    if not _is_allowed(lexical_candidate, allowed_roots, current_root):
+        raise WorkspacePathError("forbidden", "workspace path is not writable")
+
+    candidate = _canonical(lexical_candidate)
+    canonical_private_root = _canonical_optional(private_root)
+    canonical_current_root = _canonical_optional(current_root)
+    if _is_private_session_path(candidate, canonical_private_root, canonical_current_root):
+        raise WorkspacePathError("forbidden", "workspace path is not writable")
+    canonical_allowed_roots = tuple(_canonical(root) for root in allowed_roots)
+    if not _is_allowed(candidate, canonical_allowed_roots, canonical_current_root):
+        raise WorkspacePathError("forbidden", "workspace path is not writable")
+
+    relative_path = PurePosixPath(*parts).as_posix()
+    source_ref = f"{scope.source_ref.rstrip('/')}/{relative_path}"
+    return ResolvedWorkspacePath(path=candidate, relative_path=relative_path, source_ref=source_ref)
+
+
+def _is_allowed(candidate: Path, allowed_roots: tuple[Path, ...], current_root: Path | None) -> bool:
+    return any(_is_within(candidate, root) for root in allowed_roots) or (
+        current_root is not None and _is_within(candidate, current_root)
+    )
+
+
+def _is_private_session_path(
+    candidate: Path,
+    private_root: Path | None,
+    current_root: Path | None,
+) -> bool:
+    return (
+        private_root is not None
+        and _is_within(candidate, private_root)
+        and not (current_root is not None and _is_within(candidate, current_root))
+    )
+
+
+__all__ = [
+    "ResolvedWorkspacePath",
+    "WorkspacePathError",
+    "observe_version",
+    "resolve_read_path",
+    "resolve_write_path",
+]
