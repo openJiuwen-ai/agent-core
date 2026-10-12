@@ -433,7 +433,7 @@ class PrefixCompactProcessor(ContextProcessor):
         budget_tokens: int,
         force_shrink: bool = False,
     ) -> PrefixCompactSpan | None:
-        """按预算截断压缩目标：装不下的最旧消息移入 protected_tail（留在主上下文，不丢数据）。
+        """按预算截断压缩目标：超出预算的靠尾（较新）消息移入 protected_tail（留在主上下文，不丢数据）。
 
         ``force_shrink=True``（反应式 overflow 重试路径）保持既有语义：即使
         估算显示全部装得下也至少移出一条，保证重试有实际进展；False（主动
