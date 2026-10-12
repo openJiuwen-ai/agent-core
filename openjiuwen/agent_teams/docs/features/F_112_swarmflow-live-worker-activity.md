@@ -17,7 +17,7 @@ Swarmflow 的单轮 `agent()` 在引擎眼里是**一次不透明调用**：发 
 
 ## 决策
 
-1. **新增 `ProgressKind.AGENT_ACTIVITY`，结构化载荷**：`activity_type`（`"tool_call"` = 工具执行前 / `"tool_result"` = 工具执行后）/ `tool_call_id`（配对键）/ `tool_name` / `content`（512 字符截断预览，`…(truncated)` 标记截断——`"tool_call"` 上压缩的入参、`"tool_result"` 上结果 / 异常文本）。`message="tool: <name>"` 保留给旧消费方。事件仍是**业务无关、无时间戳**的——消费方在 agent_teams 层补时，保持引擎 resume 确定性。
+1. **新增 `ProgressKind.AGENT_ACTIVITY`，结构化载荷**：`activity_type`（`"tool_call"` = 工具执行前 / `"tool_result"` = 工具执行后）/ `tool_call_id`（配对键）/ `tool_name` / `content`（完整入参 / 结果 / 异常文本，仅 64KB 病态载荷防护上限，越界 `…(truncated)` 标记——与团队成员 `chat.tool_call` 帧的完整参数对齐）。`message="tool: <name>"` 保留给旧消费方。事件仍是**业务无关、无时间戳**的——消费方在 agent_teams 层补时，保持引擎 resume 确定性。
 
 2. **给 `AgentBackend` 增一条 backend → engine 的进度接缝**：`progress_sink`（只读）+ `bind_progress_sink(...)`，`run_workflow` 建好 `Runtime` 后一次性绑定为 `rt.progress_sink`。未绑定时 `progress_sink is None`，backend 静默（测试后端零成本）。这条接缝是通用的——任何 backend 都能在单次调用中途上抛进度，不绑定具体业务。
 
@@ -25,7 +25,7 @@ Swarmflow 的单轮 `agent()` 在引擎眼里是**一次不透明调用**：发 
 
 4. **worker rail 双钩、不节流**：`SwarmflowActivityRail.before_tool_call` / `after_tool_call` 各发一次，一次工具执行产生一对事件（按 `tool_call_id` 配对）。`after_tool_call` 的 `callback_priority` 加偏移（1,000,000）排在所有 rail 之后，读到其它 rail（如 `StructuredOutputFinishRail`）改写过后的 tool message；无 tool message 时回退异常文本 / 原始 result repr。rail 仅在 `opts` 带 `agent_id` 时挂载（即经引擎的 `agent()` / `send` 调用），直接调用 backend 的测试场景不挂。
 
-5. **共享 emitter 工厂**：`workflow/backends/activity_emitter.py` 统一 `truncate_activity_content`（512 上限）与 `build_activity_event`（事件形状 + `message` 兼容），worker rail / session avatar rail / external runtime 三处发射端共用——512 上限与事件形状只此一份，第四处发射端不会漂移。
+5. **共享 emitter 工厂**：`workflow/backends/activity_emitter.py` 统一 `truncate_activity_content`（64KB 防护上限）与 `build_activity_event`（事件形状 + `message` 兼容），worker rail / session avatar rail / external runtime 三处发射端共用——上限与事件形状只此一份，第四处发射端不会漂移。
 
 6. **session avatar 挂同一 rail + per-turn `correlation_id`**：`AvatarSessionManager` 给每个带 `agent_id` 的 avatar harness 挂 `SwarmflowActivityRail`；emitter 发射时从 `_SessionState.current_correlation_id`（每次 `send_turn` 置当前轮）读 id，把活动事件对齐到该轮 turn 的 started/completed 事件——观战方能按轮匹配活动。
 
@@ -48,7 +48,7 @@ Swarmflow 的单轮 `agent()` 在引擎眼里是**一次不透明调用**：发 
 - `test_activity_rail_emits_paired_tool_call_and_result`（初版 `test_activity_rail_emits_tool_name` 重写）：rail 在 `before_tool_call` / `after_tool_call` 各发一次；非 `ToolCallInputs` / 空名忽略。
 - `test_activity_rail_does_not_throttle_bursts`（初版 `test_activity_rail_throttles_bursts` 重写）：窗口内多次工具执行逐对上抛，不节流。
 - `test_activity_rail_compacts_json_string_args` / `test_activity_rail_after_tool_call_uses_exception_text`：`tool_call` 入参压缩预览；无 tool message 时回退异常 / result repr。
-- `test_activity_emitter_truncates_content_at_512` / `test_activity_emitter_builds_agent_activity_event`：`content` 512 截断 + `…(truncated)` 标记；emitter 产出 `kind=AGENT_ACTIVITY` + 结构化字段 + `message`；未绑定 sink 时 no-op。
+- `test_activity_emitter_truncates_content_at_the_guard_bound` / `test_activity_emitter_builds_agent_activity_event`：`content` 完整透传 + 防护上限截断标记；emitter 产出 `kind=AGENT_ACTIVITY` + 结构化字段 + `message`；未绑定 sink 时 no-op。
 - `test_session_avatar_rail_emits_paired_activity_with_agent_id_and_correlation` / `test_session_avatar_mounts_no_activity_rail_without_a_sink` / `test_session_avatar_mounts_no_activity_rail_without_agent_id`：avatar 挂 rail，事件带 `agent_id` + 当前轮 `correlation_id`；无 sink / 无 `agent_id` 不挂。
 - `test_session_backend_opts_carry_node_agent_id_and_journal_stays_raw`：session turn 的 opts 副本带 `agent_id`，journal 记录保持原始 opts。
 - `test_external_worker_binds_activity_sink_with_node_identity` / `test_external_worker_without_agent_id_skips_activity_bind`：三方 worker 发射前绑定（带节点身份）；无 `agent_id` 跳过。

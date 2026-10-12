@@ -40,7 +40,7 @@
    返回失败结果，不再消耗 `rt.retries` 重试（重复必败）；`AGENT_FAILED` 只发一次，错误文案完整到达 leader。
    存量重试语义不变（默认 `retryable=True`）。
 4. **上报模型链**：`AgentResult.model` / `BackendError.model` 携带 CLI 实际报告的模型
-   （`ExternalHarnessMemberRuntime.reported_model`，来自可靠性上下文），`AGENT_COMPLETED` /
+   （`ExternalHarnessMemberRuntime.reported_model`，runtime 自行捕获 `session/model_changed` / `system/init` 事件，不依赖可靠性上下文——swarmflow worker 不绑定可靠性上下文也能上报），`AGENT_COMPLETED` /
    `AGENT_FAILED` 事件据此命名真正服务的端点而非原始 option hint；`AGENT_STARTED.model` 仍是 best-known
    ——`describe_model` 用同一份 `plan_external_model` 算校验后的展示值，解析失败回退原始 hint。display-only，
    从不进 journal（不参与缓存签名）。`builtin_model` / `effort` 在**有值时**折入 `call_signature` identity
@@ -86,5 +86,5 @@
 - **label-less 认证文案**：双受众认证消息不携带节点 label，归位靠事件的 `agent_id`；文案里加节点名
   需要把 member_name 透传进 `_auth_failure_message`，当前不必要（事件已可归位）。
 - **首锁身份按裸 hint 比较**：`builtin_model="X"`（吃默认档）与 `builtin_model="X", effort="<default>"`（显式默认档）视为不同身份会拒绝——严格方向（不会假 no-op），重申同一 hint 即可。
-- 第三方轮次的 `reported_model` 依赖可靠性上下文已绑定且模型事件已到达（`None` 时不命名端点，退化为
-  option hint）。
+- 第三方轮次的 `reported_model` 由 runtime 直接捕获模型事件（swarmflow worker 不绑定可靠性上下文也能上报）；
+  `None` 仅当 CLI 全程未报模型，此时不命名端点、退化为 option hint。

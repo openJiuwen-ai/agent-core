@@ -34,7 +34,9 @@
 4. **token 事后记账**：外部成员无模型调用钩子，`SwarmflowBudgetRail.bill()` 在轮末把归一后的量记进
    session / workflow 两本账；入口闸在下一次调用前生效，最坏超支一轮。归一：Codex 的
    `TurnResult.usage` 已是本轮 `usage.last` 之和；Claude（`claude-code`）为会话累计量，逐轮差分，
-   总量回落即视为对话重置、整段归本轮。SDK 侧预算不透传。
+   总量回落即视为对话重置、整段归本轮。输入/输出/缓存拆分随总量同行：`ExternalTurnOutcome` 携带
+   `TurnUsage` 的拆分（累计 provider 逐计数器差分），`bill()` 一并记入 rail 的 `call_input/output/cache_tokens`，
+   `AGENT_COMPLETED` 据此上报、与 native 口径对齐；CLI 未报拆分时保持 `None`，不猜。SDK 侧预算不透传。
 5. **结构化输出走提示词 + JSON 解析**：外部 CLI 不挂 `StructuredOutputTool`，schema 追加到 prompt 尾部，
    轮末从 `final_output` 取最后一个 JSON 对象；解析失败 = native "未提交"，`BackendError` → 引擎重试 → `None`。
 6. **`REQUIRE_RESUME` 两级语义落在 backend + `require_checkpoint`**：外部会话的运行时在**首轮 `send_turn`** 才
