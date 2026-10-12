@@ -891,3 +891,25 @@ async def test_require_checkpoint_resumes_when_a_pointer_exists() -> None:
     await runtime.stop()
     assert harness.start_contexts[0].resume_policy is ResumePolicy.REQUIRE_RESUME
 
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_seed_checkpoint_lets_a_fresh_member_session_require_resume() -> None:
+    """A forked child has no history of its own; the host seeds the pointer it must resume."""
+    harness = _FakeHarness()
+    team_session = _FakeTeamSession()
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness, context=_context(),
+        resume_external_backend=True, require_checkpoint=True,
+        seed_checkpoint={"session_id": "forked-1"},
+    )
+    await runtime.start(team_session=team_session)
+    await runtime.stop()
+    started = harness.start_contexts[0]
+    assert started.resume_policy is ResumePolicy.REQUIRE_RESUME
+    assert started.checkpoint is not None
+    assert started.checkpoint.provider == "fake"
+    assert started.checkpoint.agent_id == "member-agent"
+    assert started.checkpoint.data == {"session_id": "forked-1"}
+    assert team_session.member_session.commit_calls >= 1
+

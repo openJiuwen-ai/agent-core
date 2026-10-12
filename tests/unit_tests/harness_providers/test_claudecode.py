@@ -48,6 +48,7 @@ from openjiuwen.harness_providers.claudecode.failure_classifier import (
 )
 from openjiuwen.harness_providers.claudecode.harness import MODEL_CHANGED_EVENT
 from openjiuwen.harness_providers.claudecode.lifecycle import SETTLED_SUBTYPE
+from openjiuwen.harness_providers.claudecode.mapping import ClaudeTurnAccumulator
 from openjiuwen.harness_providers.claudecode.options import build_claude_options, build_claude_session_id
 from tests.test_logger import logger
 
@@ -916,6 +917,29 @@ async def test_uninformative_result_errors_fall_back_to_the_http_status(monkeypa
     assert error.message == "Claude turn failed: HTTP 429"
     assert error.category == "rate_limited"
     logger.info("claude uninformative result errors fall back to the http status")
+
+
+def test_assistant_message_carries_its_transcript_uuid(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The JSONL uuid is the only id the offline ``fork_session`` accepts as a cut point."""
+    sdk, _ = _install_fake_sdk(monkeypatch)
+    accumulator = ClaudeTurnAccumulator(turn_id="turn-1", sdk=sdk)
+    accumulator.consume(
+        sdk.AssistantMessage(
+            content=[sdk.TextBlock(text="hi")],
+            model="claude-x",
+            parent_tool_use_id=None,
+            error=None,
+            usage=None,
+            message_id="msg_01abc",
+            stop_reason="end_turn",
+            session_id="s",
+            uuid="3f2a0000-1111-2222-3333-444444444444",
+        )
+    )
+    message = accumulator.messages[-1]
+    assert message.message_id == "msg_01abc"
+    assert message.data["uuid"] == "3f2a0000-1111-2222-3333-444444444444"
+    logger.info("claude assistant messages keep the transcript uuid next to the api id")
 
 
 @pytest.mark.asyncio

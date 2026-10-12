@@ -83,3 +83,20 @@ async def test_workflow_runtime_rejects_adapter_backends():
             cli_agent="gemini", entry=entry, member_name="m", member_agent_id="t_m", session_id="s1",
             team_name="t", system_prompt="p", cwd=None,
         )
+
+
+@pytest.mark.asyncio
+async def test_workflow_runtime_forwards_seed_checkpoint(monkeypatch):
+    class _Harness:
+        def __init__(self, config, **kw):
+            pass
+
+        card = type("C", (), {"name": "codex"})()
+
+    monkeypatch.setattr(spawn_mod, "CodexHarness", _Harness)
+    runtime = await build_cli_workflow_runtime(
+        cli_agent="codex", entry=ExternalCliAgentSpec(cli_agent="codex"), member_name="m", member_agent_id="t_m",
+        session_id="s1", team_name="t", system_prompt="p", cwd=None,
+        resume_external_backend=True, require_checkpoint=True, seed_checkpoint={"thread_id": "thr_child"},
+    )
+    assert runtime._seed_checkpoint == {"thread_id": "thr_child"}

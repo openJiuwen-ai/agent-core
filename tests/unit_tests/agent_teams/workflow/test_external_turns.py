@@ -19,10 +19,12 @@ from openjiuwen.harness_protocol import (
     HarnessCard,
     HarnessContext,
     HarnessState,
+    MessageRole,
     StateChangedEvent,
     TurnEventKind,
     TurnError,
     TurnLifecycleEvent,
+    TurnMessage,
     TurnResult,
     TurnStatus,
     TurnUsage,
@@ -188,3 +190,81 @@ async def test_stale_round_event_is_ignored():
     outcome = await task
     await driver.stop()
     assert outcome.text == "real"
+
+
+@pytest.mark.asyncio
+async def test_codex_turn_marker_is_native_turn_id():
+    harness, driver = _driver("codex")
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("x"))
+    await asyncio.sleep(0)
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FINISHED,
+            result=TurnResult(status=TurnStatus.COMPLETED, final_output="ok",
+                              provider_data={"native_turn_id": "turn_abc"}),
+        ),
+        turn_id="turn-1",
+    )
+    outcome = await task
+    await driver.stop()
+    assert outcome.marker == "turn_abc"
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_marker_is_last_assistant_transcript_uuid():
+    harness, driver = _driver("claude-code")
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("x"))
+    await asyncio.sleep(0)
+    messages = (
+        TurnMessage(message_id="u-1", role=MessageRole.USER, content=()),
+        TurnMessage(message_id="msg_01a", role=MessageRole.ASSISTANT, content=(),
+                    data={"uuid": "11111111-2222-3333-4444-555555555555"}),
+        TurnMessage(message_id="t-1", role=MessageRole.TOOL, content=()),
+        TurnMessage(message_id="msg_01b", role=MessageRole.ASSISTANT, content=(),
+                    data={"uuid": "3f2a0000-1111-2222-3333-444444444444"}),
+    )
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FINISHED,
+            result=TurnResult(status=TurnStatus.COMPLETED, final_output="ok", messages=messages),
+        ),
+        turn_id="turn-1",
+    )
+    outcome = await task
+    await driver.stop()
+    assert outcome.marker == "3f2a0000-1111-2222-3333-444444444444"
+
+
+@pytest.mark.asyncio
+async def test_claude_turn_marker_is_none_without_a_transcript_uuid():
+    """The API message id is not a transcript uuid; offline fork_session rejects it."""
+    harness, driver = _driver("claude-code")
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("x"))
+    await asyncio.sleep(0)
+    await harness.emit(
+        TurnLifecycleEvent(
+            kind=TurnEventKind.FINISHED,
+            result=TurnResult(
+                status=TurnStatus.COMPLETED, final_output="ok",
+                messages=(TurnMessage(message_id="msg_01a", role=MessageRole.ASSISTANT, content=()),),
+            ),
+        ),
+        turn_id="turn-1",
+    )
+    outcome = await task
+    await driver.stop()
+    assert outcome.marker is None
+
+
+@pytest.mark.asyncio
+async def test_marker_is_none_when_provider_reports_nothing():
+    harness, driver = _driver("codex")
+    await driver.start(_FakeTeamSession())
+    task = asyncio.create_task(driver.run_turn("x"))
+    await asyncio.sleep(0)
+    await _finish(harness, "ok")
+    assert (await task).marker is None
+    await driver.stop()

@@ -20,7 +20,9 @@ import pytest
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
+from openjiuwen.agent_teams.workflow.backends import avatar_session_backend as asb_mod
 from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
+from openjiuwen.agent_teams.workflow.backends.external_fork import ForkCredentials
 from openjiuwen.agent_teams.workflow.backends.external_turns import ExternalTurnOutcome
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
@@ -808,13 +810,40 @@ def test_session_member_names_without_run_id_keep_legacy_shape():
     assert mgr._next_member_name("agent", {"label": "x"}) == "wf-sess-x-0"
 
 
+class _FakeMemberSession:
+    """Stands in for the child AgentSession a runtime (or the read path) owns."""
+
+    def __init__(self, state: dict | None = None) -> None:
+        self.state = dict(state or {})
+        self.commit_calls = 0
+        self.post_run_calls = 0
+
+    def update_state(self, data: dict) -> None:
+        self.state.update(data)
+
+    def get_state(self, key: str):
+        return self.state.get(key)
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
+
+    async def pre_run(self) -> None:
+        return None
+
+    async def post_run(self) -> None:
+        self.post_run_calls += 1
+
+
 class _FakeTurns:
     """Stands in for ExternalMemberTurns: records lifecycle, answers canned turns."""
 
     instances: list["_FakeTurns"] = []
 
-    def __init__(self, *, resume: bool, require: bool, has_pointer: bool = True) -> None:
+    def __init__(self, *, resume: bool, require: bool, has_pointer: bool = True, seed: dict | None = None) -> None:
         self.resume, self.require, self.has_pointer = resume, require, has_pointer
+        self.seed = seed
+        self.pointer: str | None = None  # what the provider reports as its session/thread id
+        self.member_session = _FakeMemberSession()
         self.started = 0
         self.stopped = 0
         self.aborted = 0
@@ -823,6 +852,10 @@ class _FakeTurns:
 
     provider_name = "codex"
 
+    @property
+    def session_id(self) -> str | None:
+        return self.pointer
+
     async def start(self, team_session):
         if self.resume and self.require and not self.has_pointer:
             raise HarnessProtocolError("no checkpoint pointer")
@@ -830,7 +863,12 @@ class _FakeTurns:
 
     async def run_turn(self, prompt, *, schema_json=None):
         self.prompts.append((prompt, schema_json))
-        return ExternalTurnOutcome(text=f"ext:{prompt}", structured={"v": 1} if schema_json else None, tokens=7)
+        return ExternalTurnOutcome(
+            text=f"ext:{prompt}",
+            structured={"v": 1} if schema_json else None,
+            tokens=7,
+            marker=f"mk{len(self.prompts)}",
+        )
 
     async def abort(self):
         self.aborted += 1
@@ -849,8 +887,8 @@ def _external_mgr(monkeypatch, *, has_pointer: bool = True) -> AvatarSessionMana
         external_cwd=lambda member, entry: None,
     )
 
-    async def _build(state, *, resume, require):
-        return _FakeTurns(resume=resume, require=require, has_pointer=has_pointer)
+    async def _build(state, *, resume, require, seed_checkpoint=None):
+        return _FakeTurns(resume=resume, require=require, has_pointer=has_pointer, seed=seed_checkpoint)
 
     monkeypatch.setattr(mgr, "_build_external_turns", _build)
     return mgr
@@ -897,9 +935,11 @@ def test_external_session_cold_resume_with_pointer_resumes(monkeypatch):
 def test_external_session_fork_is_rejected(monkeypatch):
     mgr = _external_mgr(monkeypatch)
     sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
-    with pytest.raises(BackendError, match="fork"):
+    # The parent never ran a turn, so the provider never handed out a pointer to branch.
+    with pytest.raises(BackendError, match="no provider pointer"):
         asyncio.run(mgr.capture_fork(sid, keep_rounds=None, fork_mode="full"))
-    with pytest.raises(BackendError, match="fork"):
+    # A native context snapshot is meaningless to a CLI provider.
+    with pytest.raises(BackendError, match="native context snapshot"):
         asyncio.run(
             mgr.open_session(
                 kind="agent", instructions=None, opts={"label": "k", "agent_type": "codex"},
@@ -936,11 +976,283 @@ def test_external_session_start_failure_stops_runtime(monkeypatch):
     assert _FakeTurns.instances[0].stopped == 1
 
 
-def test_external_session_fork_blocked_after_close(monkeypatch):
-    """capture_fork raises BackendError even after the session row is removed by close_session."""
+def test_external_fork_without_a_pointer_is_refused(monkeypatch):
+    """capture_fork refuses a session that never ran a turn, even after its row is gone."""
     mgr = _external_mgr(monkeypatch)
     sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
     asyncio.run(mgr.close_session(sid))
-    # Row is gone, but _external_members remembers this was an external session.
-    with pytest.raises(BackendError, match="fork"):
+    # Row is gone, but _external_provider remembers this was a codex session.
+    with pytest.raises(BackendError, match="no provider pointer"):
         asyncio.run(mgr.capture_fork(sid, keep_rounds=None, fork_mode="full"))
+
+
+# ---------------------------------------------------------------------------
+# external fork: capture credentials, persist markers, materialise on first turn
+# ---------------------------------------------------------------------------
+
+
+def _turn_opts(label="c"):
+    return {"label": label, "agent_type": "codex"}
+
+
+async def _run_two_turns(mgr, sid):
+    await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
+    await mgr.send_turn(sid, "two", _turn_opts(), None,
+                        history=[{"role": "user", "content": "one"}, {"role": "assistant", "content": "ext:one"}])
+
+
+def test_external_fork_captures_credentials_from_live_parent(monkeypatch):
+    mgr = _external_mgr(monkeypatch)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await _run_two_turns(mgr, sid)
+        _FakeTurns.instances[0].pointer = "thr_p"  # what runtime.session_id reports after start
+        data = await mgr.capture_fork(sid, keep_rounds=1, fork_mode="before")
+        creds = ForkCredentials.from_fork_data(data)
+        assert creds == ForkCredentials(provider="codex", parent_member=sid, parent_pointer="thr_p",
+                                        mode="before", cut_marker="mk1", keep_rounds=1)
+        full = ForkCredentials.from_fork_data(await mgr.capture_fork(sid, keep_rounds=None, fork_mode="full"))
+        assert full.cut_marker is None and full.mode == "full"
+
+    asyncio.run(_body())
+
+
+def test_external_fork_rejects_unsupported_mode_and_bad_keep_rounds(monkeypatch):
+    mgr = _external_mgr(monkeypatch)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await _run_two_turns(mgr, sid)
+        _FakeTurns.instances[0].pointer = "thr_p"
+        with pytest.raises(BackendError, match="after"):
+            await mgr.capture_fork(sid, keep_rounds=1, fork_mode="after")
+        with pytest.raises(BackendError, match="keep_rounds"):
+            await mgr.capture_fork(sid, keep_rounds=5, fork_mode="before")
+        assert len(_FakeTurns.instances) == 1  # no child runtime was touched
+
+    asyncio.run(_body())
+
+
+def test_external_child_materialises_on_first_turn(monkeypatch):
+    mgr = _external_mgr(monkeypatch)
+    materialised: list = []
+
+    async def _fake_materialise(creds, *, entry, cwd):
+        materialised.append(creds)
+        return "thr_child"
+
+    monkeypatch.setattr(asb_mod, "materialise_external_fork", _fake_materialise)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await _run_two_turns(mgr, sid)
+        _FakeTurns.instances[0].pointer = "thr_p"
+        data = await mgr.capture_fork(sid, keep_rounds=2, fork_mode="before")
+
+        child = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts("k"), fork_data=data)
+        assert materialised == []  # nothing until the first turn
+        result = await mgr.send_turn(child, "go", _turn_opts("k"), None, history=[{"role": "user", "content": "x"}])
+        assert result.text == "ext:go"
+        assert materialised[0].cut_marker == "mk2"
+        child_turns = _FakeTurns.instances[-1]
+        assert child_turns.resume is True and child_turns.require is True
+        assert child_turns.seed == {"thread_id": "thr_child"}
+
+    asyncio.run(_body())
+
+
+def test_external_child_reconciles_against_parent_markers(monkeypatch):
+    mgr = _external_mgr(monkeypatch)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await _run_two_turns(mgr, sid)
+        _FakeTurns.instances[0].pointer = "thr_p"
+        data = await mgr.capture_fork(sid, keep_rounds=2, fork_mode="before")
+        data["external_fork"]["cut_marker"] = "mk9"  # tampered / drifted credential
+        child = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts("k"), fork_data=data)
+        with pytest.raises(BackendError, match="no longer match"):
+            await mgr.send_turn(child, "go", _turn_opts("k"), None, history=())
+
+    asyncio.run(_body())
+
+
+def test_external_markers_persist_and_fork_works_without_live_parent(monkeypatch):
+    mgr = _external_mgr(monkeypatch)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
+        # The provider hands out its pointer once the runtime is started.
+        _FakeTurns.instances[0].pointer = "thr_p"
+        await mgr.send_turn(sid, "two", _turn_opts(), None,
+                            history=[{"role": "user", "content": "one"}, {"role": "assistant", "content": "ext:one"}])
+        saved = dict(mgr._persisted_external.get(sid) or {})
+        await mgr.close_session(sid)
+        assert saved["markers"] == ["mk1", "mk2"] and saved["pointer"] == "thr_p"
+        data = await mgr.capture_fork(sid, keep_rounds=1, fork_mode="before")
+        assert ForkCredentials.from_fork_data(data).cut_marker == "mk1"
+
+    asyncio.run(_body())
+
+
+def test_external_markers_written_through_the_runtime_session(monkeypatch):
+    """The record rides the runtime's own member session, not a parallel one.
+
+    The live runtime commits its whole state on every provider checkpoint, so a
+    second session over the same bucket would have its write erased.
+    """
+    mgr = _external_mgr(monkeypatch)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
+        turns = _FakeTurns.instances[0]
+        turns.pointer = "thr_p"
+        await mgr.send_turn(sid, "two", _turn_opts(), None,
+                            history=[{"role": "user", "content": "one"}, {"role": "assistant", "content": "ext:one"}])
+        assert turns.member_session.state["swarmflow_external_turns"] == {
+            "markers": ["mk1", "mk2"], "pointer": "thr_p",
+        }
+        assert turns.member_session.commit_calls >= 2
+
+    asyncio.run(_body())
+
+
+def test_external_record_read_path_finalises_the_standalone_session(monkeypatch):
+    """With no live runtime the record is read from a standalone session, then closed."""
+    mgr = _external_mgr(monkeypatch)
+    sess = _FakeMemberSession({"swarmflow_external_turns": {"markers": ["mk1"], "pointer": "thr_p"}})
+
+    async def _member_session_for(member_name):
+        return sess
+
+    monkeypatch.setattr(mgr, "_member_session_for", _member_session_for)
+    mgr._persisted_external.clear()
+    record = asyncio.run(mgr._external_record("x"))
+    assert record == {"markers": ["mk1"], "pointer": "thr_p"}
+    assert sess.post_run_calls == 1
+
+
+def test_external_failed_turn_leaves_no_marker(monkeypatch):
+    """A failed turn records nothing: engine retries stay inside one round, so a hole would misalign rounds."""
+    mgr = _external_mgr(monkeypatch)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
+        turns = _FakeTurns.instances[0]
+        turns.pointer = "thr_p"
+
+        async def _boom(prompt, *, schema_json=None):
+            raise BackendError("boom", tokens=1)
+
+        turns.run_turn = _boom
+        with pytest.raises(BackendError, match="boom"):
+            await mgr.send_turn(sid, "two", _turn_opts(), None, history=())
+        assert mgr._persisted_external[sid]["markers"] == ["mk1"]
+        with pytest.raises(BackendError, match="keep_rounds"):
+            await mgr.capture_fork(sid, keep_rounds=2, fork_mode="before")
+        creds = ForkCredentials.from_fork_data(await mgr.capture_fork(sid, keep_rounds=1, fork_mode="before"))
+        assert creds.cut_marker == "mk1"
+
+    asyncio.run(_body())
+
+
+def test_external_member_is_registered_on_name_reservation(monkeypatch):
+    """A fully-hit parent never reaches open_session, so the name reservation must register it."""
+    mgr = _external_mgr(monkeypatch)
+
+    async def _body():
+        name = await mgr.ensure_member_name(kind="agent", opts=_turn_opts())
+        mgr._persisted_external[name] = {"markers": ["mk1"], "pointer": "thr_p"}
+        creds = ForkCredentials.from_fork_data(await mgr.capture_fork(name, keep_rounds=1, fork_mode="before"))
+        assert creds.provider == "codex" and creds.cut_marker == "mk1"
+
+    asyncio.run(_body())
+
+
+def test_external_child_with_its_own_pointer_resumes_instead_of_re_forking(monkeypatch):
+    """A partially-hit child already has a branch; a second fork would strand its history."""
+    mgr = _external_mgr(monkeypatch)
+    materialised: list = []
+
+    async def _fake_materialise(creds, *, entry, cwd):
+        materialised.append(creds)
+        return "thr_child"
+
+    monkeypatch.setattr(asb_mod, "materialise_external_fork", _fake_materialise)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await _run_two_turns(mgr, sid)
+        _FakeTurns.instances[0].pointer = "thr_p"
+        data = await mgr.capture_fork(sid, keep_rounds=2, fork_mode="before")
+        child = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts("k"), fork_data=data)
+        mgr._persisted_external[child] = {"markers": ["c1"], "pointer": "thr_child_prev"}
+
+        await mgr.send_turn(child, "go", _turn_opts("k"), None, history=[{"role": "user", "content": "x"}])
+        assert materialised == []
+        child_turns = _FakeTurns.instances[-1]
+        assert child_turns.resume is True and child_turns.require is True and child_turns.seed is None
+
+    asyncio.run(_body())
+
+
+def test_external_child_keeps_its_credentials_when_the_start_fails(monkeypatch):
+    """A child whose start failed must retry the fork, never run as a plain session."""
+    mgr = _external_mgr(monkeypatch)
+    materialised: list = []
+
+    async def _fake_materialise(creds, *, entry, cwd):
+        materialised.append(creds)
+        return "thr_child"
+
+    monkeypatch.setattr(asb_mod, "materialise_external_fork", _fake_materialise)
+
+    async def _body():
+        sid = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts())
+        await mgr.send_turn(sid, "one", _turn_opts(), None, history=())
+        _FakeTurns.instances[0].pointer = "thr_p"
+        data = await mgr.capture_fork(sid, keep_rounds=1, fork_mode="before")
+
+        # The child's runtime has no checkpoint pointer, so its resume start fails.
+        async def _build(state, *, resume, require, seed_checkpoint=None):
+            return _FakeTurns(resume=resume, require=require, has_pointer=False, seed=seed_checkpoint)
+
+        monkeypatch.setattr(mgr, "_build_external_turns", _build)
+        child = await mgr.open_session(kind="agent", instructions=None, opts=_turn_opts("k"), fork_data=data)
+        with pytest.raises(HarnessProtocolError):
+            await mgr.send_turn(child, "go", _turn_opts("k"), None, history=())
+        assert mgr._sessions[child].fork_credentials is not None
+        with pytest.raises(HarnessProtocolError):
+            await mgr.send_turn(child, "go", _turn_opts("k"), None, history=())
+        assert len(materialised) == 2  # the retry asked the provider for a fresh branch
+
+    asyncio.run(_body())
+
+
+def test_member_session_identity_matches_runtime(monkeypatch):
+    """The read path must open the very ids the runtime's own member session uses.
+
+    ``ExternalHarnessMemberRuntime._ensure_member_session`` (member_runtime.py:698)
+    calls ``team_session.create_agent_session(agent_id=self._member_agent_id)`` on the
+    team session the manager hands to ``start`` — session id and agent id must match
+    or the record lands in a different bucket.
+    """
+    mgr = _external_mgr(monkeypatch)
+    created: list = []
+
+    class _FakeTeamSession:
+        def __init__(self, *, session_id, team_id, kv_cache_runtime=None):
+            created.append(session_id)
+
+        def create_agent_session(self, *, agent_id, share_stream_writer=True):
+            created.append(agent_id)
+            return _FakeMemberSession()
+
+    monkeypatch.setattr("openjiuwen.core.session.agent_team.Session", _FakeTeamSession)
+    asyncio.run(mgr._member_session_for("m"))
+    assert mgr._derive_avatar_session_id("m") == "t/workflow/m"
+    assert created == ["t/workflow/m", "t_m"]
