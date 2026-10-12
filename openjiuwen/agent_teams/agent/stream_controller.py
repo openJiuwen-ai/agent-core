@@ -525,8 +525,16 @@ class StreamController:
         ``_drain_pending_interrupt_resumes`` when the round settles on the
         matching ask.
 
-        Returns ``"delivered"``, ``"queued"``, or ``"dropped"`` (stale: no
-        pending interrupt and no in-flight round).
+        The same applies to an approval that arrives after its interrupt has
+        already rotated/expired (``tool_call_id`` no longer matches the
+        current pending interrupt) with no in-flight round: the member
+        typically retries the same ``tool_call_id``, and the leader would
+        reject the re-approval ("already approved") — dropping the answer here
+        would deadlock the member forever. Cache it for the retry instead;
+        the orphan cleanup in ``_drain_pending_interrupt_resumes`` drops it if
+        the ask never re-commits.
+
+        Returns ``"delivered"``, ``"queued"``, or ``"dropped"`` (stopped).
         """
         async with self._interrupt_lock:
             if self._interrupt_stopped:
@@ -536,19 +544,12 @@ class StreamController:
                 if harness is not None:
                     await harness.send(user_input)
                 return "delivered"
-            if self.has_in_flight_round():
-                self._pending_interrupt_resumes.append(user_input)
-                team_logger.info(
-                    "[{}] queued interrupt resume (round in flight)",
-                    self._member_name() or "?",
-                )
-                return "queued"
+            self._pending_interrupt_resumes.append(user_input)
             team_logger.info(
-                "[{}] dropping stale interrupt resume input (no pending "
-                "interrupt, no in-flight round)",
+                "[{}] queued interrupt resume (no matching pending interrupt; cached for tool_call_id retry)",
                 self._member_name() or "?",
             )
-            return "dropped"
+            return "queued"
 
     async def _run_pending_interrupt_resumes(self) -> None:
         """Retain IDLE notifications arriving while a previous send awaits ACK."""

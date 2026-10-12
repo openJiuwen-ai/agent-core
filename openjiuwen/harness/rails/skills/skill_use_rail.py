@@ -782,7 +782,15 @@ class SkillUseRail(DeepAgentRail):
         self._ensure_session_baseline(ctx)
 
     async def _fetch_evolution_texts(self, skills: Optional[List[Skill]] = None) -> None:
-        """Fetch and cache evolution experience texts from EvolutionStore."""
+        """Fetch and cache evolution experience texts from EvolutionStore.
+
+        The evolution store keys records by the skill's install directory
+        name, while ``skill.name`` is the SKILL.md frontmatter name. The two
+        disagree for third-party marketplace skills, so after a frontmatter
+        miss, retry with the directory name — otherwise the skill's evolution
+        experience would never be injected. The cache stays keyed by
+        ``skill.name`` because ``_get_skill_description`` consumes it that way.
+        """
         if self.evolution_store is None:
             return
         skills = self.skills if skills is None else skills
@@ -793,6 +801,10 @@ class SkillUseRail(DeepAgentRail):
             seen_names.add(skill.name)
             try:
                 text = await self.evolution_store.format_desc_experience_text(skill.name)
+                if not text:
+                    dir_name = Path(skill.directory).name
+                    if dir_name and dir_name != skill.name:
+                        text = await self.evolution_store.format_desc_experience_text(dir_name)
                 self._evolution_texts[skill.name] = text
             except Exception as exc:
                 logger.warning(

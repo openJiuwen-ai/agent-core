@@ -28,7 +28,6 @@ from openjiuwen.core.context_engine.context.session_memory_manager import (
     group_completed_api_rounds,
     invalidate_session_memory_anchor,
 )
-from openjiuwen.core.context_engine.context_engine import ContextEngine
 from openjiuwen.core.context_engine.processor.base import _invoke_via_stream
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
 from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
