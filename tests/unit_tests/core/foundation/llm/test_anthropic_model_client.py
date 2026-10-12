@@ -864,8 +864,14 @@ class TestResponseReasoning:
         Tool arguments are advanced exclusively by ``input_json_delta``.  When
         that handler returned ``None`` the whole argument stream produced zero
         chunks, so ``Model.stream``'s ``stream_idle_timeout`` (default 60s,
-        measured between emitted chunks) aborted the call and the tool use was
-        lost.  Every delta must therefore surface as a metadata-only chunk.
+        measured between emitted chunks that carry model output) aborted the
+        call and the tool use was lost.
+
+        The chunk has to carry a *real* tool call fragment.  ``Model.stream``
+        gates its timeout budget on ``carries_output_token()``, which inspects
+        only ``content`` / ``reasoning_content`` / ``tool_calls`` -- metadata is
+        never consulted.  A metadata-only chunk is a framing/heartbeat frame and
+        does not reset the budget, so it would not fix the timeout.
         """
         client = _make_client()
         state = {}
@@ -885,7 +891,13 @@ class TestResponseReasoning:
             progress = client._event_to_chunk(delta_event, state)
             assert progress is not None, "每个 input_json_delta 都必须产出进度 chunk"
             assert progress.content == ""
-            assert progress.tool_calls is None
+            # 关键回归点：这个 chunk 必须被判定为携带模型输出，否则超时预算不清零。
+            assert progress.carries_output_token(), (
+                "进度 chunk 若只是心跳，Model.stream 不会重置 idle 预算"
+            )
+            # 上游能拿到的是增量分片，而不是累积全量。
+            assert len(progress.tool_calls) == 1
+            assert progress.tool_calls[0].arguments == partial
             # _sanitize_replay_block 对 tool_use 只保留 type/id/name/input，
             # 因此 args_str 的累积不会泄漏进 metadata。
             assert progress.metadata[_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY] == [{
@@ -897,12 +909,14 @@ class TestResponseReasoning:
 
         stop = MagicMock(type="content_block_stop", index=0)
         final = client._event_to_chunk(stop, state)
+        # 参数已在 delta 阶段增量投递，收尾不得再投一次全量：
+        # __add__ 对同 id 分片做拼接，否则最终 arguments 会变成两份叠加。
         assert final.tool_calls == [
             ToolCall(
                 id="t1",
                 type="function",
                 name="lookup",
-                arguments='{"location": "NY"}',
+                arguments="",
                 index=0,
             )
         ]
@@ -912,6 +926,58 @@ class TestResponseReasoning:
             "name": "lookup",
             "input": {"location": "NY"},
         }]
+
+    def test_tool_input_json_delta_fragments_merge_without_duplication(self):
+        """按 ``Model.stream`` 的累积方式拼接分片，最终 arguments 必须完整且不重复。"""
+        client = _make_client()
+        state = {}
+
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.id = "t1"
+        tool_block.name = "lookup"
+        tool_block.input = {}
+        start = MagicMock(type="content_block_start", index=0)
+        start.content_block = tool_block
+        client._event_to_chunk(start, state)
+
+        accumulated = None
+        for partial in ('{"loc', 'ation": ', '"NY"}'):
+            delta_event = MagicMock(type="content_block_delta", index=0)
+            delta_event.delta = MagicMock(type="input_json_delta", partial_json=partial)
+            chunk = client._event_to_chunk(delta_event, state)
+            accumulated = accumulated + chunk if accumulated is not None else chunk
+
+        stop = MagicMock(type="content_block_stop", index=0)
+        final = client._event_to_chunk(stop, state)
+        accumulated = accumulated + final
+
+        assert len(accumulated.tool_calls) == 1
+        merged = accumulated.tool_calls[0]
+        assert merged.id == "t1"
+        assert merged.name == "lookup"
+        assert merged.arguments == '{"location": "NY"}', "增量分片拼接后应还原完整参数，且不重复"
+
+    def test_tool_without_input_json_delta_still_gets_full_arguments(self):
+        """零 delta 的退化路径（参数随 content_block_start 到达）仍应投出可解析的参数。"""
+        client = _make_client()
+        state = {}
+
+        tool_block = MagicMock()
+        tool_block.type = "tool_use"
+        tool_block.id = "t2"
+        tool_block.name = "ping"
+        tool_block.input = {}
+        start = MagicMock(type="content_block_start", index=0)
+        start.content_block = tool_block
+        client._event_to_chunk(start, state)
+
+        stop = MagicMock(type="content_block_stop", index=0)
+        final = client._event_to_chunk(stop, state)
+
+        assert final.tool_calls == [
+            ToolCall(id="t2", type="function", name="ping", arguments="{}", index=0)
+        ]
 
 
 # ---------------------------------------------------------------------------

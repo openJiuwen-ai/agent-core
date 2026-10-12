@@ -228,3 +228,130 @@ async def test_model_stream_consumer_time_does_not_count_against_idle_budget():
         await asyncio.sleep(0.1)
 
     assert received == ["a", "b"]
+
+
+# ---------------------------------------------------------------------------
+# Anthropic tool-argument streaming
+# ---------------------------------------------------------------------------
+
+# Each individual gap below stays far under the idle budget, but their sum
+# exceeds it.  Only a chunk that resets ``waited_since_progress`` survives that.
+_ANTHROPIC_CLIENT_CONFIG = None
+
+
+def _make_anthropic_client():
+    from openjiuwen.core.foundation.llm import ModelClientConfig
+    from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
+        AnthropicModelClient,
+    )
+    from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
+
+    return AnthropicModelClient(
+        ModelRequestConfig(model_name="claude-opus-4"),
+        ModelClientConfig(
+            client_provider="Anthropic",
+            api_key="mock-key",
+            api_base="https://api.anthropic.com",
+            verify_ssl=False,
+        ),
+    )
+
+
+def _tool_arg_events(partials):
+    """Build the Anthropic event sequence for one streamed tool call."""
+    from unittest.mock import MagicMock
+
+    tool_block = MagicMock()
+    tool_block.type = "tool_use"
+    tool_block.id = "t1"
+    tool_block.name = "lookup"
+    tool_block.input = {}
+
+    start = MagicMock(type="content_block_start", index=0)
+    start.content_block = tool_block
+
+    deltas = []
+    for partial in partials:
+        event = MagicMock(type="content_block_delta", index=0)
+        event.delta = MagicMock(type="input_json_delta", partial_json=partial)
+        deltas.append(event)
+
+    stop = MagicMock(type="content_block_stop", index=0)
+    return [start, *deltas, stop]
+
+
+@pytest.mark.asyncio
+async def test_model_stream_anthropic_tool_args_do_not_trip_idle_timeout():
+    """A long tool-argument stream must not be cut off by ``stream_idle_timeout``.
+
+    ``input_json_delta`` is the only event that advances Anthropic tool
+    arguments.  While it was swallowed the stream produced nothing for the whole
+    argument phase and the idle budget ran out.  Emitting a metadata-only chunk
+    does *not* help either: ``carries_output_token()`` ignores metadata, so such a
+    chunk stays a framing frame (see
+    ``test_model_stream_heartbeat_deltas_do_not_reset_idle_timeout``) and the
+    budget keeps draining.  The delta has to carry a real tool call fragment.
+
+    Every gap here is individually small; only their cumulative sum exceeds the
+    idle budget, so this fails if any delta fails to reset the budget.
+    """
+    partials = ['{"loc', 'ation": ', '"New', ' York', '"}']
+
+    async def anthropic_tool_arg_stream(**kwargs):
+        client = _make_anthropic_client()
+        state = {}
+        # A leading text chunk satisfies the first-token budget, mirroring the
+        # real "call a tool" flow where the model narrates before the arguments.
+        yield AssistantMessageChunk(content="looking it up")
+        for event in _tool_arg_events(partials):
+            await asyncio.sleep(0.04)
+            chunk = client._event_to_chunk(event, state)
+            if chunk is not None:
+                yield chunk
+
+    model = _build_model_with_stream(
+        anthropic_tool_arg_stream,
+        first_timeout=1.0,
+        idle_timeout=0.15,
+    )
+
+    received = [chunk async for chunk in model.stream(messages=[])]
+
+    fragments = [
+        call.arguments
+        for chunk in received
+        for call in (chunk.tool_calls or [])
+        if call.arguments
+    ]
+    assert fragments == partials, "上游必须收到逐片递进的工具参数"
+    assert "".join(fragments) == '{"location": "New York"}'
+
+
+@pytest.mark.asyncio
+async def test_model_stream_anthropic_tool_args_merge_into_one_complete_call():
+    """The accumulated message must expose exactly one tool call with full args."""
+    partials = ['{"loc', 'ation": ', '"New', ' York', '"}']
+
+    async def anthropic_tool_arg_stream(**kwargs):
+        client = _make_anthropic_client()
+        state = {}
+        for event in _tool_arg_events(partials):
+            chunk = client._event_to_chunk(event, state)
+            if chunk is not None:
+                yield chunk
+
+    model = _build_model_with_stream(
+        anthropic_tool_arg_stream,
+        first_timeout=1.0,
+        idle_timeout=1.0,
+    )
+
+    accumulated = None
+    async for chunk in model.stream(messages=[]):
+        accumulated = accumulated + chunk if accumulated is not None else chunk
+
+    assert len(accumulated.tool_calls) == 1
+    call = accumulated.tool_calls[0]
+    assert call.id == "t1"
+    assert call.name == "lookup"
+    assert call.arguments == '{"location": "New York"}', "参数不得重复拼接"

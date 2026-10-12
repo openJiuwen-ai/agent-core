@@ -1424,6 +1424,9 @@ class AnthropicModelClient(BaseModelClient):
                     "name": getattr(block, "name", "") or "",
                     "input": getattr(block, "input", None) or {},
                     "args_str": "",
+                    # 参数是否已经通过 input_json_delta 增量投递给上游。
+                    # content_block_stop 据此决定要不要再投一次全量 arguments。
+                    "args_streamed": False,
                 }
             elif block_type == "thinking":
                 tool_use_acc[idx] = {
@@ -1500,18 +1503,30 @@ class AnthropicModelClient(BaseModelClient):
                     finish_reason="null",
                 )
             if self._is_tool_input_json_delta(dtype, idx, tool_use_acc):
-                tool_use_acc[idx]["args_str"] += getattr(delta, "partial_json", "") or ""
-                # 工具参数只由 input_json_delta 推进，这里一旦 return None，整段
-                # 参数流期间上游一个 chunk 都收不到。而 Model.stream 用
-                # stream_idle_timeout（默认 60s）在「已产出 chunk 之间」计时，
-                # 长参数流会被 asyncio.wait_for 直接判为 idle 并掐断，整次工具
-                # 调用丢失。与 signature_delta / content_block_stop 一致，返回
-                # 仅带 metadata 的空 chunk 作为进度心跳。
+                partial_json = getattr(delta, "partial_json", "") or ""
+                tool_use_acc[idx]["args_str"] += partial_json
+                tool_use_acc[idx]["args_streamed"] = True
+                # 工具参数只由 input_json_delta 推进，这里一旦 return None，整段参数流
+                # 期间上游一个 chunk 都收不到，长参数流会被 Model.stream 按 idle 掐断。
+                #
+                # 这里必须投递真实的 tool call 分片，而不是仅带 metadata 的空 chunk：
+                # Model.stream 的超时预算走 AssistantMessageChunk.carries_output_token()，
+                # 它只看 content / reasoning_content / tool_calls，metadata 不参与判定。
+                # 空的 content 配 tool_calls=None 会被归为 framing-only（心跳 delta），
+                # waited_since_progress 不清零，stream_idle_timeout 依旧掐断整次调用
+                # —— config.py 与 carries_output_token 的 docstring 都明文排除了这一类。
+                # 带 arguments 的分片既计入 progress，也让上游真正拿到渐进式工具参数。
                 return AssistantMessageChunk(
                     content="",
                     reasoning_content=None,
                     metadata=_stream_blocks_metadata(tool_use_acc),
-                    tool_calls=None,
+                    tool_calls=[ToolCall(
+                        id=tool_use_acc[idx]["id"],
+                        type="function",
+                        name=tool_use_acc[idx]["name"],
+                        arguments=partial_json,
+                        index=idx,
+                    )],
                     usage_metadata=None,
                     finish_reason="null",
                 )
@@ -1533,6 +1548,10 @@ class AnthropicModelClient(BaseModelClient):
                 block["input"] = json.loads(args_str)
             except (TypeError, ValueError):
                 block["input"] = {"_raw_arguments": args_str}
+            # 参数若已由 input_json_delta 增量投递，收尾 chunk 必须置空 arguments：
+            # AssistantMessageChunk.__add__ 对同 id 分片做 arguments 拼接，再投一次
+            # 全量会让最终结果变成两份参数叠加。零 delta 的退化路径仍投全量兜底。
+            already_streamed = bool(block.get("args_streamed")) and bool(block.get("args_str"))
             return AssistantMessageChunk(
                 content="",
                 reasoning_content=None,
@@ -1540,7 +1559,7 @@ class AnthropicModelClient(BaseModelClient):
                     id=block["id"],
                     type="function",
                     name=block["name"],
-                    arguments=args_str,
+                    arguments="" if already_streamed else args_str,
                     index=idx,
                 )],
                 metadata=_stream_blocks_metadata(tool_use_acc),
