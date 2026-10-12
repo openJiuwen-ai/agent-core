@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/spawn.py`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
-| 最近一次修订日期 | 2026-09-21 |
-| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md、F_114_swarmflow-thirdparty-agent.md、F_115_external-session-fork.md |
+| 最近一次修订日期 | 2026-10-08 |
+| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md、F_114_swarmflow-thirdparty-agent.md、F_115_external-session-fork.md、F_116_swarmflow-thirdparty-model-source.md |
 
 ## 范围 / 边界
 
@@ -42,6 +42,9 @@
 `seed_checkpoint=<provider data>` 在首次 `start()` 前把宿主产生的指针写成该成员自己的 checkpoint 信封
 （`agent_id` / `host_session_id` 取自 context），供 fork 子会话以 `require_checkpoint` 续接；只在首启消费一次。
 `HarnessCard.fork_modes` 声明 provider 可原生物化的分支模式（`F_115`）。
+工作流成员在发射前经 `plan_external_model` 校验并解析三参数（`model` / `builtin_model` / `effort`，
+`build_cli_workflow_runtime(model_config=...)` 接收结果），命中 pool → 端点配置、命中目录 → CLI 自身登录、
+违反规则非重试失败、**绝不回退**（`F_116`）。
 5. **可靠性只由结构化事件驱动**。`TurnLifecycleEvent(STARTED)` → `begin_attempt(phase="turn")`；
    `FAILED` → 用 `TurnResult.error`（`category` / `code` / `provider_data.sdk_error_type` /
    `http_status`）`finalize_failure` 一次；`DiagnosticEvent(data.kind == "retrying")` →

@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-09-30 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md`、`F_96_swarmflow-worker-name-stability-and-isolation-sig.md`、`F_112_swarmflow-live-worker-activity.md`、`F_113_swarmflow-worker-progressive-tool.md`、`F_114_swarmflow-thirdparty-agent.md`、`F_115_external-session-fork.md`、`F_115_swarmflow-model-hint-fail-fast.md` |
+| 最近一次修订日期 | 2026-10-08 |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md`、`F_96_swarmflow-worker-name-stability-and-isolation-sig.md`、`F_112_swarmflow-live-worker-activity.md`、`F_113_swarmflow-worker-progressive-tool.md`、`F_114_swarmflow-thirdparty-agent.md`、`F_115_external-session-fork.md`、`F_115_swarmflow-model-hint-fail-fast.md`、`F_116_swarmflow-thirdparty-model-source.md` |
 
 ## 范围 / 边界
 
@@ -34,11 +34,13 @@
 - **脚本格式**：合法 Python 模块，顶层 `META={...}`(纯字面量，`ast.literal_eval` 强制) + `async def run(args)`(或 `run()`)。脚本用 `from swarmflow import agent, parallel, ...`（facade 模块导入时一次性把唯一包名 `swarmflow` 注册进 `sys.modules` 指向 facade；进程内固定映射、无 per-run 安装/卸载，故顶层 import 与 `run` 体内延迟 import 同样生效）。
 - **接缝**：`agent()`/`parallel()`/`pipeline()`/`agent_session()`/`human_session()`/`human()`/... 经 contextvar provider 转发；`Provider` 实现可整体替换。IO 接缝是 `AgentBackend`：单轮 `run(prompt, opts, schema_json, *, call_key=None) -> AgentResult`——`call_key` 是引擎的 call-path key（结构位置标识，重放确定；backend 派生 per-call 身份如 worker 成员名时必须哈希它而非计数调用次数，计数器在 resume 上会漂移因为命中调用不进 backend），无身份诉求的 backend 可忽略；加可选的有状态会话四方法 `open_session` / `send_turn` / `close_session` / `aclose`（默认 `NotImplementedError` / no-op，单轮 backend 不实现也不受影响）+ `KNOWN_OPTIONS`（backend 自声明的 options 白名单扩展）。
   `agent()` 的 option 集合包含 `label` / `phase` / `schema` / `model` /
-  `timeout` / `isolation`。`isolation` 当前只允许 `None` 或 `"worktree"`；
+  `timeout` / `isolation` / `builtin_model` / `effort`。`isolation` 当前只允许 `None` 或 `"worktree"`；
   engine 只校验与透传，具体隔离语义由 backend 实现（`TeamWorkerBackend` 真实创建/收尾 git worktree，见 `F_39`）。
+  `builtin_model` / `effort` 仅对三方节点有意义，由 `plan_external_model` 校验与解析（`F_116`），
+  native 节点提交即非重试拒绝。
 - **可观测性**：`Runtime` 有两个 sink。`log_sink: Callable[[str], None]`（诊断文本，默认 no-op）；`progress_sink: Callable[[WorkflowProgressEvent], None]`（结构化进度，默认 no-op）。`phase()`/`log()`/`agent()` 起止发 `WorkflowProgressEvent`；引擎不读 wall-clock（保持 resume 确定性），事件**无时间戳**——消费方在 agent_teams 层补时。`WORKFLOW_STARTED` 事件额外携带 `script_path`（`run_workflow(path)` 的绝对脚本路径，供嵌入层冷启动恢复 advisory 用，见 `F_110`；其它 kind 一律 None）。
   - **backend → engine 的进度接缝**：`run_workflow` 在建好 `Runtime` 后调 `backend.bind_progress_sink(rt.progress_sink)`，使 backend 能在**单次调用中途**（不只 engine 的起止钩子）发 `WorkflowProgressEvent`。`AgentBackend.progress_sink` 未绑定（如测试）时为 `None`，backend 静默。见 `F_112`。
-  - **单轮 worker 实时活动**：`ProgressKind.AGENT_ACTIVITY` 携带该节点的 `agent_id` / `phase` / `label` + `message="tool: <name>"`，由 backend 侧 rail 在 worker 的 tool call 上（每 worker 节流）发出，经上述接缝进入 `progress_sink`。`agent_id` 复用 journal call-path key，消费方据此把活动归位到同一节点（同 label 的循环 / parallel 分支唯一可判）。events 归属 4 层 `WorkflowRun`（`AgentActivity.activity`）而非 leader 播报——per-agent 事件太吵，详见 `F_112`。
+  - **单轮 worker 实时活动**：`ProgressKind.AGENT_ACTIVITY` 携带该节点的 `agent_id` / `phase` / `label` + 结构化字段 `activity_type`（`"tool_call"` = 执行前 / `"tool_result"` = 执行后）/ `tool_call_id`（配对键）/ `tool_name` / `content`（512 字符截断预览，`…(truncated)` 标记截断）+ 遗留 `message="tool: <name>"`。**三类执行体全覆盖**（`F_112` 修订）：单轮 worker 的 `SwarmflowActivityRail`（`before_tool_call` / `after_tool_call` 双钩、不节流，一次工具执行发一对，按 `tool_call_id` 配对，`after_tool_call` 优先级偏移排在其它 rail 后读到改写后的 tool message）；`agent_session` / `human_session` 的 avatar 挂同一 rail，事件带**当前轮** `correlation_id`（per-turn 对齐该轮 started/completed）；三方 worker / 三方会话经 `ExternalHarnessMemberRuntime.bind_activity_sink` 把 Claude `tool_use` / `tool_result` 与 Codex 工具类 item（command_execution / file_change / mcp_tool_call）映射为同一事件，会话每轮 `send_turn` 前重绑。`agent_id` 复用 journal call-path key，消费方据此把活动归位到同一节点（同 label 的循环 / parallel 分支唯一可判）。events 归属 4 层 `WorkflowRun`（`AgentActivity.activity`）而非 leader 播报——per-agent 事件太吵，详见 `F_112`。
 - **嵌套 workflow 的深度守卫是 per-task，不是全局**：`workflow()` 递归封顶用 `primitives._wf_depth`（contextvar，`_MAX_WORKFLOW_DEPTH=1`），非共享 `Runtime` 计数器。
   - contextvar 随 asyncio Task 拷贝：`parallel`/`pipeline` 各分支继承父深度 → **同层并发 `workflow()` 全部放行**
   - 真递归（子流 `run()` 内再调 `workflow()`，同一 Task）→ 返回 `None` + progress `LOG`（`[wf] nested workflow depth > 1 not allowed; skipping`）
@@ -50,7 +52,7 @@
   - 子流内 agent/human 事件携带 `nested_phase`；消费方**优先**用它挂卡，而非 author `phase`
   - child 声明复用 `PHASE`；`log_sink` 另打 `[wf] child phase declared: …`（默认 no-op）
 - **单次 fan-out 上限**：`parallel(thunks)` / `pipeline(items, ...)` 入口校验长度 ≤ `_MAX_FANOUT`（4096），超出抛 `WorkflowError`——显式报错而非静默截断（对齐参考工具的单次上限）。
-- **`agent()` 的 CC 对齐参数**：`agent(..., isolation='worktree', agent_type=...)` 经 `_ENGINE_OPTIONS` 接受并透传至 backend。`isolation` 已真实执行（`TeamWorkerBackend` 创建/收尾 git worktree，`F_39`）且**有值时折入 `call_signature`**（`F_96`：无值时签名逐字节不变，存量缓存不失效；编辑加 isolation 后同 run relaunch 必须 miss 重跑，否则用户的编辑被静默忽略）；`agent_type` 由 `TeamWorkerBackend` 消费（`F_114`）：非空时进 `call_signature` identity，且 `AGENT_STARTED` 携带 `agent_type` 与 `backend.describe_model(opts)` 描述的模型。详见 `F_42` / `F_96`。
+- **`agent()` 的 CC 对齐参数**：`agent(..., isolation='worktree', agent_type=...)` 经 `_ENGINE_OPTIONS` 接受并透传至 backend。`isolation` 已真实执行（`TeamWorkerBackend` 创建/收尾 git worktree，`F_39`）且**有值时折入 `call_signature`**（`F_96`：无值时签名逐字节不变，存量缓存不失效；编辑加 isolation 后同 run relaunch 必须 miss 重跑，否则用户的编辑被静默忽略）；`agent_type` 由 `TeamWorkerBackend` 消费（`F_114`）：非空时进 `call_signature` identity。`builtin_model` / `effort` 同纪律——**有值时**才折入 identity，无值时字节不变；三者（`model` / `builtin_model` / `effort`）在三方节点上经 `plan_external_model` 校验并解析成 `ExternalCliModelConfig`（pool 端点或 CLI 自身登录），规则违反在发射前抛**非重试** `BackendError`，**绝不回退**（`F_116`）。详见 `F_42` / `F_96` / `F_116`。
 
 ## Token 预算（`BudgetLedger`，`F_66`）
 
@@ -99,7 +101,7 @@
 2. **worker = 没有团队工具的 teammate**：`TeamWorkerBackend` 从 team 的 **teammate spec**（缺失则 leader spec，经 `agent_configurator` → `inject_team_handles` 的 `SWARMFLOW_WORKER_BASE_SPEC` 注入）`model_copy` 派生 worker `DeepAgentSpec`——保留 teammate 能力（model / tools / skills / workspace / sys_operation / **todo 规划 `enable_task_planning` / `enable_task_loop`**），但因 team rail 是装配期注入、原始 spec 不含，worker 天然无团队协作工具。每个 worker 是一个 `TeamHarness(role=WORKER)`。
 3. **不进 coordination 协作循环**：worker 不订阅消息总线、不认领任务、不被 dispatcher 唤醒。它经 **`TeamHarness.run_once`** 执行——`run_once` = `DeepAgent.invoke`（按 spec 的 `enable_task_loop` 自动单轮或自驱 task-loop），**不开 supervisor → 无 steer / 无 outputs 流**，返回值与 `Runner.run_agent` 一致；**不经** `TeamAgent.invoke` / `CoordinationKernel.start`。结束 `harness.dispose()` 释放 sys_operation（工具由 `run_once` 的 `teardown_tools` 自动清理）。
 4. **无 DB roster 身份、不持 `team_backend`**：swarmflow worker **不是 teammate**，`TeamWorkerBackend` **不**经 `spawn_member` 往 team DB 写 member row。每个 worker mint 成员名：有 `run_id` 时为 `{run_prefix}-{label_slug}-{ident}`，否则 `wf-{slug}-{ident}`（`F_47` / `S_21`）；`ident` 是引擎 call-path key 的 `sha256[:12]`（`call_key` 缺席时回退 per-backend 计数器，仅供直接调用）——call key 重放确定（命中也消耗槽位），故同 run resume 铸出相同成员名 → 相同 worktree slug → 创建 fast-recovery 复用 pause 留下的 worktree；跨 run 因 run_prefix 不同必然新名（F_47 语义保留，`F_96`）。满足 `_MEMBER_NAME_PATTERN`，只用作 worker card / owner id / 工作区目录名——纯进程内身份，用完即弃，不污染团队成员表。worker 工作区落在 `team_home/workspaces/{member}_workspace`——**开 worktree 隔离时也是它**，隔离只把 worker 的 cwd（`DeepAgentSpec.cwd`）指向 worktree，工作区不跟着走（[[F_69]]）；`agent_configurator` 已把整个 `team_home` 登记进团队 cleanup，故 worker 工作区随 `clean_team` 一并删除，**无需** backend 单独 `register_cleanup_path`。`TeamWorkerBackend` / `run_swarmflow` / `SwarmflowTool` 整条链**不注入 `team_backend`**（`F_44`）——worker 路径与 team DB 解耦。
-5. **model**：worker 默认继承 base spec（teammate/leader）的 `model`（`TeamModelConfig`）。`agent(model="X")` 的 per-call hint 经注入的 model resolver 解析为**配置而非实例**——`agent_configurator` 在 leader+`enable_swarmflow` 时构造 callable 类 `_SwarmflowModelResolver`（F_115：自闭包升级，调用契约不变），用 `resolve_member_model(ctx.team_spec, model_name="X", model_index=None)` 对 team model pool 做**纯位置查找**（无 allocator 轮转、无状态），返回 `TeamModelConfig`；命中则覆盖 worker spec.model。**未命中 fail-fast（F_115，推翻 F_31 决策 4 的静默回退）**：引擎 `_validate_model_hint` 在 `call_signature` 计算、`AGENT_STARTED` 事件与 journal 写入**之前**抛 `EngineError`（消息列出可用模型）——`agent()` 与 `AgentSession.send()` 都走它。池概念由 backend 自声明：`AgentBackend.model_pool_names() -> list[str] | None` 默认 `None`（无池概念、跳过校验，`MockBackend` / 旧 stub 行为逐字节不变）；`TeamWorkerBackend.model_pool_names()` 经鸭子探测暴露注入 resolver 的 `pool_names()`（活读，pool 刷新可见；旧式闭包 resolver 无此属性 → `None` → 不校验）。resolver 经 `BuildContext.extras` 的 `SWARMFLOW_MODEL_RESOLVER` 注入，`TeamWorkerBackend` 只持 callable，engine 对接层不耦合 pool/allocator 结构。纵深防御：resolver 解析落空保持 `ValueError` fail-fast（F_115 D4）——覆盖引擎预检之后的 pool 收缩窗口（`_attempt_calls` 按 backend 错误重试后 `AGENT_FAILED`），以及引擎路径之外的消费方（CLI MCP 工具集 / tool gateway）。
+5. **model**：worker 默认继承 base spec（teammate/leader）的 `model`（`TeamModelConfig`）。`agent(model="X")` 的 per-call hint 经注入的 `model_resolver` 回调解析为**配置而非实例**——`agent_configurator` 在 leader+`enable_swarmflow` 时构造闭包，用 `resolve_member_model(ctx.team_spec, model_name="X", model_index=None)` 对 team model pool 做**纯位置查找**（无 allocator 轮转、无状态），返回 `TeamModelConfig`；命中则覆盖 worker spec.model，未命中（pool 未配 / 名字缺失 / 无 hint）返回 `None` → 继承 base spec model。resolver 经 `BuildContext.extras` 的 `SWARMFLOW_MODEL_RESOLVER` 注入，`TeamWorkerBackend` 只持 `(name) -> TeamModelConfig | None` 回调，engine 对接层不耦合 pool/allocator 结构。**hint 解析失败是 pool miss，不是继承**（`F_116` 修订）：`model_resolver` 对非空 hint 返回 `None` 时 `_resolve_model` 抛**非重试** `BackendError`（文案含 pool 可兼容名单），不再静默回退到 base spec——确定性错误一次失败，不消耗重试。
 6. **worktree isolation**：`agent(isolation="worktree")` 给该 worker 创建
    owner-scoped worktree。`TeamWorkerBackend` 调
    `WorktreeManager.create_owner_worktree(slug)`，slug 固定为
@@ -128,6 +130,12 @@
    `ExternalHarnessMemberRuntime`（无团队加盟注入、`inject_mcp=False`、swarmflow worker 提示词），
    `ExternalMemberTurns` 驱动一轮后 `stop()`。usage 轮末经 `SwarmflowBudgetRail.bill()` 入两本账；
    schema 走提示词 + JSON 解析；`CancelledError` → `abort(immediate=True)`。成员名 / cwd 规则同 native worker。
+   **模型**（`F_116`）：发射前 `plan_external_model` 校验三参数——`model` 命中 pool 且协议兼容 → 端点
+   配置；`builtin_model`（+`effort`）命中该 kind 目录 → CLI 自身登录配置；互斥、`effort` 伴随、全空走 CLI
+   默认；任一违反 → **非重试** `BackendError`。`AGENT_STARTED.model` 是 best-known（`describe_model` 用同一
+   `plan_external_model` 算校验后展示值，失败回退原始 hint）；`AGENT_COMPLETED` / `AGENT_FAILED` 携带 CLI
+   实际报告的模型（`AgentResult.model` / `BackendError.model`），命名真正服务的端点。认证失败走双受众文案
+   （根因在前、workaround + 可兼容 pool 名单在后），**无回退**。
 
 ## Resume Journal 持久化（`run_swarmflow`）
 
@@ -312,8 +320,8 @@ rebuild 回灌）→ `NativeHarness.background_task_controller`；SwarmflowTool 
    - 有 branch：`{phase}#{disambig}:{label}:{turn}`（`disambig` = `_branch_disambig(_path)`，`par`→`p{i}`，`pipe`→`i{i}s{s}`，`.` 连接）
    - `HumanSession` 是 `AgentSession` 别名。详见 `F_39`。
 2. **句柄 + 懒开 + history 镜像**：`AgentSession` 在引擎层维护轻量 `_history`（`(user, assistant)` 对，**不进 journal**，靠脚本重放重建，仅供 resume 签名 / 未来 fork）。首个 cache-miss 的 `send` 才调 `backend.open_session` 建会话；前序 cache hit 全程不开、不驱动后端。
-3. **journal 兼容**：`call_signature(prompt, opts, schema_json, history=None)` **仅 history 非空时**把 history 折入哈希——`agent()`（history 恒空）签名逐字节不变，worker resume 零回归；会话 turn 折入 history，使上游 turn 变更级联重跑下游。**isolation 同纪律**（`F_96`）：**仅有值时**折入 identity dict（`label`/`phase`/`model` 三键集合之外的第四键），无值时字节不变——存量缓存不失效，编辑加 `isolation='worktree'` 后同 run relaunch 必须 miss 重跑（否则 SDD-0005 §4.3 的静默忽略缺口）。
-4. **options bag**：会话原语经 `options` dict 传调优参数，`_build_opts` 校验键 ∈ `_ENGINE_OPTIONS{label,phase,schema,model,timeout,isolation,agent_type} | backend.KNOWN_OPTIONS`，未知键 fail-fast；**值的治理**（F_115）：`_validate_model_hint` 把 fail-fast 从 KEY 扩展到 VALUE——backend `model_pool_names()` 非 `None` 且 `model` hint 不在池内 → 抛 `EngineError` 列出可用模型（池为 `None` 跳过校验），在签名/事件/journal 之前拦截。`agent()` 保持显式 kwargs（含 `isolation` / `agent_type`；isolation 真实执行且入签名，agent_type 真实路由，见 `F_114`）。
+3. **journal 兼容**：`call_signature(prompt, opts, schema_json, history=None)` **仅 history 非空时**把 history 折入哈希——`agent()`（history 恒空）签名逐字节不变，worker resume 零回归；会话 turn 折入 history，使上游 turn 变更级联重跑下游。**isolation 同纪律**（`F_96`）：**仅有值时**折入 identity dict（`label`/`phase`/`model` 三键集合之外的第四键），无值时字节不变——存量缓存不失效，编辑加 `isolation='worktree'` 后同 run relaunch 必须 miss 重跑（否则未知键会被静默忽略）。
+4. **options bag**：会话原语经 `options` dict 传调优参数，`_build_opts` 校验键 ∈ `_ENGINE_OPTIONS{label,phase,schema,model,timeout,isolation,agent_type,builtin_model,effort} | backend.KNOWN_OPTIONS`，未知键 fail-fast；`agent()` 保持显式 kwargs（含 `isolation` / `agent_type`；isolation 真实执行且入签名，agent_type 真实路由，见 `F_114`）；**值的治理**（F_115）：`_validate_model_hint` 把 fail-fast 从 KEY 扩展到 VALUE——backend `model_pool_names()` 非 `None` 且 `model` hint 不在池内 → 抛 `EngineError` 列出可用模型（池为 `None` 跳过校验），在签名/事件/journal 之前拦截。
 5. **phase 动态绑定**：会话 `send` 未显式传 phase 时取 `rt.current_phase`，一个会话可跨多个 phase；同一会话被并发 `send` 一次性告警（`_in_flight`）。
 6. **后端 = 有状态 avatar harness（`AvatarSessionManager`）**：从 base spec 派生（agent → `worker_base_spec`；human → `human_base_spec`）经 `_member_spec.derive_member_spec`（与 worker 共享）建唯一 card + 多轮 role prompt → `TeamHarness.build(role=WORKER)` → `start()` **一次** → 多轮 `send`。`role=WORKER` 隔离级别同 worker（不进 coordination），但**保活多轮**、`dispose` 于 `close_session`/`aclose`。成员名为 `{run_prefix}-sess-{slug}-{n}`（human：`-human-`；无 run id 时 `wf-` 前缀），子会话 id 因而按 run 隔离（`F_114` 决策 7）。
 7. **send-等-收**：`harness.send(prompt, immediate=False)` 起一轮；`subscribe(on_round, on_state)` 的回调（跑在 supervisor 协程，仅 set future / cache result）在 `RUNNING→IDLE` settle 时 resolve 本轮 future，取**最后一轮 finished 的 `output`**（一次 send 可能驱动多轮 task-loop continuation）。`result_type=="interrupt"`（avatar 内部 HITL）→ 抛 `BackendError` + error 日志（后续特性），不返回半截。
@@ -334,8 +342,13 @@ rebuild 回灌）→ `NativeHarness.background_task_controller`；SwarmflowTool 
     （`_SessionState.entry`），运行时在首轮 `send_turn` 启动：history 空 → 派生 id 首启；history 非空
     （冷续跑重建）→ `resume_external_backend=True, require_checkpoint=True`，指针缺失抛
     `HarnessProtocolError`。多轮复用同一运行时，`close_session` / `aclose` 时 `stop()`；`abort_all`
-    对外部会话调 `abort(immediate=True)`。history 镜像不用于播种（CLI 自有会话记忆）。fork：`capture_fork` 对外部父会话返回**凭据**（provider / 父指针 / 模式 / 切分标记），子会话首轮 `reconcile` → `materialise_external_fork`（Claude 离线 `fork_session`，Codex `thread/fork lastTurnId`）→ 以 `seed_checkpoint` + `require_checkpoint` 续接子指针；模式 ∉ `card.fork_modes`（两家均 `{full, before}`）、`keep_rounds` 越界、标记缺失、凭据与父历史不符均 `BackendError`。轮标记与指针随成员子会话持久化（`swarmflow_external_turns`）。见 `F_115`。human 会话不接受 `agent_type`。
-14. **会话模型首轮锁定（`F_115`）**：`AgentSession` 的 model 固定在**首个 cache-miss 轮**——avatar 开启（`_ensure_open`）时把当轮 hint 记入 `_opened_model`（`__slots__` 成员）。后续轮传不同 hint → 抛 `EngineError` 并指引 `fork()`（换模型的唯一正道：中途换 model 会折入 `call_signature`，造成 cache MISS + 在旧模型上付费重跑）；同 hint 重复传是 no-op；`fork()` 派生的子会话独立锁定自己的 model。锁定校验在 `_validate_model_hint` 之后（池外 hint 先报更具体的"not in the model pool"）。
+    对外部会话调 `abort(immediate=True)`。history 镜像不用于播种（CLI 自有会话记忆）。fork：`capture_fork` 对外部父会话返回**凭据**（provider / 父指针 / 模式 / 切分标记；标记 = Codex `native_turn_id` 或 Claude 本轮最后一条 assistant 消息的转写 uuid，非 API `message_id`），子会话首轮 `reconcile` → `materialise_external_fork`（Claude 离线 `fork_session`，Codex `thread/fork lastTurnId`）→ 以 `seed_checkpoint` + `require_checkpoint` 续接子指针；子会话若已持久化自己的指针则跳过物化直接续接；模式 ∉ `card.fork_modes`（两家均 `{full, before}`）、`keep_rounds` 越界、标记缺失、凭据与父历史不符均 `BackendError`。轮标记与指针随成员子会话持久化（`swarmflow_external_turns`）。见 `F_115`。human 会话不接受 `agent_type`。
+14. **模型首锁（`F_116`）**：一个 avatar 只跑一个模型，首个 live turn 记录该会话的模型身份锁，后续
+    live turn 的 hint 解析结果与锁不一致 → `EngineError`（文案指路 `fork()`：换模型 = 新会话）。解析
+    引擎侧 `_session_model_identity`：native 按原始 `model` hint，三方经 `plan_external_model` 归一
+    （pool 端点 / 目录内置 / 全空三类身份），**`model="X"` 与 `builtin_model="X"` 是不同供应、恒不等**。无 hint 锁定的报错指名实际锁定物：native 经 backend 钩子 `describe_base_model()` 指名基 spec 具体模型（无钩子/无名回退通用短语），三方指名 `the {cli} CLI's own default model`。
+    纯 cache-hit 重放不打开 avatar、不加锁——resume 里"后面才 live 的 turn"以自己的 hint 加锁；fork 子
+    会话是全新 `AgentSession`，独立加锁；human 会话不锁（真人作答）；一次性 `agent()` 不锁（用完即弃）。
 
 ## 结构化输出工具协议（`StructuredOutputTool`）
 
@@ -351,6 +364,10 @@ rebuild 回灌）→ `NativeHarness.background_task_controller`；SwarmflowTool 
 - **核心字段**（按 kind 填充）：
   - workflow：`name` / `description` / `phases`
   - agent/phase/log：`phase` / `label` / `prompt` / `model` / `outcome` / `message`
+  - **`model` 按 kind 区分**（`F_116`）：`agent_started` 是 best-known（`backend.describe_model(opts)`
+    校验后展示，失败回退原始 `model` hint）；`agent_completed` / `agent_failed` 携带 CLI 实际报告的模型
+    （`AgentResult.model` / `BackendError.model`），命名真正服务（或失败）的端点；native 与 cache-hit 为
+    `None`（display-only，从不进 journal）
   - human：`correlation_id` / `answer`（格式见有状态会话段）
   - 节点匹配：`node_type` / `agent_id`
   - 并行 run：`run_id`（`wf_{12hex}`，`F_47`）；`workflow_started` / `phase` 播报含 `{run_id}`
