@@ -26,6 +26,10 @@ _EXPIRY_NOTIFY_TIMEOUT_SECONDS = 1.0
 # session 交互锁把同会话后续审批全部卡死（2026-09-28 事故机制 A）。
 _SENDER_DRAIN_TIMEOUT_SECONDS = 5.0
 
+# 自动推导 turn（排队等锁）上限时的余量：覆盖 sender 收尾（5s）、过期通知（1s）
+# 与调度抖动。turn 上限 = 本请求 TTL × (前方同 session 在途数 + 1) + 本余量。
+_TURN_WAIT_SLACK_SECONDS = 30.0
+
 
 class SubagentApprovalCancelled(RuntimeError):
     """Pending delegated approval was withdrawn by lifecycle management."""
@@ -76,7 +80,7 @@ class SubagentApprovalRegistry:
     def __init__(
         self,
         *,
-        max_pending_per_session: int = 5,
+        max_pending_per_session: int = 20,
         max_queued_per_scope: int = 8,
         turn_wait_timeout: float | None = None,
     ) -> None:
@@ -89,14 +93,36 @@ class SubagentApprovalRegistry:
         self._guard = threading.RLock()
         self._pending: dict[str, _PendingApproval] = {}
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # 单 session 在途审批总上限——按 session 计数，**含排队者**（已展示与
+        # 排队者都在 _pending 里）。必须 > 1 + max_queued_per_scope，否则单
+        # scope 的队列深度不可达、事故形态仍会被硬拒（检视意见 2026-10-12：
+        # 旧默认 5 使单 session 有效并发被钳到 5，6 并发的 09-28 形态仍丢 1 张）。
+        # 默认 20 = 单 scope 满队列（9）+ 第二个并发 scope 的余量。
         self._max_pending_per_session = max_pending_per_session
-        # 同 scope 排队深度（持卡者之外的额外注册数）。默认 8 是给调大了
-        # session 上限的部署的 scope 维度护栏；默认 max_pending_per_session=5
-        # 下同 scope 有效深度本就受 session 配额约束。
+        # 同 scope 排队深度（持卡者之外的额外注册数）。
         self._max_queued_per_scope = max_queued_per_scope
-        # 排队等锁（等前一个审批 settle）的上限；None = 按调用方 timeout×2。
-        # 单个前驱正常最坏占用 ≈ TTL + 发卡 + 有界收尾，2×TTL 覆盖并留裕量。
+        # 排队等锁上限；None = 自动按「本请求 TTL × (前方同 session 在途数 + 1)
+        # + _TURN_WAIT_SLACK_SECONDS」推导（见 _resolve_turn_timeout），显式值优先。
         self._turn_wait_timeout = turn_wait_timeout
+        if max_pending_per_session <= max_queued_per_scope:
+            logger.warning(
+                "[skill_authorization] subagent approval session cap %s <= scope queue depth %s: "
+                "a single scope's queue is unreachable, raise max_pending_per_session",
+                max_pending_per_session,
+                max_queued_per_scope,
+            )
+
+    def _resolve_turn_timeout(self, timeout: float, waiters_ahead: int) -> float:
+        """排队等锁上限：显式配置优先；否则覆盖前方每个在途者各吃满自身 TTL 的最坏情况。
+
+        ``waiters_ahead`` = 本请求注册时同 session 已在途数（含已展示与排队者），
+        即 FIFO 顺序上先于本请求的锁竞争者。固定倍数（如 2×TTL）在排队深度
+        ≥3 时会让靠后的排队者先撞 turn 超时（卡从未展示即被拒，检视意见
+        2026-10-12），故默认与深度挂钩。
+        """
+        if self._turn_wait_timeout is not None:
+            return self._turn_wait_timeout
+        return timeout * (waiters_ahead + 1) + _TURN_WAIT_SLACK_SECONDS
 
     @classmethod
     def get_instance(cls) -> "SubagentApprovalRegistry":
@@ -173,8 +199,10 @@ class SubagentApprovalRegistry:
                     f"scope approval queue limit reached: "
                     f"session={sid!r} scope={scope!r} limit={self._max_queued_per_scope}",
                 )
-            session_count = sum(item.request.session_id == sid for item in self._pending.values())
-            if session_count >= self._max_pending_per_session:
+            # session 维度总上限（含排队者）；本次计数同时作为「前方同 session
+            # 在途数」，供 turn 等待上限按排队深度自适应（见 _resolve_turn_timeout）。
+            waiters_ahead = sum(item.request.session_id == sid for item in self._pending.values())
+            if waiters_ahead >= self._max_pending_per_session:
                 raise SubagentApprovalCapacityError(
                     f"session pending approval limit reached: session={sid!r} limit={self._max_pending_per_session}",
                 )
@@ -182,11 +210,12 @@ class SubagentApprovalRegistry:
             session_lock = self._session_locks.setdefault(sid, asyncio.Lock())
         sender_task: asyncio.Task[None] | None = None
         # 锁获取三路竞速：等锁 / future 先完成（排队期间被 resolve 或被取消
-        # 冲刷，直接返回不再傻等锁）/ turn 超时（前驱卡死的安全阀——本 MR 已
-        # 把前驱各等待全部有界化，正常排队不应触到这里）。锁的释放统一收敛
-        # 到外层 finally：排队者被 settle 时若 acquire 恰好已完成，锁也必须
-        # 释放，否则下一个排队者永久等待。
-        turn_timeout = self._turn_wait_timeout if self._turn_wait_timeout is not None else timeout * 2.0
+        # 冲刷，直接返回不再傻等锁）/ turn 超时。turn 上限按排队深度自适应
+        # （见 _resolve_turn_timeout），正常排队（每个前驱各吃满一次 TTL）不应
+        # 触到这里；它仍是「前驱卡死」的安全阀。锁的释放统一收敛到外层
+        # finally：排队者被 settle 时若 acquire 恰好已完成，锁也必须释放，
+        # 否则下一个排队者永久等待。
+        turn_timeout = self._resolve_turn_timeout(timeout, waiters_ahead)
         acquire_task = asyncio.ensure_future(session_lock.acquire())
         lock_held = False
         try:

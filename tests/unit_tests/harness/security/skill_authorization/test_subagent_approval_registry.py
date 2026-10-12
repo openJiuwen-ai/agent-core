@@ -379,3 +379,81 @@ async def test_cancel_scope_flushes_active_and_queued(fresh_registry):
             await asyncio.wait_for(task, timeout=2)
     assert send_order == ["call-a"], "queued request's sender must never run"
     assert fresh_registry.pending_requests() == ()
+
+
+@pytest.mark.asyncio
+async def test_incident_shape_six_concurrent_approvals_all_register(fresh_registry):
+    """09-28 形态：单 session 单 scope 6 并发审批，默认上限下全部注册（不再硬拒）。
+
+    检视意见 2026-10-12 ①：旧默认 max_pending_per_session=5 会把单 session
+    有效并发钳到 5，6 并发仍丢 1 张；默认提到 20 后事故形态不再触发。
+    """
+    async def hanging_sender(_request):
+        await asyncio.Event().wait()
+
+    tasks = [
+        _make_request_task(fresh_registry, f"call-{i}", sender=hanging_sender, timeout=30.0) for i in range(6)
+    ]
+    try:
+        await _wait_for_pending(fresh_registry, count=6)
+        assert len(fresh_registry.pending_requests()) == 6
+    finally:
+        assert fresh_registry.cancel_scope("session-1", "scope-1") == 6
+        for task in tasks:
+            with pytest.raises(SubagentApprovalCancelled):
+                await asyncio.wait_for(task, timeout=2)
+
+
+def test_session_cap_below_scope_depth_warns(caplog):
+    """session 上限 ≤ scope 队列深度时告警（单 scope 队列不可达）。"""
+    with caplog.at_level(
+        logging.WARNING,
+        logger="openjiuwen.harness.security.skill_authorization.subagent_approval_registry",
+    ):
+        SubagentApprovalRegistry(max_pending_per_session=5, max_queued_per_scope=8)
+    assert any("unreachable" in record.getMessage() for record in caplog.records)
+
+
+def test_resolve_turn_timeout_scales_with_queue_depth(fresh_registry):
+    """turn 等待上限：自动模式与排队深度挂钩；显式配置优先。"""
+    from openjiuwen.harness.security.skill_authorization import subagent_approval_registry as mod
+
+    slack = mod._TURN_WAIT_SLACK_SECONDS
+    assert fresh_registry._resolve_turn_timeout(120.0, 0) == 120.0 + slack
+    assert fresh_registry._resolve_turn_timeout(120.0, 3) == 120.0 * 4 + slack
+    fresh_registry._turn_wait_timeout = 7.0
+    assert fresh_registry._resolve_turn_timeout(120.0, 3) == 7.0
+
+
+@pytest.mark.asyncio
+async def test_deep_queue_gets_card_within_scaled_turn_wait(fresh_registry, monkeypatch):
+    """排队深度 3：靠后请求按深度自适应等待并拿到卡（固定 2×TTL 会先撞 turn 超时）。
+
+    检视意见 2026-10-12 ③：前驱各自吃满 TTL 才释放锁，固定倍数（2×TTL）在
+    深度 ≥3 时让靠后排队者在拿到卡前就被 turn 超时拒绝。
+    """
+    from openjiuwen.harness.security.skill_authorization import subagent_approval_registry as mod
+
+    monkeypatch.setattr(mod, "_TURN_WAIT_SLACK_SECONDS", 0.5)
+    send_order: list[str] = []
+
+    async def quick_sender(request):
+        send_order.append(request.tool_call_id)
+
+    ttl = 0.4
+    task_a = _make_request_task(fresh_registry, "call-a", sender=quick_sender, timeout=ttl)
+    await _wait_for_pending(fresh_registry)
+    task_b = _make_request_task(fresh_registry, "call-b", sender=quick_sender, timeout=ttl)
+    task_c = _make_request_task(fresh_registry, "call-c", sender=quick_sender, timeout=ttl)
+    await _wait_for_pending(fresh_registry, count=3)
+
+    # A 吃满 TTL(~0.4s) 超时 → B 接卡吃满 TTL(~0.8s) → C 接卡；
+    # C 的 turn 上限 = 0.4×3 + 0.5 = 1.7s（固定 2×TTL=0.8s 会在接卡瞬间超时）。
+    await asyncio.wait_for(_wait_for_sender(send_order, "call-c"), timeout=3)
+    c_id = [r.approval_id for r in fresh_registry.pending_requests() if r.tool_call_id == "call-c"][0]
+    assert fresh_registry.resolve(session_id="session-1", approval_id=c_id, kind=_KIND, answer="c-yes")
+    assert await asyncio.wait_for(task_c, timeout=2) == "c-yes"
+
+    for task in (task_a, task_b):
+        with pytest.raises(SubagentApprovalTimeout):
+            await asyncio.wait_for(task, timeout=2)
