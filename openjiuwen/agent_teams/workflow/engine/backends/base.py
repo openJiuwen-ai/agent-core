@@ -129,6 +129,16 @@ class AgentBackend(abc.ABC):
         """
         self._progress_sink = progress_sink
 
+    def describe_model(self, opts: dict) -> str | None:
+        """Name the model this backend would assemble for ``opts``, for progress events.
+
+        The engine emits ``AGENT_STARTED`` before it calls the backend, so the
+        raw ``opts["model"]`` hint is all it knows; a backend that resolves the
+        model elsewhere (an external CLI's configured default) reports it here.
+        ``None`` keeps the raw hint.
+        """
+        return None
+
     @abc.abstractmethod
     async def run(
         self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None

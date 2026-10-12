@@ -45,6 +45,7 @@ from openjiuwen.harness_protocol import (
     HarnessEvent,
     HarnessModelControl,
     HarnessProtocol,
+    HarnessProtocolError,
     HarnessState,
     HarnessStateError,
     HostCapability,
@@ -202,6 +203,9 @@ class ExternalHarnessMemberRuntime:
             asks for an immediate abort the provider cannot deliver.
         resume_external_backend: Require the provider to resume its persisted
             session from the member checkpoint instead of starting fresh.
+        require_checkpoint: With ``resume_external_backend``, refuse to start
+            when no checkpoint pointer is stored instead of falling back to a
+            fresh session — for hosts that know the member already has history.
         agent_kind: Reliability vocabulary for this member (``claude`` /
             ``codex``); ``None`` disables the external-runtime reliability loop.
         inject_mcp: Whether the spawn path should mount the team MCP server.
@@ -216,6 +220,7 @@ class ExternalHarnessMemberRuntime:
         team_context_tracker: TeamContextTracker | None = None,
         stop_on_unsupported_force_abort: bool = False,
         resume_external_backend: bool = False,
+        require_checkpoint: bool = False,
         agent_kind: str | None = None,
         cli_path: str | None = None,
         inject_mcp: bool = False,
@@ -225,6 +230,7 @@ class ExternalHarnessMemberRuntime:
         self._context_source = context
         self._team_context_tracker = team_context_tracker
         self._resume_external_backend = resume_external_backend
+        self._require_checkpoint = require_checkpoint
         self._agent_kind = agent_kind
         self._cli_path = cli_path
         self.inject_mcp = inject_mcp
@@ -401,6 +407,11 @@ class ExternalHarnessMemberRuntime:
             capabilities.add(HostCapability.CHECKPOINT_SINK)
         if self._resume_external_backend:
             if checkpoint is None:
+                if self._require_checkpoint:
+                    raise HarnessProtocolError(
+                        f"member {self._member_name} must resume its {self._harness.card.name} "
+                        "session but no checkpoint pointer is stored"
+                    )
                 team_logger.warning(
                     "[external-cli] member {} has no saved checkpoint; starting a new session",
                     self._member_name,

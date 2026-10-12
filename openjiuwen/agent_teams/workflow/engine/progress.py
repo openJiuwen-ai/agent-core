@@ -148,6 +148,7 @@ class WorkflowProgressEvent:
     * ``token_input`` / ``token_output`` — the prompt / completion split of
       ``tokens`` for display (``AGENT_COMPLETED``); ``None`` when the provider
       reported no split.
+    * ``agent_type``          — external provider name (claude / codex) on AGENT_STARTED; None for native workers.
     """
 
     kind: str
@@ -184,6 +185,7 @@ class WorkflowProgressEvent:
     cache_tokens: int | None = None
     token_input: int | None = None
     token_output: int | None = None
+    agent_type: str | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has

@@ -51,6 +51,7 @@ from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudget
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
+from openjiuwen.agent_teams.workflow.backends.external_turns import ExternalMemberTurns
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
 from openjiuwen.core.session.vcs.codec import encode_message
@@ -141,6 +142,12 @@ class _SessionState:
     last_finished: dict | None = None
     failed: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # one turn at a time
+    # External (agent_type) sessions: the declared CLI entry and the turn driver
+    # over its runtime. ``external`` stays None until the first turn, because
+    # whether that turn is a fresh start or a cold resume is only known then.
+    agent_type: str | None = None
+    entry: Any = None
+    external: ExternalMemberTurns | None = None
 
 
 class AvatarSessionManager:
@@ -182,6 +189,9 @@ class AvatarSessionManager:
         workflow_budget: BudgetLedger | None = None,
         kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
         skill_visibility_fn: Callable[[Any, str], Any] | None = None,
+        external_cli_agents: Sequence[Any] = (),
+        gate_agent_type: Callable[[str], Any] | None = None,
+        external_cwd: Callable[[str, Any], str | None] | None = None,
     ) -> None:
         self._budget = budget if budget is not None else BudgetLedger()
         self._workflow_budget = workflow_budget
@@ -219,6 +229,15 @@ class AvatarSessionManager:
         # base spec mounts no filesystem/shell toolset at all.
         self._skill_visibility_fn = skill_visibility_fn
         self._reply_topic_subscribed = False
+        self._external_cli_agents: tuple[Any, ...] = tuple(external_cli_agents)
+        self._gate_agent_type = gate_agent_type
+        self._external_cwd = external_cwd
+        # Tracks external-session member names so the fork guard survives close_session.
+        self._external_members: set[str] = set()
+        # Local import: team_worker_backend imports this module lazily (circular).
+        from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
+
+        self._run_prefix = TeamWorkerBackend._run_id_prefix(run_id)
 
     # ------------------------------------------------------------------
     # Engine session-backend surface (delegated from TeamWorkerBackend)
@@ -251,10 +270,24 @@ class AvatarSessionManager:
         backend invoked directly) a fresh name is minted.
         """
         base = self._human_base_spec if kind == "human" else self._worker_base_spec
-        if base is None:
+        agent_type = opts.get("agent_type")
+        if agent_type and kind == "human":
+            raise BackendError("agent_type is not valid for human sessions (a person answers, not a CLI)")
+        entry = None
+        if agent_type:
+            if self._gate_agent_type is None:
+                raise BackendError("this backend has no external CLI gate; agent_type is unavailable")
+            entry = self._gate_agent_type(agent_type)
+            if fork_data is not None:
+                raise BackendError(
+                    f"fork of an external {agent_type} session is not supported in this version"
+                )
+        if entry is None and base is None:
             raise BackendError(f"no base spec available for {kind!r} sessions")
         if member_name is None:
             member_name = self._next_member_name(kind, opts)
+        if entry is not None:
+            self._external_members.add(member_name)
         state = _SessionState(
             kind=kind,
             spec_base=base,
@@ -262,11 +295,14 @@ class AvatarSessionManager:
             member_name=member_name,
             budget_rail=SwarmflowBudgetRail(self._budget, workflow_budget=self._workflow_budget),
             session_id=self._derive_avatar_session_id(member_name),
+            agent_type=agent_type,
+            entry=entry,
         )
         self._sessions[member_name] = state
         if kind == "human":
             await self._ensure_reply_subscription()
-        await self._start_avatar(state, opts, fork_data)
+        if entry is None:
+            await self._start_avatar(state, opts, fork_data)
         return member_name
 
     async def capture_fork(self, session_id: str, *, keep_rounds: int | None, fork_mode: str) -> dict | None:
@@ -293,9 +329,11 @@ class AvatarSessionManager:
         warning is logged and the fork silently degrades to full-context,
         mirroring the team fork's "wrong name → full-context" guard.
         """
-        state = self._sessions.get(session_id)
-        if state is not None and state.harness is not None:
-            native = state.harness.get_deep_agent()
+        parent = self._sessions.get(session_id)
+        if session_id in self._external_members or (parent is not None and parent.agent_type):
+            raise BackendError(f"fork of an external session {session_id!r} is not supported in this version")
+        if parent is not None and parent.harness is not None:
+            native = parent.harness.get_deep_agent()
             return self._fork_data_from_native(native, session_id, fork_mode, keep_rounds)
 
         # No live parent avatar (fully-hit resume): recover from the persisted
@@ -490,6 +528,8 @@ class AvatarSessionManager:
         if state is None:
             raise BackendError(f"unknown session {session_id!r}")
         async with state.lock:
+            if state.entry is not None:
+                return await self._external_turn(state, prompt, opts, schema_json, history)
             await self._seed_mirror_fallback(state, history)
             if state.kind == "human":
                 return await self._human_turn(state, prompt, opts, schema_json, correlation_id)
@@ -531,7 +571,15 @@ class AvatarSessionManager:
     async def close_session(self, session_id: str) -> None:
         """Dispose one session's avatar and drop its row (idempotent)."""
         state = self._sessions.pop(session_id, None)
-        if state is None or state.harness is None:
+        if state is None:
+            return
+        if state.external is not None:
+            try:
+                await state.external.stop()
+            except Exception:
+                team_logger.debug("[swarmflow] external session stop failed for %s", session_id, exc_info=True)
+            return
+        if state.harness is None:
             return
         session = state.harness.current_session()
         release_kvc = getattr(session, "release_kvc", None)
@@ -590,11 +638,13 @@ class AvatarSessionManager:
         self._pending_reply_buffer.clear()
         live = [state for state in list(self._sessions.values()) if state.harness is not None]
 
+        external = [state for state in list(self._sessions.values()) if state.external is not None]
         results = await asyncio.gather(
             *(state.harness.abort(immediate=True) for state in live),
+            *(state.external.abort() for state in external),
             return_exceptions=True,
         )
-        for state, exc in zip(live, results):
+        for state, exc in zip(live + external, results):
             if isinstance(exc, Exception):  # noqa: BLE001 - best effort during pause
                 team_logger.debug("[swarmflow] session abort failed for %s", state.member_name)
 
@@ -866,6 +916,81 @@ class AvatarSessionManager:
             output_tokens=turn_output or None,
         )
 
+    async def _external_turn(
+        self,
+        state: _SessionState,
+        prompt: str,
+        opts: dict,
+        schema_json: dict | None,
+        history: Sequence[dict],
+    ) -> AgentResult:
+        """Drive one turn on an external CLI session, launching it on the first turn.
+
+        The engine's history mirror tells the two first-turn cases apart: empty
+        means this session has never run (fresh start under a derived id);
+        non-empty means we are rebuilding after a cold resume, so the CLI
+        session must be resumed from its checkpoint pointer — and a missing
+        pointer is an error, never a silent fresh start that would forget the
+        conversation the script believes it is continuing.
+        """
+        if state.external is None:
+            resume = state.turns_executed == 0 and bool(history)
+            state.external = await self._build_external_turns(state, resume=resume, require=resume)
+            try:
+                await state.external.start(self._team_session_for(state))
+            except Exception:
+                try:
+                    await state.external.stop()
+                except Exception:
+                    team_logger.debug("[swarmflow] external session cleanup failed for %s", state.member_name, exc_info=True)
+                state.external = None
+                team_logger.exception(
+                    "[swarmflow] external session start failed for %s (provider=%s, run=%s, resume=%s)",
+                    state.member_name,
+                    state.agent_type,
+                    self._run_id,
+                    resume,
+                )
+                raise
+        tokens_before = state.budget_rail.call_tokens
+        try:
+            outcome = await state.external.run_turn(prompt, schema_json=schema_json)
+        except BackendError as e:
+            state.budget_rail.bill(e.tokens or 0)
+            raise
+        finally:
+            state.turns_executed += 1
+        state.budget_rail.bill(outcome.tokens)
+        return AgentResult(
+            text=outcome.text,
+            structured=outcome.structured,
+            tokens=state.budget_rail.call_tokens - tokens_before,
+        )
+
+    async def _build_external_turns(
+        self, state: _SessionState, *, resume: bool, require: bool
+    ) -> ExternalMemberTurns:
+        """Build the runtime for an external session (override point for tests)."""
+        from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_workflow_runtime
+
+        cwd = self._external_cwd(state.member_name, state.entry) if self._external_cwd is not None else None
+        try:
+            runtime = await build_cli_workflow_runtime(
+                cli_agent=state.agent_type or "",
+                entry=state.entry,
+                member_name=state.member_name,
+                member_agent_id=f"{self._team_name}_{state.member_name}",
+                session_id=self._session_id or "",
+                team_name=self._team_name,
+                system_prompt=self._session_system_prompt(state),
+                cwd=cwd,
+                resume_external_backend=resume,
+                require_checkpoint=require,
+            )
+        except Exception as e:
+            raise BackendError(f"external session build failed for {state.member_name}: {e}") from e
+        return ExternalMemberTurns(runtime, member_name=state.member_name)
+
     @staticmethod
     async def _drive_round(state: _SessionState, prompt: str) -> dict | None:
         """Send one round and await the harness settling back to IDLE."""
@@ -1066,6 +1191,11 @@ class AvatarSessionManager:
         read-increment keeps it collision-free under the engine's concurrent
         fan-out, and a resumed run replays identical names because fan-out
         order is deterministic.
+        ``{run_prefix}-sess-<label-slug>-<n>`` (``-human-`` for human sessions);
+        ``wf-sess-…`` / ``wf-human-…`` when no run id is set. The run prefix makes
+        the avatar's child session id run-scoped: the same script re-run under a
+        new run id starts with fresh memory, and two concurrent runs of it never
+        read each other's context.
         """
         n = self._counter
         self._counter += 1
@@ -1076,6 +1206,9 @@ class AvatarSessionManager:
         if self._run_id:
             run_prefix = _SLUG_RE.sub("-", self._run_id.lower()).strip("-") or "wf"
         return f"{run_prefix}-{kind_prefix}-{slug}-{n}"
+        family = "human" if kind == "human" else "sess"
+        prefix = self._run_prefix or "wf"
+        return f"{prefix}-{family}-{slug}-{n}"
 
 
 def _output_text(result: Any) -> str:

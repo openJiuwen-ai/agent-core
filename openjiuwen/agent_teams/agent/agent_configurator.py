@@ -831,6 +831,7 @@ class AgentConfigurator:
         swarmflow_human_base_spec = None
         swarmflow_concurrency_governor = None
         swarmflow_budget = None
+        swarmflow_external_cli_agents: tuple[Any, ...] = ()
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
             # Callable class (same call contract as the historical closure) so
             # the inject chain stays unchanged, plus pool_names for the
@@ -866,6 +867,9 @@ class AgentConfigurator:
             # governor's L3): concurrent runs draw down one pool. ``total=None``
             # keeps it unbounded while still giving scripts a live ``spent()``.
             swarmflow_budget = BudgetLedger(total=spec.swarmflow_budget)
+            swarmflow_external_cli_agents = (
+                tuple(ctx.team_spec.external_cli_agents) if ctx.team_spec is not None else ()
+            )
 
         inject_team_handles(
             member_build_context.extras,
@@ -878,6 +882,7 @@ class AgentConfigurator:
             swarmflow_human_base_spec=swarmflow_human_base_spec,
             swarmflow_concurrency_governor=swarmflow_concurrency_governor,
             swarmflow_budget=swarmflow_budget,
+            swarmflow_external_cli_agents=swarmflow_external_cli_agents,
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
             worktree_manager=self.worktree_manager,

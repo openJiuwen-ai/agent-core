@@ -53,6 +53,7 @@ from openjiuwen.agent_teams.workflow.backends._result_text import (
     prefer_natural_or_structured_text,
 )
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
+from openjiuwen.agent_teams.workflow.backends.external_turns import ExternalMemberTurns, ExternalTurnOutcome
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.agent_teams.workflow.engine.progress import (
@@ -160,6 +161,7 @@ class TeamWorkerBackend(AgentBackend):
         on_human_replied: Callable[[str, str, str | None], None] | None = None,
         run_id: str | None = None,
         workflow_name: str | None = None,
+        external_cli_agents: Sequence[Any] = (),
     ) -> None:
         super().__init__()
         self._model = model
@@ -181,6 +183,7 @@ class TeamWorkerBackend(AgentBackend):
         self._on_human_replied = on_human_replied
         self._run_id = run_id
         self._workflow_name = workflow_name
+        self._external_cli_agents: tuple[Any, ...] = tuple(external_cli_agents)
         self._run_prefix = self._run_id_prefix(run_id)
         self._worktrees = SwarmflowWorkerWorktrees(
             team_name=team_name,
@@ -214,7 +217,9 @@ class TeamWorkerBackend(AgentBackend):
         self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
     ) -> AgentResult:
         member_name = self._next_member_name(opts, call_key)
-        model = self._resolve_model(opts.get("model"))
+        agent_type = opts.get("agent_type")
+        # Gate before any resource is touched: a bad agent_type is a script error; the engine still retries it (cheap, deterministic) before AGENT_FAILED reaches the leader.
+        entry = self._gate_agent_type(agent_type) if agent_type else None
         # The engine tags the worker's started/completed events with the
         # deterministic call-path key; reuse it so live activity events resolve
         # to the same worker node downstream.
@@ -227,6 +232,18 @@ class TeamWorkerBackend(AgentBackend):
         budget_rail = SwarmflowBudgetRail(self.budget, workflow_budget=self.workflow_budget)
         try:
             await self._worktrees.ensure(member_name, opts)
+            if entry is not None:
+                outcome = await self._execute_external_worker(
+                    prompt,
+                    member_name=member_name,
+                    entry=entry,
+                    agent_type=agent_type,
+                    opts=opts,
+                    schema_json=schema_json,
+                    budget_rail=budget_rail,
+                )
+                return AgentResult(text=outcome.text, structured=outcome.structured, tokens=budget_rail.call_tokens)
+            model = self._resolve_model(opts.get("model"))
             if schema_json is not None:
                 # The harness's ability manager re-qualifies the tool id per owner
                 # (``structured_output_{worker_owner_id}``), so concurrent workers
@@ -320,6 +337,9 @@ class TeamWorkerBackend(AgentBackend):
                 on_human_replied=self._on_human_replied,
                 kv_cache_runtime=self._kv_cache_runtime,
                 skill_visibility_fn=self._apply_worker_skill_visibility,
+                external_cli_agents=self._external_cli_agents,
+                gate_agent_type=self._gate_agent_type,
+                external_cwd=self._external_cwd,
             )
         return self._session_mgr
 
@@ -412,6 +432,77 @@ class TeamWorkerBackend(AgentBackend):
             return None
         pool_names = getattr(self._model_resolver, "pool_names", None)
         return list(pool_names()) if callable(pool_names) else None
+    def describe_model(self, opts: dict) -> str | None:
+        """Return the effective model string for an external agent call, or None for native.
+
+        Priority: explicit ``model`` hint > declared entry's model config > agent_type string.
+        Returns None when no ``agent_type`` is present (native path).
+        """
+        agent_type = opts.get("agent_type")
+        if not agent_type:
+            return None
+        if opts.get("model"):
+            return str(opts["model"])
+        entry = next((e for e in self._external_cli_agents if e.cli_agent == agent_type), None)
+        if entry is not None and entry.external_model_config is not None:
+            model = entry.external_model_config.model
+            if model:
+                return model
+        return agent_type
+
+    def _gate_agent_type(self, agent_type: str) -> Any:
+        """Validate ``agent_type`` against the SDK registry and team declaration.
+
+        Two independent allow-lists: the engine must know how to drive the
+        backend (SDK kind only in this version), and the team must have
+        declared it — the declaration carries the launch config and is the
+        operator's consent to spend on that CLI.
+        """
+        from openjiuwen.agent_teams.external.cli_agent.backends import _SDK_BACKENDS, backend_for
+
+        registry = ", ".join(sorted(_SDK_BACKENDS))
+        declared_names = [e.cli_agent for e in self._external_cli_agents]
+        declared = ", ".join(declared_names) or "(none)"
+        backend = backend_for(agent_type)
+        if backend is None:
+            raise BackendError(
+                f"agent_type {agent_type!r} is not a known backend; SDK backends: [{registry}]; "
+                f"team declared external_cli_agents: [{declared}]. Use one of the SDK backends."
+            )
+        if backend.kind != "sdk":
+            raise BackendError(
+                f"agent_type {agent_type!r} is an adapter backend, not an SDK backend; "
+                f"swarmflow v1 supports SDK backends only; SDK backends: [{registry}]; "
+                f"team declared external_cli_agents: [{declared}]."
+            )
+        if agent_type not in declared_names:
+            hint = (
+                "enable it in the team settings (external_cli_agents is empty)"
+                if not declared_names
+                else f"enable {agent_type} in the team settings or pick one of [{declared}]"
+            )
+            raise BackendError(
+                f"agent_type {agent_type!r} is not declared by this team; SDK backends: [{registry}]; "
+                f"team declared external_cli_agents: [{declared}]. To fix: {hint}."
+            )
+        return next(e for e in self._external_cli_agents if e.cli_agent == agent_type)
+
+    def _external_cwd(self, member_name: str, entry: Any) -> str | None:
+        """Return the working directory for an external CLI worker.
+
+        Uses an active worktree path when present, falls back to the declared
+        entry's ``cwd``, then the build context's project directory.
+        """
+        info = self._worktrees.get(member_name)
+        if info is not None:
+            return str(info.worktree_path)
+        if getattr(entry, "cwd", None):
+            return entry.cwd
+        if self._build_context is not None:
+            project_dir = getattr(self._build_context, "project_dir", None)
+            if project_dir:
+                return str(project_dir)
+        return None
 
     # ------------------------------------------------------------------
     # Worker execution (override point for tests)
@@ -542,6 +633,61 @@ class TeamWorkerBackend(AgentBackend):
             finally:
                 kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(harness)
         return _text_from_invoke_result(result, member_name=member_name)
+
+    async def _execute_external_worker(
+        self,
+        prompt: str,
+        *,
+        member_name: str,
+        entry: Any,
+        agent_type: str,
+        opts: dict,
+        schema_json: dict | None,
+        budget_rail: SwarmflowBudgetRail,
+    ) -> ExternalTurnOutcome:
+        """Run one prompt on a fresh external CLI member and tear it down.
+
+        Single-shot like a native worker: build, one turn, stop. Usage arrives
+        with the terminal turn result and is billed after the fact.
+        Override in tests to record calls without launching a real CLI.
+        """
+        from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_workflow_runtime
+        from openjiuwen.core.session.agent_team import Session as TeamSession
+
+        try:
+            runtime = await build_cli_workflow_runtime(
+                cli_agent=agent_type,
+                entry=entry,
+                member_name=member_name,
+                member_agent_id=f"{self._team_name}_{member_name}",
+                session_id=self._session_id or "",
+                team_name=self._team_name,
+                system_prompt=self._t("swarmflow_worker", key="free"),
+                cwd=self._external_cwd(member_name, entry),
+                model_override=opts.get("model"),
+            )
+        except Exception as e:
+            team_logger.exception("external worker build failed for %s", member_name)
+            raise BackendError(f"external worker build failed for {member_name}: {e}") from e
+        turns = ExternalMemberTurns(runtime, member_name=member_name)
+        team_session = TeamSession(
+            session_id=self._session_id,
+            team_id=self._team_name,
+            kv_cache_runtime=self._kv_cache_runtime,
+        )
+        try:
+            await turns.start(team_session)
+            outcome = await turns.run_turn(prompt, schema_json=schema_json)
+        except BackendError as e:
+            budget_rail.bill(e.tokens or 0)
+            raise
+        finally:
+            try:
+                await turns.stop()
+            except Exception:
+                team_logger.debug("external worker stop failed for %s", member_name, exc_info=True)
+        budget_rail.bill(outcome.tokens)
+        return outcome
 
     # ------------------------------------------------------------------
     # Worker workspace setup

@@ -31,6 +31,7 @@ from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
+from openjiuwen.agent_teams.rails.team_context import get_swarmflow_external_cli_agents
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -607,6 +608,7 @@ class SwarmflowTool(AsyncTool):
                 label=progress.label,
                 prompt=progress.prompt,
                 model=resolved_model,
+                agent_type=progress.agent_type,
                 outcome=progress.outcome,
                 text=progress.message,
                 phases=progress.phases,
@@ -688,6 +690,9 @@ class SwarmflowTool(AsyncTool):
                 run_id=run_id,
                 agent_gate=agent_gate,
                 budget=self._budget,
+                external_cli_agents=get_swarmflow_external_cli_agents(
+                    getattr(self._parent_agent, "build_context", None)
+                ),
             )
         # BudgetExhausted is a BaseException: no ``except`` here on purpose —
         # wrapping it would discard its structured fields, and the async-tool

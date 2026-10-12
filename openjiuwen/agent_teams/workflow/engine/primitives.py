@@ -377,6 +377,13 @@ def _emit_log(rt, message: str, *, nested_phase: str | None = None) -> None:
     )
 
 
+def _display_model(rt, opts: dict) -> str | None:
+    """The model name to show for this call: backend-described, else the raw hint."""
+    describe = getattr(rt.backend, "describe_model", None)
+    described = describe(opts) if callable(describe) else None
+    return described or opts.get("model")
+
+
 def _emit_agent_started(
     rt,
     opts: dict,
@@ -400,7 +407,8 @@ def _emit_agent_started(
             phase=opts.get("phase") or _current_phase.get(),
             label=opts.get("label"),
             prompt=prompt,
-            model=opts.get("model"),
+            model=_display_model(rt, opts),
+            agent_type=opts.get("agent_type"),
             agent_id=agent_id,
             node_type=node_type,
             parent_session_id=parent_session_id,

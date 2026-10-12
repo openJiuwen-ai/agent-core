@@ -82,6 +82,20 @@ class SwarmflowBudgetRail(AgentRail):
             self.call_output_tokens += out_n
         self._stop_if_exhausted(ctx, "after")
 
+    def bill(self, tokens: int) -> None:
+        """Credit usage reported after a turn (members with no model-call hook).
+
+        Same two ledgers, same tally as ``after_model_call``; the ceiling is then
+        enforced by the engine's entry gate before the next call rather than
+        mid-loop, so one external turn can overrun by at most its own size.
+        """
+        if tokens <= 0:
+            return
+        self.call_tokens += tokens
+        self._budget.add(tokens)
+        if self._wf_budget is not None:
+            self._wf_budget.add(tokens)
+
     def _stop_if_exhausted(self, ctx: AgentCallbackContext, when: str) -> None:
         """End this agent's round when either ledger has nothing left.
 

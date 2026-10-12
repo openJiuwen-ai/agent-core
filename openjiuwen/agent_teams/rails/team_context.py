@@ -54,6 +54,7 @@ class TeamHandleKey:
     RELIABILITY_COMPONENTS = "team.reliability_components"
     PERMISSIONS_OVERRIDE = "team.permissions_override"
     WORKTREE_MANAGER = "team.worktree_manager"
+    SWARMFLOW_EXTERNAL_CLI_AGENTS = "team.swarmflow_external_cli_agents"
 
 
 def inject_team_handles(
@@ -71,6 +72,7 @@ def inject_team_handles(
     reliability_components: Optional["ReliabilityComponents"] = None,
     permissions_override: Optional[dict[str, str]] = None,
     worktree_manager: Optional["WorktreeManager"] = None,
+    swarmflow_external_cli_agents: tuple[Any, ...] = (),
 ) -> None:
     """Write the team live handles into ``extras`` (configurator-side).
 
@@ -101,6 +103,8 @@ def inject_team_handles(
             specified at spawn time.
         worktree_manager: The owner-scoped worktree manager, if worktree
             isolation is enabled for this team.
+        swarmflow_external_cli_agents: Declared external CLI agent entries for
+            this team's swarmflow runs; empty when none are configured.
     """
     extras[TeamHandleKey.TEAM_BACKEND] = team_backend
     extras[TeamHandleKey.WORKSPACE_MANAGER] = workspace_manager
@@ -114,6 +118,7 @@ def inject_team_handles(
     extras[TeamHandleKey.RELIABILITY_COMPONENTS] = reliability_components
     extras[TeamHandleKey.PERMISSIONS_OVERRIDE] = permissions_override
     extras[TeamHandleKey.WORKTREE_MANAGER] = worktree_manager
+    extras[TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS] = swarmflow_external_cli_agents
 
 
 def _get(context: Any, key: str) -> Any:
@@ -155,6 +160,11 @@ def get_swarmflow_worker_base_spec(context: Any) -> Optional["DeepAgentSpec"]:
 def get_swarmflow_human_base_spec(context: Any) -> Optional["DeepAgentSpec"]:
     """Return the swarmflow human-session avatar base spec (human_agent spec), or None."""
     return _get(context, TeamHandleKey.SWARMFLOW_HUMAN_BASE_SPEC)
+
+
+def get_swarmflow_external_cli_agents(context: Any) -> tuple[Any, ...]:
+    """Return the declared external CLI agent entries for swarmflow runs, or empty tuple."""
+    return tuple(_get(context, TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS) or ())
 
 
 def get_swarmflow_concurrency_governor(context: Any) -> Any:
@@ -206,4 +216,5 @@ __all__ = [
     "get_swarmflow_budget",
     "get_reliability_components",
     "get_worktree_manager",
+    "get_swarmflow_external_cli_agents",
 ]

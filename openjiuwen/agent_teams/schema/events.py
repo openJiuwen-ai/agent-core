@@ -462,6 +462,10 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     label: Optional[str] = Field(default=None, description="Agent call label, on agent_* kinds")
     prompt: Optional[str] = Field(default=None, description="Rendered agent prompt, on agent_started")
     model: Optional[str] = Field(default=None, description="Model hint for the agent call, on agent_started")
+    agent_type: Optional[str] = Field(
+        default=None,
+        description="External provider kind (claude / codex) on agent_started; None for native workers",
+    )
     outcome: Optional[str] = Field(default=None, description="Short result preview, on agent_completed")
     text: Optional[str] = Field(default=None, description="Free narration text, on all kinds")
     phases: Optional[list[PhasePlan]] = Field(

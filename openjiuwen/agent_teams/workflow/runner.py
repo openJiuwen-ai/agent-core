@@ -14,7 +14,7 @@ bare ``swarmflow`` the loader always maps), so a script may import either.
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 import aiofiles
 import aiofiles.os
@@ -245,6 +245,7 @@ async def run_swarmflow(
     run_id: str | None = None,
     agent_gate: Any = None,
     budget: BudgetLedger | None = None,
+    external_cli_agents: Sequence[Any] = (),
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
@@ -331,6 +332,7 @@ async def run_swarmflow(
         on_human_replied=_on_human_replied,
         run_id=run_id,
         workflow_name=_workflow_name(script_path),
+        external_cli_agents=external_cli_agents,
     )
     if on_backend_ready is not None:
         on_backend_ready(backend)
