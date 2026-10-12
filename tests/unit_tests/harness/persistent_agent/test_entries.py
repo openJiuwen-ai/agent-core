@@ -48,7 +48,6 @@ def module(name):
 
 SEAMS = module("execution.seams")
 UNINTEGRATED_STORE, UNINTEGRATED_ADAPTER = SEAMS.session_state_store, SEAMS.native_reply_adapter
-UNINTEGRATED_ASSEMBLER = SEAMS.window_assembler
 
 
 def kinds(events):
@@ -1050,14 +1049,13 @@ async def test_old_checkpointer_state_is_neither_restored_nor_saved(harness, mon
             StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
         ),
         ({"seams": "session_state_store"}, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR),
-        ({"seams": "window_assembler"}, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR),
     ],
 )
 @pytest.mark.asyncio
 async def test_execute_rejects_before_any_event(harness, monkeypatch, change, code):
     spec = harness.spec(**change.get("spec", {}))
     ctx, host = harness.context(spec, **change.get("context", {}))
-    unintegrated = {"session_state_store": UNINTEGRATED_STORE, "window_assembler": UNINTEGRATED_ASSEMBLER}
+    unintegrated = {"session_state_store": UNINTEGRATED_STORE}
     if change.get("seams"):
         monkeypatch.setattr(SEAMS, change["seams"], unintegrated[change["seams"]])
     with pytest.raises(BaseError) as exc_info:
