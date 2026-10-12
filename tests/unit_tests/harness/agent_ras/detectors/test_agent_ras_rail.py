@@ -16,6 +16,7 @@ def _termination() -> Termination:
     return Termination(
         StatusCode.CALLBACK_EXECUTION_ABORTED,
         msg="Agent RAS stream abort: thinking-loop",
+        details={"soft_stop_needs_continue": True},
     )
 
 
@@ -31,8 +32,10 @@ class TestInspectStreamChunk:
         monitor.should_abort_stream = True
         rail._monitor_for = MagicMock(return_value=monitor)
 
-        with pytest.raises(Termination):
+        with pytest.raises(Termination) as ei:
             await rail.inspect_stream_chunk(MagicMock(), MagicMock())
+        assert ei.value.details == {"soft_stop_needs_continue": True}
+        assert "thinking-loop" in (ei.value.message or "")
         monitor.on_stream_chunk.assert_not_called()
 
     @pytest.mark.asyncio
