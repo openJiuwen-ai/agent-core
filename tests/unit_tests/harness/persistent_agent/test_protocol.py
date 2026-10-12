@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Protocol boundary tests, without a model, persistence backend, or Feishu."""
 
+import inspect
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from importlib import import_module
@@ -143,6 +144,35 @@ def test_group_results_distinguish_found_empty_and_incomplete(api):
             api.GroupMessagesResult(**SCOPE, **bad)
     with pytest.raises(BaseError):
         found.assert_matches(replace(execution(api), session_id="other-session"))
+
+
+def test_group_results_report_trusted_scan_position_apart_from_paging(api):
+    found = api.GroupMessagesResult(
+        **SCOPE, status="found", messages=(message(api),), next_cursor="m1", scanned_through="m5"
+    )
+    assert (found.next_cursor, found.scanned_through) == ("m1", "m5")
+    nothing_new = api.GroupMessagesResult(**SCOPE, status="empty", scanned_through="m5")
+    assert nothing_new.scanned_through == "m5", "a confirmed scan with no new messages still moves the cursor"
+    partial = api.GroupMessagesResult(
+        **SCOPE, status="incomplete", reason="body store unavailable", scanned_through="m5"
+    )
+    untrusted = api.GroupMessagesResult(**SCOPE, status="incomplete", reason="query timed out")
+    assert partial.scanned_through == "m5" and untrusted.scanned_through is None
+    assert api.GroupMessagesResult.model_validate_json(partial.model_dump_json()) == partial
+    with pytest.raises(ValidationError):
+        api.GroupMessagesResult(**SCOPE, status="empty", scanned_through="has space")
+
+
+def test_group_message_marks_an_unreadable_body_apart_from_recall(api):
+    unavailable = message(api, status="unavailable", text=None)
+    assert unavailable.status == "unavailable" and unavailable.text is None
+    with pytest.raises(ValidationError):
+        message(api, status="unavailable")
+
+
+def test_group_chat_recent_messages_signature_is_unchanged(api):
+    parameters = inspect.signature(api.GroupChatPort.recent_messages).parameters
+    assert list(parameters) == ["self", "execution", "cursor", "limit"], "backfill reads after the trigger as cursor"
 
 
 def test_group_message_hides_recalled_text_and_normalizes_time(api):
