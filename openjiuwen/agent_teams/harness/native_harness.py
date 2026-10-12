@@ -1328,8 +1328,7 @@ class NativeHarness(DeepAgent):
                 # - the cooperative-stop payload, produced when a pause or a
                 #   graceful abort force-finishes the inner loop at an iteration
                 #   boundary: it carries no answer.
-                if not self._is_control_result(result):
-                    await self._write_round_result_to_stream(result, self._session)
+                await self._persist_and_write_round_result(result)
                 # Expose the round result to AFTER_INVOKE rails (fired in the
                 # lifecycle's finally). Control results carry no real answer, so
                 # leave result as None for them.
@@ -1373,6 +1372,18 @@ class NativeHarness(DeepAgent):
                 active.round_id,
                 exc_info=True,
             )
+
+    async def _persist_and_write_round_result(self, result: Any) -> None:
+        """Persist interrupt state before exposing its resumable UI payload."""
+        if self._is_control_result(result):
+            return
+        if (
+            isinstance(result, dict)
+            and result.get("result_type") == "interrupt"
+            and self._session is not None
+        ):
+            await self._session.commit_interrupt()
+        await self._write_round_result_to_stream(result, self._session)
 
     @staticmethod
     def _is_control_result(result: Any) -> bool:

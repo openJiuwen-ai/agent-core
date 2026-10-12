@@ -225,7 +225,7 @@ def test_worktree_isolation_requires_host_worktree_manager():
 
     backend = TeamWorkerBackend(model=None)
 
-    with pytest.raises(BackendError, match="host-provided worktree manager"):
+    with pytest.raises(BackendError, match="requires worktree isolation"):
         asyncio.run(backend.run("write code", {"label": "sum", "isolation": "worktree"}, None))
 
 

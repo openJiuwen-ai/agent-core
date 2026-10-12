@@ -48,7 +48,8 @@ class SwarmflowWorkerWorktrees:
         manager = get_worktree_manager(self._build_context)
         if manager is None:
             raise BackendError(
-                "agent(options={'isolation': 'worktree'}) requires a host-provided worktree manager"
+                "agent(options={'isolation': 'worktree'}) requires worktree isolation "
+                "to be enabled — turn on the Worktree switch in the SwarmFlow settings"
             )
         worktrees_root = self._managed_root()
         if hasattr(manager, "with_worktrees_dir"):
