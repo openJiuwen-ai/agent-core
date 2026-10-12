@@ -3,6 +3,7 @@
 
 """Member table data access object."""
 
+from enum import Enum
 from typing import List, Optional
 
 from sqlalchemy import exists, func, select, update
@@ -35,6 +36,14 @@ from openjiuwen.core.common.logging import team_logger
 
 _DEPARTED_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_DEPARTED_STATUSES)
 _UNREACHABLE_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_UNREACHABLE_STATUSES)
+
+
+class MemberExecutionUpdateResult(Enum):
+    """Outcome of a guarded execution-status CAS write."""
+
+    UPDATED = "updated"
+    SKIPPED = "skipped"
+    REJECTED = "rejected"
 
 # The human-member family: avatar-backed (``human_agent``) and passive
 # (``passive_human``). Spelled as literals to keep this module out of the
@@ -469,13 +478,15 @@ class MemberDao:
         member_name: str,
         team_name: str,
         execution_status: str,
-    ) -> bool:
+    ) -> MemberExecutionUpdateResult:
         """Update member execution status via a single guarded CAS UPDATE.
 
         Mirror of ``update_member_status``: the transition validation is the
         ``WHERE execution_status IN (valid predecessors)`` guard, so the happy
-        path is one UPDATE with no in-lock SELECT; only rowcount=0 reads back
-        to log the precise rejection reason.
+        path is one UPDATE with no in-lock SELECT. On rowcount=0 the row is
+        read back to classify the outcome: a late duplicate round-start
+        STARTING on an already STARTING/RUNNING member is SKIPPED (row left
+        untouched), anything else is REJECTED.
         """
         valid_from = _valid_predecessor_values(ExecutionStatus(execution_status), EXECUTION_TRANSITIONS)
         async with self._sessions.write() as session:
@@ -491,12 +502,31 @@ class MemberDao:
             if result.rowcount == 1:
                 await session.commit()
                 team_logger.debug("Member %s execution status updated to %s", member_name, execution_status)
-                return True
+                return MemberExecutionUpdateResult.UPDATED
+
+            existing = await session.execute(
+                select(TeamMember.execution_status).where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                )
+            )
+            row = existing.first()
+            if (
+                row is not None
+                and execution_status == ExecutionStatus.STARTING.value
+                and row[0] in (ExecutionStatus.STARTING.value, ExecutionStatus.RUNNING.value)
+            ):
+                team_logger.debug(
+                    "Member %s already %s; late duplicate round-start STARTING skipped",
+                    member_name,
+                    row[0],
+                )
+                return MemberExecutionUpdateResult.SKIPPED
 
             await self._log_member_update_rejection(
                 session, member_name, team_name, TeamMember.execution_status, execution_status
             )
-            return False
+            return MemberExecutionUpdateResult.REJECTED
 
     async def reset_member_execution_status(
         self,

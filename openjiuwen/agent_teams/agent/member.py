@@ -9,7 +9,10 @@ This module implements TeamMember state management.
 from typing import Optional
 
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.agent_teams.tools.database import TeamDatabase
+from openjiuwen.agent_teams.tools.database import (
+    MemberExecutionUpdateResult,
+    TeamDatabase,
+)
 from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     ExecutionStatus
@@ -151,7 +154,7 @@ class TeamMember:
             new_status: New execution status
 
         Returns:
-            True if transition is valid and successful
+            True if the transition was applied or a duplicate write was skipped
         """
 
         old_status = await self.execution_status()
@@ -164,15 +167,26 @@ class TeamMember:
         # "Invalid state transition"（issue #4318 在 restart 路径已修复）。
         if old_status == new_status:
             return True
-        success = await self.db.member.update_member_execution_status(
+        if new_status == ExecutionStatus.STARTING and old_status == ExecutionStatus.RUNNING:
+            team_logger.debug(
+                f"Member {self.member_name} already RUNNING; skipping late STARTING write"
+            )
+            return True
+        result = await self.db.member.update_member_execution_status(
             self.member_name,
             self.team_name,
             new_status.value
         )
 
-        if not success:
+        if result is MemberExecutionUpdateResult.REJECTED:
             team_logger.error(f"Failed to update member execution status for {self.member_name}: {new_status.value}")
             return False
+
+        if result is MemberExecutionUpdateResult.SKIPPED:
+            team_logger.debug(
+                f"Member {self.member_name} duplicate STARTING skipped; status unchanged"
+            )
+            return True
 
         team_logger.debug(
             f"Member {self.member_name} execution status: "

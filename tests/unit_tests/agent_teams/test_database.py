@@ -25,6 +25,7 @@ from openjiuwen.agent_teams.schema.task import NewTaskSpec
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
+    MemberExecutionUpdateResult,
     TeamDatabase,
 )
 from openjiuwen.agent_teams.tools.database.engine import (
@@ -719,8 +720,8 @@ class TestMemberOperations:
             execution_status="idle"
         )
 
-        success = await db.member.update_member_execution_status("member4", "team7", "starting")
-        assert success is True
+        result = await db.member.update_member_execution_status("member4", "team7", "starting")
+        assert result is MemberExecutionUpdateResult.UPDATED
 
         member = await db.member.get_member("member4", "team7")
         assert member.execution_status == "starting"
@@ -728,9 +729,9 @@ class TestMemberOperations:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_update_member_execution_status_not_found(self, db):
-        """Test updating execution status for non-existent member returns False"""
-        success = await db.member.update_member_execution_status("nonexistentmember", "team7", "running")
-        assert success is False
+        """Test updating execution status for non-existent member returns REJECTED"""
+        result = await db.member.update_member_execution_status("nonexistentmember", "team7", "running")
+        assert result is MemberExecutionUpdateResult.REJECTED
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -3575,7 +3576,7 @@ async def test_update_member_status_invalid_transition_returns_false(db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_update_member_execution_status_invalid_transition_returns_false(db):
+async def test_update_member_execution_status_invalid_transition_rejected(db):
     """The guarded CAS update rejects an illegal execution-status transition."""
     await db.team.create_team(team_name="team_inv2", display_name="T", leader_member_name="l")
     await db.member.create_member(
@@ -3587,9 +3588,54 @@ async def test_update_member_execution_status_invalid_transition_returns_false(d
         execution_status="idle",
     )
     # idle -> running skips the mandatory starting step; not a legal transition.
-    assert await db.member.update_member_execution_status("m1", "team_inv2", "running") is False
+    result = await db.member.update_member_execution_status("m1", "team_inv2", "running")
+    assert result is MemberExecutionUpdateResult.REJECTED
     member = await db.member.get_member("m1", "team_inv2")
     assert member.execution_status == "idle"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_member_execution_status_late_duplicate_starting_skipped(db):
+    """A late duplicate round-start STARTING is SKIPPED with the row untouched.
+
+    The racing writer already moved the member past IDLE, so the CAS guard
+    drops the duplicate STARTING — but the member is legitimately active, so
+    the caller learns nothing was written rather than seeing a failure.
+    """
+    await db.team.create_team(team_name="team_skip", display_name="T", leader_member_name="l")
+    await db.member.create_member(
+        member_name="m1",
+        team_name="team_skip",
+        display_name="M1",
+        agent_card=AgentCard(name="A").model_dump_json(),
+        status="ready",
+        execution_status="idle",
+    )
+    result = await db.member.update_member_execution_status("m1", "team_skip", "starting")
+    assert result is MemberExecutionUpdateResult.UPDATED
+    result = await db.member.update_member_execution_status("m1", "team_skip", "running")
+    assert result is MemberExecutionUpdateResult.UPDATED
+
+    result = await db.member.update_member_execution_status("m1", "team_skip", "starting")
+    assert result is MemberExecutionUpdateResult.SKIPPED
+    member = await db.member.get_member("m1", "team_skip")
+    assert member.execution_status == "running"
+
+    await db.member.create_member(
+        member_name="m2",
+        team_name="team_skip",
+        display_name="M2",
+        agent_card=AgentCard(name="A").model_dump_json(),
+        status="ready",
+        execution_status="idle",
+    )
+    result = await db.member.update_member_execution_status("m2", "team_skip", "starting")
+    assert result is MemberExecutionUpdateResult.UPDATED
+    result = await db.member.update_member_execution_status("m2", "team_skip", "starting")
+    assert result is MemberExecutionUpdateResult.SKIPPED
+    member = await db.member.get_member("m2", "team_skip")
+    assert member.execution_status == "starting"
 
 
 @pytest.mark.asyncio

@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.context import (
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
+    MemberExecutionUpdateResult,
     TeamDatabase,
 )
 from openjiuwen.agent_teams.agent.member import TeamMember
@@ -445,6 +446,45 @@ class TestStatusTransitionsComplex:
         # ever seeing the illegal RUNNING -> STARTING transition.
         assert await team_member.update_execution_status(ExecutionStatus.STARTING)
         assert await team_member.update_execution_status(ExecutionStatus.RUNNING)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_late_starting_on_running_publishes_no_event(self, team_member, message_bus):
+        """Real transitions publish exactly one event each; duplicates never do.
+
+        A late duplicate round-start STARTING on a RUNNING member is reported
+        as success without touching the row — and must not emit a
+        MemberExecutionChangedEvent for a write that never landed.
+        """
+        with patch.object(message_bus, "publish", new_callable=AsyncMock) as publish:
+            assert await team_member.update_execution_status(ExecutionStatus.STARTING) is True
+            assert await team_member.update_execution_status(ExecutionStatus.RUNNING) is True
+            assert publish.await_count == 2
+
+            assert await team_member.update_execution_status(ExecutionStatus.STARTING) is True
+            assert publish.await_count == 2
+
+        assert await team_member.execution_status() == ExecutionStatus.RUNNING
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_dao_skipped_duplicate_publishes_no_event(self, team_member, db, message_bus):
+        """The millisecond-race variant: the DAO reports SKIPPED, no event follows.
+
+        The caller read IDLE before a concurrent sequence completed
+        STARTING+RUNNING, so its late STARTING fails the CAS guard and the
+        DAO classifies it as a benign duplicate. update_execution_status
+        still returns True, but publishes nothing.
+        """
+        with patch.object(
+            db.member,
+            "update_member_execution_status",
+            new_callable=AsyncMock,
+            return_value=MemberExecutionUpdateResult.SKIPPED,
+        ), patch.object(message_bus, "publish", new_callable=AsyncMock) as publish:
+            assert await team_member.update_execution_status(ExecutionStatus.STARTING) is True
+            publish.assert_not_called()
+        assert await team_member.execution_status() == ExecutionStatus.IDLE
 
 
 @pytest.mark.asyncio
