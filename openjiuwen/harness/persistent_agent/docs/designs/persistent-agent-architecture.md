@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 | 当前详细架构设计；标注"已实现"的部分以代码为准，其余均为拟议 |
-| 最近一次修订日期 | 2026-10-08 |
+| 最近一次修订日期 | 2026-10-12 |
 | 关联模块 | `openjiuwen.harness.persistent_agent` |
 | 设计概览 | [Persistent Agent 设计概览](persistent-agent-overview.md)（目标与原则不变） |
 | 文档定位 | 当前详细架构设计，作为后续开发的设计依据；此前设计仅保留在 Git 历史中 |
@@ -503,7 +503,9 @@ flowchart LR
 | `recent_messages` | 最近群消息，作为背景 | Execution 开始时调用一次（以及参与判断时），放入临时背景块 |
 | `search_messages` | 搜索历史群消息 | 执行中由模型按需调用，包装为工具 `search_group_messages` |
 
-每条消息包含：`message_id`、发送者（稳定身份 ID 加显示名，并标明是人还是 Agent）、服务端接收时间、正文、@ 了谁、回复的是哪条、附件引用、状态（正常 / 已编辑 / 已撤回，已撤回的不返回正文）、是否属于排队中的请求。
+每条消息包含：`message_id`、发送者（稳定身份 ID 加显示名，并标明是人还是 Agent）、服务端接收时间、正文、@ 了谁、回复的是哪条、附件引用、状态（正常 / 已编辑 / 已撤回 / 正文暂缺；已撤回和正文暂缺的都不返回正文，正文暂缺表示消息存在但暂时读不到）、是否属于排队中的请求。
+
+**扫描位置与展示范围分开：** 读取结果除消息外，还带服务端确认已扫描到的消息位置 `scanned_through`。它与分页用的 `next_cursor` 不同，也与实际展示给模型的消息无关。正文暂缺但扫描位置可信时，位置照常前移，并在背景中注明哪些消息正文缺失；查询失败或进度不可信时不返回该位置，读取方保留原游标。缺失的正文不建立跨 Request 的自动追补清单，更早的内容由模型按需搜索。
 
 **排队中的请求只能作为背景，不能成为当前任务的指令。** 搜索结果要区分三种情况：找到了、确定没有、没查完或查询失败（不能当作"没有"）。
 
@@ -857,7 +859,7 @@ sequenceDiagram
 | 端口 | 方向 | 操作 | 失败语义 |
 | --- | --- | --- | --- |
 | **窗口存储后端** | Server → Agent（必需注入） | `BaseKVStore`（`set / get / delete / get_by_prefix / delete_by_prefix` 等） | 读写失败按第 7.8 节 `WindowStore` 的失败语义处理 |
-| **群聊记录** `GroupChatPort` | Agent → Server | `recent_messages(execution, cursor=None, limit=20)`、`search_messages(execution, query: GroupMessageQuery)`，均返回 `GroupMessagesResult` | 区分"确定没有"和"没查完或失败" |
+| **群聊记录** `GroupChatPort` | Agent → Server | `recent_messages(execution, cursor=None, limit=20)`、`search_messages(execution, query: GroupMessageQuery)`，均返回 `GroupMessagesResult`；以触发消息为游标读取即可回补，结果中的 `scanned_through` 为服务端确认已扫描到的位置。服务端只为群 Session 注入该端口 | 区分"确定没有"和"没查完或失败"；进度不可信时不返回扫描位置 |
 | **记账** | Agent → Server | `record(event)`：普通事件接收入队后返回，普通日志缺失不阻塞；关键事件等待自身落盘后返回，final 还须确认所引用的候选输出已可靠保存（第 9.1 节） | 普通日志失败：只记诊断并继续；关键事件自身或必要候选输出保存失败：停止当前执行 |
 | **执行日志** | Agent → Server | `read_execution_log(execution_id)`：按 local_seq 返回该次执行的已保存事件，允许缺口；只允许读取同一 Session、同一 Request 下的执行 | 读不到：提示 Agent "上一次记录缺失"；非空日志也可能不完整，工具结果缺失时先查证，查不清询问发起人 |
 | **预算** | Agent → Server | `admit(model_call_id)`、`report(model_call_id, usage)` | 拒绝准入：不调用模型，产出 `execution.paused(budget_denied)` |
@@ -994,3 +996,4 @@ sequenceDiagram
 | 2026-10-08 | PA-04 结局锁定：原生调用退出、确定执行结果后同步锁定结局，锁定前接受的控制参与判定，锁定后不再接受停止或取消、不修改控制原因、不调用 `abort_bound`；锁定不代表持久化成功 | 原生已返回、收尾保存期间到达的控制原先会被接受并中断原生实例，结局却仍按原生结果，状态自相矛盾；开放 task-loop 和子代理后，收尾期间的原生中断还会与保存并发 |
 | 2026-10-08 | PA-04 审计修复：执行入口异常退出、进入清理前同样关闭控制接收；致命错误登记后跳过尚未开始的工具调用；事件同时按字符数和完整事件字节数检查容量，最终答案超限时改判 `paused(error)` 并把完整答案交给会话状态记录保存 | 清理期间迟到的控制原先会改写控制原因；致命错误后的工具调用会继续执行；只按字符数检查时，四字节字符或经转义变长的文本会超出事件字节上限，导致展示片段误判暂停、最终回答误报运行异常 |
 | 2026-10-08 | 正式名称统一为“Persistent Agent 详细架构设计”，作为当前设计依据；正文、关联文档和开发计划使用正式名称，历史设计仅保留在 Git 历史中 | 仅统一名称与引用，设计约束和已实现 / 待实现边界不变 |
+| 2026-10-12 | 群聊读取契约：`GroupMessagesResult` 增加服务端确认的扫描位置 `scanned_through`，与分页位置和展示范围分开；消息状态增加“正文暂缺”；回补以触发消息为游标读取其后的消息，`recent_messages` 签名不变（同日修正：最初设想的“触发消息之前的回补”方向错误，已撤销） | 群消息游标应以可信扫描进度为准：正文暂时读不到不能卡住游标，查询失败不能推进游标；排队的 Request 处理时，触发消息可能早于游标，期间针对它的补充须从触发消息之后读回 |
