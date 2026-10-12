@@ -842,3 +842,22 @@ def test_failure_message_counts_real_attempts_when_retried():
     """Retries-then-fail surfaces the real count: 'failed after 2 attempts: <detail>'."""
     r = _p._BackendCallResult(succeeded=False, error_detail="always fails", attempts=2)
     assert _failure_message("x", r) == "agent 'x' failed after 2 attempts: always fails"
+
+
+def test_budget_rail_bill_credits_both_ledgers_after_the_fact():
+    """External members report usage at turn end; bill() must reach the same two ledgers."""
+    from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
+    from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+
+    session = BudgetLedger(total=1000)
+    workflow = BudgetLedger(total=500)
+    rail = SwarmflowBudgetRail(session, workflow_budget=workflow)
+
+    rail.bill(300)
+    rail.bill(0)
+    rail.bill(-5)
+
+    assert rail.call_tokens == 300
+    assert session.spent == 300
+    assert workflow.spent == 300
+

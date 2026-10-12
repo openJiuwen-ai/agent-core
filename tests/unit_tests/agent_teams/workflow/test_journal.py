@@ -563,3 +563,15 @@ def test_call_signature_ignores_progressive_tool_key():
     with_switch = {**base_opts, "progressive_tool": True}
 
     assert call_signature("p", base_opts, None) == call_signature("p", with_switch, None)
+
+
+def test_call_signature_folds_agent_type_when_set():
+    """agent_type re-keys the call so a third-party round never replays a native cache row.
+    Absent / None stays byte-identical to the legacy signature."""
+    plain = call_signature("task A", {"label": "A"}, None)
+    codex = call_signature("task A", {"label": "A", "agent_type": "codex"}, None)
+    claude = call_signature("task A", {"label": "A", "agent_type": "claude"}, None)
+    assert codex != plain
+    assert claude != plain
+    assert codex != claude
+    assert call_signature("task A", {"label": "A", "agent_type": None}, None) == plain

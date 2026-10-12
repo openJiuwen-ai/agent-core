@@ -19,9 +19,12 @@ import pytest
 
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
 from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
+from openjiuwen.agent_teams.workflow.backends.external_turns import ExternalTurnOutcome
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
+from openjiuwen.harness_protocol import HarnessProtocolError
 
 
 class _FakeNative:
@@ -782,3 +785,162 @@ def test_capture_fork_recovers_from_checkpointer_when_no_live_avatar():
 
     decoded = [decode_message(d) for d in data["messages"]]
     assert any(isinstance(m, ToolMessage) for m in decoded)
+
+
+# ---------------------------------------------------------------------------
+# run-prefixed session member names + external (agent_type) sessions
+# ---------------------------------------------------------------------------
+
+
+def test_session_member_names_carry_the_run_prefix():
+    mgr = AvatarSessionManager(run_id="wf_abc-123")
+    first = mgr._next_member_name("agent", {"label": "Coder"})
+    second = mgr._next_member_name("agent", {"label": "Coder"})
+    human = mgr._next_member_name("human", {"label": "Host"})
+    assert first == "wf-abc-123-sess-coder-0"
+    assert second == "wf-abc-123-sess-coder-1"
+    assert human == "wf-abc-123-human-host-2"
+    assert AvatarSessionManager(run_id="other")._next_member_name("agent", {"label": "Coder"}) == "other-sess-coder-0"
+
+
+def test_session_member_names_without_run_id_keep_legacy_shape():
+    mgr = AvatarSessionManager()
+    assert mgr._next_member_name("agent", {"label": "x"}) == "wf-sess-x-0"
+
+
+class _FakeTurns:
+    """Stands in for ExternalMemberTurns: records lifecycle, answers canned turns."""
+
+    instances: list["_FakeTurns"] = []
+
+    def __init__(self, *, resume: bool, require: bool, has_pointer: bool = True) -> None:
+        self.resume, self.require, self.has_pointer = resume, require, has_pointer
+        self.started = 0
+        self.stopped = 0
+        self.aborted = 0
+        self.prompts: list[tuple[str, dict | None]] = []
+        _FakeTurns.instances.append(self)
+
+    provider_name = "codex"
+
+    async def start(self, team_session):
+        if self.resume and self.require and not self.has_pointer:
+            raise HarnessProtocolError("no checkpoint pointer")
+        self.started += 1
+
+    async def run_turn(self, prompt, *, schema_json=None):
+        self.prompts.append((prompt, schema_json))
+        return ExternalTurnOutcome(text=f"ext:{prompt}", structured={"v": 1} if schema_json else None, tokens=7)
+
+    async def abort(self):
+        self.aborted += 1
+
+    async def stop(self):
+        self.stopped += 1
+
+
+def _external_mgr(monkeypatch, *, has_pointer: bool = True) -> AvatarSessionManager:
+    _FakeTurns.instances.clear()
+    mgr = AvatarSessionManager(
+        team_name="t",
+        run_id="r1",
+        external_cli_agents=(ExternalCliAgentSpec(cli_agent="codex"),),
+        gate_agent_type=lambda name: ExternalCliAgentSpec(cli_agent=name),
+        external_cwd=lambda member, entry: None,
+    )
+
+    async def _build(state, *, resume, require):
+        return _FakeTurns(resume=resume, require=require, has_pointer=has_pointer)
+
+    monkeypatch.setattr(mgr, "_build_external_turns", _build)
+    return mgr
+
+
+def test_external_session_first_turn_starts_fresh_and_reuses_runtime(monkeypatch):
+    mgr = _external_mgr(monkeypatch)
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    assert _FakeTurns.instances == []  # nothing launched until the first turn
+    first = asyncio.run(mgr.send_turn(sid, "one", {"label": "c", "agent_type": "codex"}, None, history=()))
+    second = asyncio.run(
+        mgr.send_turn(
+            sid, "two", {"label": "c", "agent_type": "codex"}, {"type": "object"},
+            history=[{"role": "user", "content": "one"}, {"role": "assistant", "content": "ext:one"}],
+        )
+    )
+    turns = _FakeTurns.instances
+    assert len(turns) == 1 and turns[0].resume is False and turns[0].started == 1
+    assert first.text == "ext:one" and first.tokens == 7
+    assert second.structured == {"v": 1}
+    assert [p for p, _ in turns[0].prompts] == ["one", "two"]
+    asyncio.run(mgr.close_session(sid))
+    assert turns[0].stopped == 1
+
+
+def test_external_session_cold_resume_requires_the_pointer(monkeypatch):
+    mgr = _external_mgr(monkeypatch, has_pointer=False)
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    history = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
+    with pytest.raises(HarnessProtocolError):
+        asyncio.run(mgr.send_turn(sid, "next", {"label": "c", "agent_type": "codex"}, None, history=history))
+    assert _FakeTurns.instances[0].resume is True and _FakeTurns.instances[0].require is True
+
+
+def test_external_session_cold_resume_with_pointer_resumes(monkeypatch):
+    mgr = _external_mgr(monkeypatch, has_pointer=True)
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    history = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
+    result = asyncio.run(mgr.send_turn(sid, "next", {"label": "c", "agent_type": "codex"}, None, history=history))
+    assert result.text == "ext:next"
+    assert _FakeTurns.instances[0].resume is True and _FakeTurns.instances[0].started == 1
+
+
+def test_external_session_fork_is_rejected(monkeypatch):
+    mgr = _external_mgr(monkeypatch)
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    with pytest.raises(BackendError, match="fork"):
+        asyncio.run(mgr.capture_fork(sid, keep_rounds=None, fork_mode="full"))
+    with pytest.raises(BackendError, match="fork"):
+        asyncio.run(
+            mgr.open_session(
+                kind="agent", instructions=None, opts={"label": "k", "agent_type": "codex"},
+                fork_data={"messages": [{"role": "user", "content": "x"}]},
+            )
+        )
+
+
+def test_external_session_abort_all_aborts_live_runtimes(monkeypatch):
+    mgr = _external_mgr(monkeypatch)
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    asyncio.run(mgr.send_turn(sid, "one", {"label": "c", "agent_type": "codex"}, None, history=()))
+    asyncio.run(mgr.abort_all())
+    assert _FakeTurns.instances[0].aborted == 1
+
+
+def test_human_session_ignores_agent_type():
+    mgr = AvatarSessionManager(
+        external_cli_agents=(ExternalCliAgentSpec(cli_agent="codex"),),
+        gate_agent_type=lambda name: ExternalCliAgentSpec(cli_agent=name),
+    )
+    with pytest.raises(BackendError, match="human"):
+        asyncio.run(mgr.open_session(kind="human", instructions=None, opts={"label": "h", "agent_type": "codex"}))
+
+
+def test_external_session_start_failure_stops_runtime(monkeypatch):
+    """A failed external session start must call stop() to prevent a session leak."""
+    mgr = _external_mgr(monkeypatch, has_pointer=False)
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    history = [{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "reply"}]
+    with pytest.raises(HarnessProtocolError):
+        asyncio.run(mgr.send_turn(sid, "next", {"label": "c", "agent_type": "codex"}, None, history=history))
+    # stop() must be called so the runtime is not leaked even though start() failed.
+    assert _FakeTurns.instances[0].stopped == 1
+
+
+def test_external_session_fork_blocked_after_close(monkeypatch):
+    """capture_fork raises BackendError even after the session row is removed by close_session."""
+    mgr = _external_mgr(monkeypatch)
+    sid = asyncio.run(mgr.open_session(kind="agent", instructions=None, opts={"label": "c", "agent_type": "codex"}))
+    asyncio.run(mgr.close_session(sid))
+    # Row is gone, but _external_members remembers this was an external session.
+    with pytest.raises(BackendError, match="fork"):
+        asyncio.run(mgr.capture_fork(sid, keep_rounds=None, fork_mode="full"))

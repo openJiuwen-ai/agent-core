@@ -848,3 +848,46 @@ async def test_resume_without_a_saved_checkpoint_starts_a_new_session() -> None:
     assert started.resume_policy is not ResumePolicy.REQUIRE_RESUME
     await runtime.stop()
     logger.info("resume without a checkpoint starts a new session")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_require_checkpoint_rejects_resume_without_a_pointer() -> None:
+    """A cold resume that finds no saved session pointer must fail loudly, not start fresh."""
+    from openjiuwen.harness_protocol import HarnessProtocolError
+
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness,
+        context=_context(),
+        resume_external_backend=True,
+        require_checkpoint=True,
+    )
+    with pytest.raises(HarnessProtocolError):
+        await runtime.start(team_session=_FakeTeamSession())
+    assert harness.start_contexts == []
+    await runtime.stop()  # must not raise; runtime was never started
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_require_checkpoint_resumes_when_a_pointer_exists() -> None:
+    """With a stored pointer the strict flag behaves exactly like resume_external_backend."""
+    harness = _FakeHarness()
+    team_session = _FakeTeamSession()
+    team_session.member_session.state["external_runtime"] = {
+        "backend": "fake",
+        "checkpoint": {
+            "provider": "fake", "schema_version": "1", "agent_id": "member-agent",
+            "host_session_id": "team-session", "checkpoint_id": "cp-1", "sequence": 1,
+            "data": {"session_id": "provider-session"}, "provider_session_id": "provider-session",
+            "revision": None,
+        },
+    }
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness, context=_context(), resume_external_backend=True, require_checkpoint=True,
+    )
+    await runtime.start(team_session=team_session)
+    await runtime.stop()
+    assert harness.start_contexts[0].resume_policy is ResumePolicy.REQUIRE_RESUME
+

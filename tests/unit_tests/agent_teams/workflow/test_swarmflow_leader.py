@@ -596,3 +596,14 @@ def test_agent_failed_not_narrated_by_handler():
     handler, host = _handler(TeamRole.LEADER)
     asyncio.run(handler.on_workflow_progress(_event("agent_failed", phase="Search", label="agent-1", text="failed")))
     assert host.delivered == []
+
+
+def test_agent_started_payload_carries_agent_type():
+    """agent_type rides the cross-process team event; absent means native."""
+    ext = EventMessage.from_event(
+        WorkflowProgressTeamEvent(team_name="t", kind="agent_started", label="ext", agent_type="codex")
+    ).get_payload()
+    native = _event("agent_started", label="native").get_payload()
+    assert ext.agent_type == "codex"
+    assert native.agent_type is None
+

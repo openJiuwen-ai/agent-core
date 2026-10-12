@@ -700,3 +700,40 @@ def test_fork_parent_not_contaminated_by_child(monkeypatch):
     assert a._history[1] == {"role": "assistant", "content": "a1"}
     # capture_fork was not called on the raw object (no backend/runtime).
     assert backend.forks == []
+
+
+_AGENT_TYPE_SCRIPT = """
+from swarmflow import agent, agent_session
+
+META = {"name": "agent-type", "description": "agent_type propagation", "phases": []}
+
+async def run(args):
+    await agent("native prompt", label="native")
+    await agent("codex prompt", label="ext", options={"agent_type": "codex"})
+    await agent_session(label="ext_sess", options={"agent_type": "claude"}).send("hi")
+"""
+
+
+class _DescribingBackend(_RecordingBackend):
+    """Backend that names the model it would assemble for a third-party call."""
+
+    def describe_model(self, opts: dict) -> str | None:
+        if opts.get("agent_type"):
+            return f"{opts['agent_type']}-default-model"
+        return None
+
+
+def test_agent_started_carries_agent_type_and_described_model(tmp_path):
+    """Third-party calls announce their provider and assembled model; native calls stay as before."""
+    script = _write(tmp_path, "agent_type.py", _AGENT_TYPE_SCRIPT)
+    events: list[WorkflowProgressEvent] = []
+
+    asyncio.run(run_workflow(script, backend=_DescribingBackend(), progress_sink=events.append))
+
+    started = {e.label: e for e in events if e.kind == ProgressKind.AGENT_STARTED}
+    assert started["native"].agent_type is None
+    assert started["native"].model is None
+    assert started["ext"].agent_type == "codex"
+    assert started["ext"].model == "codex-default-model"
+    assert started["ext_sess"].agent_type == "claude"
+    assert started["ext_sess"].model == "claude-default-model"
