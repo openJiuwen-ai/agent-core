@@ -13,6 +13,7 @@
 | **OpenAIModelClient** | OpenAI-compatible large model client implementation. |
 | **OpenAIAccountModelClient** | OpenAI account OAuth large model client implementation, signing in via OAuth credentials with no `api_key` required. |
 | **AnthropicModelClient** | Anthropic protocol client. Legacy `client_provider` names such as `DashScope` and `DeepSeek` are OpenAI-compatible aliases. See [LLM Protocol Consolidation](../../Basic%20Functions/LLM%20Protocol%20Consolidation.md). |
+| **GoogleModelClient** | Optional native Gemini text and function tool client. See [Native Google](./llm/google_native.md) for `openjiuwen[google]` installation and registry setup. |
 | **BaseOutputParser** | Output parser abstract base class. |
 | **JsonOutputParser** | JSON format output parser. |
 | **MarkdownOutputParser** | Markdown format output parser. |
