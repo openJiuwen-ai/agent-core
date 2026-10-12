@@ -12,9 +12,14 @@ from typing import (
     Dict,
     List,
     Optional,
+    Tuple,
     Union,
 )
 
+from openjiuwen.core.foundation.llm.utf8_sanitize import (
+    sanitize_utf8_text,
+    sanitize_utf8_tree,
+)
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -544,6 +549,16 @@ class BaseModelClient(ABC):
 
         return result
 
+    @staticmethod
+    def _sanitize_utf8_text(value: str) -> Tuple[str, int]:
+        """Replace UTF-16 surrogate code units so the text is UTF-8 encodable."""
+        return sanitize_utf8_text(value)
+
+    @classmethod
+    def _sanitize_utf8_tree(cls, value: Any) -> Tuple[Any, int]:
+        """Recursively sanitize string leaves in request payloads."""
+        return sanitize_utf8_tree(value)
+
     def _build_request_params(
             self,
             *,
@@ -632,6 +647,21 @@ class BaseModelClient(ABC):
         # Then add kwargs parameters (will override model_config params with same key)
         filtered_kwargs = {k: v for k, v in kwargs.items() if k not in internal_params}
         params.update(filtered_kwargs)
+
+        # Drop unpaired UTF-16 surrogates before OpenAI SDK JSON encode.
+        # Covers messages/tools/stop/extra string leaves for all OpenAI-compatible clients.
+        params, surrogate_hits = self._sanitize_utf8_tree(params)
+        messages_dict = params.get("messages", messages_dict)
+        tools_dict = params.get("tools", tools_dict)
+        if surrogate_hits:
+            llm_logger.warning(
+                "Stripped UTF-16 surrogate code units from LLM request params "
+                "before UTF-8 encode (count=%s).",
+                surrogate_hits,
+                event_type=LogEventType.LLM_CALL_START,
+                model_name=model if model else self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+            )
 
         # Logging
         client_name = self._get_client_name()

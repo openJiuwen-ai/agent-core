@@ -2,9 +2,13 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 from typing import Union, List, Optional, Any, Dict
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.llm.utf8_sanitize import (
+    sanitize_message_content,
+    sanitize_utf8_text,
+)
 
 
 OPENJIUWEN_MESSAGE_PROVENANCE_METADATA = "_openjiuwen_message_provenance"
@@ -64,6 +68,19 @@ class AssistantMessage(BaseMessage):
     response_model: Optional[str] = None
     provider_metadata: Dict[str, Any] = Field(default_factory=dict)
     provider_content: Optional[Any] = None
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def _sanitize_inbound_content(cls, value: Any) -> Any:
+        """Inbound LLM reply content: replace lone surrogates with U+FFFD."""
+        return sanitize_message_content(value)
+
+    @field_validator("reasoning_content", mode="before")
+    @classmethod
+    def _sanitize_inbound_reasoning(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return sanitize_utf8_text(value)[0]
+        return value
 
     @model_validator(mode='before')
     @classmethod

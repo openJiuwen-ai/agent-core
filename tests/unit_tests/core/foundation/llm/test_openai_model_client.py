@@ -1,6 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import json
+
 from openjiuwen.core.foundation.llm import (
     ModelClientConfig,
     ModelRequestConfig,
@@ -246,6 +248,149 @@ class TestApplyModelSpecificParams:
         client._apply_model_specific_params("minimax-m3", params)
 
         assert "extra_body" not in params
+
+
+class TestUtf8SafeRequestParams:
+    """Gate: lone UTF-16 surrogates must not reach OpenAI JSON encode."""
+
+    @staticmethod
+    def _assert_utf8_json_encodable(params: dict) -> None:
+        json.dumps(params, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+
+    def test_build_request_params_strips_lone_surrogate(self):
+        client = _make_client()
+        # U+D83D is a high surrogate half; pairing with U+DE00 would form 😀, alone it is illegal UTF-8.
+        lone_high = "前置\ud83d后置"
+        lone_low = "尾\udc00半"
+        intact_emoji = "完整\U0001F600表情"
+        params = client._build_request_params(
+            messages=[{"role": "user", "content": f"{lone_high}|{lone_low}|{intact_emoji}"}],
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model=None,
+            stop=None,
+            max_tokens=None,
+            stream=True,
+        )
+        self._assert_utf8_json_encodable(params)
+        content = params["messages"][0]["content"]
+        assert "\ud83d" not in content
+        assert "\udc00" not in content
+        assert "\U0001F600" in content
+        assert "前置" in content and "后置" in content
+
+    def test_build_request_params_sanitizes_nested_tool_strings(self):
+        client = _make_client()
+        params = client._build_request_params(
+            messages=[{"role": "user", "content": "ok"}],
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "demo",
+                    "description": "desc\ud83d",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"q": {"type": "string", "description": "q\udc00"}},
+                    },
+                },
+            }],
+            temperature=None,
+            top_p=None,
+            model=None,
+            stop=None,
+            max_tokens=None,
+            stream=False,
+        )
+        self._assert_utf8_json_encodable(params)
+        dumped = json.dumps(params, ensure_ascii=False)
+        assert "\ud83d" not in dumped
+        assert "\udc00" not in dumped
+
+
+class TestUtf8SafeInboundAssistantReply:
+    """Gate: inbound LLM stream/non-stream text must be UTF-8 safe before WS/history."""
+
+    def test_assistant_message_chunk_replaces_lone_surrogate(self):
+        from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+
+        chunk = AssistantMessageChunk(
+            content="【注入】\ud83d【结束】\U0001F600",
+            reasoning_content="想\ud83d法",
+        )
+        assert "\ud83d" not in chunk.content
+        assert "\ufffd" in chunk.content
+        assert "\U0001F600" in chunk.content
+        assert "【注入】" in chunk.content and "【结束】" in chunk.content
+        assert "\ud83d" not in (chunk.reasoning_content or "")
+        assert "\ufffd" in (chunk.reasoning_content or "")
+        # Must survive JSON UTF-8 encode used on wire/history paths.
+        json.dumps(
+            {"content": chunk.content, "reasoning": chunk.reasoning_content},
+            ensure_ascii=False,
+        ).encode("utf-8")
+
+    def test_tool_call_arguments_sanitized_on_construct(self):
+        from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+
+        tc = ToolCall(
+            id="call_1",
+            type="function",
+            name="demo",
+            arguments='{"q":"坏\ud83d"}',
+            index=0,
+        )
+        assert "\ud83d" not in tc.arguments
+        assert "\ufffd" in tc.arguments
+        tc.arguments.encode("utf-8")
+
+    def test_parse_stream_chunk_sanitizes_delta_content(self):
+        client = _make_client()
+
+        class _Fn:
+            name = ""
+            arguments = '{"x":"\ud83d"}'
+
+        class _Tc:
+            id = "c1"
+            index = 0
+            function = _Fn()
+
+        class _Choice:
+            finish_reason = None
+            delta = _Delta(
+                content="答\ud83d案\U0001F600",
+                reasoning_content="理\ud83d由",
+                tool_calls=[_Tc()],
+            )
+            logprobs = None
+            token_ids = None
+
+        class _Chunk:
+            choices = [_Choice()]
+            usage = None
+            id = "chatcmpl-test"
+            model = "GLM-5.3-Flash"
+            prompt_token_ids = None
+            system_fingerprint = None
+            service_tier = None
+
+        parsed = client._parse_stream_chunk(_Chunk())
+        assert parsed is not None
+        assert "\ud83d" not in parsed.content
+        assert "\ufffd" in parsed.content
+        assert "\U0001F600" in parsed.content
+        assert "\ud83d" not in (parsed.reasoning_content or "")
+        assert parsed.tool_calls
+        assert "\ud83d" not in parsed.tool_calls[0].arguments
+        json.dumps(
+            {
+                "content": parsed.content,
+                "reasoning": parsed.reasoning_content,
+                "args": parsed.tool_calls[0].arguments,
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
 
 
 class _Delta:
