@@ -40,7 +40,11 @@ class _RetiredSessionFilter:
         digest = hashlib.sha256(session_id.encode("utf-8")).digest()
         bit_count = _RETIRED_SESSION_FILTER_BYTES * 8
         for offset in range(0, _RETIRED_SESSION_HASH_COUNT * 4, 4):
-            yield int.from_bytes(digest[offset:offset + 4], "big") % bit_count
+            # 简单名切片（两侧都是标识符）同时满足 ruff format 与 G.FMT.04
+            # 检视（禁止切片冒号前空格）：复杂表达式切片会被格式化器改写成
+            # ``[offset : offset + 4]``，与检视规则冲突。
+            end = offset + 4
+            yield int.from_bytes(digest[offset:end], "big") % bit_count
 
     def add(self, session_id: str) -> None:
         for index in self._indexes(session_id):
@@ -106,7 +110,9 @@ class SkillGrantStore:
             self._skill_executions[key] = name
         logger.info(
             "[skill_authorization] skill_execution.enter session=%s scope=%s skill=%s",
-            key[0], key[1], name,
+            key[0],
+            key[1],
+            name,
         )
 
     def exit_skill_execution(self, session_id: str, agent_scope_id: str) -> None:
@@ -117,7 +123,9 @@ class SkillGrantStore:
         if name:
             logger.info(
                 "[skill_authorization] skill_execution.exit session=%s scope=%s skill=%s",
-                key[0], key[1], name,
+                key[0],
+                key[1],
+                name,
             )
 
     def get_active_skill_execution(
@@ -172,8 +180,12 @@ class SkillGrantStore:
         logger.info(
             "[skill_authorization] grant.pending_created session=%s scope=%s skill=%s "
             "decision=%s permissions_hash=%s tool_call_id=%s",
-            key[0], key[1], manifest.skill_name, decision.value,
-            manifest.permissions_hash, approval_tool_call_id,
+            key[0],
+            key[1],
+            manifest.skill_name,
+            decision.value,
+            manifest.permissions_hash,
+            approval_tool_call_id,
         )
         return copy.deepcopy(grant)
 
@@ -204,17 +216,16 @@ class SkillGrantStore:
 
             matched = candidate.matches_identity(manifest)
             if matched and candidate.approval_tool_call_id:
-                matched = (
-                    approval_tool_call_id is not None
-                    and candidate.approval_tool_call_id == approval_tool_call_id
-                )
+                matched = approval_tool_call_id is not None and candidate.approval_tool_call_id == approval_tool_call_id
             if not matched:
                 del scope_grants[name]
                 self._drop_empty_scope(key)
                 logger.warning(
                     "[skill_authorization] grant.activate_rejected session=%s scope=%s skill=%s "
                     "reason=identity_or_tool_call_mismatch",
-                    key[0], key[1], name,
+                    key[0],
+                    key[1],
+                    name,
                 )
                 return None
 
@@ -227,22 +238,28 @@ class SkillGrantStore:
                     logger.info(
                         "[skill_authorization] grant.active_superseded session=%s scope=%s skill=%s "
                         "action=to_approved_inactive",
-                        key[0], key[1], other_name,
+                        key[0],
+                        key[1],
+                        other_name,
                     )
                 else:
                     del scope_grants[other_name]
                     logger.info(
-                        "[skill_authorization] grant.active_superseded session=%s scope=%s skill=%s "
-                        "action=deleted",
-                        key[0], key[1], other_name,
+                        "[skill_authorization] grant.active_superseded session=%s scope=%s skill=%s action=deleted",
+                        key[0],
+                        key[1],
+                        other_name,
                     )
 
             candidate.touch(GrantStatus.ACTIVE)
             self._invalidated_scopes.discard(key)
             logger.info(
-                "[skill_authorization] grant.activated session=%s scope=%s skill=%s "
-                "decision=%s permissions_hash=%s",
-                key[0], key[1], name, candidate.decision.value, candidate.permissions_hash,
+                "[skill_authorization] grant.activated session=%s scope=%s skill=%s decision=%s permissions_hash=%s",
+                key[0],
+                key[1],
+                name,
+                candidate.decision.value,
+                candidate.permissions_hash,
             )
             return copy.deepcopy(candidate)
 
@@ -338,7 +355,10 @@ class SkillGrantStore:
             self._drop_empty_scope(key)
         logger.info(
             "[skill_authorization] grant.pending_dropped session=%s scope=%s skill=%s reason=%s",
-            key[0], key[1], name, reason,
+            key[0],
+            key[1],
+            name,
+            reason,
         )
         return True
 
@@ -371,14 +391,19 @@ class SkillGrantStore:
                         logger.info(
                             "[skill_authorization] grant.revoked session=%s scope=%s skill=%s "
                             "reason=%s action=to_approved_inactive",
-                            key[0], key[1], name, reason,
+                            key[0],
+                            key[1],
+                            name,
+                            reason,
                         )
                 else:
                     del scope_grants[name]
                     logger.info(
-                        "[skill_authorization] grant.revoked session=%s scope=%s skill=%s "
-                        "reason=%s action=deleted",
-                        key[0], key[1], name, reason,
+                        "[skill_authorization] grant.revoked session=%s scope=%s skill=%s reason=%s action=deleted",
+                        key[0],
+                        key[1],
+                        name,
+                        reason,
                     )
             self._drop_empty_scope(key)
 
@@ -395,13 +420,13 @@ class SkillGrantStore:
                 del self._grants[key]
                 logger.info(
                     "[skill_authorization] grant.session_cleared session=%s scope=%s grants=%s",
-                    key[0], key[1], count,
+                    key[0],
+                    key[1],
+                    count,
                 )
             for key in [key for key in self._skill_executions if key[0] == sid]:
                 self._skill_executions.pop(key, None)
-            self._invalidated_scopes = {
-                key for key in self._invalidated_scopes if key[0] != sid
-            }
+            self._invalidated_scopes = {key for key in self._invalidated_scopes if key[0] != sid}
 
     def clear_scope(self, session_id: str, agent_scope_id: str) -> None:
         """子 Agent 销毁：删除该 ``(session_id, agent_scope_id)`` 作用域下全部 Grant。"""
@@ -413,7 +438,9 @@ class SkillGrantStore:
         if grants:
             logger.info(
                 "[skill_authorization] grant.scope_cleared session=%s scope=%s grants=%s",
-                key[0], key[1], len(grants),
+                key[0],
+                key[1],
+                len(grants),
             )
 
     def clear_all(self) -> None:
