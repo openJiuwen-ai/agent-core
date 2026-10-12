@@ -102,7 +102,7 @@ def _context_window_with(system=(), tools=()):
 
 @pytest.mark.asyncio
 async def test_compression_input_shrunk_to_budget():
-    """预算内装不下的最旧消息移入 protected_tail（留在主上下文，不丢数据）。"""
+    """超出预算的靠尾（较新）消息移入 protected_tail（留在主上下文，不丢数据）。"""
     from openjiuwen.core.foundation.llm import UserMessage
 
     compressor = DialogueCompressor(DialogueCompressorConfig())
@@ -121,7 +121,9 @@ async def test_compression_input_shrunk_to_budget():
     )
     assert shrunk is not None
     assert 1 <= len(shrunk.messages_to_compress) < 10
-    # 未进摘要的消息保留在 protected_tail（留在主上下文），且原有 tail 排在其后。
+    # 方向：最旧的留在摘要范围（messages_to_compress[0] 即原首条），
+    # 超出预算的靠尾（较新）那批移入 protected_tail（留在主上下文），原有 tail 排在其后。
+    assert shrunk.messages_to_compress[0] is msgs[0]
     assert len(shrunk.protected_tail) == 10 - len(shrunk.messages_to_compress)
     assert shrunk.protected_tail[0] is msgs[len(shrunk.messages_to_compress)]
 
