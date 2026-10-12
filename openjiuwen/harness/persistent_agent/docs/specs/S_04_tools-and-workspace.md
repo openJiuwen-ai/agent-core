@@ -5,13 +5,13 @@
 | 项 | 值 |
 | --- | --- |
 | 类型 | spec |
-| 状态 | 拟议契约；尚未实现 |
-| 关联模块 | `openjiuwen/harness/persistent_agent/{workspace/,tools/,execution/loop_adapter.py}`（拟议路径） |
-| 最近一次修订日期 | 2026-10-08 |
+| 状态 | PA-14～PA-16 agent-core 契约已部分实现；JiuwenSwarm 宿主适配待完成 |
+| 关联模块 | `openjiuwen/harness/persistent_agent/{workspace/,tools/,execution/}`、`openjiuwen/harness/tools/filesystem.py` |
+| 最近一次修订日期 | 2026-10-12 |
 | 关联 feature | N/A；开发计划 PA-14～PA-16 |
 | 设计依据 | 旧版详细架构 §12、§14.2（见 Git 历史）；当前设计为 [Persistent Agent 详细架构设计](../designs/persistent-agent-architecture.md) |
 
-当前没有本模块的工具适配或办公空间实现；本规约不声称已有工具具备下述可靠恢复能力。
+PA-14～PA-16 的 agent-core 组件已开始落地。本规约仍不声称 JiuwenSwarm 的授权、真实 SysOperation provider、事件持久化和跨进程恢复联调已经完成。
 
 ## 范围 / 边界
 
@@ -21,7 +21,7 @@
 
 | 现有实现 | 直接复用 | 尚未覆盖的要求 |
 | --- | --- | --- |
-| [`Workspace`](../../../workspace/workspace.py) 与 [`ReadFileTool/WriteFileTool/EditFileTool`](../../../tools/filesystem.py) | 工作目录结构及文件读写；`EditFileTool` 已有读后编辑检查和进程内路径锁 | 每调用授权交集、跨进程执行权围栏、稳定 `operation_id` 与回执核对。进程内锁不能当作跨实例事务 |
+| [`Workspace`](../../../workspace/workspace.py) 与 [`ReadFileTool/WriteFileTool/EditFileTool`](../../../tools/filesystem.py) | 工作目录结构及文件读写；Persistent opt-in 写工具支持内容哈希 / 条件创建；`EditFileTool` 保留读后编辑检查和进程内路径锁 | 每调用授权交集、跨进程执行权围栏、稳定 `operation_id` 与回执核对仍需宿主接入。进程内锁不能当作跨实例事务 |
 | [`PermissionEngine`](../../../security/permission_engine/core.py)、[`PermissionInterruptRail`](../../../rails/security/tool_security_rail.py) 和 FileGuard | 沿用工具审批、路径及命令安全检查 | 宿主当前主体/Session/资源授权和租约写入边界；不复制一套通用权限引擎 |
 | DeepAgent 现有 [子代理运行时](../../../subagent_runtime/) | 子代理创建、运行和并行调度 | 父 Request 的业务事件汇聚、预算、外部副作用确认及恢复核对；不新建子代理运行时 |
 
@@ -46,7 +46,7 @@
 | `read_context_knowledge` | 同一发布版本的受控正文与来源，读取时重新鉴权 |
 | `request_window_switch` | 只登记换窗请求，实际指针更新由 ContextManager 完成 |
 
-读取结果至少区分 `status, content_or_ref, source_refs, version, completeness, next_cursor`；写入另含 `operation_id, receipt`。`forbidden`、`not_found`、`partial`、`version_conflict`、`unavailable` 语义不同，但面向无权主体不能用错误差异泄露资源存在性。工具应声明只读、外部幂等键、查询、取消及补偿能力，恢复依据声明能力与实际回执，不根据工具名猜测。
+读取结果至少区分 `status, content_or_ref, source_refs, version, completeness, next_cursor`；写入另含 `operation_id, receipt`。`forbidden`、`not_found`、`partial`、`version_conflict`、`unavailable` 语义不同，但面向无权主体不能用错误差异泄露资源存在性。Persistent 写工具的条件冲突由 SysOperation 返回稳定错误码，再映射为 `version_conflict`，不解析本地化错误文本。工具应声明只读、外部幂等键、查询、取消及补偿能力，恢复依据声明能力与实际回执，不根据工具名猜测。
 
 拟议副作用序列：
 
@@ -67,7 +67,9 @@ prepare(operation_id, target, args_hash, controlled_args_ref)
 
 外部操作查询可得到已成功、明确未执行或仍未知。已成功复用原回执；明确未执行时重新检查权限和前置条件；支持外部幂等键时按原键查询或有限重试；未知且不可查询时暂停。补偿作为新的获授权操作，取消不自动授予补偿权。租约失效只能防止后续受控写入，不能撤回在途请求。旧执行者回执由宿主验证后进入核对流程，不直接改写新执行的终态或窗口。
 
-文件工具在派发和实际写入前核验执行权；若底层无法阻止失权旧进程继续写入，不开放该空间的自动多实例接管或相应写能力。子代理写工具默认串行；只有资源独立、操作标识稳定且回执可逐项核对时才允许并行。换窗前须收拢完整模型工具消息组；Checkpoint 不序列化旧子代理线程。初期缺少子代理汇聚与恢复适配时，对需可靠恢复的任务禁用其写工具。
+文件工具在派发和实际写入前核验执行权；Persistent 写工具在当前调用 preflight 中绑定授权范围和精确内容条件，PA-15 意图记账成功后才委托 Harness 工具写入。若底层无法阻止失权旧进程继续写入，不开放该空间的自动多实例接管或相应写能力。子代理写工具默认串行；只有资源独立、操作标识稳定且回执可逐项核对时才允许并行。换窗前须收拢完整模型工具消息组；Checkpoint 不序列化旧子代理线程。初期缺少子代理汇聚与恢复适配时，对需可靠恢复的任务禁用其写工具。
+
+个人版 / 普通 DeepAgent 不开启 `workspace_write` 时，仍使用原有 `WriteFileTool` / `EditFileTool` 构造和行为；PA-16 的条件写入参数只由 Persistent 专用 opt-in 实例传入。
 
 ## 与其它 spec 的关系
 

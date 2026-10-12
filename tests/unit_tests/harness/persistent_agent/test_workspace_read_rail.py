@@ -16,7 +16,7 @@ from openjiuwen.harness.persistent_agent.persistent_agent.schema.build_context i
 from openjiuwen.harness.persistent_agent.persistent_agent.schema.execution import ExecutionContext
 from openjiuwen.harness.persistent_agent.persistent_agent.schema.spec import PersistentAgentSpec
 from openjiuwen.harness.persistent_agent.persistent_agent.workspace.access import WorkspaceReadScope
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.rail import PersistentWorkspaceReadRail
+from openjiuwen.harness.persistent_agent.persistent_agent.workspace.file_access import PersistentWorkspaceReadRail
 
 pytestmark = pytest.mark.level0
 

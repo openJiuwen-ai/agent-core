@@ -81,6 +81,22 @@ class PersistentBuildContext(BuildContext):
             raise build_error(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, error_msg="capability snapshot mismatch")
         if self.tool_owner_id != self.binding.owner_id:
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="owner mismatch")
+        if "workspace_write" in spec.enabled_features:
+            if "workspace_read" not in spec.enabled_features:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="workspace_write requires workspace_read",
+                )
+            if not spec.enable_sys_operation:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="workspace_write requires enable_sys_operation",
+                )
+            if self.ports.workspace_write_access is None:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="workspace_write_access is required for workspace_write",
+                )
         if "workspace_read" in spec.enabled_features and self.ports.workspace_access is None:
             raise build_error(
                 StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,

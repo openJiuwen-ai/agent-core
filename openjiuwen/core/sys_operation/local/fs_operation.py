@@ -132,6 +132,8 @@ class _ErrorLogParams:
 class FsOperation(BaseFsOperation):
     """File system operation"""
 
+    supports_conditional_write = True
+
     @staticmethod
     def _get_lock_timeout(options: Optional[Dict[str, Any]] = None) -> float:
         """Gets the file lock timeout value from options or uses default.
@@ -425,13 +427,44 @@ class FsOperation(BaseFsOperation):
             method_name=method_name,
             method_params=method_params
         ))
+        options = options or {}
+        expected_hash = options.get("expected_content_sha256")
+        create_if_absent = options.get("create_if_absent", False)
+        if expected_hash is not None and not isinstance(expected_hash, str):
+            return self._create_error_result(
+                "write_file", "expected_content_sha256 must be a string", WriteFileResult,
+                _ErrorLogParams(method_name, method_params, start_time),
+            )
+        if not isinstance(create_if_absent, bool):
+            return self._create_error_result(
+                "write_file", "create_if_absent must be a boolean", WriteFileResult,
+                _ErrorLogParams(method_name, method_params, start_time),
+            )
+        if (
+            (expected_hash is not None and create_if_absent)
+            or ((expected_hash is not None or create_if_absent) and append)
+            or (create_if_absent and not create_if_not_exist)
+        ):
+            return self._create_error_result(
+                "write_file", "conditional write options are incompatible", WriteFileResult,
+                _ErrorLogParams(method_name, method_params, start_time),
+            )
+
+        def version_conflict() -> WriteFileResult:
+            return WriteFileResult(
+                code=StatusCode.SYS_OPERATION_FILE_VERSION_CONFLICT.code,
+                message=StatusCode.SYS_OPERATION_FILE_VERSION_CONFLICT.errmsg,
+                data=None,
+            )
+
         try:
             file_path = self._resolve_path(path, create_parent=True)
             if file_path.is_dir():
                 return self._create_error_result("write_file", f"Target path is a directory:"
                                                                f" {file_path}", WriteFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
-            if not create_if_not_exist and not file_path.exists():
+            conditional_write_requested = expected_hash is not None or create_if_absent
+            if not create_if_not_exist and not file_path.exists() and not conditional_write_requested:
                 return self._create_error_result("write_file", f"File does not exist: {file_path}",
                                                  WriteFileResult,
                                                  _ErrorLogParams(method_name, method_params, start_time))
@@ -439,23 +472,16 @@ class FsOperation(BaseFsOperation):
             timeout = self._get_lock_timeout(options)
 
             async with self._file_lock(file_path, "write", timeout):
-                expected_hash = options.get("expected_content_sha256") if options else None
+                if create_if_absent and file_path.exists():
+                    return version_conflict()
                 if expected_hash is not None:
                     try:
                         current_bytes = file_path.read_bytes()
                     except FileNotFoundError:
-                        current_bytes = b""
+                        return version_conflict()
                     current_hash = hashlib.sha256(current_bytes).hexdigest()
                     if current_hash != expected_hash:
-                        return self._create_error_result(
-                            "write_file",
-                            (
-                                f"File changed while preparing the write: {file_path}. "
-                                "Re-read the file and retry the edit."
-                            ),
-                            WriteFileResult,
-                            _ErrorLogParams(method_name, method_params, start_time),
-                        )
+                        return version_conflict()
                 if mode == "text":
                     txt = str(content)
                     if prepend_newline:
@@ -466,9 +492,14 @@ class FsOperation(BaseFsOperation):
                 else:
                     data_bytes = content if isinstance(content, (bytes, bytearray)) else bytes(content)
 
-                write_mode = "ab" if append else "wb"
-                async with aiofiles.open(file_path, mode=write_mode) as f:
-                    await f.write(data_bytes)
+                write_mode = "xb" if create_if_absent else "ab" if append else "wb"
+                try:
+                    async with aiofiles.open(file_path, mode=write_mode) as f:
+                        await f.write(data_bytes)
+                except FileExistsError:
+                    if create_if_absent:
+                        return version_conflict()
+                    raise
 
                 self._apply_permissions(file_path, permissions)
 

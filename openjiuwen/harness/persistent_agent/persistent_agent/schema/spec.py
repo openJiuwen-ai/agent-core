@@ -26,7 +26,7 @@ class PersistentAgentSpec(DeepAgentSpec):
     # Identifies this serialized Spec shape so unsupported configuration versions fail closed.
     schema_version: Literal[1] = 1
     # Advertises only capabilities the runtime can validate and bind for this Agent.
-    enabled_features: frozenset[Literal["construction", "workspace_read"]] = Field(
+    enabled_features: frozenset[Literal["construction", "workspace_read", "workspace_write"]] = Field(
         default=frozenset({"construction"}), min_length=1
     )
 
@@ -48,6 +48,22 @@ class PersistentAgentSpec(DeepAgentSpec):
 
         if not isinstance(context, PersistentBuildContext) or not context.binding.attempted:
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="use Persistent construction entry")
+        if "workspace_write" in self.enabled_features:
+            if "workspace_read" not in self.enabled_features:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="workspace_write requires workspace_read",
+                )
+            if not self.enable_sys_operation:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="workspace_write requires enable_sys_operation",
+                )
+            if context.ports.workspace_write_access is None:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="workspace_write_access is required for workspace_write",
+                )
         parts = super().resolve_parts(context)
         context.binding.parts = parts
         if "workspace_read" in self.enabled_features:
@@ -62,9 +78,19 @@ class PersistentAgentSpec(DeepAgentSpec):
                     StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
                     error_msg="workspace_access is required for workspace_read",
                 )
-            from ..workspace.rail import PersistentWorkspaceReadRail
+            from ..workspace.file_access import PersistentWorkspaceReadRail
 
             parts.rails.append(PersistentWorkspaceReadRail(context.execution, workspace_access))
+        if "workspace_write" in self.enabled_features:
+            workspace_write_access = context.ports.workspace_write_access
+            if workspace_write_access is None:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="workspace_write_access is required for workspace_write",
+                )
+            from ..workspace.file_access import PersistentWorkspaceWriteRail
+
+            parts.rails.append(PersistentWorkspaceWriteRail(context.execution, workspace_write_access))
         from ..execution.model_rail import PersistentModelCallRail
         from ..execution.stream_lifecycle import NativeStreamTaskLifecycle
         from ..execution.tool_intent_rail import PersistentToolIntentRail

@@ -4,6 +4,7 @@
 import asyncio
 import os
 import base64
+import hashlib
 import json
 import shutil
 import tempfile
@@ -268,8 +269,166 @@ async def test_write_file_tool_rejects_externally_modified_existing_file(sys_op,
     res = await write_tool.invoke({"file_path": file_path, "content": "replacement"})
 
     assert res.success is False
+    assert res.data is None
     assert "modified since read" in res.error
     assert file_path not in _FILE_READ_REGISTRY
+
+
+@pytest.mark.asyncio
+async def test_write_file_tool_does_not_recreate_deleted_observed_file(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op, enable_conditional_writes=True)
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "deleted_after_read.txt")
+    await write_tool.invoke({"file_path": file_path, "content": "existing"})
+    await read_tool.invoke({"file_path": file_path})
+    os.remove(file_path)
+
+    result = await write_tool.invoke({"file_path": file_path, "content": "must not recreate"})
+
+    assert result.success is False
+    assert result.data == {"status": "version_conflict"}
+    assert not os.path.exists(file_path)
+
+
+@pytest.mark.asyncio
+async def test_write_file_tool_passes_hash_of_exact_observed_bytes(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    write_tool = WriteFileTool(sys_op, enable_conditional_writes=True)
+    file_path = os.path.join(temp_dir, "raw_hash.txt")
+    original = "工作空间旧内容".encode("utf-8")
+    await sys_op.fs().write_file(file_path, original, mode="bytes", prepend_newline=False)
+    await read_tool.invoke({"file_path": file_path})
+
+    fs = sys_op.fs()
+    original_write_file = fs.write_file
+    seen_options = None
+
+    async def capture_write(path, content, **kwargs):
+        nonlocal seen_options
+        seen_options = kwargs.get("options")
+        return await original_write_file(path, content, **kwargs)
+
+    fs.write_file = capture_write
+    try:
+        result = await write_tool.invoke({"file_path": file_path, "content": "替换后的内容"})
+    finally:
+        fs.write_file = original_write_file
+
+    assert result.success is True
+    assert seen_options == {"expected_content_sha256": hashlib.sha256(original).hexdigest()}
+
+
+@pytest.mark.asyncio
+async def test_personal_write_file_tool_keeps_unconditional_write_behavior(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    write_tool = WriteFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "personal_write.txt")
+    await sys_op.fs().write_file(file_path, b"old", mode="bytes", prepend_newline=False)
+    await read_tool.invoke({"file_path": file_path})
+
+    fs = sys_op.fs()
+    original_write_file = fs.write_file
+    seen_options = object()
+
+    async def capture_write(path, content, **kwargs):
+        nonlocal seen_options
+        seen_options = kwargs.get("options")
+        return await original_write_file(path, content, **kwargs)
+
+    fs.write_file = capture_write
+    try:
+        result = await write_tool.invoke({"file_path": file_path, "content": "replacement"})
+    finally:
+        fs.write_file = original_write_file
+
+    assert result.success is True
+    assert seen_options is None
+
+
+@pytest.mark.asyncio
+async def test_personal_edit_file_tool_preserves_existing_version_option(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "personal_edit.txt")
+    original = b"old content"
+    await sys_op.fs().write_file(file_path, original, mode="bytes", prepend_newline=False)
+    await read_tool.invoke({"file_path": file_path})
+
+    fs = sys_op.fs()
+    original_write_file = fs.write_file
+    seen_options = object()
+
+    async def capture_write(path, content, **kwargs):
+        nonlocal seen_options
+        seen_options = kwargs.get("options")
+        return await original_write_file(path, content, **kwargs)
+
+    fs.write_file = capture_write
+    try:
+        result = await edit_tool.invoke(
+            {"file_path": file_path, "old_string": "old", "new_string": "new"}
+        )
+    finally:
+        fs.write_file = original_write_file
+
+    assert result.success is True
+    assert seen_options == {"expected_content_sha256": hashlib.sha256(original).hexdigest()}
+
+
+@pytest.mark.asyncio
+async def test_write_file_tool_uses_create_if_absent_for_new_files(sys_op, temp_dir):
+    write_tool = WriteFileTool(sys_op, enable_conditional_writes=True)
+    file_path = os.path.join(temp_dir, "atomic_create.txt")
+    fs = sys_op.fs()
+    original_write_file = fs.write_file
+    seen_options = None
+
+    async def capture_write(path, content, **kwargs):
+        nonlocal seen_options
+        seen_options = kwargs.get("options")
+        return await original_write_file(path, content, **kwargs)
+
+    fs.write_file = capture_write
+    try:
+        result = await write_tool.invoke({"file_path": file_path, "content": "created once"})
+    finally:
+        fs.write_file = original_write_file
+
+    assert result.success is True
+    assert seen_options == {"create_if_absent": True}
+
+
+@pytest.mark.asyncio
+async def test_write_file_tool_exposes_typed_conflict_without_overwriting_winner(sys_op, temp_dir):
+    read_tool = ReadFileTool(sys_op)
+    write_tool = WriteFileTool(sys_op, enable_conditional_writes=True)
+    file_path = os.path.join(temp_dir, "write_conflict.txt")
+    with open(file_path, "wb") as fh:
+        fh.write(b"observed")
+    await read_tool.invoke({"file_path": file_path})
+
+    fs = sys_op.fs()
+    original_write_file = fs.write_file
+    injected = False
+
+    async def competing_write(path, content, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            with open(path, "wb") as fh:
+                fh.write(b"winner")
+        return await original_write_file(path, content, **kwargs)
+
+    fs.write_file = competing_write
+    try:
+        result = await write_tool.invoke({"file_path": file_path, "content": "loser"})
+    finally:
+        fs.write_file = original_write_file
+
+    assert result.success is False
+    assert result.data == {"status": "version_conflict"}
+    with open(file_path, "rb") as fh:
+        assert fh.read() == b"winner"
 
 
 @pytest.mark.asyncio
@@ -617,6 +776,7 @@ async def test_edit_file_tool_partial_read_still_rejects_external_modification(s
         "new_string": "line2-edited",
     })
     assert res.success is False
+    assert res.data is None
     assert "modified since read" in res.error
 
 
@@ -656,7 +816,7 @@ async def test_edit_file_tool_rejects_change_between_edit_read_and_write(sys_op,
     """The write-time compare-and-swap must prevent a lost concurrent update."""
     write_tool = WriteFileTool(sys_op)
     read_tool = ReadFileTool(sys_op)
-    edit_tool = EditFileTool(sys_op)
+    edit_tool = EditFileTool(sys_op, enable_conditional_writes=True)
     file_path = os.path.join(temp_dir, "concurrent_edit.txt")
     await write_tool.invoke({"file_path": file_path, "content": "alpha beta"})
     await read_tool.invoke({"file_path": file_path})
@@ -685,6 +845,7 @@ async def test_edit_file_tool_rejects_change_between_edit_read_and_write(sys_op,
 
     assert result.success is False
     assert "changed while preparing" in result.error
+    assert result.data == {"status": "version_conflict"}
     with open(file_path, encoding="utf-8") as fh:
         assert fh.read() == "alpha changed-by-another-agent"
 
@@ -814,6 +975,35 @@ async def test_edit_file_tool_new_file_creation(sys_op, temp_dir):
     assert res.success is True
     assert res.data.get("created") is True
     assert os.path.exists(file_path)
+
+
+@pytest.mark.asyncio
+async def test_edit_file_tool_does_not_treat_existing_empty_file_as_absent(sys_op, temp_dir):
+    edit_tool = EditFileTool(sys_op, enable_conditional_writes=True)
+    file_path = os.path.join(temp_dir, "already_empty.txt")
+    with open(file_path, "wb") as fh:
+        fh.write(b"")
+
+    result = await edit_tool.invoke({"file_path": file_path, "old_string": "", "new_string": "new content"})
+
+    assert result.success is False
+    assert result.data == {"status": "version_conflict"}
+    with open(file_path, "rb") as fh:
+        assert fh.read() == b""
+
+
+@pytest.mark.asyncio
+async def test_personal_edit_file_tool_preserves_empty_file_creation_behavior(sys_op, temp_dir):
+    edit_tool = EditFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "personal_empty.txt")
+    with open(file_path, "wb") as fh:
+        fh.write(b"")
+
+    result = await edit_tool.invoke({"file_path": file_path, "old_string": "", "new_string": "new content"})
+
+    assert result.success is True
+    with open(file_path, "rb") as fh:
+        assert fh.read() == b"new content"
 
 
 @pytest.mark.asyncio

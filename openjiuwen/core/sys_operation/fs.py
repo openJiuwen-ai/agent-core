@@ -25,6 +25,9 @@ TAIL_CHUNK_SIZE = 1024
 class BaseFsOperation(BaseOperation, ABC):
     """Base file system operation"""
 
+    # Unknown backends must explicitly opt in only when conditional writes are atomic.
+    supports_conditional_write: bool = False
+
     def list_tools(self) -> List[ToolCard]:
         method_names = [
             "read_file",
@@ -139,6 +142,11 @@ class BaseFsOperation(BaseOperation, ABC):
             permissions: Octal file permissions (Unix/Linux only; ignored on Windows) (default: "644").
             encoding: Character encoding for text mode (default: utf-8).
             options: Extended configuration options (dict, optional).
+                ``expected_content_sha256`` requests an atomic compare-and-swap
+                against the current raw bytes. ``create_if_absent=True`` requests
+                an atomic create that cannot replace an existing target. These
+                conditions are mutually exclusive and require a backend that
+                advertises ``supports_conditional_write``.
 
         Returns:
             WriteFileResult: Structured result.

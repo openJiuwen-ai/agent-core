@@ -1209,7 +1209,14 @@ class WriteFileTool(Tool):
     MAX_FILE_SIZE: int = 1 * 1024 * 1024 * 1024  # 1 GiB
     MAX_CONTENT_SIZE: int = 5 * 1024 * 1024  # 5 MiB — larger files must use bash/shell I/O
 
-    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+    def __init__(
+        self,
+        operation: SysOperation,
+        language: str = "cn",
+        agent_id: Optional[str] = None,
+        *,
+        enable_conditional_writes: bool = False,
+    ):
         super().__init__(
             build_tool_card(
                 "write_file",
@@ -1220,6 +1227,9 @@ class WriteFileTool(Tool):
             )
         )
         self.operation = operation
+        # Conditional writes are a Persistent Agent opt-in.  Keep ordinary
+        # DeepAgent/personal-agent write semantics unchanged by default.
+        self.enable_conditional_writes = enable_conditional_writes
 
     @staticmethod
     def _detect_encoding(raw: bytes) -> str:
@@ -1237,7 +1247,7 @@ class WriteFileTool(Tool):
             f"file_ops_{agent_id}_{session.get_session_id()}.json",
         )
 
-    async def _read_existing_text(self, file_path: str) -> Tuple[str, str]:
+    async def _read_existing_text(self, file_path: str) -> Tuple[str, str, bytes]:
         res = await self.operation.fs().read_file(file_path, mode="bytes")
         if res.code != StatusCode.SUCCESS.code:
             raise OSError(res.message)
@@ -1247,13 +1257,44 @@ class WriteFileTool(Tool):
             raw = raw.encode("utf-8")
 
         encoding = self._detect_encoding(raw)
-        return raw.decode(encoding, errors="replace"), encoding
+        return raw.decode(encoding, errors="replace"), encoding, raw
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         try:
             inputs = _coerce_file_tool_inputs(inputs)
         except ValueError as exc:
             return ToolOutput(success=False, error=str(exc))
+
+        persistent_condition = (
+            kwargs.pop("_persistent_conditional_write", None)
+            if self.enable_conditional_writes
+            else None
+        )
+        persistent_expected_hash = None
+        persistent_create_if_absent = False
+        if persistent_condition is not None:
+            if not isinstance(persistent_condition, dict):
+                return ToolOutput(
+                    success=False,
+                    data={"status": "unavailable"},
+                    error="Conditional write condition is invalid.",
+                )
+            persistent_expected_hash = persistent_condition.get("expected_content_sha256")
+            persistent_create_if_absent = persistent_condition.get("create_if_absent", False) is True
+            if (persistent_expected_hash is not None and not isinstance(persistent_expected_hash, str)) or (
+                persistent_expected_hash is not None and persistent_create_if_absent
+            ):
+                return ToolOutput(
+                    success=False,
+                    data={"status": "unavailable"},
+                    error="Conditional write condition is invalid.",
+                )
+            if persistent_expected_hash is None and not persistent_create_if_absent:
+                return ToolOutput(
+                    success=False,
+                    data={"status": "unavailable"},
+                    error="Conditional write condition is missing.",
+                )
 
         path: Optional[str] = inputs.get("file_path")
         content = inputs.get("content")
@@ -1296,11 +1337,20 @@ class WriteFileTool(Tool):
 
         encoding = "utf-8"
         old_content: Optional[str] = None
+        observed_bytes: Optional[bytes] = None
         operation_type = "create"
 
         if not is_unc:
             try:
                 file_exists = os.path.exists(path)
+                read_state = _FILE_READ_REGISTRY.get(path)
+                if self.enable_conditional_writes and not file_exists and read_state is not None:
+                    _FILE_READ_REGISTRY.pop(path, None)
+                    return ToolOutput(
+                        success=False,
+                        data={"status": "version_conflict"},
+                        error="File changed while preparing the write. Re-read it before writing again.",
+                    )
                 if file_exists:
                     if os.path.isdir(path):
                         return ToolOutput(success=False, error=f"Target path is a directory: {path}")
@@ -1315,7 +1365,6 @@ class WriteFileTool(Tool):
                             ),
                         )
 
-                    read_state = _FILE_READ_REGISTRY.get(path)
                     # WriteFileTool overwrites the whole file, so the agent must
                     # have seen every line first — otherwise unread content would
                     # be lost. A single partial read only covered a window, so
@@ -1352,13 +1401,22 @@ class WriteFileTool(Tool):
                             )
                         return ToolOutput(success=False, error=msg)
 
-                    old_content, encoding = await self._read_existing_text(path)
+                    old_content, encoding, observed_bytes = await self._read_existing_text(path)
                     old_content_lf = old_content.replace("\r\n", "\n")
 
                     if read_state.mtime_ns != stat.st_mtime_ns or read_state.size_bytes != stat.st_size:
                         content_unchanged = read_state.content is not None and old_content_lf == read_state.content
                         if not content_unchanged:
                             _FILE_READ_REGISTRY.pop(path, None)
+                            if self.enable_conditional_writes:
+                                return ToolOutput(
+                                    success=False,
+                                    data={"status": "version_conflict"},
+                                    error=(
+                                        f"Error: File has been modified since read: {path}. "
+                                        "Read it again before attempting to write it."
+                                    ),
+                                )
                             return ToolOutput(
                                 success=False,
                                 error=(
@@ -1371,14 +1429,40 @@ class WriteFileTool(Tool):
             except OSError as exc:
                 return ToolOutput(success=False, error=str(exc))
 
-        res = await self.operation.fs().write_file(
-            path,
-            content,
-            prepend_newline=False,
-            create_if_not_exist=True,
-            encoding=encoding,
-        )
+        fs_operation = self.operation.fs()
+        write_options = None
+        if self.enable_conditional_writes and not is_unc and getattr(
+            fs_operation, "supports_conditional_write", False
+        ) is not True:
+            return ToolOutput(
+                success=False,
+                error="Conditional writes are not supported by the configured filesystem backend.",
+            )
+        if self.enable_conditional_writes and getattr(fs_operation, "supports_conditional_write", False) is True:
+            if persistent_expected_hash is not None:
+                write_options = {"expected_content_sha256": persistent_expected_hash}
+            elif persistent_create_if_absent:
+                write_options = {"create_if_absent": True}
+            elif observed_bytes is not None:
+                write_options = {"expected_content_sha256": hashlib.sha256(observed_bytes).hexdigest()}
+            else:
+                write_options = {"create_if_absent": True}
+
+        write_kwargs = {
+            "prepend_newline": False,
+            "create_if_not_exist": True,
+            "encoding": encoding,
+        }
+        if self.enable_conditional_writes:
+            write_kwargs["options"] = write_options
+        res = await fs_operation.write_file(path, content, **write_kwargs)
         if res.code != StatusCode.SUCCESS.code:
+            if self.enable_conditional_writes and res.code == StatusCode.SYS_OPERATION_FILE_VERSION_CONFLICT.code:
+                return ToolOutput(
+                    success=False,
+                    data={"status": "version_conflict"},
+                    error="File changed while preparing the write. Re-read it before writing again.",
+                )
             return ToolOutput(success=False, error=res.message)
 
         if not is_unc:
@@ -1444,7 +1528,14 @@ class EditFileTool(Tool):
     _STRAIGHT_TO_CURLY: dict = str.maketrans({'"': '\u201c', '\u201c': '"', '\u201d': '"',
                                                "'": '\u2018', '\u2018': "'", '\u2019': "'"})
 
-    def __init__(self, operation: SysOperation, language: str = "cn", agent_id: Optional[str] = None):
+    def __init__(
+        self,
+        operation: SysOperation,
+        language: str = "cn",
+        agent_id: Optional[str] = None,
+        *,
+        enable_conditional_writes: bool = False,
+    ):
         super().__init__(
             build_tool_card(
                 "edit_file",
@@ -1455,6 +1546,9 @@ class EditFileTool(Tool):
             )
         )
         self.operation = operation
+        # Conditional writes are a Persistent Agent opt-in.  Ordinary edit
+        # calls retain the historical filesystem contract by default.
+        self.enable_conditional_writes = enable_conditional_writes
 
     # ------------------------------------------------------------------
     # Static helpers
@@ -1650,6 +1744,37 @@ class EditFileTool(Tool):
         new_str: Optional[str] = inputs.get("new_string")
         replace_all: bool = bool(inputs.get("replace_all", False))
 
+        persistent_condition = (
+            kwargs.pop("_persistent_conditional_write", None)
+            if self.enable_conditional_writes
+            else None
+        )
+        persistent_expected_hash = None
+        persistent_create_if_absent = False
+        if persistent_condition is not None:
+            if not isinstance(persistent_condition, dict):
+                return ToolOutput(
+                    success=False,
+                    data={"status": "unavailable"},
+                    error="Conditional write condition is invalid.",
+                )
+            persistent_expected_hash = persistent_condition.get("expected_content_sha256")
+            persistent_create_if_absent = persistent_condition.get("create_if_absent", False) is True
+            if (persistent_expected_hash is not None and not isinstance(persistent_expected_hash, str)) or (
+                persistent_expected_hash is not None and persistent_create_if_absent
+            ):
+                return ToolOutput(
+                    success=False,
+                    data={"status": "unavailable"},
+                    error="Conditional write condition is invalid.",
+                )
+            if persistent_expected_hash is None and not persistent_create_if_absent:
+                return ToolOutput(
+                    success=False,
+                    data={"status": "unavailable"},
+                    error="Conditional write condition is missing.",
+                )
+
         if not file_path:
             return ToolOutput(success=False, error="file_path is required")
         if new_str is None:
@@ -1677,6 +1802,20 @@ class EditFileTool(Tool):
 
         is_unc = _is_unc_path(file_path)
         file_exists = os.path.exists(file_path) if not is_unc else True
+        if self.enable_conditional_writes and not file_exists and _FILE_READ_REGISTRY.get(file_path) is not None:
+            _FILE_READ_REGISTRY.pop(file_path, None)
+            return ToolOutput(
+                success=False,
+                data={"status": "version_conflict"},
+                error="File changed while preparing the edit. Re-read it before editing again.",
+            )
+
+        if persistent_expected_hash is not None and not file_exists:
+            return ToolOutput(
+                success=False,
+                data={"status": "version_conflict"},
+                error="File changed while preparing the edit. Re-read it before editing again.",
+            )
 
         # ---- New file creation (old_string == '') --------------------------------
         if old_str == "":
@@ -1690,10 +1829,34 @@ class EditFileTool(Tool):
                         success=False,
                         error="Cannot create new file - file already exists.",
                     )
-            write_res = await self.operation.fs().write_file(
-                file_path, new_str, prepend_newline=False, create_if_not_exist=True
-            )
+            fs_operation = self.operation.fs()
+            conditional_supported = getattr(fs_operation, "supports_conditional_write", False) is True
+            if self.enable_conditional_writes and not conditional_supported:
+                return ToolOutput(
+                    success=False,
+                    error="Conditional writes are not supported by the configured filesystem backend.",
+                )
+            create_kwargs = {
+                "prepend_newline": False,
+                "create_if_not_exist": True,
+            }
+            if self.enable_conditional_writes:
+                create_kwargs["options"] = (
+                    {"expected_content_sha256": persistent_expected_hash}
+                    if persistent_expected_hash is not None
+                    else {"create_if_absent": True}
+                )
+            write_res = await fs_operation.write_file(file_path, new_str, **create_kwargs)
             if write_res.code != StatusCode.SUCCESS.code:
+                if (
+                    self.enable_conditional_writes
+                    and write_res.code == StatusCode.SYS_OPERATION_FILE_VERSION_CONFLICT.code
+                ):
+                    return ToolOutput(
+                        success=False,
+                        data={"status": "version_conflict"},
+                        error="File already exists; it was not overwritten.",
+                    )
                 return ToolOutput(success=False, error=f"Create failed: {write_res.message}")
             # Register the new file as read so subsequent edits don't require a re-read.
             try:
@@ -1770,6 +1933,15 @@ class EditFileTool(Tool):
 
             if not content_unchanged:
                 _FILE_READ_REGISTRY.pop(file_path, None)
+                if self.enable_conditional_writes:
+                    return ToolOutput(
+                        success=False,
+                        data={"status": "version_conflict"},
+                        error=(
+                            f"Error: File has been modified since read: {file_path}. "
+                            "Read it again before attempting to edit it."
+                        ),
+                    )
                 return ToolOutput(
                     success=False,
                     error=(
@@ -1783,6 +1955,15 @@ class EditFileTool(Tool):
             content, raw = await self._read_existing_text(file_path)
         except OSError as exc:
             return ToolOutput(success=False, error=str(exc))
+
+        if persistent_expected_hash is not None:
+            current_hash = hashlib.sha256(raw).hexdigest()
+            if current_hash != persistent_expected_hash:
+                return ToolOutput(
+                    success=False,
+                    data={"status": "version_conflict"},
+                    error="File changed while preparing the edit. Re-read it before editing again.",
+                )
 
         eol = self._detect_eol(raw)
 
@@ -1836,13 +2017,36 @@ class EditFileTool(Tool):
         new_content = new_content_lf.replace("\n", eol) if eol == "\r\n" else new_content_lf
 
         # ---- Write back ----------------------------------------------------------
-        write_res = await self.operation.fs().write_file(
-            file_path,
-            new_content,
-            prepend_newline=False,
-            options={"expected_content_sha256": hashlib.sha256(raw).hexdigest()},
-        )
+        write_kwargs = {
+            "prepend_newline": False,
+            # This was part of the ordinary EditFileTool contract before
+            # PA-16.  Keep it for personal/DeepAgent callers; Persistent
+            # callers replace it with their per-call preflight condition.
+            "options": {"expected_content_sha256": hashlib.sha256(raw).hexdigest()},
+        }
+        if self.enable_conditional_writes:
+            conditional_supported = getattr(self.operation.fs(), "supports_conditional_write", False) is True
+            if not conditional_supported:
+                return ToolOutput(
+                    success=False,
+                    error="Conditional writes are not supported by the configured filesystem backend.",
+                )
+            write_kwargs["options"] = {
+                "expected_content_sha256": persistent_expected_hash
+                if persistent_expected_hash is not None
+                else hashlib.sha256(raw).hexdigest()
+            }
+        write_res = await self.operation.fs().write_file(file_path, new_content, **write_kwargs)
         if write_res.code != StatusCode.SUCCESS.code:
+            if (
+                self.enable_conditional_writes
+                and write_res.code == StatusCode.SYS_OPERATION_FILE_VERSION_CONFLICT.code
+            ):
+                return ToolOutput(
+                    success=False,
+                    data={"status": "version_conflict"},
+                    error="File changed while preparing the edit. Re-read it before editing again.",
+                )
             return ToolOutput(success=False, error=f"Write failed: {write_res.message}")
 
         # Update registry so the next edit doesn't require a re-read.
