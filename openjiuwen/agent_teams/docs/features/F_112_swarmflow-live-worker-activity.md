@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-10-08（2026-09-17 初版，本修订扩展结构化字段与 session / 三方覆盖） |
 | 范围 | `workflow/engine/progress.py`（`ProgressKind.AGENT_ACTIVITY` 结构化字段）、`workflow/engine/backends/base.py`（`progress_sink` / `bind_progress_sink` 接缝）、`workflow/engine/runner.py`（`run_workflow` 绑定）、`workflow/engine/primitives.py`（`_BackendCallSpec` 携带 `agent_id` + `call_key`；`AgentSession.send` 同款 opts 副本注入）、`workflow/backends/activity_emitter.py`（共享 emitter 工厂）、`workflow/backends/team_worker_backend.py`（`SwarmflowActivityRail` 双钩不节流）、`workflow/backends/avatar_session_backend.py`（avatar 挂同一 rail + per-turn `correlation_id`）、`workflow/backends/external_turns.py`（`bind_activity_sink` passthrough）、`external/member_runtime.py`（`bind_activity_sink` + `_on_event` 三方映射）、`workflow/schema.py`（`AgentActivity.agent_id` + 活动归位）、`workflow/AGENTS.md`、`docs/specs/S_18_swarmflow-engine-and-worker.md`、测试 `test_worker_backend.py` / `test_observer.py` / `test_avatar_session_backend.py` / `test_session_primitives.py` / `test_member_runtime.py` |
-| 测试基线 | `tests/unit_tests/agent_teams/workflow/` 全量通过（461 passed）；含 `external/` + `tools/` 全量 857 passed |
+| 测试基线 | `tests/unit_tests/agent_teams/workflow/` 全量通过（405 passed）；含 `external/` + `tools/` 全量 797 passed |
 | Refs | #773 |
 
 ## 背景
@@ -45,18 +45,16 @@ Swarmflow 的单轮 `agent()` 在引擎眼里是**一次不透明调用**：发 
 
 ## 验证
 
-- `test_activity_rail_emits_paired_tool_call_and_result`（初版 `test_activity_rail_emits_tool_name` 重写）：rail 在 `before_tool_call` / `after_tool_call` 各发一次；非 `ToolCallInputs` / 空名忽略。
-- `test_activity_rail_does_not_throttle_bursts`（初版 `test_activity_rail_throttles_bursts` 重写）：窗口内多次工具执行逐对上抛，不节流。
-- `test_activity_rail_compacts_json_string_args` / `test_activity_rail_after_tool_call_uses_exception_text`：`tool_call` 入参压缩预览；无 tool message 时回退异常 / result repr。
+- `test_activity_rail_emits_paired_tool_call_and_result`（初版 `test_activity_rail_emits_tool_name` / `test_activity_rail_throttles_bursts` 合并重写）：rail 在 `before_tool_call` / `after_tool_call` 各发一次；窗口内多次工具执行逐对上抛、不节流；`tool_call` 入参压缩预览；无 tool message 时回退异常 / result repr；非 `ToolCallInputs` / 空名忽略。
 - `test_activity_emitter_truncates_content_at_the_guard_bound` / `test_activity_emitter_builds_agent_activity_event`：`content` 完整透传 + 防护上限截断标记；emitter 产出 `kind=AGENT_ACTIVITY` + 结构化字段 + `message`；未绑定 sink 时 no-op。
-- `test_session_avatar_rail_emits_paired_activity_with_agent_id_and_correlation` / `test_session_avatar_mounts_no_activity_rail_without_a_sink` / `test_session_avatar_mounts_no_activity_rail_without_agent_id`：avatar 挂 rail，事件带 `agent_id` + 当前轮 `correlation_id`；无 sink / 无 `agent_id` 不挂。
+- `test_session_avatar_rail_emits_paired_activity_with_agent_id_and_correlation`：avatar 挂 rail，事件带 `agent_id` + 当前轮 `correlation_id`。
 - `test_session_backend_opts_carry_node_agent_id_and_journal_stays_raw`：session turn 的 opts 副本带 `agent_id`，journal 记录保持原始 opts。
-- `test_external_worker_binds_activity_sink_with_node_identity` / `test_external_worker_without_agent_id_skips_activity_bind`：三方 worker 发射前绑定（带节点身份）；无 `agent_id` 跳过。
-- `test_external_session_rebinds_activity_sink_per_turn` / `test_external_session_without_progress_sink_skips_activity_bind`：三方 session 每轮重绑 `correlation_id`；无 sink 跳过绑定。
+- `test_external_worker_binds_activity_sink_with_node_identity`：三方 worker 发射前绑定（带节点身份）。
+- `test_external_session_rebinds_activity_sink_per_turn`：三方 session 每轮重绑 `correlation_id`。
 - `test_agent_activity_is_folded_into_its_node`：活动按 `agent_id` 落到 `AgentActivity.activity`，多条累积。
 - `test_agent_activity_disambiguates_same_label_by_agent_id`：同 label 两节点，活动只落到指定 `agent_id` 的那个。
 - `test_agent_activity_falls_back_to_label_without_agent_id`：无 `agent_id` 时按 label 回退归位。
-- 回归：`tests/unit_tests/agent_teams/workflow/` 全量 461 passed；含 `external/` + `tools/` 三目录 857 passed。
+- 回归：`tests/unit_tests/agent_teams/workflow/` 全量 405 passed；含 `external/` + `tools/` 三目录 797 passed。
 
 ## 已知遗留
 

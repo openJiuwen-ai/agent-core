@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-09-21 |
 | 范围 | `harness_protocol/models.py`、`harness_providers/{claudecode,codex}/harness.py`、`workflow/backends/{external_fork,external_turns,avatar_session_backend}.py`、`external/member_runtime.py`、`external/cli_agent/spawn.py` |
-| 测试基线 | `test_external_fork.py`（15）、`test_external_turns.py::test_*_marker*`、`test_avatar_session_backend.py::test_external_fork_*` / `test_external_child_*` / `test_external_markers_*` / `test_external_member_is_registered_*`、`test_claudecode.py::test_assistant_message_carries_its_transcript_uuid`、`test_member_runtime.py::test_seed_checkpoint_*`、`test_models_fork_modes.py` |
+| 测试基线 | `test_external_fork.py`（4 个函数 / 7 个用例：拒绝不支持模式参数化、cut marker 选取与对账、Claude SDK 离线 fork 成功/失败、Codex `thread_fork` 带 entry env 与 `lastTurnId`）、`test_external_turns.py::test_turn_marker_follows_the_provider_cut_point`、`test_avatar_session_backend.py::test_external_fork_*` / `test_external_child_*` / `test_external_markers_*` / `test_external_member_is_registered_*`、`test_claudecode.py::test_assistant_message_carries_its_transcript_uuid`、`test_cli_workflow_runtime.py::test_workflow_runtime_forwards_seed_checkpoint`、`test_models_fork_modes.py` |
 | 关联 | `F_114`（三方会话）、`F_81`（native fork）、`S_18` 会话契约 13、`S_27` |
 
 ## 背景
@@ -32,7 +32,7 @@ Codex `thread/fork(threadId, lastTurnId)`（app-server 内分支）。
    不回退 full（native 的"越界降级 full"对外部不成立：标记表是唯一真相）。
 4. **标记与指针随成员子会话持久化**（`swarmflow_external_turns`），并保留进程内镜像：全命中续跑后父行
    不存在时仍可 fork；镜像在本 run 内权威，落盘失败只降级为"跨进程不可 fork"。
-5. **Codex 用短命客户端 fork**：SDK facade 的 `thread_fork` 不暴露 `last_turn_id`，走底层 `_client.thread_fork(threadId, {lastTurnId})`。
+5. **Codex 用短命客户端 fork**：SDK facade `AsyncCodex.thread_fork` 不暴露 `last_turn_id`，直接构造底层 `AsyncCodexClient`（`start` → `initialize` → `thread_fork(threadId, {lastTurnId})` → `close`）。
    同一 app-server 配置（`codex_bin`/`cwd`）保证线程可寻址。
 6. **子会话 provider 必须等于父**：凭据带 provider，`open_session` 校验；native 快照 `fork_data` 落到外部
    会话同样拒绝。

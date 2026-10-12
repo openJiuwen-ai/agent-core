@@ -24,7 +24,7 @@ workflow/
 │   └── backends/{base,mock}.py  # AgentBackend 抽象（run + 可选 open_session/send_turn/close_session/aclose + KNOWN_OPTIONS + model_pool_names——池自声明，None=不校验，F_115；progress_sink/bind_progress_sink = engine→backend 的进度接缝，worker 实时活动经它上抛，见 F_112）+ 离线确定性 MockBackend（含 session 实现）
 ├── backends/
 │   ├── team_worker_backend.py   # TeamWorkerBackend：把每个 agent() 映射成一个 WORKER TeamHarness（核心对接）；委派会话四方法给 AvatarSessionManager；SwarmflowActivityRail 在 worker 的 harness 上钩 tool call（before/after 双钩、不节流，一次工具执行发一对 AGENT_ACTIVITY，按 tool_call_id 配对，结构化 activity_type/tool_call_id/tool_name/content，见 F_112）
-│   ├── activity_emitter.py      # 共享 emitter 工厂：truncate_activity_content（512 上限 + …(truncated)）+ build_activity_event（结构化 AGENT_ACTIVITY 形状）——worker rail / avatar rail / external runtime 三处共用（F_112）
+│   ├── activity_emitter.py      # 共享 emitter 工厂：truncate_activity_content（ACTIVITY_CONTENT_LIMIT=65536 防护上限 + …(truncated)）+ build_activity_event（结构化 AGENT_ACTIVITY 形状）——worker rail / avatar rail / external runtime 三处共用（F_112）
 │   ├── avatar_session_backend.py # AvatarSessionManager：有状态会话（agent_session/human_session）的长生命周期 NativeHarness + 多轮 send-等-收 + human 推-等-格式化（_pending_human 实例字段，无全局 registry）+ fork（capture_fork 双来源[live native / checkpointer 恢复] / ensure_member_name 首轮命名 / 稳定 session_id 派生 / fork_data 注入 / 镜像兜底，见 F_81）；有 agent_id 的 avatar 挂 SwarmflowActivityRail，活动事件带当前轮 correlation_id（F_112）
 │   ├── budget_rail.py           # SwarmflowBudgetRail：挂在每个 worker/avatar harness 上，after_model_call 读 usage_metadata 记真实 token、超预算 force-finish 就地停 harness（见 F_66）；workflow_budget 非 None 时同时记 session 级 + per-run 级两层（F_87）
 │   └── _member_spec.py          # derive_member_spec / derive_member_build_context：worker 与 avatar 共享的 spec / build_context 派生

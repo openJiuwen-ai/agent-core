@@ -92,9 +92,10 @@ class WorkflowProgressEvent:
       structured payload of ``AGENT_ACTIVITY`` tool activity. ``activity_type``
       is ``"tool_call"`` (before a tool runs) or ``"tool_result"`` (after); the
       two events of one tool execution pair on ``tool_call_id`` and share
-      ``tool_name``. ``content`` is a truncated preview (512 chars, an
-      ``…(truncated)`` suffix marks the cut) — the tool's compacted arguments
-      on ``"tool_call"``, the result / exception text on ``"tool_result"``.
+      ``tool_name``. ``content`` is the full payload up to a guard bound
+      (``ACTIVITY_CONTENT_LIMIT``, 64 KiB; an ``…(truncated)`` suffix marks
+      the cut) — the tool's compacted arguments on ``"tool_call"``, the
+      result / exception text on ``"tool_result"``.
       ``message`` stays for legacy consumers.
     * ``phases``              — the static phase plan from the script's ``META``
       dict (``WORKFLOW_STARTED``); ``None`` on all other kinds.

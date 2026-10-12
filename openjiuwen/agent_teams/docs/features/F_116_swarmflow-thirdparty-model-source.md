@@ -72,16 +72,16 @@
 
 - `test_external_model.py`：三参数逐一解析、互斥 / `effort` 伴随 / native 拒绝、pool 命中与 miss（含
   协议不兼容、内置名指路、无目录不引 catalog）、`builtin_model` 目录校验与 effort 越界。
-- `test_engine_retryable.py`：`retryable=False` 一次失败即止、`AGENT_FAILED` 只发一次、`builtin_model` /
-  `effort` 折入签名（有值才变字节）。
-- `test_agent_session_model_lock.py`：首锁、同 hint 放行、切换 raise 指路 `fork()`、pool 与登录同名不同
-  供应、fork 独立锁、cache-hit 不锁、native 锁 hint、human 不锁、一次性 agent 不锁。
+- `test_engine_retryable.py`：`retryable=False` 一次失败即止、`AGENT_FAILED` 只发一次、`_build_opts` 接受
+  `builtin_model` / `effort` 两键（未知键仍拒绝）。
+- `test_journal.py::test_call_signature_folds_builtin_model_and_effort`：两键折入 `call_signature`（有值才变字节）。
+- `test_agent_session_model_lock.py`：首锁后切换 raise 指路 `fork()`（参数化：换模型 / pool 与登录同名不同
+  供应）、同 hint 放行、fork 独立锁、cache-hit 不锁、native 锁 hint、无 hint 锁按供应路径指名、失败首轮不消耗锁。
 - `test_external_turns.py`：双受众文案（根因在前、pool 名单兜底、无名单退化为修登录）。
-- `test_swarmflow_locales.py`：描述散文变更不破坏 cn/en 工具描述。
 
 ## 已知遗留
 
-- **无 hint 锁的命名（已解决）**：锁错误按供应路径指名实际锁定物——native 经 backend 钩子 `describe_base_model()`（`TeamWorkerBackend` 从 worker 基 spec 提取具体模型名；默认钩子返回 `None` 时回退通用短语），三方由引擎按身份元组诚实指名 `the {cli} CLI's own default model`（CLI 默认模型对引擎不透明，指名其种类而非臆造具体名）。
+- **无 hint 锁的命名（已解决）**：锁错误按供应路径指名实际锁定物——native 经 backend 钩子 `describe_base_model()`（`TeamWorkerBackend` 从 worker 基 spec 提取具体模型名；默认钩子返回 `None` 时回退通用短语），三方由引擎按身份记录（`_ModelIdentity`，frozen dataclass；`supply` 字段区分 pool / builtin / both / none 供应路径）诚实指名 `the {cli} CLI's own default model`（CLI 默认模型对引擎不透明，指名其种类而非臆造具体名）。
 
 - **label-less 认证文案**：双受众认证消息不携带节点 label，归位靠事件的 `agent_id`；文案里加节点名
   需要把 member_name 透传进 `_auth_failure_message`，当前不必要（事件已可归位）。
