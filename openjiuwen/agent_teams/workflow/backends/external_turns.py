@@ -20,7 +20,7 @@ from typing import Any
 
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.harness_protocol import HarnessState, TurnResult, TurnStatus, TurnUsage
+from openjiuwen.harness_protocol import HarnessState, MessageRole, TurnResult, TurnStatus, TurnUsage
 
 # Providers whose terminal ``TurnResult.usage`` is cumulative over the session
 # (their mapping emits ``UsageUpdateMode.CUMULATIVE``); everything else reports
@@ -37,6 +37,8 @@ class ExternalTurnOutcome:
     text: str
     structured: Any = None
     tokens: int = 0
+    marker: str | None = None
+    """Provider-side identifier of this turn — the cut point a later fork may reference."""
 
 
 def schema_instruction(schema_json: dict) -> str:
@@ -70,6 +72,24 @@ def parse_structured_text(text: str) -> Any:
     raise ValueError("no JSON object found in the reply")
 
 
+def turn_marker(provider_name: str, result: TurnResult) -> str | None:
+    """The provider-side id that names this turn for a later ``before`` fork.
+
+    Codex forks by turn id; Claude forks by transcript uuid — the offline
+    ``fork_session`` addresses JSONL entries and rejects the API message id, so
+    a turn whose last assistant message carries no uuid has no usable cut point.
+    """
+    if provider_name == "codex":
+        value = result.provider_data.get("native_turn_id")
+        return str(value) if value else None
+    if provider_name in _CUMULATIVE_USAGE_PROVIDERS:
+        for message in reversed(result.messages):
+            if message.role is MessageRole.ASSISTANT:
+                value = message.data.get("uuid")
+                return str(value) if value else None
+    return None
+
+
 class ExternalMemberTurns:
     """Turn-level façade over an ``ExternalHarnessMemberRuntime``.
 
@@ -89,6 +109,16 @@ class ExternalMemberTurns:
     @property
     def provider_name(self) -> str:
         return self._runtime.provider_name
+
+    @property
+    def session_id(self) -> str | None:
+        """The provider's own session / thread pointer (available once started)."""
+        return self._runtime.session_id
+
+    @property
+    def member_session(self) -> Any:
+        """The runtime's own child session — the only safe place to persist host state."""
+        return self._runtime.member_session
 
     async def start(self, team_session: Any) -> None:
         """Start the runtime (the member session comes from ``team_session``) and listen for turn ends."""
@@ -163,7 +193,8 @@ class ExternalMemberTurns:
                     f"external member '{self._member_name}' did not return a JSON object for the schema: {e}",
                     tokens=tokens or None,
                 ) from e
-        return ExternalTurnOutcome(text=text, structured=structured, tokens=tokens)
+        return ExternalTurnOutcome(text=text, structured=structured, tokens=tokens,
+                                   marker=turn_marker(self.provider_name, result))
 
     def _turn_tokens(self, usage: TurnUsage | None) -> int:
         total = int(usage.total_tokens or 0) if usage is not None else 0
@@ -177,4 +208,4 @@ class ExternalMemberTurns:
         return max(delta, 0)
 
 
-__all__ = ["ExternalMemberTurns", "ExternalTurnOutcome", "parse_structured_text", "schema_instruction"]
+__all__ = ["ExternalMemberTurns", "ExternalTurnOutcome", "parse_structured_text", "schema_instruction", "turn_marker"]

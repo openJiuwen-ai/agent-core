@@ -146,12 +146,20 @@ class HarnessCard:
     capabilities: frozenset[HarnessCapability] = field(default_factory=frozenset)
     required_host_capabilities: frozenset[HostCapability] = field(default_factory=frozenset)
     optional_host_capabilities: frozenset[HostCapability] = field(default_factory=frozenset)
+    fork_modes: frozenset[str] = field(default_factory=frozenset)
+    """Session-fork modes the provider materialises natively (``full`` / ``before``).
+
+    Empty means the provider has no native fork; a host must not emulate one
+    from a conversation mirror — a fork that silently lost tool context is
+    worse than a refused fork.
+    """
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "compatible_protocol_versions", frozenset(self.compatible_protocol_versions))
         object.__setattr__(self, "capabilities", frozenset(self.capabilities))
         object.__setattr__(self, "required_host_capabilities", frozenset(self.required_host_capabilities))
         object.__setattr__(self, "optional_host_capabilities", frozenset(self.optional_host_capabilities))
+        object.__setattr__(self, "fork_modes", frozenset(self.fork_modes))
         if not self.name or not self.implementation_version or not self.protocol_version:
             raise ValueError("harness card identity and versions must not be empty")
         if self.protocol_version not in self.compatible_protocol_versions:

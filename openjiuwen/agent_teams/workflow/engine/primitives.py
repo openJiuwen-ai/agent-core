@@ -1556,7 +1556,10 @@ class AgentSession:
         omitting it raises (there is no truncation without a split point).
         ``keep_rounds`` beyond the parent's actual round count is not an error;
         the backend warns and silently falls back to a full-context fork (the
-        team fork's "wrong name → full" guard). The parent context is captured
+        team fork's "wrong name → full" guard). External (``agent_type``)
+        sessions are stricter: an unsupported mode or an out-of-range
+        ``keep_rounds`` raises instead of degrading to full.
+        The parent context is captured
         **eagerly** here (the fork point), so later ``send()``s on this session
         do not affect the child.
 

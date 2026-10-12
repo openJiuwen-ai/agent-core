@@ -503,6 +503,7 @@ async def build_cli_workflow_runtime(
     model_override: str | None = None,
     resume_external_backend: bool = False,
     require_checkpoint: bool = False,
+    seed_checkpoint: dict | None = None,
 ) -> ExternalHarnessMemberRuntime:
     """Build a Claude Code / Codex runtime for a swarmflow worker or session.
 
@@ -596,6 +597,7 @@ async def build_cli_workflow_runtime(
         context=context,
         resume_external_backend=resume_external_backend,
         require_checkpoint=require_checkpoint,
+        seed_checkpoint=seed_checkpoint,
         agent_kind=agent_kind,
         cli_path=cli_path,
         inject_mcp=False,

@@ -134,6 +134,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                 HostCapability.MODEL_REQUEST_OBSERVATION,
             }
         ),
+        fork_modes=frozenset({"full", "before"}),
     )
 
     def __init__(

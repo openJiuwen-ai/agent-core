@@ -52,6 +52,13 @@ from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
 from openjiuwen.agent_teams.workflow.backends.external_turns import ExternalMemberTurns
+from openjiuwen.agent_teams.workflow.backends.external_fork import (
+    ForkCredentials,
+    check_fork_mode,
+    cut_marker_for,
+    materialise_external_fork,
+    reconcile,
+)
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
 from openjiuwen.core.session.vcs.codec import encode_message
@@ -148,6 +155,10 @@ class _SessionState:
     agent_type: str | None = None
     entry: Any = None
     external: ExternalMemberTurns | None = None
+    # External sessions: provider turn markers in program order (fork cut points)
+    # and, on a forked child, the credentials to materialise on its first turn.
+    turn_markers: list[str | None] = field(default_factory=list)
+    fork_credentials: ForkCredentials | None = None
 
 
 class AvatarSessionManager:
@@ -234,6 +245,13 @@ class AvatarSessionManager:
         self._external_cwd = external_cwd
         # Tracks external-session member names so the fork guard survives close_session.
         self._external_members: set[str] = set()
+        # Provider per external member, kept past close_session so a later fork
+        # still knows which provider primitive to ask for the branch.
+        self._external_provider: dict[str, str] = {}
+        # In-process mirror of what was written next to each external member's
+        # checkpoint: {"markers": [...], "pointer": str | None}. Authoritative
+        # within a run (the member-session write is best-effort).
+        self._persisted_external: dict[str, dict] = {}
         # Local import: team_worker_backend imports this module lazily (circular).
         from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 
@@ -251,7 +269,15 @@ class AvatarSessionManager:
         regardless of cache hit so a fully-hit resume still knows the member
         name ``capture_fork`` needs to locate the parent's persisted context.
         """
-        return self._next_member_name(kind, opts)
+        name = self._next_member_name(kind, opts)
+        agent_type = opts.get("agent_type")
+        if agent_type and kind != "human":
+            # A fully-hit parent never reaches open_session, so this is the only
+            # place its provider gets recorded — without it a later fork of that
+            # parent falls through to the native snapshot path and loses the CLI.
+            self._external_members.add(name)
+            self._external_provider[name] = agent_type
+        return name
 
     async def open_session(
         self,
@@ -274,20 +300,30 @@ class AvatarSessionManager:
         if agent_type and kind == "human":
             raise BackendError("agent_type is not valid for human sessions (a person answers, not a CLI)")
         entry = None
+        creds: ForkCredentials | None = None
         if agent_type:
             if self._gate_agent_type is None:
                 raise BackendError("this backend has no external CLI gate; agent_type is unavailable")
             entry = self._gate_agent_type(agent_type)
             if fork_data is not None:
-                raise BackendError(
-                    f"fork of an external {agent_type} session is not supported in this version"
-                )
+                creds = ForkCredentials.from_fork_data(fork_data)
+                if creds is None:
+                    # Only the provider can branch its own conversation; a host-side
+                    # message snapshot has nothing the CLI could resume from.
+                    raise BackendError(
+                        f"external {agent_type} session cannot be forked from a native context snapshot"
+                    )
+                if creds.provider != agent_type:
+                    raise BackendError(
+                        f"fork credentials are for {creds.provider}, not {agent_type}; a fork keeps the parent's provider"
+                    )
         if entry is None and base is None:
             raise BackendError(f"no base spec available for {kind!r} sessions")
         if member_name is None:
             member_name = self._next_member_name(kind, opts)
         if entry is not None:
             self._external_members.add(member_name)
+            self._external_provider[member_name] = agent_type
         state = _SessionState(
             kind=kind,
             spec_base=base,
@@ -297,6 +333,7 @@ class AvatarSessionManager:
             session_id=self._derive_avatar_session_id(member_name),
             agent_type=agent_type,
             entry=entry,
+            fork_credentials=creds,
         )
         self._sessions[member_name] = state
         if kind == "human":
@@ -328,10 +365,12 @@ class AvatarSessionManager:
         a value beyond the parent's actual round count is not an error — a
         warning is logged and the fork silently degrades to full-context,
         mirroring the team fork's "wrong name → full-context" guard.
+        External (``agent_type``) sessions are stricter: an unsupported mode or
+        an out-of-range ``keep_rounds`` raises instead of degrading to full.
         """
         parent = self._sessions.get(session_id)
         if session_id in self._external_members or (parent is not None and parent.agent_type):
-            raise BackendError(f"fork of an external session {session_id!r} is not supported in this version")
+            return await self._capture_external_fork(session_id, parent, keep_rounds=keep_rounds, fork_mode=fork_mode)
         if parent is not None and parent.harness is not None:
             native = parent.harness.get_deep_agent()
             return self._fork_data_from_native(native, session_id, fork_mode, keep_rounds)
@@ -349,6 +388,101 @@ class AvatarSessionManager:
             "compact_split": fork_ctx.compact_split,
             "compact_direction": fork_ctx.compact_direction,
         }
+
+    async def _capture_external_fork(
+        self, member_name: str, parent: _SessionState | None, *, keep_rounds: int | None, fork_mode: str
+    ) -> dict:
+        """Freeze what a child must ask the provider for; nothing is forked yet.
+
+        A live parent answers from its own runtime; a parent whose row is gone
+        (closed session, fully-hit resume) answers from the persisted record.
+        """
+        provider = parent.agent_type if parent is not None else self._external_provider.get(member_name)
+        if not provider:
+            raise BackendError(f"external session {member_name!r} has no recorded provider to fork from")
+        check_fork_mode(provider, fork_mode)
+        if parent is not None and parent.external is not None:
+            markers, pointer = list(parent.turn_markers), parent.external.session_id
+        else:
+            record = await self._external_record(member_name) or {}
+            markers, pointer = list(record.get("markers") or []), record.get("pointer")
+        if not pointer:
+            raise BackendError(f"external session {member_name!r} has no provider pointer to fork from")
+        creds = ForkCredentials(
+            provider=provider,
+            parent_member=member_name,
+            parent_pointer=str(pointer),
+            mode=fork_mode,
+            cut_marker=cut_marker_for(markers, fork_mode, keep_rounds),
+            keep_rounds=keep_rounds,
+        )
+        return creds.to_fork_data()
+
+    _EXTERNAL_TURNS_KEY = "swarmflow_external_turns"
+
+    async def _persist_external_turns(self, state: _SessionState) -> None:
+        """Write the marker list + provider pointer next to the member's checkpoint.
+
+        A later fork may target this session after a fully-hit resume, when no
+        runtime exists to ask; the persisted list is then the only source. The
+        write goes through the runtime's *own* member session — it commits its
+        whole state on every provider checkpoint, so a parallel session over the
+        same bucket would have this record erased under it.
+        """
+        record = {
+            "markers": list(state.turn_markers),
+            "pointer": state.external.session_id if state.external is not None else None,
+        }
+        self._persisted_external[state.member_name] = record
+        sess = state.external.member_session if state.external is not None else None
+        if sess is None:  # no member session on the runtime: mirror only — a cross-process fork then finds no record and is refused
+            return
+        try:
+            sess.update_state({self._EXTERNAL_TURNS_KEY: record})
+            await sess.commit()
+        except Exception:  # noqa: BLE001 - the in-process mirror still serves this run
+            team_logger.debug(
+                "[swarmflow] external turn markers persist failed for %s", state.member_name, exc_info=True
+            )
+
+    async def _external_record(self, member_name: str) -> dict | None:
+        """Markers + pointer for an external member: live mirror first, then the member session."""
+        record = self._persisted_external.get(member_name)
+        if record is not None:
+            return dict(record)
+        try:
+            sess = await self._member_session_for(member_name)
+            if sess is None:
+                return None
+            try:
+                saved = sess.get_state(self._EXTERNAL_TURNS_KEY)
+            finally:
+                await sess.post_run()  # read-only visit; never leave the session open
+        except Exception:  # noqa: BLE001 - best-effort persisted recovery
+            team_logger.debug("[swarmflow] external turn markers read failed for %s", member_name, exc_info=True)
+            return None
+        return dict(saved) if isinstance(saved, dict) else None
+
+    async def _member_session_for(self, member_name: str) -> Any:
+        """Open the external member's child AgentSession standalone (read path only).
+
+        Built from the derived ids rather than from a live row, so a fork can
+        still read a closed session's markers (same trick as
+        :meth:`_persisted_messages`). While a runtime is live its own
+        ``member_session`` owns this bucket — write through that, never here.
+        """
+        from openjiuwen.core.session.agent_team import Session as TeamSession
+
+        team_session = TeamSession(
+            session_id=self._derive_avatar_session_id(member_name),
+            team_id=self._team_name,
+            kv_cache_runtime=self._kv_cache_runtime,
+        )
+        sess = team_session.create_agent_session(
+            agent_id=f"{self._team_name}_{member_name}", share_stream_writer=False
+        )
+        await sess.pre_run()
+        return sess
 
     def _fork_data_from_native(self, native, member_name: str, fork_mode: str, keep_rounds: int | None) -> dict:
         """Build fork_data from a live parent avatar's native context."""
@@ -932,10 +1066,36 @@ class AvatarSessionManager:
         session must be resumed from its checkpoint pointer — and a missing
         pointer is an error, never a silent fresh start that would forget the
         conversation the script believes it is continuing.
+
+        A forked child has a third case: it has no conversation of its own yet,
+        so the provider is asked for the branch here (the last possible moment)
+        and the child starts by resuming the pointer that branch returned.
         """
         if state.external is None:
             resume = state.turns_executed == 0 and bool(history)
-            state.external = await self._build_external_turns(state, resume=resume, require=resume)
+            seed: dict | None = None
+            creds = state.fork_credentials
+            if creds is not None:
+                own = await self._external_record(state.member_name)
+                if own and own.get("pointer"):
+                    # A partially-hit child already ran under its own branch; forking
+                    # again would strand every turn it took on the first one.
+                    team_logger.info(
+                        "[swarmflow] external child %s already branched in a prior run; resuming its own pointer",
+                        state.member_name,
+                    )
+                    creds, state.fork_credentials = None, None
+                    resume = True
+            if creds is not None:
+                parent_record = await self._external_record(creds.parent_member) or {}
+                reconcile(creds, parent_record.get("markers") or [])
+                cwd = self._external_cwd(state.member_name, state.entry) if self._external_cwd is not None else None
+                child_pointer = await materialise_external_fork(creds, entry=state.entry, cwd=cwd)
+                seed = {"thread_id": child_pointer} if creds.provider == "codex" else {"session_id": child_pointer}
+                resume = True
+            state.external = await self._build_external_turns(
+                state, resume=resume, require=resume, seed_checkpoint=seed
+            )
             try:
                 await state.external.start(self._team_session_for(state))
             except Exception:
@@ -952,15 +1112,24 @@ class AvatarSessionManager:
                     resume,
                 )
                 raise
+            # Only now is the branch actually in use: a start that failed leaves the
+            # credentials in place so a retried turn re-forks, rather than silently
+            # continuing as a plain session that forgot the parent (the orphaned
+            # provider branch from the failed attempt is the accepted cost).
+            state.fork_credentials = None
         tokens_before = state.budget_rail.call_tokens
         try:
             outcome = await state.external.run_turn(prompt, schema_json=schema_json)
         except BackendError as e:
             state.budget_rail.bill(e.tokens or 0)
+            # No marker is recorded: the engine retries this turn inside the same
+            # round, so a placeholder would shift every later round's keep_rounds.
             raise
         finally:
             state.turns_executed += 1
         state.budget_rail.bill(outcome.tokens)
+        state.turn_markers.append(outcome.marker)
+        await self._persist_external_turns(state)
         return AgentResult(
             text=outcome.text,
             structured=outcome.structured,
@@ -968,7 +1137,7 @@ class AvatarSessionManager:
         )
 
     async def _build_external_turns(
-        self, state: _SessionState, *, resume: bool, require: bool
+        self, state: _SessionState, *, resume: bool, require: bool, seed_checkpoint: dict | None = None
     ) -> ExternalMemberTurns:
         """Build the runtime for an external session (override point for tests)."""
         from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_workflow_runtime
@@ -986,6 +1155,7 @@ class AvatarSessionManager:
                 cwd=cwd,
                 resume_external_backend=resume,
                 require_checkpoint=require,
+                seed_checkpoint=seed_checkpoint,
             )
         except Exception as e:
             raise BackendError(f"external session build failed for {state.member_name}: {e}") from e

@@ -141,6 +141,7 @@ class CodexHarness(SerializedTurnHarness):
                 HostCapability.MODEL_REQUEST_OBSERVATION,
             }
         ),
+        fork_modes=frozenset({"full", "before"}),
     )
 
     def __init__(self, config: CodexHarnessConfig | None = None) -> None:

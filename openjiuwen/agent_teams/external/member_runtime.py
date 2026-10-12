@@ -28,6 +28,7 @@ from typing import (
     Sequence,
     runtime_checkable,
 )
+import uuid
 
 from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn
@@ -221,6 +222,7 @@ class ExternalHarnessMemberRuntime:
         stop_on_unsupported_force_abort: bool = False,
         resume_external_backend: bool = False,
         require_checkpoint: bool = False,
+        seed_checkpoint: dict | None = None,
         agent_kind: str | None = None,
         cli_path: str | None = None,
         inject_mcp: bool = False,
@@ -231,6 +233,7 @@ class ExternalHarnessMemberRuntime:
         self._team_context_tracker = team_context_tracker
         self._resume_external_backend = resume_external_backend
         self._require_checkpoint = require_checkpoint
+        self._seed_checkpoint = seed_checkpoint
         self._agent_kind = agent_kind
         self._cli_path = cli_path
         self.inject_mcp = inject_mcp
@@ -287,6 +290,16 @@ class ExternalHarnessMemberRuntime:
     def trajectory_recorder(self) -> "HarnessTrajectoryRecorder | None":
         """Return the recorder turning this member's events into trajectory spans."""
         return self._trajectory
+
+    @property
+    def member_session(self) -> Any:
+        """The member's child AgentSession while started (``None`` otherwise).
+
+        A host that must persist its own state alongside the provider checkpoint
+        writes through this session: the runtime commits its whole state on every
+        checkpoint, so a parallel session over the same bucket would be erased.
+        """
+        return self._member_session
 
     @property
     def reliability_agent_kind(self) -> str | None:
@@ -375,6 +388,9 @@ class ExternalHarnessMemberRuntime:
         self._member_name = context.agent_name
         self._member_agent_id = context.agent_id
         await self._ensure_member_session(team_session)
+        if self._seed_checkpoint is not None and self._member_session is not None:
+            await self._write_seed_checkpoint(context)
+            self._seed_checkpoint = None
         context = self._host_context(context)
         if self._reliability_ctx is not None:
             self._reliability_ctx.begin_attempt(phase="startup", round_id=None)
@@ -437,6 +453,22 @@ class ExternalHarnessMemberRuntime:
             mcp_servers=mcp_servers,
             tools=tools,
         )
+
+    async def _write_seed_checkpoint(self, context: HarnessContext) -> None:
+        """Persist a host-produced pointer as this member's own checkpoint envelope."""
+        checkpoint = HarnessCheckpoint(
+            provider=self._harness.card.name,
+            schema_version="1",
+            agent_id=context.agent_id,
+            host_session_id=context.host_session_id,
+            checkpoint_id=f"seed-{uuid.uuid4().hex}",
+            sequence=0,
+            data=dict(self._seed_checkpoint or {}),
+            provider_session_id=None,
+            revision=None,
+        )
+        sink = _MemberSessionCheckpointSink(self._member_session, backend=self._harness.card.name)
+        await sink.save(checkpoint, reason=CheckpointReason.SESSION_ACTIVATED)
 
     async def stop(self) -> None:
         """Stop the provider and close the projected MemberRuntime output."""
