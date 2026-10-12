@@ -62,7 +62,7 @@
 
 - 冷续跑指针缺失抛出的 `HarnessProtocolError` 由引擎 `_attempt_calls` 按 `rt.retries` 重试后转 `AGENT_FAILED`
   （确定性失败被多试几次，代价有界；错误文案完整到达 leader）。
-- 外部会话 fork（`card.fork_modes`、provider `fork_session`）未实现。
+- 外部会话 fork 见 `F_115`。
 - Claude 的 `TurnResult.usage` 按 provider mapping 标记为会话累计量（`CUMULATIVE`）；若实测确认为跨续跑累计，
   冷续跑后的首轮会把续跑前的累计量重复计入两本账（`ExternalMemberTurns` 每次重建从 0 起算）。修法是随会话
   指针一起保存上次累计基线并在 `resume=True` 时喂给驱动；待 token 口径实测（含 Codex 跨进程 thread 可寻址性）

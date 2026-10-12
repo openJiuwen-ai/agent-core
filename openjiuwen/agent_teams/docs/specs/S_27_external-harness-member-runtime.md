@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/spawn.py`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
 | 最近一次修订日期 | 2026-09-21 |
-| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md、F_114_swarmflow-thirdparty-agent.md |
+| 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md、F_114_swarmflow-thirdparty-agent.md、F_115_external-session-fork.md |
 
 ## 范围 / 边界
 
@@ -39,6 +39,9 @@
    场景保持默认。`build_cli_workflow_runtime()`（`external/cli_agent/spawn.py`）是 `build_cli_runtime()` 的
    工作流兄弟：`HarnessContext` 直构、无 `OPENJIUWEN_TEAM_JOIN`、`inject_mcp=False`、无团队系统提示词，
    启动件取自 `ExternalCliAgentSpec` 条目（`F_114`）。
+`seed_checkpoint=<provider data>` 在首次 `start()` 前把宿主产生的指针写成该成员自己的 checkpoint 信封
+（`agent_id` / `host_session_id` 取自 context），供 fork 子会话以 `require_checkpoint` 续接；只在首启消费一次。
+`HarnessCard.fork_modes` 声明 provider 可原生物化的分支模式（`F_115`）。
 5. **可靠性只由结构化事件驱动**。`TurnLifecycleEvent(STARTED)` → `begin_attempt(phase="turn")`；
    `FAILED` → 用 `TurnResult.error`（`category` / `code` / `provider_data.sdk_error_type` /
    `http_status`）`finalize_failure` 一次；`DiagnosticEvent(data.kind == "retrying")` →
