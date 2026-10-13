@@ -8,6 +8,8 @@
 
 {{task.content}}
 
+{{task.submission_note}}
+
 ## How to review
 
 1. Inspect the deliverable against the acceptance criteria above.

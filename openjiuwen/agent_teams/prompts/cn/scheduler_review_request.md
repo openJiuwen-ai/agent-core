@@ -8,6 +8,8 @@
 
 {{task.content}}
 
+{{task.submission_note}}
+
 ## 验收步骤
 
 1. 对照上面的验收标准检查交付产物。

@@ -994,3 +994,41 @@ async def test_temp_reviewer_prompt_carries_its_previous_round_feedback(db, bus)
     assert f"previous round (round {first_round.review_round})" in prompt
     assert "missing the auth section" in prompt
     assert "too vague" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_prompt_carries_the_submission_note(db, bus):
+    """The reviewer locates the deliverable from the request, not a view_task call."""
+    from openjiuwen.agent_teams.agent.scheduling import render
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [TaskGraphSpec(title="deliver", content="c", task_id="r", assignee="dev-1", reviewer=("rev-1",))]
+    )
+    await scheduler.activate()
+    note = "Deliverable written to /abs/outputs/poem.md; rhyme group: 十一尤"
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("r", note=note)).ok
+
+    prompt = await render.render_review_request_for_harness(await tm.get("r"), language="en", reviewer="rev-1")
+
+    assert "## The assignee's submission note" in prompt
+    assert note in prompt
+    assert prompt.index("## Goal and acceptance criteria") < prompt.index(note) < prompt.index("## How to review")
+    assert "{{task." not in prompt
+    assert "\n\n\n" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_prompt_leaves_out_an_absent_submission_note(db, bus):
+    from openjiuwen.agent_teams.agent.scheduling import render
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+
+    prompt = await render.render_review_request_for_harness(await tm.get("r"), language="cn", reviewer="rev-1")
+
+    assert "提交说明" not in prompt
+    assert "{{task." not in prompt
+    assert "\n\n\n" not in prompt

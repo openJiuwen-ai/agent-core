@@ -19,6 +19,7 @@ Two audiences, two mechanisms:
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.i18n import t
@@ -33,6 +34,7 @@ _TASK_START = "scheduler_task_start"
 _TASK_START_PLAN = "scheduler_task_start_plan"
 _REVIEW_REQUEST = "scheduler_review_request"
 _REVIEW_PREVIOUS_FEEDBACK = "scheduler_review_previous_feedback"
+_REVIEW_SUBMISSION_NOTE = "scheduler_review_submission_note"
 _REVIEW_RENUDGE = "scheduler_review_renudge"
 _REWORK = "scheduler_rework"
 _REWORK_SUMMARY = "scheduler_rework_summary"
@@ -153,6 +155,11 @@ async def render_review_request_for_harness(
     of the previous round (``previous_vote``) is rendered into the request:
     the reviewer can then check whether the rework it asked for was done.
     Without one (first round, or no vote then) the section is left out.
+
+    The assignee's completion ``note`` (artifact paths, key decisions) is
+    rendered as well, so the reviewer can locate the deliverable without a
+    ``view_task`` round-trip. A task submitted without a note leaves the
+    section out.
     """
     from openjiuwen.agent_teams.prompts.loader import load_template
 
@@ -184,4 +191,11 @@ async def render_review_request_for_harness(
         previous = previous.replace("{{vote.decision}}", previous_vote.decision)
         previous = previous.replace("{{vote.feedback}}", previous_vote.feedback or t("scheduler.none"))
     body = body.replace("{{task.previous_feedback}}", previous)
-    return body
+    submission_note = ""
+    note = (getattr(task, "note", None) or "").strip()
+    if note:
+        submission_note = loader(_REVIEW_SUBMISSION_NOTE, language).content.strip()
+        submission_note = submission_note.replace("{{task.note}}", note)
+    body = body.replace("{{task.submission_note}}", submission_note)
+    # Optional sections left out above leave their blank separators behind.
+    return re.sub(r"\n{3,}", "\n\n", body)
