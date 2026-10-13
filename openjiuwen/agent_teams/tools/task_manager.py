@@ -133,7 +133,9 @@ class TeamTaskManager:
                 omitted.
             dispatch_mode: The team's dispatch mode ("autonomous" /
                 "scheduled"), static from ``TeamAgentSpec.dispatch_mode``
-                (F_62). ``verify_task`` selects its verdict policy by it.
+                (F_62). ``verify_task`` selects its verdict policy by it,
+                and human-assigned tasks are only eager-started outside
+                scheduled dispatch.
         """
         self.db = db
         self.team_name = team_name
@@ -1377,7 +1379,16 @@ class TeamTaskManager:
             team_logger.error(f"Failed to publish {error_label}: {e}")
 
     async def _start_human_assigned_task_if_ready(self, task: TeamTaskBase) -> bool:
-        """Start a ready task already assigned to a live human member."""
+        """Start a ready task already assigned to a live human member.
+
+        Skipped under scheduled dispatch: the scheduler owns every start there
+        and pairs it with the templated handoff message that reaches the human
+        member's inbound callback. Starting the task here would win the CAS
+        race against the scheduler, leaving the task IN_PROGRESS with no
+        handoff ever sent, so the human controller would never be notified.
+        """
+        if self._dispatch_mode == "scheduled":
+            return False
         if task.status != TaskStatus.PENDING.value or not task.assignee:
             return False
         if not await self.db.member.is_live_human_agent(self.team_name, task.assignee):
