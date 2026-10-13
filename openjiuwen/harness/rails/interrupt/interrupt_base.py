@@ -242,7 +242,8 @@ class BaseInterruptRail(AgentRail):
     ) -> None:
         raise AbortError(
             reason=f"Tool execution interrupted: {tool_name}",
-            cause=ToolInterruptException(request=request, tool_call=tool_call)
+            cause=ToolInterruptException(request=request, tool_call=tool_call),
+            is_error=False,
         )
 
     def _skip_tool(

@@ -302,6 +302,20 @@ class AsyncCallbackFramework:
             return True
         return False
 
+    def _log_abort(self, callback: Callable, error: AbortError) -> None:
+        """Log an aborted callback: an expected abort at info, any other as an error."""
+        if not error.is_error:
+            self.logger.info("Callback execution interrupted: %s - %s", callback.__name__, error.reason)
+        elif error.cause:
+            self.logger.error(
+                f"Callback execution aborted: {callback.__name__} - {error.reason} "
+                f"(caused by {type(error.cause).__name__}: {error.cause})"
+            )
+        else:
+            self.logger.error(
+                f"Callback execution aborted: {callback.__name__} - {error.reason}"
+            )
+
     # ========== Registration ==========
 
     def on(
@@ -1147,24 +1161,18 @@ class AsyncCallbackFramework:
 
                 if self.enable_metrics:
                     key = f"{event}:{callback.__name__}"
-                    self._metrics[key].update(execution_time, is_error=True)
+                    self._metrics[key].update(execution_time, is_error=e.is_error)
 
-                cb_key = f"{event}:{callback.__name__}"
-                if cb_key in self._circuit_breakers:
-                    await self._circuit_breakers[cb_key].record_failure(event, callback)
-
-                await self._execute_hooks(event, HookType.ERROR, e.cause or e, *args, **kwargs)
+                # An expected abort (an interrupt) is control flow, not a failure:
+                # no breaker failure and no ERROR hooks.
+                if e.is_error:
+                    cb_key = f"{event}:{callback.__name__}"
+                    if cb_key in self._circuit_breakers:
+                        await self._circuit_breakers[cb_key].record_failure(event, callback)
+                    await self._execute_hooks(event, HookType.ERROR, e.cause or e, *args, **kwargs)
 
                 if self.enable_logging:
-                    if e.cause:
-                        self.logger.error(
-                            f"Callback execution aborted: {callback.__name__} - {e.reason} "
-                            f"(caused by {type(e.cause).__name__}: {e.cause})"
-                        )
-                    else:
-                        self.logger.error(
-                            f"Callback execution aborted: {callback.__name__} - {e.reason}"
-                        )
+                    self._log_abort(callback, e)
 
                 # An aborted chain is exactly when the split matters, so report
                 # what ran before reraising.
