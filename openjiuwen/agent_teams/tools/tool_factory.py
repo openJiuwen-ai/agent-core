@@ -307,6 +307,8 @@ def create_team_tools(
     # always available. Symmetric to the plan_mode / persistent gates above.
     # Unconditional set subtraction is idempotent — teammate / human_agent
     # ``allowed`` sets don't contain these leader-only tools anyway.
+    if getattr(agent_team, "conversation_mode", "team") != "group_chat":
+        allowed = allowed - {"spawn_passive_human"}
     if not agent_team.hitt_enabled():
         allowed = allowed - {"spawn_human_agent", "spawn_passive_human"}
     if not agent_team.bridge_enabled():

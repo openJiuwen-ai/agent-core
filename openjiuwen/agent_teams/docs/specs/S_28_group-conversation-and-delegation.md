@@ -85,7 +85,7 @@ GroupMessageHandler 位于群聊目录，继承 MessageHandler 的生命周期�
 
 模式保存在 `TeamRuntimeContext.team_spec.conversation_mode`，取值为 team 或 group_chat；成员启动通过现有上下文继承，checkpoint 恢复时保留模式。已有运行时不因后续消息切换模式；入口拒绝与模式不一致的外部业务消息，interact 返回 conversation_mode_mismatch。空输入恢复保留现有模式。
 
-工具和提示词在装配时固定。工具工厂只向群聊运行时注册 group_send_message；普通 Team 的工具集和默认 policy 不含群聊工具或提示。human_agent 与显式工具排除配置仍按既有规则处理。工具执行保护检查运行时模式。
+工具和提示词在装配时固定。工具工厂只向群聊运行时注册 group_send_message；普通 Team 的工具集和默认 policy 不含群聊工具或提示。human_agent 与显式工具排除配置仍按既有规则处理。工具执行保护检查运行时模式。`spawn_passive_human` 同样只向群聊 Leader 暴露，仍要求 HITT 开启且未被显式排除；普通 Team 保留 `spawn_human_agent`。直接执行 `spawn_passive_human` 工具也检查群聊模式。
 
 内部投递沿用正文字符串与既有 steering/follow-up 队列。普通消息可继续渲染为 team-inbound，群聊投递近期摘录与 history.jsonl 路径；不向单 agent 透传每条消息的类型，也不解析正文判断工具模式。TeamToolRail 不动态增删工具，不在模型请求前同步群聊 schema；任务看板等框架通知不会改变工具集。
 

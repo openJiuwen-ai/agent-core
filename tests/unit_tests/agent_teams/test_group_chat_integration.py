@@ -267,3 +267,41 @@ async def test_group_runtime_context_and_cli_policy_keep_fixed_mode(runtime):
     assert restored.team_spec.conversation_mode == "group_chat"
     prompt = await _build_member_system_prompt(runtime.spec, restored, "alice", hitt_enabled=False)
     assert group_chat_prompt(runtime.spec) in prompt
+
+
+@pytest.mark.parametrize("mode,role,hitt,excluded,expected", [
+    ("team", "leader", True, None, False),
+    ("group_chat", "leader", True, None, True),
+    ("group_chat", "leader", False, None, False),
+    ("group_chat", "teammate", True, None, False),
+    ("group_chat", "human_agent", True, None, False),
+    ("group_chat", "leader", True, {"spawn_passive_human"}, False),
+])
+@pytest.mark.asyncio
+async def test_passive_human_tool_is_group_only(runtime, mode, role, hitt, excluded, expected):
+    from openjiuwen.agent_teams.tools.tool_factory import create_team_tools
+
+    runtime.backend.conversation_mode = mode
+    runtime.backend._enable_hitt = hitt
+    names = {tool.card.name for tool in create_team_tools(
+        role=role, agent_team=runtime.backend, exclude_tools=excluded,
+    )}
+    assert ("spawn_passive_human" in names) == expected
+    if role == "leader" and hitt:
+        assert "spawn_human_agent" in names
+
+
+@pytest.mark.parametrize("mode,expected", [("team", False), ("group_chat", True)])
+@pytest.mark.asyncio
+async def test_passive_human_tool_checks_runtime_mode(runtime, mode, expected):
+    from openjiuwen.agent_teams.tools.tool_member import SpawnPassiveHumanTool
+
+    runtime.backend.conversation_mode = mode
+    runtime.backend._enable_hitt = True
+    tool = SpawnPassiveHumanTool(runtime.backend, make_translator("cn"))
+    result = await tool.invoke({"member_name": "passive", "display_name": "Human", "desc": ""})
+    assert result.success == expected
+    member = await runtime.db.member.get_member("passive", "group")
+    assert (member is not None) == expected
+    if not expected:
+        assert "requires a group_chat runtime" in result.error

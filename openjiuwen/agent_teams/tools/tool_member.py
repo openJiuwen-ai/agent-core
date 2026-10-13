@@ -556,6 +556,9 @@ class SpawnPassiveHumanTool(_SpawnToolBase):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        if getattr(self.team, "conversation_mode", "team") != "group_chat":
+            return self._fail("spawn_passive_human requires a group_chat runtime")
+
         err = self._validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
