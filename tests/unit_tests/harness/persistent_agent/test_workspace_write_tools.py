@@ -11,9 +11,9 @@ import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.foundation.tool.schema import ToolOutput
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.execution import ExecutionContext
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.access import WorkspaceWriteScope
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.file_access import (
+from openjiuwen.harness.persistent_agent.schema.execution import ExecutionContext
+from openjiuwen.harness.persistent_agent.workspace.access import WorkspaceWriteScope
+from openjiuwen.harness.persistent_agent.workspace.file_access import (
     PersistentWorkspaceWriteRail,
     WorkspaceWriteAdapter,
 )

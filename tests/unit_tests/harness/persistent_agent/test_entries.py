@@ -43,7 +43,7 @@ TOOL_ARGS = '{"value": "x", "api_token": "secret-value"}'
 
 
 def module(name):
-    return import_module(f"{PKG}.persistent_agent.{name}")
+    return import_module(f"{PKG}.{name}")
 
 
 SEAMS = module("execution.seams")

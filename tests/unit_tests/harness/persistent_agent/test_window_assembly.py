@@ -42,8 +42,8 @@ from openjiuwen.harness.schema.deep_agent_spec import (
 pytestmark = pytest.mark.level0
 
 PKG = "openjiuwen.harness.persistent_agent"
-SEAMS = import_module(f"{PKG}.persistent_agent.execution.seams")
-INTEGRATION = import_module(f"{PKG}.persistent_agent.schema.integration")
+SEAMS = import_module(f"{PKG}.execution.seams")
+INTEGRATION = import_module(f"{PKG}.schema.integration")
 PART = SEAMS.WINDOW_PART_KEY
 HEADER = (
     "【本次执行】类型：新任务；request_id：request-1；execution_id：execution-1；来源：私聊；消息：dm-1；"
@@ -142,7 +142,7 @@ class AttachRuntimeNote(DeepAgentRail):
 
 
 def ref(execution, **changes):
-    data = import_module(f"{PKG}.persistent_agent.schema.protocol").InvocationRef.from_execution(execution).model_dump()
+    data = import_module(f"{PKG}.schema.protocol").InvocationRef.from_execution(execution).model_dump()
     return {**data, **changes}
 
 
@@ -461,7 +461,7 @@ async def test_a_waiting_call_blocks_a_new_request(harness, left_over):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ending", ["no_result", "stop_placeholder", "real_result"])
 async def test_a_tool_call_without_a_result_blocks_a_new_request(harness, monkeypatch, ending):
-    window_assembly = import_module(f"{PKG}.persistent_agent.execution.window_assembly")
+    window_assembly = import_module(f"{PKG}.execution.window_assembly")
     logged = []
     monkeypatch.setattr(window_assembly.logger, "error", lambda *args, **kwargs: logged.append(args))
     spec = harness.spec()

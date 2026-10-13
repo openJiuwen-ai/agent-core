@@ -8,13 +8,13 @@ import pytest
 
 from openjiuwen.core.foundation.tool.schema import ToolOutput
 from openjiuwen.core.single_agent import AgentCard
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.execution import ExecutionContext
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.spec import PersistentAgentSpec
-from openjiuwen.harness.persistent_agent.persistent_agent.tools.workspace_read import (
+from openjiuwen.harness.persistent_agent.schema.execution import ExecutionContext
+from openjiuwen.harness.persistent_agent.schema.spec import PersistentAgentSpec
+from openjiuwen.harness.persistent_agent.tools.workspace_read import (
     PersistentWorkspaceListTool,
     PersistentWorkspaceReadTool,
 )
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.access import WorkspaceReadScope
+from openjiuwen.harness.persistent_agent.workspace.access import WorkspaceReadScope
 from openjiuwen.harness.prompts.tools import build_tool_card
 
 pytestmark = pytest.mark.level0

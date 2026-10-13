@@ -11,10 +11,10 @@ import openjiuwen.harness.persistent_agent as persistent_agent_api
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.single_agent import AgentCard, create_agent_session
-from openjiuwen.harness.persistent_agent.persistent_agent.ports import PersistentPorts
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.build_context import PersistentBuildContext
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.execution import ExecutionContext
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.spec import PersistentAgentSpec
+from openjiuwen.harness.persistent_agent.ports import PersistentPorts
+from openjiuwen.harness.persistent_agent.schema.build_context import PersistentBuildContext
+from openjiuwen.harness.persistent_agent.schema.execution import ExecutionContext
+from openjiuwen.harness.persistent_agent.schema.spec import PersistentAgentSpec
 
 pytestmark = pytest.mark.level0
 
@@ -116,7 +116,7 @@ def test_write_scope_is_public_immutable_and_bound_to_execution_identity():
     scope_type = getattr(persistent_agent_api, "WorkspaceWriteScope", None)
     assert scope_type is not None, "WorkspaceWriteScope is not exported by the Persistent Agent API"
     validate_scope = getattr(
-        __import__("openjiuwen.harness.persistent_agent.persistent_agent.workspace", fromlist=["validate_write_scope"]),
+        __import__("openjiuwen.harness.persistent_agent.workspace", fromlist=["validate_write_scope"]),
         "validate_write_scope",
         None,
     )

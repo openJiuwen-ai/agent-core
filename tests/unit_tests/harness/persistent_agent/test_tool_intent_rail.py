@@ -10,15 +10,15 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentCallbackEvent, ToolCallInputs
-from openjiuwen.harness.persistent_agent.persistent_agent.execution.emitter import EventEmitter
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.build_context import ConstructionBinding
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.events import EventType
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.execution import ExecutionContext
+from openjiuwen.harness.persistent_agent.execution.emitter import EventEmitter
+from openjiuwen.harness.persistent_agent.schema.build_context import ConstructionBinding
+from openjiuwen.harness.persistent_agent.schema.events import EventType
+from openjiuwen.harness.persistent_agent.schema.execution import ExecutionContext
 from openjiuwen.harness.rails.tool_call_resilience_rail import ToolCallResilienceRail
 
 pytestmark = pytest.mark.level0
 
-_RAIL_MODULE = "openjiuwen.harness.persistent_agent.persistent_agent.execution.tool_intent_rail"
+_RAIL_MODULE = "openjiuwen.harness.persistent_agent.execution.tool_intent_rail"
 
 
 def _rail(binding):

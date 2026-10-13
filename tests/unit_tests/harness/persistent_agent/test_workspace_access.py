@@ -10,11 +10,11 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.single_agent import AgentCard, create_agent_session
-from openjiuwen.harness.persistent_agent.persistent_agent.ports import PersistentPorts
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.build_context import PersistentBuildContext
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.execution import ExecutionContext
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.spec import PersistentAgentSpec
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.access import (
+from openjiuwen.harness.persistent_agent.ports import PersistentPorts
+from openjiuwen.harness.persistent_agent.schema.build_context import PersistentBuildContext
+from openjiuwen.harness.persistent_agent.schema.execution import ExecutionContext
+from openjiuwen.harness.persistent_agent.schema.spec import PersistentAgentSpec
+from openjiuwen.harness.persistent_agent.workspace.access import (
     WorkspaceAccessPort,
     WorkspaceReadScope,
     validate_read_scope,

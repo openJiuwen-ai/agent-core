@@ -123,7 +123,7 @@ abort_persistent_request(context, *, reason: "cancel" | "stop") -> None  # async
 
 #### 2.3.1 关键运行类、函数与扩展接口定义
 
-以下按 2026-10-12 当前实现补齐定义。实现模块前缀为 `openjiuwen.harness.persistent_agent.persistent_agent`；三个正式入口由外层导出，运行类及 seams 接口均为内部接缝。源码未注解的参数保持未注解，其要求在说明中给出。
+以下按 2026-10-12 当前实现补齐定义。实现模块前缀为 `openjiuwen.harness.persistent_agent`；三个正式入口由外层导出，运行类及 seams 接口均为内部接缝。源码未注解的参数保持未注解，其要求在说明中给出。
 
 | 类 / 来源 | 变更、关系与构造 | 关键状态、生命周期与职责 |
 | --- | --- | --- |
