@@ -127,6 +127,17 @@ class SpawnManager:
                 self._configurator.member_name or "?",
                 member_name,
             )
+            # Restart/recover may have armed RESTARTING before this skip. Settle
+            # back to READY so a no-harness member is not left mid-transition.
+            team_backend = self._configurator.team_backend
+            team_name = self._configurator.team_name
+            if team_backend is not None and team_name:
+                await team_backend.db.member.try_transition_member_status(
+                    member_name,
+                    team_name,
+                    MemberStatus.RESTARTING,
+                    MemberStatus.READY,
+                )
             return None
         team_logger.info("[{}] spawning teammate: {}", self._configurator.member_name or "?", member_name)
 

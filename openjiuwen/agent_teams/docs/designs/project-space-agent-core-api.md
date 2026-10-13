@@ -171,6 +171,7 @@ await Runner.remove_team_member(
 - 已停机或不存在：幂等成功  
 - 真人（含 passive）持有进行中任务且 `force=False`：拒绝  
 - **passive**：无成员进程收尾，软停后直接落到 `SHUTDOWN`，避免永久卡在 `SHUTDOWN_REQUESTED`
+- **冷恢复**：`recover_team` **不会**把 `SHUTDOWN` / `SHUTDOWN_REQUESTED` 的成员再拉起来；移出后要回来必须 `allow_rejoin=True`。passive 不走 harness restart；若残留 `RESTARTING`/`ERROR`，恢复时结算回 `READY`
 
 查名册仍用既有监控接口（如 `get_agent_team_monitor`），本分支不另提供 `get_member` 宿主门面。
 

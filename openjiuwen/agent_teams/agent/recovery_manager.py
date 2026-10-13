@@ -38,6 +38,17 @@ class RecoveryManager:
         self._spawn_manager = spawn_manager
 
     async def recover_team(self) -> list[str]:
+        """Restart live teammates after cold recover / leader start.
+
+        Soft-stopped members stay stopped: ``SHUTDOWN`` and
+        ``SHUTDOWN_REQUESTED`` are skipped so a host remove is not undone by
+        recovery. Passive host must call ``spawn_team_member(..., allow_rejoin=True)``
+        to bring those names back.
+
+        Passive humans have no harness. Recovery never calls
+        ``restart_teammate`` for them; a leftover ``RESTARTING`` / ``ERROR`` row
+        is settled back to ``READY``, while ``READY`` rows are left alone.
+        """
         team_backend = self._configurator.team_backend
         if not team_backend:
             return []
@@ -47,9 +58,24 @@ class RecoveryManager:
         await team_backend.restore_external_cli_specs_from_db()
         all_members = await team_backend.list_member_roster()
         restarted: list[str] = []
+        departed = {
+            MemberStatus.SHUTDOWN.value,
+            MemberStatus.SHUTDOWN_REQUESTED.value,
+        }
 
         for member in all_members:
             if member.member_name == member_name:
+                continue
+            if member.status in departed:
+                team_logger.info(
+                    "[{}] skip recover for departed member {} ({})",
+                    member_name or "?",
+                    member.member_name,
+                    member.status,
+                )
+                continue
+            if member.role == TeamRole.PASSIVE_HUMAN.value:
+                await self._settle_passive_human_after_recover(member.member_name, member.status)
                 continue
             # Idempotency: a teammate already running in this runtime keeps its
             # live spawn handle, so skip it. ``recover_team`` can be invoked more
@@ -75,6 +101,40 @@ class RecoveryManager:
                 restarted.append(member.member_name)
 
         return restarted
+
+    async def _settle_passive_human_after_recover(self, member_name: str, status: str) -> None:
+        """Keep passive humans out of harness restart; clear RESTARTING residue."""
+        team_backend = self._configurator.team_backend
+        team_name = self._configurator.team_name
+        if team_backend is None or team_name is None:
+            return
+        if status == MemberStatus.READY.value:
+            return
+        if status not in {MemberStatus.RESTARTING.value, MemberStatus.ERROR.value}:
+            team_logger.debug(
+                "[{}] passive human {} status {} left unchanged during recover",
+                self._configurator.member_name or "?",
+                member_name,
+                status,
+            )
+            return
+        try:
+            from_status = MemberStatus(status)
+        except ValueError:
+            return
+        settled = await team_backend.db.member.try_transition_member_status(
+            member_name,
+            team_name,
+            from_status,
+            MemberStatus.READY,
+        )
+        if settled:
+            team_logger.info(
+                "[{}] settled passive human {} from {} to READY during recover",
+                self._configurator.member_name or "?",
+                member_name,
+                status,
+            )
 
     def persist_leader_config(self, session) -> None:
         from openjiuwen.agent_teams.runtime.metadata import (
