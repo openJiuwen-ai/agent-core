@@ -14,8 +14,8 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-09-20 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）、`F_79_team-scoped-skill-library-and-visibility.md`（team 成员的 `skills` / `enable_skill_discovery` 落 build_spec 前被清空）。其余条目见 `docs/features/` |
+| 最近一次修订日期 | 2026-10-13 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）、`F_79_team-scoped-skill-library-and-visibility.md`（team 成员的 `skills` / `enable_skill_discovery` 落 build_spec 前被清空）、`F_118_task-scoped-member-lifetime.md`（`MemberStatus.DORMANT` + `retire_target`。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -165,10 +165,14 @@ strategy to round_robin"）。**禁止**让错误延迟到首次 LLM 调用。
 | `PAUSED` | round 自然结束（persistent + idle） | 否 | 否 | `READY` / `RESTARTING` / `SHUTDOWN_REQUESTED` / `SHUTDOWN` / `ERROR` / `STOPPED` |
 | `STOPPED` | 外部 `stop_coordination`（team 仍 live） | 否 | 否 | `READY` / `RESTARTING` / `SHUTDOWN_REQUESTED` / `SHUTDOWN` / `ERROR` |
 | `SHUTDOWN` | 永久退出 | 否 | 否（DB row 留着，仅 `RESTARTING` 可复活） | `RESTARTING` |
+| `DORMANT` | 任务内联成员按 `options.lifetime="dormant"` 退场（F_118） | 否 | 否（留在名册） | `RESTARTING`（**仅点名唤醒**：`recover_member`）/ `SHUTDOWN`（leader `shutdown_member` 直落） |
 
-差异**不在"runtime 跑没跑"**——三者都意味着协程已退出，区分点在**为什么退出**：
+差异**不在"runtime 跑没跑"**——四者都意味着协程已退出，区分点在**为什么退出、谁能叫醒**：
 PAUSED 是 lifecycle 驱动的 round-end idle；STOPPED 是 manager.finalize / 外部
-stop_team 主动 tear-down；SHUTDOWN 是逻辑退场（`shutdown_self` / 失败累积）。
+stop_team 主动 tear-down；SHUTDOWN 是逻辑退场（`shutdown_self` / 失败累积）；DORMANT 是
+**有意的休眠**——与 PAUSED / STOPPED 的本质差别是 `recover_team` 冷恢复**不会**自动复活它，
+只有显式点名（单播 / 多播 `send_message`、调度器交接、interact `@name`）经
+`recover_member` 的 `DORMANT→RESTARTING` CAS 才唤醒；与 SHUTDOWN 的差别是它不是终态。
 这个区分让 leader 在 pause / stop 路径上能向持久层 (`team_member.status`) 写出
 **为什么** teammate runtime 不在了，使 `recover_team` 重启决策有数据基础。
 
@@ -177,7 +181,8 @@ stop_team 主动 tear-down；SHUTDOWN 是逻辑退场（`shutdown_self` / 失败
 被外部 stop 拆掉"两种语义，原 PAUSED 一锅端的写法盖不住后者。
 
 不要继续给 `MemberStatus` 加新枚举来"区分细微情形"，新增情形先证明现有 PAUSED /
-STOPPED / RESTARTING / ERROR 不能覆盖。
+STOPPED / RESTARTING / ERROR / DORMANT 不能覆盖。DORMANT 通过了这道证明：它要求"冷恢复
+不复活、点名才复活"，而 PAUSED / STOPPED 的契约恰恰是下个 run cycle 自动复活（`S_03` 机制 17）。
 
 ### I-12 两枚举各管各的层
 
@@ -588,6 +593,7 @@ MESSAGE = "message"
 | `ExecutionStatus` | str enum | 任务执行状态机；见数据结构段 |
 | `TaskStatus` | enum | 团队任务状态机 |
 | `MemberMode` | str enum | `BUILD_MODE` / `PLAN_MODE`，控制 teammate 是否需 leader 审批 |
+| `retire_target(lifetime, *, force)` | 纯函数 | 退场请求的终态解析：`"dormant"` 且非 force → `DORMANT`，否则 `SHUTDOWN`（F_118） |
 
 每个状态机伴随转移表常量（`MEMBER_TRANSITIONS` / `EXECUTION_TRANSITIONS` /
 `TASK_TRANSITIONS`），写路径必经
@@ -638,6 +644,8 @@ team（如直接 streaming 的单 agent）。`role` 用 `TeamRole`（`str` 枚�
 
 #### `TaskDetail`
 
+新增 `note: Optional[str]`（F_118）：承担者的完成说明，`get` 视图唯一回带它的路径。
+
 `TaskSummary` 之外加：
 
 | 字段 | 类型 |
@@ -683,15 +691,29 @@ BUSY       -> READY | PAUSED | STOPPED | SHUTDOWN_REQUESTED | ERROR
 PAUSED     -> READY | RESTARTING | STOPPED | SHUTDOWN_REQUESTED | SHUTDOWN | ERROR
 STOPPED    -> READY | RESTARTING | SHUTDOWN_REQUESTED | SHUTDOWN | ERROR
 RESTARTING -> READY | STOPPED | ERROR | SHUTDOWN
-SHUTDOWN_REQUESTED -> SHUTDOWN | ERROR
+SHUTDOWN_REQUESTED -> SHUTDOWN | DORMANT | ERROR
 SHUTDOWN   -> RESTARTING
+DORMANT    -> RESTARTING | SHUTDOWN
 ERROR      -> RESTARTING | READY | STOPPED | SHUTDOWN_REQUESTED | SHUTDOWN
 ```
+
+退场请求只有一个状态（`SHUTDOWN_REQUESTED`），终态由成员行上的策略决定：
+`retire_target(lifetime, force)`（`status.py`）——`lifetime == "dormant"` 且非 `force` → `DORMANT`，
+其余 → `SHUTDOWN`。三处落终态的代码（机制 18 无 round 分支的 `shutdown_self`、`finalize_member`
+的 `SHUTDOWN_REQUESTED` 分支、`MemberHandler` 的 `force`）都经它解析，见 F_118。
 
 关键约束：
 
 - `READY` 自转移合法（用于 ready→ready 的轻量心跳 / 状态广播）。
 - `SHUTDOWN` 不是终态：可重新 `RESTARTING`（成员复活路径）。
+- `DORMANT` 没有直达入边：只能由 `SHUTDOWN_REQUESTED` 自落（成员真正空闲时），不允许
+  leader 直写——直写会拆掉刚开始的 round，见 F_118 拒绝的方案 C。
+- 四组成员集合对 `DORMANT` 的归位：`MEMBER_SETTLED_STATUSES` 含（干完了）、
+  `MEMBER_QUIESCENT_STATUSES` 含（没在动）、`MEMBER_DEPARTED_STATUSES` /
+  `MEMBER_UNREACHABLE_STATUSES` 不含（仍在队、邮箱仍投递）。另有两处消费点按同一语义处理：
+  `runtime.manager._MEMBER_FINALIZED_STATUSES` 含（成员自己写的终态，finalize 不覆写）；
+  `message_dao.has_unread_messages` 把 DORMANT 收件人与 SHUTDOWN 同列豁免（未读在唤醒时才读，
+  不算团队未完成的工作）。
 - `BUSY` 不可直接 `SHUTDOWN`：必须经 `SHUTDOWN_REQUESTED` 或 `ERROR` /
   `READY`，避免硬中断进行中的任务。
 - `STOPPED` 与 `PAUSED` 一样可直接 `RESTARTING`（`recovery_manager` 把
@@ -745,8 +767,9 @@ CANCELLED    -> (terminal)
   `PLANNING → IN_PROGRESS`——"计划批准"就是这条边（旧 `PLAN_APPROVED` 状态已消解为它）。
   驳回保持 `PLANNING`。`assign` 感知 mode：指派 plan_mode 成员落 `PLANNING`、build_mode 落
   `IN_PROGRESS`。`BUILD_MODE` 走 `PENDING → IN_PROGRESS → COMPLETED` 直通。
-- **verify 闸**（`IN_REVIEW`）：任务配了 `reviewer`（`TeamTaskBase.reviewer`，JSON member 名
-  列表）时，成员"做完"经 `complete()` 分流落 `IN_REVIEW` 交验证（发 `TASK_SUBMITTED_FOR_REVIEW`，
+- **verify 闸**（`IN_REVIEW`）：任务配了 `reviewer`（`TeamTaskBase.reviewer`，JSON 结构化对象
+  列表 `[{type, reviewer_id, instruction}]`，F_73；reviewer **不是**名册成员，调度器按 type 拉一次性
+  harness 投票）时，成员"做完"经 `complete()` 分流落 `IN_REVIEW` 交验证（发 `TASK_SUBMITTED_FOR_REVIEW`，
   同一 UPDATE 里 `review_round += 1` 原子开新验证轮）。裁决按**生效分发模式**二分（F_62）：
   自主模式 reviewer 用 `verify_task(decision)` 首裁即决——pass→`COMPLETED`（解依赖，发
   `TASK_VERIFIED`）/ fail→`IN_PROGRESS`（返工，author 全程持有，发 `TASK_REVISION_REQUESTED`
@@ -765,6 +788,18 @@ CANCELLED    -> (terminal)
 - `PLANNING` / `IN_PROGRESS` / `IN_REVIEW`（与终态一起）在 `TASK_DEPENDENCY_REJECT_STATUSES`
   里：已在推进的任务不可再被加前置依赖。编辑锁只锁 `IN_REVIEW`（验证期内容冻结）。
 - 见 F_59（取代 F_58 的 `STARTED`）、F_62（投票 + 调度 runtime）。
+
+### 任务行 `note` 列与成员 `options.lifetime`（F_118）
+
+- `TeamTaskBase.note`（nullable text）：承担者 `member_complete_task(note=...)` 的完成说明，随
+  `complete()` / `_submit_for_review()` 同一事务落行；`TaskDetail.note` 回带、`view_task(get)` 渲染、
+  调度交接模板经 `task.upstream_brief` 读上游的 note。**事件不带正文**（`TASK_COMPLETED` /
+  `TASK_SUBMITTED_FOR_REVIEW` 仍只是唤醒信号，正文从行里现查，与 F_63 同一原则）。老 session
+  的任务表由 `engine._ensure_dynamic_table_indexes` 补列（与 `reviewer` / `review_round` 同路）。
+- `TeamMemberOptions.lifetime`（`"shutdown"` / `"dormant"` / None）：任务内联成员的退场策略，
+  落在既有 `options` JSON 列；`None` 为常驻。读点两个：调度器退场扫描
+  （`MemberDao.list_retirable_members`）与成员自己的 `retire_target` 解析
+  （`MemberDao.get_member_lifetime`）。
 
 ### 评审投票数据面（F_62）
 

@@ -8,7 +8,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-08-15 |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md`、`F_65_runtime-idle-clock-stall-nudge.md`、`F_74_leader-member-activity-and-team-idle.md`、`F_81_disband-requires-explicit-intent.md` |
 
 ## 范围 / 边界
@@ -51,13 +51,13 @@
 14. **kernel lifecycle 单调推进**：`CoordinationKernel._lifecycle_state` 是显式状态机 `idle → running → paused → stopped`：`start()` 把状态推到 `running`，`pause()` 把 `running → paused`，`stop()` 把 `running | paused → stopped`，`stopped`/`idle` 上调 `pause()` 是 no-op，`idle`/`stopped` 上调 `stop()` 是 no-op。这保证 Runner-level finally（`manager.finalize`）即使在外部 `stop_coordination` 已经发生后再调 `pause_coordination`，也只是空转，不会把"已经 stop"的状态机硬倒回 paused。
 15. **finalize_round 不做团队去向决策**：`finalize_round` 只负责 memory extract + 释放 stream_queue 引用——这是**纯**的 round-end cleanup hook。pause vs stop 的决策由 Runner finally 路径上的 `TeamRuntimeManager.finalize` / `finalize_member` 拥有（详见 `S_06_runtime-pool-dispatch`），coordination 不可在此处偷偷 pause/stop kernel。
 16. **leader stop 也 mark teammate 持久状态**：`kernel.stop()`（leader 角色）在 tear down spawn handles 之前调 `_mark_live_teammates(STOPPED)`，与 pause 路径调 `_mark_live_teammates(PAUSED)` 对称。区分点是**为什么** teammate runtime 不在了——团队仍 live、由外部 stop_team 触发就是 `STOPPED`；自然 round 间 idle 就是 `PAUSED`。该写入是 `_mark_live_teammates` 唯一调用方，禁止散落 `team_member.update_status(STOPPED)` 字面量。
-17. **teammate `stop_coordination` 不写持久状态**：teammate 侧 kernel 的 `stop()` 不调 `team_member.update_status(...)`——`team_member` 的持久态由 `TeamRuntimeManager.finalize_member` 在 Runner finally 中决定（详见 `S_06`），让 kernel 只关心进程内 runtime。理由：leader 主动 stop 团队时已经把每个 teammate 的 `team_member.status` 写成 `STOPPED`（"runtime 拆了、团队仍可恢复"），若 teammate 自己 kernel.stop 再回写一次 `SHUTDOWN`，就把可恢复的停机谎报成永久退场——名册从此说所有人都走了，而团队还在。
+17. **teammate `stop_coordination` 不写持久状态**：teammate 侧 kernel 的 `stop()` 不调 `team_member.update_status(...)`——`team_member` 的持久态由 `TeamRuntimeManager.finalize_member` 在 Runner finally 中决定（详见 `S_06`），让 kernel 只关心进程内 runtime。理由：leader 主动 stop 团队时已经把每个 teammate 的 `team_member.status` 写成 `STOPPED`（"runtime 拆了、团队仍可恢复"），若 teammate 自己 kernel.stop 再回写一次 `SHUTDOWN`，就把可恢复的停机谎报成永久退场——名册从此说所有人都走了，而团队还在。`DORMANT`（F_118）与 PAUSED / STOPPED 的分野也在这里：后两者是"runtime 拆了、下个 run cycle `recover_team` 自动复活"，DORMANT 是"有意休眠、冷恢复不复活、只认点名"。
 18. **喂 harness 之前先过 `MessageHandler._harness_input_blocked` 闸门；成员退场是「状态驱动」而非「事件驱动」，且对所有非 leader 角色同一套**。handler 层任何把消息喂进本成员 harness 的路径（`on_message_or_broadcast` / `on_poll_mailbox` / `on_member_shutdown_drain`，统一经 `_process_unread_messages`）都先读**本成员在 DB 里的 status** 决定三选一：
 
     | 本成员 status | round 在飞 | 动作 |
     |---|---|---|
-    | `SHUTDOWN` | — | **丢弃投递**。成员已彻底退场，绝不唤醒一个已死的 harness |
-    | `SHUTDOWN_REQUESTED` | 否 | **不唤醒，直接 `shutdown_self()` 落 `SHUTDOWN`**。没有 round 可搭便车，为了让 LLM 读一句"你要被关了"而起一整轮纯属烧 token 说告别 |
+    | `SHUTDOWN` / `DORMANT` | — | **丢弃投递**。成员没有 runtime，绝不喂一个已死的 harness（DORMANT 理论不可达——休眠即拆 runtime——按状态驱动的原则写明：其未读行留着，由唤醒重建的 runtime 首次 sweep 排空，F_118） |
+    | `SHUTDOWN_REQUESTED` | 否 | **不唤醒，直接 `shutdown_self()` 落终态**（`retire_target`：`SHUTDOWN`，或成员 `options.lifetime == "dormant"` 时 `DORMANT`；`force` 一律 `SHUTDOWN`，F_118）。没有 round 可搭便车，为了让 LLM 读一句"你要被关了"而起一整轮纯属烧 token 说告别。**休眠例外**（`_dormant_settle_deferred`）：终态为 `DORMANT` 且本成员有未读消息时**放行**——休眠类退场不发告别通知，所以未读一定是请求之后到达的真实输入，此刻自落会把它搁浅（发给 `SHUTDOWN_REQUESTED` 成员的消息唤不醒任何人）；放行的那一轮结束后 `_on_idle_settled` 照常关流、finalize 落 `DORMANT` |
     | `SHUTDOWN_REQUESTED` | 是 | **放行**。消息 steer 进在飞的那一轮，该轮 round-end 自检 `close_stream`（teammate 一直走的老路），不打断成员当前回合 |
 
     **必须读 DB status，不能读 `MEMBER_SHUTDOWN` 事件**：`TeamBackend.shutdown_member` 的顺序是「写 `SHUTDOWN_REQUESTED` → 发 shutdown 通知消息 → 发 `MEMBER_SHUTDOWN` 事件」，所以那条通知是作为**普通 MESSAGE 先到**的。若闸门 key 在事件上，这条消息早就把空闲 harness 唤醒跑完一轮了，事件再到已然太晚——这正是 `_shutdown_human_agent` 时代 human-agent 的"空闲直接收摊"分支几乎从不生效的原因。

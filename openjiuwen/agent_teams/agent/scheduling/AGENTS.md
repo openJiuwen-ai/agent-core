@@ -6,14 +6,14 @@ leader 侧的调度分发 runtime，与 `coordination/`（唤醒层）平齐：c
 
 | 文件 | 职责 |
 |---|---|
-| `scheduler.py` | `TeamScheduler`：事件粗筛 + 双幂等扫描（开工 / 验票）+ `SchedulerHost` 窄协议 + 已挂载 `TeamSkillEvolutionRail` 的 reviewer feedback 旁路（F_73） |
+| `scheduler.py` | `TeamScheduler`：事件粗筛 + 三个幂等扫描（开工 / 验票 / 退场）+ `SchedulerHost` 窄协议 + 已挂载 `TeamSkillEvolutionRail` 的 reviewer feedback 旁路（F_73） |
 | `review_feedback_evolution.py` | `ReviewFeedbackEvolutionCoordinator`：与产品无关的逐 Task Feedback 归因、团队终态汇总演进与新 Skill 候选路由；由 `TeamSkillEvolutionRail` 持有，复用其标准 host-event 队列 |
 | `verdict.py` | 纯函数投票判定（`settle_review_tally`：二元票池（verifier+challenger）一票否决 + 检视者分数池平均≥0.85）——策略可整体替换，不碰票据存储与状态机 |
 | `render.py` | 两类收件人两套机制：**成员**交接只组投递载荷 `meta_*`（`{template, refs, params}`，`content=""`），文案在 `prompts/<lang>/scheduler_*.md`、投递时渲染（F_63）；**leader** 摘要/升级走 `deliver_input` 直投，仍是 `i18n.py` 的 `scheduler.leader_*` 一行短串 |
 
 ## 核心不变量
 
-1. **调度器不理解事件，只理解看板。** 任何触发（task/member transport 事件、`POLL_TASK`、`SCHEDULER_SCAN` 回声、激活）都跑同一对幂等扫描；恢复 = 激活扫描本身，无独立恢复路径。事件仅有两个例外职责：终态摘要与 `TASK_LIST_DRAINED` 收尾（事件只发一次，扫描推不出"刚刚发生"）。
+1. **调度器不理解事件，只理解看板。** 任何触发（task/member transport 事件、`POLL_TASK`、`SCHEDULER_SCAN` 回声、激活）都跑同一组三个幂等扫描；恢复 = 激活扫描本身，无独立恢复路径。事件仅有两个例外职责：终态摘要与 `TASK_LIST_DRAINED` 收尾（事件只发一次，扫描推不出"刚刚发生"）。
 2. **交接 = leader 身份邮箱消息，投递即启动。** `_send_as_leader` 先落邮箱行（持久，离线成员首次 sweep 补投）再 `host.auto_start_member`（复用 `UNSTARTED→STARTING` CAS，幂等）。成员在线与否**不是**开工前置条件，调度器不做在线过滤。
 3. **发送存意图，投递才成文（F_63）。** 邮箱行的 `content` 恒空，`meta` 带模板 key + `refs`；文案由 `message_template.expand_message` 在**投递时刻**按收件人语言渲染，`{{task.*}}` 取的是**当时**的任务行——所以队列里躺了很久的交接不会投出过期的任务简报，leader 中途 `update_task` 也立刻对未投递消息生效。能表查的一律进 `refs` 现查；`params` 只放表答不出的瞬时值（某轮 fail feedback 聚合、解析后的轮数上限）。**不要**为了"省一次查询"把任务正文快照进消息。
 4. **`SchedulerHost.deliver_input` 只准注入 leader 自身**（终态摘要 / 升级 / 收尾），对成员永不直投。
@@ -25,6 +25,7 @@ leader 侧的调度分发 runtime，与 `coordination/`（唤醒层）平齐：c
    开启该能力的 `TeamSkillEvolutionRail`，后台调用其窄入口，不阻塞返工；全部任务终态时先等待已启动
    callback，再调用同一 Rail 的终态汇总入口。callback 按 `(task_id, review_round)` 进程内去重、
    异常只记录。scheduler 不理解 LLM、轨迹、Skill 归因、审批或持久化，也不自行构造 Rail。
+10. **退场由调度器请求、成员自落**（F_118）：`_reconcile_retirements` 对 `options.lifetime` 非空且 `READY`（不含 `BUSY`——round 中途请求会搁浅它正在等的回复）的成员，在"名下无非终态任务 + 无未读消息"同时成立时调普通 `shutdown_member`（休眠类不发告别通知）；终态（`SHUTDOWN` / `DORMANT`）由成员按 `retire_target` 自落（S_03 机制 18）。调度器**不直写** `DORMANT`、不拆 handle。给休眠成员派新任务时交接经 `auto_start_member` 唤醒它（`DORMANT→RESTARTING`）。
 
 ## 生命周期（kernel 接线）
 

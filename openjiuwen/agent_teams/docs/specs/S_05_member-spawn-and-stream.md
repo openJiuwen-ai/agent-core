@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/worktree/`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-08-17 |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md、F_74_leader-member-activity-and-team-idle.md、F_77_team-idle-requires-a-settled-task-board.md、F_79_team-scoped-skill-library-and-visibility.md、F_80_fork-identity-conversion.md、F_84_task-creation-starts-members.md |
 
 ## 范围 / 边界
@@ -70,6 +70,14 @@
      → on_created = TeamAgent._on_teammate_created
      → SpawnManager.spawn_teammate → process | inprocess
    ```
+
+   **唤醒**（F_118）是拉起之外的第二条重建链，入口同为 `TeamAgent.auto_start_member`
+   （`startup_member` 未命中时回落 `TeamBackend.recover_member`）与 leader `send_message`
+   单播 / 多播的 `_recover_members`：`recover_member` 的接受集是 `{ERROR, DORMANT}`，
+   CAS `<源态>→RESTARTING` 后经 `restart_teammate`（先 `cleanup_teammate` 替换死 handle，
+   再以 `initial_message=None` + 同一 child AgentSession 重建；外部 harness 续 provider
+   checkpoint），失败回滚到被认领时的源态。**撒网不唤醒**：`autostart_unstarted()`、
+   round-idle 对账、`recover_team` 冷恢复都不碰 DORMANT——休眠成员只认点名。
 
    CAS 守卫是这条链上**唯一**的并发闸：第一个到的路径把 `UNSTARTED→STARTING` 抢
    成功，其余并发路径查到 `STARTING`/`READY` 直接返回 False。spawn 失败回滚
@@ -499,8 +507,8 @@ runtime round event (kind)            →  ExecutionStatus     [_map_round]
 1. `state.team_cleaned` 置位 → `close_stream()`（临时团队 leader 调完 `clean_team` 后
    结束自身 stream 的**唯一**路径，见 [[F_10]]）；
 2. `team_member.status() == SHUTDOWN_REQUESTED` → `close_stream()`（成员跑完末轮后的
-   graceful 退场；**终态 `SHUTDOWN` 不在这里写**，由 Runner finally 的
-   `manager.finalize_member` 落，见 `S_06` 不变量 13 与 `S_03` 机制 18）；
+   graceful 退场；**终态不在这里写**，由 Runner finally 的 `manager.finalize_member` 按
+   `retire_target` 落 `SHUTDOWN` 或 `DORMANT`（F_118），见 `S_06` 不变量 13 与 `S_03` 机制 18）；
 3. 否则 → `_wake_mailbox_if_interrupt_cleared()` + `request_completion_poll_callback`
    （leader 用它立刻重估团队完成度）。
 
