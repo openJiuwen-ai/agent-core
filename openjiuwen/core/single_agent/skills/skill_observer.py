@@ -66,13 +66,16 @@ def read_skill_document(directory: Path, max_bytes: int = MAX_SKILL_DOCUMENT_BYT
     # Windows Python can give stat() and fstat() different ctime semantics.
     # Compare ctime only within the same API, while cross-checking file identity,
     # size and mtime to detect a replaced path or a write during the read.
-    if (
+    handle_changed = (
         identity(before) != identity(after)
         or before.st_ctime_ns != after.st_ctime_ns
-        or identity(path_before) != identity(current)
+    )
+    path_changed = (
+        identity(path_before) != identity(current)
         or path_before.st_ctime_ns != current.st_ctime_ns
-        or identity(after) != identity(current)
-    ):
+    )
+    handle_path_mismatch = identity(after) != identity(current)
+    if handle_changed or path_changed or handle_path_mismatch:
         raise OSError("Skill document changed while being read")
     return SkillDocumentSnapshot(directory, document, content, hashlib.sha256(content).hexdigest())
 
