@@ -2532,7 +2532,10 @@ class ReActAgent(BaseAgent):
                                 # Retry once in-loop with an [EMPTY_RESPONSE] notice so
                                 # the model can recover; exhaust → explicit error (never
                                 # silent empty success). Soft-stop RAS empties are handled
-                                # above and do not consume this budget.
+                                # above and do not consume this budget. Only continue when
+                                # another for-loop iteration remains — otherwise continue
+                                # falls into for-else as "Max iterations reached" and
+                                # loses EMPTY_RESPONSE / finish_reason / reasoning_present.
                                 if not content:
                                     await context.add_messages(
                                         UserMessage(
@@ -2544,7 +2547,13 @@ class ReActAgent(BaseAgent):
                                             ),
                                         )
                                     )
-                                    if _empty_response_retry_count < EMPTY_RESPONSE_MAX_RETRIES:
+                                    has_next_iteration = (
+                                        iteration + 1 < self._config.max_iterations
+                                    )
+                                    if (
+                                        _empty_response_retry_count < EMPTY_RESPONSE_MAX_RETRIES
+                                        and has_next_iteration
+                                    ):
                                         _empty_response_retry_count += 1
                                         logger.info(
                                             "[ReActAgent] empty no-tool turn; "

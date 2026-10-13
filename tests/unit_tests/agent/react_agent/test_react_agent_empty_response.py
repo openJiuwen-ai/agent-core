@@ -202,6 +202,27 @@ class TestEmptyNoToolTurn(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no content", added[notice_idxs[0]].content)
         self.assertIn("tool_calls", added[notice_idxs[0]].content)
 
+    async def test_empty_on_last_iteration_keeps_empty_response_error(self):
+        """最后一格 iteration 空帧不得 continue 漂成 max-iterations。
+
+        continue 在无下一轮时会落入 for-else，误报
+        ``Max iterations reached without completion``，并丢失
+        finish_reason / reasoning_present；此处必须仍走 OA.05000090。
+        """
+        agent, _, _ = self._make_agent_with_mocks(max_iterations=1)
+
+        result, mock_llm, _ = await self._invoke(agent, [_reasoning_only_empty()])
+
+        self.assertEqual(result["result_type"], "error")
+        self.assertEqual(result["output"], EMPTY_RESPONSE_MSG)
+        self.assertEqual(result["finish_reason"], "stop")
+        self.assertTrue(result["reasoning_present"])
+        self.assertEqual(mock_llm.call_count, 1)
+        self.assertNotEqual(
+            result["output"],
+            "Max iterations reached without completion",
+        )
+
     async def test_fully_empty_turn_is_error(self):
         """content 与 reasoning 均空：耗尽同轮重试后仍为 error。"""
         agent, _, _ = self._make_agent_with_mocks()
