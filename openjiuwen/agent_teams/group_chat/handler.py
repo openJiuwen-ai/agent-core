@@ -13,6 +13,7 @@ from openjiuwen.agent_teams.group_chat.meta import (
     BODY_LIMIT,
     CONTEXT_TAIL,
     GROUP_CHAT_TYPE,
+    GROUP_MENTION_ALL,
     MAX_CLIENT_MESSAGE_ID,
     MAX_MENTIONS,
     group_metadata,
@@ -158,9 +159,12 @@ async def _require_sender(backend: Any, sender: str) -> str:
 
 
 async def _require_mentions(backend: Any, mentions: list[str]) -> list[str]:
+    """Resolve who may be woken. ``all`` / ``*`` expands to every executable member."""
+    if any(name in GROUP_MENTION_ALL for name in mentions):
+        return await _all_executable_members(backend)
     targets: list[str] = []
     for name in mentions:
-        if name == _USER:
+        if name == _USER or name in GROUP_MENTION_ALL:
             continue
         member = await backend.db.member.get_member(name, backend.team_name)
         if member is None or member.status in MEMBER_DEPARTED_STATUSES:
@@ -168,6 +172,21 @@ async def _require_mentions(backend: Any, mentions: list[str]) -> list[str]:
         if member.role != "passive_human":
             targets.append(name)
     return targets
+
+
+async def _all_executable_members(backend: Any) -> list[str]:
+    """Roster members that can receive a group-chat model wake."""
+    members = await backend.db.member.get_team_members(backend.team_name)
+    names: list[str] = []
+    for member in members:
+        if member.member_name == _USER:
+            continue
+        if member.status in MEMBER_DEPARTED_STATUSES:
+            continue
+        if member.role == "passive_human":
+            continue
+        names.append(member.member_name)
+    return names
 
 
 def _same_message(stored: Any, sender: str, content: str, meta: dict) -> bool:

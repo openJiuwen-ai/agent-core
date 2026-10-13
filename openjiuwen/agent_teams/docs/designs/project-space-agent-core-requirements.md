@@ -124,7 +124,7 @@ Python 侧也可以直接构造 `GroupChatMessage`。
 | `type` | `str` | 线协议必填 | 固定 `"group_chat"`。dataclass 本身无此字段 |
 | `body` | `str` | 是 | 正文。无正文且无附件则拒绝 |
 | `client_message_id` | `str` | 是 | 同一 team/session 内的幂等键，最长 255 |
-| `mentions` | `tuple[str, ...]` | 否 | 成员名，默认空。不解析正文里的 `@` |
+| `mentions` | `tuple[str, ...]` | 否 | 成员名，默认空。不解析正文里的 `@`。含 `all` 或 `*` 时叫醒全部可执行成员（不含发送者、`user`、`passive_human`、已离队） |
 | `attachments` | `tuple[dict, ...]` | 否 | 附件引用，默认空 |
 
 未知字段拒绝。作者固定为 `user`，调用方不能传 `sender`。

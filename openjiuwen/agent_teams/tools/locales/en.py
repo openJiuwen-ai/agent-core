@@ -105,7 +105,9 @@ STRINGS: dict[str, str] = {
         "Idempotency key within one team session. Retries must reuse the same id"
     ),
     "group_send_message.mentions": (
-        "Member names to mention. An unknown or departed name fails the whole send"
+        "Member names to mention; use all or * to wake every executable member "
+        "(excluding passive humans and the sender). An unknown or departed name "
+        "fails the whole send"
     ),
     "spawn_human_agent.desc": (
         "[PUBLIC] Role profile and responsibilities of the human member, used "

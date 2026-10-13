@@ -14,6 +14,8 @@ CONTEXT_TAIL = 5
 BODY_LIMIT = 2000
 MAX_MENTIONS = 100
 MAX_CLIENT_MESSAGE_ID = 255
+# Same tokens as interact broadcast targets: wake every executable member.
+GROUP_MENTION_ALL: frozenset[str] = frozenset({"all", "*"})
 
 
 def stable_message_id(team_name: str, session_id: str, client_message_id: str) -> str:
@@ -50,4 +52,6 @@ def group_addressed(
     if session_id and row_session and row_session != session_id:
         return False
     mentions = meta.get("mentions") or []
+    if any(name in GROUP_MENTION_ALL for name in mentions):
+        return True
     return member_name in mentions

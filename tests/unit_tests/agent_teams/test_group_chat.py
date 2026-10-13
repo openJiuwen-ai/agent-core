@@ -238,6 +238,31 @@ class TestArchive:
             assert await database.message.get_unread_group_members("team-a") == ["writer"]
             history = json.loads(backend.group_conversation().history_path.read_text(encoding="utf-8").splitlines()[0])
             assert history["session_id"] == "sess-1"
+            broadcast = await post_message(
+                backend,
+                sender="user",
+                sender_name="user",
+                content="everyone look",
+                client_message_id="msg-all",
+                mentions=["all", "writer"],
+            )
+            assert set(broadcast.notified_members) == {"leader", "writer"}
+            assert broadcast.message.mentions == ["all", "writer"]
+            leader_after_all = await database.message.get_broadcast_messages(
+                "team-a", "leader", unread_only=True
+            )
+            assert any(row.message_id == broadcast.message.message_id for row in leader_after_all)
+            starred = await post_message(
+                backend,
+                sender="writer",
+                sender_name="writer",
+                content="ping all",
+                client_message_id="msg-star",
+                mentions=["*"],
+            )
+            assert starred.notified_members == ["leader"]
+            assert "writer" not in starred.notified_members
+            assert "guest" not in starred.notified_members
         finally:
             await database.close()
             reset_session_id(token)

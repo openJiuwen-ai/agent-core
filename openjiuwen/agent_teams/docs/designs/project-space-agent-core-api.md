@@ -205,6 +205,7 @@ await Runner.interact_agent_team(
 | 作者 | 宿主入口固定 `user`，**不能**传 `sender` |
 | 空 `mentions` | 只归档，不喂任何成员模型 |
 | 非空 `mentions` | 仅名单内可执行成员进未读摘录；不含发送者、`user`、`passive_human` |
+| `mentions` 含 `all` 或 `*` | 与 collaboration `@all` 对齐：叫醒当前全部可执行成员（同上排除规则）；档案里保留原 token，与具名并存时以全员为准 |
 | 缺团行 | `invalid_group_chat`，**不**自动 `build_team` |
 | 同 ID 同内容 | `duplicate=true`，不插第二行，仍 sync 投影并再发布 |
 | 同 ID 不同内容 | 失败 |
@@ -295,7 +296,7 @@ text = await Runner.get_progress_report(
 | 公开历史 | `history.json` + `.notified.json` | DB 底账 + `history.jsonl`；读进度用广播水位 |
 | 宿主公开作者 | 可指定 sender（部分草案） | 固定 `user` |
 | 空 `mentions` / 无 `@` | collaboration：默认叫醒 leader 或最近发言者 | **只归档，谁也不醒** |
-| 公开 `@all` | collaboration：并行叫醒全部 Agent/Team | **未实现**；须枚举进 `mentions` |
+| 公开 `@all` | collaboration：并行叫醒全部 Agent/Team | **已支持**：`mentions` 含 `all` / `*`；仍不解析正文 `@` |
 | `# @all` | 旧 interact 语法 | 仍是**内部广播**，不是公开 Thread |
 | 群聊 → 真人回调 | 部分方案希望 Thread 推 IM | 公开群聊**不调** HITT 回调；IM 由上层读 Thread/事件 |
 | `notified_members` | 「已叫醒」 | 「允许唤醒的资格名单」 |

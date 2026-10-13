@@ -85,7 +85,10 @@ STRINGS: dict[str, str] = {
     # group_send_message._desc lives in descs/cn/group_send_message.md
     "group_send_message.content": "公开讨论区正文。不解析正文里的 @",
     "group_send_message.client_message_id": "同一团队会话内的幂等键。重试必须复用原来的 ID",
-    "group_send_message.mentions": "要点名的成员名数组。未知或已离队的名字会使本次发送失败",
+    "group_send_message.mentions": (
+        "要点名的成员名数组；可用 all 或 * 叫醒当前全部可执行成员（不含被动真人与发送者）。"
+        "未知或已离队的名字会使本次发送失败"
+    ),
     # ===== spawn_bridge_agent ==================================================
     # spawn_bridge_agent._desc lives in descs/cn/spawn_bridge_agent.md
     "spawn_bridge_agent.member_name": (
