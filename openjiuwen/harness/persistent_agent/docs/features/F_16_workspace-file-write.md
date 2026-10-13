@@ -7,7 +7,7 @@
 | 负责人 | Yan Zhijun |
 | 范围 | `persistent_agent/{ports.py, schema/{build_context.py,spec.py}, workspace/, tools/}`、Harness 文件写工具的条件写入衔接、Persistent Agent 定向测试；JiuwenSwarm 的工作空间授权、Session 私有目录、SysOperation 后端及 AgentServer 联调 |
 | 前置 / 关联 | PA-14 文件读取、PA-15 写前意图记账；PA-18 处理写入结果未知后的查证；PA-22 处理文件来源失效 |
-| 依据 | [Persistent Agent 详细架构设计](../designs/persistent-agent-architecture.md) §8、§9.1、§11；[开发计划](../designs/persistent-agent-development-plan.md) PA-14～PA-16、M2b；[F_14](F_14_workspace-file-read.md)；[F_15](F_15_tool-intent-before-side-effect.md)；[S_04](../specs/S_04_tools-and-workspace.md) |
+| 依据 | [Persistent Agent 详细架构设计](../designs/persistent-agent-architecture.md) §4.7、§5.2.4、§6.2.1、§8.3；[开发计划](../designs/persistent-agent-development-plan.md) PA-14～PA-16、M2b；[F_14](F_14_workspace-file-read.md)；[F_15](F_15_tool-intent-before-side-effect.md)；[S_04](../specs/S_04_tools-and-workspace.md) |
 
 ## 背景与目标
 

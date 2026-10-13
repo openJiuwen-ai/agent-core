@@ -2,18 +2,18 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 类型 / 状态 | feature；PA-06，已实现（组件验收）。容量相关验收未关闭（计划第 3.4 节“容量边界”待补设计）；正式入口在 PA-10、PA-09 接入前仍明确拒绝 |
+| 类型 / 状态 | feature；PA-06，已实现（组件验收）。容量相关验收未关闭（计划第 1.2 节“容量边界”待补设计）；正式入口在 PA-10、PA-09 接入前仍明确拒绝 |
 | 日期 | 2026-10-09；引用修订：2026-10-13 |
 | 负责人 | Song Haoran |
 | 范围 | 新增 `persistent_agent/execution/window_assembly.py`；`execution/seams.py` 的 `window_assembler` 接入点；`schema/spec.py` 的 `resolve_parts`；单测新增 `test_window_assembly.py`，`test_entries.py` 删去“窗口组装未接入”的用例。共享值对象、协议和标记已移至 `schema/integration.py`，由 `seams.py` 兼容再导出。不改 `entries.py` 的编排，不改变共享契约的字段和语义，不改共享 harness / core 代码 |
 | 测试基线 | 改动前：PA 包与 `tests/unit_tests/core/session` 共 665 passed；共享回归集 213 passed；`tests/unit_tests/harness` 与 `tests/unit_tests/core/session` 联合回归 5868 passed / 39 skipped。改动后：PA 包 270 passed，PA 包与 core session 共 681 passed，共享回归集 213 passed，联合回归 5884 passed / 39 skipped（Python 3.11.17）。第二轮（2026-10-12）后：PA 包与 core session 共 777 passed，共享回归集 213 passed，联合回归 5980 passed / 39 skipped |
-| 关联 | [架构设计](../designs/persistent-agent-architecture.md) §2、§7.1～7.5、§7.7、§7.9、§11；[开发计划](../designs/persistent-agent-development-plan.md) PA-06；规约 [S_03](../specs/S_03_context-and-windows.md)（本次修订）、S_01；[F_05](F_05_execution-entries.md) §7 |
+| 关联 | [架构设计](../designs/persistent-agent-architecture.md) §2、§4.4.1～4.4.4、§4.6、§5.2.4、§7.2、§8.3；[开发计划](../designs/persistent-agent-development-plan.md) PA-06；规约 [S_03](../specs/S_03_context-and-windows.md)（本次修订）、S_01；[F_05](F_05_execution-entries.md) §3.2 |
 
 ## 背景
 
-PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入点 `window_assembler(context).assemble(context, request, record)`，拿到原生输入和新的群消息游标；接入点此前一直抛“未接入”。PA-06 按架构设计 §4.4.3 实现新 Request 的窗口组装：已保存的窗口在前，依次追加本次执行头、临时背景块，任务输入放在最后；执行中只追加。同时按 §7.1 在 Persistent 中不挂载 `ContextAssembleRail`、`PersonalContextRail` 和 `ContextProcessorRail`，并确认 `PromptAttachmentManager` 增量通道在一期需要做什么。
+PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入点 `window_assembler(context).assemble(context, request, record)`，拿到原生输入和新的群消息游标；接入点此前一直抛“未接入”。PA-06 按架构设计 §4.4.3 实现新 Request 的窗口组装：已保存的窗口在前，依次追加本次执行头、临时背景块，任务输入放在最后；执行中只追加。同时按架构设计 §4.4.1 在 Persistent 中不挂载 `ContextAssembleRail`、`PersonalContextRail` 和 `ContextProcessorRail`，并确认 `PromptAttachmentManager` 增量通道在一期需要做什么。
 
-确认恢复不调用组装（F_05 §5）；续做执行头和续做日志属于 PA-18，知识导航属于 PA-13，群消息读取属于 PA-23，结束时的整理属于 PA-10。
+确认恢复不调用组装（F_05 §2.4.2）；续做执行头和续做日志属于 PA-18，知识导航属于 PA-13，群消息读取属于 PA-23，结束时的整理属于 PA-10。
 
 ## 决策
 
@@ -33,7 +33,7 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 ↓ 之后只追加：模型回复、工具调用和结果……
 ```
 
-- 执行头和背景块都是 `UserMessage`，标记写在消息元信息 `persistent_window_part`（F_05 §7 的约定）。
+- 执行头和背景块都是 `UserMessage`，标记写在消息元信息 `persistent_window_part`（F_05 §3.2 的约定）。
 - 原生输入为 `{"query": request.text}`，任务正文不改写。
 - 组装不碰 prompt builder 和工具列表。实测同一 Execution 内两次模型调用的系统消息和工具定义完全相同，第二次调用的消息以第一次的全部消息为前缀。
 - 标记随 Session state 进入保存：PA-10 的 `save` 取到的窗口仍带 `persistent_window_part`。
@@ -72,7 +72,7 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 加载的记录带等待现场（`record.waiting`），或 Session state 中有 `__react_agent_interruption__` 时，新 Request 不组装，抛 `DEEPAGENT_CONTEXT_PARAM_ERROR`，窗口不追加任何内容。
 
 - 原因：等待结果的工具调用后面插入任何消息都会破坏工具调用配对；原生 ReAct 还会把新任务的文本当作恢复输入，重放被拦截的调用，会话内已记住的授权可能直接放行。
-- 选择校验拒绝而不是运行异常：运行异常会让服务端按 §13 当作崩溃中断，对本 Request 发起续做，而续做（PA-18）会清除旧中断状态，毁掉另一件事正在等待的确认现场。
+- 选择校验拒绝而不是运行异常：运行异常会让服务端按架构设计 §3.4 第 13 条当作崩溃中断，对本 Request 发起续做，而续做（PA-18）会清除旧中断状态，毁掉另一件事正在等待的确认现场。
 - 正常情况下服务端在等待确认期间阻塞 Session（架构设计 §3.4 第 2 条），这里只是防线。注意此时 `execution.started` 已记录，结论见“待确认决策的结论”第 6 项。窗口有未配对工具调用时的同类检查见文末“第二轮决策实施”。
 
 ### 6. 不挂载三个上下文 rail
@@ -80,7 +80,7 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 `PersistentAgentSpec.resolve_parts` 在父类装配完成后检查 `parts.rails`：含 `ContextAssembleRail`、`PersonalContextRail`、`ContextProcessorRail`（包括子类）时，抛 `DEEPAGENT_CONFIG_PARAM_ERROR`，错误信息列出 rail 名，部分构造按原有回滚清理。
 
 - 现状核对：`resolve_deep_agent_parts` 的默认 rail 只有 SecurityRail、ModelAnomalyDetectionRail、TaskPlanningRail、SkillUseRail、SubagentRail、ToolCallResilienceRail，DeepAgent 自身按配置追加的是 ProgressiveToolRail、TaskCompletionRail、权限 rail 和环境变量开启的在线训练 rail，都不是这三个。这三个 rail 只会经 `Spec.rails` 的 `RailSpec`（如 manifest 元素 `core.context_assemble`，或按导入路径加载 rail 的元素）进入。`ContextProcessorRail` 的默认压缩链只随该 rail 挂载，拒绝 rail 即不挂压缩链。
-- 明确拒绝而不是静默剔除，与 §5.1“不在运行时悄悄关闭已发布的开关”一致。
+- 明确拒绝而不是静默剔除，与架构设计 §4.2.2“不在运行时悄悄关闭已发布的开关”一致。
 - 只改 `PersistentAgentSpec`；`DeepAgentSpec` 和 `create_deep_agent` 的路径不变，个人版照常挂载（有测试）。
 
 ### 7. PromptAttachmentManager 增量通道

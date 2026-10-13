@@ -75,7 +75,7 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 - **等待中的调用**：加载的记录带等待现场，或 Session state 带 `__react_agent_interruption__` 时，新 Request 不组装，校验拒绝（`DEEPAGENT_CONTEXT_PARAM_ERROR`），窗口不追加；窗口有未配对的工具调用时同样拒绝，并记 error 日志（见上文“窗口安全”）。
 - **上下文 rail**：Persistent 构造（`PersistentAgentSpec.resolve_parts`）拒绝挂载 `ContextAssembleRail`、`PersonalContextRail`、`ContextProcessorRail`（含子类），`ContextProcessorRail` 的默认压缩链因此也不会挂载；`DeepAgentSpec` / `create_deep_agent` 不变。
 - **增量通道**：保留原生 `PromptAttachmentManager.sync_to_context`（首次快照、之后只追加变化）；一期 Persistent 自身没有执行中追加的动态内容。
-- **容量**：组装不做容量检查。超限时优先展示最新消息、标明省略范围、保留历史查询定位的选择逻辑，待共享容量计算的提供方和最终请求的检查位置对齐后实现（开发计划第 3.4 节）。
+- **容量**：组装不做容量检查。超限时优先展示最新消息、标明省略范围、保留历史查询定位的选择逻辑，待共享容量计算的提供方和最终请求的检查位置对齐后实现（开发计划第 1.2 节）。
 
 ### 4.3 `SessionStateStore.save(context, ending) -> None`
 
