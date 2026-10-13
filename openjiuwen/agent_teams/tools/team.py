@@ -768,6 +768,23 @@ class TeamBackend:
         except Exception as e:
             team_logger.error(f"Failed to publish member shutdown event for {member_name}: {e}")
 
+        # Passive passive human has no member process to settle SHUTDOWN_REQUESTED →
+        # SHUTDOWN, so the leader closes the row here. Otherwise soft-remove
+        # would leave a permanent shutting-down residue that blocks rejoin.
+        if member_data.role == TeamRole.PASSIVE_HUMAN.value:
+            settled = await self.db.member.try_transition_member_status(
+                member_name,
+                self.team_name,
+                MemberStatus.SHUTDOWN_REQUESTED,
+                MemberStatus.SHUTDOWN,
+            )
+            if not settled:
+                return MemberOpResult.fail(
+                    f"Passive human {member_name} could not settle to SHUTDOWN"
+                )
+            team_logger.info(f"Passive human {member_name} settled to SHUTDOWN")
+            return MemberOpResult.success()
+
         team_logger.info(f"Shutdown request sent to member {member_name}")
         return MemberOpResult.success()
 

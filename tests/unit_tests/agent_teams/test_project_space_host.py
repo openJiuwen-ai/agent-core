@@ -5,7 +5,6 @@
 
 from types import SimpleNamespace
 from uuid import uuid4
-from uuid import uuid4
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -155,6 +154,7 @@ class TestMemberFacade:
     @pytest.mark.asyncio
     async def test_spawn_passive_does_not_start_a_process(self):
         backend = SimpleNamespace(
+            get_member=AsyncMock(return_value=None),
             spawn_passive_human=AsyncMock(return_value=MemberOpResult.success()),
             team_name="team",
         )
@@ -176,7 +176,8 @@ class TestMemberFacade:
     @pytest.mark.asyncio
     async def test_duplicate_spawn_keeps_the_backend_reason(self):
         backend = SimpleNamespace(
-            spawn_member=AsyncMock(return_value=MemberOpResult.fail("Member dev already exists")),
+            get_member=AsyncMock(return_value=SimpleNamespace(role="teammate", status=MemberStatus.READY.value)),
+            spawn_member=AsyncMock(),
             teammate_mode="build_mode",
             team_name="team",
             _allocate_model_config=None,
@@ -191,7 +192,128 @@ class TestMemberFacade:
         )
         assert result["ok"] is False
         assert "already exists" in result["reason"]
+        backend.spawn_member.assert_not_awaited()
         agent.auto_start_member.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rejoin_passive_after_shutdown(self):
+        member = SimpleNamespace(role="passive_human", status=MemberStatus.SHUTDOWN.value)
+        transitions: list[tuple[MemberStatus, MemberStatus]] = []
+
+        async def _transition(name, team, frm, to):
+            transitions.append((frm, to))
+            member.status = to.value
+            return True
+
+        backend = SimpleNamespace(
+            get_member=AsyncMock(return_value=member),
+            team_name="team",
+            db=SimpleNamespace(member=SimpleNamespace(try_transition_member_status=_transition)),
+            spawn_passive_human=AsyncMock(),
+        )
+        agent = SimpleNamespace(team_backend=backend, spec=None, auto_start_member=AsyncMock())
+        entry = SimpleNamespace(current_session_id="sess", agent=agent)
+        result = await _TeamRunnerMixin.spawn_team_member(
+            _runner(entry),
+            _member_spec(TeamRole.PASSIVE_HUMAN),
+            "team",
+            "sess",
+            allow_rejoin=True,
+        )
+        assert result == {"ok": True, "reason": ""}
+        assert transitions == [
+            (MemberStatus.SHUTDOWN, MemberStatus.RESTARTING),
+            (MemberStatus.RESTARTING, MemberStatus.READY),
+        ]
+        backend.spawn_passive_human.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rejoin_rejects_role_conflict_and_shutting_down(self):
+        backend = SimpleNamespace(
+            get_member=AsyncMock(
+                return_value=SimpleNamespace(role="teammate", status=MemberStatus.SHUTDOWN.value)
+            ),
+            team_name="team",
+        )
+        entry = SimpleNamespace(
+            current_session_id="sess",
+            agent=SimpleNamespace(team_backend=backend, spec=None),
+        )
+        conflict = await _TeamRunnerMixin.spawn_team_member(
+            _runner(entry),
+            _member_spec(TeamRole.PASSIVE_HUMAN),
+            "team",
+            "sess",
+            allow_rejoin=True,
+        )
+        assert conflict == {"ok": False, "reason": "member_conflict"}
+
+        backend.get_member = AsyncMock(
+            return_value=SimpleNamespace(role="teammate", status=MemberStatus.SHUTDOWN_REQUESTED.value)
+        )
+        waiting = await _TeamRunnerMixin.spawn_team_member(
+            _runner(entry),
+            _member_spec(TeamRole.TEAMMATE),
+            "team",
+            "sess",
+            allow_rejoin=True,
+        )
+        assert waiting == {"ok": False, "reason": "member_shutting_down"}
+
+    @pytest.mark.asyncio
+    async def test_rejoin_teammate_uses_restart(self):
+        member = SimpleNamespace(role="teammate", status=MemberStatus.SHUTDOWN.value)
+
+        async def _transition(name, team, frm, to):
+            member.status = to.value
+            return True
+
+        restart = AsyncMock(return_value=True)
+        backend = SimpleNamespace(
+            get_member=AsyncMock(return_value=member),
+            team_name="team",
+            db=SimpleNamespace(member=SimpleNamespace(try_transition_member_status=_transition)),
+            spawn_member=AsyncMock(),
+        )
+        agent = SimpleNamespace(
+            team_backend=backend,
+            spec=None,
+            auto_start_member=AsyncMock(),
+            spawn_manager=SimpleNamespace(restart_teammate=restart),
+        )
+        entry = SimpleNamespace(current_session_id="sess", agent=agent)
+        result = await _TeamRunnerMixin.spawn_team_member(
+            _runner(entry),
+            _member_spec(TeamRole.TEAMMATE),
+            "team",
+            "sess",
+            allow_rejoin=True,
+        )
+        assert result == {"ok": True, "reason": ""}
+        restart.assert_awaited_once_with("dev")
+        backend.spawn_member.assert_not_awaited()
+        agent.auto_start_member.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_rejoin_live_member_is_idempotent(self):
+        backend = SimpleNamespace(
+            get_member=AsyncMock(
+                return_value=SimpleNamespace(role="teammate", status=MemberStatus.BUSY.value)
+            ),
+            team_name="team",
+            spawn_member=AsyncMock(),
+        )
+        agent = SimpleNamespace(team_backend=backend, spec=None, auto_start_member=AsyncMock())
+        entry = SimpleNamespace(current_session_id="sess", agent=agent)
+        result = await _TeamRunnerMixin.spawn_team_member(
+            _runner(entry),
+            _member_spec(TeamRole.TEAMMATE),
+            "team",
+            "sess",
+            allow_rejoin=True,
+        )
+        assert result == {"ok": True, "reason": ""}
+        backend.spawn_member.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_unsupported_role_and_failed_start(self):
@@ -205,6 +327,7 @@ class TestMemberFacade:
         assert rejected == {"ok": False, "reason": "unsupported_role_type"}
 
         backend = SimpleNamespace(
+            get_member=AsyncMock(return_value=None),
             spawn_member=AsyncMock(return_value=MemberOpResult.success()),
             teammate_mode="build_mode",
             team_name="team",
@@ -224,6 +347,7 @@ class TestMemberFacade:
     async def test_spawn_registers_agent_spec_before_start(self):
         team_spec = _spec(team_name="team")
         backend = SimpleNamespace(
+            get_member=AsyncMock(return_value=None),
             spawn_human_agent=AsyncMock(return_value=MemberOpResult.success()),
         )
         agent = SimpleNamespace(
@@ -270,6 +394,58 @@ class TestMemberFacade:
         member.status = MemberStatus.SHUTDOWN.value
         departed = await _TeamRunnerMixin.remove_team_member(_runner(entry), "team", "dev", "sess")
         assert departed == {"ok": True, "reason": ""}
+
+
+@pytest.mark.asyncio
+async def test_passive_soft_stop_settles_and_rejoins_from_db():
+    from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+    from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
+
+    token = set_session_id("rejoin-session")
+    database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await database.initialize()
+    try:
+        backend = TeamBackend(
+            team_name="rejoin-team",
+            member_name="team_leader",
+            is_leader=True,
+            db=database,
+            messager=AsyncMock(),
+            enable_hitt=True,
+        )
+        await backend.build_team(
+            display_name="Rejoin",
+            desc="d",
+            leader_display_name="Leader",
+            leader_desc="leads",
+        )
+        spawned = await backend.spawn_passive_human(member_name="pm1", display_name="PM", desc="decides")
+        assert spawned.ok
+        stopped = await backend.shutdown_member("pm1")
+        assert stopped.ok
+        row = await database.member.get_member("pm1", "rejoin-team")
+        assert row.status == MemberStatus.SHUTDOWN.value
+
+        agent = SimpleNamespace(team_backend=backend, spec=None, auto_start_member=AsyncMock())
+        entry = SimpleNamespace(current_session_id="rejoin-session", agent=agent)
+        rejoined = await _TeamRunnerMixin.spawn_team_member(
+            _runner(entry),
+            TeamMemberSpec(
+                member_name="pm1",
+                display_name="PM",
+                desc="decides",
+                role_type=TeamRole.PASSIVE_HUMAN,
+            ),
+            "rejoin-team",
+            "rejoin-session",
+            allow_rejoin=True,
+        )
+        assert rejoined == {"ok": True, "reason": ""}
+        row = await database.member.get_member("pm1", "rejoin-team")
+        assert row.status == MemberStatus.READY.value
+    finally:
+        await database.close()
+        reset_session_id(token)
 
 
 class TestProgressReport:

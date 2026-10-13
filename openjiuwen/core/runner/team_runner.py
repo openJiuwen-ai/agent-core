@@ -465,8 +465,14 @@ class _TeamRunnerMixin:
         spec: Any,
         team_name: str,
         session: Optional[Union[str, AgentTeamSession]] = None,
+        *,
+        allow_rejoin: bool = False,
     ) -> dict[str, Any]:
-        """Register a member on the team that is already running."""
+        """Register a member on the team that is already running.
+
+        When ``allow_rejoin`` is true, a soft-stopped row with the same
+        ``member_name`` can be re-enabled instead of failing as already exists.
+        """
         from openjiuwen.agent_teams.schema.team import TeamMemberSpec, TeamRole
 
         if not isinstance(spec, TeamMemberSpec):
@@ -491,6 +497,15 @@ class _TeamRunnerMixin:
             team_session = agent.session_manager.team_session
             if team_session is not None:
                 agent.persist_session_manifest(team_session)
+
+        existing = await backend.get_member(spec.member_name)
+        if existing is not None:
+            if allow_rejoin:
+                return await self._rejoin_team_member(agent, backend, spec, existing)
+            return {
+                "ok": False,
+                "reason": f"Member {spec.member_name} already exists in team {backend.team_name}",
+            }
 
         if role == TeamRole.PASSIVE_HUMAN:
             result = await backend.spawn_passive_human(
@@ -519,6 +534,84 @@ class _TeamRunnerMixin:
                 "ok": False,
                 "reason": f"member {spec.member_name} registered but failed to start",
             }
+        return {"ok": True, "reason": ""}
+
+    async def _rejoin_team_member(
+        self,
+        agent: Any,
+        backend: Any,
+        spec: Any,
+        existing: Any,
+    ) -> dict[str, Any]:
+        """Re-enable a soft-stopped roster row under the same ``member_name``."""
+        from openjiuwen.agent_teams.schema.status import MemberStatus
+        from openjiuwen.agent_teams.schema.team import TeamRole
+
+        wanted_role = spec.role_type.value if isinstance(spec.role_type, TeamRole) else str(spec.role_type)
+        if existing.role != wanted_role:
+            return {"ok": False, "reason": "member_conflict"}
+
+        try:
+            status = MemberStatus(existing.status)
+        except ValueError:
+            return {"ok": False, "reason": "member_conflict"}
+
+        if status == MemberStatus.SHUTDOWN_REQUESTED:
+            if wanted_role != TeamRole.PASSIVE_HUMAN.value:
+                return {"ok": False, "reason": "member_shutting_down"}
+            settled = await backend.db.member.try_transition_member_status(
+                spec.member_name,
+                backend.team_name,
+                MemberStatus.SHUTDOWN_REQUESTED,
+                MemberStatus.SHUTDOWN,
+            )
+            if not settled:
+                return {"ok": False, "reason": "member_shutting_down"}
+            status = MemberStatus.SHUTDOWN
+
+        if status not in (MemberStatus.SHUTDOWN, MemberStatus.ERROR):
+            return {"ok": True, "reason": ""}
+
+        armed = await backend.db.member.try_transition_member_status(
+            spec.member_name,
+            backend.team_name,
+            status,
+            MemberStatus.RESTARTING,
+        )
+        if not armed:
+            return {"ok": False, "reason": "member_rejoin_failed"}
+
+        if wanted_role == TeamRole.PASSIVE_HUMAN.value:
+            ready = await backend.db.member.try_transition_member_status(
+                spec.member_name,
+                backend.team_name,
+                MemberStatus.RESTARTING,
+                MemberStatus.READY,
+            )
+            if not ready:
+                return {"ok": False, "reason": "member_rejoin_failed"}
+            return {"ok": True, "reason": ""}
+
+        spawn_manager = getattr(agent, "spawn_manager", None)
+        restart = getattr(spawn_manager, "restart_teammate", None) if spawn_manager is not None else None
+        if restart is None:
+            await backend.db.member.try_transition_member_status(
+                spec.member_name,
+                backend.team_name,
+                MemberStatus.RESTARTING,
+                MemberStatus.ERROR,
+            )
+            return {"ok": False, "reason": "member_rejoin_failed"}
+
+        restarted = await restart(spec.member_name)
+        if not restarted:
+            await backend.db.member.try_transition_member_status(
+                spec.member_name,
+                backend.team_name,
+                MemberStatus.RESTARTING,
+                MemberStatus.ERROR,
+            )
+            return {"ok": False, "reason": "member_rejoin_failed"}
         return {"ok": True, "reason": ""}
 
     async def _spawn_teammate_member(self, backend: Any, spec: Any) -> Any:
@@ -1252,9 +1345,16 @@ class _TeamRunnerClassMixin:
         spec: Any,
         team_name: str,
         session: Optional[Union[str, AgentTeamSession]] = None,
+        *,
+        allow_rejoin: bool = False,
     ) -> dict[str, Any]:
         """Register a member on the team that is already running."""
-        return await _global_runner().spawn_team_member(spec, team_name, session)
+        return await _global_runner().spawn_team_member(
+            spec,
+            team_name,
+            session,
+            allow_rejoin=allow_rejoin,
+        )
 
     @classmethod
     async def remove_team_member(
