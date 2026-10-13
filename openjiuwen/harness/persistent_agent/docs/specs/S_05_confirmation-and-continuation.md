@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_05 / confirmation-and-continuation |
 | 关联模块 | [request.py](../../schema/request.py)、[entries.py](../../execution/entries.py)、[control.py](../../execution/control.py)、[确认接入协议](../../execution/seams.py) |
-| 最近一次修订日期 | 2026-10-13 |
+| 最近一次修订日期 | 2026-10-14 |
 | 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)；接入与验证见[开发计划](../designs/persistent-agent-development-plan.md) PA-09、PA-17、PA-18 |
 | 设计依据 | [架构设计：确认](../designs/persistent-agent-architecture.md#521-确认卡片等待与原生恢复)、[控制](../designs/persistent-agent-architecture.md#523-停止取消与补充消息)、[统一续做](../designs/persistent-agent-architecture.md#524-崩溃续做与非确认暂停后继续的统一流程)、[恢复边界](../designs/persistent-agent-architecture.md#83-根据什么恢复什么时候可以继续) |
 
@@ -125,4 +125,4 @@ S_01 负责实际结局编排，本文负责控制截止及继续方式；S_02 �
 - 恢复校验、控制竞争及锁定：[test_entries.py](../../../../../tests/unit_tests/harness/persistent_agent/test_entries.py)。
 - 流生产者、取消及关闭：[test_binding.py](../../../../../tests/unit_tests/harness/persistent_agent/test_binding.py)。
 - 确认后写意图与取消后未决工具：[test_tool_intent_rail.py](../../../../../tests/unit_tests/harness/persistent_agent/test_tool_intent_rail.py)。
-- 完整 WindowStore、真实确认适配与跨执行续做验证尚待 PA-09、PA-10、PA-17、PA-18 接入；测试入口与模拟结果不证明生产恢复能力。
+- 会话状态记录已由 PA-10 接入（组件验证，等待现场含中断请求类型）；真实确认适配与跨执行续做验证尚待 PA-09、PA-17、PA-18 接入；测试入口与模拟结果不证明生产恢复能力。

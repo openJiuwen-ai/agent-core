@@ -43,8 +43,8 @@ PA-05 组合已有构造、原生流和清理接缝，负责入口校验、事�
 | 三个入口、请求值对象、runner、事件映射、预算 Rail、结局锁定 | 已有组件实现；本次复核结果见第 4 节 |
 | 群消息参与判断 | 已由 [F_07](F_07_group-participation.md)接入。忽略、判断失败或预算暂停可在构造正式 Agent、加载窗口前结束 |
 | 工具意图与完成 | 已由 [F_15](F_15_tool-intent-before-side-effect.md)接入，复用 PA-05 emitter / fatal 通道，不再列为未实现接入点 |
-| 新任务正式执行 | `session_state_store`（PA-10）getter 仍明确拒绝；PA-06 组装器已接入，但 PA-23 群消息读取及 PA-13 知识导航仍有门禁；回应 / 插话也受这些条件约束 |
-| 正式确认恢复 | `session_state_store`（PA-10）和 `native_reply_adapter`（PA-09）getter 仍明确拒绝 |
+| 新任务正式执行 | `session_state_store`（PA-10）getter 仍明确拒绝（2026-10-14 PA-10 已接入，见 [F_17](F_17_session-state-record.md)）；PA-06 组装器已接入，但 PA-23 群消息读取及 PA-13 知识导航仍有门禁；回应 / 插话也受这些条件约束 |
+| 正式确认恢复 | `session_state_store`（PA-10）和 `native_reply_adapter`（PA-09）getter 仍明确拒绝（2026-10-14 PA-10 已接入，PA-09 仍拒绝，见 [F_17](F_17_session-state-record.md)） |
 | 非确认暂停后继续、崩溃续做 | 带 `recovery_ref` 的 execute 仍明确拒绝，待 PA-18 接入 |
 | 执行能力声明 | `enabled_features` 当前只允许 construction / workspace_read，没有 execution；声明条件见第 3.3 节 |
 
@@ -171,7 +171,7 @@ abort 是需 await 的控制协程，返回 None 只说明本次控制路径已�
 
 | 内部 Protocol 的完整方法 | 实现方、调用条件、完成及失败约束 |
 | --- | --- |
-| `async SessionStateStore.load(self, context: PersistentBuildContext) -> LoadedRecord` | PA-10：把最新白名单记录写入新 Session，无历史可返回空 LoadedRecord；入口验证返回类型，加载异常 / 错形状为 RUNTIME_ERROR |
+| `async SessionStateStore.load(self, context: PersistentBuildContext) -> LoadedRecord` | PA-10：把最新白名单记录写入新 Session，无历史可返回空 LoadedRecord；入口验证返回类型，加载异常 / 错形状为 RUNTIME_ERROR（2026-10-14 起记录无效时为 DEEPAGENT_CONTEXT_PARAM_ERROR 并原样透传，见 [F_17](F_17_session-state-record.md) D-04） |
 | `async SessionStateStore.save(self, context: PersistentBuildContext, ending: ExecutionEnding) -> None` | PA-10：整理窗口并一次保存记录；入口 await 成功后才记结局，异常为 RUNTIME_ERROR，不降级空保存 |
 | `async WindowAssembler.assemble(self, context: PersistentBuildContext, request: RequestInput, record: LoadedRecord) -> WindowAssembly` | PA-06：load 后追加带 WINDOW_PART_KEY 标记的执行头 / 临时背景，返回原生输入；非 BaseError 包装为 RUNTIME_ERROR，错类型拒绝 |
 | `async GroupMessageReader.recent_messages(self, context: PersistentBuildContext, *, after: str \| None = None, trigger_message_id: str \| None = None) -> GroupMessagesResult` | PA-23：游标后新消息及连续性背景，排除触发消息；当前 F_07 直接调用 GroupChatPort，不通过此接口 |
@@ -442,7 +442,7 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 | 性质 | 缺口 / 限制 | 影响及后续归属 |
 | --- | --- | --- |
 | 当前验证失败 | 两个入口流式事件链未通过 | 查明原生流到展示出口的缺口后重跑 PA-05-V-02 / V-06；不降低验收预期来伪造通过 |
-| 未实现接入 | PA-06、PA-09、PA-10 getter 仍拒绝 | 正式任务 / 确认恢复不能开放；M1 使用真实组件验收 |
+| 未实现接入 | PA-06、PA-09、PA-10 getter 仍拒绝（PA-06 已于 2026-10-12 接入，PA-10 已于 2026-10-14 接入，见 [F_17](F_17_session-state-record.md)；PA-09 仍拒绝） | 正式任务 / 确认恢复不能开放；M1 使用真实组件验收 |
 | 未实现接入 | PA-08 文件候选、超限答案补交；PA-18 续做；PA-23 游标群背景 | 当前只自动交接 message 最终回答；pending_answer 后续拆候选或转文件由 PA-08 决定，不重跑业务；recovery_ref 仍拒绝 |
 | 有意保留范围 | task-loop、同步 / 异步 / 持久子代理关闭 | PA-24～PA-26 逐项验证后开放，不由配置偷偷启用 |
 | 未验证共享边界 | 工具执行中途停止、残缺工具结果整理和真实状态保存 | PA-10 / PA-18 查证日志与外部效果，不能将模型中途停止证据扩大为完整安全续做 |
