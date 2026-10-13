@@ -1419,6 +1419,16 @@ class TestMappedToolOutput:
         assert "2023-11-" in result
 
     @pytest.mark.level1
+    def test_view_task_map_result_empty_list_nudge(self, agent_team, t):
+        """Empty list/claimable view keeps a soft next-step nudge for the LLM."""
+        tool = ViewTaskToolV2(agent_team.task_manager, t)
+        result = tool.map_result(ToolOutput(success=True, data={"tasks": [], "count": 0}))
+        assert result.startswith("No tasks found")
+        assert "create_task" in result
+        assert "send_message" in result
+        assert "stay idle" in result
+
+    @pytest.mark.level1
     def test_view_task_map_result_get(self, agent_team, t):
         """ViewTaskToolV2.map_result formats detail view with dependencies"""
         tool = ViewTaskToolV2(agent_team.task_manager, t)
