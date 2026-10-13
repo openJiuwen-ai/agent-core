@@ -842,6 +842,54 @@ async def test_temp_reviewer_runs_under_its_own_trajectory_subject(db, bus, monk
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_temp_reviewer_view_task_reads_the_board(db, bus, monkeypatch):
+    """The temp reviewer's view_task must be bound to a task manager, not the backend."""
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler as _Scheduler
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.agent_teams.tools.tool_task import ViewTaskToolV2
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    scheduler._blueprint.spec.agents = {"teammate": DeepAgentSpec()}
+    scheduler._blueprint.spec.dispatch_mode = "scheduled"
+    scheduler._blueprint.language = "cn"
+    scheduler._infra.team_backend.db = db
+    scheduler._infra.team_backend.workspace_cache = None
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    monkeypatch.setattr(_Scheduler, "_dispatch_to_reviewer", AsyncMock())
+
+    view_tools = []
+
+    class _FakeHarness:
+        async def run_once(self, _prompt, *, team_session=None):
+            return {"output": "voted"}
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, **_kwargs):
+        view_tools.extend(tool for tool in agent_spec.tools if isinstance(tool, ViewTaskToolV2))
+        return _FakeHarness()
+
+    monkeypatch.setattr(TeamHarness, "build", staticmethod(_fake_build))
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    assert len(view_tools) == 1
+    view_tool = view_tools[0]
+    detail = await view_tool.invoke({"action": "get", "task_id": "r"})
+    assert detail.success
+    assert detail.data["task_id"] == "r"
+    listed = await view_tool.invoke({"action": "list"})
+    assert listed.success
+    assert [task["task_id"] for task in listed.data["tasks"]] == ["r"]
+    in_review = await view_tool.invoke({"action": "in_review"})
+    assert in_review.success
+    assert [task["task_id"] for task in in_review.data["tasks"]] == ["r"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_temp_reviewer_prompt_carries_its_previous_round_feedback(db, bus):
     from openjiuwen.agent_teams.agent.scheduling import render
 

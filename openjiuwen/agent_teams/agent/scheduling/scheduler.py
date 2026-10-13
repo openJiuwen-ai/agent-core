@@ -561,7 +561,8 @@ class TeamScheduler:
 
         # Build a reviewer-scoped TeamTaskManager so that ``verify_task``'s
         # identity guard (``member_name in task.reviewers()``) passes against
-        # the reviewer name stored on the task row.
+        # the reviewer name stored on the task row. ``view_task`` reads through
+        # the same manager, so ``in_review`` lists this reviewer's queue.
         reviewer_tm = TeamTaskManager(
             team_name=backend.team_name,
             member_name=reviewer,
@@ -574,12 +575,11 @@ class TeamScheduler:
         # team backend's cache (it delegates to the workspace manager — the
         # single source every consumer uses). ``None`` keeps the framework
         # default.
-        backend = self._infra.team_backend
-        cache = backend.workspace_cache if backend is not None else None
+        cache = backend.workspace_cache
         tr = make_translator(language, ws_cache=cache)
 
         verify_tool = VerifyTaskTool(reviewer_tm, tr, desc_key="verify_task_scheduled")
-        view_tool = ViewTaskToolV2(backend, tr, desc_key="view_task_scheduled")
+        view_tool = ViewTaskToolV2(reviewer_tm, tr, desc_key="view_task_scheduled")
 
         member_name = reviewer
         harness = None
