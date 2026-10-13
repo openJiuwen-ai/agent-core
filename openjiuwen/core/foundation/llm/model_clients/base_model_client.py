@@ -16,20 +16,17 @@ from typing import (
     Union,
 )
 
-from openjiuwen.core.foundation.llm.utf8_sanitize import (
-    sanitize_utf8_text,
-    sanitize_utf8_tree,
-)
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import (
-    llm_logger,
     LogEventType,
+    llm_logger,
 )
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
     ModelClientConfig,
     ModelRequestConfig,
 )
@@ -45,6 +42,10 @@ from openjiuwen.core.foundation.llm.schema.message import (
     UserMessage,
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.utf8_sanitize import (
+    sanitize_utf8_text,
+    sanitize_utf8_tree,
+)
 from openjiuwen.core.foundation.tool import ToolInfo
 
 
@@ -403,7 +404,12 @@ class BaseModelClient(ABC):
         """Validate configuration parameters (subclasses can optionally override)"""
         client_name = self._get_client_name()
 
-        if not self.model_client_config.api_key:
+        auth_mode = getattr(
+            self.model_client_config,
+            "auth_mode",
+            LLMAuthMode.ApiKey.value,
+        )
+        if auth_mode in (LLMAuthMode.ApiKey, LLMAuthMode.ApiKey.value) and not self.model_client_config.api_key:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg=f"model client config api_key is required for {client_name}.")
         if not self.model_client_config.api_base:
