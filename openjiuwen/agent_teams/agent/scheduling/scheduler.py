@@ -26,6 +26,7 @@ leader itself receives direct input injections (digests / escalations).
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -541,6 +542,8 @@ class TeamScheduler:
         from openjiuwen.agent_teams.tools.locales import make_translator
         from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
         from openjiuwen.agent_teams.tools.tool_task import VerifyTaskTool, ViewTaskToolV2
+        from openjiuwen.core.session.agent_team import Session as TeamSession
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
         from openjiuwen.harness.execution_subject import execution_subject_scope
 
         spec = self._blueprint.spec
@@ -629,8 +632,9 @@ class TeamScheduler:
                 loader=self._template_loader,
                 previous_vote=previous_vote,
             )
+            team_session_id = get_session_id() or ""
             reviewer_subject = team_member_execution_subject(
-                session_id=get_session_id() or "",
+                session_id=team_session_id,
                 team_name=backend.team_name,
                 member_name=member_name,
                 display_name=member_name,
@@ -640,8 +644,22 @@ class TeamScheduler:
             # one — ``run_once`` tears down tools on every invocation.
             result = None
             for attempt in range(3):
+                # A fresh card id per attempt: agent state is checkpointed
+                # under (session id, card id), and the reviewer runs on the
+                # team session (below), so a reused id would restore the
+                # previous attempt's / round's context into a run that must
+                # start clean.
+                attempt_spec = reviewer_spec.model_copy(
+                    update={
+                        "card": AgentCard(
+                            id=f"{backend.team_name}_{reviewer}_review_{uuid.uuid4().hex[:12]}",
+                            name=reviewer,
+                            description="scheduled-mode temp reviewer",
+                        ),
+                    }
+                )
                 harness = TeamHarness.build(
-                    agent_spec=reviewer_spec,
+                    agent_spec=attempt_spec,
                     role=TeamRole.TEAMMATE,
                     member_name=member_name,
                     build_context=reviewer_ctx,
@@ -652,8 +670,17 @@ class TeamScheduler:
                         reviewer,
                         task.task_id,
                     )
+                # Run on a child of the team session: the observability rail
+                # resolves the run root by session id, so a standalone session
+                # (fresh random id) finds no root and opens no agent span —
+                # leaving the reviewer's records without its subject.
+                team_session = (
+                    TeamSession(session_id=team_session_id, team_id=backend.team_name)
+                    if team_session_id
+                    else None
+                )
                 with execution_subject_scope(reviewer_subject):
-                    result = await harness.run_once(review_prompt)
+                    result = await harness.run_once(review_prompt, team_session=team_session)
                 output_str = str(result)
                 if "181001" not in output_str:
                     break

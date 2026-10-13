@@ -802,10 +802,12 @@ async def test_temp_reviewer_runs_under_its_own_trajectory_subject(db, bus, monk
 
     built_specs = []
     run_subjects = []
+    run_sessions = []
 
     class _FakeHarness:
-        async def run_once(self, _prompt):
+        async def run_once(self, _prompt, *, team_session=None):
             run_subjects.append(current_execution_subject())
+            run_sessions.append(team_session)
             return {"output": "voted"}
 
         async def dispose(self):
@@ -818,7 +820,14 @@ async def test_temp_reviewer_runs_under_its_own_trajectory_subject(db, bus, monk
     monkeypatch.setattr(TeamHarness, "build", staticmethod(_fake_build))
 
     await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
 
+    # Runs on the team session, so the observability rail finds the run root.
+    assert run_sessions[0].get_session_id() == "sched_session"
+    # Each run gets its own card id, so no run restores another's context.
+    card_ids = {spec.card.id for spec in built_specs}
+    assert len(card_ids) == 2
+    assert all(spec.card.name == "rev-1" for spec in built_specs)
     rail_types = [rail.type for rail in built_specs[0].rails]
     assert TEAM_OBSERVABILITY in rail_types
     assert OBSERVABILITY in rail_types
