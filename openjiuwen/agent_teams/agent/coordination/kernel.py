@@ -183,18 +183,7 @@ class CoordinationKernel:
         if host.role == TeamRole.LEADER and infra.team_backend:
             existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
             if existing is not None:
-                team_row_present = True
-                non_leader_members = await infra.team_backend.list_member_roster()
-                if non_leader_members and all(m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members):
-                    team_logger.warning(
-                        "[{}] team {} found with all teammates in SHUTDOWN — finalizing prior incomplete cleanup",
-                        member_name,
-                        infra.team_backend.team_name,
-                    )
-                    await infra.team_backend.clean_team()
-                    team_row_present = False
-                else:
-                    await host.recover_team()
+                team_row_present = await self._recover_existing_team_on_start(host, infra)
 
         spec = getattr(host, "spec", None)
         if (
@@ -273,6 +262,35 @@ class CoordinationKernel:
             await debate_state.resume_terminal_grace()
         if self._dispatcher is not None:
             await self._dispatcher.activate_and_flush()
+
+    async def _recover_existing_team_on_start(self, host: Any, infra: Any) -> bool:
+        """Recover or finalize an existing team row during leader ``start``.
+
+        Returns ``True`` when the team row should still be treated as present.
+        Temporary teams finish a crashed ``clean_team`` when every non-leader
+        is already ``SHUTDOWN``. Persistent Discussion teams keep the row so
+        soft-removed members can rejoin under the same names.
+        """
+        non_leader_members = await infra.team_backend.list_member_roster()
+        all_shutdown = bool(non_leader_members) and all(
+            m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members
+        )
+        if all_shutdown and host.lifecycle != "persistent":
+            team_logger.warning(
+                "[{}] team {} found with all teammates in SHUTDOWN — finalizing prior incomplete cleanup",
+                host.member_name,
+                infra.team_backend.team_name,
+            )
+            await infra.team_backend.clean_team()
+            return False
+        if all_shutdown and host.lifecycle == "persistent":
+            team_logger.info(
+                "[{}] persistent team {} keeps row with all teammates in SHUTDOWN",
+                host.member_name,
+                infra.team_backend.team_name,
+            )
+        await host.recover_team()
+        return True
 
     def _build_wake_callback(self):
         """Compose the bus wake callback: coordination first, scheduler second.

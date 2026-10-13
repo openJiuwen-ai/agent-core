@@ -492,20 +492,22 @@ class _TeamRunnerMixin:
         if role not in (TeamRole.PASSIVE_HUMAN, TeamRole.HUMAN_AGENT, TeamRole.TEAMMATE):
             return {"ok": False, "reason": "unsupported_role_type"}
 
-        if spec.agent_spec is not None and agent.spec is not None:
-            agent.spec.agents[spec.member_name] = spec.agent_spec
-            team_session = agent.session_manager.team_session
-            if team_session is not None:
-                agent.persist_session_manifest(team_session)
-
         existing = await backend.get_member(spec.member_name)
         if existing is not None:
             if allow_rejoin:
+                # Rejoin restores status only; do not treat agent_spec as a
+                # hot config update for an existing roster row.
                 return await self._rejoin_team_member(agent, backend, spec, existing)
             return {
                 "ok": False,
                 "reason": f"Member {spec.member_name} already exists in team {backend.team_name}",
             }
+
+        if spec.agent_spec is not None and agent.spec is not None:
+            agent.spec.agents[spec.member_name] = spec.agent_spec
+            team_session = agent.session_manager.team_session
+            if team_session is not None:
+                agent.persist_session_manifest(team_session)
 
         if role == TeamRole.PASSIVE_HUMAN:
             result = await backend.spawn_passive_human(
@@ -569,7 +571,15 @@ class _TeamRunnerMixin:
                 return {"ok": False, "reason": "member_shutting_down"}
             status = MemberStatus.SHUTDOWN
 
-        if status not in (MemberStatus.SHUTDOWN, MemberStatus.ERROR):
+        # Soft-stopped, failed, or idle-torn-down rows need a real restart.
+        # READY/BUSY/… stay idempotent ok without rewriting config.
+        rejoinable = {
+            MemberStatus.SHUTDOWN,
+            MemberStatus.ERROR,
+            MemberStatus.STOPPED,
+            MemberStatus.PAUSED,
+        }
+        if status not in rejoinable:
             return {"ok": True, "reason": ""}
 
         armed = await backend.db.member.try_transition_member_status(
@@ -648,7 +658,7 @@ class _TeamRunnerMixin:
         force: bool = False,
     ) -> dict[str, Any]:
         """Soft-stop a member. The roster row and history stay."""
-        from openjiuwen.agent_teams.schema.status import MEMBER_DEPARTED_STATUSES
+        from openjiuwen.agent_teams.schema.status import MemberStatus
 
         session_id = self._resolve_team_session_id(session)
         entry = await self._get_team_runtime_manager().pool.get(team_name)
@@ -659,10 +669,17 @@ class _TeamRunnerMixin:
         if backend is None:
             return {"ok": False, "reason": "team_backend_unavailable"}
 
-        departed = {status.value for status in MEMBER_DEPARTED_STATUSES}
         member = await backend.get_member(member_name)
-        if member is None or member.status in departed:
+        if member is None or member.status == MemberStatus.SHUTDOWN.value:
             return {"ok": True, "reason": ""}
+
+        # Soft-departed but not terminal: idempotent unless force upgrades
+        # the residue to SHUTDOWN without re-enabling the member.
+        if member.status == MemberStatus.SHUTDOWN_REQUESTED.value:
+            if not force:
+                return {"ok": True, "reason": ""}
+            result = await backend.shutdown_member(member_name, force=True)
+            return {"ok": result.ok, "reason": result.reason or ""}
 
         result = await backend.shutdown_member(member_name, force=force)
         return {"ok": result.ok, "reason": result.reason or ""}

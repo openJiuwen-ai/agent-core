@@ -691,14 +691,19 @@ class TeamBackend:
 
         current_status = MemberStatus(member_data.status)
 
-        # Check if already shutdown — idempotent success path
-        if current_status == MemberStatus.SHUTDOWN or current_status == MemberStatus.SHUTDOWN_REQUESTED:
-            team_logger.debug(
-                f"Member {member_name} already shutdown"
-                if current_status == MemberStatus.SHUTDOWN
-                else f"Member {member_name} is shutting down"
-            )
+        # Terminal departure — nothing left to do.
+        if current_status == MemberStatus.SHUTDOWN:
+            team_logger.debug(f"Member {member_name} already shutdown")
             return MemberOpResult.success()
+
+        # Soft remove already requested. A second soft call stays idempotent.
+        # force=True upgrades: re-notify the member process and settle the row
+        # to SHUTDOWN without re-enabling them (host finalize / stuck exit).
+        if current_status == MemberStatus.SHUTDOWN_REQUESTED:
+            if not force:
+                team_logger.debug(f"Member {member_name} is shutting down")
+                return MemberOpResult.success()
+            return await self._force_finalize_shutdown(member_name)
 
         # Guard: reject shutdown of a live human agent who still holds active
         # tasks, unless force=True. Models sometimes confuse "cancel this
@@ -768,7 +773,7 @@ class TeamBackend:
         except Exception as e:
             team_logger.error(f"Failed to publish member shutdown event for {member_name}: {e}")
 
-        # Passive passive human has no member process to settle SHUTDOWN_REQUESTED →
+        # A passive human has no member process to settle SHUTDOWN_REQUESTED →
         # SHUTDOWN, so the leader closes the row here. Otherwise soft-remove
         # would leave a permanent shutting-down residue that blocks rejoin.
         if member_data.role == TeamRole.PASSIVE_HUMAN.value:
@@ -786,6 +791,50 @@ class TeamBackend:
             return MemberOpResult.success()
 
         team_logger.info(f"Shutdown request sent to member {member_name}")
+        return MemberOpResult.success()
+
+    async def _force_finalize_shutdown(self, member_name: str) -> MemberOpResult:
+        """Re-publish a forced shutdown and settle ``SHUTDOWN_REQUESTED`` → ``SHUTDOWN``.
+
+        Used when a soft remove left a residue and the host asks to finish
+        departure without re-enabling the member (``force=True``).
+        """
+        team_logger.info(f"Force-finalizing shutdown for member {member_name}")
+        msg_id = await self.message_manager.send_message(
+            content=t("team.shutdown_request_content"),
+            to_member_name=member_name,
+        )
+        if not msg_id:
+            team_logger.warning(f"Failed to send force-shutdown message to member {member_name}")
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(
+                    MemberShutdownEvent(
+                        team_name=self.team_name,
+                        member_name=member_name,
+                        force=True,
+                    )
+                ),
+            )
+        except Exception as e:
+            team_logger.error(f"Failed to publish force shutdown event for {member_name}: {e}")
+
+        settled = await self.db.member.try_transition_member_status(
+            member_name,
+            self.team_name,
+            MemberStatus.SHUTDOWN_REQUESTED,
+            MemberStatus.SHUTDOWN,
+        )
+        if not settled:
+            # Row may already have reached SHUTDOWN via the member process.
+            row = await self.db.member.get_member(member_name, self.team_name)
+            if row is not None and row.status == MemberStatus.SHUTDOWN.value:
+                return MemberOpResult.success()
+            return MemberOpResult.fail(
+                f"Member {member_name} could not settle to SHUTDOWN from SHUTDOWN_REQUESTED"
+            )
+        team_logger.info(f"Member {member_name} force-settled to SHUTDOWN")
         return MemberOpResult.success()
 
     async def cancel_member(self, member_name: str) -> bool:

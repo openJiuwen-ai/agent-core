@@ -56,7 +56,9 @@ class RecoveryManager:
         member_name = self._configurator.member_name
         team_logger.info("[{}] recovering team", member_name or "?")
         await team_backend.restore_external_cli_specs_from_db()
-        all_members = await team_backend.list_member_roster()
+        # Full member rows (not the narrow roster projection): recovery needs
+        # ``role`` to settle passive humans without AttributeError.
+        all_members = await team_backend.list_members()
         restarted: list[str] = []
         departed = {
             MemberStatus.SHUTDOWN.value,
@@ -110,7 +112,14 @@ class RecoveryManager:
             return
         if status == MemberStatus.READY.value:
             return
-        if status not in {MemberStatus.RESTARTING.value, MemberStatus.ERROR.value}:
+        # STOPPED / PAUSED are idle-but-still-on-roster; cold start must make
+        # the human operable again without a harness restart.
+        if status not in {
+            MemberStatus.RESTARTING.value,
+            MemberStatus.ERROR.value,
+            MemberStatus.STOPPED.value,
+            MemberStatus.PAUSED.value,
+        }:
             team_logger.debug(
                 "[{}] passive human {} status {} left unchanged during recover",
                 self._configurator.member_name or "?",

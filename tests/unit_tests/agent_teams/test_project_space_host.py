@@ -316,6 +316,77 @@ class TestMemberFacade:
         backend.spawn_member.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_rejoin_stopped_or_paused_restores_member(self):
+        member = SimpleNamespace(role="teammate", status=MemberStatus.STOPPED.value)
+
+        async def _transition(name, team, frm, to):
+            member.status = to.value
+            return True
+
+        restart = AsyncMock(return_value=True)
+        backend = SimpleNamespace(
+            get_member=AsyncMock(return_value=member),
+            team_name="team",
+            db=SimpleNamespace(member=SimpleNamespace(try_transition_member_status=_transition)),
+            spawn_member=AsyncMock(),
+        )
+        agent = SimpleNamespace(
+            team_backend=backend,
+            spec=None,
+            spawn_manager=SimpleNamespace(restart_teammate=restart),
+        )
+        entry = SimpleNamespace(current_session_id="sess", agent=agent)
+        stopped = await _TeamRunnerMixin.spawn_team_member(
+            _runner(entry),
+            _member_spec(TeamRole.TEAMMATE),
+            "team",
+            "sess",
+            allow_rejoin=True,
+        )
+        assert stopped == {"ok": True, "reason": ""}
+        restart.assert_awaited_once_with("dev")
+
+        member.status = MemberStatus.PAUSED.value
+        restart.reset_mock()
+        paused = await _TeamRunnerMixin.spawn_team_member(
+            _runner(entry),
+            _member_spec(TeamRole.TEAMMATE),
+            "team",
+            "sess",
+            allow_rejoin=True,
+        )
+        assert paused == {"ok": True, "reason": ""}
+        restart.assert_awaited_once_with("dev")
+
+    @pytest.mark.asyncio
+    async def test_rejoin_conflict_does_not_write_agent_spec(self):
+        team_spec = _spec(team_name="team")
+        backend = SimpleNamespace(
+            get_member=AsyncMock(
+                return_value=SimpleNamespace(role="teammate", status=MemberStatus.SHUTDOWN.value)
+            ),
+            team_name="team",
+        )
+        agent = SimpleNamespace(
+            team_backend=backend,
+            spec=team_spec,
+            session_manager=SimpleNamespace(team_session=object()),
+            persist_session_manifest=MagicMock(),
+        )
+        entry = SimpleNamespace(current_session_id="sess", agent=agent)
+        custom = DeepAgentSpec(system_prompt="should-not-apply")
+        conflict = await _TeamRunnerMixin.spawn_team_member(
+            _runner(entry),
+            _member_spec(TeamRole.PASSIVE_HUMAN, agent_spec=custom),
+            "team",
+            "sess",
+            allow_rejoin=True,
+        )
+        assert conflict == {"ok": False, "reason": "member_conflict"}
+        assert "dev" not in team_spec.agents
+        agent.persist_session_manifest.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_unsupported_role_and_failed_start(self):
         host = _runner(SimpleNamespace(current_session_id="sess", agent=SimpleNamespace(team_backend=object(), spec=None)))
         rejected = await _TeamRunnerMixin.spawn_team_member(
@@ -394,6 +465,20 @@ class TestMemberFacade:
         member.status = MemberStatus.SHUTDOWN.value
         departed = await _TeamRunnerMixin.remove_team_member(_runner(entry), "team", "dev", "sess")
         assert departed == {"ok": True, "reason": ""}
+
+        member.status = MemberStatus.SHUTDOWN_REQUESTED.value
+        backend.shutdown_member = AsyncMock(return_value=MemberOpResult.success())
+        soft_pending = await _TeamRunnerMixin.remove_team_member(
+            _runner(entry), "team", "dev", "sess", False
+        )
+        assert soft_pending == {"ok": True, "reason": ""}
+        backend.shutdown_member.assert_not_awaited()
+
+        forced = await _TeamRunnerMixin.remove_team_member(
+            _runner(entry), "team", "dev", "sess", True
+        )
+        assert forced == {"ok": True, "reason": ""}
+        backend.shutdown_member.assert_awaited_once_with("dev", force=True)
 
 
 @pytest.mark.asyncio
