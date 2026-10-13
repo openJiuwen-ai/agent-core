@@ -5,7 +5,7 @@
 | 项 | 说明 |
 | --- | --- |
 | 类型 | 当前架构的设计概览；设计范围与实现状态分别说明，现状与依据见第 5.1 节 |
-| 最近一次修订日期 | 2026-10-12 |
+| 最近一次修订日期 | 2026-10-13 |
 | 责任人 | henry hu |
 | 关联模块 | `openjiuwen.harness.persistent_agent` |
 | 详细设计 | [Persistent Agent 详细架构设计](persistent-agent-architecture.md) |
