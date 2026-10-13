@@ -356,7 +356,9 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `SendMessageTool` 的 `to` 固定为 `string`，只承载单个 member_name、`"user"` 或 `"*"`；
     `targets` 固定为 `array<string>`，只承载多播成员列表。两者运行时必须二选一：同时提供、
     同时省略、向 `to` 偷传数组或向 `targets` 偷传字符串都在写消息前拒绝，并返回可执行的字段
-    修正提示。`to` 若仍收到 JSON 数组字符串，只识别其错误形状并提示改用 `targets`，不解析代发。
+    修正提示。唯一宽容：`targets` 恰为单元素数组且（strip 后）等于 `to` 时，意图无歧义，按 `to`
+    单播投递，成功结果附一条提醒（`data["note"]`，`render_for_llm` 追加），引导下次只填 `to`；
+    多出任何成员仍属歧义、照旧拒绝。`to` 若仍收到 JSON 数组字符串，只识别其错误形状并提示改用 `targets`，不解析代发。
     这样宿主 LLM 不再需要在 `anyOf(string, array)` 中选择序列化分支，也不会把数组二次 JSON
     编码后塞进字符串。`ReportToLeaderTool` 仍只有 `to: enum ["leader", "user"]`，
     schema 不暴露 `targets`，invoke 对 MCP 偷传同样拒绝。多播的全员拒绝、去重、部分失败等

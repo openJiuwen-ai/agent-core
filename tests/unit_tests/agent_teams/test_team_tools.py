@@ -2332,6 +2332,30 @@ class TestSendMessageTool:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_invoke_rejects_both_fields_when_targets_extends_to(self, agent_team, t):
+        """Targets that add members beyond 'to' stay ambiguous and are rejected."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "m1", "targets": ["m1", "m2"], "content": "Hi"})
+
+        assert result.success is False
+        assert "exactly one" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_folds_targets_repeating_to_into_unicast(self, agent_team, t):
+        """A one-element 'targets' equal to 'to' is sent as a unicast with a corrective note."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "m1", "targets": [" m1 "], "content": "Hi"})
+
+        assert result.success is True
+        assert result.data["type"] == "message"
+        assert result.data["to"] == "m1"
+        text = tool.render_for_llm(result)
+        assert "Success" in text
+        assert "only 'to'" in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_requires_one_recipient_field(self, agent_team, t):
         """One separated recipient field must be present."""
         tool = SendMessageTool(agent_team.message_manager, t)

@@ -31,6 +31,21 @@ LEADER_ROLE_RECIPIENT = "leader"
 # far below it.
 MAX_CONTENT_CHARS = 2000
 
+# Appended to a successful send when ``targets`` only repeated ``to``.
+_REDUNDANT_TARGETS_NOTE = (
+    "Note: 'targets' only repeated 'to', so this was sent as a direct message. "
+    "Next time fill only 'to' for one recipient; 'targets' is for two or more."
+)
+
+
+def _targets_repeat_to(to_raw: Any, targets_raw: Any) -> bool:
+    """Tell whether ``targets`` is a one-element array naming the same member as ``to``."""
+    if not isinstance(to_raw, str) or not isinstance(targets_raw, list):
+        return False
+    if len(targets_raw) != 1 or not isinstance(targets_raw[0], str):
+        return False
+    return targets_raw[0].strip() == to_raw.strip()
+
 
 # ========== Messaging ==========
 
@@ -295,10 +310,13 @@ class _SendMessageBase(TeamTool, ABC):
                 return self._format_multicast_text(base, d)
             return base
         if d["type"] == "broadcast":
-            return f"Broadcast Already sent from {d['from']} Success"
-        if d["type"] == "multicast":
+            text = f"Broadcast Already sent from {d['from']} Success"
+        elif d["type"] == "multicast":
             return self._format_multicast_text(None, d)
-        return f"Message Already sent from {d['from']} to {d['to']} Success"
+        else:
+            text = f"Message Already sent from {d['from']} to {d['to']} Success"
+        note = d.get("note")
+        return f"{text}\n{note}" if note else text
 
     @staticmethod
     def _format_multicast_text(error: str | None, d: dict[str, Any]) -> str:
@@ -356,13 +374,28 @@ class SendMessageTool(_SendMessageBase):
         content: str,
         summary: str,
     ) -> ToolOutput:
-        """Route exactly one separated recipient field."""
-        if to_raw is not None and targets_raw is not None:
-            return ToolOutput(success=False, error="Use exactly one of 'to' or 'targets'")
-        if targets_raw is not None:
+        """Route exactly one separated recipient field.
+
+        Both fields together are tolerated only when ``targets`` merely
+        repeats ``to`` as a one-element array: the intent is unambiguous, so
+        the message goes out as a unicast and the result carries a note
+        steering the caller back to ``to`` alone.
+        """
+        if targets_raw is None:
+            return await self._dispatch_to(to_raw, content, summary)
+        if to_raw is None:
             if not isinstance(targets_raw, list):
                 return ToolOutput(success=False, error="'targets' must be an array of strings")
             return await self._multicast(targets_raw, content, summary)
+        if not _targets_repeat_to(to_raw, targets_raw):
+            return ToolOutput(success=False, error="Use exactly one of 'to' or 'targets'")
+        result = await self._dispatch_to(to_raw, content, summary)
+        if result.success:
+            result.data["note"] = _REDUNDANT_TARGETS_NOTE
+        return result
+
+    async def _dispatch_to(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+        """Route the ``to`` field: unicast, broadcast, or a shape correction."""
         if isinstance(to_raw, list):
             return ToolOutput(success=False, error="'to' must be a string; use 'targets' for multicast")
         if isinstance(to_raw, str):
