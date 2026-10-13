@@ -64,6 +64,7 @@ dependencies = [
     "loguru>=0.7.3",
     "gitcode-api>=1.2.20",
     "pyoxigraph>=0.5.8",
+    "PyYAML>=6.0.2",
 ]
 
 # A2A: required for `openjiuwen.remote_clients` / `openjiuwen.server_adapters` A2A entry
@@ -194,6 +195,9 @@ openjiuwen = [
     "**/auto_harness/resources/*.yaml",
     "**/auto_harness/skills/**/*.md",
     "**/harness/resources/*.yaml",
+    "symphony/README.md",
+    "symphony/shared/fingerprint/resources/*.yaml",
+    "symphony/retrieval/common/prompts/*.yaml",
 ]
 
 [tool.coverage.run]

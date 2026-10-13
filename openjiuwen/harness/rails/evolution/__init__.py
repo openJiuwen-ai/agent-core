@@ -2,6 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Evolution rail implementations and their historical harness exports."""
 
+from importlib import import_module
+
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
     build_evolution_progress_event,
@@ -65,6 +67,11 @@ __all__ = [
     "SkillCreateRail",
     "SkillEvolutionRail",
     "SkillEvolutionSharingMixin",
+    "CapabilityIdentity",
+    "SymphonyGraphEvolutionInput",
+    "SymphonyGraphEvolutionRail",
+    "TeamSymphonyGraphEvolutionRail",
+    "project_symphony_execution_fragments",
     "TeamSkillCreateRail",
     "TeamSkillEvolutionRail",
     "TrajectoryRail",
@@ -88,3 +95,22 @@ __all__ = [
     "remove_evolution_review_agent_config",
     "unconfigure_skill_evolution",
 ]
+
+
+_SYMPHONY_EXPORTS = {
+    "CapabilityIdentity": "openjiuwen.harness.rails.evolution.symphony_execution_graph",
+    "project_symphony_execution_fragments": "openjiuwen.harness.rails.evolution.symphony_execution_fragments",
+    "SymphonyGraphEvolutionInput": "openjiuwen.harness.rails.evolution.symphony_graph_evolution_rail",
+    "SymphonyGraphEvolutionRail": "openjiuwen.harness.rails.evolution.symphony_graph_evolution_rail",
+    "TeamSymphonyGraphEvolutionRail": "openjiuwen.harness.rails.evolution.symphony_graph_evolution_rail",
+}
+
+
+def __getattr__(name: str):
+    """Load Symphony capture only when the optional OTel stack is installed."""
+    module_name = _SYMPHONY_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module_name), name)
+    globals()[name] = value
+    return value

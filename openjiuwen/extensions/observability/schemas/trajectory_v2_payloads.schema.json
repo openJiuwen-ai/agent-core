@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openjiuwen.dev/schemas/trajectory/v2/payloads.json",
+  "title": "OpenJiuwen trajectory v2 event payloads",
+  "description": "Shape of openjiuwen.trajectory.payload for each openjiuwen.trajectory.event_kind. The Python evolution projection and the web trajectory viewer both read these payloads; the vectors under tests/unit_tests/agent_evolving/trajectory/fixtures/v2 show them replayed.",
+  "$defs": {
+    "nonEmptyString": {"type": "string", "pattern": "\\S"},
+    "contextMessage": {
+      "description": "One message of a context window. message_id is the occurrence identity: it stays the same for as long as the message stays in context, and readers join occurrences by it, never by content.",
+      "type": "object",
+      "required": ["message_id", "role", "origin"],
+      "properties": {
+        "message_id": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"$ref": "#/$defs/nonEmptyString"},
+        "origin": {"enum": ["external_user", "harness_internal"]},
+        "source_kind": {"$ref": "#/$defs/nonEmptyString"},
+        "content": true,
+        "name": true,
+        "tool_calls": true,
+        "tool_call_id": {"type": "string"},
+        "metadata": true
+      }
+    },
+    "contextDelta": {
+      "description": "One operation against the base window, applied in order.",
+      "type": "object",
+      "required": ["op", "message_id"],
+      "properties": {
+        "op": {"enum": ["insert", "remove", "move", "replace"]},
+        "message_id": {"$ref": "#/$defs/nonEmptyString"},
+        "index": {"type": "integer", "minimum": 0},
+        "from_index": {"type": "integer", "minimum": 0},
+        "message": {"$ref": "#/$defs/contextMessage"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"op": {"enum": ["insert", "replace"]}}},
+          "then": {"required": ["message", "index"]}
+        },
+        {
+          "if": {"properties": {"op": {"const": "move"}}},
+          "then": {"required": ["index"]}
+        }
+      ]
+    },
+    "modelRequest": {
+      "type": "object",
+      "required": ["request_id", "inference_id"],
+      "properties": {
+        "request_id": {"type": "string"},
+        "inference_id": {"type": "string"}
+      }
+    },
+    "contextWindowCommit": {
+      "description": "context.window.commit: the window one model request was sent, or the window a compaction produced. A baseline states messages and no base; every other commit states its delta against base_window_id.",
+      "type": "object",
+      "required": ["window_id", "base_window_id", "complete", "delta"],
+      "properties": {
+        "window_id": {"$ref": "#/$defs/nonEmptyString"},
+        "base_window_id": {"type": ["string", "null"]},
+        "complete": {"const": true},
+        "delta": {"type": "array", "items": {"$ref": "#/$defs/contextDelta"}},
+        "messages": {"type": "array", "items": {"$ref": "#/$defs/contextMessage"}},
+        "request_purpose": {"enum": ["assistant", "compaction"]},
+        "transition_kind": {"enum": ["epoch_baseline", "compaction", "trim_baseline"]},
+        "baseline_reason": {"enum": ["runtime_epoch_start", "trimmed_window"]},
+        "correlation_kind": {"const": "compaction"},
+        "caused_by_operation_id": {"$ref": "#/$defs/nonEmptyString"},
+        "input_window_id": {"type": ["string", "null"]},
+        "output_window_id": {"$ref": "#/$defs/nonEmptyString"},
+        "model_requests": {"type": "array", "items": {"$ref": "#/$defs/modelRequest"}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"transition_kind": {"enum": ["epoch_baseline", "trim_baseline"]}}, "required": ["transition_kind"]},
+          "then": {
+            "required": ["messages", "baseline_reason"],
+            "properties": {"base_window_id": {"const": null}, "delta": {"maxItems": 0}}
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {"properties": {"transition_kind": {"const": "compaction"}}, "required": ["transition_kind"]},
+              {"required": ["correlation_kind"]}
+            ]
+          },
+          "then": {"required": ["caused_by_operation_id", "input_window_id", "output_window_id", "model_requests"]}
+        }
+      ]
+    },
+    "compactionCompleted": {
+      "description": "compaction.completed: a context compaction finished. model_requests names each model call it made; an empty list is a model-free compaction.",
+      "type": "object",
+      "required": ["operation_id", "model_requests"],
+      "properties": {
+        "operation_id": {"$ref": "#/$defs/nonEmptyString"},
+        "status": {"const": "completed"},
+        "model_requests": {"type": "array", "items": {"$ref": "#/$defs/modelRequest"}},
+        "input_window_id": {"type": ["string", "null"]},
+        "output_window_id": {"type": "string"},
+        "summary": {"type": "string"},
+        "compact_summary": {"type": "string"},
+        "modified_messages": {"type": "array", "items": {"$ref": "#/$defs/compactionModifiedMessage"}}
+      }
+    },
+    "compactionModifiedMessage": {
+      "description": "A message the compaction rewrote in place. message_id is the context_message_id window commits use; offload_handle restores the original content and is null when nothing was offloaded.",
+      "type": "object",
+      "required": ["message_id"],
+      "properties": {
+        "message_id": {"$ref": "#/$defs/nonEmptyString"},
+        "role": {"type": "string"},
+        "tool_call_id": {"type": ["string", "null"]},
+        "offload_handle": {"type": ["string", "null"]},
+        "offload_type": {"type": ["string", "null"]}
+      }
+    },
+    "askUserRequested": {
+      "description": "ask_user.requested: the agent asked the user a question and is waiting.",
+      "type": "object",
+      "required": ["interaction_id", "tool_call_id", "tool_name", "arguments", "schema", "status"],
+      "properties": {
+        "interaction_id": {"type": "string"},
+        "tool_call_id": {"type": "string"},
+        "tool_name": {"const": "ask_user"},
+        "arguments": {"type": "object"},
+        "schema": {"type": "object", "required": ["name", "parameters"]},
+        "status": {"const": "pending"}
+      }
+    },
+    "askUserResolved": {
+      "description": "ask_user.resolved: the user answered (or the question was otherwise closed).",
+      "type": "object",
+      "required": ["interaction_id", "tool_call_id", "tool_name", "outcome", "status"],
+      "properties": {
+        "interaction_id": {"type": "string"},
+        "tool_call_id": {"type": "string"},
+        "tool_name": {"const": "ask_user"},
+        "answers": true,
+        "outcome": {"type": "string"},
+        "result": true,
+        "status": {"type": "string"}
+      }
+    }
+  },
+  "eventKinds": {
+    "context.window.commit": "#/$defs/contextWindowCommit",
+    "compaction.completed": "#/$defs/compactionCompleted",
+    "ask_user.requested": "#/$defs/askUserRequested",
+    "ask_user.resolved": "#/$defs/askUserResolved"
+  }
+}

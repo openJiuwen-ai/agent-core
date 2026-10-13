@@ -98,6 +98,11 @@ def init_observability(
     _provider.add_span_processor(tracker)
     set_active_span_tracker(tracker)
 
+    # Symphony graph rails consume the same ended spans as the existing exporter.
+    from openjiuwen.extensions.observability.demand import get_trajectory_span_processor
+
+    _provider.add_span_processor(get_trajectory_span_processor())
+
     exporter = span_exporter_override or _build_exporter(config)
     # console writes synchronously per-span, so keep it on the Simple
     # processor for immediate output. The file exporter appends straight
