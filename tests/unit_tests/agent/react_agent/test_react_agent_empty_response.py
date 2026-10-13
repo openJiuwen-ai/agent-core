@@ -4,10 +4,11 @@
 Regression tests for empty no-tool turns in ReActAgent.
 
 A model turn that has no assistant text and no tool_calls is not a valid
-ReAct answer even when reasoning_content is present. It must end the round
-with an explicit error instead of a silent empty ``answer`` (2026-09-11 team
-stall: reasoning-only empty turn left the claimed board task IN_PROGRESS
-until the relay 300s stall watchdog killed the stream).
+ReAct answer even when reasoning_content is present. After one same-round
+retry with an [EMPTY_RESPONSE] notice, it must end with an explicit error
+instead of a silent empty ``answer`` (2026-09-11 team stall: reasoning-only
+empty turn left the claimed board task IN_PROGRESS until the relay 300s
+stall watchdog killed the stream).
 """
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -16,6 +17,7 @@ from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, UserMessa
 from openjiuwen.core.foundation.llm.schema.message import UsageMetadata
 
 from openjiuwen.core.single_agent.agents.react_agent import (
+    EMPTY_RESPONSE_MAX_RETRIES,
     EMPTY_RESPONSE_MSG,
     ReActAgent,
     ReActAgentConfig,
@@ -145,20 +147,42 @@ class TestEmptyNoToolTurn(unittest.IsolatedAsyncioTestCase):
             result = await agent.invoke({"query": "continue"}, session=session)
         return result, mock_llm, session
 
-    async def test_reasoning_only_turn_is_error(self):
-        """核心断言：仅 reasoning 的空帧必须显式 error，不得静默空 answer。"""
+    async def test_reasoning_only_retries_once_then_succeeds(self):
+        """首次 reasoning-only 空帧同轮重试一次；第二次有正文则成功。"""
         agent, _, context = self._make_agent_with_mocks()
 
-        result, mock_llm, _ = await self._invoke(agent, [_reasoning_only_empty()])
+        result, mock_llm, _ = await self._invoke(
+            agent,
+            [_reasoning_only_empty(), _text_answer("recovered")],
+        )
+
+        self.assertEqual(result["result_type"], "answer")
+        self.assertEqual(result["output"], "recovered")
+        self.assertEqual(mock_llm.call_count, EMPTY_RESPONSE_MAX_RETRIES + 1)
+
+        added = [c[0][0] for c in context.add_messages.call_args_list if c[0]]
+        notice_idxs = [
+            i for i, msg in enumerate(added)
+            if isinstance(msg, UserMessage)
+            and EMPTY_RESPONSE_NOTICE in (msg.content or "")
+        ]
+        self.assertTrue(notice_idxs, "EMPTY_RESPONSE notice required before retry")
+
+    async def test_reasoning_only_exhausts_as_error(self):
+        """连续空帧耗尽同轮预算后必须显式 error，不得静默空 answer。"""
+        agent, _, context = self._make_agent_with_mocks()
+
+        result, mock_llm, _ = await self._invoke(
+            agent,
+            [_reasoning_only_empty(), _reasoning_only_empty()],
+        )
 
         self.assertEqual(result["result_type"], "error")
         self.assertEqual(result["output"], EMPTY_RESPONSE_MSG)
         self.assertEqual(result["finish_reason"], "stop")
         self.assertTrue(result["reasoning_present"])
-        # 当前分支不做空回复同轮重试：首次空帧即收口为 error。
-        self.assertEqual(mock_llm.call_count, 1)
+        self.assertEqual(mock_llm.call_count, EMPTY_RESPONSE_MAX_RETRIES + 1)
 
-        # 空 AssistantMessage 之后须留下拒绝提示，供后续自催/下一轮读取。
         added = [c[0][0] for c in context.add_messages.call_args_list if c[0]]
         assistant_idxs = [
             i for i, msg in enumerate(added) if isinstance(msg, AssistantMessage)
@@ -179,26 +203,34 @@ class TestEmptyNoToolTurn(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tool_calls", added[notice_idxs[0]].content)
 
     async def test_fully_empty_turn_is_error(self):
-        """content 与 reasoning 均空：保持原有 error 行为，仅诊断字段不同。"""
+        """content 与 reasoning 均空：耗尽同轮重试后仍为 error。"""
         agent, _, _ = self._make_agent_with_mocks()
 
-        result, _, _ = await self._invoke(agent, [_fully_empty()])
+        result, mock_llm, _ = await self._invoke(
+            agent,
+            [_fully_empty(), _fully_empty()],
+        )
 
         self.assertEqual(result["result_type"], "error")
         self.assertEqual(result["output"], EMPTY_RESPONSE_MSG)
         self.assertFalse(result["reasoning_present"])
+        self.assertEqual(mock_llm.call_count, EMPTY_RESPONSE_MAX_RETRIES + 1)
 
     async def test_whitespace_only_content_is_error(self):
-        """纯空白正文等价于空正文。"""
+        """纯空白正文等价于空正文；耗尽同轮重试后 error。"""
+        blank = AssistantMessage(
+            content="   \n\t",
+            finish_reason="stop",
+            reasoning_content="thinking",
+            usage_metadata=_usage(),
+        )
         agent, _, _ = self._make_agent_with_mocks()
 
-        result, _, _ = await self._invoke(agent, [
-            AssistantMessage(content="   \n\t", finish_reason="stop",
-                             reasoning_content="thinking", usage_metadata=_usage()),
-        ])
+        result, mock_llm, _ = await self._invoke(agent, [blank, blank])
 
         self.assertEqual(result["result_type"], "error")
         self.assertTrue(result["reasoning_present"])
+        self.assertEqual(mock_llm.call_count, EMPTY_RESPONSE_MAX_RETRIES + 1)
 
     async def test_normal_text_answer_unaffected(self):
         agent, _, _ = self._make_agent_with_mocks()
@@ -328,6 +360,31 @@ class TestEmptyNoToolTurn(unittest.IsolatedAsyncioTestCase):
             and SOFT_STOP_FALLBACK_STEERING[:40] in (m.content or "")
         ]
         self.assertFalse(fallback, "must not duplicate fallback when queue has steering")
+
+    async def test_empty_retry_budget_independent_of_soft_stop(self):
+        """普通空响应重试预算与 soft-stop 续跑互相独立。"""
+        agent, _, _ = self._make_agent_with_mocks(max_iterations=8)
+        calls = {"n": 0}
+
+        async def _fake_call_model(ctx, _context, _tools):
+            calls["n"] += 1
+            # 1st: soft-stop empty → soft-stop continue
+            # 2nd: ordinary empty → EMPTY_RESPONSE retry
+            # 3rd: text answer
+            if calls["n"] == 1:
+                ctx.extra[SOFT_STOP_NEEDS_CONTINUE_KEY] = True
+                return _reasoning_only_empty()
+            if calls["n"] == 2:
+                return _reasoning_only_empty()
+            return _text_answer("ok after both budgets")
+
+        session = _mock_session()
+        with patch.object(agent, "_call_model", side_effect=_fake_call_model):
+            result = await agent.invoke({"query": "work"}, session=session)
+
+        self.assertEqual(result["result_type"], "answer")
+        self.assertEqual(result["output"], "ok after both budgets")
+        self.assertEqual(calls["n"], 3)
 
 
 if __name__ == "__main__":
