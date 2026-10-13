@@ -209,7 +209,7 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
         self.assertFalse(called["value"])
         self.assertEqual([node.id for node in root.children], ["search-research"])
 
-    def test_default_equivalence_group_keeps_cross_platform_variants(self) -> None:
+    def test_lexical_similarity_guardrail_splits_disconnected_variants(self) -> None:
         builder = self._builder()
         github = TreeNode(id="github-issues", name="GitHub Issues", description="在 GitHub 管理议题。")
         gitlab = TreeNode(id="gitlab-tickets", name="GitLab Tickets", description="在 GitLab 处理工单。")
@@ -220,18 +220,18 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
             }
         }
 
-        normalized = getattr(builder, "_normalize_equivalence_groups")([github, gitlab], groups)
-
-        self.assertEqual(builder.settings.equiv_min_lexical_similarity, 0.0)
-        self.assertEqual(len(normalized), 1)
-        self.assertEqual({leaf.id for leaf in normalized[0]["leaf_nodes"]}, {github.id, gitlab.id})
-
-        builder.settings.equiv_min_lexical_similarity = 0.12
+        self.assertEqual(builder.settings.equiv_min_lexical_similarity, 0.12)
         guarded = getattr(builder, "_normalize_equivalence_groups")([github, gitlab], groups)
         self.assertEqual(len(guarded), 2)
 
+        builder.settings.equiv_min_lexical_similarity = 0.0
+        normalized = getattr(builder, "_normalize_equivalence_groups")([github, gitlab], groups)
+        self.assertEqual(len(normalized), 1)
+        self.assertEqual({leaf.id for leaf in normalized[0]["leaf_nodes"]}, {github.id, gitlab.id})
+
     def test_configured_taxonomy_keeps_fixed_levels_and_builds_terminal_groups(self) -> None:
         builder = self._builder()
+        builder.settings.equiv_min_lexical_similarity = 0.0
         builder.config.root_categories = {
             "office": {
                 "name": "Office",
@@ -331,7 +331,7 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
         self.assertIn("Candidate generation pass", prompts[0])
         self.assertIn("Pairwise verification pass", prompts[1])
 
-    def test_pairwise_equivalence_rejects_incomplete_model_coverage(self) -> None:
+    def test_pairwise_equivalence_skips_scope_when_model_coverage_incomplete(self) -> None:
         builder = self._builder()
         leaves = [TreeNode(id="left", name="Left"), TreeNode(id="right", name="Right")]
         responses = iter(
@@ -343,11 +343,12 @@ class TreeBuilderPostprocessTests(unittest.TestCase):
         )
         builder._call_llm_json = lambda prompt, **kwargs: next(responses)
 
-        with self.assertRaisesRegex(ValueError, "omitted 1 candidate pairs"):
-            getattr(builder, "_discover_equivalence_groups")(
-                TreeNode(id="parent", name="Parent"),
-                leaves,
-            )
+        result = getattr(builder, "_discover_equivalence_groups")(
+            TreeNode(id="parent", name="Parent"),
+            leaves,
+        )
+
+        self.assertEqual(result, {})
 
     def test_equivalence_candidates_reject_missing_leaf_after_correction(self) -> None:
         builder = self._builder()

@@ -268,6 +268,7 @@ def _tree_manager_config(config: ResolvedBuildConfig) -> TreeManagerConfig:
             equiv_max_groups_per_parent=config.tree_equiv_max_groups_per_parent,
             equiv_allow_singleton_groups=config.tree_equiv_allow_singleton_groups,
             equiv_min_lexical_similarity=config.tree_equiv_min_lexical_similarity,
+            equiv_max_candidate_pairs=config.tree_equiv_max_candidate_pairs,
             deterministic_prompts=config.tree_deterministic_prompts,
             discovery_seed=config.tree_discovery_seed,
             prompt_fingerprint_version=config.tree_prompt_fingerprint_version,

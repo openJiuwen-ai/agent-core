@@ -23,9 +23,12 @@ class TreeBuilderConfigTests(unittest.TestCase):
         self.assertFalse(TreeBuildConfig().equiv_grouping_enabled)
         self.assertFalse(BuildConfig().tree_equiv_grouping_enabled)
         self.assertFalse(resolve_build_config().tree_equiv_grouping_enabled)
-        self.assertEqual(TreeBuildConfig().equiv_min_lexical_similarity, 0.0)
-        self.assertEqual(BuildConfig().tree_equiv_min_lexical_similarity, 0.0)
-        self.assertEqual(resolve_build_config().tree_equiv_min_lexical_similarity, 0.0)
+        self.assertEqual(TreeBuildConfig().equiv_min_lexical_similarity, 0.12)
+        self.assertEqual(BuildConfig().tree_equiv_min_lexical_similarity, 0.12)
+        self.assertEqual(resolve_build_config().tree_equiv_min_lexical_similarity, 0.12)
+        self.assertEqual(TreeBuildConfig().equiv_max_candidate_pairs, 240)
+        self.assertEqual(BuildConfig().tree_equiv_max_candidate_pairs, 240)
+        self.assertEqual(resolve_build_config().tree_equiv_max_candidate_pairs, 240)
 
     def test_dynamic_tree_config_derives_thresholds_from_branching_factor(self) -> None:
         config = DynamicTreeConfig(branching_factor=10, max_depth=4)

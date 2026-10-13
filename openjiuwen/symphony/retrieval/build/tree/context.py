@@ -21,6 +21,7 @@ class TreeBuildSettings:
     equiv_max_groups_per_parent: int
     equiv_allow_singleton_groups: bool
     equiv_min_lexical_similarity: float
+    equiv_max_candidate_pairs: int
     deterministic_prompts: bool
     discovery_seed: int
     prompt_fingerprint_version: str
@@ -53,6 +54,7 @@ class TreeBuildSettings:
                 0.0,
                 min(1.0, float(build_config.equiv_min_lexical_similarity)),
             ),
+            equiv_max_candidate_pairs=max(0, int(build_config.equiv_max_candidate_pairs)),
             deterministic_prompts=build_config.deterministic_prompts,
             discovery_seed=build_config.discovery_seed,
             prompt_fingerprint_version=build_config.prompt_fingerprint_version,

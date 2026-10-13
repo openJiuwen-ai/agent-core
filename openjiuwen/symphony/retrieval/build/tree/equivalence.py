@@ -40,13 +40,19 @@ class TreeBuilderEquivalenceMixin(TreeBuilderMixin):
         verbose: bool = False,
     ) -> dict:
         """Recall candidate groups, verify their pairs, then form deterministic components."""
-        candidate_groups = self._discover_equivalence_candidates(second_leaf_node, leaf_children, verbose)
-        if not candidate_groups:
-            return {}
-
         leaf_map = {leaf.id: leaf for leaf in leaf_children}
-        candidate_pairs = self._candidate_pairs_from_groups(leaf_map, candidate_groups)
-        decisions = self._judge_candidate_pairs(second_leaf_node, leaf_map, candidate_pairs)
+        try:
+            candidate_groups = self._discover_equivalence_candidates(second_leaf_node, leaf_children, verbose)
+            if not candidate_groups:
+                return {}
+            candidate_pairs = self._candidate_pairs_from_groups(leaf_map, candidate_groups, verbose=verbose)
+            decisions = self._judge_candidate_pairs(second_leaf_node, leaf_map, candidate_pairs, verbose=verbose)
+        except ValueError as error:
+            if verbose:
+                console.print(
+                    f"[yellow]  Equivalence grouping failed for '{second_leaf_node.id}': {error}[/yellow]"
+                )
+            return {}
         components = self._equivalent_components(sorted(leaf_map), decisions)
         final_groups: dict[str, dict] = {}
         for group_index, component in enumerate(components, start=1):
@@ -122,6 +128,7 @@ class TreeBuilderEquivalenceMixin(TreeBuilderMixin):
         self,
         leaf_map: dict[str, TreeNode],
         candidate_groups: dict,
+        verbose: bool = False,
     ) -> list[tuple[str, str]]:
         candidate_pairs: set[tuple[str, str]] = set()
         for _, candidate_data in self._iter_group_items(candidate_groups):
@@ -136,15 +143,50 @@ class TreeBuilderEquivalenceMixin(TreeBuilderMixin):
                 if leaf_id in leaf_map:
                     member_ids.add(leaf_id)
             candidate_pairs.update(combinations(sorted(member_ids), 2))
-        return sorted(candidate_pairs)
+        pairs = sorted(candidate_pairs)
+        max_pairs = self.settings.equiv_max_candidate_pairs
+        if 0 < max_pairs < len(pairs):
+            if verbose:
+                console.print(
+                    f"[yellow]  Candidate pairs reduced from {len(pairs)} to {max_pairs} by lexical prescreen[/yellow]"
+                )
+            pairs = self._prescreen_pairs_by_similarity(leaf_map, pairs, max_pairs)
+        return pairs
+
+    @staticmethod
+    def _prescreen_pairs_by_similarity(
+        leaf_map: dict[str, TreeNode],
+        pairs: list[tuple[str, str]],
+        max_pairs: int,
+    ) -> list[tuple[str, str]]:
+        """Keep the most lexically similar pairs when the candidate total exceeds the configured cap."""
+        token_map = {
+            leaf_id: TreeBuilderEquivalenceMixin._leaf_similarity_tokens(leaf)
+            for leaf_id, leaf in leaf_map.items()
+        }
+
+        def similarity(pair: tuple[str, str]) -> float:
+            left_tokens = token_map[pair[0]]
+            right_tokens = token_map[pair[1]]
+            union = left_tokens | right_tokens
+            return (len(left_tokens & right_tokens) / len(union)) if union else 1.0
+
+        ranked = sorted(pairs, key=lambda pair: (-similarity(pair), pair))
+        return sorted(ranked[:max_pairs])
 
     def _judge_candidate_pairs(
         self,
         parent: TreeNode,
         leaf_map: dict[str, TreeNode],
         pairs: list[tuple[str, str]],
+        verbose: bool = False,
     ) -> dict[tuple[str, str], dict]:
         decisions: dict[tuple[str, str], dict] = {}
+        if verbose and pairs:
+            batch_count = (len(pairs) + _PAIRWISE_BATCH_SIZE - 1) // _PAIRWISE_BATCH_SIZE
+            console.print(
+                f"[dim]  Pairwise equivalence for '{parent.id}': {len(pairs)} pairs in {batch_count} batches[/dim]"
+            )
         for start in range(0, len(pairs), _PAIRWISE_BATCH_SIZE):
             end = start + _PAIRWISE_BATCH_SIZE
             batch = pairs[start:end]
@@ -445,6 +487,12 @@ class TreeBuilderEquivalenceMixin(TreeBuilderMixin):
         return refined
 
     @staticmethod
+    def _leaf_similarity_tokens(leaf: TreeNode) -> set[str]:
+        text = f"{leaf.id} {leaf.name} {leaf.description}"
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower())
+        return {word for word in words if word not in _GENERIC_TERMS}
+
+    @staticmethod
     def _connected_leaf_components(
         leaf_nodes: list[TreeNode],
         threshold: float,
@@ -453,12 +501,9 @@ class TreeBuilderEquivalenceMixin(TreeBuilderMixin):
         if len(leaf_nodes) <= 1:
             return [leaf_nodes]
 
-        def tokens(leaf: TreeNode) -> set[str]:
-            text = f"{leaf.id} {leaf.name} {leaf.description}"
-            words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", text.lower())
-            return {word for word in words if word not in _GENERIC_TERMS}
-
-        token_map = {leaf.id: tokens(leaf) for leaf in leaf_nodes}
+        token_map = {
+            leaf.id: TreeBuilderEquivalenceMixin._leaf_similarity_tokens(leaf) for leaf in leaf_nodes
+        }
         index = {leaf.id: leaf for leaf in leaf_nodes}
         adj: dict[str, set[str]] = {leaf.id: set() for leaf in leaf_nodes}
 
