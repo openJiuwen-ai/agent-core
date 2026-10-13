@@ -14,6 +14,7 @@ from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
+from openjiuwen.core.single_agent.skills.skill_observer import SkillDirectoryObserver
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.skills import (
     build_all_mode_skill_prompt,
@@ -63,6 +64,7 @@ class SkillUseRail(DeepAgentRail):
         disabled_skills: Optional[Union[str, List[str]]] = None,
         evolution_store: Optional[EvolutionStore] = None,
         multimodal_skill_mode: str = "hint",
+        skill_observer: Optional[SkillDirectoryObserver] = None,
     ):
         """Initialize SkillUseRail.
 
@@ -78,6 +80,7 @@ class SkillUseRail(DeepAgentRail):
             disabled_skills: Optional deny-list of skill names. Supports str or List[str].
             evolution_store: Optional EvolutionStore for progressive disclosure experience text.
             multimodal_skill_mode: ``hint`` (default), ``attach``, or ``branch``.
+            skill_observer: Optional host hook for local skill document discovery.
         """
         super().__init__()
 
@@ -96,6 +99,7 @@ class SkillUseRail(DeepAgentRail):
         self.disabled_skills = self._normalize_name_set(disabled_skills)
         self.evolution_store: Optional[EvolutionStore] = evolution_store
         self.multimodal_skill_mode = multimodal_skill_mode
+        self.skill_observer = skill_observer
 
         self.skills: List[Skill] = []
         self.system_prompt_builder = None
@@ -155,6 +159,8 @@ class SkillUseRail(DeepAgentRail):
 
     async def _prepare_skills(self) -> None:
         """Refresh skills incrementally from skills_dir and apply filters."""
+        if self.skill_observer is not None:
+            await self.skill_observer.scan(self._normalize_skill_dirs(self.skills_dir))
         if not self.enable_cache:
             self._skill_cache.clear()
             self._skill_update_at.clear()
@@ -906,11 +912,15 @@ class SkillUseRail(DeepAgentRail):
     async def load_skills_from_dir(
         cls,
         skills_dir: Union[str, List[str]],
+        *, skill_observer: Optional[SkillDirectoryObserver] = None,
     ) -> List[Skill]:
         """Load skills from one or more skills directories."""
         roots = cls._normalize_skill_dirs(skills_dir)
         if not roots:
             raise ValueError("skills_dir is empty")
+
+        if skill_observer is not None:
+            await skill_observer.scan(roots)
 
         skill_map: Dict[str, Skill] = {}
 

@@ -11,9 +11,18 @@ This module provides functionality for:
 from openjiuwen.core.single_agent.skills.skill_util import SkillUtil
 from openjiuwen.core.single_agent.skills.skill_manager import SkillManager
 from openjiuwen.core.single_agent.skills.remote_skill_util import GitHubTree, RemoteSkillUtil
+from openjiuwen.core.single_agent.skills.skill_observer import (
+    SkillDirectoryObserver, SkillDiscoveryEvent, SkillDiscoveryHook, SkillDocumentSnapshot,
+    read_skill_document,
+)
 
 
 __all__ = [
+    "SkillDirectoryObserver",
+    "SkillDiscoveryEvent",
+    "SkillDiscoveryHook",
+    "SkillDocumentSnapshot",
+    "read_skill_document",
     'SkillUtil',
     "SkillManager",
     "GitHubTree",
