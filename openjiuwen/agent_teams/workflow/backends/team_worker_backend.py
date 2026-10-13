@@ -688,11 +688,13 @@ class TeamWorkerBackend(AgentBackend):
             was requested). Structured output is read off the
             ``StructuredOutputTool`` instance by :meth:`run`, not from this value.
         """
+        from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
         from openjiuwen.agent_teams.workflow.backends._member_spec import (
             derive_member_build_context,
             derive_member_spec,
         )
+        from openjiuwen.harness.execution_subject import execution_subject_scope
 
         if self._worker_base_spec is None:
             raise BackendError("TeamWorkerBackend requires a worker_base_spec to build a worker harness")
@@ -764,7 +766,17 @@ class TeamWorkerBackend(AgentBackend):
                 team_id=self._team_name,
                 kv_cache_runtime=self._kv_cache_runtime,
             )
-            result = await harness.run_once(user_prompt, team_session=team_session)
+            # Run under the worker's own trajectory subject so its records group
+            # into a lane of their own instead of the leader's (the engine runs
+            # inside the leader's tool call and would otherwise inherit it).
+            worker_subject = team_member_execution_subject(
+                session_id=self._session_id or "",
+                team_name=self._team_name,
+                member_name=member_name,
+                display_name=label or member_name,
+            )
+            with execution_subject_scope(worker_subject):
+                result = await harness.run_once(user_prompt, team_session=team_session)
         except Exception as e:
             team_logger.exception("worker harness run_once failed for %s", member_name)
             raise BackendError(f"worker harness run_once failed for {member_name}: {e}") from e

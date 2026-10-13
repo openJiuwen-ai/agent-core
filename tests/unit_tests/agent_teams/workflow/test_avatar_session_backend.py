@@ -1260,3 +1260,40 @@ def test_session_avatar_rail_emits_paired_activity_with_agent_id_and_correlation
     assert len(second) == 2 and all(e.correlation_id == "review:sre:1" for e in second)
 
 
+
+
+def test_agent_session_avatar_starts_under_its_own_trajectory_subject(monkeypatch):
+    """The avatar's supervisor starts under a ``team_member`` subject named by its label."""
+    from openjiuwen.agent_teams.harness import team_harness as th_mod
+    from openjiuwen.harness.execution_subject import current_execution_subject
+
+    start_subjects: list = []
+
+    class _SubjectRecordingHarness(_FakeHarness):
+        async def start(self, *, team_session=None) -> None:
+            start_subjects.append(current_execution_subject())
+            await super().start(team_session=team_session)
+
+    def _fake_build(*, agent_spec, role, member_name, build_context=None, **kw):
+        h = _SubjectRecordingHarness()
+        h.member_name = member_name
+        h.spec = agent_spec
+        return h
+
+    monkeypatch.setattr(th_mod.TeamHarness, "build", _fake_build)
+
+    async def scenario():
+        mgr = _mgr(session_id="product-sess")
+        sid = await mgr.open_session(kind="agent", instructions="", opts={"label": "sre"})
+        await mgr.send_turn(sid, "first", {"label": "sre"}, None)
+        await mgr.aclose()
+        return sid
+
+    sid = asyncio.run(scenario())
+
+    subject = start_subjects[0]
+    assert subject.subject_id == f"team-member:product-sess:t:{sid}"
+    assert subject.display_name == "sre"
+    assert subject.kind == "team_member"
+    assert subject.session_id == "product-sess"
+    assert current_execution_subject() is None

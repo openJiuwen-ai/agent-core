@@ -849,8 +849,15 @@ class AgentConfigurator:
             # Human-session avatars derive from the human_agent spec; fall back to
             # the raw worker base so human_session still works when no dedicated
             # human_agent spec is configured (it just lacks human-tuned desc).
+            # Like the worker base, it mounts the observability rail pair so
+            # the avatar's records carry an agent span in the trajectory.
+            human_base = base_specs.get("human_agent") or base_specs.get("teammate") or base_specs.get("leader")
             swarmflow_human_base_spec = (
-                base_specs.get("human_agent") or base_specs.get("teammate") or base_specs.get("leader")
+                human_base.model_copy(
+                    update={"rails": list(human_base.rails or []) + member_observability_rail_specs},
+                )
+                if human_base is not None
+                else None
             )
 
             from openjiuwen.agent_teams.workflow.concurrency import (

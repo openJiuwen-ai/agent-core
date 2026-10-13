@@ -834,7 +834,9 @@ class AvatarSessionManager:
         id), before that call ever happens. ``compact_split`` / direction then
         drive ``compact_context`` on the child's own native.
         """
+        from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+        from openjiuwen.harness.execution_subject import execution_subject_scope
 
         model = self._resolve_model(opts.get("model"))
         spec = derive_member_spec(
@@ -918,7 +920,17 @@ class AvatarSessionManager:
                 product_session_id=self._session_id,
                 evict_on_finish=False,
             )
-            await harness.start(team_session=team_session)
+            # The supervisor task spawned by ``start`` drives every later turn
+            # and copies the context it is created in, so binding the avatar's
+            # trajectory subject around ``start`` covers the whole session.
+            avatar_subject = team_member_execution_subject(
+                session_id=self._session_id or "",
+                team_name=self._team_name,
+                member_name=state.member_name,
+                display_name=opts.get("label") or state.member_name,
+            )
+            with execution_subject_scope(avatar_subject):
+                await harness.start(team_session=team_session)
             if fork_data is not None and fork_data.get("messages"):
                 await self._seed_fork_context(harness, state, fork_data)
             await harness.subscribe(

@@ -1045,3 +1045,49 @@ def test_external_worker_binds_activity_sink_with_node_identity(monkeypatch):
     )
     assert result.text == "ext"
     assert binds == [(sink, "n1", "run", "x", None)]
+
+
+def test_execute_worker_runs_under_its_own_trajectory_subject(monkeypatch):
+    """A native worker runs under a ``team_member`` subject shown by its call label."""
+    from openjiuwen.agent_teams.harness import team_harness as th_mod
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.harness.execution_subject import current_execution_subject
+
+    run_subjects: list = []
+
+    class _FakeHarness:
+        async def run_once(self, content, **kw):
+            run_subjects.append(current_execution_subject())
+            return {"output": "ok", "result_type": "answer"}
+
+        def add_rail(self, rail):
+            return None
+
+        async def dispose(self):
+            return None
+
+    monkeypatch.setattr(th_mod.TeamHarness, "build", lambda **kw: _FakeHarness())
+
+    backend = TeamWorkerBackend(
+        model=None,
+        worker_base_spec=DeepAgentSpec(tools=[]),
+        team_name="t",
+        session_id="product-sess",
+    )
+    asyncio.run(
+        backend._execute_worker(
+            "t",
+            [],
+            member_name="wf-compute-0",
+            has_schema=False,
+            model=None,
+            label="compute",
+        )
+    )
+
+    subject = run_subjects[0]
+    assert subject.subject_id == "team-member:product-sess:t:wf-compute-0"
+    assert subject.display_name == "compute"
+    assert subject.kind == "team_member"
+    assert subject.session_id == "product-sess"
+    assert current_execution_subject() is None
