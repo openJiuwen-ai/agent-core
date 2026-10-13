@@ -1,5 +1,7 @@
 # Persistent Agent 开发计划
 
+## 1. 这份计划怎么读和维护
+
 | 项 | 内容 |
 | --- | --- |
 | 用途 | 在一个文档中列出要开发的特性、先后顺序和进度 |
@@ -11,7 +13,7 @@
 | 本轮安排 | 按 2026-10-09 确认的分工推进 PA-05～PA-08、PA-10～PA-12、PA-14～PA-18、PA-23；PA-07 单列模块。PA-09、PA-13、PA-22、主动学习 PA-19～PA-21、执行模式 PA-24～PA-26 暂不开发，条目和完整验收要求保留，暂缓项不出现在本轮分工图中 |
 | 当前进度 | 共 6/26 项完成：本期 6/20、学习扩展 0/3、执行模式扩展 0/3；PA-01～PA-03 已按各自独立验收边界完成，PA-04 已按架构设计收敛已实现的契约，M0 完成；PA-05 已用测试替身完成组件验收，正式入口在 PA-09、PA-10 接入前明确拒绝，M1 集成仍待开发；PA-07 已完成群消息参与判断的组件验收，AgentServer 联调仍待进行 |
 
-## 1. 怎么读这份计划
+### 1.1 范围、约束与术语
 
 Persistent Agent 接收一次已经确定归属的任务，在对应会话中运行 Agent，并把执行过程和结果交还给调用方。本模块提供运行对象的构造入口及会话内隔离能力；**AgentServer 决定何时、为哪个 Session 创建实例**，并负责实例调度。同一业务 Agent 可以拥有多个 Session；一个运行实例在同一时刻只处理一个 Session，并行的 Session 使用不同实例。业务 Agent 的身份创建、配置发布、会话排队、群内模型调用额度管理、管理查询、定时计划的创建与触发、结果投递和产品页面均属 AgentServer 等其他层，不列入本清单。定时触发已形成的普通任务可由本模块执行。
 
@@ -26,7 +28,7 @@ Persistent Agent 接收一次已经确定归属的任务，在对应会话中运
 - 同一 Request 的所有 Execution（含确认恢复、崩溃续做、非确认暂停后继续）使用同一版本的 Spec，包括确认规则和工具定义；由 AgentServer 保留并传入原配置（架构设计 §13 第 4 条），本模块按执行上下文中的配置指纹校验。资料授权和知识版本则在每个 Execution 开始时重新解析，二者不混用。
 - DeepAgent 的构造、任务循环、模型与工具调用、流式输出、中断恢复、权限确认和子代理运行时作为复用基础；AgentServer 提供调度、单一执行者保证、预算、记账与执行日志存储、群聊记录、窗口存储后端和投递。本模块实现上下文管理及这些能力的执行侧适配。
 
-每行只回答三件事：**做什么、怎样证明做成、开工前必须完成什么**。验收场景可以先用模拟调用方和模拟存储验证；“完成”仍需留下测试或联调证据。“开工硬前置”只列缺少它就无法独立实现当前特性的本模块能力，不把最终联调所需的所有特性都列为开工条件。可并行启动时间和联调汇合点见第 3 节。当前特性 ID 为 `PA-01`～`PA-26`。2026-10-08 仅调整编号与排列：旧 PA-22 移至 PA-04；旧 PA-04～PA-21 顺延为 PA-05～PA-22；PA-01～PA-03、PA-23～PA-26 不变。特性内容、依赖关系、负责人、完成状态和交付范围不变，当前编号引用同步更新。历史变更记录和第 6 节保留当时编号，不用于当前认领。PA-22 单列跨资料来源的失效管理，避免重复建设知识读取或通用上下文引擎。PA-04 承接架构设计对已实现契约的调整；PA-23 由历史 PA-11（当前 PA-12）拆出，负责群聊记录检索。PA-24～PA-26 承接 PA-05 一期未开放的执行模式。
+每项只回答三件事：**做什么、怎样证明做成、开工前必须完成什么**。验收场景可以先用模拟调用方和模拟存储验证；“完成”仍需留下测试或联调证据。“开工硬前置”只列缺少它就无法独立实现当前特性的本模块能力，不把最终联调所需的所有特性都列为开工条件。可并行启动时间和联调汇合点见第 3 节。当前特性 ID 为 `PA-01`～`PA-26`。2026-10-08 仅调整编号与排列：旧 PA-22 移至 PA-04；旧 PA-04～PA-21 顺延为 PA-05～PA-22；PA-01～PA-03、PA-23～PA-26 不变。特性内容、依赖关系、负责人、完成状态和交付范围不变，当前编号引用同步更新。附录 B.1 的历史变更记录和附录 B.2保留当时编号，不用于当前认领。PA-22 单列跨资料来源的失效管理，避免重复建设知识读取或通用上下文引擎。PA-04 承接架构设计对已实现契约的调整；PA-23 由历史 PA-11（当前 PA-12）拆出，负责群聊记录检索。PA-24～PA-26 承接 PA-05 一期未开放的执行模式。
 
 本文使用的几个词：
 
@@ -40,41 +42,118 @@ Persistent Agent 接收一次已经确定归属的任务，在对应会话中运
 | 执行日志 | AgentServer 保存的事件流，记录每次 Execution 做过什么；崩溃续做时是进度的唯一来源 |
 | 宿主端口 | AgentServer 提供的记账与执行日志、群聊记录、预算、知识和窗口存储后端等接口；本计划只实现 Persistent Agent 对这些接口的使用 |
 
-状态使用“待开始、进行中、阻塞、待验收、完成”。“完成”须有对应验收证据；仅写了代码但没有完成验证时标“待验收”。交付分类与开发状态分别记录：第 2 节 A、B、C 组属于本期，D 组属于独立学习扩展，E 组属于后续执行模式扩展；未排入本期不等于阻塞或完成。
+状态使用“待开始、进行中、阻塞、待验收、完成、暂不开发”。“完成”须有对应验收证据；仅写了代码但没有完成验证时标“待验收”。交付分类与开发状态分别记录：第 2 节 A、B、C 组属于本期，D 组属于独立学习扩展，E 组属于后续执行模式扩展；未排入本期不等于阻塞或完成。
 
 构造约束：只继承配置类，不继承运行类。PersistentAgentSpec 继承 DeepAgentSpec，使用单份扁平配置；不新增 PersistentAgent 运行类、DeepAgent 运行子类或 Agent 门面。PA-02 返回原生 DeepAgent，专属字段及调用依赖见 [F_01](../features/F_01_spec-and-deep-agent-construction.md)。PA-01～PA-03 已在本模块约定范围内完成；这不表示宿主运行时、存储后端或 PA-05 执行链路已经接入。
 
+### 1.2 待确认事项
+
+架构设计附录 C 的待确认事项在相关特性开工前与对端确认：本期不支持跨进程部署；归档保留期（影响 PA-11、PA-12）和确认超时时长（影响 PA-09）由 AgentServer 按 Agent 配置决定；系统提示词中 `tools` 片段随工具列表变化的问题，在 PA-06 中以固定工具列表规避。
+
+架构设计尚未覆盖、需先补充设计并确认的事项：
+
+- **容量边界**（影响 PA-06、PA-11、PA-17、PA-18）：70% 阈值只在两次模型调用之间检查，挡不住单个或多个工具结果一次性超限、续做时注入的日志和背景超限，以及摘要调用自身的输入超限。需在架构设计中补充：容量计算包含哪些开销、各检查点放在哪里、超大结果如何以引用加必要内容进入窗口。确认前，上述特性的容量相关验收不能关闭。
+- **写操作的声明来源**（影响 PA-15）：已确定由 agent-core 内部精确工具名白名单声明；仅 `read_file`、`list_files` 精确命中才按只读处理，不额外校验实现类；其他一律按写操作处理，ToolCard 不增加副作用字段。具体分类和宿主持久化边界见 [F_15](../features/F_15_tool-intent-before-side-effect.md)。
+
 ## 2. 要开发的特性
 
-### A. 本期：能创建、能执行一次任务
+**A. 本期：能创建、能执行一次任务**
 
-| ID | 特性：要做什么 | 怎样证明做成 | 开工硬前置 | 状态 | 负责人 | 证据 |
-| --- | --- | --- | --- | --- | --- | --- |
-| PA-01 | 定义本期调用及宿主端口契约 | Agent、Session、Request、Execution 与来源关联可校验；缺身份、权限、有效执行权或必需接口时得到明确错误；超时和结果未知不被当作“没有数据”。接口覆盖窗口、资料版本、控制、预算与提交确认，恢复扩展不作为本期完成条件 | 无 | 已完成 | yan_zj | 契约层完成：执行身份含稳定来源和不进入业务 DTO 的宿主 authority handle；基础端口缺失 / 错形状会在 DeepAgent 构造前失败；事件、提交、控制、预算、窗口与版本化资料结果区分 unknown 和有完整查询依据的 empty / not_found。代码：`openjiuwen/harness/persistent_agent/persistent_agent/schema/execution.py:13,19,23`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/protocol.py:27,33,43`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/context.py:16,37,60,82,109,150,164`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/events.py:181,206,225`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/port_results.py:18,63,102,129,152`、`openjiuwen/harness/persistent_agent/persistent_agent/ports.py:26,36,41,45,50,63,68,73,79,89`；测试：`tests/unit_tests/harness/persistent_agent/test_protocol.py:81,91`、`tests/unit_tests/harness/persistent_agent/test_construction.py:152,167`。真实端口后端、运行时权限核验、超时转换和受控写入属于 PA-05 / PA-10～PA-13，不包含在本项。架构设计影响：架构设计附录 E 所列端口、事件、执行上下文及窗口 / 资料结构的调整由 PA-04 承接，本项完成状态与证据保留。 |
-| PA-02 | 提供 Persistent Agent 运行对象的构造入口 | 复用 `DeepAgentSpec` 的 parts / Config 装配及原生 `DeepAgent` 运行类，校验宿主固定配置并绑定本次执行上下文；有效配置可创建对象，缺少必需能力时创建失败；构造本身不运行任务，不另建运行类 | PA-01 | 已完成 | yan_zj | 有效配置返回原生 `DeepAgent`；缺失四个基础端口或注入错形状 ContextStore 时，在 `DeepAgentSpec.build` 前失败；构造不调用模型 / 端口。代码：`openjiuwen/harness/persistent_agent/persistent_agent/schema/spec.py:21,70`、`openjiuwen/harness/persistent_agent/persistent_agent/factory.py:20`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/build_context.py:73,93`、`openjiuwen/harness/persistent_agent/persistent_agent/ports.py:79,89`、`openjiuwen/harness/schema/deep_agent_spec.py:524,600,635`；测试：`tests/unit_tests/harness/persistent_agent/test_construction.py:110,152,167`。正式宿主 providers 与执行入口不属于构造验收，仍待 PA-05。 |
-| PA-03 | 固定实例的 Session 归属并隔离内部状态 | 实例接收指定 Session 的调用后，消息、工具上下文、取消信号和清理范围只归该 Session；向活动实例传入另一 Session 会报错，不会读写原 Session 的状态 | PA-02 | 已完成 | yan_zj | 内部原生调用接缝校验固定 Session / Execution / Agent / owner，拒绝错配和同实例并发；隔离取消、owner 工具清理，并等待 Persistent 专用流生产者及原生 Session 收尾退出。代码：`openjiuwen/harness/persistent_agent/persistent_agent/execution/binding.py:41,57,70,97,116,126,137,161`、`openjiuwen/harness/persistent_agent/persistent_agent/execution/stream_lifecycle.py:9,17,57`、`openjiuwen/harness/deep_agent.py:3025,3411`、`openjiuwen/core/single_agent/agents/react_agent.py:2939,3057`、`openjiuwen/core/common/stream_lifecycle.py:8`；测试：`tests/unit_tests/harness/persistent_agent/test_binding.py:188,250,301,327,376`。个人版默认不注入该生命周期分支。PA-05 的正式入口以及通过该入口的 task-loop / 惰性子代理集成验收仍待完成。 |
-| PA-04 | 按架构设计收敛已实现的契约 | `ExecutionContext` 按架构设计简化 `epoch`、`authority_handle`，保留 `recovery_ref`，明确崩溃续做与非确认暂停后继续均引用原任务待接续的 Execution，不新增 `continuation`；`PersistentPorts` 移除 `ExecutionAuthority` 与 `ControlPort`，`CommitPort` 改为 `record(event)`，普通事件接收入队后返回，普通日志允许缺失、不阻塞关键事件；关键事件等待自身落盘，final 还须确认所引用候选输出已可靠保存，并增加按产生顺序读取的 `read_execution_log(execution_id)`；`ContextStore`、`HistoryPort` 不再作为对外端口、改为注入必需的窗口存储后端（`BaseKVStore`，构造时校验契约，不读写存储；专用 SysOperation 文件系统后端不在本期范围），`GroupMaterialPort` 替换为 `GroupChatPort`（`recent_messages`、`search_messages` 及架构设计 §7.9 的消息结构），保留预算与知识端口；`AgentEvent` 按架构设计 §9.2 收敛为 11 类，`tool.intent`、`tool.completed`、`execution.paused` 补齐架构设计要求的字段；暂停原因固定为 `awaiting_confirmation / stopped / budget_denied / context_unfit / error` 并校验负载，暂停收尾与事件映射留给 PA-05；`window.switched` 只定义旧窗归档引用和新窗序号；`schema/context.py` 删除带版本和条件更新的窗口结构，新增群消息结构，`MaterialQuery / MaterialSnapshot / MaterialReadResult` 只用于知识端口；完整会话状态记录和归档结构分别随 PA-10、PA-11 定义，不在本项预设；不再使用的端口结果同步删减，群聊和知识端口仍区分“确定没有”与“没查完或失败”；构造的必需端口检查和现有测试随之更新，个人版行为不变。只调整契约，不实现事件队列或 PA-18 的恢复行为 | PA-01 | 已完成 | Song Haoran | 契约按架构设计收敛：执行上下文去掉 epoch / authority_handle，recovery_ref 不能指向本次执行；端口收敛为必需的 commit（record / read_execution_log）、budget、window_backend（BaseKVStore）和可选的 group_chat、knowledge；事件收敛为 11 类并固定五种暂停原因；新增群消息结构，删除旧窗口、提交、执行权和控制结构。代码：`openjiuwen/harness/persistent_agent/persistent_agent/ports.py`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/{execution,protocol,events,port_results,context}.py`、`openjiuwen/harness/persistent_agent/__init__.py`；测试：`tests/unit_tests/harness/persistent_agent/{test_protocol,test_construction,test_binding}.py`，PA 包 173 passed（协议 99、构造 40、绑定 34）；F_01～F_03 共享回归 213 passed；改动范围 Ruff check / format 通过。设计与验证见 [F_04](../features/F_04_contract-convergence.md)。事件映射、记账调用、暂停收尾及窗口存储读写不属于本项，分别归 PA-05、PA-10、PA-11 |
-| PA-05 | 提供执行、恢复与控制入口，复用 DeepAgent 单轮执行并交接过程事件 | `execute_persistent_request(spec, context, inputs: RequestInput)` 与 `resume_persistent_request(spec, context, confirm_reply: ConfirmReply)` 组合构造、`stream_bound` 与 `close_bound`，不另写推理循环；`abort_persistent_request(context, reason=cancel / stop)` 先记录原因再复用 `abort_bound` 请求中断，结束事件统一由执行入口发出：cancel 产出 `final(cancelled)`，stop 产出 `paused(stopped)`，重复控制幂等、首个原因保留，尚未进入原生调用时在模型或工具调用前检查并收尾；原生调用退出、确定执行结果后同步锁定结局，锁定前接受的控制参与判定，锁定后不再接受停止或取消、不修改控制原因、不调用 `abort_bound`，锁定不代表持久化成功；异常退出进入清理前同样关闭控制接收。`RequestInput`、`ConfirmReply` 按架构设计 §5.1 校验：群消息在 PA-07 接入前明确拒绝；`continue_instruction` 只能随 `recovery_ref` 出现，带 `recovery_ref` 的执行在 PA-18 接入前明确拒绝；交互回复只校验结构、交互 ID 属于当前等待现场且不重复、答案键对应原问题，所属 Request 与回复目标取自等待现场，无效回复只拒绝本次恢复，不保存、不记账。一期只开放单轮执行：Spec 须显式填写 `enable_task_loop=False`，不启用任何子代理（含 `add_general_purpose_agent`），配置声明与装配结果都检查，不支持的模式在执行前拒绝。checkpointer 按 Session 注入 `NoopCheckpointer` 隔离，执行前检查，不符合就拒绝开始；正常完成、确认暂停与恢复、停止、取消、异常及提前关闭流时，checkpointer 旧状态不覆盖 WindowStore 加载的状态，不经 checkpointer 恢复或保存，原生生命周期与清理照常，个人版不变。原生流式输出映射为 `execution.started`、`reply.delta`、`progress.updated`、`model.completed`、`output.proposed`、`execution.paused / final` 并带 Request / Execution 关联；所有事件统一 await record，普通事件失败只记诊断，关键记账失败停止当前执行并由入口抛出异常。每次模型调用前 `admit`、调用后 `report`：拒绝准入时不调用模型并产出 `paused(budget_denied)`，`admit` 抛异常产出 `paused(error)`，`report` 抛异常只记诊断。最终回答生成一条 `output.proposed`（稳定 output_id、target 为 `reply_target`、share_mode=message）并列入 `final.output_refs`，收尾顺序为“交出候选 → 整理窗口 → 保存会话状态记录 → 记账 final → 清理”；中间结论、工具日志和错误文本不作为回答；事件同时受字符数和完整事件字节数限制，`reply.delta` 按两条限额拆分且拼接后与原文一致，最终答案超限时改判 `paused(error)`，完整答案交给会话状态记录保存（PA-10），只有容量超限改判暂停。原生运行错误（含 `result_type="error"`、最大迭代次数耗尽）默认 `paused(error)`，`final(failed)` 只用于明确终结依据；会话状态加载 / 保存失败及关键记账失败向外抛运行异常，原生内部吞掉的关键失败仍保留分类、阻止后续模型与工具调用并抛出；输入、Spec 或能力不合法抛校验拒绝。调用方契约见架构设计 §13 第 12、13 条（持续消费事件流、入口异常核对）。正式入口只开放已接入并验证的能力：会话状态记录（PA-10）接入前不能执行、不降级为空窗口；组件验收使用测试替身，与 M1 集成验收分开，M1 集成后再声明 `execution` 能力 | PA-02、PA-04 | 已完成 | Song Haoran、Chen Ran | 组件验收完成：三个入口、`RequestInput` / `ConfirmReply`、事件映射与记账、预算准入与用量回报（`PersistentModelCallRail`）、结局判定、最终回答交接、确认恢复校验、停止与取消、提前关闭流和 checkpointer 隔离均有测试；会话状态记录与交互适配经接入点用替身验证，正式入口在 PA-10、PA-09 接入前明确拒绝，`execution` 能力待 M1 集成后声明。代码：`openjiuwen/harness/persistent_agent/persistent_agent/execution/{entries,emitter,control,model_rail,seams}.py`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/{request,spec}.py`、`openjiuwen/harness/persistent_agent/__init__.py`；共享接缝 `openjiuwen/core/session/agent.py`、`openjiuwen/core/session/checkpointer/noop.py`；测试：`tests/unit_tests/harness/persistent_agent/{test_entries,test_request}.py`，PA 包 249 passed（含结局锁定与审计修复），`tests/unit_tests/harness` 与 `tests/unit_tests/core/session` 联合回归 5863 passed / 39 skipped；此前共享回归 213 passed。设计与验证见 [F_05](../features/F_05_execution-entries.md)，共享 Session 接缝见 harness [F_07](../../../docs/features/F_07_session-checkpointer-injection.md) |
-| PA-06 | 按 Execution 生命周期组织上下文 | 不挂载 ContextAssembleRail、PersonalContextRail 和 ContextProcessorRail 的默认压缩链；一次 Execution 内系统提示词和工具定义不变。Execution 开始时，在已保存的窗口末尾依次追加本次执行头、临时背景块（最近群消息：按会话游标增量读取并从触发消息位置回补，合并去重、排除触发消息，含被忽略的消息，游标取服务端确认的扫描位置；知识导航随 PA-13、续做日志随 PA-18 接入）和任务输入；新任务按正常输入追加，崩溃续做与非确认暂停后继续统一使用“续做”执行头并注明 recovery_ref 指向的 execution_id，重新注入原任务输入，有继续指示时一并追加；旧中断状态由 PA-18 在追加前处理，正常确认恢复不追加任何内容；执行中只追加，动态内容经 PromptAttachmentManager 的增量通道追加；排队中的消息只作背景，不成为当前指令；构造时拒绝三个上下文 rail 和按条数截断窗口的参数；加载后发现等待中的调用或未配对的工具调用时校验拒绝 | PA-04 | 待验收 | Song Haoran、Chen Ran | 组件验收完成，容量相关验收待“容量边界”对齐后关闭。代码：`execution/window_assembly.py`、`schema/integration.py`、`schema/spec.py`；测试：`test_window_assembly.py`；设计与验证见 [F_06](../features/F_06_window-assembly.md) |
-| PA-07 | 判断是否参与一条群消息 | 人类与其他 Agent 消息走同一判断流程，保留发送者、@、回复关系及附件依据；被 @ 可忽略，未被 @ 可回复或介入。判断是一次独立的轻量模型调用，只带职责、当前消息和少量最近群消息，不加载或写入窗口，不开放写工具；忽略时记账 `execution.final(ignored)`，不产生公开回复、正式任务或改写当前工作目标，被忽略的消息不进入窗口；判断失败有限次重试后报失败，不记为忽略；私聊和已受理定时任务走直接执行路径 | PA-04 | 已完成 | Chang Yucong | 组件验收完成：群消息在加载窗口和构造 DeepAgent 之前，经 `GroupChatPort.recent_messages` 做一次无工具模型调用；缺少群端口时在事件之前拒绝。被 @ 仍可忽略，未被 @ 可回应或插话；忽略只记 `participation.decided` 与 `execution.final(ignored)`，不产生 `output.proposed`，不写窗口。格式错误、模型异常和群记录 `incomplete` 重试 3 次后记 `failed`；预算拒绝记 `paused(budget_denied)` 且不调用模型。私聊和定时任务不进入判断。不调用尚未实现的 `group_message_reader`。代码：`openjiuwen/harness/persistent_agent/persistent_agent/execution/{participation.py,entries.py}`；测试：`tests/unit_tests/harness/persistent_agent/test_entries.py`，PA 包 289 passed。设计与验证见 [F_07](../features/F_07_group-participation.md)。群记录存储（PA-23）、窗口写入（PA-06、PA-10）、候选发送（PA-08）和 AgentServer 联调不在本项。 |
-| PA-08 | 可靠交接候选回复和文件结果 | 群聊与其他回复从同一事件出口返回，以稳定 output_id 关联候选内容、来源和目标；私有判断、工具明细与模型片段不直接作为群公开回复。文件须注明目标群及“上传群空间”或“发到群内”的共享方式；`output.proposed` 入队后返回，`execution.final` 记账成功时其 output_refs 引用的候选内容与交接信息已可靠保存；缺少被引用候选时 final 失败，可按原 event_id / output_id 重交，不得删除引用后宣告完成；无关普通日志缺失不阻塞交接，再由服务端处理；交接不等于已送达，办公空间保存不等于群内可见；与宿主验证重复交接不重复投递，投递失败只重试发送、不重跑任务；超过事件文本上限（65536 字符）的最终回答目前以 `paused(error)` 结束，拆成多条候选或转为文件交接在本项确定（见 [F_05](../features/F_05_execution-entries.md) 已知遗留） | PA-01 | 待开始 | Song Haoran、Chen Ran | — |
-| PA-09 | 复用 PermissionInterruptRail 处理用户确认，并响应停止与取消 | 确认完全复用 harness 的 `PermissionInterruptRail` 与原生中断恢复，不新写确认 rail；Spec 新增 `permissions` 字段（复用 `PermissionsSection`，构造时传入 DeepAgent 配置并纳入指纹），提供 `describe_confirmable_operations(spec)`；判定 ask 时保存含中断状态的会话状态记录，并同步记账 `execution.paused(awaiting_confirmation)`（附被拦截的工具名和参数）；`resume_persistent_request` 由新实例放回记录、以 `ConfirmReply` 作为恢复输入，不向窗口追加任何内容；`ConfirmReply` 的权限确认项在恢复入口统一转换：同意为 `approved=True`，同意并本会话记住为 `approved=True, auto_confirm=True, persist_allow=False`，拒绝为 `approved=False` 并附反馈，其他组合（含 `auto_confirm=True` 而 `persist_allow` 为空或为真）一律拒绝，不能进入永久允许分支；同意时执行被拦截的调用（写操作照常先记账），拒绝时把反馈作为工具结果，权限确认超时按拒绝处理；主动提问回复（AskUserRail）转换为 `AskUserPayload.answers`，允许部分回答和自由文本，漏答的问题填“（未回答）”，`outcome=timed_out` 时每个问题填“（超时未获得回答）”，原生 rail 不重复提问，不扩展原生类型，Agent 不猜测缺失信息；本会话记住的选择写入 `INTERRUPT_AUTO_CONFIRM_KEY` 并随记录保存，同一 Session 在新 Execution、新实例中仍有效，其他 Session 不继承，不写入全局权限配置或权限 YAML；取消（`abort_persistent_request(reason="cancel")`）时保存记录并记账 `final(cancelled)`，停止（`reason="stop"`）时保存记录并记账 `paused(stopped)`；补充消息一律作为新 Request，不使用 follow_up / steer；续做中的询问复用 AskUserRail | PA-05、PA-10 | 待开始 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+### PA-01 定义本期调用及宿主端口契约
+
+- **验收标准（怎样证明做成）：** Agent、Session、Request、Execution 与来源关联可校验；缺身份、权限、有效执行权或必需接口时得到明确错误；超时和结果未知不被当作“没有数据”。接口覆盖窗口、资料版本、控制、预算与提交确认，恢复扩展不作为本期完成条件
+- **开工硬前置：** 无
+
+### PA-02 提供 Persistent Agent 运行对象的构造入口
+
+- **验收标准（怎样证明做成）：** 复用 `DeepAgentSpec` 的 parts / Config 装配及原生 `DeepAgent` 运行类，校验宿主固定配置并绑定本次执行上下文；有效配置可创建对象，缺少必需能力时创建失败；构造本身不运行任务，不另建运行类
+- **开工硬前置：** PA-01
+
+### PA-03 固定实例的 Session 归属并隔离内部状态
+
+- **验收标准（怎样证明做成）：** 实例接收指定 Session 的调用后，消息、工具上下文、取消信号和清理范围只归该 Session；向活动实例传入另一 Session 会报错，不会读写原 Session 的状态
+- **开工硬前置：** PA-02
+
+### PA-04 按架构设计收敛已实现的契约
+
+- **验收标准（怎样证明做成）：** `ExecutionContext` 按架构设计简化 `epoch`、`authority_handle`，保留 `recovery_ref`，明确崩溃续做与非确认暂停后继续均引用原任务待接续的 Execution，不新增 `continuation`；`PersistentPorts` 移除 `ExecutionAuthority` 与 `ControlPort`，`CommitPort` 改为 `record(event)`，普通事件接收入队后返回，普通日志允许缺失、不阻塞关键事件；关键事件等待自身落盘，final 还须确认所引用候选输出已可靠保存，并增加按产生顺序读取的 `read_execution_log(execution_id)`；`ContextStore`、`HistoryPort` 不再作为对外端口、改为注入必需的窗口存储后端（`BaseKVStore`，构造时校验契约，不读写存储；专用 SysOperation 文件系统后端不在本期范围），`GroupMaterialPort` 替换为 `GroupChatPort`（`recent_messages`、`search_messages` 及架构设计 §7.9 的消息结构），保留预算与知识端口；`AgentEvent` 按架构设计 §9.2 收敛为 11 类，`tool.intent`、`tool.completed`、`execution.paused` 补齐架构设计要求的字段；暂停原因固定为 `awaiting_confirmation / stopped / budget_denied / context_unfit / error` 并校验负载，暂停收尾与事件映射留给 PA-05；`window.switched` 只定义旧窗归档引用和新窗序号；`schema/context.py` 删除带版本和条件更新的窗口结构，新增群消息结构，`MaterialQuery / MaterialSnapshot / MaterialReadResult` 只用于知识端口；完整会话状态记录和归档结构分别随 PA-10、PA-11 定义，不在本项预设；不再使用的端口结果同步删减，群聊和知识端口仍区分“确定没有”与“没查完或失败”；构造的必需端口检查和现有测试随之更新，个人版行为不变。只调整契约，不实现事件队列或 PA-18 的恢复行为
+- **开工硬前置：** PA-01
+
+### PA-05 提供执行、恢复与控制入口，复用 DeepAgent 单轮执行并交接过程事件
+
+- **验收标准（怎样证明做成）：** `execute_persistent_request(spec, context, inputs: RequestInput)` 与 `resume_persistent_request(spec, context, confirm_reply: ConfirmReply)` 组合构造、`stream_bound` 与 `close_bound`，不另写推理循环；`abort_persistent_request(context, reason=cancel / stop)` 先记录原因再复用 `abort_bound` 请求中断，结束事件统一由执行入口发出：cancel 产出 `final(cancelled)`，stop 产出 `paused(stopped)`，重复控制幂等、首个原因保留，尚未进入原生调用时在模型或工具调用前检查并收尾；原生调用退出、确定执行结果后同步锁定结局，锁定前接受的控制参与判定，锁定后不再接受停止或取消、不修改控制原因、不调用 `abort_bound`，锁定不代表持久化成功；异常退出进入清理前同样关闭控制接收。`RequestInput`、`ConfirmReply` 按架构设计 §5.1 校验：群消息在 PA-07 接入前明确拒绝；`continue_instruction` 只能随 `recovery_ref` 出现，带 `recovery_ref` 的执行在 PA-18 接入前明确拒绝；交互回复只校验结构、交互 ID 属于当前等待现场且不重复、答案键对应原问题，所属 Request 与回复目标取自等待现场，无效回复只拒绝本次恢复，不保存、不记账。一期只开放单轮执行：Spec 须显式填写 `enable_task_loop=False`，不启用任何子代理（含 `add_general_purpose_agent`），配置声明与装配结果都检查，不支持的模式在执行前拒绝。checkpointer 按 Session 注入 `NoopCheckpointer` 隔离，执行前检查，不符合就拒绝开始；正常完成、确认暂停与恢复、停止、取消、异常及提前关闭流时，checkpointer 旧状态不覆盖 WindowStore 加载的状态，不经 checkpointer 恢复或保存，原生生命周期与清理照常，个人版不变。原生流式输出映射为 `execution.started`、`reply.delta`、`progress.updated`、`model.completed`、`output.proposed`、`execution.paused / final` 并带 Request / Execution 关联；所有事件统一 await record，普通事件失败只记诊断，关键记账失败停止当前执行并由入口抛出异常。每次模型调用前 `admit`、调用后 `report`：拒绝准入时不调用模型并产出 `paused(budget_denied)`，`admit` 抛异常产出 `paused(error)`，`report` 抛异常只记诊断。最终回答生成一条 `output.proposed`（稳定 output_id、target 为 `reply_target`、share_mode=message）并列入 `final.output_refs`，收尾顺序为“交出候选 → 整理窗口 → 保存会话状态记录 → 记账 final → 清理”；中间结论、工具日志和错误文本不作为回答；事件同时受字符数和完整事件字节数限制，`reply.delta` 按两条限额拆分且拼接后与原文一致，最终答案超限时改判 `paused(error)`，完整答案交给会话状态记录保存（PA-10），只有容量超限改判暂停。原生运行错误（含 `result_type="error"`、最大迭代次数耗尽）默认 `paused(error)`，`final(failed)` 只用于明确终结依据；会话状态加载 / 保存失败及关键记账失败向外抛运行异常，原生内部吞掉的关键失败仍保留分类、阻止后续模型与工具调用并抛出；输入、Spec 或能力不合法抛校验拒绝。调用方契约见架构设计 §13 第 12、13 条（持续消费事件流、入口异常核对）。正式入口只开放已接入并验证的能力：会话状态记录（PA-10）接入前不能执行、不降级为空窗口；组件验收使用测试替身，与 M1 集成验收分开，M1 集成后再声明 `execution` 能力
+- **开工硬前置：** PA-02、PA-04
+
+### PA-06 按 Execution 生命周期组织上下文
+
+- **验收标准（怎样证明做成）：** 不挂载 ContextAssembleRail、PersonalContextRail 和 ContextProcessorRail 的默认压缩链；一次 Execution 内系统提示词和工具定义不变。Execution 开始时，在已保存的窗口末尾依次追加本次执行头、临时背景块（最近群消息：按会话游标增量读取并从触发消息位置回补，合并去重、排除触发消息，含被忽略的消息，游标取服务端确认的扫描位置；知识导航随 PA-13、续做日志随 PA-18 接入）和任务输入；新任务按正常输入追加，崩溃续做与非确认暂停后继续统一使用“续做”执行头并注明 recovery_ref 指向的 execution_id，重新注入原任务输入，有继续指示时一并追加；旧中断状态由 PA-18 在追加前处理，正常确认恢复不追加任何内容；执行中只追加，动态内容经 PromptAttachmentManager 的增量通道追加；排队中的消息只作背景，不成为当前指令；构造时拒绝三个上下文 rail 和按条数截断窗口的参数；加载后发现等待中的调用或未配对的工具调用时校验拒绝
+- **开工硬前置：** PA-04
+
+### PA-07 判断是否参与一条群消息
+
+- **验收标准（怎样证明做成）：** 人类与其他 Agent 消息走同一判断流程，保留发送者、@、回复关系及附件依据；被 @ 可忽略，未被 @ 可回复或介入。判断是一次独立的轻量模型调用，只带职责、当前消息和少量最近群消息，不加载或写入窗口，不开放写工具；忽略时记账 `execution.final(ignored)`，不产生公开回复、正式任务或改写当前工作目标，被忽略的消息不进入窗口；判断失败有限次重试后报失败，不记为忽略；私聊和已受理定时任务走直接执行路径
+- **开工硬前置：** PA-04
+
+### PA-08 可靠交接候选回复和文件结果
+
+- **验收标准（怎样证明做成）：** 群聊与其他回复从同一事件出口返回，以稳定 output_id 关联候选内容、来源和目标；私有判断、工具明细与模型片段不直接作为群公开回复。文件须注明目标群及“上传群空间”或“发到群内”的共享方式；`output.proposed` 入队后返回，`execution.final` 记账成功时其 output_refs 引用的候选内容与交接信息已可靠保存；缺少被引用候选时 final 失败，可按原 event_id / output_id 重交，不得删除引用后宣告完成；无关普通日志缺失不阻塞交接，再由服务端处理；交接不等于已送达，办公空间保存不等于群内可见；与宿主验证重复交接不重复投递，投递失败只重试发送、不重跑任务；超过事件文本上限（65536 字符）的最终回答目前以 `paused(error)` 结束，拆成多条候选或转为文件交接在本项确定（见 [F_05](../features/F_05_execution-entries.md) 已知遗留）
+- **开工硬前置：** PA-01
+
+### PA-09 复用 PermissionInterruptRail 处理用户确认，并响应停止与取消
+
+- **验收标准（怎样证明做成）：** 确认完全复用 harness 的 `PermissionInterruptRail` 与原生中断恢复，不新写确认 rail；Spec 新增 `permissions` 字段（复用 `PermissionsSection`，构造时传入 DeepAgent 配置并纳入指纹），提供 `describe_confirmable_operations(spec)`；判定 ask 时保存含中断状态的会话状态记录，并同步记账 `execution.paused(awaiting_confirmation)`（附被拦截的工具名和参数）；`resume_persistent_request` 由新实例放回记录、以 `ConfirmReply` 作为恢复输入，不向窗口追加任何内容；`ConfirmReply` 的权限确认项在恢复入口统一转换：同意为 `approved=True`，同意并本会话记住为 `approved=True, auto_confirm=True, persist_allow=False`，拒绝为 `approved=False` 并附反馈，其他组合（含 `auto_confirm=True` 而 `persist_allow` 为空或为真）一律拒绝，不能进入永久允许分支；同意时执行被拦截的调用（写操作照常先记账），拒绝时把反馈作为工具结果，权限确认超时按拒绝处理；主动提问回复（AskUserRail）转换为 `AskUserPayload.answers`，允许部分回答和自由文本，漏答的问题填“（未回答）”，`outcome=timed_out` 时每个问题填“（超时未获得回答）”，原生 rail 不重复提问，不扩展原生类型，Agent 不猜测缺失信息；本会话记住的选择写入 `INTERRUPT_AUTO_CONFIRM_KEY` 并随记录保存，同一 Session 在新 Execution、新实例中仍有效，其他 Session 不继承，不写入全局权限配置或权限 YAML；取消（`abort_persistent_request(reason="cancel")`）时保存记录并记账 `final(cancelled)`，停止（`reason="stop"`）时保存记录并记账 `paused(stopped)`；补充消息一律作为新 Request，不使用 follow_up / steer；续做中的询问复用 AskUserRail
+- **开工硬前置：** PA-05、PA-10
+
 
 PA-02 只验证构造入口；PA-03 验证实例内部的归属校验与状态隔离；PA-04 先把已实现的契约与架构设计对齐；PA-05 验证执行与恢复入口到事件出口的完整链路。PA-05 不重写 DeepAgent 的任务循环或另建一套流式输出；事件映射及按事件级别等待入队或落盘由 Persistent Agent 适配。AgentServer 负责调用执行与恢复入口、保证同一 Session 同时只有一个执行者、为并行 Session 分配不同实例并管理实例生命周期；PA-03 不实现这些调度工作。群内模型调用额度由 AgentServer 管理，本模块仅遵守宿主准入结果并回传实际用量，不维护预算账户。
 
-### B. 本期：能记住工作内容并读取资料
+**B. 本期：能记住工作内容并读取资料**
 
-| ID | 特性：要做什么 | 怎样证明做成 | 开工硬前置 | 状态 | 负责人 | 证据 |
-| --- | --- | --- | --- | --- | --- | --- |
-| PA-10 | 加载与保存会话状态记录 | 实现内部组件 `WindowStore` 的 `load_state / save_state`，后端使用服务端注入的 `BaseKVStore`，不放在办公空间或 Agent 工具可访问的 SysOperation 中；不使用 checkpointer（执行路径的隔离由 PA-05 实现），加载后的状态不被 checkpointer 中的旧状态覆盖；在本项定义会话状态记录的结构、白名单字段和序列化方式，保存当前窗口、中断状态、本会话确认选择及可选的 DeepAgent 运行状态，以及 PA-05 交来的结束信息（`ExecutionEnding`，含超出事件容量、尚未交接的完整最终答案 `pending_answer`，须原样保存，供 PA-08 继续交接、不重跑已完成业务），所有字段一次写入；Session 首次执行创建空窗口，后续 Execution 加载同一 Session 的当前窗口，新 Session 不继承其他 Session 的记录；结束时整理窗口（删除临时背景块、执行头压缩为一行、追加执行结束标记；等待确认时末尾的工具调用不动、结束标记记在记录元信息），覆盖保存后再记账；保存和恢复群消息游标（服务端确认的扫描位置）；停止时保存真实执行事实，保存时保证窗口可以安全追加：缺失结果的工具调用补一条 `stopped_tool_placeholder` 标记的结果（执行已停止、结果未取得、实际效果需核实），已有真实结果保留，原生自带的“已中断”结果不重复补位，正常等待确认的调用不补位；加载已知停止的旧记录时同样幂等修补；“停止 → 保存 → 重新加载 → 执行下一任务”列为联调验收；加载失败不开始执行，保存失败按崩溃续做处理 | PA-04 | 待开始 | Song Haoran、Chen Ran | — |
-| PA-11 | 容量达到 70% 时归档并换窗 | 在本项定义完整归档记录与归档索引的结构和序列化方式；在两次模型调用之间、工具调用与结果成对完整后触发；先把旧窗同步归档到 `WindowStore`（带 session_id、窗口序号、execution_id、覆盖的 request_id，并写入归档索引），归档失败不换窗；再申请额度生成旧窗摘要，组装新窗（摘要、task_plan、未完成写操作、归档引用、重新注入的执行头和任务输入、最近几轮原文）替换 ContextEngine 中的上下文，记录 `window.switched`；可重新获取的内容只存来源引用，无法重新获取的保存原文；新窗最小必要内容仍放不下时产出 `paused(context_unfit)` 并说明原因，不静默截断；新窗随本次 Execution 结束保存 | PA-10 | 待开始 | Yan Zhijun | — |
-| PA-12 | 检索本 Session 的历史窗口归档 | 提供 `search_session_history` 工具，经 `WindowStore` 的 `search` 只检索本 Session 的归档，本期按关键词匹配（读取索引后逐份扫描）；`list_archives` 可按 execution_id 查出归档供续做使用；结果区分找到、确定没有、没查完或失败，不以摘要替代原文证据；不与群聊检索合并 | PA-11 | 待开始 | Yan Zhijun | — |
-| PA-23 | 读取与检索群聊记录 | 经 `GroupChatPort` 在 Execution 开始和参与判断时读取最近群消息：按会话状态记录中的游标增量获取，并以触发消息为游标回补触发消息之后至本次读取上界的消息，两部分合并去重并排除触发消息（验收示例：R2 由 M120 触发，R1 执行期间 M130 补充了 R2 的要求，R1 结束时游标为 M180，R2 的背景须包含 M130）；返回服务端确认已扫描到的位置 `scanned_through` 作为新游标，正文暂缺（`unavailable`）不卡住游标，查询失败或进度不可信时不返回位置；区分永久不可读与查询失败；提供 `search_group_messages` 工具供模型按需搜索；消息带稳定发送者身份、服务端接收时间、@、回复、附件引用和状态，已撤回的不返回正文，排队中的请求只作背景；结果区分找到、确定没有、没查完或失败；私聊 Session 不需要该端口 | PA-04 | 待开始 | Yan Zhijun | — |
-| PA-13 | 读取 PersonalContext 的授权知识版本 | 不挂载 PersonalContextRail；经 `KnowledgePort` 在 Execution 开始时解析一次授权范围和知识版本，知识导航放入临时背景块，执行中不刷新，正文由模型按需读取；无权限与不存在可区分；发布或授权变化在下一个 Execution 生效，并向 PA-22 提供来源依赖及失效信息 | PA-04 | 待开始 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
-| PA-14 | 按调用授权读取办公空间文件 | 复用 Workspace 与文件工具，能列出和读取当前授权范围内文件并保留来源及观察到的内容版本；越界路径、其他 Session 私有目录被拒绝；权限未知不读取 | PA-01 | 进行中 | Yan Zhijun | agent-core 组件已实现：`WorkspaceReadScope` / `WorkspaceAccessPort` 绑定 `ExecutionContext` 的 Agent、Session、principal 和 `policy_revision`；`resolve_read_path` 做相对路径、越界、兄弟 Session 私有目录与符号链接检查，`PersistentWorkspaceReadRail` 复用 Harness 的 `ReadFileTool` / `ListDirTool`，读取结果补充逻辑路径、`source_refs`、观察版本和完整性，`unknown` / `forbidden` 在后端访问前失败。代码：`openjiuwen/harness/persistent_agent/persistent_agent/workspace/access.py:18,67,75`、`openjiuwen/harness/persistent_agent/persistent_agent/workspace/path_policy.py:36,100`、`openjiuwen/harness/persistent_agent/persistent_agent/workspace/file_access.py:187`、`openjiuwen/harness/persistent_agent/persistent_agent/tools/workspace_read.py:43,153`、`openjiuwen/harness/persistent_agent/persistent_agent/{ports.py:99,105,schema/build_context.py:84,schema/spec.py:29,53}`；测试：`tests/unit_tests/harness/persistent_agent/test_workspace_access.py:95,114,126,139,155`、`tests/unit_tests/harness/persistent_agent/test_workspace_path_policy.py:35,47,70,77,88,105`、`tests/unit_tests/harness/persistent_agent/test_workspace_read_rail.py:108,129,146`、`tests/unit_tests/harness/persistent_agent/test_workspace_read_tools.py:83,110,127,148,170,189`，定向测试 24 passed、1 skipped（2 个既有 Pydantic 弃用警告）。设计与验证见 [F_14](../features/F_14_workspace-file-read.md)；JiuwenSwarm 侧 `WorkspaceAccessPort`、目录授权映射和跨仓联调尚未完成，PA-15 / PA-16 不因本项提前开放 |
-| PA-15 | 写操作执行前同步记账意图 | 由 agent-core 内部精确工具名白名单判定副作用：精确命中 `read_file`、`list_files` 才按只读；名单外、未知、自定义和 MCP 工具均按有副作用处理。写操作执行前产出 `tool.intent`（operation_id、工具名、目标、参数哈希及敏感参数脱敏后的可读摘要）并同步记账，按架构设计 §9.1 等待本条意图落盘，不因前序普通日志缺失而失败，成功才执行，失败停止当前执行；所有工具调用结束后产出 `tool.completed`（工具名、可读参数摘要、成功 / 失败 / 未知、必填的非空白结果摘要（所有状态均需提供，约 500 字以内）、可选的结果引用）；确认恢复后的写操作同样先记账；Persistent 不另加查询或重试，结果不明交 PA-18 的续做规则处理。与原生 ToolCallResilienceRail 衔接：只重试显式声明 `idempotent=True` 的工具；重试会再次触发工具调用前的回调，同一工具调用沿用原 operation_id，不重复登记意图 | PA-04 | 进行中 | Yan Zhijun | agent-core 已新增精确只读名单 `read_file` / `list_files`、并为 Persistent Agent 装配 `PersistentToolIntentRail`；写意图先等待关键事件记账，失败设置 fatal 并 force-finish 原生工具回调，且在意图等待返回后复查共享停止状态，阻断并行兄弟调用；完成事件带稳定 `operation_id`，确认中断 / 拒绝前不记账，确认恢复后再过写前屏障；Persistent 侧仅显式 `idempotent=True` 保留重试。代码：`persistent_agent/tools/effect_policy.py`、`persistent_agent/execution/tool_intent_rail.py`、`persistent_agent/schema/spec.py`；测试：`test_effect_policy.py`、`test_tool_intent_rail.py`、`test_entries.py`、`test_workspace_read_rail.py`，PA 包 325 passed / 1 skipped，共享重试 Rail 11 passed。JiuwenSwarm 的真实 `CommitPort.record` 持久化确认与跨仓联调尚未完成，PA-15 保持进行中，PA-16 不因此提前放行；详见 [F_15](../features/F_15_tool-intent-before-side-effect.md) |
-| PA-16 | 适配办公空间文件修改 | 复用文件工具按授权创建和修改文件，写入前按 PA-15 记账意图；会话草稿放在 `sessions/<session_id>/` 下，其他 Session 不能访问；两个任务同时改同一文件时冲突可识别；文件落盘不等于任务完成，也不等于群内可见，任务失败不自动回滚文件 | PA-14、PA-15 | 进行中 | Yan Zhijun | agent-core 已实现 `WorkspaceWriteScope` / `WorkspaceWriteAccessPort`、逻辑路径和 Session 隔离、Persistent 文件访问模块、条件哈希写入与条件创建；默认个人版 / DeepAgent 不装配 `workspace_write`，保留原 Write/Edit 路径。测试覆盖授权失败关闭、意图记账顺序、同版本并发更新 / 创建冲突和默认工具兼容性；PA-16 与底层条件写入定向测试 80 passed / 3 skipped，另有 1 个既有 Windows 锁清理时序测试单独排除；Harness Grep 5 个 Windows shell allowlist 失败与本项无关。JiuwenSwarm 的真实写授权端口、Session 目录映射、SysOperation / Sandbox provider 和 AgentServer 联调尚未完成，故不标完成。详见 [F_16](../features/F_16_workspace-file-write.md) |
-| PA-22 | 跟踪上下文来源版本并处理失效内容 | 对消息、历史归档、文件、知识及派生摘要记录来源依赖；资料更新和撤权在下一个 Execution 生效：临时背景块每次按最新版本重新注入，归档中可重新获取的内容只存来源引用、读取时重新检查权限；执行中不改写系统提示词和工具定义，执行中立即生效列为后续扩展（架构设计附录 D）；权限或版本无法确认时不读取 | PA-04 | 待开始 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+### PA-10 加载与保存会话状态记录
+
+- **验收标准（怎样证明做成）：** 实现内部组件 `WindowStore` 的 `load_state / save_state`，后端使用服务端注入的 `BaseKVStore`，不放在办公空间或 Agent 工具可访问的 SysOperation 中；不使用 checkpointer（执行路径的隔离由 PA-05 实现），加载后的状态不被 checkpointer 中的旧状态覆盖；在本项定义会话状态记录的结构、白名单字段和序列化方式，保存当前窗口、中断状态、本会话确认选择及可选的 DeepAgent 运行状态，以及 PA-05 交来的结束信息（`ExecutionEnding`，含超出事件容量、尚未交接的完整最终答案 `pending_answer`，须原样保存，供 PA-08 继续交接、不重跑已完成业务），所有字段一次写入；Session 首次执行创建空窗口，后续 Execution 加载同一 Session 的当前窗口，新 Session 不继承其他 Session 的记录；结束时整理窗口（删除临时背景块、执行头压缩为一行、追加执行结束标记；等待确认时末尾的工具调用不动、结束标记记在记录元信息），覆盖保存后再记账；保存和恢复群消息游标（服务端确认的扫描位置）；停止时保存真实执行事实，保存时保证窗口可以安全追加：缺失结果的工具调用补一条 `stopped_tool_placeholder` 标记的结果（执行已停止、结果未取得、实际效果需核实），已有真实结果保留，原生自带的“已中断”结果不重复补位，正常等待确认的调用不补位；加载已知停止的旧记录时同样幂等修补；“停止 → 保存 → 重新加载 → 执行下一任务”列为联调验收；加载失败不开始执行，保存失败按崩溃续做处理
+- **开工硬前置：** PA-04
+
+### PA-11 容量达到 70% 时归档并换窗
+
+- **验收标准（怎样证明做成）：** 在本项定义完整归档记录与归档索引的结构和序列化方式；在两次模型调用之间、工具调用与结果成对完整后触发；先把旧窗同步归档到 `WindowStore`（带 session_id、窗口序号、execution_id、覆盖的 request_id，并写入归档索引），归档失败不换窗；再申请额度生成旧窗摘要，组装新窗（摘要、task_plan、未完成写操作、归档引用、重新注入的执行头和任务输入、最近几轮原文）替换 ContextEngine 中的上下文，记录 `window.switched`；可重新获取的内容只存来源引用，无法重新获取的保存原文；新窗最小必要内容仍放不下时产出 `paused(context_unfit)` 并说明原因，不静默截断；新窗随本次 Execution 结束保存
+- **开工硬前置：** PA-10
+
+### PA-12 检索本 Session 的历史窗口归档
+
+- **验收标准（怎样证明做成）：** 提供 `search_session_history` 工具，经 `WindowStore` 的 `search` 只检索本 Session 的归档，本期按关键词匹配（读取索引后逐份扫描）；`list_archives` 可按 execution_id 查出归档供续做使用；结果区分找到、确定没有、没查完或失败，不以摘要替代原文证据；不与群聊检索合并
+- **开工硬前置：** PA-11
+
+### PA-23 读取与检索群聊记录
+
+- **验收标准（怎样证明做成）：** 经 `GroupChatPort` 在 Execution 开始和参与判断时读取最近群消息：按会话状态记录中的游标增量获取，并以触发消息为游标回补触发消息之后至本次读取上界的消息，两部分合并去重并排除触发消息（验收示例：R2 由 M120 触发，R1 执行期间 M130 补充了 R2 的要求，R1 结束时游标为 M180，R2 的背景须包含 M130）；返回服务端确认已扫描到的位置 `scanned_through` 作为新游标，正文暂缺（`unavailable`）不卡住游标，查询失败或进度不可信时不返回位置；区分永久不可读与查询失败；提供 `search_group_messages` 工具供模型按需搜索；消息带稳定发送者身份、服务端接收时间、@、回复、附件引用和状态，已撤回的不返回正文，排队中的请求只作背景；结果区分找到、确定没有、没查完或失败；私聊 Session 不需要该端口
+- **开工硬前置：** PA-04
+
+### PA-13 读取 PersonalContext 的授权知识版本
+
+- **验收标准（怎样证明做成）：** 不挂载 PersonalContextRail；经 `KnowledgePort` 在 Execution 开始时解析一次授权范围和知识版本，知识导航放入临时背景块，执行中不刷新，正文由模型按需读取；无权限与不存在可区分；发布或授权变化在下一个 Execution 生效，并向 PA-22 提供来源依赖及失效信息
+- **开工硬前置：** PA-04
+
+### PA-14 按调用授权读取办公空间文件
+
+- **验收标准（怎样证明做成）：** 复用 Workspace 与文件工具，能列出和读取当前授权范围内文件并保留来源及观察到的内容版本；越界路径、其他 Session 私有目录被拒绝；权限未知不读取
+- **开工硬前置：** PA-01
+
+### PA-15 写操作执行前同步记账意图
+
+- **验收标准（怎样证明做成）：** 由 agent-core 内部精确工具名白名单判定副作用：精确命中 `read_file`、`list_files` 才按只读；名单外、未知、自定义和 MCP 工具均按有副作用处理。写操作执行前产出 `tool.intent`（operation_id、工具名、目标、参数哈希及敏感参数脱敏后的可读摘要）并同步记账，按架构设计 §6.2 等待本条意图落盘，不因前序普通日志缺失而失败，成功才执行，失败停止当前执行；所有工具调用结束后产出 `tool.completed`（工具名、可读参数摘要、成功 / 失败 / 未知、必填的非空白结果摘要（所有状态均需提供，约 500 字以内）、可选的结果引用）；确认恢复后的写操作同样先记账；Persistent 不另加查询或重试，结果不明交 PA-18 的续做规则处理。与原生 ToolCallResilienceRail 衔接：只重试显式声明 `idempotent=True` 的工具；重试会再次触发工具调用前的回调，同一工具调用沿用原 operation_id，不重复登记意图
+- **开工硬前置：** PA-04
+
+### PA-16 适配办公空间文件修改
+
+- **验收标准（怎样证明做成）：** 复用文件工具按授权创建和修改文件，写入前按 PA-15 记账意图；会话草稿放在 `sessions/<session_id>/` 下，其他 Session 不能访问；两个任务同时改同一文件时冲突可识别；文件落盘不等于任务完成，也不等于群内可见，任务失败不自动回滚文件
+- **开工硬前置：** PA-14、PA-15
+
+### PA-22 跟踪上下文来源版本并处理失效内容
+
+- **验收标准（怎样证明做成）：** 对消息、历史归档、文件、知识及派生摘要记录来源依赖；资料更新和撤权在下一个 Execution 生效：临时背景块每次按最新版本重新注入，归档中可重新获取的内容只存来源引用、读取时重新检查权限；执行中不改写系统提示词和工具定义，执行中立即生效列为后续扩展（架构设计附录 D）；权限或版本无法确认时不读取
+- **开工硬前置：** PA-04
+
 
 文件只读与写入分开：PA-14 可以先交付；PA-16 在 PA-15 的意图记账就绪后再启用。写操作结果不明时，执行侧不查询、不自动重试，由 PA-18 的续做规则先查证，查不清再问发起人。
 
@@ -82,38 +161,64 @@ PA-12 与 PA-23 分开交付：历史窗口归档是 Agent 自己的工作过程
 
 PA-13 负责“授权知识如何读进来”，采集与发布由 PersonalContext 负责；PA-22 负责“已进入上下文的各类内容何时失效”，也覆盖非知识资料和派生摘要。PA-22 可先使用模拟片段与版本端口开发，与 PA-06、PA-12、PA-13、PA-23 在 M2a 验证整条失效链，与 PA-14～PA-16 在 M2b 验证文件变化和撤权；它不实现权限策略或另建知识库。续做时的资料装配随 PA-18 在 M2c 验证。
 
-### C. 本期：执行日志与续做
+**C. 本期：执行日志与续做**
 
 架构设计删除了 Checkpoint 和程序层面的精确恢复。PA-17、PA-18 保留编号，内容改为“执行日志 + 续做规则”，纳入本期。
 
-| ID | 特性：要做什么 | 怎样证明做成 | 开工硬前置 | 状态 | 负责人 | 证据 |
-| --- | --- | --- | --- | --- | --- | --- |
-| PA-17 | 读取并整理执行日志 | 事件流即执行日志，由服务端按 execution_id 和产生顺序保存，本模块不另写本地日志文件；崩溃续做和非确认暂停后继续都由程序调用 `read_execution_log(recovery_ref)`，只能读取同一 Session、同一 Request 的日志；读取已保存日志，按 local_seq 排序，允许缺口且非空不保证完整；缺少 tool.completed 的写操作标为有意图、无结果，不推断未执行；按架构设计 §9.3 整理成简短执行记录：丢弃 `reply.delta`、`model.completed`，按 operation_id 或工具调用 ID 合并意图与结果，保留中间结论，列出按 execution_id 查到的归档，过长时写操作一条不省略；读不到时提示“上一次记录缺失”，由 Agent 向发起人确认 | PA-04 | 待开始 | Song Haoran、Chen Ran | — |
-| PA-18 | 崩溃续做与非确认暂停后继续 | 进程崩溃、符合架构设计 §13 异常续做条件的入口中断及非确认暂停后继续，统一按架构设计 §11.2，由服务端沿用原 Request、新 execution_id 和指向该任务待接续执行的 `recovery_ref` 调用 `execute_persistent_request`，不新增 continuation 字段；加载 Session 最新会话状态记录，若带旧中断状态，先为每个缺少结果的工具调用补齐匹配 tool_call_id 的查证说明，已有真实结果不重复补齐，清除 `__react_agent_interruption__`、保留已保存的 `__interrupt_auto_confirm__`；再读取日志和归档，追加含恢复引用的续做执行头、进度摘要、原任务输入及继续指示。补结果只修复上下文，不记成实际工具执行的 tool.completed；正常确认恢复保留中断现场。续做规则写入提示词：已成功的步骤不重做，已登记意图但无结果的写操作（包括 tool.completed 日志缺失）先查证、查不清用 AskUserRail 问发起人，已产出最终结果的直接整理交出；停止后继续须明确请求；预算、容量或可恢复错误导致的暂停，在明确继续或服务端确认条件恢复后沿用同一流程，不新增恢复入口；所有续做即使窗口保存成功也读日志，中间执行过其他任务时仍加载最新窗口并查证当前状态；引用无法定位或日志缺失明确处理，不当作新任务直接重做 | PA-06、PA-10、PA-17 | 待开始 | Song Haoran、Chen Ran | — |
+### PA-17 读取并整理执行日志
+
+- **验收标准（怎样证明做成）：** 事件流即执行日志，由服务端按 execution_id 和产生顺序保存，本模块不另写本地日志文件；崩溃续做和非确认暂停后继续都由程序调用 `read_execution_log(recovery_ref)`，只能读取同一 Session、同一 Request 的日志；读取已保存日志，按 local_seq 排序，允许缺口且非空不保证完整；缺少 tool.completed 的写操作标为有意图、无结果，不推断未执行；按架构设计 §9.3 整理成简短执行记录：丢弃 `reply.delta`、`model.completed`，按 operation_id 或工具调用 ID 合并意图与结果，保留中间结论，列出按 execution_id 查到的归档，过长时写操作一条不省略；读不到时提示“上一次记录缺失”，由 Agent 向发起人确认
+- **开工硬前置：** PA-04
+
+### PA-18 崩溃续做与非确认暂停后继续
+
+- **验收标准（怎样证明做成）：** 进程崩溃、符合架构设计 §13 异常续做条件的入口中断及非确认暂停后继续，统一按架构设计 §11.2，由服务端沿用原 Request、新 execution_id 和指向该任务待接续执行的 `recovery_ref` 调用 `execute_persistent_request`，不新增 continuation 字段；加载 Session 最新会话状态记录，若带旧中断状态，先为每个缺少结果的工具调用补齐匹配 tool_call_id 的查证说明，已有真实结果不重复补齐，清除 `__react_agent_interruption__`、保留已保存的 `__interrupt_auto_confirm__`；再读取日志和归档，追加含恢复引用的续做执行头、进度摘要、原任务输入及继续指示。补结果只修复上下文，不记成实际工具执行的 tool.completed；正常确认恢复保留中断现场。续做规则写入提示词：已成功的步骤不重做，已登记意图但无结果的写操作（包括 tool.completed 日志缺失）先查证、查不清用 AskUserRail 问发起人，已产出最终结果的直接整理交出；停止后继续须明确请求；预算、容量或可恢复错误导致的暂停，在明确继续或服务端确认条件恢复后沿用同一流程，不新增恢复入口；所有续做即使窗口保存成功也读日志，中间执行过其他任务时仍加载最新窗口并查证当前状态；引用无法定位或日志缺失明确处理，不当作新任务直接重做
+- **开工硬前置：** PA-06、PA-10、PA-17
+
 
 PA-17 负责把上一次 Execution 的事件整理成 Agent 可读的执行记录；PA-18 负责统一续做、旧中断现场处理、注入内容和续做规则。两项分开，便于分别验证“日志整理”和“续做判断”。PA-04 只调整恢复引用与日志读取契约，旧中断状态处理不作为其完成前置。正常确认恢复由 PA-09 借助会话状态记录完成，不属于本组；子代理沿用 DeepAgent 现有实现，其写操作同样遵守 PA-15 的意图记账。AgentServer 负责停止记录、继续指示与原 Request 的关联及恢复引用选择，服务端事件队列也在对端实现。
 
-### D. 独立扩展：主动学习
+**D. 独立扩展：主动学习**
 
-| ID | 特性：要做什么 | 怎样证明做成 | 开工硬前置 | 状态 | 负责人 | 证据 |
-| --- | --- | --- | --- | --- | --- | --- |
-| PA-19 | 从工作记录中识别学习目标 | 只使用专门授权且已确认的记录；同一问题不反复创建目标 | PA-01 | 待开始 | zhaominjun1997 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
-| PA-20 | 跟踪学习内容的处理结果 | 能关联目标、来源和 PersonalContext 的处理批次；处理失败不能显示为知识已更新 | PA-19 | 待开始 | zhaominjun1997 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
-| PA-21 | 根据后续工作反馈调整学习目标 | 能记录“新知识是否有帮助”及依据；反馈只更新学习目标，不改写原任务记录 | PA-19 | 待开始 | zhaominjun1997 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+### PA-19 从工作记录中识别学习目标
+
+- **验收标准（怎样证明做成）：** 只使用专门授权且已确认的记录；同一问题不反复创建目标
+- **开工硬前置：** PA-01
+
+### PA-20 跟踪学习内容的处理结果
+
+- **验收标准（怎样证明做成）：** 能关联目标、来源和 PersonalContext 的处理批次；处理失败不能显示为知识已更新
+- **开工硬前置：** PA-19
+
+### PA-21 根据后续工作反馈调整学习目标
+
+- **验收标准（怎样证明做成）：** 能记录“新知识是否有帮助”及依据；反馈只更新学习目标，不改写原任务记录
+- **开工硬前置：** PA-19
+
 
 PA-19～PA-21 在独立学习作业中运行，不挤占业务会话，不作为本期核心交付前置。PA-13 的基础知识使用与 PA-22 的知识失效处理不依赖学习扩展完成。
 
-### E. 后续：执行模式扩展
+**E. 后续：执行模式扩展**
 
 PA-05 一期只开放单轮执行。以下执行模式各自验证生命周期、预算、记账、确认恢复和 checkpointer 隔离后逐项开放，不计入本期交付门槛。
 
-| ID | 特性：要做什么 | 怎样证明做成 | 开工硬前置 | 状态 | 负责人 | 证据 |
-| --- | --- | --- | --- | --- | --- | --- |
-| PA-24 | 开放 task-loop 执行模式 | 通过正式入口验证 task-loop 下的实例隔离、取消与停止收敛、确认恢复、异常清理、预算与记账，确认后台任务退出、其他 Session 不受影响，checkpointer 隔离成立；验证通过后 Persistent Spec 才允许 `enable_task_loop=True` | PA-05 | 待开始 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
-| PA-25 | 开放同步子代理 | 子代理在父 Request / Execution 内执行，预算、事件、意图记账（PA-15）和确认恢复经父执行汇聚；停止与取消收敛子代理，清理后无残留后台任务；验证通过后才允许配置同步子代理 | PA-05、PA-15 | 待开始 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
-| PA-26 | 开放异步及持久子代理 | 异步或持久子代理的后台任务归属、取消收敛、跨 Execution 状态及续做规则有明确设计并通过验证；验证通过后才允许 `enable_async_subagent` / `enable_subagent_runtime` | PA-25 | 待开始 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+### PA-24 开放 task-loop 执行模式
 
-## 3. 开发计划
+- **验收标准（怎样证明做成）：** 通过正式入口验证 task-loop 下的实例隔离、取消与停止收敛、确认恢复、异常清理、预算与记账，确认后台任务退出、其他 Session 不受影响，checkpointer 隔离成立；验证通过后 Persistent Spec 才允许 `enable_task_loop=True`
+- **开工硬前置：** PA-05
+
+### PA-25 开放同步子代理
+
+- **验收标准（怎样证明做成）：** 子代理在父 Request / Execution 内执行，预算、事件、意图记账（PA-15）和确认恢复经父执行汇聚；停止与取消收敛子代理，清理后无残留后台任务；验证通过后才允许配置同步子代理
+- **开工硬前置：** PA-05、PA-15
+
+### PA-26 开放异步及持久子代理
+
+- **验收标准（怎样证明做成）：** 异步或持久子代理的后台任务归属、取消收敛、跨 Execution 状态及续做规则有明确设计并通过验证；验证通过后才允许 `enable_async_subagent` / `enable_subagent_runtime`
+- **开工硬前置：** PA-25
+
+
+## 3. 特性依赖关系与并行开发
 
 以下按**交付节点和并行工作线**组织开发，不排具体日期或工期。完整交付分类仍为本期 20 项、独立学习扩展 3 项和执行模式扩展 3 项；本轮开发范围、暂缓项和负责人以第 3.2 节为准。节点表示可以交付、演示和验收的结果；工作线表示可以交给不同开发者同时推进的工作。纳入本轮的特性满足第 2 节开工硬前置即可启动，不必等同批其他工作结束；扩展满足依赖不意味着自动纳入本轮。
 
@@ -127,7 +232,7 @@ PA-05 一期只开放单轮执行。以下执行模式各自验证生命周期�
 
 #### 3.2.1 本轮分工与暂缓范围
 
-图中使用下列缩写；第 2 节的负责人列登记全名。Song Haoran 与 Chen Ran 共同负责所列特性，本计划不进一步指定两人内部的单项认领或工期。
+图中使用下列缩写；第 4.1 节的负责人列登记全名。Song Haoran 与 Chen Ran 共同负责所列特性，本计划不进一步指定两人内部的单项认领或工期。
 
 | 缩写 | 负责人 | 本轮特性与协作范围 | 可以并行与需要等待的部分 |
 | --- | --- | --- | --- |
@@ -294,6 +399,57 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 
 ### 3.4 验收范围与能力开放
 
+能力开放遵循以下条件：
+
+- M1 可先演示私聊和定时任务、会话状态记录、确认恢复、取消和停止；未接入 PA-07 时不处理群消息，未接入 PA-11 时上下文放不下明确暂停。
+- 持续使用可变或可撤权资料时，须完成 PA-22 与相应读取、装配路径联调；撤权在下一个 Execution 生效，不能只验证 KnowledgePort 已撤权而仍向模型传旧内容。
+- 本期写工具开放须通过 PA-15、PA-16 适用场景：写操作执行前意图记账成功才执行，需要确认的操作经 PA-09 由发起人确认；未声明副作用属性的工具一律按写操作处理；结果不明时不另加重试，原生只重试声明幂等的工具。
+- M2c 通过前，AgentServer 不自动续做未完成的 Request，由服务端明确处置；被停止的任务任何时候都不自动续做。一期不开放 task-loop 与子代理（PA-24～PA-26 验证后逐项开放）；子代理开放后，其写工具未接入 PA-15 意图记账时禁用。
+- 会话状态记录保存失败按崩溃续做处理；普通日志入队或保存失败只记诊断，缺失不阻塞后续关键事件；关键事件自身或 final 必需候选输出保存失败则停止当前执行；不能把未保存或未记账的结果当作已完成。
+
+## 4. 开发计划与进展
+
+实现或验证有变化时，修改第 4.1 节对应特性的“状态”“负责人”“证据”三列和下方交付节点的状态，并在变更记录中追加一条。分别统计本期 20 项、独立学习扩展 3 项、执行模式扩展 3 项及总计 26 项；范围变更不能记为完成。硬前置尚未完成且未明确暂不开发的特性保持“待开始”；已经开工但自身验收或必要联调未过的特性标“进行中”或“待验收”，并写明待验证项及其交付范围。扩展未排期且未明确暂不开发时仍为“待开始”，不因此标为“阻塞”。完成项附上实现和测试或联调链接；架构设计附录 C 的验证点按第 4.2 节登记结论。调用方及 PersonalContext 自身的开发进度在各自目录维护。负责人按第 3.2 节已确认的分工登记，不因使用 AI 协助修改而覆盖负责人；PA-01～PA-04 的既有负责人及历史证据保留。暂不开发的特性和交付节点使用“暂不开发”状态，并在证据列保留暂缓说明，不计为完成或删除。
+
+### 4.1 特性与交付节点进展
+
+| ID | 交付分类 | 状态 | 负责人 | 证据 |
+| --- | --- | --- | --- | --- |
+| PA-01 | 本期 | 已完成 | yan_zj | 契约层完成：执行身份含稳定来源和不进入业务 DTO 的宿主 authority handle；基础端口缺失 / 错形状会在 DeepAgent 构造前失败；事件、提交、控制、预算、窗口与版本化资料结果区分 unknown 和有完整查询依据的 empty / not_found。代码：`openjiuwen/harness/persistent_agent/persistent_agent/schema/execution.py:13,19,23`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/protocol.py:27,33,43`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/context.py:16,37,60,82,109,150,164`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/events.py:181,206,225`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/port_results.py:18,63,102,129,152`、`openjiuwen/harness/persistent_agent/persistent_agent/ports.py:26,36,41,45,50,63,68,73,79,89`；测试：`tests/unit_tests/harness/persistent_agent/test_protocol.py:81,91`、`tests/unit_tests/harness/persistent_agent/test_construction.py:152,167`。真实端口后端、运行时权限核验、超时转换和受控写入属于 PA-05 / PA-10～PA-13，不包含在本项。架构设计影响：架构设计附录 E 所列端口、事件、执行上下文及窗口 / 资料结构的调整由 PA-04 承接，本项完成状态与证据保留。 |
+| PA-02 | 本期 | 已完成 | yan_zj | 有效配置返回原生 `DeepAgent`；缺失四个基础端口或注入错形状 ContextStore 时，在 `DeepAgentSpec.build` 前失败；构造不调用模型 / 端口。代码：`openjiuwen/harness/persistent_agent/persistent_agent/schema/spec.py:21,70`、`openjiuwen/harness/persistent_agent/persistent_agent/factory.py:20`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/build_context.py:73,93`、`openjiuwen/harness/persistent_agent/persistent_agent/ports.py:79,89`、`openjiuwen/harness/schema/deep_agent_spec.py:524,600,635`；测试：`tests/unit_tests/harness/persistent_agent/test_construction.py:110,152,167`。正式宿主 providers 与执行入口不属于构造验收，仍待 PA-05。 |
+| PA-03 | 本期 | 已完成 | yan_zj | 内部原生调用接缝校验固定 Session / Execution / Agent / owner，拒绝错配和同实例并发；隔离取消、owner 工具清理，并等待 Persistent 专用流生产者及原生 Session 收尾退出。代码：`openjiuwen/harness/persistent_agent/persistent_agent/execution/binding.py:41,57,70,97,116,126,137,161`、`openjiuwen/harness/persistent_agent/persistent_agent/execution/stream_lifecycle.py:9,17,57`、`openjiuwen/harness/deep_agent.py:3025,3411`、`openjiuwen/core/single_agent/agents/react_agent.py:2939,3057`、`openjiuwen/core/common/stream_lifecycle.py:8`；测试：`tests/unit_tests/harness/persistent_agent/test_binding.py:188,250,301,327,376`。个人版默认不注入该生命周期分支。PA-05 正式入口已有组件实现与独立验收，M1 真实宿主集成仍待完成；一期只开放单轮模式，task-loop、同步子代理、异步及持久子代理的正式入口验收分别归 PA-24～PA-26。当前绑定设计及验证见 [F_03](../features/F_03_invocation-binding-and-isolation.md)。 |
+| PA-04 | 本期 | 已完成 | Song Haoran | 契约按架构设计收敛：执行上下文去掉 epoch / authority_handle，recovery_ref 不能指向本次执行；端口收敛为必需的 commit（record / read_execution_log）、budget、window_backend（BaseKVStore）和可选的 group_chat、knowledge；事件收敛为 11 类并固定五种暂停原因；新增群消息结构，删除旧窗口、提交、执行权和控制结构。代码：`openjiuwen/harness/persistent_agent/persistent_agent/ports.py`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/{execution,protocol,events,port_results,context}.py`、`openjiuwen/harness/persistent_agent/__init__.py`；测试：`tests/unit_tests/harness/persistent_agent/{test_protocol,test_construction,test_binding}.py`，2026-10-07 当时 PA 包 173 passed（协议 99、构造 40、绑定 34），F_01～F_03 共享回归 213 passed，改动范围 Ruff check / format 通过；2026-10-12 在当前工作区重跑上述三个测试文件，173 passed、5 warnings，未重跑完整 PA 包、共享回归、Ruff 或 mypy。当前外层声明 41 个导出，39 个可解析；两个后续工作空间符号在该次历史检查中的懒加载问题记录于 F_04 第 4.3 节；目标分支后续提交已修正导出映射，不属于 PA-04 原新增符号。设计与验证见 [F_04](../features/F_04_contract-convergence.md)。事件映射、记账调用、暂停收尾及窗口存储读写不属于本项，分别归 PA-05、PA-10、PA-11 |
+| PA-05 | 本期 | 已完成 | Song Haoran、Chen Ran | 组件验收完成：三个入口、`RequestInput` / `ConfirmReply`、事件映射与记账、预算准入与用量回报（`PersistentModelCallRail`）、结局判定、最终回答交接、确认恢复校验、停止与取消、提前关闭流和 checkpointer 隔离均有测试；会话状态记录与交互适配经接入点用替身验证，正式入口在 PA-10、PA-09 接入前明确拒绝，`execution` 能力待 M1 集成后声明。代码：`openjiuwen/harness/persistent_agent/persistent_agent/execution/{entries,emitter,control,model_rail,seams}.py`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/{request,spec}.py`、`openjiuwen/harness/persistent_agent/__init__.py`；共享接缝 `openjiuwen/core/session/agent.py`、`openjiuwen/core/session/checkpointer/noop.py`；测试：`tests/unit_tests/harness/persistent_agent/{test_entries,test_request}.py`，PA 包 249 passed（含结局锁定与审计修复），`tests/unit_tests/harness` 与 `tests/unit_tests/core/session` 联合回归 5863 passed / 39 skipped；此前共享回归 213 passed。设计与验证见 [F_05](../features/F_05_execution-entries.md)，共享 Session 接缝见 harness [F_07](../../../docs/features/F_07_session-checkpointer-injection.md) |
+| PA-06 | 本期 | 待验收 | Song Haoran、Chen Ran | 组件验收完成，容量相关验收待“容量边界”对齐后关闭。代码：`execution/window_assembly.py`、`schema/integration.py`、`schema/spec.py`；测试：`test_window_assembly.py`；设计与验证见 [F_06](../features/F_06_window-assembly.md) |
+| PA-07 | 本期 | 已完成 | Chang Yucong | 组件验收完成：群消息在加载窗口和构造 DeepAgent 之前，经 `GroupChatPort.recent_messages` 做独立的无工具模型判断（正常成功一次，异常有限尝试）；缺少群端口时在事件之前拒绝。被 @ 仍可忽略，未被 @ 可回应或插话；忽略路径产生 `model.completed`、`participation.decided` 与 `execution.final(ignored)`，不产生 `output.proposed`，不写窗口。格式错误、模型异常和群记录 `incomplete` 最多尝试 3 次仍失败后记 `failed`；预算拒绝记 `paused(budget_denied)` 且不调用模型。私聊和定时任务不进入判断。不调用尚未实现的 `group_message_reader`。代码：`openjiuwen/harness/persistent_agent/persistent_agent/execution/{participation.py,entries.py}`；测试：`tests/unit_tests/harness/persistent_agent/test_entries.py`，原阶段 PA 包 289 passed；2026-10-12 定向复核 10 passed / 61 deselected / 5 warnings，全包及真实联调本次未执行。设计与验证见 [F_07](../features/F_07_group-participation.md)。群记录存储（PA-23）、窗口写入（PA-06、PA-10）、候选发送（PA-08）和 AgentServer 联调不在本项。 |
+| PA-08 | 本期 | 待开始 | Song Haoran、Chen Ran | — |
+| PA-09 | 本期 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+| PA-10 | 本期 | 待开始 | Song Haoran、Chen Ran | — |
+| PA-11 | 本期 | 待开始 | Yan Zhijun | — |
+| PA-12 | 本期 | 待开始 | Yan Zhijun | — |
+| PA-23 | 本期 | 待开始 | Yan Zhijun | — |
+| PA-13 | 本期 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+| PA-14 | 本期 | 进行中 | Yan Zhijun | agent-core 组件已实现：`WorkspaceReadScope` / `WorkspaceAccessPort` 绑定 `ExecutionContext` 的 Agent、Session、principal 和 `policy_revision`；`resolve_read_path` 做相对路径、越界、兄弟 Session 私有目录与符号链接检查，`PersistentWorkspaceReadRail` 复用 Harness 的 `ReadFileTool` / `ListDirTool`，读取结果补充逻辑路径、`source_refs`、观察版本和完整性，`unknown` / `forbidden` 在后端访问前失败。代码：`openjiuwen/harness/persistent_agent/persistent_agent/workspace/access.py:18,67,75`、`openjiuwen/harness/persistent_agent/persistent_agent/workspace/path_policy.py:36,100`、`openjiuwen/harness/persistent_agent/persistent_agent/workspace/file_access.py:17`、`openjiuwen/harness/persistent_agent/persistent_agent/tools/workspace_read.py:43,153`、`openjiuwen/harness/persistent_agent/persistent_agent/{ports.py:99,105,schema/build_context.py:84,schema/spec.py:29,53}`；测试：`tests/unit_tests/harness/persistent_agent/test_workspace_access.py:95,114,126,139,155`、`tests/unit_tests/harness/persistent_agent/test_workspace_path_policy.py:35,47,70,77,88,105`、`tests/unit_tests/harness/persistent_agent/test_workspace_read_rail.py:108,129,146`、`tests/unit_tests/harness/persistent_agent/test_workspace_read_tools.py:83,110,127,148,170,189`，定向测试 24 passed、1 skipped（2 个既有 Pydantic 弃用警告）。设计与验证见 [F_14](../features/F_14_workspace-file-read.md)；JiuwenSwarm 侧 `WorkspaceAccessPort`、目录授权映射和跨仓联调尚未完成，PA-15 / PA-16 不因本项提前开放 |
+| PA-15 | 本期 | 进行中 | Yan Zhijun | agent-core 已新增精确只读名单 `read_file` / `list_files`，统一装配 `PersistentToolIntentRail`；写意图等待关键确认后才派发，失败保留 fatal 并 force-finish，等待返回后复查共享停止状态；回调上下文内去重，operation_id 按 namespace / Agent / Session / Request / tool_call_id 稳定派生，跨 Execution 稳定关联不等于持久去重；Persistent 仅显式 `idempotent=True` 保留原生重试。代码与验收入口见 [F_15](../features/F_15_tool-intent-before-side-effect.md) 第 2 节。2026-10-10 历史基线为 PA 包 325 passed / 1 skipped、共享重试 11 passed；2026-10-12 当前工作树回归合计 344 passed / 1 skipped / 2 failed（PA 包 333 passed / 1 skipped / 2 failed、共享重试 11 passed），两个失败单独复跑仍在 reply.delta 序列断言失败，确认同意后恢复分支本次未验证到。结论为部分验证，真实 CommitPort 持久化确认与跨仓联调未执行，状态保持进行中，PA-16 不提前放行；环境、命令、失败及剩余边界见 F_15 第 4 节 |
+| PA-16 | 本期 | 进行中 | Yan Zhijun | agent-core 已实现 `WorkspaceWriteScope` / `WorkspaceWriteAccessPort`、逻辑路径和 Session 隔离、Persistent 文件访问模块、条件哈希写入与条件创建；默认个人版 / DeepAgent 不装配 `workspace_write`，保留原 Write/Edit 路径。测试覆盖授权失败关闭、意图记账顺序、同版本并发更新 / 创建冲突和默认工具兼容性；PA-16 与底层条件写入定向测试 80 passed / 3 skipped，另有 1 个既有 Windows 锁清理时序测试单独排除；Harness Grep 5 个 Windows shell allowlist 失败与本项无关。JiuwenSwarm 的真实写授权端口、Session 目录映射、SysOperation / Sandbox provider 和 AgentServer 联调尚未完成，故不标完成。详见 [F_16](../features/F_16_workspace-file-write.md) |
+| PA-22 | 本期 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+| PA-17 | 本期 | 待开始 | Song Haoran、Chen Ran | — |
+| PA-18 | 本期 | 待开始 | Song Haoran、Chen Ran | — |
+| PA-19 | 独立学习扩展 | 暂不开发 | zhaominjun1997 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+| PA-20 | 独立学习扩展 | 暂不开发 | zhaominjun1997 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+| PA-21 | 独立学习扩展 | 暂不开发 | zhaominjun1997 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+| PA-24 | 后续执行模式扩展 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+| PA-25 | 后续执行模式扩展 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+| PA-26 | 后续执行模式扩展 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+| M0：接口基线 | 本期 | 已完成 | yan_zj | PA-01 按旧版架构定义调用身份与宿主端口协议；PA-04 按架构设计收敛执行上下文、端口、事件与群消息结构，PA 包 173 passed、共享回归 213 passed，见 [F_04](../features/F_04_contract-convergence.md)。实际宿主适配和存储后端不属于接口基线，列在 PA-05、PA-10～PA-13、PA-23 |
+| M1：可执行任务 | 本期 | 待开始 | 本轮 SHR / CR；CYC 负责 AgentServer 配合 | 执行与恢复入口、会话状态记录、确认与控制、结果交接；PA-09 暂不开发，完整确认恢复验收仍待完成 |
+| M2a：群消息与长上下文 | 本期 | 待开始 | 本轮 SHR / CR、YZJ、CYC | 群消息判断、换窗与归档、群聊与历史检索、知识与 PA-22 失效联调；PA-13、PA-22 暂不开发，相关完整验收待完成 |
+| M2b：办公空间读写 | 本期 | 待开始 | 本轮 YZJ；CYC 负责 AgentServer 配合 | 文件读写、写操作意图记账、并发修改及 PA-22 文件失效联调；PA-22 暂不开发，完整文件失效验收待完成 |
+| M2c：崩溃后续做原任务 | 本期 | 待开始 | 本轮 SHR / CR、YZJ；CYC 负责 AgentServer 配合 | 执行日志整理、崩溃续做与停止后继续；完整验收仍包含 M1 执行链及确认恢复后崩溃场景，不能因 PA-09 暂缓而视为通过 |
+| M2d：主动学习 | 独立学习扩展 | 暂不开发 | zhaominjun1997 | 本轮暂不开发；保留目标、处理批次与反馈关联的后续安排 |
+
+### 4.2 架构设计附录 C 验证点
+
 架构设计不再预先展开验证矩阵，各特性实现时按自身“怎样证明做成”补充测试（架构设计附录 B）。旧版架构 V01～V41 验证矩阵（见 Git 历史）只作参考，不作为本期验收项。下表把架构设计附录 C 中“实现阶段需要验证”的事项落到具体特性，须在对应特性完成前给出结论并登记证据：
 
 | 架构设计附录 C 验证点 | 主责特性 | 交付节点 | 当前结论 |
@@ -306,33 +462,22 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 | 6. 换窗阈值与新窗保留的原文轮数 | PA-11 | M2a | 待验证 |
 | 7. 确认恢复后崩溃，续做加载旧中断记录时能否补齐工具结果、清除旧中断状态并保留会话授权，正常确认恢复不受影响 | PA-18 | M2c | 待验证 |
 
-架构设计附录 C 的待确认事项在相关特性开工前与对端确认：本期不支持跨进程部署；归档保留期（影响 PA-11、PA-12）和确认超时时长（影响 PA-09）由 AgentServer 按 Agent 配置决定；系统提示词中 `tools` 片段随工具列表变化的问题，在 PA-06 中以固定工具列表规避。
+## 附录 A. 从 JiuwenSwarm 迁移时的补充安排
 
-架构设计尚未覆盖、需先补充设计并确认的事项：
+本节只补充跨仓接入顺序，不改变第 2～3 节的模块内硬前置和并行计划。本轮只推进第 3.2 节纳入分工的部分；知识、学习、确认及来源失效相关内容保留为后续安排。
 
-- **容量边界**（影响 PA-06、PA-11、PA-17、PA-18）：70% 阈值只在两次模型调用之间检查，挡不住单个或多个工具结果一次性超限、续做时注入的日志和背景超限，以及摘要调用自身的输入超限。需在架构设计中补充：容量计算包含哪些开销、各检查点放在哪里、超大结果如何以引用加必要内容进入窗口。确认前，上述特性的容量相关验收不能关闭。
-- **写操作的声明来源**（影响 PA-15）：已确定由 agent-core 内部精确工具名白名单声明；仅 `read_file`、`list_files` 精确命中才按只读处理，不额外校验实现类；其他一律按写操作处理，ToolCard 不增加副作用字段。具体分类和宿主持久化边界见 [F_15](../features/F_15_tool-intent-before-side-effect.md)。
+1. **M0 先确认责任和差异。** 明确单次调用固定 Session、事件按序入队与关键事件等待落盘、窗口存储后端注入、群聊记录权限，以及切窗策略。切窗时机已由架构设计确定为“两次模型调用之间、容量达到 70%”，与此前产品讨论的“整轮结束后切窗”不同，不能直接搬旧控制器。
+2. **宿主适配与纯算法提取可并行准备。** 公共群归档、附件 / 云文档、Skill 安装选择、飞书身份和渠道投递保留 JiuwenSwarm；core 经端口消费。字面原文匹配、消息转换等可复用，但补充调用权限、稳定引用和完整性检查。
+3. **优先形成 M1 的新入口闭环。** 使用 Harness 公共工厂，验证实例隔离、完整装配、统一事件、控制及文本 / 文件结果提案；不复制旧应用 Runtime 或直接 SDK 发送链路。个人版入口保持原逻辑。
+4. **窗口与续做按独立确认点接入。** PA-10 先支持会话状态记录的加载和保存，PA-11 再处理换窗和归档；现有窗口加载器不是 PA-18 的崩溃续做。PA-15 的意图记账从 M0 后准备，与窗口开发并行。
+5. **能力放行与开工条件分开。** PA-05 可用模拟端口开发，但 M1 须合并验证 PA-03、PA-06、PA-08、PA-09、PA-10；PA-18 可在 PA-17 后开发，但 M2c 放行必须满足第 3.3 节的日志整理、归档查询和意图记账要求。缺少意图记账时不能以兼容模式开放写工具。
+6. **知识和学习保留原归属。** core 消费 PersonalContext 的授权版本，学习作业只管理目标、批次关联与反馈；采集 / 发布实现不迁入 Persistent Agent。M2d 仍可独立交付。
 
-能力开放遵循以下条件：
+后续实现前按 `docs/AGENTS.md` 创建对应 feature 设计，完成代码和验证后再更新 PA 状态。实现目录沿用现有的 `persistent_agent/persistent_agent/` 结构（见架构设计 §4 与 [F_01：当前实现结构与影响面](../features/F_01_spec-and-deep-agent-construction.md#32-当前实现结构与影响面)），新组件按职责放入 `execution/`、`schema/` 或新增子目录；不创建空执行接口或将文档梳理计为实现完成。
 
-- M1 可先演示私聊和定时任务、会话状态记录、确认恢复、取消和停止；未接入 PA-07 时不处理群消息，未接入 PA-11 时上下文放不下明确暂停。
-- 持续使用可变或可撤权资料时，须完成 PA-22 与相应读取、装配路径联调；撤权在下一个 Execution 生效，不能只验证 KnowledgePort 已撤权而仍向模型传旧内容。
-- 本期写工具开放须通过 PA-15、PA-16 适用场景：写操作执行前意图记账成功才执行，需要确认的操作经 PA-09 由发起人确认；未声明副作用属性的工具一律按写操作处理；结果不明时不另加重试，原生只重试声明幂等的工具。
-- M2c 通过前，AgentServer 不自动续做未完成的 Request，由服务端明确处置；被停止的任务任何时候都不自动续做。一期不开放 task-loop 与子代理（PA-24～PA-26 验证后逐项开放）；子代理开放后，其写工具未接入 PA-15 意图记账时禁用。
-- 会话状态记录保存失败按崩溃续做处理；普通日志入队或保存失败只记诊断，缺失不阻塞后续关键事件；关键事件自身或 final 必需候选输出保存失败则停止当前执行；不能把未保存或未记账的结果当作已完成。
+## 附录 B. 历史变更与阶段交付记录
 
-## 4. 进度怎么更新
-
-实现或验证有变化时，修改第 2 节对应特性的“状态”“负责人”“证据”三列和下方交付节点的状态，并在变更记录中追加一条。分别统计本期 20 项、独立学习扩展 3 项、执行模式扩展 3 项及总计 26 项；范围变更不能记为完成。硬前置尚未完成的特性保持“待开始”；已经开工但自身验收或必要联调未过的特性标“进行中”或“待验收”，并写明待验证项及其交付范围。扩展未排期仍为“待开始”，不因此标为“阻塞”。完成项附上实现和测试或联调链接；架构设计附录 C 的验证点按第 3.4 节登记结论。调用方及 PersonalContext 自身的开发进度在各自目录维护。负责人按第 3.2 节已确认的分工登记，不因使用 AI 协助修改而覆盖负责人；PA-01～PA-04 的既有负责人及历史证据保留。暂不开发的特性保留原状态并在证据 / 待办中标注安排，不计为完成或删除。
-
-| 交付节点 | 交付分类 | 状态 | 负责人 | 验收证据或待办 |
-| --- | --- | --- | --- | --- |
-| M0：接口基线 | 本期 | 已完成 | yan_zj | PA-01 按旧版架构定义调用身份与宿主端口协议；PA-04 按架构设计收敛执行上下文、端口、事件与群消息结构，PA 包 173 passed、共享回归 213 passed，见 [F_04](../features/F_04_contract-convergence.md)。实际宿主适配和存储后端不属于接口基线，列在 PA-05、PA-10～PA-13、PA-23 |
-| M1：可执行任务 | 本期 | 待开始 | 本轮 SHR / CR；CYC 负责 AgentServer 配合 | 执行与恢复入口、会话状态记录、确认与控制、结果交接；PA-09 暂不开发，完整确认恢复验收仍待完成 |
-| M2a：群消息与长上下文 | 本期 | 待开始 | 本轮 SHR / CR、YZJ、CYC | 群消息判断、换窗与归档、群聊与历史检索、知识与 PA-22 失效联调；PA-13、PA-22 暂不开发，相关完整验收待完成 |
-| M2b：办公空间读写 | 本期 | 待开始 | 本轮 YZJ；CYC 负责 AgentServer 配合 | 文件读写、写操作意图记账、并发修改及 PA-22 文件失效联调；PA-22 暂不开发，完整文件失效验收待完成 |
-| M2c：崩溃后续做原任务 | 本期 | 待开始 | 本轮 SHR / CR、YZJ；CYC 负责 AgentServer 配合 | 执行日志整理、崩溃续做与停止后继续；完整验收仍包含 M1 执行链及确认恢复后崩溃场景，不能因 PA-09 暂缓而视为通过 |
-| M2d：主动学习 | 独立学习扩展 | 待开始 | zhaominjun1997 | 本轮暂不开发；保留目标、处理批次与反馈关联的后续安排 |
+### B.1 历史变更记录
 
 以下历史记录保留当时的 PA 编号；2026-10-08 编号调整之后的记录使用当前编号。
 
@@ -397,21 +542,12 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 | 2026-10-12 | PA-16 | agent-core 实现并装配 Persistent 文件访问模块：增加独立写授权端口、逻辑路径 / Session 隔离、条件哈希更新和条件创建，冲突稳定映射为 `version_conflict`；条件写入仅在 Persistent opt-in 工具实例启用，个人版 / 普通 DeepAgent 默认行为保持不变；补充意图记账顺序、记账失败零写入、结果未知映射、同版本并发更新 / 创建和默认工具回归测试 | PA-16 与底层条件写入定向测试 80 passed / 3 skipped，另有 1 个既有 Windows 锁清理时序测试单独排除；Harness Grep 5 个 Windows shell allowlist 失败与本项无关。JiuwenSwarm 的真实 `WorkspaceWriteAccessPort`、Session 目录 / provider 适配、`CommitPort.record` 持久化确认及跨仓联调尚未完成，PA-16 保持进行中，详见 [F_16](../features/F_16_workspace-file-write.md) |
 | 2026-10-12 | PA-04、PA-23 | 补充群聊读取契约：回补以触发消息为游标读取其后的消息（`recent_messages` 签名不变；同日最初加入的 `before` 方向错误，已撤销），`GroupMessagesResult` 增加可信扫描位置 `scanned_through`，消息状态增加 `unavailable`；PA-23 验收同步为“增量读取＋回补合并去重、以扫描位置为游标、区分永久不可读与查询失败” | 契约只增不改，原有调用兼容；PA-07 需补充“正文暂缺”的展示；完成状态不变 |
 | 2026-10-12 | PA-06、PA-10 | PA-06 第二轮：游标改为服务端确认的扫描位置，回补区间为触发消息之后至本次读取上界，正文暂缺单独标注；加载后发现未配对的工具调用时以校验拒绝结束并记 error 日志；拒绝启用按条数截断窗口的参数。PA-10 验收补充停止后的窗口安全与幂等修补。误派暂缓（新错误分类与前置加载）本期不做 | PA 包与 core Session 共 778 passed，共享回归 213 passed，联合回归 5981 passed / 39 skipped；PA-06 改为待验收（容量边界待对齐） |
+| 2026-10-12 | PA-03 | 重构 F_03：补齐绑定快照、状态条件、原生流收尾和验收映射；按用户要求将原阶段记录整合为设计演进与历史验证摘要，不保留完整原文；校正 PA-03 当前证据中的正式入口和执行模式扩展归属 | 文档核对与现有绑定测试 34 passed；PA-05 组件实现不等于 M1 联调完成，task-loop / 子代理归 PA-24～PA-26；本次不改变特性状态、依赖、排期或完成数 |
+| 2026-10-12 | PA-04 | 重构 F_04：按开发计划与特性设计模板组织契约差异、决策、独立验收和历史记录；核对现行架构 / spec / 代码，更新 PA-05、PA-07、PA-15 的组件状态及剩余边界；记录后续工作空间懒导出问题 | 协议、构造与绑定测试 173 passed、5 warnings；36 个相对链接及所用锚点、验收编号、目标文档差异格式检查通过。历史共享回归 / Ruff / mypy 与本次结果分开；不改变 PA-04 状态、依赖、负责人、排期或完成数，详见 [F_04](../features/F_04_contract-convergence.md) |
+| 2026-10-12 | PA-07 | 按开发计划与特性设计模板重构 [F_07](../features/F_07_group-participation.md)，补齐输入、预算 / 模型异常记账、输出解析、事件交接、局部依赖图和验收映射；校正 ignore 路径包含 model.completed，记录近期消息 limit 与正式接入 / 架构概括顺序的边界 | 现有群参与定向测试 10 passed / 61 deselected / 5 warnings；历史 PA 包 289 passed 与本次结果分开，AgentServer 联调仍待进行；本次不改变代码、架构、特性状态、负责人、排期、依赖或完成数 |
+| 2026-10-12 | PA-15 | 重构 F_15：按开发计划及特性设计模板补齐范围、决策、验收、局部依赖、宿主开放条件与遗留；核对 ConstructionBinding、五项 operation_id、上下文内去重、显式 target_ref、完成状态与摘要边界 | 本次现有 PA / 共享重试回归 344 passed / 1 skipped / 2 failed，失败单独复跑一致；历史基线分开保留，真实宿主确认及跨仓联调未执行。状态、负责人、硬前置和完成数不变，证据见 [F_15](../features/F_15_tool-intent-before-side-effect.md) 第 4 节 |
 
-## 5. 从 JiuwenSwarm 迁移时的补充安排
-
-本节只补充跨仓接入顺序，不改变第 2～3 节的模块内硬前置和并行计划。本轮只推进第 3.2 节纳入分工的部分；知识、学习、确认及来源失效相关内容保留为后续安排。
-
-1. **M0 先确认责任和差异。** 明确单次调用固定 Session、事件按序入队与关键事件等待落盘、窗口存储后端注入、群聊记录权限，以及切窗策略。切窗时机已由架构设计确定为“两次模型调用之间、容量达到 70%”，与此前产品讨论的“整轮结束后切窗”不同，不能直接搬旧控制器。
-2. **宿主适配与纯算法提取可并行准备。** 公共群归档、附件 / 云文档、Skill 安装选择、飞书身份和渠道投递保留 JiuwenSwarm；core 经端口消费。字面原文匹配、消息转换等可复用，但补充调用权限、稳定引用和完整性检查。
-3. **优先形成 M1 的新入口闭环。** 使用 Harness 公共工厂，验证实例隔离、完整装配、统一事件、控制及文本 / 文件结果提案；不复制旧应用 Runtime 或直接 SDK 发送链路。个人版入口保持原逻辑。
-4. **窗口与续做按独立确认点接入。** PA-10 先支持会话状态记录的加载和保存，PA-11 再处理换窗和归档；现有窗口加载器不是 PA-18 的崩溃续做。PA-15 的意图记账从 M0 后准备，与窗口开发并行。
-5. **能力放行与开工条件分开。** PA-05 可用模拟端口开发，但 M1 须合并验证 PA-03、PA-06、PA-08、PA-09、PA-10；PA-18 可在 PA-17 后开发，但 M2c 放行必须满足第 3.3 节的日志整理、归档查询和意图记账要求。缺少意图记账时不能以兼容模式开放写工具。
-6. **知识和学习保留原归属。** core 消费 PersonalContext 的授权版本，学习作业只管理目标、批次关联与反馈；采集 / 发布实现不迁入 Persistent Agent。M2d 仍可独立交付。
-
-后续实现前按 `docs/AGENTS.md` 创建对应 feature 设计，完成代码和验证后再更新 PA 状态。实现目录沿用现有的 `persistent_agent/persistent_agent/` 结构（见架构设计 §4 与 [F_01](../features/F_01_spec-and-deep-agent-construction.md) 第 10 节），新组件按职责放入 `execution/`、`schema/` 或新增子目录；不创建空执行接口或将文档梳理计为实现完成。
-
-## 6. 第一阶段具体产物与评审门槛
+### B.2 第一阶段具体产物与评审门槛
 
 本节是按旧版架构完成第一阶段（PA-01～03）时的交付记录，保留原文。其中列为“尚未实现”的有界交接、持久化去重 / 围栏、超时查询等在架构设计下不再需要；`execute_persistent_request` 的签名以架构设计 §5.1 为准；按架构设计对已实现代码的调整见当前 PA-04（旧 PA-22）。
 
@@ -426,15 +562,15 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 
 F_01 已经用户确认并启动配置与构造实现。A～C 的构造子范围已落地；D 暂不提供空执行函数，以免误用为可靠执行入口。构造测试覆盖返回类型、错配 Session / 配置、工具注册隔离、浅复制污染和失败清理，并有默认 Harness 定向回归。原配置恢复、未知提交、隐藏写能力及模型前动态授权须在后续执行接入时验证；窗口、群判断和恢复不能随工厂空挂载后标为实现。
 
-### 6.1 第一阶段交付记录
+#### B.2.1 第一阶段交付记录
 
 - 实现目录：`persistent_agent/persistent_agent/` 下的 factory.py、ports.py、schema/{spec,build_context,execution,context}.py；外层 `__init__.py` 懒导出构造和协议符号。
 - 通用接缝：BuildContext.tool_owner_id（缺省 None）→ DeepAgentSpec.resolve_parts → parts / Config；不改个人版默认行为。
-- 测试：`tests/unit_tests/harness/persistent_agent/test_construction.py`；实际结果见 F_01 第 10 节。
+- 测试：`tests/unit_tests/harness/persistent_agent/test_construction.py`；历史验收以本节阶段记录为准，当前验证范围与定向运行结果见 [F_01 验证记录](../features/F_01_spec-and-deep-agent-construction.md#41-验证范围与结果)。
 - 进度：PA-01 契约层、PA-02 构造和 PA-03 实例内 Session 隔离已分别完成。下一步为 PA-04 正式执行适配、事件生产与授权 / 预算 / 确认闭环，不重新实现模型循环。
 - 未提交代码；仍在用户指定 checkout 的当前分支。
 
-### 6.2 第二步：执行协议值对象
+#### B.2.2 第二步：执行协议值对象
 
 - 实现目录：内部 schema/{protocol,events,port_results}.py；ports.py 使用类型化事件和结果，外层包继续懒导出，不新增运行类。
 - AgentEvent 稳定编号、完整提案摘要、13 类负载；Commit / Authority / Control / Budget 结果明确区分未知、拒绝和确认，并验证归属与引用。
@@ -442,7 +578,7 @@ F_01 已经用户确认并启动配置与构造实现。A～C 的构造子范围
 - PA-01 / M0 的接口契约已完成，不等于宿主端口已有生产实现。尚未实现：事件生产与 local_seq 分配、有界交接、持久化去重 / 围栏、超时查询、原生 DeepAgent 执行映射。PA-04 / M1 仍待开始，不把 DTO 当成执行闭环。
 - 本步不改 JiuwenSwarm、个人版逻辑或通用 Harness 代码，不提交代码；架构文件未修改。
 
-### 6.3 第三步：内部执行绑定与隔离
+#### B.2.3 第三步：内部执行绑定与隔离
 
 - 内部 execution/binding.py 提供 native invoke / stream 的绑定占用，以及作用于目标绑定的停止与空闲关闭；工厂捕获配置及资源归属快照。Persistent 构造注入独立流任务管理器，通过 DeepAgent 可选分支取消并等待单轮流生产者及 Session 收尾退出。默认个人版不注入、不启用。
 - 测试使用真实 DeepAgent、Session、Runner 工具注册与本地模型，覆盖并行消息 / 工具隔离、错配拒绝、停止、清理、异常释放和流提前关闭。
