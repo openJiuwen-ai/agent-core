@@ -45,6 +45,27 @@ designs/<slug>.md
 
 ## 内容约定
 
+### 模板参考要求（必须遵守）
+
+新增或修改本目录中的相关文档前，必须阅读并参考公共[模板目录](../../docs/templates/)
+中的相应模板，遵循其适用的内容、填写与维护规范；不能仅凭下文的建议结构编写。
+
+| 文档类型 | 必须参考的模板 |
+| --- | --- |
+| 设计概览（Overview） | [overview-template.md](../../docs/templates/overview-template.md) |
+| 架构详细设计 | [architecture-template.md](../../docs/templates/architecture-template.md) |
+| `specs/` 中的模块规约 | [spec-template.md](../../docs/templates/spec-template.md) |
+| `features/` 中的特性设计方案 | [feature-design-template.md](../../docs/templates/feature-design-template.md) |
+| 特性开发计划与进度跟踪 | [feature-development-plan-template.md](../../docs/templates/feature-development-plan-template.md) |
+
+`designs/` 中的文档按内容类型选择上述模板。模板中的章节可按其使用说明裁剪，
+本目录的命名、归档、设计确认与同步规则仍须遵守；下文的建议结构是本目录的补充说明。
+
+以上链接均以本 `AGENTS.md` 所在目录为基准。实际文档引用模板时必须使用相对路径，
+并从该文档所在目录重新计算；例如 `designs/`、`specs/`、`features/` 下的文档应使用
+`../../../docs/templates/<模板文件名>.md`。不得直接复制模板内部的示例路径，
+提交前须核对链接指向的模板文件存在且可打开。
+
 ### `specs/` 建议结构
 
 ```markdown

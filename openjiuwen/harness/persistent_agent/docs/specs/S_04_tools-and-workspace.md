@@ -1,78 +1,97 @@
-# S_04 工具副作用与办公空间规约
+# S_04 办公空间授权与文件读取规约
 
 ## 元信息
 
 | 项 | 值 |
 | --- | --- |
 | 类型 | spec |
-| 状态 | PA-14～PA-16 agent-core 契约已部分实现；JiuwenSwarm 宿主适配待完成 |
-| 关联模块 | `openjiuwen/harness/persistent_agent/{workspace/,tools/,execution/}`、`openjiuwen/harness/tools/filesystem.py` |
+| 编号 / slug | S_04 / tools-and-workspace |
+| 关联模块 | [workspace/access.py](../../persistent_agent/workspace/access.py)、[path_policy.py](../../persistent_agent/workspace/path_policy.py)、[file_access.py](../../persistent_agent/workspace/file_access.py)、[tools/workspace_read.py](../../persistent_agent/tools/workspace_read.py) |
 | 最近一次修订日期 | 2026-10-12 |
-| 关联 feature | N/A；开发计划 PA-14～PA-16 |
-| 设计依据 | 旧版详细架构 §12、§14.2（见 Git 历史）；当前设计为 [Persistent Agent 详细架构设计](../designs/persistent-agent-architecture.md) |
+| 关联 feature | [F_14](../features/F_14_workspace-file-read.md)；文件修改接入见[开发计划](../designs/persistent-agent-development-plan.md) PA-16 |
+| 设计依据 | [架构设计：办公空间](../designs/persistent-agent-architecture.md#47-办公空间与知识)、[身份与隔离](../designs/persistent-agent-architecture.md#9-权限隔离与资源限制) |
 
-PA-14～PA-16 的 agent-core 组件已开始落地。本规约仍不声称 JiuwenSwarm 的授权、真实 SysOperation provider、事件持久化和跨进程恢复联调已经完成。
+本规约维护 WorkspaceAccessPort、调用级读取授权、逻辑路径、文件读取结果及私有草稿隔离。通用副作用和工具事件从本文拆出，由 S_08 唯一维护。
 
-## 范围 / 边界
+## 1. 范围、术语与适用条件
 
-本规约定义 Persistent Agent 对 Harness 工具、办公空间文件、历史与知识读取工具的授权边界，以及产生外部效果的工具操作协议。工具通用注册和执行安全仍由 [Harness 工具规约](../../../docs/specs/S_05_tools-contract.md)、[安全规约](../../../docs/specs/S_08_security-engine.md) 和 [工作空间规约](../../../docs/specs/S_09_workspace.md) 负责。
+PA-14 只读组件已实现：复用 Harness ReadFileTool / ListDirTool，并注册受保护的 `read_file` / `list_files`。实际目录部署、业务授权、平台 SDK 与宿主端口实现归 AgentServer；真实宿主联调仍未验证，不能以本地只读组件证明 PA-16 写入或跨进程恢复已开放。
 
-## 现有实现的复用边界
+启用条件为 Spec.enabled_features 含 workspace_read、enable_sys_operation=true，且 PersistentPorts.workspace_access 存在并提供异步 resolve_read_scope。上下文及装配阶段均校验，不等到模型读取时才发现缺少依赖。未开启时不添加本读取 Rail；普通 DeepAgent 仍遵循通用行为。
 
-| 现有实现 | 直接复用 | 尚未覆盖的要求 |
-| --- | --- | --- |
-| [`Workspace`](../../../workspace/workspace.py) 与 [`ReadFileTool/WriteFileTool/EditFileTool`](../../../tools/filesystem.py) | 工作目录结构及文件读写；Persistent opt-in 写工具支持内容哈希 / 条件创建；`EditFileTool` 保留读后编辑检查和进程内路径锁 | 每调用授权交集、跨进程执行权围栏、稳定 `operation_id` 与回执核对仍需宿主接入。进程内锁不能当作跨实例事务 |
-| [`PermissionEngine`](../../../security/permission_engine/core.py)、[`PermissionInterruptRail`](../../../rails/security/tool_security_rail.py) 和 FileGuard | 沿用工具审批、路径及命令安全检查 | 宿主当前主体/Session/资源授权和租约写入边界；不复制一套通用权限引擎 |
-| DeepAgent 现有 [子代理运行时](../../../subagent_runtime/) | 子代理创建、运行和并行调度 | 父 Request 的业务事件汇聚、预算、外部副作用确认及恢复核对；不新建子代理运行时 |
+公共 [工具](../../../docs/specs/S_05_tools-contract.md)、[安全](../../../docs/specs/S_08_security-engine.md)、[工作空间](../../../docs/specs/S_09_workspace.md)机制继续由 Harness 负责，本模块补充业务身份、私有 Session 路径及来源。Shell、CLI、MCP、写工具和子进程不因注册本读取 Rail 就获得相同的沙箱隔离保证。
 
-已有文件工具的本地历史或读状态记录不是 SessionStore 权威操作日志，也不能证明跨进程写入恰好一次。优先以适配器围绕现有工具增加意图确认和结果核对；若某工具不能满足围栏或恢复协议，只禁用该工具的自动恢复/写能力，不另写一套文件工具替代所有已有实现。
+DeepAgent 工具路径还须遵守既有 allow / ask / deny 及配置范围；宿主 scope=allowed 本身不表示审批完成或授予扩大后的能力。直接调用读取包装器不能证明已经经过完整的原生权限 Rail 链。
 
-## 不变量
+## 2. 数据结构与事实归属
 
-1. 有效权限为配置范围、Request 启动上限、当前主体、Session 或群范围及资源当前授权的交集；文件路径、同 Agent 身份或同项目根均不授予其他 Session 的私有历史访问权。
-2. Agent 可在获授权办公空间内直接读写文件。文件存在和写入成功不等于 Request 已完成或文件已公开到群。
-3. 具有副作用的逻辑操作使用稳定 `operation_id`，与模型工具调用 ID 分离。意图先获宿主确认，外部调用后回执再获确认，才能推进依赖步骤。
-4. 工具超时仅表示结果未知；不能以超时、进程退出或旧执行权失效推断“未执行”，也不能盲目生成新操作标识重做。
-5. Shell、CLI、MCP 和子进程继续受本调用主体、Session 与资源范围约束；入口路径校验不能代替子进程内隔离。保存脚本或 SOP 不自动安装 Skill 或扩大执行权限。
-6. DeepAgent 子代理仍是父 Request/Execution 内的工作单元。其事件、预算、权限和写入回执经父执行汇聚，不创建第二个业务 Session 或绕开宿主队列。
+WorkspaceReadScope 为宿主返回的不可变运行对象，不进入可序列化 Spec，不保存 Session、锁或取消状态。定义位置为 [access.py](../../persistent_agent/workspace/access.py)。
 
-## 接口契约与错误语义
-
-| 拟议工具类别 | 读写契约 |
+| 字段 | 语义与约束 |
 | --- | --- |
-| `search_session_history / read_evidence` | 返回本 Session 有界原文、来源、版本、完整性与分页游标 |
-| `query_group_materials` | 按获授权群查询公开消息、成员、公告和文档导航 |
-| Harness 文件工具 | 当前办公空间相对路径的读、创建、修改、列举；写入返回可核对状态 |
-| `read_context_knowledge` | 同一发布版本的受控正文与来源，读取时重新鉴权 |
-| `request_window_switch` | 只登记换窗请求，实际指针更新由 ContextManager 完成 |
+| status | allowed / forbidden / unknown；unknown 不能按允许处理 |
+| agent_id、session_id | 当前执行的 Agent / Session 归属 |
+| principal_ref | 可选；提供时必须与 ExecutionContext 主体一致 |
+| workspace_root、allowed_roots | 实际根与宿主授予的可读根；字符串被规范化为 Path，根目录本身不是授权 |
+| private_sessions_root、current_session_root | 可选私有范围根；保护其他 Session 草稿，当前 Session 范围仍由宿主授予 |
+| source_ref、policy_revision | 稳定来源及当前执行策略关联，必须非空；策略修订须匹配 ExecutionContext |
+| reason | 可选诊断；不能把宿主异常或实际主机路径直接暴露给模型 |
 
-读取结果至少区分 `status, content_or_ref, source_refs, version, completeness, next_cursor`；写入另含 `operation_id, receipt`。`forbidden`、`not_found`、`partial`、`version_conflict`、`unavailable` 语义不同，但面向无权主体不能用错误差异泄露资源存在性。Persistent 写工具的条件冲突由 SysOperation 返回稳定错误码，再映射为 `version_conflict`，不解析本地化错误文本。工具应声明只读、外部幂等键、查询、取消及补偿能力，恢复依据声明能力与实际回执，不根据工具名猜测。
+读取成功沿用 Harness 内容 / 列表数据，并附逻辑路径、source_refs、version、status、completeness、next_cursor。version 是本次 stat 元数据观察得到的不透明摘要，可能为空；不是文件内容哈希、不可变快照或防并发变更的凭证。路径和版本只说明此次读取观察，不授予下一次使用权限。
 
-拟议副作用序列：
+## 3. 不变量
 
-```text
-prepare(operation_id, target, args_hash, controlled_args_ref)
-  → tool.intent 提交确认
-  → 检查执行权、当前授权、取消与审批
-  → 使用原幂等键调用外部系统
-  → tool.completed 携带真实回执和结果引用
-  → 提交确认后推进依赖步骤
-```
+1. **I-1 授权先行：** 每次读取 / 列举先从宿主解析范围，再验证 Agent、Session、可选主体和策略修订。查不清、端口异常或归属错配都不能放行。
+2. **I-2 私有范围：** 同 Agent、同项目根或共享工作空间不授予其他 Session 草稿访问权；其他 Session 私有路径即使在共享允许根内仍拒绝。
+3. **I-3 路径受控：** 模型只能提供逻辑相对路径；词法边界和规范化真实路径均须检查，符号链接不能逃逸允许根。
+4. **I-4 安全结果：** 拒绝先于底层读取，不因错误差异泄露未经授权的目标是否存在；授权成功后才区分 not_found 与后端不可用。
+5. **I-5 只读边界：** 本适配只注册读取与列举，不承担写入、外部回执核对、工具完成判定或发送交接。
 
-意图还须保存工具与协议版本、目标身份、可恢复参数受控引用、审批或授权关联以及查询/重试能力声明。参数摘要用于冲突检测，不能从摘要猜测参数；明文凭证不进入恢复正文，执行时按当前授权重新取得。目标或关键参数变化须创建新操作。无法安全保留重试参数或查询回执时，结果未知只能人工核对。
+## 4. 接口契约
 
-## 状态及数据生命周期
+### 4.1 `WorkspaceAccessPort.resolve_read_scope(execution) -> WorkspaceReadScope`
 
-办公空间目录可按部署初始化为 `inbox/`、`work/`、`sessions/<session_id>/`、`knowledge/`、`templates/`、`practices/`，目录名称不是授权机制。跨 Session 可在当前权限下共享工作文件；会话草稿、未完成待办、Checkpoint 和私有轨迹仍在会话受限范围。读取工作文件应保留路径、当时内容状态和来源；后续使用前文件变化时重新读取与核对。并发写同一文件发生冲突时不盲目覆盖。
+由读取适配调用，宿主按当前业务身份返回范围，不执行文件读取。validate_read_scope 核对形态与调用归属；端口失败、错误类型或策略不匹配转为安全 unknown 结果，不直接回传宿主诊断。该逐次文件鉴权不能被扩大为“当前窗口及全部派生知识立即撤权”；知识和 Execution 快照边界见 S_09 / S_03。
 
-外部操作查询可得到已成功、明确未执行或仍未知。已成功复用原回执；明确未执行时重新检查权限和前置条件；支持外部幂等键时按原键查询或有限重试；未知且不可查询时暂停。补偿作为新的获授权操作，取消不自动授予补偿权。租约失效只能防止后续受控写入，不能撤回在途请求。旧执行者回执由宿主验证后进入核对流程，不直接改写新执行的终态或窗口。
+### 4.2 `read_file` / `list_files`
 
-文件工具在派发和实际写入前核验执行权；Persistent 写工具在当前调用 preflight 中绑定授权范围和精确内容条件，PA-15 意图记账成功后才委托 Harness 工具写入。若底层无法阻止失权旧进程继续写入，不开放该空间的自动多实例接管或相应写能力。子代理写工具默认串行；只有资源独立、操作标识稳定且回执可逐项核对时才允许并行。换窗前须收拢完整模型工具消息组；Checkpoint 不序列化旧子代理线程。初期缺少子代理汇聚与恢复适配时，对需可靠恢复的任务禁用其写工具。
+工具参数继续引用原 Harness ToolCard；read_file 的路径键为 file_path，list_files 为 path，列举路径缺省为 `.`。包装器在实际委托前将已授权路径替换为底层规范路径，结果中的结构化路径元数据再转换回逻辑路径；invoke 与 stream 使用同一保护路径，stream 交出同一次调用结果。
 
-个人版 / 普通 DeepAgent 不开启 `workspace_write` 时，仍使用原有 `WriteFileTool` / `EditFileTool` 构造和行为；PA-16 的条件写入参数只由 Persistent 专用 opt-in 实例传入。
+拒绝 NUL、绝对路径、驱动器 / UNC 路径及 `..` 段；统一斜杠、移除 `.` 段，空路径字符串按根目录 `.` 归一化，不将其写成“所有空路径均拒绝”。先检查词法候选的允许根与私有范围，再检查 realpath 后的相同边界；进入底层工具前检查获授权目标是否存在。
 
-## 与其它 spec 的关系
+| 结果 | 含义与副作用 |
+| --- | --- |
+| ok / complete | 读取或列举成功；返回观察到的逻辑路径、来源和可用版本 |
+| partial / partial | read_file 提供非零 offset 或任何 limit 时的有界读取；不是历史完整性保证 |
+| forbidden | 范围拒绝或路径越界；不执行底层读取 |
+| unknown | 授权不确定、归属 / 策略错误或端口异常；不执行底层读取 |
+| not_found | 已授权目标不存在 |
+| unavailable | 已授权读取后端失败或返回形态非法 |
 
-- [S_02](S_02_events-and-result-handoff.md) 定义意图与回执的事件确认。
-- [S_03](S_03_context-and-windows.md) 定义文件当前状态进入模型输入的条件。
-- [S_05](S_05_checkpoint-and-recovery.md) 定义未决操作在恢复时的核对。
+错误返回 ToolOutput(success=false)，data 只含安全 status，error 为固定安全说明。成功 next_cursor 当前为空；list_files 没有分页协议，保持 complete，不能补写游标翻页或 version_conflict 能力。内容正文并非凭证过滤器，结构化主机路径清理不能被误写为全量正文脱敏保证。
+
+## 5. 读取资源与生命周期
+
+本调用构造独立读取 Rail / 工具实例；Rail init 注册读取工具，uninit 移除本调用相应能力，owner 及实例清理由 S_07 约束。每次读取重新取得宿主范围，不缓存成永久授权。文件后续变化需重新读取和核对，观察版本不阻止并发修改或读取期间的路径 / 文件竞态。
+
+目录部署可有 inbox、work、sessions、knowledge、templates、practices，但名称不是授权机制。当前配置授予的公共文件可共享；会话草稿、私有轨迹、状态和归档的隔离分别由本规约和 S_03 负责，状态后端不能因设置私有目录就放进工具可访问范围。文件成功不表示任务结束或公开到群，结果交接见 S_02。
+
+## 6. 当前限制与替代关系
+
+- PA-16 的 agent-core 文件修改组件已实现，独立写授权端口及精确内容条件在 preflight 中绑定，PA-15 意图记账成功后才委托 Harness 写工具。内容哈希及条件创建冲突由 SysOperation 稳定错误码映射为 version_conflict，不解析本地化错误文本。真实授权端口、provider 和跨仓联调仍待完成；不能承诺跨进程事务、自动接管或恰好一次写入。普通 DeepAgent 不启用 workspace_write 时保留原 Write/Edit 行为，详见 [F_16](../features/F_16_workspace-file-write.md)。
+- 当前路径保护不提供完整 OS 沙箱，也不证明 Shell / MCP / 子进程隔离；不因保存脚本或 SOP 自动安装 Skill 或扩大权限。
+- 目标分支后续提交已将 WorkspaceAccessPort / WorkspaceReadScope 的外层懒导出映射修正为 workspace.access，并新增写授权端口和范围导出；F_14 保留的导入失败是修正前历史证据。真实宿主能力仍不能只凭 __all__ 声明证明可用。
+- 原 S_04 的通用副作用、操作标识、意图与完成规则转由 [S_08](S_08_tool-effects-and-intent.md) 维护；旧租约围栏、外部查询 / 补偿与所有工具统一返回回执的协议不属于现行 PA-14 保证。
+
+## 7. 关联规约与验证索引
+
+S_07 负责能力装配和 owner；S_08 负责本两个工具的只读分类与完成事件；S_03 负责私有状态和归档；S_09 负责知识资料读取；S_02 负责候选文件的共享和投递。
+
+| 条款 / 接口 | 检查入口 |
+| --- | --- |
+| 范围形态、不可变性及身份匹配 | [test_workspace_access.py](../../../../../tests/unit_tests/harness/persistent_agent/test_workspace_access.py) |
+| 路径、符号链接及其他 Session 私有范围 | [test_workspace_path_policy.py](../../../../../tests/unit_tests/harness/persistent_agent/test_workspace_path_policy.py) |
+| 装配开关与独立读取 Rail | [test_workspace_read_rail.py](../../../../../tests/unit_tests/harness/persistent_agent/test_workspace_read_rail.py) |
+| 拒绝前不访问后端、结果与来源版本 | [test_workspace_read_tools.py](../../../../../tests/unit_tests/harness/persistent_agent/test_workspace_read_tools.py) |
+
+这些检查定位 agent-core 组件；外层公开导入、真实宿主范围、OS 级隔离及跨仓联调须另行验证，证据见 F_14 和唯一开发计划。
