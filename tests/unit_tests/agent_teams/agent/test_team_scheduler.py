@@ -774,3 +774,58 @@ async def test_handoff_to_dormant_member_wakes_it_through_auto_start(db, bus):
 
     assert (await tm.get("z")).status == TaskStatus.IN_PROGRESS.value
     assert host.started_members == ["dev-1"]
+
+
+# ---------------------------------------------------------------------------
+# Temp reviewer trajectory attribution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_runs_under_its_own_trajectory_subject(db, bus, monkeypatch):
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler as _Scheduler
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+    from openjiuwen.agent_teams.rails.elements import OBSERVABILITY, TEAM_OBSERVABILITY
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.harness.execution_subject import current_execution_subject
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    scheduler._blueprint.spec.agents = {"teammate": DeepAgentSpec()}
+    scheduler._blueprint.spec.dispatch_mode = "scheduled"
+    scheduler._blueprint.language = "cn"
+    scheduler._infra.team_backend.db = db
+    scheduler._infra.team_backend.workspace_cache = None
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    # The scan dispatches a real temp reviewer; keep it from building one.
+    monkeypatch.setattr(_Scheduler, "_dispatch_to_reviewer", AsyncMock())
+
+    built_specs = []
+    run_subjects = []
+
+    class _FakeHarness:
+        async def run_once(self, _prompt):
+            run_subjects.append(current_execution_subject())
+            return {"output": "voted"}
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, **_kwargs):
+        built_specs.append(agent_spec)
+        return _FakeHarness()
+
+    monkeypatch.setattr(TeamHarness, "build", staticmethod(_fake_build))
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    rail_types = [rail.type for rail in built_specs[0].rails]
+    assert TEAM_OBSERVABILITY in rail_types
+    assert OBSERVABILITY in rail_types
+    subject = run_subjects[0]
+    assert subject.subject_id == f"team-member:sched_session:{TEAM}:rev-1"
+    assert subject.display_name == "rev-1"
+    assert subject.kind == "team_member"
+    assert subject.session_id == "sched_session"
+    # The scope is released once the reviewer run returns.
+    assert current_execution_subject() is None

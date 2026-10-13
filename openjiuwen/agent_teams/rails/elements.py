@@ -36,6 +36,7 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
+from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 from openjiuwen.harness.manifest.builtin_elements import (
     OBSERVABILITY,
     observability_dependency_installed,
@@ -473,6 +474,23 @@ def build_team_observability_rail(params: dict[str, Any], context: Any) -> Any:
     return maybe_team_observability_rail()
 
 
+def observability_rail_specs() -> list[RailSpec]:
+    """Return the observability rail pair every team-built agent mounts.
+
+    ``core.observability`` owns the agent span itself (harness-level,
+    team-agnostic) and ``core.team.observability`` layers the team identity
+    onto it, so the two are always mounted together. Each provider checks
+    ``is_initialized()`` and is a no-op when tracing is off.
+
+    Returns:
+        A fresh list of the two rail specs, safe for the caller to extend.
+    """
+    return [
+        RailSpec(type=TEAM_OBSERVABILITY),
+        RailSpec(type=OBSERVABILITY),
+    ]
+
+
 __all__ = [
     "TEAM_TOOL",
     "TEAM_POLICY",
@@ -484,4 +502,5 @@ __all__ = [
     "TEAM_OBSERVABILITY",
     "OBSERVABILITY",
     "observability_dependency_installed",
+    "observability_rail_specs",
 ]

@@ -74,7 +74,42 @@ if TYPE_CHECKING:
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
+def team_member_execution_subject(
+    *,
+    session_id: str,
+    team_name: str,
+    member_name: str,
+    display_name: str,
+    is_leader: bool = False,
+) -> ExecutionSubject:
+    """Build the trajectory owner identity of one Team member execution.
+
+    Shared by long-lived members and the one-shot reviewers the scheduled
+    dispatch mode spawns, so every execution acting under a member name lands
+    in the same trajectory lane.
+
+    Args:
+        session_id: Session the Team runs in.
+        team_name: Team the member belongs to.
+        member_name: Member name, unique within the team.
+        display_name: Name shown on the trajectory lane.
+        is_leader: Whether the member is the team leader.
+
+    Returns:
+        The execution subject to bind around the member's spans.
+    """
+    return ExecutionSubject(
+        subject_id=f"team-member:{session_id}:{team_name}:{member_name}",
+        display_name=display_name,
+        kind="team_leader" if is_leader else "team_member",
+        parent_subject_id="",
+        session_id=session_id,
+    )
+
+
 # pylint: disable=too-many-public-methods
+
+
 class TeamAgent(BaseAgent):
     """One implementation that can act as leader or teammate.
 
@@ -736,15 +771,13 @@ class TeamAgent(BaseAgent):
 
     def observability_execution_subject(self, session_id: str = "") -> ExecutionSubject:
         """Return the stable trajectory owner identity for this Team member."""
-        team_name = str(self.team_name or "")
         member_name = str(self.member_name or self.card.name or self.card.id)
-        display_name = str(getattr(self.runtime_context, "display_name", "") or member_name)
-        return ExecutionSubject(
-            subject_id=f"team-member:{session_id}:{team_name}:{member_name}",
-            display_name=display_name,
-            kind="team_leader" if self.role == TeamRole.LEADER else "team_member",
-            parent_subject_id="",
+        return team_member_execution_subject(
             session_id=session_id,
+            team_name=str(self.team_name or ""),
+            member_name=member_name,
+            display_name=str(getattr(self.runtime_context, "display_name", "") or member_name),
+            is_leader=self.role == TeamRole.LEADER,
         )
 
     async def invoke(self, inputs, session=None):
@@ -1911,4 +1944,4 @@ class TeamAgent(BaseAgent):
         return agent
 
 
-__all__ = ["TeamAgent"]
+__all__ = ["TeamAgent", "team_member_execution_subject"]

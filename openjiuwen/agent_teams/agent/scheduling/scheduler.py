@@ -527,12 +527,21 @@ class TeamScheduler:
         ``view_task`` — so it can inspect the deliverable and cast a vote.
         The harness is disposed immediately after ``run_once``, regardless of
         outcome; a crash is logged and retried on the next scan.
+
+        For trajectory attribution the reviewer mounts the same observability
+        rail pair as a team member and runs under a ``team_member`` execution
+        subject named after the reviewer, so its model / tool records group
+        into their own lane instead of falling into the unassigned main group.
         """
+        from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
+        from openjiuwen.agent_teams.context import get_session_id
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+        from openjiuwen.agent_teams.rails.elements import observability_rail_specs
         from openjiuwen.agent_teams.schema.team import TeamRole
         from openjiuwen.agent_teams.tools.locales import make_translator
         from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
         from openjiuwen.agent_teams.tools.tool_task import VerifyTaskTool, ViewTaskToolV2
+        from openjiuwen.harness.execution_subject import execution_subject_scope
 
         spec = self._blueprint.spec
         agents = getattr(spec, "agents", None) or {}
@@ -595,6 +604,7 @@ class TeamScheduler:
                 update={
                     "system_prompt": system_prompt,
                     "tools": list(base_agent_spec.tools or []) + [verify_tool, view_tool],
+                    "rails": list(base_agent_spec.rails or []) + observability_rail_specs(),
                 }
             )
             reviewer_ctx = (
@@ -615,6 +625,12 @@ class TeamScheduler:
                 reviewer=reviewer,
                 loader=self._template_loader,
             )
+            reviewer_subject = team_member_execution_subject(
+                session_id=get_session_id() or "",
+                team_name=backend.team_name,
+                member_name=member_name,
+                display_name=member_name,
+            )
             # Retry transient model-call failures up to 3 times.
             # Each attempt builds a fresh harness and disposes the old
             # one — ``run_once`` tears down tools on every invocation.
@@ -632,7 +648,8 @@ class TeamScheduler:
                         reviewer,
                         task.task_id,
                     )
-                result = await harness.run_once(review_prompt)
+                with execution_subject_scope(reviewer_subject):
+                    result = await harness.run_once(review_prompt)
                 output_str = str(result)
                 if "181001" not in output_str:
                     break
