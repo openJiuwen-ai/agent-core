@@ -5,6 +5,8 @@
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -47,6 +49,26 @@ class PersistentModelCallRail(DeepAgentRail):
             return False
         ctx.request_force_finish(pause_result("error", "execution is stopping"))
         return True
+
+    async def before_invoke(self, ctx) -> None:
+        """Rails are registered by now and the native context is not yet created: refuse offloading.
+
+        A rail's init may add context processors after construction, so this is checked here too.
+        """
+        if self._emitter() is None:
+            return
+        from .session_state import offloading_processors
+
+        reference = self._binding.agent_ref
+        agent = reference() if reference is not None else None
+        offloading = offloading_processors(agent) if agent is not None else []
+        if offloading:
+            error = build_error(
+                StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                error_msg=f"Persistent windows do not support offloading; remove {', '.join(offloading)}",
+            )
+            self._binding.control.mark_fatal(error)
+            raise error
 
     async def before_model_call(self, ctx) -> None:
         """Skip the call after a control or critical failure; otherwise ask for budget."""

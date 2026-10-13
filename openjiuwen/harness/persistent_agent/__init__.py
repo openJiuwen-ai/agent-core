@@ -48,6 +48,7 @@ __all__ = [
     "FinalPayload",
     "BudgetAdmission",
     "BudgetReport",
+    "session_key_prefix",
 ]
 
 _MODULES = {
@@ -98,6 +99,7 @@ _MODULES = {
         "schema.events",
     ),
     **dict.fromkeys(("BudgetAdmission", "BudgetReport"), "schema.port_results"),
+    "session_key_prefix": "execution.session_state",
 }
 
 

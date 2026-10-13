@@ -5,7 +5,7 @@
 The formal entries call these and reject the request while they raise, so no
 execution silently runs without session state, window assembly or interactive
 adaptation. Shared contracts live in schema.integration and are re-exported here
-for existing callers. Window assembly (PA-06) is integrated.
+for existing callers. Window assembly (PA-06) and the session state record (PA-10) are integrated.
 """
 
 from typing import TYPE_CHECKING
@@ -26,6 +26,7 @@ from ..schema.integration import (
     WindowAssembler,
     WindowAssembly,
 )
+from .session_state import ExecutionStateStore, WindowStore
 from .window_assembly import ExecutionWindowAssembler
 
 if TYPE_CHECKING:
@@ -55,8 +56,8 @@ def _not_integrated(what: str, feature: str):
 
 
 def session_state_store(context: "PersistentBuildContext") -> SessionStateStore:
-    """Return the WindowStore-backed state store."""
-    raise _not_integrated("session state record", "PA-10")
+    """Return the WindowStore-backed state store of this Execution."""
+    return ExecutionStateStore(WindowStore(context.ports.window_backend))
 
 
 def window_assembler(context: "PersistentBuildContext") -> WindowAssembler:

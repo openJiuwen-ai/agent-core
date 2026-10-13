@@ -17,6 +17,8 @@ from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 
 from ..schema.context import GroupMessage, GroupMessagesResult
 from ..schema.integration import (
+    CONTEXT_ID,
+    CONTEXT_STATE_KEY,
     EXECUTION_HEADER,
     TEMPORARY_BACKGROUND,
     WINDOW_PART_KEY,
@@ -28,10 +30,6 @@ from ..schema.integration import (
 if TYPE_CHECKING:
     from ..schema.build_context import PersistentBuildContext
     from ..schema.request import RequestInput
-
-# Session state key and context ID the native ReAct agent loads its window from.
-_CONTEXT_KEY = "context"
-_CONTEXT_ID = "default_context_id"
 
 _REQUEST_KINDS = {"group_message": "群消息", "direct_message": "私聊", "scheduled": "定时任务"}
 _SENDER_KINDS = {"human": "人", "agent": "Agent"}
@@ -112,7 +110,7 @@ def _field(item, name):
 
 def _unpaired_tool_calls(session) -> list[str]:
     """Tool calls in the loaded window without a result; a PA-10 stop placeholder counts as a result."""
-    window = ((session.get_state(_CONTEXT_KEY) or {}).get(_CONTEXT_ID) or {}).get("messages") or []
+    window = ((session.get_state(CONTEXT_STATE_KEY) or {}).get(CONTEXT_ID) or {}).get("messages") or []
     pending: dict[str, None] = {}
     for message in window:
         for call in _field(message, "tool_calls") or ():
@@ -125,9 +123,9 @@ def _unpaired_tool_calls(session) -> list[str]:
 
 def _append_to_window(session, messages: list[UserMessage]) -> None:
     """Append after the loaded window; the native agent loads Session state into its context."""
-    contexts = session.get_state(_CONTEXT_KEY) or {}
-    window = contexts.get(_CONTEXT_ID) or {}
-    session.update_state({_CONTEXT_KEY: {_CONTEXT_ID: {"messages": [*(window.get("messages") or []), *messages]}}})
+    contexts = session.get_state(CONTEXT_STATE_KEY) or {}
+    window = contexts.get(CONTEXT_ID) or {}
+    session.update_state({CONTEXT_STATE_KEY: {CONTEXT_ID: {"messages": [*(window.get("messages") or []), *messages]}}})
 
 
 class ExecutionWindowAssembler:
