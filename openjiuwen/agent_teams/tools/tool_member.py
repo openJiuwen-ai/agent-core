@@ -22,6 +22,25 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
 
 
+def validate_member_name(member_name: str | None) -> str | None:
+    """Validate ``member_name`` at the tool boundary.
+
+    Returns:
+        An error message when the name is missing or malformed,
+        otherwise ``None``.
+    """
+    if member_name and _MEMBER_NAME_PATTERN.match(member_name):
+        return None
+    return (
+        f"Invalid member_name {member_name!r}: must start with a "
+        "lowercase ASCII letter (a-z), followed by lowercase letters, "
+        "digits (0-9) or hyphen (-); no uppercase, underscore, "
+        "whitespace, or non-ASCII characters (including CJK) — "
+        "member_name is reused as a routing token and a filesystem "
+        "path segment"
+    )
+
+
 def _is_anthropic_provider(provider: str) -> bool:
     """Return whether a provider name is Anthropic-compatible."""
     from openjiuwen.agent_teams.external.cli_agent.model_compat import is_anthropic_provider
@@ -121,25 +140,6 @@ class _SpawnToolBase(TeamTool, ABC):
             )
         )
         self.team = team
-
-    @staticmethod
-    def _validate_member_name(member_name: str | None) -> str | None:
-        """Validate ``member_name`` at the tool boundary.
-
-        Returns:
-            An error message when the name is missing or malformed,
-            otherwise ``None``.
-        """
-        if member_name and _MEMBER_NAME_PATTERN.match(member_name):
-            return None
-        return (
-            f"Invalid member_name {member_name!r}: must start with a "
-            "lowercase ASCII letter (a-z), followed by lowercase letters, "
-            "digits (0-9) or hyphen (-); no uppercase, underscore, "
-            "whitespace, or non-ASCII characters (including CJK) — "
-            "member_name is reused as a routing token and a filesystem "
-            "path segment"
-        )
 
     @staticmethod
     def _fail(reason: str) -> ToolOutput:
@@ -326,7 +326,7 @@ class SpawnTeammateTool(_SpawnToolBase):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        err = self._validate_member_name(inputs.get("member_name"))
+        err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
 
@@ -529,7 +529,7 @@ class SpawnHumanAgentTool(_SpawnToolBase):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        err = self._validate_member_name(inputs.get("member_name"))
+        err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
 
@@ -589,7 +589,7 @@ class SpawnPassiveHumanTool(_SpawnToolBase):
         if getattr(self.team, "conversation_mode", "team") != "group_chat":
             return self._fail("spawn_passive_human requires a group_chat runtime")
 
-        err = self._validate_member_name(inputs.get("member_name"))
+        err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
 
@@ -666,7 +666,7 @@ class SpawnBridgeAgentTool(_SpawnToolBase):
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         from openjiuwen.agent_teams.schema.team import BridgeMailboxInjectMode
 
-        err = self._validate_member_name(inputs.get("member_name"))
+        err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
 
@@ -867,7 +867,7 @@ class SpawnExternalCliTool(_SpawnToolBase):
         return f"<fallback_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</fallback_model_catalog>"
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        err = self._validate_member_name(inputs.get("member_name"))
+        err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
 

@@ -13,7 +13,7 @@ from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
-from openjiuwen.agent_teams.tools.tool_member import _SpawnToolBase, register_teammate
+from openjiuwen.agent_teams.tools.tool_member import register_teammate, validate_member_name
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -163,7 +163,7 @@ def _validate_inline_members(tasks: list[dict], *, leader_member_name: str | Non
         if not isinstance(member, dict):
             return f"Task {_spec_label(spec)!r}: 'member' must be an object"
         name = (member.get("member_name") or "").strip()
-        name_error = _SpawnToolBase._validate_member_name(name)
+        name_error = validate_member_name(name)
         if name_error:
             return f"Task {_spec_label(spec)!r}: member.{name_error}"
         if name in seen:

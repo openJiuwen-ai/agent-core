@@ -426,7 +426,7 @@ autonomous 没有调度器，退场判定无处安放（leader 收不到自发 `
 5. **`task_links` 对每条模板消息都查 2+N 次**：先加载模板、只在正文含 `task.upstream_brief` / `task.downstream_brief` 时解析；行按 `get_tasks_by_ids` 一次 `IN` 取回。
 6. **唤醒与旧 runtime 的 finalize 赛跑**：`shutdown_self` 把终态记进 `TeamAgentState.retired_status`，`finalize_member` 先看它（见 D3）。
 7. **`typing.Dict` / `Optional` 新代码**：改为 `dict[str, int]` / `str | None`。
-8. **内联注册复制 `spawn_teammate`**：抽 `tool_member.register_teammate`，命名校验复用 `_SpawnToolBase._validate_member_name`。
+8. **内联注册复制 `spawn_teammate`**：抽 `tool_member.register_teammate`，命名校验复用 `tool_member.validate_member_name`。
 9. **`members_with_unread` 复制广播水位逻辑**：`has_unread_messages` 与它共用 `_direct_unread_recipients` / `_broadcast_unread_recipients`。
 10. **临时 reviewer 的 `view_task` 仍是自主文案**：改用 `view_task_scheduled`。
 
