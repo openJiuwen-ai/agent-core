@@ -5,14 +5,14 @@
 | 类型 | 当前详细架构设计；标注"已实现"的部分以代码为准，其余均为拟议 |
 | 最近一次修订日期 | 2026-10-13 |
 | 关联模块 | `openjiuwen.harness.persistent_agent` |
-| 设计概览 | [Persistent Agent 设计概览](../../../../../../agent-core/openjiuwen/harness/persistent_agent/docs/designs/persistent-agent-overview.md) |
+| 设计概览 | [Persistent Agent 设计概览](persistent-agent-overview.md) |
 | 文档定位 | 描述 Persistent Agent 的架构方案，作为后续开发的设计依据 |
-| 开发计划 | [persistent-agent-development-plan.md](../../../../../../agent-core/openjiuwen/harness/persistent_agent/docs/designs/persistent-agent-development-plan.md) |
+| 开发计划 | [persistent-agent-development-plan.md](persistent-agent-development-plan.md) |
 | 责任人 | henry hu |
 
 本文说明 Persistent Agent 的定位、核心概念、模块设计、协作流程、状态、数据与故障处理。Agent 侧说明怎样执行；AgentServer 侧说明必须提供的保证，具体实现由服务端所属模块设计。
 
-**实现状态：** 构造、实例隔离、执行入口编排、群参与判断、写前意图和 PA-06 新 Request 窗口组装已有组件实现；PA-06 容量验收、会话状态记录、交互适配及真实宿主联调仍待完成。停止路径仅有部分验证，其余设计及待验证前提不视为已实现或验证通过。当前支持范围、负责人和证据以[统一开发计划](../../../../../../agent-core/openjiuwen/harness/persistent_agent/docs/designs/persistent-agent-development-plan.md)为准。
+**实现状态：** 构造、实例隔离、执行入口编排、群参与判断、写前意图和 PA-06 新 Request 窗口组装已有组件实现；PA-06 容量验收、会话状态记录、交互适配及真实宿主联调仍待完成。停止路径仅有部分验证，其余设计及待验证前提不视为已实现或验证通过。当前支持范围、负责人和证据以[统一开发计划](persistent-agent-development-plan.md)为准。
 
 | 阅读目的 | 章节入口 |
 | --- | --- |
@@ -215,7 +215,7 @@ flowchart LR
 
 ### 3.5 端口与交接契约
 
-执行通过端口集合（[`PersistentPorts`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/ports.py)）访问依赖能力；下表定义各契约的方向、操作与失败语义。
+执行通过端口集合（[`PersistentPorts`](../../ports.py)）访问依赖能力；下表定义各契约的方向、操作与失败语义。
 
 | 端口 | 方向 | 操作 | 失败语义 |
 | --- | --- | --- | --- |
@@ -238,11 +238,11 @@ flowchart LR
 
 这部分已经在代码中实现，本节只按代码现状描述。
 
-- **配置**：[`PersistentAgentSpec`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/schema/spec.py) 继承 `DeepAgentSpec`，是一份扁平配置，带 `fingerprint()` 用于校验版本。
-- **构造**：[`create_persistent_agent(spec, context=...)`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/factory.py) 返回**原生 `DeepAgent`**，不新建 Agent 类。构造过程不调用模型，也不调用端口。
-- **一次执行的上下文**：[`PersistentBuildContext`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/schema/build_context.py) 携带 [`ExecutionContext`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/schema/execution.py)（身份与权限快照）、Session 和端口集合。它只能使用一次，并为这次执行分配独立的 `tool_owner_id`，避免同名有状态工具相互覆盖。
+- **配置**：[`PersistentAgentSpec`](../../schema/spec.py) 继承 `DeepAgentSpec`，是一份扁平配置，带 `fingerprint()` 用于校验版本。
+- **构造**：[`create_persistent_agent(spec, context=...)`](../../factory.py) 返回**原生 `DeepAgent`**，不新建 Agent 类。构造过程不调用模型，也不调用端口。
+- **一次执行的上下文**：[`PersistentBuildContext`](../../schema/build_context.py) 携带 [`ExecutionContext`](../../schema/execution.py)（身份与权限快照）、Session 和端口集合。它只能使用一次，并为这次执行分配独立的 `tool_owner_id`，避免同名有状态工具相互覆盖。
 - **恢复引用**：`ExecutionContext.recovery_ref` 指向同一 Session、同一 Request 下待接续的 Execution；续做关联规则见第 5.2.4 节。
-- **隔离**：[`execution/binding.py`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/execution/binding.py) 提供内部的 `invoke_bound / stream_bound / abort_bound / close_bound`：
+- **隔离**：[`execution/binding.py`](../../execution/binding.py) 提供内部的 `invoke_bound / stream_bound / abort_bound / close_bound`：
   - 调用前校验 Agent、Session、Execution 是否都匹配；
   - 拒绝同一实例的并发调用；
   - 停止和清理只影响自己这次执行的资源。
@@ -328,7 +328,7 @@ abort_persistent_request(context, *, reason: "cancel" | "stop") -> None
 
 因此 Persistent Agent **自建一套按 Execution 生命周期的窗口管理**，并且在 Persistent Agent 中**不挂载**上述三个 rail：Persistent 构造遇到它们（含子类）时明确拒绝。同理，原生 context engine 按条数截断窗口的三个参数（`max_context_message_num`、`default_window_message_num`、`default_window_round_num`）在 Persistent 中也不允许启用。
 
-**执行中动态内容的追加通道。** `PromptAttachmentManager` 的"只在末尾追加增量"通道（[prompt_attachment_manager.py](../../../../../../agent-core/openjiuwen/harness/prompts/prompt_attachment_manager.py)）符合"执行中只追加"的要求，可以作为执行中追加动态内容的实现手段。
+**执行中动态内容的追加通道。** `PromptAttachmentManager` 的"只在末尾追加增量"通道（[prompt_attachment_manager.py](../../../prompts/prompt_attachment_manager.py)）符合"执行中只追加"的要求，可以作为执行中追加动态内容的实现手段。
 
 **前缀缓存原则：**
 
@@ -451,10 +451,10 @@ WindowStore 负责会话状态格式、读写、归档、按 Execution 查询归
 
 确认能力**完全复用** harness 现有实现，Persistent Agent 不写确认相关的 rail 代码：
 
-- [`PermissionInterruptRail`](../../../../../../agent-core/openjiuwen/harness/rails/security/tool_security_rail.py) 是 [`ConfirmInterruptRail`](../../../../../../agent-core/openjiuwen/harness/rails/interrupt/confirm_rail.py) 的子类，由权限引擎按工具、路径、shell 命令和风险等级判定 `allow / ask / deny`（[permission_engine](../../../../../../agent-core/openjiuwen/harness/security/permission_engine/core.py)）；
-- DeepAgent 在配置中 `permissions.enabled` 为真时**自动创建并挂载**这个 rail（[deep_agent.py:774](../../../../../../agent-core/openjiuwen/harness/deep_agent.py:774)）；
+- [`PermissionInterruptRail`](../../../rails/security/tool_security_rail.py) 是 [`ConfirmInterruptRail`](../../../rails/interrupt/confirm_rail.py) 的子类，由权限引擎按工具、路径、shell 命令和风险等级判定 `allow / ask / deny`（[permission_engine](../../../security/permission_engine/core.py)）；
+- DeepAgent 在配置中 `permissions.enabled` 为真时**自动创建并挂载**这个 rail（[deep_agent.py:774](../../../deep_agent.py#L774)）；
 - 判定为 `ask` 时，rail 抛出中断，ReAct 把上下文和中断状态写进 Session state，返回确认请求；
-- 恢复时，ReAct 读出中断状态，带着回复执行被拦截的工具调用，再从下一轮迭代继续（[handler.py:310](../../../../../../agent-core/openjiuwen/core/single_agent/interrupt/handler.py:310)）。
+- 恢复时，ReAct 读出中断状态，带着回复执行被拦截的工具调用，再从下一轮迭代继续（[handler.py:310](../../../../core/single_agent/interrupt/handler.py#L310)）。
 
 **Persistent Agent 只负责一件事：** 在两次执行之间，把白名单里的 Session state 字段保存好、再放回去（第 7.3 节）。
 
@@ -583,7 +583,7 @@ sequenceDiagram
 5. 在窗口末尾追加续做执行头（含 `recovery_ref` 指向的执行 ID）、临时背景块和原任务输入；有用户的继续指示时一并追加。
 6. 调用 DeepAgent，**先由模型按续做规则判断进度**。其他任务可能改变了文件或外部状态，需要重新查证；"已登记意图、无结果"的写操作不能直接重做。
 
-**为什么清除旧中断状态：** E1 等待确认时保存的记录包含中断状态；E2 收到同意后可能已经执行写操作，但在保存新记录前崩溃，E3 加载到的仍是 E1 的记录。原生 ReAct 发现中断状态后，会先恢复保存的工具调用，再进入模型循环（[react_agent.py:2654](../../../../../../agent-core/openjiuwen/core/single_agent/agents/react_agent.py:2654)、[handler.py:334](../../../../../../agent-core/openjiuwen/core/single_agent/interrupt/handler.py:334)）。若不先处理，日志里的"结果不明先查证"来不及生效；会话内已记住的授权还可能让旧调用直接放行。
+**为什么清除旧中断状态：** E1 等待确认时保存的记录包含中断状态；E2 收到同意后可能已经执行写操作，但在保存新记录前崩溃，E3 加载到的仍是 E1 的记录。原生 ReAct 发现中断状态后，会先恢复保存的工具调用，再进入模型循环（[react_agent.py:2654](../../../../core/single_agent/agents/react_agent.py#L2654)、[handler.py:334](../../../../core/single_agent/interrupt/handler.py#L334)）。若不先处理，日志里的"结果不明先查证"来不及生效；会话内已记住的授权还可能让旧调用直接放行。
 
 **补结果只修复上下文，不代表工具执行成功或失败。** 不把这条说明记成实际工具执行的 `tool.completed`，真实进度以执行日志和查证结果为准。会话授权保留，但是否需要执行某个操作仍由续做规则判断。
 
@@ -746,13 +746,13 @@ reply.delta 结束、文件写好、窗口有结束标记或页面显示完成�
 
 **Persistent Agent 不使用 agent-core 的 checkpointer。** 原因：
 
-- 现有中断恢复只读写 Session state，并不直接依赖 checkpointer（[handler.py:279](../../../../../../agent-core/openjiuwen/core/single_agent/interrupt/handler.py:279)）；checkpointer 只是把 Session state 存到外部再读回来的工具；
+- 现有中断恢复只读写 Session state，并不直接依赖 checkpointer（[handler.py:279](../../../../core/single_agent/interrupt/handler.py#L279)）；checkpointer 只是把 Session state 存到外部再读回来的工具；
 - checkpointer 保存的是整个 Session state，如果再由窗口管理另存一份当前窗口，就会出现两份上下文，加载时不知道以哪份为准；
 - 默认的内存实现重启即丢失，而且数据格式完全跟随 core 内部实现。
 
 **做法：** AgentServer 每次执行都提供**新的空 Session**，服务端不额外调用 `pre_run / post_run`。跨 Execution 的状态只由窗口管理（`WindowStore`）保存和加载：执行开始时把会话状态记录写回 Session state，结束时按白名单取出、整理后保存。
 
-**服务端不调用，不等于原生执行路径不调用。** ReAct 流式路径仍会调用 `pre_run` 和 `commit`（[react_agent.py:2984](../../../../../../agent-core/openjiuwen/core/single_agent/agents/react_agent.py:2984)、[react_agent.py:3050](../../../../../../agent-core/openjiuwen/core/single_agent/agents/react_agent.py:3050)），进入 checkpointer 的恢复和保存逻辑。新的空 Session 仍可能按 Session ID 读回旧记录，覆盖 `WindowStore` 加载的状态。
+**服务端不调用，不等于原生执行路径不调用。** ReAct 流式路径仍会调用 `pre_run` 和 `commit`（[react_agent.py:2984](../../../../core/single_agent/agents/react_agent.py#L2984)、[react_agent.py:3050](../../../../core/single_agent/agents/react_agent.py#L3050)），进入 checkpointer 的恢复和保存逻辑。新的空 Session 仍可能按 Session ID 读回旧记录，覆盖 `WindowStore` 加载的状态。
 
 **执行路径隔离：** `Session` 和 `create_agent_session` 接收可选参数 `checkpointer`。显式传入时，`pre_run` 的状态加载和 `commit` 的状态保存都使用注入的实现；未传入时使用默认实现（内部 Session 在构造时取得默认实现，`pre_run` 在执行时取得全局实现），个人版默认行为不变。AgentServer 为每次 Execution 创建新的空 Session 并显式注入不读写存储的 `NoopCheckpointer`；`InMemoryCheckpointer` 仍会恢复和保存状态，不能当作空实现。隔离按 Session 生效，不修改全局 checkpointer 配置；执行入口在执行前检查隔离配置，不符合就拒绝开始。原生 `pre_run`、`commit` 等生命周期照常运行，保留 Session 创建回调、流关闭、取消收敛和资源清理，只是其中的 checkpointer 恢复和保存不读写存储；执行过程中仍正常读写当前 Session state。正常结束、确认暂停与恢复、取消、停止、异常和提前关闭流都按此执行。
 
@@ -780,7 +780,7 @@ reply.delta 结束、文件写好、窗口有结束标记或页面显示完成�
 
 | 后端 | 适用场景 | 要求 |
 | --- | --- | --- |
-| [`BaseKVStore`](../../../../../../agent-core/openjiuwen/core/foundation/store/base_kv_store.py) | 服务端通过统一 KV 接口提供 Redis、数据库等存储实现 | 服务端注入实例，保证持久化和隔离 |
+| [`BaseKVStore`](../../../../core/foundation/store/base_kv_store.py) | 服务端通过统一 KV 接口提供 Redis、数据库等存储实现 | 服务端注入实例，保证持久化和隔离 |
 
 窗口存储后端是必需依赖，构造时检查其符合 `BaseKVStore` 契约，不读取或写入存储。接口类型符合不等于数据持久化，跨重启保存由服务端提供的具体实现保证；内存后端只用于测试。专用 SysOperation 文件系统后端不在本期开发和验收范围。
 
@@ -1081,7 +1081,7 @@ sequenceDiagram
 
 ### 11.2 需要检查哪些要求，由哪里验证
 
-本节给出架构检查入口。实现验证点见第 12.2.1 节；完整测试、负责人、进度与证据由[统一开发计划](../../../../../../agent-core/openjiuwen/harness/persistent_agent/docs/designs/persistent-agent-development-plan.md)及对应方案维护。
+本节给出架构检查入口。实现验证点见第 12.2.1 节；完整测试、负责人、进度与证据由[统一开发计划](persistent-agent-development-plan.md)及对应方案维护。
 
 | 检查主题 | 应证明什么 | 对应章节 | 验证入口 |
 | --- | --- | --- | --- |
@@ -1158,8 +1158,8 @@ sequenceDiagram
 
 | 文档 | 阅读用途 |
 | --- | --- |
-| [Persistent Agent 设计概览](../../../../../../agent-core/openjiuwen/harness/persistent_agent/docs/designs/persistent-agent-overview.md) | 定位、目标与原则 |
-| [统一开发计划](../../../../../../agent-core/openjiuwen/harness/persistent_agent/docs/designs/persistent-agent-development-plan.md) | 特性负责人、验收、进度与证据 |
+| [Persistent Agent 设计概览](persistent-agent-overview.md) | 定位、目标与原则 |
+| [统一开发计划](persistent-agent-development-plan.md) | 特性负责人、验收、进度与证据 |
 
 源码链接用于定位实现；具体规约、方案和验证记录从开发计划查阅。源码引用不替代能力验收证据。
 

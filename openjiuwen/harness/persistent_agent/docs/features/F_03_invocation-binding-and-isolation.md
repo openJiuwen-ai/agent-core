@@ -7,7 +7,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 | feature；PA-03 内部绑定与原生单轮调用隔离的设计及归档记录 |
-| 日期 | 原阶段归档日期：2026-09-29；本次文档修订：2026-10-12 |
+| 日期 | 原阶段归档日期：2026-09-29；本次文档修订：2026-10-12；引用修订：2026-10-13 |
 | 负责人 | yan_zj（PA-03 原实现与独立验收负责人） |
 | 状态与适用范围 | PA-03 已按内部绑定及单轮调用边界完成；正式入口、业务收尾和执行模式扩展分别由相关特性维护 |
 | 范围 | `execution/binding.py`、`execution/stream_lifecycle.py`、构造快照及共享原生流生命周期接缝；不承担宿主 Session 调度或业务事件闭环 |
@@ -81,14 +81,14 @@ PA-03 的目标是以 PA-02 的构造绑定为基础，将内部原生调用固�
 
 | 模块 | 责任 |
 | --- | --- |
-| [schema/build_context.py](../../persistent_agent/schema/build_context.py) | ConstructionBinding 保存原归属、锁和 runtime；validate_binding 核对 agent、Session、Execution、ports 与 owner |
-| [factory.py](../../persistent_agent/factory.py) | 原生构造结束后保存 agent 弱引用，调用 `InvocationState.capture`，清除临时 parts；构造失败回收详见 F_01 |
-| [schema/spec.py](../../persistent_agent/schema/spec.py) | 经父类 parts / Config 路径注入本构造的 NativeStreamTaskLifecycle；当前也装配模型及写意图 Rails |
-| [execution/binding.py](../../persistent_agent/execution/binding.py) | 运行快照校验、占用、输入副本、原生 invoke / stream、独立停止及空闲关闭 |
-| [execution/stream_lifecycle.py](../../persistent_agent/execution/stream_lifecycle.py) | 仅管理本绑定登记的原生生产者，避免重复取消与收尾中再次取消，等待退出 |
+| [schema/build_context.py](../../schema/build_context.py) | ConstructionBinding 保存原归属、锁和 runtime；validate_binding 核对 agent、Session、Execution、ports 与 owner |
+| [factory.py](../../factory.py) | 原生构造结束后保存 agent 弱引用，调用 `InvocationState.capture`，清除临时 parts；构造失败回收详见 F_01 |
+| [schema/spec.py](../../schema/spec.py) | 经父类 parts / Config 路径注入本构造的 NativeStreamTaskLifecycle；当前也装配模型及写意图 Rails |
+| [execution/binding.py](../../execution/binding.py) | 运行快照校验、占用、输入副本、原生 invoke / stream、独立停止及空闲关闭 |
+| [execution/stream_lifecycle.py](../../execution/stream_lifecycle.py) | 仅管理本绑定登记的原生生产者，避免重复取消与收尾中再次取消，等待退出 |
 | [DeepAgent](../../../deep_agent.py)、[ReActAgent](../../../../core/single_agent/agents/react_agent.py) | 单轮 stream 与 abort 的可选原生接缝；生产者创建、finalizing 标记及原生 Session 生命周期 |
 | [owned stream 判定](../../../../core/common/stream_lifecycle.py)、[回调装饰器](../../../../core/runner/callback/decorator.py) | 识别显式归属的流，使适用的回调生成器边界向下传播关闭；默认流关闭语义沿用原契约 |
-| [execution/entries.py](../../persistent_agent/execution/entries.py) | 后续 PA-05 消费者：独立 runner、事件映射、控制原因及结局、状态接入、等待控制完成后关闭 |
+| [execution/entries.py](../../execution/entries.py) | 后续 PA-05 消费者：独立 runner、事件映射、控制原因及结局、状态接入、等待控制完成后关闭 |
 
 #### 2.3.1 关键类、绑定函数与原生接口定义
 
@@ -96,8 +96,8 @@ PA-03 的目标是以 PA-02 的构造绑定为基础，将内部原生调用固�
 
 | 类 / 定义来源 | 变更、关系与构造 | 关键属性和生命周期 |
 | --- | --- | --- |
-| [binding.InvocationState](../../persistent_agent/execution/binding.py) | 本特性新增普通 dataclass；组合到 `binding.runtime`，由 capture 构造 | 必传 config、model、abilities、declarations、owned_tools；loop / active_task 默认 None，stopped / stopping / closing / closed 默认 False。字段类型、更新时机及复核范围见第 2.4 节；不序列化 |
-| [stream_lifecycle.NativeStreamTaskLifecycle](../../persistent_agent/execution/stream_lifecycle.py) | 本特性新增；`__init__(self)`，无宿主参数，作为 `DeepAgentConfig.stream_task_lifecycle` 注入 | `_tasks`、`_cancel_requested`、`_finalizing` 均为初始空 `set[asyncio.Task]`；每次构造独立实例，只管理登记的原生流生产者；不扫描其他后台任务 |
+| [binding.InvocationState](../../execution/binding.py) | 本特性新增普通 dataclass；组合到 `binding.runtime`，由 capture 构造 | 必传 config、model、abilities、declarations、owned_tools；loop / active_task 默认 None，stopped / stopping / closing / closed 默认 False。字段类型、更新时机及复核范围见第 2.4 节；不序列化 |
+| [stream_lifecycle.NativeStreamTaskLifecycle](../../execution/stream_lifecycle.py) | 本特性新增；`__init__(self)`，无宿主参数，作为 `DeepAgentConfig.stream_task_lifecycle` 注入 | `_tasks`、`_cancel_requested`、`_finalizing` 均为初始空 `set[asyncio.Task]`；每次构造独立实例，只管理登记的原生流生产者；不扫描其他后台任务 |
 
 | 类方法 / 源码完整签名 | 输入输出、异常及副作用 |
 | --- | --- |
@@ -107,7 +107,7 @@ PA-03 的目标是以 PA-02 的构造绑定为基础，将内部原生调用固�
 | `async NativeStreamTaskLifecycle.scope(self, task)`（asynccontextmanager） | 上下文进入时登记 task；退出时请求一次取消并等待真实退出，完成后移除三组标记；本体 yield 无业务值 |
 | `async NativeStreamTaskLifecycle.cancel_and_wait(self)` | 对当前登记任务快照请求取消并等待；生产者等待自身抛 RuntimeError，生产者非取消异常或等待期间的取消可传播；不提供超时接管 |
 
-下面的独立函数均新增于 [binding.py](../../persistent_agent/execution/binding.py)。这些是源码签名；缺省返回注解不表示没有返回值。
+下面的独立函数均新增于 [binding.py](../../execution/binding.py)。这些是源码签名；缺省返回注解不表示没有返回值。
 
 | 内部异步函数 | 调用条件、参数与结果 | 异常及状态 / 资源副作用 |
 | --- | --- | --- |

@@ -6,8 +6,8 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | S_04 / tools-and-workspace |
-| 关联模块 | [workspace/access.py](../../persistent_agent/workspace/access.py)、[path_policy.py](../../persistent_agent/workspace/path_policy.py)、[file_access.py](../../persistent_agent/workspace/file_access.py)、[tools/workspace_read.py](../../persistent_agent/tools/workspace_read.py) |
-| 最近一次修订日期 | 2026-10-12 |
+| 关联模块 | [workspace/access.py](../../workspace/access.py)、[path_policy.py](../../workspace/path_policy.py)、[file_access.py](../../workspace/file_access.py)、[tools/workspace_read.py](../../tools/workspace_read.py) |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | [F_14](../features/F_14_workspace-file-read.md)；文件修改接入见[开发计划](../designs/persistent-agent-development-plan.md) PA-16 |
 | 设计依据 | [架构设计：办公空间](../designs/persistent-agent-architecture.md#47-办公空间与知识)、[身份与隔离](../designs/persistent-agent-architecture.md#9-权限隔离与资源限制) |
 
@@ -25,7 +25,7 @@ DeepAgent 工具路径还须遵守既有 allow / ask / deny 及配置范围；�
 
 ## 2. 数据结构与事实归属
 
-WorkspaceReadScope 为宿主返回的不可变运行对象，不进入可序列化 Spec，不保存 Session、锁或取消状态。定义位置为 [access.py](../../persistent_agent/workspace/access.py)。
+WorkspaceReadScope 为宿主返回的不可变运行对象，不进入可序列化 Spec，不保存 Session、锁或取消状态。定义位置为 [access.py](../../workspace/access.py)。
 
 | 字段 | 语义与约束 |
 | --- | --- |

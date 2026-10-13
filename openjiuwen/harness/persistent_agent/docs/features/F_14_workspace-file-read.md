@@ -6,7 +6,7 @@
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-14 按调用授权读取办公空间文件 |
 | 建档日期 | 2026-10-09 |
-| 日期 / 最近修订 | 2026-10-12 |
+| 日期 / 最近修订 | 2026-10-12；引用修订：2026-10-13 |
 | 负责人 | Yan Zhijun，与统一开发计划 PA-14 一致 |
 | 状态 | 进行中：agent-core 只读组件已实现；公共导出已由目标分支后续提交修正，工具说明仍有缺口，JiuwenSwarm 宿主适配和真实联调未完成 |
 | 范围 | `openjiuwen/harness/persistent_agent/` 的授权端口、构造门控、路径策略、读取 Rail、工具包装器、公共导出声明及对应单测 |
@@ -221,12 +221,12 @@ PA-14 包装器不自行写 WindowStore、会话状态记录或执行日志，�
 
 | 类 / 定义来源 | 变更、关系与构造定义 | 关键属性、作用域与资源责任 |
 | --- | --- | --- |
-| [workspace.access.WorkspaceReadScope](../../persistent_agent/workspace/access.py) | 新增 frozen、kw_only dataclass，完整字段构造见第 5.2 节及源码 | 必传 status、agent_id、session_id、workspace_root、allowed_roots、private_sessions_root、current_session_root、source_ref、policy_revision；principal_ref / reason 默认 None。构造归一化 Path / tuple，不访问文件系统；每次读取由宿主重新返回 |
-| [workspace.path_policy.ResolvedWorkspacePath](../../persistent_agent/workspace/path_policy.py) | 新增内部 `@dataclass(frozen=True, slots=True)` | 必传 `path: Path`、`relative_path: str`、`source_ref: str`；组合后端真实路径与模型可见逻辑引用，不向模型公开 path |
-| [workspace.path_policy.WorkspacePathError](../../persistent_agent/workspace/path_policy.py) | 新增内部 ValueError 子类；`__init__(self, status: PathDecisionStatus, reason: str = "workspace path is not readable")` | status 为 forbidden / unknown，原因使用安全说明；由路径函数抛出、包装工具转成安全 ToolOutput |
-| [tools.workspace_read._PersistentWorkspaceReadTool](../../persistent_agent/tools/workspace_read.py) | 新增内部 Tool 子类；`__init__(self, *, base_tool: Any, execution: ExecutionContext, workspace_access: WorkspaceAccessPort) -> None` | 组合 `_base_tool`、固定 `_execution` 与 `_workspace_access`，复用底层 Card；无授权缓存，每次 invoke 授权 |
-| [PersistentWorkspaceReadTool / PersistentWorkspaceListTool](../../persistent_agent/tools/workspace_read.py) | 新增内部包装类，均继承上述基类及构造器 | Read 的 `_path_key="file_path"`、缺省路径 None；List 的 `_path_key="path"`、`_default_path="."`。分别包装 ReadFileTool / ListDirTool，只开放模型已有只读参数 |
-| [workspace.file_access.PersistentWorkspaceReadRail](../../persistent_agent/workspace/file_access.py) | 新增内部 DeepAgentRail 子类；`__init__(self, execution: ExecutionContext, workspace_access: WorkspaceAccessPort) -> None` | execution / workspace_access 固定，tools 初始空 list、priority=100；首次原生初始化构造两包装工具并注册，uninit 移除能力并清空 tools |
+| [workspace.access.WorkspaceReadScope](../../workspace/access.py) | 新增 frozen、kw_only dataclass，完整字段构造见第 5.2 节及源码 | 必传 status、agent_id、session_id、workspace_root、allowed_roots、private_sessions_root、current_session_root、source_ref、policy_revision；principal_ref / reason 默认 None。构造归一化 Path / tuple，不访问文件系统；每次读取由宿主重新返回 |
+| [workspace.path_policy.ResolvedWorkspacePath](../../workspace/path_policy.py) | 新增内部 `@dataclass(frozen=True, slots=True)` | 必传 `path: Path`、`relative_path: str`、`source_ref: str`；组合后端真实路径与模型可见逻辑引用，不向模型公开 path |
+| [workspace.path_policy.WorkspacePathError](../../workspace/path_policy.py) | 新增内部 ValueError 子类；`__init__(self, status: PathDecisionStatus, reason: str = "workspace path is not readable")` | status 为 forbidden / unknown，原因使用安全说明；由路径函数抛出、包装工具转成安全 ToolOutput |
+| [tools.workspace_read._PersistentWorkspaceReadTool](../../tools/workspace_read.py) | 新增内部 Tool 子类；`__init__(self, *, base_tool: Any, execution: ExecutionContext, workspace_access: WorkspaceAccessPort) -> None` | 组合 `_base_tool`、固定 `_execution` 与 `_workspace_access`，复用底层 Card；无授权缓存，每次 invoke 授权 |
+| [PersistentWorkspaceReadTool / PersistentWorkspaceListTool](../../tools/workspace_read.py) | 新增内部包装类，均继承上述基类及构造器 | Read 的 `_path_key="file_path"`、缺省路径 None；List 的 `_path_key="path"`、`_default_path="."`。分别包装 ReadFileTool / ListDirTool，只开放模型已有只读参数 |
+| [workspace.file_access.PersistentWorkspaceReadRail](../../workspace/file_access.py) | 新增内部 DeepAgentRail 子类；`__init__(self, execution: ExecutionContext, workspace_access: WorkspaceAccessPort) -> None` | execution / workspace_access 固定，tools 初始空 list、priority=100；首次原生初始化构造两包装工具并注册，uninit 移除能力并清空 tools |
 
 | 关键方法 / 完整源码签名 | 输入输出、调用条件及异常 / 副作用 |
 | --- | --- |
@@ -240,10 +240,10 @@ PA-14 包装器不自行写 WindowStore、会话状态记录或执行日志，�
 
 | 函数 / 模块与完整签名（同步） | 输入、返回值、异常及副作用 |
 | --- | --- |
-| [access.validate_read_scope](../../persistent_agent/workspace/access.py)：`validate_read_scope(scope: WorkspaceReadScope, execution: ExecutionContext) -> WorkspaceReadScope` | 复核返回类型、Agent / Session、可选 principal 及 policy_revision；有效时返回原 scope，错配为 CONTEXT_PARAM_ERROR；不比较所有 Execution 字段、不查询授权 |
-| [path_policy.resolve_read_path](../../persistent_agent/workspace/path_policy.py)：`resolve_read_path(scope: WorkspaceReadScope, requested_path: str) -> ResolvedWorkspacePath` | 只接受工作空间相对路径；失败抛 WorkspacePathError；realpath 涉及路径解析，函数不委托内容读取或目标 exists / stat |
-| [path_policy.observe_version](../../persistent_agent/workspace/path_policy.py)：`observe_version(path: str \| os.PathLike[str]) -> str \| None` | 读取成功后观察 stat 元数据，返回 SHA-256 版本；OSError 返回 None；不散列正文，也不是条件写令牌 |
-| [workspace_read._logicalize_path_metadata](../../persistent_agent/tools/workspace_read.py)：`_logicalize_path_metadata(value: Any, absolute_path: Any, relative_path: str, key: str \| None = None) -> Any` | 递归复制 Mapping / list / tuple，将指定路径键及 content 中匹配目标的路径替为逻辑路径；规则范围见第 5.5 节，不提供任意秘密脱敏 |
+| [access.validate_read_scope](../../workspace/access.py)：`validate_read_scope(scope: WorkspaceReadScope, execution: ExecutionContext) -> WorkspaceReadScope` | 复核返回类型、Agent / Session、可选 principal 及 policy_revision；有效时返回原 scope，错配为 CONTEXT_PARAM_ERROR；不比较所有 Execution 字段、不查询授权 |
+| [path_policy.resolve_read_path](../../workspace/path_policy.py)：`resolve_read_path(scope: WorkspaceReadScope, requested_path: str) -> ResolvedWorkspacePath` | 只接受工作空间相对路径；失败抛 WorkspacePathError；realpath 涉及路径解析，函数不委托内容读取或目标 exists / stat |
+| [path_policy.observe_version](../../workspace/path_policy.py)：`observe_version(path: str \| os.PathLike[str]) -> str \| None` | 读取成功后观察 stat 元数据，返回 SHA-256 版本；OSError 返回 None；不散列正文，也不是条件写令牌 |
+| [workspace_read._logicalize_path_metadata](../../tools/workspace_read.py)：`_logicalize_path_metadata(value: Any, absolute_path: Any, relative_path: str, key: str \| None = None) -> Any` | 递归复制 Mapping / list / tuple，将指定路径键及 content 中匹配目标的路径替为逻辑路径；规则范围见第 5.5 节，不提供任意秘密脱敏 |
 
 宿主授权接口完整定义为：
 
@@ -254,7 +254,7 @@ class WorkspaceAccessPort(Protocol):
         ...
 ```
 
-定义来源为 [workspace/access.py](../../persistent_agent/workspace/access.py)，宿主实现通过 PersistentPorts.workspace_access 注入，再由 Spec.resolve_parts 传入 Rail / 包装工具；构造仅检查异步方法形状。调用方每次读取 await 当前授权决定，不把上次 scope 缓存为授权；端口不读取文件。抛异常、类型或身份错配统一转 unknown，不把宿主异常细节透出。接口没有超时默认值、跨读取幂等保证或撤权原子锁。
+定义来源为 [workspace/access.py](../../workspace/access.py)，宿主实现通过 PersistentPorts.workspace_access 注入，再由 Spec.resolve_parts 传入 Rail / 包装工具；构造仅检查异步方法形状。调用方每次读取 await 当前授权决定，不把上次 scope 缓存为授权；端口不读取文件。抛异常、类型或身份错配统一转 unknown，不把宿主异常细节透出。接口没有超时默认值、跨读取幂等保证或撤权原子锁。
 
 模型可见接口仍是 `read_file` 与 `list_files`：完整 ToolCard 参数 Schema 复用 [ReadFileTool](../../../tools/filesystem.py) / [ListDirTool](../../../tools/filesystem.py)，包装器不新增让模型指定 Agent / Session / 宿主根目录的参数。invoke 成功返回 ToolOutput，安全失败状态及部分结果定义见第 5.4～5.5 节；每次重复调用都重新授权及读取，可得到新内容和版本。读取工具的内部状态变化、意图分类及清理由第 5.6 节与 F_03 / F_15 衔接。
 
@@ -262,12 +262,12 @@ class WorkspaceAccessPort(Protocol):
 
 | 实现位置 | 本项责任 / 当前影响 |
 | --- | --- |
-| [workspace/access.py](../../persistent_agent/workspace/access.py) | Scope 不可变数据、Protocol、形态与调用身份校验 |
-| [workspace/path_policy.py](../../persistent_agent/workspace/path_policy.py) | 逻辑路径、词法 / realpath 边界、来源和观察版本 |
-| [workspace/file_access.py](../../persistent_agent/workspace/file_access.py) | 两个受保护读取工具的 init / uninit |
-| [tools/workspace_read.py](../../persistent_agent/tools/workspace_read.py)、[tools/__init__.py](../../persistent_agent/tools/__init__.py) | 授权后委托、invoke / stream、安全失败、路径清理和结果装饰 |
-| [ports.py](../../persistent_agent/ports.py) | 可选 workspace_access 及异步方法校验 |
-| [schema/build_context.py](../../persistent_agent/schema/build_context.py)、[schema/spec.py](../../persistent_agent/schema/spec.py) | workspace_read 能力、依赖门控和读取 Rail 装配 |
+| [workspace/access.py](../../workspace/access.py) | Scope 不可变数据、Protocol、形态与调用身份校验 |
+| [workspace/path_policy.py](../../workspace/path_policy.py) | 逻辑路径、词法 / realpath 边界、来源和观察版本 |
+| [workspace/file_access.py](../../workspace/file_access.py) | 两个受保护读取工具的 init / uninit |
+| [tools/workspace_read.py](../../tools/workspace_read.py)、[tools/__init__.py](../../tools/__init__.py) | 授权后委托、invoke / stream、安全失败、路径清理和结果装饰 |
+| [ports.py](../../ports.py) | 可选 workspace_access 及异步方法校验 |
+| [schema/build_context.py](../../schema/build_context.py)、[schema/spec.py](../../schema/spec.py) | workspace_read 能力、依赖门控和读取 Rail 装配 |
 | [外层 __init__.py](../../__init__.py) | 声明 WorkspaceAccessPort / WorkspaceReadScope 公共符号；当前映射错误，尚不可用 |
 | [Harness filesystem.py](../../../tools/filesystem.py)、[工具说明](../../../prompts/tools/filesystem.py) | 复用现有读取 / 列举实现和 ToolCard；保留原格式、限制与缓存语义 |
 
@@ -297,9 +297,9 @@ class WorkspaceAccessPort(Protocol):
 | service.py：_ensure_im_session_workspace | 宿主生命周期中“目录已准备好”的接入点 | 不移到每次工具读取授权中执行 |
 | render_conversation_workspace_instructions、旧 agent_manager.py 的 workspace_dir / mcp_resource_root 接入 | 目录提示和运行配置只能作为接入线索 | 提示词和环境路径不能替代 WorkspaceAccessPort |
 
-当前可核对入口位于 JiuwenSwarm 的 [runtime/agent_manager.py](../../../../../../jiuwenswarm/jiuwenswarm/server/runtime/agent_manager.py)、[common/runtime_workspace.py](../../../../../../jiuwenswarm/jiuwenswarm/common/runtime_workspace.py) 和 [gateway_adapter/workspace_file_adapter.py](../../../../../../jiuwenswarm/jiuwenswarm/server/runtime/gateway_adapter/workspace_file_adapter.py)。它们分别涉及运行管理、工作空间绑定与文件交互，不能因具备路径处理就认定已实现本授权端口。
+当前可核对入口位于 JiuwenSwarm 仓的 `jiuwenswarm/server/runtime/agent_manager.py`、`jiuwenswarm/common/runtime_workspace.py` 和 `jiuwenswarm/server/runtime/gateway_adapter/workspace_file_adapter.py`。它们分别涉及运行管理、工作空间绑定与文件交互，不能因具备路径处理就认定已实现本授权端口。
 
-宿主目标授权边界见 [JiuwenMate S_08](../../../../../../jiuwenswarm/jiuwenswarm/server/jiuwenmate/docs/specs/S_08_authorization-and-workspace.md)。该文档标注为拟议契约，包含本特性之外的即时撤权、稳定资产引用及写效果要求；引用它不表示这些能力已经落地。本次搜索当前 JiuwenSwarm 未找到 WorkspaceAccessPort / WorkspaceReadScope 接入。
+宿主目标授权边界见 JiuwenSwarm 仓的 JiuwenMate S_08（`jiuwenswarm/server/jiuwenmate/docs/specs/S_08_authorization-and-workspace.md`）。该文档标注为拟议契约，包含本特性之外的即时撤权、稳定资产引用及写效果要求；引用它不表示这些能力已经落地。本次搜索当前 JiuwenSwarm 未找到 WorkspaceAccessPort / WorkspaceReadScope 接入。
 
 ### 7.3 接入骨架与调用顺序
 

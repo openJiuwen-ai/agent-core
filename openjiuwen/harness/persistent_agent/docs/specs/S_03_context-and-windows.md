@@ -6,8 +6,8 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | S_03 / context-and-windows |
-| 关联模块 | [seams.py](../../persistent_agent/execution/seams.py)、[BaseKVStore 注入集合](../../persistent_agent/ports.py)、[integration.py](../../persistent_agent/schema/integration.py)、[window_assembly.py](../../persistent_agent/execution/window_assembly.py)；WindowStore 与换窗管理尚待接入 |
-| 最近一次修订日期 | 2026-10-12 |
+| 关联模块 | [seams.py](../../execution/seams.py)、[BaseKVStore 注入集合](../../ports.py)、[integration.py](../../schema/integration.py)、[window_assembly.py](../../execution/window_assembly.py)；WindowStore 与换窗管理尚待接入 |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | [F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)；待实现与验证范围见[开发计划](../designs/persistent-agent-development-plan.md) PA-06、PA-10～PA-12 |
 | 设计依据 | [架构设计：窗口](../designs/persistent-agent-architecture.md#44-上下文窗口管理)、[换窗](../designs/persistent-agent-architecture.md#522-运行中换窗归档摘要与替换)、[保存规则](../designs/persistent-agent-architecture.md#7-数据管理与保存规则) |
 

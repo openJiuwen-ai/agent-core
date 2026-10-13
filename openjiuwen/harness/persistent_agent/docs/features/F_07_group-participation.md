@@ -7,7 +7,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-07，F_07 为本目录的文档编号 |
-| 日期 | 原阶段归档：2026-10-09；本次文档修订：2026-10-12 |
+| 日期 | 原阶段归档：2026-10-09；本次文档修订：2026-10-12；引用修订：2026-10-13 |
 | 原实现范围 | 内部 `persistent_agent/execution/participation.py`、`execution/entries.py`；组件测试 `tests/unit_tests/harness/persistent_agent/test_entries.py` |
 | 本次修订范围 | 重组设计、取舍、依赖和验证记录，补齐输入、预算、事件与失败边界；不改变代码、公共接口或已确认架构 |
 | 唯一开发计划 | [Persistent Agent 开发计划](../designs/persistent-agent-development-plan.md) PA-07；认领、状态、排期与交付节点在该计划维护 |
@@ -45,7 +45,7 @@ PA-07 负责消费宿主提供的群消息，作出三选一判断并交接结�
 
 ### 2.2 总体方案
 
-[execute_persistent_request](../../persistent_agent/execution/entries.py)先校验模式、上下文及 NoopCheckpointer、RequestInput、续做限制和群端口，再建立 emitter 并启动 runner。只有 `kind == group_message` 调用 [judge_participation](../../persistent_agent/execution/participation.py)。判断直接读取 `GroupChatPort.recent_messages`，不调用尚不可用的 `seams.group_message_reader`。
+[execute_persistent_request](../../execution/entries.py)先校验模式、上下文及 NoopCheckpointer、RequestInput、续做限制和群端口，再建立 emitter 并启动 runner。只有 `kind == group_message` 调用 [judge_participation](../../execution/participation.py)。判断直接读取 `GroupChatPort.recent_messages`，不调用尚不可用的 `seams.group_message_reader`。
 
 ```mermaid
 flowchart TD
@@ -81,7 +81,7 @@ flowchart TD
 
 ### 2.4 输入、模型与输出契约
 
-接口与完整 Schema 以 S_01、S_09 及 [request.py](../../persistent_agent/schema/request.py)、[context.py](../../persistent_agent/schema/context.py)为准。下表描述当前判断实际消费的子范围。
+接口与完整 Schema 以 S_01、S_09 及 [request.py](../../schema/request.py)、[context.py](../../schema/context.py)为准。下表描述当前判断实际消费的子范围。
 
 | 输入 / 设置 | 当前实现 |
 | --- | --- |
@@ -103,7 +103,7 @@ flowchart TD
 
 以下按 2026-10-12 当前实现补充，模块为 `openjiuwen.harness.persistent_agent.execution.participation`。本特性新增内部生产函数与结果载体，复用已有宿主 Protocol、RequestInput 和事件 DTO，不增加外层公共 API。
 
-关键类是 [ParticipationOutcome](../../persistent_agent/execution/participation.py)，定义为 `@dataclass(frozen=True)`，生成构造器接受 `terminal: bool` 和 `event_id: str | None = None`。它无显式基类、运行资源句柄或自定义方法，生命周期限于一次前置判断；`terminal=True` 表示该分支已通过 emitter 处理 final / paused，`terminal=False` 携本次 participation.decided 的 ID，供 started 关联。字段在构造时确定，不作为持久状态、投递回执或模型判断准确率证据。
+关键类是 [ParticipationOutcome](../../execution/participation.py)，定义为 `@dataclass(frozen=True)`，生成构造器接受 `terminal: bool` 和 `event_id: str | None = None`。它无显式基类、运行资源句柄或自定义方法，生命周期限于一次前置判断；`terminal=True` 表示该分支已通过 emitter 处理 final / paused，`terminal=False` 携本次 participation.decided 的 ID，供 started 关联。字段在构造时确定，不作为持久状态、投递回执或模型判断准确率证据。
 
 | 关键函数 / 完整源码签名 | 调用方、输入和返回值 | 异常与副作用 |
 | --- | --- | --- |
@@ -114,7 +114,7 @@ flowchart TD
 | `async _report(budget, execution, model_call_id: str, usage: ModelUsage) -> None` | await BudgetPort.report，重新校验 BudgetReport 与调用归属 | 普通 Exception 只记诊断；report 是宿主记账副作用，失败不重跑已完成的模型 |
 | `async _finish_failed(emitter, reason: str) -> ParticipationOutcome` | 压缩原因并产生 final(failed)，返回 terminal=True | 关键记账失败传播；不伪装成 ignored，不保存空窗口 |
 
-这些签名没有为未注解参数补造类型声明；完整定义与辅助格式化函数来源均为 [participation.py](../../persistent_agent/execution/participation.py)。`_duty(spec) -> str` 选择非空 system_prompt 或 Card 职责，`_current_block(source, agent_id: str) -> str` / `_recent_block(messages) -> str` 只构造判断文本，原始消息、排队背景及撤回处理见第 2.4 节。它们不读取附件内容，也不向群发送消息。
+这些签名没有为未注解参数补造类型声明；完整定义与辅助格式化函数来源均为 [participation.py](../../execution/participation.py)。`_duty(spec) -> str` 选择非空 system_prompt 或 Card 职责，`_current_block(source, agent_id: str) -> str` / `_recent_block(messages) -> str` 只构造判断文本，原始消息、排队背景及撤回处理见第 2.4 节。它们不读取附件内容，也不向群发送消息。
 
 | 复用接口及定义来源 | 实现方、注入与当前消费约束 |
 | --- | --- |
@@ -133,9 +133,9 @@ flowchart TD
 5. ignore 随后记 `execution.final(status=ignored, reason=reason)`，output_refs 默认空，结束 runner。无 execution.started、reply.delta、output.proposed，也不读取 / 保存会话记录、不改写工作目标或窗口。
 6. respond / intervene 返回内部 `ParticipationOutcome(terminal=False, event_id=...)`。入口取得状态 / 窗口接入点，构造并复核 DeepAgent 后，才产生 `execution.started(goal=request.text, decision_event_id=...)`，随后 load → assemble → 原生执行。参与判断本身不完成任务或发送回复。
 
-[ParticipationPayload](../../persistent_agent/schema/events.py)已有 DTO；本项新增的是生产者接入。participation.decided 和 model.completed 默认 visibility=private，属于普通事件；不能直接当作群公开回复。final 和 paused 属于关键事件，失败不得伪装成终结成功。
+[ParticipationPayload](../../schema/events.py)已有 DTO；本项新增的是生产者接入。participation.decided 和 model.completed 默认 visibility=private，属于普通事件；不能直接当作群公开回复。final 和 paused 属于关键事件，失败不得伪装成终结成功。
 
-[EventEmitter](../../persistent_agent/execution/emitter.py)顺序 await `CommitPort.record` 后向流交出事件。普通事件失败只记诊断，仍可展示并继续；关键事件须由宿主确认自身落盘，record 失败登记 fatal 并抛 `DEEPAGENT_RUNTIME_ERROR`，该事件不向流交出。final(ignored) 成功不保证普通判断日志完整，decision_event_id 也不保证被引用普通事件必然已持久化。宿主消费原事件流时不再次记账，收到 final / paused 后仍须消费至结束。
+[EventEmitter](../../execution/emitter.py)顺序 await `CommitPort.record` 后向流交出事件。普通事件失败只记诊断，仍可展示并继续；关键事件须由宿主确认自身落盘，record 失败登记 fatal 并抛 `DEEPAGENT_RUNTIME_ERROR`，该事件不向流交出。final(ignored) 成功不保证普通判断日志完整，decision_event_id 也不保证被引用普通事件必然已持久化。宿主消费原事件流时不再次记账，收到 final / paused 后仍须消费至结束。
 
 “整理窗口 → 保存记录 → 结束记账”适用于已进入正式任务体的收尾。前置判断终结没有加载窗口，直接记 final / paused，不调用 `_finish`；不能为满足正式执行的保存顺序而额外写入空记录。
 
@@ -161,10 +161,10 @@ flowchart TD
 
 | 位置 | 原特性落地点 / 本次核对结果 |
 | --- | --- |
-| [participation.py](../../persistent_agent/execution/participation.py) | 独立模型、消息格式化、校验 / 重试、预算、决策和前置终结 |
-| [entries.py](../../persistent_agent/execution/entries.py) | `_require_request` 不再无条件拒绝群消息；execute 检查群端口并在接入点及实例构造前判断；started 关联决策 ID |
-| [ports.py](../../persistent_agent/ports.py)、[schema/events.py](../../persistent_agent/schema/events.py) | 消费已有 GroupChatPort、BudgetPort、CommitPort 和判断 DTO，不新增公开端口或事件类型 |
-| [seams.py](../../persistent_agent/execution/seams.py) | group_message_reader 仍拒绝；本项绕过该 getter，不把 PA-23 声明为已接入 |
+| [participation.py](../../execution/participation.py) | 独立模型、消息格式化、校验 / 重试、预算、决策和前置终结 |
+| [entries.py](../../execution/entries.py) | `_require_request` 不再无条件拒绝群消息；execute 检查群端口并在接入点及实例构造前判断；started 关联决策 ID |
+| [ports.py](../../ports.py)、[schema/events.py](../../schema/events.py) | 消费已有 GroupChatPort、BudgetPort、CommitPort 和判断 DTO，不新增公开端口或事件类型 |
+| [seams.py](../../execution/seams.py) | group_message_reader 仍拒绝；本项绕过该 getter，不把 PA-23 声明为已接入 |
 | [test_entries.py](../../../../../tests/unit_tests/harness/persistent_agent/test_entries.py) | 使用真实 DeepAgent、本地模型和端口 / 窗口替身验证组件编排 |
 
 旧私聊和定时任务不读取群端口、不产生参与事件，继续沿用执行入口。群消息由“全部拒绝”变为“先判断，再按接入情况继续”；缺少端口、不合法模式 / 输入及尚未接入能力仍明确拒绝。没有新增窗口数据或迁移格式；`enabled_features` 仍只有 construction / workspace_read，未加入 execution。本次只修订文档，不改变上述行为。

@@ -6,8 +6,8 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | S_05 / confirmation-and-continuation |
-| 关联模块 | [request.py](../../persistent_agent/schema/request.py)、[entries.py](../../persistent_agent/execution/entries.py)、[control.py](../../persistent_agent/execution/control.py)、[确认接入协议](../../persistent_agent/execution/seams.py) |
-| 最近一次修订日期 | 2026-10-12 |
+| 关联模块 | [request.py](../../schema/request.py)、[entries.py](../../execution/entries.py)、[control.py](../../execution/control.py)、[确认接入协议](../../execution/seams.py) |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)；接入与验证见[开发计划](../designs/persistent-agent-development-plan.md) PA-09、PA-17、PA-18 |
 | 设计依据 | [架构设计：确认](../designs/persistent-agent-architecture.md#521-确认卡片等待与原生恢复)、[控制](../designs/persistent-agent-architecture.md#523-停止取消与补充消息)、[统一续做](../designs/persistent-agent-architecture.md#524-崩溃续做与非确认暂停后继续的统一流程)、[恢复边界](../designs/persistent-agent-architecture.md#83-根据什么恢复什么时候可以继续) |
 

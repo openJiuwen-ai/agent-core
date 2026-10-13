@@ -7,7 +7,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 | feature；PA-04 已实现契约的收敛与归档记录 |
-| 日期 | 原阶段归档：2026-10-07；本次文档修订：2026-10-12 |
+| 日期 | 原阶段归档：2026-10-07；本次文档修订：2026-10-12；引用修订：2026-10-13 |
 | 负责人 | Song Haoran；认领与后续安排以统一开发计划为准 |
 | 状态与验收边界 | PA-04 已按类型、端口协议、构造检查与既有绑定回归边界完成；不包含生产宿主端口、事件队列、状态存储或续做实现 |
 | 原实现范围 | 内部 `persistent_agent/ports.py`、`schema/{execution,protocol,events,port_results,context}.py`、外层 `__init__.py` 及对应单测；`schema/build_context.py`、`factory.py` 当时只修正过时文档字符串。不改共享 harness / core 代码 |
@@ -39,7 +39,7 @@ spec 维护现行契约，本文解释为什么替换旧契约、替换到哪里
 
 PA-04 原交付只调整契约，不实现运行行为。此后 PA-05 已有事件映射、EventEmitter、预算和暂停收尾组件，PA-07 已消费群聊最近消息，PA-15 已实现工具意图 / 完成 Rail。原文“全部待实现”的描述不再适用于这些组件，但其本地测试不能证明 AgentServer 已提供真实持久化确认。
 
-PA-06 窗口组装已接入，容量验收仍待完成；实际会话状态、完整确认适配、历史读取整理与续做仍有接入缺口。正式任务执行和确认恢复受 [seams.py](../../persistent_agent/execution/seams.py) 的门禁约束；带 recovery_ref 的执行仍被拒绝。群参与判断可先于这些接入结束，不能笼统描述为所有入口都不可运行。
+PA-06 窗口组装已接入，容量验收仍待完成；实际会话状态、完整确认适配、历史读取整理与续做仍有接入缺口。正式任务执行和确认恢复受 [seams.py](../../execution/seams.py) 的门禁约束；带 recovery_ref 的执行仍被拒绝。群参与判断可先于这些接入结束，不能笼统描述为所有入口都不可运行。
 
 本文的验收预期集中在第 2.7 节，本次证据在第 4 节，旧结果只在附录 A 维护。PA-04 完成不等于 M1 执行闭环或 M2c 续做闭环通过。
 
@@ -144,7 +144,7 @@ record 是事件唯一持久化通道。入口流只作实时展示，宿主消�
 
 ### 2.5 事件收敛与载荷约束
 
-旧契约共 13 类事件：删除 checkpoint.proposed、control.waiting、execution.suspended、window.activated，新增 execution.paused、window.switched，得到当前 11 类。Schema 唯一来源是 [events.py](../../persistent_agent/schema/events.py) / S_02，以下只展开本次差异和关键校验。
+旧契约共 13 类事件：删除 checkpoint.proposed、control.waiting、execution.suspended、window.activated，新增 execution.paused、window.switched，得到当前 11 类。Schema 唯一来源是 [events.py](../../schema/events.py) / S_02，以下只展开本次差异和关键校验。
 
 | 事件 | 负载与变更 | 确认级别 |
 | --- | --- | --- |
@@ -198,13 +198,13 @@ KnowledgePort 继续使用 MaterialQuery、MaterialSnapshot、MaterialReadResult
 
 | 类 / 定义来源 | 变更类型与可见性 | 定义、关键属性及关系 |
 | --- | --- | --- |
-| [schema.execution.ExecutionContext](../../persistent_agent/schema/execution.py) | 修改；公开 | `@dataclass(frozen=True, kw_only=True)`，以全部身份、配置和授权字段构造，只有 `recovery_ref: str \| None = None` 可省略；字段表见第 2.3.1 节及 S_07。不持有执行权对象、锁或 epoch |
-| [schema.protocol.InvocationRef](../../persistent_agent/schema/protocol.py) | 修改；公开 | 继承 ProtocolModel，仅保留六元身份；事件及预算 / 资料结果继承此类。创建与归属复核方法见 F_02 第 5.6 节 |
-| [ports.PersistentPorts](../../persistent_agent/ports.py) | 修改；公开 | frozen、kw_only dataclass；所有成员初值 None，validate 强制 commit / budget / window_backend，提供可选端口时检查形状。定义、类型与完整方法见 F_02 第 5.6 节 |
-| [schema.port_results.BudgetAdmission / BudgetReport](../../persistent_agent/schema/port_results.py) | 修改；公开 | 继承 InvocationRef；分别保留 admitted / denied 和 confirmed / rejected，凭据 / reason 默认 None；model_call_id 与 status 必传；不以 unknown 包装调用异常 |
-| [schema.events.ToolIntentPayload / ToolCompletedPayload](../../persistent_agent/schema/events.py) | 修改；公开 | 继承 ProtocolModel；意图新增必填稳定 operation_id，结果必须有 result_summary；字段与可选值见第 2.5 节。类本身不分类读写、不派发工具 |
-| [schema.events.PausedPayload / FinalPayload](../../persistent_agent/schema/events.py) | 新增暂停负载 / 修改终态；公开 | 继承 ProtocolModel；PausedPayload.reason 必传，intercepted=()、detail=None；FinalPayload.status 必传，output_refs / artifact_refs=()、reason=None；语义见第 2.5 节 |
-| [schema.events.WindowSwitchedPayload](../../persistent_agent/schema/events.py) | 新增替代负载；公开 | 继承 ProtocolModel；archive_ref 与 window_seq 必传，只描述旧窗归档引用和新窗序号，不实现归档 |
+| [schema.execution.ExecutionContext](../../schema/execution.py) | 修改；公开 | `@dataclass(frozen=True, kw_only=True)`，以全部身份、配置和授权字段构造，只有 `recovery_ref: str \| None = None` 可省略；字段表见第 2.3.1 节及 S_07。不持有执行权对象、锁或 epoch |
+| [schema.protocol.InvocationRef](../../schema/protocol.py) | 修改；公开 | 继承 ProtocolModel，仅保留六元身份；事件及预算 / 资料结果继承此类。创建与归属复核方法见 F_02 第 5.6 节 |
+| [ports.PersistentPorts](../../ports.py) | 修改；公开 | frozen、kw_only dataclass；所有成员初值 None，validate 强制 commit / budget / window_backend，提供可选端口时检查形状。定义、类型与完整方法见 F_02 第 5.6 节 |
+| [schema.port_results.BudgetAdmission / BudgetReport](../../schema/port_results.py) | 修改；公开 | 继承 InvocationRef；分别保留 admitted / denied 和 confirmed / rejected，凭据 / reason 默认 None；model_call_id 与 status 必传；不以 unknown 包装调用异常 |
+| [schema.events.ToolIntentPayload / ToolCompletedPayload](../../schema/events.py) | 修改；公开 | 继承 ProtocolModel；意图新增必填稳定 operation_id，结果必须有 result_summary；字段与可选值见第 2.5 节。类本身不分类读写、不派发工具 |
+| [schema.events.PausedPayload / FinalPayload](../../schema/events.py) | 新增暂停负载 / 修改终态；公开 | 继承 ProtocolModel；PausedPayload.reason 必传，intercepted=()、detail=None；FinalPayload.status 必传，output_refs / artifact_refs=()、reason=None；语义见第 2.5 节 |
+| [schema.events.WindowSwitchedPayload](../../schema/events.py) | 新增替代负载；公开 | 继承 ProtocolModel；archive_ref 与 window_seq 必传，只描述旧窗归档引用和新窗序号，不实现归档 |
 
 DTO 按字段关键字构造，完整字段注解及默认值见上述来源。ExecutionContext 构造时将范围集合归一化为 frozenset；Pydantic 值对象构造 / model_validate 时触发以下校验，不需要调用方手动逐个调用 validator。
 
@@ -260,12 +260,12 @@ PA-04 在既有协议、构造和绑定上依次收敛调用身份 → 端口及
 
 | 文件 | 本次原实现责任 | 当前后续影响 |
 | --- | --- | --- |
-| [execution.py](../../persistent_agent/schema/execution.py)、[protocol.py](../../persistent_agent/schema/protocol.py) | 去掉执行代次 / 句柄，保留恢复引用，调整共同归属 | 下游响应和事件继续按六元身份校验 |
-| [ports.py](../../persistent_agent/ports.py)、[port_results.py](../../persistent_agent/schema/port_results.py) | 端口收敛、依赖形状检查和预算状态简化 | 后续新增 workspace_access；业务方法消费分别归各 spec |
-| [events.py](../../persistent_agent/schema/events.py) | 11 类事件、暂停和工具结果字段及校验 | EventEmitter 和 Rails 负责分配序号、记账与运行控制 |
-| [context.py](../../persistent_agent/schema/context.py) | 删除旧窗口 DTO，新增群消息并保留知识模型 | 群参与判断已消费；窗口背景和完整知识适配待接入 |
+| [execution.py](../../schema/execution.py)、[protocol.py](../../schema/protocol.py) | 去掉执行代次 / 句柄，保留恢复引用，调整共同归属 | 下游响应和事件继续按六元身份校验 |
+| [ports.py](../../ports.py)、[port_results.py](../../schema/port_results.py) | 端口收敛、依赖形状检查和预算状态简化 | 后续新增 workspace_access；业务方法消费分别归各 spec |
+| [events.py](../../schema/events.py) | 11 类事件、暂停和工具结果字段及校验 | EventEmitter 和 Rails 负责分配序号、记账与运行控制 |
+| [context.py](../../schema/context.py) | 删除旧窗口 DTO，新增群消息并保留知识模型 | 群参与判断已消费；窗口背景和完整知识适配待接入 |
 | [外层 __init__.py](../../__init__.py) | 删除旧符号并懒导出现行协议 | 后续入口和工作空间符号使集合扩展，当前解析限制见第 4 节 |
-| [build_context.py](../../persistent_agent/schema/build_context.py)、[factory.py](../../persistent_agent/factory.py) | 原阶段仅更新过时说明，复用端口 validate 路径 | 后续装配 Rails 和能力依赖不属于 PA-04 原代码改动 |
+| [build_context.py](../../schema/build_context.py)、[factory.py](../../factory.py) | 原阶段仅更新过时说明，复用端口 validate 路径 | 后续装配 Rails 和能力依赖不属于 PA-04 原代码改动 |
 
 PA-04 为 PA-05、PA-06、PA-07、PA-10、PA-13、PA-15、PA-17、PA-22、PA-23 提供契约前置；完整直接依赖及并行工作线只在统一开发计划第 2～3 节维护。各项取得其最小契约后可独立实现和模拟验证，不必等待整个宿主集成完成。PA-04 作为基础契约参与 M0，真实运行和故障验证仍按 M1 / M2c 等节点各自的完整门槛验收。
 

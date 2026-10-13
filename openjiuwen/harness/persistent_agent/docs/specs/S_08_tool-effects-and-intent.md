@@ -6,8 +6,8 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | S_08 / tool-effects-and-intent |
-| 关联模块 | [effect_policy.py](../../persistent_agent/tools/effect_policy.py)、[tool_intent_rail.py](../../persistent_agent/execution/tool_intent_rail.py)、[Spec 装配](../../persistent_agent/schema/spec.py) |
-| 最近一次修订日期 | 2026-10-12 |
+| 关联模块 | [effect_policy.py](../../tools/effect_policy.py)、[tool_intent_rail.py](../../execution/tool_intent_rail.py)、[Spec 装配](../../schema/spec.py) |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | [F_15](../features/F_15_tool-intent-before-side-effect.md) |
 | 设计依据 | [架构设计：写意图及确认](../designs/persistent-agent-architecture.md#62-事件传递确认与流量边界)、[外部操作](../designs/persistent-agent-architecture.md#82-外部操作与重试条件) |
 

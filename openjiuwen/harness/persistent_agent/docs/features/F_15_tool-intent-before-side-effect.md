@@ -7,7 +7,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-15，F_15 为文档编号 |
-| 日期 | 原阶段设计及实现记录：2026-10-10；本次文档修订：2026-10-12 |
+| 日期 | 原阶段设计及实现记录：2026-10-10；本次文档修订：2026-10-12；引用修订：2026-10-13 |
 | 负责人 | Yan Zhijun；认领和后续安排以统一开发计划为准 |
 | 状态 | 进行中；agent-core 已有组件实现，真实宿主持久化确认及跨仓联调未完成 |
 | 方案依据 | 沿用现行架构、spec 和原记录中的名称白名单决策；本次核对实现，不改变架构或公共契约 |
@@ -58,7 +58,7 @@ D-01 的名称约定和 D-03 的宿主可靠确认是方案成立的重要前提
 
 ### 2.2 分类及低层入口
 
-[effect_policy.py](../../persistent_agent/tools/effect_policy.py) 是唯一分类来源：
+[effect_policy.py](../../tools/effect_policy.py) 是唯一分类来源：
 
 ```python
 READ_ONLY_TOOL_ALLOWLIST = frozenset({"read_file", "list_files"})
@@ -85,13 +85,13 @@ def is_read_only_tool_name(tool_name: str | None) -> bool:
 
 | 组件 / 关键符号 | 责任与本次关系 |
 | --- | --- |
-| [effect_policy.py](../../persistent_agent/tools/effect_policy.py) | 内部名称分类函数和常量，不扩展外层公共 API |
-| [PersistentToolIntentRail](../../persistent_agent/execution/tool_intent_rail.py) | 继承 DeepAgentRail；构造参数为 `binding: ConstructionBinding`；before_tool_call、on_tool_exception、after_tool_call 均为异步回调 |
-| [PersistentAgentSpec.resolve_parts](../../persistent_agent/schema/spec.py) | 统一追加意图 Rail，传入实际类型为 ConstructionBinding 的 `context.binding`；通过绑定取得当前 ExecutionContext 和 ExecutionControl |
-| [ConstructionBinding](../../persistent_agent/schema/build_context.py)、[ExecutionControl](../../persistent_agent/execution/control.py) | 构造上下文持有调用级控制；control 保存 emitter、首个 fatal 和停止 / 取消原因 |
-| [EventEmitter.emit](../../persistent_agent/execution/emitter.py) | `async def emit(self, event_type: EventType, payload: Any) -> AgentEvent`；锁内创建和顺序记账，再交给展示队列 |
-| [CommitPort.record](../../persistent_agent/ports.py) | `async def record(self, execution: ExecutionContext, event: AgentEvent) -> None`；宿主实现，不新增 PA-15 专用端口 |
-| [entries.py](../../persistent_agent/execution/entries.py)、[model_rail.py](../../persistent_agent/execution/model_rail.py) | 正式入口安装 emitter、保留并重新抛出 fatal，控制后续模型及工具调用 |
+| [effect_policy.py](../../tools/effect_policy.py) | 内部名称分类函数和常量，不扩展外层公共 API |
+| [PersistentToolIntentRail](../../execution/tool_intent_rail.py) | 继承 DeepAgentRail；构造参数为 `binding: ConstructionBinding`；before_tool_call、on_tool_exception、after_tool_call 均为异步回调 |
+| [PersistentAgentSpec.resolve_parts](../../schema/spec.py) | 统一追加意图 Rail，传入实际类型为 ConstructionBinding 的 `context.binding`；通过绑定取得当前 ExecutionContext 和 ExecutionControl |
+| [ConstructionBinding](../../schema/build_context.py)、[ExecutionControl](../../execution/control.py) | 构造上下文持有调用级控制；control 保存 emitter、首个 fatal 和停止 / 取消原因 |
+| [EventEmitter.emit](../../execution/emitter.py) | `async def emit(self, event_type: EventType, payload: Any) -> AgentEvent`；锁内创建和顺序记账，再交给展示队列 |
+| [CommitPort.record](../../ports.py) | `async def record(self, execution: ExecutionContext, event: AgentEvent) -> None`；宿主实现，不新增 PA-15 专用端口 |
+| [entries.py](../../execution/entries.py)、[model_rail.py](../../execution/model_rail.py) | 正式入口安装 emitter、保留并重新抛出 fatal，控制后续模型及工具调用 |
 | [ToolCallResilienceRail](../../../rails/tool_call_resilience_rail.py) | 复用共享原生重试；Persistent 在其异常回调之后约束重试，不修改个人版行为 |
 
 Rail 实例只持有 binding。`ctx.extra["_persistent_tool_intent_state"]` 保存本调用的 ID、工具名、参数哈希、摘要、operation_id、dispatched 和 completed；不在 Rail 上建立所有工具共用的可变字典。新 Execution 的新实例不会自动恢复该字典。
@@ -100,7 +100,7 @@ Rail 实例只持有 binding。`ctx.extra["_persistent_tool_intent_state"]` 保�
 
 本节按 2026-10-12 当前实现补充。实现模块前缀为 `openjiuwen.harness.persistent_agent`；本特性新增内部策略和 Rail，复用已公开的事件 DTO，不新增宿主 Protocol 或外层入口。
 
-核心类 [execution.tool_intent_rail.PersistentToolIntentRail](../../persistent_agent/execution/tool_intent_rail.py) 继承 `DeepAgentRail`，构造签名为 `__init__(self, binding: ConstructionBinding)`（源码未标返回类型），由 PersistentAgentSpec.resolve_parts 创建并追加到 parts.rails。实例只持有 `_binding`，作用域为一次构造；依赖通过 binding.execution / control 间接取得，不拥有宿主连接或关闭宿主端口。priority=5，AFTER_TOOL_CALL 回调优先级单独提高，具体顺序见第 2.4 节。
+核心类 [execution.tool_intent_rail.PersistentToolIntentRail](../../execution/tool_intent_rail.py) 继承 `DeepAgentRail`，构造签名为 `__init__(self, binding: ConstructionBinding)`（源码未标返回类型），由 PersistentAgentSpec.resolve_parts 创建并追加到 parts.rails。实例只持有 `_binding`，作用域为一次构造；依赖通过 binding.execution / control 间接取得，不拥有宿主连接或关闭宿主端口。priority=5，AFTER_TOOL_CALL 回调优先级单独提高，具体顺序见第 2.4 节。
 
 | 关键成员 / 初始值 | 创建与更新主体 | 约束与作用 |
 | --- | --- | --- |
@@ -117,12 +117,12 @@ Rail 实例只持有 binding。`ctx.extra["_persistent_tool_intent_state"]` 保�
 | `_params_digest(arguments: Any) -> str`（staticmethod） | JSON 字符串先解码，None 作空对象，生成规范 JSON 哈希 | 不可序列化、NaN 或 UTF-8 错误可抛异常，before_tool_call 转 fatal；不在事件保存原始参数 |
 | `_args_summary(cls, arguments: Any) -> str` / `_result_summary(cls, result: Any, exception: BaseException \| None) -> str`（classmethod） | 返回最多 500 字符脱敏摘要；坏参数 JSON、原始文本 / 异常结果使用省略说明 | 无存储副作用；过滤范围见第 2.5～2.7 节，不承诺任意嵌套容器或正文脱敏 |
 
-上述方法完整定义来自 tool_intent_rail.py；方法的类名限定和调用方向见第 2.3 节，不把内部辅助方法导出为 API。ToolIntentPayload / ToolCompletedPayload 的字段、必填项、默认值与关联规则引用第 2.5 / 2.7 节及 [events.py](../../persistent_agent/schema/events.py)，两类继承 ProtocolModel，字段构造 / 校验本身不代表写操作已经发生。
+上述方法完整定义来自 tool_intent_rail.py；方法的类名限定和调用方向见第 2.3 节，不把内部辅助方法导出为 API。ToolIntentPayload / ToolCompletedPayload 的字段、必填项、默认值与关联规则引用第 2.5 / 2.7 节及 [events.py](../../schema/events.py)，两类继承 ProtocolModel，字段构造 / 校验本身不代表写操作已经发生。
 
 | 独立函数 / 完整签名 | 变更与调用方 | 输入输出、异常及副作用 |
 | --- | --- | --- |
-| [tools.effect_policy.is_read_only_tool_name](../../persistent_agent/tools/effect_policy.py)：`is_read_only_tool_name(tool_name: str \| None) -> bool`（同步） | 本特性新增内部函数，before_tool_call 消费；定义已在第 2.2 节给出 | 精确白名单成员判断，无外部副作用，不授予路径权限或校验实现类 |
-| [execution.entries.redact_arguments](../../persistent_agent/execution/entries.py)：`redact_arguments(arguments: Any) -> str`（同步） | 复用内部函数，参数 / 结果摘要及确认卡片消费 | 返回最多 TEXT_MAX_CHARS 字符的 JSON / 文本；dict / list 敏感键值替为 `***`，坏 JSON 原串在此函数中仅 strip / 截断，Rail 另用省略策略。未知对象 default=str，递归结构等异常由调用方处理 |
+| [tools.effect_policy.is_read_only_tool_name](../../tools/effect_policy.py)：`is_read_only_tool_name(tool_name: str \| None) -> bool`（同步） | 本特性新增内部函数，before_tool_call 消费；定义已在第 2.2 节给出 | 精确白名单成员判断，无外部副作用，不授予路径权限或校验实现类 |
+| [execution.entries.redact_arguments](../../execution/entries.py)：`redact_arguments(arguments: Any) -> str`（同步） | 复用内部函数，参数 / 结果摘要及确认卡片消费 | 返回最多 TEXT_MAX_CHARS 字符的 JSON / 文本；dict / list 敏感键值替为 `***`，坏 JSON 原串在此函数中仅 strip / 截断，Rail 另用省略策略。未知对象 default=str，递归结构等异常由调用方处理 |
 
 扩展接口是原生 Rail 回调：完整 AgentCallbackContext / AgentCallbackEvent 定义见[原生回调基类](../../../../core/single_agent/rail/base.py)，DeepAgentRail 定义见[Harness Rail 基类](../../../rails/base.py)。原生框架注入 ctx.inputs、ctx.extra、ctx.exception、ctx.agent 和停止 / 重试控制方法；Rail 经 parts.rails 装配并由原生首次初始化注册，调用方不直接把任意 dict 当回调上下文。before 与 exception / after 的优先级语义见第 2.4 / 2.8 节，取消或框架跳过收尾时不保证 after 一定发生。
 
@@ -155,7 +155,7 @@ dispatch 标记表示通过屏障、允许派发，不是外部写入成功的�
 
 ### 2.5 操作身份、参数和调用内去重
 
-`tool.intent` 沿用既有 [ToolIntentPayload](../../persistent_agent/schema/events.py)，字段处理如下：
+`tool.intent` 沿用既有 [ToolIntentPayload](../../schema/events.py)，字段处理如下：
 
 | 字段 | 当前生成规则与限制 |
 | --- | --- |
