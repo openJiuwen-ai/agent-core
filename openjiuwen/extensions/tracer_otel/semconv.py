@@ -53,6 +53,8 @@ GEN_AI_AGENT_ID = "gen_ai.agent.id"
 GEN_AI_AGENT_DESCRIPTION = "gen_ai.agent.description"
 GEN_AI_CONVERSATION_ID = "gen_ai.conversation.id"
 
+GEN_AI_RETRIEVAL_QUERY_TEXT = "gen_ai.retrieval.query.text"
+GEN_AI_RETRIEVAL_DOCUMENTS = "gen_ai.retrieval.documents"
 GEN_AI_RETRIEVAL_TOP_K = "gen_ai.retrieval.top_k"
 GEN_AI_DATA_SOURCE_ID = "gen_ai.data_source.id"
 GEN_AI_EMBEDDINGS_DIMENSION_COUNT = "gen_ai.embeddings.dimension.count"
