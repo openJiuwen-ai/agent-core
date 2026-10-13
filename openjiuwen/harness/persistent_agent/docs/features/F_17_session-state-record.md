@@ -10,10 +10,10 @@
 | 方案成熟度 | 已确认（2026-10-14）：D-01～D-10 均已确认；D-06 的 core 改动合并前由 core 维护者评审 |
 | 计划条目 | [开发计划](../designs/persistent-agent-development-plan.md) PA-10 |
 | 负责人 | Song Haoran、Chen Ran |
-| 状态 | 进行中（设计已确认，尚未实现） |
+| 状态 | 进行中：I-01～I-07 已实现并通过组件验证（2026-10-14）；I-08 的 core 改动待实施 |
 | 设计依据 | [架构设计](../designs/persistent-agent-architecture.md) §3.4、§4.4.2、§7.2、§7.3、§8.1；[S_03](../specs/S_03_context-and-windows.md) 第 4.1、4.3、5.2、5.3 节；[S_01](../specs/S_01_public-api-and-execution.md) 执行编排 |
 | 关联 feature | [F_05](F_05_execution-entries.md)（入口调用 `load` / `save` 的位置与顺序，共享接入契约见其第 3.2 节）；[F_06](F_06_window-assembly.md)（窗口标记、未配对工具调用的兜底拒绝）；PA-08 的结果交接方案尚未归档，联动点见本文第 3 节 |
-| 验证摘要 | 未执行；验证设计见第 7 节 |
+| 验证摘要 | 2026-10-14：I-01～I-07 组件验证通过，PA 包与 core Session 872 passed，5 项变异检查均被测试发现；I-08 相关场景（PA-10-V-07、V-14、V-20、V-23、V-24）与真实服务端未验证，见第 7 节 |
 | Refs | 未关联 issue / PR |
 
 ## 2. 背景、目标与范围
@@ -259,6 +259,8 @@ flowchart LR
 | `schema/session_record.py` 的中断状态编解码 | `def encode_interruption(state: ToolInterruptionState) -> dict`；`def decode_interruption(data: dict) -> ToolInterruptionState`；新增；内部 | `save` / `load` 调用 | 按 D-02 的类型白名单精确匹配；编码遇到未知类型抛运行错误，解码遇到未知标记抛 `DEEPAGENT_CONTEXT_PARAM_ERROR` |
 | `execution/session_state.py` 的 `tidy_window` | `def tidy_window(messages: list[BaseMessage], ending: ExecutionEnding, execution_id: str) -> list[BaseMessage]`；新增 | `save` 调用 | 按 D-09 删除临时背景块、追加结束标记；不修改其他消息 |
 | `execution/session_state.py` 的 `patch_stopped_calls` | `def patch_stopped_calls(messages: list[BaseMessage]) -> list[BaseMessage]`；新增 | 结局为 `stopped`、`cancelled` 或 `error` 的 `save`，以及加载这三种结局的记录时调用 | 为缺结果的调用在其调用组之后补占位结果，内容为“结果未取得，实际效果需核实”；幂等 |
+| `execution/session_state.py` 的 `unpaired_tool_calls` | `def unpaired_tool_calls(messages: list) -> list[str]`；新增 | 加载校验、保存检查与补位判断 | 按调用顺序返回没有结果的调用；补位与原生中断结果都算结果 |
+| `execution/session_state.py` 的 `offloading_processors` | `def offloading_processors(agent) -> list[str]`；新增 | 构造入口与 `PersistentModelCallRail.before_invoke` | 按 `processor_type()` 识别 `ReActAgentConfig.context_processors` 中会卸载消息的处理器；分叉版 `MessageSummaryOffloader` 同名 |
 | `execution/seams.py` 的 `session_state_store` | 修改 | 入口取接入点 | 由抛“未接入”改为返回绑定 `context.ports.window_backend` 的 `ExecutionStateStore` |
 | `execution/entries.py` 的 `_load` | 修改 | 入口加载记录 | 框架的 `ValidationError` 原样透传，其他异常包成 `DEEPAGENT_RUNTIME_ERROR`；保存路径不变 |
 | `execution/model_rail.py` 的 `PersistentModelCallRail.before_invoke` | 新增回调 | Rail 注册完成后、ReAct 创建上下文前 | 按 D-07 检查实际处理器；发现会卸载的类型即标记致命错误并停止 |
@@ -423,12 +425,13 @@ I-01～I-07 与 I-08 分别提交；I-08 合并前由 core 维护者评审。核
 
 | 执行日期 / 验证范围 | 实现版本与环境 | 命令 / 复现步骤 / 记录链接 | 实际结果 | 未覆盖项 / 失败原因 |
 | --- | --- | --- | --- | --- |
-| — | — | — | 未执行 | 尚未实现 |
+| 2026-10-14 I-01～I-07：PA-10-V-01～V-06、V-08～V-13、V-15～V-19、V-21、V-22、V-25 | feature/pa-10-session-state 的 feat 与 test 提交（基于 jiuwenmate 8e0d1067）；macOS、Python 3.11.17、pytest 9.0.2；真实 DeepAgent、本地模型、`InMemoryKVStore`，确认适配（PA-09）用替身 | `PYTHONPATH=$PWD .venv/bin/python -m pytest tests/unit_tests/harness/persistent_agent tests/unit_tests/core/session -q`；单元测试 [test_session_state.py](../../../../../tests/unit_tests/harness/persistent_agent/test_session_state.py)，组件测试 [test_entries.py](../../../../../tests/unit_tests/harness/persistent_agent/test_entries.py) 中使用 `real_state` 的用例 | 872 passed（新增单元 40、组件 15）；变异检查 5 项（去掉无上下文跳过、去掉 DeepAgent 状态同步、入口不放行校验错误、中断请求不带类型、去掉窗口同步）均被测试发现 | PA-10-V-04 只覆盖 `InterruptRequest` 的端到端恢复，`AskUserRequest` 在单元层验证；内存后端不证明真实服务端的持久化与隔离 |
+| PA-10-V-07、V-14、V-20、V-23、V-24 | — | — | 未执行 | 依赖 I-08 的 core 改动 |
 
 ### 7.3 验证结论
 
-- 已证明范围：无，尚未实现。
-- 未覆盖或未通过的承诺：全部；工具执行中途结束的真实事实依赖 I-08 的 core 改动；`pending_answer` 的生命周期受 D-08 限制。
+- 已证明范围：记录的加载与保存、保存前同步窗口与 DeepAgent 状态、中断请求类型、无效记录与存储故障的区分、键编码、窗口整理与结束标记、模型调用中途停止及第一次模型调用前停止的保存与再执行、加载修补、卸载处理器的两层拒绝与保存兜底、`pending_answer` 的原样保存与覆盖日志（组件层，内存后端）。
+- 未覆盖或未通过的承诺：工具执行中途被停止、取消或报错时的真实事实依赖 I-08，PA-10-V-07、V-14、V-20、V-23、V-24 未执行；真实服务端后端未联调；`pending_answer` 的生命周期受 D-08 限制。
 - 可支持的交付判断：不能声明 PA-10 完成。设计完成、代码完成与真实集成验收分别报告；组件验证通过后，真实服务端后端的持久化与隔离仍需联调证明（S_03 I-5），`pending_answer` 的完整链路需 PA-05、PA-08、PA-10 联合验收。
 
 ## 8. 风险与已知遗留
@@ -439,6 +442,7 @@ I-01～I-07 与 I-08 分别提交；I-08 合并前由 core 维护者评审。核
 | --- | --- | --- | --- |
 | core 消息、中断状态或 DeepAgent 状态的字段变化 | 旧记录无法还原 | 版本号、白名单与往返测试；不兼容时校验拒绝 | PA-10-V-11、V-17、V-18；core 升级时回归 |
 | 记录体积随窗口增长 | 后端单值大小可能受限 | 换窗（PA-11）控制窗口大小 | 待“容量边界”对齐后评估 |
+| 确认中断在 PA-09 接入前出现 | PA-10 接入后新任务入口可执行；若执行中出现确认中断，等待现场会被保存，但确认恢复入口在 PA-09 接入前仍拒绝，该 Session 之后的新 Request 会被 PA-06 拒绝 | 本特性不改变能力开放范围 | 需开发者决定 PA-09 接入前如何限制会产生确认中断的配置 |
 | core 新增会卸载的处理器 | 前置检查漏判 | 保存兜底（D-07 第 3 层） | PA-10-V-12 |
 
 ### 8.2 已知遗留
@@ -476,3 +480,17 @@ I-01～I-07 与 I-08 分别提交；I-08 合并前由 core 维护者评审。核
 - 旧结论的效力：只覆盖停止的补位范围与原文案已替代；架构 §7.2、S_03 第 5.2 节、开发计划 PA-10、概览、F_05 与 F_06 已同步，原文案在 F_05、F_06 中就近注明。
 - 影响与同步：新增 PA-10-V-23～V-25；I-08 的前置只剩 core 维护者评审。
 - 验证：未执行。
+
+### 2026-10-14 实现 I-01～I-07
+
+- 原结论与适用范围：第 4.2 节 D-01～D-05、D-07～D-10 与第 5 节的目标设计。
+- 新证据与原因：实现与测试中确认了以下细节，均未改变已确认的决策。
+- 最终变化：
+  - 卸载处理器的识别抽成 `offloading_processors`，构造入口与 `PersistentModelCallRail.before_invoke` 共用；运行时检查复用 PA-05 的致命错误机制，入口在原生退出后抛出配置错误。
+  - 非完成、非取消的结局在结束标记中写作“暂停（原因）”，原因取 PA-05 的结局名称。
+  - 解析失败一律不保留 pydantic 异常作为原因，因为其中带有记录原文；后端异常保留原始原因。
+  - 精确类型检查（消息类、中断状态与请求类型）保留，不改为 `isinstance`，避免子类字段被静默丢弃。
+  - 测试夹具增加共享后端与按执行上下文创建 Session，原“状态存储未接入时拒绝”的用例随接入删除。
+- 旧结论的效力：仍适用。
+- 影响与同步：S_01、S_03、S_05、架构实现状态、开发计划与 F_02、F_03、F_05、F_06、F_07 的接入状态已同步；PA-10 接入后新任务入口可执行，确认恢复入口在 PA-09 接入前仍拒绝（见本文第 8.1 节的风险）。
+- 验证：见第 7.2 节。

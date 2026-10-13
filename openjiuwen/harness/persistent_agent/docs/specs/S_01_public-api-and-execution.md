@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_01 / public-api-and-execution |
 | 关联模块 | [entries.py](../../execution/entries.py)、[participation.py](../../execution/participation.py)、[model_rail.py](../../execution/model_rail.py)、[RequestInput](../../schema/request.py)、[预算结果](../../schema/port_results.py) |
-| 最近一次修订日期 | 2026-10-13 |
+| 最近一次修订日期 | 2026-10-14 |
 | 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_07](../features/F_07_group-participation.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md) |
 | 设计依据 | [架构设计：执行入口](../designs/persistent-agent-architecture.md#42-执行入口与原生推理循环)、[主流程](../designs/persistent-agent-architecture.md#51-主流程)、[故障与结局](../designs/persistent-agent-architecture.md#81-故障影响错误分类与结局) |
 
@@ -84,6 +84,8 @@ GroupChatPort 的授权、消息与完整性规则由 [S_09](S_09_group-chat-and
 | 未开放模式、缺少群端口、带 recovery_ref、接入点尚不可用 | BaseError，DEEPAGENT_CONFIG_PARAM_ERROR；不把未接入能力降级为新任务或空窗口；群判断已发生的事件不会撤销 |
 | 非法构造上下文 / checkpointer | BaseError，DEEPAGENT_CONTEXT_PARAM_ERROR |
 | 会话记录加载 / 保存失败或返回形态非法 | DEEPAGENT_RUNTIME_ERROR；加载失败不运行原生流，保存失败不记结束事件 |
+| 会话记录无效（加载时） | 框架校验错误 DEEPAGENT_CONTEXT_PARAM_ERROR 原样透传；不运行原生流、不退回空窗口，服务端不续做（S_03 第 4.1 节） |
+| Rail 注册后发现会卸载消息的上下文处理器 | DEEPAGENT_CONFIG_PARAM_ERROR，登记 fatal 后在原生退出时抛出；不调用模型、不保存、不记结束事件 |
 | 窗口组装失败 | 已有 BaseError 保留；其他异常或非法返回包装为 DEEPAGENT_RUNTIME_ERROR，不运行半装配窗口 |
 | 关键记账失败 | 按 S_02 登记 fatal 并抛出；不降级为 paused(error) |
 | 实例清理失败 | 无先前异常时抛 DEEPAGENT_RUNTIME_ERROR；失败收尾不掩盖已有原异常 |
