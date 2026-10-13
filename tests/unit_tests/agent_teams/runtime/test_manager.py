@@ -57,6 +57,11 @@ class FakeTeamAgent:
     async def pause_coordination(self) -> None:
         self.pause_coordination_calls += 1
 
+    async def resolve_retire_target(self, *, force: bool = False) -> MemberStatus:
+        return self.retire_target
+
+    retire_target: MemberStatus = MemberStatus.SHUTDOWN
+
 
 class FakeTeamMember:
     """Mock TeamMember that tracks status updates."""
@@ -94,6 +99,50 @@ class TestFinalizeMember:
         assert agent.stop_coordination_calls == 1
         assert agent.pause_coordination_calls == 0
         assert fake_member.update_status_calls == [MemberStatus.SHUTDOWN]
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_shutdown_requested_settles_to_dormant_per_lifetime(self):
+        """F_118: the request is one status; the settle target follows the member's lifetime."""
+        fake_member = FakeTeamMember(MemberStatus.SHUTDOWN_REQUESTED)
+        agent = FakeTeamAgent(team_member=fake_member)
+        agent.retire_target = MemberStatus.DORMANT
+
+        await TeamRuntimeManager.finalize_member(agent)
+
+        assert agent.stop_coordination_calls == 1
+        assert fake_member.update_status_calls == [MemberStatus.DORMANT]
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_self_retired_member_tears_down_even_if_row_was_claimed_by_a_wake(self):
+        """shutdown_self recorded DORMANT; a wake has since CAS'd the row to RESTARTING.
+
+        The old run cycle must still stop (not pause + re-mark READY under the
+        new runtime), so finalize trusts the in-memory settle over the row.
+        """
+        fake_member = FakeTeamMember(MemberStatus.RESTARTING)
+        agent = FakeTeamAgent(team_member=fake_member)
+        agent.retired_status = MemberStatus.DORMANT
+
+        await TeamRuntimeManager.finalize_member(agent)
+
+        assert agent.stop_coordination_calls == 1
+        assert agent.pause_coordination_calls == 0
+        assert fake_member.update_status_calls == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_already_dormant_skips_status_write(self):
+        """A DORMANT row was written by the member itself; finalize only closes the kernel."""
+        fake_member = FakeTeamMember(MemberStatus.DORMANT)
+        agent = FakeTeamAgent(team_member=fake_member)
+
+        await TeamRuntimeManager.finalize_member(agent)
+
+        assert agent.stop_coordination_calls == 1
+        assert agent.pause_coordination_calls == 0
+        assert fake_member.update_status_calls == []
 
     @pytest.mark.asyncio
     @pytest.mark.level0

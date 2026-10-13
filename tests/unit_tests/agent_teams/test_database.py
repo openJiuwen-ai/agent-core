@@ -241,6 +241,44 @@ class TestTeamDatabaseInit:
             engine.dispose()
 
     @pytest.mark.level1
+    def test_task_migration_adds_note_column_idempotently(self):
+        """A pre-F_118 task table gains ``note``; a table that has it is left alone."""
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_task_prenote (
+                        task_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        assignee TEXT,
+                        reviewer TEXT,
+                        review_round INTEGER NOT NULL DEFAULT 0,
+                        max_review_rounds INTEGER,
+                        updated_at BIGINT
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_task_prenote (task_id, team_name, title, content, status) "
+                    "VALUES ('t1', 'team', 't', 'c', 'pending')"
+                )
+
+                _ensure_dynamic_table_indexes(conn, ["team_task_prenote"], {"team_task_prenote"})
+                _ensure_dynamic_table_indexes(conn, ["team_task_prenote"], {"team_task_prenote"})
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_task_prenote")}
+                row = conn.exec_driver_sql("SELECT note FROM team_task_prenote").mappings().one()
+
+            assert "note" in columns
+            assert row["note"] is None
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
     def test_team_info_migration_adds_capability_columns(self):
         """A pre-F_62 team_info table gains dispatch_mode / enable_task_verification."""
         from openjiuwen.agent_teams.tools.database.engine import _ensure_team_info_capability_columns

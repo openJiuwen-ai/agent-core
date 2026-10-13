@@ -1879,3 +1879,225 @@ async def test_spawn_worktree_with_git_subdirectory_registers_member(
 
     assert result.ok
     assert await db.member.get_member("isolated", "test_team") is not None
+
+
+# ---------------------------------------------------------------------------
+# F_118: dormant members — wake, direct shutdown, fan-out immunity, completion
+# ---------------------------------------------------------------------------
+
+
+async def _dormant_backend(db, message_bus, team_id: str, **callbacks) -> TeamBackend:
+    """A leader backend over a fresh team holding one DORMANT member ``dev-1``."""
+    await db.team.create_team(team_name=team_id, display_name=team_id, leader_member_name="leader1")
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        **callbacks,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(
+        member_name="dev-1",
+        display_name="Dev 1",
+        agent_card=card,
+        status=MemberStatus.DORMANT,
+        lifetime="dormant",
+    )
+    return backend
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_recover_member_wakes_dormant_member(db, message_bus):
+    """A single-recipient nudge claims DORMANT -> RESTARTING through the recovery CAS."""
+    on_restarted = AsyncMock(return_value=True)
+    backend = await _dormant_backend(db, message_bus, "wake_team", on_member_restarted=on_restarted)
+
+    assert await backend.recover_member("dev-1") is True
+
+    on_restarted.assert_awaited_once_with("dev-1")
+    member = await db.member.get_member("dev-1", "wake_team")
+    assert member.status == MemberStatus.RESTARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_recover_member_failed_wake_returns_to_dormant(db, message_bus):
+    """A wake whose restart fails rolls the row back to the state it was claimed from."""
+    on_restarted = AsyncMock(return_value=False)
+    backend = await _dormant_backend(db, message_bus, "wake_fail_team", on_member_restarted=on_restarted)
+
+    assert await backend.recover_member("dev-1") is False
+
+    member = await db.member.get_member("dev-1", "wake_fail_team")
+    assert member.status == MemberStatus.DORMANT.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_recover_member_ignores_ready_member(db, message_bus):
+    """Only ERROR / DORMANT rows are recoverable; a live member is never re-spawned by a nudge."""
+    on_restarted = AsyncMock(return_value=True)
+    backend = await _dormant_backend(db, message_bus, "wake_ready_team", on_member_restarted=on_restarted)
+    await db.member.update_member_status("dev-1", "wake_ready_team", MemberStatus.RESTARTING.value)
+    await db.member.update_member_status("dev-1", "wake_ready_team", MemberStatus.READY.value)
+
+    assert await backend.recover_member("dev-1") is False
+    on_restarted.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_shutdown_dormant_member_settles_directly(db, message_bus):
+    """No runtime consumes a MEMBER_SHUTDOWN for a dormant member: land SHUTDOWN at once."""
+    on_stopped = AsyncMock()
+    backend = await _dormant_backend(db, message_bus, "shutdown_dormant_team", on_member_stopped=on_stopped)
+
+    result = await backend.shutdown_member("dev-1")
+
+    assert result.ok
+    on_stopped.assert_awaited_once_with("dev-1")
+    member = await db.member.get_member("dev-1", "shutdown_dormant_team")
+    assert member.status == MemberStatus.SHUTDOWN.value
+    # No shutdown notice row: nobody would read it.
+    assert await db.message.get_team_messages(team_name="shutdown_dormant_team") == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_leaves_dormant_members_asleep(db, message_bus):
+    """Fan-out start touches UNSTARTED only; a dormant member wakes on explicit address alone."""
+    on_created = AsyncMock()
+    backend = await _dormant_backend(db, message_bus, "fanout_team", on_member_started=on_created)
+    card = AgentCard(name="Dev2", description="dev 2", version="1.0.0")
+    await backend.spawn_member(member_name="dev-2", display_name="Dev 2", agent_card=card)
+
+    started = await backend.autostart_unstarted()
+
+    assert started == ["dev-2"]
+    member = await db.member.get_member("dev-1", "fanout_team")
+    assert member.status == MemberStatus.DORMANT.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_is_team_completed_treats_dormant_as_settled_despite_unread(agent_team, db):
+    """A dormant member is done; its unread broadcast is read on wake, not outstanding work."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.DORMANT.value)
+    await _drain_one_task(agent_team)
+    await agent_team.message_manager.broadcast_message(content="announce")
+    await agent_team.message_manager.send_message(content="later", to_member_name="member1")
+
+    snapshot = await agent_team.is_team_completed()
+
+    assert snapshot is not None
+    assert snapshot.member_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_retirement_projections(db, message_bus):
+    """list_retirable_members / get_member_lifetime / members_with_unread / open counts feed the scan."""
+    backend = await _dormant_backend(db, message_bus, "proj_team")
+    card = AgentCard(name="X", description="x", version="1.0.0")
+    await backend.spawn_member(member_name="dev-2", display_name="Dev 2", agent_card=card, lifetime="shutdown")
+    await backend.spawn_member(member_name="dev-3", display_name="Dev 3", agent_card=card)
+    await db.member.update_member_status("dev-2", "proj_team", MemberStatus.READY.value)
+    await db.member.update_member_status("dev-3", "proj_team", MemberStatus.READY.value)
+    await backend.spawn_member(member_name="dev-4", display_name="Dev 4", agent_card=card, lifetime="dormant")
+    await db.member.update_member_status("dev-4", "proj_team", MemberStatus.READY.value)
+    await db.member.update_member_status("dev-4", "proj_team", MemberStatus.BUSY.value)
+
+    # dev-1 is DORMANT, dev-3 has no policy, dev-4 is mid-round: only idle dev-2 is a candidate.
+    assert await backend.list_retirable_members() == [("dev-2", MemberStatus.READY.value, "shutdown")]
+    assert await backend.get_member_lifetime("dev-1") == "dormant"
+    assert await backend.get_member_lifetime("dev-3") is None
+    assert await backend.get_member_lifetime("nobody") is None
+
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+
+    spec = TaskGraphSpec(title="T", content="c", task_id="t1", assignee="dev-2")
+    graph = await backend.task_manager.add_graph([spec])
+    assert graph.ok
+    assert await backend.task_manager.open_task_counts_by_assignee() == {"dev-2": 1}
+    await db.task.cancel_task("t1")
+    assert await backend.task_manager.open_task_counts_by_assignee() == {}
+
+    await backend.message_manager.send_message(content="hi", to_member_name="dev-2")
+    assert await backend.message_manager.members_with_unread(["dev-2", "dev-3"]) == {"dev-2"}
+    await backend.message_manager.broadcast_message(content="all")
+    assert await backend.message_manager.members_with_unread(["dev-3"]) == {"dev-3"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_delete_unstarted_member_only_removes_untouched_rows(db, message_bus):
+    """The rollback path deletes an UNSTARTED row and nothing else."""
+    backend = await _dormant_backend(db, message_bus, "rollback_team")
+    card = AgentCard(name="X", description="x", version="1.0.0")
+    await backend.spawn_member(member_name="dev-2", display_name="Dev 2", agent_card=card, lifetime="shutdown")
+
+    assert await backend.delete_unstarted_member("dev-2") is True
+    assert await backend.member_exists("dev-2") is False
+    # dev-1 is DORMANT, so it is not "untouched" and stays.
+    assert await backend.delete_unstarted_member("dev-1") is False
+    assert await backend.member_exists("dev-1") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_shutdown_member_sends_no_notice_for_dormant_retirement(db, message_bus):
+    """A dormant retirement writes the request and the event but no goodbye mail (it would only sit unread)."""
+    await db.team.create_team(team_name="notice_team", display_name="n", leader_member_name="leader1")
+    backend = TeamBackend(team_name="notice_team", member_name="leader1", db=db, messager=message_bus, is_leader=True)
+    card = AgentCard(name="X", description="x", version="1.0.0")
+    await backend.spawn_member(member_name="dormant-1", display_name="D", agent_card=card, lifetime="dormant")
+    await backend.spawn_member(member_name="resident-1", display_name="R", agent_card=card)
+    for name in ("dormant-1", "resident-1"):
+        await db.member.update_member_status(name, "notice_team", MemberStatus.READY.value)
+
+    assert (await backend.shutdown_member("dormant-1")).ok
+    assert (await backend.shutdown_member("resident-1")).ok
+
+    recipients = [m.to_member_name for m in await db.message.get_team_messages(team_name="notice_team")]
+    assert recipients == ["resident-1"]
+    for name in ("dormant-1", "resident-1"):
+        assert (await db.member.get_member(name, "notice_team")).status == MemberStatus.SHUTDOWN_REQUESTED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_delete_unstarted_member_releases_workspace(db, message_bus, monkeypatch):
+    """Rolling back an inline member undoes spawn_member's workspace side effects too."""
+    from openjiuwen.agent_teams.team_workspace import binder as binder_module
+
+    await db.team.create_team(team_name="ws_team", display_name="w", leader_member_name="leader1")
+    backend = TeamBackend(team_name="ws_team", member_name="leader1", db=db, messager=message_bus, is_leader=True)
+    card = AgentCard(name="X", description="x", version="1.0.0")
+    await backend.spawn_member(member_name="tmp-1", display_name="T", agent_card=card, lifetime="shutdown")
+
+    calls: list[tuple[str, str]] = []
+    primed: list[tuple[str, str, object]] = []
+
+    class _FakeBinder:
+        def release(self, team_name, member_name, **_kw):
+            calls.append(("release", member_name))
+            return True
+
+        def delete_if_zero(self, team_name, member_name, **_kw):
+            calls.append(("delete", member_name))
+            return True
+
+    monkeypatch.setattr(binder_module, "MemberWorkspaceBinder", _FakeBinder)
+    backend._spec_evolution_enabled = True
+    fake_cache = SimpleNamespace(fill_member_field=lambda m, f, c: primed.append((m, f, c)))
+    monkeypatch.setattr(TeamBackend, "workspace_cache", property(lambda self: fake_cache))
+
+    assert await backend.delete_unstarted_member("tmp-1") is True
+
+    assert calls == [("release", "tmp-1"), ("delete", "tmp-1")]
+    assert primed == [("tmp-1", "desc", None), ("tmp-1", "prompt", None)]
+    assert not await backend.member_exists("tmp-1")

@@ -228,3 +228,98 @@ async def test_malformed_meta_is_treated_as_a_plain_message():
     expanded = await _expand(_msg("{not json", content="body survives"), task=_FakeTask())
 
     assert expanded == ExpandedMessage(body="body survives", is_template=False)
+
+
+# ---------------------------------------------------------------------------
+# F_118 / D7: upstream / downstream briefs on the start handoff
+# ---------------------------------------------------------------------------
+
+
+def _row(task_id: str, title: str, assignee: str | None = None, note: str | None = None) -> SimpleNamespace:
+    return SimpleNamespace(task_id=task_id, title=title, assignee=assignee, note=note)
+
+
+async def _links_getter(upstream, downstream):
+    async def _get(_task_id: str):
+        return list(upstream), list(downstream)
+
+    return _get
+
+
+async def _expand_start(task: _FakeTask, *, upstream=(), downstream=(), language: str = "en", links=True):
+    msg = _msg('{"template": "scheduler_task_start", "refs": {"task": "t-1"}}')
+    return await expand_message(
+        msg,
+        task_getter=await _task_getter(task),
+        member_getter=await _member_getter(None),
+        language=language,
+        task_links_getter=await _links_getter(upstream, downstream) if links else None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_handoff_renders_upstream_note_and_downstream_owner():
+    expanded = await _expand_start(
+        _FakeTask(),
+        upstream=[_row("t-0", "design schema", "arch-1", "schema at docs/schema.md; chose UUID keys")],
+        downstream=[_row("t-2", "write client", "fe-1")],
+    )
+
+    assert expanded.is_template
+    assert "- t-0 · design schema · arch-1 · schema at docs/schema.md; chose UUID keys" in expanded.body
+    assert "- t-2 · write client · fe-1" in expanded.body
+    assert "<missing:" not in expanded.body
+    logger.info("rendered start handoff: %s", expanded.body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_handoff_renders_none_phrase_without_links():
+    """No links, or no links getter at all, both render the localized "none" line."""
+    assert "- Upstream (completed, yours to build on):\nnone" in (await _expand_start(_FakeTask())).body
+    assert "无" in (await _expand_start(_FakeTask(), language="cn")).body
+    assert "none" in (await _expand_start(_FakeTask(), links=False)).body
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_start_handoff_brief_values_are_not_rescanned():
+    """A note containing a placeholder is literal text, never expanded twice."""
+    expanded = await _expand_start(
+        _FakeTask(),
+        upstream=[_row("t-0", "x", "a", "see {{task.content}} for details")],
+    )
+
+    assert "see {{task.content}} for details" in expanded.body
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_links_are_fetched_only_for_templates_that_render_them():
+    """A review request carries a task ref but no brief placeholder: no dependency queries."""
+    calls: list[str] = []
+
+    async def _links(task_id: str):
+        calls.append(task_id)
+        return [], []
+
+    review = _msg('{"template": "scheduler_review_request", "refs": {"task": "t-1"}}')
+    expanded = await expand_message(
+        review,
+        task_getter=await _task_getter(_FakeTask()),
+        member_getter=await _member_getter(None),
+        language="en",
+        task_links_getter=_links,
+    )
+    assert expanded.is_template and calls == []
+
+    start = _msg('{"template": "scheduler_task_start", "refs": {"task": "t-1"}}')
+    await expand_message(
+        start,
+        task_getter=await _task_getter(_FakeTask()),
+        member_getter=await _member_getter(None),
+        language="en",
+        task_links_getter=_links,
+    )
+    assert calls == ["t-1"]

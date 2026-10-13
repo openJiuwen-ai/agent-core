@@ -1598,3 +1598,60 @@ async def test_update_claimed_task_keeps_claim_and_notifies(task_manager, messag
     assert len(events) == 1
     assert events[0].payload["task_id"] == task.task_id
     assert events[0].payload["member_name"] == "member1"
+
+
+# ---------------------------------------------------------------------------
+# F_118 / D7: the author's completion note is persisted on the task row
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_complete_persists_note_on_the_row(task_manager):
+    task = await task_manager.add(title="T", content="c")
+    assert await task_manager.claim(task.task_id)
+
+    result = await task_manager.complete(task.task_id, note="artifact at out/report.md")
+
+    assert result.ok
+    detail = await task_manager.get_task_detail(task.task_id)
+    assert detail.note == "artifact at out/report.md"
+    assert detail.status == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_submit_for_review_persists_note_too(task_manager):
+    """A reviewed task lands in IN_REVIEW with the note already on the row for reviewers."""
+    graph = await task_manager.add_graph(
+        [
+            TaskGraphSpec(
+                title="T",
+                content="c",
+                task_id="r1",
+                assignee=task_manager.member_name,
+                reviewer=({"type": "verifier", "reviewer_id": "v1", "instruction": ""},),
+            )
+        ]
+    )
+    assert graph.ok
+    assert await task_manager.claim("r1")
+
+    result = await task_manager.complete("r1", note="see pr #12")
+
+    assert result.ok
+    detail = await task_manager.get_task_detail("r1")
+    assert detail.status == TaskStatus.IN_REVIEW.value
+    assert detail.note == "see pr #12"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_get_tasks_by_ids_skips_unknown_ids(task_manager):
+    a = await task_manager.add(title="A", content="c")
+    b = await task_manager.add(title="B", content="c")
+
+    rows = await task_manager.db.task.get_tasks_by_ids([a.task_id, "nope", b.task_id])
+
+    assert {row.task_id for row in rows} == {a.task_id, b.task_id}
+    assert await task_manager.db.task.get_tasks_by_ids([]) == []

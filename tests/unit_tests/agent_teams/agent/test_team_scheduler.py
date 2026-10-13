@@ -26,7 +26,7 @@ from openjiuwen.agent_teams.schema.events import (
     TaskCompletedEvent,
     TaskListDrainedEvent,
 )
-from openjiuwen.agent_teams.schema.status import MemberMode, TaskStatus
+from openjiuwen.agent_teams.schema.status import MemberMode, MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.task import TaskGraphSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -655,3 +655,96 @@ async def test_task_list_drained_waits_for_task_feedback_then_finalizes_team_fee
     await scheduler.on_event(event)
 
     assert order == ["task", f"team:{TEAM}"]
+
+
+# ---------------------------------------------------------------------------
+# F_118: retirement scan — request retirement of task-scoped members
+# ---------------------------------------------------------------------------
+
+
+def _retirement_scheduler(db, bus, *, candidates, unread=frozenset()):
+    """Scheduler whose backend reports ``candidates`` as retirable and ``unread`` as pending input."""
+    from openjiuwen.agent_teams.tools.team import MemberOpResult
+
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    backend = scheduler._infra.team_backend
+    live = list(candidates)
+    backend.list_retirable_members = AsyncMock(side_effect=lambda: list(live))
+
+    async def _request(member_name: str):
+        # The real row flips to SHUTDOWN_REQUESTED and leaves the live set;
+        # mirror that so the fixpoint loop converges like production.
+        live[:] = [row for row in live if row[0] != member_name]
+        return MemberOpResult.success()
+
+    backend.shutdown_member = AsyncMock(side_effect=_request)
+    mm.members_with_unread = AsyncMock(return_value=set(unread))
+    return scheduler, backend, tm
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_retirement_requested_once_board_is_empty(db, bus):
+    """READY + no open task + nothing unread -> one ordinary shutdown_member request."""
+    scheduler, backend, tm = _retirement_scheduler(db, bus, candidates=[("dev-1", "ready", "dormant")])
+
+    await scheduler.activate()
+
+    backend.shutdown_member.assert_awaited_once_with("dev-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_retirement_waits_for_open_tasks_including_review(db, bus):
+    """A task under review (or pending / blocked) keeps its author around."""
+    scheduler, backend, tm = _retirement_scheduler(db, bus, candidates=[("dev-1", "ready", "shutdown")])
+    reviewer = ({"type": "verifier", "reviewer_id": "v1", "instruction": ""},)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1", reviewer=reviewer)])
+    await scheduler.activate()  # starts the task; dev-1 now has IN_PROGRESS work
+    backend.shutdown_member.assert_not_awaited()
+
+    await _reviewer_mgr(db, bus, "dev-1").complete("a")  # IN_PROGRESS -> IN_REVIEW
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert (await tm.get("a")).status == TaskStatus.IN_REVIEW.value
+    backend.shutdown_member.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_retirement_waits_for_unread_input(db, bus):
+    """The just-woken window: READY before the waking message was read must not retire."""
+    scheduler, backend, _tm = _retirement_scheduler(
+        db, bus, candidates=[("dev-1", "ready", "dormant")], unread={"dev-1"}
+    )
+
+    await scheduler.activate()
+
+    backend.shutdown_member.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retirement_ignores_members_without_policy(db, bus):
+    """Nothing to retire -> no board queries, no requests."""
+    scheduler, backend, _tm = _retirement_scheduler(db, bus, candidates=[])
+
+    await scheduler.activate()
+
+    backend.shutdown_member.assert_not_awaited()
+    scheduler._infra.message_manager.members_with_unread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_handoff_to_dormant_member_wakes_it_through_auto_start(db, bus):
+    """A new task for a retired member is an explicit address: the handoff starts it."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await db.member.update_member_status("dev-1", TEAM, MemberStatus.SHUTDOWN_REQUESTED.value)
+    await db.member.update_member_status("dev-1", TEAM, MemberStatus.DORMANT.value)
+    await tm.add_graph([TaskGraphSpec(title="again", content="c", task_id="z", assignee="dev-1")])
+
+    await scheduler.activate()
+
+    assert (await tm.get("z")).status == TaskStatus.IN_PROGRESS.value
+    assert host.started_members == ["dev-1"]
