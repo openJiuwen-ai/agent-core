@@ -8,8 +8,8 @@ from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.access import WorkspaceReadScope
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.path_policy import (
+from openjiuwen.harness.persistent_agent.workspace.access import WorkspaceReadScope
+from openjiuwen.harness.persistent_agent.workspace.path_policy import (
     WorkspacePathError,
     observe_version,
     resolve_read_path,

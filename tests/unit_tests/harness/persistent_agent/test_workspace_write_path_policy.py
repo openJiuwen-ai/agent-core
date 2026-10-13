@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.access import WorkspaceWriteScope
+from openjiuwen.harness.persistent_agent.workspace.access import WorkspaceWriteScope
 
 pytestmark = pytest.mark.level0
 
@@ -29,7 +29,7 @@ def scope_for(root: Path, *, status="allowed", current_session="session-a"):
 
 
 def resolve_write_path(scope, requested_path):
-    module = import_module("openjiuwen.harness.persistent_agent.persistent_agent.workspace.path_policy")
+    module = import_module("openjiuwen.harness.persistent_agent.workspace.path_policy")
     resolver = getattr(module, "resolve_write_path", None)
     assert callable(resolver), "PA-16 write path resolver is not implemented"
     return resolver(scope, requested_path)
@@ -48,8 +48,8 @@ def test_resolve_shared_and_current_session_write_paths(tmp_path):
 
 
 def test_write_path_resolver_is_exported_from_workspace_package():
-    workspace = import_module("openjiuwen.harness.persistent_agent.persistent_agent.workspace")
-    resolver_module = import_module("openjiuwen.harness.persistent_agent.persistent_agent.workspace.path_policy")
+    workspace = import_module("openjiuwen.harness.persistent_agent.workspace")
+    resolver_module = import_module("openjiuwen.harness.persistent_agent.workspace.path_policy")
 
     assert workspace.resolve_write_path is resolver_module.resolve_write_path
 

@@ -92,7 +92,7 @@ PA-03 的目标是以 PA-02 的构造绑定为基础，将内部原生调用固�
 
 #### 2.3.1 关键类、绑定函数与原生接口定义
 
-以下是 2026-10-12 当前实现的内部符号，均不经 Persistent 外层包导出；实现模块前缀为 `openjiuwen.harness.persistent_agent.persistent_agent.execution`。复用的 ConstructionBinding / PersistentBuildContext 定义见 [F_01 第 2.3.4 节](F_01_spec-and-deep-agent-construction.md#234-关键类函数与构造接口定义)。源码没有标注的参数和返回类型保持原状，实际含义在表中说明。
+以下是 2026-10-12 当前实现的内部符号，均不经 Persistent 外层包导出；实现模块前缀为 `openjiuwen.harness.persistent_agent.execution`。复用的 ConstructionBinding / PersistentBuildContext 定义见 [F_01 第 2.3.4 节](F_01_spec-and-deep-agent-construction.md#234-关键类函数与构造接口定义)。源码没有标注的参数和返回类型保持原状，实际含义在表中说明。
 
 | 类 / 定义来源 | 变更、关系与构造 | 关键属性和生命周期 |
 | --- | --- | --- |

@@ -130,7 +130,7 @@ def built(monkeypatch):
 
 
 def runtime():
-    return import_module("openjiuwen.harness.persistent_agent.persistent_agent.execution.binding")
+    return import_module("openjiuwen.harness.persistent_agent.execution.binding")
 
 
 @pytest.mark.asyncio

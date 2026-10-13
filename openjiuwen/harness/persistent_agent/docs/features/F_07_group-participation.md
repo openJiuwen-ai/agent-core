@@ -101,7 +101,7 @@ flowchart TD
 
 #### 2.4.1 关键类、判断函数与接口定义
 
-以下按 2026-10-12 当前实现补充，模块为 `openjiuwen.harness.persistent_agent.persistent_agent.execution.participation`。本特性新增内部生产函数与结果载体，复用已有宿主 Protocol、RequestInput 和事件 DTO，不增加外层公共 API。
+以下按 2026-10-12 当前实现补充，模块为 `openjiuwen.harness.persistent_agent.execution.participation`。本特性新增内部生产函数与结果载体，复用已有宿主 Protocol、RequestInput 和事件 DTO，不增加外层公共 API。
 
 关键类是 [ParticipationOutcome](../../persistent_agent/execution/participation.py)，定义为 `@dataclass(frozen=True)`，生成构造器接受 `terminal: bool` 和 `event_id: str | None = None`。它无显式基类、运行资源句柄或自定义方法，生命周期限于一次前置判断；`terminal=True` 表示该分支已通过 emitter 处理 final / paused，`terminal=False` 携本次 participation.decided 的 ID，供 started 关联。字段在构造时确定，不作为持久状态、投递回执或模型判断准确率证据。
 

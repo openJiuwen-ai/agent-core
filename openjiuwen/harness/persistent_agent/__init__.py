@@ -104,6 +104,6 @@ _MODULES = {
 def __getattr__(name: str):
     if name not in _MODULES:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    value = getattr(import_module(f"{__name__}.persistent_agent.{_MODULES[name]}"), name)
+    value = getattr(import_module(f"{__name__}.{_MODULES[name]}"), name)
     globals()[name] = value
     return value

@@ -11,7 +11,7 @@
 | 负责人 | Yan Zhijun；认领和后续安排以统一开发计划为准 |
 | 状态 | 进行中；agent-core 已有组件实现，真实宿主持久化确认及跨仓联调未完成 |
 | 方案依据 | 沿用现行架构、spec 和原记录中的名称白名单决策；本次核对实现，不改变架构或公共契约 |
-| 原实现范围 | `openjiuwen/harness/persistent_agent/persistent_agent/` 内的 `schema/spec.py`、`tools/effect_policy.py`、`execution/tool_intent_rail.py` 及对应单测；复用已有执行入口和事件通道 |
+| 原实现范围 | `openjiuwen/harness/persistent_agent/` 内的 `schema/spec.py`、`tools/effect_policy.py`、`execution/tool_intent_rail.py` 及对应单测；复用已有执行入口和事件通道 |
 | 本次修订范围 | 重组方案、取舍、验收、依赖和验证记录，纠正身份、去重、摘要及结果判定的适用范围；不修改代码或测试 |
 | 唯一开发计划 | [Persistent Agent 开发计划](../designs/persistent-agent-development-plan.md) PA-15；开发状态、负责人、排期及 M2b / M2c 进展在那里维护 |
 | 验证摘要 | 历史组件记录与本次结果分开维护。本次 PA 包及共享重试测试合计 344 passed、1 skipped、2 failed；确认同意后的恢复分支未由失败用例验证到，详见第 4 节 |
@@ -98,7 +98,7 @@ Rail 实例只持有 binding。`ctx.extra["_persistent_tool_intent_state"]` 保�
 
 #### 2.3.1 关键类、函数与回调接口定义
 
-本节按 2026-10-12 当前实现补充。实现模块前缀为 `openjiuwen.harness.persistent_agent.persistent_agent`；本特性新增内部策略和 Rail，复用已公开的事件 DTO，不新增宿主 Protocol 或外层入口。
+本节按 2026-10-12 当前实现补充。实现模块前缀为 `openjiuwen.harness.persistent_agent`；本特性新增内部策略和 Rail，复用已公开的事件 DTO，不新增宿主 Protocol 或外层入口。
 
 核心类 [execution.tool_intent_rail.PersistentToolIntentRail](../../persistent_agent/execution/tool_intent_rail.py) 继承 `DeepAgentRail`，构造签名为 `__init__(self, binding: ConstructionBinding)`（源码未标返回类型），由 PersistentAgentSpec.resolve_parts 创建并追加到 parts.rails。实例只持有 `_binding`，作用域为一次构造；依赖通过 binding.execution / control 间接取得，不拥有宿主连接或关闭宿主端口。priority=5，AFTER_TOOL_CALL 回调优先级单独提高，具体顺序见第 2.4 节。
 

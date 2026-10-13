@@ -10,13 +10,13 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.single_agent import AgentCard, create_agent_session
 from openjiuwen.harness.deep_agent import DeepAgent
-from openjiuwen.harness.persistent_agent.persistent_agent.execution.tool_intent_rail import PersistentToolIntentRail
-from openjiuwen.harness.persistent_agent.persistent_agent.ports import PersistentPorts
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.build_context import PersistentBuildContext
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.execution import ExecutionContext
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.spec import PersistentAgentSpec
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.access import WorkspaceReadScope
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.file_access import PersistentWorkspaceReadRail
+from openjiuwen.harness.persistent_agent.execution.tool_intent_rail import PersistentToolIntentRail
+from openjiuwen.harness.persistent_agent.ports import PersistentPorts
+from openjiuwen.harness.persistent_agent.schema.build_context import PersistentBuildContext
+from openjiuwen.harness.persistent_agent.schema.execution import ExecutionContext
+from openjiuwen.harness.persistent_agent.schema.spec import PersistentAgentSpec
+from openjiuwen.harness.persistent_agent.workspace.access import WorkspaceReadScope
+from openjiuwen.harness.persistent_agent.workspace.file_access import PersistentWorkspaceReadRail
 
 pytestmark = pytest.mark.level0
 

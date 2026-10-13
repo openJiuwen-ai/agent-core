@@ -215,7 +215,7 @@ flowchart LR
 
 ### 3.5 端口与交接契约
 
-执行通过端口集合（[`PersistentPorts`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/persistent_agent/ports.py)）访问依赖能力；下表定义各契约的方向、操作与失败语义。
+执行通过端口集合（[`PersistentPorts`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/ports.py)）访问依赖能力；下表定义各契约的方向、操作与失败语义。
 
 | 端口 | 方向 | 操作 | 失败语义 |
 | --- | --- | --- | --- |
@@ -238,11 +238,11 @@ flowchart LR
 
 这部分已经在代码中实现，本节只按代码现状描述。
 
-- **配置**：[`PersistentAgentSpec`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/persistent_agent/schema/spec.py) 继承 `DeepAgentSpec`，是一份扁平配置，带 `fingerprint()` 用于校验版本。
-- **构造**：[`create_persistent_agent(spec, context=...)`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/persistent_agent/factory.py) 返回**原生 `DeepAgent`**，不新建 Agent 类。构造过程不调用模型，也不调用端口。
-- **一次执行的上下文**：[`PersistentBuildContext`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/persistent_agent/schema/build_context.py) 携带 [`ExecutionContext`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/persistent_agent/schema/execution.py)（身份与权限快照）、Session 和端口集合。它只能使用一次，并为这次执行分配独立的 `tool_owner_id`，避免同名有状态工具相互覆盖。
+- **配置**：[`PersistentAgentSpec`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/schema/spec.py) 继承 `DeepAgentSpec`，是一份扁平配置，带 `fingerprint()` 用于校验版本。
+- **构造**：[`create_persistent_agent(spec, context=...)`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/factory.py) 返回**原生 `DeepAgent`**，不新建 Agent 类。构造过程不调用模型，也不调用端口。
+- **一次执行的上下文**：[`PersistentBuildContext`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/schema/build_context.py) 携带 [`ExecutionContext`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/schema/execution.py)（身份与权限快照）、Session 和端口集合。它只能使用一次，并为这次执行分配独立的 `tool_owner_id`，避免同名有状态工具相互覆盖。
 - **恢复引用**：`ExecutionContext.recovery_ref` 指向同一 Session、同一 Request 下待接续的 Execution；续做关联规则见第 5.2.4 节。
-- **隔离**：[`execution/binding.py`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/persistent_agent/execution/binding.py) 提供内部的 `invoke_bound / stream_bound / abort_bound / close_bound`：
+- **隔离**：[`execution/binding.py`](../../../../../../agent-core/openjiuwen/harness/persistent_agent/execution/binding.py) 提供内部的 `invoke_bound / stream_bound / abort_bound / close_bound`：
   - 调用前校验 Agent、Session、Execution 是否都匹配；
   - 拒绝同一实例的并发调用；
   - 停止和清理只影响自己这次执行的资源。

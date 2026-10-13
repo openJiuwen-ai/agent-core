@@ -217,7 +217,7 @@ PA-14 包装器不自行写 WindowStore、会话状态记录或执行日志，�
 
 ### 5.7 关键类、函数与工具接口定义
 
-以下补充 2026-10-12 当前实现，模块前缀为 `openjiuwen.harness.persistent_agent.persistent_agent`。WorkspaceReadScope / WorkspaceAccessPort 列在外层 `__all__` 中，但文档重写时的导入失败属于目标分支修正前的历史结果，见第 8～9 节；内部工具有模块 `__all__` 不等于成为外层公共 API。
+以下补充 2026-10-12 当前实现，模块前缀为 `openjiuwen.harness.persistent_agent`。WorkspaceReadScope / WorkspaceAccessPort 列在外层 `__all__` 中，但文档重写时的导入失败属于目标分支修正前的历史结果，见第 8～9 节；内部工具有模块 `__all__` 不等于成为外层公共 API。
 
 | 类 / 定义来源 | 变更、关系与构造定义 | 关键属性、作用域与资源责任 |
 | --- | --- | --- |
@@ -315,7 +315,7 @@ from openjiuwen.harness.persistent_agent import (
     create_persistent_agent,
 )
 # 临时用于展示当前实现；正式宿主接入前须修复并验证外层懒导出。
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.access import (
+from openjiuwen.harness.persistent_agent.workspace.access import (
     WorkspaceReadScope,
 )
 

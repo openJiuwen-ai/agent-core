@@ -11,13 +11,13 @@ from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from openjiuwen.core.single_agent import AgentCard, create_agent_session
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentCallbackEvent, ToolCallInputs
 from openjiuwen.harness.deep_agent import DeepAgent
-from openjiuwen.harness.persistent_agent.persistent_agent.execution.tool_intent_rail import PersistentToolIntentRail
-from openjiuwen.harness.persistent_agent.persistent_agent.ports import PersistentPorts
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.build_context import PersistentBuildContext
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.execution import ExecutionContext
-from openjiuwen.harness.persistent_agent.persistent_agent.schema.spec import PersistentAgentSpec
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.access import WorkspaceWriteScope
-from openjiuwen.harness.persistent_agent.persistent_agent.workspace.file_access import PersistentWorkspaceWriteRail
+from openjiuwen.harness.persistent_agent.execution.tool_intent_rail import PersistentToolIntentRail
+from openjiuwen.harness.persistent_agent.ports import PersistentPorts
+from openjiuwen.harness.persistent_agent.schema.build_context import PersistentBuildContext
+from openjiuwen.harness.persistent_agent.schema.execution import ExecutionContext
+from openjiuwen.harness.persistent_agent.schema.spec import PersistentAgentSpec
+from openjiuwen.harness.persistent_agent.workspace.access import WorkspaceWriteScope
+from openjiuwen.harness.persistent_agent.workspace.file_access import PersistentWorkspaceWriteRail
 
 pytestmark = pytest.mark.level0
 

@@ -194,7 +194,7 @@ KnowledgePort 继续使用 MaterialQuery、MaterialSnapshot、MaterialReadResult
 
 #### 2.6.1 收敛后的关键类、方法与接口定义
 
-以下补充 2026-10-12 当前实现中直接承载本次契约调整的类；模块前缀为 `openjiuwen.harness.persistent_agent.persistent_agent`。本项修改现有值对象及端口契约，不新增运行主体、服务端后端或独立执行函数。共享定义引用 F_01 / F_02，避免同一签名重复维护。
+以下补充 2026-10-12 当前实现中直接承载本次契约调整的类；模块前缀为 `openjiuwen.harness.persistent_agent`。本项修改现有值对象及端口契约，不新增运行主体、服务端后端或独立执行函数。共享定义引用 F_01 / F_02，避免同一签名重复维护。
 
 | 类 / 定义来源 | 变更类型与可见性 | 定义、关键属性及关系 |
 | --- | --- | --- |

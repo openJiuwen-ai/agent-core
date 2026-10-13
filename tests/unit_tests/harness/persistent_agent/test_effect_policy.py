@@ -4,7 +4,7 @@ from importlib import import_module
 
 import pytest
 
-_MODULE = "openjiuwen.harness.persistent_agent.persistent_agent.tools.effect_policy"
+_MODULE = "openjiuwen.harness.persistent_agent.tools.effect_policy"
 
 
 def is_read_only_tool_name(tool_name):
