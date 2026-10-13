@@ -1209,6 +1209,27 @@ async def test_mentioned_group_message_can_be_ignored_without_opening_a_task(har
 
 
 @pytest.mark.asyncio
+async def test_participation_prompt_tells_an_unreadable_body_from_a_recall(harness):
+    """PA-07-V-09: M103's body is only unavailable, so the judgment must not be told it was recalled."""
+    spec = harness.spec()
+    chat = GroupChat(
+        (
+            group_message(message_id="M103", sender_name="张三", status="unavailable", text=None),
+            group_message(message_id="M104", sender_name="赵六", status="recalled", text=None),
+            group_message(message_id="M105", sender_name="钱七", text=None),
+        )
+    )
+    ctx, _ = harness.context(spec, group_chat=chat)
+    harness.model.judgments = [judgment("ignore", "与当前职责无关")]
+    await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    text = prompt_text(harness.model)
+    assert "- 群消息 张三: 正文暂缺" in text
+    assert "- 群消息 赵六: 已撤回" in text
+    assert "- 群消息 钱七: （无正文）" in text
+    assert text.count("已撤回") == 1, "only the recalled message is reported as recalled"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["respond", "intervene"])
 async def test_unmentioned_group_message_can_continue_into_execution(harness, decision):
     spec = harness.spec(system_prompt="你是团队里的调研专家。")
