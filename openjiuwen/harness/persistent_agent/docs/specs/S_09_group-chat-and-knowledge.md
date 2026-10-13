@@ -68,7 +68,7 @@ search_messages(execution, query: GroupMessageQuery) -> GroupMessagesResult
 
 内部 async 接入返回 GroupMessagesResult，待 PA-23 实现：读取游标之后的新消息，并回补触发消息之后至本次读取上界的消息，合并去重且排除触发消息，供 S_03 组装临时背景。当前 getter 明确拒绝。S_01 的参与判断直接读取 GroupChatPort，不调用此接入点；不能因此把 PA-23 标为参与判断的硬前置。
 
-排队回补示例：R2 由 M120 触发，R1 执行期间 M130 补充了 R2 的要求，R1 结束游标为 M180；R2 的背景须包含 M130。游标使用增量读取的可信 scanned_through，无可信位置时保留旧值；正文暂缺标注缺失，不卡住可信扫描位置，也不建立跨 Request 自动缺口追补。PA-07 旧展示把空正文都标为已撤回，unavailable 的展示适配仍由 PA-07 负责人补齐。
+排队回补示例：R2 由 M120 触发，R1 执行期间 M130 补充了 R2 的要求，R1 结束游标为 M180；R2 的背景须包含 M130。游标使用增量读取的可信 scanned_through，无可信位置时保留旧值；正文暂缺标注缺失，不卡住可信扫描位置，也不建立跨 Request 自动缺口追补。参与判断读取的最近消息同样区分已撤回与正文暂缺，展示规则见 S_01。
 
 ### 4.3 KnowledgePort
 
