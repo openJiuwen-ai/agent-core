@@ -74,6 +74,12 @@ class TaskBoardHandler(BaseCoordinationHandler):
         {TeamEvent.TASK_CREATED, TeamEvent.TASK_UNBLOCKED, TeamEvent.TASK_RELEASED}
     )
 
+    # i18n keys of the steers that move a member off a task it lost. They
+    # point the member back at the claimable pool; a dispatch mode without
+    # one overrides them.
+    _REVOKED_FROM_SELF_KEY: ClassVar[str] = "dispatcher.task_revoked_from_self"
+    _CANCELLED_TO_SELF_KEY: ClassVar[str] = "dispatcher.task_cancelled_to_self"
+
     async def on_task_claimed(self, event: EventMessage) -> None:
         """Directed assignment from another node.
 
@@ -232,7 +238,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
         await self._poll.resume_polls()
         content = render_event(
             kind="task-revoked",
-            body=t("dispatcher.task_revoked_from_self", task_id=payload.task_id),
+            body=t(self._REVOKED_FROM_SELF_KEY, task_id=payload.task_id),
             task_id=payload.task_id,
         )
         team_logger.info(
@@ -264,7 +270,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
         await self._poll.resume_polls()
         content = render_event(
             kind="task-cancelled",
-            body=t("dispatcher.task_cancelled_to_self", task_id=payload.task_id),
+            body=t(self._CANCELLED_TO_SELF_KEY, task_id=payload.task_id),
             task_id=payload.task_id,
         )
         team_logger.info(
@@ -583,6 +589,11 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
         TeamEvent.TASK_VERIFIED: "on_task_board_event",
         TeamEvent.TASK_REVISION_REQUESTED: "on_task_board_event",
     }
+
+    # No claimable pool here: a member that loses a task waits for the next
+    # assignment instead of surveying the board for work to claim.
+    _REVOKED_FROM_SELF_KEY: ClassVar[str] = "dispatcher.task_revoked_from_self_scheduled"
+    _CANCELLED_TO_SELF_KEY: ClassVar[str] = "dispatcher.task_cancelled_to_self_scheduled"
 
     async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
         """No startup board survey under scheduled dispatch (F_69).

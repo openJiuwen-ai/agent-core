@@ -28,7 +28,9 @@ from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
+    TaskCancelledEvent,
     TaskCreatedEvent,
+    TaskRevokedEvent,
     TaskSubmittedForReviewEvent,
     TeamEvent,
 )
@@ -238,6 +240,29 @@ async def test_scheduled_board_event_keeps_polls_without_nudge(db, bus):
     await scheduled.on_task_board_event(event)
     assert host.delivered == []  # awareness belongs to the scheduler
     assert poll.resumed >= 2  # polling stays alive in both modes
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_scheduled_lost_task_steers_do_not_point_at_claimable_pool(db, bus):
+    """Scheduled members have no claimable pool: losing a task means wait, not claim."""
+    blueprint = _blueprint("dev-1", TeamRole.TEAMMATE)
+    infra = _infra(db, bus, "dev-1")
+    cancelled = EventMessage.from_event(TaskCancelledEvent(team_name=TEAM, member_name="dev-1", task_id="t1"))
+    revoked = EventMessage.from_event(TaskRevokedEvent(team_name=TEAM, member_name="dev-1", task_id="t2"))
+
+    autonomous_host, scheduled_host = FakeHost(), FakeHost()
+    autonomous = TaskBoardHandler(autonomous_host, blueprint, infra, FakePoll())
+    scheduled = ScheduledTaskBoardHandler(scheduled_host, blueprint, infra, FakePoll())
+    for handler in (autonomous, scheduled):
+        await handler.on_task_cancelled(cancelled)
+        await handler.on_task_revoked(revoked)
+
+    assert all("可认领" in str(content) for content in autonomous_host.delivered)
+    assert len(scheduled_host.delivered) == 2
+    for content in scheduled_host.delivered:
+        assert "可认领" not in str(content)
+        assert "另行通知开工" in str(content)
 
 
 @pytest.mark.asyncio

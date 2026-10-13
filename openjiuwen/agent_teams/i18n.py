@@ -168,6 +168,15 @@ STRINGS: dict[str, dict[str, str]] = {
             "[任务取消] 你正在执行的任务 [{task_id}] 已被取消。请立即停止该任务的工作，"
             "并通过 view_task 查看是否有新的可认领任务。"
         ),
+        # Scheduled dispatch: no claimable pool, the next task arrives as a start notice
+        "dispatcher.task_revoked_from_self_scheduled": (
+            "[任务撤回] 任务 [{task_id}] 已被转交给其他成员。请立即停止该任务的工作，"
+            "不要再为它提交结果；新任务指派给你时会另行通知开工，无需轮询看板。"
+        ),
+        "dispatcher.task_cancelled_to_self_scheduled": (
+            "[任务取消] 你正在执行的任务 [{task_id}] 已被取消。请立即停止该任务的工作，"
+            "不要再为它提交结果；新任务指派给你时会另行通知开工，无需轮询看板。"
+        ),
         "dispatcher.task_content_updated_to_self": (
             "[任务变更] 你正在执行的任务 [{task_id}] 的内容已被更新。请通过 view_task "
             "重新查看最新要求后继续执行（任务仍归你，无需重新认领）。"
@@ -568,6 +577,17 @@ STRINGS: dict[str, dict[str, str]] = {
         "dispatcher.task_cancelled_to_self": (
             "[Task Cancelled] Task [{task_id}] you were working on has been cancelled. "
             "Stop working on it now and call view_task to find your next available task."
+        ),
+        # Scheduled dispatch: no claimable pool, the next task arrives as a start notice
+        "dispatcher.task_revoked_from_self_scheduled": (
+            "[Task Revoked] Task [{task_id}] has been reassigned to another member. "
+            "Stop working on it now and do not submit results for it; a new task assigned "
+            "to you arrives with its own start notice, so there is no need to poll the board."
+        ),
+        "dispatcher.task_cancelled_to_self_scheduled": (
+            "[Task Cancelled] Task [{task_id}] you were working on has been cancelled. "
+            "Stop working on it now and do not submit results for it; a new task assigned "
+            "to you arrives with its own start notice, so there is no need to poll the board."
         ),
         "dispatcher.task_content_updated_to_self": (
             "[Task Updated] The content of task [{task_id}] you are working on has changed. "
