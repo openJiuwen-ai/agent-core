@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from openjiuwen.core.common.exception.errors import FrameworkError
 from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode, ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     OpenAIModelClient,
@@ -313,3 +314,103 @@ async def test_affinity_stream_rejects_usage_only_response(monkeypatch):
             chunk
             async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})
         ]
+
+
+class _PostResponse:
+    def __init__(self, *, status_code=200, body=None, text=""):
+        self.status_code = status_code
+        self._body = body
+        self.text = text
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("no json body")
+        return self._body
+
+
+def _mock_post_http_client(response):
+    captured = {}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, headers=None, json=None):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return response
+
+    return lambda **_kwargs: _Client(), captured
+
+
+_COMPLETION_BODY = {
+    "id": "chatcmpl-1",
+    "object": "chat.completion",
+    "created": 1700000000,
+    "model": "qwen",
+    "choices": [{
+        "index": 0,
+        "message": {"role": "assistant", "content": "affinity-answer"},
+        "finish_reason": "stop",
+    }],
+    "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+}
+
+
+@pytest.mark.asyncio
+async def test_affinity_invoke_posts_to_normalized_url(monkeypatch):
+    """Affinity ainvoke must hit /v1 like astream, not api_base verbatim (MR review: Must Fix)."""
+    client = _affinity_client(api_base="http://gw:9000")
+    factory, captured = _mock_post_http_client(_PostResponse(body=_COMPLETION_BODY))
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        factory,
+    )
+    message = await client.invoke(messages=[{"role": "user", "content": "hi"}])
+    assert captured["url"] == "http://gw:9000/v1/chat/completions"
+    assert message.content == "affinity-answer"
+    assert message.usage_metadata is not None
+    assert message.usage_metadata.total_tokens == 3
+
+
+@pytest.mark.asyncio
+async def test_affinity_kv_action_posts_to_normalized_url(monkeypatch):
+    client = _affinity_client(api_base="http://gw:9000")
+    factory, captured = _mock_post_http_client(_PostResponse(body=_COMPLETION_BODY))
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        factory,
+    )
+    assert await client.evict_kvc(session_id="sess", max_attempts=1) is True
+    assert captured["url"] == "http://gw:9000/v1/chat/completions"
+
+
+@pytest.mark.asyncio
+async def test_affinity_kv_action_validates_management_response(monkeypatch):
+    client = _affinity_client(api_base="http://gw:9000")
+    factory, _captured = _mock_post_http_client(_PostResponse(body={"choices": []}))
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        factory,
+    )
+    with pytest.raises(FrameworkError):
+        await client.evict_kvc(session_id="sess", max_attempts=1)
+
+
+@pytest.mark.asyncio
+async def test_affinity_post_reports_error_status(monkeypatch):
+    client = _affinity_client(api_base="http://gw:9000")
+    factory, captured = _mock_post_http_client(
+        _PostResponse(status_code=500, text="gateway boom"),
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        factory,
+    )
+    with pytest.raises(FrameworkError):
+        await client.invoke(messages=[{"role": "user", "content": "hi"}])
+    assert captured["url"] == "http://gw:9000/v1/chat/completions"
