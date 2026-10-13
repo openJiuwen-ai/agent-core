@@ -4,7 +4,8 @@
 
 The session state store, window assembler and reply adapter doubles stand in for
 PA-10 / PA-06 / PA-09 so the orchestration can be verified; they never replace the
-formal implementations.
+formal implementations. Tests using the real_state fixture run the formal PA-10 store and
+PA-06 assembler over an in-memory window backend shared by the Executions of one test.
 """
 
 import asyncio
@@ -16,7 +17,7 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.store import InMemoryKVStore
@@ -47,7 +48,8 @@ def module(name):
 
 
 SEAMS = module("execution.seams")
-UNINTEGRATED_STORE, UNINTEGRATED_ADAPTER = SEAMS.session_state_store, SEAMS.native_reply_adapter
+REAL_STATE_STORE, REAL_ASSEMBLER = SEAMS.session_state_store, SEAMS.window_assembler
+UNINTEGRATED_ADAPTER = SEAMS.native_reply_adapter
 
 
 def kinds(events):
@@ -91,6 +93,7 @@ class LocalModel:
         self.streaming = asyncio.Event()
         self.cancelled = asyncio.Event()
         self.on_call = None
+        self.seen = []
 
     async def invoke(self, messages, **kwargs):
         """Participation judgment only. Native execution always streams."""
@@ -106,6 +109,7 @@ class LocalModel:
 
     async def stream(self, messages, **kwargs):
         self.calls += 1
+        self.seen.append([getattr(message, "content", None) for message in messages])
         if self.on_call is not None:
             self.on_call()
         turn = self.turns.pop(0) if self.turns else "answer"
@@ -274,6 +278,8 @@ class Harness:
         self.tool_hooks = {}
         self.rewrite = {}
         self.assembler = WindowAssembler()
+        # Shared by every context of a test once set; each context gets its own backend otherwise.
+        self.backend = None
 
     def spec(self, confirm=False, rewrite=False, **overrides):
         fields = dict(
@@ -322,9 +328,11 @@ class Harness:
         host = Host(self.log)
         ctx = self.api.PersistentBuildContext(
             execution=replace(execution, **changes),
-            session=create_agent_session(session_id="session-a", card=spec.card, checkpointer=checkpointer),
+            session=create_agent_session(
+                session_id=changes.get("session_id", "session-a"), card=spec.card, checkpointer=checkpointer
+            ),
             ports=self.api.PersistentPorts(
-                commit=host, budget=host, window_backend=InMemoryKVStore(), group_chat=group_chat
+                commit=host, budget=host, window_backend=self.backend or InMemoryKVStore(), group_chat=group_chat
             ),
         )
         return ctx, host
@@ -1048,16 +1056,12 @@ async def test_old_checkpointer_state_is_neither_restored_nor_saved(harness, mon
             },
             StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
         ),
-        ({"seams": "session_state_store"}, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR),
     ],
 )
 @pytest.mark.asyncio
 async def test_execute_rejects_before_any_event(harness, monkeypatch, change, code):
     spec = harness.spec(**change.get("spec", {}))
     ctx, host = harness.context(spec, **change.get("context", {}))
-    unintegrated = {"session_state_store": UNINTEGRATED_STORE}
-    if change.get("seams"):
-        monkeypatch.setattr(SEAMS, change["seams"], unintegrated[change["seams"]])
     with pytest.raises(BaseError) as exc_info:
         await collect(harness.api.execute_persistent_request(spec, ctx, request(**change.get("request", {}))))
     assert_rejected(exc_info, code)
@@ -1307,3 +1311,318 @@ async def test_direct_and_scheduled_requests_skip_participation(harness, payload
     assert "participation.decided" not in kinds(events)
     assert events[0].event_type == "execution.started" and events[0].payload.decision_event_id is None
     assert events[-1].payload.status == "completed"
+
+
+# --- PA-10: the formal session state store ---------------------------------------------------------
+
+STATE = module("execution.session_state")
+RECORD = module("schema.session_record")
+PLACEHOLDER = "结果未取得，实际效果需核实"
+
+
+class KeepPlanSlug(DeepAgentRail):
+    """Changes the cached DeepAgent state only; DeepAgent itself writes it back on a normal end."""
+
+    def init(self, agent):
+        super().init(agent)
+        self.agent = agent
+
+    async def before_model_call(self, ctx) -> None:
+        self.agent.load_state(ctx.session).plan_mode.plan_slug = "kept-slug"
+
+
+class LateNote(DeepAgentRail):
+    """Adds to the live window after the native agent has written it back, as an outer rail may."""
+
+    def init(self, agent):
+        super().init(agent)
+        self.agent = agent
+
+    async def after_invoke(self, ctx) -> None:
+        engine = self.agent.react_agent.context_engine
+        await engine.get_context(session_id=ctx.session.get_session_id()).add_messages(UserMessage(content="late note"))
+
+
+class AddOffloader(DeepAgentRail):
+    """Adds an offloading context processor while rails register, after construction checks."""
+
+    def init(self, agent):
+        super().init(agent)
+        react_agent = getattr(agent, "react_agent", None) or agent
+        react_agent.config.context_processors = [("MessageOffloader", None)]
+
+
+class Backend(InMemoryKVStore):
+    """In-memory window backend that counts writes and can fail on demand."""
+
+    def __init__(self):
+        super().__init__()
+        self.sets = 0
+        self.get_error = None
+        self.set_error = None
+
+    async def get(self, key):
+        if self.get_error is not None:
+            raise self.get_error
+        return await super().get(key)
+
+    async def set(self, key, value):
+        if self.set_error is not None:
+            raise self.set_error
+        self.sets += 1
+        await super().set(key, value)
+
+
+@pytest.fixture
+def real_state(harness, monkeypatch):
+    monkeypatch.setattr(SEAMS, "session_state_store", REAL_STATE_STORE)
+    monkeypatch.setattr(SEAMS, "window_assembler", REAL_ASSEMBLER)
+    monkeypatch.setitem(_RAIL_PROVIDER_REGISTRY, "test.entries.keep_plan_slug", lambda params, context: KeepPlanSlug())
+    monkeypatch.setitem(_RAIL_PROVIDER_REGISTRY, "test.entries.add_offloader", lambda params, context: AddOffloader())
+    monkeypatch.setitem(_RAIL_PROVIDER_REGISTRY, "test.entries.late_note", lambda params, context: LateNote())
+    harness.backend = Backend()
+    return harness
+
+
+def state_key(session_id="session-a"):
+    return STATE.WindowStore.state_key("business-agent", session_id)
+
+
+async def saved_record(harness, session_id="session-a"):
+    raw = await harness.backend.get(state_key(session_id))
+    return None if raw is None else json.loads(raw)
+
+
+def window_of(record):
+    return RECORD.decode_messages(record["messages"])
+
+
+def parts(messages):
+    return [(message.metadata or {}).get(SEAMS.WINDOW_PART_KEY) for message in messages]
+
+
+@pytest.mark.asyncio
+async def test_record_carries_the_window_to_the_next_request_of_the_same_session(real_state):
+    """PA-10-V-01 / V-02."""
+    harness = real_state
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    first = await collect(harness.api.execute_persistent_request(spec, ctx, request(text="first task")))
+    assert first[-1].payload.status == "completed"
+    record = await saved_record(harness)
+    assert harness.backend.sets == 1, "one record, one write"
+    assert record["schema_version"] == 1 and (record["agent_id"], record["session_id"]) == (
+        "business-agent",
+        "session-a",
+    )
+    assert record["interruption"] is None and record["ending"]["outcome"] == "completed"
+
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2")
+    await collect(harness.api.execute_persistent_request(spec, ctx, request(text="second task")))
+    seen = harness.model.seen[-1]
+    assert "first task" in seen and "local answer" in seen, "the second Request sees the first one's window"
+
+    other, _ = harness.context(spec, execution_id="execution-3", session_id="session-b")
+    await collect(harness.api.execute_persistent_request(spec, other, request(text="other session")))
+    assert "first task" not in harness.model.seen[-1], "another Session starts from its own record"
+    assert (await saved_record(harness, "session-b"))["session_id"] == "session-b"
+
+
+@pytest.mark.asyncio
+async def test_end_marker_records_how_the_execution_ended(real_state):
+    """PA-10-V-03: header kept as one line, background dropped, one end marker per Execution."""
+    harness = real_state
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    messages = window_of(await saved_record(harness))
+    assert parts(messages) == ["execution_header", None, None, "execution_end"]
+    assert messages[-1].content.startswith(
+        "【执行结束】request_id：request-1；execution_id：execution-1；结局：已完成；交出候选：out_"
+    )
+
+    ctx, host = harness.context(spec, execution_id="execution-2", request_id="request-2")
+    host.admission = "denied"
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.reason == "budget_denied"
+    messages = window_of(await saved_record(harness))
+    assert parts(messages).count("execution_end") == 2 and parts(messages).count("execution_header") == 2
+    assert "结局：暂停（budget_denied）；交出候选：无" in messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_confirmation_scene_is_saved_without_a_marker_and_resumed(real_state):
+    """PA-10-V-04: the waiting call stays last; the scene comes back for the reply."""
+    harness = real_state
+    spec = harness.spec(confirm=True)
+    await pause_for_confirmation(harness, spec)
+    record = await saved_record(harness)
+    assert record["ending"]["outcome"] == "awaiting_confirmation" and record["interruption"] is not None
+    messages = window_of(record)
+    assert "execution_end" not in parts(messages)
+    assert messages[-1].tool_calls[0].id == "call-1", "the call awaiting its result is left untouched"
+    request_type = next(iter(record["interruption"]["interrupted_tools"]["call-1"]["interrupt_requests"].values()))
+    assert request_type["type"] == "interrupt_request"
+
+    ctx, _ = harness.context(spec, execution_id="execution-2")
+    resumed = await collect(harness.api.resume_persistent_request(spec, ctx, permission()))
+    assert resumed[-1].payload.status == "completed"
+    record = await saved_record(harness)
+    assert record["interruption"] is None and record["ending"]["execution_id"] == "execution-2"
+    messages = window_of(record)
+    assert STATE.unpaired_tool_calls(messages) == [] and parts(messages)[-1] == "execution_end"
+
+
+@pytest.mark.asyncio
+async def test_stop_during_a_model_call_is_saved_and_the_next_task_runs(real_state):
+    """PA-10-V-06, and stop → save → load → next task for a stop during a model call."""
+    harness = real_state
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    harness.model.release.clear()
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    await asyncio.wait_for(harness.model.streaming.wait(), 5)
+    await harness.api.abort_persistent_request(ctx, reason="stop")
+    events = await asyncio.wait_for(consumer, 5)
+    assert events[-1].payload.reason == "stopped"
+    messages = window_of(await saved_record(harness))
+    assert [message.content for message in messages[1:3]] == ["please summarize", "[Request cancelled by user]"]
+    assert "结局：暂停（stopped）" in messages[-1].content
+
+    harness.model.release.set()
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2")
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request(text="next task")))
+    assert events[-1].payload.status == "completed"
+    assert "[Request cancelled by user]" in harness.model.seen[-1]
+
+
+@pytest.mark.asyncio
+async def test_save_takes_the_live_native_window(real_state):
+    """PA-10-V-15: what changed after the native write-back is still saved."""
+    harness = real_state
+    spec = harness.spec(rails=[RailSpec(type="test.entries.late_note")])
+    ctx, _ = harness.context(spec)
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.status == "completed"
+    contents = [message.content for message in window_of(await saved_record(harness))]
+    assert contents[-2:] == ["late note", contents[-1]] and contents[-1].startswith("【执行结束】")
+
+
+@pytest.mark.asyncio
+async def test_stop_before_any_native_context_keeps_the_assembled_window(real_state):
+    """PA-10-V-16: no native context exists, so no empty snapshot replaces the window."""
+    harness = real_state
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    await harness.api.abort_persistent_request(ctx, reason="stop")
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.reason == "stopped" and harness.model.calls == 0
+    assert parts(window_of(await saved_record(harness))) == ["execution_header", "execution_end"]
+
+
+@pytest.mark.asyncio
+async def test_an_invalid_record_is_rejected_before_the_model_and_left_as_it_is(real_state):
+    """PA-10-V-10 at the entry: a validation rejection, not a runtime error."""
+    harness = real_state
+    await harness.backend.set(state_key(), '{"schema_version": 2}')
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    with pytest.raises(BaseError) as exc_info:
+        await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert_rejected(exc_info, StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR)
+    assert harness.model.calls == 0 and kinds(host.events) == ["execution.started"]
+    assert await harness.backend.get(state_key()) == '{"schema_version": 2}'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["get", "set"])
+async def test_backend_faults_are_runtime_errors_at_the_entry(real_state, failing):
+    """PA-10-V-09: a failed read never calls the model; a failed write records no ending."""
+    harness = real_state
+    setattr(harness.backend, f"{failing}_error", ValueError("backend down"))
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    with pytest.raises(BaseError) as exc_info:
+        await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert_rejected(exc_info, StatusCode.DEEPAGENT_RUNTIME_ERROR)
+    assert "execution.final" not in kinds(host.events) and "execution.paused" not in kinds(host.events)
+    assert harness.model.calls == (0 if failing == "get" else 1)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_save_after_a_stop_is_still_a_runtime_error(real_state):
+    """PA-10-V-25: placeholders do not turn a save failure into an ordinary ending."""
+    harness = real_state
+    harness.backend.set_error = ValueError("backend down")
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    harness.model.release.clear()
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    await asyncio.wait_for(harness.model.streaming.wait(), 5)
+    await harness.api.abort_persistent_request(ctx, reason="stop")
+    with pytest.raises(BaseError) as exc_info:
+        await asyncio.wait_for(consumer, 5)
+    assert_rejected(exc_info, StatusCode.DEEPAGENT_RUNTIME_ERROR)
+    assert "execution.paused" not in kinds(host.events)
+
+
+@pytest.mark.asyncio
+async def test_pending_answer_is_saved_verbatim(real_state):
+    """PA-10-V-13: kept under the current contract until PA-08 settles its lifecycle."""
+    harness = real_state
+    harness.model.answer = emoji_text(65500)
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.detail == CAPACITY_DETAIL
+    assert (await saved_record(harness))["ending"]["pending_answer"] == "local " + harness.model.answer
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop", [False, True], ids=["completed", "stopped"])
+async def test_deepagent_state_is_saved_even_when_the_native_end_skips_it(real_state, stop):
+    """PA-10-V-18: a stop skips DeepAgent's own write-back; PA-10 flushes the cached state first."""
+    harness = real_state
+    spec = harness.spec(rails=[RailSpec(type="test.entries.keep_plan_slug")])
+    ctx, _ = harness.context(spec)
+    if stop:
+        harness.model.release.clear()
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    if stop:
+        await asyncio.wait_for(harness.model.streaming.wait(), 5)
+        await harness.api.abort_persistent_request(ctx, reason="stop")
+    await asyncio.wait_for(consumer, 5)
+    record = await saved_record(harness)
+    assert record["deepagent_state"]["plan_mode"]["plan_slug"] == "kept-slug"
+
+    harness.model.release.set()
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2")
+    await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert ctx.session.get_state("deepagent")["plan_mode"]["plan_slug"] == "kept-slug"
+
+
+@pytest.mark.asyncio
+async def test_offloading_added_while_rails_register_is_refused_before_the_model(real_state):
+    """PA-10-V-21: a rail's init can add processors after construction; they are refused at invoke."""
+    harness = real_state
+    spec = harness.spec(rails=[RailSpec(type="test.entries.add_offloader")])
+    ctx, host = harness.context(spec)
+    with pytest.raises(BaseError) as exc_info:
+        await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert_rejected(exc_info, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR)
+    assert "MessageOffloader" in str(exc_info.value)
+    assert harness.model.calls == 0 and await saved_record(harness) is None
+    assert "execution.final" not in kinds(host.events) and "execution.paused" not in kinds(host.events)
+
+
+@pytest.mark.asyncio
+async def test_offloading_found_at_construction_is_refused_before_any_event(real_state, monkeypatch):
+    """PA-10-V-21: the construction check reads the assembled native configuration."""
+    harness = real_state
+    monkeypatch.setattr(module("factory"), "offloading_processors", lambda agent: ["MessageOffloader"])
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    with pytest.raises(BaseError) as exc_info:
+        await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert_rejected(exc_info, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR)
+    assert host.events == [] and harness.model.calls == 0
