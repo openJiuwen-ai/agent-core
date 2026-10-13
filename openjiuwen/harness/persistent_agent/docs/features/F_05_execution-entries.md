@@ -7,7 +7,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-05，F_05 为文档编号 |
-| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12 |
+| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13 |
 | 负责人 | Song Haoran、Chen Ran；认领和后续安排以统一开发计划为准 |
 | 方案依据 | 沿用已确认架构及现行 spec；原阶段记录注明 D1～D7 已确认，本次不新增设计确认或修改架构 |
 | 原实现范围 | 内部 `persistent_agent/schema/request.py`、`execution/{entries,control,emitter,model_rail,seams}.py`、`schema/spec.py`，外层 `__init__.py` 与对应单测；复用共享 Session 接缝 |
@@ -100,7 +100,7 @@ flowchart LR
 
 ### 2.3 公共入口与输入契约
 
-三个入口由[外层包](../../__init__.py)懒加载导出；内部实现位于 [entries.py](../../persistent_agent/execution/entries.py)。以下是调用契约概览，不要求源码签名逐项带类型注解。
+三个入口由[外层包](../../__init__.py)懒加载导出；内部实现位于 [entries.py](../../execution/entries.py)。以下是调用契约概览，不要求源码签名逐项带类型注解。
 
 ```text
 execute_persistent_request(spec, context, inputs: RequestInput) -> AsyncIterator[AgentEvent]
@@ -127,11 +127,11 @@ abort_persistent_request(context, *, reason: "cancel" | "stop") -> None  # async
 
 | 类 / 来源 | 变更、关系与构造 | 关键状态、生命周期与职责 |
 | --- | --- | --- |
-| [execution.control.ExecutionControl](../../persistent_agent/execution/control.py) | 新增 dataclass；ConstructionBinding 默认组合一个新实例 | abort_reason / fatal / emitter / stop_settled 初始 None，outcome_locked=False；本 Execution 的控制信号，不序列化、不代表持久化回执 |
-| [execution.emitter.EventEmitter](../../persistent_agent/execution/emitter.py) | 新增；`__init__(self, execution: ExecutionContext, commit, control: ExecutionControl)` | execution 固定，commit 为注入的 CommitPort；`_seq=0`、新 asyncio.Lock、无界 `outbox: asyncio.Queue[AgentEvent]`；唯一 record 调用者，本次 runner 结束后由消费侧排空 |
-| [execution.model_rail.PersistentModelCallRail](../../persistent_agent/execution/model_rail.py) | 新增，继承 DeepAgentRail；`__init__(self, binding: ConstructionBinding)` | `_binding` 固定，priority=10；通过 binding 取 emitter、预算与控制，模型调用 ID 放回调 ctx.extra，不在 Rail 建共享调用字典 |
-| [execution.entries._Outcome](../../persistent_agent/execution/entries.py) | 新增内部 frozen dataclass | kind 必传，text=""、detail=None、intercepted=()；将原生结果映射为待保存的结局，不是业务持久状态 |
-| [schema.request.RequestInput / ConfirmReply](../../persistent_agent/schema/request.py) | 新增公开 DTO，继承 ProtocolModel | 关键字字段构造，完整字段及源类型约束见第 2.3 节；输入不携带 Session 或端口，不新建宿主 Request |
+| [execution.control.ExecutionControl](../../execution/control.py) | 新增 dataclass；ConstructionBinding 默认组合一个新实例 | abort_reason / fatal / emitter / stop_settled 初始 None，outcome_locked=False；本 Execution 的控制信号，不序列化、不代表持久化回执 |
+| [execution.emitter.EventEmitter](../../execution/emitter.py) | 新增；`__init__(self, execution: ExecutionContext, commit, control: ExecutionControl)` | execution 固定，commit 为注入的 CommitPort；`_seq=0`、新 asyncio.Lock、无界 `outbox: asyncio.Queue[AgentEvent]`；唯一 record 调用者，本次 runner 结束后由消费侧排空 |
+| [execution.model_rail.PersistentModelCallRail](../../execution/model_rail.py) | 新增，继承 DeepAgentRail；`__init__(self, binding: ConstructionBinding)` | `_binding` 固定，priority=10；通过 binding 取 emitter、预算与控制，模型调用 ID 放回调 ctx.extra，不在 Rail 建共享调用字典 |
+| [execution.entries._Outcome](../../execution/entries.py) | 新增内部 frozen dataclass | kind 必传，text=""、detail=None、intercepted=()；将原生结果映射为待保存的结局，不是业务持久状态 |
+| [schema.request.RequestInput / ConfirmReply](../../schema/request.py) | 新增公开 DTO，继承 ProtocolModel | 关键字字段构造，完整字段及源类型约束见第 2.3 节；输入不携带 Session 或端口，不新建宿主 Request |
 
 | 关键类方法 / 同步或异步 | 输入输出、调用条件及副作用 |
 | --- | --- |
@@ -144,7 +144,7 @@ abort_persistent_request(context, *, reason: "cancel" | "stop") -> None  # async
 | `async PersistentModelCallRail.after_model_call(self, ctx) -> None` / `on_model_exception(self, ctx) -> None` | 消费并移除本次调用 ID，回报用量与 model.completed；模型异常回报 unknown，report 异常诊断后继续；after 可产带工具调用的中间文本 |
 | `async PersistentModelCallRail.before_tool_call(self, ctx) -> None` | emitter 存在时阻止控制 / fatal 后尚未开始的工具，不负责写意图；写屏障见 F_15 |
 
-公开独立函数的真实签名在 [entries.py](../../persistent_agent/execution/entries.py)：
+公开独立函数的真实签名在 [entries.py](../../execution/entries.py)：
 
 ```python
 async def execute_persistent_request(spec, context, inputs) -> AsyncIterator[AgentEvent]:
@@ -167,7 +167,7 @@ abort 是需 await 的控制协程，返回 None 只说明本次控制路径已�
 | `_native_resume_input(context: PersistentBuildContext, reply: ConfirmReply, waiting, adapter) -> InteractiveInput`（同步） | 复核 WaitingScene、Request、工具调用及问题键，调用 adapter.to_native 后按 tool_call_id 写入新 InteractiveInput；非法匹配为 INPUT_PARAM_ERROR |
 | `async _drive(control: ExecutionControl, runner) -> AsyncGenerator[AgentEvent, None]` | 创建独立 runner Task 并转发 outbox；自然结束传播 runner 异常，提前关闭取消并等待其清理；本函数不再次 record |
 
-扩展接口及载体定义在 [execution/seams.py](../../persistent_agent/execution/seams.py)。WaitingScene(request_id, reply_target)、LoadedRecord(waiting=None, last_group_message_id=None)、WindowAssembly(native_input, last_group_message_id=None)、ExecutionEnding(outcome, request_id, reply_target, output_refs=(), pending_answer=None, last_group_message_id=None) 均为 frozen dataclass；参数类型和生成构造定义见源码，含义见第 2.4～2.6 节。
+扩展接口及载体定义在 [execution/seams.py](../../execution/seams.py)。WaitingScene(request_id, reply_target)、LoadedRecord(waiting=None, last_group_message_id=None)、WindowAssembly(native_input, last_group_message_id=None)、ExecutionEnding(outcome, request_id, reply_target, output_refs=(), pending_answer=None, last_group_message_id=None) 均为 frozen dataclass；参数类型和生成构造定义见源码，含义见第 2.4～2.6 节。
 
 | 内部 Protocol 的完整方法 | 实现方、调用条件、完成及失败约束 |
 | --- | --- |
@@ -229,7 +229,7 @@ PA-06 加载后的兜底检查若发现等待中的调用或未配对工具调�
 
 ### 2.5 事件出口、预算与工具守卫
 
-[EventEmitter](../../persistent_agent/execution/emitter.py)是本 Execution 唯一 `record` 调用者。在锁内按顺序分配 local_seq、构造 AgentEvent、await CommitPort.record，再排入展示队列。字段身份、event_id 和重传冲突由 S_02 维护；服务端消费生成器时不再次记同一事件。
+[EventEmitter](../../execution/emitter.py)是本 Execution 唯一 `record` 调用者。在锁内按顺序分配 local_seq、构造 AgentEvent、await CommitPort.record，再排入展示队列。字段身份、event_id 和重传冲突由 S_02 维护；服务端消费生成器时不再次记同一事件。
 
 - `tool.intent / execution.paused / execution.final` 为关键事件：记账失败登记首个 fatal 并抛运行异常，不把失败事件交入展示队列。
 - 普通事件失败只记诊断，仍交入展示队列；展示不证明事件已保存，也不能用序号缺口推断业务未发生。
@@ -246,7 +246,7 @@ PA-06 加载后的兜底检查若发现等待中的调用或未配对工具调�
 | 执行结束 | execution.paused / execution.final |
 | 协同生产者 | participation.decided 归 PA-07；tool.intent / tool.completed 归 PA-15；window.switched 生产者归 PA-11，仍待接入 |
 
-[PersistentModelCallRail](../../persistent_agent/execution/model_rail.py)由 PersistentAgentSpec.resolve_parts 装配；没有正式 emitter 时不执行预算与事件逻辑。它使用 before_model_call、after_model_call、on_model_exception、before_tool_call 四个钩子：
+[PersistentModelCallRail](../../execution/model_rail.py)由 PersistentAgentSpec.resolve_parts 装配；没有正式 emitter 时不执行预算与事件逻辑。它使用 before_model_call、after_model_call、on_model_exception、before_tool_call 四个钩子：
 
 1. 模型前先查 fatal / cancel / stop，有则 force-finish、跳过调用；否则生成新的 model_call_id，await admit 并重新校验 BudgetAdmission 和调用归属。denied 标记 budget_denied；异常或 DTO / 归属错配标记 error，均不调用模型。
 2. 模型完成以响应 usage_metadata 构造用量；缺少用量或模型调用失败为 unknown，不伪造零计数。await report、校验 BudgetReport / 归属，再记 model.completed。
@@ -372,15 +372,15 @@ flowchart LR
 
 | 位置 | 责任及接入原因 |
 | --- | --- |
-| [request.py](../../persistent_agent/schema/request.py) | 请求 / 回复值对象校验，入口重新校验后消费 |
-| [entries.py](../../persistent_agent/execution/entries.py) | runner、原生流映射、恢复匹配、候选、保存和结束编排 |
-| [control.py](../../persistent_agent/execution/control.py) | 首次控制、首个 fatal、同步锁定和停止完成信号 |
-| [emitter.py](../../persistent_agent/execution/emitter.py) | 唯一编号 / 记账 / 展示出口及容量控制 |
-| [model_rail.py](../../persistent_agent/execution/model_rail.py) | 原生模型预算 / 用量及模型 / 工具控制守卫 |
-| [seams.py](../../persistent_agent/execution/seams.py) | 后续实现接入点、当前拒绝门禁及共享契约兼容再导出 |
-| [schema/integration.py](../../persistent_agent/schema/integration.py) | 共享值对象、窗口标记和协议的定义 |
-| [spec.py](../../persistent_agent/schema/spec.py)、[外层导出](../../__init__.py) | 装配 Rail / stream lifecycle，公开三个入口和请求类型 |
-| [binding.py](../../persistent_agent/execution/binding.py)、[stream_lifecycle.py](../../persistent_agent/execution/stream_lifecycle.py) | 复用 PA-03 的占用、后台生产者收敛及关闭机制 |
+| [request.py](../../schema/request.py) | 请求 / 回复值对象校验，入口重新校验后消费 |
+| [entries.py](../../execution/entries.py) | runner、原生流映射、恢复匹配、候选、保存和结束编排 |
+| [control.py](../../execution/control.py) | 首次控制、首个 fatal、同步锁定和停止完成信号 |
+| [emitter.py](../../execution/emitter.py) | 唯一编号 / 记账 / 展示出口及容量控制 |
+| [model_rail.py](../../execution/model_rail.py) | 原生模型预算 / 用量及模型 / 工具控制守卫 |
+| [seams.py](../../execution/seams.py) | 后续实现接入点、当前拒绝门禁及共享契约兼容再导出 |
+| [schema/integration.py](../../schema/integration.py) | 共享值对象、窗口标记和协议的定义 |
+| [spec.py](../../schema/spec.py)、[外层导出](../../__init__.py) | 装配 Rail / stream lifecycle，公开三个入口和请求类型 |
+| [binding.py](../../execution/binding.py)、[stream_lifecycle.py](../../execution/stream_lifecycle.py) | 复用 PA-03 的占用、后台生产者收敛及关闭机制 |
 
 | 接入协议 / 归属 | 值对象与约定 | 当前边界 |
 | --- | --- | --- |

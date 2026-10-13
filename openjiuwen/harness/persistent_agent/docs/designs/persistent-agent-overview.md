@@ -210,9 +210,9 @@ PersonalContext 的授权与版本在 Execution 开始时解析一次，执行�
 
 现有 [DeepAgent](../../../deep_agent.py)、[构造工厂](../../../factory.py)、[PersonalContext](../../../personal_context/personal_context.py)、Rails、权限引擎与 Workspace 是可复用基础；可靠执行仍依赖宿主兑现持久化、隔离、记账、输出交接及独立流消费等保证。
 
-**已实现的组件。** 构造与实例隔离、执行上下文及端口契约已按各自范围实现，见[调用与执行规约](../specs/S_01_public-api-and-execution.md)。[执行、恢复与控制入口](../../persistent_agent/execution/entries.py)已有实现，并完成组件验收，见 [F_05](../features/F_05_execution-entries.md)；群消息参与判断也已完成组件验收，见 [F_07](../features/F_07_group-participation.md)。群消息的忽略路径在构造 DeepAgent 和加载窗口之前结束。
+**已实现的组件。** 构造与实例隔离、执行上下文及端口契约已按各自范围实现，见[调用与执行规约](../specs/S_01_public-api-and-execution.md)。[执行、恢复与控制入口](../../execution/entries.py)已有实现，并完成组件验收，见 [F_05](../features/F_05_execution-entries.md)；群消息参与判断也已完成组件验收，见 [F_07](../features/F_07_group-participation.md)。群消息的忽略路径在构造 DeepAgent 和加载窗口之前结束。
 
-**待接入的能力。** PA-06 窗口装配已接入，容量验收仍待完成；会话状态记录（PA-10）和交互适配（PA-09）仍通过[接入点](../../persistent_agent/execution/seams.py)等待对应组件接入；入口组件测试使用替身验证这些协作。依赖接入并完成 M1 集成前，不声明完整原生业务执行闭环或 execution 能力已开放。崩溃续做与非确认暂停后继续（PA-18）尚未接入，当前入口明确拒绝带 recovery_ref 的执行。
+**待接入的能力。** PA-06 窗口装配已接入，容量验收仍待完成；会话状态记录（PA-10）和交互适配（PA-09）仍通过[接入点](../../execution/seams.py)等待对应组件接入；入口组件测试使用替身验证这些协作。依赖接入并完成 M1 集成前，不声明完整原生业务执行闭环或 execution 能力已开放。崩溃续做与非确认暂停后继续（PA-18）尚未接入，当前入口明确拒绝带 recovery_ref 的执行。
 
 **验证边界。** 模型调用中途停止时的上下文保存已有部分验证，工具执行中途停止的不完整工具调用清理仍待验证。组件验收、真实宿主端口与跨仓联调分别确认，具体状态和证据以统一开发计划及对应 feature 为准。
 

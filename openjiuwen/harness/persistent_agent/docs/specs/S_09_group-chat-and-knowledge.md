@@ -6,8 +6,8 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | S_09 / group-chat-and-knowledge |
-| 关联模块 | [ports.py](../../persistent_agent/ports.py)、[schema/context.py](../../persistent_agent/schema/context.py)、[GroupMessageReader 接入](../../persistent_agent/execution/seams.py) |
-| 最近一次修订日期 | 2026-10-12 |
+| 关联模块 | [ports.py](../../ports.py)、[schema/context.py](../../schema/context.py)、[GroupMessageReader 接入](../../execution/seams.py) |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | [F_02](../features/F_02_execution-protocol.md)、[F_04](../features/F_04_contract-convergence.md)、[F_07](../features/F_07_group-participation.md)；实际读取接入见[开发计划](../designs/persistent-agent-development-plan.md) PA-13、PA-23 |
 | 设计依据 | [架构设计：群聊与检索](../designs/persistent-agent-architecture.md#46-群聊记录与历史检索)、[办公空间与知识](../designs/persistent-agent-architecture.md#47-办公空间与知识)、[权限](../designs/persistent-agent-architecture.md#91-身份与权限检查) |
 

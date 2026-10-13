@@ -6,8 +6,8 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | S_07 / construction-and-binding |
-| 关联模块 | [factory.py](../../persistent_agent/factory.py)、[Spec](../../persistent_agent/schema/spec.py)、[构造上下文](../../persistent_agent/schema/build_context.py)、[执行上下文](../../persistent_agent/schema/execution.py)、[绑定接缝](../../persistent_agent/execution/binding.py) |
-| 最近一次修订日期 | 2026-10-12 |
+| 关联模块 | [factory.py](../../factory.py)、[Spec](../../schema/spec.py)、[构造上下文](../../schema/build_context.py)、[执行上下文](../../schema/execution.py)、[绑定接缝](../../execution/binding.py) |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | [F_01](../features/F_01_spec-and-deep-agent-construction.md)、[F_02](../features/F_02_execution-protocol.md)、[F_03](../features/F_03_invocation-binding-and-isolation.md)、[F_04](../features/F_04_contract-convergence.md)、[F_14](../features/F_14_workspace-file-read.md) |
 | 设计依据 | [架构设计：构造与隔离](../designs/persistent-agent-architecture.md#41-构造与实例隔离已实现)、[宿主保证](../designs/persistent-agent-architecture.md#34-agentserver-必须提供的保证) |
 
@@ -28,7 +28,7 @@
 | `ExecutionContext` | 单次执行的不可变归属、配置和授权快照 | 宿主提供的 frozen dataclass | 宿主为每次 Execution 创建新值 |
 | `PersistentBuildContext` | 一次构造的真实 Session、端口及工具 owner | 本调用运行时 | 构造校验、claim 和绑定校验 |
 | `ConstructionBinding` / `InvocationState` | 原对象身份、关键声明值、占用、停止及清理状态 | 本实例私有状态 | 内部绑定接缝 |
-| `InvocationRef` / `ProtocolModel` | 事件及宿主响应共用的归属和 DTO 约束 | [protocol.py](../../persistent_agent/schema/protocol.py) | 构造、重新校验及归属匹配 |
+| `InvocationRef` / `ProtocolModel` | 事件及宿主响应共用的归属和 DTO 约束 | [protocol.py](../../schema/protocol.py) | 构造、重新校验及归属匹配 |
 
 Spec 继承 DeepAgentSpec，JSON 字段平铺、拒绝额外字段。专属字段为 `schema_version=1` 和 `enabled_features`；后者允许 `construction`、`workspace_read`，默认仅含 `construction`，集合不能为空。`workspace_read` 的依赖和行为由 [S_04](S_04_tools-and-workspace.md) 定义；不支持 `execution` 能力声明或未实现的策略字段。
 
@@ -73,7 +73,7 @@ Spec.build 委托本工厂，工厂在副本上调用父类 DeepAgentSpec.build 
 
 ### 4.2 内部 `invoke_bound / stream_bound / abort_bound / close_bound`
 
-定义位于 [binding.py](../../persistent_agent/execution/binding.py)，不是外层业务 API。invoke / stream 校验原对象并固定传入原构造 Session，不直接完成授权、预算记账或业务终态确认；原生结果不能表示任务完成或送达。
+定义位于 [binding.py](../../execution/binding.py)，不是外层业务 API。invoke / stream 校验原对象并固定传入原构造 Session，不直接完成授权、预算记账或业务终态确认；原生结果不能表示任务完成或送达。
 
 ```text
 invoke_bound(agent, inputs, *, context)

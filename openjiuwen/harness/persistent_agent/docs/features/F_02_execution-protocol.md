@@ -5,7 +5,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 | feature；PA-01 执行协议设计与后续契约演进 |
-| 日期 | 原阶段归档日期：2026-09-29；本次文档修订：2026-10-12 |
+| 日期 | 原阶段归档日期：2026-09-29；本次文档修订：2026-10-12；引用修订：2026-10-13 |
 | 范围 | 调用归属、不可变事件、类型化宿主响应、构造期端口检查，以及窗口 / 资料协议的演进和接入边界 |
 | 方案依据 | 原协议阶段按用户确认形成；当前方案沿用 F_04 已落实的契约收敛，运行适配及确认语义分别由 F_05 和现行 spec 定义 |
 | 计划条目 / 状态 | [统一开发计划](../designs/persistent-agent-development-plan.md) PA-01：契约层已完成；当前契约调整归 PA-04，执行适配归 PA-05。完成范围分别判断，不能据此宣称 M1 已通过 |
@@ -125,7 +125,7 @@ D-01～D-05 来自协议阶段的实现与审查，验证依据见第 8 节；D-
 - 标识最多 512 字符；文本最多 65536 字符；原因最多 4096 字符；关联 / 输出等引用最多 128 项。完整规范 JSON 的 UTF-8 字节数最多 262144（256 KiB），包含全部字段及转义开销；非法 UTF-8 被拒绝。`proposal_size()` 给出实际大小。
 - 类型负载拒绝错配和额外字段。参数摘要、哈希及受控引用不应携带秘密，脱敏和引用授权不由 DTO 自动完成。
 
-当前 11 类事件及对应负载如下；详细字段见 [S_02](../specs/S_02_events-and-result-handoff.md#2-数据结构与事实归属) 与 [events.py](../../persistent_agent/schema/events.py)。
+当前 11 类事件及对应负载如下；详细字段见 [S_02](../specs/S_02_events-and-result-handoff.md#2-数据结构与事实归属) 与 [events.py](../../schema/events.py)。
 
 | 事件 | 负载模型 | 关键约束 / 确认等级 |
 | --- | --- | --- |
@@ -213,13 +213,13 @@ output.proposed 始终是候选：message 必须有非空白正文且不能带 f
 
 | 类 / 定义来源 | 变更及可见性 | 职责、关系和关键状态 |
 | --- | --- | --- |
-| [schema.protocol.ProtocolModel](../../persistent_agent/schema/protocol.py) | 本特性新增；内部基类 | 继承 Pydantic `BaseModel`，统一 frozen、extra=forbid 及实例重校验；不持有运行句柄 |
-| [schema.protocol.InvocationRef](../../persistent_agent/schema/protocol.py) | 新增，后由 F_04 收敛；公开 | 继承 ProtocolModel，六个必传身份字段；作为事件、预算与资料结果的共同基类 |
-| [schema.events.AgentEvent](../../persistent_agent/schema/events.py) | 新增，后续特性调整负载；公开 | 继承 InvocationRef；schema_version=1、event_id 初始空串、visibility=private、correlation_refs=()；event_type、local_seq、occurred_at、payload 必传，校验后派生 event_id；字段含义见第 5.2 节 |
-| [schema.protocol.ModelUsage](../../persistent_agent/schema/protocol.py) | 新增；公开 | 继承 ProtocolModel；status 必传，计数与 reason 默认 None，校验 known / unknown 的互斥形状 |
-| [schema.port_results.BudgetAdmission / BudgetReport](../../persistent_agent/schema/port_results.py) | 新增，后由 F_04 收敛；公开 | 继承 InvocationRef；model_call_id、status 必传，reservation_ref / receipt_ref 与 reason 默认 None；验证准入或回报凭据及调用关联 |
-| [schema.context.GroupMessagesResult / MaterialReadResult](../../persistent_agent/schema/context.py) | 新增，后续调整；公开 | 继承 InvocationRef，组合 GroupMessage / MaterialSnapshot；状态必传，消息 / 条目默认空 tuple。完整查询、消息和快照定义同文件，语义见第 5.4 节 |
-| [ports.PersistentPorts](../../persistent_agent/ports.py) | 新增，后由 F_04 / F_14 调整；公开 | frozen、kw_only dataclass；六个依赖成员默认 None，类型及必需性见第 5.3 节；宿主注入后供构造和执行共同消费 |
+| [schema.protocol.ProtocolModel](../../schema/protocol.py) | 本特性新增；内部基类 | 继承 Pydantic `BaseModel`，统一 frozen、extra=forbid 及实例重校验；不持有运行句柄 |
+| [schema.protocol.InvocationRef](../../schema/protocol.py) | 新增，后由 F_04 收敛；公开 | 继承 ProtocolModel，六个必传身份字段；作为事件、预算与资料结果的共同基类 |
+| [schema.events.AgentEvent](../../schema/events.py) | 新增，后续特性调整负载；公开 | 继承 InvocationRef；schema_version=1、event_id 初始空串、visibility=private、correlation_refs=()；event_type、local_seq、occurred_at、payload 必传，校验后派生 event_id；字段含义见第 5.2 节 |
+| [schema.protocol.ModelUsage](../../schema/protocol.py) | 新增；公开 | 继承 ProtocolModel；status 必传，计数与 reason 默认 None，校验 known / unknown 的互斥形状 |
+| [schema.port_results.BudgetAdmission / BudgetReport](../../schema/port_results.py) | 新增，后由 F_04 收敛；公开 | 继承 InvocationRef；model_call_id、status 必传，reservation_ref / receipt_ref 与 reason 默认 None；验证准入或回报凭据及调用关联 |
+| [schema.context.GroupMessagesResult / MaterialReadResult](../../schema/context.py) | 新增，后续调整；公开 | 继承 InvocationRef，组合 GroupMessage / MaterialSnapshot；状态必传，消息 / 条目默认空 tuple。完整查询、消息和快照定义同文件，语义见第 5.4 节 |
+| [ports.PersistentPorts](../../ports.py) | 新增，后由 F_04 / F_14 调整；公开 | frozen、kw_only dataclass；六个依赖成员默认 None，类型及必需性见第 5.3 节；宿主注入后供构造和执行共同消费 |
 
 这些 DTO 不创建模型、连接或持久化记录，也没有异步释放方法；frozen 约束不代替宿主授权。事件负载类、字段上限和 event_type 映射由第 5.2 节及 events.py 维护。
 
@@ -235,7 +235,7 @@ output.proposed 始终是候选：message 必须有非空白正文且不能带 f
 
 本特性没有独立运行函数：上述创建、比较均属于类方法。序号分配、唯一 record 调用、队列及错误编排由后续 [F_05](F_05_execution-entries.md) 的 EventEmitter 实现，不能由 DTO 方法推导执行能力。
 
-宿主接口均为 [ports.py](../../persistent_agent/ports.py) 中的 `Protocol`，实现方是 AgentServer / 宿主适配器，通过 `PersistentPorts(...)` 注入；不要求实现类继承 Protocol，不由本包自动创建生产后端。CommitPort、BudgetPort 未在外层导出，GroupChatPort、KnowledgePort 已导出。下表是带参数类型、默认值及返回类型的完整方法定义，全部为异步方法。
+宿主接口均为 [ports.py](../../ports.py) 中的 `Protocol`，实现方是 AgentServer / 宿主适配器，通过 `PersistentPorts(...)` 注入；不要求实现类继承 Protocol，不由本包自动创建生产后端。CommitPort、BudgetPort 未在外层导出，GroupChatPort、KnowledgePort 已导出。下表是带参数类型、默认值及返回类型的完整方法定义，全部为异步方法。
 
 | 接口方法 | 调用方、完成条件及失败语义 |
 | --- | --- |
@@ -254,15 +254,15 @@ WorkspaceAccessPort 的完整定义及调用约束见 [F_14 第 5.7 节](F_14_wo
 
 | 位置 | 作用与阶段归属 |
 | --- | --- |
-| [schema/protocol.py](../../persistent_agent/schema/protocol.py) | F_02 引入共同原语；F_04 收敛归属 |
-| [schema/execution.py](../../persistent_agent/schema/execution.py) | 宿主不可变执行快照；F_04 删除租约字段，保留 recovery_ref |
-| [schema/events.py](../../persistent_agent/schema/events.py) | F_02 稳定事件 / 负载 / 容量；F_04 收敛当前 11 类事件 |
-| [schema/port_results.py](../../persistent_agent/schema/port_results.py) | 原多端口结果收敛为预算响应 |
-| [schema/context.py](../../persistent_agent/schema/context.py) | 知识 Material 模型保留，旧窗口 DTO 删除，新增群消息模型 |
-| [ports.py](../../persistent_agent/ports.py)、[build_context.py](../../persistent_agent/schema/build_context.py) | 类型化协议、必需 / 可选注入与构造前检查 |
+| [schema/protocol.py](../../schema/protocol.py) | F_02 引入共同原语；F_04 收敛归属 |
+| [schema/execution.py](../../schema/execution.py) | 宿主不可变执行快照；F_04 删除租约字段，保留 recovery_ref |
+| [schema/events.py](../../schema/events.py) | F_02 稳定事件 / 负载 / 容量；F_04 收敛当前 11 类事件 |
+| [schema/port_results.py](../../schema/port_results.py) | 原多端口结果收敛为预算响应 |
+| [schema/context.py](../../schema/context.py) | 知识 Material 模型保留，旧窗口 DTO 删除，新增群消息模型 |
+| [ports.py](../../ports.py)、[build_context.py](../../schema/build_context.py) | 类型化协议、必需 / 可选注入与构造前检查 |
 | [外层 __init__.py](../../__init__.py) | 继续懒导出协议值对象；CommitPort / BudgetPort 协议从内部 ports.py 取用，不据名称推定为外层导出 |
-| [emitter.py](../../persistent_agent/execution/emitter.py)、[model_rail.py](../../persistent_agent/execution/model_rail.py) | F_05 后续提供序号、记账、预算消费；非 F_02 原交付 |
-| [tool_intent_rail.py](../../persistent_agent/execution/tool_intent_rail.py) | F_15 后续提供写意图及工具结果；真实关键持久化由宿主实现 |
+| [emitter.py](../../execution/emitter.py)、[model_rail.py](../../execution/model_rail.py) | F_05 后续提供序号、记账、预算消费；非 F_02 原交付 |
+| [tool_intent_rail.py](../../execution/tool_intent_rail.py) | F_15 后续提供写意图及工具结果；真实关键持久化由宿主实现 |
 
 原实施顺序是先写协议测试确认失败，再实现 protocol / events / port_results、更新 ports 和导出，补边界回归，定向验证及独立审查，最后同步 S_01 / S_02 和计划。来源、窗口及版本化资料契约在 2026-09-29 补齐。events 与 port_results 共用 InvocationRef / ModelUsage，ports 消费二者，事件模型不反向导入 ports，避免循环依赖。
 

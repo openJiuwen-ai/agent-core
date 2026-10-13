@@ -7,7 +7,7 @@
 | 项 | 值 |
 | --- | --- |
 | 类型 | feature；记录 PA-01 的构造契约基础与 PA-02 的原生 DeepAgent 构造设计 |
-| 最近修订日期 | 2026-10-12 |
+| 最近修订日期 | 2026-10-12；引用修订：2026-10-13 |
 | 核心方案 | 原生 DeepAgent 运行主体 + 单份继承型扁平 Spec |
 | 负责人 | yan_zj（PA-01 / PA-02） |
 | 状态与适用范围 | PA-01 契约层、PA-02 构造已按各自边界完成；后续契约收敛、实例隔离及执行组件分别由 PA-04、PA-03、PA-05 维护 |
@@ -72,7 +72,7 @@ Persistent 是组合到 DeepAgent 的配置、Rails、工具及交接能力，�
 
 #### 2.3.1 可序列化 Spec
 
-实现见 [schema/spec.py](../../persistent_agent/schema/spec.py)。
+实现见 [schema/spec.py](../../schema/spec.py)。
 
 | 内容 | 当前约束 |
 | --- | --- |
@@ -90,7 +90,7 @@ workspace_read 的装配由 [F_14](F_14_workspace-file-read.md)定义；开启�
 
 #### 2.3.2 调用级构造上下文
 
-实现见 [build_context.py](../../persistent_agent/schema/build_context.py)、[execution.py](../../persistent_agent/schema/execution.py)。PersistentBuildContext 扩展通用 BuildContext，是不参与发布 JSON 的运行载体，不是 Agent 类。
+实现见 [build_context.py](../../schema/build_context.py)、[execution.py](../../schema/execution.py)。PersistentBuildContext 扩展通用 BuildContext，是不参与发布 JSON 的运行载体，不是 Agent 类。
 
 | 部分 | 当前事实与约束 |
 | --- | --- |
@@ -108,7 +108,7 @@ recovery_ref 不能等于本次 execution_id，其“同一 Session / Request �
 
 #### 2.3.3 宿主依赖与静态检查
 
-实现见 [ports.py](../../persistent_agent/ports.py)。构造只检查依赖存在及指定方法为异步函数；不调用这些方法，不证明签名的完整语义、授权或存储可靠性。
+实现见 [ports.py](../../ports.py)。构造只检查依赖存在及指定方法为异步函数；不调用这些方法，不证明签名的完整语义、授权或存储可靠性。
 
 | 依赖 | 构造要求 | 当前接口 / 主责规约 |
 | --- | --- | --- |
@@ -127,9 +127,9 @@ recovery_ref 不能等于本次 execution_id，其“同一 Session / Request �
 
 | 类 / 定义来源 | 变更与可见性 | 职责、关系及生命周期 |
 | --- | --- | --- |
-| [schema.spec.PersistentAgentSpec](../../persistent_agent/schema/spec.py) | 本特性新增；公开 | 继承 `DeepAgentSpec`，经 Pydantic 关键字字段构造；父类字段、专属字段及默认值见第 2.3.1 节。保存发布配置，不持有调用资源；构造工厂使用 JSON 往返副本 |
-| [schema.build_context.PersistentBuildContext](../../persistent_agent/schema/build_context.py) | 本特性新增；公开 | `@dataclass(kw_only=True)`，继承 `BuildContext`；构造时必传 `execution: ExecutionContext`、`session: Session`、`ports: PersistentPorts`，父类字段及完整生成构造定义见[BuildContext](../../../schema/build_context.py)。`binding` 不接受构造传入，由 default_factory 创建；一次 claim 对应一次装配 |
-| [schema.build_context.ConstructionBinding](../../persistent_agent/schema/build_context.py) | 本特性新增、后续扩展；内部 | 普通 dataclass，组合锁、owner、原调用引用、原生 Agent 弱引用及 `ExecutionControl`；派生 context 共用同一 binding，不是宿主可替换的执行权接口 |
+| [schema.spec.PersistentAgentSpec](../../schema/spec.py) | 本特性新增；公开 | 继承 `DeepAgentSpec`，经 Pydantic 关键字字段构造；父类字段、专属字段及默认值见第 2.3.1 节。保存发布配置，不持有调用资源；构造工厂使用 JSON 往返副本 |
+| [schema.build_context.PersistentBuildContext](../../schema/build_context.py) | 本特性新增；公开 | `@dataclass(kw_only=True)`，继承 `BuildContext`；构造时必传 `execution: ExecutionContext`、`session: Session`、`ports: PersistentPorts`，父类字段及完整生成构造定义见[BuildContext](../../../schema/build_context.py)。`binding` 不接受构造传入，由 default_factory 创建；一次 claim 对应一次装配 |
+| [schema.build_context.ConstructionBinding](../../schema/build_context.py) | 本特性新增、后续扩展；内部 | 普通 dataclass，组合锁、owner、原调用引用、原生 Agent 弱引用及 `ExecutionControl`；派生 context 共用同一 binding，不是宿主可替换的执行权接口 |
 
 | 类 / 关键属性 | 类型与初值 | 更新主体与约束 |
 | --- | --- | --- |
@@ -149,7 +149,7 @@ recovery_ref 不能等于本次 execution_id，其“同一 Session / Request �
 | `PersistentBuildContext.claim(self, spec: PersistentAgentSpec) -> None` | 锁内 validate 后固定本次调用；重复 claim 拒绝 | 改变 attempted 与绑定引用；成功 claim 后装配失败也已消耗上下文 |
 | `PersistentBuildContext.validate_binding(self, agent: DeepAgent) -> None` | 核对原生对象、Execution 值、Session / ports 对象及 owner | CONTEXT_PARAM_ERROR；只读复核，运行快照另由 F_03 校验 |
 
-关键独立函数是 [factory.create_persistent_agent](../../persistent_agent/factory.py)：
+关键独立函数是 [factory.create_persistent_agent](../../factory.py)：
 
 ```python
 def create_persistent_agent(spec: PersistentAgentSpec, *, context: PersistentBuildContext) -> DeepAgent:
@@ -230,7 +230,7 @@ execute / resume 使用 spec 与 context。RequestInput 是宿主已保存 Reque
 
 一期正式执行另要求 enable_task_loop=False、关闭全部子代理开关和自动通用子代理，新的空 runtime Session 注入 NoopCheckpointer；这些是执行校验，不能声称工厂自身已验证全部条件。默认父类配置不被悄悄重写。
 
-[seams.py](../../persistent_agent/execution/seams.py) 中 SessionStateStore（PA-10）、GroupMessageReader（PA-23）、NativeReplyAdapter（PA-09）仍有未接入门禁；WindowAssembler（PA-06）已接入，容量验收仍待完成。普通任务路径不能降级为空状态 / 窗口；带 recovery_ref 的执行明确拒绝。群消息可在正式 Agent 构造前完成参与判断及 ignored / failed 等独立分支，不表示任务执行链路开放。
+[seams.py](../../execution/seams.py) 中 SessionStateStore（PA-10）、GroupMessageReader（PA-23）、NativeReplyAdapter（PA-09）仍有未接入门禁；WindowAssembler（PA-06）已接入，容量验收仍待完成。普通任务路径不能降级为空状态 / 窗口；带 recovery_ref 的执行明确拒绝。群消息可在正式 Agent 构造前完成参与判断及 ignored / failed 等独立分支，不表示任务执行链路开放。
 
 | 能力 | 当前保证及依赖 | 不能据此推导的结论 / 失败边界 |
 | --- | --- | --- |
@@ -297,11 +297,11 @@ flowchart LR
 | 位置 | 责任 / 影响 |
 | --- | --- |
 | [外层 __init__.py](../../__init__.py) | 懒加载公共构造类型、工厂、协议值与业务入口；Harness 顶层导出集合未因此扩展 |
-| [factory.py](../../persistent_agent/factory.py) | 静态检查、JSON 配置副本、共享装配调用、返回前复核与失败回收 |
-| [spec.py](../../persistent_agent/schema/spec.py) | 扁平配置、完整指纹、工厂委托与后续能力接缝注入 |
-| [build_context.py](../../persistent_agent/schema/build_context.py)、[execution.py](../../persistent_agent/schema/execution.py) | 一次绑定、独立 owner、身份 / 配置 / 权限快照；ExecutionContext 是身份值，不是执行器 |
-| [ports.py](../../persistent_agent/ports.py)、[schema 包](../../persistent_agent/schema/) | 宿主异步契约及 DTO；无默认成功实现、无存储后端 |
-| [execution/binding.py](../../persistent_agent/execution/binding.py)、[execution/seams.py](../../persistent_agent/execution/seams.py) | 后续运行隔离及未接入门禁，正式执行独立验收 |
+| [factory.py](../../factory.py) | 静态检查、JSON 配置副本、共享装配调用、返回前复核与失败回收 |
+| [spec.py](../../schema/spec.py) | 扁平配置、完整指纹、工厂委托与后续能力接缝注入 |
+| [build_context.py](../../schema/build_context.py)、[execution.py](../../schema/execution.py) | 一次绑定、独立 owner、身份 / 配置 / 权限快照；ExecutionContext 是身份值，不是执行器 |
+| [ports.py](../../ports.py)、[schema 包](../../schema/) | 宿主异步契约及 DTO；无默认成功实现、无存储后端 |
+| [execution/binding.py](../../execution/binding.py)、[execution/seams.py](../../execution/seams.py) | 后续运行隔离及未接入门禁，正式执行独立验收 |
 | [通用 BuildContext](../../../schema/build_context.py)、[DeepAgentSpec](../../../schema/deep_agent_spec.py)、[Harness factory](../../../factory.py) | 可选 owner 透传与共享 parts / Config 装配；不补构造后的私有字段 |
 | [AbilityManager](../../../../core/single_agent/ability_manager.py) | 有状态资格化、stateless 共享及 owner 资源清理 |
 | 本文与 S_07、相关 feature / 总计划 | 分别维护技术证据、构造契约、运行行为与交付状态 |

@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 状态 | feature；agent-core 组件实现与验证完成，JiuwenSwarm 宿主适配 / 联调待完成 |
-| 日期 | 2026-10-12 |
+| 日期 | 2026-10-12；引用修订：2026-10-13 |
 | 负责人 | Yan Zhijun |
 | 范围 | `persistent_agent/{ports.py, schema/{build_context.py,spec.py}, workspace/, tools/}`、Harness 文件写工具的条件写入衔接、Persistent Agent 定向测试；JiuwenSwarm 的工作空间授权、Session 私有目录、SysOperation 后端及 AgentServer 联调 |
 | 前置 / 关联 | PA-14 文件读取、PA-15 写前意图记账；PA-18 处理写入结果未知后的查证；PA-22 处理文件来源失效 |

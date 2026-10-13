@@ -6,8 +6,8 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | S_01 / public-api-and-execution |
-| 关联模块 | [entries.py](../../persistent_agent/execution/entries.py)、[participation.py](../../persistent_agent/execution/participation.py)、[model_rail.py](../../persistent_agent/execution/model_rail.py)、[RequestInput](../../persistent_agent/schema/request.py)、[预算结果](../../persistent_agent/schema/port_results.py) |
-| 最近一次修订日期 | 2026-10-12 |
+| 关联模块 | [entries.py](../../execution/entries.py)、[participation.py](../../execution/participation.py)、[model_rail.py](../../execution/model_rail.py)、[RequestInput](../../schema/request.py)、[预算结果](../../schema/port_results.py) |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_07](../features/F_07_group-participation.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md) |
 | 设计依据 | [架构设计：执行入口](../designs/persistent-agent-architecture.md#42-执行入口与原生推理循环)、[主流程](../designs/persistent-agent-architecture.md#51-主流程)、[故障与结局](../designs/persistent-agent-architecture.md#81-故障影响错误分类与结局) |
 
@@ -30,7 +30,7 @@
 
 ## 2. 数据结构与事实归属
 
-RequestInput 是宿主已保存的任务输入值，定义在 [request.py](../../persistent_agent/schema/request.py)。
+RequestInput 是宿主已保存的任务输入值，定义在 [request.py](../../schema/request.py)。
 
 | 字段 / 条件 | 语义与校验 |
 | --- | --- |
@@ -90,7 +90,7 @@ GroupChatPort 的授权、消息与完整性规则由 [S_09](S_09_group-chat-and
 
 ### 4.4 模型预算与用量
 
-预算方法定义于 [ports.py](../../persistent_agent/ports.py)，账户与结算由宿主维护。
+预算方法定义于 [ports.py](../../ports.py)，账户与结算由宿主维护。
 
 | 方法 | 输入 / 结果 | 失败语义 |
 | --- | --- | --- |
@@ -113,7 +113,7 @@ GroupChatPort 的授权、消息与完整性规则由 [S_09](S_09_group-chat-and
 
 ## 6. 当前限制与兼容性
 
-WindowAssembler 已接入，容量验收仍待完成；SessionStateStore、GroupMessageReader 和 NativeReplyAdapter 的接入门禁仍见 [seams.py](../../persistent_agent/execution/seams.py)；组件测试用模拟接入不证明真实存储、跨仓授权、投递或续做已开放。enabled_features 不增加 execution，完整集成需按[唯一开发计划](../designs/persistent-agent-development-plan.md)验证。
+WindowAssembler 已接入，容量验收仍待完成；SessionStateStore、GroupMessageReader 和 NativeReplyAdapter 的接入门禁仍见 [seams.py](../../execution/seams.py)；组件测试用模拟接入不证明真实存储、跨仓授权、投递或续做已开放。enabled_features 不增加 execution，完整集成需按[唯一开发计划](../designs/persistent-agent-development-plan.md)验证。
 
 本规约合并原 S_01 的执行规则与 S_02 的原生流映射、预算及结局编排。构造与绑定转由 S_07 维护，控制、确认回复和续做转由 S_05 维护；废止旧的执行权围栏和“所有暂停均占住队列直到终态”描述，不提供超时自动接管或精确程序恢复保证。
 

@@ -6,8 +6,8 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | S_02 / events-and-result-handoff |
-| 关联模块 | [events.py](../../persistent_agent/schema/events.py)、[emitter.py](../../persistent_agent/execution/emitter.py)、[CommitPort](../../persistent_agent/ports.py) |
-| 最近一次修订日期 | 2026-10-12 |
+| 关联模块 | [events.py](../../schema/events.py)、[emitter.py](../../execution/emitter.py)、[CommitPort](../../ports.py) |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | [F_02](../features/F_02_execution-protocol.md)、[F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md) |
 | 设计依据 | [架构设计：事件与确认](../designs/persistent-agent-architecture.md#62-事件传递确认与流量边界)、[结果交接](../designs/persistent-agent-architecture.md#63-完成与结果交接)、[日志读取](../designs/persistent-agent-architecture.md#833-执行日志的读取整理与能力边界) |
 
