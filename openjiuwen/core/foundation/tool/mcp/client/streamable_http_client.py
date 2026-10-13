@@ -76,6 +76,9 @@ class StreamableHttpClient(McpClient):
         from mcp.client import streamable_http as streamable_http_module
 
         try:
+            from openjiuwen.harness.security.outbound import check_mcp_server_url
+
+            check_mcp_server_url(self._server_path)
             from openjiuwen.core.foundation.tool.auth.auth_callback import AuthType
             from openjiuwen.core.runner import Runner
             framework = Runner.callback_framework

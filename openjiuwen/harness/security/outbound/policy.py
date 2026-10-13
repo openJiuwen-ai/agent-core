@@ -23,10 +23,20 @@ from __future__ import annotations
 import ipaddress
 import logging
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlparse
 
+from openjiuwen.harness.security.outbound.limits import (
+    DEFAULT_MAX_REQUEST_MB,
+    DEFAULT_TIMEOUT_SECONDS,
+    MAX_REQUEST_MB,
+    MAX_TIMEOUT_SECONDS,
+    MAX_URL_CHARS,
+    parse_positive_int,
+    request_limit_bytes,
+)
 from openjiuwen.harness.security.permission_engine.netguard.net_guard import (
     NetGuardChecker,
     url_hostname,
@@ -76,9 +86,22 @@ class OutboundBlockedError(PermissionError):
 
 
 @dataclass(frozen=True)
+class OutboundRequestPolicy:
+    """Immutable effective limits published together with net_guard rules."""
+
+    max_request_mb: int = DEFAULT_MAX_REQUEST_MB
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
+
+    @property
+    def max_request_bytes(self) -> int:
+        return request_limit_bytes(self.max_request_mb)
+
+
+@dataclass(frozen=True)
 class HostExitState:
     mode: str
     checker: NetGuardChecker | None = None
+    policy: OutboundRequestPolicy | None = None
     error: str | None = None
 
 
@@ -121,8 +144,22 @@ def publish_host_exit_policy(permissions: Mapping[str, Any] | None) -> HostExitS
         else:
             checker = NetGuardChecker(section)
             mode = STATE_ACTIVE if checker.enforce_host_exit else STATE_NOT_ENFORCED
-            state = HostExitState(mode=mode, checker=checker)
-    except Exception as exc:  # noqa: BLE001 - fail-closed on any build error
+            policy = OutboundRequestPolicy(
+                max_request_mb=parse_positive_int(
+                    section.get("max_request_mb"),
+                    name="net_guard.max_request_mb",
+                    default=DEFAULT_MAX_REQUEST_MB,
+                    maximum=MAX_REQUEST_MB,
+                ),
+                timeout_seconds=parse_positive_int(
+                    section.get("timeout_seconds"),
+                    name="net_guard.timeout_seconds",
+                    default=DEFAULT_TIMEOUT_SECONDS,
+                    maximum=MAX_TIMEOUT_SECONDS,
+                ),
+            )
+            state = HostExitState(mode=mode, checker=checker, policy=policy)
+    except Exception as exc:
         logger.exception("[HostExit] host_exit.policy_build_failed")
         state = HostExitState(mode=STATE_ERROR, error=str(exc) or type(exc).__name__)
     _set_state(state)
@@ -141,9 +178,14 @@ def check_outbound_url(url: str, *, is_redirect: bool = False) -> None:
         raise OutboundBlockedError(url, f"host exit policy unavailable: {state.error}", "host_exit:error")
     if state.mode != STATE_ACTIVE or state.checker is None:
         return
-    scheme = (urlparse(url).scheme or "").lower()
+    if len(url) > MAX_URL_CHARS:
+        raise OutboundBlockedError(url, "URL exceeds internal length limit", "host_exit:url_size")
+    parsed = urlparse(url)
+    scheme = (parsed.scheme or "").lower()
     if scheme not in _ALLOWED_SCHEMES:
         raise OutboundBlockedError(url, f"scheme not allowed: {scheme or '<none>'}", "host_exit:scheme")
+    if parsed.username is not None or parsed.password is not None:
+        raise OutboundBlockedError(url, "URL userinfo is not allowed", "host_exit:userinfo")
     host = url_hostname(url)
     if not host:
         raise OutboundBlockedError(url, "missing host", "host_exit:host")
@@ -194,19 +236,29 @@ def describe_host_exit() -> dict[str, Any]:
         "mode": state.mode,
         "enforced": state.mode in (STATE_ACTIVE, STATE_ERROR),
         "error": state.error,
+        "limits_active": state.mode == STATE_ACTIVE and state.policy is not None,
+        "limits": (
+            {
+                "max_request_mb": state.policy.max_request_mb,
+                "timeout_seconds": state.policy.timeout_seconds,
+            }
+            if state.policy is not None
+            else None
+        ),
         "exemptions": [dict(e) for e in HOST_EXIT_EXEMPTIONS],
     }
 
 
 __all__ = [
     "HOST_EXIT_EXEMPTIONS",
-    "HostExitState",
-    "OutboundBlockedError",
     "STATE_ACTIVE",
     "STATE_DISABLED",
     "STATE_ERROR",
     "STATE_NOT_ENFORCED",
     "STATE_UNSET",
+    "HostExitState",
+    "OutboundBlockedError",
+    "OutboundRequestPolicy",
     "check_mcp_server_url",
     "check_outbound_url",
     "describe_host_exit",

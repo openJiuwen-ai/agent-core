@@ -4,12 +4,19 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
 import requests
 
-from openjiuwen.harness.security.outbound.policy import check_outbound_url
+from openjiuwen.harness.security.outbound.limits import cap_timeout, enforce_request_size
+from openjiuwen.harness.security.outbound.policy import (
+    STATE_ACTIVE,
+    OutboundBlockedError,
+    check_outbound_url,
+    get_host_exit_state,
+)
 
 DEFAULT_MAX_REDIRECTS = 10
 _BODY_KWARGS = ("data", "json", "files")
@@ -26,14 +33,33 @@ def _next_method(status: int, method: str) -> str:
     return method
 
 
+def _origin(url: str) -> tuple[str, str | None, int | None]:
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    default_port = 443 if scheme == "https" else 80 if scheme == "http" else None
+    return scheme, parsed.hostname, parsed.port or default_port
+
+
 def strip_auth_on_host_change(kwargs: dict[str, Any], old_url: str, new_url: str) -> None:
-    """Drop ``Authorization`` and ``auth`` before following a redirect to another host."""
-    if urlparse(old_url).hostname == urlparse(new_url).hostname:
+    """Drop caller-provided credentials whenever the complete origin changes."""
+    if _origin(old_url) == _origin(new_url):
         return
     headers = kwargs.get("headers")
     if isinstance(headers, dict):
-        kwargs["headers"] = {k: v for k, v in headers.items() if str(k).lower() != "authorization"}
+        sensitive = {"authorization", "cookie", "proxy-authorization"}
+        kwargs["headers"] = {
+            k: v for k, v in headers.items() if str(k).lower() not in sensitive
+        }
     kwargs.pop("auth", None)
+
+
+def check_redirect_transition(old_url: str, new_url: str) -> None:
+    if urlparse(old_url).scheme.lower() == "https" and urlparse(new_url).scheme.lower() == "http":
+        raise OutboundBlockedError(
+            new_url,
+            "HTTPS to HTTP redirect is not allowed",
+            "host_exit:downgrade",
+        )
 
 
 def request(
@@ -56,14 +82,29 @@ def request(
     sess = session or requests.Session()
     current_method = method.upper()
     current_url = url
+    state = get_host_exit_state()
+    policy = state.policy if state.mode == STATE_ACTIVE else None
+    deadline = time.monotonic() + policy.timeout_seconds if policy is not None else None
     try:
         for _hop in range(max_redirects + 1):
             check_outbound_url(current_url, is_redirect=_hop > 0)
+            if policy is not None and deadline is not None:
+                enforce_request_size(kwargs, policy.max_request_bytes)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise requests.exceptions.Timeout("outbound total timeout exceeded")
+                kwargs["timeout"] = cap_timeout(kwargs.get("timeout"), remaining)
             resp = sess.request(current_method, current_url, allow_redirects=False, **kwargs)
             if not resp.is_redirect:
                 return resp
             location = resp.headers.get("Location") or ""
             next_url = urljoin(current_url, location)
+            if policy is not None:
+                try:
+                    check_redirect_transition(current_url, next_url)
+                except OutboundBlockedError:
+                    resp.close()
+                    raise
             new_method = _next_method(resp.status_code, current_method)
             if new_method != current_method:
                 for key in _BODY_KWARGS:
@@ -90,6 +131,7 @@ __all__ = [
     "DEFAULT_MAX_REDIRECTS",
     "RequestException",
     "Response",
+    "check_redirect_transition",
     "get",
     "post",
     "request",

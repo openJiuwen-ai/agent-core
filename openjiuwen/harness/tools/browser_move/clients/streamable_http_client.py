@@ -67,6 +67,9 @@ class BrowserMoveStreamableHttpClient(StreamableHttpClient):
         attempts = max(1, int(retry_times))
         for attempt in range(1, attempts + 1):
             try:
+                from openjiuwen.harness.security.outbound import check_mcp_server_url
+
+                check_mcp_server_url(self._server_path)
                 await self.disconnect(timeout=timeout)
                 self._client = streamable_http_client(
                     self._server_path,

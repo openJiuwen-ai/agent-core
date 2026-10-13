@@ -4,14 +4,21 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 from urllib.parse import urljoin
 
 import aiohttp
 
-from openjiuwen.harness.security.outbound.policy import check_outbound_url
+from openjiuwen.harness.security.outbound.limits import cap_timeout, enforce_request_size
+from openjiuwen.harness.security.outbound.policy import (
+    STATE_ACTIVE,
+    check_outbound_url,
+    get_host_exit_state,
+)
 from openjiuwen.harness.security.outbound.sync_client import (
     DEFAULT_MAX_REDIRECTS,
+    check_redirect_transition,
     strip_auth_on_host_change,
 )
 
@@ -39,8 +46,21 @@ async def request(
     kwargs.pop("allow_redirects", None)
     current_method = method.upper()
     current_url = url
+    state = get_host_exit_state()
+    policy = state.policy if state.mode == STATE_ACTIVE else None
+    deadline = time.monotonic() + policy.timeout_seconds if policy is not None else None
     for _hop in range(max_redirects + 1):
         check_outbound_url(current_url, is_redirect=_hop > 0)
+        if policy is not None and deadline is not None:
+            enforce_request_size(kwargs, policy.max_request_bytes)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("outbound total timeout exceeded")
+            kwargs["timeout"] = cap_timeout(
+                kwargs.get("timeout"),
+                remaining,
+                aiohttp_module=aiohttp,
+            )
         resp = await session.request(current_method, current_url, allow_redirects=False, **kwargs)
         status = resp.status
         location = resp.headers.get("Location")
@@ -48,6 +68,8 @@ async def request(
             return resp
         resp.release()
         next_url = urljoin(current_url, location)
+        if policy is not None:
+            check_redirect_transition(current_url, next_url)
         new_method = _next_method(status, current_method)
         if new_method != current_method:
             for key in _BODY_KWARGS:

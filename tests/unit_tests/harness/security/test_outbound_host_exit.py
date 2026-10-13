@@ -8,6 +8,7 @@ import pytest
 
 from openjiuwen.harness.security.outbound import policy as host_exit
 from openjiuwen.harness.security.outbound import sync_client
+from openjiuwen.harness.security.outbound.limits import OutboundLimitError
 from openjiuwen.harness.security.outbound.policy import OutboundBlockedError
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel
 from openjiuwen.harness.security.permission_engine.netguard.net_guard import NetGuardChecker
@@ -97,6 +98,12 @@ def test_active_blocks_denied_and_bad_scheme():
     with pytest.raises(OutboundBlockedError):
         host_exit.check_outbound_url("file:///etc/passwd")
     host_exit.check_outbound_url("https://ok.example/")
+    with pytest.raises(OutboundBlockedError) as oversized_url:
+        host_exit.check_outbound_url("https://ok.example/?" + "x" * 8192)
+    assert oversized_url.value.matched_rule == "host_exit:url_size"
+    with pytest.raises(OutboundBlockedError) as userinfo:
+        host_exit.check_outbound_url("https://user:secret@ok.example/")
+    assert userinfo.value.matched_rule == "host_exit:userinfo"
 
 
 def test_not_enforced_passes_through():
@@ -106,6 +113,34 @@ def test_not_enforced_passes_through():
     assert host_exit.get_host_exit_state().mode == host_exit.STATE_NOT_ENFORCED
     host_exit.check_outbound_url("https://anything.example")
     assert host_exit.describe_host_exit()["enforced"] is False
+
+
+def test_active_policy_publishes_default_and_configured_limits():
+    state = host_exit.publish_host_exit_policy(
+        {"net_guard": _section(max_request_mb=2, timeout_seconds=7)}
+    )
+    assert state.policy is not None
+    assert state.policy.max_request_bytes == 2 * 1024 * 1024
+    assert state.policy.timeout_seconds == 7
+    description = host_exit.describe_host_exit()
+    assert description["limits_active"] is True
+    assert description["limits"] == {"max_request_mb": 2, "timeout_seconds": 7}
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("max_request_mb", 0),
+        ("max_request_mb", True),
+        ("timeout_seconds", -1),
+        ("timeout_seconds", "60"),
+    ],
+)
+def test_invalid_limit_config_is_fail_closed(field, value):
+    state = host_exit.publish_host_exit_policy({"net_guard": _section(**{field: value})})
+    assert state.mode == host_exit.STATE_ERROR
+    with pytest.raises(OutboundBlockedError):
+        host_exit.check_outbound_url("https://ok.example")
 
 
 def test_build_error_is_fail_closed(monkeypatch):
@@ -205,6 +240,82 @@ def test_sync_redirect_rewrites_method_and_strips_auth():
     assert kwargs["headers"] == {"X-Other": "1"}
 
 
+def test_sync_cross_origin_redirect_strips_all_caller_credentials():
+    host_exit.publish_host_exit_policy({"net_guard": _section()})
+    final = _Resp(200)
+    session = _Session([_Resp(302, "https://a.example:8443/next"), final])
+    sync_client.get(
+        "https://a.example/start",
+        session=session,
+        auth=("user", "secret"),
+        headers={
+            "Authorization": "Bearer x",
+            "Cookie": "sid=secret",
+            "Proxy-Authorization": "Basic x",
+            "X-Other": "1",
+        },
+    )
+    kwargs = session.calls[1][2]
+    assert "auth" not in kwargs
+    assert kwargs["headers"] == {"X-Other": "1"}
+
+
+def test_sync_https_to_http_redirect_is_blocked():
+    host_exit.publish_host_exit_policy({"net_guard": _section()})
+    first = _Resp(302, "http://a.example/insecure")
+    session = _Session([first])
+    with pytest.raises(OutboundBlockedError) as exc:
+        sync_client.get("https://a.example/start", session=session)
+    assert exc.value.matched_rule == "host_exit:downgrade"
+    assert first.closed
+    assert len(session.calls) == 1
+
+
+def test_sync_rejects_known_oversized_body_before_connecting():
+    host_exit.publish_host_exit_policy({"net_guard": _section(max_request_mb=1)})
+    session = _Session([_Resp(200)])
+    with pytest.raises(OutboundLimitError) as exc:
+        sync_client.post("https://a.example/upload", session=session, data=b"x" * (1024 * 1024 + 1))
+    assert exc.value.code == "OUTBOUND_REQUEST_TOO_LARGE"
+    assert session.calls == []
+
+
+def test_sync_multipart_counts_form_and_file_together():
+    host_exit.publish_host_exit_policy({"net_guard": _section(max_request_mb=1)})
+    session = _Session([_Resp(200)])
+    with pytest.raises(OutboundLimitError) as exc:
+        sync_client.post(
+            "https://a.example/upload",
+            session=session,
+            data={"description": "small"},
+            files={"file": ("data.bin", b"x" * (1024 * 1024))},
+        )
+    assert exc.value.code == "OUTBOUND_REQUEST_TOO_LARGE"
+    assert session.calls == []
+
+
+def test_sync_rejects_oversized_headers_before_connecting():
+    host_exit.publish_host_exit_policy({"net_guard": _section()})
+    session = _Session([_Resp(200)])
+    with pytest.raises(OutboundLimitError) as exc:
+        sync_client.get(
+            "https://a.example/",
+            session=session,
+            headers={"X-Large": "x" * (64 * 1024)},
+        )
+    assert exc.value.code == "OUTBOUND_HEADERS_TOO_LARGE"
+    assert session.calls == []
+
+
+def test_sync_policy_caps_timeout_without_lengthening_caller_timeout():
+    host_exit.publish_host_exit_policy({"net_guard": _section(timeout_seconds=7)})
+    session = _Session([_Resp(200), _Resp(200)])
+    sync_client.get("https://a.example/", session=session)
+    sync_client.get("https://a.example/", session=session, timeout=2)
+    assert session.calls[0][2]["timeout"] == pytest.approx(7, abs=0.1)
+    assert session.calls[1][2]["timeout"] == 2.0
+
+
 class _AsyncResp:
     def __init__(self, status, location=None):
         self._status = status
@@ -265,6 +376,28 @@ async def test_async_cross_host_redirect_strips_auth():
     assert url == "https://b.example/next"
     assert "auth" not in kwargs
     assert kwargs["headers"] == {"X-Other": "1"}
+
+
+@pytest.mark.asyncio
+async def test_async_rejects_known_oversized_body_and_caps_timeout():
+    from openjiuwen.harness.security.outbound import async_client
+
+    host_exit.publish_host_exit_policy(
+        {"net_guard": _section(max_request_mb=1, timeout_seconds=9)}
+    )
+    session = _AsyncSession([_AsyncResp(200)])
+    with pytest.raises(OutboundLimitError):
+        await async_client.request(
+            session,
+            "POST",
+            "https://a.example/upload",
+            data=b"x" * (1024 * 1024 + 1),
+        )
+    assert session.calls == []
+
+    await async_client.request(session, "GET", "https://a.example/")
+    timeout = session.calls[0][2]["timeout"]
+    assert timeout.total == pytest.approx(9, abs=0.1)
 
 
 def test_sync_too_many_redirects():

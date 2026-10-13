@@ -132,6 +132,8 @@ class NetGuardSection(TypedDict, total=False):
     defaults: NotRequired[str]  # ``allow`` | ``deny``
     urls: NotRequired[dict[str, str]]  # host 通配 / URL 前缀 / URL glob
     enforce_host_exit: NotRequired[bool]  # 宿主 HTTP 出口（P3）是否同时强制；缺省 true
+    max_request_mb: NotRequired[int]  # P3 单请求正文上限；缺省 10 MiB
+    timeout_seconds: NotRequired[int]  # P3 单请求总超时上限；缺省 60 秒
 
 
 class ShellGuardSection(TypedDict, total=False):
@@ -197,9 +199,9 @@ __all__ = [
     "FileGuardPathEntry",
     "FileGuardSection",
     "NetGuardSection",
-    "ShellGuardSection",
     "PermissionConfirmResponse",
     "PermissionLevel",
     "PermissionResult",
     "PermissionsSection",
+    "ShellGuardSection",
 ]
