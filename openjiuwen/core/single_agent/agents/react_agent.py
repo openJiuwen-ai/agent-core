@@ -9,21 +9,22 @@ Author: huenrui1@huawei.com
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
-import asyncio
 import time
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 
-from pydantic import Field, BaseModel
+from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.constants.constant import RESUME_SIGNAL
 from openjiuwen.core.common.exception.errors import BaseError, Termination
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.single_agent.schema.steering import SteeringInput
-from openjiuwen.core.common.logging import logger
+
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
         browser_agent_log_info,
@@ -31,59 +32,52 @@ try:
 except Exception:  # pragma: no cover - browser runtime is optional here
     browser_agent_log_info = None
 from openjiuwen.core.common.security.user_config import UserConfig
-from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm.schema.config import (
-    ModelClientConfig,
-    ModelRequestConfig
-)
-from openjiuwen.core.context_engine import (
-    ContextEngine,
-    ContextEngineConfig,
-    ModelContext
-)
-from openjiuwen.core.foundation.llm import (
-    AssistantMessage,
-    Model,
-    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
-    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
-    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
-    ToolMessage,
-    UserMessage,
-    SystemMessage
-)
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ModelContext
 from openjiuwen.core.foundation.kv_cache import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
     KVCacheAffinityConfig,
 )
-from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.foundation.llm import (
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+    AssistantMessage,
+    Model,
+    SystemMessage,
+    ToolMessage,
+    UserMessage,
+)
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
-from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.ability_manager import AbilityManager, illegal_tool_call_reason
-from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext
+from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.interrupt.handler import ResumeContext, ToolInterruptHandler
 from openjiuwen.core.single_agent.interrupt.resume_guard import (
     should_abandon_unmatched_confirm_resume,
 )
 from openjiuwen.core.single_agent.interrupt.state import (
-    BaseInterruptionState,
+    INTERRUPTION_KEY,
     RESUME_START_ITERATION_KEY,
+    BaseInterruptionState,
     ToolInterruptionState,
-    INTERRUPTION_KEY
+)
+from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.single_agent.prompts.builder import (
+    PromptSection,
+    SystemPromptBuilder,
 )
 from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackEvent,
     AgentCallbackContext,
+    AgentCallbackEvent,
     InvokeInputs,
     ModelCallInputs,
     UserMessageInputs,
     rail,
-)
-from openjiuwen.core.single_agent.prompts.builder import (
-    PromptSection,
-    SystemPromptBuilder,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -1310,6 +1304,7 @@ class ReActAgent(BaseAgent):
             return AssistantMessage(content="", tool_calls=[])
         return AssistantMessage(
             content=chunk.content or "",
+            metadata=chunk.metadata,
             tool_calls=chunk.tool_calls or [],
             usage_metadata=chunk.usage_metadata,
             reasoning_content=chunk.reasoning_content,
@@ -1735,7 +1730,7 @@ class ReActAgent(BaseAgent):
 
     def _is_interrupted(self, tool_result: Any) -> bool:
         """Detect whether a tool result signals workflow interruption."""
-        from openjiuwen.core.workflow import WorkflowOutput, WorkflowExecutionState
+        from openjiuwen.core.workflow import WorkflowExecutionState, WorkflowOutput
         if isinstance(tool_result, WorkflowOutput):
             return tool_result.state == WorkflowExecutionState.INPUT_REQUIRED
         if isinstance(tool_result, list):
@@ -2443,6 +2438,7 @@ class ReActAgent(BaseAgent):
                             await context.add_messages(
                                 AssistantMessage(
                                     content=ai_message.content,
+                                    metadata=ai_message.metadata,
                                     tool_calls=ai_message.tool_calls,
                                     reasoning_content=ai_message.reasoning_content,
                                     usage_metadata=ai_message.usage_metadata,
