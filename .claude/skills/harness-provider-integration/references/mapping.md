@@ -43,6 +43,11 @@ IO adapter 读这些键（`io_adapter.py` 的 `_project_item`）：
   total_tokens`，厂商特有项放 `provider_data`（如 `cached_write_tokens`）。
 - 厂商不报费用就不报 `cost`，不要自己估算（Codex 先例）。
 
+## 模型请求 `ModelRequestEvent`
+
+宿主声明 `MODEL_REQUEST_OBSERVATION` 时每次模型请求发一个，早于它引起的工具条目，工具在 `causation_ids`
+里引用它；轨迹的 Model / Input 泳道只来自它。推断、对齐、补全规则见 [observation.md](observation.md)。
+
 ## 诊断与未知记录
 
 - 厂商仍在自动重试的错误：`DiagnosticEvent(WARNING, data={"kind": "retrying", "category": ...})`，

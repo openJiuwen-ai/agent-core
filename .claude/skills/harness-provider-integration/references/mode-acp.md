@@ -39,6 +39,7 @@ CliProcess (process.py)            启动 / 行读写 / stderr 丢弃 / 关闭�
 | `mcp-naming` | 挂一个 FastMCP fixture，看 `tool_call` 的 `title` 与 `rawInput`：opencode 1.17 是 `{server}_{tool}`，opencode 2.0 是代码模式（`execute` 工具里的 `tools.{server}.{tool}`），kimi-code 是 `mcp__{server}__{tool}` |
 | `failure-codes` | 触发真实错误（未登录、错模型），把厂商自有 JSON-RPC 错误码加进 `_VENDOR_RPC_CODE_CATEGORY` |
 | `fixtures` | 用录到的真实往返改写 `fake_agent.py` 的记录形状 |
+| `observation` | 模板已按 ACP 流推断模型请求（Model 泳道、工具归属）；CLI 本地记录了请求时，在 `_observe_request` 里按记录补上输入、系统提示词、工具清单与逐请求用量，Input 泳道才有内容。见 [observation.md](observation.md) |
 | `skills-dir` | CLI 的项目级技能发现目录，例如 `.opencode/skills`（以厂商文档为准） |
 | `agents-md` | 填包内 `AGENTS.md`"验证过的厂商事实" |
 

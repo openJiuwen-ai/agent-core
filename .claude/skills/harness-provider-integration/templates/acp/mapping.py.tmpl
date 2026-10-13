@@ -17,10 +17,20 @@ Shapes handled here come from real ACP exchanges, not from the spec alone:
   a file path later), so the name is taken from the first one seen;
 * ``rawOutput`` is the structured result, while ``content`` holds what the
   agent rendered for the model.
+
+ACP states no model request, so when the host observes requests the
+accumulator derives them from the stream: a run of thought / message output
+and the tool calls that follow it is one request, and output after a tool
+settled (or a tool call with none in between) opens the next. Each derived
+``ModelRequestEvent`` carries the output side only (``input_observed=False``),
+is emitted before the tool items it caused, and those items cite it in
+``causation_ids``. A provider that can read the vendor's own request records
+completes the event in ``_observe_request`` on the harness.
 """
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -29,6 +39,8 @@ from openjiuwen.harness_protocol import (
     ItemEventKind,
     ItemLifecycleEvent,
     MessageRole,
+    ModelRequestEvent,
+    ModelRequestStatus,
     OutputChannel,
     OutputEvent,
     OutputKind,
@@ -64,6 +76,7 @@ class MappedEvent:
 
     payload: Any
     item_id: str | None = None
+    causation_ids: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -82,10 +95,28 @@ class _ToolCall:
     started: bool = False
 
 
+@dataclass(slots=True)
+class _OpenRequest:
+    """A model request derived from the stream, still producing output."""
+
+    request_id: str
+    started_at: float
+    first_output_at: float | None = None
+    blocks: list[ContentBlock] = field(default_factory=list)
+
+
 class __CLASS__TurnAccumulator:
     """State needed to normalize the updates of one ``session/prompt``."""
 
-    def __init__(self, *, turn_id: str) -> None:
+    def __init__(self, *, turn_id: str, observe_requests: bool = False, model: str | None = None) -> None:
+        """Start the state of one turn.
+
+        Args:
+            turn_id: The protocol turn the updates belong to.
+            observe_requests: Derive ``ModelRequestEvent``s from the stream
+                (the host declared ``MODEL_REQUEST_OBSERVATION``).
+            model: The model the session runs on, when known.
+        """
         self.turn_id = turn_id
         self.messages: list[TurnMessage] = []
         self.last_text_output = ""
@@ -94,6 +125,15 @@ class __CLASS__TurnAccumulator:
         self._open: dict[OutputChannel, _OpenOutput] = {}
         self._output_seq = 0
         self._tools: dict[str, _ToolCall] = {}
+        self._observe_requests = observe_requests
+        self._model = model
+        self._request: _OpenRequest | None = None
+        self._request_seq = 0
+        # When the model was last asked: the turn start, then each settled tool.
+        self._asked_at = time.time()
+        # The closed request whose tool calls may still be arriving; output or
+        # a settled tool ends that window.
+        self._calling_request: str | None = None
 
     @property
     def emitted_output(self) -> bool:
@@ -113,12 +153,13 @@ class __CLASS__TurnAccumulator:
             return self._tool_call_update(update)
         return [_provider_event(kind, update)]
 
-    def finish(self) -> list[MappedEvent]:
-        """Finalize every open output; call before building the terminal result."""
-        mapped: list[MappedEvent] = []
-        for channel in (OutputChannel.REASONING, OutputChannel.ANSWER):
-            mapped.extend(self._finalize(channel))
-        return mapped
+    def finish(self, request_status: ModelRequestStatus = ModelRequestStatus.COMPLETED) -> list[MappedEvent]:
+        """Finalize every open output and request; call before building the terminal result.
+
+        Args:
+            request_status: How the request still producing output ended.
+        """
+        return [*self._finalize_outputs(), *self._close_request(request_status)]
 
     def usage_event(self, response: Mapping[str, Any]) -> list[MappedEvent]:
         """Read the turn usage some agents attach to the prompt response."""
@@ -197,6 +238,7 @@ class __CLASS__TurnAccumulator:
             )
             self._open[channel] = current
         current.parts.append(text)
+        self._note_output()
         mapped.append(
             MappedEvent(
                 OutputEvent(
@@ -219,13 +261,12 @@ class __CLASS__TurnAccumulator:
             self.last_text_output = text
         message_id = current.message_key or current.output_id
         block_kind = "text" if channel is OutputChannel.ANSWER else "reasoning"
+        block = ContentBlock(block_id=current.output_id, kind=block_kind, content=text)
         self.messages.append(
-            TurnMessage(
-                message_id=f"{message_id}:{block_kind}",
-                role=MessageRole.ASSISTANT,
-                content=(ContentBlock(block_id=current.output_id, kind=block_kind, content=text),),
-            )
+            TurnMessage(message_id=f"{message_id}:{block_kind}", role=MessageRole.ASSISTANT, content=(block,))
         )
+        if self._request is not None:
+            self._request.blocks.append(block)
         return [
             MappedEvent(
                 OutputEvent(
@@ -250,7 +291,7 @@ class __CLASS__TurnAccumulator:
                 kind=_string(update.get("kind")),
             )
         # Text written before the call belongs to the reply that made it.
-        return [*self.finish(), *self._tool_call_update(update)]
+        return [*self._finalize_outputs(), *self._tool_call_update(update)]
 
     def _tool_call_update(self, update: Mapping[str, Any]) -> list[MappedEvent]:
         call_id = _string(update.get("toolCallId"))
@@ -271,14 +312,18 @@ class __CLASS__TurnAccumulator:
         ready = _has_value(call.raw_input) or status in _SETTLED_TOOL_STATUSES
         if not call.started and ready:
             call.started = True
+            arguments = to_json_safe(call.raw_input or {})
+            requests, causes = self._request_calling(call_id, call.name, arguments)
+            mapped.extend(requests)
             mapped.append(
                 MappedEvent(
                     ItemLifecycleEvent(
                         kind=ItemEventKind.STARTED,
                         item_type="tool",
-                        data={"name": call.name, "arguments": to_json_safe(call.raw_input or {}), "kind": call.kind},
+                        data={"name": call.name, "arguments": arguments, "kind": call.kind},
                     ),
                     item_id=call_id,
+                    causation_ids=causes,
                 )
             )
         if status in _SETTLED_TOOL_STATUSES:
@@ -297,7 +342,87 @@ class __CLASS__TurnAccumulator:
                     item_id=call_id,
                 )
             )
+            # The tool result goes back to the model, which is asked again.
+            self._asked_at = time.time()
+            self._calling_request = None
         return mapped
+
+    # ------------------------------------------------------------------
+    # Derived model requests
+    # ------------------------------------------------------------------
+
+    def _finalize_outputs(self) -> list[MappedEvent]:
+        mapped: list[MappedEvent] = []
+        for channel in (OutputChannel.REASONING, OutputChannel.ANSWER):
+            mapped.extend(self._finalize(channel))
+        return mapped
+
+    def _note_output(self) -> None:
+        """Record model output, opening a request when none is producing it."""
+        if not self._observe_requests:
+            return
+        self._calling_request = None
+        if self._request is None:
+            self._request = self._new_request()
+        if self._request.first_output_at is None:
+            self._request.first_output_at = time.time()
+
+    def _new_request(self) -> _OpenRequest:
+        self._request_seq += 1
+        return _OpenRequest(request_id=f"{self.turn_id}:request:{self._request_seq}", started_at=self._asked_at)
+
+    def _request_calling(self, call_id: str, name: str, arguments: Any) -> tuple[list[MappedEvent], tuple[str, ...]]:
+        """Return the request events to emit before a tool starts, and the tool's causes.
+
+        A tool call ends the request producing output. Calls arriving right
+        after it (parallel calls) belong to the same request; a call with no
+        output since the last settled tool is a request of its own.
+        """
+        if not self._observe_requests:
+            return [], ()
+        if self._request is None and self._calling_request is not None:
+            return [], (self._calling_request,)
+        if self._request is None:
+            self._request = self._new_request()
+        request = self._request
+        request.blocks.append(
+            ContentBlock(
+                block_id=f"{request.request_id}:{call_id}",
+                kind="tool_call",
+                content={"name": name, "arguments": arguments},
+                data={"call_id": call_id},
+            )
+        )
+        mapped = self._close_request(ModelRequestStatus.COMPLETED)
+        self._calling_request = request.request_id
+        return mapped, (request.request_id,)
+
+    def _close_request(self, status: ModelRequestStatus) -> list[MappedEvent]:
+        request = self._request
+        self._request = None
+        if request is None:
+            return []
+        ended_at = max(time.time(), request.started_at)
+        first_chunk = request.first_output_at
+        output = (
+            TurnMessage(message_id=request.request_id, role=MessageRole.ASSISTANT, content=tuple(request.blocks))
+            if request.blocks
+            else None
+        )
+        return [
+            MappedEvent(
+                ModelRequestEvent(
+                    request_id=request.request_id,
+                    status=status,
+                    started_at=request.started_at,
+                    ended_at=ended_at,
+                    model=self._model,
+                    output_message=output,
+                    time_to_first_chunk=max(first_chunk - request.started_at, 0.0) if first_chunk else None,
+                    data={PROVIDER_NAME: {"observation": "acp_stream"}},
+                )
+            )
+        ]
 
     def _common(self, timing: TurnTiming, stop_reason: str | None) -> dict[str, Any]:
         return {

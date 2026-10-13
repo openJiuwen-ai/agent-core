@@ -29,6 +29,7 @@ from openjiuwen.harness_protocol import (
     InteractionResponseStatus,
     ItemEventKind,
     ItemLifecycleEvent,
+    ModelRequestEvent,
     McpServerConfig,
     McpTransport,
     ModelSelection,
@@ -185,6 +186,44 @@ async def test_tool_call_starts_with_its_arguments_and_completes(tmp_path: Path)
         assert completed.event.data["rendered_result"] == "TOKEN-1"
         assert completed.event.data["result"]["output"] == "1: TOKEN-1"
         assert _terminal(events).result.final_output == "TOKEN-1"
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_observed_requests_are_derived_from_the_stream_and_own_their_tools(tmp_path: Path) -> None:
+    harness = __CLASS__Harness(_config(tmp_path / "state.json"))
+    host = frozenset({HostCapability.MODEL_REQUEST_OBSERVATION})
+    await harness.start(_context(tmp_path, host_capabilities=host))
+    try:
+        receipt = await harness.send(HarnessInput(content="TOOL read secret.txt"))
+        events = await _turn(harness, receipt.turn_id)
+        observed = (ModelRequestEvent, ItemLifecycleEvent)
+        kinds = [type(event.event).__name__ for event in events if isinstance(event.event, observed)]
+        # Each request is reported before the tool it asked for.
+        assert kinds == ["ModelRequestEvent", "ItemLifecycleEvent", "ItemLifecycleEvent", "ModelRequestEvent"]
+        requests = [event.event for event in events if isinstance(event.event, ModelRequestEvent)]
+        calling, answering = requests
+        assert [block.kind for block in calling.output_message.content] == ["reasoning", "tool_call"]
+        started = next(event for event in events if isinstance(event.event, ItemLifecycleEvent))
+        call = calling.output_message.content[1]
+        assert (call.data["call_id"], call.content["arguments"]) == (started.item_id, started.event.data["arguments"])
+        assert [block.kind for block in answering.output_message.content] == ["reasoning", "text"]
+        assert not calling.input_observed
+        assert calling.ended_at <= answering.started_at
+        assert calling.request_id in started.causation_ids
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_requests_stay_unreported_unless_the_host_observes_them(tmp_path: Path) -> None:
+    harness = __CLASS__Harness(_config(tmp_path / "state.json"))
+    await harness.start(_context(tmp_path))
+    try:
+        receipt = await harness.send(HarnessInput(content="TOOL read secret.txt"))
+        events = await _turn(harness, receipt.turn_id)
+        assert not [event for event in events if isinstance(event.event, ModelRequestEvent)]
     finally:
         await harness.stop()
 

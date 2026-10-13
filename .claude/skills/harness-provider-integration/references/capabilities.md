@@ -44,7 +44,7 @@
 | `CHECKPOINT_SINK` | 基类 `_publish_checkpoint` 自动推送；provider 只管在会话激活 / id 变化时调用。 |
 | `MCP_SERVERS` | 挂载 `context.mcp_servers`；不支持的传输（`IN_PROCESS`、无 http 能力时的 HTTP）在 `start` 抛 Unsupported。 |
 | `PROVIDER_INTERACTION` | 改变 provider 持久身份的切换（认证 fallback）先 `_confirm_provider_extension` 再提交。 |
-| `MODEL_REQUEST_OBSERVATION` | 打开厂商的请求观测通道并产出 `ModelRequestEvent`（高级，见 Claude / Codex `observation.py`，新 provider 第一版通常不做）。 |
+| `MODEL_REQUEST_OBSERVATION` | 产出 `ModelRequestEvent`，轨迹的 Model / Input 泳道全靠它：ACP 模板默认从流推断（只有输出侧），有厂商请求记录时在 `_observe_request` 补全输入。规则见 [observation.md](observation.md)。 |
 
 团队成员运行时（`ExternalHarnessMemberRuntime` + `HarnessIOAdapter`）总会声明 `USER_INPUT`，并在
 有成员 session 时声明 `CHECKPOINT_SINK`；新 provider 必须在这些宿主能力存在时仍能正常 `start`。
