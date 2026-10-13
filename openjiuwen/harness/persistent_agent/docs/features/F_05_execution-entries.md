@@ -392,7 +392,7 @@ flowchart LR
 
 窗口消息元信息使用 `WINDOW_PART_KEY=persistent_window_part`。PA-06 写 execution_header / temporary_background，PA-10 保存前分别保留并压缩为一行 / 删除；无标记消息按普通窗口内容保留。等待确认时末尾未完成工具调用不动，结束标记放记录元信息，完整整理契约见 S_03。PA-05 只传递这些协议，不自行定义第二套窗口格式。
 
-共享值对象、标记和协议定义在 `schema/integration.py`，`seams.py` 保留 getter 并兼容再导出。群读取接缝为 `recent_messages(context, *, after=None, trigger_message_id=None)`：增量与触发消息之后至本次读取上界的回补合并去重，排除触发消息；使用 `scanned_through` 作为可信游标。PA-10 对停止后缺失结果的调用补 `stopped_tool_placeholder`，不能把补位当作真实成功或失败；正常等待确认不补位。
+共享值对象、标记和协议定义在 `schema/integration.py`，`seams.py` 保留 getter 并兼容再导出。群读取接缝为 `recent_messages(context, *, after=None, trigger_message_id=None)`：增量与触发消息之后至本次读取上界的回补合并去重，排除触发消息；使用 `scanned_through` 作为可信游标。PA-10 对停止后缺失结果的调用补 `stopped_tool_placeholder`，不能把补位当作真实成功或失败；正常等待确认不补位（2026-10-14 起补位覆盖停止、取消和执行中报错，文案为“结果未取得，实际效果需核实”，见 [F_17](F_17_session-state-record.md) D-06）。
 
 ### 3.3 M1 开放条件与兼容核对
 

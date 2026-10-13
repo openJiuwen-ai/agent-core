@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_03 / context-and-windows |
 | 关联模块 | [seams.py](../../execution/seams.py)、[BaseKVStore 注入集合](../../ports.py)、[integration.py](../../schema/integration.py)、[window_assembly.py](../../execution/window_assembly.py)；WindowStore 与换窗管理尚待接入 |
-| 最近一次修订日期 | 2026-10-13 |
+| 最近一次修订日期 | 2026-10-14 |
 | 关联 feature | [F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)；待实现与验证范围见[开发计划](../designs/persistent-agent-development-plan.md) PA-06、PA-10～PA-12 |
 | 设计依据 | [架构设计：窗口](../designs/persistent-agent-architecture.md#44-上下文窗口管理)、[换窗](../designs/persistent-agent-architecture.md#522-运行中换窗归档摘要与替换)、[保存规则](../designs/persistent-agent-architecture.md#7-数据管理与保存规则) |
 
@@ -107,7 +107,7 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 
 等待确认时，末尾待结果的工具调用一律不动；结束标记写入记录元信息，不追加到窗口尾部。临时背景仍可按标记删除。完成、取消、失败与可恢复暂停需保存；忽略群消息未写入窗口，无需保存；进程崩溃无法保存。停止能否取得完整现场须按实现验证，不据控制入口返回宣称已保存。
 
-**停止后的安全窗口：** PA-10 保存真实执行事实，并为缺失工具结果的调用幂等补充标为 `stopped_tool_placeholder` 的结果，说明“执行已停止，结果未取得，实际效果需核实”；已有真实结果及原生“已中断”结果不重复补位，正常等待确认不补位。加载已知停止的旧记录时同样修补。“停止 → 保存 → 重新加载 → 下一任务”仍需完整联调。
+**中途结束后的安全窗口：** 停止、取消或执行中报错时，原生执行路径保留已取得的真实工具结果（Persistent 显式启用）；PA-10 保存时为缺失工具结果的调用幂等补充标为 `stopped_tool_placeholder` 的结果，说明“结果未取得，实际效果需核实”，具体结束原因由结束记录说明；已有真实结果及原生“已中断”结果不重复补位，正常等待确认不补位。加载结局为停止、取消或失败的旧记录时同样修补。“停止、取消或报错 → 保存 → 重新加载 → 下一任务”仍需完整联调（已确认待实现，见 [F_17](../features/F_17_session-state-record.md)）。
 
 ### 5.3 后端、清理与部分成功
 

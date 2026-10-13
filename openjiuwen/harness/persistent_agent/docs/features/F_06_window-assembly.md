@@ -174,7 +174,7 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 
 **群消息游标改为扫描位置。** 共享读取器改为 `recent_messages(context, after=游标, trigger_message_id=触发消息)`：读取器把“游标之后的增量”和“触发消息之后至本次读取上界的回补”合并去重、排除触发消息，并返回服务端确认已扫描到的位置 `scanned_through`（PA-04 契约补充见 [F_04](F_04_contract-convergence.md)）。组装器只用 `scanned_through` 推进游标：正文暂缺但位置可信时照常前移，读取结果不带位置时保留旧游标。字段名 `last_group_message_id` 不变，含义改为服务端确认已扫描到的位置。这同时解决了首轮遗留的“触发消息下次会被再读一次”：扫描覆盖了触发消息，游标就越过它。正文暂缺（`unavailable`）的消息在背景中标为“正文暂缺，需要时可查询群聊记录”。
 
-**窗口不能安全追加时拒绝。** 加载后若窗口中有工具调用没有对应结果（真实结果或 PA-10 的停止补位都算结果），组装器以 `DEEPAGENT_CONTEXT_PARAM_ERROR` 拒绝，不追加任何内容，并用 error 日志记录 Session、Execution 和未配对的调用 ID，供运维识别。正常情况下 PA-10 保存时保证窗口可以安全追加，加载已知停止的旧记录时做幂等修补，所以这条路径只在记录损坏时触发。采用校验拒绝而不是新的错误分类：不改 core 错误体系，服务端不续做；代价是该 Request 需要重新发起。停止补位用新标记 `stopped_tool_placeholder`（`WINDOW_PART_KEY` 的取值，定义在 `schema/integration.py`），内容为“执行已停止，结果未取得，实际效果需核实”，不冒充真实结果，也不认定工具失败。
+**窗口不能安全追加时拒绝。** 加载后若窗口中有工具调用没有对应结果（真实结果或 PA-10 的停止补位都算结果），组装器以 `DEEPAGENT_CONTEXT_PARAM_ERROR` 拒绝，不追加任何内容，并用 error 日志记录 Session、Execution 和未配对的调用 ID，供运维识别。正常情况下 PA-10 保存时保证窗口可以安全追加，加载已知停止的旧记录时做幂等修补，所以这条路径只在记录损坏时触发。采用校验拒绝而不是新的错误分类：不改 core 错误体系，服务端不续做；代价是该 Request 需要重新发起。停止补位用新标记 `stopped_tool_placeholder`（`WINDOW_PART_KEY` 的取值，定义在 `schema/integration.py`），内容为“执行已停止，结果未取得，实际效果需核实”，不冒充真实结果，也不认定工具失败（2026-10-14 起文案改为“结果未取得，实际效果需核实”，并覆盖停止、取消和执行中报错，见 [F_17](F_17_session-state-record.md) D-06）。
 
 **拒绝按条数截断窗口。** `context_engine_config` 显式设置 `max_context_message_num`、`default_window_message_num` 或 `default_window_round_num` 时，Persistent 构造以 `DEEPAGENT_CONFIG_PARAM_ERROR` 拒绝；三者在原生代码中默认均为空（不截断），个人版不受影响。
 
