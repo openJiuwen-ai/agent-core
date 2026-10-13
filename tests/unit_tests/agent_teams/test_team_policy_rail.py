@@ -123,6 +123,14 @@ async def _admit(
     return message
 
 
+async def _sync_attachments(agent, ctx: _StubContext) -> UserMessage | None:
+    """Sync attachments the way ``ReActAgent`` does, delivery callbacks included."""
+    message = await agent.prompt_attachment_manager.sync_to_context(ctx.context, _SESSION_ID)
+    for callback in ctx.extra.pop(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY, []):
+        await callback()
+    return message
+
+
 def _team_texts(ctx: _StubContext) -> str:
     """Join every message body so tests can assert on delivered team state."""
     return "\n".join(str(message.content) for message in ctx.context.messages)
@@ -631,12 +639,7 @@ class TestTeamPolicyRailTeamContext:
         ctx.inputs = UserMessageInputs(parts=batch, source="query")
 
         await rail.on_user_message(ctx)
-        snapshot = await agent.prompt_attachment_manager.sync_to_context(
-            ctx.context,
-            _SESSION_ID,
-        )
-        for callback in ctx.extra.pop(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY):
-            await callback()
+        snapshot = await _sync_attachments(agent, ctx)
         user_message = UserMessage(content="\n".join(batch))
         await ctx.context.add_messages(user_message)
 
@@ -655,12 +658,7 @@ class TestTeamPolicyRailTeamContext:
         await ctx.context.add_messages(ToolMessage(content="done", tool_call_id="c1"))
         backend.add_member(_StubMember("dev2", "Newbie"), mtime=2)
         await rail.before_model_call(ctx)
-        delta = await agent.prompt_attachment_manager.sync_to_context(
-            ctx.context,
-            _SESSION_ID,
-        )
-        for callback in ctx.extra.pop(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY):
-            await callback()
+        delta = await _sync_attachments(agent, ctx)
 
         assert isinstance(delta, UserMessage)
         assert ctx.context.messages[-2].role == "tool"
@@ -669,8 +667,172 @@ class TestTeamPolicyRailTeamContext:
         assert delta.content.startswith("<system-reminder>\n")
         assert delta.content.endswith("\n</system-reminder>")
         assert "动态上下文已经变化" in delta.content
-        assert "roster-change" in delta.content
+        assert '<team-event kind="roster-change">' in delta.content
+        assert "[加入] member_name=dev2" in delta.content
+        assert "member_name: leader1" not in delta.content
+        assert "不再生效" not in delta.content
         assert snapshot.content == snapshot_content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_rebuilt_agent_keeps_team_context_active(self):
+        """A rebuilt member starts with an empty attachment registry.
+
+        The persisted conversation still records ``team.context`` as active, so
+        the rebuilt rail must register it again; otherwise the next sync would
+        tell the member its own identity and team are no longer in effect.
+        """
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        session = _StubSession()
+        ctx = _StubContext(session=session)
+
+        first_agent = _AttachmentStubAgent(SystemPromptBuilder(language="cn"))
+        first_rail = _leader_rail(backend)
+        first_rail.init(first_agent)
+        ctx.inputs = UserMessageInputs(parts=["go"], source="query")
+        await first_rail.on_user_message(ctx)
+        snapshot = await _sync_attachments(first_agent, ctx)
+        await ctx.context.add_messages(UserMessage(content="go"))
+        assert snapshot is not None
+        assert "<team-context>" in snapshot.content
+
+        # Next round: new agent instance, fresh manager, same session + history.
+        rebuilt_agent = _AttachmentStubAgent(SystemPromptBuilder(language="cn"))
+        rebuilt_rail = _leader_rail(backend)
+        rebuilt_rail.init(rebuilt_agent)
+        ctx.inputs = UserMessageInputs(parts=["hello again"], source="query")
+        await rebuilt_rail.on_user_message(ctx)
+        await rebuilt_rail.before_model_call(ctx)
+        second = await _sync_attachments(rebuilt_agent, ctx)
+
+        assert second is None
+        assert "不再生效" not in _team_texts(ctx)
+        logger.info("Rebuilt agent re-registered team.context without a removal delta")
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_history_with_withdrawn_team_context_is_restored(self):
+        """Sessions already hit by the withdrawal get the state back next round."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        ctx = _StubContext()
+        first_agent = _AttachmentStubAgent(SystemPromptBuilder(language="cn"))
+        first_rail = _leader_rail(backend)
+        first_rail.init(first_agent)
+        await first_rail.before_model_call(ctx)
+        await _sync_attachments(first_agent, ctx)
+        # Reproduce the old behaviour: the section vanished from the registry.
+        await first_agent.prompt_attachment_manager.clear_section(session_id=_SESSION_ID, section="team.context")
+        await first_agent.prompt_attachment_manager.add_section(
+            session_id=_SESSION_ID,
+            section="runtime.setting",
+            content="runtime",
+            kind="runtime",
+            source="test",
+        )
+        withdrawn = await _sync_attachments(first_agent, ctx)
+        assert withdrawn is not None
+        assert "不再生效" in withdrawn.content
+
+        rebuilt_agent = _AttachmentStubAgent(SystemPromptBuilder(language="cn"))
+        rebuilt_rail = _leader_rail(backend)
+        rebuilt_rail.init(rebuilt_agent)
+        await rebuilt_agent.prompt_attachment_manager.add_section(
+            session_id=_SESSION_ID,
+            section="runtime.setting",
+            content="runtime",
+            kind="runtime",
+            source="test",
+        )
+        await rebuilt_rail.before_model_call(ctx)
+        restored = await _sync_attachments(rebuilt_agent, ctx)
+
+        assert restored is not None
+        assert "<team-context>" in restored.content
+        assert "member_name: leader1" in restored.content
+        assert "不再生效" not in restored.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_roster_change_after_rebuild_stays_a_delta(self):
+        """Re-registering across a rebuild must not turn later changes into snapshots."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        session = _StubSession()
+        ctx = _StubContext(session=session)
+
+        first_agent = _AttachmentStubAgent(SystemPromptBuilder(language="cn"))
+        first_rail = _leader_rail(backend)
+        first_rail.init(first_agent)
+        await first_rail.before_model_call(ctx)
+        await _sync_attachments(first_agent, ctx)
+
+        rebuilt_agent = _AttachmentStubAgent(SystemPromptBuilder(language="cn"))
+        rebuilt_rail = _leader_rail(backend)
+        rebuilt_rail.init(rebuilt_agent)
+        await rebuilt_rail.before_model_call(ctx)
+        assert await _sync_attachments(rebuilt_agent, ctx) is None
+
+        backend.add_member(_StubMember("dev2", "Newbie"), mtime=2)
+        await rebuilt_rail.before_model_call(ctx)
+        delta = await _sync_attachments(rebuilt_agent, ctx)
+        assert delta is not None
+        assert '<team-event kind="roster-change">' in delta.content
+        assert "[加入] member_name=dev2" in delta.content
+        assert "<team-context>" not in delta.content
+        assert "不再生效" not in delta.content
+
+        # Another rebuild re-registers the delta it last delivered: still quiet.
+        again_agent = _AttachmentStubAgent(SystemPromptBuilder(language="cn"))
+        again_rail = _leader_rail(backend)
+        again_rail.init(again_agent)
+        await again_rail.before_model_call(ctx)
+        assert await _sync_attachments(again_agent, ctx) is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_lost_history_snapshot_restores_full_state(self):
+        """Without a snapshot in history the whole state is registered, not the last delta."""
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev")],
+            self_member_name="leader1",
+        )
+        session = _StubSession()
+        ctx = _StubContext(session=session)
+        agent = _AttachmentStubAgent(SystemPromptBuilder(language="cn"))
+        rail = _leader_rail(backend)
+        rail.init(agent)
+        await rail.before_model_call(ctx)
+        await _sync_attachments(agent, ctx)
+        backend.add_member(_StubMember("dev2", "Newbie"), mtime=2)
+        await rail.before_model_call(ctx)
+        await _sync_attachments(agent, ctx)
+
+        # Compaction dropped every attachment message; the member is rebuilt.
+        compacted = _StubContext(session=session)
+        rebuilt_agent = _AttachmentStubAgent(SystemPromptBuilder(language="cn"))
+        rebuilt_rail = _leader_rail(backend)
+        rebuilt_rail.init(rebuilt_agent)
+        await rebuilt_rail.before_model_call(compacted)
+        snapshot = await _sync_attachments(rebuilt_agent, compacted)
+
+        assert snapshot is not None
+        assert "<team-context>" in snapshot.content
+        assert "member_name: leader1" in snapshot.content
+        assert '<team-event kind="roster">' in snapshot.content
+        assert "member_name=dev2" in snapshot.content
+        assert "roster-change" not in snapshot.content
 
     @pytest.mark.asyncio
     @pytest.mark.level1

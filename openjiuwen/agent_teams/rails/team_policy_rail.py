@@ -66,6 +66,9 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
 
+# Attachment section holding this member's identity, team metadata and roster.
+TEAM_CONTEXT_ATTACHMENT_SECTION = "team.context"
+
 
 class TeamPolicyRail(DeepAgentRail):
     """Inject the team's static PromptSections and its evolving team state.
@@ -82,7 +85,9 @@ class TeamPolicyRail(DeepAgentRail):
         metadata, and the peer roster. These are per-member and/or appear only
         once the team exists, so they cannot live in the shared prefix.
         :class:`TeamContextTracker` decides what is still unsaid; the rail
-        queues it as one dynamic attachment section. ReAct then appends a
+        registers it as one dynamic attachment section, and re-registers the
+        last delivered content while nothing changed so the section stays
+        active across agent rebuilds. ReAct then appends a
         role=system snapshot/delta message either before the admitted user
         turn or after a tool result when state appears mid-loop. Nothing already
         in the history is ever rewritten.
@@ -225,10 +230,10 @@ class TeamPolicyRail(DeepAgentRail):
         session = getattr(ctx, "session", None)
         if session is None:
             return
+        if await self._queue_team_context_attachment(ctx, session):
+            return
         text = await self._tracker.pending_text(session)
         if not text:
-            return
-        if await self._queue_team_context_attachment(ctx, session, text):
             return
         parts.insert(0, text)
         await self._tracker.commit(session)
@@ -292,27 +297,52 @@ class TeamPolicyRail(DeepAgentRail):
 
         await self._announce_unattached_state(ctx)
 
-    async def _queue_team_context_attachment(
-        self,
-        ctx: AgentCallbackContext,
-        session: Any,
-        text: str,
-    ) -> bool:
-        """Queue one team-state section for the shared history synchronizer.
+    async def _queue_team_context_attachment(self, ctx: AgentCallbackContext, session: Any) -> bool:
+        """Register this member's team state as one dynamic attachment section.
 
-        The ReAct agent calls ``sync_to_context`` after all rails at the user
-        admission and before-model boundaries.  The tracker baseline is
-        committed only after that synchronization succeeds, so a failed
-        context write leaves the announcement pending for the next boundary.
+        The attachment manager is a *current-state* channel: each boundary
+        diffs the registered sections against the state recorded in history,
+        and a section missing from the registry reads as withdrawn. The manager
+        lives on the agent instance, so a rebuilt member starts with an empty
+        registry and ``team.context`` has to be registered at every boundary:
+
+          * history holds no attachment snapshot (first delivery, or compaction
+            dropped it) -- the complete current state;
+          * the tracker has something new -- that incremental text, so roster
+            changes stay join/leave deltas;
+          * nothing changed -- the content committed last time, unchanged, so
+            its content hash matches the history and nothing is announced.
+
+        The tracker baseline and the registered content are committed only
+        after the ReAct history sync succeeds.
+
+        Returns:
+            ``True`` when the attachment lane owns delivery, ``False`` (no
+            manager installed, or the section could not be registered) to fall
+            back to the in-history message lane.
         """
         manager = self.attachment_manager
-        if manager is None:
+        context = getattr(ctx, "context", None)
+        if manager is None or context is None:
             return False
         try:
             writer = manager.bind_context(ctx)
+            has_snapshot = manager.has_history_snapshot(context, writer.session_id)
+            text = await self._tracker.pending_text(session)
+            last_text = self._tracker.last_delivered_text(session)
+            if not has_snapshot:
+                content = await self._tracker.snapshot_text()
+            elif text:
+                content = text
+            else:
+                # A session delivered before the content was remembered falls
+                # back to the full state once, then keeps re-registering it.
+                content = last_text or await self._tracker.snapshot_text()
+            if not content:
+                return True
             await writer.add_section(
-                section="team.context",
-                content=text,
+                section=TEAM_CONTEXT_ATTACHMENT_SECTION,
+                content=content,
                 kind=PromptAttachmentKind.RUNTIME,
                 source="agent_core.team_policy_rail",
                 priority=80,
@@ -326,9 +356,10 @@ class TeamPolicyRail(DeepAgentRail):
             )
             return False
 
-        callbacks = ctx.extra.setdefault(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY, [])
-        if isinstance(callbacks, list):
-            callbacks.append(lambda: self._tracker.commit(session))
+        if text or content != last_text:
+            callbacks = ctx.extra.setdefault(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY, [])
+            if isinstance(callbacks, list):
+                callbacks.append(lambda: self._tracker.commit(session, delivered_text=content))
         return True
 
     async def _announce_unattached_state(self, ctx: AgentCallbackContext) -> None:
@@ -348,10 +379,10 @@ class TeamPolicyRail(DeepAgentRail):
         session = getattr(ctx, "session", None)
         if context is None or session is None:
             return
+        if await self._queue_team_context_attachment(ctx, session):
+            return
         text = await self._tracker.pending_text(session)
         if not text:
-            return
-        if await self._queue_team_context_attachment(ctx, session, text):
             return
         await context.add_messages(UserMessage(content=text))
         await self._tracker.commit(session)
