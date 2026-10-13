@@ -19,10 +19,28 @@ EMPTY_REPORT = "暂无进展"
 _SCOPES = frozenset({"team", "member", "all"})
 _HISTORY_LIMIT = 200
 _BODY_LIMIT = 2000
-_SYSTEM_PROMPT = (
-    "你是团队进展汇报助手。根据材料用中文作答，固定四段：目标、计划、进度、进展质量。"
-    "材料没有覆盖的段落写「材料不足」。不要编造成员发言，不要补充材料之外的事实。"
-)
+_SYSTEM_PROMPT = """你是项目空间的团队进展汇报助手。下面用户消息里是只读材料：团队目标、名册、任务黑板、公开讨论摘录（可能按成员切开）。
+
+请用简洁通顺的中文写一份可直接展示给人看的汇报，必须按下面四个小标题分段（标题原样保留）：
+
+## 目标
+这个团队 / 本场讨论到底要做成什么。优先用团队描述与任务标题归纳，不要抄整段原文。
+
+## 计划
+已拆成哪些工作、谁负责、大致先后关系。没有任务板时写「材料不足」。
+
+## 进度
+当前走到哪一步：哪些已完成 / 进行中 / 阻塞，公开讨论里最近在推进什么。用事实表述，不要堆砌 status 枚举词。
+
+## 进展质量
+做到什么程度、有无风险或分歧、下一步建议是什么。只能依据材料里出现的任务与公开讨论；材料不足的小节写「材料不足」。
+
+硬性约束：
+- 不得编造成员未说过的话，不得发明材料之外的需求、文件或结论。
+- 材料写明「已省略」的更早讨论，不要当成你读过全文。
+- 若用户材料要求「只展开某成员」或「不写团队整体段」，遵守该范围，但仍用上述四个小标题组织（整体段可简写为材料不足）。
+- 不要输出 JSON、不要加与四段无关的开场白或结尾客套。
+"""
 
 
 class ProgressReportService:
@@ -94,11 +112,20 @@ class ProgressReportService:
         return log.read_messages()
 
     def _format(self, team, members, tasks, history: list[ConversationMessage]) -> str:
-        lines: list[str] = []
+        lines: list[str] = [
+            "【汇报范围】",
+            f"scope={self._scope}",
+            f"session_id={self._session_id}",
+        ]
         if self._scope == "member" and self._member_name:
-            lines.append(f"只展开成员 {self._member_name}，整体段可以不写。")
+            lines.append(f"只展开成员 {self._member_name}，团队整体段可以写「材料不足」。")
         elif self._scope == "member":
-            lines.append("按成员展开，不写团队整体段。")
+            lines.append("按非 leader 成员逐个展开；不要单独写团队整体综述段。")
+        elif self._scope == "team":
+            lines.append("只写团队整体，不要按成员逐个展开。")
+        else:
+            lines.append("先写团队整体，再按非 leader 成员展开。")
+        lines.append("【材料开始】")
         if self._scope in ("team", "all"):
             lines.extend(self._team_lines(team, members, tasks, history))
         if self._scope in ("member", "all"):
@@ -107,6 +134,7 @@ class ProgressReportService:
                 lines.append(f"成员 {self._member_name}：材料不足")
             for member in selected:
                 lines.extend(self._member_lines(member, tasks, history))
+        lines.append("【材料结束】请按系统要求输出四段汇报。")
         return "\n".join(lines)
 
     def _team_lines(self, team, members, tasks, history) -> list[str]:
