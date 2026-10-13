@@ -316,3 +316,72 @@ class TestArchive:
         finally:
             await database.close()
             reset_session_id(token)
+
+
+class TestPassiveGroupSend:
+    """Passive humans post publicly via HumanAgentToolCall, not host sender."""
+
+    @pytest.mark.level0
+    @pytest.mark.asyncio
+    async def test_passive_group_send_uses_member_author(self, tmp_path):
+        """A passthrough group_send_message archives as the passive member."""
+        from openjiuwen.agent_teams.interaction.passive_tool_executor import PassiveToolExecutor
+        from openjiuwen.agent_teams.tools.team import TeamBackend
+        from openjiuwen.agent_teams.tools.tool_permissions import (
+            HUMAN_AGENT_TOOLS,
+            PASSIVE_HUMAN_TOOLS,
+        )
+
+        assert "group_send_message" in PASSIVE_HUMAN_TOOLS
+        assert "group_send_message" not in HUMAN_AGENT_TOOLS
+
+        configure_openjiuwen_home(tmp_path)
+        token = set_session_id("sess-1")
+        database = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+        try:
+            await database.initialize()
+            await database.create_cur_session_tables()
+            await database.team.create_team("team-a", "Team", "leader")
+            await database.member.create_member(
+                "leader", "team-a", "Leader", "{}", "ready", role="leader"
+            )
+            await database.member.create_member(
+                "writer", "team-a", "Writer", "{}", "unstarted", role="teammate"
+            )
+            await database.member.create_member(
+                "guest", "team-a", "Guest", "{}", "ready", role="passive_human"
+            )
+            leader = TeamBackend(
+                team_name="team-a",
+                member_name="leader",
+                is_leader=True,
+                db=database,
+                messager=_Bus(),
+                enable_hitt=True,
+            )
+            leader.bind_group_session("sess-1")
+            executor = PassiveToolExecutor(leader, language="en")
+            denied = await executor.execute("guest", "build_team", {})
+            assert denied.success is False
+            assert denied.error == "tool_not_permitted:build_team"
+            result = await executor.execute(
+                "guest",
+                "group_send_message",
+                {
+                    "content": "pm says hi",
+                    "client_message_id": "pm-1",
+                    "mentions": ["writer"],
+                },
+            )
+            assert result.success is True
+            assert result.data["message"]["sender"] == "guest"
+            assert result.data["notified_members"] == ["writer"]
+            history = json.loads(
+                leader.group_conversation().history_path.read_text(encoding="utf-8").splitlines()[0]
+            )
+            assert history["sender"] == "guest"
+            assert history["content"] == "pm says hi"
+        finally:
+            await database.close()
+            reset_session_id(token)
+            reset_openjiuwen_home()

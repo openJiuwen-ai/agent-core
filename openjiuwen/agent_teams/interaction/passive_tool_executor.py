@@ -7,12 +7,13 @@ from __future__ import annotations
 
 from typing import Any
 
+from openjiuwen.agent_teams.group_chat.tools import GroupSendMessageTool
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import MappedToolOutput
 from openjiuwen.agent_teams.tools.tool_factory import _SEND_MESSAGE_CLASS, create_team_tools
-from openjiuwen.agent_teams.tools.tool_permissions import HUMAN_AGENT_TOOLS
+from openjiuwen.agent_teams.tools.tool_permissions import PASSIVE_HUMAN_TOOLS
 from openjiuwen.agent_teams.tools.tool_task import ClaimTaskTool
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -27,7 +28,7 @@ class PassiveToolExecutor:
 
     async def execute(self, sender: str, tool_name: str, tool_args: dict[str, Any] | None) -> ToolOutput:
         """Run ``tool_name`` as ``sender``. Unknown names stay inside the whitelist error."""
-        allowed = set(HUMAN_AGENT_TOOLS)
+        allowed = set(PASSIVE_HUMAN_TOOLS)
         if self._backend.dispatch_mode == "autonomous":
             allowed.add("claim_task")
         if tool_name not in allowed:
@@ -59,6 +60,9 @@ class PassiveToolExecutor:
                 lang=self._language,
             )
         }
+        # Public posts are host-driven for passive humans; avatar registration
+        # does not include this tool, so wire it only on the passthrough path.
+        tools["group_send_message"] = GroupSendMessageTool(backend, translator)
         if self._backend.dispatch_mode == "autonomous":
             tools["claim_task"] = ClaimTaskTool(backend.task_manager, translator)
         else:
@@ -95,4 +99,8 @@ class PassiveToolExecutor:
             leader.db,
             leader.messager,
         )
+        # Public archive needs the same session projection as the leader process.
+        backend.group_chat_spec = leader.group_chat_spec
+        if leader.group_session_id:
+            backend.group_session_id = leader.group_session_id
         return backend

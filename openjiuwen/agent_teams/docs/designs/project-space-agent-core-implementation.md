@@ -25,7 +25,7 @@
 | 叫醒 | `EventDispatcher` 对消息类事件只注册一个路由。未读里有群行时走 `GroupMessageHandler`，从旧到新一次一条；否则仍走原来的 `MessageHandler`。`activate_and_flush` 没动 |
 | 宿主 | `inputs["query"]` 和 `interact_agent_team` 接受 `type=group_chat`。作者固定 `user`。非法字典在进 leader 模型前失败。leader 不在 `notified_members` 时，确认包之后关闭流 |
 | 启动 | leader 扫描未读点名。`UNSTARTED` 走 `startup_member`。`ERROR` 先 CAS 到 `RESTARTING`，再 `restart_teammate`。被动真人不进这个名单，`spawn_teammate` 也不给它起进程 |
-| 工具 | `group_send_message` 在共享工具集，必填 `content` 和 `client_message_id`。`human_agent` 与 `passive_human` 没有这个工具 |
+| 工具 | `group_send_message` 在共享工具集，必填 `content` 和 `client_message_id`。`human_agent` / `passive_human` 模型侧没有；被动代调白名单 `PASSIVE_HUMAN_TOOLS` 含该工具 |
 | 被动真人 | 新角色 `passive_human`，注册即 `READY`。不并进 `human_agent_names()`。工具透传先认被动真人，再拒绝 avatar。执行器按发送者单独建 task / message manager，缓存在 leader 的 `TeamBackend` 上 |
 
 公开群广播在入站回调处直接返回。定向消息和原来的内部广播仍通知可达真人，被动真人加在这两类收件人里。

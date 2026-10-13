@@ -150,8 +150,11 @@ await Runner.spawn_team_member(
 |---|---|
 | 不存在 | 走正常新建 |
 | 同名且 role 不同 | `member_conflict` |
-| `SHUTDOWN_REQUESTED` 且非 passive | `member_shutting_down`（稍后重试） |
+| `SHUTDOWN_REQUESTED` 且非 passive | `member_shutting_down`（稍后重试；宿主可用 `remove(..., force=True)` 先收尾） |
 | `SHUTDOWN_REQUESTED` 且 passive | 先落到 `SHUTDOWN` 再重启用 |
+| `STOPPED` / `PAUSED` / `ERROR` / `SHUTDOWN` | 真正重启用（不是假成功） |
+| 角色冲突 | `member_conflict`；**不会**先写入传入的 `agent_spec` |
+| 重加成功 | **不**用本次 `agent_spec` 做能力热更新；沿用旧成员行配置 |
 | `SHUTDOWN` / `ERROR`，role 兼容 | 重启用：passive → `READY`；teammate/avatar → `restart_teammate` |
 | 仍在队且 role 一致 | 幂等 `ok=True`（不启第二份实例） |
 
@@ -171,7 +174,9 @@ await Runner.remove_team_member(
 - 已停机或不存在：幂等成功  
 - 真人（含 passive）持有进行中任务且 `force=False`：拒绝  
 - **passive**：无成员进程收尾，软停后直接落到 `SHUTDOWN`，避免永久卡在 `SHUTDOWN_REQUESTED`
-- **冷恢复**：`recover_team` **不会**把 `SHUTDOWN` / `SHUTDOWN_REQUESTED` 的成员再拉起来；移出后要回来必须 `allow_rejoin=True`。passive 不走 harness restart；若残留 `RESTARTING`/`ERROR`，恢复时结算回 `READY`
+- **退出残留**：`SHUTDOWN_REQUESTED` 时软 remove 仍幂等；`force=True` 会重发强制退出事件并把行结算到 `SHUTDOWN`（不重新启用）
+- **冷恢复**：`recover_team` **不会**把 `SHUTDOWN` / `SHUTDOWN_REQUESTED` 的成员再拉起来；移出后要回来必须 `allow_rejoin=True`。passive 不走 harness restart；若残留 `RESTARTING`/`ERROR`/`STOPPED`/`PAUSED`，恢复时结算回 `READY`
+- **持久团**：leader 启动时若非 Leader 成员已全部 `SHUTDOWN`，**不会**自动 `clean_team`（保留团行以便原名重加）；临时团仍会收尾清理
 
 查名册仍用既有监控接口（如 `get_agent_team_monitor`），本分支不另提供 `get_member` 宿主门面。
 
@@ -202,7 +207,7 @@ await Runner.interact_agent_team(
 |---|---|
 | 底账 | 数据库一条 `broadcast`，`meta.type=group_chat` |
 | 投影 | 可重建的 `history.jsonl`；`context_path` 指向它 |
-| 作者 | 宿主入口固定 `user`，**不能**传 `sender` |
+| 作者 | 宿主 `type=group_chat` 固定 `user`，**不能**传 `sender`；团内被动真人公开发言走 `HumanAgentToolCall(group_send_message)`，作者=该成员 |
 | 空 `mentions` | 只归档，不喂任何成员模型 |
 | 非空 `mentions` | 仅名单内可执行成员进未读摘录；不含发送者、`user`、`passive_human` |
 | `mentions` 含 `all` 或 `*` | 与 collaboration `@all` 对齐：叫醒当前全部可执行成员（同上排除规则）；档案里保留原 token，与具名并存时以全员为准 |
@@ -212,7 +217,7 @@ await Runner.interact_agent_team(
 
 成功时 `DeliverResult.data` 含：`message`、`duplicate`、`notified_members`（**可唤醒资格**，不是已读回执）、`context_path`。
 
-成员公开回复：工具 `group_send_message`（作者=当前成员）。`human_agent` / `passive_human` **不**注册该工具。
+成员公开回复：工具 `group_send_message`（作者=当前成员）。`human_agent` / `passive_human` **不**注册进模型工具集；`passive_human` 可由宿主 `HumanAgentToolCall` 代调同一工具。
 
 ### 3.2 普通内部广播 / 私信（旧能力，仍可用）
 
@@ -222,7 +227,7 @@ await Runner.interact_agent_team(
 - 按普通广播/定向邮箱规则投递  
 - 可达真人可触发 `register_human_agent_inbound` 回调  
 
-与公开区 `@all`（文档里的全员激活）不是同一套语义。本分支公开区**没有**语义化 `@all` token；要全员醒须由宿主把成员名填进 `mentions`。
+与公开区 `mentions: ["all"|"*"]` 不是同一套语义：后者进公开 Thread，前者只走内部邮箱。
 
 ### 3.3 公开区与 HITT 回调
 
@@ -241,8 +246,8 @@ await Runner.interact_agent_team(
 | 宿主工具透传 | `HumanAgentToolCall` | 不支持（avatar 路径） | — |
 | `target=None` | `passive_member_no_avatar` | 驱动 avatar | — |
 
-`HumanAgentToolCall` 白名单：`view_task`、`member_complete_task`、`verify_task`、`send_message`；自主调度下另有 `claim_task`。  
-这是宿主**代真人按按钮**，不是入站回调。
+`HumanAgentToolCall` 白名单（`PASSIVE_HUMAN_TOOLS`）：`view_task`、`member_complete_task`、`verify_task`、`send_message`、`group_send_message`；自主调度下另有 `claim_task`。  
+这是宿主**代真人按按钮**，不是入站回调。`group_send_message` 归档作者是 `sender`（该被动成员），不是团外 `user`。
 
 ---
 
@@ -294,7 +299,7 @@ text = await Runner.get_progress_report(
 |---|---|---|
 | 公开区开关 | `enable_group_chat`、`group_context_tail` | **无**；`type=group_chat` + 固定摘录 5 条 |
 | 公开历史 | `history.json` + `.notified.json` | DB 底账 + `history.jsonl`；读进度用广播水位 |
-| 宿主公开作者 | 可指定 sender（部分草案） | 固定 `user` |
+| 宿主公开作者 | 可指定 sender（部分草案） | `type=group_chat` 固定 `user`；被动真人用 `HumanAgentToolCall(group_send_message)` 以成员身份发 |
 | 空 `mentions` / 无 `@` | collaboration：默认叫醒 leader 或最近发言者 | **只归档，谁也不醒** |
 | 公开 `@all` | collaboration：并行叫醒全部 Agent/Team | **已支持**：`mentions` 含 `all` / `*`；仍不解析正文 `@` |
 | `# @all` | 旧 interact 语法 | 仍是**内部广播**，不是公开 Thread |

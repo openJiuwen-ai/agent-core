@@ -104,6 +104,14 @@ HUMAN_AGENT_TOOLS: set[str] = {
     "send_message",
 }
 
+# Tools the host may invoke as a ``passive_human`` via ``HumanAgentToolCall``.
+# Extends the avatar set with ``group_send_message`` so a PM can post to the
+# public thread under their own member identity. Avatar LLM tool registration
+# stays on ``HUMAN_AGENT_TOOLS`` and does not get this entry.
+PASSIVE_HUMAN_TOOLS: set[str] = HUMAN_AGENT_TOOLS | {
+    "group_send_message",
+}
+
 
 # ``member_name`` is used verbatim as a primary key, a message routing
 # token, and a path segment under ``team_home``. Allowing non-ASCII

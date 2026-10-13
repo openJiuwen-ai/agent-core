@@ -184,7 +184,7 @@ flowchart TD
 
 Leader 未被点名时仍扫描未读群消息的 `mentions`，拉起其中 `UNSTARTED` 或 `ERROR` 的成员。这是启动，不是把正文先交给 leader。leader 自己不在 `mentions` 里时，`get_broadcast_messages` 不把这行返回给他。`UNSTARTED` 走现有 `startup_member`。`ERROR` 用现有 `try_transition_member_status` 收到 `RESTARTING`，再走 `SpawnManager.restart_teammate`。`passive_human` 不进这个列表。`spawn_teammate` 见到这个角色直接跳过，避免恢复路径误起 harness。
 
-成员公开回复使用工具 `group_send_message`，与宿主输入共用归档和通知。作者绑定当前 `member_name`。`human_agent` 与 `passive_human` 不注册该工具。
+成员公开回复使用工具 `group_send_message`，与宿主输入共用归档和通知。作者绑定当前 `member_name`。`human_agent` 与 `passive_human` **不**把该工具注册进模型侧工具集；被动真人改由宿主 `HumanAgentToolCall` 代调（见 `PASSIVE_HUMAN_TOOLS`）。
 
 | 参数 | 必填 | 说明 |
 |---|---|---|
@@ -218,6 +218,7 @@ Leader 在 `hitt_enabled()` 时多一个工具 `spawn_passive_human`，参数只
 | `member_complete_task` | 有 | 有 |
 | `verify_task` | 有 | 有 |
 | `claim_task` | 有 | 无 |
+| `group_send_message` | 有 | 有 |
 
 成功时扩展 `DeliverResult`：`output` 为工具文本，`data` 为工具结构化结果。失败 token 包括 `tool_not_permitted:<名>`、`unknown_human_agent`、`passive_member_no_avatar`、`tool_passthrough_avatar_not_supported`。
 
