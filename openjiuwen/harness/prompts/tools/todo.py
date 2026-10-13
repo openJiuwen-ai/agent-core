@@ -18,7 +18,7 @@ TODO_CREATE_DESCRIPTION_CN = """
 ## 使用方式
 
 入参为 JSON 数组（每个任务必须包含 id 字段）：
-    {"tasks": [{"id": "translate_doc", "content": "翻译文档", "activeForm": "正在翻译文档", "description": "将文档翻译为目标语言", "selected_model_id": "fast"}, {"id": "analyze_arch", "content": "分析代码架构", "activeForm": "正在分析代码架构", "description": "梳理代码模块结构与依赖关系", "selected_model_id": "smart"}]}
+    {"todos": [{"id": "translate_doc", "content": "翻译文档", "activeForm": "正在翻译文档", "description": "将文档翻译为目标语言", "selected_model_id": "fast"}, {"id": "analyze_arch", "content": "分析代码架构", "activeForm": "正在分析代码架构", "description": "梳理代码模块结构与依赖关系", "selected_model_id": "smart"}]}
 
 ## 规则
 
@@ -36,7 +36,7 @@ Create a todo list for the current session to track progress, organize complex t
 ## Usage
 
 Input is a JSON array (each task must include an id field):
-    {"tasks": [{"id": "translate_doc", "content": "Translate document", "activeForm": "Translating document", "description": "Translate the document into the target language", "selected_model_id": "fast"}, {"id": "analyze_arch", "content": "Analyze code architecture", "activeForm": "Analyzing code architecture", "description": "Map out module structure and dependencies", "selected_model_id": "smart"}]}
+    {"todos": [{"id": "translate_doc", "content": "Translate document", "activeForm": "Translating document", "description": "Translate the document into the target language", "selected_model_id": "fast"}, {"id": "analyze_arch", "content": "Analyze code architecture", "activeForm": "Analyzing code architecture", "description": "Map out module structure and dependencies", "selected_model_id": "smart"}]}
 
 ## Rules
 
@@ -261,7 +261,7 @@ TODO_GET_DESCRIPTION: Dict[str, str] = {
 # Parameter-level bilingual descriptions
 # ---------------------------------------------------------------------------
 TODO_CREATE_PARAMS: Dict[str, Dict[str, str]] = {
-    "tasks": {
+    "todos": {
         "cn": (
             "子任务列表，JSON 数组格式。每个元素为任务对象，必填字段：\n"
             "- id：任务唯一标识符，由你自行指定，必须简短且语义清晰（如 \"translate_doc\"、\"analyze_code\"），"
@@ -370,14 +370,14 @@ def _todo_item_properties(language: str = "cn") -> Dict[str, Any]:
 def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
     """Return the full JSON Schema for todo_create tool input_params."""
     p = TODO_CREATE_PARAMS
-    tasks_desc = p["tasks"].get(language, p["tasks"]["cn"])
+    todos_desc = p["todos"].get(language, p["todos"]["cn"])
     item_props = _todo_item_properties(language)
     return {
         "type": "object",
         "properties": {
-            "tasks": {
+            "todos": {
                 "type": "array",
-                "description": tasks_desc,
+                "description": todos_desc,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -391,7 +391,7 @@ def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
                 },
             },
         },
-        "required": ["tasks"],
+        "required": ["todos"],
     }
 
 

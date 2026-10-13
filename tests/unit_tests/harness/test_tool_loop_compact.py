@@ -69,7 +69,7 @@ def _tool_call(tool_id: str, name: str, arguments: str) -> ToolCall:
 
 def _todo_round(index: int, *, arguments: str | None = None, result: str | None = None) -> list:
     args = arguments or (
-        '{"tasks":[{"id":"literature_review","content":"'
+        '{"todos":[{"id":"literature_review","content":"'
         + _CN_LIT_REVIEW
         + '","activeForm":"'
         + _CN_ACTIVE

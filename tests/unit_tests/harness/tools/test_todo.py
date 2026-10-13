@@ -172,7 +172,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
     async def test_invoke_create_json_array(self):
         """Creates todos from JSON array."""
         result = await self.tool.invoke({
-            "tasks": [
+            "todos": [
                 {"content": "Task 1", "activeForm": "Doing Task 1", "description": "Desc 1"},
                 {"content": "Task 2", "activeForm": "Doing Task 2", "description": "Desc 2"},
                 {"content": "Task 3", "activeForm": "Doing Task 3", "description": "Desc 3"}
@@ -187,7 +187,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
     async def test_invoke_create_with_chinese_content(self):
         """Chinese content in task fields works correctly."""
         inputs = {
-            "tasks": [
+            "todos": [
                 {"content": "需求分析", "activeForm": "正在分析需求", "description": "明确项目目标、用户需求及功能边界"},
                 {"content": "技术选型", "activeForm": "正在选型", "description": "评估并选择合适的技术栈"},
                 {"content": "实施方案", "activeForm": "正在制定方案", "description": "制定开发计划、分配任务"},
@@ -206,7 +206,7 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
             {"content": "Translate doc", "activeForm": "Translating doc", "description": "Translate document to English", "selected_model_id": "fast"},
             {"content": "Analyze code", "activeForm": "Analyzing code", "description": "Analyze code architecture", "selected_model_id": "smart"},
         ]
-        result = await self.tool.invoke({"tasks": tasks}, session=self.mock_session)
+        result = await self.tool.invoke({"todos": tasks}, session=self.mock_session)
         self.assertIn("Successfully created 2 task(s)", result["message"])
         saved = self.tool.save_todos.call_args[0][1]
         self.assertEqual(saved[0].selected_model_id, "fast")
@@ -216,26 +216,26 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
     async def test_invoke_create_empty_tasks(self):
         """Raises error for empty task list."""
         with self.assertRaises(Exception):
-            await self.tool.invoke({"tasks": []}, session=self.mock_session)
+            await self.tool.invoke({"todos": []}, session=self.mock_session)
 
-    async def test_invoke_missing_tasks_param(self):
-        """Raises error when tasks parameter is missing."""
+    async def test_invoke_missing_todos_param(self):
+        """Raises error when todos parameter is missing."""
         with self.assertRaises(Exception):
             await self.tool.invoke({}, session=self.mock_session)
 
     async def test_invoke_create_invalid_json_string(self):
         """Raises error for non-array input (string format no longer supported)."""
         with self.assertRaises(Exception):
-            await self.tool.invoke({"tasks": "not a valid json array"}, session=self.mock_session)
+            await self.tool.invoke({"todos": "not a valid json array"}, session=self.mock_session)
 
     async def test_invoke_create_missing_required_field(self):
         """Raises error when required field (content, activeForm, or description) is missing."""
         with self.assertRaises(Exception):
-            await self.tool.invoke({"tasks": [{"activeForm": "Doing"}]}, session=self.mock_session)
+            await self.tool.invoke({"todos": [{"activeForm": "Doing"}]}, session=self.mock_session)
         with self.assertRaises(Exception):
-            await self.tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
+            await self.tool.invoke({"todos": [{"content": "Task 1"}]}, session=self.mock_session)
         with self.assertRaises(Exception):
-            await self.tool.invoke({"tasks": [{"content": "Task 1", "activeForm": "Doing"}]}, session=self.mock_session)
+            await self.tool.invoke({"todos": [{"content": "Task 1", "activeForm": "Doing"}]}, session=self.mock_session)
 
 
 class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
@@ -266,8 +266,8 @@ class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
     async def test_invoke_list_success(self):
         """Returns only active (non-completed, non-cancelled) tasks in simplified format."""
         result = await self.tool.invoke({}, session=self.mock_session)
-        self.assertIn("tasks", result)
-        tasks = result["tasks"]
+        self.assertIn("todos", result)
+        tasks = result["todos"]
         # Only IN_PROGRESS and PENDING should be returned
         self.assertEqual(len(tasks), 2)
         contents = [t["content"] for t in tasks]
