@@ -45,6 +45,6 @@ Image / speech / video generation is served by `OpenAIModelClient` when `client_
 
 The OpenAI-compatible implementation passes `api_base` to the OpenAI SDK **verbatim** (the SDK appends `/chat/completions` itself); `/v1` is never appended. Gateway-specific paths (e.g. `https://gw.example.com/llm`) and URLs with a query string work as configured.
 
-Only the raw HTTP gateway path (the KV-affinity streaming flow of the `ascend_affinity` / `inference_affinity` endpoint profiles) keeps the legacy AscendAffinity/InferenceAffinity normalization: it appends `/v1` and tolerates an `/v1/chat/completions` suffix.
+Only the KV-affinity flow (`extensions.kv_cache.mode` set to `"affinity"`, e.g. the config produced by normalizing the legacy `client_provider="AscendAffinity"`; there are no `ascend_affinity` / `inference_affinity` endpoint profiles) keeps the legacy AscendAffinity client normalization: non-streaming, streaming, and KV-management requests all go through the raw HTTP gateway path, which appends `/v1` and tolerates an `/v1/chat/completions` suffix.
 
 **Migrating from older versions**: if you relied on "any host works, the framework appends `/v1`", spell out the full `api_base` (e.g. `https://host/v1`) — otherwise requests will hit the wrong path.
