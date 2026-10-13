@@ -237,8 +237,18 @@ async def _validate_assignees(
     tasks: list[dict],
     *,
     required: bool,
+    batch_members: frozenset[str] = frozenset(),
 ) -> str | None:
-    """Reject assignees that are missing, unknown, or point to the leader."""
+    """Reject assignees that are missing, unknown, or point to the leader.
+
+    Args:
+        agent_team: Backend used for the leader lookup and the roster probe.
+        tasks: Task specs whose ``assignee`` is checked.
+        required: Whether every spec must name an assignee.
+        batch_members: Inline member names declared by this same call. They
+            are written to the roster only after validation, so an assignee
+            naming one of them is accepted without the existence probe.
+    """
     leader_member_name = await agent_team.resolve_leader_member_name()
     for spec in tasks:
         assignee = (spec.get("assignee") or "").strip()
@@ -254,6 +264,8 @@ async def _validate_assignees(
                 f"Task {_spec_label(spec)!r}: assignee {assignee!r} is the team leader; "
                 f"assign the task to a non-leader member"
             )
+        if assignee in batch_members:
+            continue
         if not await agent_team.member_exists(assignee):
             return f"Task {_spec_label(spec)!r}: member {assignee!r} not found in the team"
     return None
@@ -592,9 +604,17 @@ class ScheduledTaskCreateTool(TeamTool):
         if error:
             return ToolOutput(success=False, error=error)
         # Existing-member checks for plain assignees; inline names are written
-        # right after and would fail the existence probe here by design.
+        # right after and would fail the existence probe here by design. A
+        # plain task may still name an inline member declared elsewhere in
+        # this call: its row lands before ``add_graph`` needs the owner.
         plain = [spec for spec in tasks if spec.get("member") is None]
-        error = await _validate_assignees(self.agent_team, plain, required=True)
+        batch_members = frozenset(spec["assignee"] for spec in tasks if spec.get("member") is not None)
+        error = await _validate_assignees(
+            self.agent_team,
+            plain,
+            required=True,
+            batch_members=batch_members,
+        )
         if error:
             return ToolOutput(success=False, error=error)
 

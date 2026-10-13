@@ -1127,6 +1127,53 @@ async def test_scheduled_create_task_declares_member_inline(db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_scheduled_create_task_assignee_may_name_an_inline_member_of_the_batch(db):
+    """A later task can be owned by a member an earlier task of the same call declares."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke(
+        {
+            "tasks": [
+                {"task_id": "write", "title": "write", "content": "c", "member": _inline("poet-a")},
+                {"task_id": "collect", "title": "collect", "content": "c", "assignee": "poet-a", "depends_on": ["write"]},
+            ]
+        }
+    )
+    assert result.success, result.error
+
+    collect = await backend.task_manager.get("collect")
+    assert collect.assignee == "poet-a"
+    assert collect.status == TaskStatus.BLOCKED.value
+    assert (await backend.task_manager.get("write")).assignee == "poet-a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_create_task_unknown_assignee_still_rejected_beside_inline_members(db):
+    """Names outside both the roster and the batch's inline members stay rejected, with nothing written."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke(
+        {
+            "tasks": [
+                {"task_id": "write", "title": "write", "content": "c", "member": _inline("poet-a")},
+                {"task_id": "collect", "title": "collect", "content": "c", "assignee": "ghost"},
+            ]
+        }
+    )
+
+    assert not result.success
+    assert "'ghost' not found" in result.error
+    assert not await backend.member_exists("poet-a")
+    assert await backend.task_manager.get("write") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("member", "assignee", "needle"),
     [

@@ -255,8 +255,8 @@ STRINGS: dict[str, str] = {
     # Both create_task variants expose assignee. Autonomous treats it as
     # optional; scheduled requires it.
     "create_task.task.assignee": (
-        "承担该任务的成员名称；该成员必须已存在且不能是 leader。自主模式可选，未填写则进入公共认领池；"
-        "调度模式必填，成员不会自主认领"
+        "承担该任务的成员名称；该成员必须已存在（调度模式下也可以是本次调用中其他任务用 member 内联声明的成员）"
+        "且不能是 leader。自主模式可选，未填写则进入公共认领池；调度模式必填，成员不会自主认领"
     ),
     "create_task.task.member": (
         "随任务一起创建的承担者（与 assignee 二选一）：字段同 spawn_teammate"

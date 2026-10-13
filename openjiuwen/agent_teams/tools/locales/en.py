@@ -351,7 +351,8 @@ STRINGS: dict[str, str] = {
     # Both create_task variants expose assignee. Autonomous treats it as
     # optional; scheduled requires it.
     "create_task.task.assignee": (
-        "Member name that carries this task; the member must already exist and must not be the leader. "
+        "Member name that carries this task; the member must already exist (in scheduled mode it may also be a "
+        "member declared inline via 'member' by another task of the same call) and must not be the leader. "
         "Optional in autonomous mode (omitted tasks enter the shared claim pool); required in scheduled mode "
         "because members never claim there"
     ),
