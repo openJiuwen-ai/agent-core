@@ -829,3 +829,42 @@ async def test_temp_reviewer_runs_under_its_own_trajectory_subject(db, bus, monk
     assert subject.session_id == "sched_session"
     # The scope is released once the reviewer run returns.
     assert current_execution_subject() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_prompt_carries_its_previous_round_feedback(db, bus):
+    from openjiuwen.agent_teams.agent.scheduling import render
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
+    first_round = await tm.get("r")
+    # The first round has no previous vote, so the section is left out.
+    assert await tm.get_previous_round_vote(first_round, "rev-1") is None
+    first_prompt = await render.render_review_request_for_harness(first_round, language="en", reviewer="rev-1")
+    assert "previous round" not in first_prompt
+    assert "{{task.previous_feedback}}" not in first_prompt
+
+    rev_1 = _reviewer_mgr(db, bus, "rev-1")
+    assert (await rev_1.verify_task("r", "fail", "too vague")).ok
+    assert (await rev_1.verify_task("r", "fail", "missing the auth section")).ok
+    assert (await _reviewer_mgr(db, bus, "rev-2").verify_task("r", "pass")).ok
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    assert (await tm.get("r")).status == TaskStatus.IN_PROGRESS.value
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("r")).ok
+    second_round = await tm.get("r")
+    assert second_round.review_round == first_round.review_round + 1
+
+    # The reviewer's latest vote of the previous round wins.
+    previous = await tm.get_previous_round_vote(second_round, "rev-1")
+    assert previous.decision == "fail"
+    assert previous.feedback == "missing the auth section"
+    prompt = await render.render_review_request_for_harness(
+        second_round,
+        language="en",
+        reviewer="rev-1",
+        previous_vote=previous,
+    )
+    assert f"previous round (round {first_round.review_round})" in prompt
+    assert "missing the auth section" in prompt
+    assert "too vague" not in prompt

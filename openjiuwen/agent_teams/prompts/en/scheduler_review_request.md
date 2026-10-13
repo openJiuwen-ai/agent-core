@@ -2,6 +2,8 @@
 
 {{task.reviewer_instruction}}
 
+{{task.previous_feedback}}
+
 ## Goal and acceptance criteria
 
 {{task.content}}

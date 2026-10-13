@@ -19,16 +19,20 @@ Two audiences, two mechanisms:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.message_template import build_meta
 from openjiuwen.agent_teams.schema.status import TaskStatus
 
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.tools.models import TeamTaskReviewVoteBase
+
 # Template keys, i.e. ``prompts/<lang>/<key>.md`` basenames.
 _TASK_START = "scheduler_task_start"
 _TASK_START_PLAN = "scheduler_task_start_plan"
 _REVIEW_REQUEST = "scheduler_review_request"
+_REVIEW_PREVIOUS_FEEDBACK = "scheduler_review_previous_feedback"
 _REVIEW_RENUDGE = "scheduler_review_renudge"
 _REWORK = "scheduler_rework"
 _REWORK_SUMMARY = "scheduler_rework_summary"
@@ -137,12 +141,18 @@ async def render_review_request_for_harness(
     language: str = "cn",
     reviewer: str = "",
     loader: "Any" = None,  # TemplateLoader — bound lazily to dodge import cycles
+    previous_vote: "TeamTaskReviewVoteBase | None" = None,
 ) -> str:
     """Render the review request as a plain user prompt for a temp reviewer harness.
 
     ``loader`` binds the team scheduler's per-team workspace cache so
     reviewer_* templates read evolved workspace values; ``None`` (default)
     keeps the framework read-only loader.
+
+    A temp reviewer starts every round with a fresh context, so its own vote
+    of the previous round (``previous_vote``) is rendered into the request:
+    the reviewer can then check whether the rework it asked for was done.
+    Without one (first round, or no vote then) the section is left out.
     """
     from openjiuwen.agent_teams.prompts.loader import load_template
 
@@ -167,4 +177,11 @@ async def render_review_request_for_harness(
                 instruction = detail.get("instruction", "")
                 break
     body = body.replace("{{task.reviewer_instruction}}", instruction)
+    previous = ""
+    if previous_vote is not None:
+        previous = loader(_REVIEW_PREVIOUS_FEEDBACK, language).content.strip()
+        previous = previous.replace("{{vote.review_round}}", str(previous_vote.review_round))
+        previous = previous.replace("{{vote.decision}}", previous_vote.decision)
+        previous = previous.replace("{{vote.feedback}}", previous_vote.feedback or t("scheduler.none"))
+    body = body.replace("{{task.previous_feedback}}", previous)
     return body

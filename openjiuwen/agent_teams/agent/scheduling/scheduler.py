@@ -619,11 +619,15 @@ class TeamScheduler:
 
             # Use the review request message as the prompt: template
             # rendered at delivery-time against the current task row.
+            # The reviewer runs with a fresh context every round; its own
+            # previous-round vote is the only carry-over it gets.
+            previous_vote = await task_manager.get_previous_round_vote(task, reviewer)
             review_prompt = await render.render_review_request_for_harness(
                 task,
                 language=language,
                 reviewer=reviewer,
                 loader=self._template_loader,
+                previous_vote=previous_vote,
             )
             reviewer_subject = team_member_execution_subject(
                 session_id=get_session_id() or "",

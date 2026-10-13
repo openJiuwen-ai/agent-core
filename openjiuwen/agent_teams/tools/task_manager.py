@@ -63,6 +63,7 @@ from openjiuwen.agent_teams.tools.database import (
     TeamTaskBase,
     TeamTaskDependencyBase,
 )
+from openjiuwen.agent_teams.tools.models import TeamTaskReviewVoteBase
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.core.common.logging import team_logger
 
@@ -826,6 +827,29 @@ class TeamTaskManager:
             if detail.get("reviewer_id") == reviewer_name:
                 return detail.get("type", "verifier")
         return "verifier"
+
+    async def get_previous_round_vote(self, task, reviewer: str) -> TeamTaskReviewVoteBase | None:
+        """Return one reviewer's latest vote in the round before the current one.
+
+        A temp reviewer runs with a fresh context every round, so this vote is
+        the only memory it gets of what it asked the assignee to rework.
+
+        Args:
+            task: The task row whose ``review_round`` names the current round.
+            reviewer: Reviewer whose vote to look up.
+
+        Returns:
+            The reviewer's latest vote of round ``review_round - 1``, or None
+            on the first round or when the reviewer did not vote then.
+        """
+        if task.review_round <= 1:
+            return None
+        votes = await self.db.task.get_review_votes(task.task_id, task.review_round - 1)
+        latest = None
+        for vote in votes:
+            if vote.reviewer == reviewer:
+                latest = vote
+        return latest
 
     async def get_review_tally(self, task) -> dict[str, Any]:
         """Snapshot the current-round vote tally of one IN_REVIEW task.

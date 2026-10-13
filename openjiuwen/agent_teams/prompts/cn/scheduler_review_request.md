@@ -2,6 +2,8 @@
 
 {{task.reviewer_instruction}}
 
+{{task.previous_feedback}}
+
 ## 任务目标与验收标准
 
 {{task.content}}
