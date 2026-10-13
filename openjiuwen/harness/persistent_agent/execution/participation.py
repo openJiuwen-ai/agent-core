@@ -106,10 +106,13 @@ def _recent_block(messages) -> str:
         return "无"
     lines = []
     for message in messages:
-        if message.status == "recalled" or message.text is None:
+        # An unreadable body is not a recall; telling them apart keeps the judgment on true facts.
+        if message.status == "recalled":
             body = "已撤回"
+        elif message.status == "unavailable":
+            body = "正文暂缺"
         else:
-            body = message.text
+            body = message.text if message.text else "（无正文）"
         label = "排队背景" if message.queued_request else "群消息"
         lines.append(f"- {label} {message.sender_name}: {body}")
     return "\n".join(lines)
