@@ -41,9 +41,9 @@ from openjiuwen.harness.rails.task_planning_rail import (
 from openjiuwen.harness.rails.heartbeat_rail import (
     HeartbeatRail,
 )
+from openjiuwen.core.common.run_context import HeartbeatReason
 from openjiuwen.core.single_agent.rail.base import (
     RunKind,
-    HeartbeatReason,
 )
 from openjiuwen.harness.tools import (
     ReadFileTool, WriteFileTool, EditFileTool,

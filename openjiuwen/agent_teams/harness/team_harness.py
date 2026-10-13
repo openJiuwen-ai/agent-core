@@ -37,6 +37,7 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_h
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 
@@ -289,14 +290,26 @@ class TeamHarness:
             )
         return self._native.outputs()
 
-    async def send(self, content: Any, *, immediate: bool = False) -> Any:
+    async def send(
+        self,
+        content: Any,
+        *,
+        immediate: bool = False,
+        run_context: RunContext | None = None,
+    ) -> Any:
         """Submit input to the native; ``immediate`` steers the active round."""
         if self._native is None:
             raise_error(
                 StatusCode.AGENT_TEAM_EXECUTION_ERROR,
                 error_msg="TeamHarness.send() before start().",
             )
-        return await self._native.send(content, immediate=immediate)
+        if run_context is None:
+            return await self._native.send(content, immediate=immediate)
+        return await self._native.send(
+            content,
+            immediate=immediate,
+            run_context=run_context,
+        )
 
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the active round: graceful (False) or hard+rollback (True).

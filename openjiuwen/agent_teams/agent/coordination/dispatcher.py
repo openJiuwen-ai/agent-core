@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Event dispatcher for TeamAgent coordination events.
 
 Trigger rules (coarse filters: agent_ready, inner-vs-transport, role
@@ -50,6 +50,7 @@ from openjiuwen.agent_teams.schema.events import TeamEvent
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner.callback import AsyncCallbackFramework
 
 
@@ -97,11 +98,22 @@ class AgentRoundController(Protocol):
         """Cancel the running agent task."""
         ...
 
-    async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
+    async def deliver_input(
+        self,
+        content: Any,
+        *,
+        use_steer: bool = True,
+        run_context: RunContext | None = None,
+    ) -> None:
         """Guarantee that content reaches the DeepAgent regardless of state."""
         ...
 
-    async def resume_interrupt(self, user_input: Any) -> None:
+    async def resume_interrupt(
+        self,
+        user_input: Any,
+        *,
+        run_context: RunContext | None = None,
+    ) -> None:
         """Resume a pending HITL interrupt with structured input."""
         ...
 

@@ -14,11 +14,11 @@ import pytest
 
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.runner import Runner
+from openjiuwen.core.common.run_context import HeartbeatReason
 from openjiuwen.core.single_agent.rail.base import (
     InvokeInputs,
     RunKind,
     RunContext,
-    HeartbeatReason,
 )
 from openjiuwen.core.sys_operation import (
     SysOperationCard,

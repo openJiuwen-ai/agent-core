@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """TaskLoopController — Controller subclass for round-based loops.
 
 Encapsulates round management (prepare/wait/complete),
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.controller.base import Controller
 from openjiuwen.core.controller.schema.event import InputEvent
 from openjiuwen.core.session.agent import Session
@@ -49,7 +50,7 @@ class TaskLoopController(Controller):
         query: str,
         is_follow_up: bool = False,
         run_kind: Any = None,
-        run_context: Any = None,
+        run_context: RunContext | None = None,
         *,
         task_id: Optional[str] = None,
         turn_number: Optional[int] = None,

@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import dataclasses
 import os
 import uuid
 from contextlib import AbstractAsyncContextManager, aclosing, suppress
@@ -30,6 +29,7 @@ from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.run_context import normalize_run_context
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -1723,17 +1723,7 @@ class DeepAgent(BaseAgent):
                 run_kind = RunKind(kind)
                 context_data = run.get("context")
                 if context_data:
-                    _rc_fields = {f.name for f in dataclasses.fields(RunContext)}
-                    extra = dict(context_data.get("extra") or {})
-                    for k, v in context_data.items():
-                        if k not in _rc_fields:
-                            extra[k] = v
-                    rc_kwargs = {
-                        k: v for k, v in context_data.items()
-                        if k in _rc_fields
-                    }
-                    rc_kwargs["extra"] = extra
-                    run_context = RunContext(**rc_kwargs)
+                    run_context = normalize_run_context(context_data)
             # Merge raw_query into RunContext.extra
             # (without affecting run_kind for normal queries)
             raw_query = inputs.get("raw_query", "")

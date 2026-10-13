@@ -52,6 +52,7 @@ from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
 from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
 from openjiuwen.core.single_agent.base import BaseAgent
@@ -434,14 +435,27 @@ class TeamAgent(BaseAgent):
     def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()
 
-    async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
+    async def deliver_input(
+        self,
+        content: Any,
+        *,
+        use_steer: bool = True,
+        run_context: RunContext | None = None,
+    ) -> None:
         # The runtime's single supervisor serialises inputs: send() starts a
         # round when idle, steers (use_steer) or queues a follow-up when running.
         # No transition-window race, so no manual branch / pending queue here.
         harness = self.harness
         if harness is None:
             return
-        await harness.send(content, immediate=use_steer)
+        if run_context is None:
+            await harness.send(content, immediate=use_steer)
+            return
+        await harness.send(
+            content,
+            immediate=use_steer,
+            run_context=run_context,
+        )
 
     def set_background_task_controller(self, controller: Any) -> None:
         """Attach the embedder's background task controller to this member's brain.
@@ -537,7 +551,12 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             await harness.send(content, immediate=True)
 
-    async def resume_interrupt(self, user_input) -> None:
+    async def resume_interrupt(
+        self,
+        user_input: Any,
+        *,
+        run_context: RunContext | None = None,
+    ) -> None:
         if not self._stream_controller.is_valid_interrupt_resume(user_input):
             team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
             return
@@ -545,7 +564,10 @@ class TeamAgent(BaseAgent):
         # round (idle) or steers it into the active one — no pending queue.
         harness = self.harness
         if harness is not None:
-            await harness.send(user_input)
+            if run_context is None:
+                await harness.send(user_input)
+            else:
+                await harness.send(user_input, run_context=run_context)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract method: configure

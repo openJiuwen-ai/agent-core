@@ -316,7 +316,7 @@ async def submit_round(
     query: str,
     is_follow_up: bool = False,
     run_kind: Any = None,
-    run_context: Any = None,
+    run_context: RunContext | None = None,
 ) -> None
 ```
 
@@ -330,7 +330,7 @@ async def submit_round(
 | `query` | `str` | 用户查询文本 |
 | `is_follow_up` | `bool` | 本轮是否为后续延续 |
 | `run_kind` | `Any` | 心跳支持的运行类型 |
-| `run_context` | `Any` | 心跳支持的运行上下文 |
+| `run_context` | `RunContext \| None` | 本次调用的请求级运行上下文 |
 
 ---
 

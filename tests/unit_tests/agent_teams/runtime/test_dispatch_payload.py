@@ -81,7 +81,10 @@ async def test_god_view_always_goes_to_leader():
     result = await TeamRuntimeManager._dispatch_payload(agent, payload)
 
     assert result.ok
-    agent.deliver_input.assert_awaited_once_with("@dev-1 should not be parsed here")
+    agent.deliver_input.assert_awaited_once_with(
+        "@dev-1 should not be parsed here",
+        run_context=None,
+    )
     agent.team_backend.message_manager.send_message.assert_not_called()
     agent.team_backend.message_manager.broadcast_message.assert_not_called()
 
@@ -215,7 +218,7 @@ async def test_interact_str_hash_prefix_routes_to_god_view():
     result = await manager.interact("# raw question", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent.deliver_input.assert_awaited_once_with("raw question")
+    agent.deliver_input.assert_awaited_once_with("raw question", run_context=None)
     agent.team_backend.message_manager.send_message.assert_not_called()
     agent.team_backend.message_manager.broadcast_message.assert_not_called()
 
@@ -267,7 +270,10 @@ async def test_interact_str_no_prefix_falls_back_to_god_view():
     result = await manager.interact("just a plain question", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent.deliver_input.assert_awaited_once_with("just a plain question")
+    agent.deliver_input.assert_awaited_once_with(
+        "just a plain question",
+        run_context=None,
+    )
     agent.team_backend.message_manager.send_message.assert_not_called()
 
 
@@ -281,7 +287,7 @@ async def test_interact_str_at_target_without_body_is_unparseable():
     result = await manager.interact("@dev-1", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent.deliver_input.assert_awaited_once_with("@dev-1")
+    agent.deliver_input.assert_awaited_once_with("@dev-1", run_context=None)
     agent.team_backend.message_manager.send_message.assert_not_called()
 
 
@@ -302,7 +308,7 @@ async def test_interact_str_unknown_member_folds_to_god_view():
     result = await manager.interact("@ghost ship it", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent.deliver_input.assert_awaited_once_with("@ghost ship it")
+    agent.deliver_input.assert_awaited_once_with("@ghost ship it", run_context=None)
     agent.team_backend.message_manager.send_message.assert_not_called()
 
 
@@ -316,7 +322,10 @@ async def test_interact_str_multiple_unknown_members_fold_into_one_message():
     result = await manager.interact("# @g1 @g2 stand-up in 5", team_name="alpha", session_id="s1")
 
     assert result.ok
-    agent.deliver_input.assert_awaited_once_with("@g1 @g2 stand-up in 5")
+    agent.deliver_input.assert_awaited_once_with(
+        "@g1 @g2 stand-up in 5",
+        run_context=None,
+    )
     agent.team_backend.message_manager.send_message.assert_not_called()
 
 
@@ -351,7 +360,7 @@ async def test_interact_str_partial_match_routes_known_and_folds_unknown():
         to_member_name="m1",
         from_member_name="user",
     )
-    agent.deliver_input.assert_awaited_once_with("@ghost on it")
+    agent.deliver_input.assert_awaited_once_with("@ghost on it", run_context=None)
 
 
 # ----------------------------------------------------------------------

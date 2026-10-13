@@ -25,7 +25,8 @@ harness/
 两条队列，同一个语义——**攒住的东西整批喂给下一次模型调用**：
 
 - `send(immediate=True)` 推进当前 round 的 steering 队列，inner loop 在下一次 model call
-  之前 drain；
+  之前 drain；每条即时输入携带自己的 `run_context`，不同上下文的连续消息分属不同 model
+  boundary，消费时才切换 callback context，不能因为上下文不同而降级成 follow-up；
 - `send(immediate=False)` 进 follow-up 队列，round 结束时**整批** drain 出来驱动下一轮
   （[[F_71]]）。曾经是 `pop(0)` 一条一轮——两条队列本该同义却不同义，代价是每条排队输入
   各烧一个完整 round，而且成员对最旧那条动手时看不见后面还排着什么。
@@ -131,6 +132,8 @@ swarmflow→`w`、未注册→`t`）；`id_generator.py` 在 agent_teams 顶层�
 
 1. **框架不牵扯 TeamAgent。** 只依赖 NativeHarness 公共表面（`send` / `launch_async_tool` /
    `model`）。`TeamAgent.deliver_input` 只是 `harness.send` 的薄包装；要注入直接用 harness。
+   `send(..., run_context=...)` 的上下文按模型轮次隔离：延迟输入遵守全局 FIFO，只批量合并
+   连续且 `run_context` 相同的字符串输入，绝不能跨上下文合并或重排。
 2. **没有异步 tool_result。** 启动段与完成段是两个独立回合；完成结果绝不回到原 `tool_use_id`。
 3. **不收编 sessions_spawn / 不走 TaskScheduler 的 SESSION_SPAWN。** 避免结果写进 DeepAgent
    `pending_follow_ups`（进 session checkpoint 的 user-bound 语义）污染恢复。

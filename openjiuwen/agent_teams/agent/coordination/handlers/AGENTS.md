@@ -50,7 +50,7 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
 
 | 事件 | 策略 |
 |---|---|
-| `USER_INPUT`（inner） | 直接 `deliver_input`。**路由已经在更上游做完**（`TeamRuntimeManager._dispatch_god_view` 解析 `@member`），到这里的输入必然是给本 agent 的，handler 不再解析 mention |
+| `USER_INPUT`（inner） | 直接 `deliver_input`，并原样透传 payload 中的 request-local `run_context`。**路由已经在更上游做完**（`TeamRuntimeManager._dispatch_god_view` 解析 `@member`），到这里的输入必然是给本 agent 的，handler 不再解析 mention |
 | `STANDBY` | `pause_polls()`，仅此 |
 | `CLEANED` | 非 leader → `shutdown_self()`。**leader 分支恒 no-op**：persistent leader 必须活过 `clean_team` 去接下一次交互；temporary leader 的收尾由 `StreamController._on_idle_settled` 查 `state.team_cleaned` 这个 latch 驱动，走总线事件会跟 round-end 抢跑 |
 | `TOOL_APPROVAL_RESULT` | 目标是自己才 `resume_interrupt`，把审批结果包成 `InteractiveInput` 灌回被中断的工具调用 |

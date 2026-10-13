@@ -72,6 +72,7 @@ from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_workt
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.session.agent_team import (
     Session as AgentTeamSession,
 )
@@ -494,6 +495,7 @@ class TeamRuntimeManager:
         *,
         team_name: str,
         session_id: str,
+        run_context: RunContext | None = None,
     ) -> DeliverResult:
         """Route an interact payload through the active team's gate.
 
@@ -540,7 +542,10 @@ class TeamRuntimeManager:
 
         if isinstance(payload, InteractiveInput):
             if entry.agent.has_pending_interrupt():
-                await entry.agent.resume_interrupt(payload)
+                await entry.agent.resume_interrupt(
+                    payload,
+                    run_context=run_context,
+                )
                 return DeliverResult.success(None)
             return DeliverResult.failure("unsupported_interactive_input")
 
@@ -587,7 +592,12 @@ class TeamRuntimeManager:
             # routing directives — they fold back into a no-mention
             # message for the leader / avatar instead of silently
             # writing a bus message to a non-existent member.
-            return await self.dispatch_payloads(entry.agent, payloads, entry=entry)
+            return await self.dispatch_payloads(
+                entry.agent,
+                payloads,
+                entry=entry,
+                run_context=run_context,
+            )
         finally:
             await entry.interact_gate.consume_done(ticket)
 
@@ -674,13 +684,19 @@ class TeamRuntimeManager:
         payloads: list[InteractPayload],
         *,
         entry: Optional["ActiveTeam"] = None,
+        run_context: RunContext | None = None,
     ) -> DeliverResult:
         """Resolve and dispatch interact payloads through the runtime router."""
         payloads = await TeamRuntimeManager._resolve_recipients(agent, payloads)
 
         last_result: DeliverResult = DeliverResult.success(None)
         for entry_payload in payloads:
-            last_result = await TeamRuntimeManager._dispatch_payload(agent, entry_payload, entry=entry)
+            last_result = await TeamRuntimeManager._dispatch_payload(
+                agent,
+                entry_payload,
+                entry=entry,
+                run_context=run_context,
+            )
             if not last_result.ok:
                 return last_result
         return last_result
@@ -713,6 +729,7 @@ class TeamRuntimeManager:
         payload: InteractPayload,
         *,
         entry: Optional["ActiveTeam"] = None,
+        run_context: RunContext | None = None,
     ) -> DeliverResult:
         backend = agent.team_backend
         if backend is None and not isinstance(payload, GodViewMessage):
@@ -730,7 +747,11 @@ class TeamRuntimeManager:
             # decisions (``@<member>`` / ``# body`` / ``$<avatar>``)
             # live in ``parse_interact_str`` on the str-input boundary
             # and surface as concrete payload types of their own.
-            return await UserInbox.deliver_to_leader(agent.deliver_input, payload.body)
+            async def _deliver_to_leader(body: str) -> None:
+                """Deliver one input with its invocation-scoped context."""
+                await agent.deliver_input(body, run_context=run_context)
+
+            return await UserInbox.deliver_to_leader(_deliver_to_leader, payload.body)
         if isinstance(payload, OperatorMessage):
             inbox = UserInbox(backend.message_manager)
             if payload.target is None:

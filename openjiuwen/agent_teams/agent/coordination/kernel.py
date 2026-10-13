@@ -664,10 +664,14 @@ class CoordinationKernel:
         if self._event_bus is None:
             return
         query = inputs.get("query", "") if isinstance(inputs, dict) else inputs
+        run_context = inputs.get("run_context") if isinstance(inputs, dict) else None
         await self._event_bus.enqueue(
             InnerEventMessage(
                 event_type=InnerEventType.USER_INPUT,
-                payload={"content": query},
+                payload={
+                    "content": query,
+                    "run_context": run_context,
+                },
             )
         )
 

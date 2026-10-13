@@ -960,10 +960,10 @@ class ReActAgent(BaseAgent):
             queued, which also means no event was fired.
         """
         queue = ctx.steering_queue
-        if queue is None or queue.empty():
+        if queue is None or not ctx.has_pending_steering():
             return []
         previous_inputs = ctx.inputs
-        ctx.inputs = SteeringDrainInputs(pending=queue.qsize())
+        ctx.inputs = SteeringDrainInputs(pending=ctx.steering_pending_count())
         try:
             await ctx.fire(AgentCallbackEvent.BEFORE_STEERING_DRAIN)
             limit = ctx.inputs.limit

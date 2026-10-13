@@ -51,6 +51,10 @@ from typing import (
 )
 
 from openjiuwen.core.common.logging import runner_logger as logger
+from openjiuwen.core.common.run_context import (
+    RunContextInput,
+    normalize_run_context,
+)
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.multi_agent import (
     BaseTeam,
@@ -256,6 +260,7 @@ class _TeamRunnerMixin:
         envs: Optional[dict[str, Any]] = None,
         stream_logger: Optional["TeamStreamLogger"] = None,
         background_task_controller: Optional[Any] = None,
+        run_context: RunContextInput | None = None,
     ) -> AsyncIterator[Any]:
         """Stream-run an agent_teams TeamAgent identified by spec or team_name.
 
@@ -306,7 +311,18 @@ class _TeamRunnerMixin:
                     # Attach the embedder's pause/resume control surface to the
                     # leader brain; SwarmflowTool reads it to register run handles.
                     activation.agent.set_background_task_controller(background_task_controller)
-                async for chunk in activation.agent.stream(inputs, session=activation.session):
+                stream_inputs = inputs
+                normalized_run_context = normalize_run_context(run_context)
+                if normalized_run_context is not None:
+                    if isinstance(inputs, dict):
+                        stream_inputs = dict(inputs)
+                        stream_inputs["run_context"] = normalized_run_context
+                    else:
+                        stream_inputs = {
+                            "query": inputs,
+                            "run_context": normalized_run_context,
+                        }
+                async for chunk in activation.agent.stream(stream_inputs, session=activation.session):
                     if stream_logger is not None:
                         stream_logger.feed(chunk)
                     yield chunk
@@ -456,6 +472,7 @@ class _TeamRunnerMixin:
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        run_context: RunContextInput | None = None,
     ):
         """Deliver an interact payload to an active TeamAgent runtime.
 
@@ -486,6 +503,7 @@ class _TeamRunnerMixin:
                 payload,
                 team_name=team_name,
                 session_id=session_id,
+                run_context=normalize_run_context(run_context),
             )
 
     async def _maybe_attach_interact_observability(self, *, team_name: str, session_id: str) -> None:
@@ -977,6 +995,7 @@ class _TeamRunnerClassMixin:
         envs: Optional[dict[str, Any]] = None,
         stream_logger: Optional["TeamStreamLogger"] = None,
         background_task_controller: Optional[Any] = None,
+        run_context: RunContextInput | None = None,
     ) -> AsyncIterator[Any]:
         """Stream-run a team. ``base=True`` switches to the multi_agent
         ``BaseTeam`` path (``str | BaseTeam``); default goes through the
@@ -1011,6 +1030,7 @@ class _TeamRunnerClassMixin:
             envs=envs,
             stream_logger=stream_logger,
             background_task_controller=background_task_controller,
+            run_context=run_context,
         ):
             yield chunk
 
@@ -1021,12 +1041,14 @@ class _TeamRunnerClassMixin:
         *,
         team_name: Optional[str] = None,
         session_id: Optional[str] = None,
+        run_context: RunContextInput | None = None,
     ):
         """Deliver an interact payload to an active TeamAgent runtime."""
         return await _global_runner().interact_agent_team(
             payload,
             team_name=team_name,
             session_id=session_id,
+            run_context=run_context,
         )
 
     @classmethod

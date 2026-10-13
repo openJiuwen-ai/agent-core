@@ -17,6 +17,7 @@ import contextvars
 import sys
 import time
 from abc import ABC
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from enum import Enum
@@ -33,6 +34,7 @@ from typing import (
 )
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.run_context import RunContext
 
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import InteractiveInput
@@ -239,21 +241,6 @@ class RunKind(Enum):
     GOAL = "goal"
 
 
-class HeartbeatReason(Enum):
-    """Heartbeat trigger reason."""
-    INTERVAL = "interval"
-    MANUAL = "manual"
-
-
-@dataclass
-class RunContext:
-    """Structured runtime context for heartbeat."""
-    reason: Optional[HeartbeatReason] = None
-    session_id: Optional[str] = None
-    context_mode: Optional[str] = None
-    extra: Dict[str, Any] = field(default_factory=dict)
-
-
 # ================================================================
 # Typed Event Inputs
 # ================================================================
@@ -374,9 +361,7 @@ class TaskIterationInputs:
             (e.g. ``RunKind.GOAL``).  Set by the executor so
             that rails like ``TaskCompletionRail`` can identify
             goal rounds without reading task metadata directly.
-        run_context: Structured runtime context propagated from
-            task metadata.  May be a ``RunContext`` dataclass or
-            a plain dict depending on the caller.
+        run_context: Structured runtime context propagated from task metadata.
     """
     iteration: int
     loop_event: Any
@@ -385,7 +370,7 @@ class TaskIterationInputs:
     query: Optional[str] = None
     is_follow_up: bool = False
     run_kind: Any = None
-    run_context: Any = None
+    run_context: RunContext | None = None
 
 
 @dataclass
@@ -439,6 +424,26 @@ class SteeringDrainInputs:
     """
     pending: int = 0
     limit: int | None = None
+
+
+class SteeringInput(str):
+    """Carry one steering message with its request-local runtime context."""
+
+    run_context: RunContext | None
+
+    def __new__(
+        cls,
+        content: str,
+        run_context: RunContext | None = None,
+    ) -> "SteeringInput":
+        value = super().__new__(cls, content)
+        value.run_context = run_context
+        return value
+
+    @property
+    def content(self) -> str:
+        """Return the plain message content."""
+        return str(self)
 
 
 @dataclass
@@ -584,6 +589,9 @@ class AgentCallbackContext:
     _steering_queue: Optional[asyncio.Queue] = field(
         default=None, init=False, repr=False
     )
+    _steering_buffer: deque[Any] = field(
+        default_factory=deque, init=False, repr=False
+    )
 
     async def fire(
         self, event: AgentCallbackEvent
@@ -691,6 +699,7 @@ class AgentCallbackContext:
             queue: The shared asyncio.Queue instance.
         """
         self._steering_queue = queue
+        self._steering_buffer.clear()
 
     def push_steering(self, msg: str) -> None:
         """Push a steering message into the queue.
@@ -712,6 +721,9 @@ class AgentCallbackContext:
         where this one stopped. A non-empty queue always yields at least one
         message: consumption has to make progress, or ``has_pending_steering``
         would keep the loop going over a backlog nothing ever consumes.
+        Contextual inputs are batched only while their runtime context stays
+        unchanged; consuming a contextual batch switches the callback context
+        before the next model call.
 
         Args:
             limit: The most this call may take. ``None`` (the default) takes
@@ -726,26 +738,47 @@ class AgentCallbackContext:
             return []
         take = None if limit is None else max(1, limit)
         msgs: List[str] = []
-        while not self._steering_queue.empty():
+        contextual = False
+        run_context: RunContext | None = None
+        while self._steering_buffer or not self._steering_queue.empty():
             if take is not None and len(msgs) >= take:
                 break
             try:
-                msgs.append(
-                    self._steering_queue.get_nowait()
-                )
+                if self._steering_buffer:
+                    item = self._steering_buffer.popleft()
+                else:
+                    item = self._steering_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            item_contextual = isinstance(item, SteeringInput)
+            item_context = item.run_context if item_contextual else None
+            if msgs and (item_contextual != contextual or item_context != run_context):
+                self._steering_buffer.appendleft(item)
+                break
+            if not msgs:
+                contextual = item_contextual
+                run_context = item_context
+            msgs.append(item.content if item_contextual else item)
+        if contextual and msgs:
+            self.extra["run_context"] = run_context
         return msgs
 
     def has_pending_steering(self) -> bool:
         """Check whether steering messages are pending.
 
         Returns:
-            True if a queue is bound and non-empty.
+            True if a queue is bound and either its queue or lookahead buffer
+            is non-empty.
         """
         if self._steering_queue is None:
             return False
-        return not self._steering_queue.empty()
+        return bool(self._steering_buffer) or not self._steering_queue.empty()
+
+    def steering_pending_count(self) -> int:
+        """Return the number of buffered and queued steering messages."""
+        if self._steering_queue is None:
+            return 0
+        return len(self._steering_buffer) + self._steering_queue.qsize()
 
     @property
     def steering_queue(self) -> Optional[asyncio.Queue]:
