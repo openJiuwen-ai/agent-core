@@ -7,13 +7,13 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-07，F_07 为本目录的文档编号 |
-| 日期 | 原阶段归档：2026-10-09；本次文档修订：2026-10-12；引用修订：2026-10-13 |
+| 日期 | 原阶段归档：2026-10-09；文档修订：2026-10-12；引用与展示修订：2026-10-13 |
 | 原实现范围 | 内部 `persistent_agent/execution/participation.py`、`execution/entries.py`；组件测试 `tests/unit_tests/harness/persistent_agent/test_entries.py` |
-| 本次修订范围 | 重组设计、取舍、依赖和验证记录，补齐输入、预算、事件与失败边界；不改变代码、公共接口或已确认架构 |
+| 修订范围 | 2026-10-13：最近群消息展示区分已撤回、正文暂缺（`unavailable`）和无正文，改动 `_recent_block` 及对应测试，不改变判断策略、入口顺序或公共接口，见第 4.4 节；2026-10-12：重组设计、取舍、依赖和验证记录，不改变代码 |
 | 唯一开发计划 | [Persistent Agent 开发计划](../designs/persistent-agent-development-plan.md) PA-07；认领、状态、排期与交付节点在该计划维护 |
-| 负责人 / 当前边界 | 计划认领为 Chang Yucong；已完成群参与判断组件验收，AgentServer 联调仍待进行 |
+| 负责人 / 当前边界 | 计划认领为 Chang Yucong；2026-10-13 的展示修订按用户安排由 Song Haoran 实施。已完成群参与判断组件验收，AgentServer 联调仍待进行 |
 | 方案依据 | 沿用已确认架构与现行 spec；实现细节经源码和现有测试核对，本次不新增设计确认 |
-| 验证摘要 | 原阶段记录 PA 包 289 passed；本次定向复核 10 passed / 61 deselected / 5 warnings。两者适用范围不同，详见第 4 节 |
+| 验证摘要 | 原阶段记录 PA 包 289 passed；2026-10-12 定向复核 10 passed / 61 deselected / 5 warnings；2026-10-13 展示修订后 PA 包与 core Session 818 passed。各次适用范围不同，详见第 4 节 |
 | Refs / 关联 PR | 对应开发计划 PA-07；原记录未提供 issue / PR，不补造编号 |
 
 本文参考用户指定的[特性开发计划模板](../../../docs/templates/feature-development-plan-template.md)，按“范围与口径 → 特性与验收 → 依赖与联合交付 → 验证与进展”组织；按[特性设计模板](../../../docs/templates/feature-design-template.md)和[目录约定](../AGENTS.md)补充技术方案、取舍与演进依据。不另建进度台账，也不把组件完成解释为群消息业务链路已开放。
@@ -88,7 +88,7 @@ flowchart TD
 | 职责 | 优先使用非空白 `spec.system_prompt`；否则使用 AgentCard 的 `name`（无 name 时用 `id`）及 `description`，不是只取名称 |
 | 当前消息 | 来自 `request.source`：正文、发送者名称 / ID / human 或 agent、是否提及 `execution.agent_id`、reply_to、attachment_refs；无正文用占位文本。判断不读取附件正文，也不使用顶层 `request.text` 替代来源正文 |
 | 最近群消息 | 每次尝试调用 `recent_messages(execution, None, 8)`；重新校验 GroupMessagesResult 并 `assert_matches(execution)`，排除与触发 source.message_id 相同的记录。不加载窗口游标、不追读 next_cursor、不调用 search_messages |
-| 最近消息的提示格式 | 按端口返回顺序保留发送者名称和正文；queued_request 标为“排队背景”，其他为“群消息”；recalled 或 text 为 None 显示“已撤回”。后者是当前展示实现，并不证明无正文消息都已撤回 |
+| 最近消息的提示格式 | 按端口返回顺序保留发送者名称和正文；queued_request 标为“排队背景”，其他为“群消息”。正文按状态展示：`recalled` 显示“已撤回”，`unavailable` 显示“正文暂缺”，其余状态正文为空时显示“（无正文）”，与当前消息的无正文占位一致（2026-10-13 修订；此前 recalled 或 text 为 None 一律显示“已撤回”，见第 4.4 节） |
 | 模型 | 复用发布配置中的 `spec.model.build()`，在尝试循环之前构建一次；缺少模型或 build 异常立即 final(failed)。没有单独的参与模型配置 |
 | 调用 | 两条消息：system 给出判断指令，user 提供职责、当前消息和最近背景；直接 `model.invoke(..., tools=None)`，不挂正式 Agent 的工具或 Rails、不起草公开回复 |
 | 输出 | 期望一个 JSON 对象，decision 为 ignore / respond / intervene，reason 为非空字符串；reason 压缩空白并截到 4096 字符 |
@@ -114,7 +114,7 @@ flowchart TD
 | `async _report(budget, execution, model_call_id: str, usage: ModelUsage) -> None` | await BudgetPort.report，重新校验 BudgetReport 与调用归属 | 普通 Exception 只记诊断；report 是宿主记账副作用，失败不重跑已完成的模型 |
 | `async _finish_failed(emitter, reason: str) -> ParticipationOutcome` | 压缩原因并产生 final(failed)，返回 terminal=True | 关键记账失败传播；不伪装成 ignored，不保存空窗口 |
 
-这些签名没有为未注解参数补造类型声明；完整定义与辅助格式化函数来源均为 [participation.py](../../execution/participation.py)。`_duty(spec) -> str` 选择非空 system_prompt 或 Card 职责，`_current_block(source, agent_id: str) -> str` / `_recent_block(messages) -> str` 只构造判断文本，原始消息、排队背景及撤回处理见第 2.4 节。它们不读取附件内容，也不向群发送消息。
+这些签名没有为未注解参数补造类型声明；完整定义与辅助格式化函数来源均为 [participation.py](../../execution/participation.py)。`_duty(spec) -> str` 选择非空 system_prompt 或 Card 职责，`_current_block(source, agent_id: str) -> str` / `_recent_block(messages) -> str` 只构造判断文本，原始消息、排队背景及已撤回 / 正文暂缺 / 无正文的展示见第 2.4 节。它们不读取附件内容，也不向群发送消息。
 
 | 复用接口及定义来源 | 实现方、注入与当前消费约束 |
 | --- | --- |
@@ -182,6 +182,7 @@ flowchart TD
 | PA-07-V-05：预算拒绝 | admit denied；只产生 paused(budget_denied)，不调用模型、不 report、不加载窗口 | `test_budget_denial_skips_the_participation_model` |
 | PA-07-V-06：不完整群背景 | 连续返回 incomplete；群读取三次、模型零次、final(failed)，无决策和窗口加载 | `test_incomplete_group_history_is_not_treated_as_ignore` |
 | PA-07-V-07：私聊 / 定时旁路 | 两类输入直接进入原生任务路径；群端口和判断模型零调用，started 无决策引用 | `test_direct_and_scheduled_requests_skip_participation`（两个参数） |
+| PA-07-V-09：最近消息的空正文展示 | 最近消息中分别有已撤回、正文暂缺（如 M103 正文暂时读不到）和普通但无正文的消息；判断提示依次显示“已撤回”“正文暂缺”“（无正文）”，正文暂缺不再被报为已撤回 | `test_participation_prompt_tells_an_unreadable_body_from_a_recall` 通过；换回旧展示时该用例失败 |
 | PA-07-V-08：其他来源及协议边界 | Agent 来源沿同一流程；核对 empty、撤回 / 排队背景、职责回退、输出合法性、重试用量和新的调用 ID、准入 / 报告异常、关键记账失败及真实过滤 | 当前行为已逐项对照源码；上述组合尚无本次定向测试结果，不将其他原生路径测试扩大解释为群判断覆盖 |
 
 V-01～V-07 对应本次执行的 10 个参数化用例。V-08 记录进一步验证入口和边界，不声称本次新建或运行了这些测试；群 DTO 与归属基础可参考 [test_protocol.py](../../../../../tests/unit_tests/harness/persistent_agent/test_protocol.py)，请求来源结构可参考 [test_request.py](../../../../../tests/unit_tests/harness/persistent_agent/test_request.py)。
@@ -211,6 +212,7 @@ flowchart LR
 | --- | --- | --- | --- |
 | 2026-10-09 原阶段 | 原 F_07 记录 `tests/unit_tests/harness/persistent_agent`；未提供完整命令、环境或独立日志 | PA 包 289 passed；改动文件 Ruff check / format 通过 | 历史组件证据，保留原结论；不作为本次全包回归或真实 AgentServer 联调结果 |
 | 2026-10-12 本次定向复核 | Windows、本仓 `.venv`；Python 3.13.12、pytest 9.1.1；本地模型、模拟宿主端口和窗口接缝，真实 DeepAgent | 10 passed / 61 deselected / 5 warnings；V-01～V-07 均通过 | 仅群判断定向用例；全量 PA 包、Ruff 及真实服务端联调本次未执行。5 条 warning 来自既有 Pydantic / SQLAlchemy 弃用提示 |
+| 2026-10-13 展示修订 | macOS、本仓 `.venv`；Python 3.11.17、pytest 9.0.2；基于 jiuwenmate `f1bec14f`；本地模型、模拟宿主端口 | PA-07-V-09 新用例通过，换回旧 `_recent_block` 时该用例失败；PA 包与 core Session 818 passed；改动文件 Ruff check / format 通过 | 只覆盖判断提示文本；不代表真实群聊服务返回 `unavailable` 的联调 |
 | 2026-10-12 文档与实现核对 | 模板、架构第 4.3 节、现行 S_01 / S_02 / S_03 / S_07 / S_09、participation / entries / emitter / seams 与测试断言 | 纠正职责回退、8 条限制、模型异常记账、输出解析和正式门禁表述；28 个相对链接、8 个场景 ID、7 个测试引用核对通过，git diff --check 通过 | 源码核对不代替 V-08 的专门测试或真实授权、结算、持久化 / 投递验证 |
 
 本次实现基于 agent-core `dca8baad0c7a55996cadadf9011331d21f4173bd` 工作区；相关设计文档存在本地修订，本次未改 Python 实现。以下命令在 `src/agent-core` 目录实际执行：
@@ -219,11 +221,19 @@ flowchart LR
 .\.venv\Scripts\python.exe -m pytest tests/unit_tests/harness/persistent_agent/test_entries.py -k 'group_message or participation or incomplete_group or direct_and_scheduled' -q
 ```
 
+2026-10-13 展示修订在仓库根目录执行：
+
+```bash
+PYTHONPATH=$PWD .venv/bin/python -m pytest tests/unit_tests/harness/persistent_agent tests/unit_tests/core/session -q
+```
+
 ### 4.2 验证结论
 
 现有定向测试证明：缺端口前置拒绝、被 @ 可忽略且不触碰正式窗口、未被 @ 可回应 / 插话并关联 started、格式或模型错误三次后失败、预算拒绝不调用模型、incomplete 不伪装为空或忽略，以及私聊 / 定时任务旁路。原阶段组件完成结论在该范围得到复核，状态、负责人、依赖及完成数不因此变化。
 
 替身提供了 PA-06、PA-10 的协作，因此“参与后 completed”只证明入口组合契约。当前生产 getter 仍拒绝，真实授权、群消息存储、预算对账、关键记账落盘、候选发送与模型判断质量未由本次测试证明。F_05 另有正式入口回归和未通过场景，以其验证记录为准；本次 10 项通过不覆盖或关闭那些缺口。
+
+2026-10-13 的 PA-07-V-09 证明：判断提示把已撤回、正文暂缺和普通无正文的消息分别标注，正文暂缺不再被报为已撤回。判断策略、入口顺序、最近消息条数、重试和证据引用未变，原有群判断用例全部通过。
 
 ### 4.3 已知遗留与限制
 
@@ -232,7 +242,7 @@ flowchart LR
 | 最近消息存储、游标和检索未接入 | 本项只消费注入的 GroupChatPort，group_message_reader 仍拒绝；判断使用 cursor=None，不更新会话游标 | PA-23 / AgentServer；验证真实授权过滤、分页 / 增量读取和来源隔离 |
 | 参与后窗口及候选链路未闭合 | PA-06、PA-10 getter 尚未接入；ignore 本次不写窗口，后续作为背景出现仍需相关组件实现 | PA-05、PA-06、PA-10、PA-08；真实执行与交接联合验证 |
 | 服务端忽略与投递未联调 | ignored 后不向群发送是宿主职责；私有决策 / 用量事件不能直接公开 | AgentServer / PA-07；M2a 联调，核对关键落盘和无公开忽略回复 |
-| 输入容量与格式边界 | 请求 limit=8 但不本地截断，无总 token 上限；text=None 展示为“已撤回”；采用文本 JSON 提取 | 后续针对超额端口返回、无正文消息和包裹 / 多对象输出增加定向验证；若改变契约同步 S_01 / S_09 |
+| 输入容量与格式边界 | 请求 limit=8 但不本地截断，无总 token 上限；text=None 展示为“已撤回”（2026-10-13 已由第 4.4 节修订替代：按状态区分已撤回、正文暂缺和无正文）；采用文本 JSON 提取 | 后续针对超额端口返回、无正文消息和包裹 / 多对象输出增加定向验证；若改变契约同步 S_01 / S_09 |
 | 判断阶段控制和效果尚未专门验证 | 未主动检查 stop / cancel；现有群测试只有 human 来源，Agent 来源、预算异常等组合见 V-08；无真实模型准确率或时延证据 | PA-05 / PA-07；补充判断阶段控制与 V-08 场景，明确预期后再考虑代码调整 |
 | 判断仍占 Session 排队位置 | 长任务期间新群消息判断会滞后；本期不新增排队前路径 | 架构附录 B 后续扩展，需另行设计受理和事件归属 |
 
@@ -242,3 +252,10 @@ flowchart LR
 - **2026-10-12：按模板重构归档。** 原文内容整合为当前方案、决策 / 拒绝理由、流程与异常表、局部依赖图、验收及证据，补齐模型异常用量、report 失败、模型 / 职责来源、JSON 解析、8 条限制和接入点失败后的已有事件。不保留完整旧原文；旧“最多 8 条”“职责缺省只用名称”“成功才记 model.completed”的不精确表述由第 2.4～2.6 节替代，代码行为未变。
 - **引用与差异处理。** 原 Refs 的“架构 §6”更新为现行第 4.3、6.2～6.3 节；S_01 已维护参与判断，S_02 不再列为待接入生产者。架构第 5.1.1 节的概括步骤先列构造、后列参与判断，与第 4.3 节及当前实现顺序不一致；本文按后两者描述实际顺序，保留该待对齐点，不据概括步骤把构造提前，也不在本次擅自修改架构设计。
 - **同步范围。** 开发计划 PA-07 行同步本次定向证据并校正 ignore 事件摘要；不调整状态、负责人、排期、硬前置、交付分类或完成数。现行 spec 已包含相关行为，本次未改变契约，不新增或改写 spec。
+- **2026-10-13：最近消息区分正文暂缺。**
+  - 原结论与适用范围：第 2.4 节记录 `_recent_block` 把 `recalled` 或 `text is None` 一律显示为“已撤回”，当时只把它列为展示实现的限制。
+  - 新证据与原因：PA-04 的群聊契约补充了 `GroupMessage.status = unavailable`（消息存在但正文暂时读不到，不带正文）。按原展示，M103 这类消息在判断提示中显示为“群消息 张三：已撤回”，给参与判断模型错误事实；普通状态但没有正文的消息同样会被误报为已撤回。
+  - 最终变化：`_recent_block` 按状态展示正文：`recalled` 为“已撤回”，`unavailable` 为“正文暂缺”，其他状态正文为空时为“（无正文）”，与 `_current_block` 对当前消息的占位一致。不改变参与判断策略、入口顺序、最近消息条数、重试或证据引用。
+  - 旧结论的效力：第 2.4 节原“recalled 或 text 为 None 显示已撤回”已由本条替代；第 4.3 节对应遗留就近注明。
+  - 影响与同步：只改判断提示文本，不改公共接口、事件或 spec 契约；S_01 第 4.2 节补充最近消息的展示区分，S_09 中“PA-07 旧展示”的待办说明改为现行描述；F_04、F_06 中对应遗留就近注明已解决；开发计划 PA-07 的进展说明和变更记录同步，负责人与状态不变。
+  - 验证：新增 PA-07-V-09（`test_participation_prompt_tells_an_unreadable_body_from_a_recall`），换回旧展示时该用例失败；PA 包与 core Session 818 passed，见第 4.1 节。
