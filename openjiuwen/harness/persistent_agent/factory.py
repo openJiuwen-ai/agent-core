@@ -13,6 +13,7 @@ from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.deep_agent_spec import DeepAgentSpec
 
 from .execution.binding import InvocationState
+from .execution.session_state import offloading_processors
 from .schema.build_context import PersistentBuildContext
 from .schema.spec import PersistentAgentSpec
 
@@ -55,6 +56,12 @@ def create_persistent_agent(spec: PersistentAgentSpec, *, context: PersistentBui
             or context.ports is not context.binding.ports
         ):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="context changed during construction")
+        offloading = offloading_processors(agent)
+        if offloading:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                error_msg=f"Persistent windows do not support offloading; remove {', '.join(offloading)}",
+            )
         context.binding.agent_ref = weakref.ref(agent)
         context.binding.runtime = InvocationState.capture(agent, context.binding.owner_id)
         context.binding.parts = None

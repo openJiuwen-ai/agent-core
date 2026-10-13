@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.exception.errors import ValidationError as FrameworkValidationError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session.checkpointer import NoopCheckpointer
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -139,7 +140,13 @@ async def _store_call(operation: str, call) -> Any:
 
 
 async def _load(context: PersistentBuildContext, store) -> seams.LoadedRecord:
-    record = await _store_call("load", store.load(context))
+    """An invalid stored record is a validation rejection; every other load failure is a runtime error."""
+    try:
+        record = await store.load(context)
+    except FrameworkValidationError:
+        raise
+    except Exception as exc:
+        raise _reject(StatusCode.DEEPAGENT_RUNTIME_ERROR, "session state record load failed", exc) from exc
     if not isinstance(record, seams.LoadedRecord):
         raise _reject(StatusCode.DEEPAGENT_RUNTIME_ERROR, "session state record load returned no LoadedRecord")
     return record

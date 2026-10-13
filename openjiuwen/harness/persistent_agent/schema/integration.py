@@ -16,14 +16,21 @@ if TYPE_CHECKING:
     from .context import GroupMessagesResult
     from .request import AnswerResponse, PermissionResponse, RequestInput
 
+# Session state key and context ID the native ReAct agent loads its window from.
+CONTEXT_STATE_KEY = "context"
+CONTEXT_ID = "default_context_id"
+
 # Metadata key PA-06 sets on the window messages it appends; PA-10 tidies the window by it at the end.
 WINDOW_PART_KEY = "persistent_window_part"
 # Kept and compressed to one line when the Execution ends.
 EXECUTION_HEADER = "execution_header"
 # Deleted when the Execution ends; injected again with the latest content next time.
 TEMPORARY_BACKGROUND = "temporary_background"
-# Set by PA-10 on the tool result it adds for a call that a stop left without one: the result was not
-# obtained and its effect must be checked. It is neither a real result nor a failure.
+# Set by PA-10 on the one-line marker it appends when an Execution ends, unless it waits for a reply.
+EXECUTION_END = "execution_end"
+# Set by PA-10 on the tool result it adds for a call that a stop, cancel or error left without one: the
+# result was not obtained and its effect must be checked. It is neither a real result nor a failure; the
+# end record says why the Execution ended.
 STOPPED_TOOL_PLACEHOLDER = "stopped_tool_placeholder"
 
 
