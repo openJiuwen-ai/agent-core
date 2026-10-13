@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/`） |
 | 最近一次修订日期 | 2026-10-13 |
-| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_third-party-harness-provider-packages.md、F_08_provider-owned-model-config.md、F_09_auth-fallback-as-a-protocol-capability.md、agent_teams F_113_external-harness-builtin-model-selection.md |
+| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_third-party-harness-provider-packages.md、F_08_provider-owned-model-config.md、F_09_auth-fallback-as-a-protocol-capability.md、F_10_hot-replacing-installed-providers.md、agent_teams F_113_external-harness-builtin-model-selection.md |
 
 ## 范围 / 边界
 
@@ -102,7 +102,10 @@
     `HARNESS_PROVIDER_ENTRY_POINT_GROUP = "openjiuwen.harness_providers"` 中的同名入口，值为
     `HarnessProvider` 类（无参实例化）或实例，加载 / 实例化失败或不满足 SPI 都抛带原因的
     `ValueError`，不静默跳过。组名是对外稳定 API。每次解析都重新读取安装元数据，所以运行中
-    `pip install` 的 wheel 下一次解析即可见。
+    `pip install` 的 wheel 下一次解析即可见。**已导入的已安装包被原地替换时下一次解析重新导入**（F_10）：
+    以发行包 `RECORD` 的哈希为指纹，指纹变化就把该发行包的顶层包（`top_level.txt`，缺省时取 RECORD 的
+    顶层路径）从 `sys.modules` 移除再加载；已创建的 harness 继续用旧模块，新 harness 用新代码。内置与
+    进程内注册的 provider 不参与；openjiuwen 自身的改动仍需重启进程。
 
 ## 接口契约
 
