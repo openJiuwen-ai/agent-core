@@ -547,6 +547,16 @@ class TeamAgentSpec(BaseModel):
     enable_permissions: bool = False
     """Team-specific permission control."""
 
+    enable_organization: bool = True
+    """Spec-level gate for organization tool mounting.
+
+    True mounts org control tools on the leader and rehydrates existing
+    organization bindings. False skips both, so the leader sees no
+    organization tools at all. Default True preserves standalone library
+    behavior; hosts map their own switch to this field, JiuwenSwarm maps
+    its experimental team organization toggle.
+    """
+
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
 

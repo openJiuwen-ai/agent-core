@@ -483,6 +483,8 @@ class OrganizationRuntimeManager:
         backend = getattr(agent, "team_backend", None)
         if backend is None or not getattr(backend, "is_leader", False):
             return
+        if not getattr(agent.spec, "enable_organization", True):
+            return
         harness = agent.harness
         add_tool = getattr(harness, "add_tool", None)
         if not callable(add_tool):
@@ -1178,6 +1180,8 @@ class OrganizationRuntimeManager:
             backend = getattr(agent, "team_backend", None)
             if backend is None or not getattr(backend, "is_leader", False):
                 return False
+        if not getattr(agent.spec, "enable_organization", True):
+            return False
 
         organization_id = self._team_organizations.get((session_id, team_id))
         if not organization_id:

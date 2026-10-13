@@ -3074,6 +3074,47 @@ async def test_active_teams_can_create_and_join_organization(active_organization
 
 
 @pytest.mark.asyncio
+async def test_control_tools_follow_the_organization_flag(active_organization_runtime):
+    """Control tools mount on the leader only while the flag stays open."""
+    runtime, agents, session_id = active_organization_runtime
+    leader = agents["team-a"]
+
+    await runtime.ensure_control_tools(leader, session_id=session_id)
+    assert any(tool.card.name.startswith("org_") for tool in leader.harness.tools)
+
+    leader.spec.enable_organization = False
+    leader.harness = FakeHarness()
+    await runtime.ensure_control_tools(leader, session_id=session_id)
+    assert not [tool.card.name for tool in leader.harness.tools]
+
+
+@pytest.mark.asyncio
+async def test_team_binding_skips_rehydration_when_organization_disabled(active_organization_runtime):
+    """A closed flag leaves an existing organization binding unrestored."""
+    runtime, agents, session_id = active_organization_runtime
+    leader = agents["team-a"]
+    await runtime.create_organization(
+        organization_id="org-gated",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+    assert leader.team_backend.org_task_manager is not None
+
+    leader.spec.enable_organization = False
+    leader.harness = FakeHarness()
+    leader.team_backend.org_task_manager = None
+    bound = await runtime.ensure_team_binding(
+        team_id="team-a",
+        session_id=session_id,
+        agent=leader,
+    )
+
+    assert bound is False
+    assert leader.team_backend.org_task_manager is None
+    assert not [tool.card.name for tool in leader.harness.tools]
+
+
+@pytest.mark.asyncio
 async def test_joined_leader_is_woken_to_consider_open_org_task(active_organization_runtime):
     runtime, agents, session_id = active_organization_runtime
     await runtime.create_organization(

@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/organization/`、`runtime/manager.py` |
-| 最近一次修订日期 | 2026-10-08 |
+| 最近一次修订日期 | 2026-10-13 |
 | 关联 feature | `F_115_team-organization-develop-integration.md` |
 
 ## 范围 / 边界
@@ -23,7 +23,8 @@ Organization 在已有 Team 之上提供跨团队任务池、消息、专家团�
 3. 领取和状态变更必须带任务当前状态条件，避免多个团队同时成功领取。
 4. 子任务保留 parent/root 关系；汇总任务保存来源关系和执行状态，不以普通子任务代替来源依赖。
 5. 未领取任务按策略进入描述修订或超时关闭，不能依靠 Leader 恰好再次被调用来推进。
-6. 组织工具只向具备对应角色的 Leader 暴露，不赋予普通成员组织管理权限。
+6. 组织工具只向具备对应角色且 `enable_organization` 为 True 的 Leader 暴露，不赋予普通成员组织管理权限；
+   该 spec 字段默认 True，是宿主关闭整条组织能力的唯一开关。
 7. 共享工作空间允许读取组织资料；写入限制在本团队发布目录或允许的共享目录。
    Git 初始化、配置和初始提交使用同一个互斥锁；文件锁在工具成功、失败和异常路径均释放。
 8. 组织订阅入口按 `OrgEventMessage` 解析组织事件，不依赖传输消息的普通 Team 事件映射。
@@ -46,6 +47,8 @@ Organization 在已有 Team 之上提供跨团队任务池、消息、专家团�
 Runner 的组织入口复用现有 TeamRuntimeManager，不改变未绑定组织的 Team 的派发方式。
 会话释放先释放组织关联，再停止团队；普通 stop/pause/finalize 仍遵循 S_06 的生命周期语义。
 组织工具由现有工具工厂和角色权限链装配，组织命名空间与原有团队工具分开。
+挂载入口 `ensure_control_tools` 与 `ensure_team_binding` 受 `TeamAgentSpec.enable_organization` 门控，
+关闭时 Leader 不挂载组织工具，既有绑定也不回灌。
 
 ## 与其他 spec 的关系
 
