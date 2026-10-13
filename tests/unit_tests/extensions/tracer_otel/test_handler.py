@@ -50,6 +50,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
     GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
+    GEN_AI_RETRIEVAL_DOCUMENTS,
+    GEN_AI_RETRIEVAL_QUERY_TEXT,
     GEN_AI_RETRIEVAL_TOP_K,
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ID,
@@ -713,6 +715,99 @@ class TestOtelWorkflowHandler:
         assert s.attributes[GEN_AI_OPERATION_NAME] == "execute_tool"
         assert s.name == "execute_tool tool_node"
         assert s.attributes[GEN_AI_TOOL_NAME] == "tool_node"
+
+    async def test_workflow_retrieval_component_tagged_as_retrieval(self):
+        """KnowledgeRetrievalExecutable gets the standard retrieval name and
+        gen_ai.operation.name="retrieval"; query/documents are projected onto
+        gen_ai.retrieval.query.text / gen_ai.retrieval.documents from the
+        component inputs/outputs."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "什么是向量检索"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(
+            invoke_id="kb_node",
+            outputs={"results": ["doc-1 内容", "doc-2 内容"], "context": "doc-1 内容\ndoc-2 内容"},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.kind == trace.SpanKind.INTERNAL
+        assert s.name == "retrieval kb_node"
+        assert s.attributes[GEN_AI_OPERATION_NAME] == "retrieval"
+        assert s.attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "什么是向量检索"
+        assert list(s.attributes[GEN_AI_RETRIEVAL_DOCUMENTS]) == ["doc-1 内容", "doc-2 内容"]
+
+    async def test_workflow_retrieval_query_refreshed_on_pre_invoke(self):
+        """Transform callbacks may mutate inputs in place; on_pre_invoke refreshes
+        gen_ai.retrieval.query.text together with openjiuwen.workflow.inputs."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "旧查询"},
+            parent_node_id="",
+        )
+        await handler.on_pre_invoke(
+            invoke_id="kb_node",
+            inputs={"query": "新查询"},
+            component_metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+        )
+        await handler.on_call_done(invoke_id="kb_node")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert finished[0].attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "新查询"
+
+    async def test_workflow_non_retrieval_component_keeps_generic_name(self):
+        """Components whose type carries no "Retrieval" substring keep the generic
+        component.<invoke_id> name and get no gen_ai.operation.name tag."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="other_node",
+            metadata={
+                "component_id": "other_node",
+                "component_type": "SomeExecutable",
+                "component_name": "other_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "不是检索组件"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(invoke_id="other_node", outputs={"results": ["x"]})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "component.other_node"
+        assert GEN_AI_OPERATION_NAME not in s.attributes
+        assert GEN_AI_RETRIEVAL_QUERY_TEXT not in s.attributes
+        assert GEN_AI_RETRIEVAL_DOCUMENTS not in s.attributes
 
     async def test_workflow_non_llm_internal_span(self):
         """Non-LLM component → INTERNAL span kind."""

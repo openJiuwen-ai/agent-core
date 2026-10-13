@@ -60,6 +60,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
     GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
+    GEN_AI_RETRIEVAL_DOCUMENTS,
+    GEN_AI_RETRIEVAL_QUERY_TEXT,
     GEN_AI_RETRIEVAL_TOP_K,
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ID,
@@ -142,11 +144,18 @@ _LLM_SUBSTRINGS: tuple[str, ...] = ("LLM", "IntentDetection", "Questioner")
 # Substring match on "Tool" covers ToolExecutable and any future Tool-named variants.
 _TOOL_SUBSTRINGS: tuple[str, ...] = ("Tool",)
 
+# Component types that represent retrieval (knowledge/memory retrieval) —
+# tagged with gen_ai.operation.name="retrieval" and named "retrieval <name>"
+# per OTel GenAI semantic conventions.  Substring match on "Retrieval" covers
+# KnowledgeRetrievalExecutable, MemoryRetrievalExecutable and future variants.
+_RETRIEVAL_SUBSTRINGS: tuple[str, ...] = ("Retrieval",)
+
 # gen_ai.operation.name values (OTel GenAI semantic conventions) — constants so
 # no call site re-types the literal.
 _OPERATION_NAME_CHAT = "chat"
 _OPERATION_NAME_EXECUTE_TOOL = "execute_tool"
 _OPERATION_NAME_EMBEDDINGS = "embeddings"
+_OPERATION_NAME_RETRIEVAL = "retrieval"
 
 
 def _serialize(value: Any) -> str:
@@ -180,6 +189,35 @@ def _normalize_llm_payload(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_normalize_llm_payload(v) for v in value]
     return value
+
+
+def _extract_retrieval_query(inputs: Any) -> str | None:
+    """Pull the query text out of a retrieval component's inputs."""
+    if isinstance(inputs, str):
+        return inputs or None
+    if isinstance(inputs, dict):
+        query = inputs.get("query")
+        if isinstance(query, str) and query:
+            return query
+    return None
+
+
+def _extract_retrieval_documents(outputs: Any) -> list[str] | None:
+    """Pull the retrieved documents out of a retrieval component's outputs."""
+    results = None
+    if isinstance(outputs, dict):
+        results = outputs.get("results")
+    elif hasattr(outputs, "results"):
+        results = outputs.results
+    if isinstance(results, list) and results:
+        return [str(item) for item in results]
+    return None
+
+
+def _is_retrieval_component_span(otel_span: trace.Span) -> bool:
+    """Whether an open workflow component span belongs to a retrieval component."""
+    component_type = str((otel_span.attributes or {}).get(OJ_WORKFLOW_COMPONENT_TYPE, ""))
+    return any(s in component_type for s in _RETRIEVAL_SUBSTRINGS)
 
 
 def _standard_messages(value: Any, *, default_role: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1060,6 +1098,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             span_kind = SpanKind.CLIENT if is_llm_component else SpanKind.INTERNAL
 
             is_tool_component = any(s in component_type for s in _TOOL_SUBSTRINGS)
+            is_retrieval_component = any(s in component_type for s in _RETRIEVAL_SUBSTRINGS)
             if is_workflow_root:
                 span_name = invoke_id
             elif is_llm_component:
@@ -1068,6 +1107,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             elif is_tool_component:
                 tool_name = str(metadata.get("component_name") or invoke_id)
                 span_name = f"execute_tool {tool_name}"
+            elif is_retrieval_component:
+                retrieval_name = str(metadata.get("component_name") or invoke_id)
+                span_name = f"retrieval {retrieval_name}"
             else:
                 span_name = f"component.{invoke_id}"
 
@@ -1118,11 +1160,17 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                     GEN_AI_TOOL_NAME,
                     str(metadata.get("component_name") or invoke_id),
                 )
+            elif is_retrieval_component:
+                otel_span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_RETRIEVAL)
 
             self._set_workflow_attrs(otel_span, metadata, invoke_id)
 
             if inputs is not None:
                 otel_span.set_attribute(OJ_WORKFLOW_INPUTS, redact(inputs, self._config))
+                if is_retrieval_component:
+                    query = _extract_retrieval_query(inputs)
+                    if query is not None:
+                        otel_span.set_attribute(GEN_AI_RETRIEVAL_QUERY_TEXT, redact(query, self._config))
 
             state = OtelSpanState(
                 span=otel_span, context_token=None, invoke_id=invoke_id, start_time=start_time,
@@ -1159,6 +1207,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             if state.recorded:
                 if outputs is not None:
                     state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
+                    if _is_retrieval_component_span(state.span):
+                        documents = _extract_retrieval_documents(outputs)
+                        if documents is not None:
+                            state.span.set_attribute(GEN_AI_RETRIEVAL_DOCUMENTS, documents)
 
                 self._set_workflow_end_attrs(state)
                 state.span.set_attribute(OJ_STATUS, NodeStatus.FINISH.value)
@@ -1195,6 +1247,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 # after transform callbacks mutate inputs in place.
                 state.inputs = inputs
                 state.span.set_attribute(OJ_WORKFLOW_INPUTS, redact(inputs, self._config))
+                if _is_retrieval_component_span(state.span):
+                    query = _extract_retrieval_query(inputs)
+                    if query is not None:
+                        state.span.set_attribute(GEN_AI_RETRIEVAL_QUERY_TEXT, redact(query, self._config))
             self._set_workflow_attrs(state.span, component_metadata, invoke_id)
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_pre_invoke failed: %s", exc)
@@ -1281,6 +1337,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 return
             if outputs is not None:
                 state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
+                if _is_retrieval_component_span(state.span):
+                    documents = _extract_retrieval_documents(outputs)
+                    if documents is not None:
+                        state.span.set_attribute(GEN_AI_RETRIEVAL_DOCUMENTS, documents)
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_post_invoke failed: %s", exc)
 
