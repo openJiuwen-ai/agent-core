@@ -488,6 +488,32 @@ async def test_completion_event_digests_once(db, bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_completion_digest_carries_no_board_count_snapshot(db, bus):
+    """The digest is queued behind the leader's round, so it must not freeze a board count.
+
+    A count taken at completion reads as current progress when the digest
+    lands after newer tasks were created; the leader queries the live board.
+    """
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1"),
+            TaskGraphSpec(title="two", content="c", task_id="b", assignee="dev-1"),
+        ]
+    )
+    await scheduler.activate()
+    author = _reviewer_mgr(db, bus, "dev-1")
+    assert (await author.complete("a")).ok
+
+    await scheduler.on_event(EventMessage.from_event(TaskCompletedEvent(team_name=TEAM, task_id="a", member_name="dev-1")))
+
+    digest = next(text for text in host.leader_inputs if "[a]" in text)
+    assert "剩余" not in digest
+    assert "view_task" in digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_task_list_drained_announces_once(db, bus):
     scheduler, host, mm, tm = _build_scheduler(db, bus)
     await scheduler.activate()

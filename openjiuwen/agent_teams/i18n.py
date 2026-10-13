@@ -207,7 +207,7 @@ STRINGS: dict[str, dict[str, str]] = {
         # their wording (F_63). Leader digests bypass the mailbox (direct input
         # injection), so they have no meta channel and stay one-line i18n.
         "scheduler.leader_task_done": (
-            "[调度器] 任务 [{task_id}]「{title}」已完成（{how}）。看板剩余未终结任务 {remaining} 个。"
+            "[调度器] 任务 [{task_id}]「{title}」已完成（{how}）。需要全局进度时用 view_task 查看看板实时状态。"
         ),
         "scheduler.leader_task_done_how_verified": "验收通过",
         "scheduler.leader_task_done_how_direct": "无验证直接完成",
@@ -624,8 +624,8 @@ STRINGS: dict[str, dict[str, str]] = {
         # their wording (F_63). Leader digests bypass the mailbox (direct input
         # injection), so they have no meta channel and stay one-line i18n.
         "scheduler.leader_task_done": (
-            "[Scheduler] Task [{task_id}] \"{title}\" completed ({how}). {remaining} unfinished "
-            "task(s) remain on the board."
+            "[Scheduler] Task [{task_id}] \"{title}\" completed ({how}). Call view_task for the "
+            "board's live state when you need overall progress."
         ),
         "scheduler.leader_task_done_how_verified": "review passed",
         "scheduler.leader_task_done_how_direct": "no review, completed directly",

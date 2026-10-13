@@ -958,9 +958,17 @@ class UpdateTaskTool(TeamTool):
                         task_id=task_id,
                     ),
                 )
+            if task.status == TaskStatus.COMPLETED.value:
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        f"Task {task_id} is already completed and cannot be cancelled; it needs no "
+                        "further action. To redo the work, create a new task."
+                    ),
+                )
             success = await self.agent_team.cancel_task(task_id=task_id)
             if not success:
-                return ToolOutput(success=False, error="Failed to cancel task")
+                return ToolOutput(success=False, error=f"Failed to cancel task {task_id} (status: {task.status})")
             return ToolOutput(success=True, data={"task_id": task_id, "status": "cancelled"})
 
         # Collect all field updates in one pass

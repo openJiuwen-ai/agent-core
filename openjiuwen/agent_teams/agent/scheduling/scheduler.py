@@ -723,7 +723,7 @@ class TeamScheduler:
         terminal = (TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value)
         remaining = sum(1 for task in tasks if task.status not in terminal)
         await self._host.deliver_input(
-            render.render_leader_task_done(task_id, title, verified=verified, remaining=remaining),
+            render.render_leader_task_done(task_id, title, verified=verified),
             use_steer=False,
         )
         if remaining == 0 and tasks and not self._all_done_announced:

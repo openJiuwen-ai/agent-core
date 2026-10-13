@@ -2786,6 +2786,29 @@ async def test_cancel_claimed_task_does_not_cancel_member(agent_team, t, sample_
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_cancel_completed_task_explains_why(agent_team, t, sample_agent_card, db):
+    """Cancelling a completed task says it is already done instead of a bare failure."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="Content")
+    await db.task.claim_task(task.task_id, "dev-1")
+    await db.task.complete_task(task.task_id)
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "status": "cancelled"})
+
+    assert result.success is False
+    assert "already completed" in result.error
+    assert (await agent_team.task_manager.get(task.task_id)).status == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_edit_claimed_task_keeps_claim_without_cancel_member(agent_team, t, sample_agent_card, db):
     """Editing a claimed task's content keeps it claimed by the same member
     (no reset, no member-wide cancel); the member is told to re-read via a

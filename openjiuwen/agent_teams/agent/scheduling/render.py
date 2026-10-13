@@ -85,10 +85,15 @@ def meta_verified_report(task) -> dict:
     return build_meta(_VERIFIED_REPORT, refs={"task": task.task_id})
 
 
-def render_leader_task_done(task_id: str, title: str, *, verified: bool, remaining: int) -> str:
-    """One-line terminal digest injected into the leader."""
+def render_leader_task_done(task_id: str, title: str, *, verified: bool) -> str:
+    """One-line terminal digest injected into the leader.
+
+    Carries no board count: the digest is queued as a follow-up and may reach
+    the leader well after newer tasks were created, so a count snapshotted
+    here would read as stale progress. The leader queries the live board.
+    """
     how_key = "scheduler.leader_task_done_how_verified" if verified else "scheduler.leader_task_done_how_direct"
-    return t("scheduler.leader_task_done", task_id=task_id, title=title, how=t(how_key), remaining=remaining)
+    return t("scheduler.leader_task_done", task_id=task_id, title=title, how=t(how_key))
 
 
 def render_leader_escalation_rounds(task, feedback: str) -> str:
