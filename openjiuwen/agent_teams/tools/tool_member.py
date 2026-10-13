@@ -184,6 +184,46 @@ class _SpawnToolBase(TeamTool, ABC):
         )
 
 
+async def register_teammate(
+    team: TeamBackend,
+    *,
+    member_name: str,
+    display_name: str,
+    desc: str,
+    prompt: str | None,
+    allocation: "Allocation | None",
+    isolation: str | None = None,
+    permissions_override: dict[str, str] | None = None,
+    lifetime: str | None = None,
+) -> "MemberOpResult":
+    """Register one ordinary LLM teammate row (UNSTARTED) — the single place that
+    knows how a teammate's card and mode are derived.
+
+    Used by ``spawn_teammate`` and by ``create_task``'s inline ``member``
+    (F_118), so the two can never drift on card id, mode or options.
+    """
+    from openjiuwen.agent_teams.schema.status import MemberMode
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+    agent_card = AgentCard(
+        id=f"{team.team_name}_{member_name}",
+        name=display_name,
+        description=desc,
+    )
+    return await team.spawn_member(
+        member_name=member_name,
+        display_name=display_name,
+        agent_card=agent_card,
+        desc=desc,
+        prompt=prompt,
+        mode=MemberMode(team.teammate_mode.value),
+        allocation=allocation,
+        isolation=isolation,
+        permissions_override=permissions_override,
+        lifetime=lifetime,
+    )
+
+
 class SpawnTeammateTool(_SpawnToolBase):
     """Spawn an ordinary LLM teammate (``role_type='teammate'``).
 
@@ -286,9 +326,6 @@ class SpawnTeammateTool(_SpawnToolBase):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        from openjiuwen.agent_teams.schema.status import MemberMode
-        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-
         err = self._validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
@@ -310,25 +347,18 @@ class SpawnTeammateTool(_SpawnToolBase):
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")
         desc = inputs.get("desc", "")
-        permissions_override = inputs.get("permissions")
         allocation = (
             self._allocate_model_config(inputs.get("model_name")) if self._allocate_model_config else None
         )
-        agent_card = AgentCard(
-            id=f"{self.team.team_name}_{member_name}",
-            name=display_name,
-            description=desc,
-        )
-        result = await self.team.spawn_member(
+        result = await register_teammate(
+            self.team,
             member_name=member_name,
             display_name=display_name,
-            agent_card=agent_card,
             desc=desc,
             prompt=inputs.get("prompt"),
-            mode=MemberMode(self.team.teammate_mode.value),
             allocation=allocation,
             isolation=inputs.get("isolation"),
-            permissions_override=permissions_override,
+            permissions_override=inputs.get("permissions"),
         )
         fork_value = inputs.get("fork")
         if fork_value and fork_value not in ("false", False):

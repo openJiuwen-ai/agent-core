@@ -33,11 +33,11 @@ from openjiuwen.agent_teams.inbound_render import (
     render_event,
     render_inbound,
 )
-from openjiuwen.agent_teams.message_template import ExpandedMessage, expand_message
+from openjiuwen.agent_teams.message_template import ExpandedMessage, expand_message, task_links
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, bind_template_loader
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
 from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailure
-from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.status import MemberStatus, retire_target
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_time_context
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -132,12 +132,20 @@ class MessageHandler(BaseCoordinationHandler):
         Every path in this handler that feeds the local harness passes through
         here first. Three outcomes, keyed on the member's persisted status:
 
-        * ``SHUTDOWN`` — the member is gone. Never feed a dead harness; drop the
-          delivery.
+        * ``SHUTDOWN`` / ``DORMANT`` — the member has no runtime. Never feed a
+          dead harness; drop the delivery (a DORMANT member's unread rows stay
+          unread and are drained by the runtime its wake rebuilds, F_118).
         * ``SHUTDOWN_REQUESTED`` with no round in flight — the member is on its
           way out with nothing running to ride. Waking the harness for one last
           round, only to hand it a "you are being shut down" notice, burns an
-          LLM round to say goodbye. Settle straight to SHUTDOWN instead.
+          LLM round to say goodbye. Settle straight to the retire target
+          (SHUTDOWN, or DORMANT per the member's lifetime policy) instead.
+          **Dormant exception**: a dormant retirement sends no notice, so any
+          unread row is real input that arrived between the request and this
+          sweep; settling now would strand it (a message to a
+          SHUTDOWN_REQUESTED member wakes nobody). Let the delivery through —
+          the round it starts ends with ``_on_idle_settled`` closing the
+          stream, and finalize settles DORMANT after the input was read.
         * ``SHUTDOWN_REQUESTED`` with a round in flight — let the delivery
           through. It steers into the running round, whose end closes the stream
           (the teardown teammates have always ridden).
@@ -163,19 +171,35 @@ class MessageHandler(BaseCoordinationHandler):
             return False
 
         status = await backend.get_member_status(member_name)
-        if status == MemberStatus.SHUTDOWN.value:
-            team_logger.debug("[{}] harness input dropped: member is already SHUTDOWN", member_name)
+        if status in (MemberStatus.SHUTDOWN.value, MemberStatus.DORMANT.value):
+            team_logger.debug("[{}] harness input dropped: member is {}", member_name, status)
             return True
         if status != MemberStatus.SHUTDOWN_REQUESTED.value:
             return False
         if self._round.has_in_flight_round():
             return False
+        if await self._dormant_settle_deferred(member_name):
+            return False
 
         team_logger.info(
-            "[{}] shutdown requested with no round in flight; settling to SHUTDOWN without a final round",
+            "[{}] shutdown requested with no round in flight; settling without a final round",
             member_name,
         )
         await self._lifecycle.shutdown_self()
+        return True
+
+    async def _dormant_settle_deferred(self, member_name: str) -> bool:
+        """Whether a dormant-bound member must read its mailbox before settling (F_118)."""
+        backend = self._infra.team_backend
+        message_manager = self._infra.message_manager
+        if backend is None or message_manager is None:
+            return False
+        lifetime = await backend.get_member_lifetime(member_name)
+        if retire_target(lifetime) is not MemberStatus.DORMANT:
+            return False
+        if member_name not in await message_manager.members_with_unread([member_name]):
+            return False
+        team_logger.info("[{}] dormant retirement deferred: unread input is delivered first", member_name)
         return True
 
     async def _process_unread_messages(self, member_name: str, *, use_steer: bool = True) -> None:
@@ -317,12 +341,16 @@ class MessageHandler(BaseCoordinationHandler):
         async def _get_member(name: str) -> Any:
             return await db.member.get_member(name, backend.team_name) if db is not None else None
 
+        async def _get_links(task_id: str) -> tuple[list[Any], list[Any]]:
+            return await task_links(db, task_id) if db is not None else ([], [])
+
         return await expand_message(
             msg,
             task_getter=_get_task,
             member_getter=_get_member,
             language=self._language(),
             loader=self._template_loader,
+            task_links_getter=_get_links,
         )
 
     async def _bridge_deliverable_for(self, member_name: str, msg: Any, *, expanded: ExpandedMessage) -> str:

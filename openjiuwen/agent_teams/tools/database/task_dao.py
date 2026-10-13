@@ -587,6 +587,37 @@ class TaskDao:
             total, non_terminal = result.one()
             return int(total), int(non_terminal)
 
+    async def get_tasks_by_ids(self, task_ids: list[str]) -> List[TeamTaskBase]:
+        """Fetch several task rows in one ``IN`` query (order unspecified; missing ids skipped)."""
+        if not task_ids:
+            return []
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(select(team_task_model).where(team_task_model.task_id.in_(task_ids)))
+            return self._hydrate_rows(result.scalars().all())
+
+    async def open_task_counts_by_assignee(self, team_name: str) -> dict[str, int]:
+        """Count non-terminal tasks per assignee in one grouped query.
+
+        Non-terminal is everything outside ``TASK_TERMINAL_STATUSES`` —
+        PENDING / BLOCKED / PLANNING / IN_PROGRESS / IN_REVIEW alike: a member
+        whose task sits in review or in a dependency queue still has work on
+        its board. Members with no open task are simply absent from the
+        result. Feeds the scheduler's retirement scan (F_118).
+        """
+        team_task_model = _get_task_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(team_task_model.assignee, func.count())
+                .where(
+                    team_task_model.team_name == team_name,
+                    team_task_model.assignee.is_not(None),
+                    team_task_model.status.not_in(list(TASK_TERMINAL_STATUSES)),
+                )
+                .group_by(team_task_model.assignee)
+            )
+            return {assignee: int(count) for assignee, count in result.all()}
+
     async def get_tasks_by_assignee(
         self, team_name: str, assignee_id: str, status: Optional[str] = None
     ) -> List[TeamTaskBase]:
@@ -836,7 +867,7 @@ class TaskDao:
 
             return task
 
-    async def submit_for_review(self, task_id: str) -> bool:
+    async def submit_for_review(self, task_id: str, *, note: str | None = None) -> bool:
         """Atomically move an IN_PROGRESS task to IN_REVIEW via a CAS UPDATE.
 
         The verify-gate entry: the author declared the work done and the task
@@ -865,6 +896,7 @@ class TaskDao:
                     status=TaskStatus.IN_REVIEW.value,
                     review_round=team_task_model.review_round + 1,
                     updated_at=now,
+                    **({"note": note} if note is not None else {}),
                 )
             )
             await session.commit()
@@ -1367,8 +1399,12 @@ class TaskDao:
                 "unblocked_tasks": unblocked_tasks,
             }
 
-    async def complete_task(self, task_id: str) -> Optional[Dict]:
-        """Complete a task atomically and unblock dependent tasks."""
+    async def complete_task(self, task_id: str, *, note: str | None = None) -> Optional[Dict]:
+        """Complete a task atomically and unblock dependent tasks.
+
+        ``note`` (the author's completion note, F_118) lands in the same
+        transaction as the status flip when given.
+        """
         async with self._sessions.write() as session:
             now = get_current_time()
             outcome = await _terminate_task_in_session(
@@ -1380,6 +1416,9 @@ class TaskDao:
             if outcome is None:
                 return None
             task, unblocked = outcome
+            if note is not None:
+                task.note = note
+                session.add(task)
             await session.commit()
             return {"task": task, "unblocked_tasks": unblocked}
 

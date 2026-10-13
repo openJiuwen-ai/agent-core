@@ -377,6 +377,7 @@ class TeamTaskManager:
             reviewer=task.reviewers(),
             review_round=task.review_round,
             max_review_rounds=task.max_review_rounds,
+            note=task.note,
             blocked_by=blocked_by,
             blocks=blocks,
             updated_at=task.updated_at,
@@ -599,7 +600,7 @@ class TeamTaskManager:
 
         return TaskOpResult.success()
 
-    async def complete(self, task_id: str) -> TaskOpResult:
+    async def complete(self, task_id: str, *, note: str | None = None) -> TaskOpResult:
         """Complete a task.
 
         Updates task status to 'completed' and unblocks dependent tasks.
@@ -607,6 +608,9 @@ class TeamTaskManager:
 
         Args:
             task_id: Task identifier.
+            note: Author's completion note (artifact paths, key decisions).
+                Persisted on the task row — read by downstream handoff briefs
+                and ``view_task(get)``, never carried by events (F_118).
 
         Returns:
             ``TaskOpResult`` describing the outcome.
@@ -628,7 +632,7 @@ class TeamTaskManager:
         # review is driven by the task's reviewer list, not the member.
         gated = await self.db.task.get_task(task_id)
         if gated is not None and gated.reviewers():
-            return await self._submit_for_review(gated)
+            return await self._submit_for_review(gated, note=note)
 
         # No plan-mode-specific gate is needed: the transition table forbids
         # PLANNING -> COMPLETED, so a plan-mode member cannot complete a task
@@ -637,7 +641,7 @@ class TeamTaskManager:
 
         # Complete task atomically - this handles state validation, dependency resolution,
         # and unblocking dependent tasks in a single transaction to prevent race conditions
-        result = await self.db.task.complete_task(task_id)
+        result = await self.db.task.complete_task(task_id, note=note)
         if not result:
             current = await self.db.task.get_task(task_id)
             if current is None:
@@ -680,7 +684,7 @@ class TeamTaskManager:
         await self._maybe_publish_task_list_drained()
         return TaskOpResult.success()
 
-    async def _submit_for_review(self, task) -> TaskOpResult:
+    async def _submit_for_review(self, task, *, note: str | None = None) -> TaskOpResult:
         """Route a completed-by-author task into the verify gate (IN_REVIEW).
 
         Called from ``complete`` when the task carries reviewers. Plain
@@ -689,7 +693,7 @@ class TeamTaskManager:
         ``TASK_SUBMITTED_FOR_REVIEW`` carrying the reviewer list for the
         framework to dispatch/notify.
         """
-        submitted = await self.db.task.submit_for_review(task.task_id)
+        submitted = await self.db.task.submit_for_review(task.task_id, note=note)
         if not submitted:
             return TaskOpResult.fail(
                 f"Task {task.task_id} cannot be submitted for review from status "
@@ -1438,6 +1442,10 @@ class TeamTaskManager:
             List of claimable Task objects
         """
         return await self.list_tasks(status=TaskStatus.PENDING.value)
+
+    async def open_task_counts_by_assignee(self) -> dict[str, int]:
+        """Non-terminal task count per assignee (absent = none open). See F_118."""
+        return await self.db.task.open_task_counts_by_assignee(self.team_name)
 
     async def get_tasks_by_assignee(self, member_name: str, status: Optional[str] = None) -> List[TeamTaskBase]:
         """Get tasks assigned to a specific member

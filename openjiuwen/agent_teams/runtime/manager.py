@@ -380,6 +380,7 @@ class TeamRuntimeManager:
             MemberStatus.STOPPED,
             MemberStatus.PAUSED,
             MemberStatus.SHUTDOWN,
+            MemberStatus.DORMANT,
             MemberStatus.ERROR,
         }
     )
@@ -394,7 +395,8 @@ class TeamRuntimeManager:
 
         Persisted ``team_member`` status is owned here for the natural
         round-end path:
-          - SHUTDOWN_REQUESTED -> stop + mark SHUTDOWN.
+          - SHUTDOWN_REQUESTED -> stop + mark the retire target (SHUTDOWN, or
+            DORMANT when the member's lifetime policy says so, F_118).
           - otherwise -> pause + mark READY (next assignment can pick it up).
 
         When ``team_member`` is already in
@@ -406,6 +408,27 @@ class TeamRuntimeManager:
         member = agent.team_member
         member_name = getattr(agent, "member_name", "?")
         try:
+            async def _release_member_kvc() -> None:
+                harness = getattr(getattr(agent, "resources", None), "harness", None)
+                current_session = getattr(harness, "current_session", None)
+                session = current_session() if callable(current_session) else None
+                release_kvc = getattr(session, "release_kvc", None)
+                if callable(release_kvc):
+                    await release_kvc()
+
+            # A member that retired itself (``shutdown_self``) says so in
+            # memory. Trust that over the row: a wake may already have CAS'd
+            # the row to RESTARTING, and reading that here would pause and
+            # re-mark READY a runtime that must be torn down (F_118).
+            retired = getattr(agent, "retired_status", None)
+            if retired is not None:
+                team_logger.info(
+                    "finalize_member: team member {} retired itself ({}); closing kernel only",
+                    member_name,
+                    retired.value,
+                )
+                await agent.stop_coordination(on_quiesced=_release_member_kvc)
+                return
             current_status: Optional[MemberStatus] = None
             if member is not None:
                 try:
@@ -419,14 +442,6 @@ class TeamRuntimeManager:
                 current_status is not None and current_status in TeamRuntimeManager._MEMBER_FINALIZED_STATUSES
             )
 
-            async def _release_member_kvc() -> None:
-                harness = getattr(getattr(agent, "resources", None), "harness", None)
-                current_session = getattr(harness, "current_session", None)
-                session = current_session() if callable(current_session) else None
-                release_kvc = getattr(session, "release_kvc", None)
-                if callable(release_kvc):
-                    await release_kvc()
-
             if already_finalized:
                 # Another lifecycle owner already wrote the persisted outcome.
                 # Just close the kernel without erasing STOPPED/PAUSED/ERROR.
@@ -435,19 +450,21 @@ class TeamRuntimeManager:
                     member_name,
                     current_status.value if current_status is not None else None,
                 )
-                if current_status is MemberStatus.SHUTDOWN:
+                if current_status in (MemberStatus.SHUTDOWN, MemberStatus.DORMANT):
                     await agent.stop_coordination(on_quiesced=_release_member_kvc)
                 else:
                     await agent.stop_coordination()
                 return
             if current_status == MemberStatus.SHUTDOWN_REQUESTED:
+                target = await agent.resolve_retire_target()
                 team_logger.info(
-                    "finalize_member: shutting down team member {} on request",
+                    "finalize_member: retiring team member {} on request -> {}",
                     member_name,
+                    target.value,
                 )
                 await agent.stop_coordination(on_quiesced=_release_member_kvc)
                 if member is not None:
-                    await member.update_status(MemberStatus.SHUTDOWN)
+                    await member.update_status(target)
                 return
             team_logger.info(
                 "finalize_member: pausing team member {}; marking READY for next assignment",

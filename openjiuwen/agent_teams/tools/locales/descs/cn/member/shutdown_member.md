@@ -11,6 +11,7 @@
 - 成员长时间卡住、无法恢复时，可考虑 force=true
 
 注意：
+- 退场终态由成员的 lifetime 决定：常规成员落 SHUTDOWN；`create_task` 内联且 `lifetime=dormant` 的成员落 DORMANT（休眠，保留在名册）。要彻底关闭一个休眠成员，对它再调一次本工具即可直接落 SHUTDOWN；`force=true` 一律落 SHUTDOWN
 - 这不是"立即完成关闭"的同步操作，而是发起关闭请求
 - 调用后应等待成员真正进入 SHUTDOWN，再执行 clean_team 或依赖其已退出的后续操作
 - force=true 仅用于异常兜底，可能中断未完成工作，不应作为常规路径

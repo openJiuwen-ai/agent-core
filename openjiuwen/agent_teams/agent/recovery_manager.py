@@ -55,10 +55,13 @@ class RecoveryManager:
 
             # Shutdown is owned by the member finalizer. Recovery must neither
             # revive a departed member nor complete an in-flight shutdown on
-            # behalf of a runtime that may still be starting or exiting.
+            # behalf of a runtime that may still be starting or exiting. A
+            # DORMANT member is retired on purpose and wakes only when named
+            # (F_118) — never from a cold recovery sweep.
             if member.status in {
                 MemberStatus.SHUTDOWN_REQUESTED.value,
                 MemberStatus.SHUTDOWN.value,
+                MemberStatus.DORMANT.value,
             }:
                 continue
 

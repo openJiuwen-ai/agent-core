@@ -3,7 +3,7 @@
 
 """Task management tools: create, view, update, submit, claim, and complete."""
 
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.schema.task import TaskGraphSpec
@@ -13,9 +13,13 @@ from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
+from openjiuwen.agent_teams.tools.tool_member import _SpawnToolBase, register_teammate
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.models.allocator import Allocation
 
 
 # ========== Task Management ==========
@@ -65,8 +69,44 @@ def _autonomous_task_node_schema(t: Translator) -> dict:
     return _task_node_schema(properties)
 
 
-def _scheduled_task_node_schema(t: Translator) -> dict:
-    """Build the scheduled create_task node schema."""
+_MEMBER_LIFETIMES = ("shutdown", "dormant")
+
+
+def _inline_member_schema(t: Translator) -> dict:
+    """Schema of ``create_task``'s inline ``member`` object (scheduled only, F_118).
+
+    The five public fields are ``spawn_teammate``'s, word for word — an inline
+    member *is* a teammate row, only written by ``create_task`` — so their
+    descriptions are shared. ``lifetime`` is what makes it inline: a member
+    declared with its task always carries a retirement policy.
+    """
+    return {
+        "type": "object",
+        "properties": {
+            "member_name": {"type": "string", "description": t("spawn_teammate", "member_name")},
+            "display_name": {"type": "string", "description": t("spawn_teammate", "display_name")},
+            "desc": {"type": "string", "description": t("spawn_teammate", "desc")},
+            "prompt": {"type": "string", "description": t("spawn_teammate", "prompt")},
+            "model_name": {"type": "string", "description": t("spawn_teammate", "model_name")},
+            "lifetime": {
+                "type": "string",
+                "enum": list(_MEMBER_LIFETIMES),
+                "description": t("create_task", "task.member.lifetime"),
+            },
+        },
+        "required": ["member_name", "display_name", "desc", "lifetime"],
+    }
+
+
+def _scheduled_task_node_schema(t: Translator, *, inline_member_enabled: bool = True) -> dict:
+    """Build the scheduled create_task node schema.
+
+    ``assignee`` and ``member`` are the two ways to name a task's owner —
+    exactly one per task, enforced in ``invoke`` (JSON schema has no clean
+    "one of two keys" without ``anyOf``, which the team schemas avoid). The
+    ``member`` property is gated like ``spawn_teammate`` itself: a predefined
+    roster cannot grow, so the property and its prose both disappear.
+    """
     properties = _base_task_node_properties(t)
     properties.update(
         {
@@ -97,7 +137,99 @@ def _scheduled_task_node_schema(t: Translator) -> dict:
             },
         }
     )
-    return _task_node_schema(properties, extra_required=["assignee"])
+    if inline_member_enabled:
+        properties["member"] = {
+            **_inline_member_schema(t),
+            "description": t("create_task", "task.member"),
+        }
+    return _task_node_schema(properties)
+
+
+def _validate_inline_members(tasks: list[dict], *, leader_member_name: str | None) -> str | None:
+    """Pure batch checks on inline ``member`` objects, before any write.
+
+    Exactly one of ``assignee`` / ``member`` per task; a well-formed, unique,
+    non-leader ``member_name``; a known ``lifetime``. Existence against the
+    roster is checked by the caller (it needs the backend).
+    """
+    seen: set[str] = set()
+    for spec in tasks:
+        member = spec.get("member")
+        assignee = (spec.get("assignee") or "").strip()
+        if member is None:
+            continue
+        if assignee:
+            return f"Task {_spec_label(spec)!r}: give either 'assignee' or 'member', not both"
+        if not isinstance(member, dict):
+            return f"Task {_spec_label(spec)!r}: 'member' must be an object"
+        name = (member.get("member_name") or "").strip()
+        name_error = _SpawnToolBase._validate_member_name(name)
+        if name_error:
+            return f"Task {_spec_label(spec)!r}: member.{name_error}"
+        if name in seen:
+            return f"Task {_spec_label(spec)!r}: member.member_name {name!r} is declared twice in this call"
+        seen.add(name)
+        if leader_member_name and name == leader_member_name:
+            return f"Task {_spec_label(spec)!r}: member.member_name {name!r} is the team leader"
+        for key in ("display_name", "desc"):
+            if not (member.get(key) or "").strip():
+                return f"Task {_spec_label(spec)!r}: member.{key} is required"
+        if member.get("lifetime") not in _MEMBER_LIFETIMES:
+            return (
+                f"Task {_spec_label(spec)!r}: member.lifetime must be one of "
+                f"{', '.join(_MEMBER_LIFETIMES)}"
+            )
+    return None
+
+
+async def _materialize_inline_members(
+    agent_team: TeamBackend,
+    tasks: list[dict],
+    *,
+    allocate: "Callable[[str | None], Allocation | None] | None",
+) -> tuple[list[str], str | None]:
+    """Write one UNSTARTED roster row per inline ``member`` and bind it as the assignee.
+
+    Registration only — the same ``spawn_member`` that ``spawn_teammate``
+    calls, so S_05's register/launch split holds: the scheduler's handoff
+    starts the member once its task is on the board. Returns the names
+    written (for compensation if the task graph then fails) and an error.
+    Rows written before a later member is rejected are rolled back here.
+    """
+    created: list[str] = []
+    for spec in tasks:
+        member = spec.get("member")
+        if member is None:
+            continue
+        name = member["member_name"].strip()
+        if await agent_team.member_exists(name):
+            await _discard_inline_members(agent_team, created)
+            return [], f"Task {_spec_label(spec)!r}: member {name!r} already exists in the team"
+        result = await register_teammate(
+            agent_team,
+            member_name=name,
+            display_name=member["display_name"].strip(),
+            desc=member["desc"].strip(),
+            prompt=(member.get("prompt") or "").strip() or None,
+            allocation=allocate(member.get("model_name")) if allocate else None,
+            lifetime=member["lifetime"],
+        )
+        if not result.ok:
+            await _discard_inline_members(agent_team, created)
+            return [], f"Task {_spec_label(spec)!r}: {result.reason}"
+        created.append(name)
+        spec["assignee"] = name
+    return created, None
+
+
+async def _discard_inline_members(agent_team: TeamBackend, names: list[str]) -> None:
+    """Roll back inline member rows whose task batch did not land."""
+    for name in names:
+        try:
+            if not await agent_team.delete_unstarted_member(name):
+                team_logger.warning("create_task: inline member %s could not be rolled back", name)
+        except Exception:
+            team_logger.error("create_task: rollback of inline member %s failed", name, exc_info=True)
 
 
 async def _validate_assignees(
@@ -344,6 +476,12 @@ class TaskCreateTool(TeamTool):
         return "\n".join(lines)
 
 
+def _inline_brief(assignee: str | None, lifetimes: dict[str, str]) -> dict:
+    """Mark a brief whose owner was declared inline, with its lifetime."""
+    lifetime = lifetimes.get(assignee or "")
+    return {"lifetime": lifetime} if lifetime else {}
+
+
 def _owner_phrase(task: dict) -> str:
     """Render a scheduled task's owner and whether it is ready or waiting."""
     if task.get("status") == TaskStatus.BLOCKED.value:
@@ -365,22 +503,40 @@ class ScheduledTaskCreateTool(TeamTool):
     escalates to the leader instead of looping.
     """
 
-    def __init__(self, agent_team: TeamBackend, t: Translator):
+    #: Description slot documenting the inline ``member`` object. Schema and
+    #: prose are gated together (``inline_member_enabled``), like
+    #: ``spawn_teammate``'s fork slot: the model never reads about an
+    #: argument it has no way to pass.
+    _INLINE_MEMBER_SLOT = frozenset({"create_task_inline_member"})
+
+    def __init__(
+        self,
+        agent_team: TeamBackend,
+        t: Translator,
+        *,
+        inline_member_enabled: bool = True,
+        model_config_allocator: "Callable[[str | None], Allocation | None] | None" = None,
+    ):
         super().__init__(
             ToolCard(
                 id="team.create_task",
                 name="create_task",
-                description=t("create_task_scheduled"),
+                description=t(
+                    "create_task_scheduled",
+                    omit=None if inline_member_enabled else self._INLINE_MEMBER_SLOT,
+                ),
             )
         )
         self.agent_team = agent_team
         self.task_manager = agent_team.task_manager
+        self._inline_member_enabled = inline_member_enabled
+        self._allocate_model_config = model_config_allocator
         self.card.input_params = {
             "type": "object",
             "properties": {
                 "tasks": {
                     "type": "array",
-                    "items": _scheduled_task_node_schema(t),
+                    "items": _scheduled_task_node_schema(t, inline_member_enabled=inline_member_enabled),
                     "description": t("create_task", "tasks"),
                 },
             },
@@ -411,13 +567,42 @@ class ScheduledTaskCreateTool(TeamTool):
         error = _validate_task_batch(tasks)
         if error:
             return ToolOutput(success=False, error=error)
-        error = await _validate_assignees(self.agent_team, tasks, required=True)
+        # Inline members (F_118): schema omission binds the hosting LLM; this
+        # rejects the same argument from an MCP client, which calls ``invoke``
+        # directly. Checked before anything is written.
+        if not self._inline_member_enabled and any(spec.get("member") is not None for spec in tasks):
+            return ToolOutput(
+                success=False,
+                error="Cannot use 'member': this team's roster is predefined (team_mode='predefined'); "
+                "name an existing member via 'assignee' instead",
+            )
+        leader_member_name = await self.agent_team.resolve_leader_member_name()
+        error = _validate_inline_members(tasks, leader_member_name=leader_member_name)
         if error:
             return ToolOutput(success=False, error=error)
+        # Validators below read ``assignee``; bind the inline name now so the
+        # self-review guard and the owner checks see the future owner.
+        for spec in tasks:
+            if spec.get("member") is not None:
+                spec["assignee"] = spec["member"]["member_name"].strip()
         error = self._validate_review_rounds(tasks)
         if error:
             return ToolOutput(success=False, error=error)
         error = await _validate_reviewers(self.agent_team, tasks)
+        if error:
+            return ToolOutput(success=False, error=error)
+        # Existing-member checks for plain assignees; inline names are written
+        # right after and would fail the existence probe here by design.
+        plain = [spec for spec in tasks if spec.get("member") is None]
+        error = await _validate_assignees(self.agent_team, plain, required=True)
+        if error:
+            return ToolOutput(success=False, error=error)
+
+        created, error = await _materialize_inline_members(
+            self.agent_team,
+            tasks,
+            allocate=self._allocate_model_config,
+        )
         if error:
             return ToolOutput(success=False, error=error)
 
@@ -439,13 +624,22 @@ class ScheduledTaskCreateTool(TeamTool):
             ]
         )
         if not result.ok:
+            # The member rows landed first (add_graph needs the owner to
+            # exist); a rejected graph must not leave orphan members behind.
+            await _discard_inline_members(self.agent_team, created)
             return ToolOutput(success=False, error=result.reason)
 
         # The owner and landing status are the whole point of the scheduled
         # contract: the leader must tell "starts now" from "waiting on
         # dependencies" without a follow-up view_task. Autonomous-effective
         # batches carry no assignee and render like the claimable variant.
-        briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
+        lifetimes = {
+            spec["assignee"]: spec["member"]["lifetime"] for spec in tasks if spec.get("member") is not None
+        }
+        briefs = [
+            {**task.brief(), "assignee": task.assignee, **_inline_brief(task.assignee, lifetimes)}
+            for task in result.tasks
+        ]
         if len(briefs) == 1:
             return ToolOutput(success=True, data=briefs[0])
         return ToolOutput(success=True, data={"tasks": briefs, "count": len(briefs)})
@@ -455,6 +649,8 @@ class ScheduledTaskCreateTool(TeamTool):
         line = f"task_id={task['task_id']} title={task['title']}"
         if task.get("assignee"):
             line += f" {_owner_phrase(task)}"
+        if task.get("lifetime"):
+            line += f" [new member, lifetime={task['lifetime']}]"
         return line
 
     def render_for_llm(self, output: ToolOutput) -> str:
@@ -474,12 +670,12 @@ class ViewTaskToolV2(TeamTool):
     Explicit action enum instead of implicit param-based dispatch.
     """
 
-    def __init__(self, task_manager: TeamTaskManager, t: Translator):
+    def __init__(self, task_manager: TeamTaskManager, t: Translator, *, desc_key: str = "view_task"):
         super().__init__(
             ToolCard(
                 id="team.view_task",
                 name="view_task",
-                description=t("view_task"),
+                description=t(desc_key),
             )
         )
         self.task_manager = task_manager
@@ -548,6 +744,8 @@ class ViewTaskToolV2(TeamTool):
                 lines.append(f"Assignee: {d['assignee']}")
             if d.get("reviewer"):
                 lines.append(f"Reviewers: {', '.join(d['reviewer'])}")
+            if d.get("note"):
+                lines.append(f"Note: {d['note']}")
             if d.get("updated_at") is not None:
                 lines.append(f"Updated: {format_time_context(d['updated_at'], now_ms)}")
             if d.get("blocked_by"):
@@ -1109,8 +1307,9 @@ class MemberCompleteTaskTool(TeamTool):
                 ),
             )
 
+        note = (inputs.get("note") or "").strip() or None
         try:
-            result = await self.task_manager.complete(task_id=task_id)
+            result = await self.task_manager.complete(task_id=task_id, note=note)
         except Exception as e:
             team_logger.error("member_complete_task: complete(%s) failed: %s", task_id, e)
             return ToolOutput(success=False, error=f"Internal error: {e}")
@@ -1123,7 +1322,6 @@ class MemberCompleteTaskTool(TeamTool):
         settled = await self.task_manager.get(task_id)
         outcome = "in_review" if settled and settled.status == TaskStatus.IN_REVIEW.value else "completed"
 
-        note = (inputs.get("note") or "").strip() or None
         return ToolOutput(
             success=True,
             data={

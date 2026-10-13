@@ -40,6 +40,7 @@ from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
+    retire_target,
 )
 from openjiuwen.agent_teams.schema.stream import is_team_event_marker
 from openjiuwen.agent_teams.schema.team import (
@@ -884,13 +885,23 @@ class TeamAgent(BaseAgent):
     async def _cancel_agent(self) -> None:
         await self._stream_controller.cancel_agent()
 
-    async def shutdown_self(self) -> None:
+    async def shutdown_self(self, *, force: bool = False) -> None:
+        """Settle this member's retire request now.
+
+        The terminal state is ``retire_target`` of the lifetime policy on the
+        member's own row: SHUTDOWN for resident members (and always under
+        ``force``), DORMANT for a task-scoped member declared with
+        ``lifetime="dormant"`` (F_118). Either way the runtime goes away; only
+        the roster row's meaning differs.
+        """
         member_name = self._member_name() or "?"
-        team_logger.info("[{}] shutdown_self requested", member_name)
+        team_logger.info("[{}] shutdown_self requested (force={})", member_name, force)
         await self._stream_controller.cooperative_cancel()
+        target = await self.resolve_retire_target(force=force)
+        self._state.retired_status = target
         if self._state.team_member is not None:
             try:
-                await self._state.team_member.update_status(MemberStatus.SHUTDOWN)
+                await self._state.team_member.update_status(target)
             except Exception as e:
                 team_logger.debug(
                     "[{}] post-clean status update failed (expected): {}",
@@ -899,6 +910,23 @@ class TeamAgent(BaseAgent):
                 )
         await self._dispose_tiny_agents()
         self._close_stream()
+
+    @property
+    def retired_status(self) -> MemberStatus | None:
+        """Terminal status this member settled itself into, or None (see ``finalize_member``)."""
+        return self._state.retired_status
+
+    async def resolve_retire_target(self, *, force: bool = False) -> MemberStatus:
+        """SHUTDOWN or DORMANT, from this member's persisted lifetime policy."""
+        backend = self._infra.team_backend
+        name = self._member_name()
+        lifetime = None
+        if backend is not None and name and not force:
+            try:
+                lifetime = await backend.get_member_lifetime(name)
+            except Exception as exc:
+                team_logger.debug("[{}] lifetime lookup failed; settling to SHUTDOWN: {}", name, exc)
+        return retire_target(lifetime, force=force)
 
     async def finalize_non_contributing_worktrees(self) -> None:
         """Finalize current-session worktrees that did not contribute commits."""

@@ -195,15 +195,68 @@ class TeamScheduler:
     # ------------------------------------------------------------------
 
     async def _scan(self) -> None:
-        """Run both reconcile passes to a bounded fixpoint."""
+        """Run the three reconcile passes to a bounded fixpoint."""
         task_manager = self._infra.task_manager
         if task_manager is None:
             return
         for _ in range(_MAX_SCAN_PASSES):
             acted = await self._reconcile_starts(task_manager)
             acted = await self._reconcile_reviews(task_manager) or acted
+            acted = await self._reconcile_retirements(task_manager) or acted
             if not acted:
                 return
+
+    async def _reconcile_retirements(self, task_manager) -> bool:
+        """Request retirement of task-scoped members whose board is empty (F_118).
+
+        A member declared inline on ``create_task`` carries a lifetime policy
+        on its row. Once it is live and nothing is left for it, the scheduler
+        issues the ordinary ``shutdown_member`` request; the member settles
+        into SHUTDOWN or DORMANT itself, from that same policy, when it is
+        truly idle (S_03 mechanism 18) — this pass never touches a round.
+
+        Three conditions, each closing one hole:
+
+        * idle (``READY``) — never BUSY (mid-round: replies to what it is
+          saying would be stranded), UNSTARTED (row landed, task not yet),
+          RESTARTING (a wake in progress), or already requested;
+        * no non-terminal task on its board — ``IN_REVIEW`` / ``PENDING`` /
+          ``BLOCKED`` all count as open, so a submitted task keeps its author
+          around for rework and the post-verify report;
+        * nothing unread — a just-woken DORMANT member is READY before it has
+          read the message that woke it; requesting retirement in that window
+          would settle it without a round and strand the message.
+        """
+        backend = self._infra.team_backend
+        message_manager = self._infra.message_manager
+        if backend is None or message_manager is None:
+            return False
+        candidates = await backend.list_retirable_members()
+        if not candidates:
+            return False
+        open_counts = await task_manager.open_task_counts_by_assignee()
+        unread = await message_manager.members_with_unread([name for name, _status, _lifetime in candidates])
+        acted = False
+        for member_name, status, lifetime in candidates:
+            if open_counts.get(member_name, 0) or member_name in unread:
+                continue
+            result = await backend.shutdown_member(member_name)
+            if not result.ok:
+                team_logger.debug(
+                    "[scheduler] retirement request for %s (status=%s) did not apply: %s",
+                    member_name,
+                    status,
+                    result.reason,
+                )
+                continue
+            team_logger.info(
+                "[scheduler] retirement requested for %s (lifetime=%s, was %s)",
+                member_name,
+                lifetime,
+                status,
+            )
+            acted = True
+        return acted
 
     async def _reconcile_starts(self, task_manager) -> bool:
         """Start each idle member's earliest assigned PENDING task."""
@@ -514,7 +567,7 @@ class TeamScheduler:
         tr = make_translator(language, ws_cache=cache)
 
         verify_tool = VerifyTaskTool(reviewer_tm, tr, desc_key="verify_task_scheduled")
-        view_tool = ViewTaskToolV2(backend, tr)
+        view_tool = ViewTaskToolV2(backend, tr, desc_key="view_task_scheduled")
 
         member_name = reviewer
         harness = None

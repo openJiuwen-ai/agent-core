@@ -355,6 +355,17 @@ STRINGS: dict[str, str] = {
         "Optional in autonomous mode (omitted tasks enter the shared claim pool); required in scheduled mode "
         "because members never claim there"
     ),
+    "create_task.task.member": (
+        "Owner created together with the task (one of assignee / member): same fields as spawn_teammate "
+        "(member_name / display_name / desc / prompt / model_name) plus a required lifetime. The member becomes the "
+        "task's assignee and is started by the scheduling framework; once every task on its board is terminal it "
+        "retires per lifetime"
+    ),
+    "create_task.task.member.lifetime": (
+        "Retirement policy: shutdown = shut down automatically once its tasks are all done (terminal, the name "
+        "cannot be reused); dormant = go dormant automatically (stays on the roster, processes no events) and wakes "
+        "only when addressed directly (send_message(to=<member>) or a new task assigned to it)"
+    ),
     "create_task.task.depends_on": (
         "Prerequisite task IDs; may reference tasks created in this same call "
         "or existing tasks"

@@ -7,9 +7,11 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+MemberLifetime = Literal["shutdown", "dormant"]
 
 
 class MemberModelRef(BaseModel):
@@ -48,6 +50,15 @@ class TeamMemberOptions(BaseModel):
     builtin_model: MemberBuiltinModel | None = None
     cli_agent: str | None = None
     worktree: MemberWorktreeOptions | None = None
+    lifetime: MemberLifetime | None = Field(
+        default=None,
+        description=(
+            "Retirement policy for a task-scoped member (scheduled dispatch only, "
+            "set by create_task's inline `member`). None = resident, the leader "
+            "retires it explicitly. 'shutdown' / 'dormant' name the state the "
+            "member settles into once the scheduler finds nothing left on its board."
+        ),
+    )
     permissions_override: dict[str, str] | None = Field(
         default=None,
         description=(
@@ -126,9 +137,11 @@ def build_member_options(
     worktree_isolation: str | None = None,
     worktree_path: str | None = None,
     permissions_override: dict[str, str] | None = None,
+    lifetime: MemberLifetime | None = None,
 ) -> str | None:
     """Build a TeamMember.options JSON string for new writes."""
     parsed = TeamMemberOptions()
+    parsed.lifetime = lifetime
     parsed.model_ref = _model_ref_from_mapping(model_ref)
     parsed.fallback_model_ref = _model_ref_from_mapping(fallback_model_ref)
     parsed.builtin_model = builtin_model
@@ -239,3 +252,8 @@ def _record_value(record: object, key: str) -> Any:
     if isinstance(record, Mapping):
         return record.get(key)
     return getattr(record, key, None)
+
+
+def get_member_lifetime(record: object) -> MemberLifetime | None:
+    """Return the member's retirement policy from options (None = resident)."""
+    return get_member_options(record).lifetime

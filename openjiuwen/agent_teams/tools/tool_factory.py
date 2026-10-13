@@ -91,6 +91,29 @@ _VERIFY_TASK_DESC_KEY: dict[str, str] = {
     "scheduled": "verify_task_scheduled",
 }
 
+# ``view_task`` reads the same board either way; only the "teammate
+# workflow" prose differs — the autonomous claim loop has no place in a
+# scheduled member's description (no ``claim_task``, no hunting for work).
+_VIEW_TASK_DESC_KEY: dict[str, str] = {
+    "autonomous": "view_task",
+    "scheduled": "view_task_scheduled",
+}
+
+# Construction-time keyword arguments per ``create_task`` variant. The
+# scheduled form can declare a task's owner inline (F_118): that needs the
+# model allocator ``spawn_teammate`` uses and the predefined-roster gate.
+# The autonomous form takes nothing extra; the table keeps the call site
+# branch-free.
+
+
+def _create_task_kwargs(dispatch_mode: str, *, team_mode: str, model_config_allocator: Any) -> dict[str, Any]:
+    if dispatch_mode == "scheduled":
+        return {
+            "inline_member_enabled": team_mode != "predefined",
+            "model_config_allocator": model_config_allocator,
+        }
+    return {}
+
 
 # ========== Tool Factory ==========
 
@@ -225,9 +248,13 @@ def create_team_tools(
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),
         # Task management
-        "create_task": create_task_cls(agent_team, t),
+        "create_task": create_task_cls(
+            agent_team,
+            t,
+            **_create_task_kwargs(dispatch_mode, team_mode=team_mode, model_config_allocator=model_config_allocator),
+        ),
         "update_task": UpdateTaskTool(agent_team, t, dispatch_mode=dispatch_mode),
-        "view_task": ViewTaskToolV2(task_mgr, t),
+        "view_task": ViewTaskToolV2(task_mgr, t, desc_key=_VIEW_TASK_DESC_KEY[dispatch_mode]),
         "claim_task": ClaimTaskTool(task_mgr, t),
         "submit_plan": SubmitPlanTool(task_mgr, t),
         "verify_task": VerifyTaskTool(task_mgr, t, desc_key=_VERIFY_TASK_DESC_KEY[dispatch_mode]),

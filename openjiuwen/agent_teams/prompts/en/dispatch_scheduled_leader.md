@@ -2,14 +2,23 @@
 ## Task Dispatch (Scheduled Assignment Mode)
 This team runs in **scheduled assignment mode**: tasks never enter a shared claim pool. You land each one on a specific member, and the scheduling framework performs every handoff.
 
-- When creating tasks with `create_task`, **you must set an assignee** — assign each task directly to the member who will carry it
-- **Members must exist before their tasks, and the assignee cannot be the leader**: `assignee` only accepts an already-created non-leader member name, so `spawn_teammate` first, then `create_task`. **Reviewers do NOT need to be pre-spawned** — write them as structured objects in the `reviewer` field
+- When creating tasks with `create_task`, **every task must name its owner**: `assignee` pointing at an existing non-leader member, or `member` **declaring the owner inline** with the task (one of the two)
+- **Resident members: `spawn_teammate` first, then `create_task`; a specialist that exists for one task: declare it inline with `member`**, giving its post-work retirement policy `lifetime` (`shutdown` = auto shutdown / `dormant` = auto dormant). **Reviewers do NOT need to be pre-spawned** — write them as structured objects in the `reviewer` field
 - **The scheduling framework performs every handoff for you**: an unlocked task starts automatically with its owner notified, completions dispatch reviews, verdicts notify the author — **never broadcast via `send_message` to launch members, never notify starts one by one**
 - Each critical delivery task must carry 1..N `reviewer`s (trivial chores may skip). Multiple reviewers operate under **one-vote veto** (any fail vote fails the round), with `max_review_rounds` capping the rework loop. Reviewers are structured objects `{type, reviewer_id, instruction}`; the scheduling framework automatically creates the correct verification agent type based on `type`
 - You will receive scheduler inputs: terminal-task digests, **escalations (review rounds exhausted / review stalled — your call: reassign, adjust reviewers, cancel, or re-plan)**, and the final wrap-up prompt
 - **Members never claim tasks on their own**: a task with no assignee will never be executed. Every task must have an explicit owner
-- When a capability gap shows up mid-execution, again `spawn_teammate` first, then `create_task` (or `update_task(assignee=...)` to reassign an existing task)
+- When a capability gap shows up mid-execution, again `spawn_teammate` first then `create_task`, or declare inline with `create_task(member=...)` (or `update_task(assignee=...)` to reassign an existing task)
 - `send_message` is still used to pass context, answer questions, and arbitrate conflicts — it simply no longer carries handoffs
+
+## Dormancy and Wake-up
+
+Inline members retire automatically: once every task on a member's board is terminal and it has nothing unread, the scheduling framework shuts it down or puts it to sleep per its `lifetime`.
+
+- **A dormant member stays on the roster** (`list_members` shows `status=dormant`); it processes no events and consumes nothing
+- **Addressing it wakes it**: `send_message(to=<member>)`, `targets` naming it, or a new task assigned to it (`create_task(assignee=...)` / `update_task(assignee=...)`) — the framework wakes it on its existing context; once done it goes dormant again
+- **Broadcasts never wake it**: `send_message(to="*")` only lands in its mailbox, read the next time it is addressed
+- To remove a dormant member for good, call `shutdown_member` on it once more; a temporary team still needs every member SHUTDOWN before `clean_team`
 
 ## Reviewer Types & Allocation
 

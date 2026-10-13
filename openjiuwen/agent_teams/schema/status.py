@@ -33,6 +33,14 @@ class MemberStatus(str, Enum):
         RESTARTING: Member process is being restarted after failure
         SHUTDOWN_REQUESTED: Member has received shutdown request
         SHUTDOWN: Member has been shut down
+        DORMANT: Member retired after its last task with
+            ``options.lifetime == "dormant"``: the runtime is torn down and
+            the coordination loop is gone, but the roster row stays. Unlike
+            PAUSED / STOPPED it is NOT revived by ``recover_team``; unlike
+            SHUTDOWN it is not terminal. The only way back is an explicit,
+            single-recipient wake (``recover_member``: a direct ``send_message``,
+            a scheduler handoff, an interact ``@name``), which goes
+            DORMANT -> RESTARTING -> READY on the member's existing session.
         ERROR: Member is in error state
     """
     UNSTARTED = "unstarted"
@@ -44,6 +52,7 @@ class MemberStatus(str, Enum):
     RESTARTING = "restarting"
     SHUTDOWN_REQUESTED = "shutdown_requested"
     SHUTDOWN = "shut_down"
+    DORMANT = "dormant"
     ERROR = "error"
 
 
@@ -66,9 +75,12 @@ class MemberStatus(str, Enum):
 # and the one message that never arrives is the notice saying it was removed —
 # for a human member, that notice is what its controller reads.
 #
-# PAUSED / STOPPED / ERROR / RESTARTING are in neither set: those members still
-# belong to the team and are expected back, so both the work guards and the
-# delivery path keep treating them as ordinary members.
+# PAUSED / STOPPED / ERROR / RESTARTING / DORMANT are in neither set: those
+# members still belong to the team and are expected back, so both the work
+# guards and the delivery path keep treating them as ordinary members. A
+# DORMANT member in particular must stay deliverable: the direct message that
+# wakes it lands in its mailbox first and is drained on the restarted runtime's
+# first sweep.
 MEMBER_DEPARTED_STATUSES: frozenset[MemberStatus] = frozenset(
     {
         MemberStatus.SHUTDOWN_REQUESTED,
@@ -132,10 +144,15 @@ MEMBER_TRANSITIONS: Dict[MemberStatus, List[MemberStatus]] = {
     ],
     MemberStatus.SHUTDOWN_REQUESTED: [
         MemberStatus.SHUTDOWN,
+        MemberStatus.DORMANT,     # retire target when options.lifetime == "dormant"
         MemberStatus.ERROR,
     ],
     MemberStatus.SHUTDOWN: [
         MemberStatus.RESTARTING,
+    ],
+    MemberStatus.DORMANT: [
+        MemberStatus.RESTARTING,  # explicit single-recipient wake
+        MemberStatus.SHUTDOWN,    # leader shutdown_member: no runtime, settle directly
     ],
     MemberStatus.ERROR: [
         MemberStatus.RESTARTING,
@@ -158,6 +175,7 @@ MEMBER_SETTLED_STATUSES = frozenset(
         MemberStatus.PAUSED.value,
         MemberStatus.STOPPED.value,
         MemberStatus.SHUTDOWN.value,
+        MemberStatus.DORMANT.value,
     }
 )
 
@@ -188,9 +206,21 @@ MEMBER_QUIESCENT_STATUSES: frozenset[MemberStatus] = frozenset(
         MemberStatus.PAUSED,
         MemberStatus.STOPPED,
         MemberStatus.SHUTDOWN,
+        MemberStatus.DORMANT,
         MemberStatus.ERROR,
     }
 )
+
+
+# Where a retire request settles. ``shutdown_member`` writes one request
+# status (SHUTDOWN_REQUESTED); the member decides the terminal state when it
+# is actually idle, from the lifetime policy persisted on its own row. Members
+# without a policy (every autonomous member, every spawn_teammate member)
+# settle to SHUTDOWN exactly as before; ``force`` always does.
+def retire_target(lifetime: str | None, *, force: bool = False) -> MemberStatus:
+    if lifetime == "dormant" and not force:
+        return MemberStatus.DORMANT
+    return MemberStatus.SHUTDOWN
 
 
 class ExecutionStatus(str, Enum):

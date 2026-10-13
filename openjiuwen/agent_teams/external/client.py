@@ -25,7 +25,7 @@ from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
 from openjiuwen.agent_teams.external.format import render_messages, render_task_board
 from openjiuwen.agent_teams.i18n import set_language
-from openjiuwen.agent_teams.message_template import expand_message
+from openjiuwen.agent_teams.message_template import expand_message, task_links
 from openjiuwen.agent_teams.messager.base import create_messager
 from openjiuwen.agent_teams.messager.messager import Messager
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
@@ -481,6 +481,9 @@ class ExternalTeamClient:
         async def _get_member(name: str) -> Any:
             return await db.member.get_member(name, self.team_name)
 
+        async def _get_links(task_id: str) -> tuple[list[Any], list[Any]]:
+            return await task_links(db, task_id)
+
         bodies: dict[str, str] = {}
         for msg in messages:
             expanded = await expand_message(
@@ -488,6 +491,7 @@ class ExternalTeamClient:
                 task_getter=_get_task,
                 member_getter=_get_member,
                 language=self._descriptor.language or "cn",
+                task_links_getter=_get_links,
             )
             if expanded.is_template:
                 bodies[msg.message_id] = expanded.body

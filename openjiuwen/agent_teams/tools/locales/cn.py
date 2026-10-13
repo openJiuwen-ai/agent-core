@@ -258,6 +258,16 @@ STRINGS: dict[str, str] = {
         "承担该任务的成员名称；该成员必须已存在且不能是 leader。自主模式可选，未填写则进入公共认领池；"
         "调度模式必填，成员不会自主认领"
     ),
+    "create_task.task.member": (
+        "随任务一起创建的承担者（与 assignee 二选一）：字段同 spawn_teammate"
+        "（member_name / display_name / desc / prompt / model_name），外加必填的 lifetime。"
+        "成员落为该任务的 assignee，由调度框架拉起；名下任务全部终态后按 lifetime 退场"
+    ),
+    "create_task.task.member.lifetime": (
+        "退场策略：shutdown = 名下任务全部完成后自动关闭（终态，名字不可复用）；"
+        "dormant = 自动休眠（保留在名册，不处理任何事件），"
+        "仅被点名（send_message(to=该成员) 或派新任务）时唤醒"
+    ),
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
     "create_task.task.reviewer": (

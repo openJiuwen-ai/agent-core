@@ -49,6 +49,7 @@ from openjiuwen.agent_teams.schema.status import (
     MemberMode,
     MemberStatus,
     TaskStatus,
+    retire_target,
 )
 from openjiuwen.agent_teams.schema.team import (
     BridgeMailboxInjectMode,
@@ -744,6 +745,7 @@ class TeamBackend:
         cli_agent: Optional[str] = None,
         builtin_model: Optional["MemberBuiltinModel"] = None,
         permissions_override: Optional[dict[str, str]] = None,
+        lifetime: str | None = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
 
@@ -780,6 +782,10 @@ class TeamBackend:
                 from ``spawn_teammate.permissions``.  Only tightening
                 rules are valid (see ``narrow_permissions``).  Persisted
                 as JSON on the member row so it survives process restarts.
+            lifetime: Retirement policy for a task-scoped member
+                (``"shutdown"`` / ``"dormant"``, F_118). None = resident.
+                Persisted in ``options`` so the scheduler's retirement scan
+                and the member's own settle read the same fact.
 
         Returns:
             ``MemberOpResult`` describing the outcome. ``__bool__`` falls
@@ -813,6 +819,7 @@ class TeamBackend:
             cli_agent=cli_agent,
             worktree_isolation=isolation,
             permissions_override=permissions_override,
+            lifetime=lifetime,
         )
 
         # Resolve the latest identity from the evolvable md before writing the
@@ -993,16 +1000,23 @@ class TeamBackend:
 
         return True
 
-    async def recover_member(self, member_name: str) -> bool:
-        """Restart one failed member after atomically claiming recovery.
+    #: Statuses a single-recipient nudge may restart out of. ERROR is a
+    #: failed runtime; DORMANT is a retired one whose row stayed on the
+    #: roster (F_118). Both have no runtime and both come back only when
+    #: someone names the member — never from a fan-out start or cold recovery.
+    _RECOVERABLE_STATUSES = (MemberStatus.ERROR, MemberStatus.DORMANT)
 
-        Only ERROR members are eligible. The ERROR→RESTARTING CAS prevents a
-        direct message, scheduler handoff, and cold recovery from launching
-        duplicate runtimes. A failed restart returns the member to ERROR so a
-        later explicit nudge can try again.
+    async def recover_member(self, member_name: str) -> bool:
+        """Restart one failed or dormant member after atomically claiming it.
+
+        Eligible source states are ``_RECOVERABLE_STATUSES``. The
+        ``<source>→RESTARTING`` CAS prevents a direct message, scheduler
+        handoff, and cold recovery from launching duplicate runtimes. A
+        failed restart returns the member to the state it was claimed from
+        so a later explicit nudge can try again.
 
         Args:
-            member_name: The failed member to restart.
+            member_name: The failed or dormant member to restart.
 
         Returns:
             True when this call restarted the member, otherwise False.
@@ -1010,10 +1024,20 @@ class TeamBackend:
         if not self.is_leader or self._on_member_restarted is None:
             return False
 
+        current = await self.db.member.get_member_status(self.team_name, member_name)
+        if current is None:
+            return False
+        try:
+            source = MemberStatus(current)
+        except ValueError:
+            return False
+        if source not in self._RECOVERABLE_STATUSES:
+            return False
+
         transitioned = await self.db.member.try_transition_member_status(
             member_name,
             self.team_name,
-            MemberStatus.ERROR,
+            source,
             MemberStatus.RESTARTING,
         )
         if not transitioned:
@@ -1030,7 +1054,7 @@ class TeamBackend:
                 member_name,
                 self.team_name,
                 MemberStatus.RESTARTING,
-                MemberStatus.ERROR,
+                source,
             )
         return restarted
 
@@ -1232,13 +1256,14 @@ class TeamBackend:
                 )
 
         # ERROR means the member runtime has already failed and cannot consume
-        # a mailbox request or shutdown event. Settle it directly; the CAS also
-        # arbitrates against a concurrent ERROR→RESTARTING recovery claim.
-        if current_status == MemberStatus.ERROR:
+        # a mailbox request or shutdown event; DORMANT means it was retired and
+        # has no runtime either (F_118). Settle both directly; the CAS also
+        # arbitrates against a concurrent →RESTARTING recovery / wake claim.
+        if current_status in self._RECOVERABLE_STATUSES:
             transitioned = await self.db.member.try_transition_member_status(
                 member_name,
                 self.team_name,
-                MemberStatus.ERROR,
+                current_status,
                 MemberStatus.SHUTDOWN,
             )
             if not transitioned:
@@ -1248,7 +1273,9 @@ class TeamBackend:
                     await self._on_member_stopped(member_name)
                 except Exception as exc:
                     team_logger.warning("Failed to clean stale runtime for member {}: {}", member_name, exc)
-            team_logger.info("Shutdown failed member {} directly", member_name)
+            if current_status is MemberStatus.DORMANT:
+                await self._publish_member_shutdown(member_name, force)
+            team_logger.info("Shutdown {} member {} directly", current_status.value, member_name)
             return MemberOpResult.success()
 
         # Passive humans have no process to consume a MEMBER_SHUTDOWN event,
@@ -1274,21 +1301,7 @@ class TeamBackend:
             if not success:
                 return MemberOpResult.fail(f"Database rejected status update for member {member_name}")
 
-            try:
-                await self.messager.publish(
-                    topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
-                    message=EventMessage.from_event(
-                        MemberShutdownEvent(
-                            team_name=self.team_name,
-                            member_name=member_name,
-                            force=force,
-                        )
-                    ),
-                )
-                team_logger.debug(f"Member shutdown event published: {member_name}")
-            except Exception as e:
-                team_logger.error(f"Failed to publish member shutdown event for member {member_name}: {e}")
-
+            await self._publish_member_shutdown(member_name, force)
             team_logger.info(f"Passive human member {member_name} shut down directly (no runtime to notify)")
             return MemberOpResult.success()
 
@@ -1314,15 +1327,26 @@ class TeamBackend:
             return MemberOpResult.fail(f"Database rejected status update for member {member_name}")
 
         # Note: execution_status is managed by member process internally
-        # Team leader only sets member status and notifies member via message and event
-        msg_id = await self.message_manager.send_message(
-            content=t("team.shutdown_request_content"),
-            to_member_name=member_name,
-        )
-        if not msg_id:
-            team_logger.warning(f"Failed to send shutdown request message to member {member_name}")
+        # Team leader only sets member status and notifies member via message and event.
+        # A dormant retirement gets no goodbye notice (F_118): the member settles
+        # without a round, so the notice would only sit unread — and worse, it
+        # would count as "unread input" and make the settle defer forever.
+        lifetime = await self.get_member_lifetime(member_name)
+        if retire_target(lifetime, force=force) is MemberStatus.SHUTDOWN:
+            msg_id = await self.message_manager.send_message(
+                content=t("team.shutdown_request_content"),
+                to_member_name=member_name,
+            )
+            if not msg_id:
+                team_logger.warning(f"Failed to send shutdown request message to member {member_name}")
 
         # Publish shutdown event (for cross-process notification to member)
+        await self._publish_member_shutdown(member_name, force)
+        team_logger.info(f"Shutdown request sent to member {member_name}")
+        return MemberOpResult.success()
+
+    async def _publish_member_shutdown(self, member_name: str, force: bool) -> None:
+        """Best-effort ``MemberShutdownEvent`` so rosters and observers refresh."""
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
@@ -1337,9 +1361,6 @@ class TeamBackend:
             team_logger.debug(f"Member shutdown event published: {member_name}")
         except Exception as e:
             team_logger.error(f"Failed to publish member shutdown event for {member_name}: {e}")
-
-        team_logger.info(f"Shutdown request sent to member {member_name}")
-        return MemberOpResult.success()
 
     async def cancel_member(self, member_name: str) -> bool:
         """Cancel member execution
@@ -2513,6 +2534,45 @@ class TeamBackend:
         if member_dao is None:
             return None
         return await member_dao.get_member_status(self.team_name, member_name)
+
+    async def get_member_lifetime(self, member_name: str) -> str | None:
+        """Retirement policy (``options.lifetime``) of ``member_name``, or None (resident).
+
+        Narrow projection read once by the member's own retire settle
+        (``shutdown_self`` / ``finalize_member``) to pick SHUTDOWN vs DORMANT.
+        """
+        return await self.db.member.get_member_lifetime(self.team_name, member_name)
+
+    async def list_retirable_members(self) -> list[tuple[str, str, str]]:
+        """``(member_name, status, lifetime)`` for live members carrying a retirement policy."""
+        return await self.db.member.list_retirable_members(self.team_name)
+
+    async def delete_unstarted_member(self, member_name: str) -> bool:
+        """Roll back an inline member that never left UNSTARTED (F_118).
+
+        The exact inverse of ``spawn_member``: the row goes, and when the
+        evolvable workspace is on, the member workspace ``spawn_member``
+        prepared (link + dynamic real dir holding the identity md) is released
+        and the cache entries it primed are dropped. Filesystem cleanup is
+        best-effort; a leftover directory is logged, never raised.
+        """
+        deleted = await self.db.member.delete_unstarted_member(member_name, self.team_name)
+        if not deleted:
+            return False
+        if self._spec_evolution_enabled and self.workspace_cache is not None:
+            from openjiuwen.agent_teams.team_workspace.binder import MemberWorkspaceBinder
+
+            try:
+                binder = MemberWorkspaceBinder()
+                binder.release(self.team_name, member_name, member_workspace_prefix=self._member_workspace_prefix)
+                binder.delete_if_zero(
+                    self.team_name, member_name, member_workspace_prefix=self._member_workspace_prefix
+                )
+            except Exception as exc:
+                team_logger.warning("Workspace of rolled-back member {} was not removed: {}", member_name, exc)
+            self.workspace_cache.fill_member_field(member_name, "desc", None)
+            self.workspace_cache.fill_member_field(member_name, "prompt", None)
+        return True
 
     async def register_human_agent_inbound(
         self,

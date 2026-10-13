@@ -124,8 +124,8 @@ class TeamLifecycleController(Protocol):
         """Start or recover a named member with queued mailbox input."""
         ...
 
-    async def shutdown_self(self) -> None:
-        """Force-shutdown this agent in response to team dissolution."""
+    async def shutdown_self(self, *, force: bool = False) -> None:
+        """Settle this agent's retire request (SHUTDOWN, or DORMANT per its lifetime; ``force`` is always SHUTDOWN)."""
         ...
 
     async def observe_member_status(self, member_name: str, status: MemberStatus) -> None:
