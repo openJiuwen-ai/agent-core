@@ -81,6 +81,12 @@ class SkillGrantStore:
         self._retired_sessions = _RetiredSessionFilter()
 
     @property
+    def authorization_generation(self) -> int:
+        """当前授权撤销代次；共享存储可覆盖为跨进程的持久化代次。"""
+        with _authorization_generation_lock:
+            return _authorization_generation
+
+    @property
     def retired_session_memory_bytes(self) -> int:
         """墓碑过滤器固定分配的字节数（用于运行时观测）。"""
         return self._retired_sessions.memory_bytes
@@ -138,10 +144,13 @@ class SkillGrantStore:
         *,
         decision: GrantDecision,
         approval_tool_call_id: str | None = None,
+        authorization_generation: int | None = None,
     ) -> SkillGrant:
         """审批通过后写入 ``PENDING_ACTIVATION`` Grant（同 skill 重复审批时覆盖旧候选）。
 
         ``overlay_snapshot`` 取自 Manifest 中规范化后的 overlay。
+        ``authorization_generation`` 可由宿主传入审批开始时的撤销代次；
+        存储必须在写候选的原子边界内校验，拒绝共享撤销后的迟到审批。
         """
         key = _normalize_scope(session_id, agent_scope_id)
         if not manifest.authorizable:
@@ -164,6 +173,11 @@ class SkillGrantStore:
             approval_tool_call_id=approval_tool_call_id,
         )
         with self._lock:
+            if (
+                authorization_generation is not None
+                and authorization_generation != self.authorization_generation
+            ):
+                raise RuntimeError("Skill authorization changed while approval was pending")
             if key[0] in self._retired_sessions:
                 raise RuntimeError(
                     f"session 已永久删除，不能创建 Grant: session_id={key[0]!r}",
@@ -441,6 +455,9 @@ _authorization_generation_lock = threading.Lock()
 
 def get_skill_authorization_generation() -> int:
     """返回动态授权撤销代次，用于使开关关闭前的迟到答案永久失效。"""
+    store = peek_skill_grant_store()
+    if store is not None:
+        return store.authorization_generation
     with _authorization_generation_lock:
         return _authorization_generation
 
@@ -468,7 +485,7 @@ def get_skill_grant_store() -> SkillGrantStore:
 
 
 def set_skill_grant_store(store: SkillGrantStore) -> None:
-    """替换全局 ``SkillGrantStore``（测试用）。"""
+    """宿主启动时安装存储实现，或供测试替换；应在接受请求前调用。"""
     global _grant_store
     with _grant_store_lock:
         _grant_store = store

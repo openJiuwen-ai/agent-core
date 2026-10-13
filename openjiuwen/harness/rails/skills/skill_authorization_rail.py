@@ -959,6 +959,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
             if self._create_pending_grant_quiet(
                 session_id, agent_scope_id, manifest, tool_call_id,
                 decision=GrantDecision.LOCAL, log_tag=f"{self._gate_log_tag}.auto_approve_failed",
+                authorization_generation=authorization_generation,
             ):
                 logger.info(
                     "[skill_authorization] %s.auto_approved skill=%s session=%s scope=%s "
@@ -1002,6 +1003,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
         if self._create_pending_grant_quiet(
             session_id, agent_scope_id, manifest, call.tool_call_id,
             decision=GrantDecision.SESSION, log_tag=f"{self._gate_log_tag}.session_reuse_failed",
+            authorization_generation=call.authorization_generation,
         ):
             logger.info(
                 "[skill_authorization] %s.session_reused skill=%s session=%s scope=%s",
@@ -1012,12 +1014,14 @@ class SkillAuthorizationRail(BaseInterruptRail):
     def _create_pending_grant_quiet(
         self, session_id: str, agent_scope_id: str, manifest: SkillManifest,
         tool_call_id: str, *, decision: GrantDecision, log_tag: str,
+        authorization_generation: int | None = None,
     ) -> bool:
         """写 PENDING_ACTIVATION Grant；失败只记日志返回 False（调用方按无 overlay 放行）。"""
         try:
             self.store.create_pending_grant(
                 session_id, agent_scope_id, manifest,
                 decision=decision, approval_tool_call_id=tool_call_id,
+                authorization_generation=authorization_generation,
             )
             return True
         except Exception:  # noqa: BLE001
@@ -1227,6 +1231,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
         if not self._create_pending_grant_quiet(
             session_id, agent_scope_id, manifest, tool_call_id,
             decision=decision, log_tag=f"{self._gate_log_tag}.grant_create_failed",
+            authorization_generation=pending.get("authorization_generation"),
         ):
             return self.approve()
         logger.info(

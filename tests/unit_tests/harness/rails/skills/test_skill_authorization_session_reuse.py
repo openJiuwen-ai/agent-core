@@ -2,8 +2,8 @@
 
 import os
 
-from openjiuwen.harness.rails.skills.skill_authorization_rail import SkillAuthorizationRail
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+from openjiuwen.harness.rails.skills.skill_authorization_rail import SkillAuthorizationRail
 from openjiuwen.harness.security.host import ToolPermissionHost
 from openjiuwen.harness.security.skill_authorization import (
     GrantDecision,
@@ -96,11 +96,14 @@ def test_session_grant_is_not_reused_after_manifest_identity_changes() -> None:
     )
     rail = SkillAuthorizationRail(grant_store=store)
 
-    assert rail._find_reusable_approval(
-        "session-1",
-        "main",
-        _manifest(permissions_hash="permissions-v2"),
-    ) is None
+    assert (
+        rail._find_reusable_approval(
+            "session-1",
+            "main",
+            _manifest(permissions_hash="permissions-v2"),
+        )
+        is None
+    )
 
 
 def test_permission_rail_exposes_request_scoped_snapshot_hook() -> None:
@@ -117,11 +120,49 @@ def test_explicit_permission_template_overrides_legacy_environment_flag() -> Non
     previous = os.environ.get("SKILL_AUTHORIZATION_ENABLED")
     os.environ["SKILL_AUTHORIZATION_ENABLED"] = "false"
     try:
-        assert is_skill_authorization_enabled(
-            {"skill_authorization": {"enabled": True}}
-        )
+        assert is_skill_authorization_enabled({"skill_authorization": {"enabled": True}})
     finally:
         if previous is None:
             os.environ.pop("SKILL_AUTHORIZATION_ENABLED", None)
         else:
             os.environ["SKILL_AUTHORIZATION_ENABLED"] = previous
+
+
+def test_shared_authorization_generation_provider() -> None:
+    from openjiuwen.harness.security.skill_authorization import (
+        get_skill_authorization_generation,
+        get_skill_grant_store,
+        set_skill_grant_store,
+    )
+
+    class SharedStore(SkillGrantStore):
+        @property
+        def authorization_generation(self) -> int:
+            return 42
+
+    previous = get_skill_grant_store()
+    try:
+        set_skill_grant_store(SharedStore())
+        assert get_skill_authorization_generation() == 42
+    finally:
+        set_skill_grant_store(previous)
+
+
+def test_pending_grant_rejects_stale_shared_approval_generation() -> None:
+    import pytest
+
+    class SharedStore(SkillGrantStore):
+        @property
+        def authorization_generation(self) -> int:
+            return 42
+
+    store = SharedStore()
+    with pytest.raises(RuntimeError, match="changed while approval was pending"):
+        store.create_pending_grant(
+            "session-1", "main", _manifest(), decision=GrantDecision.LOCAL, authorization_generation=41
+        )
+    assert store.list_grants("session-1") == []
+    grant = store.create_pending_grant(
+        "session-1", "main", _manifest(), decision=GrantDecision.LOCAL, authorization_generation=42
+    )
+    assert grant.status == GrantStatus.PENDING_ACTIVATION
