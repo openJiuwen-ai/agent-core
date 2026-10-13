@@ -2746,6 +2746,31 @@ async def test_shutdown_self_cancels_running_round_and_closes_stream():
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+async def test_shutdown_self_settles_dormant_member_from_backend_lifetime():
+    """A dormant-lifetime member retires to DORMANT, read off the team backend.
+
+    Regression: ``resolve_retire_target`` once read a non-existent ``_infra``
+    attribute, so every ``shutdown_self`` / ``finalize_member`` raised before
+    writing the terminal status, leaving the member stuck in
+    SHUTDOWN_REQUESTED with a live coordination loop and a dead runtime.
+    """
+    agent = _make_teammate()
+    agent._stream_controller.stream_queue = asyncio.Queue()
+    agent._stream_controller.cooperative_cancel = AsyncMock()
+    agent.team_backend.get_member_lifetime = AsyncMock(return_value="dormant")
+    team_member = SimpleNamespace(update_status=AsyncMock(return_value=True))
+    agent._state.team_member = team_member
+
+    await agent.shutdown_self()
+
+    team_member.update_status.assert_awaited_once_with(MemberStatus.DORMANT)
+    assert agent.retired_status is MemberStatus.DORMANT
+    assert await agent._stream_controller.stream_queue.get() is None
+    assert await agent.resolve_retire_target(force=True) is MemberStatus.SHUTDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
 async def test_teammate_round_completion_wakes_mailbox_after_interrupt_clears():
     """Deferred mailbox messages should be retried immediately after interrupt clears."""
     agent = _make_teammate()

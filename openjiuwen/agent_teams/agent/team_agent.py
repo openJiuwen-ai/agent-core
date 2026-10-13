@@ -918,7 +918,7 @@ class TeamAgent(BaseAgent):
 
     async def resolve_retire_target(self, *, force: bool = False) -> MemberStatus:
         """SHUTDOWN or DORMANT, from this member's persisted lifetime policy."""
-        backend = self._infra.team_backend
+        backend = self.team_backend
         name = self._member_name()
         lifetime = None
         if backend is not None and name and not force:
