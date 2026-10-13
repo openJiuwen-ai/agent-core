@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+import asyncio
 import json
 from copy import deepcopy
 from dataclasses import dataclass
@@ -566,6 +567,50 @@ class OpenAIModelClient(BaseModelClient):
                 f"raw_samples={raw_samples!r}"
             )
 
+    async def _post_affinity_gateway_json(
+            self,
+            params: dict,
+            *,
+            timeout: Optional[float] = None,
+    ) -> dict:
+        """POST raw JSON to the affinity gateway and return the parsed body.
+
+        Non-streaming counterpart of ``_iter_affinity_gateway_stream``: same
+        raw HTTP transport and legacy URL rule (``_chat_completions_url``,
+        appending ``/v1``), replicating the legacy AscendAffinity/InferenceAffinity
+        clients. The OpenAI SDK path is never used for affinity configs.
+        """
+        url = _chat_completions_url(self.model_client_config.api_base)
+        headers = self._affinity_http_headers(stream=False)
+        body = self._affinity_request_body(params)
+        verify = (
+            SslUtils.create_strict_ssl_context(self.model_client_config.ssl_cert)
+            if self.model_client_config.verify_ssl
+            else False
+        )
+        final_timeout = timeout if timeout is not None else self.model_client_config.timeout
+        async with httpx.AsyncClient(
+                proxy=UrlUtils.get_global_proxy_url(url),
+                verify=verify,
+                timeout=final_timeout,
+        ) as http_client:
+            response = await http_client.post(url, headers=headers, json=body)
+        if response.status_code != 200:
+            error_text = response.text
+            raise ValueError(f"API returned error {response.status_code}: {error_text}")
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise ValueError(f"API returned invalid JSON: {response.text}") from exc
+
+    @staticmethod
+    def _validate_management_response(response: Any) -> None:
+        """Validate the agreed Chat Completion response envelope."""
+        if not isinstance(response, dict) or not response.get("choices"):
+            raise ValueError(
+                "KV management request did not return a valid Chat Completion response"
+            )
+
     def supports_kv_cache_release(self) -> bool:
         return self._kv_cache_mode() == "release"
 
@@ -876,20 +921,14 @@ class OpenAIModelClient(BaseModelClient):
         attempts = self.model_client_config.max_retries if max_attempts is None else max(1, int(max_attempts))
         last_error = None
         for attempt in range(attempts):
-            async_client = None
             try:
-                async_client = self._create_async_openai_client(timeout=timeout)
-                if timeout is not None:
-                    params["timeout"] = timeout
-                await async_client.chat.completions.create(**params)
+                raw = await self._post_affinity_gateway_json(params, timeout=timeout)
+                self._validate_management_response(raw)
                 return True
             except Exception as exc:
                 last_error = exc
                 if attempt < attempts - 1:
-                    continue
-            finally:
-                if async_client is not None and not self._use_shared_client():
-                    await async_client.close()
+                    await asyncio.sleep(2 ** attempt)
 
         raise build_error(
             StatusCode.MODEL_CALL_FAILED,
@@ -1278,15 +1317,23 @@ class OpenAIModelClient(BaseModelClient):
                 presence_penalty=params.get("presence_penalty"),
                 stop=params.get("stop"))
 
-            async_client = self._create_async_openai_client(timeout=timeout)
-
             # Per-request timeout override; cached shared client is never rebuilt
             # just to change the timeout.
             if timeout is not None:
                 params["timeout"] = timeout
 
             # Call API
-            response = await async_client.chat.completions.create(**params)
+            if self._uses_affinity_gateway():
+                # Legacy affinity gateways expect the /v1 normalization (same
+                # URL rule as the affinity stream branch): post raw JSON via
+                # the raw HTTP path instead of letting the SDK append
+                # /chat/completions to api_base verbatim.
+                raw = await self._post_affinity_gateway_json(params, timeout=timeout)
+                from openai.types.chat import ChatCompletion
+                response = ChatCompletion.model_validate(raw)
+            else:
+                async_client = self._create_async_openai_client(timeout=timeout)
+                response = await async_client.chat.completions.create(**params)
             llm_logger.info(
                 "OpenAI API response received.",
                 event_type=LogEventType.LLM_CALL_END,
