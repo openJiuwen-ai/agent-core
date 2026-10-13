@@ -530,11 +530,12 @@ class TeamScheduler:
         outcome; a crash is logged and retried on the next scan.
 
         For trajectory attribution the reviewer mounts the same observability
-        rail pair as a team member and runs under a ``team_member`` execution
-        subject named after the reviewer, so its model / tool records group
-        into their own lane instead of falling into the unassigned main group.
+        rail pair as a team member and runs under its own execution subject per
+        (task, reviewer, round, attempt), so each fresh-context run groups into
+        a lane of its own instead of falling into the unassigned main group or
+        sharing a lane with another task's same-named reviewer.
         """
-        from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
+        from openjiuwen.agent_teams.agent.team_agent import team_reviewer_execution_subject
         from openjiuwen.agent_teams.context import get_session_id
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
         from openjiuwen.agent_teams.rails.elements import observability_rail_specs
@@ -633,12 +634,6 @@ class TeamScheduler:
                 previous_vote=previous_vote,
             )
             team_session_id = get_session_id() or ""
-            reviewer_subject = team_member_execution_subject(
-                session_id=team_session_id,
-                team_name=backend.team_name,
-                member_name=member_name,
-                display_name=member_name,
-            )
             # Retry transient model-call failures up to 3 times.
             # Each attempt builds a fresh harness and disposes the old
             # one — ``run_once`` tears down tools on every invocation.
@@ -678,6 +673,15 @@ class TeamScheduler:
                     TeamSession(session_id=team_session_id, team_id=backend.team_name)
                     if team_session_id
                     else None
+                )
+                reviewer_subject = team_reviewer_execution_subject(
+                    session_id=team_session_id,
+                    team_name=backend.team_name,
+                    task_id=task.task_id,
+                    reviewer=reviewer,
+                    review_round=task.review_round,
+                    attempt=attempt,
+                    assignee=task.assignee,
                 )
                 with execution_subject_scope(reviewer_subject):
                     result = await harness.run_once(review_prompt, team_session=team_session)

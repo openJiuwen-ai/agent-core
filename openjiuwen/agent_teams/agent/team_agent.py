@@ -84,9 +84,9 @@ def team_member_execution_subject(
 ) -> ExecutionSubject:
     """Build the trajectory owner identity of one Team member execution.
 
-    Shared by long-lived members and the one-shot reviewers the scheduled
-    dispatch mode spawns, so every execution acting under a member name lands
-    in the same trajectory lane.
+    Shared by every execution acting under a member name (long-lived members,
+    swarmflow workers and avatars), so they land in the same trajectory lane.
+    One-shot reviewers use :func:`team_reviewer_execution_subject` instead.
 
     Args:
         session_id: Session the Team runs in.
@@ -103,6 +103,63 @@ def team_member_execution_subject(
         display_name=display_name,
         kind="team_leader" if is_leader else "team_member",
         parent_subject_id="",
+        session_id=session_id,
+    )
+
+
+def team_reviewer_execution_subject(
+    *,
+    session_id: str,
+    team_name: str,
+    task_id: str,
+    reviewer: str,
+    review_round: int,
+    attempt: int = 0,
+    assignee: str | None = None,
+) -> ExecutionSubject:
+    """Build the trajectory owner identity of one temp reviewer harness run.
+
+    A scheduled-dispatch reviewer is a one-shot harness built per review round
+    (and rebuilt per retry attempt) with a fresh context, so each run is its
+    own execution and gets its own subject. Keying on the reviewer name alone
+    is wrong twice over: ``reviewer_id`` is numbered per task (every task's
+    first verifier is ``verifier_1``), so concurrent reviews of different tasks
+    would interleave in one lane, and successive rounds would be recorded as
+    one conversation whose context was swapped out mid-way.
+
+    The kind stays ``team_member`` so the run shows as a team lane; the parent
+    points at the assignee whose deliverable is under review.
+
+    Args:
+        session_id: Session the Team runs in.
+        team_name: Team the reviewed task belongs to.
+        task_id: Task under review.
+        reviewer: Reviewer id stored on the task (e.g. ``challenger_1``).
+        review_round: Review round this run votes in.
+        attempt: Zero-based retry attempt within the round.
+        assignee: Member whose deliverable is reviewed, if any.
+
+    Returns:
+        The execution subject to bind around the reviewer harness run.
+    """
+    subject_id = f"team-reviewer:{session_id}:{team_name}:{task_id}:{reviewer}:r{review_round}"
+    display_name = f"{reviewer} · {task_id} · R{review_round}"
+    if attempt:
+        subject_id = f"{subject_id}:a{attempt}"
+        display_name = f"{display_name} · retry {attempt}"
+    parent_subject_id = ""
+    if assignee:
+        parent_subject_id = team_member_execution_subject(
+            session_id=session_id,
+            team_name=team_name,
+            member_name=assignee,
+            display_name=assignee,
+        ).subject_id
+    return ExecutionSubject(
+        subject_id=subject_id,
+        display_name=display_name,
+        kind="team_member",
+        parent_subject_id=parent_subject_id,
         session_id=session_id,
     )
 
@@ -1944,4 +2001,4 @@ class TeamAgent(BaseAgent):
         return agent
 
 
-__all__ = ["TeamAgent", "team_member_execution_subject"]
+__all__ = ["TeamAgent", "team_member_execution_subject", "team_reviewer_execution_subject"]

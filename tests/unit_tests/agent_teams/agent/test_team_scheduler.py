@@ -832,12 +832,81 @@ async def test_temp_reviewer_runs_under_its_own_trajectory_subject(db, bus, monk
     assert TEAM_OBSERVABILITY in rail_types
     assert OBSERVABILITY in rail_types
     subject = run_subjects[0]
-    assert subject.subject_id == f"team-member:sched_session:{TEAM}:rev-1"
-    assert subject.display_name == "rev-1"
+    review_round = (await tm.get("r")).review_round
+    assert subject.subject_id == f"team-reviewer:sched_session:{TEAM}:r:rev-1:r{review_round}"
+    assert subject.display_name == f"rev-1 · r · R{review_round}"
+    # Still a team lane, parented on the author whose deliverable is reviewed.
     assert subject.kind == "team_member"
+    assert subject.parent_subject_id == f"team-member:sched_session:{TEAM}:dev-1"
     assert subject.session_id == "sched_session"
     # The scope is released once the reviewer run returns.
     assert current_execution_subject() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_subject_is_per_task_round_and_attempt(db, bus, monkeypatch):
+    """Every fresh-context reviewer run owns its subject.
+
+    ``reviewer_id`` is numbered per task, so two tasks' first reviewers share a
+    name and may run concurrently; and each round / retry attempt is a new
+    harness with a fresh context. Sharing one subject would interleave their
+    windows in one trajectory lane.
+    """
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler as _Scheduler
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.harness.execution_subject import current_execution_subject
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    scheduler._blueprint.spec.agents = {"teammate": DeepAgentSpec()}
+    scheduler._blueprint.spec.dispatch_mode = "scheduled"
+    scheduler._blueprint.language = "cn"
+    scheduler._infra.team_backend.db = db
+    scheduler._infra.team_backend.workspace_cache = None
+    monkeypatch.setattr(_Scheduler, "_dispatch_to_reviewer", AsyncMock())
+    # Two tasks whose first reviewer carries the same per-task id.
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="deliver a", content="c", task_id="a", assignee="dev-1", reviewer=("verifier_1",)),
+            TaskGraphSpec(title="deliver b", content="c", task_id="b", assignee="dev-2", reviewer=("verifier_1",)),
+        ]
+    )
+    await scheduler.activate()
+    for task_id, author in (("a", "dev-1"), ("b", "dev-2")):
+        assert (await _reviewer_mgr(db, bus, author).complete(task_id)).ok
+
+    run_subjects = []
+    outputs = ["181001 transient", "voted", "voted", "voted"]
+
+    class _FakeHarness:
+        async def run_once(self, _prompt, *, team_session=None):
+            run_subjects.append(current_execution_subject())
+            return {"output": outputs[len(run_subjects) - 1]}
+
+        async def dispose(self):
+            return None
+
+    monkeypatch.setattr(TeamHarness, "build", staticmethod(lambda **_kwargs: _FakeHarness()))
+
+    task_a = await tm.get("a")
+    # Round N fails once transiently and is retried, then task b, then round N+1.
+    await scheduler._spawn_temp_reviewer("verifier_1", task_a)
+    await scheduler._spawn_temp_reviewer("verifier_1", await tm.get("b"))
+    await scheduler._spawn_temp_reviewer(
+        "verifier_1",
+        task_a.model_copy(update={"review_round": task_a.review_round + 1}),
+    )
+
+    ids = [subject.subject_id for subject in run_subjects]
+    round_a = task_a.review_round
+    assert ids == [
+        f"team-reviewer:sched_session:{TEAM}:a:verifier_1:r{round_a}",
+        f"team-reviewer:sched_session:{TEAM}:a:verifier_1:r{round_a}:a1",
+        f"team-reviewer:sched_session:{TEAM}:b:verifier_1:r{(await tm.get('b')).review_round}",
+        f"team-reviewer:sched_session:{TEAM}:a:verifier_1:r{round_a + 1}",
+    ]
+    assert len(set(ids)) == len(ids)
 
 
 @pytest.mark.asyncio
