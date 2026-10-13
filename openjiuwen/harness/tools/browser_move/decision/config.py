@@ -5,6 +5,8 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
+from openjiuwen.core.foundation.llm.system_one.providers import JEV_PROVIDERS
+
 
 @dataclass(frozen=True)
 class BrowserDecisionConfig:
@@ -23,13 +25,10 @@ class BrowserDecisionConfig:
     def __post_init__(self) -> None:
         if self.mode not in {"llm", "shadow", "hybrid"}:
             raise ValueError("browser.decision.mode must be llm, shadow or hybrid")
-        defaults = {
-            "typesafe": ("jev-1.13.0", "https://api.typesafe.ai/v1", "TYPESAFE_API_KEY"),
-            "openrouter": ("typesafe/jev-1.13", "https://openrouter.ai/api/alpha", "OPENROUTER_API_KEY"),
-        }
-        if self.provider not in defaults:
+        if self.provider not in JEV_PROVIDERS:
             raise ValueError("browser.decision.provider must be typesafe or openrouter")
-        for name, value in zip(("model", "api_base", "api_key_env"), defaults[self.provider]):
+        for name in ("model", "api_base", "api_key_env"):
+            value = getattr(JEV_PROVIDERS[self.provider], name)
             configured = getattr(self, name)
             if not isinstance(configured, str):
                 raise ValueError(f"browser.decision.{name} must be a string")

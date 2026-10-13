@@ -32,6 +32,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.harness.native_harness import NativeHarness
+from openjiuwen.agent_teams.harness.protocol import INTERRUPT_UNAVAILABLE
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -326,6 +327,21 @@ class TeamHarness:
         """
         if self._is_cycle_active():
             await self._native.resume(query=query)
+
+    async def interrupt(self, content: str) -> str:
+        """Safe interrupt with replanning (see :meth:`NativeHarness.interrupt`).
+
+        Returns ``INTERRUPT_UNAVAILABLE`` when no run cycle is live.
+        """
+        if not self._is_cycle_active():
+            return INTERRUPT_UNAVAILABLE
+        return await self._native.interrupt(content)
+
+    def work_summary(self) -> dict[str, str]:
+        """Model-free summary of the current work (see :meth:`NativeHarness.work_summary`)."""
+        if self._native is None:
+            return {}
+        return self._native.work_summary()
 
     @property
     def paused_query(self) -> Optional[str]:

@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, AsyncIterator, Protocol, runtime_checkable
 
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.stream import OutputSchema
-from openjiuwen.agent_teams.harness.state import HarnessState
 
 if TYPE_CHECKING:
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -93,4 +93,49 @@ class HarnessProtocol(Protocol):
         ...
 
 
-__all__ = ["HarnessProtocol"]
+INTERRUPT_APPLIED = "INTERRUPT"
+"""``interrupt`` result: the round stopped safely and continues with the content."""
+
+INTERRUPT_UNAVAILABLE = "UNAVAILABLE"
+"""``interrupt`` result: no running round to interrupt; nothing was changed."""
+
+
+@runtime_checkable
+class InterruptibleHarness(Protocol):
+    """Optional capability: safe interrupt with replanning.
+
+    Kept apart from :class:`HarnessProtocol` on purpose: that protocol is
+    ``runtime_checkable``, so adding a method there would make every runtime
+    without the capability (external CLI members) fail ``isinstance``. Callers
+    probe this protocol and treat a runtime that does not satisfy it as
+    ``INTERRUPT_UNAVAILABLE``.
+    """
+
+    async def interrupt(self, content: str) -> str:
+        """Stop the active round at a safe boundary and replan with ``content``.
+
+        Cancels an in-flight model call, or waits for running tools to finish;
+        keeps the live context and tool results; invalidates the task plan; then
+        continues the round with ``content`` steered in. Returns
+        ``INTERRUPT_APPLIED`` or ``INTERRUPT_UNAVAILABLE``. Raises when an
+        explicit pause / abort / stop or a crash supersedes it.
+        """
+        ...
+
+
+@runtime_checkable
+class WorkSummarySource(Protocol):
+    """Optional capability: a short, model-free summary of the current work."""
+
+    def work_summary(self) -> dict[str, str]:
+        """Return phase, request and current plan step as plain strings."""
+        ...
+
+
+__all__ = [
+    "INTERRUPT_APPLIED",
+    "INTERRUPT_UNAVAILABLE",
+    "HarnessProtocol",
+    "InterruptibleHarness",
+    "WorkSummarySource",
+]

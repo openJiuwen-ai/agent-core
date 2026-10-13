@@ -19,6 +19,7 @@ framework swallowing as silent error handling.
 
 from __future__ import annotations
 
+from functools import partial
 from typing import (
     Any,
     ClassVar,
@@ -199,6 +200,12 @@ class EventDispatcher:
         "scheduled": ScheduledStaleTaskHandler,
     }
 
+    # Roles whose mailbox deliveries the duplex router may route (F_117). Human
+    # agent avatars and bridge avatars keep the original handlers.
+    _DUPLEX_ROLES: ClassVar[frozenset[TeamRole]] = frozenset(
+        {TeamRole.LEADER, TeamRole.TEAMMATE, TeamRole.EXTERNAL_CLI},
+    )
+
     def __init__(
         self,
         host: DispatcherHost,
@@ -218,8 +225,33 @@ class EventDispatcher:
 
         self.lifecycle = AgentLifecycleHandler(host, blueprint, infra, poll_ctrl)
         self.member = MemberHandler(host, blueprint, infra, poll_ctrl)
-        self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
-        self.group_message = GroupMessageHandler(host, blueprint, infra, poll_ctrl)
+        # Duplex delivery routing (F_117) mounts only when the team opts in:
+        # the two mailbox handlers are swapped for their routing variants here,
+        # at assembly, exactly like the reliability handler below. Disabled
+        # teams construct the original classes and behave as before.
+        self.duplex_router = None
+        duplex_cfg = getattr(blueprint.spec, "duplex", None)
+        if (
+            duplex_cfg is not None
+            and duplex_cfg.active
+            and blueprint.role in self._DUPLEX_ROLES
+            and blueprint.member_name
+        ):
+            from openjiuwen.agent_teams.duplex.handlers import DuplexGroupMessageHandler, DuplexMessageHandler
+            from openjiuwen.agent_teams.duplex.router import DuplexRouter
+
+            self.duplex_router = DuplexRouter(
+                host,
+                infra,
+                blueprint.member_name,
+                duplex_cfg,
+                redrain=partial(poll_ctrl.enqueue, InnerEventMessage(event_type=InnerEventType.POLL_MAILBOX)),
+            )
+            self.message = DuplexMessageHandler(host, blueprint, infra, poll_ctrl, router=self.duplex_router)
+            self.group_message = DuplexGroupMessageHandler(host, blueprint, infra, poll_ctrl, router=self.duplex_router)
+        else:
+            self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
+            self.group_message = GroupMessageHandler(host, blueprint, infra, poll_ctrl)
         # task_board / stale_task are the dispatch-mode-owned handler pair
         # (F_62): the mode is static spec configuration, so the variant is
         # chosen right here at construction, for every role alike.
@@ -305,6 +337,11 @@ class EventDispatcher:
         handler = self.group_message if await self.group_message.handles(event) else self.message
         method_name = MessageHandler.EVENT_METHOD_MAP[event.event_type]
         await getattr(handler, method_name)(event)
+
+    async def aclose(self) -> None:
+        """Release dispatcher-owned background work (the duplex judge worker)."""
+        if self.duplex_router is not None:
+            await self.duplex_router.aclose()
 
     @property
     def dispatch_mode(self) -> str:

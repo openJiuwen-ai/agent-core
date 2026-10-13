@@ -270,13 +270,23 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                     team_logger.debug("[{}] message from={}, id={}", member_name, msg.from_member_name, msg.message_id)
 
-                    await self._round.deliver_input(text, use_steer=use_steer)
-                    delivered.append(msg)
+                    if await self._deliver_message(msg, text, expanded=expanded, use_steer=use_steer):
+                        delivered.append(msg)
             finally:
                 if delivered:
                     await self._infra.message_manager.mark_messages_read(delivered, member_name)
             if interrupted:
                 return
+
+    async def _deliver_message(self, msg: Any, text: str, *, expanded: ExpandedMessage, use_steer: bool) -> bool:
+        """Feed one rendered mailbox row to the local agent.
+
+        Returns whether the drain should mark the row read. The base handler
+        always steers (or follows up) and returns True. ``duplex.handlers.DuplexMessageHandler``
+        overrides this to route the row through the duplex router (F_117).
+        """
+        await self._round.deliver_input(text, use_steer=use_steer)
+        return True
 
     def _language(self) -> str:
         """Team language for delivery-time template rendering."""
