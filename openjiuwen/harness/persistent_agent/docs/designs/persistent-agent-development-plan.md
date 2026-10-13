@@ -204,7 +204,7 @@ PA-05 一期只开放单轮执行。以下执行模式各自验证生命周期�
 
 ### PA-24 开放 task-loop 执行模式
 
-- **验收标准（怎样证明做成）：** 通过正式入口验证 task-loop 下的实例隔离、取消与停止收敛、确认恢复、异常清理、预算与记账，确认后台任务退出、其他 Session 不受影响，checkpointer 隔离成立；验证通过后 Persistent Spec 才允许 `enable_task_loop=True`
+- **验收标准（怎样证明做成）：** 通过正式入口验证 task-loop 下的实例隔离、取消与停止收敛、确认恢复、异常清理、预算与记账，确认后台任务退出、其他 Session 不受影响，checkpointer 隔离成立；并核实会话状态记录中 DeepAgent 状态快照的按次字段（`iteration`、`task_plan`、`stop_condition_state`、`pending_follow_ups`）跨 Request 的生命周期，停止或异常后不得把上一 Request 的停止条件或待处理追加消息带入下一 Request（见 [F_17](../features/F_17_session-state-record.md) D-03）；验证通过后 Persistent Spec 才允许 `enable_task_loop=True`
 - **开工硬前置：** PA-05
 
 ### PA-25 开放同步子代理
@@ -424,7 +424,7 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 | PA-07 | 本期 | 已完成 | Chang Yucong | 组件验收完成：群消息在加载窗口和构造 DeepAgent 之前，经 `GroupChatPort.recent_messages` 做独立的无工具模型判断（正常成功一次，异常有限尝试）；缺少群端口时在事件之前拒绝。被 @ 仍可忽略，未被 @ 可回应或插话；忽略路径产生 `model.completed`、`participation.decided` 与 `execution.final(ignored)`，不产生 `output.proposed`，不写窗口。格式错误、模型异常和群记录 `incomplete` 最多尝试 3 次仍失败后记 `failed`；预算拒绝记 `paused(budget_denied)` 且不调用模型。私聊和定时任务不进入判断。不调用尚未实现的 `group_message_reader`。代码：`openjiuwen/harness/persistent_agent/execution/{participation.py,entries.py}`；测试：`tests/unit_tests/harness/persistent_agent/test_entries.py`，原阶段 PA 包 289 passed；2026-10-12 定向复核 10 passed / 61 deselected / 5 warnings，全包及真实联调本次未执行。2026-10-13 展示修订（按用户安排由 Song Haoran 实施）：最近消息区分已撤回、正文暂缺（`unavailable`）和无正文，新增 PA-07-V-09，PA 包与 core Session 818 passed。设计与验证见 [F_07](../features/F_07_group-participation.md)。群记录存储（PA-23）、窗口写入（PA-06、PA-10）、候选发送（PA-08）和 AgentServer 联调不在本项。 |
 | PA-08 | 本期 | 待开始 | Song Haoran、Chen Ran | — |
 | PA-09 | 本期 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
-| PA-10 | 本期 | 进行中 | Song Haoran、Chen Ran | 设计中（2026-10-13）：已建 [F_17](../features/F_17_session-state-record.md) 方案草稿，覆盖记录结构与序列化、加载与保存、结束整理、等待确认现场、停止补位与记录错误分类；九项决策按默认方案起草，逐项待开发者确认 → 验证未执行 → 尚未实现；工具执行中途停止时原生会删除不完整的工具调用组，真实执行事实的取得方式暂缓（F_17 Q-01），`pending_answer` 的去留随 PA-08 的 D9 确定 |
+| PA-10 | 本期 | 进行中 | Song Haoran、Chen Ran | 设计已确认（2026-10-14）：[F_17](../features/F_17_session-state-record.md) 的 D-01～D-05、D-07～D-10 已确认，覆盖保存前同步窗口与 DeepAgent 状态、带类型标记的中断状态编解码、无效记录与存储故障的区分、存储键编码与公开键前缀函数、卸载处理器的前置拒绝和窗口整理规则 → 验证未执行 → 尚未实现；D-06（原生执行路径保留工具执行中途结束时的真实事实）方向已确认，共享接口及影响范围待确认（F_17 Q-01），确认前工具执行中途结束仍丢失被删除的调用组；`pending_answer` 的生命周期暂缓（F_17 D-08），完整链路需与 PA-05、PA-08 联合验收 |
 | PA-11 | 本期 | 待开始 | Yan Zhijun | — |
 | PA-12 | 本期 | 待开始 | Yan Zhijun | — |
 | PA-23 | 本期 | 待开始 | Yan Zhijun | — |
@@ -548,6 +548,7 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 | 2026-10-13 | PA-07 | 按用户安排由 Song Haoran 修正最近群消息展示：`recalled` 显示“已撤回”，`unavailable` 显示“正文暂缺”，其他无正文显示“（无正文）”；不改变判断策略、入口顺序、条数或重试；同步 F_07、S_01、S_09，并在 F_04、F_06 注明遗留已解决 | 新增 PA-07-V-09，换回旧展示时该用例失败；PA 包与 core Session 818 passed；AgentServer 联调仍待进行；不改变特性状态、负责人、排期、依赖或完成数，详见 [F_07](../features/F_07_group-participation.md) |
 | 2026-10-12 | PA-15 | 重构 F_15：按开发计划及特性设计模板补齐范围、决策、验收、局部依赖、宿主开放条件与遗留；核对 ConstructionBinding、五项 operation_id、上下文内去重、显式 target_ref、完成状态与摘要边界 | 本次现有 PA / 共享重试回归 344 passed / 1 skipped / 2 failed，失败单独复跑一致；历史基线分开保留，真实宿主确认及跨仓联调未执行。状态、负责人、硬前置和完成数不变，证据见 [F_15](../features/F_15_tool-intent-before-side-effect.md) 第 4 节 |
 | 2026-10-13 | PA-10 | 开始设计：新增 [F_17](../features/F_17_session-state-record.md) 方案草稿；核对代码发现工具执行中途停止时，同批工具结果未写入窗口，原生收尾又删除不完整的工具调用组，架构 §7.2 的补位要求在该情况下无法由 PA-10 单独满足，记为 F_17 Q-01 并按开发者决定暂缓 | 状态改为进行中；方案为草稿，未实现、未验证；不改变负责人、依赖、排期或完成数 |
+| 2026-10-14 | PA-10、PA-24 | 开发者确认 PA-10 设计决策并修订 [F_17](../features/F_17_session-state-record.md)：保存前同步窗口与 DeepAgent 状态、中断状态带类型标记编解码、无效记录与存储故障分开处理、存储键分别百分号编码并导出键前缀函数、卸载处理器三层拒绝、`pending_answer` 按现行契约保存且生命周期暂缓；D-06 方向改为由原生执行路径保留真实工具事实，接口与影响范围待确认。PA-24 验收增加 DeepAgent 状态按次字段的跨 Request 核实 | 方案确认，未实现、未验证；不改变负责人、依赖、排期或完成数 |
 
 ### B.2 第一阶段具体产物与评审门槛
 
