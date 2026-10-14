@@ -20,7 +20,7 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.exception.errors import (
     ValidationError as RequestValidationError,
 )
-from openjiuwen.core.foundation.llm.system_one import JevSystemOneClient
+from openjiuwen.core.foundation.llm.system_one import JEV_PROVIDERS, JevSystemOneClient
 from openjiuwen.core.foundation.llm.utils.request_sanitizer import clean_unicode
 
 from ..playwright_runtime.browser_logging import browser_agent_log_info
@@ -105,7 +105,7 @@ class JevClient:
             raise DecisionUnavailable("invalid_jev_request")
         client = JevSystemOneClient(
             api_key=key, api_base=self.config.api_base, model_name=self.config.model,
-            endpoint_path="/decisions" if self.config.provider == "openrouter" else "/systemone",
+            endpoint_path=JEV_PROVIDERS[self.config.provider].endpoint_path,
             timeout=self.config.request_timeout_ms / 1000, max_retries=0, http_client=self._client,
         )
         # Core owns the typed protocol. Browser policy owns bounded retries and

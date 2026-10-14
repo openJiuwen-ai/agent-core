@@ -104,8 +104,30 @@ class _CmdResume:
     query: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _CmdInterrupt:
+    """An interrupt() invocation reaching the supervisor (safe interrupt + replan).
+
+    The supervisor stops the active round at a safe boundary (cancels an
+    in-flight model call, or waits for running tools to finish), keeps the live
+    context and tool results (no rollback), invalidates the task plan, and
+    continues the round with ``content`` steered in.
+
+    Attributes:
+        content: Text steered into the continuation round.
+        ack: Future resolved with ``INTERRUPT_APPLIED`` once the continuation
+            round started, with ``INTERRUPT_UNAVAILABLE`` when no round can be
+            interrupted, or failed when an explicit pause / abort / stop or a
+            crash superseded the interrupt before it committed.
+    """
+
+    content: str
+    ack: asyncio.Future
+
+
 ControlEvent = Union[
     _CmdSend,
+    _CmdInterrupt,
     _CmdAbort,
     _CmdPause,
     _CmdResume,

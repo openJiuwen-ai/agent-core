@@ -9,10 +9,10 @@ SESSION_SPAWN / rails / state）。`TeamHarness` 在其上做 team 适配。
 
 ```
 harness/
-├── protocol.py        # HarnessProtocol（结构化契约，isinstance 校验）：send / abort / pause / resume / stop / outputs
+├── protocol.py        # HarnessProtocol（结构化契约，isinstance 校验）：send / abort / pause / resume / stop / outputs；可选能力 InterruptibleHarness（interrupt：安全打断+重新规划，F_117）/ WorkSummarySource
 ├── native_harness.py  # NativeHarness(DeepAgent)：supervisor + round 驱动 + send/steer/follow_up；run_once 非流式单次 invoke（不开 supervisor，返回 Runner.run_agent 格式 dict）
 ├── team_harness.py    # TeamHarness：在 NativeHarness 上做 team 适配（build / role）；run_once 转发（单轮 worker 入口）
-├── control.py         # _CmdSend / _CmdAbort / _CmdPause / _CmdResume / _CmdRoundFinished / _CmdStop
+├── control.py         # _CmdSend / _CmdInterrupt / _CmdAbort / _CmdPause / _CmdResume / _CmdRoundFinished / _CmdStop
 ├── state.py           # HarnessInternalState / InboxMessage / ActiveRound / HarnessState / RoundPhase
 ├── turn.py            # MemberTurn + resolve_member_turn：成员轨迹 turn 身份（持久化在 session state，无 OTel 依赖）
 ├── outputs.py         # _OutputIterator / _END 输出迭代
@@ -57,6 +57,12 @@ user turn）。
 该 rail 用 **harness back-ref**（公共只读属性 `harness.active_round`）定位活跃 round —— inner loop 跑在
 TaskScheduler 的 exec task 里，ContextVar 读不到。详见 [`S_18`](../docs/specs/S_18_harness-interaction-contract.md)
 与 [`F_60`](../docs/features/F_60_native-harness-pause-abort-resume.md)。
+
+第三个动词 `interrupt(content)`（F_117，安全打断 + 重新规划）复用同一协作停止点但**不回滚**：
+model 阶段硬取消生成后直接提交，tool 阶段等工具跑完（PAUSING，命令记在
+`HarnessInternalState.pending_interrupt`）。提交 = 作废 `task_plan` + continuation round +
+把 `content` 作为一条 steer 推入。显式 pause / abort / stop 会让等待中的打断失败；等待期间到达的
+`send` 按 RUNNING 路由，不丢。
 
 ## 轨迹 turn（`turn.py`）
 

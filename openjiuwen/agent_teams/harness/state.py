@@ -12,7 +12,7 @@ import asyncio
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from openjiuwen.harness_protocol.state import HarnessState
 
@@ -178,6 +178,9 @@ class HarnessInternalState:
         output_queue: chunk forwarder target consumed by ``outputs()``.
         supervisor_task: The asyncio.Task running ``_supervisor``.
         round_id_counter: Source of monotonic ActiveRound ids.
+        pending_interrupt: The ``_CmdInterrupt`` waiting for the active round
+            to reach its safe boundary (phase PAUSING), or None. Set only for a
+            tool-phase interrupt; a model-phase interrupt commits at once.
     """
 
     phase: HarnessState = HarnessState.IDLE
@@ -188,6 +191,7 @@ class HarnessInternalState:
     output_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     supervisor_task: asyncio.Task | None = None
     round_id_counter: int = 0
+    pending_interrupt: Any = None
 
     def next_seq(self) -> int:
         """Return and increment the InboxMessage sequence counter."""

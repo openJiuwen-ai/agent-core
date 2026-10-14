@@ -8,8 +8,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/coordination/` |
-| 最近一次修订日期 | 2026-08-15 |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md`、`F_65_runtime-idle-clock-stall-nudge.md`、`F_74_leader-member-activity-and-team-idle.md`、`F_81_disband-requires-explicit-intent.md` |
+| 最近一次修订日期 | 2026-10-13 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_07_team-completion-events.md`、`F_14_human-agent-team-event-rendering.md`、`F_65_runtime-idle-clock-stall-nudge.md`、`F_74_leader-member-activity-and-team-idle.md`、`F_81_disband-requires-explicit-intent.md`、`F_117_duplex-delivery-routing.md` |
 
 ## 范围 / 边界
 
@@ -22,6 +22,8 @@
 - `CoordinationKernel` 的构造装配序、内部 lifecycle state machine（`idle → running → paused → stopped`，pause/stop 幂等）、`start` / `pause` / `stop` / `finalize_round` 路径与 `SessionManager` 的三方法状态机协作。
 - 三类窄 protocol（`AgentRoundController` / `TeamLifecycleController` / `PollController`）在 host ↔ handler 之间的契约。
 - 异常语义：`AsyncCallbackFramework.trigger` 吞 `Exception`、放行 `AbortError`。
+- 双工投递路由（F_117）在邮箱 handler 上的装配点与投递钩子（不变量 22）。路由策略本身、监工
+  格式与打断重规划的细节归 `agent_teams/duplex/` 与 F_117。
 
 **这个规约不管：**
 
@@ -70,6 +72,20 @@
 20. **自主模式的停滞计时一律读运行时 idle 时钟，绝不读 DB `task.updated_at`**（F_65）。`TeamAgentState.idle_since`（`time.monotonic()`，**进程本地、内存态、不持久化**）由 `StreamController._map_state` 在 READY/BUSY 边写入（`IDLE →` 打戳、`RUNNING →` 清空），handler 经 `AgentRoundController.idle_seconds()` 读取，`kernel.start` 调 `TeamAgent.refresh_idle_baseline()` 在每个 run cycle 入口、event bus 恢复 `POLL_TASK` **之前**重置基线。三条理由：(a) pause 冻结 `updated_at` 而墙钟继续走，`now - updated_at` 在长 pause→resume 后必然报出假停滞；(b) 成员状态列本就不落时间戳（`TeamMember.updated_at` 只随名册变更 bump），DB 层无从回答"READY 了多久"；(c) `idle_seconds()` 在忙时为 `None`，使"正在干活的成员被判停滞"在类型层面不可表达。**仅 `refresh_idle_baseline` 覆盖 idle-across-pause 这一路**：pause 时正忙的成员 `idle_since` 本就是 `None`，其 round 续跑后自然重新打戳。**调度模式仍读 `updated_at`**（F_65 范围外；同款 pause 缺陷记为已知遗留），二者的隔离靠 `ScheduledStaleTaskHandler` 覆写 `_check_stale_claimed_tasks` / `_self_nudge_stale_claim` 钉住旧实现，自主基类内不留 `updated_at` 痕迹。
 
 21. **解散团队是显式行为，coordination 永远不从名册状态推断它**（F_81）。`clean_team` 只有两个合法调用者：temporary leader 的 `clean_team` 工具，与 operator 的 `delete_agent_team`（经 `force_clean_team`）。coordination 层**没有**任何自动调用点——`MemberHandler` 不因"最后一个 teammate 转 SHUTDOWN"清理，`CoordinationKernel.start` 读到团队行就 `recover_team()`，不管名册长什么样。理由是"当前无存活成员"这个状态与"要解散"这个意图**不同构**：leader 关掉最后一名成员准备换一批人时，两次操作之间的那一瞬同样满足它，而 `clean_team` 会 cascade 删掉任务板 / 消息 / 名册并 `rmtree` 掉登记的 workspace 与产物目录，还让 runtime pool 里仍被 operator 视为存活的 entry 指向一个不存在的团队。这与 `tool_factory` 对 persistent 团队摘掉 `clean_team` 工具是**同一条禁令**（见 `tools/AGENTS.md` 的持久团队门控），不得从 coordination 侧绕行。本条是铁律 1（coordination 不做决策）在生命周期上的特例化。
+
+22. **双工投递路由只在装配期接入，关闭时逐字是原行为**（F_117）。`spec.duplex` 非空且
+    `enabled and mode == "active"`、角色 ∈ {leader, teammate, external_cli} 时，`EventDispatcher`
+    构造期把 `message` / `group_message` 换成 `DuplexMessageHandler` / `DuplexGroupMessageHandler`
+    并持有一个 `DuplexRouter`（`dispatcher.duplex_router`）；否则构造原类，`duplex_router is None`。
+    两个邮箱 handler 的唯一投递点是 `MessageHandler._deliver_message(msg, text, *, expanded,
+    use_steer) -> bool`（返回值 = 排空循环是否把这一行记为已读），基类实现即原来的
+    `deliver_input` + True；双工类覆写它，方法体内不判开关。路由器**不阻塞**串行的事件循环：
+    需要监工判断的行由路由器接管（返回 False、后续排空按 `owns` 过滤），后台判断、执行、自行标
+    已读，再入队一次 `POLL_MAILBOX` 重新排空；投递或打断失败的行保持未读、等定时轮询重投（不立即
+    重排），**不回退成插入**。广播被扣住期间，比它新的广播不投递、不标已读（广播已读是水位线）。
+    用户侧发件人（`user`、human agent、passive human）、Leader 的广播、模板/JSON 行、以及不经邮箱的
+    系统提醒（看板巡视、催办）都不经监工。`kernel.stop` 在停 EventBus 前调
+    `dispatcher.aclose()` 收掉判断 worker。
 
 ## 接口契约
 
@@ -199,9 +215,12 @@ class EventDispatcher:
     task_board: TaskBoardHandler        # scheduled 模式下是 ScheduledTaskBoardHandler
     stale_task: StaleTaskHandler        # scheduled 模式下是 ScheduledStaleTaskHandler
     team_completion: TeamCompletionHandler
+    duplex_router: DuplexRouter | None  # F_117；未开启时为 None，message 为原类
 
     @property
     def dispatch_mode(self) -> str: ...
+
+    async def aclose(self) -> None: ...  # 收掉 dispatcher 持有的后台工作（双工判断 worker）
 
     async def dispatch(self, event: CoordinationEvent) -> None: ...
 ```

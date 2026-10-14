@@ -47,6 +47,31 @@ import asyncio
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable
 
+from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime
+from openjiuwen.agent_teams.harness.control import (
+    _CmdAbort,
+    _CmdInterrupt,
+    _CmdPause,
+    _CmdResume,
+    _CmdRoundFinished,
+    _CmdSend,
+    _CmdStop,
+)
+from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
+from openjiuwen.agent_teams.harness.protocol import INTERRUPT_APPLIED, INTERRUPT_UNAVAILABLE
+from openjiuwen.agent_teams.harness.snapshot_rail import (
+    COOPERATIVE_STOP_TYPE,
+    PhaseSnapshotRail,
+    capture_snapshot,
+)
+from openjiuwen.agent_teams.harness.state import (
+    ActiveRound,
+    HarnessInternalState,
+    HarnessState,
+    InboxMessage,
+    SafeStateSnapshot,
+)
+from openjiuwen.agent_teams.harness.turn import resolve_member_turn
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, raise_error
 from openjiuwen.core.common.logging import logger
@@ -61,29 +86,6 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.state import DeepAgentState
-from openjiuwen.agent_teams.harness.control import (
-    _CmdAbort,
-    _CmdPause,
-    _CmdResume,
-    _CmdRoundFinished,
-    _CmdSend,
-    _CmdStop,
-)
-from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime
-from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
-from openjiuwen.agent_teams.harness.snapshot_rail import (
-    COOPERATIVE_STOP_TYPE,
-    PhaseSnapshotRail,
-    capture_snapshot,
-)
-from openjiuwen.agent_teams.harness.state import (
-    ActiveRound,
-    HarnessInternalState,
-    HarnessState,
-    InboxMessage,
-    SafeStateSnapshot,
-)
-from openjiuwen.agent_teams.harness.turn import resolve_member_turn
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.build_context import BuildContext
@@ -102,6 +104,8 @@ _EVENT_STATE = "harness.state"
 _EVENT_ROUND = "harness.round"
 _EVENT_NAMESPACE = "native_harness"
 _SLOW_ROUND_REPEAT_LOG_INTERVAL_SECONDS = 600.0
+# Upper bound for each free-text field of ``work_summary``.
+_WORK_SUMMARY_FIELD_LIMIT = 1000
 
 
 def _query_text(query: "str | list[str] | InteractiveInput") -> str | None:
@@ -621,6 +625,54 @@ class NativeHarness(DeepAgent):
         await self._control.put(_CmdResume(ack=ack, query=query))
         await ack
 
+    async def interrupt(self, content: str) -> str:
+        """Stop the active round at a safe boundary and replan with ``content``.
+
+        A safe interrupt, distinct from both ``pause`` and ``abort``:
+
+        - an in-flight model call is cancelled; running tools are allowed to
+          finish (their side effects are irreversible) and the loop stops at the
+          next model-call boundary;
+        - the live context and every completed tool result are kept — unlike
+          ``pause``, nothing is rolled back;
+        - the task plan is invalidated, and the round continues in place with
+          ``content`` steered in, so the agent replans before acting again.
+
+        Returns ``INTERRUPT_APPLIED`` once the continuation round started, or
+        ``INTERRUPT_UNAVAILABLE`` when no round is running (or another interrupt
+        is already waiting) — nothing is changed then. Raises when an explicit
+        pause / abort / stop or a crash supersedes the interrupt before it
+        committed; the caller must not fall back to a plain steer then.
+        """
+        self._require_alive()
+        ack: asyncio.Future = asyncio.get_running_loop().create_future()
+        await self._control.put(_CmdInterrupt(content=content, ack=ack))
+        return await ack
+
+    def work_summary(self) -> dict[str, str]:
+        """Return a short, model-free summary of the current work.
+
+        Plain strings only: lifecycle phase, the request driving the current (or
+        paused) round, and the task plan's goal and current step when a plan
+        exists. Read synchronously from supervisor-owned state; never calls the
+        model.
+        """
+        summary = {"phase": self._st.phase.value}
+        active = self._st.active
+        query = active.original_query if active is not None else self._st.paused_query
+        request = _query_text(query) if query is not None else None
+        if request:
+            summary["request"] = request[:_WORK_SUMMARY_FIELD_LIMIT]
+        plan = self.load_state(self._session).task_plan if self._session is not None else None
+        if plan is not None:
+            if plan.goal:
+                summary["goal"] = plan.goal[:_WORK_SUMMARY_FIELD_LIMIT]
+            current = plan.get_task(plan.current_task_id) if plan.current_task_id else None
+            if current is not None:
+                step = current.description or current.content
+                summary["current_step"] = step[:_WORK_SUMMARY_FIELD_LIMIT]
+        return summary
+
     # ------------------------------------------------------------------
     # Auto-invoke override (session_spawn): route through the supervisor.
     # ------------------------------------------------------------------
@@ -771,6 +823,8 @@ class NativeHarness(DeepAgent):
             await self._on_resume(cmd)
         elif isinstance(cmd, _CmdRoundFinished):
             await self._on_round_done(cmd)
+        elif isinstance(cmd, _CmdInterrupt):
+            await self._on_interrupt(cmd)
         else:  # pragma: no cover - defensive
             logger.warning("[NativeHarness] unknown control event: %r", cmd)
 
@@ -789,6 +843,7 @@ class NativeHarness(DeepAgent):
             StatusCode.DEEPAGENT_RUNTIME_ERROR,
             error_msg="NativeHarness stopped before this command was handled.",
         )
+        self._reject_interrupt("supervisor stopped")
         pending = []
         if crashed_cmd is not None:
             pending.append(crashed_cmd)
@@ -826,6 +881,11 @@ class NativeHarness(DeepAgent):
         msg = InboxMessage(seq=seq, content=cmd.msg.content, immediate=cmd.msg.immediate)
 
         phase = self._st.phase
+        if phase is HarnessState.PAUSING and self._st.pending_interrupt is not None:
+            # A safe interrupt is waiting for running tools to finish; its
+            # continuation round picks the input up, so route it as RUNNING
+            # rather than dropping it.
+            phase = HarnessState.RUNNING
         if phase is HarnessState.IDLE:
             active = self._start_round(msg.content)
             await self._transition(HarnessState.RUNNING)
@@ -870,7 +930,10 @@ class NativeHarness(DeepAgent):
           has not started, the loop exits at the next ``before_model_call``;
           otherwise the started iteration (LLM + tools) runs to completion and
           the loop exits at the following model-call boundary.
+
+        An abort supersedes a safe interrupt still waiting for its boundary.
         """
+        self._reject_interrupt("superseded by abort")
         phase = self._st.phase
         if phase is HarnessState.IDLE:
             self._ack(cmd.ack, None)
@@ -932,6 +995,9 @@ class NativeHarness(DeepAgent):
         completes while the cancel is being prepared, ``after_model_call`` still
         force-finishes before any tool starts.
         """
+        # An explicit pause supersedes a safe interrupt waiting in PAUSING: the
+        # round still settles to PAUSED, and stays there.
+        self._reject_interrupt("superseded by pause")
         phase = self._st.phase
         if phase is not HarnessState.RUNNING:
             # PAUSING: a cooperative pause is already in flight. PAUSED / IDLE /
@@ -1021,6 +1087,91 @@ class NativeHarness(DeepAgent):
             await self._settle_round_done(active, cmd)
         finally:
             self._resolve_pause_ack(active)
+        await self._settle_pending_interrupt()
+
+    async def _on_interrupt(self, cmd: _CmdInterrupt) -> None:
+        """Start a safe interrupt: stop at a safe boundary, keep context, replan.
+
+        Shares the cooperative stop with ``_on_pause`` (``pause_requested``) but
+        never rolls back. A model-phase interrupt cancels the parked model call
+        and commits at once; a tool-phase interrupt waits in PAUSING and commits
+        from ``_on_round_done`` once the round settled to PAUSED.
+        """
+        active = self._st.active
+        if self._st.phase is not HarnessState.RUNNING or active is None:
+            # IDLE / PAUSED / TERMINATED, or PAUSING (a pause or another
+            # interrupt is already in flight): nothing to interrupt.
+            self._ack(cmd.ack, INTERRUPT_UNAVAILABLE)
+            return
+        self._st.paused_query = _query_text(active.original_query)
+        active.pause_requested = True
+        if active.model_call_in_flight:
+            # Cancel only the generation. Its response never reached the
+            # context, so there is nothing to roll back; rolling back to the
+            # last boundary would also drop steers admitted since then.
+            await self._hard_cancel_round(active)
+            self._reset_coordinator()
+            await self._emit_round_aborted(active.round_id, "interrupt")
+            await self._emit_round("paused", active.round_id)
+            self._st.active = None
+            await self._transition(HarnessState.PAUSED)
+            await self._commit_interrupt(cmd)
+            return
+        self._st.pending_interrupt = cmd
+        await self._transition(HarnessState.PAUSING)
+
+    async def _settle_pending_interrupt(self) -> None:
+        """Commit a tool-phase interrupt once its round settled to PAUSED."""
+        cmd = self._st.pending_interrupt
+        if cmd is None:
+            return
+        self._st.pending_interrupt = None
+        if self._st.phase is HarnessState.PAUSED:
+            await self._commit_interrupt(cmd)
+            return
+        self._fail_interrupt(cmd, "round ended before reaching a safe boundary")
+
+    async def _commit_interrupt(self, cmd: _CmdInterrupt) -> None:
+        """Invalidate the task plan and continue the paused round with the content.
+
+        The continuation keeps the round's originating query (task-plan reuse and
+        failure retry still see it) and appends no user turn; ``content`` arrives
+        through the steering queue before the next model call.
+        """
+        try:
+            session = self._session
+            if session is not None:
+                state = self.load_state(session)
+                state.task_plan = None
+                self.save_state(session, state)
+            query = self._st.paused_query or ""
+            self._st.paused_query = None
+            active = self._start_round(query, resume_continuation=True)
+            self._push_steer(cmd.content)
+            await self._transition(HarnessState.RUNNING)
+            await self._emit_round("started", active.round_id)
+        except Exception as exc:
+            if not cmd.ack.done():
+                cmd.ack.set_exception(exc)
+            raise
+        logger.info("[NativeHarness] interrupt committed round_id=%s plan_invalidated=true", active.round_id)
+        self._ack(cmd.ack, INTERRUPT_APPLIED)
+
+    def _reject_interrupt(self, reason: str) -> None:
+        """Fail a safe interrupt that is still waiting for its boundary."""
+        cmd = self._st.pending_interrupt
+        if cmd is None:
+            return
+        self._st.pending_interrupt = None
+        self._fail_interrupt(cmd, reason)
+
+    @staticmethod
+    def _fail_interrupt(cmd: _CmdInterrupt, reason: str) -> None:
+        logger.info("[NativeHarness] interrupt not applied: %s", reason)
+        if not cmd.ack.done():
+            cmd.ack.set_exception(
+                build_error(StatusCode.DEEPAGENT_RUNTIME_ERROR, error_msg=f"interrupt not applied: {reason}"),
+            )
 
     def _resolve_pause_ack(self, active: ActiveRound) -> None:
         """Resolve a deferred cooperative-pause ack, if one is pending."""
@@ -1169,6 +1320,7 @@ class NativeHarness(DeepAgent):
         after the supervisor exits; the forwarder then emits the ``_END``
         sentinel.
         """
+        self._reject_interrupt("harness stopped")
         active = self._st.active
         if active is not None:
             await self._hard_cancel_round(active)

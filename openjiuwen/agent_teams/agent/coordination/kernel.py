@@ -21,8 +21,8 @@ from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.harness.prompts import resolve_language as _resolve_language
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
+from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
@@ -554,6 +554,8 @@ class CoordinationKernel:
         await host.spawn_manager.shutdown_all_handles()
         if memory_manager:
             await memory_manager.close()
+        if self._dispatcher is not None:
+            await self._dispatcher.aclose()
         if self._event_bus is not None:
             await self._event_bus.stop()
         self.close_stream()

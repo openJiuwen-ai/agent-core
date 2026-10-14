@@ -1,6 +1,6 @@
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-08-13
+最近一次修订日期：2026-10-13
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -36,6 +36,17 @@ TeamHarness/StreamController）的决策见 [[F_28_native-harness-team-adoption]
 | `abort` | `async (*, immediate=False)` | 中止当前 round → IDLE。graceful（False）在 iteration 边界停；immediate（True）硬取消 + 回退最近边界 |
 | `pause` | `async ()` | 在最近的 inner ReAct iteration 边界暂停 → PAUSED，round 保留可续 |
 | `resume` | `async (*, query=None)` | 从保留的 context 原地续跑 paused round（不追加新的 user turn）。`query` 驱动**冷恢复**（harness 已重建、context 来自 checkpoint）；warm 恢复忽略它 |
+
+可选能力（`harness/protocol.py`，均 `@runtime_checkable`，**不并入 `HarnessProtocol`**——
+往 runtime_checkable 协议加方法会让不支持的实现 `isinstance` 失败）：
+
+| 协议 | 成员 | 语义 |
+|---|---|---|
+| `InterruptibleHarness` | `async interrupt(content: str) -> str` | 安全打断 + 重新规划（见「中断语义」）。返回 `INTERRUPT_APPLIED` / `INTERRUPT_UNAVAILABLE`；被显式 pause / abort / stop 或崩溃取代时抛错 |
+| `WorkSummarySource` | `work_summary() -> dict[str, str]` | 不调模型的当前工作摘要：`phase` / `request` / `goal` / `current_step` |
+
+`NativeHarness` 与 `TeamHarness`（转发；cycle 未活跃时 `UNAVAILABLE` / `{}`）实现二者；外部
+CLI 运行时不实现，调用方据此退化为普通插入（F_117）。
 
 `abort` 与 `pause` 是**两个正交动词**：abort 丢弃当前 round（下次 `send` 起全新 round），
 pause 停在干净边界并保留 round（`resume` 原地续）。
@@ -141,6 +152,17 @@ ToolMessage 强配对，一次 iteration 只有两个合法结局：**整个丢�
   无回滚 → IDLE。
 - **immediate abort**（`immediate=True`）：`task_scheduler.cancel_task(task_id)` 硬停 executor +
   回滚 DeepAgentState+context 到 `last_iter_snapshot`（无则 pre-round baseline）→ IDLE。
+- **interrupt**（`interrupt(content)`，F_117，安全打断 + 重新规划）：仅 RUNNING 且有活动 round
+  时生效，否则立即返回 `UNAVAILABLE`（含 PAUSING：已有 pause 或 interrupt 在等）。与 pause 共用
+  `pause_requested` 协作停止点，但**不回滚**：model 阶段 → 硬取消生成（回复本就没进 context），
+  直接 PAUSED 并提交；tool 阶段 → 等工具跑完，round 在下一个 model-call 边界停 → PAUSING →
+  `_on_round_done` 进 PAUSED 后提交（等待中的命令记在 `HarnessInternalState.pending_interrupt`）。
+  提交 = `DeepAgentState.task_plan = None`（作废旧计划）+ 用 paused query 起 continuation round +
+  把 `content` 作为一条 steer 推入 → 返回 `INTERRUPT_APPLIED`。显式 pause（PAUSING 中）/ abort /
+  stop / round 未停在边界 / supervisor 崩溃都会让等待中的打断以 `DEEPAGENT_RUNTIME_ERROR` 失败，
+  显式 pause 时 harness 留在 PAUSED。**等待打断期间（PAUSING + `pending_interrupt`）到达的
+  `send` 按 RUNNING 路由**（插入进 steering 队列 / 排队进 follow-up），由 continuation round 取走；
+  显式 pause 的 PAUSING 期间 `send` 仍沿用原行为（无分支，被丢弃，已知遗留）。
 - **工具外部副作用不撤销**（沿袭 F_27）。这正是 tool 阶段必须等 iteration 完成的理由。
 - **CLI runtime**：abort 信号单轮 `_drive` 自然返回并 fire `aborted` round 事件；
   immediate rollback / pause / resume 无对应快照，降级 no-op。
