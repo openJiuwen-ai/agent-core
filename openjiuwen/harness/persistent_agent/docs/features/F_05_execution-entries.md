@@ -7,14 +7,14 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-05，F_05 为文档编号 |
-| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14 |
+| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14（见附录 A.2） |
 | 负责人 | Song Haoran、Chen Ran；认领和后续安排以统一开发计划为准 |
 | 方案依据 | 沿用已确认架构及现行 spec；原阶段记录注明 D1～D7 已确认，本次不新增设计确认或修改架构 |
 | 原实现范围 | 内部 `persistent_agent/schema/request.py`、`execution/{entries,control,emitter,model_rail,seams}.py`、`schema/spec.py`，外层 `__init__.py` 与对应单测；复用共享 Session 接缝 |
-| 本次修订范围 | 2026-10-12 重组设计与验证记录；2026-10-14 修复控制拒绝的工具消息，补充独立测试与文档；公开接口不变 |
+| 本次修订范围 | 2026-10-12 重组设计与验证记录；2026-10-14 修复控制拒绝的工具消息，补充独立测试，并同步 PA-10 接入、保存边界及 Model Rail 钩子；公开接口不变 |
 | 唯一开发计划 | [Persistent Agent 开发计划](../designs/persistent-agent-development-plan.md) PA-05；开发状态、排期、交付分类和节点进度在该计划维护 |
 | 验证摘要 | 2026-10-12 历史定向复核 94 passed / 2 failed；2026-10-14 控制修复独立回归及推送前复核均为 823 passed，历史与最新记录分开保留；真实宿主与 M1 联调未完成，见第 4 节及附录 A.2 |
-| Refs / 关联 PR | 原记录未提供 issue / PR；本次不补造编号 |
+| Refs / 关联 PR | 原记录未提供 issue；控制 Rail 修复已合入 [PR #72](https://gitcode.com/huenrui_/agent-core/pull/72)，未关联 issue |
 
 本文参考用户指定的[特性开发计划模板](../../../docs/templates/feature-development-plan-template.md)，按“范围与口径 → 特性与验收 → 依赖与联合交付 → 验证与进展”组织；按[特性设计模板](../../../docs/templates/feature-design-template.md)及[目录约定](../AGENTS.md)展开方案、取舍和实现流程。本文提供 PA-05 的技术设计与验证证据，不另建排期或完成率台账。
 
@@ -43,8 +43,8 @@ PA-05 组合已有构造、原生流和清理接缝，负责入口校验、事�
 | 三个入口、请求值对象、runner、事件映射、预算 Rail、结局锁定 | 已有组件实现；本次复核结果见第 4 节 |
 | 群消息参与判断 | 已由 [F_07](F_07_group-participation.md)接入。忽略、判断失败或预算暂停可在构造正式 Agent、加载窗口前结束 |
 | 工具意图与完成 | 已由 [F_15](F_15_tool-intent-before-side-effect.md)接入，复用 PA-05 emitter / fatal 通道，不再列为未实现接入点 |
-| 新任务正式执行 | `session_state_store`（PA-10）getter 仍明确拒绝（2026-10-14 PA-10 已接入，见 [F_17](F_17_session-state-record.md)）；PA-06 组装器已接入，但 PA-23 群消息读取及 PA-13 知识导航仍有门禁；回应 / 插话也受这些条件约束 |
-| 正式确认恢复 | `session_state_store`（PA-10）和 `native_reply_adapter`（PA-09）getter 仍明确拒绝（2026-10-14 PA-10 已接入，PA-09 仍拒绝，见 [F_17](F_17_session-state-record.md)） |
+| 新任务正式执行 | `session_state_store`（PA-10）已接入（2026-10-14，见 [F_17](F_17_session-state-record.md)），新任务正式入口可执行；PA-06 组装器已接入，但注入 GroupChatPort（需要 PA-23 群消息读取）或 KnowledgePort（PA-13 知识导航）时仍拒绝；回应 / 插话也受这些条件约束 |
+| 正式确认恢复 | `session_state_store`（PA-10）已接入（2026-10-14，见 [F_17](F_17_session-state-record.md)）；确认恢复因 `native_reply_adapter`（PA-09）尚未接入而拒绝 |
 | 非确认暂停后继续、崩溃续做 | 带 `recovery_ref` 的 execute 仍明确拒绝，待 PA-18 接入 |
 | 执行能力声明 | `enabled_features` 当前只允许 construction / workspace_read，没有 execution；声明条件见第 3.3 节 |
 
@@ -140,9 +140,10 @@ abort_persistent_request(context, *, reason: "cancel" | "stop") -> None  # async
 | `async EventEmitter.emit(self, event_type: EventType, payload: Any) -> AgentEvent` | 锁内创建、编号、await record 后交出事件；普通失败诊断后仍入 outbox，关键失败标 fatal 并抛 RUNTIME_ERROR，不入 outbox |
 | `async EventEmitter.emit_if_fits(self, event_type: EventType, payload: dict) -> AgentEvent \| None` | 检查 payload.text 和完整容量；超限返回 None 且不占序号，字段形状错误仍可抛 ValidationError；用于最终候选 |
 | `async EventEmitter.emit_text(self, event_type: EventType, text: str) -> None` | 文本按字符 / JSON 字节上限分块，多事件相接还原原文；空字符串不产事件；记录与入队是副作用 |
+| `async PersistentModelCallRail.before_invoke(self, ctx) -> None` | PA-10 新增：Rail 注册完成后、原生创建上下文前检查实际挂载的卸载处理器，发现即标记致命错误并抛 CONFIG_PARAM_ERROR；无 emitter 时不工作 |
 | `async PersistentModelCallRail.before_model_call(self, ctx) -> None` | 无 emitter 时不工作；有 emitter 时停止检查与预算准入，准入成功保存调用 ID，拒绝 / 异常请求 force-finish |
 | `async PersistentModelCallRail.after_model_call(self, ctx) -> None` / `on_model_exception(self, ctx) -> None` | 消费并移除本次调用 ID，回报用量与 model.completed；模型异常回报 unknown，report 异常诊断后继续；after 可产带工具调用的中间文本 |
-| `async PersistentModelCallRail.before_tool_call(self, ctx) -> None` | emitter 存在时阻止控制 / fatal 后尚未开始的工具，同时写入结果“本次执行正在结束，该工具未调用。”；不负责写意图，写屏障见 F_15 |
+| `async PersistentModelCallRail.before_tool_call(self, ctx) -> None` | emitter 存在时阻止控制 / fatal 后尚未开始的工具，同时把该调用的工具结果写为“本次执行正在结束，该工具未调用。”；不负责写意图，写屏障见 F_15 |
 
 公开独立函数的真实签名在 [entries.py](../../execution/entries.py)：
 
@@ -177,7 +178,7 @@ abort 是需 await 的控制协程，返回 None 只说明本次控制路径已�
 | `async GroupMessageReader.recent_messages(self, context: PersistentBuildContext, *, after: str \| None = None, trigger_message_id: str \| None = None) -> GroupMessagesResult` | PA-23：游标后新消息及连续性背景，排除触发消息；当前 F_07 直接调用 GroupChatPort，不通过此接口 |
 | `NativeReplyAdapter.to_native(self, response: PermissionResponse \| AnswerResponse, request: InterruptRequest) -> Any`（同步） | PA-09：合法响应转为原生中断输入值，不创建新任务正文；等待场景及工具 ID 由入口先校验，适配器异常可传播 |
 
-获取接口分别为 `session_state_store(context: PersistentBuildContext) -> SessionStateStore`、`window_assembler(context: PersistentBuildContext) -> WindowAssembler`、`group_message_reader(context: PersistentBuildContext) -> GroupMessageReader`、`native_reply_adapter() -> NativeReplyAdapter`，均为同步内部函数。当前这四个 getter 统一抛 CONFIG_PARAM_ERROR，接口定义不是已接入后端；替身仅用于组件验证。宿主 record / budget 接口复用 [F_02 第 5.6 节](F_02_execution-protocol.md#56-关键类方法与宿主接口定义)，没有新增执行权或控制端口。
+获取接口分别为 `session_state_store(context: PersistentBuildContext) -> SessionStateStore`、`window_assembler(context: PersistentBuildContext) -> WindowAssembler`、`group_message_reader(context: PersistentBuildContext) -> GroupMessageReader`、`native_reply_adapter() -> NativeReplyAdapter`，均为同步内部函数。当前 `session_state_store` 返回 PA-10 的正式实现，`window_assembler` 返回 PA-06 的组装器（注入 KnowledgePort 时抛 CONFIG_PARAM_ERROR；注入 GroupChatPort 时需要群消息读取，同样拒绝）；`group_message_reader`（PA-23）与 `native_reply_adapter`（PA-09）仍抛 CONFIG_PARAM_ERROR，测试中的替身仅用于组件验证。宿主 record / budget 接口复用 [F_02 第 5.6 节](F_02_execution-protocol.md#56-关键类方法与宿主接口定义)，没有新增执行权或控制端口。
 
 ### 2.4 执行与确认恢复流程
 
@@ -246,12 +247,13 @@ PA-06 加载后的兜底检查若发现等待中的调用或未配对工具调�
 | 执行结束 | execution.paused / execution.final |
 | 协同生产者 | participation.decided 归 PA-07；tool.intent / tool.completed 归 PA-15；window.switched 生产者归 PA-11，仍待接入 |
 
-[PersistentModelCallRail](../../execution/model_rail.py)由 PersistentAgentSpec.resolve_parts 装配；没有正式 emitter 时不执行预算与事件逻辑。它使用 before_model_call、after_model_call、on_model_exception、before_tool_call 四个钩子：
+[PersistentModelCallRail](../../execution/model_rail.py)由 PersistentAgentSpec.resolve_parts 装配；没有正式 emitter 时不执行预算与事件逻辑。它使用 before_invoke、before_model_call、after_model_call、on_model_exception、before_tool_call 五个钩子（before_invoke 为 PA-10 新增，见第 5 条）：
 
 1. 模型前先查 fatal / cancel / stop，有则 force-finish、跳过调用；否则生成新的 model_call_id，await admit 并重新校验 BudgetAdmission 和调用归属。denied 标记 budget_denied；异常或 DTO / 归属错配标记 error，均不调用模型。
 2. 模型完成以响应 usage_metadata 构造用量；缺少用量或模型调用失败为 unknown，不伪造零计数。await report、校验 BudgetReport / 归属，再记 model.completed。
 3. report 调用或校验异常只记诊断；响应为 rejected 也不转成执行暂停，宿主负责结算与对账。model.completed 不是结算回执。
-4. 工具前同样检查控制和 fatal，阻止每个尚未开始的工具，包括只读工具；被阻止的调用写入结果“本次执行正在结束，该工具未调用。”。停止、取消与致命错误共用这条说明，内部强制结束载荷保持不变，入口仍据此判定结局。已开始的并行调用依赖现有取消收敛，不承诺撤销外部效果。
+4. 工具前同样检查控制和 fatal，阻止每个尚未开始的工具，包括只读工具；被阻止的调用在窗口中的结果为“本次执行正在结束，该工具未调用。”（停止、取消与致命错误共用），强制结束载荷仍用于判定结局。已开始的并行调用依赖现有取消收敛，不承诺撤销外部效果。
+5. 原生调用开始时（Rail 已注册、上下文尚未创建）检查实际挂载的上下文处理器，发现会卸载消息的处理器即标记致命错误并停止，入口在原生退出后抛出配置错误，不保存、不记结束事件（[F_17](F_17_session-state-record.md) D-07）。
 
 模型 Rail 优先级为 10；当前既有排序中高值先执行，它位于其他常用模型前钩子之后。不能仅凭数值宣称未来任何自定义 Rail 都不会排在它后面。PA-15 的 before_tool_call 优先级为 5，在控制守卫与权限 / 中断判定之后，并在意图等待返回后再次检查控制；旧文“PA-15 尚待接入、与工具守卫同为 10”的说明已不适用。完整工具策略和原生幂等重试边界由 F_15 / S_08 唯一维护。
 
@@ -378,15 +380,15 @@ flowchart LR
 | [control.py](../../execution/control.py) | 首次控制、首个 fatal、同步锁定和停止完成信号 |
 | [emitter.py](../../execution/emitter.py) | 唯一编号 / 记账 / 展示出口及容量控制 |
 | [model_rail.py](../../execution/model_rail.py) | 原生模型预算 / 用量及模型 / 工具控制守卫 |
-| [seams.py](../../execution/seams.py) | 后续实现接入点、当前拒绝门禁及共享契约兼容再导出 |
+| [seams.py](../../execution/seams.py) | 接入点（PA-10 会话状态记录与 PA-06 组装器已接入，群消息读取与回复适配仍拒绝）及共享契约兼容再导出 |
 | [schema/integration.py](../../schema/integration.py) | 共享值对象、窗口标记和协议的定义 |
 | [spec.py](../../schema/spec.py)、[外层导出](../../__init__.py) | 装配 Rail / stream lifecycle，公开三个入口和请求类型 |
 | [binding.py](../../execution/binding.py)、[stream_lifecycle.py](../../execution/stream_lifecycle.py) | 复用 PA-03 的占用、后台生产者收敛及关闭机制 |
 
 | 接入协议 / 归属 | 值对象与约定 | 当前边界 |
 | --- | --- | --- |
-| SessionStateStore.load / PA-10 | 写回 Session state，返回 LoadedRecord(waiting, last_group_message_id)；确定无记录返回空 LoadedRecord | getter 未接入；异常或非法返回为运行失败，不退回空窗口 |
-| SessionStateStore.save / PA-10 | 收到 ExecutionEnding(outcome, request_id, reply_target, output_refs, pending_answer, last_group_message_id)，整理白名单后一次保存 | pending_answer 与游标须原样保存；游标进入结束标记；实现待接入 |
+| SessionStateStore.load / PA-10 | 写回 Session state，返回 LoadedRecord(waiting, last_group_message_id)；确定无记录返回空 LoadedRecord | 已接入（[F_17](F_17_session-state-record.md)）；后端异常为运行失败，记录无效为校验拒绝，均不退回空窗口 |
+| SessionStateStore.save / PA-10 | 收到 ExecutionEnding(outcome, request_id, reply_target, output_refs, pending_answer, last_group_message_id)，整理白名单后一次保存 | pending_answer 与游标须原样保存；游标进入结束标记；已接入，写入前失败不调用写入，后端写入抛错时记录可能已改变 |
 | WindowAssembler.assemble / PA-06 | load 之后组装，返回 WindowAssembly(native_input, last_group_message_id)；游标为服务端确认的扫描位置，无可信进度则保留加载时的游标 | 已接入；容量验收未关闭；确认恢复不调用 |
 | GroupMessageReader.recent_messages / PA-23 | after 游标后的新消息及少量衔接，trigger_message_id 排除触发消息，返回 GroupMessagesResult | getter 未接入；PA-06 背景消费它。当前 PA-07 直接调用 GroupChatPort，不等待该 getter |
 | NativeReplyAdapter.to_native / PA-09 | 匹配后的单项回复转原生载荷，入口按交互 ID 组装 InteractiveInput | getter 未接入；测试适配器不是正式实现 |
@@ -449,11 +451,15 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 | 未实现接入 | PA-06、PA-09、PA-10 getter 仍拒绝（PA-06 已于 2026-10-12 接入，PA-10 已于 2026-10-14 接入，见 [F_17](F_17_session-state-record.md)；PA-09 仍拒绝） | 正式任务 / 确认恢复不能开放；M1 使用真实组件验收 |
 =======
 | 历史验证失败，本轮不再复现 | 2026-10-12 记录的两个入口流式事件链失败 | 2026-10-14 基于 8e0d1067 的独立回归通过：PA 包与 core Session 823 passed；历史失败记录保留，真实宿主验收仍待进行 |
+<<<<<<< HEAD
 | 未实现接入 | PA-06、PA-09、PA-10 getter 仍拒绝 | 正式任务 / 确认恢复不能开放；M1 使用真实组件验收 |
 >>>>>>> 05b63e9e3 (docs(harness): record PA-05 refused tool call behavior)
+=======
+| 未实现接入 | PA-06、PA-10 已接入（2026-10-12、2026-10-14，见 [F_17](F_17_session-state-record.md)）；PA-09 回复适配与 PA-23 群消息读取的 getter 仍拒绝 | 确认恢复与群 Session 任务仍拒绝；私聊和定时任务的正式入口可执行，但 M1 真实组件验收前不声明 execution 能力 |
+>>>>>>> 543754d14 (docs(harness): synchronize PA-10 design and integration status)
 | 未实现接入 | PA-08 文件候选、超限答案补交；PA-18 续做；PA-23 游标群背景 | 当前只自动交接 message 最终回答；pending_answer 后续拆候选或转文件由 PA-08 决定，不重跑业务；recovery_ref 仍拒绝 |
 | 有意保留范围 | task-loop、同步 / 异步 / 持久子代理关闭 | PA-24～PA-26 逐项验证后开放，不由配置偷偷启用 |
-| 未验证共享边界 | 工具执行中途停止、残缺工具结果整理和真实状态保存 | PA-10 / PA-18 查证日志与外部效果，不能将模型中途停止证据扩大为完整安全续做 |
+| 已有组件验证、真实集成待完成 | 工具停止、取消或报错后的调用组保留、残缺结果补位和状态保存已有 PA-10 组件证据 | 见 F_17；真实宿主与 PA-18 续做仍须查证日志和外部效果，不能据此宣称完整安全续做 |
 | 预算覆盖限制 | 原生 Rail 之外的内部模型调用，例如独立 task planning 模型，不经过本 Rail | 一期不启用这类 Rail；开放时评估额外预算消费者 |
 | 宿主运行方案待明确 | emitter 展示队列当前无容量上限，无跨保存 / 记账事务 | 队列容量、限流及观测由集成维护者按架构约定补齐；本项不承诺已实现流量控制 |
 
@@ -489,7 +495,8 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 | 2026-10-09 群判断接入 | 判断先于正式构造和窗口加载；忽略 / 失败不受 store / assembler 门禁 | F_07；替代早期全部群消息拒绝结论 |
 | 后续工具意图接入 | 写前关键记账，完成为普通事件，before_tool_call 排在模型控制守卫之后 | F_15 / S_08；替代原 PA-15 未接入及排序遗留 |
 | 2026-10-12 本次文档重构 | 参考模板重组全部设计与证据，修正错误码、实际控制检查位置、群路径门禁和当前架构引用；记录 94 passed / 2 failed | 本文第 4 节；只修文档，不用历史通过覆盖当前失败 |
-
+| 2026-10-14 当前接入状态同步 | PA-10 接入后，按代码更新 getter 状态（存储与组装器已接入，群消息读取与回复适配仍拒绝）、确认恢复的拒绝原因、SessionStateStore 边界、Model Rail 钩子（新增 before_invoke）与未实现接入遗留；原“四个 getter 统一拒绝”“四个钩子”及“PA-10 getter 仍拒绝”为接入前描述 | 第 1.3、2.3、2.5、3.2、4.3 节；[F_17](F_17_session-state-record.md) |
+| 2026-10-14 PA-10 联动（Q-03） | 被控制 Rail 阻止的工具调用写入结果“本次执行正在结束，该工具未调用。”，不再以强制结束载荷的文字作为窗口中的工具结果：PA-10 接入后窗口跨任务保存，内部停止信号会带到下一任务，停止时也显示 error | 第 2 节控制检查第 4 条；[F_17](F_17_session-state-record.md) Q-03；test_entries.py 中的 `test_calls_refused_after_a_control_say_they_did_not_run`（停止、取消）与 `test_the_control_rail_refuses_every_call_with_the_same_note`（含致命错误） |
 
 ### 2026-10-14 控制 Rail 说明文字修复与独立验证
 

@@ -2,7 +2,7 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 类型 / 状态 | feature；PA-06，已实现（组件验收）。容量相关验收未关闭（计划第 1.2 节“容量边界”待补设计）；正式入口在 PA-10、PA-09 接入前仍明确拒绝（2026-10-14 PA-10 已接入，确认恢复在 PA-09 接入前仍拒绝，见 [F_17](F_17_session-state-record.md)） |
+| 类型 / 状态 | feature；PA-06，已实现（组件验收）。容量相关验收未关闭（计划第 1.2 节“容量边界”待补设计）；新任务正式入口已可执行（PA-10 于 2026-10-14 接入，见 [F_17](F_17_session-state-record.md)），确认恢复在 PA-09 接入前仍拒绝 |
 | 日期 | 2026-10-09；引用修订：2026-10-13 |
 | 负责人 | Song Haoran |
 | 范围 | 新增 `persistent_agent/execution/window_assembly.py`；`execution/seams.py` 的 `window_assembler` 接入点；`schema/spec.py` 的 `resolve_parts`；单测新增 `test_window_assembly.py`，`test_entries.py` 删去“窗口组装未接入”的用例。共享值对象、协议和标记已移至 `schema/integration.py`，由 `seams.py` 兼容再导出。不改 `entries.py` 的编排，不改变共享契约的字段和语义，不改共享 harness / core 代码 |

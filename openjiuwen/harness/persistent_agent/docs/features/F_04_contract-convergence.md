@@ -71,7 +71,7 @@ flowchart LR
     Context --> DTO["现行事件、预算与资料 DTO"]
     DTO -.->|后续组件消费| Runtime["PA-05 / PA-07 / PA-15 等"]
     Runtime -.->|record / budget / group / knowledge| Host
-    Backend["宿主注入 BaseKVStore"] -.->|PA-10 / PA-11 待接入| Store["内部会话记录与归档"]
+    Backend["宿主注入 BaseKVStore"] -.->|会话记录 PA-10 已接入，归档 PA-11 待接入| Store["内部会话记录与归档"]
 ```
 
 实线表示本项的数据及构造检查路径；虚线表示后续消费或待接入的运行关系，不表示 PA-04 已完成相应运行链路。BaseKVStore 是注入依赖，WindowStore 是内部组件，二者不形成新的外部 ContextStore 端口。
@@ -335,7 +335,7 @@ print(len(api.__all__), failed)
 | 工具只读 / 写声明与意图记账 | PA-15 已有 Rail；声明来源已确定为 agent-core 精确名称白名单，仅 read_file、list_files 为只读，其他默认写；不增加 ToolCard 字段 | PA-15 / S_08；真实 tool.intent 持久化确认和跨仓联调仍待验，不把本地放行顺序当作持久化证据 |
 | 候选保存、补交与投递 | PA-05 已产生最终 message 候选并带入 final.output_refs；完整候选交接和生产发送仍待完成 | PA-08 / AgentServer；验证缺候选 final 失败、原 ID 补交和去重，发送失败不重跑业务 |
 | 日志读取、缺口与悬空工具结果 | read_execution_log 协议已定义；整理、查证、补齐工具结果和清除过期中断尚待接入 | PA-17 / PA-18；M2c 验证缺日志不当未执行、先查证未决写操作，并保留正确确认状态 |
-| 会话记录、归档与 JSON 还原 | BaseKVStore 注入和 JSON / 白名单约束已确认；实际 load / save、换窗及归档实现待接入 | PA-06、PA-10～PA-12 / S_03；验证整条保存、对象还原、私有隔离和跨重启行为 |
+| 会话记录、归档与 JSON 还原 | BaseKVStore 注入和 JSON / 白名单约束已确认；会话状态记录的 load / save 已接入（PA-10，见 [F_17](F_17_session-state-record.md)）；换窗及归档实现待接入 | PA-06、PA-10～PA-12 / S_03；验证整条保存、对象还原、私有隔离和跨重启行为 |
 | 群聊与知识 | PA-07 已消费 recent_messages；窗口群背景、完整搜索与授权知识适配仍待接入 | PA-23、PA-13 / S_09；宿主验证权限、撤回、游标和完整性，不能以空结果掩盖失败 |
 | 容量和运行保障 | DTO 上限已实现；窗口 / 工具结果 / 续做注入的容量计算与检查点、宿主队列限流等仍需确认 | PA-06、PA-11、PA-17、PA-18 与 AgentServer；以开发计划及架构的待确认项为准 |
 | 后续工作空间懒导出 | WorkspaceAccessPort、WorkspaceReadScope 的 `_MODULES` 路径多含一层 persistent_agent，getattr 导致三层包路径不存在；其余 39 个符号可解析 | 工作空间能力维护者 / PA-14，定位 [外层 __init__.py](../../__init__.py)。本次只记录，不改代码；修复后重新运行全量导出检查 |
