@@ -1688,8 +1688,23 @@ async def test_workflow_cancel():
         assert True
 
     from openjiuwen.core.session.checkpointer import CheckpointerFactory
-    session_exist = await CheckpointerFactory.get_checkpointer().session_exists(session_id)
-    assert session_exist is False
+    checkpointer = CheckpointerFactory.get_checkpointer()
+    session_exist = await checkpointer.session_exists(session_id)
+    # 取消不等于正常完成:io 侧 checkpoint 须保留(post_workflow_execute
+    # 异常分支保存),不得被误判为正常完成而清除。
+    assert session_exist is True
+
+    # 语义澄清(2026-10-16 评审):取消分支只保留"已存在"的快照不被清除;
+    # 全新执行的中途取消不写入图侧快照(Pregel run_step 仅 except
+    # Exception,CancelledError 绕过 _save_state_on_error)。固化两点:
+    # 1) 图侧快照确实不存在;
+    # 2) 随后以 InteractiveInput resume 被前置校验显式拒绝(可诊断错误),
+    #    而非静默全新起跑或假称可从中断节点续跑。
+    assert checkpointer._graph_store.store_ck.get(session_id) is None
+    with pytest.raises(BaseError, match="interactive resume requested"):
+        await flow.invoke(
+            InteractiveInput(), create_workflow_session(session_id=session_id)
+        )
 
 
 async def test_questioner_context_sharing():
