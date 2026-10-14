@@ -5,6 +5,7 @@
 
 from typing import TYPE_CHECKING, Any, Callable
 
+from openjiuwen.agent_teams.message_template import task_links, upstream_lines
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.schema.task import TaskGraphSpec
 from openjiuwen.agent_teams.timefmt import format_time_context
@@ -760,7 +761,12 @@ class ViewTaskToolV2(TeamTool):
                 return ToolOutput(success=False, error="task_id required for get action")
             detail = await self.task_manager.get_task_detail(task_id=task_id)
             if detail:
-                return ToolOutput(success=True, data=detail.model_dump(exclude_none=True))
+                data = detail.model_dump(exclude_none=True)
+                # Direct upstream deliveries as one summary line each (F_120).
+                upstream, _downstream = await task_links(self.task_manager.db, task_id)
+                if upstream:
+                    data["upstream"] = upstream_lines(upstream)
+                return ToolOutput(success=True, data=data)
             return ToolOutput(success=False, error="Task not found")
 
         if action == "note":
@@ -833,6 +839,9 @@ class ViewTaskToolV2(TeamTool):
                 lines.append(f"Blocked by: {', '.join(f'#{tid}' for tid in d['blocked_by'])}")
             if d.get("blocks"):
                 lines.append(f"Blocks: {', '.join(f'#{tid}' for tid in d['blocks'])}")
+            if d.get("upstream"):
+                lines.append("Upstream deliveries:")
+                lines.extend(d["upstream"])
             return "\n".join(lines)
         # List view (list/claimable action) — mirrors TaskListTool
         tasks = d.get("tasks", [])
@@ -1269,6 +1278,7 @@ class ClaimTaskTool(TeamTool):
             )
         )
         self.task_manager = task_manager
+        self._t = t
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -1278,6 +1288,8 @@ class ClaimTaskTool(TeamTool):
                     "enum": ["claimed", "completed"],
                     "description": t("claim_task", "status"),
                 },
+                "summary": {"type": "string", "description": t("claim_task", "summary")},
+                "note": {"type": "string", "description": t("claim_task", "note")},
             },
             "required": ["task_id", "status"],
         }
@@ -1291,6 +1303,10 @@ class ClaimTaskTool(TeamTool):
         task = await self.task_manager.get(task_id)
         if not task:
             return ToolOutput(success=False, error="Task not found")
+
+        summary = (inputs.get("summary") or "").strip() or None
+        note = (inputs.get("note") or "").strip() or None
+        extra: dict[str, Any] = {}
 
         if status == "claimed":
             # One active task per member: refuse a second concurrent claim so a
@@ -1308,9 +1324,16 @@ class ClaimTaskTool(TeamTool):
             if not claim_result.ok:
                 return ToolOutput(success=False, error=claim_result.reason)
             status_change = {"from": task.status, "to": TaskStatus.IN_PROGRESS.value}
+            # Claiming is when an autonomous member starts the work, so this is
+            # when it needs to know what its direct upstream delivered (F_120).
+            upstream, _downstream = await task_links(self.task_manager.db, task_id)
+            if upstream:
+                extra["upstream"] = upstream_lines(upstream)
+            if summary is not None or note is not None:
+                extra["fields_ignored"] = True
 
         elif status == "completed":
-            complete_result = await self.task_manager.complete(task_id=task_id)
+            complete_result = await self.task_manager.complete(task_id=task_id, summary=summary, note=note)
             if not complete_result.ok:
                 return ToolOutput(success=False, error=complete_result.reason)
             # A reviewer-carrying task enters IN_REVIEW instead of completing.
@@ -1331,16 +1354,27 @@ class ClaimTaskTool(TeamTool):
                 "task_id": task_id,
                 "updated_fields": ["status"],
                 "status_change": status_change,
+                **extra,
             },
         )
 
     def render_for_llm(self, output: ToolOutput) -> str:
-        """Map claim_task result with behavior guidance on completion."""
+        """Map claim_task result with behavior guidance on completion.
+
+        A claim also lists the direct upstream deliveries (completion summaries)
+        so the member starts with what it builds on (F_120).
+        """
         if not output.success:
             return output.error or "Task not found"
         d = output.data
         sc = d["status_change"]
         result = f"Task #{d['task_id']} {sc['from']} → {sc['to']}"
+        if d.get("upstream"):
+            lines = [self._t("claim_task", "upstream_header"), *d["upstream"]]
+            lines.append(self._t("claim_task", "upstream_note_hint"))
+            result += "\n\n" + "\n".join(lines)
+        if d.get("fields_ignored"):
+            result += "\n\n" + self._t("claim_task", "fields_ignored")
         if sc["to"] == TaskStatus.COMPLETED.value:
             result += "\n\nTask completed. Call view_task now to find your next available task."
         return result

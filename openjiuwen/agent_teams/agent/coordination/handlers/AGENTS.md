@@ -140,7 +140,7 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
 
 **C. 看板巡视** —— `on_task_board_event` → `_nudge_idle_agent`，角色分化最关键的一处：
 
-- **leader 收每个 board 事件都巡视全部未完成任务**（它owns 看板级决策，必须看见每次跃迁）
+- **leader 收每个 board 事件都巡视全部未完成任务**（它owns 看板级决策，必须看见每次跃迁）；由 `TASK_COMPLETED` / `TASK_VERIFIED` 触发时，看板（或全部完成的收尾提示）之前先列"刚完成"的那个任务及其完成摘要，按需附 `view_task(action='note')` 提示——看板只列未完成任务，否则刚完成的结果会丢（F_120）。成员不再另发完成汇报
 - **teammate 只被 `_TEAMMATE_NUDGE_EVENTS` 唤醒** = `TASK_CREATED` / `TASK_UNBLOCKED` /
   `TASK_RELEASED`，即**只有会扩大可处理池的三类**。其余跃迁要么缩小池（`CLAIMED`）、要么
   移除任务（`COMPLETED` / `CANCELLED`）、要么不改变可处理集（`UPDATED` / `STARTED`），

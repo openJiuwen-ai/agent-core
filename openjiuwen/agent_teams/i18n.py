@@ -183,7 +183,8 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/dispatcher.py — message formatting
         "dispatcher.task_plan_approved_to_self": (
-            "[计划已批准] 任务 [{task_id}] 的执行计划已通过。请开始执行，完成后用 claim_task(status='completed') 标记完成。"
+            "[计划已批准] 任务 [{task_id}] 的执行计划已通过。请开始执行，完成后用 "
+            "claim_task(status='completed', summary=..., note=...) 标记完成。"
             "{feedback}"
         ),
         "dispatcher.task_plan_rejected_to_self": (
@@ -265,6 +266,14 @@ STRINGS: dict[str, dict[str, str]] = {
             "然后依次调用 shutdown_member 关闭所有成员，"
             "等待所有成员状态转为 shutdown 后，"
             "调用 clean_team 解散团队。"
+        ),
+        # task_board.py _just_completed_block (F_120): the task that just
+        # finished, ahead of the board / all-done prompt in the leader nudge.
+        "dispatcher.leader_just_completed": "刚完成：",
+        "dispatcher.leader_just_completed_line": "- [{task_id}] {title} → {assignee}",
+        "dispatcher.leader_just_completed_summary": "：{summary}",
+        "dispatcher.leader_just_completed_note_hint": (
+            "  详细完成说明用 view_task(action='note', task_id='{task_id}') 查看。"
         ),
         "dispatcher.leader_task_board": (
             "当前任务看板如下，请审查：\n"
@@ -605,7 +614,7 @@ STRINGS: dict[str, dict[str, str]] = {
         # agent/dispatcher.py — message formatting
         "dispatcher.task_plan_approved_to_self": (
             "[Plan Approved] Your execution plan for task [{task_id}] was approved. "
-            "Start execution and call claim_task(status='completed') when done. {feedback}"
+            "Start execution and call claim_task(status='completed', summary=..., note=...) when done. {feedback}"
         ),
         "dispatcher.task_plan_rejected_to_self": (
             "[Plan Rejected] Your execution plan for task [{task_id}] needs revision. "
@@ -697,6 +706,12 @@ STRINGS: dict[str, dict[str, str]] = {
             "then call shutdown_member for each member in turn, "
             "wait until all members reach status shutdown, "
             "and finally call clean_team to disband the team."
+        ),
+        "dispatcher.leader_just_completed": "Just completed:",
+        "dispatcher.leader_just_completed_line": "- [{task_id}] {title} → {assignee}",
+        "dispatcher.leader_just_completed_summary": ": {summary}",
+        "dispatcher.leader_just_completed_note_hint": (
+            "  For the full completion note, call view_task(action='note', task_id='{task_id}')."
         ),
         "dispatcher.leader_task_board": (
             "Current task board — please review:\n"

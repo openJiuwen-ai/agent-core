@@ -460,6 +460,18 @@ STRINGS: dict[str, str] = {
     # claim_task._desc lives in descs/en/task/claim_task.md
     "claim_task.task_id": "The ID of the task to claim or complete",
     "claim_task.status": "New status: 'claimed' (start work) or 'completed' (mark done)",
+    "claim_task.summary": (
+        "Only with status=completed: one-sentence completion summary — what you delivered and where the main "
+        "artifact is; this is what the leader and your downstream see"
+    ),
+    "claim_task.note": (
+        "Only with status=completed: the full completion detail — artifact paths, key decisions or follow-ups"
+    ),
+    "claim_task.fields_ignored": "summary / note only take effect with status=completed; ignored for this claim.",
+    "claim_task.upstream_header": "Upstream deliveries (this task's direct dependencies):",
+    "claim_task.upstream_note_hint": (
+        "For an upstream task's full completion note, call `view_task(action='note', task_id=...)`."
+    ),
     # ===== member_complete_task ===============================================
     # member_complete_task._desc lives in descs/en/task/member_complete_task.md
     "member_complete_task.task_id": (

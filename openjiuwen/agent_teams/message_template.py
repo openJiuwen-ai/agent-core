@@ -148,6 +148,18 @@ def _task_line(task: Any, *, with_summary: bool) -> str:
     return " ".join(parts)
 
 
+def upstream_lines(upstream: list[Any]) -> list[str]:
+    """One bullet per upstream task: ``- task_id · title · assignee · <completion summary>``.
+
+    Args:
+        upstream: Upstream task rows (the task's direct dependencies).
+
+    Returns:
+        The bullet lines, empty when there is no upstream task.
+    """
+    return [f"- {_task_line(task, with_summary=True)}" for task in upstream]
+
+
 def upstream_brief(upstream: list[Any], language: str = "cn") -> str:
     """Render one line per upstream task with its completion summary.
 
@@ -161,9 +173,9 @@ def upstream_brief(upstream: list[Any], language: str = "cn") -> str:
     Returns:
         The bullet lines plus the hint, or ``""`` when there is no upstream task.
     """
-    if not upstream:
+    lines = upstream_lines(upstream)
+    if not lines:
         return ""
-    lines = [f"- {_task_line(task, with_summary=True)}" for task in upstream]
     lines.append(_UPSTREAM_NOTE_HINT.get(language, _UPSTREAM_NOTE_HINT["en"]))
     return "\n".join(lines)
 
@@ -388,4 +400,5 @@ __all__ = [
     "parse_meta",
     "task_links",
     "upstream_brief",
+    "upstream_lines",
 ]

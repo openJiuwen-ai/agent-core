@@ -330,6 +330,11 @@ STRINGS: dict[str, str] = {
     # claim_task._desc lives in descs/cn/task/claim_task.md
     "claim_task.task_id": "要领取或完成的任务 ID",
     "claim_task.status": "目标状态：'claimed'（领取）或 'completed'（完成）",
+    "claim_task.summary": "仅 status=completed 时生效：一句话完成摘要——交付了什么、主产物在哪；leader 与下游看到的就是它",
+    "claim_task.note": "仅 status=completed 时生效：完整的完成详情——产物路径、关键决策或后续注意事项",
+    "claim_task.fields_ignored": "summary / note 仅在 status=completed 时生效，本次领取已忽略。",
+    "claim_task.upstream_header": "上游交付（本任务的直接依赖）：",
+    "claim_task.upstream_note_hint": "需要某个上游任务的详细完成说明时，用 `view_task(action='note', task_id=...)` 查看。",
     # ===== member_complete_task ===============================================
     # member_complete_task._desc lives in descs/cn/task/member_complete_task.md
     "member_complete_task.task_id": "要标记完成的任务 ID（必须是 leader 已经指派给你的任务）",

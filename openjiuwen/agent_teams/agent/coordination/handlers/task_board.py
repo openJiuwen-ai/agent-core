@@ -23,6 +23,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordina
 from openjiuwen.agent_teams.external.format import render_task_line
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.inbound_render import render_event
+from openjiuwen.agent_teams.message_template import completion_summary, completion_summary_truncated
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -72,6 +73,12 @@ class TaskBoardHandler(BaseCoordinationHandler):
     # transition.
     _TEAMMATE_NUDGE_EVENTS: ClassVar[frozenset[str]] = frozenset(
         {TeamEvent.TASK_CREATED, TeamEvent.TASK_UNBLOCKED, TeamEvent.TASK_RELEASED}
+    )
+
+    # Board events that mean "a task just finished": the leader's nudge for
+    # them leads with that task's completion summary (F_120).
+    _LEADER_COMPLETION_EVENTS: ClassVar[frozenset[str]] = frozenset(
+        {TeamEvent.TASK_COMPLETED, TeamEvent.TASK_VERIFIED}
     )
 
     # i18n keys of the steers that move a member off a task it lost. They
@@ -468,7 +475,10 @@ class TaskBoardHandler(BaseCoordinationHandler):
             )
             return
         team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
-        await self._nudge_idle_agent(member_name)
+        just_completed = None
+        if self._blueprint.role == TeamRole.LEADER and event.event_type in self._LEADER_COMPLETION_EVENTS:
+            just_completed = event.get_payload().task_id
+        await self._nudge_idle_agent(member_name, just_completed=just_completed)
 
     async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
         """First board survey after this member's runtime comes up (F_69).
@@ -490,7 +500,12 @@ class TaskBoardHandler(BaseCoordinationHandler):
             return
         await self._nudge_idle_agent(member_name)
 
-    async def _nudge_idle_agent(self, member_name: str, from_poll: bool = False) -> None:
+    async def _nudge_idle_agent(
+        self,
+        member_name: str,
+        from_poll: bool = False,
+        just_completed: str | None = None,
+    ) -> None:
         """Feed task context to an idle agent.
 
         Leader: reviews the full task board (every incomplete task) to
@@ -508,6 +523,10 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 empty-team) returns silently — real task-completion
                 prompts arrive via the TASK_EVENTS path so polling
                 should not re-trigger them.
+            just_completed: The task whose completion triggered this leader
+                nudge. Its completion summary is listed ahead of the board
+                (and ahead of the all-done prompt): the board shows only
+                incomplete work and would otherwise drop it (F_120).
         """
         all_tasks = await self._infra.task_manager.list_tasks()
         terminal = {"completed", "cancelled"}
@@ -518,15 +537,17 @@ class TaskBoardHandler(BaseCoordinationHandler):
 
         team_logger.debug("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
         if self._blueprint.role == TeamRole.LEADER:
+            completed_block = _just_completed_block(all_tasks, just_completed)
             if not incomplete:
                 lifecycle = self._blueprint.lifecycle
                 if lifecycle == "persistent":
                     prompt = t("dispatcher.all_done_persistent")
                 else:
                     prompt = t("dispatcher.all_done_temporary")
-                await self._round.deliver_input(render_event(kind="all-done", body=prompt))
+                body = "\n\n".join([*completed_block, prompt])
+                await self._round.deliver_input(render_event(kind="all-done", body=body))
                 return
-            lines = [t("dispatcher.leader_task_board")]
+            lines = [*completed_block, t("dispatcher.leader_task_board")]
             board_tasks = incomplete
         else:
             # Teammate: surface claimable work (pending + unassigned) and
@@ -555,6 +576,33 @@ class TaskBoardHandler(BaseCoordinationHandler):
             render_event(kind="task-board", body="\n".join(lines)),
             use_steer=False,
         )
+
+
+def _just_completed_block(all_tasks: list, task_id: str | None) -> list[str]:
+    """Render the "just completed" lines for the task behind a leader nudge (F_120).
+
+    One headline, the task line with its completion summary, and — when there
+    is more to read (a completion note, or a summary cut for length) — the
+    ``view_task(action='note')`` hint. Empty when no completed task is named.
+    """
+    if task_id is None:
+        return []
+    task = next((row for row in all_tasks if row.task_id == task_id), None)
+    if task is None or task.status != "completed":
+        return []
+    line = t(
+        "dispatcher.leader_just_completed_line",
+        task_id=task.task_id,
+        title=task.title,
+        assignee=task.assignee or "-",
+    )
+    summary = completion_summary(task)
+    if summary:
+        line += t("dispatcher.leader_just_completed_summary", summary=summary)
+    lines = [t("dispatcher.leader_just_completed"), line]
+    if (task.note or "").strip() or completion_summary_truncated(task):
+        lines.append(t("dispatcher.leader_just_completed_note_hint", task_id=task.task_id))
+    return ["\n".join(lines)]
 
 
 class ScheduledTaskBoardHandler(TaskBoardHandler):
