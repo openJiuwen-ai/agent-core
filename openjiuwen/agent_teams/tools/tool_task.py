@@ -148,21 +148,27 @@ def _scheduled_task_node_schema(t: Translator, *, inline_member_enabled: bool = 
 def _validate_inline_members(tasks: list[dict], *, leader_member_name: str | None) -> str | None:
     """Pure batch checks on inline ``member`` objects, before any write.
 
-    Exactly one of ``assignee`` / ``member`` per task; a well-formed, unique,
-    non-leader ``member_name``; a known ``lifetime``. Existence against the
-    roster is checked by the caller (it needs the backend).
+    One owner per task: an ``assignee`` beside ``member`` must repeat the
+    inline ``member_name`` (redundant but unambiguous, tolerated and noted by
+    the caller); naming someone else is a conflict. Plus a well-formed,
+    unique, non-leader ``member_name`` and a known ``lifetime``. Existence
+    against the roster is checked by the caller (it needs the backend).
     """
     seen: set[str] = set()
     for spec in tasks:
         member = spec.get("member")
-        assignee = (spec.get("assignee") or "").strip()
         if member is None:
             continue
-        if assignee:
-            return f"Task {_spec_label(spec)!r}: give either 'assignee' or 'member', not both"
         if not isinstance(member, dict):
             return f"Task {_spec_label(spec)!r}: 'member' must be an object"
         name = (member.get("member_name") or "").strip()
+        assignee = (spec.get("assignee") or "").strip()
+        if assignee and assignee != name:
+            return (
+                f"Task {_spec_label(spec)!r}: 'assignee' {assignee!r} conflicts with inline "
+                f"member {name!r} — a task has one owner; keep only 'member' to create "
+                f"{name!r}, or only 'assignee' to give it to {assignee!r}"
+            )
         name_error = validate_member_name(name)
         if name_error:
             return f"Task {_spec_label(spec)!r}: member.{name_error}"
@@ -494,6 +500,23 @@ def _inline_brief(assignee: str | None, lifetimes: dict[str, str]) -> dict:
     return {"lifetime": lifetime} if lifetime else {}
 
 
+def _redundant_assignee_note(tasks: list[dict]) -> str | None:
+    """Note the tasks that repeated their inline member's name in ``assignee``.
+
+    Must run before the inline name is bound to ``assignee``, which would
+    make every inline task look redundant.
+    """
+    labels = [
+        _spec_label(spec) for spec in tasks if spec.get("member") is not None and (spec.get("assignee") or "").strip()
+    ]
+    if not labels:
+        return None
+    return (
+        f"Note: {', '.join(repr(label) for label in labels)} set 'assignee' to the inline member's own name; "
+        f"'member' already makes that member the owner. Next time fill only 'member'."
+    )
+
+
 def _owner_phrase(task: dict) -> str:
     """Render a scheduled task's owner and whether it is ready or waiting."""
     if task.get("status") == TaskStatus.BLOCKED.value:
@@ -592,6 +615,7 @@ class ScheduledTaskCreateTool(TeamTool):
         error = _validate_inline_members(tasks, leader_member_name=leader_member_name)
         if error:
             return ToolOutput(success=False, error=error)
+        note = _redundant_assignee_note(tasks)
         # Validators below read ``assignee``; bind the inline name now so the
         # self-review guard and the owner checks see the future owner.
         for spec in tasks:
@@ -660,9 +684,10 @@ class ScheduledTaskCreateTool(TeamTool):
             {**task.brief(), "assignee": task.assignee, **_inline_brief(task.assignee, lifetimes)}
             for task in result.tasks
         ]
-        if len(briefs) == 1:
-            return ToolOutput(success=True, data=briefs[0])
-        return ToolOutput(success=True, data={"tasks": briefs, "count": len(briefs)})
+        data = briefs[0] if len(briefs) == 1 else {"tasks": briefs, "count": len(briefs)}
+        if note:
+            data["note"] = note
+        return ToolOutput(success=True, data=data)
 
     @staticmethod
     def _task_line(task: dict) -> str:
@@ -678,9 +703,12 @@ class ScheduledTaskCreateTool(TeamTool):
             return output.error or "Operation failed"
         d = output.data
         if "task_id" in d and "title" in d:
-            return f"Task created: {self._task_line(d)}"
-        lines = [self._task_line(task) for task in d.get("tasks", [])]
-        lines.append(f"Created {d['count']}")
+            lines = [f"Task created: {self._task_line(d)}"]
+        else:
+            lines = [self._task_line(task) for task in d.get("tasks", [])]
+            lines.append(f"Created {d['count']}")
+        if d.get("note"):
+            lines.append(d["note"])
         return "\n".join(lines)
 
 

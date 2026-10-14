@@ -1151,6 +1151,47 @@ async def test_scheduled_create_task_assignee_may_name_an_inline_member_of_the_b
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_scheduled_create_task_tolerates_assignee_repeating_inline_member(db):
+    """An assignee equal to the inline member_name is redundant, not a conflict: created, with a note."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke(
+        {
+            "tasks": [
+                {"task_id": "b-1", "title": "t", "content": "c", "assignee": "api-dev", "member": _inline("api-dev")},
+                {"task_id": "b-2", "title": "t", "content": "c", "member": _inline("ui-dev")},
+            ]
+        }
+    )
+
+    assert result.success, result.error
+    assert (await backend.task_manager.get("b-1")).assignee == "api-dev"
+    assert await backend.member_exists("api-dev")
+    text = create_task.render_for_llm(result)
+    assert "'b-1'" in text and "'b-2'" not in text
+    assert "fill only 'member'" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_create_task_inline_member_alone_carries_no_note(db):
+    """The canonical inline form renders without the redundancy note."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    node = {"task_id": "b-1", "title": "t", "content": "c", "member": _inline("api-dev")}
+    result = await create_task.invoke({"tasks": [node]})
+
+    assert result.success, result.error
+    assert "note" not in result.data
+    assert "Note:" not in create_task.render_for_llm(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_scheduled_create_task_unknown_assignee_still_rejected_beside_inline_members(db):
     """Names outside both the roster and the batch's inline members stay rejected, with nothing written."""
     backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
@@ -1177,7 +1218,7 @@ async def test_scheduled_create_task_unknown_assignee_still_rejected_beside_inli
 @pytest.mark.parametrize(
     ("member", "assignee", "needle"),
     [
-        (_inline("api-dev"), DEV_1, "not both"),
+        (_inline("api-dev"), DEV_1, "conflicts with inline member"),
         (_inline("Bad_Name"), None, "member.Invalid member_name"),
         (_inline(DEV_1), None, "already exists"),
         (_inline("api-dev", "forever"), None, "lifetime"),

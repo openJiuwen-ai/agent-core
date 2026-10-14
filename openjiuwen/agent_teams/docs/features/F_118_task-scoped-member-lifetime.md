@@ -134,7 +134,7 @@ RESTARTING ──(重建失败回滚)──▶ DORMANT                         �
 {
   "task_id": "t-api",
   "title": "...", "content": "...",
-  "member": {                       // 与 assignee 互斥，二选一
+  "member": {                       // 与 assignee 二选一；assignee 同名时宽容放行（见文末「落地后调整」）
     "member_name": "api-dev-1",     // 同 spawn_teammate 的命名约束
     "display_name": "...",
     "desc": "...",
@@ -448,3 +448,20 @@ autonomous 没有调度器，退场判定无处安放（leader 收不到自发 `
 1. 唤醒范围按"点名就醒"：单播 / 多播 `send_message`、调度器交接、interact `@name`、群聊 `@name`。
 2. `lifetime` 本期不暴露给 `spawn_teammate`。
 3. `clean_team` 不把 `DORMANT` 视作可清理，休眠成员仍需 `shutdown_member`。
+
+## 落地后调整（2026-10-14）：同名 `assignee` 宽容放行
+
+实测 leader 常在写了 `member` 的节点上顺手再填一个同名 `assignee`，原实现一律报
+`give either 'assignee' or 'member', not both`，整批失败、白耗一轮。两者指向同一个人时不存在歧义，
+拒绝只是在惩罚冗余。
+
+- **决策**：`_validate_inline_members` 只在 `assignee` 与 `member.member_name` **不同**时报冲突
+  （错误里点名两者并给出二选一的修法）；相同则放行，`_redundant_assignee_note` 在绑定内联名之前
+  收集这些节点，成功结果带 `data["note"]`，`render_for_llm` 追加一行「下次只填 `member`」。
+  手法与 `send_message` 对 `targets == [to]` 的宽容一致。
+- **拒绝**：静默放行不提醒——模型学不到规范写法，冗余会一直重复；异名时取 `member` 覆盖
+  `assignee`——那是真实意图冲突，猜哪个都可能把任务交错人。
+- **描述**：`create_task_inline_member` 片段仍写「二选一」——规范写法不变，宽容只是容错。
+- **验证**：`test_scheduled_create_task_tolerates_assignee_repeating_inline_member` /
+  `test_scheduled_create_task_inline_member_alone_carries_no_note`；异名用例改断言
+  `conflicts with inline member`。

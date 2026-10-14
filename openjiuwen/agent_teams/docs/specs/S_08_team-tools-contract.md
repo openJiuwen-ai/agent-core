@@ -25,7 +25,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-10-13 |
+| 最近一次修订日期 | 2026-10-14 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md、F_118_task-scoped-member-lifetime.md |
 
 ## 范围 / 边界
@@ -233,7 +233,9 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 19. **`create_task` 的 `assignee` 与任务图同一事务落库**（F_57 / F_59 / F_62）。scheduled
     形态**每个任务必须有承担者**（scheduled 成员不自主认领，无主任务不会被调度）：`assignee`
     指向已存在成员，或 `member` 对象随任务**内联创建**一个（F_118，见不变量 25），二者在
-    `invoke` 里二选一校验（schema 无 `anyOf`，故 `required` 不再列 `assignee`）；随 `TaskGraphSpec` →
+    `invoke` 里二选一校验（schema 无 `anyOf`，故 `required` 不再列 `assignee`；唯一宽容：
+    `assignee` 恰等于同节点 `member.member_name` 时视为冗余而非冲突，照常创建并在结果里附提醒，
+    指向他人才报冲突）；随 `TaskGraphSpec` →
     `NewTaskSpec` 进同一次 `mutate_dependency_graph`。**每个任务一律 seed `PENDING`**
     （携带 assignee）：无依赖 → 停在 `PENDING(assignee)`（"已指派未开始"），带依赖 →
     refresh pass 翻成 `BLOCKED(assignee)`。指派与开工是两个事件，故创建期**不再** seed
@@ -367,7 +369,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 25. **任务内联成员只属调度形态；退场策略是成员属性，退场由调度器请求、成员自落**（F_118）。
     `ScheduledTaskCreateTool` 的任务节点可带 `member` 对象（`member_name` / `display_name` /
     `desc` / `prompt` / `model_name` 与 `spawn_teammate` 逐字相同 + 必填 `lifetime ∈
-    {shutdown, dormant}`），与 `assignee` 二选一。`invoke` 顺序：批内纯校验（互斥、命名模式、
+    {shutdown, dormant}`），与 `assignee` 二选一（同名 `assignee` 宽容放行 + 结果附提醒，见不变量 19）。
+    `invoke` 顺序：批内纯校验（承担者冲突、命名模式、
     批内不重名、非 leader、lifetime 合法）→ 把 `member_name` 绑为 spec 的 `assignee` → 既有
     review / reviewer / assignee 校验 → `spawn_member(..., lifetime=)` 落 `UNSTARTED` 行 →
     `add_graph`；图写入失败经 `TeamBackend.delete_unstarted_member`（仓库唯一删成员路径，

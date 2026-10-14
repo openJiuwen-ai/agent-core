@@ -411,15 +411,16 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 三条强制约束，提交时必查：
 
-1. **每次特性更新必须归档 feature 文档，且特性代码、测试代码、文档拆成三个连续提交**：在 `docs/features/`
+1. **每次特性更新必须归档 feature 文档，且 `feat` 改动的特性代码、测试代码、文档拆成三个连续提交**：在 `docs/features/`
    下新增一份 `F_NN_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。commit message 只写
-   what，feature 文档负责写 why / why-not。落地顺序**固定为三个紧邻的提交**——提交 1 落特性代码
-   （`feat(swarm): ...` 或对应 type），提交 2 落本次新增/改动的单测（`test(swarm): ...`），提交 3
+   what，feature 文档负责写 why / why-not。`feat` 改动落地顺序**固定为三个紧邻的提交**——提交 1 落特性代码
+   （`feat(swarm): ...`），提交 2 落本次新增/改动的单测（`test(swarm): ...`），提交 3
    落本次涉及的全部文档：`docs/features/F_NN_*.md` 新增 + 下面 #2 要求的 `docs/specs/S_NN_*.md`
    修订（`docs(swarm): ...`）。特性代码、测试、文档不再混进同一次 commit——既不让大段文档 diff 淹没
    代码评审，也让测试改动独立可审，还避免文档归档拖延导致设计上下文随时间漂移。
-   **例外**：归档为 `docs/bugfix/B_NN_*.md` 的缺陷修复，修复代码、回归测试、`B_NN` 文档及连带的
-   spec 修订合并为**一个** `fix(...)` 提交——它们是同一条证据链，需要作为整体评审、cherry-pick 和 revert。
+   **只有 `feat` 拆**：`fix` / `refactor` / `perf` 等其它类型的改动，代码、测试、文档（含 `docs/bugfix/B_NN_*.md`、
+   对已有 `F_NN` 的追补及连带的 spec 修订）合并为**一个**对应 type 的提交——它们是同一条证据链，
+   需要作为整体评审、cherry-pick 和 revert。
 2. **所有模块设计规约变动必须更新 specs 文档**：模块契约、跨子模块的公共协议、不变量、
    公共 API 形态发生变化时，同步修订对应 `docs/specs/S_NN_<slug>.md`；新规约 = 新 spec 文件。
    规约变了但 specs 没改，下次读 spec 的人就被误导——这是设计债，不是文档懒。
@@ -449,4 +450,4 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 footer 用 `Refs: #<issue>` 格式关联 issue。issue 号若无法从当前上下文明确，必须先询问用户，不要臆造或留空。
 
-涉及 `docs/features/F_*` / `docs/specs/S_*` 文档更新的特性改动，**特性代码、测试代码、文档拆成三个连续提交**（提交 1 特性代码 `feat(swarm)`，提交 2 单测 `test(swarm)`，提交 3 文档 `docs(swarm)`），细则见上文「设计文档归档与双向同步」约束 #1。缺陷修复（`docs/bugfix/B_*`）例外，代码、测试、文档合并为一个 `fix(...)` 提交。
+**只有 `feat` 改动拆提交**：涉及 `docs/features/F_*` / `docs/specs/S_*` 文档更新的 `feat` 改动，特性代码、测试代码、文档拆成三个连续提交（提交 1 特性代码 `feat(swarm)`，提交 2 单测 `test(swarm)`，提交 3 文档 `docs(swarm)`），细则见上文「设计文档归档与双向同步」约束 #1。`fix` / `refactor` 等其它类型一律不拆，代码、测试、文档合并为一个对应 type 的提交。
