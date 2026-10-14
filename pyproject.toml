@@ -222,6 +222,8 @@ openjiuwen = [
     "**/locales/**/*.md",
     "**/harness/resources/*.yaml",
     "extensions/observability/schemas/*.json",
+    "harness/moa/NOTICE",
+    "**/harness/moa/skills/**/*.md",
     "**/auto_harness/resources/*.yaml",
     "**/auto_harness/skills/**/*.md",
     "symphony/README.md",

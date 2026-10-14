@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 if TYPE_CHECKING:
+    from openjiuwen.harness.moa.config import MoAConfig
     from openjiuwen.harness.workspace.workspace import Workspace
 
 # Key under ``BuildContext.extras`` where ``DeepAgentSpec.resolve_parts``
@@ -67,6 +68,8 @@ class BuildContext:
             member has no project of its own.
         extras: Escape-hatch mapping for platform handles when subclassing is
             not convenient.
+        moa: Invocation policy for this root agent only; not inherited by
+            capability providers or serialized as part of a spec.
     """
 
     language: str = "cn"
@@ -77,6 +80,7 @@ class BuildContext:
     project_dir: Optional[str] = None
     team_outputs_dir: Optional[str] = None
     extras: dict[str, Any] = field(default_factory=dict)
+    moa: MoAConfig | None = None
 
     def derive(self, **overrides: Any) -> "BuildContext":
         """Return a shallow per-member copy with ``overrides`` applied.

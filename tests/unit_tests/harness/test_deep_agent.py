@@ -40,7 +40,6 @@ from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcess
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent, _DEFAULT_DIRECT_TOOL_NAMES
 from openjiuwen.harness.observability.rail import AgentObservabilityRail
-from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import (
@@ -167,6 +166,9 @@ class FakeReactAgent:
 
     def configure(self, config: ReActAgentConfig) -> None:
         self.config = config
+
+    def set_llm(self, model: Model) -> None:
+        self._llm = model
 
 
 class SlowReactAgent(FakeReactAgent):
