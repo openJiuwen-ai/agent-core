@@ -169,6 +169,23 @@ async def test_params_render_and_missing_fields_stay_inline():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
+async def test_rework_carries_feedback_without_restating_the_task():
+    """The assignee already holds its task; a rework notice only adds the feedback."""
+    meta = (
+        '{"template": "scheduler_rework", "refs": {"task": "t-1"}, '
+        '"params": {"feedback": "broken build", "max_rounds": 3}}'
+    )
+    task = _FakeTask(title="refactor auth", content="make it stateless")
+
+    expanded = await _expand(_msg(meta), task=task)
+
+    assert "broken build" in expanded.body
+    assert "refactor auth" in expanded.body
+    assert "make it stateless" not in expanded.body
+
+
+@pytest.mark.asyncio
 @pytest.mark.level0
 async def test_substituted_values_are_never_rescanned():
     """LLM-authored task text cannot smuggle in placeholders."""

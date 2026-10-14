@@ -947,6 +947,8 @@ async def test_temp_reviewer_view_task_reads_the_board(db, bus, monkeypatch):
 
     assert len(view_tools) == 1
     view_tool = view_tools[0]
+    # The reviewer's copy marks view_task as a fallback: the request already has the task.
+    assert "验收兜底" in view_tool.card.description
     detail = await view_tool.invoke({"action": "get", "task_id": "r"})
     assert detail.success
     assert detail.data["task_id"] == "r"
@@ -1015,6 +1017,7 @@ async def test_temp_reviewer_prompt_carries_the_submission_note(db, bus):
 
     assert "## The assignee's submission note" in prompt
     assert note in prompt
+    assert "The above is the task's current, complete content." in prompt
     assert prompt.index("## Goal and acceptance criteria") < prompt.index(note) < prompt.index("## How to review")
     assert "{{task." not in prompt
     assert "\n\n\n" not in prompt

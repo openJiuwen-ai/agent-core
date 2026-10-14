@@ -8,6 +8,8 @@
 
 {{task.content}}
 
+The above is the task's current, complete content.
+
 {{task.upstream_section}}
 
 {{task.submission_note}}

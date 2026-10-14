@@ -4,8 +4,4 @@
 
 {{param.feedback}}
 
-## 任务目标与验收标准
-
-{{task.content}}
-
 按反馈修复后，再次调用 `member_complete_task(task_id='{{task.task_id}}')` 提交验收。

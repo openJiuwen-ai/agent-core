@@ -8,6 +8,8 @@
 
 {{task.content}}
 
+以上为该任务当前的完整内容。
+
 {{task.upstream_section}}
 
 {{task.submission_note}}
