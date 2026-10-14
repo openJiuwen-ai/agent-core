@@ -102,20 +102,46 @@ def _part(message) -> str | None:
     return (getattr(message, "metadata", None) or {}).get(WINDOW_PART_KEY)
 
 
-def unpaired_tool_calls(messages: list) -> list[str]:
-    """Tool calls without a result, in call order; placeholders and native interruption results count."""
-    pending: dict[str, None] = {}
-    for message in messages:
-        for call in getattr(message, "tool_calls", None) or ():
-            pending[call.id] = None
+def _call_groups(messages: list) -> tuple[list[tuple[AssistantMessage, list[str]]], int]:
+    """Each tool call group with its calls still without a result, and the number of stray results.
+
+    A result answers a call only among the tool messages right after the call's own group, so a
+    call id reused by a later group is paired on its own; a result anywhere else, for a call of
+    another group, or repeated, is stray.
+    """
+    groups, stray, index = [], 0, 0
+    while index < len(messages):
+        message = messages[index]
+        index += 1
         if isinstance(message, ToolMessage):
-            pending.pop(message.tool_call_id, None)
-    return list(pending)
+            stray += 1
+            continue
+        if not (isinstance(message, AssistantMessage) and message.tool_calls):
+            continue
+        calls = [call.id for call in message.tool_calls]
+        answered: set[str] = set()
+        while index < len(messages) and isinstance(messages[index], ToolMessage):
+            call_id = messages[index].tool_call_id
+            if call_id in calls and call_id not in answered:
+                answered.add(call_id)
+            else:
+                stray += 1
+            index += 1
+        groups.append((message, [call for call in calls if call not in answered]))
+    return groups, stray
+
+
+def unpaired_tool_calls(messages: list) -> list[str]:
+    """Tool calls without a result right after their group, in window order.
+
+    Placeholders and native interruption results count as results.
+    """
+    groups, _ = _call_groups(messages)
+    return [call for _, unpaired in groups for call in unpaired]
 
 
 def patch_stopped_calls(messages: list) -> list:
-    """Add a placeholder result after each call group for calls still without one; idempotent."""
-    answered = {message.tool_call_id for message in messages if isinstance(message, ToolMessage)}
+    """Add a placeholder after each call group's results for its calls still without one; idempotent."""
     patched, index = [], 0
     while index < len(messages):
         message = messages[index]
@@ -123,7 +149,9 @@ def patch_stopped_calls(messages: list) -> list:
         index += 1
         if not (isinstance(message, AssistantMessage) and message.tool_calls):
             continue
+        answered = set()
         while index < len(messages) and isinstance(messages[index], ToolMessage):
+            answered.add(messages[index].tool_call_id)
             patched.append(messages[index])
             index += 1
         for call in message.tool_calls:
@@ -161,36 +189,80 @@ def tidy_window(messages: list, ending: ExecutionEnding, execution_id: str) -> l
     return kept
 
 
-def offloading_processors(agent) -> list[str]:
-    """Context processors on the native agent that move messages out of the window (not supported)."""
-    from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
-    from openjiuwen.core.context_engine.processor.offloader.message_summary_offloader import (
-        MessageSummaryOffloader,
-    )
-    from openjiuwen.core.context_engine.processor.offloader.tool_result_budget_processor import (
-        ToolResultBudgetProcessor,
+# Processors that write the offload buffer. ToolResultBudgetProcessor and MessageSummaryOffloader
+# derive from MessageOffloader; the forked MessageSummaryOffloader does not and replaces the core one
+# under the same type name. Classes are named by path: importing them would register them again.
+_OFFLOADER_TYPES = frozenset({"MessageOffloader", "MessageSummaryOffloader", "ToolResultBudgetProcessor"})
+_OFFLOADER_CLASSES = frozenset(
+    {
+        "openjiuwen.core.context_engine.processor.offloader.message_offloader.MessageOffloader",
+        "openjiuwen.core.context_engine.processor.forked.offloader.message_offloader.MessageSummaryOffloader",
+    }
+)
+
+
+def _derives_from_offloader(processor_class) -> bool:
+    return any(
+        f"{base.__module__}.{base.__qualname__}" in _OFFLOADER_CLASSES
+        for base in getattr(processor_class, "__mro__", ())
     )
 
-    # The forked MessageSummaryOffloader registers under the same type name.
-    offloading = {
-        processor.processor_type()
-        for processor in (MessageOffloader, MessageSummaryOffloader, ToolResultBudgetProcessor)
-    }
+
+def offloading_processors(agent) -> list[str]:
+    """Context processors on the native agent that move messages out of the window (not supported).
+
+    A configured type counts by its name or by its registered class deriving from an offloader,
+    so a subclass registered under a new name is found too.
+    """
+    from openjiuwen.core.context_engine.context_engine import ContextEngine
+
+    registered = getattr(ContextEngine, "_PROCESSOR_MAP", {})
     react_agent = getattr(agent, "react_agent", None)
     configured = getattr(getattr(react_agent, "config", None), "context_processors", None) or ()
-    return sorted({entry[0] for entry in configured if entry and entry[0] in offloading})
+    return sorted(
+        {
+            entry[0]
+            for entry in configured
+            if entry and (entry[0] in _OFFLOADER_TYPES or _derives_from_offloader(registered.get(entry[0])))
+        }
+    )
+
+
+def _call_facts(call) -> tuple:
+    """What a call does: the native resume replays the interrupt entry's call, so all of it must match.
+
+    ``index`` is left out: it only orders streamed chunks and the message format does not keep it.
+    """
+    return call.id, call.type, call.name, call.arguments
+
+
+def _matches_waiting_scene(groups: list, interruption) -> bool:
+    """The last call group is the interrupted batch, call for call, and only its interrupted calls lack results."""
+    if not groups or any(unpaired for _, unpaired in groups[:-1]):
+        return False
+    group, unpaired = groups[-1]
+    shown = [_call_facts(call) for call in group.tool_calls]
+    if shown != [_call_facts(call) for call in interruption.ai_message.tool_calls or ()]:
+        return False
+    by_id = {facts[0]: facts for facts in shown}
+    tools = interruption.interrupted_tools
+    return set(unpaired) == set(tools) and all(
+        _call_facts(entry.tool_call) == by_id.get(call_id) for call_id, entry in tools.items()
+    )
 
 
 def _check_window(messages: list, ending_outcome: str, interruption, error) -> None:
-    """A waiting scene's unpaired calls are its interrupted ones; interrupted endings get placeholders."""
-    unpaired = unpaired_tool_calls(messages)
+    """Results follow their own call group; a waiting scene's unpaired calls are exactly its interrupted ones."""
+    groups, stray = _call_groups(messages)
+    if stray:
+        raise error("window has tool results outside their call group")
     waiting = ending_outcome == WAITING
     if waiting != (interruption is not None):
         raise error("window and interruption state disagree")
     if waiting:
-        if set(unpaired) - set(interruption.interrupted_tools):
+        if not _matches_waiting_scene(groups, interruption):
             raise error("window and interruption state disagree")
-    elif unpaired and ending_outcome not in INTERRUPTED_ENDINGS:
+    elif any(unpaired for _, unpaired in groups) and ending_outcome not in INTERRUPTED_ENDINGS:
         raise error("window has tool calls without results")
 
 
@@ -282,8 +354,14 @@ class ExecutionStateStore:
                 last_group_message_id=ending.last_group_message_id,
             ),
         )
-        self._warn_pending_answer_overwrite(execution, ending)
-        await self._store.save_state(execution.agent_id, execution.session_id, dump_record(record))
+        payload = dump_record(record)
+        try:
+            await self._store.save_state(execution.agent_id, execution.session_id, payload)
+        except BaseError:
+            # The backend may have applied the write before failing, so the answer may be gone already.
+            self._warn_pending_answer_overwrite(execution, ending, written=False)
+            raise
+        self._warn_pending_answer_overwrite(execution, ending, written=True)
 
     @staticmethod
     async def _sync_native(context: "PersistentBuildContext") -> None:
@@ -305,13 +383,14 @@ class ExecutionStateStore:
         except Exception as exc:
             raise unsavable("the native window could not be synced", exc) from exc
 
-    def _warn_pending_answer_overwrite(self, execution, ending: ExecutionEnding) -> None:
+    def _warn_pending_answer_overwrite(self, execution, ending: ExecutionEnding, *, written: bool) -> None:
         loaded = self._loaded
         if loaded is None or loaded.pending_answer is None or ending.pending_answer == loaded.pending_answer:
             return
         logger.error(
-            "[PersistentAgent] pending answer overwritten: session=%s "
+            "[PersistentAgent] pending answer %s: session=%s "
             "previous_request=%s previous_execution=%s request=%s execution=%s",
+            "overwritten" if written else "may have been overwritten by a failed write",
             execution.session_id,
             loaded.request_id,
             loaded.execution_id,
