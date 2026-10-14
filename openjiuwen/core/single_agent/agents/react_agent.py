@@ -34,6 +34,15 @@ try:
 except Exception:  # pragma: no cover - browser runtime is optional here
     browser_agent_log_info = None
 from openjiuwen.core.common.security.user_config import UserConfig
+<<<<<<< HEAD
+=======
+from openjiuwen.core.foundation.prompt import PromptTemplate
+from openjiuwen.core.foundation.llm.schema.config import (
+    ModelClientConfig,
+    ModelRequestConfig
+)
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+>>>>>>> eb2bf3b0d (feat(core): retain tool facts on aborted execution)
 from openjiuwen.core.context_engine import (
     ContextEngine,
     ContextEngineConfig,
@@ -323,7 +332,20 @@ class ReActAgentConfig(BaseModel):
         description="Whether to execute tool calls in parallel (as opposed to in sequence)",
     )
 
+<<<<<<< HEAD
     def configure_model(self, model_name: str) -> "ReActAgentConfig":
+=======
+    retain_tool_facts_on_abort: bool = Field(
+        default=False,
+        description=(
+            "When a turn is cancelled or fails mid-batch, keep the tool calls already issued and the "
+            "results already obtained instead of dropping incomplete tool call groups. Calls still without "
+            "a result are left for the caller to resolve."
+        ),
+    )
+
+    def configure_model(self, model_name: str) -> 'ReActAgentConfig':
+>>>>>>> eb2bf3b0d (feat(core): retain tool facts on aborted execution)
         """Configure model name
 
         Args:
@@ -581,11 +603,17 @@ class ReActAgent(BaseAgent):
         self._kv_cache_model_call_hook = kv_cache_react_model_call_hook.KVCacheModelCallHook()
         self._context_usage_aggregator = SessionKVCacheAggregator()
         self._context_usage_sequences: dict[str, int] = {}
+<<<<<<< HEAD
         # The ability manager contains every registered tool, while the final
         # model window may expose a filtered subset after Swarm/Core rails run.
         # Manual context snapshots reuse the last finalized model tool list so
         # their tool-token estimate matches the immediately preceding request.
         self._last_model_tools: list[ToolInfo] | None = None
+=======
+        # Per-session results of the running tool batch, kept until they are written to the context
+        # (retain_tool_facts_on_abort only).
+        self._tool_fact_journals: Dict[str, Dict[str, ToolMessage]] = {}
+>>>>>>> eb2bf3b0d (feat(core): retain tool facts on aborted execution)
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -2344,11 +2372,13 @@ class ReActAgent(BaseAgent):
             else:
                 logger.info("Executing tool: %s with args: %s", tool_name, log_args)
 
+        journal_key, retention = self._open_tool_fact_journal(session)
         results = await self.ability_manager.execute(
             ctx=ctx,
             tool_call=tool_calls,
             session=session,
             parallel_tool_calls=self._config.parallel_tool_calls,
+            **retention,
         )
 
         tool_names = {call.id: call.name for call in tool_calls}
@@ -2364,6 +2394,9 @@ class ReActAgent(BaseAgent):
         if multimodal_message is not None:
             await context.add_messages(multimodal_message)
 
+        # Only now are the batch's results in the context; until then an abort uses the journal.
+        if journal_key is not None:
+            self._tool_fact_journals.pop(journal_key, None)
         return results
 
     @staticmethod
@@ -3555,6 +3588,7 @@ class ReActAgent(BaseAgent):
         in the same session still sees what the user asked before the abort.
         """
         session_id = session.get_session_id()
+        journal = self._tool_fact_journals.pop(session_id, None)
         context = self.context_engine.get_context(session_id=session_id)
         if context is None:
             return
@@ -3563,7 +3597,10 @@ class ReActAgent(BaseAgent):
         if not current:
             return
 
-        kept = self._sanitize_cancelled_turn_messages(current, marker=marker)
+        if self._config is not None and self._config.retain_tool_facts_on_abort:
+            kept = self._retain_cancelled_turn_messages(current, journal or {}, marker=marker)
+        else:
+            kept = self._sanitize_cancelled_turn_messages(current, marker=marker)
         context.set_messages(kept, with_history=False)
 
     async def _persist_context_after_abort(
@@ -3635,6 +3672,74 @@ class ReActAgent(BaseAgent):
                 "Cancellation-specific context persistence was cancelled for session %s",
                 session.get_session_id(),
             )
+
+    def _open_tool_fact_journal(self, session: Optional[Session]) -> Tuple[Optional[str], Dict[str, Any]]:
+        """Start the batch's journal when retaining tool facts; returns its key and extra execute arguments."""
+        config = self._config
+        if config is None or not config.retain_tool_facts_on_abort or session is None:
+            return None, {}
+        journal_key = session.get_session_id()
+        journal: Dict[str, ToolMessage] = {}
+        self._tool_fact_journals[journal_key] = journal
+
+        def on_tool_result(tool_call: ToolCall, message: Optional[ToolMessage]) -> None:
+            # Every reported message may enter the context; None means the call has no result yet.
+            if message is None:
+                journal.pop(tool_call.id, None)
+            else:
+                journal[tool_call.id] = message
+
+        # Passed only when retaining, so callers that wrap or replace execute keep their call shape.
+        return journal_key, {"on_tool_result": on_tool_result}
+
+    @staticmethod
+    def _retain_cancelled_turn_messages(
+            messages: List[Any],
+            journal: Dict[str, ToolMessage],
+            marker: str = "[Request cancelled by user]",
+    ) -> List[Any]:
+        """Keep an aborted turn's real tool facts (retain_tool_facts_on_abort).
+
+        Each tool call group is kept: results already in the context stay, results the
+        batch obtained but did not write yet are added from ``journal`` in call order, and
+        calls still without a result are left for the caller to resolve. Orphan tool
+        results are dropped and a bare trailing UserMessage gets the abort marker, as in
+        ``_sanitize_cancelled_turn_messages``.
+        """
+        kept: List[Any] = []
+        i = 0
+        n = len(messages)
+        while i < n:
+            msg = messages[i]
+            if isinstance(msg, AssistantMessage) and msg.tool_calls:
+                kept.append(msg)
+                call_ids = [getattr(tc, "id", None) for tc in msg.tool_calls if getattr(tc, "id", None)]
+                answered = set()
+                j = i + 1
+                while j < n and isinstance(messages[j], ToolMessage):
+                    # Results of other calls are orphans here and are dropped.
+                    if messages[j].tool_call_id in call_ids and messages[j].tool_call_id not in answered:
+                        kept.append(messages[j])
+                        answered.add(messages[j].tool_call_id)
+                    j += 1
+                for tc_id in call_ids:
+                    if tc_id not in answered and tc_id in journal:
+                        kept.append(journal[tc_id])
+                        answered.add(tc_id)
+                i = j
+                continue
+
+            if isinstance(msg, ToolMessage):
+                # Orphan tool result without a matching assistant tool_calls.
+                i += 1
+                continue
+
+            kept.append(msg)
+            i += 1
+
+        if kept and isinstance(kept[-1], UserMessage):
+            kept.append(AssistantMessage(content=marker))
+        return kept
 
     @staticmethod
     def _sanitize_cancelled_turn_messages(
