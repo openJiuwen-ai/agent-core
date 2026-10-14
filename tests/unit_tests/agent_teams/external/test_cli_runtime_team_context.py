@@ -352,3 +352,56 @@ async def test_baseline_is_persisted_and_survives_a_new_runtime():
     await restarted.start(team_session=team_session)
     await restarted.announce_team_context()
     assert restarted.sent == []
+
+
+# ---------------------------------------------------------------------------
+# F_119: review passes ride the next outbound message under scheduled dispatch
+# ---------------------------------------------------------------------------
+
+
+class _OutcomeBackend:
+    """Backend stand-in whose task manager reports one reviewed completion."""
+
+    def __init__(self) -> None:
+        from types import SimpleNamespace
+
+        task = SimpleNamespace(task_id="done-1", title="ship it", reviewers=lambda: ["v1"])
+
+        class _Manager:
+            async def get_tasks_by_assignee(self, member_name: str, status: str | None = None) -> list:
+                return [task]
+
+        self.task_manager = _Manager()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_send_carries_review_passes_once_after_team_context():
+    from openjiuwen.agent_teams.team_context import TaskOutcomeTracker
+
+    runtime, _ = _make_runtime()
+    runtime.bind_task_outcome_tracker(TaskOutcomeTracker(team_backend=_OutcomeBackend(), member_name="claude-1"))
+    await runtime.start(team_session=_StubTeamSession())
+
+    await runtime.send("next task")
+    await runtime.send("another")
+
+    first = runtime.sent[0][0]
+    assert first.index("<team-context>") < first.index('<team-event kind="task-verified">')
+    assert "done-1 · ship it" in first
+    assert first.endswith("next task")
+    assert runtime.sent[1][0] == "another"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_standalone_announcement_does_not_carry_review_passes():
+    from openjiuwen.agent_teams.team_context import TaskOutcomeTracker
+
+    runtime, _ = _make_runtime()
+    runtime.bind_task_outcome_tracker(TaskOutcomeTracker(team_backend=_OutcomeBackend(), member_name="claude-1"))
+    await runtime.start(team_session=_StubTeamSession())
+
+    await runtime.announce_team_context()
+
+    assert "task-verified" not in runtime.sent[0][0]

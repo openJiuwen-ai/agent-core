@@ -341,14 +341,12 @@ async def test_review_dispatch_once_per_round_then_settle_pass(db, bus):
     assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "pass")).ok
     assert (await _reviewer_mgr(db, bus, "rev-2").verify_task("r", "pass")).ok
     assert (await _reviewer_mgr(db, bus, "rev-3").verify_task("r", "pass")).ok
+    author_dms_before = [meta for to, meta in _dm_targets(mm) if to == "dev-1"]
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
 
     assert (await tm.get("r")).status == TaskStatus.COMPLETED.value
-    # The author is told to report to the leader; the leader gets digests.
-    report_dms = [
-        to for to, meta in _dm_targets(mm) if meta["template"] == "scheduler_verified_report" and to == "dev-1"
-    ]
-    assert report_dms
+    # A pass does not wake the author (F_119); the leader gets the digest.
+    assert [meta for to, meta in _dm_targets(mm) if to == "dev-1"] == author_dms_before
     assert any("[r]" in text for text in host.leader_inputs)
 
 
@@ -1151,3 +1149,118 @@ async def test_temp_reviewer_prompt_lists_upstream_tasks(db, bus):
     assert "- up · draft · dev-2 · poem at /abs/up.md" in prompt
     assert "{{task." not in prompt
 
+
+
+# ---------------------------------------------------------------------------
+# F_119: the leader digest carries the completion summary
+# ---------------------------------------------------------------------------
+
+
+async def _digest_for(db, bus, *, summary: str | None, note: str | None) -> str:
+    scheduler, host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1")])
+    await scheduler.activate()
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("a", summary=summary, note=note)).ok
+    await scheduler.on_event(
+        EventMessage.from_event(TaskCompletedEvent(team_name=TEAM, task_id="a", member_name="dev-1"))
+    )
+    digests = [text for text in host.leader_inputs if "[a]" in text]
+    assert len(digests) == 1
+    return digests[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_digest_carries_summary_and_points_to_the_note(db, bus):
+    digest = await _digest_for(db, bus, summary="report at out/r.md", note="full detail\nsecond line")
+
+    assert "report at out/r.md" in digest
+    assert "full detail" not in digest
+    assert "view_task(action='note', task_id='a')" in digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_digest_without_note_or_cut_omits_the_note_hint(db, bus):
+    digest = await _digest_for(db, bus, summary="short summary", note=None)
+
+    assert "short summary" in digest
+    assert "action='note'" not in digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_digest_without_completion_text_is_the_bare_line(db, bus):
+    digest = await _digest_for(db, bus, summary=None, note=None)
+
+    assert "action='note'" not in digest
+    assert digest.count("\n") == 1  # headline + board hint only
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_digest_points_to_the_note_when_the_summary_is_cut(db, bus):
+    digest = await _digest_for(db, bus, summary="z" * 300, note=None)
+
+    assert "z" * 200 + "…" in digest
+    assert "view_task(action='note', task_id='a')" in digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_review_request_shows_summary_and_full_note(db, bus):
+    from openjiuwen.agent_teams.agent.scheduling import render
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [TaskGraphSpec(title="deliver", content="c", task_id="r", assignee="dev-1", reviewer=("rev-1",))]
+    )
+    await scheduler.activate()
+    note = "first line\n" + "x" * 400
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("r", summary="poem at /abs/p.md", note=note)).ok
+
+    prompt = await render.render_review_request_for_harness(await tm.get("r"), language="en", reviewer="rev-1")
+
+    assert "Summary: poem at /abs/p.md" in prompt
+    assert f"Detail:\n{note}" in prompt
+    assert "{{task." not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_review_request_upstream_lists_summaries_only(db, bus):
+    from openjiuwen.agent_teams.agent.scheduling import render
+    from openjiuwen.agent_teams.message_template import task_links
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="draft", content="c", task_id="up", assignee="dev-2"),
+            TaskGraphSpec(
+                title="collect",
+                content="c",
+                task_id="r",
+                assignee="dev-1",
+                reviewer=("rev-1",),
+                depends_on=("up",),
+            ),
+        ]
+    )
+    await scheduler.activate()
+    assert (
+        await _reviewer_mgr(db, bus, "dev-2").complete("up", summary="poem at /abs/up.md", note="long detail")
+    ).ok
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("r")).ok
+    upstream, _downstream = await task_links(db, "r")
+
+    prompt = await render.render_review_request_for_harness(
+        await tm.get("r"),
+        language="en",
+        reviewer="rev-1",
+        upstream=upstream,
+    )
+
+    assert "- up · draft · dev-2 · poem at /abs/up.md" in prompt
+    assert "long detail" not in prompt
+    assert "view_task(action='note', task_id=...)" in prompt

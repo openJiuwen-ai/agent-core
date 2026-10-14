@@ -1694,3 +1694,92 @@ class TestTeamPolicyRailSteeringQuota:
         await rail.before_steering_drain(ctx)
 
         assert ctx.inputs is None
+
+
+# ---------------------------------------------------------------------------
+# F_119: review passes ride the member's next input under scheduled dispatch
+# ---------------------------------------------------------------------------
+
+
+class _OutcomeTaskManager:
+    """Answers the outcome tracker's board query with fixed completed rows."""
+
+    def __init__(self, completed: list) -> None:
+        self.completed = completed
+
+    async def get_tasks_by_assignee(self, member_name: str, status: str | None = None) -> list:
+        return list(self.completed)
+
+
+def _verified_task(task_id: str):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(task_id=task_id, title=f"title-{task_id}", reviewers=lambda: ["v1"])
+
+
+def _teammate_rail(
+    dispatch_mode: str,
+    *,
+    role: TeamRole = TeamRole.TEAMMATE,
+) -> tuple[TeamPolicyRail, _FakeTeamBackend]:
+    backend = _FakeTeamBackend(self_member_name="dev1")
+    backend.task_manager = _OutcomeTaskManager([_verified_task("done-1")])
+    rail = TeamPolicyRail(
+        role=role,
+        member_name="dev1",
+        language="cn",
+        dispatch_mode=dispatch_mode,
+        team_backend=backend,
+    )
+    return rail, backend
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_review_pass_rides_the_next_input_once():
+    rail, _backend = _teammate_rail("scheduled")
+    rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
+    ctx = _StubContext()
+
+    first = await _admit(rail, ctx, "next task")
+    second = await _admit(rail, ctx, "another")
+
+    assert '<team-event kind="task-verified">' in first.content
+    assert "done-1" in first.content
+    assert first.content.endswith("next task")
+    assert "task-verified" not in second.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_review_pass_stays_inline_with_the_attachment_manager():
+    """The notice is an event: it joins the input, never the team.context attachment."""
+    rail, _backend = _teammate_rail("scheduled")
+    agent = _AttachmentStubAgent(SystemPromptBuilder(language="cn"))
+    rail.init(agent)
+    ctx = _StubContext()
+    batch = ["next task"]
+    ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+    await rail.on_user_message(ctx)
+    attachment = await _sync_attachments(agent, ctx)
+
+    assert '<team-event kind="task-verified">' in batch[0]
+    assert batch[-1] == "next task"
+    assert attachment is not None
+    assert "task-verified" not in attachment.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_autonomous_and_leader_rails_carry_no_outcome_notice():
+    autonomous, _ = _teammate_rail("autonomous")
+    autonomous.init(_StubAgent(SystemPromptBuilder(language="cn")))
+    leader, _ = _teammate_rail("scheduled", role=TeamRole.LEADER)
+    leader.init(_StubAgent(SystemPromptBuilder(language="cn")))
+
+    autonomous_msg = await _admit(autonomous, _StubContext(), "go")
+    leader_msg = await _admit(leader, _StubContext(), "go")
+
+    assert "task-verified" not in autonomous_msg.content
+    assert "task-verified" not in leader_msg.content

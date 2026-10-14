@@ -1655,3 +1655,159 @@ async def test_get_tasks_by_ids_skips_unknown_ids(task_manager):
 
     assert {row.task_id for row in rows} == {a.task_id, b.task_id}
     assert await task_manager.db.task.get_tasks_by_ids([]) == []
+
+
+# ---------------------------------------------------------------------------
+# F_119: completion summary beside the note; both cleared when ownership moves
+# ---------------------------------------------------------------------------
+
+
+async def _reviewed_task_back_in_progress(task_manager, db, message_bus, *, summary: str, note: str) -> str:
+    """Submit a reviewed task with a summary / note, then fail its review so it is IN_PROGRESS again."""
+    graph = await task_manager.add_graph(
+        [
+            TaskGraphSpec(
+                title="T",
+                content="c",
+                task_id="r2",
+                assignee=task_manager.member_name,
+                reviewer=({"type": "verifier", "reviewer_id": "v1", "instruction": ""},),
+            )
+        ]
+    )
+    assert graph.ok
+    assert await task_manager.claim("r2")
+    assert (await task_manager.complete("r2", summary=summary, note=note)).ok
+    reviewer = TeamTaskManager(team_name="test_team", member_name="v1", db=db, messager=message_bus)
+    assert (await reviewer.verify_task("r2", "fail", "redo")).ok
+    assert (await task_manager.get("r2")).status == TaskStatus.IN_PROGRESS.value
+    return "r2"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_complete_persists_summary_beside_note(task_manager):
+    task = await task_manager.add(title="T", content="c")
+    assert await task_manager.claim(task.task_id)
+
+    result = await task_manager.complete(task.task_id, summary="report at out/r.md", note="full detail")
+
+    assert result.ok
+    detail = await task_manager.get_task_detail(task.task_id)
+    assert detail.summary == "report at out/r.md"
+    assert detail.note == "full detail"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_resubmission_keeps_fields_that_are_not_given(task_manager, db, message_bus):
+    task_id = await _reviewed_task_back_in_progress(
+        task_manager,
+        db,
+        message_bus,
+        summary="first summary",
+        note="first note",
+    )
+
+    assert (await task_manager.complete(task_id, note="revised note")).ok
+
+    row = await task_manager.get(task_id)
+    assert row.summary == "first summary"
+    assert row.note == "revised note"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_summary_is_stored_in_full(task_manager):
+    task = await task_manager.add(title="T", content="c")
+    assert await task_manager.claim(task.task_id)
+    long_summary = "x" * 500
+
+    assert (await task_manager.complete(task.task_id, summary=long_summary)).ok
+
+    assert (await task_manager.get(task.task_id)).summary == long_summary
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reassign_clears_summary_and_note(task_manager, db, message_bus):
+    await db.member.create_member(
+        member_name="member2",
+        team_name="test_team",
+        display_name="member2",
+        agent_card=AgentCard().model_dump_json(),
+        status="BUSY",
+        mode=MemberMode.BUILD_MODE.value,
+    )
+    task_id = await _reviewed_task_back_in_progress(task_manager, db, message_bus, summary="s", note="n")
+
+    assert (await task_manager.reassign(task_id, "member2")).ok
+
+    row = await task_manager.get(task_id)
+    assert row.assignee == "member2"
+    assert row.status == TaskStatus.IN_PROGRESS.value
+    assert row.summary is None
+    assert row.note is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reassign_cas_miss_leaves_completion_text(task_manager, db, message_bus):
+    task_id = await _reviewed_task_back_in_progress(task_manager, db, message_bus, summary="s", note="n")
+
+    swapped = await task_manager.db.task.reassign_task(task_id, "someone-else", "member2")
+
+    assert swapped is False
+    row = await task_manager.get(task_id)
+    assert (row.summary, row.note) == ("s", "n")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reset_clears_summary_and_note_even_in_review(task_manager):
+    graph = await task_manager.add_graph(
+        [
+            TaskGraphSpec(
+                title="T",
+                content="c",
+                task_id="r3",
+                assignee=task_manager.member_name,
+                reviewer=({"type": "verifier", "reviewer_id": "v1", "instruction": ""},),
+            )
+        ]
+    )
+    assert graph.ok
+    assert await task_manager.claim("r3")
+    assert (await task_manager.complete("r3", summary="s", note="n")).ok
+    assert (await task_manager.get("r3")).status == TaskStatus.IN_REVIEW.value
+
+    assert (await task_manager.reset("r3")).ok
+
+    row = await task_manager.get("r3")
+    assert row.assignee is None
+    assert row.summary is None
+    assert row.note is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_content_update_keeps_summary_and_note(task_manager, db, message_bus):
+    task_id = await _reviewed_task_back_in_progress(task_manager, db, message_bus, summary="s", note="n")
+
+    await task_manager.update_task(task_id, content="revised content")
+
+    row = await task_manager.get(task_id)
+    assert (row.summary, row.note) == ("s", "n")
+
+
+@pytest.mark.level1
+def test_dispatch_mode_is_exposed_read_only(db, message_bus):
+    manager = TeamTaskManager(
+        team_name="test_team",
+        member_name="member1",
+        db=db,
+        messager=message_bus,
+        dispatch_mode="scheduled",
+    )
+
+    assert manager.dispatch_mode == "scheduled"

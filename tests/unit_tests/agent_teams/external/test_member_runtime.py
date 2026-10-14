@@ -1088,3 +1088,27 @@ async def test_activity_sink_drops_idless_and_unparsable_tool_events() -> None:
     assert received == []
 
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_review_pass_notice_rides_once_and_is_recorded_as_its_own_input() -> None:
+    """F_119: the outcome tracker's notice joins the next send, then is committed."""
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    recorder = _RecordingTrajectoryRecorder()
+    runtime.bind_trajectory_recorder(recorder)  # type: ignore[arg-type]
+    notice = '<team-event kind="task-verified">\ndone\n</team-event>'
+    tracker = _OneShotTeamContextTracker(notice)
+    runtime.bind_task_outcome_tracker(tracker)  # type: ignore[arg-type]
+    await runtime.start(team_session=_FakeTeamSession())
+
+    await runtime.send("next task")
+    await runtime.send("another")
+    await runtime.stop()
+
+    inputs = [call for call in recorder.calls if call[0] == "input"]
+    assert inputs[0] == ("input", ("turn-1", "next task"))
+    assert ("input", ("turn-1", notice)) in inputs
+    assert sum(1 for call in inputs if call[1][1] == notice) == 1
+    assert tracker.commits == 1

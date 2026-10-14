@@ -18,11 +18,15 @@ from types import SimpleNamespace
 import pytest
 
 from openjiuwen.agent_teams.message_template import (
+    SUMMARY_RENDER_LIMIT,
     ExpandedMessage,
     build_meta,
+    completion_summary,
+    completion_summary_truncated,
     expand_message,
     fallback_line,
     parse_meta,
+    upstream_brief,
 )
 from tests.test_logger import logger
 
@@ -202,13 +206,13 @@ async def test_substituted_values_are_never_rescanned():
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_language_selects_the_template_file():
-    meta = '{"template": "scheduler_verified_report", "refs": {"task": "t-1"}}'
+    meta = '{"template": "scheduler_task_start", "refs": {"task": "t-1"}}'
 
     cn = await _expand(_msg(meta), task=_FakeTask(), language="cn")
     en = await _expand(_msg(meta), task=_FakeTask(), language="en")
 
-    assert "[验收通过]" in cn.body
-    assert "[Review Passed]" in en.body
+    assert "[任务开工]" in cn.body
+    assert "[Task Started]" in en.body
 
 
 # ---------------------------------------------------------------------------
@@ -252,8 +256,14 @@ async def test_malformed_meta_is_treated_as_a_plain_message():
 # ---------------------------------------------------------------------------
 
 
-def _row(task_id: str, title: str, assignee: str | None = None, note: str | None = None) -> SimpleNamespace:
-    return SimpleNamespace(task_id=task_id, title=title, assignee=assignee, note=note)
+def _row(
+    task_id: str,
+    title: str,
+    assignee: str | None = None,
+    note: str | None = None,
+    summary: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(task_id=task_id, title=title, assignee=assignee, note=note, summary=summary)
 
 
 async def _links_getter(upstream, downstream):
@@ -340,3 +350,73 @@ async def test_links_are_fetched_only_for_templates_that_render_them():
         task_links_getter=_links,
     )
     assert calls == ["t-1"]
+
+
+# ---------------------------------------------------------------------------
+# F_119: completion summary — the one-line form of a task's completion text
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.level0
+def test_completion_summary_prefers_the_summary():
+    row = _row("t", "x", summary="report at out/r.md", note="full\ndetail")
+
+    assert completion_summary(row) == "report at out/r.md"
+    assert completion_summary_truncated(row) is False
+
+
+@pytest.mark.level0
+def test_completion_summary_falls_back_to_the_first_note_line():
+    row = _row("t", "x", note="\n  first line  \nsecond line")
+
+    assert completion_summary(row) == "first line"
+    # The note has more than its first line, so there is more to read.
+    assert completion_summary_truncated(row) is True
+
+
+@pytest.mark.level0
+def test_completion_summary_is_empty_without_text():
+    row = _row("t", "x")
+
+    assert completion_summary(row) == ""
+    assert completion_summary_truncated(row) is False
+
+
+@pytest.mark.level1
+def test_completion_summary_folds_lines_and_cuts_to_the_limit():
+    row = _row("t", "x", summary="a\nb  c")
+    assert completion_summary(row) == "a b c"
+
+    long_row = _row("t", "x", summary="y" * (SUMMARY_RENDER_LIMIT + 50))
+    rendered = completion_summary(long_row)
+    assert rendered == "y" * SUMMARY_RENDER_LIMIT + "…"
+    assert completion_summary_truncated(long_row) is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_handoff_upstream_shows_only_the_summary_and_a_note_hint():
+    expanded = await _expand_start(
+        _FakeTask(),
+        upstream=[_row("t-0", "design schema", "arch-1", note="line one\nline two", summary="schema at docs/s.md")],
+    )
+
+    assert "- t-0 · design schema · arch-1 · schema at docs/s.md" in expanded.body
+    assert "line one" not in expanded.body
+    assert "view_task(action='note', task_id=...)" in expanded.body
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_start_handoff_note_hint_is_localized_and_absent_without_upstream():
+    cn = await _expand_start(_FakeTask(), upstream=[_row("t-0", "x", "a", summary="s")], language="cn")
+    assert "需要某个上游任务的详细完成说明时" in cn.body
+
+    without = await _expand_start(_FakeTask())
+    assert "view_task(action='note'" not in without.body
+
+
+@pytest.mark.level1
+def test_upstream_brief_is_empty_without_upstream():
+    assert upstream_brief([]) == ""
+
