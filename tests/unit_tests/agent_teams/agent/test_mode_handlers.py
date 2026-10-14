@@ -668,3 +668,44 @@ async def test_teammate_board_keeps_the_task_bodies(db, bus):
     await handler.on_task_board_event(EventMessage.from_event(TaskUnblockedEvent(team_name=TEAM, task_id="t1")))
 
     assert "what to build" in host.delivered[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_is_not_woken_for_its_own_blocked_task(db, bus):
+    host, poll = FakeHost(), FakePoll()
+    infra = _infra(db, bus, "dev-1")
+    assert (
+        await infra.task_manager.add_graph(
+            [
+                TaskGraphSpec(title="first", content="c", task_id="t1", assignee="rev-1"),
+                TaskGraphSpec(title="mine", content="c", task_id="t2", assignee="dev-1", depends_on=("t1",)),
+            ]
+        )
+    ).ok
+    handler = TaskBoardHandler(host, _blueprint("dev-1", TeamRole.TEAMMATE), infra, poll)
+
+    await handler.on_task_board_event(
+        EventMessage.from_event(TaskCreatedEvent(team_name=TEAM, task_id="t1", status="pending"))
+    )
+    await handler.on_initial_task_poll(InnerEventMessage(event_type=InnerEventType.INITIAL_POLL_TASK))
+
+    assert host.delivered == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_teammate_board_header_does_not_send_it_to_view_task(db, bus):
+    host, poll = FakeHost(), FakePoll()
+    infra = _infra(db, bus, "dev-1")
+    assert (
+        await infra.task_manager.add_graph([TaskGraphSpec(title="mine", content="c", task_id="t1", assignee="dev-1")])
+    ).ok
+    handler = TaskBoardHandler(host, _blueprint("dev-1", TeamRole.TEAMMATE), infra, poll)
+
+    await handler.on_task_board_event(EventMessage.from_event(TaskUnblockedEvent(team_name=TEAM, task_id="t1")))
+
+    assert "[t1] [pending] mine" in host.delivered[0]
+    assert "view_task" not in host.delivered[0]
+    assert "claim_task(status=claimed)" in host.delivered[0]
+

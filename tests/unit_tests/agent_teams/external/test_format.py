@@ -129,12 +129,13 @@ def test_render_task_board_filters_terminal_and_marks_assignment(lang_en):
         _task("t3", "claimed", "dev-1"),
         _task("t4", "cancelled", None),
     ]
-    out = render_task_board(tasks, is_leader=False, now_ms=_NOW_MS)
+    out = render_task_board(tasks, is_leader=False, now_ms=_NOW_MS, member_name="dev-1")
     assert "t1" in out
-    assert "t3" in out
+    # Terminal tasks and in-flight work are not something to start now.
     assert "t2" not in out
+    assert "t3" not in out
     assert "t4" not in out
-    assert "→ dev-1" in out
+    assert "(unassigned)" in out
 
 
 @pytest.mark.level0
@@ -174,3 +175,22 @@ def test_render_task_board_leaves_bodies_out_for_the_leader_only(lang_en):
 
     assert task.content not in leader
     assert task.content in teammate
+
+
+@pytest.mark.level0
+def test_teammate_board_lists_only_tasks_it_can_start(lang_en):
+    tasks = [
+        _task("mine", "pending", "dev-1"),
+        _task("theirs", "pending", "dev-2"),
+        _task("waiting", "blocked", "dev-1"),
+        _task("open", "pending", None),
+    ]
+
+    out = render_task_board(tasks, is_leader=False, now_ms=_NOW_MS, member_name="dev-1")
+
+    assert "[mine]" in out
+    assert "[open]" in out
+    assert "[theirs]" not in out
+    assert "[waiting]" not in out
+    assert "view_task" not in out
+

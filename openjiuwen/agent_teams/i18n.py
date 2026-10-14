@@ -157,7 +157,8 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
-            "[任务指派] 任务 [{task_id}] 已指派给你，请通过 view_task 工具查看任务详情并执行。"
+            "[任务指派] 任务 [{task_id}]「{title}」已指派给你，完整内容如下，"
+            "用 claim_task(status=claimed) 开始执行。\n\n{content}"
         ),
         # agent/coordination/handlers/task_board.py — task reassigned away from this member
         "dispatcher.task_revoked_from_self": (
@@ -286,9 +287,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "- 整体进度是否符合预期"
         ),
         "dispatcher.teammate_task_list": (
-            "以下是当前可处理的任务：\n"
+            "以下是你现在可以开始的任务（已附完整内容）：\n"
             "- 未指派的 pending 任务可由你认领\n"
-            "- 已指派给你的任务请先用 view_task 查看详情，再按任务工具推进"
+            "- 指派给你的任务直接用 claim_task(status=claimed) 开始"
         ),
         "dispatcher.task_unassigned_marker": " (待领取)",
         # agent/dispatcher.py — stale-pending leader self-prompt
@@ -587,8 +588,8 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
-            "[Task Assigned] Task [{task_id}] has been assigned to you. "
-            "Use view_task to inspect the details and start working on it."
+            "[Task Assigned] Task [{task_id}] \"{title}\" has been assigned to you. Its full content "
+            "follows; start it with claim_task(status=claimed).\n\n{content}"
         ),
         # agent/coordination/handlers/task_board.py — task reassigned away from this member
         "dispatcher.task_revoked_from_self": (
@@ -728,9 +729,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "- Whether the overall progress matches expectations"
         ),
         "dispatcher.teammate_task_list": (
-            "Tasks available to work on:\n"
+            "Tasks you can start now (full content included):\n"
             "- Unassigned pending tasks may be claimed by you\n"
-            "- For tasks already assigned to you, use view_task for details and proceed with the task tools"
+            "- For tasks assigned to you, start directly with claim_task(status=claimed)"
         ),
         "dispatcher.task_unassigned_marker": " (unassigned)",
         # agent/dispatcher.py — stale-pending leader self-prompt

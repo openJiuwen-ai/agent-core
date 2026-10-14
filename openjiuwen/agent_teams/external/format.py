@@ -166,23 +166,39 @@ def render_task_line(
     return line
 
 
-def render_task_board(tasks: list[_TaskLike], *, is_leader: bool, now_ms: int) -> str:
+def render_task_board(
+    tasks: list[_TaskLike],
+    *,
+    is_leader: bool,
+    now_ms: int,
+    member_name: str | None = None,
+) -> str:
     """Render the actionable task board as a ``<team-event kind="task-board">``.
 
     Mirrors ``TaskBoardHandler``'s ``render_event(kind="task-board", ...)``: a
-    role-specific header followed by one line per non-terminal task, wrapped in
-    a single ``<team-event>`` block.
+    role-specific header followed by one line per task, wrapped in a single
+    ``<team-event>`` block. The leader sees every non-terminal task (without
+    bodies); a teammate sees only what it can start now — unassigned pending
+    tasks and pending tasks assigned to ``member_name``.
 
     Args:
         tasks: All team tasks; terminal ones are filtered out here.
-        is_leader: Whether the viewer is the leader (changes the header).
+        is_leader: Whether the viewer is the leader (changes header and rows).
         now_ms: Current millisecond UTC epoch, the relative-time anchor.
+        member_name: The viewing teammate, whose own pending tasks are listed.
 
     Returns:
         The ``<team-event kind="task-board">`` XML, or an empty string when
         nothing is actionable.
     """
-    incomplete = [task for task in tasks if task.status not in _TERMINAL_TASK_STATUSES]
+    if is_leader:
+        incomplete = [task for task in tasks if task.status not in _TERMINAL_TASK_STATUSES]
+    else:
+        incomplete = [
+            task
+            for task in tasks
+            if task.status == "pending" and (not task.assignee or task.assignee == member_name)
+        ]
     if not incomplete:
         return ""
 

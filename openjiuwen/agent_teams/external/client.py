@@ -460,7 +460,12 @@ class ExternalTeamClient:
                     bodies=bodies,
                 )
             )
-        board = render_task_board(view.tasks, is_leader=self.is_leader, now_ms=now_ms)
+        board = render_task_board(
+            view.tasks,
+            is_leader=self.is_leader,
+            now_ms=now_ms,
+            member_name=self.member_name,
+        )
         if board:
             parts.append(board)
         return "\n\n".join(parts) if parts else "(inbox empty)"

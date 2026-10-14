@@ -121,7 +121,9 @@ class TaskBoardHandler(BaseCoordinationHandler):
 
         Self-assignment rendering is role-aware: a teammate / leader
         sees the teammate-oriented ``dispatcher.task_assigned_to_self``
-        prompt ("call view_task and start working"). A human_agent
+        prompt, which carries the task title and body and says to claim it —
+        only once the task is workable (``pending``); a blocked assignment is
+        left to the board, which wakes the member when it unblocks. A human_agent
         avatar sees the HITT-specific ``hitt.task_assigned_to_self_human``
         prompt, which frames the event as a notification for the
         controlling human and tells the avatar LLM not to autonomously
@@ -172,9 +174,27 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 note_text=t("hitt.silence_note"),
             )
         else:
+            # The notice carries the task itself, so the member starts without
+            # a view_task round-trip. A task that is not workable yet (still
+            # blocked, or already gone) is not announced: the member is woken
+            # by the board once it unblocks.
+            task = await self._infra.task_manager.get(payload.task_id)
+            if task is None or task.status != "pending":
+                team_logger.debug(
+                    "[{}] assignment of {} not announced: task is {}",
+                    member_name,
+                    payload.task_id,
+                    "gone" if task is None else task.status,
+                )
+                return
             content = render_event(
                 kind="task-assigned",
-                body=t("dispatcher.task_assigned_to_self", task_id=payload.task_id),
+                body=t(
+                    "dispatcher.task_assigned_to_self",
+                    task_id=task.task_id,
+                    title=task.title or "",
+                    content=task.content or "",
+                ),
                 task_id=payload.task_id,
             )
 
@@ -600,14 +620,18 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 if task.status not in terminal
             )
         else:
-            # Teammate: surface claimable work (pending + unassigned) and
-            # explicitly assigned self work. Assigned pending tasks may have
-            # been created before this member started; feeding them here makes
-            # the startup poll actionable without exposing other members' work.
+            # Teammate: surface only work it can start now — claimable tasks
+            # (pending + unassigned) and pending tasks assigned to it. Assigned
+            # pending tasks may have been created before this member started;
+            # feeding them here makes the startup poll actionable without
+            # exposing other members' work. Its own blocked or in-flight tasks
+            # are left out: a blocked one wakes it when it unblocks, an
+            # in-flight one is already in hand (and the stale-claim sweep
+            # catches a stalled one), so listing them only wakes it for nothing.
             board_tasks = [
                 task
                 for task in incomplete
-                if (task.status == "pending" and not task.assignee) or task.assignee == member_name
+                if task.status == "pending" and (not task.assignee or task.assignee == member_name)
             ]
             if not board_tasks:
                 return
