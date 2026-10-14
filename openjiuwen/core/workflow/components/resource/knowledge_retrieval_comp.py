@@ -157,8 +157,7 @@ class KnowledgeRetrievalExecutable(ComponentExecutable):
         metadata = {
             "top_k": self._config.retrieval_config.top_k,
             "data_source_ids": [
-                component_kb_config.kb_config.kb_id
-                for component_kb_config in self._config.component_kb_configs
+                component_kb_config.kb_config.kb_id for component_kb_config in self._config.component_kb_configs
             ],
         }
         if self._config.retrieval_config.agentic and self._config.model_id:

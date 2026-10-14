@@ -343,49 +343,71 @@ class _RecordingAgentHandler(TraceExtAgentHandler):
     async def on_embedding_error(self, span, error, **kwargs):
         self.events.append(("error", type(error).__name__))
 
-    async def on_llm_start(self, **kw): pass
+    async def on_llm_start(self, **kw):
+        pass
 
-    async def on_llm_request(self, **kw): pass
+    async def on_llm_request(self, **kw):
+        pass
 
-    async def on_llm_end(self, **kw): pass
+    async def on_llm_end(self, **kw):
+        pass
 
-    async def on_llm_error(self, **kw): pass
+    async def on_llm_error(self, **kw):
+        pass
 
-    async def on_plugin_start(self, **kw): pass
+    async def on_plugin_start(self, **kw):
+        pass
 
-    async def on_plugin_end(self, **kw): pass
+    async def on_plugin_end(self, **kw):
+        pass
 
-    async def on_plugin_error(self, **kw): pass
+    async def on_plugin_error(self, **kw):
+        pass
 
-    async def on_prompt_start(self, **kw): pass
+    async def on_prompt_start(self, **kw):
+        pass
 
-    async def on_prompt_end(self, **kw): pass
+    async def on_prompt_end(self, **kw):
+        pass
 
-    async def on_prompt_error(self, **kw): pass
+    async def on_prompt_error(self, **kw):
+        pass
 
-    async def on_chain_start(self, **kw): pass
+    async def on_chain_start(self, **kw):
+        pass
 
-    async def on_chain_end(self, **kw): pass
+    async def on_chain_end(self, **kw):
+        pass
 
-    async def on_chain_error(self, **kw): pass
+    async def on_chain_error(self, **kw):
+        pass
 
-    async def on_retriever_start(self, **kw): pass
+    async def on_retriever_start(self, **kw):
+        pass
 
-    async def on_retriever_end(self, **kw): pass
+    async def on_retriever_end(self, **kw):
+        pass
 
-    async def on_retriever_error(self, **kw): pass
+    async def on_retriever_error(self, **kw):
+        pass
 
-    async def on_evaluator_start(self, **kw): pass
+    async def on_evaluator_start(self, **kw):
+        pass
 
-    async def on_evaluator_end(self, **kw): pass
+    async def on_evaluator_end(self, **kw):
+        pass
 
-    async def on_evaluator_error(self, **kw): pass
+    async def on_evaluator_error(self, **kw):
+        pass
 
-    async def on_workflow_start(self, **kw): pass
+    async def on_workflow_start(self, **kw):
+        pass
 
-    async def on_workflow_end(self, **kw): pass
+    async def on_workflow_end(self, **kw):
+        pass
 
-    async def on_workflow_error(self, **kw): pass
+    async def on_workflow_error(self, **kw):
+        pass
 
 
 class TestAPIEmbeddingTraceEvents:
