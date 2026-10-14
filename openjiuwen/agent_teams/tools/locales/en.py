@@ -462,7 +462,8 @@ STRINGS: dict[str, str] = {
     "claim_task.status": "New status: 'claimed' (start work) or 'completed' (mark done)",
     "claim_task.summary": (
         "Only with status=completed: one-sentence completion summary — what you delivered and where the main "
-        "artifact is; this is what the leader and your downstream see"
+        "artifact is; this is what the leader and your downstream see; when the deliverable itself is short "
+        "(one sentence, a number, a verdict), put it in the summary itself rather than only a file path"
     ),
     "claim_task.note": (
         "Only with status=completed: the full completion detail — artifact paths, key decisions or follow-ups"
@@ -479,7 +480,8 @@ STRINGS: dict[str, str] = {
     ),
     "member_complete_task.summary": (
         "One-sentence completion summary: what you delivered and where the main artifact is; shown in the "
-        "leader digest and in downstream upstream lists"
+        "leader digest and in downstream upstream lists; when the deliverable itself is short "
+        "(one sentence, a number, a verdict), put it in the summary itself rather than only a file path"
     ),
     "member_complete_task.note": (
         "Full completion detail: artifact paths, key decisions or follow-ups the team should know about; "

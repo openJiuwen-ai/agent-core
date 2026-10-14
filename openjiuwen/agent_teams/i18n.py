@@ -229,6 +229,7 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "scheduler.leader_all_done": (
             "[调度器] 任务看板已全部终结（共 {count} 个任务）。请汇总团队执行结果，向用户交付最终结论。"
+            "无需向成员发送收尾或待命通知——它们没有新任务时会自动待命，广播只会把每个成员各唤醒一轮。"
         ),
         "scheduler.inspector_avg_line": (
             "\n- [检视者平均分] {avg:.2f} / 0.85 ({status})\n"
@@ -260,7 +261,10 @@ STRINGS: dict[str, dict[str, str]] = {
             "你写在回复正文里的任何文字都不会送达用户，不调用工具就等于没有回复。"
         ),
         # agent/dispatcher.py — idle-agent nudges
-        "dispatcher.all_done_persistent": ("所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"),
+        "dispatcher.all_done_persistent": (
+            "所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"
+            "无需向成员发送收尾或待命通知——它们没有新任务时会自动待命，广播只会把每个成员各唤醒一轮。"
+        ),
         "dispatcher.all_done_temporary": (
             "所有任务已完成。请汇总团队工作成果，"
             "然后依次调用 shutdown_member 关闭所有成员，"
@@ -667,7 +671,9 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "scheduler.leader_all_done": (
             "[Scheduler] Every task on the board is terminal ({count} task(s) total). Summarize "
-            "the team's results and deliver the final conclusion to the user."
+            "the team's results and deliver the final conclusion to the user. Do not send members a wrap-up "
+            "or stand-by notice — they idle on their own when there is no new work, and a broadcast only wakes "
+            "each of them for a round."
         ),
         "scheduler.inspector_avg_line": (
             "\n- [Inspector avg] {avg:.2f} / 0.85 ({status})\n"
@@ -699,7 +705,9 @@ STRINGS: dict[str, dict[str, str]] = {
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (
             "All tasks are complete. Please summarize this round's results. "
-            "The team remains running and awaits new task instructions."
+            "The team remains running and awaits new task instructions. "
+            "Do not send members a wrap-up or stand-by notice — they idle on their own when there is no "
+            "new work, and a broadcast only wakes each of them for a round."
         ),
         "dispatcher.all_done_temporary": (
             "All tasks are complete. Summarize the team's work, "
