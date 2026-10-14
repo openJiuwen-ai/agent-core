@@ -81,6 +81,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     """
 
     priority: int = 90
+    _ONE_TIME_APPROVAL_RULES = frozenset({"immutable_project_execution_config"})
 
     def __init__(
         self,
@@ -107,12 +108,22 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         exc_info=True,
                     )
             trusted_dirs = []
+            immutable_control_roots = []
+            if self._host.resolve_immutable_control_roots is not None:
+                try:
+                    immutable_control_roots = self._host.resolve_immutable_control_roots()
+                except Exception:
+                    logger.warning(
+                        "[PermissionEngine] permission.rail.immutable_roots_resolve_failed",
+                        exc_info=True,
+                    )
             self._engine = PermissionEngine(
                 config=self._static_config,
                 llm=llm,
                 model_name=model_name,
                 workspace_root=workspace_root,
                 trusted_dirs=trusted_dirs,
+                immutable_control_roots=immutable_control_roots,
             )
         if self._host.tool_permission_checks_active is not None:
             self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
@@ -131,6 +142,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         Maps tool names from openjiuwen.harness.tools to mcp_* names used in config.
         """
         return TOOL_NAME_ALIASES.get(tool_name, tool_name)
+
+    @classmethod
+    def _requires_one_time_approval(cls, result: PermissionResult) -> bool:
+        return result.matched_rule in cls._ONE_TIME_APPROVAL_RULES
 
     def _get_auto_confirm_key(self, tool_call: ToolCall) -> str:
         """Never reuse legacy whole-tool session approvals."""
@@ -431,7 +446,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     async def _validate_confirmation(self, payload, tool_name, tool_args, session_id):
         if not payload.approved:
-            return None
+            return payload, None
         try:
             if self._host.get_permissions_snapshot:
                 self.update_config(self._invoke_permissions_hook(
@@ -441,10 +456,14 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                                   scope=payload.authorization_scope)
             result = await self._engine.check_permission(tool_name, tool_args)
             if result.is_denied:
-                return "[PERMISSION_DENIED] " + (result.reason or "Policy changed while awaiting approval")
+                return payload, "[PERMISSION_DENIED] " + (
+                    result.reason or "Policy changed while awaiting approval"
+                )
+            if self._requires_one_time_approval(result) and payload.auto_confirm:
+                payload = replace(payload, auto_confirm=False, persist_allow=None)
         except (TypeError, ValueError) as exc:
-            return "[PERMISSION_DENIED] " + str(exc)
-        return None
+            return payload, "[PERMISSION_DENIED] " + str(exc)
+        return payload, None
 
     async def _apply_host_evaluation(
         self, ctx: AgentCallbackContext, tool_call: Optional[ToolCall], result: PermissionResult,
@@ -571,8 +590,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 )
                 raise
 
-            if result.permission != PermissionLevel.DENY and self._is_auto_confirmed(
-                auto_confirm_config, auto_confirm_key,
+            if (
+                result.permission != PermissionLevel.DENY
+                and not self._requires_one_time_approval(result)
+                and self._is_auto_confirmed(
+                    auto_confirm_config, auto_confirm_key,
+                )
             ):
                 result = PermissionResult(PermissionLevel.ALLOW, "session_auto_confirm")
             result = await self._apply_host_evaluation(ctx, tool_call, result)
@@ -593,7 +616,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 )
                 return self.reject(tool_result=f"[PERMISSION_DENIED] {result.reason or 'Operation not allowed'}")
 
-            if self._is_auto_confirmed(auto_confirm_config, auto_confirm_key):
+            if (
+                not self._requires_one_time_approval(result)
+                and self._is_auto_confirmed(auto_confirm_config, auto_confirm_key)
+            ):
                 logger.info(
                     "[PermissionEngine] permission.auto_confirm.hit tool=%s key=%s",
                     tool_name,
@@ -630,7 +656,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                             ),
                         )
                     confirm_payload = ext_out
-                    invalid = await self._validate_confirmation(confirm_payload, normalized_name, tool_args, session_id)
+                    confirm_payload, invalid = await self._validate_confirmation(
+                        confirm_payload, normalized_name, tool_args, session_id,
+                    )
                     if invalid:
                         return self.reject(tool_result=invalid)
                     persisted = False
@@ -703,7 +731,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 metadata=self._build_interrupt_metadata(tool_call, invalid),
             ))
 
-        invalid = await self._validate_confirmation(payload, normalized_name, tool_args, session_id)
+        payload, invalid = await self._validate_confirmation(
+            payload, normalized_name, tool_args, session_id,
+        )
         if invalid:
             return self.reject(tool_result=invalid)
         persisted = False

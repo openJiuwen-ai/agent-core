@@ -112,6 +112,13 @@ class ToolPermissionHost:
     resolve_workspace_dir: Callable[[], Path] | None = None
     """外部路径校验用的 workspace 根目录。"""
 
+    resolve_immutable_control_roots: Callable[[], list[Path]] | None = None
+    """宿主控制面只读根目录。
+
+    该列表不属于用户 ``permissions`` 配置，普通权限开关、full access 和
+    会话授权均不得覆盖其写入拒绝。
+    """
+
     permission_yaml_path: Path | None = None
     """Agent 配置文件路径；权限段写盘时优先使用（文件可尚不存在，父目录须存在）。
 

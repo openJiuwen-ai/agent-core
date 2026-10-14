@@ -50,7 +50,7 @@ def test_inlined_high_command_is_ask_critical_is_deny() -> None:
     )
     assert chmod_level == PermissionLevel.ASK
     rm_level, _ = evaluate_tiered_policy(
-        cfg, "bash", {"command": "rm -rf /tmp/workspace-dist"},
+        cfg, "bash", {"command": "rm -rf /"},
     )
     assert rm_level == PermissionLevel.ASK
     mkfs_level, _ = evaluate_tiered_policy(
@@ -62,10 +62,10 @@ def test_inlined_high_command_is_ask_critical_is_deny() -> None:
 def test_package_rm_split_short_flags_are_ask() -> None:
     cfg = _package_cfg()
     cases = (
-        "rm -r -f /data",
-        "rm -f -r /data",
-        "rm /data -r -f",
-        "rm -r --force /data",
+        "rm -r -f /",
+        "rm -f -r /",
+        "rm / -r -f",
+        "rm -r --force /",
     )
     for command in cases:
         level, matched = evaluate_tiered_policy(
@@ -75,9 +75,16 @@ def test_package_rm_split_short_flags_are_ask() -> None:
         assert "shell_fs_recursive_or_forced_delete" in matched, (command, matched)
 
 
-def test_package_rm_single_short_flag_is_not_builtin_ask() -> None:
+def test_package_rm_non_root_or_without_both_flags_is_not_builtin_ask() -> None:
     cfg = _package_cfg()
-    for command in ("rm -r /data", "rm -f /data", "rm notes.txt"):
+    for command in (
+        "rm -r /",
+        "rm -f /",
+        "rm notes.txt",
+        "rm -rf /data",
+        "rm -rf ./dist",
+        "rm -rf ~/",
+    ):
         level, matched = evaluate_tiered_policy(
             cfg, "bash", {"command": command},
         )
@@ -87,7 +94,7 @@ def test_package_rm_single_short_flag_is_not_builtin_ask() -> None:
         )
 
 
-def test_package_rd_recursive_is_ask() -> None:
+def test_package_other_delete_commands_are_not_builtin_ask() -> None:
     cfg = _package_cfg()
     cases = (
         "rd /s dirname",
@@ -101,8 +108,10 @@ def test_package_rd_recursive_is_ask() -> None:
         level, matched = evaluate_tiered_policy(
             cfg, "bash", {"command": command},
         )
-        assert level == PermissionLevel.ASK, (command, matched)
-        assert "shell_fs_recursive_or_forced_delete" in matched, (command, matched)
+        assert level == PermissionLevel.ALLOW, (command, matched)
+        assert "shell_fs_recursive_or_forced_delete" not in (matched or ""), (
+            command, matched,
+        )
 
 
 def test_package_rd_quiet_only_is_not_builtin_ask() -> None:
@@ -114,7 +123,7 @@ def test_package_rd_quiet_only_is_not_builtin_ask() -> None:
     assert "shell_fs_recursive_or_forced_delete" not in (matched or "")
 
 
-def test_package_shred_dangerous_path_is_ask() -> None:
+def test_package_shred_does_not_match_root_delete_rule() -> None:
     cfg = _package_cfg()
     cases = (
         "shred /tmp/x",
@@ -128,8 +137,9 @@ def test_package_shred_dangerous_path_is_ask() -> None:
         level, matched = evaluate_tiered_policy(
             cfg, "bash", {"command": command},
         )
-        assert level == PermissionLevel.ASK, (command, matched)
-        assert "shell_fs_recursive_or_forced_delete" in matched, (command, matched)
+        assert "shell_fs_recursive_or_forced_delete" not in (matched or ""), (
+            command, level, matched,
+        )
 
 
 def test_package_shred_relative_file_is_not_builtin_ask() -> None:
@@ -155,15 +165,14 @@ def _package_cfg() -> dict:
     )
 
 
-def test_package_windows_powershell_forced_delete_is_ask() -> None:
+def test_package_windows_powershell_forced_root_delete_is_ask() -> None:
     cfg = _package_cfg()
     cases = (
-        "Remove-Item -Recurse -Force C:\\temp\\build",
-        "Remove-Item -Force -Recurse C:\\temp\\build",
-        "Remove-Item C:\\temp\\build -Recurse",
-        "ri -Recurse C:\\Users\\me\\out",
-        "erase -Force notes.txt",
-        "rmdir -Recurse .\\dist",
+        "Remove-Item -Recurse -Force C:\\",
+        "Remove-Item -Force C:\\ -Recurse",
+        "Remove-Item C:/ -Recurse -Force",
+        "ri -R -F D:\\",
+        "rm -Recurse -Force E:\\",
     )
     for command in cases:
         level, matched = evaluate_tiered_policy(
@@ -173,13 +182,23 @@ def test_package_windows_powershell_forced_delete_is_ask() -> None:
         assert "shell_ps_recursive_or_forced_delete" in matched, (command, matched)
 
 
-def test_package_windows_plain_remove_item_is_not_builtin_ask() -> None:
+def test_package_windows_non_root_or_single_flag_does_not_match_root_delete_rule() -> None:
     cfg = _package_cfg()
-    level, matched = evaluate_tiered_policy(
-        cfg, "powershell", {"command": "Remove-Item .\\notes.txt"},
-    )
-    assert level == PermissionLevel.ALLOW
-    assert "shell_ps_recursive_or_forced_delete" not in (matched or "")
+    for command in (
+        "Remove-Item .\\notes.txt",
+        "Remove-Item -Recurse -Force C:\\temp\\build",
+        "Remove-Item -Recurse C:\\",
+        "Remove-Item -Force C:\\",
+        "erase -Recurse -Force C:\\",
+        "rmdir -Recurse -Force C:\\",
+        "del -Recurse -Force C:\\",
+    ):
+        level, matched = evaluate_tiered_policy(
+            cfg, "powershell", {"command": command},
+        )
+        assert "shell_ps_recursive_or_forced_delete" not in (matched or ""), (
+            command, level, matched,
+        )
 
 
 def test_package_windows_system_and_disk_cmdlets_are_deny() -> None:
@@ -350,11 +369,13 @@ def test_package_firewall_flag_variants() -> None:
         assert "shell_disable_firewall" in matched, (command, matched)
 
 
-def test_package_ps_del_alias_and_rm_short_recurse() -> None:
+def test_package_ps_non_root_aliases_are_not_builtin_ask() -> None:
     cfg = _package_cfg()
     for command in ("del -Recurse .\\tmp", "rm -Recurse .\\tmp"):
         level, matched = evaluate_tiered_policy(
             cfg, "powershell", {"command": command},
         )
-        assert level == PermissionLevel.ASK, (command, matched)
-        assert "shell_ps_recursive_or_forced_delete" in matched, (command, matched)
+        assert level == PermissionLevel.ALLOW, (command, matched)
+        assert "shell_ps_recursive_or_forced_delete" not in (matched or ""), (
+            command, matched,
+        )

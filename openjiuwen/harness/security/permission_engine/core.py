@@ -30,6 +30,9 @@ from openjiuwen.harness.security.permission_engine.fileguard.file_guard import (
     FileGuardChecker,
     build_file_guard_checker,
 )
+from openjiuwen.harness.security.permission_engine.fileguard.immutable_control_plane import (
+    ImmutableControlPlaneGuard,
+)
 from openjiuwen.harness.security.permission_engine.fileguard.sensitive_paths import (
     merge_package_sensitive_paths,
 )
@@ -151,6 +154,7 @@ class PermissionEngine:
         model_name: str | None = None,
         workspace_root: Path | None = None,
         trusted_dirs: list[Path] | None = None,
+        immutable_control_roots: list[Path] | None = None,
     ):
         # 运行时为可变 dict；TypedDict 仅作入参形状说明
         self.config: dict[str, Any] = prepare_permissions_for_engine(config)
@@ -160,6 +164,12 @@ class PermissionEngine:
         self._model_name = model_name
         self._workspace_root = workspace_root
         self._trusted_dirs = trusted_dirs or []
+        self._immutable_control_roots = immutable_control_roots or []
+        self._immutable_control_guard = ImmutableControlPlaneGuard(
+            self._immutable_control_roots,
+            workspace_root=self._workspace_root,
+            permission_config=self.config,
+        )
         self._file_guard: FileGuardChecker | None = build_file_guard_checker(
             self.config,
             workspace_root=self._workspace_root,
@@ -170,6 +180,11 @@ class PermissionEngine:
     # ---------- 配置 ----------
 
     def _rebuild_file_guard(self) -> None:
+        self._immutable_control_guard = ImmutableControlPlaneGuard(
+            self._immutable_control_roots,
+            workspace_root=self._workspace_root,
+            permission_config=self.config,
+        )
         self._file_guard = build_file_guard_checker(
             self.config,
             workspace_root=self._workspace_root,
@@ -288,6 +303,17 @@ class PermissionEngine:
             tool_name,
             self._enabled,
         )
+
+        immutable_args = tool_args if isinstance(tool_args, dict) else {}
+        immutable_result = self._immutable_control_guard.evaluate(tool_name, immutable_args)
+        if immutable_result is not None:
+            logger.warning(
+                "[PermissionEngine] permission.immutable_control_plane.denied "
+                "tool=%s paths=%s",
+                tool_name,
+                immutable_result.external_paths or [],
+            )
+            return immutable_result
 
         if not self._enabled:
             logger.info("[PermissionEngine] permission.check.skip reason=system_disabled decision=allow")

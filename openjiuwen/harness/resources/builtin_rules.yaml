@@ -9,18 +9,18 @@
 
 rules:
   - id: shell_fs_recursive_or_forced_delete
-    description: "递归、强制或批量删除，可能造成数据破坏"
+    description: "递归且强制删除 POSIX 文件系统根目录"
     tools: [shell]
     match_type: command
-    pattern: 're:(?i)(?:^|[\s;&|()])(?:(?:rm\s+(?=[^;&|]*(?:/[^;&|\s]*|\*|~[^;&|\s]*|\$HOME[^;&|\s]*|\.{1,2}(?:/[^;&|\s]*)?))(?=[^;&|]*(?:-[A-Za-z]*[rR][A-Za-z]*[fF]|-[A-Za-z]*[fF][A-Za-z]*[rR]|--recursive\b|--force\b|-[rR]\b[^;&|]*-[fF]\b|-[fF]\b[^;&|]*-[rR]\b))|(?:rm\s+(?:/\*|~/|\$HOME/|\.{1,2}/))|(?:find\s+[^;&|]*\s-delete\b)|(?:shred\b(?=[^;&|]*(?:/[^;&|\s]*|\*|~[^;&|\s]*|\$HOME[^;&|\s]*|(?:^|[\s])\.{1,2}(?:/[^;&|\s]*)?)))|(?:del\s+[^;&|]*/[fqs]+\b)|(?:(?:rd|rmdir)\s+[^;&|]*/[qf]*s[qf]*\b)))'
+    pattern: 're:(?i)(?:^|[\s;&|()])rm\b(?=[^;&|\r\n]*\s/+(?=\s|$|[;&|)]))(?=[^;&|\r\n]*\s(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)(?=\s|$))(?=[^;&|\r\n]*\s(?:-[A-Za-z]*[fF][A-Za-z]*|--force)(?=\s|$))'
     severity: HIGH
     action: ask
 
   - id: shell_ps_recursive_or_forced_delete
-    description: "PowerShell 递归或强制删除，可能造成数据破坏"
+    description: "PowerShell 递归且强制删除 Windows 盘符根目录"
     tools: [shell]
     match_type: command
-    pattern: 're:(?i)(^|[\s;&|()])(((Remove-Item|\bri\b|\berase\b|\brmdir\b|\bdel\b)\b[^\n\r;|&]*-(Recurse|Force|R|F)\b)|(\brm\b[^\n\r;|&]*-(Recurse|Force)\b))'
+    pattern: 're:(?i)(?:^|[\s;&|()])(?:Remove-Item|\bri\b|\brm\b)\b(?=[^\n\r;|&]*-(?:Recurse|R)\b)(?=[^\n\r;|&]*-(?:Force|F)\b)(?=[^\n\r;|&]*\s["'']?[A-Za-z]:[\\/]+["'']?(?=\s|$|[;|&)]))'
     severity: HIGH
     action: ask
 
