@@ -205,6 +205,20 @@ class TeamAgentSpec(BaseModel):
     model_config = {"protected_namespaces": ()}
 
     agents: dict[str, DeepAgentSpec]
+    reviewer_agent: DeepAgentSpec | None = None
+    """Base spec for the one-shot reviewers spawned per review round.
+
+    Under scheduled dispatch a task's reviewers run as temporary harnesses that
+    only inspect a deliverable and cast a vote, so they should carry a narrow,
+    read-only capability set rather than a teammate's full one. The host that
+    assembles member capabilities builds this spec. ``None`` falls back to the
+    teammate spec with the framework-level trimming the scheduler applies
+    (read-only file tools, no todo planning, no sub-agents).
+
+    Kept out of ``agents`` on purpose: that dict is also looked up by member
+    name, so a reserved ``"reviewer"`` key would collide with a member of that
+    name.
+    """
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
     evolution_enabled: bool = True

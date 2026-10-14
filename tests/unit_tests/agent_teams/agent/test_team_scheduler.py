@@ -5,6 +5,7 @@
 
 import asyncio
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -1032,3 +1033,118 @@ async def test_temp_reviewer_prompt_leaves_out_an_absent_submission_note(db, bus
     assert "提交说明" not in prompt
     assert "{{task." not in prompt
     assert "\n\n\n" not in prompt
+
+
+async def _capture_reviewer_spec(scheduler, tm, monkeypatch, db) -> Any:
+    """Spawn one temp reviewer and return the agent spec its harness was built with."""
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler as _Scheduler
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+
+    scheduler._blueprint.spec.dispatch_mode = "scheduled"
+    scheduler._blueprint.language = "cn"
+    scheduler._infra.team_backend.db = db
+    scheduler._infra.team_backend.workspace_cache = None
+    monkeypatch.setattr(_Scheduler, "_dispatch_to_reviewer", AsyncMock())
+    built = []
+
+    class _FakeHarness:
+        async def run_once(self, _prompt, *, team_session=None):
+            return {"output": "voted"}
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, **_kwargs):
+        built.append(agent_spec)
+        return _FakeHarness()
+
+    monkeypatch.setattr(TeamHarness, "build", staticmethod(_fake_build))
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+    assert len(built) == 1
+    return built[0]
+
+
+def _tool_names(agent_spec) -> set[str]:
+    return {getattr(tool, "type", None) or tool.card.name for tool in agent_spec.tools}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_prefers_the_host_reviewer_spec(db, bus, monkeypatch):
+    from openjiuwen.agent_teams.schema.deep_agent_spec import BuiltinToolSpec, DeepAgentSpec
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    scheduler._blueprint.spec.agents = {"teammate": DeepAgentSpec(tools=[BuiltinToolSpec(type="host.cron")])}
+    scheduler._blueprint.spec.reviewer_agent = DeepAgentSpec(tools=[BuiltinToolSpec(type="host.web_fetch")])
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+
+    agent_spec = await _capture_reviewer_spec(scheduler, tm, monkeypatch, db)
+
+    assert _tool_names(agent_spec) == {"host.web_fetch", "verify_task", "view_task"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_falls_back_to_a_trimmed_teammate_spec(db, bus, monkeypatch):
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec, RailSpec, SubAgentSpec
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    scheduler._blueprint.spec.reviewer_agent = None
+    scheduler._blueprint.spec.agents = {
+        "teammate": DeepAgentSpec(
+            rails=[RailSpec(type="core.sys_operation")],
+            subagents=[SubAgentSpec(agent_card=AgentCard(name="helper"), system_prompt="")],
+            enable_task_planning=True,
+            add_general_purpose_agent=True,
+        )
+    }
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+
+    agent_spec = await _capture_reviewer_spec(scheduler, tm, monkeypatch, db)
+
+    sys_rails = [rail for rail in agent_spec.rails if rail.type == "core.sys_operation"]
+    assert sys_rails[0].params["read_only"] is True
+    assert agent_spec.subagents is None
+    assert agent_spec.add_general_purpose_agent is False
+    assert agent_spec.enable_task_planning is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_prompt_lists_upstream_tasks(db, bus):
+    from openjiuwen.agent_teams.agent.scheduling import render
+    from openjiuwen.agent_teams.message_template import task_links
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="draft", content="c", task_id="up", assignee="dev-2"),
+            TaskGraphSpec(
+                title="collect",
+                content="c",
+                task_id="r",
+                assignee="dev-1",
+                reviewer=("rev-1",),
+                depends_on=("up",),
+            ),
+        ]
+    )
+    await scheduler.activate()
+    assert (await _reviewer_mgr(db, bus, "dev-2").complete("up", note="poem at /abs/up.md")).ok
+    # The completed upstream unblocks "r"; the next scan starts it.
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("r")).ok
+    upstream, _downstream = await task_links(db, "r")
+
+    prompt = await render.render_review_request_for_harness(
+        await tm.get("r"),
+        language="en",
+        reviewer="rev-1",
+        upstream=upstream,
+    )
+
+    assert "## Upstream tasks" in prompt
+    assert "- up · draft · dev-2 · poem at /abs/up.md" in prompt
+    assert "{{task." not in prompt
+

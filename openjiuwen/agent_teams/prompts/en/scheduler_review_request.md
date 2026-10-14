@@ -8,6 +8,8 @@
 
 {{task.content}}
 
+{{task.upstream_section}}
+
 {{task.submission_note}}
 
 ## How to review

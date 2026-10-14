@@ -101,9 +101,21 @@ def _task_line(task: Any, *, with_note: bool) -> str:
     return " ".join(parts)
 
 
+def upstream_brief(upstream: list[Any]) -> str:
+    """Render one line per upstream task, each carrying the author's completion note.
+
+    Args:
+        upstream: Upstream task rows.
+
+    Returns:
+        The bullet lines, or ``""`` when there is no upstream task.
+    """
+    return "\n".join(f"- {_task_line(task, with_note=True)}" for task in upstream)
+
+
 def _task_briefs(upstream: list[Any], downstream: list[Any], language: str) -> dict[str, str]:
     none = _NONE_PHRASE.get(language, _NONE_PHRASE["en"])
-    up = "\n".join(f"- {_task_line(task, with_note=True)}" for task in upstream) or none
+    up = upstream_brief(upstream) or none
     down = "\n".join(f"- {_task_line(task, with_note=False)}" for task in downstream) or none
     return {"upstream_brief": up, "downstream_brief": down}
 
@@ -317,4 +329,5 @@ __all__ = [
     "fallback_line",
     "parse_meta",
     "task_links",
+    "upstream_brief",
 ]

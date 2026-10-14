@@ -12,7 +12,7 @@ Carefully read the task objectives and acceptance criteria in the review request
 
 ### Locate the Deliverables
 
-Get the deliverable file paths from the task content and "The assignee's submission note" in the review request, and use `read_file` to read the deliverables. If paths are still unclear, use `list_files` to explore the shared team deliverables directory; only if that is not enough, use `view_task(action=get)` for more task information.
+The review request already carries the task content, its upstream tasks and "The assignee's submission note"; get the deliverable file paths from them and use `read_file` to read the deliverables. If paths are still unclear, use `list_files` to explore the directory the deliverables live in.
 
 ### Scoring Rubric
 

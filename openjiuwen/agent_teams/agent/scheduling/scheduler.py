@@ -35,12 +35,14 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.agent.scheduling import render
+from openjiuwen.agent_teams.agent.scheduling.reviewer_spec import build_reviewer_agent_spec
 from openjiuwen.agent_teams.agent.scheduling.verdict import (
     VERDICT_FAIL,
     VERDICT_PASS,
     settle_review_tally,
 )
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.message_template import task_links
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template, make_template_loader
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import TaskStatus
@@ -511,9 +513,9 @@ class TeamScheduler:
     async def _dispatch_to_reviewer(self, reviewer: str, task: Any) -> None:
         """Dispatch a review request by spawning a one-shot temp reviewer harness.
 
-        The harness inherits the team's base agent spec (model, filesystem
-        tools) augmented with ``verify_task`` + ``view_task`` so it can
-        inspect the deliverable and cast its vote.  The harness is built,
+        The harness runs on the reviewer base spec (see
+        :meth:`_spawn_temp_reviewer`) augmented with ``verify_task`` +
+        ``view_task`` so it can inspect the deliverable and cast its vote.  The harness is built,
         run once, and disposed — a crash is logged and the next scheduler
         scan retries via ``_review_dispatched.discard()``.
         """
@@ -523,11 +525,13 @@ class TeamScheduler:
     async def _spawn_temp_reviewer(self, reviewer: str, task: Any) -> None:
         """Build a one-shot reviewer harness and run ``verify_task`` on it.
 
-        The reviewer inherits the team's base agent spec (model, filesystem
-        tools, etc.) and gets two extra team tools — ``verify_task`` +
-        ``view_task`` — so it can inspect the deliverable and cast a vote.
-        The harness is disposed immediately after ``run_once``, regardless of
-        outcome; a crash is logged and retried on the next scan.
+        The reviewer runs on ``spec.reviewer_agent`` when the host provides
+        one, else on the teammate spec narrowed by the framework
+        (:func:`build_reviewer_agent_spec`). It gets two extra team tools:
+        ``verify_task`` to cast its vote and ``view_task`` as a fallback only,
+        since the review request already carries what it needs. The harness
+        is disposed immediately after ``run_once``, regardless of outcome; a
+        crash is logged and retried on the next scan.
 
         For trajectory attribution the reviewer mounts the same observability
         rail pair as a team member and runs under its own execution subject per
@@ -548,11 +552,14 @@ class TeamScheduler:
         from openjiuwen.harness.execution_subject import execution_subject_scope
 
         spec = self._blueprint.spec
-        agents = getattr(spec, "agents", None) or {}
-        base_agent_spec = agents.get("teammate") or agents.get("leader")
+        base_agent_spec = getattr(spec, "reviewer_agent", None)
         if base_agent_spec is None:
-            team_logger.error("[scheduler] no base agent spec for temp reviewer")
-            return
+            agents = getattr(spec, "agents", None) or {}
+            member_spec = agents.get("teammate") or agents.get("leader")
+            if member_spec is None:
+                team_logger.error("[scheduler] no base agent spec for temp reviewer")
+                return
+            base_agent_spec = build_reviewer_agent_spec(member_spec)
 
         backend = self._infra.team_backend
         task_manager = self._infra.task_manager
@@ -626,12 +633,14 @@ class TeamScheduler:
             # The reviewer runs with a fresh context every round; its own
             # previous-round vote is the only carry-over it gets.
             previous_vote = await task_manager.get_previous_round_vote(task, reviewer)
+            upstream, _downstream = await task_links(backend.db, task.task_id)
             review_prompt = await render.render_review_request_for_harness(
                 task,
                 language=language,
                 reviewer=reviewer,
                 loader=self._template_loader,
                 previous_vote=previous_vote,
+                upstream=upstream,
             )
             team_session_id = get_session_id() or ""
             # Retry transient model-call failures up to 3 times.

@@ -8,6 +8,8 @@
 
 {{task.content}}
 
+{{task.upstream_section}}
+
 {{task.submission_note}}
 
 ## 验收步骤

@@ -23,7 +23,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.message_template import build_meta
+from openjiuwen.agent_teams.message_template import build_meta, upstream_brief
 from openjiuwen.agent_teams.schema.status import TaskStatus
 
 if TYPE_CHECKING:
@@ -35,6 +35,7 @@ _TASK_START_PLAN = "scheduler_task_start_plan"
 _REVIEW_REQUEST = "scheduler_review_request"
 _REVIEW_PREVIOUS_FEEDBACK = "scheduler_review_previous_feedback"
 _REVIEW_SUBMISSION_NOTE = "scheduler_review_submission_note"
+_REVIEW_UPSTREAM = "scheduler_review_upstream"
 _REVIEW_RENUDGE = "scheduler_review_renudge"
 _REWORK = "scheduler_rework"
 _REWORK_SUMMARY = "scheduler_rework_summary"
@@ -144,6 +145,7 @@ async def render_review_request_for_harness(
     reviewer: str = "",
     loader: "Any" = None,  # TemplateLoader — bound lazily to dodge import cycles
     previous_vote: "TeamTaskReviewVoteBase | None" = None,
+    upstream: list[Any] | None = None,
 ) -> str:
     """Render the review request as a plain user prompt for a temp reviewer harness.
 
@@ -159,7 +161,10 @@ async def render_review_request_for_harness(
     The assignee's completion ``note`` (artifact paths, key decisions) is
     rendered as well, so the reviewer can locate the deliverable without a
     ``view_task`` round-trip. A task submitted without a note leaves the
-    section out.
+    section out. Likewise the ``upstream`` task rows are listed with their
+    authors' notes, so a reviewer of a task that builds on others (an
+    aggregation, say) knows where its inputs came from; no upstream task
+    leaves the section out.
     """
     from openjiuwen.agent_teams.prompts.loader import load_template
 
@@ -197,5 +202,11 @@ async def render_review_request_for_harness(
         submission_note = loader(_REVIEW_SUBMISSION_NOTE, language).content.strip()
         submission_note = submission_note.replace("{{task.note}}", note)
     body = body.replace("{{task.submission_note}}", submission_note)
+    upstream_section = ""
+    upstream_lines = upstream_brief(upstream or [])
+    if upstream_lines:
+        upstream_section = loader(_REVIEW_UPSTREAM, language).content.strip()
+        upstream_section = upstream_section.replace("{{task.upstream_brief}}", upstream_lines)
+    body = body.replace("{{task.upstream_section}}", upstream_section)
     # Optional sections left out above leave their blank separators behind.
     return re.sub(r"\n{3,}", "\n\n", body)
