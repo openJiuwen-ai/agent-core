@@ -29,6 +29,7 @@ from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TaskCancelledEvent,
+    TaskCompletedEvent,
     TaskCreatedEvent,
     TaskRevokedEvent,
     TaskSubmittedForReviewEvent,
@@ -406,4 +407,104 @@ async def test_scheduled_startup_survey_defers_to_the_scheduler(db, bus):
     host.delivered.clear()
     scheduled = ScheduledTaskBoardHandler(host, blueprint, infra, poll)
     await scheduled.on_initial_task_poll(tick)
+    assert host.delivered == []
+
+
+# ---------------------------------------------------------------------------
+# F_120: the leader's completion nudge leads with what just completed
+# ---------------------------------------------------------------------------
+
+
+async def _complete_as_dev(db, bus, task_id: str, *, summary: str | None, note: str | None) -> None:
+    dev = TeamTaskManager(team_name=TEAM, member_name="dev-1", db=db, messager=bus)
+    assert await dev.claim(task_id)
+    assert (await dev.complete(task_id, summary=summary, note=note)).ok
+
+
+def _completed_event(task_id: str) -> EventMessage:
+    return EventMessage.from_event(TaskCompletedEvent(team_name=TEAM, task_id=task_id, member_name="dev-1"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_completion_nudge_leads_with_the_summary(db, bus):
+    host, poll = FakeHost(), FakePoll()
+    infra = _infra(db, bus, LEADER)
+    assert (
+        await infra.task_manager.add_graph(
+            [
+                TaskGraphSpec(title="first", content="c", task_id="t1"),
+                TaskGraphSpec(title="second", content="c", task_id="t2"),
+            ]
+        )
+    ).ok
+    await _complete_as_dev(db, bus, "t1", summary="report at out/r.md", note="full detail")
+    handler = TaskBoardHandler(host, _blueprint(LEADER, TeamRole.LEADER), infra, poll)
+
+    await handler.on_task_board_event(_completed_event("t1"))
+
+    assert len(host.delivered) == 1
+    body = host.delivered[0]
+    assert "[t1] first → dev-1" in body
+    assert "report at out/r.md" in body
+    assert "full detail" not in body
+    assert "view_task(action='note', task_id='t1')" in body
+    assert body.index("t1") < body.index("t2")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_all_done_nudge_keeps_the_last_completion(db, bus):
+    host, poll = FakeHost(), FakePoll()
+    infra = _infra(db, bus, LEADER)
+    assert (await infra.task_manager.add_graph([TaskGraphSpec(title="only", content="c", task_id="t1")])).ok
+    await _complete_as_dev(db, bus, "t1", summary="shipped", note=None)
+    handler = TaskBoardHandler(host, _blueprint(LEADER, TeamRole.LEADER), infra, poll)
+
+    await handler.on_task_board_event(_completed_event("t1"))
+
+    assert len(host.delivered) == 1
+    body = host.delivered[0]
+    assert 'kind="all-done"' in body
+    assert "[t1] only → dev-1" in body
+    assert "shipped" in body
+    assert "action='note'" not in body
+    assert body.index("shipped") < body.index("clean_team")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_nudge_for_other_events_has_no_completion_entry(db, bus):
+    host, poll = FakeHost(), FakePoll()
+    infra = _infra(db, bus, LEADER)
+    assert (
+        await infra.task_manager.add_graph(
+            [
+                TaskGraphSpec(title="first", content="c", task_id="t1"),
+                TaskGraphSpec(title="second", content="c", task_id="t2"),
+            ]
+        )
+    ).ok
+    await _complete_as_dev(db, bus, "t1", summary="done", note=None)
+    handler = TaskBoardHandler(host, _blueprint(LEADER, TeamRole.LEADER), infra, poll)
+
+    await handler.on_task_board_event(
+        EventMessage.from_event(TaskCreatedEvent(team_name=TEAM, task_id="t2", status="pending"))
+    )
+
+    assert len(host.delivered) == 1
+    assert "[t1]" not in host.delivered[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_teammate_is_not_woken_by_a_completion(db, bus):
+    host, poll = FakeHost(), FakePoll()
+    infra = _infra(db, bus, "dev-1")
+    assert (await infra.task_manager.add_graph([TaskGraphSpec(title="only", content="c", task_id="t1")])).ok
+    await _complete_as_dev(db, bus, "t1", summary="done", note=None)
+    handler = TaskBoardHandler(host, _blueprint("dev-1", TeamRole.TEAMMATE), infra, poll)
+
+    await handler.on_task_board_event(_completed_event("t1"))
+
     assert host.delivered == []
