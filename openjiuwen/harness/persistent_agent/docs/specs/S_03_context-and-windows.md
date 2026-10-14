@@ -17,7 +17,7 @@
 
 ### 1.1 责任范围与当前边界
 
-BaseKVStore 注入位及 LoadedRecord、WindowAssembly、ExecutionEnding、SessionStateStore / WindowAssembler 协议已有定义；PA-06 新 Request 窗口组装与 PA-10 会话状态记录的加载、保存已实现；工具执行中途结束时由原生保留真实结果的 core 改动尚待实施，换窗和归档检索尚未实现。共享值对象、标记和协议定义在 schema/integration.py，seams.py 兼容再导出。下文未标明已实现的运行规则属于已确认但待实现的契约，不表示当前门禁已开放。
+BaseKVStore 注入位及 LoadedRecord、WindowAssembly、ExecutionEnding、SessionStateStore / WindowAssembler 协议已有定义；PA-06 新 Request 窗口组装与 PA-10 会话状态记录的加载、保存已实现；工具执行中途结束时由原生保留真实事实的 core 改动已有组件实现、待 core 维护者评审，换窗和归档检索尚未实现。共享值对象、标记和协议定义在 schema/integration.py，seams.py 兼容再导出。下文未标明已实现的运行规则属于已确认但待实现的契约，不表示当前门禁已开放。
 
 窗口归属 Session，只有 Execution 读写；始终加载 Session 的当前记录，不为每个 Request 保留可切回的独立活动窗口。宿主保证同 Session 单一执行者和后端隔离；本模块定义格式、序列化、整理、保存与检索逻辑，宿主不需要理解记录内容。
 
@@ -57,7 +57,7 @@ LoadedRecord 的 waiting 引用 [S_05](S_05_confirmation-and-continuation.md#2-�
 
 ### 4.1 `SessionStateStore.load(context) -> LoadedRecord`
 
-调用方为执行 / 恢复入口，使用 S_01 要求的新空 Session 和 NoopCheckpointer。组件读出记录后先校验，再写回 Session state；确实没有记录时返回空 LoadedRecord。后端读写失败为 DEEPAGENT_RUNTIME_ERROR，不能降级为“没有记录”，不开始原生执行。记录无效（JSON 损坏、结构不合法、版本不支持、身份与本次执行不精确相等、消息或中断请求无法恢复、窗口与中断状态不一致）为 DEEPAGENT_CONTEXT_PARAM_ERROR，诊断日志不含记录正文；入口在加载路径上只透传这一类框架校验错误。加载失败不调用模型、不退回空窗口、不覆盖原记录；加载时的补位只作用于内存。正常等待确认的缺结果调用是合法现场。
+调用方为执行 / 恢复入口，使用 S_01 要求的新空 Session 和 NoopCheckpointer。组件读出记录后先校验，再写回 Session state；确实没有记录时返回空 LoadedRecord。后端读写失败为 DEEPAGENT_RUNTIME_ERROR，不能降级为“没有记录”，不开始原生执行。记录无效（JSON 损坏、结构不合法、版本不支持、身份与本次执行不精确相等、消息或中断请求无法恢复、工具结果不紧跟本组调用、窗口与中断状态不一致）为 DEEPAGENT_CONTEXT_PARAM_ERROR，诊断日志不含记录正文；入口在加载路径上只透传这一类框架校验错误。加载失败不调用模型、不退回空窗口、不覆盖原记录；加载时的补位只作用于内存。工具结果按调用组配对；正常等待确认时，只有最后一组中被中断的调用可以缺结果，且窗口、中断状态的 ai_message 与中断条目中的调用须按 ID、类型、名称和参数逐个一致（原生恢复执行中断条目中的调用），这是合法现场；三者不一致时保存失败、加载判为无效，不互相覆盖。
 
 ### 4.2 `WindowAssembler.assemble(context, request, record) -> WindowAssembly`
 
@@ -79,7 +79,7 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 
 ### 4.3 `SessionStateStore.save(context, ending) -> None`
 
-保存前先让原生把内存中的最新窗口（本 Session 已有原生上下文时；没有时保留 Session 中已加载或已装配的窗口）与 DeepAgent 状态写回 Session state，再整理窗口，把白名单字段与结束信息组成同一条记录，一次 set 写入；context 与中断状态不能分两次独立保存。同步失败、存在默认窗口以外的上下文、卸载缓冲不为空、等待确认却没有中断状态、非中途结束的结局仍有缺结果的调用、编码失败或后端写入失败，均为运行异常：不写记录，执行入口不记结束事件。调用成功只证明会话记录保存，不证明结束事件或候选输出完成。
+保存前先让原生把内存中的最新窗口（本 Session 已有原生上下文时；没有时保留 Session 中已加载或已装配的窗口）与 DeepAgent 状态写回 Session state，再整理窗口，把白名单字段与结束信息组成同一条记录，一次 set 写入；context 与中断状态不能分两次独立保存。同步失败、存在默认窗口以外的上下文、卸载缓冲不为空、等待确认却没有中断状态、非中途结束的结局仍有缺结果的调用、工具结果不紧跟本组调用、编码失败或后端写入失败，均为运行异常，执行入口不记结束事件。写入前的失败不调用后端写入，原记录不变；后端写入本身抛错时不能保证记录未改变（可能在写入落地后才报错），下一次加载可能读到本次记录，续做以执行日志为准。调用成功只证明会话记录保存，不证明结束事件或候选输出完成。
 
 ### 4.4 WindowStore 与历史检索（已确认待实现）
 
@@ -107,7 +107,7 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 
 等待确认时，末尾待结果的工具调用一律不动；结束标记写入记录元信息，不追加到窗口尾部。临时背景仍可按标记删除。完成、取消、失败与可恢复暂停需保存；忽略群消息未写入窗口，无需保存；进程崩溃无法保存。停止能否取得完整现场须按实现验证，不据控制入口返回宣称已保存。
 
-**中途结束后的安全窗口：** 停止、取消或执行中报错时，原生执行路径保留已取得的真实工具结果（Persistent 显式启用）；PA-10 保存时为缺失工具结果的调用幂等补充标为 `stopped_tool_placeholder` 的结果，说明“结果未取得，实际效果需核实”，具体结束原因由结束记录说明；已有真实结果及原生“已中断”结果不重复补位，正常等待确认不补位。加载结局为停止、取消或失败的旧记录时同样修补。PA-10 的保存补位与加载修补已实现；原生保留已取得结果的 core 改动尚待实施，实施前工具执行中途结束时被原生删除的调用组无法恢复。“停止、取消或报错 → 保存 → 重新加载 → 下一任务”仍需完整联调（见 [F_17](../features/F_17_session-state-record.md)）。
+**中途结束后的安全窗口：** 停止、取消或执行中报错时，原生执行路径保留已发出的调用组（Persistent 显式启用）：后续处理（含安全 Rail 的替换）全部完成的结果按最终结果保留；已返回或已抛错、但后续处理未完成的调用只保留说明，不保存未经处理的内容。这里的“处理完成”指事件链走完，不等于安全检查成功：回调框架对 Rail 的普通异常只记日志、继续执行其余 Rail，内容照常保留；宿主安全 Rail 要拦截内容，须先替换成安全说明，再请求强制结束。PA-10 保存时按调用组为缺失工具结果的调用幂等补充标为 `stopped_tool_placeholder` 的结果，说明“结果未取得，实际效果需核实”，具体结束原因由结束记录说明；已有结果、说明及原生“已中断”结果不重复补位，正常等待确认不补位。加载结局为停止、取消或失败的旧记录时同样修补。保存补位、加载修补与原生事实保留均已有组件实现，core 改动待 core 维护者评审；“停止、取消或报错 → 保存 → 重新加载 → 下一任务”已有组件验证，仍需真实服务端联调（见 [F_17](../features/F_17_session-state-record.md)）。
 
 ### 5.3 后端、清理与部分成功
 
@@ -124,5 +124,5 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 - S_01 调用 load / assemble / save 并负责业务结局；S_05 规定正常确认保留现场、续做处理过期现场；S_02 定义窗口事件及结束事件的确认。
 - S_09 提供获授权资料，S_04 提供当前文件读取；摘要、原文和工具实际结果分别承担不同事实职责。
 - 当前接入协议、NoopCheckpointer 隔离与保存先后可定位 [test_entries.py](../../../../../tests/unit_tests/harness/persistent_agent/test_entries.py)；其中替身部分不证明真实后端行为。
-- 会话状态记录：[test_session_state.py](../../../../../tests/unit_tests/harness/persistent_agent/test_session_state.py) 覆盖记录格式、键编码、中断请求类型、补位、整理与校验；test_entries.py 用正式存储与组装器覆盖跨 Request 窗口延续、确认现场、停止、后端故障与无效记录。均为内存后端的组件验证，不证明真实服务端后端的持久化与隔离。
+- 会话状态记录：[test_session_state.py](../../../../../tests/unit_tests/harness/persistent_agent/test_session_state.py) 覆盖记录格式、键编码、中断请求类型、补位、整理与校验；test_entries.py 用正式存储与组装器覆盖跨 Request 窗口延续、确认现场、停止、后端故障与无效记录，以及工具执行中途停止、取消、报错和宿主安全 Rail 处理未完成时的保存；core 的事实保留由 test_ability_manager_tool_results.py 与 test_react_agent_tool_fact_retention.py 覆盖。均为内存后端的组件验证，不证明真实服务端后端的持久化与隔离。
 - 70% 换窗、归档检索、跨重启与安全后端的验证入口尚待 PA-11、PA-12 与服务端联调建立；PA-06 组装已有组件验证，容量验收未关闭，证据维护于唯一开发计划，不能把待执行验证写成已通过。
