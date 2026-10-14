@@ -12,12 +12,17 @@ import asyncio
 import json
 from dataclasses import replace
 from importlib import import_module
+from types import SimpleNamespace
 
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
+<<<<<<< HEAD
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata, UserMessage
+=======
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UsageMetadata
+>>>>>>> 5800f8e1d (test(harness): cover tool calls refused by execution control)
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.store import InMemoryKVStore
@@ -25,6 +30,7 @@ from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.session.checkpointer import CheckpointerFactory, NoopCheckpointer
 from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 from openjiuwen.core.single_agent import AgentCard, Session, create_agent_session
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail, ConfirmPayload
@@ -152,6 +158,9 @@ class Remember(Tool):
         self.calls.append(inputs)
         if self.hooks.get("on_invoke") is not None:
             self.hooks["on_invoke"]()
+        if self.hooks.get("gate") is not None and len(self.calls) == self.hooks.get("gate_call", 1):
+            self.hooks["gate_reached"].set()
+            await self.hooks["gate"].wait()
         if self.hooks.get("fail_once"):
             self.hooks["fail_once"] = False
             raise TimeoutError("temporary tool timeout")
@@ -1313,6 +1322,7 @@ async def test_direct_and_scheduled_requests_skip_participation(harness, payload
     assert events[-1].payload.status == "completed"
 
 
+<<<<<<< HEAD
 # --- PA-10: the formal session state store ---------------------------------------------------------
 
 STATE = module("execution.session_state")
@@ -1626,3 +1636,48 @@ async def test_offloading_found_at_construction_is_refused_before_any_event(real
         await collect(harness.api.execute_persistent_request(spec, ctx, request()))
     assert_rejected(exc_info, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR)
     assert host.events == [] and harness.model.calls == 0
+=======
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cause", ["stop", "cancel", "critical"])
+async def test_the_control_rail_refuses_every_call_with_the_same_note(cause):
+    """A stop, a cancel and a critical failure share the refusal; a critical failure saves no record."""
+    control = SimpleNamespace(emitter=object(), fatal=None, abort_reason=None)
+    if cause == "critical":
+        control.fatal = RuntimeError("critical record failed")
+    else:
+        control.abort_reason = cause
+    rail = module("execution.model_rail").PersistentModelCallRail(SimpleNamespace(control=control))
+    call = ToolCall(id="call-b", type="function", name="remember", arguments=TOOL_ARGS)
+    inputs = ToolCallInputs(tool_call=call, tool_name="remember", tool_args=TOOL_ARGS)
+    ctx = AgentCallbackContext(agent=None, inputs=inputs)
+    await rail.before_tool_call(ctx)
+    assert (
+        ctx.inputs.tool_msg.content == "本次执行正在结束，该工具未调用。"
+        and ctx.inputs.tool_msg.tool_call_id == "call-b"
+    )
+    assert ctx.consume_force_finish().result["result_type"] == "persistent_pause", "the entry still reads the signal"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["stop", "cancel"])
+async def test_refused_call_note_reaches_the_native_window(harness, reason):
+    """PA-05 independently keeps the refusal note, with no PA-10 implementation installed."""
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    harness.model.turns = ["two_tools"]
+    harness.tool_hooks.update(gate=asyncio.Event(), gate_call=1, gate_reached=asyncio.Event())
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    await asyncio.wait_for(harness.tool_hooks["gate_reached"].wait(), 5)
+    await harness.api.abort_persistent_request(ctx, reason=reason)
+    events = await asyncio.wait_for(consumer, 5)
+    if reason == "stop":
+        assert events[-1].payload.reason == "stopped"
+    else:
+        assert events[-1].payload.status == "cancelled"
+    contexts = harness.store.record["state"]["context"]
+    messages = next(iter(contexts.values()))["messages"]
+    result = next(m for m in messages if isinstance(m, ToolMessage) and m.tool_call_id == "call-b")
+    assert result.content == "本次执行正在结束，该工具未调用。"
+    assert len(harness.tool_calls) == 1, "call-b was refused before invocation"
+    assert "persistent_pause" not in result.content and "execution is stopping" not in result.content
+>>>>>>> 5800f8e1d (test(harness): cover tool calls refused by execution control)
