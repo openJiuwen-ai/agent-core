@@ -29,10 +29,15 @@ from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TaskCancelledEvent,
+    TaskClaimedEvent,
     TaskCompletedEvent,
     TaskCreatedEvent,
+    TaskReleasedEvent,
+    TaskRevisionRequestedEvent,
     TaskRevokedEvent,
+    TaskStartedEvent,
     TaskSubmittedForReviewEvent,
+    TaskUnblockedEvent,
     TeamEvent,
 )
 from openjiuwen.agent_teams.schema.status import MemberMode, MemberStatus
@@ -508,3 +513,113 @@ async def test_teammate_is_not_woken_by_a_completion(db, bus):
     await handler.on_task_board_event(_completed_event("t1"))
 
     assert host.delivered == []
+
+
+# ---------------------------------------------------------------------------
+# F_121: the autonomous leader wakes only for board events that need a decision
+# ---------------------------------------------------------------------------
+
+
+async def _leader_board(db, bus, tasks: list[TaskGraphSpec]) -> tuple[TaskBoardHandler, FakeHost, FakePoll]:
+    host, poll = FakeHost(), FakePoll()
+    infra = _infra(db, bus, LEADER)
+    infra.team_backend.is_human_agent = AsyncMock(return_value=False)
+    assert (await infra.task_manager.add_graph(tasks)).ok
+    return TaskBoardHandler(host, _blueprint(LEADER, TeamRole.LEADER), infra, poll), host, poll
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_is_not_woken_by_progress_only_events(db, bus):
+    handler, host, poll = await _leader_board(
+        db,
+        bus,
+        [TaskGraphSpec(title="w", content="c", task_id="t1", assignee="dev-1")],
+    )
+
+    await handler.on_task_claimed(
+        EventMessage.from_event(TaskClaimedEvent(team_name=TEAM, task_id="t1", member_name="dev-1"))
+    )
+    await handler.on_task_board_event(
+        EventMessage.from_event(TaskStartedEvent(team_name=TEAM, task_id="t1", member_name="dev-1"))
+    )
+    await handler.on_task_submitted_for_review(
+        EventMessage.from_event(
+            TaskSubmittedForReviewEvent(team_name=TEAM, task_id="t1", member_name="dev-1", reviewer=["rev-1"])
+        )
+    )
+    await handler.on_task_revision_requested(
+        EventMessage.from_event(
+            TaskRevisionRequestedEvent(team_name=TEAM, task_id="t1", member_name="dev-1", feedback="redo")
+        )
+    )
+
+    assert host.delivered == []
+    assert poll.resumed >= 4  # polling stays alive for every skipped event
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_unblock_wakes_only_for_an_unowned_task(db, bus):
+    handler, host, _poll = await _leader_board(
+        db,
+        bus,
+        [
+            TaskGraphSpec(title="owned", content="c", task_id="owned", assignee="dev-1"),
+            TaskGraphSpec(title="unowned", content="c", task_id="unowned"),
+        ],
+    )
+
+    await handler.on_task_board_event(
+        EventMessage.from_event(TaskUnblockedEvent(team_name=TEAM, task_id="owned"))
+    )
+    assert host.delivered == []
+
+    await handler.on_task_board_event(
+        EventMessage.from_event(TaskUnblockedEvent(team_name=TEAM, task_id="gone"))
+    )
+    assert host.delivered == []
+
+    await handler.on_task_board_event(
+        EventMessage.from_event(TaskUnblockedEvent(team_name=TEAM, task_id="unowned"))
+    )
+    assert len(host.delivered) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_still_wakes_for_decision_events(db, bus):
+    handler, host, _poll = await _leader_board(
+        db,
+        bus,
+        [
+            TaskGraphSpec(title="a", content="c", task_id="t1"),
+            TaskGraphSpec(title="b", content="c", task_id="t2"),
+        ],
+    )
+
+    await handler.on_task_board_event(
+        EventMessage.from_event(TaskCreatedEvent(team_name=TEAM, task_id="t2", status="pending"))
+    )
+    await handler.on_task_board_event(
+        EventMessage.from_event(TaskReleasedEvent(team_name=TEAM, task_id="t1"))
+    )
+    await _complete_as_dev(db, bus, "t1", summary="done", note=None)
+    await handler.on_task_board_event(_completed_event("t1"))
+
+    assert len(host.delivered) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_teammate_still_wakes_on_an_assigned_unblock(db, bus):
+    host, poll = FakeHost(), FakePoll()
+    infra = _infra(db, bus, "dev-1")
+    assert (
+        await infra.task_manager.add_graph([TaskGraphSpec(title="w", content="c", task_id="t1", assignee="dev-1")])
+    ).ok
+    handler = TaskBoardHandler(host, _blueprint("dev-1", TeamRole.TEAMMATE), infra, poll)
+
+    await handler.on_task_board_event(EventMessage.from_event(TaskUnblockedEvent(team_name=TEAM, task_id="t1")))
+
+    assert len(host.delivered) == 1
