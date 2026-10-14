@@ -115,10 +115,11 @@ async def test_complete_own_assigned_task(tool, caller_task_manager):
     assert result.success, result.error
     assert result.data["task_id"] == task.task_id
     assert result.data["status"] == "completed"
-    assert result.data["note"] == "done"
+    assert "note" not in result.data
 
     refreshed = await caller_task_manager.get(task.task_id)
     assert refreshed.status == TaskStatus.COMPLETED.value
+    assert refreshed.note == "done"
 
 
 @pytest.mark.asyncio
@@ -170,8 +171,8 @@ async def test_unknown_task_id_returns_not_found(tool):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_render_for_llm_includes_note(tool, caller_task_manager):
-    """The mapped LLM-facing string is informative and stable."""
+async def test_render_for_llm_does_not_echo_the_note(tool, caller_task_manager):
+    """The LLM-facing string reports the outcome; the note stays in the call arguments."""
     task = await caller_task_manager.add(title="With note", content="...")
     await caller_task_manager.assign(task.task_id, HUMAN_NAME)
 
@@ -180,4 +181,4 @@ async def test_render_for_llm_includes_note(tool, caller_task_manager):
 
     assert task.task_id in text
     assert "completed" in text.lower()
-    assert "patched config" in text
+    assert "patched config" not in text

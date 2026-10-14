@@ -1350,12 +1350,13 @@ class MemberCompleteTaskTool(TeamTool):
         settled = await self.task_manager.get(task_id)
         outcome = "in_review" if settled and settled.status == TaskStatus.IN_REVIEW.value else "completed"
 
+        # The note is not echoed back: the caller already holds it in its own
+        # tool-call arguments, and repeating it only doubles it in context.
         return ToolOutput(
             success=True,
             data={
                 "task_id": task_id,
                 "status": outcome,
-                "note": note,
             },
         )
 
@@ -1364,12 +1365,8 @@ class MemberCompleteTaskTool(TeamTool):
             return output.error or "Failed to complete task"
         d = output.data
         if d.get("status") == "in_review":
-            line = f"Task #{d['task_id']} submitted for review — awaiting a reviewer's verdict"
-        else:
-            line = f"Task #{d['task_id']} completed"
-        if d.get("note"):
-            line += f" (note: {d['note']})"
-        return line
+            return f"Task #{d['task_id']} submitted for review — awaiting a reviewer's verdict"
+        return f"Task #{d['task_id']} completed"
 
 
 class VerifyTaskTool(TeamTool):
