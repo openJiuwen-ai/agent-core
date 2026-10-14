@@ -749,6 +749,36 @@ class TestOtelWorkflowHandler:
         assert s.attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "什么是向量检索"
         assert list(s.attributes[GEN_AI_RETRIEVAL_DOCUMENTS]) == ["doc-1 内容", "doc-2 内容"]
 
+    async def test_workflow_retrieval_documents_redacted(self):
+        """gen_ai.retrieval.documents follows the same redaction policy as
+        query.text / workflow.outputs: hashed when redaction_enabled=True,
+        never raw document text."""
+        config = OtelTracerConfig(redaction_enabled=True)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "什么是向量检索"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(
+            invoke_id="kb_node",
+            outputs={"results": ["doc-1 内容", "doc-2 内容"]},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        docs = list(finished[0].attributes[GEN_AI_RETRIEVAL_DOCUMENTS])
+        assert docs[0].startswith("sha256:")
+        assert docs[1].startswith("sha256:")
+        assert finished[0].attributes[GEN_AI_RETRIEVAL_QUERY_TEXT].startswith("sha256:")
+
     async def test_workflow_retrieval_query_refreshed_on_pre_invoke(self):
         """Transform callbacks may mutate inputs in place; on_pre_invoke refreshes
         gen_ai.retrieval.query.text together with openjiuwen.workflow.inputs."""
