@@ -8,6 +8,7 @@ from uuid import uuid4
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from ..schema.events import EventType
@@ -21,6 +22,8 @@ if TYPE_CHECKING:
 PAUSE_MARKER = "persistent_pause"
 _CALL_KEY = "_persistent_model_call_id"
 _PROGRESS_LIMIT = 500
+# Result of a call refused after a stop, a cancel or a critical failure.
+SKIPPED_TOOL_TEXT = "本次执行正在结束，该工具未调用。"
 _DETAIL_LIMIT = 4096
 
 
@@ -89,8 +92,10 @@ class PersistentModelCallRail(DeepAgentRail):
 
     async def before_tool_call(self, ctx) -> None:
         """Skip every tool not yet started, read-only ones included, after a control or critical failure."""
-        if self._emitter() is not None:
-            self._stop_requested(ctx)
+        if self._emitter() is not None and self._stop_requested(ctx):
+            # Keep the internal force-finish payload for entry control; the window gets a plain note.
+            call = getattr(ctx.inputs, "tool_call", None)
+            ctx.inputs.tool_msg = ToolMessage(content=SKIPPED_TOOL_TEXT, tool_call_id=getattr(call, "id", "") or "")
 
     async def after_model_call(self, ctx) -> None:
         """Report usage and record the call; text beside tool calls is an intermediate conclusion."""
