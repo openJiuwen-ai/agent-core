@@ -14,8 +14,8 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-10-13 |
-| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）、`F_79_team-scoped-skill-library-and-visibility.md`（team 成员的 `skills` / `enable_skill_discovery` 落 build_spec 前被清空）、`F_118_task-scoped-member-lifetime.md`（`MemberStatus.DORMANT` + `retire_target`。其余条目见 `docs/features/` |
+| 最近一次修订日期 | 2026-10-14 |
+| 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）、`F_79_team-scoped-skill-library-and-visibility.md`（team 成员的 `skills` / `enable_skill_discovery` 落 build_spec 前被清空）、`F_118_task-scoped-member-lifetime.md`（`MemberStatus.DORMANT` + `retire_target`）、`F_119_scheduled-completion-handoff-via-note.md`（任务行 `summary` 列与改派 / 重置清空。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
 
@@ -644,7 +644,7 @@ team（如直接 streaming 的单 agent）。`role` 用 `TeamRole`（`str` 枚�
 
 #### `TaskDetail`
 
-新增 `note: Optional[str]`（F_118）：承担者的完成说明，`get` 视图唯一回带它的路径。
+新增 `note: Optional[str]`（F_118）与 `summary: Optional[str]`（F_119）：承担者的完成详情与一句话摘要，`get` 视图回带两者（`view_task(action='note')` 另以不含 `content` 的独立形态回带）。
 
 `TaskSummary` 之外加：
 
@@ -789,11 +789,19 @@ CANCELLED    -> (terminal)
   里：已在推进的任务不可再被加前置依赖。编辑锁只锁 `IN_REVIEW`（验证期内容冻结）。
 - 见 F_59（取代 F_58 的 `STARTED`）、F_62（投票 + 调度 runtime）。
 
-### 任务行 `note` 列与成员 `options.lifetime`（F_118）
+### 任务行 `summary` / `note` 列与成员 `options.lifetime`（F_118 / F_119）
 
-- `TeamTaskBase.note`（nullable text）：承担者 `member_complete_task(note=...)` 的完成说明，随
+- `TeamTaskBase.summary`（nullable text，F_119）：承担者 `member_complete_task(summary=...)` 的一句话
+  完成摘要（交付了什么、主产物在哪），完整存储，只在渲染时截断（leader 终态摘要、上游列表）。
+  写入语义与 `note` 相同：`complete()` / `_submit_for_review()` 传了就覆盖、不传保留。老 session
+  的任务表由 `engine._ensure_dynamic_table_indexes` 补列。
+- **归属变更清空**（F_119）：`TaskDao.reassign_task`（条件 `UPDATE` 的同一条 `values`）与
+  `TaskDao.reset_task`（与 `assignee = None` 同处）把 `summary` / `note` 一并置空——完成说明属于
+  前任承担者的那次交付。`update_task` 改内容保留 assignee，不清空。
+
+- `TeamTaskBase.note`（nullable text）：承担者 `member_complete_task(note=...)` 的完成详情（F_119 起是 `summary` 背后的全文），随
   `complete()` / `_submit_for_review()` 同一事务落行；`TaskDetail.note` 回带、`view_task(get)` 渲染、
-  调度交接模板经 `task.upstream_brief` 读上游的 note。**事件不带正文**（`TASK_COMPLETED` /
+  调度交接模板经 `task.upstream_brief` 读上游的完成摘要（F_119 起不再是 note 全文）。**事件不带正文**（`TASK_COMPLETED` /
   `TASK_SUBMITTED_FOR_REVIEW` 仍只是唤醒信号，正文从行里现查，与 F_63 同一原则）。老 session
   的任务表由 `engine._ensure_dynamic_table_indexes` 补列（与 `reviewer` / `review_round` 同路）。
 - `TeamMemberOptions.lifetime`（`"shutdown"` / `"dormant"` / None）：任务内联成员的退场策略，

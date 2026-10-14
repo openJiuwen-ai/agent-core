@@ -8,8 +8,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/scheduling/` |
-| 最近一次修订日期 | 2026-10-13 |
-| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback）、`F_118_task-scoped-member-lifetime.md`（第三个幂等扫描：任务内联成员的退场请求；交接消息的上下游简述） |
+| 最近一次修订日期 | 2026-10-14 |
+| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback）、`F_118_task-scoped-member-lifetime.md`（第三个幂等扫描：任务内联成员的退场请求；交接消息的上下游简述）、`F_119_scheduled-completion-handoff-via-note.md`（完成交接改走任务行 `summary` / `note`、leader 摘要带完成摘要、验收通过延迟告知） |
 
 ## 范围 / 边界
 
@@ -70,7 +70,7 @@
     一个即将自落的成员身上而无人唤醒；`READY` 的状态事件在 round 结束时本来就会再触发扫描），
     三条件同时成立才调**普通** `shutdown_member`：
     (a) 名下无非终态任务（`open_task_counts_by_assignee`，`IN_REVIEW` / `PENDING` / `BLOCKED` 都算
-    开放——提交后的 author 要留着返工与验收后汇报）；(b) 本成员无未读消息
+    开放——提交后的 author 要留着返工；验收通过不再唤醒 author，见下文"验收通过的延迟告知"）；(b) 本成员无未读消息
     （`members_with_unread`，堵"刚被唤醒、`READY` 已写、消息还没读"的窗口——否则机制 18 会在
     无 round 在飞时直接落终态，消息永远没人读）；(c) 已请求 / 已退场 / `UNSTARTED` /
     `RESTARTING` 的不在候选集里。调度器**不直写** `DORMANT`、不拆 handle：请求与自落两阶段
@@ -163,7 +163,6 @@ kernel 侧：
 | 开工（build / plan 闸） | assignee | `scheduler_task_start` / `scheduler_task_start_plan` |
 | 送审派发 / 催办 | 每个 reviewer / 未投票 reviewer | `scheduler_review_request` / `scheduler_review_renudge` |
 | 打回返工（`params`: 聚合 fail feedback + 解析后轮数上限） | author | `scheduler_rework` |
-| 验收通过后要求汇报 | author | `scheduler_verified_report` |
 
 **占位符标准** `{{namespace.field}}`：单遍 `re.sub` 替换，**填充值永不二次扫描**（任务正文
 是 LLM 写的，防占位符注入）；命名空间**字段白名单**（无 getattr 直通，新增 DB 列不会
@@ -171,7 +170,7 @@ kernel 侧：
 
 | 命名空间 | 数据源 | 时机 | 白名单 |
 |---|---|---|---|
-| `task.*` | 任务行（`refs.task`） | 投递时现查 | `task_id` `title` `content` `status` `assignee` `reviewer` `review_round` `max_review_rounds` + 两个计算字段 `upstream_brief` / `downstream_brief`（F_118 / D7：经可选 `task_links_getter` 多查一次依赖表与相关任务行，上游每条 `task_id · title · assignee · note`，下游每条 `task_id · title · assignee`，空集渲染为语言固定短句"无"/"none"；两个投递点共用 `message_template.task_links` 绑定该 getter，缺 getter 时渲染为空集短句） |
+| `task.*` | 任务行（`refs.task`） | 投递时现查 | `task_id` `title` `content` `status` `assignee` `reviewer` `review_round` `max_review_rounds` + 两个计算字段 `upstream_brief` / `downstream_brief`（F_118 / D7、F_119：经可选 `task_links_getter` 多查一次依赖表与相关任务行，只取**直接依赖**（一跳）；上游每条 `task_id · title · assignee · <完成摘要>`（`message_template.completion_summary`：优先 `summary`，否则 `note` 首个非空行，压单行、渲染截断到 `SUMMARY_RENDER_LIMIT`），非空时末尾追加一行 `view_task(action='note', task_id=...)` 取全文提示；下游每条 `task_id · title · assignee`，空集渲染为语言固定短句"无"/"none"；两个投递点共用 `message_template.task_links` 绑定该 getter，缺 getter 时渲染为空集短句） |
 | `member.*` | 成员行（`refs.member`） | 投递时现查 | `member_name` `display_name` `desc` |
 | `param.*` | `meta.params` | 发送时定格 | 键即字段（标量）；只放表答不出的瞬时值 |
 
@@ -179,7 +178,7 @@ kernel 侧：
 一行 fallback（template key + task_id，成员 `view_task` 兜底），不预存副本；meta 整体缺失 =
 普通消息，原样投 `content`。
 
-`note` 是任务行列、**不进事件**：`TASK_COMPLETED` / `TASK_SUBMITTED_FOR_REVIEW` 仍只是唤醒信号，
+`summary` / `note` 是任务行列、**不进事件**：`TASK_COMPLETED` / `TASK_SUBMITTED_FOR_REVIEW` 仍只是唤醒信号，
 正文从行里现查——与"能表查的一律现查"同一原则。
 
 **展开点共四处**（缺一处即漏投空消息）：`handlers/message.py` 的
@@ -194,7 +193,22 @@ kernel 侧：
 |---|---|---|
 | 终态摘要 / 轮数升级 / 停摆升级 / 收尾 | leader（`deliver_input`，非 steer） | `scheduler.leader_task_done` / `scheduler.leader_escalation_rounds` / `scheduler.leader_escalation_stall` / `scheduler.leader_all_done` |
 
-leader 摘要不经邮箱 → 无 meta 通道、无投递时展开，维持一行式 i18n 运行时短串。
+leader 摘要不经邮箱 → 无 meta 通道、无投递时展开，维持 i18n 运行时短串。终态摘要
+（`render.render_leader_task_done(task, verified=)`）由多行组成：标题行（`scheduler.leader_task_done`）、
+完成摘要行（`scheduler.leader_task_done_summary`，摘要为空时省略）、详情提示行
+（`scheduler.leader_task_done_note_hint`，仅在有 `note` 或摘要被截断时出现）、看板提示行
+（`scheduler.leader_task_done_board_hint`）。它取代成员的 `send_message` 完成汇报（F_119）：调度模式
+成员完成或送审都不再汇报。
+
+### 验收通过的延迟告知（F_119）
+
+验收通过**不唤醒** author：`_settle_pass` 只结算并给 leader 发终态摘要，不再投递邮箱消息
+（`scheduler_verified_report` 已删除）。"通过"这一事实由 author 自己的 rail 在它**下一次输入**时
+告知——`team_context.TaskOutcomeTracker` 查 author 名下 `completed` 且带 reviewer、尚未告知的任务，
+渲染为 `<team-event kind="task-verified">` 内联进被接纳的输入（`TeamPolicyRail.on_user_message`；
+外部 CLI 成员在下一条消息里），投递后把 task_id 记入成员 session state 的
+`task_outcome_announced`。不经邮箱 → 不影响 `members_with_unread`，不阻塞退场 / 休眠落定 /
+团队收尾；事件语义 → 不进 `team.context` 附件。仅调度模式、非 leader 成员启用。
 
 ## 与其它 spec 的关系
 
