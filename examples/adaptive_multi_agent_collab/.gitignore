@@ -1,12 +1,6 @@
-# Raw prompts/responses and resumable call caches
-artifacts/real/cache/
-artifacts/mock/cache/
-
-# Learned parameters
-artifacts/real/checkpoints/
-artifacts/mock/checkpoints/
-
-# Local temporary material and partial downloads
+# Future local runs must not commit prompts, model outputs, or checkpoints.
+artifacts/
+checkpoints/
 tmp/
 *.partial
 *.download
@@ -16,9 +10,35 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 
+# Disposable verification scratch only; summaries/evidence beside these stay visible.
+/reports/*/mypy/
+/reports/*/mypy_*/
+/reports/*/mypy-*/
+/reports/*/probe_mypy/
+/reports/*/.mypy_cache/
+/reports/*/cache/
+/reports/*/pytest_tmp/
+/reports/*/pytest_tmp_*/
+/reports/*/full_pytest_tmp/
+/reports/*/full_pytest_final_tmp/
+/reports/*/assets_pytest_tmp/
+/reports/*/probe_pytest_tmp/
+/reports/*/pytest-runtime/
+/reports/*/probe_pytest_cache/
+/reports/*/black/
+/reports/*/pylint/
+/reports/*/matplotlib/
+/reports/failure_policy/scratch/
+
 # Never store local environment or credential files here
 .env
 .env.*
 
-# The repository root ignores *.txt broadly; this example's dependency list is source.
-!requirements.txt
+# Local approved assets, private approvals, and paid-run records
+assets/
+approvals/
+runs/
+# Archived private campaign records and byte-preserved paid compatibility receipts.
+/archive/Pilot_1/
+/archive/Pilot_2/
+/evidence/compatibility/
