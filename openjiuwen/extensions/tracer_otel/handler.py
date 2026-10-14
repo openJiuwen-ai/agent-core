@@ -1153,7 +1153,12 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 if _is_retrieval_component_span(state.span):
                     documents = _extract_retrieval_documents(outputs)
                     if documents is not None:
-                        state.span.set_attribute(GEN_AI_RETRIEVAL_DOCUMENTS, documents)
+                        # Same policy as query.text / workflow.outputs: hash
+                        # under redaction, truncate otherwise — never raw text.
+                        state.span.set_attribute(
+                            GEN_AI_RETRIEVAL_DOCUMENTS,
+                            [redact(doc, self._config) for doc in documents],
+                        )
 
             self._set_workflow_end_attrs(state)
             state.span.set_attribute(OJ_STATUS, NodeStatus.FINISH.value)
@@ -1292,7 +1297,12 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 if _is_retrieval_component_span(state.span):
                     documents = _extract_retrieval_documents(outputs)
                     if documents is not None:
-                        state.span.set_attribute(GEN_AI_RETRIEVAL_DOCUMENTS, documents)
+                        # Same policy as query.text / workflow.outputs: hash
+                        # under redaction, truncate otherwise — never raw text.
+                        state.span.set_attribute(
+                            GEN_AI_RETRIEVAL_DOCUMENTS,
+                            [redact(doc, self._config) for doc in documents],
+                        )
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_post_invoke failed: %s", exc)
 
