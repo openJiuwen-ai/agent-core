@@ -7,21 +7,29 @@ record is invalid; they raise a framework validation error whose message never c
 """
 
 import json
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
 from pydantic import ValidationError as PydanticValidationError
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
-from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, SystemMessage, ToolMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.state import ToolInterruptEntry, ToolInterruptionState
 
-RECORD_VERSION = 1
+if TYPE_CHECKING:
+    from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+
+RECORD_VERSION: Literal[1] = 1
 
 # Window messages are restored only into these classes, chosen by role.
-_MESSAGE_TYPES = {"user": UserMessage, "assistant": AssistantMessage, "tool": ToolMessage, "system": SystemMessage}
+_MESSAGE_TYPES: dict[str, type[BaseMessage]] = {
+    "user": UserMessage,
+    "assistant": AssistantMessage,
+    "tool": ToolMessage,
+    "system": SystemMessage,
+}
 
 
 class RecordEnding(BaseModel):
@@ -67,7 +75,7 @@ def unsavable(reason: str, cause: BaseException | None = None) -> BaseError:
     )
 
 
-def _request_types() -> dict[str, type]:
+def _request_types() -> dict[str, type["InterruptRequest"]]:
     """Interrupt request classes a record may hold, by their stable tag; matched by exact type."""
     from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
     from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserRequest
@@ -91,12 +99,14 @@ def decode_messages(items: list[dict]) -> list:
     """Restore the window; an unknown role or an unrestorable message makes the record invalid."""
     messages = []
     for item in items:
-        message_type = _MESSAGE_TYPES.get(item.get("role"))
+        role = item.get("role")
+        message_type = _MESSAGE_TYPES.get(role) if isinstance(role, str) else None
         if message_type is None:
             raise invalid_record("window message has an unknown role")
         try:
             messages.append(message_type.model_validate(item))
-        except PydanticValidationError:
+        except (PydanticValidationError, TypeError, ValueError):
+            # Validators may raise TypeError, which pydantic passes through; the record is still at fault.
             raise invalid_record("window message cannot be restored") from None
     return messages
 
@@ -174,7 +184,7 @@ def decode_interruption(data: dict) -> ToolInterruptionState:
             interrupted_tools=tools,
             auto_confirm_mapping=encoded.auto_confirm_mapping,
         )
-    except PydanticValidationError:
+    except (PydanticValidationError, TypeError, ValueError):
         raise invalid_record("interruption state cannot be restored") from None
 
 

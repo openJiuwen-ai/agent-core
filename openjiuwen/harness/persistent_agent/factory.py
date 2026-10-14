@@ -62,6 +62,9 @@ def create_persistent_agent(spec: PersistentAgentSpec, *, context: PersistentBui
                 StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
                 error_msg=f"Persistent windows do not support offloading; remove {', '.join(offloading)}",
             )
+        # A stop, cancel or error keeps the tool facts the batch already obtained; the session state record
+        # then marks calls still without a result (PA-10).
+        agent.react_agent.config.retain_tool_facts_on_abort = True
         context.binding.agent_ref = weakref.ref(agent)
         context.binding.runtime = InvocationState.capture(agent, context.binding.owner_id)
         context.binding.parts = None
