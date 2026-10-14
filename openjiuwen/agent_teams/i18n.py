@@ -182,6 +182,19 @@ STRINGS: dict[str, dict[str, str]] = {
             "你已达到本轮思辨互发上限（{count}/{max_count}）。请停止等待和互发，"
             "立即向 Leader 发送一次 final_report=true 的最终要点。"
         ),
+        # rails/session_budget_rail.py — ISS-4993 session budget wrap-up / rejection
+        "session_budget.exceeded_wrapup": (
+            "[系统通知] 团队会话预算已达上限（{dimension}: {used}/{limit}），讨论必须收束。"
+            "请立即停止发起任何新的讨论或任务指派，基于已有信息整理最终结论，"
+            '通过 send_message(to="user", final_report=true) 向用户提交一份'
+            "包含最终结论、已完成工作与遗留事项的总结报告，然后结束本轮。"
+            "不要再向团队成员发送消息。"
+        ),
+        "session_budget.send_rejected": (
+            "[系统通知] 团队会话预算已达上限（{dimension}: {used}/{limit}），该消息被拒绝投递。"
+            "请停止向成员继续发送消息；如需提交最终结论，"
+            "请使用 final_report=true 向 Leader 或 user 发送一次总结。"
+        ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": ("所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"),
         "dispatcher.all_done_temporary": (
@@ -456,6 +469,20 @@ STRINGS: dict[str, dict[str, str]] = {
             "You have reached this round's debate send limit ({count}/{max_count}). Stop waiting "
             "and messaging peers, and immediately send one final report to the Leader with "
             "final_report=true."
+        ),
+        # rails/session_budget_rail.py — ISS-4993 session budget wrap-up / rejection
+        "session_budget.exceeded_wrapup": (
+            "[Framework notice] The team session budget is exhausted ({dimension}: {used}/{limit}); "
+            "the discussion must wrap up. Stop starting any new discussion or task assignment, "
+            "consolidate the final conclusions from what you already have, and submit a summary "
+            'report (final conclusions, completed work, open items) to the user via '
+            'send_message(to="user", final_report=true), then end this round. '
+            "Do not message teammates any further."
+        ),
+        "session_budget.send_rejected": (
+            "[Framework notice] The team session budget is exhausted ({dimension}: {used}/{limit}); "
+            "this send was rejected. Stop messaging members; to submit a final conclusion, "
+            "send one summary with final_report=true to the Leader or the user."
         ),
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (

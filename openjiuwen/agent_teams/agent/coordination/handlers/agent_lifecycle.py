@@ -59,6 +59,13 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
             DebateRunState,
         ):
             await debate_state.reset_finalized_leader_round()
+        # a fresh real user input starts a new commission
+        # cycle on a persistent team — the previous cycle's exhausted
+        # session budget must not bleed into it. Leader-only, matching the
+        # debate reset above.
+        budget_state = getattr(self._infra.team_backend, "session_budget_state", None)
+        if self._blueprint.role == TeamRole.LEADER and budget_state is not None:
+            await budget_state.reset_cycle()
         team_logger.info("user_input → deliver_input")
         await self._round.deliver_input(content)
 

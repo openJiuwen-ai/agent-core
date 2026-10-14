@@ -24,7 +24,7 @@ so the periodic idle tick is the reliable leader-idle hook.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Awaitable, Callable, ClassVar
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, ClassVar
 
 from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -116,6 +116,49 @@ class TeamCompletionHandler(BaseCoordinationHandler):
             )
             return
 
+        # session-budget short-circuit. Once the budget is
+        # exhausted the normal completion conditions no longer have to (and,
+        # mid-discussion, structurally will not) come true: a runaway session
+        # must be concluded, not waited out. Two phases:
+        #   1. wrap-up not yet delivered -> claim it race-free and steer the
+        #      one-shot instruction into the leader so it produces a summary;
+        #   2. wrap-up delivered and the leader idle again -> force-complete
+        #      the team. This intentionally bypasses the
+        #      ``enable_taskless_completion`` empty-board gate: exhausting the
+        #      session budget is an explicit conclusion signal, not a board
+        #      state, and waiting on the board is exactly the hang ISS-4993
+        #      showed.
+        from openjiuwen.agent_teams.rails.session_budget_rail import SessionBudgetState
+
+        # isinstance guards against foreign/mock attributes: only a real
+        # SessionBudgetState may short-circuit the normal completion path.
+        budget_state = getattr(team_backend, "session_budget_state", None)
+        if isinstance(budget_state, SessionBudgetState) and budget_state.exceeded:
+            if not budget_state.wrapup_delivered:
+                if await budget_state.mark_wrapup_delivered():
+                    team_logger.info(
+                        "[leader] session budget exhausted ({}); delivering wrap-up instruction",
+                        budget_state.exceeded,
+                    )
+                    await self._round.deliver_input(
+                        budget_state.wrapup_instruction(),
+                        use_steer=True,
+                    )
+                return
+            if not self._team_completed_emitted:
+                snapshot = await self._budget_completion_snapshot(team_backend)
+                await self._finalize_non_contributing_worktrees("session budget exhausted")
+                await self._publish_team_completed(team_backend.team_name, snapshot)
+                self._team_completed_emitted = True
+                # Persistent teams auto-pause on completion, budget-forced or
+                # not — the Runner drives finalize -> pause from here either way.
+                if self._blueprint.lifecycle == "persistent":
+                    await self._lifecycle.conclude_completed_round(
+                        snapshot.member_count,
+                        snapshot.task_count,
+                    )
+            return
+
         snapshot = await team_backend.is_team_completed()
         # Emergency rollback: when ``TeamSpec.enable_taskless_completion`` is
         # False, an empty task board must never auto-complete — skip the
@@ -150,6 +193,27 @@ class TeamCompletionHandler(BaseCoordinationHandler):
                 snapshot.member_count,
                 snapshot.task_count,
             )
+
+    async def _budget_completion_snapshot(self, team_backend: Any) -> TeamCompletionSnapshot:
+        """Best-effort counts for a budget-exhausted force completion.
+
+        The snapshot is purely informational (event payload + logs); a
+        lookup failure yields 0 for that count rather than blocking the
+        forced conclusion.
+        """
+        member_count = 0
+        task_count = 0
+        try:
+            members = await team_backend.list_members()
+            member_count = len(members or [])
+        except Exception as exc:  # noqa: BLE001 - counts must not block the conclusion
+            team_logger.warning("budget completion member count failed: {}", exc)
+        try:
+            tasks = await team_backend.task_manager.list_tasks()
+            task_count = len(tasks or [])
+        except Exception as exc:  # noqa: BLE001 - counts must not block the conclusion
+            team_logger.warning("budget completion task count failed: {}", exc)
+        return TeamCompletionSnapshot(member_count=member_count, task_count=task_count)
 
     async def _publish_team_completed(self, team_name: str, snapshot: TeamCompletionSnapshot) -> None:
         """Publish TEAM_COMPLETED on the team topic; log on failure."""

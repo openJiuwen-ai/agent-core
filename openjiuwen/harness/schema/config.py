@@ -238,6 +238,15 @@ class DeepAgentConfig:
     enable_subagent_runtime: bool = False
     add_general_purpose_agent: bool = False
     max_iterations: int = 15
+    task_loop_max_iterations: int = 1000
+    """Upper bound on ReAct iterations when ``enable_task_loop`` is on.
+
+    The task loop needs far more headroom than a single invoke, but an
+    unbounded ``sys.maxsize`` means a runaway
+    loop can never terminate on its own — it only dies when something
+    external kills the process. The default keeps ordinary sessions well
+    clear while guaranteeing an eventual stop.
+    """
     subagents: Optional[List[SubAgentConfig | "DeepAgent"]] = None
     tools: Optional[List[ToolCard]] = None
     mcps: Optional[List[McpServerConfig]] = None

@@ -356,6 +356,32 @@ class TeamAgentSpec(BaseModel):
     Peer, multicast, and broadcast ``send_message`` calls count once each.
     Leader and user reports remain available. ``None`` disables the rail.
     """
+    max_total_rounds: Optional[int] = None
+    """Optional team-session ceiling on total message rounds.
+
+    A "round" is one member being woken by an unread message and delivering
+    it into its ReAct loop (see MessageHandler._process_unread_messages).
+    Unlike ``max_debate_rounds`` this counts *every* delivery shape —
+    member→leader reports and leader broadcasts included — so an autonomous
+    team whose chat never matches the debate pattern is still bounded.
+    On breach the leader is asked (once) to wrap up, then the team is
+    force-completed. ``None`` disables this dimension.
+    """
+    max_total_messages: Optional[int] = None
+    """Optional team-session ceiling on successful intra-team send_message calls.
+
+    Every peer/multicast/broadcast/report delivery counts; there is no
+    leader/report exemption at session level (that is the ISS-4993 blind
+    spot of the per-teammate debate cap). ``None`` disables this dimension.
+    """
+    token_budget: Optional[int] = None
+    """Optional team-session ceiling on cumulative LLM input tokens.
+
+    Summed from ``usage_metadata.input_tokens`` of every member's model
+    responses via SessionBudgetRail.after_model_call. On breach the same
+    wrap-up + force-completion path as ``max_total_rounds`` fires.
+    ``None`` disables this dimension.
+    """
     review_stall_timeout: int = 1800
     """Seconds before a stalled review round escalates to the leader.
 
@@ -639,6 +665,21 @@ class TeamAgentSpec(BaseModel):
             raise ValueError(
                 f"review_stall_timeout must be > 0 seconds, got {self.review_stall_timeout}",
             )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_session_budget_settings(self) -> "TeamAgentSpec":
+        """Range-check the session budget ceilings.
+
+        SessionBudgetRail consumes these as-is once per delivery, so a
+        non-positive ceiling must fail at spec time, not mid-run.
+        """
+        for field_name in ("max_total_rounds", "max_total_messages", "token_budget"):
+            value = getattr(self, field_name)
+            if value is not None and value < 1:
+                raise ValueError(
+                    f"{field_name} must be >= 1 when set, got {value}",
+                )
         return self
 
     @model_validator(mode="after")

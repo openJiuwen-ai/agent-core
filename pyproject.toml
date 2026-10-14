@@ -144,6 +144,8 @@ test = [
     "aiosqlite>=0.22.1",
     # harness -> rails -> agent_evolving imports opentelemetry.sdk at module import time
     "opentelemetry-sdk>=1.25.0",
+    # extensions/observability/otlp_codec.py imports the otlp trace encoder at module import time
+    "opentelemetry-exporter-otlp-proto-common>=1.25.0",
 ]
 
 # Linting & formatting
