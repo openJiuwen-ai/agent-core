@@ -265,9 +265,7 @@ class APIEmbedding(Embedding):
     async def _trace_embedding_start(self, tracer, text: str | List[str]):
         """Open the embedding trace span; returns the tracer span handle."""
         span = tracer.tracer_agent_span_manager.create_agent_span()
-        inputs: dict[str, Any] = (
-            {"text": text} if isinstance(text, str) else {"text_count": len(text)}
-        )
+        inputs: dict[str, Any] = {"text": text} if isinstance(text, str) else {"text_count": len(text)}
         if self._dimension is not None:
             inputs["dimension"] = self._dimension
         await self._trace_embedding_trigger(
