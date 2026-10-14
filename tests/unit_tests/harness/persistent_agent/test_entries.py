@@ -27,6 +27,7 @@ from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.store import InMemoryKVStore
 from openjiuwen.core.foundation.tool import Tool, ToolCard
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.session.checkpointer import CheckpointerFactory, NoopCheckpointer
 from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 from openjiuwen.core.single_agent import AgentCard, Session, create_agent_session
@@ -139,7 +140,7 @@ class LocalModel:
 
 
 class Remember(Tool):
-    """Not parallel-safe, so several calls in one turn run one after another."""
+    """Not parallel-safe unless a test says so, so several calls in one turn run one after another."""
 
     def __init__(self, calls, hooks, name="remember"):
         super().__init__(
@@ -147,7 +148,7 @@ class Remember(Tool):
                 id=name,
                 name=name,
                 input_params={"type": "object", "properties": {"value": {"type": "string"}}},
-                parallel_safe=False,
+                parallel_safe=hooks.get("parallel_safe", False),
                 idempotent=hooks.get("idempotent", False),
             )
         )
@@ -159,6 +160,7 @@ class Remember(Tool):
         if self.hooks.get("on_invoke") is not None:
             self.hooks["on_invoke"]()
         if self.hooks.get("gate") is not None and len(self.calls) == self.hooks.get("gate_call", 1):
+            # Holds this call in flight so a control can arrive mid-batch.
             self.hooks["gate_reached"].set()
             await self.hooks["gate"].wait()
         if self.hooks.get("fail_once"):
@@ -1328,6 +1330,11 @@ async def test_direct_and_scheduled_requests_skip_participation(harness, payload
 STATE = module("execution.session_state")
 RECORD = module("schema.session_record")
 PLACEHOLDER = "结果未取得，实际效果需核实"
+RETURNED_NOTE = "[Result not included]"
+RAISED_NOTE = "[Error not included]"
+CHECKED = "checked by the host"
+BLOCKED = "blocked by the host: the output is withheld"
+SKIPPED = "本次执行正在结束，该工具未调用。"
 
 
 class KeepPlanSlug(DeepAgentRail):
@@ -1351,6 +1358,71 @@ class LateNote(DeepAgentRail):
     async def after_invoke(self, ctx) -> None:
         engine = self.agent.react_agent.context_engine
         await engine.get_context(session_id=ctx.session.get_session_id()).add_messages(UserMessage(content="late note"))
+
+
+class FailWritingSecond(DeepAgentRail):
+    """Makes writing call-b's result into the context fail, after both tools have finished."""
+
+    def init(self, agent):
+        super().init(agent)
+        self.agent = agent
+
+    async def before_tool_call(self, ctx) -> None:
+        if ctx.inputs.tool_call.id != "call-b":
+            return
+        context = self.agent.react_agent.context_engine.get_context(session_id=ctx.session.get_session_id())
+        write = context.add_messages
+
+        async def add_messages(message, *args, **kwargs):
+            if getattr(message, "tool_call_id", None) == "call-b":
+                raise RuntimeError("context write failed")
+            return await write(message, *args, **kwargs)
+
+        context.add_messages = add_messages
+
+
+class HostOutputCheck(DeepAgentRail):
+    """Acts as a host security rail: replaces every tool output before it may be used.
+
+    ``control`` can hold one (event, call id) until released, make one abort its processing, or block
+    one as the host contract asks: replace it with a safe note first, then request a forced finish.
+    An ordinary exception would not stop anything: the callback framework logs it and runs the rest.
+    """
+
+    def __init__(self, control):
+        super().__init__()
+        self.control = control
+
+    async def on_tool_exception(self, ctx) -> None:
+        await self._check(ctx, "on_tool_exception")
+
+    async def after_tool_call(self, ctx) -> None:
+        await self._check(ctx, "after_tool_call")
+
+    async def _check(self, ctx, event):
+        call_id = ctx.inputs.tool_call.id
+        if self.control.get("hold") == (event, call_id):
+            self.control["reached"].set()
+            await self.control["gate"].wait()
+        if self.control.get("fail") == (event, call_id):
+            raise AbortError("output check failed")
+        if self.control.get("block") == (event, call_id):
+            ctx.inputs.tool_result = BLOCKED
+            ctx.inputs.tool_msg = ToolMessage(content=BLOCKED, tool_call_id=call_id)
+            ctx.request_force_finish({"output": "output withheld by the host", "result_type": "error"})
+            return
+        if event == "after_tool_call":
+            ctx.inputs.tool_result = CHECKED
+            ctx.inputs.tool_msg = ToolMessage(content=CHECKED, tool_call_id=call_id)
+
+
+class RewriteArgs(DeepAgentRail):
+    """Rewrites every call's arguments before the confirmation rail looks at it."""
+
+    priority = 95
+
+    async def before_tool_call(self, ctx) -> None:
+        ctx.inputs.tool_args = '{"value": "rewritten"}'
 
 
 class AddOffloader(DeepAgentRail):
@@ -1390,6 +1462,16 @@ def real_state(harness, monkeypatch):
     monkeypatch.setitem(_RAIL_PROVIDER_REGISTRY, "test.entries.keep_plan_slug", lambda params, context: KeepPlanSlug())
     monkeypatch.setitem(_RAIL_PROVIDER_REGISTRY, "test.entries.add_offloader", lambda params, context: AddOffloader())
     monkeypatch.setitem(_RAIL_PROVIDER_REGISTRY, "test.entries.late_note", lambda params, context: LateNote())
+    monkeypatch.setitem(
+        _RAIL_PROVIDER_REGISTRY, "test.entries.fail_writing_second", lambda params, context: FailWritingSecond()
+    )
+    monkeypatch.setitem(_RAIL_PROVIDER_REGISTRY, "test.entries.rewrite_args", lambda params, context: RewriteArgs())
+    harness.output_check = {"reached": asyncio.Event(), "gate": asyncio.Event()}
+    monkeypatch.setitem(
+        _RAIL_PROVIDER_REGISTRY,
+        "test.entries.host_output_check",
+        lambda params, context: HostOutputCheck(harness.output_check),
+    )
     harness.backend = Backend()
     return harness
 
@@ -1409,6 +1491,25 @@ def window_of(record):
 
 def parts(messages):
     return [(message.metadata or {}).get(SEAMS.WINDOW_PART_KEY) for message in messages]
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_scene_keeps_the_call_as_the_model_made_it(real_state):
+    """A rewrite before the confirmation does not reach the saved call; the resume applies it again."""
+    harness = real_state
+    spec = harness.spec(rails=[RailSpec(type="test.entries.confirm"), RailSpec(type="test.entries.rewrite_args")])
+    await pause_for_confirmation(harness, spec)
+    record = await saved_record(harness)
+    scene = RECORD.decode_interruption(record["interruption"])
+    shown = [message for message in window_of(record) if getattr(message, "tool_calls", None)][-1].tool_calls
+    assert [call.arguments for call in shown] == [TOOL_ARGS]
+    assert [call.arguments for call in scene.ai_message.tool_calls] == [TOOL_ARGS]
+    assert scene.interrupted_tools["call-1"].tool_call.arguments == TOOL_ARGS
+
+    ctx, _ = harness.context(spec, execution_id="execution-2")
+    resumed = await collect(harness.api.resume_persistent_request(spec, ctx, permission()))
+    assert resumed[-1].payload.status == "completed", "the saved scene is consistent and loads"
+    assert harness.tool_calls == [{"value": "rewritten"}], "the resume runs the rewritten call"
 
 
 @pytest.mark.asyncio
@@ -1636,7 +1737,129 @@ async def test_offloading_found_at_construction_is_refused_before_any_event(real
         await collect(harness.api.execute_persistent_request(spec, ctx, request()))
     assert_rejected(exc_info, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR)
     assert host.events == [] and harness.model.calls == 0
+<<<<<<< HEAD
 =======
+=======
+
+
+def call_group(messages):
+    """The assistant message carrying call-a and call-b, followed by its results."""
+    index = next(i for i, message in enumerate(messages) if getattr(message, "tool_calls", None))
+    return messages[index], messages[index + 1 : index + 3]
+
+
+async def next_task_sees(harness, spec, *texts):
+    harness.model.release.set()
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2")
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request(text="next task")))
+    assert events[-1].payload.status == "completed", "the next task runs on the saved window"
+    for text in texts:
+        assert any(text in str(content) for content in harness.model.seen[-1]), text
+
+
+@pytest.mark.asyncio
+async def test_persistent_construction_turns_on_tool_fact_retention(harness):
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    agent = harness.api.create_persistent_agent(spec, context=ctx)
+    assert agent.react_agent.config.retain_tool_facts_on_abort is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["stop", "cancel"])
+async def test_tool_facts_survive_a_control_mid_batch(real_state, reason):
+    """PA-10-V-07 / V-14 / V-23: call-a finished, call-b in flight; the next task still sees call-a.
+
+    Exclusive calls absorb the cancel, so the batch ends on its own and call-b carries the native result.
+    """
+    harness = real_state
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    harness.model.turns = ["two_tools"]
+    harness.tool_hooks.update(gate=asyncio.Event(), gate_call=2, gate_reached=asyncio.Event())
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    await asyncio.wait_for(harness.tool_hooks["gate_reached"].wait(), 5)
+    await harness.api.abort_persistent_request(ctx, reason=reason)
+    events = await asyncio.wait_for(consumer, 5)
+    if reason == "stop":
+        assert events[-1].payload.reason == "stopped"
+    else:
+        assert events[-1].payload.status == "cancelled"
+    group, results = call_group(window_of(await saved_record(harness)))
+    assert [call.id for call in group.tool_calls] == ["call-a", "call-b"]
+    assert [result.tool_call_id for result in results] == ["call-a", "call-b"]
+    assert "remembered" in results[0].content, "call-a's real result is kept"
+    # The in-flight call carries the native interruption result, so no placeholder is added.
+    assert results[1].content == "[Interrupted] Tool 'remember' execution was cancelled by user."
+    assert SEAMS.WINDOW_PART_KEY not in (results[1].metadata or {})
+    harness.tool_hooks.pop("gate")
+    await next_task_sees(harness, spec, "remembered", "[Interrupted]")
+
+
+@pytest.mark.asyncio
+async def test_tool_facts_survive_an_error_while_writing_results(real_state):
+    """PA-10-V-24: both tools finished; writing call-b's result fails, yet both real results are saved."""
+    harness = real_state
+    spec = harness.spec(rails=[RailSpec(type="test.entries.fail_writing_second")])
+    ctx, _ = harness.context(spec)
+    harness.model.turns = ["two_tools"]
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.reason == "error"
+    group, results = call_group(window_of(await saved_record(harness)))
+    assert [result.tool_call_id for result in results] == ["call-a", "call-b"]
+    assert all("remembered" in result.content for result in results), "the journal kept call-b's real result"
+    assert PLACEHOLDER not in [result.content for result in results]
+    clean = harness.spec()
+    await next_task_sees(harness, clean, "remembered")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["stop", "cancel"])
+async def test_parallel_tool_facts_survive_a_control_and_get_a_placeholder(real_state, reason):
+    """PA-10-V-07 / V-14 / V-23 on the parallel path: the cancel leaves the batch and the abort cleanup keeps call-a."""
+    harness = real_state
+    harness.tool_hooks.update(parallel_safe=True, gate=asyncio.Event(), gate_call=2, gate_reached=asyncio.Event())
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    harness.model.turns = ["two_tools"]
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    await asyncio.wait_for(harness.tool_hooks["gate_reached"].wait(), 5)
+    await harness.api.abort_persistent_request(ctx, reason=reason)
+    await asyncio.wait_for(consumer, 5)
+    group, results = call_group(window_of(await saved_record(harness)))
+    assert [call.id for call in group.tool_calls] == ["call-a", "call-b"], "the group is kept, not dropped"
+    assert "remembered" in results[0].content
+    assert results[1].content == PLACEHOLDER
+    assert results[1].metadata == {SEAMS.WINDOW_PART_KEY: "stopped_tool_placeholder"}
+    harness.tool_hooks.pop("gate")
+    await next_task_sees(harness, spec, "remembered", PLACEHOLDER)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["stop", "cancel"])
+async def test_calls_refused_after_a_control_say_they_did_not_run(real_state, reason):
+    """PA-10 Q-03: the control rail's refusal reads as a plain note, not as the internal stop signal."""
+    harness = real_state
+    spec = harness.spec()
+    ctx, _ = harness.context(spec)
+    harness.model.turns = ["two_tools"]
+    harness.tool_hooks.update(gate=asyncio.Event(), gate_call=1, gate_reached=asyncio.Event())
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    await asyncio.wait_for(harness.tool_hooks["gate_reached"].wait(), 5)
+    await harness.api.abort_persistent_request(ctx, reason=reason)
+    events = await asyncio.wait_for(consumer, 5)
+    if reason == "stop":
+        assert events[-1].payload.reason == "stopped"
+    else:
+        assert events[-1].payload.status == "cancelled"
+    record = await saved_record(harness)
+    _, results = call_group(window_of(record))
+    assert results[0].content == "[Interrupted] Tool 'remember' execution was cancelled by user."
+    assert results[1].content == SKIPPED and len(harness.tool_calls) == 1, "call-b was refused, not started"
+    assert_kept_out(record, "persistent_pause", "execution is stopping")
+
+
+>>>>>>> d6a6de24c (test(harness): cover session state validation and failures)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cause", ["stop", "cancel", "critical"])
 async def test_the_control_rail_refuses_every_call_with_the_same_note(cause):
@@ -1656,6 +1879,127 @@ async def test_the_control_rail_refuses_every_call_with_the_same_note(cause):
         and ctx.inputs.tool_msg.tool_call_id == "call-b"
     )
     assert ctx.consume_force_finish().result["result_type"] == "persistent_pause", "the entry still reads the signal"
+
+
+@pytest.mark.asyncio
+async def test_a_host_rail_blocking_a_result_keeps_its_note_and_ends_the_task(real_state):
+    """The host contract: replace the output with a safe note, then request a forced finish."""
+    harness = real_state
+    spec = harness.spec(rails=[RailSpec(type="test.entries.host_output_check")])
+    ctx, _ = harness.context(spec)
+    harness.model.turns = ["tool"]
+    harness.output_check["block"] = ("after_tool_call", "call-1")
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.reason == "error" and harness.model.calls == 1, "the task ends at once"
+    record = await saved_record(harness)
+    messages = window_of(record)
+    result = next(message for message in messages if getattr(message, "tool_call_id", None) == "call-1")
+    assert result.content == BLOCKED
+    assert_kept_out(record, "remembered")
+    assert "结局：暂停（error）" in messages[-1].content
+
+
+def assert_kept_out(record, *raw):
+    text = json.dumps(record, ensure_ascii=False)
+    for item in raw:
+        assert item not in text, f"unprocessed content {item!r} reached the saved record"
+
+
+async def stop_while_the_host_checks(harness, spec, reason):
+    ctx, _ = harness.context(spec)
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    await asyncio.wait_for(harness.output_check["reached"].wait(), 5)
+    await harness.api.abort_persistent_request(ctx, reason=reason)
+    events = await asyncio.wait_for(consumer, 5)
+    if reason == "stop":
+        assert events[-1].payload.reason == "stopped"
+    else:
+        assert events[-1].payload.status == "cancelled"
+    harness.output_check.pop("hold")
+    record = await saved_record(harness)
+    return record, call_group(window_of(record))[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["stop", "cancel"])
+async def test_a_result_cut_off_while_the_host_rail_checks_it_stays_out(real_state, reason):
+    """PA-10 D-06 (2): call-a returned; the control arrived before the host rail finished checking it."""
+    harness = real_state
+    spec = harness.spec(rails=[RailSpec(type="test.entries.host_output_check")])
+    harness.model.turns = ["two_tools"]
+    harness.output_check["hold"] = ("after_tool_call", "call-a")
+    record, results = await stop_while_the_host_checks(harness, spec, reason)
+    assert results[0].content.startswith(RETURNED_NOTE), "the call returned; only that fact is kept"
+    assert results[1].tool_call_id == "call-b" and len(harness.tool_calls) == 1, "call-b was refused, not started"
+    assert_kept_out(record, "remembered")
+    await next_task_sees(harness, spec, RETURNED_NOTE)
+    assert not any("remembered" in str(content) for content in harness.model.seen[-1])
+
+
+@pytest.mark.asyncio
+async def test_an_error_cut_off_while_the_host_rail_checks_it_stays_out(real_state):
+    """PA-10 D-06 (3): call-a raised; the stop arrived before the host rail finished with the error."""
+    harness = real_state
+    spec = harness.spec(rails=[RailSpec(type="test.entries.host_output_check")])
+    harness.model.turns = ["two_tools"]
+    harness.tool_hooks["fail_once"] = True
+    harness.output_check["hold"] = ("on_tool_exception", "call-a")
+    record, results = await stop_while_the_host_checks(harness, spec, "stop")
+    assert results[0].content.startswith(RAISED_NOTE), "the call raised; it is not reported as finished"
+    assert_kept_out(record, "temporary tool timeout", "remembered")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event", ["on_tool_exception", "after_tool_call"])
+async def test_a_host_rail_failing_on_an_error_keeps_the_error_content_out(real_state, event):
+    """PA-10 D-06 (3): call-a raised and the host rail aborted while handling the error; the wrapper only logs it."""
+    harness = real_state
+    spec = harness.spec(rails=[RailSpec(type="test.entries.host_output_check")])
+    ctx, _ = harness.context(spec)
+    harness.model.turns = ["two_tools"]
+    harness.tool_hooks["fail_once"] = True
+    harness.output_check["fail"] = (event, "call-a")
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.status == "completed"
+    record = await saved_record(harness)
+    _, results = call_group(window_of(record))
+    assert results[0].content.startswith(RAISED_NOTE), "not reported as finished, and without the error"
+    assert results[1].content == CHECKED
+    assert_kept_out(record, "temporary tool timeout", "remembered")
+
+
+@pytest.mark.asyncio
+async def test_a_host_rail_failing_on_a_result_keeps_the_raw_content_out(real_state):
+    """PA-10 D-06 (2): the host rail aborted while checking call-a; call-b was checked normally."""
+    harness = real_state
+    spec = harness.spec(rails=[RailSpec(type="test.entries.host_output_check")])
+    ctx, _ = harness.context(spec)
+    harness.model.turns = ["two_tools"]
+    harness.output_check["fail"] = ("after_tool_call", "call-a")
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.status == "completed"
+    record = await saved_record(harness)
+    _, results = call_group(window_of(record))
+    assert results[0].content.startswith(RETURNED_NOTE)
+    assert results[1].content == CHECKED
+    assert_kept_out(record, "remembered")
+
+
+@pytest.mark.asyncio
+async def test_a_checked_result_survives_a_later_write_failure(real_state):
+    """PA-10 D-06 (1): both results were checked; writing call-b fails, and the checked result is saved."""
+    harness = real_state
+    spec = harness.spec(
+        rails=[RailSpec(type="test.entries.host_output_check"), RailSpec(type="test.entries.fail_writing_second")]
+    )
+    ctx, _ = harness.context(spec)
+    harness.model.turns = ["two_tools"]
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.reason == "error"
+    record = await saved_record(harness)
+    _, results = call_group(window_of(record))
+    assert [result.content for result in results] == [CHECKED, CHECKED]
+    assert_kept_out(record, "remembered")
 
 
 @pytest.mark.asyncio

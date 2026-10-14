@@ -76,6 +76,16 @@ def interruption(*requests, call_id="call-1"):
     )
 
 
+def tampered(entry_call=None, ai_call=None):
+    """A waiting scene whose interrupt entry or ai_message disagrees with the window's call-1."""
+    state = interruption(call_id="call-1")
+    if entry_call is not None:
+        state.interrupted_tools["call-1"].tool_call = entry_call
+    if ai_call is not None:
+        state.ai_message.tool_calls = [ai_call]
+    return state
+
+
 def context(agent_id="agent:1", session_id="session%a", execution_id="execution-1"):
     session = create_agent_session(session_id=session_id, card=AgentCard(id=agent_id, name="test"))
     execution = SimpleNamespace(agent_id=agent_id, session_id=session_id, execution_id=execution_id)
@@ -181,6 +191,22 @@ def test_messages_round_trip_exactly():
     assert [type(message) for message in restored] == [type(message) for message in messages]
 
 
+def test_a_tool_call_round_trip_keeps_what_runs_but_not_the_stream_index():
+    """PA-10-V-11: the message format keeps id, type, name, arguments and response_item_id, not index."""
+    sent = ToolCall(id="call-1", type="function", name="remember", arguments="{}", index=0, response_item_id="item-1")
+    message = AssistantMessage(content="checking", tool_calls=[sent], metadata={PART: "x"})
+    restored = RECORD.decode_messages(json.loads(json.dumps(RECORD.encode_messages([message]))))[0]
+    kept = restored.tool_calls[0]
+    assert (kept.id, kept.type, kept.name, kept.arguments, kept.response_item_id) == (
+        "call-1",
+        "function",
+        "remember",
+        "{}",
+        "item-1",
+    )
+    assert kept.index is None and restored.metadata == {PART: "x"}
+
+
 def test_message_subclasses_are_not_saved():
     class NotedUserMessage(UserMessage):
         note: str = "dropped by UserMessage"
@@ -267,6 +293,21 @@ def test_stopped_call_placeholders_follow_their_group_and_are_idempotent():
     assert STATE.unpaired_tool_calls(patched) == []
 
 
+def test_results_pair_only_with_their_own_group():
+    """A call id reused by a later group is not answered by the earlier result."""
+    reused = [
+        UserMessage(content="first task"),
+        AssistantMessage(content="", tool_calls=[call("call-1")]),
+        tool_result("call-1"),
+        UserMessage(content="second task"),
+        AssistantMessage(content="", tool_calls=[call("call-1")]),
+    ]
+    assert STATE.unpaired_tool_calls(reused) == ["call-1"]
+    patched = STATE.patch_stopped_calls(reused)
+    assert patched[-1].tool_call_id == "call-1" and patched[-1].metadata == {PART: "stopped_tool_placeholder"}
+    assert STATE.unpaired_tool_calls(patched) == []
+
+
 def test_tidy_window_drops_background_and_marks_the_end():
     """PA-10-V-03 at the window level: history and the one-line header stay as they are."""
     header = UserMessage(content="【本次执行】类型：新任务", metadata={PART: "execution_header"})
@@ -322,6 +363,21 @@ async def test_load_restores_state_and_the_waiting_scene():
 
 
 @pytest.mark.asyncio
+async def test_a_waiting_call_is_compared_without_its_stream_index():
+    """The message format drops ToolCall.index, so an entry that kept it still matches the window."""
+    state_store, backend = store()
+    indexed = ToolCall(id="call-1", type="function", name="remember", arguments='{"value": "x"}', index=0)
+    data = record(
+        messages=RECORD.encode_messages([AssistantMessage(content="checking", tool_calls=[call("call-1")])]),
+        interruption=RECORD.encode_interruption(tampered(entry_call=indexed)),
+        ending={"outcome": "awaiting_confirmation", "request_id": "r", "execution_id": "e"},
+    )
+    await backend.set(STATE.WindowStore.state_key("agent:1", "session%a"), json.dumps(data))
+    loaded = await state_store.load(context())
+    assert loaded.waiting is not None
+
+
+@pytest.mark.asyncio
 async def test_missing_record_starts_an_empty_window():
     state_store, _ = store()
     ctx = context()
@@ -369,6 +425,63 @@ async def test_loading_an_interrupted_record_patches_in_memory_only(outcome):
         },
         {"interruption": RECORD.encode_interruption(interruption())},
         {"deepagent_state": {"task_plan": {"tasks": "not a list"}}},
+        {"messages": [{"role": ["user"], "content": SECRET}]},
+        {"messages": [{"role": {"name": "user"}, "content": SECRET}]},
+        {
+            "messages": RECORD.encode_messages(
+                [
+                    AssistantMessage(content=SECRET, tool_calls=[call("call-x")]),
+                    UserMessage(content="next"),
+                    tool_result("call-x"),
+                ]
+            ),
+            "ending": {"outcome": "stopped", "request_id": "r", "execution_id": "e"},
+        },
+        {
+            "messages": RECORD.encode_messages(
+                [AssistantMessage(content=SECRET, tool_calls=[call("call-1")]), tool_result("call-1")]
+            ),
+            "interruption": RECORD.encode_interruption(interruption(call_id="call-1")),
+            "ending": {"outcome": "awaiting_confirmation", "request_id": "r", "execution_id": "e"},
+        },
+        {
+            "messages": RECORD.encode_messages(
+                [
+                    AssistantMessage(content=SECRET, tool_calls=[call("call-0")]),
+                    UserMessage(content="next"),
+                    AssistantMessage(content="checking", tool_calls=[call("call-1")]),
+                ]
+            ),
+            "interruption": RECORD.encode_interruption(interruption(call_id="call-1")),
+            "ending": {"outcome": "awaiting_confirmation", "request_id": "r", "execution_id": "e"},
+        },
+        {
+            "messages": RECORD.encode_messages(
+                [
+                    AssistantMessage(content=SECRET, tool_calls=[call("call-1"), call("call-2")]),
+                    tool_result("call-2"),
+                ]
+            ),
+            "interruption": RECORD.encode_interruption(interruption(call_id="call-1")),
+            "ending": {"outcome": "awaiting_confirmation", "request_id": "r", "execution_id": "e"},
+        },
+        {
+            "messages": RECORD.encode_messages([AssistantMessage(content=SECRET, tool_calls=[call("call-1")])]),
+            "ending": {"outcome": "awaiting_confirmation", "request_id": "r", "execution_id": "e"},
+            "interruption": RECORD.encode_interruption(tampered(entry_call=call("call-1", name="delete_file"))),
+        },
+        {
+            "messages": RECORD.encode_messages([AssistantMessage(content=SECRET, tool_calls=[call("call-1")])]),
+            "ending": {"outcome": "awaiting_confirmation", "request_id": "r", "execution_id": "e"},
+            "interruption": RECORD.encode_interruption(
+                tampered(entry_call=ToolCall(id="call-1", type="function", name="remember", arguments='{"value": "y"}'))
+            ),
+        },
+        {
+            "messages": RECORD.encode_messages([AssistantMessage(content=SECRET, tool_calls=[call("call-1")])]),
+            "ending": {"outcome": "awaiting_confirmation", "request_id": "r", "execution_id": "e"},
+            "interruption": RECORD.encode_interruption(tampered(ai_call=call("call-1", name="delete_file"))),
+        },
     ],
     ids=[
         "agent-mismatch",
@@ -379,6 +492,15 @@ async def test_loading_an_interrupted_record_patches_in_memory_only(outcome):
         "waiting-call-not-interrupted",
         "interruption-without-waiting",
         "broken-deepagent-state",
+        "list-role",
+        "object-role",
+        "result-after-a-later-message",
+        "waiting-call-already-answered",
+        "waiting-with-an-earlier-unpaired-group",
+        "waiting-batch-differs-from-interruption",
+        "waiting-entry-runs-another-tool",
+        "waiting-entry-has-other-arguments",
+        "waiting-ai-message-differs-from-window",
     ],
 )
 async def test_invalid_records_are_rejected_without_touching_session_or_backend(change, monkeypatch):
@@ -462,8 +584,39 @@ async def test_save_patches_interrupted_endings_and_writes_one_record(outcome, m
             "completed",
         ),
         ({"__interrupt_auto_confirm__": {"remember": "yes"}}, "completed"),
+        (
+            {
+                "context": {
+                    "default_context_id": {
+                        "messages": [
+                            AssistantMessage(content="", tool_calls=[call("call-x")]),
+                            UserMessage(content="next"),
+                            tool_result("call-x"),
+                        ]
+                    }
+                }
+            },
+            "stopped",
+        ),
+        (
+            {
+                "context": {
+                    "default_context_id": {"messages": [AssistantMessage(content="", tool_calls=[call("call-1")])]}
+                },
+                "__react_agent_interruption__": tampered(entry_call=call("call-1", name="delete_file")),
+            },
+            "awaiting_confirmation",
+        ),
     ],
-    ids=["offloaded-messages", "second-window", "waiting-without-interruption", "unpaired-on-completion", "bad-choice"],
+    ids=[
+        "offloaded-messages",
+        "second-window",
+        "waiting-without-interruption",
+        "unpaired-on-completion",
+        "bad-choice",
+        "stray-result-on-stop",
+        "waiting-entry-runs-another-tool",
+    ],
 )
 async def test_save_checks_fail_as_runtime_errors_and_write_nothing(state, outcome, monkeypatch):
     """PA-10-V-12 and the other save-time checks: nothing is dropped or overwritten silently."""
@@ -533,6 +686,32 @@ def test_offloading_processors_are_found_by_their_registered_type():
     assert STATE.offloading_processors(SimpleNamespace(react_agent=None)) == []
 
 
+def test_offloader_subclasses_registered_under_new_names_are_found(monkeypatch):
+    from openjiuwen.core.context_engine.context_engine import ContextEngine
+    from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import DialogueCompressor
+    from openjiuwen.core.context_engine.processor.forked.offloader.message_offloader import (
+        MessageSummaryOffloader as ForkedSummaryOffloader,
+    )
+    from openjiuwen.core.context_engine.processor.offloader.message_offloader import MessageOffloader
+
+    class HostOffloader(MessageOffloader):
+        pass
+
+    class HostForkedOffloader(ForkedSummaryOffloader):
+        pass
+
+    class HostCompressor(DialogueCompressor):
+        pass
+
+    for processor in (HostOffloader, HostForkedOffloader, HostCompressor):
+        monkeypatch.setitem(ContextEngine._PROCESSOR_MAP, processor.processor_type(), processor)
+    config = SimpleNamespace(
+        context_processors=[("HostOffloader", None), ("HostForkedOffloader", None), ("HostCompressor", None)]
+    )
+    agent = SimpleNamespace(react_agent=SimpleNamespace(config=config))
+    assert STATE.offloading_processors(agent) == ["HostForkedOffloader", "HostOffloader"]
+
+
 @pytest.mark.asyncio
 async def test_overwriting_a_pending_answer_is_logged_without_its_text(monkeypatch):
     """PA-10-V-22: the single ending field is no lifecycle; losing the answer is at least visible."""
@@ -549,3 +728,52 @@ async def test_overwriting_a_pending_answer_is_logged_without_its_text(monkeypat
     await state_store.save(ctx, ending())
     assert len(errors) == 1
     assert "request-0" in errors[0] and "request-1" in errors[0] and SECRET not in errors[0]
+
+
+class WritesThenFails(InMemoryKVStore):
+    """A backend whose set raises after the value was stored, e.g. a timeout after the write landed."""
+
+    async def set(self, key, value):
+        await super().set(key, value)
+        raise RuntimeError("backend write failed")
+
+
+async def load_with_pending_answer(backend, monkeypatch):
+    errors = []
+    monkeypatch.setattr(STATE.logger, "error", lambda message, *args: errors.append(message % args))
+    monkeypatch.setattr(STATE.ExecutionStateStore, "_sync_native", staticmethod(skip_sync))
+    data = record(
+        ending={"outcome": "error", "request_id": "request-0", "execution_id": "execution-0", "pending_answer": SECRET}
+    )
+    await InMemoryKVStore.set(backend, KEY, json.dumps(data))
+    state_store, _ = store(backend)
+    ctx = context()
+    await state_store.load(ctx)
+    return state_store, ctx, errors
+
+
+@pytest.mark.asyncio
+async def test_a_failed_write_cannot_promise_the_record_is_unchanged(monkeypatch):
+    """PA-10-V-09 / V-22: the entry sees a runtime error, yet the backend may hold the new record."""
+    backend = WritesThenFails()
+    state_store, ctx, errors = await load_with_pending_answer(backend, monkeypatch)
+    with pytest.raises(BaseError) as exc_info:
+        await state_store.save(ctx, ending())
+    assert_runtime(exc_info)
+    assert (await saved(backend))["ending"]["request_id"] == "request-1", "the write landed before the error"
+    assert len(errors) == 1 and "may have been overwritten" in errors[0] and SECRET not in errors[0]
+
+
+@pytest.mark.asyncio
+async def test_a_save_failing_before_the_write_leaves_the_record_and_logs_nothing(monkeypatch):
+    backend = InMemoryKVStore()
+    state_store, ctx, errors = await load_with_pending_answer(backend, monkeypatch)
+    loaded = window(ctx.session)
+    ctx.session.update_state(
+        {"context": {"default_context_id": {"messages": loaded, "offload_messages": {"handle": ["x"]}}}}
+    )
+    with pytest.raises(BaseError) as exc_info:
+        await state_store.save(ctx, ending())
+    assert_runtime(exc_info)
+    assert (await saved(backend))["ending"]["request_id"] == "request-0", "nothing was written"
+    assert errors == []
