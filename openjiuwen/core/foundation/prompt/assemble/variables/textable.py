@@ -10,7 +10,11 @@ from openjiuwen.core.foundation.prompt.assemble.variables.variable import Variab
 
 
 class TextableVariable(Variable):
-    """Variable class for processing string-type placeholders"""
+    """Variable class for processing string-type placeholders.
+
+    An empty placeholder (for example ``{{}}``) is treated as literal text
+    with a warning instead of raising an error.
+    """
     def __init__(self, text: str, name: str = "default", prefix: str = "{{", suffix: str = "}}"):
         self.text = text
         self.name = name
@@ -19,15 +23,26 @@ class TextableVariable(Variable):
 
         pattern = re.compile(re.escape(prefix) + r"([^{}]*?)" + re.escape(suffix))
         placeholders = []
+        # Split the template into ordered segments (literal text vs placeholder)
+        # so that rendering only touches literal text and never rewrites the
+        # substituted values.
+        segments = []
+        cursor = 0
         for match in pattern.finditer(text):
             placeholder = match.group(1).strip()
             if len(placeholder) == 0:
-                raise build_error(
-                    StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED,
-                    error_msg="placeholders cannot be empty string"
+                prompt_logger.warning(
+                    "Empty placeholder found; treating as literal text",
+                    metadata={"name": name, "placeholder": match.group(0)}
                 )
+                # cursor not advanced: empty placeholder retained as literal text
+                continue
+            segments.append(("text", text[cursor:match.start()]))
+            segments.append(("variable", placeholder))
+            cursor = match.end()
             if placeholder not in placeholders:
                 placeholders.append(placeholder)
+        segments.append(("text", text[cursor:]))
 
         input_keys = []
         for placeholder in placeholders:
@@ -37,6 +52,7 @@ class TextableVariable(Variable):
 
         self.placeholders = placeholders
         self.input_keys = input_keys
+        self._segments = segments
         super().__init__(name, input_keys=input_keys)
 
     def update(self, **kwargs):
@@ -45,11 +61,14 @@ class TextableVariable(Variable):
         Args:
             **kwargs: arguments passed in as key-value pairs for updating the variable.
         """
-        formatted_text = self.text
-        for placeholder in self.placeholders:
+        parts = []
+        for kind, payload in self._segments:
+            if kind == "text":
+                parts.append(payload)
+                continue
             value = kwargs
             try:
-                for node in placeholder.split("."):
+                for node in payload.split("."):
                     if isinstance(value, dict):
                         value = value.get(node)
                     else:
@@ -57,7 +76,7 @@ class TextableVariable(Variable):
             except Exception as e:
                 raise build_error(
                     StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED,
-                    error_msg=f"error parsing the placeholder `{placeholder}`",
+                    error_msg=f"error parsing the placeholder `{payload}`",
                     cause=e
                 ) from e
             if not isinstance(value, (str, int, float, bool)):
@@ -67,8 +86,8 @@ class TextableVariable(Variable):
                     type_event=LogEventType.AGENT_START,
                     input_data=kwargs,
                     output_data=self.value,
-                    metadata={"placeholder": placeholder}
+                    metadata={"placeholder": payload}
                     )
-            placeholder_str = f"{self.prefix}{placeholder}{self.suffix}"
-            formatted_text = formatted_text.replace(placeholder_str, str(value))
+            parts.append(str(value))
+        formatted_text = "".join(parts)
         self.value = formatted_text
