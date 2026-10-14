@@ -26,7 +26,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
 | 最近一次修订日期 | 2026-10-14 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md、F_118_task-scoped-member-lifetime.md、F_119_scheduled-completion-handoff-via-note.md |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md、F_118_task-scoped-member-lifetime.md、F_119_scheduled-completion-handoff-via-note.md、F_120_autonomous-completion-summary-and-note.md |
 
 ## 范围 / 边界
 
@@ -398,6 +398,11 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     不附。`view_task(action='note', task_id=)` 返回 `{view: "note", task_id, title, status, assignee,
     summary, note}`（不含 `content`，独立渲染分支），不截断——是 leader 摘要、上游列表里截断摘要背后
     的全文入口；`view_task(get)` 同时显示 `Summary:` 与 `Note:`。
+28. **`claim_task` 完成时写 `summary` / `note`，认领时附直接上游摘要**（F_120）。schema 新增可选
+    `summary` / `note`，只在 `status=completed` 时经 `complete(summary=, note=)` 落行；`claimed` 时传入
+    则忽略并在结果里提示。认领成功后结果列出本任务**直接上游**（一跳依赖）的完成摘要
+    （`message_template.upstream_lines`，与调度模式开工通知同格式）与 `view_task(action='note')` 提示；
+    `view_task(get)` 同样附"Upstream deliveries"小节。两种模式下成员都不再用 `send_message` 汇报完成。
 
 ## 接口契约
 
