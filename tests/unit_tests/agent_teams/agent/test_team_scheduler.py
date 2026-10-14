@@ -123,6 +123,7 @@ def _build_scheduler(
     )
     spec.agents = None
     infra.team_backend = AsyncMock(team_name=TEAM)
+    infra.team_backend.task_verification_enabled = lambda: True
     blueprint = SimpleNamespace(spec=spec, team_name=TEAM)
     host = FakeHost()
     if review_feedback_rail is not None:
@@ -140,6 +141,10 @@ def _build_scheduler(
         infra=infra,
         build_context=build_context,
     )
+    # Most scheduler unit tests drive votes through real TeamTaskManager
+    # instances and do not need an LLM harness. Protocol-lifecycle tests below
+    # replace this stub with their own outcome sequence.
+    scheduler._spawn_temp_reviewer = AsyncMock(return_value="unavailable")
     return scheduler, host, message_manager, task_manager
 
 
@@ -349,6 +354,119 @@ async def test_review_dispatch_once_per_round_then_settle_pass(db, bus):
     ]
     assert report_dms
     assert any("[r]" in text for text in host.leader_inputs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_temp_reviewer_no_vote_retries_then_escalates_fail_closed(db, bus):
+    """A prose-only reviewer completion cannot strand IN_REVIEW silently."""
+    scheduler, host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    scheduler._spawn_temp_reviewer = AsyncMock(return_value="no_vote")
+
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    for _ in range(100):
+        if not scheduler._review_jobs and scheduler._spawn_temp_reviewer.await_count == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    assert scheduler._spawn_temp_reviewer.await_count == 2
+    assert (await tm.get("r")).status == TaskStatus.IN_REVIEW.value
+    protocol_failures = [text for text in host.leader_inputs if "rev-1" in text and "verify_task" in text]
+    assert len(protocol_failures) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_temp_reviewer_missing_vote_recovers_on_second_attempt(db, bus):
+    """A retry that persists a vote is reconciled immediately and settles."""
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    attempts = 0
+
+    async def _review_then_vote(reviewer, task):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return "no_vote"
+        result = await _reviewer_mgr(db, bus, reviewer).verify_task(task.task_id, "pass")
+        assert result.ok
+        return "voted"
+
+    scheduler._spawn_temp_reviewer = AsyncMock(side_effect=_review_then_vote)
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    for _ in range(100):
+        if (await tm.get("r")).status == TaskStatus.COMPLETED.value:
+            break
+        await asyncio.sleep(0.01)
+
+    assert attempts == 2
+    assert (await tm.get("r")).status == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_active_scheduler_retries_cancelled_reviewer_job(db, bus):
+    """An inner run cancellation cannot consume the missing-vote wake-up."""
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    attempts = 0
+
+    async def _cancel_then_vote(reviewer, task):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise asyncio.CancelledError
+        result = await _reviewer_mgr(db, bus, reviewer).verify_task(task.task_id, "pass")
+        assert result.ok
+        return "voted"
+
+    scheduler._spawn_temp_reviewer = AsyncMock(side_effect=_cancel_then_vote)
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    for _ in range(100):
+        if (await tm.get("r")).status == TaskStatus.COMPLETED.value:
+            break
+        await asyncio.sleep(0.01)
+
+    assert attempts == 2
+    assert (await tm.get("r")).status == TaskStatus.COMPLETED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_replacing_non_voting_reviewer_dispatches_in_same_round(db, bus):
+    """Reviewer identity, not only (task, round), participates in dedupe."""
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    scheduler._spawn_temp_reviewer = AsyncMock(return_value="no_vote")
+
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    for _ in range(100):
+        if not scheduler._review_jobs and scheduler._spawn_temp_reviewer.await_count == 2:
+            break
+        await asyncio.sleep(0.01)
+
+    changed = await tm.set_reviewer(
+        "r",
+        [{"type": "verifier", "reviewer_id": "rev-2", "instruction": "check runtime"}],
+    )
+    assert changed.ok
+
+    async def _replacement_votes(reviewer, task):
+        result = await _reviewer_mgr(db, bus, reviewer).verify_task(task.task_id, "pass")
+        assert result.ok
+        return "voted"
+
+    scheduler._spawn_temp_reviewer = AsyncMock(side_effect=_replacement_votes)
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    for _ in range(100):
+        if (await tm.get("r")).status == TaskStatus.COMPLETED.value:
+            break
+        await asyncio.sleep(0.01)
+
+    assert scheduler._spawn_temp_reviewer.await_count == 1
+    assert scheduler._spawn_temp_reviewer.await_args.args[0] == "rev-2"
+    assert (await tm.get("r")).status == TaskStatus.COMPLETED.value
 
 
 @pytest.mark.asyncio
