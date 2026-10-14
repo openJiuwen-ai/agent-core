@@ -23,7 +23,12 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.message_template import build_meta, upstream_brief
+from openjiuwen.agent_teams.message_template import (
+    build_meta,
+    completion_summary,
+    completion_summary_truncated,
+    upstream_brief,
+)
 from openjiuwen.agent_teams.schema.status import TaskStatus
 
 if TYPE_CHECKING:
@@ -39,7 +44,6 @@ _REVIEW_UPSTREAM = "scheduler_review_upstream"
 _REVIEW_RENUDGE = "scheduler_review_renudge"
 _REWORK = "scheduler_rework"
 _REWORK_SUMMARY = "scheduler_rework_summary"
-_VERIFIED_REPORT = "scheduler_verified_report"
 
 
 def meta_task_start(task) -> dict:
@@ -87,20 +91,26 @@ def meta_rework_summary(task, max_rounds: int) -> dict:
     )
 
 
-def meta_verified_report(task) -> dict:
-    """Delivery payload asking the author to report results to the leader."""
-    return build_meta(_VERIFIED_REPORT, refs={"task": task.task_id})
+def render_leader_task_done(task: Any, *, verified: bool) -> str:
+    """Terminal digest injected into the leader, carrying the completion summary.
 
-
-def render_leader_task_done(task_id: str, title: str, *, verified: bool) -> str:
-    """One-line terminal digest injected into the leader.
+    The digest replaces the member's own completion report (F_119): it names
+    the task, the bounded completion summary, and — when there is more to read
+    (a completion note, or a summary cut for length) — where to read it.
 
     Carries no board count: the digest is queued as a follow-up and may reach
     the leader well after newer tasks were created, so a count snapshotted
     here would read as stale progress. The leader queries the live board.
     """
     how_key = "scheduler.leader_task_done_how_verified" if verified else "scheduler.leader_task_done_how_direct"
-    return t("scheduler.leader_task_done", task_id=task_id, title=title, how=t(how_key))
+    lines = [t("scheduler.leader_task_done", task_id=task.task_id, title=task.title, how=t(how_key))]
+    summary = completion_summary(task)
+    if summary:
+        lines.append(t("scheduler.leader_task_done_summary", summary=summary))
+    if (getattr(task, "note", None) or "").strip() or completion_summary_truncated(task):
+        lines.append(t("scheduler.leader_task_done_note_hint", task_id=task.task_id))
+    lines.append(t("scheduler.leader_task_done_board_hint"))
+    return "\n".join(lines)
 
 
 def render_leader_escalation_rounds(task, feedback: str) -> str:
@@ -138,6 +148,29 @@ def format_fail_feedback(fail_feedback: dict[str, str]) -> str:
     return "\n".join(lines)
 
 
+_SUBMISSION_LABELS = {
+    "cn": ("摘要", "详情"),
+    "en": ("Summary", "Detail"),
+}
+
+
+def _submission_body(task: Any, language: str) -> str:
+    """The assignee's summary and full note, verbatim, for a reviewer.
+
+    A reviewer must see the whole submission, so nothing here is truncated.
+    Each part is labelled and left out when missing.
+    """
+    summary_label, note_label = _SUBMISSION_LABELS.get(language, _SUBMISSION_LABELS["en"])
+    parts: list[str] = []
+    summary = (getattr(task, "summary", None) or "").strip()
+    if summary:
+        parts.append(f"{summary_label}: {summary}")
+    note = (getattr(task, "note", None) or "").strip()
+    if note:
+        parts.append(f"{note_label}:\n{note}")
+    return "\n\n".join(parts)
+
+
 async def render_review_request_for_harness(
     task: Any,
     *,
@@ -158,13 +191,13 @@ async def render_review_request_for_harness(
     the reviewer can then check whether the rework it asked for was done.
     Without one (first round, or no vote then) the section is left out.
 
-    The assignee's completion ``note`` (artifact paths, key decisions) is
-    rendered as well, so the reviewer can locate the deliverable without a
-    ``view_task`` round-trip. A task submitted without a note leaves the
-    section out. Likewise the ``upstream`` task rows are listed with their
-    authors' notes, so a reviewer of a task that builds on others (an
-    aggregation, say) knows where its inputs came from; no upstream task
-    leaves the section out.
+    The assignee's completion ``summary`` and full ``note`` (artifact paths,
+    key decisions) are rendered verbatim as well, so the reviewer can locate
+    the deliverable without a ``view_task`` round-trip. A task submitted
+    without either leaves the section out. Likewise the ``upstream`` task rows
+    are listed with their completion summaries, so a reviewer of a task that
+    builds on others (an aggregation, say) knows where its inputs came from;
+    no upstream task leaves the section out.
     """
     from openjiuwen.agent_teams.prompts.loader import load_template
 
@@ -197,13 +230,13 @@ async def render_review_request_for_harness(
         previous = previous.replace("{{vote.feedback}}", previous_vote.feedback or t("scheduler.none"))
     body = body.replace("{{task.previous_feedback}}", previous)
     submission_note = ""
-    note = (getattr(task, "note", None) or "").strip()
-    if note:
+    submission_body = _submission_body(task, language)
+    if submission_body:
         submission_note = loader(_REVIEW_SUBMISSION_NOTE, language).content.strip()
-        submission_note = submission_note.replace("{{task.note}}", note)
+        submission_note = submission_note.replace("{{task.submission_body}}", submission_body)
     body = body.replace("{{task.submission_note}}", submission_note)
     upstream_section = ""
-    upstream_lines = upstream_brief(upstream or [])
+    upstream_lines = upstream_brief(upstream or [], language)
     if upstream_lines:
         upstream_section = loader(_REVIEW_UPSTREAM, language).content.strip()
         upstream_section = upstream_section.replace("{{task.upstream_brief}}", upstream_lines)

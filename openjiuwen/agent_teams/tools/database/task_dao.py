@@ -806,7 +806,9 @@ class TaskDao:
                     team_task_model.assignee == from_assignee,
                     team_task_model.status.in_(reassignable),
                 )
-                .values(assignee=to_assignee, updated_at=now)
+                # The completion text describes the former owner's delivery;
+                # it is cleared atomically with the hand-over (F_119).
+                .values(assignee=to_assignee, summary=None, note=None, updated_at=now)
             )
             await session.commit()
             swapped = result.rowcount == 1
@@ -861,13 +863,22 @@ class TaskDao:
             origin_task_status = task.status
             task.status = TaskStatus.PENDING.value
             task.assignee = None
+            # The completion text belongs to the released owner's delivery (F_119).
+            task.summary = None
+            task.note = None
             task.updated_at = get_current_time()
             await session.commit()
             team_logger.info("Task %s reset from %s to PENDING", task_id, origin_task_status)
 
             return task
 
-    async def submit_for_review(self, task_id: str, *, note: str | None = None) -> bool:
+    async def submit_for_review(
+        self,
+        task_id: str,
+        *,
+        summary: str | None = None,
+        note: str | None = None,
+    ) -> bool:
         """Atomically move an IN_PROGRESS task to IN_REVIEW via a CAS UPDATE.
 
         The verify-gate entry: the author declared the work done and the task
@@ -877,7 +888,8 @@ class TaskDao:
         ``WHERE status='in_progress'`` makes IN_PROGRESS the sole predecessor.
         ``review_round`` is bumped in the same statement (F_62): opening a new
         round is atomic with the flip, so votes recorded against a superseded
-        round can never be confused with the current one.
+        round can never be confused with the current one. ``summary`` /
+        ``note`` overwrite the stored completion text only when given (F_119).
 
         Returns:
             True iff the row moved to IN_REVIEW (``rowcount == 1``); False when
@@ -896,6 +908,7 @@ class TaskDao:
                     status=TaskStatus.IN_REVIEW.value,
                     review_round=team_task_model.review_round + 1,
                     updated_at=now,
+                    **({"summary": summary} if summary is not None else {}),
                     **({"note": note} if note is not None else {}),
                 )
             )
@@ -1399,11 +1412,18 @@ class TaskDao:
                 "unblocked_tasks": unblocked_tasks,
             }
 
-    async def complete_task(self, task_id: str, *, note: str | None = None) -> Optional[Dict]:
+    async def complete_task(
+        self,
+        task_id: str,
+        *,
+        summary: str | None = None,
+        note: str | None = None,
+    ) -> Optional[Dict]:
         """Complete a task atomically and unblock dependent tasks.
 
-        ``note`` (the author's completion note, F_118) lands in the same
-        transaction as the status flip when given.
+        ``summary`` / ``note`` (the author's completion summary and detail,
+        F_118 / F_119) land in the same transaction as the status flip, each
+        only when given.
         """
         async with self._sessions.write() as session:
             now = get_current_time()
@@ -1416,8 +1436,11 @@ class TaskDao:
             if outcome is None:
                 return None
             task, unblocked = outcome
+            if summary is not None:
+                task.summary = summary
             if note is not None:
                 task.note = note
+            if summary is not None or note is not None:
                 session.add(task)
             await session.commit()
             return {"task": task, "unblocked_tasks": unblocked}

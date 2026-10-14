@@ -286,9 +286,10 @@ STRINGS: dict[str, str] = {
     # view_task._desc lives in descs/cn/task/view_task.md
     "view_task.action": (
         "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、"
+        "'note'（单个任务完整的完成摘要与详情，需传 task_id）、"
         "'claimable'（可认领的 pending 任务）、'in_review'（指派给你验证、正在 in_review 的任务）"
     ),
-    "view_task.task_id": "任务 ID — action=get 时必填，其他模式忽略",
+    "view_task.task_id": "任务 ID — action=get / note 时必填，其他模式忽略",
     "view_task.status": (
         "仅 action=list 时使用的状态过滤："
         "pending/blocked/planning/in_progress/in_review/completed/cancelled，不传则返回全部"
@@ -332,7 +333,8 @@ STRINGS: dict[str, str] = {
     # ===== member_complete_task ===============================================
     # member_complete_task._desc lives in descs/cn/task/member_complete_task.md
     "member_complete_task.task_id": "要标记完成的任务 ID（必须是 leader 已经指派给你的任务）",
-    "member_complete_task.note": "可选的完成说明，便于团队了解你的执行结果或后续注意事项",
+    "member_complete_task.summary": "一句话完成摘要：交付了什么、主产物在哪；用于 leader 摘要与下游上游列表",
+    "member_complete_task.note": "完整的完成详情：产物路径、关键决策或后续注意事项；校验者与 view_task(action='note') 读取全文",
     # ===== verify_task ========================================================
     # verify_task._desc lives in descs/cn/task/verify_task.md
     "verify_task.task_id": "要验证的任务 ID（必须是指派给你验证、当前处于 in_review 的任务）",

@@ -600,10 +600,120 @@ class TeamContextTracker:
             )
 
 
+# Session state key holding the ids of verified tasks this member was told about.
+TASK_OUTCOME_STATE_KEY = "task_outcome_announced"
+
+# Stable contract token for the <team-event> ``kind`` attribute.
+TASK_VERIFIED_EVENT_KIND = "task-verified"
+
+
+class TaskOutcomeTracker:
+    """Tell a member, on its next input, which of its submitted tasks passed review.
+
+    Under scheduled dispatch a passed review does not wake the author (F_119):
+    it has nothing to act on, and waking it would only delay its retirement.
+    The fact still reaches it, late — whatever wakes the member next (a start
+    notice, a leader or user message) carries it.
+
+    This is an *event*, not standing state, so it is folded into the admitted
+    input itself and never into the ``team.context`` attachment (a
+    current-state channel). The source of truth is the task table — the
+    member's completed tasks that carry reviewers — and the delivery baseline
+    is the set of task ids already told, kept in the member's own session
+    state next to the team-context baseline so both are checkpointed with the
+    conversation. A task completed without review is never announced: the
+    member completed it itself.
+
+    Usage mirrors :class:`TeamContextTracker`: ``pending_text`` → deliver →
+    ``commit``. Not task-safe, for the same reason that tracker is not.
+
+    Args:
+        team_backend: Backend whose task manager answers the board query.
+            ``None`` disables the tracker.
+        member_name: This member's semantic identifier.
+
+    The notice text follows the process-global runtime language (``i18n.t``),
+    like the roster note.
+    """
+
+    def __init__(
+        self,
+        *,
+        team_backend: "TeamBackend | None",
+        member_name: str | None,
+    ) -> None:
+        self._team_backend = team_backend
+        self._member_name = member_name
+        # Task ids rendered by the last pending_text call, held until delivery
+        # is confirmed. None means there is nothing awaiting a commit.
+        self._uncommitted: list[str] | None = None
+
+    async def pending_text(self, session: Any) -> str | None:
+        """Render the verified tasks this member has not been told about yet.
+
+        Args:
+            session: The member's own child ``AgentSession``. ``None`` disables
+                the tracker.
+
+        Returns:
+            A ``<team-event kind="task-verified">`` block, or ``None``.
+        """
+        self._uncommitted = None
+        if session is None or self._team_backend is None or not self._member_name:
+            return None
+        task_manager = getattr(self._team_backend, "task_manager", None)
+        if task_manager is None:
+            return None
+        announced = set(_read_announced(session))
+        completed = await task_manager.get_tasks_by_assignee(self._member_name, status="completed")
+        fresh = [task for task in completed if task.reviewers() and task.task_id not in announced]
+        if not fresh:
+            return None
+        self._uncommitted = [task.task_id for task in fresh]
+        lines = [t("team_context.task_verified_intro")]
+        lines.extend(f"- {task.task_id} · {task.title or ''}" for task in fresh)
+        return render_event(kind=TASK_VERIFIED_EVENT_KIND, body="\n".join(lines))
+
+    async def commit(self, session: Any) -> None:
+        """Record the tasks the caller just delivered as told.
+
+        A no-op when the last :meth:`pending_text` returned nothing.
+
+        Args:
+            session: The member's own child ``AgentSession``.
+        """
+        pending = self._uncommitted
+        self._uncommitted = None
+        if pending is None or session is None:
+            return
+        announced = list(_read_announced(session))
+        announced.extend(task_id for task_id in pending if task_id not in announced)
+        try:
+            session.update_state({TASK_OUTCOME_STATE_KEY: announced})
+            await session.commit()
+        except Exception as exc:  # noqa: BLE001 - never break a model call over a checkpoint write
+            team_logger.warning(
+                "[{}] failed to persist task outcome baseline: {}",
+                self._member_name or "?",
+                exc,
+            )
+
+
+def _read_announced(session: Any) -> list[str]:
+    """Read the ids of verified tasks already announced to this member."""
+    state = session.get_state(TASK_OUTCOME_STATE_KEY)
+    if not isinstance(state, list):
+        return []
+    return [str(task_id) for task_id in state]
+
+
 __all__ = [
     "ROSTER_CHANGE_EVENT_KIND",
     "ROSTER_EVENT_KIND",
     "ROSTER_NOTE_KIND",
+    "TASK_OUTCOME_STATE_KEY",
+    "TASK_VERIFIED_EVENT_KIND",
     "TEAM_CONTEXT_STATE_KEY",
+    "TaskOutcomeTracker",
     "TeamContextTracker",
 ]

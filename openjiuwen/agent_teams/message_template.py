@@ -84,39 +84,94 @@ _TASK_FIELDS: dict[str, Callable[[Any], str]] = {
 
 # Computed task fields (F_118 / D7): one line per linked task, resolved at
 # delivery time like every other ``task.*`` value. The upstream line carries
-# the author's completion ``note`` — the hand-over that used to be echoed
-# only to the author.
+# the author's completion summary (F_119); the full detail stays one
+# ``view_task(action='note')`` call away.
 _TASK_LINK_FIELDS = ("upstream_brief", "downstream_brief")
 
 _NONE_PHRASE = {"cn": "无", "en": "none"}
 
+_UPSTREAM_NOTE_HINT = {
+    "cn": "需要某个上游任务的详细完成说明时，用 `view_task(action='note', task_id=...)` 查看。",
+    "en": "For an upstream task's full completion note, call `view_task(action='note', task_id=...)`.",
+}
 
-def _task_line(task: Any, *, with_note: bool) -> str:
+# Rendered length ceiling of a completion summary (F_119). The stored value is
+# never cut; only lightweight renderings (digests, briefs) are.
+SUMMARY_RENDER_LIMIT = 200
+
+
+def completion_summary(task: Any) -> str:
+    """Render a task's completion summary as one bounded line.
+
+    Falls back to the first non-empty line of the completion note when the
+    author gave no summary. Line breaks are folded into spaces and the result
+    is cut to ``SUMMARY_RENDER_LIMIT`` characters with a trailing ``…``.
+
+    Args:
+        task: A task row (or any object with ``summary`` / ``note``).
+
+    Returns:
+        The one-line summary, or ``""`` when the task has neither field.
+    """
+    text = (getattr(task, "summary", None) or "").strip()
+    if not text:
+        note = getattr(task, "note", None) or ""
+        text = next((line.strip() for line in note.splitlines() if line.strip()), "")
+    text = " ".join(text.split())
+    if len(text) > SUMMARY_RENDER_LIMIT:
+        return text[:SUMMARY_RENDER_LIMIT] + "…"
+    return text
+
+
+def completion_summary_truncated(task: Any) -> bool:
+    """Whether :func:`completion_summary` had to drop part of the task's text.
+
+    True when the rendered line is cut, or when it fell back to the note while
+    the note has more than its first line.
+    """
+    summary = " ".join((getattr(task, "summary", None) or "").split())
+    if summary:
+        return len(summary) > SUMMARY_RENDER_LIMIT
+    note_lines = [line for line in (getattr(task, "note", None) or "").splitlines() if line.strip()]
+    if not note_lines:
+        return False
+    return len(note_lines) > 1 or len(" ".join(note_lines[0].split())) > SUMMARY_RENDER_LIMIT
+
+
+def _task_line(task: Any, *, with_summary: bool) -> str:
     parts = [f"{task.task_id} · {task.title or ''}"]
     if task.assignee:
         parts.append(f"· {task.assignee}")
-    note = getattr(task, "note", None) if with_note else None
-    if note:
-        parts.append(f"· {note}")
+    summary = completion_summary(task) if with_summary else ""
+    if summary:
+        parts.append(f"· {summary}")
     return " ".join(parts)
 
 
-def upstream_brief(upstream: list[Any]) -> str:
-    """Render one line per upstream task, each carrying the author's completion note.
+def upstream_brief(upstream: list[Any], language: str = "cn") -> str:
+    """Render one line per upstream task with its completion summary.
+
+    Only the summary is rendered; a closing line points to
+    ``view_task(action='note')`` for the full detail.
 
     Args:
-        upstream: Upstream task rows.
+        upstream: Upstream task rows (the task's direct dependencies).
+        language: Rendering language of the closing hint ('cn' or 'en').
 
     Returns:
-        The bullet lines, or ``""`` when there is no upstream task.
+        The bullet lines plus the hint, or ``""`` when there is no upstream task.
     """
-    return "\n".join(f"- {_task_line(task, with_note=True)}" for task in upstream)
+    if not upstream:
+        return ""
+    lines = [f"- {_task_line(task, with_summary=True)}" for task in upstream]
+    lines.append(_UPSTREAM_NOTE_HINT.get(language, _UPSTREAM_NOTE_HINT["en"]))
+    return "\n".join(lines)
 
 
 def _task_briefs(upstream: list[Any], downstream: list[Any], language: str) -> dict[str, str]:
     none = _NONE_PHRASE.get(language, _NONE_PHRASE["en"])
-    up = upstream_brief(upstream) or none
-    down = "\n".join(f"- {_task_line(task, with_note=False)}" for task in downstream) or none
+    up = upstream_brief(upstream, language) or none
+    down = "\n".join(f"- {_task_line(task, with_summary=False)}" for task in downstream) or none
     return {"upstream_brief": up, "downstream_brief": down}
 
 
@@ -322,9 +377,12 @@ __all__ = [
     "ExpandedMessage",
     "MemberGetter",
     "RefUnresolved",
+    "SUMMARY_RENDER_LIMIT",
     "TaskGetter",
     "TaskLinksGetter",
     "build_meta",
+    "completion_summary",
+    "completion_summary_truncated",
     "expand_message",
     "fallback_line",
     "parse_meta",

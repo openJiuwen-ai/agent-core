@@ -12,6 +12,9 @@
 - 查看**其他成员**任务的内容与完成说明（note）——例如你的下游需要你交付什么、上游交付了什么
 - 开工通知已包含你自己任务的目标、验收标准与上下游简述，通常不需要再 get 自己的任务
 
+### action=note（需要 task_id）
+- 读取某个任务完整的完成摘要（summary）与完成详情（note）——看板摘要、上游列表里的完成摘要只是截断的一行
+
 ### action=in_review
 - 你是验证者时，列出等待你验收的任务
 
@@ -22,7 +25,10 @@
 不含 content — 需要详情请用 action=get 查看单个任务。
 
 ### get
-单个任务完整详情：含 content、note（承担者的完成说明）、blocked_by（前置依赖）、blocks（下游依赖）。
+单个任务完整详情：含 content、summary / note（承担者的完成摘要与详情）、blocked_by（前置依赖）、blocks（下游依赖）。
+
+### note
+单个任务的完成摘要（summary）与完整完成详情（note），不截断。
 
 ## Tips
 

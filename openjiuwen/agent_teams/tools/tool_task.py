@@ -277,6 +277,13 @@ async def _validate_assignees(
     return None
 
 
+# Appended to member_complete_task results under scheduled dispatch (F_119).
+_SCHEDULED_HANDOFF_NOTICE = (
+    "The scheduler passes the result and your summary to the leader; do not send a separate "
+    "completion report. A review verdict, if any, reaches you on your next input."
+)
+
+
 def _spec_label(spec: dict) -> str:
     """Human-readable label for a task spec in error messages."""
     return spec.get("task_id") or spec.get("title") or "<unnamed>"
@@ -732,7 +739,7 @@ class ViewTaskToolV2(TeamTool):
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["get", "list", "claimable", "in_review"],
+                    "enum": ["get", "note", "list", "claimable", "in_review"],
                     "description": t("view_task", "action"),
                 },
                 "task_id": {"type": "string", "description": t("view_task", "task_id")},
@@ -755,6 +762,28 @@ class ViewTaskToolV2(TeamTool):
             if detail:
                 return ToolOutput(success=True, data=detail.model_dump(exclude_none=True))
             return ToolOutput(success=False, error="Task not found")
+
+        if action == "note":
+            # The full completion summary + detail of one task (F_119): the
+            # untruncated text behind the summaries shown in digests and briefs.
+            task_id = inputs.get("task_id")
+            if not task_id:
+                return ToolOutput(success=False, error="task_id required for note action")
+            task = await self.task_manager.get(task_id)
+            if task is None:
+                return ToolOutput(success=False, error="Task not found")
+            return ToolOutput(
+                success=True,
+                data={
+                    "view": "note",
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "status": task.status,
+                    "assignee": task.assignee,
+                    "summary": task.summary,
+                    "note": task.note,
+                },
+            )
 
         if action == "in_review":
             # Tasks this member must verify (it is a reviewer and status=IN_REVIEW).
@@ -781,6 +810,8 @@ class ViewTaskToolV2(TeamTool):
             return output.error or "Task not found"
         d = output.data
         now_ms = get_current_time()
+        if d.get("view") == "note":
+            return _render_completion_note(d)
         # Detail view (get action) — mirrors TaskGetTool
         if "content" in d:
             lines = [
@@ -792,6 +823,8 @@ class ViewTaskToolV2(TeamTool):
                 lines.append(f"Assignee: {d['assignee']}")
             if d.get("reviewer"):
                 lines.append(f"Reviewers: {', '.join(d['reviewer'])}")
+            if d.get("summary"):
+                lines.append(f"Summary: {d['summary']}")
             if d.get("note"):
                 lines.append(f"Note: {d['note']}")
             if d.get("updated_at") is not None:
@@ -816,6 +849,20 @@ class ViewTaskToolV2(TeamTool):
                 parts.append(f"[blocked by {', '.join(f'#{tid}' for tid in task['blocked_by'])}]")
             lines.append(" ".join(parts))
         return "\n".join(lines)
+
+
+def _render_completion_note(d: dict[str, Any]) -> str:
+    """Render ``view_task(action='note')``: the full completion summary and detail."""
+    owner = f", assignee: {d['assignee']}" if d.get("assignee") else ""
+    head = f"Task #{d['task_id']} \"{d['title']}\" ({d['status']}{owner})"
+    if not d.get("summary") and not d.get("note"):
+        return f"{head}\nTask #{d['task_id']} has no completion summary or note."
+    lines = [head]
+    if d.get("summary"):
+        lines.append(f"Summary: {d['summary']}")
+    if d.get("note"):
+        lines.append(f"Completion note:\n{d['note']}")
+    return "\n".join(lines)
 
 
 class UpdateTaskTool(TeamTool):
@@ -1331,6 +1378,10 @@ class MemberCompleteTaskTool(TeamTool):
                     "type": "string",
                     "description": t("member_complete_task", "task_id"),
                 },
+                "summary": {
+                    "type": "string",
+                    "description": t("member_complete_task", "summary"),
+                },
                 "note": {
                     "type": "string",
                     "description": t("member_complete_task", "note"),
@@ -1363,9 +1414,10 @@ class MemberCompleteTaskTool(TeamTool):
                 ),
             )
 
+        summary = (inputs.get("summary") or "").strip() or None
         note = (inputs.get("note") or "").strip() or None
         try:
-            result = await self.task_manager.complete(task_id=task_id, note=note)
+            result = await self.task_manager.complete(task_id=task_id, summary=summary, note=note)
         except Exception as e:
             team_logger.error("member_complete_task: complete(%s) failed: %s", task_id, e)
             return ToolOutput(success=False, error=f"Internal error: {e}")
@@ -1378,8 +1430,9 @@ class MemberCompleteTaskTool(TeamTool):
         settled = await self.task_manager.get(task_id)
         outcome = "in_review" if settled and settled.status == TaskStatus.IN_REVIEW.value else "completed"
 
-        # The note is not echoed back: the caller already holds it in its own
-        # tool-call arguments, and repeating it only doubles it in context.
+        # The summary / note are not echoed back: the caller already holds them
+        # in its own tool-call arguments, and repeating them only doubles them
+        # in context.
         return ToolOutput(
             success=True,
             data={
@@ -1393,8 +1446,14 @@ class MemberCompleteTaskTool(TeamTool):
             return output.error or "Failed to complete task"
         d = output.data
         if d.get("status") == "in_review":
-            return f"Task #{d['task_id']} submitted for review — awaiting a reviewer's verdict"
-        return f"Task #{d['task_id']} completed"
+            line = f"Task #{d['task_id']} submitted for review — awaiting a reviewer's verdict"
+        else:
+            line = f"Task #{d['task_id']} completed"
+        # Under scheduled dispatch the scheduler hands the result and summary to
+        # the leader (F_119); a separate report would only repeat it.
+        if self.task_manager.dispatch_mode == "scheduled":
+            line += f"\n\n{_SCHEDULED_HANDOFF_NOTICE}"
+        return line
 
 
 class VerifyTaskTool(TeamTool):

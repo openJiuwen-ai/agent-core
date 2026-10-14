@@ -398,10 +398,11 @@ STRINGS: dict[str, str] = {
     "view_task.action": (
         "View mode: 'list' (default, summary of all tasks), "
         "'get' (single task detail, requires task_id), "
+        "'note' (a task's full completion summary and note, requires task_id), "
         "'claimable' (pending tasks ready to claim), "
         "'in_review' (tasks assigned to you to verify, currently in_review)"
     ),
-    "view_task.task_id": "Task ID — required when action=get, ignored otherwise",
+    "view_task.task_id": "Task ID — required when action=get or note, ignored otherwise",
     "view_task.status": (
         "Status filter for action=list only: "
         "pending/blocked/planning/in_progress/in_review/completed/cancelled. "
@@ -464,8 +465,13 @@ STRINGS: dict[str, str] = {
     "member_complete_task.task_id": (
         "ID of the task to mark completed (must be a task the leader has assigned to you)"
     ),
+    "member_complete_task.summary": (
+        "One-sentence completion summary: what you delivered and where the main artifact is; shown in the "
+        "leader digest and in downstream upstream lists"
+    ),
     "member_complete_task.note": (
-        "Optional completion note describing your result or any follow-up the team should know about"
+        "Full completion detail: artifact paths, key decisions or follow-ups the team should know about; "
+        "reviewers and view_task(action='note') read it in full"
     ),
     # ===== verify_task ========================================================
     # verify_task._desc lives in descs/en/task/verify_task.md

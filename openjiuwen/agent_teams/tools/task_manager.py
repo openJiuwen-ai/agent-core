@@ -146,6 +146,11 @@ class TeamTaskManager:
         self.leader_member_name = str(leader_member_name or "").strip()
         self._dispatch_mode = dispatch_mode
 
+    @property
+    def dispatch_mode(self) -> str:
+        """The team's dispatch mode ("autonomous" / "scheduled")."""
+        return self._dispatch_mode
+
     def configure_plan_storage(
         self,
         *,
@@ -380,6 +385,7 @@ class TeamTaskManager:
             reviewer=task.reviewers(),
             review_round=task.review_round,
             max_review_rounds=task.max_review_rounds,
+            summary=task.summary,
             note=task.note,
             blocked_by=blocked_by,
             blocks=blocks,
@@ -603,7 +609,13 @@ class TeamTaskManager:
 
         return TaskOpResult.success()
 
-    async def complete(self, task_id: str, *, note: str | None = None) -> TaskOpResult:
+    async def complete(
+        self,
+        task_id: str,
+        *,
+        summary: str | None = None,
+        note: str | None = None,
+    ) -> TaskOpResult:
         """Complete a task.
 
         Updates task status to 'completed' and unblocks dependent tasks.
@@ -611,9 +623,13 @@ class TeamTaskManager:
 
         Args:
             task_id: Task identifier.
-            note: Author's completion note (artifact paths, key decisions).
-                Persisted on the task row — read by downstream handoff briefs
-                and ``view_task(get)``, never carried by events (F_118).
+            summary: Author's one-line completion summary (what was delivered
+                and where), rendered in leader digests and upstream briefs
+                (F_119). Stored in full; ``None`` keeps the stored value.
+            note: Author's full completion detail (artifact paths, key
+                decisions). Persisted on the task row — read by reviewers and
+                ``view_task``, never carried by events (F_118). ``None`` keeps
+                the stored value.
 
         Returns:
             ``TaskOpResult`` describing the outcome.
@@ -635,7 +651,7 @@ class TeamTaskManager:
         # review is driven by the task's reviewer list, not the member.
         gated = await self.db.task.get_task(task_id)
         if gated is not None and gated.reviewers():
-            return await self._submit_for_review(gated, note=note)
+            return await self._submit_for_review(gated, summary=summary, note=note)
 
         # No plan-mode-specific gate is needed: the transition table forbids
         # PLANNING -> COMPLETED, so a plan-mode member cannot complete a task
@@ -644,7 +660,7 @@ class TeamTaskManager:
 
         # Complete task atomically - this handles state validation, dependency resolution,
         # and unblocking dependent tasks in a single transaction to prevent race conditions
-        result = await self.db.task.complete_task(task_id, note=note)
+        result = await self.db.task.complete_task(task_id, summary=summary, note=note)
         if not result:
             current = await self.db.task.get_task(task_id)
             if current is None:
@@ -687,7 +703,13 @@ class TeamTaskManager:
         await self._maybe_publish_task_list_drained()
         return TaskOpResult.success()
 
-    async def _submit_for_review(self, task, *, note: str | None = None) -> TaskOpResult:
+    async def _submit_for_review(
+        self,
+        task,
+        *,
+        summary: str | None = None,
+        note: str | None = None,
+    ) -> TaskOpResult:
         """Route a completed-by-author task into the verify gate (IN_REVIEW).
 
         Called from ``complete`` when the task carries reviewers. Plain
@@ -696,7 +718,7 @@ class TeamTaskManager:
         ``TASK_SUBMITTED_FOR_REVIEW`` carrying the reviewer list for the
         framework to dispatch/notify.
         """
-        submitted = await self.db.task.submit_for_review(task.task_id, note=note)
+        submitted = await self.db.task.submit_for_review(task.task_id, summary=summary, note=note)
         if not submitted:
             return TaskOpResult.fail(
                 f"Task {task.task_id} cannot be submitted for review from status "

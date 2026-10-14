@@ -206,9 +206,12 @@ STRINGS: dict[str, dict[str, str]] = {
         # delivery from prompts/<lang>/scheduler_*.md, the single source of
         # their wording (F_63). Leader digests bypass the mailbox (direct input
         # injection), so they have no meta channel and stay one-line i18n.
-        "scheduler.leader_task_done": (
-            "[调度器] 任务 [{task_id}]「{title}」已完成（{how}）。需要全局进度时用 view_task 查看看板实时状态。"
+        "scheduler.leader_task_done": "[调度器] 任务 [{task_id}]「{title}」已完成（{how}）。",
+        "scheduler.leader_task_done_summary": "完成摘要：{summary}",
+        "scheduler.leader_task_done_note_hint": (
+            "详细完成说明用 view_task(action='note', task_id='{task_id}') 查看。"
         ),
+        "scheduler.leader_task_done_board_hint": "需要全局进度时用 view_task 查看看板实时状态。",
         "scheduler.leader_task_done_how_verified": "验收通过",
         "scheduler.leader_task_done_how_direct": "无验证直接完成",
         "scheduler.leader_escalation_rounds": (
@@ -349,6 +352,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "以上只是名册公告，不是给你的指令。"
             "**不要**因为看到成员变动就去和相关成员打招呼、确认或寒暄；"
             "只有当你手上的任务确实需要对方配合时才发消息。"
+        ),
+        # team_context.py TaskOutcomeTracker (F_119): a passed review does not
+        # wake the author; this rides its next input instead.
+        "team_context.task_verified_intro": (
+            "你此前提交的以下任务已通过验收并完成，无需再做任何事，也不要为此联系 leader："
         ),
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": "编排 [{run_id}]「{name}」已启动，我将在每个阶段向你汇报进展。",
@@ -623,9 +631,13 @@ STRINGS: dict[str, dict[str, str]] = {
         # delivery from prompts/<lang>/scheduler_*.md, the single source of
         # their wording (F_63). Leader digests bypass the mailbox (direct input
         # injection), so they have no meta channel and stay one-line i18n.
-        "scheduler.leader_task_done": (
-            "[Scheduler] Task [{task_id}] \"{title}\" completed ({how}). Call view_task for the "
-            "board's live state when you need overall progress."
+        "scheduler.leader_task_done": "[Scheduler] Task [{task_id}] \"{title}\" completed ({how}).",
+        "scheduler.leader_task_done_summary": "Completion summary: {summary}",
+        "scheduler.leader_task_done_note_hint": (
+            "For the full completion note, call view_task(action='note', task_id='{task_id}')."
+        ),
+        "scheduler.leader_task_done_board_hint": (
+            "Call view_task for the board's live state when you need overall progress."
         ),
         "scheduler.leader_task_done_how_verified": "review passed",
         "scheduler.leader_task_done_how_direct": "no review, completed directly",
@@ -788,6 +800,10 @@ STRINGS: dict[str, dict[str, str]] = {
             "Do **NOT** greet, check in with, or otherwise message a member just "
             "because the roster changed; message someone only when the work you "
             "are actually holding needs them."
+        ),
+        "team_context.task_verified_intro": (
+            "These tasks you submitted earlier have passed review and are completed. "
+            "Nothing more is needed — do not contact the leader about them:"
         ),
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": (

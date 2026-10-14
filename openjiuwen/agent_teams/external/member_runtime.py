@@ -32,7 +32,7 @@ from typing import (
 
 from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn
-from openjiuwen.agent_teams.team_context import TeamContextTracker
+from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
@@ -233,6 +233,9 @@ class ExternalHarnessMemberRuntime:
         self._harness = harness
         self._context_source = context
         self._team_context_tracker = team_context_tracker
+        # Scheduled dispatch only (F_119): review passes folded into the next
+        # message. Bound after construction, like the team-context tracker.
+        self._task_outcome_tracker: TaskOutcomeTracker | None = None
         self._resume_external_backend = resume_external_backend
         self._require_checkpoint = require_checkpoint
         self._seed_checkpoint = seed_checkpoint
@@ -332,6 +335,10 @@ class ExternalHarnessMemberRuntime:
 
     def bind_team_context_tracker(self, tracker: TeamContextTracker | None) -> None:
         self._team_context_tracker = tracker
+
+    def bind_task_outcome_tracker(self, tracker: TaskOutcomeTracker | None) -> None:
+        """Bind the tracker that folds untold review passes into the next message."""
+        self._task_outcome_tracker = tracker
 
     def bind_mcp_servers(self, servers: Sequence[McpServerConfig]) -> None:
         """Mount additional MCP servers on the next ``start``."""
@@ -555,15 +562,21 @@ class ExternalHarnessMemberRuntime:
                 return await self._adapter.send(content, immediate=immediate)
             external_input = to_harness_input(content)
             delivered_text = harness_input_text(external_input)
+            pending_outcome = await self._pending_task_outcome()
+            if pending_outcome:
+                external_input = _prepend_context(external_input, pending_outcome)
             pending_context = await self._pending_team_context()
             if pending_context:
                 external_input = _prepend_context(external_input, pending_context)
             receipt = await self._adapter.send(external_input, immediate=immediate)
-            # Both halves are recorded, and the message first so it is the one
+            # Every part is recorded, and the message first so it is the one
             # the turn states as its input. A provider splits the delivery into
             # a message per block, so the combined text would match none of
             # them and the turn would read as if nobody had said anything.
             self._record_input(receipt, delivered_text)
+            if pending_outcome:
+                self._record_input(receipt, pending_outcome)
+                await self._commit_task_outcome()
             if pending_context:
                 self._record_input(receipt, pending_context)
                 await self._commit_team_context()
@@ -916,6 +929,16 @@ class ExternalHarnessMemberRuntime:
         if self._team_context_tracker is None or self._member_session is None:
             return
         await self._team_context_tracker.commit(self._member_session)
+
+    async def _pending_task_outcome(self) -> str | None:
+        if self._task_outcome_tracker is None or self._member_session is None:
+            return None
+        return await self._task_outcome_tracker.pending_text(self._member_session)
+
+    async def _commit_task_outcome(self) -> None:
+        if self._task_outcome_tracker is None or self._member_session is None:
+            return
+        await self._task_outcome_tracker.commit(self._member_session)
 
     # ------------------------------------------------------------------
     # MemberRuntime: interrupt helpers and no-op hooks

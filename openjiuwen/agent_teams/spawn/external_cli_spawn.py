@@ -597,6 +597,12 @@ async def external_cli_spawn(
             team_name,
         ),
     )
+    if spec.dispatch_mode == "scheduled" and teammate_backend is not None:
+        from openjiuwen.agent_teams.team_context import TaskOutcomeTracker
+
+        runtime.bind_task_outcome_tracker(
+            TaskOutcomeTracker(team_backend=teammate_backend, member_name=member_name),
+        )
     from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
 
     if isinstance(runtime, ExternalHarnessMemberRuntime):

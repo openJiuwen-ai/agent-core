@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -347,9 +348,10 @@ class TeamScheduler:
         if not result.ok:
             team_logger.debug("[scheduler] pass settle for %s did not apply: %s", task.task_id, result.reason)
             return False
-        if task.assignee:
-            await self._send_as_leader(task.assignee, render.meta_verified_report(task))
-        await self._digest_task_done(task_manager, task.task_id, task.title, verified=True)
+        # The author is not woken for a pass (F_119): the leader gets the result
+        # through the digest, and the author learns it on its next input via
+        # the task-outcome channel of its own rail.
+        await self._digest_task_done(task_manager, task, verified=True)
         return True
 
     async def _settle_fail_or_escalate(self, task_manager, task, tally: dict) -> bool:
@@ -770,21 +772,24 @@ class TeamScheduler:
         )
         await self._host.deliver_input(content, use_steer=False)
 
-    async def _digest_task_done(self, task_manager, task_id: str, title: str, *, verified: bool) -> None:
-        """One-line terminal digest to the leader, once per task.
+    async def _digest_task_done(self, task_manager, task: Any, *, verified: bool) -> None:
+        """Terminal digest to the leader, once per task.
+
+        Carries the task's completion summary (F_119), which stands in for the
+        member's own completion report.
 
         Also the all-done fallback for leader-settled boards: the drained
         event a leader-local settle publishes is self-filtered off the bus,
         so a zero-remaining digest announces the wrap-up directly.
         """
-        if task_id in self._digested_tasks:
+        if task.task_id in self._digested_tasks:
             return
-        self._digested_tasks.add(task_id)
+        self._digested_tasks.add(task.task_id)
         tasks = await task_manager.list_tasks()
         terminal = (TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value)
-        remaining = sum(1 for task in tasks if task.status not in terminal)
+        remaining = sum(1 for row in tasks if row.status not in terminal)
         await self._host.deliver_input(
-            render.render_leader_task_done(task_id, title, verified=verified),
+            render.render_leader_task_done(task, verified=verified),
             use_steer=False,
         )
         if remaining == 0 and tasks and not self._all_done_announced:
@@ -812,8 +817,11 @@ class TeamScheduler:
         if task_id in self._digested_tasks:
             return
         task = await task_manager.get(task_id)
-        title = task.title if task is not None else ""
-        await self._digest_task_done(task_manager, task_id, title, verified=verified)
+        if task is None:
+            # The row was swept between the event and this digest: announce the
+            # id alone rather than drop the completion.
+            task = SimpleNamespace(task_id=task_id, title="", summary=None, note=None)
+        await self._digest_task_done(task_manager, task, verified=verified)
 
     async def _announce_all_done(self, event: EventMessage) -> None:
         """Inject the final all-terminal digest into the leader, once."""

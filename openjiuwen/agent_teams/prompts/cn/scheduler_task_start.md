@@ -13,6 +13,6 @@
 
 ## 交付方式
 
-- 完成后调用 `member_complete_task(task_id='{{task.task_id}}', note=...)` 提交，`note` 写明产物路径与关键决策——它会随开工通知交给下游。
+- 完成后调用 `member_complete_task(task_id='{{task.task_id}}', summary=..., note=...)` 提交：`summary` 一句话说明交付了什么、主产物在哪，`note` 写完整的产物路径与关键决策——它们会交给 Leader 与下游，提交后不需要另行汇报。
 - 该任务的验证者：{{task.reviewer}}。提交后由调度框架转交验收，你不需要联系验证者。
 - 执行中需要澄清或协调时，用 `send_message` 联系 leader。

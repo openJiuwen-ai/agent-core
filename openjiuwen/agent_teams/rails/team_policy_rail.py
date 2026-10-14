@@ -52,7 +52,7 @@ from openjiuwen.agent_teams.prompts import (
 )
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.team_context import TeamContextTracker
+from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
@@ -181,6 +181,14 @@ class TeamPolicyRail(DeepAgentRail):
             language=language,
             fork_source=fork_source,
         )
+        # Scheduled dispatch only (F_119): a passed review does not wake the
+        # author, so the outcome rides its next admitted input instead.
+        # Autonomous dispatch keeps its live verified notice.
+        self._outcome_tracker: TaskOutcomeTracker | None = (
+            TaskOutcomeTracker(team_backend=team_backend, member_name=member_name)
+            if dispatch_mode == "scheduled" and team_backend is not None and role != TeamRole.LEADER
+            else None
+        )
 
     def init(self, agent: Any) -> None:
         """Cache the agent's shared prompt builder."""
@@ -219,6 +227,11 @@ class TeamPolicyRail(DeepAgentRail):
 
         The state is inserted at the front, so the member reads who it is and
         what team it is on before whatever prompted this round.
+
+        Under scheduled dispatch, review passes the member has not been told
+        about yet are folded in as well (F_119). They are events, not standing
+        state, so they always go inline into this input — never into the
+        ``team.context`` attachment.
         """
         inputs = getattr(ctx, "inputs", None)
         parts = getattr(inputs, "parts", None)
@@ -230,6 +243,7 @@ class TeamPolicyRail(DeepAgentRail):
         session = getattr(ctx, "session", None)
         if session is None:
             return
+        await self._fold_task_outcomes(parts, session)
         if await self._queue_team_context_attachment(ctx, session):
             return
         text = await self._tracker.pending_text(session)
@@ -237,6 +251,16 @@ class TeamPolicyRail(DeepAgentRail):
             return
         parts.insert(0, text)
         await self._tracker.commit(session)
+
+    async def _fold_task_outcomes(self, parts: list[str], session: Any) -> None:
+        """Prepend review passes not yet told to the member onto its input."""
+        if self._outcome_tracker is None:
+            return
+        text = await self._outcome_tracker.pending_text(session)
+        if not text:
+            return
+        parts.insert(0, text)
+        await self._outcome_tracker.commit(session)
 
     async def before_steering_drain(self, ctx: AgentCallbackContext) -> None:
         """Cap how much of the steering backlog one model call takes.

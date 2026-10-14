@@ -13,6 +13,6 @@
 
 ## How to deliver
 
-- Call `member_complete_task(task_id='{{task.task_id}}', note=...)` when done; put artifact paths and key decisions in `note` — it is handed to your downstream with their start notice.
+- Call `member_complete_task(task_id='{{task.task_id}}', summary=..., note=...)` when done: `summary` is one sentence on what you delivered and where the main artifact is, `note` holds the full artifact paths and key decisions — both go to the leader and your downstream, so do not report separately after submitting.
 - Reviewers for this task: {{task.reviewer}}. The framework hands your submission over for review — do not contact the reviewers yourself.
 - Use `send_message` to reach the leader if you need clarification or coordination.
