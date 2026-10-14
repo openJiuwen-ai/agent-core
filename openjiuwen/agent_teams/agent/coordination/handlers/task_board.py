@@ -589,7 +589,16 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 await self._round.deliver_input(render_event(kind="all-done", body=body))
                 return
             lines = [*completed_block, t("dispatcher.leader_task_board")]
-            board_tasks = incomplete
+            # The leader authored every task body, so its board is one light
+            # line per task (status, owner, what blocks it) instead of
+            # re-sending each body on every nudge; view_task(get) has it.
+            summaries = await self._infra.task_manager.list_tasks_with_deps()
+            now_ms = get_current_time()
+            lines.extend(
+                render_task_line(task, now_ms=now_ms, with_content=False, blocked_by=task.blocked_by)
+                for task in summaries.tasks
+                if task.status not in terminal
+            )
         else:
             # Teammate: surface claimable work (pending + unassigned) and
             # explicitly assigned self work. Assigned pending tasks may have
@@ -602,11 +611,11 @@ class TaskBoardHandler(BaseCoordinationHandler):
             ]
             if not board_tasks:
                 return
+            # A teammate keeps the bodies: it did not write them and picks
+            # work by matching them against its own expertise.
+            now_ms = get_current_time()
             lines = [t("dispatcher.teammate_task_list")]
-
-        now_ms = get_current_time()
-        for task in board_tasks:
-            lines.append(render_task_line(task, now_ms=now_ms))
+            lines.extend(render_task_line(task, now_ms=now_ms) for task in board_tasks)
 
         # A board survey is a reminder, not a reason to drop what the member is
         # doing (decision dimension 3): it never says "the work you are on is

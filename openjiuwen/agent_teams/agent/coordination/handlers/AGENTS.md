@@ -145,6 +145,7 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
   `TASK_RELEASED`，即**只有会扩大可处理池的三类**。其余跃迁要么缩小池（`CLAIMED`）、要么
   移除任务（`COMPLETED` / `CANCELLED`）、要么不改变可处理集（`UPDATED` / `STARTED`），
   唤醒 teammate 只会白烧一轮去重扫没变的板。
+- leader 看板每任务一行**不带 `content`**（`render_task_line(with_content=False)`，附 `[blocked by #…]`，数据来自 `list_tasks_with_deps`）——任务正文是 leader 自己写的，已在其上下文里，每次唤醒重贴只是重复；要看全文用 `view_task(get)`。teammate 看板保留 `content`（它靠正文匹配专长决定认领）
 - `_nudge_idle_agent` 给 teammate 只渲染 **claimable（pending 且无 assignee）+ assignee ==
   自己的未完成任务**；别人 in-flight 的活不喂给 teammate——唤醒它是为了让它接活，不是让它
   围观别人干活。

@@ -151,3 +151,26 @@ def test_render_task_board_wraps_in_team_event(lang_en):
 def test_render_task_board_empty_when_all_terminal(lang_en):
     tasks = [_task("t1", "completed", None), _task("t2", "cancelled", None)]
     assert render_task_board(tasks, is_leader=False, now_ms=_NOW_MS) == ""
+
+
+@pytest.mark.level0
+def test_render_task_line_can_drop_the_body_and_name_blockers(lang_en):
+    task = _task("t1", "blocked", "dev-1")
+
+    line = render_task_line(task, now_ms=_NOW_MS, with_content=False, blocked_by=["t0", "tx"])
+
+    assert task.content not in line
+    assert line.startswith("- [t1] [blocked] ")
+    assert "→ dev-1" in line
+    assert line.endswith("[blocked by #t0, #tx]")
+
+
+@pytest.mark.level0
+def test_render_task_board_leaves_bodies_out_for_the_leader_only(lang_en):
+    task = _task("t1", "pending", None)
+
+    leader = render_task_board([task], is_leader=True, now_ms=_NOW_MS)
+    teammate = render_task_board([task], is_leader=False, now_ms=_NOW_MS)
+
+    assert task.content not in leader
+    assert task.content in teammate

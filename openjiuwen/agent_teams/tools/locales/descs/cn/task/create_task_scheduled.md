@@ -8,7 +8,7 @@
 ## 任务字段
 
 - **title**: 简明描述任务目标（祈使语气，如 "实现用户认证"）
-- **content**: 目标、验收标准和约束 — 不写具体操作步骤。**不要**写"完成后用 send_message 向 leader 汇报 / 报进度"之类的要求：成员提交时写下的完成摘要（`summary` / `note`）会随调度器的终态摘要自动送达你，额外的汇报只会重复并多唤醒你一轮
+- **content**: 目标、验收标准和约束 — 不写具体操作步骤。**不要**写"完成后用 send_message 向 leader 汇报 / 报进度"之类的要求：成员提交时写下的完成摘要（`summary` / `note`）会随调度器的终态摘要自动送达你，额外的汇报只会重复并多唤醒你一轮。也**无需**写"开工前用 view_task 读取前序任务的 note"：开工通知会自动附上本任务直接上游的完成摘要，需要全文成员会自己用 `view_task(action='note')` 读取
 - **assignee**（与 `member` 二选一）: 承担该任务的成员名称。**该成员必须已经存在且不能是 leader**——先 `spawn_teammate` 建人，再 `create_task` 派活；也可以填本次调用中其他任务用 `member` 内联声明的成员，例如前面任务新建的成员再承担后置的汇总任务
 - **member**（与 `assignee` 二选一）: 随任务内联创建的承担者对象，见下方《任务内联成员》
 - **reviewer**（每个任务需要至少 1 个）: 结构化对象的列表，每项必填 `type`（verifier / inspector / challenger）和 `reviewer_id`（名称，不能等于 assignee），可选 `instruction`（verifier 的验证侧重点描述）。例如 `{"type": "verifier", "reviewer_id": "功能正确性验证", "instruction": "运行测试用例..."}`。配了验证者的任务完成后进入 `in_review` 验收，任一 reviewer 投 fail 即打回（一票否决制）。reviewer 不需要提前 spawn——调度框架会根据 type 自动创建对应类型的临时验证智能体。

@@ -66,3 +66,17 @@ def test_create_task_content_field_discourages_completion_reports(language: str,
         assert "**不要**写\"完成后用 send_message 向 leader 汇报" in desc
     else:
         assert "Do **not** ask the member to `send_message` you a report" in desc
+
+
+@pytest.mark.level1
+@pytest.mark.parametrize("language", ["cn", "en"])
+@pytest.mark.parametrize("desc_key", ["create_task", "create_task_scheduled"])
+def test_create_task_tells_the_leader_upstream_summaries_arrive_on_their_own(language: str, desc_key: str):
+    from openjiuwen.agent_teams.tools.locales import make_translator
+
+    desc = make_translator(language)(desc_key)
+
+    if language == "cn":
+        assert "**无需**写\"开工前用 view_task 读取前序任务的 note\"" in desc
+    else:
+        assert "**no need** to write \"before starting, read the upstream tasks' notes with view_task\"" in desc

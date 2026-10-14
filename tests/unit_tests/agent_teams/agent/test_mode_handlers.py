@@ -623,3 +623,48 @@ async def test_teammate_still_wakes_on_an_assigned_unblock(db, bus):
     await handler.on_task_board_event(EventMessage.from_event(TaskUnblockedEvent(team_name=TEAM, task_id="t1")))
 
     assert len(host.delivered) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_board_lists_tasks_without_their_bodies(db, bus):
+    handler, host, _poll = await _leader_board(
+        db,
+        bus,
+        [
+            TaskGraphSpec(title="first", content="long body of the first task", task_id="t1"),
+            TaskGraphSpec(
+                title="second",
+                content="long body of the second task",
+                task_id="t2",
+                assignee="dev-1",
+                depends_on=("t1",),
+            ),
+        ],
+    )
+
+    await handler.on_task_board_event(
+        EventMessage.from_event(TaskReleasedEvent(team_name=TEAM, task_id="t1"))
+    )
+
+    assert len(host.delivered) == 1
+    board = host.delivered[0]
+    assert "long body" not in board
+    assert "[t1] [pending] first" in board
+    assert "[t2] [blocked] second → dev-1" in board
+    assert "[blocked by #t1]" in board
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_teammate_board_keeps_the_task_bodies(db, bus):
+    host, poll = FakeHost(), FakePoll()
+    infra = _infra(db, bus, "dev-1")
+    assert (
+        await infra.task_manager.add_graph([TaskGraphSpec(title="w", content="what to build", task_id="t1")])
+    ).ok
+    handler = TaskBoardHandler(host, _blueprint("dev-1", TeamRole.TEAMMATE), infra, poll)
+
+    await handler.on_task_board_event(EventMessage.from_event(TaskUnblockedEvent(team_name=TEAM, task_id="t1")))
+
+    assert "what to build" in host.delivered[0]

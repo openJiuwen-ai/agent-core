@@ -131,22 +131,39 @@ def render_messages(
     )
 
 
-def render_task_line(task: _TaskLike, *, now_ms: int) -> str:
+def render_task_line(
+    task: _TaskLike,
+    *,
+    now_ms: int,
+    with_content: bool = True,
+    blocked_by: list[str] | None = None,
+) -> str:
     """Render one task-board line with its last-transition time.
 
     Single source of truth for the task-board row format, shared by the
     in-process ``TaskBoardHandler`` and the external task-board renderer.
 
     Args:
-        task: A team task row.
+        task: A team task row (or summary; ``content`` is read only when
+            ``with_content`` is set).
         now_ms: Current millisecond UTC epoch, the relative-time anchor.
+        with_content: Whether to carry the task body. The leader's board
+            leaves it out: the leader wrote every body itself, and repeating
+            them on each nudge only re-sends what is already in its context.
+        blocked_by: Unresolved dependency ids, appended as ``[blocked by …]``.
 
     Returns:
-        A line like ``- [t1] [claimed] Title: body → dev-1 (3 分钟前)``.
+        A line like ``- [t1] [claimed] Title: body → dev-1 (3 分钟前)``, or
+        ``- [t1] [blocked] Title → dev-1 (3 分钟前) [blocked by #t0]`` without
+        the body.
     """
     assignee = f" → {task.assignee}" if task.assignee else t("dispatcher.task_unassigned_marker")
     time_info = format_time_context(task.updated_at, now_ms)
-    return f"- [{task.task_id}] [{task.status}] {task.title}: {task.content}{assignee} ({time_info})"
+    body = f": {task.content}" if with_content else ""
+    line = f"- [{task.task_id}] [{task.status}] {task.title}{body}{assignee} ({time_info})"
+    if blocked_by:
+        line += f" [blocked by {', '.join(f'#{task_id}' for task_id in blocked_by)}]"
+    return line
 
 
 def render_task_board(tasks: list[_TaskLike], *, is_leader: bool, now_ms: int) -> str:
@@ -171,7 +188,7 @@ def render_task_board(tasks: list[_TaskLike], *, is_leader: bool, now_ms: int) -
 
     header = t("dispatcher.leader_task_board") if is_leader else t("dispatcher.teammate_task_list")
     lines = [header]
-    lines.extend(render_task_line(task, now_ms=now_ms) for task in incomplete)
+    lines.extend(render_task_line(task, now_ms=now_ms, with_content=not is_leader) for task in incomplete)
     return render_event(kind="task-board", body="\n".join(lines))
 
 
