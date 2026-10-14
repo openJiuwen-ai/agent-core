@@ -81,6 +81,23 @@ class TaskBoardHandler(BaseCoordinationHandler):
         {TeamEvent.TASK_COMPLETED, TeamEvent.TASK_VERIFIED}
     )
 
+    # Board events that never need a leader decision (F_121), so they do not
+    # wake it: a member claiming work or an assignment taking effect
+    # (TASK_CLAIMED fall-through), a human assignee's task auto-starting
+    # (TASK_STARTED), and the review back-and-forth between author and
+    # reviewers (TASK_SUBMITTED_FOR_REVIEW / TASK_REVISION_REQUESTED
+    # fall-through) — its outcome, a pass, still arrives as TASK_VERIFIED.
+    # The leader's next wake shows the full board, so nothing is lost; a
+    # stalled task still reaches it through the stale-task sweep.
+    _LEADER_QUIET_EVENTS: ClassVar[frozenset[str]] = frozenset(
+        {
+            TeamEvent.TASK_CLAIMED,
+            TeamEvent.TASK_STARTED,
+            TeamEvent.TASK_SUBMITTED_FOR_REVIEW,
+            TeamEvent.TASK_REVISION_REQUESTED,
+        }
+    )
+
     # i18n keys of the steers that move a member off a task it lost. They
     # point the member back at the claimable pool; a dispatch mode without
     # one overrides them.
@@ -458,8 +475,10 @@ class TaskBoardHandler(BaseCoordinationHandler):
         Any other board churn — a member editing / completing /
         cancelling a task, or someone else claiming one — never adds
         claimable work, so waking an idle teammate for it just burns a
-        round. The leader stays exempt: it owns board-level decisions
-        (re-plan / assign / conclude) and must see every transition.
+        round. The leader is woken only by events that may need its
+        decision (F_121): ``_LEADER_QUIET_EVENTS`` and the unblocking of a
+        task that already has an assignee are progress only, so they are
+        skipped; its next wake surveys the full board anyway.
         ``resume_polls`` fires for every event regardless, so the nudge
         filter never stalls periodic polling.
         """
@@ -474,11 +493,33 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 event.event_type,
             )
             return
+        if self._blueprint.role == TeamRole.LEADER and await self._leader_needs_no_decision(event):
+            team_logger.debug(
+                "[{}] skip leader nudge: event {} needs no leader decision",
+                member_name,
+                event.event_type,
+            )
+            return
         team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
         just_completed = None
         if self._blueprint.role == TeamRole.LEADER and event.event_type in self._LEADER_COMPLETION_EVENTS:
             just_completed = event.get_payload().task_id
         await self._nudge_idle_agent(member_name, just_completed=just_completed)
+
+    async def _leader_needs_no_decision(self, event: EventMessage) -> bool:
+        """Whether a board event is progress only, from the leader's point of view (F_121).
+
+        ``TASK_UNBLOCKED`` splits on the task's owner: an assigned task is
+        picked up by its assignee, while an unowned one enters the claimable
+        pool and may need the leader to assign it (e.g. to a human member).
+        A task row that is already gone needs nothing either.
+        """
+        if event.event_type in self._LEADER_QUIET_EVENTS:
+            return True
+        if event.event_type != TeamEvent.TASK_UNBLOCKED:
+            return False
+        task = await self._infra.task_manager.get(event.get_payload().task_id)
+        return task is None or bool(task.assignee)
 
     async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
         """First board survey after this member's runtime comes up (F_69).
