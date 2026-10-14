@@ -72,7 +72,7 @@ class ExpertTeamLauncher(Protocol):
         """
 
     async def stop(self, *, team_id: str, session_id: str) -> None:
-        """Stop a temporary Team after a failed invite or aborted launch."""
+        """Stop a temporary Team after a failed launch/invite or organization dissolution."""
 
 
 __all__ = [
