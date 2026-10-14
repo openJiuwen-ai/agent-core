@@ -10,6 +10,8 @@ from openjiuwen.harness.personal_context.distill.types import CorpusMessage
 
 FIXTURE_END_MS = 1_700_000_010_000
 BASE_MS = 1_700_000_000_000
+# Eligible fixture messages end at base+4000 (m4); m5 is ineligible.
+FIXTURE_WINDOW_MAX_MS = BASE_MS + 4_000
 
 
 def test_fixture_corpus_filters_ineligible_empty_and_window():
@@ -36,12 +38,15 @@ def test_fixture_corpus_filters_ineligible_empty_and_window():
             ),
         ]
     )
-    messages, sampled = corpus.list_messages(
+    batch = corpus.list_messages(
         window_start_ms=0,
         window_end_ms=FIXTURE_END_MS,
         max_messages=800,
     )
-    assert sampled is False
+    assert batch.sampled is False
+    assert batch.eligible_count == 4
+    assert batch.window_max_sent_at_ms == FIXTURE_WINDOW_MAX_MS
+    messages = batch.messages
     assert len(messages) == 4
     assert all(message.learning_eligible == 1 for message in messages)
     assert all(message.content_text.strip() for message in messages)
@@ -54,12 +59,28 @@ def test_fixture_corpus_filters_ineligible_empty_and_window():
 
 def test_fixture_corpus_downsamples_uniformly():
     corpus = FixtureCorpus(default_fixture_messages())
-    sampled_messages, sampled = corpus.list_messages(
+    batch = corpus.list_messages(
         window_start_ms=0,
         window_end_ms=FIXTURE_END_MS,
         max_messages=2,
     )
-    assert sampled is True
-    assert len(sampled_messages) == 2
-    assert sampled_messages[0].id == "m1"
-    assert sampled_messages[1].id == "m3"
+    assert batch.sampled is True
+    # Batch facts describe the PRE-downsample window: 4 eligible, max is m4.
+    assert batch.eligible_count == 4
+    assert batch.window_max_sent_at_ms == FIXTURE_WINDOW_MAX_MS
+    assert len(batch.messages) == 2
+    assert batch.messages[0].id == "m1"
+    assert batch.messages[1].id == "m3"
+
+
+def test_fixture_corpus_empty_window_returns_zero_batch():
+    corpus = FixtureCorpus(default_fixture_messages())
+    batch = corpus.list_messages(
+        window_start_ms=FIXTURE_END_MS,
+        window_end_ms=FIXTURE_END_MS + 1_000,
+        max_messages=800,
+    )
+    assert batch.messages == []
+    assert batch.sampled is False
+    assert batch.eligible_count == 0
+    assert batch.window_max_sent_at_ms is None

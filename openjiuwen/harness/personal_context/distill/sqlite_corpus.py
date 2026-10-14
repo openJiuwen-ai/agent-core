@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from openjiuwen.harness.personal_context.distill.corpus import _downsample
+from openjiuwen.harness.personal_context.distill.corpus import DistillCorpusBatch, _downsample
 from openjiuwen.harness.personal_context.distill.types import CorpusMessage
 from openjiuwen.harness.personal_context.im.scheduler import open_im_context_db
 
@@ -66,12 +66,18 @@ class SqliteImCorpus:
         window_start_ms: int,
         window_end_ms: int,
         max_messages: int,
-    ) -> tuple[list[CorpusMessage], bool]:
+    ) -> DistillCorpusBatch:
         selected = self._load_eligible(
             window_start_ms=int(window_start_ms),
             window_end_ms=int(window_end_ms),
         )
-        return _downsample(selected, max_messages)
+        picked, sampled = _downsample(selected, max_messages)
+        return DistillCorpusBatch(
+            messages=picked,
+            sampled=sampled,
+            eligible_count=len(selected),
+            window_max_sent_at_ms=selected[-1].sent_at_ms if selected else None,
+        )
 
     def count_eligible_since(self, *, cursor_ms: int, until_ms: int) -> int:
         return len(

@@ -20,7 +20,7 @@ from openjiuwen.harness.personal_context.distill.store import (
     get_cursor_ms,
     get_job,
 )
-from openjiuwen.harness.personal_context.distill.types import CorpusMessage
+from openjiuwen.harness.personal_context.distill.types import CorpusMessage, DistillCandidates
 
 FIXTURE_END_MS = 1_700_000_010_000
 FIXTURE_BASE_MS = 1_700_000_000_000
@@ -61,6 +61,20 @@ def _seed_cursor(home: str, covered_through_ms: int) -> None:
     )
 
 
+def _bulk_messages(count: int) -> list[CorpusMessage]:
+    return [
+        CorpusMessage(
+            id=f"b{i}",
+            channel_id="welink",
+            conversation_id="conv-bulk",
+            content_text=f"批量消息{i}",
+            sent_at_ms=FIXTURE_BASE_MS + i,
+            is_self=True,
+        )
+        for i in range(1, count + 1)
+    ]
+
+
 @pytest.mark.asyncio
 async def test_run_distill_job_success_writes_version_and_activates_current(tmp_path: Path):
     home = str(tmp_path)
@@ -89,7 +103,16 @@ async def test_run_distill_job_success_writes_version_and_activates_current(tmp_
     job = get_job(home, result.job_id)
     assert job is not None
     assert job["status"] == "success"
+    assert job["message_count"] == 4
+    assert job["eligible_count"] == 4
+    assert job["prompt_message_count"] == 4
+    assert job["covered_through_ms"] == FIXTURE_COVERED_THROUGH_MS
     assert "persona_id" not in job
+    meta = json.loads((root / "meta.json").read_text(encoding="utf-8"))
+    assert meta["message_count"] == 4
+    assert meta["eligible_count"] == 4
+    assert meta["prompt_message_count"] == 4
+    assert meta["covered_through_ms"] == FIXTURE_COVERED_THROUGH_MS
 
 
 @pytest.mark.asyncio
@@ -107,6 +130,11 @@ async def test_run_distill_job_empty_window_success_does_not_advance_cursor(tmp_
     assert result.distilled_dir is None
     assert not (tmp_path / "im" / "profiles").exists()
     assert get_cursor_ms(home) == 0
+    job = get_job(home, result.job_id)
+    assert job["message_count"] == 0
+    assert job["eligible_count"] == 0
+    assert job["prompt_message_count"] == 0
+    assert job["covered_through_ms"] is None
 
 
 @pytest.mark.asyncio
@@ -146,7 +174,9 @@ async def test_run_distill_job_empty_window_keeps_range_for_late_ingest(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_run_distill_job_sampled_success_does_not_advance_cursor(tmp_path: Path):
+async def test_run_distill_job_sampled_success_parks_cursor_at_last_eligible(tmp_path: Path):
+    """Option C: sampled success advances the cursor to the pre-downsample
+    window max; job json and meta.json record the approximation honestly."""
     home = str(tmp_path)
     _seed_cursor(home, 100)
     messages = default_fixture_messages()
@@ -162,8 +192,23 @@ async def test_run_distill_job_sampled_success_does_not_advance_cursor(tmp_path:
     assert result.message_count == 2
     assert result.sampled is True
     assert result.distilled_dir is not None
-    assert get_cursor_ms(home) == 100
+    assert get_cursor_ms(home) == FIXTURE_COVERED_THROUGH_MS
 
+    job = get_job(home, result.job_id)
+    assert job["eligible_count"] == 4
+    assert job["message_count"] == 2
+    assert job["prompt_message_count"] == 2
+    assert job["covered_through_ms"] == FIXTURE_COVERED_THROUGH_MS
+    meta = json.loads(
+        (Path(result.distilled_dir or "") / "meta.json").read_text(encoding="utf-8")
+    )
+    assert meta["eligible_count"] == 4
+    assert meta["message_count"] == 2
+    assert meta["prompt_message_count"] == 2
+    assert meta["sampled"] is True
+    assert meta["covered_through_ms"] == FIXTURE_COVERED_THROUGH_MS
+
+    # Livelock gone: the next tick starts after the whole window, not inside it.
     result2 = await run_distill_job(
         home,
         window_end_ms=FIXTURE_END_MS,
@@ -173,10 +218,81 @@ async def test_run_distill_job_sampled_success_does_not_advance_cursor(tmp_path:
         analyzer=LlmAnalyzer(_FakeLlm()),
     )
     assert result2.status == "success"
-    assert result2.sampled is False
-    assert result2.message_count == 4
-    assert result2.window_start_ms == 100
+    assert result2.message_count == 0
+    assert result2.window_start_ms == FIXTURE_COVERED_THROUGH_MS
     assert get_cursor_ms(home) == FIXTURE_COVERED_THROUGH_MS
+
+
+@pytest.mark.asyncio
+async def test_run_distill_job_renders_whole_corpus_between_cap_and_max(tmp_path: Path):
+    """200 < N <= max_messages: every message reaches the prompt (old 200-cap regression)."""
+    home = str(tmp_path)
+    messages = _bulk_messages(300)
+    result = await run_distill_job(
+        home,
+        window_end_ms=FIXTURE_BASE_MS + 10_000,
+        force_full_window=True,
+        max_messages=800,
+        corpus=FixtureCorpus(messages),
+        analyzer=LlmAnalyzer(_FakeLlm()),
+    )
+    assert result.status == "success"
+    assert result.sampled is False
+    assert result.message_count == 300
+    job = get_job(home, result.job_id)
+    assert job["message_count"] == 300
+    assert job["eligible_count"] == 300
+    assert job["prompt_message_count"] == 300
+    assert get_cursor_ms(home) == FIXTURE_BASE_MS + 300 + 1
+
+
+@pytest.mark.asyncio
+async def test_run_distill_job_over_max_messages_covers_whole_window(tmp_path: Path):
+    """N > max_messages (842 vs 800, experiments 3/4): LLM eats 800 sampled,
+    cursor still parks at the last eligible of the full window — no livelock."""
+    home = str(tmp_path)
+    messages = _bulk_messages(842)
+    result = await run_distill_job(
+        home,
+        window_end_ms=FIXTURE_BASE_MS + 10_000,
+        force_full_window=True,
+        max_messages=800,
+        corpus=FixtureCorpus(messages),
+        analyzer=LlmAnalyzer(_FakeLlm()),
+    )
+    assert result.status == "success"
+    assert result.sampled is True
+    assert result.message_count == 800
+    job = get_job(home, result.job_id)
+    assert job["eligible_count"] == 842
+    assert job["message_count"] == 800
+    assert job["prompt_message_count"] == 800
+    assert job["covered_through_ms"] == FIXTURE_BASE_MS + 842 + 1
+    assert get_cursor_ms(home) == FIXTURE_BASE_MS + 842 + 1
+
+
+@pytest.mark.asyncio
+async def test_run_distill_job_records_diverged_prompt_count_honestly(tmp_path: Path):
+    """Sentinel data path: a truncating analyzer is recorded, not hidden."""
+
+    class _TruncatingAnalyzer:
+        async def analyze(self, messages):
+            return DistillCandidates(persona_md="p", work_md="w", prompt_message_count=2)
+
+    home = str(tmp_path)
+    result = await run_distill_job(
+        home,
+        window_end_ms=FIXTURE_END_MS,
+        force_full_window=True,
+        corpus=FixtureCorpus(default_fixture_messages()),
+        analyzer=_TruncatingAnalyzer(),
+    )
+    assert result.status == "success"
+    assert get_cursor_ms(home) == FIXTURE_COVERED_THROUGH_MS
+    job = get_job(home, result.job_id)
+    assert job["message_count"] == 4
+    assert job["prompt_message_count"] == 2
+    assert job["covered_through_ms"] == FIXTURE_COVERED_THROUGH_MS
 
 
 @pytest.mark.asyncio
