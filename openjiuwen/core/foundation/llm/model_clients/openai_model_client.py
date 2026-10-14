@@ -789,7 +789,7 @@ class OpenAIModelClient(BaseModelClient):
             release_params["tools_released_index"] = tools_released_index
 
         url = (
-            f"{self.model_client_config.api_base.rstrip('/')}"
+            f"{_normalize_openai_base_url(self.model_client_config.api_base)}"
             f"{getattr(kv_cache, 'release_endpoint', '/release_kv_cache')}"
         )
         verify = (
