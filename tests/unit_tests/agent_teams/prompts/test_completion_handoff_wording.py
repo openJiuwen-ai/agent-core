@@ -40,3 +40,29 @@ def test_scheduled_section_drops_the_override_clause(language: str):
 
     assert "优先于通用工作流程" not in section
     assert "overrides the" not in section
+
+
+@pytest.mark.level1
+@pytest.mark.parametrize("language", ["cn", "en"])
+@pytest.mark.parametrize("dispatch", ["dispatch_autonomous_leader", "dispatch_scheduled_leader"])
+def test_leader_is_told_not_to_ask_members_for_completion_reports(language: str, dispatch: str):
+    section = load_template(dispatch, language).content
+
+    if language == "cn":
+        assert "**不要**在任务内容里要求成员完成后用 `send_message` 汇报" in section
+    else:
+        assert "do **not** write into a task's content that the member must `send_message` you" in section
+
+
+@pytest.mark.level1
+@pytest.mark.parametrize("language", ["cn", "en"])
+@pytest.mark.parametrize("desc_key", ["create_task", "create_task_scheduled"])
+def test_create_task_content_field_discourages_completion_reports(language: str, desc_key: str):
+    from openjiuwen.agent_teams.tools.locales import make_translator
+
+    desc = make_translator(language)(desc_key)
+
+    if language == "cn":
+        assert "**不要**写\"完成后用 send_message 向 leader 汇报" in desc
+    else:
+        assert "Do **not** ask the member to `send_message` you a report" in desc
