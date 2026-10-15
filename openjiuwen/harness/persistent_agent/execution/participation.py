@@ -141,7 +141,7 @@ async def _report(budget, execution, model_call_id: str, usage: ModelUsage) -> N
 
 
 async def _finish_failed(emitter, reason: str) -> ParticipationOutcome:
-    await emitter.emit(EventType.EXECUTION_FINAL, {"status": "failed", "reason": _clip(reason)})
+    await emitter.emit_ending(EventType.EXECUTION_FINAL, {"status": "failed", "reason": _clip(reason)})
     return ParticipationOutcome(terminal=True)
 
 
@@ -168,13 +168,15 @@ async def judge_participation(spec, context, request, emitter) -> ParticipationO
             admission = BudgetAdmission.model_validate(await budget.admit(execution, model_call_id))
             admission.assert_call(execution, model_call_id)
         except Exception as exc:
-            await emitter.emit(
+            await emitter.emit_ending(
                 EventType.EXECUTION_PAUSED,
                 {"reason": "error", "detail": _clip(f"budget admission failed: {exc}")},
             )
             return ParticipationOutcome(terminal=True)
         if admission.status == "denied":
-            await emitter.emit(EventType.EXECUTION_PAUSED, {"reason": "budget_denied", "detail": admission.reason})
+            await emitter.emit_ending(
+                EventType.EXECUTION_PAUSED, {"reason": "budget_denied", "detail": admission.reason}
+            )
             return ParticipationOutcome(terminal=True)
         try:
             response = await model.invoke(
@@ -224,7 +226,7 @@ async def judge_participation(spec, context, request, emitter) -> ParticipationO
             },
         )
         if decision == "ignore":
-            await emitter.emit(EventType.EXECUTION_FINAL, {"status": "ignored", "reason": reason})
+            await emitter.emit_ending(EventType.EXECUTION_FINAL, {"status": "ignored", "reason": reason})
             return ParticipationOutcome(terminal=True)
         return ParticipationOutcome(terminal=False, event_id=decided.event_id)
     return await _finish_failed(emitter, last_error)

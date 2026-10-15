@@ -32,10 +32,12 @@ class CommitPort(Protocol):
         are diagnosed without stopping the Execution. Ordinary log gaps or
         persistence retries do not block later critical calls. ``tool.intent``,
         ``execution.paused`` and ``execution.final`` return after this event is
-        durable; failures stop the Execution. Final also requires every candidate
-        output referenced by its ``output_refs`` to be durably stored, including
-        its content and handoff information. Hosts deduplicate by ``event_id``;
-        resubmitted candidates retain their original event and output IDs.
+        durable; failures stop the Execution. Paused and final also require every
+        candidate output referenced by their ``output_refs`` to be durably stored,
+        including its content and handoff information; a file candidate is read at
+        its logical path and checked against its size and digest. Hosts deduplicate
+        by ``event_id``; resubmitted candidates retain their original event and
+        output IDs.
         """
         ...
 

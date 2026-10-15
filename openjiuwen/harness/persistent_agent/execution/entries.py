@@ -8,10 +8,9 @@ state and records the ending. The generator only relays recorded events.
 """
 
 import asyncio
-import hashlib
 import json
 from contextlib import aclosing
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, AsyncGenerator, AsyncIterator
 
 from pydantic import ValidationError
@@ -27,22 +26,24 @@ from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY, ToolI
 
 from ..factory import create_persistent_agent
 from ..schema.build_context import PersistentBuildContext
-from ..schema.events import AgentEvent, EventType
+from ..schema.events import EVENT_MAX_BYTES, AgentEvent, EventType
 from ..schema.protocol import TEXT_MAX_CHARS
 from ..schema.request import ConfirmReply, RequestInput
 from ..schema.spec import PersistentAgentSpec
-from . import seams
+from . import handoff, seams
 from .binding import InvocationState, abort_bound, close_bound, stream_bound
 from .control import AbortReason, ExecutionControl
-from .emitter import EventEmitter
+from .emitter import EventEmitter, escaped_bytes, longest_prefix, widest_size
 from .model_rail import PAUSE_MARKER
 from .participation import judge_participation
+from .session_state import sync_native, window_messages
 
 _UNSUPPORTED_FLAGS = ("enable_async_subagent", "enable_subagent_runtime", "add_general_purpose_agent")
 _SENSITIVE_KEYS = ("password", "secret", "token", "key", "credential", "authorization")
 _DETAIL_LIMIT = 4096
 _END: Any = object()
-_CAPACITY_DETAIL = "final answer exceeds the event size limit; kept in the session state record for handoff"
+# Accepted stops and cancels hand off nothing.
+_NO_HANDOFF = frozenset({"stopped", "cancelled"})
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,7 @@ class _Outcome:
 
 
 def redact_arguments(arguments: Any) -> str:
-    """Readable tool arguments with values under sensitive key names masked."""
+    """Readable tool arguments with values under sensitive key names masked; callers bound the length."""
 
     def scrub(value):
         if isinstance(value, dict):
@@ -72,9 +73,8 @@ def redact_arguments(arguments: Any) -> str:
         try:
             arguments = json.loads(arguments)
         except ValueError:
-            return arguments.strip()[:TEXT_MAX_CHARS] or "{}"
-    text = json.dumps(scrub(arguments if arguments is not None else {}), ensure_ascii=False, default=str)
-    return text[:TEXT_MAX_CHARS] or "{}"
+            return arguments.strip() or "{}"
+    return json.dumps(scrub(arguments if arguments is not None else {}), ensure_ascii=False, default=str)
 
 
 def _reject(code: StatusCode, message: str, cause: BaseException | None = None):
@@ -247,58 +247,113 @@ async def _run_native(agent, context: PersistentBuildContext, native_input) -> _
     return _lock(control, _outcome_from_result(result, intercepted))
 
 
-def _output_id(context: PersistentBuildContext) -> str:
-    digest = hashlib.sha256(f"{context.execution.execution_id}:final-answer".encode("utf-8")).hexdigest()
-    return "out_" + digest[:32]
+def _without_handoff(outcome: _Outcome, failure: str) -> _Outcome:
+    """Nothing is handed off: a completed run pauses on error; a pause keeps its reason and says why."""
+    note = f"handoff not prepared: {failure}"
+    if outcome.kind == "completed":
+        return _Outcome("error", detail=_detail(note, note))
+    return replace(outcome, detail=_detail(f"{outcome.detail}; {note}" if outcome.detail else note, note))
+
+
+def _fit_intercepted(context: PersistentBuildContext, paused: dict) -> dict:
+    """Cut the redacted arguments so the pause event fits; every cut call is marked truncated.
+
+    The room the other fields leave is shared evenly; what a short call does not need goes to the
+    others. Approval still applies to the complete interrupted call kept in the interruption state.
+    """
+    calls = paused["intercepted"]
+    if not calls:
+        return paused
+    probe = {**paused, "intercepted": tuple({**call, "arguments": "x"} for call in calls)}
+    room = EVENT_MAX_BYTES - widest_size(context.execution, EventType.EXECUTION_PAUSED, probe, any_execution=False)
+    room += len(calls)
+    needs = [escaped_bytes(call["arguments"]) for call in calls]
+    budgets = [0] * len(calls)
+    for position, index in enumerate(sorted(range(len(calls)), key=needs.__getitem__)):
+        budgets[index] = min(needs[index], room // (len(calls) - position))
+        room -= budgets[index]
+    fitted = []
+    for call, need, budget in zip(calls, needs, budgets):
+        text = call["arguments"]
+        if need > budget or len(text) > TEXT_MAX_CHARS:
+            call = {**call, "arguments": text[: longest_prefix(text, budget)], "arguments_truncated": True}
+        fitted.append(call)
+    return {**paused, "intercepted": tuple(fitted)}
 
 
 async def _finish(
     context: PersistentBuildContext,
+    spec: PersistentAgentSpec,
     store,
     outcome: _Outcome,
     reply_target: str | None,
     last_group_message_id: str | None,
 ) -> None:
-    """Hand off the answer, save the state record, then record the ending, in this order."""
+    """Prepare and hand off the candidates, save the state record, then record the ending, in this order."""
     emitter = context.binding.control.emitter
-    output_refs: tuple[str, ...] = ()
-    pending_answer = None
+    answer = outcome.text if outcome.kind == "completed" and outcome.text.strip() else None
+    batch, failure = handoff.PreparedBatch(), None
     try:
-        if outcome.kind == "completed" and outcome.text.strip():
-            output_id = _output_id(context)
-            payload = {
-                "output_id": output_id,
-                "target_ref": reply_target,
-                "share_mode": "message",
-                "text": outcome.text,
-            }
-            if await emitter.emit_if_fits(EventType.OUTPUT_PROPOSED, payload) is None:
-                # Only exceeding capacity pauses; the answer is never truncated and is kept for a later handoff.
-                pending_answer = outcome.text
-                outcome = _Outcome("error", detail=_CAPACITY_DETAIL)
-            else:
-                output_refs = (output_id,)
+        if outcome.kind not in _NO_HANDOFF:
+            batch = await handoff.prepare_batch(
+                context.execution,
+                context.ports.workspace_access,
+                reply_target,
+                answer,
+                await _effective_registrations(context, spec),
+                spec.share_file_max_bytes,
+            )
+            if batch.failures:
+                failure = handoff.describe_failures(batch.failures)
+                outcome = _without_handoff(outcome, failure)
+        proposals = await handoff.hand_off(emitter, batch)
         ending = seams.ExecutionEnding(
             outcome.kind,
             context.execution.request_id,
             reply_target,
-            output_refs,
-            pending_answer=pending_answer,
+            batch.output_refs,
             last_group_message_id=last_group_message_id,
+            answer_text=answer,
+            answer_segments=batch.answer_segments,
+            shared_files=batch.files,
+            handoff_failure=failure,
         )
         await _store_call("save", store.save(context, ending))
         if outcome.kind in ("completed", "cancelled"):
-            final = {"status": outcome.kind, "output_refs": output_refs}
+            final = {"status": outcome.kind, "output_refs": batch.output_refs}
             if outcome.kind == "cancelled":
                 final["reason"] = "cancelled by request"
-            await emitter.emit(EventType.EXECUTION_FINAL, final)
+            await emitter.emit_ending(EventType.EXECUTION_FINAL, final, proposals)
         else:
-            await emitter.emit(
-                EventType.EXECUTION_PAUSED,
-                {"reason": outcome.kind, "intercepted": outcome.intercepted, "detail": outcome.detail},
-            )
+            paused = {
+                "reason": outcome.kind,
+                "intercepted": outcome.intercepted,
+                "detail": outcome.detail,
+                "output_refs": batch.output_refs,
+            }
+            await emitter.emit_ending(EventType.EXECUTION_PAUSED, _fit_intercepted(context, paused), proposals)
     except ValidationError as exc:
         raise _reject(StatusCode.DEEPAGENT_RUNTIME_ERROR, "execution ending could not be recorded", exc) from exc
+
+
+def _rebuild_registrations(context: PersistentBuildContext) -> None:
+    """A confirmation resume counts the listings of its chain toward the limit; the resumed run may add more."""
+    registrations = context.binding.control.registrations
+    for registration in handoff.rebuild_registrations(window_messages(context.session)):
+        handoff.merge_registration(registrations, registration)
+
+
+async def _effective_registrations(context: PersistentBuildContext, spec) -> list[handoff.Registration]:
+    """Listings whose share_file result reached the final window as listed, after every rail.
+
+    The live window is synced first. A result a host rail rewrote, a note PA-10 put in place of an
+    unfinished one, a placeholder or an interruption result does not count, in this Execution as in
+    a confirmation resume.
+    """
+    if "workspace_read" not in spec.enabled_features:
+        return []
+    await sync_native(context)
+    return handoff.rebuild_registrations(window_messages(context.session))
 
 
 async def _close(agent, context: PersistentBuildContext, *, failing: bool) -> None:
@@ -389,7 +444,7 @@ async def execute_persistent_request(spec, context, inputs) -> AsyncIterator[Age
             record = await _load(context, store)
             assembly = await _assemble(assembler, context, request, record)
             outcome = await _run_native(agent, context, assembly.native_input)
-            await _finish(context, store, outcome, request.reply_target, assembly.last_group_message_id)
+            await _finish(context, spec, store, outcome, request.reply_target, assembly.last_group_message_id)
 
         await _run(context, spec, body)
 
@@ -452,9 +507,11 @@ async def resume_persistent_request(spec, context, confirm_reply) -> AsyncIterat
         record = await _load(context, store)
         # An invalid reply is rejected before anything is recorded or saved; the scene keeps waiting.
         native_input = _native_resume_input(context, reply, record.waiting, adapter)
+        if "workspace_read" in spec.enabled_features:
+            _rebuild_registrations(context)
         outcome = await _run_native(agent, context, native_input)
         # Resume reads no group messages, so the previous cursor is kept.
-        await _finish(context, store, outcome, record.waiting.reply_target, record.last_group_message_id)
+        await _finish(context, spec, store, outcome, record.waiting.reply_target, record.last_group_message_id)
 
     async with aclosing(_drive(control, _run(context, spec, body))) as events:
         async for event in events:
