@@ -7,7 +7,7 @@ import sqlite3
 from functools import partial
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from typing import Callable, Literal
+from typing import Any, Callable, Literal
 
 try:
     from filelock import AsyncReadWriteLock, ReadWriteLock, Timeout as FileLockTimeout
@@ -22,27 +22,24 @@ if AsyncReadWriteLock is not None and ReadWriteLock is not None:
     class _ManagedReadWriteLock(ReadWriteLock):
         """Expose lifecycle management for filelock's singleton registry."""
 
-        def _configure_and_begin(
-                self,
-                mode: Literal["read", "write"],
-                timeout: float,
-                *,
-                blocking: bool,
-                start_time: float,
-        ) -> None:
+        # filelock renamed the keyword-only part of this hook in 3.30.0, so it
+        # is forwarded untouched rather than named again here.
+        def _configure_and_begin(self, mode: Literal["read", "write"], timeout: float, **kwargs: Any) -> None:
             try:
-                super()._configure_and_begin(mode, timeout, blocking=blocking, start_time=start_time)
+                super()._configure_and_begin(mode, timeout, **kwargs)
             except sqlite3.OperationalError as exc:
                 if mode != "read" or "no such table: sqlite_schema" not in str(exc).lower():
                     raise
                 self._con.execute("SELECT name FROM sqlite_master LIMIT 1;").close()
 
-        @classmethod
-        def evict_singleton(cls, lock_file: str, expected: ReadWriteLock) -> None:
+        # filelock 3.30.0 gave every ReadWriteLock subclass its own registry,
+        # so the entry to drop is the base class's rather than this class's.
+        @staticmethod
+        def evict_singleton(lock_file: str, expected: ReadWriteLock) -> None:
             normalized_path = pathlib.Path(lock_file).resolve()
-            with cls._instances_lock:
-                if cls._instances.get(normalized_path) is expected:
-                    cls._instances.pop(normalized_path, None)
+            with ReadWriteLock._instances_lock:
+                if ReadWriteLock._instances.get(normalized_path) is expected:
+                    ReadWriteLock._instances.pop(normalized_path, None)
 
 
     class _ManagedAsyncReadWriteLock(AsyncReadWriteLock):

@@ -879,8 +879,8 @@ def test_read_lock_supports_sqlite_without_schema_alias(work_dir, monkeypatch):
     """Read locking falls back to sqlite_master on SQLite versions before 3.33."""
     lock_file = Path(work_dir) / "legacy_sqlite_lock.db"
 
-    def legacy_configure(lock, mode, _timeout, *, blocking, start_time):
-        del blocking, start_time
+    def legacy_configure(lock, mode, _timeout, **kwargs):
+        del kwargs
         assert mode == "read"
         lock._con.execute("BEGIN TRANSACTION;").close()
         raise sqlite3.OperationalError("no such table: sqlite_schema")
