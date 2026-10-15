@@ -1146,15 +1146,22 @@ class TaskDao:
         task_id: str,
         title: Optional[str] = None,
         content: Optional[str] = None,
-    ) -> bool:
-        """Update task content (title, content, etc.)."""
+    ) -> Optional[TeamTaskBase]:
+        """Update task content (title, content, etc.).
+
+        Returns the post-write row — selected inside the same write
+        transaction, so its ``status`` is the committed state at update
+        time — or ``None`` when the task is missing or in-review locked.
+        The row is not hydrated: ``content`` may still be a spill
+        placeholder; use :meth:`get_task` to read the body.
+        """
         team_task_model = _get_task_model()
         async with self._sessions.write() as session:
             result = await session.execute(select(team_task_model).where(team_task_model.task_id == task_id))
             task = result.scalar_one_or_none()
             if not task:
                 team_logger.error("Task %s not found", task_id)
-                return False
+                return None
 
             # IN_REVIEW stays locked: a task submitted for verification is
             # frozen so the reviewer evaluates against stable content. PLANNING
@@ -1168,7 +1175,7 @@ class TaskDao:
                     task_id,
                     task.status,
                 )
-                return False
+                return None
 
             updated = False
             if title is not None and task.title != title:
@@ -1189,7 +1196,7 @@ class TaskDao:
                 await session.commit()
                 team_logger.info("Task %s updated", task_id)
 
-            return True
+            return task
 
     async def mutate_dependency_graph(
         self,

@@ -25,7 +25,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-10-14 |
+| 最近一次修订日期 | 2026-10-15 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md、F_118_task-scoped-member-lifetime.md、F_119_scheduled-completion-handoff-via-note.md、F_120_autonomous-completion-summary-and-note.md |
 
 ## 范围 / 边界
@@ -192,8 +192,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 17. **取消 / 编辑执行中任务用任务级信号，不取消成员**：cancel 一个执行中任务、或改其
     标题 / 内容，都**不再** `cancel_member`。cancel 发 `TASK_CANCELLED`（带 `member_name`）
     让该成员经 `on_task_cancelled` 停手；编辑**保持任务 IN_PROGRESS**（DAO 放开 PLANNING /
-    IN_PROGRESS 可编辑，仅 IN_REVIEW 锁——验证期内容冻结），发 `TASK_UPDATED`（带 `member_name`）
-    让该成员经 `on_task_updated` 重看后继续。**仍在团队中的**人类成员持有的任务对 cancel /
+    IN_PROGRESS 可编辑，仅 IN_REVIEW 锁——验证期内容冻结），发 `TASK_UPDATED`（带 `member_name`
+    与写事务内读回的 `status`，见 B_03）让该成员经 `on_task_updated` 重看后继续。**仍在团队中的**人类成员持有的任务对 cancel /
     reassign / **改标题·内容**三者都 leader-immutable（HITT 锁，key 在
     `TeamBackend.is_live_human_agent` / `live_human_agent_names`，**不是**裸 role——见
     `S_07` 运行约束 3），故这些信号的 `member_name` 永不指向一个**在队**的 human avatar。

@@ -1600,6 +1600,32 @@ async def test_update_claimed_task_keeps_claim_and_notifies(task_manager, messag
     assert events[0].payload["member_name"] == "member1"
 
 
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_event_carries_post_write_status(task_manager, message_bus):
+    """TASK_UPDATED carries the post-write status, so a consumer whose view
+    missed a transition resyncs from the event instead of re-querying."""
+    task = await task_manager.add(title="T", content="c")
+    assert (await task_manager.assign(task.task_id, "member1")).ok
+    message_bus.publish.reset_mock()
+
+    result = await task_manager.update_task(task.task_id, title="Revised")
+    assert result.ok
+
+    events = _published_events(message_bus, TeamEvent.TASK_UPDATED)
+    assert len(events) == 1
+    assert events[0].payload["status"] == TaskStatus.IN_PROGRESS.value
+    assert events[0].payload["member_name"] == "member1"
+
+    message_bus.publish.reset_mock()
+    pending = await task_manager.add(title="P", content="c")
+    assert (await task_manager.update_task(pending.task_id, content="edited")).ok
+
+    events = _published_events(message_bus, TeamEvent.TASK_UPDATED)
+    assert len(events) == 1
+    assert events[0].payload["status"] == TaskStatus.PENDING.value
+
+
 # ---------------------------------------------------------------------------
 # F_118 / D7: the author's completion note is persisted on the task row
 # ---------------------------------------------------------------------------

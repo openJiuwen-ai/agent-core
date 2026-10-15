@@ -941,8 +941,9 @@ class TestTaskOperations:
             status="pending"
         )
 
-        success = await db.task.update_task("task_title", title="Updated Title")
-        assert success is True
+        updated = await db.task.update_task("task_title", title="Updated Title")
+        assert updated is not None
+        assert updated.title == "Updated Title"
 
         task = await db.task.get_task("task_title")
         assert task.title == "Updated Title"
@@ -965,8 +966,8 @@ class TestTaskOperations:
             status="pending"
         )
 
-        success = await db.task.update_task("task_content", content="Updated Content")
-        assert success is True
+        updated = await db.task.update_task("task_content", content="Updated Content")
+        assert updated is not None
 
         task = await db.task.get_task("task_content")
         assert task.title == "Original Title"
@@ -989,12 +990,13 @@ class TestTaskOperations:
             status="pending"
         )
 
-        success = await db.task.update_task(
+        updated = await db.task.update_task(
             "task_both",
             title="Updated Title",
             content="Updated Content"
         )
-        assert success is True
+        assert updated is not None
+        assert updated.title == "Updated Title"
 
         task = await db.task.get_task("task_both")
         assert task.title == "Updated Title"
@@ -1003,9 +1005,9 @@ class TestTaskOperations:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_update_task_not_found(self, db):
-        """Test updating non-existent task returns False"""
-        success = await db.task.update_task("nonexistent_task", title="New Title")
-        assert success is False
+        """Test updating non-existent task returns None"""
+        updated = await db.task.update_task("nonexistent_task", title="New Title")
+        assert updated is None
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -1024,9 +1026,9 @@ class TestTaskOperations:
             status="pending"
         )
 
-        # Update with same values - should still return True
-        success = await db.task.update_task("task_same", title="Same Title", content="Same Content")
-        assert success is True
+        # Update with same values - still returns the unchanged row
+        updated = await db.task.update_task("task_same", title="Same Title", content="Same Content")
+        assert updated is not None
 
         task = await db.task.get_task("task_same")
         assert task.title == "Same Title"
@@ -1051,8 +1053,9 @@ class TestTaskOperations:
         )
 
         # Editing an in-progress task now succeeds.
-        success = await db.task.update_task("task_claimed", title="New Title")
-        assert success is True
+        updated = await db.task.update_task("task_claimed", title="New Title")
+        assert updated is not None
+        assert updated.status == "in_progress"
         task = await db.task.get_task("task_claimed")
         assert task.title == "New Title"
 
@@ -1065,7 +1068,7 @@ class TestTaskOperations:
             status="in_review"
         )
         locked = await db.task.update_task("task_in_review", title="Nope")
-        assert locked is False
+        assert locked is None
         unchanged = await db.task.get_task("task_in_review")
         assert unchanged.title == "In Review Task"
 

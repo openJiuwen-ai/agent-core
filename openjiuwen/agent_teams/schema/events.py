@@ -310,6 +310,11 @@ class TaskPlanResponseEvent(BaseEventMessage):
 class TaskUpdatedEvent(BaseEventMessage):
     """Event published when a task is updated"""
     task_id: str = Field(..., description="Task unique identifier")
+    status: Optional[str] = Field(
+        default=None,
+        description="Task status at edit time; content edits never change it, "
+        "but carrying it lets consumers resync a stale view from this event",
+    )
 
 
 class TaskClaimedEvent(BaseEventMessage):

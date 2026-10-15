@@ -1524,9 +1524,10 @@ class TeamTaskManager:
     ) -> TaskOpResult:
         """Update task title / content.
 
-        Publishes ``TASK_UPDATED`` on success. Does not bump the task's
-        ``updated_at`` column — that timestamp tracks status transitions
-        only.
+        Publishes ``TASK_UPDATED`` on success, carrying the post-write
+        status so a consumer whose view missed a transition can resync
+        from the event itself. Does not bump the task's ``updated_at``
+        column — that timestamp tracks status transitions only.
 
         Args:
             task_id: Task identifier.
@@ -1540,8 +1541,8 @@ class TeamTaskManager:
         if not task:
             return TaskOpResult.fail(f"Task {task_id} not found")
 
-        success = await self.db.task.update_task(task_id, title=title, content=content)
-        if not success:
+        updated = await self.db.task.update_task(task_id, title=title, content=content)
+        if updated is None:
             return TaskOpResult.fail(
                 f"Task {task_id} cannot be edited while in status '{task.status}'; "
                 f"content updates are allowed on pending / blocked / planning / in-progress tasks "
@@ -1552,12 +1553,19 @@ class TeamTaskManager:
 
         # A claimed task stays claimed on edit; carry the assignee so its
         # dispatcher tells it to re-read the revised content (on_task_updated)
-        # instead of the old reset-to-pending + cancel_member.
+        # instead of the old reset-to-pending + cancel_member. The status rides
+        # the post-write row read inside the DAO's write transaction, so it is
+        # the committed state at update time rather than a re-query.
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.TASK.build(get_session_id(), self.team_name),
                 message=EventMessage.from_event(
-                    TaskUpdatedEvent(team_name=self.team_name, task_id=task_id, member_name=task.assignee)
+                    TaskUpdatedEvent(
+                        team_name=self.team_name,
+                        task_id=task_id,
+                        member_name=updated.assignee,
+                        status=updated.status,
+                    )
                 ),
             )
             team_logger.debug(f"Task updated event published: {task_id}")
