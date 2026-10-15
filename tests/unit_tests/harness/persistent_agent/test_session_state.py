@@ -53,7 +53,6 @@ def ending(outcome="completed", **overrides):
         request_id="request-1",
         reply_target="chat-1",
         output_refs=(),
-        pending_answer=None,
         last_group_message_id="m-9",
     )
     fields.update(overrides)
@@ -318,14 +317,14 @@ def test_tidy_window_drops_background_and_marks_the_end():
         UserMessage(content="task"),
         AssistantMessage(content="answer"),
     ]
-    done = ending(output_refs=("out_1",))
+    done = ending(output_refs=("out_1",), answer_text="answer", answer_segments=1)
     tidied = STATE.tidy_window(messages, done, "execution-1")
-    assert tidied[:4] == [messages[0], header, messages[3], messages[4]]
+    assert tidied[:-1] == [messages[0], header, messages[3], messages[4]], "an unchanged answer is not repeated"
     marker = tidied[-1]
     assert marker.metadata == {PART: "execution_end"}
     assert marker.content == (
         "【执行结束】request_id：request-1；execution_id：execution-1；结局：已完成；"
-        "交出候选：out_1（以结束记录为准）；群消息已扫描到：m-9"
+        "交出候选：最终回答 1 段（以结束记录为准）；群消息已扫描到：m-9"
     )
     paused = STATE.tidy_window(messages, ending("budget_denied", last_group_message_id=None), "execution-1")
     assert paused[-1].content.endswith("结局：暂停（budget_denied）；交出候选：无；群消息已扫描到：无")
@@ -712,22 +711,60 @@ def test_offloader_subclasses_registered_under_new_names_are_found(monkeypatch):
     assert STATE.offloading_processors(agent) == ["HostForkedOffloader", "HostOffloader"]
 
 
+def test_tidy_window_keeps_a_rewritten_answer_and_says_what_was_handed_off():
+    """PA-08-V-10: the answer as handed off stays in the window when after_invoke changed it."""
+    messages = [UserMessage(content="task"), AssistantMessage(content="native answer")]
+    handed = ending(
+        output_refs=("out_a", "out_b", "out_f"),
+        answer_text="rewritten answer",
+        answer_segments=2,
+        shared_files=(("reports/q3.md", "upload", "out_f"),),
+    )
+    tidied = STATE.tidy_window(messages, handed, "execution-1")
+    kept = tidied[-2]
+    assert kept.metadata == {PART: "handoff_text"}
+    assert kept.content == "【实际交出的最终回答】\nrewritten answer"
+    assert "交出候选：最终回答 2 段、文件 reports/q3.md（upload，out_f）（以结束记录为准）" in tidied[-1].content
+
+    failed = ending("error", answer_text="rewritten answer", handoff_failure="reports/q3.md: not_found")
+    tidied = STATE.tidy_window(messages, failed, "execution-1")
+    assert tidied[-2].metadata == {PART: "handoff_text"}, "the answer is kept for a later handoff"
+    assert "交出候选：无；未交接原因：reports/q3.md: not_found；群消息已扫描到：m-9" in tidied[-1].content
+
+
 @pytest.mark.asyncio
-async def test_overwriting_a_pending_answer_is_logged_without_its_text(monkeypatch):
-    """PA-10-V-22: the single ending field is no lifecycle; losing the answer is at least visible."""
-    errors = []
-    monkeypatch.setattr(STATE.logger, "error", lambda message, *args: errors.append(message % args))
+async def test_new_records_carry_no_pending_answer(monkeypatch):
+    """PA-08-V-14: a saved record keeps version 1 and has no pending_answer key."""
     monkeypatch.setattr(STATE.ExecutionStateStore, "_sync_native", staticmethod(skip_sync))
     state_store, backend = store()
-    data = record(
-        ending={"outcome": "error", "request_id": "request-0", "execution_id": "execution-0", "pending_answer": SECRET}
-    )
-    await backend.set(STATE.WindowStore.state_key("agent:1", "session%a"), json.dumps(data))
     ctx = context()
     await state_store.load(ctx)
-    await state_store.save(ctx, ending())
-    assert len(errors) == 1
-    assert "request-0" in errors[0] and "request-1" in errors[0] and SECRET not in errors[0]
+    await state_store.save(ctx, ending(answer_text="answer", answer_segments=1, output_refs=("out_1",)))
+    written = await saved(backend)
+    assert written["schema_version"] == 1 and set(written["ending"]) == {
+        "outcome",
+        "request_id",
+        "execution_id",
+        "reply_target",
+        "output_refs",
+        "last_group_message_id",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [SECRET, None], ids=["text", "null"])
+async def test_a_record_with_the_retired_pending_answer_key_is_invalid(value):
+    """PA-08-V-14: the strict record model rejects the retired key, even when it is null; nothing is changed."""
+    state_store, backend = store()
+    data = record(
+        ending={"outcome": "error", "request_id": "request-0", "execution_id": "execution-0", "pending_answer": value}
+    )
+    raw = json.dumps(data)
+    await backend.set(KEY, raw)
+    with pytest.raises(BaseError) as exc_info:
+        await state_store.load(context())
+    assert_invalid(exc_info)
+    assert await backend.get(KEY) == raw, "the stored record is left as it is"
 
 
 class WritesThenFails(InMemoryKVStore):
@@ -738,36 +775,31 @@ class WritesThenFails(InMemoryKVStore):
         raise RuntimeError("backend write failed")
 
 
-async def load_with_pending_answer(backend, monkeypatch):
-    errors = []
-    monkeypatch.setattr(STATE.logger, "error", lambda message, *args: errors.append(message % args))
+async def load_previous(backend, monkeypatch):
     monkeypatch.setattr(STATE.ExecutionStateStore, "_sync_native", staticmethod(skip_sync))
-    data = record(
-        ending={"outcome": "error", "request_id": "request-0", "execution_id": "execution-0", "pending_answer": SECRET}
-    )
+    data = record(ending={"outcome": "error", "request_id": "request-0", "execution_id": "execution-0"})
     await InMemoryKVStore.set(backend, KEY, json.dumps(data))
     state_store, _ = store(backend)
     ctx = context()
     await state_store.load(ctx)
-    return state_store, ctx, errors
+    return state_store, ctx
 
 
 @pytest.mark.asyncio
 async def test_a_failed_write_cannot_promise_the_record_is_unchanged(monkeypatch):
-    """PA-10-V-09 / V-22: the entry sees a runtime error, yet the backend may hold the new record."""
+    """PA-10-V-09: the entry sees a runtime error, yet the backend may hold the new record."""
     backend = WritesThenFails()
-    state_store, ctx, errors = await load_with_pending_answer(backend, monkeypatch)
+    state_store, ctx = await load_previous(backend, monkeypatch)
     with pytest.raises(BaseError) as exc_info:
         await state_store.save(ctx, ending())
     assert_runtime(exc_info)
     assert (await saved(backend))["ending"]["request_id"] == "request-1", "the write landed before the error"
-    assert len(errors) == 1 and "may have been overwritten" in errors[0] and SECRET not in errors[0]
 
 
 @pytest.mark.asyncio
-async def test_a_save_failing_before_the_write_leaves_the_record_and_logs_nothing(monkeypatch):
+async def test_a_save_failing_before_the_write_leaves_the_record(monkeypatch):
     backend = InMemoryKVStore()
-    state_store, ctx, errors = await load_with_pending_answer(backend, monkeypatch)
+    state_store, ctx = await load_previous(backend, monkeypatch)
     loaded = window(ctx.session)
     ctx.session.update_state(
         {"context": {"default_context_id": {"messages": loaded, "offload_messages": {"handle": ["x"]}}}}
@@ -776,4 +808,3 @@ async def test_a_save_failing_before_the_write_leaves_the_record_and_logs_nothin
         await state_store.save(ctx, ending())
     assert_runtime(exc_info)
     assert (await saved(backend))["ending"]["request_id"] == "request-0", "nothing was written"
-    assert errors == []

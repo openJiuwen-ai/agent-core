@@ -9,8 +9,10 @@ PA-06 assembler over an in-memory window backend shared by the Executions of one
 """
 
 import asyncio
+import hashlib
 import json
 from dataclasses import replace
+from datetime import datetime, timezone
 from importlib import import_module
 from types import SimpleNamespace
 
@@ -33,6 +35,7 @@ from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 from openjiuwen.core.single_agent import AgentCard, Session, create_agent_session
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.persistent_agent.workspace.access import WorkspaceReadScope
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail, ConfirmPayload
 from openjiuwen.harness.schema.deep_agent_spec import (
@@ -80,7 +83,8 @@ def usage(input_tokens, output_tokens):
 
 
 class LocalModel:
-    """Streams one queued turn per call: an answer by default, or "tool" / "two_tools" / "fail"."""
+    """Streams one queued turn per call: an answer by default, "tool" / "two_tools" / "fail", or a
+    (tool name, arguments) pair for one call of that tool."""
 
     model_client_config = None
     model_config = None
@@ -122,6 +126,11 @@ class LocalModel:
         turn = self.turns.pop(0) if self.turns else "answer"
         if turn == "fail":
             raise RuntimeError("local model failure")
+        if isinstance(turn, tuple):
+            name, arguments = turn
+            calls = [ToolCall(id=f"call-{self.calls}", type="function", name=name, arguments=arguments)]
+            yield AssistantMessageChunk(content="checking ", tool_calls=calls, usage_metadata=usage(3, 4))
+            return
         if turn in ("tool", "two_tools"):
             ids = [f"call-{self.calls}"] if turn == "tool" else ["call-a", "call-b"]
             calls = [ToolCall(id=tool_id, type="function", name=self.tool_name, arguments=TOOL_ARGS) for tool_id in ids]
@@ -180,6 +189,7 @@ class Host:
         self.events = []
         self.reports = []
         self.fail_record = set()
+        self.fail_once = set()
         self.admission = "admitted"
         self.admit_error = None
         self.report_error = None
@@ -187,6 +197,9 @@ class Host:
     async def record(self, execution, event):
         if event.event_type in self.fail_record:
             raise RuntimeError("commit unavailable")
+        if event.event_type in self.fail_once:
+            self.fail_once.discard(event.event_type)
+            raise RuntimeError("commit briefly unavailable")
         self.events.append(event)
         self.log.append(str(event.event_type))
 
@@ -318,7 +331,15 @@ class Harness:
         return self.api.PersistentAgentSpec(**fields)
 
     def context(
-        self, spec, *, execution_id="execution-1", request_id="request-1", isolated=True, group_chat=None, **changes
+        self,
+        spec,
+        *,
+        execution_id="execution-1",
+        request_id="request-1",
+        isolated=True,
+        group_chat=None,
+        workspace_access=None,
+        **changes,
     ):
         execution = self.api.ExecutionContext(
             namespace_id="tenant",
@@ -343,7 +364,11 @@ class Harness:
                 session_id=changes.get("session_id", "session-a"), card=spec.card, checkpointer=checkpointer
             ),
             ports=self.api.PersistentPorts(
-                commit=host, budget=host, window_backend=self.backend or InMemoryKVStore(), group_chat=group_chat
+                commit=host,
+                budget=host,
+                window_backend=self.backend or InMemoryKVStore(),
+                group_chat=group_chat,
+                workspace_access=workspace_access,
             ),
         )
         return ctx, host
@@ -521,12 +546,14 @@ async def test_native_failures_pause_without_output(harness, failure):
     assert harness.store.endings[-1].outcome == "error"
 
 
-CAPACITY_DETAIL = "final answer exceeds the event size limit; kept in the session state record for handoff"
+def outputs(events):
+    return [event for event in events if event.event_type == "output.proposed"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("limit", ["characters", "event_bytes"])
-async def test_oversized_answer_pauses_and_is_kept_for_handoff(harness, limit):
+async def test_oversized_answer_is_handed_off_in_ordered_segments(harness, limit):
+    """PA-08-V-09: the answer is never cut; its segments join back to it and the run completes."""
     spec = harness.spec()
     ctx, host = harness.context(spec)
     if limit == "characters":
@@ -538,33 +565,33 @@ async def test_oversized_answer_pauses_and_is_kept_for_handoff(harness, limit):
     events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
     deltas = [event for event in events if event.event_type == "reply.delta"]
     assert "".join(event.payload.text for event in deltas) == answer, "display is split, never cut"
-    assert len(deltas) >= 3
     assert_within_limits(events)
-    assert "output.proposed" not in kinds(events)
-    assert (events[-1].payload.reason, events[-1].payload.detail) == ("error", CAPACITY_DETAIL)
+    segments = outputs(events)
+    assert len(segments) >= 2 and "".join(event.payload.text for event in segments) == answer
+    assert len({event.payload.output_id for event in segments}) == len(segments)
+    final = events[-1]
+    assert final.payload.status == "completed"
+    assert final.payload.output_refs == tuple(event.payload.output_id for event in segments), "delivery order"
     ending = harness.store.endings[-1]
-    assert (ending.outcome, ending.output_refs, ending.pending_answer) == ("error", (), answer)
-    assert harness.log.index("save") < harness.log.index("execution.paused")
+    assert (ending.outcome, ending.answer_segments, ending.answer_text) == ("completed", len(segments), answer)
+    assert harness.log.index("save") < harness.log.index("execution.final")
     assert [event.local_seq for event in host.events] == list(range(1, len(host.events) + 1))
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rewritten", ["short rewritten answer", "oversized"])
-async def test_answer_rewritten_in_after_invoke_is_the_one_checked(harness, rewritten):
+async def test_answer_rewritten_in_after_invoke_is_the_one_handed_off(harness, rewritten):
     spec = harness.spec(rewrite=True)
     ctx, _ = harness.context(spec)
     harness.rewrite["output"] = emoji_text(65500) if rewritten == "oversized" else rewritten
     events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
-    if rewritten == "oversized":
-        assert events[-1].payload.detail == CAPACITY_DETAIL
-        assert harness.store.endings[-1].pending_answer == harness.rewrite["output"]
-    else:
-        output = next(event for event in events if event.event_type == "output.proposed")
-        assert output.payload.text == rewritten and events[-1].payload.status == "completed"
+    assert "".join(event.payload.text for event in outputs(events)) == harness.rewrite["output"]
+    assert events[-1].payload.status == "completed"
+    assert harness.store.endings[-1].answer_text == harness.rewrite["output"]
 
 
 @pytest.mark.asyncio
-async def test_state_save_failure_is_not_absorbed_by_capacity_handling(harness):
+async def test_state_save_failure_after_the_handoff_records_no_ending(harness):
     spec = harness.spec()
     ctx, host = harness.context(spec)
     harness.model.answer = emoji_text(65500)
@@ -572,7 +599,23 @@ async def test_state_save_failure_is_not_absorbed_by_capacity_handling(harness):
     with pytest.raises(BaseError) as exc_info:
         await collect(harness.api.execute_persistent_request(spec, ctx, request()))
     assert_rejected(exc_info, StatusCode.DEEPAGENT_RUNTIME_ERROR)
-    assert not {"output.proposed", "execution.final", "execution.paused"} & set(kinds(host.events))
+    assert "output.proposed" in kinds(host.events), "candidates are handed off before the save"
+    assert not {"execution.final", "execution.paused"} & set(kinds(host.events)), "unreferenced, never delivered"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_final_hands_its_outputs_in_again_and_completes(harness):
+    """PA-08-V-07 at the entry: one hand-in again and one retry; state is saved once, nothing reruns."""
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    host.fail_once = {"execution.final"}
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert events[-1].payload.status == "completed"
+    recorded = kinds(host.events)
+    assert recorded[-2:] == ["output.proposed", "execution.final"]
+    proposals = [event for event in host.events if event.event_type == "output.proposed"]
+    assert proposals[0] is proposals[1], "handed in again as the same event"
+    assert harness.log.count("save") == 1 and harness.model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -1549,7 +1592,8 @@ async def test_end_marker_records_how_the_execution_ended(real_state):
     messages = window_of(await saved_record(harness))
     assert parts(messages) == ["execution_header", None, None, "execution_end"]
     assert messages[-1].content.startswith(
-        "【执行结束】request_id：request-1；execution_id：execution-1；结局：已完成；交出候选：out_"
+        "【执行结束】request_id：request-1；execution_id：execution-1；结局：已完成；"
+        "交出候选：最终回答 1 段（以结束记录为准）"
     )
 
     ctx, host = harness.context(spec, execution_id="execution-2", request_id="request-2")
@@ -1678,15 +1722,35 @@ async def test_a_failed_save_after_a_stop_is_still_a_runtime_error(real_state):
 
 
 @pytest.mark.asyncio
-async def test_pending_answer_is_saved_verbatim(real_state):
-    """PA-10-V-13: kept under the current contract until PA-08 settles its lifecycle."""
+async def test_an_oversized_answer_completes_and_stays_in_the_window(real_state):
+    """PA-08-V-09: the answer is handed off in segments; the record keeps it as the native reply in the
+    window and writes no ending.pending_answer."""
     harness = real_state
     harness.model.answer = emoji_text(65500)
     spec = harness.spec()
     ctx, _ = harness.context(spec)
     events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
-    assert events[-1].payload.detail == CAPACITY_DETAIL
-    assert (await saved_record(harness))["ending"]["pending_answer"] == "local " + harness.model.answer
+    assert events[-1].payload.status == "completed"
+    record = await saved_record(harness)
+    assert "pending_answer" not in record["ending"]
+    messages = window_of(record)
+    assert "handoff_text" not in parts(messages), "the native reply already is the answer handed off"
+    assert any(message.content == "local " + harness.model.answer for message in messages), "the full answer stays"
+    assert f"交出候选：最终回答 {len(outputs(events))} 段" in messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_a_rewritten_answer_is_kept_in_the_window_as_handed_off(real_state):
+    """PA-08-V-10: the window keeps the text the group received, not only the native reply."""
+    harness = real_state
+    harness.rewrite["output"] = "rewritten answer"
+    spec = harness.spec(rewrite=True)
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    messages = window_of(await saved_record(harness))
+    assert parts(messages)[-2:] == ["handoff_text", "execution_end"]
+    assert messages[-2].content == "【实际交出的最终回答】\nrewritten answer"
+    assert messages[-3].content == "local answer", "the native reply stays as it was"
 
 
 @pytest.mark.asyncio
@@ -2024,4 +2088,413 @@ async def test_refused_call_note_reaches_the_native_window(harness, reason):
     assert result.content == "本次执行正在结束，该工具未调用。"
     assert len(harness.tool_calls) == 1, "call-b was refused before invocation"
     assert "persistent_pause" not in result.content and "execution is stopping" not in result.content
+<<<<<<< HEAD
 >>>>>>> 5800f8e1d (test(harness): cover tool calls refused by execution control)
+=======
+
+
+# PA-08: listed files with a real DeepAgent, a temporary workspace and the formal share_file tool.
+
+
+class WorkspaceAccess:
+    def __init__(self, root):
+        self.root = root
+
+    async def resolve_read_scope(self, context):
+        return WorkspaceReadScope(
+            status="allowed",
+            agent_id=context.agent_id,
+            session_id=context.session_id,
+            workspace_root=self.root,
+            allowed_roots=(self.root,),
+            private_sessions_root=self.root / "sessions",
+            current_session_root=self.root / "sessions" / context.session_id,
+            source_ref="workspace://business-agent",
+            policy_revision=context.policy_revision,
+        )
+
+
+def shared(path, mode="upload", caption=None):
+    arguments = {"file_path": path, "share_mode": mode}
+    if caption is not None:
+        arguments["caption"] = caption
+    return ("share_file", json.dumps(arguments, ensure_ascii=False))
+
+
+def digest(data):
+    return "sha256:" + hashlib.sha256(data).hexdigest()
+
+
+@pytest.fixture
+def files(harness, tmp_path):
+    root = tmp_path / "workspace"
+    (root / "reports").mkdir(parents=True)
+    (root / "reports" / "q3.md").write_bytes(b"third quarter")
+    (root / "notes.txt").write_bytes(b"notes")
+    harness.workspace = root
+    harness.access = WorkspaceAccess(root)
+    return harness
+
+
+def file_spec(harness, **overrides):
+    return harness.spec(
+        enable_sys_operation=True, enabled_features=frozenset({"construction", "workspace_read"}), **overrides
+    )
+
+
+def on_second_call(harness, action):
+    harness.model.on_call = lambda: action() if harness.model.calls == 2 else None
+
+
+@pytest.mark.asyncio
+async def test_listed_files_are_handed_off_after_the_answer_in_listed_order(files):
+    """PA-08-V-01 / V-03 / V-05: the answer first, then each file in listed order, all to the reply target."""
+    harness = files
+    spec = file_spec(harness)
+    ctx, _ = harness.context(spec, workspace_access=harness.access)
+    harness.model.turns = [shared("notes.txt"), shared("reports/q3.md", "attachment", "第三季度"), "answer"]
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    answer, notes, report = (event.payload for event in outputs(events))
+    assert (answer.share_mode, answer.text) == ("message", "local answer")
+    assert (notes.share_mode, notes.file_path, notes.file_size, notes.file_ref, notes.text) == (
+        "upload",
+        "notes.txt",
+        5,
+        digest(b"notes"),
+        None,
+    )
+    assert (report.share_mode, report.file_path, report.text) == ("attachment", "reports/q3.md", "第三季度")
+    assert {answer.target_ref, notes.target_ref, report.target_ref} == {"chat-1"}
+    assert events[-1].payload.status == "completed"
+    assert events[-1].payload.output_refs == (answer.output_id, notes.output_id, report.output_id)
+    assert "tool.intent" not in kinds(events) and kinds(events).count("tool.completed") == 2
+    assert harness.store.endings[-1].shared_files == (
+        ("notes.txt", "upload", notes.output_id),
+        ("reports/q3.md", "attachment", report.output_id),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_file_is_handed_off_as_it_is_at_the_end_and_unlisted_files_never(files):
+    """PA-08-V-04."""
+    harness = files
+    spec = file_spec(harness)
+    ctx, _ = harness.context(spec, workspace_access=harness.access)
+    (harness.workspace / "unlisted.md").write_bytes(b"draft")
+    harness.model.turns = [shared("notes.txt"), "answer"]
+    on_second_call(harness, lambda: (harness.workspace / "notes.txt").write_bytes(b"final notes"))
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    handed = [event.payload for event in outputs(events) if event.payload.share_mode != "message"]
+    assert [(item.file_path, item.file_ref, item.file_size) for item in handed] == [
+        ("notes.txt", digest(b"final notes"), 11)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["error", "stopped", "cancelled"])
+async def test_pauses_hand_off_listed_files_and_controls_hand_off_nothing(files, ending):
+    """PA-08-V-05 / V-13: a stop or cancel accepted before the lock hands off nothing."""
+    harness = files
+    spec = file_spec(harness)
+    ctx, _ = harness.context(spec, workspace_access=harness.access)
+    harness.model.turns = [shared("notes.txt"), "fail" if ending == "error" else "answer"]
+    if ending == "error":
+        events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+        (handed,) = outputs(events)
+        assert handed.payload.file_path == "notes.txt"
+        paused = events[-1].payload
+        assert (paused.reason, paused.output_refs) == ("error", (handed.payload.output_id,))
+        return
+    harness.model.release.clear()
+    consumer = asyncio.create_task(collect(harness.api.execute_persistent_request(spec, ctx, request())))
+    await asyncio.wait_for(harness.model.streaming.wait(), 5)
+    await harness.api.abort_persistent_request(ctx, reason="stop" if ending == "stopped" else "cancel")
+    events = await asyncio.wait_for(consumer, 5)
+    assert outputs(events) == [] and events[-1].payload.output_refs == ()
+    if ending == "stopped":
+        assert events[-1].payload.reason == "stopped"
+    else:
+        assert events[-1].payload.status == "cancelled"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["completed", "awaiting_confirmation"])
+async def test_a_file_that_cannot_be_prepared_stops_the_whole_handoff(files, outcome):
+    """PA-08-V-06: nothing is handed off, not even the answer; the pause says which file and why."""
+    harness = files
+    waiting = outcome == "awaiting_confirmation"
+    spec = file_spec(harness, confirm=waiting)
+    ctx, _ = harness.context(spec, workspace_access=harness.access)
+    harness.model.turns = [shared("notes.txt"), "tool" if waiting else "answer"]
+    on_second_call(harness, lambda: (harness.workspace / "notes.txt").unlink())
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert outputs(events) == []
+    paused = events[-1].payload
+    assert "handoff not prepared: notes.txt: not_found" in paused.detail and paused.output_refs == ()
+    ending = harness.store.endings[-1]
+    assert ending.handoff_failure == "notes.txt: not_found" and ending.output_refs == ()
+    if waiting:
+        assert paused.reason == "awaiting_confirmation" and paused.intercepted, "the scene keeps waiting"
+    else:
+        assert paused.reason == "error" and ending.answer_text == "local answer", "kept for a later handoff"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [False, True], ids=["unchanged", "changed"])
+async def test_a_confirmation_resume_hands_off_the_files_of_its_chain(files, real_state, changed):
+    """PA-08-V-11: listings before the pause are rebuilt; an unchanged file keeps its identity."""
+    harness = files
+    spec = file_spec(harness, confirm=True)
+    harness.model.turns = [shared("reports/q3.md"), "tool", "answer"]
+    ctx, _ = harness.context(spec, workspace_access=harness.access)
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    (before,) = outputs(events)
+    assert events[-1].payload.reason == "awaiting_confirmation"
+    assert events[-1].payload.output_refs == (before.payload.output_id,), "a confirmation pause hands off files"
+    if changed:
+        (harness.workspace / "reports" / "q3.md").write_bytes(b"revised after confirmation")
+    ctx, _ = harness.context(spec, execution_id="execution-2", workspace_access=harness.access)
+    resumed = await collect(harness.api.resume_persistent_request(spec, ctx, permission("call-2")))
+    answer, after = (event.payload for event in outputs(resumed))
+    assert answer.share_mode == "message" and after.file_path == "reports/q3.md"
+    assert (after.output_id == before.payload.output_id) is not changed, "a changed file is a new version"
+    assert resumed[-1].payload.output_refs == (answer.output_id, after.output_id)
+
+
+@pytest.mark.asyncio
+async def test_long_confirmation_arguments_are_cut_but_the_resume_runs_the_full_call(harness):
+    """PA-08-V-12 at the entry."""
+    value = "v" * 300000
+    spec = harness.spec(confirm=True)
+    harness.model.turns = [("remember", json.dumps({"value": value}))]
+    ctx, _ = harness.context(spec)
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    paused = events[-1]
+    assert paused.payload.reason == "awaiting_confirmation" and paused.proposal_size() <= 262144
+    (call,) = paused.payload.intercepted
+    assert call.arguments_truncated is True and json.dumps({"value": value}).startswith(call.arguments)
+    ctx, _ = harness.context(spec, execution_id="execution-2")
+    resumed = await collect(harness.api.resume_persistent_request(spec, ctx, permission("call-1")))
+    assert resumed[-1].payload.status == "completed" and harness.tool_calls == [{"value": value}]
+
+
+def intercepted_call(index, size):
+    return {"tool_call_id": f"call-{index}", "tool_name": "remember", "arguments": json.dumps({"value": "x" * size})}
+
+
+def test_confirmation_arguments_share_the_room_and_are_marked_when_cut():
+    """PA-08-V-12: 64 calls fit one event; a short call keeps its arguments whole."""
+    entries = module("execution.entries")
+    events = module("schema.events")
+    execution = module("schema.execution").ExecutionContext(
+        namespace_id="tenant",
+        agent_id="business-agent",
+        session_id="session-a",
+        request_id="request-1",
+        execution_id="execution-1",
+        config_version="v1",
+        config_fingerprint="0" * 64,
+        source_ref="source:message-1",
+        principal_ref="user",
+        startup_scope=frozenset({"read"}),
+        source_scope=frozenset({"read"}),
+        policy_revision="p1",
+        capability_snapshot=frozenset({"construction"}),
+    )
+    context = SimpleNamespace(execution=execution)
+    calls = tuple(intercepted_call(index, 20000) for index in range(63)) + (intercepted_call(63, 10),)
+    paused = {"reason": "awaiting_confirmation", "intercepted": calls, "detail": None, "output_refs": ()}
+    fitted = entries._fit_intercepted(context, paused)
+    event = events.AgentEvent.create(
+        execution,
+        event_type=events.EventType.EXECUTION_PAUSED,
+        local_seq=10**6,
+        occurred_at=datetime.now(timezone.utc),
+        payload=fitted,
+    )
+    assert event.proposal_size() <= events.EVENT_MAX_BYTES
+    shown = event.payload.intercepted
+    assert shown[-1].arguments == calls[-1]["arguments"] and shown[-1].arguments_truncated is False
+    for original, call in zip(calls[:-1], shown[:-1]):
+        assert call.arguments_truncated is True and original["arguments"].startswith(call.arguments)
+    assert len({len(call.arguments) for call in shown[:-1]}) <= 2, "the room is shared evenly"
+
+    whole = {**paused, "intercepted": (intercepted_call(0, 100),)}
+    assert entries._fit_intercepted(context, whole) == whole, "arguments that fit are left as they are"
+    long_text = {**paused, "intercepted": (intercepted_call(0, 70000),)}
+    (call,) = entries._fit_intercepted(context, long_text)["intercepted"]
+    assert call["arguments_truncated"] is True and len(call["arguments"]) == 65536, "the character limit too"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("host", ["rewrites_and_ends", "rewrites", "fails_while_checking"])
+async def test_a_listing_whose_result_a_host_rail_withheld_is_not_handed_off(files, real_state, host):
+    """PA-08-V-17: the final window decides; a rewritten result or a note in its place lists nothing."""
+    harness = files
+    spec = file_spec(harness, rails=[RailSpec(type="test.entries.host_output_check")])
+    ctx, _ = harness.context(spec, workspace_access=harness.access)
+    if host == "rewrites_and_ends":
+        harness.model.turns = [shared("notes.txt")]
+        harness.output_check["block"] = ("after_tool_call", "call-1")
+    elif host == "rewrites":
+        harness.model.turns = [shared("notes.txt"), "answer"]
+    else:
+        # The host rail aborts while checking the result, so PA-10 keeps only a note; the run then fails.
+        harness.model.turns = [shared("notes.txt"), "fail"]
+        harness.output_check["fail"] = ("after_tool_call", "call-1")
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert [event.payload.share_mode for event in outputs(events)] == (["message"] if host == "rewrites" else [])
+    result = next(
+        message
+        for message in window_of(await saved_record(harness))
+        if getattr(message, "tool_call_id", None) == "call-1"
+    )
+    expected = {"rewrites_and_ends": BLOCKED, "rewrites": CHECKED, "fails_while_checking": RETURNED_NOTE}[host]
+    assert result.content.startswith(expected), "the window shows why nothing was listed"
+    if host == "rewrites":
+        assert events[-1].payload.status == "completed"
+        assert events[-1].payload.output_refs == (outputs(events)[0].payload.output_id,)
+    else:
+        assert (events[-1].payload.reason, events[-1].payload.output_refs) == ("error", ())
+
+
+class LateListing(DeepAgentRail):
+    """Adds a listed share_file result to the live window after the native write-back, as an outer rail may."""
+
+    def init(self, agent):
+        super().init(agent)
+        self.agent = agent
+
+    async def after_invoke(self, ctx) -> None:
+        handoff = module("execution.handoff")
+        context = self.agent.react_agent.context_engine.get_context(session_id=ctx.session.get_session_id())
+        call = ToolCall(id="late-1", type="function", name="share_file", arguments="{}")
+        await context.add_messages(AssistantMessage(content="", tool_calls=[call]))
+        listed = handoff.registration_result(handoff.Registration("notes.txt", "upload"))
+        await context.add_messages(ToolMessage(content=listed, tool_call_id="late-1"))
+
+
+@pytest.mark.asyncio
+async def test_the_ending_reads_the_live_window_not_a_stale_snapshot(files, real_state, monkeypatch):
+    """PA-08-V-17: the window is synced before the listings are read from it."""
+    harness = files
+    monkeypatch.setitem(_RAIL_PROVIDER_REGISTRY, "test.entries.late_listing", lambda params, context: LateListing())
+    spec = file_spec(harness, rails=[RailSpec(type="test.entries.late_listing")])
+    ctx, _ = harness.context(spec, workspace_access=harness.access)
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert [event.payload.share_mode for event in outputs(events)] == ["message", "upload"]
+    assert events[-1].payload.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_confirmation_chain_counts_its_listings_toward_the_limit(files, real_state, monkeypatch):
+    """Q-01: the limit applies to the chain's listings merged with the resumed run's."""
+    monkeypatch.setattr(module("execution.handoff"), "MAX_REGISTRATIONS", 1)
+    harness = files
+    spec = file_spec(harness, confirm=True)
+    harness.model.turns = [shared("reports/q3.md"), "tool", shared("notes.txt"), "answer"]
+    ctx, _ = harness.context(spec, workspace_access=harness.access)
+    await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    ctx, _ = harness.context(spec, execution_id="execution-2", workspace_access=harness.access)
+    resumed = await collect(harness.api.resume_persistent_request(spec, ctx, permission("call-2")))
+    assert [event.payload.file_path for event in outputs(resumed)] == [None, "reports/q3.md"]
+    refused = next(
+        message
+        for message in window_of(await saved_record(harness))
+        if getattr(message, "tool_call_id", None) == "call-3"
+    )
+    assert refused.content.startswith("本次交付最多登记"), "the resumed listing is refused at call time"
+
+
+PARTICIPATION_ENDINGS = {
+    "ignored": ("execution.final", "ignored"),
+    "failed": ("execution.final", "failed"),
+    "budget_denied": ("execution.paused", "budget_denied"),
+    "admission_error": ("execution.paused", "error"),
+}
+
+
+def end_participation(harness, host, ending):
+    if ending == "ignored":
+        harness.model.judgments = [judgment("ignore")]
+    elif ending == "failed":
+        harness.model.judgments = ["not json"] * 3
+    elif ending == "budget_denied":
+        host.admission = "denied"
+    else:
+        host.admit_error = RuntimeError("budget port down")
+
+
+def ending_value(event):
+    return getattr(event.payload, "status", None) or event.payload.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", list(PARTICIPATION_ENDINGS))
+async def test_a_participation_ending_is_retried_once_after_a_record_failure(harness, ending):
+    """PA-08-V-07 on the participation path: the same event is recorded again; nothing reruns."""
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    ctx, host = harness.context(spec, group_chat=GroupChat((group_message(),)))
+    end_participation(harness, host, ending)
+    kind, value = PARTICIPATION_ENDINGS[ending]
+    host.fail_once = {kind}
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    assert (str(events[-1].event_type), ending_value(events[-1])) == (kind, value)
+    recorded = [event for event in host.events if event.event_type == kind]
+    assert recorded == [events[-1]], "recorded once, on the retry"
+    assert ctx.binding.control.fatal is None
+    assert harness.model.judge_calls == {"ignored": 1, "failed": 3}.get(ending, 0), "the judgment is not rerun"
+    assert harness.model.calls == 0 and harness.store.loaded_marker == "never loaded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["ignored", "budget_denied"])
+async def test_a_participation_ending_that_fails_twice_stops_the_execution(harness, ending):
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    ctx, host = harness.context(spec, group_chat=GroupChat((group_message(),)))
+    end_participation(harness, host, ending)
+    kind, _ = PARTICIPATION_ENDINGS[ending]
+    host.fail_record = {kind}
+    with pytest.raises(BaseError) as exc_info:
+        await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    assert_rejected(exc_info, StatusCode.DEEPAGENT_RUNTIME_ERROR)
+    assert kind not in kinds(host.events) and ctx.binding.control.fatal is not None
+    assert harness.model.judge_calls == (1 if ending == "ignored" else 0) and harness.model.calls == 0
+
+
+class RedactListingCaption(DeepAgentRail):
+    """Acts as a host rail that changes a share_file result but keeps its success form."""
+
+    def __init__(self, end):
+        super().__init__()
+        self.end = end
+
+    async def after_tool_call(self, ctx) -> None:
+        if ctx.inputs.tool_call.name != "share_file":
+            return
+        result = json.loads(ctx.inputs.tool_msg.content)
+        content = json.dumps({**result, "caption": "redacted"}, ensure_ascii=False)
+        ctx.inputs.tool_result = content
+        ctx.inputs.tool_msg = ToolMessage(content=content, tool_call_id=ctx.inputs.tool_call.id)
+        if self.end:
+            ctx.request_force_finish({"output": "host withheld this listing", "result_type": "error"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("end", [True, False], ids=["ends", "continues"])
+async def test_a_listing_a_host_rail_changed_in_the_same_form_is_not_handed_off(files, real_state, monkeypatch, end):
+    """PA-08-V-17: the check value no longer matches, so the changed result lists nothing."""
+    harness = files
+    monkeypatch.setitem(
+        _RAIL_PROVIDER_REGISTRY, "test.entries.redact_listing", lambda params, context: RedactListingCaption(end)
+    )
+    spec = file_spec(harness, rails=[RailSpec(type="test.entries.redact_listing")])
+    ctx, _ = harness.context(spec, workspace_access=harness.access)
+    harness.model.turns = [shared("notes.txt", caption="original caption"), "answer"]
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    assert [event.payload.share_mode for event in outputs(events)] == ([] if end else ["message"])
+    if end:
+        assert (events[-1].payload.reason, events[-1].payload.output_refs) == ("error", ())
+    else:
+        assert events[-1].payload.status == "completed"
+>>>>>>> 416de680c (test(harness): cover PA-08 handoff and recovery boundaries)
