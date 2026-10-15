@@ -22,6 +22,11 @@ TEAM_POLICY_LABEL = "TEAM_POLICY"
 TEAM_TOOL_CALL_NAMES = {"send_message", "view_task", "claim_task", "member_complete_task"}
 TEAM_MESSAGE_TOOL_CALL_NAMES = {"send_message"}
 TEAM_POLICY_TOOL_CALL_NAME = "build_team"
+# Opening tag of the in-history policy block a framework-built team's leader
+# receives instead of a ``build_team`` result (agent_teams F_122). The block
+# rides the first input, so it is found inside a user message rather than at
+# its very start.
+TEAM_POLICY_BLOCK_TAG = "<team-policy>"
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,13 @@ def build_team_policy_reinjected_messages(
     ``state_snapshot_max_chars``, on the same grounds the skill-round builder
     does it: a half policy is a policy with the second half silently deleted.
 
+    A leader of a framework-built team never calls ``build_team``: its policy
+    arrived as a ``<team-policy>`` block folded into its first input (F_122).
+    That block is located the same way — the newest user message carrying the
+    tag — and restored whole. The two forms never coexist in one
+    conversation, so the tool-call form is tried first and the block form only
+    when no ``build_team`` call exists.
+
     Nothing is re-injected when the policy is already surviving in
     ``messages_to_keep``, or when this conversation never built a team (every
     non-leader agent, which is most of them).
@@ -153,16 +165,51 @@ def build_team_policy_reinjected_messages(
                 continue
             if _policy_already_kept(result_text, keep_signatures):
                 return []
-            return [
-                UserMessage(
-                    content=(
-                        f"{STATE_REINJECTION_MARKER}\n[{TEAM_POLICY_LABEL}]\n"
-                        f"Team collaboration policy recovered from compressed dialogue "
-                        f"(still in force, follow it verbatim):\n{result_text}"
-                    )
-                )
-            ]
-    return []
+            return [_team_policy_reinjection(result_text)]
+    block_text = _find_team_policy_block(messages)
+    if not block_text:
+        return []
+    if _policy_already_kept(block_text, keep_signatures):
+        return []
+    return [_team_policy_reinjection(block_text)]
+
+
+def _team_policy_reinjection(policy_text: str) -> UserMessage:
+    """Wrap a recovered policy text as the re-injected user message."""
+    return UserMessage(
+        content=(
+            f"{STATE_REINJECTION_MARKER}\n[{TEAM_POLICY_LABEL}]\n"
+            f"Team collaboration policy recovered from compressed dialogue "
+            f"(still in force, follow it verbatim):\n{policy_text}"
+        )
+    )
+
+
+def _find_team_policy_block(messages: List[BaseMessage]) -> str:
+    """Return the ``<team-policy>`` block of the newest user message carrying one.
+
+    The block rides a first input alongside other team blocks and the user's
+    own text, so the whole message is not the policy: only the element itself
+    is returned, from its opening tag to its closing tag. A message carrying
+    the opening tag without the closing one is skipped. An already re-injected
+    copy is skipped as well (it starts with the reinjection marker), so a
+    second compaction does not recover a recovery.
+    """
+    closing_tag = "</team-policy>"
+    for message in reversed(messages):
+        if not isinstance(message, UserMessage):
+            continue
+        text = message_to_text(message)
+        if text.startswith(STATE_REINJECTION_MARKER):
+            continue
+        start = text.find(TEAM_POLICY_BLOCK_TAG)
+        if start < 0:
+            continue
+        end = text.find(closing_tag, start)
+        if end < 0:
+            continue
+        return text[start:end + len(closing_tag)]
+    return ""
 
 
 def _policy_already_kept(result_text: str, keep_signatures: set[str]) -> bool:

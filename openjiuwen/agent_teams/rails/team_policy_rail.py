@@ -44,9 +44,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots, render_clock
+from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots, render_clock, render_team_policy_inline
 from openjiuwen.agent_teams.prompts import (
     build_leader_bootstrap_section,
+    build_leader_policy_disclosure,
+    build_leader_prebuilt_section,
     build_team_extra_section,
     build_team_static_sections,
 )
@@ -124,6 +126,7 @@ class TeamPolicyRail(DeepAgentRail):
         language: str = "cn",
         team_mode: str = "default",
         dispatch_mode: str = "autonomous",
+        bootstrap_mode: str = "leader",
         base_prompt: str | None = None,
         team_workspace_path: str | None = None,
         team_outputs_dir: str | None = None,
@@ -168,7 +171,28 @@ class TeamPolicyRail(DeepAgentRail):
             base_prompt=base_prompt,
             hitt_enabled=hitt_enabled,
             swarmflow_enabled=swarmflow_enabled,
+            bootstrap_mode=bootstrap_mode,
         )
+
+        # A framework-built team (F_122) has no ``build_team`` result to carry
+        # the leader's policy, so the same disclosure text is rendered here —
+        # every variable it depends on is spec-settled (no leader choice is
+        # pending) — and handed to the tracker as a ``<team-policy>`` block.
+        # ``hitt_enabled`` is the spec ceiling: with no ``build_team`` call it
+        # is also the effective value.
+        policy_text: str | None = None
+        if role == TeamRole.LEADER and bootstrap_mode == "framework":
+            policy_text = render_team_policy_inline(
+                body=build_leader_policy_disclosure(
+                    lifecycle=lifecycle,
+                    teammate_mode=teammate_mode,
+                    team_mode=team_mode,
+                    dispatch_mode=dispatch_mode,
+                    language=language,
+                    hitt_enabled=hitt_enabled,
+                    loader=self._loader,
+                ),
+            )
 
         self._tracker = TeamContextTracker(
             team_backend=team_backend,
@@ -182,6 +206,7 @@ class TeamPolicyRail(DeepAgentRail):
             expose_human_agents_to_teammates=expose_human_agents_to_teammates,
             language=language,
             fork_source=fork_source,
+            policy_text=policy_text,
         )
         # Scheduled dispatch only (F_119): a passed review does not wake the
         # author, so the outcome rides its next admitted input instead.
@@ -438,6 +463,7 @@ class TeamPolicyRail(DeepAgentRail):
         base_prompt: str | None,
         hitt_enabled: bool,
         swarmflow_enabled: bool,
+        bootstrap_mode: str,
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time.
 
@@ -453,6 +479,7 @@ class TeamPolicyRail(DeepAgentRail):
             sections = self._build_leader_sections(
                 base_prompt=base_prompt,
                 swarmflow_enabled=swarmflow_enabled,
+                bootstrap_mode=bootstrap_mode,
             )
         else:
             sections = build_team_static_sections(
@@ -480,19 +507,27 @@ class TeamPolicyRail(DeepAgentRail):
         *,
         base_prompt: str | None,
         swarmflow_enabled: bool,
+        bootstrap_mode: str,
     ) -> list[PromptSection]:
-        """Build the leader's prefix: bootstrap, plus the caller's own prompt.
+        """Build the leader's prefix: an opening section, plus the caller's own prompt.
 
-        The extra section stays here rather than moving into the ``build_team``
-        disclosure because it is not team policy: it is what the SDK caller told
-        *this* leader to do, and it has to be in force before the team exists —
-        it may well be the instruction that decides what team to build.
+        The opening section is ``team_bootstrap`` (route to ``build_team``) or,
+        for a framework-built team (F_122), ``team_prebuilt`` (the team exists,
+        the policy arrives as a ``<team-policy>`` block). The extra section
+        stays here rather than moving into the policy disclosure because it is
+        not team policy: it is what the SDK caller told *this* leader to do,
+        and it has to be in force before the team exists — it may well be the
+        instruction that decides what team to build.
         """
-        sections = [build_leader_bootstrap_section(
-            swarmflow_enabled=swarmflow_enabled,
-            language=self._language,
-            loader=self._loader,
-        )]
+        if bootstrap_mode == "framework":
+            opening = build_leader_prebuilt_section(language=self._language, loader=self._loader)
+        else:
+            opening = build_leader_bootstrap_section(
+                swarmflow_enabled=swarmflow_enabled,
+                language=self._language,
+                loader=self._loader,
+            )
+        sections = [opening]
         extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
         if extra is not None:
             sections.append(extra)

@@ -58,6 +58,7 @@ that can interleave means revisiting this.
 
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.i18n import t
@@ -91,6 +92,10 @@ _TEAM_INFO_MTIME = "team_info_mtime"
 _ROSTER_MTIME = "roster_mtime"
 _ROSTER = "roster"
 _MEMBER_PROMPT_MTIME = "member_prompt_mtime"
+# sha256 of the collaboration policy last delivered (framework-built teams,
+# F_122). A hash rather than a flag: an evolved policy template re-renders to
+# different text, and that is a reason to deliver it again.
+_POLICY_HASH = "policy_hash"
 # Content last registered in a current-state channel (the attachment section).
 _LAST_DELIVERED_TEXT = "last_delivered_text"
 
@@ -128,6 +133,12 @@ class TeamContextTracker:
         fork_source: When this member was forked from another (spawned with
             ``fork="..."``), the source member's name. ``None`` for a normal
             spawn. Rendered into the identity body as a conversion notice.
+        policy_text: The leader's collaboration policy, already rendered as a
+            ``<team-policy>`` block, for a framework-built team (F_122). It
+            is delivered once — ahead of the first input, between the team
+            context and the roster — and again only when its text changes.
+            ``None`` (every other member, and a leader that receives the
+            policy from its ``build_team`` result) disables the channel.
     """
 
     def __init__(
@@ -144,8 +155,10 @@ class TeamContextTracker:
         expose_human_agents_to_teammates: bool = False,
         language: str = "cn",
         fork_source: str | None = None,
+        policy_text: str | None = None,
     ) -> None:
         self._team_backend = team_backend
+        self._policy_text = policy_text
         self._member_name = member_name
         self._role = role
         self._display_name = display_name
@@ -189,7 +202,7 @@ class TeamContextTracker:
         roster_block = None
         if self._team_backend is not None:
             roster_block = self._render_roster_snapshot(await self._list_roster())
-        blocks = self._compose_blocks(identity_body, info_body, roster_block)
+        blocks = self._compose_blocks(identity_body, info_body, roster_block, policy_block=self._policy_text)
         return "\n\n".join(blocks) if blocks else None
 
     async def pending_text(self, session: Any) -> str | None:
@@ -215,8 +228,9 @@ class TeamContextTracker:
         updated = dict(baseline)
         identity_body = await self._identity_body(baseline, updated)
         info_body = await self._team_info_body(baseline, updated)
+        policy_block = self._policy_block(baseline, updated)
         roster_block = await self._roster_block(baseline, updated)
-        blocks = self._compose_blocks(identity_body, info_body, roster_block)
+        blocks = self._compose_blocks(identity_body, info_body, roster_block, policy_block=policy_block)
 
         if blocks:
             self._uncommitted = updated
@@ -273,8 +287,16 @@ class TeamContextTracker:
         identity_body: str | None,
         info_body: str | None,
         roster_block: str | None,
+        *,
+        policy_block: str | None = None,
     ) -> list[str]:
-        """Assemble rendered channel bodies into the delivered blocks, in order."""
+        """Assemble rendered channel bodies into the delivered blocks, in order.
+
+        Order: ``<team-context>`` (who I am, what team this is), then the
+        ``<team-policy>`` block when there is one (how this team works), then
+        the roster (who else is here). A leader reads its identity before the
+        rules and the rules before the people it can hand work to.
+        """
         blocks: list[str] = []
         # Identity and team info are both standing facts about the team, so when
         # they surface together they belong in one <team-context> rather than two
@@ -309,9 +331,27 @@ class TeamContextTracker:
                 standing = [part for part in (identity_body, info_body) if part]
                 blocks.append(render_team_context(body="\n".join(standing)))
 
+        if policy_block:
+            blocks.append(policy_block)
         if roster_block:
             blocks.append(roster_block)
         return blocks
+
+    def _policy_block(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:
+        """Return the policy block when its text has not been delivered yet.
+
+        The baseline records the sha256 of the delivered text. Same digest →
+        nothing to say; a different one (first delivery, or the evolved
+        policy templates re-rendered to new text) → deliver and record. The
+        block is already rendered, so it is returned as is.
+        """
+        if self._policy_text is None:
+            return None
+        digest = hashlib.sha256(self._policy_text.encode("utf-8")).hexdigest()
+        if baseline.get(_POLICY_HASH) == digest:
+            return None
+        updated[_POLICY_HASH] = digest
+        return self._policy_text
 
     # ------------------------------------------------------------------
     # Channels

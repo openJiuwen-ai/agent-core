@@ -54,6 +54,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "time.unknown": "时间未知",
         # schema/blueprint.py
         "blueprint.default_desc": "天才项目管理专家",
+        "blueprint.generic_team_display_name": "通用协作团队",
+        "blueprint.generic_team_desc": (
+            "不限定领域的通用任务协作团队：由 Leader 按任务动态组建承担者，"
+            "任务完成后成员按退场策略关闭或休眠。"
+        ),
         # tools/team.py
         "team.shutdown_request_content": "当前任务已全部完成，请结束流程",
         "team.cancel_request_content": "当前任务有变动，请停止执行当前任务，重新尝试认领合适任务",
@@ -463,6 +468,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "time.unknown": "unknown time",
         # schema/blueprint.py
         "blueprint.default_desc": "Genius project management expert",
+        "blueprint.generic_team_display_name": "General Collaboration Team",
+        "blueprint.generic_team_desc": (
+            "A domain-agnostic collaboration team: the leader assembles assignees per task; "
+            "members retire or go dormant once their tasks close."
+        ),
         # tools/team.py
         "team.shutdown_request_content": "All tasks are complete. Please wrap up and exit.",
         "team.cancel_request_content": (

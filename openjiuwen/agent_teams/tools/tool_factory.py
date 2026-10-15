@@ -126,6 +126,7 @@ def create_team_tools(
     dispatch_mode: str = "autonomous",
     lifecycle: str = "temporary",
     team_mode: str = "default",
+    bootstrap_mode: str = "leader",
     model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
     exclude_tools: set[str] | None = None,
     lang: str = "cn",
@@ -170,6 +171,12 @@ def create_team_tools(
         team_mode: Team operating mode — "default" / "predefined" / "hybrid".
             Selects the workflow variant disclosed in the ``build_team``
             result; it does not change any tool's shape.
+        bootstrap_mode: Who materializes the team — "leader" (the leader
+            calls ``build_team``) or "framework" (the coordination kernel
+            builds the team on start, F_122). Under "framework" the leader's
+            ``build_team`` is dropped: the team already exists and the policy
+            that tool would disclose reaches the leader as a
+            ``<team-policy>`` context block instead.
         model_config_allocator: Callback that returns the next
             ``Allocation`` for teammate allocation. Receives an
             optional ``model_name`` hint forwarded from the spawn site;
@@ -329,6 +336,12 @@ def create_team_tools(
     # the leader is the only one who can wind them down.
     if lifecycle == "persistent":
         allowed = allowed - {"clean_team"}
+    # A framework-built team (F_122) already exists when the leader starts,
+    # and the policy ``build_team`` would disclose reaches the leader as a
+    # ``<team-policy>`` context block instead. A tool that is present gets
+    # called, so it is removed rather than left as a no-op.
+    if bootstrap_mode == "framework":
+        allowed = allowed - {"build_team"}
     # Capability gating for the non-teammate spawn tools: a spawn tool the
     # backend would reject is simply never shown to the LLM. spawn_teammate is
     # always available. Symmetric to the plan_mode / persistent gates above.

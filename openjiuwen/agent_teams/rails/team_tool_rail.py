@@ -66,6 +66,7 @@ class TeamToolRail(DeepAgentRail):
         dispatch_mode: str = "autonomous",
         lifecycle: str = "temporary",
         team_mode: str = "default",
+        bootstrap_mode: str = "leader",
         language: str = "cn",
         model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
         exclude_tools: Optional[Set[str]] = None,
@@ -88,6 +89,7 @@ class TeamToolRail(DeepAgentRail):
         self._dispatch_mode = dispatch_mode
         self._lifecycle = lifecycle
         self._team_mode = team_mode
+        self._bootstrap_mode = bootstrap_mode
         self._language = language
         self._model_config_allocator = model_config_allocator
         self._exclude_tools = exclude_tools
@@ -130,6 +132,7 @@ class TeamToolRail(DeepAgentRail):
             dispatch_mode=self._dispatch_mode,
             lifecycle=self._lifecycle,
             team_mode=self._team_mode,
+            bootstrap_mode=self._bootstrap_mode,
             model_config_allocator=self._model_config_allocator,
             exclude_tools=self._exclude_tools,
             lang=self._language,

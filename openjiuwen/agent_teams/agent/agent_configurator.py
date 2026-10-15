@@ -705,6 +705,7 @@ class AgentConfigurator:
                 params={
                     "teammate_mode": teammate_mode,
                     "dispatch_mode": spec.dispatch_mode,
+                    "bootstrap_mode": spec.bootstrap_mode,
                     "lifecycle": spec.lifecycle,
                     "team_mode": _resolve_team_mode(spec),
                     "exclude_tools": exclude,
@@ -725,6 +726,7 @@ class AgentConfigurator:
                     "teammate_mode": teammate_mode,
                     "team_mode": _resolve_team_mode(spec),
                     "dispatch_mode": spec.dispatch_mode,
+                    "bootstrap_mode": spec.bootstrap_mode,
                     "base_prompt": agent_spec.system_prompt,
                     "team_workspace_path": team_workspace_path,
                     "team_outputs_dir": team_outputs_dir,

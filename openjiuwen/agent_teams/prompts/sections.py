@@ -59,6 +59,7 @@ class TeamSectionName:
     """Centralized section names owned by ``TeamPolicyRail``."""
 
     BOOTSTRAP = "team_bootstrap"
+    PREBUILT = "team_prebuilt"
     ROLE = "team_role"
     HITT = "team_hitt"
     BRIDGE = "team_bridge"
@@ -178,6 +179,38 @@ def build_leader_bootstrap_section(
     body = loader("leader_bootstrap", language).format({"collaboration_mechanism": mechanism}).content.strip()
     return PromptSection(
         name=TeamSectionName.BOOTSTRAP,
+        content={language: f"{body}\n"},
+        priority=11,
+    )
+
+
+def build_leader_prebuilt_section(
+    *,
+    language: str = "cn",
+    loader: TemplateLoader = load_template,
+) -> PromptSection:
+    """Build the leader's opening section for a framework-built team (F_122).
+
+    The ``team_bootstrap`` counterpart for ``bootstrap_mode="framework"``:
+    the team already exists when the leader starts and there is no
+    ``build_team`` to call, so the section says only who the leader is, that
+    the team is a generic one with no members yet, and that the policy,
+    team info and roster arrive with the first input as ``<team-policy>`` /
+    ``<team-context>`` blocks. It carries no collaboration-mechanism slot:
+    the "build_team versus swarmflow" routing guide names a path that does
+    not exist here.
+
+    Args:
+        language: Prompt language ('cn' or 'en').
+        loader: Template loader (the per-team workspace loader, or the
+            framework default).
+
+    Returns:
+        PromptSection carrying the prebuilt opening body.
+    """
+    body = loader("leader_prebuilt", language).content.strip()
+    return PromptSection(
+        name=TeamSectionName.PREBUILT,
         content={language: f"{body}\n"},
         priority=11,
     )
@@ -849,6 +882,7 @@ __all__ = [
     "TeamSectionName",
     "build_leader_bootstrap_section",
     "build_leader_policy_disclosure",
+    "build_leader_prebuilt_section",
     "build_team_bridge_section",
     "build_team_dispatch_section",
     "build_team_extra_section",

@@ -25,7 +25,7 @@
 
 ## 验证者类型与分配
 
-`create_task` 的 `reviewer` 字段填写结构化对象列表。reviewer 系统是否生效取决于 build_team 的 `enable_task_verification` 参数（详见 build_team 的工具说明）。每项两个字段——`type` 和 `instruction`：
+`create_task` 的 `reviewer` 字段填写结构化对象列表。reviewer 系统是否生效取决于团队配置的任务验证开关（`enable_task_verification`）。每项两个字段——`type` 和 `instruction`：
 
 | 字段 | 必填 | 说明 |
 |------|:---:|------|
@@ -73,7 +73,7 @@
 
 ### 分配原则
 
-如果 build_team 时 `enable_task_verification=false`，跳过本节——系统已关闭评审，你不需要分配 reviewer。
+如果团队的任务验证开关（`enable_task_verification`）为关，跳过本节——系统已关闭评审，你不需要分配 reviewer。
 
 没有固定公式。根据任务特点，从三种 reviewer 中挑选你觉得有价值的组合：
 

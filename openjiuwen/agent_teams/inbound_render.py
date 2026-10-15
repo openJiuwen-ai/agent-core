@@ -327,6 +327,26 @@ def render_team_policy(*, body: str, tools: str, note: str) -> str:
     return f'<team-policy tools="{_esc_attr(tools)}">\n{declaration}\n\n{body}\n</team-policy>'
 
 
+def render_team_policy_inline(*, body: str) -> str:
+    """Render the standing team policy for an in-process leader (F_122).
+
+    The in-history form of :func:`render_team_policy`: same element, no
+    ``tools`` attribute and no tool-namespace note, because an in-process
+    member calls the team tools by their bare names. Delivered once through
+    the ``TeamContextTracker`` ahead of the leader's first input when the
+    framework built the team and there is no ``build_team`` result to carry
+    the policy. Like the external form, the body is the team's own Markdown
+    and is **not escaped**.
+
+    Args:
+        body: The assembled policy sections, inserted verbatim.
+
+    Returns:
+        The rendered ``<team-policy>`` block.
+    """
+    return f"<team-policy>\n{body}\n</team-policy>"
+
+
 def snapshot_kind_of(text: str) -> str | None:
     """Return the snapshot kind ``text`` is, or None when it is not one.
 
@@ -392,5 +412,6 @@ __all__ = [
     "render_team_context",
     "render_team_context_with_identity",
     "render_team_policy",
+    "render_team_policy_inline",
     "snapshot_kind_of",
 ]
