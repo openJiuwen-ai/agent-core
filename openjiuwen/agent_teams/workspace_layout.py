@@ -8,9 +8,11 @@ from __future__ import annotations
 import errno
 import os
 import shutil
+import sys
 from pathlib import Path
 
 from openjiuwen.agent_teams.paths import independent_member_workspace, team_home
+from openjiuwen.core.common.utils.windows_junction import create_windows_junction
 
 
 def team_member_workspace_path(team_name: str, member_name: str) -> Path:
@@ -37,6 +39,17 @@ def ensure_team_member_workspace_link(team_name: str, member_name: str) -> str:
                 target_is_directory=True,
             )
         except OSError as exc:
+            # Windows 无特权建 symlink 的错误码不止 1314：服务进程/沙箱环境下
+            # 同一调用也可能以 WinError 2/5 等形态出现（实测 agentserver 内
+            # WinError 2，交互进程 1314）。junction 失败会抛出，统一兜底安全。
+            if sys.platform == "win32":
+                try:
+                    create_windows_junction(
+                        str(independent_workspace), str(workspace_path)
+                    )
+                    return str(workspace_path)
+                except OSError:
+                    pass
             if getattr(exc, "errno", None) not in (errno.EACCES, errno.EPERM):
                 raise
             shutil.copytree(

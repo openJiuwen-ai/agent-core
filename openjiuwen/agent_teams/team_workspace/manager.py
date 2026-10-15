@@ -38,13 +38,6 @@ from openjiuwen.harness.tools.worktree.git import _run_git, rev_parse
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.common.utils.windows_junction import create_windows_junction
 
-try:
-    import winerror
-except ImportError:  # pragma: no cover - unavailable outside Windows
-    ERROR_PRIVILEGE_NOT_HELD = 1314
-else:
-    ERROR_PRIVILEGE_NOT_HELD = winerror.ERROR_PRIVILEGE_NOT_HELD
-
 
 class TeamWorkspaceManager:
     """Manages team shared workspace metadata and version control.
@@ -177,7 +170,11 @@ class TeamWorkspaceManager:
         try:
             os.symlink(target_path, link_path, target_is_directory=True)
         except OSError as exc:
-            if os.name == "nt" and getattr(exc, "winerror", None) == ERROR_PRIVILEGE_NOT_HELD:
+            # Windows 无特权建 symlink 的错误码不止 1314（ERROR_PRIVILEGE_NOT_HELD）：
+            # 服务进程/沙箱环境下同一调用也可能以 WinError 2/5 等形态出现（实测
+            # agentserver 内 WinError 2，交互进程 1314）。junction 创建自带存在性
+            # 校验且失败会抛出——统一兜底不会掩盖真实错误。
+            if os.name == "nt":
                 try:
                     self._create_windows_junction(target_path, link_path)
                 except OSError as junction_error:
@@ -196,7 +193,8 @@ class TeamWorkspaceManager:
                     )
                     return
                 team_logger.info(
-                    "Symlink privilege unavailable on Windows; mounted %s via junction at %s",
+                    "Symlink unavailable on Windows (%s); mounted %s via junction at %s",
+                    exc,
                     target_path,
                     link_path,
                 )
