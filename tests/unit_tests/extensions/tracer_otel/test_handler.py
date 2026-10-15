@@ -1249,6 +1249,52 @@ class TestComponentSpansInvokeIdKey:
         invoke_ids = {s.attributes.get(OJ_INVOKE_ID) for s in finished}
         assert invoke_ids == {"node_1_inv_1", "node_1_inv_2"}
 
+    async def test_leftover_component_span_ended_on_workflow_failure(self, monkeypatch):
+        """A component span still open when its workflow fails must be fully
+        cleaned up by on_invoke's defensive _component_spans loop: end + detach +
+        _span_manager pop. Dropping only the index entry would leak the span and
+        its ambient-context token, and leave the manager entry unreachable for
+        the stale-session cleanup safety net."""
+        detached = []
+        orig_detach = OtelWorkflowHandler._detach_state
+
+        def _spy_detach(state):
+            detached.append(state)
+            orig_detach(state)
+
+        monkeypatch.setattr(OtelWorkflowHandler, "_detach_state", staticmethod(_spy_detach))
+
+        await self.handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        await self.handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "q"},
+            parent_node_id="",
+        )
+        comp_state = self.handler._component_spans["kb_node"]
+        assert comp_state.context_token is not None  # attach is active on component spans
+        # Defensive-loop condition: state.invoke_id equals the failing workflow's
+        # invoke_id (component created under the workflow's id).
+        comp_state.invoke_id = "wf_root"
+
+        await self.handler.on_invoke(invoke_id="wf_root", exception=RuntimeError("wf failed"))
+
+        names = {s.name for s in _EXPORTER.get_finished_spans()}
+        assert "wf_root" in names  # root ended via the normal error path
+        assert "retrieval kb_node" in names  # component ended by the cleanup loop
+        assert self.handler._span_manager.get("kb_node") is None
+        assert not self.handler._component_spans
+        assert comp_state in detached  # ambient context token released
+
 
 class TestWorkflowIsolation:
     """Test workflow isolation via workflow_id field (Problem B part 3).
