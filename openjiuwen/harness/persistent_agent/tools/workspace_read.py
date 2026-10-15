@@ -42,7 +42,31 @@ class _PersistentWorkspaceReadTool(Tool):
         execution: ExecutionContext,
         workspace_access: WorkspaceAccessPort,
     ) -> None:
-        super().__init__(base_tool.card)
+        card = base_tool.card.model_copy(deep=True)
+        if self._path_key == "file_path":
+            card.description = card.description.replace(
+                "file_path 必须是绝对路径。",
+                "file_path 必须是办公空间内的逻辑相对路径；不接受绝对路径或包含 `..` 的路径段。",
+            ).replace(
+                "file_path must be an absolute path.",
+                "file_path must be a workspace-relative path; absolute paths and `..` path segments are not allowed.",
+            )
+            input_params = card.input_params
+            if isinstance(input_params, dict):
+                properties = input_params.get("properties")
+                if isinstance(properties, dict):
+                    path_param = properties.get("file_path")
+                    if isinstance(path_param, dict):
+                        path_description = path_param.get("description", "")
+                        path_param["description"] = path_description.replace(
+                            "要读取的文件绝对路径",
+                            "办公空间内文件的逻辑相对路径（不接受绝对路径或包含 `..` 的路径段）",
+                        ).replace(
+                            "The absolute path to the file to read",
+                            "Workspace-relative path for the file to read "
+                            "(absolute paths and `..` path segments are not accepted)",
+                        )
+        super().__init__(card)
         self._base_tool = base_tool
         self._execution = execution
         self._workspace_access = workspace_access
