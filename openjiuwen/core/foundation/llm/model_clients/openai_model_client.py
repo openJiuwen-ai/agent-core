@@ -431,15 +431,19 @@ class OpenAIModelClient(BaseModelClient):
         """Get client name."""
         return "OpenAI client"
 
-    @classmethod
     def _build_request_headers(
-            cls,
+            self,
             base_headers: Optional[Mapping[str, Any]],
             request_headers: Optional[Mapping[str, Any]],
     ) -> dict[str, str]:
-        """Merge request-level headers with prebuilt config-level headers (request wins)."""
+        """Merge request-level headers with prebuilt config-level headers (request wins).
+
+        OpenRouter attribution headers are config-level only per the OpenRouter
+        App Attribution spec, so request-level copies are dropped — but only for
+        the openrouter profile; other endpoints pass request headers through.
+        """
         filtered_request_headers = request_headers
-        if request_headers:
+        if request_headers and self._endpoint_profile_name() == "openrouter":
             filtered_request_headers = {
                 key: value
                 for key, value in request_headers.items()
@@ -973,12 +977,15 @@ class OpenAIModelClient(BaseModelClient):
 
         if kv_mode == "release" and enable_cache_sharing and session_id:
             kv_cache = self._kv_cache_config()
-            params[getattr(kv_cache, "enable_cache_sharing_field", "cache_sharing")] = True
-            params[getattr(kv_cache, "session_field", "cache_salt")] = session_id
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body[getattr(kv_cache, "enable_cache_sharing_field", "cache_sharing")] = True
+            extra_body[getattr(kv_cache, "session_field", "cache_salt")] = session_id
+            params["extra_body"] = extra_body
 
         if kv_mode == "affinity" and session_id:
             kv_cache = self._kv_cache_config()
-            params[getattr(kv_cache, "affinity_field", "agent_hint")] = self._build_agent_hint(
+            extra_body = dict(params.get("extra_body") or {})
+            extra_body[getattr(kv_cache, "affinity_field", "agent_hint")] = self._build_agent_hint(
                 session_id=session_id,
                 parent_session_id=parent_session_id or session_id,
                 action=kv_action,
@@ -990,6 +997,7 @@ class OpenAIModelClient(BaseModelClient):
                 tools_end=tools_end,
                 include_tools=include_tools,
             )
+            params["extra_body"] = extra_body
 
         self._apply_openrouter_profile(params)
 
@@ -1528,35 +1536,6 @@ class OpenAIModelClient(BaseModelClient):
             if async_client is not None and not self._use_shared_client():
                 await async_client.close()
 
-    @staticmethod
-    def _extract_image_prompt(messages: List[UserMessage]) -> str:
-        """Build prompt string from UserMessage content for images.generate."""
-        if not messages:
-            raise build_error(
-                StatusCode.MODEL_INVOKE_PARAM_ERROR,
-                error_msg="Image generation requires at least one message.",
-            )
-
-        text_parts: List[str] = []
-        for msg in messages:
-            content = msg.content
-            if isinstance(content, str):
-                if content.strip():
-                    text_parts.append(content.strip())
-            elif isinstance(content, list):
-                for item in content:
-                    if isinstance(item, str) and item.strip():
-                        text_parts.append(item.strip())
-                    elif isinstance(item, dict) and item.get("text"):
-                        text_parts.append(str(item["text"]).strip())
-
-        if not text_parts:
-            raise build_error(
-                StatusCode.MODEL_INVOKE_PARAM_ERROR,
-                error_msg="Image generation requires a non-empty text prompt.",
-            )
-        return "\n".join(text_parts)
-
     async def generate_image(
             self,
             messages: List[UserMessage],
@@ -1570,84 +1549,52 @@ class OpenAIModelClient(BaseModelClient):
             seed: int = 0,
             **kwargs
     ) -> ImageGenerationResponse:
-        """Generate image via OpenAI ``images.generate`` API."""
-        request_custom_headers = kwargs.pop("custom_headers", None)
-        timeout = kwargs.pop("timeout", None)
+        self._require_dashscope_media_profile("generate_image")
 
-        effective_model = model or self.model_config.model_name
-        prompt = self._extract_image_prompt(messages)
-
-        generate_params: dict[str, Any] = {
-            "model": effective_model,
-            "prompt": prompt,
-            "n": n if n is not None else 1,
-            **kwargs,
-        }
-        if size is not None:
-            generate_params["size"] = size
-
-        effective_headers = self._build_request_headers(
-            self._base_headers,
-            request_custom_headers,
-        )
-        if effective_headers:
-            generate_params["extra_headers"] = effective_headers
-
-        async_client = None
         try:
-            llm_logger.info(
-                "Calling OpenAI image generation API.",
-                event_type=LogEventType.LLM_CALL_START,
-                model_name=effective_model,
-                model_provider=self.model_client_config.client_provider,
+            content_list = self._dashscope_image_content(messages)
+            import dashscope
+            from dashscope import MultiModalConversation
+
+            api_params = {
+                "api_key": self.model_client_config.api_key,
+                "model": model or self.model_config.model_name,
+                "messages": [{"role": "user", "content": content_list}],
+                "result_format": "message",
+                "stream": False,
+                "size": size,
+                "n": n,
+                "prompt_extend": prompt_extend,
+                "watermark": watermark,
+            }
+            if negative_prompt:
+                api_params["negative_prompt"] = negative_prompt
+            if seed is not None:
+                api_params["seed"] = seed
+            api_params.update(kwargs)
+
+            dashscope.base_http_api_url = self.model_client_config.api_base
+            response = MultiModalConversation.call(**api_params)
+            self._raise_for_dashscope_response(response, "image generation")
+
+            image_urls = []
+            for choice in (getattr(response, "output", None) or {}).get("choices", []):
+                content = (choice.get("message") or {}).get("content") or []
+                for content_item in content:
+                    if isinstance(content_item, dict) and content_item.get("image"):
+                        image_urls.append(content_item["image"])
+            if not image_urls:
+                raise build_error(
+                    StatusCode.MODEL_CALL_FAILED,
+                    error_msg="No images returned from DashScope API.",
+                )
+            return ImageGenerationResponse(
+                model=api_params["model"],
+                images=image_urls,
+                created=None,
             )
-
-            async_client = self._create_async_openai_client(timeout=timeout)
-
-            # Per-request timeout override; cached shared client is never rebuilt
-            # just to change the timeout.
-            if timeout is not None:
-                generate_params["timeout"] = timeout
-
-            response = await async_client.images.generate(**generate_params)
-        except Exception as e:
-            error_detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-            llm_logger.error(
-                "OpenAI image generation API error.",
-                event_type=LogEventType.LLM_CALL_ERROR,
-                model_name=effective_model,
-                model_provider=self.model_client_config.client_provider,
-                exception=error_detail,
-            )
-            raise build_error(
-                StatusCode.MODEL_CALL_FAILED,
-                error_msg=f"OpenAI image generation error: {error_detail}",
-            ) from e
-        finally:
-            if async_client is not None and not self._use_shared_client():
-                await async_client.close()
-
-        image_urls: List[str] = []
-        images_base64: List[str] = []
-        if response.data:
-            for image_item in response.data:
-                if getattr(image_item, "url", None):
-                    image_urls.append(image_item.url)
-                if getattr(image_item, "b64_json", None):
-                    images_base64.append(image_item.b64_json)
-
-        if not image_urls and not images_base64:
-            raise build_error(
-                StatusCode.MODEL_CALL_FAILED,
-                error_msg="No images returned from OpenAI image generation API.",
-            )
-
-        return ImageGenerationResponse(
-            model=effective_model,
-            images=image_urls,
-            images_base64=images_base64,
-            created=getattr(response, "created", None),
-        )
+        except Exception as exc:
+            self._raise_dashscope_model_error("image generation", exc)
 
     async def generate_video(
             self,

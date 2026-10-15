@@ -438,7 +438,27 @@ def test_openai_none_auth_uses_placeholder_sdk_key():
     assert client._resolved_api_key() == "EMPTY"
 
 
-def test_dashscope_profile_converts_text_and_reference_images_for_generation():
+class _DashscopeImageResponse:
+
+    status_code = 200
+    output = {"choices": [{"message": {"content": [{"image": "https://example.test/out.png"}]}}]}
+
+
+class _StubMultiModalConversation:
+
+    call_params = None
+
+    @classmethod
+    def call(cls, **api_params):
+        cls.call_params = api_params
+        return _DashscopeImageResponse()
+
+
+@pytest.mark.asyncio
+async def test_dashscope_profile_generate_image_uses_native_multimodal_api(monkeypatch):
+    import dashscope
+
+    monkeypatch.setattr(dashscope, "MultiModalConversation", _StubMultiModalConversation)
     client_config = ModelClientConfig(
         client_provider="OpenAI",
         endpoint_profile="dashscope",
@@ -448,19 +468,44 @@ def test_dashscope_profile_converts_text_and_reference_images_for_generation():
     )
     client = OpenAIModelClient(ModelRequestConfig(model="wan2.6-image"), client_config)
 
-    content = client._dashscope_image_content([
-        UserMessage(content=[
+    response = await client.generate_image(
+        [UserMessage(content=[
             {"text": "turn this into watercolor"},
             {"image": "https://example.test/source.png"},
             {"image_url": {"url": "https://example.test/ref.png"}},
-        ])
-    ])
+        ])],
+        negative_prompt="blurry",
+        seed=42,
+        watermark=True,
+    )
 
-    assert content == [
+    api_params = _StubMultiModalConversation.call_params
+    assert api_params["messages"] == [{"role": "user", "content": [
         {"text": "turn this into watercolor"},
         {"image": "https://example.test/source.png"},
         {"image": "https://example.test/ref.png"},
-    ]
+    ]}]
+    assert api_params["negative_prompt"] == "blurry"
+    assert api_params["seed"] == 42
+    assert api_params["watermark"] is True
+    assert api_params["prompt_extend"] is True
+    assert api_params["result_format"] == "message"
+    assert response.images == ["https://example.test/out.png"]
+
+
+@pytest.mark.asyncio
+async def test_dashscope_profile_generate_image_requires_dashscope_profile():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="vllm",
+        api_key="sk-test-key",
+        api_base="https://example.test/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="qwen-image"), client_config)
+
+    with pytest.raises(BaseError):
+        await client.generate_image([UserMessage(content="a cat")], seed=42, watermark=True)
 
 
 @pytest.mark.parametrize(
@@ -472,9 +517,19 @@ def test_dashscope_profile_converts_text_and_reference_images_for_generation():
         [{"text": "prompt"}, {"type": "image", "image": "https://example.test/a.png"}],
     ],
 )
-def test_dashscope_profile_rejects_invalid_image_generation_content(content):
+@pytest.mark.asyncio
+async def test_dashscope_profile_rejects_invalid_image_generation_content(content):
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="dashscope",
+        api_key="sk-test-key",
+        api_base="https://dashscope.aliyuncs.com",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="wan2.6-image"), client_config)
+
     with pytest.raises(BaseError):
-        OpenAIModelClient._dashscope_image_content([UserMessage(content=content)])
+        await client.generate_image([UserMessage(content=content)])
 
 
 @pytest.mark.parametrize(
@@ -591,6 +646,116 @@ def test_kv_affinity_agent_hint_moves_to_extra_body_for_openai_sdk():
         "parent_session_id": "parent",
     }
     assert "agent_hint" not in params
+
+
+def test_kv_custom_field_names_reach_extra_body_for_openai_sdk():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="sk-test-key",
+        api_base="https://example.test/v1",
+        extensions={"kv_cache": {
+            "mode": "release",
+            "session_field": "x-cache-salt",
+            "enable_cache_sharing_field": "x-cache-sharing",
+        }},
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="qwen"), client_config)
+
+    params = client._build_request_params(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+        session_id="session-1",
+        enable_cache_sharing=True,
+    )
+    client._move_openai_extra_body_extensions(params)
+
+    assert params["extra_body"]["x-cache-salt"] == "session-1"
+    assert params["extra_body"]["x-cache-sharing"] is True
+    assert "x-cache-salt" not in params
+    assert "x-cache-sharing" not in params
+
+
+def test_kv_affinity_custom_field_name_reaches_extra_body_for_openai_sdk():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="sk-test-key",
+        api_base="https://example.test/v1",
+        extensions={"kv_cache": {"mode": "affinity", "affinity_field": "x-agent-hint"}},
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="qwen"), client_config)
+
+    params = client._build_request_params(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+        session_id="child",
+        parent_session_id="parent",
+    )
+    client._move_openai_extra_body_extensions(params)
+
+    assert params["extra_body"]["x-agent-hint"] == {
+        "session_id": "child",
+        "parent_session_id": "parent",
+    }
+    assert "x-agent-hint" not in params
+
+
+def test_non_openrouter_profile_passes_request_level_attribution_headers_through():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="vllm",
+        api_key="sk-test-key",
+        api_base="https://example.test/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="qwen"), client_config)
+
+    headers = client._build_request_headers(
+        {"Authorization": "Bearer sk-test-key"},
+        {"http-referer": "https://example.test/app", "X-Custom": "keep"},
+    )
+
+    assert headers["http-referer"] == "https://example.test/app"
+    assert headers["X-Custom"] == "keep"
+    assert headers["Authorization"] == "Bearer sk-test-key"
+
+
+def test_openrouter_profile_still_drops_request_level_attribution_headers():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="openrouter",
+        api_key="sk-test-key",
+        api_base="https://openrouter.ai/api/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="anthropic/claude-sonnet-4"), client_config)
+
+    headers = client._build_request_headers(
+        {"Authorization": "Bearer sk-test-key"},
+        {
+            "http-referer": "https://example.test/app",
+            "X-Openrouter-Title": "my-app",
+            "X-Custom": "keep",
+        },
+    )
+
+    assert "http-referer" not in headers
+    assert "x-openrouter-title" not in headers
+    assert headers["X-Custom"] == "keep"
+    assert headers["Authorization"] == "Bearer sk-test-key"
 
 
 class _Delta:
