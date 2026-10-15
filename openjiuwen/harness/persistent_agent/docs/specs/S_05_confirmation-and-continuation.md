@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | S_05 / confirmation-and-continuation |
 | 关联模块 | [request.py](../../schema/request.py)、[entries.py](../../execution/entries.py)、[control.py](../../execution/control.py)、[确认接入协议](../../execution/seams.py) |
-| 最近一次修订日期 | 2026-10-14 |
-| 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)；接入与验证见[开发计划](../designs/persistent-agent-development-plan.md) PA-09、PA-17、PA-18 |
+| 最近一次修订日期 | 2026-10-15 |
+| 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_19](../features/F_19_execution-log-record.md)；接入与验证见[开发计划](../designs/persistent-agent-development-plan.md) PA-09、PA-17、PA-18 |
 | 设计依据 | [架构设计：确认](../designs/persistent-agent-architecture.md#521-确认卡片等待与原生恢复)、[控制](../designs/persistent-agent-architecture.md#523-停止取消与补充消息)、[统一续做](../designs/persistent-agent-architecture.md#524-崩溃续做与非确认暂停后继续的统一流程)、[恢复边界](../designs/persistent-agent-architecture.md#83-根据什么恢复什么时候可以继续) |
 
 本规约维护 ConfirmReply、确认恢复、停止 / 取消、控制截止及原 Request 的继续方式。原 Checkpoint 文档改名后，状态保存转由 S_03 唯一负责。
@@ -105,7 +105,7 @@ reason 仅 cancel / stop；非法原因为 DEEPAGENT_INPUT_PARAM_ERROR，非法�
 
 补结果仅修复上下文，不能伪造 tool.completed 或表示副作用成功 / 失败。原生恢复可能在模型循环前执行被拦截工具，因此必须在续做进入原生调用前处理过期中断；正常确认恢复不能执行上述清理步骤。
 
-日志按操作 / 调用 ID 合并意图和结果，保留 progress.updated 及当次归档，丢弃无助进度判断的 reply.delta / model.completed。记录太长时不能省略写操作，只读项可合并；读不到或日志缺口须提示“上一次记录缺失”。已成功步骤不重做，不确定只读步骤可重读；有意图无结果的写操作先查证，查不清复用 AskUserRail 问发起人。
+日志整理由 PA-17 提供（[F_19](../features/F_19_execution-log-record.md)）：意图与结果只在能唯一关联时合并，operation_id 复用（第二条意图，或结果之后出现的意图）与调用身份不一致时分开列出并注明；保留 progress.updated、工具的调用 ID、目标与结果引用、候选及其是否被 paused / final 引用；丢弃 reply.delta、model.completed、execution.started 与参与判断。当前不裁剪、不聚合、不省略，能否注入由续做按实际容量判断（待“容量边界”对齐）；归档暂只列日志中的换窗引用并注明未按 execution_id 查询（待 PA-12）。读不到、空日志或契约不符时提示“上一次记录缺失”；序号缺口与缺少结束记录照常整理并写明，不能据此推断未执行。已成功步骤不重做，不确定只读步骤可重读；有意图无结果的写操作先查证，查不清复用 AskUserRail 问发起人。
 
 ### 5.4 异常后的宿主核对
 
@@ -125,4 +125,5 @@ S_01 负责实际结局编排，本文负责控制截止及继续方式；S_02 �
 - 恢复校验、控制竞争及锁定：[test_entries.py](../../../../../tests/unit_tests/harness/persistent_agent/test_entries.py)。
 - 流生产者、取消及关闭：[test_binding.py](../../../../../tests/unit_tests/harness/persistent_agent/test_binding.py)。
 - 确认后写意图与取消后未决工具：[test_tool_intent_rail.py](../../../../../tests/unit_tests/harness/persistent_agent/test_tool_intent_rail.py)。
-- 会话状态记录已由 PA-10 接入（组件验证，等待现场含中断请求类型）；真实确认适配与跨执行续做验证尚待 PA-09、PA-17、PA-18 接入；测试入口与模拟结果不证明生产恢复能力。
+- 执行日志整理：[test_execution_log.py](../../../../../tests/unit_tests/harness/persistent_agent/test_execution_log.py)（PA-17 组件验证）。
+- 会话状态记录已由 PA-10 接入（组件验证，等待现场含中断请求类型）；真实确认适配与跨执行续做验证尚待 PA-09、PA-18 接入；测试入口与模拟结果不证明生产恢复能力。
