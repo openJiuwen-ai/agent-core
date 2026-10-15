@@ -31,8 +31,8 @@ class StaticWorkspaceAccess:
 
 
 class RecordingTool:
-    def __init__(self, name, *, success=True, data=None, error=None):
-        self.card = build_tool_card(name, "RecordingTool", "cn", agent_id="test")
+    def __init__(self, name, *, language="cn", success=True, data=None, error=None):
+        self.card = build_tool_card(name, "RecordingTool", language, agent_id="test")
         self.calls = []
         self.success = success
         self.data = data
@@ -77,6 +77,47 @@ def scope_for(root: Path, *, status="allowed"):
         source_ref="workspace://agent-a",
         policy_revision="policy-1",
     )
+
+
+@pytest.mark.parametrize(
+    ("language", "relative_instruction", "old_instruction", "relative_parameter", "old_parameter"),
+    [
+        (
+            "cn",
+            "file_path 必须是办公空间内的逻辑相对路径",
+            "file_path 必须是绝对路径",
+            "办公空间内文件的逻辑相对路径",
+            "要读取的文件绝对路径",
+        ),
+        (
+            "en",
+            "file_path must be a workspace-relative path",
+            "file_path must be an absolute path",
+            "Workspace-relative path for the file to read",
+            "The absolute path to the file to read",
+        ),
+    ],
+)
+def test_read_tool_card_describes_relative_paths_without_mutating_base_card(
+    tmp_path, language, relative_instruction, old_instruction, relative_parameter, old_parameter
+):
+    base = RecordingTool("read_file", language=language)
+    original_description = base.card.description
+    original_path_description = base.card.input_params["properties"]["file_path"]["description"]
+    tool = PersistentWorkspaceReadTool(
+        base_tool=base,
+        execution=execution_for(),
+        workspace_access=StaticWorkspaceAccess(scope_for(tmp_path)),
+    )
+
+    tool_path_description = tool.card.input_params["properties"]["file_path"]["description"]
+
+    assert relative_instruction in tool.card.description
+    assert old_instruction not in tool.card.description
+    assert relative_parameter in tool_path_description
+    assert old_parameter not in tool_path_description
+    assert base.card.description == original_description
+    assert base.card.input_params["properties"]["file_path"]["description"] == original_path_description
 
 
 @pytest.mark.asyncio
