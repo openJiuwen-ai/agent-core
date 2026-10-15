@@ -12,8 +12,8 @@ from typing import Any, ContextManager
 from opentelemetry import context as otel_context
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode, set_span_in_context
 
-from openjiuwen.agent_teams.observability.redaction import redact_completion, redact_prompt
-from openjiuwen.agent_teams.observability.semconv import (
+from openjiuwen.extensions.observability.redaction import redact_completion, redact_prompt
+from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_AGENT_INPUT,
     AT_AGENT_NAME,

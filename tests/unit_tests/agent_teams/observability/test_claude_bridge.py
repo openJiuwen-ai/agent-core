@@ -17,8 +17,8 @@ from openjiuwen.agent_teams.observability import (
     shutdown_observability,
 )
 from openjiuwen.agent_teams.observability.claude import ClaudeSpanBridge, NoopClaudeSpanBridge
-from openjiuwen.agent_teams.observability.callback_handler import OtelCallbackHandler
-from openjiuwen.agent_teams.observability.semconv import (
+from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
+from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_INPUT,
     AT_AGENT_OUTPUT,
     AT_MEMBER_NAME,
@@ -185,6 +185,7 @@ async def test_claude_bridge_suppresses_team_tool_sdk_span_and_parents_execution
             redact_prompts=False,
             redact_completions=False,
         ),
+        tracer=get_tracer("test.claude_bridge"),
     )
 
     bridge.start_turn(prompt="message teammate")

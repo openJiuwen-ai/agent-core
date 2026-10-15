@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -62,6 +63,13 @@ class _FakeRuntime:
     def bind_team_context_tracker(self, tracker: Any) -> None:
         """Accept deferred team context binding."""
         self.team_context_tracker = tracker
+
+
+class _FakeTeamAgent:
+    def __init__(self, spec: TeamAgentSpec, team_session: Any | None = None) -> None:
+        self.spec = spec
+        self.team_backend = None
+        self.session_manager = SimpleNamespace(team_session=team_session)
 
 
 async def _empty_outputs() -> Any:
