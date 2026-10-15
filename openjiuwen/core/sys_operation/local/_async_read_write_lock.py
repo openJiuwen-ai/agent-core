@@ -39,10 +39,16 @@ if AsyncReadWriteLock is not None and ReadWriteLock is not None:
 
         @classmethod
         def evict_singleton(cls, lock_file: str, expected: ReadWriteLock) -> None:
+            # ``ReadWriteLock.__init_subclass__`` hands every subclass its own
+            # ``_instances`` registry, while the async adapter always constructs
+            # the base class. Consulting ``cls._instances`` would therefore look
+            # into this subclass's empty registry and never detach anything; the
+            # registry that holds *expected* is the one owned by its own class.
+            owner = type(expected)
             normalized_path = pathlib.Path(lock_file).resolve()
-            with cls._instances_lock:
-                if cls._instances.get(normalized_path) is expected:
-                    cls._instances.pop(normalized_path, None)
+            with owner._instances_lock:
+                if owner._instances.get(normalized_path) is expected:
+                    owner._instances.pop(normalized_path, None)
 
 
     class _ManagedAsyncReadWriteLock(AsyncReadWriteLock):
@@ -129,21 +135,19 @@ class HybridAsyncReadWriteLock:
             raise self._timeout() from None
 
     async def _acquire_file(self, mode: Literal["read", "write"], deadline: float) -> None:
-        """Poll without a long-running executor call that could outlive cancellation."""
+        """Poll with a short non-blocking attempt instead of one long blocking call.
+
+        The attempt has to stay in the calling task: ``filelock`` records read and
+        write ownership per asyncio task and rejects a release issued by a task that
+        never acquired, so moving the call into a helper task would leave the file
+        lock unreleasable. A non-blocking attempt keeps every executor call short
+        enough that cancellation cannot leave one running behind.
+        """
         acquire = self._file.acquire_read if mode == "read" else self._file.acquire_write
         while True:
-            task = asyncio.create_task(acquire(timeout=0, blocking=False))
             try:
-                await asyncio.shield(task)
+                await acquire(timeout=0, blocking=False)
                 return
-            except asyncio.CancelledError:
-                try:
-                    await task
-                except FileLockTimeout:
-                    pass
-                else:
-                    await self._file.release()
-                raise
             except FileLockTimeout:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:
@@ -151,20 +155,20 @@ class HybridAsyncReadWriteLock:
                 await asyncio.sleep(min(self._poll_interval, remaining))
 
     async def _release_file(self) -> None:
-        task = asyncio.create_task(self._file.release())
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+        # Released from the acquiring task for the ownership reason documented on
+        # ``_acquire_file``.
+        await self._file.release()
 
     @asynccontextmanager
     async def read(self, timeout: float):
         deadline = asyncio.get_running_loop().time() + timeout
         async with self._condition:
             await self._wait_for(lambda: not self._writer and self._writers_waiting == 0, deadline)
-            if self._readers == 0:
-                await self._acquire_file("read", deadline)
+            # Every reader takes its own file-lock level. Sharing one level between
+            # in-process readers would hand the release to whichever reader leaves
+            # last, and filelock refuses a release issued by any task other than the
+            # one that acquired.
+            await self._acquire_file("read", deadline)
             self._readers += 1
 
         try:
@@ -172,9 +176,12 @@ class HybridAsyncReadWriteLock:
         finally:
             async with self._condition:
                 self._readers -= 1
-                if self._readers == 0:
+                try:
                     await self._release_file()
-                self._condition.notify_all()
+                finally:
+                    # Wake waiters even when the release failed, so one broken
+                    # release cannot strand them for the whole lock timeout.
+                    self._condition.notify_all()
 
     @asynccontextmanager
     async def write(self, timeout: float):
@@ -185,6 +192,10 @@ class HybridAsyncReadWriteLock:
                 await self._wait_for(lambda: not self._writer and self._readers == 0, deadline)
             finally:
                 self._writers_waiting -= 1
+                # Readers queued behind this writer wait for the queue position to
+                # clear; a writer that times out or fails to acquire must still wake
+                # them, or they sleep out their whole timeout behind a gone writer.
+                self._condition.notify_all()
             await self._acquire_file("write", deadline)
             self._writer = True
 
@@ -192,9 +203,14 @@ class HybridAsyncReadWriteLock:
             yield
         finally:
             async with self._condition:
-                await self._release_file()
-                self._writer = False
-                self._condition.notify_all()
+                try:
+                    await self._release_file()
+                finally:
+                    # The writer flag must never outlive the lock: leaving it set
+                    # blocks every later writer on the same instance for the whole
+                    # lock timeout.
+                    self._writer = False
+                    self._condition.notify_all()
 
     async def close(self) -> None:
         async with self._condition:
