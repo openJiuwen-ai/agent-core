@@ -399,6 +399,7 @@ class CodexSdkRuntime(CliRuntimeBase):
             await self._interrupt_handle(handle)
         index = start_index
         notifications_seen = 0
+        turn_completed = False
         try:
             stream = handle.stream().__aiter__()
             while True:
@@ -419,6 +420,8 @@ class CodexSdkRuntime(CliRuntimeBase):
                     ) from exc
                 notifications_seen += 1
                 self._trace_notification(notification)
+                if getattr(notification, "method", "") == "turn/completed":
+                    turn_completed = True
                 chunks = _notification_chunks(notification, index)
                 for chunk in chunks:
                     team_logger.debug(
@@ -428,6 +431,11 @@ class CodexSdkRuntime(CliRuntimeBase):
                     )
                     yield chunk
                     index = chunk.index + 1
+            if not turn_completed and not self._aborted:
+                raise RuntimeError(
+                    f"codex SDK turn stream ended without turn/completed "
+                    f"after {notifications_seen} notification(s)"
+                )
         except BaseException as exc:
             # A transport failure can race with the App Server's batched OTel
             # trace export. Preserve any native sampling spans that were
