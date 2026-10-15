@@ -69,6 +69,15 @@ def message(api, **changes):
 
 
 INTERCEPTED = {"tool_call_id": "call-1", "tool_name": "submit_expense", "arguments": "单号=BX-0930"}
+FILE_OUTPUT = {
+    "output_id": "o2",
+    "target_ref": "group-1",
+    "share_mode": "upload",
+    "file_ref": "sha256:" + "a" * 64,
+    "file_path": "reports/q3.md",
+    "file_size": 13,
+    "text": "第三季度报告",
+}
 
 
 def test_event_roundtrip_keeps_id_payload_and_digest(api):
@@ -307,7 +316,13 @@ def test_event_and_nested_payload_are_immutable(api):
         ),
         ("window.switched", {"archive_ref": "archive-7", "window_seq": 3}),
         ("output.proposed", {"output_id": "o1", "target_ref": "group-1", "share_mode": "message", "text": "hello"}),
+        ("output.proposed", FILE_OUTPUT),
         ("execution.paused", {"reason": "awaiting_confirmation", "intercepted": [INTERCEPTED]}),
+        ("execution.paused", {"reason": "error", "detail": "model failed", "output_refs": ["o1"]}),
+        (
+            "execution.paused",
+            {"reason": "awaiting_confirmation", "intercepted": [{**INTERCEPTED, "arguments_truncated": True}]},
+        ),
         ("execution.paused", {"reason": "stopped"}),
         ("execution.final", {"status": "completed", "output_refs": ["o1"]}),
         ("execution.final", {"status": "failed", "reason": "task cannot be completed"}),
@@ -327,6 +342,43 @@ def test_output_file_needs_target_and_reference(api):
             event_type="output.proposed",
             payload={"output_id": "o1", "target_ref": "g1", "share_mode": "attachment"},
         )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"file_ref": None},
+        {"file_path": None},
+        {"file_size": None},
+        {"file_ref": "a" * 64},
+        {"file_ref": "sha256:" + "A" * 64},
+        {"file_size": -1},
+        {"file_path": "/reports/q3.md"},
+        {"file_path": "reports/../q3.md"},
+        {"file_path": "reports//q3.md"},
+        {"file_path": "./q3.md"},
+        {"file_path": "reports\\q3.md"},
+        {"file_path": "reports/q3\x01.md"},
+        {"file_path": "r" * 1025},
+        {"text": "x" * 4097},
+    ],
+)
+def test_file_outputs_carry_a_digest_a_logical_path_and_a_size(api, change):
+    """PA-08-V-03: what the host reads, checks and shows."""
+    with pytest.raises(ValidationError):
+        api.OutputPayload.model_validate({**FILE_OUTPUT, **change})
+
+
+def test_file_output_size_has_no_schema_limit_and_messages_carry_no_file(api):
+    """The size limit is a runtime setting shared with the host, not part of the event schema."""
+    assert api.OutputPayload.model_validate({**FILE_OUTPUT, "file_size": 10**15}).file_size == 10**15
+    assert api.OutputPayload.model_validate({**FILE_OUTPUT, "text": "x" * 4096}).text == "x" * 4096
+    message = {"output_id": "o1", "target_ref": "g1", "share_mode": "message", "text": "hello"}
+    for field in ("file_ref", "file_path", "file_size"):
+        with pytest.raises(ValidationError):
+            api.OutputPayload.model_validate({**message, field: FILE_OUTPUT[field]})
+    link = {"output_id": "o1", "target_ref": "g1", "share_mode": "link", "file_ref": "ref-1"}
+    assert api.OutputPayload.model_validate(link).file_path is None, "link keeps its controlled reference"
 
 
 @pytest.mark.parametrize("reason", ["awaiting_confirmation", "stopped", "budget_denied", "context_unfit", "error"])
@@ -350,6 +402,8 @@ def test_pause_reasons_are_the_fixed_five(api, reason):
         {"reason": "error"},
         {"reason": "awaiting_confirmation", "intercepted": [INTERCEPTED, INTERCEPTED]},
         {"reason": "awaiting_confirmation", "intercepted": [{**INTERCEPTED, "arguments": " "}]},
+        {"reason": "stopped", "output_refs": ["o1"]},
+        {"reason": "error", "detail": "failed", "output_refs": ["o1"] * 129},
     ],
 )
 def test_pause_payload_rules(api, payload):

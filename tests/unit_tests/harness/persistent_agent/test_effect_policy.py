@@ -18,7 +18,7 @@ def is_read_only_tool_name(tool_name):
     return policy.is_read_only_tool_name(tool_name)
 
 
-@pytest.mark.parametrize("tool_name", ["read_file", "list_files"])
+@pytest.mark.parametrize("tool_name", ["read_file", "list_files", "share_file"])
 def test_only_exact_workspace_read_tool_names_are_read_only(tool_name):
     assert is_read_only_tool_name(tool_name) is True
 
@@ -37,6 +37,8 @@ def test_only_exact_workspace_read_tool_names_are_read_only(tool_name):
         "search_files",
         "custom_tool",
         "mcp__files__read_file",
+        "SHARE_FILE",
+        "share_files",
     ],
 )
 def test_unregistered_and_near_match_names_are_side_effecting(tool_name):
