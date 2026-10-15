@@ -626,6 +626,132 @@ class TestTeamPolicyRailStaticSections:
         assert TeamSectionName.ROLE in sections
 
 
+class TestTeamPolicyRailFrameworkBootstrap:
+    """A framework-built team's leader (F_122): prebuilt opening in the prefix,
+    the policy delivered as a ``<team-policy>`` block ahead of the first input."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_framework_leader_prefix_is_prebuilt_opening_plus_extra(self):
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+
+        rail = _leader_rail(dispatch_mode="scheduled", bootstrap_mode="framework", base_prompt="Stay sharp")
+        rail.init(agent)
+        await rail.before_model_call(_StubContext())
+
+        sections = builder.get_all_sections()
+        assert set(sections) == {TeamSectionName.PREBUILT, TeamSectionName.EXTRA}
+        opening = sections[TeamSectionName.PREBUILT].render("cn")
+        # The team exists: no routing to build_team, and no policy in the prefix.
+        assert "调用 `build_team`" not in opening
+        assert "没有 `build_team` 这一步" in opening
+        assert "任务下发（调度指派模式）" not in builder.build()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_framework_leader_receives_the_policy_ahead_of_its_first_input(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Generic team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend, dispatch_mode="scheduled", bootstrap_mode="framework")
+        rail.init(agent)
+        ctx = _StubContext()
+
+        batch = ["research the market"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+        await rail.on_user_message(ctx)
+
+        # Team context, then the policy, then the roster, then the clock — all
+        # ahead of what the user typed.
+        delivered = batch[0]
+        assert "<team-context>" in delivered
+        assert "<team-policy>" in delivered
+        assert delivered.index("<team-context>") < delivered.index("<team-policy>")
+        assert delivered.index("<team-policy>") < delivered.index('<team-event kind="roster">')
+        assert batch[-1] == "research the market"
+        expected = build_leader_policy_disclosure(
+            lifecycle="temporary",
+            dispatch_mode="scheduled",
+            language="cn",
+        )
+        assert expected in delivered
+        assert "任务下发（调度指派模式）" in delivered
+
+        # Delivered once: the next input carries no second copy.
+        second = ["and the competitors"]
+        ctx.inputs = UserMessageInputs(parts=second, source="query")
+        await rail.on_user_message(ctx)
+        assert "<team-policy>" not in "\n".join(second)
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_framework_leader_policy_rides_the_attachment_lane(self):
+        """With the production attachment manager the policy is in the registered snapshot."""
+        backend = _FakeTeamBackend(team=_StubTeam("Beta", "Generic team"), self_member_name="leader1")
+        builder = SystemPromptBuilder(language="cn")
+        agent = _AttachmentStubAgent(builder)
+        rail = _leader_rail(backend, dispatch_mode="scheduled", bootstrap_mode="framework")
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["ship it"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+        snapshot = await _sync_attachments(agent, ctx)
+
+        assert batch[-1] == "ship it"
+        assert "<team-policy>" not in "\n".join(batch)
+        assert snapshot is not None
+        assert "<team-policy>" in snapshot.content
+        assert "<team-context>" in snapshot.content
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_leader_bootstrap_mode_delivers_no_policy_block(self):
+        """The default lane is untouched: policy comes from build_team, not the tracker."""
+        backend = _FakeTeamBackend(team=_StubTeam("Beta", "Test team"), self_member_name="leader1")
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = _leader_rail(backend, dispatch_mode="scheduled")
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["go"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+        await rail.before_model_call(ctx)
+
+        assert "<team-policy>" not in "\n".join(batch)
+        assert TeamSectionName.BOOTSTRAP in builder.get_all_sections()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_teammate_never_gets_a_policy_block(self):
+        backend = _FakeTeamBackend(team=_StubTeam("Beta", "Test team"), self_member_name="dev1")
+        builder = SystemPromptBuilder(language="cn")
+        agent = _StubAgent(builder)
+        rail = TeamPolicyRail(
+            role=TeamRole.TEAMMATE,
+            member_name="dev1",
+            dispatch_mode="scheduled",
+            bootstrap_mode="framework",
+            team_backend=backend,
+        )
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["hello"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+
+        assert "<team-policy>" not in "\n".join(batch)
+
+
 class TestTeamPolicyRailTeamContext:
     """Team state is delivered into the conversation, not the system prompt.
 

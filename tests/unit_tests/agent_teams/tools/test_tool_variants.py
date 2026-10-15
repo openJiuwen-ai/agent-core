@@ -1381,3 +1381,45 @@ async def test_shutdown_member_lifetime_prose_follows_dispatch_mode(db, lang):
     assert "{{" not in autonomous
     assert "DORMANT" in scheduled
     assert "lifetime=dormant" in scheduled
+
+
+# ---------------------------------------------------------------------------
+# Framework bootstrap drops build_team (F_122)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_framework_bootstrap_drops_build_team_for_the_leader(db):
+    """A framework-built team already exists: the leader holds no ``build_team``."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    leader_default = _tool_names(create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled"))
+    leader_framework = _tool_names(
+        create_team_tools(
+            role="leader",
+            agent_team=backend,
+            dispatch_mode="scheduled",
+            bootstrap_mode="framework",
+        )
+    )
+    assert "build_team" in leader_default
+    assert "build_team" not in leader_framework
+    # Only build_team goes; the rest of the leader surface is untouched.
+    assert leader_default - leader_framework == {"build_team"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_framework_bootstrap_leaves_member_tools_alone(db):
+    """Members never had ``build_team``; the bootstrap mode does not touch their set."""
+    backend = _backend(db, DEV_1, False, dispatch_mode="scheduled")
+    default = _tool_names(create_team_tools(role="teammate", agent_team=backend, dispatch_mode="scheduled"))
+    framework = _tool_names(
+        create_team_tools(
+            role="teammate",
+            agent_team=backend,
+            dispatch_mode="scheduled",
+            bootstrap_mode="framework",
+        )
+    )
+    assert default == framework
