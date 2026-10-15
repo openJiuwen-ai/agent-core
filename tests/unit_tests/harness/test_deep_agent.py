@@ -1950,57 +1950,87 @@ def test_hot_reload_model_updates_context_processor_config() -> None:
         assert cfg.model_client.api_base == "http://new-endpoint"
 
 
-def test_hot_reload_model_rebinds_processor_model_instances() -> None:
-    """Hot-reload should call ``rebind_model`` on processors in the context pool."""
+@pytest.mark.asyncio
+async def test_hot_reload_model_rebinds_cached_builtin_processors() -> None:
+    """Built-in compressors cached in the real context pool must drop the old ``Model``."""
     from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
+        DialogueCompressor,
         DialogueCompressorConfig,
+    )
+    from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
+        RoundLevelCompressor,
+        RoundLevelCompressorConfig,
     )
 
     old_model = _create_dummy_model()
     old_model.model_config.model_name = "old-model"
-
-    dialogue_cfg = DialogueCompressorConfig(
-        trigger_context_ratio=0.8,
-        min_target_context_ratio=0.1,
-        model=old_model.model_config,
-        model_client=old_model.model_client_config,
-    )
+    old_model.model_client_config.api_base = "http://old-endpoint"
 
     agent = create_deep_agent(
         model=old_model,
         auto_create_workspace=False,
         enable_task_loop=False,
     )
-    fake_react = FakeReactAgent()
-    fake_react.config.context_processors = [
-        ("DialogueCompressor", dialogue_cfg),
+    react_agent = agent.react_agent
+    react_agent.config.context_processors = [
+        (
+            "DialogueCompressor",
+            DialogueCompressorConfig(
+                trigger_context_ratio=0.8,
+                min_target_context_ratio=0.1,
+                model=old_model.model_config,
+                model_client=old_model.model_client_config,
+            ),
+        ),
+        (
+            "RoundLevelCompressor",
+            RoundLevelCompressorConfig(
+                trigger_context_ratio=0.8,
+                min_target_context_ratio=0.1,
+                keep_recent_messages=4,
+                model=old_model.model_config,
+                model_client=old_model.model_client_config,
+            ),
+        ),
     ]
-    agent.set_react_agent(fake_react, initialized=True)
-
-    # Simulate an already-instantiated processor in the context pool
-    fake_ctx = MagicMock()
-    fake_processor = MagicMock()
-    fake_processor.config = dialogue_cfg
-    fake_processor.processor_type = MagicMock(return_value="DialogueCompressor")
-    fake_ctx._processors = [fake_processor]
-
-    fake_react.context_engine = MagicMock()
-    fake_react.context_engine._context_pool = {"sess_1|ctx_1": fake_ctx}
+    context = await react_agent.context_engine.create_context(
+        "ctx",
+        processors=react_agent.config.context_processors,
+    )
+    dialogue, round_level = context._processors
+    assert isinstance(dialogue, DialogueCompressor)
+    assert isinstance(round_level, RoundLevelCompressor)
+    old_dialogue_model = dialogue._model
+    assert old_dialogue_model.model_client_config.api_base == "http://old-endpoint"
 
     new_model = _create_dummy_model()
     new_model.model_config.model_name = "new-model"
     new_model.model_client_config.api_base = "http://new-endpoint"
+    agent.configure(DeepAgentConfig(model=new_model, enable_task_loop=False))
 
-    agent.configure(DeepAgentConfig(
-        model=new_model,
+    cached = react_agent.context_engine.get_context("ctx", "default_session_id")
+    assert cached is context, "configure() must keep the cached context, not rebuild the engine"
+    for processor in (dialogue, round_level):
+        assert processor._model is new_model
+        assert processor._config.model.model_name == "new-model"
+        assert processor._config.model_client.api_base == "http://new-endpoint"
+    assert old_dialogue_model is not new_model
+
+
+def test_hot_reload_model_propagates_processor_rebind_errors() -> None:
+    """A failed cached-processor rebind must surface instead of leaving the old model silently."""
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        auto_create_workspace=False,
         enable_task_loop=False,
-    ))
-
-    # rebind_model should have been called with the new model config
-    fake_processor.rebind_model.assert_called_once()
-    call_kwargs = fake_processor.rebind_model.call_args.kwargs
-    assert call_kwargs["model_config"] is new_model.model_config
-    assert call_kwargs["model_client_config"] is new_model.model_client_config
+    )
+    with patch.object(
+        agent.react_agent,
+        "update_model_context",
+        side_effect=RuntimeError("rebind failed"),
+    ):
+        with pytest.raises(RuntimeError, match="rebind failed"):
+            agent.configure(DeepAgentConfig(model=_create_dummy_model(), enable_task_loop=False))
 
 
 def test_hot_reload_context_processor_models_noop_without_model() -> None:
