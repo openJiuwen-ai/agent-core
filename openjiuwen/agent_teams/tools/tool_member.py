@@ -1058,14 +1058,32 @@ class SpawnExternalCliTool(_SpawnToolBase):
 
 
 class ShutdownMemberTool(TeamTool):
-    """Shutdown a team member"""
+    """Shutdown a team member.
 
-    def __init__(self, team: TeamBackend, t: Translator):
+    The lifetime / DORMANT note is a gated capability slot: only the
+    scheduled variant of ``create_task`` can declare a member with a
+    ``lifetime``, so under autonomous dispatch the prose about it is dropped
+    (F_118 / B_04) — the model must never read about a path it cannot take.
+    """
+
+    #: Description slot documenting lifetime-driven terminal states.
+    _LIFETIME_SLOT = "shutdown_member_lifetime"
+
+    def __init__(self, team: TeamBackend, t: Translator, *, dispatch_mode: str = "autonomous"):
+        """Build the shutdown_member tool.
+
+        Args:
+            team: Backend the shutdown request goes through.
+            t: Locale-bound translator.
+            dispatch_mode: How tasks reach members. ``"scheduled"`` keeps the
+                lifetime note; ``"autonomous"`` omits it.
+        """
+        lifetime_enabled = dispatch_mode == "scheduled"
         super().__init__(
             ToolCard(
                 id="team.shutdown_member",
                 name="shutdown_member",
-                description=t("shutdown_member"),
+                description=t("shutdown_member", omit=None if lifetime_enabled else frozenset({self._LIFETIME_SLOT})),
             )
         )
         self.team = team

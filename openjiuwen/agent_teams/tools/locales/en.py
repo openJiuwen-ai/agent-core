@@ -348,21 +348,25 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
     "create_task.task.content": "Task details including goals and acceptance criteria",
-    # Both create_task variants expose assignee. Autonomous treats it as
-    # optional; scheduled requires it.
+    # ``assignee`` reads differently per create_task variant: autonomous has
+    # no inline member, so its string must not mention one. The scheduled
+    # strings live under the ``create_task_scheduled`` namespace below.
     "create_task.task.assignee": (
-        "Member name that carries this task; the member must already exist (in scheduled mode it may also be a "
-        "member declared inline via 'member' by another task of the same call) and must not be the leader. "
-        "Optional in autonomous mode (omitted tasks enter the shared claim pool); required in scheduled mode "
-        "because members never claim there"
+        "Member name that carries this task (optional); the member must already exist (spawn_teammate first) "
+        "and must not be the leader. Omit it to put the task on the shared claim pool for members to claim"
     ),
-    "create_task.task.member": (
+    "create_task_scheduled.task.assignee": (
+        "Member name that carries this task (one of assignee / member); the member must already exist (it may "
+        "also be a member declared inline via 'member' by another task of the same call) and must not be the "
+        "leader. Scheduled mode requires an owner because members never claim there"
+    ),
+    "create_task_scheduled.task.member": (
         "Owner created together with the task (one of assignee / member): same fields as spawn_teammate "
         "(member_name / display_name / desc / prompt / model_name) plus a required lifetime. The member becomes the "
         "task's assignee and is started by the scheduling framework; once every task on its board is terminal it "
         "retires per lifetime"
     ),
-    "create_task.task.member.lifetime": (
+    "create_task_scheduled.task.member.lifetime": (
         "Retirement policy: shutdown = shut down automatically once its tasks are all done (terminal, the name "
         "cannot be reused); dormant = go dormant automatically (stays on the roster, processes no events) and wakes "
         "only when addressed directly (send_message(to=<member>) or a new task assigned to it)"

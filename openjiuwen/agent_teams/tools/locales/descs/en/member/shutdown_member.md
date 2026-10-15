@@ -11,7 +11,8 @@ Use when:
 - a member is stuck for a long time and force=true is needed as a fallback
 
 Notes:
-- The terminal state follows the member's lifetime: a regular member lands in SHUTDOWN; a member declared inline on `create_task` with `lifetime=dormant` lands in DORMANT (dormant, still on the roster). To close a dormant member for good, call this tool on it once more — it lands in SHUTDOWN directly; `force=true` always lands in SHUTDOWN
 - This does not mean "the member is fully closed right now"; it initiates shutdown
 - Wait until the member actually reaches SHUTDOWN before calling clean_team or assuming the member is gone
 - force=true is a high-risk fallback for abnormal cases, not the normal path
+
+{{shutdown_member_lifetime}}

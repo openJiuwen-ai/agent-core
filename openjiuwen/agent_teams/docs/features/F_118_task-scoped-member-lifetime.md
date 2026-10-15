@@ -442,6 +442,11 @@ autonomous 没有调度器，退场判定无处安放（leader 收不到自发 `
   窗口会以全新 session 醒来，与今天 ERROR 重启一致。
 - 退场扫描的"无未读"条件把 leader 发给它的任何消息都当作"还有事"，所以 leader 对一个本该
   退场的成员多问一句，它会多活一轮再退——这是期望行为，不是缺陷。
+- （2026-10-15 追补，B_04）"autonomous 下没人会写 `lifetime`"的前提被共享文案打破：
+  `create_task.task.assignee` 与 `shutdown_member` 描述两种形态共用，都提到内联成员，autonomous
+  的 leader 照着传了 `member`，`TaskCreateTool` 静默丢弃后落了无主任务。修复见
+  `docs/bugfix/B_04_autonomous-create-task-inline-member-leak.md`：参数描述分命名空间、
+  `shutdown_member` 的 lifetime 段改 capability 槽、autonomous `create_task` 显式拒绝 `member`。
 
 ## 已定的决策点（v1 评审）
 

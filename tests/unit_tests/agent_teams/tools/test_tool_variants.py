@@ -1311,3 +1311,73 @@ def test_inline_member_validator_rejects_the_leader_name():
         leader_member_name="lead-1",
     )
     assert error is not None and "team leader" in error
+
+
+# ---------------------------------------------------------------------------
+# B_04: the inline member must not leak into the autonomous variant
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autonomous_create_task_rejects_inline_member(db):
+    """A smuggled ``member`` is refused loudly, never dropped into an unassigned task.
+
+    The leader of session web_1a13ef76fa3 passed ``member`` without ``assignee``
+    to the autonomous variant; the field was silently ignored, five unowned
+    tasks landed on the board and the leader reported five dormant members
+    that never existed.
+    """
+    backend = _backend(db, LEADER_NAME, True)
+    create_task = _by_name(create_team_tools(role="leader", agent_team=backend), "create_task")
+
+    result = await create_task.invoke(
+        {"tasks": [{"task_id": "a1", "title": "x", "content": "c", "member": _inline("writer-1")}]}
+    )
+    assert not result.success
+    assert "'member'" in result.error
+    assert "autonomous" in result.error
+    assert "spawn_teammate" in result.error
+    assert await backend.task_manager.get("a1") is None
+    assert not await backend.member_exists("writer-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+async def test_create_task_assignee_prose_follows_dispatch_mode(db, lang):
+    """Only the scheduled ``assignee`` prose may mention the inline ``member``."""
+    backend = _backend(db, LEADER_NAME, True)
+
+    def assignee_desc(dispatch_mode: str) -> str:
+        tool = _by_name(
+            create_team_tools(role="leader", agent_team=backend, dispatch_mode=dispatch_mode, lang=lang),
+            "create_task",
+        )
+        return tool.card.input_params["properties"]["tasks"]["items"]["properties"]["assignee"]["description"]
+
+    # The phrase that points the model at the inline object, per language.
+    needle = {"cn": "member 内联", "en": "via 'member'"}[lang]
+    assert needle not in assignee_desc("autonomous")
+    assert needle in assignee_desc("scheduled")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+async def test_shutdown_member_lifetime_prose_follows_dispatch_mode(db, lang):
+    """The DORMANT / lifetime note appears only where ``create_task`` can declare a lifetime."""
+    backend = _backend(db, LEADER_NAME, True)
+
+    def desc(dispatch_mode: str) -> str:
+        return _by_name(
+            create_team_tools(role="leader", agent_team=backend, dispatch_mode=dispatch_mode, lang=lang),
+            "shutdown_member",
+        ).card.description
+
+    autonomous, scheduled = desc("autonomous"), desc("scheduled")
+    assert "DORMANT" not in autonomous
+    assert "lifetime" not in autonomous
+    assert "{{" not in autonomous
+    assert "DORMANT" in scheduled
+    assert "lifetime=dormant" in scheduled

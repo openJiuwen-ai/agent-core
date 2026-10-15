@@ -243,7 +243,7 @@ def create_team_tools(
             t,
             model_config_allocator=model_config_allocator,
         ),
-        "shutdown_member": ShutdownMemberTool(agent_team, t),
+        "shutdown_member": ShutdownMemberTool(agent_team, t, dispatch_mode=dispatch_mode),
         "set_member_model": SetMemberModelTool(agent_team, t),
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),

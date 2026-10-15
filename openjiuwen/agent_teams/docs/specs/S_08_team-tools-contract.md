@@ -380,7 +380,14 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     （card id / mode / options 只在一处推导）。注册与拉起分离不变——内联成员由调度器交接
     拉起（`S_05` 不变量 1）。`member` 属性与其描述槽 `{{create_task_inline_member}}` 按
     `team_mode != "predefined"` 一起出现 / 消失（同 `spawn_teammate` 被摘掉的门），偷传在写库前
-    拒掉。`TaskCreateTool`（autonomous）**不改**：形态差异由类吸收。
+    拒掉。`TaskCreateTool`（autonomous）**不暴露也不接受 `member`**：schema 里没有该属性，
+    `invoke` 在批次纯校验之后、任何 DB 访问之前把带 `member` 的任务报错拒掉（指引先
+    `spawn_teammate` 再 `assignee`），而不是静默丢弃——与 `update_task` 对偷传 `reviewer` 的处置
+    同一原则（B_04）。形态差异仍由类吸收，不进共享纯函数 `_validate_assignees`。
+    **讲内联成员的文案只在 scheduled 形态出现**：`assignee` 的参数描述按形态分命名空间
+    （`create_task.task.assignee` 只讲 autonomous；`create_task_scheduled.task.{assignee,member,member.lifetime}`
+    讲 scheduled），`shutdown_member` 描述里的 lifetime / DORMANT 一段是 capability 槽
+    `{{shutdown_member_lifetime}}`，gate `dispatch_mode == "scheduled"`。
     退场：`shutdown_member` 的终态由成员行 `options.lifetime` 决定（`retire_target`，`S_12`）——
     常规成员落 `SHUTDOWN`，`lifetime=dormant` 落 `DORMANT`，`force=True` 一律 `SHUTDOWN`；终态为
     `DORMANT` 的请求**不发告别通知**（见 `S_22` 不变量 17）；对已 `DORMANT` 的成员再调一次即

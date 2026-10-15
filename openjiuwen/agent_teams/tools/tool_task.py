@@ -92,7 +92,7 @@ def _inline_member_schema(t: Translator) -> dict:
             "lifetime": {
                 "type": "string",
                 "enum": list(_MEMBER_LIFETIMES),
-                "description": t("create_task", "task.member.lifetime"),
+                "description": t("create_task_scheduled", "task.member.lifetime"),
             },
         },
         "required": ["member_name", "display_name", "desc", "lifetime"],
@@ -111,7 +111,7 @@ def _scheduled_task_node_schema(t: Translator, *, inline_member_enabled: bool = 
     properties = _base_task_node_properties(t)
     properties.update(
         {
-            "assignee": {"type": "string", "description": t("create_task", "task.assignee")},
+            "assignee": {"type": "string", "description": t("create_task_scheduled", "task.assignee")},
             # reviewer 结构化对象数组。model 只传 type + description，
             # reviewer_id 由代码按类型自动编号（verifier_1, inspector_1 等）。
             "reviewer": {
@@ -141,7 +141,7 @@ def _scheduled_task_node_schema(t: Translator, *, inline_member_enabled: bool = 
     if inline_member_enabled:
         properties["member"] = {
             **_inline_member_schema(t),
-            "description": t("create_task", "task.member"),
+            "description": t("create_task_scheduled", "task.member"),
         }
     return _task_node_schema(properties)
 
@@ -390,6 +390,11 @@ class TaskCreateTool(TeamTool):
     targets are rejected at this boundary as redundant. Tasks without an
     ``assignee`` are claimable from the shared board; tasks with an assignee
     are reserved for that non-leader member.
+
+    The inline ``member`` object belongs to the scheduled variant only (F_118):
+    this schema never exposes it, and ``invoke`` rejects it instead of
+    dropping it — a silently ignored ``member`` lands an unassigned task on
+    the board while the leader believes it created a member (B_04).
     """
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
@@ -422,6 +427,16 @@ class TaskCreateTool(TeamTool):
         error = _validate_task_batch(tasks)
         if error:
             return ToolOutput(success=False, error=error)
+        inline = [_spec_label(spec) for spec in tasks if spec.get("member") is not None]
+        if inline:
+            return ToolOutput(
+                success=False,
+                error=(
+                    f"Tasks {inline}: 'member' is not accepted under autonomous dispatch — this team has no "
+                    "inline-member creation. Register the member with spawn_teammate first and pass its "
+                    "member_name as 'assignee', or omit 'assignee' to put the task on the shared board."
+                ),
+            )
         error = await _validate_assignees(self.agent_team, tasks, required=False)
         if error:
             return ToolOutput(success=False, error=error)
