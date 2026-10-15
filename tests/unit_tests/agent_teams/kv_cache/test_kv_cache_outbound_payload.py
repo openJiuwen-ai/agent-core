@@ -83,6 +83,12 @@ class _CapturingAffinityModel:
             stream=False,
             **kwargs,
         )
+        # KV hint fields now travel in params["extra_body"]; the affinity gateway
+        # body flattens extra_body (see _affinity_request_body), so flatten here
+        # to keep asserting on the outbound wire shape.
+        extra_body = payload.pop("extra_body", None)
+        if isinstance(extra_body, dict):
+            payload.update(extra_body)
         self.payloads.append(payload)
         return AssistantMessage(content="ok")
 
