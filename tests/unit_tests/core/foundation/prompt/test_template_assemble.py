@@ -1,6 +1,4 @@
-import pytest
 
-from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, ToolMessage, ToolCall, SystemMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
@@ -273,7 +271,9 @@ class TestPromptAssemble:
         self.assert_equal(["user.profile.name"], var2.placeholders)
 
         data3 = {"key": "{{}}"}
-        pytest.raises(BaseError, DictableVariable, data=data3)
+        var3 = DictableVariable(data=data3)
+        self.assert_equal([], var3.input_keys)
+        self.assert_equal({"key": "{{}}"}, var3.eval())
 
     def test_dictable_variable_update(self):
         data = {
