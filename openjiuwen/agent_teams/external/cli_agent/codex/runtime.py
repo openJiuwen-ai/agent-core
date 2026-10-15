@@ -20,6 +20,7 @@ from openjiuwen.agent_teams.external.cli_agent.codex.options import (
 )
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
 
@@ -873,6 +874,7 @@ async def build_codex_runtime(
     bypass_approvals_and_sandbox: bool,
     system_prompt: str | None,
     codex_bin: str | None,
+    external_model_config: ExternalCliModelConfig | None = None,
     resume_external_backend: bool = False,
     turn_idle_timeout_s: float | None = None,
     turn_idle_retries: int | None = None,
@@ -895,7 +897,6 @@ async def build_codex_runtime(
             observability_initialized = False
         else:
             observability_initialized = is_initialized()
-
         if observability_initialized and not isinstance(
             span_bridge,
             _NoopCodexSpanBridge,
@@ -931,6 +932,7 @@ async def build_codex_runtime(
             mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
             member_name=member_name,
             codex_bin=codex_bin,
+            external_model_config=external_model_config,
             native_otel_trace_endpoint=(native_otel_receiver.endpoint if native_otel_receiver is not None else None),
             rollout_trace_root=(str(rollout_trace_reader.root) if rollout_trace_reader is not None else None),
             sdk=sdk,
@@ -938,6 +940,7 @@ async def build_codex_runtime(
         thread_options = build_codex_thread_options(
             cwd=cwd,
             system_prompt=system_prompt,
+            external_model_config=external_model_config,
             bypass_approvals_and_sandbox=bypass_approvals_and_sandbox,
             sdk=sdk,
         )
