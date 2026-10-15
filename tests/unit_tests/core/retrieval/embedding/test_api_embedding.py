@@ -281,7 +281,7 @@ class TestAPIEmbedding:
             model = APIEmbedding(config=embedding_config, max_batch_size=2)
             texts = ["text 1", "text 2", "text 3"]
             # Even if batch_size=5 is specified, it should be limited to max_batch_size=2
-            embeddings = await model.embed_documents(texts, batch_size=5)
+            await model.embed_documents(texts, batch_size=5)
             # Should process in 2 batches (2 + 1)
             assert mock_to_thread.call_count == 2
 
@@ -421,6 +421,8 @@ class TestAPIEmbeddingTraceEvents:
         from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
 
         recorder = _RecordingAgentHandler()
+        saved_agent = TracerHandlerRegistry.get_agent_handlers()
+        saved_workflow = TracerHandlerRegistry.get_workflow_handlers()
         TracerHandlerRegistry.register_handler("embed_recorder", recorder)
         tracer = Tracer(session_id="embed-trace-test")
         tracer.init()
@@ -432,7 +434,14 @@ class TestAPIEmbeddingTraceEvents:
         try:
             yield recorder
         finally:
+            # Restore the pre-test global registry instead of leaving it empty:
+            # clearing in teardown would drop handlers registered by other
+            # test modules and couple this suite to execution order.
             TracerHandlerRegistry.clear()
+            for name, saved in saved_agent.items():
+                TracerHandlerRegistry.register_handler(name, saved)
+            for name, saved in saved_workflow.items():
+                TracerHandlerRegistry.register_handler(name, saved)
 
     @pytest.mark.asyncio
     async def test_embed_query_fires_start_and_end(self, embedding_config, traced_env):
@@ -465,6 +474,14 @@ class TestAPIEmbeddingTraceEvents:
 
     @pytest.mark.asyncio
     async def test_no_session_skips_events(self, embedding_config, monkeypatch):
+        from openjiuwen.core.session.tracer.tracer import Tracer
+
+        fired = []
+
+        async def _spy_trigger(*args, **kwargs):
+            fired.append((args, kwargs))
+
+        monkeypatch.setattr(Tracer, "trigger", _spy_trigger)
         monkeypatch.setattr(
             "openjiuwen.core.retrieval.embedding.api_embedding.get_current_session",
             lambda: None,
@@ -479,6 +496,9 @@ class TestAPIEmbeddingTraceEvents:
         ):
             model = APIEmbedding(config=embedding_config)
             assert await model.embed_query("hello") == [0.1, 0.2]
+        # "Skips events" is observable, not just "did not crash": no tracer
+        # event may fire anywhere along the call path.
+        assert fired == []
 
     @pytest.mark.asyncio
     async def test_embed_failure_fires_error(self, embedding_config, traced_env):
