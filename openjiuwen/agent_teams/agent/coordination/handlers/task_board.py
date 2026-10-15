@@ -725,7 +725,10 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
         scheduled dispatch it does: the scheduler's start scan runs on every
         wake, and its handoff lands in the mailbox as a durable row that the
         startup mailbox sweep drains. Surveying the board here would deliver
-        the same task a second time, next to the scheduler's mail.
+        the same task a second time, next to the scheduler's mail. That
+        covers a task handed over while already active, too: the scheduler's
+        handoff scan mails the new owner its start when the mailbox holds
+        none for it.
         """
         team_logger.debug(
             "[{}] scheduled dispatch: startup board survey skipped",
