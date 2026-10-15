@@ -7,14 +7,14 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-15，F_15 为文档编号 |
-| 日期 | 原阶段设计及实现记录：2026-10-10；本次文档修订：2026-10-12；引用修订：2026-10-13 |
+| 日期 | 原阶段设计及实现记录：2026-10-10；本次文档修订：2026-10-15 |
 | 负责人 | Yan Zhijun；认领和后续安排以统一开发计划为准 |
-| 状态 | 进行中；agent-core 已有组件实现，真实宿主持久化确认及跨仓联调未完成 |
+| 状态 | 进行中；agent-core 组件与 JiuwenSwarm `HostCommitPort` 均已有实现和组件测试；真实写工具写前屏障及重启后读回意图的跨仓验证未完成 |
 | 方案依据 | 沿用现行架构、spec 和原记录中的名称白名单决策；本次核对实现，不改变架构或公共契约 |
 | 原实现范围 | `openjiuwen/harness/persistent_agent/` 内的 `schema/spec.py`、`tools/effect_policy.py`、`execution/tool_intent_rail.py` 及对应单测；复用已有执行入口和事件通道 |
 | 本次修订范围 | 重组方案、取舍、验收、依赖和验证记录，纠正身份、去重、摘要及结果判定的适用范围；不修改代码或测试 |
 | 唯一开发计划 | [Persistent Agent 开发计划](../designs/persistent-agent-development-plan.md) PA-15；开发状态、负责人、排期及 M2b / M2c 进展在那里维护 |
-| 验证摘要 | 历史组件记录与本次结果分开维护。本次 PA 包及共享重试测试合计 344 passed、1 skipped、2 failed；确认同意后的恢复分支未由失败用例验证到，详见第 4 节 |
+| 验证摘要 | 2026-10-15：agent-core PA 包 613 passed、10 skipped；两项此前失败的入口回归单独复跑 2 passed。JiuwenSwarm CommitPort 单测 28 passed，真实 Core Web 集成 7 passed（只读场景）；跨仓真实写工具屏障仍待验证，详见第 4 节 |
 | Refs / 关联 PR | 原记录未提供 issue / PR，本次不补造编号 |
 
 本文参考用户指定的[特性开发计划模板](../../../docs/templates/feature-development-plan-template.md)，按“范围与口径 → 方案与验收 → 依赖与联合交付 → 验证与进展”组织；同时按[特性设计模板](../../../docs/templates/feature-design-template.md)和[目录约定](../AGENTS.md)保留设计理由、拒绝方案及已知遗留。本文提供 PA-15 的设计与验证记录，不另建排期或完成率台账。
@@ -61,19 +61,19 @@ D-01 的名称约定和 D-03 的宿主可靠确认是方案成立的重要前提
 [effect_policy.py](../../tools/effect_policy.py) 是唯一分类来源：
 
 ```python
-READ_ONLY_TOOL_ALLOWLIST = frozenset({"read_file", "list_files"})
+READ_ONLY_TOOL_ALLOWLIST = frozenset({"read_file", "list_files", "share_file"})
 
 def is_read_only_tool_name(tool_name: str | None) -> bool:
     return tool_name in READ_ONLY_TOOL_ALLOWLIST
 ```
 
-上面是本特性实现时的名单。2026-10-14 起 PA-08 加入 `share_file`，分类依据是“不直接修改办公空间或外部系统”，允许修改本次执行的内部登记状态；名单名称不变，是否改名由本特性负责人统一处理（[F_18](F_18_output-handoff.md) D-06）。
+`share_file` 不直接修改办公空间或外部系统，只修改本次执行的内部登记状态，因此由 PA-08 加入名单（[F_18](F_18_output-handoff.md) D-06）。白名单仅表示该工具不触发 PA-15 的写前意图屏障，不代表其登记状态会跨执行持久化。
 
 只读取 Harness 实际暴露给模型、进入 `ToolCallInputs.tool_name` 的完整名称。不折叠大小写，不猜别名，不匹配前后缀或 `read` / `search` 关键词，也不核验 AbilityManager 当前绑定的实例或实现类。
 
 | 条件 | 当前处理 |
 | --- | --- |
-| 身份和参数有效，名称精确为 read_file / list_files（2026-10-14 起另含 share_file） | 不产生 tool.intent；派发后有 emitter 时产生 tool.completed，operation_id 为 None |
+| 身份和参数有效，名称精确为 read_file / list_files / share_file | 不产生 tool.intent；派发后有 emitter 时产生 tool.completed，operation_id 为 None |
 | 已注册但名单外，或未知、自定义、MCP、宿主新增名称 | 按有副作用处理，必须等待写意图确认后才允许底层派发；此分类不证明工具已注册或一定可执行 |
 | 工具调用 ID / 名称缺失、非字符串、空值或含空白 | 只读和写调用均失败关闭，不因命中白名单豁免身份检查 |
 | 参数无法规范化或摘要生成失败 | 只读和写调用均失败关闭，不放行底层工具 |
@@ -232,7 +232,7 @@ PA-15 不主动重试未知写结果，不要求外部系统提供幂等键、�
 
 | 验收 ID | 前置 / 操作与通过条件 | 独立或联合验证入口 |
 | --- | --- | --- |
-| PA-15-V-01 分类 | 精确命中两个名称免意图；大小写、近似、自定义、MCP 和未知名称均默认写；分类不查实现类 | [test_effect_policy.py](../../../../../tests/unit_tests/harness/persistent_agent/test_effect_policy.py) |
+| PA-15-V-01 分类 | 精确命中三个名称免意图；大小写、近似、自定义、MCP 和未知名称均默认写；分类不查实现类 | [test_effect_policy.py](../../../../../tests/unit_tests/harness/persistent_agent/test_effect_policy.py) |
 | PA-15-V-02 身份与关联 | 有效调用生成稳定作用域操作 ID；同上下文 JSON 键序变化不重复意图；ID / 名称 / 参数冲突、身份缺失及不可规范化参数不派发 | [test_tool_intent_rail.py](../../../../../tests/unit_tests/harness/persistent_agent/test_tool_intent_rail.py)；跨 Execution 只验证 ID 稳定，不扩展为持久去重 |
 | PA-15-V-03 写前确认与 fatal | 阻塞 record 时工具未调用；成功后才调用；失败时工具调用为零、入口重抛同一 fatal；普通日志缺口不阻止后续关键事件 | rail、[test_entries.py](../../../../../tests/unit_tests/harness/persistent_agent/test_entries.py)、[test_emitter.py](../../../../../tests/unit_tests/harness/persistent_agent/test_emitter.py)；真实落盘另见 V-08 |
 | PA-15-V-04 授权与确认恢复 | 等待 / 拒绝 / skip / force-finish 不记工具意图或完成；同意后实际执行写工具前先记意图，再产生关联完成事件 | entries 的确认恢复 / 拒绝测试与 rail skip 测试；组件替身验证；真实确认由 PA-09、PA-10 联合 |
@@ -290,15 +290,17 @@ PA-14、PA-15 和宿主端口可以按契约并行推进。PA-16 需要 PA-14 �
 4. 事件队列不随 Agent 实例清理取消；已保存日志可按 execution_id 读取并按 local_seq 返回。入口流只展示，宿主不把流消费当作第二条持久化通道。
 5. 不把 tool.intent 解释为操作成功。完成事件反映工具报告，外部事实仍由文件 / 系统状态及回执查证；缺少完成结果由 PA-17 / PA-18 先查证、查不清询问发起人。
 
-若现有 CommitPort 已提供关键确认，无需为白名单再造宿主通道；若只入内存队列就返回，须先补齐关键确认。两者都需要真实证据。本次只读检索本地 `src/jiuwenswarm` Python 源码中的 PersistentPorts、CommitPort、tool.intent 和正式入口名称，未找到对应接入，不能据此断言其他分支或部署环境不存在实现。
+当前本地 `huenrui_jiuwenswarm` 仓库 `jiuwenmate` 分支已有 `jiuwenswarm/server/jiuwenmate/ports/commit.py` 中的 `HostCommitPort`：`record` 对 `tool.intent`、`execution.paused`、`execution.final` 等关键事件等待 `ExecutionRepository.record_events` 返回；普通事件走后台 `CommitQueue`。仓储按事务保存事件，同一 `event_id` 与相同内容可幂等跳过，内容冲突会报错。该实现和组件测试证明宿主端具备关键确认路径，但尚未证明完整写工具调用链在真实持久化确认后才产生副作用。
+
+证据边界：`tests/unit_tests/server/jiuwenmate/test_commit_port.py` 当前 28 项通过，覆盖 `tool.intent` 重复记账及关键事件存储失败抛错；其中重启测试当前验证的是一般事件日志，不是重启后读回 `tool.intent`。`tests/integration_tests/jiuwenmate/test_web_real_core.py` 当前 7 项通过，实际运行 Core 与宿主 Web 链路，但只覆盖只读工具场景。上述测试都不等同于 V-08 的受控写工具端到端屏障验证。
 
 ### 3.4 实施顺序与开放门槛
 
 | 顺序 | 产物 / 责任 | 独立验证或交接条件 |
 | --- | --- | --- |
-| 1 | agent-core 分类、Rail、统一装配及现有 emitter / fatal 接入 | 以 V-01～V-07 核对实际组件行为；实现位置见第 2.3 节 |
-| 2 | 入口回归缺口复核及修复；PA-05 / 流式事件维护者，PA-15 协同 | 解决第 4 节两项失败，并重新实际执行确认同意后写前记账分支，不只调整文档为通过 |
-| 3 | 宿主真实 CommitPort 接入；AgentServer 持久化维护者与 PA-15 | V-08：可靠确认、失败阻断、重传与退出后可读证据；记录对端版本、环境及复现步骤 |
+| 1 | agent-core 分类、Rail、统一装配及现有 emitter / fatal 接入 | 组件已实现；以 V-01～V-07 核对实际组件行为，当前测试结果见第 4 节 |
+| 2 | 入口回归复核；PA-05 / 流式事件维护者，PA-15 协同 | 2026-10-15 此前两项失败用例均单独通过；保留其历史失败记录，新的代码回归仍按正常 CI 覆盖 |
+| 3 | 跨仓写前屏障联调；AgentServer 持久化维护者与 PA-15 | 宿主 `HostCommitPort` 已存在且组件测试通过；仍需用受控写工具证明成功时先持久化再产生副作用、持久化失败时工具调用为零，并验证重启后可读回该 `tool.intent` |
 | 4 | 文件写入和确认链；PA-14～PA-16、PA-09 及相关窗口 / 来源特性 | M2b 按总计划完整验收；授权、文件修改和冲突不能由 PA-15 代替 |
 | 5 | 日志及未知结果继续；PA-17、PA-18 与宿主 | M2c 按总计划演示崩溃和非确认暂停后继续，避免直接重放旧写调用 |
 
@@ -308,29 +310,37 @@ PA-14、PA-15 和宿主端口可以按契约并行推进。PA-16 需要 PA-14 �
 
 ### 4.1 实际执行记录
 
-本次使用当前工作树既有代码和测试，Windows、Python 3.13.12、pytest 9.1.1；执行目录为 `src/agent-core`。实际命令如下，测试采用组件替身，不连接生产持久化或真实外部写平台：
+以下为 2026-10-15 在两个本地 `jiuwenmate` 工作树执行的实际验证。agent-core 的组件测试使用测试替身，不连接 JiuwenSwarm 存储；JiuwenSwarm 的 Web 集成测试使用真实 Core 与本地测试设施，但本次覆盖的工具只有只读场景，不连接真实外部写平台。
 
 ```text
-.\.venv\Scripts\python.exe -m pytest tests/unit_tests/harness/persistent_agent tests/unit_tests/core/single_agent/test_tool_call_resilience_rail.py -q
+# agent-core 仓库根目录
+uv run --offline pytest tests/unit_tests/harness/persistent_agent -q -o addopts= --asyncio-mode=auto --tb=short
+uv run --offline pytest tests/unit_tests/harness/persistent_agent/test_entries.py::test_completed_execution_records_events_in_order tests/unit_tests/harness/persistent_agent/test_entries.py::test_confirmation_pause_then_resume_completes -q -o addopts= --asyncio-mode=auto --tb=short
 
-.\.venv\Scripts\python.exe -m pytest tests/unit_tests/harness/persistent_agent/test_entries.py::test_completed_execution_records_events_in_order tests/unit_tests/harness/persistent_agent/test_entries.py::test_confirmation_pause_then_resume_completes -q --tb=short --show-capture=no
+# JiuwenSwarm 仓库根目录
+uv run --offline pytest tests/unit_tests/server/jiuwenmate/test_commit_port.py -q -o addopts= --asyncio-mode=auto --tb=short
+uv run --offline pytest tests/integration_tests/jiuwenmate/test_web_real_core.py -q -o addopts= --asyncio-mode=auto --tb=short
 ```
 
 | 日期 / 检查 | 实际结果 | 证据范围与限制 |
 | --- | --- | --- |
-| 2026-10-10 原阶段组件记录 | PA 包 325 passed、1 skipped；共享 ToolCallResilienceRail 11 passed；Ruff lint / format 通过；记录 2 个 Pydantic 弃用警告 | 保留历史基线；本次未复现当时环境，不用该数字覆盖当前失败，历史 Ruff 结果也不算本次执行 |
+| 2026-10-10 原阶段组件记录 | PA 包 325 passed、1 skipped；共享 ToolCallResilienceRail 11 passed；Ruff lint / format 通过；记录 2 个 Pydantic 弃用警告 | 保留历史基线；本次未复现当时环境，不用该历史数字代表当前状态；历史 Ruff 结果也不算本次执行 |
 | 2026-10-12 PA 包及共享重试回归 | 共 347 项：344 passed、1 skipped、2 failed、5 warnings；其中 PA 包 333 passed / 1 skipped / 2 failed，共享重试 11 passed | 分类、意图 Rail、写前失败阻断、原生重试、完成结果、低层 emitter 和装配等现有断言通过；整包未全通过 |
 | 2026-10-12 两个失败用例单独复跑 | 2 failed，均在事件序列断言处观察到 index 1 为 model.completed，而预期 reply.delta | `test_completed_execution_records_events_in_order` 在第 380 行失败；`test_confirmation_pause_then_resume_completes` 在第 703 行失败，尚未进入同意后的 resume 分支；失败根因待对应入口 / 流式链维护者定位 |
-| 本次跳过 / 警告 | 符号链接逃逸用例在当前 Windows 环境跳过；2 个 Pydantic class Config、3 个 SQLAlchemy declarative_mixin 弃用警告 | 跳过属于 PA-14 路径验证，不计为通过；警告来自已有代码，本次未处理 |
+| 2026-10-15 agent-core PA 包 | 613 passed、10 skipped；2 个 Pydantic 弃用警告 | 当前 PA 包测试集通过；它是 agent-core 组件验证，不含真实 JiuwenSwarm 持久化写屏障 |
+| 2026-10-15 agent-core 两项入口回归单独复跑 | 2 passed | `test_completed_execution_records_events_in_order` 与 `test_confirmation_pause_then_resume_completes` 均通过；取代 2026-10-12 失败作为当前结果，历史失败仍保留 |
+| 2026-10-15 JiuwenSwarm CommitPort 单测 | 28 passed | 覆盖关键 `tool.intent` 存储失败抛错及相同事件重传去重；重启用例未专门验证 `tool.intent` |
+| 2026-10-15 JiuwenSwarm Core Web 集成 | 7 passed | 真实 Core / 宿主 Web 链路的只读工具场景；未运行写工具，不能证明 PA-15 写前屏障 |
+| 2026-10-12 跳过 / 警告 | 符号链接逃逸用例在当时 Windows 环境跳过；2 个 Pydantic class Config、3 个 SQLAlchemy declarative_mixin 弃用警告 | 这是 2026-10-12 运行记录；跳过属于 PA-14 路径验证，不计为通过，警告来自已有代码，本次未处理 |
 | 2026-10-12 源码及测试核对 | 统一装配、五项身份派生、回调上下文去重、显式 target_ref、状态判定及普通完成失败边界均已逐项核对 | 源码核对不代替缺失断言、真实宿主确认或跨进程验证 |
 | 2026-10-12 文档一致性检查 | 35 个相对链接可解析，8 个验收 ID 唯一，代码围栏成对，git diff --check 通过 | 核对模板路径、源码 / 测试入口、预期与证据分离；不替代运行及真实联调 |
-| JiuwenSwarm 关键确认及跨仓联调 | 未执行；没有真实持久化确认、崩溃退出后读取或端到端证据 | V-08 与 M2b / M2c 仍待验证，不因本地测试或端口定义存在而宣告通过 |
+| V-08 跨仓真实写工具屏障 | 未执行 | 宿主关键事件路径已有实现及组件测试，但尚无一次测试把真实 `PersistentToolIntentRail`、`HostCommitPort`、持久存储和受控写工具串起来，覆盖成功先落盘、失败零副作用及重启后读回意图 |
 
-各通过用例的入口见第 2.10 节；本次失败与 [F_05 当前流式展示回归记录](F_05_execution-entries.md)所列两项一致。原确认测试虽包含恢复后写前顺序断言，本次执行没有到达该分支，不能将测试文件存在或旧记录等同于当前通过。
+2026-10-12 的失败是历史记录，已由 2026-10-15 两项定向回归通过取代；不能据此继续称这两项当前失败。第 2.10 节列出行为验收和测试入口，V-08 的跨仓端到端部分仍未执行。
 
 ### 4.2 验证结论与进展维护
 
-结论为**部分验证**。V-01、V-02、V-03、V-05～V-07 的现有组件断言通过，但不扩大为未写断言的所有分支；V-04 的拒绝 / skip 等已有断言通过，同意后恢复的当前回归因前段序列失败而未验证到；V-08 未执行。取消跳过收尾、外部已执行但完成日志丢失、跨进程查证及旧中断状态清理属于共享联合场景，仍待 PA-18 / 宿主证据。
+结论为**组件已验证、跨仓写屏障未闭环**。2026-10-15 agent-core PA 包及此前失败的两项入口回归通过；这说明相应组件和入口回归当前通过，不扩大为未写断言的所有分支。JiuwenSwarm `HostCommitPort` 的关键事件确认与去重有单测，Core Web 链路也有只读集成测试；但 V-08 仍缺真实写工具端到端测试及 `tool.intent` 的重启后读回证据。取消跳过收尾、外部已执行但完成日志丢失、跨进程查证及旧中断状态清理属于共享联合场景，仍待 PA-17 / PA-18 与宿主证据。
 
 PA-15 保持进行中：已有 agent-core 实现不等于完整宿主保证，也不等于 PA-16 或 M2b 可开放。状态、负责人、关联 PR、剩余工作和日期统一在开发计划 PA-15 行维护；M2b / M2c 引用该证据，不能把组件测试的结果计作整项或产品完成。
 
@@ -338,13 +348,13 @@ PA-15 保持进行中：已有 agent-core 实现不等于完整宿主保证，�
 
 | 遗留 / 责任范围 | 当前限制及后续验证要求 |
 | --- | --- |
-| 真正持久化确认 / AgentServer 与 PA-15 | 未完成真实 CommitPort 联调；须验证 V-08，内存排队确认不能替代可靠保存 |
-| 入口流式回归 / PA-05 与 PA-15 协同 | 两项事件序列测试失败；恢复后写前顺序分支本次未到达，定位并修复后重跑完整适用场景 |
-| 名称白名单 / agent-core 及工具注册方 | 仅 read_file / list_files；其他只读名称也记意图。按名唯一解析不防止错误的同名写实现替换，新增或变更能力须重新审查 |
+| 跨仓真实写屏障 / AgentServer 与 PA-15 | `HostCommitPort` 关键事件路径及其组件测试已存在；尚无受控写工具证明“意图可靠保存后才派发”及“存储失败零副作用”，也未验证重启后读回 `tool.intent` |
+| 入口流式回归 / PA-05 与 PA-15 协同 | 2026-10-12 两项失败已在 2026-10-15 定向复跑通过；保留为历史记录，不再是当前已知失败 |
+| 名称白名单 / agent-core 及工具注册方 | 当前名单为 `read_file`、`list_files`、`share_file`；其他只读名称也记意图。按名唯一解析不防止错误的同名写实现替换，新增或变更能力须重新审查 |
 | 去重和崩溃边界 / PA-17、PA-18 | 仅上下文内去重；稳定 operation_id 不禁止新 Execution 重派发。意图有而完成无时先查证，不从缺日志推断未执行 |
 | 摘要与状态适配 / 工具适配方 | 无全文秘密检测和恢复参数存储；target_ref 只取显式字段，result_refs 未填；显式失败需结构化 success=False，failed 也不能证明无局部副作用 |
 | 并行与取消 / 执行链及 PA-18 | 等待意图的调用可被停止复核阻断，已派发调用不能由屏障撤回；跳过收尾后保留未决，不伪造结果或自动补偿 |
-| 正式入口 / PA-06、PA-09、PA-10 | 未接入状态、组装及确认转换时生产入口仍拒绝；低层 invoke_bound / stream_bound 无 emitter 不能作为可靠写入口 |
+| 正式入口 / PA-06、PA-09、PA-10 | JiuwenSwarm Core Web 集成当前只验证只读场景；PA-15 写路径尚未接入真实 CommitPort 的端到端验收。正式入口开放仍受 PA-06 / PA-09 / PA-10 各自门禁约束；低层 invoke_bound / stream_bound 无 emitter 不能作为可靠写入口 |
 | 办公空间与后续执行模式 / PA-14、PA-16、PA-24～PA-26 | PA-14 有自己的授权 / 公共导出等遗留，PA-16 仍需文件修改与冲突验证；当前 Rail 不能证明未开放子代理及 task-loop 的写调用已汇聚 |
 | 非目标后续能力 / 对应特性 | 外部回执查询、未知结果继续、文件冲突、输出交接和渠道投递分别由后续特性 / 宿主负责；写入或工具正常返回不等于任务完成 |
 
@@ -356,3 +366,4 @@ PA-15 保持进行中：已有 agent-core 实现不等于完整宿主保证，�
 | 2026-10-10 实现记录 | 装配 Rail、写前屏障、完成事件、稳定关联、fatal / force-finish、原生重试约束及回归 | 历史测试基线见第 4.1 节；未包含真实宿主持久化联调 |
 | 2026-10-14 PA-08 加入 share_file | 名单加入 `share_file`，注释写明分类依据；名单名称不变 | 第 2.2 节代码与行为表就近注明；见 [F_18](F_18_output-handoff.md) D-06 与 S_08 |
 | 2026-10-12 文档重构 | 对照两个模板、现行架构 / specs 和代码整理范围、决策、局部依赖、验收及证据；校准绑定类型、五项操作身份、上下文内去重、显式目标、摘要 / 状态边界 | 不修改代码、公共契约、架构、负责人、硬前置或特性完成数；本次测试结果和剩余边界取代“当前全通过”的表述，历史记录仍保留 |
+| 2026-10-15 当前实现与验证核对 | 更新白名单为 `read_file` / `list_files` / `share_file`；将 2026-10-12 两项失败标为历史，并记录 agent-core 当前回归、JiuwenSwarm `HostCommitPort` 实现及组件 / 只读集成测试证据 | 宿主关键事件实现不等于完整写屏障验收；V-08 仍待受控写工具成功 / 失败场景和重启后读回 `tool.intent` |
