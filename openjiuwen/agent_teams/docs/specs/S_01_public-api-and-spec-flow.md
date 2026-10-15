@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/__init__.py`、`openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/runtime/manager.py`、`openjiuwen/core/runner/team_runner.py`、`openjiuwen/core/runner/runner.py` |
-| 最近一次修订日期 | 2026-08-19 |
-| 关联 feature | N/A |
+| 最近一次修订日期 | 2026-10-15 |
+| 关联 feature | `F_122_framework-bootstrapped-generic-team.md`（`bootstrap_mode` / `team_display_name` / `team_desc` 三个 spec 字段） |
 
 ## 范围 / 边界
 
@@ -41,7 +41,7 @@ Spec 形态：
 build 流向：
 
 9. `TeamAgentSpec.build()` 是**单向**的：消费 spec、产出 `TeamAgent` 运行时实例；运行时实例不回写 spec、不修改入参 spec 的字段值。
-10. `build()` 在返回前必须完成全部 spec 校验——保留名冲突、HITT 一致性、`model_pool ↔ model_router` 互斥、leader 模型可解析。任何校验失败必须抛 `ValueError` 或 `AGENT_TEAM_CONFIG_INVALID`，**不允许**返回半构造的 `TeamAgent`。
+10. `build()` 在返回前必须完成全部 spec 校验——保留名冲突、HITT 一致性、`model_pool ↔ model_router` 互斥、`bootstrap_mode="framework"` ⇒ `dispatch_mode="scheduled"`（F_122）、leader 模型可解析。任何校验失败必须抛 `ValueError` 或 `AGENT_TEAM_CONFIG_INVALID`，**不允许**返回半构造的 `TeamAgent`。
 11. `build()` 调用前后，spec 的 `model_dump()` 输出在用户可见字段上保持稳定。framework 内部的字段补全只发生在两处：`@model_validator` 阶段（如 `transport` 的 inprocess 默认值）和 `build()` 阶段（router → pool 展开），且都在**同一次 build 内**完成，不延迟到运行时。
 
 Runner 入口：

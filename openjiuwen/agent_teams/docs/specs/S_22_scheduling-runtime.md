@@ -9,7 +9,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/scheduling/` |
 | 最近一次修订日期 | 2026-10-15 |
-| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback）、`F_118_task-scoped-member-lifetime.md`（第三个幂等扫描：任务内联成员的退场请求；交接消息的上下游简述）、`F_119_scheduled-completion-handoff-via-note.md`（完成交接改走任务行 `summary` / `note`、leader 摘要带完成摘要、验收通过延迟告知）；bugfix `B_06_scheduled-reassign-active-task-handoff-gap.md`（第四个幂等扫描：改派活跃任务后给新 owner 补发开工交接） |
+| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback）、`F_118_task-scoped-member-lifetime.md`（第三个幂等扫描：任务内联成员的退场请求；交接消息的上下游简述）、`F_119_scheduled-completion-handoff-via-note.md`（完成交接改走任务行 `summary` / `note`、leader 摘要带完成摘要、验收通过延迟告知）、`F_122_framework-bootstrapped-generic-team.md`（框架建队：第三个激活来源）；bugfix `B_06_scheduled-reassign-active-task-handoff-gap.md`（第四个幂等扫描：改派活跃任务后给新 owner 补发开工交接） |
 
 ## 范围 / 边界
 
@@ -31,7 +31,7 @@
 ## 不变量
 
 1. **调度器只在 `spec.dispatch_mode == "scheduled"` 的 leader kernel 上存在**：`CoordinationKernel.setup` 构造（休眠态）；其余 kernel（teammate、autonomous leader）的 `scheduler` 恒为 None。
-2. **激活条件 = team 已建成**。两个激活点：`kernel.notify_team_built()`（build_team 成功回调内，先于任何 teammate spawn / create_task）与 `kernel.start()`（team 行已存在——warm resume / 冷恢复）。`pause()` / `stop()` 即 `deactivate()`。
+2. **激活条件 = team 已建成**。两个激活点：`kernel.notify_team_built()`（`build_team` 成功回调内，先于任何 teammate spawn / create_task——`build_team` 工具调用与 `bootstrap_mode="framework"` 下 `kernel.start()` 的框架建队共用这条回调，见 F_122）与 `kernel.start()`（team 行已存在——warm resume / 冷恢复）。`bootstrap_mode="framework"` 的 leader `start()` 返回时团队行必然存在（新建或已存在）、调度器必然已激活。`pause()` / `stop()` 即 `deactivate()`。
 3. **dispatch_mode 是静态 spec 配置**（F_62 评审定稿）：`TeamAgentSpec.dispatch_mode` 在构建期决定一切——rails/工具形态/提示词按模式装配、每套一份互不混写；`TeamSpec.dispatch_mode` 镜像它随 spawn 载荷到达成员进程；`build_team` **不选择协调模式**（`team_info.dispatch_mode` 列只是记录，spec 是运行时真相）；运行期没有任何模式切换路径。
 4. **调度器不理解事件，只理解看板**：任何触发（`task_*` / `member_*` transport 事件、`POLL_TASK`、`SCHEDULER_SCAN`、激活）都跑同一组四个幂等扫描（开工 / 交接补发 / 验票 / 退场）到有界不动点（`_MAX_SCAN_PASSES`）。恢复没有独立路径——激活扫描就是恢复。事件仅承担两个扫描推不出的职责：终态摘要与 `TASK_LIST_DRAINED` 收尾（事件只发一次）。
 5. **交接 = leader 身份邮箱消息，投递即启动**：`_send_as_leader` 先写邮箱行（持久）再 `host.auto_start_member`（`UNSTARTED→STARTING` 拉起、`ERROR→RESTARTING` 复活、`DORMANT→RESTARTING` 唤醒，三条都是 CAS、幂等；给休眠成员派新任务即把它叫醒，F_118）。成员在线与否不是开工前置条件；成员侧零新代码（走既有 `MessageHandler`）。行里存的是**投递载荷不是文案**（`content=""` + `meta`），文案在投递时按模板渲染——见「消息面」段与 `S_12` 的 meta 三铁律。

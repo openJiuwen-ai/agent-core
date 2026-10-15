@@ -302,6 +302,15 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
       解散的团队（自己的 `clean_team`，或 operator 的 `delete_agent_team`），团队行已消失，
       那时它确实需要重新建队。
 
+21a-1. **`bootstrap_mode="framework"` 的 leader 工具集不含 `build_team`**（[[F_122]]）。框架在
+    `kernel.start()` 里建队（`TeamBackend.build_team` 程序化调用，`overrides=None`，生效能力 = spec
+    天花板），准则改由 `TeamContextTracker` 以 `<team-policy>` 块随首条输入投递，于是 `build_team`
+    没有任何剩余职责——工具在、描述在，模型就会去调，所以在 `create_team_tools` 里按
+    `bootstrap_mode` 减掉（与 plan_mode / persistent 两条减法同处），而不是留一个幂等空转的工具。
+    减法只动 leader 集的这一个名字；成员集不变。`rejects_rebuild` / `_reattach_team` 保留给
+    `bootstrap_mode="leader"`，本模式物理不可达。该模式只允许与 `dispatch_mode="scheduled"` 组合
+    （spec 校验）。
+
 21b. **verify 闸是 dispatch 门控的能力，`update_task` 与 `build_team` 双层执法**（[[F_76]]）。`reviewer` /
     `max_review_rounds` 两个属性只在 `dispatch_mode == "scheduled"` 时进 `update_task` 的 schema，
     描述里的 `{{update_task_verify_gate}}` 槽用**同一个信号**门控——参数与讲这个参数的散文一起出现、
