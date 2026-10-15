@@ -1338,6 +1338,17 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                     for key, val in list(self._component_spans.items()):
                         if val.invoke_id == invoke_id:
                             self._component_spans.pop(key, None)
+                            # Component span still open at workflow failure: finish
+                            # it like stale-session cleanup (end + manager pop +
+                            # detach). Dropping only the index entry leaks the span,
+                            # its context token, and the _span_manager entry the
+                            # cleanup safety net would need to reach it.
+                            try:
+                                val.span.end()
+                                self._span_manager.pop(key)
+                                self._detach_state(val)
+                            except Exception as exc:
+                                session_logger.warning("otel workflow handler: cleanup component span failed: %s", exc)
                 return
 
             # Non-exception: buffer on_invoke_data
