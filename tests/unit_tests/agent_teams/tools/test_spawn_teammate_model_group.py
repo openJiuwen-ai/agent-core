@@ -237,3 +237,82 @@ async def test_predefined_external_cli_member_is_not_pinned_to_a_route_tag(db):
 
     assert get_member_model_ref(await backend.get_member("cli-1")) is None
     assert get_member_model_ref(await backend.get_member("dev-9")).route_tag == "smart"
+
+
+# ---------------------------------------------------------------------------
+# create_task inline members obey the same model-group contract
+# ---------------------------------------------------------------------------
+
+
+def _create_task_tool(backend: TeamBackend):
+    from openjiuwen.agent_teams.tools.tool_task import ScheduledTaskCreateTool
+
+    return ScheduledTaskCreateTool(backend, make_translator("en"), model_config_allocator=backend.allocate_model)
+
+
+def _inline_task(task_id: str, member_name: str, **member_extra) -> dict:
+    member = {"member_name": member_name, "display_name": "Dev", "desc": "helper", "lifetime": "shutdown"}
+    return {"task_id": task_id, "title": task_id, "content": "c", "member": {**member, **member_extra}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_inline_member_requested_model_is_persisted_as_route_tags(db):
+    backend = _backend(db, pool=_model_group_pool())
+
+    result = await _create_task_tool(backend).invoke({"tasks": [_inline_task("t1", "dev-1", model_name="smart")]})
+
+    assert result.success, result.error
+    model_ref = get_member_model_ref(await backend.get_member("dev-1"))
+    assert model_ref.model_name == "*"
+    assert model_ref.route_tag == "smart"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_inline_member_unselectable_model_fails_and_rolls_back_the_batch(db):
+    backend = _backend(db, pool=_model_group_pool())
+
+    result = await _create_task_tool(backend).invoke(
+        {
+            "tasks": [
+                _inline_task("t1", "dev-1", model_name="fast"),
+                _inline_task("t2", "dev-2", model_name="gpt-9"),
+            ]
+        }
+    )
+
+    assert not result.success
+    assert "gpt-9" in result.error
+    assert "fast, smart" in result.error
+    assert "ask the user" in result.error
+    # The member registered earlier in the batch is rolled back, and no task lands.
+    assert await backend.get_member("dev-1") is None
+    assert await backend.get_member("dev-2") is None
+    assert await backend.task_manager.get("t1") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_inline_member_schema_lists_selectable_models(db):
+    tool = _create_task_tool(_backend(db, pool=_model_group_pool()))
+
+    member = tool.card.input_params["properties"]["tasks"]["items"]["properties"]["member"]
+    description = member["properties"]["model_name"]["description"]
+
+    assert '{"selectable_models": ["fast", "smart"]}' in description
+    assert "sk-1" not in description
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_inline_member_without_a_model_group_is_unchanged(db):
+    backend = _backend(db)
+    tool = _create_task_tool(backend)
+
+    member = tool.card.input_params["properties"]["tasks"]["items"]["properties"]["member"]
+    result = await tool.invoke({"tasks": [_inline_task("t1", "dev-1", model_name="anything")]})
+
+    assert "selectable_model_catalog" not in member["properties"]["model_name"]["description"]
+    assert result.success, result.error
+    assert get_member_model_ref(await backend.get_member("dev-1")) is None

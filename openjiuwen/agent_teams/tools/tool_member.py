@@ -100,6 +100,39 @@ def _optional_text(value: Any) -> str | None:
     return stripped or None
 
 
+def model_name_description(team: TeamBackend, t: Translator) -> str:
+    """Describe the ``model_name`` argument of a tool that registers a teammate.
+
+    Inside a model group the field takes a route tag rather than a pool
+    model, so the wording switches and the selectable tags are listed.
+    """
+    if not team.is_model_group_pool():
+        return t("spawn_teammate", "model_name")
+    catalog = {"selectable_models": [str(tag) for tag in team.list_route_tags()]}
+    context = f"<selectable_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</selectable_model_catalog>"
+    return f"{t('spawn_teammate', 'model_name_group')}\n\n{context}"
+
+
+def check_model_selectable(team: TeamBackend, model_name: Any, allocation: "Allocation | None") -> str | None:
+    """Reject an explicit ``model_name`` the current model group cannot honour.
+
+    In a model group an explicit model is a hard requirement: running the
+    member on the whole group instead would silently ignore the user.
+
+    Returns:
+        An error message when the model is not selectable, otherwise ``None``.
+    """
+    model_name = _optional_text(model_name)
+    if allocation is not None or not model_name or not team.is_model_group_pool():
+        return None
+    selectable = ", ".join(team.list_route_tags()) or "<none>"
+    return (
+        f"model_name '{model_name}' is not selectable in the current model group "
+        f"(selectable: {selectable}). Do not pick a substitute yourself: ask the user "
+        "which model to use, or omit model_name to let the model group choose."
+    )
+
+
 # ========== Member Management ==========
 
 
@@ -266,11 +299,6 @@ class SpawnTeammateTool(_SpawnToolBase):
         )
         self._allocate_model_config = model_config_allocator
         self._fork_enabled = fork_enabled
-        model_name_description = t("spawn_teammate", "model_name")
-        if team.is_model_group_pool():
-            model_name_description = (
-                f"{t('spawn_teammate', 'model_name_group')}\n\n{self._selectable_models_context()}"
-            )
         properties: dict[str, Any] = {
             "member_name": {
                 "type": "string",
@@ -284,7 +312,7 @@ class SpawnTeammateTool(_SpawnToolBase):
             "prompt": {"type": "string", "description": t("spawn_teammate", "prompt")},
             "model_name": {
                 "type": "string",
-                "description": model_name_description,
+                "description": model_name_description(team, t),
             },
             "isolation": {
                 "type": "string",
@@ -330,11 +358,6 @@ class SpawnTeammateTool(_SpawnToolBase):
             "required": ["member_name", "display_name", "desc"],
         }
 
-    def _selectable_models_context(self) -> str:
-        """Render the models a model-group member can be pinned to."""
-        catalog = {"selectable_models": [str(tag) for tag in self.team.list_route_tags()]}
-        return f"<selectable_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</selectable_model_catalog>"
-
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         err = validate_member_name(inputs.get("member_name"))
         if err:
@@ -360,16 +383,9 @@ class SpawnTeammateTool(_SpawnToolBase):
         allocation = (
             self._allocate_model_config(inputs.get("model_name")) if self._allocate_model_config else None
         )
-        # In a model group an explicit model is a hard requirement: running the
-        # member on the whole group instead would silently ignore the user.
-        model_name = _optional_text(inputs.get("model_name"))
-        if allocation is None and model_name and self.team.is_model_group_pool():
-            selectable = ", ".join(self.team.list_route_tags()) or "<none>"
-            return self._fail(
-                f"model_name '{model_name}' is not selectable in the current model group "
-                f"(selectable: {selectable}). Do not pick a substitute yourself: ask the user "
-                "which model to use, or omit model_name to let the model group choose."
-            )
+        err = check_model_selectable(self.team, inputs.get("model_name"), allocation)
+        if err:
+            return self._fail(err)
         result = await register_teammate(
             self.team,
             member_name=member_name,
