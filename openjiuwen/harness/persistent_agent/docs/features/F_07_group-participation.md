@@ -112,7 +112,7 @@ flowchart TD
 | `async _recent(port, execution, trigger_id: str)` | 使用 GroupChatPort，返回去掉触发消息后的 GroupMessage tuple；原调用是 recent_messages(execution, None, 8) | 重新校验响应并匹配归属；incomplete 为 RuntimeError，端口 / DTO 异常传播给判断重试；不追读游标或补足 8 条 |
 | `_usage(response) -> ModelUsage`（同步） | 从 usage_metadata 的两项计数构造 known；缺 metadata 或任一计数为 unknown | 不伪造零用量；计数类型错误仍可触发 DTO ValidationError，不能把所有非法 metadata 都写成已兜底 |
 | `async _report(budget, execution, model_call_id: str, usage: ModelUsage) -> None` | await BudgetPort.report，重新校验 BudgetReport 与调用归属 | 普通 Exception 只记诊断；report 是宿主记账副作用，失败不重跑已完成的模型 |
-| `async _finish_failed(emitter, reason: str) -> ParticipationOutcome` | 压缩原因并产生 final(failed)，返回 terminal=True | 关键记账失败传播；不伪装成 ignored，不保存空窗口 |
+| `async _finish_failed(emitter, reason: str) -> ParticipationOutcome` | 压缩原因并产生 final(failed)，返回 terminal=True | 关键记账失败传播（2026-10-15 起先按原事件重试一次，见下文第 2.5 节注明）；不伪装成 ignored，不保存空窗口 |
 
 这些签名没有为未注解参数补造类型声明；完整定义与辅助格式化函数来源均为 [participation.py](../../execution/participation.py)。`_duty(spec) -> str` 选择非空 system_prompt 或 Card 职责，`_current_block(source, agent_id: str) -> str` / `_recent_block(messages) -> str` 只构造判断文本，原始消息、排队背景及已撤回 / 正文暂缺 / 无正文的展示见第 2.4 节。它们不读取附件内容，也不向群发送消息。
 
@@ -120,7 +120,7 @@ flowchart TD
 | --- | --- |
 | GroupChatPort / BudgetPort / CommitPort，完整方法见 [F_02 第 5.6 节](F_02_execution-protocol.md#56-关键类方法与宿主接口定义) | 宿主通过 context.ports 注入；判断自行读取 recent_messages、admit / report，事件统一通过 emitter.emit → CommitPort.record 路径；不调用 search_messages，也不额外保存流中事件 |
 | 发布模型 `spec.model.build()`，定义见[模型配置 Spec](../../../schema/deep_agent_spec.py)；调用接口见 [Model.invoke](../../../../core/foundation/llm/model.py) | build 返回既有模型对象；判断调用 invoke 的两条 system / user 消息且 tools=None，无正式 Agent Rails；不另建参与模型配置或工具接口 |
-| `EventEmitter.emit`，完整签名见 [F_05 第 2.3.1 节](F_05_execution-entries.md#231-关键运行类函数与扩展接口定义) | 当前 Execution 专有 emitter 在 execute 的 `_start` 建立；决策普通记账、final / paused 关键记账，完成条件按第 2.5 节 |
+| `EventEmitter.emit`，完整签名见 [F_05 第 2.3.1 节](F_05_execution-entries.md#231-关键运行类函数与扩展接口定义) | 当前 Execution 专有 emitter 在 execute 的 `_start` 建立；决策普通记账、final / paused 关键记账，完成条件按第 2.5 节（2026-10-15 起 final / paused 改用 `emit_ending`，见 [F_18](F_18_output-handoff.md) D-07） |
 
 参与模型调用和端口响应均 await，但本函数未定义独立超时或取消回滚机制；原生推理阶段的控制测试不能证明判断阶段已检查 stop / cancel。重试不是跨 Execution 去重，已有预算和事件不会被撤销，边界见第 2.6 节。
 
@@ -135,7 +135,7 @@ flowchart TD
 
 [ParticipationPayload](../../schema/events.py)已有 DTO；本项新增的是生产者接入。participation.decided 和 model.completed 默认 visibility=private，属于普通事件；不能直接当作群公开回复。final 和 paused 属于关键事件，失败不得伪装成终结成功。
 
-[EventEmitter](../../execution/emitter.py)顺序 await `CommitPort.record` 后向流交出事件。普通事件失败只记诊断，仍可展示并继续；关键事件须由宿主确认自身落盘，record 失败登记 fatal 并抛 `DEEPAGENT_RUNTIME_ERROR`，该事件不向流交出。final(ignored) 成功不保证普通判断日志完整，decision_event_id 也不保证被引用普通事件必然已持久化。宿主消费原事件流时不再次记账，收到 final / paused 后仍须消费至结束。
+[EventEmitter](../../execution/emitter.py)顺序 await `CommitPort.record` 后向流交出事件。普通事件失败只记诊断，仍可展示并继续；关键事件须由宿主确认自身落盘，record 失败登记 fatal 并抛 `DEEPAGENT_RUNTIME_ERROR`，该事件不向流交出。（2026-10-15 起，本路径的 final(failed / ignored) 与 paused(budget_denied / error) 改由 `EventEmitter.emit_ending` 记账：首次失败按原事件重试一次，仍失败才登记 fatal 并抛异常；不重新判断、不重复调用模型，见 [F_18](F_18_output-handoff.md) D-07。）final(ignored) 成功不保证普通判断日志完整，decision_event_id 也不保证被引用普通事件必然已持久化。宿主消费原事件流时不再次记账，收到 final / paused 后仍须消费至结束。
 
 “整理窗口 → 保存记录 → 结束记账”适用于已进入正式任务体的收尾。前置判断终结没有加载窗口，直接记 final / paused，不调用 `_finish`；不能为满足正式执行的保存顺序而额外写入空记录。
 
@@ -152,7 +152,7 @@ flowchart TD
 | 模型调用异常 | report unknown(reason=model call failed)，产生 unknown 的 model.completed，再进入下次尝试；耗尽后 final(failed) |
 | 模型返回但输出缺失 / 不可解析 / decision 或 reason 非法 | 本次 report 与 model.completed 已发生，继续尝试；耗尽后 final(failed)，不生成 participation.decided 或 ignored |
 | report 调用、DTO 或归属校验异常 | 只记录诊断，不重复已经发生的模型调用，也不阻止后续解析；合法 rejected 响应不转换为暂停，由宿主对账 |
-| 关键 final / paused 记账失败 | 入口抛运行异常，不纳入判断尝试、不改判 ignored / failed；宿主核对真实落盘结局 |
+| 关键 final / paused 记账失败 | 入口抛运行异常，不纳入判断尝试、不改判 ignored / failed；宿主核对真实落盘结局（2026-10-15 起先按原事件重试一次，两次都失败才抛异常） |
 | respond / intervene 后接入点不可用 | 抛配置错误；已产生的 model.completed / participation.decided 不撤销，也尚未产生 execution.started，不以判断成功冒充任务完成 |
 
 本地三次判断重试不提供跨 Execution 的决策缓存或业务请求去重；宿主再次执行需使用新的上下文，并自行核对已有结局。提前关闭事件流的收敛沿用 PA-05，不能作为已记录取消的证据。判断函数没有主动检查 stop / cancel 标志或结局锁定，判断期间的业务控制边界须单独验证，不能由原生推理阶段的控制测试推导其已受覆盖。
@@ -259,3 +259,9 @@ PYTHONPATH=$PWD .venv/bin/python -m pytest tests/unit_tests/harness/persistent_a
   - 旧结论的效力：第 2.4 节原“recalled 或 text 为 None 显示已撤回”已由本条替代；第 4.3 节对应遗留就近注明。
   - 影响与同步：只改判断提示文本，不改公共接口、事件或 spec 契约；S_01 第 4.2 节补充最近消息的展示区分，S_09 中“PA-07 旧展示”的待办说明改为现行描述；F_04、F_06 中对应遗留就近注明已解决；开发计划 PA-07 的进展说明和变更记录同步，负责人与状态不变。
   - 验证：新增 PA-07-V-09（`test_participation_prompt_tells_an_unreadable_body_from_a_recall`），换回旧展示时该用例失败；PA 包与 core Session 818 passed，见第 4.1 节。
+- **2026-10-15：参与判断路径的结束事件接入 D-07 重试（PA-08 集成）。**
+  - 原结论与适用范围：本路径的 final / paused 经 `emitter.emit` 记账，首次关键记账失败即登记 fatal。
+  - 新证据与原因：S_02 第 4.2 节与 [F_18](F_18_output-handoff.md) D-07 要求所有 paused / final 经 `emit_ending` 记账；独立审阅在正式入口复现 final(ignored)、paused(budget_denied) 的记账临时失败一次即报致命异常。
+  - 最终变化：`participation.py` 的 4 处结束事件改为 `emitter.emit_ending`，没有候选可补交，首次失败按原事件重试一次；判断策略、重试次数、事件顺序和负责人不变。
+  - 旧结论的效力：第 2.4.1、2.5、2.6 节相关描述就近注明，原文保留。
+  - 验证：`test_a_participation_ending_is_retried_once_after_a_record_failure`（四种结束方式）与 `test_a_participation_ending_that_fails_twice_stops_the_execution`，见 [F_18](F_18_output-handoff.md) 第 8.2 节。

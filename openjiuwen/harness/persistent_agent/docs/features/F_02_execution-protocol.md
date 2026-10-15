@@ -137,7 +137,7 @@ D-01～D-05 来自协议阶段的实现与审查，验证依据见第 8 节；D-
 | tool.intent | ToolIntentPayload | operation_id、tool_call_id、参数哈希与脱敏摘要；关键 |
 | tool.completed | ToolCompletedPayload | succeeded / failed / unknown 均须非空白 result_summary，后两者还须 reason；普通 |
 | window.switched | WindowSwitchedPayload | 旧窗 archive_ref、新窗正整数 window_seq；普通，生产者待接入 |
-| output.proposed | OutputPayload | output_id、目标、共享方式、正文或受控文件引用；普通，final 引用后另保障保存 |
+| output.proposed | OutputPayload | output_id、目标、共享方式、正文或受控文件引用；普通，final 引用后另保障保存（2026-10-14 起：文件候选另带 sha256 摘要、逻辑路径与大小，paused 引用时同样保障，见 [F_18](F_18_output-handoff.md)） |
 | execution.paused | PausedPayload | 五种暂停原因；关键 |
 | execution.final | FinalPayload | completed / ignored / cancelled / failed；非 completed 须原因；关键 |
 
@@ -201,9 +201,9 @@ sequenceDiagram
 
 EventEmitter 的锁串行化产生、record 调用和展示顺序；宿主保存的普通日志可以缺失，不设全部前序落盘屏障。展示队列与宿主持久化队列不是同一队列；当前 emitter 的 outbox 是无界 asyncio.Queue，不能从旧架构“有界交接”推导现有背压保证。
 
-output.proposed 始终是候选：message 必须有非空白正文且不能带 file_ref；attachment / upload / link 必须带受控 file_ref。final.output_refs 必须列出本次要交接的候选；宿主在 final 成功前保存其内容、目标和共享信息。缺失时不能删除引用后宣布完成，补交沿用原 event_id / output_id，不重跑业务任务。
+output.proposed 始终是候选：message 必须有非空白正文且不能带 file_ref；attachment / upload / link 必须带受控 file_ref。final.output_refs 必须列出本次要交接的候选；宿主在 final 成功前保存其内容、目标和共享信息。缺失时不能删除引用后宣布完成，补交沿用原 event_id / output_id，不重跑业务任务。（2026-10-14 起由 [F_18](F_18_output-handoff.md) 替代：upload / attachment 的 file_ref 为 `sha256:<hex>` 内容摘要并带 file_path、file_size；paused 也可引用候选并享有同样保障；结束事件首次失败按原事件补交候选并重试一次。当前契约以 S_02 第 4.4 节为准。）
 
-执行入口当前自动交接 message 最终回答；文件候选、多种共享方式和完整补交适配仍由 PA-08 接入。正常收尾为“交出候选 → 整理窗口 → 保存会话状态记录 → 记账 final → 清理”。reply.delta 可按字符与字节限额无损拆分；最终答案超限则 paused(error)，完整答案经结束信息交给状态保存接入点，不截断后完成。正式存储适配尚待接入，这不是 F_02 提供的后端。
+执行入口当前自动交接 message 最终回答；文件候选、多种共享方式和完整补交适配仍由 PA-08 接入。正常收尾为“交出候选 → 整理窗口 → 保存会话状态记录 → 记账 final → 清理”。reply.delta 可按字符与字节限额无损拆分；最终答案超限则 paused(error)，完整答案经结束信息交给状态保存接入点，不截断后完成。正式存储适配尚待接入，这不是 F_02 提供的后端。（以上为 2026-10-12 时的状态，2026-10-14 起由 [F_18](F_18_output-handoff.md) 替代：`share_file` 文件候选已接入，超长回答拆成有序分段后照常完成，不再以暂停结束，也没有 `pending_answer`。）
 
 关键 record 失败抛运行错误，并阻止后续未开始的模型 / 工具调用；普通日志丢失不阻断关键记账。工具结果缺失或 unknown 不允许解释成“工具未执行”；续做前查证规则见 [S_05](../specs/S_05_confirmation-and-continuation.md) 和 [S_08](../specs/S_08_tool-effects-and-intent.md)。服务端须持续消费直到结束 / 异常，前端断开只结束展示订阅。业务完成、状态保存和渠道送达分别确认。
 
@@ -345,7 +345,7 @@ PA-01 的原契约层完成状态保留；其现行替代以 PA-04 / F_04 为依
 | 生产记账、队列、去重与候选可靠保存：宿主范围，未作真实验证 | 组件使用替身；展示、record 类型或 final DTO 不证明落盘 | AgentServer 与 PA-05、PA-08、PA-15 联调；按第 8.3 节故障条件验收 |
 | 窗口组装（PA-06）与会话状态记录（PA-10，见 [F_17](F_17_session-state-record.md)）已接入；归档及检索待接入（PA-11、PA-12） | BaseKVStore 注入只证明类型；旧 ContextStore 不再是待实现项 | PA-06、PA-10～PA-12 / S_03；验证真实保存、读取、隔离及 JSON 还原 |
 | 知识与完整群历史适配：待接入 | 群参与判断已直接消费 recent_messages，不代表 PA-23 完整历史工具或 PA-13 知识可用 | S_09、PA-13、PA-23；验证授权过滤、版本及完整性 |
-| 文件候选、完整补交与超大最终答案交接：待实现 / 待设计 | 仅已有候选协议和 message 自动交接；超限不截断完成 | PA-08；验证完整答案保留、原标识补交和目标 / 共享检查 |
+| 文件候选、完整补交与超大最终答案交接：待实现 / 待设计（2026-10-14 已有组件实现，见 [F_18](F_18_output-handoff.md)） | 仅已有候选协议和 message 自动交接；超限不截断完成 | PA-08；验证完整答案保留、原标识补交和目标 / 共享检查；服务端联调仍待完成 |
 | 工具结果查证与崩溃续做：待实现 | unknown、日志缺口或意图无结果不能触发盲目重做 | PA-17、PA-18 / S_05、S_08；验证无重复业务副作用 |
 | 受控引用授权与内容脱敏：生产者 / 宿主责任 | DTO 不执行引用解析或实际鉴权；F_14 读取和 F_15 摘要组件已有独立实现 | 按相应 feature 的真实宿主边界验证，不将引用合法性等同授权 |
 | 跨进程超时查询、执行代次围栏及精确恢复：本期范围外 | 原方案已被同进程架构替代，不保留为当前阻塞 | 架构前提变化时整体重设计 |
@@ -361,3 +361,4 @@ PA-01 的原契约层完成状态保留；其现行替代以 PA-04 / F_04 为依
 | 2026-10-07～08 | F_05 实现执行入口、序号、事件映射、预算消费和收尾组件 | 当前 PA-05 组件验收完成；真实接入仍按统一计划，不再写成“执行适配尚未实现” |
 | 2026-10-08 | 计划调整编号：旧 PA-22 → PA-04；旧 PA-04～PA-21 → PA-05～PA-22 | 正文统一使用当前编号，历史证据标明当时范围，不重编号特性文件 |
 | 2026-10-12 | 按两个模板、当前架构 / spec / 代码重新组织；补责任图、确认时序、兼容映射、验证入口及遗留归属，并将必要历史信息融入正文 | 只修订 F_02，不改变架构、代码、计划状态或历史通过结论；文档检查及定向执行结果见第 8 节 |
+| 2026-10-14 | PA-08 改变候选交接：文件候选字段、paused 引用候选、结束事件补交重试、超长回答分段 | 第 5.2、5.5、9 节就近注明替代，原文保留；当前契约见 S_02 与 [F_18](F_18_output-handoff.md) |
