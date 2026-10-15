@@ -433,20 +433,40 @@ class TestRouterCache:
         }
 
     @pytest.mark.asyncio
-    async def test_core_route_bridge_ignores_retry_events(self):
-        """Intermediate retry events stay observability-only."""
+    async def test_core_route_bridge_logs_retry_without_frontend_callback(self):
+        """A failed route is logged before failover, and is not a final LLM_ROUTE event."""
         event = SimpleNamespace(
             event_type=SimpleNamespace(value="request_retried"),
-            extra={"model_group_id": "group-1", "route_id": "route-1"},
+            extra={
+                "model_group_id": "group-1",
+                "route_id": "route-1",
+                "model_name": "qwen-coder",
+                "provider": "openai",
+                "fallback_reason": "DeploymentRateLimitError",
+            },
+            deployment_id="route-1",
+            provider="openai",
+            attempt=1,
+            total_attempts=3,
+            error_type="DeploymentRateLimitError",
+            error_message="rate limit",
         )
 
         with patch(
             "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.trigger",
             new_callable=AsyncMock,
-        ) as mock_trigger:
+        ) as mock_trigger, patch(
+            "openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.llm_logger",
+        ) as mock_llm_logger:
             await _CoreRoutingEventBridge().handle_event(event)
 
         mock_trigger.assert_not_awaited()
+        mock_llm_logger.warning.assert_called_once()
+        warning_args = mock_llm_logger.warning.call_args.args
+        assert "route-1" in warning_args
+        assert "qwen-coder" in warning_args
+        assert "DeploymentRateLimitError" in warning_args
+        assert "rate limit" in warning_args
 
     @pytest.mark.asyncio
     async def test_core_route_bridge_ignores_stream_succeeded_events(self):
