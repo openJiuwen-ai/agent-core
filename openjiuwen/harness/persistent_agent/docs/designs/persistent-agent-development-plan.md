@@ -454,7 +454,7 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 | PA-15 | 本期 | 进行中 | Yan Zhijun | agent-core 已新增精确只读名单 `read_file` / `list_files`，统一装配 `PersistentToolIntentRail`；写意图等待关键确认后才派发，失败保留 fatal 并 force-finish，等待返回后复查共享停止状态；回调上下文内去重，operation_id 按 namespace / Agent / Session / Request / tool_call_id 稳定派生，跨 Execution 稳定关联不等于持久去重；Persistent 仅显式 `idempotent=True` 保留原生重试。代码与验收入口见 [F_15](../features/F_15_tool-intent-before-side-effect.md) 第 2 节。2026-10-10 历史基线为 PA 包 325 passed / 1 skipped、共享重试 11 passed；2026-10-12 当前工作树回归合计 344 passed / 1 skipped / 2 failed（PA 包 333 passed / 1 skipped / 2 failed、共享重试 11 passed），两个失败单独复跑仍在 reply.delta 序列断言失败，确认同意后恢复分支本次未验证到。结论为部分验证，真实 CommitPort 持久化确认与跨仓联调未执行，状态保持进行中，PA-16 不提前放行；环境、命令、失败及剩余边界见 F_15 第 4 节 |
 | PA-16 | 本期 | 进行中 | Yan Zhijun | agent-core 已实现 `WorkspaceWriteScope` / `WorkspaceWriteAccessPort`、逻辑路径和 Session 隔离、Persistent 文件访问模块、条件哈希写入与条件创建；默认个人版 / DeepAgent 不装配 `workspace_write`，保留原 Write/Edit 路径。测试覆盖授权失败关闭、意图记账顺序、同版本并发更新 / 创建冲突和默认工具兼容性；PA-16 与底层条件写入定向测试 80 passed / 3 skipped，另有 1 个既有 Windows 锁清理时序测试单独排除；Harness Grep 5 个 Windows shell allowlist 失败与本项无关。JiuwenSwarm 的真实写授权端口、Session 目录映射、SysOperation / Sandbox provider 和 AgentServer 联调尚未完成，故不标完成。详见 [F_16](../features/F_16_workspace-file-write.md) |
 | PA-22 | 本期 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
-| PA-17 | 本期 | 待开始 | Song Haoran、Chen Ran | — |
+| PA-17 | 本期 | 进行中 | Song Haoran | 组件实现与组件验证（2026-10-15）：[F_19](../features/F_19_execution-log-record.md) 的 D-01～D-06、P-01～P-07 由开发者确认；`execution/execution_log.py` 的 `summarize_execution` 先整份校验（只接受 tuple、四项归属与目标执行、日志内来源一致、内容冲突），再按序号整理并写明缺口与未记录结束，意图与结果只在唯一关联时合并，保留候选及 paused / final 引用和工具的查证依据；测试：`test_execution_log.py` 40 个用例，PA 包 661 passed，harness 与 core Session 6283 passed、39 skipped，41 项变异全部被发现。待完成：按 execution_id 查询归档（PA-12、PA-18）、容量验收（“容量边界”）、PA-18 接入与 M2c 联调 |
 | PA-18 | 本期 | 待开始 | Song Haoran、Chen Ran | — |
 | PA-19 | 独立学习扩展 | 暂不开发 | zhaominjun1997 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
 | PA-20 | 独立学习扩展 | 暂不开发 | zhaominjun1997 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
@@ -581,8 +581,8 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 | 2026-10-14 | PA-08、PA-10 | 按独立审阅修订 [F_18](../features/F_18_output-handoff.md)：收尾先同步窗口并以最终窗口确定有效登记，宿主 Rail 阻断或改写的登记不再交出；新流程退役 `pending_answer`，已保存旧记录的处理（迁移或确认无历史数据）待开发者决定，当前为临时实现；极端合法输入下确认事件仍可能超限一项按开发者决定暂缓 | 修订验收与遗留；不改变负责人、依赖、排期或完成数 |
 | 2026-10-14 | PA-08、PA-10 | 开发者确认开发阶段尚未实际运行、没有历史数据：不做迁移，删除 `pending_answer` 及其兼容代码，带该键的记录（含 null）按严格模型判为无效；记录版本保持 1。替代上一条中“已保存旧记录的处理待决定”的内容 | 修订验收与遗留；不改变负责人、依赖、排期或完成数 |
 | 2026-10-15 | PA-07、PA-08 | 按独立复审修订 [F_18](../features/F_18_output-handoff.md)：`share_file` 回执增加内容校验值，保留格式、只改内容的改写不再算登记（不是签名，不能证明来源）；群参与判断的 final / paused 改由 `emit_ending` 记账，首次失败按原事件重试一次；F_02、F_07、F_15 就近注明替代 | 不改变 PA-07 负责人与判断策略；不改变依赖、排期或完成数 |
-
 | 2026-10-15 | PA-08 | 开发者确认按 PA 交付目标合入，PA-08 必要集成随本批交付，PA-17 单独开发与交付；本批 13 个源码、7 个测试、14 个文档按 feat(harness) → test(harness) → docs(harness) 组织 | 不包含根 checkout 既有计划修改或 PA-17 改动；已验证源码与测试哈希不变，真实服务端 V-15 未执行，PA-08 保持进行中；子仓推送后主仓 PR 另行确认 |
+| 2026-10-15 | PA-17 | 新增 [F_19](../features/F_19_execution-log-record.md)：开发者确认 D-01～D-06、P-01～P-07 与三项补充规则（复用后不误配、合并时核对调用身份、非法 execution_id 前置拒绝）；按审阅意见补充“结果之后出现同 ID 的意图按复用处理”、日志内来源一致、工具查证依据与诊断等级；实现 `execution/execution_log.py`，同步 S_02 第 4.3 节、S_05 第 5.3 节；PA-17 负责人登记为 Song Haoran | PA-17 改为进行中；组件验证见 F_19 第 8.2 节；按 execution_id 查询归档待 PA-12、PA-18，容量验收待“容量边界”对齐；不改变依赖、排期或完成数 |
 
 ### B.2 第一阶段具体产物与评审门槛
 
