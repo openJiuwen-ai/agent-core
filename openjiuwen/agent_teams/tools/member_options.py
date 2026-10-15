@@ -19,6 +19,8 @@ class MemberModelRef(BaseModel):
 
     model_name: str | None = None
     model_index: int | None = None
+    route_tag: str | None = None
+    """``fallback_tag`` pinning a model-group member to one model."""
 
 
 class MemberBuiltinModel(BaseModel):
@@ -99,6 +101,7 @@ def _model_ref_from_mapping(value: Mapping[str, Any] | None) -> MemberModelRef |
     return MemberModelRef(
         model_name=value.get("model_name") if isinstance(value.get("model_name"), str) else None,
         model_index=value.get("model_index") if isinstance(value.get("model_index"), int) else None,
+        route_tag=value.get("route_tag") if isinstance(value.get("route_tag"), str) else None,
     )
 
 

@@ -470,6 +470,7 @@ class SpawnManager:
                 team_spec,
                 model_name="*",
                 model_index=0,
+                route_tag=model_ref.route_tag if model_ref is not None else None,
             )
             fallback_member_model = None
 

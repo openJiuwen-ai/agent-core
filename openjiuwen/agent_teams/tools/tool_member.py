@@ -100,6 +100,39 @@ def _optional_text(value: Any) -> str | None:
     return stripped or None
 
 
+def model_name_description(team: TeamBackend, t: Translator) -> str:
+    """Describe the ``model_name`` argument of a tool that registers a teammate.
+
+    Inside a model group the field takes a route tag rather than a pool
+    model, so the wording switches and the selectable tags are listed.
+    """
+    if not team.is_model_group_pool():
+        return t("spawn_teammate", "model_name")
+    catalog = {"selectable_models": [str(tag) for tag in team.list_route_tags()]}
+    context = f"<selectable_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</selectable_model_catalog>"
+    return f"{t('spawn_teammate', 'model_name_group')}\n\n{context}"
+
+
+def check_model_selectable(team: TeamBackend, model_name: Any, allocation: "Allocation | None") -> str | None:
+    """Reject an explicit ``model_name`` the current model group cannot honour.
+
+    In a model group an explicit model is a hard requirement: running the
+    member on the whole group instead would silently ignore the user.
+
+    Returns:
+        An error message when the model is not selectable, otherwise ``None``.
+    """
+    model_name = _optional_text(model_name)
+    if allocation is not None or not model_name or not team.is_model_group_pool():
+        return None
+    selectable = ", ".join(team.list_route_tags()) or "<none>"
+    return (
+        f"model_name '{model_name}' is not selectable in the current model group "
+        f"(selectable: {selectable}). Do not pick a substitute yourself: ask the user "
+        "which model to use, or omit model_name to let the model group choose."
+    )
+
+
 # ========== Member Management ==========
 
 
@@ -279,7 +312,7 @@ class SpawnTeammateTool(_SpawnToolBase):
             "prompt": {"type": "string", "description": t("spawn_teammate", "prompt")},
             "model_name": {
                 "type": "string",
-                "description": t("spawn_teammate", "model_name"),
+                "description": model_name_description(team, t),
             },
             "isolation": {
                 "type": "string",
@@ -350,6 +383,9 @@ class SpawnTeammateTool(_SpawnToolBase):
         allocation = (
             self._allocate_model_config(inputs.get("model_name")) if self._allocate_model_config else None
         )
+        err = check_model_selectable(self.team, inputs.get("model_name"), allocation)
+        if err:
+            return self._fail(err)
         result = await register_teammate(
             self.team,
             member_name=member_name,
@@ -820,6 +856,11 @@ class SpawnExternalCliTool(_SpawnToolBase):
 
     def _preferred_current_model(self, cli_agent: str, entries: list["ModelPoolEntry"]) -> str | None:
         """Return the current model when the pool can allocate it compatibly."""
+        # In a model group the current model is the logical "*" entry, not a
+        # concrete model an external CLI can run; the fallback must be one of
+        # the real deployments instead.
+        if self.team.is_model_group_pool():
+            return None
         current_name = self.team.current_model_name
         current_provider = self.team.current_model_provider
         if current_name is None or current_provider is None:
@@ -835,7 +876,11 @@ class SpawnExternalCliTool(_SpawnToolBase):
     def _model_catalog_context(self) -> str:
         """Render safe current-model and pool protocol data for the model."""
         current_model = None
-        if self.team.current_model_name is not None and self.team.current_model_provider is not None:
+        if (
+            not self.team.is_model_group_pool()
+            and self.team.current_model_name is not None
+            and self.team.current_model_provider is not None
+        ):
             current_model = {
                 "model_name": self.team.current_model_name,
                 "protocol": _model_api_protocol(self.team.current_model_provider),

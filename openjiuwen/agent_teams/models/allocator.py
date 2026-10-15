@@ -50,13 +50,14 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol, TYPE_CHECKING, runtime_checkable
+from typing import Any, Callable, Optional, Protocol, TYPE_CHECKING, runtime_checkable
 
 from openjiuwen.agent_teams.models.pool import (
     INTELLI_ROUTER_PROVIDER,
     INTELLI_ROUTER_UNIFIED_MODEL,
     ModelPoolEntry,
 )
+from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
@@ -76,17 +77,26 @@ class Allocation:
     entry: ModelPoolEntry
     group_index: int
     persistence_model_name: str | None = None
+    route_tag: str | None = None
+    """``fallback_tag`` pinning a model-group member to matching deployments."""
 
     def to_team_model_config(self) -> "TeamModelConfig":
         """Materialize the live ``TeamModelConfig`` for runtime use."""
-        return self.entry.to_team_model_config()
+        return _with_route_tag(self.entry.to_team_model_config(), self.route_tag)
 
     def to_db_ref(self) -> dict:
-        """Produce the lightweight ``{model_name, model_index}`` ref for DB persistence."""
-        return {
+        """Produce the lightweight model ref for DB persistence.
+
+        ``route_tag`` is only present for a model-group member pinned to one
+        model; it is a selection criterion, not a config snapshot.
+        """
+        ref: dict[str, Any] = {
             "model_name": self.persistence_model_name or self.entry.model_name,
             "model_index": self.group_index,
         }
+        if self.route_tag:
+            ref["route_tag"] = self.route_tag
+        return ref
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +215,58 @@ class CliModelCatalog(Protocol):
     ) -> list[CliModelAllocation]:
         """Resolve physical models by name."""
         ...
+
+
+def _router_config(entry: ModelPoolEntry) -> dict:
+    """The structured IntelliRouter config nested in a logical entry (may be empty)."""
+    router = (entry.metadata.get("client") or {}).get("intelli_router")
+    return router if isinstance(router, dict) else {}
+
+
+def _group_fallback_tag(router: dict) -> str | None:
+    """The tag a ``tag-filtered`` model group is already restricted to, if any."""
+    if router.get("strategy") != "tag-filtered":
+        return None
+    tag = str((router.get("strategy_kwargs") or {}).get("fallback_tag") or "").strip()
+    return tag or None
+
+
+def _selectable_route_tags(router: dict) -> list[str]:
+    """Tags a member can be pinned to: deployment ``fallback_tag`` values.
+
+    A ``tag-filtered`` group only ever routes to its own tag, so pinning a
+    member to any other tag would bypass the group's restriction.
+    """
+    tags = {
+        str(item.get("fallback_tag") or "").strip()
+        for item in router.get("deployments") or []
+        if isinstance(item, dict)
+    }
+    tags.discard("")
+    group_tag = _group_fallback_tag(router)
+    if group_tag is not None:
+        tags &= {group_tag}
+    return sorted(tags)
+
+
+def _with_route_tag(config: "TeamModelConfig", tag: str | None) -> "TeamModelConfig":
+    """Return ``config`` routed only to deployments whose ``fallback_tag`` is ``tag``.
+
+    Uses the router's existing ``tag-filtered`` strategy. ``strategy_kwargs``
+    is replaced, not merged: kwargs of the group's own strategy are not valid
+    for ``tag-filtered``. The shared pool entry is never modified.
+    """
+    router = config.model_client_config.intelli_router
+    if not tag or router is None:
+        return config
+    client = config.model_client_config.model_copy(
+        update={
+            "intelli_router": router.model_copy(
+                update={"strategy": "tag-filtered", "strategy_kwargs": {"fallback_tag": tag}},
+            ),
+        },
+    )
+    return config.model_copy(update={"model_client_config": client})
 
 
 def _pool_digest(pool: list[ModelPoolEntry]) -> str:
@@ -568,15 +630,32 @@ class IntelliRouterAllocator:
         *,
         provider_filter: Optional[Callable[[str], bool]] = None,
     ) -> Optional[Allocation]:
-        """Return a logical entry; physical deployments are never allocated."""
-        # Provider filtering applies to physical CLI deployments, not the
-        # logical IntelliRouter entry. Empty and wildcard hints select it.
-        entry = (
-            self._pool[0]
-            if model_name in (None, "", INTELLI_ROUTER_UNIFIED_MODEL)
-            else None
-        )
-        return Allocation(entry=entry, group_index=0) if entry is not None else None
+        """Return the logical entry, optionally pinned to one model.
+
+        Physical deployments are never allocated: a pinned member still gets
+        the ``"*"`` entry, routed through ``tag-filtered`` to the deployments
+        whose ``fallback_tag`` equals ``model_name``.
+
+        Args:
+            model_name: Empty or ``"*"`` selects the whole group; any other
+                value must be a selectable ``fallback_tag``.
+            provider_filter: Ignored. Provider filtering applies to physical
+                CLI deployments, not the logical IntelliRouter entry.
+
+        Returns:
+            ``None`` for an unselectable name — an explicitly requested model
+            never falls back to the whole group.
+        """
+        tag = str(model_name or "").strip()
+        if tag in ("", INTELLI_ROUTER_UNIFIED_MODEL):
+            return Allocation(entry=self._pool[0], group_index=0)
+        if tag not in self.list_route_tags():
+            return None
+        return Allocation(entry=self._pool[0], group_index=0, route_tag=tag)
+
+    def list_route_tags(self) -> list[str]:
+        """Models (``fallback_tag`` values) a member can be pinned to, sorted."""
+        return _selectable_route_tags(_router_config(self._pool[0]))
 
     def state_dict(self) -> dict:
         return {"pool_digest": self._pool_digest}
@@ -654,6 +733,7 @@ def resolve_member_model(
     *,
     model_name: Optional[str],
     model_index: Optional[int],
+    route_tag: Optional[str] = None,
 ) -> Optional["TeamModelConfig"]:
     """Resolve a member's model from a stored reference against the live pool.
 
@@ -674,6 +754,11 @@ def resolve_member_model(
             ``Allocation.to_db_ref``.
         model_index: Reference produced at spawn time via
             ``Allocation.to_db_ref``.
+        route_tag: ``fallback_tag`` persisted for a pinned model-group
+            member. Re-applied when the current group still serves it;
+            dropped with a warning otherwise, so a group edited between runs
+            degrades to group-wide routing instead of a member that can never
+            get a deployment.
 
     Returns:
         A live ``TeamModelConfig`` when the reference can be resolved
@@ -685,7 +770,15 @@ def resolve_member_model(
     if not group:
         return None
     idx = model_index if isinstance(model_index, int) and 0 <= model_index < len(group) else 0
-    return group[idx].to_team_model_config()
+    entry = group[idx]
+    if route_tag and route_tag not in _selectable_route_tags(_router_config(entry)):
+        team_logger.warning(
+            "persisted route tag {!r} is no longer served by the current model group; "
+            "falling back to group-wide routing",
+            route_tag,
+        )
+        route_tag = None
+    return _with_route_tag(entry.to_team_model_config(), route_tag)
 
 
 def build_model_allocator(
