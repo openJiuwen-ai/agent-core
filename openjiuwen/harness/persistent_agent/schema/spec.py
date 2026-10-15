@@ -17,6 +17,11 @@ if TYPE_CHECKING:
 
     from .build_context import PersistentBuildContext
 
+# Development placeholder for the shared-file size limit; the published value is aligned with the host.
+SHARE_FILE_DEFAULT_MAX_BYTES = 32 * 1024 * 1024
+# Guard against a misconfigured limit, not a delivery policy.
+SHARE_FILE_MAX_BYTES_CEILING = 1024 * 1024 * 1024
+
 # Native context-engine limits that silently drop window messages by count.
 _WINDOW_TRUNCATION_LIMITS = ("max_context_message_num", "default_window_message_num", "default_window_round_num")
 
@@ -27,6 +32,13 @@ def _truncating_limits(config) -> list[str]:
         return []
     read = config.get if isinstance(config, dict) else lambda name: getattr(config, name, None)
     return [name for name in _WINDOW_TRUNCATION_LIMITS if read(name) is not None]
+
+
+def _share_file_rail(context: "PersistentBuildContext", workspace_access, max_bytes: int):
+    """Files are listed for handoff under the read authorization; reading is not permission to publish."""
+    from ..execution.share_file import ShareFileRail
+
+    return ShareFileRail(context.execution, workspace_access, context.binding.control.registrations, max_bytes)
 
 
 class PersistentAgentSpec(DeepAgentSpec):
@@ -40,6 +52,8 @@ class PersistentAgentSpec(DeepAgentSpec):
     enabled_features: frozenset[Literal["construction", "workspace_read", "workspace_write"]] = Field(
         default=frozenset({"construction"}), min_length=1
     )
+    # Largest file share_file may hand off, in bytes actually read; the host checks the same published limit.
+    share_file_max_bytes: int = Field(default=SHARE_FILE_DEFAULT_MAX_BYTES, gt=0, le=SHARE_FILE_MAX_BYTES_CEILING)
 
     def fingerprint(self) -> str:
         """Hash the entire JSON publication, not runtime handles or only base fields."""
@@ -111,6 +125,7 @@ class PersistentAgentSpec(DeepAgentSpec):
             from ..workspace.file_access import PersistentWorkspaceReadRail
 
             parts.rails.append(PersistentWorkspaceReadRail(context.execution, workspace_access))
+            parts.rails.append(_share_file_rail(context, workspace_access, self.share_file_max_bytes))
         if "workspace_write" in self.enabled_features:
             workspace_write_access = context.ports.workspace_write_access
             if workspace_write_access is None:

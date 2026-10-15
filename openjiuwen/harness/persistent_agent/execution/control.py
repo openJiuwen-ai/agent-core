@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     import asyncio
 
     from .emitter import EventEmitter
+    from .handoff import Registration
 
 AbortReason = Literal["cancel", "stop"]
 
@@ -25,6 +26,9 @@ class ExecutionControl:
     stop_settled: "asyncio.Future[None] | None" = field(default=None, repr=False)
     # Set once the native call has exited and the outcome is determined; not a persistence receipt.
     outcome_locked: bool = False
+    # Listings share_file accepted, with a confirmation chain's, for the merge and the 64-file limit at call
+    # time. The ending hands off only listings whose result reached the final window (entries._finish).
+    registrations: "dict[tuple[str, str], Registration]" = field(default_factory=dict, repr=False)
 
     def request_abort(self, reason: AbortReason) -> bool:
         """Record the first control reason before the outcome is locked; otherwise report False."""

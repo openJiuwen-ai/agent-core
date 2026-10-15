@@ -42,8 +42,6 @@ class RecordEnding(BaseModel):
     execution_id: StrictStr
     reply_target: StrictStr | None = None
     output_refs: list[StrictStr] = Field(default_factory=list)
-    # Kept as handed over under the current contract; PA-08 decides how it is carried further.
-    pending_answer: StrictStr | None = None
     last_group_message_id: StrictStr | None = None
 
 

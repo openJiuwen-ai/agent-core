@@ -27,6 +27,7 @@ from ..schema.integration import (
     CONTEXT_ID,
     CONTEXT_STATE_KEY,
     EXECUTION_END,
+    HANDOFF_TEXT,
     STOPPED_TOOL_PLACEHOLDER,
     TEMPORARY_BACKGROUND,
     WINDOW_PART_KEY,
@@ -56,6 +57,7 @@ WAITING = "awaiting_confirmation"
 # Endings that may leave tool calls without results; the window is made safe to append to.
 INTERRUPTED_ENDINGS = frozenset({"stopped", "cancelled", "error"})
 PLACEHOLDER_TEXT = "结果未取得，实际效果需核实"
+HANDOFF_TEXT_PREFIX = "【实际交出的最终回答】\n"
 _OUTCOME_LABELS = {"completed": "已完成", "cancelled": "已取消"}
 
 
@@ -167,24 +169,53 @@ def patch_stopped_calls(messages: list) -> list:
     return patched
 
 
+def _handed_off(ending: ExecutionEnding) -> str:
+    if not ending.output_refs:
+        return "无"
+    parts = [f"最终回答 {ending.answer_segments} 段"] if ending.answer_segments else []
+    parts.extend(f"文件 {path}（{mode}，{output_id}）" for path, mode, output_id in ending.shared_files)
+    return "、".join(parts) + "（以结束记录为准）"
+
+
 def _end_marker(ending: ExecutionEnding, execution_id: str) -> UserMessage:
     outcome = _OUTCOME_LABELS.get(ending.outcome, f"暂停（{ending.outcome}）")
-    outputs = "、".join(ending.output_refs) + "（以结束记录为准）" if ending.output_refs else "无"
     fields = [
         ("request_id", ending.request_id),
         ("execution_id", execution_id),
         ("结局", outcome),
-        ("交出候选", outputs),
-        ("群消息已扫描到", ending.last_group_message_id or "无"),
+        ("交出候选", _handed_off(ending)),
     ]
+    if ending.handoff_failure:
+        fields.append(("未交接原因", ending.handoff_failure))
+    fields.append(("群消息已扫描到", ending.last_group_message_id or "无"))
     text = "【执行结束】" + "；".join(f"{name}：{value}" for name, value in fields)
     return UserMessage(content=text, metadata={WINDOW_PART_KEY: EXECUTION_END})
 
 
+def _handoff_text(messages: list, answer: str | None) -> UserMessage | None:
+    """The answer as handed off, when after_invoke rails changed it from this Execution's last native reply."""
+    if answer is None:
+        return None
+    for message in reversed(messages):
+        if _part(message) == EXECUTION_END:
+            break
+        if isinstance(message, AssistantMessage):
+            if not message.tool_calls and message.content == answer:
+                return None
+            break
+    return UserMessage(content=HANDOFF_TEXT_PREFIX + answer, metadata={WINDOW_PART_KEY: HANDOFF_TEXT})
+
+
 def tidy_window(messages: list, ending: ExecutionEnding, execution_id: str) -> list:
-    """Drop the temporary background; keep history and the one-line header; add the end marker."""
+    """Drop the temporary background; keep history and the one-line header; add the end marker.
+
+    A final answer that after_invoke rails changed is kept, as handed off, right before the marker.
+    """
     kept = [message for message in messages if _part(message) != TEMPORARY_BACKGROUND]
     if ending.outcome != WAITING:
+        handoff_text = _handoff_text(kept, ending.answer_text)
+        if handoff_text is not None:
+            kept.append(handoff_text)
         kept.append(_end_marker(ending, execution_id))
     return kept
 
@@ -271,7 +302,6 @@ class ExecutionStateStore:
 
     def __init__(self, store: WindowStore):
         self._store = store
-        self._loaded: RecordEnding | None = None
 
     async def load(self, context: "PersistentBuildContext") -> LoadedRecord:
         """Validate the latest record, then write it into the new Session; no record gives an empty window."""
@@ -312,7 +342,6 @@ class ExecutionStateStore:
         if interruption is not None:
             state[INTERRUPTION_KEY] = interruption
         context.session.update_state(state)
-        self._loaded = record.ending
         ending = record.ending
         waiting = WaitingScene(ending.request_id, ending.reply_target) if ending.outcome == WAITING else None
         return LoadedRecord(waiting=waiting, last_group_message_id=ending.last_group_message_id)
@@ -350,53 +379,40 @@ class ExecutionStateStore:
                 execution_id=execution.execution_id,
                 reply_target=ending.reply_target,
                 output_refs=list(ending.output_refs),
-                pending_answer=ending.pending_answer,
                 last_group_message_id=ending.last_group_message_id,
             ),
         )
-        payload = dump_record(record)
-        try:
-            await self._store.save_state(execution.agent_id, execution.session_id, payload)
-        except BaseError:
-            # The backend may have applied the write before failing, so the answer may be gone already.
-            self._warn_pending_answer_overwrite(execution, ending, written=False)
-            raise
-        self._warn_pending_answer_overwrite(execution, ending, written=True)
+        await self._store.save_state(execution.agent_id, execution.session_id, dump_record(record))
 
     @staticmethod
     async def _sync_native(context: "PersistentBuildContext") -> None:
-        """Have the native agent write its live window and DeepAgent state into Session state.
+        await sync_native(context)
 
-        Without a native context for this Session the loaded or assembled window is kept: syncing
-        then would write an empty snapshot over it.
-        """
-        reference = context.binding.agent_ref
-        agent = reference() if reference is not None else None
-        if agent is None:
-            raise unsavable("the native agent is no longer available")
-        session = context.session
-        try:
-            engine = agent.react_agent.context_engine
-            if engine.get_context(CONTEXT_ID, session.get_session_id()) is not None:
-                await engine.save_contexts(session)
-            agent.save_state(session)
-        except Exception as exc:
-            raise unsavable("the native window could not be synced", exc) from exc
 
-    def _warn_pending_answer_overwrite(self, execution, ending: ExecutionEnding, *, written: bool) -> None:
-        loaded = self._loaded
-        if loaded is None or loaded.pending_answer is None or ending.pending_answer == loaded.pending_answer:
-            return
-        logger.error(
-            "[PersistentAgent] pending answer %s: session=%s "
-            "previous_request=%s previous_execution=%s request=%s execution=%s",
-            "overwritten" if written else "may have been overwritten by a failed write",
-            execution.session_id,
-            loaded.request_id,
-            loaded.execution_id,
-            ending.request_id,
-            execution.execution_id,
-        )
+async def sync_native(context: "PersistentBuildContext") -> None:
+    """Have the native agent write its live window and DeepAgent state into Session state.
+
+    Without a native context for this Session the loaded or assembled window is kept: syncing
+    then would write an empty snapshot over it.
+    """
+    reference = context.binding.agent_ref
+    agent = reference() if reference is not None else None
+    if agent is None:
+        raise unsavable("the native agent is no longer available")
+    session = context.session
+    try:
+        engine = agent.react_agent.context_engine
+        if engine.get_context(CONTEXT_ID, session.get_session_id()) is not None:
+            await engine.save_contexts(session)
+        agent.save_state(session)
+    except Exception as exc:
+        raise unsavable("the native window could not be synced", exc) from exc
+
+
+def window_messages(session) -> list:
+    """The default window as it stands in Session state; synced first when the native agent has run."""
+    contexts = session.get_state(CONTEXT_STATE_KEY) or {}
+    return list((contexts.get(CONTEXT_ID) or {}).get("messages") or [])
 
 
 def _auto_confirm(value) -> dict:

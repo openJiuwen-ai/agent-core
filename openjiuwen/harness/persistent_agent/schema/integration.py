@@ -28,6 +28,9 @@ EXECUTION_HEADER = "execution_header"
 TEMPORARY_BACKGROUND = "temporary_background"
 # Set by PA-10 on the one-line marker it appends when an Execution ends, unless it waits for a reply.
 EXECUTION_END = "execution_end"
+# Set on the user message, before the end marker, that keeps the final answer as it was handed off
+# when after_invoke rails changed it from the native reply (PA-08).
+HANDOFF_TEXT = "handoff_text"
 # Set by PA-10 on the tool result it adds for a call that a stop, cancel or error left without one: the
 # result was not obtained and its effect must be checked. It is neither a real result nor a failure; the
 # end record says why the Execution ended.
@@ -59,10 +62,15 @@ class ExecutionEnding:
     request_id: str
     reply_target: str | None
     output_refs: tuple[str, ...] = ()
-    # A final answer too large for one output event; must be saved so a later handoff needs no rerun.
-    pending_answer: str | None = None
     # Group scan position for the next Execution, kept in the end marker.
     last_group_message_id: str | None = None
+    # The final answer used for handoff; kept in the window when it differs from the native reply.
+    answer_text: str | None = None
+    # Message candidates the answer was handed off as, and the (path, share mode, output_id) of each file.
+    answer_segments: int = 0
+    shared_files: tuple[tuple[str, str, str], ...] = ()
+    # Why nothing was handed off: logical paths and categories of the parts not prepared.
+    handoff_failure: str | None = None
 
 
 @dataclass(frozen=True)

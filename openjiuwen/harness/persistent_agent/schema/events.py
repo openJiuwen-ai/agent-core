@@ -4,11 +4,12 @@
 
 import hashlib
 import json
+import re
 from datetime import timezone
 from enum import StrEnum
 from typing import Annotated, Literal, Self
 
-from pydantic import AwareDatetime, Field, ValidationInfo, field_validator, model_validator
+from pydantic import AwareDatetime, Field, StringConstraints, ValidationInfo, field_validator, model_validator
 from pydantic_core import PydanticCustomError
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -21,6 +22,7 @@ from .protocol import (
     Identifier,
     InvocationRef,
     ModelUsage,
+    Nonnegative,
     Positive,
     ProtocolModel,
     Reason,
@@ -28,8 +30,16 @@ from .protocol import (
 )
 
 References = Annotated[tuple[Identifier, ...], Field(max_length=128)]
+# Logical workspace path relative to the workspace root, in POSIX form; never a host path.
+LogicalPath = Annotated[str, StringConstraints(min_length=1, max_length=1024, pattern=r"^[^\x00-\x1f\x7f\\]+$")]
+# Characters of the public caption that accompanies a shared file.
+CAPTION_MAX_CHARS = 4096
 # UTF-8 bytes of one canonical event proposal, counting every field, not only text.
 EVENT_MAX_BYTES = 262144
+
+
+def _is_file_digest(value: str | None) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"sha256:[a-f0-9]{64}", value) is not None
 
 
 class EventType(StrEnum):
@@ -82,18 +92,40 @@ class OutputPayload(ProtocolModel):
     output_id: Identifier
     target_ref: Identifier
     share_mode: Literal["message", "attachment", "upload", "link"]
+    # Message text, or the public caption of a shared file.
     text: Text | None = None
     file_ref: Identifier | None = None
+    # Where the host reads a shared file and the name it shows; the host checks size and digest on reading.
+    file_path: LogicalPath | None = None
+    # Bytes actually read; the size limit is a runtime setting shared with the host, not part of this schema.
+    file_size: Nonnegative | None = None
     dependency_refs: References = ()
+
+    @field_validator("file_path")
+    @classmethod
+    def validate_file_path(cls, value: str | None) -> str | None:
+        """Accept only a normalized relative path: no root, empty, current or parent part."""
+        if value is not None and (value.startswith("/") or any(part in ("", ".", "..") for part in value.split("/"))):
+            raise PydanticCustomError("persistent_protocol", "file_path must be a normalized relative path")
+        return value
 
     @model_validator(mode="after")
     def validate_output(self) -> Self:
         """Ensure each sharing mode carries the appropriate output reference."""
+        file_fields = (self.file_ref, self.file_path, self.file_size)
         if self.share_mode == "message":
-            if self.text is None or self.file_ref is not None:
+            if self.text is None or any(field is not None for field in file_fields):
                 raise PydanticCustomError("persistent_protocol", "message output needs text, not a file reference")
-        elif self.file_ref is None:
-            raise PydanticCustomError("persistent_protocol", "file/link output requires a controlled reference")
+        elif self.share_mode == "link":
+            if self.file_ref is None:
+                raise PydanticCustomError("persistent_protocol", "link output requires a controlled reference")
+        else:
+            if any(field is None for field in file_fields):
+                raise PydanticCustomError("persistent_protocol", "file output requires a digest, path and size")
+            if not _is_file_digest(self.file_ref):
+                raise PydanticCustomError("persistent_protocol", "file_ref must be a sha256 content digest")
+            if self.text is not None and len(self.text) > CAPTION_MAX_CHARS:
+                raise PydanticCustomError("persistent_protocol", "file caption exceeds 4096 characters")
         return self
 
 
@@ -150,6 +182,8 @@ class InterceptedToolCall(ProtocolModel):
     tool_name: Identifier
     # Readable arguments for the confirmation card, with sensitive values redacted.
     arguments: Text
+    # The arguments were cut to fit the event; approval still applies to the complete interrupted call.
+    arguments_truncated: bool = False
 
 
 class PausedPayload(ProtocolModel):
@@ -158,10 +192,14 @@ class PausedPayload(ProtocolModel):
     reason: Literal["awaiting_confirmation", "stopped", "budget_denied", "context_unfit", "error"]
     intercepted: Annotated[tuple[InterceptedToolCall, ...], Field(max_length=64)] = ()
     detail: Reason | None = None
+    # Shared-file candidates handed off by this pause, in delivery order; a stop hands off nothing.
+    output_refs: References = ()
 
     @model_validator(mode="after")
     def validate_pause(self) -> Self:
         """Only confirmation pauses carry tool calls; condition pauses must explain themselves."""
+        if self.reason == "stopped" and self.output_refs:
+            raise PydanticCustomError("persistent_protocol", "a stopped pause hands off no output")
         if (self.reason == "awaiting_confirmation") != bool(self.intercepted):
             raise PydanticCustomError(
                 "persistent_protocol", "awaiting_confirmation requires intercepted calls; other pauses carry none"
