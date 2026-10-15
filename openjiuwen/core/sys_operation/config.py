@@ -24,14 +24,15 @@ class LocalWorkConfig(BaseModel):
         default=None,
         description="Security boundary for fs operations.  Paths outside every entry are "
                     "rejected when restrict_to_sandbox is True.  When None (default), the "
-                    "effective list falls back to [workspace, project_root] read from the "
-                    "per-agent CwdState ContextVar.  Independent of CWD -- CWD can move "
-                    "freely while the sandbox stays fixed.")
+                    "effective list falls back to [workspace, project_root, cwd, *skill_roots] "
+                    "read from the per-agent CwdState ContextVar.  Independent of CWD -- CWD "
+                    "can move freely while the sandbox stays fixed.")
 
     restrict_to_sandbox: bool = Field(
         default=False,
         description="When True, fs operations reject paths outside every sandbox_root entry. "
-                    "If sandbox_root is None, falls back to [workspace, project_root] defaults.")
+                    "If sandbox_root is None, falls back to the "
+                    "[workspace, project_root, cwd, *skill_roots] defaults.")
 
     dangerous_patterns: Optional[List[str]] = Field(
         default=None,
