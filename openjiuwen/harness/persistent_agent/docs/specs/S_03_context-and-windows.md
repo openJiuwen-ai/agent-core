@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | S_03 / context-and-windows |
 | 关联模块 | [seams.py](../../execution/seams.py)、[BaseKVStore 注入集合](../../ports.py)、[integration.py](../../schema/integration.py)、[window_assembly.py](../../execution/window_assembly.py)、[session_state.py](../../execution/session_state.py)、[session_record.py](../../schema/session_record.py)；会话状态记录已接入，换窗与归档尚待接入 |
-| 最近一次修订日期 | 2026-10-14 |
-| 关联 feature | [F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)；待实现与验证范围见[开发计划](../designs/persistent-agent-development-plan.md) PA-06、PA-10～PA-12 |
+| 最近一次修订日期 | 2026-10-15 |
+| 关联 feature | [F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_17](../features/F_17_session-state-record.md)、[F_18](../features/F_18_output-handoff.md)；待实现与验证范围见[开发计划](../designs/persistent-agent-development-plan.md) PA-06、PA-10～PA-12 |
 | 设计依据 | [架构设计：窗口](../designs/persistent-agent-architecture.md#44-上下文窗口管理)、[换窗](../designs/persistent-agent-architecture.md#522-运行中换窗归档摘要与替换)、[保存规则](../designs/persistent-agent-architecture.md#7-数据管理与保存规则) |
 
 本规约唯一维护 Session 当前窗口、会话状态记录、内部 WindowStore 接入、归档与本 Session 历史；合并旧 S_05 中的状态保存责任。
@@ -36,11 +36,11 @@ BaseKVStore 注入位及 LoadedRecord、WindowAssembly、ExecutionEnding、Sessi
 | 旧窗归档及索引 | 换出窗口的完整原文、关联执行与覆盖请求；摘要和索引只供导航 | WindowStore 归档与检索 |
 | LoadedRecord | load 写回新 Session 后返回的接入结果 | SessionStateStore.load |
 | WindowAssembly | native_input 与服务端确认扫描位置 last_group_message_id；无可信进度时保留加载时游标 | WindowAssembler.assemble |
-| ExecutionEnding | outcome、request_id、reply_target、output_refs、pending_answer、last_group_message_id | 执行入口交给 save |
+| ExecutionEnding | outcome、request_id、reply_target、output_refs、last_group_message_id，以及交接摘要 answer_text、answer_segments、shared_files、handoff_failure | 执行入口交给 save |
 
 LoadedRecord 的 waiting 引用 [S_05](S_05_confirmation-and-continuation.md#2-确认输入与等待现场) 的 WaitingScene，另含服务端确认已扫描到的位置 last_group_message_id；与实际展示范围和正文是否完整分开，不表示群消息成为任务输入。
 
-会话记录白名单为 context 中的默认窗口、`__react_agent_interruption__`（只在等待确认时）、INTERRUPT_AUTO_CONFIRM_KEY 与 DeepAgent 状态快照 `deepagent`，连同结束信息写成一条 JSON 记录（schema_version 1，结构见 [F_17](../features/F_17_session-state-record.md)）。中断请求带类型标记保存，只接受 InterruptRequest 与 AskUserRequest，其他类型明确失败。白名单以外的 Session 字段不保存，线程、锁、连接、隐藏推理和凭证不进入记录；不复制旧 CheckpointBody。
+会话记录白名单为 context 中的默认窗口、`__react_agent_interruption__`（只在等待确认时）、INTERRUPT_AUTO_CONFIRM_KEY 与 DeepAgent 状态快照 `deepagent`，连同结束信息写成一条 JSON 记录（schema_version 1，结构见 [F_17](../features/F_17_session-state-record.md)）。结束信息不含 pending_answer：超长回答分段交出，完整正文随窗口保存；带该键的记录（含值为 null）按记录无效处理。开发阶段没有历史数据，不做迁移，见 [F_18](../features/F_18_output-handoff.md) 第 7 节。中断请求带类型标记保存，只接受 InterruptRequest 与 AskUserRequest，其他类型明确失败。白名单以外的 Session 字段不保存，线程、锁、连接、隐藏推理和凭证不进入记录；不复制旧 CheckpointBody。
 
 键由导出函数 `session_key_prefix(agent_id, session_id)` 派生：两个 ID 分别百分号编码（冒号、百分号均转义）后拼成 `pa:{编码后的 agent_id}:{编码后的 session_id}:`，状态键为前缀加 `state`，归档与索引键为前缀加 `archive:{序号}`、`archive_index`；记录中保留原始 ID，身份按原值精确比较。索引记录序号、execution_id、覆盖的 request_id 和时间；命名空间及跨主体隔离由宿主保障，不从键中包含 ID 推导已授权。
 
@@ -103,9 +103,10 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 | 本次执行头 | 保留；PA-06 生成的执行头已是一行，原样保留 |
 | 临时背景 | 删除，下次 Execution 按当前版本重新注入 |
 | 用户输入、确认结果及工作过程 | 保留；可重新取得的大结果可改为来源引用 |
-| 执行结束标记 | 结局不是等待确认时，在窗口末尾追加一条带 `persistent_window_part=execution_end` 标记的单行用户消息，写明 request_id、execution_id、结局、交出的候选（以结束记录为准）和服务端确认已扫描到的群消息位置；最终答案超限时 pending_answer 按现行契约保存在记录的结束信息中，其跨 Request 生命周期待 PA-08 确定 |
+| 交接正文 | 结局不是等待确认、本次有最终回答，且 after_invoke Rail 改写后与本 Execution 最后一条原生回复不同时，在结束标记之前追加一条带 `persistent_window_part=handoff_text` 标记的用户消息，内容为 `【实际交出的最终回答】` 加实际交接的正文；整批准备失败时同样保留，作为后续交接的依据；相同则不追加 |
+| 执行结束标记 | 结局不是等待确认时，在窗口末尾追加一条带 `persistent_window_part=execution_end` 标记的单行用户消息，写明 request_id、execution_id、结局、交出的候选（`最终回答 N 段`、`文件 <逻辑路径>（<共享方式>，<output_id>）`，以结束记录为准，没有候选写“无”）、整批准备失败时的未交接原因（逻辑路径与类别），以及服务端确认已扫描到的群消息位置 |
 
-等待确认时，末尾待结果的工具调用一律不动；结束标记写入记录元信息，不追加到窗口尾部。临时背景仍可按标记删除。完成、取消、失败与可恢复暂停需保存；忽略群消息未写入窗口，无需保存；进程崩溃无法保存。停止能否取得完整现场须按实现验证，不据控制入口返回宣称已保存。
+等待确认时，末尾待结果的工具调用一律不动；结束标记写入记录元信息，不追加到窗口尾部。窗口中的 `share_file` 调用及其结构化结果是文件登记的依据：收尾时以最终窗口中的有效结果确定交出的文件，确认恢复也据此计入上限（S_04 第 4.3 节）；换窗（PA-11）须保留当前确认链中尚未交出的登记依据。临时背景仍可按标记删除。完成、取消、失败与可恢复暂停需保存；忽略群消息未写入窗口，无需保存；进程崩溃无法保存。停止能否取得完整现场须按实现验证，不据控制入口返回宣称已保存。
 
 **中途结束后的安全窗口：** 停止、取消或执行中报错时，原生执行路径保留已发出的调用组（Persistent 显式启用）：后续处理（含安全 Rail 的替换）全部完成的结果按最终结果保留；已返回或已抛错、但后续处理未完成的调用只保留说明，不保存未经处理的内容。这里的“处理完成”指事件链走完，不等于安全检查成功：回调框架对 Rail 的普通异常只记日志、继续执行其余 Rail，内容照常保留；宿主安全 Rail 要拦截内容，须先替换成安全说明，再请求强制结束。PA-10 保存时按调用组为缺失工具结果的调用幂等补充标为 `stopped_tool_placeholder` 的结果，说明“结果未取得，实际效果需核实”，具体结束原因由结束记录说明；已有结果、说明及原生“已中断”结果不重复补位，正常等待确认不补位。加载结局为停止、取消或失败的旧记录时同样修补。保存补位、加载修补与原生事实保留均已有组件实现，core 改动待 core 维护者评审；“停止、取消或报错 → 保存 → 重新加载 → 下一任务”已有组件验证，仍需真实服务端联调（见 [F_17](../features/F_17_session-state-record.md)）。
 

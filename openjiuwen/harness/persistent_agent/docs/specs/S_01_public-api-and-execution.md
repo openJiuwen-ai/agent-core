@@ -8,7 +8,7 @@
 | 编号 / slug | S_01 / public-api-and-execution |
 | 关联模块 | [entries.py](../../execution/entries.py)、[participation.py](../../execution/participation.py)、[model_rail.py](../../execution/model_rail.py)、[RequestInput](../../schema/request.py)、[预算结果](../../schema/port_results.py) |
 | 最近一次修订日期 | 2026-10-14 |
-| 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_07](../features/F_07_group-participation.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md) |
+| 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_07](../features/F_07_group-participation.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_18](../features/F_18_output-handoff.md) |
 | 设计依据 | [架构设计：执行入口](../designs/persistent-agent-architecture.md#42-执行入口与原生推理循环)、[主流程](../designs/persistent-agent-architecture.md#51-主流程)、[故障与结局](../designs/persistent-agent-architecture.md#81-故障影响错误分类与结局) |
 
 本规约维护正式执行入口、群消息参与判断、模型预算及结局判定，不维护底层构造、事件 Schema 或窗口存储格式。
@@ -107,11 +107,11 @@ GroupChatPort 的授权、消息与完整性规则由 [S_09](S_09_group-chat-and
 
 ## 5. 跨接口执行流程与结局
 
-普通任务路径为：基础校验 → 必要的参与判断 → 获取接入点 → 构造并复核模式 → execution.started → 加载记录 → 组装输入 → 原生 stream → 判定并锁定结局 → 候选回答交接 → 保存记录 → 记 paused / final → 关闭实例。确认恢复不追加窗口，不重复记 started，流程由 S_05 定义。
+普通任务路径为：基础校验 → 必要的参与判断 → 获取接入点 → 构造并复核模式 → execution.started → 加载记录 → 组装输入 → 原生 stream → 判定并锁定结局 → 整批准备并交出候选 → 保存记录 → 记 paused / final → 关闭实例。确认恢复不追加窗口，不重复记 started，流程由 S_05 定义。
 
 结局先处理 fatal，再采用锁定前接受的 cancel / stop；随后依次考虑被拦截调用、模型预算标记、answer 和其他原生结果。cancel 为 final(cancelled)，stop 为 paused(stopped)，有拦截为 paused(awaiting_confirmation)，预算拒绝为 paused(budget_denied)。原生错误、异常、迭代耗尽或无结果默认 paused(error)；不能把错误文本作为候选回答。明确判断失败可 final(failed)，普通工具失败不自动终结 Request。
 
-结局锁定与控制截止由 S_05 定义；锁定不能证明状态保存或终态提交成功。最终答案取 after_invoke Rail 之后的实际结果；非空白答案以由 execution_id 派生的 output_id 提交 message 候选。若正文字符数或完整事件字节数超限，不截断，改为 paused(error)，经 ExecutionEnding.pending_answer 保存原答案；只有容量超限适用此路径，非法字段或保存失败仍抛异常。候选文件及其他共享方式的协议由 S_02 定义。
+结局锁定与控制截止由 S_05 定义；锁定不能证明状态保存或终态提交成功。锁定后按 [S_02](S_02_events-and-result-handoff.md#44-候选输出交接) 第 4.4 节整批准备候选：最终答案取 after_invoke Rail 之后的实际结果，非空白时与本 Execution 经 `share_file` 登记的文件一起准备、分段并派生身份；停止和取消不交接。任一项准备失败时整批不交，completed 改为 paused(error)，其他暂停保留原因并在 detail 中补充。超长答案拆成有序分段，不截断，也不再以暂停结束；非法字段或保存失败仍抛异常。随后保存记录（结束信息带交接摘要，见 S_03），再记 paused / final；结束事件首次记账失败时按原事件补交其引用的候选一次、再按原事件重试一次（S_02 第 4.2 节）。等待确认暂停的拦截调用参数按事件容量截断并标记。准备候选前先同步实时窗口，以最终窗口中的有效 `share_file` 结果确定文件；确认恢复在原生恢复之前把确认链的有效登记计入上限（S_04 第 4.3 节）。
 
 原生片段映射为 reply.delta；正文与工具调用同现时产出最多 500 字符的 progress.updated；模型完成或失败产出 model.completed；交互片段汇入暂停载荷。具体事件字段、序号和容量处理仅在 S_02 维护，工具事件产生条件由 S_08 维护。
 

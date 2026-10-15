@@ -7,7 +7,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-05，F_05 为文档编号 |
-| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14（见附录 A.2） |
+| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14；PA-08 交接替代说明：2026-10-14（见附录 A.2） |
 | 负责人 | Song Haoran、Chen Ran；认领和后续安排以统一开发计划为准 |
 | 方案依据 | 沿用已确认架构及现行 spec；原阶段记录注明 D1～D7 已确认，本次不新增设计确认或修改架构 |
 | 原实现范围 | 内部 `persistent_agent/schema/request.py`、`execution/{entries,control,emitter,model_rail,seams}.py`、`schema/spec.py`，外层 `__init__.py` 与对应单测；复用共享 Session 接缝 |
@@ -138,7 +138,7 @@ abort_persistent_request(context, *, reason: "cancel" | "stop") -> None  # async
 | `ExecutionControl.request_abort(self, reason: AbortReason) -> bool`（同步） | 首个且结局未锁定时保存原因并返回 True，重复或晚到返回 False；此方法不校验 reason 值，由公开入口校验 |
 | `ExecutionControl.lock_outcome(self) -> AbortReason \| None` / `mark_fatal(self, error: BaseException) -> None`（同步） | 前者置 outcome_locked 并返回已接受原因；后者只保存首个 fatal，不覆盖旧错误 |
 | `async EventEmitter.emit(self, event_type: EventType, payload: Any) -> AgentEvent` | 锁内创建、编号、await record 后交出事件；普通失败诊断后仍入 outbox，关键失败标 fatal 并抛 RUNTIME_ERROR，不入 outbox |
-| `async EventEmitter.emit_if_fits(self, event_type: EventType, payload: dict) -> AgentEvent \| None` | 检查 payload.text 和完整容量；超限返回 None 且不占序号，字段形状错误仍可抛 ValidationError；用于最终候选 |
+| `async EventEmitter.emit_if_fits(self, event_type: EventType, payload: dict) -> AgentEvent \| None` | 检查 payload.text 和完整容量；超限返回 None 且不占序号，字段形状错误仍可抛 ValidationError；用于最终候选。**2026-10-14 已删除**：最终回答改由 [F_18](F_18_output-handoff.md) 的交接模块按最宽事件分段，paused / final 改由 `emit_ending` 记账 |
 | `async EventEmitter.emit_text(self, event_type: EventType, text: str) -> None` | 文本按字符 / JSON 字节上限分块，多事件相接还原原文；空字符串不产事件；记录与入队是副作用 |
 | `async PersistentModelCallRail.before_invoke(self, ctx) -> None` | PA-10 新增：Rail 注册完成后、原生创建上下文前检查实际挂载的卸载处理器，发现即标记致命错误并抛 CONFIG_PARAM_ERROR；无 emitter 时不工作 |
 | `async PersistentModelCallRail.before_model_call(self, ctx) -> None` | 无 emitter 时不工作；有 emitter 时停止检查与预算准入，准入成功保存调用 ID，拒绝 / 异常请求 force-finish |
@@ -164,11 +164,11 @@ abort 是需 await 的控制协程，返回 None 只说明本次控制路径已�
 | 内部独立函数 / 完整签名 | 输入输出及设计作用 |
 | --- | --- |
 | `async _run_native(agent, context: PersistentBuildContext, native_input) -> _Outcome` | 消费 stream_bound 的原生事件并映射为结局；fatal 重新抛出，控制在原生退出后锁定；普通运行异常可转 error |
-| `async _finish(context: PersistentBuildContext, store, outcome: _Outcome, reply_target: str \| None, last_group_message_id: str \| None) -> None` | 候选交接 → store.save → paused / final；超长完整答案放 ExecutionEnding.pending_answer，保存失败阻止结束记账；不是事务回滚 |
+| `async _finish(context: PersistentBuildContext, store, outcome: _Outcome, reply_target: str \| None, last_group_message_id: str \| None) -> None` | 候选交接 → store.save → paused / final；超长完整答案放 ExecutionEnding.pending_answer，保存失败阻止结束记账；不是事务回滚。**2026-10-14 起**签名增加 `spec`，先按 [F_18](F_18_output-handoff.md) 整批准备并交出候选（含 `share_file` 文件），不再使用 pending_answer |
 | `_native_resume_input(context: PersistentBuildContext, reply: ConfirmReply, waiting, adapter) -> InteractiveInput`（同步） | 复核 WaitingScene、Request、工具调用及问题键，调用 adapter.to_native 后按 tool_call_id 写入新 InteractiveInput；非法匹配为 INPUT_PARAM_ERROR |
 | `async _drive(control: ExecutionControl, runner) -> AsyncGenerator[AgentEvent, None]` | 创建独立 runner Task 并转发 outbox；自然结束传播 runner 异常，提前关闭取消并等待其清理；本函数不再次 record |
 
-扩展接口及载体定义在 [execution/seams.py](../../execution/seams.py)。WaitingScene(request_id, reply_target)、LoadedRecord(waiting=None, last_group_message_id=None)、WindowAssembly(native_input, last_group_message_id=None)、ExecutionEnding(outcome, request_id, reply_target, output_refs=(), pending_answer=None, last_group_message_id=None) 均为 frozen dataclass；参数类型和生成构造定义见源码，含义见第 2.4～2.6 节。
+扩展接口及载体定义在 [execution/seams.py](../../execution/seams.py)。WaitingScene(request_id, reply_target)、LoadedRecord(waiting=None, last_group_message_id=None)、WindowAssembly(native_input, last_group_message_id=None)、ExecutionEnding(outcome, request_id, reply_target, output_refs=(), pending_answer=None, last_group_message_id=None) 均为 frozen dataclass（2026-10-14 起 ExecutionEnding 去掉 pending_answer，增加交接摘要字段，见 [F_18](F_18_output-handoff.md)）；参数类型和生成构造定义见源码，含义见第 2.4～2.6 节。
 
 | 内部 Protocol 的完整方法 | 实现方、调用条件、完成及失败约束 |
 | --- | --- |
@@ -264,7 +264,7 @@ PA-06 加载后的兜底检查若发现等待中的调用或未配对工具调�
 所有事件同时受 `TEXT_MAX_CHARS=65536` 和 `EVENT_MAX_BYTES=262144`（256 KiB）约束；后一限额计入完整规范 JSON 的身份、序号、时间、目标及转义开销。65536 个四字节字符已经耗尽正文之外的空间，控制字符还可能每个转义为 6 字节，因此不能只检查字符数。
 
 - emit_text 为 reply.delta 选择满足两条限额的最长前缀，按 Python 字符边界拆分；片段拼接与原文一致，包括空格、换行和制表符。
-- emit_if_fits 用于最终回答；只有正文及完整事件都能容纳才编号、记账并展示，否则返回 None。
+- emit_if_fits 用于最终回答；只有正文及完整事件都能容纳才编号、记账并展示，否则返回 None。（2026-10-14 已由 [F_18](F_18_output-handoff.md) 的最终回答分段替代。）
 - 容量试探不调用 record、不消耗正式 local_seq；使用下一事件的序号与同一时间，正文替换为单字符 x。可用正文空间等于字节限额减去占位事件大小再加 1，按正文规范转义字节数精确比较。
 - 非法代理字符等字段错误不是容量超限，按真实事件校验规则抛出，不能吞为暂停。
 
@@ -285,7 +285,9 @@ PA-06 加载后的兜底检查若发现等待中的调用或未配对工具调�
 
 如果最终答案超出字符或完整事件字节限额，入口改判 paused(error)，不交残缺候选，将完整正文写入 ExecutionEnding.pending_answer，再按“保存 → 暂停记账”收尾。原生窗口只含模型原始回复，可能没有 after_invoke 改写的答案，因此 pending_answer 必须原样保存，后续交接不能重跑已完成业务。此降级只适用于容量超限；字段错误、保存失败和关键记账失败仍抛异常。
 
-`redact_arguments` 对解析成字典 / 列表的参数递归处理，键名包含 password、secret、token、key、credential、authorization（忽略大小写）的值替换为 `***`，摘要受文本限额约束，PA-15 复用它。不能把该函数描述成任意文本的秘密检测：无法解析为 JSON 的字符串仅 strip / 限长，公开展示仍需宿主授权和脱敏。
+**2026-10-14 替代说明：** 上述两段（按 execution_id 派生 output_id、超限改判 paused(error) 并保存 pending_answer）已由 [F_18](F_18_output-handoff.md) 替代：身份在 Request 范围内按内容派生，超长回答拆成有序分段后照常 completed，改写后的正文以 `handoff_text` 消息保留在窗口中；本节第 5 行“非空白正文先交候选”的结局规则不变，另增加登记文件的交接与整批准备失败的处理。
+
+`redact_arguments` 对解析成字典 / 列表的参数递归处理，键名包含 password、secret、token、key、credential、authorization（忽略大小写）的值替换为 `***`，摘要受文本限额约束，PA-15 复用它（2026-10-14 起本函数不再截断，长度由调用方限制：PA-15 截取 500 字符，确认事件按 [F_18](F_18_output-handoff.md) D-13 的容量预算截断并标记）。不能把该函数描述成任意文本的秘密检测：无法解析为 JSON 的字符串仅 strip / 限长，公开展示仍需宿主授权和脱敏。
 
 ### 2.7 控制、流关闭与资源生命周期
 
@@ -388,7 +390,7 @@ flowchart LR
 | 接入协议 / 归属 | 值对象与约定 | 当前边界 |
 | --- | --- | --- |
 | SessionStateStore.load / PA-10 | 写回 Session state，返回 LoadedRecord(waiting, last_group_message_id)；确定无记录返回空 LoadedRecord | 已接入（[F_17](F_17_session-state-record.md)）；后端异常为运行失败，记录无效为校验拒绝，均不退回空窗口 |
-| SessionStateStore.save / PA-10 | 收到 ExecutionEnding(outcome, request_id, reply_target, output_refs, pending_answer, last_group_message_id)，整理白名单后一次保存 | pending_answer 与游标须原样保存；游标进入结束标记；已接入，写入前失败不调用写入，后端写入抛错时记录可能已改变 |
+| SessionStateStore.save / PA-10 | 收到 ExecutionEnding(outcome, request_id, reply_target, output_refs, last_group_message_id 及交接摘要)，整理白名单后一次保存 | 游标须原样保存并进入结束标记；交接摘要进入结束标记（[F_18](F_18_output-handoff.md)）；已接入，写入前失败不调用写入，后端写入抛错时记录可能已改变 |
 | WindowAssembler.assemble / PA-06 | load 之后组装，返回 WindowAssembly(native_input, last_group_message_id)；游标为服务端确认的扫描位置，无可信进度则保留加载时的游标 | 已接入；容量验收未关闭；确认恢复不调用 |
 | GroupMessageReader.recent_messages / PA-23 | after 游标后的新消息及少量衔接，trigger_message_id 排除触发消息，返回 GroupMessagesResult | getter 未接入；PA-06 背景消费它。当前 PA-07 直接调用 GroupChatPort，不等待该 getter |
 | NativeReplyAdapter.to_native / PA-09 | 匹配后的单项回复转原生载荷，入口按交互 ID 组装 InteractiveInput | getter 未接入；测试适配器不是正式实现 |
@@ -456,8 +458,12 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 >>>>>>> 05b63e9e3 (docs(harness): record PA-05 refused tool call behavior)
 =======
 | 未实现接入 | PA-06、PA-10 已接入（2026-10-12、2026-10-14，见 [F_17](F_17_session-state-record.md)）；PA-09 回复适配与 PA-23 群消息读取的 getter 仍拒绝 | 确认恢复与群 Session 任务仍拒绝；私聊和定时任务的正式入口可执行，但 M1 真实组件验收前不声明 execution 能力 |
+<<<<<<< HEAD
 >>>>>>> 543754d14 (docs(harness): synchronize PA-10 design and integration status)
 | 未实现接入 | PA-08 文件候选、超限答案补交；PA-18 续做；PA-23 游标群背景 | 当前只自动交接 message 最终回答；pending_answer 后续拆候选或转文件由 PA-08 决定，不重跑业务；recovery_ref 仍拒绝 |
+=======
+| 未实现接入 | PA-18 续做；PA-23 游标群背景 | recovery_ref 仍拒绝。原“PA-08 文件候选、超限答案补交”一项已由 [F_18](F_18_output-handoff.md) 实现组件（超长回答分段、`share_file` 文件候选、结束事件补交重试），真实服务端联调待完成 |
+>>>>>>> eae315844 (docs(harness): document PA-08 contracts and validation)
 | 有意保留范围 | task-loop、同步 / 异步 / 持久子代理关闭 | PA-24～PA-26 逐项验证后开放，不由配置偷偷启用 |
 | 已有组件验证、真实集成待完成 | 工具停止、取消或报错后的调用组保留、残缺结果补位和状态保存已有 PA-10 组件证据 | 见 F_17；真实宿主与 PA-18 续做仍须查证日志和外部效果，不能据此宣称完整安全续做 |
 | 预算覆盖限制 | 原生 Rail 之外的内部模型调用，例如独立 task planning 模型，不经过本 Rail | 一期不启用这类 Rail；开放时评估额外预算消费者 |
@@ -496,6 +502,7 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 | 后续工具意图接入 | 写前关键记账，完成为普通事件，before_tool_call 排在模型控制守卫之后 | F_15 / S_08；替代原 PA-15 未接入及排序遗留 |
 | 2026-10-12 本次文档重构 | 参考模板重组全部设计与证据，修正错误码、实际控制检查位置、群路径门禁和当前架构引用；记录 94 passed / 2 failed | 本文第 4 节；只修文档，不用历史通过覆盖当前失败 |
 | 2026-10-14 当前接入状态同步 | PA-10 接入后，按代码更新 getter 状态（存储与组装器已接入，群消息读取与回复适配仍拒绝）、确认恢复的拒绝原因、SessionStateStore 边界、Model Rail 钩子（新增 before_invoke）与未实现接入遗留；原“四个 getter 统一拒绝”“四个钩子”及“PA-10 getter 仍拒绝”为接入前描述 | 第 1.3、2.3、2.5、3.2、4.3 节；[F_17](F_17_session-state-record.md) |
+| 2026-10-14 PA-08 交接替代 | 最终回答交接改由 F_18 的交接模块完成：身份按内容在 Request 范围内派生，超长回答分段交出、不再以 paused(error) 结束，ExecutionEnding 去掉 pending_answer；收尾先整批准备候选（含 `share_file` 文件），结束事件首次失败按原事件补交并重试一次；删除 emit_if_fits | [F_18](F_18_output-handoff.md)；第 2.3、2.6、3.2、4.3 节保留原结论并注明替代 |
 | 2026-10-14 PA-10 联动（Q-03） | 被控制 Rail 阻止的工具调用写入结果“本次执行正在结束，该工具未调用。”，不再以强制结束载荷的文字作为窗口中的工具结果：PA-10 接入后窗口跨任务保存，内部停止信号会带到下一任务，停止时也显示 error | 第 2 节控制检查第 4 条；[F_17](F_17_session-state-record.md) Q-03；test_entries.py 中的 `test_calls_refused_after_a_control_say_they_did_not_run`（停止、取消）与 `test_the_control_rail_refuses_every_call_with_the_same_note`（含致命错误） |
 
 ### 2026-10-14 控制 Rail 说明文字修复与独立验证

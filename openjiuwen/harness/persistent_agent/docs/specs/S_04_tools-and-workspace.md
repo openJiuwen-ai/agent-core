@@ -1,4 +1,4 @@
-# S_04 办公空间授权与文件读取规约
+# S_04 办公空间授权、文件读取与文件登记规约
 
 ## 元信息
 
@@ -6,18 +6,18 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | S_04 / tools-and-workspace |
-| 关联模块 | [workspace/access.py](../../workspace/access.py)、[path_policy.py](../../workspace/path_policy.py)、[file_access.py](../../workspace/file_access.py)、[tools/workspace_read.py](../../tools/workspace_read.py) |
-| 最近一次修订日期 | 2026-10-13 |
-| 关联 feature | [F_14](../features/F_14_workspace-file-read.md)；文件修改接入见[开发计划](../designs/persistent-agent-development-plan.md) PA-16 |
+| 关联模块 | [workspace/access.py](../../workspace/access.py)、[path_policy.py](../../workspace/path_policy.py)、[file_access.py](../../workspace/file_access.py)、[tools/workspace_read.py](../../tools/workspace_read.py)、[execution/share_file.py](../../execution/share_file.py)、[execution/handoff.py](../../execution/handoff.py) |
+| 最近一次修订日期 | 2026-10-15 |
+| 关联 feature | [F_14](../features/F_14_workspace-file-read.md)、[F_18](../features/F_18_output-handoff.md)（`share_file`）；文件修改接入见[开发计划](../designs/persistent-agent-development-plan.md) PA-16 |
 | 设计依据 | [架构设计：办公空间](../designs/persistent-agent-architecture.md#47-办公空间与知识)、[身份与隔离](../designs/persistent-agent-architecture.md#9-权限隔离与资源限制) |
 
-本规约维护 WorkspaceAccessPort、调用级读取授权、逻辑路径、文件读取结果及私有草稿隔离。通用副作用和工具事件从本文拆出，由 S_08 唯一维护。
+本规约维护 WorkspaceAccessPort、调用级读取授权、逻辑路径、文件读取结果、私有草稿隔离及 `share_file` 的文件登记。通用副作用和工具事件从本文拆出，由 S_08 唯一维护。
 
 ## 1. 范围、术语与适用条件
 
 PA-14 只读组件已实现：复用 Harness ReadFileTool / ListDirTool，并注册受保护的 `read_file` / `list_files`。实际目录部署、业务授权、平台 SDK 与宿主端口实现归 AgentServer；真实宿主联调仍未验证，不能以本地只读组件证明 PA-16 写入或跨进程恢复已开放。
 
-启用条件为 Spec.enabled_features 含 workspace_read、enable_sys_operation=true，且 PersistentPorts.workspace_access 存在并提供异步 resolve_read_scope。上下文及装配阶段均校验，不等到模型读取时才发现缺少依赖。未开启时不添加本读取 Rail；普通 DeepAgent 仍遵循通用行为。
+启用条件为 Spec.enabled_features 含 workspace_read、enable_sys_operation=true，且 PersistentPorts.workspace_access 存在并提供异步 resolve_read_scope。上下文及装配阶段均校验，不等到模型读取时才发现缺少依赖。未开启时不添加本读取 Rail 与 `share_file`；普通 DeepAgent 仍遵循通用行为。`share_file`（PA-08）随读取能力装配，不新增能力标记，见第 4.3 节。
 
 公共 [工具](../../../docs/specs/S_05_tools-contract.md)、[安全](../../../docs/specs/S_08_security-engine.md)、[工作空间](../../../docs/specs/S_09_workspace.md)机制继续由 Harness 负责，本模块补充业务身份、私有 Session 路径及来源。Shell、CLI、MCP、写工具和子进程不因注册本读取 Rail 就获得相同的沙箱隔离保证。
 
@@ -45,7 +45,7 @@ WorkspaceReadScope 为宿主返回的不可变运行对象，不进入可序列�
 2. **I-2 私有范围：** 同 Agent、同项目根或共享工作空间不授予其他 Session 草稿访问权；其他 Session 私有路径即使在共享允许根内仍拒绝。
 3. **I-3 路径受控：** 模型只能提供逻辑相对路径；词法边界和规范化真实路径均须检查，符号链接不能逃逸允许根。
 4. **I-4 安全结果：** 拒绝先于底层读取，不因错误差异泄露未经授权的目标是否存在；授权成功后才区分 not_found 与后端不可用。
-5. **I-5 只读边界：** 本适配只注册读取与列举，不承担写入、外部回执核对、工具完成判定或发送交接。
+5. **I-5 只读边界：** 读取适配只注册读取与列举，不承担写入、外部回执核对、工具完成判定或发送交接；`share_file` 只把文件登记到本次执行的登记表，不发送、不上传，读授权不代表允许公开。
 
 ## 4. 接口契约
 
@@ -70,6 +70,26 @@ WorkspaceReadScope 为宿主返回的不可变运行对象，不进入可序列�
 
 错误返回 ToolOutput(success=false)，data 只含安全 status，error 为固定安全说明。成功 next_cursor 当前为空；list_files 没有分页协议，保持 complete，不能补写游标翻页或 version_conflict 能力。内容正文并非凭证过滤器，结构化主机路径清理不能被误写为全量正文脱敏保证。
 
+### 4.3 `share_file`
+
+启用 workspace_read 时随读取能力装配（ShareFileRail），未启用时模型看不到该工具。参数为 file_path（必填，逻辑相对路径）、share_mode（必填，upload / attachment）和 caption（可选，最多 4096 字符，随文件公开；空白视为没有）。不提供目标参数，投递目标由程序设为当前回复目标（S_02 第 4.4 节）。
+
+登记时依次检查以下各层，任一不通过即返回失败、不登记：
+
+| 层 | 检查内容 | 来源 |
+| --- | --- | --- |
+| 授权 | resolve_read_scope 与 validate_read_scope；授权未知、端口异常或身份不符时失败关闭 | 第 4.1 节 |
+| 路径 | resolve_read_path，与 read_file 相同的词法与真实路径规则 | 第 4.2 节 |
+| 规则 | 权限引擎按“读”检查 file_path（FileGuard 登记 `FileToolSpec("share_file", "file_path", "read")`），只在工具调用时进行 | Harness 安全引擎 |
+| 文件 | 目标是普通文件：不跟随末级符号链接、非阻塞打开，打开后核对类型以及设备号与 inode；当前大小不超过上限。只读元数据，不读内容 | handoff.check_shared_file |
+| 登记 | 逻辑路径可写入输出事件（最多 1024 字符等，见 S_02）；合并后不超过 64 项 | handoff.merge_registration |
+
+成功结果是固定格式的 JSON：`{"share_file": "registered", "file_path", "share_mode", "caption", "note", "receipt"}`，收尾与确认恢复都只识别这一格式，并按 file_path、share_mode、caption 重新计算 receipt（内容校验值）比对，不一致即不算登记。校验值只是内容校验，不是签名：它能发现保留原校验值的内容改写，但不能证明结果来自本工具，也发现不了同时重算校验值的改写。同一规范化路径与共享方式重复登记只保留一项：说明取最新一次，位置保持首次登记时的位置；64 项上限作用于合并后的集合。失败返回 ToolOutput(success=false)，data 只含 status（forbidden、unknown、not_found、unavailable、not_a_file、too_large、invalid_arguments、too_many_files），说明不含宿主路径或宿主诊断。
+
+收尾准备时（S_02 第 4.4 节）重新取得授权、解析路径，按文件层检查后分块读取，计算 sha256 并累计实际读取的字节数；超过 Spec.share_file_max_bytes 立即失败，不把整个文件加载到内存，也不记录文件内容。该上限默认 32 MiB，是开发占位值，正式值由服务端对齐；取值须大于 0 且不超过保护性硬上限 1 GiB，进入 Spec 指纹。规则层只在调用时检查：收尾不是工具调用，不能发起确认。
+
+`share_file` 在 PA-15 名单中按无外部副作用处理（S_08），不记写意图，照常记工具完成事件。调用时写入的登记表只用于合并与 64 项上限，随 Execution 释放。收尾时先同步实时窗口，只按最终窗口中最后一个结束标记之后、所有 Rail 处理完成后仍为固定格式的 `share_file` 成功结果确定交出的文件：宿主 Rail 改写或阻断的结果、说明、补位和中断结果都不算。确认恢复时，在原生恢复之前把确认链的有效登记并入登记表，计入上限。停止、崩溃和其他暂停后的继续，由 Agent 决定是否重新登记。
+
 ## 5. 读取资源与生命周期
 
 本调用构造独立读取 Rail / 工具实例；Rail init 注册读取工具，uninit 移除本调用相应能力，owner 及实例清理由 S_07 约束。每次读取重新取得宿主范围，不缓存成永久授权。文件后续变化需重新读取和核对，观察版本不阻止并发修改或读取期间的路径 / 文件竞态。
@@ -85,7 +105,7 @@ WorkspaceReadScope 为宿主返回的不可变运行对象，不进入可序列�
 
 ## 7. 关联规约与验证索引
 
-S_07 负责能力装配和 owner；S_08 负责本两个工具的只读分类与完成事件；S_03 负责私有状态和归档；S_09 负责知识资料读取；S_02 负责候选文件的共享和投递。
+S_07 负责能力装配和 owner；S_08 负责读取工具与 `share_file` 的只读分类及完成事件；S_03 负责私有状态和归档；S_09 负责知识资料读取；S_02 负责候选文件的交接格式、身份与投递保证。
 
 | 条款 / 接口 | 检查入口 |
 | --- | --- |
@@ -93,5 +113,7 @@ S_07 负责能力装配和 owner；S_08 负责本两个工具的只读分类与�
 | 路径、符号链接及其他 Session 私有范围 | [test_workspace_path_policy.py](../../../../../tests/unit_tests/harness/persistent_agent/test_workspace_path_policy.py) |
 | 装配开关与独立读取 Rail | [test_workspace_read_rail.py](../../../../../tests/unit_tests/harness/persistent_agent/test_workspace_read_rail.py) |
 | 拒绝前不访问后端、结果与来源版本 | [test_workspace_read_tools.py](../../../../../tests/unit_tests/harness/persistent_agent/test_workspace_read_tools.py) |
+| `share_file` 登记检查、登记表、装配与大小上限 | [test_share_file.py](../../../../../tests/unit_tests/harness/persistent_agent/test_share_file.py) |
+| 收尾读取、摘要与整批准备 | [test_handoff.py](../../../../../tests/unit_tests/harness/persistent_agent/test_handoff.py) |
 
 这些检查定位 agent-core 组件；外层公开导入、真实宿主范围、OS 级隔离及跨仓联调须另行验证，证据见 F_14 和唯一开发计划。
