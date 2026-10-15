@@ -34,7 +34,7 @@ def external_cli_agent_spec_from_template(
     if provider not in _PROVIDER_TO_CLI:
         raise ValueError("runtime.provider_name must be 'codex' or 'claudecode'")
     expected_version = resolve_provider(provider).card.implementation_version
-    if runtime.provider_version != expected_version:
+    if runtime.provider_version is not None and runtime.provider_version != expected_version:
         raise ValueError(
             f"runtime requires {provider} {runtime.provider_version!r}; "
             f"installed version is {expected_version!r}"
