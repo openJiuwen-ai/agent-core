@@ -609,7 +609,18 @@ class DeepAgent(BaseAgent):
             new_react_config.context_engine_config = config.context_engine_config
         if config.kv_cache_affinity_config is not None:
             new_react_config.kv_cache_affinity_config = config.kv_cache_affinity_config
+        # Explicit browser policy instances must survive reconfiguration. Replace
+        # their generative delegate when the caller supplies a new ordinary model.
+        current_model = getattr(self._react_agent, "_llm", None)
+        bind_fallback = getattr(type(current_model), "bind_fallback", None)
+        explicit_model = config.model
+        if callable(bind_fallback) and not callable(getattr(type(explicit_model), "bind_fallback", None)):
+            if explicit_model is not None:
+                current_model.bind_fallback(explicit_model)
+            explicit_model = current_model
         self._react_agent.configure(new_react_config)
+        if callable(getattr(type(explicit_model), "bind_fallback", None)):
+            self._react_agent.set_llm(explicit_model)
         self._sync_prompt_builder_references()
         logger.info("[DeepAgent] Model configuration hot reloaded")
 
