@@ -8,6 +8,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.workflow.components.condition.condition import Condition, FuncCondition
 from openjiuwen.core.workflow.components.condition.expression import ExpressionCondition
 from openjiuwen.core.session import BaseSession
+from openjiuwen.core.session.execution_session_ctx import resolve_routing_session
 from openjiuwen.core.session.node import Session
 from openjiuwen.core.session.tracer import TracerWorkflowUtils
 from openjiuwen.core.graph.visualization.drawable_edge import DrawableBranchRouter
@@ -90,7 +91,11 @@ class BranchRouter:
         raise ValueError("session type is wrong")
 
     async def __call__(self, *args, **kwargs) -> list[str]:
-        session = self._session
+        # 路由 session 解析链：组件级（路由属主 invoke 写入）→ workflow 级
+        # （CompiledGraph._invoke 入口写入）→ self._session 兜底。共享 router
+        # 实例并发执行时不再依赖 set_session 覆写共享字段；执行期间 ContextVar
+        # 恒有值，racy 的 ProxySession._stub 亦不被读到。
+        session = resolve_routing_session(self._session, owner=self)
         if self.report_trace:
             branches = []
             for branch in self._branches:

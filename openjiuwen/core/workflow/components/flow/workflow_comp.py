@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import AsyncIterator, Any, Dict
+from contextvars import ContextVar
+from typing import AsyncIterator, Any, Dict, Optional
 
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -52,6 +53,11 @@ class SubWorkflowStreamState:
         self._accumulated_outputs = []
 
 
+_STREAM_STATE: ContextVar[Optional[SubWorkflowStreamState]] = ContextVar(
+    "openjiuwen_sub_workflow_stream_state", default=None
+)
+
+
 class SubWorkflowComponent(WorkflowComponent):
     def __init__(self, sub_workflow: Workflow, *, cache_stream: bool = False):
         super().__init__()
@@ -72,16 +78,19 @@ class SubWorkflowComponent(WorkflowComponent):
                                                config=inputs.get(CONFIG_KEY), is_sub=True)
 
     async def stream(self, inputs: Input, session: Session, context: ModelContext) -> AsyncIterator[Output]:
+        state = SubWorkflowStreamState() if self._cache_stream else None
+        _STREAM_STATE.set(state)
         async for value in self._sub_workflow.stream(inputs.get(INPUTS_KEY),
                                                          session, config=inputs.get(CONFIG_KEY), is_sub=True):
-            if self._cache_stream:
-                self._stream_state.accumulate(value)
+            if state is not None:
+                state.accumulate(value)
             yield value
 
     def get_stream_output(self) -> Output:
         """Get the cached stream output for batch retrieval."""
         if self._cache_stream:
-            return self._stream_state.build_final_result()
+            state = _STREAM_STATE.get()
+            return (state or self._stream_state).build_final_result()
         return None
 
     def graph_invoker(self) -> bool:

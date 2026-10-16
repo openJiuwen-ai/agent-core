@@ -19,6 +19,7 @@ from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Output, Input
+from openjiuwen.core.session.execution_session_ctx import set_component_exec
 from openjiuwen.core.session.node import Session
 from openjiuwen.core.foundation.llm import (
     BaseMessage, UserMessage, SystemMessage, AssistantMessage, ModelRequestConfig, ModelClientConfig, Model
@@ -206,6 +207,14 @@ class IntentDetectionExecutable(ComponentExecutable):
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
         """Invoke IntentDetection node"""
+        # 本组件同样是分支路由属主（``self._router`` 经
+        # ``add_conditional_edges`` 注册）。BranchRouter 的解析链改走
+        # ContextVar 后，必须在此补写组件级执行上下文并声明 router 归属，
+        # 否则路由 dispatch 会退到 workflow 级 session——节点级 session
+        # 与 workflow 级 session 的取值语义不同，会导致分支条件求值口径
+        # 变化。set_session 保留作为解析链最终兜底源。
+        if self._router is not None:
+            set_component_exec(session, context, owner=self._router)
         self._set_session(session)
         self._router.set_session(session)
         await self._initialize_if_needed()

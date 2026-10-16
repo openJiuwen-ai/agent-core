@@ -237,12 +237,27 @@ class PregelGraph(Graph):
         return result if result else source_list
 
     def compile(self, session: BaseSession, **kwargs) -> ExecutableGraph:
+        """编译当前图结构为可执行图（纯函数化，可并发复用）。
+
+        同一 PregelGraph 实例可被并发执行安全共享，执行期状态不落在图实例上：
+        1. 每节点新建 Vertex 壳包装共享 executable（build 期 Vertex 不再被
+           init——规避 Future 绑定旧事件循环、调用计数残留、NodeSession 覆写）；
+        2. 无条件全新编译（不再判断 self.pregel is None——channels 上的执行
+           残留不跨执行携带）；
+        3. after_step 闭包捕获 session 参数（不读 self._session——共享实例
+           并发 compile 时会互相覆盖）；
+        4. 保留 self.pregel/checkpointer/_session 属性写入，兼容既有读取方。
+        """
+        fresh_nodes = {}
         for node_id, node in self.nodes.items():
-            node.init(session, **kwargs)
+            fresh = Vertex(node_id, node._executable)  # pylint: disable=protected-access
+            fresh.is_end_node = node.is_end_node
+            fresh.init(session, **kwargs)
+            fresh_nodes[node_id] = fresh
 
         def after_step(loop):
-            if self._session:
-                self._session.state().commit()
+            if session:
+                session.state().commit()
             graph_logger.debug(
                 f"Finished to run graph super-step [{loop.step}]",
                 event_type=LogEventType.GRAPH_SUPER_STEP_END,
@@ -255,20 +270,38 @@ class PregelGraph(Graph):
                 }
             )
 
-        if self.pregel is None:
-            self.checkpointer = session.checkpointer()
-            store = GraphStore(self.checkpointer.graph_store())
-            self.pregel = self._compile(graph_store=store, step_callback=after_step)
-            self._session = session
-        else:
-            self._session = session
-        return CompiledGraph(self.pregel, self.checkpointer)
+        checkpointer = session.checkpointer()
+        store = GraphStore(checkpointer.graph_store())
+        pregel = self._compile(graph_store=store, step_callback=after_step, nodes=fresh_nodes)
 
-    def _compile(self, graph_store=None, step_callback=None) -> Pregel:
+        # StreamActor 的 vertex 换成本次执行的 fresh vertex：actor 的
+        # should_handle_message/is_done/stream_call 依赖 Vertex.init 设置的
+        # _component_ability/_session，build 期 vertex 不再被 init，不替换
+        # 则流式边工作流崩溃。ActorManager 为 per-execution 构造，此处
+        # 替换不写任何共享对象。
+        try:
+            manager = session.actor_manager()
+        except Exception:
+            manager = None
+        streams = getattr(manager, "_streams", None)
+        if isinstance(streams, dict):
+            for actor in streams.values():
+                fresh = fresh_nodes.get(getattr(actor, "_node_id", None))
+                if fresh is not None:
+                    actor.set_vertex(fresh)
+
+        self.pregel = pregel
+        self.checkpointer = checkpointer
+        self._session = session
+        return CompiledGraph(pregel, checkpointer)
+
+    def _compile(self, graph_store=None, step_callback=None, nodes=None) -> Pregel:
+        # nodes 注入点：compile 传入本次执行的 fresh vertex（默认仍读 self.nodes）
+        nodes = nodes if nodes is not None else self.nodes
         edges: list[Tuple[str | list[str], str]] = []
         sources: dict[str, list[set[str]]] = {}
         builder = PregelBuilder()
-        for node_id, action in self.nodes.items():
+        for node_id, action in nodes.items():
             builder.add_node(node_id, action)
 
         # Step 1: collect sources as single-element groups
@@ -313,43 +346,56 @@ class CompiledGraph(ExecutableGraph):
         self._checkpointer = checkpointer
 
     async def _invoke(self, inputs: Input, session: BaseSession, config: Any = None) -> Output:
-        is_main = False
-        session_id = session.session_id()
-        workflow_id = session.workflow_id()
-
-        if config is None:
-            is_main = True
-            config = PregelConfig(session_id=session_id, ns=workflow_id, recursion_limit=MAX_RECURSIVE_LIMIT)
-
+        # 执行树根建立"当前 workflow session"通道：嵌套子工作流/循环体各自的
+        # _invoke set 为自己的 session，返回后 token 恢复父 session（栈式）。
+        # 供 BranchRouter 等读侧按任务解析，替代共享实例字段。
+        # 延迟导入避免 graph ↔ workflow 的循环导入。
+        from openjiuwen.core.session.execution_session_ctx import (
+            reset_workflow_session,
+            set_workflow_session,
+        )
+        token = set_workflow_session(session)
         try:
-            if is_main:
-                await self._checkpointer.pre_workflow_execute(session, inputs)
-            if not isinstance(inputs, InteractiveInput):
-                session.state().commit_user_inputs(inputs)
+            is_main = False
+            session_id = session.session_id()
+            workflow_id = session.workflow_id()
 
-            result = None
-            exception = None
+            if config is None:
+                is_main = True
+                config = PregelConfig(session_id=session_id, ns=workflow_id, recursion_limit=MAX_RECURSIVE_LIMIT)
 
             try:
-                result = await self._pregel.run(config=config)
-            except asyncio.CancelledError:
-                graph_logger.debug(
-                    "Pregel execution cancelled",
-                    event_type=LogEventType.GRAPH_END,
-                    metadata={"session_id": session_id, "workflow_id": workflow_id, "cancelled": True}
-                )
-                raise
-            except Exception as e:
-                exception = e
+                if is_main:
+                    await self._checkpointer.pre_workflow_execute(session, inputs)
+                if not isinstance(inputs, InteractiveInput):
+                    session.state().commit_user_inputs(inputs)
 
-            if is_main:
-                await self._checkpointer.post_workflow_execute(session, result, exception)
-            elif exception is not None:
-                raise exception
-        except asyncio.CancelledError:
-            if is_main:
-                await self._checkpointer.post_workflow_execute(session, {}, None)
-            raise
+                result = None
+                exception = None
+
+                try:
+                    result = await self._pregel.run(config=config)
+                except asyncio.CancelledError:
+                    graph_logger.debug(
+                        "Pregel execution cancelled",
+                        event_type=LogEventType.GRAPH_END,
+                        metadata={"session_id": session_id, "workflow_id": workflow_id, "cancelled": True}
+                    )
+                    raise
+                except Exception as e:
+                    exception = e
+
+                if is_main:
+                    await self._checkpointer.post_workflow_execute(session, result, exception)
+                elif exception is not None:
+                    raise exception
+                return result
+            except asyncio.CancelledError:
+                if is_main:
+                    await self._checkpointer.post_workflow_execute(session, {}, None)
+                raise
+        finally:
+            reset_workflow_session(token)
 
     async def stream(self, inputs: Input, session: Session) -> AsyncIterator[Output]:
         pass
