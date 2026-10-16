@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | S_07 / construction-and-binding |
 | 关联模块 | [factory.py](../../factory.py)、[Spec](../../schema/spec.py)、[构造上下文](../../schema/build_context.py)、[执行上下文](../../schema/execution.py)、[绑定接缝](../../execution/binding.py) |
-| 最近一次修订日期 | 2026-10-13 |
-| 关联 feature | [F_01](../features/F_01_spec-and-deep-agent-construction.md)、[F_02](../features/F_02_execution-protocol.md)、[F_03](../features/F_03_invocation-binding-and-isolation.md)、[F_04](../features/F_04_contract-convergence.md)、[F_14](../features/F_14_workspace-file-read.md) |
+| 最近一次修订日期 | 2026-10-16 |
+| 关联 feature | [F_01](../features/F_01_spec-and-deep-agent-construction.md)、[F_02](../features/F_02_execution-protocol.md)、[F_03](../features/F_03_invocation-binding-and-isolation.md)、[F_04](../features/F_04_contract-convergence.md)、[F_14](../features/F_14_workspace-file-read.md) ；[F_20](../features/F_20_continuation.md)（PA-18 联动修订） |
 | 设计依据 | [架构设计：构造与隔离](../designs/persistent-agent-architecture.md#41-构造与实例隔离已实现)、[宿主保证](../designs/persistent-agent-architecture.md#34-agentserver-必须提供的保证) |
 
 本规约维护配置、调用身份、依赖形状、原生 DeepAgent 构造和实例内绑定；这些内容从 S_01 分离后由本文唯一维护。
@@ -30,7 +30,17 @@
 | `ConstructionBinding` / `InvocationState` | 原对象身份、关键声明值、占用、停止及清理状态 | 本实例私有状态 | 内部绑定接缝 |
 | `InvocationRef` / `ProtocolModel` | 事件及宿主响应共用的归属和 DTO 约束 | [protocol.py](../../schema/protocol.py) | 构造、重新校验及归属匹配 |
 
-Spec 继承 DeepAgentSpec，JSON 字段平铺、拒绝额外字段。专属字段为 `schema_version=1` 和 `enabled_features`；后者允许 `construction`、`workspace_read`，默认仅含 `construction`，集合不能为空。`workspace_read` 的依赖和行为由 [S_04](S_04_tools-and-workspace.md) 定义；不支持 `execution` 能力声明或未实现的策略字段。
+Spec 继承 DeepAgentSpec，JSON 字段平铺、拒绝额外字段。`schema_version=1`；`enabled_features` 允许 `construction`、`workspace_read`、`workspace_write`，默认仅含 `construction`，集合不能为空。办公空间能力及 share_file_max_bytes 的依赖和行为由 [S_04](S_04_tools-and-workspace.md) 定义；不支持 `execution` 能力声明或未实现的策略字段。
+
+PA-18 的专属配置由 [F_20](../features/F_20_continuation.md) D-06、D-09 确认：
+
+| 字段 | 约束与默认值 | 生效与失败边界 |
+| --- | --- | --- |
+| continuation_chain_limit | 正整数或 None，默认 None | 续做追溯上限；配置后所有 Execution 均声明 read_execution_record。正式续做开放后，未配置在任何事件之前拒绝；新任务和低层构造不要求提供执行链接口 |
+| model_input_limit_tokens | 正整数或 None，默认 None | 模型独立输入上限；与下一字段任一配置即要求完整容量配置 |
+| capacity_safety_margin_tokens | 非负整数或 None，默认 None | 容量安全余量；与 model_input_limit_tokens、模型请求配置的 context_window、max_tokens 一起校验 |
+
+context_window 为模型总容量，max_tokens 为输出预留。四项齐全且输入上限不超过总容量、输出预留加安全余量小于总容量时，可用输入为 min(输入上限, 总容量 − 输出预留 − 安全余量)。配置不完整或组合不成立时，正式执行在任何事件和构造之前拒绝，任一容量字段已设置的直接构造也拒绝，错误为 DEEPAGENT_CONFIG_PARAM_ERROR。新任务、正常确认恢复与续做的正式 execute / resume 均须完整配置，两个新字段都为 None 时也拒绝；该入口门禁已实现并有组件测试。Spec 默认 None 继续用于低层构造，不为部署选择具体数值，也不改变通用 core 默认关闭行为。新增字段计入完整 Spec 指纹，宿主须使用同一发布版本匹配 ExecutionContext。 context_engine_config 经 JSON 快照后由 Persistent 装配边界校验并还原为 ContextEngineConfig，保留其 tokenizer 与缓存设置，不修改发布快照或指纹。最终容量检查每次读取当前 ModelContext.token_counter()，复用 core 已按 context_engine_config 的 tokenizer_spec、tokenizer_registry 和缓存配置选择的计数器；不另行选择或缓存。取得计数器失败、估算或降级均为容量未知，不能视为足够。
 
 构造经 JSON 往返生成配置副本；`fingerprint()` 对父类及专属字段全部计算规范 JSON 的 SHA-256，能力集合先排序。配置版本、主体和权限上限由宿主固定，不能仅凭声明了开关推断能力可运行。
 
@@ -62,7 +72,7 @@ InvocationRef 定义上述六元归属；响应须重新 `model_validate`，再�
 
 工厂不调用模型或端口、不读写窗口后端、不发送消息，不提供假成功端口。WorkspaceSpec 的根目录须由宿主预建并关闭 auto_create_workspace。有状态 ToolCard 引用被拒绝，应由 BuiltinToolSpec provider 创建独立实例；stateless ToolCard 可保留共享 ID。自定义 provider 是可信扩展，须遵守构造期无外部业务副作用并为有状态工具 / Rail 返回独立实例。
 
-Spec.build 委托本工厂，工厂在副本上调用父类 DeepAgentSpec.build 的共享装配路径，并非直接调用 create_deep_agent。装配注入 NativeStreamTaskLifecycle、PersistentModelCallRail 和 PersistentToolIntentRail；workspace_read 开启时另加授权读取 Rail。模型 Rail 依赖正式入口 emitter 才生效，写意图 Rail 的低层调用限制见 S_08。
+Spec.build 委托本工厂，工厂在副本上调用父类 DeepAgentSpec.build 的共享装配路径，并非直接调用 create_deep_agent。装配注入 NativeStreamTaskLifecycle、PersistentModelCallRail 和 PersistentToolIntentRail；workspace_read 开启时另加授权读取与 share_file Rail，workspace_write 的依赖与装配见 S_04。配置 continuation_chain_limit 时另装配 ExecutionRecordRail，工具定义对该 Spec 的所有 Execution 一致，仅合法续做可查询本次已核验链中的记录，新任务调用返回不可用。模型 Rail 依赖正式入口 emitter 才生效，在 before_invoke 为本 ReActAgent 实例注入最终请求检查，顺序与暂停语义见 S_01 第 4.4 节；通用 core 接缝默认关闭、不引入 Persistent 类型。写意图 Rail 的低层调用限制见 S_08。
 
 | 错误边界 | 结果与副作用 |
 | --- | --- |

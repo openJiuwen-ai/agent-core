@@ -7,15 +7,15 @@
 | 类型 | spec |
 | 编号 / slug | S_05 / confirmation-and-continuation |
 | 关联模块 | [request.py](../../schema/request.py)、[entries.py](../../execution/entries.py)、[control.py](../../execution/control.py)、[确认接入协议](../../execution/seams.py) |
-| 最近一次修订日期 | 2026-10-15 |
-| 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_19](../features/F_19_execution-log-record.md)；接入与验证见[开发计划](../designs/persistent-agent-development-plan.md) PA-09、PA-17、PA-18 |
+| 最近一次修订日期 | 2026-10-16 |
+| 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_19](../features/F_19_execution-log-record.md)、[F_20](../features/F_20_continuation.md)；接入与验证见[开发计划](../designs/persistent-agent-development-plan.md) PA-09、PA-17、PA-18 |
 | 设计依据 | [架构设计：确认](../designs/persistent-agent-architecture.md#521-确认卡片等待与原生恢复)、[控制](../designs/persistent-agent-architecture.md#523-停止取消与补充消息)、[统一续做](../designs/persistent-agent-architecture.md#524-崩溃续做与非确认暂停后继续的统一流程)、[恢复边界](../designs/persistent-agent-architecture.md#83-根据什么恢复什么时候可以继续) |
 
 本规约维护 ConfirmReply、确认恢复、停止 / 取消、控制截止及原 Request 的继续方式。原 Checkpoint 文档改名后，状态保存转由 S_03 唯一负责。
 
 ## 1. 范围、术语与适用条件
 
-确认回复 DTO、恢复与控制入口及结局锁定已有组件实现；NativeReplyAdapter 和会话记录接入仍不可用，完整确认恢复不开放。崩溃续做与非确认暂停后继续为已确认待实现的契约，带 recovery_ref 的执行当前明确拒绝。
+确认回复 DTO、恢复与控制入口及结局锁定已有组件实现；NativeReplyAdapter 和会话记录接入仍不可用，完整确认恢复不开放。崩溃续做与非确认暂停后继续已有组件实现（F_20），正式入口在开放条件满足前仍明确拒绝带 recovery_ref 的执行。
 
 确认使用既有 PermissionInterruptRail / AskUserRail 与原生中断恢复，不另写确认 Rail，不用 TaskLoop 的活动 follow-up 队列替代宿主业务队列。构造 / 绑定、执行编排、事件可靠性、记录格式及副作用查证条件分别引用 S_07、S_01、S_02、S_03、S_08。
 
@@ -66,9 +66,17 @@ reason 仅 cancel / stop；非法原因为 DEEPAGENT_INPUT_PARAM_ERROR，非法�
 
 入口返回只表示控制请求处理，不证明原生调用、在途工具、状态保存或记账已经收敛；它不发事件。cancel 对应 final(cancelled)，stop 对应 paused(stopped)，都由执行入口在收尾时产生。已发生外部效果不因取消自动撤销，补偿需另行授权，不在本接口自动执行。
 
-### 4.4 续做调用（已确认待实现）
+### 4.4 续做调用（组件已实现，正式入口未开放）
 
-崩溃续做及非确认暂停后继续走 execute_persistent_request，沿原 Request 使用新的 execution_id、原输入与 Spec，并以 recovery_ref 指向该任务最近一次待接续的 Execution。继续指示通过 RequestInput.continue_instruction 提供；引用不能取同 Session 其他任务的 Execution。当前入口在基础校验时拒绝带 recovery_ref，不能按新任务重跑。
+崩溃续做及非确认暂停后继续走 execute_persistent_request，沿原 Request 使用新的 execution_id、原输入与 Spec，并以 recovery_ref 指向该任务最近一次待接续的 Execution。继续指示通过 RequestInput.continue_instruction 提供；引用不能取同 Session 其他任务的 Execution。
+
+| 条件 | 对外结果 |
+| --- | --- |
+| recovery_ref 不是合法标识（1～512 字符，不含空白与控制字符） | DEEPAGENT_CONTEXT_PARAM_ERROR，在任何事件之前 |
+| 续做尚未开放：PA-12 按 execution_id 查询归档未接入 | DEEPAGENT_CONFIG_PARAM_ERROR，在任何事件之前，不按新任务重跑 |
+| 开放后宿主没有提供 commit.read_execution_link（S_02 第 4.3.1 节），Spec 未配置 continuation_chain_limit，或未配置容量检查（model_input_limit_tokens、capacity_safety_margin_tokens 与模型请求配置的 context_window、max_tokens） | DEEPAGENT_CONFIG_PARAM_ERROR，在任何事件之前 |
+
+续做的组装顺序、执行链追溯与登记范围见 [F_20](../features/F_20_continuation.md)；放行条件不替代 M2c 原有的确认恢复、生命周期、记账和宿主验收要求。
 
 ### 4.5 `NativeReplyAdapter.to_native(response, request) -> Any`（内部接入，待实现）
 
@@ -93,19 +101,19 @@ reason 仅 cancel / stop；非法原因为 DEEPAGENT_INPUT_PARAM_ERROR，非法�
 
 补充消息始终是新的 Request，普通排队，不能活动 steer / follow_up 到当前任务。有其他任务经过暂停期间执行时，继续仍加载 Session 最新窗口，不回退旧快照。
 
-### 5.3 确认与统一续做的区别（已确认待实现）
+### 5.3 确认与统一续做的区别（组件已实现，正式入口未开放）
 
 正常确认恢复完整保留现场；崩溃及非确认暂停继续按以下顺序：
 
 1. 宿主提供新 Execution、原 Request / Spec / 输入及正确恢复引用，确认旧执行已退出。
 2. 加载 S_03 的 Session 最新会话记录到新的空 Session。
-3. 若记录有旧中断状态，为窗口中缺少结果的调用补匹配 ID 的“上次中断，真实结果需查证”说明，已有真实结果不改；清除旧中断状态，保留本 Session 已记住的确认选择。
-4. 读取 S_02 的原执行日志，并按 execution_id 查 S_03 归档；先处理事实不明，不启动旧中断工具的自动重放。
+3. 若记录有旧中断状态，先核对它属于本 Request（属于其他 Request 即拒绝），再为窗口中缺少结果的调用补匹配 ID 的说明（与停止补位相同：“结果未取得，实际效果需核实”），已有真实结果不改；清除旧中断状态，保留本 Session 已记住的确认选择。
+4. 沿 S_02 第 4.3.1 节的前序关系追溯执行链，逐次读取 S_02 的执行日志，并按 execution_id 查 S_03 归档；先处理事实不明，不启动旧中断工具的自动重放。
 5. 追加续做执行头、临时记录背景、原任务输入和必要继续指示，交由 DeepAgent 先查证进度。
 
 补结果仅修复上下文，不能伪造 tool.completed 或表示副作用成功 / 失败。原生恢复可能在模型循环前执行被拦截工具，因此必须在续做进入原生调用前处理过期中断；正常确认恢复不能执行上述清理步骤。
 
-日志整理由 PA-17 提供（[F_19](../features/F_19_execution-log-record.md)）：意图与结果只在能唯一关联时合并，operation_id 复用（第二条意图，或结果之后出现的意图）与调用身份不一致时分开列出并注明；保留 progress.updated、工具的调用 ID、目标与结果引用、候选及其是否被 paused / final 引用；丢弃 reply.delta、model.completed、execution.started 与参与判断。当前不裁剪、不聚合、不省略，能否注入由续做按实际容量判断（待“容量边界”对齐）；归档暂只列日志中的换窗引用并注明未按 execution_id 查询（待 PA-12）。读不到、空日志或契约不符时提示“上一次记录缺失”；序号缺口与缺少结束记录照常整理并写明，不能据此推断未执行。已成功步骤不重做，不确定只读步骤可重读；有意图无结果的写操作先查证，查不清复用 AskUserRail 问发起人。
+日志整理由 PA-17 提供（[F_19](../features/F_19_execution-log-record.md)）：意图与结果只在能唯一关联时合并，operation_id 复用（第二条意图，或结果之后出现的意图）与调用身份不一致时分开列出并注明；保留 progress.updated、工具的调用 ID、目标与结果引用、候选及其是否被 paused / final 引用；丢弃 reply.delta、model.completed、execution.started 与参与判断。续做自动提供分层（brief）摘要：写操作、结局、缺口与 share_file 登记逐项保留，只读调用只计次数，候选正文只给字数；完整记录由 read_execution_record 分页读取，只限本次已核验的执行链；最终请求容量检查见 F_20 D-09；归档暂只列日志中的换窗引用并注明未按 execution_id 查询（待 PA-12）。读不到、空日志或契约不符时提示“上一次记录缺失”；序号缺口与缺少结束记录照常整理并写明，不能据此推断未执行。已成功步骤不重做，不确定只读步骤可重读；有意图无结果的写操作先查证，查不清时可复用 AskUserRail 询问发起人；是否询问由模型判断，不设记录缺失即必须先询问的门禁。
 
 ### 5.4 异常后的宿主核对
 

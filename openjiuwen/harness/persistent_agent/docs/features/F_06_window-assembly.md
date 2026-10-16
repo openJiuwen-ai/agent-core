@@ -2,8 +2,8 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 类型 / 状态 | feature；PA-06，已实现（组件验收）。容量相关验收未关闭（计划第 1.2 节“容量边界”待补设计）；新任务正式入口已可执行（PA-10 于 2026-10-14 接入，见 [F_17](F_17_session-state-record.md)），确认恢复在 PA-09 接入前仍拒绝 |
-| 日期 | 2026-10-09；引用修订：2026-10-13 |
+| 类型 / 状态 | feature；PA-06，已实现（组件验收）。PA-18 已接入续做组装与最终容量检查组件；可选材料筛选、自动换窗及摘要调用前检查仍待 PA-06、PA-11 联合接入，容量验收未关闭。正式续做入口仍拒绝；确认恢复在 PA-09 接入前仍拒绝 |
+| 日期 | 2026-10-09；引用修订：2026-10-13；PA-18 联动修订：2026-10-16 |
 | 负责人 | Song Haoran |
 | 范围 | 新增 `persistent_agent/execution/window_assembly.py`；`execution/seams.py` 的 `window_assembler` 接入点；`schema/spec.py` 的 `resolve_parts`；单测新增 `test_window_assembly.py`，`test_entries.py` 删去“窗口组装未接入”的用例。共享值对象、协议和标记已移至 `schema/integration.py`，由 `seams.py` 兼容再导出。不改 `entries.py` 的编排，不改变共享契约的字段和语义，不改共享 harness / core 代码 |
 | 测试基线 | 改动前：PA 包与 `tests/unit_tests/core/session` 共 665 passed；共享回归集 213 passed；`tests/unit_tests/harness` 与 `tests/unit_tests/core/session` 联合回归 5868 passed / 39 skipped。改动后：PA 包 270 passed，PA 包与 core session 共 681 passed，共享回归集 213 passed，联合回归 5884 passed / 39 skipped（Python 3.11.17）。第二轮（2026-10-12）后：PA 包与 core session 共 777 passed，共享回归集 213 passed，联合回归 5980 passed / 39 skipped |
@@ -28,13 +28,14 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 已保存的窗口
 【本次执行】……                 ← 执行头，persistent_window_part = execution_header
 【最近群消息】……               ← 临时背景块，persistent_window_part = temporary_background（仅群 Session）
+【续做记录、续做规则】……        ← 同类临时背景块（仅合法续做）
 （已有附件的快照，如有）
-任务输入                        ← 原生 query，即 RequestInput.text 原文，无标记
+任务输入                        ← 原任务正文；续做时追加可选继续指示，无标记
 ↓ 之后只追加：模型回复、工具调用和结果……
 ```
 
 - 执行头和背景块都是 `UserMessage`，标记写在消息元信息 `persistent_window_part`（F_05 §3.2 的约定）。
-- 原生输入为 `{"query": request.text}`，任务正文不改写。
+- 新任务原生输入为 `{"query": request.text}`，任务正文不改写；续做在原文之后追加“【继续指示】”及其正文，见 [F_20](F_20_continuation.md) D-04。
 - 组装不碰 prompt builder 和工具列表。实测同一 Execution 内两次模型调用的系统消息和工具定义完全相同，第二次调用的消息以第一次的全部消息为前缀。
 - 标记随 Session state 进入保存：PA-10 的 `save` 取到的窗口仍带 `persistent_window_part`。
 
@@ -48,7 +49,7 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 
 - 架构设计只要求执行类型、request_id、execution_id。来源、发送者、接收时间和附件引用也放进执行头：它们是“谁、在什么时候提出了这件事”的事实，执行头在结束时保留，后续 Request 仍能看到；任务输入保持原文。显示名中的空白合并为一个空格，保证单行。
 - 执行头本身已是一行，PA-10 整理时可原样保留。
-- 续做由 PA-18 用同一格式表达：`类型：续做`，并增加 `recovery_ref：<execution_id>` 字段。本次不实现；执行上下文带 `recovery_ref` 时，组装器与入口一样拒绝（`DEEPAGENT_CONFIG_PARAM_ERROR`），不会把续做组装成新任务。
+- PA-18 已在同一组装器接入续做分支：`类型：续做`，并增加 `recovery_ref：<execution_id>`。组装器先按 F_20 D-02 核对并处理旧等待现场，再追加分层材料、规则和原任务；`chain_limit` 由 Spec 传入。正式入口仍在任何事件之前通过 continuation_support 拒绝续做，直到 PA-12 归档查询及 M2c 放行条件满足；门禁不表示组装器组件尚未实现。
 
 ### 3. 临时背景块：最近群消息
 
@@ -75,6 +76,8 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 - 选择校验拒绝而不是运行异常：运行异常会让服务端按架构设计 §3.4 第 13 条当作崩溃中断，对本 Request 发起续做，而续做（PA-18）会清除旧中断状态，毁掉另一件事正在等待的确认现场。
 - 正常情况下服务端在等待确认期间阻塞 Session（架构设计 §3.4 第 2 条），这里只是防线。注意此时 `execution.started` 已记录，结论见“待确认决策的结论”第 6 项。窗口有未配对工具调用时的同类检查见文末“第二轮决策实施”。
 
+上述拒绝针对新 Request。合法续做若加载到本 Request 的旧等待现场，先使用 patch_stopped_calls 补位、清除过期中断并清空 waiting，保留会话授权和群消息游标，然后继续组装；属于其他 Request 则拒绝且不清理。正常确认恢复不调用组装器，完整保留现场。行为与责任见 F_20 Q-07、Q-08。
+
 ### 6. 不挂载三个上下文 rail
 
 `PersistentAgentSpec.resolve_parts` 在父类装配完成后检查 `parts.rails`：含 `ContextAssembleRail`、`PersonalContextRail`、`ContextProcessorRail`（包括子类）时，抛 `DEEPAGENT_CONFIG_PARAM_ERROR`，错误信息列出 rail 名，部分构造按原有回滚清理。
@@ -91,7 +94,7 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 
 ### 8. 接入点
 
-`seams.window_assembler(context)` 返回 `ExecutionWindowAssembler`，群 Session 时同时解析读取器。共享值对象、协议和标记定义在 `schema/integration.py`；该模块不依赖执行接入点或具体实现，运行对象的注解依赖只在 `TYPE_CHECKING` 中导入。
+`seams.window_assembler(context, *, chain_limit=None)` 返回 `ExecutionWindowAssembler(reader, *, chain_limit=None)`，PA-18 的执行入口传入 Spec.continuation_chain_limit，群 Session 时同时解析读取器。共享 WindowAssembler.assemble 的参数、返回值和窗口标记不变，仍定义在 `schema/integration.py`；该模块不依赖执行接入点或具体实现，运行对象的注解依赖只在 `TYPE_CHECKING` 中导入。
 
 `window_assembly.py` 直接导入共享契约，不再依赖 `seams.py`；`seams.py` 使用普通顶层导入加载组装器，移除局部延迟导入和 `cyclic-import` 豁免。`seams.py` 显式再导出原有共享名称，保持旧导入路径及对象身份兼容，调用方和其他分支无需同步改名。字段、默认值、窗口标记及业务行为保持不变。
 
@@ -125,7 +128,7 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 | 6. 等待中的调用 | 加载记录带等待现场，或 Session state 带中断状态：校验拒绝，只记过 `execution.started`，不调用模型、不保存，窗口末尾不追加 |
 | 7. 触发消息 | 群消息 Request：读取器收到触发消息 ID；即使读取结果里含触发消息，背景也不含它；执行头写明来源、消息 ID、发送者及身份、接收时间 |
 | 8. empty / incomplete | empty 不加背景块；incomplete（有或没有消息）都放入带说明的背景块；两者没有可信扫描进度时沿用游标，带扫描位置时前移（第二轮） |
-| 9. 归属与续做 | 读取结果属于另一次执行时拒绝；带 `recovery_ref` 的上下文不组装 |
+| 9. 归属与续做 | 原 PA-06 验证读取结果归属及拒绝未接入续做。2026-10-16 起续做组件由 PA-18 接入：缺少追溯配置仍拒绝，合法组装与正式入口门禁分别由 F_20 的组件用例验证，不沿用“带 recovery_ref 一律不组装”的旧结论 |
 | 10. 三个 rail | 分别经 `RailSpec` 挂载时，Persistent 构造校验拒绝并点名；同一配置用 `DeepAgentSpec` 装配时仍包含该 rail |
 
 变异检查（第一轮）：去掉触发消息过滤、incomplete 时前移游标（第一轮规则）、去掉 rail 检查、去掉等待现场检查、去掉按时间排序、背景放到执行头之前、incomplete 不加说明、只检查等待现场不检查中断状态，各自都有用例失败。
@@ -154,8 +157,8 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 
 ## 已知遗留
 
-- **容量边界未关闭**：背景块和执行头不做容量检查；读取器一次最多可返回 500 条、每条最长 65536 字符的消息；已保存窗口的大小也未在开始时检查。“超限时优先展示最新消息、标明省略范围、保留历史查询定位”的选择逻辑依赖共享容量计算，提供方和最终请求的容量检查位置仍待跨 PA 对齐，本轮不设临时配额；必要输入放不下时按架构设计给出 `paused(context_unfit)`，原始任务不截断。
-- **知识导航、续做执行头与续做日志、群消息读取**分别待 PA-13、PA-18、PA-23 接入。
+- **容量边界未关闭**：PA-18 已提供共用 capacity.py 与最终请求检查；完整容量配置下，最终消息、附件和工具定义在预算准入及模型调用前统一计数，超限为 paused(context_unfit)，未知为 paused(error)，均不调用模型。装配阶段暂不单独计数；群背景可选层的筛选随 PA-06 接入，自动换窗与摘要调用前检查随 PA-11 接入。读取器一次最多可返回 500 条、每条最长 65536 字符，不能把最终检查存在解释为材料选择或换窗已完成。新任务、正常确认恢复与续做的正式入口都必须完整配置容量，缺失即前置拒绝；扩展新任务 / 确认恢复的校验与相应组件测试已实现。原任务与未决写操作不能静默截断，详见 F_20 D-09。
+- **知识导航与群消息读取**分别待 PA-13、PA-23；续做执行头、分层日志与规则已有 PA-18 组件实现，正式入口仍待 PA-12 与 M2c 联合放行。
 - **兜底检查的拒绝发生在 `execution.started` 之后**：加载会话状态记录在 `execution.started` 之后，所以“等待中的调用”和“窗口不能安全追加”两项校验拒绝都晚于该事件。服务端按校验拒绝处理，不续做（架构设计 §8.1），Request 需要重新发起。若记录确实损坏，同一 Session 之后的每个新 Request 都会被同样拒绝，需要服务端告警并人工修复记录；正常情况下 PA-10 的修补使这条路径不会触发（2026-10-14 起 PA-10 加载时先校验记录，损坏的记录在加载阶段即被拒绝，见 [F_17](F_17_session-state-record.md) D-04）。
 - **未提供扫描位置的服务端**：读取结果不带 `scanned_through` 时游标不前移，背景每次都从旧游标读起。
 - **回补区间的正确性由 PA-23 保证**：PA-06 只传入游标和触发消息；本项测试的读取器替身按契约计算范围，正式读取器须以第二轮验证中的 M120 / M130 / M180 示例验收。
@@ -189,3 +192,9 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 | 截断参数 | 三个参数分别以 dict 和 `ContextEngineConfig` 设置时都拒绝，错误消息点名参数 |
 | 变异检查 | 去掉未配对检查、把游标改回“最后展示的消息”、去掉截断参数拒绝，对应用例分别失败 1、4、6 项 |
 | 回归 | PA 包与 core session 共 777 passed；共享回归集 213 passed；`tests/unit_tests/harness` 与 `tests/unit_tests/core/session` 联合回归 5980 passed / 39 skipped |
+
+## 2026-10-16 PA-18 联动同步
+
+- 原结论与范围：PA-06 原阶段只组装新任务，带 recovery_ref 的上下文拒绝；容量计算的提供方与最终检查位置尚未确定。
+- 新依据与变化：按 F_20 的已确认方案，同一组装器支持合法续做，chain_limit 经 getter 传入；旧现场先处理、分层证据和规则放临时背景、原任务与继续指示最后进入窗口。共用容量模块和最终请求检查已由 PA-18 提供。
+- 当前效力：原“带 recovery_ref 一律不组装”和“最终检查位置待对齐”不再是组件现状；正式续做仍按 D-10 门禁拒绝。装配筛选与换窗摘要检查仍待后续接入，PA-06 容量验收不因最终检查存在而关闭。历史测试按原阶段保留，新增场景与本轮文档检查见 F_20 第 8 节。

@@ -7,7 +7,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-15，F_15 为文档编号 |
-| 日期 | 原阶段设计及实现记录：2026-10-10；本次文档修订：2026-10-15 |
+| 日期 | 原阶段设计及实现记录：2026-10-10；本次文档修订：2026-10-15；PA-18 名单联动：2026-10-16 |
 | 负责人 | Yan Zhijun；认领和后续安排以统一开发计划为准 |
 | 状态 | 进行中；agent-core 组件与 JiuwenSwarm `HostCommitPort` 均已有实现和组件测试；真实写工具写前屏障及重启后读回意图的跨仓验证未完成 |
 | 方案依据 | 沿用现行架构、spec 和原记录中的名称白名单决策；本次核对实现，不改变架构或公共契约 |
@@ -61,7 +61,7 @@ D-01 的名称约定和 D-03 的宿主可靠确认是方案成立的重要前提
 [effect_policy.py](../../tools/effect_policy.py) 是唯一分类来源：
 
 ```python
-READ_ONLY_TOOL_ALLOWLIST = frozenset({"read_file", "list_files", "share_file"})
+READ_ONLY_TOOL_ALLOWLIST = frozenset({"read_file", "list_files", "share_file", "read_execution_record"})
 
 def is_read_only_tool_name(tool_name: str | None) -> bool:
     return tool_name in READ_ONLY_TOOL_ALLOWLIST
@@ -69,11 +69,13 @@ def is_read_only_tool_name(tool_name: str | None) -> bool:
 
 `share_file` 不直接修改办公空间或外部系统，只修改本次执行的内部登记状态，因此由 PA-08 加入名单（[F_18](F_18_output-handoff.md) D-06）。白名单仅表示该工具不触发 PA-15 的写前意图屏障，不代表其登记状态会跨执行持久化。
 
+PA-18 加入 `read_execution_record`：它只读取当前 Session、当前 Request、本次续做已核验执行链中的记录；每次调用校验目标归属并对整份日志重新校验、关联后分页，新任务调用返回不可用。该工具不改变办公空间或外部系统，因此免写意图，实际派发后仍按普通只读工具记完成事件。工具的声明条件、查询范围与分页契约由 [F_20](F_20_continuation.md) D-08 唯一维护；本次不改变白名单名称、PA-15 负责人或其宿主可靠确认责任。
+
 只读取 Harness 实际暴露给模型、进入 `ToolCallInputs.tool_name` 的完整名称。不折叠大小写，不猜别名，不匹配前后缀或 `read` / `search` 关键词，也不核验 AbilityManager 当前绑定的实例或实现类。
 
 | 条件 | 当前处理 |
 | --- | --- |
-| 身份和参数有效，名称精确为 read_file / list_files / share_file | 不产生 tool.intent；派发后有 emitter 时产生 tool.completed，operation_id 为 None |
+| 身份和参数有效，名称精确为 read_file / list_files / share_file / read_execution_record | 不产生 tool.intent；派发后有 emitter 时产生 tool.completed，operation_id 为 None |
 | 已注册但名单外，或未知、自定义、MCP、宿主新增名称 | 按有副作用处理，必须等待写意图确认后才允许底层派发；此分类不证明工具已注册或一定可执行 |
 | 工具调用 ID / 名称缺失、非字符串、空值或含空白 | 只读和写调用均失败关闭，不因命中白名单豁免身份检查 |
 | 参数无法规范化或摘要生成失败 | 只读和写调用均失败关闭，不放行底层工具 |
@@ -232,7 +234,7 @@ PA-15 不主动重试未知写结果，不要求外部系统提供幂等键、�
 
 | 验收 ID | 前置 / 操作与通过条件 | 独立或联合验证入口 |
 | --- | --- | --- |
-| PA-15-V-01 分类 | 精确命中三个名称免意图；大小写、近似、自定义、MCP 和未知名称均默认写；分类不查实现类 | [test_effect_policy.py](../../../../../tests/unit_tests/harness/persistent_agent/test_effect_policy.py) |
+| PA-15-V-01 分类 | 精确命中四个名称免意图；大小写、近似、自定义、MCP 和未知名称均默认写；分类不查实现类 | [test_effect_policy.py](../../../../../tests/unit_tests/harness/persistent_agent/test_effect_policy.py)；新增日志工具的实际调用无写意图由 F_20 的组件用例覆盖 |
 | PA-15-V-02 身份与关联 | 有效调用生成稳定作用域操作 ID；同上下文 JSON 键序变化不重复意图；ID / 名称 / 参数冲突、身份缺失及不可规范化参数不派发 | [test_tool_intent_rail.py](../../../../../tests/unit_tests/harness/persistent_agent/test_tool_intent_rail.py)；跨 Execution 只验证 ID 稳定，不扩展为持久去重 |
 | PA-15-V-03 写前确认与 fatal | 阻塞 record 时工具未调用；成功后才调用；失败时工具调用为零、入口重抛同一 fatal；普通日志缺口不阻止后续关键事件 | rail、[test_entries.py](../../../../../tests/unit_tests/harness/persistent_agent/test_entries.py)、[test_emitter.py](../../../../../tests/unit_tests/harness/persistent_agent/test_emitter.py)；真实落盘另见 V-08 |
 | PA-15-V-04 授权与确认恢复 | 等待 / 拒绝 / skip / force-finish 不记工具意图或完成；同意后实际执行写工具前先记意图，再产生关联完成事件 | entries 的确认恢复 / 拒绝测试与 rail skip 测试；组件替身验证；真实确认由 PA-09、PA-10 联合 |
@@ -288,7 +290,7 @@ PA-14、PA-15 和宿主端口可以按契约并行推进。PA-16 需要 PA-14 �
 2. 按既有 Session / Request / Execution 归属保存，并按 event_id 幂等处理**同一事件**重传；同 ID 不同内容不能覆盖。operation_id 用于关联，不等于本端已实现跨 Execution 的操作去重。
 3. `tool.completed` 等普通事件可按架构入队后返回；入队或异步保存失败允许缺口，不将其升级成写执行屏障，不阻止后续关键事件。
 4. 事件队列不随 Agent 实例清理取消；已保存日志可按 execution_id 读取并按 local_seq 返回。入口流只展示，宿主不把流消费当作第二条持久化通道。
-5. 不把 tool.intent 解释为操作成功。完成事件反映工具报告，外部事实仍由文件 / 系统状态及回执查证；缺少完成结果由 PA-17 / PA-18 先查证、查不清询问发起人。
+5. 不把 tool.intent 解释为操作成功。完成事件反映工具报告，外部事实仍由文件 / 系统状态及回执查证；缺少完成结果由 PA-17 / PA-18 先查证、不能盲目重做；查不清时可以询问发起人，是否询问由模型判断（F_20 Q-09）。
 
 当前本地 `huenrui_jiuwenswarm` 仓库 `jiuwenmate` 分支已有 `jiuwenswarm/server/jiuwenmate/ports/commit.py` 中的 `HostCommitPort`：`record` 对 `tool.intent`、`execution.paused`、`execution.final` 等关键事件等待 `ExecutionRepository.record_events` 返回；普通事件走后台 `CommitQueue`。仓储按事务保存事件，同一 `event_id` 与相同内容可幂等跳过，内容冲突会报错。该实现和组件测试证明宿主端具备关键确认路径，但尚未证明完整写工具调用链在真实持久化确认后才产生副作用。
 
@@ -350,7 +352,7 @@ PA-15 保持进行中：已有 agent-core 实现不等于完整宿主保证，�
 | --- | --- |
 | 跨仓真实写屏障 / AgentServer 与 PA-15 | `HostCommitPort` 关键事件路径及其组件测试已存在；尚无受控写工具证明“意图可靠保存后才派发”及“存储失败零副作用”，也未验证重启后读回 `tool.intent` |
 | 入口流式回归 / PA-05 与 PA-15 协同 | 2026-10-12 两项失败已在 2026-10-15 定向复跑通过；保留为历史记录，不再是当前已知失败 |
-| 名称白名单 / agent-core 及工具注册方 | 当前名单为 `read_file`、`list_files`、`share_file`；其他只读名称也记意图。按名唯一解析不防止错误的同名写实现替换，新增或变更能力须重新审查 |
+| 名称白名单 / agent-core 及工具注册方 | 当前名单为 `read_file`、`list_files`、`share_file`、`read_execution_record`；其他只读名称也记意图。按名唯一解析不防止错误的同名写实现替换，新增或变更能力须重新审查 |
 | 去重和崩溃边界 / PA-17、PA-18 | 仅上下文内去重；稳定 operation_id 不禁止新 Execution 重派发。意图有而完成无时先查证，不从缺日志推断未执行 |
 | 摘要与状态适配 / 工具适配方 | 无全文秘密检测和恢复参数存储；target_ref 只取显式字段，result_refs 未填；显式失败需结构化 success=False，failed 也不能证明无局部副作用 |
 | 并行与取消 / 执行链及 PA-18 | 等待意图的调用可被停止复核阻断，已派发调用不能由屏障撤回；跳过收尾后保留未决，不伪造结果或自动补偿 |
@@ -367,3 +369,10 @@ PA-15 保持进行中：已有 agent-core 实现不等于完整宿主保证，�
 | 2026-10-14 PA-08 加入 share_file | 名单加入 `share_file`，注释写明分类依据；名单名称不变 | 第 2.2 节代码与行为表就近注明；见 [F_18](F_18_output-handoff.md) D-06 与 S_08 |
 | 2026-10-12 文档重构 | 对照两个模板、现行架构 / specs 和代码整理范围、决策、局部依赖、验收及证据；校准绑定类型、五项操作身份、上下文内去重、显式目标、摘要 / 状态边界 | 不修改代码、公共契约、架构、负责人、硬前置或特性完成数；本次测试结果和剩余边界取代“当前全通过”的表述，历史记录仍保留 |
 | 2026-10-15 当前实现与验证核对 | 更新白名单为 `read_file` / `list_files` / `share_file`；将 2026-10-12 两项失败标为历史，并记录 agent-core 当前回归、JiuwenSwarm `HostCommitPort` 实现及组件 / 只读集成测试证据 | 宿主关键事件实现不等于完整写屏障验收；V-08 仍待受控写工具成功 / 失败场景和重启后读回 `tool.intent` |
+
+### 2026-10-16 PA-18 日志查询工具分类
+
+- 原范围：PA-08 接入后的名单含 read_file、list_files、share_file。
+- 已确认变化：F_20 D-08 的 read_execution_record 只读当前续做链中的已保存记录，加入同一份精确名称名单；本次同步代码片段、分类表、验收说明与遗留，默认写和真实宿主持久化责任不变。
+- 旧结论的效力：历史三项名单只适用于当时版本，当前四项名单以第 2.2 节和 effect_policy.py 为准；不改 PA-15 负责人。新增工具的无写意图组件证据与本轮文档检查见 F_20 第 8 节，不等于跨仓写屏障验收完成。
+- Q-09 联动补正：第 3 节续做规则明确查不清时是否询问由模型判断，与实际日志提示和 F_19 保持一致；未决写操作仍须先查证、不能盲目重做。

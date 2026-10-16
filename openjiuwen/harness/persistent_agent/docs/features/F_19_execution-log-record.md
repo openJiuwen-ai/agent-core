@@ -6,7 +6,7 @@
 | --- | --- |
 | 建档日期 | 2026-10-15 |
 | 归档日期 | 2026-10-15 |
-| 修订日期 | 2026-10-16：恢复第 8.2.2 节旧基线验证记录；本次修复证据见 [F_17 第 9 节](F_17_session-state-record.md#2026-10-16-v0120-基线冲突修复) |
+| 修订日期 | 2026-10-16：恢复第 8.2.2 节旧基线验证记录；PA-18 分层材料与受控查询契约同步；基线冲突修复证据见 [F_17 第 9 节](F_17_session-state-record.md#2026-10-16-v0120-基线冲突修复) |
 | 范围 | agent-core `openjiuwen/harness/persistent_agent`：读取同一 Request 下指定历史 Execution 的已保存事件，按契约整份校验，整理成供 Agent 使用的执行日志整理。不含续做触发、旧中断现场清理、窗口注入与 `recovery_ref` 入口开放（PA-18），不含按 execution_id 查询归档（PA-11、PA-12） |
 | 方案成熟度 | 已确认：D-01～D-03 由开发者 2026-10-15 批注确认；D-04～D-06、P-01～P-07 及三项补充规则由开发者 2026-10-15 确认；D-04 中“结果之后出现同 ID 的意图按复用处理”是补充规则 1 的适用细化，依据开发者 2026-10-15 转交的审阅意见 |
 | 计划条目 | [开发计划](../designs/persistent-agent-development-plan.md) PA-17 |
@@ -32,7 +32,7 @@
 | 序号有缺口或没有结束事件 | 不支持 | 写明缺少哪些序号；写“未记录结束；无法仅凭日志确定执行是否已结束” |
 | 读取失败、空日志、结构不合法、归属错配、内容冲突 | 不支持 | 整份弃用，`missing=True`，只给出“上一次记录缺失”提示，不交出任何事件内容 |
 | operation_id 复用或调用身份不一致 | 不支持 | 各条分开列出并注明，已有结果不会算到后来的未决意图上 |
-| 日志很长 | 不支持 | 不截断、不省略，交给 PA-18 判断能否注入 |
+| 日志很长 | 不支持 | 默认 full 完整整理不截断；PA-18 自动提供 brief 必需层，完整整理通过受控工具分页读取，最终请求统一检查容量 |
 
 ### 2.3 本次范围与非目标
 
@@ -46,15 +46,15 @@
   - 普通事件允许缺失，关键事件只证明自身落盘；非空日志不代表完整（S_02 I-2、I-4）。
   - event_id 是完整调用身份（含 source_ref）与 local_seq 的规范 JSON 哈希（S_02 第 2 节）。
   - operation_id 由调用身份与 tool_call_id 派生（PA-15），同一 Request 内 operation_id 复用即 tool_call_id 复用。同一 Execution 内，意图在执行前记账，一定排在它自己的结果之前。
-  - 只读工具按 PA-15 的精确名单识别（[effect_policy.py](../../tools/effect_policy.py)，当前为 `read_file`、`list_files`、`share_file`）；名单外的调用有写意图，`tool.completed` 带同一 operation_id。
+  - 只读工具按 PA-15 的精确名单识别（[effect_policy.py](../../tools/effect_policy.py)，当前为 `read_file`、`list_files`、`share_file`、`read_execution_record`）；名单外的调用有写意图，`tool.completed` 带同一 operation_id。
   - 结束事件首次记账失败时按原事件补交候选并重试（F_18 D-07），日志中可能出现内容相同的重复事件。
   - 工具参数摘要与结果摘要在写入时已截到 500 字符（PA-15），结论在写入时已截到 500 字符（`model_rail.py`）。
 - **已确认的问题（开发者 2026-10-15）：**
   - **P-01 候选引用：** paused 与 final 的 `output_refs` 都算引用；被引用不代表已送达。
   - **P-02 `share_file`：** 保持只读名单分类，但将来引入只读聚合时须排除它，逐次保留文件登记依据。
   - **P-03 端口返回类型：** 只接受 tuple，逐条重新校验。list 等其他类型按契约不符处理：整份弃用，`missing=True`，诊断记失败类别与定位身份，由端口提供方修正。不做 list 兼容。
-  - **P-04 裁剪与聚合：** 当前不裁剪、不聚合、不省略，不启用单项 200 字符或整段上限；后续规则另行确认，容量验收待完成。
-  - **P-05 归档参数：** 不增加 `archive_refs` 参数，保持 `summarize_execution(context, execution_id)` 签名；只列日志中的归档引用并注明“尚未按 execution_id 查询，可能不全”；完整归档验收待 PA-12、PA-18。
+  - **P-04 裁剪与聚合：** 默认 full 不裁剪、不聚合、不省略，不启用单项 200 字符或整段上限；2026-10-16 按 F_20 D-08 增加 brief 层，取舍见 D-05，整体容量验收仍待完成。
+  - **P-05 归档参数：** 不增加 `archive_refs` 参数；当前 `summarize_execution(context, execution_id, *, detail="full")` 的 detail 只选择整理层次，不注入外部归档。只列日志中的归档引用并注明未查询；完整归档验收待 PA-12、PA-18。
   - **P-06 落地：** 仓库落地与提交由开发者负责。
   - **P-07 日志内来源一致：** 一个 Execution 只有一个 source_ref。日志内各事件的 source_ref 不一致即归属错配，整份弃用；日志的 source_ref 可以与当前执行不同，不拿当前执行比较。
 
@@ -64,8 +64,10 @@
 
 ```mermaid
 flowchart TD
-    A["PA-18：续做入口"] --> R["summarize_execution(context, execution_id)"]
-    R --> P{"参数合法？<br/>上下文类型、execution_id 为 Identifier"}
+    A["PA-18 自动材料<br/>summarize_execution(detail=brief)"] --> R["共用 _record 读取与整理路径"]
+    D["日志查询工具<br/>record_blocks，固定 full"] --> R
+    F["summarize_execution<br/>默认 detail=full"] --> R
+    R --> P{"参数合法？<br/>detail、上下文类型、execution_id"}
     P -- "否" --> X["抛出参数错误<br/>不调用端口"]
     P -- "是" --> L["read_execution_log(execution, execution_id)"]
     L -- "端口异常" --> M["missing=True<br/>上一次记录缺失"]
@@ -73,7 +75,9 @@ flowchart TD
     V -- "不通过" --> M
     V -- "通过" --> S["去重、按序号排序、找缺口"]
     S --> G["逐次关联意图与结果<br/>保留结论、候选、归档、结局"]
-    G --> T["missing=False<br/>执行日志整理"]
+    G --> K{"输出层次"}
+    K -- "brief" --> T["missing=False，分层摘要<br/>逐条保留写操作与登记，明确省略"]
+    K -- "full / record_blocks" --> U["missing=False，完整整理<br/>完整块先关联后分页"]
 ```
 
 组件只读不写：不调用模型、不改窗口、不记事件。何时调用、怎样放进窗口、按 `missing` 怎样继续，都归 PA-18。
@@ -83,6 +87,7 @@ flowchart TD
 #### D-01 范围与返回值（已确认）
 
 - 只负责读取、校验、整理执行日志。新增 `execution/execution_log.py`，提供内部函数 `summarize_execution(context, execution_id)`，返回不可变的 `ExecutionLogSummary(text, missing)`。
+- 2026-10-16 按 [F_20](F_20_continuation.md) D-08 追加关键字参数 `detail: Literal["full", "brief"] = "full"`：默认的完整整理不变；`brief` 为续做的分层摘要（写操作、结局、缺口与 `share_file` 登记逐项保留，只读调用只计次数，候选正文只给字数，并单独注明省略）。另增 `record_blocks(context, execution_id)`，在同样的整份校验后返回完整整理的各行与各条目，供续做的 `read_execution_record` 分页；非法的 `detail` 在读取前抛参数错误。
 - 不改执行入口；接入由 PA-18 完成。
 - `missing` 只表示本次没有取得可用日志，不表示上次没有执行。
 - 确认依据：开发者 2026-10-15 批注 1。
@@ -132,23 +137,23 @@ flowchart TD
 
 #### D-05 长度与容量（已确认）
 
-- 不固化整段字数上限，不采用此前建议的 8000 字符。
-- 当前不裁剪、不聚合、不省略，不启用单项 200 字符上限：各项按事件中的文字原样保留（工具摘要与结论在写入时已有 500 字符的上限）；候选正文、写操作、结局和引用都不会因长度被删除。
-- 能否注入由 PA-18 根据模型实际容量、已加载窗口及其他背景判断。
-- 后续如启用裁剪或聚合，规则另行确认，须在文本中注明，并与日志缺口区分。
+- 不固化整段字数上限，不采用此前建议的 8000 字符。以下对完整整理（`detail="full"`）成立；分层摘要的取舍见 F_20 D-08。
+- 默认 detail="full" 不裁剪、不聚合、不省略，不启用单项 200 字符上限：各项按事件中的文字原样保留（工具摘要与结论在写入时已有 500 字符的上限）；候选正文、写操作、结局和引用都不会因长度被删除。record_blocks 始终提供这一完整层。
+- detail="brief" 按 F_20 D-08 提供自动注入层：写操作（包括成功、失败、未决及关联有歧义的记录）、结局、序号缺口和 share_file 登记逐条保留；其余只读调用按工具名计次数；候选保留成果定位与正文字数。只在实际省略时写明省略内容，与日志缺失、序号缺口及断链分别说明。完整细节由 read_execution_record 查询，不据省略推断未执行。
+- PA-18 在最终请求装配后、预算准入和模型调用前统一检查完整输入，超限或计数不可靠时阻断调用；本阶段装配时不另行计数，不能把材料分层当作容量检查。可选材料筛选及自动换窗仍待 PA-06、PA-11 联合接入。
 - 整理规则不能替代整体容量设计，容量验收继续保留，待完成。
 - 确认依据：开发者 2026-10-15 批注 5；P-04。
 
 #### D-06 归档引用（已确认）
 
-- 不增加 `archive_refs` 参数，签名保持 `summarize_execution(context, execution_id)`。
+- 不增加 `archive_refs` 参数；整理层次由 detail 选择，当前完整签名见第 5.2 节，默认 full 的归档引用行为不变。
 - 只列出日志中 `window.switched` 记下的归档引用，并注明“仅为日志中的归档引用，尚未按 execution_id 查询，可能不全”；日志中没有换窗记录时也写明。
 - PA-11 负责归档及索引，PA-12 提供按 execution_id 查询，沿用 Yan Zhijun 的既有分工。完整归档验收标为“待 PA-12 查询及 PA-18 集成验证”，不以日志中的换窗事件替代。
 - 确认依据：P-05。
 
 #### D-07 与 PA-18 的分工
 
-本组件只提供读取与整理。调用时机、旧中断现场清理、续做执行头与临时背景的追加、续做规则提示词、按 `missing` 决定继续还是失败、按实际容量决定能否注入、归档查询结果的使用，以及开放 `recovery_ref` 入口，都归 PA-18。
+本组件只提供读取与整理。调用时机、旧中断现场清理、续做执行头与临时背景的追加、续做规则、分层材料、受控分页、最终请求容量检查、归档查询结果的使用及正式入口门禁归 PA-18。missing 只提供未知证据，不强制询问或终止，由模型按续做规则判断查证、询问、结束或继续；查不清的写操作不能盲目重做。
 
 ### 4.3 替代方案与排除理由
 
@@ -173,7 +178,7 @@ flowchart TD
 - **LI-2 整份可用或整份弃用：** 只要有一条不合格，不向模型交出任何事件内容。
 - **LI-3 不把未知当未执行：** 记录缺失、缺口、没有结果的写意图，都不会被写成“没有执行”。
 - **LI-4 不误配结果：** operation_id 复用后不再合并；调用身份不一致不合并；已有结果不算到其他意图上。
-- **LI-5 不删减关键事实：** 写操作、候选正文、结局、引用与查证依据不因长度被删除；当前不做任何省略。
+- **LI-5 不删减关键事实：** full 与 record_blocks 保留候选正文及所有整理条目；brief 保留写操作、登记、结局、缺口和成果定位，只按 D-05 聚合只读操作及省略候选正文并显式说明。任一层都不静默删除未决写操作。
 - **LI-6 不越权陈述投递：** 候选只写是否被结束记录引用。
 - **LI-7 参数错误不是记录缺失：** 参数非法时不调用端口，直接抛出。
 
@@ -182,7 +187,9 @@ flowchart TD
 | 名称 | 签名与变更类型 | 职责 | 约束 |
 | --- | --- | --- | --- |
 | `ExecutionLogSummary` | 冻结 dataclass；新增 | 整理结果 | `text: str`；`missing: bool` |
-| `summarize_execution` | `async def summarize_execution(context: PersistentBuildContext, execution_id: str) -> ExecutionLogSummary`；新增 | PA-18 在续做入口调用 | 先校验参数（非法即抛 `DEEPAGENT_CONTEXT_PARAM_ERROR` / `DEEPAGENT_INPUT_PARAM_ERROR`，不调用端口）；端口为 `context.ports.commit`；端口异常转为 `missing=True`；取消照常传播 |
+| `summarize_execution` | `async def summarize_execution(context: PersistentBuildContext, execution_id: str, *, detail: Literal["full", "brief"] = "full") -> ExecutionLogSummary`；默认 full 保持兼容 | PA-18 自动材料使用 brief，其他调用默认完整整理 | 先校验 detail、上下文与执行标识，非法即抛 `DEEPAGENT_CONTEXT_PARAM_ERROR` / `DEEPAGENT_INPUT_PARAM_ERROR`，不调用端口；端口异常转为 missing=True；取消照常传播 |
+| `record_blocks` | `async def record_blocks(context: PersistentBuildContext, execution_id: str) -> tuple[tuple[str, ...], bool]`；新增 | 返回完整整理的块元组与 missing 标志，供日志工具分页 | 与 full 执行同一份读取、整份校验、去重及意图 / 结果关联；块以换行连接等于完整整理，先关联再分页，不能把页外结果误判为无结果 |
+| `_record` | 内部 | 共用读取、校验和整理路径 | summary 与 record_blocks 不维护第二套校验规则 |
 | `_validated` / `_checked` / `_foreign` | 内部 | 整份校验（只接受 tuple、归属、来源一致）、按 local_seq 去重与排序 | 任一不合格返回失败类别 |
 | `_diagnose` | 内部 | 写诊断 | 只含类别与定位身份；契约不符记 error，读取失败与空日志记 warning |
 | `_Tools` | 内部 | 按 operation_id 逐次关联意图与结果 | 见第 5.2.1 节 |
@@ -206,12 +213,12 @@ flowchart TD
 4. [交出候选] 文件 reports/q3.md（out_…，目标 chat-1，upload，sha256:…，13 字节）：未见结束记录，无法判断是否被引用：季度报告
 结局：未记录结束；无法仅凭日志确定执行是否已结束。
 归档：archive#7（仅为日志中的归档引用，尚未按 execution_id 查询，可能不全）
-说明：以上由程序从执行日志整理；即使序号连续且有结束记录，也不代表日志完整。结果不明、没有结果或失败的写操作先查证，查不清询问发起人。
+说明：以上由程序从执行日志整理；即使序号连续且有结束记录，也不代表日志完整。结果不明、没有结果或失败的写操作先查证实际效果，不能直接重做；查不清时可以询问发起人，是否询问由模型判断。
 ```
 
 成功的写操作带结果引用时写作：`[成功] submit_reminder(单号=BX-0930) → 已提醒（结果引用 receipt:77）（写操作 op_12，调用 call-12，目标 reminder:BX-0930）`。不在只读名单中的工具（例如 `search_group_messages`）按写操作列出，带“写操作”标记。
 
-不可用时：`上一次执行 E4：上一次记录缺失：没有取得可用的执行日志。不能据此认为上一次没有执行；涉及写操作先查证，查不清询问发起人。`
+不可用时：`上一次执行 E4：上一次记录缺失：没有取得可用的执行日志。不能据此认为上一次没有执行；涉及写操作先查证实际效果，不能直接重做；查不清时可以询问发起人，是否询问由模型判断。`
 
 ## 6. 影响面与实施设计
 
@@ -240,7 +247,7 @@ flowchart TD
 | PA-17-V-05 | 序号缺口；没有结束事件 | 列出缺失区间；写“未记录结束”；`missing=False` |
 | PA-17-V-06 | 写操作各状态；名单外工具没有意图 | 按 D-04 的写法；名单外工具按写操作处理 |
 | PA-17-V-07 | 候选被 final 引用、被 paused 引用、未被引用、没有结束事件；多行正文；文件说明 | 按 D-04 标注；正文原样保留；不出现“已投递”“已送达” |
-| PA-17-V-08 | 很长的日志 | 不截断、不聚合、不省略，写操作全部保留 |
+| PA-17-V-08 | 很长的日志 | 默认 full 不截断、不聚合、不省略，写操作全部保留；新增 brief 与完整块的验证见 F_20 V-26，不改此历史 full 验收的范围 |
 | PA-17-V-09 | 换窗归档 | 列出并注明“尚未按 execution_id 查询” |
 | PA-17-V-10 | 内容相同的重复事件 | 只算一次，不误报缺口 |
 | PA-17-V-11 | operation_id 复用（A → A 成功 → B；再加 A 的重复结果）、未见意图的旧结果 → B → 旧结果重复出现、两条待定意图、重复结果 | 复用前的合并保留；B 保持“已登记，无结果”；其余结果分开列出并注明 |
@@ -251,8 +258,6 @@ flowchart TD
 | 其他 | 任务取消 | 取消照常传播 |
 
 ### 8.2 实际执行与证据
-
-以下为仓库外组件验证记录；仓库落地后的检查见第 8.2.1 节。
 
 - **固定基线：** jiuwenmate 提交 dd648886 的源码快照（`git archive dd648886 openjiuwen tests examples pyproject.toml Makefile`；`openjiuwen`、`tests`、`pyproject.toml`、`Makefile` 的 git 树哈希与仓库 dd648886 逐项一致），应用本特性补丁（源码、测试与本文、S_02、S_05、开发计划 4 个文档）。
 - **工作目录：** 上述快照的根目录，位于开发者本机仓库外的草稿区，不是仓库工作区。所有命令都在这里执行。
@@ -273,29 +278,7 @@ flowchart TD
 | 2026-10-15 / codespell（`make spelling` 只查 `.py`，本次另加文档） | `PYTHONPATH=<codespell 安装目录> $PY -m codespell_lib <源码> <测试> <4 个文档>` | 无输出，退出码 0 | 只覆盖上述 6 个文件 |
 | 2026-10-15 / 变异检查 | 入口：`$PY mutate_pa17.py <快照根> $PY`（在快照根目录外执行亦可，脚本按参数定位文件）。脚本不在仓库内，随本特性交付记录提供（SHA-256 `d93a8831eb63291de80cdec0fe718ab37da9a062a13639babde9544f940db052`），完整命令与输出见同一交付记录中的 `pa17-mutation.log`。每项把 `execution_log.py` 中唯一出现的一段原文替换为改写文本（41 项，如去掉来源一致检查、结果之后的意图仍可合并、契约问题只记 warning、不展示结果引用），运行 `pytest tests/unit_tests/harness/persistent_agent/test_execution_log.py -x`，测试失败即算被发现，随后恢复原文 | 41/41 被发现，退出码 0；执行前后源码哈希不变 | 只改写 `execution_log.py`；按 event_id 去重一项在 P-07 之后成为等价变异，已移出清单；脚本与日志未入库，仓库读者需从交付记录获取 |
 
-上述仓库外验证未覆盖：全仓静态检查与 `make check` / `make type-check`；测试文件的 Pylint 检查与 mypy 诊断处理；PA-18 接入与 M2c 联调；按 execution_id 查询归档（PA-12）；容量验收。
-
-#### 8.2.1 仓库落地后的检查
-
-2026-10-15 按开发者授权，在基于 dd648886 的隔离 Git 工作树应用 PA-17 补丁；未应用 PA-18 补丁，未创建新分支。源码与测试保持补丁原样，仅补充本文的归档日期与落地验证记录。工作目录为该工作树根目录，`$PY` 为项目 `.venv/bin/python`；`PATH` 前置该解释器的 bin 目录，设置 `PYTHONPATH=.`、`PYTHONDONTWRITEBYTECODE=1`，Pylint 与 mypy 缓存放在仓库外验证目录。
-
-| 范围 | 实际命令 | 结果 | 未覆盖 / 说明 |
-| --- | --- | --- | --- |
-| PA-17 定向用例 | `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. $PY -m pytest tests/unit_tests/harness/persistent_agent/test_execution_log.py -q -p no:cacheprovider -o addopts= --disable-warnings` | 40 passed | 组件验证 |
-| harness 与 core Session 回归 | `make test PYTHON="$PY" UV=no RUN_CMD=env TESTFLAGS="tests/unit_tests/harness tests/unit_tests/core/session -q -p no:cacheprovider -o addopts= --disable-warnings"` | 6283 passed、39 skipped、4 subtests passed | 89 warnings；不是真实 AgentServer 联调 |
-| 暂存的 PA-17 源码与测试 | `make check PYTHON="$PY" UV=no RUN_CMD=env` | Ruff 导入顺序、格式、规则与 codespell 通过；Pylint 源码 10.00/10 | 测试目录按 Pylint 配置排除；不是全仓静态检查 |
-| 暂存的 PA-17 源码与测试 | `make type-check PYTHON="$PY" UV=no RUN_CMD=env` | mypy 报告测试文件 4 条已知诊断，源码无诊断 | Makefile 忽略 mypy 的退出码 1，故 make 返回 0；类型检查不能记为通过。诊断位置及原因见上表，未修改测试 |
-| 文档一致性 | 检查 4 份文档的相对链接与章节锚点、PA-17-V 编号；使用 Mermaid 解析本文与计划的图；`codespell -q 3 <4 个文档>`；`git diff --cached --check` | 107 个相对链接与锚点、15 个唯一验证编号、3 个 Mermaid 块语法、codespell 与差异格式检查通过 | Mermaid 未做 SVG 渲染；未执行全仓文档检查 |
-
-PA-18 接入与 M2c 联调、按 execution_id 查询归档及容量验收仍未完成；本次落地不关闭这些验收。
-
-#### 8.2.2 主仓合入前的冲突修正与验证
-
-2026-10-15 按开发者授权，将主仓 `jiuwenmate` 的 feb09685 合入子仓 PA-17 的 e98bcbaf，在计划附录 B.1 保留主仓新增的 PA-15 历史记录与 PA-17 历史记录。主仓 PA-14 工具及测试、F_15 和 PA-15 计划进展保持原样；PA-17 源码与测试逐字节核对仍与 e98bcbaf 一致。以下命令在隔离合并工作树根目录执行，解释器和工具配置沿用第 8.2.1 节。
-
-- 回归：`make test PYTHON="$PY" UV=no RUN_CMD=env TESTFLAGS="tests/unit_tests/harness tests/unit_tests/core/session -q -p no:cacheprovider -o addopts= --disable-warnings"`，6285 passed、39 skipped、89 warnings、4 subtests passed。
-- 静态检查：`make check PYTHON="$PY" UV=no RUN_CMD=env CHANGES_RAW="<PA-17 源码> <PA-17 测试> openjiuwen/harness/persistent_agent/tools/workspace_read.py tests/unit_tests/harness/persistent_agent/test_workspace_read_tools.py"`；`make type-check` 使用同一文件清单。Ruff 导入顺序、格式、规则与 codespell 通过；Pylint 在主仓原样保留的 `workspace_read.py` 有 3 条诊断，mypy 有 8 条（该主仓文件 4 条、PA-17 测试 4 条），PA-17 源码无诊断。Makefile 忽略检查器错误，不把其返回 0 记成全通过；不在本次冲突修正中改动主仓既有文件。
-- 验收边界不变：组件回归不证明真实宿主续做、归档查询或容量验收完成。
+未覆盖：全仓静态检查与 `make check` / `make type-check`；测试文件的 Pylint 检查与 mypy 诊断处理；PA-18 接入与 M2c 联调；按 execution_id 查询归档（PA-12）；容量验收。
 
 ### 8.3 验证结论
 
@@ -306,7 +289,7 @@ PA-18 接入与 M2c 联调、按 execution_id 查询归档及容量验收仍未�
 | 风险 / 遗留 | 影响 | 应对 / 后续入口 |
 | --- | --- | --- |
 | 按 execution_id 查询归档依赖 PA-11、PA-12 | 崩溃前已归档但 `window.switched` 未保存的归档不出现 | D-06；PA-12 接入后由 PA-18 合入 |
-| 不裁剪、不聚合 | 日志很长时整理结果很长 | PA-18 按实际容量判断能否注入；P-04 |
+| 完整整理可能很长 | full 与 record_blocks 保留完整正文，不能直接假定能装入窗口 | PA-18 自动提供 brief，完整细节分页读取；最终请求容量检查与后续材料筛选见 D-05、F_20 D-09 |
 | 端口返回 list 时整份弃用 | 宽松实现的宿主会让续做总是拿到“记录缺失” | 由端口提供方按契约返回 tuple；诊断类别可定位 |
 | operation_id 复用时较早的结果不再合并 | 多出一些待查证的记录 | 有意为之，避免虚假成功（D-04） |
 | 结束记录引用只说明应当投递 | Agent 不知道是否送达 | 投递状态归服务端 |
@@ -334,3 +317,23 @@ PA-18 接入与 M2c 联调、按 execution_id 查询归档及容量验收仍未�
 - 最终变化：意图总在自己的结果之前记账，因此结果之后出现同 ID 的意图按复用处理（补充规则 1 的适用细化）；实现 P-07，日志内 source_ref 须一致，可与当前执行不同；工具项列出调用 ID、目标与结果引用；契约不符记 error，读取失败与空日志记 warning；示例改为与代码一致（只读工具用 `read_file`，没有结束记录时候选写“无法判断是否被引用”）；“只写上一次记录缺失”明确为固定的提示文本，只含目标执行 ID 与处理说明，不含事件内容；补充 `_Tools` 关联状态（第 5.2.1 节）、固定基线与命令；同步 S_02 第 4.3 节、S_05 第 5.3 节与开发计划。
 - 旧结论的效力：上一条修订中“operation_id 出现第二条意图后不再合并”扩展为“出现第二条意图或在结果之后出现意图”。
 - 验证：第 8.2 节。
+
+### 2026-10-16 追加分层摘要与分页数据源（F_20 D-08）
+
+- 原结论与适用范围：`summarize_execution(context, execution_id)` 只有完整整理；P-04 规定不裁剪、不聚合、不省略。
+- 新证据与原因：开发者 2026-10-16 确认 F_20 Q-04 与 D-08：续做自动提供关键进度、成果与所有未决写操作的分层摘要，详细记录由受控工具分页读取。
+- 最终变化：追加关键字参数 `detail`（默认 `full`，行为不变）与 `brief` 规则；新增 `record_blocks`，在同样的整份校验后返回完整整理的各行与各条目。只读名单加入 `read_execution_record`。
+- 旧结论的效力：P-04 与 D-05 继续约束完整整理；分层摘要的省略按 F_20 D-08 执行，并在文本中单独注明。
+- 验证：分层摘要与 `record_blocks` 的用例在本特性测试文件中，执行记录见 [F_20](F_20_continuation.md) 第 8.2 节。
+
+### 2026-10-16 补齐 PA-18 联动接口与容量说明
+
+- 原缺口：D-01 已补 detail，但归档参数说明、关键接口表、长日志验收与示意图仍只表达旧完整整理，存在同文档冲突。
+- 最终变化：统一 summarize_execution 的关键字参数 detail，补 record_blocks 的完整返回类型、共享校验与先关联后分页语义；分别说明 full 与 brief，更新 D-05、LI-5、图和历史规则的适用范围。PA-18 的最终容量检查已接入，不再写为提供方或位置待定；可选材料筛选及换窗验收继续保留。
+- 验证：本轮为文档同步，检查结果维护于 F_20 第 8.2 节；不修改 PA-17 的事件校验、关联算法或默认 full 行为。
+
+### 2026-10-16 Q-09 实际提示同步
+
+- 推送复查发现缺失提示与页脚仍含“查不清询问发起人”的旧措辞，与本文第 4 节和 F_20 Q-09 的模型自主判断不一致。
+- 同步 execution_log.py 的 _MISSING / _FOOTER 和第 5.3 节示例：未决写操作先查证实际效果、不能直接重做；查不清时可以询问，是否询问由模型判断。
+- full、brief 和 missing 三条材料路径均有固定文案之外的约束测试；本次实际执行结果随 F_20 第 8.2 节记录，不以原有组件结果代替。

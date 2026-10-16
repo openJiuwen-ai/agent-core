@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | S_02 / events-and-result-handoff |
 | 关联模块 | [events.py](../../schema/events.py)、[emitter.py](../../execution/emitter.py)、[CommitPort](../../ports.py) |
-| 最近一次修订日期 | 2026-10-15 |
-| 关联 feature | [F_02](../features/F_02_execution-protocol.md)、[F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_18](../features/F_18_output-handoff.md)、[F_19](../features/F_19_execution-log-record.md) |
+| 最近一次修订日期 | 2026-10-16 |
+| 关联 feature | [F_02](../features/F_02_execution-protocol.md)、[F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_18](../features/F_18_output-handoff.md)、[F_19](../features/F_19_execution-log-record.md)、[F_20](../features/F_20_continuation.md) |
 | 设计依据 | [架构设计：事件与确认](../designs/persistent-agent-architecture.md#62-事件传递确认与流量边界)、[结果交接](../designs/persistent-agent-architecture.md#63-完成与结果交接)、[日志读取](../designs/persistent-agent-architecture.md#833-执行日志的读取整理与能力边界) |
 
 本规约唯一维护事件 Schema、序号与可靠性、CommitPort、候选输出及其持久化 / 投递边界。
@@ -71,6 +71,12 @@ reply.delta 保留非空的空格、换行与制表符片段，空字符串不�
 消费方（[F_19](../features/F_19_execution-log-record.md) 的 `summarize_execution`）先整份校验再使用：返回值须是非空 tuple，每项重新 model_validate；租户、Agent、Session、Request 与当前执行一致，execution_id 为读取目标；同一份日志只有一个 source_ref（可以与当前执行不同）；同一 local_seq 只对应一份规范化提案，内容相同的重复只保留一条。任一项不满足即整份弃用，不向模型交出任何事件内容，结果标为记录缺失（`missing=True`）；`missing` 只表示没有取得可用日志，不表示上一次没有执行。诊断只含失败类别与定位身份：读取失败与空日志记 warning，其余契约不符记 error。execution_id 不是合法标识时在读取前抛参数错误，不转为记录缺失。
 
 读不到、空日志或契约不符按“上一次记录缺失”处理，不据此启动整段重放；序号缺口与缺少结束记录照常整理并写明。整理规则见 F_19，查证与续做由 S_05 定义。
+
+#### 4.3.1 `read_execution_link(execution, execution_id) -> ExecutionLink`（可选，续做使用）
+
+宿主在派发 Execution 之前保存它的前序关系，覆盖确认恢复、崩溃续做与非确认暂停后继续，只限同一 Session、同一 Request。该方法由提交端口提供（协议 `ExecutionLinkPort`；该协议与返回 DTO `ExecutionLink` 均由包级 API 懒导出），只读，失败抛异常；构造时不检查，续做开放时由入口在任何事件之前检查（S_05 第 4.4 节）。前序关系是执行元数据，不能由允许缺失的普通事件推出。
+
+`ExecutionLink` 含四项归属（namespace_id、agent_id、session_id、request_id）、`execution_id`、`predecessor_id` 与 `relation`（`first` / `confirmation_resume` / `continuation`）：`first` 没有前序，其他关系必须有前序，不能以自身为前序。消费方（[F_20](../features/F_20_continuation.md) D-06）逐步核对归属与目标执行，拒绝循环和指向当前执行的关联；链接读取失败或不可用只停止继续追溯，不影响已读到的日志；达到配置的追溯上限时写明未查完，不当作链首。
 
 ### 4.4 候选输出交接
 
