@@ -1,0 +1,75 @@
+{
+  "sandbox": {
+    "backend": "yuanrong"
+  },
+  "docker": {
+    "binary": "docker",
+    "api_version": "1.39",
+    "image": "",
+    "network": "bridge",
+    "cpus": 2.0,
+    "memory": "4g",
+    "pids": 512,
+    "workers": 1,
+    "workspace_root": "/path/to/host/sft-workspaces",
+    "output_root": "/path/to/host/sft-runs",
+    "keep_container": false,
+    "host_site_packages": "/path/to/host/site-packages",
+    "runtime_prefix": "/path/to/host/jiuwenswarm",
+    "image_python": "/opt/jiuwenswarm-runtime/bin/python"
+  },
+  "model": {
+    "profile": "supervisor.json",
+    "ssl_cert": "",
+    "timeout_seconds": 660,
+    "verify_ssl": false,
+    "temperature": 0.95
+  },
+  "gateway": {
+    "url": "http://127.0.0.1:18081",
+    "host_url": "http://127.0.0.1:18081",
+    "container_url": "http://172.17.0.1:18081",
+    "api_key_env": "",
+    "timeout_seconds": 30
+  },
+  "jiuwenswarm": {
+    "python": "/path/to/host/jiuwenswarm/bin/python",
+    "gateway_port": 19001,
+    "agent_server_port": 18092
+  },
+  "trajectory": {
+    "scenario": "swe_bench_direct_supervisor",
+    "tenant_id": "docker-lite"
+  },
+  "swe": {
+    "case_file": "testcase.json",
+    "case_ids": [],
+    "enable_task_loop": false,
+    "max_iterations": 100,
+    "timeout_seconds": 1800,
+    "completion_timeout_seconds": 600
+  },
+  "eval": {
+    "enabled": true,
+    "python": "/path/to/host/python/bin/python3",
+    "dataset": "data/eval.json",
+    "split": "test",
+    "workers": 1,
+    "timeout_seconds": 1800,
+    "wall_timeout_seconds": 2400,
+    "cache_level": "env",
+    "namespace": "swebench"
+  },
+  "gold": {
+    "enabled": true,
+    "source": "data/gold.json",
+    "patch_field": "patch",
+    "marker_start": "## Internal Note: Pair Programming Handoff",
+    "marker_end": "## STATEMENT-ENDS"
+  },
+  "yuanrong": {
+    "endpoint": "http://127.0.0.1:8888",
+    "request_timeout_seconds": 300,
+    "namespace": "dev"
+  }
+}
