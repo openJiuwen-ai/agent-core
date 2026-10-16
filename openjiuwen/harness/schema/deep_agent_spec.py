@@ -145,6 +145,10 @@ class VisionModelSpec(BaseModel):
     base_url: str = DEFAULT_OPENAI_BASE_URL
     model: str = DEFAULT_OPENAI_VISION_MODEL
     max_retries: int = 3
+    #: Auth headers for session-mode accounts (mirror of the dataclass field);
+    #: without this the dataclass → spec → dataclass round-trip silently drops
+    #: the headers and team/member agents lose vision authentication.
+    default_headers: Optional[dict[str, str]] = None
 
     def build(self) -> VisionModelConfig:
         return VisionModelConfig(**self.model_dump())

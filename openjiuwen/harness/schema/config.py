@@ -59,6 +59,9 @@ class VisionModelConfig:
     base_url: str = DEFAULT_OPENAI_BASE_URL
     model: str = DEFAULT_OPENAI_VISION_MODEL
     max_retries: int = 3
+    #: Optional auth headers (e.g. session-mode accounts that authenticate via a
+    #: custom Authorization header instead of the bearer api_key).
+    default_headers: Optional[Dict[str, str]] = None
 
     @classmethod
     def from_env(cls) -> "VisionModelConfig":
@@ -84,11 +87,24 @@ class VisionModelConfig:
             else:
                 model = DEFAULT_OPENAI_VISION_MODEL
 
+        headers_raw = (os.getenv("VISION_DEFAULT_HEADERS") or "").strip()
+        default_headers: Optional[Dict[str, str]] = None
+        if headers_raw:
+            try:
+                import json as _json
+
+                parsed_headers = _json.loads(headers_raw)
+                if isinstance(parsed_headers, dict) and parsed_headers:
+                    default_headers = {str(k): str(v) for k, v in parsed_headers.items()}
+            except (ValueError, TypeError):
+                default_headers = None
+
         return cls(
             api_key=api_key,
             base_url=base_url,
             model=model,
             max_retries=_parse_int_from_env("VISION_MAX_RETRIES", 3),
+            default_headers=default_headers,
         )
 
 
