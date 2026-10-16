@@ -252,22 +252,8 @@ class TaskTool(Tool):
             return data
         data["browser_result"] = browser_result
         data["retryable"] = bool(browser_result.get("retryable"))
-        resume_context: dict[str, Any] = {}
-        resume_keys = (
-            "status",
-            "missing_fields",
-            "missing_slots",
-            "requested_slots",
-            "blockers",
-            "evidence",
-            "current_page",
-            "recommended_recovery",
-            "resume_count",
-            "deadline",
-        )
-        for key in resume_keys:
-            resume_context[key] = browser_result.get(key)
-        data["resume_context"] = resume_context
+        # Transport the same facts and scope; do not maintain a second lossy field projection.
+        data["resume_context"] = dict(browser_result)
         return data
 
     @staticmethod
@@ -342,26 +328,15 @@ class TaskTool(Tool):
     def _focused_browser_resume_task(record: dict[str, Any], repair_instruction: str = "") -> str:
         browser_result = record.get("browser_result")
         browser_result = browser_result if isinstance(browser_result, dict) else {}
-        missing_slots = [
-            dict(slot)
-            for slot in browser_result.get("missing_slots") or []
-            if isinstance(slot, dict)
-        ][:12]
-        if not missing_slots:
-            missing_slots = [
-                {"field": str(field_name)}
-                for field_name in browser_result.get("missing_fields") or []
-                if str(field_name).strip()
-            ][:12]
         recovery = str(browser_result.get("recommended_recovery") or "").strip()
         original_goal = record.get("original_user_goal") or record.get("original_task", "")
         return (
             "Resume the same browser task from its current page and retained evidence. "
             f"Original user goal and constraints: {original_goal}. "
             f"Focused repair instruction: {repair_instruction}. "
-            f"Optional extraction hints (not a completion checklist): {json.dumps(missing_slots, ensure_ascii=False)}. "
-            f"Recovery hint: {recovery or 'collect_missing_evidence_from_current_page'}. "
-            "Repair only what is needed for the original goal; inferred slots are not extra requirements. "
+            f"Last observed page: {(browser_result.get('current_page') or {}).get('url', '')}. "
+            f"Recovery hint: {recovery or 'continue_from_current_page'}. "
+            "Repair only what is needed for the original goal using retained source observations. "
             "Keep valid evidence, correct contradicted evidence, and do not repeat satisfied work or expand scope."
         )
 
@@ -564,16 +539,8 @@ class TaskTool(Tool):
             )
 
         terminal_status = str(browser_result.get("status") or existing_query.get("status") or "")
-        from openjiuwen.harness.tools.browser_move.playwright_runtime.evidence import completion_contradiction
-
-        correction = completion_contradiction(
-            browser_result, str(existing_query.get("original_user_goal") or existing_query.get("original_task") or ""),
-        )
-        if terminal_status == "completed" and correction:
-            browser_result = {**browser_result, "status": "partial", "retryable": True, "correction_reason": correction}
-            existing_query["browser_result"] = browser_result
-            terminal_status = "partial"
         can_resume = bool(browser_result.get("retryable")) and terminal_status in {"partial", "blocked"}
+        can_resume = can_resume or bool(terminal_status == "completed" and requested_resume_id)
         can_resume = can_resume and float(existing_query.get("deadline_at") or 0) > time.time()
         resume_count = int(existing_query.get("resume_count") or 0)
         if not can_resume or resume_count >= _BROWSER_QUERY_RESUME_LIMIT:
@@ -1097,18 +1064,21 @@ class TaskTool(Tool):
             return self._existing_browser_query_output(browser_query.record, code="browser_query_deadline_expired")
 
     def render_for_llm(self, output: ToolOutput) -> str:
-        """Render the subagent's answer; browser tasks keep their orchestration fields.
-
-        The tool description tells the model to act on ``resume_task_id``,
-        ``retryable`` and ``browser_result``, so a browser task appends those
-        fields after the answer. A refused browser query (it carries ``code``)
-        already uses that payload as its answer.
-        """
+        """Render one browser result, retaining execution facts and worker interpretation."""
         data = output.data
         answer = render_payload_text(data["output"])
-        orchestration = {key: value for key, value in data.items() if key not in ("output", "agent_id")}
+        orchestration = {
+            key: value for key, value in data.items() if key not in ("output", "agent_id", "resume_context")
+        }
         if not orchestration or "code" in orchestration:
             return answer or "Subagent finished without output."
+        browser_result = orchestration.get("browser_result")
+        if isinstance(browser_result, dict):
+            # The runtime's output already wraps this same result. Plain legacy answers
+            # are retained once, explicitly as worker text rather than execution truth.
+            if answer and not self._extract_browser_result({}, answer) and not browser_result.get("summary"):
+                orchestration["worker_output"] = answer
+            return json.dumps({"browser_orchestration": orchestration}, ensure_ascii=False)
         block = json.dumps({"browser_orchestration": orchestration}, ensure_ascii=False)
         return f"{answer}\n\n{block}" if answer else block
 
