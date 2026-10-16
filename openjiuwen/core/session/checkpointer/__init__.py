@@ -12,14 +12,18 @@ from openjiuwen.core.session.checkpointer.base import (
     WORKFLOW_NAMESPACE_GRAPH,
 )
 from openjiuwen.core.session.checkpointer.checkpointer import (
+    CheckpointerConfig,
     CheckpointerFactory,
     CheckpointerProvider,
 )
+from openjiuwen.core.session.checkpointer.inmemory import InMemoryCheckpointer
 
 __all__ = [
     "CheckpointerFactory",
     "CheckpointerProvider",
     "Checkpointer",
+    "CheckpointerConfig",
+    "InMemoryCheckpointer",
     "Storage",
     "build_key",
     "build_key_with_namespace",
