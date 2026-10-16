@@ -45,6 +45,60 @@ class UntouchedKVStore(BaseKVStore):
     delete_by_prefix = mget = batch_delete = pipeline = _touched
 
 
+class UntouchedGroupPort:
+    async def recent_messages(self, *args, **kwargs):
+        raise AssertionError("construction must not read group messages")
+
+    async def search_messages(self, *args, **kwargs):
+        raise AssertionError("construction must not search group history")
+
+
+def test_group_search_is_execution_owned_and_personal_is_unchanged(api):
+    from openjiuwen.core.runner import Runner
+    from openjiuwen.harness.persistent_agent.tools.effect_policy import is_read_only_tool_name
+
+    name = "search_group_messages"
+    spec = spec_for(api)
+    first_context = context_for(api, spec, "first")
+    second_context = context_for(api, spec, "second")
+    first_context.ports = ports_for(api, group_chat=UntouchedGroupPort())
+    second_context.ports = ports_for(api, group_chat=UntouchedGroupPort())
+    first = api.create_persistent_agent(spec, context=first_context)
+    second = api.create_persistent_agent(spec, context=second_context)
+    try:
+        first_card = first.ability_manager.get(name)
+        second_card = second.ability_manager.get(name)
+        assert first_card is not None and second_card is not None
+        assert first_card.id != second_card.id
+        assert Runner.resource_mgr.get_tool(first_card.id) is not Runner.resource_mgr.get_tool(second_card.id)
+        first_context.validate_binding(first)
+        second_context.validate_binding(second)
+        first.ability_manager.teardown_tools()
+        assert Runner.resource_mgr.get_tool(first_card.id) is None
+        assert Runner.resource_mgr.get_tool(second_card.id) is not None
+        assert is_read_only_tool_name(name) and not is_read_only_tool_name("Search_Group_Messages")
+        plain = DeepAgentSpec(
+            card=spec.card,
+            enable_sys_operation=False,
+            enable_task_loop=False,
+            auto_create_workspace=False,
+        )
+        assert all(card.name != name for card in plain.resolve_parts().tool_cards)
+    finally:
+        first.ability_manager.teardown_tools()
+        second.ability_manager.teardown_tools()
+
+
+def test_group_search_rejects_name_collision(api):
+    from openjiuwen.core.foundation.tool import ToolCard
+
+    spec = spec_for(api, tools=[ToolCard(id="custom-search", name="search_group_messages", stateless=True)])
+    context = context_for(api, spec)
+    context.ports = ports_for(api, group_chat=UntouchedGroupPort())
+    with pytest.raises(BaseError, match="reserved for Persistent group history"):
+        api.create_persistent_agent(spec, context=context)
+
+
 def ports_for(api, **overrides):
     port = Port()
     args = dict(commit=port, budget=port, window_backend=UntouchedKVStore())

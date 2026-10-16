@@ -64,9 +64,8 @@ def session_state_store(context: "PersistentBuildContext") -> SessionStateStore:
 def window_assembler(context: "PersistentBuildContext", *, chain_limit: int | None = None) -> WindowAssembler:
     """Return the window assembler for new Requests and continuations.
 
-    An injected port means its background is expected: a group Session (GroupChatPort) needs the
-    group message reader, and knowledge navigation (KnowledgePort) is not integrated yet. Either
-    missing piece is rejected before any event instead of running without that background.
+    GroupChatPort also serves explicit cross-group search in private Sessions. Only a group-message
+    Request automatically reads current-group background. Knowledge navigation remains unavailable.
     """
     ports = context.ports
     if getattr(ports, "knowledge", None) is not None:
@@ -82,7 +81,9 @@ def continuation_support(context: "PersistentBuildContext") -> None:
 
 def group_message_reader(context: "PersistentBuildContext") -> GroupMessageReader:
     """Return the reader of this Session's group messages."""
-    raise _not_integrated("group message reading", "PA-23")
+    from .group_history import ExecutionGroupMessageReader
+
+    return ExecutionGroupMessageReader()
 
 
 def native_reply_adapter() -> NativeReplyAdapter:

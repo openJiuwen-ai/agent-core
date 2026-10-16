@@ -43,7 +43,7 @@ class GroupMessage(ProtocolModel):
 
 
 class GroupMessageQuery(ProtocolModel):
-    """Bounded search over the Session's group history."""
+    """Bounded search over the bound Agent's currently authorized groups."""
 
     query: Annotated[str, Field(min_length=1, max_length=4096)] | None = None
     since: AwareDatetime | None = None
@@ -51,6 +51,10 @@ class GroupMessageQuery(ProtocolModel):
     sender_id: Identifier | None = None
     cursor: Identifier | None = None
     limit: Annotated[int, Field(strict=True, gt=0, le=500)] = 50
+    group_ids: Annotated[tuple[Identifier, ...], Field(max_length=128)] = ()
+    group_names: Annotated[
+        tuple[Annotated[str, Field(min_length=1, max_length=512, pattern=r"\S")], ...], Field(max_length=128)
+    ] = ()
 
     @model_validator(mode="after")
     def validate_query(self) -> Self:
@@ -83,6 +87,41 @@ class GroupMessagesResult(InvocationRef):
             raise PydanticCustomError("persistent_context", "empty group result must be a complete absence")
         if self.status == "incomplete" and self.reason is None:
             raise PydanticCustomError("persistent_context", "incomplete group result requires a reason")
+        return self
+
+
+class GroupMessageSearchHit(ProtocolModel):
+    """An authorized historical message with an unambiguous source."""
+
+    group_id: Identifier
+    group_name: Annotated[str, Field(min_length=1, max_length=512)]
+    message_ref: Identifier
+    message: GroupMessage
+
+
+class GroupMessageSearchResult(InvocationRef):
+    """Search completeness is independent of the current group's scan cursor."""
+
+    status: Literal["found", "empty", "incomplete", "forbidden", "unavailable", "failed"]
+    hits: Annotated[tuple[GroupMessageSearchHit, ...], Field(max_length=500)] = ()
+    next_cursor: Identifier | None = None
+    query_complete: bool = Field(strict=True)
+    reason: Reason | None = None
+
+    @model_validator(mode="after")
+    def validate_search(self) -> Self:
+        """Never present partial scans or failed authorization as confirmed absence."""
+        complete = self.status in ("found", "empty")
+        if self.query_complete != complete or (complete and self.next_cursor is not None):
+            raise PydanticCustomError("persistent_context", "search status and completeness disagree")
+        if self.status == "found" and not self.hits:
+            raise PydanticCustomError("persistent_context", "found search requires hits")
+        if self.status == "empty" and self.hits:
+            raise PydanticCustomError("persistent_context", "empty search cannot contain hits")
+        if not complete and self.reason is None:
+            raise PydanticCustomError("persistent_context", "unfinished search requires a reason")
+        if self.status in ("forbidden", "unavailable", "failed") and (self.hits or self.next_cursor is not None):
+            raise PydanticCustomError("persistent_context", "failed search cannot expose hits or cursor")
         return self
 
 

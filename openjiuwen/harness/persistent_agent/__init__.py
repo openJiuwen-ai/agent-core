@@ -34,6 +34,8 @@ __all__ = [
     "ModelUsage",
     "GroupMessage",
     "GroupMessageQuery",
+    "GroupMessageSearchHit",
+    "GroupMessageSearchResult",
     "GroupMessagesResult",
     "MaterialQuery",
     "MaterialSnapshot",
@@ -79,6 +81,8 @@ _MODULES = {
         (
             "GroupMessage",
             "GroupMessageQuery",
+            "GroupMessageSearchHit",
+            "GroupMessageSearchResult",
             "GroupMessagesResult",
             "MaterialQuery",
             "MaterialSnapshot",

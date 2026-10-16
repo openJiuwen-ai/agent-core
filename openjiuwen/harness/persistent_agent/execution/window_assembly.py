@@ -137,7 +137,7 @@ class ExecutionWindowAssembler:
     """Arranges the window once at the start of the Execution (architecture §7.4, §5.2.4)."""
 
     def __init__(self, reader: GroupMessageReader | None = None, *, chain_limit: int | None = None):
-        # Present only in a group Session (one with a GroupChatPort).
+        # Port presence enables the reader; only group-message Requests consume it automatically.
         self._reader = reader
         # Most earlier Executions a continuation reads back through (Spec.continuation_chain_limit).
         self._chain_limit = chain_limit
@@ -174,7 +174,7 @@ class ExecutionWindowAssembler:
             )
         parts = [_marked(_execution_header(context, request), EXECUTION_HEADER)]
         cursor = record.last_group_message_id
-        if self._reader is not None:
+        if request.kind == "group_message" and self._reader is not None:
             result = GroupMessagesResult.model_validate(
                 await self._reader.recent_messages(context, after=cursor, trigger_message_id=request.trigger_message_id)
             )
