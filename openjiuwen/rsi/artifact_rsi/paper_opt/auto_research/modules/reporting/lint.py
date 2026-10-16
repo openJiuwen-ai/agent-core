@@ -73,14 +73,20 @@ def check_structure(section_id: str, text: str) -> list[str]:
     draft_lint.py (fetched and read directly from its actual source, not a
     summary): exactly-3 \\item contributions in Introduction, exactly-3
     themed \\subsections in Related Work, a \\subsection{Notation} in
-    Method, exactly-3 named \\subsections in Experiments (their
-    `contrib_items`/`subsection_count`/`require_notation_table` recipe
-    checks), plus the invariant checks every section gets there regardless
-    of recipe (banned LaTeX in prose, a numbered heading, a markdown
-    fence). Their real script reads these target counts from a
+    Method (their `contrib_items`/`subsection_count`/`require_notation_table`
+    recipe checks), plus the invariant checks every section gets there
+    regardless of recipe (banned LaTeX in prose, a numbered heading, a
+    markdown fence). Their real script reads these target counts from a
     `template.json` per venue; this project has one fixed template
     (sections.py), so the targets are inlined directly rather than
     threading a template file through for a single fixed shape.
+
+    Experiments intentionally has no subsection-count invariant (unlike
+    Introduction/Related Work above): an append-only modify-paper run adds
+    exactly one subsection to the existing paper's experiments section, so
+    any fixed target count is wrong by construction for that case — the
+    count is legitimately "however many the baseline already had, plus
+    however many this run appended," not a fixed template shape.
     """
     violations: list[str] = []
     if section_id == "introduction":
@@ -94,13 +100,6 @@ def check_structure(section_id: str, text: str) -> list[str]:
     elif section_id == "method":
         if not _NOTATION_HEADING_RE.search(text):
             violations.append("missing \\subsection{Notation}")
-    elif section_id == "experiments":
-        n = len(_SUBSECTION_RE.findall(text))
-        if n != 3:
-            violations.append(
-                f"expected exactly 3 \\subsection (Implementation Details, Experimental "
-                f"Design, Results), found {n}"
-            )
     elif section_id == "discussion":
         if not _SUBSECTION_RE.search(text):
             violations.append("missing a \\subsection (e.g. Limitations and Failure Modes)")

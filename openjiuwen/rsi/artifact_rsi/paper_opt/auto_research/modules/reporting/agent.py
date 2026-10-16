@@ -102,6 +102,27 @@ _HTML_READ_CHUNK_CHARS = 16_384
 _PREVIOUS_ATTEMPT_NOTES_FILENAME = "PREVIOUS_ATTEMPT_NOTES.md"
 _LATEX_RUNTIME_CONFIG_FILENAME = ".latex-runtime.json"
 
+# The modify-run preamble below defaults to "regenerate every section,
+# don't copy verbatim" — correct for the common multi-iteration research
+# flow, but directly contradictory to a manager subtask contract that asks
+# for an append-only edit (preserve the paper, touch only the named
+# section(s)). Appended to both modify-run preambles so a restrictive
+# contract can override the default without the two instructions fighting
+# in the same prompt (observed against a real run: the model received
+# both "do not copy verbatim" and an append-only contract at once, and
+# produced neither a verbatim-preserved paper nor a fully regenerated one).
+_APPEND_ONLY_GUIDANCE = (
+    "If the manager subtask contract below restricts you to editing specific "
+    "section(s) only, follow that restriction instead of the general guidance "
+    'above -- "do not copy verbatim" does not apply to sections outside that '
+    "restriction. In that case you must still write every file under "
+    "sections/*.tex: for every section you are not asked to change, copy its "
+    "original content byte-for-byte into sections/<id>.tex; for the "
+    "section(s) you are asked to change, write the complete section file -- "
+    "keep its existing content and append your new material, never output "
+    "only the new material by itself."
+)
+
 
 class _HtmlTextExcerptParser(HTMLParser):
     """Collect bounded visible HTML text without retaining the whole document."""
@@ -659,7 +680,7 @@ class ReportingAgent:
                     "Expand or repair the short/missing sections named above, then compile with "
                     "ts-latex. Prioritize actually finishing every section, compiling, and staying "
                     "within word/citation/traceable-number requirements over polish.\n\n"
-                    f"{bands}"
+                    f"{bands}\n\n{_APPEND_ONLY_GUIDANCE}"
                 )
             else:
                 preamble = (
@@ -672,7 +693,7 @@ class ReportingAgent:
                     "still supports, clearly labeling them as historical/prior-paper evidence rather "
                     "than new measurements. Revise or retract prior claims that this run contradicts. "
                     "Layout, prose, and figures may be regenerated.\n\n"
-                    f"{bands}"
+                    f"{bands}\n\n{_APPEND_ONLY_GUIDANCE}"
                 )
         else:
             preamble = (
