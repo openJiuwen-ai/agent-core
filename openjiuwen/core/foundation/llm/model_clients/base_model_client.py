@@ -20,6 +20,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import (
     llm_logger,
+    logger,
     LogEventType,
 )
 from openjiuwen.core.common.security.user_config import UserConfig
@@ -619,28 +620,68 @@ class BaseModelClient(ABC):
             "context_operation_id",
         }
 
-        # Get all fields from model_config (including extra fields)
-        extra_params = self.model_config.model_dump(
-            exclude={
-                "model_name",
-                "model",
-                "temperature",
-                "top_p",
-                "max_tokens",
-                "stop",
-                # Context metadata is consumed by the context engine and must
-                # never be sent as a provider SDK request parameter.
-                "context_window",
-                # Provider-neutral intent; resolved into wire controls separately.
-                "reasoning",
-                # UI-facing alias of ``reasoning`` used by upstream application
-                # catalogs. With extra="allow" it would otherwise be forwarded
-                # verbatim to the provider SDK and rejected as an unknown
-                # keyword argument at call time.
-                "reasoning_level",
-            },
-            exclude_none=True
-        )
+        # Forward only well-defined request keys to the provider SDK.
+        #
+        # ``ModelRequestConfig`` is extra="allow", so upstream applications can
+        # smuggle arbitrary keys (e.g. the jiuwenswarm UI alias
+        # ``reasoning_level``) into the request config. Forwarding them
+        # verbatim makes ``AsyncCompletions.create(**params)`` fail at call
+        # time with "unexpected keyword argument" — far away from where the
+        # field was actually introduced. Instead of growing a blocklist every
+        # time a new upstream field leaks, keep one explicit allowlist here:
+        # vendor-native passthrough is still available through the standard
+        # ``extra_body`` channel, which the SDK forwards inside the JSON body.
+        _SDK_PARAM_ALLOWLIST = frozenset({
+            # OpenAI SDK native request fields commonly configured at request level.
+            "user",
+            "metadata",
+            "store",
+            "logit_bias",
+            "logprobs",
+            "top_logprobs",
+            "n",
+            "presence_penalty",
+            "frequency_penalty",
+            "seed",
+            "response_format",
+            "service_tier",
+            "parallel_tool_calls",
+            "stream_options",
+            "web_search_options",
+            "audio",
+            "modalities",
+            "prediction",
+            "reasoning_effort",
+            "verbosity",
+            "safety_identifier",
+            # Anthropic-style structured output/effort control (also emitted by
+            # the reasoning plan; see llm.reasoning _REASONING_WIRE_KEYS).
+            "output_config",
+            # Vendor-native reasoning/thinking controls historically accepted
+            # as top-level extras (see llm.reasoning legacy-key handling); they
+            # are also routed through extra_body by the reasoning plan.
+            "thinking",
+            "enable_thinking",
+            "thinking_budget",
+            "thinking_strategy",
+            "chat_template_kwargs",
+            # OpenAI SDK standard escape hatch for provider-private parameters.
+            "extra_body",
+            "extra_headers",
+            "extra_query",
+        })
+        dumped = self.model_config.model_dump(exclude_none=True)
+        extra_params = {
+            key: value for key, value in dumped.items()
+            if key in _SDK_PARAM_ALLOWLIST
+        }
+        dropped_keys = sorted(set(dumped) - set(extra_params))
+        if dropped_keys:
+            logger.warning(
+                "[BaseModelClient] dropped non-whitelisted request-config keys before SDK call: %s "
+                "(vendor-private parameters should use extra_body)",
+                dropped_keys,
+            )
         params.update(extra_params)
 
         # Then add kwargs parameters (will override model_config params with same key)
