@@ -822,6 +822,12 @@ class PersistenceCheckpointer(Checkpointer):
             metadata={"operation": "pre_execute", "storage_type": "persistence"}
         )
         if isinstance(inputs, InteractiveInput):
+            # 修复6：交互恢复（InteractiveInput）必须有可恢复的 checkpoint，
+            # 否则图从 start 全新起跑并难定位崩溃。校验逻辑下沉为基类共享方法
+            # （validate_interactive_resume），InMemory/Redis 后端统一接入。
+            await self.validate_interactive_resume(
+                session, self._workflow_storage, self._graph_state, "persistence"
+            )
             await self._workflow_storage.recover(session, inputs)
         else:
             # Check if workflow state exists

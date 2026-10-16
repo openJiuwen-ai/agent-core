@@ -66,6 +66,7 @@ TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
 TEAM_RELIABILITY = "core.team.reliability"
 TEAM_DEBATE_ROUND_CAP = "core.team.debate_round_cap"
+TEAM_SESSION_BUDGET = "core.team.session_budget"
 TEAM_OBSERVABILITY = "core.team.observability"
 
 
@@ -381,6 +382,63 @@ def build_team_debate_round_cap_rail(params: dict[str, Any], context: Any) -> An
 
 
 # ---------------------------------------------------------------------------
+# team.session_budget — team-session rounds/messages/token ceilings (ISS-4993)
+# ---------------------------------------------------------------------------
+
+
+class TeamSessionBudgetInput(ConstructionInput):
+    """Construction inputs for the session budget rail."""
+
+    role: str = context_field(attr="role", default="teammate", description="Team role value.")
+    member_name: str = context_field(attr="member_name", default="", description="Member name.")
+    language: str = context_field(attr="language", default="cn", description="Resolved language code.")
+    max_total_rounds: Optional[int] = param_field(
+        default=None,
+        description="Team-session ceiling on delivering mailbox drains.",
+    )
+    max_total_messages: Optional[int] = param_field(
+        default=None,
+        description="Team-session ceiling on successful send_message calls.",
+    )
+    token_budget: Optional[int] = param_field(
+        default=None,
+        description="Team-session ceiling on cumulative LLM input tokens.",
+    )
+
+
+@harness_element(
+    kind=ElementKind.RAIL,
+    name=TEAM_SESSION_BUDGET,
+    description="Team-session rounds/messages/token ceilings (autonomous runaway guard).",
+    input_model=TeamSessionBudgetInput,
+)
+def build_team_session_budget_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build the session budget rail when at least one ceiling is configured."""
+    from openjiuwen.agent_teams.rails.session_budget_rail import SessionBudgetRail
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    inp = TeamSessionBudgetInput.resolve(params, context)
+    ceilings = (inp.max_total_rounds, inp.max_total_messages, inp.token_budget)
+    if all(value is None for value in ceilings) or inp.role not in {
+        TeamRole.LEADER.value,
+        TeamRole.TEAMMATE.value,
+    }:
+        return None
+    backend = get_team_backend(context)
+    if backend is None or not inp.member_name:
+        return None
+    return SessionBudgetRail(
+        max_total_rounds=inp.max_total_rounds,
+        max_total_messages=inp.max_total_messages,
+        token_budget=inp.token_budget,
+        team_backend=backend,
+        member_name=inp.member_name,
+        role=TeamRole(inp.role),
+        language=inp.language,
+    )
+
+
+# ---------------------------------------------------------------------------
 # core.team.observability — TeamObservabilityRail
 # ---------------------------------------------------------------------------
 
@@ -421,6 +479,7 @@ __all__ = [
     "TEAM_PLAN_MODE",
     "TEAM_RELIABILITY",
     "TEAM_DEBATE_ROUND_CAP",
+    "TEAM_SESSION_BUDGET",
     "TEAM_OBSERVABILITY",
     "OBSERVABILITY",
     "observability_dependency_installed",

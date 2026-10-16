@@ -506,6 +506,7 @@ class AgentConfigurator:
             TEAM_PLAN_MODE,
             TEAM_POLICY,
             TEAM_RELIABILITY,
+            TEAM_SESSION_BUDGET,
             TEAM_TOOL,
             TEAM_TOOL_APPROVAL,
             TEAM_WORKSPACE,
@@ -601,6 +602,33 @@ class AgentConfigurator:
                     params={
                         "max_debate_rounds": spec.max_debate_rounds,
                         "team_name": resolved_team_name,
+                    },
+                ),
+            )
+
+        # session-level budget rail. Autonomous teams whose
+        # chat never matches the debate pattern (member→leader reports,
+        # leader broadcasts) escape the per-teammate debate cap entirely;
+        # this rail bounds the whole session instead — rounds / messages /
+        # input tokens, no leader/report exemptions. Injected whenever any
+        # ceiling is configured (jiuwenswarm defaults all three on).
+        session_ceilings = (
+            spec.max_total_rounds,
+            spec.max_total_messages,
+            spec.token_budget,
+        )
+        if (
+            spec.dispatch_mode == "autonomous"
+            and ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE}
+            and any(value is not None for value in session_ceilings)
+        ):
+            team_rail_specs.append(
+                RailSpec(
+                    type=TEAM_SESSION_BUDGET,
+                    params={
+                        "max_total_rounds": spec.max_total_rounds,
+                        "max_total_messages": spec.max_total_messages,
+                        "token_budget": spec.token_budget,
                     },
                 ),
             )

@@ -214,6 +214,14 @@ class MessageHandler(BaseCoordinationHandler):
             return
 
         backend = self._infra.team_backend
+        # once the session budget is exhausted no member is
+        # woken for new mail anymore — the leader receives exactly one
+        # wrap-up instruction, everyone else (and the leader after its
+        # wrap-up) drains read-only so unread rows stop re-triggering polls.
+        budget_state = getattr(backend, "session_budget_state", None)
+        if budget_state is not None and budget_state.exceeded:
+            await self._drain_under_exhausted_budget(member_name, budget_state)
+            return
         debate_state = getattr(backend, "debate_state", None)
         if (
             self._blueprint.role == TeamRole.LEADER
@@ -235,6 +243,19 @@ class MessageHandler(BaseCoordinationHandler):
                 break
 
             team_logger.info("[{}] processing {} unread messages (steer={})", member_name, len(new_messages), use_steer)
+            # ISS-4993: one delivering drain is one session round. The
+            # crossing check fires mid-drain on purpose — the messages already
+            # read in this drain still get delivered; the budget takes effect
+            # on the next wake.
+            if budget_state is not None:
+                reason = await budget_state.record_turn()
+                if reason:
+                    team_logger.warning(
+                        "[{}] session budget exhausted via rounds: {} (limit {})",
+                        member_name,
+                        budget_state.turn_count,
+                        budget_state.max_total_rounds,
+                    )
             # Collect delivered messages and batch their read-state write into
             # a single transaction after the loop — one commit (one fsync)
             # instead of one per message. The finally guarantees already
@@ -347,6 +368,53 @@ class MessageHandler(BaseCoordinationHandler):
                     await self._infra.message_manager.mark_messages_read(delivered, member_name)
             if interrupted:
                 return
+
+    async def _drain_under_exhausted_budget(self, member_name: str, budget_state: Any) -> None:
+        """Budget-exhausted mailbox handling: one leader wrap-up, read-only drain.
+
+        The leader receives the wrap-up instruction exactly once — the
+        ``mark_wrapup_delivered`` claim makes concurrent wakes race-free —
+        then every member (the leader included, on later wakes) drains its
+        mailbox read-only so unread rows never re-trigger a poll. The
+        wrap-up delivery itself is not counted as a round: the budget that
+        fired it is already spent.
+        """
+        from openjiuwen.agent_teams.rails.session_budget_rail import SessionBudgetState
+
+        is_leader = self._blueprint.role == TeamRole.LEADER
+        has_budget_state = isinstance(budget_state, SessionBudgetState)
+        no_pending_interrupt = not self._round.has_pending_interrupt()
+        # mark_wrapup_delivered is the one-shot claim — keep it last so the
+        # short-circuit only fires it when the wrap-up can actually go out.
+        should_deliver_wrapup = (
+            is_leader
+            and has_budget_state
+            and no_pending_interrupt
+            and await budget_state.mark_wrapup_delivered()
+        )
+        if should_deliver_wrapup:
+            team_logger.info(
+                "[{}] session budget exhausted; delivering leader wrap-up instruction",
+                member_name,
+            )
+            await self._round.deliver_input(
+                budget_state.wrapup_instruction(),
+                use_steer=True,
+            )
+        await self._drain_read_only(member_name)
+
+    async def _drain_read_only(self, member_name: str) -> None:
+        """Mark all unread messages read without waking the local harness."""
+        mm = self._infra.message_manager
+        if mm is None:
+            return
+        try:
+            all_unread = await self._read_all_unread(member_name)
+        except Exception as exc:  # noqa: BLE001 - best-effort drain, keep polls flowing
+            team_logger.warning("[{}] read-only mailbox drain failed: {}", member_name, exc)
+            return
+        if all_unread:
+            await mm.mark_messages_read(all_unread, member_name)
 
     def _language(self) -> str:
         """Team language for delivery-time template rendering."""

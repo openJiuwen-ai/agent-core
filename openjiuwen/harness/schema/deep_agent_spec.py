@@ -446,6 +446,12 @@ class DeepAgentSpec(BaseModel):
     enable_security_rail: bool = True
     enable_tool_resilience_rail: bool = True
     max_iterations: int = 15
+    task_loop_max_iterations: int = 1000
+    """Upper bound on ReAct iterations when ``enable_task_loop`` is on.
+
+    Replaces the unbounded ``sys.maxsize`` the task loop used to install
+    (ISS-4993): the loop gets generous headroom but a guaranteed stop.
+    """
     workspace: Optional[WorkspaceSpec] = None
     cwd: Optional[str] = None
     """Shell working directory / relative-path base. Defaults to the workspace root."""
@@ -587,6 +593,7 @@ class DeepAgentSpec(BaseModel):
             enable_security_rail=self.enable_security_rail,
             enable_tool_resilience_rail=self.enable_tool_resilience_rail,
             max_iterations=self.max_iterations,
+            task_loop_max_iterations=self.task_loop_max_iterations,
             workspace=workspace,
             cwd=self.cwd,
             project_root=self.project_root,
