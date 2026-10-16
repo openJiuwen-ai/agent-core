@@ -124,6 +124,12 @@ class CommitState(StateCollection):
             return None
         return self._io_state.get_by_prefix(node_id if node_id else self._node_id, self._parent_id)
 
+    def clear_outputs(self, node_id=None) -> None:
+        if self._io_state is None:
+            return
+        target = node_id if node_id else self._node_id
+        self._io_state.update_by_id(target, {target: None})
+
     def get_inputs_by_transformer(self, transformer: Callable) -> dict:
         if self._io_state is None:
             return {}

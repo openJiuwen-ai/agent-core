@@ -1,6 +1,6 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Callable, Union, Hashable, Any
+from typing import Callable, Union, Hashable
 
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -10,6 +10,7 @@ from openjiuwen.core.workflow.components.condition.condition import Condition
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.graph.base import Graph
 from openjiuwen.core.graph.executable import Input, Output
+from openjiuwen.core.session.execution_session_ctx import set_component_exec
 from openjiuwen.core.session.node import Session
 
 
@@ -36,6 +37,10 @@ class BranchComponent(WorkflowComponent):
         return self._router
 
     async def invoke(self, inputs: Input, session: Session, context: ModelContext) -> Output:
+        # 组件级执行上下文：BranchRouter 解析链的第一优先级。本组件是路由
+        # 属主，路由 dispatch 发生在 invoke 返回之后的同一 NodeTask 内，
+        # 值不 reset；set_session 保留作为解析链的最终兜底源。
+        set_component_exec(session, context, owner=self._router)
         self._router.set_session(session)
         return {}
 

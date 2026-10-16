@@ -61,6 +61,10 @@ class StreamActor:
         self._node_id: str = node_id
         self._running_tasks: list[asyncio.Task] = []
 
+    def set_vertex(self, vertex: StreamConsumer) -> None:
+        """替换执行期 vertex（per-execution compile 注入本次执行的 fresh vertex）。"""
+        self._vertex = vertex
+
     async def send(self, message: dict, source_ability: ComponentAbility, first_frame: bool = False,
                    producer_id: str = None):
         log_message = dict(event_type=LogEventType.GRAPH_SEND_STREAM_CHUNK,
