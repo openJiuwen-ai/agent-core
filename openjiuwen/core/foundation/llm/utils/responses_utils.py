@@ -22,8 +22,9 @@ from openjiuwen.core.foundation.llm.schema.message import (
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.utils.provider_error import summarize_provider_error_text
+from openjiuwen.core.foundation.llm.utils.request_sanitizer import clean_unicode
+from openjiuwen.core.foundation.tool import ToolInfo
 
 
 class OpenAIAccountResponsesError(Exception):
@@ -89,7 +90,7 @@ def build_request_body(
     expanded = expand_nested_extra_body(extra_body)
     if expanded:
         body.update(expanded)
-    return body
+    return clean_unicode(body)
 
 
 def expand_nested_extra_body(extra_body: Optional[dict[str, Any]]) -> dict[str, Any]:

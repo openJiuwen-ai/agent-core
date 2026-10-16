@@ -619,7 +619,7 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(calls), 2)
         self.assertEqual(first.data["query_id"], "main-query-1")
-        self.assertIn("Optional extraction hints (not a completion checklist)", calls[1]["query"])
+        self.assertIn("retained source observations", calls[1]["query"])
         self.assertIn("Focused repair instruction", calls[1]["query"])
         self.assertIn("do not repeat satisfied work or expand scope", calls[1]["query"])
         self.assertEqual(calls[0]["conversation_id"], calls[1]["conversation_id"])

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from typing import Any, Dict
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,7 +19,7 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PROMPT_ATTACHMENT_PRESERVE_TAIL_METADATA_KEY,
 )
 
-from .browser_logging import browser_agent_log_warning
+from .browser_logging import browser_agent_log_info, browser_agent_log_warning
 from .browser_working_context import BrowserWorkingContextStore
 
 _BROWSER_STATE_MESSAGE_NAME = "current_browser_state"
@@ -46,6 +47,7 @@ _BROWSER_STATE_REFRESH_TOOL_NAMES = frozenset(
         "browser_hover",
         "browser_navigate",
         "browser_navigate_back",
+        "browser_page_action",
         "browser_press_key",
         "browser_run_code",
         "browser_run_code_unsafe",
@@ -86,6 +88,8 @@ _BROWSER_STATE_REFRESH_TOOL_NAMES = frozenset(
 )
 _BROWSER_STATE_OBSERVATION_TOOL_NAMES = frozenset(
     {
+        "browser_phase",
+        "browser_page_action",
         "browser_find",
         "browser_probe_cards",
         "browser_probe_interactives",
@@ -100,6 +104,7 @@ class BrowserStateContextProcessorConfig(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     provider: Any = Field(exclude=True, repr=False)
+    decision_policy: Any = Field(default=None, exclude=True, repr=False)
     max_dom_chars: int = Field(default=12_000, ge=2_000)
 
 
@@ -147,12 +152,38 @@ class BrowserStateContextProcessor(ContextProcessor):
             action_group_id and action_group_id not in self._seen_action_group_ids
         )
         if should_refresh:
+            capture_started = time.perf_counter()
+            session = context.get_session_ref() if context is not None else None
+            from .phase_contract import task_state
+
+            # Shared execution guards need observed capabilities in both modes.
+            include_decision = bool(task_state(session).get("goal"))
+            if self.config.decision_policy is not None:
+                try:
+                    include_decision = self.config.decision_policy.should_observe(context) or include_decision
+                except Exception:
+                    browser_agent_log_warning("[BROWSER_POLICY] observation eligibility failed; use original LLM")
             if reconciliation_only and action_group_id:
-                captured_state = await self._capture_reconciliation_state(action_group_id=action_group_id)
+                captured_state = await self._capture_reconciliation_state(action_group_id=action_group_id,
+                                                                         include_decision=include_decision)
             elif observation_only and action_group_id:
                 captured_state = await self._capture_compact_state(action_group_id=action_group_id)
             else:
-                captured_state = await self._capture_state(action_group_id=action_group_id or "initial")
+                captured_state = await self._capture_state(action_group_id=action_group_id or "initial",
+                                                          include_decision=include_decision)
+            session = context.get_session_ref() if context is not None else None
+            phase = session.get_state("__browser_phase_budget_state__") if session is not None else {}
+            phase = phase if isinstance(phase, dict) else {}
+            browser_agent_log_info("[BROWSER_TIMING] %s", json.dumps({
+                "component": "observation", "task_id": phase.get("task_id"),
+                "phase_version": (phase.get("active_phase_contract") or {}).get("version", 0),
+                "action_group_id": action_group_id or "initial",
+                "capture_mode": (captured_state.get("capture_source") or (
+                    "reconciliation" if reconciliation_only else "compact" if observation_only else "full"
+                )),
+                "elapsed_ms": round((time.perf_counter() - capture_started) * 1000, 3),
+                "success": bool(captured_state.get("ok")),
+            }))
             await self._preserve_projected_state(captured_state)
             self._page_change = self._classify_page_change(captured_state)
             semantic_progress = captured_state.get("semantic_progress")
@@ -168,6 +199,9 @@ class BrowserStateContextProcessor(ContextProcessor):
                 self._consecutive_no_progress += 1
             else:
                 self._consecutive_no_progress = 0
+            from .phase_contract import observe_runtime
+
+            await observe_runtime(self.config.provider, session, captured_state)
             self._cached_state = captured_state
             self._cached_state_message = self._build_state_message(captured_state)
         self._seen_refresh_tool_call_ids.update(refresh_tool_call_ids)
@@ -181,7 +215,16 @@ class BrowserStateContextProcessor(ContextProcessor):
         ]
         if self._cached_state_message is None:
             self._cached_state_message = self._build_state_message(self._cached_state or {})
-        context_window.context_messages.append(self._cached_state_message)
+        state_message = self._cached_state_message
+        if self.config.decision_policy is not None:
+            try:
+                metadata = await self.config.decision_policy.publish_context(
+                    context, self._cached_state or {}, refresh=should_refresh, observation_only=observation_only,
+                )
+                state_message = state_message.model_copy(update={"metadata": {**state_message.metadata, **metadata}})
+            except Exception:
+                browser_agent_log_warning("[BROWSER_POLICY] observation publication failed; use original LLM")
+        context_window.context_messages.append(state_message)
         return None, context_window
 
     @classmethod
@@ -232,7 +275,7 @@ class BrowserStateContextProcessor(ContextProcessor):
             group_browser_ids = group_refresh_ids | group_observation_ids
             if not group_browser_ids:
                 continue
-            refresh_tool_call_ids.update(group_browser_ids)
+            refresh_tool_call_ids = set(group_browser_ids)
             latest_group_id = hashlib.sha256("\x1f".join(call_ids).encode("utf-8")).hexdigest()[:16]
             latest_observation_only = not group_refresh_ids and bool(group_observation_ids)
         return latest_group_id, refresh_tool_call_ids, latest_observation_only
@@ -274,6 +317,13 @@ class BrowserStateContextProcessor(ContextProcessor):
             if cls._is_refresh_tool_name(tool_call.name) and cls._tool_message_changed_state(tool_message):
                 mutation_ids.add(call_id)
             if cls._is_observation_tool_name(tool_call.name) and cls._tool_message_succeeded(tool_message):
+                if str(tool_call.name).endswith("browser_phase"):
+                    try:
+                        phase_result = json.loads(tool_message.content)
+                    except (TypeError, ValueError):
+                        phase_result = {}
+                    if not phase_result.get("observation_updated"):
+                        continue  # Metadata updates must not trigger another capture.
                 observation_ids.add(call_id)
         return call_ids, mutation_ids, observation_ids
 
@@ -366,10 +416,12 @@ class BrowserStateContextProcessor(ContextProcessor):
             for expected in _BROWSER_STATE_OBSERVATION_TOOL_NAMES
         )
 
-    async def _capture_state(self, *, action_group_id: str) -> Dict[str, Any]:
+    async def _capture_state(self, *, action_group_id: str, include_decision: bool = False) -> Dict[str, Any]:
         try:
             capture = self.config.provider.capture_browser_state
-            if action_group_id == "initial":
+            if include_decision:
+                state = await capture(action_group_id=action_group_id, include_decision=True)
+            elif action_group_id == "initial":
                 state = await capture()
             else:
                 try:
@@ -426,12 +478,14 @@ class BrowserStateContextProcessor(ContextProcessor):
                 state["page_position"] = self._cached_state.get("page_position") or {}
         return state
 
-    async def _capture_reconciliation_state(self, *, action_group_id: str) -> Dict[str, Any]:
+    async def _capture_reconciliation_state(self, *, action_group_id: str,
+                                            include_decision: bool = False) -> Dict[str, Any]:
         capture = getattr(self.config.provider, "capture_reconciliation_browser_state", None)
         if not callable(capture):
             return await self._capture_state(action_group_id=action_group_id)
         try:
-            state = await capture(action_group_id=action_group_id)
+            decision_kwargs = {"include_decision": True} if include_decision else {}
+            state = await capture(action_group_id=action_group_id, **decision_kwargs)
         except Exception as exc:
             browser_agent_log_warning(
                 "[BrowserStateContextProcessor] browser state reconciliation failed: %s",
@@ -490,6 +544,8 @@ class BrowserStateContextProcessor(ContextProcessor):
 
     @staticmethod
     def _state_header(state: Dict[str, Any]) -> Dict[str, Any]:
+        from .phase_contract import binding_targets
+
         page_state = state.get("page_state")
         if not isinstance(page_state, dict):
             page_state = {}
@@ -504,6 +560,7 @@ class BrowserStateContextProcessor(ContextProcessor):
             "dom_error": state.get("dom_error"),
             "native_ax": state.get("dom") or "",
             "page_state": page_state,
+            "phase_bindings": binding_targets((state.get("decision_observation") or {}).get("controls", []), limit=12),
             "recall_handle": state.get("projection_recall_handle"),
         }
 
@@ -562,6 +619,7 @@ class BrowserStateContextProcessor(ContextProcessor):
             collections = (
                 page_state.get("interactives"),
                 page_state.get("cards"),
+                (payload.get("phase_bindings") or {}).get("targets"),
             )
             while self._serialized_size(payload) > self.config.max_dom_chars:
                 largest = max(
@@ -572,6 +630,9 @@ class BrowserStateContextProcessor(ContextProcessor):
                 if largest is None:
                     break
                 largest.pop()
+                bindings = payload.get("phase_bindings") or {}
+                if largest is bindings.get("targets"):
+                    bindings["omitted"] = int(bindings.get("omitted", 0)) + 1
 
         if self._serialized_size(payload) <= self.config.max_dom_chars:
             payload["truncated"] = True

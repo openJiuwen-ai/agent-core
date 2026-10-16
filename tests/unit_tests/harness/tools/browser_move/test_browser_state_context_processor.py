@@ -713,8 +713,8 @@ async def test_runtime_combines_snapshot_with_page_metadata() -> None:
     runtime._selector_primary_links = {}
     runtime._last_observed_url = ""
     runtime.ensure_runtime_ready = AsyncMock()
-    runtime._call_playwright_tool = AsyncMock(return_value='- link "Docs" [ref=e3]')
-    runtime._call_playwright_run_code_unsafe = AsyncMock(
+    runtime.call_playwright_tool = AsyncMock(return_value='- link "Docs" [ref=e3]')
+    runtime.call_playwright_run_code_unsafe = AsyncMock(
         return_value={
             "ok": True,
             "url": "https://example.test/docs",
@@ -734,15 +734,15 @@ async def test_runtime_combines_snapshot_with_page_metadata() -> None:
     state = await runtime.capture_browser_state()
 
     runtime.ensure_runtime_ready.assert_awaited_once()
-    runtime._call_playwright_tool.assert_awaited_once_with("browser_snapshot", {})
-    run_code = runtime._call_playwright_run_code_unsafe.await_args.args[0]
+    runtime.call_playwright_tool.assert_awaited_once_with("browser_snapshot", {})
+    run_code = runtime.call_playwright_run_code_unsafe.await_args.args[0]
     assert "page.screenshot" not in run_code
     assert state["ok"] is True
     assert state["url"] == "https://example.test/docs"
     assert state["dom"] == '- link "Docs" [ref=e3]'
     assert state["page_state"]["interactives"][0]["text"] == "Docs"
     assert "screenshot" not in state
-    target = runtime._ensure_page_state().resolve_target(generation_id="g0", ref="e3")
+    target = runtime.ensure_page_state().resolve_target(generation_id="g0", ref="e3")
     assert target is not None
     assert target.locator == {"ref": "e3"}
 
@@ -755,8 +755,8 @@ async def test_runtime_timeout_reconciliation_skips_full_snapshot() -> None:
     runtime._selector_primary_links = {}
     runtime._last_observed_url = "https://example.test/current"
     runtime.ensure_runtime_ready = AsyncMock()
-    runtime._call_playwright_tool = AsyncMock()
-    runtime._call_playwright_run_code_unsafe = AsyncMock(
+    runtime.call_playwright_tool = AsyncMock()
+    runtime.call_playwright_run_code_unsafe = AsyncMock(
         return_value={
             "ok": True,
             "url": "https://example.test/next",
@@ -773,8 +773,8 @@ async def test_runtime_timeout_reconciliation_skips_full_snapshot() -> None:
 
     state = await runtime.capture_reconciliation_browser_state(action_group_id="timeout-group")
 
-    runtime._call_playwright_tool.assert_not_awaited()
-    runtime._call_playwright_run_code_unsafe.assert_awaited_once()
+    runtime.call_playwright_tool.assert_not_awaited()
+    runtime.call_playwright_run_code_unsafe.assert_awaited_once()
     assert state["ok"] is True
     assert state["reconciliation_only"] is True
     assert state["url"] == "https://example.test/next"
@@ -789,13 +789,13 @@ async def test_runtime_automatic_capture_replaces_refs_after_url_generation_sync
     runtime._selector_primary_links = {}
     runtime._last_observed_url = ""
     runtime.ensure_runtime_ready = AsyncMock()
-    runtime._call_playwright_tool = AsyncMock(
+    runtime.call_playwright_tool = AsyncMock(
         side_effect=[
             '- button "First" [ref=e1]',
             '- button "Second" [ref=e2]',
         ]
     )
-    runtime._call_playwright_run_code_unsafe = AsyncMock(
+    runtime.call_playwright_run_code_unsafe = AsyncMock(
         side_effect=[
             {
                 "ok": True,
@@ -822,9 +822,9 @@ async def test_runtime_automatic_capture_replaces_refs_after_url_generation_sync
     assert first_state["page_state"]["interactives"][0]["text"] == "First"
     assert second_state["page_state"]["interactives"][0]["text"] == "Second"
     assert runtime.generation_id == "g1"
-    assert runtime._ensure_page_state().resolve_target(generation_id="g1", ref="e2") is not None
+    assert runtime.ensure_page_state().resolve_target(generation_id="g1", ref="e2") is not None
     with pytest.raises(ValueError, match="Stale AX ref e1 belongs to g0"):
-        runtime._ensure_page_state().resolve_target(generation_id="g1", ref="e1")
+        runtime.ensure_page_state().resolve_target(generation_id="g1", ref="e1")
 
 
 @pytest.mark.asyncio
@@ -835,8 +835,8 @@ async def test_runtime_does_not_reuse_dom_when_snapshot_capture_fails() -> None:
     runtime._selector_primary_links = {}
     runtime._last_observed_url = ""
     runtime.ensure_runtime_ready = AsyncMock()
-    runtime._call_playwright_tool = AsyncMock(side_effect=RuntimeError("snapshot timeout"))
-    runtime._call_playwright_run_code_unsafe = AsyncMock(
+    runtime.call_playwright_tool = AsyncMock(side_effect=RuntimeError("snapshot timeout"))
+    runtime.call_playwright_run_code_unsafe = AsyncMock(
         return_value={
             "ok": True,
             "url": "https://fresh.example",
