@@ -48,6 +48,13 @@ _INTERNAL_REQUEST_KEYS = {
     "provider",
     "stream",
 }
+# UI-compat request keys that upstream applications (e.g. jiuwenswarm model
+# catalog) may carry inside request-config mappings. ``reasoning_level`` is a
+# UI-facing alias for the provider-neutral ``reasoning`` intent; if it leaks
+# into ``ModelRequestConfig`` (extra="allow") it is forwarded verbatim to the
+# provider SDK, which rejects the unknown kwarg at call time. The compiler
+# normalizes it away before building request defaults.
+_UI_ALIAS_REQUEST_KEYS = {"reasoning_level"}
 _CORE_ONLY_REQUEST_KEYS = {"context_window"}
 _ROUTER_PROVIDER_BY_CORE_PROVIDER = {
     ProviderType.OpenAI.value.lower(): "openai",
@@ -373,6 +380,10 @@ def _request_config_data(values: Mapping[str, Any] | None) -> dict[str, Any]:
         if value is None or key in _INTERNAL_REQUEST_KEYS or normalized_key in _REQUEST_MODEL_KEYS:
             continue
         if normalized_key in _CLIENT_CONFIG_FIELDS:
+            continue
+        # UI-compat aliases (e.g. ``reasoning_level``) never reach the provider
+        # SDK: map them onto their provider-neutral core keys instead.
+        if normalized_key in _UI_ALIAS_REQUEST_KEYS:
             continue
         result[normalized_key] = deepcopy(value)
     return result

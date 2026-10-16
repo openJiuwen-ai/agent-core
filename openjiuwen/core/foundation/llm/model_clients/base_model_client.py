@@ -633,6 +633,11 @@ class BaseModelClient(ABC):
                 "context_window",
                 # Provider-neutral intent; resolved into wire controls separately.
                 "reasoning",
+                # UI-facing alias of ``reasoning`` used by upstream application
+                # catalogs. With extra="allow" it would otherwise be forwarded
+                # verbatim to the provider SDK and rejected as an unknown
+                # keyword argument at call time.
+                "reasoning_level",
             },
             exclude_none=True
         )

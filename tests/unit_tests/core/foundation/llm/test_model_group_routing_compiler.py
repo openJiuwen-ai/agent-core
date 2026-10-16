@@ -66,6 +66,31 @@ def test_compile_single_model_ignores_model_request_default_aliases():
     assert compiled.model_request_config.temperature == 0.4
 
 
+def test_compile_single_model_drops_ui_reasoning_level_alias():
+    """``reasoning_level`` is a UI-facing alias and must never reach the SDK.
+
+    Upstream catalogs (jiuwenswarm model groups) carry ``reasoning_level`` in
+    request-config mappings. Because ``ModelRequestConfig`` allows extra
+    fields, a leaked alias would be forwarded verbatim to the provider SDK
+    and rejected at call time as an unexpected keyword argument.
+    """
+    compiled = compile_model_selection({
+        "model_id": "m1",
+        "model_name": "qwen-plus",
+        "provider": ProviderType.DashScope.value,
+        "api_key": "sk",
+        "api_base": "https://dashscope.aliyuncs.com/compatible-mode",
+        "request_defaults": {
+            "temperature": 0.4,
+            "reasoning_level": "max",
+        },
+    })
+
+    dumped = compiled.model_request_config.model_dump(exclude_none=True)
+    assert "reasoning_level" not in dumped
+    assert dumped["temperature"] == 0.4
+
+
 def test_compile_model_group_without_strategy_uses_first_enabled_route_as_single_model():
     compiled = compile_model_selection({
         "model_group_id": "group-1",
