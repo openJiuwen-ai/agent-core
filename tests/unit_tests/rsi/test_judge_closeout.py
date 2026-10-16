@@ -2,6 +2,7 @@
 """Judge iteration recovery always starts from the complete frozen snapshot."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -147,3 +148,69 @@ async def test_closeout_has_no_consumed_state(tmp_path, monkeypatch):
     assert await judge_runtime.run_judge_closeout(EvaluatorConfig(), tmp_path) == _verdict()
     assert await judge_runtime.run_judge_closeout(EvaluatorConfig(), tmp_path) == _verdict()
     assert model.invoke.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [
+    'Assessment:\n```json\n{"score":0}\n```\n```json\n{"score":1}\n```',
+    '{"overall_reason":"return "ok""}',
+    '{"score":0,"score":1}',
+])
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+async def test_runtime_format_error_reaches_persisted_recovery(tmp_path, monkeypatch, raw, repair_succeeds):
+    from openjiuwen.core.runner import Runner
+
+    agent = SimpleNamespace(
+        card=SimpleNamespace(id="judge-test", name="evaluator_agent"),
+        configured_rails=lambda: [],
+        cleanup_task_resources=AsyncMock(),
+    )
+    monkeypatch.setattr(judge_runtime, "inline_evidence", lambda *args, **kwargs: None)
+    monkeypatch.setattr(judge_runtime, "build_judge_agent", lambda *args, **kwargs: agent)
+    monkeypatch.setattr(Runner, "run_agent", AsyncMock(return_value={"output": raw}))
+    repaired = _verdict(0.9) if repair_succeeds else raw
+    repair = AsyncMock(return_value=repaired)
+    monkeypatch.setattr(llm_as_judge, "repair_judge_json", repair)
+    judger = LlmAsJudgeJudger(_config(tmp_path))
+    if repair_succeeds:
+        result = await judger.judge(**_arguments(tmp_path))
+        assert result.passed is True
+        assert result.metadata["parsed"]["overall_score"] == 0.9
+    else:
+        with pytest.raises(EvaluationInfrastructureError, match="Unusable LLM evaluation"):
+            await judger.judge(**_arguments(tmp_path))
+        assert not list(tmp_path.rglob("assessment.json"))
+        assert list(tmp_path.rglob("validation_error_1.json"))
+    response_path, = tmp_path.rglob("response_1.json")
+    assert json.loads(response_path.read_text(encoding="utf-8"))["raw_output"] == raw
+    repair.assert_awaited_once()
+    assert repair.call_args.args[1] == raw
+    agent.cleanup_task_resources.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_primary_error", [False, True])
+async def test_cleanup_failure_does_not_replace_verdict_or_execution_error(tmp_path, monkeypatch, has_primary_error):
+    from openjiuwen.core.runner import Runner
+
+    agent = SimpleNamespace(
+        card=SimpleNamespace(id="judge-cleanup", name="evaluator_agent"),
+        configured_rails=lambda: [],
+        cleanup_task_resources=AsyncMock(side_effect=RuntimeError("cleanup unavailable")),
+    )
+    monkeypatch.setattr(judge_runtime, "inline_evidence", lambda *args, **kwargs: None)
+    monkeypatch.setattr(judge_runtime, "build_judge_agent", lambda *args, **kwargs: agent)
+    call = AsyncMock(side_effect=TimeoutError("original timeout")) if has_primary_error else AsyncMock(
+        return_value={"output": _verdict()},
+    )
+    monkeypatch.setattr(Runner, "run_agent", call)
+    removed = []
+    monkeypatch.setattr(Runner.resource_mgr, "remove_sys_operation", removed.append)
+    if has_primary_error:
+        with pytest.raises(TimeoutError, match="original timeout"):
+            await judge_runtime.run_judge_agent(_config(tmp_path), tmp_path, "", tmp_path / "tools.jsonl")
+    else:
+        assert await judge_runtime.run_judge_agent(
+            _config(tmp_path), tmp_path, "", tmp_path / "tools.jsonl",
+        ) == _verdict()
+    assert removed == ["evaluator_agent_judge-cleanup"]
