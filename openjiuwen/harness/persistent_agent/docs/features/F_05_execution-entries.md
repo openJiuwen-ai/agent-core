@@ -7,7 +7,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-05，F_05 为文档编号 |
-| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14；PA-08 交接替代说明：2026-10-14（见附录 A.2） |
+| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14；PA-08 交接替代说明：2026-10-14；v0.1.20 冲突修复与入口测试适配：2026-10-16（见附录 A.2） |
 | 负责人 | Song Haoran、Chen Ran；认领和后续安排以统一开发计划为准 |
 | 方案依据 | 沿用已确认架构及现行 spec；原阶段记录注明 D1～D7 已确认，本次不新增设计确认或修改架构 |
 | 原实现范围 | 内部 `persistent_agent/schema/request.py`、`execution/{entries,control,emitter,model_rail,seams}.py`、`schema/spec.py`，外层 `__init__.py` 与对应单测；复用共享 Session 接缝 |
@@ -448,22 +448,9 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 
 | 性质 | 缺口 / 限制 | 影响及后续归属 |
 | --- | --- | --- |
-<<<<<<< HEAD
-| 当前验证失败 | 两个入口流式事件链未通过 | 查明原生流到展示出口的缺口后重跑 PA-05-V-02 / V-06；不降低验收预期来伪造通过 |
-| 未实现接入 | PA-06、PA-09、PA-10 getter 仍拒绝（PA-06 已于 2026-10-12 接入，PA-10 已于 2026-10-14 接入，见 [F_17](F_17_session-state-record.md)；PA-09 仍拒绝） | 正式任务 / 确认恢复不能开放；M1 使用真实组件验收 |
-=======
 | 历史验证失败，本轮不再复现 | 2026-10-12 记录的两个入口流式事件链失败 | 2026-10-14 基于 8e0d1067 的独立回归通过：PA 包与 core Session 823 passed；历史失败记录保留，真实宿主验收仍待进行 |
-<<<<<<< HEAD
-| 未实现接入 | PA-06、PA-09、PA-10 getter 仍拒绝 | 正式任务 / 确认恢复不能开放；M1 使用真实组件验收 |
->>>>>>> 05b63e9e3 (docs(harness): record PA-05 refused tool call behavior)
-=======
 | 未实现接入 | PA-06、PA-10 已接入（2026-10-12、2026-10-14，见 [F_17](F_17_session-state-record.md)）；PA-09 回复适配与 PA-23 群消息读取的 getter 仍拒绝 | 确认恢复与群 Session 任务仍拒绝；私聊和定时任务的正式入口可执行，但 M1 真实组件验收前不声明 execution 能力 |
-<<<<<<< HEAD
->>>>>>> 543754d14 (docs(harness): synchronize PA-10 design and integration status)
-| 未实现接入 | PA-08 文件候选、超限答案补交；PA-18 续做；PA-23 游标群背景 | 当前只自动交接 message 最终回答；pending_answer 后续拆候选或转文件由 PA-08 决定，不重跑业务；recovery_ref 仍拒绝 |
-=======
 | 未实现接入 | PA-18 续做；PA-23 游标群背景 | recovery_ref 仍拒绝。原“PA-08 文件候选、超限答案补交”一项已由 [F_18](F_18_output-handoff.md) 实现组件（超长回答分段、`share_file` 文件候选、结束事件补交重试），真实服务端联调待完成 |
->>>>>>> eae315844 (docs(harness): document PA-08 contracts and validation)
 | 有意保留范围 | task-loop、同步 / 异步 / 持久子代理关闭 | PA-24～PA-26 逐项验证后开放，不由配置偷偷启用 |
 | 已有组件验证、真实集成待完成 | 工具停止、取消或报错后的调用组保留、残缺结果补位和状态保存已有 PA-10 组件证据 | 见 F_17；真实宿主与 PA-18 续做仍须查证日志和外部效果，不能据此宣称完整安全续做 |
 | 预算覆盖限制 | 原生 Rail 之外的内部模型调用，例如独立 task planning 模型，不经过本 Rail | 一期不启用这类 Rail；开放时评估额外预算消费者 |
@@ -504,6 +491,7 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 | 2026-10-14 当前接入状态同步 | PA-10 接入后，按代码更新 getter 状态（存储与组装器已接入，群消息读取与回复适配仍拒绝）、确认恢复的拒绝原因、SessionStateStore 边界、Model Rail 钩子（新增 before_invoke）与未实现接入遗留；原“四个 getter 统一拒绝”“四个钩子”及“PA-10 getter 仍拒绝”为接入前描述 | 第 1.3、2.3、2.5、3.2、4.3 节；[F_17](F_17_session-state-record.md) |
 | 2026-10-14 PA-08 交接替代 | 最终回答交接改由 F_18 的交接模块完成：身份按内容在 Request 范围内派生，超长回答分段交出、不再以 paused(error) 结束，ExecutionEnding 去掉 pending_answer；收尾先整批准备候选（含 `share_file` 文件），结束事件首次失败按原事件补交并重试一次；删除 emit_if_fits | [F_18](F_18_output-handoff.md)；第 2.3、2.6、3.2、4.3 节保留原结论并注明替代 |
 | 2026-10-14 PA-10 联动（Q-03） | 被控制 Rail 阻止的工具调用写入结果“本次执行正在结束，该工具未调用。”，不再以强制结束载荷的文字作为窗口中的工具结果：PA-10 接入后窗口跨任务保存，内部停止信号会带到下一任务，停止时也显示 error | 第 2 节控制检查第 4 条；[F_17](F_17_session-state-record.md) Q-03；test_entries.py 中的 `test_calls_refused_after_a_control_say_they_did_not_run`（停止、取消）与 `test_the_control_rail_refuses_every_call_with_the_same_note`（含致命错误） |
+| 2026-10-16 v0.1.20 基线适配 | 清理第 4.3 节的冲突标记与重复旧状态，保留 PA-10、PA-08 已接入的说明；完整保留各方入口测试，将终结错误替身明确为不可重试错误，并补充瞬态重试恢复、耗尽及逐次调用记账验证，保留新基线重试策略 | [F_17 第 9 节](F_17_session-state-record.md#2026-10-16-v0120-基线冲突修复)；原验收预期与共享接入契约不变 |
 
 ### 2026-10-14 控制 Rail 说明文字修复与独立验证
 

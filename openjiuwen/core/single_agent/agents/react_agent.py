@@ -61,6 +61,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
@@ -2898,9 +2899,7 @@ class ReActAgent(BaseAgent):
         raw_turn_number = inputs.get("_turn_number") if isinstance(inputs, dict) else None
         turn_number = (
             raw_turn_number
-            if isinstance(raw_turn_number, int)
-            and not isinstance(raw_turn_number, bool)
-            and raw_turn_number > 0
+            if isinstance(raw_turn_number, int) and not isinstance(raw_turn_number, bool) and raw_turn_number > 0
             else None
         )
         invocation_id = str(raw_invocation_id or uuid.uuid4().hex)
@@ -3441,9 +3440,7 @@ class ReActAgent(BaseAgent):
                     if pending_id is None:
                         await session.write_stream(schema)
                         continue
-                    if (
-                        hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id
-                    ):
+                    if hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id:
                         await session.write_stream(schema)
         else:
             await session.write_stream(
@@ -3788,9 +3785,9 @@ class ReActAgent(BaseAgent):
 
     @staticmethod
     def _retain_cancelled_turn_messages(
-            messages: List[Any],
-            journal: Dict[str, ToolMessage],
-            marker: str = "[Request cancelled by user]",
+        messages: List[Any],
+        journal: Dict[str, ToolMessage],
+        marker: str = "[Request cancelled by user]",
     ) -> List[Any]:
         """Keep an aborted turn's real tool facts (retain_tool_facts_on_abort).
 

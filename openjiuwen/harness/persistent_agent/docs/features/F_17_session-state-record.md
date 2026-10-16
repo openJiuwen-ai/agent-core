@@ -5,7 +5,7 @@
 | 项 | 值 |
 | --- | --- |
 | 建档日期 | 2026-10-13 |
-| 修订日期 | 2026-10-14：开发者确认决策，方案由草稿改为已确认；同日确认 D-06 的影响范围与后续处理未完成时的保存规则，实现 I-08 并按审阅修复配对、卸载检查与记录校验；同日确认 Q-02、Q-03 与宿主安全 Rail 约定，等待现场改为按调用内容核对，并明确两项保留限制；按第四轮审阅收紧保存失败、防篡改、消息往返与安全保证的表述，见第 9 节 |
+| 修订日期 | 2026-10-14：开发者确认决策，方案由草稿改为已确认；同日确认 D-06 的影响范围与后续处理未完成时的保存规则，实现 I-08 并按审阅修复配对、卸载检查与记录校验；同日确认 Q-02、Q-03 与宿主安全 Rail 约定，等待现场改为按调用内容核对，并明确两项保留限制；按第四轮审阅收紧保存失败、防篡改、消息往返与安全保证的表述；2026-10-16：补充 v0.1.20 基线冲突修复与验证，见第 9 节 |
 | 范围 | agent-core `openjiuwen/harness/persistent_agent`：`SessionStateStore` 接入点与内部组件 `WindowStore` 的实现、会话状态记录的结构与序列化、保存前的窗口同步、Execution 结束时的窗口整理、中途结束后的占位补位、记录错误分类、存储键编码、卸载缓冲的前置拒绝；以及原生执行路径保留真实工具事实所需的 core 改动（D-06）。不含换窗、归档与检索（PA-11、PA-12），只提供它们共用的键编码 |
 | 方案成熟度 | 已确认（2026-10-14）：D-01～D-10 均已确认；D-06 的 core 改动需要维护者评审，按开发者最新决定以“待评审”标注交付，不作为本次合入前置；Q-01～Q-03 均已确认 |
 | 计划条目 | [开发计划](../designs/persistent-agent-development-plan.md) PA-10 |
@@ -650,3 +650,25 @@ PYLINTHOME=/var/folders/_l/c87b96ts3xx_s3fhy4_m4w4m0000gn/T/pa10-after-pa05-merg
 - 旧结论的效力：“I-08 未提交”由本条替代；此前 7010 与变异检查保留为历史证据，未将未重跑项目写成本轮通过。
 - 影响与同步：F_05 保留独立修复和当前接入说明，统一计划 §4.1 更新已提交范围与推送前证据；负责人修改只限该节 PA-05、PA-06、PA-10 三行。真实宿主未联调，core 维护者评审待完成，PA-10 仍进行中。
 - 验证：第 7.2 节本轮复核，7012 passed；完整静态检查的既有失败与复杂度增加分别列出。主仓 PA-10 PR 仍须在子仓推送后取得开发者单独确认。
+
+### 2026-10-16 v0.1.20 基线冲突修复
+
+- 范围与确认依据：开发者确认在父仓 `jiuwenmate_v0.1.20` 的最新基线修复剩余冲突并补回 F_19 历史记录；本次基线为 `bc6100f69`，PA-18 不纳入本次工作，不改变已确认的 D-06 或共享契约。
+- 合并方案：`ReActAgent` 导入去重并保留 `ToolCall`；保留默认关闭的 `retain_tool_facts_on_abort` 和新基线的方法声明；同时初始化新基线的 `_last_model_tools` 与本特性的 `_tool_fact_journals`。保留 v0.1.20 其余实现及已合入的流生命周期适配，不用旧版整文件覆盖 core。
+- 测试与文档：完整保留 PA-05、PA-10、PA-08 的入口测试及所需消息类型；开发计划与 F_05 按旧分支已提交版本 `e145fc562` 清理叠加的历史状态，不使用工作区未提交内容；从原合并提交恢复 F_19 第 8.2.2 节，并保持其旧基线历史证据身份。
+- 基线适配：首轮相关回归为 1123 passed、3 failed。新基线增加模型瞬态错误重试，旧测试的一次普通异常会在重试后取得替身的默认成功回答，未进入原定的终结错误场景。测试替身明确区分不可重试错误与瞬态错误，保留既有暂停与交接断言，并补充瞬态错误恢复、重试耗尽及各次模型调用记账的入口验证；生产重试策略不修改。
+- 验证范围：先检查语法及冲突标记，再验证 PA 包、工具事实保留与默认取消行为、Session/checkpointer、流提前关闭与反复取消，以及新基线的上下文工具用量统计；按结果扩大到 Harness 共享回归。以下为本次新执行的结果，前述旧基线记录不作为新基线通过证据。
+
+实际环境为 macOS arm64、Python 3.11.17，使用主 checkout 的既有 `.venv`，命令在基于 `bc6100f69` 的隔离工作树根目录执行。`$PY` 指向该虚拟环境的 `bin/python`；`PATH` 前置同一 `bin`，设置 `PYTHONDONTWRITEBYTECODE=1`、`PYTHONPATH=.`，Ruff、Pylint 与 mypy 缓存放在 `/private/tmp/pa-v0120-*`，未暂存文件或修改工具配置。
+
+| 范围 | 实际入口 | 本次结果与边界 |
+| --- | --- | --- |
+| 终结错误与瞬态重试的入口验证 | `make test UV=no PYTHON="$PY" TESTFLAGS='tests/unit_tests/harness/persistent_agent/test_entries.py -k "native_failures_pause_without_output or native_transient_failures_keep_retries or pauses_hand_off_listed_files_and_controls_hand_off_nothing or a_listing_whose_result_a_host_rail_withheld_is_not_handed_off" -q -p no:cacheprovider -o addopts= --disable-warnings --tb=short --show-capture=no'` | 10 passed、125 deselected、2 warnings；原终结错误断言不变，新增重试恢复与耗尽两种情况 |
+| Harness、Session、工具事实与上下文统计回归 | `make test UV=no PYTHON="$PY" TESTFLAGS='tests/unit_tests/harness tests/unit_tests/core/session tests/unit_tests/agent/react_agent/test_react_agent_tool_fact_retention.py tests/unit_tests/agent/react_agent/test_react_agent_cancel_context.py tests/unit_tests/agent/react_agent/test_react_agent_context_config.py tests/unit_tests/core/single_agent/test_context_usage_events.py tests/unit_tests/core/context_engine/test_context_usage.py -q -p no:cacheprovider -o addopts= --disable-warnings --tb=short --show-capture=no'` | 7699 passed、128 skipped、93 warnings、4 subtests passed；96.39 秒。包括流提前关闭、重复取消、默认关闭的清理行为，以及实际工具列表的用量统计 |
+| 两个改动的 Python 文件 | `make check UV=no RUN_CMD=env PYTHON="$PY" CHANGES_RAW='openjiuwen/core/single_agent/agents/react_agent.py tests/unit_tests/harness/persistent_agent/test_entries.py'` | Ruff 导入、格式、规则与 codespell 通过；Pylint 27 条诊断，9.71/10，未通过。测试目录按配置不做 Pylint 检查 |
+| 同一 Python 文件清单 | `make type-check UV=no RUN_CMD=env PYTHON="$PY" CHANGES_RAW='openjiuwen/core/single_agent/agents/react_agent.py tests/unit_tests/harness/persistent_agent/test_entries.py'` | mypy 204 条诊断（core 189、入口测试 15），未通过。Makefile 忽略检查器退出码，不把 make 返回 0 记成通过 |
+| 内容与文档核对 | Python AST、原合并提交比较、相对链接及章节锚点扫描、`codespell -q 3 <本次 4 个 Markdown 文件>`、`git diff --check` | core AST 与三个冲突块的预定合并结果一致，其他差异仅为格式；原 86 个入口测试函数的 AST 全部保留；F_19 第 8.2.2 节与原合并提交 `9c11f2b3e` 一致；PA 文档 800 个相对链接、其中 61 个章节锚点均有效；跟踪的 Python / Markdown 无 Git 冲突标记，差异格式与文档拼写通过 |
+
+静态诊断对照使用当前依赖与工具配置，将旧 PA 基线 `e145fc562`、新 release 基线 `5cc21e0f2` 的源文件分别送入 Pylint `--from-stdin` / mypy `--shadow-file`，不改工作树。Pylint 两侧分别为 27、25 条；合并后的诊断按符号与消息对照，差异为模块总行数及组合后的 `_execute_tool_call` 局部变量数（17/15）、`_inner_stream` 语句数（51/50）。mypy 两侧 core 分别为 159、190 条；本次 core 189 条按符号与消息归一化行号后，均可在至少一侧找到；入口测试与旧版本同为 15 条，忽略行号位移后无新增。该对照仅说明诊断来源，不等于完整静态检查通过；本次不为消除这些诊断做无关重构。
+
+验收边界：本次未运行全仓测试、真实 AgentServer 联调、覆盖率或变异检查；不证明续做接入、确认恢复开放、容量验收或其他暂缓能力完成。PA-18 未应用，D-06 的 core 维护者评审仍待完成；开发计划中的负责人、状态、依赖和完成数不变。
