@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from enum import Enum
 from typing import Self, Union, Callable, Any, Optional, Dict
 
@@ -41,6 +42,25 @@ FIRST_IN_LOOP = "_first_in_loop"
 CONDITION_NODE_ID = "condition"
 BODY_NODE_ID = "body"
 POST_BODY_NODE_ID = "post_body"
+
+# 循环组件执行期状态会话化（静态图实例复用的并发隔离）：同一
+# AdvancedLoopComponent 实例被并发执行共享时，break 退出标志 / 轮次计数
+# 不能落共享实例字段（并发会话互相覆盖：A 的 break 写进「最后进入循环的
+# 会话」、B 的 is_broken 恒读 False → 循环不退出 → 循环体重跑）。
+# 执行期 session 经 ContextVar 按任务解析（on_invoke 设置/复位），
+# _broken / finish_index 一律读写该 session 的 state；无执行期上下文时
+# 回退实例字段，保持旧行为。
+_LOOP_EXEC_SESSION: ContextVar[Optional[NodeSession]] = ContextVar(
+    "openjiuwen_loop_exec_session", default=None
+)
+
+
+def _resolve_loop_session(component: Any) -> Optional[NodeSession]:
+    """按执行期上下文解析循环组件当前执行的 session（无上下文回退实例字段）。"""
+    session = _LOOP_EXEC_SESSION.get()
+    if session is not None:
+        return session
+    return getattr(component, "_node_session", None)
 
 
 class LoopGroup(BaseWorkflow, Executable):
@@ -318,22 +338,34 @@ class PostLoopBody(Executable):
         self._finish_index = -1
 
     async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
-        finish_index = session.state().get(FINISH_INDEX)
-        if finish_index is not None:
-            self._finish_index = finish_index
-        self._finish_index += 1
-        session.state().update({FINISH_INDEX: self._finish_index})
-        session.state().commit()
+        # 轮次计数写执行期 session（并发下共享实例字段会跨会话串值）。
+        loop_session = _LOOP_EXEC_SESSION.get()
+        state = loop_session.state() if loop_session is not None else session.state()
+        finish_index = state.get(FINISH_INDEX)
+        if not isinstance(finish_index, int):
+            finish_index = -1
+        finish_index += 1
+        state.update({FINISH_INDEX: finish_index})
+        state.commit()
         return None
 
     def skip_trace(self) -> bool:
         return True
 
     def get_finish_index(self) -> int:
-        return self._finish_index
+        loop_session = _LOOP_EXEC_SESSION.get()
+        if loop_session is None:
+            return self._finish_index
+        value = loop_session.state().get(FINISH_INDEX)
+        return value if isinstance(value, int) else -1
 
     def set_finish_index(self, finish_index: int) -> None:
-        self._finish_index = finish_index
+        loop_session = _LOOP_EXEC_SESSION.get()
+        if loop_session is None:
+            self._finish_index = finish_index
+            return
+        loop_session.state().update({FINISH_INDEX: finish_index})
+        loop_session.state().commit()
 
 
 class AdvancedLoopComponent(ComponentComposable, LoopController, Executable, AtomicNode):
@@ -383,11 +415,13 @@ class AdvancedLoopComponent(ComponentComposable, LoopController, Executable, Ato
         self._callbacks.append(callback)
 
     def __call__(self, *args, **kwargs) -> list[str]:
-        return self.atomic_invoke(session=self._node_session)
+        return self.atomic_invoke(session=_resolve_loop_session(self))
 
     def _atomic_invoke(self, **kwargs) -> Any:
         try:
-            outputs = self._condition_invoke(session=self._node_session)
+            outputs = self._condition_invoke(
+                session=kwargs.get("session") or _resolve_loop_session(self)
+            )
             return outputs
         except Exception as e:
             if isinstance(e, BaseError):
@@ -437,33 +471,54 @@ class AdvancedLoopComponent(ComponentComposable, LoopController, Executable, Ato
         return self._in_loop if continue_loop else self._out_loop
 
     def is_broken(self) -> bool:
-        _is_broken = self._node_session.state().get(BROKEN)
+        # 退出标志按执行期 session 读取（不读共享实例字段上的 session）
+        session = _resolve_loop_session(self)
+        if session is None:
+            return False
+        _is_broken = session.state().get(BROKEN)
         if isinstance(_is_broken, bool):
             return _is_broken
         return False
 
     def break_loop(self):
-        self._node_session.state().update({BROKEN: True})
+        # 退出标志写入执行期 session 并提交（未提交的 staged 写会随 session
+        # 对象切换丢失，并发下 break 标志须落盘）
+        session = _resolve_loop_session(self)
+        if session is None:
+            return
+        session.state().update({BROKEN: True})
+        session.state().commit()
 
     async def on_invoke(self, inputs: Input, session: BaseSession, **kwargs) -> Output:
         loop_session = session
-        self._node_id = loop_session.node_id()
-        self._node_session = NodeSession(loop_session, self._node_id)
+        # These values belong to this invocation. Keeping them on the reusable
+        # component lets a concurrent call overwrite the session used to read
+        # the loop result after the nested graph returns.
+        node_id = loop_session.node_id()
+        node_session = NodeSession(loop_session, node_id)
+        self._node_id = node_id
+        self._node_session = node_session
 
-        loop_session.state().set_outputs({LOOP_ID: self._node_id})
+        loop_session.state().set_outputs({LOOP_ID: node_id})
         state = loop_session.state()._io_state.get_state()
         state = state.get(session.parent_id()) if session.parent_id() else state
-        if state and self._node_id in state:
-            del state[self._node_id]
+        if state and node_id in state:
+            del state[node_id]
         loop_session.state().set_outputs(state)
         loop_session.state().commit()
 
         if loop_session.tracer() is not None:
             loop_session.tracer().register_workflow_span_manager(loop_session.executable_id())
-        compiled = self._graph.compile(loop_session, **kwargs)
-        await compiled.invoke(inputs, loop_session)
-        result = self._node_session.state().get_outputs(self._node_id)
-        loop_session.state()._io_state.update_by_id(self._node_id, {self._node_id: None})
+        # 执行期 session 上通道：本次循环执行的 break/轮次计数解析到本会话
+        # （并发执行各自任务上下文内可见；finally 复位防泄漏到同任务后续代码）
+        token = _LOOP_EXEC_SESSION.set(self._node_session)
+        try:
+            compiled = self._graph.compile(loop_session, **kwargs)
+            await compiled.invoke(inputs, loop_session)
+        finally:
+            _LOOP_EXEC_SESSION.reset(token)
+        result = node_session.state().get_outputs(node_id)
+        loop_session.state().clear_outputs(node_id)
         return result
 
     def graph_invoker(self) -> bool:

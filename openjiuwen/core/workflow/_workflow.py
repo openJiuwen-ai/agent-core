@@ -25,6 +25,7 @@ from openjiuwen.core.session import ProxySession, NodeSession, InteractiveInput
 from openjiuwen.core.session import Transformer
 from openjiuwen.core.session import SubWorkflowSession
 from openjiuwen.core.session import RouterSession
+from openjiuwen.core.session.execution_session_ctx import resolve_routing_session
 from openjiuwen.core.session import BaseSession
 from openjiuwen.core.session import WorkflowSession
 
@@ -279,8 +280,12 @@ class BaseWorkflow:
         else:
             def new_router(state):
                 sig = inspect.signature(router)
+                # A callable router is part of the reusable workflow graph too.
+                # Resolve the session of this execution instead of closing over
+                # the workflow's build-time ProxySession.
+                current_session = resolve_routing_session(self._session)
                 if 'session' in sig.parameters:
-                    return router(session=RouterSession(self._session))
+                    return router(session=RouterSession(current_session))
                 else:
                     return router()
 
