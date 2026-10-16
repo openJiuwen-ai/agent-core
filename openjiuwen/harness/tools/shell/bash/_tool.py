@@ -65,6 +65,7 @@ class _BashInputs:
     workdir: str
     run_in_background: bool
     max_output_chars: int
+    head_ratio: float
     shell_type: str
     description: str
 
@@ -130,6 +131,25 @@ class BashTool(Tool):
         return max(200, min(value, max_chars))
 
     @staticmethod
+    def _resolve_head_ratio(raw_value: Any, default: float = 0.6) -> float:
+        """Parse and clamp the head/tail split ratio used for truncated output.
+
+        The head shares are given to the start of the output (setup / context);
+        the remainder keeps the tail (typically the error or final status).
+        ``BASH_TOOL_HEAD_RATIO`` overrides the default when the caller omits it.
+        """
+        try:
+            env_default = float(os.getenv("BASH_TOOL_HEAD_RATIO") or default)
+        except ValueError:
+            env_default = default
+        default = max(0.0, min(1.0, env_default))
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            value = default
+        return max(0.0, min(1.0, value))
+
+    @staticmethod
     def _parse_inputs(inputs: Dict[str, Any]) -> _BashInputs:
         """Parse and clamp tool inputs."""
         shell_type = inputs.get("shell_type", "auto")
@@ -141,6 +161,7 @@ class BashTool(Tool):
             workdir=inputs.get("workdir", ""),
             run_in_background=bool(inputs.get("run_in_background", False)),
             max_output_chars=BashTool._resolve_max_output_chars(inputs.get("max_output_chars", 20000)),
+            head_ratio=BashTool._resolve_head_ratio(inputs.get("head_ratio")),
             shell_type=shell_type,
             description=inputs.get("description", ""),
         )
@@ -219,6 +240,7 @@ class BashTool(Tool):
                         exit_code=res.data.exit_code if res.data.exit_code is not None else -1,
                         warning=warning,
                         max_output_chars=p.max_output_chars,
+                        head_ratio=p.head_ratio,
                     ),
                     res.message,
                 )
@@ -244,6 +266,7 @@ class BashTool(Tool):
                 exit_code=exit_code,
                 warning=warning,
                 max_output_chars=p.max_output_chars,
+                head_ratio=p.head_ratio,
             ),
             meaning.is_error,
         )
@@ -342,6 +365,7 @@ class BashTool(Tool):
                 exit_code=final_exit_code,
                 warning=warning,
                 max_output_chars=p.max_output_chars,
+                head_ratio=p.head_ratio,
             ),
             meaning.is_error,
         )
