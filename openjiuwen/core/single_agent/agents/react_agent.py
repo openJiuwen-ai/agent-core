@@ -3455,12 +3455,12 @@ class ReActAgent(BaseAgent):
             )
 
     async def stream(
-            self,
-            inputs: Any,
-            session: Optional[Session] = None,
-            stream_modes: Optional[List[StreamMode]] = None,
-            *,
-            _background_task_lifecycle=None,
+        self,
+        inputs: Any,
+        session: Optional[Session] = None,
+        stream_modes: Optional[List[StreamMode]] = None,
+        *,
+        _background_task_lifecycle=None,
     ) -> AsyncIterator[Any]:
         """Stream execute ReAct process
 
@@ -3495,16 +3495,14 @@ class ReActAgent(BaseAgent):
         if self.is_agent_session:
             await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
 
-        if _background_task_lifecycle is not None:
-            async with aclosing(self._inner_stream(
-                session=session, inputs=inputs, need_cleanup=need_cleanup,
+        async with aclosing(
+            self._inner_stream(
+                session=session,
+                inputs=inputs,
+                need_cleanup=need_cleanup,
                 _background_task_lifecycle=_background_task_lifecycle,
-            )) as chunks:
-                async for chunk in chunks:
-                    yield chunk
-            return
-
-        async with aclosing(self._inner_stream(session=session, inputs=inputs, need_cleanup=need_cleanup)) as chunks:
+            )
+        ) as chunks:
             async for chunk in chunks:
                 yield chunk
 
