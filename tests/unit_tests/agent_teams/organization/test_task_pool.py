@@ -4471,6 +4471,98 @@ async def test_owner_can_dissolve_organization_and_recreate_it(active_organizati
     assert agents["team-a"].spec.metadata["organization_id"] == "org-dissolve"
 
 
+async def _seed_foreign_org_row(agents, *, organization_id: str, owner_team_id: str) -> None:
+    """Persist an org_info row as if a team from another session created it."""
+    backend = agents["team-a"].team_backend
+    manager = get_process_org_manager(
+        organization_id=organization_id,
+        db=backend.db,
+        messager=backend.messager,
+        session_id="session-old",
+    )
+    await manager.initialize(
+        metadata={
+            "owner_team_id": owner_team_id,
+            "owner_leader_id": f"leader-{owner_team_id}",
+            "session_id": "session-old",
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_organization_reassigns_id_from_inactive_owner(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await _seed_foreign_org_row(agents, organization_id="org-reuse", owner_team_id="team-gone")
+
+    created = await runtime.create_organization(
+        organization_id="org-reuse",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+
+    assert created.organization_id == "org-reuse-2"
+    assert created.owner_team_id == "team-a"
+    assert agents["team-a"].team_backend.org_task_manager.organization_id == "org-reuse-2"
+    stale = await get_process_org_manager(
+        organization_id="org-reuse",
+        db=agents["team-a"].team_backend.db,
+        messager=agents["team-a"].team_backend.messager,
+        session_id=session_id,
+    ).get_organization()
+    assert stale is not None
+    assert stale.owner_team_id == "team-gone"
+
+
+@pytest.mark.asyncio
+async def test_create_organization_suffix_skips_taken_candidates(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await _seed_foreign_org_row(agents, organization_id="org-crowded", owner_team_id="team-gone")
+    await _seed_foreign_org_row(agents, organization_id="org-crowded-2", owner_team_id="team-also-gone")
+
+    created = await runtime.create_organization(
+        organization_id="org-crowded",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+
+    assert created.organization_id == "org-crowded-3"
+    assert created.owner_team_id == "team-a"
+
+
+@pytest.mark.asyncio
+async def test_create_organization_still_conflicts_with_live_same_session_owner(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await runtime.create_organization(
+        organization_id="org-live",
+        owner_team_id="team-b",
+        session_id=session_id,
+    )
+
+    with pytest.raises(ValueError, match="organization already belongs to team: team-b"):
+        await runtime.create_organization(
+            organization_id="org-live",
+            owner_team_id="team-a",
+            session_id=session_id,
+        )
+    assert agents["team-a"].team_backend.org_task_manager is None
+
+
+@pytest.mark.asyncio
+async def test_org_create_organization_tool_reports_reassigned_id(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    await _seed_foreign_org_row(agents, organization_id="org-tool-reuse", owner_team_id="team-gone")
+    await runtime.ensure_control_tools(agents["team-a"], session_id=session_id)
+    owner_tools = {tool.card.name: tool for tool in agents["team-a"].harness.tools}
+
+    created = await owner_tools["org_create_organization"].invoke({"organization_id": "org-tool-reuse"})
+
+    assert created.success
+    assert created.data["organization_id"] == "org-tool-reuse-2"
+    assert created.data["requested_organization_id"] == "org-tool-reuse"
+    assert "org-tool-reuse-2" in created.data["note"]
+    assert agents["team-a"].team_backend.org_task_manager.organization_id == "org-tool-reuse-2"
+
+
 @pytest.mark.asyncio
 async def test_non_owner_cannot_dissolve_organization_even_without_bindings(active_organization_runtime):
     runtime, agents, session_id = active_organization_runtime

@@ -19,7 +19,7 @@ Team Organization defines 24 Leader tools. The complete catalog belongs in the g
 
 | Tool | Purpose | Main constraint |
 |------|---------|-----------------|
-| `org_create_organization` | Create an Organization owned by the active Team | Safe ID; a Team cannot join two Organizations |
+| `org_create_organization` | Create an Organization owned by the active Team | Safe ID; a Team cannot join two Organizations. Organization IDs share one namespace in the owner `TeamDatabase`: if the requested ID is still recorded for an owner Team that is not active in this session, a unique `-N` suffix is allocated and the effective ID is returned — use the returned `organization_id` for subsequent `org_*` calls |
 | `org_invite_team` | Invite an active same-session Team | The target shares the owner's `TeamDatabase` |
 | `org_dissolve_organization` | Unbind members and delete Organization data | Owner only; not a root-task completion action |
 | `org_list_available_teams` | List active Teams that can be invited | Active Teams only |
