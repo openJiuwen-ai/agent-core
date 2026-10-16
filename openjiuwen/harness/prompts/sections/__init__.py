@@ -11,6 +11,7 @@ class SectionName:
     SKILLS = "skills"
     TOOLS = "tools"
     TODO = "todo"
+    TASK_DESCRIPTION = "task_description"
     TASK_TOOL = "task_tool"
     TOOL_NAVIGATION = "tool_navigation"
     PROGRESSIVE_TOOL_RULES = "progressive_tool_rules"
