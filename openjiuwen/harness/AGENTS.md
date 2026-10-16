@@ -49,7 +49,7 @@ harness/
 ├── security/              # 工具权限引擎：tiered_policy / file_guard / shell_ast（S_08）
 ├── skills/                # skill 库状态（library_state）（S_16）
 ├── subagent_runtime/      # 子代理运行时：registry / instance / control / persistence（S_10）
-├── subagents/             # 内置子代理：browser / code / explore / plan / research / verification（S_18）
+├── subagents/             # 内置子代理：browser / code / cua / explore / mobile_gui / plan / research / verification（S_18）
 ├── task_loop/             # 任务循环：controller / event_handler / event_executor（S_03）
 ├── tools/                 # 工具集合：shell / web / worktree / subagent / skills ...（S_05）
 └── workspace/             # 工作空间：workspace.py / directory_builder.py（S_09）

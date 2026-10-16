@@ -245,6 +245,20 @@ def test_preprocess_builds_four_layer_offline(tmp_path):
     assert do.agents[0].prompt == "compute the answer"
 
 
+def test_preprocess_accepts_agent_template(tmp_path):
+    """The offline preview must not reject an option the real backend accepts."""
+    script = _write(tmp_path, '''
+from swarmflow import agent
+
+META = {"name": "exp", "description": "expert preview", "phases": []}
+
+async def run(args):
+    return await agent("shoot", label="clip", options={"agent_template": "clip"})
+''')
+    run = asyncio.run(preprocess_swarmflow(script))
+    assert run.name == "exp"
+
+
 def test_execute_worker_derives_teammate_spec_without_team_tools(tmp_path, monkeypatch):
     """_execute_worker derives a WORKER spec from the base spec: a teammate
     without team tools — todo planning preserved, structured_output appended,
@@ -1045,3 +1059,205 @@ def test_external_worker_binds_activity_sink_with_node_identity(monkeypatch):
     )
     assert result.text == "ext"
     assert binds == [(sink, "n1", "run", "x", None)]
+
+
+def test_execute_worker_runs_under_its_own_trajectory_subject(monkeypatch):
+    """A native worker runs under a ``team_member`` subject shown by its call label."""
+    from openjiuwen.agent_teams.harness import team_harness as th_mod
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.harness.execution_subject import current_execution_subject
+
+    run_subjects: list = []
+
+    class _FakeHarness:
+        async def run_once(self, content, **kw):
+            run_subjects.append(current_execution_subject())
+            return {"output": "ok", "result_type": "answer"}
+
+        def add_rail(self, rail):
+            return None
+
+        async def dispose(self):
+            return None
+
+    monkeypatch.setattr(th_mod.TeamHarness, "build", lambda **kw: _FakeHarness())
+
+    backend = TeamWorkerBackend(
+        model=None,
+        worker_base_spec=DeepAgentSpec(tools=[]),
+        team_name="t",
+        session_id="product-sess",
+    )
+    asyncio.run(
+        backend._execute_worker(
+            "t",
+            [],
+            member_name="wf-compute-0",
+            has_schema=False,
+            model=None,
+            label="compute",
+        )
+    )
+
+    subject = run_subjects[0]
+    assert subject.subject_id == "team-member:product-sess:t:wf-compute-0"
+    assert subject.display_name == "compute"
+    assert subject.kind == "team_member"
+    assert subject.session_id == "product-sess"
+    assert current_execution_subject() is None
+
+
+# --- agent_template: pick an AgentGroup member as the worker identity ---
+
+
+def _expert(name="clip", persona="PERSONA", *, external=False, spec=None):
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.agent_teams.workflow.backends.expert_specs import SwarmflowExpertEntry
+
+    return SwarmflowExpertEntry(
+        member_name=name,
+        display_name=f"display-{name}",
+        persona=persona,
+        spec=None
+        if external
+        else (
+            spec
+            or DeepAgentSpec(
+                tools=[], enable_task_loop=True, agent_template_spec={"agent_card": {"id": name, "name": name}}
+            )
+        ),
+        external_cli=object() if external else None,
+    )
+
+
+class _RecordingBackend(TeamWorkerBackend):
+    """Records what _execute_worker received instead of building a harness."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.calls: list[dict] = []
+
+    async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None, **kw):
+        self.calls.append({"member": member_name, "has_schema": has_schema, "kw": kw})
+        if has_schema and tools:
+            tools[0].captured = {"x": "1"}
+            tools[0].called = True
+            return ""
+        return "native"
+
+
+def _expert_backend(**experts):
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    return _RecordingBackend(model=None, worker_base_spec=DeepAgentSpec(tools=[]), run_id="r1", expert_specs=experts)
+
+
+def test_known_options_declare_agent_template():
+    assert "agent_template" in TeamWorkerBackend.KNOWN_OPTIONS
+
+
+def test_preview_backend_accepts_every_team_backend_option():
+    """Offline preview must not reject an option the live backend accepts."""
+    from openjiuwen.agent_teams.workflow.engine.backends.mock import MockBackend
+
+    assert TeamWorkerBackend.KNOWN_OPTIONS <= MockBackend.KNOWN_OPTIONS
+
+
+def test_agent_template_hit_routes_expert_entry_into_execute_worker():
+    backend = _expert_backend(clip=_expert())
+    result = asyncio.run(backend.run("p", {"label": "x", "agent_template": "clip"}, None, call_key="k"))
+    assert result.text == "native"
+    assert backend.calls[0]["kw"]["expert"].member_name == "clip"
+
+
+def test_agent_template_absent_keeps_legacy_call_shape():
+    backend = _expert_backend(clip=_expert())
+    asyncio.run(backend.run("p", {"label": "x"}, None, call_key="k"))
+    assert "expert" not in backend.calls[0]["kw"]  # byte-compatible path: no new kwarg
+
+
+@pytest.mark.parametrize(
+    ("opts", "needle"),
+    [
+        ({"label": "x", "agent_template": "designer/clip"}, "bare member name"),
+        ({"label": "x", "agent_template": 123}, "bare member name"),
+        ({"label": "x", "agent_template": "scene"}, "available members: ['clip']"),
+        # the Leader is never in the expert table; say so instead of "not a member"
+        ({"label": "x", "agent_template": "leader"}, "Team Leader"),
+        ({"label": "x", "agent_template": "clip", "agent_type": "codex"}, "mutually exclusive"),
+    ],
+)
+def test_agent_template_validation_rejects_before_launch(opts, needle):
+    backend = _expert_backend(clip=_expert())
+    with pytest.raises(BackendError) as exc:
+        asyncio.run(backend.run("p", opts, None, call_key="k"))
+    assert needle in str(exc.value)
+    assert exc.value.retryable is False
+    assert backend.calls == []
+
+
+def test_agent_template_without_bound_group_explains_binding():
+    backend = _expert_backend()
+    with pytest.raises(BackendError, match="no AgentGroup is bound"):
+        asyncio.run(backend.run("p", {"label": "x", "agent_template": "clip"}, None, call_key="k"))
+
+
+def test_agent_template_external_member_is_not_supported_yet():
+    backend = _expert_backend(writer=_expert("writer", external=True))
+    with pytest.raises(BackendError, match="external runtime"):
+        asyncio.run(backend.run("p", {"label": "x", "agent_template": "writer"}, None, call_key="k"))
+    assert backend.calls == []
+
+
+def test_describe_agent_template_returns_display_name_or_none():
+    backend = _expert_backend(clip=_expert())
+    assert backend.describe_agent_template({"label": "x", "agent_template": "clip"}) == "display-clip"
+    assert backend.describe_agent_template({"label": "x"}) is None
+    assert backend.describe_agent_template({"label": "x", "agent_template": "nope"}) is None
+
+
+def test_execute_worker_prepends_persona_to_engine_worker_prompt(monkeypatch):
+    """Expert path: system_prompt = persona + blank line + the unchanged engine text;
+    tools come from the expert spec (+ structured_output), not the teammate base."""
+    from openjiuwen.agent_teams.harness import team_harness as th_mod
+    from openjiuwen.agent_teams.schema.deep_agent_spec import BuiltinToolSpec, DeepAgentSpec
+    from openjiuwen.agent_teams.tools.structured_output_tool import StructuredOutputTool
+
+    captured: dict = {}
+
+    class _FakeHarness:
+        async def run_once(self, content, **kw):
+            return {"output": "ok", "result_type": "answer"}
+
+        def add_rail(self, rail):
+            return None
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, role, member_name, build_context=None, **kw):
+        captured["spec"] = agent_spec
+        return _FakeHarness()
+
+    monkeypatch.setattr(th_mod.TeamHarness, "build", _fake_build)
+
+    base = DeepAgentSpec(tools=[BuiltinToolSpec(type="core.web_search")], enable_task_loop=True)
+    backend = TeamWorkerBackend(model=None, worker_base_spec=base, language="cn")
+    engine_free = backend._t("swarmflow_worker", key="free")
+    engine_schema = backend._t("swarmflow_worker", key="schema")
+
+    asyncio.run(backend._execute_worker("t", [], member_name="wf-w-0", has_schema=False, model=None, expert=_expert()))
+    assert captured["spec"].system_prompt == f"PERSONA\n\n{engine_free}"
+    assert captured["spec"].tools == []  # expert spec tools, not the teammate's web_search
+    assert captured["spec"].agent_template_spec == {"agent_card": {"id": "clip", "name": "clip"}}
+
+    tool = StructuredOutputTool({"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"]})
+    asyncio.run(
+        backend._execute_worker("t", [tool], member_name="wf-w-1", has_schema=True, model=None, expert=_expert())
+    )
+    assert captured["spec"].system_prompt == f"PERSONA\n\n{engine_schema}"
+    assert captured["spec"].tools == [tool]
+
+    # No expert: the legacy prompt, byte for byte.
+    asyncio.run(backend._execute_worker("t", [], member_name="wf-w-2", has_schema=False, model=None))
+    assert captured["spec"].system_prompt == engine_free

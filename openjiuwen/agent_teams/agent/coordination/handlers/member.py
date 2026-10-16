@@ -119,7 +119,7 @@ class MemberHandler(BaseCoordinationHandler):
             return
         if event.event_type == TeamEvent.MEMBER_SHUTDOWN and getattr(payload, "force", False):
             team_logger.info("[{}] forced shutdown; tearing down without a final round", member_name)
-            await self._lifecycle.shutdown_self()
+            await self._lifecycle.shutdown_self(force=True)
             return
 
     async def _deliver_external_team_context(self, event: CoordinationEvent) -> None:

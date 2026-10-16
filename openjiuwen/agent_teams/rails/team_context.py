@@ -55,6 +55,7 @@ class TeamHandleKey:
     PERMISSIONS_OVERRIDE = "team.permissions_override"
     WORKTREE_MANAGER = "team.worktree_manager"
     SWARMFLOW_EXTERNAL_CLI_AGENTS = "team.swarmflow_external_cli_agents"
+    SWARMFLOW_EXPERT_SPECS = "team.swarmflow_expert_specs"
 
 
 def inject_team_handles(
@@ -73,6 +74,7 @@ def inject_team_handles(
     permissions_override: Optional[dict[str, str]] = None,
     worktree_manager: Optional["WorktreeManager"] = None,
     swarmflow_external_cli_agents: tuple[Any, ...] = (),
+    swarmflow_expert_specs: Optional[dict[str, Any]] = None,
 ) -> None:
     """Write the team live handles into ``extras`` (configurator-side).
 
@@ -105,6 +107,9 @@ def inject_team_handles(
             isolation is enabled for this team.
         swarmflow_external_cli_agents: Declared external CLI agent entries for
             this team's swarmflow runs; empty when none are configured.
+        swarmflow_expert_specs: AgentGroup members a swarmflow script may pick via
+            ``agent_template`` (member name → expert entry). Empty / None when the
+            session has no AgentGroup bound.
     """
     extras[TeamHandleKey.TEAM_BACKEND] = team_backend
     extras[TeamHandleKey.WORKSPACE_MANAGER] = workspace_manager
@@ -119,6 +124,7 @@ def inject_team_handles(
     extras[TeamHandleKey.PERMISSIONS_OVERRIDE] = permissions_override
     extras[TeamHandleKey.WORKTREE_MANAGER] = worktree_manager
     extras[TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS] = swarmflow_external_cli_agents
+    extras[TeamHandleKey.SWARMFLOW_EXPERT_SPECS] = dict(swarmflow_expert_specs or {})
 
 
 def _get(context: Any, key: str) -> Any:
@@ -165,6 +171,11 @@ def get_swarmflow_human_base_spec(context: Any) -> Optional["DeepAgentSpec"]:
 def get_swarmflow_external_cli_agents(context: Any) -> tuple[Any, ...]:
     """Return the declared external CLI agent entries for swarmflow runs, or empty tuple."""
     return tuple(_get(context, TeamHandleKey.SWARMFLOW_EXTERNAL_CLI_AGENTS) or ())
+
+
+def get_swarmflow_expert_specs(context: Any) -> dict[str, Any]:
+    """Return the swarmflow expert table (member name → entry), or {}."""
+    return dict(_get(context, TeamHandleKey.SWARMFLOW_EXPERT_SPECS) or {})
 
 
 def get_swarmflow_concurrency_governor(context: Any) -> Any:
@@ -217,4 +228,5 @@ __all__ = [
     "get_reliability_components",
     "get_worktree_manager",
     "get_swarmflow_external_cli_agents",
+    "get_swarmflow_expert_specs",
 ]

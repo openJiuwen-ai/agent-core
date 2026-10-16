@@ -48,7 +48,10 @@ from openjiuwen.agent_teams.external.cli_agent.injector import Injector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import ProcessLike, ProcessTransport, StreamReaderLike
 from openjiuwen.agent_teams.harness.outputs import _END, _OutputIterator
 from openjiuwen.agent_teams.harness.state import HarnessState
-from openjiuwen.agent_teams.team_context import TeamContextTracker
+from openjiuwen.agent_teams.inbound_render import render_clock
+from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
+from openjiuwen.agent_teams.timefmt import format_absolute_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
@@ -146,6 +149,9 @@ class CliRuntimeBase(ABC):
         # state (Codex thread id) and the team-context delivery baseline live.
         self._member_agent_id = member_agent_id
         self._team_context_tracker = team_context_tracker
+        # Scheduled dispatch only (F_119): review passes folded into the next
+        # message. Bound after construction, like the team-context tracker.
+        self._task_outcome_tracker: "TaskOutcomeTracker | None" = None
         self._member_session: Any = None
         # Lifecycle phase mapped onto the team's HarnessState vocabulary so the
         # StreamController treats a CLI runtime exactly like a NativeHarness.
@@ -192,6 +198,10 @@ class CliRuntimeBase(ABC):
     def bind_team_context_tracker(self, tracker: "TeamContextTracker | None") -> None:
         """Bind the tracker that injects pending team state into outbound messages."""
         self._team_context_tracker = tracker
+
+    def bind_task_outcome_tracker(self, tracker: "TaskOutcomeTracker | None") -> None:
+        """Bind the tracker that folds untold review passes into the next message."""
+        self._task_outcome_tracker = tracker
 
     def bind_reliability_context(
         self,
@@ -290,12 +300,22 @@ class CliRuntimeBase(ABC):
         Returns None (CLI runtimes have no monotonic sequence id to surface).
         """
         text = content if isinstance(content, str) else str(content)
+        # Inbound messages carry absolute send times only; the anchor tells
+        # the member what "now" is, the way TeamPolicyRail does for an
+        # in-process member.
+        clock = render_clock(now=format_absolute_time(get_current_time()))
+        text = f"{clock}\n{text}" if text else clock
+        outcome = await self._pending_task_outcome()
+        if outcome:
+            text = f"{outcome}\n\n{text}" if text else outcome
         pending = await self._pending_team_context()
         if pending:
             text = f"{pending}\n\n{text}" if text else pending
         result = await self._send_raw(text, immediate=immediate)
         if pending:
             await self._commit_team_context()
+        if outcome:
+            await self._commit_task_outcome()
         return result
 
     async def announce_team_context(self) -> None:
@@ -324,6 +344,18 @@ class CliRuntimeBase(ABC):
         if self._team_context_tracker is None or self._member_session is None:
             return
         await self._team_context_tracker.commit(self._member_session)
+
+    async def _pending_task_outcome(self) -> str | None:
+        """Render review passes this member has not been told about yet."""
+        if self._task_outcome_tracker is None or self._member_session is None:
+            return None
+        return await self._task_outcome_tracker.pending_text(self._member_session)
+
+    async def _commit_task_outcome(self) -> None:
+        """Record the delivered review passes as told."""
+        if self._task_outcome_tracker is None or self._member_session is None:
+            return
+        await self._task_outcome_tracker.commit(self._member_session)
 
     async def _send_raw(self, text: str, *, immediate: bool = False) -> Any:
         """Drive the CLI with one message: start a turn, steer, or follow up.

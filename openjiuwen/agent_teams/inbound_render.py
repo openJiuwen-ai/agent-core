@@ -14,7 +14,10 @@ This module renders that input as semantic XML instead, giving the LLM a
 clean boundary:
 
 - ``<team-inbound>`` wraps the **original message** verbatim, with the
-  sender / id / type / time as attributes.
+  sender / id / type / time as attributes. ``time`` is the absolute send
+  time only: the block stays in the history and is read again later.
+- ``<team-clock>`` is the current-time anchor delivered with each admitted
+  input, so the member can tell how long ago an absolute ``time`` was.
 - ``<team-event>`` wraps a **framework event** (task assignment, plan
   decision, nudge, completion notice, task board, roster change, ...),
   with the event type in the ``kind`` attribute.
@@ -129,8 +132,9 @@ def render_inbound(
         message_id: The message id, so the LLM can reference / mark it.
         msg_type: A stable contract token — ``INBOUND_TYPE_DIRECT`` or
             ``INBOUND_TYPE_BROADCAST`` — not a localized label.
-        time_info: Human-readable send time (already rendered by
-            ``timefmt.format_time_context``).
+        time_info: Absolute send time (already rendered by
+            ``timefmt.format_absolute_time``). No relative diff: this block
+            is written into the history and read again later.
         for_controller: When True, add ``for="controller"`` so a HITT
             avatar treats this as a notification for its human controller.
         note_kind: Optional ``<team-note>`` kind (e.g. ``"reply-hint"``,
@@ -179,6 +183,26 @@ def render_controller_input(*, content: str) -> str:
         f'type="{INBOUND_TYPE_DIRECT}"',
     ]
     return _render_block("team-inbound", attrs, content)
+
+
+def render_clock(*, now: str) -> str:
+    """Render the current-time anchor as a self-closing ``<team-clock>``.
+
+    Every ``time`` attribute written into a member's history is an absolute
+    send time. A relative diff ("3 minutes ago") would be true only when it was
+    rendered and would go stale the moment the history is read again, so the
+    member gets the current time instead, once per admitted input, and
+    measures elapsed time against the newest anchor itself. An older anchor
+    records what "now" was back then and is never refreshed.
+
+    Args:
+        now: The current time, already rendered by
+            ``timefmt.format_absolute_time``.
+
+    Returns:
+        The rendered ``<team-clock now="..."/>`` element.
+    """
+    return f'<team-clock now="{_esc_attr(now)}"/>'
 
 
 def render_event(
@@ -303,6 +327,26 @@ def render_team_policy(*, body: str, tools: str, note: str) -> str:
     return f'<team-policy tools="{_esc_attr(tools)}">\n{declaration}\n\n{body}\n</team-policy>'
 
 
+def render_team_policy_inline(*, body: str) -> str:
+    """Render the standing team policy for an in-process leader (F_122).
+
+    The in-history form of :func:`render_team_policy`: same element, no
+    ``tools`` attribute and no tool-namespace note, because an in-process
+    member calls the team tools by their bare names. Delivered once through
+    the ``TeamContextTracker`` ahead of the leader's first input when the
+    framework built the team and there is no ``build_team`` result to carry
+    the policy. Like the external form, the body is the team's own Markdown
+    and is **not escaped**.
+
+    Args:
+        body: The assembled policy sections, inserted verbatim.
+
+    Returns:
+        The rendered ``<team-policy>`` block.
+    """
+    return f"<team-policy>\n{body}\n</team-policy>"
+
+
 def snapshot_kind_of(text: str) -> str | None:
     """Return the snapshot kind ``text`` is, or None when it is not one.
 
@@ -361,11 +405,13 @@ __all__ = [
     "INBOUND_TYPE_DIRECT",
     "SNAPSHOT_EVENT_KINDS",
     "drop_superseded_snapshots",
+    "render_clock",
     "render_controller_input",
     "render_event",
     "render_inbound",
     "render_team_context",
     "render_team_context_with_identity",
     "render_team_policy",
+    "render_team_policy_inline",
     "snapshot_kind_of",
 ]

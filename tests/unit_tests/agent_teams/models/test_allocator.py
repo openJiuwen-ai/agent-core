@@ -16,6 +16,8 @@ without the optional ``intelli_router`` package installed.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 from pydantic import ValidationError
 
@@ -864,6 +866,34 @@ def test_inherit_pool_ids_breaks_inheritance_on_credential_rotation():
     [merged] = inherit_pool_ids([old], [new])
     assert merged.model_id == new.model_id  # NOT inherited
     assert merged.api_key == "ROTATED"
+
+
+def test_inherit_pool_ids_ignores_client_id_under_metadata_client():
+    """A host-dumped ``ModelClientConfig`` brings a fresh ``client_id`` uuid.
+
+    It is client identity, not configuration (``to_team_model_config``
+    overrides it with ``model_id``), so two builds of the same selection
+    still match.
+    """
+    from openjiuwen.agent_teams.models.pool import _entry_signature, inherit_pool_ids
+
+    def _built() -> ModelPoolEntry:
+        return ModelPoolEntry(
+            model_name="deepseek-flash",
+            api_key="K",
+            api_base_url="https://api.deepseek.com",
+            api_provider="OpenAI",
+            metadata={"client": {"client_id": str(uuid.uuid4()), "timeout": 1800.0}},
+        )
+
+    old, new = _built(), _built()
+    assert old.metadata["client"]["client_id"] != new.metadata["client"]["client_id"]
+    assert _entry_signature(old) == _entry_signature(new)
+    # The signature works on a copy; the entry keeps what it was given.
+    assert "client_id" in new.metadata["client"]
+
+    [merged] = inherit_pool_ids([old], [new])
+    assert merged.model_id == old.model_id
 
 
 def test_inherit_pool_ids_breaks_inheritance_on_base_url_migration():

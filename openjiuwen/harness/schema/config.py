@@ -28,6 +28,7 @@ from openjiuwen.harness.workspace.workspace import (
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
+    from openjiuwen.harness.moa import MoAConfig
 
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_OPENROUTER_VISION_MODEL = "google/gemini-2.5-pro"
@@ -306,6 +307,7 @@ class DeepAgentConfig:
     # Filesystem sandbox: when True, file ops are restricted to workspace/project root.
     # Subagents inherit the stricter of their own spec and this value.
     restrict_to_work_dir: bool = True
+    moa: MoAConfig | None = None
 
     # Task-loop no-progress guard: stop repeated short answer rounds.
     task_loop_no_progress_guard: TaskLoopNoProgressGuardConfig = field(

@@ -24,6 +24,7 @@ from openjiuwen.agent_teams.schema.external_runtime_reliability import (
     ExternalRuntimeFailureReason,
     ExternalRuntimePhase,
 )
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 
 
@@ -235,8 +236,18 @@ class MemberExecutionChangedEvent(BaseEventMessage):
 
 
 class MemberShutdownEvent(BaseEventMessage):
-    """Event published when a member is shut down"""
+    """Event published when a member is asked to retire.
+
+    The member's runtime is torn down either way; ``target_status`` tells
+    observers where the member settles. ``shut_down`` leaves the roster,
+    while ``dormant`` keeps the member on it and wakes it when named again,
+    so rosters must not treat every shutdown event as a removal.
+    """
     force: bool = Field(..., description="Force member shut down")
+    target_status: str = Field(
+        default=MemberStatus.SHUTDOWN.value,
+        description="Settled member status this retirement leads to: 'shut_down' or 'dormant'",
+    )
 
 
 class MemberCanceledEvent(BaseEventMessage):
@@ -310,6 +321,11 @@ class TaskPlanResponseEvent(BaseEventMessage):
 class TaskUpdatedEvent(BaseEventMessage):
     """Event published when a task is updated"""
     task_id: str = Field(..., description="Task unique identifier")
+    status: Optional[str] = Field(
+        default=None,
+        description="Task status at edit time; content edits never change it, "
+        "but carrying it lets consumers resync a stale view from this event",
+    )
 
 
 class TaskClaimedEvent(BaseEventMessage):
@@ -465,6 +481,13 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     agent_type: Optional[str] = Field(
         default=None,
         description="External provider kind (claude / codex) on agent_started; None for native workers",
+    )
+    agent_template: Optional[str] = Field(
+        default=None,
+        description="AgentGroup member picked via options.agent_template on agent_started; None for the generic worker",
+    )
+    display_name: Optional[str] = Field(
+        default=None, description="Display name of that expert on agent_started; None when absent"
     )
     outcome: Optional[str] = Field(default=None, description="Short result preview, on agent_completed")
     text: Optional[str] = Field(default=None, description="Free narration text, on all kinds")

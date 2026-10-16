@@ -45,6 +45,10 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.rails.mcp_rail import McpRail
+from openjiuwen.harness.rails.multimodal_context_summarizer_rail import (
+    ARCHIVED_SCREEN_PLACEHOLDER,
+    MultimodalContextSummarizerRail,
+)
 from openjiuwen.harness.rails.memory import (
     CodingMemoryRail,
     ExternalMemoryRail,
@@ -80,6 +84,7 @@ from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 # fmt: on
 
 __all__ = [
+    "ARCHIVED_SCREEN_PLACEHOLDER",
     "AgentModeRail",
     "AskUserPayload",
     "AskUserRail",
@@ -105,6 +110,7 @@ __all__ = [
     "MemoryRail",
     "MemberSkillEvolutionRail",
     "MetisContextEvolveRail",
+    "MultimodalContextSummarizerRail",
     "PermissionInterruptRail",
     "ProgressiveToolRail",
     "SafetyPromptRail",

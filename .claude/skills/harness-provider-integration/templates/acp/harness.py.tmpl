@@ -31,6 +31,8 @@ from openjiuwen.harness_protocol import (
     JsonObject,
     McpTransport,
     ModelOption,
+    ModelRequestEvent,
+    ModelRequestStatus,
     ModelSelection,
     ResumePolicy,
     ToolApprovalDecision,
@@ -146,6 +148,7 @@ class __CLASS__Harness(SerializedTurnHarness):
                 HostCapability.TOOL_APPROVAL,
                 HostCapability.MCP_SERVERS,
                 HostCapability.CHECKPOINT_SINK,
+                HostCapability.MODEL_REQUEST_OBSERVATION,
             }
         ),
     )
@@ -262,7 +265,13 @@ class __CLASS__Harness(SerializedTurnHarness):
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
-        accumulator = __CLASS__TurnAccumulator(turn_id=turn.turn_id)
+        context = self._context
+        observed = context is not None and HostCapability.MODEL_REQUEST_OBSERVATION in context.host_capabilities
+        accumulator = __CLASS__TurnAccumulator(
+            turn_id=turn.turn_id,
+            observe_requests=observed,
+            model=self._session_model(),
+        )
         if turn.abort_requested:
             return TurnEventKind.ABORTED, accumulator.build_interrupted_result(turn, timing=timing)
         if self._restore_pending:
@@ -289,7 +298,8 @@ class __CLASS__Harness(SerializedTurnHarness):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self._emit_mapped(turn, accumulator.finish())
+            status = ModelRequestStatus.CANCELLED if turn.abort_requested else ModelRequestStatus.FAILED
+            await self._emit_mapped(turn, accumulator.finish(status))
             if turn.abort_requested:
                 return TurnEventKind.ABORTED, accumulator.build_interrupted_result(turn, timing=timing)
             return TurnEventKind.FAILED, accumulator.build_failed_result(classify_exception(exc), timing=timing)
@@ -647,7 +657,7 @@ class __CLASS__Harness(SerializedTurnHarness):
         # Let the cancelled prompt settle so its trailing updates stay in this turn.
         with contextlib.suppress(Exception):
             await asyncio.wait_for(asyncio.shield(future), self._config.shutdown_timeout_s)
-        await self._emit_mapped(turn, accumulator.finish())
+        await self._emit_mapped(turn, accumulator.finish(ModelRequestStatus.CANCELLED))
         error = turn_error(
             f"__DISPLAY__ did not finish the turn within {self._config.turn_timeout_s:g}s",
             category="network_timeout",
@@ -666,7 +676,32 @@ class __CLASS__Harness(SerializedTurnHarness):
 
     async def _emit_mapped(self, turn: PendingTurn, mapped: list[MappedEvent]) -> None:
         for event in mapped:
-            await self._emit(event.payload, turn=turn, item_id=event.item_id)
+            payload = event.payload
+            if isinstance(payload, ModelRequestEvent):
+                payload = await self._observe_request(payload)
+            await self._emit(payload, turn=turn, item_id=event.item_id, causation_ids=event.causation_ids)
+
+    # Overridden per vendor; instance state (the session's record) lives there.
+    # pylint: disable-next=add-staticmethod-or-classmethod-decorator
+    async def _observe_request(self, request: ModelRequestEvent) -> ModelRequestEvent:
+        """Complete a request derived from the ACP stream with the vendor's own record.
+
+        SCAFFOLD(observation): the stream only shows what the model produced.
+        When the CLI records its requests (Kimi Code's ``wire.jsonl``, a local
+        database, request logs), find the record of this request and return
+        the event with what it states: ``system_instructions``,
+        ``input_messages`` (with stable message ids) and
+        ``input_observed=True``, ``tool_definitions``, ``usage``, the served
+        ``model``. Keep ``request_id``: tool items already cite it. Wait for a
+        record briefly at most, and return ``request`` unchanged when none
+        arrives. See ``references/observation.md``.
+        """
+        return request
+
+    def _session_model(self) -> str | None:
+        """Return the model the session runs on: the endpoint model, else the CLI-login one."""
+        endpoint = self._active_endpoint
+        return endpoint.model if endpoint is not None else self._primary_model
 
     def _launch(self, context: HarnessContext) -> tuple[tuple[str, ...], dict[str, str]]:
         """Argv and environment of the agent process.

@@ -231,14 +231,14 @@ class TodoCreateTool(TodoTool):
 
         results = dict()
         try:
-            tasks_input = inputs.get("tasks")
-            if tasks_input and isinstance(tasks_input, list):
-                results["message"] = await self._create_from_list(session_id, tasks_input)
+            todos_input = inputs.get("todos")
+            if todos_input and isinstance(todos_input, list):
+                results["message"] = await self._create_from_list(session_id, todos_input)
                 return results
 
             raise build_error(
                 StatusCode.TOOL_TODOS_INVOKE_FAILED,
-                reason="'tasks' parameter is required and must be a JSON array"
+                reason="'todos' parameter is required and must be a JSON array"
             )
 
         except Exception as e:
@@ -383,7 +383,7 @@ class TodoListTool(TodoTool):
                 }
                 for t in active_tasks
             ]
-            return {"tasks": simplified}
+            return {"todos": simplified}
         except Exception as e:
             tool_logger.error(
                 "Todo list tool invocation failed",
@@ -398,7 +398,7 @@ class TodoListTool(TodoTool):
     def render_for_llm(self, output: Dict[str, Any]) -> str:
         """Render one active task per line with its status and dependencies."""
         lines = []
-        for task in output["tasks"]:
+        for task in output["todos"]:
             depends = f" (depends on: {', '.join(task['depends_on'])})" if task["depends_on"] else ""
             lines.append(f"- [{task['status']}] {task['id']}: {task['content']}{depends}")
         return "\n".join(lines) or "No active tasks."

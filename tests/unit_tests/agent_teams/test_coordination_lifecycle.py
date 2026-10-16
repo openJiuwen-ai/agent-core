@@ -497,3 +497,140 @@ async def test_finalize_round_does_not_extract_memory():
     host.stream_controller.stop.assert_awaited_once()
     host.resources.harness.stop.assert_awaited_once()
     assert host.stream_controller.stream_queue is None
+
+
+# ---------------------------------------------------------------------------
+# Framework bootstrap: start() materializes the team (F_122)
+# ---------------------------------------------------------------------------
+
+
+def _framework_spec(**overrides) -> SimpleNamespace:
+    """Spec stand-in for a framework-bootstrapped team, as ``start`` reads it."""
+    fields = {
+        "workspace": None,
+        "evolution_enabled": False,
+        "bootstrap_mode": "framework",
+        "team_display_name": None,
+        "team_desc": None,
+        "leader": SimpleNamespace(display_name="Team Leader", desc="Plans and verifies"),
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def _framework_backend(existing_team: object | None) -> SimpleNamespace:
+    """Backend stand-in exposing what ``start`` touches: db init, team lookup, build_team."""
+    return SimpleNamespace(
+        team_name="test-team",
+        db=SimpleNamespace(
+            initialize=AsyncMock(),
+            team=SimpleNamespace(get_team=AsyncMock(return_value=existing_team)),
+        ),
+        build_team=AsyncMock(),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_builds_the_team_when_no_row_exists_under_framework_bootstrap():
+    """No team row + ``bootstrap_mode="framework"`` → ``start`` builds the team itself.
+
+    The generic identity comes from the spec (i18n defaults when unset, the
+    leader's own display name / desc), with no capability overrides.
+    """
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.recover_team = AsyncMock()
+    kernel = _arm_kernel_for_start(host)
+    host.blueprint = SimpleNamespace(spec=_framework_spec())
+    backend = _framework_backend(existing_team=None)
+    host.infra.team_backend = backend
+
+    await kernel.start(session)
+
+    backend.build_team.assert_awaited_once()
+    kwargs = backend.build_team.await_args.kwargs
+    assert kwargs["display_name"] == "通用协作团队"
+    assert "通用" in kwargs["desc"]
+    assert kwargs["leader_display_name"] == "Team Leader"
+    assert kwargs["leader_desc"] == "Plans and verifies"
+    assert "overrides" not in kwargs
+    host.recover_team.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_start_uses_the_configured_team_identity_under_framework_bootstrap():
+    """Explicit ``team_display_name`` / ``team_desc`` win over the generic defaults."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.recover_team = AsyncMock()
+    kernel = _arm_kernel_for_start(host)
+    host.blueprint = SimpleNamespace(spec=_framework_spec(team_display_name="Ops Crew", team_desc="Runs ops"))
+    backend = _framework_backend(existing_team=None)
+    host.infra.team_backend = backend
+
+    await kernel.start(session)
+
+    kwargs = backend.build_team.await_args.kwargs
+    assert kwargs["display_name"] == "Ops Crew"
+    assert kwargs["desc"] == "Runs ops"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_rejoins_an_existing_team_under_framework_bootstrap():
+    """A team row that is already there is recovered, never rebuilt."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.recover_team = AsyncMock()
+    kernel = _arm_kernel_for_start(host)
+    host.blueprint = SimpleNamespace(spec=_framework_spec())
+    backend = _framework_backend(existing_team=object())
+    host.infra.team_backend = backend
+
+    await kernel.start(session)
+
+    backend.build_team.assert_not_awaited()
+    host.recover_team.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_leaves_team_building_to_the_leader_by_default():
+    """``bootstrap_mode="leader"`` (the default) keeps ``start`` out of team building."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.session_manager.team_session = session
+    host.recover_team = AsyncMock()
+    kernel = _arm_kernel_for_start(host)
+    host.blueprint = SimpleNamespace(spec=_framework_spec(bootstrap_mode="leader"))
+    backend = _framework_backend(existing_team=None)
+    host.infra.team_backend = backend
+
+    await kernel.start(session)
+
+    backend.build_team.assert_not_awaited()
+    host.recover_team.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_start_never_builds_a_team_for_a_non_leader():
+    """Only the leader kernel materializes the team; a teammate's never does."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.role = TeamRole.TEAMMATE
+    host.session_manager.team_session = session
+    host.recover_team = AsyncMock()
+    kernel = _arm_kernel_for_start(host)
+    host.blueprint = SimpleNamespace(spec=_framework_spec())
+    backend = _framework_backend(existing_team=None)
+    host.infra.team_backend = backend
+
+    await kernel.start(session)
+
+    backend.build_team.assert_not_awaited()

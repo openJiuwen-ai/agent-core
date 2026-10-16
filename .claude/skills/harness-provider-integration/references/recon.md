@@ -22,6 +22,7 @@
 | 13 | 模型怎么选？（启动 flag、会话配置项、配置文件）两种都实测，厂商之间相反 | `MODEL_ARGS` / `MODEL_CONFIG_ID` |
 | 14 | 技能（skills）从哪个项目目录发现？ | `SKILLS_SCAN_DIR` |
 | 15 | 需要登录吗？未登录时报什么？ | `auth_required` 映射；e2e 前置条件 |
+| 16 | CLI 有没有在本地记下每次模型请求？（会话日志、请求日志、本地数据库、OTLP 遥测）记了哪些：发出时间、模型、发出的消息、系统提示词、工具清单、逐请求用量？主 agent 与子 agent 怎么区分？ | 轨迹 Input / Model 泳道、`_observe_request`（[observation.md](observation.md)） |
 
 ## 2. 取证方法
 

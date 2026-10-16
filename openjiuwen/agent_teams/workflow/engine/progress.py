@@ -162,6 +162,10 @@ class WorkflowProgressEvent:
       ``tokens`` for display (``AGENT_COMPLETED``); ``None`` when the provider
       reported no split.
     * ``agent_type``          — external provider name (claude / codex) on AGENT_STARTED; None for native workers.
+    * ``agent_template``      — the AgentGroup member picked via ``options.agent_template``
+      on AGENT_STARTED; None for the generic native worker.
+    * ``display_name``        — that expert's display name as the backend describes it
+      (AGENT_STARTED); None when no expert or the backend cannot name it.
     """
 
     kind: str
@@ -199,6 +203,8 @@ class WorkflowProgressEvent:
     token_input: int | None = None
     token_output: int | None = None
     agent_type: str | None = None
+    agent_template: str | None = None
+    display_name: str | None = None
     activity_type: str | None = None
     tool_call_id: str | None = None
     tool_name: str | None = None

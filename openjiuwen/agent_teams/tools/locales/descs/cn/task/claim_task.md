@@ -6,9 +6,13 @@
 - 从 view_task 中找到 pending 且无人认领的任务后，设置 status=claimed 领取
 - 应选择匹配自己领域专长的任务
 - **同一时刻只能有一个进行中（in_progress）的任务**：若你已有认领在做的任务，需先完成它再领取新任务，否则领取会被拒绝
+- 领取成功后，结果会列出本任务直接上游的交付摘要；需要某个上游的完整说明时用 `view_task(action='note', task_id=...)`
 
 **标记任务完成：**
-- 完成任务描述的所有工作后，设置 status=completed 标记完成
+- 完成任务描述的所有工作后，设置 status=completed 标记完成，同时填写：
+  - `summary`：一句话完成摘要——交付了什么、主产物在哪。Leader 与下游看到的就是它
+  - `note`：完整的完成详情——产物路径、关键决策或后续注意事项
+- `summary` / `note` 就是你的完成交接，完成后**不要**再用 send_message 汇报完成；二者只在 status=completed 时生效
 - 重要：完成后应调用 view_task 寻找下一个可用任务
 
 - 只有在完全完成任务后才能标记 completed
@@ -34,4 +38,4 @@
 {"task_id": "task-1", "status": "claimed"}
 
 完成任务：
-{"task_id": "task-1", "status": "completed"}
+{"task_id": "task-1", "status": "completed", "summary": "登录接口已实现，代码在 src/auth/login.py", "note": "使用 JWT，过期 2 小时；单测在 tests/test_login.py，全部通过"}

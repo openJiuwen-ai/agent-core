@@ -8,7 +8,8 @@ Mark a task that is assigned to the calling member as completed.
 ## Input
 
 - `task_id` (required): ID of the task to complete.
-- `note` (optional): Completion note describing the deliverable path, key decisions, or anything the team should be aware of.
+- `summary` (optional): a one-sentence completion summary — what you delivered and where the main artifact is.
+- `note` (optional): the full completion detail — deliverable path, key decisions, or anything the team should be aware of.
 
 ## Boundaries vs. other tools
 

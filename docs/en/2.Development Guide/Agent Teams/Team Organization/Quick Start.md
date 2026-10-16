@@ -44,4 +44,4 @@ Use Leader tools such as `org_create_task`, `org_claim_task`, and `org_update_ta
 
 Leaders use `org_view_organization` and `org_view_tasks`. A host can call `runtime.get_organization()` and, when the whole collaboration boundary is no longer needed, `runtime.dissolve_organization()`.
 
-Dissolution unbinds members, stops the Organization Summary Team, and removes persistent Organization records. Do not dissolve an Organization merely because one root task completed; it can be reused for later work.
+Dissolution unbinds members, clears Organization IDs from Team and member configuration, stops temporary expert Teams marked by the host as `expert_team` and the Summary Team, and removes persistent Organization records. The Owner and independently created invited Teams remain available; templates, history, and artifacts are preserved. Do not dissolve an Organization merely because one root task completed; it can be reused for later work.

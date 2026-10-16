@@ -60,6 +60,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
     GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
+    GEN_AI_RETRIEVAL_DOCUMENTS,
+    GEN_AI_RETRIEVAL_QUERY_TEXT,
     GEN_AI_RETRIEVAL_TOP_K,
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ID,
@@ -142,11 +144,18 @@ _LLM_SUBSTRINGS: tuple[str, ...] = ("LLM", "IntentDetection", "Questioner")
 # Substring match on "Tool" covers ToolExecutable and any future Tool-named variants.
 _TOOL_SUBSTRINGS: tuple[str, ...] = ("Tool",)
 
+# Component types that represent retrieval (knowledge/memory retrieval) —
+# tagged with gen_ai.operation.name="retrieval" and named "retrieval <name>"
+# per OTel GenAI semantic conventions.  Substring match on "Retrieval" covers
+# KnowledgeRetrievalExecutable, MemoryRetrievalExecutable and future variants.
+_RETRIEVAL_SUBSTRINGS: tuple[str, ...] = ("Retrieval",)
+
 # gen_ai.operation.name values (OTel GenAI semantic conventions) — constants so
 # no call site re-types the literal.
 _OPERATION_NAME_CHAT = "chat"
 _OPERATION_NAME_EXECUTE_TOOL = "execute_tool"
 _OPERATION_NAME_EMBEDDINGS = "embeddings"
+_OPERATION_NAME_RETRIEVAL = "retrieval"
 
 
 def _serialize(value: Any) -> str:
@@ -180,6 +189,35 @@ def _normalize_llm_payload(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_normalize_llm_payload(v) for v in value]
     return value
+
+
+def _extract_retrieval_query(inputs: Any) -> str | None:
+    """Pull the query text out of a retrieval component's inputs."""
+    if isinstance(inputs, str):
+        return inputs or None
+    if isinstance(inputs, dict):
+        query = inputs.get("query")
+        if isinstance(query, str) and query:
+            return query
+    return None
+
+
+def _extract_retrieval_documents(outputs: Any) -> list[str] | None:
+    """Pull the retrieved documents out of a retrieval component's outputs."""
+    results = None
+    if isinstance(outputs, dict):
+        results = outputs.get("results")
+    elif hasattr(outputs, "results"):
+        results = outputs.results
+    if isinstance(results, list) and results:
+        return [str(item) for item in results]
+    return None
+
+
+def _is_retrieval_component_span(otel_span: trace.Span) -> bool:
+    """Whether an open workflow component span belongs to a retrieval component."""
+    component_type = str((otel_span.attributes or {}).get(OJ_WORKFLOW_COMPONENT_TYPE, ""))
+    return any(s in component_type for s in _RETRIEVAL_SUBSTRINGS)
 
 
 def _standard_messages(value: Any, *, default_role: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -597,15 +635,19 @@ class OtelAgentHandler(TraceExtAgentHandler):
         span_name_prefix: str,
         *,
         extra_attrs: dict[str, str] | None = None,
+        span_name: str | None = None,
     ) -> None:
         parent_ctx = self._resolve_parent_context(agent_span)
         instance_name = str(instance_info.get("class_name", "unknown"))
         is_tool = (extra_attrs or {}).get(GEN_AI_OPERATION_NAME) == _OPERATION_NAME_EXECUTE_TOOL
         state = self._start_and_push(
             name=(
-                f"execute_tool {instance_name}"
-                if is_tool
-                else f"{span_name_prefix}.{instance_name}"
+                span_name
+                or (
+                    f"execute_tool {instance_name}"
+                    if is_tool
+                    else f"{span_name_prefix}.{instance_name}"
+                )
             ),
             kind=SpanKind.INTERNAL,
             parent_ctx=parent_ctx,
@@ -754,15 +796,22 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     # ================================================================
     # Embedding events — INTERNAL span, embeddings operation (issue #1833).
-    # No core emitter yet: entry points are ready for when the framework
-    # grows on_embedding_* tracer events.
+    # Core emitter: APIEmbedding._get_embeddings fires these under a traced
+    # session context (workflow component / agent run); the span parents onto
+    # whatever OTel span is ambient at the trigger point.
     # ================================================================
 
     async def on_embedding_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
-            extra_attrs: dict[str, Any] = {GEN_AI_OPERATION_NAME: _OPERATION_NAME_EMBEDDINGS}
+            model_name = str(instance_info.get("model_name") or instance_info.get("class_name") or "unknown")
+            extra_attrs: dict[str, Any] = {
+                GEN_AI_OPERATION_NAME: _OPERATION_NAME_EMBEDDINGS,
+                GEN_AI_REQUEST_MODEL: model_name,
+            }
+            # GenAI naming rule: "{operation.name} {gen_ai.request.model}"
             self._start_non_llm_span(
-                span, inputs, instance_info, "embedding", "embedding", extra_attrs=extra_attrs
+                span, inputs, instance_info, "embedding", "embedding",
+                extra_attrs=extra_attrs, span_name=f"embeddings {model_name}",
             )
             state = self._span_manager.get(span.invoke_id)
             if state is None or not state.recorded:
@@ -777,9 +826,28 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_embedding_end(self, span: TraceAgentSpan, outputs, **kwargs):
         try:
+            state = self._span_manager.get(span.invoke_id)
+            if state is not None and state.recorded and isinstance(outputs, dict):
+                # Service-side facts captured by the core emitter from the raw
+                # embedding API response (see APIEmbedding._trace_embedding_end).
+                response_model = outputs.get("response_model")
+                if response_model:
+                    state.span.set_attribute(GEN_AI_RESPONSE_MODEL, str(response_model))
+                dimension = outputs.get("dimension")
+                if dimension is not None:
+                    state.span.set_attribute(GEN_AI_EMBEDDINGS_DIMENSION_COUNT, int(dimension))
+                usage_input_tokens = outputs.get("usage_input_tokens")
+                if isinstance(usage_input_tokens, int):
+                    state.span.set_attribute(GEN_AI_USAGE_INPUT_TOKENS, usage_input_tokens)
             self._end_non_llm_span(span, outputs)
         except Exception as exc:
             session_logger.warning("otel agent handler: on_embedding_end failed: %s", exc)
+
+    async def on_embedding_error(self, span: TraceAgentSpan, error, **kwargs):
+        try:
+            self._error_non_llm_span(span, error)
+        except Exception as exc:
+            session_logger.warning("otel agent handler: on_embedding_error failed: %s", exc)
 
     # ================================================================
     # Memory events — INTERNAL span (issue #1833; no core emitter yet,
@@ -907,16 +975,32 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             try:
                 state.span.end()
                 self._span_manager.pop(state.invoke_id)
+                self._detach_state(state)
             except Exception as exc:
                 session_logger.warning("otel workflow handler: cleanup layer root span failed: %s", exc)
         for state in list(self._component_spans.values()):
             try:
                 state.span.end()
                 self._span_manager.pop(state.invoke_id)
+                self._detach_state(state)
             except Exception as exc:
                 session_logger.warning("otel workflow handler: cleanup component span failed: %s", exc)
         self._layer_root_spans.clear()
         self._component_spans.clear()
+
+    @staticmethod
+    def _detach_state(state: OtelSpanState) -> None:
+        """Detach the ambient context attached with a workflow span, if any.
+
+        Tolerates tokens created in another context (stale-session cleanup may
+        run outside the context that attached the span).
+        """
+        if state is None or state.context_token is None:
+            return
+        try:
+            otel_context.detach(state.context_token)
+        except Exception:  # noqa: BLE001 - token belongs to another context
+            pass
 
     # --- helper: resolve parent context for a new span ---
 
@@ -1060,6 +1144,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             span_kind = SpanKind.CLIENT if is_llm_component else SpanKind.INTERNAL
 
             is_tool_component = any(s in component_type for s in _TOOL_SUBSTRINGS)
+            is_retrieval_component = any(s in component_type for s in _RETRIEVAL_SUBSTRINGS)
             if is_workflow_root:
                 span_name = invoke_id
             elif is_llm_component:
@@ -1068,6 +1153,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             elif is_tool_component:
                 tool_name = str(metadata.get("component_name") or invoke_id)
                 span_name = f"execute_tool {tool_name}"
+            elif is_retrieval_component:
+                retrieval_name = str(metadata.get("component_name") or invoke_id)
+                span_name = f"retrieval {retrieval_name}"
             else:
                 span_name = f"component.{invoke_id}"
 
@@ -1118,14 +1206,37 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                     GEN_AI_TOOL_NAME,
                     str(metadata.get("component_name") or invoke_id),
                 )
+            elif is_retrieval_component:
+                otel_span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_RETRIEVAL)
+                # Static retrieval facts exported by the component through
+                # ComponentExecutable.trace_metadata() (core plumbing).
+                top_k = metadata.get("top_k")
+                if isinstance(top_k, int):
+                    otel_span.set_attribute(GEN_AI_RETRIEVAL_TOP_K, top_k)
+                data_source_ids = metadata.get("data_source_ids")
+                if isinstance(data_source_ids, list) and data_source_ids:
+                    otel_span.set_attribute(GEN_AI_DATA_SOURCE_ID, [str(i) for i in data_source_ids])
+                request_model = metadata.get("request_model")
+                if request_model:
+                    otel_span.set_attribute(GEN_AI_REQUEST_MODEL, str(request_model))
 
             self._set_workflow_attrs(otel_span, metadata, invoke_id)
 
             if inputs is not None:
                 otel_span.set_attribute(OJ_WORKFLOW_INPUTS, redact(inputs, self._config))
+                if is_retrieval_component:
+                    query = _extract_retrieval_query(inputs)
+                    if query is not None:
+                        otel_span.set_attribute(GEN_AI_RETRIEVAL_QUERY_TEXT, redact(query, self._config))
 
+            # Attach the span as the ambient OTel context for the duration of
+            # component execution, so spans created inside the component
+            # (embedding spans from the core emitter, HTTP client
+            # instrumentation) parent onto it instead of becoming orphan
+            # roots.  Detached wherever the span state is popped.
+            context_token = otel_context.attach(trace.set_span_in_context(otel_span))
             state = OtelSpanState(
-                span=otel_span, context_token=None, invoke_id=invoke_id, start_time=start_time,
+                span=otel_span, context_token=context_token, invoke_id=invoke_id, start_time=start_time,
                 workflow_id=metadata.get("workflow_id") if metadata else None,
             )
             self._span_manager.push(invoke_id, state)
@@ -1159,11 +1270,21 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             if state.recorded:
                 if outputs is not None:
                     state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
+                    if _is_retrieval_component_span(state.span):
+                        documents = _extract_retrieval_documents(outputs)
+                        if documents is not None:
+                            # Same policy as query.text / workflow.outputs: hash
+                            # under redaction, truncate otherwise — never raw text.
+                            state.span.set_attribute(
+                                GEN_AI_RETRIEVAL_DOCUMENTS,
+                                [redact(doc, self._config) for doc in documents],
+                            )
 
                 self._set_workflow_end_attrs(state)
                 state.span.set_attribute(OJ_STATUS, NodeStatus.FINISH.value)
                 state.span.set_status(Status(StatusCode.OK))
             state.span.end()
+            self._detach_state(state)
 
             # Remove from mappings
             self._layer_root_spans.pop(invoke_id, None)
@@ -1195,6 +1316,10 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 # after transform callbacks mutate inputs in place.
                 state.inputs = inputs
                 state.span.set_attribute(OJ_WORKFLOW_INPUTS, redact(inputs, self._config))
+                if _is_retrieval_component_span(state.span):
+                    query = _extract_retrieval_query(inputs)
+                    if query is not None:
+                        state.span.set_attribute(GEN_AI_RETRIEVAL_QUERY_TEXT, redact(query, self._config))
             self._set_workflow_attrs(state.span, component_metadata, invoke_id)
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_pre_invoke failed: %s", exc)
@@ -1261,10 +1386,22 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 if pop_state is not None:
                     self._set_workflow_end_attrs(pop_state)
                     pop_state.span.end()
+                    self._detach_state(pop_state)
                     # Preserve _layer_root_spans for multi-round context
                     for key, val in list(self._component_spans.items()):
                         if val.invoke_id == invoke_id:
                             self._component_spans.pop(key, None)
+                            # Component span still open at workflow failure: finish
+                            # it like stale-session cleanup (end + manager pop +
+                            # detach). Dropping only the index entry leaks the span,
+                            # its context token, and the _span_manager entry the
+                            # cleanup safety net would need to reach it.
+                            try:
+                                val.span.end()
+                                self._span_manager.pop(key)
+                                self._detach_state(val)
+                            except Exception as exc:
+                                session_logger.warning("otel workflow handler: cleanup component span failed: %s", exc)
                 return
 
             # Non-exception: buffer on_invoke_data
@@ -1281,6 +1418,15 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 return
             if outputs is not None:
                 state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
+                if _is_retrieval_component_span(state.span):
+                    documents = _extract_retrieval_documents(outputs)
+                    if documents is not None:
+                        # Same policy as query.text / workflow.outputs: hash
+                        # under redaction, truncate otherwise — never raw text.
+                        state.span.set_attribute(
+                            GEN_AI_RETRIEVAL_DOCUMENTS,
+                            [redact(doc, self._config) for doc in documents],
+                        )
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_post_invoke failed: %s", exc)
 

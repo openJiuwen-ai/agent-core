@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/organization/`、`runtime/manager.py` |
-| 最近一次修订日期 | 2026-10-13 |
+| 最近一次修订日期 | 2026-10-14 |
 | 关联 feature | `F_115_team-organization-develop-integration.md` |
 
 ## 范围 / 边界
@@ -46,6 +46,8 @@ Organization 在已有 Team 之上提供跨团队任务池、消息、专家团�
 
 Runner 的组织入口复用现有 TeamRuntimeManager，不改变未绑定组织的 Team 的派发方式。
 会话释放先释放组织关联，再停止团队；普通 stop/pause/finalize 仍遵循 S_06 的生命周期语义。
+解散组织清除各参与团队及其成员的组织绑定配置，并停止宿主标记为 `expert_team` 的临时专家团队和汇总团队。
+Owner 及原本独立存在的受邀团队保持运行实例；专家团模板、团队历史和已生成的交付物保留。
 组织工具由现有工具工厂和角色权限链装配，组织命名空间与原有团队工具分开。
 挂载入口 `ensure_control_tools` 与 `ensure_team_binding` 受 `TeamAgentSpec.enable_organization` 门控，
 关闭时 Leader 不挂载组织工具，既有绑定也不回灌。

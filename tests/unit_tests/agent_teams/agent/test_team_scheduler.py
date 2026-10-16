@@ -4,7 +4,9 @@
 """Unit tests for the F_62 TeamScheduler (leader-side scheduled dispatch)."""
 
 import asyncio
+import json
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -26,7 +28,7 @@ from openjiuwen.agent_teams.schema.events import (
     TaskCompletedEvent,
     TaskListDrainedEvent,
 )
-from openjiuwen.agent_teams.schema.status import MemberMode, TaskStatus
+from openjiuwen.agent_teams.schema.status import MemberMode, MemberStatus, TaskStatus
 from openjiuwen.agent_teams.schema.task import TaskGraphSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -112,7 +114,11 @@ def _build_scheduler(
         dispatch_mode="scheduled",
     )
     message_manager = AsyncMock()
+    message_manager.member_name = LEADER
     message_manager.send_message = AsyncMock(return_value="mid-1")
+    # The handoff scan asks the mailbox what the owner already holds; an
+    # empty mailbox is the default, tests seed rows via ``_mailbox_handoff``.
+    message_manager.get_messages = AsyncMock(return_value=[])
     infra = TeamInfra()
     infra.task_manager = task_manager
     infra.message_manager = message_manager
@@ -155,6 +161,12 @@ def _dm_targets(message_manager) -> list[tuple[str, dict]]:
     for call in message_manager.send_message.await_args_list:
         calls.append((call.kwargs["to_member_name"], call.kwargs["meta"]))
     return calls
+
+
+def _mailbox_handoff(to_member: str, task_id: str, *, template: str = "scheduler_task_start") -> SimpleNamespace:
+    """A stored leader start handoff row as ``get_messages`` would return it."""
+    meta = json.dumps({"template": template, "refs": {"task": task_id}})
+    return SimpleNamespace(from_member_name=LEADER, to_member_name=to_member, content="", meta=meta)
 
 
 def _reviewer_mgr(db, bus, name):
@@ -340,14 +352,12 @@ async def test_review_dispatch_once_per_round_then_settle_pass(db, bus):
     assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "pass")).ok
     assert (await _reviewer_mgr(db, bus, "rev-2").verify_task("r", "pass")).ok
     assert (await _reviewer_mgr(db, bus, "rev-3").verify_task("r", "pass")).ok
+    author_dms_before = [meta for to, meta in _dm_targets(mm) if to == "dev-1"]
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
 
     assert (await tm.get("r")).status == TaskStatus.COMPLETED.value
-    # The author is told to report to the leader; the leader gets digests.
-    report_dms = [
-        to for to, meta in _dm_targets(mm) if meta["template"] == "scheduler_verified_report" and to == "dev-1"
-    ]
-    assert report_dms
+    # A pass does not wake the author (F_119); the leader gets the digest.
+    assert [meta for to, meta in _dm_targets(mm) if to == "dev-1"] == author_dms_before
     assert any("[r]" in text for text in host.leader_inputs)
 
 
@@ -484,6 +494,32 @@ async def test_completion_event_digests_once(db, bus):
     assert len(digests) == 1
     # The board drained: the all-done wrap-up rides on the same digest pass.
     assert any("1" in text for text in host.leader_inputs if text not in digests)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_completion_digest_carries_no_board_count_snapshot(db, bus):
+    """The digest is queued behind the leader's round, so it must not freeze a board count.
+
+    A count taken at completion reads as current progress when the digest
+    lands after newer tasks were created; the leader queries the live board.
+    """
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1"),
+            TaskGraphSpec(title="two", content="c", task_id="b", assignee="dev-1"),
+        ]
+    )
+    await scheduler.activate()
+    author = _reviewer_mgr(db, bus, "dev-1")
+    assert (await author.complete("a")).ok
+
+    await scheduler.on_event(EventMessage.from_event(TaskCompletedEvent(team_name=TEAM, task_id="a", member_name="dev-1")))
+
+    digest = next(text for text in host.leader_inputs if "[a]" in text)
+    assert "剩余" not in digest
+    assert "view_task" in digest
 
 
 @pytest.mark.asyncio
@@ -655,3 +691,677 @@ async def test_task_list_drained_waits_for_task_feedback_then_finalizes_team_fee
     await scheduler.on_event(event)
 
     assert order == ["task", f"team:{TEAM}"]
+
+
+# ---------------------------------------------------------------------------
+# F_118: retirement scan — request retirement of task-scoped members
+# ---------------------------------------------------------------------------
+
+
+def _retirement_scheduler(db, bus, *, candidates, unread=frozenset()):
+    """Scheduler whose backend reports ``candidates`` as retirable and ``unread`` as pending input."""
+    from openjiuwen.agent_teams.tools.team import MemberOpResult
+
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    backend = scheduler._infra.team_backend
+    live = list(candidates)
+    backend.list_retirable_members = AsyncMock(side_effect=lambda: list(live))
+
+    async def _request(member_name: str):
+        # The real row flips to SHUTDOWN_REQUESTED and leaves the live set;
+        # mirror that so the fixpoint loop converges like production.
+        live[:] = [row for row in live if row[0] != member_name]
+        return MemberOpResult.success()
+
+    backend.shutdown_member = AsyncMock(side_effect=_request)
+    mm.members_with_unread = AsyncMock(return_value=set(unread))
+    return scheduler, backend, tm
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_retirement_requested_once_board_is_empty(db, bus):
+    """READY + no open task + nothing unread -> one ordinary shutdown_member request."""
+    scheduler, backend, tm = _retirement_scheduler(db, bus, candidates=[("dev-1", "ready", "dormant")])
+
+    await scheduler.activate()
+
+    backend.shutdown_member.assert_awaited_once_with("dev-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_retirement_waits_for_open_tasks_including_review(db, bus):
+    """A task under review (or pending / blocked) keeps its author around."""
+    scheduler, backend, tm = _retirement_scheduler(db, bus, candidates=[("dev-1", "ready", "shutdown")])
+    reviewer = ({"type": "verifier", "reviewer_id": "v1", "instruction": ""},)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1", reviewer=reviewer)])
+    await scheduler.activate()  # starts the task; dev-1 now has IN_PROGRESS work
+    backend.shutdown_member.assert_not_awaited()
+
+    await _reviewer_mgr(db, bus, "dev-1").complete("a")  # IN_PROGRESS -> IN_REVIEW
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert (await tm.get("a")).status == TaskStatus.IN_REVIEW.value
+    backend.shutdown_member.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_retirement_waits_for_unread_input(db, bus):
+    """The just-woken window: READY before the waking message was read must not retire."""
+    scheduler, backend, _tm = _retirement_scheduler(
+        db, bus, candidates=[("dev-1", "ready", "dormant")], unread={"dev-1"}
+    )
+
+    await scheduler.activate()
+
+    backend.shutdown_member.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_retirement_ignores_members_without_policy(db, bus):
+    """Nothing to retire -> no board queries, no requests."""
+    scheduler, backend, _tm = _retirement_scheduler(db, bus, candidates=[])
+
+    await scheduler.activate()
+
+    backend.shutdown_member.assert_not_awaited()
+    scheduler._infra.message_manager.members_with_unread.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_handoff_to_dormant_member_wakes_it_through_auto_start(db, bus):
+    """A new task for a retired member is an explicit address: the handoff starts it."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await db.member.update_member_status("dev-1", TEAM, MemberStatus.SHUTDOWN_REQUESTED.value)
+    await db.member.update_member_status("dev-1", TEAM, MemberStatus.DORMANT.value)
+    await tm.add_graph([TaskGraphSpec(title="again", content="c", task_id="z", assignee="dev-1")])
+
+    await scheduler.activate()
+
+    assert (await tm.get("z")).status == TaskStatus.IN_PROGRESS.value
+    assert host.started_members == ["dev-1"]
+
+
+# ---------------------------------------------------------------------------
+# Handoff scan: reassignment of an active task
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reassigned_active_task_is_handed_to_its_new_owner(db, bus):
+    """An ``update_task`` reassignment keeps the task IN_PROGRESS, so the start
+    scan never fires for the new owner; the handoff scan mails it the same
+    start instruction and lazily starts it."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1")])
+    await scheduler.activate()
+    assert _dm_targets(mm) == [("dev-1", {"template": "scheduler_task_start", "refs": {"task": "a"}})]
+
+    assert (await tm.reassign("a", "dev-2")).ok
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    task = await tm.get("a")
+    assert task.status == TaskStatus.IN_PROGRESS.value
+    assert task.assignee == "dev-2"
+    assert _dm_targets(mm)[1:] == [("dev-2", {"template": "scheduler_task_start", "refs": {"task": "a"}})]
+    assert host.started_members == ["dev-1", "dev-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_handoff_scan_sends_each_owner_its_start_once(db, bus):
+    """Repeated wakes do not re-mail an owner that already holds its handoff."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1")])
+    await scheduler.activate()
+    assert (await tm.reassign("a", "dev-2")).ok
+
+    for _ in range(3):
+        await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert [target for target, _ in _dm_targets(mm)] == ["dev-1", "dev-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_restarted_scheduler_trusts_the_mailbox_before_re_sending_a_handoff(db, bus):
+    """A fresh scheduler (empty memo) re-learns handoffs from the mailbox: an
+    owner whose start row is already there gets nothing, an owner without one
+    gets its start. Read or unread does not matter."""
+    seeded, _host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1"),
+            TaskGraphSpec(title="two", content="c", task_id="b", assignee="dev-2"),
+        ]
+    )
+    await seeded.activate()
+    assert (await tm.reassign("b", "planner")).ok
+
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+
+    async def _get_messages(*, to_member_name: str, from_member_name: str):
+        assert from_member_name == LEADER
+        if to_member_name == "dev-1":
+            return [_mailbox_handoff("dev-1", "a")]
+        return []
+
+    mm.get_messages = AsyncMock(side_effect=_get_messages)
+    await scheduler.activate()
+
+    assert _dm_targets(mm) == [("planner", {"template": "scheduler_task_start", "refs": {"task": "b"}})]
+    assert host.started_members == ["planner"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_handoff_scan_recognises_a_plan_gate_start(db, bus):
+    """A plan-mode owner's start row is the plan template; it still counts as
+    the owner having been handed the task."""
+    seeded, _host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="plan it", content="c", task_id="p", assignee="planner")])
+    await seeded.activate()
+    assert (await tm.get("p")).status == TaskStatus.PLANNING.value
+
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    mm.get_messages = AsyncMock(return_value=[_mailbox_handoff("planner", "p", template="scheduler_task_start_plan")])
+    await scheduler.activate()
+
+    assert _dm_targets(mm) == []
+    assert host.started_members == []
+
+
+# ---------------------------------------------------------------------------
+# Temp reviewer trajectory attribution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_runs_under_its_own_trajectory_subject(db, bus, monkeypatch):
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler as _Scheduler
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+    from openjiuwen.agent_teams.rails.elements import OBSERVABILITY, TEAM_OBSERVABILITY
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.harness.execution_subject import current_execution_subject
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    scheduler._blueprint.spec.agents = {"teammate": DeepAgentSpec()}
+    scheduler._blueprint.spec.dispatch_mode = "scheduled"
+    scheduler._blueprint.language = "cn"
+    scheduler._infra.team_backend.db = db
+    scheduler._infra.team_backend.workspace_cache = None
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    # The scan dispatches a real temp reviewer; keep it from building one.
+    monkeypatch.setattr(_Scheduler, "_dispatch_to_reviewer", AsyncMock())
+
+    built_specs = []
+    run_subjects = []
+    run_sessions = []
+
+    class _FakeHarness:
+        async def run_once(self, _prompt, *, team_session=None):
+            run_subjects.append(current_execution_subject())
+            run_sessions.append(team_session)
+            return {"output": "voted"}
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, **_kwargs):
+        built_specs.append(agent_spec)
+        return _FakeHarness()
+
+    monkeypatch.setattr(TeamHarness, "build", staticmethod(_fake_build))
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    # Runs on the team session, so the observability rail finds the run root.
+    assert run_sessions[0].get_session_id() == "sched_session"
+    # Each run gets its own card id, so no run restores another's context.
+    card_ids = {spec.card.id for spec in built_specs}
+    assert len(card_ids) == 2
+    assert all(spec.card.name == "rev-1" for spec in built_specs)
+    rail_types = [rail.type for rail in built_specs[0].rails]
+    assert TEAM_OBSERVABILITY in rail_types
+    assert OBSERVABILITY in rail_types
+    subject = run_subjects[0]
+    review_round = (await tm.get("r")).review_round
+    assert subject.subject_id == f"team-reviewer:sched_session:{TEAM}:r:rev-1:r{review_round}"
+    assert subject.display_name == f"rev-1 · r · R{review_round}"
+    # Still a team lane, parented on the author whose deliverable is reviewed.
+    assert subject.kind == "team_member"
+    assert subject.parent_subject_id == f"team-member:sched_session:{TEAM}:dev-1"
+    assert subject.session_id == "sched_session"
+    # The scope is released once the reviewer run returns.
+    assert current_execution_subject() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_subject_is_per_task_round_and_attempt(db, bus, monkeypatch):
+    """Every fresh-context reviewer run owns its subject.
+
+    ``reviewer_id`` is numbered per task, so two tasks' first reviewers share a
+    name and may run concurrently; and each round / retry attempt is a new
+    harness with a fresh context. Sharing one subject would interleave their
+    windows in one trajectory lane.
+    """
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler as _Scheduler
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.harness.execution_subject import current_execution_subject
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    scheduler._blueprint.spec.agents = {"teammate": DeepAgentSpec()}
+    scheduler._blueprint.spec.dispatch_mode = "scheduled"
+    scheduler._blueprint.language = "cn"
+    scheduler._infra.team_backend.db = db
+    scheduler._infra.team_backend.workspace_cache = None
+    monkeypatch.setattr(_Scheduler, "_dispatch_to_reviewer", AsyncMock())
+    # Two tasks whose first reviewer carries the same per-task id.
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="deliver a", content="c", task_id="a", assignee="dev-1", reviewer=("verifier_1",)),
+            TaskGraphSpec(title="deliver b", content="c", task_id="b", assignee="dev-2", reviewer=("verifier_1",)),
+        ]
+    )
+    await scheduler.activate()
+    for task_id, author in (("a", "dev-1"), ("b", "dev-2")):
+        assert (await _reviewer_mgr(db, bus, author).complete(task_id)).ok
+
+    run_subjects = []
+    outputs = ["181001 transient", "voted", "voted", "voted"]
+
+    class _FakeHarness:
+        async def run_once(self, _prompt, *, team_session=None):
+            run_subjects.append(current_execution_subject())
+            return {"output": outputs[len(run_subjects) - 1]}
+
+        async def dispose(self):
+            return None
+
+    monkeypatch.setattr(TeamHarness, "build", staticmethod(lambda **_kwargs: _FakeHarness()))
+
+    task_a = await tm.get("a")
+    # Round N fails once transiently and is retried, then task b, then round N+1.
+    await scheduler._spawn_temp_reviewer("verifier_1", task_a)
+    await scheduler._spawn_temp_reviewer("verifier_1", await tm.get("b"))
+    await scheduler._spawn_temp_reviewer(
+        "verifier_1",
+        task_a.model_copy(update={"review_round": task_a.review_round + 1}),
+    )
+
+    ids = [subject.subject_id for subject in run_subjects]
+    round_a = task_a.review_round
+    assert ids == [
+        f"team-reviewer:sched_session:{TEAM}:a:verifier_1:r{round_a}",
+        f"team-reviewer:sched_session:{TEAM}:a:verifier_1:r{round_a}:a1",
+        f"team-reviewer:sched_session:{TEAM}:b:verifier_1:r{(await tm.get('b')).review_round}",
+        f"team-reviewer:sched_session:{TEAM}:a:verifier_1:r{round_a + 1}",
+    ]
+    assert len(set(ids)) == len(ids)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_view_task_reads_the_board(db, bus, monkeypatch):
+    """The temp reviewer's view_task must be bound to a task manager, not the backend."""
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler as _Scheduler
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+    from openjiuwen.agent_teams.tools.tool_task import ViewTaskToolV2
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    scheduler._blueprint.spec.agents = {"teammate": DeepAgentSpec()}
+    scheduler._blueprint.spec.dispatch_mode = "scheduled"
+    scheduler._blueprint.language = "cn"
+    scheduler._infra.team_backend.db = db
+    scheduler._infra.team_backend.workspace_cache = None
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    monkeypatch.setattr(_Scheduler, "_dispatch_to_reviewer", AsyncMock())
+
+    view_tools = []
+
+    class _FakeHarness:
+        async def run_once(self, _prompt, *, team_session=None):
+            return {"output": "voted"}
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, **_kwargs):
+        view_tools.extend(tool for tool in agent_spec.tools if isinstance(tool, ViewTaskToolV2))
+        return _FakeHarness()
+
+    monkeypatch.setattr(TeamHarness, "build", staticmethod(_fake_build))
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    assert len(view_tools) == 1
+    view_tool = view_tools[0]
+    # The reviewer's copy marks view_task as a fallback: the request already has the task.
+    assert "验收兜底" in view_tool.card.description
+    detail = await view_tool.invoke({"action": "get", "task_id": "r"})
+    assert detail.success
+    assert detail.data["task_id"] == "r"
+    listed = await view_tool.invoke({"action": "list"})
+    assert listed.success
+    assert [task["task_id"] for task in listed.data["tasks"]] == ["r"]
+    in_review = await view_tool.invoke({"action": "in_review"})
+    assert in_review.success
+    assert [task["task_id"] for task in in_review.data["tasks"]] == ["r"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_prompt_carries_its_previous_round_feedback(db, bus):
+    from openjiuwen.agent_teams.agent.scheduling import render
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
+    first_round = await tm.get("r")
+    # The first round has no previous vote, so the section is left out.
+    assert await tm.get_previous_round_vote(first_round, "rev-1") is None
+    first_prompt = await render.render_review_request_for_harness(first_round, language="en", reviewer="rev-1")
+    assert "previous round" not in first_prompt
+    assert "{{task.previous_feedback}}" not in first_prompt
+
+    rev_1 = _reviewer_mgr(db, bus, "rev-1")
+    assert (await rev_1.verify_task("r", "fail", "too vague")).ok
+    assert (await rev_1.verify_task("r", "fail", "missing the auth section")).ok
+    assert (await _reviewer_mgr(db, bus, "rev-2").verify_task("r", "pass")).ok
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    assert (await tm.get("r")).status == TaskStatus.IN_PROGRESS.value
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("r")).ok
+    second_round = await tm.get("r")
+    assert second_round.review_round == first_round.review_round + 1
+
+    # The reviewer's latest vote of the previous round wins.
+    previous = await tm.get_previous_round_vote(second_round, "rev-1")
+    assert previous.decision == "fail"
+    assert previous.feedback == "missing the auth section"
+    prompt = await render.render_review_request_for_harness(
+        second_round,
+        language="en",
+        reviewer="rev-1",
+        previous_vote=previous,
+    )
+    assert f"previous round (round {first_round.review_round})" in prompt
+    assert "missing the auth section" in prompt
+    assert "too vague" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_prompt_carries_the_submission_note(db, bus):
+    """The reviewer locates the deliverable from the request, not a view_task call."""
+    from openjiuwen.agent_teams.agent.scheduling import render
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [TaskGraphSpec(title="deliver", content="c", task_id="r", assignee="dev-1", reviewer=("rev-1",))]
+    )
+    await scheduler.activate()
+    note = "Deliverable written to /abs/outputs/poem.md; rhyme group: 十一尤"
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("r", note=note)).ok
+
+    prompt = await render.render_review_request_for_harness(await tm.get("r"), language="en", reviewer="rev-1")
+
+    assert "## The assignee's submission note" in prompt
+    assert note in prompt
+    assert "The above is the task's current, complete content." in prompt
+    assert prompt.index("## Goal and acceptance criteria") < prompt.index(note) < prompt.index("## How to review")
+    assert "{{task." not in prompt
+    assert "\n\n\n" not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_prompt_leaves_out_an_absent_submission_note(db, bus):
+    from openjiuwen.agent_teams.agent.scheduling import render
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+
+    prompt = await render.render_review_request_for_harness(await tm.get("r"), language="cn", reviewer="rev-1")
+
+    assert "提交说明" not in prompt
+    assert "{{task." not in prompt
+    assert "\n\n\n" not in prompt
+
+
+async def _capture_reviewer_spec(scheduler, tm, monkeypatch, db) -> Any:
+    """Spawn one temp reviewer and return the agent spec its harness was built with."""
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler as _Scheduler
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+
+    scheduler._blueprint.spec.dispatch_mode = "scheduled"
+    scheduler._blueprint.language = "cn"
+    scheduler._infra.team_backend.db = db
+    scheduler._infra.team_backend.workspace_cache = None
+    monkeypatch.setattr(_Scheduler, "_dispatch_to_reviewer", AsyncMock())
+    built = []
+
+    class _FakeHarness:
+        async def run_once(self, _prompt, *, team_session=None):
+            return {"output": "voted"}
+
+        async def dispose(self):
+            return None
+
+    def _fake_build(*, agent_spec, **_kwargs):
+        built.append(agent_spec)
+        return _FakeHarness()
+
+    monkeypatch.setattr(TeamHarness, "build", staticmethod(_fake_build))
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+    assert len(built) == 1
+    return built[0]
+
+
+def _tool_names(agent_spec) -> set[str]:
+    return {getattr(tool, "type", None) or tool.card.name for tool in agent_spec.tools}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_prefers_the_host_reviewer_spec(db, bus, monkeypatch):
+    from openjiuwen.agent_teams.schema.deep_agent_spec import BuiltinToolSpec, DeepAgentSpec
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    scheduler._blueprint.spec.agents = {"teammate": DeepAgentSpec(tools=[BuiltinToolSpec(type="host.cron")])}
+    scheduler._blueprint.spec.reviewer_agent = DeepAgentSpec(tools=[BuiltinToolSpec(type="host.web_fetch")])
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+
+    agent_spec = await _capture_reviewer_spec(scheduler, tm, monkeypatch, db)
+
+    assert _tool_names(agent_spec) == {"host.web_fetch", "verify_task", "view_task"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_falls_back_to_a_trimmed_teammate_spec(db, bus, monkeypatch):
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec, RailSpec, SubAgentSpec
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    scheduler._blueprint.spec.reviewer_agent = None
+    scheduler._blueprint.spec.agents = {
+        "teammate": DeepAgentSpec(
+            rails=[RailSpec(type="core.sys_operation")],
+            subagents=[SubAgentSpec(agent_card=AgentCard(name="helper"), system_prompt="")],
+            enable_task_planning=True,
+            add_general_purpose_agent=True,
+        )
+    }
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+
+    agent_spec = await _capture_reviewer_spec(scheduler, tm, monkeypatch, db)
+
+    sys_rails = [rail for rail in agent_spec.rails if rail.type == "core.sys_operation"]
+    assert sys_rails[0].params["read_only"] is True
+    assert agent_spec.subagents is None
+    assert agent_spec.add_general_purpose_agent is False
+    assert agent_spec.enable_task_planning is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_temp_reviewer_prompt_lists_upstream_tasks(db, bus):
+    from openjiuwen.agent_teams.agent.scheduling import render
+    from openjiuwen.agent_teams.message_template import task_links
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="draft", content="c", task_id="up", assignee="dev-2"),
+            TaskGraphSpec(
+                title="collect",
+                content="c",
+                task_id="r",
+                assignee="dev-1",
+                reviewer=("rev-1",),
+                depends_on=("up",),
+            ),
+        ]
+    )
+    await scheduler.activate()
+    assert (await _reviewer_mgr(db, bus, "dev-2").complete("up", note="poem at /abs/up.md")).ok
+    # The completed upstream unblocks "r"; the next scan starts it.
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("r")).ok
+    upstream, _downstream = await task_links(db, "r")
+
+    prompt = await render.render_review_request_for_harness(
+        await tm.get("r"),
+        language="en",
+        reviewer="rev-1",
+        upstream=upstream,
+    )
+
+    assert "## Upstream tasks" in prompt
+    assert "- up · draft · dev-2 · poem at /abs/up.md" in prompt
+    assert "{{task." not in prompt
+
+
+
+# ---------------------------------------------------------------------------
+# F_119: the leader digest carries the completion summary
+# ---------------------------------------------------------------------------
+
+
+async def _digest_for(db, bus, *, summary: str | None, note: str | None) -> str:
+    scheduler, host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1")])
+    await scheduler.activate()
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("a", summary=summary, note=note)).ok
+    await scheduler.on_event(
+        EventMessage.from_event(TaskCompletedEvent(team_name=TEAM, task_id="a", member_name="dev-1"))
+    )
+    digests = [text for text in host.leader_inputs if "[a]" in text]
+    assert len(digests) == 1
+    return digests[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_digest_carries_summary_and_points_to_the_note(db, bus):
+    digest = await _digest_for(db, bus, summary="report at out/r.md", note="full detail\nsecond line")
+
+    assert "report at out/r.md" in digest
+    assert "full detail" not in digest
+    assert "view_task(action='note', task_id='a')" in digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_digest_without_note_or_cut_omits_the_note_hint(db, bus):
+    digest = await _digest_for(db, bus, summary="short summary", note=None)
+
+    assert "short summary" in digest
+    assert "action='note'" not in digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_digest_without_completion_text_is_the_bare_line(db, bus):
+    digest = await _digest_for(db, bus, summary=None, note=None)
+
+    assert "action='note'" not in digest
+    assert digest.count("\n") == 1  # headline + board hint only
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_leader_digest_points_to_the_note_when_the_summary_is_cut(db, bus):
+    digest = await _digest_for(db, bus, summary="z" * 300, note=None)
+
+    assert "z" * 200 + "…" in digest
+    assert "view_task(action='note', task_id='a')" in digest
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_review_request_shows_summary_and_full_note(db, bus):
+    from openjiuwen.agent_teams.agent.scheduling import render
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [TaskGraphSpec(title="deliver", content="c", task_id="r", assignee="dev-1", reviewer=("rev-1",))]
+    )
+    await scheduler.activate()
+    note = "first line\n" + "x" * 400
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("r", summary="poem at /abs/p.md", note=note)).ok
+
+    prompt = await render.render_review_request_for_harness(await tm.get("r"), language="en", reviewer="rev-1")
+
+    assert "Summary: poem at /abs/p.md" in prompt
+    assert f"Detail:\n{note}" in prompt
+    assert "{{task." not in prompt
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_review_request_upstream_lists_summaries_only(db, bus):
+    from openjiuwen.agent_teams.agent.scheduling import render
+    from openjiuwen.agent_teams.message_template import task_links
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="draft", content="c", task_id="up", assignee="dev-2"),
+            TaskGraphSpec(
+                title="collect",
+                content="c",
+                task_id="r",
+                assignee="dev-1",
+                reviewer=("rev-1",),
+                depends_on=("up",),
+            ),
+        ]
+    )
+    await scheduler.activate()
+    assert (
+        await _reviewer_mgr(db, bus, "dev-2").complete("up", summary="poem at /abs/up.md", note="long detail")
+    ).ok
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    assert (await _reviewer_mgr(db, bus, "dev-1").complete("r")).ok
+    upstream, _downstream = await task_links(db, "r")
+
+    prompt = await render.render_review_request_for_harness(
+        await tm.get("r"),
+        language="en",
+        reviewer="rev-1",
+        upstream=upstream,
+    )
+
+    assert "- up · draft · dev-2 · poem at /abs/up.md" in prompt
+    assert "long detail" not in prompt
+    assert "view_task(action='note', task_id=...)" in prompt

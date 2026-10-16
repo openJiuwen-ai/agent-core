@@ -24,6 +24,7 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.member import TeamMember
     from openjiuwen.agent_teams.agent.member_activity import MemberActivityRegistry
+    from openjiuwen.agent_teams.schema.status import MemberStatus
     from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 
@@ -57,6 +58,11 @@ class TeamAgentState:
     # tool/clean path, read from the stream round-end path), so it belongs
     # in TeamAgentState per the four-quadrant rule.
     team_cleaned: bool = False
+    # Terminal status this member wrote for itself in ``shutdown_self``
+    # (SHUTDOWN / DORMANT). ``finalize_member`` reads it instead of the DB row:
+    # a wake can CAS the row to RESTARTING before the old run cycle has
+    # finalized, and the old cycle must still tear down, not pause (F_118).
+    retired_status: Optional["MemberStatus"] = None
 
     # ``time.monotonic()`` stamp of the moment this member last settled into
     # runtime IDLE (MemberStatus.READY); ``None`` while it is mid-round

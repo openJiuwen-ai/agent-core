@@ -27,6 +27,10 @@ from openjiuwen.agent_teams.tools.models import (
 )
 from openjiuwen.core.common.logging import team_logger
 
+# Recipients whose unread rows never count as outstanding team work: a
+# SHUTDOWN member will not read again, a DORMANT member reads on wake.
+_UNREAD_EXEMPT_STATUSES: tuple[str, ...] = (MemberStatus.SHUTDOWN.value, MemberStatus.DORMANT.value)
+
 
 class MessageDao:
     """Data access object for message and message-read-status tables."""
@@ -433,7 +437,7 @@ class MessageDao:
         """Return True if any team message is still unread by its intended reader.
 
         Direct messages: unread when ``is_read`` is False and the recipient
-        has not already reached SHUTDOWN. Broadcast messages:
+        has not already reached SHUTDOWN / DORMANT. Broadcast messages:
         read state is a per-member high-water mark in MessageReadStatus, so a
         broadcast is unread by reachable member M when M is not its sender and M's
         watermark does not yet cover the broadcast timestamp. This honors
@@ -451,66 +455,116 @@ class MessageDao:
         Returns:
             True if at least one matching message has not been read.
         """
-        message_model = _get_message_model()
-        read_status_model = _get_message_read_status_model()
         async with self._sessions.read() as session:
-            # Direct messages: a single unread row is enough.
-            recipient_is_shutdown = (
-                select(TeamMember.member_name)
-                .where(
-                    TeamMember.team_name == message_model.team_name,
-                    TeamMember.member_name == message_model.to_member_name,
-                    TeamMember.status == MemberStatus.SHUTDOWN.value,
-                )
-                .exists()
-            )
-            direct_unread = await session.execute(
-                select(message_model.message_id)
-                .where(
-                    message_model.team_name == team_name,
-                    message_model.broadcast.is_(False),
-                    message_model.is_read.is_(False),
-                    ~recipient_is_shutdown,
-                )
-                .limit(1)
-            )
-            if direct_unread.first() is not None:
+            if await self._direct_unread_recipients(session, team_name, only=None, probe=True):
                 return True
-
             if not include_broadcast:
                 return False
+            return bool(await self._broadcast_unread_recipients(session, team_name, only=None))
 
-            # Apply the common watermark in SQL, then check explicit group
-            # recipients from metadata without loading message bodies.
-            covered_by_watermark = (
-                select(read_status_model.member_name)
-                .where(
-                    read_status_model.member_name == TeamMember.member_name,
-                    read_status_model.team_name == team_name,
-                    read_status_model.read_at >= message_model.timestamp,
-                )
-                .exists()
-            )
-            unread_broadcast = await session.execute(
-                select(message_model.meta, message_model.from_member_name, TeamMember.member_name, TeamMember.role)
-                .join(TeamMember, TeamMember.team_name == message_model.team_name)
-                .where(
-                    message_model.team_name == team_name,
-                    message_model.broadcast.is_(True),
-                    TeamMember.status != MemberStatus.SHUTDOWN.value,
-                    ~covered_by_watermark,
-                )
-            )
-            from openjiuwen.agent_teams.group_chat.handler import group_metadata
+    async def members_with_unread(self, team_name: str, member_names: list[str]) -> set[str]:
+        """Return the subset of ``member_names`` that still have unread input.
 
-            for row in unread_broadcast.all():
-                meta = group_metadata(row)
-                if meta:
-                    if row.role != "passive_human" and row.member_name in meta["mentions"]:
-                        return True
-                elif row.member_name != row.from_member_name:
-                    return True
-            return False
+        Same two readers as ``has_unread_messages`` (direct rows, then the
+        broadcast watermark), narrowed to the named members. Feeds the
+        scheduler's retirement scan and the dormant settle gate (F_118): a
+        member that has not yet read what was sent to it is not done, even
+        with an empty task board.
+        """
+        if not member_names:
+            return set()
+        async with self._sessions.read() as session:
+            pending = await self._direct_unread_recipients(session, team_name, only=member_names, probe=False)
+            remaining = [name for name in member_names if name not in pending]
+            if remaining:
+                pending |= await self._broadcast_unread_recipients(session, team_name, only=remaining)
+            return pending
+
+    async def _direct_unread_recipients(
+        self,
+        session: AsyncSession,
+        team_name: str,
+        *,
+        only: list[str] | None,
+        probe: bool,
+    ) -> set[str]:
+        """Recipients (restricted to ``only`` when given) holding an unread direct row.
+
+        Recipients in ``_UNREAD_EXEMPT_STATUSES`` never count. ``probe`` stops
+        at the first hit (the yes/no completion check needs no roster).
+        """
+        message_model = _get_message_model()
+        recipient_is_exempt = (
+            select(TeamMember.member_name)
+            .where(
+                TeamMember.team_name == message_model.team_name,
+                TeamMember.member_name == message_model.to_member_name,
+                TeamMember.status.in_(_UNREAD_EXEMPT_STATUSES),
+            )
+            .exists()
+        )
+        stmt = (
+            select(message_model.to_member_name)
+            .where(
+                message_model.team_name == team_name,
+                message_model.broadcast.is_(False),
+                message_model.is_read.is_(False),
+                ~recipient_is_exempt,
+            )
+            .distinct()
+        )
+        if only is not None:
+            stmt = stmt.where(message_model.to_member_name.in_(only))
+        if probe:
+            stmt = stmt.limit(1)
+        return {row.to_member_name for row in (await session.execute(stmt)).all()}
+
+    async def _broadcast_unread_recipients(
+        self,
+        session: AsyncSession,
+        team_name: str,
+        *,
+        only: list[str] | None,
+    ) -> set[str]:
+        """Members (restricted to ``only`` when given) with a broadcast above their read watermark.
+
+        Group messages count only for mentioned non-passive members; ordinary
+        broadcasts for everyone but the sender. Exempt statuses never count.
+        """
+        message_model = _get_message_model()
+        read_status_model = _get_message_read_status_model()
+        covered_by_watermark = (
+            select(read_status_model.member_name)
+            .where(
+                read_status_model.member_name == TeamMember.member_name,
+                read_status_model.team_name == team_name,
+                read_status_model.read_at >= message_model.timestamp,
+            )
+            .exists()
+        )
+        stmt = (
+            select(message_model.meta, message_model.from_member_name, TeamMember.member_name, TeamMember.role)
+            .join(TeamMember, TeamMember.team_name == message_model.team_name)
+            .where(
+                message_model.team_name == team_name,
+                message_model.broadcast.is_(True),
+                TeamMember.status.not_in(_UNREAD_EXEMPT_STATUSES),
+                ~covered_by_watermark,
+            )
+        )
+        if only is not None:
+            stmt = stmt.where(TeamMember.member_name.in_(only))
+        from openjiuwen.agent_teams.group_chat.handler import group_metadata
+
+        pending: set[str] = set()
+        for row in (await session.execute(stmt)).all():
+            meta = group_metadata(row)
+            if meta:
+                if row.role != "passive_human" and row.member_name in meta["mentions"]:
+                    pending.add(row.member_name)
+            elif row.member_name != row.from_member_name:
+                pending.add(row.member_name)
+        return pending
 
     async def _mark_read_in_session(
         self,

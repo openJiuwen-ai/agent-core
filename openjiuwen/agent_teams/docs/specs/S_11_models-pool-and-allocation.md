@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/models/` |
-| 最近一次修订日期 | 2026-07-17 |
-| 关联 feature | F_16_by-model-name-allocator-list-serialisation.md、F_67_intelli-router-allocation-strategy.md |
+| 最近一次修订日期 | 2026-10-15 |
+| 关联 feature | F_16_by-model-name-allocator-list-serialisation.md、F_67_intelli-router-allocation-strategy.md、B_05_paused-team-rebuilt-on-every-request.md |
 
 ## 范围 / 边界
 
@@ -54,10 +54,16 @@
    池里 live 读取，凭证轮换不需要重 spawn 成员。
 
 3. **`inherit_pool_ids` 只对 bit-exact 旧条目继承 `model_id`**。bit-exact
-   的判定基于 `_entry_signature`（除 `model_id` 外所有字段 JSON
+   的判定基于 `_entry_signature`（除 client 身份外所有字段 JSON
    canonical）；任何字段差异（含 api_key 轮换）都强制新 uuid，避免基础
    设施层缓存到旧凭证的 client 在轮换后继续服务。重复签名按池序一一配对，
    多余新条目用各自的 auto-uuid。
+   **client 身份不算配置**：签名排除 `model_id` 与 `metadata.client.client_id`。
+   宿主常把整个 `ModelClientConfig` dump 进 `metadata.client`，其 `client_id`
+   每次 dump 都是新 uuid，而 `to_team_model_config` 物化时又用 `model_id`
+   覆盖它。把它算进签名会让同一个选择的两次构建判成"换模型"——
+   `TeamRuntimeManager.activate` 用同一个签名判断 paused 运行时是否要重建，
+   结果每次追问都拆掉重建（[[B_05]]）。
 
 4. **`Allocator.allocate()` 返回 `None` ⇔ "无可用条目"**。`None` 是
    显式的回退信号，调用方据此走 `TeamAgentSpec.agents` per-agent 模型
@@ -274,7 +280,8 @@ def inherit_pool_ids(
 ```
 
 - 按 `_entry_signature(entry)` 对齐：`json.dumps(entry.model_dump(
-  exclude={"model_id"}), sort_keys=True, default=str)`。
+  exclude={"model_id"}), sort_keys=True, default=str)`，其中
+  `metadata.client.client_id` 先从 dump 出的副本里剔除（不改条目本身）。
 - 同签名多条按池序一一配对；旧条目用尽则后续新条目保持 auto-uuid。
 - 顺序无关：reorder-only 的两个池能完全对齐。
 - 任意值差异（含 api_key、api_base_url、metadata 任一键、description）

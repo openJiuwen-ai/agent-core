@@ -322,6 +322,10 @@ class TeamMessageManager:
         """
         return await self.db.message.has_unread_messages(self.team_name, include_broadcast=include_broadcast)
 
+    async def members_with_unread(self, member_names: list[str]) -> set[str]:
+        """Subset of ``member_names`` with unread direct or broadcast input."""
+        return await self.db.message.members_with_unread(self.team_name, member_names)
+
     async def mark_message_read(self, message_id: str, member_name: str) -> bool:
         """Mark a message as read by a member
 

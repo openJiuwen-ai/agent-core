@@ -667,14 +667,13 @@ class AgentConfigurator:
         # team config (predefined roster, plan-mode, reliability gating) stay
         # here; "can it build" gates (a missing handle) live in the factories.
         from openjiuwen.agent_teams.rails.elements import (
-            OBSERVABILITY,
-            TEAM_OBSERVABILITY,
             TEAM_PLAN_MODE,
             TEAM_POLICY,
             TEAM_RELIABILITY,
             TEAM_TOOL,
             TEAM_TOOL_APPROVAL,
             TEAM_WORKSPACE,
+            observability_rail_specs,
         )
         from openjiuwen.agent_teams.rails.registration import (
             ensure_harness_elements_registered,
@@ -685,14 +684,12 @@ class AgentConfigurator:
         ensure_harness_elements_registered()
 
         # Observability rail specs — shared by all agents (members + swarmflow
-        # workers). Two rails, always mounted as a pair: ``core.observability``
-        # owns the agent span itself (harness-level, team-agnostic) and
-        # ``core.team.observability`` layers the team identity onto it. Each
-        # provider checks is_initialized() — no-op when disabled.
-        observability_rail_specs = [
-            RailSpec(type=TEAM_OBSERVABILITY),
-            RailSpec(type=OBSERVABILITY),
-        ]
+        # workers + scheduled-mode temp reviewers). Two rails, always mounted
+        # as a pair: ``core.observability`` owns the agent span itself
+        # (harness-level, team-agnostic) and ``core.team.observability`` layers
+        # the team identity onto it. Each provider checks is_initialized() —
+        # no-op when disabled.
+        member_observability_rail_specs = observability_rail_specs()
 
         # Predefined teams pin their roster — strip every dynamic spawn tool
         # (one per role_type) from the leader's tool set.
@@ -708,6 +705,7 @@ class AgentConfigurator:
                 params={
                     "teammate_mode": teammate_mode,
                     "dispatch_mode": spec.dispatch_mode,
+                    "bootstrap_mode": spec.bootstrap_mode,
                     "lifecycle": spec.lifecycle,
                     "team_mode": _resolve_team_mode(spec),
                     "exclude_tools": exclude,
@@ -728,6 +726,7 @@ class AgentConfigurator:
                     "teammate_mode": teammate_mode,
                     "team_mode": _resolve_team_mode(spec),
                     "dispatch_mode": spec.dispatch_mode,
+                    "bootstrap_mode": spec.bootstrap_mode,
                     "base_prompt": agent_spec.system_prompt,
                     "team_workspace_path": team_workspace_path,
                     "team_outputs_dir": team_outputs_dir,
@@ -838,6 +837,7 @@ class AgentConfigurator:
         swarmflow_concurrency_governor = None
         swarmflow_budget = None
         swarmflow_external_cli_agents: tuple[Any, ...] = ()
+        swarmflow_expert_specs: dict[str, Any] = {}
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
             # Callable class (same call contract as the historical closure) so
             # the inject chain stays unchanged, plus pool_names for the
@@ -848,12 +848,19 @@ class AgentConfigurator:
             swarmflow_model_resolver = _SwarmflowModelResolver(ctx.team_spec)
 
             base_specs = spec.agents
-            swarmflow_worker_base_spec = _derive_swarmflow_worker_base_spec(spec, observability_rail_specs)
+            swarmflow_worker_base_spec = _derive_swarmflow_worker_base_spec(spec, member_observability_rail_specs)
             # Human-session avatars derive from the human_agent spec; fall back to
             # the raw worker base so human_session still works when no dedicated
             # human_agent spec is configured (it just lacks human-tuned desc).
+            # Like the worker base, it mounts the observability rail pair so
+            # the avatar's records carry an agent span in the trajectory.
+            human_base = base_specs.get("human_agent") or base_specs.get("teammate") or base_specs.get("leader")
             swarmflow_human_base_spec = (
-                base_specs.get("human_agent") or base_specs.get("teammate") or base_specs.get("leader")
+                human_base.model_copy(
+                    update={"rails": list(human_base.rails or []) + member_observability_rail_specs},
+                )
+                if human_base is not None
+                else None
             )
 
             from openjiuwen.agent_teams.workflow.concurrency import (
@@ -875,6 +882,13 @@ class AgentConfigurator:
             swarmflow_budget = BudgetLedger(total=spec.swarmflow_budget)
             swarmflow_external_cli_agents = _derive_swarmflow_external_cli_agents(spec)
 
+            from openjiuwen.agent_teams.workflow.backends.expert_specs import derive_swarmflow_expert_specs
+
+            # Experts are AgentGroup members already in the blueprint; a script
+            # picks one by member name. Derived once here, next to the worker
+            # base spec, so both ride the same rails and progressive_tool switch.
+            swarmflow_expert_specs = derive_swarmflow_expert_specs(spec, member_observability_rail_specs)
+
         inject_team_handles(
             member_build_context.extras,
             team_backend=self.team_backend,
@@ -887,6 +901,7 @@ class AgentConfigurator:
             swarmflow_concurrency_governor=swarmflow_concurrency_governor,
             swarmflow_budget=swarmflow_budget,
             swarmflow_external_cli_agents=swarmflow_external_cli_agents,
+            swarmflow_expert_specs=swarmflow_expert_specs,
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
             worktree_manager=self.worktree_manager,
@@ -894,7 +909,7 @@ class AgentConfigurator:
 
         # Fold the team rails into the spec rails (after the user rails, to keep
         # the init order consistent with the legacy mount order).
-        team_rail_specs.extend(observability_rail_specs)
+        team_rail_specs.extend(member_observability_rail_specs)
         base_rails = _apply_team_worktree_shell_guard(
             list(build_spec.rails or []),
             enabled=ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE, TeamRole.EXTERNAL_CLI},

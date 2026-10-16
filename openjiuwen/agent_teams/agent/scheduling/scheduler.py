@@ -12,6 +12,11 @@ idempotent scan pair:
   ``PENDING(assignee)`` task via ``TeamTaskManager.start_task`` (CAS) and hand
   it over with a leader-identity mailbox message (delivery lazily starts the
   member runtime, so being offline is never a start precondition).
+* **handoff scan** — for each active task, make sure its *current* owner
+  holds a start handoff in the mailbox; an owner that acquired the task by
+  ``update_task`` reassignment (status preserved, so the start scan never
+  fires for it) is handed the same leader-identity start message, lazily
+  started like any other recipient.
 * **review scan** — dispatch review requests for freshly opened rounds, tally
   votes (``verdict.judge``), settle decided rounds via ``settle_review``,
   escalate to the leader when the round ceiling is exhausted or a round
@@ -26,6 +31,8 @@ leader itself receives direct input injections (digests / escalations).
 from __future__ import annotations
 
 import asyncio
+import uuid
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
@@ -34,12 +41,14 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.agent.scheduling import render
+from openjiuwen.agent_teams.agent.scheduling.reviewer_spec import build_reviewer_agent_spec
 from openjiuwen.agent_teams.agent.scheduling.verdict import (
     VERDICT_FAIL,
     VERDICT_PASS,
     settle_review_tally,
 )
 from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.message_template import parse_meta, task_links
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template, make_template_loader
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import TaskStatus
@@ -116,6 +125,12 @@ class TeamScheduler:
         self._escalated: set[tuple[str, int]] = set()
         self._summary_requested: set[tuple[str, int]] = set()
         self._digested_tasks: set[str] = set()
+        # (task_id, owner) pairs whose start handoff is known to sit in the
+        # mailbox — written when this process sends one, or when the handoff
+        # scan finds one already there. Saves the scan a mailbox query per
+        # active task on every wake; after a restart each pair costs exactly
+        # one query to re-learn.
+        self._handoff_known: set[tuple[str, str]] = set()
         self._all_done_announced = False
         self._review_feedback_dispatched: set[tuple[str, int]] = set()
         self._review_feedback_tasks: set[asyncio.Task[Any]] = set()
@@ -195,15 +210,69 @@ class TeamScheduler:
     # ------------------------------------------------------------------
 
     async def _scan(self) -> None:
-        """Run both reconcile passes to a bounded fixpoint."""
+        """Run the four reconcile passes to a bounded fixpoint."""
         task_manager = self._infra.task_manager
         if task_manager is None:
             return
         for _ in range(_MAX_SCAN_PASSES):
             acted = await self._reconcile_starts(task_manager)
+            acted = await self._reconcile_handoffs(task_manager) or acted
             acted = await self._reconcile_reviews(task_manager) or acted
+            acted = await self._reconcile_retirements(task_manager) or acted
             if not acted:
                 return
+
+    async def _reconcile_retirements(self, task_manager) -> bool:
+        """Request retirement of task-scoped members whose board is empty (F_118).
+
+        A member declared inline on ``create_task`` carries a lifetime policy
+        on its row. Once it is live and nothing is left for it, the scheduler
+        issues the ordinary ``shutdown_member`` request; the member settles
+        into SHUTDOWN or DORMANT itself, from that same policy, when it is
+        truly idle (S_03 mechanism 18) — this pass never touches a round.
+
+        Three conditions, each closing one hole:
+
+        * idle (``READY``) — never BUSY (mid-round: replies to what it is
+          saying would be stranded), UNSTARTED (row landed, task not yet),
+          RESTARTING (a wake in progress), or already requested;
+        * no non-terminal task on its board — ``IN_REVIEW`` / ``PENDING`` /
+          ``BLOCKED`` all count as open, so a submitted task keeps its author
+          around for rework and the post-verify report;
+        * nothing unread — a just-woken DORMANT member is READY before it has
+          read the message that woke it; requesting retirement in that window
+          would settle it without a round and strand the message.
+        """
+        backend = self._infra.team_backend
+        message_manager = self._infra.message_manager
+        if backend is None or message_manager is None:
+            return False
+        candidates = await backend.list_retirable_members()
+        if not candidates:
+            return False
+        open_counts = await task_manager.open_task_counts_by_assignee()
+        unread = await message_manager.members_with_unread([name for name, _status, _lifetime in candidates])
+        acted = False
+        for member_name, status, lifetime in candidates:
+            if open_counts.get(member_name, 0) or member_name in unread:
+                continue
+            result = await backend.shutdown_member(member_name)
+            if not result.ok:
+                team_logger.debug(
+                    "[scheduler] retirement request for %s (status=%s) did not apply: %s",
+                    member_name,
+                    status,
+                    result.reason,
+                )
+                continue
+            team_logger.info(
+                "[scheduler] retirement requested for %s (lifetime=%s, was %s)",
+                member_name,
+                lifetime,
+                status,
+            )
+            acted = True
+        return acted
 
     async def _reconcile_starts(self, task_manager) -> bool:
         """Start each idle member's earliest assigned PENDING task."""
@@ -232,9 +301,77 @@ class TeamScheduler:
             started = await task_manager.get(candidate.task_id)
             if started is None:
                 continue
-            await self._send_as_leader(member_name, render.meta_task_start(started))
+            await self._send_task_start(started)
             acted = True
         return acted
+
+    async def _reconcile_handoffs(self, task_manager) -> bool:
+        """Hand every active task to an owner that never received its start.
+
+        The start scan hands a task over exactly when it flips it out of
+        ``PENDING``. A leader ``update_task(assignee=...)`` on an already
+        active task (``TASK_REASSIGNABLE_STATUSES`` keeps the status) therefore
+        produces no handoff: the former owner is steered off by
+        ``TASK_REVOKED``, but the new owner only sees a transient
+        ``TASK_CLAIMED`` — nothing if its runtime is not up yet, and under
+        scheduled dispatch there is no startup board survey to catch up from
+        (``ScheduledTaskBoardHandler.on_initial_task_poll``). The task then
+        sits ``IN_PROGRESS`` with nobody working on it until the owner's own
+        stale sweep fires or the leader notices.
+
+        This pass closes that gap from the board alone: for each active task
+        the current owner must hold a leader-identity start handoff bound to
+        that task in its mailbox (durable, so an offline owner drains it on
+        startup). Missing → send the same start message the start scan would
+        have sent, which also lazily starts the owner. Idempotent via the
+        mailbox itself plus the in-process ``_handoff_known`` memo; a
+        restarted leader re-learns each pair with one mailbox read.
+        """
+        message_manager = self._infra.message_manager
+        if message_manager is None:
+            return False
+        active: list[Any] = []
+        for status in (TaskStatus.PLANNING.value, TaskStatus.IN_PROGRESS.value):
+            active.extend(await task_manager.list_tasks(status=status))
+        acted = False
+        for task in active:
+            owner = task.assignee
+            if not owner or (task.task_id, owner) in self._handoff_known:
+                continue
+            if await self._owner_has_start_handoff(message_manager, owner, task.task_id):
+                self._handoff_known.add((task.task_id, owner))
+                continue
+            team_logger.info(
+                "[scheduler] active task %s has no start handoff for its owner %s; sending one",
+                task.task_id,
+                owner,
+            )
+            if await self._send_task_start(task):
+                acted = True
+        return acted
+
+    async def _owner_has_start_handoff(self, message_manager, owner: str, task_id: str) -> bool:
+        """Whether ``owner``'s mailbox holds a leader start handoff for ``task_id``.
+
+        Read or unread does not matter — a drained handoff was delivered, an
+        undrained one will be on the owner's next mailbox sweep.
+        """
+        rows = await message_manager.get_messages(
+            to_member_name=owner,
+            from_member_name=message_manager.member_name,
+        )
+        for row in rows:
+            if render.is_task_start_meta(parse_meta(row.meta), task_id):
+                return True
+        return False
+
+    async def _send_task_start(self, task) -> bool:
+        """Send the owner its start handoff and remember that it is in the mailbox."""
+        owner = task.assignee
+        sent = await self._send_as_leader(owner, render.meta_task_start(task))
+        if sent:
+            self._handoff_known.add((task.task_id, owner))
+        return sent
 
     async def _reconcile_reviews(self, task_manager) -> bool:
         """Dispatch, judge, settle, escalate and re-nudge open review rounds."""
@@ -291,9 +428,10 @@ class TeamScheduler:
         if not result.ok:
             team_logger.debug("[scheduler] pass settle for %s did not apply: %s", task.task_id, result.reason)
             return False
-        if task.assignee:
-            await self._send_as_leader(task.assignee, render.meta_verified_report(task))
-        await self._digest_task_done(task_manager, task.task_id, task.title, verified=True)
+        # The author is not woken for a pass (F_119): the leader gets the result
+        # through the digest, and the author learns it on its next input via
+        # the task-outcome channel of its own rail.
+        await self._digest_task_done(task_manager, task, verified=True)
         return True
 
     async def _settle_fail_or_escalate(self, task_manager, task, tally: dict) -> bool:
@@ -457,9 +595,9 @@ class TeamScheduler:
     async def _dispatch_to_reviewer(self, reviewer: str, task: Any) -> None:
         """Dispatch a review request by spawning a one-shot temp reviewer harness.
 
-        The harness inherits the team's base agent spec (model, filesystem
-        tools) augmented with ``verify_task`` + ``view_task`` so it can
-        inspect the deliverable and cast its vote.  The harness is built,
+        The harness runs on the reviewer base spec (see
+        :meth:`_spawn_temp_reviewer`) augmented with ``verify_task`` +
+        ``view_task`` so it can inspect the deliverable and cast its vote.  The harness is built,
         run once, and disposed — a crash is logged and the next scheduler
         scan retries via ``_review_dispatched.discard()``.
         """
@@ -469,24 +607,41 @@ class TeamScheduler:
     async def _spawn_temp_reviewer(self, reviewer: str, task: Any) -> None:
         """Build a one-shot reviewer harness and run ``verify_task`` on it.
 
-        The reviewer inherits the team's base agent spec (model, filesystem
-        tools, etc.) and gets two extra team tools — ``verify_task`` +
-        ``view_task`` — so it can inspect the deliverable and cast a vote.
-        The harness is disposed immediately after ``run_once``, regardless of
-        outcome; a crash is logged and retried on the next scan.
+        The reviewer runs on ``spec.reviewer_agent`` when the host provides
+        one, else on the teammate spec narrowed by the framework
+        (:func:`build_reviewer_agent_spec`). It gets two extra team tools:
+        ``verify_task`` to cast its vote and ``view_task`` as a fallback only,
+        since the review request already carries what it needs. The harness
+        is disposed immediately after ``run_once``, regardless of outcome; a
+        crash is logged and retried on the next scan.
+
+        For trajectory attribution the reviewer mounts the same observability
+        rail pair as a team member and runs under its own execution subject per
+        (task, reviewer, round, attempt), so each fresh-context run groups into
+        a lane of its own instead of falling into the unassigned main group or
+        sharing a lane with another task's same-named reviewer.
         """
+        from openjiuwen.agent_teams.agent.team_agent import team_reviewer_execution_subject
+        from openjiuwen.agent_teams.context import get_session_id
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+        from openjiuwen.agent_teams.rails.elements import observability_rail_specs
         from openjiuwen.agent_teams.schema.team import TeamRole
         from openjiuwen.agent_teams.tools.locales import make_translator
         from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
         from openjiuwen.agent_teams.tools.tool_task import VerifyTaskTool, ViewTaskToolV2
+        from openjiuwen.core.session.agent_team import Session as TeamSession
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+        from openjiuwen.harness.execution_subject import execution_subject_scope
 
         spec = self._blueprint.spec
-        agents = getattr(spec, "agents", None) or {}
-        base_agent_spec = agents.get("teammate") or agents.get("leader")
+        base_agent_spec = getattr(spec, "reviewer_agent", None)
         if base_agent_spec is None:
-            team_logger.error("[scheduler] no base agent spec for temp reviewer")
-            return
+            agents = getattr(spec, "agents", None) or {}
+            member_spec = agents.get("teammate") or agents.get("leader")
+            if member_spec is None:
+                team_logger.error("[scheduler] no base agent spec for temp reviewer")
+                return
+            base_agent_spec = build_reviewer_agent_spec(member_spec)
 
         backend = self._infra.team_backend
         task_manager = self._infra.task_manager
@@ -496,7 +651,8 @@ class TeamScheduler:
 
         # Build a reviewer-scoped TeamTaskManager so that ``verify_task``'s
         # identity guard (``member_name in task.reviewers()``) passes against
-        # the reviewer name stored on the task row.
+        # the reviewer name stored on the task row. ``view_task`` reads through
+        # the same manager, so ``in_review`` lists this reviewer's queue.
         reviewer_tm = TeamTaskManager(
             team_name=backend.team_name,
             member_name=reviewer,
@@ -509,12 +665,11 @@ class TeamScheduler:
         # team backend's cache (it delegates to the workspace manager — the
         # single source every consumer uses). ``None`` keeps the framework
         # default.
-        backend = self._infra.team_backend
-        cache = backend.workspace_cache if backend is not None else None
+        cache = backend.workspace_cache
         tr = make_translator(language, ws_cache=cache)
 
         verify_tool = VerifyTaskTool(reviewer_tm, tr, desc_key="verify_task_scheduled")
-        view_tool = ViewTaskToolV2(backend, tr)
+        view_tool = ViewTaskToolV2(reviewer_tm, tr, desc_key="view_task_reviewer")
 
         member_name = reviewer
         harness = None
@@ -542,6 +697,7 @@ class TeamScheduler:
                 update={
                     "system_prompt": system_prompt,
                     "tools": list(base_agent_spec.tools or []) + [verify_tool, view_tool],
+                    "rails": list(base_agent_spec.rails or []) + observability_rail_specs(),
                 }
             )
             reviewer_ctx = (
@@ -556,19 +712,40 @@ class TeamScheduler:
 
             # Use the review request message as the prompt: template
             # rendered at delivery-time against the current task row.
+            # The reviewer runs with a fresh context every round; its own
+            # previous-round vote is the only carry-over it gets.
+            previous_vote = await task_manager.get_previous_round_vote(task, reviewer)
+            upstream, _downstream = await task_links(backend.db, task.task_id)
             review_prompt = await render.render_review_request_for_harness(
                 task,
                 language=language,
                 reviewer=reviewer,
                 loader=self._template_loader,
+                previous_vote=previous_vote,
+                upstream=upstream,
             )
+            team_session_id = get_session_id() or ""
             # Retry transient model-call failures up to 3 times.
             # Each attempt builds a fresh harness and disposes the old
             # one — ``run_once`` tears down tools on every invocation.
             result = None
             for attempt in range(3):
+                # A fresh card id per attempt: agent state is checkpointed
+                # under (session id, card id), and the reviewer runs on the
+                # team session (below), so a reused id would restore the
+                # previous attempt's / round's context into a run that must
+                # start clean.
+                attempt_spec = reviewer_spec.model_copy(
+                    update={
+                        "card": AgentCard(
+                            id=f"{backend.team_name}_{reviewer}_review_{uuid.uuid4().hex[:12]}",
+                            name=reviewer,
+                            description="scheduled-mode temp reviewer",
+                        ),
+                    }
+                )
                 harness = TeamHarness.build(
-                    agent_spec=reviewer_spec,
+                    agent_spec=attempt_spec,
                     role=TeamRole.TEAMMATE,
                     member_name=member_name,
                     build_context=reviewer_ctx,
@@ -579,7 +756,26 @@ class TeamScheduler:
                         reviewer,
                         task.task_id,
                     )
-                result = await harness.run_once(review_prompt)
+                # Run on a child of the team session: the observability rail
+                # resolves the run root by session id, so a standalone session
+                # (fresh random id) finds no root and opens no agent span —
+                # leaving the reviewer's records without its subject.
+                team_session = (
+                    TeamSession(session_id=team_session_id, team_id=backend.team_name)
+                    if team_session_id
+                    else None
+                )
+                reviewer_subject = team_reviewer_execution_subject(
+                    session_id=team_session_id,
+                    team_name=backend.team_name,
+                    task_id=task.task_id,
+                    reviewer=reviewer,
+                    review_round=task.review_round,
+                    attempt=attempt,
+                    assignee=task.assignee,
+                )
+                with execution_subject_scope(reviewer_subject):
+                    result = await harness.run_once(review_prompt, team_session=team_session)
                 output_str = str(result)
                 if "181001" not in output_str:
                     break
@@ -619,7 +815,7 @@ class TeamScheduler:
                 except Exception:
                     team_logger.debug("[scheduler] temp reviewer dispose failed for %s", reviewer)
 
-    async def _send_as_leader(self, member_name: str, meta: dict) -> None:
+    async def _send_as_leader(self, member_name: str, meta: dict) -> bool:
         """Leader-identity mailbox handoff + idempotent lazy member startup.
 
         The row carries the delivery payload, not the text: ``content`` is
@@ -630,17 +826,29 @@ class TeamScheduler:
         via the same ``UNSTARTED -> STARTING`` CAS the send_message tool uses;
         an already-running member simply gets the MESSAGE wake. Per-recipient
         failures are logged and never abort the scan.
+
+        Returns:
+            True iff the mailbox row landed (the member startup is best-effort
+            and does not affect the result).
         """
         message_manager = self._infra.message_manager
         if message_manager is None:
-            return
+            return False
         try:
             message_id = await message_manager.send_message(content="", to_member_name=member_name, meta=meta)
-            if not message_id:
-                team_logger.error("[scheduler] handoff message to %s was not delivered", member_name)
-            await self._host.auto_start_member(member_name)
         except Exception:
             team_logger.error("[scheduler] handoff to %s failed", member_name, exc_info=True)
+            return False
+        if not message_id:
+            team_logger.error("[scheduler] handoff message to %s was not delivered", member_name)
+        # The row is the handoff; startup is a separate best-effort step whose
+        # failure must not make the caller believe the mail never landed (it
+        # would re-send on the next scan).
+        try:
+            await self._host.auto_start_member(member_name)
+        except Exception:
+            team_logger.error("[scheduler] member startup after handoff to %s failed", member_name, exc_info=True)
+        return bool(message_id)
 
     async def _escalate(self, task, content: str) -> None:
         """Inject an escalation into the leader once per (task, round)."""
@@ -656,21 +864,24 @@ class TeamScheduler:
         )
         await self._host.deliver_input(content, use_steer=False)
 
-    async def _digest_task_done(self, task_manager, task_id: str, title: str, *, verified: bool) -> None:
-        """One-line terminal digest to the leader, once per task.
+    async def _digest_task_done(self, task_manager, task: Any, *, verified: bool) -> None:
+        """Terminal digest to the leader, once per task.
+
+        Carries the task's completion summary (F_119), which stands in for the
+        member's own completion report.
 
         Also the all-done fallback for leader-settled boards: the drained
         event a leader-local settle publishes is self-filtered off the bus,
         so a zero-remaining digest announces the wrap-up directly.
         """
-        if task_id in self._digested_tasks:
+        if task.task_id in self._digested_tasks:
             return
-        self._digested_tasks.add(task_id)
+        self._digested_tasks.add(task.task_id)
         tasks = await task_manager.list_tasks()
         terminal = (TaskStatus.COMPLETED.value, TaskStatus.CANCELLED.value)
-        remaining = sum(1 for task in tasks if task.status not in terminal)
+        remaining = sum(1 for row in tasks if row.status not in terminal)
         await self._host.deliver_input(
-            render.render_leader_task_done(task_id, title, verified=verified, remaining=remaining),
+            render.render_leader_task_done(task, verified=verified),
             use_steer=False,
         )
         if remaining == 0 and tasks and not self._all_done_announced:
@@ -698,8 +909,11 @@ class TeamScheduler:
         if task_id in self._digested_tasks:
             return
         task = await task_manager.get(task_id)
-        title = task.title if task is not None else ""
-        await self._digest_task_done(task_manager, task_id, title, verified=verified)
+        if task is None:
+            # The row was swept between the event and this digest: announce the
+            # id alone rather than drop the completion.
+            task = SimpleNamespace(task_id=task_id, title="", summary=None, note=None)
+        await self._digest_task_done(task_manager, task, verified=verified)
 
     async def _announce_all_done(self, event: EventMessage) -> None:
         """Inject the final all-terminal digest into the leader, once."""

@@ -17,6 +17,10 @@ Provider names resolve in this order:
    :data:`HARNESS_PROVIDER_ENTRY_POINT_GROUP` group, whose value is a
    ``HarnessProvider`` class (instantiated without arguments) or instance.
 
+An installed provider replaced on disk (same distribution, different
+``RECORD``) is imported afresh by the next resolution: harnesses already
+created keep running the code they were built from, new ones get the new code.
+
 Every provider that runs a model implements ``ModelConfigProvider.model_config``
 to map a host's ``ModelChoice`` (a built-in model, or one on a host endpoint
 when the card declares ``ENDPOINT_MODELS``) onto its own configuration; the
@@ -26,10 +30,14 @@ manifest factory and the team spawn path both go through
 
 from __future__ import annotations
 
+import hashlib
+import importlib
+import sys
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping
 
+from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.harness.resources.extension_loader import find_agent_template_manifest, load_agent_template_package
 from openjiuwen.harness.resources.extension_resolver import render_agent_template_system_prompt
 from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec, McpServerSpec
@@ -60,6 +68,10 @@ _DEEP_AGENT_ONLY_SECTIONS = ("tools", "rails", "subagents")
 _NATIVE_PROVIDERS = frozenset({"native", "native_v2"})
 # In-process registrations (register_harness_provider): name -> provider factory.
 _REGISTERED_PROVIDERS: dict[str, Callable[[], HarnessProvider]] = {}
+# Installed provider distributions already imported: distribution key -> RECORD digest.
+_IMPORTED_DISTRIBUTIONS: dict[str, str] = {}
+
+logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
 
 ProviderFactory = Callable[[], HarnessProvider]
 
@@ -113,6 +125,7 @@ def resolve_provider(provider: str) -> HarnessProvider:
     for entry in _provider_entry_points():
         if entry.name != provider:
             continue
+        _forget_replaced_distribution(entry)
         try:
             loaded = entry.load()
         except Exception as exc:
@@ -123,6 +136,52 @@ def resolve_provider(provider: str) -> HarnessProvider:
 
 def _provider_entry_points() -> tuple[Any, ...]:
     return tuple(entry_points(group=HARNESS_PROVIDER_ENTRY_POINT_GROUP))
+
+
+def _forget_replaced_distribution(entry: Any) -> None:
+    """Drop an installed provider's modules when its files changed since they were imported.
+
+    A host replaces a provider package in place (pip, or extracting a new
+    wheel over the old directory) while its process keeps running. Python
+    would keep serving the modules imported from the old files, so a changed
+    ``RECORD`` (it lists every file with its hash) removes the distribution's
+    top-level packages from ``sys.modules`` and the entry point imports them
+    again. Objects built from the old modules keep them alive and keep working.
+    """
+    dist = getattr(entry, "dist", None)
+    if dist is None:
+        return
+    record = dist.read_text("RECORD")
+    if record is None:
+        return
+    key = f"{dist.locate_file('')}::{dist.metadata['Name']}"
+    digest = hashlib.sha256(record.encode()).hexdigest()
+    previous = _IMPORTED_DISTRIBUTIONS.get(key)
+    _IMPORTED_DISTRIBUTIONS[key] = digest
+    if previous is None or previous == digest:
+        return
+    packages = _top_level_packages(dist)
+    stale = [name for name in sys.modules if name.split(".", 1)[0] in packages]
+    for name in stale:
+        sys.modules.pop(name, None)
+    importlib.invalidate_caches()
+    logger.info("harness provider %r was replaced on disk; reimporting %s", entry.name, ", ".join(sorted(packages)))
+
+
+def _top_level_packages(dist: Any) -> frozenset[str]:
+    """Return the importable top-level names a distribution installs."""
+    listed = dist.read_text("top_level.txt")
+    if listed:
+        return frozenset(line.strip() for line in listed.splitlines() if line.strip())
+    names: set[str] = set()
+    for file in dist.files or ():
+        top = file.parts[0]
+        if top.endswith((".dist-info", ".data")) or top == "..":
+            continue
+        name = top.split(".", 1)[0] if len(file.parts) == 1 else top
+        if name.isidentifier():
+            names.add(name)
+    return frozenset(names)
 
 
 def _as_provider(name: str, loaded: Any) -> HarnessProvider:

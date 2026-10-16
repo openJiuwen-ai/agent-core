@@ -12,6 +12,8 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
+from openjiuwen.agent_teams.inbound_render import render_clock
+from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.external.member_runtime import (
     ExternalHarnessMemberRuntime,
     TeamContextAwareRuntime,
@@ -48,6 +50,16 @@ from openjiuwen.harness_protocol import (
     UnsupportedHarnessCapabilityError,
 )
 from tests.test_logger import logger
+
+# Pinned clock so the current-time anchor every send carries is predictable.
+_NOW_MS = 1_700_000_000_000
+_CLOCK = render_clock(now=format_absolute_time(_NOW_MS))
+
+
+@pytest.fixture(autouse=True)
+def _pinned_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freeze the time the runtime stamps onto each outgoing input."""
+    monkeypatch.setattr("openjiuwen.agent_teams.external.member_runtime.get_current_time", lambda: _NOW_MS)
 
 
 class _FakeEventCursor:
@@ -495,7 +507,7 @@ async def test_immediate_send_from_idle_uses_auto() -> None:
 
     receipt = await runtime.send("start", immediate=True)
 
-    assert harness.send_calls[0][0].content == "start"
+    assert harness.send_calls[0][0].content == f"{_CLOCK}\n\nstart"
     assert harness.send_calls[0][1] is DeliveryMode.AUTO
     assert receipt.accepted_mode is DeliveryMode.AUTO
 
@@ -645,8 +657,8 @@ async def test_concurrent_sends_deliver_pending_team_context_once() -> None:
     await asyncio.gather(first, second)
 
     assert [content.content for content, _mode in harness.send_calls] == [
-        f"{tracker.text}\n\nfirst",
-        "second",
+        f"{tracker.text}\n\n{_CLOCK}\n\nfirst",
+        f"{_CLOCK}\n\nsecond",
     ]
     assert tracker.commits == 1
     await runtime.stop()
@@ -705,6 +717,7 @@ async def test_team_context_riding_along_is_recorded_as_its_own_input() -> None:
     # is what the turn reports as its input.
     assert inputs == [
         ("input", ("turn-1", "review the parser")),
+        ("input", ("turn-1", _CLOCK)),
         ("input", ("turn-1", pending)),
     ]
 
@@ -738,6 +751,7 @@ async def test_trajectory_recorder_receives_inputs_member_turns_and_every_event(
     assert HostCapability.MODEL_REQUEST_OBSERVATION in harness.start_contexts[0].host_capabilities
     assert recorder.calls == [
         ("input", ("turn-1", "list the files")),
+        ("input", ("turn-1", _CLOCK)),
         ("identity", ("turn-1", member_turn["turn_id"], 1)),
         ("observe", "TurnLifecycleEvent"),
         ("observe", "ItemLifecycleEvent"),
@@ -1088,3 +1102,27 @@ async def test_activity_sink_drops_idless_and_unparsable_tool_events() -> None:
     assert received == []
 
 
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_review_pass_notice_rides_once_and_is_recorded_as_its_own_input() -> None:
+    """F_119: the outcome tracker's notice joins the next send, then is committed."""
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    recorder = _RecordingTrajectoryRecorder()
+    runtime.bind_trajectory_recorder(recorder)  # type: ignore[arg-type]
+    notice = '<team-event kind="task-verified">\ndone\n</team-event>'
+    tracker = _OneShotTeamContextTracker(notice)
+    runtime.bind_task_outcome_tracker(tracker)  # type: ignore[arg-type]
+    await runtime.start(team_session=_FakeTeamSession())
+
+    await runtime.send("next task")
+    await runtime.send("another")
+    await runtime.stop()
+
+    inputs = [call for call in recorder.calls if call[0] == "input"]
+    assert inputs[0] == ("input", ("turn-1", "next task"))
+    assert ("input", ("turn-1", notice)) in inputs
+    assert sum(1 for call in inputs if call[1][1] == notice) == 1
+    assert tracker.commits == 1

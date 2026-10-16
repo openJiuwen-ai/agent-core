@@ -77,6 +77,8 @@ def call_signature(
     to ``isolation='worktree'`` re-keys it. Without this, editing a script to
     add isolation to an already-cached call would resume-hit the old record
     and silently skip the worktree the caller now asked for.
+
+    ``agent_template`` likewise participates only when set: the same prompt run by two experts is two calls.
     """
     identity = {k: opts.get(k) for k in ("label", "phase", "model")}
     if opts.get("isolation"):
@@ -87,6 +89,8 @@ def call_signature(
         identity["builtin_model"] = opts["builtin_model"]
     if opts.get("effort"):
         identity["effort"] = opts["effort"]
+    if opts.get("agent_template"):
+        identity["agent_template"] = opts["agent_template"]
     parts = [
         prompt,
         json.dumps(identity, sort_keys=True, ensure_ascii=False),

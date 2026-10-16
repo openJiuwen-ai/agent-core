@@ -205,6 +205,20 @@ class TeamAgentSpec(BaseModel):
     model_config = {"protected_namespaces": ()}
 
     agents: dict[str, DeepAgentSpec]
+    reviewer_agent: DeepAgentSpec | None = None
+    """Base spec for the one-shot reviewers spawned per review round.
+
+    Under scheduled dispatch a task's reviewers run as temporary harnesses that
+    only inspect a deliverable and cast a vote, so they should carry a narrow,
+    read-only capability set rather than a teammate's full one. The host that
+    assembles member capabilities builds this spec. ``None`` falls back to the
+    teammate spec with the framework-level trimming the scheduler applies
+    (read-only file tools, no todo planning, no sub-agents).
+
+    Kept out of ``agents`` on purpose: that dict is also looked up by member
+    name, so a reserved ``"reviewer"`` key would collide with a member of that
+    name.
+    """
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
     evolution_enabled: bool = True
@@ -347,6 +361,33 @@ class TeamAgentSpec(BaseModel):
     reviewer). The reviewer machinery itself (column, guards, voting) is
     always available regardless of this flag. Overridable per team
     instance at ``build_team`` time. See F_62.
+    """
+    bootstrap_mode: Literal["leader", "framework"] = "leader"
+    """Who materializes the team row, and how the leader receives its policy.
+
+    ``"leader"`` (default): the leader calls the ``build_team`` tool, which
+    creates the team and discloses the collaboration policy in its result
+    (F_76). ``"framework"``: the leader's coordination kernel builds the team
+    itself on ``start()`` when no team row exists yet, the leader's tool set
+    carries no ``build_team``, and the policy reaches the leader through the
+    ``TeamContextTracker`` as a ``<team-policy>`` block ahead of its first
+    input. Only valid together with ``dispatch_mode="scheduled"`` — the
+    task-driven handoffs are what make a pre-built, memberless team usable.
+    See F_122.
+    """
+    team_display_name: str | None = None
+    """Team label written to the team row by a framework bootstrap.
+
+    ``None`` falls back to the generic i18n default (per ``language``).
+    Ignored under ``bootstrap_mode="leader"``, where the leader names the
+    team in its ``build_team`` call.
+    """
+    team_desc: str | None = None
+    """Team description written to the team row by a framework bootstrap.
+
+    Lands in ``team_card.md`` and in the team info every member reads.
+    ``None`` falls back to the generic i18n default (per ``language``).
+    Ignored under ``bootstrap_mode="leader"``.
     """
     default_max_review_rounds: int = 3
     """Default per-task review-round ceiling (scheduled dispatch).
@@ -698,6 +739,23 @@ class TeamAgentSpec(BaseModel):
         if self.stale_pending_idle_timeout <= 0:
             raise ValueError(
                 f"stale_pending_idle_timeout must be > 0 seconds, got {self.stale_pending_idle_timeout}",
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_bootstrap_mode(self) -> "TeamAgentSpec":
+        """Reject a framework bootstrap outside scheduled dispatch (F_122).
+
+        A framework-built team starts with no members; only the scheduling
+        runtime turns ``create_task`` into member handoffs, so under
+        autonomous dispatch the pre-built team would sit idle while its
+        leader lacks the ``build_team`` call that normally hands it the
+        policy. Failing here keeps that combination from ever being built.
+        """
+        if self.bootstrap_mode == "framework" and self.dispatch_mode != "scheduled":
+            raise ValueError(
+                "bootstrap_mode='framework' requires dispatch_mode='scheduled'; "
+                f"got dispatch_mode={self.dispatch_mode!r}",
             )
         return self
 

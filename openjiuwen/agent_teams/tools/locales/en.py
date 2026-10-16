@@ -93,6 +93,21 @@ STRINGS: dict[str, str] = {
         "(e.g. gpt-4, claude-sonnet-4); "
         "the system picks an appropriate model when omitted"
     ),
+    "spawn_teammate.model_name_group": (
+        "Optional. Set only when the user explicitly asks for this member to use a "
+        "specific model, and copy the value verbatim from selectable_models below. "
+        "Omit it when the user did not mention a model; the model group chooses.\n"
+        "Before setting it, compare the user's wording with each entry in "
+        "selectable_models (ignoring case, spaces and hyphens):\n"
+        "- Exactly equal to one entry: that entry is the only match; use it.\n"
+        "- Otherwise, every entry whose name contains the user's wording is a match. "
+        "Use it when there is exactly one; when there are several, call ask_user to "
+        "ask the user to choose among them, and never pick the shortest or "
+        "closest-looking one yourself. For example, if the user says \"use GLM\" "
+        "and the list has GLM-5.3 and GLM-5.3-Flash, you must ask.\n"
+        "- No match: call ask_user to tell the user which models are selectable, "
+        "and never substitute another model"
+    ),
     "spawn_teammate.permissions": (
         "Narrow the teammate's tool permissions (only tightening, never loosening). "
         "Keys are tool names, values are permission levels: 'allow', 'ask', or 'deny'. "
@@ -348,12 +363,28 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
     "create_task.task.content": "Task details including goals and acceptance criteria",
-    # Both create_task variants expose assignee. Autonomous treats it as
-    # optional; scheduled requires it.
+    # ``assignee`` reads differently per create_task variant: autonomous has
+    # no inline member, so its string must not mention one. The scheduled
+    # strings live under the ``create_task_scheduled`` namespace below.
     "create_task.task.assignee": (
-        "Member name that carries this task; the member must already exist and must not be the leader. "
-        "Optional in autonomous mode (omitted tasks enter the shared claim pool); required in scheduled mode "
-        "because members never claim there"
+        "Member name that carries this task (optional); the member must already exist (spawn_teammate first) "
+        "and must not be the leader. Omit it to put the task on the shared claim pool for members to claim"
+    ),
+    "create_task_scheduled.task.assignee": (
+        "Member name that carries this task (one of assignee / member); the member must already exist (it may "
+        "also be a member declared inline via 'member' by another task of the same call) and must not be the "
+        "leader. Scheduled mode requires an owner because members never claim there"
+    ),
+    "create_task_scheduled.task.member": (
+        "Owner created together with the task (one of assignee / member): same fields as spawn_teammate "
+        "(member_name / display_name / desc / prompt / model_name) plus a required lifetime. The member becomes the "
+        "task's assignee and is started by the scheduling framework; once every task on its board is terminal it "
+        "retires per lifetime"
+    ),
+    "create_task_scheduled.task.member.lifetime": (
+        "Retirement policy: shutdown = shut down automatically once its tasks are all done (terminal, the name "
+        "cannot be reused); dormant = go dormant automatically (stays on the roster, processes no events) and wakes "
+        "only when addressed directly (send_message(to=<member>) or a new task assigned to it)"
     ),
     "create_task.task.depends_on": (
         "Prerequisite task IDs; may reference tasks created in this same call "
@@ -386,10 +417,11 @@ STRINGS: dict[str, str] = {
     "view_task.action": (
         "View mode: 'list' (default, summary of all tasks), "
         "'get' (single task detail, requires task_id), "
+        "'note' (a task's full completion summary and note, requires task_id), "
         "'claimable' (pending tasks ready to claim), "
         "'in_review' (tasks assigned to you to verify, currently in_review)"
     ),
-    "view_task.task_id": "Task ID — required when action=get, ignored otherwise",
+    "view_task.task_id": "Task ID — required when action=get or note, ignored otherwise",
     "view_task.status": (
         "Status filter for action=list only: "
         "pending/blocked/planning/in_progress/in_review/completed/cancelled. "
@@ -447,13 +479,32 @@ STRINGS: dict[str, str] = {
     # claim_task._desc lives in descs/en/task/claim_task.md
     "claim_task.task_id": "The ID of the task to claim or complete",
     "claim_task.status": "New status: 'claimed' (start work) or 'completed' (mark done)",
+    "claim_task.summary": (
+        "Only with status=completed: one-sentence completion summary — what you delivered and where the main "
+        "artifact is; this is what the leader and your downstream see; when the deliverable itself is short "
+        "(one sentence, a number, a verdict), put it in the summary itself rather than only a file path"
+    ),
+    "claim_task.note": (
+        "Only with status=completed: the full completion detail — artifact paths, key decisions or follow-ups"
+    ),
+    "claim_task.fields_ignored": "summary / note only take effect with status=completed; ignored for this claim.",
+    "claim_task.upstream_header": "Upstream deliveries (this task's direct dependencies):",
+    "claim_task.upstream_note_hint": (
+        "For an upstream task's full completion note, call `view_task(action='note', task_id=...)`."
+    ),
     # ===== member_complete_task ===============================================
     # member_complete_task._desc lives in descs/en/task/member_complete_task.md
     "member_complete_task.task_id": (
         "ID of the task to mark completed (must be a task the leader has assigned to you)"
     ),
+    "member_complete_task.summary": (
+        "One-sentence completion summary: what you delivered and where the main artifact is; shown in the "
+        "leader digest and in downstream upstream lists; when the deliverable itself is short "
+        "(one sentence, a number, a verdict), put it in the summary itself rather than only a file path"
+    ),
     "member_complete_task.note": (
-        "Optional completion note describing your result or any follow-up the team should know about"
+        "Full completion detail: artifact paths, key decisions or follow-ups the team should know about; "
+        "reviewers and view_task(action='note') read it in full"
     ),
     # ===== verify_task ========================================================
     # verify_task._desc lives in descs/en/task/verify_task.md

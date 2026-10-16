@@ -806,6 +806,14 @@ class ReActAgent(BaseAgent):
             model_client_config=model_client_config,
         )
 
+    def get_llm(self) -> Model:
+        """Return the current model, initializing it lazily when needed.
+
+        Raises:
+            ValueError: If model_client_config is not configured.
+        """
+        return self._get_llm()
+
     def _get_llm(self) -> Model:
         """Get LLM instance (lazy initialization)
 

@@ -5,9 +5,9 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/rails/`（61 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-09-07 |
-| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md` |
+| 关联模块 | `openjiuwen/harness/rails/`（70 文件，7 个子目录） |
+| 最近一次修订日期 | 2026-10-14 |
+| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md` |
 
 ## 范围 / 边界
 
@@ -55,10 +55,10 @@
    `100 SysOperationRail` → `95 McpRail / SkillUseRail / SubagentRail` →
    `90 TaskPlanningRail / ProgressiveToolRail / BaseInterruptRail / PermissionInterruptRail /
    BaseSecurityRail / VerificationRail` → `85 AgentModeRail / SafetyPromptRail /
-   ContextAssembleRail / Context*ProcessorRail / Skill*CreateRail` →
+   ContextAssembleRail / Context*ProcessorRail / MultimodalContextSummarizerRail / Skill*CreateRail` →
    `80 MemoryRail / CodingMemoryRail / HeartbeatRail / Skill*EvolutionRail` →
    `70 LLMRetryRail / ToolCallResilienceRail` → `60 EvolutionRail / LspRail` →
-   `50 core 默认` → `10 TrajectoryRail / TaskCompletionRail`。
+   `50 core 默认`（含 `tools/cua/rails.py` 的 Cua*Rail） → `10 TrajectoryRail / TaskCompletionRail`。
 5. **`init` 从不被回调框架调用**，只由 core 模块级 `init_rail(rail, agent)` 调用（>0.1s 升
    INFO）。三个调用点全在 `deep_agent.py`：`_ensure_initialized`（主路径，按 priority 降序）、
    `register_rail`（运行时单个挂载）、`start()`（仅对 `TaskCompletionRail` 二次 init，
@@ -96,6 +96,13 @@
     `gen_ai.tool.call.id/arguments/result` 与 `gen_ai.tool.name`，资源标识放入
     `openjiuwen.tool.resource_id`。Evolution rail 只清洗这套标准字段；历史输入兼容属于
     trajectory 读取边界，不属于 rail producer。
+13. **多模态截图归档 rail 是共享实现**：`rails/multimodal_context_summarizer_rail.py` 的
+    `MultimodalContextSummarizerRail(screenshots_to_keep=3, *, protected_user_message_names=())`
+    在 `before_model_call` 中把较早的带 `image_url` 的 user 消息图像替换为
+    `ARCHIVED_SCREEN_PLACEHOLDER` 文本，保留最近 `screenshots_to_keep` 条；`name` 在
+    `protected_user_message_names` 中的消息不参与计数也不被替换。cua_agent 始终使用它
+    （`S_18`）；`tools/mobile_gui/rails/multimodal_context_summarizer_rail.py` 保留原导入路径，
+    是预置 mobile 受保护消息名的子类。
 
 ## 接口契约
 
@@ -105,6 +112,7 @@ AgentModeRail, AskUserPayload, AskUserRail, BaseInterruptRail, BaseSecurityRail,
 CodingMemoryRail, ConfirmInterruptRail, ContextEvolutionRail, DeepAgentRail,
 EvolutionRail, EvolutionInterruptRail, ExternalMemoryRail, HeartbeatRail,
 ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRail,
+MultimodalContextSummarizerRail, ARCHIVED_SCREEN_PLACEHOLDER,
 PermissionInterruptRail, ProgressiveToolRail, SafetyPromptRail, SecurityAllow,
 SecurityCheckContext, SecurityDecision, SecurityInterrupt, SecurityReject, SecurityRail,
 SessionRail, SkillCreateRail, SkillEvolutionRail, SkillUseRail, SubagentRail,

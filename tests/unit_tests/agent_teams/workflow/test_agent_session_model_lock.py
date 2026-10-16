@@ -31,6 +31,7 @@ class _SessionBackend(AgentBackend):
 
     def __init__(self) -> None:
         self.opened: list[str] = []
+        self.opened_opts: list[dict] = []
         self.turns: list[str] = []
         self.forks: list[str] = []
         self.fork_data: dict | None = {"messages": [{"role": "user", "content": "forked"}]}
@@ -47,6 +48,7 @@ class _SessionBackend(AgentBackend):
     async def open_session(self, *, kind, instructions, opts, fork_data=None, member_name=None):
         sid = member_name or f"s{self._n}"
         self.opened.append(sid)
+        self.opened_opts.append(dict(opts))
         return sid
 
     async def send_turn(self, session_id, prompt, opts, schema_json, *, history=(), correlation_id=None):
@@ -315,3 +317,73 @@ def test_failed_first_turn_never_consumes_the_lock(tmp_path):
     result = asyncio.run(run_workflow(_write(tmp_path, "retry_same_hint.py", _RETRY_SAME_HINT_SCRIPT), backend=backend))
     assert result == [None, "turn:second"]
     assert backend.turns == ["second"]
+
+
+_TEMPLATE_LOCK_SCRIPT = """
+from swarmflow import agent_session
+
+META = {"name": "tlock", "description": "session template lock", "phases": []}
+
+async def run(args):
+    s = agent_session(label="shot", options={"agent_template": "clip"})
+    a = await s.send("first")
+    b = await s.send("second", options=SECOND)
+    return [a, b]
+"""
+
+
+class _TemplateSessionBackend(_SessionBackend):
+    KNOWN_OPTIONS = frozenset({"agent_template"})
+
+
+def test_session_switching_agent_template_raises_and_points_at_fork(tmp_path):
+    backend = _TemplateSessionBackend()
+    script = _write(tmp_path, "tlock.py", _TEMPLATE_LOCK_SCRIPT.replace("SECOND", '{"agent_template": "scene"}'))
+    with pytest.raises(EngineError) as exc:
+        asyncio.run(run_workflow(script, backend=backend))
+    assert "agent_template" in str(exc.value) and "'clip'" in str(exc.value) and "fork()" in str(exc.value)
+    assert backend.turns == ["first"]
+
+
+def test_session_restating_or_omitting_agent_template_is_noop(tmp_path):
+    backend = _TemplateSessionBackend()
+    # Third turn passes no options at all: the session-level template still
+    # applies, so omission must not read as "switched to no template".
+    script = _write(
+        tmp_path,
+        "tsame.py",
+        '''
+from swarmflow import agent_session
+
+META = {"name": "tsame", "description": "session template re-state", "phases": []}
+
+async def run(args):
+    s = agent_session(label="shot", options={"agent_template": "clip"})
+    a = await s.send("first")
+    b = await s.send("second", options={"agent_template": "clip"})
+    c = await s.send("third")
+    return [a, b, c]
+''',
+    )
+    assert asyncio.run(run_workflow(script, backend=backend)) == ["turn:first", "turn:second", "turn:third"]
+
+
+def test_fork_child_inherits_agent_template(tmp_path):
+    backend = _TemplateSessionBackend()
+    script = _write(
+        tmp_path,
+        "tfork.py",
+        '''
+from swarmflow import agent_session
+
+META = {"name": "tfork", "description": "fork inherits template", "phases": []}
+
+async def run(args):
+    s = agent_session(label="shot", options={"agent_template": "clip"})
+    await s.send("first")
+    child = await s.fork(label="shot2")
+    return await child.send("child turn")
+''',
+    )
+    asyncio.run(run_workflow(script, backend=backend))
+    assert backend.opened_opts[-1].get("agent_template") == "clip"

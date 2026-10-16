@@ -72,6 +72,17 @@ STRINGS: dict[str, str] = {
         "可选。建议该成员使用的模型名称（如 gpt-4、claude-sonnet-4 等）；"
         "未指定时由系统自动选择合适的模型"
     ),
+    "spawn_teammate.model_name_group": (
+        "可选。仅当用户明确要求该成员使用某个模型时填写，且必须原样填写下方 selectable_models 中的一项；"
+        "用户未提及模型时省略，由模型组自动选择。\n"
+        "填写前，将用户的说法与 selectable_models 逐项比对（比对时忽略大小写、空格和连字符）：\n"
+        "- 与某一项完全一致：只对应该项，直接使用。\n"
+        "- 否则，名称中包含用户说法的每一项都算对应。只对应一项时直接使用；"
+        "对应多项时，必须先调用 ask_user 列出这些候选让用户选择，"
+        "不得自行挑选名称最短或看起来最接近的一项。"
+        "例如用户说“用 GLM”，而列表中有 GLM-5.3 和 GLM-5.3-Flash，必须询问。\n"
+        "- 一项都不对应：先调用 ask_user 告知用户当前可选的模型，不得替换为其他模型。"
+    ),
     "spawn_teammate.permissions": (
         "收窄该 teammate 的工具权限（只能收紧，不能放宽）。"
         "键为工具名，值为权限级别：'allow'、'ask' 或 'deny'。"
@@ -252,11 +263,26 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
     "create_task.task.content": "任务详细内容，包含目标和验收标准",
-    # Both create_task variants expose assignee. Autonomous treats it as
-    # optional; scheduled requires it.
+    # ``assignee`` reads differently per create_task variant: autonomous has
+    # no inline member, so its string must not mention one. The scheduled
+    # strings live under the ``create_task_scheduled`` namespace below.
     "create_task.task.assignee": (
-        "承担该任务的成员名称；该成员必须已存在且不能是 leader。自主模式可选，未填写则进入公共认领池；"
-        "调度模式必填，成员不会自主认领"
+        "承担该任务的成员名称（可选）；该成员必须已存在（先 spawn_teammate）且不能是 leader。"
+        "未填写则进入公共认领池，等待成员自主认领"
+    ),
+    "create_task_scheduled.task.assignee": (
+        "承担该任务的成员名称（与 member 二选一）；该成员必须已存在（也可以是本次调用中其他任务用 member "
+        "内联声明的成员）且不能是 leader。调度模式必填承担者，成员不会自主认领"
+    ),
+    "create_task_scheduled.task.member": (
+        "随任务一起创建的承担者（与 assignee 二选一）：字段同 spawn_teammate"
+        "（member_name / display_name / desc / prompt / model_name），外加必填的 lifetime。"
+        "成员落为该任务的 assignee，由调度框架拉起；名下任务全部终态后按 lifetime 退场"
+    ),
+    "create_task_scheduled.task.member.lifetime": (
+        "退场策略：shutdown = 名下任务全部完成后自动关闭（终态，名字不可复用）；"
+        "dormant = 自动休眠（保留在名册，不处理任何事件），"
+        "仅被点名（send_message(to=该成员) 或派新任务）时唤醒"
     ),
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
@@ -276,9 +302,10 @@ STRINGS: dict[str, str] = {
     # view_task._desc lives in descs/cn/task/view_task.md
     "view_task.action": (
         "查看模式：'list'（默认，所有任务摘要）、'get'（单个任务详情，需传 task_id）、"
+        "'note'（单个任务完整的完成摘要与详情，需传 task_id）、"
         "'claimable'（可认领的 pending 任务）、'in_review'（指派给你验证、正在 in_review 的任务）"
     ),
-    "view_task.task_id": "任务 ID — action=get 时必填，其他模式忽略",
+    "view_task.task_id": "任务 ID — action=get / note 时必填，其他模式忽略",
     "view_task.status": (
         "仅 action=list 时使用的状态过滤："
         "pending/blocked/planning/in_progress/in_review/completed/cancelled，不传则返回全部"
@@ -319,10 +346,20 @@ STRINGS: dict[str, str] = {
     # claim_task._desc lives in descs/cn/task/claim_task.md
     "claim_task.task_id": "要领取或完成的任务 ID",
     "claim_task.status": "目标状态：'claimed'（领取）或 'completed'（完成）",
+    "claim_task.summary": (
+        "仅 status=completed 时生效：一句话完成摘要——交付了什么、主产物在哪；leader 与下游看到的就是它；交付物本身很短（一句话、一个数字、一个结论）时直接写进摘要，别只写文件路径"
+    ),
+    "claim_task.note": "仅 status=completed 时生效：完整的完成详情——产物路径、关键决策或后续注意事项",
+    "claim_task.fields_ignored": "summary / note 仅在 status=completed 时生效，本次领取已忽略。",
+    "claim_task.upstream_header": "上游交付（本任务的直接依赖）：",
+    "claim_task.upstream_note_hint": "需要某个上游任务的详细完成说明时，用 `view_task(action='note', task_id=...)` 查看。",
     # ===== member_complete_task ===============================================
     # member_complete_task._desc lives in descs/cn/task/member_complete_task.md
     "member_complete_task.task_id": "要标记完成的任务 ID（必须是 leader 已经指派给你的任务）",
-    "member_complete_task.note": "可选的完成说明，便于团队了解你的执行结果或后续注意事项",
+    "member_complete_task.summary": (
+        "一句话完成摘要：交付了什么、主产物在哪；用于 leader 摘要与下游上游列表；交付物本身很短（一句话、一个数字、一个结论）时直接写进摘要，别只写文件路径"
+    ),
+    "member_complete_task.note": "完整的完成详情：产物路径、关键决策或后续注意事项；校验者与 view_task(action='note') 读取全文",
     # ===== verify_task ========================================================
     # verify_task._desc lives in descs/cn/task/verify_task.md
     "verify_task.task_id": "要验证的任务 ID（必须是指派给你验证、当前处于 in_review 的任务）",

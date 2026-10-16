@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 import pytest_asyncio
 
@@ -174,6 +176,48 @@ async def active_organization_runtime():
 async def test_list_expert_groups_without_catalog_returns_empty(active_organization_runtime):
     org_runtime, _, _ = active_organization_runtime
     assert await org_runtime.list_expert_groups() == []
+
+
+@pytest.mark.asyncio
+async def test_dissolve_stops_temporary_expert_but_preserves_owner_and_invited_team(active_organization_runtime):
+    org_runtime, agents, session_id = active_organization_runtime
+    host = org_runtime._team_runtime_manager
+    # Even an Owner built from an expert template must survive organization dissolution.
+    agents["team-a"].spec.metadata["expert_team"] = True
+    agents["team-b"].spec.metadata.update({"expert_team": True, "agent_group_name": "analysis-group"})
+    agents["team-b"].stop_coordination = AsyncMock()
+    launcher = FakeLauncher(team_id="team-b", leader_id="leader-team-b")
+
+    async def stop(*, team_id, session_id):
+        assert await host.stop_team(team_name=team_id, session_id=session_id)
+
+    launcher.stop = AsyncMock(side_effect=stop)
+    org_runtime.set_expert_team_launcher(launcher)
+    await org_runtime.create_organization(
+        organization_id="org-dissolve-experts", owner_team_id="team-a", session_id=session_id
+    )
+    for team_id in ("team-b", "team-c"):
+        await org_runtime.invite_team(
+            organization_id="org-dissolve-experts",
+            inviter_team_id="team-a",
+            target_team_id=team_id,
+            session_id=session_id,
+        )
+
+    result = await org_runtime.dissolve_organization(
+        organization_id="org-dissolve-experts", owner_team_id="team-a", session_id=session_id
+    )
+
+    launcher.stop.assert_awaited_once_with(team_id="team-b", session_id=session_id)
+    agents["team-b"].stop_coordination.assert_awaited_once()
+    assert {entry.team_name for entry in await host.pool.teams_for_session(session_id)} == {"team-a", "team-c"}
+    assert result["deleted"]["organization"] == 1
+    for team_id in ("team-a", "team-b", "team-c"):
+        assert agents[team_id].team_backend.org_task_manager is None
+        assert "organization_id" not in agents[team_id].spec.metadata
+    assert agents["team-b"].spec.metadata["agent_group_name"] == "analysis-group"
+    await org_runtime.create_organization(organization_id="org-next", owner_team_id="team-a", session_id=session_id)
+    assert agents["team-a"].team_backend.org_task_manager.organization_id == "org-next"
 
 
 @pytest.mark.asyncio

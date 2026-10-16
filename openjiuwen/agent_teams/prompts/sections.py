@@ -59,6 +59,7 @@ class TeamSectionName:
     """Centralized section names owned by ``TeamPolicyRail``."""
 
     BOOTSTRAP = "team_bootstrap"
+    PREBUILT = "team_prebuilt"
     ROLE = "team_role"
     HITT = "team_hitt"
     BRIDGE = "team_bridge"
@@ -98,16 +99,15 @@ _LABELS: dict[str, dict[str, str]] = {
         "task_state_heading": "# 任务状态流转",
         "lifecycle_heading": "# 团队生命周期",
         "leader_mode_plan": (
-            "团队成员执行模式: plan_mode（成员选择或接到任务后需直接通过 submit_plan 提交计划，"
+            "团队成员执行模式: plan_mode（成员接到任务后需先通过 submit_plan 提交计划，"
             "由你通过 approve_plan 审批后才能执行）"
         ),
-        "leader_mode_build": ("团队成员执行模式: build_mode（成员领取任务后自主执行并直接完成，无需你审批计划）"),
+        "leader_mode_build": ("团队成员执行模式: build_mode（成员接到任务后自主执行并直接完成，无需你审批计划）"),
         "teammate_mode_plan": (
-            "你的执行模式: plan_mode（选择或接到任务后必须先通过 submit_plan 提交计划，"
-            "该工具会认领任务；"
+            "你的执行模式: plan_mode（接到任务后必须先通过 submit_plan 提交计划，"
             "等待 leader 通过 approve_plan 审批后才能开始执行）"
         ),
-        "teammate_mode_build": ("你的执行模式: build_mode（领取任务后可自主执行并直接标记完成，无需 leader 审批计划）"),
+        "teammate_mode_build": ("你的执行模式: build_mode（接到任务后可自主执行并直接标记完成，无需 leader 审批计划）"),
     },
     "en": {
         "role_heading": "# Team Role",
@@ -116,24 +116,21 @@ _LABELS: dict[str, dict[str, str]] = {
         "task_state_heading": "# Task State Transitions",
         "lifecycle_heading": "# Team Lifecycle",
         "leader_mode_plan": (
-            "Teammate execution mode: plan_mode (teammates must submit a plan "
-            "with submit_plan after selecting or receiving a task; "
-            "that tool reserves the task, then teammates wait for your exact plan_id approval via approve_plan "
+            "Teammate execution mode: plan_mode (once a task reaches a teammate it must submit a plan "
+            "with submit_plan and wait for your exact plan_id approval via approve_plan "
             "before executing)"
         ),
         "leader_mode_build": (
-            "Teammate execution mode: build_mode (teammates execute and "
-            "complete tasks autonomously without plan approval)"
+            "Teammate execution mode: build_mode (once a task reaches a teammate it executes and "
+            "completes it autonomously without plan approval)"
         ),
         "teammate_mode_plan": (
-            "Your execution mode: plan_mode (after selecting or receiving a task you must "
-            "submit a plan via submit_plan; that tool reserves the task. Wait for the leader to approve "
-            "that plan_id via approve_plan before executing)"
+            "Your execution mode: plan_mode (once a task reaches you, submit a plan via submit_plan "
+            "and wait for the leader to approve that plan_id via approve_plan before executing)"
         ),
         "teammate_mode_build": (
-            "Your execution mode: build_mode (after claiming a task you "
-            "execute autonomously and mark it completed without leader plan "
-            "approval)"
+            "Your execution mode: build_mode (once a task reaches you, execute it "
+            "autonomously and mark it completed without leader plan approval)"
         ),
     },
 }
@@ -182,6 +179,38 @@ def build_leader_bootstrap_section(
     body = loader("leader_bootstrap", language).format({"collaboration_mechanism": mechanism}).content.strip()
     return PromptSection(
         name=TeamSectionName.BOOTSTRAP,
+        content={language: f"{body}\n"},
+        priority=11,
+    )
+
+
+def build_leader_prebuilt_section(
+    *,
+    language: str = "cn",
+    loader: TemplateLoader = load_template,
+) -> PromptSection:
+    """Build the leader's opening section for a framework-built team (F_122).
+
+    The ``team_bootstrap`` counterpart for ``bootstrap_mode="framework"``:
+    the team already exists when the leader starts and there is no
+    ``build_team`` to call, so the section says only who the leader is, that
+    the team is a generic one with no members yet, and that the policy,
+    team info and roster arrive with the first input as ``<team-policy>`` /
+    ``<team-context>`` blocks. It carries no collaboration-mechanism slot:
+    the "build_team versus swarmflow" routing guide names a path that does
+    not exist here.
+
+    Args:
+        language: Prompt language ('cn' or 'en').
+        loader: Template loader (the per-team workspace loader, or the
+            framework default).
+
+    Returns:
+        PromptSection carrying the prebuilt opening body.
+    """
+    body = loader("leader_prebuilt", language).content.strip()
+    return PromptSection(
+        name=TeamSectionName.PREBUILT,
         content={language: f"{body}\n"},
         priority=11,
     )
@@ -239,6 +268,10 @@ def build_team_role_section(
     # The execution mode describes how a member plans and completes work it
     # took on itself. An avatar never does — it acts only on its controller's
     # instruction — so the mode line says nothing to it.
+    # The mode line says what happens *after* a task reaches a member, never
+    # how it gets there — claiming (autonomous) vs. being started by the
+    # scheduler (scheduled) is the dispatch section's story, and this section
+    # is shared by both modes.
     if role == TeamRole.HUMAN_AGENT:
         mode_line = ""
     else:
@@ -849,6 +882,7 @@ __all__ = [
     "TeamSectionName",
     "build_leader_bootstrap_section",
     "build_leader_policy_disclosure",
+    "build_leader_prebuilt_section",
     "build_team_bridge_section",
     "build_team_dispatch_section",
     "build_team_extra_section",

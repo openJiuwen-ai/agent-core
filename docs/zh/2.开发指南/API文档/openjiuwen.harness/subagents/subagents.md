@@ -98,3 +98,14 @@ def create_research_agent(
 | `**config_kwargs` | `Any` | — | 转发到 `create_deep_agent()` |
 
 **返回值**: `DeepAgent` — 已配置的研究智能体实例。
+
+---
+
+## function create_cua_agent
+
+通过 `create_deep_agent()` 创建桌面子智能体，通过窗口截图和真实的鼠标键盘输入操作本机原生应用，
+需要支持视觉的模型。默认 max_iterations=25，默认 capability 为 core + input +
+app_lifecycle。`build_cua_agent_config` 生成对应的 `SubAgentConfig`，供父智能体经 `task_tool` 委派。
+
+完整参数、桌面工具、capability、内置 Rails、委派结果与续跑、权限规则，统一见
+[桌面子智能体](./桌面子智能体.md)。

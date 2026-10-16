@@ -341,7 +341,10 @@ class SpawnManager:
                     status = MemberStatus(member.status)
                 except ValueError:
                     status = MemberStatus.ERROR
-                if status in {MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN}:
+                # A retired member's runtime exiting is the expected shape of
+                # its retirement, not a failure: DORMANT wakes only when named
+                # (F_118), never from the health monitor.
+                if status in {MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.SHUTDOWN, MemberStatus.DORMANT}:
                     team_logger.info(
                         "Teammate {} is {}; skip unhealthy restart",
                         member_name,
@@ -467,6 +470,7 @@ class SpawnManager:
                 team_spec,
                 model_name="*",
                 model_index=0,
+                route_tag=model_ref.route_tag if model_ref is not None else None,
             )
             fallback_member_model = None
 

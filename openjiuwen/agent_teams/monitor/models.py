@@ -15,6 +15,8 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.agent_teams.message_template import parse_meta
+
 
 class TeamInfo(BaseModel):
     """Team basic information."""
@@ -130,6 +132,13 @@ class MessageInfo(BaseModel):
     timestamp: int
     broadcast: bool
     is_read: bool = False
+    meta: dict | None = Field(
+        default=None,
+        description=(
+            "Template descriptor of a framework message ({template, refs, params}). "
+            "Set only for template rows, whose ``content`` is empty until delivery renders it."
+        ),
+    )
 
     @classmethod
     def from_internal(cls, msg) -> MessageInfo:
@@ -148,6 +157,7 @@ class MessageInfo(BaseModel):
             timestamp=msg.timestamp,
             broadcast=msg.broadcast,
             is_read=msg.is_read,
+            meta=parse_meta(getattr(msg, "meta", None)),
         )
 
 
@@ -214,7 +224,7 @@ class MonitorEvent(BaseModel):
     Member event fields:
         MEMBER_RESTARTED: reason, restart_count
         MEMBER_STATUS_CHANGED / MEMBER_EXECUTION_CHANGED: old_status, new_status
-        MEMBER_SHUTDOWN: force
+        MEMBER_SHUTDOWN: force, target_status
 
     Task event fields:
         All TASK_*: task_id
@@ -245,6 +255,8 @@ class MonitorEvent(BaseModel):
     reason: str | None = None
     restart_count: int | None = None
     force: bool | None = None
+    # Settled status a MEMBER_SHUTDOWN leads to: "shut_down" or "dormant".
+    target_status: str | None = None
 
     # -- Task fields --
     task_id: str | None = None

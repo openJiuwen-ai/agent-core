@@ -105,3 +105,12 @@ status/assignee 同级），不破坏 `TaskSummary` 的 lightweight 契约。
   self-only 的单任务 self-nudge，不再有批量聚合头），此遗留项作废。
 - **MCP `get_task` 仍返回原始 `updated_at` 整数**（`model_dump`），未渲染成可读时间。它是
   单任务详情的结构化输出，外部 agent 可自行处理；`list_tasks` / `read_inbox` 已给渲染字符串。
+
+## 追补（2026-10-15）：入站消息不再带相对差
+
+本文"决策"中「`handlers/message.py` / `external/format.py` 的消息渲染注入 `<绝对> (<相对>)`」一条已被
+[[B_04_inbound-relative-time-and-mailbox-order]] 修订：`<team-inbound>` 是写进成员对话历史、之后
+会被反复重读的文本，投递时算出的相对差（「刚刚」）到下一轮就过时了。现在入站消息与 bridge 入站头只写
+绝对发送时间（`timefmt.format_absolute_time`），"现在"由每次输入附带的 `<team-clock now>` 锚点给出
+（见 S_09 不变量 28a）。任务看板、`view_task`、停滞提醒、MCP `list_tasks` 等快照类输出保留本文的
+`<绝对> (<相对>)` 渲染不变。

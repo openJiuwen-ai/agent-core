@@ -1260,3 +1260,65 @@ def test_session_avatar_rail_emits_paired_activity_with_agent_id_and_correlation
     assert len(second) == 2 and all(e.correlation_id == "review:sre:1" for e in second)
 
 
+
+
+def test_agent_session_avatar_starts_under_its_own_trajectory_subject(monkeypatch):
+    """The avatar's supervisor starts under a ``team_member`` subject named by its label."""
+    from openjiuwen.agent_teams.harness import team_harness as th_mod
+    from openjiuwen.harness.execution_subject import current_execution_subject
+
+    start_subjects: list = []
+
+    class _SubjectRecordingHarness(_FakeHarness):
+        async def start(self, *, team_session=None) -> None:
+            start_subjects.append(current_execution_subject())
+            await super().start(team_session=team_session)
+
+    def _fake_build(*, agent_spec, role, member_name, build_context=None, **kw):
+        h = _SubjectRecordingHarness()
+        h.member_name = member_name
+        h.spec = agent_spec
+        return h
+
+    monkeypatch.setattr(th_mod.TeamHarness, "build", _fake_build)
+
+    async def scenario():
+        mgr = _mgr(session_id="product-sess")
+        sid = await mgr.open_session(kind="agent", instructions="", opts={"label": "sre"})
+        await mgr.send_turn(sid, "first", {"label": "sre"}, None)
+        await mgr.aclose()
+        return sid
+
+    sid = asyncio.run(scenario())
+
+    subject = start_subjects[0]
+    assert subject.subject_id == f"team-member:product-sess:t:{sid}"
+    assert subject.display_name == "sre"
+    assert subject.kind == "team_member"
+    assert subject.session_id == "product-sess"
+    assert current_execution_subject() is None
+
+
+def test_agent_session_picks_expert_spec_and_prepends_persona(monkeypatch):
+    """An agent_template session derives from the expert spec; its system prompt is
+    persona + blank line + the session role prompt (+ instructions)."""
+    from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import _SESSION_SYS_PROMPT_AGENT
+    from openjiuwen.agent_teams.workflow.backends.expert_specs import SwarmflowExpertEntry
+
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+    expert_spec = DeepAgentSpec(tools=[], agent_template_spec={"agent_card": {"id": "clip", "name": "clip"}})
+    entry = SwarmflowExpertEntry("clip", "视频镜头师", "PERSONA", expert_spec, None)
+
+    def _gate(opts):
+        return entry if opts.get("agent_template") == "clip" else None
+
+    async def scenario():
+        mgr = _mgr(gate_agent_template=_gate)
+        await mgr.open_session(kind="agent", instructions="be brief", opts={"label": "shot", "agent_template": "clip"})
+        await mgr.open_session(kind="agent", instructions=None, opts={"label": "plain"})
+
+    asyncio.run(scenario())
+    assert harnesses[0].spec.agent_template_spec == {"agent_card": {"id": "clip", "name": "clip"}}
+    assert harnesses[0].spec.system_prompt == f"PERSONA\n\n{_SESSION_SYS_PROMPT_AGENT}\n\nbe brief"
+    assert harnesses[1].spec.system_prompt == _SESSION_SYS_PROMPT_AGENT

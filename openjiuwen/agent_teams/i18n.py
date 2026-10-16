@@ -54,6 +54,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "time.unknown": "时间未知",
         # schema/blueprint.py
         "blueprint.default_desc": "天才项目管理专家",
+        "blueprint.generic_team_display_name": "通用协作团队",
+        "blueprint.generic_team_desc": (
+            "不限定领域的通用任务协作团队：由 Leader 按任务动态组建承担者，"
+            "任务完成后成员按退场策略关闭或休眠。"
+        ),
         # tools/team.py
         "team.shutdown_request_content": "当前任务已全部完成，请结束流程",
         "team.cancel_request_content": "当前任务有变动，请停止执行当前任务，重新尝试认领合适任务",
@@ -157,7 +162,8 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
-            "[任务指派] 任务 [{task_id}] 已指派给你，请通过 view_task 工具查看任务详情并执行。"
+            "[任务指派] 任务 [{task_id}]「{title}」已指派给你，完整内容如下，"
+            "用 claim_task(status=claimed) 开始执行。\n\n{content}"
         ),
         # agent/coordination/handlers/task_board.py — task reassigned away from this member
         "dispatcher.task_revoked_from_self": (
@@ -168,13 +174,23 @@ STRINGS: dict[str, dict[str, str]] = {
             "[任务取消] 你正在执行的任务 [{task_id}] 已被取消。请立即停止该任务的工作，"
             "并通过 view_task 查看是否有新的可认领任务。"
         ),
+        # Scheduled dispatch: no claimable pool, the next task arrives as a start notice
+        "dispatcher.task_revoked_from_self_scheduled": (
+            "[任务撤回] 任务 [{task_id}] 已被转交给其他成员。请立即停止该任务的工作，"
+            "不要再为它提交结果；新任务指派给你时会另行通知开工，无需轮询看板。"
+        ),
+        "dispatcher.task_cancelled_to_self_scheduled": (
+            "[任务取消] 你正在执行的任务 [{task_id}] 已被取消。请立即停止该任务的工作，"
+            "不要再为它提交结果；新任务指派给你时会另行通知开工，无需轮询看板。"
+        ),
         "dispatcher.task_content_updated_to_self": (
             "[任务变更] 你正在执行的任务 [{task_id}] 的内容已被更新。请通过 view_task "
             "重新查看最新要求后继续执行（任务仍归你，无需重新认领）。"
         ),
         # agent/dispatcher.py — message formatting
         "dispatcher.task_plan_approved_to_self": (
-            "[计划已批准] 任务 [{task_id}] 的执行计划已通过。请开始执行，完成后用 claim_task(status='completed') 标记完成。"
+            "[计划已批准] 任务 [{task_id}] 的执行计划已通过。请开始执行，完成后用 "
+            "claim_task(status='completed', summary=..., note=...) 标记完成。"
             "{feedback}"
         ),
         "dispatcher.task_plan_rejected_to_self": (
@@ -197,9 +213,12 @@ STRINGS: dict[str, dict[str, str]] = {
         # delivery from prompts/<lang>/scheduler_*.md, the single source of
         # their wording (F_63). Leader digests bypass the mailbox (direct input
         # injection), so they have no meta channel and stay one-line i18n.
-        "scheduler.leader_task_done": (
-            "[调度器] 任务 [{task_id}]「{title}」已完成（{how}）。看板剩余未终结任务 {remaining} 个。"
+        "scheduler.leader_task_done": "[调度器] 任务 [{task_id}]「{title}」已完成（{how}）。",
+        "scheduler.leader_task_done_summary": "完成摘要：{summary}",
+        "scheduler.leader_task_done_note_hint": (
+            "详细完成说明用 view_task(action='note', task_id='{task_id}') 查看。"
         ),
+        "scheduler.leader_task_done_board_hint": "需要全局进度时用 view_task 查看看板实时状态。",
         "scheduler.leader_task_done_how_verified": "验收通过",
         "scheduler.leader_task_done_how_direct": "无验证直接完成",
         "scheduler.leader_escalation_rounds": (
@@ -216,6 +235,7 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "scheduler.leader_all_done": (
             "[调度器] 任务看板已全部终结（共 {count} 个任务）。请汇总团队执行结果，向用户交付最终结论。"
+            "无需向成员发送收尾或待命通知——它们没有新任务时会自动待命，广播只会把每个成员各唤醒一轮。"
         ),
         "scheduler.inspector_avg_line": (
             "\n- [检视者平均分] {avg:.2f} / 0.85 ({status})\n"
@@ -247,12 +267,23 @@ STRINGS: dict[str, dict[str, str]] = {
             "你写在回复正文里的任何文字都不会送达用户，不调用工具就等于没有回复。"
         ),
         # agent/dispatcher.py — idle-agent nudges
-        "dispatcher.all_done_persistent": ("所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"),
+        "dispatcher.all_done_persistent": (
+            "所有任务已完成。请汇总本轮工作成果。团队继续保持运行，等待新的任务指令。"
+            "无需向成员发送收尾或待命通知——它们没有新任务时会自动待命，广播只会把每个成员各唤醒一轮。"
+        ),
         "dispatcher.all_done_temporary": (
             "所有任务已完成。请汇总团队工作成果，"
             "然后依次调用 shutdown_member 关闭所有成员，"
             "等待所有成员状态转为 shutdown 后，"
             "调用 clean_team 解散团队。"
+        ),
+        # task_board.py _just_completed_block (F_120): the task that just
+        # finished, ahead of the board / all-done prompt in the leader nudge.
+        "dispatcher.leader_just_completed": "刚完成：",
+        "dispatcher.leader_just_completed_line": "- [{task_id}] {title} → {assignee}",
+        "dispatcher.leader_just_completed_summary": "：{summary}",
+        "dispatcher.leader_just_completed_note_hint": (
+            "  详细完成说明用 view_task(action='note', task_id='{task_id}') 查看。"
         ),
         "dispatcher.leader_task_board": (
             "当前任务看板如下，请审查：\n"
@@ -261,9 +292,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "- 整体进度是否符合预期"
         ),
         "dispatcher.teammate_task_list": (
-            "以下是当前可处理的任务：\n"
+            "以下是你现在可以开始的任务（已附完整内容）：\n"
             "- 未指派的 pending 任务可由你认领\n"
-            "- 已指派给你的任务请先用 view_task 查看详情，再按任务工具推进"
+            "- 指派给你的任务直接用 claim_task(status=claimed) 开始"
         ),
         "dispatcher.task_unassigned_marker": " (待领取)",
         # agent/dispatcher.py — stale-pending leader self-prompt
@@ -340,6 +371,11 @@ STRINGS: dict[str, dict[str, str]] = {
             "以上只是名册公告，不是给你的指令。"
             "**不要**因为看到成员变动就去和相关成员打招呼、确认或寒暄；"
             "只有当你手上的任务确实需要对方配合时才发消息。"
+        ),
+        # team_context.py TaskOutcomeTracker (F_119): a passed review does not
+        # wake the author; this rides its next input instead.
+        "team_context.task_verified_intro": (
+            "你此前提交的以下任务已通过验收并完成，无需再做任何事，也不要为此联系 leader："
         ),
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": "编排 [{run_id}]「{name}」已启动，我将在每个阶段向你汇报进展。",
@@ -432,6 +468,11 @@ STRINGS: dict[str, dict[str, str]] = {
         "time.unknown": "unknown time",
         # schema/blueprint.py
         "blueprint.default_desc": "Genius project management expert",
+        "blueprint.generic_team_display_name": "General Collaboration Team",
+        "blueprint.generic_team_desc": (
+            "A domain-agnostic collaboration team: the leader assembles assignees per task; "
+            "members retire or go dormant once their tasks close."
+        ),
         # tools/team.py
         "team.shutdown_request_content": "All tasks are complete. Please wrap up and exit.",
         "team.cancel_request_content": (
@@ -557,8 +598,8 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         # agent/dispatcher.py — task assignment notification
         "dispatcher.task_assigned_to_self": (
-            "[Task Assigned] Task [{task_id}] has been assigned to you. "
-            "Use view_task to inspect the details and start working on it."
+            "[Task Assigned] Task [{task_id}] \"{title}\" has been assigned to you. Its full content "
+            "follows; start it with claim_task(status=claimed).\n\n{content}"
         ),
         # agent/coordination/handlers/task_board.py — task reassigned away from this member
         "dispatcher.task_revoked_from_self": (
@@ -569,6 +610,17 @@ STRINGS: dict[str, dict[str, str]] = {
             "[Task Cancelled] Task [{task_id}] you were working on has been cancelled. "
             "Stop working on it now and call view_task to find your next available task."
         ),
+        # Scheduled dispatch: no claimable pool, the next task arrives as a start notice
+        "dispatcher.task_revoked_from_self_scheduled": (
+            "[Task Revoked] Task [{task_id}] has been reassigned to another member. "
+            "Stop working on it now and do not submit results for it; a new task assigned "
+            "to you arrives with its own start notice, so there is no need to poll the board."
+        ),
+        "dispatcher.task_cancelled_to_self_scheduled": (
+            "[Task Cancelled] Task [{task_id}] you were working on has been cancelled. "
+            "Stop working on it now and do not submit results for it; a new task assigned "
+            "to you arrives with its own start notice, so there is no need to poll the board."
+        ),
         "dispatcher.task_content_updated_to_self": (
             "[Task Updated] The content of task [{task_id}] you are working on has changed. "
             "Call view_task to re-read the latest requirements, then continue (the task is "
@@ -577,7 +629,7 @@ STRINGS: dict[str, dict[str, str]] = {
         # agent/dispatcher.py — message formatting
         "dispatcher.task_plan_approved_to_self": (
             "[Plan Approved] Your execution plan for task [{task_id}] was approved. "
-            "Start execution and call claim_task(status='completed') when done. {feedback}"
+            "Start execution and call claim_task(status='completed', summary=..., note=...) when done. {feedback}"
         ),
         "dispatcher.task_plan_rejected_to_self": (
             "[Plan Rejected] Your execution plan for task [{task_id}] needs revision. "
@@ -603,9 +655,13 @@ STRINGS: dict[str, dict[str, str]] = {
         # delivery from prompts/<lang>/scheduler_*.md, the single source of
         # their wording (F_63). Leader digests bypass the mailbox (direct input
         # injection), so they have no meta channel and stay one-line i18n.
-        "scheduler.leader_task_done": (
-            "[Scheduler] Task [{task_id}] \"{title}\" completed ({how}). {remaining} unfinished "
-            "task(s) remain on the board."
+        "scheduler.leader_task_done": "[Scheduler] Task [{task_id}] \"{title}\" completed ({how}).",
+        "scheduler.leader_task_done_summary": "Completion summary: {summary}",
+        "scheduler.leader_task_done_note_hint": (
+            "For the full completion note, call view_task(action='note', task_id='{task_id}')."
+        ),
+        "scheduler.leader_task_done_board_hint": (
+            "Call view_task for the board's live state when you need overall progress."
         ),
         "scheduler.leader_task_done_how_verified": "review passed",
         "scheduler.leader_task_done_how_direct": "no review, completed directly",
@@ -626,7 +682,9 @@ STRINGS: dict[str, dict[str, str]] = {
         ),
         "scheduler.leader_all_done": (
             "[Scheduler] Every task on the board is terminal ({count} task(s) total). Summarize "
-            "the team's results and deliver the final conclusion to the user."
+            "the team's results and deliver the final conclusion to the user. Do not send members a wrap-up "
+            "or stand-by notice — they idle on their own when there is no new work, and a broadcast only wakes "
+            "each of them for a round."
         ),
         "scheduler.inspector_avg_line": (
             "\n- [Inspector avg] {avg:.2f} / 0.85 ({status})\n"
@@ -658,13 +716,21 @@ STRINGS: dict[str, dict[str, str]] = {
         # agent/dispatcher.py — idle-agent nudges
         "dispatcher.all_done_persistent": (
             "All tasks are complete. Please summarize this round's results. "
-            "The team remains running and awaits new task instructions."
+            "The team remains running and awaits new task instructions. "
+            "Do not send members a wrap-up or stand-by notice — they idle on their own when there is no "
+            "new work, and a broadcast only wakes each of them for a round."
         ),
         "dispatcher.all_done_temporary": (
             "All tasks are complete. Summarize the team's work, "
             "then call shutdown_member for each member in turn, "
             "wait until all members reach status shutdown, "
             "and finally call clean_team to disband the team."
+        ),
+        "dispatcher.leader_just_completed": "Just completed:",
+        "dispatcher.leader_just_completed_line": "- [{task_id}] {title} → {assignee}",
+        "dispatcher.leader_just_completed_summary": ": {summary}",
+        "dispatcher.leader_just_completed_note_hint": (
+            "  For the full completion note, call view_task(action='note', task_id='{task_id}')."
         ),
         "dispatcher.leader_task_board": (
             "Current task board — please review:\n"
@@ -673,9 +739,9 @@ STRINGS: dict[str, dict[str, str]] = {
             "- Whether the overall progress matches expectations"
         ),
         "dispatcher.teammate_task_list": (
-            "Tasks available to work on:\n"
+            "Tasks you can start now (full content included):\n"
             "- Unassigned pending tasks may be claimed by you\n"
-            "- For tasks already assigned to you, use view_task for details and proceed with the task tools"
+            "- For tasks assigned to you, start directly with claim_task(status=claimed)"
         ),
         "dispatcher.task_unassigned_marker": " (unassigned)",
         # agent/dispatcher.py — stale-pending leader self-prompt
@@ -768,6 +834,10 @@ STRINGS: dict[str, dict[str, str]] = {
             "Do **NOT** greet, check in with, or otherwise message a member just "
             "because the roster changed; message someone only when the work you "
             "are actually holding needs them."
+        ),
+        "team_context.task_verified_intro": (
+            "These tasks you submitted earlier have passed review and are completed. "
+            "Nothing more is needed — do not contact the leader about them:"
         ),
         # agent/coordination/handlers/workflow.py — swarmflow spectator broadcast
         "workflow.started": (

@@ -84,6 +84,9 @@ def test_package_shell_rules_include_powershell_tool() -> None:
     assert rules
     for rule in rules:
         tools = rule.get("tools") or []
+        if rule.get("match_type") != "command":
+            # Non-shell categories (e.g. os_control) don't apply to shell tools.
+            continue
         assert "shell" in tools or "powershell" in tools, rule.get("id")
 
 

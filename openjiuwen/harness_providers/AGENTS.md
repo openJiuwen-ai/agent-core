@@ -29,6 +29,9 @@ Built-in provider names accepted by the factory: `native`, `native_v2`, `claudec
 Third-party providers resolve after them: in-process `register_harness_provider(name, factory)`,
 then installed packages declaring an entry point in the `openjiuwen.harness_providers` group
 (`HARNESS_PROVIDER_ENTRY_POINT_GROUP`, a stable public name). `available_providers()` lists all.
+An installed provider replaced on disk (its `RECORD` digest changed) is reimported by the next
+`resolve_provider`: its top-level packages leave `sys.modules`, harnesses already created keep the
+old modules, new ones get the new code (F_10).
 The provider card names are `deepagent`, `native_v2`, `claude-code`, `codex`, `deepseek-harness`.
 `native_v2` is resolved lazily to `agent_teams.harness.protocol_adapter.NativeV2HarnessProvider`;
 its implementation stays in the team package and reuses NativeHarness manifest construction.

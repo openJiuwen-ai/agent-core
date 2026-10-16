@@ -25,6 +25,7 @@ Built-in guardrails that hook into the `DeepAgent` lifecycle. Rails are register
 | `TeamSkillEvolutionRail` | Evolves existing team skills using aggregated team trajectories and approval-governed experience records. |
 | `TeamSkillRail` | Compatibility alias for `TeamSkillEvolutionRail`; evolves existing team skills using aggregated team trajectories and approval-governed experience records. |
 | `TrajectoryRail` | Archives one canonical trajectory for each completed Agent invoke. |
+| `MultimodalContextSummarizerRail` | Replaces images in older screenshot user messages with a fixed placeholder (`ARCHIVED_SCREEN_PLACEHOLDER`), keeping the latest `screenshots_to_keep` (default 3). Messages whose `name` is in `protected_user_message_names` are never replaced. Used by the desktop sub-agent. |
 
 ## Rail Lifecycle
 

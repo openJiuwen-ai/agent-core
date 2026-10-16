@@ -713,6 +713,12 @@ def _find_tool_loop_compact_range(
             continue
         if eligible[-1].fingerprint != round_info.fingerprint:
             break
+        # Only back-to-back rounds form a loop: any message between two rounds
+        # (a new user input, a plain assistant reply) means the model was given
+        # something new and chose the same call again — a legitimate re-check,
+        # not a loop. Folding across it would also delete that input.
+        if round_info.end != eligible[-1].start:
+            break
         eligible.append(round_info)
 
     eligible.reverse()

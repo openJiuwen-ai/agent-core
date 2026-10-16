@@ -498,3 +498,79 @@ def test_native_result_leaves_reported_model_none(tmp_path):
     completed = [e for e in events if e.kind == ProgressKind.AGENT_COMPLETED]
     assert len(completed) == 1
     assert completed[0].model is None
+
+
+def test_agent_started_carries_agent_template_and_display_name(tmp_path):
+    """AGENT_STARTED names the picked expert (member name + backend-described display name);
+    a plain call leaves both None."""
+    from openjiuwen.agent_teams.workflow.engine import run_workflow
+    from openjiuwen.agent_teams.workflow.engine.backends.mock import MockBackend
+
+    class _ExpertMock(MockBackend):
+        KNOWN_OPTIONS = frozenset({"agent_template"})
+
+        def describe_agent_template(self, opts):
+            return {"clip": "视频镜头师"}.get(opts.get("agent_template") or "")
+
+    script = tmp_path / "exp.py"
+    script.write_text(
+        'from swarmflow import agent\n'
+        'META = {"name": "exp", "description": "d", "phases": []}\n'
+        'async def run(args):\n'
+        '    a = await agent("one", label="a", options={"agent_template": "clip"})\n'
+        '    b = await agent("two", label="b")\n'
+        '    return [a, b]\n',
+        encoding="utf-8",
+    )
+    events: list = []
+    asyncio.run(run_workflow(str(script), backend=_ExpertMock(), progress_sink=events.append))
+    started = {e.label: e for e in events if e.kind == "agent_started"}
+    assert started["a"].agent_template == "clip" and started["a"].display_name == "视频镜头师"
+    assert started["b"].agent_template is None and started["b"].display_name is None
+
+
+def test_non_string_agent_template_is_rejected_by_engine(tmp_path):
+    """A non-string agent_template fails the run in the engine, before any agent starts."""
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
+
+    script = _write(
+        tmp_path,
+        "badtpl.py",
+        'from swarmflow import agent\n'
+        'META = {"name": "badtpl", "description": "d", "phases": []}\n'
+        'async def run(args):\n'
+        '    return await agent("one", label="a", options={"agent_template": 123})\n',
+    )
+    events: list = []
+    with pytest.raises(EngineError) as exc:
+        asyncio.run(run_workflow(script, backend=MockBackend(), progress_sink=events.append))
+    assert "agent_template" in str(exc.value)
+    assert not [e for e in events if e.kind == ProgressKind.AGENT_STARTED]
+
+
+def test_non_string_agent_template_is_rejected_on_the_session_path(tmp_path):
+    """The same _build_opts validator covers agent_session().send()."""
+    from openjiuwen.agent_teams.workflow.engine.errors import EngineError
+
+    script = _write(
+        tmp_path,
+        "badtplsession.py",
+        'from swarmflow import agent_session\n'
+        'META = {"name": "badtplsession", "description": "d", "phases": []}\n'
+        'async def run(args):\n'
+        '    s = agent_session(label="chat", options={"agent_template": 123})\n'
+        '    return await s.send("x")\n',
+    )
+    events: list = []
+    with pytest.raises(EngineError) as exc:
+        asyncio.run(run_workflow(script, backend=MockBackend(), progress_sink=events.append))
+    assert "agent_template" in str(exc.value)
+    assert not [e for e in events if e.kind == ProgressKind.AGENT_STARTED]
+
+
+def test_team_event_schema_carries_expert_fields():
+    from openjiuwen.agent_teams.schema.events import WorkflowProgressTeamEvent
+
+    ev = WorkflowProgressTeamEvent(team_name="t", kind="agent_started", agent_template="clip", display_name="X")
+    assert ev.agent_template == "clip" and ev.display_name == "X"
+    assert WorkflowProgressTeamEvent(team_name="t", kind="agent_started").agent_template is None

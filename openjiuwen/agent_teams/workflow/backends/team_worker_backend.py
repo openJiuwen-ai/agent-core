@@ -39,7 +39,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
@@ -200,7 +200,12 @@ class TeamWorkerBackend(AgentBackend):
         team_backend: The host team backend handle — source of the team model
             pool for third-party model planning and native pool-miss messages.
             ``None`` (tests / a backend without a team) leaves the pool empty.
+        expert_specs: AgentGroup members a script may pick via ``agent_template``
+            (member name → ``SwarmflowExpertEntry``). Empty when no group is bound.
     """
+
+    #: Options this backend understands beyond the engine's own set.
+    KNOWN_OPTIONS = frozenset({"agent_template"})
 
     def __init__(
         self,
@@ -221,6 +226,7 @@ class TeamWorkerBackend(AgentBackend):
         workflow_name: str | None = None,
         external_cli_agents: Sequence[Any] = (),
         team_backend: Any = None,
+        expert_specs: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self._model = model
@@ -244,6 +250,7 @@ class TeamWorkerBackend(AgentBackend):
         self._run_id = run_id
         self._workflow_name = workflow_name
         self._external_cli_agents: tuple[Any, ...] = tuple(external_cli_agents)
+        self._expert_specs: dict[str, Any] = dict(expert_specs or {})
         self._run_prefix = self._run_id_prefix(run_id)
         self._worktrees = SwarmflowWorkerWorktrees(
             team_name=team_name,
@@ -278,6 +285,12 @@ class TeamWorkerBackend(AgentBackend):
     ) -> AgentResult:
         member_name = self._next_member_name(opts, call_key)
         agent_type = opts.get("agent_type")
+        # Expert pick (AgentGroup member). Gated before any resource is touched,
+        # like agent_type: a bad member name is a script error, not a retry.
+        # It runs FIRST so a script naming both knobs is told they are mutually
+        # exclusive, instead of hearing about whichever CLI it also named.
+        expert = self._gate_agent_template(opts)
+        expert_kw = {"expert": expert} if expert is not None else {}
         # Gate before any resource is touched: a bad agent_type is a script
         # error; the engine still retries it (cheap, deterministic) before
         # AGENT_FAILED reaches the leader.
@@ -364,6 +377,7 @@ class TeamWorkerBackend(AgentBackend):
                     agent_id=agent_id,
                     phase=phase,
                     label=label,
+                    **expert_kw,
                 )
                 if not (submit_tool.called and submit_tool.captured is not None):
                     raise BackendError(
@@ -389,6 +403,7 @@ class TeamWorkerBackend(AgentBackend):
                 agent_id=agent_id,
                 phase=phase,
                 label=label,
+                **expert_kw,
             )
             return AgentResult(
                 text=text,
@@ -444,6 +459,7 @@ class TeamWorkerBackend(AgentBackend):
                 skill_visibility_fn=self._apply_worker_skill_visibility,
                 external_cli_agents=self._external_cli_agents,
                 gate_agent_type=self._gate_agent_type,
+                gate_agent_template=self._gate_agent_template,
                 external_cwd=self._external_cwd,
                 team_backend=self._team_backend,
                 progress_sink=self.progress_sink,
@@ -634,6 +650,58 @@ class TeamWorkerBackend(AgentBackend):
             )
         return next(e for e in self._external_cli_agents if e.cli_agent == agent_type)
 
+    def _gate_agent_template(self, opts: dict) -> Any | None:
+        """Resolve ``opts["agent_template"]`` against the bound AgentGroup, or None.
+
+        Raises a non-retryable ``BackendError`` for a prefixed name, an unknown
+        member, a missing group, a clash with ``agent_type`` (the template owns
+        the runtime), or an external-runtime member (not run by swarmflow yet).
+        """
+        name = opts.get("agent_template")
+        if not name:
+            return None
+        if opts.get("agent_type"):
+            raise BackendError(
+                "agent_template and agent_type are mutually exclusive: "
+                "the template decides the runtime; drop agent_type",
+                retryable=False,
+            )
+        if not isinstance(name, str) or "/" in name:
+            raise BackendError(
+                f"agent_template {name!r} must be the bare member name of the bound AgentGroup "
+                "(a string without a 'group/' prefix)",
+                retryable=False,
+            )
+        entry = self._expert_specs.get(name)
+        if entry is None:
+            if name == "leader":
+                # The Leader already drives the conversation that launched this
+                # workflow; its persona is about delegating, not doing a node's work.
+                raise BackendError(
+                    "agent_template 'leader' is the Team Leader, not a worker; "
+                    "pick a worker member of the bound AgentGroup",
+                    retryable=False,
+                )
+            if self._expert_specs:
+                hint = f"available members: {sorted(self._expert_specs)}"
+            else:
+                hint = "no AgentGroup is bound to this session; bind one (agent_group_name) before using agent_template"
+            raise BackendError(
+                f"agent_template {name!r} is not a member of the bound AgentGroup; {hint}",
+                retryable=False,
+            )
+        if entry.is_external:
+            raise BackendError(
+                f"agent_template {name!r} declares an external runtime; "
+                "swarmflow does not run external-runtime experts yet",
+                retryable=False,
+            )
+        return entry
+
+    def describe_agent_template(self, opts: dict) -> str | None:
+        entry = self._expert_specs.get(opts.get("agent_template") or "")
+        return entry.display_name if entry is not None else None
+
     def _external_cwd(self, member_name: str, entry: Any) -> str | None:
         """Return the working directory for an external CLI worker.
 
@@ -667,6 +735,7 @@ class TeamWorkerBackend(AgentBackend):
         agent_id: str | None = None,
         phase: str | None = None,
         label: str | None = None,
+        expert: Any = None,
     ) -> str:
         """Build a worker ``TeamHarness`` and run it for one execution.
 
@@ -682,20 +751,34 @@ class TeamWorkerBackend(AgentBackend):
             budget_rail: This call's token rail, mounted on the worker harness so
                 the run's ceiling binds the worker's own loop. ``None`` (tests
                 overriding this method) leaves the worker unmetered.
+            expert: The resolved expert entry when the call named an
+                ``agent_template``; its spec replaces the worker base and its
+                persona is prepended to the engine worker prompt.
 
         Returns:
             The worker's final free-text output (only meaningful when no schema
             was requested). Structured output is read off the
             ``StructuredOutputTool`` instance by :meth:`run`, not from this value.
         """
+        from openjiuwen.agent_teams.agent.team_agent import team_member_execution_subject
         from openjiuwen.agent_teams.harness.team_harness import TeamHarness
         from openjiuwen.agent_teams.workflow.backends._member_spec import (
             derive_member_build_context,
             derive_member_spec,
         )
+        from openjiuwen.harness.execution_subject import execution_subject_scope
 
+        # Checked before the expert substitution: even an expert-backed worker
+        # draws its workspace from the base spec (_setup_worker_workspace).
         if self._worker_base_spec is None:
             raise BackendError("TeamWorkerBackend requires a worker_base_spec to build a worker harness")
+        base_spec = expert.spec if expert is not None else self._worker_base_spec
+        worker_key = "schema" if has_schema else "free"
+        worker_text = self._t("swarmflow_worker", key=worker_key)
+        # Persona first (who / rules), engine text last (single-shot delivery
+        # protocol) — the engine text is kept verbatim so the structured_output
+        # contract the backend checks afterwards is never weakened.
+        system_prompt = f"{expert.persona}\n\n{worker_text}" if expert is not None and expert.persona else worker_text
 
         try:
             # Worker = teammate without team tools: per-call model (else inherit),
@@ -703,12 +786,10 @@ class TeamWorkerBackend(AgentBackend):
             # instance. enable_task_loop / enable_task_planning ride along from
             # the base spec, so DeepAgent todo planning is preserved.
             worker_spec = derive_member_spec(
-                self._worker_base_spec,
+                base_spec,
                 team_name=self._team_name,
                 member_name=member_name,
-                system_prompt=(
-                    self._t("swarmflow_worker", key="schema") if has_schema else self._t("swarmflow_worker", key="free")
-                ),
+                system_prompt=system_prompt,
                 model=model,
                 extra_tools=tools,
                 description="swarmflow worker",
@@ -764,7 +845,17 @@ class TeamWorkerBackend(AgentBackend):
                 team_id=self._team_name,
                 kv_cache_runtime=self._kv_cache_runtime,
             )
-            result = await harness.run_once(user_prompt, team_session=team_session)
+            # Run under the worker's own trajectory subject so its records group
+            # into a lane of their own instead of the leader's (the engine runs
+            # inside the leader's tool call and would otherwise inherit it).
+            worker_subject = team_member_execution_subject(
+                session_id=self._session_id or "",
+                team_name=self._team_name,
+                member_name=member_name,
+                display_name=label or member_name,
+            )
+            with execution_subject_scope(worker_subject):
+                result = await harness.run_once(user_prompt, team_session=team_session)
         except Exception as e:
             team_logger.exception("worker harness run_once failed for %s", member_name)
             raise BackendError(f"worker harness run_once failed for {member_name}: {e}") from e

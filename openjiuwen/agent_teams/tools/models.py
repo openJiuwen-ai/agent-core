@@ -151,6 +151,16 @@ class TeamTaskBase(SQLModel):
     # still fails, the scheduler escalates to the leader instead of looping
     # rework. NULL falls back to ``TeamAgentSpec.default_max_review_rounds``.
     max_review_rounds: Optional[int] = Field(default=None, nullable=True)
+    # Author's one-line completion summary (F_119): what was delivered and
+    # where. Rendered in lightweight places (leader digest, upstream briefs);
+    # stored in full, truncated only when rendered. Cleared together with
+    # ``note`` whenever the task leaves its assignee (reassign / reset).
+    summary: Optional[str] = Field(default=None, nullable=True)
+    # Author's completion note (F_118 / D7): artifact paths and key decisions
+    # written by ``member_complete_task(note=...)``. Persisted so downstream
+    # members, reviewers and the leader (``view_task``) can read it; events
+    # never carry it. Since F_119 it is the full detail behind ``summary``.
+    note: Optional[str] = Field(default=None, nullable=True)
     updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
     def brief(self) -> dict:

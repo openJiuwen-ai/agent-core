@@ -50,6 +50,8 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
     GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
+    GEN_AI_RETRIEVAL_DOCUMENTS,
+    GEN_AI_RETRIEVAL_QUERY_TEXT,
     GEN_AI_RETRIEVAL_TOP_K,
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ID,
@@ -714,6 +716,129 @@ class TestOtelWorkflowHandler:
         assert s.name == "execute_tool tool_node"
         assert s.attributes[GEN_AI_TOOL_NAME] == "tool_node"
 
+    async def test_workflow_retrieval_component_tagged_as_retrieval(self):
+        """KnowledgeRetrievalExecutable gets the standard retrieval name and
+        gen_ai.operation.name="retrieval"; query/documents are projected onto
+        gen_ai.retrieval.query.text / gen_ai.retrieval.documents from the
+        component inputs/outputs."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "什么是向量检索"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(
+            invoke_id="kb_node",
+            outputs={"results": ["doc-1 内容", "doc-2 内容"], "context": "doc-1 内容\ndoc-2 内容"},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.kind == trace.SpanKind.INTERNAL
+        assert s.name == "retrieval kb_node"
+        assert s.attributes[GEN_AI_OPERATION_NAME] == "retrieval"
+        assert s.attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "什么是向量检索"
+        assert list(s.attributes[GEN_AI_RETRIEVAL_DOCUMENTS]) == ["doc-1 内容", "doc-2 内容"]
+
+    async def test_workflow_retrieval_documents_redacted(self):
+        """gen_ai.retrieval.documents follows the same redaction policy as
+        query.text / workflow.outputs: hashed when redaction_enabled=True,
+        never raw document text."""
+        config = OtelTracerConfig(redaction_enabled=True)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "什么是向量检索"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(
+            invoke_id="kb_node",
+            outputs={"results": ["doc-1 内容", "doc-2 内容"]},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        docs = list(finished[0].attributes[GEN_AI_RETRIEVAL_DOCUMENTS])
+        assert docs[0].startswith("sha256:")
+        assert docs[1].startswith("sha256:")
+        assert finished[0].attributes[GEN_AI_RETRIEVAL_QUERY_TEXT].startswith("sha256:")
+
+    async def test_workflow_retrieval_query_refreshed_on_pre_invoke(self):
+        """Transform callbacks may mutate inputs in place; on_pre_invoke refreshes
+        gen_ai.retrieval.query.text together with openjiuwen.workflow.inputs."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "旧查询"},
+            parent_node_id="",
+        )
+        await handler.on_pre_invoke(
+            invoke_id="kb_node",
+            inputs={"query": "新查询"},
+            component_metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+        )
+        await handler.on_call_done(invoke_id="kb_node")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert finished[0].attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "新查询"
+
+    async def test_workflow_non_retrieval_component_keeps_generic_name(self):
+        """Components whose type carries no "Retrieval" substring keep the generic
+        component.<invoke_id> name and get no gen_ai.operation.name tag."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="other_node",
+            metadata={
+                "component_id": "other_node",
+                "component_type": "SomeExecutable",
+                "component_name": "other_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "不是检索组件"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(invoke_id="other_node", outputs={"results": ["x"]})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "component.other_node"
+        assert GEN_AI_OPERATION_NAME not in s.attributes
+        assert GEN_AI_RETRIEVAL_QUERY_TEXT not in s.attributes
+        assert GEN_AI_RETRIEVAL_DOCUMENTS not in s.attributes
+
     async def test_workflow_non_llm_internal_span(self):
         """Non-LLM component → INTERNAL span kind."""
         config = OtelTracerConfig(redaction_enabled=False)
@@ -1123,6 +1248,52 @@ class TestComponentSpansInvokeIdKey:
         # Both spans should exist independently
         invoke_ids = {s.attributes.get(OJ_INVOKE_ID) for s in finished}
         assert invoke_ids == {"node_1_inv_1", "node_1_inv_2"}
+
+    async def test_leftover_component_span_ended_on_workflow_failure(self, monkeypatch):
+        """A component span still open when its workflow fails must be fully
+        cleaned up by on_invoke's defensive _component_spans loop: end + detach +
+        _span_manager pop. Dropping only the index entry would leak the span and
+        its ambient-context token, and leave the manager entry unreachable for
+        the stale-session cleanup safety net."""
+        detached = []
+        orig_detach = OtelWorkflowHandler._detach_state
+
+        def _spy_detach(state):
+            detached.append(state)
+            orig_detach(state)
+
+        monkeypatch.setattr(OtelWorkflowHandler, "_detach_state", staticmethod(_spy_detach))
+
+        await self.handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        await self.handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "q"},
+            parent_node_id="",
+        )
+        comp_state = self.handler._component_spans["kb_node"]
+        assert comp_state.context_token is not None  # attach is active on component spans
+        # Defensive-loop condition: state.invoke_id equals the failing workflow's
+        # invoke_id (component created under the workflow's id).
+        comp_state.invoke_id = "wf_root"
+
+        await self.handler.on_invoke(invoke_id="wf_root", exception=RuntimeError("wf failed"))
+
+        names = {s.name for s in _EXPORTER.get_finished_spans()}
+        assert "wf_root" in names  # root ended via the normal error path
+        assert "retrieval kb_node" in names  # component ended by the cleanup loop
+        assert self.handler._span_manager.get("kb_node") is None
+        assert not self.handler._component_spans
+        assert comp_state in detached  # ambient context token released
 
 
 class TestWorkflowIsolation:
@@ -1680,9 +1851,9 @@ class TestGenAiSemconvAttrs:
         assert handler._span_manager.get(agent_span.invoke_id) is None
 
     async def test_embedding_start_sets_dimension_count(self):
-        """EMBEDDING span entry point: embeddings operation + dimension count.
-        No core emitter yet — invoked directly here until the framework grows
-        on_embedding_* events."""
+        """EMBEDDING span: embeddings operation, GenAI "{operation} {model}"
+        naming, request model and dimension count (core emitter:
+        APIEmbedding._get_embeddings)."""
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
 
@@ -1691,16 +1862,92 @@ class TestGenAiSemconvAttrs:
 
         await handler.on_embedding_start(
             span=embedding_span,
-            inputs={"input": "text", "dimension": 768},
-            instance_info={"class_name": "text-embedding"},
+            inputs={"text": "hello", "dimension": 768},
+            instance_info={"class_name": "APIEmbedding", "model_name": "bge-m3"},
         )
-        await handler.on_embedding_end(span=embedding_span, outputs=None)
+        await handler.on_embedding_end(
+            span=embedding_span,
+            outputs={
+                "vector_count": 1,
+                "dimension": 768,
+                "response_model": "bge-m3-20260101",
+                "usage_input_tokens": 12,
+            },
+        )
 
         s = _EXPORTER.get_finished_spans()[0]
-        assert s.name == "embedding.text-embedding"
+        assert s.name == "embeddings bge-m3"
         assert s.attributes[GEN_AI_OPERATION_NAME] == "embeddings"
+        assert s.attributes[GEN_AI_REQUEST_MODEL] == "bge-m3"
+        assert s.attributes[GEN_AI_RESPONSE_MODEL] == "bge-m3-20260101"
         assert s.attributes[GEN_AI_EMBEDDINGS_DIMENSION_COUNT] == 768
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 12
         assert s.attributes[GEN_AI_PROVIDER_NAME] == "openjiuwen"
+        assert s.status.status_code == trace.StatusCode.OK
+
+    async def test_embedding_error_marks_error(self):
+        """on_embedding_error (fired by the core emitter on final failure)
+        closes the span with ERROR status and error.type."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        embedding_span = span_manager.create_agent_span()
+
+        await handler.on_embedding_start(
+            span=embedding_span,
+            inputs={"text": "hello"},
+            instance_info={"class_name": "APIEmbedding", "model_name": "bge-m3"},
+        )
+        await handler.on_embedding_error(span=embedding_span, error=RuntimeError("boom"))
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.status.status_code == trace.StatusCode.ERROR
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+
+    async def test_embedding_span_parents_onto_ambient_component_span(self):
+        """End-to-end parenting: while a retrieval component span is open
+        (context attached by on_call_start), an embedding span triggered from
+        inside the component resolves the component span as its OTel parent
+        instead of becoming an orphan root."""
+        wf_handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig(redaction_enabled=False))
+        agent_handler = OtelAgentHandler(_OTEL_TRACER, OtelTracerConfig(redaction_enabled=False))
+
+        await wf_handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+                "top_k": 5,
+                "data_source_ids": ["kb-a", "kb-b"],
+            },
+            inputs={"query": "q"},
+            parent_node_id="",
+        )
+
+        # Simulate the core emitter firing inside component execution: the
+        # ambient OTel context is whatever on_call_start attached (same task).
+        agent_span = SpanManager("t").create_agent_span()
+        await agent_handler.on_embedding_start(
+            span=agent_span,
+            inputs={"text": "q", "dimension": 1024},
+            instance_info={"class_name": "APIEmbedding", "model_name": "bge-m3"},
+        )
+        await agent_handler.on_embedding_end(span=agent_span, outputs={"vector_count": 1})
+
+        await wf_handler.on_call_done(invoke_id="kb_node", outputs={"results": ["d1"]})
+
+        finished = _EXPORTER.get_finished_spans()
+        by_name = {s.name: s for s in finished}
+        comp = by_name["retrieval kb_node"]
+        emb = by_name["embeddings bge-m3"]
+        assert emb.parent is not None and emb.parent.span_id == comp.context.span_id
+        assert emb.context.trace_id == comp.context.trace_id
+        # Component-level metadata attrs exported via trace_metadata()
+        assert comp.attributes[GEN_AI_RETRIEVAL_TOP_K] == 5
+        assert list(comp.attributes[GEN_AI_DATA_SOURCE_ID]) == ["kb-a", "kb-b"]
 
     async def test_memory_start_sets_record_count(self):
         """MEMORY span entry point: record count from inputs."""

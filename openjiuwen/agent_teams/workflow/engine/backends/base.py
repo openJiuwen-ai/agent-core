@@ -152,6 +152,14 @@ class AgentBackend(abc.ABC):
         """
         return None
 
+    def describe_agent_template(self, opts: dict) -> str | None:
+        """Display name of the expert ``opts["agent_template"]`` resolves to, for progress events.
+
+        ``None`` (default) = this backend has no expert table; the engine emits the
+        raw member name alone.
+        """
+        return None
+
     @abc.abstractmethod
     async def run(
         self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None

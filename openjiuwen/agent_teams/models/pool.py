@@ -517,15 +517,26 @@ def materialize_model_group(compiled: Any, selection: Any | None = None) -> list
 
 
 def _entry_signature(entry: ModelPoolEntry) -> str:
-    """Canonical signature of an entry's full config, excluding ``model_id``.
+    """Canonical signature of an entry's full config, excluding client identity.
 
     Two entries with the same signature describe the same logical
     endpoint plus the same auth, request knobs, and metadata — i.e.
     a future foundation client cache could safely serve one client
     for both. Any difference (api_key rotation included) yields a
     different signature and forces a fresh ``model_id``.
+
+    Client identity is not configuration and is left out: ``model_id``,
+    and a ``client_id`` under ``metadata.client``. Hosts often fill
+    ``metadata.client`` by dumping a whole ``ModelClientConfig``, whose
+    ``client_id`` is a fresh uuid on every dump; ``to_team_model_config``
+    overrides it with ``model_id`` anyway. Counting it made two builds of
+    the same selection look like a model change, so a paused team was torn
+    down and rebuilt on every request.
     """
     payload = entry.model_dump(exclude={"model_id"})
+    client_extra = payload.get("metadata", {}).get("client")
+    if isinstance(client_extra, dict):
+        client_extra.pop("client_id", None)
     return json.dumps(payload, sort_keys=True, default=str)
 
 

@@ -9,7 +9,11 @@ from openjiuwen.core.foundation.prompt.assemble.variables.variable import Variab
 
 
 class DictableVariable(Variable):
-    """Variable class for processing dict or list type placeholders recursively"""
+    """Variable class for processing dict or list type placeholders recursively.
+
+    An empty placeholder (for example ``{{}}``) is treated as literal text
+    with a warning instead of raising an error.
+    """
 
     def __init__(self, data: Union[dict, list], name: str = "default", prefix: str = "{{", suffix: str = "}}"):
         self.data = data
@@ -36,10 +40,11 @@ class DictableVariable(Variable):
             for match in self.pattern.finditer(obj):
                 placeholder = match.group(1).strip()
                 if len(placeholder) == 0:
-                    raise build_error(
-                        StatusCode.PROMPT_ASSEMBLER_VARIABLE_INIT_FAILED,
-                        error_msg="placeholders cannot be empty string"
+                    prompt_logger.warning(
+                        "Empty placeholder found; treating as literal text",
+                        metadata={"name": self.name, "placeholder": match.group(0)}
                     )
+                    continue
                 if placeholder not in placeholders:
                     placeholders.append(placeholder)
         elif isinstance(obj, list):
@@ -65,12 +70,17 @@ class DictableVariable(Variable):
         if not isinstance(obj, str):
             return obj
 
-        formatted_text = obj
-        for placeholder in self.placeholders:
-            placeholder_str = f"{self.prefix}{placeholder}{self.suffix}"
-            if placeholder_str not in formatted_text:
+        # Split the string into ordered segments (literal text vs placeholder)
+        # so that rendering only touches literal text and never rewrites the
+        # substituted values.
+        parts = []
+        cursor = 0
+        for match in self.pattern.finditer(obj):
+            placeholder = match.group(1).strip()
+            if len(placeholder) == 0:
+                # cursor not advanced: empty placeholder retained as literal text
                 continue
-
+            parts.append(obj[cursor:match.start()])
             value = kwargs
             try:
                 for node in placeholder.split("."):
@@ -85,6 +95,15 @@ class DictableVariable(Variable):
                     cause=e
                 ) from e
 
+            if value is None:
+                prompt_logger.warning(
+                    "Placeholder resolved to None; keeping original placeholder text",
+                    metadata={"name": self.name, "placeholder": placeholder}
+                )
+                parts.append(obj[match.start():match.end()])
+                cursor = match.end()
+                continue
+
             if not isinstance(value, (str, int, float, bool)):
                 prompt_logger.info(
                     "Converting non-string value using str()."
@@ -95,6 +114,7 @@ class DictableVariable(Variable):
                     metadata={"placeholder": placeholder}
                 )
 
-            formatted_text = formatted_text.replace(placeholder_str, str(value))
-
-        return formatted_text
+            parts.append(str(value))
+            cursor = match.end()
+        parts.append(obj[cursor:])
+        return "".join(parts)

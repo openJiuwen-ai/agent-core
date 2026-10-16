@@ -204,6 +204,7 @@ class Agent:
 
     async def tool(self, session_id: str) -> None:
         call_id = "call_" + uuid.uuid4().hex[:8]
+        _chunk(session_id, "agent_thought_chunk", "msg_plan", "read the file first")
         _notify(session_id, {"sessionUpdate": "tool_call", "toolCallId": call_id, "title": "read",
                              "kind": "read", "status": "pending", "locations": [], "rawInput": {}})
         _notify(session_id, {"sessionUpdate": "tool_call_update", "toolCallId": call_id, "status": "in_progress",

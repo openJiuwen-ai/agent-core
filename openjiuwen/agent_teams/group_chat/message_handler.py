@@ -66,12 +66,10 @@ class GroupMessageHandler(MessageHandler):
             return ExpandedMessage(body=body, is_template=False)
         return await super()._expand(message)
 
-    def _format_message(self, message, *, expanded, is_human_agent, now_ms):
+    def _format_message(self, message, *, expanded, is_human_agent):
         if message.broadcast and group_metadata(message):
             return expanded.body
-        return super()._format_message(
-            message, expanded=expanded, is_human_agent=is_human_agent, now_ms=now_ms,
-        )
+        return super()._format_message(message, expanded=expanded, is_human_agent=is_human_agent)
 
     def _try_parse_approval_payload(self, message):
         if message.broadcast and group_metadata(message):

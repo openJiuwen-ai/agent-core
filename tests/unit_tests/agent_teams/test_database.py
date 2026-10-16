@@ -241,6 +241,84 @@ class TestTeamDatabaseInit:
             engine.dispose()
 
     @pytest.mark.level1
+    def test_task_migration_adds_note_column_idempotently(self):
+        """A pre-F_118 task table gains ``note``; a table that has it is left alone."""
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_task_prenote (
+                        task_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        assignee TEXT,
+                        reviewer TEXT,
+                        review_round INTEGER NOT NULL DEFAULT 0,
+                        max_review_rounds INTEGER,
+                        updated_at BIGINT
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_task_prenote (task_id, team_name, title, content, status) "
+                    "VALUES ('t1', 'team', 't', 'c', 'pending')"
+                )
+
+                _ensure_dynamic_table_indexes(conn, ["team_task_prenote"], {"team_task_prenote"})
+                _ensure_dynamic_table_indexes(conn, ["team_task_prenote"], {"team_task_prenote"})
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_task_prenote")}
+                row = conn.exec_driver_sql("SELECT note FROM team_task_prenote").mappings().one()
+
+            assert "note" in columns
+            assert row["note"] is None
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
+    def test_task_migration_adds_summary_column_idempotently(self):
+        """A pre-F_119 task table (with ``note``) gains ``summary``; reruns are no-ops."""
+        engine = create_engine("sqlite:///:memory:")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    """
+                    CREATE TABLE team_task_presummary (
+                        task_id TEXT PRIMARY KEY,
+                        team_name TEXT NOT NULL,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        status TEXT NOT NULL,
+                        assignee TEXT,
+                        reviewer TEXT,
+                        review_round INTEGER NOT NULL DEFAULT 0,
+                        max_review_rounds INTEGER,
+                        note TEXT,
+                        updated_at BIGINT
+                    )
+                    """
+                )
+                conn.exec_driver_sql(
+                    "INSERT INTO team_task_presummary (task_id, team_name, title, content, status, note) "
+                    "VALUES ('t1', 'team', 't', 'c', 'completed', 'kept')"
+                )
+
+                _ensure_dynamic_table_indexes(conn, ["team_task_presummary"], {"team_task_presummary"})
+                _ensure_dynamic_table_indexes(conn, ["team_task_presummary"], {"team_task_presummary"})
+
+                columns = {col["name"] for col in inspect(conn).get_columns("team_task_presummary")}
+                row = conn.exec_driver_sql("SELECT summary, note FROM team_task_presummary").mappings().one()
+
+            assert "summary" in columns
+            assert row["summary"] is None
+            assert row["note"] == "kept"
+        finally:
+            engine.dispose()
+
+    @pytest.mark.level1
     def test_team_info_migration_adds_capability_columns(self):
         """A pre-F_62 team_info table gains dispatch_mode / enable_task_verification."""
         from openjiuwen.agent_teams.tools.database.engine import _ensure_team_info_capability_columns
@@ -863,8 +941,9 @@ class TestTaskOperations:
             status="pending"
         )
 
-        success = await db.task.update_task("task_title", title="Updated Title")
-        assert success is True
+        updated = await db.task.update_task("task_title", title="Updated Title")
+        assert updated is not None
+        assert updated.title == "Updated Title"
 
         task = await db.task.get_task("task_title")
         assert task.title == "Updated Title"
@@ -887,8 +966,8 @@ class TestTaskOperations:
             status="pending"
         )
 
-        success = await db.task.update_task("task_content", content="Updated Content")
-        assert success is True
+        updated = await db.task.update_task("task_content", content="Updated Content")
+        assert updated is not None
 
         task = await db.task.get_task("task_content")
         assert task.title == "Original Title"
@@ -911,12 +990,13 @@ class TestTaskOperations:
             status="pending"
         )
 
-        success = await db.task.update_task(
+        updated = await db.task.update_task(
             "task_both",
             title="Updated Title",
             content="Updated Content"
         )
-        assert success is True
+        assert updated is not None
+        assert updated.title == "Updated Title"
 
         task = await db.task.get_task("task_both")
         assert task.title == "Updated Title"
@@ -925,9 +1005,9 @@ class TestTaskOperations:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_update_task_not_found(self, db):
-        """Test updating non-existent task returns False"""
-        success = await db.task.update_task("nonexistent_task", title="New Title")
-        assert success is False
+        """Test updating non-existent task returns None"""
+        updated = await db.task.update_task("nonexistent_task", title="New Title")
+        assert updated is None
 
     @pytest.mark.asyncio
     @pytest.mark.level0
@@ -946,9 +1026,9 @@ class TestTaskOperations:
             status="pending"
         )
 
-        # Update with same values - should still return True
-        success = await db.task.update_task("task_same", title="Same Title", content="Same Content")
-        assert success is True
+        # Update with same values - still returns the unchanged row
+        updated = await db.task.update_task("task_same", title="Same Title", content="Same Content")
+        assert updated is not None
 
         task = await db.task.get_task("task_same")
         assert task.title == "Same Title"
@@ -973,8 +1053,9 @@ class TestTaskOperations:
         )
 
         # Editing an in-progress task now succeeds.
-        success = await db.task.update_task("task_claimed", title="New Title")
-        assert success is True
+        updated = await db.task.update_task("task_claimed", title="New Title")
+        assert updated is not None
+        assert updated.status == "in_progress"
         task = await db.task.get_task("task_claimed")
         assert task.title == "New Title"
 
@@ -987,7 +1068,7 @@ class TestTaskOperations:
             status="in_review"
         )
         locked = await db.task.update_task("task_in_review", title="Nope")
-        assert locked is False
+        assert locked is None
         unchanged = await db.task.get_task("task_in_review")
         assert unchanged.title == "In Review Task"
 

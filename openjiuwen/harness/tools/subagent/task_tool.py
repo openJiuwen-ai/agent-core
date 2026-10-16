@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import inspect
 import json
+import os
 import time
 import uuid
 from contextlib import aclosing, nullcontext
@@ -55,19 +56,57 @@ except Exception:  # pragma: no cover - browser runtime is optional here
 DEFAULT_SUBAGENT_TASK_TIMEOUT_S = 720.0
 EXECUTION_DEADLINE_STATE_KEY = "__subagent_execution_deadline_at__"
 BROWSER_PARENT_QUERY_STATE_KEY = "__browser_parent_user_query__"
+# Operators raise the budget for long desktop/browser work without a code
+# change; a value that does not parse as a positive number keeps the default.
+SUBAGENT_TASK_TIMEOUT_ENV = "OPENJIUWEN_SUBAGENT_TASK_TIMEOUT_S"
+# cua_agent stops itself this far before the tool-call ceiling so the model
+# receives a resumable result instead of a bare "timed out" error that loses
+# every step the desktop agent already took.
+_CUA_TIMEOUT_MARGIN_S = 20.0
+
+
+def resolve_subagent_task_timeout_s() -> float:
+    """Delegation ceiling in seconds: env override when valid, else the default."""
+    raw = (os.getenv(SUBAGENT_TASK_TIMEOUT_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_SUBAGENT_TASK_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        logger.warning(
+            "[TaskTool] ignoring %s=%r (need a positive number of seconds); using %ss",
+            SUBAGENT_TASK_TIMEOUT_ENV,
+            raw,
+            DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+        )
+        return DEFAULT_SUBAGENT_TASK_TIMEOUT_S
+    return value
+
+
 _BROWSER_QUERY_STATE_KEY = "__browser_query_delegation_state__"
+# Last resume_context per cua sub-session, keyed by resume_task_id, so a
+# resumed delegation can carry the retained desktop context into its query.
+_CUA_DELEGATION_STATE_KEY = "__cua_delegation_state__"
 _BROWSER_SIMPLE_QUERY_BUDGET_S = 240.0
 _BROWSER_COMPLEX_QUERY_BUDGET_S = 600.0
 _BROWSER_QUERY_RESUME_LIMIT = 1
+
+# Subagent types that support an explicit resume_task_id opt-in instead of a
+# sticky (always-same) sub-session: both are non-sticky by default (see
+# kv_cache_subagent_lifecycle.is_sticky_subagent_type) so two unrelated delegations don't
+# collide into one session, and a caller that deliberately wants the earlier
+# session back (FAIL -> fix -> re-verify) passes the resume_task_id that call
+# returned.
+_EXPLICIT_RESUME_SUBAGENT_TYPES = frozenset({"browser_agent", "cua_agent"})
 
 
 def _summarize_task_description(task_description: Any) -> dict[str, Any]:
     task_text = str(task_description or "")
     task_hash = ""
     if task_text:
-        task_hash = hashlib.sha256(
-            task_text.encode("utf-8", errors="ignore")
-        ).hexdigest()[:12]
+        task_hash = hashlib.sha256(task_text.encode("utf-8", errors="ignore")).hexdigest()[:12]
 
     return {
         "redacted": True,
@@ -156,6 +195,7 @@ class _SubagentInputContext:
     parent_invocation_id: str | None
     affinity_enabled: bool
     browser_query: _BrowserQueryContext | None
+    cua_resume_task_id: str = ""
 
 
 class TaskTool(Tool):
@@ -195,11 +235,7 @@ class TaskTool(Tool):
         self._allowed_subagent_types = (
             None
             if allowed_subagent_types is None
-            else frozenset(
-                str(name).strip()
-                for name in allowed_subagent_types
-                if str(name).strip()
-            )
+            else frozenset(str(name).strip() for name in allowed_subagent_types if str(name).strip())
         )
 
     @staticmethod
@@ -212,8 +248,10 @@ class TaskTool(Tool):
         normalized_resume_id = str(resume_task_id or "").strip()
         if normalized_resume_id:
             expected_prefix = f"{parent_session_id}_sub_{normalized_type}_"
-            if normalized_type != "browser_agent" or not normalized_resume_id.startswith(expected_prefix):
-                raise ValueError("resume_task_id is not valid for this parent browser task")
+            if normalized_type not in _EXPLICIT_RESUME_SUBAGENT_TYPES or not normalized_resume_id.startswith(
+                expected_prefix
+            ):
+                raise ValueError("resume_task_id is not valid for this parent task")
             return normalized_resume_id
         if kv_cache_subagent_lifecycle.is_sticky_subagent_type(normalized_type):
             # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
@@ -233,6 +271,15 @@ class TaskTool(Tool):
         browser_result = parsed.get("browser_result")
         return dict(browser_result) if isinstance(browser_result, dict) else {}
 
+    @staticmethod
+    def _extract_cua_result(result: Any, output: Any) -> dict[str, Any]:
+        # CuaProgressRail.after_invoke sets this directly on the answer
+        # payload (mirrors authoritative_browser_result above); cua_agent
+        # never round-trips it through the model's own output text.
+        if isinstance(result, dict) and isinstance(result.get("cua_result"), dict):
+            return dict(result["cua_result"])
+        return {}
+
     @classmethod
     def _build_result_data(
         cls,
@@ -244,16 +291,27 @@ class TaskTool(Tool):
         sub_session_id: str,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {"output": output, "agent_id": agent_id}
-        if str(subagent_type) != "browser_agent":
+        normalized_type = str(subagent_type)
+        if normalized_type == "browser_agent":
+            browser_result = cls._extract_browser_result(result, output)
+            data["resume_task_id"] = sub_session_id
+            if not browser_result:
+                return data
+            data["browser_result"] = browser_result
+            data["retryable"] = bool(browser_result.get("retryable"))
+            # Transport the same facts and scope; do not maintain a second lossy field projection.
+            data["resume_context"] = dict(browser_result)
             return data
-        browser_result = cls._extract_browser_result(result, output)
-        data["resume_task_id"] = sub_session_id
-        if not browser_result:
+        if normalized_type == "cua_agent":
+            cua_result = cls._extract_cua_result(result, output)
+            data["resume_task_id"] = sub_session_id
+            if not cua_result:
+                return data
+            data["cua_result"] = cua_result
+            data["retryable"] = cua_result.get("status") != "completed"
+            resume_keys = ("status", "blockers", "current_window", "recommended_recovery", "resume_count")
+            data["resume_context"] = {key: cua_result.get(key) for key in resume_keys}
             return data
-        data["browser_result"] = browser_result
-        data["retryable"] = bool(browser_result.get("retryable"))
-        # Transport the same facts and scope; do not maintain a second lossy field projection.
-        data["resume_context"] = dict(browser_result)
         return data
 
     @staticmethod
@@ -297,11 +355,7 @@ class TaskTool(Tool):
         records = parent_session.get_state(_BROWSER_QUERY_STATE_KEY)
         if not isinstance(records, dict):
             return {}
-        return {
-            str(key): dict(value)
-            for key, value in records.items()
-            if isinstance(value, dict)
-        }
+        return {str(key): dict(value) for key, value in records.items() if isinstance(value, dict)}
 
     @staticmethod
     def _save_browser_query_records(
@@ -339,6 +393,59 @@ class TaskTool(Tool):
             "Repair only what is needed for the original goal using retained source observations. "
             "Keep valid evidence, correct contradicted evidence, and do not repeat satisfied work or expand scope."
         )
+
+    @staticmethod
+    def _save_cua_resume_context(
+        parent_session: Session,
+        sub_session_id: str,
+        resume_context: dict[str, Any],
+    ) -> None:
+        records = parent_session.get_state(_CUA_DELEGATION_STATE_KEY)
+        records = dict(records) if isinstance(records, dict) else {}
+        records[str(sub_session_id)] = dict(resume_context)
+        parent_session.update_state({_CUA_DELEGATION_STATE_KEY: records})
+
+    @staticmethod
+    def _focused_cua_resume_task(
+        parent_session: Session,
+        resume_task_id: str,
+        task_description: Any,
+    ) -> Any:
+        """Prefix a cua resume with the context its last run reported.
+
+        browser_agent narrows a resume to its unresolved evidence slots; a
+        desktop run has no slot model, so the retained context is the last
+        reported window, blockers and recovery hint, with the parent's own
+        (already narrowed) description as the remaining work. A run that was
+        cancelled on the delegation budget additionally has to re-verify the
+        desktop: the action in flight at cancellation may have executed
+        without being recorded. Without a stored record the description
+        passes through unchanged.
+        """
+        records = parent_session.get_state(_CUA_DELEGATION_STATE_KEY)
+        record = records.get(str(resume_task_id)) if isinstance(records, dict) else None
+        if not isinstance(record, dict):
+            return task_description
+        lines = [
+            "Resume the same desktop task from its current window and retained progress; do not restart from scratch.",
+            f"Previous run status: {record.get('status') or 'unknown'}.",
+        ]
+        if record.get("current_window"):
+            lines.append(f"Last window: {json.dumps(record['current_window'], ensure_ascii=False)}.")
+        if record.get("blockers"):
+            lines.append(f"Reported blockers: {json.dumps(record['blockers'], ensure_ascii=False)}.")
+        if record.get("recommended_recovery"):
+            lines.append(f"Recovery hint: {record['recommended_recovery']}")
+        if record.get("status") == "timeout":
+            lines.append(
+                "The previous run was cut off mid-run: its last desktop action may have executed "
+                "without being recorded. Re-snapshot the current window and verify whether that "
+                "action already took effect before repeating it."
+            )
+        else:
+            lines.append("Re-snapshot the current window with get_window_state before acting.")
+        lines.append(f"Remaining task: {task_description}")
+        return "\n".join(lines)
 
     @classmethod
     def _existing_browser_query_output(
@@ -405,18 +512,15 @@ class TaskTool(Tool):
         if self._allowed_subagent_types is not None and normalized_type not in self._allowed_subagent_types:
             raise build_error(
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason=(
-                    f"Subagent type '{normalized_type}' is not available through "
-                    "task_tool"
-                ),
+                reason=(f"Subagent type '{normalized_type}' is not available through task_tool"),
             )
         if normalized_type != "browser_agent":
-            if resume_task_id:
+            if resume_task_id and normalized_type not in _EXPLICIT_RESUME_SUBAGENT_TYPES:
                 raise build_error(
                     StatusCode.TOOL_TASK_TOOL_INVOKED,
-                    reason="'resume_task_id' is supported only for browser_agent",
+                    reason=(f"'resume_task_id' is supported only for {sorted(_EXPLICIT_RESUME_SUBAGENT_TYPES)}"),
                 )
-            return normalized_type, task_description, "", None
+            return normalized_type, task_description, resume_task_id, None
 
         raw_capabilities = inputs.get("browser_capabilities")
         if raw_capabilities is None:
@@ -666,6 +770,10 @@ class TaskTool(Tool):
             subagent_inputs["run"] = {
                 "context": {"extra": TaskTool._browser_run_context(context.browser_query)},
             }
+        elif context.cua_resume_task_id:
+            subagent_inputs["run"] = {
+                "context": {"extra": {"cua_resume": True, "resume_task_id": context.sub_session_id}},
+            }
         if not context.affinity_enabled:
             return subagent_inputs
         subagent_inputs.update(
@@ -740,6 +848,8 @@ class TaskTool(Tool):
             subagent_type=normalized_type,
             sub_session_id=sub_session_id,
         )
+        if normalized_type == "cua_agent" and isinstance(data.get("resume_context"), dict):
+            self._save_cua_resume_context(parent_session, sub_session_id, data["resume_context"])
         if browser_query is None:
             return ToolOutput(success=True, data=data, error=None)
         browser_result = data.get("browser_result")
@@ -775,6 +885,59 @@ class TaskTool(Tool):
             reason,
         )
 
+    def _cua_delegation_budget_s(self) -> float:
+        """Seconds a cua delegation may run before it is returned as resumable.
+
+        Derived from the tool card's ``resilience.timeout_s`` (the ceiling the
+        AbilityManager enforces) minus a margin, so this path always wins the
+        race against the hard timeout. Cards without the property (tests,
+        hand-built tools) fall back to the configured default ceiling.
+        """
+        properties = getattr(self.card, "properties", None)
+        resilience = properties.get("resilience") if isinstance(properties, dict) else None
+        ceiling = resilience.get("timeout_s") if isinstance(resilience, dict) else None
+        if not isinstance(ceiling, (int, float)) or isinstance(ceiling, bool) or ceiling <= 0:
+            ceiling = resolve_subagent_task_timeout_s()
+        return max(float(ceiling) - _CUA_TIMEOUT_MARGIN_S, float(ceiling) * 0.5)
+
+    @staticmethod
+    def _build_cua_timeout_output(
+        subagent: Any,
+        *,
+        parent_session: Session,
+        sub_session_id: str,
+        budget_s: float,
+    ) -> ToolOutput:
+        message = (
+            f"cua_agent ran out of its {budget_s:.0f}s delegation budget and was cancelled "
+            "mid-run. Its desktop session and the steps it recorded are preserved, but the "
+            "action in flight at cancellation may have executed without being recorded. To "
+            "continue, call task_tool again with subagent_type='cua_agent', the same "
+            "resume_task_id, and a task_description covering only what is still missing; the "
+            "resumed run re-verifies the desktop before acting."
+        )
+        resume_context = {
+            "status": "timeout",
+            # Nothing records whether a cancelled desktop call took effect, so
+            # the resumed run must verify.
+            "last_action_confirmed": False,
+            "recommended_recovery": (
+                "Resume with the same resume_task_id; do not restart from scratch. "
+                "Re-snapshot and verify whether the interrupted action took effect "
+                "before repeating it."
+            ),
+        }
+        TaskTool._save_cua_resume_context(parent_session, sub_session_id, resume_context)
+        data = {
+            "output": message,
+            "agent_id": getattr(getattr(subagent, "card", None), "id", None),
+            "resume_task_id": sub_session_id,
+            "status": "timeout",
+            "retryable": True,
+            "resume_context": resume_context,
+        }
+        return ToolOutput(success=True, data=data, error=None)
+
     async def _invoke_created_subagent(
         self,
         subagent: Any,
@@ -787,6 +950,7 @@ class TaskTool(Tool):
         parent_session: Session,
         browser_query: _BrowserQueryContext | None,
         affinity_enabled: bool,
+        cua_resume_task_id: str = "",
     ) -> ToolOutput:
         succeeded = False
         child_session: Session | None = None
@@ -794,16 +958,14 @@ class TaskTool(Tool):
         parent_subject_id = parent_subject.subject_id if parent_subject else "main"
         subject = ExecutionSubject(
             subject_id=f"subagent:{uuid.uuid4().hex}",
-            display_name=str(
-                getattr(getattr(subagent, "card", None), "name", None)
-                or normalized_type
-            ),
+            display_name=str(getattr(getattr(subagent, "card", None), "name", None) or normalized_type),
             kind="subagent",
             parent_subject_id=parent_subject_id,
             session_id=sub_session_id,
         )
         owner_root = None
         task_timeout = None
+        cua_budget_s = None
         try:
             from openjiuwen.extensions.observability.span_context import get_root_span
             from openjiuwen.harness.observability.span_context import (
@@ -843,6 +1005,7 @@ class TaskTool(Tool):
                         parent_invocation_id=parent_invocation_id,
                         affinity_enabled=affinity_enabled,
                         browser_query=browser_query,
+                        cua_resume_task_id=cua_resume_task_id,
                     ),
                 )
                 if child_session is not None:
@@ -858,6 +1021,13 @@ class TaskTool(Tool):
                         DEFAULT_SUBAGENT_TASK_TIMEOUT_S - 5.0,
                         float(browser_query.record["deadline_at"]) - time.time() - 1.0,
                     ))
+                elif normalized_type == "cua_agent":
+                    # Stop before the tool-call ceiling fires: a desktop run
+                    # that ran out of time still has its session (and every
+                    # snapshot/action so far) checkpointed under
+                    # sub_session_id, so hand the model a resumable result
+                    # instead of letting AbilityManager raise a bare timeout.
+                    cua_budget_s = remaining = self._cua_delegation_budget_s()
                 task_timeout = asyncio.timeout(remaining)
                 async with task_timeout:
                     result = await self._invoke_with_usage_delegation(
@@ -878,6 +1048,18 @@ class TaskTool(Tool):
                     subagent=subagent,
                 )
             except TimeoutError:
+                if cua_budget_s is not None and task_timeout.expired():
+                    logger.warning(
+                        "[TaskTool] cua_agent delegation exceeded %.0fs; returning resumable result for sub_session=%s",
+                        cua_budget_s,
+                        sub_session_id,
+                    )
+                    return self._build_cua_timeout_output(
+                        subagent,
+                        parent_session=parent_session,
+                        sub_session_id=sub_session_id,
+                        budget_s=cua_budget_s,
+                    )
                 if browser_query is None:
                     raise
                 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
@@ -906,9 +1088,7 @@ class TaskTool(Tool):
                     browser_query,
                     "browser_subagent_execution_failed",
                 )
-                logger.error(
-                    f"[TaskTool] Subagent: {normalized_type} execution failed, error={exc}"
-                )
+                logger.error(f"[TaskTool] Subagent: {normalized_type} execution failed, error={exc}")
                 raise build_error(
                     StatusCode.TOOL_TASK_TOOL_INVOKED,
                     reason=f"Subagent {normalized_type} execution failed: {exc}",
@@ -966,16 +1146,12 @@ class TaskTool(Tool):
                 reason="TaskTool requires a valid session in kwargs",
             )
 
-        normalized_type, task_description, resume_task_id, browser_capabilities = (
-            self._parse_invocation_inputs(inputs)
-        )
+        normalized_type, task_description, resume_task_id, browser_capabilities = self._parse_invocation_inputs(inputs)
         runtime_parent_session_id = parent_session.get_session_id()
         affinity_enabled = kv_cache_subagent_lifecycle.affinity_enabled(self.parent_agent)
         parent_cache_id = runtime_parent_session_id
         if affinity_enabled:
-            parent_cache_id = kv_cache_subagent_lifecycle.resolve_subagent_parent_cache_id(
-                parent_session
-            )
+            parent_cache_id = kv_cache_subagent_lifecycle.resolve_subagent_parent_cache_id(parent_session)
         browser_query: _BrowserQueryContext | None = None
         if normalized_type == "browser_agent":
             browser_query = self._prepare_browser_query(
@@ -988,6 +1164,8 @@ class TaskTool(Tool):
                 return browser_query.early_output
             task_description = browser_query.task_description
             resume_task_id = browser_query.resume_task_id
+        elif normalized_type == "cua_agent" and resume_task_id:
+            task_description = self._focused_cua_resume_task(parent_session, resume_task_id, task_description)
 
         try:
             sub_session_id = self._build_sub_session_id(
@@ -1018,10 +1196,7 @@ class TaskTool(Tool):
         )
 
         query_summary = _summarize_task_description(task_description)
-        invoke_log = (
-            "[TaskTool] Invoking subagent with isolated session: %s, "
-            "subagent_type=%s, query_summary=%s"
-        )
+        invoke_log = "[TaskTool] Invoking subagent with isolated session: %s, subagent_type=%s, query_summary=%s"
         if normalized_type == "browser_agent" and browser_agent_log_info is not None:
             browser_agent_log_info(invoke_log, sub_session_id, normalized_type, query_summary)
         else:
@@ -1050,6 +1225,7 @@ class TaskTool(Tool):
                     parent_session=parent_session,
                     browser_query=browser_query,
                     affinity_enabled=affinity_enabled,
+                    cua_resume_task_id=(resume_task_id if normalized_type == "cua_agent" else ""),
                 )
         except TimeoutError:
             if browser_query is None or not outer_timeout.expired():
@@ -1113,7 +1289,7 @@ def create_task_tool(
     )
     card.properties = {
         **(card.properties if isinstance(card.properties, dict) else {}),
-        "resilience": {"timeout_s": DEFAULT_SUBAGENT_TASK_TIMEOUT_S},
+        "resilience": {"timeout_s": resolve_subagent_task_timeout_s()},
     }
 
     return [
@@ -1128,6 +1304,8 @@ def create_task_tool(
 
 __all__ = [
     "DEFAULT_SUBAGENT_TASK_TIMEOUT_S",
+    "SUBAGENT_TASK_TIMEOUT_ENV",
+    "resolve_subagent_task_timeout_s",
     "TaskTool",
     "create_task_tool",
 ]

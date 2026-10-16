@@ -23,6 +23,8 @@ from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.harness.tools import TaskTool, create_task_tool
 from openjiuwen.harness.tools.subagent.task_tool import (
     DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+    SUBAGENT_TASK_TIMEOUT_ENV,
+    resolve_subagent_task_timeout_s,
 )
 
 
@@ -94,7 +96,7 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(result.success)
-        self.assertEqual(result.data, {"output": "done", 'agent_id': 'test_id'})
+        self.assertEqual(result.data, {"output": "done", "agent_id": "test_id"})
         self.assertIsNone(result.error)
         self.assertEqual(called_inputs["query"], "run task")
         self.assertEqual(prepare_calls, 1)
@@ -199,7 +201,10 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         )
         for subagent in (InvokeOnlySubAgent(), StreamingSubAgent()):
             result = await tool._invoke_subagent(
-                subagent, inputs, parent_session_id="parent_session", session=child_session,
+                subagent,
+                inputs,
+                parent_session_id="parent_session",
+                session=child_session,
             )
             self.assertEqual(result["output"], "done")
 
@@ -319,6 +324,83 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
                 session=Session(session_id="parent_session"),
             )
         self.assertEqual(cleanup_calls, 1)
+
+    async def test_cua_delegation_timeout_returns_a_resumable_result(self) -> None:
+        """A cua run that outlives its budget must not lose its session.
+
+        The desktop agent checkpoints every snapshot/action under the sub
+        session; a bare timeout error made the coordinator restart from
+        scratch (live: 12 minutes of Discord navigation discarded). The tool
+        must instead hand back resume_task_id with status=timeout.
+        """
+        cleanup_calls = 0
+
+        class FakeSubAgent:
+            card = AgentCard(name="cua_agent", description="cua", id="cua_id")
+
+            async def invoke(self, _inputs):
+                await asyncio.sleep(60)
+
+            async def cleanup_task_resources(self) -> None:
+                nonlocal cleanup_calls
+                cleanup_calls += 1
+
+        parent_agent = SimpleNamespace(
+            create_subagent=lambda *_args, **_kwargs: FakeSubAgent(),
+        )
+        card = ToolCard(id="task_tool_test", name="task_tool", description="test")
+        # Ceiling of 0.4s -> budget max(0.4-20, 0.2) = 0.2s: the inner timeout
+        # must fire well before a 60s subagent finishes.
+        card.properties = {"resilience": {"timeout_s": 0.4}}
+        tool = TaskTool(card=card, parent_agent=parent_agent)
+
+        result = await asyncio.wait_for(
+            tool.invoke(
+                {"subagent_type": "cua_agent", "task_description": "open the settings window"},
+                session=Session(session_id="parent_session"),
+            ),
+            timeout=5,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.data["status"], "timeout")
+        self.assertTrue(result.data["retryable"])
+        self.assertRegex(result.data["resume_task_id"], r"^parent_session_sub_cua_agent_[0-9a-f]{8}$")
+        self.assertIn("resume_task_id", result.data["output"])
+        self.assertEqual(cleanup_calls, 1)
+
+    async def test_non_cua_delegations_keep_raising_on_the_hard_timeout(self) -> None:
+        class FakeSubAgent:
+            card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, _inputs):
+                await asyncio.sleep(60)
+
+            async def cleanup_task_resources(self) -> None:
+                return None
+
+        parent_agent = SimpleNamespace(
+            create_subagent=lambda *_args, **_kwargs: FakeSubAgent(),
+        )
+        card = ToolCard(id="task_tool_test", name="task_tool", description="test")
+        card.properties = {"resilience": {"timeout_s": 0.4}}
+        tool = TaskTool(card=card, parent_agent=parent_agent)
+
+        with self.assertRaises(TimeoutError):
+            await asyncio.wait_for(
+                tool.invoke(
+                    {"subagent_type": "code", "task_description": "run task"},
+                    session=Session(session_id="parent_session"),
+                ),
+                timeout=0.5,
+            )
+
+    def test_subagent_task_timeout_env_override(self) -> None:
+        with patch.dict("os.environ", {SUBAGENT_TASK_TIMEOUT_ENV: "1800"}):
+            self.assertEqual(resolve_subagent_task_timeout_s(), 1800.0)
+        for bad in ("", "abc", "0", "-5"):
+            with patch.dict("os.environ", {SUBAGENT_TASK_TIMEOUT_ENV: bad}):
+                self.assertEqual(resolve_subagent_task_timeout_s(), DEFAULT_SUBAGENT_TASK_TIMEOUT_S)
 
     async def test_task_tool_cleans_up_when_outer_timeout_cancels_invoke(self) -> None:
         cleanup_calls = 0
@@ -459,9 +541,7 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             "status": "partial",
             "retryable": True,
             "missing_fields": ["product_rating"],
-            "missing_slots": [
-                {"entity": "product", "variant": "default", "field": "product_rating"}
-            ],
+            "missing_slots": [{"entity": "product", "variant": "default", "field": "product_rating"}],
             "blockers": [],
             "evidence": [{"field": "title", "value": "Keyboard"}],
             "current_page": {"url": "https://example.test/item/1"},
@@ -549,9 +629,7 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             "status": "partial",
             "retryable": True,
             "missing_fields": ["product_rating"],
-            "missing_slots": [
-                {"entity": "product", "variant": "default", "field": "product_rating"}
-            ],
+            "missing_slots": [{"entity": "product", "variant": "default", "field": "product_rating"}],
             "blockers": [],
             "evidence": [{"field": "title", "value": "Keyboard"}],
             "recommended_recovery": "read_product_rating_on_current_page",
@@ -636,8 +714,281 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third.data["code"], "browser_query_resume_not_allowed")
         self.assertFalse(third.data["retryable"])
 
+    async def test_task_tool_creates_fresh_cua_model_session(self) -> None:
+        called_inputs: dict[str, str] = {}
+
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
+                called_inputs.update(inputs)
+                return {"output": "done"}
+
+        cua_spec = SubAgentConfig(
+            agent_card=AgentCard(name="cua_agent", description="cua subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[cua_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+
+        card = ToolCard(id="task_tool_test", name="task_tool", description="test")
+        tool = TaskTool(card=card, parent_agent=parent_agent)
+
+        session = Session(session_id="parent_session")
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()) as mock_create_subagent:
+            result = await tool.invoke(
+                {
+                    "subagent_type": "cua_agent",
+                    "task_description": "open notepad and type hello",
+                },
+                session=session,
+            )
+
+        self.assertTrue(result.success)
+        cua_session_id = called_inputs["conversation_id"]
+        self.assertRegex(cua_session_id, r"^parent_session_sub_cua_agent_[0-9a-f]{8}$")
+        self.assertEqual(result.data["resume_task_id"], cua_session_id)
+        mock_create_subagent.assert_called_once_with("cua_agent", cua_session_id)
+
+    def test_cua_session_can_resume_only_with_returned_parent_scoped_id(self) -> None:
+        resume_id = "parent_session_sub_cua_agent_1234abcd"
+        self.assertEqual(
+            TaskTool._build_sub_session_id(
+                "parent_session",
+                "cua_agent",
+                resume_id,
+            ),
+            resume_id,
+        )
+        with self.assertRaisesRegex(ValueError, "not valid"):
+            TaskTool._build_sub_session_id(
+                "another_parent",
+                "cua_agent",
+                resume_id,
+            )
+
+    async def test_cua_resume_passes_structured_context_and_result_metadata(self) -> None:
+        called_inputs: dict[str, object] = {}
+        cua_result = {
+            "status": "blocked",
+            "current_window": {"pid": 4242, "window_id": "w1"},
+            "blockers": ["type_text: element not found"],
+            "revisit_count": 3,
+            "recommended_recovery": (
+                "Task appears to be cycling through the same desktop state; retry with a "
+                "materially different approach or escalate delivery_mode."
+            ),
+            "resume_count": 1,
+        }
+
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, inputs: dict[str, object]) -> dict[str, object]:
+                called_inputs.update(inputs)
+                return {"output": "still working on it", "cua_result": cua_result}
+
+        cua_spec = SubAgentConfig(
+            agent_card=AgentCard(name="cua_agent", description="cua subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[cua_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+        resume_id = "parent_session_sub_cua_agent_1234abcd"
+
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
+            result = await tool.invoke(
+                {
+                    "subagent_type": "cua_agent",
+                    "task_description": "keep trying to close the dialog",
+                    "resume_task_id": resume_id,
+                },
+                session=Session(session_id="parent_session"),
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(called_inputs["conversation_id"], resume_id)
+        self.assertEqual(
+            called_inputs["run"],
+            {"context": {"extra": {"cua_resume": True, "resume_task_id": resume_id}}},
+        )
+        self.assertTrue(result.data["retryable"])
+        self.assertEqual(result.data["cua_result"], cua_result)
+        self.assertEqual(result.data["resume_context"]["blockers"], cua_result["blockers"])
+        self.assertEqual(result.data["resume_context"]["current_window"], cua_result["current_window"])
+
+    async def test_cua_resume_query_carries_the_last_reported_context(self) -> None:
+        """A cua resume must reach the subagent as a focused continuation.
+
+        browser_agent rewrites its resume around unresolved slots; cua passed
+        the parent's description through untouched, so the resumed run knew
+        nothing of the window, blockers or recovery hint its own last run
+        reported and tended to start the task over.
+        """
+        queries: list[object] = []
+        cua_result = {
+            "status": "blocked",
+            "current_window": {"pid": 4242, "window_id": "w1"},
+            "blockers": ["type_text: element not found"],
+            "revisit_count": 0,
+            "recommended_recovery": "escalate delivery_mode",
+            "resume_count": 1,
+        }
+
+        class FakeSubAgent:
+            card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, inputs: dict[str, object]) -> dict[str, object]:
+                queries.append(inputs["query"])
+                return {"output": "still working on it", "cua_result": cua_result}
+
+        cua_spec = SubAgentConfig(
+            agent_card=AgentCard(name="cua_agent", description="cua subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[cua_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+        session = Session(session_id="parent_session")
+
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()):
+            first = await tool.invoke(
+                {"subagent_type": "cua_agent", "task_description": "close the dialog"},
+                session=session,
+            )
+            resumed = await tool.invoke(
+                {
+                    "subagent_type": "cua_agent",
+                    "task_description": "dismiss the remaining dialog",
+                    "resume_task_id": first.data["resume_task_id"],
+                },
+                session=session,
+            )
+
+        self.assertTrue(resumed.success)
+        self.assertEqual(queries[0], "close the dialog")
+        self.assertIn("Resume the same desktop task", queries[1])
+        self.assertIn('"pid": 4242', queries[1])
+        self.assertIn("type_text: element not found", queries[1])
+        self.assertIn("escalate delivery_mode", queries[1])
+        self.assertTrue(queries[1].endswith("Remaining task: dismiss the remaining dialog"))
+
+    async def test_cua_timeout_resume_warns_about_the_unrecorded_last_action(self) -> None:
+        """A cancelled cua run must not be resumed as if it stopped cleanly.
+
+        anyio.fail_after cancels the delegation wherever it is, including
+        inside a drag or type_text the daemon then completes anyway, and the
+        driver keeps no last-action record to ask. The timeout result and the
+        resumed query must both say so, or the resumed run repeats the action
+        blindly (double-typed text, a second drag).
+        """
+        queries: list[object] = []
+
+        class FakeSubAgent:
+            card = AgentCard(name="cua_agent", description="cua", id="cua_id")
+
+            async def invoke(self, inputs):
+                queries.append(inputs["query"])
+                if len(queries) == 1:
+                    await asyncio.sleep(60)
+                return {"output": "done"}
+
+            async def cleanup_task_resources(self) -> None:
+                pass
+
+        parent_agent = SimpleNamespace(
+            create_subagent=lambda *_args, **_kwargs: FakeSubAgent(),
+        )
+        card = ToolCard(id="task_tool_test", name="task_tool", description="test")
+        card.properties = {"resilience": {"timeout_s": 0.4}}
+        tool = TaskTool(card=card, parent_agent=parent_agent)
+        session = Session(session_id="parent_session")
+
+        timed_out = await asyncio.wait_for(
+            tool.invoke(
+                {"subagent_type": "cua_agent", "task_description": "drag the file into the folder"},
+                session=session,
+            ),
+            timeout=5,
+        )
+        self.assertFalse(timed_out.data["resume_context"]["last_action_confirmed"])
+        self.assertIn("may have executed without being recorded", timed_out.data["output"])
+
+        resumed = await asyncio.wait_for(
+            tool.invoke(
+                {
+                    "subagent_type": "cua_agent",
+                    "task_description": "finish moving the file",
+                    "resume_task_id": timed_out.data["resume_task_id"],
+                },
+                session=session,
+            ),
+            timeout=5,
+        )
+        self.assertTrue(resumed.success)
+        self.assertIn("cut off mid-run", queries[1])
+        self.assertIn("verify whether that action already took effect", queries[1])
+        self.assertTrue(queries[1].endswith("Remaining task: finish moving the file"))
+
 
 class TestTaskToolSync(unittest.TestCase):
+    def test_sub_session_id_deterministic_for_resumable_subagents(self) -> None:
+        """Resumable specialists must get the same sub-session on every delegation.
+
+        verification relies on this for FAIL -> fix -> re-verify loops. browser_agent
+        and cua_agent are intentionally excluded: their session/driver state is owned
+        by a service registry outside the model session, and a sticky model session
+        here would leak an earlier, unrelated delegation's context into a fresh
+        TaskTool call. Both instead offer an explicit resume_task_id opt-in (see
+        _EXPLICIT_RESUME_SUBAGENT_TYPES) for the one case that still wants continuity.
+        """
+        for resumable in ("verification_agent",):
+            self.assertEqual(
+                TaskTool._build_sub_session_id("parent", resumable),
+                f"parent_sub_{resumable}",
+            )
+        for non_sticky in ("browser_agent", "cua_agent", "code_agent"):
+            first = TaskTool._build_sub_session_id("parent", non_sticky)
+            second = TaskTool._build_sub_session_id("parent", non_sticky)
+            self.assertIsNotNone(re.fullmatch(rf"parent_sub_{non_sticky}_[0-9a-f]{{8}}", first))
+            self.assertNotEqual(first, second)
+
     def test_create_task_tool(self) -> None:
         parent_agent = SimpleNamespace(deep_config=None)
         tools = create_task_tool(
@@ -703,9 +1054,7 @@ class TestTaskToolSync(unittest.TestCase):
                 description="custom general subagent",
             ),
             system_prompt="custom prompt",
-            tools=[
-                ToolCard(id="custom_tool", name="custom_tool", description="custom tool")
-            ],
+            tools=[ToolCard(id="custom_tool", name="custom_tool", description="custom tool")],
             mcps=[
                 McpServerConfig(
                     server_name="custom_mcp",

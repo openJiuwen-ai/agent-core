@@ -888,6 +888,90 @@ async def test_external_cli_without_auth_fallback_only_accepts_an_omitted_fallba
         assert "omit 'fallback_model_name'" in (result.error or "")
 
 
+async def _model_group_codex_tool(db, message_bus, t):
+    """A leader on a model group (current model is the logical "*") spawning Codex."""
+    from openjiuwen.agent_teams.models.allocator import IntelliRouterAllocator
+    from openjiuwen.agent_teams.models.pool import IntelliRouterConfig, IntelliRouterDeployment
+
+    await db.team.create_team(
+        team_name="ext_cli_model_group_team",
+        display_name="Ext Model Group",
+        leader_member_name="leader1",
+    )
+    pool = IntelliRouterConfig(
+        deployments=[
+            IntelliRouterDeployment(
+                model_name="glm-flash", api_key="secret", api_base="https://glm.example", provider="openai",
+            ),
+            IntelliRouterDeployment(
+                model_name="deepseek-flash", api_key="secret", api_base="https://ds.example", provider="openai",
+            ),
+        ],
+    ).to_pool_entries()
+    team = TeamBackend(
+        team_name="ext_cli_model_group_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: pool,
+        current_model_name="*",
+        current_model_provider="intelli_router",
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="codex")],
+    )
+    team.update_model_allocator(IntelliRouterAllocator(pool))
+    return team, SpawnExternalCliTool(team, t, model_config_allocator=team.allocate_model)
+
+
+@pytest.mark.asyncio
+async def test_external_cli_in_model_group_accepts_a_real_fallback_model(db, message_bus, t):
+    """The logical "*" current model must not be forced as an external CLI fallback."""
+    team, tool = await _model_group_codex_tool(db, message_bus, t)
+
+    result = await tool.invoke(
+        {
+            "member_name": "codex-group",
+            "display_name": "Codex Group",
+            "prompt": "reviewer",
+            "cli_agent": "codex",
+            "fallback_model_name": "deepseek-flash",
+        }
+    )
+
+    assert result.success is True, result.error
+    fallback_ref = get_member_fallback_model_ref(await team.get_member("codex-group"))
+    assert fallback_ref is not None
+    assert fallback_ref.model_name == "deepseek-flash"
+
+
+@pytest.mark.asyncio
+async def test_external_cli_in_model_group_still_rejects_the_logical_entry(db, message_bus, t):
+    _team, tool = await _model_group_codex_tool(db, message_bus, t)
+
+    result = await tool.invoke(
+        {
+            "member_name": "codex-star",
+            "display_name": "Codex Star",
+            "prompt": "reviewer",
+            "cli_agent": "codex",
+            "fallback_model_name": "*",
+        }
+    )
+
+    assert result.success is False
+    assert "logical entry" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_external_cli_in_model_group_catalog_hides_the_logical_current_model(db, message_bus, t):
+    _team, tool = await _model_group_codex_tool(db, message_bus, t)
+
+    description = tool.card.input_params["properties"]["fallback_model_name"]["description"]
+
+    assert '"current_model": null' in description
+    assert '"deepseek-flash"' in description and '"glm-flash"' in description
+
+
 @pytest.mark.asyncio
 async def test_external_cli_rejects_null_when_compatible_fallback_exists(db, message_bus, t):
     """Null cannot bypass an available protocol-compatible fallback."""
@@ -2332,6 +2416,30 @@ class TestSendMessageTool:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
+    async def test_invoke_rejects_both_fields_when_targets_extends_to(self, agent_team, t):
+        """Targets that add members beyond 'to' stay ambiguous and are rejected."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "m1", "targets": ["m1", "m2"], "content": "Hi"})
+
+        assert result.success is False
+        assert "exactly one" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_folds_targets_repeating_to_into_unicast(self, agent_team, t):
+        """A one-element 'targets' equal to 'to' is sent as a unicast with a corrective note."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "m1", "targets": [" m1 "], "content": "Hi"})
+
+        assert result.success is True
+        assert result.data["type"] == "message"
+        assert result.data["to"] == "m1"
+        text = tool.render_for_llm(result)
+        assert "Success" in text
+        assert "only 'to'" in text
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
     async def test_invoke_requires_one_recipient_field(self, agent_team, t):
         """One separated recipient field must be present."""
         tool = SendMessageTool(agent_team.message_manager, t)
@@ -2782,6 +2890,29 @@ async def test_cancel_claimed_task_does_not_cancel_member(agent_team, t, sample_
         if call.kwargs.get("message") is not None and call.kwargs["message"].event_type == TeamEvent.TASK_CANCELLED
     ]
     assert any(m.payload["member_name"] == "dev-1" for m in cancelled)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancel_completed_task_explains_why(agent_team, t, sample_agent_card, db):
+    """Cancelling a completed task says it is already done instead of a bare failure."""
+    await db.member.create_member(
+        member_name="dev-1",
+        team_name="test_team",
+        display_name="dev-1",
+        agent_card=sample_agent_card.model_dump_json(),
+        status=MemberStatus.READY,
+    )
+    task = await agent_team.task_manager.add(title="Task", content="Content")
+    await db.task.claim_task(task.task_id, "dev-1")
+    await db.task.complete_task(task.task_id)
+
+    tool = UpdateTaskTool(agent_team, t)
+    result = await tool.invoke({"task_id": task.task_id, "status": "cancelled"})
+
+    assert result.success is False
+    assert "already completed" in result.error
+    assert (await agent_team.task_manager.get(task.task_id)).status == TaskStatus.COMPLETED.value
 
 
 @pytest.mark.asyncio

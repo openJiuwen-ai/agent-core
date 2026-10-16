@@ -564,3 +564,54 @@ async def test_leader_member_status_persists_after_build_team(db, agent_card, me
         assert await handle.status() == MemberStatus.BUSY
     finally:
         reset_session_id(token)
+
+
+# ---------------------------------------------------------------------------
+# F_118: DORMANT status — placement in the transition table and status sets
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.level0
+def test_dormant_transitions_and_retire_target():
+    """DORMANT is reached only through a retire request and left only by a wake or a shutdown."""
+    from openjiuwen.agent_teams.schema.status import (
+        MEMBER_DEPARTED_STATUSES,
+        MEMBER_QUIESCENT_STATUSES,
+        MEMBER_SETTLED_STATUSES,
+        MEMBER_TRANSITIONS,
+        MEMBER_UNREACHABLE_STATUSES,
+        MemberStatus,
+        is_valid_transition,
+        retire_target,
+    )
+
+    assert is_valid_transition(MemberStatus.SHUTDOWN_REQUESTED, MemberStatus.DORMANT, MEMBER_TRANSITIONS)
+    assert is_valid_transition(MemberStatus.DORMANT, MemberStatus.RESTARTING, MEMBER_TRANSITIONS)
+    assert is_valid_transition(MemberStatus.DORMANT, MemberStatus.SHUTDOWN, MEMBER_TRANSITIONS)
+    # No direct edge in: the member settles itself out of a request.
+    assert not is_valid_transition(MemberStatus.READY, MemberStatus.DORMANT, MEMBER_TRANSITIONS)
+    assert not is_valid_transition(MemberStatus.DORMANT, MemberStatus.READY, MEMBER_TRANSITIONS)
+
+    # Settled (done) and quiescent (not moving), but neither departed nor unreachable:
+    # a dormant member still belongs to the team and its mailbox still receives.
+    assert MemberStatus.DORMANT.value in MEMBER_SETTLED_STATUSES
+    assert MemberStatus.DORMANT in MEMBER_QUIESCENT_STATUSES
+    assert MemberStatus.DORMANT not in MEMBER_DEPARTED_STATUSES
+    assert MemberStatus.DORMANT not in MEMBER_UNREACHABLE_STATUSES
+
+    assert retire_target(None) is MemberStatus.SHUTDOWN
+    assert retire_target("shutdown") is MemberStatus.SHUTDOWN
+    assert retire_target("dormant") is MemberStatus.DORMANT
+    assert retire_target("dormant", force=True) is MemberStatus.SHUTDOWN
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_settles_request_into_dormant(team_member):
+    """SHUTDOWN_REQUESTED -> DORMANT is a legal member write (the dormant retire settle)."""
+    await team_member.update_status(MemberStatus.READY)
+    await team_member.update_status(MemberStatus.SHUTDOWN_REQUESTED)
+    assert await team_member.update_status(MemberStatus.DORMANT)
+    assert await team_member.status() == MemberStatus.DORMANT
+    assert await team_member.update_status(MemberStatus.RESTARTING)
+    assert await team_member.update_status(MemberStatus.READY)

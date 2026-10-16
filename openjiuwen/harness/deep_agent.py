@@ -399,6 +399,12 @@ class DeepAgent(BaseAgent):
     def configure(self, config: DeepAgentConfig) -> "DeepAgent":
         """Apply configuration and rebuild the internal ReActAgent."""
 
+        if self._deep_config is not None and config.moa != self._deep_config.moa:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                error_msg="MoA configuration cannot change after DeepAgent construction",
+            )
+
         self._filter_disabled_tools(config)
         if self._deep_config is None:
             self._initial_configure(config)
@@ -619,10 +625,95 @@ class DeepAgent(BaseAgent):
                 current_model.bind_fallback(explicit_model)
             explicit_model = current_model
         self._react_agent.configure(new_react_config)
-        if callable(getattr(type(explicit_model), "bind_fallback", None)):
+        # Ordinary agents keep configure()'s model selection and lazy reset.
+        # MoA also needs to retain the caller's pre-built model instance.
+        restore_model = callable(getattr(type(explicit_model), "bind_fallback", None)) or (
+            config.moa is not None and explicit_model is not None
+        )
+        if restore_model:
+            context_window = self._react_agent.config.context_engine_config.model_context_window_tokens_override
             self._react_agent.set_llm(explicit_model)
+            if config.moa is not None and (
+                self._react_agent.config.context_engine_config.model_context_window_tokens_override != context_window
+            ):
+                # set_llm() may clear an explicit window when model metadata
+                # omits it. Restore configure()'s resolved value in cached contexts too.
+                self._react_agent.update_model_context(
+                    model_name=self._react_agent.config.model_name,
+                    context_window_tokens=context_window,
+                    model=explicit_model,
+                )
         self._sync_prompt_builder_references()
+        # Propagate the new model to context processors (compressors,
+        # offloaders) so they don't stay pinned to the model that was active
+        # when ContextProcessorRail.init() first injected them. Without this,
+        # a hot-reload that switches the primary model leaves compressors using
+        # the old model — if that endpoint is down, compression silently fails
+        # (status=noop) and the context window grows unbounded. set_llm()
+        # already rebinds cached processors on the restore_model path.
+        self._hot_reload_context_processor_models(config, rebind_cached=not restore_model)
         logger.info("[DeepAgent] Model configuration hot reloaded")
+
+    def _hot_reload_context_processor_models(
+        self,
+        config: DeepAgentConfig,
+        *,
+        rebind_cached: bool = True,
+    ) -> None:
+        """Make context processors follow the hot-reloaded primary model.
+
+        ``ContextProcessorRail.init()`` injects the primary model into each
+        processor config (compressors, offloaders) only while ``model`` is
+        ``None``, and each model-backed processor builds its ``Model`` once in
+        ``__init__``. Two things therefore go stale on a model switch:
+
+        1. The processor config templates in ``react_agent.config.context_processors``,
+           which seed processors for contexts created later. Only configs that
+           already carry a model are updated, keeping the rail's injection semantics.
+        2. Processors already instantiated in the ``ContextEngine`` context pool.
+           These are rebound through the public chain
+           ``ReActAgent.update_model_context`` → ``ContextEngine.update_model_context``
+           → ``ModelContext.rebind_model`` → ``ContextProcessor.rebind_model``.
+           Errors propagate so an incomplete rebind is not silently masked.
+
+        Args:
+            config: The incoming DeepAgent config carrying the new model.
+            rebind_cached: Whether to rebind cached processors. ``False`` when the
+                caller already rebound them via ``ReActAgent.set_llm``.
+        """
+        if self._react_agent is None or config.model is None:
+            return
+        new_model_config = config.model.model_config
+        new_model_client_config = config.model.model_client_config
+        react_config = self._react_agent.config
+        updated = 0
+        for _key, cfg in getattr(react_config, "context_processors", None) or []:
+            changed = False
+            if getattr(cfg, "model", None) is not None:
+                cfg.model = new_model_config
+                changed = True
+            if getattr(cfg, "model_client", None) is not None:
+                cfg.model_client = new_model_client_config
+                changed = True
+            if changed:
+                updated += 1
+        if updated:
+            logger.info(
+                "[DeepAgent] Context processor configs rebound to new primary model: %d", updated,
+            )
+
+        update_model_context = getattr(self._react_agent, "update_model_context", None)
+        if not rebind_cached or not callable(update_model_context):
+            return
+        # Keep configure()'s resolved model name / window: update_model_context()
+        # overwrites both on the context engine and every cached context.
+        update_model_context(
+            model_name=react_config.model_name,
+            context_window_tokens=react_config.context_engine_config.model_context_window_tokens_override,
+            model=config.model,
+            model_config=new_model_config,
+            model_client_config=new_model_client_config,
+        )
 
     def _extension_bound_tool_names(self) -> set[str]:
         """Return tool names owned by successful Plugin / AgentTemplate loads."""
@@ -778,6 +869,12 @@ class DeepAgent(BaseAgent):
         """Append config-driven rails to _pending_rails for lazy registration."""
         if config.rails is not None:
             self._pending_rails.extend(config.rails)
+
+        if config.moa is not None:
+            from openjiuwen.harness.rails.moa_rail import MoARail
+
+            if not any(isinstance(rail, MoARail) for rail in (*self._pending_rails, *self._registered_rails)):
+                self._pending_rails.append(MoARail(config.moa))
 
         self._task_completion_rail = None
 
@@ -1305,6 +1402,12 @@ class DeepAgent(BaseAgent):
             await self._register_online_training_rail_from_env_if_needed()
             return
 
+        if self._deep_config is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_RUNTIME_ERROR,
+                error_msg="DeepAgent not configured. Call configure() first.",
+            )
+
         self._queue_online_training_rail_from_env()
 
         # Initialize ContextVar CWD in the current asyncio Task context.
@@ -1348,6 +1451,12 @@ class DeepAgent(BaseAgent):
                 await self.unregister_rail(stale_rail)
         self._stale_rails.clear()
 
+        moa_integration = None
+        if self._deep_config.moa is not None:
+            from openjiuwen.harness.moa.integration import MoAIntegration
+
+            moa_integration = MoAIntegration(self)
+
         # Initialize in the same order callbacks run in: highest priority
         # first. A rail's init registers its tools and prompt sections, so
         # "run my hook after that rail's" and "see that rail's tools at init
@@ -1355,22 +1464,34 @@ class DeepAgent(BaseAgent):
         # sort is stable, so rails sharing a priority keep the order the
         # caller listed them in.
         rail_init_timings: List[tuple] = []
-        initialized_rails = sorted(
-            self._pending_rails,
-            key=lambda r: r.priority,
-            reverse=True,
-        )
-        for rail_inst in initialized_rails:
-            if isinstance(rail_inst, TaskCompletionRail):
-                self._task_completion_rail = rail_inst
-                self._bind_live_goal_manager(rail_inst)
-            if isinstance(rail_inst, DeepAgentRail):
-                rail_inst.set_sys_operation(self._deep_config.sys_operation)
-                rail_inst.set_workspace(self._deep_config.workspace)
-            rail_init_timings.append(
-                (type(rail_inst).__name__, init_rail(rail_inst, self))
+        initializing_rail = None
+        try:
+            if moa_integration is not None:
+                moa_integration.prepare()
+            initialized_rails = sorted(
+                self._pending_rails,
+                key=lambda r: r.priority,
+                reverse=True,
             )
-            await self._register_rail_selective(rail_inst)
+            for rail_inst in initialized_rails:
+                initializing_rail = rail_inst
+                if isinstance(rail_inst, TaskCompletionRail):
+                    self._task_completion_rail = rail_inst
+                    self._bind_live_goal_manager(rail_inst)
+                if isinstance(rail_inst, DeepAgentRail):
+                    rail_inst.set_sys_operation(self._deep_config.sys_operation)
+                    rail_inst.set_workspace(self._deep_config.workspace)
+                rail_init_timings.append(
+                    (type(rail_inst).__name__, init_rail(rail_inst, self))
+                )
+                await self._register_rail_selective(rail_inst)
+                initializing_rail = None
+            if moa_integration is not None:
+                await moa_integration.finalize(initialized_rails)
+        except BaseException:
+            if moa_integration is not None:
+                await moa_integration.rollback(initializing_rail)
+            raise
 
         # ProgressiveToolRail owns the BM25 catalog. Build its initial
         # snapshot only after every pending startup rail has registered its
@@ -1656,6 +1777,17 @@ class DeepAgent(BaseAgent):
 
                 return self._bind_inherited_artifact_root(
                     create_mobile_gui_agent(
+                        **create_kwargs,
+                        **dict(spec.factory_kwargs or {}),
+                    )
+                )
+            if normalized_factory in {"cua_agent", "desktop_agent"}:
+                from openjiuwen.harness.subagents.cua_agent import (
+                    create_cua_agent,
+                )
+
+                return self._bind_inherited_artifact_root(
+                    create_cua_agent(
                         **create_kwargs,
                         **dict(spec.factory_kwargs or {}),
                     )
@@ -2015,6 +2147,11 @@ class DeepAgent(BaseAgent):
 
     async def unregister_rail(self, rail: AgentRail) -> "DeepAgent":
         """Unregister a rail from pending/outer/inner."""
+        if self._deep_config is not None and self._deep_config.moa is not None:
+            from openjiuwen.harness.moa.integration import MoAIntegration
+
+            await MoAIntegration.retire_companions(self, rail)
+
         # Remove queued instances first so lazy-init does not re-register stale rails.
         self._pending_rails = [queued for queued in self._pending_rails if queued is not rail]
         self._registered_rails = [r for r in self._registered_rails if r is not rail]

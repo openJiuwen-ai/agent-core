@@ -25,12 +25,14 @@ from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
 from openjiuwen.agent_teams.external.format import render_messages, render_task_board
 from openjiuwen.agent_teams.i18n import set_language
-from openjiuwen.agent_teams.message_template import expand_message
+from openjiuwen.agent_teams.inbound_render import render_clock
+from openjiuwen.agent_teams.message_template import expand_message, task_links
 from openjiuwen.agent_teams.messager.base import create_messager
 from openjiuwen.agent_teams.messager.messager import Messager
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
 from openjiuwen.agent_teams.schema.task import TaskCreateResult, TaskDetail, TaskOpResult
 from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
+from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.models import TeamMember, TeamMessageBase, TeamTaskBase
@@ -426,7 +428,9 @@ class ExternalTeamClient:
         from openjiuwen.agent_teams.group_chat.handler import context_for, group_metadata
 
         broadcast = await messages.get_broadcast_messages(member_name=self.member_name, unread_only=True)
-        unread = [*direct, *broadcast]
+        # Oldest first, the order an in-process member is delivered them in;
+        # each query is already time-ordered, the concatenation is not.
+        unread = sorted([*direct, *broadcast], key=lambda message: message.timestamp)
         for index, msg in enumerate(unread):
             if msg.broadcast and group_metadata(msg):
                 body = await context_for(self._backend, self.member_name, msg)
@@ -452,15 +456,22 @@ class ExternalTeamClient:
         parts: list[str] = []
         if view.messages:
             bodies = await self._expand_template_bodies(view.messages)
+            # The messages carry absolute send times only; the clock anchor
+            # in front lets the reader tell how long ago each was sent.
+            parts.append(render_clock(now=format_absolute_time(now_ms)))
             parts.append(
                 render_messages(
                     view.messages,
                     is_human_agent=self.is_human_agent,
-                    now_ms=now_ms,
                     bodies=bodies,
                 )
             )
-        board = render_task_board(view.tasks, is_leader=self.is_leader, now_ms=now_ms)
+        board = render_task_board(
+            view.tasks,
+            is_leader=self.is_leader,
+            now_ms=now_ms,
+            member_name=self.member_name,
+        )
         if board:
             parts.append(board)
         return "\n\n".join(parts) if parts else "(inbox empty)"
@@ -481,6 +492,9 @@ class ExternalTeamClient:
         async def _get_member(name: str) -> Any:
             return await db.member.get_member(name, self.team_name)
 
+        async def _get_links(task_id: str) -> tuple[list[Any], list[Any]]:
+            return await task_links(db, task_id)
+
         bodies: dict[str, str] = {}
         for msg in messages:
             expanded = await expand_message(
@@ -488,6 +502,7 @@ class ExternalTeamClient:
                 task_getter=_get_task,
                 member_getter=_get_member,
                 language=self._descriptor.language or "cn",
+                task_links_getter=_get_links,
             )
             if expanded.is_template:
                 bodies[msg.message_id] = expanded.body

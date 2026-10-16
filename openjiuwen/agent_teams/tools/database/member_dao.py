@@ -6,7 +6,7 @@
 from enum import Enum
 from typing import List, Optional
 
-from sqlalchemy import exists, func, select, update
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from openjiuwen.agent_teams.schema.status import (
@@ -334,6 +334,71 @@ class MemberDao:
             rows = (await session.execute(stmt)).all()
             return [(row.member_name, row.display_name, row.status) for row in rows]
 
+    async def list_retirable_members(self, team_name: str) -> list[tuple[str, str, str]]:
+        """Project ``(member_name, status, lifetime)`` for members that carry a
+        retirement policy and are idle (READY).
+
+        Feeds the scheduler's retirement scan (F_118). READY only: a BUSY
+        member is mid-round, and a retire request landing there would turn
+        the replies to whatever it is saying into stranded mail (the round
+        ends, the stream closes, nobody wakes it). The READY status event
+        re-triggers the scan the moment the round is over. The status filter
+        runs in SQL; ``lifetime`` lives inside the ``options`` JSON so the
+        policy filter is applied here, on the already-narrowed row set.
+        """
+        from openjiuwen.agent_teams.tools.member_options import load_member_options
+
+        async with self._sessions.read() as session:
+            stmt = select(
+                TeamMember.member_name,
+                TeamMember.status,
+                TeamMember.options,
+            ).where(
+                TeamMember.team_name == team_name,
+                TeamMember.status == MemberStatus.READY.value,
+            )
+            rows = (await session.execute(stmt)).all()
+        out: list[tuple[str, str, str]] = []
+        for row in rows:
+            lifetime = load_member_options(row.options).lifetime
+            if lifetime:
+                out.append((row.member_name, row.status, lifetime))
+        return out
+
+    async def get_member_lifetime(self, team_name: str, member_name: str) -> str | None:
+        """Return one member's retirement policy (``options.lifetime``) or None."""
+        from openjiuwen.agent_teams.tools.member_options import load_member_options
+
+        async with self._sessions.read() as session:
+            stmt = select(TeamMember.options).where(
+                TeamMember.team_name == team_name,
+                TeamMember.member_name == member_name,
+            )
+            row = (await session.execute(stmt)).first()
+        if row is None:
+            return None
+        return load_member_options(row.options).lifetime
+
+    async def delete_unstarted_member(self, member_name: str, team_name: str) -> bool:
+        """Delete a member row that nothing has touched yet (status UNSTARTED).
+
+        The only member-delete path in the DAO, and deliberately guarded: it
+        exists to roll back an inline member whose task batch failed to land
+        (``create_task`` wrote the row before ``add_graph``, F_118). A row that
+        has left UNSTARTED has a runtime, a mailbox or a task bound to it and
+        is never deleted here.
+        """
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                delete(TeamMember).where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                    TeamMember.status == MemberStatus.UNSTARTED.value,
+                )
+            )
+            await session.commit()
+            return result.rowcount == 1
+
     async def get_members_max_updated_at(self, team_name: str) -> int:
         """Probe MAX(``team_member.updated_at``) for the team.
 
@@ -639,8 +704,9 @@ class MemberDao:
     ) -> bool:
         """Claim a teammate for restart and reset its execution snapshot.
 
-        A teammate can restart after a pause or a process restart. Matching
-        the observed status prevents a changed member from being restarted.
+        A teammate can restart after a pause, a process restart, or an
+        explicit wake out of DORMANT. Matching the observed status prevents a
+        changed member from being restarted.
 
         Args:
             member_name: Member to restart.

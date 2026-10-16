@@ -389,6 +389,12 @@ def _display_model(rt, opts: dict) -> str | None:
     return described or opts.get("model")
 
 
+def _display_agent_template(rt, opts: dict) -> str | None:
+    """The expert display name for this call, when the backend can name it."""
+    describe = getattr(rt.backend, "describe_agent_template", None)
+    return describe(opts) if callable(describe) else None
+
+
 def _emit_agent_started(
     rt,
     opts: dict,
@@ -414,6 +420,8 @@ def _emit_agent_started(
             prompt=prompt,
             model=_display_model(rt, opts),
             agent_type=opts.get("agent_type"),
+            agent_template=opts.get("agent_template"),
+            display_name=_display_agent_template(rt, opts),
             agent_id=agent_id,
             node_type=node_type,
             parent_session_id=parent_session_id,
@@ -515,7 +523,8 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
         The merged, validated, ``None``-stripped options dict.
 
     Raises:
-        EngineError: If any key is outside the allowed set.
+        EngineError: If any key is outside the allowed set, or ``agent_template``
+            carries a non-string value (it can never name a member).
     """
     merged: dict = {}
     for key, value in (options or {}).items():
@@ -529,6 +538,14 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
     if unknown:
         raise EngineError(
             f"unknown option(s) {unknown}; allowed: {sorted(allowed)}"
+        )
+    # Validated here, not in agent(): one validator covers agent(),
+    # AgentSession.send() and fork-merged options, all before AGENT_STARTED is
+    # emitted. The backend keeps its own isinstance guard (defence in depth).
+    template = merged.get("agent_template")
+    if template is not None and not isinstance(template, str):
+        raise EngineError(
+            f"agent_template must be a member name string, got {type(template).__name__}"
         )
     return merged
 
@@ -1438,7 +1455,7 @@ class AgentSession:
     __slots__ = (
         "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
         "_history", "_sid", "_member_name", "_in_flight", "_fork_data",
-        "_parent_session_id", "_opened_model", "_completed_turns",
+        "_parent_session_id", "_opened_model", "_opened_template", "_completed_turns",
     )
 
     def __init__(
@@ -1469,6 +1486,8 @@ class AgentSession:
         # Model lock: the first live turn's identity, or the sentinel while the
         # avatar has never opened (a human session never locks).
         self._opened_model = _NOT_LOCKED
+        # Template lock: the expert the first live turn picked (None = none picked).
+        self._opened_template: str | None = None
         # Live turns completed since the avatar opened. The lock is set before
         # the first live turn runs, so it only means "used" once a turn landed;
         # a failed first turn may re-lock (see _ensure_open).
@@ -1776,6 +1795,20 @@ class AgentSession:
         # locked yet — the first live turn records, later live turns compare.
         identity = _session_model_identity(opts) if not self._human else _NOT_LOCKED
         if self._sid is not None:
+            template = opts.get("agent_template")
+            if not self._human and template != self._opened_template:
+                if self._completed_turns == 0:
+                    self._opened_template = template
+                else:
+                    locked_text = (
+                        "no agent_template" if self._opened_template is None
+                        else f"agent_template {self._opened_template!r}"
+                    )
+                    raise EngineError(
+                        f"agent session {opts.get('label') or 'agent'!r} is locked to {locked_text} "
+                        f"(set by its first live turn); one avatar runs one expert, "
+                        f"so switching experts needs a new session — fork() it instead"
+                    )
             if identity is not _NOT_LOCKED and identity != self._opened_model:
                 if self._completed_turns == 0:
                     # The lock was recorded on the first live turn before it ran;
@@ -1808,6 +1841,7 @@ class AgentSession:
         # Record the first live turn's identity as the session's lock. A fork
         # child is a fresh AgentSession (own sentinel), so it locks afresh.
         self._opened_model = identity
+        self._opened_template = opts.get("agent_template")
 
     def _append_history(self, prompt: str, result: Any, model_cls) -> None:
         """Append the ``(user, assistant)`` pair so the next turn carries context."""

@@ -277,3 +277,15 @@ def test_get_member_worktree_from_namespace():
     assert worktree is not None
     assert worktree.isolation == "worktree"
     assert worktree.path == "/tmp/ws"
+
+
+def test_build_member_options_with_lifetime():
+    """F_118: the retirement policy rides in options and reads back via the accessor."""
+    from openjiuwen.agent_teams.tools.member_options import get_member_lifetime
+
+    raw = build_member_options(lifetime="dormant")
+    assert load_member_options(raw).lifetime == "dormant"
+    assert get_member_lifetime(SimpleNamespace(options=raw)) == "dormant"
+    # Resident by default: no policy key is written at all.
+    assert load_member_options(build_member_options()).lifetime is None
+    assert get_member_lifetime(SimpleNamespace(options=None)) is None

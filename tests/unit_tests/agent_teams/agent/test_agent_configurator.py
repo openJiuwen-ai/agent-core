@@ -157,6 +157,22 @@ def test_worker_base_spec_prefers_teammate_over_leader():
     assert spec.agents["teammate"].progressive_tool is None
 
 
+def test_expert_specs_handle_round_trips_through_build_context():
+    """The expert table rides BuildContext.extras under its own key; absent → {}."""
+    from openjiuwen.agent_teams.rails.team_context import (
+        TeamHandleKey,
+        get_swarmflow_expert_specs,
+        inject_team_handles,
+    )
+    from openjiuwen.agent_teams.schema.build_context import BuildContext
+
+    ctx = BuildContext()
+    assert get_swarmflow_expert_specs(ctx) == {}
+    inject_team_handles(ctx.extras, swarmflow_expert_specs={"clip": object()})
+    assert set(get_swarmflow_expert_specs(ctx)) == {"clip"}
+    assert TeamHandleKey.SWARMFLOW_EXPERT_SPECS == "team.swarmflow_expert_specs"
+
+
 # --- swarmflow external CLI allowlist: read from the blueprint, not the runtime spec ---
 
 

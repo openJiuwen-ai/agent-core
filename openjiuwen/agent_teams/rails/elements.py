@@ -36,6 +36,7 @@ from openjiuwen.agent_teams.harness.manifest import (
     harness_element,
     param_field,
 )
+from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec
 from openjiuwen.harness.manifest.builtin_elements import (
     OBSERVABILITY,
     observability_dependency_installed,
@@ -82,6 +83,7 @@ class TeamToolInput(ConstructionInput):
     dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
     lifecycle: str = param_field(default="temporary", description="Team lifecycle (temporary / persistent).")
     team_mode: str = param_field(default="default", description="Team operating mode.")
+    bootstrap_mode: str = param_field(default="leader", description="Who materializes the team (leader / framework).")
     exclude_tools: list[str] = param_field(default_factory=list, description="Tool names to exclude.")
     qualify_ids: bool = param_field(default=False, description="Suffix tool ids per member (inprocess spawn).")
     team_name: str = param_field(default="default", description="Team name.")
@@ -112,6 +114,7 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         dispatch_mode=inp.dispatch_mode,
         lifecycle=inp.lifecycle,
         team_mode=inp.team_mode,
+        bootstrap_mode=inp.bootstrap_mode,
         language=inp.language,
         model_config_allocator=backend.allocate_model,
         exclude_tools=set(inp.exclude_tools) or None,
@@ -150,6 +153,7 @@ class TeamPolicyInput(ConstructionInput):
     teammate_mode: str = param_field(default="build_mode", description="Member execution mode.")
     team_mode: str = param_field(default="default", description="Team operating mode.")
     dispatch_mode: str = param_field(default="autonomous", description="How tasks reach members.")
+    bootstrap_mode: str = param_field(default="leader", description="Who materializes the team (leader / framework).")
     base_prompt: Optional[str] = param_field(default=None, description="User-supplied base system prompt.")
     team_workspace_path: Optional[str] = param_field(default=None, description="Team workspace root path.")
     team_outputs_dir: Optional[str] = param_field(
@@ -197,6 +201,7 @@ def build_team_policy_rail(params: dict[str, Any], context: Any) -> Any:
         language=inp.language,
         team_mode=inp.team_mode,
         dispatch_mode=inp.dispatch_mode,
+        bootstrap_mode=inp.bootstrap_mode,
         base_prompt=inp.base_prompt,
         team_workspace_path=inp.team_workspace_path,
         team_outputs_dir=inp.team_outputs_dir,
@@ -473,6 +478,23 @@ def build_team_observability_rail(params: dict[str, Any], context: Any) -> Any:
     return maybe_team_observability_rail()
 
 
+def observability_rail_specs() -> list[RailSpec]:
+    """Return the observability rail pair every team-built agent mounts.
+
+    ``core.observability`` owns the agent span itself (harness-level,
+    team-agnostic) and ``core.team.observability`` layers the team identity
+    onto it, so the two are always mounted together. Each provider checks
+    ``is_initialized()`` and is a no-op when tracing is off.
+
+    Returns:
+        A fresh list of the two rail specs, safe for the caller to extend.
+    """
+    return [
+        RailSpec(type=TEAM_OBSERVABILITY),
+        RailSpec(type=OBSERVABILITY),
+    ]
+
+
 __all__ = [
     "TEAM_TOOL",
     "TEAM_POLICY",
@@ -484,4 +506,5 @@ __all__ = [
     "TEAM_OBSERVABILITY",
     "OBSERVABILITY",
     "observability_dependency_installed",
+    "observability_rail_specs",
 ]

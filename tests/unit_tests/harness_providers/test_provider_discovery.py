@@ -5,8 +5,12 @@
 
 from __future__ import annotations
 
-from importlib.metadata import EntryPoint
+import hashlib
+import sys
+import uuid
+from importlib.metadata import EntryPoint, PathDistribution
 from pathlib import Path
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -192,3 +196,68 @@ def test_install_skills_accepts_a_third_party_scan_dir(tmp_path: Path) -> None:
         install_skills((SkillSource(str(source)),), provider="fake-cli", cwd=str(project))
     with pytest.raises(ValueError, match="escapes"):
         install_skills((SkillSource(str(source)),), provider="fake-cli", cwd=str(project), scan_dir="../outside")
+
+
+def _install_provider(site: Path, package: str, version: str) -> list[EntryPoint]:
+    """Write (or overwrite) an installed provider distribution under ``site``."""
+    source = (
+        "from openjiuwen.harness_protocol import HarnessCard\n\n\n"
+        "class Provider:\n"
+        "    @property\n"
+        "    def card(self):\n"
+        f"        return HarnessCard(name='hot', implementation_version={version!r})\n\n"
+        "    @staticmethod\n"
+        "    def create(config):\n"
+        "        return config\n"
+    )
+    (site / package).mkdir(exist_ok=True)
+    (site / package / "__init__.py").write_text(source, encoding="utf-8")
+    info = site / f"{package}-0.1.0.dist-info"
+    info.mkdir(exist_ok=True)
+    (info / "METADATA").write_text(f"Metadata-Version: 2.1\nName: {package}\nVersion: 0.1.0\n", encoding="utf-8")
+    (info / "entry_points.txt").write_text(
+        f"[{HARNESS_PROVIDER_ENTRY_POINT_GROUP}]\nhot = {package}:Provider\n",
+        encoding="utf-8",
+    )
+    digest = hashlib.sha256(source.encode()).hexdigest()
+    (info / "RECORD").write_text(
+        f"{package}/__init__.py,sha256={digest},{len(source)}\n{package}-0.1.0.dist-info/RECORD,,\n",
+        encoding="utf-8",
+    )
+    return list(PathDistribution(info).entry_points)
+
+
+@pytest.fixture
+def site_packages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A private site-packages on ``sys.path``, as a frozen host extracts provider wheels."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    yield tmp_path
+    for name in [name for name in sys.modules if name.startswith("hot_provider_")]:
+        sys.modules.pop(name, None)
+
+
+def test_a_provider_replaced_on_disk_is_reimported_for_new_harnesses(
+    site_packages: Path,
+    installed: list[EntryPoint],
+) -> None:
+    package = f"hot_provider_{uuid.uuid4().hex}"
+    installed[:] = _install_provider(site_packages, package, "1")
+    old = resolve_provider("hot")
+    assert old.card.implementation_version == "1"
+
+    installed[:] = _install_provider(site_packages, package, "22")
+    new = resolve_provider("hot")
+
+    assert new.card.implementation_version == "22"
+    # Objects built from the old import keep running the old code.
+    assert old.card.implementation_version == "1"
+    assert type(new) is not type(old)
+
+
+def test_an_unchanged_provider_is_not_reimported(site_packages: Path, installed: list[EntryPoint]) -> None:
+    package = f"hot_provider_{uuid.uuid4().hex}"
+    installed[:] = _install_provider(site_packages, package, "1")
+    first = resolve_provider("hot")
+    second = resolve_provider("hot")
+    assert type(first) is type(second)

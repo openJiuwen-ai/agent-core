@@ -11,10 +11,10 @@ from typing import (
     Callable,
     Optional,
 )
+
 from pydantic import BaseModel
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import (
     Model,
     ModelClientConfig,
@@ -23,21 +23,20 @@ from openjiuwen.core.foundation.llm import (
 from openjiuwen.core.foundation.tool import (
     McpServerConfig,
     ToolCard,
-    ToolExposure,
 )
+from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.config import (
     LocalWorkConfig,
     SandboxGatewayConfig,
 )
-from openjiuwen.core.sys_operation.sys_operation import SysOperationCard, SysOperation
+from openjiuwen.core.sys_operation.sys_operation import SysOperation, SysOperationCard
 from openjiuwen.harness.schema.build_context import (
-    BuildContext,
     PARENT_SYS_OPERATION_EXTRAS_KEY,
+    BuildContext,
 )
 from openjiuwen.harness.schema.config import (
-    AudioModelConfig,
     DEFAULT_ACR_BASE_URL,
     DEFAULT_AUDIO_HTTP_TIMEOUT,
     DEFAULT_MAX_AUDIO_BYTES,
@@ -45,6 +44,7 @@ from openjiuwen.harness.schema.config import (
     DEFAULT_OPENAI_AUDIO_TRANSCRIPTION_MODEL,
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_OPENAI_VISION_MODEL,
+    AudioModelConfig,
     SubAgentConfig,
     VisionModelConfig,
 )
@@ -553,6 +553,7 @@ class DeepAgentSpec(BaseModel):
             build_ctx = context.derive(
                 workspace=workspace,
                 member_card_id=member_card_id,
+                moa=None,
             )
             build_ctx.extras = dict(build_ctx.extras)
         else:
@@ -628,6 +629,7 @@ class DeepAgentSpec(BaseModel):
             context_engine_config=self.context_engine_config,
             kv_cache_affinity_config=self.kv_cache_affinity_config,
             trajectory_span_processor=getattr(build_ctx, "trajectory_span_processor", None),
+            moa=getattr(context, "moa", None),
             **self._progressive_tool_kwargs(),
         )
 

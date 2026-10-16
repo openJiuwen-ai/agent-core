@@ -32,7 +32,10 @@ from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
-from openjiuwen.agent_teams.rails.team_context import get_swarmflow_external_cli_agents
+from openjiuwen.agent_teams.rails.team_context import (
+    get_swarmflow_expert_specs,
+    get_swarmflow_external_cli_agents,
+)
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -663,6 +666,8 @@ class SwarmflowTool(AsyncTool):
                 prompt=progress.prompt,
                 model=resolved_model,
                 agent_type=progress.agent_type,
+                agent_template=getattr(progress, "agent_template", None),
+                display_name=getattr(progress, "display_name", None),
                 outcome=progress.outcome,
                 text=progress.message,
                 phases=progress.phases,
@@ -749,6 +754,9 @@ class SwarmflowTool(AsyncTool):
                 agent_gate=agent_gate,
                 budget=self._budget,
                 external_cli_agents=get_swarmflow_external_cli_agents(
+                    getattr(self._parent_agent, "build_context", None)
+                ),
+                expert_specs=get_swarmflow_expert_specs(
                     getattr(self._parent_agent, "build_context", None)
                 ),
                 team_backend=self._team_backend,

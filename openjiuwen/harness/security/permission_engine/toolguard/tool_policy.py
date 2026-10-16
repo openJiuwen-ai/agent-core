@@ -7,8 +7,8 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from dataclasses import dataclass
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +57,31 @@ _PATH_TOOLS = frozenset({
 })
 _NETWORK_TOOLS = frozenset({"mcp_fetch_webpage", "mcp_free_search", "mcp_paid_search"})
 
+# cua desktop-control tools (mouse/keyboard/app lifecycle), under their
+# model-facing names. The rules that target them live with the cua agent's own
+# permissions, not in the package builtin rules: the names are bare, and a
+# category alone changes nothing for another agent's same-named tool.
+_OS_CONTROL_TOOL_PREFIX = ""
+_OS_CONTROL_TOOL_NAMES = (
+    "click",
+    "double_click",
+    "right_click",
+    "move_cursor",
+    "drag",
+    "type_text",
+    "press_key",
+    "hotkey",
+    "scroll",
+    "launch_app",
+    "kill_app",
+    "bring_to_front",
+)
+_OS_CONTROL_TOOLS = frozenset(f"{_OS_CONTROL_TOOL_PREFIX}{name}" for name in _OS_CONTROL_TOOL_NAMES)
+
+
+# Structured argument values an os_control rule pattern may match against.
+_OS_CONTROL_ARG_KEYS = frozenset({"text", "name", "bundle_id", "value", "key", "keys"})
+
 _PATH_ARG_KEYS = frozenset({
     "path", "file_path", "target_file", "file", "old_path", "new_path",
     "source_path", "dest_path", "directory", "dir",
@@ -100,6 +125,8 @@ def _tool_category(
         return "path"
     if tool_name in _NETWORK_TOOLS:
         return "network"
+    if tool_name in _OS_CONTROL_TOOLS:
+        return "os_control"
     return None
 
 
@@ -189,6 +216,30 @@ def _path_pattern_matches(pattern: str, value: str) -> bool:
             logger.warning("[PermissionEngine] permission.tiered_policy.invalid_path_regex expr=%r", expr)
             return False
     return _TIERED_PATH_MATCHER.match_path(p, value)
+
+
+def _os_control_pattern_matches(pattern: str, tool_args: dict[str, Any]) -> bool:
+    """os_control rule matching.
+
+    ``*`` matches any invocation of the tool (whole-tool guardrail). Any other
+    pattern is matched (exact / glob / ``re:``) against the tool's relevant
+    string arguments (text, app name/bundle, key names).
+    """
+    p = (pattern or "").strip()
+    if not p:
+        return False
+    if p == "*":
+        return True
+    for key in _OS_CONTROL_ARG_KEYS:
+        val = tool_args.get(key)
+        if isinstance(val, str):
+            if val.strip() and _shell_pattern_matches(p, val.strip()):
+                return True
+        elif isinstance(val, list):
+            joined = " ".join(str(x) for x in val if x is not None).strip()
+            if joined and _shell_pattern_matches(p, joined):
+                return True
+    return False
 
 
 def _tool_arg_value_looks_like_path(arg_key: str, value: str) -> bool:
@@ -349,6 +400,8 @@ def tiered_policy_rule_matches(
     if cat == "network":
         # 产品设计：网络类暂仅整工具；参数规则不匹配
         return False
+    if cat == "os_control":
+        return _os_control_pattern_matches(pattern, tool_args)
     return False
 
 

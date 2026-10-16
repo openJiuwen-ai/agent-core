@@ -122,6 +122,7 @@ python -m pytest -q                          # 单测 + 注册测试必须全绿
 | `skills-dir` | CLI 的项目级技能发现目录（没有就保持 `None`，配置技能会被拒绝） | recon.md |
 | `failure-codes` / `failure-exceptions` | 厂商错误码 / 异常类型到共享类别 | mapping.md |
 | `fixtures` | 假运行时改成真实记录的形状 | [testing.md](references/testing.md) |
+| `observation` | 模型请求上报：流推断之外，用厂商请求记录补全输入（轨迹 Input / Model 泳道） | [observation.md](references/observation.md) |
 | `agents-md` | 填包内 `AGENTS.md`"验证过的厂商事实" | — |
 
 ## 5. e2e 证明能力
@@ -179,6 +180,7 @@ jiuwenswarm 的对接、版本规则：[packaging.md](references/packaging.md)�
 - [ ] `scaffold.py --check` 输出 0 个标记
 - [ ] `python -m pytest` 全绿（单测、注册测试、e2e），e2e 在真实运行时上运行而非跳过
 - [ ] 卡片能力与 e2e 一一对应；未声明能力有"拒绝"单测
+- [ ] 宿主观测请求时轨迹有 Model 与 Tools 泳道、工具都挂在请求下；CLI 有本地请求记录时 Input 泳道也有内容
 - [ ] 包内 `AGENTS.md` 写明厂商版本与每条关键事实的出处
 - [ ] `pyproject.toml` 的 openjiuwen 下限不低于提供 entry point 发现的版本；SDK 模式写明厂商 SDK 依赖
 - [ ] 已和用户确认是否自带 CLI；自带时每个目标平台都用 `build_runtime.py` 构建并通过冒烟，非本机平台在该平台上实测过

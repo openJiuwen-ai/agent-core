@@ -1,6 +1,4 @@
-import pytest
 
-from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, ToolMessage, ToolCall, SystemMessage
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.prompt.assemble.assembler import PromptAssembler
@@ -15,8 +13,10 @@ class TestPromptAssemble:
         assert left == right
 
     def test_textable_variable(self):
-        # Test empty placeholder throws exception
-        pytest.raises(BaseError, TextableVariable, text="{{}}")
+        # Empty placeholder is kept as literal text with a warning (no exception)
+        var_empty = TextableVariable(text="{{}}")
+        self.assert_equal([], var_empty.input_keys)
+        self.assert_equal("{{}}", var_empty.eval())
 
         # Test single placeholder
         var1 = TextableVariable(text="{{x}}")
@@ -32,7 +32,9 @@ class TestPromptAssemble:
 
     def test_textable_variables(self):
         # Duplicate test (can be retained or deleted) - retained and optimized here
-        pytest.raises(BaseError, TextableVariable, text="{{}}")
+        var_empty = TextableVariable(text="{{}}")
+        self.assert_equal([], var_empty.input_keys)
+        self.assert_equal("{{}}", var_empty.eval())
         var1 = TextableVariable(text="{{x}}")
         self.assert_equal(["x"], var1.input_keys)
         self.assert_equal("default", var1.name)
@@ -57,10 +59,11 @@ class TestPromptAssemble:
         self.assert_equal(["user"], var.input_keys)
         self.assert_equal(["user.name"], var.placeholders)
 
-        # Test empty placeholder (<<>>) - need to specify corresponding prefix and suffix
+        # Empty placeholder (<<>>) is kept as literal text with a warning
         text = "Hello, <<>>!"
-        with pytest.raises(BaseError):
-            TextableVariable(text=text, prefix="<<", suffix=">>")  # Specify placeholder format
+        var_empty = TextableVariable(text=text, prefix="<<", suffix=">>")
+        self.assert_equal([], var_empty.input_keys)
+        self.assert_equal("Hello, <<>>!", var_empty.eval())
 
     def test_update(self):
         # Test normal placeholder replacement
@@ -268,7 +271,9 @@ class TestPromptAssemble:
         self.assert_equal(["user.profile.name"], var2.placeholders)
 
         data3 = {"key": "{{}}"}
-        pytest.raises(BaseError, DictableVariable, data=data3)
+        var3 = DictableVariable(data=data3)
+        self.assert_equal([], var3.input_keys)
+        self.assert_equal({"key": "{{}}"}, var3.eval())
 
     def test_dictable_variable_update(self):
         data = {

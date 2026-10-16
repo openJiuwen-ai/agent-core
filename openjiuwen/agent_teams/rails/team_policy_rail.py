@@ -44,15 +44,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots
+from openjiuwen.agent_teams.inbound_render import drop_superseded_snapshots, render_clock, render_team_policy_inline
 from openjiuwen.agent_teams.prompts import (
     build_leader_bootstrap_section,
+    build_leader_policy_disclosure,
+    build_leader_prebuilt_section,
     build_team_extra_section,
     build_team_static_sections,
 )
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.team_context import TeamContextTracker
+from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
+from openjiuwen.agent_teams.timefmt import format_absolute_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
@@ -65,6 +69,9 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
+
+# Attachment section holding this member's identity, team metadata and roster.
+TEAM_CONTEXT_ATTACHMENT_SECTION = "team.context"
 
 
 class TeamPolicyRail(DeepAgentRail):
@@ -82,7 +89,9 @@ class TeamPolicyRail(DeepAgentRail):
         metadata, and the peer roster. These are per-member and/or appear only
         once the team exists, so they cannot live in the shared prefix.
         :class:`TeamContextTracker` decides what is still unsaid; the rail
-        queues it as one dynamic attachment section. ReAct then appends a
+        registers it as one dynamic attachment section, and re-registers the
+        last delivered content while nothing changed so the section stays
+        active across agent rebuilds. ReAct then appends a
         role=system snapshot/delta message either before the admitted user
         turn or after a tool result when state appears mid-loop. Nothing already
         in the history is ever rewritten.
@@ -117,6 +126,7 @@ class TeamPolicyRail(DeepAgentRail):
         language: str = "cn",
         team_mode: str = "default",
         dispatch_mode: str = "autonomous",
+        bootstrap_mode: str = "leader",
         base_prompt: str | None = None,
         team_workspace_path: str | None = None,
         team_outputs_dir: str | None = None,
@@ -161,7 +171,28 @@ class TeamPolicyRail(DeepAgentRail):
             base_prompt=base_prompt,
             hitt_enabled=hitt_enabled,
             swarmflow_enabled=swarmflow_enabled,
+            bootstrap_mode=bootstrap_mode,
         )
+
+        # A framework-built team (F_122) has no ``build_team`` result to carry
+        # the leader's policy, so the same disclosure text is rendered here —
+        # every variable it depends on is spec-settled (no leader choice is
+        # pending) — and handed to the tracker as a ``<team-policy>`` block.
+        # ``hitt_enabled`` is the spec ceiling: with no ``build_team`` call it
+        # is also the effective value.
+        policy_text: str | None = None
+        if role == TeamRole.LEADER and bootstrap_mode == "framework":
+            policy_text = render_team_policy_inline(
+                body=build_leader_policy_disclosure(
+                    lifecycle=lifecycle,
+                    teammate_mode=teammate_mode,
+                    team_mode=team_mode,
+                    dispatch_mode=dispatch_mode,
+                    language=language,
+                    hitt_enabled=hitt_enabled,
+                    loader=self._loader,
+                ),
+            )
 
         self._tracker = TeamContextTracker(
             team_backend=team_backend,
@@ -175,6 +206,15 @@ class TeamPolicyRail(DeepAgentRail):
             expose_human_agents_to_teammates=expose_human_agents_to_teammates,
             language=language,
             fork_source=fork_source,
+            policy_text=policy_text,
+        )
+        # Scheduled dispatch only (F_119): a passed review does not wake the
+        # author, so the outcome rides its next admitted input instead.
+        # Autonomous dispatch keeps its live verified notice.
+        self._outcome_tracker: TaskOutcomeTracker | None = (
+            TaskOutcomeTracker(team_backend=team_backend, member_name=member_name)
+            if dispatch_mode == "scheduled" and team_backend is not None and role != TeamRole.LEADER
+            else None
         )
 
     def init(self, agent: Any) -> None:
@@ -197,13 +237,21 @@ class TeamPolicyRail(DeepAgentRail):
         self.attachment_manager = None
 
     async def on_user_message(self, ctx: AgentCallbackContext) -> None:
-        """Drop superseded inputs from the batch, then fold in team state.
+        """Drop superseded inputs, stamp the current time, then fold in team state.
 
-        Two jobs on the list of inputs about to become one message, in that
-        order: the batch is pruned first, and the team state then goes in front
-        of what survives.
+        Three jobs on the list of inputs about to become one message, in that
+        order: the batch is pruned first, a ``<team-clock>`` anchor goes in
+        front of what survives, and the team state then goes in front of that.
 
-        Both exist because this is the one moment these are still *inputs*. A
+        The clock anchor is what makes the absolute ``time`` on every
+        ``<team-inbound>`` readable as "how long ago". The inbound blocks carry
+        no relative diff because they stay in the history: rendered once, a
+        "just now" would still say "just now" when the member reads it again an
+        hour later. The anchor is written once per admitted input and never
+        refreshed, so each one stays true as a record of when that input
+        arrived, and the newest one is the member's current time.
+
+        All three happen here because this is the one moment these are still *inputs*. A
         step later they are one ordinary history message — it can no longer be
         located by position (compaction rewrites the history behind it) and it
         must no longer be edited (rewriting a message invalidates every KV-cache
@@ -214,6 +262,11 @@ class TeamPolicyRail(DeepAgentRail):
 
         The state is inserted at the front, so the member reads who it is and
         what team it is on before whatever prompted this round.
+
+        Under scheduled dispatch, review passes the member has not been told
+        about yet are folded in as well (F_119). They are events, not standing
+        state, so they always go inline into this input — never into the
+        ``team.context`` attachment.
         """
         inputs = getattr(ctx, "inputs", None)
         parts = getattr(inputs, "parts", None)
@@ -221,17 +274,30 @@ class TeamPolicyRail(DeepAgentRail):
             return
 
         self._drop_superseded(parts)
+        if parts:
+            parts.insert(0, render_clock(now=format_absolute_time(get_current_time())))
 
         session = getattr(ctx, "session", None)
         if session is None:
             return
+        await self._fold_task_outcomes(parts, session)
+        if await self._queue_team_context_attachment(ctx, session):
+            return
         text = await self._tracker.pending_text(session)
         if not text:
             return
-        if await self._queue_team_context_attachment(ctx, session, text):
-            return
         parts.insert(0, text)
         await self._tracker.commit(session)
+
+    async def _fold_task_outcomes(self, parts: list[str], session: Any) -> None:
+        """Prepend review passes not yet told to the member onto its input."""
+        if self._outcome_tracker is None:
+            return
+        text = await self._outcome_tracker.pending_text(session)
+        if not text:
+            return
+        parts.insert(0, text)
+        await self._outcome_tracker.commit(session)
 
     async def before_steering_drain(self, ctx: AgentCallbackContext) -> None:
         """Cap how much of the steering backlog one model call takes.
@@ -292,27 +358,52 @@ class TeamPolicyRail(DeepAgentRail):
 
         await self._announce_unattached_state(ctx)
 
-    async def _queue_team_context_attachment(
-        self,
-        ctx: AgentCallbackContext,
-        session: Any,
-        text: str,
-    ) -> bool:
-        """Queue one team-state section for the shared history synchronizer.
+    async def _queue_team_context_attachment(self, ctx: AgentCallbackContext, session: Any) -> bool:
+        """Register this member's team state as one dynamic attachment section.
 
-        The ReAct agent calls ``sync_to_context`` after all rails at the user
-        admission and before-model boundaries.  The tracker baseline is
-        committed only after that synchronization succeeds, so a failed
-        context write leaves the announcement pending for the next boundary.
+        The attachment manager is a *current-state* channel: each boundary
+        diffs the registered sections against the state recorded in history,
+        and a section missing from the registry reads as withdrawn. The manager
+        lives on the agent instance, so a rebuilt member starts with an empty
+        registry and ``team.context`` has to be registered at every boundary:
+
+          * history holds no attachment snapshot (first delivery, or compaction
+            dropped it) -- the complete current state;
+          * the tracker has something new -- that incremental text, so roster
+            changes stay join/leave deltas;
+          * nothing changed -- the content committed last time, unchanged, so
+            its content hash matches the history and nothing is announced.
+
+        The tracker baseline and the registered content are committed only
+        after the ReAct history sync succeeds.
+
+        Returns:
+            ``True`` when the attachment lane owns delivery, ``False`` (no
+            manager installed, or the section could not be registered) to fall
+            back to the in-history message lane.
         """
         manager = self.attachment_manager
-        if manager is None:
+        context = getattr(ctx, "context", None)
+        if manager is None or context is None:
             return False
         try:
             writer = manager.bind_context(ctx)
+            has_snapshot = manager.has_history_snapshot(context, writer.session_id)
+            text = await self._tracker.pending_text(session)
+            last_text = self._tracker.last_delivered_text(session)
+            if not has_snapshot:
+                content = await self._tracker.snapshot_text()
+            elif text:
+                content = text
+            else:
+                # A session delivered before the content was remembered falls
+                # back to the full state once, then keeps re-registering it.
+                content = last_text or await self._tracker.snapshot_text()
+            if not content:
+                return True
             await writer.add_section(
-                section="team.context",
-                content=text,
+                section=TEAM_CONTEXT_ATTACHMENT_SECTION,
+                content=content,
                 kind=PromptAttachmentKind.RUNTIME,
                 source="agent_core.team_policy_rail",
                 priority=80,
@@ -326,9 +417,10 @@ class TeamPolicyRail(DeepAgentRail):
             )
             return False
 
-        callbacks = ctx.extra.setdefault(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY, [])
-        if isinstance(callbacks, list):
-            callbacks.append(lambda: self._tracker.commit(session))
+        if text or content != last_text:
+            callbacks = ctx.extra.setdefault(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY, [])
+            if isinstance(callbacks, list):
+                callbacks.append(lambda: self._tracker.commit(session, delivered_text=content))
         return True
 
     async def _announce_unattached_state(self, ctx: AgentCallbackContext) -> None:
@@ -348,10 +440,10 @@ class TeamPolicyRail(DeepAgentRail):
         session = getattr(ctx, "session", None)
         if context is None or session is None:
             return
+        if await self._queue_team_context_attachment(ctx, session):
+            return
         text = await self._tracker.pending_text(session)
         if not text:
-            return
-        if await self._queue_team_context_attachment(ctx, session, text):
             return
         await context.add_messages(UserMessage(content=text))
         await self._tracker.commit(session)
@@ -371,6 +463,7 @@ class TeamPolicyRail(DeepAgentRail):
         base_prompt: str | None,
         hitt_enabled: bool,
         swarmflow_enabled: bool,
+        bootstrap_mode: str,
     ) -> list[PromptSection]:
         """Construct the never-changing sections once at rail init time.
 
@@ -386,6 +479,7 @@ class TeamPolicyRail(DeepAgentRail):
             sections = self._build_leader_sections(
                 base_prompt=base_prompt,
                 swarmflow_enabled=swarmflow_enabled,
+                bootstrap_mode=bootstrap_mode,
             )
         else:
             sections = build_team_static_sections(
@@ -413,19 +507,27 @@ class TeamPolicyRail(DeepAgentRail):
         *,
         base_prompt: str | None,
         swarmflow_enabled: bool,
+        bootstrap_mode: str,
     ) -> list[PromptSection]:
-        """Build the leader's prefix: bootstrap, plus the caller's own prompt.
+        """Build the leader's prefix: an opening section, plus the caller's own prompt.
 
-        The extra section stays here rather than moving into the ``build_team``
-        disclosure because it is not team policy: it is what the SDK caller told
-        *this* leader to do, and it has to be in force before the team exists —
-        it may well be the instruction that decides what team to build.
+        The opening section is ``team_bootstrap`` (route to ``build_team``) or,
+        for a framework-built team (F_122), ``team_prebuilt`` (the team exists,
+        the policy arrives as a ``<team-policy>`` block). The extra section
+        stays here rather than moving into the policy disclosure because it is
+        not team policy: it is what the SDK caller told *this* leader to do,
+        and it has to be in force before the team exists — it may well be the
+        instruction that decides what team to build.
         """
-        sections = [build_leader_bootstrap_section(
-            swarmflow_enabled=swarmflow_enabled,
-            language=self._language,
-            loader=self._loader,
-        )]
+        if bootstrap_mode == "framework":
+            opening = build_leader_prebuilt_section(language=self._language, loader=self._loader)
+        else:
+            opening = build_leader_bootstrap_section(
+                swarmflow_enabled=swarmflow_enabled,
+                language=self._language,
+                loader=self._loader,
+            )
+        sections = [opening]
         extra = build_team_extra_section(base_prompt=base_prompt, language=self._language)
         if extra is not None:
             sections.append(extra)

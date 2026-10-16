@@ -16,8 +16,11 @@ openjiuwen 侧的解析顺序：内置 provider（封闭集合，永远优先）
 注册 → `sys.path` 上任何发行包在 entry point 组 **`openjiuwen.harness_providers`** 里声明的同名入口。
 入口值是 `HarnessProvider` 类（无参实例化）或实例；加载失败、实例化失败、不满足 SPI 都抛带原因的
 `ValueError`。每次解析都重新读元数据，所以运行中安装/解压后下一次解析即可见（解压后先调
-`importlib.invalidate_caches()`，jiuwenswarm 的激活函数已这样做）。editable 安装与升级已导入的包
-需要重启进程。
+`importlib.invalidate_caches()`，jiuwenswarm 的激活函数已这样做）。已导入的包被原地替换（pip 升级，或
+解压新 wheel 覆盖原目录）后，下一次解析按 `RECORD` 指纹发现变化并重新导入：新会话用新代码，运行中的成员
+继续用旧代码直到重启。前提是包导入时没有全局副作用（不 monkeypatch openjiuwen、不在导入时
+`register_harness_provider`），包内模块在模块顶部互相导入（函数内延迟导入会在替换后拿到新版本），且是纯
+Python。editable 安装改源码不改 `RECORD`，仍需重启进程；openjiuwen 自身升级也需重启。
 
 ## 可选：包内自带 CLI（参照 claude-agent-sdk / openai-codex-cli-bin）
 

@@ -647,7 +647,7 @@ class OrganizationRuntimeManager:
         owner_team_id: str,
         session_id: str,
     ) -> dict[str, Any]:
-        """Dissolve an organization, unbind its teams, and erase its DB rows."""
+        """Unbind all members, stop temporary experts, and erase organization rows."""
 
         async with self._membership_lock:
             _, owner_backend = await self._resolve_leader(owner_team_id, session_id)
@@ -670,6 +670,7 @@ class OrganizationRuntimeManager:
 
             member_team_ids = {leader.team_id for leader in organization.leaders}
             member_team_ids.add(owner_team_id)
+            expert_team_ids: set[str] = set()
             for team_id in member_team_ids:
                 key = (session_id, team_id)
                 worker = self._leader_turn_workers.pop(key, None)
@@ -692,6 +693,9 @@ class OrganizationRuntimeManager:
                 backend = getattr(entry.agent, "team_backend", None)
                 if backend is None:
                     continue
+                metadata = getattr(entry.agent.spec, "metadata", None) or {}
+                if team_id != owner_team_id and metadata.get("expert_team"):
+                    expert_team_ids.add(team_id)
                 backend.org_task_manager = None
                 backend.org_message_service = None
                 self._unbind_organization_workspace(entry.agent, backend)
@@ -712,6 +716,9 @@ class OrganizationRuntimeManager:
                 self._team_organizations.pop(key, None)
 
             deleted = await manager.dissolve_organization()
+            if self._expert_team_launcher is not None:
+                for team_id in sorted(expert_team_ids):
+                    await self._expert_team_launcher.stop(team_id=team_id, session_id=session_id)
             if self._summary_team_launcher is not None and summary_team is not None and summary_team.summary_team_id:
                 await self._summary_team_launcher.stop(
                     team_id=summary_team.summary_team_id,
@@ -1009,6 +1016,12 @@ class OrganizationRuntimeManager:
         if workspace_manager is not None and workspace_root:
             workspace_manager.unmount_from_workspace(workspace_root)
         backend.organization_workspace_manager = None
+        spec = getattr(agent, "spec", None)
+        if spec is not None:
+            metadata = dict(getattr(spec, "metadata", None) or {})
+            metadata.pop("organization_id", None)
+            metadata.pop("organization_session_id", None)
+            spec.metadata = metadata
 
     async def _ensure_unclaimed_service(self, manager: Any, session_id: str) -> None:
         key = (session_id, manager.organization_id)

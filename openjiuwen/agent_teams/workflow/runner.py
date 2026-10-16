@@ -14,7 +14,7 @@ bare ``swarmflow`` the loader always maps), so a script may import either.
 """
 from __future__ import annotations
 
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import aiofiles
 import aiofiles.os
@@ -247,6 +247,7 @@ async def run_swarmflow(
     budget: BudgetLedger | None = None,
     external_cli_agents: Sequence[Any] = (),
     team_backend: Any = None,
+    expert_specs: Mapping[str, Any] | None = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
@@ -294,6 +295,8 @@ async def run_swarmflow(
             reads ``get_model_pool()`` off it). ``None`` (a swarmflow run outside
             a team shell) leaves the pool empty, so any ``model`` hint fails as a
             pool miss.
+        expert_specs: AgentGroup expert table for ``agent_template`` picks; empty
+            when none bound.
 
     Returns:
         Whatever the script's ``run(args)`` returned.
@@ -341,6 +344,7 @@ async def run_swarmflow(
         workflow_name=_workflow_name(script_path),
         external_cli_agents=external_cli_agents,
         team_backend=team_backend,
+        expert_specs=expert_specs,
     )
     if on_backend_ready is not None:
         on_backend_ready(backend)

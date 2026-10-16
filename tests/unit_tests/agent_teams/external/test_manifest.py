@@ -71,3 +71,35 @@ def test_external_manifest_appends_skills_by_default(provider_name: str) -> None
     config = external_cli_agent_spec_from_template(template)
     assert config is not None
     assert config.skill_conflict == "append"
+
+
+@pytest.mark.parametrize("provider_name", ["codex", "claudecode"])
+@pytest.mark.parametrize("runtime_fields", [{}, {"provider_version": None}])
+def test_external_manifest_accepts_unspecified_provider_version(
+    provider_name: str,
+    runtime_fields: dict[str, str | None],
+) -> None:
+    template = AgentTemplateSpec(
+        agent_card=AgentCard(id="member", name="Member", description="External member"),
+        runtime=AgentRuntimeSpec.model_validate({"provider_name": provider_name, **runtime_fields}),
+    )
+
+    config = external_cli_agent_spec_from_template(template)
+
+    assert config is not None
+    assert config.cli_agent == {"codex": "codex", "claudecode": "claude"}[provider_name]
+
+
+@pytest.mark.parametrize("provider_name", ["codex", "claudecode"])
+@pytest.mark.parametrize("version", ["unsupported-version", ""])
+def test_external_manifest_rejects_explicit_mismatched_provider_version(
+    provider_name: str,
+    version: str,
+) -> None:
+    template = AgentTemplateSpec(
+        agent_card=AgentCard(id="member", name="Member", description="External member"),
+        runtime=AgentRuntimeSpec(provider_name=provider_name, provider_version=version),
+    )
+
+    with pytest.raises(ValueError, match=f"runtime requires {provider_name}"):
+        external_cli_agent_spec_from_template(template)

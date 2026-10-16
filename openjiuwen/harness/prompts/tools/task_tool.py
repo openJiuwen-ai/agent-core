@@ -72,7 +72,9 @@ user the result, you should send a text message back to the user with a \
 concise summary of the result.
 - Each task_tool invocation starts fresh by default — provide a complete task description. \
 Pass the returned resume_task_id only to explicitly continue or correct the same browser task \
-within its existing deadline.
+within its existing deadline, or to continue the same unfinished desktop (cua_agent) task.
+- If a cua_agent result comes back with status="timeout" and retryable=true, its desktop session is preserved: \
+continue it with the same resume_task_id and describe only what is still missing. Do not restart the task from scratch.
 - For browser_agent, preserve browser_result.status together with its summary, evidence and source observations. \
 Even a partial result can contain useful answers. Execution receipts describe dispatch/ACK; summary and completion \
 are worker judgments. Keep observations separate from inferred causes, respect source restrictions, and never treat \
@@ -148,7 +150,10 @@ task_tool 启动专门的子代理来自主处理复杂任务。每种子代理�
 - 子代理完成后会返回一条消息给你。该结果对用户不可见。\
 如需向用户展示结果，你应发送一条文字消息，简明总结子代理的结果。
 - 每次 task_tool 调用默认都是全新启动——请提供完整的任务描述。\
-只有在原期限内明确继续或纠正同一个浏览器任务时，才传入上次返回的 resume_task_id。
+只有在原期限内明确继续或纠正同一个浏览器任务，\
+或明确继续同一个未完成的桌面（cua_agent）任务时，才传入上次返回的 resume_task_id。
+- 若 cua_agent 返回 status="timeout" 且 retryable=true，其桌面会话已保留：\
+请用同一个 resume_task_id 继续，任务描述只写尚未完成的部分，不要从头重做。
 - 对 browser_agent，保留 browser_result.status 以及 summary、evidence 和带来源的 observations。\
 partial 中也可能已有可用答案。执行回执说明派发/ACK；summary 和完成判断由 worker 提供。\
 区分来源观察与原因推测，遵守原文限制，阻断列表为空不能证明页面没有障碍。不要为填字段槽而重复查询。
@@ -211,10 +216,13 @@ TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
         "en": "Additional capability categories required by browser_agent; use an empty list for core-only tasks",
     },
     "resume_task_id": {
-        "cn": "仅在继续同一个未完成浏览器任务时，传入上一次 task_tool 返回的 resume_task_id；新任务不要传",
+        "cn": (
+            "仅在继续同一个未完成的浏览器或桌面（cua_agent）任务时，"
+            "传入上一次 task_tool 返回的 resume_task_id；新任务不要传"
+        ),
         "en": (
-            "Only when continuing the same unfinished browser task, pass the resume_task_id "
-            "returned by the previous task_tool call; omit it for a new task"
+            "Only when continuing the same unfinished browser or desktop (cua_agent) task, pass "
+            "the resume_task_id returned by the previous task_tool call; omit it for a new task"
         ),
     },
 }

@@ -499,6 +499,39 @@ async def test_unblocked_task_assigned_to_human_starts_immediately(built_team, d
     assert unblocked_events[0].payload["task_id"] == "t-human-blocked"
 
 
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_dispatch_leaves_human_task_pending_for_scheduler(built_team, db):
+    """Under scheduled dispatch the scheduler owns the start and its handoff."""
+    from openjiuwen.agent_teams.schema.task import TaskGraphSpec
+    from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
+
+    scheduled_task_manager = TeamTaskManager(
+        team_name=built_team.team_name,
+        member_name=built_team.member_name,
+        db=db,
+        messager=built_team.messager,
+        dispatch_mode="scheduled",
+    )
+
+    graph = await scheduled_task_manager.add_graph(
+        [
+            TaskGraphSpec(
+                task_id="t-human-scheduled",
+                title="Human task",
+                content="Do the human-owned work.",
+                assignee=HUMAN_AGENT_MEMBER_NAME,
+            ),
+        ]
+    )
+
+    assert graph.ok, graph.reason
+    task = await scheduled_task_manager.get("t-human-scheduled")
+    assert task.status == TaskStatus.PENDING.value
+    assert task.assignee == HUMAN_AGENT_MEMBER_NAME
+    assert _published_events(built_team, TeamEvent.TASK_STARTED) == []
+
+
 # ---------------------------------------------------------------------------
 # Task lock (UpdateTaskTool) — leader cannot cancel/reassign human_agent tasks
 # ---------------------------------------------------------------------------

@@ -54,7 +54,7 @@ class TestCodeAgentE2E(unittest.IsolatedAsyncioTestCase):
         mock_llm.set_responses([
             create_tool_call_response(
                 "todo_create",
-                '{"tasks": "设计模块架构;实现核心功能;编写单元测试;集成测试"}'
+                '{"todos": "设计模块架构;实现核心功能;编写单元测试;集成测试"}'
             ),
             create_tool_call_response(
                 "todo_list",

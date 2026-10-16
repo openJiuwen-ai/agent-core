@@ -591,3 +591,16 @@ def test_call_signature_folds_builtin_model_and_effort():
     assert call_signature(
         "task A", {**base, "builtin_model": None, "effort": None}, None,
     ) == plain
+
+
+def test_call_signature_folds_agent_template_when_set():
+    """Two experts on the same prompt are two calls; no agent_template keeps the legacy bytes."""
+    from openjiuwen.agent_teams.workflow.engine.journal import call_signature
+
+    base = {"label": "x", "phase": "p", "model": None}
+    legacy = call_signature("prompt", base, None)
+    assert call_signature("prompt", {**base, "agent_template": "clip"}, None) != legacy
+    assert call_signature("prompt", {**base, "agent_template": "clip"}, None) != call_signature(
+        "prompt", {**base, "agent_template": "scene"}, None
+    )
+    assert call_signature("prompt", {**base, "agent_template": None}, None) == legacy
