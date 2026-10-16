@@ -1701,7 +1701,7 @@ class FsOperation(BaseFsOperation):
             method_exec_time_ms=exec_time_ms
         )
 
-        if not stream_chunk.data.is_last_chunk:
-            sys_operation_logger.debug(stream_log, event=event)
-        else:
+        if log_event_type == LogEventType.SYS_OP_END:
             sys_operation_logger.info(end_stream_log, event=event)
+        else:
+            sys_operation_logger.debug(stream_log, event=event)
