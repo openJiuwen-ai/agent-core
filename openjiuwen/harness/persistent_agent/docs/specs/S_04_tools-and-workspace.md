@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | S_04 / tools-and-workspace |
 | 关联模块 | [workspace/access.py](../../workspace/access.py)、[path_policy.py](../../workspace/path_policy.py)、[file_access.py](../../workspace/file_access.py)、[tools/workspace_read.py](../../tools/workspace_read.py)、[execution/share_file.py](../../execution/share_file.py)、[execution/handoff.py](../../execution/handoff.py) |
-| 最近一次修订日期 | 2026-10-15 |
-| 关联 feature | [F_14](../features/F_14_workspace-file-read.md)、[F_18](../features/F_18_output-handoff.md)（`share_file`）；文件修改接入见[开发计划](../designs/persistent-agent-development-plan.md) PA-16 |
+| 最近一次修订日期 | 2026-10-16 |
+| 关联 feature | [F_14](../features/F_14_workspace-file-read.md)、[F_18](../features/F_18_output-handoff.md)（`share_file`）、[F_20](../features/F_20_continuation.md)（续做的登记范围）；文件修改接入见[开发计划](../designs/persistent-agent-development-plan.md) PA-16 |
 | 设计依据 | [架构设计：办公空间](../designs/persistent-agent-architecture.md#47-办公空间与知识)、[身份与隔离](../designs/persistent-agent-architecture.md#9-权限隔离与资源限制) |
 
 本规约维护 WorkspaceAccessPort、调用级读取授权、逻辑路径、文件读取结果、私有草稿隔离及 `share_file` 的文件登记。通用副作用和工具事件从本文拆出，由 S_08 唯一维护。
@@ -88,7 +88,7 @@ WorkspaceReadScope 为宿主返回的不可变运行对象，不进入可序列�
 
 收尾准备时（S_02 第 4.4 节）重新取得授权、解析路径，按文件层检查后分块读取，计算 sha256 并累计实际读取的字节数；超过 Spec.share_file_max_bytes 立即失败，不把整个文件加载到内存，也不记录文件内容。该上限默认 32 MiB，是开发占位值，正式值由服务端对齐；取值须大于 0 且不超过保护性硬上限 1 GiB，进入 Spec 指纹。规则层只在调用时检查：收尾不是工具调用，不能发起确认。
 
-`share_file` 在 PA-15 名单中按无外部副作用处理（S_08），不记写意图，照常记工具完成事件。调用时写入的登记表只用于合并与 64 项上限，随 Execution 释放。收尾时先同步实时窗口，只按最终窗口中最后一个结束标记之后、所有 Rail 处理完成后仍为固定格式的 `share_file` 成功结果确定交出的文件：宿主 Rail 改写或阻断的结果、说明、补位和中断结果都不算。确认恢复时，在原生恢复之前把确认链的有效登记并入登记表，计入上限。停止、崩溃和其他暂停后的继续，由 Agent 决定是否重新登记。
+`share_file` 在 PA-15 名单中按无外部副作用处理（S_08），不记写意图，照常记工具完成事件。调用时写入的登记表只用于合并与 64 项上限，随 Execution 释放。收尾时先同步实时窗口，只按最终窗口中最后一个结束标记或执行头之后、所有 Rail 处理完成后仍为固定格式的 `share_file` 成功结果确定交出的文件：宿主 Rail 改写或阻断的结果、说明、补位和中断结果都不算。确认恢复时，在原生恢复之前把确认链的有效登记并入登记表，计入上限。停止、崩溃和其他暂停后的继续，由 Agent 决定是否重新登记。
 
 ## 5. 读取资源与生命周期
 

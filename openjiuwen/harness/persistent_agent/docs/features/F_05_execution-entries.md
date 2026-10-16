@@ -7,11 +7,11 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-05，F_05 为文档编号 |
-| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14；PA-08 交接替代说明：2026-10-14；v0.1.20 冲突修复与入口测试适配：2026-10-16（见附录 A.2） |
+| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14；PA-08 交接替代说明：2026-10-14；v0.1.20 冲突修复与入口测试适配、PA-18 接入与容量契约同步：2026-10-16（见附录 A.2） |
 | 负责人 | Song Haoran、Chen Ran；认领和后续安排以统一开发计划为准 |
 | 方案依据 | 沿用已确认架构及现行 spec；原阶段记录注明 D1～D7 已确认，本次不新增设计确认或修改架构 |
 | 原实现范围 | 内部 `persistent_agent/schema/request.py`、`execution/{entries,control,emitter,model_rail,seams}.py`、`schema/spec.py`，外层 `__init__.py` 与对应单测；复用共享 Session 接缝 |
-| 本次修订范围 | 2026-10-12 重组设计与验证记录；2026-10-14 修复控制拒绝的工具消息，补充独立测试，并同步 PA-10 接入、保存边界及 Model Rail 钩子；公开接口不变 |
+| 本次修订范围 | 2026-10-12 重组设计与验证记录；2026-10-14 修复控制拒绝的工具消息并同步 PA-10；2026-10-16 同步 PA-18 的续做组件、窗口接缝、最终容量检查及预算准入时点；三个公开执行入口签名不变，core 接缝与 Spec 配置见 F_20 |
 | 唯一开发计划 | [Persistent Agent 开发计划](../designs/persistent-agent-development-plan.md) PA-05；开发状态、排期、交付分类和节点进度在该计划维护 |
 | 验证摘要 | 2026-10-12 历史定向复核 94 passed / 2 failed；2026-10-14 控制修复独立回归及推送前复核均为 823 passed，历史与最新记录分开保留；真实宿主与 M1 联调未完成，见第 4 节及附录 A.2 |
 | Refs / 关联 PR | 原记录未提供 issue；控制 Rail 修复已合入 [PR #72](https://gitcode.com/huenrui_/agent-core/pull/72)，未关联 issue |
@@ -178,11 +178,13 @@ abort 是需 await 的控制协程，返回 None 只说明本次控制路径已�
 | `async GroupMessageReader.recent_messages(self, context: PersistentBuildContext, *, after: str \| None = None, trigger_message_id: str \| None = None) -> GroupMessagesResult` | PA-23：游标后新消息及连续性背景，排除触发消息；当前 F_07 直接调用 GroupChatPort，不通过此接口 |
 | `NativeReplyAdapter.to_native(self, response: PermissionResponse \| AnswerResponse, request: InterruptRequest) -> Any`（同步） | PA-09：合法响应转为原生中断输入值，不创建新任务正文；等待场景及工具 ID 由入口先校验，适配器异常可传播 |
 
-获取接口分别为 `session_state_store(context: PersistentBuildContext) -> SessionStateStore`、`window_assembler(context: PersistentBuildContext) -> WindowAssembler`、`group_message_reader(context: PersistentBuildContext) -> GroupMessageReader`、`native_reply_adapter() -> NativeReplyAdapter`，均为同步内部函数。当前 `session_state_store` 返回 PA-10 的正式实现，`window_assembler` 返回 PA-06 的组装器（注入 KnowledgePort 时抛 CONFIG_PARAM_ERROR；注入 GroupChatPort 时需要群消息读取，同样拒绝）；`group_message_reader`（PA-23）与 `native_reply_adapter`（PA-09）仍抛 CONFIG_PARAM_ERROR，测试中的替身仅用于组件验证。宿主 record / budget 接口复用 [F_02 第 5.6 节](F_02_execution-protocol.md#56-关键类方法与宿主接口定义)，没有新增执行权或控制端口。
+获取接口分别为 `session_state_store(context: PersistentBuildContext) -> SessionStateStore`、`window_assembler(context: PersistentBuildContext, *, chain_limit: int | None = None) -> WindowAssembler`、`group_message_reader(context: PersistentBuildContext) -> GroupMessageReader`、`native_reply_adapter() -> NativeReplyAdapter`，均为同步内部函数。当前 `session_state_store` 返回 PA-10 的正式实现，`window_assembler` 返回 PA-06 / PA-18 共用组装器，入口传入 Spec.continuation_chain_limit（注入 KnowledgePort 时抛 CONFIG_PARAM_ERROR；注入 GroupChatPort 时仍需要 PA-23 群消息读取）。`continuation_support(context) -> None` 是 PA-18 正式入口门禁，在 PA-12 归档查询接入前明确拒绝；`group_message_reader`（PA-23）与 `native_reply_adapter`（PA-09）仍拒绝，测试替身只证明组件。WindowAssembler.assemble 的共享签名、值对象和标记不变，权威定义在 schema/integration.py，seams.py 兼容再导出。宿主 record / budget 仍复用 F_02 的契约，新增可选执行链接口由 [S_02 第 4.3.1 节](../specs/S_02_events-and-result-handoff.md) 与 [F_20](F_20_continuation.md) D-06 定义，不新增执行权或控制端口。
 
 ### 2.4 执行与确认恢复流程
 
 #### 2.4.1 新 Request 的 execute
+
+本节的参与判断分支只适用于新 Request。PA-18 合法续做跳过群参与判断，先处理本 Request 的过期等待现场，再复用后续原生执行与收尾；流程、前序关系及正式入口门禁见 [F_20](F_20_continuation.md)。发起续做不要求模型继续操作，模型仍可根据证据结束任务。
 
 1. 校验 Spec 模式、上下文 / NoopCheckpointer、RequestInput、recovery_ref 和群端口存在性。
 2. `_start` 创建本 Execution 的 emitter，拒绝已有 emitter 的上下文。首次迭代启动 runner。
@@ -249,11 +251,13 @@ PA-06 加载后的兜底检查若发现等待中的调用或未配对工具调�
 
 [PersistentModelCallRail](../../execution/model_rail.py)由 PersistentAgentSpec.resolve_parts 装配；没有正式 emitter 时不执行预算与事件逻辑。它使用 before_invoke、before_model_call、after_model_call、on_model_exception、before_tool_call 五个钩子（before_invoke 为 PA-10 新增，见第 5 条）：
 
-1. 模型前先查 fatal / cancel / stop，有则 force-finish、跳过调用；否则生成新的 model_call_id，await admit 并重新校验 BudgetAdmission 和调用归属。denied 标记 budget_denied；异常或 DTO / 归属错配标记 error，均不调用模型。
+1. before_model_call 先查 fatal / cancel / stop，有则 force-finish、跳过调用。PA-18 将预算准入移到本实例注入的 check_final_request：最终系统提示、消息、附件和工具定义全部装配后，先检查容量，再生成新的 model_call_id、await admit 并重新校验 BudgetAdmission 和调用归属，最后调用模型。容量超限为 context_unfit，计数不可靠为 error，两者均不准入；denied 为 budget_denied，准入异常或 DTO / 归属错配为 error，均不调用模型。返回暂停结果不会进入模型异常重试，实际重试则重新检查并准入。
 2. 模型完成以响应 usage_metadata 构造用量；缺少用量或模型调用失败为 unknown，不伪造零计数。await report、校验 BudgetReport / 归属，再记 model.completed。
 3. report 调用或校验异常只记诊断；响应为 rejected 也不转成执行暂停，宿主负责结算与对账。model.completed 不是结算回执。
 4. 工具前同样检查控制和 fatal，阻止每个尚未开始的工具，包括只读工具；被阻止的调用在窗口中的结果为“本次执行正在结束，该工具未调用。”（停止、取消与致命错误共用），强制结束载荷仍用于判定结局。已开始的并行调用依赖现有取消收敛，不承诺撤销外部效果。
 5. 原生调用开始时（Rail 已注册、上下文尚未创建）检查实际挂载的上下文处理器，发现会卸载消息的处理器即标记致命错误并停止，入口在原生退出后抛出配置错误，不保存、不记结束事件（[F_17](F_17_session-state-record.md) D-07）。
+
+before_invoke 同时通过 ReActAgent.set_final_request_check 为本实例注入上述最终检查；core 接缝默认关闭，不依赖 Persistent 类型，完整定义、配置、计数可靠性和待 core 维护者评审的边界见 F_20 D-09。容量检查不由 Rail 优先级保证最终性。独立的群消息参与判断仍单独使用预算端口，不经过这一原生接缝。
 
 模型 Rail 优先级为 10；当前既有排序中高值先执行，它位于其他常用模型前钩子之后。不能仅凭数值宣称未来任何自定义 Rail 都不会排在它后面。PA-15 的 before_tool_call 优先级为 5，在控制守卫与权限 / 中断判定之后，并在意图等待返回后再次检查控制；旧文“PA-15 尚待接入、与工具守卫同为 10”的说明已不适用。完整工具策略和原生幂等重试边界由 F_15 / S_08 唯一维护。
 
@@ -391,7 +395,7 @@ flowchart LR
 | --- | --- | --- |
 | SessionStateStore.load / PA-10 | 写回 Session state，返回 LoadedRecord(waiting, last_group_message_id)；确定无记录返回空 LoadedRecord | 已接入（[F_17](F_17_session-state-record.md)）；后端异常为运行失败，记录无效为校验拒绝，均不退回空窗口 |
 | SessionStateStore.save / PA-10 | 收到 ExecutionEnding(outcome, request_id, reply_target, output_refs, last_group_message_id 及交接摘要)，整理白名单后一次保存 | 游标须原样保存并进入结束标记；交接摘要进入结束标记（[F_18](F_18_output-handoff.md)）；已接入，写入前失败不调用写入，后端写入抛错时记录可能已改变 |
-| WindowAssembler.assemble / PA-06 | load 之后组装，返回 WindowAssembly(native_input, last_group_message_id)；游标为服务端确认的扫描位置，无可信进度则保留加载时的游标 | 已接入；容量验收未关闭；确认恢复不调用 |
+| WindowAssembler.assemble / PA-06、PA-18 | load 之后组装，返回 WindowAssembly(native_input, last_group_message_id)；游标为服务端确认的扫描位置，无可信进度则保留加载时游标；续做先核对并清理本 Request 的旧等待现场，再追加执行链证据、规则及原任务 | 新任务与续做组件已接入，正式续做门禁仍关闭；容量筛选与换窗验收未关闭；正常确认恢复不调用 |
 | GroupMessageReader.recent_messages / PA-23 | after 游标后的新消息及少量衔接，trigger_message_id 排除触发消息，返回 GroupMessagesResult | getter 未接入；PA-06 背景消费它。当前 PA-07 直接调用 GroupChatPort，不等待该 getter |
 | NativeReplyAdapter.to_native / PA-09 | 匹配后的单项回复转原生载荷，入口按交互 ID 组装 InteractiveInput | getter 未接入；测试适配器不是正式实现 |
 
@@ -450,7 +454,7 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 | --- | --- | --- |
 | 历史验证失败，本轮不再复现 | 2026-10-12 记录的两个入口流式事件链失败 | 2026-10-14 基于 8e0d1067 的独立回归通过：PA 包与 core Session 823 passed；历史失败记录保留，真实宿主验收仍待进行 |
 | 未实现接入 | PA-06、PA-10 已接入（2026-10-12、2026-10-14，见 [F_17](F_17_session-state-record.md)）；PA-09 回复适配与 PA-23 群消息读取的 getter 仍拒绝 | 确认恢复与群 Session 任务仍拒绝；私聊和定时任务的正式入口可执行，但 M1 真实组件验收前不声明 execution 能力 |
-| 未实现接入 | PA-18 续做；PA-23 游标群背景 | recovery_ref 仍拒绝。原“PA-08 文件候选、超限答案补交”一项已由 [F_18](F_18_output-handoff.md) 实现组件（超长回答分段、`share_file` 文件候选、结束事件补交重试），真实服务端联调待完成 |
+| 组件已实现、正式门禁未开放 | PA-18 续做；PA-23 游标群背景仍未接入 | PA-18 已实现执行链、旧现场处理、分层材料、分页工具与最终容量检查；正式 recovery_ref 入口仍按 F_20 D-10 拒绝，等待 PA-12 与 M2c。PA-08 文件候选与超长回答分段见 F_18，真实服务端联调待完成 |
 | 有意保留范围 | task-loop、同步 / 异步 / 持久子代理关闭 | PA-24～PA-26 逐项验证后开放，不由配置偷偷启用 |
 | 已有组件验证、真实集成待完成 | 工具停止、取消或报错后的调用组保留、残缺结果补位和状态保存已有 PA-10 组件证据 | 见 F_17；真实宿主与 PA-18 续做仍须查证日志和外部效果，不能据此宣称完整安全续做 |
 | 预算覆盖限制 | 原生 Rail 之外的内部模型调用，例如独立 task planning 模型，不经过本 Rail | 一期不启用这类 Rail；开放时评估额外预算消费者 |
@@ -502,3 +506,9 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 - 独立证据：在 Git 基线 `8e0d1067` 的临时副本应用此修复，不包含 PA-10 代码；macOS、Python 3.11.17、本地模型、原生 DeepAgent，会话存储仍用 PA-05 替身。实际命令：`make test UV=no PYTHON=<共享虚拟环境的 Python> TESTFLAGS='tests/unit_tests/harness/persistent_agent tests/unit_tests/core/session -q --tb=short -o addopts="" --disable-warnings'`，823 passed、17 warnings。Ruff 检查及格式检查通过，Pylint 10.00/10；拼写检查另用临时安装的 codespell 完成。
 - 边界：只证明控制拒绝的消息和入口结局；不证明 PA-10 的存储或真实宿主联调。
 - 推送前复核（2026-10-14）：在基于 `8e0d1067` 的 detached 工作树中重跑上述 PA 包与 core Session 命令，823 passed、18 warnings；实际提交范围的格式、拼写、Ruff 和 Pylint 检查全部通过（Pylint 10.00/10）。Makefile 检查使用共享解释器，拼写工具通过临时安装的 codespell 执行；没有修改仓库工具配置。开发计划本次差异全部限于 §4.1，包含控制修复的进展与开发者指定的 PA-05、PA-06、PA-10 负责人。
+
+### 2026-10-16 PA-18 联动同步
+
+- 原结论与范围：新任务执行由 PA-05 编排，预算准入在 before_model_call，续做组件未接入。
+- 新依据与变化：F_20 已确认的 D-06、D-08、D-09、D-10 已在 PA-18 原型中接入；更新本节接缝、预算时点、续做组装边界与正式门禁。共享 WindowAssembler.assemble 的签名和值对象保持不变。
+- 当前效力：预算按“最终请求 → 容量检查 → 准入 → 模型调用”执行；PA-18 组件可验证，正式续做仍拒绝。原 PA-05 的历史验收记录保留原范围，不能替代 PA-18 或 M2c 验收。验证与未完成项见 F_20 第 8 节；本轮只同步文档。

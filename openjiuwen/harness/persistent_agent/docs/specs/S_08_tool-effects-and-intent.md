@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_08 / tool-effects-and-intent |
 | 关联模块 | [effect_policy.py](../../tools/effect_policy.py)、[tool_intent_rail.py](../../execution/tool_intent_rail.py)、[Spec 装配](../../schema/spec.py) |
-| 最近一次修订日期 | 2026-10-14 |
+| 最近一次修订日期 | 2026-10-16 |
 | 关联 feature | [F_15](../features/F_15_tool-intent-before-side-effect.md)；share_file 的分类见 [F_18](../features/F_18_output-handoff.md) D-06 |
 | 设计依据 | [架构设计：写意图及确认](../designs/persistent-agent-architecture.md#62-事件传递确认与流量边界)、[外部操作](../designs/persistent-agent-architecture.md#82-外部操作与重试条件) |
 
@@ -21,7 +21,7 @@ PersistentToolIntentRail 和名称白名单已有实现，Spec.resolve_parts 统
 
 ## 2. 操作身份与事实归属
 
-白名单仅包含模型可见的精确工具名 read_file、list_files、share_file，定义在 effect_policy.py；分类依据是“不直接修改办公空间或外部系统”，允许修改本次执行的内部登记状态（share_file 只登记文件，上传与发送由服务端在结束事件落盘后执行，见 S_04 第 4.3 节）。不折叠大小写、不匹配前后缀、不按 read / search 关键词或实现类猜测；未知、自定义、MCP 或宿主新增名称都按写操作处理。白名单维护在 agent-core 一处，宿主不维护第二份表；后续只读名称须在相应实现特性审查登记。
+白名单仅包含模型可见的精确工具名 read_file、list_files、share_file、read_execution_record（只读取本 Request 已保存的执行日志，PA-18），定义在 effect_policy.py；分类依据是“不直接修改办公空间或外部系统”，允许修改本次执行的内部登记状态（share_file 只登记文件，上传与发送由服务端在结束事件落盘后执行，见 S_04 第 4.3 节）。不折叠大小写、不匹配前后缀、不按 read / search 关键词或实现类猜测；未知、自定义、MCP 或宿主新增名称都按写操作处理。白名单维护在 agent-core 一处，宿主不维护第二份表；后续只读名称须在相应实现特性审查登记。
 
 | 事实 | 定义与持有者 |
 | --- | --- |
@@ -85,7 +85,7 @@ tool.completed 是普通日志，构造或 record 失败只诊断，不能替换
 
 实际流程为：权限 / 确认判断 → 检查停止与调用身份 → 分类 → 写操作同步意图 → 复核能否派发 → 底层工具 → 最终完成事件。意图可靠保存与实际外部执行之间没有跨系统事务；有意图无结果可以是取消、崩溃或普通日志缺失，不推断操作未执行。
 
-程序级外部查询、取消、补偿、精确重放与文件冲突不属于 PA-15。取消不自动授予补偿权，也不撤回在途请求；后续继续须按 S_05 查证源状态，查不清询问发起人。子代理执行模式仍未开放，不能据此承诺父子事件 / 预算及外部副作用已完整汇聚。
+程序级外部查询、取消、补偿、精确重放与文件冲突不属于 PA-15。取消不自动授予补偿权，也不撤回在途请求；后续继续须按 S_05 查证源状态，查不清时可询问发起人，是否询问由模型判断。子代理执行模式仍未开放，不能据此承诺父子事件 / 预算及外部副作用已完整汇聚。
 
 ## 6. 当前限制与替代关系
 

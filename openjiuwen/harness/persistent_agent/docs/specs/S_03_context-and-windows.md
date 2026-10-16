@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | S_03 / context-and-windows |
 | 关联模块 | [seams.py](../../execution/seams.py)、[BaseKVStore 注入集合](../../ports.py)、[integration.py](../../schema/integration.py)、[window_assembly.py](../../execution/window_assembly.py)、[session_state.py](../../execution/session_state.py)、[session_record.py](../../schema/session_record.py)；会话状态记录已接入，换窗与归档尚待接入 |
-| 最近一次修订日期 | 2026-10-15 |
-| 关联 feature | [F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_17](../features/F_17_session-state-record.md)、[F_18](../features/F_18_output-handoff.md)；待实现与验证范围见[开发计划](../designs/persistent-agent-development-plan.md) PA-06、PA-10～PA-12 |
+| 最近一次修订日期 | 2026-10-16 |
+| 关联 feature | [F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_17](../features/F_17_session-state-record.md)、[F_18](../features/F_18_output-handoff.md)；待实现与验证范围见[开发计划](../designs/persistent-agent-development-plan.md) PA-06、PA-10～PA-12 ；[F_20](../features/F_20_continuation.md)（PA-18 联动修订） |
 | 设计依据 | [架构设计：窗口](../designs/persistent-agent-architecture.md#44-上下文窗口管理)、[换窗](../designs/persistent-agent-architecture.md#522-运行中换窗归档摘要与替换)、[保存规则](../designs/persistent-agent-architecture.md#7-数据管理与保存规则) |
 
 本规约唯一维护 Session 当前窗口、会话状态记录、内部 WindowStore 接入、归档与本 Session 历史；合并旧 S_05 中的状态保存责任。
@@ -67,15 +67,16 @@ PA-06 已实现：加载之后，按稳定到临时顺序保留窗口历史，�
 
 PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.window_assembler`），设计与取舍见 [F_06](../features/F_06_window-assembly.md)：
 
-- **组成与位置**：加载会话状态记录之后，在 Session state `context` 中已保存窗口的末尾依次追加执行头、临时背景块（均为 `UserMessage`，带上述标记），任务输入作为原生输入 `{"query": RequestInput.text}` 由原生 ReAct 加在最后。系统提示词和工具定义不变；此后执行中只追加。
-- **执行头**：一行，`【本次执行】类型：新任务；request_id：…；execution_id：…；来源：私聊|群消息|定时任务`，有触发消息时再加消息 ID、发送者（显示名、ID，群消息另注人或 Agent）、接收时间，有附件时加附件引用。续做（PA-18）沿用同一格式，类型为“续做”并加 `recovery_ref`；在此之前带 `recovery_ref` 的上下文不组装。
+- **组成与位置**：加载会话状态记录之后，在 Session state `context` 中已保存窗口的末尾依次追加执行头、临时背景块（均为 `UserMessage`，带上述标记），任务输入由原生 ReAct 加在最后。新任务的 query 为 RequestInput.text 原文；续做的 query 在原文之后追加可选继续指示。系统提示词和工具定义不变；此后执行中只追加。
+- **执行头**：一行，`【本次执行】类型：新任务；request_id：…；execution_id：…；来源：私聊|群消息|定时任务`，有触发消息时再加消息 ID、发送者（显示名、ID，群消息另注人或 Agent）、接收时间，有附件时加附件引用。PA-18 已在组件中接入续做执行头：类型为“续做”并加 `recovery_ref`；是否可进入该分支由 S_05 第 4.4 节的正式入口门禁控制。
+- **续做材料**：先处理本 Request 的旧等待现场，再追加续做执行头、最近群消息、执行链的分层摘要与续做规则、原任务及继续指示。摘要保留关键进度、成果定位、所有未决写操作及缺失说明，详细记录由受控 read_execution_record 分页查询；摘要与规则属于临时背景，结束时删除，执行头、任务和工作过程保留。具体契约见 [F_20](../features/F_20_continuation.md) D-06、D-08。
 - **群 Session**：注入了 `GroupChatPort` 的 Session。只有群 Session 读取最近群消息：以加载的游标为 `after`、以触发消息为 `trigger_message_id` 读取（增量与触发位置回补合并去重、排除触发消息），结果须属于本次执行；组装器再排除触发消息并按接收时间排序。被忽略的消息照常列出，排队中的请求逐条标注且说明只作背景、不是指令，已撤回的不显示正文，正文暂缺的标注“正文暂缺，需要时可查询群聊记录”。`empty` 不加背景块；`incomplete` 仍加背景块并注明没有读取完整，不能当作“没有消息”。
 - **游标**：取读取结果中服务端确认的扫描位置 `scanned_through`，与展示范围无关；结果不带该位置时以及私聊 Session 沿用加载时的游标。
 - **未接入的来源**：群 Session 在群消息读取（PA-23）接入前、注入 `KnowledgePort` 的执行在知识导航（PA-13）接入前，于接入点明确拒绝（`DEEPAGENT_CONFIG_PARAM_ERROR`）。群消息 Request 例外：PA-07 先完成参与判断才取接入点，此时已有判断事件；群里的定时任务和私聊仍在任何事件之前拒绝。
 - **等待中的调用**：加载的记录带等待现场，或 Session state 带 `__react_agent_interruption__` 时，新 Request 不组装，校验拒绝（`DEEPAGENT_CONTEXT_PARAM_ERROR`），窗口不追加；窗口有未配对的工具调用时同样拒绝，并记 error 日志（见上文“窗口安全”）。
 - **上下文 rail**：Persistent 构造（`PersistentAgentSpec.resolve_parts`）拒绝挂载 `ContextAssembleRail`、`PersonalContextRail`、`ContextProcessorRail`（含子类），`ContextProcessorRail` 的默认压缩链因此也不会挂载；`DeepAgentSpec` / `create_deep_agent` 不变。
 - **增量通道**：保留原生 `PromptAttachmentManager.sync_to_context`（首次快照、之后只追加变化）；一期 Persistent 自身没有执行中追加的动态内容。
-- **容量**：组装不做容量检查。超限时优先展示最新消息、标明省略范围、保留历史查询定位的选择逻辑，待共享容量计算的提供方和最终请求的检查位置对齐后实现（开发计划第 1.2 节）。
+- **容量**：本阶段续做只有必需材料，装配时暂不单独计数。PA-18 已提供共用 execution/capacity.py 和最终请求检查，在完整请求装配后、预算准入与模型调用前阻断超限或未知容量，见 S_01 第 4.4 节及 F_20 D-09。PA-06 接入可选群背景时补材料筛选，PA-11 接入换窗时补摘要调用前检查；三个检查点目前只完成每次原生模型调用前这一处。减少可选材料、必要时归档换窗、复查后仍放不下则 context_unfit 的整体流程仍待联合接入，不截断原任务或静默删除未决写操作。
 
 ### 4.3 `SessionStateStore.save(context, ending) -> None`
 
@@ -91,7 +92,7 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 
 普通模型回复、工具调用和结果沿原生路径追加。两次模型调用之间，窗口容量达到模型上下文容量的 70% 且工具消息成对完整时触发换窗，预留 30% 用于摘要。Agent 主动换窗请求属于后续扩展，本期不承诺 request_window_switch 工具。
 
-顺序为：同步归档旧窗原文及关联 → 申请预算生成摘要 → 组装并替换内存新窗 → 产生 S_02 的 window.switched。归档失败不换窗；摘要失败保留已归档原文并按实际策略重试，不能承诺无限重试。新窗含旧窗摘要、目标 / 待办、未决写意图、归档引用、当前执行头和任务输入，以及完整成组的近期原文。最小必要内容仍放不下则 paused(context_unfit)，不静默截断。
+顺序为：同步归档旧窗原文及关联 → 检查摘要请求容量 → 申请预算生成摘要 → 组装并替换内存新窗 → 产生 S_02 的 window.switched。归档失败不换窗；摘要失败保留已归档原文并按实际策略重试，不能承诺无限重试。新窗含旧窗摘要、目标 / 待办、未决写意图、归档引用、当前执行头和任务输入，以及完整成组的近期原文。当前确认链中仍有效的 share_file 调用及成功结果必须保留，并置于新窗最后一个执行头或结束标记之后，不能只保留登记摘要。70% 是换窗触发阈值，实际调用还须满足共用容量上限；最小必要内容仍放不下则 paused(context_unfit)，不静默截断。
 
 新窗在执行中只存在内存，执行结束才保存当前记录；崩溃不会自动保存新窗口。归档、内存替换、普通窗口事件和会话记录分别确认，不提供全局事务、条件指针更新、租约围栏或“事件失败回滚窗口”的保证。
 
@@ -106,7 +107,7 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 | 交接正文 | 结局不是等待确认、本次有最终回答，且 after_invoke Rail 改写后与本 Execution 最后一条原生回复不同时，在结束标记之前追加一条带 `persistent_window_part=handoff_text` 标记的用户消息，内容为 `【实际交出的最终回答】` 加实际交接的正文；整批准备失败时同样保留，作为后续交接的依据；相同则不追加 |
 | 执行结束标记 | 结局不是等待确认时，在窗口末尾追加一条带 `persistent_window_part=execution_end` 标记的单行用户消息，写明 request_id、execution_id、结局、交出的候选（`最终回答 N 段`、`文件 <逻辑路径>（<共享方式>，<output_id>）`，以结束记录为准，没有候选写“无”）、整批准备失败时的未交接原因（逻辑路径与类别），以及服务端确认已扫描到的群消息位置 |
 
-等待确认时，末尾待结果的工具调用一律不动；结束标记写入记录元信息，不追加到窗口尾部。窗口中的 `share_file` 调用及其结构化结果是文件登记的依据：收尾时以最终窗口中的有效结果确定交出的文件，确认恢复也据此计入上限（S_04 第 4.3 节）；换窗（PA-11）须保留当前确认链中尚未交出的登记依据。临时背景仍可按标记删除。完成、取消、失败与可恢复暂停需保存；忽略群消息未写入窗口，无需保存；进程崩溃无法保存。停止能否取得完整现场须按实现验证，不据控制入口返回宣称已保存。
+等待确认时，末尾待结果的工具调用一律不动；结束标记写入记录元信息，不追加到窗口尾部。窗口中的 `share_file` 调用及其结构化成功结果是文件登记依据：收尾只扫描最终窗口最后一个结束标记或执行头之后的有效结果（S_04 第 4.3 节）。新任务、崩溃续做及非确认暂停后继续开启新的扫描范围，旧登记只供查证，不自动交出；正常确认恢复不追加执行头，沿用本确认链有效登记并计入上限。换窗（PA-11）须把有效调用及成功结果完整保留在该扫描范围内。临时背景仍可按标记删除。完成、取消、失败与可恢复暂停需保存；忽略群消息未写入窗口，无需保存；进程崩溃无法保存。停止能否取得完整现场须按实现验证，不据控制入口返回宣称已保存。
 
 **中途结束后的安全窗口：** 停止、取消或执行中报错时，原生执行路径保留已发出的调用组（Persistent 显式启用）：后续处理（含安全 Rail 的替换）全部完成的结果按最终结果保留；已返回或已抛错、但后续处理未完成的调用只保留说明，不保存未经处理的内容。这里的“处理完成”指事件链走完，不等于安全检查成功：回调框架对 Rail 的普通异常只记日志、继续执行其余 Rail，内容照常保留；宿主安全 Rail 要拦截内容，须先替换成安全说明，再请求强制结束。PA-10 保存时按调用组为缺失工具结果的调用幂等补充标为 `stopped_tool_placeholder` 的结果，说明“结果未取得，实际效果需核实”，具体结束原因由结束记录说明；已有结果、说明及原生“已中断”结果不重复补位，正常等待确认不补位。加载结局为停止、取消或失败的旧记录时同样修补。保存补位、加载修补与原生事实保留均已有组件实现，core 改动待 core 维护者评审；“停止、取消或报错 → 保存 → 重新加载 → 下一任务”已有组件验证，仍需真实服务端联调（见 [F_17](../features/F_17_session-state-record.md)）。
 
