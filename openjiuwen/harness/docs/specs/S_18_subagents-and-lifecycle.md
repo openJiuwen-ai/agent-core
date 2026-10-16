@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（9 文件）、`openjiuwen/harness/tools/cua/`、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-10-15 |
+| 最近一次修订日期 | 2026-10-16 |
 | 关联 feature | F_05_browser-task-integrity、F_07_browser-jev-policy、F_08_browser-jev-handover、F_09_browser-runtime-phase-contract、F_10_browser-runtime-simplification、F_11_browser-p0-closure、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_14_browser-model-usage-summary、F_20_react-iteration-limit、F_21_cua-desktop-subagent |
 
 ## 范围 / 边界
@@ -77,7 +77,11 @@ Browser 的完整工具、Rails、运行时与宿主接入统一见
     并发只读结果的合并结构由 PageState 提供。WorkingContext 默认只投影 runtime 权威状态，
     不再要求模型维护第二份记忆。原生 AX 先解包装再注册 refs，不被不完整 Probe 替换；工具消息
     只携带新数据和 PageState 摘要，不重复附加旧 Cards。确认排序/筛选变化时废弃旧列表目标，
-    不因每次只读观察递增 generation。
+    不因每次只读观察递增 generation。完整 AX snapshot 在解码和投影前计算内容指纹，并规范化生成的
+    refs；页面进度由 runtime 统一分类，context processor 不再维护第二套页面变化状态。没有新语义证据的
+    只读检查不增加或清除交互失败计数，也不消耗 replan trial；检查中出现的新证据仍走现有进度恢复路径。
+    缺失或失效的 JEV 决策观察仍通过既有有界 metadata 读取修复；该修复属于 observation，
+    不重复评价交互失败，也不触发完整 AX 捕获。
     有损投影前保存任务内可恢复原文，handle 不跨 session；临时观察文件有效期 24 小时，
     写入时惰性清理过期文件，跨任务扫描每工作区最多每小时一次；每任务上限 128 个 / 64 MiB。
     停止运行时不保证物理文件即时删除。存储失败时保留原文。

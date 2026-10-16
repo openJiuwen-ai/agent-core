@@ -31,9 +31,8 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabiliti
     CORE_BROWSER_TOOL_NAMES,
     resolve_browser_capabilities,
 )
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context import (
-    BrowserWorkingContextStore,
-)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context import BrowserWorkingContextStore
+from openjiuwen.harness.tools.browser_move.playwright_runtime.page_content import fingerprint_snapshot
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime, BrowserRuntimeRail
 from openjiuwen.harness.tools.browser_move.playwright_runtime.service import MAX_ITERATION_MESSAGE
 
@@ -79,6 +78,238 @@ def _make_bare_runtime() -> BrowserAgentRuntime:
     runtime._selector_primary_links = {}
     runtime._last_observed_url = ""
     return runtime
+
+
+def _make_capture_runtime() -> BrowserAgentRuntime:
+    runtime = _make_bare_runtime()
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime.call_playwright_tool = AsyncMock(return_value='- button "Filters" [ref=e1]')
+    runtime.call_playwright_run_code_unsafe = AsyncMock(
+        return_value={
+            "ok": True,
+            "url": "https://tenders.example/results",
+            "title": "Tenders",
+            "semantic_state": {"result_count": 2, "first_result_text": "Pinned tender"},
+        }
+    )
+    return runtime
+
+
+@pytest.mark.parametrize("capture_method", ["capture_browser_state", "capture_reconciliation_browser_state"])
+@pytest.mark.parametrize("wrapped_result", [False, True], ids=["text", "nested-json-mcp"])
+def test_complete_capture_detects_later_results_beyond_context_limits(
+    capture_method: str,
+    wrapped_result: bool,
+) -> None:
+    runtime = _make_capture_runtime()
+    padding = json.dumps("unchanged page text " * 1000)
+    snapshots = [
+        f'- main:\n  - article "Pinned tender" [ref=e1]\n  - paragraph: {padding}\n'
+        '  - article "Tender" [ref=e2]:\n'
+        f'    - paragraph: Tender {index} closes October {index + 1} {"x" * 6100}\n'
+        '    - link "Details" [ref=e3]:\n      - /url: https://tenders.example/details'
+        for index in range(4)
+    ]
+    runtime.call_playwright_tool.side_effect = [
+        json.dumps({"result": {"content": [{"type": "text", "text": snapshot}]}})
+        if wrapped_result
+        else snapshot
+        for snapshot in snapshots
+    ]
+    runtime.persist_observation = AsyncMock(return_value="a" * 32)
+    capture = getattr(runtime, capture_method)
+    first = _run(capture(action_group_id="initial"))
+    assert first["semantic_progress"]["progress"] == "initial"
+
+    for index in range(1, 4):
+        state = _run(capture(action_group_id=f"action-{index}"))
+        progress = state["semantic_progress"]
+        assert state["ok"] is True
+        assert progress["progress"] == "progress"
+        assert progress["changed_fields"] == ["page_content_hash"]
+        assert progress["consecutive_no_progress"] == 0
+        assert progress["replan_required"] is False
+        assert state["semantic_state"]["page_content_hash"] == fingerprint_snapshot(snapshots[index])
+        assert "Details" in state["dom"]
+        assert f"Tender {index} closes October" not in state["dom"]
+        runtime.validate_reference_values(("e3",))
+        target = runtime.ensure_page_state().resolve_target(generation_id=runtime.generation_id, ref="e3")
+        assert target.name == "Details"
+        runtime.persist_observation.assert_any_await(snapshots[index], "browser_snapshot")
+
+    assert runtime.call_playwright_tool.await_count == 4
+    assert runtime.call_playwright_run_code_unsafe.await_count == 4
+    if capture_method == "capture_reconciliation_browser_state":
+        assert state["reconciliation_only"] is True
+
+
+@pytest.mark.parametrize("capture_method", ["capture_browser_state", "capture_reconciliation_browser_state"])
+@pytest.mark.parametrize("filter_changed", [False, True])
+def test_capture_invalidates_only_changed_listing_targets(capture_method: str, filter_changed: bool) -> None:
+    runtime = _make_capture_runtime()
+    metadata = runtime.call_playwright_run_code_unsafe.return_value
+    metadata["semantic_state"]["selected_filters"] = [{"key": "sort", "value": "oldest"}]
+    _run(runtime.capture_browser_state(action_group_id="initial"))
+    page_state = runtime.ensure_page_state()
+    cards = page_state.register_cards(
+        {"cards": [{"selector_hint": "#old-card", "selector_hint_validated": True, "match_count": 1}]}
+    )
+    target_id = cards[0]["target_id"]
+    generation = runtime.generation_id
+    metadata["semantic_state"]["selected_filters"] = [
+        {"key": "sort", "value": "newest" if filter_changed else "oldest"}
+    ]
+
+    result = _run(getattr(runtime, capture_method)(action_group_id="interaction"))
+
+    assert result["ok"] is True
+    assert runtime.generation_id == generation
+    runtime.validate_reference_values(("e1",))
+    if filter_changed:
+        assert result["page_state"]["listing_stale"] is True
+        assert any(card.get("target_id") == target_id for card in result["page_state"]["cards"])
+        with pytest.raises(ValueError):
+            runtime.resolve_model_target_id(target_id)
+    else:
+        assert runtime.resolve_model_target_id(target_id).selector == "#old-card"
+        assert result["page_state"]["cards"]
+
+
+def test_compact_capture_reuses_content_without_charging_failed_interactions() -> None:
+    runtime = _make_capture_runtime()
+    initial = _run(runtime.capture_browser_state(action_group_id="initial"))
+    content_hash = initial["semantic_state"]["page_content_hash"]
+
+    for index in range(1, 4):
+        state = _run(runtime.capture_compact_browser_state(action_group_id=f"inspect-{index}"))
+        assert state["semantic_state"]["page_content_hash"] == content_hash
+        assert state["semantic_progress"]["observation_only"] is True
+        assert state["semantic_progress"]["progress"] == "inspection"
+        assert state["semantic_progress"]["consecutive_no_progress"] == 0
+        assert state["semantic_progress"]["replan_required"] is False
+
+    runtime.call_playwright_tool.assert_awaited_once()
+    runtime.call_playwright_run_code_unsafe.assert_awaited_once()
+    runtime.ensure_page_state().add_field_coverage(["closing_date"])
+    evidence = _run(runtime.capture_compact_browser_state(action_group_id="new-evidence"))
+    assert evidence["semantic_progress"]["progress"] == "progress"
+    assert evidence["semantic_progress"]["changed_fields"] == ["field_coverage"]
+
+
+@pytest.mark.parametrize("capture_fails", [False, True])
+def test_full_capture_for_read_preserves_failed_interaction_budget(capture_fails: bool) -> None:
+    runtime = _make_capture_runtime()
+    _run(runtime.capture_browser_state(action_group_id="initial"))
+    _run(runtime.capture_browser_state(action_group_id="failed-interaction"))
+    if capture_fails:
+        runtime.call_playwright_tool.side_effect = RuntimeError("snapshot unavailable")
+
+    for index in range(3):
+        captured = _run(runtime.capture_browser_state(action_group_id=f"read-{index}", observation_only=True))
+        progress = captured["semantic_progress"]
+        assert progress["observation_only"] is True
+        assert progress["progress"] == ("unknown" if capture_fails else "inspection")
+        assert progress["consecutive_no_progress"] == 1
+        assert progress["replan_required"] is False
+
+
+@pytest.mark.parametrize("failure", ["snapshot_exception", "invalid_snapshot", "error_envelope", "metadata_exception"])
+def test_failed_capture_invalidates_compact_content_without_advancing_history(failure: str) -> None:
+    runtime = _make_capture_runtime()
+    _run(runtime.capture_browser_state(action_group_id="initial"))
+    _run(runtime.capture_compact_browser_state(action_group_id="inspect"))
+    before = runtime.semantic_progress
+    metadata = runtime.call_playwright_run_code_unsafe.return_value
+    if failure == "snapshot_exception":
+        runtime.call_playwright_tool.side_effect = RuntimeError("snapshot timeout")
+    elif failure == "invalid_snapshot":
+        runtime.call_playwright_tool.return_value = "### Error\nBrowser disconnected"
+    elif failure == "error_envelope":
+        runtime.call_playwright_tool.return_value = {
+            "isError": True,
+            "content": [{"type": "text", "text": '- button "Filters" [ref=e1]'}],
+        }
+    else:
+        runtime.call_playwright_run_code_unsafe.side_effect = RuntimeError("metadata timeout")
+
+    failed = _run(runtime.capture_browser_state(action_group_id="failed-action"))
+    compact = _run(runtime.capture_compact_browser_state(action_group_id="inspection-after-failure"))
+    assert failed["semantic_progress"]["observation_only"] is False
+    assert compact["semantic_progress"]["observation_only"] is True
+
+    for state in (failed, compact):
+        assert state["ok"] is False
+        assert state["semantic_progress"]["progress"] == "unknown"
+        assert state["semantic_progress"]["observable_progress"] is False
+        assert state["semantic_progress"]["changed_fields"] == []
+        assert "page_content_hash" not in state["semantic_state"]
+        assert "page_content_hash" not in state["semantic_progress"]["semantic_state"]
+    assert runtime.semantic_progress == before
+
+    runtime.call_playwright_tool.side_effect = None
+    runtime.call_playwright_tool.return_value = '- button "Filters" [ref=e99]'
+    runtime.call_playwright_run_code_unsafe.side_effect = None
+    runtime.call_playwright_run_code_unsafe.return_value = metadata
+    recovered = _run(runtime.capture_browser_state(action_group_id="successful-capture"))
+    assert recovered["semantic_progress"]["revision"] == before["revision"] + 1
+    assert recovered["semantic_progress"]["progress"] == "no_progress"
+    assert recovered["semantic_progress"]["consecutive_no_progress"] == 1
+    assert _run(runtime.capture_compact_browser_state(action_group_id="fresh-inspection"))["ok"] is True
+
+
+@pytest.mark.parametrize("invalidate", ["generation", "url", "task_reset"])
+def test_compact_capture_rejects_content_from_a_different_page_or_task(invalidate: str) -> None:
+    runtime = _make_capture_runtime()
+    _run(runtime.capture_browser_state(action_group_id="initial"))
+    if invalidate == "generation":
+        runtime.observe_page_url("https://tenders.example/results", force_navigation=True)
+    elif invalidate == "url":
+        runtime.ensure_page_state().observe(url="https://tenders.example/new-page")
+    else:
+        runtime.reset_semantic_task()
+    before = runtime.semantic_progress
+
+    compact = _run(runtime.capture_compact_browser_state(action_group_id="inspection"))
+
+    assert compact["semantic_progress"]["progress"] == "unknown"
+    assert "page_content_hash" not in compact["semantic_state"]
+    assert runtime.semantic_progress == before
+    runtime.ensure_page_state().observe(url="https://tenders.example/results")
+    repeated = _run(runtime.capture_compact_browser_state(action_group_id="repeated-inspection"))
+    assert repeated["semantic_progress"]["progress"] == "unknown"
+    assert runtime.semantic_progress == before
+
+
+def test_compact_capture_without_complete_baseline_does_not_start_history() -> None:
+    runtime = _make_bare_runtime()
+    runtime.ensure_page_state().observe(url="https://tenders.example/results")
+
+    compact = _run(runtime.capture_compact_browser_state(action_group_id="inspection"))
+
+    assert compact["semantic_progress"]["progress"] == "unknown"
+    assert compact["semantic_progress"]["observation_only"] is True
+    assert runtime.semantic_progress == {}
+
+
+def test_failed_navigation_capture_does_not_relabel_previous_page_content() -> None:
+    runtime = _make_capture_runtime()
+    initial = _run(runtime.capture_browser_state(action_group_id="initial"))
+    runtime.call_playwright_tool.side_effect = RuntimeError("snapshot timeout")
+    runtime.call_playwright_run_code_unsafe.return_value = {
+        "ok": True,
+        "url": "https://tenders.example/other-page",
+    }
+
+    failed = _run(runtime.capture_browser_state(action_group_id="navigation"))
+
+    assert failed["semantic_state"]["url"] == "https://tenders.example/other-page"
+    assert failed["semantic_state"]["generation_id"] != initial["semantic_state"]["generation_id"]
+    assert "page_content_hash" not in failed["semantic_state"]
+    assert "first_result_text" not in failed["semantic_state"]
+    assert (
+        runtime.semantic_progress["semantic_state"]["page_content_hash"]
+        == initial["semantic_state"]["page_content_hash"]
+    )
 
 
 def test_rail_is_agent_rail_subclass() -> None:
@@ -201,6 +432,7 @@ def test_pdf_allowlist_filters_active_browser_agent_schemas() -> None:
 
     registered_tools = [
         ToolInfo(name="browser_click", description="core", parameters={}),
+        ToolInfo(name="browser_evaluate", description="internal", parameters={}),
         ToolInfo(name="browser_pdf_save", description="pdf", parameters={}),
         ToolInfo(name="browser_get_config", description="config", parameters={}),
         ToolInfo(name="browser_cookie_list", description="storage", parameters={}),
@@ -214,11 +446,11 @@ def test_pdf_allowlist_filters_active_browser_agent_schemas() -> None:
         visible_names = {tool.name for tool in _run(agent.ability_manager.list_tool_info())}
 
     assert "mcp_playwright-official_browser_click" in visible_names
+    assert "mcp_playwright-official_browser_evaluate" in visible_names
     assert "mcp_playwright-official_browser_pdf_save" in visible_names
     assert "mcp_playwright-official_browser_get_config" not in visible_names
     assert "mcp_playwright-official_browser_cookie_list" not in visible_names
     assert "mcp_playwright-official_browser_mouse_click_xy" not in visible_names
-
 
 def test_before_invoke_called_twice_delegates_twice() -> None:
     """Idempotency is BrowserAgentRuntime's responsibility; rail always delegates."""
@@ -429,30 +661,78 @@ def test_navigation_invalidates_snapshot_refs_from_older_generation() -> None:
         runtime.validate_reference_values(("f1e2",))
 
 
-def test_after_snapshot_preserves_native_text_and_attaches_page_summary() -> None:
+@pytest.mark.parametrize("tool_name", ["mcp_playwright_browser_snapshot", "mcp_playwright-official_browser_find"])
+@pytest.mark.parametrize("padding_repeats", [0, 1000], ids=["small", "large"])
+@pytest.mark.parametrize("wrapped_result", [False, True], ids=["text", "mcp-content"])
+def test_after_ax_observation_registers_refs_before_output_projection(
+    tool_name: str,
+    padding_repeats: int,
+    wrapped_result: bool,
+) -> None:
     runtime = _make_bare_runtime()
     rail = BrowserRuntimeRail(runtime)
+    padding = "  - paragraph: Other page information\n" * padding_repeats
+    raw_observation = (
+        '- textbox "Search" [ref=f1e2]\n'
+        f"{padding}"
+        '- link "Data analytics tender" [ref=f1e3]:\n'
+        '  - /url: https://example.test/tender/7\n'
+        '- paragraph: Closing date: 2026-10-01\n'
+        f"{padding}"
+    )
+    tool_result = (
+        {"ok": True, "content": [{"type": "text", "text": raw_observation}]}
+        if wrapped_result
+        else raw_observation
+    )
+    original_message = json.dumps(tool_result) if wrapped_result else raw_observation
     tool_message = ToolMessage(
-        tool_call_id="snapshot-call",
-        content='textbox "Search" [ref=f1e2]',
+        tool_call_id="observation-call",
+        content=original_message,
+        metadata={"browser_raw_handle": "a" * 32},
     )
     ctx = AgentCallbackContext(
         agent=MagicMock(),
         inputs=ToolCallInputs(
-            tool_name="mcp_playwright_browser_snapshot",
+            tool_name=tool_name,
             tool_args={},
-            tool_result='textbox "Search" [ref=f1e2]',
+            tool_result=tool_result,
             tool_msg=tool_message,
         ),
     )
 
     _run(rail.after_tool_call(ctx))
 
-    assert '"observation":"compact_page_state"' not in tool_message.content
-    assert '"generation_id":"g0"' in tool_message.content
-    assert "[ref=f1e2]" in tool_message.content
-    runtime.validate_reference_values(("f1e2",))
-    assert '"ref":"f1e2"' not in tool_message.content
+    assert tool_message.metadata["browser_raw_handle"] == "a" * 32
+    if padding_repeats:
+        assert len(tool_message.content) < len(original_message)
+
+    runtime.validate_reference_values(("f1e2", "f1e3"))
+    page_state = runtime.ensure_page_state()
+    target = page_state.resolve_target(generation_id=runtime.generation_id, ref="f1e3")
+    assert target.ref == "f1e3"
+    assert rail._normalize_playwright_ref_args(
+        "mcp_playwright_browser_click",
+        {"target_id": target.target_id, "generation_id": runtime.generation_id, "element": "Data analytics tender"},
+    ) == {"target": "f1e3", "element": "Data analytics tender"}
+    if wrapped_result:
+        assert ctx.inputs.tool_result["page_state"] == runtime.export_page_state()
+
+
+def test_other_structured_results_keep_upstream_projection() -> None:
+    runtime = _make_bare_runtime()
+    runtime.ensure_page_state().register_cards({"cards": [{"selector": "#cached", "title": "Cached result"}]})
+    rail = BrowserRuntimeRail(runtime)
+    result = {"ok": True, "elements": [{"text": "Search", "selector": "#search", "enabled": True}]}
+    inputs = SimpleNamespace(tool_msg=ToolMessage(content=json.dumps(result), tool_call_id="probe"))
+
+    rail._attach_page_state(inputs, "browser_probe_interactives", result)
+
+    visible = json.loads(inputs.tool_msg.content)
+    assert "cards" not in visible["page_state"]
+    assert "interactives" not in visible["page_state"]
+    assert visible["elements"] == [{"text": "Search", "enabled": True}]
+    assert result["page_state"]["cards"]
 
 
 def test_click_result_url_change_invalidates_snapshot_refs() -> None:
@@ -1648,6 +1928,82 @@ def test_read_recovery_has_no_separate_proof_counter() -> None:
     assert action_class == "script_exploration"
     assert updated["status"] == "replan_required"
     assert not updated["read_only_recovery_counts"]
+
+
+@pytest.mark.parametrize("tool_name", [
+    "browser_probe_cards", "browser_probe_interactives", "browser_snapshot", "browser_find",
+])
+@pytest.mark.parametrize("replan_count,pending", [(0, False), (2, False), (1, True)])
+def test_reads_preserve_interaction_replan_budget_and_strategy(
+    tool_name: str, replan_count: int, pending: bool,
+) -> None:
+    session = _FakeSession()
+    state = BrowserRuntimeRail._build_phase_state("Read the search form")
+    preserved = {
+        "status": "replan_trial" if pending else "replan_required",
+        "replan_required": True,
+        "replan_count": replan_count,
+        "replan_trial_pending": pending,
+        "trial_strategy": "new-click" if pending else "",
+        "blocked_strategy": "failed-click",
+        "failed_strategies": ["failed-click"],
+        "last_action_class": "interaction",
+        "last_strategy_fingerprint": "failed-click",
+        "next_action_class": "materially_different_strategy",
+    }
+    state.update(preserved)
+    session.update_state({"__browser_phase_budget_state__": state})
+
+    for _ in range(3):
+        BrowserRuntimeRail._consume_phase_budget(session, tool_name, {})
+
+    assert {key: state[key] for key in preserved} == preserved
+    assert state["replan_denial_count"] == 0
+    assert state["read_only_recovery_counts"] == {}
+    assert sum(phase["attempts"] for phase in state["phases"].values()) == 3
+
+
+@pytest.mark.parametrize("tool_name", [
+    "browser_probe_cards", "browser_probe_interactives", "browser_snapshot", "browser_find",
+])
+def test_reads_retain_advisory_phase_costs_and_terminal_guard(tool_name: str) -> None:
+    session = _FakeSession()
+    state = BrowserRuntimeRail._build_phase_state("Read the current page")
+    for details in state["phases"].values():
+        details["budget"] = 1
+    session.update_state({"__browser_phase_budget_state__": state})
+    BrowserRuntimeRail._consume_phase_budget(session, tool_name, {})
+
+    BrowserRuntimeRail._consume_phase_budget(session, tool_name, {})
+    assert sum(details["attempts"] for details in state["phases"].values()) == 2
+    assert state["status"] not in {"partial", "blocked"}
+    state["status"] = "partial"
+    with pytest.raises(ValueError, match="already partial"):
+        BrowserRuntimeRail._consume_phase_budget(session, tool_name, {})
+
+
+@pytest.mark.parametrize("tool_name", [
+    "browser_probe_cards", "browser_probe_interactives", "browser_snapshot", "browser_find",
+])
+def test_failed_read_does_not_fail_a_pending_interaction_trial(tool_name: str) -> None:
+    session = _FakeSession()
+    state = BrowserRuntimeRail._build_phase_state("Read the search form")
+    state.update(
+        status="replan_trial", replan_required=True, replan_trial_pending=True,
+        replan_count=1, trial_strategy="click-search", blocked_strategy="previous-click",
+    )
+    session.update_state({"__browser_phase_budget_state__": state})
+    BrowserRuntimeRail._consume_phase_budget(session, tool_name, {})
+    BrowserRuntimeRail._record_phase_result(
+        session, tool_name, {}, {"ok": False, "error": "snapshot unavailable"},
+    )
+
+    assert state["status"] == "replan_trial"
+    assert state["replan_trial_pending"] is True
+    assert state["replan_count"] == 1
+    assert state["trial_strategy"] == "click-search"
+    assert state["blocked_strategy"] == "previous-click"
+    assert state["failed_strategies"] == []
 
 
 def test_offload_recall_does_not_consume_browser_phase_or_replan_budget() -> None:

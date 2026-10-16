@@ -65,6 +65,7 @@ from .evidence import (
     source_observations,
     today_temperature_fields,
 )
+from .page_content import fingerprint_snapshot
 from .page_state import CARD_EVIDENCE_FIELDS, BrowserPageState, BrowserTarget, decode_ax_text, navigation_destination
 from .phase_contract import unresolved_writes
 from .probe_semantics import normalize_card_probe_payload
@@ -73,7 +74,7 @@ from .probes import (
     build_card_probe_js,
     build_interactive_probe_js,
 )
-from .semantic_state import SemanticStateTracker
+from .semantic_state import SemanticStateTracker, build_semantic_state
 from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
 from .site_profiles import (
     get_selector_cache,
@@ -81,6 +82,7 @@ from .site_profiles import (
     site_profiles_for_url,
 )
 from .status_logging import BrowserSubagentStatusLogger, is_browser_subagent_status_log_enabled
+from .tool_categories import is_browser_observation_tool
 
 _BROWSER_PROGRESS_STATE_KEY = "__browser_subagent_progress_state__"
 _BROWSER_PROGRESS_TASK_KEY = "__browser_subagent_last_task__"
@@ -461,6 +463,7 @@ class BrowserAgentRuntime:
         self._selector_primary_links = self._page_state.selector_primary_links
         self._last_observed_url = ""
         self._semantic_state_tracker = SemanticStateTracker()
+        self._semantic_snapshot_identity: tuple[str, str] | None = None
         self._task_turn = None
         self._post_observation: Optional[Dict[str, Any]] = None
         _ACTIVE_BROWSER_RUNTIMES.add(self)
@@ -561,6 +564,7 @@ class BrowserAgentRuntime:
         page_state = self.ensure_page_state()
         page_state.advance()
         self._page_generation = page_state.generation
+        self._semantic_snapshot_identity = None
 
     def observe_page_url(self, url: Any, *, force_navigation: bool = False) -> None:
         normalized = str(url or "").strip()
@@ -1112,24 +1116,28 @@ class BrowserAgentRuntime:
         self._controller.register_builtin_actions()
 
     async def capture_browser_state(
-        self, *, action_group_id: str = "", include_decision: bool = False
+        self, *, action_group_id: str = "", observation_only: bool = False,
+        include_decision: bool = False, _allow_reconciliation: bool = True,
     ) -> Dict[str, Any]:
         """Capture a fresh, non-cached browser observation for the next model call."""
+        self._semantic_snapshot_identity = None
         await self.ensure_runtime_ready()
-        if include_decision and self._has_post_observation():
+        if _allow_reconciliation and self._uses_compact_decision_observation() and self._has_post_observation():
             return await self.capture_reconciliation_browser_state(
-                action_group_id=action_group_id, include_decision=True,
+                action_group_id=action_group_id, include_decision=True, observation_only=observation_only,
             )
 
         dom = ""
         dom_error = None
-        snapshot_captured = False
+        page_content_hash = None
         snapshot_audit: Dict[str, Any] = {}
         try:
             raw_snapshot = await self.call_playwright_tool("browser_snapshot", {})
+            page_content_hash = fingerprint_snapshot(raw_snapshot)
             raw_snapshot = self.unwrap_mcp_text_result(raw_snapshot)
             snapshot_audit = write_browser_agent_audit_artifact("ax_snapshot", raw_snapshot)
-            snapshot_captured = True
+            if page_content_hash is None:
+                dom_error = "browser_snapshot returned no complete accessibility snapshot"
             dom = decode_ax_text(raw_snapshot)
         except Exception as exc:
             dom_error = f"browser_snapshot failed: {exc}"
@@ -1147,7 +1155,7 @@ class BrowserAgentRuntime:
         self.observe_page_url(metadata.get("url"))
         self.ensure_page_state().observe(title=metadata.get("title"))
         self._invalidate_changed_listing(metadata)
-        if snapshot_captured:
+        if page_content_hash is not None and dom_error is None:
             self._register_snapshot_refs(dom, replace=True)
         decision_probe = metadata.pop("decision_probe", None)
         if include_decision:
@@ -1159,8 +1167,7 @@ class BrowserAgentRuntime:
 
         errors = [error for error in (dom_error, metadata_error) if error]
         semantic_state = metadata.get("semantic_state")
-        if not isinstance(semantic_state, dict):
-            semantic_state = {}
+        semantic_state = dict(semantic_state) if isinstance(semantic_state, dict) else {}
         semantic_state.update(
             {
                 "url": metadata.get("url") or "",
@@ -1168,20 +1175,21 @@ class BrowserAgentRuntime:
             }
         )
         semantic_tracker = self._ensure_semantic_state_tracker()
-        if metadata_error:
-            semantic_progress = semantic_tracker.latest
-            semantic_progress.update(
-                {
-                    "progress": "unknown",
-                    "observable_progress": False,
-                    "capture_error": metadata_error,
-                }
+        if errors:
+            semantic_progress = self._unknown_semantic_progress(
+                semantic_state,
+                error="; ".join(errors),
+                action_group_id=action_group_id,
+                observation_only=observation_only,
             )
         else:
+            semantic_state["page_content_hash"] = page_content_hash
             semantic_progress = semantic_tracker.observe(
                 semantic_state,
                 action_group_id=action_group_id,
+                observation_only=observation_only,
             )
+            self._semantic_snapshot_identity = (self.generation_id, str(page_state.get("url") or ""))
         semantic_state = self._with_semantic_provenance(
             semantic_progress,
             fallback_state=semantic_state,
@@ -1260,10 +1268,25 @@ class BrowserAgentRuntime:
         excerpt = "\n".join(lines[index] for index in sorted(indices))
         return f'{excerpt}\n<persisted-output handle="{handle}">Native AX; recall for omitted text.</persisted-output>'
 
-    async def capture_reconciliation_browser_state(self, *, action_group_id: str,
-                                                   include_decision: bool = False) -> Dict[str, Any]:
-        """Reconcile an ambiguous mutation without capturing a full AX snapshot."""
+    def _uses_compact_decision_observation(self) -> bool:
+        policy = getattr(self, "decision_policy", None)
+        return getattr(getattr(policy, "decision_config", None), "mode", "llm") == "hybrid"
 
+    async def capture_reconciliation_browser_state(self, *, action_group_id: str,
+                                                   include_decision: bool = False,
+                                                   observation_only: bool = False,
+                                                   _metadata_only: bool = False) -> Dict[str, Any]:
+        """Use guarded compact observations for JEV and complete observations for LLM."""
+
+        if not _metadata_only and not self._uses_compact_decision_observation():
+            state = await self.capture_browser_state(
+                action_group_id=action_group_id, include_decision=include_decision,
+                observation_only=observation_only, _allow_reconciliation=False,
+            )
+            state["reconciliation_only"] = True
+            return state
+
+        self._semantic_snapshot_identity = None
         await self.ensure_runtime_ready()
         decision_kwargs = {"include_decision": True} if include_decision else {}
         metadata, metadata_error = await self.capture_browser_metadata(**decision_kwargs)
@@ -1297,7 +1320,9 @@ class BrowserAgentRuntime:
                 }
             )
         else:
-            semantic_progress = tracker.observe(semantic_state, action_group_id=action_group_id)
+            semantic_progress = tracker.observe(
+                semantic_state, action_group_id=action_group_id, observation_only=observation_only,
+            )
         semantic_state = self._with_semantic_provenance(
             semantic_progress,
             fallback_state=semantic_state,
@@ -1322,9 +1347,9 @@ class BrowserAgentRuntime:
 
     async def capture_compact_browser_state(self, *, action_group_id: str) -> Dict[str, Any]:
         """Merge completed read-only observations without another browser round trip."""
-        if self._has_post_observation():
+        if self._uses_compact_decision_observation() and self._has_post_observation():
             return await self.capture_reconciliation_browser_state(
-                action_group_id=action_group_id, include_decision=True,
+                action_group_id=action_group_id, include_decision=True, observation_only=True,
             )
         observation_error = ""
         policy_config = getattr(getattr(self, "decision_policy", None), "decision_config", None)
@@ -1340,6 +1365,7 @@ class BrowserAgentRuntime:
                 async with asyncio.timeout(2):
                     repaired = await self.capture_reconciliation_browser_state(
                         action_group_id=action_group_id, include_decision=True,
+                        observation_only=True, _metadata_only=True,
                     )
                 repaired["capture_source"] = "decision_repair_rpc"
                 if not repaired.get("decision_observation", {}).get("capture_id"):
@@ -1355,36 +1381,77 @@ class BrowserAgentRuntime:
         page_state = self.export_page_state()
         semantic_tracker = self._ensure_semantic_state_tracker()
         semantic_state = semantic_tracker.current_state
+        identity = (self.generation_id, str(page_state.get("url") or ""))
+        reusable = bool(
+            getattr(self, "_semantic_snapshot_identity", None) == identity and semantic_state.get("page_content_hash")
+        )
+        if not reusable:
+            self._semantic_snapshot_identity = None
+            semantic_state = {}
         semantic_state.update(
             {
                 "url": page_state.get("url") or semantic_state.get("url") or "",
                 "field_coverage": page_state.get("field_coverage") or semantic_state.get("field_coverage") or [],
             }
         )
-        semantic_progress = semantic_tracker.observe(
-            semantic_state,
-            action_group_id=action_group_id,
-        )
+        capture_error = None
+        if reusable:
+            semantic_progress = semantic_tracker.observe(
+                semantic_state, action_group_id=action_group_id, observation_only=True
+            )
+        else:
+            capture_error = "A complete browser capture is required before reusing page content"
+            semantic_progress = self._unknown_semantic_progress(
+                semantic_state,
+                error=capture_error,
+                action_group_id=action_group_id,
+                observation_only=True,
+            )
         semantic_state = self._with_semantic_provenance(
             semantic_progress,
             fallback_state=semantic_state,
         )
         return {
-            "ok": True,
-            "error": None,
+            "ok": not capture_error,
+            "error": capture_error,
             "url": page_state.get("url") or "",
             "title": page_state.get("title") or "",
             "tabs": self.ensure_page_state().observation_metadata.get("tabs") or [],
             "page_position": self.ensure_page_state().observation_metadata.get("page_position") or {},
             "semantic_state": semantic_state,
             "semantic_progress": semantic_progress,
-            "field_coverage": semantic_state["field_coverage"],
+            "field_coverage": semantic_state.get("field_coverage", []),
             "page_state": page_state,
             "dom": "",
             "dom_error": None,
             "decision_observation": self.ensure_page_state().export_decision_observation(),
             "decision_observation_error": observation_error,
         }
+
+    def _unknown_semantic_progress(
+        self,
+        state: dict[str, Any],
+        *,
+        error: str,
+        action_group_id: str,
+        observation_only: bool = False,
+    ) -> dict[str, Any]:
+        """Report unavailable content without changing the successful observation history."""
+        semantic_state = build_semantic_state(state)
+        semantic_state.pop("page_content_hash", None)
+        progress = self._ensure_semantic_state_tracker().latest
+        progress.update(
+            {
+                "action_group_id": action_group_id,
+                "semantic_state": semantic_state,
+                "progress": "unknown",
+                "observable_progress": False,
+                "observation_only": observation_only,
+                "changed_fields": [],
+                "capture_error": error,
+            }
+        )
+        return progress
 
     def _with_semantic_provenance(
         self,
@@ -2653,6 +2720,7 @@ class BrowserAgentRuntime:
     def reset_semantic_task(self) -> None:
         """Start semantic loop tracking for a new user task without resetting Chrome."""
         self._ensure_semantic_state_tracker().reset()
+        self._semantic_snapshot_identity = None
 
     def _ensure_semantic_state_tracker(self) -> SemanticStateTracker:
         tracker = getattr(self, "_semantic_state_tracker", None)
@@ -4049,15 +4117,7 @@ class BrowserRuntimeRail(AgentRail):
 
     @staticmethod
     def _tool_may_change_browser_state(tool_name: str) -> bool:
-        normalized = str(tool_name or "").strip().lower()
-        observation_tokens = (
-            "browser_probe_cards",
-            "browser_probe_interactives",
-            "browser_snapshot",
-            "browser_find",
-            "browser_phase",
-        )
-        return not _contains_any_token(normalized, observation_tokens)
+        return not is_browser_observation_tool(tool_name) and "browser_phase" not in str(tool_name).lower()
 
     def _canonicalize_tool_name(self, tool_name: str) -> str:
         canonical = canonicalize_playwright_tool_name(tool_name)
@@ -5435,9 +5495,10 @@ class BrowserRuntimeRail(AgentRail):
         details["last_signature"] = signature
         details["last_semantic_signature"] = signature
         state["current_phase"] = phase
-        state["last_action_class"] = action_class
-        state["last_strategy_fingerprint"] = strategy_fingerprint
-        state["next_action_class"] = ""
+        if not is_browser_observation_tool(tool_name):
+            state["last_action_class"] = action_class
+            state["last_strategy_fingerprint"] = strategy_fingerprint
+            state["next_action_class"] = ""
         session.update_state({_BROWSER_PHASE_STATE_KEY: state})
         return action_class
 
@@ -5576,7 +5637,9 @@ class BrowserRuntimeRail(AgentRail):
                 args,
                 result,
             )
-            cls._record_failed_phase_result(state, details, tool_result)
+            cls._record_failed_phase_result(
+                state, details, tool_result, observation_only=is_browser_observation_tool(tool_name)
+            )
             missing_fields = cls._missing_completion_requirements(state) if phase == "extraction" else []
             if completion_evidence and not missing_fields:
                 cls._complete_phase(state, phases, phase, details, completion_evidence)
@@ -5778,13 +5841,19 @@ class BrowserRuntimeRail(AgentRail):
         )
 
     @staticmethod
-    def _record_failed_phase_result(state: Dict[str, Any], details: Dict[str, Any], tool_result: Any) -> None:
+    def _record_failed_phase_result(
+        state: Dict[str, Any],
+        details: Dict[str, Any],
+        tool_result: Any,
+        *,
+        observation_only: bool = False,
+    ) -> None:
         if str(state.get("status") or "").strip().lower() in _BROWSER_TERMINAL_STATUSES:
             return
         details["status"] = "pending"
         if isinstance(tool_result, dict):
             details["last_error"] = str(tool_result.get("error") or "")[:300]
-        if not state.get("replan_trial_pending"):
+        if observation_only or not state.get("replan_trial_pending"):
             return
         trial_strategy = str(state.get("trial_strategy") or "")
         state["replan_trial_pending"] = False
