@@ -33,7 +33,11 @@ from openjiuwen.core.foundation.llm.schema.config import (
 UNSET_REASONING = object()
 
 _NEW_REASONING_KEYS = {"mode", "effort", "budget_tokens"}
-_LEGACY_REASONING_TOP_LEVEL_FIELDS = {
+# Public vocabulary of request keys the reasoning plan can emit onto the wire.
+# ``BaseModelClient`` imports these as the authoritative allowlist source for
+# reasoning-related SDK parameters, so the vocabulary lives in exactly one
+# place next to the plan that produces it.
+LEGACY_REASONING_TOP_LEVEL_FIELDS = {
     "reasoning_effort",
     "thinking",
     "enable_thinking",
@@ -41,6 +45,7 @@ _LEGACY_REASONING_TOP_LEVEL_FIELDS = {
     "thinking_strategy",
     "chat_template_kwargs",
 }
+_LEGACY_REASONING_TOP_LEVEL_FIELDS = LEGACY_REASONING_TOP_LEVEL_FIELDS
 _LEGACY_REASONING_EXTRA_BODY_FIELDS = {
     "reasoning",
     "reasoning_effort",
@@ -49,7 +54,7 @@ _LEGACY_REASONING_EXTRA_BODY_FIELDS = {
     "thinking_budget",
     "thinking_strategy",
 }
-_REASONING_WIRE_KEYS = (
+REASONING_WIRE_KEYS = (
     "reasoning",
     "reasoning_effort",
     "thinking",
@@ -58,6 +63,7 @@ _REASONING_WIRE_KEYS = (
     "thinking_strategy",
     "output_config",
 )
+_REASONING_WIRE_KEYS = REASONING_WIRE_KEYS
 
 _DISABLED_REASONING_EFFORTS = {"off", "none"}
 _GENERIC_ENDPOINT_PROFILES = {"", "openai", "openai-compatible", "openai_compatible"}

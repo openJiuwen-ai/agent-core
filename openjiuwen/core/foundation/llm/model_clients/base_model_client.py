@@ -4,6 +4,7 @@ from abc import (
     ABC,
     abstractmethod,
 )
+import inspect
 from typing import (
     Any,
     AsyncIterator,
@@ -14,6 +15,7 @@ from typing import (
 )
 
 import httpx
+import openai.resources.chat.completions
 
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -25,6 +27,10 @@ from openjiuwen.core.common.logging import (
 )
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.reasoning import (
+    LEGACY_REASONING_TOP_LEVEL_FIELDS,
+    REASONING_WIRE_KEYS,
+)
 from openjiuwen.core.foundation.llm.schema.config import (
     LLMAuthMode,
     ModelClientConfig,
@@ -43,6 +49,18 @@ from openjiuwen.core.foundation.llm.schema.message import (
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
+
+# Keys that are either formal ``ModelRequestConfig`` schema fields or built
+# explicitly by ``_build_request_params`` — they must never leak through the
+# generic allowlist path as raw SDK kwargs. Derived from the schema (single
+# source of truth), so a new formal field is excluded automatically.
+_NON_SDK_CONFIG_KEYS = frozenset(ModelRequestConfig.model_fields) | {
+    "model",  # alias of model_name, built explicitly into params["model"]
+    "messages",
+    "stream",
+    "tools",
+    "tool_choice",
+}
 
 
 class BaseModelClient(ABC):
@@ -631,45 +649,28 @@ class BaseModelClient(ABC):
         # time a new upstream field leaks, keep one explicit allowlist here:
         # vendor-native passthrough is still available through the standard
         # ``extra_body`` channel, which the SDK forwards inside the JSON body.
-        _SDK_PARAM_ALLOWLIST = frozenset({
-            # OpenAI SDK native request fields commonly configured at request level.
-            "user",
-            "metadata",
-            "store",
-            "logit_bias",
-            "logprobs",
-            "top_logprobs",
-            "n",
-            "presence_penalty",
-            "frequency_penalty",
-            "seed",
-            "response_format",
-            "service_tier",
-            "parallel_tool_calls",
-            "stream_options",
-            "web_search_options",
-            "audio",
-            "modalities",
-            "prediction",
-            "reasoning_effort",
-            "verbosity",
-            "safety_identifier",
-            # Anthropic-style structured output/effort control (also emitted by
-            # the reasoning plan; see llm.reasoning _REASONING_WIRE_KEYS).
-            "output_config",
-            # Vendor-native reasoning/thinking controls historically accepted
-            # as top-level extras (see llm.reasoning legacy-key handling); they
-            # are also routed through extra_body by the reasoning plan.
-            "thinking",
-            "enable_thinking",
-            "thinking_budget",
-            "thinking_strategy",
-            "chat_template_kwargs",
-            # OpenAI SDK standard escape hatch for provider-private parameters.
-            "extra_body",
-            "extra_headers",
-            "extra_query",
-        })
+        #
+        # Key sources (no hand-maintained duplicates of other modules):
+        #   * reasoning wire keys — imported from ``llm.reasoning``
+        #     (``REASONING_WIRE_KEYS`` / ``LEGACY_REASONING_TOP_LEVEL_FIELDS``),
+        #     the same vocabulary the reasoning plan itself emits.
+        #   * OpenAI SDK request keys — ``openai.resources.chat.completions``
+        #     ``AsyncCompletions.create`` keyword parameters, excluding the
+        #     keys this method builds explicitly (model/messages/stream/
+        #     temperature/top_p/max_tokens/stop/tools) and channel/session
+        #     plumbing (self/timeout/functions/function_call).
+        #   * SDK request-channel escape hatches: extra_body/extra_headers/
+        #     extra_query.
+        _SDK_PARAM_ALLOWLIST = (
+            frozenset(REASONING_WIRE_KEYS)
+            | set(LEGACY_REASONING_TOP_LEVEL_FIELDS)
+            | frozenset(
+                inspect.signature(
+                    openai.resources.chat.completions.AsyncCompletions.create
+                ).parameters
+            )
+            | {"extra_body", "extra_headers", "extra_query"}
+        ) - _NON_SDK_CONFIG_KEYS
         dumped = self.model_config.model_dump(exclude_none=True)
         extra_params = {
             key: value for key, value in dumped.items()
