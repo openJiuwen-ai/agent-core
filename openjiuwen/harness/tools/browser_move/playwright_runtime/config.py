@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
 from openjiuwen.core.foundation.tool import McpServerConfig
+from ..decision.config import BrowserDecisionConfig
 
 from .browser_capabilities import (
     CORE_BROWSER_CAPABILITY_NAME,
@@ -91,6 +92,7 @@ class RuntimeSettings:
     mcp_cfg: McpServerConfig
     guardrails: BrowserRunGuardrails
     instance: Optional[BrowserInstanceConfig] = None
+    decision: BrowserDecisionConfig = BrowserDecisionConfig()
 
 
 def resolve_playwright_mcp_cwd() -> str:

@@ -13,6 +13,7 @@
 | **OpenAIModelClient** | OpenAI-compatible large model client implementation. |
 | **OpenAIAccountModelClient** | OpenAI account OAuth large model client implementation, signing in via OAuth credentials with no `api_key` required. |
 | **AnthropicModelClient** | Anthropic protocol client. Legacy `client_provider` names such as `DashScope` and `DeepSeek` are OpenAI-compatible aliases. See [LLM Protocol Consolidation](../../Basic%20Functions/LLM%20Protocol%20Consolidation.md). |
+| **system_one.JevSystemOneClient** | Standalone lightweight client for Jev typed evaluations through the System One API. It is not registered as a chat `ModelClient`. |
 | **BaseOutputParser** | Output parser abstract base class. |
 | **JsonOutputParser** | JSON format output parser. |
 | **MarkdownOutputParser** | Markdown format output parser. |
