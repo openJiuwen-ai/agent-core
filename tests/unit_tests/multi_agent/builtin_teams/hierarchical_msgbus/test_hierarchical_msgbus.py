@@ -1023,3 +1023,105 @@ class TestSupervisorAgentCreate:
         instance = provider()
         assert _get_semaphore_value(_get_ability_manager(instance)) == 4
         
+
+# ---------------------------------------------------------------------------
+# SECTION 3f -- P2PAbilityManager: callback_context propagation
+# ---------------------------------------------------------------------------
+
+_P2P_SUPER_SINGLE_CALL = (
+    "openjiuwen.core.multi_agent.teams.hierarchical_msgbus"
+    ".p2p_ability_manager.AbilityManager._execute_single_tool_call"
+)
+
+
+def _rail_ctx() -> MagicMock:
+    """A context the base-class rail can fire lifecycle events on."""
+    # ``extra`` must be a real dict: _railed_execute_single_tool_call pops
+    # ``_skip_tool`` from it and treats any truthy value as "skip the call",
+    # so a bare MagicMock would short-circuit the code under test.
+    ctx = MagicMock()
+    ctx.agent.agent_callback_manager.execute = AsyncMock(return_value=None)
+    ctx.extra = {}
+    ctx.steering_queue = None
+    return ctx
+
+
+class TestP2PAbilityManagerCallbackContext:
+    """_execute_single_tool_call matches the base signature and forwards it."""
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_non_agent_call_accepts_callback_context_keyword():
+        """The keyword the base class passes must bind on the override."""
+        mgr = P2PAbilityManager(supervisor=MagicMock())
+        expected = ("res", ToolMessage(content="ok", tool_call_id="tc1"))
+        with patch(_P2P_SUPER_SINGLE_CALL, new=AsyncMock(return_value=expected)):
+            result = await mgr._execute_single_tool_call(
+                tool_call=_tc("plain_tool"),
+                session=MagicMock(),
+                tag=None,
+                callback_context=MagicMock(),
+            )
+        assert result == expected
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_non_agent_call_forwards_callback_context_to_super():
+        """The context reaches the base implementation instead of being dropped."""
+        # The base class uses it to decide whether a tool receives
+        # ``_tool_callback_context``, so dropping it here would silently
+        # disable deferred-tool execution rather than raise.
+        mgr = P2PAbilityManager(supervisor=MagicMock())
+        ctx = MagicMock()
+        expected = ("res", ToolMessage(content="ok", tool_call_id="tc1"))
+        with patch(
+            _P2P_SUPER_SINGLE_CALL, new=AsyncMock(return_value=expected)
+        ) as mock_super:
+            await mgr._execute_single_tool_call(
+                tool_call=_tc("plain_tool"),
+                session=MagicMock(),
+                tag=None,
+                callback_context=ctx,
+            )
+        assert mock_super.await_args.kwargs["callback_context"] is ctx
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_agent_call_still_dispatches_over_p2p_with_callback_context():
+        """The P2P branch is unaffected by the added parameter."""
+        sv = MagicMock()
+        sv.send = AsyncMock(return_value={"out": "ok"})
+        sv.runtime = MagicMock(p2p_timeout=1800.0)
+        mgr = P2PAbilityManager(supervisor=sv)
+        mgr.add(_sub_card("sub_a"))
+        session = MagicMock()
+        session.get_session_id = MagicMock(return_value="s1")
+        result, tool_message = await mgr._execute_single_tool_call(
+            tool_call=_tc("sub_a", {"x": 1}),
+            session=session,
+            tag=None,
+            callback_context=MagicMock(),
+        )
+        sv.send.assert_awaited_once()
+        assert result == {"out": "ok"}
+        assert tool_message.tool_call_id == "tc1"
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_non_agent_call_reaches_base_implementation_through_execute():
+        """A plain tool call routed by a supervisor reaches the base class."""
+        # Drives the real AbilityManager.execute rather than patching it, so the
+        # call travels the path that fails in production:
+        # execute -> _railed_execute_single_tool_call -> the override. With a
+        # mismatched override the base implementation is never reached and the
+        # caller receives an "Ability execution error" ToolMessage instead.
+        mgr = P2PAbilityManager(supervisor=MagicMock())
+        expected = ("RESULT", ToolMessage(content="tool ran", tool_call_id="tc1"))
+        with patch(
+            _P2P_SUPER_SINGLE_CALL, new=AsyncMock(return_value=expected)
+        ) as mock_super:
+            results = await mgr.execute(
+                _rail_ctx(), _tc("plain_tool"), MagicMock()
+            )
+        assert mock_super.await_count == 1
+        assert results == [expected]
