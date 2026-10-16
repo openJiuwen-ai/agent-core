@@ -127,6 +127,25 @@ def test_review_feedback_uses_mounted_team_rail_lifecycle(tmp_path):
     assert rail._online_request_id_prefix() == "team_skill_evolve"
 
 
+def test_review_feedback_forwards_attribution_sink_into_coordinator(tmp_path):
+    rail = _team_skill_rail(
+        str(tmp_path / "team-skills"),
+        llm=MagicMock(),
+        model="mock-model",
+        signal_trigger=False,
+        async_evolution=False,
+    )
+    sink = AsyncMock()
+
+    rail.configure_review_feedback_evolution(
+        session_id="session-1",
+        team_id="team-1",
+        attribution_sink=sink,
+    )
+
+    assert rail._review_feedback_coordinator._attribution_sink is sink
+
+
 @pytest.mark.asyncio
 async def test_review_feedback_child_events_and_creation_approval_use_parent_queue(
     tmp_path,
