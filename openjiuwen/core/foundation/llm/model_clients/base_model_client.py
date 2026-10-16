@@ -62,6 +62,32 @@ _NON_SDK_CONFIG_KEYS = frozenset(ModelRequestConfig.model_fields) | {
     "tool_choice",
 }
 
+# Allowlist of request keys ``_build_request_params`` may forward to the
+# provider SDK. ``ModelRequestConfig`` is extra="allow", so upstream
+# applications can smuggle arbitrary keys (e.g. the jiuwenswarm UI alias
+# ``reasoning_level``) into the request config; forwarding them verbatim
+# makes ``AsyncCompletions.create(**params)`` fail at call time.
+#
+# Key sources (no hand-maintained duplicates of other modules):
+#   * reasoning wire keys — imported from ``llm.reasoning``
+#     (``REASONING_WIRE_KEYS`` / ``LEGACY_REASONING_TOP_LEVEL_FIELDS``),
+#     the same vocabulary the reasoning plan itself emits.
+#   * OpenAI SDK request keys — ``openai.resources.chat.completions``
+#     ``AsyncCompletions.create`` keyword parameters, so SDK upgrades keep
+#     the allowlist in sync automatically.
+#   * SDK request-channel escape hatches: extra_body/extra_headers/
+#     extra_query.
+_SDK_PARAM_ALLOWLIST = (
+    frozenset(REASONING_WIRE_KEYS)
+    | set(LEGACY_REASONING_TOP_LEVEL_FIELDS)
+    | frozenset(
+        inspect.signature(
+            openai.resources.chat.completions.AsyncCompletions.create
+        ).parameters
+    )
+    | {"extra_body", "extra_headers", "extra_query"}
+) - _NON_SDK_CONFIG_KEYS
+
 
 class BaseModelClient(ABC):
     """LLM Model Client Abstract Base Class
@@ -638,39 +664,13 @@ class BaseModelClient(ABC):
             "context_operation_id",
         }
 
-        # Forward only well-defined request keys to the provider SDK.
-        #
-        # ``ModelRequestConfig`` is extra="allow", so upstream applications can
-        # smuggle arbitrary keys (e.g. the jiuwenswarm UI alias
-        # ``reasoning_level``) into the request config. Forwarding them
-        # verbatim makes ``AsyncCompletions.create(**params)`` fail at call
-        # time with "unexpected keyword argument" — far away from where the
-        # field was actually introduced. Instead of growing a blocklist every
-        # time a new upstream field leaks, keep one explicit allowlist here:
-        # vendor-native passthrough is still available through the standard
-        # ``extra_body`` channel, which the SDK forwards inside the JSON body.
-        #
-        # Key sources (no hand-maintained duplicates of other modules):
-        #   * reasoning wire keys — imported from ``llm.reasoning``
-        #     (``REASONING_WIRE_KEYS`` / ``LEGACY_REASONING_TOP_LEVEL_FIELDS``),
-        #     the same vocabulary the reasoning plan itself emits.
-        #   * OpenAI SDK request keys — ``openai.resources.chat.completions``
-        #     ``AsyncCompletions.create`` keyword parameters, excluding the
-        #     keys this method builds explicitly (model/messages/stream/
-        #     temperature/top_p/max_tokens/stop/tools) and channel/session
-        #     plumbing (self/timeout/functions/function_call).
-        #   * SDK request-channel escape hatches: extra_body/extra_headers/
-        #     extra_query.
-        _SDK_PARAM_ALLOWLIST = (
-            frozenset(REASONING_WIRE_KEYS)
-            | set(LEGACY_REASONING_TOP_LEVEL_FIELDS)
-            | frozenset(
-                inspect.signature(
-                    openai.resources.chat.completions.AsyncCompletions.create
-                ).parameters
-            )
-            | {"extra_body", "extra_headers", "extra_query"}
-        ) - _NON_SDK_CONFIG_KEYS
+        # Forward only well-defined request keys to the provider SDK
+        # (``_SDK_PARAM_ALLOWLIST``; see its module-level definition for the
+        # authoritative key sources). Undefined keys are dropped here with a
+        # warning instead of failing inside ``AsyncCompletions.create(**params)``
+        # far away from where the field was introduced. Vendor-native
+        # passthrough stays available through the standard ``extra_body``
+        # channel, which the SDK forwards inside the JSON body.
         dumped = self.model_config.model_dump(exclude_none=True)
         extra_params = {
             key: value for key, value in dumped.items()
