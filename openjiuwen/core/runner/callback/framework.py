@@ -1010,6 +1010,15 @@ class AsyncCallbackFramework:
                 # Clear callbacks
                 del self._callbacks[event]
 
+            # Drop accumulated per-event metrics so unregistered events do not
+            # accumulate CallbackMetrics entries forever (issue#5240 residue).
+            # Metrics keys are "{event}:{callback_name}", hence the prefix match.
+            for metrics_key in [
+                key for key in self._metrics
+                if key == event or key.startswith(f"{event}:")
+            ]:
+                self._metrics.pop(metrics_key, None)
+
             # Remove chain if exists
             if event in self._chains:
                 del self._chains[event]

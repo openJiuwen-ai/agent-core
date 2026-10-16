@@ -161,6 +161,28 @@ class BaseAgent(metaclass=_AgentMeta):
         """Access the hook registry for advanced registration."""
         return self._agent_callback_manager
 
+    async def aclose(self) -> None:
+        """Release instance-scoped registrations from process-global managers.
+
+        ``__init__`` registers instance-namespaced callbacks into the
+        process-global ``Runner.callback_framework`` and agent-qualified tools
+        into ``Runner.resource_mgr``; neither side evicts by owner, so a
+        discarded agent instance left both behind forever — every CallbackInfo
+        pins its bound methods and, through them, the whole agent object graph
+        (issue#5240: ~144 CallbackInfo/session, RSS grows linearly to OOM).
+
+        Call once the agent instance will never be used again (session adapter
+        teardown, team round end). Idempotent: repeated calls are no-ops.
+        """
+        try:
+            await self._agent_callback_manager.clear()
+        except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+            logger.warning("BaseAgent aclose: callback clear failed: %s", exc)
+        try:
+            self._ability_manager.teardown_tools()
+        except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+            logger.warning("BaseAgent aclose: tool teardown failed: %s", exc)
+
     async def register_skill(self, skill_path: Union[str, List[str]]):
         """Register a skill"""
         self.lazy_init_skill()

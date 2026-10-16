@@ -776,7 +776,12 @@ class AbilityManager:
 
         if self._owner_id:
             card.id = self.qualify_tool_id(card, self._owner_id)
-        Runner.resource_mgr.add_tool(resource, refresh=True)
+            # Tag with the owner id so teardown_tools can drop the whole owner
+            # domain in one sweep, including forms registered outside this
+            # method (issue#5240: session-suffixed ids never unregistered).
+            Runner.resource_mgr.add_tool(resource, refresh=True, tag=self._owner_id)
+        else:
+            Runner.resource_mgr.add_tool(resource, refresh=True)
         return self.add(card)
 
     def remove_ability(self, name: Union[str, List[str]]) -> None:
@@ -820,6 +825,16 @@ class AbilityManager:
                 continue
             self.remove(name)
             Runner.resource_mgr.remove_tool(card.id)
+        # Sweep the whole owner-tag domain as a backstop: entries registered
+        # with this owner's tag but not through this manager's exact-id form
+        # (session-suffixed ids, agent cards) otherwise never leave the
+        # process-global registry (issue#5240).
+        Runner.resource_mgr.remove_tool(
+            tag=self._owner_id, skip_if_tag_not_exists=True
+        )
+        Runner.resource_mgr.remove_agent(
+            tag=self._owner_id, skip_if_tag_not_exists=True
+        )
 
     def _live_raw_keys(self) -> set:
         """Live raw ability keys across tools / workflows / agents."""

@@ -3056,6 +3056,33 @@ class DeepAgent(BaseAgent):
                 exc_info=True,
             )
 
+    async def aclose(self) -> None:
+        """Extend :meth:`BaseAgent.aclose` to the wrapped react agent and subagents.
+
+        Rails register on both this agent's callback manager and the inner
+        ``_react_agent``'s one, so both namespaces must be cleared; cached
+        subagent controls for every parent session are cancelled as well.
+        """
+        await super().aclose()
+        react_agent = self._react_agent
+        if react_agent is not None and react_agent is not self:
+            try:
+                await react_agent.aclose()
+            except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+                logger.warning(
+                    "[DeepAgent] aclose: react agent close failed: %s", exc
+                )
+        try:
+            from openjiuwen.harness.tools.subagent._control_registry import (
+                release_all_subagent_controls,
+            )
+
+            await release_all_subagent_controls(self, reason="agent_closed")
+        except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+            logger.warning(
+                "[DeepAgent] aclose: subagent control release failed: %s", exc
+            )
+
     async def stop(self) -> None:
         """Terminate the interaction loop and wake any attached output consumer."""
         if not self._interaction_started:
