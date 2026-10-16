@@ -17,7 +17,7 @@ from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 from .schema.context import GroupMessageQuery, GroupMessagesResult, MaterialQuery, MaterialReadResult
 from .schema.events import AgentEvent
 from .schema.execution import ExecutionContext
-from .schema.port_results import BudgetAdmission, BudgetReport
+from .schema.port_results import BudgetAdmission, BudgetReport, ExecutionLink
 from .schema.protocol import ModelUsage
 from .workspace.access import WorkspaceAccessPort, WorkspaceWriteAccessPort
 
@@ -48,6 +48,16 @@ class CommitPort(Protocol):
         completeness. Missing tool results do not imply the operation never ran.
         """
         ...
+
+
+class ExecutionLinkPort(Protocol):
+    """Optional on the commit port; only continuation (PA-18) needs it, so construction does not require it."""
+
+    async def read_execution_link(self, execution: ExecutionContext, execution_id: str) -> ExecutionLink:
+        """Return the link the host saved before dispatching an Execution of the same Session and Request.
+
+        Raises when the link cannot be read; a missing link is never reported as the first Execution.
+        """
 
 
 class BudgetPort(Protocol):

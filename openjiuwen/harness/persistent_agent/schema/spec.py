@@ -41,6 +41,19 @@ def _share_file_rail(context: "PersistentBuildContext", workspace_access, max_by
     return ShareFileRail(context.execution, workspace_access, context.binding.control.registrations, max_bytes)
 
 
+def _record_rail(context: "PersistentBuildContext"):
+    from ..execution.record_tool import ExecutionRecordRail
+
+    return ExecutionRecordRail(context)
+
+
+def _context_engine_config(config):
+    """Restore the typed runtime config after the Spec's JSON publication roundtrip."""
+    from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+
+    return ContextEngineConfig.model_validate(config)
+
+
 class PersistentAgentSpec(DeepAgentSpec):
     """Construction-only v1 spec. Declaring a policy does not implement execution."""
 
@@ -54,6 +67,12 @@ class PersistentAgentSpec(DeepAgentSpec):
     )
     # Largest file share_file may hand off, in bytes actually read; the host checks the same published limit.
     share_file_max_bytes: int = Field(default=SHARE_FILE_DEFAULT_MAX_BYTES, gt=0, le=SHARE_FILE_MAX_BYTES_CEILING)
+    # Most earlier Executions a continuation reads back through; set by the deployment, required for continuation.
+    continuation_chain_limit: int | None = Field(default=None, gt=0)
+    # Capacity check of every final model request (F_20 D-09). Setting either field asks for it; the model
+    # request config's context_window and max_tokens are then required too. No default numbers are assumed.
+    model_input_limit_tokens: int | None = Field(default=None, gt=0)
+    capacity_safety_margin_tokens: int | None = Field(default=None, ge=0)
 
     def fingerprint(self) -> str:
         """Hash the entire JSON publication, not runtime handles or only base fields."""
@@ -91,6 +110,8 @@ class PersistentAgentSpec(DeepAgentSpec):
                 )
         parts = super().resolve_parts(context)
         context.binding.parts = parts
+        if parts.config.context_engine_config is not None:
+            parts.config.context_engine_config = _context_engine_config(parts.config.context_engine_config)
         from openjiuwen.harness.rails.context_engineer import ContextAssembleRail, ContextProcessorRail
         from openjiuwen.harness.rails.personal_context import PersonalContextRail
 
@@ -142,7 +163,10 @@ class PersistentAgentSpec(DeepAgentSpec):
 
         parts.config.stream_task_lifecycle = NativeStreamTaskLifecycle()
         # Inert until an execution entry attaches its emitter to this binding.
-        parts.rails.append(PersistentModelCallRail(context.binding))
+        parts.rails.append(PersistentModelCallRail(context.binding, spec=self))
+        if self.continuation_chain_limit is not None:
+            # Declared for every Execution of the Spec, so tool definitions stay the same across a Request.
+            parts.rails.append(_record_rail(context))
         # Every Persistent tool call passes through the write-intent barrier.
         parts.rails.append(PersistentToolIntentRail(context.binding))
         return parts
