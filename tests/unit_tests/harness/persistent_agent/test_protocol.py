@@ -13,6 +13,14 @@ from pydantic import ValidationError
 from openjiuwen.core.common.exception.errors import BaseError
 
 pytestmark = pytest.mark.level0
+
+
+@pytest.mark.parametrize("name,module_name", [("ExecutionLink", "schema.port_results"), ("ExecutionLinkPort", "ports")])
+def test_execution_link_contracts_are_public(api, name, module_name):
+    assert name in api.__all__
+    assert getattr(api, name) is getattr(import_module(f"openjiuwen.harness.persistent_agent.{module_name}"), name)
+
+
 WHEN = datetime(2026, 9, 28, 8, 0, tzinfo=timezone.utc)
 SCOPE = dict(
     namespace_id="tenant",

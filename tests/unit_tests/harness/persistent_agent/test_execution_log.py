@@ -5,6 +5,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
+from typing import Any
 
 import pytest
 
@@ -82,9 +83,9 @@ def build_context(commit):
     )
 
 
-async def summarize(log=(), error=None):
+async def summarize(log=(), error=None, **options):
     commit = Commit(log, error)
-    summary = await LOG.summarize_execution(build_context(commit), TARGET)
+    summary = await LOG.summarize_execution(build_context(commit), TARGET, **options)
     assert commit.calls == [(CURRENT, TARGET)], "reads the target Execution under the current invocation"
     return summary
 
@@ -230,6 +231,18 @@ async def test_a_failed_read_is_a_missing_record_without_host_detail(monkeypatch
 async def test_cancellation_propagates():
     with pytest.raises(asyncio.CancelledError):
         await summarize(error=asyncio.CancelledError())
+
+
+@pytest.mark.parametrize("detail", ["full", "brief", "missing"])
+@pytest.mark.asyncio
+async def test_log_material_leaves_asking_the_initiator_to_the_model(detail):
+    if detail == "missing":
+        summary = await summarize(error=OSError("not available"))
+    else:
+        summary = await summarize((progress(1, "核对进度"),), detail=detail)
+    assert "查不清时可以询问发起人，是否询问由模型判断" in summary.text
+    assert "不能直接重做" in summary.text
+    assert "查不清询问发起人" not in summary.text
 
 
 @pytest.mark.parametrize("bad", ["", "has space", "a\x00b", "a\nb", "x" * 513, None, 123, b"execution-2"])
@@ -512,3 +525,65 @@ async def test_identical_events_recorded_twice_count_once():
     out, end = answer(1, "out_a"), final(2, refs=("out_a",))
     summary = await summarize((end, out, out, end))
     assert summary.missing is False and summary.text.count("[交出候选]") == 1 and "日志缺少" not in summary.text
+
+
+# F_20 D-08: the brief summary a continuation starts from, and the full one its record tool pages.
+
+
+def brief_log():
+    return (
+        noise(1),
+        completed(2, "read_file", result="已读取"),
+        completed(3, "read_file", result="已读取"),
+        completed(4, "list_files", result="3 个文件"),
+        completed(5, "share_file", result="已登记 reports/q3.md"),
+        intent(6, "op_a", "send_mail"),
+        intent(7, "op_b", "submit_reminder"),
+        completed(8, "submit_reminder", op="op_b", result="已提醒"),
+        completed(9, "upload_report", status="unknown", op="op_c", result="超时", reason="timed out"),
+        progress(10, "审批停在财务复核环节"),
+        answer(12, "out_a", text="回答" * 300),
+        final(13, refs=("out_a",)),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_brief_summary_keeps_every_write_outcome_and_gap_and_counts_reads():
+    brief = (await summarize(brief_log(), detail="brief")).text
+    lines = brief.split("\n")
+    assert lines[0] == "执行 execution-2（请求 request-1）的执行日志摘要："
+    assert lines[1] == "日志缺少第 11 条记录。" and lines[2] == LOG._OMITTED, "gaps and omissions are told apart"
+    assert "[成功] share_file(x) → 已登记 reports/q3.md（调用 call-5）" in brief, "listings are kept one by one"
+    assert "[已登记，无结果] send_mail(单号=BX-0930)（写操作 op_a" in brief
+    assert "[成功] submit_reminder(单号=BX-0930) → 已提醒（写操作 op_b" in brief
+    assert "[结果不明] upload_report(x) → 超时（原因：timed out）（写操作 op_c" in brief
+    assert "[结论] 审批停在财务复核环节" in brief
+    assert "[只读操作] read_file 2 次、list_files 1 次（明细未列出）" in brief
+    assert "out_a" in brief and "（正文 600 字，未列出）" in brief and "回答回答" not in brief
+    assert "结局：已完成；引用候选 out_a" in brief and brief.endswith(LOG._FOOTER)
+
+
+@pytest.mark.asyncio
+async def test_a_brief_summary_with_nothing_left_out_does_not_say_so():
+    brief = (await summarize((intent(1, "op_a", "send_mail"), final(2)), detail="brief")).text
+    assert LOG._OMITTED not in brief and "[只读操作]" not in brief
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_detail_is_rejected_before_the_port():
+    commit = Commit((progress(1, "a"),))
+    raw_detail: Any = "short"  # Deliberately invalid input at the runtime boundary.
+    with pytest.raises(BaseError) as exc_info:
+        await LOG.summarize_execution(build_context(commit), TARGET, detail=raw_detail)
+    assert exc_info.value.status == StatusCode.DEEPAGENT_INPUT_PARAM_ERROR
+    assert commit.calls == []
+
+
+@pytest.mark.asyncio
+async def test_record_blocks_join_into_the_full_summary_after_the_same_checks():
+    commit = Commit(brief_log())
+    blocks, missing = await LOG.record_blocks(build_context(commit), TARGET)
+    assert missing is False and "\n".join(blocks) == (await summarize(brief_log())).text
+    assert any("回答回答" in block for block in blocks), "the full record keeps the bodies"
+    missing_blocks, missing = await LOG.record_blocks(build_context(Commit(())), TARGET)
+    assert missing is True and missing_blocks == (f"上一次执行 {TARGET}：{LOG._MISSING}",)

@@ -23,7 +23,7 @@ from openjiuwen.harness.persistent_agent.execution.control import ExecutionContr
 from openjiuwen.harness.persistent_agent.execution.emitter import EventEmitter, widest_size
 from openjiuwen.harness.persistent_agent.schema.events import EVENT_MAX_BYTES, AgentEvent, EventType
 from openjiuwen.harness.persistent_agent.schema.execution import ExecutionContext
-from openjiuwen.harness.persistent_agent.schema.integration import EXECUTION_END, WINDOW_PART_KEY
+from openjiuwen.harness.persistent_agent.schema.integration import EXECUTION_END, EXECUTION_HEADER, WINDOW_PART_KEY
 from openjiuwen.harness.persistent_agent.schema.protocol import TEXT_MAX_CHARS
 from openjiuwen.harness.persistent_agent.workspace.access import WorkspaceReadScope
 from openjiuwen.harness.persistent_agent.workspace.path_policy import ResolvedWorkspacePath
@@ -251,6 +251,25 @@ def test_rebuild_reads_only_share_file_results_of_the_current_chain():
         Registration("a.md", "attachment", None),
     ], "latest caption, first position; a result outside its call group does not count"
     assert HANDOFF.rebuild_registrations(messages[:3]) == [], "another Request's listings never return"
+
+
+def header(kind="新任务"):
+    return UserMessage(content=f"【本次执行】类型：{kind}", metadata={WINDOW_PART_KEY: EXECUTION_HEADER})
+
+
+def test_an_execution_header_starts_a_new_listing_scope():
+    """F_20 D-07: a new task or a continuation lists afresh; a confirmation resume keeps its chain."""
+    before = [AssistantMessage(content="", tool_calls=[share_call("e1")]), listed("e1", "before-crash.md")]
+    waiting = AssistantMessage(content="", tool_calls=[share_call("w1", "remember")])
+    new_task = [end_marker(), header(), UserMessage(content="task"), *before]
+    assert HANDOFF.rebuild_registrations(new_task) == [Registration("before-crash.md", "upload", None)]
+    assert HANDOFF.rebuild_registrations([*new_task, waiting]) == [Registration("before-crash.md", "upload", None)], (
+        "a confirmation resume adds no header and keeps the listings made before it waited"
+    )
+    resumed = [*new_task, waiting, ToolMessage(content=HANDOFF.SHARE_FILE, tool_call_id="w1"), header("续做")]
+    assert HANDOFF.rebuild_registrations(resumed) == [], "listings before a continuation are evidence only"
+    again = [*resumed, AssistantMessage(content="", tool_calls=[share_call("e3")]), listed("e3", "after.md")]
+    assert HANDOFF.rebuild_registrations(again) == [Registration("after.md", "upload", None)]
 
 
 @pytest.mark.parametrize(

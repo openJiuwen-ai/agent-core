@@ -20,6 +20,7 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UsageMetadata, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
@@ -315,12 +316,13 @@ class Harness:
         fields = dict(
             card=AgentCard(id="business-agent", name="test"),
             model=ModelSpec(
-                model_client_config={
-                    "client_provider": "OpenAI",
-                    "api_key": "mock-api-key",
-                    "api_base": "https://example.invalid/v1",
-                }
+                model_client_config=ModelClientConfig(
+                    client_provider="OpenAI", api_key="mock-api-key", api_base="https://example.invalid/v1"
+                ),
+                model_request_config=ModelRequestConfig(context_window=1_000_000, max_tokens=4_000),
             ),
+            model_input_limit_tokens=900_000,
+            capacity_safety_margin_tokens=1_000,
             enable_sys_operation=False,
             enable_task_loop=False,
             enable_security_rail=False,
@@ -393,7 +395,7 @@ async def collect(stream):
 
 
 @pytest.fixture
-def harness(monkeypatch):
+def harness(monkeypatch, capacity_counter):
     api = import_module(PKG)
     model, tool_calls = LocalModel(), []
     store = StateStore([])
@@ -411,7 +413,7 @@ def harness(monkeypatch):
         _RAIL_PROVIDER_REGISTRY, "test.entries.rewrite", lambda params, context: RewriteAnswer(harness.rewrite)
     )
     monkeypatch.setattr(SEAMS, "session_state_store", lambda context: store)
-    monkeypatch.setattr(SEAMS, "window_assembler", lambda context: harness.assembler)
+    monkeypatch.setattr(SEAMS, "window_assembler", lambda context, **_: harness.assembler)
     monkeypatch.setattr(SEAMS, "native_reply_adapter", ReplyAdapter)
     return harness
 
@@ -1131,7 +1133,7 @@ async def test_old_checkpointer_state_is_neither_restored_nor_saved(harness, mon
         ({"spec": {"enable_subagent_runtime": True}}, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR),
         ({"spec": {"add_general_purpose_agent": True}}, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR),
         ({"context": {"isolated": False}}, StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR),
-        ({"context": {"recovery_ref": "recovery-1"}}, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR),
+        ({"context": {"recovery_ref": "not an identifier"}}, StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR),
         ({"request": {"continue_instruction": "go on"}}, StatusCode.DEEPAGENT_INPUT_PARAM_ERROR),
         ({"request": {"reply_target": ""}}, StatusCode.DEEPAGENT_INPUT_PARAM_ERROR),
         (

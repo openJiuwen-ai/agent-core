@@ -13,6 +13,7 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.llm.schema.message import (
     AssistantMessage,
     SystemMessage,
@@ -257,12 +258,13 @@ class Harness:
         fields = dict(
             card=AgentCard(id="business-agent", name="test"),
             model=ModelSpec(
-                model_client_config={
-                    "client_provider": "OpenAI",
-                    "api_key": "mock-api-key",
-                    "api_base": "https://example.invalid/v1",
-                }
+                model_client_config=ModelClientConfig(
+                    client_provider="OpenAI", api_key="mock-api-key", api_base="https://example.invalid/v1"
+                ),
+                model_request_config=ModelRequestConfig(context_window=1_000_000, max_tokens=4_000),
             ),
+            model_input_limit_tokens=900_000,
+            capacity_safety_margin_tokens=1_000,
             enable_sys_operation=False,
             enable_task_loop=False,
             enable_security_rail=False,
@@ -307,7 +309,7 @@ class Harness:
 
 
 @pytest.fixture
-def harness(monkeypatch, tmp_path):
+def harness(monkeypatch, tmp_path, capacity_counter):
     api = import_module(PKG)
     model, store = LocalModel(), StateStore()
     monkeypatch.setattr(ModelSpec, "build", lambda self: model)
@@ -591,14 +593,6 @@ async def test_group_result_of_another_execution_is_rejected(harness):
     with pytest.raises(BaseError) as exc_info:
         await assemble(harness, scheduled_request(), SEAMS.LoadedRecord(), group=True)
     assert_error(exc_info, StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR)
-
-
-@pytest.mark.asyncio
-async def test_continuation_is_not_assembled_before_pa18(harness):
-    with pytest.raises(BaseError) as exc_info:
-        await assemble(harness, scheduled_request(), SEAMS.LoadedRecord(), recovery_ref="execution-0")
-    assert_error(exc_info, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR)
-    assert "PA-18" in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
