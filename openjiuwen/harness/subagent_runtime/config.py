@@ -25,6 +25,7 @@ class SubagentRuntimeConfig:
     max_subagents: int = 10
     max_concurrent_running: int = 10
     turn_timeout_s: float = TURN_TIMEOUT_S_DEFAULT
+    spawn_slot_wait_timeout_s: float = TURN_TIMEOUT_S_DEFAULT
     enable_lru_eviction: bool = True
     enable_activity_stream: bool = True
     activity_queue_size: int = 256

@@ -464,8 +464,10 @@ def build_subagent_tools(
         language=language,
         agent_id=agent_id,
     )
-    # Wait can legally span queued turns past TURN_TIMEOUT_S_DEFAULT; the
-    # card must not kill the call before control.wait's own deadline.
+    # Spawn may wait for a free slot up to spawn_slot_wait_timeout_s and wait can
+    # legally span queued turns past TURN_TIMEOUT_S_DEFAULT; neither card may be
+    # killed by the default tool-call timeout before the control's own deadline.
+    _attach_call_timeout(spawn_card, None)
     _attach_call_timeout(wait_card, None)
     list_card = build_tool_card(
         name="subagent_list",
