@@ -86,7 +86,12 @@ class OrgCreateOrganizationTool(_OrgControlTool):
     def __init__(self, runtime_manager: "OrganizationRuntimeManager", team_id: str, session_id: str) -> None:
         super().__init__(
             name="org_create_organization",
-            description="Create a team organization owned by this active team.",
+            description=(
+                "Create a team organization owned by this active team. If the requested "
+                "organization_id is already owned by another team that is not active in "
+                "this session, a unique '-N' suffix is appended; always use the "
+                "organization_id returned in the result for subsequent org_* calls."
+            ),
             runtime_manager=runtime_manager,
             team_id=team_id,
             session_id=session_id,
@@ -119,6 +124,15 @@ class OrgCreateOrganizationTool(_OrgControlTool):
             return ToolOutput(success=False, error=str(exc))
         data = organization.model_dump()
         data["next_action"] = _ORG_TASK_POOL_NEXT_ACTION
+        requested_id = str(inputs.get("organization_id") or "")
+        if requested_id and organization.organization_id != requested_id:
+            data["requested_organization_id"] = requested_id
+            data["note"] = (
+                f"Requested organization_id {requested_id!r} is owned by another team from "
+                f"an earlier session; created with unique id {organization.organization_id!r} "
+                f"instead. Use the returned organization_id "
+                f"{organization.organization_id!r} for every subsequent org_* call."
+            )
         return ToolOutput(success=True, data=data)
 
 

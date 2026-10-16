@@ -256,6 +256,7 @@ _PARENT_RESUME_TERMINAL_STATUSES = frozenset(
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.tools.database import TeamDatabase
 
 
 class OrganizationRuntimeManager:
@@ -508,7 +509,13 @@ class OrganizationRuntimeManager:
         description: str | None = None,
         unclaimed_task_policy: OrgUnclaimedTaskPolicy | None = None,
     ) -> OrganizationSpec:
-        """Create an organization owned by an active team and bind its leader."""
+        """Create an organization owned by an active team and bind its leader.
+
+        When the requested ``organization_id`` is already recorded for an owner
+        team that is not active in this session, a unique ``-N`` suffix is
+        allocated instead of failing; the effective id is always carried by the
+        returned ``OrganizationSpec``.
+        """
 
         from openjiuwen.agent_teams.organization.workspace import validate_organization_id
 
@@ -519,14 +526,22 @@ class OrganizationRuntimeManager:
             if existing_manager is not None and existing_manager.organization_id != organization_id:
                 raise ValueError(f"team already belongs to organization: {existing_manager.organization_id}")
 
+            effective_id = await self._resolve_claimable_organization_id(
+                requested_organization_id=organization_id,
+                owner_team_id=owner_team_id,
+                db=owner_backend.db,
+                messager=owner_backend.messager,
+                session_id=session_id,
+            )
             manager = get_process_org_manager(
-                organization_id=organization_id,
+                organization_id=effective_id,
                 db=owner_backend.db,
                 messager=owner_backend.messager,
                 session_id=session_id,
             )
             existing = await manager.get_organization()
             if existing is not None and existing.owner_team_id not in (None, owner_team_id):
+                # Defensive only: allocation above guarantees a claimable id.
                 raise ValueError(f"organization already belongs to team: {existing.owner_team_id}")
 
             was_new = existing is None
@@ -552,11 +567,71 @@ class OrganizationRuntimeManager:
             if was_new:
                 logger.info(
                     "organization created: org=%s owner=%s leader=%s",
-                    organization_id,
+                    effective_id,
                     owner_team_id,
                     owner_leader_id,
                 )
             return created
+
+    async def _resolve_claimable_organization_id(
+        self,
+        *,
+        requested_organization_id: str,
+        owner_team_id: str,
+        db: "TeamDatabase",
+        messager: Any,
+        session_id: str,
+    ) -> str:
+        """Return the requested id when claimable, else a suffixed unique id.
+
+        Organization ids share one namespace in the owner ``TeamDatabase``
+        while every session builds a fresh team instance: re-running the same
+        task prompt deterministically re-picks the same id and used to abort
+        with ``organization already belongs to team`` against a previous
+        session's leftover row. Mirror the host's team-name dedup — when the
+        recorded owner is not active in this session, transparently allocate
+        ``<id>-2``, ``<id>-3``, ... The hard error remains only for an owner
+        team that is live in this session, which is a genuine same-session
+        collision the caller must resolve explicitly (e.g. join via
+        ``org_invite_team`` instead of creating a duplicate organization).
+        """
+
+        async def recorded_owner(candidate_id: str) -> str | None:
+            candidate_manager = get_process_org_manager(
+                organization_id=candidate_id,
+                db=db,
+                messager=messager,
+                session_id=session_id,
+            )
+            existing_org = await candidate_manager.get_organization()
+            if existing_org is None:
+                return None
+            return str(existing_org.owner_team_id or "") or None
+
+        current_owner = await recorded_owner(requested_organization_id)
+        if current_owner is None or current_owner == owner_team_id:
+            return requested_organization_id
+
+        entry = await self._team_runtime_manager.pool.get(current_owner)
+        if entry is not None and entry.current_session_id == session_id:
+            raise ValueError(f"organization already belongs to team: {current_owner}")
+
+        for attempt in range(2, 102):
+            suffix = f"-{attempt}"
+            # Keep the 96-char contract of validate_organization_id (workspace.py).
+            candidate = f"{requested_organization_id[:96 - len(suffix)]}{suffix}"
+            if await recorded_owner(candidate) in (None, owner_team_id):
+                logger.warning(
+                    "organization id requested=%s owned by inactive team=%s; "
+                    "reassigned effective=%s owner=%s session=%s",
+                    requested_organization_id,
+                    current_owner,
+                    candidate,
+                    owner_team_id,
+                    session_id,
+                )
+                return candidate
+        raise ValueError(f"unable to allocate a unique organization_id for: {requested_organization_id}")
 
     async def invite_team(
         self,
