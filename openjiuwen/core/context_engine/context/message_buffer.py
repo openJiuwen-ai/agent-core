@@ -2,10 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import glob
 import os
-from typing import List, Optional, Union, Dict
+from typing import Dict, List, Optional, Union
 
-from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage
 
 
 class ContextMessageBuffer:
@@ -14,30 +14,28 @@ class ContextMessageBuffer:
         self.rebulid(history_messages)
 
     def size(self) -> int:
-        if self._max_buffer_size is not None:
-            return min(len(self._context_messages), self._max_buffer_size)
-        return len(self._context_messages)
+        return len(self._context_messages) - self._retained_start()
 
     def add_back(self, messages: Union[BaseMessage, List[BaseMessage]]):
+        previous_start = self._retained_start()
         if isinstance(messages, BaseMessage):
             self._context_messages.append(messages)
         else:
             for msg in messages:
                 self._context_messages.append(msg)
+        self._log_discarded(previous_start, self._retained_start())
         self._if_need_resize()
 
     def get_back(self, size: Optional[int] = None, with_history: bool = True) -> List[BaseMessage]:
-        context_messages = (
-            self._context_messages[:]
-            if self._max_buffer_size is None
-            else self._context_messages[max(0, len(self._context_messages) - self._max_buffer_size):]
-        )
+        start = self._retained_start()
+        context_messages = self._context_messages[start:]
+        history_size = max(0, self._history_messages_size - start)
         if size is None:
             return context_messages \
                 if with_history \
-                else context_messages[self._history_messages_size:]
+                else context_messages[history_size:]
         total_size = len(context_messages)
-        context_size = total_size - self._history_messages_size
+        context_size = total_size - history_size
         size = min(size, context_size) if not with_history else min(size, total_size)
         return context_messages[total_size - size:]
 
@@ -61,23 +59,43 @@ class ContextMessageBuffer:
         self._context_messages = history_messages + messages
 
     def rebulid(self, history_messages: List[BaseMessage]):
-        if self._max_buffer_size is not None:
-            self._context_messages = history_messages[-self._max_buffer_size:]
-            self._history_messages_size = min(len(self._context_messages), self._max_buffer_size)
-        else:
-            self._context_messages = history_messages.copy()
-            self._history_messages_size = len(self._context_messages)
+        self._context_messages = history_messages.copy()
+        start = self._retained_start()
+        self._log_discarded(0, start)
+        self._context_messages = self._context_messages[start:]
+        self._history_messages_size = len(self._context_messages)
+
+    def _retained_start(self) -> int:
+        """Keep the hard limit without starting inside a tool-call group."""
+        if self._max_buffer_size is None:
+            return 0
+        start = max(0, len(self._context_messages) - self._max_buffer_size)
+        # Also normalize orphan results arriving after an oversized active
+        # group was fully removed, or restored from a legacy checkpoint.
+        return self._skip_tool_results(start)
+
+    def _skip_tool_results(self, start: int) -> int:
+        while start < len(self._context_messages) and isinstance(self._context_messages[start], ToolMessage):
+            start += 1
+        return start
+
+    def _log_discarded(self, start: int, end: int):
+        if end > start:
+            tool_results = sum(isinstance(msg, ToolMessage) for msg in self._context_messages[start:end])
+            logger.info(
+                "Context message limit discarded %s messages, including %s tool results",
+                end - start,
+                tool_results,
+            )
 
     def _if_need_resize(self):
         if self._max_buffer_size is None:
             return
         if len(self._context_messages) <= self._max_buffer_size * 2:
             return
-        self._context_messages = self._context_messages[self._max_buffer_size:]
-        if self._history_messages_size == 0 or self._max_buffer_size > self._history_messages_size:
-            self._history_messages_size = 0
-            return
-        self._history_messages_size = self._history_messages_size - self._max_buffer_size
+        start = self._skip_tool_results(self._max_buffer_size)
+        self._context_messages = self._context_messages[start:]
+        self._history_messages_size = max(0, self._history_messages_size - start)
 
 
 class OffloadMessageBuffer:
