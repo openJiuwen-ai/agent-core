@@ -6,6 +6,7 @@ The session state store and group message reader doubles stand in for PA-10 / PA
 the window assembler, its seam and the Persistent construction are the real ones.
 """
 
+import json
 from datetime import datetime, timezone
 from importlib import import_module
 
@@ -105,8 +106,14 @@ class LocalModel:
 
     async def stream(self, messages, **kwargs):
         self.seen.append((list(messages), list(kwargs.get("tools") or [])))
-        if (self.turns.pop(0) if self.turns else "answer") == "tool":
-            call = ToolCall(id="call-1", type="function", name="remember", arguments='{"value": "x"}')
+        turn = self.turns.pop(0) if self.turns else "answer"
+        if turn in ("tool", "search"):
+            name, arguments = (
+                ("search_group_messages", '{"query": "lunch", "group_ids": ["group-b"]}')
+                if turn == "search"
+                else ("remember", '{"value": "x"}')
+            )
+            call = ToolCall(id="call-1", type="function", name=name, arguments=arguments)
             yield AssistantMessageChunk(content="checking ", tool_calls=[call], usage_metadata=usage())
             return
         yield AssistantMessageChunk(
@@ -389,11 +396,8 @@ async def test_group_background_sits_between_header_and_task_input(harness):
         group_message("m-5", 5, status="unavailable", text=None),
     ]
     harness.reader.scanned_through = "m-6"
-    spec = harness.spec()
-    ctx, _ = harness.context(spec, group=True)
-    harness.store.loaded = SEAMS.LoadedRecord(None, "gm-0")
-    await harness.run(spec, ctx, scheduled_request())
-    assert harness.reader.calls == [("gm-0", None)], "read after the saved cursor; a schedule has no trigger"
+    assembly, messages = await assemble(harness, group_request(), SEAMS.LoadedRecord(None, "gm-0"), group=True)
+    assert harness.reader.calls == [("gm-0", "trigger")]
     background = "\n".join(
         [
             INTRO,
@@ -405,14 +409,12 @@ async def test_group_background_sits_between_header_and_task_input(harness):
             "- [m-5] 2026-10-08T09:05:00+00:00 王五（u-5，人）[正文暂缺，需要时可查询群聊记录]",
         ]
     )
-    ((messages, _),) = harness.model.seen
-    assert parts(messages[2:]) == [
+    assert parts(messages[1:]) == [
         ("UserMessage", background, SEAMS.TEMPORARY_BACKGROUND),
-        ("UserMessage", "summarize unhandled claims", None),
     ]
-    assert messages[1].metadata[PART] == SEAMS.EXECUTION_HEADER
-    assert harness.store.endings[-1].last_group_message_id == "m-6", "the cursor follows the confirmed scan position"
-    assert parts(harness.store.saved)[1][2] == SEAMS.TEMPORARY_BACKGROUND
+    assert assembly.native_input == {"query": "summarize unhandled claims"}
+    assert messages[0].metadata[PART] == SEAMS.EXECUTION_HEADER
+    assert assembly.last_group_message_id == "m-6", "the cursor follows the confirmed scan position"
 
 
 @pytest.mark.asyncio
@@ -430,14 +432,13 @@ async def test_dynamic_content_is_appended_through_the_attachment_channel(harnes
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("port", ["group_chat", "knowledge"])
-async def test_injected_background_ports_need_their_integration(harness, port):
+async def test_injected_knowledge_port_needs_its_integration(harness):
     spec = harness.spec()
-    ctx, host = harness.context(spec, group=port == "group_chat", knowledge=port == "knowledge")
+    ctx, host = harness.context(spec, knowledge=True)
     with pytest.raises(BaseError) as exc_info:
         await harness.run(spec, ctx, scheduled_request())
     assert_error(exc_info, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR)
-    assert ("PA-23" if port == "group_chat" else "PA-13") in str(exc_info.value)
+    assert "PA-13" in str(exc_info.value)
     assert host.events == [] and harness.model.seen == [], "rejected before any event or model call"
 
 
@@ -504,6 +505,91 @@ async def assemble(harness, request, record, **context_options):
     return assembly, window
 
 
+def group_request():
+    return {
+        "kind": "group_message",
+        "text": "summarize unhandled claims",
+        "reply_target": "group-1",
+        "source": group_message("trigger", 0),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("task_input", [direct_request(), scheduled_request()])
+async def test_search_port_does_not_automatically_read_group_background(harness, task_input):
+    spec = harness.spec()
+    ctx, _ = harness.context(spec, group=True)
+    events = await harness.run(spec, ctx, task_input)
+    assert events[-1].payload.status == "completed"
+    ((messages, tools),) = harness.model.seen
+    assert "search_group_messages" in str(tools)
+    assert all(message.metadata.get(PART) != SEAMS.TEMPORARY_BACKGROUND for message in messages)
+
+
+@pytest.mark.asyncio
+async def test_search_runs_through_native_tool_loop_and_readonly_barrier(harness):
+    from openjiuwen.core.runner import Runner
+
+    spec = harness.spec()
+    ctx, host = harness.context(spec, group=True)
+    calls = []
+
+    async def search(execution, query):
+        calls.append((execution, query))
+        return {
+            **ref(execution),
+            "status": "found",
+            "query_complete": True,
+            "hits": [
+                {
+                    "group_id": "group-b",
+                    "group_name": "项目群",
+                    "message_ref": "group-b:m1",
+                    "message": group_message("m1", 1),
+                }
+            ],
+        }
+
+    host.search_messages = search
+    harness.model.turns = ["search"]
+    events = await harness.run(spec, ctx, direct_request())
+    assert events[-1].payload.status == "completed"
+    assert len(calls) == 1 and calls[0][0] is ctx.execution and calls[0][1].group_ids == ("group-b",)
+    (first, first_tools), (second, second_tools) = harness.model.seen
+    assert second[: len(first)] == first and second_tools == first_tools
+    result = next(message for message in second if isinstance(message, ToolMessage))
+    assert json.loads(result.content)["hits"][0]["message_ref"] == "group-b:m1"
+    assert "tool.intent" not in kinds(events)
+    assert Runner.resource_mgr.get_tool("search_group_messages_" + ctx.tool_owner_id) is None
+
+
+@pytest.mark.asyncio
+async def test_real_reader_is_wired_into_window_assembly(harness):
+    spec = harness.spec()
+    ctx, host = harness.context(spec, group=True)
+    calls = []
+
+    async def recent(execution, cursor=None, limit=20):
+        calls.append(cursor)
+        messages = (
+            [group_message("m3", 3)]
+            if cursor == "m2"
+            else [
+                group_message("m1", 1),
+                group_message("m2", 2),
+                group_message("m3", 3),
+            ]
+        )
+        return {**ref(execution), "status": "found", "messages": messages, "scanned_through": "m3"}
+
+    host.recent_messages = recent
+    request = harness.api.RequestInput.model_validate(group_request())
+    assembly = await SEAMS.window_assembler(ctx).assemble(ctx, request, SEAMS.LoadedRecord(None, "m2"))
+    window = ctx.session.get_state("context")["default_context_id"]["messages"]
+    assert calls == ["m2", "trigger"] and assembly.last_group_message_id == "m3"
+    assert "[m1]" in window[1].content and "[m3]" in window[1].content
+
+
 @pytest.mark.asyncio
 async def test_group_message_request_excludes_its_trigger_from_background(harness):
     harness.use_reader()
@@ -551,7 +637,7 @@ async def test_backfill_keeps_what_was_said_about_a_queued_request_meanwhile(har
 async def test_empty_group_result_adds_no_background(harness, scanned, cursor):
     harness.use_reader()
     harness.reader.status, harness.reader.scanned_through = "empty", scanned
-    assembly, window = await assemble(harness, scheduled_request(), SEAMS.LoadedRecord(None, "gm-0"), group=True)
+    assembly, window = await assemble(harness, group_request(), SEAMS.LoadedRecord(None, "gm-0"), group=True)
     assert [message.metadata[PART] for message in window] == [SEAMS.EXECUTION_HEADER]
     assert assembly.last_group_message_id == cursor, "a confirmed scan moves the cursor even with nothing new"
 
@@ -562,7 +648,7 @@ async def test_incomplete_group_result_is_flagged_and_keeps_the_cursor(harness, 
     harness.use_reader()
     harness.reader.status, harness.reader.reason = "incomplete", "group history timed out"
     harness.reader.messages = [group_message("m-5", 5)] if with_messages else []
-    assembly, window = await assemble(harness, scheduled_request(), SEAMS.LoadedRecord(None, "gm-0"), group=True)
+    assembly, window = await assemble(harness, group_request(), SEAMS.LoadedRecord(None, "gm-0"), group=True)
     lines = window[1].content.split("\n")
     assert lines[:2] == [
         INTRO,
@@ -579,7 +665,7 @@ async def test_unreadable_bodies_do_not_hold_back_a_trusted_cursor(harness):
     harness.reader.status, harness.reader.reason = "incomplete", "message body store unavailable"
     harness.reader.messages = [group_message("m-3", 3, status="unavailable", text=None), group_message("m-4", 4)]
     harness.reader.scanned_through = "m-5"
-    assembly, window = await assemble(harness, scheduled_request(), SEAMS.LoadedRecord(None, "gm-0"), group=True)
+    assembly, window = await assemble(harness, group_request(), SEAMS.LoadedRecord(None, "gm-0"), group=True)
     lines = window[1].content.split("\n")
     assert "[正文暂缺，需要时可查询群聊记录]" in lines[2] and "没有读取完整" in lines[1]
     assert assembly.last_group_message_id == "m-5", "the host confirmed the scan, so the missing body is not re-read"
@@ -591,7 +677,7 @@ async def test_group_result_of_another_execution_is_rejected(harness):
     harness.reader.messages = [group_message("m-1", 1)]
     harness.reader.identity = {"execution_id": "execution-other"}
     with pytest.raises(BaseError) as exc_info:
-        await assemble(harness, scheduled_request(), SEAMS.LoadedRecord(), group=True)
+        await assemble(harness, group_request(), SEAMS.LoadedRecord(), group=True)
     assert_error(exc_info, StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR)
 
 

@@ -162,6 +162,18 @@ class PersistentAgentSpec(DeepAgentSpec):
         from ..execution.tool_intent_rail import PersistentToolIntentRail
 
         parts.config.stream_task_lifecycle = NativeStreamTaskLifecycle()
+        if context.ports.group_chat is not None:
+            from ..tools.group_history import SEARCH_TOOL_NAME, PersistentGroupMessageSearchTool
+
+            if any(card.name == SEARCH_TOOL_NAME for card in parts.tool_cards):
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                    error_msg=f"{SEARCH_TOOL_NAME} is reserved for Persistent group history",
+                )
+            tool = PersistentGroupMessageSearchTool(execution=context.execution, group_chat=context.ports.group_chat)
+            parts.tool_instances.append(tool)
+            parts.tool_cards.append(tool.card)
+            parts.config.tools = list(parts.tool_cards)
         # Inert until an execution entry attaches its emitter to this binding.
         parts.rails.append(PersistentModelCallRail(context.binding, spec=self))
         if self.continuation_chain_limit is not None:

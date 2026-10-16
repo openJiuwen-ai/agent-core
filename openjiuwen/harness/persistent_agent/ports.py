@@ -14,7 +14,13 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
 
-from .schema.context import GroupMessageQuery, GroupMessagesResult, MaterialQuery, MaterialReadResult
+from .schema.context import (
+    GroupMessageQuery,
+    GroupMessageSearchResult,
+    GroupMessagesResult,
+    MaterialQuery,
+    MaterialReadResult,
+)
 from .schema.events import AgentEvent
 from .schema.execution import ExecutionContext
 from .schema.port_results import BudgetAdmission, BudgetReport, ExecutionLink
@@ -73,7 +79,7 @@ class BudgetPort(Protocol):
 
 
 class GroupChatPort(Protocol):
-    """Host port for the group history of the Session's group; the host resolves the group."""
+    """Current-group background and Agent-authorized cross-group search; the host resolves authorization."""
 
     async def recent_messages(
         self, execution: ExecutionContext, cursor: str | None = None, limit: int = 20
@@ -82,11 +88,22 @@ class GroupChatPort(Protocol):
 
         A reader backfilling a queued Request passes its trigger message as ``cursor`` to read everything
         after the trigger. ``scanned_through`` in the result is the position the host confirms it scanned.
+        With a cursor, pages are in forward scan order; next_cursor continues that scan. Each call
+        rechecks current authorization. Unknown positions or incomplete coverage are not empty results.
         """
         ...
 
-    async def search_messages(self, execution: ExecutionContext, query: GroupMessageQuery) -> GroupMessagesResult:
-        """Search authorized group history of the Session's group."""
+    async def search_messages(self, execution: ExecutionContext, query: GroupMessageQuery) -> GroupMessageSearchResult:
+        """Search retained history of groups currently authorized for execution.agent_id.
+
+        Reauthorize every page; filters only narrow that scope, not grant access. Do not require the
+        questioner to belong to the target group. Resolve exact names inside that scope, returning
+        unavailable with safe disambiguation guidance for ambiguous names. Match literal substrings
+        case-insensitively; order by receive time descending, then group_id and message_id. No time
+        filter means all retained history, not proof of history before collection began. Bind cursors
+        to the Agent, query and authorization scope; never trust a model-supplied cursor as permission.
+        Reasons must be safe for the model; unavailable targets must not disclose their existence.
+        """
         ...
 
 
