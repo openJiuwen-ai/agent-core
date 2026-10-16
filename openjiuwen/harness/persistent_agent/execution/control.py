@@ -29,6 +29,8 @@ class ExecutionControl:
     # Listings share_file accepted, with a confirmation chain's, for the merge and the 64-file limit at call
     # time. The ending hands off only listings whose result reached the final window (entries._finish).
     registrations: "dict[tuple[str, str], Registration]" = field(default_factory=dict, repr=False)
+    # Executions a continuation reached through verified links; read_execution_record answers only for them.
+    verified_chain: tuple[str, ...] = ()
 
     def request_abort(self, reason: AbortReason) -> bool:
         """Record the first control reason before the outcome is locked; otherwise report False."""

@@ -19,7 +19,7 @@ from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
 
 from ..schema.events import CAPTION_MAX_CHARS, EVENT_MAX_BYTES, AgentEvent, EventType
 from ..schema.execution import ExecutionContext
-from ..schema.integration import EXECUTION_END, WINDOW_PART_KEY
+from ..schema.integration import EXECUTION_END, EXECUTION_HEADER, WINDOW_PART_KEY
 from ..workspace.access import WorkspaceAccessPort, WorkspaceReadScope, validate_read_scope
 from ..workspace.path_policy import ResolvedWorkspacePath, WorkspacePathError, resolve_read_path
 from .emitter import EventEmitter, longest_prefix, widest_size
@@ -164,18 +164,24 @@ def _parse_result(content: Any) -> Registration | None:
     return Registration(file_path, share_mode, caption) if unchanged else None
 
 
+# Window parts after which a new listing scope starts (see rebuild_registrations).
+_SCOPE_STARTS = frozenset({EXECUTION_END, EXECUTION_HEADER})
+
+
 def rebuild_registrations(messages: list) -> list[Registration]:
     """Listings of the current confirmation chain, rebuilt from share_file's own results in the window.
 
-    Only messages after the last end marker are read, so another Request's listings never reach this
-    reply target. A result counts only right after its own call group, in the fixed success form and
+    Only messages after the last end marker or execution header are read: another Request's listings
+    never reach this reply target, and a new task or a continuation starts its own scope, so listings
+    made before a crash or a pause are evidence only. A confirmation resume adds no header and keeps
+    the listings of its chain. A result counts only right after its own call group, in the fixed success form and
     with a matching content check value; notes, placeholders, interruption results and results whose
     content was changed without recomputing the check value count as not listed. See _parse_result for
     what the check value does not prove.
     """
     start = 0
     for index, message in enumerate(messages):
-        if (getattr(message, "metadata", None) or {}).get(WINDOW_PART_KEY) == EXECUTION_END:
+        if (getattr(message, "metadata", None) or {}).get(WINDOW_PART_KEY) in _SCOPE_STARTS:
             start = index + 1
     chain = messages[start:]
     merged: dict[tuple[str, str], Registration] = {}

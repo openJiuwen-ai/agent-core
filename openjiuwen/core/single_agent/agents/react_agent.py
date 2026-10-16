@@ -19,7 +19,7 @@ import time
 import uuid
 from contextlib import aclosing
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Iterable, List, Literal, Optional, Tuple, Union, cast
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Iterable, List, Literal, Optional, Tuple, Union, cast
 
 from pydantic import BaseModel, Field
 
@@ -545,6 +545,11 @@ class InterruptionState(BaseInterruptionState):
     pending_component_id: str
 
 
+# Check of one final model request: None lets the call go ahead; a result dict ends the round
+# without calling the model (see ReActAgent.set_final_request_check).
+FinalRequestCheck = Callable[[AgentCallbackContext], Awaitable[Optional[Dict[str, Any]]]]
+
+
 class ReActAgent(BaseAgent):
     """ReAct paradigm Agent implementation
     ReAct loop: Reasoning -> Acting -> Observation -> Repeat
@@ -599,6 +604,24 @@ class ReActAgent(BaseAgent):
         # Per-session results of the running tool batch, kept until they are written to the context
         # (retain_tool_facts_on_abort only).
         self._tool_fact_journals: Dict[str, Dict[str, ToolMessage]] = {}
+        # Optional per-instance check of each final model request; off unless installed.
+        self._final_request_check: Optional[FinalRequestCheck] = None
+
+    def set_final_request_check(self, check: Optional["FinalRequestCheck"]) -> None:
+        """Install the check of each final model request on this instance, or remove it with None.
+
+        The check runs inside every model call attempt, after the final system prompt, window
+        messages and tool definitions are built and before the provider is called. It returns None
+        to let the call go ahead, or a result dict that ends this round without calling the model,
+        the way a force-finish result does. It is not an exception, so no rail retry and no model
+        exception recovery follow it; cancellation still propagates.
+        """
+        self._final_request_check = check
+
+    async def _final_request_finish(self, ctx: AgentCallbackContext) -> Optional[Dict[str, Any]]:
+        """The installed check's result for this final request; None when none is installed or it allows the call."""
+        check = self._final_request_check
+        return None if check is None else await check(ctx)
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -1721,7 +1744,7 @@ class ReActAgent(BaseAgent):
         after=AgentCallbackEvent.AFTER_MODEL_CALL,
         on_exception=AgentCallbackEvent.ON_MODEL_EXCEPTION,
     )
-    async def _railed_model_call(self, ctx: AgentCallbackContext) -> AssistantMessage:
+    async def _railed_model_call(self, ctx: AgentCallbackContext) -> Union[AssistantMessage, Dict[str, Any]]:
         """Execute LLM call with @rail before/after/on_exception hooks.
 
         All BEFORE_MODEL_CALL rails have run at this point and may have
@@ -1735,6 +1758,10 @@ class ReActAgent(BaseAgent):
 
         Uses llm.stream() when ctx.extra["_streaming"] is True,
         falls back to llm.invoke() otherwise.
+
+        An installed final request check (set_final_request_check) sees the
+        final messages and tools; a result dict from it is returned instead
+        of calling the model.
         """
         # --- Finalize system message and context window (post-rails) ---
         llm = self._get_llm()
@@ -1747,6 +1774,11 @@ class ReActAgent(BaseAgent):
             model_client_config=getattr(llm, "model_client_config", None),
         )
         self._last_model_tools = list(ctx.inputs.tools or [])
+
+        # The final request is now known; an installed check may end the round before the provider call.
+        finish = await self._final_request_finish(ctx)
+        if finish is not None:
+            return finish
 
         # Freeze the final-window report before the provider call.  The same
         # request-local object is used by post_call; post_call must not ask the

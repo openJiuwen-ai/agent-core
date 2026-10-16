@@ -44,6 +44,7 @@ __all__ = [
     "WaitingScene",
     "WindowAssembler",
     "WindowAssembly",
+    "continuation_support",
     "group_message_reader",
     "native_reply_adapter",
     "session_state_store",
@@ -60,8 +61,8 @@ def session_state_store(context: "PersistentBuildContext") -> SessionStateStore:
     return ExecutionStateStore(WindowStore(context.ports.window_backend))
 
 
-def window_assembler(context: "PersistentBuildContext") -> WindowAssembler:
-    """Return the window assembler for new Requests.
+def window_assembler(context: "PersistentBuildContext", *, chain_limit: int | None = None) -> WindowAssembler:
+    """Return the window assembler for new Requests and continuations.
 
     An injected port means its background is expected: a group Session (GroupChatPort) needs the
     group message reader, and knowledge navigation (KnowledgePort) is not integrated yet. Either
@@ -71,7 +72,12 @@ def window_assembler(context: "PersistentBuildContext") -> WindowAssembler:
     if getattr(ports, "knowledge", None) is not None:
         raise _not_integrated("knowledge navigation", "PA-13")
     reader = group_message_reader(context) if getattr(ports, "group_chat", None) is not None else None
-    return ExecutionWindowAssembler(reader)
+    return ExecutionWindowAssembler(reader, chain_limit=chain_limit)
+
+
+def continuation_support(context: "PersistentBuildContext") -> None:
+    """Continuation opens with the archive query by execution_id (PA-12; F_20 D-10)."""
+    raise _not_integrated("continuation", "PA-12 archive query")
 
 
 def group_message_reader(context: "PersistentBuildContext") -> GroupMessageReader:

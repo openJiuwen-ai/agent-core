@@ -1,10 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Window of a new Request: saved window, execution header, temporary background, then the task input.
+"""Window of a new Request or a continuation: saved window, execution header, temporary background,
+then the task input.
 
 Header and background are appended to the loaded window in Session state before the native
 call; the native ReAct loop then adds the task input after them and only appends from there.
 System prompt and tool definitions are not touched, so the saved window stays a cacheable prefix.
+A continuation (PA-18) first settles a stale waiting scene, then adds the log summary and rules.
 """
 
 from typing import TYPE_CHECKING
@@ -26,6 +28,7 @@ from ..schema.integration import (
     LoadedRecord,
     WindowAssembly,
 )
+from . import continuation
 
 if TYPE_CHECKING:
     from ..schema.build_context import PersistentBuildContext
@@ -45,14 +48,16 @@ def _inline(value) -> str:
 
 
 def _execution_header(context: "PersistentBuildContext", request: "RequestInput") -> str:
-    """One-line header of this Execution; PA-18 adds type "续做" and recovery_ref in the same format."""
+    """One-line header of this Execution; a continuation says so and names the Execution it continues."""
     execution = context.execution
     fields = [
-        ("类型", "新任务"),
+        ("类型", "新任务" if execution.recovery_ref is None else "续做"),
         ("request_id", execution.request_id),
         ("execution_id", execution.execution_id),
-        ("来源", _REQUEST_KINDS[request.kind]),
     ]
+    if execution.recovery_ref is not None:
+        fields.append(("recovery_ref", execution.recovery_ref))
+    fields.append(("来源", _REQUEST_KINDS[request.kind]))
     source = request.source
     if source is not None:
         sender = f"{_inline(source.sender_name)}（{source.sender_id}"
@@ -129,20 +134,21 @@ def _append_to_window(session, messages: list[UserMessage]) -> None:
 
 
 class ExecutionWindowAssembler:
-    """Arranges a new Request's window once at the start of the Execution (architecture §7.4)."""
+    """Arranges the window once at the start of the Execution (architecture §7.4, §5.2.4)."""
 
-    def __init__(self, reader: GroupMessageReader | None = None):
+    def __init__(self, reader: GroupMessageReader | None = None, *, chain_limit: int | None = None):
         # Present only in a group Session (one with a GroupChatPort).
         self._reader = reader
+        # Most earlier Executions a continuation reads back through (Spec.continuation_chain_limit).
+        self._chain_limit = chain_limit
 
     async def assemble(
         self, context: "PersistentBuildContext", request: "RequestInput", record: LoadedRecord
     ) -> WindowAssembly:
         """Append the header and background; the task input goes last as the native query."""
-        if context.execution.recovery_ref is not None:
-            raise build_error(
-                StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, error_msg="continuation is not integrated yet (PA-18)"
-            )
+        resuming = context.execution.recovery_ref is not None
+        if resuming:
+            record = continuation.clear_stale_scene(context, record)
         if record.waiting is not None or context.session.get_state(INTERRUPTION_KEY) is not None:
             # Anything appended after a call awaiting its result breaks tool-call pairing, and the native
             # agent would replay the interrupted call with the new task text as its resume input. A
@@ -184,5 +190,10 @@ class ExecutionWindowAssembler:
             # body does not hold it back, and a read without trusted progress keeps the old one.
             if result.scanned_through is not None:
                 cursor = result.scanned_through
+        query = request.text
+        if resuming:
+            background = await continuation.continuation_background(context, self._chain_limit)
+            parts.append(_marked(background, TEMPORARY_BACKGROUND))
+            query = continuation.continued_query(request.text, request.continue_instruction)
         _append_to_window(context.session, parts)
-        return WindowAssembly({"query": request.text}, last_group_message_id=cursor)
+        return WindowAssembly({"query": query}, last_group_message_id=cursor)

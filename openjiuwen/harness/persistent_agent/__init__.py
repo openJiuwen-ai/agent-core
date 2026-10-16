@@ -3,6 +3,11 @@
 """Persistent construction, invocation contracts and protocol values."""
 
 from importlib import import_module
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .ports import ExecutionLinkPort
+    from .schema.port_results import ExecutionLink
 
 __all__ = [
     "PersistentAgentSpec",
@@ -11,6 +16,7 @@ __all__ = [
     "PersistentPorts",
     "KnowledgePort",
     "GroupChatPort",
+    "ExecutionLinkPort",
     "WorkspaceAccessPort",
     "WorkspaceReadScope",
     "WorkspaceWriteAccessPort",
@@ -48,6 +54,7 @@ __all__ = [
     "FinalPayload",
     "BudgetAdmission",
     "BudgetReport",
+    "ExecutionLink",
     "session_key_prefix",
 ]
 
@@ -56,7 +63,7 @@ _MODULES = {
     "PersistentBuildContext": "schema.build_context",
     "ExecutionContext": "schema.execution",
     "PersistentPorts": "ports",
-    **dict.fromkeys(("KnowledgePort", "GroupChatPort"), "ports"),
+    **dict.fromkeys(("KnowledgePort", "GroupChatPort", "ExecutionLinkPort"), "ports"),
     **dict.fromkeys(("WorkspaceAccessPort", "WorkspaceReadScope"), "workspace.access"),
     **dict.fromkeys(("WorkspaceWriteAccessPort", "WorkspaceWriteScope"), "workspace.access"),
     "create_persistent_agent": "factory",
@@ -98,7 +105,7 @@ _MODULES = {
         ),
         "schema.events",
     ),
-    **dict.fromkeys(("BudgetAdmission", "BudgetReport"), "schema.port_results"),
+    **dict.fromkeys(("BudgetAdmission", "BudgetReport", "ExecutionLink"), "schema.port_results"),
     "session_key_prefix": "execution.session_state",
 }
 

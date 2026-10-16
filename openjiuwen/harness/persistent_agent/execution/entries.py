@@ -11,6 +11,7 @@ import asyncio
 import json
 from contextlib import aclosing
 from dataclasses import dataclass, replace
+from inspect import iscoroutinefunction
 from typing import Any, AsyncGenerator, AsyncIterator
 
 from pydantic import ValidationError
@@ -32,6 +33,8 @@ from ..schema.request import ConfirmReply, RequestInput
 from ..schema.spec import PersistentAgentSpec
 from . import handoff, seams
 from .binding import InvocationState, abort_bound, close_bound, stream_bound
+from .capacity import capacity_limits
+from .continuation import require_recovery_ref
 from .control import AbortReason, ExecutionControl
 from .emitter import EventEmitter, escaped_bytes, longest_prefix, widest_size
 from .model_rail import PAUSE_MARKER
@@ -95,6 +98,13 @@ def _require_supported_modes(spec) -> None:
         )
     if spec.subagents or any(getattr(spec, flag) for flag in _UNSUPPORTED_FLAGS):
         raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "subagents are not opened for Persistent execution yet")
+    # Every formal execute/resume requires full capacity configuration, before any event or construction.
+    if capacity_limits(spec) is None:
+        raise _reject(
+            StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+            "formal execution requires the capacity check: configure model_input_limit_tokens, "
+            "capacity_safety_margin_tokens, context_window and max_tokens",
+        )
 
 
 def _require_assembled_modes(agent) -> None:
@@ -119,8 +129,22 @@ def _require_request(context: PersistentBuildContext, inputs) -> RequestInput:
     if request.continue_instruction is not None and recovery_ref is None:
         raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "continue_instruction requires a recovery_ref")
     if recovery_ref is not None:
-        raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "continuation is not integrated yet (PA-18)")
+        require_recovery_ref(context.execution)
     return request
+
+
+def _require_continuation(spec: PersistentAgentSpec, context: PersistentBuildContext) -> None:
+    """A continuation needs its integrations, the host's link reader and a chain limit; checked before any event.
+
+    Only a continuation checks these, so hosts, new Requests and construction without it are unaffected.
+    """
+    if context.execution.recovery_ref is None:
+        return
+    seams.continuation_support(context)
+    if not iscoroutinefunction(getattr(context.ports.commit, "read_execution_link", None)):
+        raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "continuation requires commit.read_execution_link")
+    if spec.continuation_chain_limit is None:
+        raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "continuation requires continuation_chain_limit")
 
 
 def _start(context: PersistentBuildContext) -> ExecutionControl:
@@ -417,24 +441,29 @@ async def _drive(control: ExecutionControl, runner) -> AsyncGenerator[AgentEvent
 
 
 async def execute_persistent_request(spec, context, inputs) -> AsyncIterator[AgentEvent]:
-    """Run a new Request; the host consumes the stream to its end (architecture §13)."""
+    """Run a new Request, or continue one when the context carries a recovery_ref (architecture §5.2.4).
+
+    The host consumes the stream to its end (architecture §13).
+    """
     _require_supported_modes(spec)
     _require_isolation(context)
     request = _require_request(context, inputs)
+    _require_continuation(spec, context)
     if request.kind == "group_message" and context.ports.group_chat is None:
         raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "group chat port is required for group participation")
     control = _start(context)
 
     async def runner():
         decision_event_id = None
-        if request.kind == "group_message":
+        # A continuation goes on with a Request its first Execution already chose to take part in.
+        if request.kind == "group_message" and context.execution.recovery_ref is None:
             # Judgment reads GroupChatPort itself and must finish before the window store is touched.
             judged = await judge_participation(spec, context, request, control.emitter)
             if judged.terminal:
                 return
             decision_event_id = judged.event_id
         store = seams.session_state_store(context)
-        assembler = seams.window_assembler(context)
+        assembler = seams.window_assembler(context, chain_limit=spec.continuation_chain_limit)
 
         async def body(agent):
             started = {"goal": request.text}

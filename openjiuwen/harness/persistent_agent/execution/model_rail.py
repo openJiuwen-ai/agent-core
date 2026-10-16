@@ -14,9 +14,11 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from ..schema.events import EventType
 from ..schema.port_results import BudgetAdmission, BudgetReport
 from ..schema.protocol import ModelUsage
+from . import capacity
 
 if TYPE_CHECKING:
     from ..schema.build_context import ConstructionBinding
+    from ..schema.spec import PersistentAgentSpec
 
 # Result marker a force-finished model call hands back to the execution entry.
 PAUSE_MARKER = "persistent_pause"
@@ -35,12 +37,14 @@ def pause_result(reason: str, detail: str | None = None) -> dict:
 class PersistentModelCallRail(DeepAgentRail):
     """Inert outside the execution entries, which attach the emitter before running."""
 
-    # Lowest priority: the last before-model hook, so admission is the final decision.
+    # Check stopping after higher-priority before-model rails; capacity and admission use the final request hook.
     priority = 10
 
-    def __init__(self, binding: "ConstructionBinding"):
+    def __init__(self, binding: "ConstructionBinding", *, spec: "PersistentAgentSpec | None" = None):
         super().__init__()
         self._binding = binding
+        self._spec = spec
+        self._limits = capacity.capacity_limits(spec) if spec is not None else None
 
     def _emitter(self):
         return self._binding.control.emitter
@@ -72,23 +76,59 @@ class PersistentModelCallRail(DeepAgentRail):
             )
             self._binding.control.mark_fatal(error)
             raise error
+        if agent is not None:
+            # This instance's native loop checks every final request: capacity, then budget (F_20 D-09).
+            agent.react_agent.set_final_request_check(self.check_final_request)
 
     async def before_model_call(self, ctx) -> None:
-        """Skip the call after a control or critical failure; otherwise ask for budget."""
-        if self._emitter() is None or self._stop_requested(ctx):
-            return
+        """Skip the call after a control or critical failure; budget is asked for on the final request."""
+        if self._emitter() is not None:
+            self._stop_requested(ctx)
+
+    async def check_final_request(self, ctx) -> dict | None:
+        """Final request, capacity check, budget admission, in this order; a result ends the round.
+
+        Called by the native loop once the final messages and tools are built, before the model. A
+        request that does not fit or cannot be counted is never admitted, and a denied one never runs.
+        """
+        if self._emitter() is None:
+            return None
+        if self._limits is not None:
+            needed = await self._count(ctx)
+            if needed is None:
+                return pause_result("error", "context capacity unknown: the final request cannot be counted reliably")
+            if needed > self._limits.available_input:
+                available = self._limits.available_input
+                return pause_result("context_unfit", f"the final request needs {needed} input tokens; {available} fit")
+        return await self._admit(ctx)
+
+    async def _count(self, ctx) -> int | None:
+        if self._spec is None:
+            return None
+        try:
+            # Core already selected this counter from the published tokenizer settings. Read it on
+            # every final check so a context rebind cannot leave us using a stale counter.
+            counter = ctx.context.token_counter()
+        except Exception:  # noqa: BLE001 - without a counter the capacity is unknown; cancellation propagates
+            return None
+        if counter is None:
+            return None
+        request = self._spec.model.model_request_config if self._spec.model is not None else None
+        model = str(getattr(request, "model_name", "") or "")
+        return capacity.count_request(counter, list(ctx.inputs.messages or []), ctx.inputs.tools, model)
+
+    async def _admit(self, ctx) -> dict | None:
         execution, budget = self._binding.execution, self._binding.ports.budget
         model_call_id = "mc_" + uuid4().hex
         try:
             admission = BudgetAdmission.model_validate(await budget.admit(execution, model_call_id))
             admission.assert_call(execution, model_call_id)
         except Exception as exc:
-            ctx.request_force_finish(pause_result("error", f"budget admission failed: {exc}"[:_DETAIL_LIMIT]))
-            return
+            return pause_result("error", f"budget admission failed: {exc}"[:_DETAIL_LIMIT])
         if admission.status == "denied":
-            ctx.request_force_finish(pause_result("budget_denied", admission.reason))
-            return
+            return pause_result("budget_denied", admission.reason)
         ctx.extra[_CALL_KEY] = model_call_id
+        return None
 
     async def before_tool_call(self, ctx) -> None:
         """Skip every tool not yet started, read-only ones included, after a control or critical failure."""

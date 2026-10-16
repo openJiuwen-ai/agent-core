@@ -4,7 +4,8 @@
 
 # Tools that do not directly change the workspace or any external system. share_file only records a
 # listing in this Execution's own table; the host uploads or sends after the ending is recorded.
-READ_ONLY_TOOL_ALLOWLIST = frozenset({"read_file", "list_files", "share_file"})
+# read_execution_record only reads saved execution logs of this Request (PA-18).
+READ_ONLY_TOOL_ALLOWLIST = frozenset({"read_file", "list_files", "share_file", "read_execution_record"})
 
 
 def is_read_only_tool_name(tool_name: str | None) -> bool:

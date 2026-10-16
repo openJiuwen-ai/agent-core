@@ -3,11 +3,13 @@
 """Execution log summary (PA-17): read one earlier Execution's saved events and summarize them for the Agent.
 
 Only reads and summarizes: no model call, no window change, no event. When and how the summary is used
-for a continuation belongs to PA-18.
+for a continuation belongs to PA-18. ``detail="brief"`` keeps every write, outcome and gap but counts
+read-only calls and leaves candidate bodies out; the full summary stays readable page by page through
+the continuation's record tool (``record_blocks``).
 """
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -19,8 +21,12 @@ from ..schema.build_context import PersistentBuildContext
 from ..schema.events import AgentEvent, EventType
 from ..schema.protocol import Identifier
 from ..tools.effect_policy import is_read_only_tool_name
+from .handoff import SHARE_FILE
 
+# The tool a continuation reads full records with (execution/record_tool.py).
+RECORD_TOOL = "read_execution_record"
 _IDENTITY = ("namespace_id", "agent_id", "session_id", "request_id")
+_DETAILS = ("full", "brief")
 _EXECUTION_ID = TypeAdapter(Identifier)
 _ENDINGS = frozenset({EventType.EXECUTION_PAUSED, EventType.EXECUTION_FINAL})
 _LABELS = {"succeeded": "成功", "failed": "失败", "unknown": "结果不明"}
@@ -32,13 +38,18 @@ _WRITE_HINTS = {
 }
 _INDENT = "    "
 _EMPTY = "log is empty"
-_MISSING = "上一次记录缺失：没有取得可用的执行日志。不能据此认为上一次没有执行；涉及写操作先查证，查不清询问发起人。"
+_MISSING = (
+    "上一次记录缺失：没有取得可用的执行日志。不能据此认为上一次没有执行；"
+    "涉及写操作先查证实际效果，不能直接重做；查不清时可以询问发起人，是否询问由模型判断。"
+)
 _NO_ENDING = "未记录结束；无法仅凭日志确定执行是否已结束。"
 _NOTHING = "日志中没有工具、结论、候选或换窗记录。"
 _ARCHIVE_NOTE = "仅为日志中的归档引用，尚未按 execution_id 查询，可能不全"
+_OMITTED = f"本摘要省略了只读操作的明细与候选正文，完整记录可用 {RECORD_TOOL} 按执行 ID 分页查询。"
 _FOOTER = (
     "说明：以上由程序从执行日志整理；即使序号连续且有结束记录，也不代表日志完整。"
-    "结果不明、没有结果或失败的写操作先查证，查不清询问发起人。"
+    "结果不明、没有结果或失败的写操作先查证实际效果，不能直接重做；"
+    "查不清时可以询问发起人，是否询问由模型判断。"
 )
 
 
@@ -68,12 +79,29 @@ class _Tool:
     notes: list[str] = field(default_factory=list)
 
 
-async def summarize_execution(context: PersistentBuildContext, execution_id: str) -> ExecutionLogSummary:
+async def summarize_execution(
+    context: PersistentBuildContext, execution_id: str, *, detail: Literal["full", "brief"] = "full"
+) -> ExecutionLogSummary:
     """Read ``execution_id``'s saved events in this Request and summarize them.
 
     Unless a nonempty log passes the basic contract checks as a whole, the summary says the record is
     missing and no event content is used. Cancellation, invalid arguments and summarizing errors propagate.
     """
+    blocks, missing = await _record(context, execution_id, detail)
+    return ExecutionLogSummary("\n".join(blocks), missing=missing)
+
+
+async def record_blocks(context: PersistentBuildContext, execution_id: str) -> tuple[tuple[str, ...], bool]:
+    """The full summary as its lines and items, after the same whole-log checks, and whether it is missing.
+
+    Joined with line breaks they are the full summary; a paged reader splits by them.
+    """
+    return await _record(context, execution_id, "full")
+
+
+async def _record(context: PersistentBuildContext, execution_id: str, detail: str) -> tuple[tuple[str, ...], bool]:
+    if detail not in _DETAILS:
+        raise build_error(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, error_msg="detail must be 'full' or 'brief'")
     if not isinstance(context, PersistentBuildContext):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="PersistentBuildContext required")
     try:
@@ -87,13 +115,13 @@ async def summarize_execution(context: PersistentBuildContext, execution_id: str
         returned = await context.ports.commit.read_execution_log(execution, execution_id)
     except Exception as exc:  # noqa: BLE001 - a failed read is a missing record; cancellation still propagates
         _diagnose(execution, execution_id, f"read failed ({type(exc).__name__})", broken=False)
-        return ExecutionLogSummary(_missing(execution_id), missing=True)
+        return (_missing(execution_id),), True
     events, rejected = _validated(returned, execution, execution_id)
     if rejected is not None:
         # Nothing saved can be real; any other rejection means the host broke the port contract.
         _diagnose(execution, execution_id, rejected, broken=rejected != _EMPTY)
-        return ExecutionLogSummary(_missing(execution_id), missing=True)
-    return ExecutionLogSummary(_summarize(events, execution_id), missing=False)
+        return (_missing(execution_id),), True
+    return tuple(_blocks(events, execution_id, brief=detail == "brief")), False
 
 
 def _diagnose(execution, execution_id: str, category: str, *, broken: bool) -> None:
@@ -275,7 +303,7 @@ def _refs(ending) -> str:
     return f"；引用候选 {'、'.join(refs)}" if refs else ""
 
 
-def _candidate_text(payload, segment: int, referenced_by: dict[str, list[str]], ended: bool) -> str:
+def _candidate_text(payload, segment: int, referenced_by: dict[str, list[str]], ended: bool, brief: bool) -> str:
     facts = [payload.output_id, f"目标 {payload.target_ref}", payload.share_mode]
     if payload.file_ref:
         facts.append(payload.file_ref)
@@ -293,10 +321,12 @@ def _candidate_text(payload, segment: int, referenced_by: dict[str, list[str]], 
         state = f"被结束记录“{'”“'.join(referenced_by[payload.output_id])}”引用（服务端负责投递，不代表已送达）"
     else:
         state = "未被结束记录引用，服务端不会投递"
+    if brief:
+        return f"[交出候选] {what}：{state}" + (f"（正文 {len(payload.text)} 字，未列出）" if payload.text else "")
     return _block(f"[交出候选] {what}：{state}：", payload.text)
 
 
-def _summarize(events: tuple, execution_id: str) -> str:
+def _blocks(events: tuple, execution_id: str, *, brief: bool) -> list[str]:
     items: list[tuple[str, Any]] = []
     tools = _Tools(items)
     archives: list[str] = []
@@ -313,34 +343,61 @@ def _summarize(events: tuple, execution_id: str) -> str:
             archives.append(event.payload.archive_ref)
         elif kind in _ENDINGS:
             endings.append(event)
-    return "\n".join(_header(events, execution_id) + _body(items, endings) + _tail(items, endings, archives))
+    body, omitted = _body(items, endings, brief)
+    header = _header(events, execution_id, brief)
+    if omitted:
+        header.append(_OMITTED)
+    return header + body + _tail(items, endings, archives)
 
 
-def _header(events: tuple, execution_id: str) -> list[str]:
-    header = [f"上一次执行 {execution_id}（请求 {events[0].request_id}）的执行日志整理："]
+def _header(events: tuple, execution_id: str, brief: bool) -> list[str]:
+    request = events[0].request_id
+    title = (
+        f"执行 {execution_id}（请求 {request}）的执行日志摘要："
+        if brief
+        else (f"上一次执行 {execution_id}（请求 {request}）的执行日志整理：")
+    )
+    header = [title]
     gaps = _gaps(events)
     if gaps:
         header.append(f"日志缺少第 {'、'.join(gaps)} 条记录。")
     return header
 
 
-def _body(items: list, endings: list) -> list[str]:
+def _brief_drops(kind: str, value: Any) -> bool:
+    """Read-only calls are only counted in a brief summary; share_file listings and writes are kept."""
+    return kind == "tool" and not value.write and value.name != SHARE_FILE
+
+
+def _body(items: list, endings: list, brief: bool) -> tuple[list[str], bool]:
+    """Numbered items, and whether a brief summary left something out."""
     referenced_by: dict[str, list[str]] = {}
     for ending in endings:
         for output_id in ending.payload.output_refs:
             referenced_by.setdefault(output_id, []).append(_ending_text(ending))
     lines: list[str] = []
+    counted: dict[str, int] = {}
     segment = 0
+    omitted = False
     for kind, value in items:
+        if kind == EventType.OUTPUT_PROPOSED:
+            segment += value.share_mode == "message"
+            omitted |= brief and bool(value.text)
+        if brief and _brief_drops(kind, value):
+            counted[value.name] = counted.get(value.name, 0) + 1
+            continue
         if kind == "tool":
             text = _tool_text(value)
         elif kind == EventType.PROGRESS_UPDATED:
             text = _block("[结论] ", value.text)
         else:
-            segment += value.share_mode == "message"
-            text = _candidate_text(value, segment, referenced_by, bool(endings))
+            text = _candidate_text(value, segment, referenced_by, bool(endings), brief)
         lines.append(f"{len(lines) + 1}. {text}")
-    return lines or [_NOTHING]
+    if counted:
+        calls = "、".join(f"{name} {count} 次" for name, count in counted.items())
+        lines.append(f"{len(lines) + 1}. [只读操作] {calls}（明细未列出）")
+        omitted = True
+    return lines or [_NOTHING], omitted
 
 
 def _tail(items: list, endings: list, archives: list[str]) -> list[str]:
