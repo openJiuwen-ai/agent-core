@@ -49,6 +49,7 @@ def test_result_decoder_keeps_error_and_does_not_mine_json_from_page_or_code():
 
 def test_real_mcp_array_wrapper_and_relative_urls_share_the_evidence_path():
     state = _state("Return first five titles", ["title"])
+    state["requirements_source"] = "explicit"
     state["last_page"]["url"] = "https://search.test/search?q=lesson"
     state["requested_result_count"] = 5
     rows = [{"title": f"Lesson {i}", "href": f"//video.test/lesson/{i}"} for i in range(5)]
@@ -61,6 +62,7 @@ def test_real_mcp_array_wrapper_and_relative_urls_share_the_evidence_path():
 
 def test_array_extraction_uses_same_ai_classification_as_probe():
     state = _state("Return search results", [])
+    state["requirements_source"] = "explicit"
     state["last_page"]["url"] = "https://www.google.com/search?q=calculator"
     _record(state, [
         {"title": "Calculator", "href": "https://example.test/1"},
@@ -75,12 +77,16 @@ def test_array_extraction_uses_same_ai_classification_as_probe():
 
 def test_redirect_is_proved_by_this_successful_navigation_not_another_tabs_cache():
     state = _state("Open the first search result and return title", ["title"])
+    state["requirements_source"] = "explicit"
     state["last_page"] = {"url": "https://search.test/search?q=university", "title": "Results"}
     args = {"url": "https://search.test/link?token=123"}
+    state["structured_evidence"] = [{"source": state["last_page"]["url"], "cards": [{
+        "title": "University", "primary_link": args["url"], "region": "main_result", "is_ad": False,
+    }]}]
     result = {"result": "### Page\n- Page URL: https://university.test/\n- Page Title: University"}
     BrowserRuntimeRail._record_structured_evidence(state, result, tool_name="browser_navigate", tool_args=args)
     assert state["evidence_slots"][0]["value"] == "University"
-    metadata = state["structured_evidence"][0]
+    metadata = next(item for item in state["structured_evidence"] if item.get("kind") == "page_metadata")
     assert metadata["destination_verified"]
     assert metadata["navigation"]["requested_url"] == args["url"]
     unrelated = {**result, "page_state": {"url": "https://other.test/", "title": "Unrelated"}}
@@ -99,11 +105,11 @@ def test_page_identity_preserves_content_parameters_and_fragments(url, same):
     BrowserWorkingContextStore._merge_semantic_observation(state, {"semantic_state": {"url": url}})
     assert state["last_page"]["title"] == ("Item" if same else "")
     runtime = _make_bare_runtime()
-    runtime._observe_page_url(original)
-    runtime._ensure_page_state().observe(title="Item")
+    runtime.observe_page_url(original)
+    runtime.ensure_page_state().observe(title="Item")
     original_generation = runtime.generation_id
-    runtime._observe_page_url(url)
-    assert runtime._ensure_page_state().title == ("Item" if same else "")
+    runtime.observe_page_url(url)
+    assert runtime.ensure_page_state().title == ("Item" if same else "")
     assert (runtime.generation_id == original_generation) is same
 
 
@@ -261,7 +267,7 @@ def test_inferred_fields_count_and_variants_are_not_a_second_completion_judge():
     result = _finish(state)
     assert result["status"] == "completed"
     assert result["missing_fields"] == [] and result["missing_slots"] == []
-    assert "novel_field" in result["unverified_fields"]
+    assert "unverified_fields" not in result
     assert not result["retryable"]
     assert result["observations"]
 
@@ -308,7 +314,7 @@ def test_popup_binding_synchronizes_native_current_tab_without_replaying_steps(m
         }},
     })
     selected_url = "https://example.test/popup" if mode == "selected" else "https://example.test/old"
-    runtime._call_playwright_tool = AsyncMock(
+    runtime.call_playwright_tool = AsyncMock(
         return_value=f"### Result\n- 2: (current) [Popup]({selected_url})",
         side_effect=RuntimeError("selection failed") if mode == "exception" else None,
     )
@@ -317,7 +323,7 @@ def test_popup_binding_synchronizes_native_current_tab_without_replaying_steps(m
         {"op": "wait_for_url", "url_contains": "/popup"},
     ], generation_id=runtime.generation_id))
     runtime._controller.run_action.assert_awaited_once()
-    runtime._call_playwright_tool.assert_awaited_once_with("browser_tabs", {"action": "select", "index": 2})
+    runtime.call_playwright_tool.assert_awaited_once_with("browser_tabs", {"action": "select", "index": 2})
     assert result["ok"] is (mode == "selected")
     assert result["steps"][0]["executed"]
     assert result["page_binding"]["mcp_selected"] is (mode == "selected")
@@ -360,3 +366,17 @@ def test_card_projection_keeps_query_window_and_recoverable_raw_result(storage):
         assert "raw_observation" not in projected
     else:
         assert projected["raw_observation"] == raw
+
+
+def test_occluded_control_names_its_cover_for_information_only(dom_page):
+    # The page scan dropped the covering element, so Jev could not tell a modal was in the way.
+    dom_page.set_content('''<button id="covered" style="position:absolute;top:20px;left:20px">Book covered</button>
+      <div role="dialog" style="position:absolute;top:0;left:0;width:400px;height:150px;background:white;z-index:5">
+        <p>We use cookies</p><button style="position:absolute;top:100px;left:300px">Accept</button></div>
+      <button id="open" style="position:absolute;top:300px">Book open</button>''')
+    result = _probe(dom_page, build_interactive_probe_js(query="Book"))
+    controls = {item["text"]: item for item in result["elements"]}
+    assert controls["Book covered"]["blocked_by"].startswith("We use cookies")
+    assert controls["Book covered"]["decision_state"]["blocked_by"] == controls["Book covered"]["blocked_by"]
+    assert not controls["Book covered"]["actionable"]
+    assert controls["Book open"]["blocked_by"] == "" and "blocked_by" not in controls["Book open"]["decision_state"]

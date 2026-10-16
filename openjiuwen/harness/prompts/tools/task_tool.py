@@ -70,14 +70,18 @@ with no memory of this conversation
 The result returned by the subagent is not visible to the user. To show the \
 user the result, you should send a text message back to the user with a \
 concise summary of the result.
-- Each task_tool invocation starts fresh by default — provide a complete task description. Only pass the returned resume_task_id when explicitly continuing the same unfinished browser task.
+- Each task_tool invocation starts fresh by default — provide a complete task description. \
+Pass the returned resume_task_id only to explicitly continue or correct the same browser task \
+within its existing deadline.
 - For browser_agent, preserve browser_result.status together with its summary, evidence and source observations. \
-Even a partial result can contain useful answers. unverified_fields means fields were not mapped to typed slots, \
-not that the observed answer is false. Do not repeat a lookup merely to reformat or independently verify it.
+Even a partial result can contain useful answers. Execution receipts describe dispatch/ACK; summary and completion \
+are worker judgments. Keep observations separate from inferred causes, respect source restrictions, and never treat \
+an empty blocker list as proof that the page has no obstacle. Do not repeat a lookup merely to fill field slots.
 - retryable=true permits, but does not require, at most one focused continuation with the same resume_task_id. \
-Continue only for genuinely unanswered user requirements; missing_slots and recommended_recovery are hints, \
-not a second completion checklist. Do not restart satisfied work or add requirements. \
-If retryable=false, report the available result.
+Continue only for genuinely unanswered user requirements; recommended_recovery is a hint, not a completion checklist. \
+If a completed worker answer leaves a concrete user requirement unanswered, explicitly request correction with \
+the same resume_task_id and a focused instruction; the original deadline and one-resume limit still apply. \
+Otherwise report the available result; do not restart satisfied work or add requirements.
 - The subagent's outputs should generally be trusted.
 - Clearly tell the subagent whether you expect it to write code or just to do \
 research (search, file reads, web fetches, etc.), since it is not aware of \
@@ -143,13 +147,15 @@ task_tool 启动专门的子代理来自主处理复杂任务。每种子代理�
 - task_description 应包含完整的上下文信息——子代理没有本次对话的任何记忆
 - 子代理完成后会返回一条消息给你。该结果对用户不可见。\
 如需向用户展示结果，你应发送一条文字消息，简明总结子代理的结果。
-- 每次 task_tool 调用默认都是全新启动——请提供完整的任务描述。只有明确继续同一个未完成的浏览器任务时，才传入上次返回的 resume_task_id。
+- 每次 task_tool 调用默认都是全新启动——请提供完整的任务描述。\
+只有在原期限内明确继续或纠正同一个浏览器任务时，才传入上次返回的 resume_task_id。
 - 对 browser_agent，保留 browser_result.status 以及 summary、evidence 和带来源的 observations。\
-partial 中也可能已有可用答案。unverified_fields 表示未映射到结构化字段，不代表已观察到的答案错误；\
-不要仅为改写字段名或交叉验证而重复查询。
+partial 中也可能已有可用答案。执行回执说明派发/ACK；summary 和完成判断由 worker 提供。\
+区分来源观察与原因推测，遵守原文限制，阻断列表为空不能证明页面没有障碍。不要为填字段槽而重复查询。
 - retryable=true 只是允许续跑，不是要求续跑。只有用户要求确实尚未回答时，\
-才可使用同一 resume_task_id 至多续跑一次；missing_slots 和 recommended_recovery 只是提示，不是第二套完成清单。\
-不要重做已满足的目标或新增要求。retryable=false 时直接报告已有结果。
+才可使用同一 resume_task_id 至多续跑一次；recommended_recovery 是提示，不是完成清单。\
+若 worker 报告 completed 但仍有明确未满足的用户要求，可带同一 resume_task_id 和定向修复指令显式纠正，\
+仍受原期限和一次续跑限制。否则报告已有结果，不要重做已满足的目标或新增要求。
 - 子代理的输出通常应当被信任。
 - 明确告知子代理你期望它写代码还是仅做调研\
 （搜索、读文件、抓取网页等），因为它不知道用户的意图。
