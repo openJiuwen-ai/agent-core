@@ -217,6 +217,8 @@ def score_judge_output(
         hit["penalty"] = criterion["penalty"]
         hit["description"] = criterion["description"]
     total_weight = sum(item["weight"] for item in behaviors)
+    if total_weight <= 0:
+        raise ValueError("behaviors must have a positive total weight")
     score = sum(result["score"] * item["weight"] for result, item in zip(results, behaviors)) / total_weight
     base_score = score
     penalties = [hit["penalty"] for hit in hits if hit["triggered"]]
@@ -270,7 +272,7 @@ def compute_dimensions(results: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "per_behavior_scores": scores,
         "low_score_behaviors": low,
-        "avg_behavior_score": sum(scores.values()) / len(scores),
+        "avg_behavior_score": sum(scores.values()) / len(scores) if scores else 0.0,
         "behavior_count": len(scores),
         "pass_count": len(scores) - len(low),
         "fail_count": len(low),
