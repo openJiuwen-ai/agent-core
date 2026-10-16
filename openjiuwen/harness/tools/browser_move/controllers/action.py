@@ -22,6 +22,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging im
     browser_agent_log_info,
     browser_agent_log_warning,
 )
+from openjiuwen.harness.tools.browser_move.playwright_runtime.execution_journal import mark_dispatched
 
 from .base import BaseController
 
@@ -1041,28 +1042,18 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "    }\n"
         "    throw new Error(`condition timed out after ${timeout}ms`);\n"
         "  };\n"
-        "  const clickWithTransientRetry = async (step, timeout, option = false, initialChecked = null) => {\n"
-        "    const started = Date.now();\n"
-        "    let lastError = null;\n"
-        "    for (let attempt = 0; attempt < 2; attempt += 1) {\n"
-        "      const remaining = Math.max(250, timeout - (Date.now() - started));\n"
-        "      try {\n"
-        "        const locator = option ? optionLocatorFromStep(step) : locatorFromStep(step);\n"
-        "        const checked = attempt === 0 && initialChecked\n"
-        "          ? initialChecked\n"
-        "          : await validateTarget(locator, remaining, true);\n"
-        "        await checked.locator.click({ timeout: remaining });\n"
-        "        return checked;\n"
-        "      } catch (error) {\n"
-        "        lastError = error;\n"
-        "        const message = String(error && error.message ? error.message : error).toLowerCase();\n"
-        "        const transient = /(detached|not attached|intercept|not stable|"
-        "outside of the viewport)/.test(message);\n"
-        "        if (!transient || attempt > 0 || Date.now() - started >= timeout) throw error;\n"
-        "        await sleep(Math.min(100, Math.max(0, timeout - (Date.now() - started))));\n"
-        "      }\n"
-        "    }\n"
-        "    throw lastError || new Error('click failed');\n"
+        "  // Playwright owns actionability retry. Never replay an uncertain invocation here.\n"
+        "  const invokeAction = async (action) => {\n"
+        "    if (currentItem.executed !== true) currentItem.executed = null;\n"
+        "    const value = await action();\n"
+        "    currentItem.executed = true;\n"
+        "    return value;\n"
+        "  };\n"
+        "  const clickChecked = async (step, timeout, option = false, initialChecked = null) => {\n"
+        "    const locator = option ? optionLocatorFromStep(step) : locatorFromStep(step);\n"
+        "    const checked = initialChecked || await validateTarget(locator, timeout, true);\n"
+        "    await invokeAction(() => checked.locator.click({ timeout }));\n"
+        "    return checked;\n"
         "  };\n"
         "  const summarizeVisible = async () => {\n"
         "    return await page.evaluate(() => {\n"
@@ -1101,7 +1092,6 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "        throw new Error('stale target after navigation; observe the current page before acting');\n"
         "      }\n"
         "      const checked = await validateTarget(locator, timeout, requireEnabled);\n"
-        "      currentItem.executed = true;\n"
         "      return checked;\n"
         "    } finally {\n"
         "      preflightElapsedMs += Date.now() - started;\n"
@@ -1128,7 +1118,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "      }\n"
         "      if (op === 'click') {\n"
         "        const prechecked = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout);\n"
-        "        const target = await clickWithTransientRetry(step, timeout, false, prechecked);\n"
+        "        const target = await clickChecked(step, timeout, false, prechecked);\n"
         "        item.target_validation = target.metadata;\n"
         "      } else if (op === 'fill' || op === 'type') {\n"
         "        const checked = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout);\n"
@@ -1136,7 +1126,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "        const target = checked.locator;\n"
         "        const value = String(step.value ?? step.text_value ?? '');\n"
         "        if (op === 'type' || step.mode === 'type') {\n"
-        "          await target.click({ timeout });\n"
+        "          await invokeAction(() => target.click({ timeout }));\n"
         "          try {\n"
         "            await page.keyboard.press(selectAllKey);\n"
         "          } catch (_err) {}\n"
@@ -1148,14 +1138,14 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "            { delay: Math.max(0, Number(step.delay_ms || 0)) }\n"
         "          );\n"
         "        } else {\n"
-        "          await target.fill(value, { timeout });\n"
+        "          await invokeAction(() => target.fill(value, { timeout }));\n"
         "        }\n"
         "      } else if (op === 'autocomplete') {\n"
         "        const checked = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout);\n"
         "        item.target_validation = checked.metadata;\n"
         "        const target = checked.locator;\n"
         "        const value = String(step.value ?? step.query ?? step.text_value ?? '');\n"
-        "        await target.click({ timeout });\n"
+        "        await invokeAction(() => target.click({ timeout }));\n"
         "        try {\n"
         "          await page.keyboard.press(selectAllKey);\n"
         "        } catch (_err) {}\n"
@@ -1163,7 +1153,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "          await page.keyboard.press('Backspace');\n"
         "        } catch (_err) {}\n"
         "        if (step.fill_first) {\n"
-        "          await target.fill(value, { timeout });\n"
+        "          await invokeAction(() => target.fill(value, { timeout }));\n"
         "        } else {\n"
         "          await page.keyboard.type(\n"
         "            value,\n"
@@ -1175,19 +1165,19 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "        }\n"
         "        const checkedOption = await getCheckedTarget(i, 'option', optionLocatorFromStep(step), timeout);\n"
         "        item.option_validation = checkedOption.metadata;\n"
-        "        await clickWithTransientRetry(step, timeout, true, checkedOption);\n"
+        "        await clickChecked(step, timeout, true, checkedOption);\n"
         "      } else if (op === 'select_visible_text') {\n"
         "        const checkedOption = await getCheckedTarget(i, 'option', optionLocatorFromStep(step), timeout);\n"
         "        item.target_validation = checkedOption.metadata;\n"
-        "        await clickWithTransientRetry(step, timeout, true, checkedOption);\n"
+        "        await clickChecked(step, timeout, true, checkedOption);\n"
         "      } else if (op === 'press') {\n"
         "        const key = String(step.key || 'Enter');\n"
         "        if (hasTarget(step)) {\n"
         "          const checkedTarget = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout);\n"
         "          item.target_validation = checkedTarget.metadata;\n"
-        "          await checkedTarget.locator.press(key, { timeout });\n"
+        "          await invokeAction(() => checkedTarget.locator.press(key, { timeout }));\n"
         "        } else {\n"
-        "          await page.keyboard.press(key);\n"
+        "          await invokeAction(() => page.keyboard.press(key));\n"
         "        }\n"
         "      } else if (op === 'select_option') {\n"
         "        const checkedTarget = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout);\n"
@@ -1197,7 +1187,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "          const values = Array.isArray(step.values)\n"
         "            ? step.values.map((item) => String(item))\n"
         "            : String(step.values);\n"
-        "          await target.selectOption(values, { timeout });\n"
+        "          await invokeAction(() => target.selectOption(values, { timeout }));\n"
         "        } else {\n"
         "          const option = {};\n"
         "          if (step.value !== undefined || step.option_value !== undefined) {\n"
@@ -1220,13 +1210,13 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "              + 'option_label, label_value, choose_text, or index'\n"
         "            );\n"
         "          }\n"
-        "          await target.selectOption(option, { timeout });\n"
+        "          await invokeAction(() => target.selectOption(option, { timeout }));\n"
         "        }\n"
         "      } else if (op === 'set_checked') {\n"
         "        const checked = step.checked === undefined ? true : !!step.checked;\n"
         "        const checkedTarget = await getCheckedTarget(i, 'primary', locatorFromStep(step), timeout);\n"
         "        item.target_validation = checkedTarget.metadata;\n"
-        "        await checkedTarget.locator.setChecked(checked, { timeout });\n"
+        "        await invokeAction(() => checkedTarget.locator.setChecked(checked, { timeout }));\n"
         "      } else if (op === 'wait_for_selector') {\n"
         "        if (!step.selector) throw new Error('wait_for_selector requires selector');\n"
         "        await firstLocator(page.locator(String(step.selector))).waitFor({\n"
@@ -1421,6 +1411,7 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "      } else {\n"
         "        throw new Error(`unsupported op: ${op}`);\n"
         "      }\n"
+        "      item.executed = true;\n"
         "      item.ok = true;\n"
         "      if (step.wait_after_ms !== undefined) {\n"
         "        await sleep(Math.max(0, Number(step.wait_after_ms || 0)));\n"
@@ -1440,13 +1431,14 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "        choose_text: step.choose_text || step.option_text || null,\n"
         "      };\n"
         "      item.elapsed_ms = Date.now() - stepStartedAt;\n"
-        "      if (!item.executed) item.state_changed = false;\n"
+        "      if (item.executed === false) item.state_changed = false;\n"
         "      results.push(item);\n"
         "      if (step.optional || payload.continue_on_error) continue;\n"
         "      return {\n"
         "        ok: false,\n"
         "        status: results.some((result) => result.ok) ? 'partial' : 'failed',\n"
-        "        executed: results.some((result) => result.executed),\n"
+        "        executed: results.some((result) => result.executed === null) ? null :\n"
+        "          results.some((result) => result.executed === true),\n"
         "        error: item.error,\n"
         "        steps: results,\n"
         "        extracted: collectExtracted(results),\n"
@@ -1479,7 +1471,8 @@ def _build_batch_interact_script(payload: dict[str, Any]) -> str:
         "    });\n"
         "  return {\n"
         "    ok: failedSteps.length === 0,\n"
-        "    executed: results.some((result) => result.executed),\n"
+        "    executed: results.some((result) => result.executed === null) ? null :\n"
+        "          results.some((result) => result.executed === true),\n"
         "    status: failedSteps.length === 0 ? 'completed' : 'partial',\n"
         "    error: failedSteps.length === 0 ? null : 'one or more optional batch steps failed',\n"
         "    steps: results,\n"
@@ -2158,6 +2151,7 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
 
         executor_started_at = time.perf_counter()
         try:
+            mark_dispatched()
             raw = await asyncio.wait_for(
                 code_executor(js_code),
                 timeout=effective_global_timeout_ms / 1000,
@@ -2173,6 +2167,9 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             return {
                 "ok": False,
                 "status": "failed",
+                "executed": None,
+                "state_changed": True,
+                "execution_state": "dispatched_unknown",
                 "error": error,
                 "session_id": session_id,
                 "request_id": request_id,
@@ -2201,6 +2198,9 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             return {
                 "ok": False,
                 "status": "failed",
+                "executed": None,
+                "state_changed": True,
+                "execution_state": "dispatched_unknown",
                 "error": error,
                 "session_id": session_id,
                 "request_id": request_id,
@@ -2239,6 +2239,9 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             return {
                 "ok": False,
                 "status": "failed",
+                "executed": None,
+                "state_changed": True,
+                "execution_state": "dispatched_unknown",
                 "error": error,
                 "raw_preview": raw_text[:400],
                 "session_id": session_id,
