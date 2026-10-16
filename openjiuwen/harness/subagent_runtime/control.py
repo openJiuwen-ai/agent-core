@@ -72,6 +72,7 @@ def _runtime_sticky_subagent_type(subagent_type: str) -> bool:
 
 
 _TASK_DESCRIPTION_MAX_LEN = 2000
+_SLOT_RECHECK_INTERVAL_S = 1.0
 
 
 def _cursor_start_index(turns: list[SubagentTurn], cursor: str | None) -> int:
@@ -132,6 +133,8 @@ class SubagentControl:
         self._registry = SubagentRegistry(self._config)
         self._semaphore = asyncio.Semaphore(self._config.max_concurrent_running)
         self._closed_records: dict[str, SubagentRecord] = {}
+        self._slot_waiters: list[asyncio.Future[None]] = []
+        self._evicted_finals: dict[str, SubagentStatus] = {}
         self._turns: dict[str, deque[SubagentTurn]] = {}
         self._turn_seq: dict[str, int] = {}
         self._activities: dict[str, deque[SubagentActivity]] = {}
@@ -222,13 +225,16 @@ class SubagentControl:
             )
         except Exception:
             reservation.rollback()
+            self._notify_slot_waiters()
             raise
+        self._evicted_finals.pop(sid, None)
 
         try:
             await instance.enqueue(UserInputOp(query=query, task_id=task_id))
         except Exception:
             await self._manager.remove(sid, reason="spawn_failed")
             self._registry.release(sid)
+            self._notify_slot_waiters()
             raise
 
         self._registry.touch(sid)
@@ -256,7 +262,7 @@ class SubagentControl:
         for sid in targets:
             instance = self._manager.find(sid)
             if instance is None:
-                statuses[sid] = SubagentStatus.not_found()
+                statuses[sid] = self._evicted_finals.get(sid) or SubagentStatus.not_found()
                 continue
             self._registry.touch(sid)
             receiver = instance.subscribe_status()
@@ -297,9 +303,10 @@ class SubagentControl:
             if statuses[sid].kind is not SubagentStatusKind.COMPLETED:
                 continue
             instance = self._manager.find(sid)
-            if instance is None or not instance.last_output:
+            output = instance.last_output if instance is not None else statuses[sid].message
+            if not output:
                 continue
-            results[sid] = instance.last_output
+            results[sid] = output
         output_files: dict[str, str] = {}
         for sid in targets:
             if statuses[sid].kind is not SubagentStatusKind.COMPLETED:
@@ -491,9 +498,11 @@ class SubagentControl:
             )
         except Exception:
             reservation.rollback()
+            self._notify_slot_waiters()
             raise
 
         self._closed_records.pop(subagent_id, None)
+        self._evicted_finals.pop(subagent_id, None)
         restored = self._manager.find(subagent_id)
         if restored is None:
             return ResumeResult(status=SubagentStatus.pending_init(), restored=True)
@@ -520,6 +529,7 @@ class SubagentControl:
                 logger.warning("[SubagentControl] cancel_all failed: sid=%s", sid)
                 self._registry.release(sid)
             closed.append(sid)
+        self._notify_slot_waiters()
         await self.persist()
         return closed
 
@@ -716,27 +726,77 @@ class SubagentControl:
         metadata = self._registry.find_metadata(subagent_id)
         if metadata is not None and metadata.closed_at_ms is None:
             metadata.closed_at_ms = time.time() * 1000
+        if reason == "evicted":
+            self._remember_evicted_final(subagent_id)
         await self._manager.remove(subagent_id, reason=reason)
         if metadata is not None:
             self._store_closed_record(metadata, close_reason=reason)
         self._registry.release(subagent_id)
+        self._notify_slot_waiters()
         if persist:
             await self.persist()
         else:
             self.flush()
 
+    def _remember_evicted_final(self, subagent_id: str) -> None:
+        instance = self._manager.find(subagent_id)
+        status = instance.status.current() if instance is not None else None
+        if status is None or not status.is_final():
+            return
+        self._evicted_finals.pop(subagent_id, None)
+        self._evicted_finals[subagent_id] = status
+        limit = max_persisted_records(self._config.max_subagents)
+        while len(self._evicted_finals) > limit:
+            self._evicted_finals.pop(next(iter(self._evicted_finals)))
+
     async def _acquire_slot(self) -> SpawnReservation:
+        loop = asyncio.get_running_loop()
+        deadline: float | None = None
+        while True:
+            try:
+                return self._registry.reserve_slot()
+            except BaseError:
+                if not self._config.enable_lru_eviction:
+                    raise
+                if await self._evict_one_idle():
+                    continue
+                if deadline is None:
+                    deadline = loop.time() + max(self._config.spawn_slot_wait_timeout_s, 0.0)
+                    if deadline > loop.time():
+                        logger.info(
+                            "[SubagentControl] all %d subagent slots busy; waiting up to %.0fs for one",
+                            self._config.max_subagents,
+                            self._config.spawn_slot_wait_timeout_s,
+                        )
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                await self._wait_slot_change(min(remaining, _SLOT_RECHECK_INTERVAL_S))
+
+    async def _evict_one_idle(self) -> bool:
+        for sid in self._registry.lru_candidates():
+            instance = self._manager.find(sid)
+            if instance is not None and instance.is_evictable() and not instance.has_active_turn():
+                await self.close(sid, reason="evicted")
+                return True
+        return False
+
+    async def _wait_slot_change(self, timeout_s: float) -> None:
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._slot_waiters.append(waiter)
         try:
-            return self._registry.reserve_slot()
-        except BaseError:
-            if not self._config.enable_lru_eviction:
-                raise
-            for sid in self._registry.lru_candidates():
-                instance = self._manager.find(sid)
-                if instance is not None and instance.is_evictable():
-                    await self.close(sid, reason="evicted")
-                    return self._registry.reserve_slot()
-            raise
+            await asyncio.wait_for(waiter, timeout_s)
+        except TimeoutError:
+            pass
+        finally:
+            if waiter in self._slot_waiters:
+                self._slot_waiters.remove(waiter)
+
+    def _notify_slot_waiters(self) -> None:
+        waiters, self._slot_waiters = self._slot_waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
 
     def _build_metadata_from_record(
         self,
@@ -1128,6 +1188,7 @@ class SubagentControl:
             self._append_turn(subagent_id, metadata, instance, status)
         await self.emit_status_update(subagent_id)
         self.flush()
+        self._notify_slot_waiters()
 
     def _resolve_final(
         self,
