@@ -582,11 +582,8 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 | 2026-10-14 | PA-08、PA-10 | 开发者确认开发阶段尚未实际运行、没有历史数据：不做迁移，删除 `pending_answer` 及其兼容代码，带该键的记录（含 null）按严格模型判为无效；记录版本保持 1。替代上一条中“已保存旧记录的处理待决定”的内容 | 修订验收与遗留；不改变负责人、依赖、排期或完成数 |
 | 2026-10-15 | PA-07、PA-08 | 按独立复审修订 [F_18](../features/F_18_output-handoff.md)：`share_file` 回执增加内容校验值，保留格式、只改内容的改写不再算登记（不是签名，不能证明来源）；群参与判断的 final / paused 改由 `emit_ending` 记账，首次失败按原事件重试一次；F_02、F_07、F_15 就近注明替代 | 不改变 PA-07 负责人与判断策略；不改变依赖、排期或完成数 |
 | 2026-10-15 | PA-08 | 开发者确认按 PA 交付目标合入，PA-08 必要集成随本批交付，PA-17 单独开发与交付；本批 13 个源码、7 个测试、14 个文档按 feat(harness) → test(harness) → docs(harness) 组织 | 不包含根 checkout 既有计划修改或 PA-17 改动；已验证源码与测试哈希不变，真实服务端 V-15 未执行，PA-08 保持进行中；子仓推送后主仓 PR 另行确认 |
-<<<<<<< HEAD
-| 2026-10-15 | PA-17 | 新增 [F_19](../features/F_19_execution-log-record.md)：开发者确认 D-01～D-06、P-01～P-07 与三项补充规则（复用后不误配、合并时核对调用身份、非法 execution_id 前置拒绝）；按审阅意见补充“结果之后出现同 ID 的意图按复用处理”、日志内来源一致、工具查证依据与诊断等级；实现 `execution/execution_log.py`，同步 S_02 第 4.3 节、S_05 第 5.3 节；PA-17 负责人登记为 Song Haoran | PA-17 改为进行中；组件验证见 F_19 第 8.2 节；按 execution_id 查询归档待 PA-12、PA-18，容量验收待“容量边界”对齐；不改变依赖、排期或完成数 |
-=======
 | 2026-10-15 | PA-15 | 按最新 agent-core 与 JiuwenSwarm 本地代码 / 测试刷新 [F_15](../features/F_15_tool-intent-before-side-effect.md)：白名单同步为 `read_file` / `list_files` / `share_file`；两项历史失败入口回归更新为当前通过；补充 JiuwenSwarm `HostCommitPort` 关键事件等待写入的实现与组件测试证据 | agent-core PA 包 613 passed / 10 skipped，入口回归 2 passed；JiuwenSwarm CommitPort 28 passed、Core Web 只读集成 7 passed。真实写工具写前屏障及重启后 `tool.intent` 读回仍未跨仓验证；PA-15 状态、负责人、依赖及完成数不变 |
->>>>>>> 3517ff7b1 (docs(PA-15): refresh tool intent barrier verification)
+| 2026-10-15 | PA-17 | 新增 [F_19](../features/F_19_execution-log-record.md)：开发者确认 D-01～D-06、P-01～P-07 与三项补充规则（复用后不误配、合并时核对调用身份、非法 execution_id 前置拒绝）；按审阅意见补充“结果之后出现同 ID 的意图按复用处理”、日志内来源一致、工具查证依据与诊断等级；实现 `execution/execution_log.py`，同步 S_02 第 4.3 节、S_05 第 5.3 节；PA-17 负责人登记为 Song Haoran | PA-17 改为进行中；组件验证见 F_19 第 8.2 节；按 execution_id 查询归档待 PA-12、PA-18，容量验收待“容量边界”对齐；不改变依赖、排期或完成数 |
 
 ### B.2 第一阶段具体产物与评审门槛
 

@@ -7,7 +7,6 @@ import inspect
 from contextlib import aclosing
 from typing import Any
 
-from openjiuwen.core.common.stream_lifecycle import owns_stream_lifecycle
 from openjiuwen.core.session.checkpointer import Checkpointer
 from openjiuwen.core.session.config.base import (
     Config,
@@ -123,23 +122,12 @@ def with_session(session: Any = None):
                 target_session = get_target_session(args, kwargs)
                 previous = _current_session.get()
                 token = _current_session.set(target_session)
-                close_source = owns_stream_lifecycle(func, args, kwargs)
-                source = func(*args, **kwargs)
                 try:
-<<<<<<< HEAD
                     async with aclosing(func(*args, **kwargs)) as source:
                         async for value in source:
                             yield value
-=======
-                    async for value in source:
-                        yield value
->>>>>>> a8c94d5e1 (feat(harness): deliver Persistent Agent contracts, factory, and execution isolation)
                 finally:
-                    try:
-                        if close_source:
-                            await source.aclose()
-                    finally:
-                        _reset_current_session(token, previous, target_session)
+                    _reset_current_session(token, previous, target_session)
 
             return async_gen_wrapper
 

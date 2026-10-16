@@ -3343,16 +3343,12 @@ class ReActAgent(BaseAgent):
             )
 
     async def stream(
-<<<<<<< HEAD
-        self, inputs: Any, session: Optional[Session] = None, stream_modes: Optional[List[StreamMode]] = None
-=======
-            self,
-            inputs: Any,
-            session: Optional[Session] = None,
-            stream_modes: Optional[List[StreamMode]] = None,
-            *,
-            _background_task_lifecycle=None,
->>>>>>> a8c94d5e1 (feat(harness): deliver Persistent Agent contracts, factory, and execution isolation)
+        self,
+        inputs: Any,
+        session: Optional[Session] = None,
+        stream_modes: Optional[List[StreamMode]] = None,
+        *,
+        _background_task_lifecycle=None,
     ) -> AsyncIterator[Any]:
         """Stream execute ReAct process
 
@@ -3387,23 +3383,16 @@ class ReActAgent(BaseAgent):
         if self.is_agent_session:
             await session.pre_run(inputs=inputs if isinstance(inputs, dict) else None)
 
-<<<<<<< HEAD
-        async with aclosing(self._inner_stream(session=session, inputs=inputs, need_cleanup=need_cleanup)) as chunks:
+        async with aclosing(
+            self._inner_stream(
+                session=session,
+                inputs=inputs,
+                need_cleanup=need_cleanup,
+                _background_task_lifecycle=_background_task_lifecycle,
+            )
+        ) as chunks:
             async for chunk in chunks:
                 yield chunk
-=======
-        if _background_task_lifecycle is not None:
-            async with aclosing(self._inner_stream(
-                session=session, inputs=inputs, need_cleanup=need_cleanup,
-                _background_task_lifecycle=_background_task_lifecycle,
-            )) as chunks:
-                async for chunk in chunks:
-                    yield chunk
-            return
-
-        async for chunk in self._inner_stream(session=session, inputs=inputs, need_cleanup=need_cleanup):
-            yield chunk
->>>>>>> a8c94d5e1 (feat(harness): deliver Persistent Agent contracts, factory, and execution isolation)
 
     @with_session()
     async def _inner_stream(self, session, inputs, need_cleanup, _background_task_lifecycle=None):
@@ -3464,17 +3453,6 @@ class ReActAgent(BaseAgent):
             # Agent sessions use stream_iterator for consuming output
             task = asyncio.create_task(stream_process())
 
-<<<<<<< HEAD
-            try:
-                async for result in session.stream_iterator():
-                    yield result
-                await task
-            finally:
-                # The consumer owns the producer, including early aclose/cancellation.
-                if not task.done():
-                    task.cancel()
-                await asyncio.gather(task, return_exceptions=True)
-=======
             if _background_task_lifecycle is not None:
                 async with _background_task_lifecycle.scope(task):
                     async for result in session.stream_iterator():
@@ -3484,11 +3462,15 @@ class ReActAgent(BaseAgent):
                     await asyncio.shield(task)
                 return
 
-            async for result in session.stream_iterator():
-                yield result
-
-            await task
->>>>>>> a8c94d5e1 (feat(harness): deliver Persistent Agent contracts, factory, and execution isolation)
+            try:
+                async for result in session.stream_iterator():
+                    yield result
+                await task
+            finally:
+                # The consumer owns the producer, including early aclose/cancellation.
+                if not task.done():
+                    task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
         else:
             # Workflow sessions: just run stream_process, output goes to session.write_stream()
             # The workflow graph consumes from session.write_stream() via StreamWriterManager
