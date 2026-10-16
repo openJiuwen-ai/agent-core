@@ -6,6 +6,7 @@
 | --- | --- |
 | 建档日期 | 2026-10-15 |
 | 归档日期 | 2026-10-15 |
+| 修订日期 | 2026-10-16：恢复第 8.2.2 节旧基线验证记录；本次修复证据见 [F_17 第 9 节](F_17_session-state-record.md#2026-10-16-v0120-基线冲突修复) |
 | 范围 | agent-core `openjiuwen/harness/persistent_agent`：读取同一 Request 下指定历史 Execution 的已保存事件，按契约整份校验，整理成供 Agent 使用的执行日志整理。不含续做触发、旧中断现场清理、窗口注入与 `recovery_ref` 入口开放（PA-18），不含按 execution_id 查询归档（PA-11、PA-12） |
 | 方案成熟度 | 已确认：D-01～D-03 由开发者 2026-10-15 批注确认；D-04～D-06、P-01～P-07 及三项补充规则由开发者 2026-10-15 确认；D-04 中“结果之后出现同 ID 的意图按复用处理”是补充规则 1 的适用细化，依据开发者 2026-10-15 转交的审阅意见 |
 | 计划条目 | [开发计划](../designs/persistent-agent-development-plan.md) PA-17 |
@@ -287,6 +288,14 @@ flowchart TD
 | 文档一致性 | 检查 4 份文档的相对链接与章节锚点、PA-17-V 编号；使用 Mermaid 解析本文与计划的图；`codespell -q 3 <4 个文档>`；`git diff --cached --check` | 107 个相对链接与锚点、15 个唯一验证编号、3 个 Mermaid 块语法、codespell 与差异格式检查通过 | Mermaid 未做 SVG 渲染；未执行全仓文档检查 |
 
 PA-18 接入与 M2c 联调、按 execution_id 查询归档及容量验收仍未完成；本次落地不关闭这些验收。
+
+#### 8.2.2 主仓合入前的冲突修正与验证
+
+2026-10-15 按开发者授权，将主仓 `jiuwenmate` 的 feb09685 合入子仓 PA-17 的 e98bcbaf，在计划附录 B.1 保留主仓新增的 PA-15 历史记录与 PA-17 历史记录。主仓 PA-14 工具及测试、F_15 和 PA-15 计划进展保持原样；PA-17 源码与测试逐字节核对仍与 e98bcbaf 一致。以下命令在隔离合并工作树根目录执行，解释器和工具配置沿用第 8.2.1 节。
+
+- 回归：`make test PYTHON="$PY" UV=no RUN_CMD=env TESTFLAGS="tests/unit_tests/harness tests/unit_tests/core/session -q -p no:cacheprovider -o addopts= --disable-warnings"`，6285 passed、39 skipped、89 warnings、4 subtests passed。
+- 静态检查：`make check PYTHON="$PY" UV=no RUN_CMD=env CHANGES_RAW="<PA-17 源码> <PA-17 测试> openjiuwen/harness/persistent_agent/tools/workspace_read.py tests/unit_tests/harness/persistent_agent/test_workspace_read_tools.py"`；`make type-check` 使用同一文件清单。Ruff 导入顺序、格式、规则与 codespell 通过；Pylint 在主仓原样保留的 `workspace_read.py` 有 3 条诊断，mypy 有 8 条（该主仓文件 4 条、PA-17 测试 4 条），PA-17 源码无诊断。Makefile 忽略检查器错误，不把其返回 0 记成全通过；不在本次冲突修正中改动主仓既有文件。
+- 验收边界不变：组件回归不证明真实宿主续做、归档查询或容量验收完成。
 
 ### 8.3 验证结论
 

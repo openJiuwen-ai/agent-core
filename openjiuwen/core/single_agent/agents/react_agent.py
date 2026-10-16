@@ -34,15 +34,6 @@ try:
 except Exception:  # pragma: no cover - browser runtime is optional here
     browser_agent_log_info = None
 from openjiuwen.core.common.security.user_config import UserConfig
-<<<<<<< HEAD
-=======
-from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm.schema.config import (
-    ModelClientConfig,
-    ModelRequestConfig
-)
-from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
->>>>>>> eb2bf3b0d (feat(core): retain tool facts on aborted execution)
 from openjiuwen.core.context_engine import (
     ContextEngine,
     ContextEngineConfig,
@@ -70,6 +61,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
     ModelRequestConfig,
 )
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
@@ -332,9 +324,6 @@ class ReActAgentConfig(BaseModel):
         description="Whether to execute tool calls in parallel (as opposed to in sequence)",
     )
 
-<<<<<<< HEAD
-    def configure_model(self, model_name: str) -> "ReActAgentConfig":
-=======
     retain_tool_facts_on_abort: bool = Field(
         default=False,
         description=(
@@ -344,8 +333,7 @@ class ReActAgentConfig(BaseModel):
         ),
     )
 
-    def configure_model(self, model_name: str) -> 'ReActAgentConfig':
->>>>>>> eb2bf3b0d (feat(core): retain tool facts on aborted execution)
+    def configure_model(self, model_name: str) -> "ReActAgentConfig":
         """Configure model name
 
         Args:
@@ -603,17 +591,14 @@ class ReActAgent(BaseAgent):
         self._kv_cache_model_call_hook = kv_cache_react_model_call_hook.KVCacheModelCallHook()
         self._context_usage_aggregator = SessionKVCacheAggregator()
         self._context_usage_sequences: dict[str, int] = {}
-<<<<<<< HEAD
         # The ability manager contains every registered tool, while the final
         # model window may expose a filtered subset after Swarm/Core rails run.
         # Manual context snapshots reuse the last finalized model tool list so
         # their tool-token estimate matches the immediately preceding request.
         self._last_model_tools: list[ToolInfo] | None = None
-=======
         # Per-session results of the running tool batch, kept until they are written to the context
         # (retain_tool_facts_on_abort only).
         self._tool_fact_journals: Dict[str, Dict[str, ToolMessage]] = {}
->>>>>>> eb2bf3b0d (feat(core): retain tool facts on aborted execution)
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -2831,9 +2816,7 @@ class ReActAgent(BaseAgent):
         raw_turn_number = inputs.get("_turn_number") if isinstance(inputs, dict) else None
         turn_number = (
             raw_turn_number
-            if isinstance(raw_turn_number, int)
-            and not isinstance(raw_turn_number, bool)
-            and raw_turn_number > 0
+            if isinstance(raw_turn_number, int) and not isinstance(raw_turn_number, bool) and raw_turn_number > 0
             else None
         )
         invocation_id = str(raw_invocation_id or uuid.uuid4().hex)
@@ -3329,9 +3312,7 @@ class ReActAgent(BaseAgent):
                     if pending_id is None:
                         await session.write_stream(schema)
                         continue
-                    if (
-                        hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id
-                    ):
+                    if hasattr(schema, "payload") and hasattr(schema.payload, "id") and schema.payload.id == pending_id:
                         await session.write_stream(schema)
         else:
             await session.write_stream(
@@ -3676,9 +3657,9 @@ class ReActAgent(BaseAgent):
 
     @staticmethod
     def _retain_cancelled_turn_messages(
-            messages: List[Any],
-            journal: Dict[str, ToolMessage],
-            marker: str = "[Request cancelled by user]",
+        messages: List[Any],
+        journal: Dict[str, ToolMessage],
+        marker: str = "[Request cancelled by user]",
     ) -> List[Any]:
         """Keep an aborted turn's real tool facts (retain_tool_facts_on_abort).
 

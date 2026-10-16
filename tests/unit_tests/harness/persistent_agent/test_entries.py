@@ -20,11 +20,7 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-<<<<<<< HEAD
-from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata, UserMessage
-=======
-from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UsageMetadata
->>>>>>> 5800f8e1d (test(harness): cover tool calls refused by execution control)
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, ToolMessage, UsageMetadata, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.store import InMemoryKVStore
@@ -82,9 +78,17 @@ def usage(input_tokens, output_tokens):
     return UsageMetadata(input_tokens=input_tokens, output_tokens=output_tokens)
 
 
+class PermanentModelError(RuntimeError):
+    """A provider rejects the request, so a terminal-error test cannot recover through a retry."""
+
+    status_code = 400
+
+
 class LocalModel:
-    """Streams one queued turn per call: an answer by default, "tool" / "two_tools" / "fail", or a
-    (tool name, arguments) pair for one call of that tool."""
+    """Streams a queued answer, tool call, permanent "fail", or "transient_fail" per call.
+
+    A (tool name, arguments) pair emits one call of that tool; an empty queue returns an answer.
+    """
 
     model_client_config = None
     model_config = None
@@ -125,6 +129,8 @@ class LocalModel:
             self.on_call()
         turn = self.turns.pop(0) if self.turns else "answer"
         if turn == "fail":
+            raise PermanentModelError("local model failure")
+        if turn == "transient_fail":
             raise RuntimeError("local model failure")
         if isinstance(turn, tuple):
             name, arguments = turn
@@ -544,6 +550,39 @@ async def test_native_failures_pause_without_output(harness, failure):
     assert events[-1].event_type == "execution.paused"
     assert events[-1].payload.reason == "error" and events[-1].payload.detail
     assert harness.store.endings[-1].outcome == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recovers", [True, False])
+async def test_native_transient_failures_keep_retries_and_account_for_each_call(harness, monkeypatch, recovers):
+    """The v0.1.20 native retry remains active; only an exhausted failure pauses without an answer."""
+    from openjiuwen.harness.rails.model_anomaly_detection_rail import ModelAnomalyDetectionRail
+
+    original_init = ModelAnomalyDetectionRail.__init__
+
+    def without_delay(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        self.transient_base_delay_seconds = 0
+
+    monkeypatch.setattr(ModelAnomalyDetectionRail, "__init__", without_delay)
+    spec = harness.spec()
+    ctx, host = harness.context(spec)
+    harness.model.turns = ["transient_fail"] if recovers else ["transient_fail"] * 4
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+    calls = 2 if recovers else 4
+    assert harness.model.calls == calls
+    completed = [event for event in events if event.event_type == "model.completed"]
+    assert len(completed) == len(host.reports) == calls
+    assert len({event.payload.model_call_id for event in completed}) == calls
+    assert all(event.payload.usage.status == "unknown" for event in completed[: calls - 1])
+    if recovers:
+        assert events[-1].payload.status == "completed"
+        assert len(outputs(events)) == 1
+        assert completed[-1].payload.usage.status == "known"
+    else:
+        assert events[-1].event_type == "execution.paused"
+        assert events[-1].payload.reason == "error" and outputs(events) == []
+        assert completed[-1].payload.usage.status == "unknown"
 
 
 def outputs(events):
@@ -1367,7 +1406,6 @@ async def test_direct_and_scheduled_requests_skip_participation(harness, payload
     assert events[-1].payload.status == "completed"
 
 
-<<<<<<< HEAD
 # --- PA-10: the formal session state store ---------------------------------------------------------
 
 STATE = module("execution.session_state")
@@ -1801,9 +1839,6 @@ async def test_offloading_found_at_construction_is_refused_before_any_event(real
         await collect(harness.api.execute_persistent_request(spec, ctx, request()))
     assert_rejected(exc_info, StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR)
     assert host.events == [] and harness.model.calls == 0
-<<<<<<< HEAD
-=======
-=======
 
 
 def call_group(messages):
@@ -1923,7 +1958,6 @@ async def test_calls_refused_after_a_control_say_they_did_not_run(real_state, re
     assert_kept_out(record, "persistent_pause", "execution is stopping")
 
 
->>>>>>> d6a6de24c (test(harness): cover session state validation and failures)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cause", ["stop", "cancel", "critical"])
 async def test_the_control_rail_refuses_every_call_with_the_same_note(cause):
@@ -2088,9 +2122,6 @@ async def test_refused_call_note_reaches_the_native_window(harness, reason):
     assert result.content == "本次执行正在结束，该工具未调用。"
     assert len(harness.tool_calls) == 1, "call-b was refused before invocation"
     assert "persistent_pause" not in result.content and "execution is stopping" not in result.content
-<<<<<<< HEAD
->>>>>>> 5800f8e1d (test(harness): cover tool calls refused by execution control)
-=======
 
 
 # PA-08: listed files with a real DeepAgent, a temporary workspace and the formal share_file tool.
@@ -2497,4 +2528,3 @@ async def test_a_listing_a_host_rail_changed_in_the_same_form_is_not_handed_off(
         assert (events[-1].payload.reason, events[-1].payload.output_refs) == ("error", ())
     else:
         assert events[-1].payload.status == "completed"
->>>>>>> 416de680c (test(harness): cover PA-08 handoff and recovery boundaries)
