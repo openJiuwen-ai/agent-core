@@ -4,6 +4,8 @@ The openJiuwen development framework supports visual display of constructed work
 
 # Prerequisites
 
+- Set `WORKFLOW_DRAWABLE=true` before constructing each `Workflow` (including nested workflows). Changing the flag later does not enable drawing for an existing workflow. `BranchRouter` retains its branch targets and labels independently, so it may be created before drawing is enabled and attached to a new drawable workflow.
+
 - Before using workflow visualization functionality, need to install and run [Jupyter Notebook](https://jupyter.org/).
 
 1. Execute the following command to install Jupyter Notebook
