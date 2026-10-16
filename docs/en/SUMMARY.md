@@ -43,6 +43,7 @@
       - [Aggregation and Expert Teams](2.Development%20Guide/Agent%20Teams/Team%20Organization/Aggregation%20and%20Expert%20Teams.md)
       - [Runtime Integration and Reliability](2.Development%20Guide/Agent%20Teams/Team%20Organization/Runtime%20Integration%20and%20Reliability.md)
     - [Team Skill Evolution](2.Development%20Guide/Agent%20Teams/Team%20Skill%20Evolution.md)
+    - [Team Verification](2.Development%20Guide/Agent%20Teams/Team%20Verification.md)
   - [Self Evolution](2.Development%20Guide/Self%20Evolution/README.md)
     - [Agent Skills: Let Agents Capture Your Expertise](2.Development%20Guide/Self%20Evolution/Agent-Skills-Capture-Your-Expertise.md)
     - [Swarm Skills: Turn a Successful Collaboration into Team Capability](2.Development%20Guide/Self%20Evolution/Swarm-Skills-Turn-a-Successful-Collaboration-into-Team-Capability.md)
