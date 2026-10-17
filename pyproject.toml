@@ -228,6 +228,7 @@ openjiuwen = [
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
     "**/harness/resources/*.yaml",
+    "dev_tools/agent_builder/resource/*.json",
     "extensions/observability/schemas/*.json",
     "harness/moa/NOTICE",
     "**/harness/moa/skills/**/*.md",
