@@ -2,10 +2,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Load the Windows soft-delete DLL into the current process.
 
-The DLL hooks ntdll delete calls and CreateProcessInternalW. Child
-processes are injected by that hook. This module only loads the DLL once
-into the agent process and publishes the archive directory in the environment
-so children inherit it.
+The DLL hooks delete calls with Detours inside ordinary 64-bit Windows
+processes, and patches each child's import table so the loader maps the DLL
+before main. Git Bash is not injected. Its rm, rmdir, unlink, and shred
+children are loaded from the DLL's debug loop and keep inline hooks.
+This module only loads the DLL once into the agent process and publishes
+the archive directory in the environment so children inherit it.
 """
 
 from __future__ import annotations
