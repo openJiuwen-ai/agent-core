@@ -964,7 +964,13 @@ async def test_codex_sdk_runtime_rejects_unexpected_resumed_thread_id():
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_codex_sdk_runtime_checkpoints_new_thread_id_once():
-    thread = _FakeThread("thread-new", [[], []])
+    completed_turn = [
+        _notification(
+            "turn/completed",
+            turn=SimpleNamespace(status="completed", error=None),
+        )
+    ]
+    thread = _FakeThread("thread-new", [completed_turn, completed_turn])
     runtime, _ = _runtime(thread=thread)
 
     await _start(runtime)
@@ -1085,6 +1091,26 @@ async def test_codex_sdk_runtime_reports_non_retryable_sdk_errors():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_codex_sdk_runtime_rejects_stream_without_terminal_event():
+    retry_error = SimpleNamespace(message="Reconnecting... 5/5")
+    turn = [
+        _notification("error", error=retry_error, will_retry=True),
+        _notification("item/agentMessage/delta", delta="Reconnecting... 5/5"),
+    ]
+    thread = _FakeThread("thread-developer", [turn])
+    runtime, _ = _runtime(thread=thread)
+    await _start(runtime)
+    chunks = []
+
+    with pytest.raises(RuntimeError, match="ended without turn/completed after 2 notification"):
+        async for chunk in runtime._drive({"query": "fail after retries"}):
+            chunks.append(chunk)
+
+    assert [chunk.payload["content"] for chunk in chunks] == ["Reconnecting... 5/5"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_codex_sdk_runtime_retries_silent_turn_on_same_thread():
     stalled = _BlockingTurnHandle()
     recovered = _FakeTurnHandle(
@@ -1162,7 +1188,13 @@ async def _collect_drive(runtime, query):
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_codex_sdk_runtime_queues_follow_up_for_same_thread():
-    thread = _FakeThread("thread-developer", [[], []])
+    completed_turn = [
+        _notification(
+            "turn/completed",
+            turn=SimpleNamespace(status="completed", error=None),
+        )
+    ]
+    thread = _FakeThread("thread-developer", [completed_turn, completed_turn])
     runtime, _ = _runtime(thread=thread)
     await _start(runtime)
     await runtime.follow_up("next")
