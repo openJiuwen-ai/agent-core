@@ -11,6 +11,7 @@ import pathlib
 import re
 import shlex
 import sys
+import zipfile
 import asyncio
 import shutil
 import threading
@@ -85,6 +86,39 @@ def _office_write_unsupported_error(file_path: str, tool_name: str) -> str:
     )
 
 
+def _detect_embedded_images(file_path: str, media_prefix: str) -> list[str]:
+    """List embedded media filenames inside a zip-based Office document.
+
+    Returns an empty list when the file is not a valid zip or has no media.
+    Best-effort signal only — does not extract or process the images.
+    """
+    try:
+        with zipfile.ZipFile(file_path) as zf:
+            return [
+                n.rsplit("/", 1)[-1]
+                for n in zf.namelist()
+                if n.startswith(media_prefix) and not n.endswith("/")
+            ]
+    except (zipfile.BadZipFile, OSError):
+        return []
+
+
+def _embedded_images_hint(file_path: str, media_prefix: str, doc_label: str) -> str:
+    """Build a hint appended to read_file output when embedded images exist."""
+    media = _detect_embedded_images(file_path, media_prefix)
+    if not media:
+        return ""
+    names = ", ".join(media[:10])
+    if len(media) > 10:
+        names += f", … (+{len(media) - 10} more)"
+    return (
+        f"\n\n[该{doc_label}包含 {len(media)} 张嵌入图片（{media_prefix}{names}）。"
+        f"如需理解图片内容，请先用 Python 解包提取"
+        f"（{doc_label}是 zip 格式，图片在 {media_prefix} 目录），"
+        f"然后调用 visual_question_answering 工具识别。]"
+    )
+
+
 def _read_docx_text(file_path: str) -> str:
     """Extract text and tables from a .docx file as Markdown."""
     from docx import Document
@@ -120,6 +154,7 @@ def _read_docx_text(file_path: str) -> str:
             table_lines.append("| " + " | ".join(cells) + " |")
         parts.append("\n".join(table_lines))
 
+    parts.append(_embedded_images_hint(file_path, "word/media/", "Word 文档"))
     return "\n\n".join(parts)
 
 
@@ -176,6 +211,7 @@ def _read_pptx_text(file_path: str) -> str:
                         parts.append("| " + " | ".join(cells) + " |")
         parts.append("")
 
+    parts.append(_embedded_images_hint(file_path, "ppt/media/", "PPT 演示文稿"))
     return "\n".join(parts)
 
 
