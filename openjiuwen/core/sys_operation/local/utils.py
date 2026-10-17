@@ -25,6 +25,11 @@ from pydantic import (
 
 from openjiuwen.core.common.logging import sys_operation_logger, LogEventType
 
+# After the direct child has exited, wait at most this long for stdout/stderr EOF.
+# A descendant that inherited the pipes (Start-Process -NoNewWindow) never closes
+# them, and an unbounded wait there never returns a tool result.
+_POST_EXIT_DRAIN_GRACE_SECONDS = 5.0
+
 
 class StreamEventType(str, Enum):
     """Enumeration of stream event types for async process output monitoring."""
@@ -219,8 +224,20 @@ class AsyncProcessHandler:
                 exception=ori_ex
             )
 
-        # Normal completion: ensure both drainers have read through to EOF.
-        await asyncio.gather(*readers, return_exceptions=True)
+        # Process has exited. Bound the drain: inherited pipe handles never EOF.
+        await _finish_readers(_POST_EXIT_DRAIN_GRACE_SECONDS)
+        # Timeout cancels the drainers, so they are done(); cancelled() is the
+        # signal that EOF never arrived.
+        if any(reader.cancelled() for reader in readers):
+            sys_operation_logger.warning(
+                "Process exited but stdout/stderr were still open; returning output read so far",
+                event_type=LogEventType.SYS_OP_ERROR,
+                metadata={"pid": self._process.pid, "drain_grace_seconds": _POST_EXIT_DRAIN_GRACE_SECONDS},
+            )
+            stderr_buf.extend(
+                f"\n[stdout/stderr still open {_POST_EXIT_DRAIN_GRACE_SECONDS:g}s after the process exited; "
+                "output above is partial and a child process may still be running]\n".encode()
+            )
         final_exit_code = self._process.returncode if self._process.returncode is not None else -1
         return InvokeData(
             stdout=_decode(stdout_buf),
