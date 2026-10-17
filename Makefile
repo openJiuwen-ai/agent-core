@@ -175,17 +175,17 @@ ifeq ($(strip $(CHANGES_RAW)),)
 endif
 
 format: has-staged-changes
-	-@$(RUN_CMD) ruff check --select I $(CHANGED_FILES)
-	-@$(RUN_CMD) ruff format --check $(CHANGED_FILES)
+	@$(RUN_CMD) ruff check --select I $(CHANGED_FILES)
+	@$(RUN_CMD) ruff format --check $(CHANGED_FILES)
 
 lint: has-staged-changes
-	-@$(RUN_CMD) ruff check --show-fixes $(CHANGED_FILES)
+	@$(RUN_CMD) ruff check --show-fixes $(CHANGED_FILES)
 
 pylint: has-staged-changes
-	-@$(RUN_CMD) pylint $(CHANGED_FILES)
+	@$(RUN_CMD) pylint $(CHANGED_FILES)
 
 spelling: has-staged-changes
-	-@$(RUN_CMD) codespell $(CHANGED_FILES)
+	@$(RUN_CMD) codespell $(CHANGED_FILES)
 
 fix-format: has-staged-changes
 	-@$(RUN_CMD) ruff check --select I --fix $(CHANGED_FILES)
@@ -195,21 +195,21 @@ fix-lint: has-staged-changes
 	-@$(RUN_CMD) ruff check --fix $(CHANGED_FILES)
 
 type-check: has-staged-changes
-	-@$(RUN_CMD) mypy $(CHANGED_FILES)
+	@$(RUN_CMD) mypy $(CHANGED_FILES)
 
 check: has-staged-changes
 	@echo $(LINESEP)
 	@echo [Makefile] Checking code format...
-	-@$(MAKE) format COMMITS=$(COMMITS)
+	@$(MAKE) format COMMITS=$(COMMITS)
 	@echo $(LINESEP)
 	@echo [Makefile] Checking spelling...
-	-@$(MAKE) spelling COMMITS=$(COMMITS)
+	@$(MAKE) spelling COMMITS=$(COMMITS)
 	@echo $(LINESEP)
 	@echo [Makefile] Checking linting via ruff...
-	-@$(MAKE) lint COMMITS=$(COMMITS)
+	@$(MAKE) lint COMMITS=$(COMMITS)
 	@echo $(LINESEP)
 	@echo [Makefile] Checking linting via pylint...
-	-@$(MAKE) pylint COMMITS=$(COMMITS)
+	@$(MAKE) pylint COMMITS=$(COMMITS)
 
 fix: has-staged-changes
 	@echo $(LINESEP)
