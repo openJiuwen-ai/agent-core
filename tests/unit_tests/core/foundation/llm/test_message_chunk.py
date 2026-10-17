@@ -6,8 +6,8 @@ import pytest
 from openjiuwen.core.foundation.llm.schema.message_chunk import (
     AssistantMessageChunk,
     ToolMessageChunk,
-    merge_parser_content,
     merge_dicts,
+    merge_parser_content,
     merge_pydantic_models,
 )
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
@@ -340,6 +340,20 @@ def test_assistant_add_preserves_trace_response_facts() -> None:
     assert result.response_model == "model-1"
     assert result.provider_metadata == {"service_tier": "default", "status": "completed"}
     assert result.provider_content == "raw-b"
+def test_assistant_add_keeps_latest_non_empty_metadata():
+    chunk1 = AssistantMessageChunk(
+        content="",
+        metadata={"anthropic_content_blocks": [{"type": "thinking", "thinking": "a"}]},
+    )
+    chunk2 = AssistantMessageChunk(
+        content="",
+        metadata={"anthropic_content_blocks": [{"type": "thinking", "thinking": "ab"}]},
+    )
+    chunk3 = AssistantMessageChunk(content="")
+
+    result = chunk1 + chunk2 + chunk3
+
+    assert result.metadata == chunk2.metadata
 
 
 def test_assistant_add_merges_finish_reason():

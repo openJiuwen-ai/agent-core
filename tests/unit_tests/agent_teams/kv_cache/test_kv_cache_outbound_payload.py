@@ -21,10 +21,9 @@ from openjiuwen.core.foundation.kv_cache import (
     KVCacheAffinityConfig,
     KVCacheIdentity,
 )
-from openjiuwen.core.foundation.llm.model_clients.ascend_affinity_model_client import (
-    AscendAffinityModelClient,
-)
+from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
@@ -36,13 +35,14 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCa
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
-def _client() -> AscendAffinityModelClient:
-    return AscendAffinityModelClient(
+def _client() -> OpenAIModelClient:
+    return OpenAIModelClient(
         model_config=ModelRequestConfig(model="test-model"),
         model_client_config=ModelClientConfig(
-            client_provider=ProviderType.AscendAffinity,
-            api_key="test-key",
+            client_provider=ProviderType.OpenAI,
+            auth_mode=LLMAuthMode.CustomHeaders,
             api_base="https://example.test",
+            extensions={"kv_cache": {"mode": "affinity"}},
             verify_ssl=False,
         ),
     )
@@ -83,6 +83,12 @@ class _CapturingAffinityModel:
             stream=False,
             **kwargs,
         )
+        # KV hint fields now travel in params["extra_body"]; the affinity gateway
+        # body flattens extra_body (see _affinity_request_body), so flatten here
+        # to keep asserting on the outbound wire shape.
+        extra_body = payload.pop("extra_body", None)
+        if isinstance(extra_body, dict):
+            payload.update(extra_body)
         self.payloads.append(payload)
         return AssistantMessage(content="ok")
 
@@ -169,7 +175,12 @@ class _HarnessForRegistry:
         (True, True, True),
     ],
 )
-async def test_team_member_outbound_payload_gate_and_registry_noop(role: str, enabled: bool, supports: bool, expect_hint: bool) -> None:
+async def test_team_member_outbound_payload_gate_and_registry_noop(
+    role: str,
+    enabled: bool,
+    supports: bool,
+    expect_hint: bool,
+) -> None:
     member_id = "leader-card" if role == "leader" else "teammate-card"
     cache_id = f"team:team-sid:team:team-a:member:{member_id}"
 
