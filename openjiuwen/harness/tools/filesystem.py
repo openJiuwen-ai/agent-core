@@ -182,6 +182,7 @@ def _read_xlsx_text(file_path: str) -> str:
     finally:
         wb.close()
 
+    parts.append(_embedded_images_hint(file_path, "xl/media/", "Excel 工作簿"))
     return "\n\n".join(parts)
 
 
@@ -1109,6 +1110,17 @@ class ReadFileTool(Tool):
                     budget.spend(page_tokens)
                     parts.append(page_block)
                     extracted_count += 1
+
+                # Report embedded images across all pages (not just the extracted range)
+                # so the model knows to extract and recognize them via VQA.
+                total_images = sum(len(page.images) for page in pdf.pages)
+                if total_images > 0:
+                    parts.append(
+                        f"\n\n[该PDF包含 {total_images} 张嵌入图片。"
+                        f"如需理解图片内容，请先用 Python 提取"
+                        f"（pdfplumber 或 PyMuPDF 均可），"
+                        f"然后调用 visual_question_answering 工具识别。]"
+                    )
                 return "\n\n".join(parts).strip()
 
         return await asyncio.to_thread(_extract_sync)
