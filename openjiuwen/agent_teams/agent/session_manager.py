@@ -101,6 +101,7 @@ class SessionManager:
         team_backend = self._configurator.team_backend
         if team_backend:
             await team_backend.db.create_cur_session_tables()
+            team_backend.bind_group_session(session.get_session_id())
 
         spec = self._configurator.spec
         if spec and self._configurator.role == TeamRole.LEADER:

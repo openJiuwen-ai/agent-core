@@ -553,6 +553,37 @@ async def test_start_teammate_waits_for_leader_pending_resume():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_start_ensure_team_on_start_when_no_team_row():
+    """A missing team row with the flag on builds before the leader round."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.spec = SimpleNamespace(ensure_team_on_start=True)
+    host.ensure_team_built = AsyncMock()
+    host.infra.team_backend = None
+    kernel = _arm_kernel_for_start(host)
+
+    await kernel.start(session)
+
+    host.ensure_team_built.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_start_skips_ensure_team_when_flag_is_off():
+    """The default flag leaves team creation to the leader tool."""
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.spec = SimpleNamespace(ensure_team_on_start=False)
+    host.ensure_team_built = AsyncMock()
+    kernel = _arm_kernel_for_start(host)
+
+    await kernel.start(session)
+
+    host.ensure_team_built.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_start_leaves_an_unpaused_round_alone():
     """A member with nothing suspended is not driven by ``start``."""
     session = _StubSession()

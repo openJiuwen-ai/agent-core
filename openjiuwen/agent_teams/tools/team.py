@@ -225,6 +225,10 @@ class TeamBackend:
         # member process. Prompts and tool shapes are assembled per mode at
         # build time; nothing flips it at runtime.
         self.dispatch_mode: str = dispatch_mode
+        self.group_chat_spec: Any = None
+        self.group_session_id = ""
+        self._group_log: Any = None
+        self._passive_executor: Any = None
         # Verification expectation (F_62): spec ceiling + runtime effective
         # flag, mirroring the ``enable_hitt`` pattern.
         self._spec_enable_task_verification: bool = enable_task_verification
@@ -474,6 +478,8 @@ class TeamBackend:
         unstarted = await self.db.member.get_team_members(self.team_name, status=MemberStatus.UNSTARTED)
         started: list[str] = []
         for member in unstarted:
+            if member.role == TeamRole.PASSIVE_HUMAN.value:
+                continue
             await self.startup_member(member.member_name, on_created)
             started.append(member.member_name)
         return started
@@ -499,6 +505,9 @@ class TeamBackend:
         Returns:
             True if the member was started, False otherwise.
         """
+        existing = await self.db.member.get_member(member_name, self.team_name)
+        if existing is not None and existing.role == TeamRole.PASSIVE_HUMAN.value:
+            return False
         transitioned = await self.db.member.try_transition_member_status(
             member_name, self.team_name, MemberStatus.UNSTARTED, MemberStatus.STARTING,
         )
@@ -682,14 +691,19 @@ class TeamBackend:
 
         current_status = MemberStatus(member_data.status)
 
-        # Check if already shutdown — idempotent success path
-        if current_status == MemberStatus.SHUTDOWN or current_status == MemberStatus.SHUTDOWN_REQUESTED:
-            team_logger.debug(
-                f"Member {member_name} already shutdown"
-                if current_status == MemberStatus.SHUTDOWN
-                else f"Member {member_name} is shutting down"
-            )
+        # Terminal departure — nothing left to do.
+        if current_status == MemberStatus.SHUTDOWN:
+            team_logger.debug(f"Member {member_name} already shutdown")
             return MemberOpResult.success()
+
+        # Soft remove already requested. A second soft call stays idempotent.
+        # force=True upgrades: re-notify the member process and settle the row
+        # to SHUTDOWN without re-enabling them (host finalize / stuck exit).
+        if current_status == MemberStatus.SHUTDOWN_REQUESTED:
+            if not force:
+                team_logger.debug(f"Member {member_name} is shutting down")
+                return MemberOpResult.success()
+            return await self._force_finalize_shutdown(member_name)
 
         # Guard: reject shutdown of a live human agent who still holds active
         # tasks, unless force=True. Models sometimes confuse "cancel this
@@ -759,7 +773,68 @@ class TeamBackend:
         except Exception as e:
             team_logger.error(f"Failed to publish member shutdown event for {member_name}: {e}")
 
+        # A passive human has no member process to settle SHUTDOWN_REQUESTED →
+        # SHUTDOWN, so the leader closes the row here. Otherwise soft-remove
+        # would leave a permanent shutting-down residue that blocks rejoin.
+        if member_data.role == TeamRole.PASSIVE_HUMAN.value:
+            settled = await self.db.member.try_transition_member_status(
+                member_name,
+                self.team_name,
+                MemberStatus.SHUTDOWN_REQUESTED,
+                MemberStatus.SHUTDOWN,
+            )
+            if not settled:
+                return MemberOpResult.fail(
+                    f"Passive human {member_name} could not settle to SHUTDOWN"
+                )
+            team_logger.info(f"Passive human {member_name} settled to SHUTDOWN")
+            return MemberOpResult.success()
+
         team_logger.info(f"Shutdown request sent to member {member_name}")
+        return MemberOpResult.success()
+
+    async def _force_finalize_shutdown(self, member_name: str) -> MemberOpResult:
+        """Re-publish a forced shutdown and settle ``SHUTDOWN_REQUESTED`` → ``SHUTDOWN``.
+
+        Used when a soft remove left a residue and the host asks to finish
+        departure without re-enabling the member (``force=True``).
+        """
+        team_logger.info(f"Force-finalizing shutdown for member {member_name}")
+        msg_id = await self.message_manager.send_message(
+            content=t("team.shutdown_request_content"),
+            to_member_name=member_name,
+        )
+        if not msg_id:
+            team_logger.warning(f"Failed to send force-shutdown message to member {member_name}")
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(
+                    MemberShutdownEvent(
+                        team_name=self.team_name,
+                        member_name=member_name,
+                        force=True,
+                    )
+                ),
+            )
+        except Exception as e:
+            team_logger.error(f"Failed to publish force shutdown event for {member_name}: {e}")
+
+        settled = await self.db.member.try_transition_member_status(
+            member_name,
+            self.team_name,
+            MemberStatus.SHUTDOWN_REQUESTED,
+            MemberStatus.SHUTDOWN,
+        )
+        if not settled:
+            # Row may already have reached SHUTDOWN via the member process.
+            row = await self.db.member.get_member(member_name, self.team_name)
+            if row is not None and row.status == MemberStatus.SHUTDOWN.value:
+                return MemberOpResult.success()
+            return MemberOpResult.fail(
+                f"Member {member_name} could not settle to SHUTDOWN from SHUTDOWN_REQUESTED"
+            )
+        team_logger.info(f"Member {member_name} force-settled to SHUTDOWN")
         return MemberOpResult.success()
 
     async def cancel_member(self, member_name: str) -> bool:
@@ -1224,6 +1299,11 @@ class TeamBackend:
                 ),
             )
 
+        # An existing row is success. Leave the roster, description, and the
+        # runtime capability flags from the first build untouched.
+        if await self.db.team.team_exists(self.team_name):
+            return
+
         # Step B: compute effective flag and persist on backend so all
         # downstream spawn paths see a single source of truth.
         effective_enable_hitt = self._spec_enable_hitt if enable_hitt is None else enable_hitt
@@ -1281,7 +1361,7 @@ class TeamBackend:
         # is disabled on this run.
         skipped_bridge_specs: list[BridgeMemberSpec] = []
         for member_spec in self.predefined_members:
-            if member_spec.role_type == TeamRole.HUMAN_AGENT:
+            if member_spec.role_type in (TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN):
                 continue
             if isinstance(member_spec, BridgeMemberSpec) and not effective_enable_bridge:
                 skipped_bridge_specs.append(member_spec)
@@ -1322,6 +1402,7 @@ class TeamBackend:
         # (the ceiling itself stays open per the spec, but this run
         # declined to engage HITT).
         human_specs = [m for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT]
+        passive_specs = [m for m in self.predefined_members if m.role_type == TeamRole.PASSIVE_HUMAN]
         if effective_enable_hitt:
             for human_spec in human_specs:
                 await self.spawn_human_agent(
@@ -1330,7 +1411,13 @@ class TeamBackend:
                     desc=human_spec.desc,
                     prompt=human_spec.prompt,
                 )
-        elif human_specs:
+            for passive_spec in passive_specs:
+                await self.spawn_passive_human(
+                    member_name=passive_spec.member_name,
+                    display_name=passive_spec.display_name,
+                    desc=passive_spec.desc,
+                )
+        elif human_specs or passive_specs:
             team_logger.warning(
                 "Skipped %d predefined HUMAN_AGENT(s) for team %s because "
                 "build_team(enable_hitt=False) overrode the spec capability",
@@ -1435,6 +1522,69 @@ class TeamBackend:
             )
         return result
 
+    async def spawn_passive_human(
+        self,
+        *,
+        member_name: str,
+        display_name: Optional[str] = None,
+        desc: Optional[str] = None,
+    ) -> MemberOpResult:
+        """Register a passive human as READY. No harness is started."""
+        if not self._enable_hitt:
+            return MemberOpResult.fail(
+                "Cannot spawn passive human: HITT capability is disabled "
+                "(enable_hitt=False on TeamAgentSpec or build_team)"
+            )
+        resolved_display_name = display_name or t("hitt.passive_human_display_name")
+        resolved_desc = desc or t("hitt.passive_human_default_desc")
+        member_card = AgentCard(
+            id=f"{self.team_name}_{member_name}",
+            name=resolved_display_name,
+            description=resolved_desc,
+        )
+        return await self.spawn_member(
+            member_name=member_name,
+            display_name=resolved_display_name,
+            agent_card=member_card,
+            desc=resolved_desc,
+            prompt=None,
+            status=MemberStatus.READY,
+            execution_status=ExecutionStatus.IDLE,
+            mode=MemberMode.BUILD_MODE,
+            role=TeamRole.PASSIVE_HUMAN,
+        )
+
+    def bind_group_session(self, session_id: str) -> None:
+        """Remember the session whose public history this process projects."""
+        if not isinstance(session_id, str) or not session_id.strip():
+            return
+        if self._group_log is not None and self.group_session_id != session_id:
+            raise ValueError("group chat session is already bound")
+        self.group_session_id = session_id
+
+    def group_conversation(self):
+        """Return the projection for the bound session."""
+        from openjiuwen.agent_teams.group_chat.conversation import GroupConversationLog
+
+        if not self.group_session_id:
+            raise ValueError("group chat requires a bound session")
+        if self._group_log is None:
+            root = None
+            workspace = getattr(self.group_chat_spec, "workspace", None)
+            if workspace is not None and getattr(workspace, "root_path", None):
+                root = workspace.root_path
+            self._group_log = GroupConversationLog(self.team_name, self.group_session_id, root)
+        return self._group_log
+
+    def passive_tool_executor(self):
+        """Return the leader-owned executor for passive-human tool calls."""
+        from openjiuwen.agent_teams.interaction.passive_tool_executor import PassiveToolExecutor
+
+        if self._passive_executor is None:
+            language = getattr(self.group_chat_spec, "language", None) or "cn"
+            self._passive_executor = PassiveToolExecutor(self, language=language)
+        return self._passive_executor
+
     async def is_human_agent(self, member_name: Optional[str]) -> bool:
         """Whether ``member_name`` is a registered human-agent member.
 
@@ -1463,7 +1613,27 @@ class TeamBackend:
         member_dao = self.db.member
         if member_dao is None:
             return False
-        return await member_dao.is_live_human_agent(self.team_name, member_name)
+        if await member_dao.is_live_human_agent(self.team_name, member_name):
+            return True
+        return await member_dao.is_live_passive_human(self.team_name, member_name)
+
+    async def is_passive_human(self, member_name: Optional[str]) -> bool:
+        """Whether ``member_name`` is a passive human. Avatar lists stay unchanged."""
+        if not member_name or self.db.member is None:
+            return False
+        return await self.db.member.is_passive_human(self.team_name, member_name)
+
+    async def is_reachable_passive_human(self, member_name: str | None) -> bool:
+        """Whether a passive human can still receive a directed or internal message."""
+        if not member_name or self.db.member is None:
+            return False
+        return await self.db.member.is_reachable_passive_human(self.team_name, member_name)
+
+    async def reachable_passive_human_names(self) -> frozenset[str]:
+        """Passive humans that can still receive a directed or internal broadcast."""
+        if self.db.member is None:
+            return frozenset()
+        return frozenset(await self.db.member.list_reachable_passive_human_names(self.team_name))
 
     async def is_reachable_human_agent(self, member_name: str | None) -> bool:
         """Whether ``member_name`` is a human-agent member that can still be delivered to.
@@ -1504,7 +1674,7 @@ class TeamBackend:
         registration. Unknown member names raise ``KeyError`` so typos
         surface immediately rather than silently dropping notifications.
         """
-        if not await self.is_human_agent(member_name):
+        if not await self.is_human_agent(member_name) and not await self.is_passive_human(member_name):
             names = await self.human_agent_names()
             raise KeyError(
                 f"'{member_name}' is not a registered human-agent member; "

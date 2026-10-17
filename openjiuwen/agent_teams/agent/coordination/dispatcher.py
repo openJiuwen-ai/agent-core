@@ -33,6 +33,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventMessage,
     InnerEventType,
 )
+from openjiuwen.agent_teams.group_chat.message_handler import GroupMessageHandler
 from openjiuwen.agent_teams.agent.coordination.handlers import (
     AgentLifecycleHandler,
     MemberHandler,
@@ -214,6 +215,7 @@ class EventDispatcher:
         self.lifecycle = AgentLifecycleHandler(host, blueprint, infra, poll_ctrl)
         self.member = MemberHandler(host, blueprint, infra, poll_ctrl)
         self.message = MessageHandler(host, blueprint, infra, poll_ctrl)
+        self.group_message = GroupMessageHandler(host, blueprint, infra, poll_ctrl)
         # task_board / stale_task are the dispatch-mode-owned handler pair
         # (F_62): the mode is static spec configuration, so the variant is
         # chosen right here at construction, for every role alike.
@@ -276,6 +278,8 @@ class EventDispatcher:
 
         for handler in handlers:
             for event_key, callback in handler.get_callbacks().items():
+                if handler is self.message:
+                    callback = self._dispatch_mailbox
                 self._framework.register_sync(event_key, callback)
 
     @property
@@ -323,6 +327,20 @@ class EventDispatcher:
         """Close dispatch admission before pausing or stopping a run cycle."""
         async with self._startup_lock:
             self._startup_ready = False
+
+    async def _dispatch_mailbox(self, event: CoordinationEvent) -> None:
+        """Route one mailbox event to the group handler or the ordinary handler.
+
+        Only one of the two runs. Registering both would deliver the same
+        broadcast twice. The startup gate in ``dispatch`` still wraps this.
+        """
+        if event.event_type in (TeamEvent.BROADCAST, InnerEventType.POLL_MAILBOX):
+            starter = getattr(self._round, "start_mentioned_members", None)
+            if starter is not None:
+                await starter()
+        handler = self.group_message if await self.group_message.handles(event) else self.message
+        method_name = MessageHandler.EVENT_METHOD_MAP[event.event_type]
+        await getattr(handler, method_name)(event)
 
     async def dispatch(self, event: CoordinationEvent) -> None:
         """Wake-up entry. Applies coarse rules, then triggers framework."""
