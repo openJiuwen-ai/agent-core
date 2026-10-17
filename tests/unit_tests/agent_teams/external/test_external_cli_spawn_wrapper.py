@@ -22,6 +22,7 @@ from openjiuwen.core.runner.runner import Runner
 class _FakeRuntime:
     def __init__(self) -> None:
         self.stopped = False
+        self.team_context_tracker: Any = None
 
     async def start(self, *, team_session: Any | None = None) -> None:
         """Start fake runtime."""
@@ -58,6 +59,10 @@ class _FakeRuntime:
         """Return no mounted rails."""
         _ = rail_type
         return []
+
+    def bind_team_context_tracker(self, tracker: Any) -> None:
+        """Accept deferred team context binding."""
+        self.team_context_tracker = tracker
 
 
 class _FakeTeamAgent:
@@ -135,8 +140,9 @@ async def test_external_cli_spawn_stops_runtime_on_cancel(monkeypatch):
         team_spec=team_spec,
     )
     handle = await spawn_mod.external_cli_spawn(
-        _FakeTeamAgent(spec),
-        ctx,
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
         session_id="sess-1",
     )
     await started.wait()
@@ -186,8 +192,9 @@ async def test_external_cli_spawn_without_initial_message_uses_empty_query(monke
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        _FakeTeamAgent(spec),
-        ctx,
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
         session_id="sess-1",
     )
     await started.wait()
@@ -195,6 +202,53 @@ async def test_external_cli_spawn_without_initial_message_uses_empty_query(monke
 
     assert build_kwargs["resume_external_backend"] is False
     assert run_inputs == {"query": ""}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_external_cli_spawn_binds_tracker_to_external_member_backend(monkeypatch):
+    """External CLI team context must use the spawned member's own backend view."""
+    runtime = _FakeRuntime()
+    started = asyncio.Event()
+
+    async def _fake_build_cli_runtime(*args: Any, **kwargs: Any) -> _FakeRuntime:
+        _ = args, kwargs
+        return runtime
+
+    async def _fake_run_agent_team(*args: Any, **kwargs: Any) -> None:
+        _ = args, kwargs
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(spawn_mod, "build_cli_runtime", _fake_build_cli_runtime)
+    monkeypatch.setattr(Runner, "run_agent_team", _fake_run_agent_team)
+
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="ext_team",
+        display_name="Ext",
+        lifecycle=TeamLifecycle.PERSISTENT,
+        teammate_mode=MemberMode.BUILD_MODE,
+    )
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_name="claude-1",
+        cli_agent="claude",
+        team_spec=TeamSpec(team_name="ext_team", display_name="Ext"),
+    )
+
+    handle = await spawn_mod.external_cli_spawn(
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
+        session_id="sess-1",
+    )
+    await started.wait()
+    await handle.force_kill()
+
+    tracker = runtime.team_context_tracker
+    assert tracker is not None
+    assert tracker._team_backend.member_name == "claude-1"
 
 
 @pytest.mark.asyncio
@@ -236,8 +290,9 @@ async def test_external_cli_spawn_resume_passes_backend_flag(monkeypatch):
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        _FakeTeamAgent(spec),
-        ctx,
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
         session_id="sess-1",
         resume_external_backend=True,
     )
@@ -278,13 +333,13 @@ async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
         external_cli_agents=[
             {
                 "cli_agent": "codex",
+                "cli_path": "/opt/codex-cli",
                 "codex_bin": "/opt/codex",
                 "codex_turn_idle_timeout_s": 45.0,
                 "codex_turn_idle_retries": 2,
             }
         ],
     )
-    agent = _FakeTeamAgent(spec)
     ctx = TeamRuntimeContext(
         role=TeamRole.TEAMMATE,
         member_name="codex-1",
@@ -293,8 +348,9 @@ async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        agent,
-        ctx,
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
         session_id="sess-1",
         resume_external_backend=True,
     )
@@ -302,6 +358,7 @@ async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
 
     assert build_kwargs["member_agent_id"] == "ext_team_codex-1"
     assert build_kwargs["resume_external_backend"] is True
+    assert build_kwargs["cli_path"] == "/opt/codex-cli"
     assert build_kwargs["codex_bin"] == "/opt/codex"
     assert build_kwargs["codex_turn_idle_timeout_s"] == 45.0
     assert build_kwargs["codex_turn_idle_retries"] == 2
@@ -342,7 +399,7 @@ async def test_external_cli_spawn_resolves_worktree_cwd_and_add_dirs(monkeypatch
         teammate_mode=MemberMode.BUILD_MODE,
         workspace={"enabled": True, "root_path": team_workspace},
         build_context=BuildContext(project_dir=project_dir),
-        external_cli_agents=[{"cli_agent": "claude"}],
+        external_cli_agents=[{"cli_agent": "claude", "cli_path": "/opt/claude"}],
     )
     team_spec = TeamSpec(team_name="ext_team", display_name="Ext")
     ctx = TeamRuntimeContext(
@@ -354,14 +411,16 @@ async def test_external_cli_spawn_resolves_worktree_cwd_and_add_dirs(monkeypatch
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        _FakeTeamAgent(spec),
-        ctx,
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
         session_id="sess-1",
     )
     await started.wait()
     await handle.force_kill()
 
     assert build_kwargs["cwd"] == worktree_path
+    assert build_kwargs["cli_path"] == "/opt/claude"
     assert build_kwargs["add_dirs"] == (project_dir, team_workspace)
 
 
@@ -411,8 +470,9 @@ async def test_external_cli_spawn_explicit_cwd_wins_and_others_become_add_dirs(m
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        _FakeTeamAgent(spec),
-        ctx,
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
         session_id="sess-1",
     )
     await started.wait()
@@ -459,8 +519,9 @@ async def test_external_cli_spawn_keeps_explicit_initial_message(monkeypatch):
     )
 
     handle = await spawn_mod.external_cli_spawn(
-        _FakeTeamAgent(spec),
-        ctx,
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
         initial_message="hello",
         session_id="sess-1",
     )
