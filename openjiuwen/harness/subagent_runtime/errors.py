@@ -20,7 +20,10 @@ def raise_subagent_not_found(subagent_id: str) -> NoReturn:
 def raise_subagent_capacity_invalid(*, used: int, limit: int) -> NoReturn:
     raise_error(
         StatusCode.DEEPAGENT_SUBAGENT_CAPACITY_INVALID,
-        error_msg=f"used={used}, limit={limit}",
+        error_msg=(
+            f"used={used}, limit={limit}; every live subagent is still running, "
+            "call subagent_wait for one of them before spawning more"
+        ),
     )
 
 
