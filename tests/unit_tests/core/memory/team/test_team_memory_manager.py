@@ -364,8 +364,8 @@ async def test_extract_after_round_no_auto_extract(temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_extract_after_round_leader_persistent_calls_extract_team_memories(temp_dir):
-    """Leader + persistent + auto_extract + db + team_memory_dir invokes extraction."""
+async def test_extract_after_round_leader_persistent_snapshots_then_runs_in_background(temp_dir):
+    """Leader + persistent snapshots DB sync, then schedules background extraction."""
     tm_dir = os.path.join(temp_dir, "team-memory")
     os.makedirs(tm_dir, exist_ok=True)
 
@@ -391,19 +391,141 @@ async def test_extract_after_round_leader_persistent_calls_extract_team_memories
     await manager.init_toolkit()
 
     with patch(
-        "openjiuwen.agent_teams.memory.extractor.extract_team_memories",
+        "openjiuwen.agent_teams.memory.extractor.snapshot_team_extraction_context",
         new_callable=AsyncMock,
-    ) as mock_extract:
-        await manager.extract_after_round()
-        mock_extract.assert_awaited_once_with(
-            team_name=params.team_name,
-            db=mock_db,
-            task_manager=mock_task_manager,
-            team_memory_dir=tm_dir,
-            sys_operation=mock_sys_op,
-            model=mock_model,
-            tz_offset_hours=9.0,
-        )
+        return_value="# snap",
+    ) as mock_snapshot:
+        with patch(
+            "openjiuwen.agent_teams.memory.extractor.run_team_memory_extraction",
+            new_callable=AsyncMock,
+        ) as mock_run:
+            await manager.extract_after_round()
+            mock_snapshot.assert_awaited_once_with(
+                team_name=params.team_name,
+                db=mock_db,
+                task_manager=mock_task_manager,
+                tz_offset_hours=9.0,
+            )
+            assert manager._extract_task is not None
+            await manager._extract_task
+            mock_run.assert_awaited_once_with(
+                team_name=params.team_name,
+                team_memory_dir=tm_dir,
+                context="# snap",
+                model=mock_model,
+            )
+
+
+@pytest.mark.asyncio
+async def test_extract_after_round_skips_duplicate_while_in_flight(temp_dir):
+    """Second extract_after_round while background task is pending is a no-op."""
+    import asyncio
+
+    tm_dir = os.path.join(temp_dir, "team-memory")
+    os.makedirs(tm_dir, exist_ok=True)
+
+    params = create_test_params(
+        workspace_root=temp_dir,
+        lifecycle="persistent",
+        role="leader",
+    )
+    params.enable_auto_extract = True
+    params.team_memory_dir = tm_dir
+    params.db = MagicMock()
+    params.task_manager = MagicMock()
+    params.extraction_model = MagicMock()
+
+    manager = TeamMemoryManager(params)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    run_count = 0
+
+    async def slow_run(**_kwargs):
+        nonlocal run_count
+        run_count += 1
+        started.set()
+        await release.wait()
+
+    with patch(
+        "openjiuwen.agent_teams.memory.extractor.snapshot_team_extraction_context",
+        new_callable=AsyncMock,
+        return_value="# snap",
+    ) as mock_snapshot:
+        with patch(
+            "openjiuwen.agent_teams.memory.extractor.run_team_memory_extraction",
+            new=AsyncMock(side_effect=slow_run),
+        ):
+            await manager.extract_after_round()
+            await started.wait()
+            await manager.extract_after_round()
+            assert mock_snapshot.await_count == 1
+            assert run_count == 1
+            release.set()
+            await manager._extract_task
+            assert run_count == 1
+
+
+@pytest.mark.asyncio
+async def test_extract_after_round_serializes_concurrent_snapshot_claim(temp_dir):
+    """Concurrent extract_after_round during a slow snapshot still forks only one agent."""
+    import asyncio
+
+    tm_dir = os.path.join(temp_dir, "team-memory")
+    os.makedirs(tm_dir, exist_ok=True)
+
+    params = create_test_params(
+        workspace_root=temp_dir,
+        lifecycle="persistent",
+        role="leader",
+    )
+    params.enable_auto_extract = True
+    params.team_memory_dir = tm_dir
+    params.db = MagicMock()
+    params.task_manager = MagicMock()
+    params.extraction_model = MagicMock()
+
+    manager = TeamMemoryManager(params)
+    snapshot_entered = asyncio.Event()
+    snapshot_release = asyncio.Event()
+    run_started = asyncio.Event()
+    run_release = asyncio.Event()
+    snapshot_count = 0
+    run_count = 0
+
+    async def slow_snapshot(**_kwargs):
+        nonlocal snapshot_count
+        snapshot_count += 1
+        snapshot_entered.set()
+        await snapshot_release.wait()
+        return "# snap"
+
+    async def slow_run(**_kwargs):
+        nonlocal run_count
+        run_count += 1
+        run_started.set()
+        await run_release.wait()
+
+    with patch(
+        "openjiuwen.agent_teams.memory.extractor.snapshot_team_extraction_context",
+        new=AsyncMock(side_effect=slow_snapshot),
+    ):
+        with patch(
+            "openjiuwen.agent_teams.memory.extractor.run_team_memory_extraction",
+            new=AsyncMock(side_effect=slow_run),
+        ):
+            first = asyncio.create_task(manager.extract_after_round())
+            await snapshot_entered.wait()
+            second = asyncio.create_task(manager.extract_after_round())
+            # Hold the background task pending so the second caller sees in-flight.
+            snapshot_release.set()
+            await asyncio.gather(first, second)
+            await run_started.wait()
+            assert snapshot_count == 1
+            assert run_count == 1
+            run_release.set()
+            await manager._extract_task
+            assert snapshot_count == 1
+            assert run_count == 1
 
 
 @pytest.mark.asyncio

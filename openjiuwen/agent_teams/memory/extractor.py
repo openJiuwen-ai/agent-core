@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, List, Optional
 
@@ -104,48 +105,85 @@ def _build_extraction_context(
     return "\n".join(parts)
 
 
+def _safe_memory_path(team_memory_dir: str, path: str) -> Optional[str]:
+    if ".." in path or path.startswith("/") or path.startswith("\\"):
+        return None
+    return os.path.join(team_memory_dir, os.path.basename(path))
+
+
+def _read_local_file(full_path: str) -> str:
+    if not os.path.exists(full_path):
+        return ""
+    with open(full_path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def _write_local_file_atomic(full_path: str, content: str) -> None:
+    parent = os.path.dirname(full_path) or "."
+    os.makedirs(parent, exist_ok=True)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=parent,
+            suffix=".tmp",
+            prefix="team_memory_extract_",
+            delete=False,
+        ) as f:
+            tmp_path = f.name
+            f.write(content)
+        os.replace(tmp_path, full_path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
 def _create_extraction_tools(
     team_memory_dir: str,
-    sys_operation: "SysOperation",
     *,
     team_name: str = "",
 ) -> List[Any]:
-    """Create restricted tools for the extract agent to read/write ``team-memory/`` directory."""
+    """Create tools that read/write ``team-memory/`` via local FS.
+
+    Intentionally independent of harness ``sys_operation`` so a background
+    extract can finish after ``harness.dispose()`` has unregistered that handle.
+    """
     from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 
     prefix = f"extract.{team_name}" if team_name else "extract"
 
     async def _read_file(path: str) -> dict:
-        if ".." in path or path.startswith("/"):
+        full_path = _safe_memory_path(team_memory_dir, path)
+        if full_path is None:
             return {"error": "Invalid path"}
-        full_path = os.path.join(team_memory_dir, os.path.basename(path))
         try:
-            result = await sys_operation.fs().read_file(full_path)
-            if result and hasattr(result, "data") and result.data:
-                return {"content": result.data.content, "path": full_path}
-            return {"content": "", "path": full_path}
+            content = _read_local_file(full_path)
+            return {"content": content, "path": full_path}
         except Exception:
             return {"content": "", "path": full_path, "note": "file not found"}
 
     async def _write_file(path: str, content: str) -> dict:
-        if ".." in path or path.startswith("/"):
+        full_path = _safe_memory_path(team_memory_dir, path)
+        if full_path is None:
             return {"error": "Invalid path"}
-        full_path = os.path.join(team_memory_dir, os.path.basename(path))
         try:
-            await sys_operation.fs().write_file(
-                full_path, content=content, create_if_not_exist=True
-            )
+            _write_local_file_atomic(full_path, content)
             return {"success": True, "path": full_path}
         except Exception as e:
             return {"success": False, "error": str(e)}
 
     async def _list_files() -> dict:
         try:
-            result = await sys_operation.fs().list_files(team_memory_dir, recursive=False)
-            if result and hasattr(result, "data") and result.data:
-                files = [f.name for f in result.data.list_items if not f.is_directory]
-                return {"files": files}
-            return {"files": []}
+            if not os.path.isdir(team_memory_dir):
+                return {"files": []}
+            files = [
+                name
+                for name in os.listdir(team_memory_dir)
+                if os.path.isfile(os.path.join(team_memory_dir, name))
+            ]
+            return {"files": files}
         except Exception:
             return {"files": []}
 
@@ -191,56 +229,94 @@ def _create_extraction_tools(
     ]
 
 
+async def snapshot_team_extraction_context(
+    *,
+    team_name: str,
+    db: "TeamDatabase",
+    task_manager: "TeamTaskManager",
+    tz_offset_hours: float = 8.0,
+) -> Optional[str]:
+    """Read tasks/messages while the session DB is still bound.
+
+    Returns ``None`` when there is nothing to extract. Callers that schedule
+    background generation must finish this step before ``release_session``.
+    """
+    if db is None or task_manager is None:
+        return None
+
+    tasks = await task_manager.list_tasks()
+    messages = await db.message.get_team_messages(team_name)
+    if not tasks and not messages:
+        return None
+    return _build_extraction_context(tasks, messages, tz_offset_hours)
+
+
+async def run_team_memory_extraction(
+    *,
+    team_name: str,
+    team_memory_dir: str,
+    context: str,
+    model: "Model",
+) -> None:
+    """Run the extraction agent against an already-snapshotted context string."""
+    if not team_memory_dir or model is None or not context:
+        return
+
+    os.makedirs(team_memory_dir, exist_ok=True)
+
+    from openjiuwen.harness.factory import create_deep_agent
+    from openjiuwen.core.runner.runner import Runner
+
+    extraction_tools = _create_extraction_tools(team_memory_dir, team_name=team_name)
+    agent = create_deep_agent(
+        model,
+        system_prompt=EXTRACTION_AGENT_PROMPT,
+        tools=extraction_tools,
+        max_iterations=EXTRACTION_AGENT_MAX_ITERATIONS,
+        enable_task_loop=False,
+    )
+
+    await Runner.run_agent(
+        agent,
+        {"query": f"请分析以下团队 {team_name} 的协作记录并提取记忆：\n\n{context}"},
+    )
+    logger.info(f"[extractor] Extraction agent completed for {team_name}")
+
+
 async def extract_team_memories(
     *,
     team_name: str,
     db: "TeamDatabase",
     task_manager: "TeamTaskManager",
     team_memory_dir: str,
-    sys_operation: Optional["SysOperation"],
+    sys_operation: Optional["SysOperation"] = None,
     model: Optional["Model"] = None,
     tz_offset_hours: float = 8.0,
 ) -> None:
-    """Forked Agent 提炼团队记忆。
+    """Forked Agent 提炼团队记忆（同步完整路径，供测试与兼容调用）。
 
+    ``sys_operation`` 保留入参以兼容旧调用方，写盘已改为本地 FS，不再使用它。
     ``model`` 为 None 时不执行（无 LLM 无法提炼）。
     """
-    required_components = [sys_operation, team_memory_dir, model, db, task_manager]
-    if None in required_components:
+    del sys_operation  # kept for API compatibility; tools use local FS
+    if None in (team_memory_dir, model, db, task_manager):
         return
 
     try:
-        tasks = await task_manager.list_tasks()
-        messages = await db.message.get_team_messages(team_name)
-
-        if not tasks and not messages:
+        context = await snapshot_team_extraction_context(
+            team_name=team_name,
+            db=db,
+            task_manager=task_manager,
+            tz_offset_hours=tz_offset_hours,
+        )
+        if not context:
             return
-
-        os.makedirs(team_memory_dir, exist_ok=True)
-
-        context = _build_extraction_context(tasks, messages, tz_offset_hours)
-
-        from openjiuwen.harness.factory import create_deep_agent
-        from openjiuwen.core.runner.runner import Runner
-
-        extraction_tools = _create_extraction_tools(
-            team_memory_dir, sys_operation, team_name=team_name
+        await run_team_memory_extraction(
+            team_name=team_name,
+            team_memory_dir=team_memory_dir,
+            context=context,
+            model=model,
         )
-        agent = create_deep_agent(
-            model,
-            system_prompt=EXTRACTION_AGENT_PROMPT,
-            tools=extraction_tools,
-            max_iterations=EXTRACTION_AGENT_MAX_ITERATIONS,
-            enable_task_loop=False,
-        )
-
-        await Runner.run_agent(
-            agent,
-            {"query": f"请分析以下团队 {team_name} 的协作记录并提取记忆：\n\n{context}"},
-        )
-
-        logger.info(f"[extractor] Extraction agent completed for {team_name}")
-
     except Exception as e:
         logger.warning(f"[extractor] extract_team_memories failed: {e}")
 
@@ -251,4 +327,6 @@ __all__ = [
     "MESSAGE_CONTENT_PREVIEW_MAX",
     "TASK_CONTENT_PREVIEW_MAX",
     "extract_team_memories",
+    "run_team_memory_extraction",
+    "snapshot_team_extraction_context",
 ]
