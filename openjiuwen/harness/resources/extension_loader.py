@@ -356,7 +356,9 @@ def _first_display_description(value: Any) -> str:
 
 
 def _read_json_mapping(path: Path) -> dict[str, Any]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    # Package manifests are edited on Windows too; tolerate the UTF-8 BOM that
+    # Notepad/PowerShell add instead of failing with JSONDecodeError.
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise ValueError(f"Manifest must contain a mapping: {path}")
     return payload
