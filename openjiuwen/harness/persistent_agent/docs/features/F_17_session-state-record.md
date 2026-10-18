@@ -5,9 +5,9 @@
 | 项 | 值 |
 | --- | --- |
 | 建档日期 | 2026-10-13 |
-| 修订日期 | 2026-10-14：开发者确认决策，方案由草稿改为已确认；同日确认 D-06 的影响范围与后续处理未完成时的保存规则，实现 I-08 并按审阅修复配对、卸载检查与记录校验；同日确认 Q-02、Q-03 与宿主安全 Rail 约定，等待现场改为按调用内容核对，并明确两项保留限制；按第四轮审阅收紧保存失败、防篡改、消息往返与安全保证的表述；2026-10-16：补充 v0.1.20 基线冲突修复与验证，见第 9 节 |
-| 范围 | agent-core `openjiuwen/harness/persistent_agent`：`SessionStateStore` 接入点与内部组件 `WindowStore` 的实现、会话状态记录的结构与序列化、保存前的窗口同步、Execution 结束时的窗口整理、中途结束后的占位补位、记录错误分类、存储键编码、卸载缓冲的前置拒绝；以及原生执行路径保留真实工具事实所需的 core 改动（D-06）。不含换窗、归档与检索（PA-11、PA-12），只提供它们共用的键编码 |
-| 方案成熟度 | 已确认（2026-10-14）：D-01～D-10 均已确认；D-06 的 core 改动需要维护者评审，按开发者最新决定以“待评审”标注交付，不作为本次合入前置；Q-01～Q-03 均已确认 |
+| 修订日期 | 2026-10-14：开发者确认决策，方案由草稿改为已确认；同日确认 D-06 的影响范围与后续处理未完成时的保存规则，实现 I-08 并按审阅修复配对、卸载检查与记录校验；同日确认 Q-02、Q-03 与宿主安全 Rail 约定，等待现场改为按调用内容核对，并明确两项保留限制；按第四轮审阅收紧保存失败、防篡改、消息往返与安全保证的表述；2026-10-16：补充 v0.1.20 基线冲突修复与验证；2026-10-17：补充 PA-11 逐轮 checkpoint，并确定未启用前直接采用 schema_version=1 最终结构，见第 10 节 |
+| 范围 | agent-core `openjiuwen/harness/persistent_agent`：`SessionStateStore` 接入点与内部组件 `WindowStore` 的实现、会话状态记录的结构与序列化、保存前的窗口同步、Execution 结束时的窗口整理、中途结束后的占位补位、记录错误分类、存储键编码、卸载缓冲的前置拒绝；以及原生执行路径保留真实工具事实所需的 core 改动（D-06）。PA-11 逐轮 checkpoint、窗口归档和换窗按第 10 节的协作扩展实现；PA-12 历史检索不在本文范围 |
+| 方案成熟度 | D-01～D-10 及 Q-01～Q-03 按原决策确认；2026-10-17 确认 PA-11 需要的逐轮 checkpoint 与终态语义，并决定在未启用前直接把最终结构定为 schema_version=1，不保留旧 V1 兼容层。PA-10 的 I-01～I-08 基线仍负责终态保存；PA-11 协作扩展现已完成 agent-core 组件实现与测试，真实 BaseKVStore / JiuwenSwarm 联调仍待完成，PA-10 整体仍进行中 |
 | 计划条目 | [开发计划](../designs/persistent-agent-development-plan.md) PA-10 |
 | 负责人 | Song Haoran、Chen Ran |
 | 状态 | 进行中：I-01～I-08 已实现并通过组件验证（2026-10-14），I-08 与审阅修复已提交，core 维护者评审待完成；真实服务端未联调，PA-10 未通过验收 |
@@ -49,6 +49,8 @@
 | Session 第一次执行 | 接入点拒绝，正式入口不能执行 | 读不到记录，返回空 `LoadedRecord`，从空窗口开始；结束时保存第一条记录 |
 | 同一 Session 的后续 Execution | 同上 | 加载最新记录写回新 Session，窗口、确认选择、DeepAgent 状态和群消息游标延续；其他 Session 的记录不可见 |
 | Execution 正常结束、取消、失败或非确认暂停 | 同上 | 保存前同步原生窗口，删除临时背景块，追加执行结束标记，整条记录一次写入后再记账结束事件 |
+| 一个完整 ReAct 轮次完成且 Execution 继续 | 当前只在 Execution 收尾时保存 | 下一次模型调用前保存完整轮次 checkpoint；不保存流式 token 或尚未结束的工具批次 |
+| checkpoint 保存失败 | 当前没有中间 checkpoint | 停止在下一次模型调用之前；写入异常可能已落盘，恢复时结合执行日志核对，不盲目重做 |
 | 等待用户确认 | 同上 | 窗口末尾待结果的工具调用不动，中断状态连同请求子类字段一起保存；结束信息只进记录元信息；确认恢复时加载出等待现场 |
 | 工具执行中途被停止、取消或执行报错 | 按执行路径删除不完整的调用组，或把已返回、处理未完成的调用写成被取消；后续处理中止时写入未经处理的原始结果 | 原生保留调用组（D-06）：后续处理全部完成的结果按最终结果保留，含安全 Rail 替换后的内容；已返回或已抛错、但后续处理未完成的调用只保留说明，不含返回或错误内容（事件链走完不等于安全检查成功，拦截依赖宿主安全 Rail 的约定，见第 8.1 节）；PA-10 为仍缺结果的调用补 `stopped_tool_placeholder` 结果，内容为“结果未取得，实际效果需核实”；新实例加载后可执行下一任务；加载、保存和关键记账失败仍按原规则报错 |
 | 存储读写失败 | 同上 | 按运行异常处理：加载时不调用模型，保存时不记结束事件 |
@@ -57,8 +59,8 @@
 
 ### 2.3 本次范围与非目标
 
-- 本次包含：记录结构与序列化；`WindowStore` 的 `load_state` / `save_state`；`SessionStateStore` 实现及 `seams.session_state_store` 接线；保存前的窗口与 DeepAgent 状态同步；结束整理；等待确认现场的保存与加载；中途结束的补位及加载时修补；群消息游标；`ExecutionEnding` 全部字段的保存；记录错误分类及入口加载路径的映射；存储键编码与公开的键前缀函数；卸载处理器的执行前拒绝与保存兜底；原生事实保留的 core 改动（D-06）。
-- 本次不包含：换窗、旧窗归档与历史检索（PA-11、PA-12）；可重新获取的大结果改为来源引用（容量相关，待“容量边界”对齐）；续做时清理过期中断现场和读取执行日志（PA-17、PA-18）；交互回复适配（PA-09）；`pending_answer` 跨 Request 的保留与清理（D-08；2026-10-14 由 F_18 退出 `pending_answer`，开发阶段无历史数据，兼容代码已删除）；task-loop 与子代理继续按 PA-05 门禁拒绝；宿主安全 Rail 拦截后立即阻断同批尚未开始的调用（一期边界，见第 8.2 节）；确认恢复后把实际执行的参数写回窗口（开放确认恢复前的验收条件，见第 8.2 节）。
+- PA-10 基线实现范围：记录结构与 schema_version=1 序列化；`WindowStore` 的 `load_state` / `save_state`；`SessionStateStore` 实现及 `seams.session_state_store` 接线；保存前的窗口与 DeepAgent 状态同步；Execution 结束整理；等待确认现场的保存与加载；中途结束的补位及加载时修补；群消息游标；`ExecutionEnding` 全部字段的保存；记录错误分类及入口加载路径的映射；存储键编码与公开的键前缀函数；卸载处理器的执行前拒绝与保存兜底；原生事实保留的 core 改动（D-06）。PA-11 协作扩展另增加逐轮 checkpoint，并在启用前直接调整 V1 记录结构；此前组件级旧结构不做兼容读取，尚未实现。
+- 本次仍不包含：PA-11 的换窗算法、旧窗归档及 PA-12 历史检索的详细实现；可重新获取的大结果改为来源引用（容量相关，待“容量边界”对齐）；续做时清理过期中断现场和读取执行日志（PA-17、PA-18）；交互回复适配（PA-09）；`pending_answer` 跨 Request 的保留与清理（D-08；2026-10-14 由 F_18 退出 `pending_answer`，开发阶段无历史数据，兼容代码已删除）；task-loop 与子代理继续按 PA-05 门禁拒绝；宿主安全 Rail 拦截后立即阻断同批尚未开始的调用（一期边界，见第 8.2 节）；确认恢复后把实际执行的参数写回窗口（开放确认恢复前的验收条件，见第 8.2 节）。
 
 ## 3. 设计约束、假设与待决问题
 
@@ -83,12 +85,15 @@
 
 ### 4.1 方案概览
 
-`SessionStateStore` 的实现位于执行入口与存储后端之间：`load` 从后端读出整条记录，先校验再写回新 Session 的 state；`save` 先让原生把最新窗口和 DeepAgent 状态同步到 Session state，再取出白名单字段，整理窗口后连同结束信息组成一条记录，用一次 `set` 写入。`WindowStore` 负责键的派生和后端读写，把后端异常统一转成运行错误，不理解记录内容。原生执行路径在开关打开时保留中途结束的工具调用组，后续处理已完成的结果按最终结果保留、未完成的只留说明（D-06），PA-10 只负责补位和保存。
+`SessionStateStore` 的实现位于执行入口与存储后端之间：`load` 从后端读出整条记录，先校验再写回新 Session 的 state；PA-10 基线 `save` 在 Execution 结束时同步最新窗口和 DeepAgent 状态，整理窗口后连同结束信息组成一条记录，用一次 `set` 写入。`WindowStore` 负责键的派生和后端读写，把后端异常统一转成运行错误，不理解记录内容。原生执行路径在开关打开时保留中途结束的工具调用组，后续处理已完成的结果按最终结果保留、未完成的只留说明（D-06），PA-10 负责终态补位与保存。
+
+PA-11 增加 `checkpoint(context, checkpoint)`：只在一个完整 ReAct 轮次已结束、Execution 将继续时调用。它同步原生窗口和 DeepAgent 状态后，将未整理的完整窗口与 checkpoint 元数据一次写入同一 Session state 键；成功返回前不得开始下一次模型调用。若该轮触发换窗，由 PA-11 将旧窗归档后提交新活动窗口和 rollover 元数据，这次状态写入同时满足 checkpoint，不额外重复保存。Execution 收尾继续调用原有 `save(context, ending)`，执行结束整理和 ending 语义不变。
 
 ```mermaid
 flowchart LR
     E["执行 / 恢复入口<br/>entries.py"] -- "load(context)" --> S["SessionStateStore 实现"]
     E -- "save(context, ending)" --> S
+    R["Persistent ReAct loop<br/>完整轮次边界"] -- "checkpoint(context, metadata)" --> S
     S -- "保存前同步：save_contexts、<br/>DeepAgent.save_state" --> N["原生 DeepAgent / ReAct"]
     N -- "写回 context、deepagent" --> SS["新的空 Session<br/>(NoopCheckpointer)"]
     S -- "读写白名单字段" --> SS
@@ -192,6 +197,15 @@ flowchart LR
 - 相关候选：pickle（存储内容可被利用执行代码，且格式绑定 Python 与 core 内部版本）。
 - 确认依据：开发者 2026-10-14 决策 4 中“非法 JSON、版本不支持”的分类。
 
+#### D-11 PA-11 逐轮 checkpoint 与 PA-10 V1 结构协作扩展
+
+- 选择与依据：每个完整 ReAct 轮次完成且 Execution 将继续时，在下一次模型调用前调用 `SessionStateStore.checkpoint(context, checkpoint)`。不按 token、流式片段或未完成工具批次写入。普通 checkpoint 同步最新完整窗口后直接保存，不调用终态整理、不删除临时背景、不压缩执行头、不追加执行结束标记；该记录的 `checkpoint` 有值、`ending` 为空。PA-11 若在该轮换窗，则归档旧窗口后一次提交新 ActiveWindow、窗口指针、扫描游标及 rollover 检查点，代替普通 checkpoint。Execution 结束仍走 `save(context, ending)`，按原规则整理并保存，`checkpoint` 置空、`ending` 有值。
+- 记录格式：最终格式保持 `schema_version=1`，包含 `checkpoint` 元数据与顶层 `last_group_message_id`，并将 `ending` 设为可选；一条记录必须恰有 checkpoint 或 ending 之一。`SessionCheckpoint` 输入包含 `request_id`、`execution_id`、完整 ReAct 轮次序号、类型（`react_iteration` 或 `rollover`）及最新扫描游标；落库时游标独立于结束语义保存在记录顶层。轮次序号在同一 Execution 内从 1 开始。终态则由 ending 及其身份字段表达。
+- 版本兼容：PA-10/PA-11 尚未启用到真实持久化后端；当前实现只在组件级测试中产生过旧记录格式，没有必须保留的线上记录。因此在首次启用前直接把 `schema_version=1` 定义为最终结构，不实现旧格式的游标映射或双结构解码。不是同时支持两种 V1：新代码只接受最终结构；旧组件格式、未知版本或损坏记录按 D-04 失败关闭，不降级为空状态。启用前若发现旧格式记录，须先显式迁移或清理，不能让新旧代码并发读写同一后端。
+- 失败与隔离：checkpoint 的同步、校验、编码或存储失败时停止当前 Execution，不得开始下一次模型调用；BaseKVStore `set` 抛错可能发生在写入落地后，不承诺原记录不变。恢复须重载当前记录并结合 PA-17 / PA-18 执行日志确认工具副作用，不盲目重放。checkpoint 接缝仅由 Persistent Agent 显式调用；个人版默认不启用、不增加写入。
+- 影响与验证：PA-11 已在 agent-core 扩展协议、V1 schema、编码 / 解码、逐轮 checkpoint、turn-loop 接入及 rollover 合并；Persistent Agent 测试集和 core single-agent 测试集已通过。完整快照逐轮写入带来 IO、序列化与延迟成本，仍须在 AgentServer 的真实 BaseKVStore 上测量；该协作扩展不改变 PA-10 既有终态保存顺序、负责人或当前进度。
+- 确认依据：开发者 2026-10-17 确认完整 ReAct 轮次后保存检查点，并按此扩展 PA-11 方案。
+
 ### 4.3 替代方案与排除理由
 
 | 候选 / 关联决策 | 候选目的与关键差异 | 拒绝或暂缓原因 | 重新评估条件 |
@@ -214,7 +228,7 @@ flowchart LR
 ### 5.1 模块责任与关键不变量
 
 - **执行入口（PA-05，已实现）**：决定何时 `load`、`save`，把结局、回复目标、交出的候选、超长答案和群消息游标组成 `ExecutionEnding` 交给 `save`。本次只调整 `_load` 的错误映射（D-04）。
-- **`SessionStateStore` 实现（本次）**：同步、整理、补位、编解码与校验；理解 Session state 白名单字段、窗口标记和结束信息。
+- **`SessionStateStore` 实现（PA-10 基线 + PA-11 协作扩展）**：同步、逐轮 checkpoint、终态整理、补位、编解码与校验；理解 Session state 白名单字段、窗口标记和结束信息。
 - **`WindowStore`（本次）**：派生键、读写整条记录，把后端异常转成运行错误；后续 PA-11、PA-12 在同一组件上增加归档和检索。
 - **`PersistentModelCallRail`（PA-05，本次增加检查）**：Rail 注册完成后检查实际挂载的处理器（D-07）。
 - **原生执行路径（core，D-06）**：开关打开时保留中途结束的工具调用组，按后续处理是否完成保留最终结果或说明。
@@ -222,7 +236,7 @@ flowchart LR
 
 本次须保持的不变量沿用 [S_03](../specs/S_03_context-and-windows.md)：I-1 唯一状态、I-3 最新窗口、I-4 保存先行、I-5 私有存储。另外保证：
 
-- 记录只含白名单字段，整条记录一次 `set` 写入；读到的记录必须属于本 Agent、本 Session（原始 ID 精确比较）。
+- 记录只含白名单字段，整条记录一次 `set` 写入；读到的记录必须属于本 Agent、本 Session（原始 ID 精确比较）。schema_version=1 的活动记录保存 checkpoint 且不含 ending；终态记录保存 ending 且不含 checkpoint。
 - 加载失败时不写后端；保存在写入前失败（同步、检查、编码）时不调用后端写入，原记录不变；后端写入本身抛错时不能保证记录未改变，后端可能已写入新记录。加载时的修补只作用于内存，不回写。
 - 等待确认时窗口末尾待结果的工具调用不被追加、补位或删除。
 - 补位幂等：已有真实结果、原生中断结果或已有补位的调用不重复补位。
@@ -235,21 +249,27 @@ flowchart LR
 
 | 类名 / 所属模块 | 变更类型与可见范围 | 职责与边界 | 继承 / 实现 / 组合关系 |
 | --- | --- | --- | --- |
-| `schema/session_record.py` 的 `SessionStateRecord` | 新增；内部 | 记录结构与校验；消息、中断状态的编解码 | pydantic 模型，`extra="forbid"` |
+| `schema/session_record.py` 的 `SessionStateRecord` | 新增；内部 | 唯一 V1 记录结构与校验；拒绝未启用的旧 V1 结构；消息、中断状态的编解码 | pydantic 模型，`extra="forbid"` |
 | `execution/session_state.py` 的 `WindowStore` | 新增；内部 | 派生键，读写整条记录，后端异常转运行错误 | 组合注入的 `BaseKVStore` |
-| `execution/session_state.py` 的 `ExecutionStateStore` | 新增；内部 | 实现 `SessionStateStore`：加载写回、同步、整理、补位、保存 | 实现 [integration.py](../../schema/integration.py) 的协议；组合 `WindowStore` |
+| `execution/session_state.py` 的 `ExecutionStateStore` | 新增；内部 | 实现 `SessionStateStore`：加载写回、逐轮 checkpoint、终态同步 / 整理 / 补位 / 保存 | 实现 [integration.py](../../schema/integration.py) 的协议；组合 `WindowStore` |
 
 ##### SessionStateRecord
 
 | 关键属性 | 类型与初始值 | 含义与约束 | 更新主体与时机 |
 | --- | --- | --- | --- |
-| `schema_version` | `Literal[1]` | 记录格式版本；其他值按 D-04 校验拒绝 | 保存时固定写入 |
+| `schema_version` | `Literal[1]` | 首次启用的唯一记录格式；未知值按 D-04 校验拒绝 | checkpoint 与终态保存均写 1；不解码旧 V1 结构 |
 | `agent_id` / `session_id` | `str` | 原始身份；加载时须与本次执行精确相等 | 保存时取自 `context.execution` |
-| `messages` | `list[dict]` | 整理后的窗口，元素为消息的 JSON 导出，含 `role` | 保存时 |
+| `messages` | `list[dict]` | 当前窗口，元素为消息的 JSON 导出，含 `role`；非终态 checkpoint 保持未整理的活动窗口，终态保存沿用 D-09 整理 | checkpoint 或终态保存时 |
 | `interruption` | `dict \| None = None` | D-02 编码的中断状态；只在结局为等待确认时非空 | 保存时 |
 | `auto_confirm` | `dict[str, bool] = {}` | “本会话记住”的确认选择 | 保存时 |
 | `deepagent_state` | `dict \| None = None` | `DeepAgentState.to_session_dict()` 的结果 | 保存时 |
-| `ending` | `RecordEnding` | `outcome`、`request_id`、`execution_id`、`reply_target`、`output_refs`、`last_group_message_id` | 保存时取自 `ExecutionEnding` 和 `context.execution`；原有的 `pending_answer` 已于 2026-10-14 删除，带该键的记录判为无效（D-08 后续） |
+| `checkpoint` | `SessionCheckpoint \| None` | 非终态完整轮次检查点：`request_id`、`execution_id`、`iteration_seq`、`kind`；类型为 `react_iteration` 或 `rollover` | 每次继续执行前的完整 ReAct 轮次更新；终态保存时置空 |
+| `last_group_message_id` | `StrictStr \| None` | 最近一次已确认扫描到的群消息位置；与是否终态无关 | 从 checkpoint 或终态 `ExecutionEnding` 更新，始终保存在记录顶层 |
+| `current_window_id` / `window_seq` | `StrictStr \| None` / `StrictInt \| None` | PA-11 活动窗口唯一标识及 Session 内序号；非换窗普通 checkpoint 沿用当前值 | PA-11 初始窗口创建或换窗时更新；与窗口消息在同一次 `set` 中写入 |
+| `last_rollover` | `RolloverCheckpoint \| None` | PA-11 最近一次已提交的旧 / 新窗口、archive_ref、触发类型和 token 用量 | PA-11 换窗时与新活动窗口同次写入；普通 checkpoint 沿用当前值 |
+| `ending` | `RecordEnding \| None` | 已结束 Execution 的 `outcome`、`request_id`、`execution_id`、`reply_target`、`output_refs`；不承载中途 checkpoint，也不保存扫描游标 | 终态保存时写入；普通 checkpoint 时为空。原有 `pending_answer` 已于 2026-10-14 删除，带该键的记录判为无效（D-08 后续） |
+
+schema_version=1 的最终记录必须且只能满足以下一种状态：非终态活动记录（`checkpoint != None`、`ending == None`）或终态记录（`checkpoint == None`、`ending != None`）。PA-11 的首次活动窗口标识及 rollover 字段在其功能启用后按 S_03 校验；普通 PA-10 checkpoint 不得自行生成窗口切换元数据。
 
 ##### WindowStore
 
@@ -263,6 +283,7 @@ flowchart LR
 | 关键方法签名 | 职责与调用条件 | 参数与返回值说明 | 异常与副作用 |
 | --- | --- | --- | --- |
 | `async def load(self, context: PersistentBuildContext) -> LoadedRecord` | 入口在 `execution.started` 之后调用 | 返回等待现场（结局为等待确认时）与群消息游标；没有记录时返回空 `LoadedRecord` | 写回 Session state；记录无效时抛 `DEEPAGENT_CONTEXT_PARAM_ERROR`，不写 Session state |
+| `async def checkpoint(self, context: PersistentBuildContext, checkpoint: SessionCheckpoint) -> None` | Persistent ReAct loop 在完整轮次完成、且 Execution 将继续时调用 | 同步窗口和 DeepAgent 状态，校验轮次完整，将当前窗口与 checkpoint 元数据作为一条 V1 记录写入；不做终态整理 | 任一失败均阻止下一次模型调用；后端 set 抛错时记录可能已改变 |
 | `async def save(self, context: PersistentBuildContext, ending: ExecutionEnding) -> None` | 入口在交出候选之后、记账结束事件之前调用 | `ending` 由入口构造 | 同步原生状态后一次写入后端；任何失败抛运行错误：写入前失败不调用写入，后端写入抛错时记录可能已改变 |
 
 #### 5.2.2 关键函数定义与说明
@@ -283,26 +304,31 @@ flowchart LR
 
 ### 5.3 接口定义与消息契约
 
-`SessionStateStore` 协议签名不变（[integration.py](../../schema/integration.py)）：
+`SessionStateStore` 在现有 `load` / 终态 `save` 基础上增加 `checkpoint`（[integration.py](../../schema/integration.py)）：
 
 | 入口 / 消息 | 调用方 / 消费者 | 输入与成功结果 | 失败语义 |
 | --- | --- | --- | --- |
 | `load(context) -> LoadedRecord` | 执行与恢复入口 | 最新记录写回新 Session；无记录时返回空 `LoadedRecord` | 后端异常：运行错误，不开始执行；记录无效：`DEEPAGENT_CONTEXT_PARAM_ERROR` 加诊断日志，入口透传 |
-| `save(context, ending) -> None` | 执行与恢复入口 | 同步后整理的整条记录写入后端 | 任何失败：运行错误，不记结束事件 |
+| `checkpoint(context, checkpoint) -> None` | Persistent ReAct loop | 完整轮次的整条状态记录写入后端；成功返回后才允许下一次模型调用 | 任何失败：停止当前执行，不继续调用模型 |
+| `save(context, ending) -> None` | 执行与恢复入口 | 同步、整理后的终态记录写入后端 | 任何失败：运行错误，不记结束事件 |
 | `session_key_prefix(agent_id, session_id) -> str` | 本模块、PA-11 / PA-12、宿主 | 编码后的键前缀 | 无 |
 
-`LoadedRecord.waiting` 在记录结局为 `awaiting_confirmation` 时取 `WaitingScene(request_id, reply_target)`，其余为 `None`；`last_group_message_id` 取记录结束信息中的群消息游标。
+`LoadedRecord.waiting` 在记录结局为 `awaiting_confirmation` 时取 `WaitingScene(request_id, reply_target)`，其余为 `None`；`last_group_message_id` 始终取 V1 记录顶层游标。
+
+游标保存在 V1 记录顶层，`checkpoint` 与 `ending` 不重复携带它。正常执行中的 checkpoint 表示已提交完整 ReAct 轮次；Execution 结束时仍保存终态记录。
 
 ### 5.4 数据模型与事实归属
 
 | 数据 | 语义与隔离范围 | 权威位置 | 创建、更新与释放 |
 | --- | --- | --- | --- |
-| 会话状态记录 | Session 最新已保存的现场；按 Agent 与 Session 隔离 | 后端键 `session_key_prefix(…) + "state"` | 每次 Execution 结束覆盖保存；服务端按前缀清理 |
+| 会话状态记录 | Session 最新已保存的现场；按 Agent 与 Session 隔离 | 后端键 `session_key_prefix(…) + "state"` | 每个完整 ReAct 轮次提交活动 checkpoint；Execution 结束再提交终态记录；服务端按前缀清理 |
 | 窗口 `messages` | 当前窗口；只取 `default_context_id` | 记录的 `messages` | 加载时写回 Session state；执行中由原生和 PA-06 追加；保存时同步、整理后写回记录 |
 | 中断状态 | 等待确认的现场，含请求子类字段 | 记录的 `interruption` | 只在结局为等待确认时保存；加载时写回 `__react_agent_interruption__` |
 | 确认选择 | “本会话记住”，Session 内有效 | 记录的 `auto_confirm` | 每次保存；加载时写回 `__interrupt_auto_confirm__` |
 | DeepAgent 状态 | `DeepAgentState` 的可序列化快照 | 记录的 `deepagent_state` | 每次保存（先同步缓存）；加载时写回 `deepagent` |
-| 结束信息 | 上次 Execution 的结局、交出的候选、群消息游标（超长答案自 2026-10-14 起不再保存，见 D-08 后续） | 记录的 `ending` | 每次保存覆盖 |
+| checkpoint | 当前执行最近一次完整 ReAct 轮次的身份、序号和类型；不代表 Execution 已结束 | V1 记录的 `checkpoint` | 完整轮次提交；终态保存时清空 |
+| 群消息游标 | 服务端确认已扫描到的位置；与 Execution 是否结束无关 | V1 记录顶层 `last_group_message_id` | 每次 checkpoint 或终态保存更新 |
+| 结束信息 | 上次 Execution 的结局和交出的候选（超长答案自 2026-10-14 起不再保存，见 D-08 后续） | 记录的 `ending` | Execution 终态保存；普通 checkpoint 时为空 |
 
 白名单之外的 Session state（例如 `__session_memory__`、`offload_messages`、`last_context_window_access_at`、各 Rail 的私有状态）不保存。消息只认 `user`、`assistant`、`tool`、`system` 四种 `role`。
 
@@ -335,15 +361,27 @@ flowchart TD
     S8 --> S11["组成整条记录，一次 set"]
     S9 --> S11
     S10 --> S11
+
+    C0["完整 ReAct 轮次结束，Execution 将继续"] --> C1["同步原生窗口与 DeepAgent 状态"]
+    C1 --> C2["确认工具批次完成、调用结果配对"]
+    C2 --> C3["保存未整理的活动窗口和 checkpoint 元数据"]
+    C3 --> C4{"单条 set 成功?"}
+    C4 -- 是 --> C5["才允许下一次模型调用"]
+    C4 -- 否 / 异常 --> C6["停止当前 Execution；恢复时结合日志核对"]
 ```
 
 1. **加载**：后端读取与解析校验分开处理（D-04）。消息的 `role` 不是字符串、或还原时抛出类型错误，都按无效记录处理。工具结果只能紧跟在本组调用之后，出现在其他位置、属于其他组或重复的结果判为无效。窗口与中断状态的一致性规则：结局为等待确认当且仅当有中断状态；等待确认时，只有最后一组调用可以缺结果，该组的调用与中断状态 `ai_message` 的调用逐个一致，缺结果的调用恰好是 `interrupted_tools` 中的调用，每个中断条目中的调用也与窗口中同 ID 的调用一致，这是合法现场。调用按 ID、类型、名称和参数比较，不只比较 ID：原生恢复执行的是中断条目中调用的副本，必须与窗口中显示的调用相同；`index` 只用于流式拼接，消息格式不保存，不参与比较。保存时不在三者之间互相覆盖，不一致即保存失败，加载时判为无效；结局为 `stopped`、`cancelled` 或 `error` 时，缺结果的调用按 D-06 补位；其他结局出现缺结果的调用判为无效。校验通过后才写回 Session state。
 2. **执行中**：PA-06 在加载的窗口末尾追加执行头和临时背景块，原生 ReAct 追加任务输入和工作过程，本次不介入。
-3. **保存**：
+3. **逐轮 checkpoint（PA-11 协作扩展）**：
+   - 仅在模型回复完整结束、整批工具已完成、调用与结果配对，且本次 Execution 将继续时触发；不对流式 token 或未完成的工具批次写盘。
+   - 同步原生窗口和 DeepAgent 状态，校验只有默认窗口且 `offload_messages` 为空；保留临时背景与执行头，不调用 `tidy_window`，不补终态标记。
+   - 将窗口、checkpoint 元数据和最新群消息游标写为一条 V1 记录，一次 `set`。该方法成功返回前不得开始下一次模型调用。
+   - 写入前失败不调用后端；`set` 抛错可能发生在落盘之后，必须停止当前执行，恢复时结合执行日志核对，不把缺少 checkpoint 当作工具未执行。
+4. **终态保存**：
    - 同步原生窗口（D-01）和 DeepAgent 状态（D-03）。
    - 取 `default_context_id` 的 `messages`；存在其他窗口、`offload_messages` 不为空、结局为等待确认却没有中断状态，均按保存失败处理（D-07、5.6 节）。
    - 删除临时背景块，执行头保持原样，结局为 `stopped`、`cancelled` 或 `error` 时补位，按 D-09 处理结束标记。其他结局（不含等待确认）若仍有缺结果的调用，按保存失败处理，因为这样的记录加载时会被判为无效；工具结果不紧跟本组调用、或等待现场与中断状态不符时同样按保存失败处理。
-   - 组成 `SessionStateRecord`，序列化后一次 `set` 写入。
+   - 组成 V1 `SessionStateRecord`，写入终态 `ending`、清空 `checkpoint`，把群消息游标放在记录顶层，序列化后一次 `set` 写入。
    - 写入成功后，若加载时带有 `pending_answer` 而本次覆盖了它，记 error 日志（D-08）；后端写入抛错时同样记一条，注明“可能已覆盖”；写入前失败时原记录不变，不记该日志。（2026-10-14 随 `pending_answer` 退出删除，见 D-08 后续。）
 
 结束标记示例：`【执行结束】request_id：R1；execution_id：E1；结局：已完成；交出候选：out_…（以结束记录为准）；群消息已扫描到：M180`。（2026-10-14 起“交出候选”改写交接摘要，例如“最终回答 1 段、文件 reports/q3.md（upload，out_…）”，整批准备失败时追加“未交接原因”，见 [F_18](F_18_output-handoff.md) 第 5.5 节。）
@@ -361,11 +399,11 @@ flowchart TD
 
 ### 5.7 并发与一致性
 
-同一 Session 同一时间只有一个执行者，由服务端保证（架构 §3.4 第 1 条），记录读写不加锁、不做条件写入。记录保存与结束事件记账分别确认，不构成跨存储事务：保存成功而结束记账失败时，下一次加载得到的记录已含本次结果，续做按结束标记和执行日志判断（S_03 第 5.3 节）。后端写入抛错但新记录已经落地时情形相同：入口按失败处理、不记结束事件，下一次加载却得到本次记录。
+同一 Session 同一时间只有一个执行者，由服务端保证（架构 §3.4 第 1 条），记录读写不加锁、不做条件写入。逐轮 checkpoint 必须串行且严格按已完成轮次递增；checkpoint 写入与下一次模型调用之间有成功屏障。终态记录保存与结束事件记账分别确认，不构成跨存储事务：保存成功而结束记账失败时，下一次加载得到终态记录，续做按 ending 和执行日志判断。后端 `set` 抛错但新记录已经落地时也按结果未知处理，停止当前执行并在恢复时重新加载、核对日志。
 
 ### 5.8 持久化与恢复
 
-记录每次 Execution 结束时覆盖保存一次，不保存执行中的中间状态；进程在执行中崩溃时，下一次加载得到的是上一次结束时的记录，本次工作只能靠执行日志续做（PA-17、PA-18），跨进程崩溃恢复沿用现有恢复契约。恢复的粒度是“上一次结束时的窗口与现场”，不恢复执行位置。
+正常运行期间，每个完整 ReAct 轮次结束后提交一个活动 checkpoint；换窗提交本身充当该轮 checkpoint。Execution 结束时仍提交整理后的终态记录。进程在两个 checkpoint 之间崩溃时，下一次加载得到最近一次成功 checkpoint；checkpoint 后发生但尚未纳入下一 checkpoint 的工具副作用，须由 PA-17 / PA-18 结合执行日志查证。该设计不恢复模型调用栈或 token 位置，也不允许仅凭窗口快照盲目重放。
 
 ### 5.9 原生执行路径的事实保留（D-06 接口方案）
 
@@ -416,12 +454,14 @@ flowchart TD
 | I-06 | [model_rail.py](../../execution/model_rail.py)、[spec.py](../../schema/spec.py) | 卸载处理器的构造时与 Rail 注册后检查（D-07） | 无；PA-10-V-21 |
 | I-07 | `tests/unit_tests/harness/persistent_agent/` | 记录、整理、补位、错误分类单测；真实 DeepAgent 与 `InMemoryKVStore` 的组件测试 | I-01～I-06 |
 | I-08 | core `react_agent.py`、`ability_manager.py` 及其测试；Persistent 构造时打开开关 | D-06 原生事实保留 | core 维护者评审标为待完成，不作为本次合入前置；独立验证：PA-10-V-07、V-14、V-20、V-23、V-24、V-26～V-30 |
+| I-09（PA-11 协作扩展） | `schema/integration.py`、`schema/session_record.py`、`execution/session_state.py` | 增加 `SessionCheckpoint` / `SessionStateStore.checkpoint`，扩展唯一 V1 记录结构、不增加旧结构映射；保留既有终态 `save` 整理顺序，并在终态记录中清空 checkpoint | PA-11 先完成接口与记录扩展；PA-10-V-33～V-37；不修改个人版默认路径 |
 
-I-01～I-07 与 I-08 分别提交；I-08 交付时标注需要 core 维护者评审，不作为本次合入前置。核对范围：`SessionStateStore` 的调用方只有执行与恢复入口；此前没有任何已保存的记录（接入点一直拒绝），不存在旧数据兼容问题，不需要迁移。
+I-01～I-07 与 I-08 分别提交；I-08 交付时标注需要 core 维护者评审，不作为本次合入前置。I-09 的 PA-11 协作扩展已在 agent-core 完成组件实现与测试，不改变 I-01～I-08 的历史验收结果。PA-10 V1 与 PA-11 扩展尚未启用到真实 AgentServer 持久化后端；按开发者确认，无需保留历史线上记录。因此 V1 直接采用最终结构，不实现旧结构兼容；首次接入真实后端前仍须检查并处理可能存在的旧结构记录，不能静默解释。
 
 ### 6.2 文档同步
 
 - spec：实现时修订 [S_03](../specs/S_03_context-and-windows.md)：第 4.1 节加载失败的分类（D-04）、第 4.3 节保存前同步与白名单（D-01、D-03）、第 5.2 节整理与结束标记（D-09）、第 5.3 节键编码与 `session_key_prefix`（D-05）、第 6 节把存储格式与损坏校验补为有效契约；记录结构不在 spec 中复制，引用本文。[S_01](../specs/S_01_public-api-and-execution.md) 补充加载路径的错误映射与 Rail 注册后的卸载检查。
+- PA-11 协作扩展的设计已同步到 S_03 §2、§3、§4.3～4.5、§5.1、F_11、详细架构、设计概览及开发计划；代码实现时再同步 `SessionStateStore`、`SessionStateRecord` 与 turn-loop 的实际实现路径和验证证据。
 - 架构：§7.2 中途结束的补位范围与文案、§7.3 的键编码与 DeepAgent 状态，已于 2026-10-14 同步（均在已确认决策范围内）；同日补充后续处理未完成时只保留说明（D-06 规则 2、3）。
 - 开发计划：PA-10 进展；PA-24 增加门禁（开放 task-loop 前核实 DeepAgent 状态中按次字段跨 Request 的生命周期）；PA-11、PA-12 使用同一键编码。
 - 其他入口：[F_05](F_05_execution-entries.md) 的入口错误语义、[F_06](F_06_window-assembly.md) 中“未配对工具调用由 PA-10 保证”的遗留，按实现结果就近注明。
@@ -464,6 +504,11 @@ I-01～I-07 与 I-08 分别提交；I-08 交付时标注需要 core 维护者评
 | PA-10-V-30 | 安全 Rail 替换完成后写入窗口失败 | 两个结果都已替换，写入乙时报错 | 记录中两条都是替换后的结果，原始内容不出现 | 组件测试 |
 | PA-10-V-31 | 被控制 Rail 拒绝派发的调用（Q-03） | 不可并行的工具甲执行中停止或取消，工具乙被拒绝；另直接调用控制 Rail 覆盖致命错误 | 乙的结果为“本次执行正在结束，该工具未调用。”，记录中不出现内部停止信号；致命错误时写入相同说明，强制结束载荷不变 | 组件测试；单测 |
 | PA-10-V-32 | 宿主安全 Rail 拦截结果 | 测试 Rail 先替换成安全说明，再请求强制结束 | 窗口保留安全说明、原始内容不出现，不再调用模型，结局为暂停（error） | 组件测试 |
+| PA-10-V-33 | 完整 ReAct 轮次结束且 Execution 继续 | Persistent turn-loop 运行到下一次模型调用前 | 前一轮完整窗口、checkpoint 身份 / 序号及游标已一次写入；checkpoint 返回后才发生下一次模型调用 | 组件测试；PA-11 协作扩展 |
+| PA-10-V-34 | 模型流尚未结束、工具批次未收敛或调用结果未配对 | 在轮次中途挂起或注入未完成工具 | 不调用 checkpoint，不开始下一次模型调用；后续终态路径按原规则整理保存 | turn-loop 边界测试；PA-11 协作扩展 |
+| PA-10-V-35 | 普通 checkpoint 写入前失败或 BaseKVStore 写入后抛错 | 分别在同步、校验、序列化和 set 阶段注入故障 | 后续模型调用被阻断；写入前失败不改后端，set 异常不假定记录未变；恢复通过执行日志核对，不盲目重放 | 故障注入；PA-11 协作扩展 |
+| PA-10-V-36 | 一轮触发 PA-11 rollover | 监控 archive、state 与模型调用顺序 | 归档后只写一次新窗口 state，该提交同时带 rollover 和轮次 checkpoint；不额外写普通快照；写入成功才切换上下文 | 组件测试；PA-11 协作扩展 |
+| PA-10-V-37 | 验证 V1 活动 checkpoint、终态记录及旧结构拒绝 | 构造最终 V1 活动 / 终态记录、此前组件级旧 V1 结构、未知版本及非法记录 | 活动和终态记录往返正确；旧结构、未知版本或损坏记录失败关闭，不降级为空或被覆盖 | 单测与组件测试；PA-11 协作扩展 |
 
 ### 7.2 实际执行与证据
 
@@ -508,8 +553,8 @@ PYLINTHOME=/var/folders/_l/c87b96ts3xx_s3fhy4_m4w4m0000gn/T/pa10-after-pa05-merg
 
 ### 7.3 验证结论
 
-- 已证明范围：记录的加载与保存、保存前同步窗口与 DeepAgent 状态、中断请求类型、无效记录与存储故障的区分、键编码、窗口整理与结束标记、按调用组的配对与补位、模型调用中途停止及第一次模型调用前停止的保存与再执行、加载修补、卸载处理器（含子类）的两层拒绝与保存兜底、`pending_answer` 的原样保存与覆盖日志；工具执行中途停止、取消、报错时按 D-06 三条规则保留事实，宿主安全 Rail 处理未完成时原始内容不进入窗口和记录（组件层，内存后端，测试替身模拟宿主 Rail）。
-- 未覆盖或未通过的承诺：core 维护者评审待完成；真实服务端后端与真实宿主安全 Rail 未联调；`pending_answer` 的生命周期受 D-08 限制；回调框架吞掉 Rail 普通异常的情况不在规则 2、3 覆盖范围内，宿主安全 Rail 须按已确认的约定拦截（第 8.1 节）；确认恢复后窗口显示的参数可能与实际执行的不同，列为开放确认恢复前的验收条件；宿主安全 Rail 拦截后同批调用仍会执行，作为一期边界保留（第 8.2 节）。
+- 已证明范围：PA-10 原 V1 终态记录加载 / 保存、保存前同步窗口与 DeepAgent 状态、中断请求类型、无效记录与存储故障的区分、键编码、窗口整理与结束标记、按调用组配对与补位及其既有中途结束验证；新增 D-11 / PA-11 组件覆盖活动 checkpoint 与终态记录、逐轮保存屏障、完整工具轮次安全换窗、精确 token 计数、归档幂等与索引重建、归档后状态提交失败时的精确匹配恢复、错误身份 / 轮次 / 旧窗口内容失败关闭，以及没有启用 PA-11 时普通 agent 与个人版路径不安装换窗管理器。测试使用 InMemoryKVStore 和模型替身，不代表生产后端保证。
+- 未覆盖或未通过的承诺：真实服务端 BaseKVStore 的持久性、隔离、单 Session 串行，以及真实模型 provider 的 hard-limit 计数和写入开销尚未联调；启用真实后端前仍须核实并处理可能存在的旧 V1 记录；core 维护者评审待完成；真实宿主安全 Rail 未联调；回调框架吞掉 Rail 普通异常的情况不在规则 2、3 覆盖范围内；确认恢复后窗口显示的参数可能与实际执行的不同，列为开放确认恢复前的验收条件；宿主安全 Rail 拦截后同批调用仍会执行，作为一期边界保留（第 8.1、8.2 节）。
 - 可支持的交付判断：不能声明 PA-10 完成。设计完成、代码完成与真实集成验收分别报告；组件验证通过后，真实服务端后端的持久化与隔离仍需联调证明（S_03 I-5），`pending_answer` 的完整链路需 PA-05、PA-08、PA-10 联合验收。
 
 ## 8. 风险与已知遗留
@@ -520,6 +565,7 @@ PYLINTHOME=/var/folders/_l/c87b96ts3xx_s3fhy4_m4w4m0000gn/T/pa10-after-pa05-merg
 | --- | --- | --- | --- |
 | core 消息、中断状态或 DeepAgent 状态的字段变化 | 旧记录无法还原 | 版本号、白名单与往返测试；不兼容时校验拒绝 | PA-10-V-11、V-17、V-18；core 升级时回归 |
 | 记录体积随窗口增长 | 后端单值大小可能受限 | 换窗（PA-11）控制窗口大小 | 待“容量边界”对齐后评估 |
+| 每个完整 ReAct 轮次写整条记录 | 存储 I/O、JSON 序列化和执行延迟增加 | 仅在完整轮次边界写入；rollover 合并为同一次 state 写入 | PA-11 真实 BaseKVStore 联调记录写入次数、延迟和记录大小 |
 | 确认中断在 PA-09 接入前出现 | PA-10 接入后新任务入口可执行；若执行中出现确认中断，等待现场会被保存，但确认恢复入口在 PA-09 接入前仍拒绝，该 Session 之后的新 Request 会被 PA-06 拒绝 | 本特性不改变能力开放范围 | 需开发者决定 PA-09 接入前如何限制会产生确认中断的配置 |
 | core 新增会卸载的处理器 | 前置检查漏判；不继承已知卸载处理器的新类同样漏判 | 已知类的子类按继承链识别；保存兜底（D-07 第 3 层） | PA-10-V-12、V-21 |
 | Rail 抛错不一定中止后续处理 | 回调框架对 Rail 的普通异常只记日志、继续执行其余 Rail，框架层面处理视为完成；宿主安全 Rail 若靠普通异常拦截，原始内容仍会进入窗口（个人版相同） | 规则 2、3 覆盖停止、取消、穿出的中止和 `@rail` 包装屏蔽的链失败；已确认的约定：宿主安全 Rail 先替换成安全说明，再请求强制结束（PA-10-V-32） | 真实宿主联调时核实其写法 |
@@ -532,6 +578,8 @@ PYLINTHOME=/var/folders/_l/c87b96ts3xx_s3fhy4_m4w4m0000gn/T/pa10-after-pa05-merg
 | 确认恢复后窗口中的调用参数 | 暂缓：原生恢复对中断条目调用的副本应用 Rail，改写后的参数不写回窗口 | Rail 在确认前改写参数时，恢复后窗口显示模型发出的原参数，结果来自改写后的调用；确认恢复入口在 PA-09 接入前拒绝，当前不影响已开放能力 | 开放确认恢复前的验收条件：PA-09 接入时联调验证恢复后窗口中的调用与实际执行的参数一致；若需修复，位置在原生恢复执行与窗口更新（core），不由只负责回复转换的 PA-09 承担 |
 | 宿主安全 Rail 拦截后同批其他调用 | 一期边界：强制结束在整批收尾后停止后续推理 | 不能保证阻止同批尚未开始的调用；同批调用在模型看到被拦截内容之前发出 | 宿主若要求立即阻断后续操作，须另行确认 core 方案 |
 | `pending_answer` 的生命周期 | 已由 F_18 解决（2026-10-14） | 不再产生；开发阶段无历史数据，兼容代码已删除，带该键的记录按无效记录拒绝 | — |
+| 逐轮 checkpoint 与 V1 结构扩展 | D-11 已完成 agent-core 组件实现与验证；真实后端尚未启用 | 保留 PA-10 原终态保存路径；PA-11 负责 turn-loop 接入、rollover 与崩溃恢复 | 真实 BaseKVStore / JiuwenSwarm 联调；PA-10-V-33～V-37 的真实后端部分 |
+| V1 首次启用前的旧结构数据 | 组件级旧 V1 结构与新 V1 结构不兼容 | 按当前前提无线上记录；若启用前实际发现记录，必须先迁移或清理；启用后不允许旧版代码并发读写 | 真实 BaseKVStore 接入前的存储检查与发布验证 |
 | DeepAgent 状态中的按次字段 | 一期单轮不产生效果（D-03） | 原样保存 | PA-24 开放 task-loop 前核实 |
 | 大结果改为来源引用 | 容量相关，范围外 | 原样保存 | “容量边界”对齐后由相应特性处理 |
 
@@ -672,3 +720,17 @@ PYLINTHOME=/var/folders/_l/c87b96ts3xx_s3fhy4_m4w4m0000gn/T/pa10-after-pa05-merg
 静态诊断对照使用当前依赖与工具配置，将旧 PA 基线 `e145fc562`、新 release 基线 `5cc21e0f2` 的源文件分别送入 Pylint `--from-stdin` / mypy `--shadow-file`，不改工作树。Pylint 两侧分别为 27、25 条；合并后的诊断按符号与消息对照，差异为模块总行数及组合后的 `_execute_tool_call` 局部变量数（17/15）、`_inner_stream` 语句数（51/50）。mypy 两侧 core 分别为 159、190 条；本次 core 189 条按符号与消息归一化行号后，均可在至少一侧找到；入口测试与旧版本同为 15 条，忽略行号位移后无新增。该对照仅说明诊断来源，不等于完整静态检查通过；本次不为消除这些诊断做无关重构。
 
 验收边界：本次未运行全仓测试、真实 AgentServer 联调、覆盖率或变异检查；不证明续做接入、确认恢复开放、容量验收或其他暂缓能力完成。PA-18 未应用，D-06 的 core 维护者评审仍待完成；开发计划中的负责人、状态、依赖和完成数不变。
+
+### 2026-10-17 PA-11 逐轮 checkpoint 协作扩展（初始记录）
+
+- **确认依据：** 开发者确认以完整 ReAct 轮次作为非终态保存边界：工具调用与结果齐全后、下一次模型调用前提交；不按 token 或工具批次中途写入。Execution 结束仍使用 PA-10 终态整理与保存。
+- **当时契约（版本策略后续修订）：** 新增 `SessionStateStore.checkpoint` 与 `SessionCheckpoint`；活动记录以 `checkpoint` 标识最近完成轮次、不设置终态 `ending`；终态记录保留原 `save` 流程并清除 `checkpoint`；游标置于记录顶层。存储版本当时暂定 v2，后经同日决定改为 V1，见下节。
+- **责任边界：** PA-10 当前代码 / 测试仅证明 v1 终态保存；逐轮 checkpoint 的协议、schema、测试需扩展，turn-loop 调用及 rollover 合并由 PA-11 接入。既有 PA-10 收尾次序、个人版默认行为、PA-10 负责人和进度均不因这项设计变更而宣称完成或重开。
+- **验证状态：** PA-10-V-33～V-37 为新增验收设计，尚未执行；完整快照写入的后端开销和 PA-18 基于日志的恢复处理也尚未验证。
+
+### 2026-10-17 未启用记录直接采用 V1
+
+- **确认依据：** 开发者确认当前代码尚未启用到真实持久化服务，且没有需要保留的线上记录；选择直接采用 V1，省去尚未上线时的双格式兼容读取和迁移层。
+- **最终契约：** `SessionStateStore.checkpoint` 与 `SessionCheckpoint` 保持；schema_version=1 直接包含顶层群消息游标及互斥的 `checkpoint` / `ending`。只接受这一最终结构；此前组件测试用的记录格式虽也标为 1，但不属于兼容输入，未知版本或损坏记录同样失败关闭。
+- **启用条件：** 首次启用真实 BaseKVStore 前检查没有旧结构记录；若发现则显式迁移或清理。启用后不得让使用旧结构的代码与新代码并发访问同一存储；后续不兼容变更再提升 schema_version。
+- **影响与验证状态：** PA-10 仍需修改 schema、协议及测试，PA-11 负责 loop 接入和 rollover 合并；PA-10 原终态保存、个人版行为、负责人和进度不变。设计未实现，PA-10-V-33～V-37 尚未执行。

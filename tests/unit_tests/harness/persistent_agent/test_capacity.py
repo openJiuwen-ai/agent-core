@@ -100,12 +100,39 @@ def test_an_estimated_or_failed_count_is_unknown(counter):
 
 def final_check_context(get_counter):
     binding: Any = SimpleNamespace(
-        control=SimpleNamespace(emitter=object()), ports=SimpleNamespace(budget=SimpleNamespace(admit=AsyncMock()))
+        control=SimpleNamespace(emitter=object(), window_switch_manager=None),
+        ports=SimpleNamespace(budget=SimpleNamespace(admit=AsyncMock())),
     )
     ctx = SimpleNamespace(
         context=SimpleNamespace(token_counter=get_counter), inputs=SimpleNamespace(messages=MESSAGES, tools=[])
     )
     return PersistentModelCallRail(binding, spec=spec()), ctx, binding.ports.budget
+
+
+@pytest.mark.asyncio
+async def test_staged_window_rebuild_does_not_admit_a_stale_or_second_model_request():
+    rail, ctx, budget = final_check_context(lambda: Counter())
+    manager = SimpleNamespace(before_model_request=AsyncMock(return_value=None))
+    rail._binding.control.window_switch_manager = manager
+    ctx.has_context_rebuild_request = True
+
+    result = await rail.check_final_request(ctx)
+
+    assert result is None
+    manager.before_model_request.assert_awaited_once_with(ctx)
+    budget.admit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_complete_react_iteration_is_forwarded_only_when_persistent_execution_is_active():
+    rail, _ctx, _budget = final_check_context(lambda: Counter())
+    manager = SimpleNamespace(after_react_iteration=AsyncMock())
+    rail._binding.control.window_switch_manager = manager
+    callback_context = object()
+
+    await rail.after_react_iteration(callback_context)
+
+    manager.after_react_iteration.assert_awaited_once_with(callback_context)
 
 
 @pytest.mark.asyncio

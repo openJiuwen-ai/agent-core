@@ -1769,16 +1769,29 @@ class ReActAgent(BaseAgent):
             llm,
             self._config.kv_cache_affinity_config,
         )
-        context_window, usage_prompt_sections = await self._build_model_context_window(
-            ctx,
-            model_client_config=getattr(llm, "model_client_config", None),
-        )
-        self._last_model_tools = list(ctx.inputs.tools or [])
+        for rebuild_attempt in range(2):
+            context_window, usage_prompt_sections = await self._build_model_context_window(
+                ctx,
+                model_client_config=getattr(llm, "model_client_config", None),
+            )
+            self._last_model_tools = list(ctx.inputs.tools or [])
 
-        # The final request is now known; an installed check may end the round before the provider call.
-        finish = await self._final_request_finish(ctx)
-        if finish is not None:
-            return finish
+            # The final request is now known; an installed check may finish the round or
+            # replace the context and request one fresh build before the provider is called.
+            ctx.extra["_final_request_context_window"] = context_window
+            try:
+                finish = await self._final_request_finish(ctx)
+            finally:
+                ctx.extra.pop("_final_request_context_window", None)
+            rebuild = ctx.consume_context_rebuild_request()
+            if finish is not None:
+                if rebuild:
+                    raise RuntimeError("final request check cannot finish and rebuild the same model call")
+                return finish
+            if not rebuild:
+                break
+            if rebuild_attempt:
+                raise RuntimeError("final request check requested more than one context rebuild")
 
         # Freeze the final-window report before the provider call.  The same
         # request-local object is used by post_call; post_call must not ask the

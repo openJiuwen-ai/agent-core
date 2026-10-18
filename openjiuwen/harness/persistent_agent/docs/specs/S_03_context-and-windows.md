@@ -6,8 +6,8 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | S_03 / context-and-windows |
-| 关联模块 | [seams.py](../../execution/seams.py)、[BaseKVStore 注入集合](../../ports.py)、[integration.py](../../schema/integration.py)、[window_assembly.py](../../execution/window_assembly.py)、[session_state.py](../../execution/session_state.py)、[session_record.py](../../schema/session_record.py)；会话状态记录已接入，换窗与归档尚待接入 |
-| 最近一次修订日期 | 2026-10-16 |
+| 关联模块 | [seams.py](../../execution/seams.py)、[BaseKVStore 注入集合](../../ports.py)、[integration.py](../../schema/integration.py)、[window_assembly.py](../../execution/window_assembly.py)、[session_state.py](../../execution/session_state.py)、[session_record.py](../../schema/session_record.py)；PA-11 agent-core 组件已接入，真实服务端后端待联调 |
+| 最近一次修订日期 | 2026-10-17 |
 | 关联 feature | [F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_11](../features/F_11_window-management.md)、[F_17](../features/F_17_session-state-record.md)、[F_18](../features/F_18_output-handoff.md)；待实现与验证范围见[开发计划](../designs/persistent-agent-development-plan.md) PA-06、PA-10～PA-12；[F_20](../features/F_20_continuation.md)（PA-18 联动修订） |
 | 设计依据 | [架构设计：窗口](../designs/persistent-agent-architecture.md#44-上下文窗口管理)、[换窗](../designs/persistent-agent-architecture.md#522-运行中换窗主动交接容量兜底与状态提交)、[保存规则](../designs/persistent-agent-architecture.md#7-数据管理与保存规则) |
 
@@ -17,7 +17,7 @@
 
 ### 1.1 责任范围与当前边界
 
-BaseKVStore 注入位及 LoadedRecord、WindowAssembly、ExecutionEnding、SessionStateStore / WindowAssembler 协议已有定义；PA-06 新 Request 窗口组装与 PA-10 会话状态记录的加载、保存已实现；工具执行中途结束时由原生保留真实事实的 core 改动已有组件实现、待 core 维护者评审。PA-11 的主动换窗、容量兜底、归档和状态对账契约已由 [F_11](../features/F_11_window-management.md) 确认并在本规约同步，运行链路仍未接入；PA-12 历史检索尚未实现。共享值对象、标记和协议定义在 schema/integration.py，seams.py 兼容再导出。下文未标明已实现的运行规则属于已确认但待实现的契约，不表示当前门禁已开放。
+BaseKVStore 注入位及 LoadedRecord、WindowAssembly、ExecutionEnding、SessionStateStore / WindowAssembler 协议已有定义；PA-06 新 Request 窗口组装、PA-10 会话状态记录及 PA-11 的逐轮 checkpoint、主动换窗、容量兜底、归档和精确恢复已接入 agent-core 组件执行链并通过组件测试；工具执行中途结束时由原生保留真实事实的 core 改动已有组件实现、待 core 维护者评审。真实 AgentServer BaseKVStore、单 Session 串行和真实 provider 容量边界仍待联调；PA-12 历史检索尚未实现。共享值对象、标记和协议定义在 schema/integration.py，seams.py 兼容再导出。组件实现不代表真实宿主门禁已开放。
 
 窗口归属 Session，只有 Execution 读写；始终加载 Session 的当前记录，不为每个 Request 保留可切回的独立活动窗口。宿主保证同 Session 单一执行者和后端隔离；本模块定义格式、序列化、整理、保存与检索逻辑，宿主不需要理解记录内容。
 
@@ -32,26 +32,27 @@ BaseKVStore 注入位及 LoadedRecord、WindowAssembly、ExecutionEnding、Sessi
 | 对象 | 作用与事实权威 | 修改入口 |
 | --- | --- | --- |
 | 内存当前窗口 | 本次 Execution 的 ContextEngine 内容；通常只追加，PA-11 仅在安全边界提交后整体替换 | WindowAssembler、原生循环与窗口管理 |
-| 会话状态记录 | Session 最新已保存现场及当前窗口指针；跨 Execution 的唯一状态来源 | WindowStore 的单条记录保存 |
+| 会话状态记录 | Session 最近一次完整 ReAct 轮次的已保存现场及当前窗口指针；跨 Execution 的唯一状态来源 | PA-10 检查点、结束保存及 PA-11 换窗提交均覆盖同一条 WindowStore 记录 |
 | 旧窗归档及索引 | 换出窗口的完整原文、来源引用及切换元数据；索引只供导航，归档不自动提供 Agent 历史检索能力 | WindowStore 归档；PA-12 提供后续检索 |
 | LoadedRecord | load 写回新 Session 后返回的接入结果 | SessionStateStore.load |
 | WindowAssembly | native_input 与服务端确认扫描位置 last_group_message_id；无可信进度时保留加载时游标 | WindowAssembler.assemble |
-| ExecutionEnding | outcome、request_id、reply_target、output_refs、last_group_message_id，以及交接摘要 answer_text、answer_segments、shared_files、handoff_failure | 执行入口交给 save |
+| SessionCheckpoint | request_id、execution_id、完整 ReAct 轮次序号、检查点类型及当前群消息扫描游标；不保存模型调用栈或半轮状态 | Persistent 执行循环交给 checkpoint |
+| ExecutionEnding | outcome、request_id、reply_target、output_refs、终态扫描游标 last_group_message_id，以及交接摘要 answer_text、answer_segments、shared_files、handoff_failure | 执行入口交给终态 save；游标由记录编码器提升至顶层，不放在 ending 内 |
 
 LoadedRecord 的 waiting 引用 [S_05](S_05_confirmation-and-continuation.md#2-确认输入与等待现场) 的 WaitingScene，另含服务端确认已扫描到的位置 last_group_message_id；与实际展示范围和正文是否完整分开，不表示群消息成为任务输入。
 
-PA-10 当前会话记录白名单为 context 中的默认窗口、`__react_agent_interruption__`（只在等待确认时）、INTERRUPT_AUTO_CONFIRM_KEY 与 DeepAgent 状态快照 `deepagent`，连同结束信息写成一条 JSON 记录（schema_version 1，结构见 [F_17](../features/F_17_session-state-record.md)）。结束信息不含 pending_answer：超长回答分段交出，完整正文随窗口保存；带该键的记录（含值为 null）按记录无效处理。开发阶段没有历史数据，不做迁移，见 [F_18](../features/F_18_output-handoff.md) 第 7 节。中断请求带类型标记保存，只接受 InterruptRequest 与 AskUserRequest，其他类型明确失败。白名单以外的 Session 字段不保存，线程、锁、连接、隐藏推理和凭证不进入记录；不复制旧 CheckpointBody。
+PA-10 会话状态记录采用 schema_version=1 的唯一最终结构：白名单为 context 中的默认窗口、`__react_agent_interruption__`（只在等待确认时）、INTERRUPT_AUTO_CONFIRM_KEY、DeepAgent 状态快照 `deepagent`、当前检查点元数据、顶层群消息扫描游标及可选终态 `ending`，作为一条 JSON 记录写入（结构见 [F_17](../features/F_17_session-state-record.md)）。`ending` 只表示已结束 Execution；执行中检查点不设置本次 Execution 的 ending。由于尚未启用真实持久化，直接调整未发布的 V1 结构，不兼容此前组件级 V1 记录；启用前检查后端没有旧结构记录，若发现则显式迁移或清理。未知版本、损坏或身份不符仍失败关闭。结束信息不含 pending_answer：超长回答分段交出，完整正文随窗口保存；带该键的记录（含值为 null）按记录无效处理。中断请求带类型标记保存，只接受 InterruptRequest 与 AskUserRequest，其他类型明确失败。白名单以外的 Session 字段不保存，线程、锁、连接、隐藏推理和凭证不进入记录；不复制旧 CheckpointBody。
 
-PA-11 的目标是在同一条 Session 状态记录中增加 `current_window_id`、`window_seq` 和 `last_rollover`：前两者标识唯一当前窗口及其 Session 内序号，后者记录最近一次已提交切换的旧 / 新窗口标识、`archive_ref`、触发类型和 token 用量。PA-11 中途保存与 PA-10 结束保存共用 WindowStore 和状态键；新窗口内容与检查点必须在同一次状态记录写入中提交，不建立 `replacement_history` 或第二个活动窗口指针。当前 PA-10 记录要求包含 `ending`，而 F_11 尚未说明中途换窗保存时该字段的值及其恢复含义；实现前须定义该字段如何表示“Execution 仍在运行”，避免把旧结局当成本次结局或把未结束执行写成终态。PA-10 schema_version 1 记录的读取兼容方式及 PA-11 写入时的版本策略也尚未定稿，实施前须明确，不得将未知或不兼容记录当作空状态。
+PA-11 在同一条 Session 状态记录中增加 `current_window_id`、`window_seq` 和 `last_rollover`：前两者标识唯一当前窗口及其 Session 内序号，后者记录最近一次已提交切换的旧 / 新窗口标识、`archive_ref`、触发类型和 token 用量。PA-10 在每个完整 ReAct 轮次后提交当前窗口；若该轮触发换窗，PA-11 的新窗口状态提交同时满足本轮检查点要求，不另写重复快照。执行中检查点、换窗提交与 Execution 结束保存共用 WindowStore 和状态键；不建立 `replacement_history` 或第二个活动窗口指针。schema_version=1 的唯一最终结构中，活动记录必须恰有非空 `checkpoint`、空 `ending`；终态记录恰有空 `checkpoint`、非空 `ending`。游标保存在记录顶层；不兼容此前组件级旧 V1 结构，也不提供读取映射。未知版本或无效记录不得降级为空状态；真实后端启用前须确认不存在旧结构记录。
 
 键由导出函数 `session_key_prefix(agent_id, session_id)` 派生：两个 ID 分别百分号编码（冒号、百分号均转义）后拼成 `pa:{编码后的 agent_id}:{编码后的 session_id}:`，状态键为前缀加 `state`，归档与索引键为前缀加 `archive:{序号}`、`archive_index`；记录中保留原始 ID，身份按原值精确比较。索引记录序号、execution_id、覆盖的 request_id 和时间；命名空间及跨主体隔离由宿主保障，不从键中包含 ID 推导已授权。
 
 ## 3. 不变量
 
 1. **I-1 唯一状态：** 跨 Execution 只由 WindowStore 保存 / 加载白名单会话记录；`current_window_id` 是当前窗口唯一持久指针，不使用另一份 checkpointer 状态、ContextStore 活动指针、普通事件或 Checkpoint 恢复点作为并行权威。
-2. **I-2 追加边界：** Execution 内系统提示词和工具定义固定；动态内容只追加。PA-11 只允许在安全边界完成归档与状态提交后整体替换窗口，结束整理仍在保存边界进行。
+2. **I-2 追加边界：** Execution 内系统提示词和工具定义固定；动态内容只追加。每轮完整 ReAct 结束后、下一次模型调用前保存检查点；PA-11 只允许在安全边界完成归档与状态提交后整体替换窗口，结束整理仍在保存边界进行。
 3. **I-3 最新窗口：** 新任务、崩溃续做和停止后继续加载 Session 最新记录，不回退到原 Request 的旧窗口。
-4. **I-4 保存先行：** 整理 → 保存整条会话记录 → 记 paused / final，不能先确认结束再保存上下文。
+4. **I-4 保存先行：** 普通继续路径先保存完整轮次检查点再调用下一轮模型；终态路径整理 → 保存整条会话记录 → 记 paused / final，不能先确认结束再保存上下文。
 5. **I-5 私有存储：** 状态与归档后端不能位于 Agent 工具可访问的办公空间或 SysOperation 内；内存测试后端不能证明跨重启持久化。
 6. **I-6 消息完整：** 换窗前工具调用与结果须完整成组；旧窗先可靠归档，不能静默丢弃必要事实或用交接要点替代可回查原文。未交出的 `share_file` 登记依据及尚未确认的副作用线索须在新窗交接内容中保留或以稳定引用指向。
 7. **I-7 提交顺序：** 先幂等归档旧窗，再将新窗口及 `last_rollover` 写入同一条 Session 状态记录，状态写入成功后才替换运行时上下文；普通 `window.switched` 仅为通知，失败不回滚已提交状态。
@@ -82,19 +83,23 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 - **增量通道**：保留原生 `PromptAttachmentManager.sync_to_context`（首次快照、之后只追加变化）；一期 Persistent 自身没有执行中追加的动态内容。
 - **容量**：本阶段续做只有必需材料，装配时暂不单独计数。PA-18 已提供共用 execution/capacity.py 和最终请求检查，在完整请求装配后、预算准入与模型调用前阻断超限或未知容量，见 S_01 第 4.4 节及 F_20 D-09。PA-06 接入可选群背景时补材料筛选，PA-11 接入换窗时补摘要调用前检查；三个检查点目前只完成每次原生模型调用前这一处。减少可选材料、必要时归档换窗、复查后仍放不下则 context_unfit 的整体流程仍待联合接入，不截断原任务或静默删除未决写操作。
 
-### 4.3 `SessionStateStore.save(context, ending) -> None`
+### 4.3 `SessionStateStore.checkpoint(context, checkpoint) -> None`
+
+在完整 ReAct 轮次结束、且该 Execution 将继续运行时调用；模型回复已收敛，批内工具全部完成并经过结果处理，所有调用与结果完整配对。实现先同步原生窗口和 DeepAgent 状态，校验消息完整性，再将白名单字段、完整当前窗口、检查点身份 / 序号 / 类型及最新群消息游标组成一条记录，一次 set 写入同一 Session state 键。检查点不删除临时背景、不压缩执行头、不追加执行结束标记，也不把当前 Execution 写成已结束；只有持久化成功后才允许下一次模型调用。该轮若执行 PA-11 换窗，则以归档后的旧窗和提交的新活动窗口完成同一检查点，不再额外写普通轮次快照。同步、校验、编码或存储失败时停止继续推理，不宣称检查点成功；后端 set 抛错可能已落盘，PA-18 结合重载记录与执行日志判定。
+
+### 4.4 `SessionStateStore.save(context, ending) -> None`
 
 保存前先让原生把内存中的最新窗口（本 Session 已有原生上下文时；没有时保留 Session 中已加载或已装配的窗口）与 DeepAgent 状态写回 Session state，再整理窗口，把白名单字段与结束信息组成同一条记录，一次 set 写入；context 与中断状态不能分两次独立保存。同步失败、存在默认窗口以外的上下文、卸载缓冲不为空、等待确认却没有中断状态、非中途结束的结局仍有缺结果的调用、工具结果不紧跟本组调用、编码失败或后端写入失败，均为运行异常，执行入口不记结束事件。写入前的失败不调用后端写入，原记录不变；后端写入本身抛错时不能保证记录未改变（可能在写入落地后才报错），下一次加载可能读到本次记录，续做以执行日志为准。调用成功只证明会话记录保存，不证明结束事件或候选输出完成。
 
-### 4.4 WindowStore 与历史检索（已确认待实现）
+### 4.5 WindowStore 与历史检索（PA-11 归档已组件实现；PA-12 检索待实现）
 
-WindowStore 的 load_state / save_state、archive / list_archives、search 是逻辑操作，不是已实现的公开函数签名。PA-11 归档必须保存被换出窗口的完整规范化消息、必要来源引用和切换元数据；元数据至少能关联旧 / 新 window_id 与 window_seq、稳定 archive_ref、trigger_kind、WindowSeed、保留消息组引用、token 用量、request_id / execution_id 及原 Spec 指纹，以支持同一次切换的恢复对账。`archive_ref` 由 WindowStore 根据 Session 与被换出窗口的稳定身份派生，调用方不得指定物理键；重复写入相同内容可复用，冲突内容不得覆盖。归档按 Session 私有，原文只能在授权范围内读取。归档存在不代表 Agent 已获得历史检索能力；PA-12 才提供面向 Agent 的检索。检索结果须区分确定没有与没查完 / 失败，不以索引未命中断言历史不存在；摘要、索引和缓存只是派生视图，事实判断需回查可用原文。
+PA-11 的 Session 状态读写、窗口归档、归档索引和精确恢复已有 agent-core 组件实现。归档保存被换出窗口的完整规范化消息，以及用于重建候选新窗口的切换元数据：旧 / 新 `window_id` 与 `window_seq`、稳定 `archive_ref`、`trigger_kind`、`WindowSeed`、保留消息组引用、候选指纹、token 用量、`request_id` / `execution_id`、原 Spec 指纹、轮次序号和群消息游标；不重复保存完整的新窗口候选。恢复时从旧窗口快照、seed 和保留项引用重建候选，校验指纹，并先持久化修复后的活动状态再加载到 Session。`archive_ref` 由 WindowStore 根据 Session 和被换出窗口序号派生，调用方不得指定物理键；重复写入相同内容可复用，冲突内容不得覆盖。归档按 Session 私有。真实 BaseKVStore 和 JiuwenSwarm 行为仍待联调。PA-12 的 `search` 和面向 Agent 的历史检索尚未实现；归档存在不代表 Agent 已获得历史检索能力。未来检索须区分确定没有与没查完 / 失败，不以索引未命中断言历史不存在；摘要、索引和缓存只是派生视图，事实判断需回查可用原文。
 
 ## 5. 窗口与保存生命周期
 
-### 5.1 执行中与安全换窗（PA-11：已确认待实现）
+### 5.1 执行中与安全换窗（PA-11：agent-core 组件已实现，真实宿主待联调）
 
-普通模型回复、工具调用和结果沿原生路径追加。PA-11 有两个触发入口但共用一条换窗流水线：Agent 在合适的阶段边界通过内部 `new_context` 控制动作提交受约束的 `WindowSeed`，这是主路径；若本回合没有主动请求，Persistent Agent 的窗口管理组件估算下一次模型调用所需容量，在接近适用模型 hard-limit 保护边界时触发兜底。容量估算计入当前上下文、即将加入的用户 / 工具结果、系统指令和工具定义、输出预留及安全余量；不使用跨模型固定的 70%。容量边界依据 AgentServer 提供的模型能力与可靠性验证确定；信息不可用时使用注入的保守预留，仍无法证明调用安全则在继续模型调用前暂停。
+普通模型回复、工具调用和结果沿原生路径追加。每轮完整 ReAct 结束且 Execution 将继续时，PA-10 在下一次模型调用前同步并持久化当前窗口检查点；执行中的消息流或未完成工具批次不单独落盘。PA-11 有两个触发入口但共用一条换窗流水线：Agent 在合适的阶段边界通过内部 `new_context` 控制动作提交受约束的 `WindowSeed`，这是主路径；若本回合没有主动请求，Persistent Agent 的窗口管理组件按 PA-18 规则准确检查下一次完整模型请求，超过可用输入上限时触发兜底。容量检查计入当前上下文、即将加入的用户 / 工具结果、系统指令和工具定义、输出预留及安全余量；不使用跨模型固定的 70%。容量配置或计数不可用、不可靠、失败时按 PA-18 暂停为 `error`，不使用估算或保守预留放行模型调用。
 
 `new_context` 是 Persistent Agent 内部控制动作，不是用户调用的业务工具，也不直接改写存储或作为公共 Python API。WindowSeed 是 Agent 提交的有界交接建议，包含当前目标、已完成进度、下一步、约束 / 决策、未决问题，以及经执行日志核验的未决副作用引用和稳定证据引用；它不构成事实回执、权限或授权。容量兜底没有 Agent seed 时，由窗口管理组件根据已保存的任务目标、执行事实和最近完整交互整理最小交接要点，不额外调用模型生成摘要。
 
@@ -102,9 +107,9 @@ WindowStore 的 load_state / save_state、archive / list_archives、search 是�
 
 只在安全边界切换：当前模型回复已结束，并行工具已结束或收敛，所有工具调用与结果完整成组。新窗口由固定系统指令和工具定义、本次原始 Request、经过校验的 WindowSeed，以及按 token 预算挑选的近期完整消息组构成；不把旧窗全文复制进新窗。必要任务信息、未交出的 `share_file` 登记依据和未决写操作线索必须保留或以稳定引用衔接。工具结果可能使下一请求越过 hard limit 时，也须在结果进入窗口前判断能否安全承载。新窗口的必要内容仍放不下时，产出 `paused(context_unfit)`，不静默截断。
 
-切换顺序固定为：准备并验证候选新窗 → 以稳定 `archive_ref` 幂等保存旧窗完整原文和切换元数据 → 将新窗口、`current_window_id`、`window_seq` 与 `last_rollover` 一次写入 PA-10 的同一条 Session 状态记录 → 持久化成功后替换运行时上下文 → 尽力记录 S_02 的普通 `window.switched` 通知。归档失败不提交新窗口；状态写入失败或结果未知时停止当前执行，不在候选新窗或旧内存窗继续调用模型。事件失败不回滚已提交的状态或内存切换。
+普通路径顺序固定为：同步原生状态与 DeepAgent 状态 → 校验本轮已完整收敛 → 一次写入当前窗口及检查点元数据 → 成功后才发起下一次模型调用。若该轮触发换窗，则以以下提交代替普通检查点，避免重复快照：准备并验证候选新窗 → 以稳定 `archive_ref` 幂等保存本轮结束后的旧窗完整原文和切换元数据 → 将新窗口、`current_window_id`、`window_seq`、`last_rollover` 与本轮检查点一次写入 PA-10 的同一条 Session 状态记录 → 持久化成功后替换运行时上下文 → 尽力记录 S_02 的普通 `window.switched` 通知。归档失败不提交新窗口；状态写入失败或结果未知时停止当前执行，不在候选新窗或旧内存窗继续调用模型。事件失败不回滚已提交的状态或内存切换。
 
-恢复以 Session 状态记录的当前窗口指针为准。若进程在旧窗归档后、新状态提交前中断，加载时只有在归档元数据与 Session、旧 / 新窗口、原 Request 和 Spec 精确匹配时，才重建同一候选并幂等补写状态；无法精确匹配则失败关闭并由 PA-18 按执行日志查证。若状态已写入但运行时替换前中断，恢复加载状态记录中的新窗口。PA-11 不提供跨键全局事务、分布式租约或跨进程接管保证；AgentServer 须保证同一 Session 单执行者串行及 BaseKVStore 的持久、隔离单键写入。
+恢复以 Session 状态记录的当前窗口指针为准。若进程在旧窗归档后、新状态提交前中断，加载时只有在归档元数据与 Session、旧窗口快照、原 Request、recovery_ref、Spec 指纹及轮次序号精确匹配时，才从旧窗口快照、已保存的 seed 和保留项引用确定性重建候选；重建结果须匹配归档候选指纹，随后先补写活动状态，成功后才加载到 Session。不匹配时失败关闭，不调用模型。若状态已写入但运行时替换前中断，恢复加载状态记录中的新窗口。PA-11 不提供跨键全局事务、分布式租约或跨进程接管保证；AgentServer 须保证同一 Session 单执行者串行及 BaseKVStore 的持久、隔离单键写入。
 
 ### 5.2 执行结束整理
 
@@ -123,11 +128,11 @@ WindowStore 的 load_state / save_state、archive / list_archives、search 是�
 
 ### 5.3 后端、清理与部分成功
 
-服务端注入持久 BaseKVStore，保证命名空间隔离、工具不可访问和单条状态一次写入；沙箱、容器生命周期或 InMemoryCheckpointer 不能提供这些保证。状态保存成功而结束事件缺失时，后续结合记录结束标记、执行日志和归档查证，不能简单重跑。宿主按保留期清理归档，删除 Agent / Session 时清理 `session_key_prefix` 返回的前缀（由 agent-core 导出，宿主不自行拼接）；不能把计算实例关闭视为删除持久记录。
+服务端注入持久 BaseKVStore，保证命名空间隔离、工具不可访问和每次检查点均以单条状态一次写入；沙箱、容器生命周期或 InMemoryCheckpointer 不能提供这些保证。状态检查点与执行事件、最终结局记账分别确认，不构成跨存储事务；保存成功而后续记账缺失时，续做结合检查点元数据、记录结束标记和执行日志查证，不能简单重跑。宿主按保留期清理归档，删除 Agent / Session 时清理 `session_key_prefix` 返回的前缀（由 agent-core 导出，宿主不自行拼接）；不能把计算实例关闭视为删除持久记录。
 
 ## 6. 当前限制与替代关系
 
-PA-10 的会话状态记录格式（schema_version 1）与损坏校验已定义并实现（第 4.1 节与 [F_17](../features/F_17_session-state-record.md)）。PA-11 的换窗、归档和对账契约已在第 2、3、4.4、5.1 节确认，但仍未接入运行链路；PA-12 历史检索也未实现。PA-11 实现前还须定稿两个状态记录问题：schema_version 1 旧记录的兼容读取和新记录版本策略；中途换窗保存时必需字段 `ending` 的表示与恢复语义。归档保留期由 AgentServer 策略决定。不得沿用旧 epoch、head_revision 或旧 schema 错误名。
+PA-10 的终态保存语义保持不变；逐轮检查点和最终 V1 记录结构已在 agent-core 实现并通过组件测试（见 [F_17](../features/F_17_session-state-record.md)）。PA-11 的换窗、归档和精确对账也已接入组件执行链；真实 BaseKVStore 持久化、隔离、单 Session 串行和真实 provider 容量边界仍待联调。PA-12 历史检索尚未实现。最终 V1 将执行中检查点与可选终态 `ending` 分开表达；活动记录只含 checkpoint，终态记录只含 ending。此前组件级旧 V1 格式不在兼容范围内，启用真实后端前须确认并处理旧结构记录。归档保留期由 AgentServer 策略决定。不得沿用旧 epoch、head_revision 或旧 schema 错误名。
 
 原 S_03 的 ContextStore、SessionContextHead、独立内容 revision、window.activated、每次模型调用重装配及即时知识刷新规则已被本规约替代；原 S_05 的 Checkpoint 保存责任合并到本规约的会话记录。旧方案在 Git / feature 历史追溯，不作为现行保证。群聊与知识模型转由 S_09 独立维护。
 
@@ -137,4 +142,4 @@ PA-10 的会话状态记录格式（schema_version 1）与损坏校验已定义�
 - S_09 提供获授权资料，S_04 提供当前文件读取；摘要、原文和工具实际结果分别承担不同事实职责。
 - 当前接入协议、NoopCheckpointer 隔离与保存先后可定位 [test_entries.py](../../../../../tests/unit_tests/harness/persistent_agent/test_entries.py)；其中替身部分不证明真实后端行为。
 - 会话状态记录：[test_session_state.py](../../../../../tests/unit_tests/harness/persistent_agent/test_session_state.py) 覆盖记录格式、键编码、中断请求类型、补位、整理与校验；test_entries.py 用正式存储与组装器覆盖跨 Request 窗口延续、确认现场、停止、后端故障与无效记录，以及工具执行中途停止、取消、报错和宿主安全 Rail 处理未完成时的保存；core 的事实保留由 test_ability_manager_tool_results.py 与 test_react_agent_tool_fact_retention.py 覆盖。均为内存后端的组件验证，不证明真实服务端后端的持久化与隔离。
-- 主动换窗、模型容量兜底、归档 / Session 状态部分提交对账及跨重启行为尚待 PA-11 组件验证和服务端联调；PA-12 历史检索仍是独立后续能力。PA-06 组装已有组件验证，容量验收未关闭；真实 hard limit 元数据、持久隔离后端与同 Session 单执行者保证均不能由替身测试证明。验证证据维护于唯一开发计划，不能把待执行验证写成已通过。
+- 主动换窗、模型容量兜底、归档 / Session 状态部分提交恢复已有 agent-core 组件测试；真实后端跨重启、隔离、单 Session 单执行者及 provider hard limit 仍待服务端联调。PA-12 历史检索是独立后续能力。PA-06 组装已有组件验证，容量验收未关闭；真实后端和真实模型保证不能由替身测试证明。验证证据维护于唯一开发计划，不能把待执行联调写成已通过。

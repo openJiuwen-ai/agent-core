@@ -12,6 +12,8 @@ READ_ONLY_TOOL_ALLOWLIST = frozenset(
         "share_file",
         "read_execution_record",
         "search_group_messages",
+        # Persistent control request only; it does not write workspace or host state.
+        "new_context",
     }
 )
 

@@ -284,6 +284,11 @@ class Harness:
             "interruption": RECORD.encode_interruption(interruption) if interruption is not None else None,
             "auto_confirm": ending.pop("auto_confirm", {}),
             "deepagent_state": None,
+            "checkpoint": None,
+            "last_group_message_id": ending.pop("last_group_message_id", None),
+            "current_window_id": ending.pop("current_window_id", None),
+            "window_seq": ending.pop("window_seq", None),
+            "last_rollover": ending.pop("last_rollover", None),
             "ending": {"outcome": outcome, "request_id": request_id, "execution_id": "execution-1", **ending},
         }
         await self.backend.set(self.key(), json.dumps(record))

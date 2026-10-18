@@ -9,7 +9,17 @@ record is invalid; they raise a framework validation error whose message never c
 import json
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictFloat,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
 from pydantic import ValidationError as PydanticValidationError
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -42,11 +52,99 @@ class RecordEnding(BaseModel):
     execution_id: StrictStr
     reply_target: StrictStr | None = None
     output_refs: list[StrictStr] = Field(default_factory=list)
-    last_group_message_id: StrictStr | None = None
+
+
+class RecordCheckpoint(BaseModel):
+    """Last complete active ReAct boundary; never describes a partially settled tool batch."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    request_id: StrictStr
+    execution_id: StrictStr
+    iteration_seq: StrictInt = Field(ge=1)
+    kind: Literal["react_iteration", "rollover"]
+
+
+class RecordRollover(BaseModel):
+    """The latest committed transition from one archived window to the current one."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    old_window_id: StrictStr = Field(min_length=1)
+    old_window_seq: StrictInt = Field(ge=1)
+    new_window_id: StrictStr = Field(min_length=1)
+    new_window_seq: StrictInt = Field(ge=2)
+    archive_ref: StrictStr = Field(min_length=1)
+    trigger_kind: Literal["agent", "capacity_fallback"]
+    token_usage: dict[StrictStr, StrictInt | StrictFloat | StrictStr | StrictBool | None]
+
+    @model_validator(mode="after")
+    def _validate_transition(self):
+        if self.old_window_id == self.new_window_id or self.new_window_seq != self.old_window_seq + 1:
+            raise ValueError("rollover must identify one consecutive successor window")
+        return self
+
+
+class WindowArchivePayload(BaseModel):
+    """Transition content supplied by the window manager; storage identity and reference are store-owned."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    old_window_id: StrictStr = Field(min_length=1)
+    old_window_seq: StrictInt = Field(ge=1)
+    new_window_id: StrictStr = Field(min_length=1)
+    new_window_seq: StrictInt = Field(ge=2)
+    trigger_kind: Literal["agent", "capacity_fallback"]
+    request_id: StrictStr
+    execution_id: StrictStr
+    spec_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    seed: dict[StrictStr, Any]
+    retained_item_refs: list[StrictStr]
+    token_usage: dict[StrictStr, StrictInt | StrictFloat | StrictStr | StrictBool | None]
+    messages: list[dict[StrictStr, Any]]
+    candidate_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    iteration_seq: StrictInt = Field(ge=1)
+    last_group_message_id: StrictStr | None
+
+    @model_validator(mode="after")
+    def _validate_transition(self):
+        if self.old_window_id == self.new_window_id or self.new_window_seq != self.old_window_seq + 1:
+            raise ValueError("archive must identify one consecutive successor window")
+        return self
+
+
+class RecordWindowArchive(WindowArchivePayload):
+    """Session-scoped full old window plus the metadata needed to verify its transition."""
+
+    agent_id: StrictStr
+    session_id: StrictStr
+    archive_ref: StrictStr = Field(min_length=1)
+    created_at: AwareDatetime
+
+
+class RecordArchiveIndexEntry(BaseModel):
+    """Navigation-only summary for one stored archive."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    archive_ref: StrictStr
+    old_window_seq: StrictInt = Field(ge=1)
+    request_id: StrictStr
+    execution_id: StrictStr
+    created_at: AwareDatetime
+
+
+class RecordArchiveIndex(BaseModel):
+    """Rebuildable archive navigation index, never the source of archive contents."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal[1] = 1
+    entries: list[RecordArchiveIndexEntry] = Field(default_factory=list)
 
 
 class SessionStateRecord(BaseModel):
-    """The whitelisted Session state of the latest saved Execution, written in one set."""
+    """The final V1 Session state: either one active checkpoint or one terminal ending."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -58,7 +156,30 @@ class SessionStateRecord(BaseModel):
     interruption: dict[StrictStr, Any] | None = None
     auto_confirm: dict[StrictStr, StrictBool] = Field(default_factory=dict)
     deepagent_state: dict[StrictStr, Any] | None = None
-    ending: RecordEnding
+    checkpoint: RecordCheckpoint | None
+    last_group_message_id: StrictStr | None
+    current_window_id: StrictStr | None
+    window_seq: StrictInt | None
+    last_rollover: RecordRollover | None
+    ending: RecordEnding | None
+
+    @model_validator(mode="after")
+    def _validate_lifecycle(self):
+        if (self.checkpoint is None) == (self.ending is None):
+            raise ValueError("exactly one of checkpoint and ending must be present")
+        if (self.current_window_id is None) != (self.window_seq is None):
+            raise ValueError("current window identity and sequence must be present together")
+        if self.window_seq is not None and self.window_seq < 1:
+            raise ValueError("window sequence must be positive")
+        if self.last_rollover is not None:
+            if (
+                self.current_window_id != self.last_rollover.new_window_id
+                or self.window_seq != self.last_rollover.new_window_seq
+            ):
+                raise ValueError("last rollover must point at the current window")
+        if self.checkpoint is not None and self.checkpoint.kind == "rollover" and self.last_rollover is None:
+            raise ValueError("a rollover checkpoint requires rollover metadata")
+        return self
 
 
 def invalid_record(reason: str) -> BaseError:

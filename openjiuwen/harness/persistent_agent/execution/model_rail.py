@@ -85,6 +85,14 @@ class PersistentModelCallRail(DeepAgentRail):
         if self._emitter() is not None:
             self._stop_requested(ctx)
 
+    async def after_react_iteration(self, ctx) -> None:
+        """Mark a complete tool iteration for checkpointing before the next model request."""
+        if self._emitter() is None:
+            return
+        manager = getattr(self._binding.control, "window_switch_manager", None)
+        if manager is not None:
+            await manager.after_react_iteration(ctx)
+
     async def check_final_request(self, ctx) -> dict | None:
         """Final request, capacity check, budget admission, in this order; a result ends the round.
 
@@ -93,6 +101,15 @@ class PersistentModelCallRail(DeepAgentRail):
         """
         if self._emitter() is None:
             return None
+        manager = getattr(self._binding.control, "window_switch_manager", None)
+        if manager is not None:
+            result = await manager.before_model_request(ctx)
+            if result is not None:
+                return result
+            # A provisional candidate has been staged. Let core rebuild the final request,
+            # but do not count or admit the stale request or charge a second model call.
+            if ctx.has_context_rebuild_request:
+                return None
         if self._limits is not None:
             needed = await self._count(ctx)
             if needed is None:
