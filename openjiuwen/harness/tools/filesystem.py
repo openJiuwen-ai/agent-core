@@ -171,8 +171,9 @@ def _read_pptx_text(file_path: str) -> str:
                     header = [cell.text.replace("|", "\\|").strip() for cell in table.rows[0].cells]
                     parts.append("| " + " | ".join(header) + " |")
                     parts.append("| " + " | ".join("---" for _ in header) + " |")
-                    for row in table.rows[1:]:
-                        cells = [cell.text.replace("|", "\\|").strip() for cell in row.cells]
+                    # python-pptx table.rows does not support slicing ([1:]) — use index range.
+                    for row_idx in range(1, len(table.rows)):
+                        cells = [cell.text.replace("|", "\\|").strip() for cell in table.rows[row_idx].cells]
                         parts.append("| " + " | ".join(cells) + " |")
         parts.append("")
 
