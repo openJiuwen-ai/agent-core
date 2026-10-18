@@ -28,6 +28,17 @@ from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 
 
+def _topic_part(value: object) -> str:
+    """Escape ``:`` inside a topic component so it cannot fake a separator.
+
+    Topics are ``session:{sid}:team:{team}:...``. Team/session ids are
+    human-supplied; a level name containing the literal ``:team:`` can make
+    two different (session, team) pairs render the same topic and receive each
+    other's events. Escape ``%`` first, then ``:``.
+    """
+    return str(value).replace("%", "%25").replace(":", "%3A")
+
+
 class TeamTopic(str, Enum):
     """Topic categories for team event routing."""
 
@@ -45,7 +56,7 @@ class TeamTopic(str, Enum):
         Returns:
             Topic string in the format "session:{session_id}:team:{team_name}:{topic}".
         """
-        return f"session:{session_id}:team:{team_name}:{self.value}"
+        return f"session:{_topic_part(session_id)}:team:{_topic_part(team_name)}:{self.value}"
 
 
 def swarmflow_human_reply_topic(
@@ -60,8 +71,14 @@ def swarmflow_human_reply_topic(
     ``None`` falls back to the legacy session+team scope (single-run safe).
     """
     if run_id:
-        return f"session:{session_id}:team:{team_name}:run:{run_id}:swarmflow_human_reply"
-    return f"session:{session_id}:team:{team_name}:swarmflow_human_reply"
+        return (
+            f"session:{_topic_part(session_id)}:team:{_topic_part(team_name)}:"
+            f"run:{_topic_part(run_id)}:swarmflow_human_reply"
+        )
+    return (
+        f"session:{_topic_part(session_id)}:team:{_topic_part(team_name)}:"
+        "swarmflow_human_reply"
+    )
 
 
 def format_swarmflow_human_reply_target(
