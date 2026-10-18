@@ -16,6 +16,26 @@ from openjiuwen.core.workflow import WorkflowOutput
 
 MAX_RECURSE_DEPTH = 10
 
+# Plain payload dicts may legitimately contain the markers used by this wire
+# format. Escape them so a tool result like {"__class__": "..."} survives a
+# round-trip instead of being mistaken for a typed envelope.
+_ESCAPE_PREFIX = "__dsh_escaped__"
+_RESERVED_KEYS = ("__class__", "__type__")
+
+
+def _escape_key(key: Any) -> Any:
+    if not isinstance(key, str):
+        return key
+    if key in _RESERVED_KEYS or key.startswith(_ESCAPE_PREFIX):
+        return _ESCAPE_PREFIX + key
+    return key
+
+
+def _unescape_key(key: Any) -> Any:
+    if isinstance(key, str) and key.startswith(_ESCAPE_PREFIX):
+        return key[len(_ESCAPE_PREFIX):]
+    return key
+
 # Classes that can be deserialized in JSON, call .model_validate(payload) for deserialization
 TYPE_REGISTRY = {
     "OutputSchema": OutputSchema,
@@ -77,7 +97,7 @@ def _serialize_payload(payload: Any, depth: int) -> Any:
     if isinstance(payload, dict):
         new_dict = {}
         for k, v in payload.items():
-            new_dict[k] = _serialize_payload(v, depth + 1)
+            new_dict[_escape_key(k)] = _serialize_payload(v, depth + 1)
         return new_dict
 
     # Primitives (str, int, float, bool, None, etc.)
@@ -124,7 +144,7 @@ def _deserialize_payload(payload: Any, depth: int) -> Any:
     if isinstance(payload, dict):
         new_dict = {}
         for k, v in payload.items():
-            new_dict[k] = _deserialize_payload(v, depth + 1)
+            new_dict[_unescape_key(k)] = _deserialize_payload(v, depth + 1)
         return new_dict
 
     # Primitives
