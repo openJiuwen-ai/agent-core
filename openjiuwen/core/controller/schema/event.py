@@ -41,10 +41,12 @@ class Event(BaseModel):
     event_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     metadata: Optional[Dict[str, Any]] = None
 
-    def __post_init__(self):
+    def model_post_init(self, __context: Any) -> None:
         """Post-initialization processing
 
-        Ensures metadata is not None.
+        Ensures metadata is not None. Pydantic models call model_post_init,
+        not the dataclass-style __post_init__, so the old hook never ran and
+        metadata stayed None in every serialized event.
         """
         if self.metadata is None:
             self.metadata = {}
