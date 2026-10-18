@@ -18,6 +18,7 @@ from pydantic import (
     StrictFloat,
     StrictInt,
     StrictStr,
+    field_validator,
     model_validator,
 )
 from pydantic import ValidationError as PydanticValidationError
@@ -141,6 +142,65 @@ class RecordArchiveIndex(BaseModel):
 
     schema_version: Literal[1] = 1
     entries: list[RecordArchiveIndexEntry] = Field(default_factory=list)
+
+
+class SessionHistorySearchQuery(BaseModel):
+    """Bounded keyword search over one Session's archived windows."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    query: StrictStr = Field(min_length=1, max_length=4096)
+    limit: StrictInt = Field(default=50, ge=1, le=500)
+
+    @field_validator("query", mode="before")
+    @classmethod
+    def _strip_query(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class SessionHistorySearchHit(BaseModel):
+    """One original text field matching a keyword in an archived message."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    archive_ref: StrictStr = Field(min_length=1)
+    old_window_id: StrictStr = Field(min_length=1)
+    old_window_seq: StrictInt = Field(ge=1)
+    message_index: StrictInt = Field(ge=0)
+    role: Literal["user", "assistant", "tool"]
+    matched_field: StrictStr = Field(min_length=1)
+    tool_name: StrictStr | None = None
+    excerpt: StrictStr = Field(max_length=2048)
+    excerpt_truncated: StrictBool
+
+
+class SessionHistorySearchResult(BaseModel):
+    """Search outcome; scan completeness is independent of display truncation."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    status: Literal["found", "empty", "incomplete", "failed"]
+    query_complete: StrictBool
+    hits: list[SessionHistorySearchHit] = Field(default_factory=list)
+    results_truncated: StrictBool = False
+    reason: StrictStr | None = None
+
+    @model_validator(mode="after")
+    def _validate_outcome(self):
+        if self.status in {"found", "empty"} and not self.query_complete:
+            raise ValueError("found and empty require a complete query")
+        if self.status == "found" and not self.hits:
+            raise ValueError("found requires at least one hit")
+        if self.status == "empty" and (self.hits or self.results_truncated):
+            raise ValueError("empty cannot contain hits or truncated results")
+        if self.status in {"incomplete", "failed"}:
+            if self.query_complete or not self.reason:
+                raise ValueError("incomplete and failed require an incomplete query and a reason")
+        if self.status == "failed" and self.hits:
+            raise ValueError("failed cannot contain hits")
+        if self.status in {"found", "empty"} and self.reason is not None:
+            raise ValueError("a complete query cannot contain a failure reason")
+        return self
 
 
 class SessionStateRecord(BaseModel):

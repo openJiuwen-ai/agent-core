@@ -51,6 +51,9 @@ from ..schema.session_record import (
     RecordEnding,
     RecordRollover,
     RecordWindowArchive,
+    SessionHistorySearchHit,
+    SessionHistorySearchQuery,
+    SessionHistorySearchResult,
     SessionStateRecord,
     WindowArchivePayload,
     decode_interruption,
@@ -101,6 +104,85 @@ def _message_fingerprint(messages: list) -> str:
     """Stable digest used to verify a recovery candidate rebuilt from archived references."""
     encoded = json.dumps(encode_messages(messages), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _text_fields(value, path: str):
+    """Yield only plain strings and structured text blocks, never arbitrary metadata."""
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _text_fields(item, f"{path}[{index}]")
+    elif isinstance(value, dict) and isinstance(value.get("text"), str):
+        yield f"{path}.text", value["text"]
+
+
+def _matched_excerpt(text: str, query: str) -> tuple[str, bool] | None:
+    """Return a bounded original excerpt around the first case-folded literal match."""
+    folded_query = query.casefold()
+    match_start = text.casefold().find(folded_query)
+    if match_start < 0:
+        return None
+
+    match_end = match_start + len(folded_query)
+    original_start = original_end = None
+    folded_position = 0
+    for index, character in enumerate(text):
+        next_position = folded_position + len(character.casefold())
+        if original_start is None and folded_position <= match_start < next_position:
+            original_start = index
+        if original_end is None and folded_position < match_end <= next_position:
+            original_end = index + 1
+        folded_position = next_position
+        if original_start is not None and original_end is not None:
+            break
+
+    if original_start is None or original_end is None:
+        return None
+    excerpt_limit = 2048
+    if len(text) <= excerpt_limit:
+        return text, False
+    start = max(0, original_start - excerpt_limit // 2)
+    end = min(len(text), start + excerpt_limit)
+    if end < original_end:
+        start = max(0, original_end - excerpt_limit)
+        end = min(len(text), start + excerpt_limit)
+    if end == len(text) and end - start < excerpt_limit:
+        start = max(0, end - excerpt_limit)
+    return text[start:end], start > 0 or end < len(text)
+
+
+def _message_search_fields(message):
+    """Yield the searchable text fields of one user, assistant, or tool message."""
+    role = message.role
+    if role not in {"user", "assistant", "tool"}:
+        return
+    content_path = "tool_result.content" if role == "tool" else "content"
+    tool_name = message.name if role == "tool" else None
+    if role == "tool" and isinstance(tool_name, str):
+        yield role, "tool_result.name", tool_name, tool_name
+    for path, text in _text_fields(message.content, content_path):
+        yield role, path, tool_name, text
+    if role == "assistant":
+        for index, call in enumerate(message.tool_calls or []):
+            yield role, f"tool_calls[{index}].function.name", call.name, call.name
+            yield role, f"tool_calls[{index}].function.arguments", call.name, call.arguments
+
+
+def _archive_index(archives: list[RecordWindowArchive]) -> RecordArchiveIndex:
+    """Build the navigation-only index from validated archive records."""
+    return RecordArchiveIndex(
+        entries=[
+            RecordArchiveIndexEntry(
+                archive_ref=archive.archive_ref,
+                old_window_seq=archive.old_window_seq,
+                request_id=archive.request_id,
+                execution_id=archive.execution_id,
+                created_at=archive.created_at,
+            )
+            for archive in archives
+        ]
+    )
 
 
 class WindowStore:
@@ -252,12 +334,19 @@ class WindowStore:
         await self._rebuild_archive_index(agent_id, session_id)
         return stored
 
-    async def _read_archives(self, agent_id: str, session_id: str) -> list[RecordWindowArchive]:
+    async def _read_archive_entries(self, agent_id: str, session_id: str) -> tuple[str, dict[str, str | bytes]]:
+        """Enumerate authoritative archive keys and values for one Session."""
         prefix = session_key_prefix(agent_id, session_id) + "archive:"
         try:
             entries = await self._backend.get_by_prefix(prefix)
         except Exception as exc:
             raise _runtime("window archives could not be listed", exc) from exc
+        if not isinstance(entries, dict):
+            raise _runtime("window archive backend returned an invalid listing")
+        return prefix, entries
+
+    async def _read_archives(self, agent_id: str, session_id: str) -> list[RecordWindowArchive]:
+        prefix, entries = await self._read_archive_entries(agent_id, session_id)
         archives = []
         for key, raw in entries.items():
             suffix = key.removeprefix(prefix)
@@ -272,44 +361,177 @@ class WindowStore:
 
     async def _rebuild_archive_index(self, agent_id: str, session_id: str) -> RecordArchiveIndex:
         archives = await self._read_archives(agent_id, session_id)
-        index = RecordArchiveIndex(
-            entries=[
-                RecordArchiveIndexEntry(
-                    archive_ref=archive.archive_ref,
-                    old_window_seq=archive.old_window_seq,
-                    request_id=archive.request_id,
-                    execution_id=archive.execution_id,
-                    created_at=archive.created_at,
-                )
-                for archive in archives
-            ]
-        )
+        return await self._write_archive_index(agent_id, session_id, archives)
+
+    async def _write_archive_index(
+        self, agent_id: str, session_id: str, archives: list[RecordWindowArchive]
+    ) -> RecordArchiveIndex:
+        index = _archive_index(archives)
         try:
             await self._backend.set(self.archive_index_key(agent_id, session_id), index.model_dump_json())
         except Exception as exc:
             raise _runtime("window archive index could not be written", exc) from exc
         return index
 
-    async def list_archives(self, agent_id: str, session_id: str) -> list[RecordWindowArchive]:
+    async def list_archives(
+        self, agent_id: str, session_id: str, execution_id: str | None = None
+    ) -> list[RecordWindowArchive]:
         """Return authoritative archives and rebuild the navigation index from them."""
         archives = await self._read_archives(agent_id, session_id)
-        index = RecordArchiveIndex(
-            entries=[
-                RecordArchiveIndexEntry(
-                    archive_ref=archive.archive_ref,
-                    old_window_seq=archive.old_window_seq,
-                    request_id=archive.request_id,
-                    execution_id=archive.execution_id,
-                    created_at=archive.created_at,
-                )
-                for archive in archives
-            ]
-        )
+        await self._write_archive_index(agent_id, session_id, archives)
+        if execution_id is None:
+            return archives
+        return [archive for archive in archives if archive.execution_id == execution_id]
+
+    async def search(
+        self, agent_id: str, session_id: str, query: str, *, limit: int = 50
+    ) -> SessionHistorySearchResult:
+        """Search retained archived message text, preserving partial-scan and failure semantics."""
         try:
-            await self._backend.set(self.archive_index_key(agent_id, session_id), index.model_dump_json())
-        except Exception as exc:
-            raise _runtime("window archive index could not be written", exc) from exc
-        return archives
+            search = SessionHistorySearchQuery(query=query, limit=limit)
+        except (PydanticValidationError, TypeError, ValueError):
+            return SessionHistorySearchResult(
+                status="failed",
+                query_complete=False,
+                reason="历史搜索参数无效。",
+            )
+
+        try:
+            prefix, raw_entries = await self._read_archive_entries(agent_id, session_id)
+        except Exception:
+            return SessionHistorySearchResult(
+                status="failed",
+                query_complete=False,
+                reason="历史归档列表读取失败，不能据此判断是否有匹配记录。",
+            )
+        try:
+            raw_index = await self._backend.get(self.archive_index_key(agent_id, session_id))
+        except Exception:
+            return SessionHistorySearchResult(
+                status="failed",
+                query_complete=False,
+                reason="历史归档索引读取失败，不能据此判断是否有匹配记录。",
+            )
+
+        index = None
+        if raw_index is not None:
+            try:
+                index = RecordArchiveIndex.model_validate_json(raw_index)
+            except (PydanticValidationError, TypeError, ValueError):
+                pass
+
+        archive_keys: list[tuple[int, str, str | bytes]] = []
+        scan_incomplete = False
+        for key, raw in raw_entries.items():
+            suffix = key.removeprefix(prefix) if isinstance(key, str) else ""
+            try:
+                window_seq = int(suffix)
+                if window_seq < 1 or key != self.archive_key(agent_id, session_id, window_seq):
+                    raise ValueError
+            except (TypeError, ValueError):
+                scan_incomplete = True
+                continue
+            archive_keys.append((window_seq, key, raw))
+
+        archive_keys.sort(key=lambda item: item[0], reverse=True)
+        actual_sequences = {window_seq for window_seq, _, _ in archive_keys}
+        indexed_by_seq = {}
+        index_stale = index is None
+        missing_archives = False
+        if index is not None:
+            for entry in index.entries:
+                if entry.old_window_seq in indexed_by_seq:
+                    index_stale = True
+                indexed_by_seq[entry.old_window_seq] = entry
+            if set(indexed_by_seq) - actual_sequences:
+                missing_archives = True
+            if actual_sequences - set(indexed_by_seq):
+                index_stale = True
+
+        archives: list[RecordWindowArchive] = []
+        hits: list[SessionHistorySearchHit] = []
+        results_truncated = False
+        for window_seq, key, raw in archive_keys:
+            try:
+                archive = self._parse_archive(raw, agent_id, session_id, window_seq)
+            except Exception:
+                scan_incomplete = True
+                continue
+            archives.append(archive)
+            indexed_entry = indexed_by_seq.get(window_seq)
+            if indexed_entry is None or (
+                indexed_entry.archive_ref != archive.archive_ref
+                or indexed_entry.request_id != archive.request_id
+                or indexed_entry.execution_id != archive.execution_id
+                or indexed_entry.created_at != archive.created_at
+            ):
+                index_stale = True
+
+            try:
+                messages = decode_messages(archive.messages)
+            except Exception:
+                scan_incomplete = True
+                continue
+            for message_index in range(len(messages) - 1, -1, -1):
+                message = messages[message_index]
+                for role, matched_field, tool_name, text in _message_search_fields(message):
+                    excerpt = _matched_excerpt(text, search.query)
+                    if excerpt is None:
+                        continue
+                    if len(hits) >= search.limit:
+                        results_truncated = True
+                        continue
+                    excerpt_text, excerpt_truncated = excerpt
+                    hits.append(
+                        SessionHistorySearchHit(
+                            archive_ref=archive.archive_ref,
+                            old_window_id=archive.old_window_id,
+                            old_window_seq=archive.old_window_seq,
+                            message_index=message_index,
+                            role=role,
+                            matched_field=matched_field,
+                            tool_name=tool_name,
+                            excerpt=excerpt_text,
+                            excerpt_truncated=excerpt_truncated,
+                        )
+                    )
+
+        if missing_archives:
+            scan_incomplete = True
+        if index_stale and not scan_incomplete:
+            try:
+                await self._write_archive_index(
+                    agent_id, session_id, sorted(archives, key=lambda item: item.old_window_seq)
+                )
+            except Exception:
+                return SessionHistorySearchResult(
+                    status="failed",
+                    query_complete=False,
+                    reason="历史归档索引无法恢复，不能确认搜索结果。",
+                )
+
+        if scan_incomplete:
+            if not archives:
+                return SessionHistorySearchResult(
+                    status="failed",
+                    query_complete=False,
+                    reason="历史归档无法读取，不能确认搜索结果。",
+                )
+            return SessionHistorySearchResult(
+                status="incomplete",
+                query_complete=False,
+                hits=hits,
+                results_truncated=results_truncated,
+                reason="部分历史归档无法读取或核验，搜索结果不完整。",
+            )
+        if hits:
+            return SessionHistorySearchResult(
+                status="found",
+                query_complete=True,
+                hits=hits,
+                results_truncated=results_truncated,
+            )
+        return SessionHistorySearchResult(status="empty", query_complete=True)
 
 
 def _part(message) -> str | None:

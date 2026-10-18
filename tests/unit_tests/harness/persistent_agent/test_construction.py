@@ -99,6 +99,38 @@ def test_group_search_rejects_name_collision(api):
         api.create_persistent_agent(spec, context=context)
 
 
+def test_session_history_search_is_persistent_only_and_read_only(api):
+    from openjiuwen.core.runner import Runner
+    from openjiuwen.harness.persistent_agent.tools.effect_policy import is_read_only_tool_name
+
+    name = "search_session_history"
+    spec = spec_for(api)
+    context = context_for(api, spec)
+    agent = api.create_persistent_agent(spec, context=context)
+    try:
+        card = agent.ability_manager.get(name)
+        assert card is not None
+        assert Runner.resource_mgr.get_tool(card.id) is not None
+        assert is_read_only_tool_name(name)
+        personal = DeepAgentSpec(
+            card=spec.card,
+            enable_sys_operation=False,
+            enable_task_loop=False,
+            auto_create_workspace=False,
+        )
+        assert all(item.name != name for item in personal.resolve_parts().tool_cards)
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
+def test_session_history_search_rejects_name_collision(api):
+    from openjiuwen.core.foundation.tool import ToolCard
+
+    spec = spec_for(api, tools=[ToolCard(id="custom-history", name="search_session_history", stateless=True)])
+    with pytest.raises(BaseError, match="reserved for Persistent session history"):
+        api.create_persistent_agent(spec, context=context_for(api, spec))
+
+
 def test_window_management_tool_is_opt_in_and_absent_from_personal_deep_agent(api):
     from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
     from openjiuwen.harness.schema.deep_agent_spec import ModelSpec
