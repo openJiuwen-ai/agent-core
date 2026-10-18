@@ -23,6 +23,26 @@ from openjiuwen.core.session.vcs.backend import decode_log_entry, encode_log_ent
 from openjiuwen.core.session.vcs.models import Commit, Head, LogEntry, Snapshot
 
 
+def _safe_record_file(directory: Path, record_id: str) -> Path | None:
+    """Build a record path only for a plain file-name component.
+
+    ``get_commit`` / ``get_snapshot`` are reachable with caller-supplied ids
+    (``restore``/``rewind`` pass the ref through). Without this check an id
+    like ``../other-session/commit`` escapes the session directory and can
+    read another session's records.
+    """
+    if (
+        not isinstance(record_id, str)
+        or not record_id
+        or record_id in {".", ".."}
+        or "/" in record_id
+        or "\\" in record_id
+        or "\x00" in record_id
+    ):
+        return None
+    return directory / f"{record_id}.json"
+
+
 class JsonlBackend:
     """Append-only jsonl log + snapshot/commit/HEAD files under one session dir."""
 
@@ -101,8 +121,8 @@ class JsonlBackend:
         return await asyncio.to_thread(self._load_snapshot, snapshot_id)
 
     def _load_snapshot(self, snapshot_id: str) -> Snapshot | None:
-        path = self._snapshot_dir / f"{snapshot_id}.json"
-        if not path.exists():
+        path = _safe_record_file(self._snapshot_dir, snapshot_id)
+        if path is None or not path.exists():
             return None
         return Snapshot.model_validate_json(path.read_text(encoding="utf-8"))
 
@@ -131,8 +151,8 @@ class JsonlBackend:
         return await asyncio.to_thread(self._load_commit, commit_id)
 
     def _load_commit(self, commit_id: str) -> Commit | None:
-        path = self._commit_dir / f"{commit_id}.json"
-        if not path.exists():
+        path = _safe_record_file(self._commit_dir, commit_id)
+        if path is None or not path.exists():
             return None
         return Commit.model_validate_json(path.read_text(encoding="utf-8"))
 
