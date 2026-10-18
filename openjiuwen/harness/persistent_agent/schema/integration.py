@@ -7,7 +7,7 @@ so both can depend on the same contracts without a circular import.
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from .build_context import PersistentBuildContext
     from .context import GroupMessagesResult
     from .request import AnswerResponse, PermissionResponse, RequestInput
+    from .window import WindowRollover
 
 # Session state key and context ID the native ReAct agent loads its window from.
 CONTEXT_STATE_KEY = "context"
@@ -46,12 +47,40 @@ class WaitingScene:
 
 
 @dataclass(frozen=True)
+class SessionCheckpoint:
+    """Identity of a complete, non-terminal ReAct boundary committed to Session state."""
+
+    request_id: str
+    execution_id: str
+    iteration_seq: int
+    kind: Literal["react_iteration", "rollover"]
+    last_group_message_id: str | None = None
+
+
+@dataclass(frozen=True)
+class RolloverCheckpoint:
+    """Metadata for the most recently committed transition between two active windows."""
+
+    old_window_id: str
+    old_window_seq: int
+    new_window_id: str
+    new_window_seq: int
+    archive_ref: str
+    trigger_kind: Literal["agent", "capacity_fallback"]
+    token_usage: dict[str, int | float | str | bool | None]
+
+
+@dataclass(frozen=True)
 class LoadedRecord:
     """What the entry needs from the latest record once it has been written into the new Session."""
 
     waiting: WaitingScene | None = None
     # Group scan position the host confirmed to an earlier Execution; recent messages are read after it.
     last_group_message_id: str | None = None
+    checkpoint: SessionCheckpoint | None = None
+    current_window_id: str | None = None
+    window_seq: int | None = None
+    last_rollover: RolloverCheckpoint | None = None
 
 
 @dataclass(frozen=True)
@@ -83,13 +112,19 @@ class WindowAssembly:
 
 
 class SessionStateStore(Protocol):
-    """Loads and saves the whitelisted session state record (PA-10)."""
+    """Loads, checkpoints and terminally saves the whitelisted session state record (PA-10 / PA-11)."""
 
     async def load(self, context: "PersistentBuildContext") -> LoadedRecord:
         """Write the latest record into the new Session; an empty LoadedRecord when there is none."""
 
     async def save(self, context: "PersistentBuildContext", ending: ExecutionEnding) -> None:
         """Tidy the window and save the record in one write."""
+
+    async def checkpoint(self, context: "PersistentBuildContext", checkpoint: SessionCheckpoint) -> None:
+        """Save one complete active ReAct boundary without terminal window cleanup."""
+
+    async def rollover(self, context: "PersistentBuildContext", transition: "WindowRollover") -> "RolloverCheckpoint":
+        """Archive the old window, then atomically save its successor and the iteration checkpoint."""
 
 
 class WindowAssembler(Protocol):

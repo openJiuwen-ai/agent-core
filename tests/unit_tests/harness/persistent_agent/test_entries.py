@@ -1867,6 +1867,38 @@ async def test_persistent_construction_turns_on_tool_fact_retention(harness):
 
 
 @pytest.mark.asyncio
+async def test_new_context_switches_only_after_the_tool_result_and_commits_archive_before_answer(real_state):
+    harness = real_state
+    spec = harness.spec(
+        enabled_features=frozenset({"construction", "window_management"}),
+        model_input_limit_tokens=100_000,
+    )
+    ctx, _ = harness.context(spec)
+    seed = {
+        "objective": "整理当前任务并继续",
+        "completed": ["已完成本轮工具检查"],
+        "next_steps": ["给出最终答复"],
+    }
+    harness.model.turns = [("new_context", json.dumps(seed, ensure_ascii=False)), "answer"]
+
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+
+    assert events[-1].payload.status == "completed"
+    assert harness.model.calls == 2, "the candidate window is rebuilt before the second call"
+    assert "window.switched" in kinds(events)
+    record = await saved_record(harness)
+    assert record["window_seq"] == 2 and record["last_rollover"]["old_window_seq"] == 1
+    archive = (
+        await module("execution.session_state")
+        .WindowStore(harness.backend)
+        .load_archive("business-agent", "session-a", 1)
+    )
+    archived = module("schema.session_record").decode_messages(archive.messages)
+    assert any(getattr(message, "tool_calls", None) for message in archived)
+    assert any(getattr(message, "tool_call_id", None) == "call-1" for message in archived)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reason", ["stop", "cancel"])
 async def test_tool_facts_survive_a_control_mid_batch(real_state, reason):
     """PA-10-V-07 / V-14 / V-23: call-a finished, call-b in flight; the next task still sees call-a.

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     import asyncio
 
+    from ..schema.window import WindowSwitchRequest
     from .emitter import EventEmitter
     from .handoff import Registration
 
@@ -31,6 +32,12 @@ class ExecutionControl:
     registrations: "dict[tuple[str, str], Registration]" = field(default_factory=dict, repr=False)
     # Executions a continuation reached through verified links; read_execution_record answers only for them.
     verified_chain: tuple[str, ...] = ()
+    # PA-11 writes only after AFTER_REACT_ITERATION marks a complete boundary.
+    pending_window_switch: "WindowSwitchRequest | None" = None
+    safe_boundary_pending: bool = False
+    pending_iteration_seq: int = 0
+    rollover_committed: bool = False
+    window_switch_manager: object | None = field(default=None, repr=False)
 
     def request_abort(self, reason: AbortReason) -> bool:
         """Record the first control reason before the outcome is locked; otherwise report False."""
@@ -48,3 +55,10 @@ class ExecutionControl:
         """Keep the first critical failure."""
         if self.fatal is None:
             self.fatal = error
+
+    def queue_window_switch(self, request: "WindowSwitchRequest") -> bool:
+        """Accept one Agent handoff for the next safe boundary; never switch inside a tool batch."""
+        if self.pending_window_switch is not None or self.outcome_locked or self.abort_reason is not None:
+            return False
+        self.pending_window_switch = request
+        return True

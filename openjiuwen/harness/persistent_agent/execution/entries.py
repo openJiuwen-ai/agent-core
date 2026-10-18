@@ -189,6 +189,22 @@ async def _assemble(assembler, context: PersistentBuildContext, request: Request
     return assembly
 
 
+def _install_window_switch_manager(spec, context, store, last_group_message_id, request_text):
+    """Attach PA-11 only to opt-in Persistent Executions; personal agents never use this path."""
+    if "window_management" not in spec.enabled_features:
+        return
+    from .window_management import WindowSwitchManager
+
+    context.binding.control.window_switch_manager = WindowSwitchManager(
+        context,
+        request_text,
+        spec,
+        store,
+        context.binding.control.emitter,
+        last_group_message_id=last_group_message_id,
+    )
+
+
 def _chunk_parts(chunk) -> tuple[Any, Any]:
     if isinstance(chunk, dict):
         return chunk.get("type"), chunk.get("payload")
@@ -472,6 +488,13 @@ async def execute_persistent_request(spec, context, inputs) -> AsyncIterator[Age
             await control.emitter.emit(EventType.EXECUTION_STARTED, started)
             record = await _load(context, store)
             assembly = await _assemble(assembler, context, request, record)
+            _install_window_switch_manager(
+                spec,
+                context,
+                store,
+                assembly.last_group_message_id,
+                request.text,
+            )
             outcome = await _run_native(agent, context, assembly.native_input)
             await _finish(context, spec, store, outcome, request.reply_target, assembly.last_group_message_id)
 
@@ -538,6 +561,7 @@ async def resume_persistent_request(spec, context, confirm_reply) -> AsyncIterat
         native_input = _native_resume_input(context, reply, record.waiting, adapter)
         if "workspace_read" in spec.enabled_features:
             _rebuild_registrations(context)
+        _install_window_switch_manager(spec, context, store, record.last_group_message_id, None)
         outcome = await _run_native(agent, context, native_input)
         # Resume reads no group messages, so the previous cursor is kept.
         await _finish(context, spec, store, outcome, record.waiting.reply_target, record.last_group_message_id)

@@ -10,7 +10,7 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig, SystemMessage
+from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig, SystemMessage, UserMessage
 from openjiuwen.core.single_agent import AgentCard, ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import AgentRail
 from tests.unit_tests.fixtures.mock_llm import MockLLMModel, create_text_response
@@ -76,6 +76,30 @@ async def test_a_passing_check_sees_the_final_request_then_the_model_is_called()
     ((messages, _tools),) = check.seen
     assert isinstance(messages[0], SystemMessage) and "你是一个助手" in messages[0].content, "the final system prompt"
     assert messages[-1].content == "hello"
+
+
+@pytest.mark.asyncio
+async def test_a_check_can_replace_context_and_rebuild_the_same_final_request_once():
+    agent = make_agent()
+    seen = []
+
+    async def rebuild_once(ctx):
+        seen.append(list(ctx.inputs.messages))
+        if len(seen) == 1:
+            ctx.context.set_messages([UserMessage(content="replacement request")])
+            ctx.request_context_rebuild()
+            assert ctx.has_context_rebuild_request is True
+        return None
+
+    agent.set_final_request_check(rebuild_once)
+    llm = model()
+
+    result = await invoke(agent, llm)
+
+    assert result["result_type"] == "answer" and llm.call_count == 1
+    assert len(seen) == 2
+    assert seen[0][-1].content == "hello"
+    assert seen[1][-1].content == "replacement request"
 
 
 @pytest.mark.asyncio

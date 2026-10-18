@@ -99,6 +99,71 @@ def test_group_search_rejects_name_collision(api):
         api.create_persistent_agent(spec, context=context)
 
 
+def test_window_management_tool_is_opt_in_and_absent_from_personal_deep_agent(api):
+    from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+    from openjiuwen.harness.schema.deep_agent_spec import ModelSpec
+
+    default_spec = DeepAgentSpec(
+        card=AgentCard(id="business-agent", name="test"),
+        enable_sys_operation=False,
+        enable_task_loop=False,
+        auto_create_workspace=False,
+    )
+    assert all(card.name != "new_context" for card in default_spec.resolve_parts().tool_cards)
+
+    enabled_spec = spec_for(
+        api,
+        enabled_features={"construction", "window_management"},
+        model=ModelSpec(
+            model_client_config=ModelClientConfig(
+                client_provider="OpenAI", api_key="mock-api-key", api_base="https://example.invalid/v1"
+            ),
+            model_request_config=ModelRequestConfig(context_window=1000, max_tokens=100),
+        ),
+        model_input_limit_tokens=800,
+        capacity_safety_margin_tokens=50,
+    )
+    context = context_for(api, enabled_spec)
+    agent = api.create_persistent_agent(enabled_spec, context=context)
+    try:
+        assert agent.ability_manager.get("new_context") is not None
+        assert all(
+            card.name != "new_context"
+            for card in DeepAgentSpec(
+                card=enabled_spec.card,
+                enable_sys_operation=False,
+                enable_task_loop=False,
+                auto_create_workspace=False,
+            )
+            .resolve_parts()
+            .tool_cards
+        )
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
+def test_window_management_rejects_new_context_name_collision(api):
+    from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+    from openjiuwen.core.foundation.tool import ToolCard
+    from openjiuwen.harness.schema.deep_agent_spec import ModelSpec
+
+    spec = spec_for(
+        api,
+        enabled_features={"construction", "window_management"},
+        model=ModelSpec(
+            model_client_config=ModelClientConfig(
+                client_provider="OpenAI", api_key="mock-api-key", api_base="https://example.invalid/v1"
+            ),
+            model_request_config=ModelRequestConfig(context_window=1000, max_tokens=100),
+        ),
+        model_input_limit_tokens=800,
+        capacity_safety_margin_tokens=50,
+        tools=[ToolCard(id="custom-new-context", name="new_context", stateless=True)],
+    )
+    with pytest.raises(BaseError, match="reserved for Persistent window management"):
+        api.create_persistent_agent(spec, context=context_for(api, spec))
+
+
 def ports_for(api, **overrides):
     port = Port()
     args = dict(commit=port, budget=port, window_backend=UntouchedKVStore())

@@ -8,8 +8,15 @@ the whitelisted fields in one set. Backend faults are runtime errors; an unusabl
 validation error.
 """
 
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 from urllib.parse import quote
+from uuid import uuid4
+
+from pydantic import ValidationError as PydanticValidationError
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
@@ -33,11 +40,19 @@ from ..schema.integration import (
     WINDOW_PART_KEY,
     ExecutionEnding,
     LoadedRecord,
+    RolloverCheckpoint,
+    SessionCheckpoint,
     WaitingScene,
 )
 from ..schema.session_record import (
+    RecordArchiveIndex,
+    RecordArchiveIndexEntry,
+    RecordCheckpoint,
     RecordEnding,
+    RecordRollover,
+    RecordWindowArchive,
     SessionStateRecord,
+    WindowArchivePayload,
     decode_interruption,
     decode_messages,
     dump_record,
@@ -47,6 +62,7 @@ from ..schema.session_record import (
     parse_record,
     unsavable,
 )
+from ..schema.window import WindowRollover, WindowSeed
 
 if TYPE_CHECKING:
     from openjiuwen.core.foundation.store.base_kv_store import BaseKVStore
@@ -59,6 +75,13 @@ INTERRUPTED_ENDINGS = frozenset({"stopped", "cancelled", "error"})
 PLACEHOLDER_TEXT = "结果未取得，实际效果需核实"
 HANDOFF_TEXT_PREFIX = "【实际交出的最终回答】\n"
 _OUTCOME_LABELS = {"completed": "已完成", "cancelled": "已取消"}
+
+
+@dataclass(frozen=True)
+class _WindowMetadata:
+    current_window_id: str | None = None
+    window_seq: int | None = None
+    last_rollover: RolloverCheckpoint | None = None
 
 
 def session_key_prefix(agent_id: str, session_id: str) -> str:
@@ -74,6 +97,12 @@ def _runtime(message: str, cause: BaseException | None = None) -> BaseError:
     return build_error(StatusCode.DEEPAGENT_RUNTIME_ERROR, error_msg=message, cause=cause)
 
 
+def _message_fingerprint(messages: list) -> str:
+    """Stable digest used to verify a recovery candidate rebuilt from archived references."""
+    encoded = json.dumps(encode_messages(messages), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 class WindowStore:
     """Reads and writes whole records; any backend failure is a runtime error, never an invalid record."""
 
@@ -84,6 +113,18 @@ class WindowStore:
     def state_key(agent_id: str, session_id: str) -> str:
         """Key of the Session's state record."""
         return session_key_prefix(agent_id, session_id) + "state"
+
+    @staticmethod
+    def archive_key(agent_id: str, session_id: str, window_seq: int) -> str:
+        """Key of one archived old window; derived from the Session and its sequence."""
+        if isinstance(window_seq, bool) or not isinstance(window_seq, int) or window_seq < 1:
+            raise ValueError("window sequence must be a positive integer")
+        return session_key_prefix(agent_id, session_id) + f"archive:{window_seq}"
+
+    @staticmethod
+    def archive_index_key(agent_id: str, session_id: str) -> str:
+        """Key of the rebuildable Session archive index."""
+        return session_key_prefix(agent_id, session_id) + "archive_index"
 
     async def load_state(self, agent_id: str, session_id: str) -> str | bytes | None:
         """The stored record as returned by the backend, or None when the Session has none."""
@@ -98,6 +139,177 @@ class WindowStore:
             await self._backend.set(self.state_key(agent_id, session_id), payload)
         except Exception as exc:
             raise _runtime("session state record could not be written", exc) from exc
+
+    @staticmethod
+    def _archive_ref(window_seq: int) -> str:
+        return f"archive:{window_seq}"
+
+    @staticmethod
+    def _parse_archive(raw: str | bytes, agent_id: str, session_id: str, window_seq: int) -> RecordWindowArchive:
+        try:
+            archive = RecordWindowArchive.model_validate_json(raw)
+        except (PydanticValidationError, TypeError, ValueError):
+            raise invalid_record("window archive structure is not valid") from None
+        if (
+            archive.agent_id != agent_id
+            or archive.session_id != session_id
+            or archive.old_window_seq != window_seq
+            or archive.archive_ref != WindowStore._archive_ref(window_seq)
+        ):
+            raise invalid_record("window archive identity does not match its Session key")
+        normalized_messages = encode_messages(decode_messages(archive.messages))
+        try:
+            WindowSeed.model_validate(archive.seed)
+        except (PydanticValidationError, TypeError, ValueError):
+            raise invalid_record("window archive seed is not valid") from None
+        return archive.model_copy(update={"messages": normalized_messages})
+
+    async def load_archive(self, agent_id: str, session_id: str, window_seq: int) -> RecordWindowArchive | None:
+        """Load and validate one full archived window; a missing key is distinct from a broken backend."""
+        key = self.archive_key(agent_id, session_id, window_seq)
+        try:
+            raw = await self._backend.get(key)
+        except Exception as exc:
+            raise _runtime("window archive could not be read", exc) from exc
+        if raw is None:
+            return None
+        return self._parse_archive(raw, agent_id, session_id, window_seq)
+
+    async def find_pending_rollover(
+        self,
+        agent_id: str,
+        session_id: str,
+        *,
+        current_window_id: str | None,
+        window_seq: int | None,
+        checkpoint: SessionCheckpoint | None,
+        request_id: str,
+        recovery_ref: str | None,
+        spec_fingerprint: str,
+    ) -> RecordWindowArchive | None:
+        """Find an archive left before a failed state commit, accepting only its exact recovery identity."""
+        if current_window_id is None and window_seq is None:
+            return None
+        if current_window_id is None or window_seq is None:
+            raise invalid_record("current window identity is incomplete")
+        archive = await self.load_archive(agent_id, session_id, window_seq)
+        if archive is None:
+            return None
+        if (
+            checkpoint is None
+            or archive.old_window_id != current_window_id
+            or archive.request_id != request_id
+            or archive.request_id != checkpoint.request_id
+            or archive.execution_id != checkpoint.execution_id
+            or archive.execution_id != recovery_ref
+            or archive.spec_fingerprint != spec_fingerprint
+            or checkpoint.kind != "react_iteration"
+            or archive.iteration_seq != checkpoint.iteration_seq
+        ):
+            raise invalid_record("pending rollover does not match the active Session checkpoint")
+        return archive
+
+    async def archive_window(self, agent_id: str, session_id: str, payload: dict) -> RecordWindowArchive:
+        """Store one immutable archive idempotently, then refresh its navigation index."""
+        try:
+            candidate = WindowArchivePayload.model_validate(payload)
+            WindowSeed.model_validate(candidate.seed)
+            # Decode and re-encode to ensure the archived source snapshot is restorable.
+            normalized_messages = encode_messages(decode_messages(candidate.messages))
+            archive = RecordWindowArchive(
+                **candidate.model_dump(exclude={"messages"}),
+                messages=normalized_messages,
+                agent_id=agent_id,
+                session_id=session_id,
+                archive_ref=self._archive_ref(candidate.old_window_seq),
+                created_at=datetime.now(timezone.utc),
+            )
+        except (PydanticValidationError, BaseError, TypeError, ValueError) as exc:
+            raise unsavable("window archive payload is invalid", exc) from exc
+
+        key = self.archive_key(agent_id, session_id, archive.old_window_seq)
+        serialized = archive.model_dump_json()
+        try:
+            created = await self._backend.exclusive_set(key, serialized)
+        except Exception as exc:
+            raise _runtime("window archive could not be written", exc) from exc
+        if created is True:
+            stored = archive
+        elif created is False:
+            try:
+                existing_raw = await self._backend.get(key)
+            except Exception as exc:
+                raise _runtime("existing window archive could not be checked", exc) from exc
+            if existing_raw is None:
+                raise _runtime("window archive write outcome is unknown")
+            existing = self._parse_archive(existing_raw, agent_id, session_id, archive.old_window_seq)
+            if existing.model_dump(exclude={"created_at"}) != archive.model_dump(exclude={"created_at"}):
+                raise _runtime("window archive conflicts with the existing transition")
+            stored = existing
+        else:
+            raise _runtime("window archive backend returned an invalid write result")
+
+        await self._rebuild_archive_index(agent_id, session_id)
+        return stored
+
+    async def _read_archives(self, agent_id: str, session_id: str) -> list[RecordWindowArchive]:
+        prefix = session_key_prefix(agent_id, session_id) + "archive:"
+        try:
+            entries = await self._backend.get_by_prefix(prefix)
+        except Exception as exc:
+            raise _runtime("window archives could not be listed", exc) from exc
+        archives = []
+        for key, raw in entries.items():
+            suffix = key.removeprefix(prefix)
+            try:
+                window_seq = int(suffix)
+            except ValueError:
+                raise invalid_record("window archive key is malformed") from None
+            if key != self.archive_key(agent_id, session_id, window_seq):
+                raise invalid_record("window archive key is malformed")
+            archives.append(self._parse_archive(raw, agent_id, session_id, window_seq))
+        return sorted(archives, key=lambda item: item.old_window_seq)
+
+    async def _rebuild_archive_index(self, agent_id: str, session_id: str) -> RecordArchiveIndex:
+        archives = await self._read_archives(agent_id, session_id)
+        index = RecordArchiveIndex(
+            entries=[
+                RecordArchiveIndexEntry(
+                    archive_ref=archive.archive_ref,
+                    old_window_seq=archive.old_window_seq,
+                    request_id=archive.request_id,
+                    execution_id=archive.execution_id,
+                    created_at=archive.created_at,
+                )
+                for archive in archives
+            ]
+        )
+        try:
+            await self._backend.set(self.archive_index_key(agent_id, session_id), index.model_dump_json())
+        except Exception as exc:
+            raise _runtime("window archive index could not be written", exc) from exc
+        return index
+
+    async def list_archives(self, agent_id: str, session_id: str) -> list[RecordWindowArchive]:
+        """Return authoritative archives and rebuild the navigation index from them."""
+        archives = await self._read_archives(agent_id, session_id)
+        index = RecordArchiveIndex(
+            entries=[
+                RecordArchiveIndexEntry(
+                    archive_ref=archive.archive_ref,
+                    old_window_seq=archive.old_window_seq,
+                    request_id=archive.request_id,
+                    execution_id=archive.execution_id,
+                    created_at=archive.created_at,
+                )
+                for archive in archives
+            ]
+        )
+        try:
+            await self._backend.set(self.archive_index_key(agent_id, session_id), index.model_dump_json())
+        except Exception as exc:
+            raise _runtime("window archive index could not be written", exc) from exc
+        return archives
 
 
 def _part(message) -> str | None:
@@ -282,11 +494,15 @@ def _matches_waiting_scene(groups: list, interruption) -> bool:
     )
 
 
-def _check_window(messages: list, ending_outcome: str, interruption, error) -> None:
+def _check_window(messages: list, ending_outcome: str | None, interruption, error) -> None:
     """Results follow their own call group; a waiting scene's unpaired calls are exactly its interrupted ones."""
     groups, stray = _call_groups(messages)
     if stray:
         raise error("window has tool results outside their call group")
+    if ending_outcome is None:
+        if interruption is not None or any(unpaired for _, unpaired in groups):
+            raise error("active checkpoint has an unsettled tool call or interruption")
+        return
     waiting = ending_outcome == WAITING
     if waiting != (interruption is not None):
         raise error("window and interruption state disagree")
@@ -302,12 +518,30 @@ class ExecutionStateStore:
 
     def __init__(self, store: WindowStore):
         self._store = store
+        self._window_metadata: dict[tuple[str, str], _WindowMetadata] = {}
+
+    @staticmethod
+    def _identity(context: "PersistentBuildContext") -> tuple[str, str]:
+        return context.execution.agent_id, context.execution.session_id
+
+    def _metadata_for(self, context: "PersistentBuildContext") -> _WindowMetadata:
+        return self._window_metadata.get(self._identity(context), _WindowMetadata())
+
+    def _remember_metadata(self, context: "PersistentBuildContext", metadata: _WindowMetadata) -> None:
+        self._window_metadata[self._identity(context)] = metadata
+
+    @staticmethod
+    def _rollover_value(record: RecordRollover | None) -> RolloverCheckpoint | None:
+        if record is None:
+            return None
+        return RolloverCheckpoint(**record.model_dump())
 
     async def load(self, context: "PersistentBuildContext") -> LoadedRecord:
         """Validate the latest record, then write it into the new Session; no record gives an empty window."""
         execution = context.execution
         raw = await self._store.load_state(execution.agent_id, execution.session_id)
         if raw is None:
+            self._remember_metadata(context, _WindowMetadata())
             return LoadedRecord()
         try:
             record = parse_record(raw)
@@ -315,12 +549,85 @@ class ExecutionStateStore:
                 raise invalid_record("identity does not match this Session")
             messages = decode_messages(record.messages)
             interruption = decode_interruption(record.interruption) if record.interruption is not None else None
-            _check_window(messages, record.ending.outcome, interruption, invalid_record)
+            ending_outcome = record.ending.outcome if record.ending is not None else None
+            _check_window(messages, ending_outcome, interruption, invalid_record)
             if record.deepagent_state is not None:
                 try:
                     DeepAgentState.from_session_dict(record.deepagent_state)
                 except Exception:
                     raise invalid_record("DeepAgent state cannot be restored") from None
+            pending_rollover = await self._store.find_pending_rollover(
+                execution.agent_id,
+                execution.session_id,
+                current_window_id=record.current_window_id,
+                window_seq=record.window_seq,
+                checkpoint=(
+                    SessionCheckpoint(
+                        **record.checkpoint.model_dump(),
+                        last_group_message_id=record.last_group_message_id,
+                    )
+                    if record.checkpoint is not None
+                    else None
+                ),
+                request_id=execution.request_id,
+                recovery_ref=execution.recovery_ref,
+                spec_fingerprint=execution.config_fingerprint,
+            )
+            if pending_rollover is not None:
+                # The archive is written before the active record. If the process stopped between
+                # those writes, repair only when its source snapshot and rebuilt candidate match.
+                if pending_rollover.messages != encode_messages(messages):
+                    raise invalid_record("pending rollover archive does not contain the active window snapshot")
+                from .window_management import restore_rollover_candidate
+
+                try:
+                    recovered_messages = restore_rollover_candidate(
+                        messages,
+                        WindowSeed.model_validate(pending_rollover.seed),
+                        pending_rollover.retained_item_refs,
+                    )
+                except (PydanticValidationError, TypeError, ValueError):
+                    raise invalid_record("pending rollover candidate cannot be reconstructed") from None
+                if _message_fingerprint(recovered_messages) != pending_rollover.candidate_fingerprint:
+                    raise invalid_record("pending rollover candidate does not match its archived fingerprint")
+                _check_window(recovered_messages, None, None, invalid_record)
+                recovered_rollover = RecordRollover(
+                    old_window_id=pending_rollover.old_window_id,
+                    old_window_seq=pending_rollover.old_window_seq,
+                    new_window_id=pending_rollover.new_window_id,
+                    new_window_seq=pending_rollover.new_window_seq,
+                    archive_ref=pending_rollover.archive_ref,
+                    trigger_kind=pending_rollover.trigger_kind,
+                    token_usage=pending_rollover.token_usage,
+                )
+                recovered_record = SessionStateRecord(
+                    agent_id=record.agent_id,
+                    session_id=record.session_id,
+                    messages=encode_messages(recovered_messages),
+                    interruption=None,
+                    auto_confirm=record.auto_confirm,
+                    deepagent_state=record.deepagent_state,
+                    checkpoint=RecordCheckpoint(
+                        request_id=pending_rollover.request_id,
+                        execution_id=pending_rollover.execution_id,
+                        iteration_seq=pending_rollover.iteration_seq,
+                        kind="rollover",
+                    ),
+                    last_group_message_id=pending_rollover.last_group_message_id,
+                    current_window_id=pending_rollover.new_window_id,
+                    window_seq=pending_rollover.new_window_seq,
+                    last_rollover=recovered_rollover,
+                    ending=None,
+                )
+                # Persist first; a backend failure must not expose a candidate that is not committed.
+                await self._store.save_state(
+                    execution.agent_id,
+                    execution.session_id,
+                    dump_record(recovered_record),
+                )
+                record = recovered_record
+                messages = recovered_messages
+                interruption = None
         except BaseError as exc:
             # Diagnostics name the Session and the category only; the record text stays out of logs.
             logger.error(
@@ -330,7 +637,7 @@ class ExecutionStateStore:
                 exc.message,
             )
             raise
-        if record.ending.outcome in INTERRUPTED_ENDINGS:
+        if record.ending is not None and record.ending.outcome in INTERRUPTED_ENDINGS:
             # A record saved before its window was made safe is repaired in memory, never written back.
             messages = patch_stopped_calls(messages)
         state = {
@@ -343,8 +650,158 @@ class ExecutionStateStore:
             state[INTERRUPTION_KEY] = interruption
         context.session.update_state(state)
         ending = record.ending
-        waiting = WaitingScene(ending.request_id, ending.reply_target) if ending.outcome == WAITING else None
-        return LoadedRecord(waiting=waiting, last_group_message_id=ending.last_group_message_id)
+        waiting = (
+            WaitingScene(ending.request_id, ending.reply_target)
+            if ending is not None and ending.outcome == WAITING
+            else None
+        )
+        checkpoint = (
+            SessionCheckpoint(**record.checkpoint.model_dump(), last_group_message_id=record.last_group_message_id)
+            if record.checkpoint is not None
+            else None
+        )
+        metadata = _WindowMetadata(
+            current_window_id=record.current_window_id,
+            window_seq=record.window_seq,
+            last_rollover=self._rollover_value(record.last_rollover),
+        )
+        self._remember_metadata(context, metadata)
+        return LoadedRecord(
+            waiting=waiting,
+            last_group_message_id=record.last_group_message_id,
+            checkpoint=checkpoint,
+            current_window_id=metadata.current_window_id,
+            window_seq=metadata.window_seq,
+            last_rollover=metadata.last_rollover,
+        )
+
+    async def checkpoint(self, context: "PersistentBuildContext", checkpoint: SessionCheckpoint) -> None:
+        """Save a complete active iteration without terminal cleanup or an end marker."""
+        execution, session = context.execution, context.session
+        await self._sync_native(context)
+        contexts = session.get_state(CONTEXT_STATE_KEY) or {}
+        if set(contexts) - {CONTEXT_ID}:
+            raise unsavable("only the default window is supported")
+        window = contexts.get(CONTEXT_ID) or {}
+        if window.get("offload_messages"):
+            raise unsavable("offloaded messages are not supported")
+        messages = list(window.get("messages") or [])
+        if session.get_state(INTERRUPTION_KEY) is not None:
+            raise unsavable("an active checkpoint cannot contain interruption state")
+        _check_window(messages, None, None, unsavable)
+        try:
+            encoded_checkpoint = RecordCheckpoint(
+                request_id=checkpoint.request_id,
+                execution_id=checkpoint.execution_id,
+                iteration_seq=checkpoint.iteration_seq,
+                kind=checkpoint.kind,
+            )
+        except (PydanticValidationError, TypeError, ValueError) as exc:
+            raise unsavable("checkpoint metadata is invalid", exc) from exc
+
+        metadata = self._metadata_for(context)
+        current_window_id = metadata.current_window_id or uuid4().hex
+        window_seq = metadata.window_seq or 1
+        record = SessionStateRecord(
+            agent_id=execution.agent_id,
+            session_id=execution.session_id,
+            messages=encode_messages(messages),
+            interruption=None,
+            auto_confirm=_auto_confirm(session.get_state(INTERRUPT_AUTO_CONFIRM_KEY) or {}),
+            deepagent_state=_deepagent_state(session.get_state(DEEPAGENT_STATE_KEY)),
+            checkpoint=encoded_checkpoint,
+            last_group_message_id=checkpoint.last_group_message_id,
+            current_window_id=current_window_id,
+            window_seq=window_seq,
+            last_rollover=(
+                RecordRollover(**metadata.last_rollover.__dict__) if metadata.last_rollover is not None else None
+            ),
+            ending=None,
+        )
+        await self._store.save_state(execution.agent_id, execution.session_id, dump_record(record))
+        self._remember_metadata(
+            context,
+            _WindowMetadata(current_window_id, window_seq, metadata.last_rollover),
+        )
+
+    async def rollover(self, context: "PersistentBuildContext", transition: WindowRollover) -> RolloverCheckpoint:
+        """Archive the full old window before one write commits the new active window and checkpoint."""
+        execution, session = context.execution, context.session
+        reference = context.binding.agent_ref
+        agent = reference() if reference is not None else None
+        if agent is None:
+            raise unsavable("the native agent is no longer available")
+        try:
+            # Save DeepAgent-owned state without publishing the provisional candidate window.
+            agent.save_state(session)
+        except Exception as exc:
+            raise unsavable("DeepAgent state could not be synced before rollover", exc) from exc
+        old_messages = list(transition.old_messages)
+        new_messages = list(transition.new_messages)
+        if session.get_state(INTERRUPTION_KEY) is not None:
+            raise unsavable("a rollover cannot contain interruption state")
+        _check_window(old_messages, None, None, unsavable)
+        _check_window(new_messages, None, None, unsavable)
+
+        metadata = self._metadata_for(context)
+        old_window_id = metadata.current_window_id or uuid4().hex
+        old_window_seq = metadata.window_seq or 1
+        new_window_id = uuid4().hex
+        new_window_seq = old_window_seq + 1
+        archive = await self._store.archive_window(
+            execution.agent_id,
+            execution.session_id,
+            {
+                "old_window_id": old_window_id,
+                "old_window_seq": old_window_seq,
+                "new_window_id": new_window_id,
+                "new_window_seq": new_window_seq,
+                "trigger_kind": transition.trigger_kind,
+                "request_id": execution.request_id,
+                "execution_id": execution.execution_id,
+                "spec_fingerprint": execution.config_fingerprint,
+                "seed": transition.seed.model_dump(mode="json"),
+                "retained_item_refs": list(transition.retained_item_refs),
+                "token_usage": transition.token_usage,
+                "messages": encode_messages(old_messages),
+                "candidate_fingerprint": _message_fingerprint(new_messages),
+                "iteration_seq": transition.iteration_seq,
+                "last_group_message_id": transition.last_group_message_id,
+            },
+        )
+        rollover = RecordRollover(
+            old_window_id=old_window_id,
+            old_window_seq=old_window_seq,
+            new_window_id=new_window_id,
+            new_window_seq=new_window_seq,
+            archive_ref=archive.archive_ref,
+            trigger_kind=transition.trigger_kind,
+            token_usage=transition.token_usage,
+        )
+        checkpoint = RecordCheckpoint(
+            request_id=execution.request_id,
+            execution_id=execution.execution_id,
+            iteration_seq=transition.iteration_seq,
+            kind="rollover",
+        )
+        record = SessionStateRecord(
+            agent_id=execution.agent_id,
+            session_id=execution.session_id,
+            messages=encode_messages(new_messages),
+            interruption=None,
+            auto_confirm=_auto_confirm(session.get_state(INTERRUPT_AUTO_CONFIRM_KEY) or {}),
+            deepagent_state=_deepagent_state(session.get_state(DEEPAGENT_STATE_KEY)),
+            checkpoint=checkpoint,
+            last_group_message_id=transition.last_group_message_id,
+            current_window_id=new_window_id,
+            window_seq=new_window_seq,
+            last_rollover=rollover,
+            ending=None,
+        )
+        await self._store.save_state(execution.agent_id, execution.session_id, dump_record(record))
+        committed = RolloverCheckpoint(**rollover.model_dump())
+        self._remember_metadata(context, _WindowMetadata(new_window_id, new_window_seq, committed))
+        return committed
 
     async def save(self, context: "PersistentBuildContext", ending: ExecutionEnding) -> None:
         """Sync the native state, tidy the window and write the whole record once; any failure writes nothing."""
@@ -366,6 +823,7 @@ class ExecutionStateStore:
         messages = tidy_window(messages, ending, execution.execution_id)
         auto_confirm = session.get_state(INTERRUPT_AUTO_CONFIRM_KEY) or {}
         deepagent_state = session.get_state(DEEPAGENT_STATE_KEY)
+        metadata = self._metadata_for(context)
         record = SessionStateRecord(
             agent_id=execution.agent_id,
             session_id=execution.session_id,
@@ -373,13 +831,19 @@ class ExecutionStateStore:
             interruption=encode_interruption(interruption) if interruption is not None else None,
             auto_confirm=_auto_confirm(auto_confirm),
             deepagent_state=_deepagent_state(deepagent_state),
+            checkpoint=None,
+            last_group_message_id=ending.last_group_message_id,
+            current_window_id=metadata.current_window_id,
+            window_seq=metadata.window_seq,
+            last_rollover=(
+                RecordRollover(**metadata.last_rollover.__dict__) if metadata.last_rollover is not None else None
+            ),
             ending=RecordEnding(
                 outcome=ending.outcome,
                 request_id=ending.request_id,
                 execution_id=execution.execution_id,
                 reply_target=ending.reply_target,
                 output_refs=list(ending.output_refs),
-                last_group_message_id=ending.last_group_message_id,
             ),
         )
         await self._store.save_state(execution.agent_id, execution.session_id, dump_record(record))

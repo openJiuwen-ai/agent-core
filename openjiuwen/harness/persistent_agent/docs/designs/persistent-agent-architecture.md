@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 | 当前详细架构设计；标注"已实现"的部分以代码为准，其余均为拟议 |
-| 最近一次修订日期 | 2026-10-16 |
+| 最近一次修订日期 | 2026-10-17 |
 | 关联模块 | `openjiuwen.harness.persistent_agent` |
 | 设计概览 | [Persistent Agent 设计概览](persistent-agent-overview.md) |
 | 文档定位 | 描述 Persistent Agent 的架构方案，作为后续开发的设计依据 |
@@ -12,9 +12,9 @@
 
 本文说明 Persistent Agent 的定位、核心概念、模块设计、协作流程、状态、数据与故障处理。Agent 侧说明怎样执行；AgentServer 侧说明必须提供的保证，具体实现由服务端所属模块设计。
 
-**实现状态：** 构造、实例隔离、执行入口编排、群参与判断、写前意图、PA-06 新 Request 窗口组装、PA-10 会话状态记录的加载与保存和 PA-08 候选交接（最终回答分段、`share_file` 文件交接、结束事件补交重试）已有组件实现；工具执行中途结束时原生保留真实事实的 core 改动已有组件实现、待 core 维护者评审；PA-17 执行日志整理与 PA-18 续做（执行链追溯、分层材料与 `read_execution_record`、最终请求容量检查）已有组件实现，续做在正式入口的开放条件满足前仍拒绝，最终请求检查的 core 接缝待 core 维护者评审；PA-06 容量验收、交互适配及真实宿主联调仍待完成。停止路径仅有部分验证，其余设计及待验证前提不视为已实现或验证通过。当前支持范围、负责人和证据以[统一开发计划](persistent-agent-development-plan.md)为准。
+**实现状态：** 构造、实例隔离、执行入口编排、群参与判断、写前意图、PA-06 新 Request 窗口组装、PA-10 V1 会话状态记录及 PA-08 候选交接（最终回答分段、`share_file` 文件交接、结束事件补交重试）已有组件实现；PA-11 的逐轮 checkpoint、最终 V1 记录结构、主动换窗、容量兜底、归档和精确恢复已在 agent-core 接入 Persistent Agent 执行链并通过组件测试；真实 BaseKVStore、provider 容量边界和 JiuwenSwarm 联调仍待完成。工具执行中途结束时原生保留真实事实的 core 改动已有组件实现、待 core 维护者评审；PA-17 执行日志整理与 PA-18 续做（执行链追溯、分层材料与 `read_execution_record`、最终请求容量检查）已有组件实现，续做在正式入口的开放条件满足前仍拒绝，最终请求检查的 core 接缝待 core 维护者评审；PA-06 容量验收、交互适配及真实宿主联调仍待完成。当前支持范围、负责人和证据以[统一开发计划](persistent-agent-development-plan.md)为准。
 
-PA-11 主动换窗、容量兜底、归档及状态对账设计已同步到 [F_11](../features/F_11_window-management.md)、[S_03](../specs/S_03_context-and-windows.md) 和本架构文档，尚未接入或验证。
+PA-11 的 agent-core 组件实现与测试证据见 [F_11](../features/F_11_window-management.md)、[S_03](../specs/S_03_context-and-windows.md) 和统一开发计划；生产持久化及跨仓闭环仍待验证。
 
 PA-23 的当前群背景读取器、Agent 级跨群搜索契约及 Persistent 专用只读工具已有 agent-core 实现；组件与个人版隔离验证见 [F_23 §8](../features/F_23_group-chat-history-retrieval.md#8-验收设计)。JiuwenSwarm 的实际群历史存储、实时授权 Provider 和跨仓验证仍待完成，不作为已闭环能力。
 
@@ -111,7 +111,7 @@ Session 隔离、前缀缓存、工具调用与结果配对、单一执行者，
 | Execution : Window | 1 : N | 一次执行中可以换多次窗，同一时刻只用一个 |
 | 同一 Session 的活动 Execution | 最多 1 | 由 AgentServer 保证，所以窗口存储不需要并发控制 |
 
-Session 是长期隔离单位；Request 是一件事，暂停后可沿用；Execution 是一次实际处理，创建新实例，结束后清理。当前窗口跨 Request 使用，换出后归档；会话状态记录在结束时覆盖保存，日志按 Execution 归档。完整时间线见第 11.1.1 节，归属见第 7.1 节。
+Session 是长期隔离单位；Request 是一件事，暂停后可沿用；Execution 是一次实际处理，创建新实例，结束后清理。当前窗口跨 Request 使用，换出后归档；完整 ReAct 轮次继续执行前先覆盖保存活动 checkpoint，Execution 结束时再覆盖保存终态记录，日志按 Execution 归档。完整时间线见第 11.1.1 节，归属见第 7.1 节。
 
 ### 2.2 共同规则索引
 
@@ -136,7 +136,7 @@ Session 是长期隔离单位；Request 是一件事，暂停后可沿用；Exec
 1. **窗口只由 Execution 读写**；Request 和 Session 不直接操作窗口。
 2. **加载的永远是 Session 的当前窗口**，不存在"加载某个 Request 的窗口"。
 3. **执行中只追加**；换窗是唯一的改写点。
-4. **换窗时旧窗先归档；Execution 结束时保存会话状态记录。** 崩溃时会话状态记录保持不变。
+4. **完整 ReAct 轮次继续前先保存 checkpoint；换窗时旧窗先归档；Execution 结束时保存终态记录。** 崩溃时恢复最近一次成功提交的活动窗口；本轮尚未检查点化的副作用由执行日志查证。
 5. **被忽略的群消息不进入窗口。**
 
 ## 3. 架构总览与模块分工
@@ -576,7 +576,7 @@ sequenceDiagram
 3. 将候选新窗口、`current_window_id`、`window_seq` 和 `last_rollover` 写入 PA-10 使用的同一条 Session 状态记录。只有状态写入成功，候选新窗才成为持久化的当前窗口。
 4. 持久化成功后替换 ContextEngine 的运行时上下文，再尽力记录普通 `window.switched` 通知。通知失败不回滚状态或运行时切换。
 
-**部分成功与恢复：** 归档失败时保持当前状态、不切换；状态写入失败或结果未知时停止当前执行，不继续在新候选窗或旧内存窗调用模型。恢复先加载 Session 状态：若指针已指向新窗，加载该窗；若仍指向旧窗，仅在归档中的 Session、旧 / 新窗口、Request 和 Spec 指纹精确匹配时，才重建同一候选并幂等补写状态；不匹配或元数据不足则失败关闭并由 PA-18 结合执行日志查证。若状态提交成功但内存替换前中断，状态记录仍是权威，下一次加载新窗。普通 `window.switched` 事件不作为恢复依据。
+**部分成功与恢复：** 归档失败时保持当前状态、不切换；状态写入失败或结果未知时停止当前执行，不继续在新候选窗或旧内存窗调用模型。恢复先加载 Session 状态：若指针已指向新窗，加载该窗；若仍指向旧窗，仅在归档中的 Session、旧窗口完整快照、旧 / 新窗口标识、Request、recovery_ref、Spec 指纹及轮次序号精确匹配时，才从旧窗快照、seed 和保留项引用确定性重建候选，并校验归档保存的候选指纹。校验通过后先将修复后的状态记录持久化，再暴露新窗口；不直接从归档读取另一份完整候选，也不重新计数。身份、内容或指纹不匹配则失败关闭并由 PA-18 结合执行日志查证。若状态提交成功但内存替换前中断，状态记录仍是权威，下一次加载新窗。普通 `window.switched` 事件不作为恢复依据。
 
 **责任与保证边界：** Persistent Agent 负责 WindowSeed 校验、容量估算、归档 / 状态提交流程和运行时替换；AgentServer 必须提供同一 Session 单执行者、持久隔离的 BaseKVStore 单键写入及适用模型 hard limit 或可用的保守策略。归档和 Session 状态是先后执行的单键写入，不构成跨键事务；PA-11 不提供跨进程接管或分布式租约保证。
 
@@ -751,7 +751,7 @@ reply.delta 结束、文件写好、窗口有结束标记或页面显示完成�
 | 先记账，再保存 | 服务端认为已完成，但窗口里没有这次的工作内容，下一件事加载时这段上下文永久丢失 ❌ |
 | **先保存，再记账** | 窗口已有完整内容和结束标记，只是没收到记账；触发崩溃续做时，Agent 看到"已经产出最终结果"，直接整理交出 ✅ |
 
-**Execution 结束时保存整理过的当前窗口并覆盖，不为每个 Execution 另存窗口快照。** PA-11 另在每次成功换窗时，将新活动窗口和最近切换检查点作为同一条 Session 状态记录提交；只有成功提交的窗口才是可恢复的当前窗口。需要审计时使用执行日志和旧窗归档。
+**每个完整 ReAct 轮次结束且 Execution 将继续时，先将当前完整窗口作为活动 checkpoint 覆盖写入；成功后才允许下一次模型调用。** 不按 token 或未完成工具批次写盘。Execution 结束时仍执行“整理窗口 → 保存终态记录 → 记账”，不为每次 Execution 另存独立快照。若该轮触发 PA-11 换窗，归档旧窗并将新活动窗口及 rollover 元数据提交到同一 Session 状态记录，这次写入同时满足本轮 checkpoint，不重复保存快照。只有成功提交的窗口才是可恢复的当前窗口。需要审计时使用执行日志和旧窗归档。
 
 | 内容 | 处理 | 理由 |
 | --- | --- | --- |
@@ -787,7 +787,7 @@ reply.delta 结束、文件写好、窗口有结束标记或页面显示完成�
 - checkpointer 保存的是整个 Session state，如果再由窗口管理另存一份当前窗口，就会出现两份上下文，加载时不知道以哪份为准；
 - 默认的内存实现重启即丢失，而且数据格式完全跟随 core 内部实现。
 
-**做法：** AgentServer 每次执行都提供**新的空 Session**，服务端不额外调用 `pre_run / post_run`。跨 Execution 的状态只由窗口管理（`WindowStore`）保存和加载：执行开始时把会话状态记录写回 Session state，结束时按白名单取出、整理后保存；PA-11 还会在一次 Execution 内的换窗提交点保存新活动窗口及切换检查点。
+**做法：** AgentServer 每次执行都提供**新的空 Session**，服务端不额外调用 `pre_run / post_run`。跨 Execution 的状态只由窗口管理（`WindowStore`）保存和加载：执行开始时把会话状态记录写回 Session state；每个完整 ReAct 轮次若将继续，按白名单 checkpoint 当前活动窗口；Execution 结束时按原终态规则整理后保存；PA-11 换窗提交的新活动窗口与切换检查点替代该轮普通 checkpoint。
 
 **服务端不调用，不等于原生执行路径不调用。** ReAct 流式路径仍会调用 `pre_run` 和 `commit`（[react_agent.py:2984](../../../../core/single_agent/agents/react_agent.py#L2984)、[react_agent.py:3050](../../../../core/single_agent/agents/react_agent.py#L3050)），进入 checkpointer 的恢复和保存逻辑。新的空 Session 仍可能按 Session ID 读回旧记录，覆盖 `WindowStore` 加载的状态。
 
@@ -795,17 +795,19 @@ reply.delta 结束、文件写好、窗口有结束标记或页面显示完成�
 
 | Session state 字段 | 作用 | 什么时候存 |
 | --- | --- | --- |
-| `context` | 当前窗口（ContextEngine 从这里加载上下文） | PA-10 每次执行结束；PA-11 每次成功换窗提交 |
+| `context` | 当前窗口（ContextEngine 从这里加载上下文） | PA-10 每个完整 ReAct 轮次 checkpoint 和每次 Execution 终态保存；PA-11 换窗提交替代该轮普通 checkpoint |
 | `__react_agent_interruption__` | 中断状态：被拦截的工具调用、迭代轮次、原始请求 | 等待确认时 |
-| `INTERRUPT_AUTO_CONFIRM_KEY` | "本会话记住"的确认选择 | 每次执行结束 |
-| `deepagent`（DeepAgent 状态快照） | `DeepAgentState` 的可序列化快照：plan_mode、task_plan 等 | 每次执行结束（保存前先同步运行中的缓存） |
+| `INTERRUPT_AUTO_CONFIRM_KEY` | "本会话记住"的确认选择 | 每次完整轮次 checkpoint 和终态保存 |
+| `deepagent`（DeepAgent 状态快照） | `DeepAgentState` 的可序列化快照：plan_mode、task_plan 等 | 每次完整轮次 checkpoint 和终态保存（先同步运行中的缓存） |
+| `checkpoint` | 当前 Execution 最近一次完整 ReAct 轮次的 Request / Execution 身份、轮次序号、类型与群消息游标 | 每次非终态完整轮次；换窗时与新 ActiveWindow 一次提交 |
+| `ending` | 已结束 Execution 的结局及交接信息 | 只在终态保存时填写；活动 checkpoint 不伪造 ending |
 | `current_window_id` | Session 当前活动窗口的唯一标识；状态记录是唯一持久当前指针 | 初始窗口创建及每次成功换窗；与 `context` 同一条记录写入 |
 | `window_seq` | Session 内单调递增的当前窗口序号 | 初始窗口创建及每次成功换窗；与 `current_window_id` 同一条记录写入 |
 | `last_rollover` | 最近一次成功切换检查点：旧 / 新 window ID、`archive_ref`、触发类型和 token 用量 | 每次成功换窗；与新 `context` 同一条记录写入 |
 
-PA-11 复用 PA-10 的 Session state 键和一次 `set` 写整条记录，不增加 `replacement_history` 或另一份当前窗口指针。F_11 已规定新增字段和恢复语义，但尚未定稿 PA-10 schema_version 1 记录的读取兼容方式及 PA-11 新记录的版本策略；当前 PA-10 记录还要求 `ending`，中途换窗保存时该字段如何表示 Execution 仍在运行也须在实现前明确，避免混淆上次已结束 Execution 与当前未结束 Execution。PA-11 归档记录保存完整旧窗口及切换元数据，稳定 `archive_ref` 由 WindowStore 根据 Session 和旧窗口身份派生；AgentServer 提供持久、隔离的 BaseKVStore 单键写入，并保证同一 Session 单一执行者。
+PA-11 复用 PA-10 的 Session state 键和一次 `set` 写整条记录，不增加 `replacement_history` 或另一份当前窗口指针。schema_version=1 记录将活动 `checkpoint` 与可选 `ending` 分开：活动检查点只表示已提交的完整轮次，`ending` 只表示已结束 Execution；记录同时保存顶层群消息扫描游标。PA-10/PA-11 尚未启用真实持久化，故直接调整未发布的 V1 结构，不兼容此前组件级旧 V1 记录；未知版本或损坏记录失败关闭，启用前须检查后端并显式迁移或清理任何旧结构记录。checkpoint 与换窗现有 agent-core 组件实现和测试通过，生产后端仍待联调。PA-11 归档保存完整旧窗口及重建新候选所需的 seed、保留项引用、身份元数据和候选指纹，不重复保存完整新窗口；稳定 `archive_ref` 由 WindowStore 根据 Session 和旧窗口身份派生。AgentServer 提供持久、隔离的 BaseKVStore 单键写入，并保证同一 Session 单一执行者。
 
-会话状态记录的结构、白名单与序列化方式由状态保存组件定义；归档记录与归档索引的结构及序列化方式由归档组件定义。PA-11 对 state 增加窗口标识和切换检查点字段，但 PA-10 schema_version 1 记录的兼容读取方式及新写入版本策略尚待实现前定稿；必须明确如何加载现有 PA-10 记录，不得把未知版本或损坏数据降级为空状态。`MaterialQuery / MaterialSnapshot / MaterialReadResult` 只用于知识端口，群消息使用 `GroupChatPort` 的专用消息结构。
+会话状态记录的结构、白名单与序列化方式由状态保存组件定义；归档记录与归档索引的结构及序列化方式由归档组件定义。PA-11 对 state 增加窗口标识和 rollover 检查点字段；PA-10 的逐轮 checkpoint 扩展记录到 F_17 D-11，直接扩展 schema_version=1 的未启用格式，不提供旧 V1 映射。`MaterialQuery / MaterialSnapshot / MaterialReadResult` 只用于知识端口，群消息使用 `GroupChatPort` 的专用消息结构。
 
 **白名单以外的字段一律不保存。** 所有字段**写在同一条记录里，一次写入**，不存在"窗口存了、中断状态没存上"的情况。
 
@@ -851,7 +853,7 @@ PA-11 复用 PA-10 的 Session state 键和一次 `set` 写整条记录，不增
 | `archive(session_id, execution_id, old_window, transition_metadata)` / `list_archives(session_id, execution_id)` | 归档失败：不提交新窗口，必要时暂停并说明原因；同一 `archive_ref` 的相同内容幂等复用，冲突不得覆盖 |
 | `search(session_id, query)` | PA-12 后续提供历史检索；检索时区分"确定没有"和"没查完或失败"，不以索引未命中断言历史不存在 |
 
-PA-11 中途切换的确认顺序为“旧窗归档成功 → 新窗口及检查点写入 state 成功 → 替换运行时上下文 → 尽力发出普通 `window.switched`”。归档与 state 是两个顺序单键写入，不构成跨键事务；若归档已写而 state 仍指向旧窗，恢复只有在归档元数据与 Session、旧 / 新窗口、原 Request 和 Spec 指纹精确匹配时才重建同一候选并幂等补写 state。若 state 写入已成功而运行时替换前中断，加载 state 中的新窗口。普通事件可能缺失，不参与提交确认。
+普通 checkpoint 的确认顺序为“本轮完整收敛 → 单条 state 写入成功 → 下一次模型调用”。PA-11 中途切换则为“旧窗归档成功 → 新窗口及本轮 checkpoint 写入 state 成功 → 替换运行时上下文 → 尽力发出普通 `window.switched`”。归档与 state 是两个顺序单键写入，不构成跨键事务；若归档已写而 state 仍指向旧窗，恢复只有在归档元数据与 Session、旧窗快照、原 Request、recovery_ref、Spec 指纹及轮次序号精确匹配时，才从旧窗、seed 与保留项引用重建候选并校验候选指纹，然后先补写 state 再加载到 Session。身份、内容或指纹不匹配时失败关闭。若 state 写入已成功而运行时替换前中断，加载 state 中的新窗口。普通事件可能缺失，不参与提交确认。
 
 ### 7.4 旧窗归档的保存理由与内容分类
 
@@ -1097,7 +1099,7 @@ sequenceDiagram
 3. **先归档旧窗**及切换元数据；归档失败时不提交新窗口。
 4. 将新窗口、`current_window_id`、`window_seq` 和 `last_rollover` 一次写入 PA-10 的 Session state 记录；状态写入失败或结果未知时停止当前执行，不继续模型调用。
 5. 状态写入成功后替换 ContextEngine 上下文，再尽力记录普通 `window.switched` 通知；通知失败不回滚。
-6. 中断后以 Session state 当前指针恢复；归档已保存而 state 仍指向旧窗时，仅在身份、Request 和 Spec 指纹精确匹配时幂等重建并补写同一状态，否则失败关闭。PA-11 不调用独立模型生成旧窗摘要。
+6. 中断后以 Session state 当前指针恢复；归档已保存而 state 仍指向旧窗时，仅在旧窗快照、Session、Request、recovery_ref、Spec 指纹和轮次均匹配时，才从旧窗、seed 与保留项引用重建候选并校验指纹；先持久化修复状态再加载，任何不匹配均失败关闭。PA-11 不调用独立模型生成旧窗摘要。
 
 #### 11.1.5 崩溃续做
 
@@ -1228,8 +1230,8 @@ sequenceDiagram
 9. 排队中的消息和补充消息都是新的 Request，不能成为当前任务的指令。
 10. Session 私有状态（会话状态记录、归档、执行日志、会话草稿）互不可见。
 11. 停止不等于取消；重启后不自动续做被停止的任务。
-12. 窗口只由 Execution 读写；执行中只追加，换窗是唯一的改写点。
-13. 换窗时先归档旧窗；Execution 结束时按"整理 → 保存 → 记账"的顺序收尾。
+12. 窗口只由 Execution 读写；模型流和工具批次中只追加，完整 ReAct 轮次间提交 checkpoint，换窗是窗口整体替换点。
+13. 每个完整 ReAct 轮次继续前先保存；换窗时先归档旧窗并用新窗提交替代该轮 checkpoint；Execution 结束时按"整理 → 保存 → 记账"的顺序收尾。
 14. 一次 Execution 内系统提示词和工具定义不变；撤权在下一个 Execution 生效。
 15. 窗口装满且换窗后最小必要内容仍放不下时，暂停并说明原因，不静默截断。
 16. 不使用 checkpointer；跨执行状态只保存白名单字段，一次写入。
@@ -1269,6 +1271,8 @@ sequenceDiagram
 | 2026-10-08～09 | 统一文档名称，按架构模板组织为十二章；修正章节引用、相对链接和查询失败语义，补充解释、索引与待确认议题 | 提升阅读和核对效率，保持核心设计及图和文本块；文档整理不代表实现或验收完成 |
 | 2026-10-10 | 正文直接描述方案，移除新旧对照、改造清单与重构说明；有效约束并入对应章节，历史按时间与主题合并 | 将当前方案与演变记录分开，保留设计理由、能力边界、待确认事项及关键历史决策 |
 | 2026-10-15 | PA-11 窗口管理按 [F_11](../features/F_11_window-management.md) 同步：Agent 主动换窗为主、模型容量 hard-limit 兜底；新窗与 `last_rollover` 在 PA-10 Session state 单记录提交后才切换运行时上下文；旧窗归档幂等并支持基于 state 的恢复对账，`window.switched` 仅作普通通知 | 替代未落地的固定 70% 自动换窗与额外摘要模型方案；PA-11 仍未实现。PA-10 schema_version 1 记录兼容和 PA-11 新写入版本策略须在实现前定稿 |
+| 2026-10-17 | PA-10 / PA-11 逐轮 checkpoint 初始方案：完整 ReAct 轮次结束且 Execution 继续时，在下一次模型调用前保存活动窗口；完整快照不按 token 或未完成工具批次写盘；换窗提交替代该轮普通 checkpoint；Execution 结束仍按原终态顺序保存。初始记录格式曾提出 v2 与 v1 兼容读取 | 确保完整轮次在继续推理前可恢复，同时区分活动检查点和已结束 Execution；存储版本策略已被同日下一条记录替代；checkpoint 与 PA-11 loop 接入、测试尚未完成，见 [F_17 D-11](../features/F_17_session-state-record.md) 和 [F_11](../features/F_11_window-management.md) |
+| 2026-10-17 | PA-10 / PA-11 存储版本策略修订 | 由于代码尚未启用真实持久化且没有须保留的线上记录，checkpoint、ending 分离及顶层游标直接作为 schema_version=1 的唯一最终结构；不兼容此前组件级旧 V1 结构，启用前须检查并显式迁移或清理旧记录 | 省去上线前不必要的双格式读取与迁移层；记录结构扩展与 PA-11 loop 接入仍未实现，个人版行为、PA-10 终态语义及负责人/进度不变；替代同日早先的 v2 决策，见 [F_17](../features/F_17_session-state-record.md) |
 | 2026-10-16 | PA-23 群聊历史检索按 [F_23](../features/F_23_group-chat-history-retrieval.md) 与 [S_09](../specs/S_09_group-chat-and-knowledge.md) 同步：近期消息读取按当前 Session 群定位；历史搜索按 Agent 当前获授权群跨群检索，可从私聊或其他群发起；搜索权限不依赖当前提问者的群成员身份；新增独立跨群搜索结果完整性语义，且搜索不自动注入群历史 | 分离当前群背景与 Agent 级群历史检索；保持 PA-07 参与判断独立。真实群历史存储、授权 Provider 与跨仓联调仍待实现 |
 
 | 2026-10-12 | 群聊读取契约：`GroupMessagesResult` 增加服务端确认的扫描位置 `scanned_through`，与分页位置和展示范围分开；消息状态增加“正文暂缺”；回补以触发消息为游标读取其后的消息，`recent_messages` 签名不变（同日修正：最初设想的“触发消息之前的回补”方向错误，已撤销） | 群消息游标应以可信扫描进度为准：正文暂时读不到不能卡住游标，查询失败不能推进游标；排队的 Request 处理时，触发消息可能早于游标，期间针对它的补充须从触发消息之后读回 |

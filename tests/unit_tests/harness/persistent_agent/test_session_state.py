@@ -87,7 +87,14 @@ def tampered(entry_call=None, ai_call=None):
 
 def context(agent_id="agent:1", session_id="session%a", execution_id="execution-1"):
     session = create_agent_session(session_id=session_id, card=AgentCard(id=agent_id, name="test"))
-    execution = SimpleNamespace(agent_id=agent_id, session_id=session_id, execution_id=execution_id)
+    execution = SimpleNamespace(
+        agent_id=agent_id,
+        session_id=session_id,
+        execution_id=execution_id,
+        request_id="request-1",
+        recovery_ref=None,
+        config_fingerprint="a" * 64,
+    )
     return SimpleNamespace(execution=execution, session=session, binding=SimpleNamespace(agent_ref=None))
 
 
@@ -113,9 +120,21 @@ def record(**overrides):
         "interruption": None,
         "auto_confirm": {},
         "deepagent_state": None,
+        "checkpoint": None,
+        "last_group_message_id": "m-9",
+        "current_window_id": None,
+        "window_seq": None,
+        "last_rollover": None,
         "ending": {"outcome": "completed", "request_id": "request-0", "execution_id": "execution-0"},
     }
     data.update(overrides)
+    ending_value = data.get("ending")
+    if isinstance(ending_value, dict) and "last_group_message_id" in ending_value:
+        ending_value = dict(ending_value)
+        if "last_group_message_id" not in overrides:
+            data["last_group_message_id"] = ending_value["last_group_message_id"]
+        ending_value.pop("last_group_message_id")
+        data["ending"] = ending_value
     return data
 
 
@@ -266,6 +285,18 @@ def test_malformed_records_are_invalid(raw):
     assert_invalid(exc_info)
 
 
+def test_component_only_v1_record_is_not_mistaken_for_the_final_v1_shape():
+    """PA-11-V-15: the pre-checkpoint component record is not a compatible input."""
+    legacy = {
+        key: value
+        for key, value in record().items()
+        if key not in {"checkpoint", "last_group_message_id", "current_window_id", "window_seq", "last_rollover"}
+    }
+    with pytest.raises(BaseError) as exc_info:
+        RECORD.parse_record(json.dumps(legacy))
+    assert_invalid(exc_info)
+
+
 def test_stopped_call_placeholders_follow_their_group_and_are_idempotent():
     """PA-10-V-08: real and native interruption results stay; only missing ones get the placeholder."""
     native_interrupted = tool_result("call-b", "[Interrupted] Tool 'remember' execution was cancelled by user.")
@@ -359,6 +390,55 @@ async def test_load_restores_state_and_the_waiting_scene():
     assert ctx.session.get_state(INTERRUPTION_KEY) == state
     assert ctx.session.get_state(INTERRUPT_AUTO_CONFIRM_KEY) == {"remember": True}
     assert ctx.session.get_state("deepagent") == {"iteration": 2, "plan_mode": {"mode": "plan"}}
+
+
+@pytest.mark.asyncio
+async def test_load_rejects_archive_when_old_window_snapshot_does_not_match():
+    """PA-11 recovery must not accept matching IDs when the archived content differs."""
+    state_store, backend = store()
+    data = record(
+        checkpoint={
+            "request_id": "request-0",
+            "execution_id": "execution-0",
+            "iteration_seq": 2,
+            "kind": "react_iteration",
+        },
+        ending=None,
+        current_window_id="window-1",
+        window_seq=1,
+    )
+    await backend.set(STATE.WindowStore.state_key("agent:1", "session%a"), json.dumps(data))
+    await state_store._store.archive_window(
+        "agent:1",
+        "session%a",
+        {
+            "old_window_id": "window-1",
+            "old_window_seq": 1,
+            "new_window_id": "window-2",
+            "new_window_seq": 2,
+            "trigger_kind": "agent",
+            "request_id": "request-0",
+            "execution_id": "execution-0",
+            "spec_fingerprint": "a" * 64,
+            "seed": {"objective": "continue"},
+            "retained_item_refs": [],
+            "token_usage": {"input_tokens": 100},
+            "messages": RECORD.encode_messages([UserMessage(content="archived old window")]),
+            "candidate_fingerprint": "c" * 64,
+            "iteration_seq": 2,
+            "last_group_message_id": "m-9",
+        },
+    )
+    recovering = context()
+    recovering.execution.request_id = "request-0"
+    recovering.execution.recovery_ref = "execution-0"
+    recovering.execution.config_fingerprint = "a" * 64
+
+    with pytest.raises(BaseError) as exc_info:
+        await state_store.load(recovering)
+
+    assert_invalid(exc_info)
+    assert recovering.session.get_state("context") is None
 
 
 @pytest.mark.asyncio
@@ -556,6 +636,11 @@ async def test_save_patches_interrupted_endings_and_writes_one_record(outcome, m
         "interruption",
         "auto_confirm",
         "deepagent_state",
+        "checkpoint",
+        "last_group_message_id",
+        "current_window_id",
+        "window_seq",
+        "last_rollover",
         "ending",
     }
     messages = RECORD.decode_messages(data["messages"])
@@ -565,6 +650,92 @@ async def test_save_patches_interrupted_endings_and_writes_one_record(outcome, m
     ]
     assert messages[-1].metadata == {PART: "execution_end"}
     assert data["ending"]["outcome"] == outcome and data["ending"]["execution_id"] == "execution-1"
+
+
+@pytest.mark.asyncio
+async def test_terminal_save_uses_final_v1_shape_and_keeps_group_cursor_top_level(monkeypatch):
+    monkeypatch.setattr(STATE.ExecutionStateStore, "_sync_native", staticmethod(skip_sync))
+    state_store, backend = store()
+
+    await state_store.save(context(), ending(last_group_message_id="m-final"))
+
+    data = await saved(backend)
+    assert data["schema_version"] == 1
+    assert data["checkpoint"] is None and data["ending"]["outcome"] == "completed"
+    assert data["last_group_message_id"] == "m-final"
+    assert "last_group_message_id" not in data["ending"]
+    assert data["current_window_id"] is None and data["window_seq"] is None
+    assert data["last_rollover"] is None
+
+
+@pytest.mark.asyncio
+async def test_active_checkpoint_round_trips_without_tidying_the_complete_window(monkeypatch):
+    """PA-11-V-12: save a complete active window without applying terminal cleanup."""
+    monkeypatch.setattr(STATE.ExecutionStateStore, "_sync_native", staticmethod(skip_sync))
+    state_store, backend = store()
+    active = context()
+    active.session.update_state(
+        {
+            "context": {
+                "default_context_id": {
+                    "messages": [
+                        UserMessage(content="task"),
+                        AssistantMessage(content="checking", tool_calls=[call("call-active")]),
+                        tool_result("call-active"),
+                        UserMessage(content="temporary", metadata={PART: "temporary_background"}),
+                    ]
+                }
+            }
+        }
+    )
+    checkpoint = INTEGRATION.SessionCheckpoint(
+        request_id="request-1",
+        execution_id="execution-1",
+        iteration_seq=1,
+        kind="react_iteration",
+        last_group_message_id="m-10",
+    )
+
+    await state_store.checkpoint(active, checkpoint)
+
+    data = await saved(backend)
+    assert data["checkpoint"] == {
+        "request_id": "request-1",
+        "execution_id": "execution-1",
+        "iteration_seq": 1,
+        "kind": "react_iteration",
+    }
+    assert data["ending"] is None and data["last_group_message_id"] == "m-10"
+    assert data["window_seq"] == 1 and data["current_window_id"]
+    restored = RECORD.decode_messages(data["messages"])
+    assert restored[-1].metadata == {PART: "temporary_background"}
+    assert all(message.metadata.get(PART) != "execution_end" for message in restored)
+
+    loaded_context = context()
+    loaded = await state_store.load(loaded_context)
+    assert loaded.checkpoint == checkpoint
+    assert loaded.current_window_id == data["current_window_id"] and loaded.window_seq == 1
+    assert loaded.last_group_message_id == "m-10"
+    assert window(loaded_context.session)[-1].metadata == {PART: "temporary_background"}
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_write_failure_is_reported_as_failure(monkeypatch):
+    """PA-11-V-14: a failed checkpoint must not return as if the next model call were safe."""
+    monkeypatch.setattr(STATE.ExecutionStateStore, "_sync_native", staticmethod(skip_sync))
+    state_store = STATE.ExecutionStateStore(STATE.WindowStore(FailingBackend(ValueError("backend down"))))
+    checkpoint = INTEGRATION.SessionCheckpoint(
+        request_id="request-1",
+        execution_id="execution-1",
+        iteration_seq=1,
+        kind="react_iteration",
+        last_group_message_id=None,
+    )
+
+    with pytest.raises(BaseError) as exc_info:
+        await state_store.checkpoint(context(), checkpoint)
+
+    assert_runtime(exc_info)
 
 
 @pytest.mark.asyncio
@@ -747,8 +918,8 @@ async def test_new_records_carry_no_pending_answer(monkeypatch):
         "execution_id",
         "reply_target",
         "output_refs",
-        "last_group_message_id",
     }
+    assert written["checkpoint"] is None and written["last_group_message_id"] == "m-9"
 
 
 @pytest.mark.asyncio

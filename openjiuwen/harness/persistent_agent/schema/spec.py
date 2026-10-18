@@ -62,8 +62,8 @@ class PersistentAgentSpec(DeepAgentSpec):
     # Identifies this serialized Spec shape so unsupported configuration versions fail closed.
     schema_version: Literal[1] = 1
     # Advertises only capabilities the runtime can validate and bind for this Agent.
-    enabled_features: frozenset[Literal["construction", "workspace_read", "workspace_write"]] = Field(
-        default=frozenset({"construction"}), min_length=1
+    enabled_features: frozenset[Literal["construction", "workspace_read", "workspace_write", "window_management"]] = (
+        Field(default=frozenset({"construction"}), min_length=1)
     )
     # Largest file share_file may hand off, in bytes actually read; the host checks the same published limit.
     share_file_max_bytes: int = Field(default=SHARE_FILE_DEFAULT_MAX_BYTES, gt=0, le=SHARE_FILE_MAX_BYTES_CEILING)
@@ -107,6 +107,14 @@ class PersistentAgentSpec(DeepAgentSpec):
                 raise build_error(
                     StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
                     error_msg="workspace_write_access is required for workspace_write",
+                )
+        if "window_management" in self.enabled_features:
+            from ..execution.capacity import capacity_limits
+
+            if capacity_limits(self) is None:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                    error_msg="window_management requires explicit model capacity limits",
                 )
         parts = super().resolve_parts(context)
         context.binding.parts = parts
@@ -171,6 +179,18 @@ class PersistentAgentSpec(DeepAgentSpec):
                     error_msg=f"{SEARCH_TOOL_NAME} is reserved for Persistent group history",
                 )
             tool = PersistentGroupMessageSearchTool(execution=context.execution, group_chat=context.ports.group_chat)
+            parts.tool_instances.append(tool)
+            parts.tool_cards.append(tool.card)
+            parts.config.tools = list(parts.tool_cards)
+        if "window_management" in self.enabled_features:
+            from ..tools.new_context import NEW_CONTEXT_TOOL_NAME, PersistentNewContextTool
+
+            if any(card.name == NEW_CONTEXT_TOOL_NAME for card in parts.tool_cards):
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                    error_msg=f"{NEW_CONTEXT_TOOL_NAME} is reserved for Persistent window management",
+                )
+            tool = PersistentNewContextTool(context.binding.control)
             parts.tool_instances.append(tool)
             parts.tool_cards.append(tool.card)
             parts.config.tools = list(parts.tool_cards)
