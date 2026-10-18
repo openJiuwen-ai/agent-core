@@ -182,6 +182,28 @@ class PersistentAgentSpec(DeepAgentSpec):
             parts.tool_instances.append(tool)
             parts.tool_cards.append(tool.card)
             parts.config.tools = list(parts.tool_cards)
+        from ..execution.session_state import WindowStore
+        from ..tools.session_history import SEARCH_TOOL_NAME as SESSION_HISTORY_TOOL_NAME
+        from ..tools.session_history import PersistentSessionHistorySearchTool
+
+        if any(card.name == SESSION_HISTORY_TOOL_NAME for card in parts.tool_cards):
+            raise build_error(
+                StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                error_msg=f"{SESSION_HISTORY_TOOL_NAME} is reserved for Persistent session history",
+            )
+        window_backend = context.ports.window_backend
+        if window_backend is None:
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg="window_backend is required for Persistent session history",
+            )
+        tool = PersistentSessionHistorySearchTool(
+            execution=context.execution,
+            window_store=WindowStore(window_backend),
+        )
+        parts.tool_instances.append(tool)
+        parts.tool_cards.append(tool.card)
+        parts.config.tools = list(parts.tool_cards)
         if "window_management" in self.enabled_features:
             from ..tools.new_context import NEW_CONTEXT_TOOL_NAME, PersistentNewContextTool
 
