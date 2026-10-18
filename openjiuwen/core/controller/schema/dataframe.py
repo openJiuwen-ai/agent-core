@@ -15,8 +15,9 @@ DataFrame is the basic unit for data transmission in the controller,
 used for passing data in scenarios such as events, task input/output, etc.
 """
 
+import builtins
 from typing import Literal, Optional, Dict, Any, Union
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 
 
 class BaseDataFrame(BaseModel):
@@ -41,7 +42,7 @@ class TextDataFrame(BaseDataFrame):
         type: DataFrame type, fixed as "text"
         text: Text content
     """
-    type: Literal["text", "file", "json"] = "text"
+    type: Literal["text"] = "text"
     text: str
 
 
@@ -58,11 +59,20 @@ class FileDataFrame(BaseDataFrame):
         bytes: Byte data of file content (optional, mutually exclusive with uri)
         uri: File URI (optional, mutually exclusive with bytes)
     """
-    type: Literal["text", "file", "json"] = "file"
+    type: Literal["file"] = "file"
     name: str
     mimeType: str
-    bytes: Optional[bytes] = None
+    # ``bytes`` as a bare annotation resolves to the field name itself in the
+    # class body (it becomes NoneType), making the field unable to hold bytes.
+    bytes: Optional[builtins.bytes] = None
     uri: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self):
+        """bytes and uri are documented as mutually exclusive alternatives."""
+        if (self.bytes is None) == (self.uri is None):
+            raise ValueError("FileDataFrame requires exactly one of bytes or uri")
+        return self
 
 
 class JsonDataFrame(BaseDataFrame):
@@ -75,7 +85,7 @@ class JsonDataFrame(BaseDataFrame):
         type: DataFrame type, fixed as "json"
         data: JSON data dictionary
     """
-    type: Literal["text", "file", "json"] = "json"
+    type: Literal["json"] = "json"
     data: Dict[str, Any]
 
 
