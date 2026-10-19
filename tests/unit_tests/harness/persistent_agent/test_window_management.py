@@ -494,7 +494,7 @@ async def test_rollover_manager_marks_only_a_complete_react_iteration_as_safe():
     control = ExecutionControl()
     request = SimpleNamespace(context_window=1000, max_tokens=100, model_name="test")
     model = SimpleNamespace(model_request_config=request)
-    spec = SimpleNamespace(model=model, model_input_limit_tokens=800, capacity_safety_margin_tokens=50)
+    spec = SimpleNamespace(model=model)
     context = SimpleNamespace(
         binding=SimpleNamespace(control=control),
         execution=SimpleNamespace(execution_id="execution-1"),
@@ -520,11 +520,7 @@ async def test_complete_iteration_is_checkpointed_before_the_next_model_request(
     manager_module = import_module(f"{PKG}.execution.window_management")
     control = ExecutionControl()
     request = SimpleNamespace(context_window=1000, max_tokens=100, model_name="test")
-    spec = SimpleNamespace(
-        model=SimpleNamespace(model_request_config=request),
-        model_input_limit_tokens=800,
-        capacity_safety_margin_tokens=50,
-    )
+    spec = SimpleNamespace(model=SimpleNamespace(model_request_config=request))
     execution = SimpleNamespace(request_id="request-1", execution_id="execution-1")
     context = SimpleNamespace(binding=SimpleNamespace(control=control), execution=execution)
     store = SimpleNamespace(checkpoint=AsyncMock())
@@ -532,7 +528,10 @@ async def test_complete_iteration_is_checkpointed_before_the_next_model_request(
         context, "task", spec, store, None, last_group_message_id="group-message-1"
     )
     callback_context = SimpleNamespace(
-        context=SimpleNamespace(token_counter=lambda: ExactCounter()),
+        context=SimpleNamespace(
+            token_counter=lambda: ExactCounter(),
+            context_window_tokens=lambda: 1000,
+        ),
         inputs=SimpleNamespace(
             messages=[SystemMessage(content="system"), UserMessage(content="next request")],
             tools=[],
@@ -554,20 +553,131 @@ async def test_complete_iteration_is_checkpointed_before_the_next_model_request(
 
 
 @pytest.mark.asyncio
+async def test_fallback_threshold_uses_the_context_engine_effective_window():
+    manager_module = import_module(f"{PKG}.execution.window_management")
+    control = ExecutionControl()
+    request = SimpleNamespace(context_window=None, max_tokens=100, model_name="test")
+    spec = SimpleNamespace(model=SimpleNamespace(model_request_config=request))
+    context = SimpleNamespace(
+        binding=SimpleNamespace(control=control),
+        execution=SimpleNamespace(request_id="request-1", execution_id="execution-1"),
+    )
+    store = SimpleNamespace(checkpoint=AsyncMock())
+    manager = manager_module.WindowSwitchManager(context, "task", spec, store, None, last_group_message_id=None)
+    resolved_window = Mock(return_value=2000)
+    callback_context = SimpleNamespace(
+        context=SimpleNamespace(token_counter=lambda: ExactCounter(), context_window_tokens=resolved_window),
+        inputs=SimpleNamespace(
+            messages=[SystemMessage(content="system"), UserMessage(content="x" * 994)],
+            tools=[],
+            react_iteration=2,
+        ),
+        extra={},
+    )
+    await manager.after_react_iteration(SimpleNamespace(extra={"_react_iteration": 1}, inputs=None))
+
+    result = await manager.before_model_request(callback_context)
+
+    assert result is None
+    store.checkpoint.assert_awaited_once()
+    resolved_window.assert_called_once_with()
+    assert control.pending_window_switch is None
+
+
+@pytest.mark.asyncio
+async def test_rollover_threshold_refreshes_from_the_current_context_engine_window():
+    manager_module = import_module(f"{PKG}.execution.window_management")
+    control = ExecutionControl()
+    spec = SimpleNamespace(model=SimpleNamespace(model_request_config=SimpleNamespace(context_window=4000)))
+    context = SimpleNamespace(
+        binding=SimpleNamespace(control=control),
+        execution=SimpleNamespace(request_id="request-1", execution_id="execution-1"),
+    )
+    manager = manager_module.WindowSwitchManager(context, "task", spec, None, None, last_group_message_id=None)
+    resolved_window = Mock(side_effect=[2000, 1000])
+    callback_context = SimpleNamespace(
+        context=SimpleNamespace(context_window_tokens=resolved_window),
+        inputs=SimpleNamespace(messages=[], tools=[]),
+        extra={},
+    )
+
+    await manager.before_model_request(callback_context)
+    await manager.before_model_request(callback_context)
+
+    assert resolved_window.call_count == 2
+    assert manager._context_window == 1000
+    assert manager._rollover_threshold == 800
+
+
+@pytest.mark.asyncio
+async def test_missing_effective_context_window_pauses_before_model_request():
+    manager_module = import_module(f"{PKG}.execution.window_management")
+    control = ExecutionControl()
+    spec = SimpleNamespace(model=SimpleNamespace(model_request_config=SimpleNamespace(context_window=1000)))
+    context = SimpleNamespace(
+        binding=SimpleNamespace(control=control),
+        execution=SimpleNamespace(request_id="request-1", execution_id="execution-1"),
+    )
+    manager = manager_module.WindowSwitchManager(context, "task", spec, None, None, last_group_message_id=None)
+    callback_context = SimpleNamespace(
+        context=SimpleNamespace(context_window_tokens=lambda: None),
+        inputs=SimpleNamespace(messages=[], tools=[]),
+        extra={},
+    )
+
+    result = await manager.before_model_request(callback_context)
+
+    assert result["reason"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_unavailable_window_after_candidate_rebuild_restores_the_old_context():
+    manager_module = import_module(f"{PKG}.execution.window_management")
+    control = ExecutionControl()
+    spec = SimpleNamespace(model=SimpleNamespace(model_request_config=SimpleNamespace(context_window=None)))
+    context = SimpleNamespace(
+        binding=SimpleNamespace(control=control),
+        execution=SimpleNamespace(request_id="request-1", execution_id="execution-1"),
+    )
+    manager = manager_module.WindowSwitchManager(context, "task", spec, None, None, last_group_message_id=None)
+    old_messages = [UserMessage(content="old window")]
+    set_messages = Mock()
+    callback_context = SimpleNamespace(
+        context=SimpleNamespace(context_window_tokens=lambda: None, set_messages=set_messages),
+        inputs=SimpleNamespace(messages=[UserMessage(content="candidate")], tools=[]),
+        extra={},
+    )
+    manager._prepared = manager_module._PreparedRollover(
+        old_messages=tuple(old_messages),
+        new_messages=(UserMessage(content="candidate"),),
+        seed=WINDOW.WindowSeed(objective="task"),
+        trigger_kind="agent",
+        retained_item_refs=(),
+        iteration_seq=1,
+    )
+    control.queue_window_switch(
+        WINDOW.WindowSwitchRequest(trigger_kind="agent", seed=WINDOW.WindowSeed(objective="task"))
+    )
+
+    result = await manager.before_model_request(callback_context)
+
+    assert result["reason"] == "error"
+    set_messages.assert_called_once_with(old_messages)
+    assert manager._prepared is None
+    assert control.pending_window_switch is None
+
+
+@pytest.mark.asyncio
 async def test_required_new_window_content_that_does_not_fit_pauses_without_writing():
     manager_module = import_module(f"{PKG}.execution.window_management")
     control = ExecutionControl()
     control.safe_boundary_pending = True
     control.pending_iteration_seq = 1
     control.queue_window_switch(
-        WINDOW.WindowSwitchRequest(trigger_kind="agent", seed=WINDOW.WindowSeed(objective="必须保留" * 100))
+        WINDOW.WindowSwitchRequest(trigger_kind="agent", seed=WINDOW.WindowSeed(objective="必须保留" * 200))
     )
     request = SimpleNamespace(context_window=1000, max_tokens=100, model_name="test")
-    spec = SimpleNamespace(
-        model=SimpleNamespace(model_request_config=request),
-        model_input_limit_tokens=50,
-        capacity_safety_margin_tokens=0,
-    )
+    spec = SimpleNamespace(model=SimpleNamespace(model_request_config=request))
     context = SimpleNamespace(
         binding=SimpleNamespace(control=control),
         execution=SimpleNamespace(execution_id="execution-1"),
@@ -582,6 +692,7 @@ async def test_required_new_window_content_that_does_not_fit_pauses_without_writ
     callback_context = SimpleNamespace(
         context=SimpleNamespace(
             token_counter=lambda: ExactCounter(),
+            context_window_tokens=lambda: 1000,
             get_messages=lambda: old_messages,
             set_messages=AsyncMock(),
         ),
@@ -599,17 +710,13 @@ async def test_required_new_window_content_that_does_not_fit_pauses_without_writ
 
 
 @pytest.mark.asyncio
-async def test_capacity_fallback_uses_the_same_rollover_pipeline_and_drops_only_optional_history():
+async def test_capacity_fallback_uses_eighty_percent_context_window_threshold():
     manager_module = import_module(f"{PKG}.execution.window_management")
     control = ExecutionControl()
     control.safe_boundary_pending = True
     control.pending_iteration_seq = 1
     request = SimpleNamespace(context_window=1000, max_tokens=100, model_name="test")
-    spec = SimpleNamespace(
-        model=SimpleNamespace(model_request_config=request),
-        model_input_limit_tokens=900,
-        capacity_safety_margin_tokens=0,
-    )
+    spec = SimpleNamespace(model=SimpleNamespace(model_request_config=request))
     execution = SimpleNamespace(request_id="request-1", execution_id="execution-1")
     context = SimpleNamespace(binding=SimpleNamespace(control=control), execution=execution)
 
@@ -634,11 +741,12 @@ async def test_capacity_fallback_uses_the_same_rollover_pipeline_and_drops_only_
             content="",
             tool_calls=[ToolCall(id="read-1", type="function", name="read_file", arguments="{}")],
         ),
-        ToolMessage(content="optional historical result " + "x" * 1000, tool_call_id="read-1"),
+        ToolMessage(content="optional historical result " + "x" * 760, tool_call_id="read-1"),
     ]
     archived_messages = tuple(old_messages)
     model_context = SimpleNamespace(
         token_counter=lambda: ExactCounter(),
+        context_window_tokens=lambda: 1000,
         get_messages=lambda: list(old_messages),
         set_messages=lambda messages: old_messages.__setitem__(slice(None), messages),
     )
@@ -676,7 +784,7 @@ def test_entry_installs_the_window_manager_only_for_opted_in_persistent_agents()
     )
     request = SimpleNamespace(context_window=1000, max_tokens=100, model_name="test")
     model = SimpleNamespace(model_request_config=request)
-    base = dict(model=model, model_input_limit_tokens=800, capacity_safety_margin_tokens=50)
+    base = dict(model=model)
     disabled = SimpleNamespace(**base, enabled_features=frozenset({"construction"}))
     enabled = SimpleNamespace(**base, enabled_features=frozenset({"construction", "window_management"}))
 
