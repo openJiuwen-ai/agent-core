@@ -76,6 +76,8 @@ AbilityManager      ▼
    `render_for_llm` 与 AFTER_TOOL_CALL rail 改写，包装器把该文本交给模型，不再把目标结构化
    结果二次渲染；文本走 `RelayedToolOutput` 私有属性，结构化结果（`{"name", "result"}`、原
    `error`）不变。
+   目标带图片时，包装器把目标的 `data["multimodal"]` 移到自身 `data` 上（嵌套的 `result` 不再带它），
+   图片与直接调用一样送达模型。
 5. **渲染不得改变流式输出的结构化工具结果**：上层服务依据 `ToolTrackingRail` / native harness
    `_ObservationRail` 流出的 `tool_result` 做判断与展示，两者读结构化结果而非 `ToolMessage`。
    改动前后对同一输入逐字节比对两路 payload：普通工具、MCP 多模态结果、`tool_call` 成功 / 失败
@@ -156,6 +158,4 @@ AbilityManager      ▼
   会话恢复需改读 `rendered_result`。jiuwenswarm 的 `JiuSwarmStreamEventRail`（priority 80，早于
   会追加审批提示的 `PlanApprovalRail` 76）、网关字段白名单、历史恢复与 web / TUI 展示尚未迁移，
   在 jiuwenswarm 侧跟进。
-- `tool_call` 包装器把目标结果嵌套在 `data["result"]`，目标 `data["multimodal"]` 的图片不会送达
-  模型（改动前即如此）。
 - `LspTool` 的 formatter 对列表形态的 definition 结果抛异常后回落 repr（改动前即如此）。

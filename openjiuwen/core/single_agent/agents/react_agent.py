@@ -109,6 +109,10 @@ _IDENTITY_SECTION_PRIORITY = 10
 _SKILLS_SECTION_PRIORITY = 90
 _PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY = "_openjiuwen_prompt_attachment_commit_callbacks"
 _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
+# UserMessage metadata: content indexes of tool images the model sees only until
+# it answers (multimodal item ``"keep_in_context": False``).
+_IMAGE_PARTS_SHOWN_ONCE_METADATA = "_openjiuwen_image_parts_shown_once"
+_IMAGE_SHOWN_ONCE_NOTE = "This image was shown once and is no longer attached."
 # Above this, the per-stage breakdown of invoke preparation is reported at INFO
 # so a slow start shows up without having to enable debug logging. Preparation
 # loads interruption state and builds the prompt, which is normal work worth a
@@ -1207,6 +1211,7 @@ class ReActAgent(BaseAgent):
                     model_client_config=model_client_config,
                 )
             ]
+        context_window_kwargs.setdefault("window_mutators", []).append(self._hide_answered_images_shown_once)
 
         context_window = await ctx.context.get_context_window(**context_window_kwargs)
         # Keep callback inputs aligned with the exact window sent to the
@@ -1216,6 +1221,37 @@ class ReActAgent(BaseAgent):
         if ctx.extra.get("_finalizing_max_iterations"):
             ctx.inputs.tools = None
         return context_window, usage_prompt_sections
+
+    @staticmethod
+    async def _hide_answered_images_shown_once(_context: ModelContext, window: ContextWindow) -> ContextWindow:
+        """Leave out tool images marked ``keep_in_context: False`` once the model has answered after them.
+
+        Only the window changes. The stored message keeps the image, so a call
+        that fails, pauses or resumes before that answer still shows it.
+        """
+        messages = window.context_messages
+        last_answer = max(
+            (index for index, message in enumerate(messages) if isinstance(message, AssistantMessage)),
+            default=-1,
+        )
+        window.context_messages = [
+            ReActAgent._without_images_shown_once(message) if index < last_answer else message
+            for index, message in enumerate(messages)
+        ]
+        return window
+
+    @staticmethod
+    def _without_images_shown_once(message: Any) -> Any:
+        if not isinstance(message, UserMessage) or not isinstance(message.content, list):
+            return message
+        shown_once = message.metadata.get(_IMAGE_PARTS_SHOWN_ONCE_METADATA)
+        if not shown_once:
+            return message
+        content = [
+            {"type": "text", "text": _IMAGE_SHOWN_ONCE_NOTE} if index in shown_once else part
+            for index, part in enumerate(message.content)
+        ]
+        return message.model_copy(update={"content": content})
 
     def _context_usage_prompt_sections(self) -> list[tuple[ContextCategory, str, str]]:
         """Return builder sections using the four-category product taxonomy."""
@@ -2339,6 +2375,7 @@ class ReActAgent(BaseAgent):
     def _build_multimodal_tool_results_message(tool_results: Any) -> Optional[UserMessage]:
         content: List[dict[str, Any]] = []
         loaded_paths: List[str] = []
+        shown_once: set[int] = set()
 
         for tool_result in tool_results:
             for item in ReActAgent._iter_multimodal_image_items(tool_result):
@@ -2352,14 +2389,15 @@ class ReActAgent(BaseAgent):
                         "text": f"Image loaded from {source}: {source_path}",
                     }
                 )
-                content.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": data_url,
-                        },
-                    }
-                )
+                image_part = {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": data_url,
+                    },
+                }
+                if item.get("keep_in_context") is False:
+                    shown_once.add(id(image_part))
+                content.append(image_part)
 
         if not content:
             return None
@@ -2371,7 +2409,12 @@ class ReActAgent(BaseAgent):
             ]
             content.insert(0, {"type": "text", "text": "\n".join(summary_lines)})
 
-        return UserMessage(content=content)
+        metadata = {}
+        if shown_once:
+            metadata[_IMAGE_PARTS_SHOWN_ONCE_METADATA] = [
+                index for index, part in enumerate(content) if id(part) in shown_once
+            ]
+        return UserMessage(content=content, metadata=metadata)
 
     @staticmethod
     def _iter_multimodal_image_items(tool_result: Any) -> List[dict[str, Any]]:
