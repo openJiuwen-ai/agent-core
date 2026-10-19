@@ -4,6 +4,7 @@
 """Unit tests for the F_62 TeamScheduler (leader-side scheduled dispatch)."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -113,7 +114,11 @@ def _build_scheduler(
         dispatch_mode="scheduled",
     )
     message_manager = AsyncMock()
+    message_manager.member_name = LEADER
     message_manager.send_message = AsyncMock(return_value="mid-1")
+    # The handoff scan asks the mailbox what the owner already holds; an
+    # empty mailbox is the default, tests seed rows via ``_mailbox_handoff``.
+    message_manager.get_messages = AsyncMock(return_value=[])
     infra = TeamInfra()
     infra.task_manager = task_manager
     infra.message_manager = message_manager
@@ -156,6 +161,12 @@ def _dm_targets(message_manager) -> list[tuple[str, dict]]:
     for call in message_manager.send_message.await_args_list:
         calls.append((call.kwargs["to_member_name"], call.kwargs["meta"]))
     return calls
+
+
+def _mailbox_handoff(to_member: str, task_id: str, *, template: str = "scheduler_task_start") -> SimpleNamespace:
+    """A stored leader start handoff row as ``get_messages`` would return it."""
+    meta = json.dumps({"template": template, "refs": {"task": task_id}})
+    return SimpleNamespace(from_member_name=LEADER, to_member_name=to_member, content="", meta=meta)
 
 
 def _reviewer_mgr(db, bus, name):
@@ -773,6 +784,96 @@ async def test_handoff_to_dormant_member_wakes_it_through_auto_start(db, bus):
 
     assert (await tm.get("z")).status == TaskStatus.IN_PROGRESS.value
     assert host.started_members == ["dev-1"]
+
+
+# ---------------------------------------------------------------------------
+# Handoff scan: reassignment of an active task
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reassigned_active_task_is_handed_to_its_new_owner(db, bus):
+    """An ``update_task`` reassignment keeps the task IN_PROGRESS, so the start
+    scan never fires for the new owner; the handoff scan mails it the same
+    start instruction and lazily starts it."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1")])
+    await scheduler.activate()
+    assert _dm_targets(mm) == [("dev-1", {"template": "scheduler_task_start", "refs": {"task": "a"}})]
+
+    assert (await tm.reassign("a", "dev-2")).ok
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    task = await tm.get("a")
+    assert task.status == TaskStatus.IN_PROGRESS.value
+    assert task.assignee == "dev-2"
+    assert _dm_targets(mm)[1:] == [("dev-2", {"template": "scheduler_task_start", "refs": {"task": "a"}})]
+    assert host.started_members == ["dev-1", "dev-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_handoff_scan_sends_each_owner_its_start_once(db, bus):
+    """Repeated wakes do not re-mail an owner that already holds its handoff."""
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1")])
+    await scheduler.activate()
+    assert (await tm.reassign("a", "dev-2")).ok
+
+    for _ in range(3):
+        await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert [target for target, _ in _dm_targets(mm)] == ["dev-1", "dev-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_restarted_scheduler_trusts_the_mailbox_before_re_sending_a_handoff(db, bus):
+    """A fresh scheduler (empty memo) re-learns handoffs from the mailbox: an
+    owner whose start row is already there gets nothing, an owner without one
+    gets its start. Read or unread does not matter."""
+    seeded, _host, mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph(
+        [
+            TaskGraphSpec(title="one", content="c", task_id="a", assignee="dev-1"),
+            TaskGraphSpec(title="two", content="c", task_id="b", assignee="dev-2"),
+        ]
+    )
+    await seeded.activate()
+    assert (await tm.reassign("b", "planner")).ok
+
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+
+    async def _get_messages(*, to_member_name: str, from_member_name: str):
+        assert from_member_name == LEADER
+        if to_member_name == "dev-1":
+            return [_mailbox_handoff("dev-1", "a")]
+        return []
+
+    mm.get_messages = AsyncMock(side_effect=_get_messages)
+    await scheduler.activate()
+
+    assert _dm_targets(mm) == [("planner", {"template": "scheduler_task_start", "refs": {"task": "b"}})]
+    assert host.started_members == ["planner"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_handoff_scan_recognises_a_plan_gate_start(db, bus):
+    """A plan-mode owner's start row is the plan template; it still counts as
+    the owner having been handed the task."""
+    seeded, _host, _mm, tm = _build_scheduler(db, bus)
+    await tm.add_graph([TaskGraphSpec(title="plan it", content="c", task_id="p", assignee="planner")])
+    await seeded.activate()
+    assert (await tm.get("p")).status == TaskStatus.PLANNING.value
+
+    scheduler, host, mm, tm = _build_scheduler(db, bus)
+    mm.get_messages = AsyncMock(return_value=[_mailbox_handoff("planner", "p", template="scheduler_task_start_plan")])
+    await scheduler.activate()
+
+    assert _dm_targets(mm) == []
+    assert host.started_members == []
 
 
 # ---------------------------------------------------------------------------

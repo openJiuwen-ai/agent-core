@@ -12,6 +12,11 @@ idempotent scan pair:
   ``PENDING(assignee)`` task via ``TeamTaskManager.start_task`` (CAS) and hand
   it over with a leader-identity mailbox message (delivery lazily starts the
   member runtime, so being offline is never a start precondition).
+* **handoff scan** — for each active task, make sure its *current* owner
+  holds a start handoff in the mailbox; an owner that acquired the task by
+  ``update_task`` reassignment (status preserved, so the start scan never
+  fires for it) is handed the same leader-identity start message, lazily
+  started like any other recipient.
 * **review scan** — dispatch review requests for freshly opened rounds, tally
   votes (``verdict.judge``), settle decided rounds via ``settle_review``,
   escalate to the leader when the round ceiling is exhausted or a round
@@ -43,7 +48,7 @@ from openjiuwen.agent_teams.agent.scheduling.verdict import (
     settle_review_tally,
 )
 from openjiuwen.agent_teams.i18n import t
-from openjiuwen.agent_teams.message_template import task_links
+from openjiuwen.agent_teams.message_template import parse_meta, task_links
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template, make_template_loader
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.status import TaskStatus
@@ -120,6 +125,12 @@ class TeamScheduler:
         self._escalated: set[tuple[str, int]] = set()
         self._summary_requested: set[tuple[str, int]] = set()
         self._digested_tasks: set[str] = set()
+        # (task_id, owner) pairs whose start handoff is known to sit in the
+        # mailbox — written when this process sends one, or when the handoff
+        # scan finds one already there. Saves the scan a mailbox query per
+        # active task on every wake; after a restart each pair costs exactly
+        # one query to re-learn.
+        self._handoff_known: set[tuple[str, str]] = set()
         self._all_done_announced = False
         self._review_feedback_dispatched: set[tuple[str, int]] = set()
         self._review_feedback_tasks: set[asyncio.Task[Any]] = set()
@@ -199,12 +210,13 @@ class TeamScheduler:
     # ------------------------------------------------------------------
 
     async def _scan(self) -> None:
-        """Run the three reconcile passes to a bounded fixpoint."""
+        """Run the four reconcile passes to a bounded fixpoint."""
         task_manager = self._infra.task_manager
         if task_manager is None:
             return
         for _ in range(_MAX_SCAN_PASSES):
             acted = await self._reconcile_starts(task_manager)
+            acted = await self._reconcile_handoffs(task_manager) or acted
             acted = await self._reconcile_reviews(task_manager) or acted
             acted = await self._reconcile_retirements(task_manager) or acted
             if not acted:
@@ -289,9 +301,77 @@ class TeamScheduler:
             started = await task_manager.get(candidate.task_id)
             if started is None:
                 continue
-            await self._send_as_leader(member_name, render.meta_task_start(started))
+            await self._send_task_start(started)
             acted = True
         return acted
+
+    async def _reconcile_handoffs(self, task_manager) -> bool:
+        """Hand every active task to an owner that never received its start.
+
+        The start scan hands a task over exactly when it flips it out of
+        ``PENDING``. A leader ``update_task(assignee=...)`` on an already
+        active task (``TASK_REASSIGNABLE_STATUSES`` keeps the status) therefore
+        produces no handoff: the former owner is steered off by
+        ``TASK_REVOKED``, but the new owner only sees a transient
+        ``TASK_CLAIMED`` — nothing if its runtime is not up yet, and under
+        scheduled dispatch there is no startup board survey to catch up from
+        (``ScheduledTaskBoardHandler.on_initial_task_poll``). The task then
+        sits ``IN_PROGRESS`` with nobody working on it until the owner's own
+        stale sweep fires or the leader notices.
+
+        This pass closes that gap from the board alone: for each active task
+        the current owner must hold a leader-identity start handoff bound to
+        that task in its mailbox (durable, so an offline owner drains it on
+        startup). Missing → send the same start message the start scan would
+        have sent, which also lazily starts the owner. Idempotent via the
+        mailbox itself plus the in-process ``_handoff_known`` memo; a
+        restarted leader re-learns each pair with one mailbox read.
+        """
+        message_manager = self._infra.message_manager
+        if message_manager is None:
+            return False
+        active: list[Any] = []
+        for status in (TaskStatus.PLANNING.value, TaskStatus.IN_PROGRESS.value):
+            active.extend(await task_manager.list_tasks(status=status))
+        acted = False
+        for task in active:
+            owner = task.assignee
+            if not owner or (task.task_id, owner) in self._handoff_known:
+                continue
+            if await self._owner_has_start_handoff(message_manager, owner, task.task_id):
+                self._handoff_known.add((task.task_id, owner))
+                continue
+            team_logger.info(
+                "[scheduler] active task %s has no start handoff for its owner %s; sending one",
+                task.task_id,
+                owner,
+            )
+            if await self._send_task_start(task):
+                acted = True
+        return acted
+
+    async def _owner_has_start_handoff(self, message_manager, owner: str, task_id: str) -> bool:
+        """Whether ``owner``'s mailbox holds a leader start handoff for ``task_id``.
+
+        Read or unread does not matter — a drained handoff was delivered, an
+        undrained one will be on the owner's next mailbox sweep.
+        """
+        rows = await message_manager.get_messages(
+            to_member_name=owner,
+            from_member_name=message_manager.member_name,
+        )
+        for row in rows:
+            if render.is_task_start_meta(parse_meta(row.meta), task_id):
+                return True
+        return False
+
+    async def _send_task_start(self, task) -> bool:
+        """Send the owner its start handoff and remember that it is in the mailbox."""
+        owner = task.assignee
+        sent = await self._send_as_leader(owner, render.meta_task_start(task))
+        if sent:
+            self._handoff_known.add((task.task_id, owner))
+        return sent
 
     async def _reconcile_reviews(self, task_manager) -> bool:
         """Dispatch, judge, settle, escalate and re-nudge open review rounds."""
@@ -735,7 +815,7 @@ class TeamScheduler:
                 except Exception:
                     team_logger.debug("[scheduler] temp reviewer dispose failed for %s", reviewer)
 
-    async def _send_as_leader(self, member_name: str, meta: dict) -> None:
+    async def _send_as_leader(self, member_name: str, meta: dict) -> bool:
         """Leader-identity mailbox handoff + idempotent lazy member startup.
 
         The row carries the delivery payload, not the text: ``content`` is
@@ -746,17 +826,29 @@ class TeamScheduler:
         via the same ``UNSTARTED -> STARTING`` CAS the send_message tool uses;
         an already-running member simply gets the MESSAGE wake. Per-recipient
         failures are logged and never abort the scan.
+
+        Returns:
+            True iff the mailbox row landed (the member startup is best-effort
+            and does not affect the result).
         """
         message_manager = self._infra.message_manager
         if message_manager is None:
-            return
+            return False
         try:
             message_id = await message_manager.send_message(content="", to_member_name=member_name, meta=meta)
-            if not message_id:
-                team_logger.error("[scheduler] handoff message to %s was not delivered", member_name)
-            await self._host.auto_start_member(member_name)
         except Exception:
             team_logger.error("[scheduler] handoff to %s failed", member_name, exc_info=True)
+            return False
+        if not message_id:
+            team_logger.error("[scheduler] handoff message to %s was not delivered", member_name)
+        # The row is the handoff; startup is a separate best-effort step whose
+        # failure must not make the caller believe the mail never landed (it
+        # would re-send on the next scan).
+        try:
+            await self._host.auto_start_member(member_name)
+        except Exception:
+            team_logger.error("[scheduler] member startup after handoff to %s failed", member_name, exc_info=True)
+        return bool(message_id)
 
     async def _escalate(self, task, content: str) -> None:
         """Inject an escalation into the leader once per (task, round)."""

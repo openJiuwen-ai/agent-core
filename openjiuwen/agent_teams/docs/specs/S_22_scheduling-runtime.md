@@ -8,8 +8,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/scheduling/` |
-| 最近一次修订日期 | 2026-10-14 |
-| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback）、`F_118_task-scoped-member-lifetime.md`（第三个幂等扫描：任务内联成员的退场请求；交接消息的上下游简述）、`F_119_scheduled-completion-handoff-via-note.md`（完成交接改走任务行 `summary` / `note`、leader 摘要带完成摘要、验收通过延迟告知） |
+| 最近一次修订日期 | 2026-10-15 |
+| 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback）、`F_118_task-scoped-member-lifetime.md`（第三个幂等扫描：任务内联成员的退场请求；交接消息的上下游简述）、`F_119_scheduled-completion-handoff-via-note.md`（完成交接改走任务行 `summary` / `note`、leader 摘要带完成摘要、验收通过延迟告知）；bugfix `B_06_scheduled-reassign-active-task-handoff-gap.md`（第四个幂等扫描：改派活跃任务后给新 owner 补发开工交接） |
 
 ## 范围 / 边界
 
@@ -33,7 +33,7 @@
 1. **调度器只在 `spec.dispatch_mode == "scheduled"` 的 leader kernel 上存在**：`CoordinationKernel.setup` 构造（休眠态）；其余 kernel（teammate、autonomous leader）的 `scheduler` 恒为 None。
 2. **激活条件 = team 已建成**。两个激活点：`kernel.notify_team_built()`（build_team 成功回调内，先于任何 teammate spawn / create_task）与 `kernel.start()`（team 行已存在——warm resume / 冷恢复）。`pause()` / `stop()` 即 `deactivate()`。
 3. **dispatch_mode 是静态 spec 配置**（F_62 评审定稿）：`TeamAgentSpec.dispatch_mode` 在构建期决定一切——rails/工具形态/提示词按模式装配、每套一份互不混写；`TeamSpec.dispatch_mode` 镜像它随 spawn 载荷到达成员进程；`build_team` **不选择协调模式**（`team_info.dispatch_mode` 列只是记录，spec 是运行时真相）；运行期没有任何模式切换路径。
-4. **调度器不理解事件，只理解看板**：任何触发（`task_*` / `member_*` transport 事件、`POLL_TASK`、`SCHEDULER_SCAN`、激活）都跑同一组三个幂等扫描（开工 / 验票 / 退场）到有界不动点（`_MAX_SCAN_PASSES`）。恢复没有独立路径——激活扫描就是恢复。事件仅承担两个扫描推不出的职责：终态摘要与 `TASK_LIST_DRAINED` 收尾（事件只发一次）。
+4. **调度器不理解事件，只理解看板**：任何触发（`task_*` / `member_*` transport 事件、`POLL_TASK`、`SCHEDULER_SCAN`、激活）都跑同一组四个幂等扫描（开工 / 交接补发 / 验票 / 退场）到有界不动点（`_MAX_SCAN_PASSES`）。恢复没有独立路径——激活扫描就是恢复。事件仅承担两个扫描推不出的职责：终态摘要与 `TASK_LIST_DRAINED` 收尾（事件只发一次）。
 5. **交接 = leader 身份邮箱消息，投递即启动**：`_send_as_leader` 先写邮箱行（持久）再 `host.auto_start_member`（`UNSTARTED→STARTING` 拉起、`ERROR→RESTARTING` 复活、`DORMANT→RESTARTING` 唤醒，三条都是 CAS、幂等；给休眠成员派新任务即把它叫醒，F_118）。成员在线与否不是开工前置条件；成员侧零新代码（走既有 `MessageHandler`）。行里存的是**投递载荷不是文案**（`content=""` + `meta`），文案在投递时按模板渲染——见「消息面」段与 `S_12` 的 meta 三铁律。
 6. **`SchedulerHost.deliver_input` 只准注入 leader 自身**（终态摘要 / 升级 / 收尾）。对成员的输入永远走邮箱。
 7. **开工规则**：成员无活跃任务（`{PLANNING, IN_PROGRESS, IN_REVIEW}`）时，取其名下 `updated_at` 最早的 `PENDING(assignee)` 任务 `start_task`（DAO CAS；plan_mode 成员落 `PLANNING`）。并发/重复触发由 CAS 与一活跃探针消歧。
@@ -42,7 +42,7 @@
 10. **投票判定策略在调度器，票据事实在 DB**：`verify_task`（scheduled 团队）只追加票行 + 发 `TASK_REVIEW_VOTE`，不翻转状态；autonomous 团队维持首裁即决。工具描述随语义分离（desc_key：`verify_task` / `verify_task_scheduled`）。策略更换 = 替换 `verdict.judge`，不碰票表与状态机。
 11. **leader 自发事件经 `SCHEDULER_SCAN` 回声可见**：`kernel._filter_self` 丢弃 self 事件时，若调度器激活且事件是 `task_*`，改投 `InnerEventType.SCHEDULER_SCAN`。coordination 无 handler 监听该 inner 事件；调度器视其为纯扫描提示。
 12. **异常语义**：`TeamScheduler.on_event` 吞普通异常（log + 下次触发重试幂等扫描），绝不让 bus loop 挂掉——与 `AsyncCallbackFramework.trigger` 的 swallow 语义对齐。
-13. **内存记账不持久化**：送审去重 / 催办节流 / 升级去重 / 摘要去重都是进程内状态；leader 重启最坏重发一次送审或升级。看板真相只在 DB。
+13. **内存记账不持久化**：送审去重 / 催办节流 / 升级去重 / 摘要去重 / 交接已知对（`_handoff_known`）都是进程内状态；leader 重启最坏重发一次送审或升级、每个活跃任务多读一次邮箱。看板真相只在 DB，交接真相在邮箱。
 14. **各分发模式拥有自己的 task-board / stale handler 类，选择只发生在装配点**：
     `ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler` 是调度模式的 task-board / stale
     handler（verify 闸三事件与 `TASK_REVIEW_VOTE` 一律路由到 resume_polls-only 的
@@ -78,6 +78,19 @@
     `shutdown_member` **不发告别通知**（它只会躺着未读，且会让机制 18 的休眠延迟永远成立），
     请求与自落之间到达的真实消息由机制 18 的「休眠例外」先投递再自落。被唤醒的成员再次满足
     三条件即再次休眠，没有"醒了就常驻"的特例。
+
+18. **交接补发扫描：活跃任务的当前 owner 必须持有开工交接**（B_06）。开工扫描（不变量 7）只在
+    任务离开 `PENDING` 的那一刻发交接；leader `update_task(assignee=...)` 改派一个 `PLANNING` /
+    `IN_PROGRESS` 任务时状态原地保留（`TASK_REASSIGNABLE_STATUSES`），不再经过那一刻——新 owner
+    只收到瞬时 `TASK_CLAIMED`，runtime 未起（`UNSTARTED` / `DORMANT`）则无人接收，且不变量 14 的
+    调度类 handler 没有首启板巡视可以补课。`_reconcile_handoffs` 与开工并列：对每个
+    `PLANNING` / `IN_PROGRESS` 且有 assignee 的任务，查 owner 邮箱里是否已有 leader 身份、
+    `meta.template ∈ {scheduler_task_start, scheduler_task_start_plan}` 且 `refs.task == task_id` 的行
+    （`render.is_task_start_meta`；已读未读皆算——读过即已投递，未读则下次 sweep 必投），没有就
+    `_send_as_leader(owner, meta_task_start(task))`——与开工扫描逐字同一条交接，同样懒启动 owner。
+    幂等由邮箱行本身保证，进程内 `_handoff_known`（`(task_id, owner)`）只是省查询；
+    `_send_as_leader` 返回邮箱行是否落下，落下才记账，失败留给下次扫描重试。调度器仍不消费
+    "改派"事件：`TASK_REVOKED` / `TASK_CLAIMED` 的 self 回声只是一次扫描提示（不变量 11）。
 
 ## 接口契约
 
@@ -160,7 +173,7 @@ kernel 侧：
 
 | 场景 | 收件人 | template key |
 |---|---|---|
-| 开工（build / plan 闸） | assignee | `scheduler_task_start` / `scheduler_task_start_plan` |
+| 开工（build / plan 闸）；改派活跃任务后给新 owner 的补发交接是同一条（不变量 18） | assignee | `scheduler_task_start` / `scheduler_task_start_plan` |
 | 送审派发 / 催办 | 每个 reviewer / 未投票 reviewer | `scheduler_review_request` / `scheduler_review_renudge` |
 | 打回返工（`params`: 聚合 fail feedback + 解析后轮数上限） | author | `scheduler_rework` |
 

@@ -46,10 +46,30 @@ _REWORK = "scheduler_rework"
 _REWORK_SUMMARY = "scheduler_rework_summary"
 
 
+_TASK_START_TEMPLATES = frozenset({_TASK_START, _TASK_START_PLAN})
+
+
 def meta_task_start(task) -> dict:
     """Delivery payload for the assignee's start instruction (plan gate aware)."""
     template = _TASK_START_PLAN if task.status == TaskStatus.PLANNING.value else _TASK_START
     return build_meta(template, refs={"task": task.task_id})
+
+
+def is_task_start_meta(meta: dict | None, task_id: str) -> bool:
+    """Whether a parsed mailbox ``meta`` is a start handoff bound to ``task_id``.
+
+    The handoff backstop (B_06) asks the mailbox "did this owner ever get a
+    start instruction for this task?"; the template keys stay private to this
+    module, so the question is answered here rather than by string-matching
+    in the scheduler. Either start template counts — a plan-gate start is
+    still the owner's start.
+    """
+    if not meta:
+        return False
+    if meta.get("template") not in _TASK_START_TEMPLATES:
+        return False
+    refs = meta.get("refs") or {}
+    return refs.get("task") == task_id
 
 
 def meta_review_request(task) -> dict:

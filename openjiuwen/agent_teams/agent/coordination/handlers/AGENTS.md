@@ -254,7 +254,8 @@ run_id**——人工交互靠 `correlation_id` 路由，设计如此）。`deliv
   全部路由到 `on_task_board_event`，而后者被重写成 **resume_polls-only**（交接是调度器的
   leader 身份邮箱消息，再自反应就是双投递；leader 的感知走调度器的摘要/升级）。
   `on_initial_task_poll` 覆写为 no-op（同理：调度器的 handoff 是邮箱里的持久行，首启邮箱
-  sweep 会 drain 它）。**继承** `TASK_CLAIMED` / `REVOKED` / `CANCELLED` / `UPDATED` 的定向
+  sweep 会 drain 它；改派到手的活跃任务也不例外——调度器的交接补发扫描会给没有开工行的
+  新 owner 补一封，B_06）。**继承** `TASK_CLAIMED` / `REVOKED` / `CANCELLED` / `UPDATED` 的定向
   steer——`update_task` 在两个模式下同义。
 - `ScheduledStaleTaskHandler`：`on_poll_task` 只扫自己的 stale 活跃任务（漏投递的兜底），
   **不做 leader stale-pending 自催**（调度模式下排队中的 `PENDING(assignee)` 是常态，调度器
