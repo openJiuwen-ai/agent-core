@@ -99,6 +99,10 @@ class WebSocketEventPublisher:
         request_id = f"team-event-{uuid.uuid4()}"
         request = self._build_request(topic_id, message, request_id)
         async with self._lock:
+            if self._session is None or self._session.closed:
+                raise RuntimeError("WebSocket event publisher is not started")
+            if self._ws is None or self._ws.closed:
+                await self.start()
             ws = self._ws
             if ws is None or ws.closed:
                 raise RuntimeError("WebSocket event publisher is not started")
