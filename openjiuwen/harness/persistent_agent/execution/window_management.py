@@ -37,6 +37,7 @@ _SEED_PREFIX = "【窗口交接要点；事实与副作用状态仍需核实】\
 _FALLBACK_NEXT_STEP = "根据原始任务和保留的工具结果继续；不要把交接文字当作操作成功证明。"
 _PROMPT_ATTACHMENT_HISTORY = "_openjiuwen_prompt_attachment_history"
 _PROTECTED_TOOL_NAMES = frozenset({"share_file"})
+_ROLLOVER_CONTEXT_RATIO = 0.8
 
 
 @dataclass(frozen=True)
@@ -212,7 +213,7 @@ def restore_rollover_candidate(
 
 
 class WindowSwitchManager:
-    """One PA-11 coordinator for both Agent requests and exact-capacity fallback."""
+    """One PA-11 coordinator for Agent requests and the 80% rollover fallback."""
 
     def __init__(
         self,
@@ -230,7 +231,8 @@ class WindowSwitchManager:
         self._state_store = state_store
         self._emitter = emitter
         self._last_group_message_id = last_group_message_id
-        self._limits = capacity.capacity_limits(spec)
+        self._context_window = 0
+        self._rollover_threshold = 0
         self._prepared: _PreparedRollover | None = None
 
     async def after_react_iteration(self, ctx: "AgentCallbackContext | ExecutionControl") -> None:
@@ -246,6 +248,12 @@ class WindowSwitchManager:
     async def before_model_request(self, ctx: "AgentCallbackContext") -> dict | None:
         """Checkpoint or switch after the prior batch, immediately before the next model call."""
         control = self._context.binding.control
+        if not self._refresh_rollover_threshold(ctx):
+            if self._prepared is not None:
+                self._restore_old_context(ctx, self._prepared)
+                self._prepared = None
+                control.pending_window_switch = None
+            return _pause("error", "上下文引擎未能解析有效上下文窗口，已暂停；不会调用模型。")
         if self._prepared is not None:
             return await self._finish_prepared(ctx)
         if not control.safe_boundary_pending:
@@ -260,12 +268,9 @@ class WindowSwitchManager:
         request = control.pending_window_switch
         current_tokens = self._count_request(ctx)
         if request is None:
-            if self._limits is None:
-                await self._checkpoint(control, iteration_seq)
-                return None
             if current_tokens is None:
                 return _pause("error", "当前模型请求无法可靠计数，已暂停；不会按估算结果换窗。")
-            if current_tokens <= self._limits.available_input:
+            if current_tokens <= self._rollover_threshold:
                 await self._checkpoint(control, iteration_seq)
                 return None
             try:
@@ -280,6 +285,22 @@ class WindowSwitchManager:
             request = WindowSwitchRequest(trigger_kind="capacity_fallback", seed=seed)
 
         return await self._prepare(ctx, request, iteration_seq)
+
+    def _refresh_rollover_threshold(self, ctx: "AgentCallbackContext") -> bool:
+        """Use the active ContextEngine's resolved model window for each model request."""
+        context = getattr(ctx, "context", None)
+        resolve_window = getattr(context, "context_window_tokens", None)
+        if not callable(resolve_window):
+            return False
+        try:
+            context_window = resolve_window()
+        except Exception:  # noqa: BLE001 - an unavailable context window must not allow a model call
+            return False
+        if not isinstance(context_window, int) or isinstance(context_window, bool) or context_window <= 0:
+            return False
+        self._context_window = context_window
+        self._rollover_threshold = context_window * 4 // 5
+        return True
 
     async def _checkpoint(self, control: ExecutionControl, iteration_seq: int) -> None:
         execution = self._context.execution
@@ -385,12 +406,12 @@ class WindowSwitchManager:
         if needed is None:
             control.pending_window_switch = None
             return _pause("error", "新窗口请求无法可靠计数，已暂停；不会使用估算值继续。")
-        if self._limits is None or needed > self._limits.available_input:
+        if needed > self._rollover_threshold:
             control.pending_window_switch = None
-            available = self._limits.available_input if self._limits is not None else 0
             return _pause(
                 "context_unfit",
-                f"新窗口的必要内容需要 {needed} 个输入 token，可用上限为 {available}；未删除必要信息，也未切换。",
+                f"新窗口的必要内容需要 {needed} 个输入 token，超过 context_window 的 80% 阈值 "
+                f"({self._rollover_threshold})；未删除必要信息，也未切换。",
             )
 
         self._prepared = _PreparedRollover(
@@ -441,15 +462,15 @@ class WindowSwitchManager:
         required_count = self._count_candidate(ctx, required)
         if required_count is None:
             raise _ContextCountUnavailable("required candidate content cannot be counted reliably")
-        if self._limits is None or required_count > self._limits.available_input:
-            raise _RequiredContextUnfit("required candidate content exceeds the configured input capacity")
+        if required_count > self._rollover_threshold:
+            raise _RequiredContextUnfit("required candidate content exceeds 80% of context_window")
 
         for group in reversed(optional):
             proposed = [*required, *(deepcopy(message) for message in group.messages)]
             measured = self._count_candidate(ctx, proposed)
             if measured is None:
                 raise _ContextCountUnavailable("recent message group cannot be counted reliably")
-            if measured > self._limits.available_input:
+            if measured > self._rollover_threshold:
                 break
             selected.append(group)
             required = proposed
@@ -470,22 +491,21 @@ class WindowSwitchManager:
             self._prepared = None
             control.pending_window_switch = None
             return _pause("error", "重建后的模型请求无法可靠计数，已暂停；换窗没有提交。")
-        if self._limits is None or needed > self._limits.available_input:
+        if needed > self._rollover_threshold:
             self._restore_old_context(ctx, prepared)
             self._prepared = None
             control.pending_window_switch = None
-            available = self._limits.available_input if self._limits is not None else 0
             return _pause(
                 "context_unfit",
-                f"新窗口完整请求需要 {needed} 个输入 token，可用上限为 {available}；必要内容未被截断。",
+                f"新窗口完整请求需要 {needed} 个输入 token，超过 context_window 的 80% 阈值 "
+                f"({self._rollover_threshold})；必要内容未被截断。",
             )
 
         token_usage = {
             "candidate_input_tokens": needed,
-            "input_limit": self._limits.available_input,
-            "context_window": self._limits.context_window,
-            "output_reserve": self._limits.output_reserve,
-            "safety_margin": self._limits.safety_margin,
+            "input_limit": self._rollover_threshold,
+            "context_window": self._context_window,
+            "rollover_threshold_ratio": _ROLLOVER_CONTEXT_RATIO,
         }
         transition = WindowRollover(
             trigger_kind=prepared.trigger_kind,

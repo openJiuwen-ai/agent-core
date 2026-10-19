@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_03 / context-and-windows |
 | 关联模块 | [seams.py](../../execution/seams.py)、[BaseKVStore 注入集合](../../ports.py)、[integration.py](../../schema/integration.py)、[window_assembly.py](../../execution/window_assembly.py)、[session_state.py](../../execution/session_state.py)、[session_record.py](../../schema/session_record.py)；PA-11 agent-core 组件已接入，真实服务端后端待联调 |
-| 最近一次修订日期 | 2026-10-18 |
+| 最近一次修订日期 | 2026-10-19 |
 | 关联 feature | [F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_11](../features/F_11_window-management.md)、[F_12](../features/F_12_session-history-search.md)（PA-12 设计与实现）、[F_17](../features/F_17_session-state-record.md)、[F_18](../features/F_18_output-handoff.md)；待实现与验证范围见[开发计划](../designs/persistent-agent-development-plan.md) PA-06、PA-10～PA-12；[F_20](../features/F_20_continuation.md)（PA-18 联动修订） |
 | 设计依据 | [架构设计：窗口](../designs/persistent-agent-architecture.md#44-上下文窗口管理)、[换窗](../designs/persistent-agent-architecture.md#522-运行中换窗主动交接容量兜底与状态提交)、[保存规则](../designs/persistent-agent-architecture.md#7-数据管理与保存规则) |
 
@@ -81,11 +81,11 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 - **等待中的调用**：加载的记录带等待现场，或 Session state 带 `__react_agent_interruption__` 时，新 Request 不组装，校验拒绝（`DEEPAGENT_CONTEXT_PARAM_ERROR`），窗口不追加；窗口有未配对的工具调用时同样拒绝，并记 error 日志（见上文“窗口安全”）。
 - **上下文 rail**：Persistent 构造（`PersistentAgentSpec.resolve_parts`）拒绝挂载 `ContextAssembleRail`、`PersonalContextRail`、`ContextProcessorRail`（含子类），`ContextProcessorRail` 的默认压缩链因此也不会挂载；`DeepAgentSpec` / `create_deep_agent` 不变。
 - **增量通道**：保留原生 `PromptAttachmentManager.sync_to_context`（首次快照、之后只追加变化）；一期 Persistent 自身没有执行中追加的动态内容。
-- **容量**：本阶段续做只有必需材料，装配时暂不单独计数。PA-18 已提供共用 execution/capacity.py 和最终请求检查，在完整请求装配后、预算准入与模型调用前阻断超限或未知容量，见 S_01 第 4.4 节及 F_20 D-09。PA-06 接入可选群背景时补材料筛选，PA-11 接入换窗时补摘要调用前检查；三个检查点目前只完成每次原生模型调用前这一处。减少可选材料、必要时归档换窗、复查后仍放不下则 context_unfit 的整体流程仍待联合接入，不截断原任务或静默删除未决写操作。
+- **容量**：PA-11 使用 `rollover_threshold = floor(context_window × 80%)`。未主动换窗时，下一次完整请求的准确输入 token 数超过该阈值就触发换窗；新窗口候选完整请求也必须不超过该阈值。`context_window` 每次模型调用前从当前 `ModelContext.context_window_tokens()` 获取，即上下文引擎解析出的有效窗口。80% 是 PA-11 的换窗阈值，不是 provider hard-limit 保证。
 
 ### 4.3 `SessionStateStore.checkpoint(context, checkpoint) -> None`
 
-在完整 ReAct 轮次结束、且该 Execution 将继续运行时调用；模型回复已收敛，批内工具全部完成并经过结果处理，所有调用与结果完整配对。实现先同步原生窗口和 DeepAgent 状态，校验消息完整性，再将白名单字段、完整当前窗口、检查点身份 / 序号 / 类型及最新群消息游标组成一条记录，一次 set 写入同一 Session state 键。检查点不删除临时背景、不压缩执行头、不追加执行结束标记，也不把当前 Execution 写成已结束；只有持久化成功后才允许下一次模型调用。该轮若执行 PA-11 换窗，则以归档后的旧窗和提交的新活动窗口完成同一检查点，不再额外写普通轮次快照。同步、校验、编码或存储失败时停止继续推理，不宣称检查点成功；后端 set 抛错可能已落盘，PA-18 结合重载记录与执行日志判定。
+在完整 ReAct 轮次结束、且该 Execution 将继续运行时调用；模型回复已收敛，批内工具全部完成并经过结果处理，所有调用与结果完整配对。实现先同步原生窗口和 DeepAgent 状态，校验消息完整性，再将白名单字段、完整当前窗口、检查点身份 / 序号 / 类型及最新群消息游标组成一条记录，一次 set 写入同一 Session state 键。检查点不删除临时背景、不压缩执行头、不追加执行结束标记，也不把当前 Execution 写成已结束；只有持久化成功后才允许下一次模型调用。该轮若执行 PA-11 换窗，则以归档后的旧窗和提交的新活动窗口完成同一检查点，不再额外写普通轮次快照。同步、校验、编码或存储失败时停止继续推理，不宣称检查点成功；后端 set 抛错可能已落盘，恢复时结合重载记录与执行日志判定。
 
 ### 4.4 `SessionStateStore.save(context, ending) -> None`
 
@@ -99,13 +99,13 @@ PA-11 的 Session 状态读写、窗口归档、归档索引和精确恢复已�
 
 ### 5.1 执行中与安全换窗（PA-11：agent-core 组件已实现，真实宿主待联调）
 
-普通模型回复、工具调用和结果沿原生路径追加。每轮完整 ReAct 结束且 Execution 将继续时，PA-10 在下一次模型调用前同步并持久化当前窗口检查点；执行中的消息流或未完成工具批次不单独落盘。PA-11 有两个触发入口但共用一条换窗流水线：Agent 在合适的阶段边界通过内部 `new_context` 控制动作提交受约束的 `WindowSeed`，这是主路径；若本回合没有主动请求，Persistent Agent 的窗口管理组件按 PA-18 规则准确检查下一次完整模型请求，超过可用输入上限时触发兜底。容量检查计入当前上下文、即将加入的用户 / 工具结果、系统指令和工具定义、输出预留及安全余量；不使用跨模型固定的 70%。容量配置或计数不可用、不可靠、失败时按 PA-18 暂停为 `error`，不使用估算或保守预留放行模型调用。
+普通模型回复、工具调用和结果沿原生路径追加。每轮完整 ReAct 结束且 Execution 将继续时，PA-10 在下一次模型调用前同步并持久化当前窗口检查点；执行中的消息流或未完成工具批次不单独落盘。PA-11 有两个触发入口但共用一条换窗流水线：Agent 在合适的阶段边界通过内部 `new_context` 控制动作提交受约束的 `WindowSeed`，这是主路径；若本回合没有主动请求，窗口管理组件准确计算下一次完整模型请求的输入 token 数，超过 `floor(context_window × 80%)` 时触发兜底，正好等于阈值时不触发。每次模型调用前都从当前 `ModelContext.context_window_tokens()` 刷新有效窗口和对应阈值，模型切换后采用新值。计数需覆盖实际发送的系统指令、工具定义、活动消息和附件处理结果；计数不可用或不可靠时暂停为 `error`，不使用估算值。上下文引擎无法提供正整数窗口时暂停为 `error`，不继续调用模型。
 
 `new_context` 是 Persistent Agent 内部控制动作，不是用户调用的业务工具，也不直接改写存储或作为公共 Python API。WindowSeed 是 Agent 提交的有界交接建议，包含当前目标、已完成进度、下一步、约束 / 决策、未决问题，以及经执行日志核验的未决副作用引用和稳定证据引用；它不构成事实回执、权限或授权。容量兜底没有 Agent seed 时，由窗口管理组件根据已保存的任务目标、执行事实和最近完整交互整理最小交接要点，不额外调用模型生成摘要。
 
-当前确认链中仍有效的 `share_file` 调用及成功结果须位于新窗最后一个执行头或结束标记之后，不能只保留登记摘要。换窗前的估算不替代 S_01 / F_20 已接入的最终请求容量检查。
+当前确认链中仍有效的 `share_file` 调用及成功结果须位于新窗最后一个执行头或结束标记之后，不能只保留登记摘要。
 
-只在安全边界切换：当前模型回复已结束，并行工具已结束或收敛，所有工具调用与结果完整成组。新窗口由固定系统指令和工具定义、本次原始 Request、经过校验的 WindowSeed，以及按 token 预算挑选的近期完整消息组构成；不把旧窗全文复制进新窗。必要任务信息、未交出的 `share_file` 登记依据和未决写操作线索必须保留或以稳定引用衔接。工具结果可能使下一请求越过 hard limit 时，也须在结果进入窗口前判断能否安全承载。新窗口的必要内容仍放不下时，产出 `paused(context_unfit)`，不静默截断。
+只在安全边界切换：当前模型回复已结束，并行工具已结束或收敛，所有工具调用与结果完整成组。新窗口由固定系统指令和工具定义、本次原始 Request、经过校验的 WindowSeed，以及按 token 预算挑选的近期完整消息组构成；不把旧窗全文复制进新窗。必要任务信息、未交出的 `share_file` 登记依据和未决写操作线索必须保留或以稳定引用衔接。换窗后重建的完整请求也要准确计数，超过 `floor(context_window × 80%)` 时，产出 `paused(context_unfit)`，不静默截断。
 
 普通路径顺序固定为：同步原生状态与 DeepAgent 状态 → 校验本轮已完整收敛 → 一次写入当前窗口及检查点元数据 → 成功后才发起下一次模型调用。若该轮触发换窗，则以以下提交代替普通检查点，避免重复快照：准备并验证候选新窗 → 以稳定 `archive_ref` 幂等保存本轮结束后的旧窗完整原文和切换元数据 → 将新窗口、`current_window_id`、`window_seq`、`last_rollover` 与本轮检查点一次写入 PA-10 的同一条 Session 状态记录 → 持久化成功后替换运行时上下文 → 尽力记录 S_02 的普通 `window.switched` 通知。归档失败不提交新窗口；状态写入失败或结果未知时停止当前执行，不在候选新窗或旧内存窗继续调用模型。事件失败不回滚已提交的状态或内存切换。
 
