@@ -38,5 +38,20 @@ model = Model(
 - `SiliconFlowModelClient`
 - `InferenceAffinityModelClient`
 - `AscendAffinityModelClient`
+- `HuaweiMaasModelClient`（迁移方式不同，见下节）
 
 生图 / 语音 / 视频：`client_provider="DashScope"`（或 `endpoint_profile="dashscope"`）时，由 `OpenAIModelClient` 提供 `generate_image` / `generate_speech` / `generate_video`。
+
+## Huawei MaaS 与 x-span-id 链路追踪
+
+`client_provider="HuaweiMaas"` 已随本次收敛删除，且不设别名：该配置会直接报错（unavailable model provider）。被删的 `HuaweiMaasModelClient` 唯一增量能力是给每个请求注入 `x-span-id`（uuid4 hex），供华为云 ModelArts MaaS 网关（如 `https://api.modelarts-maas.com/v1`）做请求级链路追踪。
+
+迁移方式：直连 MaaS 网关改用 OpenAI 兼容配置，`x-span-id` 改在调用侧注入——每次调用生成新 span id：
+
+```python
+import uuid
+
+msg = await model.invoke(messages, custom_headers={"x-span-id": uuid.uuid4().hex})
+```
+
+`custom_headers` 逐调用合并进请求头；固定头也可直接配在 `ModelClientConfig.custom_headers`。若希望对业务代码透明，可在宿主层包装客户端的 `invoke` / `stream`，按 `api_base` 判断 MaaS 端点后统一注入。

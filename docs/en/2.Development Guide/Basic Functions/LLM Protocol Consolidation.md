@@ -38,5 +38,20 @@ These classes and modules are gone. Use `Model` plus a string `client_provider` 
 - `SiliconFlowModelClient`
 - `InferenceAffinityModelClient`
 - `AscendAffinityModelClient`
+- `HuaweiMaasModelClient` (different migration path, see the section below)
 
 Image / speech / video generation is served by `OpenAIModelClient` when `client_provider="DashScope"` (or `endpoint_profile="dashscope"`).
+
+## Huawei MaaS and x-span-id tracing
+
+`client_provider="HuaweiMaas"` is removed with no alias: the config now fails explicitly (unavailable model provider). The removed `HuaweiMaasModelClient` had one incremental capability: injecting `x-span-id` (uuid4 hex) into every request for request-level tracing on the Huawei Cloud ModelArts MaaS gateway (e.g. `https://api.modelarts-maas.com/v1`).
+
+To migrate: connect to the MaaS gateway with the OpenAI-compatible configuration and inject `x-span-id` at the call site — a fresh span id per call:
+
+```python
+import uuid
+
+msg = await model.invoke(messages, custom_headers={"x-span-id": uuid.uuid4().hex})
+```
+
+`custom_headers` is merged into request headers per call; static headers can also be set on `ModelClientConfig.custom_headers`. To keep business code untouched, wrap the client's `invoke` / `stream` at the host layer and inject after matching the MaaS `api_base`.
