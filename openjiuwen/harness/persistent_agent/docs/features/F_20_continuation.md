@@ -5,15 +5,15 @@
 | 项 | 值 |
 | --- | --- |
 | 建档日期 | 2026-10-15 |
-| 最近修订日期 | 2026-10-16 |
-| 范围 | agent-core `openjiuwen/harness/persistent_agent`：带 `recovery_ref` 的续做；加载最新会话状态记录后处理过期中断现场；沿执行链读取并整理日志（复用 PA-17）；追加续做执行头、续做材料、续做规则、原任务输入与继续指示；续做时的参与判断与文件登记范围；续做材料的分层、日志查询与容量检查；所有正式 execute / resume 的容量配置校验及续做开放条件。不含 AgentServer 的触发、调度、前序关系的保存与恢复引用选择，不含按 execution_id 查询归档（PA-12），不含自动换窗（PA-11），不含正常确认恢复适配（PA-09） |
-| 方案成熟度 | 已确认：Q-01～Q-09、D-06、D-08、D-09 与 D-10 方案 A；开发者 2026-10-16 明确三项决定：装配阶段暂不单独计数、每页固定 6000 字符、新任务与正常确认恢复也必须配置容量检查。三项均已实现并有组件验证，不再列为待决 |
+| 最近修订日期 | 2026-10-19 |
+| 范围 | agent-core `openjiuwen/harness/persistent_agent`：带 `recovery_ref` 的续做；加载最新会话状态记录后处理过期中断现场；沿执行链读取并整理日志（复用 PA-17）；追加续做执行头、续做材料、续做规则、原任务输入与继续指示；续做时的参与判断与文件登记范围；续做材料的分层与日志查询；最终请求接缝与预算准入时点；续做开放条件。PA-18 的容量检查与正式入口的容量配置校验已于 2026-10-19 移除。不含 AgentServer 的触发、调度、前序关系的保存与恢复引用选择，不含按 execution_id 查询归档（PA-12），不含自动换窗（PA-11），不含正常确认恢复适配（PA-09） |
+| 方案成熟度 | 已确认：Q-01～Q-09、D-06、D-08、D-09 与 D-10 方案 A；开发者 2026-10-16 明确三项决定：装配阶段暂不单独计数、每页固定 6000 字符、新任务与正常确认恢复也必须配置容量检查。开发者 2026-10-19 决定移除 PA-18 的容量检查：Q-06、D-09 的容量部分及第一、第三项决定撤销，D-09 的 core 接缝与预算准入时点保留 |
 | 计划条目 | [开发计划](../designs/persistent-agent-development-plan.md) PA-18 |
 | 负责人 | Song Haoran |
-| 状态 | 进行中：既有续做与最终检查组件已实现并通过组件验证；所有正式 execute / resume 强制容量配置已实现并有组件验证；2026-10-16 审阅发现的计数正确性问题已修复并补真实计数器用例。正式入口按 D-10 继续拒绝续做（等待 PA-12 按 execution_id 查询归档）；放行还需部署的模型有非估算计数器；core 接缝待 core 维护者评审；装配阶段材料筛选与换窗摘要调用前检查待 PA-06、PA-11；AgentServer 联调与 M2c 未做 |
+| 状态 | 进行中：续做组件已实现并通过组件验证；2026-10-19 按开发者决定移除 PA-18 的容量检查与正式入口的容量配置要求，已有组件验证。正式入口按 D-10 继续拒绝续做（等待 PA-12 按 execution_id 查询归档）；core 接缝（现用于换窗处理与预算准入）待 core 维护者评审；AgentServer 联调与 M2c 未做 |
 | 设计依据 | [架构设计](../designs/persistent-agent-architecture.md) §3.4 第 9、13 条，§4.4 窗口组装表，§5.2.4，§8.3；[S_05](../specs/S_05_confirmation-and-continuation.md) 第 4.4、5.3 节；[S_02](../specs/S_02_events-and-result-handoff.md) 第 4.3 节；[S_03](../specs/S_03_context-and-windows.md) |
 | 关联 feature | [F_05](F_05_execution-entries.md)（入口）；[F_06](F_06_window-assembly.md)（窗口组装）；[F_07](F_07_group-participation.md)（参与判断）；[F_15](F_15_tool-intent-before-side-effect.md)（意图记账）；[F_17](F_17_session-state-record.md)（会话状态记录与补位）；[F_18](F_18_output-handoff.md)（文件登记，D-12 按本文 Q-03 修订）；[F_19](F_19_execution-log-record.md)（执行日志整理，PA-17） |
-| 验证摘要 | 2026-10-16 推送复查后的修复：PA 包与 core 最终检查 779 passed；新增真实本地 tokenizer 的正式配置 / 选择路径、未知容量、计数器更新、取消和询问措辞用例。JSON 快照后的上下文配置已在 Persistent 装配边界还原类型。更广回归、静态与文档检查见第 8.2 节；保留此前验证的历史边界。真实宿主联调与完整验收未完成 |
+| 验证摘要 | 2026-10-19 最新主仓适配：PA 包与 core 接缝 862 passed；扩大回归 8538 passed / 128 skipped；旧构造门槛反例 4 项先红后绿；改动文件的 Ruff、格式、codespell 通过，Pylint / mypy 无新增诊断，348 处本地链接与 15 段 Mermaid 语法检查通过，见第 8.2.3 节。第 8.2.2 节及此前验证保留各自历史基线，不替代当前验证；真实宿主联调与完整验收未完成 |
 | Refs | 未关联 issue / PR |
 
 ## 2. 背景、目标与范围
@@ -39,8 +39,8 @@
 
 ### 2.3 本次范围与非目标
 
-- 本次包含：入口参数校验与开放门禁、过期现场处理、执行链追溯、日志整理接入、续做执行头 / 续做材料 / 规则 / 任务输入、续做中的参与判断与文件登记范围；分层材料、日志查询工具与容量检查的方案（D-08、D-09）。
-- 本次不包含：服务端的续做触发、调度、停止事实、前序关系的保存与恢复引用选择（AgentServer）；按 execution_id 查询归档（PA-12）；自动换窗（PA-11）；正常确认恢复（PA-09）；群消息读取（PA-23）与知识导航（PA-13）的接入。
+- 本次包含：入口参数校验与开放门禁、过期现场处理、执行链追溯、日志整理接入、续做执行头 / 续做材料 / 规则 / 任务输入、续做中的参与判断与文件登记范围；分层材料与日志查询工具（D-08）、最终请求接缝与预算准入时点（D-09；容量检查 2026-10-19 移除）。
+- 本次不包含：模型容量检查（2026-10-19 移除，见 D-09）；服务端的续做触发、调度、停止事实、前序关系的保存与恢复引用选择（AgentServer）；按 execution_id 查询归档（PA-12）；自动换窗（PA-11）；正常确认恢复（PA-09）；群消息读取（PA-23）与知识导航（PA-13）的接入。
 
 ## 3. 设计约束、假设与待决问题
 
@@ -57,19 +57,19 @@
   - **Q-03：** 文件登记从“最后一个结束标记或执行头之后”扫描。新任务、崩溃续做及非确认暂停后继续开启新的登记范围，旧登记只作参考；正常确认恢复沿用本确认链的有效登记；换窗须保留本确认链的有效登记，并确保它们仍位于扫描范围内。
   - **Q-04：** 程序自动提供关键进度、已有成果、所有未决写操作的必要信息，以及记录缺失或不完整的提示；模型需要核实细节时，通过受控工具读取详细日志，仅限当前 Session、当前 Request。续做规则与进度摘要放入临时背景，结束时删除；先处理旧中断现场，再追加续做材料。
   - **Q-05：** 采用 D-10 方案 A。
-  - **Q-06 容量（方向）：** PA-06、PA-11、PA-18 共用计数与判断规则；完整计数；预计输入 + 输出预留 + 安全余量 ≤ 模型总容量，且满足模型输入上限；70% 由 PA-11 换窗，超过实际可用上限阻止调用；材料分层，省略须标注，不能静默删除未决写操作；三个检查点；超限时减少可选材料 → 必要时换窗 → 复查，仍放不下则 `context_unfit`；容量未知或计数失败明确报告故障；最终检查在最终请求装配后、预算准入和模型调用前，失败须真正阻断调用。示例数值不作为正式配置。细化见 D-09。
+  - **Q-06 容量（2026-10-19 撤销）：** 原方向为 PA-06、PA-11、PA-18 共用计数与判断规则，每次模型调用在最终请求装配后、预算准入前检查容量，超限或容量未知时阻断调用。开发者 2026-10-19 决定移除 PA-18 的容量检查：应用端使用不同模型，context window 各不相同，部分模型的上限未知，无法为所有正式执行配置。PA-18 不再计数或按容量阻断；模型容量只由启用 window_management 的 PA-11 使用。见 D-09。
   - **Q-07：** 复用 `patch_stopped_calls(messages)`，默认文案“结果未取得，实际效果需核实”与 `stopped_tool_placeholder` 标记；不增加 `text` 参数。
   - **Q-08：** 加载记录并核对等待现场归属（属于其他 Request 即拒绝）→ 补位 → 写回消息、清除 `__react_agent_interruption__`、清空 waiting，保留会话授权与群消息游标 → 追加续做材料。
   - **Q-09：** 不设“日志缺失就必须先询问”的程序门禁；是否询问由模型判断，但未决写操作仍须先查证、不能盲目重做。
 - **实现中发现的问题与处理（开发者 2026-10-16 审阅）：**
-  - **装配阶段暂不单独计数（已确认）：** 续做材料只有必需层，没有可筛选的可选材料；装配时系统提示与工具定义尚未定稿。本阶段暂不设置装配计数，超限由最终检查在第一次模型调用之前统一阻断。Q-06 的三个检查点中只完成了“每次模型调用前”这一个；装配阶段的材料筛选随 PA-06 的可选背景接入，换窗摘要调用前的检查随 PA-11 接入，届时补齐。
-  - **每页字符上限（已确认）：** 保留 `PAGE_MAX_CHARS = 6000`，暂不新增配置。它是 `read_execution_record` 完整返回 JSON 的字符上限，不是 token 容量保证；完整请求放不放得下由最终容量检查判断。以后有实际需求再支持更小的页。
-  - **计数正确性（已修复）：** 审阅复现两点：计数器自报 `estimated=True` 的结果仍被接受；实际的 `TiktokenCounter("gpt-4")` 把普通文本中的长 data URL 替换为短占位后计数（32 tokens，未替换时 63030 tokens），而模型收到的是原文。修复见 D-09“计数可靠性”。
-- **三项决定的实施状态（开发者 2026-10-16 明确确认）：**
-  - **装配阶段：** 暂不另算容量，由每次模型调用前的最终检查统一把关；可选材料筛选与换窗摘要检查仍按 PA-06、PA-11 的接入安排补齐。
-  - **分页：** 保持完整返回 JSON 上限 6000 字符，暂不增加配置；字符上限不代替 token 容量检查。
-  - **正式入口容量配置：** 新任务、正常确认恢复与续做均必须具备完整容量配置；缺失、配置不完整或组合不成立时，在任何事件和构造之前拒绝。低层构造的可选默认值和通用 ReActAgent 默认关闭行为不据此改变。execute / resume 的共用入口已强制校验，PA-05、PA-06 的正式入口测试已补完整配置；新增反例覆盖两个字段均缺失时的新任务与确认恢复，均在事件和构造之前拒绝。
-  - 此三项不再有待决问题；实现与实际验证见第 8.2 节，真实宿主与 M2c 验收仍未完成。
+  - **装配阶段暂不单独计数（2026-10-16 确认，2026-10-19 随容量检查移除失效）：** PA-18 不再计数。
+  - **每页字符上限（已确认）：** 保留 `PAGE_MAX_CHARS = 6000`，暂不新增配置。它是 `read_execution_record` 完整返回 JSON 的字符上限，不是 token 容量保证。以后有实际需求再支持更小的页。
+  - **计数正确性（已修复；2026-10-19 起只适用于 PA-11 使用的 `capacity.py`）：** 审阅复现两点：计数器自报 `estimated=True` 的结果仍被接受；实际的 `TiktokenCounter("gpt-4")` 把普通文本中的长 data URL 替换为短占位后计数（32 tokens，未替换时 63030 tokens），而模型收到的是原文。修复见 D-09“计数可靠性”。
+- **三项决定的实施状态（开发者 2026-10-16 确认，2026-10-19 部分撤销）：**
+  - **装配阶段：** 2026-10-19 随容量检查移除失效。
+  - **分页：** 保持完整返回 JSON 上限 6000 字符，暂不增加配置；字符上限不是 token 容量保证。
+  - **正式入口容量配置：** 2026-10-19 撤销。正式 execute / resume 不再要求容量配置；入口门禁与对应拒绝用例已删除，改为验证没有容量配置时新任务与续做都能执行（PA-18-V-30）。
+  - 实现与实际验证见第 8.2 节，真实宿主与 M2c 验收仍未完成。
 
 ## 4. 总体方案与设计取舍
 
@@ -79,7 +79,7 @@
 flowchart TD
     A["execute_persistent_request<br/>带 recovery_ref"] --> V{"recovery_ref 是合法标识？"}
     V -- "否" --> X["校验拒绝，不记任何事件"]
-    V -- "是" --> O{"续做已开放？<br/>接入条件、read_execution_link、追溯上限、容量检查"}
+    V -- "是" --> O{"续做已开放？<br/>接入条件、read_execution_link、追溯上限"}
     O -- "否" --> Y["配置拒绝，不记任何事件"]
     O -- "是" --> S["execution.started<br/>（群消息不做参与判断）"]
     S --> L["加载最新会话状态记录"]
@@ -176,18 +176,17 @@ flowchart TD
   4. 每页的 `segments` 标明条目序号、片段起止与条目总长；同一条目的片段按顺序拼接即为原文，各条目以换行连接即为完整整理，无损还原。正常翻页游标必然前进，读完时 `next_cursor` 为空。
   5. 页大小按返回 JSON 的总长计算（正文、游标、状态与其他字段都计入），游标长度按本记录可能的最长游标预留；连一个有效片段都放不下时返回 `page_too_small`，不返回空页。
 
-#### D-09 容量检查（已确认，部分实现）
+#### D-09 最终请求接缝与预算准入（容量检查 2026-10-19 移除）
 
-- **分工：** PA-18 交付共用容量模块（`execution/capacity.py`）、续做材料分层与按实例启用的最终请求检查接缝；PA-11 再接入换窗及摘要调用前检查。
-- **core 接缝（`react_agent.py`）：** `ReActAgent.set_final_request_check(check)` 按实例注入，默认 `None`、行为不变。`_railed_model_call` 在最终系统提示、窗口消息与工具定义写入 `ctx.inputs` 之后、调用模型之前调用 `check(ctx)`：返回 `None` 放行；返回结果字典即以该结果结束本轮（与 force-finish 结果相同的通道），不是异常，不进入 Rail 重试或 `_recover_from_model_exception`。core 只提供通用的“允许调用 / 提前结束”，不引入 Persistent 的类型或暂停原因。每次 Rail 重试与恢复重试都会重新生成最终请求并再次检查；取消照常传播。需 core 维护者评审。
-- **Persistent 检查（`PersistentModelCallRail.check_final_request`）：** 在 `before_invoke` 为本实例注入；顺序为最终请求 → 容量检查 → 预算准入 → 模型调用。预算准入从 `before_model_call` 移到这里，`before_model_call` 只保留停止检查。容量超限返回 `paused(context_unfit)`，计数不可靠或计数器无法取得返回 `paused(error)`，两者都不准入、不调用模型；准入拒绝返回 `paused(budget_denied)`，不调用模型。
-- **配置：** 复用 `model.model_request_config.context_window`（总容量）与 `max_tokens`（输出预留），新增 Spec 字段 `model_input_limit_tokens`（正整数）与 `capacity_safety_margin_tokens`（非负整数），默认 `None`。2026-10-16 已确认所有正式 execute / resume（含新任务、正常确认恢复、续做）均要求四项齐全且组合可行，缺失时也须在任何事件和构造之前拒绝（`DEEPAGENT_CONFIG_PARAM_ERROR`）；输入上限不超过总容量，输出预留加安全余量小于总容量。可用输入为 `min(输入上限, 总容量 − 输出预留 − 安全余量)`。全入口强制校验已实现，两个新字段均未配置时也在事件和构造之前拒绝。低层构造继续保留可选默认值，任一容量字段被设置即校验完整性，不改变通用 core 默认关闭行为。
-- **计数可靠性（2026-10-16 修订）：** 每次最终检查从当前 `ModelContext.token_counter()` 取得 core 已按发布配置选择的计数器，沿用 `context_engine_config` 的 tokenizer_spec、tokenizer_registry 与缓存配置；不另建选择器、不在 Rail 缓存计数器。对最终消息与工具定义各计数一次（最终消息已含系统提示）。满足以下全部条件才算可靠：计数器自报非估算（`estimated=False`）、没有降级原因、来源不是已知的降级来源（`string_length_fallback`、`tiktoken_fallback`、`family_tokenizer_fallback`、`not_reported`）；消息内容都是文本，且不会被计数器改写——core 计数器会先把文本中的图片 data URL 换成短占位再计数，而模型收到的是原文，所以凡是 `sanitize_value_for_text` 会改写的内容都按容量未知处理。计数后再检查标记（计数过程中可能降级）。取得计数器失败也按容量未知暂停，取消继续传播。不修改 core 计数器及其质量标记，其他场景的估算行为不变。按此规则，core 当前的 tiktoken 计数自报为估算，一律按未知处理；只有为模型提供原生 tokenizer（`native_tokenizer`，自报非估算）时，配置了容量检查的执行才能通过检查。
-- **装配阶段：** 本阶段暂不单独计数，见第 3 节。
+- **撤销（开发者 2026-10-19）：** 移除 PA-18 的容量检查。原因：应用端使用不同模型，context window 各不相同，部分模型的上限未知，无法为所有正式执行配置容量。删除：`PersistentModelCallRail` 对最终请求的计数及 `paused(context_unfit)` / `paused(error)` 暂停；正式 execute / resume 的容量配置要求（`_require_supported_modes`）；续做开放条件中的容量检查；模型 Rail 的 `spec` 参数。请求能否放下由模型服务判断，PA-18 不预先阻断。原配置、可用输入与计数可靠性规则见第 10 节的历史记录。
+- **保留的 core 接缝（`react_agent.py`）：** `ReActAgent.set_final_request_check(check)` 按实例注入，默认 `None`、行为不变。`_railed_model_call` 在最终系统提示、窗口消息与工具定义写入 `ctx.inputs` 之后、调用模型之前调用 `check(ctx)`：返回 `None` 放行；返回结果字典即以该结果结束本轮（与 force-finish 结果相同的通道），不是异常，不进入 Rail 重试或 `_recover_from_model_exception`。PA-11 在其上增加了重建最终请求的能力。core 只提供通用的“允许调用 / 提前结束”，不引入 Persistent 的类型或暂停原因；取消照常传播。需 core 维护者评审。
+- **保留的 Persistent 最终检查（`PersistentModelCallRail.check_final_request`）：** 在 `before_invoke` 为本实例注入；顺序为最终请求 → 换窗处理（启用 `window_management` 时，PA-11）→ 预算准入 → 模型调用。预算准入在这里，`before_model_call` 只保留停止检查；准入拒绝返回 `paused(budget_denied)`，不调用模型。
+- **计数复用与兼容字段：** PA-11 仅复用 `execution/capacity.py` 的 `count_request` 准确计数；窗口阈值使用主仓已实现的 `floor(context_window × 80%)`，见 [F_11](F_11_window-management.md)。`capacity_limits`、`CapacityLimits` 仅保留为内部兼容辅助，不再由正式入口或构造调用。Spec 的 `model_input_limit_tokens`、`capacity_safety_margin_tokens` 默认 `None`，可选保留旧值及指纹，不参与执行准入或换窗判断；启用 `window_management` 也不要求旧四项容量配置。`context_engine_config` 的类型还原与 tokenizer 配置保留（PA-18-V-27）。
+- **对 PA-11 的影响（待确认）：** 主仓 PA-11 每次调用前刷新当前 ContextEngine 的有效窗口，但仅在完整工具批次之后的安全边界对完整请求计数并比较阈值；每个 Execution 的首次调用及 checkpoint 后的重试不覆盖完整请求计数。是否扩展这些检查点，由 PA-11 负责人决定；本次保留主仓的窗口算法，并删除 Spec 中与新阈值无关的旧构造门槛，不扩展安全边界。
 
 #### D-10 开放范围（方案 A，已实现）
 
-- 正式入口继续拒绝带 `recovery_ref` 的执行：`seams.continuation_support(context)` 在 PA-12 按 execution_id 查询归档接入前抛 `DEEPAGENT_CONFIG_PARAM_ERROR`，在任何事件之前。执行链（D-06）与最终容量检查（D-09）已接入，开放后入口还在任何事件之前检查宿主提供 `read_execution_link`、Spec 配置了 `continuation_chain_limit` 与容量检查。
+- 正式入口继续拒绝带 `recovery_ref` 的执行：`seams.continuation_support(context)` 在 PA-12 按 execution_id 查询归档接入前抛 `DEEPAGENT_CONFIG_PARAM_ERROR`，在任何事件之前。执行链（D-06）已接入，开放后入口还在任何事件之前检查宿主提供 `read_execution_link`、Spec 配置了 `continuation_chain_limit`。
 - 组件通过内部接缝打开门禁，用替身验证；在 M2c 与其他条件一起放行。这些是新增条件，不替代 M2c 原有的确认恢复、生命周期、记账和宿主验收要求。
 - 不选方案 B（PA-11 换窗接入前先开放）：需要额外维护“换窗能力变化后自动关闭续做”的联动状态，收益不足。
 
@@ -229,14 +228,14 @@ flowchart TD
 | `ReActAgent.set_final_request_check(check)`、`FinalRequestCheck` | core `single_agent/agents/react_agent.py`，新增 | 按实例注入的最终请求检查；默认关闭 |
 | `ExecutionLink` | `schema/port_results.py`，新增 | 宿主保存的前序关系，校验首次执行与前序的对应 |
 | `ExecutionLinkPort` | `ports.py`，新增（可选协议） | `read_execution_link(execution, execution_id)` |
-| `PersistentAgentSpec` 的 `continuation_chain_limit`、`model_input_limit_tokens`、`capacity_safety_margin_tokens` | `schema/spec.py`，新增 | 追溯上限与容量配置，默认 `None` |
-| `capacity_limits`、`CapacityLimits`、`count_request` | `execution/capacity.py`，新增 | 共用的容量配置解析、可用输入与可靠计数；计数器取自当前 ModelContext |
-| `PersistentModelCallRail.check_final_request` | `execution/model_rail.py`，修改 | 容量检查后预算准入；`before_model_call` 只保留停止检查 |
+| `PersistentAgentSpec` 的 `continuation_chain_limit`、`model_input_limit_tokens`、`capacity_safety_margin_tokens` | `schema/spec.py`，新增 | 追溯上限与旧容量兼容字段，默认 `None`；旧字段只保留序列化与指纹，不参与运行判断 |
+| `capacity_limits`、`CapacityLimits`、`count_request` | `execution/capacity.py`，新增 | `count_request` 由 PA-11 复用；容量解析与旧上限对象只保留内部兼容，正式入口与构造不调用 |
+| `PersistentModelCallRail.check_final_request` | `execution/model_rail.py`，修改 | 换窗处理后预算准入；`before_model_call` 只保留停止检查 |
 | `summarize_execution(..., detail=...)`、`record_blocks` | `execution/execution_log.py`，修改 | 分层摘要与分页数据源 |
 | `ExecutionRecordTool`、`ExecutionRecordRail`、`page`、`encode_cursor` | `execution/record_tool.py`，新增 | `read_execution_record` 工具、声明与分页 |
 | `ExecutionControl.verified_chain` | `execution/control.py`，新增 | 本次续做已核验的执行 |
 | `continuation_support(context)` | `execution/seams.py`，新增 | 续做开放门禁 |
-| `_require_continuation(spec, context)` | `execution/entries.py`，新增 | 续做门禁、`read_execution_link` 与追溯上限；全入口容量配置另由 `_require_supported_modes` 检查 |
+| `_require_continuation(spec, context)` | `execution/entries.py`，新增 | 续做门禁、`read_execution_link` 与追溯上限 |
 | `require_recovery_ref`、`clear_stale_scene`、`continuation_background`、`continued_query` | `execution/continuation.py`，新增 | 续做步骤 |
 | `ExecutionWindowAssembler(reader, *, chain_limit)`、`window_assembler(context, *, chain_limit=None)` | `execution/window_assembly.py`、`execution/seams.py`，修改 | 续做分支 |
 | `rebuild_registrations` | `execution/handoff.py`，修改 | 扫描范围从最后一个结束标记或执行头开始（D-07） |
@@ -247,17 +246,17 @@ flowchart TD
 | 实施项 | 模块 / 文件 | 内容 | 状态 | 验证 |
 | --- | --- | --- | --- | --- |
 | I-01 | `execution/continuation.py`（新增） | D-01～D-04、D-06 的续做步骤 | 已实现 | PA-18-V-01～V-07、V-11～V-14 |
-| I-02 | `execution/entries.py`、`execution/seams.py` | 续做门禁与入口检查；参与判断跳过；容量配置的入口校验 | 已实现；新任务与确认恢复强制配置有新增组件测试 | V-02、V-07、V-10、V-19 |
+| I-02 | `execution/entries.py`、`execution/seams.py` | 续做门禁与入口检查；参与判断跳过（容量配置的入口校验 2026-10-19 删除） | 已实现 | V-02、V-07、V-10、V-30 |
 | I-03 | `execution/window_assembly.py` | 续做分支 | 已实现 | V-01、V-03～V-06 |
 | I-04 | `execution/handoff.py` | 登记扫描范围 | 已实现 | V-04、V-09、V-15 |
-| I-05 | `schema/port_results.py`、`ports.py`、`schema/spec.py` | 执行链接口、追溯上限与容量字段 | 已实现 | V-10～V-13、V-19 |
+| I-05 | `schema/port_results.py`、`ports.py`、`schema/spec.py` | 执行链接口、追溯上限与容量字段（容量字段仅兼容保留） | 已实现 | V-10～V-13、V-27 |
 | I-06 | `execution/execution_log.py`、`execution/record_tool.py`、`execution/control.py`、`tools/effect_policy.py` | 分层摘要、查询工具与分页、只读名单 | 已实现 | V-20～V-23、V-26 |
-| I-07 | core `react_agent.py`、`execution/capacity.py`、`execution/model_rail.py` | 最终请求检查接缝与容量检查 | 已实现，core 待评审 | V-16～V-19、V-24、V-25 |
-| I-08 | 文档 | 本文；F_19 接口与完整 / 分层整理；F_18 D-12；S_01、S_02、S_03、S_04、S_05、S_07、S_08；F_05、F_06、F_15；既有架构草稿、设计概览及计划的联动内容 | 2026-10-16 已将实现、测试与配套文档同步到项目工作区；保留原有计划修改，PA-18 负责人为 Song Haoran，不新增架构决策 | 本轮文档检查见第 8.2 节 |
+| I-07 | core `react_agent.py`、`execution/model_rail.py` | 最终请求检查接缝与预算准入（容量检查 2026-10-19 删除，`capacity.py` 转由 PA-11 使用） | 已实现，core 待评审 | V-18、V-24、V-25、V-30 |
+| I-08 | 文档 | 本文；F_19 接口与完整 / 分层整理；F_18 D-12；S_01、S_02、S_03、S_04、S_05、S_07、S_08；F_05、F_06、F_15；既有架构草稿、设计概览及计划的联动内容 | 2026-10-16 已将实现、测试与配套文档同步到项目工作区；保留原有计划修改，PA-18 负责人为 Song Haoran，不新增架构决策；2026-10-19 同步移除容量检查：架构的实现状态、§5.1、§5.2.2、§6.1、§9.3 与附录 C，计划，S_01、S_03、S_05、S_07，F_05、F_06、F_11、F_19 | 本轮文档检查见第 8.2 节 |
 
 ## 7. 兼容与迁移
 
-不改记录格式与版本。新增的 `ExecutionLinkPort` 是可选协议，构造不检查；新增的 Spec 字段默认 `None`，但正式 execute / resume 必须完整配置容量，旧宿主须随发布补齐；字段会改变 Spec 指纹（与 PA-08 新增 `share_file_max_bytes` 时相同）。core 接缝默认关闭，未注入时原生行为不变。Persistent 的预算准入从 `before_model_call` 移到最终请求检查，准入次数与结果不变，时点移到最终请求装配之后。配置了 `continuation_chain_limit` 的 Spec 多声明一个只读工具。新任务与确认恢复的登记范围不变。正式入口对续做仍拒绝。
+不改记录格式与版本。新增的 `ExecutionLinkPort` 是可选协议，构造不检查；新增的 Spec 字段默认 `None`；2026-10-19 起正式 execute / resume 不再要求容量配置，两个旧容量字段仅为兼容保留，仍参与指纹，但不参与运行判断；字段会改变 Spec 指纹（与 PA-08 新增 `share_file_max_bytes` 时相同）。core 接缝默认关闭，未注入时原生行为不变。Persistent 的预算准入从 `before_model_call` 移到最终请求检查，准入次数与结果不变，时点移到最终请求装配之后。配置了 `continuation_chain_limit` 的 Spec 多声明一个只读工具。新任务与确认恢复的登记范围不变。正式入口对续做仍拒绝。
 
 ## 8. 验证设计、执行记录与结论
 
@@ -280,21 +279,22 @@ flowchart TD
 | PA-18-V-13 | 链接读取失败、以自身为前序、循环、指向本次执行、归属不符、返回其他执行的链接、首次执行带前序、确认恢复没有前序 | 停止追溯并写明原因；已读到的日志（含该执行自己的）照常使用 |
 | PA-18-V-14 | 中间一次日志缺失而链接有效 | 写明该次记录缺失，继续读取更早执行 |
 | PA-18-V-15 | 启用 `workspace_read` 的真实文件交接：等待前登记了文件，续做中重新登记另一个文件 | 只交出回答与续做中登记的文件，等待前的登记不交出；结束事件引用一致 |
-| PA-18-V-16 | 最终请求超过可用输入，且预算会拒绝 | `paused(context_unfit)`；准入 0 次，模型 0 次（先检查容量） |
-| PA-18-V-17 | 计数只是估算；计数器无法取得 | `paused(error)`，写明容量未知、不含异常正文；准入 0 次，模型 0 次 |
-| PA-18-V-18 | 合规请求；预算拒绝 | 每次模型调用准入一次；准入拒绝为 `paused(budget_denied)`，模型不被调用 |
-| PA-18-V-19 | 容量配置不完整或不可能成立（缺 `context_window`、输入上限、安全余量，输入上限超过总容量，没有输入余地） | 执行前拒绝，没有事件，未构造 |
+| PA-18-V-16 | （2026-10-19 撤销）最终请求超过可用输入 | 容量检查已移除，用例删除 |
+| PA-18-V-17 | （2026-10-19 撤销）计数只是估算；计数器无法取得 | 容量检查已移除，用例删除 |
+| PA-18-V-18 | 普通请求；预算拒绝 | 每次模型调用准入一次；准入拒绝为 `paused(budget_denied)`，模型不被调用 |
+| PA-18-V-19 | （2026-10-19 撤销）容量配置不完整或不可能成立 | 正式入口不再校验容量配置，用例删除；启用 window_management 也不再要求旧字段，V-31 验证构造与入口 |
 | PA-18-V-20 | 同一 Spec 的新任务与续做；不配置追溯上限的 Spec | 前两者声明的工具相同且含 `read_execution_record`；后者不声明 |
 | PA-18-V-21 | 续做中读取链内执行与链外执行 | 链内返回完整整理（不是摘要），链外拒绝；不产生 `tool.intent`；每次读取都重新读取日志 |
 | PA-18-V-22 | 新任务中调用 `read_execution_record` | 返回不可用，不读取日志 |
 | PA-18-V-23 | 分页契约（`test_record_tool.py`） | 多页无损还原、每页不超过上限且不为空、条目内续读、记录变化重置并提示、非法 / 他人 / 越界游标分别拒绝、容量不足以返回片段时报错 |
-| PA-18-V-24 | 容量规则（`test_capacity.py`） | 未配置不检查；可用输入取较紧者；不完整或不可能的配置拒绝；精确计数求和；自报估算（含原生来源但 `estimated=True`）、降级、计数失败与非文本内容（含不带 data URL 的块列表）为未知；真实 `NativeTokenizerCounter` 计纯文本可信，遇到会被改写的 data URL 为未知；真实 `TiktokenCounter("gpt-4")` 自报估算，为未知 |
+| PA-18-V-24 | 准确计数与旧容量解析兼容（`test_capacity.py`；PA-11 只复用计数） | 未配置不检查；可用输入取较紧者；不完整或不可能的配置拒绝；精确计数求和；自报估算（含原生来源但 `estimated=True`）、降级、计数失败与非文本内容（含不带 data URL 的块列表）为未知；真实 `NativeTokenizerCounter` 计纯文本可信，遇到会被改写的 data URL 为未知；真实 `TiktokenCounter("gpt-4")` 自报估算，为未知 |
 | PA-18-V-25 | core 接缝（`test_final_request_check.py`） | 默认关闭时行为不变；放行时检查看到最终请求再调用模型；阻断时模型、Rail 异常回调与恢复都不发生；Rail 重试与恢复重试都再次检查；取消传播；流式调用同样检查；移除后恢复原行为 |
 | PA-18-V-26 | 分层摘要与分页数据源（`test_execution_log.py`） | 写操作、结局、缺口与 `share_file` 逐项保留，只读计次数，正文只给字数，省略单独说明；无省略时不说明；非法 `detail` 在读取前拒绝；`record_blocks` 拼接等于完整整理 |
-
-| PA-18-V-27 | 真实本地 tokenizer 的正式新任务入口（对象 / 字典配置，tokenizer_spec / registry，合规 / 超限） | core 真实选择路径和最终检查连通；合规时准入与本地模型各一次，超限时均零次；发布 JSON 与指纹不变；包含快照后类型还原，不替换计数器 |
-| PA-18-V-28 | 缺失 / 损坏 artifact；计数器不存在、获取异常、计数异常、更新与取消 | 未知容量暂停为 error 且不准入、不调用模型、不泄露异常正文；每次读取当前计数器；取消传播 |
+| PA-18-V-27 | 真实本地 tokenizer 的正式新任务入口（对象 / 字典配置，tokenizer_spec / registry） | 最终请求时原生上下文给出 `NativeTokenizerCounter`，执行完成；发布 JSON 与指纹不变；去掉快照后的类型还原时失败 |
+| PA-18-V-28 | （2026-10-19 撤销）缺失 / 损坏 artifact 及计数器异常 | 容量检查已移除，用例删除 |
 | PA-18-V-29 | full / brief / missing 三条实际日志材料路径 | 均明确先查证、不能直接重做；查不清时可以询问、由模型判断，不保留强制询问措辞 |
+| PA-18-V-30 | 模型请求配置不给 `context_window`、`max_tokens`，Spec 不配置容量的新任务与续做；配置了很小的容量上限但未启用 window_management 的新任务 | 均正常完成，每次模型调用准入一次；加回入口容量门禁或最终请求容量检查时失败 |
+| PA-18-V-31 | 启用 window_management 时，未配旧字段、仅配一项或旧值组合不适用；模型未配置 max_tokens | 真实公共构造成功，旧字段值与 Spec 指纹往返保持；未配置容量的正式执行也能完成；恢复旧构造门槛时反例失败。与 F_11-V-17 共用此验收范围 |
 
 ### 8.2 实际执行与证据
 
@@ -380,9 +380,45 @@ flowchart TD
 
 本轮未重跑变异、覆盖率采集、全仓测试或真实模型联调，不把旧基线覆盖率直接计为新基线结果；PA-12、AgentServer 前序关联、部署 tokenizer、core 维护者评审及 M2c 仍未验收，正式续做门禁与已确认设计保持不变。
 
+### 8.2.2 2026-10-19 移除 PA-18 容量检查验证
+
+- **基线与范围：** 以 `jiuwenmate` 的 `4519018ed` 导出 scratch 快照（`git archive`），只改 PA-18 容量检查相关的代码、测试与文档；未修改 core 与 PA-11 的代码，F_11 仅修正规则归属与失效引用，未改变换窗方案。根目录 checkout 未改动。
+- **环境与命令：** macOS、项目 `.venv/bin/python`，工作目录为快照根。定向：`$PY -m pytest tests/unit_tests/harness/persistent_agent tests/unit_tests/core/single_agent/test_final_request_check.py -q -p no:cacheprovider -o addopts=`；扩大：`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. $PY -m pytest tests/unit_tests/harness tests/unit_tests/core/session tests/unit_tests/core/single_agent tests/unit_tests/core/context_engine -q -p no:cacheprovider -o addopts=`。基线用同一命令在未改动的快照上运行。
+
+| 检查 | 本轮实际结果及边界 |
+| --- | --- |
+| PA 包与 core 接缝 | 854 passed、2 warnings；基线 875 passed。测试函数 494 → 485：删除 10 个容量用例函数，V-18 改名、V-27 改写为新函数，新增 V-30 |
+| 扩大回归 | 8530 passed、128 skipped、93 warnings、4 subtests passed；基线快照同范围 8551 passed、128 skipped；差额 21 与定向范围一致，均为删除的容量用例；未扩展为全仓测试 |
+| 变异 | 3 项均被发现：加回正式入口容量门禁，V-30 两例失败；恢复原 Rail 与 Spec 的最终请求容量检查，V-30 `limits_left_to_windows` 失败；去掉 `context_engine_config` 类型还原，V-27 四例失败。脚本为 scratch 的 `pa18cap/mutate.py`，未入库 |
+| Ruff / format / codespell | 改动的 8 个 Python 文件 `ruff check`、`ruff format --check`、`codespell_lib` 均通过 |
+| Pylint | 4 个改动的源码文件：基线 3 条，本次 2 条，减少的是 `model_rail.py` 的 R0911，未新增 |
+| mypy | 4 个改动的源码文件（`--follow-imports=silent`）：4 条与基线相同的既有诊断，未新增 |
+| 文档 | 改动的 11 份文档：初查发现 F_11 第 415 行有一处既有失效链接，接管复核已将其改为指向 F_11 的设计演进章节；346 处本地链接与锚点全部有效，没有新增重复标题，`codespell_lib` 与差异空白检查通过；Node ESM 加载 jsdom / Mermaid 12.2.0，15 段图语法全部解析通过，未做图形渲染 |
+
+移除实现阶段未跑全仓测试、`make check`、覆盖率或真实模型联调。接管复核另对同一代码快照的 8 个变更 Python 文件执行 `make check`：Ruff、格式与拼写检查通过，Pylint 的 2 项诊断与基线一致；mypy 检查这 8 个文件时的 24 项诊断也与基线一致，无新增。本次修正失效引用只改文档，未重跑运行测试；PA-12、AgentServer 前序关联、core 维护者评审及 M2c 仍未验收。
+
+### 8.2.3 2026-10-19 主仓 2975fe761 适配与旧构造门槛修复
+
+- **范围与确认：** 以主仓 `jiuwenmate_v0.1.20@2975fe761` 的 `git archive` 快照验证。开发者确认保留 PA-11 的有效 context_window 80% 规则，合并 PA-18 容量检查移除，并删除旧四项配置门槛，暂保留两个字段兼容。
+- **设计与实现进展：** 架构、计划、F_11、S_03 的三方文本冲突已按两项已确认决策处理；F_20、S_07 与字段注释同步兼容边界。`window_management.py`、其测试及设计概览逐字节保持主仓内容；4 个源码、5 个测试与 11 份文档组成三个顺序补丁。PA-18 / M2c 状态与其他 PA 负责人不变。
+- **环境与命令：** macOS、项目 `.venv/bin/python`，工作目录为 scratch 快照。定向执行 `make test UV=no PYTHON=$PY TESTFLAGS="tests/unit_tests/harness/persistent_agent tests/unit_tests/core/single_agent/test_final_request_check.py -q -p no:cacheprovider -o addopts="`；扩大执行 `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. $PY -m pytest tests/unit_tests/harness tests/unit_tests/core/session tests/unit_tests/core/single_agent tests/unit_tests/core/context_engine -q -p no:cacheprovider -o addopts=`。
+
+| 检查 | 本轮实际结果及边界 |
+| --- | --- |
+| V-31 反例 | 3 个公共构造参数场景及 1 个正式入口场景：保留旧构造门槛时 4 failed，删除门槛后 4 passed；覆盖未配置、部分配置及旧值组合不适用，验证序列化与指纹保持 |
+| PA 包与 core 接缝 | 862 passed、2 warnings；实际执行仓库 `make test` 入口，未把旧基线结果作为当前通过数 |
+| 扩大回归 | 8538 passed、128 skipped、93 warnings、4 subtests passed；未扩展为全仓测试或真实宿主联调 |
+| `make check` / Ruff / format / codespell | 用 `CHANGES_RAW` 显式列出 9 个变更 Python 文件，未暂存根 checkout；Ruff、格式与拼写通过；Makefile 忽略 Pylint 非零，因此不把退出 0 解释为全部无诊断 |
+| Pylint | 2 条既有诊断：`spec.resolve_parts` 的 R0914（基线 27/15，本次 26/15）与 R0915（基线 79/50，本次 75/50）；无新增，分数 9.96 → 9.97 |
+| mypy | 对相同 9 个 Python 文件和相同导入范围分别检查干净主仓与候选；均为 4 个文件 26 条既有诊断，逐项归一化比较无新增或删除 |
+| 文档 | 11 份受影响文档的 348 处本地链接 / 锚点有效，拼写、结尾换行及重复标题检查通过；15 段 Mermaid 语法解析通过，未做图形渲染 |
+| 补丁与差异 | 三个顺序补丁在干净主仓快照实际应用后与候选逐字节一致；合并补丁对干净主仓和保留原计划修改的根 checkout 均通过 `git apply --check`；差异空白检查通过 |
+
+本轮只更新 scratch，不修改根 checkout，不提交、推送、建分支或 PR。未重跑此前三项变异脚本、覆盖率、全仓测试或真实模型联调；本轮新增反例的先红后绿单独记录。core 维护者评审、AgentServer 前序关系联调、PA-12 接入与 M2c 仍未验收。PA-11 首次调用 / checkpoint 后重试检查范围与 PA-06 容量验收仍待各自决策，不在本次扩大范围。
+
 ### 8.3 验证结论
 
-D-01～D-10 的已实现范围有组件证据。收尾已修复工具卸载的身份保护和日志工具 4 条新增类型诊断，补齐公开导出，落实所有正式 execute / resume 的容量配置校验，并将实现、测试与文档落到项目工作区。推送复查发现并修复了计数器选择配置丢失与实际日志提示未同步 Q-09；真实入口进一步暴露的上下文配置类型丢失也已修复。core 接缝未经 core 维护者评审；AgentServer 的前序关系保存与查询未联调；正式入口按 D-10 在 PA-12 接入前仍拒绝续做。当前静态诊断与未完成项见第 8.2 节；PA-18 与 M2c 均不能标为完成。
+D-01～D-10 的已实现范围有组件证据。此前收尾已修复工具卸载的身份保护和日志工具 4 条新增类型诊断，补齐公开导出，并曾落实所有正式 execute / resume 的容量配置校验（2026-10-19 已撤销），并将当时的实现、测试与文档落到项目工作区。推送复查发现并修复了计数器选择配置丢失与实际日志提示未同步 Q-09；真实入口进一步暴露的上下文配置类型丢失也已修复。core 接缝未经 core 维护者评审；AgentServer 的前序关系保存与查询未联调；正式入口按 D-10 在 PA-12 接入前仍拒绝续做。当前静态诊断与未完成项见第 8.2 节。2026-10-19 按开发者决定移除 PA-18 的容量检查与正式入口容量配置要求，移除验证见第 8.2.2 节，适配最新主仓的验证见第 8.2.3 节。PA-18 与 M2c 均不能标为完成。
 
 ## 9. 风险与已知遗留
 
@@ -390,10 +426,9 @@ D-01～D-10 的已实现范围有组件证据。收尾已修复工具卸载的�
 | --- | --- | --- |
 | 归档未按 execution_id 查询 | 换窗后崩溃时看不到当次归档 | D-10；PA-12 接入前续做不开放 |
 | 换窗后登记依据移出扫描范围 | 收尾漏交已登记文件 | D-07；PA-11 验收已注明 |
-| 容量检查依赖非估算计数器 | core 当前的 tiktoken 计数自报为估算；没有原生 tokenizer 的模型，配置了容量检查时每次调用都会 `paused(error)`，所有正式执行均要求配置，因而该模型的正式调用无法继续 | 按 Q-06 不假定容量足够；部署时为模型提供原生 tokenizer；列为 M2c 放行前提 |
-| 文本中含图片 data URL 的请求 | 计数器会改写这类文本，按容量未知处理，暂停为 `paused(error)` | 待按实际发送内容计数的方案；不改 core 计数器 |
-| 装配阶段检查与换窗摘要前检查未完成 | Q-06 的三个检查点只完成一个 | PA-06、PA-11 接入时补齐 |
-| 全正式入口要求完整容量配置 | 未配置的既有宿主调用正式 execute / resume 会前置拒绝；没有可靠计数器时暂停为 error | 入口与新增拒绝用例已实现；部署须补齐配置与模型原生 tokenizer |
+| PA-18 不检查模型容量（2026-10-19） | 请求超过模型上限时，PA-18 不再预先暂停 | 开发者决定；启用 window_management 时由 PA-11 按配置换窗 |
+| 启用 window_management 时文本中含图片 data URL 的请求 | 计数器会改写这类文本，PA-11 按容量未知处理，暂停为 `paused(error)` | 待按实际发送内容计数的方案；不改 core 计数器 |
+| PA-11 的首次调用及 checkpoint 后重试未覆盖完整请求计数 | 每次调用刷新有效窗口，但完整请求的计数与阈值比较只在完整工具批次后的安全边界进行 | 待 PA-11 负责人确认是否扩展检查点（D-09）；本次不改安全边界 |
 | 日志工具卸载身份保护（已修复） | 原型会误删宿主同名替换工具 | PA-18 ExecutionRecordRail 已按 Card 对象身份核对；真实 AbilityManager 的替换、正常清理和重复卸载用例通过，不改变 core 按名删除语义 |
 | 日志工具新增类型诊断（已修复） | core Tool 的方法级类型变量与 stream 注解不表达本工具的具体边界 | invoke / stream 使用兼容的 Any 边界，内部 _read 返回 ToolOutput；定向 mypy 无新增诊断，不扩大为全局 Tool 泛型重构 |
 | 执行链公开导出（已同步） | 宿主须能从包级 API 获取查询协议及 DTO | ExecutionLink / ExecutionLinkPort 已加入外层懒导出，并有导出身份测试 |
@@ -402,6 +437,14 @@ D-01～D-10 的已实现范围有组件证据。收尾已修复工具卸载的�
 | 服务端调度错误（未阻塞 Session、未确认旧执行退出） | 可能出现两个执行者或现场被覆盖 | 架构 §3.4 第 1、2、13 条由 AgentServer 保证；联调验证 |
 
 ## 10. 设计演进与修订
+
+### 2026-10-19 适配主仓 PA-11 80% 换窗规则与兼容字段
+
+- 确认依据：开发者在主仓更新冲突复核后要求修复；保留主仓 PA-11 的 80% 阈值、准确计数、安全边界和归档 / 状态提交规则，继续移除 PA-18 的容量检查。
+- 采用方案：删除 `PersistentAgentSpec.resolve_parts` 对 `window_management` 的旧四项容量配置门槛；`model_input_limit_tokens`、`capacity_safety_margin_tokens` 暂保留为可选兼容字段，仍参与 Spec 指纹，但不控制执行准入或换窗阈值。
+- 复用边界：PA-11 继续调用 `capacity.count_request` 准确计数；`capacity_limits` 与 `CapacityLimits` 仅保留内部兼容，不再由正式入口或构造调用。有效窗口由当前 `ModelContext.context_window_tokens()` 解析；本次不增加模型超限后的换窗重试，也不扩展首次调用的安全边界。
+- 验证计划：新增真实构造和正式入口用例，覆盖未配置旧字段、部分配置和旧值组合不适用；先确认旧门槛使反例失败，再删除门槛并运行 Persistent / core 接缝及相关回归。实施与最新结果另记，不预写通过。
+
 
 ### 2026-10-16 按开发者决策记录修订
 
@@ -473,3 +516,14 @@ D-01～D-10 的已实现范围有组件证据。收尾已修复工具卸载的�
 
 - 开发者要求在旧 `jiuwenmate` 的 [PR #82](https://gitcode.com/huenrui_/agent-core/pull/82) 合入后，将 PA-18 rebase 到 `jiuwenmate_v0.1.20`。本轮仅重放 PA-18 的三个提交，保留新基线的 PA-17、core 能力与迁移修复记录；不改动占用该目标分支的另一工作树。
 - core 最终检查接缝适配新基线的最终窗口构建位置，功能和职责边界不变；计划、F_05、F_19 的冲突按双方有效记录合并。新基线验证及新增复杂度诊断见第 8.2.1 节；本轮未开放续做或扩大验收结论。
+
+### 2026-10-19 按开发者决定移除容量检查
+
+- 原结论与适用范围：Q-06 与 D-09 规定每次模型调用在最终请求装配后、预算准入前检查容量，超限暂停为 `context_unfit`，容量未知暂停为 `error`；2026-10-16 起所有正式 execute / resume 必须完整配置容量，续做开放条件包含容量检查。
+- 新证据与原因：开发者 2026-10-19 决定移除：应用端使用不同模型，context window 各不相同，部分模型的上限未知，无法为所有正式执行配置容量。
+- 最终变化：删除 Rail 的最终请求计数与两种容量暂停、正式入口容量门禁、模型 Rail 的 `spec` 参数及对应用例（V-16、V-17、V-19、V-28 与 V-10 中的容量部分）；V-27 改为直接验证 tokenizer 设置传到原生上下文；新增 V-30。保留 core 接缝、预算准入时点、`capacity.py` 与两个容量字段（只由 PA-11 使用）及 `context_engine_config` 类型还原。同步架构、计划、S_01、S_03、S_05、S_07、F_05、F_06、F_19，F_11 与 S_03 的容量规则改记为 `execution/capacity.py`（PA-11 使用），F_06 已知遗留中已解决的 `context_engine_config` 一项同步更正；未修改 PA-11 的代码。
+- 旧结论的效力：Q-06、D-09 的容量部分，第 3 节三项决定中的“装配阶段暂不单独计数”和“正式入口容量配置”，以及“放行还需部署的模型有非估算计数器”作废；本节此前记录中的容量内容只保留为历史。
+- 遗留：PA-06 的容量验收如何关闭；PA-11 是否检查每个 Execution 的首次模型调用（D-09）。
+- 验证：第 8.2.2 节。
+
+- 同日后续替代：主仓 80% 适配条目已取消将旧容量字段作为 PA-11 配置要求的过渡安排；两个字段仅兼容保留，PA-11 只复用准确计数。以第 8.2.3 节和 D-09 为当前接入边界。

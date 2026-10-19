@@ -6,7 +6,7 @@
 | --- | --- |
 | 类型 | feature |
 | 建档日期 | 2026-10-13 |
-| 修订日期 | 2026-10-19：PA-11 的容量兜底与新窗口候选检查统一使用 `floor(context_window × 80%)` |
+| 修订日期 | 2026-10-19：PA-11 的容量兜底与新窗口候选检查统一使用 `floor(context_window × 80%)`；PA-18 移除容量检查的联动修订取消旧构造门槛，两个旧字段仅兼容保留 |
 | 范围 | Persistent Agent 的 Agent 主动换窗、容量兜底、窗口归档、切换检查点及恢复对账；不改变通用 DeepAgent 默认行为 |
 | 方案成熟度 | PA-11 的 agent-core 组件实现与测试已完成；未启用前直接采用 schema_version=1 的最终记录结构，不保留旧结构兼容层。真实 BaseKVStore、模型 hard limit 与 JiuwenSwarm 联调仍待验证 |
 | 计划条目 | PA-11；状态与负责人以[开发计划](../designs/persistent-agent-development-plan.md)为准 |
@@ -47,7 +47,7 @@
 - **当前实现边界：** `PersistentPorts` 注入 `window_backend`；PA-10 / PA-11 共用的 V1 `SessionStateStore`、逐轮 checkpoint、WindowStore 归档与换窗管理均已有 agent-core 组件实现和测试。测试替身证明组件逻辑，不证明真实 BaseKVStore 的持久性、隔离性、单写入语义或 JiuwenSwarm 的 Session 串行保证。
 - **用户已确认且已实现的方向：** Agent 主动换窗为主路径；容量阈值仅兜底；每个完整 ReAct 轮次在下一次模型调用前形成检查点，Execution 结束仍按 PA-10 终态保存。PA-11 组件测试已通过；真实宿主与 provider 联调尚未完成。
 - **记录结构与恢复实现：** schema_version=1 的唯一记录结构保存当前检查点（Execution / Request 身份、完整 ReAct 轮次序号、检查点类型和群消息扫描游标）；`ending` 只表示已结束的 Execution，中途检查点不伪造结局。未启用真实持久化前直接采用最终 V1 结构，不实现旧结构读取 / 映射；未知版本或损坏记录失败关闭。归档保存完整旧窗口、WindowSeed、保留消息组引用和候选指纹；加载时按原快照重建候选、校验指纹，成功持久化修复记录后才暴露恢复后的 Session 状态。启用前仍须检查后端并显式迁移或清理任何旧结构记录。
-- **关键假设：** AgentServer 保证同一 Session 由单一执行者串行处理，并提供持久、隔离的 BaseKVStore；模型配置提供正数 `context_window`。PA-11 对完整请求只接受准确且计入实际发送内容的 token 计数，并与 `floor(context_window × 80%)` 比较；计数不可靠或不可用时按 `paused(error)` 处理，不用估算值代替。若后端不能提供持久、隔离的单键写入，PA-11 不能开放。
+- **关键假设：** AgentServer 保证同一 Session 由单一执行者串行处理，并提供持久、隔离的 BaseKVStore；当前上下文引擎能解析出正整数有效窗口。PA-11 对完整请求只接受准确且计入实际发送内容的 token 计数，并与 `floor(context_window × 80%)` 比较；计数不可靠或不可用时按 `paused(error)` 处理，不用估算值代替。若后端不能提供持久、隔离的单键写入，PA-11 不能开放。
 - **待实现时校准：** 不同 provider 的 token 计量误差、80% 阈值在真实模型上的适用性、窗口种子最大预算、近期轮次预算和 archive 保留期。80% 只定义 PA-11 的输入容量换窗与候选检查阈值，不构成 provider hard-limit 保证，也不预言模型会生成多少 token。
 
 ## 4. 总体方案与设计取舍
@@ -283,6 +283,7 @@ Persistent Agent 的窗口管理组件在新上下文中加入当前系统指令
 ### 5.4 配置与能力控制
 
 - Persistent Session 显式启用 PA-11 时才接入换窗控制；普通 DeepAgent 和个人版默认路径不变。
+- Spec 的 `model_input_limit_tokens`、`capacity_safety_margin_tokens` 为可选兼容字段，保留原值和指纹，但不参与执行准入或 80% 阈值判断；删除旧四项容量配置的构造门槛，不要求额外填写这两个字段或输出预留。
 - 使用单一固定阈值：`rollover_threshold = floor(context_window × 80%)`。主动换窗仍优先；未主动换窗时，下一次完整请求的准确输入 token 数超过该阈值才触发兜底；候选新窗口完整请求也必须不超过该阈值。
 - 每次模型调用前，从当前 `ModelContext.context_window_tokens()` 读取有效窗口并重算阈值；不新增用户可调比例字段。PA-11 的 80% 阈值只负责提前换窗，不等同于模型 provider 的最终准入上限或未来输出 token 预测。
 - PA-10 的持久 WindowStore 未接入、上下文引擎未能解析出正整数窗口、计数不可靠或当前窗口不能安全读取时，PA-11 不得静默降级为无状态运行；窗口解析失败或计数不可靠时按 `paused(error)` 处理。
@@ -410,7 +411,7 @@ next_request_tokens = exact_count(final_messages, final_tool_schemas)
 
 - **已有执行与会话：** PA-11 agent-core 组件已实现并测试，但尚未接入真实持久化后端；当前没有已启用的生产 rollover 数据。最终记录直接使用 schema_version=1，游标位于顶层，活动记录包含 checkpoint、终态记录包含 ending；不读取或映射此前组件级旧 V1 结构，旧结构和未知版本均失败关闭。启用真实后端前若发现旧结构记录，须先明确迁移或清理，不得静默按空状态处理。
 - **旧 70% 规则：** 它是尚未落地的设计规则，不是生产行为承诺；已由 S_03、详细架构和设计概览中的 PA-11 契约替代。不得同时保留“固定 70% 已生效”和本方案作为两条当前规则。
-- **旧 feature 草案：** [designs/persistent-agent-pa11-window-management-design.md](../designs/persistent-agent-pa11-window-management-design.md) 保留为讨论材料，顶部注明由本 feature 取代。当前方案以本文件为准。
+- **历史设计：** 设计演进见[本文第 10 节](#10-设计演进与修订)，当前方案以本文件为准。
 - **回退边界：** 这是启用前的 V1 格式调整，不提供与旧 V1 代码的存储兼容。启用前确保旧结构数据不存在，且不能让旧版和新版代码并发读写同一后端；启用后回滚须恢复兼容代码或显式清理 / 迁移记录。关闭主动换窗也不能删除已归档数据。
 
 ## 8. 验证设计、执行记录与结论
@@ -437,6 +438,7 @@ PA-11 的验收标准以[开发计划](../designs/persistent-agent-development-p
 | F_11-V-14 | 普通 checkpoint 写入前失败或 BaseKVStore 写入后抛错 | 分别在同步、校验、序列化和 set 阶段注入故障 | 不调用下一次模型；保留最后已确认 checkpoint；写入结果不确定时下次重载并对照执行日志，不盲目重做 | 故障注入 + 续做组件测试 |
 | F_11-V-15 | 验证 schema_version=1 的最终结构及旧结构拒绝 | 分别构造活动 checkpoint、终态记录、此前未启用的旧 V1 结构、未知版本及损坏记录 | 活动与终态记录往返正确；旧结构、未知版本或损坏记录失败关闭，不降级为空或覆盖 | 记录 schema / 编解码测试 |
 | F_11-V-16 | ContextEngine 返回的有效窗口在模型调用间变化，或无法解析有效窗口 | 改变 `ModelContext.context_window_tokens()` 返回值；另注入 None、非正整数或异常 | 每次模型调用前刷新窗口及 80% 阈值；模型切换后使用新值；窗口不可用时暂停为 `error`，不调用模型 | WindowSwitchManager 单测 |
+| F_11-V-17 | 启用换窗不要求旧容量字段，既有值保留序列化与指纹 | 复用 [F_20](F_20_continuation.md) PA-18-V-31 的公共构造与正式入口场景 | 旧字段不影响构造和 80% 阈值，不改变运行中的 Spec | 见 PA-18-V-31 |
 
 并发 / 故障测试应控制 archive、state、event 三处写入点并在每处重复运行；验证断言至少覆盖可见 current_window_id、归档条数 / 内容、模型调用次数、事件类型和暂停结果。Fake store 仅证明逻辑，不证明生产 KV 的持久性或单 Session 串行能力。
 
@@ -450,6 +452,8 @@ PA-11 的验收标准以[开发计划](../designs/persistent-agent-development-p
 | 2026-10-19：PA-11 有效窗口来源与 Persistent Agent 回归 | Windows、Python 3.11.9；模型和存储替身 | `uv run --frozen pytest tests/unit_tests/harness/persistent_agent -q` | 860 passed、10 skipped、2 warnings；覆盖有效窗口来源、模型调用间窗口刷新、窗口不可用暂停、80% 边界及完整 PA 包 | 不证明真实 BaseKVStore 持久性、provider 容量边界或 JiuwenSwarm 联调 |
 | 2026-10-19：上下文压缩窗口解析回归 | Windows、Python 3.11.9 | `uv run --frozen pytest tests/unit_tests/core/context_engine/test_round_level_compressor.py tests/unit_tests/core/context_engine/test_model_rebind.py -q` | 12 passed、2 warnings；压缩比例与模型重绑逻辑保持通过 | 不替代真实模型和生产上下文配置联调 |
 | 2026-10-19：通用 ReAct / 个人版回归 | Windows、Python 3.11.9 | `uv run --frozen pytest tests/unit_tests/core/single_agent -q` | 160 passed、2 warnings；PA-11 未启用时的原生 ReAct 路径保持通过 | 不替代 JiuwenSwarm 真实执行链和生产后端联调 |
+| 2026-10-19：PA-18 主仓适配与共享 Spec 构造门槛修复 | macOS、项目 Python 3.11；scratch 快照，模型和存储替身 | PA 包与 core 最终请求接缝；命令与证据见 [F_20 第 8.2.3 节](F_20_continuation.md#823-2026-10-19-主仓-2975fe761-适配与旧构造门槛修复) | 862 passed；V-31 / F_11-V-17 的 4 个反例先红后绿；主仓窗口管理源码和测试保持不变 | 仅验证旧字段不再阻断构造 / 执行及既有组件回归；未验证真实 provider 或 AgentServer |
+
 
 ### 8.3 验证结论
 
@@ -528,3 +532,9 @@ PA-11 的验收标准以[开发计划](../designs/persistent-agent-development-p
 - **修订：** 将总体方案按“什么时候换窗、怎么换窗、新窗口里有什么、旧窗口保存在哪里”组织；单列任务当前状态记录及其与旧窗口归档的区别；补充换窗主流程、内容去向和中断恢复三张 Mermaid 图，并在图旁说明提交点与恢复条件。
 - **保持不变：** Agent 主动优先、容量检查兜底、旧窗先归档、单条 Session 状态记录、无 `replacement_history`、普通 `window.switched` 事件不作为权威等方案结论均未改变。
 - **验证：** 本次仅调整设计文档和 Mermaid 图；代码与测试未执行。
+
+### 2026-10-19 容量规则归属表述同步
+
+- 原表述：容量判断“复用 PA-18 的规则”“按 PA-18 暂停为 `error`”。
+- 原因：开发者决定移除 PA-18 的最终请求容量检查（见 [F_20](F_20_continuation.md) D-09）；`execution/capacity.py` 的准确计数继续由本组件复用；旧容量解析仅保留内部兼容，PA-11 使用当前有效窗口的 80% 阈值。
+- 变化：修正上述归属表述及旧草案的失效引用，历史设计改指向本文第 10 节；保留主仓 80% 阈值、准确计数、安全边界与暂停语义；删除共享 Spec 的旧容量构造门槛，两个旧字段仅兼容保留；`window_management.py` 不改。

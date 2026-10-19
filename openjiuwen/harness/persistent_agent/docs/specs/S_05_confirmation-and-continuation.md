@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_05 / confirmation-and-continuation |
 | 关联模块 | [request.py](../../schema/request.py)、[entries.py](../../execution/entries.py)、[control.py](../../execution/control.py)、[确认接入协议](../../execution/seams.py) |
-| 最近一次修订日期 | 2026-10-16 |
+| 最近一次修订日期 | 2026-10-19 |
 | 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_19](../features/F_19_execution-log-record.md)、[F_20](../features/F_20_continuation.md)；接入与验证见[开发计划](../designs/persistent-agent-development-plan.md) PA-09、PA-17、PA-18 |
 | 设计依据 | [架构设计：确认](../designs/persistent-agent-architecture.md#521-确认卡片等待与原生恢复)、[控制](../designs/persistent-agent-architecture.md#523-停止取消与补充消息)、[统一续做](../designs/persistent-agent-architecture.md#524-崩溃续做与非确认暂停后继续的统一流程)、[恢复边界](../designs/persistent-agent-architecture.md#83-根据什么恢复什么时候可以继续) |
 
@@ -74,7 +74,7 @@ reason 仅 cancel / stop；非法原因为 DEEPAGENT_INPUT_PARAM_ERROR，非法�
 | --- | --- |
 | recovery_ref 不是合法标识（1～512 字符，不含空白与控制字符） | DEEPAGENT_CONTEXT_PARAM_ERROR，在任何事件之前 |
 | 续做尚未开放：PA-12 按 execution_id 查询归档未接入 | DEEPAGENT_CONFIG_PARAM_ERROR，在任何事件之前，不按新任务重跑 |
-| 开放后宿主没有提供 commit.read_execution_link（S_02 第 4.3.1 节），Spec 未配置 continuation_chain_limit，或未配置容量检查（model_input_limit_tokens、capacity_safety_margin_tokens 与模型请求配置的 context_window、max_tokens） | DEEPAGENT_CONFIG_PARAM_ERROR，在任何事件之前 |
+| 开放后宿主没有提供 commit.read_execution_link（S_02 第 4.3.1 节），或 Spec 未配置 continuation_chain_limit | DEEPAGENT_CONFIG_PARAM_ERROR，在任何事件之前 |
 
 续做的组装顺序、执行链追溯与登记范围见 [F_20](../features/F_20_continuation.md)；放行条件不替代 M2c 原有的确认恢复、生命周期、记账和宿主验收要求。
 
@@ -113,7 +113,7 @@ reason 仅 cancel / stop；非法原因为 DEEPAGENT_INPUT_PARAM_ERROR，非法�
 
 补结果仅修复上下文，不能伪造 tool.completed 或表示副作用成功 / 失败。原生恢复可能在模型循环前执行被拦截工具，因此必须在续做进入原生调用前处理过期中断；正常确认恢复不能执行上述清理步骤。
 
-日志整理由 PA-17 提供（[F_19](../features/F_19_execution-log-record.md)）：意图与结果只在能唯一关联时合并，operation_id 复用（第二条意图，或结果之后出现的意图）与调用身份不一致时分开列出并注明；保留 progress.updated、工具的调用 ID、目标与结果引用、候选及其是否被 paused / final 引用；丢弃 reply.delta、model.completed、execution.started 与参与判断。续做自动提供分层（brief）摘要：写操作、结局、缺口与 share_file 登记逐项保留，只读调用只计次数，候选正文只给字数；完整记录由 read_execution_record 分页读取，只限本次已核验的执行链；最终请求容量检查见 F_20 D-09；归档暂只列日志中的换窗引用并注明未按 execution_id 查询（待 PA-12）。读不到、空日志或契约不符时提示“上一次记录缺失”；序号缺口与缺少结束记录照常整理并写明，不能据此推断未执行。已成功步骤不重做，不确定只读步骤可重读；有意图无结果的写操作先查证，查不清时可复用 AskUserRail 询问发起人；是否询问由模型判断，不设记录缺失即必须先询问的门禁。
+日志整理由 PA-17 提供（[F_19](../features/F_19_execution-log-record.md)）：意图与结果只在能唯一关联时合并，operation_id 复用（第二条意图，或结果之后出现的意图）与调用身份不一致时分开列出并注明；保留 progress.updated、工具的调用 ID、目标与结果引用、候选及其是否被 paused / final 引用；丢弃 reply.delta、model.completed、execution.started 与参与判断。续做自动提供分层（brief）摘要：写操作、结局、缺口与 share_file 登记逐项保留，只读调用只计次数，候选正文只给字数；完整记录由 read_execution_record 分页读取，只限本次已核验的执行链；归档暂只列日志中的换窗引用并注明未按 execution_id 查询（待 PA-12）。读不到、空日志或契约不符时提示“上一次记录缺失”；序号缺口与缺少结束记录照常整理并写明，不能据此推断未执行。已成功步骤不重做，不确定只读步骤可重读；有意图无结果的写操作先查证，查不清时可复用 AskUserRail 询问发起人；是否询问由模型判断，不设记录缺失即必须先询问的门禁。
 
 ### 5.4 异常后的宿主核对
 
