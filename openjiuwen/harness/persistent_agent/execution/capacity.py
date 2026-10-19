@@ -1,11 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Trusted request counts for PA-11, with legacy capacity parsing retained for compatibility.
+"""Context-window counting for PA-11, with legacy capacity parsing retained for compatibility.
 
 PA-11 gets the active model window from ContextEngine and applies its own 80% rollover threshold.
 Execution and construction do not call the legacy limit parser or require its configuration fields.
-A count is trusted only when the counter reports it as exact (not estimated, no fallback) and counts
-what the model is actually sent; anything else is unknown, never zero.
+Request counts use the shared ContextEngine policy: model-reported usage plus an estimated appended
+tail, otherwise the selected tokenizer with character-estimate fallback.
 """
 
 from dataclasses import dataclass
@@ -13,18 +13,12 @@ from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.context_engine.content_sanitize import sanitize_value_for_text
+from openjiuwen.core.context_engine.usage.context_tokens import count_context_window_tokens
 
 if TYPE_CHECKING:
     from openjiuwen.core.context_engine.token import TokenCounter
 
     from ..schema.spec import PersistentAgentSpec
-
-# Sources core counters report for fallbacks; they are estimates whatever their flags say.
-_FALLBACK_SOURCES = frozenset(
-    {"string_length_fallback", "tiktoken_fallback", "family_tokenizer_fallback", "not_reported"}
-)
-
 
 @dataclass(frozen=True)
 class CapacityLimits:
@@ -76,25 +70,11 @@ def capacity_limits(spec: "PersistentAgentSpec") -> CapacityLimits | None:
     return CapacityLimits(window, reserve, input_limit, margin)
 
 
-def count_request(counter: "TokenCounter", messages: list, tools: list | None, model: str = "") -> int | None:
-    """Input tokens of the final request, or None when they cannot be counted reliably.
-
-    The final messages already include the system prompt, so messages and tool definitions are each
-    counted once. Non-text message content is unknown. So is text the counters would rewrite before
-    counting: they replace image data URLs with short placeholders, while the model is sent the
-    original. A count the counter itself reports as estimated, or made through a fallback, is unknown.
-    """
-    for message in messages:
-        content = getattr(message, "content", "")
-        if not isinstance(content, str) or sanitize_value_for_text(content) != content:
-            return None
-    try:
-        counted = [
-            counter.measure_messages(messages, model=model),
-            counter.measure_tools(list(tools or []), model=model),
-        ]
-    except Exception:  # noqa: BLE001 - a counter failure means the capacity is unknown, not that it fits
-        return None
-    if any(item.estimated or item.fallback_reason or item.source in _FALLBACK_SOURCES for item in counted):
-        return None
-    return sum(item.tokens for item in counted)
+def count_request(counter: "TokenCounter | None", messages: list, tools: list | None) -> int:
+    """Count a final request using the ContextEngine compressor's shared policy."""
+    return count_context_window_tokens(
+        messages,
+        list(tools or []),
+        counter,
+        "PersistentAgent",
+    )

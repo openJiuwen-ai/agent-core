@@ -181,8 +181,8 @@ flowchart TD
 - **撤销（开发者 2026-10-19）：** 移除 PA-18 的容量检查。原因：应用端使用不同模型，context window 各不相同，部分模型的上限未知，无法为所有正式执行配置容量。删除：`PersistentModelCallRail` 对最终请求的计数及 `paused(context_unfit)` / `paused(error)` 暂停；正式 execute / resume 的容量配置要求（`_require_supported_modes`）；续做开放条件中的容量检查；模型 Rail 的 `spec` 参数。请求能否放下由模型服务判断，PA-18 不预先阻断。原配置、可用输入与计数可靠性规则见第 10 节的历史记录。
 - **保留的 core 接缝（`react_agent.py`）：** `ReActAgent.set_final_request_check(check)` 按实例注入，默认 `None`、行为不变。`_railed_model_call` 在最终系统提示、窗口消息与工具定义写入 `ctx.inputs` 之后、调用模型之前调用 `check(ctx)`：返回 `None` 放行；返回结果字典即以该结果结束本轮（与 force-finish 结果相同的通道），不是异常，不进入 Rail 重试或 `_recover_from_model_exception`。PA-11 在其上增加了重建最终请求的能力。core 只提供通用的“允许调用 / 提前结束”，不引入 Persistent 的类型或暂停原因；取消照常传播。需 core 维护者评审。
 - **保留的 Persistent 最终检查（`PersistentModelCallRail.check_final_request`）：** 在 `before_invoke` 为本实例注入；顺序为最终请求 → 换窗处理（启用 `window_management` 时，PA-11）→ 预算准入 → 模型调用。预算准入在这里，`before_model_call` 只保留停止检查；准入拒绝返回 `paused(budget_denied)`，不调用模型。
-- **计数复用与兼容字段：** PA-11 仅复用 `execution/capacity.py` 的 `count_request` 准确计数；窗口阈值使用主仓已实现的 `floor(context_window × 80%)`，见 [F_11](F_11_window-management.md)。`capacity_limits`、`CapacityLimits` 仅保留为内部兼容辅助，不再由正式入口或构造调用。Spec 的 `model_input_limit_tokens`、`capacity_safety_margin_tokens` 默认 `None`，可选保留旧值及指纹，不参与执行准入或换窗判断；启用 `window_management` 也不要求旧四项容量配置。`context_engine_config` 的类型还原与 tokenizer 配置保留（PA-18-V-27）。
-- **对 PA-11 的影响（待确认）：** 主仓 PA-11 每次调用前刷新当前 ContextEngine 的有效窗口，但仅在完整工具批次之后的安全边界对完整请求计数并比较阈值；每个 Execution 的首次调用及 checkpoint 后的重试不覆盖完整请求计数。是否扩展这些检查点，由 PA-11 负责人决定；本次保留主仓的窗口算法，并删除 Spec 中与新阈值无关的旧构造门槛，不扩展安全边界。
+- **计数复用与兼容字段：** PA-11 通过 `execution/capacity.py::count_request` 复用上下文引擎压缩器的用量感知计数和估算回退；窗口阈值使用 `floor(context_window × 80%)`，见 [F_11](F_11_window-management.md)。`capacity_limits`、`CapacityLimits` 仅保留为内部兼容辅助，不再由正式入口或构造调用。Spec 的 `model_input_limit_tokens`、`capacity_safety_margin_tokens` 默认 `None`，可选保留旧值及指纹，不参与执行准入或换窗判断；启用 `window_management` 也不要求旧四项容量配置。`context_engine_config` 的类型还原与 tokenizer 配置保留（PA-18-V-27）。
+- **对 PA-11 的影响：** 首次模型调用没有已完成的 ReAct 轮次，不触发容量兜底；之后在完整工具批次和逐轮 checkpoint 的安全边界上，对下一次最终请求按上下文引擎策略计数并比较 80% 阈值。换窗提交仍只在安全边界进行。具体计数与估算回退规则见 [F_11](F_11_window-management.md)。
 
 #### D-10 开放范围（方案 A，已实现）
 
@@ -287,7 +287,7 @@ flowchart TD
 | PA-18-V-21 | 续做中读取链内执行与链外执行 | 链内返回完整整理（不是摘要），链外拒绝；不产生 `tool.intent`；每次读取都重新读取日志 |
 | PA-18-V-22 | 新任务中调用 `read_execution_record` | 返回不可用，不读取日志 |
 | PA-18-V-23 | 分页契约（`test_record_tool.py`） | 多页无损还原、每页不超过上限且不为空、条目内续读、记录变化重置并提示、非法 / 他人 / 越界游标分别拒绝、容量不足以返回片段时报错 |
-| PA-18-V-24 | 准确计数与旧容量解析兼容（`test_capacity.py`；PA-11 只复用计数） | 未配置不检查；可用输入取较紧者；不完整或不可能的配置拒绝；精确计数求和；自报估算（含原生来源但 `estimated=True`）、降级、计数失败与非文本内容（含不带 data URL 的块列表）为未知；真实 `NativeTokenizerCounter` 计纯文本可信，遇到会被改写的 data URL 为未知；真实 `TiktokenCounter("gpt-4")` 自报估算，为未知 |
+| PA-18-V-24 | PA-18 移除前的历史计数策略与旧容量解析兼容（历史测试记录；PA-11 当前策略见 F_11） | 当时未配置不检查；可用输入取较紧者；不完整或不可能的配置拒绝；精确计数求和；估算、降级、计数失败与非文本内容被视为未知。该测试记录的是 PA-18 旧容量检查方案，不代表当前 PA-11 对估算值的处理 |
 | PA-18-V-25 | core 接缝（`test_final_request_check.py`） | 默认关闭时行为不变；放行时检查看到最终请求再调用模型；阻断时模型、Rail 异常回调与恢复都不发生；Rail 重试与恢复重试都再次检查；取消传播；流式调用同样检查；移除后恢复原行为 |
 | PA-18-V-26 | 分层摘要与分页数据源（`test_execution_log.py`） | 写操作、结局、缺口与 `share_file` 逐项保留，只读计次数，正文只给字数，省略单独说明；无省略时不说明；非法 `detail` 在读取前拒绝；`record_blocks` 拼接等于完整整理 |
 | PA-18-V-27 | 真实本地 tokenizer 的正式新任务入口（对象 / 字典配置，tokenizer_spec / registry） | 最终请求时原生上下文给出 `NativeTokenizerCounter`，执行完成；发布 JSON 与指纹不变；去掉快照后的类型还原时失败 |
@@ -440,9 +440,9 @@ D-01～D-10 的已实现范围有组件证据。此前收尾已修复工具卸�
 
 ### 2026-10-19 适配主仓 PA-11 80% 换窗规则与兼容字段
 
-- 确认依据：开发者在主仓更新冲突复核后要求修复；保留主仓 PA-11 的 80% 阈值、准确计数、安全边界和归档 / 状态提交规则，继续移除 PA-18 的容量检查。
+- 确认依据：开发者在主仓更新冲突复核后要求修复；保留主仓 PA-11 的 80% 阈值、当时的计数策略、安全边界和归档 / 状态提交规则，继续移除 PA-18 的容量检查。
 - 采用方案：删除 `PersistentAgentSpec.resolve_parts` 对 `window_management` 的旧四项容量配置门槛；`model_input_limit_tokens`、`capacity_safety_margin_tokens` 暂保留为可选兼容字段，仍参与 Spec 指纹，但不控制执行准入或换窗阈值。
-- 复用边界：PA-11 继续调用 `capacity.count_request` 准确计数；`capacity_limits` 与 `CapacityLimits` 仅保留内部兼容，不再由正式入口或构造调用。有效窗口由当前 `ModelContext.context_window_tokens()` 解析；本次不增加模型超限后的换窗重试，也不扩展首次调用的安全边界。
+- 复用边界：当时 PA-11 调用 `capacity.count_request` 做准确计数；该计数策略已由 F_11 后续修订替换为与上下文引擎压缩器共享的用量感知策略。`capacity_limits` 与 `CapacityLimits` 仅保留内部兼容，不再由正式入口或构造调用。有效窗口由当前 `ModelContext.context_window_tokens()` 解析；本次不增加模型超限后的换窗重试，也不扩展首次调用的安全边界。
 - 验证计划：新增真实构造和正式入口用例，覆盖未配置旧字段、部分配置和旧值组合不适用；先确认旧门槛使反例失败，再删除门槛并运行 Persistent / core 接缝及相关回归。实施与最新结果另记，不预写通过。
 
 
@@ -526,4 +526,4 @@ D-01～D-10 的已实现范围有组件证据。此前收尾已修复工具卸�
 - 遗留：PA-06 的容量验收如何关闭；PA-11 是否检查每个 Execution 的首次模型调用（D-09）。
 - 验证：第 8.2.2 节。
 
-- 同日后续替代：主仓 80% 适配条目已取消将旧容量字段作为 PA-11 配置要求的过渡安排；两个字段仅兼容保留，PA-11 只复用准确计数。以第 8.2.3 节和 D-09 为当前接入边界。
+- 同日后续替代：主仓 80% 适配条目已取消将旧容量字段作为 PA-11 配置要求的过渡安排；两个字段仅兼容保留。PA-11 当前计数策略以 F_11 的后续修订为准。以第 8.2.3 节和 D-09 为 PA-18 当前接入边界。

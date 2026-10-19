@@ -8,7 +8,6 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
@@ -28,6 +27,15 @@ from openjiuwen.core.context_engine.processor.forked.compressor.reinjection impo
 )
 from openjiuwen.core.context_engine.processor.forked.compressor.reinjection import (
     StateReinjector as FullCompactStateReinjector,
+)
+from openjiuwen.core.context_engine.usage.context_tokens import (
+    count_messages_tokens as _shared_count_messages_tokens,
+)
+from openjiuwen.core.context_engine.usage.context_tokens import (
+    count_usage_tokens_with_tail as _shared_count_usage_tokens_with_tail,
+)
+from openjiuwen.core.context_engine.usage.context_tokens import (
+    estimate_content_tokens as _shared_estimate_content_tokens,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage, UserMessage
 
@@ -264,8 +272,7 @@ def estimate_content_tokens(content: Any) -> int:
     Uses ``len // 3`` to mirror ``TiktokenCounter``'s own fallback and align
     with thresholds scaled to real context-window token counts.
     """
-    text = sanitize_content_for_text(content)
-    return max(len(text) // 3, 1)
+    return _shared_estimate_content_tokens(content)
 
 
 def count_messages_tokens(
@@ -284,49 +291,17 @@ def count_messages_tokens(
     partial-list callers must leave ``usage_aware`` False (default), since a
     per-message size cannot be derived from a conversation-cumulative usage.
     """
-    if not messages:
-        return 0
-    if usage_aware:
-        usage_tokens = count_usage_tokens_with_tail(messages)
-        if usage_tokens is not None:
-            return usage_tokens
-    if token_counter is not None:
-        try:
-            return token_counter.count_messages(messages)
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            prefix = f"[{processor_type}] " if processor_type else ""
-            logger.warning(f"{prefix}token_counter failed, fallback to char-based estimate: {exc}")
-    return sum(estimate_content_tokens(getattr(message, "content", "")) for message in messages)
+    return _shared_count_messages_tokens(
+        messages,
+        token_counter,
+        processor_type,
+        usage_aware=usage_aware,
+    )
 
 
 def count_usage_tokens_with_tail(messages: List[BaseMessage]) -> Optional[int]:
     """Return a valid model-reported usage baseline plus its appended tail."""
-    split = _last_usage_base(messages)
-    if split is None:
-        return None
-    base, tail = split
-    return base + sum(_len3(message) for message in tail)
-
-
-def _last_usage_base(messages: List[BaseMessage]) -> Optional[Tuple[int, List[BaseMessage]]]:
-    """Return ``(total_tokens, tail_messages)`` from the last AssistantMessage
-    carrying a positive ``usage_metadata``, or ``None`` when no such message
-    exists. ``total_tokens`` is the model-reported cumulative input+output and
-    already includes the tools/system present at that turn; ``tail_messages``
-    are the messages added after it (estimated with ``len // 3``).
-    """
-    for idx in range(len(messages) - 1, -1, -1):
-        message = messages[idx]
-        if ContextUtils.has_valid_usage_metadata(message):
-            return message.usage_metadata.total_tokens, messages[slice(idx + 1, None)]
-    return None
-
-
-def _len3(message: BaseMessage) -> int:
-    """Estimate a single message's tokens with ``len // 3`` (mirrors the
-    fallback coefficient used elsewhere in this module)."""
-    content = getattr(message, "content", "")
-    return len(sanitize_content_for_text(content)) // 3
+    return _shared_count_usage_tokens_with_tail(messages)
 
 
 def resolve_context_max(context: ModelContext, model_name: str | None = None) -> int:

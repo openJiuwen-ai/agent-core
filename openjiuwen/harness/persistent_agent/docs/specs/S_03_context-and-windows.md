@@ -82,7 +82,7 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 - **上下文 rail**：Persistent 构造（`PersistentAgentSpec.resolve_parts`）拒绝挂载 `ContextAssembleRail`、`PersonalContextRail`、`ContextProcessorRail`（含子类），`ContextProcessorRail` 的默认压缩链因此也不会挂载；`DeepAgentSpec` / `create_deep_agent` 不变。
 - **增量通道**：保留原生 `PromptAttachmentManager.sync_to_context`（首次快照、之后只追加变化）；一期 Persistent 自身没有执行中追加的动态内容。
 - **续做材料**：续做只有必需材料，详细日志通过受控工具分页读取。PA-18 不检查模型容量（2026-10-19 按开发者决定移除，见 F_20 D-09），不因请求超限或计数不可靠而暂停；启用 window_management 时由 PA-11 按下文规则换窗。不截断原任务或静默删除未决写操作。
-- **换窗容量**：PA-11 使用 `rollover_threshold = floor(context_window × 80%)`。未主动换窗时，下一次完整请求的准确输入 token 数超过该阈值就触发换窗；新窗口候选完整请求也必须不超过该阈值。`context_window` 每次模型调用前从当前 `ModelContext.context_window_tokens()` 获取，即上下文引擎解析出的有效窗口。80% 是 PA-11 的换窗阈值，不是 provider hard-limit 保证。
+- **换窗容量**：PA-11 使用 `rollover_threshold = floor(context_window × 80%)`。未主动换窗时，下一次完整请求按上下文引擎的用量感知计数策略计算，超过该阈值就触发换窗；新窗口候选完整请求也使用同一策略。计数优先取最近有效模型 `total_tokens` 并估算后续新增消息；无有效基线时用当前 ModelContext 计数器，缺失或失败则估算清理后的消息和工具内容。估算值照常参与阈值比较，不因估算本身暂停。`context_window` 每次模型调用前从当前 `ModelContext.context_window_tokens()` 获取，即上下文引擎解析出的有效窗口；窗口无法解析时暂停为 `error`。80% 是 PA-11 的换窗阈值，不是 provider hard-limit 保证。
 
 ### 4.3 `SessionStateStore.checkpoint(context, checkpoint) -> None`
 
@@ -100,13 +100,13 @@ PA-11 的 Session 状态读写、窗口归档、归档索引和精确恢复已�
 
 ### 5.1 执行中与安全换窗（PA-11：agent-core 组件已实现，真实宿主待联调）
 
-普通模型回复、工具调用和结果沿原生路径追加。每轮完整 ReAct 结束且 Execution 将继续时，PA-10 在下一次模型调用前同步并持久化当前窗口检查点；执行中的消息流或未完成工具批次不单独落盘。PA-11 有两个触发入口但共用一条换窗流水线：Agent 在合适的阶段边界通过内部 `new_context` 控制动作提交受约束的 `WindowSeed`，这是主路径；若本回合没有主动请求，窗口管理组件准确计算下一次完整模型请求的输入 token 数，超过 `floor(context_window × 80%)` 时触发兜底，正好等于阈值时不触发。每次模型调用前都从当前 `ModelContext.context_window_tokens()` 刷新有效窗口和对应阈值，模型切换后采用新值。计数需覆盖实际发送的系统指令、工具定义、活动消息和附件处理结果；计数不可用或不可靠时暂停为 `error`，不使用估算值。上下文引擎无法提供正整数窗口时暂停为 `error`，不继续调用模型。
+普通模型回复、工具调用和结果沿原生路径追加。每轮完整 ReAct 结束且 Execution 将继续时，PA-10 在下一次模型调用前同步并持久化当前窗口检查点；执行中的消息流或未完成工具批次不单独落盘。PA-11 有两个触发入口但共用一条换窗流水线：Agent 在合适的阶段边界通过内部 `new_context` 控制动作提交受约束的 `WindowSeed`，这是主路径；若本回合没有主动请求，窗口管理组件按上下文引擎策略计算下一次完整模型请求的 token 数，超过 `floor(context_window × 80%)` 时触发兜底，正好等于阈值时不触发。计数优先复用有效模型用量并估算其后的新增消息；没有用量基线时调用当前 ModelContext 计数器，并在计数器缺失或失败时估算清理后的消息和工具内容。估算值照常参与比较，不因估算本身暂停。每次模型调用前都从当前 `ModelContext.context_window_tokens()` 刷新有效窗口和对应阈值，模型切换后采用新值。上下文引擎无法提供正整数窗口或计数过程发生不可恢复异常时暂停为 `error`，不继续调用模型。
 
 `new_context` 是 Persistent Agent 内部控制动作，不是用户调用的业务工具，也不直接改写存储或作为公共 Python API。WindowSeed 是 Agent 提交的有界交接建议，包含当前目标、已完成进度、下一步、约束 / 决策、未决问题，以及经执行日志核验的未决副作用引用和稳定证据引用；它不构成事实回执、权限或授权。容量兜底没有 Agent seed 时，由窗口管理组件根据已保存的任务目标、执行事实和最近完整交互整理最小交接要点，不额外调用模型生成摘要。
 
 当前确认链中仍有效的 `share_file` 调用及成功结果须位于新窗最后一个执行头或结束标记之后，不能只保留登记摘要。
 
-只在安全边界切换：当前模型回复已结束，并行工具已结束或收敛，所有工具调用与结果完整成组。新窗口由固定系统指令和工具定义、本次原始 Request、经过校验的 WindowSeed，以及按 token 预算挑选的近期完整消息组构成；不把旧窗全文复制进新窗。必要任务信息、未交出的 `share_file` 登记依据和未决写操作线索必须保留或以稳定引用衔接。换窗后重建的完整请求也要准确计数，超过 `floor(context_window × 80%)` 时，产出 `paused(context_unfit)`，不静默截断。
+只在安全边界切换：当前模型回复已结束，并行工具已结束或收敛，所有工具调用与结果完整成组。新窗口由固定系统指令和工具定义、本次原始 Request、经过校验的 WindowSeed，以及按 token 预算挑选的近期完整消息组构成；不把旧窗全文复制进新窗。必要任务信息、未交出的 `share_file` 登记依据和未决写操作线索必须保留或以稳定引用衔接。换窗后重建的完整请求也按上下文引擎策略计数，超过 `floor(context_window × 80%)` 时产出 `paused(context_unfit)`，不静默截断。
 
 普通路径顺序固定为：同步原生状态与 DeepAgent 状态 → 校验本轮已完整收敛 → 一次写入当前窗口及检查点元数据 → 成功后才发起下一次模型调用。若该轮触发换窗，则以以下提交代替普通检查点，避免重复快照：准备并验证候选新窗 → 以稳定 `archive_ref` 幂等保存本轮结束后的旧窗完整原文和切换元数据 → 将新窗口、`current_window_id`、`window_seq`、`last_rollover` 与本轮检查点一次写入 PA-10 的同一条 Session 状态记录 → 持久化成功后替换运行时上下文 → 尽力记录 S_02 的普通 `window.switched` 通知。归档失败不提交新窗口；状态写入失败或结果未知时停止当前执行，不在候选新窗或旧内存窗继续调用模型。事件失败不回滚已提交的状态或内存切换。
 

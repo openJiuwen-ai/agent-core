@@ -158,6 +158,7 @@ def test_context_window_with_valid_usage_does_not_double_count_tools():
     result = compressor._count_context_window_tokens(window, context)
 
     assert result == 5013
+    context.token_counter.assert_not_called()
     token_counter.count_messages.assert_not_called()
     token_counter.count_tools.assert_not_called()
 
