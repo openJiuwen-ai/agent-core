@@ -52,6 +52,12 @@ class ExactCounter:
             tokens=sum(len(str(tool)) for tool in tools or []),
         )
 
+    def count_messages(self, messages, *, model=""):
+        return sum(len(message.content) for message in messages)
+
+    def count_tools(self, tools, *, model=""):
+        return sum(len(str(tool)) for tool in tools or [])
+
 
 def archive_payload(**overrides):
     payload = {

@@ -11,7 +11,7 @@ import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine.token import NativeTokenizerCounter, TiktokenCounter, TokenCounter
-from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, UserMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, UsageMetadata, UserMessage
 from openjiuwen.harness.persistent_agent.execution import capacity as CAPACITY
 from openjiuwen.harness.persistent_agent.execution.model_rail import PersistentModelCallRail
 
@@ -76,25 +76,27 @@ class Counter(TokenCounter):
 MESSAGES = [SystemMessage(content="sys"), UserMessage(content="hello"), AssistantMessage(content="")]
 
 
-def test_an_exact_count_covers_messages_and_tools_once():
+def test_a_count_without_usage_uses_the_context_engine_counter_for_messages_and_tools():
     assert CAPACITY.count_request(Counter(), MESSAGES, ["tool"]) == len("sys") + len("hello") + len("tool")
     assert CAPACITY.count_request(Counter(), MESSAGES, None) == 8
 
 
-@pytest.mark.parametrize(
-    "counter",
-    [
-        pytest.param(Counter(estimated=True), id="native_but_estimated"),
-        pytest.param(Counter(source="string_length_fallback"), id="string_length"),
-        pytest.param(Counter(source="tiktoken_fallback"), id="tiktoken_fallback"),
-        pytest.param(Counter(source="family_tokenizer_fallback"), id="family"),
-        pytest.param(Counter(fallback="model_variant_tokenizer_family"), id="fallback_reason"),
-        pytest.param(Counter(source="not_reported"), id="not_reported"),
-        pytest.param(Counter(fail=True), id="counter_error"),
-    ],
-)
-def test_an_estimated_or_failed_count_is_unknown(counter):
-    assert CAPACITY.count_request(counter, MESSAGES, []) is None
+def test_a_model_usage_baseline_counts_only_the_messages_appended_after_it():
+    messages = [
+        SystemMessage(content="system"),
+        AssistantMessage(content="done", usage_metadata=UsageMetadata(total_tokens=100)),
+        UserMessage(content="x" * 40),
+    ]
+
+    assert CAPACITY.count_request(Counter(fail=True), messages, ["tools-already-in-baseline"]) == 113
+
+
+def test_an_estimated_context_counter_is_used_instead_of_being_rejected():
+    assert CAPACITY.count_request(Counter(estimated=True), MESSAGES, ["tool"]) == 12
+
+
+def test_a_failed_context_counter_falls_back_to_the_compressor_character_estimate():
+    assert CAPACITY.count_request(Counter(fail=True), MESSAGES, ["tool"]) == 4
 
 
 def final_check_context(get_counter):
@@ -134,11 +136,11 @@ async def test_complete_react_iteration_is_forwarded_only_when_persistent_execut
     manager.after_react_iteration.assert_awaited_once_with(callback_context)
 
 
-def test_non_text_content_is_unknown():
+def test_non_text_content_uses_the_context_engine_measurement_strategy():
     image = UserMessage(content=[{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA"}}])
     blocks = UserMessage(content=[{"type": "text", "text": "hello"}])
-    assert CAPACITY.count_request(Counter(), [*MESSAGES, image], []) is None
-    assert CAPACITY.count_request(Counter(), [*MESSAGES, blocks], []) is None, "block lists are not counted as sent"
+    assert CAPACITY.count_request(Counter(), [*MESSAGES, image], []) is not None
+    assert CAPACITY.count_request(Counter(), [*MESSAGES, blocks], []) is not None
 
 
 # Real counters: the flags they report and the text they rewrite before counting.
@@ -163,15 +165,15 @@ def test_a_real_native_count_of_plain_text_is_trusted(native_counter):
     assert CAPACITY.count_request(native_counter, MESSAGES, []) == native_counter.count_messages(MESSAGES)
 
 
-def test_text_a_counter_would_rewrite_is_unknown_even_for_an_exact_counter(native_counter):
-    """The counter replaces the data URL with a short placeholder; the model is sent the whole text."""
+def test_text_a_counter_would_rewrite_uses_the_same_sanitized_count_as_context_engine(native_counter):
+    """PA-11 follows ContextEngine's existing sanitizer-aware estimate policy."""
     message = UserMessage(content=f"截图如下：{DATA_URL}")
     assert native_counter.count_messages([message]) * 100 < native_counter.count(message.content)
-    assert CAPACITY.count_request(native_counter, [*MESSAGES, message], []) is None
+    assert CAPACITY.count_request(native_counter, [*MESSAGES, message], []) is not None
 
 
-def test_a_real_tiktoken_count_reports_itself_as_estimated_so_it_is_unknown():
+def test_a_tiktoken_fallback_count_is_usable_like_the_context_engine_compressor():
     counter = TiktokenCounter("gpt-4")
     assert counter.measure_messages(MESSAGES).estimated is True
-    assert CAPACITY.count_request(counter, MESSAGES, []) is None
-    assert CAPACITY.count_request(counter, [UserMessage(content=f"截图如下：{DATA_URL}")], []) is None
+    assert CAPACITY.count_request(counter, MESSAGES, []) is not None
+    assert CAPACITY.count_request(counter, [UserMessage(content=f"截图如下：{DATA_URL}")], []) is not None

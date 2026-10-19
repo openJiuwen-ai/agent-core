@@ -269,7 +269,7 @@ class WindowSwitchManager:
         current_tokens = self._count_request(ctx)
         if request is None:
             if current_tokens is None:
-                return _pause("error", "当前模型请求无法可靠计数，已暂停；不会按估算结果换窗。")
+                return _pause("error", "无法读取当前请求的上下文计数状态，已暂停；不会调用模型。")
             if current_tokens <= self._rollover_threshold:
                 await self._checkpoint(control, iteration_seq)
                 return None
@@ -329,15 +329,12 @@ class WindowSwitchManager:
     def _count_request(self, ctx: "AgentCallbackContext") -> int | None:
         try:
             counter = ctx.context.token_counter() if ctx.context is not None else None
-        except Exception:  # noqa: BLE001 - an unavailable counter means capacity is unknown
+        except Exception:  # noqa: BLE001 - failure to obtain the ContextEngine counter is unexpected
             return None
-        request = self._spec.model.model_request_config if self._spec.model is not None else None
-        model = str(getattr(request, "model_name", "") or "")
         return capacity.count_request(
             counter,
             list(ctx.inputs.messages or []),
             ctx.inputs.tools,
-            model,
         )
 
     def _count_candidate(self, ctx: "AgentCallbackContext", messages: list) -> int | None:
@@ -346,15 +343,12 @@ class WindowSwitchManager:
             return None
         try:
             counter = ctx.context.token_counter() if ctx.context is not None else None
-        except Exception:  # noqa: BLE001 - an unavailable counter means capacity is unknown
+        except Exception:  # noqa: BLE001 - failure to obtain the ContextEngine counter is unexpected
             return None
-        request = self._spec.model.model_request_config if self._spec.model is not None else None
-        model = str(getattr(request, "model_name", "") or "")
         return capacity.count_request(
             counter,
             [*window.system_messages, *messages],
             window.tools,
-            model,
         )
 
     def _fallback_seed(self, ctx: "AgentCallbackContext") -> WindowSeed:

@@ -6,7 +6,7 @@
 | --- | --- |
 | 类型 | feature |
 | 建档日期 | 2026-10-13 |
-| 修订日期 | 2026-10-19：PA-11 的容量兜底与新窗口候选检查统一使用 `floor(context_window × 80%)`；PA-18 移除容量检查的联动修订取消旧构造门槛，两个旧字段仅兼容保留 |
+| 修订日期 | 2026-10-19：PA-11 复用上下文引擎的用量感知计数策略；80% 阈值和窗口来源保持不变 |
 | 范围 | Persistent Agent 的 Agent 主动换窗、容量兜底、窗口归档、切换检查点及恢复对账；不改变通用 DeepAgent 默认行为 |
 | 方案成熟度 | PA-11 的 agent-core 组件实现与测试已完成；未启用前直接采用 schema_version=1 的最终记录结构，不保留旧结构兼容层。真实 BaseKVStore、模型 hard limit 与 JiuwenSwarm 联调仍待验证 |
 | 计划条目 | PA-11；状态与负责人以[开发计划](../designs/persistent-agent-development-plan.md)为准 |
@@ -21,16 +21,16 @@
 
 ### 2.1 背景与问题
 
-截至 2026-10-19，PA-11 的逐轮检查点、主动 `new_context`、容量兜底、归档、活动状态提交及精确恢复已接入 agent-core 的 Persistent Agent 执行链，并通过组件测试。真实服务端 BaseKVStore、模型容量边界与 JiuwenSwarm 侧仍待联调。容量兜底触发和新窗口候选检查统一使用 `floor(context_window × 80%)`。
+截至 2026-10-19，PA-11 的逐轮检查点、主动 `new_context`、容量兜底、归档、活动状态提交及精确恢复已接入 agent-core 的 Persistent Agent 执行链，并通过组件测试。真实服务端 BaseKVStore、模型容量边界与 JiuwenSwarm 侧仍待联调。容量兜底和新窗口候选检查仍使用 `floor(context_window × 80%)`；完整请求的 token 计数改为复用上下文引擎压缩器的用量感知策略。
 
-当前实现遵循以下方向：Agent 主动请求是主路径；若 Agent 没有请求，下一次完整模型请求的准确输入 token 数超过 `floor(context_window × 80%)` 时触发保护性换窗。80% 是换窗阈值，不是 provider hard limit 或生成输出长度的保证。两种触发都执行同一条归档、状态提交和上下文替换流水线。本文记录设计与组件实现；真实宿主和 provider 行为尚未完成联调验收。
+当前实现遵循以下方向：Agent 主动请求是主路径；若 Agent 没有请求，下一次完整模型请求按上下文引擎策略计算出的 token 数超过 `floor(context_window × 80%)` 时触发保护性换窗。计数优先使用最近一次有效模型 `total_tokens` 并估算其后的新增消息；没有有效用量基线时，使用当前上下文引擎计数器，缺失或失败则按清理后的文本长度估算。80% 是换窗阈值，不是 provider hard limit 或生成输出长度的保证。两种触发都执行同一条归档、状态提交和上下文替换流水线。本文记录设计与组件实现；真实宿主和 provider 行为尚未完成联调验收。
 
 ### 2.2 目标与关键场景
 
 | 场景 / 触发条件 | 当前行为 | 目标行为 / 可观察变化 |
 | --- | --- | --- |
 | Agent 判断已完成一个阶段、适合整理上下文 | `new_context` 控制动作和安全边界已有组件实现 | Agent 在安全边界提交受约束的 handoff；Persistent Agent 校验后运行统一换窗流水线 |
-| Agent 未主动换窗，下一次完整请求超过 `context_window` 的 80% | 容量兜底组件已实现；真实 provider 容量边界尚待联调 | 准确输入 token 数大于 `floor(context_window × 80%)` 时触发同一流水线 |
+| Agent 未主动换窗，下一次完整请求超过 `context_window` 的 80% | 容量兜底组件已实现；真实 provider 容量边界尚待联调 | 按上下文引擎计数策略得到的完整请求 token 数大于 `floor(context_window × 80%)` 时触发同一流水线 |
 | 一轮 ReAct 完成，Agent 将继续下一轮 | PA-10 的 V1 完整轮次检查点已接入组件执行链 | 下一次模型调用前将完整轮次写为检查点；如果本轮触发换窗，换窗提交本身就是该轮检查点 |
 | 必要 handoff 和任务输入仍超出可用容量 | 组件路径已实现并有测试 | 以 `paused(context_unfit)` 结束，不静默删除必要内容或伪造完整摘要 |
 | 进程在归档和状态提交之间中断 | 组件按精确身份与内容重建、校验候选并补写；真实后端故障语义待联调 | 以 Session 状态记录判断当前窗口，不由普通事件推断提交结果；无法精确恢复时失败关闭 |
@@ -47,7 +47,7 @@
 - **当前实现边界：** `PersistentPorts` 注入 `window_backend`；PA-10 / PA-11 共用的 V1 `SessionStateStore`、逐轮 checkpoint、WindowStore 归档与换窗管理均已有 agent-core 组件实现和测试。测试替身证明组件逻辑，不证明真实 BaseKVStore 的持久性、隔离性、单写入语义或 JiuwenSwarm 的 Session 串行保证。
 - **用户已确认且已实现的方向：** Agent 主动换窗为主路径；容量阈值仅兜底；每个完整 ReAct 轮次在下一次模型调用前形成检查点，Execution 结束仍按 PA-10 终态保存。PA-11 组件测试已通过；真实宿主与 provider 联调尚未完成。
 - **记录结构与恢复实现：** schema_version=1 的唯一记录结构保存当前检查点（Execution / Request 身份、完整 ReAct 轮次序号、检查点类型和群消息扫描游标）；`ending` 只表示已结束的 Execution，中途检查点不伪造结局。未启用真实持久化前直接采用最终 V1 结构，不实现旧结构读取 / 映射；未知版本或损坏记录失败关闭。归档保存完整旧窗口、WindowSeed、保留消息组引用和候选指纹；加载时按原快照重建候选、校验指纹，成功持久化修复记录后才暴露恢复后的 Session 状态。启用前仍须检查后端并显式迁移或清理任何旧结构记录。
-- **关键假设：** AgentServer 保证同一 Session 由单一执行者串行处理，并提供持久、隔离的 BaseKVStore；当前上下文引擎能解析出正整数有效窗口。PA-11 对完整请求只接受准确且计入实际发送内容的 token 计数，并与 `floor(context_window × 80%)` 比较；计数不可靠或不可用时按 `paused(error)` 处理，不用估算值代替。若后端不能提供持久、隔离的单键写入，PA-11 不能开放。
+- **关键假设：** AgentServer 保证同一 Session 由单一执行者串行处理，并提供持久、隔离的 BaseKVStore；当前上下文引擎能解析出正整数有效窗口。PA-11 对最终请求复用上下文引擎压缩器的计数策略：优先使用最近一次有效模型 `total_tokens` 加新增消息估算；否则使用当前上下文计数器，计数器缺失或失败时回退到清理后文本长度估算。该估算结果也用于与 `floor(context_window × 80%)` 比较，不因计数为估算值单独暂停。若后端不能提供持久、隔离的单键写入，PA-11 不能开放。
 - **待实现时校准：** 不同 provider 的 token 计量误差、80% 阈值在真实模型上的适用性、窗口种子最大预算、近期轮次预算和 archive 保留期。80% 只定义 PA-11 的输入容量换窗与候选检查阈值，不构成 provider hard-limit 保证，也不预言模型会生成多少 token。
 
 ## 4. 总体方案与设计取舍
@@ -57,7 +57,7 @@
 PA-11 有两个触发入口，但只有一套换窗流程：
 
 - **Agent 主动请求是主路径。** Agent 判断当前阶段适合交接时，通过内部 `new_context` 控制动作提交交接要点（handoff，例如当前目标、已完成进度和下一步）。它不是用户调用的业务工具，也不直接改写存储。
-- **Persistent Agent 容量检查是兜底。** 如果 Agent 没请求，Persistent Agent 对下一次完整模型请求准确计数；若 `next_request_tokens > floor(context_window × 80%)`，触发同一条换窗流程，并根据已保存的任务目标、执行事实和最近完整交互整理最小交接要点。正好等于阈值时不换窗。计数不可靠或不可用时暂停为 `error`，不以估算值触发换窗。`context_window` 来自当前运行中 `ModelContext.context_window_tokens()` 解析出的有效窗口，每次模型调用前刷新。
+- **Persistent Agent 容量检查是兜底。** 如果 Agent 没请求，Persistent Agent 按上下文引擎策略计算下一次完整模型请求；若 `next_request_tokens > floor(context_window × 80%)`，触发同一条换窗流程，并根据已保存的任务目标、执行事实和最近完整交互整理最小交接要点。正好等于阈值时不换窗。计数采用上下文引擎既有策略，不因估算或计数器缺失 / 失败单独暂停。`context_window` 来自当前运行中 `ModelContext.context_window_tokens()` 解析出的有效窗口，每次模型调用前刷新。
 - **只在完整 ReAct 迭代之间切换。** 一轮迭代指一次模型回复及其工具调用批次；必须等回复结束、批次内所有工具执行完成、所有调用与结果成组写入上下文后，在下一次模型调用之前提交切换。这里不要求等整个 Agent 调用返回最终答案；也不允许在工具调用批次中途切换。换窗可以发生在同一个用户请求仍在执行时。
 
 ```mermaid
@@ -82,7 +82,7 @@ flowchart TD
     N --> A
 ```
 
-图中的容量检查由 Persistent Agent 的窗口管理组件执行，是系统的换窗策略，不是模型要使用的预算工具。它比较完整请求的准确输入 token 数与 `floor(context_window × 80%)`。两种触发只影响交接要点的来源；从“准备新窗口启动内容”开始，后续归档、状态保存和运行时切换完全共用一条流程。新窗口到底包含什么见第 4.2 节；保存失败后的处置见第 4.3 节。
+图中的容量检查由 Persistent Agent 的窗口管理组件执行，是系统的换窗策略，不是模型要使用的预算工具。它按上下文引擎的用量感知策略计算完整请求，再与 `floor(context_window × 80%)` 比较。两种触发只影响交接要点的来源；从“准备新窗口启动内容”开始，后续归档、状态保存和运行时切换完全共用一条流程。新窗口到底包含什么见第 4.2 节；保存失败后的处置见第 4.3 节。
 
 ### 4.2 新窗口里有什么，旧窗口保存在哪里
 
@@ -143,7 +143,7 @@ flowchart TD
 #### D-01 主动换窗为主、容量兜底为辅
 
 - **选择与依据：** Agent 知道阶段目标、剩余工作和适合交接的时点；Persistent Agent 的窗口管理组件依据 AgentServer 提供的模型容量信息兜底。两种触发汇入一个窗口转换流水线，避免两套行为和恢复逻辑。
-- **代价与成立条件：** Agent 可能忘记主动请求，因此仍需在下一次模型调用前做容量检查；只使用准确计数，计数未知时暂停为 `error`，不把未知当作可用容量。
+- **代价与成立条件：** Agent 可能忘记主动请求，因此仍需在下一次模型调用前做容量检查；用量基线后的新增消息及无基线时的完整请求可能使用字符估算，80% 是策略阈值而非 provider hard limit。
 - **实现体现：** 内部 new_context 控制请求和 token-budget fallback 仅决定 trigger_kind，不分别实现摘要、存储或恢复逻辑。
 - **相关候选：** R-01 固定阈值单主路径；R-02 纯 Agent 主动、无兜底；R-03 两种触发各自一套流水线。
 - **确认依据：** 用户已明确要求主动换窗优先、容量阈值兜底；正式契约已于 2026-10-15 同步到 S_03、详细架构和设计概览。精确预算仍需结合模型能力与真实请求校准。
@@ -263,7 +263,7 @@ WindowSwitchRequest 仅包含 trigger_kind（agent 或 capacity_fallback）、�
 | 入口 / 消息 | 调用方 / 消费者 | 输入与成功结果 | 失败语义 |
 | --- | --- | --- | --- |
 | new_context(WindowSeed) | Agent → Persistent turn loop | 提交交接候选；只有归档及 Session 状态提交成功后才代表切换完成 | handoff 无效时拒绝该次请求；存储失败不换窗，不发成功事件 |
-| capacity fallback | WindowSwitchManager 内部 | Agent 未请求且下一次完整模型请求的准确输入 token 数大于 `floor(context_window × 80%)` 时触发同类 request | 计数不可靠或不可用时暂停为 `error`；新窗完整请求超过同一 80% 阈值时暂停为 `context_unfit` |
+| capacity fallback | WindowSwitchManager 内部 | Agent 未请求且上下文引擎策略计算出的下一次完整请求 token 数大于 `floor(context_window × 80%)` 时触发同类 request | 新窗完整请求超过同一 80% 阈值时暂停为 `context_unfit`；窗口无法解析或计数过程异常时暂停为 `error` |
 | window.switched | EventEmitter → AgentServer 消费者 | 复用现有 WindowSwitchedPayload：archive_ref、window_seq | 普通事件记录失败只记诊断；不得回滚已持久化的状态 |
 
 WindowSeed 的目标字段：
@@ -284,9 +284,9 @@ Persistent Agent 的窗口管理组件在新上下文中加入当前系统指令
 
 - Persistent Session 显式启用 PA-11 时才接入换窗控制；普通 DeepAgent 和个人版默认路径不变。
 - Spec 的 `model_input_limit_tokens`、`capacity_safety_margin_tokens` 为可选兼容字段，保留原值和指纹，但不参与执行准入或 80% 阈值判断；删除旧四项容量配置的构造门槛，不要求额外填写这两个字段或输出预留。
-- 使用单一固定阈值：`rollover_threshold = floor(context_window × 80%)`。主动换窗仍优先；未主动换窗时，下一次完整请求的准确输入 token 数超过该阈值才触发兜底；候选新窗口完整请求也必须不超过该阈值。
+- 使用单一固定阈值：`rollover_threshold = floor(context_window × 80%)`。主动换窗仍优先；未主动换窗时，下一次完整请求按上下文引擎策略计算的 token 数超过该阈值才触发兜底；候选新窗口完整请求也必须不超过该阈值。
 - 每次模型调用前，从当前 `ModelContext.context_window_tokens()` 读取有效窗口并重算阈值；不新增用户可调比例字段。PA-11 的 80% 阈值只负责提前换窗，不等同于模型 provider 的最终准入上限或未来输出 token 预测。
-- PA-10 的持久 WindowStore 未接入、上下文引擎未能解析出正整数窗口、计数不可靠或当前窗口不能安全读取时，PA-11 不得静默降级为无状态运行；窗口解析失败或计数不可靠时按 `paused(error)` 处理。
+- PA-10 的持久 WindowStore 未接入、上下文引擎未能解析出正整数窗口或当前窗口不能安全读取时，PA-11 不得静默降级为无状态运行；窗口解析失败或不可恢复的计数异常时按 `paused(error)` 处理。上下文引擎本身的字符估算是有效回退，不因它是估算而暂停。
 
 ### 5.5 数据模型与事实归属
 
@@ -322,7 +322,7 @@ Archive 的转换元数据只需保存恢复同一个候选所需的信息：old
 以下步骤是第 4.1 节主流程图的实现级展开；“安全边界”“新窗口内容”和两种触发入口已在该图及第 4.2 节定义。
 
 1. 每轮 ReAct 迭代结束后，turn loop 确认模型回复和整批工具结果均已完成、没有未配对工具调用或仍在运行的并行工具；尚未完成的模型流或工具批次不是检查点。
-2. 若本轮会结束 Execution，走现有结束保存并写入终态；若将继续，先检查是否有有效 new_context 请求；没有主动请求时，按 `floor(context_window × 80%)` 检查下一次完整模型请求。计数不可靠或不可用时暂停为 `error`，不继续调用模型。
+2. 若本轮会结束 Execution，走现有结束保存并写入终态；若将继续，先检查是否有有效 new_context 请求；没有主动请求时，按上下文引擎计数策略计算下一次完整模型请求，再与 `floor(context_window × 80%)` 比较。窗口无法解析或计数过程异常时暂停为 `error`，不继续调用模型。
 3. 若不换窗，PA-10 同步原生窗口和 DeepAgent 状态，把本轮完整窗口及检查点元数据作为一条记录写入同一 Session state 键；不删除临时背景、不压缩执行头、不追加结束标记。写入确认成功后才开始下一次模型调用。
 4. 若主动请求或容量兜底触发换窗，构造候选新窗：固定系统提示与工具定义 + 当前 Request 原始任务输入 + 经过字段 / 大小校验的 WindowSeed + 预算内最近完整消息组。若是 fallback 且没有 Agent handoff，窗口管理组件使用已保存任务目标、当前执行事实和最后完整交互组构造最小 seed，不调用额外摘要模型。
 5. 将本轮完成后的旧 ActiveWindow 的完整规范化历史及必要来源引用按稳定 archive_ref 幂等归档。归档转换元数据包含新窗口序号、handoff、所选近期消息组的 item 引用、触发类型、token 用量及原 Spec 指纹，供状态提交失败后的 load 对账和候选重建。
@@ -344,7 +344,7 @@ Archive 的转换元数据只需保存恢复同一个候选所需的信息：old
 | Session state 写入成功、内存替换失败 | 新窗口已经是持久权威 | 不在旧内存窗继续模型调用；结束当前实例。后续加载新 state |
 | window.switched 普通事件失败 | 状态和内存窗口已切换 | 只记录诊断；允许继续，不回滚、不伪造第二次 transition |
 | 新窗仍超过 hard limit | 旧窗已安全归档，但新调用不适配 | 产出 paused(context_unfit)，不截断任务输入或必要事实 |
-| token 使用量不可得、计数不可靠或计数失败 | 无法可靠判断下一次请求是否超过换窗阈值 | PA-11 暂停为 `error`；不使用估算值替代准确计数，也不调用模型 |
+| ContextEngine 有效窗口无法解析，或计数过程发生不可恢复异常 | 无法执行窗口阈值判断 | PA-11 暂停为 `error`，不调用模型；正常的用量缺失、计数器缺失或计数器失败由 ContextEngine 的字符估算回退处理 |
 | 普通逐轮 checkpoint 写入前同步、校验或编码失败 | 本轮尚未成为持久化检查点 | 停止当前 Execution 的后续模型调用；保留最后一次成功 checkpoint，由执行日志核对本轮可能发生的外部效果 |
 | 普通逐轮 checkpoint 的 BaseKVStore `set` 抛错 | 写入可能尚未发生，也可能已落盘 | 停止当前 Execution，不开始下一次模型调用；不假定旧记录未变。恢复时重载 state 并结合 Execution 日志判定，不能盲目重放本轮工具 |
 
@@ -370,14 +370,14 @@ PA-10 当前的结束保存仍负责整理窗口、添加结束标记并保存 `
 
 ### 5.11 按需专项设计：token 兜底规则
 
-`TokenBudgetPolicy` 是 PA-11 中由 Persistent Agent 执行的窗口切换规则，不是提供给模型使用的预算工具。它使用当前 ModelContext 计数器，对下一次实际发送的完整请求（消息、工具定义）做准确计数；完整请求需计入系统指令、工具定义、活动消息和附件处理后的实际内容。只有计数可靠时才判断是否触发容量兜底；计数未知或失败按 `paused(error)` 处理。这里的 token 是模型计量上下文长度的单位，不等于汉字或字符数：
+`TokenBudgetPolicy` 是 PA-11 中由 Persistent Agent 执行的窗口切换规则，不是提供给模型使用的预算工具。它复用上下文引擎压缩器对下一次完整请求（消息、工具定义）的计数策略，覆盖已装配的系统指令、活动消息和工具定义。存在有效模型用量时，以最近一次 `total_tokens` 为基线并估算其后的新增消息；否则使用当前 ModelContext 计数器，计数器缺失或失败时以清理后的内容长度估算。这里的 token 是模型计量上下文长度的单位，不等于汉字或字符数；回退估算是策略的一部分，不代表精确 tokenizer 结果：
 
 ~~~text
 rollover_threshold = floor(context_window × 80%)
-next_request_tokens = exact_count(final_messages, final_tool_schemas)
+next_request_tokens = context_engine_count(final_messages, final_tool_schemas)
 ~~~
 
-当 Agent 本回合没有主动请求且 `next_request_tokens > rollover_threshold` 时，在调用模型前触发 fallback；正好等于阈值时不换窗。新窗口的完整候选请求也必须满足 `candidate_tokens <= rollover_threshold`，否则暂停为 `context_unfit`。计数器报告估算、发生降级、无法取得计数或没有计入实际发送内容时，按 `paused(error)` 处理。80% 是 PA-11 的换窗阈值，不是 provider hard-limit 保证，也不表示系统能预知模型下次会生成多少 token。
+当 Agent 本回合没有主动请求且 `next_request_tokens > rollover_threshold` 时，在调用模型前触发 fallback；正好等于阈值时不换窗。新窗口的完整候选请求也必须满足 `candidate_tokens <= rollover_threshold`，否则暂停为 `context_unfit`。正常的用量缺失、计数器估算或回退估算均按上下文引擎策略得出可比较结果；有效窗口解析失败或计数过程异常时按 `paused(error)` 处理。80% 是 PA-11 的换窗阈值，不是 provider hard-limit 保证，也不表示系统能预知模型下次会生成多少 token。
 
 若工具结果自身已大于剩余窗口：
 
@@ -423,8 +423,8 @@ PA-11 的验收标准以[开发计划](../designs/persistent-agent-development-p
 | 验证 ID | 场景 / 前置状态与输入 | 操作或验证入口 | 预期结果 / 通过条件 | 验证层级与环境 |
 | --- | --- | --- | --- | --- |
 | F_11-V-01 | Agent 在模型回合结束、工具均配对后请求 new_context | 驱动真实 turn-loop 集成或等价 loop fixture | 只调用一次统一流水线；seed 字段受限；archive、state、内存切换和普通事件顺序正确 | 单测 + Harness 组件测试 |
-| F_11-V-02 | Agent 未请求，准确计数的下一调用超过 `floor(context_window × 80%)` | 注入上下文引擎解析出的有效窗口和可靠 token counter | 使用有效窗口而非 Spec 请求配置计算阈值；正好等于阈值不触发；不运行额外摘要模型；Agent 主动请求时 fallback 不重复启动 | WindowSwitchManager 单测 |
-| F_11-V-11 | 下一调用计数器不可用、报告估算或计数失败 | 注入未知 / 降级 / 失败的 token counter | PA-11 暂停为 `error`；不以估算值放行、不调用模型、不启动容量兜底 | 容量策略单测 |
+| F_11-V-02 | Agent 未请求，按上下文引擎计数策略计算的下一调用超过 `floor(context_window × 80%)` | 注入上下文引擎解析出的有效窗口、模型 usage 和不同状态的 token counter | 使用有效窗口而非 Spec 请求配置计算阈值；估算回退照常参与比较；正好等于阈值不触发；不运行额外摘要模型；Agent 主动请求时 fallback 不重复启动 | WindowSwitchManager 单测 |
+| F_11-V-11 | 有效用量基线、计数器估算 / 缺失 / 失败以及有效窗口不可用 | 注入 usage metadata、估算或失败的 token counter，并注入无效窗口 | 计数按上下文引擎策略得到估算值并参与 80% 判断；窗口无法解析或计数过程异常才暂停为 `error` | 容量策略单测 |
 | F_11-V-03 | archive 写入失败 | fake store 在写前失败 | current_window_id 不变；不调用候选窗模型；不产生 window.switched 成功事件 | 故障注入 |
 | F_11-V-04 | archive 成功、Session state set 失败或返回未知 | 控制 set 提交点后抛错；随后重新 load | 当前实例不继续候选窗；archive 不被覆盖；下次加载可由 archive metadata 幂等完成或明确失败关闭 | 故障注入 + 持久化 fake |
 | F_11-V-05 | Session state 成功、普通 window.switched record 失败 | CommitPort 对普通事件报错 | 新 state 仍是权威；窗口不回滚；只记录诊断 | EventEmitter 集成测试 |
@@ -453,11 +453,13 @@ PA-11 的验收标准以[开发计划](../designs/persistent-agent-development-p
 | 2026-10-19：上下文压缩窗口解析回归 | Windows、Python 3.11.9 | `uv run --frozen pytest tests/unit_tests/core/context_engine/test_round_level_compressor.py tests/unit_tests/core/context_engine/test_model_rebind.py -q` | 12 passed、2 warnings；压缩比例与模型重绑逻辑保持通过 | 不替代真实模型和生产上下文配置联调 |
 | 2026-10-19：通用 ReAct / 个人版回归 | Windows、Python 3.11.9 | `uv run --frozen pytest tests/unit_tests/core/single_agent -q` | 160 passed、2 warnings；PA-11 未启用时的原生 ReAct 路径保持通过 | 不替代 JiuwenSwarm 真实执行链和生产后端联调 |
 | 2026-10-19：PA-18 主仓适配与共享 Spec 构造门槛修复 | macOS、项目 Python 3.11；scratch 快照，模型和存储替身 | PA 包与 core 最终请求接缝；命令与证据见 [F_20 第 8.2.3 节](F_20_continuation.md#823-2026-10-19-主仓-2975fe761-适配与旧构造门槛修复) | 862 passed；V-31 / F_11-V-17 的 4 个反例先红后绿；主仓窗口管理源码和测试保持不变 | 仅验证旧字段不再阻断构造 / 执行及既有组件回归；未验证真实 provider 或 AgentServer |
+| 2026-10-19：PA-11 共享上下文计数策略回归 | Windows、Python 3.11；模型与存储替身 | `uv run --frozen --no-sync python -m pytest -o addopts= -o asyncio_mode=auto tests/unit_tests/harness/persistent_agent tests/unit_tests/core/context_engine/test_compressor_token_budget.py tests/unit_tests/core/context_engine/test_round_level_compressor.py tests/unit_tests/core/context_engine/test_model_rebind.py -q` | 863 passed、10 skipped、2 warnings；覆盖 Persistent Agent 全包与相关 forked compressor、压缩器和模型重绑回归 | 不证明真实 provider 容量边界、AgentServer 持久性或 JiuwenSwarm 联调 |
+| 2026-10-19：个人版 ReAct 回归 | Windows、Python 3.11 | `uv run --frozen --no-sync python -m pytest -o addopts= -o asyncio_mode=auto tests/unit_tests/core/single_agent -q` | 160 passed、2 warnings；默认 ReAct 路径回归通过 | 不替代 JiuwenSwarm 真实执行链和生产后端联调 |
 
 
 ### 8.3 验证结论
 
-- **已证明范围：** agent-core 组件中，PA-10 V1 活动 checkpoint 与原有终态保存并存；每个完整 ReAct 轮次在下一次模型调用前保存；主动控制和容量兜底共用换窗流水线；新窗口精确计数，且测试覆盖 ContextEngine 有效窗口来源、模型调用间窗口刷新、80% 边界与超阈值候选拒绝；旧窗口归档、单记录状态提交、上下文重建、事件通知的顺序正确；归档幂等、索引重建、状态提交失败后的精确匹配恢复及错配失败关闭均有测试。PA-11 仅在 Persistent Agent 显式启用时安装；本轮 860 项 PA 测试通过（10 skipped）。
+- **已证明范围：** agent-core 组件中，PA-10 V1 活动 checkpoint 与原有终态保存并存；每个完整 ReAct 轮次在下一次模型调用前保存；主动控制和容量兜底共用换窗流水线；新窗口与容量兜底复用上下文引擎的用量感知计数和估算回退，并覆盖 ContextEngine 有效窗口来源、模型调用间窗口刷新、80% 边界与超阈值候选拒绝；旧窗口归档、单记录状态提交、上下文重建、事件通知的顺序正确；归档幂等、索引重建、状态提交失败后的精确匹配恢复及错配失败关闭均有测试。PA-11 仅在 Persistent Agent 显式启用时安装；此前 860 项 PA 测试通过（10 skipped），本次共享计数变更的专项结果见新增 8.2 记录。
 - **未覆盖或未通过的承诺：** 真实 AgentServer BaseKVStore 的持久性、命名空间隔离、单 Session 串行、写入延迟 / 记录大小及 80% 阈值对 provider 实际容量边界的适用性仍未联调；JiuwenSwarm 未接入该存储与恢复路径；启用真实后端前仍须核实并处理旧 V1 结构记录。
 - **可支持的交付判断：** agent-core 组件阶段已实现并通过当前测试，但 PA-11 尚未完成或对宿主开放；开发计划状态保持“进行中”，还需真实后端和 M2a 跨仓验收。
 
@@ -467,7 +469,7 @@ PA-11 的验收标准以[开发计划](../designs/persistent-agent-development-p
 
 | 风险 / 触发条件 | 对本次方案的影响 | 已有应对措施 | 核实或验证方式 |
 | --- | --- | --- | --- |
-| provider token 计量或实际上下文边界与 80% 阈值不匹配 | 80% 可能触发过早，或不足以避免 provider 拒绝请求 | 80% 作为固定换窗阈值；准确计数失败时暂停；不宣称其为 hard-limit 保证 | 多模型真实请求记录与边界测试 |
+| provider token 计量或实际上下文边界与 80% 阈值不匹配 | 80% 可能触发过早，或不足以避免 provider 拒绝请求；上下文引擎的估算也可能偏离服务端计量 | 80% 作为固定换窗阈值，复用上下文引擎用量基线和估算回退；不宣称其为 hard-limit 保证 | 多模型真实请求记录与边界测试 |
 | handoff 丢失仍重要但未进入 seed 的事实 | 新窗偏离任务或重复副作用 | 完整旧窗归档；seed 不作权威；PA-12 按需查询；副作用查日志 | 长任务跨多次主动换窗和崩溃恢复测试 |
 | Archive 与 Session state 是分开的单键写入 | 中间故障会暂时留下孤儿归档或待对账状态 | 稳定 archive_ref、幂等写入、archive metadata 和 load reconciliation | 在每个持久化点注入崩溃 |
 | 每个完整 ReAct 轮次都覆盖写入完整状态记录 | KV 写入次数、JSON 序列化开销和执行延迟增加 | 仅在完整轮次边界写入；rollover 写入合并为同一 checkpoint；通过 Session 窗口上限控制单条记录体积 | 在 AgentServer 实际 BaseKVStore 上测量长短任务的写入次数、延迟和记录大小 |
@@ -513,12 +515,12 @@ PA-11 的验收标准以[开发计划](../designs/persistent-agent-development-p
 - **后续版本规则：** schema_version=1 是本次首次启用的格式；启用后若发生不兼容结构变更，再递增 schema_version，并按届时真实数据制定迁移方案。
 - **影响与验证：** PA-10 仍需修改 schema、协议和测试，但省去尚未上线时的双格式兼容与迁移层；PA-11 仍负责轮次循环接入及 rollover 合并。原终态整理语义、个人版行为、负责人、状态和排期不变。以上为设计决策，代码和测试尚未实现。
 
-### 2026-10-19 PA-11 使用 80% `context_window` 阈值
+### 2026-10-19 PA-11 使用 80% `context_window` 阈值（计数策略后续更新）
 
 - **修订原因：** 明确 PA-11 的容量兜底和新窗口候选检查均使用 `context_window` 的 80% 阈值。
-- **当前规则：** `rollover_threshold = floor(context_window × 80%)`。Agent 未主动换窗时，下一次完整请求的准确输入 token 数超过该值才触发兜底；新窗口完整候选请求也必须不超过该值。计数不可靠时暂停为 `error`，必要内容放不下时暂停为 `context_unfit`。
+- **当时确定的规则：** `rollover_threshold = floor(context_window × 80%)`。当时文档要求准确计数，计数不可靠时暂停为 `error`；该计数要求已由 2026-10-19 后续修订替代，80% 阈值本身保持不变。
 - **边界：** 该阈值只定义 PA-11 换窗策略，不是 provider hard-limit 或未来输出长度保证。
-- **实现与验证：** WindowSwitchManager 在每次模型调用前读取当前 `ModelContext.context_window_tokens()` 并使用精确请求计数；模型切换后刷新有效窗口及其 80% 阈值。个人版默认路径保持不变。测试证据以本节 8.2 的 2026-10-19 记录为准。
+- **实现与验证：** WindowSwitchManager 在每次模型调用前读取当前 `ModelContext.context_window_tokens()`；模型切换后刷新有效窗口及其 80% 阈值。计数策略见本节 2026-10-19 后续修订。个人版默认路径保持不变。
 
 ### 2026-10-13 按 Codex 源码澄清 TokenBudget
 
@@ -536,5 +538,12 @@ PA-11 的验收标准以[开发计划](../designs/persistent-agent-development-p
 ### 2026-10-19 容量规则归属表述同步
 
 - 原表述：容量判断“复用 PA-18 的规则”“按 PA-18 暂停为 `error`”。
-- 原因：开发者决定移除 PA-18 的最终请求容量检查（见 [F_20](F_20_continuation.md) D-09）；`execution/capacity.py` 的准确计数继续由本组件复用；旧容量解析仅保留内部兼容，PA-11 使用当前有效窗口的 80% 阈值。
-- 变化：修正上述归属表述及旧草案的失效引用，历史设计改指向本文第 10 节；保留主仓 80% 阈值、准确计数、安全边界与暂停语义；删除共享 Spec 的旧容量构造门槛，两个旧字段仅兼容保留；`window_management.py` 不改。
+- 原因：开发者决定移除 PA-18 的最终请求容量检查（见 [F_20](F_20_continuation.md) D-09）；旧容量解析仅保留内部兼容，PA-11 独立使用当前有效窗口的 80% 阈值。
+- 变化：修正上述归属表述及旧草案的失效引用；该修订当时沿用准确计数，后续已改为复用上下文引擎的用量感知计数策略；删除共享 Spec 的旧容量构造门槛，两个旧字段仅兼容保留。`window_management.py` 的换窗主流程不变。
+
+### 2026-10-19 PA-11 复用上下文引擎计数策略
+
+- **修订原因：** PA-11 的容量兜底与候选窗口检查需要和上下文压缩器对请求 token 的估算行为一致，避免压缩器能用上下文引擎已有的 usage / tokenizer / 文本回退逻辑，而换窗路径却因结果被标记为估算而暂停。
+- **当前策略：** 抽取共享的 ContextEngine 请求计数实现供压缩器和 PA-11 共用。存在有效模型 `usage_metadata.total_tokens` 时，以它作为最近一次模型调用的累计基线，并对其后的新增消息按清理后文本长度 `/ 3` 估算；该基线已经包含当次系统提示和工具定义，不重复相加。没有有效基线时，使用当前 `ModelContext` 的 token counter 计数完整消息与工具定义；counter 缺失或调用失败时，对清理后的消息和工具描述按长度 `/ 3` 估算。估算结果照常与 80% 阈值比较，不因估算本身暂停。
+- **保持不变：** 有效窗口仍在每次模型调用前从 `ModelContext.context_window_tokens()` 读取；PA-11 触发比例仍为 80%，主动换窗、安全边界、归档和状态提交不变；窗口解析失败仍为 `paused(error)`，必要候选内容超出 80% 仍为 `paused(context_unfit)`。该改动仅在 Persistent Agent 显式启用 PA-11 时生效，不改变个人版默认路径，也不恢复 PA-18 容量检查。
+- **验证：** 代码通过新增共享上下文计数模块同时供 forked compressor 和 PA-11 使用；定向 PA-11 / 窗口压缩测试结果另记在第 8.2 节。
