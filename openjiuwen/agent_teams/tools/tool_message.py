@@ -181,14 +181,49 @@ class _SendMessageBase(TeamTool, ABC):
         )
         if not msg_id:
             return ToolOutput(success=False, error=f"Failed to send message to '{to}'")
-        return ToolOutput(
-            success=True,
-            data={
-                "type": "message",
-                "from": self.message_manager.member_name,
-                "to": to,
-                "summary": summary or None,
-            },
+        hint = await self._third_party_mention_hint(to, content)
+        data = {
+            "type": "message",
+            "from": self.message_manager.member_name,
+            "to": to,
+            "summary": summary or None,
+        }
+        if hint:
+            data["hint"] = hint
+        return ToolOutput(success=True, data=data)
+
+    async def _third_party_mention_hint(self, to: str, content: str) -> str | None:
+        """Warn the sender when a P2P body @-mentions members other than ``to``.
+
+        A mention in the body is text only — this message is delivered to
+        ``to`` alone, so any teammate named with ``@`` never gets a mailbox
+        entry and never wakes up. 
+        """
+        if self._team is None or not content:
+            return None
+        try:
+            roster = await self._team.list_member_roster()
+        except Exception as exc:  # noqa: BLE001 - a hint must never fail the send
+            team_logger.debug(f"mention hint roster lookup failed: {exc}")
+            return None
+        mentioned: list[str] = []
+        for entry in roster:
+            name = str(getattr(entry, "member_name", "") or "").strip()
+            if not name or name == to:
+                continue
+            display = str(getattr(entry, "display_name", "") or "").strip()
+            if f"@{name}" not in content and not (display and f"@{display}" in content):
+                continue
+            shown = display or name
+            if shown not in mentioned:
+                mentioned.append(shown)
+        if not mentioned:
+            return None
+        return self.t(
+            "send_message",
+            "hint_mentioned_third_party",
+            to=to,
+            mentioned=", ".join(mentioned),
         )
 
     async def _multicast(
@@ -300,7 +335,11 @@ class _SendMessageBase(TeamTool, ABC):
             return f"Broadcast Already sent from {d['from']} Success"
         if d["type"] == "multicast":
             return self._format_multicast_text(None, d)
-        return f"Message Already sent from {d['from']} to {d['to']} Success"
+        text = f"Message Already sent from {d['from']} to {d['to']} Success"
+        hint = d.get("hint")
+        if hint:
+            text = f"{text}\n{hint}"
+        return text
 
     @staticmethod
     def _format_multicast_text(error: str | None, d: dict[str, Any]) -> str:

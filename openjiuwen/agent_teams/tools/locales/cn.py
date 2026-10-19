@@ -270,6 +270,10 @@ STRINGS: dict[str, str] = {
         "先用 write_file 把正文写到团队共享工作空间 .team/ 下的文件，再重发本消息，"
         "content 里只写文件路径加一两句摘要。不要为了绕过本限制而把正文拆成多条消息。"
     ),
+    "send_message.hint_mentioned_third_party": (
+        "注意：本消息仅会送达 {to}；正文中 @ 的 {mentioned} 不会收到任何系统通知——"
+        "@提及不构成送达。若需要这些成员接棒或参与，请分别用 send_message(to=该成员) 亲自送达。"
+    ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============
     # send_message_scheduled._desc lives in descs/cn/send_message_scheduled.md
     # ``content`` / ``summary`` are reused verbatim from the send_message keys

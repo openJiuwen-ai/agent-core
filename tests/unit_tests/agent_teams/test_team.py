@@ -3,6 +3,8 @@
 
 """Unit tests for AgentTeam module"""
 
+import json
+
 from unittest.mock import (
     AsyncMock,
     patch,
@@ -34,6 +36,7 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
     TaskStatus,
 )
+from openjiuwen.agent_teams.tools.message_manager import DirectMessageOptions
 from openjiuwen.agent_teams.tools.team import (
     TeamBackend,
 )
@@ -1034,6 +1037,32 @@ async def _drain_one_task(agent_team: TeamBackend) -> None:
     await agent_team.task_manager.complete(task.task_id)
 
 
+async def _mark_all_read(agent_team: TeamBackend, member_name: str = "leader1") -> None:
+    """Mark every message in the team mailbox read for ``member_name``."""
+    msgs = await agent_team.message_manager.get_team_messages("test_team")
+    await agent_team.message_manager.mark_messages_read(msgs, member_name)
+
+
+async def _relay_nudges(agent_team: TeamBackend) -> list:
+    """Return the relay-guard nudge messages currently in the team mailbox.
+
+    Rows read back from the DB carry ``coordination_meta`` JSON-dumped as a
+    string; accept both that and an in-memory dict.
+    """
+    msgs = await agent_team.message_manager.get_team_messages("test_team")
+    nudges = []
+    for m in msgs:
+        meta = m.coordination_meta
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except ValueError:
+                meta = None
+        if isinstance(meta, dict) and meta.get("relay_nudge"):
+            nudges.append(m)
+    return nudges
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_is_team_completed_all_conditions_met(agent_team, db):
@@ -1134,6 +1163,152 @@ async def test_is_team_completed_blocks_on_unread_broadcast(agent_team, db):
     await agent_team.message_manager.broadcast_message(content="announce")
 
     assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_blocks_on_unanswered_mention(agent_team, db):
+    """A body @-mention is not a delivery: the guard nudges and blocks completion."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _seed_member(db, "member2", MemberStatus.READY.value)
+    await _drain_one_task(agent_team)
+    await agent_team.message_manager.send_message(
+        content="请 @member2 接棒继续",
+        to_member_name="leader1",
+        from_member_name="member1",
+    )
+    await _mark_all_read(agent_team)
+
+    assert await agent_team.is_team_completed() is None
+
+    nudges = await _relay_nudges(agent_team)
+    assert len(nudges) == 1
+    assert nudges[0].to_member_name == "member2"
+    assert nudges[0].from_member_name == "member1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_relay_guard_nudges_once_then_fails_open(agent_team, db):
+    """The same pending mention is nudged exactly once; afterwards the guard fails open."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _seed_member(db, "member2", MemberStatus.READY.value)
+    await agent_team.message_manager.send_message(
+        content="请 @member2 接棒",
+        to_member_name="leader1",
+        from_member_name="member1",
+    )
+
+    assert await agent_team.has_pending_relay_turn() is True
+    assert len(await _relay_nudges(agent_team)) == 1
+
+    # Second evaluation: already nudged for this mention — fail open.
+    assert await agent_team.has_pending_relay_turn() is False
+    assert len(await _relay_nudges(agent_team)) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_relay_guard_passes_when_mention_answered(agent_team, db):
+    """A mentioned member that spoke after the mention is not pending."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _seed_member(db, "member2", MemberStatus.READY.value)
+    await agent_team.message_manager.send_message(
+        content="请 @member2 接棒",
+        to_member_name="leader1",
+        from_member_name="member1",
+    )
+    await agent_team.message_manager.send_message(
+        content="收到，我来继续",
+        to_member_name="leader1",
+        from_member_name="member2",
+    )
+
+    assert await agent_team.has_pending_relay_turn() is False
+    assert await _relay_nudges(agent_team) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_relay_guard_skips_errored_member(agent_team, db):
+    """An ERROR member cannot be woken — the guard must not block on it."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _seed_member(db, "member2", MemberStatus.ERROR.value)
+    await agent_team.message_manager.send_message(
+        content="请 @member2 接棒",
+        to_member_name="leader1",
+        from_member_name="member1",
+    )
+
+    assert await agent_team.has_pending_relay_turn() is False
+    assert await _relay_nudges(agent_team) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_relay_guard_budget_exhausted_fails_open(agent_team, db):
+    """With the nudge budget spent the guard fails open instead of hanging."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _seed_member(db, "member2", MemberStatus.READY.value)
+    await agent_team.message_manager.send_message(
+        content="请 @member2 接棒",
+        to_member_name="leader1",
+        from_member_name="member1",
+    )
+    agent_team._relay_nudge_budget = 0
+
+    assert await agent_team.has_pending_relay_turn() is False
+    assert await _relay_nudges(agent_team) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_relay_guard_nudges_silent_invitee(agent_team, db):
+    """A taskless debate round nudges its zero-output invitee exactly once."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _seed_member(db, "member2", MemberStatus.READY.value)
+    await agent_team.message_manager.send_message(
+        content="本轮思辨开始",
+        to_member_name="leader1",
+        from_member_name="member1",
+        options=DirectMessageOptions(coordination_meta={"round_id": "round-1"}),
+    )
+    agent_team.debate_state.round_id = "round-1"
+    agent_team.debate_state.finalized = False
+    agent_team.debate_state.expected_participants = {"member1", "member2"}
+
+    assert await agent_team.has_pending_relay_turn() is True
+
+    nudges = await _relay_nudges(agent_team)
+    assert len(nudges) == 1
+    assert nudges[0].to_member_name == "member2"
+    assert nudges[0].from_member_name == "leader1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_relay_guard_invitee_check_skipped_with_active_task(agent_team, db):
+    """The invitee trigger only applies to an all-terminal (taskless) board."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await agent_team.task_manager.add(title="T", content="c")
+    await agent_team.message_manager.send_message(
+        content="开工",
+        to_member_name="leader1",
+        from_member_name="member1",
+    )
+    agent_team.debate_state.round_id = "round-1"
+    agent_team.debate_state.finalized = False
+    agent_team.debate_state.expected_participants = {"member1"}
+
+    assert await agent_team.has_pending_relay_turn() is False
+    assert await _relay_nudges(agent_team) == []
 
 
 @pytest.mark.asyncio

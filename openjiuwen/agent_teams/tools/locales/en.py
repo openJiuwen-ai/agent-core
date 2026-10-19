@@ -388,6 +388,11 @@ STRINGS: dict[str, str] = {
         "plus a one- or two-sentence summary. Do not split the body across several "
         "messages to get around this limit."
     ),
+    "send_message.hint_mentioned_third_party": (
+        "Note: this message was delivered to {to} only; {mentioned} (mentioned with @ in "
+        "the body) receives no notification — an @-mention is not delivery. To hand the "
+        "turn to these members, deliver it to each of them with send_message(to=<member>)."
+    ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============
     # send_message_scheduled._desc lives in descs/en/send_message_scheduled.md
     # ``content`` / ``summary`` are reused verbatim from the send_message keys

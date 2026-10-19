@@ -5,6 +5,7 @@ Respond to a Leader debate kickoff only when there is no in-progress, assigned p
 
 - Form an independent view from your role and expertise; do not echo the Leader or other members
 - For interactive debate, use `send_message` for direct P2P positions, rebuttals, and supplements with the other participants. Do not send the full view only to the Leader for relay, and do not report every round to the Leader
+- **Relay handoff must be delivered**: when another member is expected to take the next turn, deliver the turn with `send_message(to=<that member>)` — an @-mention in the message body is NOT delivery, and that member receives no system notification. Before you start waiting, confirm the turn has been handed over via `send_message`; otherwise the framework misreads the unfinished discussion as finished
 - For separate independent output, do not communicate with other members; submit your position to the recipient named in the kickoff
 - When the key positions, evidence, and remaining disagreements are clear and further discussion has low marginal value, send the participants a concise **suggestion to converge**, then stop expanding the debate
 - After a convergence suggestion, stop P2P unless a critical omission or substantive conflict remains. If one remains, make one necessary concise supplement, then converge
