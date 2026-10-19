@@ -61,7 +61,7 @@ class TestHttpSession:
     @pytest.fixture
     def mock_session(self):
         session = AsyncMock(spec=ClientSession)
-        session.close.return_value = None
+        session.closed = False
         return session
 
     @pytest.fixture
@@ -90,11 +90,20 @@ class TestHttpSession:
 
     @pytest.mark.asyncio
     async def test_do_close(self, mock_session, config):
-        mock_session.close.return_value = None
+        """关闭 HttpSession 时必须真正 await 底层 client session 的 close。"""
         http_session = HttpSession(mock_session, config)
 
         await http_session.close()
-        mock_session.close.assert_called_once()
+        mock_session.close.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_do_close_skips_already_closed_session(self, mock_session, config):
+        """底层 session 已关闭时不应重复调用 close。"""
+        mock_session.closed = True
+        http_session = HttpSession(mock_session, config)
+
+        await http_session._do_close()
+        mock_session.close.assert_not_awaited()
 
 
 class TestHttpSessionManager:
