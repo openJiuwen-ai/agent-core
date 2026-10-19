@@ -69,8 +69,8 @@ class PersistentAgentSpec(DeepAgentSpec):
     share_file_max_bytes: int = Field(default=SHARE_FILE_DEFAULT_MAX_BYTES, gt=0, le=SHARE_FILE_MAX_BYTES_CEILING)
     # Most earlier Executions a continuation reads back through; set by the deployment, required for continuation.
     continuation_chain_limit: int | None = Field(default=None, gt=0)
-    # Capacity check of every final model request (F_20 D-09). Setting either field asks for it; the model
-    # request config's context_window and max_tokens are then required too. No default numbers are assumed.
+    # Legacy capacity fields remain in publications and fingerprints for compatibility. Neither execution
+    # admission nor PA-11's active-context 80% rollover policy uses them.
     model_input_limit_tokens: int | None = Field(default=None, gt=0)
     capacity_safety_margin_tokens: int | None = Field(default=None, ge=0)
 
@@ -107,14 +107,6 @@ class PersistentAgentSpec(DeepAgentSpec):
                 raise build_error(
                     StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
                     error_msg="workspace_write_access is required for workspace_write",
-                )
-        if "window_management" in self.enabled_features:
-            from ..execution.capacity import capacity_limits
-
-            if capacity_limits(self) is None:
-                raise build_error(
-                    StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
-                    error_msg="window_management requires explicit model capacity limits",
                 )
         parts = super().resolve_parts(context)
         context.binding.parts = parts
@@ -217,7 +209,7 @@ class PersistentAgentSpec(DeepAgentSpec):
             parts.tool_cards.append(tool.card)
             parts.config.tools = list(parts.tool_cards)
         # Inert until an execution entry attaches its emitter to this binding.
-        parts.rails.append(PersistentModelCallRail(context.binding, spec=self))
+        parts.rails.append(PersistentModelCallRail(context.binding))
         if self.continuation_chain_limit is not None:
             # Declared for every Execution of the Spec, so tool definitions stay the same across a Request.
             parts.rails.append(_record_rail(context))

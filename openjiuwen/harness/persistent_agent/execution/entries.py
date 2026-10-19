@@ -33,7 +33,6 @@ from ..schema.request import ConfirmReply, RequestInput
 from ..schema.spec import PersistentAgentSpec
 from . import handoff, seams
 from .binding import InvocationState, abort_bound, close_bound, stream_bound
-from .capacity import capacity_limits
 from .continuation import require_recovery_ref
 from .control import AbortReason, ExecutionControl
 from .emitter import EventEmitter, escaped_bytes, longest_prefix, widest_size
@@ -98,13 +97,6 @@ def _require_supported_modes(spec) -> None:
         )
     if spec.subagents or any(getattr(spec, flag) for flag in _UNSUPPORTED_FLAGS):
         raise _reject(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, "subagents are not opened for Persistent execution yet")
-    # Every formal execute/resume requires full capacity configuration, before any event or construction.
-    if capacity_limits(spec) is None:
-        raise _reject(
-            StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
-            "formal execution requires the capacity check: configure model_input_limit_tokens, "
-            "capacity_safety_margin_tokens, context_window and max_tokens",
-        )
 
 
 def _require_assembled_modes(agent) -> None:
