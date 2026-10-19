@@ -321,8 +321,6 @@ class Harness:
                 ),
                 model_request_config=ModelRequestConfig(context_window=1_000_000, max_tokens=4_000),
             ),
-            model_input_limit_tokens=900_000,
-            capacity_safety_margin_tokens=1_000,
             enable_sys_operation=False,
             enable_task_loop=False,
             enable_security_rail=False,
@@ -1872,6 +1870,7 @@ async def test_new_context_switches_only_after_the_tool_result_and_commits_archi
     spec = harness.spec(
         enabled_features=frozenset({"construction", "window_management"}),
         model_input_limit_tokens=100_000,
+        capacity_safety_margin_tokens=1_000,
     )
     ctx, _ = harness.context(spec)
     seed = {

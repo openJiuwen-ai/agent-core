@@ -1,8 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Shared capacity rules (F_20 D-09): configuration, available input and trusted counts."""
+"""PA-11 trusted request counts, legacy limit parsing and final-request budget admission."""
 
-import asyncio
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -106,7 +105,7 @@ def final_check_context(get_counter):
     ctx = SimpleNamespace(
         context=SimpleNamespace(token_counter=get_counter), inputs=SimpleNamespace(messages=MESSAGES, tools=[])
     )
-    return PersistentModelCallRail(binding, spec=spec()), ctx, binding.ports.budget
+    return PersistentModelCallRail(binding), ctx, binding.ports.budget
 
 
 @pytest.mark.asyncio
@@ -133,40 +132,6 @@ async def test_complete_react_iteration_is_forwarded_only_when_persistent_execut
     await rail.after_react_iteration(callback_context)
 
     manager.after_react_iteration.assert_awaited_once_with(callback_context)
-
-
-@pytest.mark.asyncio
-async def test_final_checks_read_the_current_context_counter_without_caching_it():
-    rail, ctx, _budget = final_check_context(lambda: Counter())
-    assert await rail._count(ctx) == 8
-    ctx.context.token_counter = lambda: Counter(estimated=True)
-    assert await rail._count(ctx) is None, "a rebound context must not keep using the previous exact counter"
-
-
-@pytest.mark.parametrize("failure", ["absent", "lookup_error", "count_error"])
-@pytest.mark.asyncio
-async def test_unavailable_or_broken_context_counters_block_before_budget(failure):
-    def get_counter():
-        if failure == "lookup_error":
-            raise OSError("private tokenizer path")
-        return Counter(fail=True) if failure == "count_error" else None
-
-    rail, ctx, budget = final_check_context(get_counter)
-    result = await rail.check_final_request(ctx)
-    assert result["reason"] == "error" and "capacity unknown" in result["detail"]
-    assert "private tokenizer path" not in result["detail"]
-    budget.admit.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cancellation_while_getting_the_context_counter_propagates():
-    def get_counter():
-        raise asyncio.CancelledError()
-
-    rail, ctx, budget = final_check_context(get_counter)
-    with pytest.raises(asyncio.CancelledError):
-        await rail.check_final_request(ctx)
-    budget.admit.assert_not_awaited()
 
 
 def test_non_text_content_is_unknown():

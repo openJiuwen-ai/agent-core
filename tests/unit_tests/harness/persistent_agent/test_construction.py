@@ -174,6 +174,47 @@ def test_window_management_tool_is_opt_in_and_absent_from_personal_deep_agent(ap
         agent.ability_manager.teardown_tools()
 
 
+@pytest.mark.parametrize(
+    "legacy_fields",
+    [
+        pytest.param({}, id="absent"),
+        pytest.param({"model_input_limit_tokens": 1}, id="partial"),
+        pytest.param(
+            {"model_input_limit_tokens": 10000, "capacity_safety_margin_tokens": 2000},
+            id="legacy_combination_is_unused",
+        ),
+    ],
+)
+def test_window_management_constructs_without_legacy_capacity_requirements(api, legacy_fields):
+    """PA-18-V-31 / F_11-V-17: published legacy values survive without controlling construction."""
+    from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+    from openjiuwen.harness.schema.deep_agent_spec import ModelSpec
+
+    spec = spec_for(
+        api,
+        enabled_features={"construction", "window_management"},
+        model=ModelSpec(
+            model_client_config=ModelClientConfig(
+                client_provider="OpenAI", api_key="mock-api-key", api_base="https://example.invalid/v1"
+            ),
+            model_request_config=ModelRequestConfig(context_window=1000, max_tokens=None),
+        ),
+        **legacy_fields,
+    )
+    published = api.PersistentAgentSpec.model_validate(spec.model_dump(mode="json"))
+    before = published.fingerprint()
+    assert before == spec.fingerprint()
+    context = context_for(api, published)
+    agent = api.create_persistent_agent(published, context=context)
+    try:
+        assert agent.ability_manager.get("new_context") is not None
+        assert published.fingerprint() == before
+        for name, value in legacy_fields.items():
+            assert getattr(published, name) == value
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
 def test_window_management_rejects_new_context_name_collision(api):
     from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
     from openjiuwen.core.foundation.tool import ToolCard
