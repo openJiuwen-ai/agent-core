@@ -182,7 +182,24 @@ STRINGS: dict[str, dict[str, str]] = {
             "你已达到本轮思辨互发上限（{count}/{max_count}）。请停止等待和互发，"
             "立即向 Leader 发送一次 final_report=true 的最终要点。"
         ),
-        # rails/session_budget_rail.py — ISS-4993 session budget wrap-up / rejection
+        "debate.member_cap_reject": (
+            "[系统通知] 你已达到本轮思辨发言上限（{count}/{max_count}），该消息被拒绝。"
+            "请停止继续讨论，立即向 Leader 发送一次 final_report=true 的最终要点。"
+        ),
+        "debate.leader_cap_notice": (
+            "[系统通知] 本轮思辨消息量已达上限（{count}/{max_count}），讨论需收束。"
+            "请停止继续讨论；如尚未提交结论，请向 Leader 发送一次 "
+            "final_report=true 的最终要点。"
+        ),
+        "debate.leader_cap_reject": (
+            "[系统通知] 本轮思辨中继已达上限（{count}/{max_count}），该消息被拒绝。"
+            "请停止转发成员间消息，收束本轮讨论。"
+        ),
+        "debate.leader_cap_private_instruction": (
+            "你已达到本轮思辨中继上限（{count}/{max_count}）。请停止转发成员间消息："
+            "要求成员提交 final_report=true 的最终要点，收束本轮后向用户总结。"
+        ),
+        # rails/session_budget_rail.py — session budget wrap-up / rejection
         "session_budget.exceeded_wrapup": (
             "[系统通知] 团队会话预算已达上限（{dimension}: {used}/{limit}），讨论必须收束。"
             "请立即停止发起任何新的讨论或任务指派，基于已有信息整理最终结论，"
@@ -470,7 +487,26 @@ STRINGS: dict[str, dict[str, str]] = {
             "and messaging peers, and immediately send one final report to the Leader with "
             "final_report=true."
         ),
-        # rails/session_budget_rail.py — ISS-4993 session budget wrap-up / rejection
+        "debate.member_cap_reject": (
+            "[Framework notice] You have reached this round's debate send limit ({count}/{max_count}); "
+            "this message was rejected. Stop discussing and immediately send one final report to "
+            "the Leader with final_report=true."
+        ),
+        "debate.leader_cap_notice": (
+            "[Framework notice] This round's debate traffic has reached its limit ({count}/{max_count}); "
+            "the discussion must wrap up. Stop discussing; if you have not reported yet, send one "
+            "final report to the Leader with final_report=true."
+        ),
+        "debate.leader_cap_reject": (
+            "[Framework notice] This round's relay limit has been reached ({count}/{max_count}); "
+            "this message was rejected. Stop relaying member messages and wrap up this round."
+        ),
+        "debate.leader_cap_private_instruction": (
+            "You have reached this round's relay limit ({count}/{max_count}). Stop relaying member "
+            "messages: ask members to submit their final reports with final_report=true, then "
+            "conclude the round and summarize for the user."
+        ),
+        # rails/session_budget_rail.py — session budget wrap-up / rejection
         "session_budget.exceeded_wrapup": (
             "[Framework notice] The team session budget is exhausted ({dimension}: {used}/{limit}); "
             "the discussion must wrap up. Stop starting any new discussion or task assignment, "

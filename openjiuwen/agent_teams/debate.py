@@ -46,6 +46,7 @@ class DebateRunState:
         self.pending_invitation_calls: set[str] = set()
         self.expected_participants: set[str] = set()
         self.failed_participants: set[str] = set()
+        self.capped_participants: set[str] = set()
         self.unreported_participants: set[str] = set()
         self.reports: dict[str, str] = {}
         self.finalizing = False
@@ -70,6 +71,7 @@ class DebateRunState:
         self.pending_invitation_calls.clear()
         self.expected_participants.clear()
         self.failed_participants.clear()
+        self.capped_participants.clear()
         self.unreported_participants.clear()
         self.reports.clear()
         self.finalizing = False
@@ -101,6 +103,7 @@ class DebateRunState:
             self.pending_invitation_calls = set(self.invitation_calls)
             self.expected_participants.clear()
             self.failed_participants.clear()
+            self.capped_participants.clear()
             self.unreported_participants.clear()
             self.reports.clear()
             self.finalizing = False
@@ -183,6 +186,30 @@ class DebateRunState:
                 if sender not in self.reports:
                     self.reports[sender] = content
                     self._refresh_terminal_grace_locked(sender)
+                # a real report supersedes an earlier cap notice — keep the
+                # finalization prompt coherent about who actually reported.
+                self.capped_participants.discard(sender)
+            delivery = self._claim_finalization_locked()
+        await self._deliver_finalization(delivery)
+        return accepted
+
+    async def capture_cap_notice(self, round_id: str, sender: str) -> bool:
+        """Record a member's debate-cap notice as a terminal state for this round.
+
+        A capped member may never send ``final_report``; without this signal
+        the round could not converge (relay loops). A later real
+        final report from the same member still wins via ``capture_report``.
+        """
+        delivery = None
+        accepted = False
+        async with self._lock:
+            if not self.round_id or round_id != self.round_id or self.finalized:
+                return False
+            self._expire_terminal_grace_locked()
+            if sender and sender not in self.capped_participants:
+                self.capped_participants.add(sender)
+                accepted = True
+                self._refresh_terminal_grace_locked(sender)
             delivery = self._claim_finalization_locked()
         await self._deliver_finalization(delivery)
         return accepted
@@ -234,7 +261,12 @@ class DebateRunState:
             return None
         if self.pending_invitation_calls or self._leader_wakeup is None:
             return None
-        terminal = set(self.reports) | self.failed_participants | self.unreported_participants
+        terminal = (
+            set(self.reports)
+            | self.failed_participants
+            | self.unreported_participants
+            | self.capped_participants
+        )
         if not self.expected_participants.issubset(terminal):
             return None
         self._terminal_deadline = None
@@ -321,12 +353,15 @@ class DebateRunState:
         ]
         failed = sorted(self.expected_participants & self.failed_participants)
         unreported = sorted(self.expected_participants & self.unreported_participants)
+        capped = sorted(self.expected_participants & self.capped_participants)
         if self.language.startswith("zh") or self.language == "cn":
             sections = ["本轮团队讨论已收束。请基于以下成员最终汇报，仅向用户综合总结一次，不要再次召集成员。"]
             if reports:
                 sections.extend(["成员最终汇报：", *reports])
             if failed:
                 sections.append("未能完成汇报的成员：" + "、".join(failed))
+            if capped:
+                sections.append("因思辨上限被截停的成员：" + "、".join(capped))
             if unreported:
                 sections.append("收束宽限期内未汇报的成员：" + "、".join(unreported))
             return "\n".join(sections)
@@ -338,6 +373,8 @@ class DebateRunState:
             sections.extend(["Final member reports:", *reports])
         if failed:
             sections.append("Members that failed to report: " + ", ".join(failed))
+        if capped:
+            sections.append("Members stopped by the debate send cap: " + ", ".join(capped))
         if unreported:
             sections.append("Members that did not report within the wrap-up grace period: " + ", ".join(unreported))
         return "\n".join(sections)

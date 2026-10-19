@@ -243,7 +243,7 @@ class MessageHandler(BaseCoordinationHandler):
                 break
 
             team_logger.info("[{}] processing {} unread messages (steer={})", member_name, len(new_messages), use_steer)
-            # ISS-4993: one delivering drain is one session round. The
+            # One delivering drain is one session round. The
             # crossing check fires mid-drain on purpose — the messages already
             # read in this drain still get delivered; the budget takes effect
             # on the next wake.
@@ -341,6 +341,20 @@ class MessageHandler(BaseCoordinationHandler):
                                 debate_meta["round_id"],
                                 msg.from_member_name,
                                 msg.content,
+                            )
+                            delivered.append(msg)
+                            continue
+                        elif (
+                            self._blueprint.role == TeamRole.LEADER
+                            and message_role == DebateMessageRole.CAP_NOTICE.value
+                        ):
+                            # A capped member's notice doubles as its terminal
+                            # signal — the leader-side round converges once
+                            # every invited member is reported, failed,
+                            # unreported past grace, or capped.
+                            await debate_state.capture_cap_notice(
+                                debate_meta["round_id"],
+                                msg.from_member_name,
                             )
                             delivered.append(msg)
                             continue

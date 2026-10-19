@@ -261,6 +261,11 @@ async def test_debate_cap_rail_persists_across_idle_mailbox_rounds() -> None:
         assert normalize_debate_meta(
             cap_notice.inputs.tool_args["_team_debate_meta"],
         )["message_role"] == "cap_notice"
-        assert fake.tool_contexts[3].extra.get("_skip_tool") is None
+        # A repeat over-cap send -- even one aimed at the leader without the
+        # final_report flag -- is rejected outright; the error points the
+        # member at the final_report=true convergence path.
+        repeat = fake.tool_contexts[3]
+        assert repeat.extra.get("_skip_tool") is True
+        assert "final_report=true" in repeat.inputs.tool_result["error"]
     finally:
         await Runner.stop()

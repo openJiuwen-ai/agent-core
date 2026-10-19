@@ -605,32 +605,62 @@ class AgentConfigurator:
                     },
                 ),
             )
+            team_logger.info(
+                "[config] {} debate cap enabled: max_debate_rounds={}",
+                member_name or ctx.role.value,
+                spec.max_debate_rounds,
+            )
+        else:
+            team_logger.info(
+                "[config] {} debate cap skipped (autonomous={}, role={}, max_debate_rounds={})",
+                member_name or ctx.role.value,
+                spec.dispatch_mode == "autonomous",
+                ctx.role.value,
+                spec.max_debate_rounds,
+            )
 
         # session-level budget rail. Autonomous teams whose
         # chat never matches the debate pattern (member→leader reports,
         # leader broadcasts) escape the per-teammate debate cap entirely;
         # this rail bounds the whole session instead — rounds / messages /
         # input tokens, no leader/report exemptions. Injected whenever any
-        # ceiling is configured (jiuwenswarm defaults all three on).
-        session_ceilings = (
-            spec.max_total_rounds,
-            spec.max_total_messages,
-            spec.token_budget,
-        )
+        # ceiling is configured (opt-in; jiuwenswarm passes template values
+        # through without defaults).
+        session_ceilings = {
+            "max_total_rounds": spec.max_total_rounds,
+            "max_total_messages": spec.max_total_messages,
+            "token_budget": spec.token_budget,
+        }
         if (
             spec.dispatch_mode == "autonomous"
             and ctx.role in {TeamRole.LEADER, TeamRole.TEAMMATE}
-            and any(value is not None for value in session_ceilings)
+            and any(value is not None for value in session_ceilings.values())
         ):
             team_rail_specs.append(
                 RailSpec(
                     type=TEAM_SESSION_BUDGET,
-                    params={
-                        "max_total_rounds": spec.max_total_rounds,
-                        "max_total_messages": spec.max_total_messages,
-                        "token_budget": spec.token_budget,
-                    },
+                    params=dict(session_ceilings),
                 ),
+            )
+            team_logger.info(
+                "[config] {} session budget enabled: max_total_rounds={}, "
+                "max_total_messages={}, token_budget={}",
+                member_name or ctx.role.value,
+                spec.max_total_rounds,
+                spec.max_total_messages,
+                spec.token_budget,
+            )
+        else:
+            configured_ceilings = [
+                name for name, value in session_ceilings.items() if value is not None
+            ]
+            team_logger.info(
+                "[config] {} session budget skipped (autonomous={}, role={}, "
+                "ceilings configured: {})",
+                member_name or ctx.role.value,
+                spec.dispatch_mode == "autonomous",
+                ctx.role.value,
+                configured_ceilings or "none",
             )
 
         reliability_cfg = spec.reliability

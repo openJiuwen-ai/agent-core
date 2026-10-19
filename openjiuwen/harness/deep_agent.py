@@ -7,6 +7,7 @@ import asyncio
 import copy
 import dataclasses
 import os
+import sys
 import uuid
 from contextlib import suppress
 import warnings
@@ -432,11 +433,7 @@ class DeepAgent(BaseAgent):
                     else client_cfg.client_provider
                 )
         new_react_config.max_iterations = (
-            # ISS-4993: the task loop needs headroom, not infinity — a
-            # bounded ceiling guarantees a runaway loop still terminates.
-            config.task_loop_max_iterations
-            if config.enable_task_loop
-            else config.max_iterations
+            sys.maxsize if config.enable_task_loop else config.max_iterations
         )
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
@@ -880,11 +877,7 @@ class DeepAgent(BaseAgent):
 
         react_config = ReActAgentConfig()
         react_config.max_iterations = (
-            # ISS-4993: the task loop needs headroom, not infinity — a
-            # bounded ceiling guarantees a runaway loop still terminates.
-            cfg.task_loop_max_iterations
-            if cfg.enable_task_loop
-            else cfg.max_iterations
+            sys.maxsize if cfg.enable_task_loop else cfg.max_iterations
         )
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
