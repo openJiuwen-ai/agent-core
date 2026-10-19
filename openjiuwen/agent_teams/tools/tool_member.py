@@ -41,6 +41,26 @@ def validate_member_name(member_name: str | None) -> str | None:
     )
 
 
+def validate_display_name(display_name: str | None) -> str | None:
+    """Validate ``display_name`` at the tool boundary.
+
+    Schema ``required`` only binds the hosting LLM; MCP clients call
+    ``invoke`` directly, so this check is the only enforcement. A ``None``
+    that slips through resurfaces as a pydantic error on ``AgentCard.name``
+    — a message that never names the missing parameter.
+
+    Returns:
+        An error message when the name is missing or blank,
+        otherwise ``None``.
+    """
+    if display_name and display_name.strip():
+        return None
+    return (
+        "'display_name' is required: the roster label peers see (distinct "
+        "from 'member_name', the system id used for message routing)"
+    )
+
+
 def _is_anthropic_provider(provider: str) -> bool:
     """Return whether a provider name is Anthropic-compatible."""
     from openjiuwen.agent_teams.external.cli_agent.model_compat import is_anthropic_provider
@@ -330,6 +350,10 @@ class SpawnTeammateTool(_SpawnToolBase):
         if err:
             return self._fail(err)
 
+        err = validate_display_name(inputs.get("display_name"))
+        if err:
+            return self._fail(err)
+
         # Schema omission binds the hosting LLM; this rejects the same
         # arguments coming from an MCP client, which calls ``invoke``
         # directly without validating against ``input_params``. Checked
@@ -345,7 +369,7 @@ class SpawnTeammateTool(_SpawnToolBase):
                 )
 
         member_name = inputs["member_name"]
-        display_name = inputs.get("display_name")
+        display_name = inputs["display_name"]
         desc = inputs.get("desc", "")
         allocation = (
             self._allocate_model_config(inputs.get("model_name")) if self._allocate_model_config else None
@@ -533,6 +557,10 @@ class SpawnHumanAgentTool(_SpawnToolBase):
         if err:
             return self._fail(err)
 
+        err = validate_display_name(inputs.get("display_name"))
+        if err:
+            return self._fail(err)
+
         if not self.team.hitt_enabled():
             return self._fail(
                 "Cannot spawn human agent: HITT capability is disabled "
@@ -541,7 +569,7 @@ class SpawnHumanAgentTool(_SpawnToolBase):
             )
 
         member_name = inputs["member_name"]
-        display_name = inputs.get("display_name")
+        display_name = inputs["display_name"]
         result = await self.team.spawn_human_agent(
             member_name=member_name,
             display_name=display_name,
@@ -593,6 +621,10 @@ class SpawnPassiveHumanTool(_SpawnToolBase):
         if err:
             return self._fail(err)
 
+        err = validate_display_name(inputs.get("display_name"))
+        if err:
+            return self._fail(err)
+
         if not self.team.hitt_enabled():
             return self._fail(
                 "Cannot spawn passive human: HITT capability is disabled "
@@ -601,7 +633,7 @@ class SpawnPassiveHumanTool(_SpawnToolBase):
             )
 
         member_name = inputs["member_name"]
-        display_name = inputs.get("display_name")
+        display_name = inputs["display_name"]
         result = await self.team.spawn_passive_human(
             member_name=member_name,
             display_name=display_name,
@@ -670,6 +702,10 @@ class SpawnBridgeAgentTool(_SpawnToolBase):
         if err:
             return self._fail(err)
 
+        err = validate_display_name(inputs.get("display_name"))
+        if err:
+            return self._fail(err)
+
         if not self.team.bridge_enabled():
             return self._fail(
                 "Cannot spawn bridge agent: Bridge capability is disabled "
@@ -698,7 +734,7 @@ class SpawnBridgeAgentTool(_SpawnToolBase):
             return self._fail("adapter_config must be an object/dict")
 
         member_name = inputs["member_name"]
-        display_name = inputs.get("display_name")
+        display_name = inputs["display_name"]
         protocol = inputs.get("protocol") or ""
         result = await self.team.spawn_bridge_agent(
             member_name=member_name,
@@ -871,6 +907,10 @@ class SpawnExternalCliTool(_SpawnToolBase):
         if err:
             return self._fail(err)
 
+        err = validate_display_name(inputs.get("display_name"))
+        if err:
+            return self._fail(err)
+
         cli_agent = (inputs.get("cli_agent") or "").strip()
         if not cli_agent:
             return self._fail(
@@ -890,7 +930,7 @@ class SpawnExternalCliTool(_SpawnToolBase):
             return self._fail("spawn_external_cli requires a non-empty 'prompt' (the member's private system prompt)")
 
         member_name = inputs["member_name"]
-        display_name = inputs.get("display_name")
+        display_name = inputs["display_name"]
         model_name = inputs.get("model_name")
         raw_fallback_model_name = inputs.get("fallback_model_name")
         if raw_fallback_model_name is not None and not isinstance(raw_fallback_model_name, str):
