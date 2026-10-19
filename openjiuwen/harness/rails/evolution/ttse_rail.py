@@ -48,6 +48,7 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmen
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails.evolution.evolution_rail import (
     EvolutionRail,
+    EvolutionTriggerPoint,
     PreparedEvolutionInput,
 )
 
@@ -144,6 +145,8 @@ class _TTSEPreparedEvolutionInput(PreparedEvolutionInput):
 
 class TTSERail(EvolutionRail):
     """``EvolutionRail`` + FACT/TIP dual-track induction and injection."""
+
+    _trajectory_free_hooks = frozenset({EvolutionTriggerPoint.AFTER_TASK_ITERATION})
 
     def __init__(
         self,
