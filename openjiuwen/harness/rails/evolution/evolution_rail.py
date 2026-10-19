@@ -546,7 +546,8 @@ class EvolutionRail(DeepAgentRail):
         """Drain the current subscription, enrich RL fields, then hook."""
         inputs = ctx.inputs
         capture = self._resolve_capture(ctx=ctx)
-        trajectory, increment, issues = self._drain_for_hook(
+        trajectory, increment, issues = await asyncio.to_thread(
+            self._drain_for_hook,
             ctx,
             required_category="llm",
             merge=False,
@@ -557,7 +558,9 @@ class EvolutionRail(DeepAgentRail):
                 enriched_increment = await asyncio.to_thread(
                     self._enrich_latest_llm, increment, inputs.response
                 )
-                trajectory = self._merge_clean_increment(capture, enriched_increment)
+                trajectory = await asyncio.to_thread(
+                    self._merge_clean_increment, capture, enriched_increment
+                )
         await self._on_after_model_call(ctx, trajectory)
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_MODEL_CALL and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_MODEL_CALL, ctx
@@ -567,7 +570,9 @@ class EvolutionRail(DeepAgentRail):
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Drain the current subscription, then invoke the tool hook."""
-        trajectory, _, _ = self._drain_for_hook(ctx, required_category="tool")
+        trajectory, _, _ = await asyncio.to_thread(
+            self._drain_for_hook, ctx, required_category="tool"
+        )
         await self._on_after_tool_call(ctx, trajectory)
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TOOL_CALL and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_TOOL_CALL, ctx
@@ -577,7 +582,7 @@ class EvolutionRail(DeepAgentRail):
 
     async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Drain the current subscription, then invoke the iteration hook."""
-        trajectory, _, _ = self._drain_for_hook(ctx)
+        trajectory, _, _ = await asyncio.to_thread(self._drain_for_hook, ctx)
         await self._on_after_task_iteration(ctx, trajectory)
 
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TASK_ITERATION and self._allow_evolution_trigger(
@@ -590,7 +595,9 @@ class EvolutionRail(DeepAgentRail):
         """Final-drain an invoke and release its isolated subscription."""
         capture = self._resolve_capture(ctx=ctx)
         try:
-            trajectory, _, _ = self._drain_for_hook(ctx, capture=capture)
+            trajectory, _, _ = await asyncio.to_thread(
+                self._drain_for_hook, ctx, capture=capture
+            )
             await self._on_after_invoke(ctx, trajectory)
 
             # Trigger evolution if configured for after_invoke
