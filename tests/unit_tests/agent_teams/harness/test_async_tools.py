@@ -89,6 +89,37 @@ def test_runtime_injects_full_result_on_success():
     assert "demo" in injected[0]
 
 
+def test_runtime_injects_nested_pydantic_result_on_success():
+    """The launch -> completion -> inject path renders nested Pydantic results."""
+    set_language("cn")
+    injected: list[str] = []
+
+    async def _inject(text: str) -> None:
+        injected.append(text)
+
+    async def _scenario() -> AsyncToolRuntime:
+        runtime = AsyncToolRuntime(inject=_inject)
+
+        async def _work() -> dict:
+            return {
+                "items": [_ResultModel(value=7)],
+                "labels": {"beta", "alpha"},
+            }
+
+        runtime.launch("t-pydantic", _work, tool_name="demo", description="d")
+        await runtime._tasks["t-pydantic"]
+        return runtime
+
+    runtime = asyncio.run(_scenario())
+    assert runtime.registry["t-pydantic"].status == "completed"
+    assert len(injected) == 1
+    assert '"items": [' in injected[0]
+    assert '"value": 7' in injected[0]
+    assert '"labels": [' in injected[0]
+    assert '"alpha"' in injected[0]
+    assert '"beta"' in injected[0]
+
+
 def test_runtime_injects_error_on_failure():
     """A failing task marks the record error and injects the failure text."""
     set_language("cn")

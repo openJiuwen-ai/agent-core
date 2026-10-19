@@ -129,7 +129,7 @@ def render_result_text(result: Any) -> str:
             return json.dumps(result, ensure_ascii=False, indent=2)
         except TypeError:
             team_logger.info(
-                "[async_tools] pydantic BaseModel detected, converting for JSON serialization"
+                "[async_tools] non-JSON-native result detected, converting for JSON serialization"
             )
             return json.dumps(_to_jsonable(result), ensure_ascii=False, indent=2)
     return str(result)
