@@ -81,7 +81,8 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 - **等待中的调用**：加载的记录带等待现场，或 Session state 带 `__react_agent_interruption__` 时，新 Request 不组装，校验拒绝（`DEEPAGENT_CONTEXT_PARAM_ERROR`），窗口不追加；窗口有未配对的工具调用时同样拒绝，并记 error 日志（见上文“窗口安全”）。
 - **上下文 rail**：Persistent 构造（`PersistentAgentSpec.resolve_parts`）拒绝挂载 `ContextAssembleRail`、`PersonalContextRail`、`ContextProcessorRail`（含子类），`ContextProcessorRail` 的默认压缩链因此也不会挂载；`DeepAgentSpec` / `create_deep_agent` 不变。
 - **增量通道**：保留原生 `PromptAttachmentManager.sync_to_context`（首次快照、之后只追加变化）；一期 Persistent 自身没有执行中追加的动态内容。
-- **容量**：PA-11 使用 `rollover_threshold = floor(context_window × 80%)`。未主动换窗时，下一次完整请求的准确输入 token 数超过该阈值就触发换窗；新窗口候选完整请求也必须不超过该阈值。`context_window` 每次模型调用前从当前 `ModelContext.context_window_tokens()` 获取，即上下文引擎解析出的有效窗口。80% 是 PA-11 的换窗阈值，不是 provider hard-limit 保证。
+- **续做材料**：续做只有必需材料，详细日志通过受控工具分页读取。PA-18 不检查模型容量（2026-10-19 按开发者决定移除，见 F_20 D-09），不因请求超限或计数不可靠而暂停；启用 window_management 时由 PA-11 按下文规则换窗。不截断原任务或静默删除未决写操作。
+- **换窗容量**：PA-11 使用 `rollover_threshold = floor(context_window × 80%)`。未主动换窗时，下一次完整请求的准确输入 token 数超过该阈值就触发换窗；新窗口候选完整请求也必须不超过该阈值。`context_window` 每次模型调用前从当前 `ModelContext.context_window_tokens()` 获取，即上下文引擎解析出的有效窗口。80% 是 PA-11 的换窗阈值，不是 provider hard-limit 保证。
 
 ### 4.3 `SessionStateStore.checkpoint(context, checkpoint) -> None`
 

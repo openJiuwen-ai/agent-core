@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_07 / construction-and-binding |
 | 关联模块 | [factory.py](../../factory.py)、[Spec](../../schema/spec.py)、[构造上下文](../../schema/build_context.py)、[执行上下文](../../schema/execution.py)、[绑定接缝](../../execution/binding.py) |
-| 最近一次修订日期 | 2026-10-16 |
+| 最近一次修订日期 | 2026-10-19 |
 | 关联 feature | [F_01](../features/F_01_spec-and-deep-agent-construction.md)、[F_02](../features/F_02_execution-protocol.md)、[F_03](../features/F_03_invocation-binding-and-isolation.md)、[F_04](../features/F_04_contract-convergence.md)、[F_14](../features/F_14_workspace-file-read.md) ；[F_20](../features/F_20_continuation.md)（PA-18 联动修订） |
 | 设计依据 | [架构设计：构造与隔离](../designs/persistent-agent-architecture.md#41-构造与实例隔离已实现)、[宿主保证](../designs/persistent-agent-architecture.md#34-agentserver-必须提供的保证) |
 
@@ -30,17 +30,17 @@
 | `ConstructionBinding` / `InvocationState` | 原对象身份、关键声明值、占用、停止及清理状态 | 本实例私有状态 | 内部绑定接缝 |
 | `InvocationRef` / `ProtocolModel` | 事件及宿主响应共用的归属和 DTO 约束 | [protocol.py](../../schema/protocol.py) | 构造、重新校验及归属匹配 |
 
-Spec 继承 DeepAgentSpec，JSON 字段平铺、拒绝额外字段。`schema_version=1`；`enabled_features` 允许 `construction`、`workspace_read`、`workspace_write`，默认仅含 `construction`，集合不能为空。办公空间能力及 share_file_max_bytes 的依赖和行为由 [S_04](S_04_tools-and-workspace.md) 定义；不支持 `execution` 能力声明或未实现的策略字段。
+Spec 继承 DeepAgentSpec，JSON 字段平铺、拒绝额外字段。`schema_version=1`；`enabled_features` 允许 `construction`、`workspace_read`、`workspace_write`、`window_management`，默认仅含 `construction`，集合不能为空。办公空间能力及 share_file_max_bytes 的依赖和行为由 [S_04](S_04_tools-and-workspace.md) 定义；不支持 `execution` 能力声明或未实现的策略字段。
 
-PA-18 的专属配置由 [F_20](../features/F_20_continuation.md) D-06、D-09 确认：
+续做追溯上限由 [F_20](../features/F_20_continuation.md) D-06 确认；两个容量字段原为 PA-18 的最终请求容量检查新增，该检查已于 2026-10-19 移除（F_20 D-09），字段仅为可选兼容字段，不参与运行判断；PA-11 阈值由 [S_03](S_03_context-and-windows.md) 定义：
 
 | 字段 | 约束与默认值 | 生效与失败边界 |
 | --- | --- | --- |
 | continuation_chain_limit | 正整数或 None，默认 None | 续做追溯上限；配置后所有 Execution 均声明 read_execution_record。正式续做开放后，未配置在任何事件之前拒绝；新任务和低层构造不要求提供执行链接口 |
-| model_input_limit_tokens | 正整数或 None，默认 None | 模型独立输入上限；与下一字段任一配置即要求完整容量配置 |
-| capacity_safety_margin_tokens | 非负整数或 None，默认 None | 容量安全余量；与 model_input_limit_tokens、模型请求配置的 context_window、max_tokens 一起校验 |
+| model_input_limit_tokens | 正整数或 None，默认 None | 旧容量配置兼容字段，仍序列化并参与 Spec 指纹；不控制执行准入或 PA-11 换窗 |
+| capacity_safety_margin_tokens | 非负整数或 None，默认 None | 旧容量配置兼容字段，仍序列化并参与 Spec 指纹；不作为换窗配置门槛 |
 
-context_window 为模型总容量，max_tokens 为输出预留。四项齐全且输入上限不超过总容量、输出预留加安全余量小于总容量时，可用输入为 min(输入上限, 总容量 − 输出预留 − 安全余量)。配置不完整或组合不成立时，正式执行在任何事件和构造之前拒绝，任一容量字段已设置的直接构造也拒绝，错误为 DEEPAGENT_CONFIG_PARAM_ERROR。新任务、正常确认恢复与续做的正式 execute / resume 均须完整配置，两个新字段都为 None 时也拒绝；该入口门禁已实现并有组件测试。Spec 默认 None 继续用于低层构造，不为部署选择具体数值，也不改变通用 core 默认关闭行为。新增字段计入完整 Spec 指纹，宿主须使用同一发布版本匹配 ExecutionContext。 context_engine_config 经 JSON 快照后由 Persistent 装配边界校验并还原为 ContextEngineConfig，保留其 tokenizer 与缓存设置，不修改发布快照或指纹。最终容量检查每次读取当前 ModelContext.token_counter()，复用 core 已按 context_engine_config 的 tokenizer_spec、tokenizer_registry 和缓存配置选择的计数器；不另行选择或缓存。取得计数器失败、估算或降级均为容量未知，不能视为足够。
+正式 execute / resume 与启用 window_management 的构造均不要求这两个旧容量字段，也不校验它们与模型 context_window、max_tokens 的旧四项配置组合。单字段的类型与取值约束保持不变；给出的兼容值仍参与完整 Spec 指纹，不能静默删除或改写。PA-11 每次调用前从当前 ModelContext.context_window_tokens() 解析有效窗口，按其 80% 判断换窗；不要求额外配置模型独立输入上限、安全余量或输出预留，原生模型参数仍按 core 的配置契约处理。宿主须对同一 Request 传入同一发布版本和指纹。context_engine_config 经 JSON 快照后由 Persistent 装配边界校验并还原为 ContextEngineConfig，保留其 tokenizer 与缓存设置，不修改发布快照或指纹；PA-11 换窗计数读取当前 ModelContext.token_counter()，复用 core 已选择的计数器。
 
 构造经 JSON 往返生成配置副本；`fingerprint()` 对父类及专属字段全部计算规范 JSON 的 SHA-256，能力集合先排序。配置版本、主体和权限上限由宿主固定，不能仅凭声明了开关推断能力可运行。
 

@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_01 / public-api-and-execution |
 | 关联模块 | [entries.py](../../execution/entries.py)、[participation.py](../../execution/participation.py)、[model_rail.py](../../execution/model_rail.py)、[RequestInput](../../schema/request.py)、[预算结果](../../schema/port_results.py) |
-| 最近一次修订日期 | 2026-10-16 |
+| 最近一次修订日期 | 2026-10-19 |
 | 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_07](../features/F_07_group-participation.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_18](../features/F_18_output-handoff.md) ；[F_20](../features/F_20_continuation.md)（PA-18 联动修订） |
 | 设计依据 | [架构设计：执行入口](../designs/persistent-agent-architecture.md#42-执行入口与原生推理循环)、[主流程](../designs/persistent-agent-architecture.md#51-主流程)、[故障与结局](../designs/persistent-agent-architecture.md#81-故障影响错误分类与结局) |
 
@@ -83,7 +83,7 @@ GroupChatPort 的授权、消息与完整性规则由 [S_09](S_09_group-chat-and
 | 非法 RequestInput | 入口包装为 BaseError，DEEPAGENT_INPUT_PARAM_ERROR；直接构造 DTO 的字段错误为 Pydantic ValidationError |
 | 未开放模式、缺少群端口、续做门禁或接入点尚不可用 | BaseError，DEEPAGENT_CONFIG_PARAM_ERROR；不把未接入能力降级为新任务或空窗口；续做门禁在任何事件之前拒绝，群判断之后的其他 getter 拒绝不撤销已有判断事件 |
 | recovery_ref 非法 | DEEPAGENT_CONTEXT_PARAM_ERROR，在任何事件之前拒绝，详见 S_05 第 4.4 节 |
-| 容量配置不完整或组合不成立 | DEEPAGENT_CONFIG_PARAM_ERROR，在事件和构造之前拒绝；配置契约见 S_07 |
+| 启用 window_management 时容量配置不完整或组合不成立 | DEEPAGENT_CONFIG_PARAM_ERROR，构造时拒绝；配置契约见 S_07 |
 | 非法构造上下文 / checkpointer | BaseError，DEEPAGENT_CONTEXT_PARAM_ERROR |
 | 会话记录加载 / 保存失败或返回形态非法 | DEEPAGENT_RUNTIME_ERROR；加载失败不运行原生流，保存失败不记结束事件 |
 | 会话记录无效（加载时） | 框架校验错误 DEEPAGENT_CONTEXT_PARAM_ERROR 原样透传；不运行原生流、不退回空窗口，服务端不续做（S_03 第 4.1 节） |
@@ -103,9 +103,9 @@ GroupChatPort 的授权、消息与完整性规则由 [S_09](S_09_group-chat-and
 
 两种响应均先重新校验，再匹配完整调用归属和 model_call_id。ModelUsage 的 known 必须含两个非负 token 计数；unknown 必须无计数且有原因。report 响应中的 rejected 由宿主回报，当前 Rail 不把它转换为执行暂停；不得凭 report 返回或 model.completed 日志推导结算完成。
 
-原生模型预算由 PersistentModelCallRail 完成，优先级 10；它在正式 emitter 存在时工作，并在模型及工具调用前检查停止 / fatal。before_invoke 为本实例注入 core 的最终请求检查：系统提示、窗口消息、附件和工具定义全部装配后，依次执行容量检查、预算准入、模型调用。before_model_call 只保留停止 / fatal 检查，不再执行预算准入。每次实际重试都重新检查并申请新的 model_call_id。容量超限返回 paused(context_unfit)，计数不可靠返回 paused(error)，两者都不准入、不调用模型，也不经模型异常重试；配置与计数规则见 S_07 和 [F_20](../features/F_20_continuation.md) D-09。
+原生模型预算由 PersistentModelCallRail 完成，优先级 10；它在正式 emitter 存在时工作，并在模型及工具调用前检查停止 / fatal。before_invoke 为本实例注入 core 的最终请求检查：系统提示、窗口消息、附件和工具定义全部装配后，依次执行换窗处理（启用 window_management 时，PA-11）、预算准入、模型调用。before_model_call 只保留停止 / fatal 检查，不再执行预算准入。每次实际重试都重新检查并申请新的 model_call_id；接缝返回的暂停结果不经模型异常重试。PA-18 不检查模型容量（2026-10-19 移除，见 [F_20](../features/F_20_continuation.md) D-09）。
 
-参与判断独立执行预算协议，不通过上述原生最终请求接缝；其容量接入随 PA-06 对齐。待实现的换窗摘要也须先检查容量再申请额度，见 S_03。所有正式 execute / resume（新任务、正常确认恢复与续做）必须配置完整容量检查，缺失时在任何事件和构造之前拒绝。该入口校验已实现，两个新容量字段均未配置时也会拒绝；对应拒绝路径与既有正常执行、确认恢复路径均有组件测试。低层构造及通用 ReActAgent 的默认行为不变。
+参与判断独立执行预算协议，不通过上述原生最终请求接缝。正式 execute / resume（新任务、正常确认恢复与续做）不要求容量配置；模型容量只在启用 window_management 时由 PA-11 使用，见 S_03、S_07。低层构造及通用 ReActAgent 的默认行为不变。
 
 停止、取消或致命错误后，控制 Rail 拒绝尚未调用的工具时，该调用的工具消息为“本次执行正在结束，该工具未调用。”；内部强制结束载荷只用于入口判断，不作为工具结果写入窗口。此说明不改变结局或承诺撤销已开始的外部操作，设计与独立验证见 [F_05](../features/F_05_execution-entries.md)。
 
