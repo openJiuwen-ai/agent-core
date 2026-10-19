@@ -130,7 +130,13 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
       到结构化数据后，该兼容字段与基于其字符串的解析逻辑全链路移除。
     - `tool_call` 包装器不重新渲染目标结果：结构化结果保持 `{"name", "result"}` / 原 `error`，
       目标工具已渲染（含 AFTER_TOOL_CALL 改写）的消息文本放在 `RelayedToolOutput` 的私有属性里，
-      不进 `model_dump` / `str()`，只由 `ToolCallTool.render_for_llm` 读取。
+      不进 `model_dump` / `str()`，只由 `ToolCallTool.render_for_llm` 读取。目标结果带
+      `data["multimodal"]` 时，包装器把这份图片列表移到自身 `data["multimodal"]`（嵌套的
+      `result` 不再带它），图片照常送达模型，且只序列化一次。
+    - 工具图片走 `data["multimodal"]`（`type="image"`、`data_url`）：代理在该批工具消息之后追加
+      一条用户消息交给模型。图片项带 `"keep_in_context": False` 时，只在模型对它作出回答之前出现
+      在发给模型的窗口里；之后窗口中该图片替换为一句说明文字。存储的上下文不改，失败重试、暂停
+      恢复时图片仍在。不带该键的图片每次都发送。
     - 外部协议出口（team MCP server / Claude SDK MCP / skill CLI / 被动成员执行器）同样调用
       `render_for_llm`，保证与进程内模型看到的文本一致。
 12. **Browser Batch 按顺序验证执行目标**：完整 schema 在执行前检查；DOM 唯一性、可见性和

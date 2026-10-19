@@ -45,6 +45,7 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.rails.mcp_rail import McpRail
+from openjiuwen.harness.rails._multimodal import build_read_image_multimodal_resolver
 from openjiuwen.harness.rails.multimodal_context_summarizer_rail import (
     ARCHIVED_SCREEN_PLACEHOLDER,
     MultimodalContextSummarizerRail,
@@ -139,6 +140,7 @@ __all__ = [
     "TeamSkillEvolutionRail",
     "TeamSymphonyGraphEvolutionRail",
     "TeamSkillRail",
+    "build_read_image_multimodal_resolver",
     "configure_skill_evolution",
     "configure_skill_evolution_runtime",
     "configure_ttse_evolution",
