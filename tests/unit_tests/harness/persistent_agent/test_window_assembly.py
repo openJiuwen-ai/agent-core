@@ -270,8 +270,6 @@ class Harness:
                 ),
                 model_request_config=ModelRequestConfig(context_window=1_000_000, max_tokens=4_000),
             ),
-            model_input_limit_tokens=900_000,
-            capacity_safety_margin_tokens=1_000,
             enable_sys_operation=False,
             enable_task_loop=False,
             enable_security_rail=False,
@@ -316,7 +314,7 @@ class Harness:
 
 
 @pytest.fixture
-def harness(monkeypatch, tmp_path, capacity_counter):
+def harness(monkeypatch, tmp_path):
     api = import_module(PKG)
     model, store = LocalModel(), StateStore()
     monkeypatch.setattr(ModelSpec, "build", lambda self: model)

@@ -18,8 +18,7 @@ import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngineConfig
-from openjiuwen.core.context_engine.context.context import SessionModelContext
-from openjiuwen.core.context_engine.token import TokenCounter
+from openjiuwen.core.context_engine.token import NativeTokenizerCounter
 from openjiuwen.core.context_engine.token.tokenizer_spec import TokenizerSpec
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.llm.schema.message import (
@@ -95,22 +94,6 @@ class LocalModel:
             yield AssistantMessageChunk(content="checking ", tool_calls=calls, usage_metadata=usage())
             return
         yield AssistantMessageChunk(content="checked and done", finish_reason="stop", usage_metadata=usage())
-
-
-class ExactCounter(TokenCounter):
-    """Counts like an exact tokenizer for the model: one token per character."""
-
-    measurement_source = "native_tokenizer"
-    measurement_estimated = False
-
-    def count(self, text, *, model="", **kwargs):
-        return len(text or "")
-
-    def count_messages(self, messages, *, model="", **kwargs):
-        return sum(self.count(str(message.content)) for message in messages)
-
-    def count_tools(self, tools, *, model="", **kwargs):
-        return sum(self.count(str(tool)) for tool in tools)
 
 
 class Remember(Tool):
@@ -227,8 +210,6 @@ class Harness:
                 ),
                 model_request_config=ModelRequestConfig(context_window=1_000_000, max_tokens=4_000),
             ),
-            model_input_limit_tokens=900_000,
-            capacity_safety_margin_tokens=1_000,
             enable_sys_operation=False,
             enable_task_loop=False,
             enable_security_rail=False,
@@ -299,19 +280,13 @@ class Harness:
 
 
 @pytest.fixture
-def entry_harness(monkeypatch):
+def harness(monkeypatch):
     api = import_module(PKG)
     model, tool = LocalModel(), Remember()
     monkeypatch.setattr(ModelSpec, "build", lambda self: model)
     monkeypatch.setitem(_TOOL_PROVIDER_REGISTRY, "test.continuation.remember", lambda params, context: tool)
     monkeypatch.setattr(SEAMS, "continuation_support", lambda context: None)
     return Harness(api, model, tool, monkeypatch)
-
-
-@pytest.fixture
-def harness(monkeypatch, entry_harness):
-    monkeypatch.setattr(SessionModelContext, "token_counter", lambda self: ExactCounter())
-    return entry_harness
 
 
 @pytest.fixture
@@ -327,7 +302,7 @@ def local_tokenizer(tmp_path):
 
 
 def configured_native_spec(harness, path, representation, registration="spec", **overrides):
-    name = "capacity-native-model"
+    name = "local-native-model"
     tokenizer = TokenizerSpec(
         provider="OpenAI", model=name, source="local", engine="tokenizers", artifact_path=str(path)
     )
@@ -353,39 +328,27 @@ def configured_native_spec(harness, path, representation, registration="spec", *
 
 @pytest.mark.parametrize("representation", ["object", "dict"])
 @pytest.mark.parametrize("registration", ["spec", "registry"])
-@pytest.mark.parametrize("fits", [True, False], ids=["fits", "over_limit"])
 @pytest.mark.asyncio
-async def test_native_tokenizer_configuration_reaches_the_formal_capacity_check(
-    entry_harness, local_tokenizer, representation, registration, fits
+async def test_the_published_tokenizer_reaches_the_native_context_of_a_formal_execution(
+    harness, local_tokenizer, monkeypatch, representation, registration
 ):
-    spec = configured_native_spec(
-        entry_harness, local_tokenizer, representation, registration, model_input_limit_tokens=900_000 if fits else 1
-    )
+    """The Spec's JSON roundtrip keeps the tokenizer settings that window management counts with."""
+    spec = configured_native_spec(harness, local_tokenizer, representation, registration)
     publication = spec.model_dump_json()
     fingerprint = spec.fingerprint()
-    ctx, host = entry_harness.context(spec, recovery_ref=None)
-    events = await entry_harness.run(spec, ctx, scheduled())
+    rail = import_module(f"{PKG}.execution.model_rail").PersistentModelCallRail
+    final_check, counters = rail.check_final_request, []
+
+    async def probe(self, ctx):
+        counters.append(ctx.context.token_counter())
+        return await final_check(self, ctx)
+
+    monkeypatch.setattr(rail, "check_final_request", probe)
+    ctx, _ = harness.context(spec, recovery_ref=None)
+    events = await harness.run(spec, ctx, scheduled())
     assert spec.model_dump_json() == publication and spec.fingerprint() == fingerprint
-    if fits:
-        assert events[-1].payload.status == "completed"
-        assert len(host.admits) == len(entry_harness.model.seen) == 1
-    else:
-        assert paused(events).reason == "context_unfit"
-        assert host.admits == [] and entry_harness.model.seen == []
-
-
-@pytest.mark.parametrize("representation", ["object", "dict"])
-@pytest.mark.parametrize("artifact", ["missing", "broken"])
-@pytest.mark.asyncio
-async def test_unusable_native_artifacts_pause_before_admission(entry_harness, tmp_path, representation, artifact):
-    path = tmp_path / "unusable-tokenizer.json"
-    if artifact == "broken":
-        path.write_text("not a tokenizer", encoding="utf-8")
-    spec = configured_native_spec(entry_harness, path, representation)
-    ctx, host = entry_harness.context(spec, recovery_ref=None)
-    payload = paused(await entry_harness.run(spec, ctx, scheduled()))
-    assert payload.reason == "error" and "capacity unknown" in payload.detail
-    assert host.admits == [] and entry_harness.model.seen == []
+    assert events[-1].payload.status == "completed"
+    assert len(counters) == 1 and isinstance(counters[0], NativeTokenizerCounter)
 
 
 def logged(ctx, seq, kind, payload, execution_id=EARLIER):
@@ -772,14 +735,7 @@ async def test_files_listed_before_the_crash_are_not_handed_off_but_new_listings
     assert events[-1].payload.output_refs == tuple(item.output_id for item in handed)
 
 
-# F_20 D-09: the final request is checked for capacity, then admitted, before the model is called.
-
-
-class EstimatingCounter(ExactCounter):
-    """Counts, but only as an estimate: the capacity is then unknown."""
-
-    measurement_source = "string_length_fallback"
-    measurement_estimated = True
+# Each final request is admitted once, then the model is called; no model capacity is configured or checked.
 
 
 def paused(events):
@@ -789,44 +745,7 @@ def paused(events):
 
 
 @pytest.mark.asyncio
-async def test_a_final_request_that_does_not_fit_is_paused_before_budget_and_model(harness):
-    """PA-18-V-16: capacity is checked before admission; neither admission nor the model happens."""
-    spec = harness.spec(model_input_limit_tokens=50)
-    ctx, host = harness.context(spec, recovery_ref=None)
-    host.admission = "denied"
-    events = await harness.run(spec, ctx, scheduled())
-    payload = paused(events)
-    assert payload.reason == "context_unfit" and "input tokens" in payload.detail
-    assert host.admits == [] and harness.model.seen == []
-
-
-@pytest.mark.asyncio
-async def test_a_final_request_that_cannot_be_counted_reliably_is_an_error_not_a_fit(harness, monkeypatch):
-    """PA-18-V-17: an estimated count leaves the capacity unknown."""
-    monkeypatch.setattr(SessionModelContext, "token_counter", lambda self: EstimatingCounter())
-    spec = harness.spec()
-    ctx, host = harness.context(spec, recovery_ref=None)
-    events = await harness.run(spec, ctx, scheduled())
-    payload = paused(events)
-    assert payload.reason == "error" and "capacity unknown" in payload.detail
-    assert host.admits == [] and harness.model.seen == []
-
-
-@pytest.mark.asyncio
-async def test_a_counter_that_cannot_be_obtained_is_an_unknown_capacity(harness, monkeypatch):
-    def broken(context):
-        raise OSError("tokenizer files missing")
-
-    monkeypatch.setattr(SessionModelContext, "token_counter", broken)
-    spec = harness.spec()
-    ctx, host = harness.context(spec, recovery_ref=None)
-    payload = paused(await harness.run(spec, ctx, scheduled()))
-    assert payload.reason == "error" and "tokenizer files missing" not in payload.detail
-    assert host.admits == [] and harness.model.seen == []
-
-
-@pytest.mark.asyncio
-async def test_a_fitting_request_is_admitted_once_per_model_call_then_called(harness):
+async def test_each_model_call_is_admitted_once_then_called(harness):
     """PA-18-V-18."""
     spec = harness.spec()
     ctx, host = harness.context(spec, recovery_ref=None)
@@ -849,55 +768,28 @@ NO_WINDOW = ModelSpec(
 
 
 @pytest.mark.parametrize(
-    "overrides",
+    ("overrides", "recovery_ref"),
     [
-        pytest.param({"model": NO_WINDOW}, id="no_context_window"),
-        pytest.param({"model_input_limit_tokens": None}, id="no_input_limit"),
-        pytest.param({"capacity_safety_margin_tokens": None}, id="no_safety_margin"),
-        pytest.param({"model_input_limit_tokens": 2_000_000}, id="input_limit_above_window"),
-        pytest.param({"capacity_safety_margin_tokens": 996_000}, id="no_room_for_input"),
+        pytest.param({"model": NO_WINDOW}, None, id="new_task_without_model_limits"),
+        pytest.param({"model": NO_WINDOW}, EARLIER, id="continuation_without_model_limits"),
+        pytest.param(
+            {"model": NO_WINDOW, "enabled_features": frozenset({"construction", "window_management"})},
+            None,
+            id="window_management_without_legacy_limits",
+        ),
+        pytest.param(
+            {"model_input_limit_tokens": 1, "capacity_safety_margin_tokens": 0}, None, id="limits_left_to_windows"
+        ),
     ],
 )
 @pytest.mark.asyncio
-async def test_an_incomplete_or_impossible_capacity_configuration_is_refused_before_any_event(harness, overrides):
-    """PA-18-V-19: once the check is asked for, every value must be there and the combination possible."""
+async def test_formal_execution_needs_no_model_capacity(harness, overrides, recovery_ref):
+    """PA-18-V-30 / V-31: execution and window construction do not require legacy capacity fields."""
     spec = harness.spec(**overrides)
-    ctx, host = harness.context(spec, recovery_ref=None)
-    with pytest.raises(BaseError) as exc_info:
-        await harness.run(spec, ctx, scheduled())
-    assert exc_info.value.status == StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR
-    assert host.events == [] and harness.model.seen == []
-    assert not ctx.binding.attempted, "refused before anything is constructed"
-
-
-@pytest.mark.asyncio
-async def test_continuation_requires_the_capacity_check(harness):
-    """PA-18-V-10."""
-    spec = harness.spec(model_input_limit_tokens=None, capacity_safety_margin_tokens=None)
-    ctx, host = harness.context(spec)
-    with pytest.raises(BaseError) as exc_info:
-        await harness.run(spec, ctx, scheduled())
-    assert exc_info.value.status == StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR
-    assert "capacity check" in str(exc_info.value) and host.events == []
-
-
-@pytest.mark.parametrize("entry", ["execute", "resume"])
-@pytest.mark.asyncio
-async def test_all_formal_entries_require_capacity_before_events_or_construction(harness, entry):
-    spec = harness.spec(model_input_limit_tokens=None, capacity_safety_margin_tokens=None)
-    ctx, host = harness.context(spec, recovery_ref=None)
-    if entry == "execute":
-        stream = harness.api.execute_persistent_request(spec, ctx, scheduled())
-    else:
-        stream = harness.api.resume_persistent_request(
-            spec, ctx, {"responses": [{"kind": "permission", "tool_call_id": "call-1", "choice": "approve"}]}
-        )
-    with pytest.raises(BaseError) as exc_info:
-        _ = [event async for event in stream]
-    assert exc_info.value.status == StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR
-    assert "capacity check" in str(exc_info.value)
-    assert host.events == [] and harness.model.seen == []
-    assert ctx.binding.attempted is False and ctx.binding.control.emitter is None
+    ctx, host = harness.context(spec, recovery_ref=recovery_ref)
+    events = await harness.run(spec, ctx, scheduled())
+    assert events[-1].payload.status == "completed"
+    assert harness.model.seen and len(host.admits) == len(harness.model.seen)
 
 
 # F_20 D-08: read_execution_record is declared for every Execution of the Spec and answers in a continuation.
