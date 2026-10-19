@@ -10,6 +10,7 @@ Inherits EvolutionRail to gain automatic trajectory collection.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import posixpath
 import re
@@ -782,8 +783,12 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
                 "team tasks completed; starting team skill evolution analysis",
             )
             trajectory = prepared.trajectory
-            messages = [deepcopy(message) for message in prepared.messages]
-            presented_entries = [deepcopy(entry) for entry in prepared.presented_entries]
+            messages = await asyncio.to_thread(
+                lambda: [deepcopy(message) for message in prepared.messages]
+            )
+            presented_entries = await asyncio.to_thread(
+                lambda: [deepcopy(entry) for entry in prepared.presented_entries]
+            )
 
             used_skill = self._detect_used_team_skill(trajectory)
             if not used_skill:
@@ -798,7 +803,9 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
 
             logger.info("[TeamSkillEvolutionRail] detected existing skill '%s'", used_skill)
 
-            signals = self._detect_rule_signals(trajectory=trajectory, skill_name=used_skill)
+            signals = await asyncio.to_thread(
+                self._detect_rule_signals, trajectory=trajectory, skill_name=used_skill
+            )
 
             if not signals:
                 logger.info("[TeamSkillEvolutionRail] no signals detected for '%s'", used_skill)
