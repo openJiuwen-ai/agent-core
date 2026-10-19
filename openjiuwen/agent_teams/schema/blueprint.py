@@ -371,8 +371,8 @@ class TeamAgentSpec(BaseModel):
     """Optional team-session ceiling on successful intra-team send_message calls.
 
     Every peer/multicast/broadcast/report delivery counts; there is no
-    leader/report exemption at session level (that is the ISS-4993 blind
-    spot of the per-teammate debate cap). ``None`` disables this dimension.
+    leader/report exemption at session level (that is the blind spot of
+    the per-teammate debate cap). ``None`` disables this dimension.
     """
     token_budget: Optional[int] = None
     """Optional team-session ceiling on cumulative LLM input tokens.

@@ -183,7 +183,7 @@ async def test_after_model_call_accumulates_input_tokens() -> None:
 async def test_after_tool_call_counts_every_successful_send_shape() -> None:
     rail = _rail(max_total_messages=3)
 
-    # Session level has no leader/report exemption (the ISS-4993 blind spot):
+    # Session level has no leader/report exemption (the debate cap's blind spot):
     # reports to the leader and user replies count like any peer send.
     for to in ("peer", "leader", "user"):
         await rail.after_tool_call(

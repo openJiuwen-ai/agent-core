@@ -126,8 +126,8 @@ class TeamCompletionHandler(BaseCoordinationHandler):
         #      the team. This intentionally bypasses the
         #      ``enable_taskless_completion`` empty-board gate: exhausting the
         #      session budget is an explicit conclusion signal, not a board
-        #      state, and waiting on the board is exactly the hang ISS-4993
-        #      showed.
+        #      state, and waiting on the board is exactly the hang that
+        #      motivated the session budget.
         from openjiuwen.agent_teams.rails.session_budget_rail import SessionBudgetState
 
         # isinstance guards against foreign/mock attributes: only a real

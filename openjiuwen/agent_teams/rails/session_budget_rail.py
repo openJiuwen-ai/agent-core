@@ -3,7 +3,7 @@
 
 """Team-session budget: whole-session ceilings on rounds / messages / tokens.
 
-ISS-4993: an autonomous team whose chat never matches the debate pattern
+An autonomous team whose chat never matches the debate pattern
 (member→leader reports, leader broadcasts) slips past every existing cap —
 ``max_debate_rounds`` never counts it, ``max_iterations`` is overridden to
 ``sys.maxsize`` by the task loop — so a runaway discussion grows unbounded
@@ -291,7 +291,7 @@ class SessionBudgetRail(DeepAgentRail):
         """Count one successful send_message — session level, no exemptions.
 
         Unlike the debate cap there is no leader/report carve-out here: the
-        runaway mode in ISS-4993 was *precisely* the shape the debate cap
+        runaway mode was *precisely* the shape the debate cap
         exempted (member→leader reports and leader broadcasts).
         """
         if not self._is_send_message(ctx.inputs.tool_name):

@@ -382,7 +382,7 @@ def build_team_debate_round_cap_rail(params: dict[str, Any], context: Any) -> An
 
 
 # ---------------------------------------------------------------------------
-# team.session_budget — team-session rounds/messages/token ceilings (ISS-4993)
+# team.session_budget — team-session rounds/messages/token ceilings
 # ---------------------------------------------------------------------------
 
 
