@@ -404,6 +404,12 @@ class TaskScheduler:
             )
         task = tasks[0]
 
+        if not await self._task_manager.claim_task(task_id):
+            logger.info(
+                f"Skipping task {task_id}: status changed before execution"
+            )
+            return
+
         logger.info(f"Executing task {task_id} (type: {task.task_type})")
 
         # 2. Create TaskExecutor
@@ -425,10 +431,7 @@ class TaskScheduler:
                 _, exec_task = self._running_tasks[task_id]
                 self._running_tasks[task_id] = (executor, exec_task)
 
-        # 3. Update task status to WORKING
-        await self._task_manager.update_task_status(task_id, TaskStatus.WORKING)
-
-        # 4. Execute task in streaming mode
+        # 3. Execute task in streaming mode
         async for chunk in executor.execute_ability(task_id, session):
             # 4.1 Write to session stream (so ControllerAgent can read)
             await session.write_stream(chunk)
