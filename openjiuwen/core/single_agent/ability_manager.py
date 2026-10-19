@@ -571,7 +571,7 @@ class AbilityManager:
     def _resolve_call_timeout(
             tool_card: Optional[ToolCard],
     ) -> Optional[float]:
-        """Resolve the per-call timeout for ``tool.invoke``.
+        """Resolve the card-level fallback budget for ``tool.invoke``.
 
         Override order:
 
@@ -582,12 +582,10 @@ class AbilityManager:
 
         ``ToolCard.idempotent`` is no longer consulted here. Whether a tool
         is retried on failure is owned by ``ToolCallResilienceRail``; the
-        call-level timeout applies uniformly. An exempt (``None``) result
-        is still bounded by ``MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT`` at the call
-        site to prevent indefinite hangs.
-
-        Returning ``None`` means the caller passes it to
-        ``anyio.fail_after(None)``, which is a no-op deadline.
+        card-level timeout applies uniformly. At the call site, an exempt
+        (``None``) result falls back to ``MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT``.
+        The tool's ``get_call_timeout`` hook then resolves the final budget
+        from this fallback and the invocation inputs.
         """
         properties = getattr(tool_card, "properties", None) if tool_card else None
         if not isinstance(properties, dict):
@@ -1441,6 +1439,7 @@ class AbilityManager:
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
+                call_timeout = tool.get_call_timeout(tool_args, default_timeout=call_timeout)
                 invoke_kwargs = {"session": session}
                 # The fixed progressive ``tool_call`` wrapper needs the active
                 # callback context to dispatch its discovered target through
@@ -1579,14 +1578,13 @@ class AbilityManager:
                     tool_call,
                     f"Ability not found in resource_mgr: {tool_name}",
                 )
-            # Resolve timeout from the tool's own card so non-idempotent
-            # tools are exempt on this path too (Layer 0 reads
-            # ``ToolCard.idempotent``); the name kwarg is no longer used.
+            # Use the same card policy and input-aware budget as registered tools.
             call_timeout = self._resolve_call_timeout(tool.card)
             # Global hard limit: even exempt tools (None) get a ceiling.
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
+                call_timeout = tool.get_call_timeout(tool_args, default_timeout=call_timeout)
                 with anyio.fail_after(call_timeout):
                     result = await tool.invoke(tool_args, session=session)
             except TimeoutError as e:

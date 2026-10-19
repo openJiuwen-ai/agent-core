@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-10-14 |
+| 最近一次修订日期 | 2026-10-16 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent |
 
 ## 范围 / 边界
@@ -78,6 +78,13 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
    - worktree：`WorktreeManager` / `WorktreeConfig` / `WorktreeLifecyclePolicy` +
      `EnterWorktreeTool` / `ExitWorktreeTool`（`tools/worktree/`）。
    - shell：`BashTool` / `PowerShellTool` / `CodeTool`（`tools/shell/` + `code.py`）。
+     Bash 前台命令的执行期限统一取输入 `timeout`，经既有校验后默认 300 秒，
+     上限由 `BASH_TOOL_MAX_TIMEOUT_SECONDS` 控制（默认 3600 秒）。本地 Shell 的普通与
+     流式执行均直接使用调用方传入的期限，不再读取 `JW_EXECUTE_CMD_MAX_TIMEOUT` 截断。
+     `Tool.get_call_timeout(inputs, default_timeout=...)` 是实例级调用预算扩展点：默认保留
+     AbilityManager 从卡片或默认值解析的预算；Bash 前台覆写为执行期限加 30 秒清理窗口，
+     供杀进程、收集已有输出和回传结果使用，执行本身不会延长。注册与资源回退两条调用路径
+     均使用该扩展点；后台启动继续使用原调用预算，不受命令 `timeout` 控制。
    - cron：`create_cron_tools()` + `CronToolContext` / `CronToolBackend`(Protocol)。
    - memory：`MemorySearchTool` / `MemoryGetTool` / `ReadMemoryTool` / `WriteMemoryTool` /
      `EditMemoryTool` + `CompressionRecallTool` + `CodingMemory{Read,Write,Edit}Tool`。

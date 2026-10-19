@@ -54,6 +54,7 @@ def _make_sudo_noninteractive(command: str) -> str:
 
 
 _VALID_SHELL_TYPES = frozenset({"auto", "cmd", "powershell", "bash", "sh"})
+_CALL_TIMEOUT_GRACE_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -146,6 +147,26 @@ class BashTool(Tool):
         )
 
     # ── invoke ────────────────────────────────────────────────
+
+    def get_call_timeout(
+            self,
+            inputs: dict[str, Any],
+            *,
+            default_timeout: float,
+    ) -> float:
+        """Allow the command deadline plus time to kill and drain its process.
+
+        Args:
+            inputs: Arguments using the same timeout normalization as execution.
+            default_timeout: Existing invocation budget for background launches.
+
+        Returns:
+            Foreground execution timeout plus cleanup grace, or the background budget.
+        """
+        p = self._parse_inputs(inputs)
+        if p.run_in_background:
+            return default_timeout
+        return float(p.timeout + _CALL_TIMEOUT_GRACE_SECONDS)
 
     def _build_history_path(self, session: Any) -> str:
         from openjiuwen.core.sys_operation.cwd import get_agent_history_root
