@@ -1,11 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Shared capacity rules (F_20 D-09): whether one final model request fits the model.
+"""Trusted request counts for PA-11, with legacy capacity parsing retained for compatibility.
 
-The model's total context window and output reservation come from the model request config; the
-Persistent Spec adds the model input limit and a safety margin. A request fits when its input plus the
-output reservation and the margin stays within the window, and its input stays within the input limit.
-A count is trusted only when the counter reports it as exact (not estimated, no fallback) and it counted
+PA-11 gets the active model window from ContextEngine and applies its own 80% rollover threshold.
+Execution and construction do not call the legacy limit parser or require its configuration fields.
+A count is trusted only when the counter reports it as exact (not estimated, no fallback) and counts
 what the model is actually sent; anything else is unknown, never zero.
 """
 
@@ -51,7 +50,7 @@ def _positive(value: Any) -> bool:
 
 
 def capacity_limits(spec: "PersistentAgentSpec") -> CapacityLimits | None:
-    """The Spec's capacity limits, or None when it asks for no capacity check.
+    """Parse legacy limits for direct callers; execution and construction do not use this helper.
 
     Setting either Persistent field asks for the check; then every value must be present and the
     combination possible, otherwise the configuration is refused.
