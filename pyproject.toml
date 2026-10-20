@@ -240,6 +240,7 @@ openjiuwen = [
     "rsi/**/*.md",
     "rsi/**/*.template",
     "rsi/**/*.yaml",
+    "rsi/**/skills/**/*",
 ]
 
 [tool.coverage.run]
