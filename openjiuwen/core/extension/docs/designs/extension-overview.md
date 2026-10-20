@@ -5,7 +5,7 @@
 | 项 | 说明 |
 | --- | --- |
 | 类型 | 目标设计草案；尚未完成实现与验收 |
-| 最近一次修订日期 | 2026-10-19 |
+| 最近一次修订日期 | 2026-10-21 |
 | 责任人 | Core Extension 模块维护者；与 Events 的协作由双方维护者共同确认 |
 | 所属模块 | `agent-core/openjiuwen/core/extension/` |
 | 详细设计 | [Extension 详细架构](extension-architecture.md) |
@@ -15,7 +15,7 @@
 
 本文说明 agent-core 如何加载扩展包、注册事件处理器，以及在安装失败、重载和卸载时如何处理，供开发人员和设计评审人员阅读。文中的“调用方”指使用 agent-core 接口的代码；具体产品的启动方式、配置格式和目录约定不在本文范围内。
 
-本文用 **Extension** 指扩展包管理模块，用“扩展单元”（manifest 中的 extension）指包内可以独立声明和加载的扩展。**Registry** 是拟议的管理入口，负责初始化时的事件装配，并提供安装、重载和卸载的便捷方法。事件处理器通过 Events 提供的 **EventHandlerOps（简称 Ops）** 使用平台能力。这些名称用于说明设计，目前还没有可直接调用的本模块公共 API。
+本文用 **Extension** 指扩展包管理模块，用“扩展单元”（manifest 中的 extension）指包内可以独立声明和加载的扩展。**Registry** 是拟议的管理入口，初始化时接收调用方准备好的 EventBus，装配 Extension 自己的管理事件，并提供安装、重载和卸载的便捷方法。事件处理器通过 Events 提供的 **EventHandlerOps（简称 Ops）** 使用平台能力。这些名称用于说明设计，目前还没有可直接调用的本模块公共 API。
 
 **Core Handler** 指 Events 中 CORE 层级的默认处理器，每个事件有且只有一个。Extension 模块为这些处理器提供包管理、计划和运行时能力，一个处理器可以使用多个模块。下文将 **Extension Orchestrator** 和 **Extension Runtime** 简称为 Orchestrator 和 Runtime。
 
@@ -41,7 +41,7 @@ Extension 负责把本地扩展包中的处理逻辑注册到 Events 已有的�
 
 EventBus 提供通用事件注册和调用服务，交回处理结果或异常。事件执行、平台能力和会话等公共约定以 Events 文档为准，本模块聚焦包管理事件及其 Core Handler 与模块能力的协作。
 
-调用方提供包路径，Core 业务模块提供事件定义、默认处理逻辑和能力实现，并负责实际资源访问的授权检查。Extension 不规定产品默认目录、配置文件格式或进程启动流程。
+调用方准备 EventBus，并在传给 Registry 之前，注册 Core 业务模块提供的业务事件、Core Handler、BUILTIN Handler 和 Ops Build Handler。Registry 只在传入的 EventBus 上补充 Extension 管理事件，不接收或执行业务注册回调。业务服务、包路径和业务准入由调用方协调，实际资源访问的授权检查由所属业务模块负责。Extension 不规定产品默认目录、配置文件格式或进程启动流程。
 
 ### 1.3 当前范围与后续扩展
 
@@ -60,7 +60,7 @@ flowchart TB
     Caller["业务代码：提供包路径、发起管理操作"]
     Bus["EventBus：匹配并调度 Handler"]
     subgraph Extension["agent-core / core/extension"]
-        Registry["Registry：管理操作入口与事件装配"]
+        Registry["Registry：管理入口与管理事件装配"]
         subgraph Handlers["管理事件各自的 Core Handler（Events 的 CORE 层级）"]
             IC["package.install 事件的 Core Handler"]
             LC["package.uninstall / package.reload<br/>事件的 Core Handler"]
@@ -88,12 +88,12 @@ flowchart TB
 
 图中实线表示调用或事件调度，虚线表示 Core Handler 使用模块能力的关系，不表示执行顺序。一个 Core Handler 可以使用多个模块，同一模块也可以支持多个事件的 Core Handler。例如，`package.install` 事件的 Core Handler 使用 Package Manager 解析、校验和排序，使用 Extension Orchestrator 生成计划，再使用 Extension Runtime 加载扩展并完成注册。图中部分节点合并展示职责相近的 Handler，每个事件仍有各自的 Core Handler。
 
-本图只展示管理入口、事件的 Core Handler 与模块的能力关系，不展开子事件调用或 Events 内部机制。一个独立事件可以包含多个内部步骤；哪些需要单独触发、哪些留在 Handler 内，见第 2.4 节。具体协作顺序见[详细架构第 5 节](extension-architecture.md#5-模块协作与处理流程)。
+本图只展示管理入口、事件的 Core Handler 与模块的能力关系，不展开子事件调用或 Events 内部机制。图中的 EventBus 由调用方预先完成业务注册后传入 Registry，管理操作、扩展注册和业务事件调用使用同一实例；初始化顺序见第 3.1 节。一个独立事件可以包含多个内部步骤；哪些需要单独触发、哪些留在 Handler 内，见第 2.4 节。具体协作顺序见[详细架构第 5 节](extension-architecture.md#5-模块协作与处理流程)。
 
 | 参与方 | 主要工作 | 负责确认的结果 |
 | --- | --- | --- |
-| 调用方与 Core 业务模块 | 提供包路径、可信登记回调和业务事件入口 | 调用方核对管理操作结果，业务模块确认实际业务结果 |
-| Registry | 装配管理事件及其 Core Handler，提供业务入口的便捷封装，在业务代码调用时显式触发对应事件 | 等待并交回管理结果 |
+| 调用方与 Core 业务模块 | 准备 EventBus 并注册业务事件与 Handler，再将同一实例传给 Registry；提供包路径与业务入口 | 调用方确认业务依赖就绪、核对管理操作结果，业务模块确认实际业务结果 |
+| Registry | 接收 EventBus，装配管理事件及其 Core Handler，提供业务入口的便捷封装，在业务代码调用时显式触发对应事件 | 确认管理组件就绪，等待并交回管理结果 |
 | 管理事件的 Core Handler | 执行对应事件的默认逻辑，按需使用一个或多个模块的能力；涉及另一项独立操作时触发对应事件 | 核对操作结果，决定是否继续后续步骤 |
 | Package Manager | 提供来源与声明解析、版本与包依赖检查、包级排序、包信息和自有产物清理能力 | 解析和依赖选择结果明确，文件清理满足所有权及资源释放条件 |
 | Extension Orchestrator | 为计划事件提供包内扩展依赖、操作范围与单包计划能力 | 计划中的目标扩展和步骤明确 |
@@ -145,14 +145,16 @@ Handler 的包信息由 Runtime 核实后关联：名称来自 `package.id`，�
 
 ### 3.1 入口与正常链路
 
-从提交本地包路径到扩展参与业务，共有以下六个确认步骤。事件名和接口均用于说明目标设计。
+从准备事件服务、提交本地包路径到扩展参与业务，共有以下六个确认步骤。事件名和接口均用于说明目标设计。
 
-1. **初始化装配。** 业务代码调用 `Registry.init`，连接 Events，登记管理事件及其 Core Handler 和可信平台处理器；此时不读取用户 manifest，也不安装扩展。
+1. **准备 EventBus 并初始化 Registry。** 调用方先按 Events 约定准备 EventBus 及其基础定义，注册业务事件及 Core Handler、BUILTIN Handler 和 Ops Build Handler，再将同一实例传给 `Registry.init`。Registry 只装配 Extension 管理组件、管理事件及其 Core Handler；此时不读取用户 manifest、不安装扩展，也不触发 `ops.build`。
 2. **接收安装请求。** `Registry.install` 显式触发 `package.install`，安装 Handler 负责整个请求的推进和结果汇总。
 3. **解析包和依赖。** 安装 Handler 逐路径触发 `package.parse`，再触发 `package.resolve`。Package Manager 完成来源、声明、版本、包依赖与包级排序，Runtime 提供已有生效事实。
 4. **生成单包计划。** 按包序触发 `extension.plan`，由 Orchestrator 确定本包内的目标扩展和步骤，Runtime 保存可信操作关联；卸载时另核对当前实例和注册记录。计划返回不代表已加载或已注册。
 5. **执行并记录结果。** 触发 `extension.apply`，其 Core Handler 使用 Runtime 按序加载入口、创建实例、调用 `register` 并立即保存每条注册归属。这些是事件内部步骤。失败时显式触发回滚，成功时核对生效记录并生成 Report。
 6. **参与真实业务。** 业务入口显式触发工具等业务事件，调用方核对扩展是否实际参与，以及业务结果是否符合预期；安装成功与业务成功分别确认。
+
+业务注册与 Registry 初始化都只建立组件和注册关系。Ops Build Handler 在启动时被注册，运行时才由 Events 调用来收集能力。Registry 初始化不代替调用方确认业务依赖就绪；具体装配示例与失败清理见[架构第 4.1 节](extension-architecture.md#41-registry统一管理入口)。
 
 ### 3.2 完成与交付的确认点
 
@@ -160,7 +162,7 @@ Handler 的包信息由 Runtime 核实后关联：名称来自 `package.id`，�
 
 | 确认点 | 判断依据 | 接下来可以做什么 |
 | --- | --- | --- |
-| 初始化完成 | Registry 确认管理组件和必需的平台事件、处理器均已准备好 | 受理 `install`；此时不一定有用户包 |
+| 初始化完成 | Registry 确认传入 EventBus 上的管理组件和管理事件就绪；调用方另行确认业务注册与所需服务就绪 | 调用方确认上述条件后提交 `install`；此时尚未证明用户包已生效 |
 | 包解析完成 | `package.parse` 返回明确包根、格式有效的声明和合法入口信息 | 进入包版本、依赖及顺序判断，此时不能认定可安装 |
 | 包依赖确认 | `package.resolve` 返回合法包集合、依赖检查与处理顺序 | 为选定包生成 Plan；运行中条件变化仍需重新核对 |
 | 安装成功 | Runtime 确认计划内的注册全部完成，生效记录完整，Report 没有失败项 | 将该包列为已生效 |
@@ -170,6 +172,8 @@ Handler 的包信息由 Runtime 核实后关联：名称来自 `package.id`，�
 包文件准备好、某个扩展单元注册成功，或者管理事件正常返回，都不能单独证明整包安装成功。管理 Core Handler 核对目标和完成依据，必要时触发 `package.query` 读取实际记录；内部步骤的结果由执行或回滚 Handler 汇总，Registry 只交回事件结果。
 
 ### 3.3 控制、失败与重试
+
+业务注册失败时，调用方停止启动，负责核对并清理本次业务注册；Registry 自身初始化失败时保持未就绪，只清理本次建立的管理注册和自有资源，不清空 EventBus 或删除调用方已有的注册。清理不完整时保留错误和残留，确认清理完成后再重建相关实例，不能盲目重复初始化。
 
 解析或依赖解析失败时，不执行相应加载。安装 Plan 中途失败时，`extension.apply` 的 Core Handler 显式触发 `extension.rollback`，由回滚 Handler 在内部注销本批注册、等待使用结束并释放资源，必要时清理已确认所有权的安装产物。建议以单包安装 Plan 为回滚范围，具体范围和注册可见性由详细设计确认。
 
@@ -203,7 +207,9 @@ Handler 的包信息由 Runtime 核实后关联：名称来自 `package.id`，�
 
 Runtime 负责扩展实例及注册归属，Package Manager 负责自己创建和拥有的安装产物。调用方提供的源码目录不一定属于安装产物，不能未经所有权确认就递归删除。
 
-建议每个 Registry 管理一个 EventBus 和一套生效记录，同一实例内的安装、重载和卸载操作按顺序协调。业务调用仍按 Events 的规则独立执行。这项建议不提供跨进程互斥，也不要求所有业务调用串行。
+建议调用方为每个运行域准备一个 EventBus，交给对应的一个 Registry 使用，由 Registry 维护一套生效记录。业务调用、管理操作、扩展 USER 注册和 Ops 发起的新事件使用同一实例，多个独立 Registry 共享一个 EventBus 不在本期范围内。EventBus 的创建和最终释放由调用方协调；Registry 不能据此清空调用方已有的业务注册。
+
+同一 Registry 内的安装、重载和卸载操作按顺序协调，业务调用仍按 Events 的规则独立执行。这项建议不提供跨进程互斥，也不要求所有业务调用串行。
 
 ### 4.2 恢复与一致性
 
@@ -237,7 +243,7 @@ Core 已有[工具抽象](../../../foundation/tool/base.py)，可作为工具事
 
 | 能力范围 | 目标 | 开放前需要验证什么 |
 | --- | --- | --- |
-| 启动时加载 | 从本地包完成注册，并能追踪每条注册 | 9 类独立事件及其完成依据明确；解析、两级依赖与顺序、受限登记、回滚和报告符合约定，内部步骤不额外拆事件 |
+| 启动时加载 | 从本地包完成注册，并能追踪每条注册 | 先业务注册、后传入同一 EventBus 初始化 Registry；初始化失败不破坏已有注册；9 类独立事件及其完成依据明确；解析、两级依赖与顺序、受限登记、回滚和报告符合约定，内部步骤不额外拆事件 |
 | 真实业务扩展 | 企业报告 Handler 参与 Bash 调用 | 管理与业务事件的触发点明确；扩展注册归属、平台能力接入、实际工具入口和权限符合约定 |
 | 在线卸载与重载 | 撤销注册，并安全释放包资源 | 能追踪相关调用和能力使用，依赖保护有效，等待退出及清理失败的处理通过验证 |
 
