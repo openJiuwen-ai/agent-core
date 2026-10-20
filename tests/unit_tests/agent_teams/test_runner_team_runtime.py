@@ -28,6 +28,7 @@ from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     TeamAgentSpec,
 )
+from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamRuntimeContext,
@@ -2456,21 +2457,17 @@ def mock_group_history_cleanup(monkeypatch):
 class _ResumeInterruptAgent(FakeTeamAgent):
     """FakeTeamAgent with the leader-ready and interrupt-resume faces.
 
-    ``stream`` fires the leader-started callback (simulating the
-    ``kernel.start`` tail), stays open until the interrupt resume
+    ``stream`` emits the ``team.leader_ready`` marker first (simulating
+    the ``kernel.start`` tail), stays open until the interrupt resume
     arrives, then yields a post-resume chunk — mirroring a persistent
     team whose stream outlives the interaction.
     """
 
     def __init__(self, team_name: str) -> None:
         super().__init__(team_name, stream_label="leader.chunk")
-        self.leader_started_callback: Any = None
         self.pending_interrupt = True
         self.resumed_inputs: list[Any] = []
         self._resume_received = asyncio.Event()
-
-    def set_leader_started_callback(self, callback: Any) -> None:
-        self.leader_started_callback = callback
 
     def has_pending_interrupt(self) -> bool:
         return self.pending_interrupt
@@ -2482,8 +2479,7 @@ class _ResumeInterruptAgent(FakeTeamAgent):
     async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
         self.stream_calls += 1
         self.stream_inputs.append(inputs)
-        if self.leader_started_callback is not None:
-            await self.leader_started_callback()
+        yield TeamOutputSchema(type="message", index=0, payload={"event_type": "team.leader_ready"})
         yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
         await self._resume_received.wait()
         yield OutputSchema(type="message", index=2, payload={"event_type": "leader.chunk.2"})
@@ -2494,10 +2490,6 @@ class _FailingStreamAgent(FakeTeamAgent):
 
     def __init__(self, team_name: str) -> None:
         super().__init__(team_name, stream_label="leader.chunk")
-        self.leader_started_callback: Any = None
-
-    def set_leader_started_callback(self, callback: Any) -> None:
-        self.leader_started_callback = callback
 
     async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
         yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
@@ -2505,18 +2497,24 @@ class _FailingStreamAgent(FakeTeamAgent):
 
 
 class _NeverReadyAgent(FakeTeamAgent):
-    """Agent that binds the leader-started callback but never fires it."""
+    """Agent whose stream stays alive but never emits the leader-ready marker."""
 
     def __init__(self, team_name: str) -> None:
         super().__init__(team_name, stream_label="leader.chunk")
-        self.leader_started_callback: Any = None
-
-    def set_leader_started_callback(self, callback: Any) -> None:
-        self.leader_started_callback = callback
 
     async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
         yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
         await asyncio.Event().wait()
+
+
+class _EndingStreamAgent(FakeTeamAgent):
+    """Agent whose stream ends quietly without ever emitting the marker."""
+
+    def __init__(self, team_name: str) -> None:
+        super().__init__(team_name, stream_label="leader.chunk")
+
+    async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
+        yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
 
 
 @pytest.mark.asyncio
@@ -2543,6 +2541,7 @@ async def test_runner_resume_agent_team_interrupt_streaming_resumes_and_forwards
 
     assert [chunk.payload["event_type"] for chunk in chunks] == [
         "team.runtime_ready",
+        "team.leader_ready",
         "leader.chunk.1",
         "leader.chunk.2",
     ]
@@ -2601,7 +2600,8 @@ async def test_runner_resume_propagates_stream_failure_before_ready(
             session=session_id,
         )
         with pytest.raises(ValueError, match="stream exploded"):
-            await agen.__anext__()
+            async for _ in agen:
+                pass
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
@@ -2630,8 +2630,35 @@ async def test_runner_resume_times_out_when_leader_never_ready(
             session=session_id,
         )
         with pytest.raises(BaseError) as excinfo:
-            await agen.__anext__()
+            async for _ in agen:
+                pass
     assert excinfo.value.status is StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT
+
+    await Runner.stop()
+    await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_runner_resume_raises_when_stream_ends_before_marker(
+    isolated_checkpointer,
+    stateful_team_db,
+):
+    await Runner.start()
+    session_id = f"team_resume_end_{uuid.uuid4().hex}"
+    spec = _runtime_spec("resume_end_team")
+    agent = _EndingStreamAgent("resume_end_team")
+
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
+        agen = Runner.resume_agent_team_interrupt_streaming(
+            agent_team=spec,
+            user_input=InteractiveInput("answer"),
+            session=session_id,
+        )
+        with pytest.raises(BaseError) as excinfo:
+            async for _ in agen:
+                pass
+    assert excinfo.value.status is StatusCode.AGENT_TEAM_STATE_INVALID
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
@@ -2656,7 +2683,8 @@ async def test_runner_resume_raises_when_interact_rejected(
             session=session_id,
         )
         with pytest.raises(BaseError) as excinfo:
-            await agen.__anext__()
+            async for _ in agen:
+                pass
     assert excinfo.value.status is StatusCode.AGENT_TEAM_STATE_INVALID
     assert "unsupported_interactive_input" in str(excinfo.value)
 

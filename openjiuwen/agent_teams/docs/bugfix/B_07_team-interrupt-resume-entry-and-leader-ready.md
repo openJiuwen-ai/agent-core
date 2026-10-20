@@ -6,8 +6,8 @@
 |---|---|
 | 日期 | 2026-10-20 |
 | 严重程度 | 中：中断（ask-user / 审批类）后团队无法程序化恢复；裸文本投递是**静默失败**（无错误、无输出，中断永远挂起）；`inputs=None` 伪造一轮 `"None"` 垃圾输入 |
-| 范围 | `core/runner/team_runner.py`（新增 `resume_agent_team_interrupt_streaming` 实例方法 + 类门面）、`agent_teams/runtime/manager.py`（新增 `LeaderReadyWaiter` / `watch_next_leader_ready` / `_bind_leader_ready_callback`）、`agent_teams/agent/coordination/kernel.py`（`_started_callback` + `set_started_callback`，`start()` 尾部触发）、`agent_teams/agent/team_agent.py`（`set_leader_started_callback` 透传 + `_prepare_initial_input` None 防护）、`core/common/exception/codes.py`（新增 `AGENT_TEAM_LEADER_START_TIMEOUT`）、`tests/unit_tests/agent_teams/runtime/test_leader_ready.py`（新增）、`tests/unit_tests/agent_teams/test_runner_team_runtime.py` |
-| 测试基线 | `pytest tests/unit_tests/agent_teams/test_runner_team_runtime.py tests/unit_tests/agent_teams/runtime/` → 199 passed（含本修复新增 11 例）；coordination / 错误码 / core runner 定向 → 123 passed, 20 skipped（skip 均为既有条件跳过） |
+| 范围 | `core/runner/team_runner.py`（新增 `resume_agent_team_interrupt_streaming` 实例方法 + 类门面）、`agent_teams/schema/stream.py`（新增 `is_leader_ready_marker`）、`agent_teams/agent/stream_controller.py`（新增 `emit_leader_ready`）、`agent_teams/agent/coordination/kernel.py`（`start()` 尾部 leader-only 发射标记帧）、`agent_teams/agent/team_agent.py`（`_prepare_initial_input` None 防护）、`core/common/exception/codes.py`（新增 `AGENT_TEAM_LEADER_START_TIMEOUT`）、`tests/unit_tests/agent_teams/test_team_agent_coordination.py`、`tests/unit_tests/agent_teams/test_runner_team_runtime.py` |
+| 测试基线 | `pytest tests/unit_tests/agent_teams/test_runner_team_runtime.py tests/unit_tests/agent_teams/runtime/ tests/unit_tests/agent_teams/test_team_agent_coordination.py tests/unit_tests/agent_teams/test_coordination_lifecycle.py tests/unit_tests/agent_teams/agent/test_member_activity.py tests/unit_tests/agent_teams/test_stream_controller.py` → 376 passed, 19 skipped（skip 均为既有条件跳过；含本修复新增 9 例） |
 | 关联 spec | `S_01_public-api-and-spec-flow.md`（不变量 17 + 入口签名与错误语义）、`S_04_session-and-recovery.md`（I-9 中断恢复流）；`agent_teams/AGENTS.md` / `runtime/AGENTS.md` / `coordination/AGENTS.md` 表面同步 |
 | Refs | #4910 |
 
@@ -41,54 +41,60 @@ SDK 侧没有把"重新拉起团队 + 恢复中断"一次完成的入口，调�
 
 **原则：恢复 = recovery 流 + 就绪门 + 类型化投递，三步一个入口，时序靠信号不靠猜。**
 
-1. **`Runner.resume_agent_team_interrupt_streaming`**：后台 pump `run_agent_team_streaming(inputs=None)`
-   的 recovery 流，leader 就绪后经 `interact_agent_team` 提交 `InteractiveInput`，转发缓冲与后续
-   chunk 直到 run cycle 结束。
-2. **就绪信号走 kernel 尾回调而非轮询/延时**：`set_started_callback` 挂点在 `kernel.start()` 尾部
-   （`resume_paused_round` 之后、kernel 全活）触发；waiter 在启动流**之前同步注册**
-   （`watch_next_leader_ready`，同键先 cancel 旧 waiter），`manager.activate` 尾部绑定发布回调
-   （池身份校验后 `set_ready` 并自清）——`kernel.start` 只从 `agent.stream` / `invoke` 进入，
-   绑定必然先于触发，不存在错过。
+1. **`Runner.resume_agent_team_interrupt_streaming`**：驱动 `run_agent_team_streaming(inputs=None)`
+   的 recovery 流并转发其 chunk，读到就绪标记后经 `interact_agent_team` 提交
+   `InteractiveInput`，继续转发直到 run cycle 结束。
+2. **就绪信号是流上的 `team.leader_ready` 标记帧**：`kernel.start()` 尾部
+   （`resume_paused_round` 之后、kernel 全活）leader-only 经
+   `StreamController.emit_leader_ready` 入队；`is_leader_ready_marker`
+   （`schema/stream.py`）是专用判定，`is_team_event_marker` 将其归入框架标记。
+   复用既有的标记 chunk 模式（`team.idle` / `team.completed` / `team.interact.failed`），
+   任何流消费者都可用，无需预注册。**初版实现是 manager 侧的一次性 waiter**
+   （`watch_next_leader_ready` 注册 + `activate` 尾部挂发布回调 + 池身份校验），
+   评审后因跨组件状态多（manager 字典 + kernel 回调装卸 + runner 双 task 收敛）
+   而简化为标记帧——机制从"manager 里的一次性注册"变成"流上多一种 chunk"。
 3. **契约收紧并边界校验**：`user_input: InteractiveInput` 必填、`session` 必填，违规抛
    `AGENT_TEAM_CONFIG_INVALID`——堵住裸 `str` 静默不恢复的失败模式（中断状态与 spec bucket
    都在原 session 的 checkpoint 里，新 session 无法恢复）。
-4. **错误统一 StatusCode**：流先于就绪结束 / interact 被拒（reason token 透传）→
-   `AGENT_TEAM_STATE_INVALID`；就绪超时 → 新增 `AGENT_TEAM_LEADER_START_TIMEOUT`（132009，
-   模板带 `{timeout}`，自动映射 `ExecutionError` 可重试）。
-5. **kernel 回调异常只记日志不打断启动**（就绪信号是辅助机制）；waiter 注册/替换/发布/身份
-   不匹配四处补 `team_logger` 日志；`finally` 收敛路径捕 `TimeoutError` 防止掩盖原始异常。
-6. **`str(None)` 防护**：`inputs is None` → 空 query，空即不伪造首轮（回归既有契约）。
+4. **错误统一 StatusCode**：流先于标记失败 / 结束 / interact 被拒（reason token 透传）→
+   `AGENT_TEAM_STATE_INVALID`；标记静默超时 → 新增 `AGENT_TEAM_LEADER_START_TIMEOUT`（132009，
+   模板带 `{timeout}`，自动映射 `ExecutionError` 可重试）。超时按**单次 `__anext__`** 计
+   （`asyncio.timeout` 包住一次取帧），慢消费者不误伤，只有流真静默才触发。
+5. **`str(None)` 防护**：`inputs is None` → 空 query，空即不伪造首轮（回归既有契约）。
 
 ## 拒绝的方案
 
-- **轮询 pool entry 状态或固定 sleep 后 interact**：时序不精确，慢初始化下误判；就绪回调零竞态。
+- **轮询 pool entry 状态或固定 sleep 后 interact**：时序不精确，慢初始化下误判；标记帧零竞态。
 - **允许 `str` 输入自动包一层 `InteractiveInput`**：中断恢复载荷按 interaction id 对位
   （`user_inputs`），裸文本无法可靠映射，自动包装只是把失败推迟到 harness 内部。
 - **把就绪等待并入 `run_agent_team_streaming`**：改变既有入口语义（普通 run 无需等 ready 即返回
   chunk），影响所有调用方。
-- **在 runner 层直接维护等待器、不经 manager**：绕过 `activate` 的统一绑定时机，两处状态各自对账。
+- **manager 侧一次性 waiter（初版方案）**：`watch_next_leader_ready` 注册 +
+  `activate` 尾部绑定回调 + kernel `set_started_callback` 挂点 + runner 侧 pump task /
+  输出队列 / 双 task 收敛——四组件联动约 250 行，只为传一个一次性信号；标记帧方案
+  删掉全部跨组件状态，任何消费者直接读流即可。
+- **全局超时预算（整个标记等待共享一个 30s 窗口）**：慢消费者处理 chunk 期间窗口仍在走，
+  会误伤；按单次 `__anext__` 计只在流真静默时触发。
 
 ## 验证
 
-`tests/unit_tests/agent_teams/runtime/test_leader_ready.py`（新增）：
+`tests/unit_tests/agent_teams/test_team_agent_coordination.py`（新增）：
 
 | 用例 | 覆盖 |
 |---|---|
-| `test_set_ready_resolves_wait` | 一次性事件正常唤醒 |
-| `test_cancel_discards_waiter_and_blocks_wait` | cancel 幂等；cancel 后 `set_ready` 不复活 |
-| `test_watch_replaces_previous_waiter` | 同键重复注册：旧 waiter 被 cancel，新 waiter 收到就绪 |
-| `test_matching_activation_publishes_ready_and_clears_callback` | 身份匹配：发布就绪 + 回调自清 |
-| `test_identity_mismatch_does_not_publish_ready` | 池内 agent 不一致：不发布 |
+| `test_leader_start_emits_leader_ready_marker` | leader 的 `kernel.start()` 尾部入队 `team.leader_ready`，`is_leader_ready_marker` / `is_team_event_marker` 判定 |
+| `test_teammate_start_does_not_emit_leader_ready_marker` | 非 leader kernel 不发射 |
 
 `tests/unit_tests/agent_teams/test_runner_team_runtime.py`（新增）：
 
 | 用例 | 覆盖 |
 |---|---|
-| `..._resumes_and_forwards`（level0） | chunk 顺序（runtime_ready → 前置 chunk → 恢复后 chunk）、`resume_interrupt` 收到原 `InteractiveInput`、recovery 流传 `inputs=None` |
+| `..._resumes_and_forwards`（level0） | chunk 顺序（runtime_ready → leader_ready → 前置 chunk → 恢复后 chunk）、`resume_interrupt` 收到原 `InteractiveInput`、recovery 流传 `inputs=None` |
 | `test_runner_resume_rejects_non_interactive_input` | 裸 `str` 边界拒绝（`AGENT_TEAM_CONFIG_INVALID`） |
 | `test_runner_resume_rejects_missing_session` | session 缺失拒绝 |
 | `..._propagates_stream_failure_before_ready` | 流先失败：原始异常传播 |
-| `..._times_out_when_leader_never_ready` | 永不就绪：`AGENT_TEAM_LEADER_START_TIMEOUT` |
+| `..._times_out_when_leader_never_ready` | 标记永不出现：`AGENT_TEAM_LEADER_START_TIMEOUT` |
+| `..._raises_when_stream_ends_before_marker` | 流静默结束无标记：`AGENT_TEAM_STATE_INVALID` |
 | `..._raises_when_interact_rejected` | interact 被拒（`unsupported_interactive_input` → `AGENT_TEAM_STATE_INVALID`，reason 透传） |
 
 ## 已知遗留

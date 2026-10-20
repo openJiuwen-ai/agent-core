@@ -181,23 +181,23 @@ session 切换有两条入口，差异**只在是否先清理旧 handle**：
 中断（ask-user / 审批类）关闭流之后，恢复不新增 session 状态机路径，而是组合
 既有路径并补一个**就绪门**：
 
-1. **recovery 流**：`Runner.resume_agent_team_interrupt_streaming` 后台驱动
-   `run_agent_team_streaming(inputs=None)`——dispatch 照常选
+1. **recovery 流**：`Runner.resume_agent_team_interrupt_streaming` 驱动
+   `run_agent_team_streaming(inputs=None)` 并转发其 chunk——dispatch 照常选
    `COLD_RECOVER` / `RESUME_FROM_PAUSE` / `CREATE`，`inputs=None` 不伪造首轮
    （`_prepare_initial_input` 对 None 输出空 query）。
-2. **leader 就绪门**：调用方先在 `TeamRuntimeManager` 注册 leader-ready waiter
-   （键 `(team_name, session_id)`，一次性）；`manager.activate` 尾部把发布回调挂到
-   agent（`TeamAgent.set_leader_started_callback` → kernel `_started_callback`）；
-   `kernel.start()` 尾部（`resume_paused_round` 之后，事件总线 / harness 全活）触发
-   回调，回调内做池身份校验后 `set_ready` 并自清。绑定必然先于触发
-   （`kernel.start` 只从 `agent.stream` / `invoke` 进入）。
-3. **投递**：就绪后经 `interact_agent_team` 提交 `InteractiveInput`——
+2. **leader 就绪门**：就绪信号是流上的 `team.leader_ready` 标记帧——
+   `kernel.start()` 尾部（`resume_paused_round` 之后，事件总线 / harness 全活）
+   leader-only 经 `StreamController.emit_leader_ready` 入队。消费者读到该帧
+   即可安全 interact；`is_leader_ready_marker`（`schema/stream.py`）是专用判定，
+   `is_team_event_marker` 将其归入框架标记（非流式 `invoke` 自动跳过）。
+3. **投递**：读到标记后经 `interact_agent_team` 提交 `InteractiveInput`——
    `manager.interact` 仅对该类型走 `agent.resume_interrupt` 分支；裸 `str` 会被
    god-view 路由当普通 steer，中断保持 pending，故入口在边界直接拒绝。
 
-约束：`session` 必填（中断状态与 spec bucket 在原 session checkpoint）；就绪预算
-`_TEAM_LEADER_READY_TIMEOUT_SECONDS`（30s）超时抛 `AGENT_TEAM_LEADER_START_TIMEOUT`；
-失败路径的 `finally` 取消 recovery 流，run cycle 经正常 `finalize` 收敛。
+约束：`session` 必填（中断状态与 spec bucket 在原 session checkpoint）；标记静默
+超 `_TEAM_LEADER_READY_TIMEOUT_SECONDS`（30s，按单次 `__anext__` 计，慢消费者
+不误伤）抛 `AGENT_TEAM_LEADER_START_TIMEOUT`；失败路径关闭 recovery 流，run cycle
+经正常 `finalize` 收敛。
 
 ## 接口契约
 

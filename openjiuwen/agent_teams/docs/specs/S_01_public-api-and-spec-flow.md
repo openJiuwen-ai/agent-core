@@ -51,7 +51,7 @@ Runner 入口：
 14. `member=True` 路径不进对象池、不走 dispatch，是 `inprocess_spawn` / `child_process` 给已构造 teammate / human-agent 用的内部入口。leader-only pool 不变量在此保留。
 15. 团队 lifecycle facade（`pause_agent_team` / `stop_agent_team` / `delete_agent_team` / `register_human_agent_inbound` / `get_agent_team_monitor` / `list_active_teams` / `interact_agent_team`）一律按 `(team_name, session_id)` 寻址；这两个键是 SDK 暴露给外部的运行时身份。
 16. `Runner.release(session_id, *, force=False)` 对 team session 自动回收动态表（tasks / messages 等）+ checkpoint；非 team session 走单纯 checkpoint 释放。`force` 决定遇到仍在跑的 team 是同步停掉（`True`）还是抛 `AGENT_TEAM_BUSY_INVALID`（`False`）。
-17. `Runner.resume_agent_team_interrupt_streaming` 是中断恢复专用流式入口：后台驱动 recovery 流（`inputs=None`），等 leader coordination runtime 就绪（`TeamRuntimeManager` 的 leader-ready waiter，`_TEAM_LEADER_READY_TIMEOUT_SECONDS` 预算）后经 `interact_agent_team` 提交 `InteractiveInput`（只有该类型走 `agent.resume_interrupt` 分支）。`session` 必填；`user_input` 非 `InteractiveInput` 或 session 缺失 → `AGENT_TEAM_CONFIG_INVALID`；就绪超时 → `AGENT_TEAM_LEADER_START_TIMEOUT`；流先于就绪结束 / interact 被拒 → `AGENT_TEAM_STATE_INVALID`。见 B_07。
+17. `Runner.resume_agent_team_interrupt_streaming` 是中断恢复专用流式入口：驱动 recovery 流（`inputs=None`）并转发其 chunk，读到 `team.leader_ready` 标记帧（kernel `start()` 尾部 leader-only 发射，见 S_03）后经 `interact_agent_team` 提交 `InteractiveInput`（只有该类型走 `agent.resume_interrupt` 分支），继续转发直到 run cycle 结束。`session` 必填；`user_input` 非 `InteractiveInput` 或 session 缺失 → `AGENT_TEAM_CONFIG_INVALID`；标记静默超 `_TEAM_LEADER_READY_TIMEOUT_SECONDS` → `AGENT_TEAM_LEADER_START_TIMEOUT`；流先于标记失败 / 结束 / interact 被拒 → `AGENT_TEAM_STATE_INVALID`。见 B_07。
 
 ## 接口契约
 
@@ -217,8 +217,8 @@ async def resume_agent_team_interrupt_streaming(
 ```
 
 - `user_input` 必须是 `InteractiveInput`（裸 `str` 会被 god-view 路由当成普通 steer、中断保持 pending），`session` 必填——两者违规均抛 `AGENT_TEAM_CONFIG_INVALID`。
-- 后台驱动 `run_agent_team_streaming(inputs=None)` 的 recovery 流；leader 就绪信号由 `TeamRuntimeManager` 的 leader-ready waiter 交付（kernel `start()` 尾部回调，见 S_03 / S_06）。
-- 就绪超时抛 `AGENT_TEAM_LEADER_START_TIMEOUT`；流先于就绪失败 / 结束、或 interact 返回失败（reason 透传）抛 `AGENT_TEAM_STATE_INVALID`；流内原始异常原样传播。
+- 驱动 `run_agent_team_streaming(inputs=None)` 的 recovery 流并转发其 chunk；leader 就绪信号是流上的 `team.leader_ready` 标记帧（kernel `start()` 尾部 leader-only 发射，见 S_03）。
+- 标记静默超预算抛 `AGENT_TEAM_LEADER_START_TIMEOUT`；流先于标记失败 / 结束、或 interact 返回失败（reason 透传）抛 `AGENT_TEAM_STATE_INVALID`；流内原始异常原样传播。
 - 迭代产出 recovery 流的全部 chunk（含 `team.runtime_ready` 与恢复后的后续输出），直到 run cycle 结束。
 
 ### 团队 lifecycle facade

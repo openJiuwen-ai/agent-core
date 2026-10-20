@@ -561,13 +561,6 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             harness.set_background_task_controller(controller)
 
-    def set_leader_started_callback(
-        self,
-        callback: Callable[[], Awaitable[None]] | None,
-    ) -> None:
-        """Set an internal callback for completed leader coordination startup."""
-        self._coordination.set_started_callback(callback)
-
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
 
