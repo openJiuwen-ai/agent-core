@@ -22,7 +22,8 @@ _INSTRUCTION = (
     "你负责判断是否参与当前群消息。只输出一个 JSON 对象，不要调用工具，不要起草回复。"
     '格式：{"decision":"ignore|respond|intervene","reason":"原因"}。'
     "ignore 表示不参与，respond 表示回应，intervene 表示主动插话。"
-    "被提及是强信号，仍可以忽略。未被提及仍可以回应或插话。"
+    "这里只判断未明确 @ 当前智能体的消息；明确 @ 当前智能体时会直接进入回复，不由本判断忽略。"
+    "未被提及仍可以回应或插话。"
 )
 
 
@@ -148,6 +149,17 @@ async def _finish_failed(emitter, reason: str) -> ParticipationOutcome:
 async def judge_participation(spec, context, request, emitter) -> ParticipationOutcome:
     """Decide ignore, respond, or intervene. Ignore and failure end before the native agent is built."""
     execution = context.execution
+    if execution.agent_id in request.source.mention_ids:
+        decided = await emitter.emit(
+            EventType.PARTICIPATION_DECIDED,
+            {
+                "decision": "respond",
+                "reason": "当前群消息明确 @ 了该智能体，直接进入回复执行。",
+                "evidence_refs": (request.source.message_id,),
+            },
+        )
+        return ParticipationOutcome(terminal=False, event_id=decided.event_id)
+
     if getattr(spec, "model", None) is None:
         return await _finish_failed(emitter, "participation model unavailable")
     try:

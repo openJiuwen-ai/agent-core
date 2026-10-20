@@ -37,7 +37,7 @@ PA-07 负责消费宿主提供的群消息，作出三选一判断并交接结�
 
 ### 2.1 背景、目标与范围
 
-原执行入口在校验 RequestInput 时拒绝全部群消息。PA-07 将群消息分流为 `ignore / respond / intervene`，让无须参与的消息在正式 Agent 构造和窗口加载之前结束；需要参与的消息才进入已有执行路径。人类与其他 Agent 的消息走同一判断流程，@ 只是强信号，不强制回答。
+原执行入口在校验 RequestInput 时拒绝全部群消息。PA-07 将群消息分流为 `ignore / respond / intervene`，让无须参与的消息在正式 Agent 构造和窗口加载之前结束；需要参与的消息才进入已有执行路径。明确 @ 当前智能体时，直接记录 `respond` 并进入执行，不由模型判断忽略；未明确 @ 当前智能体时，人类与其他 Agent 消息继续走同一判断流程。
 
 本项包含独立模型调用、有限重试、预算消费、判断事件和终结分支，以及回应 / 插话与 `execution.started` 的关联。不包含群消息存储和检索适配（PA-23）、窗口组装与会话记录（PA-06、PA-10）、候选交接与发送（PA-08 / AgentServer），也不新增推理循环、前端页面或排队前判断入口。
 
@@ -45,16 +45,18 @@ PA-07 负责消费宿主提供的群消息，作出三选一判断并交接结�
 
 ### 2.2 总体方案
 
-[execute_persistent_request](../../execution/entries.py)先校验模式、上下文及 NoopCheckpointer、RequestInput、续做限制和群端口，再建立 emitter 并启动 runner。只有 `kind == group_message` 调用 [judge_participation](../../execution/participation.py)。判断直接读取 `GroupChatPort.recent_messages`，不调用尚不可用的 `seams.group_message_reader`。
+[execute_persistent_request](../../execution/entries.py)先校验模式、上下文及 NoopCheckpointer、RequestInput、续做限制和群端口，再建立 emitter 并启动 runner。只有 `kind == group_message` 调用 [judge_participation](../../execution/participation.py)。明确 @ 当前智能体时直接记 `respond`，不读取群背景、不调用参与判断模型；其他群消息才读取 `GroupChatPort.recent_messages` 并做轻量判断，不调用尚不可用的 `seams.group_message_reader`。
 
 ```mermaid
 flowchart TD
     E["execute 首次迭代：基础校验"] --> K{"group_message？"}
     K -->|否| B["获取状态 / 窗口接入点"]
-    K -->|是，群端口存在| J["独立判断：读取最近消息<br/>预算准入 → 无工具模型调用"]
+    K -->|是，群端口存在| M{"明确 @ 当前智能体？"}
+    M -->|是| D["participation.decided(respond)"] --> B
+    M -->|否| J["独立判断：读取最近消息<br/>预算准入 → 无工具模型调用"]
     J -->|ignore| I["participation.decided<br/>final ignored：本次不写窗口、无候选"]
-    J -->|respond / intervene| D["participation.decided<br/>保留 decision_event_id"]
-    D --> B
+    J -->|respond / intervene| R["participation.decided<br/>保留 decision_event_id"]
+    R --> B
     J -->|预算拒绝 / 准入异常| P["paused budget_denied / error"]
     J -->|模型不可用 / 尝试耗尽| F["final failed"]
     B --> A["构造 DeepAgent → execution.started<br/>加载记录 → 组装窗口 → 原生执行"]
@@ -68,7 +70,7 @@ flowchart TD
 | --- | --- |
 | D-01：判断前置且独立 | 只提供职责、当前消息和少量群背景，`tools=None`。忽略不构造 DeepAgent、不调用状态存储或窗口组装，也不产生候选回复；代价是不能使用正式窗口中的工作历史来判断 |
 | D-02：直接消费宿主群端口 | 依赖 PA-04 已有的 GroupChatPort / DTO 契约，避开未实现的 GroupMessageReader，允许与 PA-06、PA-23 并行；后续若统一读取接缝，须保持无需加载窗口和现有错误语义 |
-| D-03：三选一由模型判断 | 保留 @、发送者、回复关系和附件证据，不采用“被 @ 必回应”的硬规则；respond 与 intervene 当前使用相同执行路径，仅决策标签不同 |
+| D-03：明确 @ 与普通群消息分流 | 明确 @ 当前智能体时，直接产生 `participation.decided(respond)` 并进入普通执行路径；其他群消息才由轻量模型选择 ignore / respond / intervene。明确 @ 不保证模型、工具或外部渠道永不失败 |
 | D-04：失败、忽略与暂停分开 | 合法 ignore 才记 ignored；读取 / 模型 / 格式错误有限尝试后记 failed；预算拒绝或准入异常记 paused，避免把执行障碍解释为同事主动不参与 |
 | D-05：每次真实调用独立计量 | 每次准入生成新的 model_call_id，调用成功或模型异常均报告用量并产生 model.completed；未知用量明确标 unknown，不能伪造零消耗 |
 
@@ -127,11 +129,12 @@ flowchart TD
 ### 2.5 正常流程、预算与事件交接
 
 1. 群消息基础校验通过后 `_start` 创建本次 Execution 的 EventEmitter；上下文已有 emitter 时拒绝复用。缺少 GroupChatPort 在 `_start` 之前抛 `DEEPAGENT_CONFIG_PARAM_ERROR`，错误文本为 `group chat port is required for group participation`，不产生事件或构造实例。
-2. 构建判断模型。每次尝试先读取并校验最近消息；读取失败不申请模型额度。读取成功后生成 `mc_` 加 UUID 的新调用 ID，调用 `BudgetPort.admit`，重新校验 BudgetAdmission 并匹配执行归属与调用 ID。
-3. 准入后调用模型。成功时提取 known / unknown 用量，先调用 `BudgetPort.report` 并校验 BudgetReport，再产生 `model.completed(model_call_id, config_version, usage)`，随后解析输出。缺少输入或输出 token 计数时用量为 unknown。
-4. 合法输出产生 `participation.decided`，携带 decision、reason、model_call_id 和 evidence_refs。证据引用按“触发消息 ID → 本次最近消息 ID”的顺序去重，最多 128 项；引用由实现生成，不接受模型猜造的消息 ID。
-5. ignore 随后记 `execution.final(status=ignored, reason=reason)`，output_refs 默认空，结束 runner。无 execution.started、reply.delta、output.proposed，也不读取 / 保存会话记录、不改写工作目标或窗口。
-6. respond / intervene 返回内部 `ParticipationOutcome(terminal=False, event_id=...)`。入口取得状态 / 窗口接入点，构造并复核 DeepAgent 后，才产生 `execution.started(goal=request.text, decision_event_id=...)`，随后 load → assemble → 原生执行。参与判断本身不完成任务或发送回复。
+2. 若 `execution.agent_id` 出现在当前来源消息的 `mention_ids` 中，直接产生 `participation.decided(respond)`，证据只引用当前触发消息；跳过判断模型、群背景读取和 PA-07 判断预算。否则进入以下轻量模型判断流程。
+3. 对未明确 @ 的消息构建判断模型。每次尝试先读取并校验最近消息；读取失败不申请模型额度。读取成功后生成 `mc_` 加 UUID 的新调用 ID，调用 `BudgetPort.admit`，重新校验 BudgetAdmission 并匹配执行归属与调用 ID。
+4. 准入后调用模型。成功时提取 known / unknown 用量，先调用 `BudgetPort.report` 并校验 BudgetReport，再产生 `model.completed(model_call_id, config_version, usage)`，随后解析输出。缺少输入或输出 token 计数时用量为 unknown。
+5. 合法模型输出产生 `participation.decided`，携带 decision、reason、model_call_id 和 evidence_refs。证据引用按“触发消息 ID → 本次最近消息 ID”的顺序去重，最多 128 项；引用由实现生成，不接受模型猜造的消息 ID。
+6. ignore 随后记 `execution.final(status=ignored, reason=reason)`，output_refs 默认空，结束 runner。无 execution.started、reply.delta、output.proposed，也不读取 / 保存会话记录、不改写工作目标或窗口。
+7. 明确 @ 的 respond，或模型判断出的 respond / intervene，都会返回内部 `ParticipationOutcome(terminal=False, event_id=...)`。入口取得状态 / 窗口接入点，构造并复核 DeepAgent 后，才产生 `execution.started(goal=request.text, decision_event_id=...)`，随后 load → assemble → 原生执行。参与判断本身不完成任务或发送回复。
 
 [ParticipationPayload](../../schema/events.py)已有 DTO；本项新增的是生产者接入。participation.decided 和 model.completed 默认 visibility=private，属于普通事件；不能直接当作群公开回复。final 和 paused 属于关键事件，失败不得伪装成终结成功。
 
@@ -167,7 +170,7 @@ flowchart TD
 | [seams.py](../../execution/seams.py) | group_message_reader 仍拒绝；本项绕过该 getter，不把 PA-23 声明为已接入 |
 | [test_entries.py](../../../../../tests/unit_tests/harness/persistent_agent/test_entries.py) | 使用真实 DeepAgent、本地模型和端口 / 窗口替身验证组件编排 |
 
-旧私聊和定时任务不读取群端口、不产生参与事件，继续沿用执行入口。群消息由“全部拒绝”变为“先判断，再按接入情况继续”；缺少端口、不合法模式 / 输入及尚未接入能力仍明确拒绝。没有新增窗口数据或迁移格式；`enabled_features` 仍只有 construction / workspace_read，未加入 execution。本次只修订文档，不改变上述行为。
+旧私聊和定时任务不读取群端口、不产生参与事件，继续沿用执行入口。群消息由“全部拒绝”变为“明确 @ 直接回应，其他消息先判断，再按接入情况继续”；缺少端口、不合法模式 / 输入及尚未接入能力仍明确拒绝。没有新增窗口数据或迁移格式；`enabled_features` 仍只有 construction / workspace_read，未加入 execution。
 
 ### 2.8 独立验收场景
 
@@ -176,7 +179,7 @@ flowchart TD
 | 场景 | 操作与预期 | 现有测试 / 证据边界 |
 | --- | --- | --- |
 | PA-07-V-01：缺少群端口 | 执行合法群请求但不注入 GroupChatPort；在事件和实例构造之前拒绝 | `test_group_message_without_port_is_rejected_before_events` |
-| PA-07-V-02：被 @ 仍可忽略 | 返回 ignore；验证职责、发送者、提及、回复关系及附件引用，排除触发消息；只产生 model.completed → participation.decided → final(ignored)，不构造、不加载 / 保存、不组装、不交候选 | `test_mentioned_group_message_can_be_ignored_without_opening_a_task` |
+| PA-07-V-02：明确 @ 当前智能体 | 不调用参与判断模型、不读群背景；产生 `participation.decided(respond)` 后进入 `execution.started`，后续走原执行路径 | `test_mentioned_group_message_bypasses_judgment_and_enters_execution`；使用 PA-06 / PA-10 替身，不证明真实服务端与渠道投递 |
 | PA-07-V-03：未被 @ 可回应或插话 | 分别返回 respond / intervene；started 引用同一个决策事件，替身窗口后进入原生流 | `test_unmentioned_group_message_can_continue_into_execution`（两个参数）；不证明真实窗口和渠道发送 |
 | PA-07-V-04：判断失败不记忽略 | 格式错误或模型异常三次；final(failed)，无 participation.decided、无正式模型流、无窗口调用 | `test_participation_failure_after_retries_is_not_ignored`（两个参数） |
 | PA-07-V-05：预算拒绝 | admit denied；只产生 paused(budget_denied)，不调用模型、不 report、不加载窗口 | `test_budget_denial_skips_the_participation_model` |
@@ -229,7 +232,7 @@ PYTHONPATH=$PWD .venv/bin/python -m pytest tests/unit_tests/harness/persistent_a
 
 ### 4.2 验证结论
 
-现有定向测试证明：缺端口前置拒绝、被 @ 可忽略且不触碰正式窗口、未被 @ 可回应 / 插话并关联 started、格式或模型错误三次后失败、预算拒绝不调用模型、incomplete 不伪装为空或忽略，以及私聊 / 定时任务旁路。原阶段组件完成结论在该范围得到复核，状态、负责人、依赖及完成数不因此变化。
+现有定向测试证明：缺端口前置拒绝、明确 @ 绕过忽略判断并进入执行、未被 @ 可回应 / 插话或忽略、格式或模型错误三次后失败、预算拒绝不调用模型、incomplete 不伪装为空或忽略，以及私聊 / 定时任务旁路。明确 @ 只保证进入回复执行路径，不保证模型、工具或渠道发送一定成功。
 
 替身提供了 PA-06、PA-10 的协作，因此“参与后 completed”只证明入口组合契约。当前生产 getter 仍拒绝，真实授权、群消息存储、预算对账、关键记账落盘、候选发送与模型判断质量未由本次测试证明。F_05 另有正式入口回归和未通过场景，以其验证记录为准；本次 10 项通过不覆盖或关闭那些缺口。
 
@@ -265,3 +268,6 @@ PYTHONPATH=$PWD .venv/bin/python -m pytest tests/unit_tests/harness/persistent_a
   - 最终变化：`participation.py` 的 4 处结束事件改为 `emitter.emit_ending`，没有候选可补交，首次失败按原事件重试一次；判断策略、重试次数、事件顺序和负责人不变。
   - 旧结论的效力：第 2.4.1、2.5、2.6 节相关描述就近注明，原文保留。
   - 验证：`test_a_participation_ending_is_retried_once_after_a_record_failure`（四种结束方式）与 `test_a_participation_ending_that_fails_twice_stops_the_execution`，见 [F_18](F_18_output-handoff.md) 第 8.2 节。
+- **2026-10-20：明确 @ 当前智能体必须进入回复执行。**
+  - 最终变化：`judge_participation` 检查规范化后的 `mention_ids`；包含当前 `execution.agent_id` 时直接记录 `participation.decided(respond)` 并继续执行，不调用判断模型或读取判断用群背景。未明确 @ 的群消息维持原模型判断；私聊与定时任务不变。
+  - 验证映射：PA-07-V-02 更新为明确 @ 必须进入执行；JiuwenSwarm JM-08 负责将当前接收 Bot 的 Feishu open_id 映射成对应内部 agent_id，仅放在该 Request 的来源消息中，公共群归档仍保留原始 Feishu mention ID。
