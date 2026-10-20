@@ -26,11 +26,28 @@ from opentelemetry.sdk.trace.sampling import ParentBasedTraceIdRatio
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
+from openjiuwen.core.single_agent.rail.default_rails import register_default_rail_factory
 from openjiuwen.extensions.observability.instrumentation import (
     ensure_global_http_instrumentation,
     resolve_global_instrument_flag,
 )
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
+from openjiuwen.extensions.tracer_otel.otel_rail import OtelRail
+
+# Auto-attach switch: register OtelRail as a core default rail factory so
+# agents built by orchestrators that never call ``register_rail`` (workflow
+# / multi-agent modes) also emit chain spans and gen_ai.agent.* identity
+# attributes. Default ON; set to a falsy value to restore pure opt-in.
+AUTO_ATTACH_RAIL_ENV = "OPENJIUWEN_OTEL_AUTO_ATTACH_RAIL"
+_FALSY = {"0", "false", "no", "off"}
+
+
+def _auto_attach_rail_enabled() -> bool:
+    """Default-on flag: only an explicit falsy value disables auto-attach."""
+    raw = os.environ.get(AUTO_ATTACH_RAIL_ENV)
+    if raw is None or not raw.strip():
+        return True
+    return raw.strip().lower() not in _FALSY
 
 
 def init_otel_tracer(config: OtelTracerConfig) -> trace.Tracer:
@@ -63,6 +80,13 @@ def init_otel_tracer(config: OtelTracerConfig) -> trace.Tracer:
     # The private provider above is unaffected by the global flag: tracer_otel
     # handlers hold a direct tracer reference, so global provider state is not
     # needed for them.
+
+    # Auto-attach OtelRail to every BaseAgent via the core default-rail
+    # registry (idempotent by factory identity). Reaching this point means
+    # provider construction succeeded; a failed init never registers.
+    if _auto_attach_rail_enabled():
+        register_default_rail_factory(OtelRail)
+
     return provider.get_tracer(config.tracer_name)
 
 
