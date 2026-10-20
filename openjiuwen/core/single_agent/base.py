@@ -39,6 +39,7 @@ from openjiuwen.core.single_agent.rail.base import (
     AnyAgentCallback,
     init_rail,
 )
+from openjiuwen.core.single_agent.rail.default_rails import default_rail_factories
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.controller.schema.controller_output import ControllerOutputChunk, ControllerOutput
 from openjiuwen.core.controller.config import ControllerConfig
@@ -113,6 +114,8 @@ class BaseAgent(metaclass=_AgentMeta):
             card.id,
             event_namespace=self._instance_id,
         )
+        self._registered_rail_types: set[type] = set()
+        self._default_rails_attached = False
         self._skill_util = None
         self.lazy_init_skill()
 
@@ -198,6 +201,7 @@ class BaseAgent(metaclass=_AgentMeta):
         """
         init_rail(rail, self)
         await self._agent_callback_manager.register_rail(rail, self)
+        self._registered_rail_types.add(type(rail))
         return self
 
     async def unregister_rail(self, rail: AgentRail) -> "BaseAgent":
@@ -211,7 +215,34 @@ class BaseAgent(metaclass=_AgentMeta):
         """
         await self._agent_callback_manager.unregister_rail(rail, self)
         rail.uninit(self)
+        self._registered_rail_types.discard(type(rail))
         return self
+
+    async def _ensure_default_rails(self) -> None:
+        """Attach rails from the process-wide default factories, once.
+
+        Runs on the first callback execution so every agent — including
+        ones constructed inside workflow or multi-agent orchestration,
+        where the caller has no place to call ``register_rail`` — picks
+        up extension-provided rails (e.g. ``tracer_otel.OtelRail``).
+        Registration happens before the current event dispatches, so a
+        rail attached here observes the event that triggered the attach.
+        Rails whose type is already registered (explicitly or by an
+        earlier factory) are skipped; failures log a warning and never
+        break the agent's callback flow.
+        """
+        if self._default_rails_attached:
+            return
+        self._default_rails_attached = True
+        for factory in default_rail_factories():
+            try:
+                rail = factory()
+                if type(rail) in self._registered_rail_types:
+                    continue
+                await self.register_rail(rail)
+            except Exception as e:
+                logger.warning(f"Default rail factory {getattr(factory, '__name__', factory)} "
+                               f"skipped on agent {self.card.id}: {e}")
 
     async def _execute_callbacks(
         self,
@@ -238,6 +269,7 @@ class BaseAgent(metaclass=_AgentMeta):
             session: Current Session object (None for before_invoke)
             context: Current ModelContext (None for before_invoke)
         """
+        await self._ensure_default_rails()
         ctx = AgentCallbackContext(
             agent=self,
             event=event,
