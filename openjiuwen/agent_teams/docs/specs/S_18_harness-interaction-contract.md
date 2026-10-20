@@ -42,6 +42,11 @@ structured interrupt resume 的队列与匹配边界见
 `abort` 与 `pause` 是**两个正交动词**：abort 丢弃当前 round（下次 `send` 起全新 round），
 pause 停在干净边界并保留 round（`resume` 原地续）。
 
+`DeepAgentSpec.completion_timeout` 在 NativeHarness 中是非终止性的慢轮次告警阈值：正数到期后
+周期记录 warning，但不取消 scheduler task；`None` 表示不限时且不启动告警 task。普通
+DeepAgent 的同名配置仍是单轮硬超时；超时时 task-loop 负责取消对应 scheduler task 并返回
+标准 `result_type="error"` 结果，避免输出层把裸 `{"error": ...}` 序列化为空回答。
+
 `MemberRuntime` 额外声明：`subscribe(*, on_state=None, on_round=None)`（单一订阅入口，
 两回调 keyword-only 且可选，只注册非 None 的，kwargs 按回调声明参数 narrow）、
 `has_pending_interrupt` /
