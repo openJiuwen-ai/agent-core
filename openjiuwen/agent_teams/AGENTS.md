@@ -36,6 +36,7 @@ Loop 控制循环，原子动作不进入该协议层级。
 |---|---|
 | `TeamAgentSpec(...).build()` | 从零组装 TeamAgent 的唯一公共路径。`agents["leader"]` 必填，`agents["teammate"]` 可选 |
 | `Runner.run_agent_team[_streaming](agent_team=spec, session=..., ...)` | 运行入口；冷启动 / 热恢复 / 切 session 由 `runtime` 子系统的 dispatch 表自动选 |
+| `Runner.resume_agent_team_interrupt_streaming(agent_team, user_input: InteractiveInput, *, session, ...)` | 中断恢复专用流式入口：后台跑 recovery 流、等 leader coordination 就绪（`TeamRuntimeManager` leader-ready waiter）后经 `interact_agent_team` 提交 `InteractiveInput`；`session` 必填。见 B_07 / S_01 不变量 17 |
 | `cli.run_team_cli(*, specs=None, yaml_paths=None)` | 交互式 TUI 公共入口。`/team` `/session` `/spec` 子命令覆盖 lifecycle 全 facade，普通文本透传 `Runner.interact_agent_team`。详见 `cli/AGENTS.md` |
 
 **新增配置项一律走 `TeamAgentSpec`**——曾经的"在 factory 函数上堆参数"路径已物理消失。扩参数列表永远是 hack，扩 Spec 才是设计。

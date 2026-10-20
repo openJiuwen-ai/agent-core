@@ -3,7 +3,11 @@
 
 """Team-runtime surface mixed into the Runner.
 
-The public ``Runner`` facade exposes a single team entry pair:
+The public ``Runner`` facade exposes the team run pair
+(``run_agent_team`` / ``run_agent_team_streaming``) plus the
+interrupt-resume entry ``resume_agent_team_interrupt_streaming``
+(start a recovered team, resume its pending interrupt once the
+leader is ready, forward the session's stream):
 
 * ``Runner.run_agent_team`` / ``run_agent_team_streaming`` — accepts
   ``str | TeamAgentSpec | BaseTeam | BaseAgent`` and routes by two
@@ -41,6 +45,7 @@ Plus one method:
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
@@ -64,6 +69,7 @@ from openjiuwen.core.multi_agent import (
 )
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import (
     BaseStreamMode,
     OutputSchema,
@@ -89,6 +95,7 @@ if TYPE_CHECKING:
 
 
 _TEAM_REJECT_KINDS: Optional[frozenset] = None
+_TEAM_LEADER_READY_TIMEOUT_SECONDS = 30.0
 
 
 def _team_reject_kinds() -> frozenset:
@@ -202,7 +209,7 @@ class _TeamRunnerMixin:
         Accepts:
         - ``TeamAgentSpec``: canonical assembly blueprint; goes through
           ``TeamRuntimeManager.activate`` (cold/warm/recover dispatch).
-        - ``str`` (team_name): re-uses an already-active pool entry —
+        - ``str`` (team_name): reuses an already-active pool entry —
           the first call must pass a spec to seed the pool.
 
         For the multi_agent ``BaseTeam`` path call the
@@ -344,6 +351,157 @@ class _TeamRunnerMixin:
                     logger.exception("cleanup after stream failed for team=%s", team_name_for_finally)
         finally:
             self._exit_root_task_group_context(token)
+
+    async def resume_agent_team_interrupt_streaming(
+        self,
+        agent_team: Union[str, "TeamAgentSpec"],
+        user_input: InteractiveInput,
+        *,
+        session: Union[str, AgentTeamSession],
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None,
+        stream_logger: Optional["TeamStreamLogger"] = None,
+        background_task_controller: Optional[Any] = None,
+        run_context: RunContextInput | None = None,
+    ) -> AsyncIterator[Any]:
+        """Start a recovered team and resume its pending interrupt once ready.
+
+        Runs the recovery stream (``run_agent_team_streaming`` with empty
+        inputs) in the background while waiting for the leader's
+        coordination runtime to become ready (the runtime manager's
+        leader-ready waiter, ``_TEAM_LEADER_READY_TIMEOUT_SECONDS``
+        budget). Once ready, ``user_input`` is submitted through
+        ``interact_agent_team`` and the session's stream chunks are
+        forwarded until the team settles the run cycle.
+
+        ``user_input`` must be an :class:`InteractiveInput` resolving the
+        pending interrupt — the interact layer only takes the
+        interrupt-resume branch for that type; a plain string would be
+        routed as a god-view steer and never resolve the interrupt.
+        ``session`` is required: the interrupted team state (spec bucket +
+        pending interrupt) lives in that session's checkpoint.
+
+        Raises ``AGENT_TEAM_*`` errors when the stream fails or ends
+        before the leader is ready, the leader-ready wait times out, or
+        the interact is rejected (the ``DeliverResult`` failure reason is
+        carried in the error).
+        """
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        if not isinstance(user_input, InteractiveInput):
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=(
+                    "resume_agent_team_interrupt_streaming requires an InteractiveInput "
+                    f"resolving the pending interrupt; got {type(user_input).__name__}"
+                ),
+            )
+        if isinstance(session, AgentTeamSession):
+            team_session = session
+        elif isinstance(session, str):
+            team_session = create_agent_team_session(session_id=session)
+        else:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=(
+                    "resume_agent_team_interrupt_streaming requires the session holding "
+                    f"the interrupted team state; got {type(session).__name__}"
+                ),
+            )
+        spec = await self._resolve_team_agent_spec(agent_team, session=team_session)
+        session_id = team_session.get_session_id()
+        runtime_manager = self._get_team_runtime_manager()
+        waiter = runtime_manager.watch_next_leader_ready(
+            team_name=spec.team_name,
+            session_id=session_id,
+        )
+        output_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        stream_errors: list[BaseException] = []
+
+        async def pump_stream() -> None:
+            try:
+                async for chunk in self.run_agent_team_streaming(
+                    agent_team=spec,
+                    inputs=None,
+                    session=team_session,
+                    context=context,
+                    stream_modes=stream_modes,
+                    envs=envs,
+                    stream_logger=stream_logger,
+                    background_task_controller=background_task_controller,
+                    run_context=run_context,
+                ):
+                    await output_queue.put(("chunk", chunk))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                stream_errors.append(exc)
+                await output_queue.put(("error", exc))
+            else:
+                await output_queue.put(("end", None))
+
+        stream_task = asyncio.create_task(pump_stream())
+        ready_task = asyncio.create_task(asyncio.wait_for(waiter.wait(), timeout=_TEAM_LEADER_READY_TIMEOUT_SECONDS))
+        try:
+            done, _ = await asyncio.wait(
+                {stream_task, ready_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stream_task in done:
+                await stream_task
+                if stream_errors:
+                    raise stream_errors[0]
+                raise_error(
+                    StatusCode.AGENT_TEAM_STATE_INVALID,
+                    reason=f"team '{spec.team_name}' stream ended before the leader coordination runtime became ready",
+                )
+            try:
+                await ready_task
+            except asyncio.TimeoutError as exc:
+                raise_error(
+                    StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT,
+                    team_name=spec.team_name,
+                    timeout=_TEAM_LEADER_READY_TIMEOUT_SECONDS,
+                    cause=exc,
+                )
+
+            result = await self.interact_agent_team(
+                user_input,
+                team_name=spec.team_name,
+                session_id=session_id,
+                run_context=run_context,
+            )
+            if not result:
+                reason = getattr(result, "reason", None) or "interrupt_resume_rejected"
+                raise_error(
+                    StatusCode.AGENT_TEAM_STATE_INVALID,
+                    reason=f"interrupt resume for team '{spec.team_name}' rejected: {reason}",
+                )
+
+            while True:
+                kind, value = await output_queue.get()
+                if kind == "chunk":
+                    yield value
+                elif kind == "error":
+                    raise value
+                else:
+                    break
+        finally:
+            waiter.cancel()
+            if not ready_task.done():
+                ready_task.cancel()
+            if not stream_task.done():
+                stream_task.cancel()
+            try:
+                await ready_task
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+            try:
+                await stream_task
+            except asyncio.CancelledError:
+                pass
 
     async def _run_base_team(
         self,
@@ -1024,6 +1182,38 @@ class _TeamRunnerClassMixin:
             agent_team=agent_team,
             inputs=inputs,
             member=member,
+            session=session,
+            context=context,
+            stream_modes=stream_modes,
+            envs=envs,
+            stream_logger=stream_logger,
+            background_task_controller=background_task_controller,
+            run_context=run_context,
+        ):
+            yield chunk
+
+    @classmethod
+    async def resume_agent_team_interrupt_streaming(
+        cls,
+        agent_team: Union[str, "TeamAgentSpec"],
+        user_input: InteractiveInput,
+        *,
+        session: Union[str, AgentTeamSession],
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None,
+        stream_logger: Optional["TeamStreamLogger"] = None,
+        background_task_controller: Optional[Any] = None,
+        run_context: RunContextInput | None = None,
+    ) -> AsyncIterator[Any]:
+        """Resume a recovered TeamAgent interrupt through a dedicated stream.
+
+        See the instance method for the leader-ready contract and the
+        ``InteractiveInput`` / session requirements.
+        """
+        async for chunk in _global_runner().resume_agent_team_interrupt_streaming(
+            agent_team=agent_team,
+            user_input=user_input,
             session=session,
             context=context,
             stream_modes=stream_modes,

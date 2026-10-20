@@ -561,6 +561,13 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             harness.set_background_task_controller(controller)
 
+    def set_leader_started_callback(
+        self,
+        callback: Callable[[], Awaitable[None]] | None,
+    ) -> None:
+        """Set an internal callback for completed leader coordination startup."""
+        self._coordination.set_started_callback(callback)
+
     def has_pending_interrupt(self) -> bool:
         return self._stream_controller.has_pending_interrupt()
 
@@ -1079,7 +1086,7 @@ class TeamAgent(BaseAgent):
         """Prepare routing and cache only non-group input for the memory pipeline."""
         from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
 
-        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
+        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else ("" if inputs is None else str(inputs))
         payloads = self._initial_leader_route_payloads(inputs)
         is_group_input = payloads and isinstance(payloads[0], GroupChatMessage)
         self._state.pending_user_query = "" if is_group_input else raw_query

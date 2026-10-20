@@ -21,8 +21,8 @@ from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.harness.prompts import resolve_language as _resolve_language
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
+from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
@@ -53,6 +53,7 @@ class CoordinationKernel:
         # dormant at setup; armed when the team's effective dispatch mode is
         # "scheduled" (build_team choice / recovery restore).
         self._scheduler: Optional["TeamScheduler"] = None
+        self._started_callback: Callable[[], Awaitable[None]] | None = None
         # Lifecycle state machine for pause/stop idempotency.
         # Transitions: idle -> running (start) -> paused (pause) -> stopped (stop).
         # ``stopped`` is terminal for this kernel instance; subsequent
@@ -129,6 +130,13 @@ class CoordinationKernel:
     def is_running(self) -> bool:
         """Whether the underlying event bus is running."""
         return self._event_bus is not None and self._event_bus.is_running
+
+    def set_started_callback(
+        self,
+        callback: Callable[[], Awaitable[None]] | None,
+    ) -> None:
+        """Set a callback invoked after the coordination runtime is started."""
+        self._started_callback = callback
 
     async def start(self, session: Any = None) -> None:
         host = self._host
@@ -270,6 +278,14 @@ class CoordinationKernel:
         # new message arrives. Runs last, once the kernel is fully live, and
         # is a no-op when there is nothing suspended to resume.
         await self.resume_paused_round()
+        if self._started_callback is not None:
+            try:
+                await self._started_callback()
+            except Exception as e:
+                # Readiness signaling is auxiliary: the kernel is already
+                # live, so a failed callback must not fail the startup —
+                # its consumer simply times out.
+                team_logger.error("[{}] leader started callback failed: {}", member_name, e)
 
     def _build_wake_callback(self):
         """Compose the bus wake callback: coordination first, scheduler second.

@@ -18,6 +18,7 @@ import shutil
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
+    Callable,
     Optional,
 )
 
@@ -88,6 +89,28 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 
 
+class LeaderReadyWaiter:
+    """One-shot waiter for a leader coordination runtime becoming ready."""
+
+    def __init__(self, event: asyncio.Event, on_cancel: Callable[[], None]) -> None:
+        self._event = event
+        self._on_cancel = on_cancel
+        self._cancelled = False
+
+    async def wait(self) -> None:
+        await self._event.wait()
+
+    def cancel(self) -> None:
+        if self._cancelled:
+            return
+        self._cancelled = True
+        self._on_cancel()
+
+    def set_ready(self) -> None:
+        if not self._cancelled:
+            self._event.set()
+
+
 @dataclass(slots=True)
 class TeamRuntimeActivation:
     """Resolved team runtime and the action that produced it."""
@@ -111,6 +134,68 @@ class TeamRuntimeManager:
     def __init__(self) -> None:
         self._pool: TeamRuntimePool = TeamRuntimePool()
         self._organization_runtime_manager: "OrganizationRuntimeManager | None" = None
+        self._pending_leader_ready: dict[tuple[str, str], LeaderReadyWaiter] = {}
+
+    def watch_next_leader_ready(
+        self,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> LeaderReadyWaiter:
+        """Watch the next leader activation for ``(team_name, session_id)``."""
+        key = (team_name, session_id)
+        previous = self._pending_leader_ready.pop(key, None)
+        if previous is not None:
+            team_logger.info(
+                "leader ready watch for team {} session {} replaced a pending waiter",
+                team_name,
+                session_id,
+            )
+            previous.cancel()
+        event = asyncio.Event()
+        waiter = LeaderReadyWaiter(
+            event,
+            lambda: self._discard_leader_ready(key, waiter),
+        )
+        self._pending_leader_ready[key] = waiter
+        return waiter
+
+    def _discard_leader_ready(
+        self,
+        key: tuple[str, str],
+        waiter: LeaderReadyWaiter,
+    ) -> None:
+        if self._pending_leader_ready.get(key) is waiter:
+            self._pending_leader_ready.pop(key, None)
+
+    def _bind_leader_ready_callback(
+        self,
+        *,
+        team_name: str,
+        session_id: str,
+        agent: "TeamAgent",
+    ) -> None:
+        key = (team_name, session_id)
+        waiter = self._pending_leader_ready.get(key)
+        if waiter is None:
+            return
+
+        async def publish_ready() -> None:
+            entry = await self._pool.get(team_name)
+            if entry is None or entry.current_session_id != session_id or entry.agent is not agent:
+                team_logger.debug(
+                    "leader ready signal skipped for team {} session {}: activation no longer matches",
+                    team_name,
+                    session_id,
+                )
+                return
+            current = self._pending_leader_ready.pop(key, None)
+            if current is not None:
+                team_logger.info("leader ready for team {} session {}", team_name, session_id)
+                current.set_ready()
+            agent.set_leader_started_callback(None)
+
+        agent.set_leader_started_callback(publish_ready)
 
     @property
     def pool(self) -> TeamRuntimePool:
@@ -237,6 +322,11 @@ class TeamRuntimeManager:
             # fallbacks.
             await self.organization_runtime_manager.ensure_team_binding(
                 team_id=team_name,
+                session_id=target_session_id,
+                agent=activation.agent,
+            )
+            self._bind_leader_ready_callback(
+                team_name=team_name,
                 session_id=target_session_id,
                 agent=activation.agent,
             )
@@ -916,6 +1006,9 @@ class TeamRuntimeManager:
             await entry.agent.stop_coordination()
         finally:
             reset_session_id(token)
+            waiter = self._pending_leader_ready.pop((team_name, session_id), None)
+            if waiter is not None:
+                waiter.cancel()
         await self._pool.remove(team_name)
         team_logger.info(
             "stop_team: team {} session {} stopped and removed from pool",
