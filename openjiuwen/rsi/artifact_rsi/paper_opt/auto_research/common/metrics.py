@@ -37,7 +37,7 @@ _COMPLETED_RUN_STATUSES = frozenset(
         "completed_live",
     }
 )
-_ITEM_RECORD_KEYS = ("per_question", "task_records", "records", "item_records")
+_ITEM_RECORD_KEYS = ("per_question", "per_item", "task_records", "records", "item_records")
 _EXCEPTION_FAILURE_RE = re.compile(r"^[A-Za-z]+(?:Error|Exception)\s*:")
 _PAIR_METRIC_STATUS = "computed_from_last_measured_rows"
 MetricResolutionStatus = Literal["resolved", "missing", "ambiguous"]
@@ -578,11 +578,20 @@ def failure_fingerprint(metrics: dict[str, Any] | None) -> str:
 
 @dataclass(frozen=True)
 class MetricsContractIssue:
-    """One metrics-contract failure with a stable fingerprint."""
+    """One metrics-contract failure with a stable fingerprint.
+
+    ``blocking=False`` marks a data-quality note (for example a declared
+    count that does not match the item records) that is worth recording
+    but must not fail an otherwise-real run over it -- the host tolerates
+    this class of mismatch by design. Existence/fabrication checks
+    (missing metrics, harness failure, universal item failure, the smoke
+    anti-stub checks) stay ``blocking=True``.
+    """
 
     reason: str
     fingerprint: str
     detail: str = ""
+    blocking: bool = True
 
 
 @dataclass
@@ -610,13 +619,42 @@ class MetricsContractResult:
         return [item.detail or item.reason for item in self.issues]
 
 
-def _contract_issue(reason: str, detail: str = "") -> MetricsContractIssue:
+def _contract_issue(reason: str, detail: str = "", *, blocking: bool = True) -> MetricsContractIssue:
     source = f"{reason}|{detail[:80]}"
     return MetricsContractIssue(
         reason=reason,
         detail=detail,
         fingerprint=hashlib.sha256(source.encode("utf-8")).hexdigest()[:12],
+        blocking=blocking,
     )
+
+
+def _lookup_synonym(metrics: dict[str, Any], names: tuple[str, ...]) -> Any:
+    """First present value among ``names``, checked at the root first, then
+    inside the canonical nested ``metrics.<name>`` location.
+
+    Scalar operational fields (``n_questions``/``model_call_count``, ...)
+    are host-documented to "stay at the root" (see the "Required
+    entry-point contract" prompt section), but a candidate that also (or
+    instead) writes them under the canonical ``metrics`` object -- the
+    same location :func:`resolve_metric` already treats as equally
+    authoritative for plan metrics -- is not making a mistake worth
+    failing the run over; check both rather than only the root. Different
+    task prompts can also legitimately declare different field-name
+    conventions (e.g. ``n_items``/``per_item`` instead of
+    ``n_questions``/``per_question`` -- observed directly from a real
+    task's own prompt), so callers pass every name their contract accepts,
+    not just one.
+    """
+    for name in names:
+        if name in metrics:
+            return metrics[name]
+    nested = metrics.get(_CANONICAL_METRICS_KEY)
+    if isinstance(nested, dict):
+        for name in names:
+            if name in nested:
+                return nested[name]
+    return None
 
 
 def _coerce_positive_int(value: Any) -> int | None:
@@ -635,7 +673,12 @@ def _declared_item_records(metrics: dict[str, Any]) -> tuple[bool, list[dict[str
     """Whether an item-record list key is present, and the dict rows in it.
 
     An empty list still counts as declared so ``n_questions: 1`` with
-    ``per_question: []`` is a mismatch, not a scalar payload.
+    ``per_question: []`` is a mismatch, not a scalar payload. Checked at
+    the root first, then inside the canonical nested ``metrics.<name>``
+    location -- a candidate that writes its item-record list under the
+    same canonical object it uses for scalar metrics (observed directly
+    against a real packaged run) is not making a mistake worth failing
+    the run over.
     """
     for key in _ITEM_RECORD_KEYS:
         if key not in metrics:
@@ -643,6 +686,14 @@ def _declared_item_records(metrics: dict[str, Any]) -> tuple[bool, list[dict[str
         value = metrics[key]
         if isinstance(value, list):
             return True, [item for item in value if isinstance(item, dict)]
+    nested = metrics.get(_CANONICAL_METRICS_KEY)
+    if isinstance(nested, dict):
+        for key in _ITEM_RECORD_KEYS:
+            if key not in nested:
+                continue
+            value = nested[key]
+            if isinstance(value, list):
+                return True, [item for item in value if isinstance(item, dict)]
     return False, []
 
 
@@ -678,10 +729,15 @@ def validate_metrics_contract(
     baseline) are valid. Missing optional fields are ignored so simple
     scalar payloads remain process-complete. Structural lies — a missing
     file, invalid JSON, the wrong ``method``, a harness-failed status, a
-    non-positive ``n_questions``, a count mismatch (including an empty
-    item-record list), or a top-level ``completed`` result whose every
-    item record failed operationally — are rejected with a stable
-    reason/fingerprint.
+    non-positive ``n_questions``, or a top-level ``completed`` result
+    whose every item record failed operationally — fail the run
+    (``ok=False``) with a stable reason/fingerprint.
+
+    A declared ``n_questions`` that does not parse as an integer, or that
+    does not match the item-record count, is recorded as a non-blocking
+    issue (``MetricsContractIssue.blocking=False``) instead: it is a
+    data-quality note worth surfacing, not evidence the run didn't
+    happen, so it must not fail an otherwise-real run.
     """
     issues: list[MetricsContractIssue] = []
     if metrics_state == "missing":
@@ -712,13 +768,15 @@ def validate_metrics_contract(
         )
         issues.append(_contract_issue("harness_failed", detail[:180]))
 
-    if "n_questions" in metrics:
-        n_questions = _coerce_positive_int(metrics.get("n_questions"))
+    n_questions_raw = _lookup_synonym(metrics, ("n_questions", "n_items"))
+    if n_questions_raw is not None:
+        n_questions = _coerce_positive_int(n_questions_raw)
         if n_questions is None:
             issues.append(
                 _contract_issue(
                     "malformed_n_questions",
-                    f"n_questions={metrics.get('n_questions')!r} is not an integer",
+                    f"n_questions={n_questions_raw!r} is not an integer",
+                    blocking=False,
                 )
             )
         elif n_questions <= 0:
@@ -735,6 +793,7 @@ def validate_metrics_contract(
                     _contract_issue(
                         "n_questions_mismatch",
                         f"n_questions={n_questions} does not match {len(records)} item records",
+                        blocking=False,
                     )
                 )
 
@@ -752,7 +811,7 @@ def validate_metrics_contract(
             )
         )
 
-    return MetricsContractResult(ok=not issues, issues=issues)
+    return MetricsContractResult(ok=not any(issue.blocking for issue in issues), issues=issues)
 
 
 def primary_metric_unresolved(
@@ -817,18 +876,27 @@ def validate_smoke_live_path(metrics: dict[str, Any] | None) -> MetricsContractR
     Not part of :func:`validate_metrics_contract` so full runs and scalar
     payloads are unaffected. Parser-only stubs (empty ``per_question``,
     ``model_call_count`` missing or 0) are rejected.
+
+    Field names are resolved via :func:`_lookup_synonym`: ``n_questions``
+    accepts an ``n_items`` payload too (different task prompts legitimately
+    declare different naming -- observed directly from a real task's own
+    contract), and every scalar here also checks the canonical nested
+    ``metrics.<name>`` location, not just the root (observed directly: a
+    real candidate wrote ``model_call_count`` under ``metrics`` instead of
+    at the root, which this rejected before only checking the root).
     """
     issues: list[MetricsContractIssue] = []
     if not isinstance(metrics, dict) or not metrics:
         issues.append(_contract_issue("missing_metrics", "smoke metrics payload is empty"))
         return MetricsContractResult(ok=False, issues=issues)
 
-    n_questions = _coerce_positive_int(metrics.get("n_questions"))
+    n_questions_raw = _lookup_synonym(metrics, ("n_questions", "n_items"))
+    n_questions = _coerce_positive_int(n_questions_raw)
     if n_questions is None or n_questions < 1:
         issues.append(
             _contract_issue(
                 "smoke_n_questions",
-                f"smoke requires n_questions >= 1, got {metrics.get('n_questions')!r}",
+                f"smoke requires n_questions >= 1, got {n_questions_raw!r}",
             )
         )
 
@@ -839,20 +907,21 @@ def validate_smoke_live_path(metrics: dict[str, Any] | None) -> MetricsContractR
                 "smoke_missing_item_records",
                 "smoke requires at least one item record (parser-only stubs are invalid); "
                 "write a non-empty top-level `per_question` list of objects "
-                "(also accepted: `task_records`, `records`, `item_records`)",
+                "(also accepted: `per_item`, `task_records`, `records`, `item_records`)",
             )
         )
 
-    count = _coerce_positive_int(metrics.get("model_call_count"))
+    call_count_raw = _lookup_synonym(metrics, ("model_call_count",))
+    count = _coerce_positive_int(call_count_raw)
     if count is None or count < 1:
         issues.append(
             _contract_issue(
                 "smoke_no_model_call",
-                f"smoke requires model_call_count >= 1, got {metrics.get('model_call_count')!r}",
+                f"smoke requires model_call_count >= 1, got {call_count_raw!r}",
             )
         )
 
-    return MetricsContractResult(ok=not issues, issues=issues)
+    return MetricsContractResult(ok=not any(issue.blocking for issue in issues), issues=issues)
 
 
 def sanitize_diagnostic_payload(value: Any, *, depth: int = 0) -> Any:

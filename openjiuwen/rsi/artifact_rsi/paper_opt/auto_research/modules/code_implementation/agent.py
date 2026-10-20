@@ -233,22 +233,46 @@ def _extract_stdout_metrics(stdout: str) -> tuple[bool, dict[str, Any] | None]:
     somewhere other than the path the host asked for. Stdout is not subject
     to that.
 
-    Returns ``(found, payload)``: ``found`` is True whenever a marker line
-    exists at all, even with unparsable JSON after it -- callers must treat
-    "no marker" (fall back to the file) differently from "marker present but
-    broken" (a real bug worth surfacing, not masking). Scans every line, not
-    just the tail, and keeps the last match in case the candidate's own
-    logging prints the marker more than once.
+    The prompt asks for the JSON "compact, one line", but a candidate that
+    pretty-prints it instead (indented, spanning multiple lines) is still
+    printing a perfectly parseable JSON value -- newlines inside a JSON
+    object are legal whitespace. Using ``json.JSONDecoder.raw_decode``
+    instead of ``json.loads`` on a single split line tolerates that: it
+    parses one complete value starting right after the marker regardless
+    of how many lines it spans, and simply ignores whatever (if anything)
+    follows it, rather than requiring the marker and the entire payload to
+    share one line (confirmed directly against a real packaged run: the
+    candidate printed ``SMOKE_METRICS_JSON:{`` followed by several more
+    indented lines, which the old single-line parser rejected outright even
+    though the payload itself was entirely valid).
+
+    Returns ``(found, payload)``: ``found`` is True whenever a marker exists
+    at all, even with unparsable JSON after it -- callers must treat "no
+    marker" (fall back to the file) differently from "marker present but
+    broken" (a real bug worth surfacing, not masking). Scans the whole
+    string, not just the tail, and keeps the last match in case the
+    candidate's own logging prints the marker more than once. The marker
+    itself must still start a line (ignoring leading whitespace) so the
+    literal marker text appearing inside an unrelated JSON string value
+    elsewhere in stdout is never mistaken for the real one.
     """
-    marker_line: str | None = None
-    for line in stdout.splitlines():
-        stripped = line.strip()
-        if stripped.startswith(_SMOKE_METRICS_STDOUT_MARKER):
-            marker_line = stripped[len(_SMOKE_METRICS_STDOUT_MARKER):].strip()
-    if marker_line is None:
+    marker_start: int | None = None
+    search_from = 0
+    while True:
+        idx = stdout.find(_SMOKE_METRICS_STDOUT_MARKER, search_from)
+        if idx == -1:
+            break
+        line_start = stdout.rfind("\n", 0, idx) + 1
+        if stdout[line_start:idx].strip() == "":
+            marker_start = idx
+        search_from = idx + len(_SMOKE_METRICS_STDOUT_MARKER)
+    if marker_start is None:
         return False, None
+    payload_start = marker_start + len(_SMOKE_METRICS_STDOUT_MARKER)
+    while payload_start < len(stdout) and stdout[payload_start].isspace():
+        payload_start += 1
     try:
-        payload = json.loads(marker_line)
+        payload, _end = json.JSONDecoder().raw_decode(stdout, payload_start)
     except json.JSONDecodeError:
         return True, None
     return True, (payload if isinstance(payload, dict) else None)
@@ -1374,6 +1398,20 @@ class CodeImplementationAgent:
         if not stdout_found:
             return (file_metrics or {}), file_state
         if stdout_metrics is None:
+            # The stdout echo is broken, but that is a redundant channel --
+            # if the file the candidate actually wrote to --output parsed
+            # fine on its own, use it instead of discarding a genuinely
+            # valid result over a formatting slip in the echo alone. Still
+            # surfaced (not silently swallowed): this means the candidate
+            # did not follow the stdout-echo contract, which is worth
+            # knowing even when it doesn't block this run.
+            if file_metrics is not None:
+                logger.warning(
+                    "smoke stdout marker present but unparsable for variant=%s; "
+                    "falling back to the --output file, which parsed fine",
+                    variant_name,
+                )
+                return file_metrics, "present"
             return {}, "invalid_json"
 
         if file_metrics is None:
