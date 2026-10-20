@@ -66,6 +66,7 @@ agent_teams/
 ├── security/            # Team 权限安全辅助（permission narrowing 等）
 ├── runtime/             # Runner 进程内 TeamAgent 对象池 + 派发决策 + Run/Interact 并发门禁
 ├── organization/        # 进程内跨团队组织、任务池、消息、专家与汇总团队、共享工作空间；见 docs/specs/S_29_team-organization.md
+├── experts/             # Team 专家：ExpertCatalog 定位协议（宿主只答"装了哪些包、在哪"）+ AgentGroup 包格式（加载器同步/异步 + 卡片）+ 模板 → Team 成员组装（唯一实现）+ 绑定团视图；leader 的 view_experts / view_expert_groups / spawn_expert 消费它。见 F_125
 ├── interaction/         # 外部交互入口（UserInbox / HumanAgentInbox / @ 路由）
 ├── tools/               # 团队工具（Leader / Teammate / Human Agent 可调用的原子操作）
 ├── messager/            # 消息传输层（inprocess / pyzmq）

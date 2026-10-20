@@ -14,7 +14,7 @@ does not.
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/deep_agent_spec.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/schema/events.py`、`openjiuwen/agent_teams/schema/status.py`、`openjiuwen/agent_teams/schema/stream.py`、`openjiuwen/agent_teams/schema/task.py` |
-| 最近一次修订日期 | 2026-10-14 |
+| 最近一次修订日期 | 2026-10-20 |
 | 关联 feature | `F_05_lifecycle-finalize-relocation.md`（`MemberStatus.STOPPED` 新增）、`F_24_agent-time-awareness.md`（`TaskSummary.updated_at` 新增）、`F_38_team-teammate-worktree-isolation-agenttool.md`（`TeamRuntimeContext.worktree_path`）、`F_59_condition-named-task-state-machine-with-verify-gate.md`（条件命名 `TaskStatus` 状态机 + verify 闸）、`F_62_scheduled-dispatch-runtime-and-review-voting.md`（票表 + 轮数列 + `TASK_REVIEW_VOTE` + dispatch 能力上限）、`F_63_scheduler-message-templating-and-delivery-render.md`（消息表 `meta` 投递载荷列）、`F_65_runtime-idle-clock-stall-nudge.md`（`TeamAgentState.idle_since` 运行时 idle 时钟 + 两个停滞阈值 spec 字段）、`F_69_cwd-workspace-project-root-separation.md`（`DeepAgentSpec.cwd` / `project_root` 与 workspace 分离）、`F_78_steering-batch-quota-hook.md`（`TeamAgentSpec.steer_batch_size`）、`F_79_team-scoped-skill-library-and-visibility.md`（team 成员的 `skills` / `enable_skill_discovery` 落 build_spec 前被清空）、`F_118_task-scoped-member-lifetime.md`（`MemberStatus.DORMANT` + `retire_target`）、`F_119_scheduled-completion-handoff-via-note.md`（任务行 `summary` 列与改派 / 重置清空。其余条目见 `docs/features/` |
 
 ## 范围 / 边界
@@ -284,6 +284,7 @@ session checkpoint 全局状态根上有一个 `teams` namespace：
 | `spawn_mode` | `str` | `"process"` | `process` / `inprocess` |
 | `leader` | `LeaderSpec` | `LeaderSpec()` | leader 身份块 |
 | `predefined_members` | `list[TeamMemberSpec]` | `[]` | 预声明成员；HITT 视角下含 `HUMAN_AGENT` |
+| `agent_group_name` | `Optional[str]` | `None` | 本 Team 由哪个 AgentGroup 组建（宿主写入）；`spawn_expert` 据此从本 spec 的 `agents[成员]` 与预定义成员拉起同类型实例（F_125） |
 | `model_pool` | `list[ModelPoolEntry]` | `[]` | LLM endpoint 池 |
 | `model_router` | `Optional[ModelRouterConfig]` | `None` | 单端点路由便利输入；与 `model_pool` 互斥 |
 | `model_pool_strategy` | `Literal["round_robin", "by_model_name", "router"]` | `"round_robin"` | 分配策略；`router` 在 `model_router` 设时强制 |
@@ -495,6 +496,8 @@ team 成员由 `agent_configurator` 把 cwd 指向项目目录或隔离 worktree
 | `member_model` | `Optional[TeamModelConfig]` | `None` |
 | `worktree_path` | `Optional[str]` | `None` |
 | `permissions_override` | `Optional[dict[str, str]]` | `None` | Per-member permission narrowing from `spawn_teammate.permissions`；flat `{tool_name: level_string}` dict，由 `narrow_permissions` 收紧基础配置 |
+| `agent_template_spec` | `Optional[dict[str, Any]]` | `None` | 按专家模板拉起的本地成员的能力快照，`build_context_from_db` 从 `options.agent_template.snapshot` 读回（F_125） |
+| `template_external_cli` | `Optional[ExternalCliAgentSpec]` | `None` | 按专家模板拉起的外部 CLI 成员的启动配置，从 `options.agent_template.external_cli` 读回（F_125） |
 
 是 **Spec → Runtime 的边界**。`build()` 出来的对象（messager config、db
 config、allocator 给当前成员的 model 选择）封进 `TeamRuntimeContext`，传给
@@ -807,6 +810,10 @@ CANCELLED    -> (terminal)
   调度交接模板经 `task.upstream_brief` 读上游的完成摘要（F_119 起不再是 note 全文）。**事件不带正文**（`TASK_COMPLETED` /
   `TASK_SUBMITTED_FOR_REVIEW` 仍只是唤醒信号，正文从行里现查，与 F_63 同一原则）。老 session
   的任务表由 `engine._ensure_dynamic_table_indexes` 补列（与 `reviewer` / `review_round` 同路）。
+- `TeamMemberOptions.agent_template`（`MemberAgentTemplate | None`，F_125）：`spawn_expert` 拉起的成员
+  来自哪个专家模板——`ref`（`{name, group}`）、`version`，以及本地成员的 `snapshot`（去掉
+  `prompt_sections` 的 `AgentTemplateSpec` JSON）或外部 CLI 成员合并后的 `external_cli` 配置。成员只靠
+  这一块重建，不再访问宿主目录。
 - `TeamMemberOptions.lifetime`（`"shutdown"` / `"dormant"` / None）：任务内联成员的退场策略，
   落在既有 `options` JSON 列；`None` 为常驻。读点两个：调度器退场扫描
   （`MemberDao.list_retirable_members`）与成员自己的 `retire_target` 解析
