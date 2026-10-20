@@ -11,10 +11,10 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.runner.callback import AbortError
-from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+from openjiuwen.core.single_agent.interrupt.ownership import InterruptOwnerMixin
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-from openjiuwen.core.single_agent.interrupt.state import RESUME_USER_INPUT_KEY, INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
@@ -43,7 +43,7 @@ class InterruptResult(InterruptDecision):
     request: InterruptRequest
 
 
-class BaseInterruptRail(AgentRail):
+class BaseInterruptRail(InterruptOwnerMixin, AgentRail):
     """Base rail for interrupt and resume handling.
 
     Provides:
@@ -54,6 +54,14 @@ class BaseInterruptRail(AgentRail):
 
     Subclasses must implement resolve_interrupt() to define
     the specific interruption logic.
+
+    Interrupt identity: every request a rail raises is stamped with the
+    rail's ``interrupt_owner`` (its class path unless set) and, for hosts,
+    its ``interrupt_kind``. On resume ``_get_user_input`` returns only the
+    answer to an interrupt this rail raised on the call, so rails sharing a
+    tool call never read each other's answers. Answers given in earlier
+    resume rounds of a still-paused call stay visible;
+    ``is_carried_answer`` tells them apart so side effects are not repeated.
     """
     priority: int = 90
 
@@ -240,6 +248,7 @@ class BaseInterruptRail(AgentRail):
             tool_call: Optional[ToolCall],
             request: InterruptRequest,
     ) -> None:
+        self.stamp_interrupt(request)
         raise AbortError(
             reason=f"Tool execution interrupted: {tool_name}",
             cause=ToolInterruptException(request=request, tool_call=tool_call),
@@ -268,40 +277,6 @@ class BaseInterruptRail(AgentRail):
         return tool_call.id if hasattr(tool_call, "id") else ""
 
     def _get_user_input(self, ctx: AgentCallbackContext, tool_call_id: str) -> Optional[UserInput]:
-        """Get user input from ctx.extra (passed by handler) or session global state.
-        
-        For subagent internal rail: tool_call_id is inner_id, can directly match user_inputs key.
-        No alias mapping needed - rail only cares if current tool_call has corresponding user input.
-        """
-        raw_input = ctx.extra.get(RESUME_USER_INPUT_KEY)
-        logger.info(
-            "[_get_user_input] tool_call_id=%r raw_input_type=%s",
-            tool_call_id, type(raw_input).__name__ if raw_input is not None else "None",
-        )
-        if raw_input is None:
-            return None
-
-        if isinstance(raw_input, InteractiveInput):
-            logger.info(
-                "[_get_user_input] InteractiveInput.user_inputs keys=%r",
-                list(raw_input.user_inputs.keys()),
-            )
-            if tool_call_id in raw_input.user_inputs:
-                matched_value = raw_input.user_inputs[tool_call_id]
-                logger.info(
-                    "[_get_user_input] MATCHED! tool_call_id=%r value=%r",
-                    tool_call_id, repr(matched_value)[:200],
-                )
-                return raw_input.user_inputs[tool_call_id]
-            logger.warning(
-                "[_get_user_input] NO MATCH! tool_call_id=%r not in keys=%r",
-                tool_call_id, list(raw_input.user_inputs.keys()),
-            )
-            return None
-
-        if isinstance(raw_input, dict):
-            if tool_call_id in raw_input:
-                return raw_input[tool_call_id]
-            return raw_input
-
-        return raw_input
+        """Return the answer to this rail's interrupt on the call in the current resume (``None`` when none)."""
+        answer = self.find_own_answer(ctx.extra, tool_call_id)
+        return answer.value if answer is not None else None

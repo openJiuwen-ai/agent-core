@@ -103,6 +103,34 @@
     `protected_user_message_names` 中的消息不参与计数也不被替换。cua_agent 始终使用它
     （`S_18`）；`tools/mobile_gui/rails/multimodal_context_summarizer_rail.py` 保留原导入路径，
     是预置 mobile 受保护消息名的子类。
+14. **中断带 id、类型和发起者，答复只给发起它的 rail**：
+    - 每个中断请求有 `interrupt_id`（中断处理器收集暂停的调用时分配，`after_tool_call` 里还没有；
+      同一调用上的后一次中断得到新 id，只因同一 rail 的上一个中断未被回答而再次发起的中断沿用
+      原 id，即使问题变了）、`interrupt_kind`（`InterruptKind`，空串 = 未声明；只供宿主渲染和决定答复形状）和
+      `interrupt_owner`（发起它的 rail 的键）。暂停结果里每个 `ToolCallInterruptRequest` 都带这三项
+      和 `tool_call_id`。
+    - **答复按发起者路由，不按类型**：rail 在 `_raise_interrupt` / `_raise_tool_interrupt` 中调
+      `stamp_interrupt` 写入 owner（默认类路径，可按实例设置）和 kind（请求未自带时），
+      `after_tool_call` 里已可见；id 只由中断处理器分配。恢复时
+      `_get_user_input` 只返回本 rail 发起的中断的答复，没有则为 `None`（= 首次进入）。答复按
+      （调用, owner）存放，所以一个 rail 在一个调用上同时只有一个待答的中断；**同一 agent 上挂两个
+      同类 rail 时，必须给其中一个设置不同的 `interrupt_owner`**（框架不检查）。
+    - **agent 内部只按 `interrupt_id` 认答复**：宿主用 `InteractiveInput.answer(interrupt_id, value)`。
+      `update(tool_call_id, value)`、纯文本与 dict 只在恢复开始时换算一次：`update` 给该调用当前等待
+      的中断；键含暂停调用 id 的 dict 只回答这些调用；其他输入给每个
+      调用当前等待的中断。原始恢复输入仍放在 `RESUME_USER_INPUT_KEY`（或请求
+      `metadata["resume_user_input_key"]` 指定的键）下，供宿主自己的 rail 读取。
+    - 升级前持久化的中断没有 id：加载时按调用 id 生成 `intr_<tool_call_id>`，按调用 id 的答复照常
+      换算到它；其发起者未知，对应 rail 会再问一次。
+    - 同一调用仍暂停时（包括之后在子 agent 内暂停的调用），之前轮次的答复带到后续轮次
+      （`carried=True`），被同一 rail 再次询问的答复丢弃。有外部副作用的 rail 用
+      `is_carried_answer(ctx.extra, tool_call_id)` 避免重复：权限 rail 对携带的批准不再写规则，
+      `permission_scene_hook` 的入参带 `answer_carried`。权限 rail 收到的每个批准（新的或携带的）都
+      重新做引擎判定，等待期间新增的 deny 规则生效。
+    - **暂停不是异常**：rail 中断在 `@rail` 包装层不触发 `on_tool_exception`、不重试；
+      `after_tool_call` 仍触发，此时 `ctx.is_paused` 为真、调用还没有结果。
+    - 宿主可用 `pending_interrupts(state)` 列出暂停的中断，用 `match_answers(user_input, pending)`
+      按处理器同一规则换算 `InteractiveInput` 并找出过期答复。
 
 ## 接口契约
 

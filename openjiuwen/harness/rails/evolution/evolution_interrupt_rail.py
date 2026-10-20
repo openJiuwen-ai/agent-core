@@ -10,8 +10,7 @@ from typing import Any, Literal
 from openjiuwen.agent_evolving.experience.draft_schema import normalize_subject
 from openjiuwen.core.foundation.llm.schema.message import ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.session import InteractiveInput
-from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind, InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.evolution.review.runtime import (
@@ -29,15 +28,15 @@ _ACTIVE_EVOLUTION_TOOL_OPERATIONS: dict[str, Literal["evolve", "simplify"]] = {
     "evolve_skill_experiences": "evolve",
     "simplify_skill_experiences": "simplify",
 }
-EVOLUTION_APPROVAL_INTERRUPT_KIND = "skill_evolution_approval"
+EVOLUTION_APPROVAL_INTERRUPT_KIND = InterruptKind.SKILL_EVOLUTION_APPROVAL
 EVOLUTION_INTERRUPT_SOURCE = "evolution_interrupt"
-EVOLUTION_RESUME_USER_INPUT_KEY = "_evolution_resume_user_input"
 
 
 class EvolutionInterruptRail(BaseInterruptRail):
     """Interrupt active Skill evolution mutation tools for user approval."""
 
     priority = 89
+    interrupt_kind = EVOLUTION_APPROVAL_INTERRUPT_KIND
 
     def __init__(
         self,
@@ -75,26 +74,6 @@ class EvolutionInterruptRail(BaseInterruptRail):
     @auto_save.setter
     def auto_save(self, value: bool) -> None:
         self._auto_save = bool(value)
-
-    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Intercept active evolution tools using the evolution-specific resume input slot."""
-        tool_call: ToolCall | None = ctx.inputs.tool_call
-        tool_name = ctx.inputs.tool_name
-
-        if tool_name not in self._tool_names:
-            return
-
-        tool_call_id = self._resolve_tool_call_id(tool_call)
-        user_input = self._get_evolution_user_input(ctx, tool_call_id)
-
-        auto_confirm_config = None
-        if ctx.session:
-            auto_confirm_config = ctx.session.get_state(INTERRUPT_AUTO_CONFIRM_KEY)
-            if not isinstance(auto_confirm_config, dict):
-                auto_confirm_config = {}
-
-        decision = await self.resolve_interrupt(ctx, tool_call, user_input, auto_confirm_config)
-        self._apply_decision(ctx, tool_call, tool_name, decision)
 
     async def resolve_interrupt(
         self,
@@ -185,22 +164,6 @@ class EvolutionInterruptRail(BaseInterruptRail):
                 metadata=self._approval_metadata(),
             )
         )
-
-    @staticmethod
-    def _get_evolution_user_input(ctx: AgentCallbackContext, tool_call_id: str) -> Any | None:
-        raw_input = ctx.extra.get(EVOLUTION_RESUME_USER_INPUT_KEY)
-        if raw_input is None:
-            return None
-
-        if isinstance(raw_input, InteractiveInput):
-            return raw_input.user_inputs.get(tool_call_id)
-
-        if isinstance(raw_input, dict):
-            if tool_call_id in raw_input:
-                return raw_input[tool_call_id]
-            return raw_input
-
-        return raw_input
 
     def _reject_tool(
         self,
@@ -321,7 +284,6 @@ class EvolutionInterruptRail(BaseInterruptRail):
             "source": EVOLUTION_INTERRUPT_SOURCE,
             "interrupt_kind": EVOLUTION_APPROVAL_INTERRUPT_KIND,
             "evolution_approval": True,
-            "resume_user_input_key": EVOLUTION_RESUME_USER_INPUT_KEY,
         }
 
     @staticmethod
@@ -398,6 +360,5 @@ class EvolutionInterruptRail(BaseInterruptRail):
 
 __all__ = [
     "EVOLUTION_APPROVAL_INTERRUPT_KIND",
-    "EVOLUTION_RESUME_USER_INPUT_KEY",
     "EvolutionInterruptRail",
 ]

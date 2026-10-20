@@ -21,6 +21,9 @@ class PermissionSceneHookInput:
     normalized_tool_name: str
     tool_args: dict[str, Any]
     engine: Any
+    # True when ``user_input`` was given in an earlier resume round of this
+    # still-paused call and was already acted on (do not persist it again).
+    answer_carried: bool = False
 
 
 PermissionSceneHook = Callable[

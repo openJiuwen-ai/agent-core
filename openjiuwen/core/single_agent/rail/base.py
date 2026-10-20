@@ -39,6 +39,7 @@ from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.interaction.base import AgentInterrupt
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.base import BaseAgent
@@ -679,6 +680,15 @@ class AgentCallbackContext:
         return requested
 
     @property
+    def is_paused(self) -> bool:
+        """Whether the call paused for user or client input instead of finishing.
+
+        True in ``after_tool_call`` of a paused call; the call resumes and ends
+        with a real result later.
+        """
+        return isinstance(self.exception, AgentInterrupt)
+
+    @property
     def has_force_finish_request(self) -> bool:
         """Check whether a force-finish request is pending."""
         return self._force_finish_request is not None
@@ -1077,6 +1087,11 @@ def rail(
                 except Exception as e:
                     exc_to_raise = e
                     ctx.exception = e
+                    if isinstance(e, AgentInterrupt):
+                        # A pause for user or client input is control flow, not a
+                        # failure: no on_exception, no retry. ``after`` still runs
+                        # with ``ctx.is_paused`` set.
+                        raise
                     # Record this failed attempt so the final error message
                     # can tell the LLM how many retries happened and why.
                     ctx.retry_history.append(

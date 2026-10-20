@@ -46,7 +46,7 @@ def _interruption_state() -> ToolInterruptionState:
             tool_call.id: ToolInterruptEntry(
                 tool_call=tool_call,
                 interrupt_requests={
-                    tool_call.id: InterruptRequest(message="Choose a plan"),
+                    tool_call.id: InterruptRequest(message="Choose a plan", interrupt_id="intr_plan"),
                 },
             ),
         },

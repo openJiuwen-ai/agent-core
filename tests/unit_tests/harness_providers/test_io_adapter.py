@@ -414,6 +414,24 @@ async def test_user_input_request_round_trips_through_interactive_input() -> Non
 
 
 @pytest.mark.asyncio
+async def test_pending_interaction_can_be_answered_by_its_interrupt_id() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness)
+    await adapter.start(_context())
+    request = UserInputRequest(request_id="ask-2", prompt="favorite color?")
+    pending = asyncio.create_task(adapter.handle(request))
+    await asyncio.sleep(0.01)
+    interactive = InteractiveInput()
+    interactive.answer("ask-2", {"answers": {"favorite color?": "red"}})
+    assert adapter.is_pending_interrupt_resume_valid(interactive)
+    assert await adapter.send(interactive) is None
+    response = await pending
+    assert response.content["answers"]["favorite color?"] == "red"
+    assert harness.sends == []
+    await adapter.stop()
+
+
+@pytest.mark.asyncio
 async def test_unmatched_interactive_input_is_forwarded_to_the_provider() -> None:
     harness = _FakeHarness()
     adapter = HarnessIOAdapter(harness)
