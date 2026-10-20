@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 文档类型 | 目标设计草案；尚未确定的内容标为补充建议或待确认项 |
-| 最近一次修订日期 | 2026-10-19 |
+| 最近一次修订日期 | 2026-10-21 |
 | 责任人 | Core Extension 模块维护者；与 Events 的协作由双方维护者共同确认 |
 | 所属模块 | `agent-core/openjiuwen/core/extension/` |
 | 配套文档 | [设计概览](extension-overview.md)、[Core 公共规范](../../../AGENTS.md) |
@@ -47,7 +47,7 @@ Extension 负责扩展包的管理和加载：读取包声明，检查来源与�
 | --- | --- |
 | 包来源 | 接收调用方明确传入的本地目录路径，检查包声明及同 ID 来源冲突 |
 | 运行域 | 处理 manifest 声明为 `backend` 的 Python 扩展；其他运行域应拒绝，支持方式另行设计 |
-| 管理操作 | 初始化装配事件；包管理操作均经对应事件执行，`package.reload` 事件的 Core Handler 先触发卸载再触发安装，期间包可能不可用 |
+| 管理操作 | 初始化时接收调用方准备好的 EventBus，注册 Extension 管理事件；包管理操作均经对应事件执行，`package.reload` 事件的 Core Handler 先触发卸载再触发安装，期间包可能不可用 |
 | 包管理 | 校验 manifest 和版本，分别确定包与包内扩展的加载顺序，并检查依赖；不自动联网寻找依赖 |
 | 事件执行 | 使用 Events 的公共注册和调用接口；通用事件机制由 Events 文档维护 |
 | 业务协作 | Core 业务模块提供事件定义、默认处理、能力和会话资料；Extension 管理包注册与资源生命周期 |
@@ -63,8 +63,8 @@ Extension 负责扩展包的管理和加载：读取包声明，检查来源与�
 | 管理请求和独立可复用操作经过事件入口，内部步骤由所属 Core Handler 执行 | 第 2.2、4.1、5 节 | 按业务边界设置 9 类目标事件，不按函数、模块或状态更新拆分 |
 | manifest 声明包和扩展入口，工厂创建实例，`register` 注册 Handler | 第 2.1、4.2～4.4 节 | 公共模型及最终导出仍待确认 |
 | 通过 Plan / Report 管理执行、回滚、重载和卸载 | 第 3～8 节 | 回滚范围、报告格式和卸载等待机制仍需细化 |
-| [Events 架构第 3.2 节](../../../events/docs/designs/events-architecture.md#32-代码归属与依赖方向)：公共模型归属及依赖方向 | 第 3.2、4.5 节 | Events 不导入包管理或调用方实现 |
-| [Events 生命周期约定](../../../events/docs/designs/events-architecture.md#53-handler-装卸与运行中的调用)：卸载时确认相关使用结束 | 第 3.4、4.5、5.2 节 | 需要协作取得使用结束确认后，才能释放包资源 |
+| [Events 架构第 3 节](../../../events/docs/designs/events-architecture.md#3-模块划分与依赖方向)：公共模型归属及依赖方向 | 第 3.2、4.5 节 | Events 不导入包管理或调用方实现 |
+| [Events 资源与停止约定](../../../events/docs/designs/events-architecture.md#83-资源与停止)：卸载时确认相关使用结束 | 第 3.4、4.5、5.2 节 | 需要协作取得使用结束确认后，才能释放包资源 |
 
 ### 1.4 核心设计取向
 
@@ -72,7 +72,8 @@ Extension 管理包，Events 执行事件。两者通过公共接口协作，同
 
 | 设计主题 | 采用的方案与原因 |
 | --- | --- |
-| 管理入口 | Registry 负责初始化时的事件装配，并提供安装、重载和卸载的便捷方法；最终类名和公开导出待定 |
+| 管理入口 | Registry 初始化时接收 EventBus，只装配 Extension 自己的管理事件及处理器，并提供安装、重载和卸载的便捷方法；最终类名和公开导出待定 |
+| EventBus 装配 | 调用方先准备 EventBus 并注册业务事件与 Handler，再将同一实例传给 Registry；业务注册不依赖 Registry 的初始化回调 |
 | 操作执行方式 | Registry 和上层 Core Handler 通过事件发起独立操作；事件内部可以调用相关模块的辅助能力 |
 | 事件触发责任 | 业务代码和 Handler 发起包管理及业务事件；EventBus 不根据 Plan、包依赖或结果安排下一项包操作 |
 | 能力模型 | 使用 Events 的 EventHandlerOps，避免在 Extension 中重复定义能力基础层 |
@@ -115,7 +116,7 @@ Extension 维护包、实例、计划和注册归属记录，不维护 Events �
 | EX-A02 分别处理包与包内扩展的依赖 | Package Manager 排列包，Orchestrator 排列包内扩展 | 拒绝缺失、循环或超出允许范围的依赖；依赖失败时跳过依赖方 | 第 4.2～4.3 节 |
 | EX-A03 每条成功注册都有可信归属 | Runtime 的受限登记入口 | 拒绝来源不明或层级不合法的注册，不留下没有归属的记录 | 第 4.4 节 |
 | EX-A04 失败时撤销本次安装 Plan 的注册 | Runtime；建议以单包安装 Plan 为范围 | 触发回滚后按相反顺序注销，记录未清理项，不报告成功；正常卸载失败保留卸载进展 | 第 5.2.1 节 |
-| EX-A05 初始化只装配事件与处理器 | Registry 与可信平台登记回调 | 装配失败时不受理包操作；初始化不读取用户 manifest、不加载或安装扩展 | 第 4.1 节 |
+| EX-A05 先准备 EventBus，再初始化 Registry | 调用方负责业务注册；Registry 接收同一 EventBus 并装配管理事件 | 装配失败时不受理包操作；初始化不读取用户 manifest、不加载或安装扩展，也不触发 `ops.build` | 第 4.1 节 |
 | EX-A06 不提前释放仍在使用的包资源 | Runtime 协调 Events 和调用方 | 等待使用结束；无法确认时保留资源并报告未完成 | 第 5.2.2 节 |
 | EX-A07 卸载成功后才能继续重载中的安装 | `package.reload` 事件的 Core Handler | 卸载失败即停止；新安装失败不能宣称旧版仍可用 | 第 5.2.3 节 |
 | EX-A08 报告必须反映实际注册和清理情况 | Runtime 提供记录，管理事件的 Core Handler 核对，Registry 交回 | 提前返回、取消或未收到结果时先核对，不凭空报告 SUCCESS | 第 6.3、8 节 |
@@ -126,7 +127,9 @@ Extension 维护包、实例、计划和注册归属记录，不维护 Events �
 
 ### 3.1 系统与外部的关系
 
-调用方通过 Registry 的便捷入口或受控事件入口提交包管理请求，两种入口都触发同一组管理事件。Registry 不直接执行包解析、安装或卸载。Core 业务模块通过可信登记入口提供事件、BUILTIN 和能力构建处理器。用户扩展包提供 manifest、入口工厂及注册实现；它的 `register` 方法只获得 USER Handler 的登记能力。
+调用方先准备 EventBus，通过公共注册接口装配 Core 业务模块提供的业务事件、Core Handler、BUILTIN Handler 和 Ops Build Handler，再将该 EventBus 传给 `Registry.init`。Registry 在同一实例上注册 Extension 管理事件及其 Core Handler，不接收或执行业务注册回调。
+
+初始化完成后，调用方通过 Registry 的便捷入口或受控事件入口提交包管理请求，两种入口都触发同一组管理事件。Registry 不直接执行包解析、安装或卸载。用户扩展包提供 manifest、入口工厂及注册实现；它的 `register` 方法只获得 USER Handler 的登记能力。
 
 管理操作从可信入口发起。包代码与调用方运行在同一进程，加载前需要校验声明和路径，但这些校验不能隔离恶意 Python 代码。若要执行不可信代码，需要单独设计隔离机制。工具或外部系统的实际执行结果，仍由所属业务模块核对。
 
@@ -139,7 +142,7 @@ Extension 维护包、实例、计划和注册归属记录，不维护 Events �
 flowchart TB
     Caller["业务代码<br/>提供包路径、操作目标和会话"]:::entry
 
-    Registry["Registry（core/extension）<br/><br/>初始化时登记事件和处理器<br/>接收请求，触发对应事件<br/>等待并返回处理结果"]:::entry
+    Registry["Registry（core/extension）<br/><br/>接收已准备好的 EventBus<br/>注册管理事件及 Core Handler<br/>触发管理事件并返回结果"]:::entry
 
     subgraph Extension["core/extension"]
         direction TB
@@ -193,6 +196,8 @@ flowchart TB
 
 一个 Core Handler 可以使用多个模块，同一模块也可以支持多个事件的 Core Handler。模块卡片说明它提供哪些能力、生成或保存哪些记录；计划、生效记录和清理记录均保存在当前进程中，不代表持久存储。解析、依赖解析、计划、执行、回滚和查询分别设有事件，加载与清理的具体步骤由执行或回滚 Handler 在内部完成。事件划分见第 4.1 节，协作顺序见第 5 节。
 
+图中的 EventBus 由调用方预先准备并传入 Registry，业务调用、管理操作、扩展 USER 注册和 Ops 发起的新事件均使用这一实例。图中调用箭头展示管理请求的执行关系；初始化时的实例传入与注册顺序见第 4.1 节。
+
 EventBus 只提供事件调用服务，不根据 Plan、包依赖或处理结果安排下一项包操作。业务代码和 Handler 决定何时发起包管理事件；Registry 在管理方法被调用时显式转发。Extension 与 Events 的协作边界见第 4.5 节。
 
 包管理事件、Core Handler 及包生命周期逻辑由 Extension 维护；事件公共模型和通用执行机制由 Events 维护，业务事件和能力实现由所属业务模块维护。源码依赖保持 `core/extension → core/events`；图中的回调调度表示运行时调用，不表示反向源码依赖。
@@ -201,13 +206,13 @@ EventBus 只提供事件调用服务，不根据 Plan、包依赖或处理结果
 
 | 参与方 | 职责与协作方式 | 交出什么、负责到哪里 |
 | --- | --- | --- |
-| Registry | 装配管理事件及其 Core Handler；业务代码调用便捷方法时，显式触发对应事件 | 等待并交回管理结果 |
+| Registry | 接收调用方传入的 EventBus，装配管理事件及其 Core Handler；业务代码调用便捷方法时，在同一实例上显式触发对应事件 | 确认管理组件就绪，等待并交回管理结果 |
 | 管理事件的 Core Handler | 执行对应事件的默认逻辑，按需使用一个或多个模块的能力；涉及另一项独立操作时触发对应事件 | 核对操作结果，决定是否继续后续步骤 |
 | Package Manager | 提供来源与声明解析、包依赖和排序、包信息查询与自有产物清理能力 | 支持解析、依赖解析和查询事件；也供执行、回滚 Handler 在满足条件后清理自有产物 |
 | Extension Orchestrator | 提供包内扩展依赖分析、操作范围与计划生成能力 | 支持 `extension.plan`；根据解析后的包信息和必要的 Runtime 记录返回单包 Plan |
 | Extension Runtime | 提供可信计划关联、实例、受限登记、计划执行、回滚、注销、等待和资源释放能力 | 支持执行与回滚事件，为计划事件保存可信关联，向依赖解析、计划及查询事件提供当前运行事实 |
 | EventBus / 执行器 | 提供公共注册、事件调用及 Handler 调度服务 | 交回处理结果或异常，不编排包管理步骤；内部机制见 Events 文档 |
-| 调用方与 Core 业务模块 | 提供路径、可信回调、会话、业务入口、资源权限和停止信号 | 从受控事件入口发起操作，核对管理与业务结果 |
+| 调用方与 Core 业务模块 | 准备 EventBus 并完成业务事件与 Handler 注册，提供路径、会话、业务入口、资源权限和停止信号 | 确认业务依赖就绪，从受控事件入口发起操作，核对管理与业务结果 |
 
 上表区分事件处理职责与模块能力职责，不限定一个 Core Handler 只能使用一个模块。安装、卸载和重载事件的 Core Handler 可以通过子事件协调多个模块；具体协作顺序见第 5 节。Core Handler 内部可以复用所需模块的纯计算或底层辅助函数，但进入另一项具有独立语义的包管理操作时，必须触发对应事件。
 
@@ -223,9 +228,38 @@ Core 业务模块需要提供所属事件的默认行为和能力处理器。Ext
 
 业务代码调用 `Registry.install`、`uninstall` 或 `reload` 时，对应方法体内显式调用受控 `trigger`，发起 `package.install`、`package.uninstall` 或 `package.reload`，并等待结果。Registry 不观察包状态、不自主扫描，也不驱动下一事件。业务代码直接调用受控 `trigger` 时，遵守相同授权及准入规则；解析、查询等请求也由业务或 Handler 明确发起。
 
-`init` 是业务代码显式调用的装配方法，负责连接 EventBus，登记每个管理事件及其 Core Handler，并执行 Core 业务事件、内置处理器和平台能力的可信登记回调。初始化只完成基础装配，不读取用户 manifest，不加载扩展代码，也不执行包安装。
+**先完成业务注册，再把同一个 EventBus 传给 Registry。** `init` 是业务代码显式调用的装配方法，只负责 Extension 自己的初始化，不接收或执行 Core 业务模块的注册回调。
 
-必需事件或平台处理器登记失败时，Registry 不能标为就绪。目前建议拒绝重复 `init`，失败实例清理后由调用方重建。事件基础设施的准备方式遵循 Events 公共约定，Extension 不重复定义。
+装配按以下顺序进行：
+
+1. **调用方准备 EventBus。** 按 Events 公共约定准备事件注册和调用入口，以及 `ops.build` 等基础定义。基础定义由 Events 维护，不由 Registry 或业务模块重复注册。
+2. **调用方注册业务内容。** Core 业务模块提供事件类型、匹配函数、唯一 Core Handler、BUILTIN Handler 和 Ops Build Handler；调用方通过 EventBus 公共接口完成注册，并确认必需的业务服务可用。具体注册代码可以汇总为业务侧函数，但由调用方直接调用。
+3. **Registry 接收 EventBus 并装配管理能力。** 调用方将已准备好的实例传给 `Registry.init`。Registry 准备 Package Manager、Orchestrator 和 Runtime，在传入的 EventBus 上注册第 4.1.1 节的管理事件及其 Core Handler；内部模块和处理器使用同一实例，不另建或替换 EventBus。
+4. **确认完成后再提交包路径。** Registry 确认自身管理组件和管理事件就绪；调用方另行确认业务注册及所需服务就绪，然后提交安装请求。用户包在安装过程中才获得受限 USER 注册入口。
+
+下面的代码只说明实例传递与装配顺序，函数名和参数形式不是已实现的公共 API：
+
+```python
+# Prepare Events infrastructure, including its own base event definitions.
+bus = EventBus()
+
+# Register business event types, Core / BUILTIN Handlers and Ops Build Handlers.
+# This function belongs to the caller, not to Registry.
+register_business_events_and_handlers(bus, services)
+
+# Register Extension management events on the same EventBus.
+registry = Registry()
+await registry.init(event_bus=bus)
+
+# Only after both business and management initialization have succeeded.
+report = await registry.install(local_package_paths)
+```
+
+上述准备与初始化只建立组件和注册关系，不读取用户 manifest、不加载用户代码、不执行包安装，也不触发 `ops.build`。注册 Ops Build Handler 与执行能力构建是两个阶段；能力构建仍由 Events 在运行时按公共约定发起。
+
+**初始化失败与清理。** 业务注册失败时，调用方停止后续装配，负责核对并清理本次业务注册，不向 Registry 提交包操作。Registry 自身的装配失败时不能标为就绪，应记录并清理本次初始化已建立的管理注册和自有资源；不能清空 EventBus，也不能删除调用方预先注册的业务事件或 Handler。注销顺序遵循 Events 约定，清理不完整时保留原始错误和残留记录，由调用方协调后续处理；本期不承诺整次装配原子回滚。
+
+目前建议拒绝对同一 Registry 重复 `init`，也不支持在初始化后更换 EventBus。调用方应在确认失败装配的清理完成后重建相关实例，不能在有残留的 EventBus 上盲目重试。EventBus 的创建和最终释放由调用方协调；Registry 就绪只说明管理入口可用，不代表所有业务模块或用户包已经就绪。具体初始化接口和清理结果表达由 Q08 形成规约。
 
 #### 4.1.1 包管理事件与 Core Handler 职责
 
@@ -383,7 +417,7 @@ Extension 使用 Events 的公共接口完成事件装配、操作调用和 Hand
 
 | 协作事项 | Extension 负责什么 | 从 Events 取得什么 |
 | --- | --- | --- |
-| 初始化装配 | Registry 登记管理事件及其 Core Handler，并执行可信平台登记回调 | 可用的事件注册和调用入口 |
+| 初始化装配 | Registry 接收调用方已准备好的 EventBus，只注册管理事件及其 Core Handler，不执行业务注册回调 | 同一实例的公共注册和调用入口；基础定义归 Events 维护 |
 | 管理操作 | 业务代码或 Handler 显式触发对应事件，核对结果后决定是否继续 | 事件处理结果或异常 |
 | 扩展注册 | Runtime 限制登记范围，关联可信包身份，保存每条 `handler_id` | Handler 注册标识和注销入口 |
 | 平台能力 | 提供可信包来源；具体能力由所属业务模块提供，Handler 使用公开 Ops 接口访问 | Events 提供的能力访问接口 |
@@ -391,7 +425,7 @@ Extension 使用 Events 的公共接口完成事件装配、操作调用和 Hand
 
 第 4.1.1 节的独立操作均经过对应事件。业务代码或 Handler 显式发起解析、计划执行、查询和回滚等请求；注销、等待、释放和产物清理由执行或回滚 Handler 在内部按条件推进。EventBus 不读取 Plan 或包依赖来安排下一项包操作。
 
-管理事件的名称、输入输出、可介入范围和结果核对要求由 Extension 规约维护。通用事件接口与 Handler 协议直接沿用 Events；卸载所需的使用结束确认见 [Events 生命周期约定](../../../events/docs/designs/events-architecture.md#53-handler-装卸与运行中的调用)，具体协作接口待 Q07 确认。
+管理事件的名称、输入输出、可介入范围和结果核对要求由 Extension 规约维护。通用事件接口与 Handler 协议直接沿用 Events；卸载所需的使用结束确认见 [Events 资源与停止约定](../../../events/docs/designs/events-architecture.md#83-资源与停止)，具体协作接口待 Q07 确认。
 
 ## 5. 模块协作与处理流程
 
@@ -401,7 +435,9 @@ Extension 使用 Events 的公共接口完成事件装配、操作调用和 Hand
 
 ### 5.1 启动与安装主流程
 
-初始化显式登记第 4.1.1 节的管理事件及其 Core Handler。业务代码调用 `Registry.install` 后触发 `package.install`。该事件接收本地包路径集合和允许的安装范围，负责把各子事件的结果组织为一次安装结果，不直接调用其他独立事件的内部实现。
+启动时，调用方先准备 EventBus 并注册业务事件与 Handler，再调用 `Registry.init(event_bus=bus)`，由 Registry 在该实例上注册第 4.1.1 节的管理事件及其 Core Handler。具体装配及失败处理见第 4.1 节。下图从初始化完成后的安装请求开始，不重复展示启动注册。
+
+业务代码调用 `Registry.install` 后，在同一 EventBus 上触发 `package.install`。该事件接收本地包路径集合和允许的安装范围，负责把各子事件的结果组织为一次安装结果，不直接调用其他独立事件的内部实现。
 
 **Core Handler 的处理逻辑：**
 
@@ -556,7 +592,7 @@ sequenceDiagram
     B-->>H: 卸载结果
 ```
 
-`extension.apply` 执行卸载、`extension.rollback` 清理失败安装时，都必须等待尚未结束的 Handler、已被选中但尚未执行的 Handler，以及仍会访问包资源的能力。该条件属于清理步骤的前置要求，不构成独立等待业务。具体使用结束确认遵循 [Events 生命周期约定](../../../events/docs/designs/events-architecture.md#53-handler-装卸与运行中的调用)，协作接口待 Q07 确认。
+`extension.apply` 执行卸载、`extension.rollback` 清理失败安装时，都必须等待尚未结束的 Handler、已被选中但尚未执行的 Handler，以及仍会访问包资源的能力。该条件属于清理步骤的前置要求，不构成独立等待业务。具体使用结束确认遵循 [Events 资源与停止约定](../../../events/docs/designs/events-architecture.md#83-资源与停止)，协作接口待 Q07 确认。
 
 注销、等待、释放或文件清理任一步失败时，保留进展、资源和未清理项。不能跳过失败条件继续删除文件，也不能将部分注销的包描述为完整生效；后续先查询，再按原卸载 Plan 的记录受控续清理，不能重新执行已完成的注册或清理步骤。
 
@@ -838,7 +874,7 @@ sequenceDiagram
 
 | 状态类别 | 何时变化、由谁确认 | 对后续流程的影响 |
 | --- | --- | --- |
-| Registry 未就绪 / 就绪 / 停止中 | Registry 根据初始化结果和调用方的准入控制确认 | 未就绪时拒绝管理操作；停止中拒绝外部新操作 |
+| Registry 未就绪 / 就绪 / 停止中 | Registry 确认自身管理组件与事件装配；调用方另行确认业务注册及服务就绪，并控制准入 | 未就绪时拒绝管理操作；停止中拒绝外部新操作；Registry 就绪不代表业务或用户包已就绪 |
 | 包已解析 | 解析事件确认包根、声明格式与入口条件 | 可以进入依赖解析，不代表依赖已满足或可以导入代码 |
 | 包依赖已确认 | 依赖解析事件返回合法包集合、包序及拒绝原因 | 可以为选定包生成单包 Plan；条件变化时需重新核对 |
 | 计划已生成 | 计划事件确认包内目标与有序步骤 | 可以请求执行，仍需核对当前授权和记录，此时尚未注册 |
@@ -884,7 +920,7 @@ Report 概括 Plan 中的实际注册、资源变化与清理结果。解析、�
 | manifest 和选定包根 | 包提供声明，Package Manager 校验实际选定内容 | 同次计划保持固定；是否复制或采用不可变包内容仍待确认 |
 | 包依赖和选择结果 | Package Manager 根据选定声明与已生效版本核对 | 用于本次安装及后续卸载依赖检查 |
 | Plan | Orchestrator 生成，Runtime 保存其与操作、来源及目标的可信关联 | 内存中的单包操作计划，不是可恢复队列 |
-| 事件与 Handler 注册记录 | Events | 由 Events 公共接口管理，Extension 保存返回的注册标识与包归属 |
+| 事件与 Handler 注册记录 | Events | 由 Events 公共接口管理；Registry 记录自身初始化建立的管理注册，Runtime 保存用户包 Handler 的注册标识与包归属 |
 | 实例、注册归属、资源与待清理项 | Runtime | 当前实例的内存记录，清理完成前不能丢弃 |
 | Report 与诊断日志 | Runtime 提供执行事实，管理 Core Handler 汇总，调用方决定留存方式 | 用于结果交接和排查，不替代注册及资源使用记录 |
 
@@ -902,10 +938,11 @@ Report 概括 Plan 中的实际注册、资源变化与清理结果。解析、�
 
 ### 8.1 故障范围与责任
 
-下表中的模块名称表示故障处理所需的能力和记录由谁提供，处理逻辑由对应事件的 Core Handler 执行，必要时协调多个模块。EventBus 仅返回结果或传播异常；决定查询、回滚、重试或清理的是接收结果的业务代码或 Handler，并由其显式触发对应事件。不存在 EventBus 自动执行的异常补偿路径。
+下表中的模块名称表示故障处理所需的能力和记录由谁提供。启动装配失败由调用方或 Registry 按各自的注册归属处理；包管理操作失败由对应事件的 Core Handler 处理，必要时协调多个模块。EventBus 仅返回结果或传播异常；决定查询、回滚、重试或清理的是接收结果的业务代码或 Handler，并由其显式触发对应事件。不存在 EventBus 自动执行的异常补偿路径。
 
 | 故障 | 谁处理、怎样处理 | 后续需要注意什么 |
 | --- | --- | --- |
+| 业务注册或 Registry 初始化失败 | 调用方停止后续启动，清理自身业务注册；Registry 自身装配失败时按第 4.1 节清理本次管理注册和自有资源，保留错误及未清理项 | 不提交包操作，不清空调用方传入的 EventBus；确认清理完成后再重建 |
 | manifest 无效、入口越界、运行域不支持或版本不兼容 | Package Manager / Orchestrator 在加载前拒绝相关目标 | 不受影响的包可继续，依赖失败目标的包跳过 |
 | 模块导入、工厂或 `register` 失败 | Runtime 停止当前计划，逆序注销本批已完成的注册 | 无法撤销导入产生的外部影响 |
 | 回滚时注销失败 | Runtime 保留原始错误和残留标识，继续尝试其他可清理项 | 不能报告回滚完成，也不能直接重复安装 |
@@ -927,7 +964,7 @@ Report 概括 Plan 中的实际注册、资源变化与清理结果。解析、�
 
 在同一进程中，先查询真实记录，再选择正常卸载、失败安装回滚或原 Plan 的受控续清理。直接调用扩展实例 `register`，或重新执行整份 Plan，都不能代替结果核对，否则可能重复注册或重复外部操作。具体查询和重试协议由 Q04 确认。
 
-进程重启后，完成事件装配，再由 `package.install` 及其子事件重新解析、校验和登记扩展。这只能重建注册关系，不能恢复旧 Plan 的执行位置、Handler 的局部变量、运行中的工具操作或旧 Ops。
+进程重启后，调用方重新准备 EventBus、注册业务内容并传入新的 Registry；初始化完成后，再由 `package.install` 及其子事件重新解析、校验和登记扩展。这只能重建注册关系，不能恢复旧 Plan 的执行位置、Handler 的局部变量、运行中的工具操作或旧 Ops。
 
 缺少持久操作记录、必要隔离和可查询的外部回执时，不能保证自动接管旧操作，也不能保证外部动作恰好执行一次。
 
@@ -941,13 +978,15 @@ Registry 和直接 `trigger` 的受控入口使用相同授权检查，核对谁
 
 个人扩展只能使用受限的 USER 登记入口，事件定义和平台处理器由可信代码登记。必需的授权检查应由受控业务入口或实际资源访问入口执行，不能只依赖扩展 Handler 拦截。
 
-发起子操作时，只能保持或收紧原请求的权限。平台 Core Handler 的包关联信息不能代替调用方授权，也不能使子操作获得额外权限。通用身份和授权约定见 [Events 第 9.1 节](../../../events/docs/designs/events-architecture.md#91-身份与授权检查)。
+发起子操作时，只能保持或收紧原请求的权限。平台 Core Handler 的包关联信息不能代替调用方授权，也不能使子操作获得额外权限。通用身份和授权约定见 [Events 第 9 节](../../../events/docs/designs/events-architecture.md#9-错误与安全边界)。
 
 撤销包权限与卸载包是两件事。即使旧 Handler 仍在执行，后续资源访问也应按当前权限拒绝。已经发出的外部请求能否撤回，由相应业务能力决定。
 
 ### 9.2 共享与隔离
 
-建议每个 Registry 实例管理一个 EventBus 和一套生效记录，不通过全局可变的“当前包”或“当前会话”传递身份。注册归属应绑定到当前加载任务，或由该任务专用的受限入口保存，避免把一个计划的 `handler_id` 记到另一个计划名下。
+建议由调用方为每个运行域准备一个 EventBus，交给对应的一个 Registry 使用，并由该 Registry 维护一套生效记录。业务事件、包管理事件、USER Handler 和 Ops 发起的新事件使用同一 EventBus；多个独立 Registry 共享一个 EventBus 的管理归属与清理不在本期设计范围内。
+
+不通过全局可变的“当前包”或“当前会话”传递身份。注册归属应绑定到当前加载任务，或由该任务专用的受限入口保存，避免把一个计划的 `handler_id` 记到另一个计划名下。
 
 不同租户需要不同扩展集合时，应使用独立实例，或由调用方提供经过确认的隔离方案。使用受限能力入口，并不自动隔离 Python 模块全局变量、文件系统、连接池或扩展自己保存的状态。共享资源在并发使用时是否安全，由资源提供方负责。
 
@@ -987,6 +1026,10 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 
 ### 11.1 代表性场景
 
+**先注册业务内容，再初始化包管理。**调用方准备 EventBus，注册业务事件及其 Core Handler、BUILTIN Handler 和 Ops Build Handler，再将该实例传给 `Registry.init`。Registry 只补充 Extension 管理事件，不重复注册业务内容，也不触发能力构建；后续安装、USER 注册和业务事件调用均使用该实例。
+
+**初始化中途失败。**Registry 已注册部分管理事件，后续注册因冲突或其他错误失败。Registry 保持未就绪，清理本次已建立的管理注册并保留未清理项，不删除调用方已有的业务注册或冲突定义。调用方停止启动，确认清理后再重建，不直接重复初始化。
+
 **正常加载并参与 Bash 调用。**业务代码触发 `package.install`；安装 Handler 依次通过包解析、依赖解析、单包计划和计划执行事件推进。执行 Handler 在内部加载、创建实例并注册，保存生效记录后交回 Report。后续业务入口触发 Bash 工具事件，调用方核对扩展参与和实际结果。
 
 **包版本不满足依赖。**调用方传入公共包 1.0.0，企业包却要求至少 1.2.0。Package Manager 检查后不加载企业包，也不自动扫描其他目录寻找替代版本。其他不受这项依赖影响的包可以继续处理。
@@ -1013,6 +1056,7 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 
 | 主题 | 需要证明什么 | 设计位置 | 后续验证归属 |
 | --- | --- | --- | --- |
+| EventBus 传入与初始化 | 业务注册先于 Registry 初始化；管理、业务和 USER 注册使用同一 EventBus；不执行业务注册回调、不触发 `ops.build`；重复初始化、事件冲突及部分失败不破坏已有注册，残留可核对 | 第 4.1、4.5、9.2、11.1 节 | Registry、Events 与调用方集成验证 |
 | 来源与声明 | 路径解析、同 ID 冲突和依赖检查有明确结果；拒绝无效版本、入口和运行域，入口路径不超出选定包根 | 第 4.2 节 | Extension 的 manifest 与来源特性方案 |
 | 统一事件入口与粒度 | 9 类目标事件均有独立入口与完成依据；内部检查、加载登记、等待释放和文件清理归所属事件，不出现绕行或无理由的额外事件 | 第 4.1、5 节 | Extension 事件契约与全过程集成验证 |
 | 包流程编排 | 包管理及真实业务事件有明确业务或 Handler 触发点；EventBus 不编排下一项包步骤 | 第 2.2、4.5、6、11.1 节 | Extension 与 Events 协作验证 |
@@ -1036,6 +1080,7 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 | 设计问题 | 当前方案及理由 | 代价与限制 | 状态 |
 | --- | --- | --- | --- |
 | 管理逻辑放在哪里 | 在 `core/extension` 维护，通过 Events 公共接口完成注册和执行协作 | Events 不反向依赖包管理或业务实现 | 目标设计 |
+| 谁准备 EventBus 与业务注册 | 调用方先准备 EventBus 并注册业务内容，再传给 Registry；业务装配由调用方直接完成，使 Registry 专注 Extension 管理职责 | 调用方协调启动与 EventBus 生命周期，需区分业务就绪和管理就绪；初始化失败只清理本次自有注册 | 目标设计；最终接口归 Q08 |
 | 操作如何执行 | 管理请求和独立可复用操作经过 9 类事件；内部步骤由所属 Core Handler 使用模块能力完成 | 每类事件要能说明独立意义、结果、模块依赖和失败责任 | 本方案的目标事件划分；公开标识及契约待规约化 |
 | Core Handler 如何使用模块 | 处理器按需使用 Package Manager、Extension Orchestrator 和 Extension Runtime 的能力，一个处理器可以使用多个模块；独立操作仍经过对应事件 | 模块分工与事件处理职责需要分别明确，不按一个处理器对应一个模块划分 | 与 overview 第 2.1 节一致 |
 | 谁编排包流程 | 业务代码及 Handler 显式触发包管理或业务事件，Registry 提供便捷方法；EventBus 不决定下一项包操作 | 包流程与通用事件服务的责任需要分开维护 | 基于 Events 的设计边界 |
@@ -1074,7 +1119,7 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 | Q05 定向操作与依赖保护 | `extension_id` 选中目标后需要一并处理哪些依赖方，以及部分卸载和被依赖包重载的范围 | Orchestrator / Package Manager；生命周期 spec | 不留下仍依赖已卸载目标的扩展，卸载顺序和影响范围明确 |
 | Q06 管理事件与并发 | 第 4.1.1 节 9 类事件的标识、输入输出、可介入与替代结果、可信父子关联、根操作准入、停止清理及递归限制 | Extension、Events、调用方；控制事件 / 生命周期 spec | 保持事件边界；独立操作均有完成依据，内部步骤不另设事件；根操作不等待自身，停止时保留必要清理范围 |
 | Q07 等待、退出与文件所有权 | 运行中调用与能力使用的结束确认、扩展关闭资源的约定、超时和取消，以及托管产物与源码的清理范围 | Runtime、Events、Package Manager 与调用方；生命周期 feature | 确认无人使用后才释放资源，有残留时保留记录和后续处理入口 |
-| Q08 最终公开接口 | Registry 业务便捷方法、受控事件入口、管理事件目录与导出、可信包及 Plan 关联，以及 Plan / Report 模型和传递方式 | Extension 与 Events；接口 spec / 集成 feature | 执行只接受可核对的可信计划；复用 Events 公共接口和能力模型，扩展接口仅补充包管理职责 |
+| Q08 最终公开接口 | `Registry.init` 接收已准备好的 EventBus 的参数与检查方式、重复初始化及失败清理结果；业务便捷方法、受控事件入口、管理事件目录与导出、可信包及 Plan 关联，以及 Plan / Report 模型和传递方式 | Extension 与 Events；接口 spec / 集成 feature | 初始化不再接收业务注册回调，同一 EventBus 的使用与清理归属可核对；执行只接受可信计划，复用 Events 公共接口和能力模型，扩展接口仅补充包管理职责 |
 
 问题解决后，应将结果写回相关正文、图表、概览和对应规约，不能只在本表标为完成。负责人认领、排期、PR 和验证进展由后续开发计划统一维护；本表只说明还缺哪些设计结论及其影响。
 
