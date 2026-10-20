@@ -1275,7 +1275,7 @@ async def test_group_message_without_port_is_rejected_before_events(harness):
 
 
 @pytest.mark.asyncio
-async def test_mentioned_group_message_can_be_ignored_without_opening_a_task(harness):
+async def test_mentioned_group_message_bypasses_judgment_and_enters_execution(harness):
     spec = harness.spec(system_prompt="你是团队里的调研专家。")
     chat = GroupChat(
         (
@@ -1288,21 +1288,19 @@ async def test_mentioned_group_message_can_be_ignored_without_opening_a_task(har
     events = await collect(
         harness.api.execute_persistent_request(spec, ctx, group_request(mention_ids=("business-agent",)))
     )
-    assert kinds(events) == ["model.completed", "participation.decided", "execution.final"]
-    assert events[1].payload.decision == "ignore"
-    assert events[1].payload.model_call_id == events[0].payload.model_call_id
-    assert events[2].payload.status == "ignored" and events[2].payload.output_refs == ()
-    assert "output.proposed" not in kinds(events) and "execution.started" not in kinds(events)
-    assert harness.model.calls == 0 and harness.model.judge_calls == 1
-    assert harness.model.judge_kwargs[0]["tools"] is None
-    assert chat.calls == [(None, 8)]
-    text = prompt_text(harness.model)
-    assert "你是团队里的调研专家。" in text
-    assert "被提及: 是" in text and "李四" in text and "att-1" in text and "reply_to: m-0" in text
-    assert "EARLIER-CONTEXT" in text and "TRIGGER-SHOULD-BE-EXCLUDED" not in text
-    assert harness.assembler.calls == [] and harness.store.loaded_marker == "never loaded"
-    assert harness.store.endings == [] and not ctx.binding.attempted
-    assert host.reports[0].status == "known"
+    decided = next(event for event in events if event.event_type == "participation.decided")
+    started = next(event for event in events if event.event_type == "execution.started")
+    final = next(event for event in events if event.event_type == "execution.final")
+
+    assert decided.payload.decision == "respond"
+    assert decided.payload.evidence_refs == ("m-1",)
+    assert decided.payload.model_call_id is None
+    assert started.payload.decision_event_id == decided.event_id
+    assert final.payload.status == "completed"
+    assert harness.model.calls == 1 and harness.model.judge_calls == 0
+    assert chat.calls == []
+    assert harness.assembler.calls and ctx.binding.attempted
+    assert host.events == events
 
 
 @pytest.mark.asyncio
