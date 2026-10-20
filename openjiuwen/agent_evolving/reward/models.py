@@ -159,7 +159,8 @@ async def can_see(model, log=lambda message: None, notes=None):
     if key not in cache:
         log(f"vision probe for {model.name} unclear: {problem[:200]}")
         if notes is not None:
-            notes.append(f"没能确认模型 {model.name} 能否看图，本次没有发截图；在配置里写 \"vision\": true 可跳过试探。")
+            notes.append(f"没能确认模型 {model.name} 能否看图，本次没有发截图；"
+                         '在配置里写 "vision": true 可跳过试探。')
         return False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

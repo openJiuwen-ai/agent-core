@@ -14,12 +14,12 @@ Results: results/results.jsonl (one line per candidate, resumable), results/crit
 import argparse
 import asyncio
 import json
-import sys
 import tarfile
 import time
 from pathlib import Path
 
 from . import pipeline
+from .cli_logging import progress_logger, result_logger
 from .config import load_config
 from .files import extract_text, read_files
 
@@ -107,8 +107,9 @@ def summarize(rows):
 
 
 async def main_async(args):
+    logger = progress_logger()
     pack, out = Path(args.pack), Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
+    await asyncio.to_thread(out.mkdir, parents=True, exist_ok=True)
     config = load_config(args.config)
     results_path = out / "results.jsonl"
     rows = [json.loads(line) for line in results_path.read_text("utf-8").splitlines()] \
@@ -126,7 +127,7 @@ async def main_async(args):
                 if (case["task"], rnd["round"], arm_name) not in seen:
                     jobs.append((case, rnd, arm_name, refs))
     jobs = jobs[:args.limit] if args.limit else jobs
-    print(f"{len(jobs)} candidate(s) to score, {len(rows)} already done", file=sys.stderr)
+    logger.info("%s candidate(s) to score, %s already done", len(jobs), len(rows))
 
     gate = asyncio.Semaphore(args.concurrency)
     lock = asyncio.Lock()
@@ -166,13 +167,15 @@ async def main_async(args):
             rows.append(row)
             with results_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-        print(f"[{time.monotonic() - started:5.0f}s] {label}: ours {row['total']} official {row['official']:.1f}"
-              + (f" ERROR {row['error']}" if row.get("error") else ""), file=sys.stderr, flush=True)
+        logger.info(
+            "[%5.0fs] %s: ours %s official %.1f%s", time.monotonic() - started, label,
+            row["total"], row["official"], f" ERROR {row['error']}" if row.get("error") else "",
+        )
 
     await asyncio.gather(*(run(*job) for job in jobs))
     summary = summarize(rows)
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    result_logger().info(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 def main(argv=None):

@@ -247,10 +247,12 @@ class _ProgressLines:
         self.tick(detail)
         return result
 
-    def finish(self, total: Any) -> None:  # not called by the pipeline; the adapter ends the run itself
+    @staticmethod
+    def finish(total: Any) -> None:  # not called by the pipeline; the adapter ends the run itself
         del total
 
-    def fail(self, error: Any) -> None:
+    @staticmethod
+    def fail(error: Any) -> None:
         del error
 
     def log(self, message: str) -> None:
@@ -386,25 +388,23 @@ async def run_reward(
     if config.get("deadline_seconds"):
         evidence_seconds = min(evidence_seconds, float(config["deadline_seconds"]))
     lines = _ProgressLines(say, language, evidence_seconds)
-    token = progress._current.set(lines)  # noqa: SLF001 - Reward's own per-run progress slot
-    try:
-        result = await pipeline.reward(
-            task, artifacts, config, txt_response=reply, user_note=user_attribution or "", log=lines.log
-        )
-        payload = to_reward_payload(result, language)
-    except Exception as exc:
-        emit_single_llm_event(
-            status_sink,
-            stage="reward",
-            model=model_name,
-            counter=counter,
-            started_at_ns=started,
-            ended_at_ns=time.time_ns(),
-            error=str(exc)[:200] or type(exc).__name__,
-        )
-        raise
-    finally:
-        progress._current.reset(token)  # noqa: SLF001
+    with progress.scoped(lines):
+        try:
+            result = await pipeline.reward(
+                task, artifacts, config, txt_response=reply, user_note=user_attribution or "", log=lines.log
+            )
+            payload = to_reward_payload(result, language)
+        except Exception as exc:
+            emit_single_llm_event(
+                status_sink,
+                stage="reward",
+                model=model_name,
+                counter=counter,
+                started_at_ns=started,
+                ended_at_ns=time.time_ns(),
+                error=str(exc)[:200] or type(exc).__name__,
+            )
+            raise
     lines.line(100, _labels(language)["finished"].format(score=payload["overall"]["total_score"]))
     meta = {
         "engine": "reward",

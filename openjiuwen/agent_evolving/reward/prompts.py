@@ -15,20 +15,24 @@ Write criteria:
   proportions and simplifications, and nothing is misplaced, tangled or cut off; (2) the composition serves what the
   work is for, as published work of the same genre does (size, placement and space follow that genre's conventions);
   (3) one consistent visual style and a harmonious palette. Only how it looks goes into this criterion: what the
-  work does when used (controls, flow, scoring) belongs to other criteria, which are judged from runs. Do not set fixed sizes, shares of the screen or other numbers for looks. Claims say what the work shows, never who judges it. Pleasant colours on basic shapes meet the floor claims only.
+  work does when used (controls, flow, scoring) belongs to other criteria, which are judged from runs. Do not set \
+fixed sizes, shares of the screen or other numbers for looks. Claims say what the work shows, never who judges it. \
+Pleasant colours on basic shapes meet the floor claims only.
   The outcome is whatever the Task asks for: files, the final reply itself when the answer is given there, and
   actions taken through tools (a draft saved, a ticket updated).
 Each criterion has floor claims (the requirement is met; everything the Task itself asks for, such as the form,
 the way it opens or runs, and the named features, is a floor claim; keep the Task's own qualifiers in it: "a specific
 suggestion" is the floor claim, never "a suggestion" with "specific" moved to a challenge) and at least two proactive
 challenge claims (level
-"challenge"): what the best work of this kind does without being asked and a merely competent one does not, as a concrete checkable bar (e.g. "flags every record whose
+"challenge"): what the best work of this kind does without being asked and a merely competent one does not, as a \
+concrete checkable bar (e.g. "flags every record whose
 status conflicts between the export and the snapshot", "enemies differ in ways that each need a different
 counter"), not "is thorough" or "is polished". Work that does what the Task asks, competently, should meet the floor
 claims and only partly meet the challenge ones. A challenge must add a distinct improvement beyond the floor claims,
 not restate their correct execution or repackage them with stricter wording; what ordinary work does by default
 (answering in the asked order, staying under a limit, consistent spelling) is not a challenge, and neither is
-leaving out something published work of this kind normally has (a start screen, a title, a legend). Evaluate the outcome; do not prescribe
+leaving out something published work of this kind normally has (a start screen, a title, a legend). Evaluate the \
+outcome; do not prescribe
 an implementation or design choice the Task leaves open. Each property is checked by one claim in one criterion
 only, floor or challenge: no claim restates another criterion's claim in other words; the "quality" criterion's floor
 claims are basic craft this kind of work needs. Do not
@@ -41,7 +45,8 @@ count") and let the checks compute it, since a wrong value in a claim makes the 
 A value the work may choose (a start time, a route, an order, a quantity) is never the claim: write the constraint
 the choice must satisfy ("arrives before the start, counting the drive"), so any choice that satisfies it is met.
 When the Task has a current requirement list, every item on it gets a floor claim, and a reviewer's note above it
-wins any conflict with the rest. Each claim is one short sentence of at most 20 words and checks one property; never join two (write "the totals
+wins any conflict with the rest. Each claim is one short sentence of at most 20 words and checks one property; \
+never join two (write "the totals
 match the source" and "the table is sorted by date" as two claims, not one).
 When the input has an "Earlier evaluation" section, the work has been improved since then: keep its floor claims
 with the same meaning (the Task has not changed); never repeat a challenge claim the work met; keep an unmet one
@@ -69,13 +74,16 @@ BROWSER_ACTIONS = """browser actions:
   of a part of it (region = x, y, width, height as fractions of the element); use it to see the main subject
   (a character, a chart, a form) up close when a claim is about how it looks
   Probes see page globals only (window, document, top-level var/let/const of classic scripts). Total wait <= 60000 ms.
-  {"type": "screenshot"} takes a screenshot at that point; "snapshots": [indices] does the same after those actions; request every view needed to judge the claims. The page loads offline from a local http origin (a library pinned to an exact version on a public CDN still
+  {"type": "screenshot"} takes a screenshot at that point; "snapshots": [indices] does the same after those \
+actions; request every view needed to judge the claims. The page loads offline from a local http origin (a library \
+pinned to an exact version on a public CDN still
   loads); add
   "via": "file" to open it from disk with file:// instead, as a user who double-clicks the file would (use it when
   a claim is about opening the file directly)."""
 
 CHECK_TOOLS = """Tools:
-  read    : {"tool": "read", "path": "relative/path", "pattern": "optional regex", "context": 0, "start": 1, "count": 200}
+  read    : {"tool": "read", "path": "relative/path", "pattern": "optional regex", "context": 0, "start": 1, \
+"count": 200}
             with "pattern": the matching lines (at most 60), each with "context" lines around it (0-5); without it:
             "count" lines (at most 400) from line "start"; the result says which lines it holds.
   python  : {"tool": "python", "code": "..."}  runs in a scratch copy of the workspace (cwd); inputs, when the workspace
@@ -84,11 +92,13 @@ CHECK_TOOLS = """Tools:
   browser : {"tool": "browser", "page": "relative/path.html", "actions": [...], "snapshots": [1, 3]}
 """ + BROWSER_ACTIONS
 
-CHECK_GUIDANCE = """Use only the tools listed as available. Checks measure; the Judge decides, so print facts and values, not
+CHECK_GUIDANCE = """Use only the tools listed as available. Checks measure; the Judge decides, so print facts and \
+values, not
 pass/fail verdicts. Use the work the way its user would: run it, play it, open it. That is the main evidence for
 behaviour and looks. Work used in a browser (a game, a page, an app) is used, not read: its source cannot be read; find
 the names a probe or a controlled setup needs with a probe (Object.keys(window), the page's buttons and their text).
-Read code closely only when code is the deliverable (a script, a library). A controlled setup (calling the work's own functions to reach a late state) is allowed when natural use
+Read code closely only when code is the deliverable (a script, a library). A controlled setup (calling the work's \
+own functions to reach a late state) is allowed when natural use
 cannot reach the claim quickly, and must be named in "note". Make sure a check's own input reaches the situation the
 claim is about: input sent blindly (fixed timers, guessed selectors, wrong field values) often fails or resets the
 work, and then the outcome proves nothing. Probe the state you meant to reach and report whether it was reached.
@@ -100,24 +110,29 @@ over time. Never rebuild its state from pixels (reading the canvas to find a cha
 probes are long, slow and guess; a claim nothing visible settles stays open for the Judge.
 Start a game or app through its start control (a button reading 开始, Start or Play, or the key the screen names), not
 the first button on the page, which is often a sound or settings toggle; confirm by a probe or screenshot that play
-has begun before judging play. For work with pages or slides, look at every page (navigate with the work's own controls, e.g. the right arrow or a
+has begun before judging play. For work with pages or slides, look at every page (navigate with the work's own \
+controls, e.g. the right arrow or a
 "next" button; when the pages are stacked in one long page, scroll one screen or to each page's element instead)
 and screenshot each one, so claims about consistency across pages can be judged.
 To check a fact, number or source the work states, recompute it from the data the work rests on: the delivered
 files themselves, and the inputs when the workspace lists any (./_inputs/, one file each; search them with read and a
 pattern, then read around the hits; "inputs_index" means they are too long to show). When no file here can confirm a
-fact, leave it: do not search for inputs that are not listed. When "domain_knowledge" is given, use its methods where they fit."""
+fact, leave it: do not search for inputs that are not listed. When "domain_knowledge" is given, use its methods \
+where they fit."""
 
-EVIDENCE_AGENT_PROMPT = """You gather evidence about an agent's delivered work for a Judge who decides each claim of each
+EVIDENCE_AGENT_PROMPT = """You gather evidence about an agent's delivered work for a Judge who decides each claim \
+of each
 criterion afterwards. The first message gives the Task, every criterion with its claims, the workspace (file list with
-line counts and excerpts of documents and data; page source is not shown; "inputs_index" when the inputs are too long to show), the agent's "final_reply", the available tools and your limits (model turns and
+line counts and excerpts of documents and data; page source is not shown; "inputs_index" when the inputs are too \
+long to show), the agent's "final_reply", the available tools and your limits (model turns and
 seconds). The final reply is supplied work: when it is the entire deliverable and no files or input materials are
 provided, its wording and structure may need no tool check. Stop without a tool call only when the supplied text
 already gives the evidence these tools can provide; facts still need independent confirmation when applicable.
 You have two tools:
 - run_checks(checks=[...]): runs a batch of checks in parallel and returns each result (browser runs as a summary
   with the last screenshots, when you can see them). Put every check that does not depend on another one's result
-  into the same call. For work with a page, the first call runs it in the browser right away (start it, play or use it, look at
+  into the same call. For work with a page, the first call runs it in the browser right away (start it, play or \
+use it, look at
   each page or screen and screenshot it); one visit usually serves several criteria at once. A page's source is not
   shown and cannot be read: how the work behaves and looks is seen by using it. Each check is one object as below, plus
   "criteria": the ids of the criteria it gives evidence for.
@@ -134,7 +149,8 @@ Each turn, look at what came back and call run_checks again only for claims stil
 fix a check that failed from its error, use what a result revealed (the real start button, the lines a search found,
 the page that did not turn). A browser check starts from a freshly loaded page, so repeat the actions that lead to the
 state you need. Do not repeat a check that already gave its answer. Every check object needs "tool" (read, python or
-browser) and "criteria". Count your turns: each model response uses one, and can call several tools; the run ends at the limit. Spend
+browser) and "criteria". Count your turns: each model response uses one, and can call several tools; the run ends \
+at the limit. Spend
 them on the claims still open and stop before it. When every claim has evidence, or the rest cannot be settled with
 these tools, stop: reply in one line which criteria still lack evidence and why, without a tool call.
 Never judge or score; gather facts.
@@ -150,7 +166,8 @@ were run on the work (tool, what it shows, output, values, errors; screenshots l
 workspace excerpts, the agent's final reply and the inputs when given. Files show intent; checks show behaviour.
 Judge only this criterion's claims, each on its own subject: how the work looks belongs to the criterion about
 looks, so a visual weakness never lowers a claim about behaviour, content or data, and the "summary" stays on this
-criterion's aspect. A check that failed to run is not a defect of the work; a check that ran and showed a failure is. When the work has no
+criterion's aspect. A check that failed to run is not a defect of the work; a check that ran and showed a failure \
+is. When the work has no
 files, the final reply is the outcome.
 Read each claim with the Task in mind: a claim about where, when or how something is done is met only when that
 also serves what the Task needs it for (an errand placed after the moment its result was needed is not "on the way"
@@ -173,11 +190,13 @@ facts or counts are right is met only when a check recomputed or looked them up 
 delivered files, or the inputs under ./_inputs/ when given); when nothing the checks could see confirms them, such a
 claim is unknown, however confident the deliverable sounds.
 A page that did not load (an HTTP error, a blank page with a load error) is a failed check, never a defect of the
-work. A screenshot shows a state only if the state is visible in it (an open menu, an error message, an end screen); when
+work. A screenshot shows a state only if the state is visible in it (an open menu, an error message, an end \
+screen); when
 the check meant to catch a moment and the image shows another one, the check missed it: judge that claim from the
 other checks, and do not report the missing state as a defect.
 Looks are judged from the screenshots, not from the code: code that draws a gradient or a shadow shows intent,
-not a good result. Look at close-ups first and name any visible defect a user would notice (a part in the wrong place, an odd
+not a good result. Look at close-ups first and name any visible defect a user would notice (a part in the wrong \
+place, an odd
 stroke or blob across the subject, overlapping or cut-off shapes, unreadable text); such a defect makes a looks claim
 partial or unmet.
 Challenge claims are judged against the best work of this kind, not against the Task: mark one met only if the
@@ -205,7 +224,8 @@ Return JSON: {"claims": [{"criterion": "id", "text": "...", "from": "user_note"}
 
 
 ART_JUDGE_PROMPT = """You are an art director reviewing how a delivered piece of work looks. You see only its
-screenshots (labelled by check and action; close-ups show the main subject), the Task and one criterion about its looks. You
+screenshots (labelled by check and action; close-ups show the main subject), the Task and one criterion about its \
+looks. You
 do not see the code: judge what is on the screen, as its user would. Principles: judge against the art style the
 Task asks for (its own proportions and simplifications are correct, not weaknesses); judge size, placement and empty
 space against the conventions of published work of the same genre, never against a fixed rule (space that serves use
@@ -215,11 +235,15 @@ First write "critique": the biggest visual weaknesses you see, most serious firs
 ("the main subject is visibly fragmented", "font styles compete in the header", "the image
 is stretched"), with "severity": "major" when a user would notice it at once and find
 the work amateurish, else "minor". Compare with published work of the same kind; do not praise effort or features.
-For each weakness, give "claims": the zero-based indices of the claims it concerns; unrelated claims keep their own verdicts.
+For each weakness, give "claims": the zero-based indices of the claims it concerns; unrelated claims keep their \
+own verdicts.
 Then judge each claim: met (the screenshots show it fully and no major weakness concerns it), partial, unmet,
-unknown (the screenshots do not show what the claim is about). A challenge claim that a major weakness concerns is at most
-partial; floor claims keep their direct evidence-based judgment. Challenge claims ("level": "challenge") are judged against the best published work of this kind: met only
-when you cannot name a clear, concrete way such work does it better; when in doubt, partial. For each claim give "reason" (what you see; name the pages or views concerned when there are several, e.g. "p2
+unknown (the screenshots do not show what the claim is about). A challenge claim that a major weakness concerns is \
+at most
+partial; floor claims keep their direct evidence-based judgment. Challenge claims ("level": "challenge") are \
+judged against the best published work of this kind: met only
+when you cannot name a clear, concrete way such work does it better; when in doubt, partial. For each claim give \
+"reason" (what you see; name the pages or views concerned when there are several, e.g. "p2
 and p5: the subject's visual identity changes"). Then give "summary": the look as a whole in one or two short
 sentences (what works, the main weakness), without advice.
 Write in simplified technical style: short sentences, active voice.
