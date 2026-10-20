@@ -713,6 +713,99 @@ def test_kv_affinity_custom_field_name_reaches_extra_body_for_openai_sdk():
     assert "x-agent-hint" not in params
 
 
+def _make_affinity_client() -> OpenAIModelClient:
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="sk-test-key",
+        api_base="https://example.test/v1",
+        extensions={"kv_cache": {"mode": "affinity"}},
+        verify_ssl=False,
+    )
+    return OpenAIModelClient(ModelRequestConfig(model="qwen"), client_config)
+
+
+@pytest.mark.asyncio
+async def test_kv_affinity_evict_messages_window_reaches_request_params():
+    client = _make_affinity_client()
+
+    captured: dict = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeAsyncClient:
+        chat = _FakeChat()
+
+        async def close(self):
+            return None
+
+    client._create_async_openai_client = lambda timeout=None: _FakeAsyncClient()
+
+    old_messages = [{"role": "user", "content": "stale context"}]
+    evicted = await client.evict_kvc(
+        session_id="child",
+        parent_session_id="parent",
+        target="messages",
+        messages=old_messages,
+        msg_start=0,
+        msg_end=1,
+    )
+
+    assert evicted is True
+    assert captured["messages"] == old_messages
+    agent_hint = captured["extra_body"]["agent_hint"]
+    edits = agent_hint["context_management"]["edits"]
+    assert edits == [{"type": "evict", "target": "messages", "start": 0, "end": 1}]
+
+
+@pytest.mark.asyncio
+async def test_kv_affinity_evict_session_target_keeps_empty_messages():
+    client = _make_affinity_client()
+
+    captured: dict = {}
+
+    class _FakeCompletions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+
+    class _FakeChat:
+        completions = _FakeCompletions()
+
+    class _FakeAsyncClient:
+        chat = _FakeChat()
+
+        async def close(self):
+            return None
+
+    client._create_async_openai_client = lambda timeout=None: _FakeAsyncClient()
+
+    evicted = await client.evict_kvc(session_id="child", parent_session_id="parent")
+
+    assert evicted is True
+    assert captured["messages"] == []
+    edits = captured["extra_body"]["agent_hint"]["context_management"]["edits"]
+    assert edits == [{"type": "evict", "target": "session"}]
+
+
+@pytest.mark.asyncio
+async def test_kv_affinity_evict_messages_target_requires_messages():
+    client = _make_affinity_client()
+
+    with pytest.raises(BaseError):
+        await client.evict_kvc(
+            session_id="child",
+            parent_session_id="parent",
+            target="messages",
+            messages=None,
+            msg_start=0,
+            msg_end=1,
+        )
+
+
 def test_non_openrouter_profile_passes_request_level_attribution_headers_through():
     client_config = ModelClientConfig(
         client_provider="OpenAI",

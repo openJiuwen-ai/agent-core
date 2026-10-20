@@ -834,6 +834,8 @@ class OpenAIModelClient(BaseModelClient):
             session_id: str,
             parent_session_id: Optional[str] = None,
             target: str = "session",
+            messages: Union[str, List[BaseMessage], List[dict], None] = None,
+            tools: Union[List[ToolInfo], List[dict], None] = None,
             model: Optional[str] = None,
             msg_start: Optional[int] = None,
             msg_end: Optional[int] = None,
@@ -847,9 +849,18 @@ class OpenAIModelClient(BaseModelClient):
         if not self.supports_kv_cache_affinity():
             return False
 
+        if target == "messages" and messages is None:
+            self._raise_kv_cache_error("messages is required for target=messages")
+        if target == "tools" and messages is None:
+            self._raise_kv_cache_error("messages is required for target=tools")
+        if target == "tools" and tools is None:
+            self._raise_kv_cache_error("tools is required for target=tools")
+        if include_tools and tools is None:
+            self._raise_kv_cache_error("tools is required when include_tools=True")
+
         params = self._build_request_params(
-            messages=[{"role": "user", "content": ""}],
-            tools=None,
+            messages=[] if target == "session" else messages,
+            tools=None if target == "session" else tools,
             temperature=None,
             top_p=None,
             model=model,
