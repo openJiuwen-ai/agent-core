@@ -1023,6 +1023,56 @@ class StatusCode(Enum):
     EVENTS_NEXT_INVALID = (200006, "events next is invalid, reason: {reason}")
     EVENTS_OPS_INVALID = (200007, "events ops is invalid, reason: {reason}")
 
+    # =============================================================================================================
+    # Extension package loading 201000–201099
+    # Business failures for install / reload / uninstall. ActivationReport.error uses status.name.
+    # =============================================================================================================
+
+    EXTENSION_PACKAGE_EXISTS = (
+        201000,
+        "extension package already active, package_id='{package_id}', display_name='{display_name}'")
+    EXTENSION_DUPLICATE_PACKAGE_ID = (
+        201001,
+        "duplicate package.id in one install batch, package_id='{package_id}'")
+    EXTENSION_HOST_VERSION_TOO_LOW = (
+        201002,
+        "host version does not satisfy requires.host, package_id='{package_id}', reason='{reason}'")
+    EXTENSION_DEPENDENCY_NOT_MET = (
+        201003,
+        "package dependency not met, package_id='{package_id}', reason='{reason}'")
+    EXTENSION_DEPENDENCY_CYCLE = (
+        201004,
+        "dependency cycle detected, packages='{packages}'")
+    EXTENSION_DEPENDENT_INCOMPATIBLE = (
+        201005,
+        "dependent rejects new version, package_id='{package_id}', dependent='{dependent}', "
+        "required='{required}', version='{version}'")
+    EXTENSION_PACKAGE_IN_USE = (
+        201006,
+        "package is required by dependents, package_id='{package_id}', dependents='{dependents}'")
+    EXTENSION_PACKAGE_BUSY = (
+        201007,
+        "package has in-flight calls, package_id='{package_id}', reason='{reason}'")
+    EXTENSION_PACKAGE_NOT_INSTALLED = (
+        201008,
+        "package is not active or not installed, package_id='{package_id}', reason='{reason}'")
+    EXTENSION_MANIFEST_INVALID = (201009, "manifest is invalid, reason='{reason}'")
+    EXTENSION_SOURCE_INVALID = (201010, "install source is invalid, reason='{reason}'")
+    EXTENSION_LOAD_FAILED = (201011, "extension load failed, reason='{reason}'")
+    EXTENSION_HANDLER_LEVEL_FORBIDDEN = (
+        201012,
+        "handler_level is not allowed for package extensions, reason='{reason}'")
+    EXTENSION_INSTALL_COPY_FAILED = (
+        201013,
+        "copy into install directory failed, reason='{reason}'")
+    EXTENSION_INFLIGHT_MISMATCH = (
+        201014,
+        "in-flight call accounting error, package_id='{package_id}', reason='{reason}'")
+    EXTENSION_HOST_VERSION_MISSING = (
+        201015,
+        "host version was not provided for requires.host, package_id='{package_id}', "
+        "reason='{reason}'")
+
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.
 

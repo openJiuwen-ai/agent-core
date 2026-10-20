@@ -8,6 +8,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from pathlib import Path
 from types import MappingProxyType
 from typing import Final, TypeAlias
 
@@ -49,10 +50,11 @@ class SessionContext:
 
 @dataclass(frozen=True, slots=True)
 class PackageMetadata:
-    """Package identity supplied when building handler operations."""
+    """Verified package identity bound to a registered handler."""
 
     package_id: str
     package_version: str | None = None
+    root: Path | None = None
 
 
 MatchPattern: TypeAlias = Mapping[str, object]
