@@ -245,6 +245,9 @@ class MilvusIndexer(Indexer):
 
             if isinstance(result, dict):
                 delete_count = result.get("delete_count", 0)
+            elif isinstance(result, (list, tuple, set)):
+                # Milvus Lite returns the primary keys of the deleted entities
+                delete_count = len(result)
             else:
                 delete_count = int(result) if result else 0
 
