@@ -435,6 +435,9 @@ class _TeamRunnerMixin:
                 ):
                     await output_queue.put(("chunk", chunk))
             except asyncio.CancelledError:
+                # Cancellation is teardown (timeout / rejected resume / consumer
+                # stopped early); it must propagate, never enter stream_errors.
+                logger.debug("resume stream pump cancelled for team {}", spec.team_name)
                 raise
             except Exception as exc:
                 stream_errors.append(exc)
