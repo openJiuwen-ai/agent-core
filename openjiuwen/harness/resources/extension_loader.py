@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Literal
@@ -242,6 +243,11 @@ def load_agent_template_package(manifest_path: str | Path) -> AgentTemplateSpec:
         subagents=subagents,
         metadata=dict(payload.get("metadata") or {}),
     )
+
+
+async def aload_agent_template_package(manifest_path: str | Path) -> AgentTemplateSpec:
+    """Async ``load_agent_template_package``, run in a worker thread."""
+    return await asyncio.to_thread(load_agent_template_package, manifest_path)
 
 
 def _load_plugin_manifest_json(manifest: Path) -> PluginSpec:
@@ -1115,6 +1121,7 @@ def _module_to_package_file(module_name: str, package_dir: Path) -> str | None:
 
 
 __all__ = [
+    "aload_agent_template_package",
     "find_agent_template_manifest",
     "find_plugin_manifest",
     "load_agent_template_package",
