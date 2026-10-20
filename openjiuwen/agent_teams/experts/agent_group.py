@@ -39,6 +39,7 @@ from openjiuwen.harness.resources.template_card import (
     LocalizedText,
     load_agent_template_card,
     localized_text,
+    manifest_text,
     normalize_localized,
     read_manifest_mapping,
 )
@@ -181,14 +182,14 @@ def _group_card(
     raw_tags = manifest.get("tags") if isinstance(manifest.get("tags"), list) else []
     return AgentGroupCard(
         name=group_name,
-        description=_text(manifest.get("description")),
+        description=manifest_text(manifest.get("description")),
         display_name=normalize_localized(manifest.get("display_name")),
         display_description=normalize_localized(manifest.get("display_description")),
-        instruction=_text(manifest.get("instruction")),
+        instruction=manifest_text(manifest.get("instruction")),
         capabilities=group_capabilities(manifest),
-        category=_text(manifest.get("category")),
+        category=manifest.get("category") if isinstance(manifest.get("category"), str) else "",
         tags=tuple(normalize_localized(tag) for tag in raw_tags if isinstance(tag, (str, Mapping))),
-        version=_text(manifest.get("version")),
+        version=manifest_text(manifest.get("version")),
         avatar=manifest.get("avatar") if isinstance(manifest.get("avatar"), str) else "",
         members=tuple(
             AgentGroupMemberCard(name=name, group=group_name, card=card)
@@ -502,10 +503,6 @@ def _load_member_template(
             update={"prompt_sections": [*template.prompt_sections, leader_rules]}
         )
     return template
-
-
-def _text(value: Any) -> str:
-    return value.strip() if isinstance(value, str) else ""
 
 
 __all__ = [

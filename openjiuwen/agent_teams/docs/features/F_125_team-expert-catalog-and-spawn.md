@@ -40,11 +40,14 @@
    按语言选文、渲染占位符、逐段 `strip()` 去空段——jiuwenswarm 现有口径，底层用 harness 的
    `render_prompt_content`）、`template_snapshot`、`apply_template_snapshot`、`compose_template_member`。
    预定义成员一次调用 `compose_template_member`；动态成员在登记时写 persona 与快照、构建时
-   `apply_template_snapshot`，两条路径每一步都是同一个函数。
+   `apply_template_snapshot`，两条路径每一步都是同一个函数。动态成员的人设按 teammate 基线 spec 的语言渲染（`ExpertBinding.persona_language`），
+   与 `compose_template_member` 取的语言相同，而不是 leader 工具的语言。
 4. **三个 leader 工具，经 `TeamToolRail` / `create_team_tools` 挂载**：`view_experts`、`view_expert_groups`
    （`get` 带成员表，可选 `member` 只展开一个成员）、`spawn_expert`。三者同属 `EXPERT_TOOLS`、进入
    `LEADER_ONLY_TOOLS`，**只按一个信号门控**：宿主注入了目录才构造、才不被减掉，三者同生同灭。
-   查看工具只读卡片（读不出的包跳过并记 warning），只有 `spawn_expert` 调用完整加载器。
+   查看工具只读卡片（读不出的包跳过并记 warning），只有 `spawn_expert` 调用完整加载器。成员表的 `spawnable`：
+   native 成员恒为真；外部运行时成员要求其 provider 映射出的 CLI 类型（`cli_agent_for_provider`，与
+   `external_cli_agent_spec_from_template` 同一张映射）已在本 Team 声明——与 `spawn_expert` 的声明检查一致。
 5. **`spawn_expert` 只登记成员行**（`UNSTARTED`），拉起仍走 `autostart_unstarted`。成员行：
    `prompt = 人设 + 补充 prompt`、`desc = 模板描述 + 补充 desc`（只追加不覆盖）、`display_name` 缺省取
    卡片显示名、与名册重名时追加「（member_name）」，`options.agent_template = {ref, version, snapshot}`。

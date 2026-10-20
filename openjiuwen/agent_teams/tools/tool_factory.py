@@ -429,7 +429,13 @@ def _expert_tools(
     bound_group = binding.bound_group if binding is not None else None
     return {
         "view_experts": ViewExpertsTool(catalog, t, language=language),
-        "view_expert_groups": ViewExpertGroupsTool(catalog, t, language=language, bound_group=bound_group),
+        "view_expert_groups": ViewExpertGroupsTool(
+            catalog,
+            t,
+            language=language,
+            bound_group=bound_group,
+            declared_cli_kinds=agent_team.external_cli_kinds(),
+        ),
         "spawn_expert": SpawnExpertTool(
             agent_team,
             t,
@@ -437,6 +443,7 @@ def _expert_tools(
             language=language,
             bound_group=bound_group,
             persona_workspace=binding.persona_workspace if binding is not None else None,
+            persona_language=binding.persona_language if binding is not None else None,
             model_config_allocator=model_config_allocator,
         ),
     }

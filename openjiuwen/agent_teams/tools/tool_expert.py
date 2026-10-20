@@ -60,8 +60,6 @@ if TYPE_CHECKING:
     from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 
 _MANIFEST = "manifest.json"
-# Runtime providers ``external_cli_agent_spec_from_template`` maps onto a CLI kind.
-_SPAWNABLE_PROVIDERS = frozenset({"claudecode", "codex"})
 
 
 def _first_line(text: str) -> str:
@@ -152,11 +150,15 @@ def _render_expert_detail(detail: dict[str, Any], *, header: str) -> str:
     return "\n".join(lines)
 
 
-def _is_spawnable(member: AgentGroupMemberCard) -> bool:
-    """Whether ``spawn_expert`` can run this member as a teammate."""
+def _is_spawnable(member: AgentGroupMemberCard, declared_cli_kinds: frozenset[str]) -> bool:
+    """Whether ``spawn_expert`` can run this member: native, or an external runtime the team declared."""
+    from openjiuwen.agent_teams.external.manifest import cli_agent_for_provider
+
     if member.is_leader:
         return False
-    return member.card.runtime == "native" or member.card.runtime_provider in _SPAWNABLE_PROVIDERS
+    if member.card.runtime == "native":
+        return True
+    return cli_agent_for_provider(member.card.runtime_provider) in declared_cli_kinds
 
 
 class ViewExpertsTool(TeamTool):
@@ -254,6 +256,7 @@ class ViewExpertGroupsTool(TeamTool):
         *,
         language: str,
         bound_group: BoundAgentGroup | None = None,
+        declared_cli_kinds: frozenset[str] = frozenset(),
     ):
         super().__init__(
             ToolCard(id="team.view_expert_groups", name="view_expert_groups", description=t("view_expert_groups"))
@@ -261,6 +264,7 @@ class ViewExpertGroupsTool(TeamTool):
         self._catalog = catalog
         self._language = language
         self._bound_group = bound_group
+        self._declared_cli_kinds = declared_cli_kinds
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -355,7 +359,7 @@ class ViewExpertGroupsTool(TeamTool):
                 {
                     "group": location.name,
                     "display_name": entry.display_label(language),
-                    "spawnable": _is_spawnable(entry),
+                    "spawnable": _is_spawnable(entry, self._declared_cli_kinds),
                     "predefined": bound and self._is_predefined(entry.name),
                 }
             )
@@ -374,7 +378,7 @@ class ViewExpertGroupsTool(TeamTool):
                     "display_name": entry.display_label(language),
                     "description": _first_line(entry.card.display_text(language)),
                     "runtime": _runtime_label(entry.card),
-                    "spawnable": _is_spawnable(entry),
+                    "spawnable": _is_spawnable(entry, self._declared_cli_kinds),
                     "predefined": bound and self._is_predefined(entry.name),
                 }
                 for entry in card.members
@@ -467,6 +471,7 @@ class SpawnExpertTool(_SpawnToolBase):
         language: str,
         bound_group: BoundAgentGroup | None = None,
         persona_workspace: str | None = None,
+        persona_language: str | None = None,
         model_config_allocator: Callable[..., "Allocation | None"] | None = None,
     ):
         super().__init__(team, t, "spawn_expert")
@@ -474,6 +479,9 @@ class SpawnExpertTool(_SpawnToolBase):
         self._language = language
         self._bound_group = bound_group
         self._persona_workspace = persona_workspace
+        # Same language compose_template_member renders predefined members in
+        # (the base spec's), so both paths yield the same persona.
+        self._persona_language = persona_language
         self._allocate_model_config = model_config_allocator
         external_cli_properties: dict[str, Any] = {
             "fallback_model_name": {
@@ -525,6 +533,13 @@ class SpawnExpertTool(_SpawnToolBase):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        try:
+            return await self._invoke(inputs)
+        except Exception as exc:
+            team_logger.error("spawn_expert failed: {}", exc)
+            return self._fail(f"Internal error: {exc}")
+
+    async def _invoke(self, inputs: dict[str, Any]) -> ToolOutput:
         err = validate_member_name(inputs.get("member_name"))
         if err:
             return self._fail(err)
@@ -637,7 +652,9 @@ class SpawnExpertTool(_SpawnToolBase):
             version=card.version,
             display_name=card.display_label(self._language) or template.agent_card.name or ref.name,
             desc=card.description or template.agent_card.description,
-            persona=render_template_persona(template, language=self._language, workspace=self._persona_workspace),
+            persona=render_template_persona(
+                template, language=self._persona_language, workspace=self._persona_workspace
+            ),
             snapshot=template_snapshot(template) if external_cli is None else None,
             external_cli=external_cli,
         )

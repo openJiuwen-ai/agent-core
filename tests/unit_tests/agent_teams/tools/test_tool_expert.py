@@ -292,7 +292,9 @@ async def test_view_expert_groups_list_and_get(db: TeamDatabase, catalog: FakeCa
     assert list(members) == ["leader", "clip", "cli-member"]
     assert members["leader"]["spawnable"] is False
     assert members["clip"]["display_name"] == "视频镜头师"
-    assert (members["cli-member"]["runtime"], members["cli-member"]["spawnable"]) == ("claudecode", True)
+    assert (members["cli-member"]["runtime"], members["cli-member"]["spawnable"]) == ("claudecode", False), (
+        "no claude CLI is declared for this team"
+    )
 
 
 @pytest.mark.level1
@@ -730,3 +732,80 @@ def test_template_fields_survive_the_process_spawn_payload() -> None:
     restored = TeamRuntimeContext.model_validate(ctx.model_dump(mode="json"))
     assert restored.agent_template_spec == ctx.agent_template_spec
     assert restored.template_external_cli == ctx.template_external_cli
+
+
+# ---------------------------------------------------------------------------
+# Review follow-ups
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_spawned_persona_uses_the_base_spec_language_like_predefined_members(
+    db: TeamDatabase, catalog: FakeCatalog, packages: dict[str, Path]
+) -> None:
+    """The leader speaks en, the teammate base has no language: both paths render with "cn"."""
+    base = DeepAgentSpec(language=None, workspace=WorkspaceSpec(root_path="/ws/teammate"))
+    predefined = compose_template_member(base, load_agent_group_package(packages["designer"])["clip"])
+    backend = _backend(db)
+    tool = _tools(
+        backend,
+        catalog,
+        binding=ExpertBinding(persona_workspace="/ws/teammate", persona_language=base.language),
+        lang="en",
+    )["spawn_expert"]
+    assert (await tool.invoke({"expert": "clip", "group": "designer", "member_name": "clip-1"})).success
+    assert (await backend.get_member("clip-1")).prompt == predefined.persona
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_spawn_expert_turns_unexpected_errors_into_a_failed_output(
+    db: TeamDatabase, catalog: FakeCatalog
+) -> None:
+    async def _broken(name: str) -> PackageLocation:
+        raise OSError("disk unavailable")
+
+    catalog.locate_expert = _broken
+    result = await _tools(_backend(db), catalog)["spawn_expert"].invoke({"expert": "finance", "member_name": "f-1"})
+    assert not result.success
+    assert result.error == "Internal error: disk unavailable"
+    assert await _member_count(db) == 0
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_external_group_member_is_spawnable_only_when_its_cli_is_declared(
+    db: TeamDatabase, catalog: FakeCatalog
+) -> None:
+    async def _cli_member_spawnable(backend: TeamBackend) -> bool:
+        got = await _tools(backend, catalog)["view_expert_groups"].invoke({"action": "get", "name": "designer"})
+        return {item["name"]: item for item in got.data["group"]["members"]}["cli-member"]["spawnable"]
+
+    assert await _cli_member_spawnable(_backend(db)) is False
+    assert await _cli_member_spawnable(_backend(db, ExternalCliAgentSpec(cli_agent="claude"))) is True
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_snapshot_of_a_deleted_package_fails_loudly_when_mounted(
+    db: TeamDatabase, catalog: FakeCatalog, packages: dict[str, Path]
+) -> None:
+    """SDD-0032 §7 #7: a member whose package directory was removed cannot silently lose its tools."""
+    from openjiuwen.harness.resources import resolve_agent_template_parts
+    from openjiuwen.harness.schema.build_context import BuildContext
+    from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
+
+    tool_file = packages["finance"] / "tools" / "lookup.py"
+    tool_file.parent.mkdir(parents=True)
+    tool_file.write_text("class Lookup:\n    pass\n", encoding="utf-8")
+    manifest = json.loads((packages["finance"] / "manifest.json").read_text(encoding="utf-8"))
+    manifest["tools"] = [{"file": "tools/lookup.py", "class": "Lookup"}]
+    (packages["finance"] / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    backend = _backend(db)
+    assert (await _tools(backend, catalog)["spawn_expert"].invoke({"expert": "finance", "member_name": "f-1"})).success
+    snapshot, _ = _template_fields(await backend.get_member("f-1"))
+    shutil.rmtree(packages["finance"])
+    with pytest.raises(Exception, match="lookup.py"):
+        resolve_agent_template_parts(AgentTemplateSpec.model_validate(snapshot), BuildContext(language="cn"))

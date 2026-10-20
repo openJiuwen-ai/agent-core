@@ -199,7 +199,11 @@ def _derive_expert_binding(spec: TeamAgentSpec) -> Any:
 
     base = spec.agents.get("teammate") or spec.agents.get("leader")
     workspace = base.workspace.root_path if base is not None and base.workspace is not None else None
-    return ExpertBinding(bound_group=bound_agent_group(spec), persona_workspace=workspace)
+    return ExpertBinding(
+        bound_group=bound_agent_group(spec),
+        persona_workspace=workspace,
+        persona_language=base.language if base is not None else None,
+    )
 
 
 def _derive_swarmflow_worker_base_spec(

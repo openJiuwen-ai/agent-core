@@ -22,6 +22,11 @@ _CONFIG_FIELDS = {
 }
 
 
+def cli_agent_for_provider(provider: str | None) -> str | None:
+    """The CLI kind an AgentTemplate runtime provider runs as, or ``None`` when unsupported."""
+    return _PROVIDER_TO_CLI.get(provider or "")
+
+
 def external_cli_agent_spec_from_template(
     template: AgentTemplateSpec,
 ) -> ExternalCliAgentSpec | None:

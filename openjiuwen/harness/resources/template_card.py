@@ -101,15 +101,15 @@ def parse_agent_template_card(manifest: Mapping[str, Any]) -> AgentTemplateCard:
     runtime = manifest.get("runtime")
     provider = runtime.get("provider_name") if isinstance(runtime, Mapping) else None
     return AgentTemplateCard(
-        name=_text(manifest.get("name")),
-        description=_text(manifest.get("description")),
+        name=manifest_text(manifest.get("name")),
+        description=manifest_text(manifest.get("description")),
         display_name=normalize_localized(manifest.get("display_name")),
         display_description=normalize_localized(manifest.get("display_description")),
         category=manifest.get("category") if isinstance(manifest.get("category"), str) else "",
         tags=tuple(
             normalize_localized(tag) for tag in _as_list(manifest.get("tags")) if isinstance(tag, (str, Mapping))
         ),
-        version=_text(manifest.get("version")),
+        version=manifest_text(manifest.get("version")),
         avatar=manifest.get("avatar") if isinstance(manifest.get("avatar"), str) else "",
         runtime="external" if runtime else "native",
         runtime_provider=provider.strip() if isinstance(provider, str) and provider.strip() else None,
@@ -152,7 +152,8 @@ def read_manifest_mapping(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _text(value: Any) -> str:
+def manifest_text(value: Any) -> str:
+    """A manifest text field, stripped; anything but a string reads as empty."""
     return value.strip() if isinstance(value, str) else ""
 
 
@@ -194,6 +195,7 @@ __all__ = [
     "LocalizedText",
     "load_agent_template_card",
     "localized_text",
+    "manifest_text",
     "normalize_localized",
     "parse_agent_template_card",
     "read_agent_template_card",

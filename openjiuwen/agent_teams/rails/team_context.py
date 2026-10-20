@@ -54,6 +54,8 @@ class ExpertBinding:
 
     bound_group: Optional["BoundAgentGroup"] = None
     persona_workspace: Optional[str] = None
+    persona_language: Optional[str] = None
+    """Language personas render in: the base spec's own, as ``compose_template_member`` uses."""
 
 
 class TeamHandleKey:
