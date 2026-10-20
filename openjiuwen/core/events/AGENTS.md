@@ -31,15 +31,17 @@
 
 ### 主要设计文件
 
-已建立的设计文档如下，当前均为目标设计草案，正式 spec 尚未建立。
-开发计划按实际需要建档，不为填满目录创建空文档。
+已建立的设计文档、正式规约和开发计划如下。设计文档仍说明目标机制；已确认的公共契约以 spec 为唯一维护位置。
 
 | 文件 | 主要内容 |
 | --- | --- |
 | [设计概览](docs/designs/events-overview.md) | 整体定位、事件处理流程、职责边界及落地条件 |
 | [详细架构](docs/designs/events-architecture.md) | 注册与执行机制、Ops 按需构建及名词/动词能力、上下文与状态隔离、故障责任、验证归属及待确认事项 |
+| [S_01 Events 公共契约规约](docs/specs/S_01_events-contract.md) | 公共模型、接口协议、错误码、Builder/Ops 边界和基础生命周期语义 |
+| [Events 特性开发计划](docs/designs/events-development-plan.md) | 4 个实际工作项、原 EV 子验收组及 M-01～M-02 的依赖、负责人、进度和验收入口 |
+| [F_01 EV-08 公共契约](docs/features/F_01_ev08-public-contract.md) | EV-08 的落地步骤、错误码号段和测试设计 |
 
-后续开发计划建议使用 `docs/designs/events-development-plan.md`；建档后在本节补充实际链接。
+具体实现方案和验证记录在开工前按实际特性建立，不为填满目录创建空文档。
 
 ## 命名与编号
 
