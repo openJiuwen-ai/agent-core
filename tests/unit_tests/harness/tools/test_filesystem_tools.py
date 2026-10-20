@@ -122,6 +122,36 @@ async def test_read_file_image_can_disable_multimodal_payload(sys_op, temp_dir):
     assert "native image multimodal input is disabled" in read_res.data["content"]
 
 
+def test_pptx_embedded_images_hint_maps_slide_layout_master_inheritance(temp_dir):
+    """Slide→layout→master inheritance：版式/母版上的图片要归属到使用它们的页。"""
+    import zipfile as _zipfile
+
+    file_path = os.path.join(temp_dir, "map.pptx")
+    with _zipfile.ZipFile(file_path, "w") as zf:
+        zf.writestr("ppt/media/image1.png", b"png")
+        zf.writestr("ppt/media/image2.jpg", b"jpg")
+        zf.writestr("ppt/media/image3.tiff", b"tiff")
+        zf.writestr(
+            "ppt/slides/_rels/slide1.xml.rels",
+            '<Relationship Target="../media/image1.png"/>'
+            '<Relationship Target="../slideLayouts/slideLayout1.xml"/>',
+        )
+        zf.writestr(
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            '<Relationship Target="../media/image2.jpg"/>'
+            '<Relationship Target="../slideMasters/slideMaster1.xml"/>',
+        )
+        zf.writestr(
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            '<Relationship Target="../media/image3.tiff"/>',
+        )
+
+    hint = filesystem_module._pptx_embedded_images_hint(file_path)
+    assert "3 张嵌入图片" in hint
+    assert "Slide 1（image1.png、image2.jpg、image3.tiff）" in hint
+    assert "未挂载" not in hint
+
+
 def test_estimate_base64_tokens_matches_actual_encoding():
     for length in (0, 1, 2, 3, 4, 5, 100, 1000, 123457):
         data = b"a" * length
@@ -1062,6 +1092,7 @@ async def test_read_pdf_truncation_on_token_budget(sys_op, temp_dir, monkeypatch
     class _FakePage:
         def __init__(self, text: str):
             self._text = text
+            self.images = []  # pdfplumber 页对象契约：嵌入图片列表
 
         def extract_text(self):
             return self._text

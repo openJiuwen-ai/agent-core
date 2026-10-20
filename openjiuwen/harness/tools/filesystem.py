@@ -119,6 +119,104 @@ def _embedded_images_hint(file_path: str, media_prefix: str, doc_label: str) -> 
     )
 
 
+def _slide_number(slide_rels_name: str) -> int:
+    """Extract the numeric slide index from a rels path like ppt/slides/_rels/slide3.xml.rels."""
+    match = re.search(r"slide(\d+)\.xml\.rels$", slide_rels_name)
+    return int(match.group(1)) if match else 0
+
+
+def _pptx_embedded_images_hint(file_path: str) -> str:
+    """Per-slide image mapping for pptx — resolves the slide→layout→master inheritance.
+
+    Images often live on layouts/masters (backgrounds, logos) rather than the slide
+    itself; without the inheritance chain the model cannot tell which page shows
+    which image. Falls back to the flat hint when rels parsing fails.
+    """
+    try:
+        with zipfile.ZipFile(file_path) as zf:
+            names = zf.namelist()
+            media = [n for n in names if n.startswith("ppt/media/") and not n.endswith("/")]
+            if not media:
+                return ""
+
+            def _read(name: str) -> str:
+                return zf.read(name).decode("utf-8", errors="ignore")
+
+            def _media_targets(content: str) -> list[str]:
+                return re.findall(r'Target="[^"]*media/([^"]+)"', content)
+
+            # 页 → 自有图片 + 所属版式；版式 → 图片 + 所属母版；母版 → 图片
+            slide_own: dict[int, list[str]] = {}
+            slide_layout: dict[int, int] = {}
+            layout_media: dict[int, list[str]] = {}
+            layout_master: dict[int, int] = {}
+            master_media: dict[int, list[str]] = {}
+            slide_rels = [
+                n for n in names if re.match(r"^ppt/slides/_rels/slide\d+\.xml\.rels$", n)
+            ]
+            for rels_name in slide_rels:
+                no = _slide_number(rels_name)
+                content = _read(rels_name)
+                slide_own[no] = _media_targets(content)
+                m = re.search(r'Target="[^"]*slideLayouts/slideLayout(\d+)\.xml"', content)
+                if m:
+                    slide_layout[no] = int(m.group(1))
+            for rels_name in [
+                n for n in names if re.match(r"^ppt/slideLayouts/_rels/slideLayout\d+\.xml\.rels$", n)
+            ]:
+                m = re.search(r"slideLayout(\d+)\.xml\.rels$", rels_name)
+                if not m:
+                    continue
+                no = int(m.group(1))
+                content = _read(rels_name)
+                layout_media[no] = _media_targets(content)
+                mm = re.search(r'Target="[^"]*slideMasters/slideMaster(\d+)\.xml"', content)
+                if mm:
+                    layout_master[no] = int(mm.group(1))
+            for rels_name in [
+                n for n in names if re.match(r"^ppt/slideMasters/_rels/slideMaster\d+\.xml\.rels$", n)
+            ]:
+                m = re.search(r"slideMaster(\d+)\.xml\.rels$", rels_name)
+                if not m:
+                    continue
+                master_media[int(m.group(1))] = _media_targets(_read(rels_name))
+
+            if not slide_own:
+                return _embedded_images_hint(file_path, "ppt/media/", "PPT 演示文稿")
+
+            # 每页有效图片 = 自有 + 版式继承 + 母版继承（去重保序）
+            slide_effective: dict[int, list[str]] = {}
+            for no in sorted(slide_own):
+                files: list[str] = []
+                inherited_layout = slide_layout.get(no, 0)
+                inherited_master = layout_master.get(inherited_layout, 0)
+                for source in (
+                    slide_own.get(no, []),
+                    layout_media.get(inherited_layout, []),
+                    master_media.get(inherited_master, []),
+                ):
+                    for f in source:
+                        if f not in files:
+                            files.append(f)
+                slide_effective[no] = files
+            mapped_files = {f for files in slide_effective.values() for f in files}
+            orphan = [m.rsplit("/", 1)[-1] for m in media if m.rsplit("/", 1)[-1] not in mapped_files]
+            groups = "；".join(
+                f"Slide {no}（{'、'.join(files)}）"
+                for no, files in sorted(slide_effective.items())
+                if files
+            )
+            if orphan:
+                groups += f"；未挂载到具体页（{'、'.join(orphan[:8])}{'…' if len(orphan) > 8 else ''}）"
+            return (
+                f"\n\n[该PPT 演示文稿包含 {len(media)} 张嵌入图片，分布：{groups}。"
+                f"如需理解图片内容，请先用 Python 解包提取"
+                f"（PPT 演示文稿是 zip 格式，图片在 ppt/media/ 目录），"
+                f"然后调用 visual_question_answering 工具识别。]"
+            )
+    except (zipfile.BadZipFile, OSError):
+        return ""
+
 def _read_docx_text(file_path: str) -> str:
     """Extract text and tables from a .docx file as Markdown."""
     from docx import Document
@@ -213,7 +311,7 @@ def _read_pptx_text(file_path: str) -> str:
                         parts.append("| " + " | ".join(cells) + " |")
         parts.append("")
 
-    parts.append(_embedded_images_hint(file_path, "ppt/media/", "PPT 演示文稿"))
+    parts.append(_pptx_embedded_images_hint(file_path))
     return "\n".join(parts)
 
 
@@ -1114,13 +1212,19 @@ class ReadFileTool(Tool):
 
                 # Report embedded images across all pages (not just the extracted range)
                 # so the model knows to extract and recognize them via VQA.
-                total_images = sum(len(page.images) for page in pdf.pages)
+                page_image_counts = [
+                    (page_no, len(pdf.pages[page_no - 1].images))
+                    for page_no in range(1, len(pdf.pages) + 1)
+                    if pdf.pages[page_no - 1].images
+                ]
+                total_images = sum(count for _, count in page_image_counts)
                 if total_images > 0:
+                    distribution = "、".join(f"第 {page_no} 页 {count} 张" for page_no, count in page_image_counts)
                     parts.append(
-                        f"\n\n[该PDF包含 {total_images} 张嵌入图片。"
-                        f"如需理解图片内容，请先用 Python 提取"
-                        f"（pdfplumber 或 PyMuPDF 均可），"
-                        f"然后调用 visual_question_answering 工具识别。]"
+                        f"\n\n[该PDF包含 {total_images} 张嵌入图片（{distribution}）。"
+                    f"如需理解图片内容，请先用 Python 提取"
+                    f"（pdfplumber 或 PyMuPDF 均可），"
+                    f"然后调用 visual_question_answering 工具识别。]"
                     )
                 return "\n\n".join(parts).strip()
 

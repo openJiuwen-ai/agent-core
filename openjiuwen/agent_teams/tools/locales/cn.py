@@ -172,7 +172,10 @@ STRINGS: dict[str, str] = {
     "create_task.tasks": "任务列表（单个任务也用数组包裹）",
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
-    "create_task.task.content": "任务详细内容，包含目标和验收标准",
+    "create_task.task.content": (
+        "任务详细内容，包含目标和验收标准；派发文档解析类任务时，"
+        "若已用 read_file 读过该文档，必须把嵌入图片信息（数量与文件名）转写进任务内容"
+    ),
     # Both create_task variants expose assignee_display_name. Autonomous treats
     # it as optional; scheduled requires it. DB still stores member_name.
     "create_task.task.assignee_display_name": (
