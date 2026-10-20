@@ -107,7 +107,9 @@ class ToolTrackingRail(AgentRail):
         is below every rail that rewrites the tool message, so the text is final.
         """
         session = ctx.session
-        if session is None:
+        if session is None or ctx.is_paused:
+            # A paused call has not finished, so there is no result to show yet;
+            # it is reported when it resumes and ends.
             return
 
         inputs = ctx.inputs

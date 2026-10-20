@@ -8,7 +8,7 @@ from typing import Any, Iterable, Optional
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind, InterruptRequest
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail, InterruptDecision
 
@@ -43,6 +43,8 @@ class ConfirmInterruptRail(BaseInterruptRail):
         rail = ConfirmInterruptRail(tool_names=["read", "delete"])
         await agent.register_rail(rail)
     """
+
+    interrupt_kind: str = InterruptKind.CONFIRM
 
     def __init__(
             self,

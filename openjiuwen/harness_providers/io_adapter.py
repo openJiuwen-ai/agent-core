@@ -23,6 +23,7 @@ from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema
+from openjiuwen.core.single_agent.interrupt.state import PendingInterrupt, match_answers
 from openjiuwen.harness_protocol import (
     TERMINAL_TURN_EVENT_KINDS,
     AbortMode,
@@ -177,7 +178,13 @@ class HarnessIOAdapter:
             return False
         if user_input.raw_inputs is not None:
             return len(self._pending) == 1
-        return any(key in self._pending for key in user_input.user_inputs)
+        return bool(self._matched_answers(user_input))
+
+    def _matched_answers(self, user_input: InteractiveInput) -> dict[str, Any]:
+        # A pending interaction is keyed by its request id; callers may answer
+        # it with update() or answer().
+        pending = [PendingInterrupt(request_id, request_id, "") for request_id in self._pending]
+        return match_answers(user_input, pending).answers
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -413,9 +420,8 @@ class HarnessIOAdapter:
         if user_input.raw_inputs is not None and len(self._pending) == 1:
             request_id = next(iter(self._pending))
             answered = self._answer(request_id, user_input.raw_inputs)
-        for request_id, value in user_input.user_inputs.items():
-            if request_id in self._pending:
-                answered = self._answer(request_id, value) or answered
+        for request_id, value in self._matched_answers(user_input).items():
+            answered = self._answer(request_id, value) or answered
         return answered
 
     def _answer(self, request_id: str, value: Any) -> bool:

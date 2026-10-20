@@ -39,7 +39,11 @@ from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPTION_KEY,
+    match_answers,
+    pending_interrupts,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.build_context import BuildContext
@@ -385,18 +389,9 @@ class TeamHarness:
         session = self._interrupt_session()
         if session is None:
             return False
-        state = session.get_state(INTERRUPTION_KEY)
-        if state is None:
-            return False
-        interrupted = getattr(state, "interrupted_tools", {}) or {}
-        pending_ids: set = set()
-        for entry in interrupted.values():
-            requests = getattr(entry, "interrupt_requests", {}) or {}
-            pending_ids.update(requests.keys())
-        if not pending_ids:
-            return False
-        resume_ids = set(user_input.user_inputs.keys())
-        return bool(resume_ids) and resume_ids.issubset(pending_ids)
+        # Any answer to something no longer pending makes the input stale.
+        matched = match_answers(user_input, pending_interrupts(session.get_state(INTERRUPTION_KEY)))
+        return bool(matched.answers) and not matched.unmatched
 
     def _interrupt_session(self) -> Optional[Any]:
         if self._native is None:
