@@ -3056,6 +3056,55 @@ class DeepAgent(BaseAgent):
                 exc_info=True,
             )
 
+    async def aclose(self) -> None:
+        """Extend :meth:`BaseAgent.aclose` to session-scoped tasks, the wrapped
+        react agent and subagents.
+
+        Rails register on both this agent's callback manager and the inner
+        ``_react_agent``'s one, so both namespaces must be cleared; cached
+        subagent controls for every parent session are cancelled as well.
+        Session-scoped asyncio tasks must be stopped too — the eviction path
+        only cleared callbacks/tools, leaving per-session consumers pending
+        forever (issue#5240 residual: SubscriptionInMemory._consume_message
+        1.7x/session + supervisor/forwarder/scheduler ~0.3x each, ~13MB/h):
+        ``stop()`` cancels the interaction loops and emit tasks, and each
+        controller's ``stop()`` shuts the task scheduler and the event-queue
+        subscriptions.
+        """
+        await super().aclose()
+        try:
+            await self.stop()
+        except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+            logger.warning("[DeepAgent] aclose: stop loops failed: %s", exc)
+        controllers = []
+        for owner in (self, self._react_agent):
+            ctl = getattr(owner, "_loop_controller", None) or getattr(owner, "_controller", None)
+            if ctl is not None and ctl not in controllers:
+                controllers.append(ctl)
+        for ctl in controllers:
+            try:
+                await ctl.stop()
+            except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+                logger.warning("[DeepAgent] aclose: controller stop failed: %s", exc)
+        react_agent = self._react_agent
+        if react_agent is not None and react_agent is not self:
+            try:
+                await react_agent.aclose()
+            except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+                logger.warning(
+                    "[DeepAgent] aclose: react agent close failed: %s", exc
+                )
+        try:
+            from openjiuwen.harness.tools.subagent._control_registry import (
+                release_all_subagent_controls,
+            )
+
+            await release_all_subagent_controls(self, reason="agent_closed")
+        except Exception as exc:  # noqa: BLE001 - 释放路径不抛出
+            logger.warning(
+                "[DeepAgent] aclose: subagent control release failed: %s", exc
+            )
+
     async def stop(self) -> None:
         """Terminate the interaction loop and wake any attached output consumer."""
         if not self._interaction_started:

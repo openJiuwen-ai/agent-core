@@ -46,6 +46,19 @@ from openjiuwen.core.single_agent.tool_batch_concurrency import ToolBatchConcurr
 # Ability type definition
 Ability = Union[ToolCard, WorkflowCard, AgentCard, McpServerConfig]
 
+# Tag namespace for ability-owned tool domain sweeps. Must stay distinct from
+# the card.id tag domain: DeepAgent._register_pending_mcps tags the MCP server
+# and every one of its tools with ``self.card.id``, and the default ability
+# owner id is also ``card.id`` (deep_agent._resolve_tool_owner_id), so a bare
+# owner tag in teardown_tools would sweep shared/cross-cycle MCP tools out of
+# the registry (dev-review CR-001).
+_ABILITY_OWNER_TAG_PREFIX = "ability-owner:"
+
+
+def _ability_owner_tag(owner_id: str) -> str:
+    """Build the namespaced tag isolating ability-owner sweeps from card.id."""
+    return f"{_ABILITY_OWNER_TAG_PREFIX}{owner_id}"
+
 
 def illegal_tool_call_reason(tool_call: Any) -> Optional[str]:
     """Return a short reason if the model tool_call must not enter the execute loop.
@@ -776,7 +789,16 @@ class AbilityManager:
 
         if self._owner_id:
             card.id = self.qualify_tool_id(card, self._owner_id)
-        Runner.resource_mgr.add_tool(resource, refresh=True)
+            # Tag with the namespaced owner tag so teardown_tools can drop the
+            # whole owner domain in one sweep, including forms registered
+            # outside this method (issue#5240: session-suffixed ids never
+            # unregistered). Never the bare owner id: that equals card.id by
+            # default, which is also the MCP registration tag domain.
+            Runner.resource_mgr.add_tool(
+                resource, refresh=True, tag=_ability_owner_tag(self._owner_id)
+            )
+        else:
+            Runner.resource_mgr.add_tool(resource, refresh=True)
         return self.add(card)
 
     def remove_ability(self, name: Union[str, List[str]]) -> None:
@@ -820,6 +842,15 @@ class AbilityManager:
                 continue
             self.remove(name)
             Runner.resource_mgr.remove_tool(card.id)
+        # Sweep the namespaced owner-tag domain as a backstop: entries
+        # registered with this owner's tag but not through this manager's
+        # exact-id form (session-suffixed ids) otherwise never leave the
+        # process-global registry (issue#5240). The namespace prefix keeps
+        # the sweep away from the card.id tag domain, which MCP registration
+        # also uses (dev-review CR-001).
+        Runner.resource_mgr.remove_tool(
+            tag=_ability_owner_tag(self._owner_id), skip_if_tag_not_exists=True
+        )
 
     def _live_raw_keys(self) -> set:
         """Live raw ability keys across tools / workflows / agents."""

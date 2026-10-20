@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from types import SimpleNamespace
@@ -11,7 +12,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from openjiuwen.agent_teams.memory.extractor import extract_team_memories
+from openjiuwen.agent_teams.memory.extractor import (
+    extract_team_memories,
+    run_team_memory_extraction,
+    snapshot_team_extraction_context,
+    _create_extraction_tools,
+)
 
 
 @pytest.fixture
@@ -107,3 +113,54 @@ async def test_extract_team_memories_success_path_calls_agent_and_runner(team_me
             assert call_kw["system_prompt"]
             assert call_kw["tools"]
             assert call_kw["enable_task_loop"] is False
+
+
+@pytest.mark.asyncio
+async def test_snapshot_returns_none_when_empty(team_memory_dir):
+    mock_db = MagicMock()
+    mock_db.message.get_team_messages = AsyncMock(return_value=[])
+    mock_tm = MagicMock()
+    mock_tm.list_tasks = AsyncMock(return_value=[])
+
+    context = await snapshot_team_extraction_context(
+        team_name="team1",
+        db=mock_db,
+        task_manager=mock_tm,
+    )
+    assert context is None
+
+
+@pytest.mark.asyncio
+async def test_run_team_memory_extraction_uses_local_fs_tools(team_memory_dir):
+    mock_agent = MagicMock()
+    mock_model = MagicMock()
+    memory_path = os.path.join(team_memory_dir, "TEAM_MEMORY.md")
+
+    with patch("openjiuwen.harness.factory.create_deep_agent", return_value=mock_agent) as mock_create:
+        with patch(
+            "openjiuwen.core.runner.runner.Runner.run_agent",
+            new_callable=AsyncMock,
+        ) as mock_run:
+            await run_team_memory_extraction(
+                team_name="team1",
+                team_memory_dir=team_memory_dir,
+                context="# snap",
+                model=mock_model,
+            )
+            mock_create.assert_called_once()
+            mock_run.assert_awaited_once()
+            tools = mock_create.call_args.kwargs["tools"]
+            write_tool = next(t for t in tools if t.card.name == "write_memory_file")
+            result = await write_tool._func(path="TEAM_MEMORY.md", content="### [lesson] ok\n")
+            assert result["success"] is True
+            assert os.path.exists(memory_path)
+            with open(memory_path, encoding="utf-8") as f:
+                assert "lesson" in f.read()
+
+
+@pytest.mark.asyncio
+async def test_extraction_tools_reject_path_traversal(team_memory_dir):
+    tools = _create_extraction_tools(team_memory_dir, team_name="t")
+    write_tool = next(t for t in tools if t.card.name == "write_memory_file")
+    result = await write_tool._func(path="../escape.md", content="x")
+    assert result == {"error": "Invalid path"}

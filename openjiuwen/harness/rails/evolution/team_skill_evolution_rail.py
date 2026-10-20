@@ -10,6 +10,7 @@ Inherits EvolutionRail to gain automatic trajectory collection.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import posixpath
 import re
@@ -155,6 +156,9 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
 
     priority = 80
     _DEFAULT_MEMBER_ROLE = "leader"
+    _trajectory_free_hooks = frozenset(
+        {EvolutionTriggerPoint.AFTER_TOOL_CALL, EvolutionTriggerPoint.AFTER_TASK_ITERATION}
+    )
     _SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
     _EXPERIENCE_RECORD_HEADING_RE = re.compile(r"#+\s*\[([A-Za-z0-9_-]+)\]")
     _subject_kind_default: str = "swarm-skill"
@@ -628,7 +632,8 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
 
         if not self._signal_trigger and not self._review_trigger:
             return
-        if trajectory is None:
+        capture = self._resolve_capture(ctx=ctx)
+        if capture is None:
             return
 
         if inputs.tool_name != "view_task":
@@ -641,13 +646,13 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
         logger.debug(
             "[TeamSkillEvolutionRail] view_task completion check result=%s, session_id=%s",
             completed,
-            self._current_trajectory_session_id(),
+            capture.session_id,
         )
         if not completed:
             logger.info("[TeamSkillEvolutionRail] view_task: tasks still in progress, skipping")
             return
 
-        self._mark_team_completion_pending()
+        self._mark_team_completion_pending(capture.session_id)
 
     def _allow_evolution_trigger(
         self,
@@ -718,7 +723,8 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
                 "(before_invoke may not have fired or after_invoke already completed)"
             )
             return False
-        trajectory = self.get_trajectory(
+        trajectory = await asyncio.to_thread(
+            self.get_trajectory,
             session_id=capture.session_id,
             member_id=capture.member_id,
             team_id=capture.team_id,
@@ -853,9 +859,10 @@ class TeamSkillEvolutionRail(_TeamTrajectoryCaptureMixin, SkillEvolutionRail):
             return
         self._passive_evolution_pending = True
 
-    def _mark_team_completion_pending(self) -> None:
+    def _mark_team_completion_pending(self, session_id: Optional[str] = None) -> None:
         """Mark team completion for either passive scan or active follow-up mode."""
-        session_id = self._current_trajectory_session_id()
+        if session_id is None:
+            session_id = self._current_trajectory_session_id()
         if self._review_trigger:
             self._completion_followup_pending_session_id = session_id
             return

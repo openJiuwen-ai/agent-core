@@ -243,6 +243,7 @@ async def external_cli_spawn(
             codex_bypass_approvals_and_sandbox=cli_cfg.codex_bypass_approvals_and_sandbox,
             codex_turn_idle_timeout_s=cli_cfg.codex_turn_idle_timeout_s,
             codex_turn_idle_retries=cli_cfg.codex_turn_idle_retries,
+            external_model_config=cli_cfg.external_model_config,
             mcp_server_command=tuple(cli_cfg.mcp_server_command),
             system_prompt=system_prompt,
             extra_env=cli_cfg.env or None,
@@ -308,7 +309,7 @@ async def external_cli_spawn(
             team_logger.info("[external-cli] member {} cancelled", member_name)
             raise
         except Exception:
-            team_logger.error("[external-cli] member {} crashed", member_name, exc_info=True)
+            team_logger.exception("[external-cli] member {} crashed", member_name)
             raise
         finally:
             await runtime.stop()

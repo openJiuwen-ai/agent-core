@@ -4,8 +4,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from openjiuwen.core.common.logging import memory_logger as logger
 from openjiuwen.agent_teams.memory.manager_params import (
@@ -36,7 +37,8 @@ class TeamMemoryManager:
         Independent of the Rail mechanism, it is explicitly invoked at key lifecycle points of TeamAgent:
         - _setup_agent: init_toolkit() + register_tools()
         - _start_coordination: load_and_inject() → injects the system prompt
-        - _finalize_round: extract_after_round()
+        - pause/stop (kernel): extract_after_round() — snapshots DB sync, runs
+          the extraction agent in a single-flight background task
         - _stop_coordination: close()
 
         Resource Contract
@@ -87,6 +89,10 @@ class TeamMemoryManager:
 
         self._cached_base_section: PromptSection | None = None
         self._active_session_id: str | None = None
+        # Single-flight background extract: pause + stop must not fork two agents.
+        # Lock covers check → snapshot → create_task only (never the LLM await).
+        self._extract_task: Optional[asyncio.Task] = None
+        self._extract_lock = asyncio.Lock()
 
     async def init_toolkit(self) -> bool:
         if self._toolkit is not None:
@@ -341,21 +347,64 @@ class TeamMemoryManager:
             return
         if not self._team_memory_dir or not self._db:
             return
+        if self._extraction_model is None or self._task_manager is None:
+            return
 
-        from openjiuwen.agent_teams.memory.extractor import extract_team_memories
+        from openjiuwen.agent_teams.memory.extractor import (
+            run_team_memory_extraction,
+            snapshot_team_extraction_context,
+        )
 
-        try:
-            await extract_team_memories(
-                team_name=self._team_name,
-                db=self._db,
-                task_manager=self._task_manager,
-                team_memory_dir=self._team_memory_dir,
-                sys_operation=self._sys_operation,
-                model=self._extraction_model,
-                tz_offset_hours=self._tz_offset,
+        # Serialize claim across the snapshot await so concurrent pause/stop
+        # cannot both pass the in-flight check and fork two extract agents.
+        async with self._extract_lock:
+            if self._extract_task is not None and not self._extract_task.done():
+                logger.info(
+                    "[TeamMemoryManager] extract already in flight for %s; skipping duplicate",
+                    self._team_name,
+                )
+                return
+
+            try:
+                # Snapshot must finish while the session DB is still bound.
+                context = await snapshot_team_extraction_context(
+                    team_name=self._team_name,
+                    db=self._db,
+                    task_manager=self._task_manager,
+                    tz_offset_hours=self._tz_offset,
+                )
+            except Exception as e:
+                logger.warning(f"[TeamMemoryManager] extract snapshot failed: {e}")
+                return
+
+            if not context:
+                return
+
+            team_name = self._team_name
+            team_memory_dir = self._team_memory_dir
+            model = self._extraction_model
+
+            async def _run_in_background() -> None:
+                try:
+                    await run_team_memory_extraction(
+                        team_name=team_name,
+                        team_memory_dir=team_memory_dir,
+                        context=context,
+                        model=model,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[TeamMemoryManager] background extract_after_round failed: {e}"
+                    )
+
+            # Fire-and-forget so pause()/stop() can publish PAUSED / leave the
+            # pool without waiting on the extraction LLM. File tools use local
+            # FS and do not need harness sys_operation after dispose. Lock is
+            # released as soon as this create_task returns — not held for LLM.
+            self._extract_task = asyncio.create_task(
+                _run_in_background(),
+                name=f"team-memory-extract:{team_name}",
             )
-        except Exception as e:
-            logger.warning(f"[TeamMemoryManager] extract_after_round failed: {e}")
 
     async def close(self) -> None:
         tool_ids = list(self._owned_tool_ids)

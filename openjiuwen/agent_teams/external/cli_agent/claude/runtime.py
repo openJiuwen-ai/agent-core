@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 import json
 from typing import Any, AsyncIterator
 
@@ -16,8 +17,34 @@ from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import (
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.session.stream.base import OutputSchema
+
+
+class _ClaudeStderrTail:
+    """Capture a bounded tail of Claude CLI stderr for crash diagnostics."""
+
+    def __init__(self, *, max_lines: int = 40, max_line_chars: int = 2000, max_chars: int = 8000) -> None:
+        """Initialize the bounded stderr tail collector."""
+        self._max_line_chars = max_line_chars
+        self._max_chars = max_chars
+        self._lines: deque[str] = deque(maxlen=max_lines)
+
+    def append(self, line: str) -> None:
+        """Append one stderr line after trimming excessive content."""
+        text = str(line).strip()
+        if not text:
+            return
+        if len(text) > self._max_line_chars:
+            text = text[: self._max_line_chars] + "...[truncated]"
+        self._lines.append(text)
+        while len(self.render()) > self._max_chars and self._lines:
+            self._lines.popleft()
+
+    def render(self) -> str:
+        """Return the currently captured stderr tail."""
+        return "\n".join(self._lines)
 
 
 class ClaudeSdkRuntime(CliRuntimeBase):
@@ -48,6 +75,33 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         self._client: Any | None = None
         self._abort_requested = False
         self._tool_names_by_id: dict[str, str] = {}
+        self._stderr_tail = _ClaudeStderrTail()
+        self._install_stderr_callback()
+
+    def _install_stderr_callback(self) -> None:
+        """Attach a Claude SDK stderr callback without dropping a caller callback."""
+        original = getattr(self._options, "stderr", None)
+
+        def _capture_stderr(line: str) -> None:
+            self._stderr_tail.append(line)
+            if callable(original):
+                original(line)
+
+        self._options.stderr = _capture_stderr
+
+    async def _connect_client(self, client: Any) -> None:
+        """Connect a Claude SDK client and log stderr tail on failure."""
+        try:
+            await client.connect()
+        except Exception:
+            stderr_tail = self._stderr_tail.render()
+            if stderr_tail:
+                team_logger.error(
+                    "[{}] Claude CLI stderr before connect failure:\n{}",
+                    self._member_name,
+                    stderr_tail,
+                )
+            raise
 
     def bind_team_tools(
         self,
@@ -107,7 +161,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             team_logger.warning("[{}] Claude SDK MCP is enabled but no team tools were bound", self._member_name)
         sdk = load_claude_sdk()
         self._client = sdk.ClaudeSDKClient(options=self._options, transport=self._transport)
-        await self._client.connect()
+        await self._connect_client(self._client)
 
     async def _drive(self, inputs: dict[str, Any]) -> AsyncIterator[Any]:
         client = self._client
@@ -115,7 +169,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             sdk = load_claude_sdk()
             client = sdk.ClaudeSDKClient(options=self._options, transport=self._transport)
             self._client = client
-            await client.connect()
+            await self._connect_client(client)
         query = inputs.get("query")
         text = query if isinstance(query, str) else str(query)
         self._abort_requested = False
@@ -166,6 +220,7 @@ def build_claude_runtime(
     cwd: str | None,
     add_dirs: tuple[str, ...],
     env: dict[str, str],
+    external_model_config: ExternalCliModelConfig | None = None,
     inject_mcp: bool,
     mcp_server_name: str,
     mcp_server_command: tuple[str, ...],
@@ -182,6 +237,7 @@ def build_claude_runtime(
         cwd=cwd,
         add_dirs=add_dirs,
         env=env,
+        external_model_config=external_model_config,
         system_prompt=system_prompt,
         team_session_id=team_session_id,
         member_name=member_name,

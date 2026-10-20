@@ -53,6 +53,13 @@ def _pid_is_running(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    except OSError as exc:
+        team_logger.warning(
+            "otel: failed to probe Codex rollout trace owner pid {}: {}",
+            pid,
+            exc,
+        )
+        return False
     return True
 
 

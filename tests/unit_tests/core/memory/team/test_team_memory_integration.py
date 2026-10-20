@@ -193,11 +193,19 @@ async def test_lifecycle_with_persistent_leader_auto_extract(temp_dir, temp_team
     await manager.init_toolkit()
 
     with patch(
-        "openjiuwen.agent_teams.memory.extractor.extract_team_memories",
+        "openjiuwen.agent_teams.memory.extractor.snapshot_team_extraction_context",
         new_callable=AsyncMock,
-    ) as mock_extract:
-        await manager.extract_after_round()
-        mock_extract.assert_awaited_once()
+        return_value="# snap",
+    ) as mock_snapshot:
+        with patch(
+            "openjiuwen.agent_teams.memory.extractor.run_team_memory_extraction",
+            new_callable=AsyncMock,
+        ) as mock_run:
+            await manager.extract_after_round()
+            mock_snapshot.assert_awaited_once()
+            assert manager._extract_task is not None
+            await manager._extract_task
+            mock_run.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -233,8 +241,10 @@ async def test_lifecycle_multiple_rounds_inject(temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_extract_does_not_run_twice_in_same_round(temp_dir, temp_team_dir):
-    """Each extract_after_round awaits extract_team_memories when leader conditions hold."""
+async def test_lifecycle_extract_single_flight_while_in_flight(temp_dir, temp_team_dir):
+    """Second extract_after_round while the first background task is pending is skipped."""
+    import asyncio
+
     params = create_test_params(
         workspace_root=temp_dir,
         lifecycle="persistent",
@@ -250,15 +260,33 @@ async def test_lifecycle_extract_does_not_run_twice_in_same_round(temp_dir, temp
     manager = TeamMemoryManager(params)
     await manager.init_toolkit()
 
-    with patch(
-        "openjiuwen.agent_teams.memory.extractor.extract_team_memories",
-        new_callable=AsyncMock,
-    ) as mock_extract:
-        await manager.extract_after_round()
-        assert mock_extract.await_count == 1
+    started = asyncio.Event()
+    release = asyncio.Event()
+    run_count = 0
 
-        await manager.extract_after_round()
-        assert mock_extract.await_count == 2
+    async def slow_run(**_kwargs):
+        nonlocal run_count
+        run_count += 1
+        started.set()
+        await release.wait()
+
+    with patch(
+        "openjiuwen.agent_teams.memory.extractor.snapshot_team_extraction_context",
+        new_callable=AsyncMock,
+        return_value="# snap",
+    ) as mock_snapshot:
+        with patch(
+            "openjiuwen.agent_teams.memory.extractor.run_team_memory_extraction",
+            new=AsyncMock(side_effect=slow_run),
+        ):
+            await manager.extract_after_round()
+            await started.wait()
+            await manager.extract_after_round()
+            assert mock_snapshot.await_count == 1
+            assert run_count == 1
+            release.set()
+            await manager._extract_task
+            assert run_count == 1
 
 
 @pytest.mark.asyncio

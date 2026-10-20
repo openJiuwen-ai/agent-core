@@ -225,6 +225,62 @@ async def test_websocket_publisher_connects_once_when_started() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_websocket_publisher_reconnects_after_idle_disconnect() -> None:
+    publisher = WebSocketEventPublisher(
+        url="ws://gateway:19000/ws",
+        session_id="session-1",
+        team_name="team-1",
+        request_timeout=1.0,
+    )
+
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.closed = False
+            self.responses = []
+
+        async def send_str(self, data: str) -> None:
+            request = json.loads(data)
+            self.responses.append(
+                SimpleNamespace(
+                    type=aiohttp.WSMsgType.TEXT,
+                    data=json.dumps({"type": "res", "id": request["id"], "ok": True}),
+                )
+            )
+
+        async def receive(self):
+            return self.responses.pop(0)
+
+        async def close(self) -> None:
+            self.closed = True
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.closed = False
+            self.websockets: list[FakeWebSocket] = []
+
+        async def ws_connect(self, _url: str, *, heartbeat: float):
+            websocket = FakeWebSocket()
+            self.websockets.append(websocket)
+            return websocket
+
+        async def close(self) -> None:
+            self.closed = True
+
+    session = FakeSession()
+    publisher._session = session
+    await publisher.start()
+    session.websockets[0].closed = True
+
+    topic = TeamTopic.MESSAGE.build("session-1", "team-1")
+    message = EventMessage(event_type="message", payload={"team_name": "team-1"})
+    await publisher.publish(topic, message)
+
+    assert len(session.websockets) == 2
+    await publisher.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_websocket_publisher_requires_start_before_publish() -> None:
     publisher = WebSocketEventPublisher(
         url="ws://gateway:19000/ws",

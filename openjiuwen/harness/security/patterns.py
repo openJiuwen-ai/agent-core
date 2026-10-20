@@ -115,8 +115,9 @@ class _ApprovalOverrideSignature:
 
 
 # 限制性字符类：允许 Unicode 字母、数字、下划线（含中文）及常见参数/路径字符，排除 shell 元字符
+# + 和 % 用于 date 等命令的格式化参数，其余字符限制保持不变
 # - 置于开头避免被解析为范围
-_WILDCARD_CHARS = r'[-\w \._/:"\']'
+_WILDCARD_CHARS = r'[-\w \._/:"\'%+]'
 
 
 def match_wildcard(value: str, pattern: str) -> bool:

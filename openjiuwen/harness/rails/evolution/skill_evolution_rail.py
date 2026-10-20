@@ -155,6 +155,9 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
     priority = 80
     _DEFAULT_MEMBER_ROLE = "teammate"
+    _trajectory_free_hooks = frozenset(
+        {EvolutionTriggerPoint.AFTER_TOOL_CALL, EvolutionTriggerPoint.AFTER_TASK_ITERATION}
+    )
     _SKILL_MD_RE = re.compile(r"[/\\]([^/\\]+)[/\\]SKILL\.md", re.IGNORECASE)
     _SKILL_MD_FILE_READ_TOOLS = frozenset({"read", "read_file", "read_file_stream"})
     _EXPERIENCE_RECORD_HEADING_RE = re.compile(r"#+\s*\[([A-Za-z0-9_-]+)\]")

@@ -12,7 +12,10 @@ result spill to disk, and full (non-truncated) result rendering.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
+
+from pydantic import BaseModel
 
 from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime, render_result_text
 from openjiuwen.agent_teams.i18n import set_language
@@ -26,6 +29,37 @@ def test_render_result_text_variants_are_full():
     assert '"k": 1' in rendered
     big = {"data": list(range(1000))}
     assert "999" in render_result_text(big)
+
+
+class _ResultModel(BaseModel):
+    value: int
+
+
+def test_render_result_text_converts_nested_pydantic_models():
+    """Pydantic results nested in common containers remain model-facing JSON."""
+    result = {
+        "items": [
+            _ResultModel(value=1),
+            {"nested": (_ResultModel(value=2),)},
+        ]
+    }
+
+    assert json.loads(render_result_text(result)) == {
+        "items": [
+            {"value": 1},
+            {"nested": [{"value": 2}]},
+        ]
+    }
+
+
+def test_render_result_text_converts_sets_after_pydantic_fallback():
+    """The fallback also normalizes non-JSON containers in the same result tree."""
+    result = {"model": _ResultModel(value=3), "labels": {"beta", "alpha"}}
+
+    assert json.loads(render_result_text(result)) == {
+        "model": {"value": 3},
+        "labels": ["alpha", "beta"],
+    }
 
 
 def test_runtime_injects_full_result_on_success():
@@ -53,6 +87,37 @@ def test_runtime_injects_full_result_on_success():
     assert len(injected) == 1
     assert "42" in injected[0]
     assert "demo" in injected[0]
+
+
+def test_runtime_injects_nested_pydantic_result_on_success():
+    """The launch -> completion -> inject path renders nested Pydantic results."""
+    set_language("cn")
+    injected: list[str] = []
+
+    async def _inject(text: str) -> None:
+        injected.append(text)
+
+    async def _scenario() -> AsyncToolRuntime:
+        runtime = AsyncToolRuntime(inject=_inject)
+
+        async def _work() -> dict:
+            return {
+                "items": [_ResultModel(value=7)],
+                "labels": {"beta", "alpha"},
+            }
+
+        runtime.launch("t-pydantic", _work, tool_name="demo", description="d")
+        await runtime._tasks["t-pydantic"]
+        return runtime
+
+    runtime = asyncio.run(_scenario())
+    assert runtime.registry["t-pydantic"].status == "completed"
+    assert len(injected) == 1
+    assert '"items": [' in injected[0]
+    assert '"value": 7' in injected[0]
+    assert '"labels": [' in injected[0]
+    assert '"alpha"' in injected[0]
+    assert '"beta"' in injected[0]
 
 
 def test_runtime_injects_error_on_failure():
