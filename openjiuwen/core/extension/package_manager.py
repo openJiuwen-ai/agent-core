@@ -1,0 +1,323 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+
+"""Install-directory layout, zip opening, and copies that never delete user source."""
+
+import shutil
+import stat
+import tempfile
+import uuid
+import zipfile
+from pathlib import Path, PurePosixPath
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.extension.errors import ExtensionFailure
+from openjiuwen.core.extension.manifest import load_manifest
+from openjiuwen.core.extension.schema.manifest import Manifest
+
+# Align with jiuwenswarm extension/skill zip guards (anti zip-bomb / symlink).
+_MAX_ZIP_FILE_COUNT = 10_000
+_MAX_ZIP_TOTAL_BYTES = 512 * 1024 * 1024
+_MAX_ZIP_SINGLE_FILE_BYTES = 32 * 1024 * 1024
+_MAX_ZIP_PATH_DEPTH = 32
+
+
+class OpenedSource:
+    """A directory whose manifest has been read.
+
+    ``close`` deletes a temporary extract directory. It does not delete the
+    caller's zip or source directory.
+    """
+
+    def __init__(
+        self,
+        manifest: Manifest,
+        root: Path,
+        source_path: Path,
+        cleanup_root: Path | None,
+    ) -> None:
+        self.manifest = manifest
+        self.root = root
+        self.source_path = source_path
+        self._cleanup_root = cleanup_root
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        if self._cleanup_root is None:
+            self._closed = True
+            return
+        cleanup = self._cleanup_root.resolve()
+        source = self.source_path.resolve()
+        if cleanup == source or source.is_relative_to(cleanup):
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                reason="temp directory overlaps the caller source; refusing to delete",
+            )
+        shutil.rmtree(cleanup, ignore_errors=True)
+        self._closed = True
+
+    def __enter__(self) -> "OpenedSource":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        self.close()
+
+
+class PackageManager:
+    """Owns the install directory. It does not record which packages are active."""
+
+    def __init__(self, store: Path) -> None:
+        self.store = store.expanduser().resolve()
+
+    def list_installed(self) -> list[Path]:
+        """Return each ``<package.id>/<version>`` directory that has a manifest.
+
+        Hidden directories are skipped. The caller passes these paths to the
+        startup batch install. This method does not choose among duplicates.
+        """
+        if not self.store.exists():
+            return []
+        found: list[Path] = []
+        for package_dir in sorted(self.store.iterdir(), key=lambda path: path.name):
+            if not package_dir.is_dir() or package_dir.name.startswith("."):
+                continue
+            for version_dir in sorted(package_dir.iterdir(), key=lambda path: path.name):
+                if not version_dir.is_dir() or version_dir.name.startswith("."):
+                    continue
+                if (version_dir / "manifest.yaml").is_file():
+                    found.append(version_dir.resolve())
+        return found
+
+    def open_source(self, source: Path) -> OpenedSource:
+        """Open a package directory or a zip.
+
+        A directory is read in place. A zip is extracted to a new temporary
+        directory. The original path is left untouched.
+
+        Raises:
+            ExtensionFailure: The path is not a directory or zip, the zip
+                escapes its directory, or the manifest is invalid.
+        """
+        source = source.expanduser().resolve()
+        if source.is_file() and source.suffix.lower() == ".zip":
+            return self._open_zip(source)
+        if source.is_dir():
+            _assert_no_symlinks(source)
+            manifest = load_manifest(source)
+            return OpenedSource(manifest, source, source, None)
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_SOURCE_INVALID,
+            reason=f"install source must be a directory or zip: {source}",
+        )
+
+    def copy_into_store(self, source_root: Path, manifest: Manifest) -> Path:
+        """Copy a package tree into ``<store>/<package.id>/<version>``.
+
+        If ``source_root`` is already that directory, it is returned as-is.
+        The source tree is never deleted. An existing store copy is not
+        replaced; callers must uninstall or reload instead.
+
+        Raises:
+            ExtensionFailure: The copy cannot be completed. The source is kept.
+        """
+        source_root = source_root.resolve()
+        if not source_root.exists():
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                reason="caller source does not exist",
+            )
+        _assert_no_symlinks(source_root)
+        target = self.version_dir(manifest.package_id, manifest.version)
+        if source_root == target:
+            return target
+        if target.exists():
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                reason=(
+                    f"install store already has {manifest.package_id}/"
+                    f"{manifest.version}; refuse to overwrite"
+                ),
+            )
+        package_dir = self.store / manifest.package_id
+        package_dir.mkdir(parents=True, exist_ok=True)
+        staging = package_dir / f".{manifest.version}.staging-{uuid.uuid4().hex}"
+        if staging.is_relative_to(source_root) or source_root.is_relative_to(staging):
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                reason="staging directory overlaps the caller source",
+            )
+        try:
+            shutil.copytree(source_root, staging, symlinks=False)
+        except OSError as exc:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                reason=f"copy into install directory failed: {exc}",
+                cause=exc,
+            ) from exc
+        try:
+            staging.rename(target)
+        except OSError as exc:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                reason=f"replace install directory failed: {exc}",
+                cause=exc,
+            ) from exc
+        return target
+
+    def remove_installed(self, package_id: str, version: str) -> None:
+        """Delete one version directory inside the install store.
+
+        Raises:
+            ExtensionFailure: The path would leave the store, or the directory
+                is not an installed package.
+        """
+        target = self.version_dir(package_id, version)
+        store = self.store.resolve()
+        if not target.is_relative_to(store) or target == store:
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_INSTALL_COPY_FAILED,
+                reason="refusing to delete a path outside the install store",
+            )
+        if not target.is_dir() or not (target / "manifest.yaml").is_file():
+            raise ExtensionFailure(
+                StatusCode.EXTENSION_PACKAGE_NOT_INSTALLED,
+                package_id=package_id,
+                reason=f"install store has no {package_id} {version}",
+            )
+        shutil.rmtree(target)
+        package_dir = target.parent
+        if package_dir.exists() and not any(package_dir.iterdir()):
+            package_dir.rmdir()
+
+    def version_dir(self, package_id: str, version: str) -> Path:
+        return (self.store / package_id / version).resolve()
+
+    def _open_zip(self, source: Path) -> OpenedSource:
+        temp = Path(tempfile.mkdtemp(prefix="openjiuwen-ext-"))
+        try:
+            _extract_zip(source, temp)
+            _assert_no_symlinks(temp)
+            manifest = load_manifest(temp)
+        except Exception:
+            shutil.rmtree(temp, ignore_errors=True)
+            raise
+        return OpenedSource(manifest, temp.resolve(), source, temp.resolve())
+
+
+def _assert_no_symlinks(src: Path) -> None:
+    """Reject a package subtree that contains any symbolic link."""
+    if src.is_symlink():
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_SOURCE_INVALID,
+            reason=f"symbolic links are not allowed in package: {src}",
+        )
+    try:
+        entries = src.rglob("*")
+        for entry in entries:
+            if entry.is_symlink():
+                raise ExtensionFailure(
+                    StatusCode.EXTENSION_SOURCE_INVALID,
+                    reason=f"symbolic links are not allowed in package: {entry}",
+                )
+    except OSError as exc:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_SOURCE_INVALID,
+            reason=f"failed to inspect package for symlinks: {exc}",
+            cause=exc,
+        ) from exc
+
+
+def _extract_zip(source: Path, destination: Path) -> None:
+    destination = destination.resolve()
+    try:
+        archive = zipfile.ZipFile(source)
+    except (zipfile.BadZipFile, OSError) as exc:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_SOURCE_INVALID,
+            reason=f"cannot open zip: {exc}",
+            cause=exc,
+        ) from exc
+    with archive:
+        total_bytes = 0
+        file_count = 0
+        for info in archive.infolist():
+            target = _member_path(destination, info.filename)
+            unix_mode = (info.external_attr >> 16) & 0xFFFF
+            if stat.S_IFMT(unix_mode) == stat.S_IFLNK:
+                raise ExtensionFailure(
+                    StatusCode.EXTENSION_SOURCE_INVALID,
+                    reason=f"zip symbolic links are not allowed: {info.filename}",
+                )
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            file_count += 1
+            if file_count > _MAX_ZIP_FILE_COUNT:
+                raise ExtensionFailure(
+                    StatusCode.EXTENSION_SOURCE_INVALID,
+                    reason=f"zip file count exceeds {_MAX_ZIP_FILE_COUNT}",
+                )
+            declared = int(info.file_size or 0)
+            if declared > _MAX_ZIP_SINGLE_FILE_BYTES:
+                raise ExtensionFailure(
+                    StatusCode.EXTENSION_SOURCE_INVALID,
+                    reason=(
+                        f"zip member exceeds {_MAX_ZIP_SINGLE_FILE_BYTES} bytes: "
+                        f"{info.filename}"
+                    ),
+                )
+            if total_bytes + max(declared, 0) > _MAX_ZIP_TOTAL_BYTES:
+                raise ExtensionFailure(
+                    StatusCode.EXTENSION_SOURCE_INVALID,
+                    reason=f"zip uncompressed size exceeds {_MAX_ZIP_TOTAL_BYTES} bytes",
+                )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(info, "r") as source_file:
+                data = source_file.read(_MAX_ZIP_SINGLE_FILE_BYTES + 1)
+            if len(data) > _MAX_ZIP_SINGLE_FILE_BYTES:
+                raise ExtensionFailure(
+                    StatusCode.EXTENSION_SOURCE_INVALID,
+                    reason=(
+                        f"zip member exceeds {_MAX_ZIP_SINGLE_FILE_BYTES} bytes: "
+                        f"{info.filename}"
+                    ),
+                )
+            total_bytes += len(data)
+            if total_bytes > _MAX_ZIP_TOTAL_BYTES:
+                raise ExtensionFailure(
+                    StatusCode.EXTENSION_SOURCE_INVALID,
+                    reason=f"zip uncompressed size exceeds {_MAX_ZIP_TOTAL_BYTES} bytes",
+                )
+            target.write_bytes(data)
+
+
+def _member_path(destination: Path, name: str) -> Path:
+    if "\\" in name:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_SOURCE_INVALID,
+            reason=f"zip member path escapes destination: {name}",
+        )
+    pure = PurePosixPath(name)
+    if pure.is_absolute() or ".." in pure.parts or not pure.parts:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_SOURCE_INVALID,
+            reason=f"zip member path escapes destination: {name}",
+        )
+    if len(pure.parts) > _MAX_ZIP_PATH_DEPTH:
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_SOURCE_INVALID,
+            reason=f"zip member path depth exceeds {_MAX_ZIP_PATH_DEPTH}: {name}",
+        )
+    target = destination.joinpath(*pure.parts).resolve()
+    if not target.is_relative_to(destination):
+        raise ExtensionFailure(
+            StatusCode.EXTENSION_SOURCE_INVALID,
+            reason=f"zip member path escapes destination: {name}",
+        )
+    return target

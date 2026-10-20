@@ -20,7 +20,8 @@
   概览与架构引用该位置。设计中的 Registry、Plan / Report、manifest 和事件名均为目标设计，
   不代表已有公共 API；待确认事项保留相应标识。
 - 修改前阅读已有实现、公开导出、调用方、相关测试和模块设计，核对本次变化的实际影响。
-  当前本目录仅有设计文档，尚无本方案的 Python 实现、公共导出及相应单元测试。
+  包加载控制面（manifest、安装目录、排序、prepare、生效记录）已有实现与单元测试；
+  Registry、管理事件触发和 Bus 注册表发布未实现。
 
 ## 文档分类与目录用途
 
@@ -35,19 +36,22 @@
 
 ### 主要设计文件
 
-已建立的设计文档如下，当前均为目标设计草案，正式 spec 尚未建立。
-开发计划按实际需要建档，不为填满目录创建空文档。
+正式 spec 已建立，见上表。特性方案见 `docs/features/`。工作项与进度见开发计划。
 
 | 文件 | 主要内容 |
 | --- | --- |
 | [设计概览](docs/designs/extension-overview.md) | 整体定位、核心对象、包管理流程、职责边界及能力开放条件 |
-| [详细架构](docs/designs/extension-architecture.md) | Registry、Package Manager、Orchestrator 与 Runtime 分工，管理事件、两级依赖与顺序、注册归属、生命周期、故障处理、验证归属及待确认事项 |
+| [详细架构](docs/designs/extension-architecture.md) | Registry、Package Manager、Orchestrator 与 Runtime 分工，管理事件、两级依赖与顺序、注册归属、生命周期 |
+| [开发计划](docs/designs/extension-development-plan.md) | EX-01～EX-04 工作项、依赖顺序、负责人与进度；9 类管理事件归属 Events |
+| [包加载规约](docs/specs/S_01_package-loading.md) | 已实现控制面契约：manifest、安装目录、依赖排序、Plan/candidate、生效记录、错误码；事件接线边界 |
+| [F_01 声明与定序](docs/features/F_01_package-source.md) | EX-01：来源、安装目录、依赖选择与排序 |
+| [F_02 Plan 与 Runtime](docs/features/F_02_plan-runtime.md) | EX-02：单包 Plan、candidate、生效记录与卸载判断 |
+
+EX-03、EX-04 的 feature 在开工时再建。
 
 Events 的协作契约从 [Events 设计概览](../events/docs/designs/events-overview.md)和
 [Events 详细架构](../events/docs/designs/events-architecture.md)进入；两者仍为目标设计草案，
-不能据此认定相关接口或生命周期协作已实现。
-
-后续开发计划建议使用 `docs/designs/extension-development-plan.md`；建档后在本节补充实际链接。
+不能据此认定相关接口或生命周期协作已实现。9 类包管理事件的登记与 Core Handler 在 Events 目录开发，见开发计划第 1 节。
 
 ## 命名与编号
 
@@ -74,7 +78,8 @@ Events 的协作契约从 [Events 设计概览](../events/docs/designs/events-ov
 - 卸载、重载、取消、超时和停止时的调用退出与资源释放条件，以及文件所有权和清理边界。
   注销不代表旧调用已经结束，注册回滚不能撤销任意外部副作用；保留未完成清理的记录。
 - 进程内状态与可持久保留的数据边界、重新加载与恢复执行的区别，以及受限登记和权限检查的归属。
-  受限接口不等同于恶意 Python 代码隔离，不将整包原子发布、无中断热更新或崩溃恢复写成已有保证。
+  受限接口可以登记 USER 和 BUILTIN，不能登记 CORE。它不是恶意 Python 代码隔离。
+  一个包的 Handler 一次写入 EventBus 注册表。重载是热切换。崩溃后不能从旧调用中间恢复执行。
 
 未确定的行为标为待确认，设计问题从
 [架构第 12 节](docs/designs/extension-architecture.md#12-设计选择与待确认事项)进入，
@@ -111,7 +116,7 @@ Events 的协作契约从 [Events 设计概览](../events/docs/designs/events-ov
 - 核对概览、架构、spec、feature 和开发计划中的名称、职责、范围、依赖、状态及证据是否一致，
   保留目标设计、待确认事项、已实现行为与实际验收结果的区别。
 - 实现变化按 [Core 测试要求](../AGENTS.md#测试与验证)验证，重点覆盖受影响的来源校验、两级依赖与顺序、
-  事件调用与结果核对、注册归属、失败回滚、依赖保护、卸载等待及资源清理；跨模块协作验证入口见
+  事件调用与结果核对、注册归属、失败回滚、依赖保护、卸载判断及资源清理；跨模块协作验证入口见
   [架构第 11 节](docs/designs/extension-architecture.md#11-完整场景与验证要求)。只记录实际执行的验证及其限制。
 - 纯文档修改检查内容、链接和差异，无需运行业务测试。分别运行 `git diff --check` 和
   `git diff --cached --check`，并单独检查这两条命令不覆盖的未跟踪新文件；`CLAUDE.md` 只保留 `@AGENTS.md` 引用。

@@ -14,13 +14,13 @@
 
 包管理和真实业务操作通过事件执行，由业务代码或 Handler 在明确的调用点发起。Registry 是业务调用的便捷封装，各管理事件的 Core Handler 负责决定是否触发下一项包操作。EventBus 提供通用事件服务，不承担包流程编排。事件机制的具体设计以 Events 文档为准。
 
-本文仅讨论 agent-core 内的机制。“调用方”指使用 agent-core 接口的代码；产品配置、默认目录、启动框架和跨仓接入不在本文范围内。本文用 **Extension** 指扩展包管理模块，用“扩展单元”（manifest 中的 extension）指包内可以独立声明和加载的扩展。**Handler** 是响应事件的处理函数，**Ops** 是 Handler 使用平台能力的入口。
+本文用 **Extension** 指扩展包管理模块，用“扩展单元”（manifest 中的 extension）指包内可以独立声明和加载的扩展。**Handler** 是响应事件的处理函数，**Ops** 是 Handler 使用平台能力的入口。jiuwenswarm 从 `config.yaml` 的 `extensions.install_dir` 读出安装目录，默认 `~/.jiuwenswarm/extensions`，再把路径交给 Extension。Extension 不解析这份配置。进程启动时先 `init` 一次，再对这个目录批量安装。前端转发和 Gateway 协议不在本文范围内。
 
 **Core Handler** 指 Events 中 CORE 层级的默认处理器，每个事件有且只有一个。Extension 的 Package Manager、Extension Orchestrator 和 Extension Runtime 为管理事件的 Core Handler 提供能力，一个处理器可以按需使用多个模块。下文将 **Extension Orchestrator** 和 **Extension Runtime** 简称为 Orchestrator 和 Runtime。
 
-**实现状态：** 当前 `core/extension/` 尚未发现本方案的 Python 实现、公共导出或相应单元测试。本文中的接口名称、Plan / Report 和 manifest 示例用于说明目标设计，不能直接作为可运行 API 使用。完整加载与卸载仍需结合 Events 接口完成实现和验证。
+**实现状态：** 来源解析、依赖排序、安装目录复制、candidate 加载和生效记录已经有代码。Registry 触发 9 类管理事件，以及把 Handler 写入 EventBus，尚未实现，依赖 Events 的公共接口落地。本文的管理事件流程按目标设计描述。
 
-完整的数据格式（Schema）、错误码和接口契约由后续规约（spec）维护；代码组织、具体实现和验证记录由特性方案（feature）维护。
+已实现控制面的契约见 [S_01 包加载规约](../specs/S_01_package-loading.md)；方案与验证见 [F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md)。工作项见 [开发计划](extension-development-plan.md)。错误码使用仓库统一 `StatusCode`（`EXTENSION_*`，201000–201015）。9 类管理事件的 Core Handler 在 Events 目录实现；Registry 与 Bus 发布对应 EX-03、EX-04，尚未实现，对应 feature 在开工时再建。
 
 | 阅读目的 | 章节入口 |
 | --- | --- |
@@ -45,13 +45,13 @@ Extension 负责扩展包的管理和加载：读取包声明，检查来源与�
 
 | 范围 | 本期目标及责任边界 |
 | --- | --- |
-| 包来源 | 接收调用方明确传入的本地目录路径，检查包声明及同 ID 来源冲突 |
+| 包来源 | 接收调用方传入的本地目录或 zip。zip 先解压到临时目录。通过检查的文件复制到安装目录，调用方的源码目录和 zip 不删除 |
 | 运行域 | 处理 manifest 声明为 `backend` 的 Python 扩展；其他运行域应拒绝，支持方式另行设计 |
-| 管理操作 | 初始化时接收调用方准备好的 EventBus，注册 Extension 管理事件；包管理操作均经对应事件执行，`package.reload` 事件的 Core Handler 先触发卸载再触发安装，期间包可能不可用 |
-| 包管理 | 校验 manifest 和版本，分别确定包与包内扩展的加载顺序，并检查依赖；不自动联网寻找依赖 |
-| 事件执行 | 使用 Events 的公共注册和调用接口；通用事件机制由 Events 文档维护 |
-| 业务协作 | Core 业务模块提供事件定义、默认处理、能力和会话资料；Extension 管理包注册与资源生命周期 |
-| 暂缓内容 | 远程仓库、自动依赖安装、多版本同时生效、前端 Runtime、沙箱、跨进程互斥和无中断切换 |
+| 管理操作 | EventBus 初始化时登记 9 类管理事件及其 Core Handler。`Registry.init` 只接收这份 EventBus，并登记 jiuwenswarm 的内置事件。`package.reload` 在依赖方仍接受新版本时热切换该包的 Handler，期间新调用使用新注册表，旧调用保持自己的快照 |
+| 包管理 | 校验 manifest、宿主版本和包版本，分别确定包与包内扩展的加载顺序；不自动联网寻找依赖 |
+| 事件执行 | 使用 Events 的公共注册和调用接口。一个包的 Handler 在一次没有 `await` 的同步更新中写入 Bus 注册表。业务 `trigger` 开始时读取注册表快照 |
+| 业务协作 | Core 业务模块提供事件定义、默认处理、能力和会话资料。Runtime 保存生效记录，供下一次安装判断依赖 |
+| 暂缓内容 | 远程仓库、自动依赖安装、多版本同时生效、前端 Runtime、沙箱、跨进程互斥，以及只热更新包内某一个扩展单元 |
 
 可选参数 `extension_id` 用于表达只操作某个扩展单元的意图。但需要一并处理哪些依赖、部分操作的结果如何表示，仍待 Q05 确认。本节说明计划支持的范围，不表示这些能力已经实现。
 
@@ -63,8 +63,8 @@ Extension 负责扩展包的管理和加载：读取包声明，检查来源与�
 | 管理请求和独立可复用操作经过事件入口，内部步骤由所属 Core Handler 执行 | 第 2.2、4.1、5 节 | 按业务边界设置 9 类目标事件，不按函数、模块或状态更新拆分 |
 | manifest 声明包和扩展入口，工厂创建实例，`register` 注册 Handler | 第 2.1、4.2～4.4 节 | 公共模型及最终导出仍待确认 |
 | 通过 Plan / Report 管理执行、回滚、重载和卸载 | 第 3～8 节 | 回滚范围、报告格式和卸载等待机制仍需细化 |
-| [Events 架构第 3 节](../../../events/docs/designs/events-architecture.md#3-模块划分与依赖方向)：公共模型归属及依赖方向 | 第 3.2、4.5 节 | Events 不导入包管理或调用方实现 |
-| [Events 资源与停止约定](../../../events/docs/designs/events-architecture.md#83-资源与停止)：卸载时确认相关使用结束 | 第 3.4、4.5、5.2 节 | 需要协作取得使用结束确认后，才能释放包资源 |
+| [Events 架构第 3.2 节](../../../events/docs/designs/events-architecture.md#32-代码归属与依赖方向)：公共模型归属及依赖方向 | 第 3.2、4.5 节 | Events 不导入包管理或调用方实现 |
+| [Events 生命周期约定](../../../events/docs/designs/events-architecture.md#53-handler-装卸与运行中的调用)：卸载时确认相关使用结束 | 第 3.4、4.5、5.2 节 | 需要协作取得使用结束确认后，才能释放包资源 |
 
 ### 1.4 核心设计取向
 
@@ -72,17 +72,17 @@ Extension 管理包，Events 执行事件。两者通过公共接口协作，同
 
 | 设计主题 | 采用的方案与原因 |
 | --- | --- |
-| 管理入口 | Registry 初始化时接收 EventBus，只装配 Extension 自己的管理事件及处理器，并提供安装、重载和卸载的便捷方法；最终类名和公开导出待定 |
-| EventBus 装配 | 调用方先准备 EventBus 并注册业务事件与 Handler，再将同一实例传给 Registry；业务注册不依赖 Registry 的初始化回调 |
+| 管理入口 | Registry 负责初始化时的事件装配，并提供安装、重载和卸载的便捷方法；最终类名和公开导出待定 |
 | 操作执行方式 | Registry 和上层 Core Handler 通过事件发起独立操作；事件内部可以调用相关模块的辅助能力 |
 | 事件触发责任 | 业务代码和 Handler 发起包管理及业务事件；EventBus 不根据 Plan、包依赖或结果安排下一项包操作 |
 | 能力模型 | 使用 Events 的 EventHandlerOps，避免在 Extension 中重复定义能力基础层 |
 | 两类加载依赖 | `requires.packages` 表示包之间的依赖，`extensions[].requires` 表示包内扩展之间的依赖 |
-| 同 ID 多来源 | 由 Package Manager 检查冲突，不预设默认目录与配置文件的覆盖关系 |
-| 事件调用范围 | 沿用 Events 的进程内调用方式 |
-| 后续新增操作 | 只有出现独立调用场景、完成结果或不同处理责任时才评估新增事件；复制文件等辅助步骤不预先设为事件 |
+| 同 ID 多来源 | 同一批出现重复 `package.id` 时整批失败。已经生效的同 ID 再安装，返回 `EXTENSION_PACKAGE_EXISTS`，不替换 |
+| 事件调用范围 | 沿用 Events 的进程内调用方式。`trigger` 开始时固定 Bus 注册表快照 |
+| 无依赖时的顺序 | 对 id 的 UTF-8 字节做 SHA-256，按十六进制字符串升序。这个顺序在进程重启后保持不变 |
+| 后续新增操作 | 只有出现独立调用场景、完成结果或不同处理责任时才评估新增事件；解压和复制文件不单独设事件 |
 
-本方案首先要求注册和清理过程可追踪。目前没有性能实测数据，不承诺启动耗时、吞吐量或卸载等待时长。哈希排序的算法及跨进程稳定性也未确定，因此“按 hash 排序”暂不意味着每次启动都能得到相同顺序。
+本方案首先要求注册和清理过程可追踪。目前没有性能实测数据，不承诺启动耗时、吞吐量或卸载等待时长。无依赖边时的排序使用 SHA-256(UTF-8 id) 的十六进制字符串，进程重启后顺序不变；不使用 Python 内置 `hash()`。
 
 ## 2. 核心概念与共同规则
 
@@ -102,7 +102,7 @@ Extension 管理包，Events 执行事件。两者通过公共接口协作，同
 | 包关联信息 | 当前 Handler 所属包的可信来源信息 | Runtime 核实后通过 Events 公共登记约定关联到 Handler |
 | EventHandlerOps（Ops） | Handler 访问平台能力、包信息和会话资料的入口 | 公共模型归 Events；Extension 直接使用既有接口 |
 
-同一回调函数注册多次，也会产生不同的注册记录。卸载必须使用实际返回的 `handler_id`，不能只按函数名删除。包名称来自 `manifest.package.id`，包根来自解析后的绝对路径；最终公共类型仍待确定，最小包关联模型由 Events 维护。
+同一回调函数注册多次，也会产生不同的注册记录。卸载必须使用实际返回的 `handler_id`，不能只按函数名删除。包身份使用 Events 的 `PackageMetadata`：`package_id` 来自 `manifest.package.id`，`package_version` 来自 manifest，`root` 为解析后的绝对包根；发布到 Bus 时由 Runtime 填入，扩展作者不得改写。
 
 Extension 维护包、实例、计划和注册归属记录，不维护 Events 的内部执行状态。双方的接口协作与责任见第 4.5 节。
 
@@ -115,10 +115,10 @@ Extension 维护包、实例、计划和注册归属记录，不维护 Events �
 | EX-A01 先明确包来源，再校验和排序 | 本次安装集合；Package Manager | 来源冲突或版本不满足时拒绝相应包，不自动改选其他来源 | 第 4.2 节 |
 | EX-A02 分别处理包与包内扩展的依赖 | Package Manager 排列包，Orchestrator 排列包内扩展 | 拒绝缺失、循环或超出允许范围的依赖；依赖失败时跳过依赖方 | 第 4.2～4.3 节 |
 | EX-A03 每条成功注册都有可信归属 | Runtime 的受限登记入口 | 拒绝来源不明或层级不合法的注册，不留下没有归属的记录 | 第 4.4 节 |
-| EX-A04 失败时撤销本次安装 Plan 的注册 | Runtime；建议以单包安装 Plan 为范围 | 触发回滚后按相反顺序注销，记录未清理项，不报告成功；正常卸载失败保留卸载进展 | 第 5.2.1 节 |
-| EX-A05 先准备 EventBus，再初始化 Registry | 调用方负责业务注册；Registry 接收同一 EventBus 并装配管理事件 | 装配失败时不受理包操作；初始化不读取用户 manifest、不加载或安装扩展，也不触发 `ops.build` | 第 4.1 节 |
-| EX-A06 不提前释放仍在使用的包资源 | Runtime 协调 Events 和调用方 | 等待使用结束；无法确认时保留资源并报告未完成 | 第 5.2.2 节 |
-| EX-A07 卸载成功后才能继续重载中的安装 | `package.reload` 事件的 Core Handler | 卸载失败即停止；新安装失败不能宣称旧版仍可用 | 第 5.2.3 节 |
+| EX-A04 失败时丢掉尚未发布的 candidate | Runtime；范围是当前包的本次计划 | 不把半套 Handler 留在 Bus 上。已经生效的其他包保持不变 | 第 5.2.1 节 |
+| EX-A05 初始化只装配事件与处理器 | Registry 接收已初始化的 EventBus，并登记 jiuwenswarm 内置回调 | EventBus 初始化时已登记 core 内置事件（含 9 类管理事件）。装配失败时不受理包操作。`init` 不读取用户 manifest，不安装扩展，不触发 `ops.build`。启动批量安装发生在 `init` 之后 | 第 4.1 节 |
+| EX-A06 有在途调用时拒绝卸载 | Runtime | 返回失败，不注销，不删除安装目录，也不等待调用结束 | 第 5.2.2 节 |
+| EX-A07 重载是热切换 | `package.reload` 的 Core Handler | 依赖方仍接受新版本才继续。准备失败时当前注册表不变。新调用读新快照，旧调用保持自己的快照 | 第 5.2.3 节 |
 | EX-A08 报告必须反映实际注册和清理情况 | Runtime 提供记录，管理事件的 Core Handler 核对，Registry 交回 | 提前返回、取消或未收到结果时先核对，不凭空报告 SUCCESS | 第 6.3、8 节 |
 | EX-A09 独立操作经过事件，内部步骤归所属 Core Handler | Registry 及各管理事件的 Core Handler | 不绕过已定义的独立事件；解析检查、加载登记、注销等待和资源清理按第 4.1.3 节归并，不能按方法随意新增事件 | 第 4.1、5 节 |
 | EX-A10 包管理事件由业务代码或 Handler 显式发起 | 业务入口、Registry 便捷方法和管理事件的 Core Handler | 不把安装、解析、回滚或下一步骤的业务编排写入 EventBus；通用事件调用约定沿用 Events | 第 3.2、4.1.2、4.5 节 |
@@ -127,9 +127,7 @@ Extension 维护包、实例、计划和注册归属记录，不维护 Events �
 
 ### 3.1 系统与外部的关系
 
-调用方先准备 EventBus，通过公共注册接口装配 Core 业务模块提供的业务事件、Core Handler、BUILTIN Handler 和 Ops Build Handler，再将该 EventBus 传给 `Registry.init`。Registry 在同一实例上注册 Extension 管理事件及其 Core Handler，不接收或执行业务注册回调。
-
-初始化完成后，调用方通过 Registry 的便捷入口或受控事件入口提交包管理请求，两种入口都触发同一组管理事件。Registry 不直接执行包解析、安装或卸载。用户扩展包提供 manifest、入口工厂及注册实现；它的 `register` 方法只获得 USER Handler 的登记能力。
+调用方通过 Registry 的便捷入口或受控事件入口提交包管理请求，两种入口都触发同一组管理事件。Registry 不直接执行包解析、安装或卸载。Core 业务模块通过可信登记入口提供事件、BUILTIN 和能力构建处理器。用户扩展包提供 manifest、入口工厂及注册实现。它的 `register` 方法只获得受限入口，可以登记 USER 和 BUILTIN，不能登记 CORE，也不能提交管理操作。
 
 管理操作从可信入口发起。包代码与调用方运行在同一进程，加载前需要校验声明和路径，但这些校验不能隔离恶意 Python 代码。若要执行不可信代码，需要单独设计隔离机制。工具或外部系统的实际执行结果，仍由所属业务模块核对。
 
@@ -142,7 +140,7 @@ Extension 维护包、实例、计划和注册归属记录，不维护 Events �
 flowchart TB
     Caller["业务代码<br/>提供包路径、操作目标和会话"]:::entry
 
-    Registry["Registry（core/extension）<br/><br/>接收已准备好的 EventBus<br/>注册管理事件及 Core Handler<br/>触发管理事件并返回结果"]:::entry
+    Registry["Registry（core/extension）<br/><br/>初始化时登记事件和处理器<br/>接收请求，触发对应事件<br/>等待并返回处理结果"]:::entry
 
     subgraph Extension["core/extension"]
         direction TB
@@ -152,25 +150,21 @@ flowchart TB
             subgraph Management["安装、卸载与重载"]
                 direction LR
                 IC["package.install 事件的<br/>Core Handler<br/><br/>按依赖顺序安装包<br/>汇总各包的安装结果"]:::handler
-                LC["package.uninstall<br/>package.reload<br/>事件的 Core Handler<br/><br/>卸载包，或先卸载再安装"]:::handler
-                IC ~~~ LC
+                LC["package.uninstall<br/>package.reload<br/>事件的 Core Handler<br/><br/>忙则拒绝卸载；重载热切换 Handler"]:::handler
             end
             subgraph Operations["各步骤的操作事件"]
                 direction LR
                 PC["package.parse<br/>package.resolve / package.query<br/>事件的 Core Handler<br/><br/>读取声明，核对依赖与状态"]:::handler
                 OC["extension.plan 事件的<br/>Core Handler<br/><br/>检查包内扩展的依赖<br/>生成本次操作的执行计划"]:::handler
                 RC["extension.apply<br/>extension.rollback<br/>事件的 Core Handler<br/><br/>执行计划，补偿失败安装"]:::handler
-                PC ~~~ OC ~~~ RC
             end
-            Management ~~~ Operations
         end
 
         subgraph Modules["模块提供的能力"]
             direction LR
             PM["Package Manager<br/><br/>读取包路径和 manifest<br/>检查版本、包依赖并排序<br/>查询状态，清理自有产物<br/>保存包信息和依赖结果"]:::module
-            O["Extension Orchestrator<br/><br/>检查包内扩展的依赖<br/>确定本次处理的扩展<br/>生成有序执行计划（Plan）<br/>记录目标扩展和执行步骤"]:::module
+            Orch["Extension Orchestrator<br/><br/>检查包内扩展的依赖<br/>确定本次处理的扩展<br/>生成有序执行计划（Plan）<br/>记录目标扩展和执行步骤"]:::module
             RT["Extension Runtime<br/><br/>按计划加载并创建实例<br/>注册 Handler，记录归属<br/>回滚注册，等待并释放资源<br/>保存计划、生效与清理记录"]:::module
-            PM ~~~ O ~~~ RT
         end
         Handlers -.->|按需使用| Modules
     end
@@ -196,8 +190,6 @@ flowchart TB
 
 一个 Core Handler 可以使用多个模块，同一模块也可以支持多个事件的 Core Handler。模块卡片说明它提供哪些能力、生成或保存哪些记录；计划、生效记录和清理记录均保存在当前进程中，不代表持久存储。解析、依赖解析、计划、执行、回滚和查询分别设有事件，加载与清理的具体步骤由执行或回滚 Handler 在内部完成。事件划分见第 4.1 节，协作顺序见第 5 节。
 
-图中的 EventBus 由调用方预先准备并传入 Registry，业务调用、管理操作、扩展 USER 注册和 Ops 发起的新事件均使用这一实例。图中调用箭头展示管理请求的执行关系；初始化时的实例传入与注册顺序见第 4.1 节。
-
 EventBus 只提供事件调用服务，不根据 Plan、包依赖或处理结果安排下一项包操作。业务代码和 Handler 决定何时发起包管理事件；Registry 在管理方法被调用时显式转发。Extension 与 Events 的协作边界见第 4.5 节。
 
 包管理事件、Core Handler 及包生命周期逻辑由 Extension 维护；事件公共模型和通用执行机制由 Events 维护，业务事件和能力实现由所属业务模块维护。源码依赖保持 `core/extension → core/events`；图中的回调调度表示运行时调用，不表示反向源码依赖。
@@ -206,21 +198,23 @@ EventBus 只提供事件调用服务，不根据 Plan、包依赖或处理结果
 
 | 参与方 | 职责与协作方式 | 交出什么、负责到哪里 |
 | --- | --- | --- |
-| Registry | 接收调用方传入的 EventBus，装配管理事件及其 Core Handler；业务代码调用便捷方法时，在同一实例上显式触发对应事件 | 确认管理组件就绪，等待并交回管理结果 |
+| Registry | 装配管理事件及其 Core Handler；业务代码调用便捷方法时，显式触发对应事件 | 等待并交回管理结果 |
 | 管理事件的 Core Handler | 执行对应事件的默认逻辑，按需使用一个或多个模块的能力；涉及另一项独立操作时触发对应事件 | 核对操作结果，决定是否继续后续步骤 |
 | Package Manager | 提供来源与声明解析、包依赖和排序、包信息查询与自有产物清理能力 | 支持解析、依赖解析和查询事件；也供执行、回滚 Handler 在满足条件后清理自有产物 |
 | Extension Orchestrator | 提供包内扩展依赖分析、操作范围与计划生成能力 | 支持 `extension.plan`；根据解析后的包信息和必要的 Runtime 记录返回单包 Plan |
 | Extension Runtime | 提供可信计划关联、实例、受限登记、计划执行、回滚、注销、等待和资源释放能力 | 支持执行与回滚事件，为计划事件保存可信关联，向依赖解析、计划及查询事件提供当前运行事实 |
 | EventBus / 执行器 | 提供公共注册、事件调用及 Handler 调度服务 | 交回处理结果或异常，不编排包管理步骤；内部机制见 Events 文档 |
-| 调用方与 Core 业务模块 | 准备 EventBus 并完成业务事件与 Handler 注册，提供路径、会话、业务入口、资源权限和停止信号 | 确认业务依赖就绪，从受控事件入口发起操作，核对管理与业务结果 |
+| 调用方与 Core 业务模块 | 提供路径、可信回调、会话、业务入口、资源权限和停止信号 | 从受控事件入口发起操作，核对管理与业务结果 |
 
 上表区分事件处理职责与模块能力职责，不限定一个 Core Handler 只能使用一个模块。安装、卸载和重载事件的 Core Handler 可以通过子事件协调多个模块；具体协作顺序见第 5 节。Core Handler 内部可以复用所需模块的纯计算或底层辅助函数，但进入另一项具有独立语义的包管理操作时，必须触发对应事件。
 
 ### 3.4 已有基础与需要补齐的部分
 
-Extension 目前尚无本设计的执行实现。[Events 架构](../../../events/docs/designs/events-architecture.md)提供所需公共接口的设计依据。Extension 在其上补充包管理事件、Core Handler 和生命周期管理；Plan / Report、manifest 和包生命周期仍需形成对应规约。
+包加载控制面（声明、安装目录、依赖定序、Plan、candidate、生效记录）已有实现与单元测试，契约见 [S_01](../specs/S_01_package-loading.md)，进度见 [开发计划](extension-development-plan.md) EX-01、EX-02。Registry 入口与向 EventBus 发布 Handler（EX-03、EX-04）尚未实现。
 
-Core 业务模块需要提供所属事件的默认行为和能力处理器。Extension 与 Events 则要共同实现可信包信息关联、注册追踪和资源使用结束确认，才能支持完整的加载与卸载流程。
+[Events 架构](../../../events/docs/designs/events-architecture.md)提供公共接口的设计依据。9 类包管理事件及其 Core Handler 在 Events 目录实现，并在 EventBus 初始化时登记；Extension 提供这些 Handler 调用的包管理与 Runtime 能力。
+
+Core 业务模块需要提供所属业务事件的默认行为和能力处理器。Extension 与 Events 共同完成可信包信息关联、注册追踪和在途计数配合后，才能跑通完整的加载与卸载流程。
 
 ## 4. 关键模块设计
 
@@ -228,38 +222,11 @@ Core 业务模块需要提供所属事件的默认行为和能力处理器。Ext
 
 业务代码调用 `Registry.install`、`uninstall` 或 `reload` 时，对应方法体内显式调用受控 `trigger`，发起 `package.install`、`package.uninstall` 或 `package.reload`，并等待结果。Registry 不观察包状态、不自主扫描，也不驱动下一事件。业务代码直接调用受控 `trigger` 时，遵守相同授权及准入规则；解析、查询等请求也由业务或 Handler 明确发起。
 
-**先完成业务注册，再把同一个 EventBus 传给 Registry。** `init` 是业务代码显式调用的装配方法，只负责 Extension 自己的初始化，不接收或执行 Core 业务模块的注册回调。
+`init` 是 jiuwenswarm 显式调用的方法。EventBus 初始化时已经登记 core 内置事件，包括 9 类管理事件及其 Core Handler。`init` 只接收这份 EventBus，并执行 jiuwenswarm 的事件和处理器登记回调。进程启动时只调用一次。它不读取用户 manifest，不加载扩展代码，不执行包安装，也不触发 `ops.build`。
 
-装配按以下顺序进行：
+`init` 返回后，jiuwenswarm 把安装目录路径传进来。Extension 列出该目录中的包目录，作为一批路径触发 `package.install`。这样进程重启后会重新装上安装目录里的包。
 
-1. **调用方准备 EventBus。** 按 Events 公共约定准备事件注册和调用入口，以及 `ops.build` 等基础定义。基础定义由 Events 维护，不由 Registry 或业务模块重复注册。
-2. **调用方注册业务内容。** Core 业务模块提供事件类型、匹配函数、唯一 Core Handler、BUILTIN Handler 和 Ops Build Handler；调用方通过 EventBus 公共接口完成注册，并确认必需的业务服务可用。具体注册代码可以汇总为业务侧函数，但由调用方直接调用。
-3. **Registry 接收 EventBus 并装配管理能力。** 调用方将已准备好的实例传给 `Registry.init`。Registry 准备 Package Manager、Orchestrator 和 Runtime，在传入的 EventBus 上注册第 4.1.1 节的管理事件及其 Core Handler；内部模块和处理器使用同一实例，不另建或替换 EventBus。
-4. **确认完成后再提交包路径。** Registry 确认自身管理组件和管理事件就绪；调用方另行确认业务注册及所需服务就绪，然后提交安装请求。用户包在安装过程中才获得受限 USER 注册入口。
-
-下面的代码只说明实例传递与装配顺序，函数名和参数形式不是已实现的公共 API：
-
-```python
-# Prepare Events infrastructure, including its own base event definitions.
-bus = EventBus()
-
-# Register business event types, Core / BUILTIN Handlers and Ops Build Handlers.
-# This function belongs to the caller, not to Registry.
-register_business_events_and_handlers(bus, services)
-
-# Register Extension management events on the same EventBus.
-registry = Registry()
-await registry.init(event_bus=bus)
-
-# Only after both business and management initialization have succeeded.
-report = await registry.install(local_package_paths)
-```
-
-上述准备与初始化只建立组件和注册关系，不读取用户 manifest、不加载用户代码、不执行包安装，也不触发 `ops.build`。注册 Ops Build Handler 与执行能力构建是两个阶段；能力构建仍由 Events 在运行时按公共约定发起。
-
-**初始化失败与清理。** 业务注册失败时，调用方停止后续装配，负责核对并清理本次业务注册，不向 Registry 提交包操作。Registry 自身的装配失败时不能标为就绪，应记录并清理本次初始化已建立的管理注册和自有资源；不能清空 EventBus，也不能删除调用方预先注册的业务事件或 Handler。注销顺序遵循 Events 约定，清理不完整时保留原始错误和残留记录，由调用方协调后续处理；本期不承诺整次装配原子回滚。
-
-目前建议拒绝对同一 Registry 重复 `init`，也不支持在初始化后更换 EventBus。调用方应在确认失败装配的清理完成后重建相关实例，不能在有残留的 EventBus 上盲目重试。EventBus 的创建和最终释放由调用方协调；Registry 就绪只说明管理入口可用，不代表所有业务模块或用户包已经就绪。具体初始化接口和清理结果表达由 Q08 形成规约。
+必需事件或平台处理器登记失败时，Registry 不能标为就绪。目前建议拒绝重复 `init`，失败实例清理后由调用方重建。事件基础设施的准备方式遵循 Events 公共约定，Extension 不重复定义。
 
 #### 4.1.1 包管理事件与 Core Handler 职责
 
@@ -276,7 +243,7 @@ report = await registry.install(local_package_paths)
 | `package.resolve` | 包之间的依赖判断和顺序选择具有独立结果，安装与卸载均需使用 | 接收操作类型、候选包或待卸载目标及当前生效集合；安装时检查版本、冲突和包依赖并给出包序，卸载时检查反向依赖和允许范围；返回合法选择、顺序及拒绝原因，不导入或注销代码 | Package Manager：版本、包依赖和包级排序；Runtime：当前生效与注册事实 |
 | `extension.plan` | 单包的目标扩展和步骤应在产生加载或清理影响前确定，供安装与卸载复用 | 接收经依赖解析确认的包、操作类型和目标范围，检查包内依赖，生成并保存可信关联的单包 Plan；卸载时核对实例和注册归属，计划生成不代表执行成功 | Orchestrator：包内依赖、范围与计划；Runtime：可信 Plan 关联、当前实例和注册记录 |
 | `extension.apply` | 执行计划具有独立的授权检查、副作用和结果核对要求 | 只接受来源及目标已核实的 Plan；安装时依序加载、创建实例和注册，卸载时依序注销、等待和释放；保存执行事实并生成 Report，安装失败时显式触发回滚 | Runtime：计划、实例、注册和资源；Package Manager：清理已确认所有权的安装产物 |
-| `extension.rollback` | 安装失败后的补偿可能在原调用结束后仍有残留，需要独立核对和重试入口 | 接收本次失败 Plan 的标识和可信执行记录，逆序撤销本批注册，等待使用结束，再释放实例、资源及自有产物；返回逐项清理结果和残留，不撤销其他已成功包或外部副作用 | Runtime：注册归属、使用结束和资源清理；Package Manager：自有产物的所有权与清理 |
+| `extension.rollback` | 尚未写入 Bus 的安装失败后，需要独立丢掉 candidate | 接收本次失败 Plan 的标识，卸载这次加载的模块，不修改已经生效的注册表，也不删除调用方源码 | Runtime 清理 candidate；Package Manager 只在自己新建且尚未发布的安装目录副本上清理 |
 | `package.query` | 管理调用超时、取消或返回失败后，需要独立读取事实来判断下一步 | 按包、操作或 Plan 标识读取当前包信息、生效状态、执行进展与待清理项；返回查询时可确认的事实，不补跑或修复操作，也不将进行中状态当作最终结果 | Package Manager：包来源和依赖信息；Runtime：生效、执行与清理记录 |
 
 表中的模块依赖包含 Core Handler 内部使用的能力，以及通过子事件取得的能力。例如安装 Handler 需要三个模块，但应通过解析、依赖解析、计划和执行事件使用它们，不直接越过这些独立事件的入口。仅接收另一个模块产出的数据，不等于必须再次调用该模块。Plan 由 Orchestrator 生成，执行时由 Runtime 核对和使用，不重新生成计划。各事件的处理步骤和模块调用时序见[第 5 节](#5-模块协作与处理流程)，依赖关系汇总见[第 5.5 节](#55-事件之间的依赖与调用约束)。
@@ -299,9 +266,9 @@ report = await registry.install(local_package_paths)
 
 目前建议在单个 Registry 内协调根管理操作。合法子事件复用同一可信操作关联和准入范围，不能再次等待父操作持有的同一把锁，也不能只因事件名不同就当作无关请求。需要避免同一操作递归调用自身。管理事件的可介入范围、根操作协调和递归限制由 Q06 确认。
 
-解析、依赖解析、计划和查询均不导入扩展代码、不改变 Handler 注册，但仍需检查调用方权限。准备结果必须在执行前重新核对；查询只能返回读取时已保存的事实，可以反映操作进行中，不承诺不同模块记录构成全局一致快照。只读请求的准入与读写协调由 Q04 / Q06 细化，不以查询触发隐式补偿。
+解析、依赖解析、计划和查询均不把 candidate 写入 Bus。查询只返回 Runtime 已经记下的事实，不补做安装。只读请求如何与根操作并发，仍见 Q06。
 
-停止时拒绝外部新请求，但为已接收操作所必需的子事件、回滚和清理保留受控执行范围。取消、超时或清理失败后保留已经发生的记录，不能直接重放整次安装或整份计划，具体查询与续清理协议由 Q04 确认。
+停止时拒绝外部新的管理请求。已经开始的业务调用继续使用自己的快照。取消或超时之后，用 `package.query` 看生效记录，不把同一次安装原样再放一遍。
 
 #### 4.1.3 事件与内部步骤的界限
 
@@ -310,8 +277,8 @@ report = await registry.install(local_package_paths)
 | 字段、格式与路径检查 | `package.parse` 的 Core Handler | 与一次候选包解析共同决定返回结果，单项检查没有独立交付结果 |
 | 版本检查、包依赖检查与包级排序 | `package.resolve` 的 Core Handler | 必须基于同一组选定包和当前生效事实共同判断；单独排序结果不足以证明依赖可满足 |
 | 包内依赖检查与扩展排序 | `extension.plan` 的 Core Handler | 共同决定同一份 Plan，不在排序后重新选择目标 |
-| 导入入口、调用工厂、执行实例 `register`、调用 Events 注册接口 | 安装 Plan 的 `extension.apply` Core Handler | 属于一次计划执行的连续步骤；每条成功注册立即记录归属，不把可取消的登记与记录捕获再拆成事件 |
-| 注销、等待使用结束和释放资源 | 卸载 Plan 的 `extension.apply`，或失败 Plan 的 `extension.rollback` Core Handler | 共同完成卸载或补偿这一管理结果；等待未结束时不得进入释放，任一步失败保留残留 |
+| 导入入口、调用工厂、执行 `register`、一次写入 Bus | 安装或重载 Plan 的 `extension.apply` Core Handler | `register` 先进入 candidate；全部成功后一次写入，不把半套 Handler 暴露给新的快照 |
+| 收集 candidate、一次写入 Bus 注册表、丢掉未发布的模块 | 安装或重载 Plan 的 `extension.apply`，失败时由 `extension.rollback` 处理 | 写入注册表之前失败，不留下半套 Handler。卸载发现在途调用时直接失败，不等待 |
 | 自有安装产物的所有权核对与清理 | 上述卸载或回滚 Core Handler 内，使用 Package Manager 能力 | 文件清理必须依附于注册撤销和使用结束条件；本期不提供任意路径删除或独立包文件回收业务 |
 | 更新进展、保存 `handler_id`、生成报告 | 所属操作的 Core Handler | 属于执行事实的记录步骤，不因一次内存更新新增事件 |
 
@@ -323,13 +290,15 @@ report = await registry.install(local_package_paths)
 
 Package Manager 的来源与声明解析能力由 `package.parse` 的 Core Handler 使用；版本、包依赖与包级排序能力由 `package.resolve` 的 Core Handler 使用。调用方和安装 Handler 通过这两个独立事件取得结果，不在事件入口前先执行同一项操作。
 
-Package Manager 从调用方明确传入的本地路径解析包根，读取候选声明。本文不约定默认目录扫描、配置文件合并或来源优先级。同一包根如何去重、不同根声明同一 `package.id` 时如何处理，由 Q01 确认。目前建议对不同根的同 ID 冲突报错，避免加载结果取决于偶然的输入或目录遍历顺序。
+Package Manager 接受调用方传入的本地目录或 zip。zip 解压到新建的临时目录，读完 manifest 并完成复制后只删除这个临时目录。目录则直接读取。通过检查的包复制到 `extensions.install_dir/<package.id>/<version>/`。源路径已经是这个安装目录时，就地使用，不再复制。调用方原来的目录和 zip 一律不删除。
 
-包来源明确后，再检查版本和依赖。如果选定包不满足要求，不自动从其他路径改选一个版本。运行中已生效的同 ID 包，也不会因为传入新路径就被替换，必须经过明确的卸载、重载等管理操作。
+同一个 `package.id` 在安装目录里只保留一个版本目录。同一批候选里这个 id 出现两次，`package.resolve` 让整批失败，错误码是 `EXTENSION_DUPLICATE_PACKAGE_ID`。id 已经在 Runtime 的生效记录里时，返回 `EXTENSION_PACKAGE_EXISTS`，不替换。要换这个包，先卸载，或直接改安装目录里的文件再 `reload`。
+
+`requires.host` 是可选字段，表示这个包需要的最低 jiuwenswarm 版本，写法与包依赖的版本条件相同。宿主版本不满足时，这个包失败，错误码是 `EXTENSION_HOST_VERSION_TOO_LOW`，不影响同一批里没有依赖关系的其他包。
 
 `extensions[].module` 必须是相对于包根的入口路径。加载前，将它解析为实际绝对路径，处理 `..`、符号链接和 Windows 目录联接（junction），确认最终入口仍位于选定包根内。不支持的运行域、文件缺失或入口越界，都应在导入代码前拒绝。
 
-一次操作使用的包根、manifest 和执行计划应保持固定。如何防止校验后包内容被替换，还需要在 Q02 中确定，例如是否使用固定内容的副本；本文不把路径校验当作已经解决这一问题。
+一次操作加载的是安装副本里的文件。校验通过后先复制到 `<install_dir>/<package.id>/<version>/`，再从这份副本加载。调用方随后修改自己的源码目录，不会改到这次已经复制的内容。已经是安装副本的目录则就地加载。
 
 #### 4.2.2 manifest 的职责和最小示例
 
@@ -367,13 +336,11 @@ extensions:
 
 `package.resolve` 的 Core Handler 在同一次依赖解析中完成版本与包依赖检查、冲突判断和包级排序。输入包括候选包或卸载目标、操作类型及 Runtime 提供的当前生效事实；输出是合法包集合、处理顺序及拒绝原因。检查与排序不再各设事件，以免基于不同选择结果继续执行。
 
-Package Manager 根据本次选定的包和已经生效的兼容依赖检查加载条件。依赖另一个待安装包时，必须先处理被依赖包，再处理依赖方；这种按依赖关系排列顺序的方式称为拓扑排序。没有包依赖时，按 `hash(package.id)` 升序排列。
-
-如果多个包都已满足前置依赖，它们之间如何排序，以及哈希算法、碰撞和跨进程稳定性如何处理，见 Q03。无论采用什么并列排序规则，都不能破坏依赖先后的要求。
+Package Manager 根据本次选定的包和 Runtime 里已经生效的依赖检查加载条件。依赖另一个待安装包时，必须先处理被依赖包，再处理依赖方。没有包依赖时，按 SHA-256(UTF-8 `package.id`) 的十六进制字符串升序排列。包内扩展使用同一算法，键是 `extension.id`。依赖先后优先于这个排序。Python 内置的 `hash()` 不参与排序。
 
 依赖缺失、存在循环或版本不满足时，不加载受影响的计划，并记录原因。目前建议让不受影响的包继续安装。例如，A 注册失败，依赖 A 的 B 就不进入 Runtime；独立的 C 可以继续，其他已成功包也不因此回滚。
 
-本次候选包与既有生效包发生同 ID 冲突时，处理策略仍待 Q02 确认。磁盘上存在一个包，不代表它是可用的生效依赖。安装 Handler 根据 `package.resolve` 的包序，逐包触发 `extension.plan`，不混排多个包的扩展单元，也不自动联网获取依赖。卸载时同一事件检查反向依赖和授权范围，并给出允许的处理顺序。
+同一批里 `package.id` 重复时整批失败。id 已经生效时，该包返回 `EXTENSION_PACKAGE_EXISTS`，不替换。磁盘上有一份目录，不等于它已经在 Runtime 的生效记录里。安装 Handler 按 `package.resolve` 的包序逐包触发 `extension.plan`，不把多个包的扩展混在一起排，也不联网下载依赖。卸载时同一事件检查反向依赖和在途调用。
 
 ### 4.3 Orchestrator：单包计划与结果协调
 
@@ -391,7 +358,7 @@ Plan ID 用于关联报告和诊断记录，本期不提供持久任务队列，
 
 是否允许一次操作同时处理所有受影响的依赖方，见 Q05。在确认之前，不能悄悄卸载调用方未指定的扩展或包。
 
-`extension.apply` 返回 Report 后，上层安装或卸载事件的 Core Handler 需要分清：注册成功、失败但已清理、失败且仍有残留，以及因依赖问题未执行。SUCCESS / FAILED 只是架构层面的结果表达；具体字段、逐项明细和跳过原因由 Q04 定稿，本文没有定义已生效的 SKIPPED 等公共状态值。
+`extension.apply` 返回 Report 后，上层要分清注册已一次生效、失败且 candidate 已丢掉，以及因为依赖问题没有执行。状态只有 SUCCESS 和 FAILED。依赖没有满足时使用 FAILED，并在 `error.message` 里写明原因，不使用 SKIPPED。`trigger` 仍可能抛出异常；调用方不能据此认定包没有生效，需要时触发 `package.query`。
 
 ### 4.4 Runtime：受限登记、归属和资源
 
@@ -399,7 +366,7 @@ Runtime 提供计划执行和失败补偿能力，分别由 `extension.apply` �
 
 安装 Plan 由 `extension.apply` 的 Core Handler 按顺序处理每个扩展：核实入口，加载模块，调用 `create_extension` 创建实例，再调用实例 `register` 完成登记。这些是同一次执行的内部步骤，不再拆分加载与注册事件。Handler 可以定义在独立的 handler.py 中，由入口模块导入。
 
-实例 `register` 只能取得 Runtime 提供的受限入口，用于登记经授权的 USER Handler。每次 Events 注册成功后，立即保存 `handler_id`，关联可信计划中的包、扩展单元和实例；登记成功与记录捕获之间不插入可被取消打断的异步等待。个人扩展不能替换事件定义、平台处理器或自行声明其他包身份，回调与包关联方式沿用 Events 公共约定。
+实例 `register` 只能取得 Runtime 提供的受限入口，可以登记 USER 和 BUILTIN，不能登记 CORE，也不能传入或改写 `PackageMetadata`，也不能替换事件定义。prepare 阶段这些 Handler 只进入 candidate，不写入 EventBus，因此业务 `trigger` 还看不见它们。该包的扩展全部成功后，commit 在一次没有 `await` 的同步更新里，由 Runtime 调用 EventBus 的 `register_event_handler(..., package_metadata=...)` 写入整套 Handler；`package_metadata` 取自 Plan 上已核实的 `PackageMetadata`（含包根）。业务 `trigger` 进入该 Handler 时，Ops 使用登记时保存的 `PackageMetadata`。写入前开始的调用继续使用旧快照；写入后开始的调用看到这个包的整套新 Handler。
 
 任一加载或登记步骤失败时，执行 Handler 停止当前安装 Plan，保存已创建实例、已注册标识和资源事实，再显式触发 `extension.rollback`。回滚 Handler 仅处理这份失败 Plan 的实际记录：逆序注销、等待相关使用结束、关闭实例并释放资源。即使 `register` 未正常返回，也依据已经捕获的标识清理；回滚失败保留原始错误及残留。
 
@@ -407,9 +374,9 @@ Runtime 提供计划执行和失败补偿能力，分别由 `extension.apply` �
 
 注销、等待、关闭和记录更新可以复用 Runtime 的辅助函数，文件核对与清理使用 Package Manager 的辅助能力；这些步骤受当前执行或回滚事件统一约束。安装文件清理与注册撤销分别记录，不能因目录还在就再次注册，也不能因注册已移除就认为资源已经释放。
 
-整个安装 Plan 成功后，Runtime 根据实际记录确认生效状态并产出 Report。重复 `install` 或 `apply` 时，先核对已生效、正在执行及待清理记录，不能盲目重放计划；重复请求与续清理的公共协议由 Q02 / Q04 确认。
+整个安装 Plan 成功后，Runtime 记下生效记录并产出 Report。同一个已生效 id 再次 `install` 时，返回 `EXTENSION_PACKAGE_EXISTS`，不再加载一遍。
 
-导入的模块、扩展实例、能力函数和包资源可能在不同时刻结束使用。删除 `sys.modules` 条目不能证明引用已释放，卸载也不会自动终止扩展自行创建的任务。相对导入、同名模块、导入缓存和资源退出分别在 Runtime 特性方案中验证，关闭资源的约定仍待 Q07 确认。
+每次 prepare 给这次加载单独建一个包，包根就是这份安装副本。入口文件放进这个包里执行。包根之内可以互相导入：同目录用 `from .handler import ...`，子目录用 `from .helpers import ...`，上一级用 `from ..common import ...`。点号对应的就是磁盘上的那一层目录。超出包根的路径不会被装进来。新的 prepare 读的是文件现在的内容。早先创建出来的函数对象仍执行它被创建时的那份代码。扩展在 `register` 里自己启动的后台任务，Runtime 不负责停止。
 
 ### 4.5 与 Events 的协作边界
 
@@ -417,15 +384,15 @@ Extension 使用 Events 的公共接口完成事件装配、操作调用和 Hand
 
 | 协作事项 | Extension 负责什么 | 从 Events 取得什么 |
 | --- | --- | --- |
-| 初始化装配 | Registry 接收调用方已准备好的 EventBus，只注册管理事件及其 Core Handler，不执行业务注册回调 | 同一实例的公共注册和调用入口；基础定义归 Events 维护 |
+| 初始化装配 | EventBus 初始化登记 core 的管理事件。Registry.init 只登记 jiuwenswarm 的内置事件 | 已经初始化好的 EventBus |
 | 管理操作 | 业务代码或 Handler 显式触发对应事件，核对结果后决定是否继续 | 事件处理结果或异常 |
-| 扩展注册 | Runtime 限制登记范围，关联可信包身份，保存每条 `handler_id` | Handler 注册标识和注销入口 |
-| 平台能力 | 提供可信包来源；具体能力由所属业务模块提供，Handler 使用公开 Ops 接口访问 | Events 提供的能力访问接口 |
+| 扩展注册 | Runtime 限制登记范围；发布时向 Bus 传入已核实的 `PackageMetadata`，保存每条 `handler_id` | `register_event_handler`（含可选 `package_metadata`）及注销入口 |
+| 平台能力 | 提供可信包来源；具体能力由所属业务模块提供 | Ops；其中包上下文来自该 Handler 登记时的 `PackageMetadata` |
 | 卸载协作 | Runtime 指定等待范围，确认相关调用与能力使用结束后再释放资源 | 按 Events 生命周期约定取得的使用结束确认 |
 
 第 4.1.1 节的独立操作均经过对应事件。业务代码或 Handler 显式发起解析、计划执行、查询和回滚等请求；注销、等待、释放和产物清理由执行或回滚 Handler 在内部按条件推进。EventBus 不读取 Plan 或包依赖来安排下一项包操作。
 
-管理事件的名称、输入输出、可介入范围和结果核对要求由 Extension 规约维护。通用事件接口与 Handler 协议直接沿用 Events；卸载所需的使用结束确认见 [Events 资源与停止约定](../../../events/docs/designs/events-architecture.md#83-资源与停止)，具体协作接口待 Q07 确认。
+管理事件的名称、输入输出和结果以本模块规约为准。通用事件接口、Handler 协议和 `trigger` 开始时的注册表快照沿用 Events。卸载不等待使用结束：有在途调用就返回 `EXTENSION_PACKAGE_BUSY`。
 
 ## 5. 模块协作与处理流程
 
@@ -435,9 +402,7 @@ Extension 使用 Events 的公共接口完成事件装配、操作调用和 Hand
 
 ### 5.1 启动与安装主流程
 
-启动时，调用方先准备 EventBus 并注册业务事件与 Handler，再调用 `Registry.init(event_bus=bus)`，由 Registry 在该实例上注册第 4.1.1 节的管理事件及其 Core Handler。具体装配及失败处理见第 4.1 节。下图从初始化完成后的安装请求开始，不重复展示启动注册。
-
-业务代码调用 `Registry.install` 后，在同一 EventBus 上触发 `package.install`。该事件接收本地包路径集合和允许的安装范围，负责把各子事件的结果组织为一次安装结果，不直接调用其他独立事件的内部实现。
+初始化显式登记第 4.1.1 节的管理事件及其 Core Handler。业务代码调用 `Registry.install` 后触发 `package.install`。该事件接收本地包路径集合和允许的安装范围，负责把各子事件的结果组织为一次安装结果，不直接调用其他独立事件的内部实现。
 
 **Core Handler 的处理逻辑：**
 
@@ -481,11 +446,10 @@ sequenceDiagram
         I->>B: trigger(extension.apply, Plan)
         B->>T: 调度执行 Handler
         loop Plan 中的每个扩展
-            T->>T: Runtime 加载入口、创建实例并调用 register
-            T->>B: 公共注册接口登记 USER Handler
-            B-->>T: handler_id
-            T->>T: 立即记录包、扩展与注册归属
+            T->>T: 加载入口并 register，声明只进入 candidate
         end
+        T->>B: 一次写入该包的整套 Handler，中间没有 await
+        T->>T: Runtime 记下生效记录
         T-->>B: 根据执行事实生成 Report
         B-->>I: 执行结果
     end
@@ -541,20 +505,20 @@ sequenceDiagram
     B-->>H: 回滚结果
 ```
 
-回滚可以独立发起，但目标必须是可信的失败 Plan 及其残留，不能代替正常卸载或撤销无关注册。某个注销、等待或释放步骤失败时，回滚 Handler 记录原始错误、逐项结果和残留，不把事件返回当作清理完成。原管理调用结束后，可以先查询事实，再通过同一回滚事件请求继续清理；具体续清理协议由 Q04 确认。
+回滚的目标是还没有写入 Bus 的失败 Plan。它丢掉 candidate 和这次加载的模块，不修改已经生效的注册表，也不删除用户来源。已经发布成功的包用卸载处理，不用回滚代替。
 
-**回滚与同时生效是两件事。** 一条 Handler 注册成功后，就可能被业务调用使用。本设计不保证整包注册统一对外可见，撤销注册也不能撤销已发生的业务影响。首期建议在启动安装完成前不接收外部业务调用；运行期间的注册可见范围和批次发布仍待 Q04 确认。
+**回滚与同时生效。** prepare 失败时，Handler 还没有进入 Bus 注册表，回滚只丢掉 candidate 和这次加载的模块。commit 把一个包的全部 Handler 一次写进注册表，中间没有 `await`。业务 `trigger` 在开始时读取注册表快照，所以不会看见半个包。写入注册表之前已经开始的调用继续使用自己的快照。回滚不能撤销扩展代码已经造成的外部影响。
 
 #### 5.2.2 卸载与资源释放
 
-`Registry.uninstall` 显式触发 `package.uninstall`。卸载 Handler 先通过 `package.resolve` 检查反向依赖与允许范围，再触发 `extension.plan` 和 `extension.apply`。注销、等待使用结束、释放资源及自有产物清理是执行 Handler 内的有序步骤，不另设等待、释放或文件删除事件。
+`Registry.uninstall` 显式触发 `package.uninstall`。卸载 Handler 先通过 `package.resolve` 检查反向依赖，再看这个包有没有在途调用。有在途调用就返回 `EXTENSION_PACKAGE_BUSY`，注册表和安装目录都不变，也不等待。没有反向依赖、也没有在途调用时，才触发 `extension.plan` 和 `extension.apply`，从 Bus 注册表移除该包的 Handler，并删除安装目录里的对应版本。不另设等待事件。
 
 **输入与处理逻辑：**
 
 1. 接收目标包标识及允许的卸载范围，核对权限、准入和 Runtime 的当前记录。目标以进程内生效及残留记录定位，不要求重新导入或重新解析磁盘上的旧代码。
-2. 触发卸载模式的 `package.resolve`，检查目标的反向依赖并取得合法卸载顺序。仍有范围外的包依赖目标时拒绝，不自行扩大卸载范围。
-3. 对允许处理的每个包，触发 `extension.plan` 生成单包卸载 Plan，再触发 `extension.apply`。多个目标先处理依赖方，再处理被依赖方；某个依赖方尚未清理完成时，不继续移除它仍需要的包。
-4. 核对每份执行报告中的注册撤销、使用结束、资源释放和自有产物清理。未完成项保留记录并报告，只有全部必要条件成立才返回该目标卸载成功。
+2. 触发卸载模式的 `package.resolve`，检查反向依赖和在途调用。仍被其他已生效包依赖，或当前有调用，就拒绝，不进入删除。
+3. 两项都通过后，触发 `extension.plan` 和 `extension.apply`，从注册表移除 Handler，并删除安装目录中的该版本。
+4. 只有反向依赖和在途调用两项都通过，才报告卸载成功。任一不通过时，Bus 注册表和安装目录保持原样。
 
 该 Handler 通过依赖解析、计划和执行事件使用三个模块。图中将多包循环简化为一个目标包；解析和计划事件的模块交接见第 5.4.2、5.4.3 节，执行内部步骤见第 5.4.4 节。
 
@@ -565,85 +529,80 @@ sequenceDiagram
     participant U as package.uninstall 事件的 Core Handler
     participant C as 准备或计划事件的 Core Handler
     participant T as extension.apply 事件的 Core Handler
-    participant A as 已接收业务调用
     H->>B: trigger(package.uninstall)
     B->>U: 调度卸载 Handler
     U->>B: trigger(package.resolve, 卸载目标与范围)
-    B->>C: 核对反向依赖和当前生效记录
-    C-->>B: 合法目标、顺序或拒绝原因
-    B-->>U: 依赖解析结果
-    U->>B: trigger(extension.plan, 单包卸载操作)
-    B->>C: 生成目标扩展及清理顺序
-    C->>C: Runtime 保存 Plan 的可信关联
-    C-->>B: 卸载 Plan
-    B-->>U: 计划结果
-    U->>B: trigger(extension.apply, Plan)
-    B->>T: 调度卸载计划执行 Handler
-    T->>B: 公共注销接口撤销目标 handler_id
-    B-->>T: 注销结果
-    T->>T: 记录撤销项 等待使用结束
-    Note over T,A: 等待未结束，不释放实例或删除文件
-    A->>A: 完成已有调用与能力使用
-    T->>T: Runtime 确认使用结束 关闭实例并释放资源
-    T->>T: Package Manager 核对并清理自有产物
-    T-->>B: 已完成步骤、失败与未清理项
-    B-->>U: 卸载 Plan 的 Report
-    U-->>B: 核对后的逐包卸载结果
+    B->>C: 核对反向依赖和在途调用
+    alt 仍被依赖或仍有调用
+        C-->>B: PACKAGE_IN_USE 或 PACKAGE_BUSY
+        B-->>U: 拒绝，注册表和安装目录不变
+    else 可以卸载
+        U->>B: trigger(extension.plan, 单包卸载操作)
+        B->>C: 生成清理顺序
+        C-->>B: 卸载 Plan
+        B-->>U: 计划结果
+        U->>B: trigger(extension.apply, Plan)
+        B->>T: 调度卸载计划执行 Handler
+        T->>B: 从注册表移除该包的 Handler
+        T->>T: Package Manager 删除安装目录中的该版本
+        T-->>B: SUCCESS
+        B-->>U: 卸载 Plan 的 Report
+    end
+    U-->>B: 卸载结果
     B-->>H: 卸载结果
 ```
 
-`extension.apply` 执行卸载、`extension.rollback` 清理失败安装时，都必须等待尚未结束的 Handler、已被选中但尚未执行的 Handler，以及仍会访问包资源的能力。该条件属于清理步骤的前置要求，不构成独立等待业务。具体使用结束确认遵循 [Events 资源与停止约定](../../../events/docs/designs/events-architecture.md#83-资源与停止)，协作接口待 Q07 确认。
+卸载在发现在途调用时立即失败，不等待这些调用结束。`extension.rollback` 只处理还没有写入 Bus 的 candidate。已经开始的业务调用继续使用它的注册表快照；卸载不会为了等它结束而停住。
 
-注销、等待、释放或文件清理任一步失败时，保留进展、资源和未清理项。不能跳过失败条件继续删除文件，也不能将部分注销的包描述为完整生效；后续先查询，再按原卸载 Plan 的记录受控续清理，不能重新执行已完成的注册或清理步骤。
-
-当前管理调用或父调用仍使用目标包时，同步等待自身退出可能死锁。首期建议拒绝这类卸载，或由调用方在相关使用结束后重新提交卸载请求，不能绕过检查直接调用清理函数。
+仍被其他已生效包依赖时返回 `EXTENSION_PACKAGE_IN_USE`，不删除文件。调用方的源码目录和上传的 zip 不是安装目录里的副本，任何卸载和回滚都不删除它们。
 
 #### 5.2.3 重载与停止
 
-`Registry.reload` 触发 `package.reload`。`package.reload` 事件的 Core Handler 先触发 `package.uninstall`，检查完整卸载结果成功后再触发 `package.install`。卸载失败或只完成部分清理就停止，不能直接调用安装逻辑继续。如果旧包已卸载而新包安装失败，目标包可能尚未生效或仍有待核对项；不自动恢复旧版、旧实例或无中断服务。回退也由调用方明确选择旧版本，再触发安装事件。
+`Registry.reload` 触发 `package.reload`。它不先卸载。Core Handler 按 `package.id` 找到安装目录，重新读取 manifest，并用 Runtime 的生效记录检查两件事：这个包自己的依赖是否仍然满足；已经依赖它的包是否仍然接受新版本。两项都通过才触发 `extension.plan` 和 `extension.apply`。
+
+`extension.apply` 用新的模块名加载安装目录里的当前文件，把 Handler 收进 candidate。全部成功后，在一次没有 `await` 的同步更新里替换该包在 Bus 注册表上的 Handler。此后开始的 `trigger` 使用新快照和新模块。更新开始前已经取得快照的调用继续执行旧模块里的代码。这些调用结束后再从 `sys.modules` 去掉旧模块，`reload` 的返回不等这一步。准备或校验失败时，Bus 上的当前 Handler 保持不变。
 
 **输入与 Core Handler 的处理逻辑：**
 
-1. 接收旧包目标、新安装来源和允许范围，建立同一根操作关联。后续卸载与安装分别保留子操作结果，子事件不能扩展原授权范围。
-2. 显式触发 `package.uninstall` 并等待完整结果。拒绝、失败、取消或存在未清理项时结束本次重载，不进入安装。
-3. 完整卸载成功后，显式触发 `package.install`，由它重新完成解析、依赖解析、计划和执行，不复用旧 Plan、旧实例或旧注册标识。
-4. 汇总旧包清理和新包安装两阶段的事实。只有两者均完成才报告重载成功；新安装失败时保留安装报告和补偿残留，不自动恢复旧包。
-
-重载 Handler 通过两个子事件使用 Package Manager、Orchestrator 和 Runtime，不直接重复它们的工作。下图中的“安装或卸载 Core Handler”合并展示两个独立处理器，内部链路分别见第 5.1、5.2.2 节。
+1. 接收 `package_id`。目录不存在或包尚未生效时返回 FAILED，其他包不变。
+2. 读取安装目录里的 manifest。依赖方不接受新版本时返回 `EXTENSION_DEPENDENT_INCOMPATIBLE`，不修改注册表。
+3. 触发 `extension.plan`，再触发 `extension.apply`。apply 只发布这个包的新 Handler。
+4. 发布成功后 generation 加 1，Runtime 更新生效记录。Report 为 SUCCESS。旧调用结束后的模块清理不改变这个结果。
 
 ```mermaid
 sequenceDiagram
     participant H as 业务代码 / Registry
     participant B as EventBus
     participant C as package.reload 事件的 Core Handler
-    participant S as 安装或卸载事件的 Core Handler
-    H->>B: trigger(package.reload, 旧目标与新来源)
+    participant P as extension.plan 事件的 Core Handler
+    participant T as extension.apply 事件的 Core Handler
+    H->>B: trigger(package.reload, package_id)
     B->>C: 调度重载 Handler
-    C->>C: 核对权限、范围和根操作关联
-    C->>B: trigger(package.uninstall, 同一根操作)
-    B->>S: 调度卸载 Handler，执行卸载链路
-    S-->>B: 卸载结果与残留
-    B-->>C: 交回卸载结果
-    alt 完整卸载成功
-        C->>B: trigger(package.install, 新来源)
-        B->>S: 调度安装 Handler，执行安装链路
-        S-->>B: 安装结果与补偿残留
-        B-->>C: 交回安装结果
-        C->>C: 汇总两个阶段的实际结果
-    else 卸载拒绝、失败或未完成
-        C->>C: 结束重载，不进入安装
+    C->>C: 读取安装目录，核对依赖方是否接受新版本
+    alt 依赖不满足或目录无效
+        C-->>B: FAILED，注册表不变
+    else 可以重载
+        C->>B: trigger(extension.plan)
+        B->>P: Orchestrator 生成新一代 Plan
+        P-->>B: Plan
+        B-->>C: 计划结果
+        C->>B: trigger(extension.apply, Plan)
+        B->>T: 用新模块名加载，收集 candidate
+        T->>B: 一次写入该包的整套 Handler
+        T-->>B: SUCCESS
+        B-->>C: 执行结果
+        Note over B: 新的 trigger 读取新快照；旧调用保持自己的快照
     end
-    C-->>B: 重载结果
-    B-->>H: 两阶段结果及后续待处理项
+    B-->>H: 重载结果
 ```
 
-其他包仍依赖目标包时，不能绕过卸载保护直接 `reload`。应先明确需要停止和重新安装哪些依赖方，见 Q05。重载还会重新登记 USER Handler，可能改变同层执行顺序，不能假定它保留原来的注册位置。
+依赖它的包只要仍满足版本条件，重载就不被拒绝。版本条件不再满足时，重载失败，已生效的 Handler 继续留在注册表里。重载会重新登记 USER 或 BUILTIN Handler，同层顺序按这次写入注册表的顺序确定。
 
 停止由业务代码发起。调用方先关闭外部新请求入口，再显式触发正常包的卸载事件，或针对失败安装触发回滚事件；已接收操作仍可按授权完成必要子事件和内部清理。EventBus 不监听停止状态自动发起包操作。确认相关使用结束后，业务代码再释放平台资源；停止不等于删除源码。
 
 ### 5.3 个人扩展登记与使用
 
-扩展作者在 manifest 声明入口，提供 `create_extension` 工厂及实例 `register` 方法。`extension.apply` 的 Core Handler 使用 Runtime 加载并创建实例，在同一次计划执行中调用 `register`；扩展只取得受限的 USER Handler 登记能力，不能直接提交自制 Plan 或借包管理事件扩大权限。
+扩展作者在 manifest 声明入口，提供 `create_extension` 工厂及实例 `register` 方法。`extension.apply` 的 Core Handler 使用 Runtime 加载并创建实例，在同一次计划执行中调用 `register`；扩展只取得受限的 USER / BUILTIN 登记能力，不能直接提交自制 Plan 或借包管理事件扩大权限。
 
 Handler 签名、平台能力访问和通用事件接口遵循 [Events 接入约定](../../../events/docs/designs/events-architecture.md)。Extension 负责将登记和后续使用关联到正确的包、扩展单元与注册批次，不展开 Events 内部机制。
 
@@ -756,11 +715,11 @@ sequenceDiagram
 
 **Core Handler 的处理逻辑：**
 
-1. 使用 Runtime 核对 Plan 是否属于当前操作、来源与目标是否一致，以及是否已执行或存在冲突。已完成、正在执行和残留待清理不能当作新的安装计划直接重放；续清理须依据保存的进展受控进行，协议仍待 Q04 确认。
-2. 安装模式下，使用 Runtime 逐扩展核实入口、导入模块、创建实例，并调用实例的受限 `register`。Runtime 使用 Events 公共注册接口，每次成功后立即捕获 `handler_id` 及其包、扩展和 Plan 归属，再继续下一步。
-3. 安装失败时停止当前 Plan，保存失败和已发生的事实，由本 Core Handler 显式触发 `extension.rollback`，等待并保留其结果。补偿不能把原安装失败改成成功；取消或超时中断清理时保留残留，后续先查询，见第 8 节。
-4. 卸载模式下，使用 Runtime 按记录注销、确认相关使用结束、关闭实例并释放资源；条件满足后再使用 Package Manager 清理自有安装产物。失败时保存进展，不触发安装回滚来恢复旧实例。
-5. 使用 Runtime 保存完成与残留事实，生成 Report。只有第 6.3 节的相应完成条件全部满足，才返回该 Plan 成功。
+1. 核对 Plan 的包、操作和当前生效记录。id 已经生效时，不把这个包再装一遍。
+2. 安装或重载时，按 Plan 加载入口并调用受限 `register`。声明先进入 candidate，不写入 Bus。该包全部成功后，一次把整套 Handler 写入注册表，并更新 Runtime 的生效记录。
+3. 写入之前失败时，触发 `extension.rollback`，丢掉 candidate。已经生效的注册表不变。
+4. 卸载时，先确认没有反向依赖、也没有在途调用。否则失败返回，不改注册表，不删安装目录。通过后移除该包的 Handler，并删除安装副本。
+5. Report 只有 SUCCESS 或 FAILED。依赖问题写在失败原因里。
 
 下图展开安装与卸载的模块调用。失败安装的回滚内部链路见第 5.2.1 节；“扩展实例”是 Runtime 管理的包内实例，受限登记入口不能让它修改事件定义或冒用其他包身份。
 
@@ -780,11 +739,10 @@ sequenceDiagram
         C->>R: 按计划加载入口并创建实例
         R->>E: 调用 register，提供受限登记入口
         loop 每条 Handler 登记
-            E->>R: 经受限入口提交登记
-            R->>B: 公共注册接口登记 USER Handler
-            B-->>R: handler_id
-            R->>R: 立即保存注册归属
+            E->>R: 经受限入口提交 USER 或 BUILTIN，先留在 candidate
         end
+        R->>B: 全部成功后一次写入 Bus 注册表
+        R->>R: 保存整包归属和生效记录
         E-->>R: register 结果
         R-->>C: 实例、注册进展与执行结果
         opt 加载或登记失败
@@ -844,7 +802,7 @@ sequenceDiagram
     B-->>H: 由调用方决定是否请求后续处理
 ```
 
-例如，安装事件已经完成注册，但外层 Handler 返回时抛错，查询应能反映已有生效事实，调用方据此避免重复安装。查询可见性和继续清理的具体接口仍待 Q04 / Q06 确认；记录保存范围见第 7 节。
+例如，安装的 Core Handler 已经把包写入注册表，外层处理结果时却抛错。`package.query` 应能读到 Runtime 里的生效记录，调用方据此避免把同一个 id 再装一遍。
 
 ### 5.5 事件之间的依赖与调用约束
 
@@ -852,9 +810,9 @@ sequenceDiagram
 
 | 事件及处理说明 | 本 Core Handler 触发的子事件 | 执行前依赖的结果或事实 | 向后续交付什么 |
 | --- | --- | --- | --- |
-| [`package.install`](#51-启动与安装主流程) | 逐路径 `package.parse`，再 `package.resolve`，逐包 `extension.plan`、`extension.apply` | Registry 就绪、安装授权与准入；每个包开始时，其依赖已经实际可用 | 逐包安装结果、依赖跳过和清理残留 |
-| [`package.uninstall`](#522-卸载与资源释放) | `package.resolve`，逐包 `extension.plan`、`extension.apply` | 当前生效及残留记录、合法卸载范围；不能先移除仍被未退出目标依赖的包 | 逐包清理结果；完整成功后才允许重载进入安装 |
-| [`package.reload`](#523-重载与停止) | `package.uninstall`，完整成功后 `package.install` | 同一根操作关联、旧目标与新来源；不能仅凭注销成功进入安装 | 旧包清理与新包安装两个阶段的结果 |
+| [`package.install`](#51-启动与安装主流程) | 逐路径 `package.parse`，再 `package.resolve`，逐包 `extension.plan`、`extension.apply` | Registry 已 init；每个包开始时，其依赖已经实际可用 | 逐包 SUCCESS 或 FAILED |
+| [`package.uninstall`](#522-卸载与资源释放) | 先 `package.resolve`；允许时再 `extension.plan`、`extension.apply` | Runtime 的生效记录。仍被依赖或仍有在途调用时不进入 apply | 成功则移除注册并删除安装副本；失败则保持原样 |
+| [`package.reload`](#523-重载与停止) | 依赖方接受新版本后，`extension.plan`、`extension.apply` | 安装目录中的当前 manifest，以及 Runtime 里依赖方的版本条件 | 该包的新 Handler 一次进入后续快照；失败时注册表不变 |
 | [`package.parse`](#541-packageparse解析单个包) | 无 | 可访问的本地来源、支持的声明格式和合法入口 | 候选包，供依赖解析使用 |
 | [`package.resolve`](#542-packageresolve确认包依赖与处理顺序) | 无 | 安装候选包或卸载目标；Runtime 当前生效、依赖及冲突记录 | 合法目标、包序与拒绝原因，供单包计划使用 |
 | [`extension.plan`](#543-extensionplan生成可信单包计划) | 无 | 已确认的包与范围、有效依赖结果；Runtime 当前实例和注册事实 | 保存可信关联的单包 Plan，供执行核对 |
@@ -874,7 +832,7 @@ sequenceDiagram
 
 | 状态类别 | 何时变化、由谁确认 | 对后续流程的影响 |
 | --- | --- | --- |
-| Registry 未就绪 / 就绪 / 停止中 | Registry 确认自身管理组件与事件装配；调用方另行确认业务注册及服务就绪，并控制准入 | 未就绪时拒绝管理操作；停止中拒绝外部新操作；Registry 就绪不代表业务或用户包已就绪 |
+| Registry 未就绪 / 就绪 / 停止中 | Registry 根据初始化结果和调用方的准入控制确认 | 未就绪时拒绝管理操作；停止中拒绝外部新操作 |
 | 包已解析 | 解析事件确认包根、声明格式与入口条件 | 可以进入依赖解析，不代表依赖已满足或可以导入代码 |
 | 包依赖已确认 | 依赖解析事件返回合法包集合、包序及拒绝原因 | 可以为选定包生成单包 Plan；条件变化时需重新核对 |
 | 计划已生成 | 计划事件确认包内目标与有序步骤 | 可以请求执行，仍需核对当前授权和记录，此时尚未注册 |
@@ -904,7 +862,7 @@ Report 概括 Plan 中的实际注册、资源变化与清理结果。解析、�
 
 卸载要报告 SUCCESS，则必须确认依赖检查通过、目标注册已撤销、相关使用已结束，且本次应清理的资源和安装产物都已处理完成。调用方拥有的源码目录不一定属于安装产物，因此“清理完成”不等于删除源码，见第 7.2 节。
 
-批量操作要逐包保留成功、失败和因依赖问题未执行的原因。各操作事件的输入输出应明确前置条件、目标身份、操作结果、未执行或清理残留；父 Core Handler 根据这些结果决定是否触发下一步。具体结构和最终公共类型由 Q04、Q06 定稿。
+批量操作要逐包给出 SUCCESS 或 FAILED。依赖没有满足时用 FAILED，并写明原因。父 Core Handler 根据这些结果决定是否触发下一步。并发上的根操作准入仍见 Q06。
 
 如果默认安装已完成，而外层 Handler 处理结果时失败，调用可能报错，但包已经生效。调用方应先触发 `package.query` 核对，不直接重新注册。重试卸载或回滚时，也根据保存的进展继续清理，不能绕过事件直接重放内部步骤。
 
@@ -920,7 +878,7 @@ Report 概括 Plan 中的实际注册、资源变化与清理结果。解析、�
 | manifest 和选定包根 | 包提供声明，Package Manager 校验实际选定内容 | 同次计划保持固定；是否复制或采用不可变包内容仍待确认 |
 | 包依赖和选择结果 | Package Manager 根据选定声明与已生效版本核对 | 用于本次安装及后续卸载依赖检查 |
 | Plan | Orchestrator 生成，Runtime 保存其与操作、来源及目标的可信关联 | 内存中的单包操作计划，不是可恢复队列 |
-| 事件与 Handler 注册记录 | Events | 由 Events 公共接口管理；Registry 记录自身初始化建立的管理注册，Runtime 保存用户包 Handler 的注册标识与包归属 |
+| 事件与 Handler 注册记录 | Events | 由 Events 公共接口管理，Extension 保存返回的注册标识与包归属 |
 | 实例、注册归属、资源与待清理项 | Runtime | 当前实例的内存记录，清理完成前不能丢弃 |
 | Report 与诊断日志 | Runtime 提供执行事实，管理 Core Handler 汇总，调用方决定留存方式 | 用于结果交接和排查，不替代注册及资源使用记录 |
 
@@ -938,16 +896,15 @@ Report 概括 Plan 中的实际注册、资源变化与清理结果。解析、�
 
 ### 8.1 故障范围与责任
 
-下表中的模块名称表示故障处理所需的能力和记录由谁提供。启动装配失败由调用方或 Registry 按各自的注册归属处理；包管理操作失败由对应事件的 Core Handler 处理，必要时协调多个模块。EventBus 仅返回结果或传播异常；决定查询、回滚、重试或清理的是接收结果的业务代码或 Handler，并由其显式触发对应事件。不存在 EventBus 自动执行的异常补偿路径。
+下表中的模块名称表示故障处理所需的能力和记录由谁提供，处理逻辑由对应事件的 Core Handler 执行，必要时协调多个模块。EventBus 仅返回结果或传播异常；决定查询、回滚、重试或清理的是接收结果的业务代码或 Handler，并由其显式触发对应事件。不存在 EventBus 自动执行的异常补偿路径。
 
 | 故障 | 谁处理、怎样处理 | 后续需要注意什么 |
 | --- | --- | --- |
-| 业务注册或 Registry 初始化失败 | 调用方停止后续启动，清理自身业务注册；Registry 自身装配失败时按第 4.1 节清理本次管理注册和自有资源，保留错误及未清理项 | 不提交包操作，不清空调用方传入的 EventBus；确认清理完成后再重建 |
 | manifest 无效、入口越界、运行域不支持或版本不兼容 | Package Manager / Orchestrator 在加载前拒绝相关目标 | 不受影响的包可继续，依赖失败目标的包跳过 |
 | 模块导入、工厂或 `register` 失败 | Runtime 停止当前计划，逆序注销本批已完成的注册 | 无法撤销导入产生的外部影响 |
 | 回滚时注销失败 | Runtime 保留原始错误和残留标识，继续尝试其他可清理项 | 不能报告回滚完成，也不能直接重复安装 |
 | 安装事件的 Core Handler 已完成，外层事件却失败 | Registry / 调用方核对生效记录 | `trigger` 报错不等于包未安装 |
-| 卸载等待超时或包资源无法关闭 | Runtime 保留资源和记录，报告未完成 | 不删除在用文件，不进入重载的安装阶段 |
+| 卸载时仍有调用 | Runtime 返回 `EXTENSION_PACKAGE_BUSY` | 不注销，不删除安装目录，也不进入重载的反面流程 |
 | 文件清理失败 | Package Manager 记录残留产物，Runtime 保留其关联 | 注册可能已经撤销，后续只需补文件清理 |
 | 取消请求与操作完成同时发生 | Runtime 核对已经执行的步骤，清理未完成批次 | 取消不等于从未执行；清理被打断时保留相关记录 |
 | 进程退出或崩溃 | 调用方重启后根据包路径重新登记，并按自身策略或人工核对残留 | 本期不能自动续接 Plan 或补偿外部操作 |
@@ -958,13 +915,13 @@ Report 概括 Plan 中的实际注册、资源变化与清理结果。解析、�
 
 扩展作者应让注册阶段只声明注册关系。确实需要外部操作时，由所属能力提供操作回执和避免重复执行的依据。
 
-管理请求超时或失败后，先触发 `package.query` 核对注册、生效与待清理记录，外部业务回执由所属能力核对。失败安装的残留交给 `extension.rollback`，卸载残留交给原卸载 Plan 的受控续清理；只剩文件时也只处理已记录的自有产物，不再次注册。续清理协议待 Q04 确认，不能凭日志缺失或文件仍在就判断操作未执行。
+管理请求超时或失败后，先触发 `package.query` 核对 Runtime 的生效记录。还没写入 Bus 的失败 candidate 交给 `extension.rollback`。有在途调用的卸载直接失败，不留下“卸了一半”的注册表。
 
 ### 8.3 可以重建什么
 
-在同一进程中，先查询真实记录，再选择正常卸载、失败安装回滚或原 Plan 的受控续清理。直接调用扩展实例 `register`，或重新执行整份 Plan，都不能代替结果核对，否则可能重复注册或重复外部操作。具体查询和重试协议由 Q04 确认。
+在同一进程中，先用 `package.query` 看生效记录。已经生效的 id 不再执行同一份安装 Plan。失败且尚未发布的 candidate 走 rollback。允许卸载时才走卸载。直接再调用扩展的 `register`，不能代替这次核对。
 
-进程重启后，调用方重新准备 EventBus、注册业务内容并传入新的 Registry；初始化完成后，再由 `package.install` 及其子事件重新解析、校验和登记扩展。这只能重建注册关系，不能恢复旧 Plan 的执行位置、Handler 的局部变量、运行中的工具操作或旧 Ops。
+进程重启后，完成事件装配，再由 `package.install` 及其子事件重新解析、校验和登记扩展。这只能重建注册关系，不能恢复旧 Plan 的执行位置、Handler 的局部变量、运行中的工具操作或旧 Ops。
 
 缺少持久操作记录、必要隔离和可查询的外部回执时，不能保证自动接管旧操作，也不能保证外部动作恰好执行一次。
 
@@ -978,15 +935,13 @@ Registry 和直接 `trigger` 的受控入口使用相同授权检查，核对谁
 
 个人扩展只能使用受限的 USER 登记入口，事件定义和平台处理器由可信代码登记。必需的授权检查应由受控业务入口或实际资源访问入口执行，不能只依赖扩展 Handler 拦截。
 
-发起子操作时，只能保持或收紧原请求的权限。平台 Core Handler 的包关联信息不能代替调用方授权，也不能使子操作获得额外权限。通用身份和授权约定见 [Events 第 9 节](../../../events/docs/designs/events-architecture.md#9-错误与安全边界)。
+发起子操作时，只能保持或收紧原请求的权限。平台 Core Handler 的包关联信息不能代替调用方授权，也不能使子操作获得额外权限。通用身份和授权约定见 [Events 第 9.1 节](../../../events/docs/designs/events-architecture.md#91-身份与授权检查)。
 
 撤销包权限与卸载包是两件事。即使旧 Handler 仍在执行，后续资源访问也应按当前权限拒绝。已经发出的外部请求能否撤回，由相应业务能力决定。
 
 ### 9.2 共享与隔离
 
-建议由调用方为每个运行域准备一个 EventBus，交给对应的一个 Registry 使用，并由该 Registry 维护一套生效记录。业务事件、包管理事件、USER Handler 和 Ops 发起的新事件使用同一 EventBus；多个独立 Registry 共享一个 EventBus 的管理归属与清理不在本期设计范围内。
-
-不通过全局可变的“当前包”或“当前会话”传递身份。注册归属应绑定到当前加载任务，或由该任务专用的受限入口保存，避免把一个计划的 `handler_id` 记到另一个计划名下。
+建议每个 Registry 实例管理一个 EventBus 和一套生效记录，不通过全局可变的“当前包”或“当前会话”传递身份。注册归属应绑定到当前加载任务，或由该任务专用的受限入口保存，避免把一个计划的 `handler_id` 记到另一个计划名下。
 
 不同租户需要不同扩展集合时，应使用独立实例，或由调用方提供经过确认的隔离方案。使用受限能力入口，并不自动隔离 Python 模块全局变量、文件系统、连接池或扩展自己保存的状态。共享资源在并发使用时是否安全，由资源提供方负责。
 
@@ -1002,11 +957,9 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 
 ### 10.1 保证范围与成立条件
 
-正确加载、失败回滚和安全卸载分别依赖不同条件：加载顺序依赖完整的依赖检查和明确的并列排序规则；回滚依赖每条注册标识都被保存且能够注销；资源释放依赖对相关调用和能力使用结束的确认。
+正确加载依赖依赖检查和 SHA-256 排序。一个包的 Handler 在一次同步注册表更新中一起可见。卸载在仍有调用时直接失败，不删除安装目录。重载用新的模块名加载当前文件，使新 `trigger` 执行新代码，旧快照继续执行旧模块。
 
-这些机制尚未实现或验证时，只能作为设计目标，不能开放依赖它们的运行期间资源删除，也不能宣称整包注册可以同时生效。
-
-本期不保证整个批次全成功或全失败、运行期间的整包原子安装、无中断重载、崩溃自动恢复、全局串行或外部副作用回滚。启动安装期间暂不开放业务入口，可以限制部分注册被业务看到的范围，但仍需要 Runtime 完成失败清理。
+本期保证：无依赖时的 SHA-256 顺序在重启后不变；重载热切换该包的 Handler；整包 Handler 同时进入后续快照。本期不保证崩溃后自动恢复执行位置，也不保证扩展在 `register` 里自行创建的后台任务会被 Runtime 关掉。调用方的源码目录不会被删除。
 
 ### 10.2 问题发现与定位
 
@@ -1016,31 +969,27 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 
 ### 10.3 保留、删除与升级
 
-`schemaVersion` 表示声明格式版本，`package.version` 和依赖范围表示包版本是否兼容，二者不能互相替代。不支持的格式或依赖版本应在加载前拒绝，哪些未知字段可以忽略由 Q02 确认。
+`schemaVersion` 表示声明格式版本，`package.version` 和依赖范围表示包版本是否兼容，二者不能互相替代。版本号是 `MAJOR.MINOR.PATCH`。版本条件按空白分开，每一段都要满足，例如 `>=1.0.0 <2.0.0`。未在 manifest 规约里定义的字段，解析时拒绝。
 
-不能直接覆盖仍在使用的包目录，就认定已经完成重载。目前建议准备内容和版本明确的包，先卸载旧版，再安装新版。需要回退时，明确选择旧版包重新安装。Python 导入缓存和不同包的同名模块仍需验证，替换文件本身不能保证后续执行的就是新代码。
-
-与待清理项和仍在使用的资源有关的记录，必须保留到确认处理结束。停止 Registry 不自动删除源码、业务数据或外部工具结果。本方案也没有独立的备份恢复协议：备份包文件和路径记录不能恢复旧调用栈，更不能证明备份之后没有发生外部操作。
+重载读取的是安装目录里的当前文件，并用新的模块名执行这份源码。已经在跑的调用仍使用它开始时加载的模块对象，因此新旧代码可以同时存在到旧调用结束。需要退回旧行为时，把安装目录里的文件改回后再次 `reload`，或卸载后安装旧版本。停止 Registry 不删除调用方的源码、业务数据或外部工具结果。
 
 ## 11. 完整场景与验证要求
 
 ### 11.1 代表性场景
 
-**先注册业务内容，再初始化包管理。**调用方准备 EventBus，注册业务事件及其 Core Handler、BUILTIN Handler 和 Ops Build Handler，再将该实例传给 `Registry.init`。Registry 只补充 Extension 管理事件，不重复注册业务内容，也不触发能力构建；后续安装、USER 注册和业务事件调用均使用该实例。
-
-**初始化中途失败。**Registry 已注册部分管理事件，后续注册因冲突或其他错误失败。Registry 保持未就绪，清理本次已建立的管理注册并保留未清理项，不删除调用方已有的业务注册或冲突定义。调用方停止启动，确认清理后再重建，不直接重复初始化。
-
 **正常加载并参与 Bash 调用。**业务代码触发 `package.install`；安装 Handler 依次通过包解析、依赖解析、单包计划和计划执行事件推进。执行 Handler 在内部加载、创建实例并注册，保存生效记录后交回 Report。后续业务入口触发 Bash 工具事件，调用方核对扩展参与和实际结果。
 
 **包版本不满足依赖。**调用方传入公共包 1.0.0，企业包却要求至少 1.2.0。Package Manager 检查后不加载企业包，也不自动扫描其他目录寻找替代版本。其他不受这项依赖影响的包可以继续处理。
 
-**包内注册中途失败。**`extension.apply` 的 Core Handler 已记录 H1、H2，随后实例 `register` 抛错。执行 Handler 触发 `extension.rollback`，回滚 Handler 在内部先撤销 H2、H1，再确认使用结束并释放资源。任一步失败都保留原始错误和残留，不能跳过等待释放资源。依赖该包的后续包跳过，独立包可继续。
+**包内注册中途失败。** `extension.apply` 已经把部分 Handler 收进 candidate，随后 `register` 抛错。执行 Handler 触发 `extension.rollback`，丢掉整个 candidate，Bus 注册表不变。依赖该包的后续包得到 FAILED。没有依赖关系的包继续。
+
+**重载与根操作协调。** `package.reload` 触发 `extension.plan` 和 `extension.apply`，不先触发卸载。依赖方仍接受新版本时，一次替换该包的 Handler。准备失败时注册表不变。
+
+**重载一个仍被依赖的包。** 企业包要求公共包 `>=1.0.0 <2.0.0`。公共包重载到 1.4.0 时继续。重载到 2.0.0 时返回 `EXTENSION_DEPENDENT_INCOMPATIBLE`，公共包当前 Handler 保持不变。
 
 **事件报错，但包可能已经生效。**安装事件的 Core Handler 已执行完计划，外层可信 Handler 在处理返回结果时抛错。Registry 不能据此判断“尚未安装”。调用方触发 `package.query` 核对生效记录，再决定是否只需重新取得报告，避免再次注册。
 
 **解析事件被提前返回。**`package.parse` 返回但没有满足契约的候选包结果。安装 Handler 核对目标与完成依据后停止对应包，不触发依赖解析、计划或执行。不能把任意正常返回都视为解析完成，替代结果的允许范围由 Q06 细化。
-
-**重载与根操作协调。**`package.reload` 事件的 Core Handler 在同一受控操作中触发 `package.uninstall`，成功后再触发 `package.install`。两个子事件均经过 EventBus，但不重新等待父操作持有的根管理锁。它们仍检查各自目标、授权和执行条件，不直接调用模块实现。
 
 **未显式触发就没有下一项包操作。**初始化、注册变化、某个业务事件返回或异常，都不会让 EventBus 自行安排安装、解析、重试或清理。下一项包操作必须有明确的业务代码或 Handler 调用点。
 
@@ -1056,7 +1005,6 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 
 | 主题 | 需要证明什么 | 设计位置 | 后续验证归属 |
 | --- | --- | --- | --- |
-| EventBus 传入与初始化 | 业务注册先于 Registry 初始化；管理、业务和 USER 注册使用同一 EventBus；不执行业务注册回调、不触发 `ops.build`；重复初始化、事件冲突及部分失败不破坏已有注册，残留可核对 | 第 4.1、4.5、9.2、11.1 节 | Registry、Events 与调用方集成验证 |
 | 来源与声明 | 路径解析、同 ID 冲突和依赖检查有明确结果；拒绝无效版本、入口和运行域，入口路径不超出选定包根 | 第 4.2 节 | Extension 的 manifest 与来源特性方案 |
 | 统一事件入口与粒度 | 9 类目标事件均有独立入口与完成依据；内部检查、加载登记、等待释放和文件清理归所属事件，不出现绕行或无理由的额外事件 | 第 4.1、5 节 | Extension 事件契约与全过程集成验证 |
 | 包流程编排 | 包管理及真实业务事件有明确业务或 Handler 触发点；EventBus 不编排下一项包步骤 | 第 2.2、4.5、6、11.1 节 | Extension 与 Events 协作验证 |
@@ -1064,7 +1012,7 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 | 两级定序 | 包与包内扩展分别检查依赖；被依赖方先加载；并列及 hash 排序规则明确 | 第 4.2～4.3 节 | Package Manager / Orchestrator 特性方案 |
 | 注册归属 | 标识不会丢失，包信息可信，个人扩展只能注册 USER，同一函数的多条注册可分别处理 | 第 4.4 节 | Runtime 与 Events 协作特性方案 |
 | 回滚与批量失败 | 逆序撤销本计划注册，保留清理失败项，依赖方跳过，独立包继续 | 第 5.2.1、8 节 | Runtime 与管理流程特性方案 |
-| 注册可见性 | 安装期间的业务准入控制有效，运行期间可能看到部分注册的限制明确，不误报事务能力 | 第 5.2.1 节 | 调用方与 Extension 集成验证 |
+| 注册可见性 | 一个包的 Handler 在一次同步更新后一起出现在后续快照里；更新前的快照仍是旧的整套 | 第 5.2.1 节 | 调用方与 Extension 集成验证 |
 | 包关联与能力接入 | Handler 使用的包关联信息与 Runtime 核实的来源一致；平台能力通过既有公共接口接入，不因子操作丢失或扩大授权 | 第 4.4～4.5、9 节 | Runtime、Events 与能力提供方集成验证 |
 | 卸载与重载 | 仍被依赖的目标不能直接卸载，相关使用结束后才清理，卸载失败不继续安装 | 第 5.2.2～5.2.3 节 | Runtime、Events 与调用方生命周期特性方案 |
 | 失败与重试 | Core Handler 成功后外层失败、取消、超时和文件残留，不导致重复注册或误删资源 | 第 6～8 节 | 管理流程的故障注入验证 |
@@ -1080,16 +1028,15 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 | 设计问题 | 当前方案及理由 | 代价与限制 | 状态 |
 | --- | --- | --- | --- |
 | 管理逻辑放在哪里 | 在 `core/extension` 维护，通过 Events 公共接口完成注册和执行协作 | Events 不反向依赖包管理或业务实现 | 目标设计 |
-| 谁准备 EventBus 与业务注册 | 调用方先准备 EventBus 并注册业务内容，再传给 Registry；业务装配由调用方直接完成，使 Registry 专注 Extension 管理职责 | 调用方协调启动与 EventBus 生命周期，需区分业务就绪和管理就绪；初始化失败只清理本次自有注册 | 目标设计；最终接口归 Q08 |
 | 操作如何执行 | 管理请求和独立可复用操作经过 9 类事件；内部步骤由所属 Core Handler 使用模块能力完成 | 每类事件要能说明独立意义、结果、模块依赖和失败责任 | 本方案的目标事件划分；公开标识及契约待规约化 |
 | Core Handler 如何使用模块 | 处理器按需使用 Package Manager、Extension Orchestrator 和 Extension Runtime 的能力，一个处理器可以使用多个模块；独立操作仍经过对应事件 | 模块分工与事件处理职责需要分别明确，不按一个处理器对应一个模块划分 | 与 overview 第 2.1 节一致 |
 | 谁编排包流程 | 业务代码及 Handler 显式触发包管理或业务事件，Registry 提供便捷方法；EventBus 不决定下一项包操作 | 包流程与通用事件服务的责任需要分开维护 | 基于 Events 的设计边界 |
 | 谁确定加载顺序 | Package Manager 排列包，Orchestrator 排列当前包内扩展 | 不跨包混合排列扩展单元 | 目标设计 |
-| 怎样让扩展生效 | 加载入口、调用工厂和受限 `register`，并保存每条注册标识 | 注销无法撤销 Python 导入产生的外部影响 | 目标设计；受限入口待细化 |
-| 失败时撤销哪些注册 | 建议撤销本次单包 Plan 的全部注册 | 不提供整个批次事务，运行期间可能看到部分注册 | 补充建议，Q04 确认 |
-| 怎样重载 | 卸载成功后再安装 | 存在不可用窗口，新安装失败不自动恢复旧版 | 目标设计 |
+| 怎样让扩展生效 | 加载入口、调用工厂，用受限入口收集 USER 或 BUILTIN，再一次写入 Bus 注册表 | 导入产生的外部影响不能靠丢掉 candidate 撤销 | 目标设计 |
+| 失败时如何处理 | 尚未写入 Bus 的 candidate 整包丢掉 | 已经生效的其他包保持不变 | 目标设计 |
+| 怎样重载 | 依赖方仍接受新版本时，用新模块名加载并一次替换该包的 Handler | 旧快照继续执行旧模块，直到那些调用结束 | 目标设计 |
 | 管理操作怎样并发 | 建议在单个 Registry 内按顺序协调 | 不解决跨进程竞争，也需避免嵌套管理调用产生冲突 | 补充建议，Q06 确认 |
-| 何时删除包文件 | 确认产物所有权，注销并等待使用结束后再清理 | 等待可能超时，调用方提供的源码目录保留 | 补充建议，Q07 确认 |
+| 何时删除安装目录 | 卸载时没有在途调用，才删除安装目录里的该版本。调用方的源码目录和 zip 不删除 | 有在途调用时卸载失败，目录保留 | 目标设计 |
 
 本表记录当前方案和理由，不表示尚未讨论的方案已经被评审或否决。正式契约确认后写入 spec，具体实现取舍和验证记录写入 feature。
 
@@ -1102,8 +1049,8 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 | 前提 | 需要补充的验证 | 不成立时会怎样 | 确认责任 |
 | --- | --- | --- | --- |
 | Events 能提供所需的注册、调用和使用结束确认接口 | 包来源关联、注册与注销、卸载等待的集成验证 | 无法安全卸载，也无法准确判断还有哪些残留 | Events 与 Runtime 维护者 |
-| Core 调用入口能协调安装和停止期间的业务准入 | 父子调用、工具入口和管理调用的协作测试 | 无法限制部分注册被业务看到，也无法保证停止时安全清理 | Extension、Events 与 Core 业务模块维护者 |
-| Python 扩展可以按计划加载，并在使用结束后清理 | 相对导入、模块重名、缓存和资源退出测试 | 重载后可能仍执行旧代码，或影响其他包 | Runtime 维护者 |
+| Core 调用入口能把一次 `trigger` 的注册表快照交给执行器 | 快照在第一次 await 前固定，并且能接受一个包的整套 Handler 一次写入 | 后续调用可能看见半个包 | Extension 与 Events 维护者 |
+| Python 扩展按新模块名加载 | 同一次进程里，旧调用仍执行旧模块，新 prepare 执行当前文件 | 新旧代码无法区分 | Runtime 维护者 |
 | 从校验到加载期间，包内容保持一致 | 托管副本、不可变包根或等效机制及版本检查 | 校验的声明可能与真正执行的代码不一致 | Package Manager、Runtime 与调用方维护者 |
 
 #### 12.2.2 尚未确定的设计问题
@@ -1112,16 +1059,11 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 
 | 编号与问题 | 还需要明确什么 | 责任与维护位置 | 需要达到的结果 |
 | --- | --- | --- | --- |
-| Q01 来源与重复选择 | 本地路径解析、同根去重、不同根同 ID 的处理；目前建议冲突报错 | Extension；来源 / manifest spec | 包来源唯一明确，重复输入的处理可解释 |
-| Q02 版本、制品与格式 | 包版本范围、schema 校验、已生效同 ID 包的处理，以及如何固定待加载的包内容 | Package Manager 与 Runtime；manifest spec / feature | 校验版本与实际导入内容一致，不悄悄降级或替换 |
-| Q03 hash 和拓扑并列 | 稳定摘要算法、编码、哈希碰撞、ID 次级排序和多个就绪节点的顺序；建议避免依赖带进程随机化的内置字符串 hash | Package Manager / Orchestrator；排序 spec | 排序规则明确；确认前不保证不同进程顺序相同 |
-| Q04 登记批次与报告 | 单包回滚范围、受限入口、包关联、报告与 Output 明细、依赖跳过、重复 `install` 和结果查询；整包原子发布尚不具备 | Runtime、Events、Registry；生命周期 / 注册 spec | 注册可撤销，未完成清理可继续，报告可核对，部分注册的可见范围明确 |
-| Q05 定向操作与依赖保护 | `extension_id` 选中目标后需要一并处理哪些依赖方，以及部分卸载和被依赖包重载的范围 | Orchestrator / Package Manager；生命周期 spec | 不留下仍依赖已卸载目标的扩展，卸载顺序和影响范围明确 |
-| Q06 管理事件与并发 | 第 4.1.1 节 9 类事件的标识、输入输出、可介入与替代结果、可信父子关联、根操作准入、停止清理及递归限制 | Extension、Events、调用方；控制事件 / 生命周期 spec | 保持事件边界；独立操作均有完成依据，内部步骤不另设事件；根操作不等待自身，停止时保留必要清理范围 |
-| Q07 等待、退出与文件所有权 | 运行中调用与能力使用的结束确认、扩展关闭资源的约定、超时和取消，以及托管产物与源码的清理范围 | Runtime、Events、Package Manager 与调用方；生命周期 feature | 确认无人使用后才释放资源，有残留时保留记录和后续处理入口 |
-| Q08 最终公开接口 | `Registry.init` 接收已准备好的 EventBus 的参数与检查方式、重复初始化及失败清理结果；业务便捷方法、受控事件入口、管理事件目录与导出、可信包及 Plan 关联，以及 Plan / Report 模型和传递方式 | Extension 与 Events；接口 spec / 集成 feature | 初始化不再接收业务注册回调，同一 EventBus 的使用与清理归属可核对；执行只接受可信计划，复用 Events 公共接口和能力模型，扩展接口仅补充包管理职责 |
+| Q05 定向操作与依赖保护 | 只指定 `extension_id` 时要一并处理哪些依赖方，以及部分卸载的范围 | Orchestrator / Package Manager；生命周期 spec | 不留下仍依赖已卸载目标的扩展 |
+| Q06 管理事件与并发 | 根操作准入、停止清理及递归限制 | Extension、Events、调用方；控制事件 / 生命周期 spec | 独立操作仍走 9 类事件；根操作不等待自身 |
+| Q08 最终公开接口 | EventBus 落地后，Registry 便捷方法与 Plan 如何交给 `extension.apply` | Extension 与 Events；接口 spec | 执行只接受可核对的计划；Ops 与注册表沿用 Events |
 
-问题解决后，应将结果写回相关正文、图表、概览和对应规约，不能只在本表标为完成。负责人认领、排期、PR 和验证进展由后续开发计划统一维护；本表只说明还缺哪些设计结论及其影响。
+问题解决后，应将结果写回相关正文、图表、概览和对应规约，不能只在本表标为完成。负责人认领、排期、PR 和验证进展由 [开发计划](extension-development-plan.md) 统一维护；本表只说明还缺哪些设计结论及其影响。
 
 ### 12.3 相关文档
 
@@ -1131,4 +1073,4 @@ Package Manager 和 Runtime 应在导入前限制声明大小、包内扩展数�
 | [Events 详细架构](../../../events/docs/designs/events-architecture.md) | 查阅公共事件接口、扩展接入与生命周期约定；事件机制的详细设计在该文档维护 |
 | [Core 公共规范](../../../AGENTS.md) | 查阅模板使用、规约与特性方案分工，以及交付检查要求 |
 
-Extension 的正式规约、实现方案、验证记录和统一开发计划尚未建立。需要由谁补充、缺少它们会影响什么，见第 11.2 和 12.2 节。
+Extension 的规约在 `docs/specs/`，特性说明在 `docs/features/`。Registry 与 EventBus 的对接还没有实现，见特性文档里的实现范围。

@@ -77,6 +77,7 @@ RANGE_RULES = [
     ((190000, 198999), "SessionError"),
     ((199000, 199999), "SysOperationError"),
     ((200000, 200999), "ValidationError"),
+    ((201000, 201099), "ValidationError"),
 ]
 
 # Manual overrides expressed as names to avoid failing import when some legacy names are absent.
@@ -97,6 +98,9 @@ _MANUAL_OVERRIDES_RAW = {
     "PREGEL_GRAPH_SUPER_STEP_EXECUTION_ERROR": "GraphError",
     "DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR": "AgentError",
     "COMPONENT_SYMPHONY_ARTIFACT_NOT_FOUND": "ValidationError",
+    "EXTENSION_LOAD_FAILED": "ExecutionError",
+    "EXTENSION_INSTALL_COPY_FAILED": "ExecutionError",
+    "EXTENSION_INFLIGHT_MISMATCH": "ExecutionError",
 }
 
 # Build the actual mapping only for StatusCode members that exist in the current enum.
