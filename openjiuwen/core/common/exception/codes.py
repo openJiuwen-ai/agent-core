@@ -1011,6 +1011,18 @@ class StatusCode(Enum):
         199010,
         "sandbox isolation key error, operation: {operation}, reason: {error_msg}")
 
+    # =========================
+    # Events 200000–200999
+    # =========================
+
+    EVENTS_REGISTRATION_INVALID = (200001, "events registration is invalid, reason: {reason}")
+    EVENTS_UNKNOWN_EVENT_INVALID = (200002, "events unknown event is invalid, reason: {reason}")
+    EVENTS_STATE_INVALID = (200003, "events state is invalid, reason: {reason}")
+    EVENTS_PAYLOAD_INVALID = (200004, "events payload is invalid, reason: {reason}")
+    EVENTS_MATCH_INVALID = (200005, "events match is invalid, reason: {reason}")
+    EVENTS_NEXT_INVALID = (200006, "events next is invalid, reason: {reason}")
+    EVENTS_OPS_INVALID = (200007, "events ops is invalid, reason: {reason}")
+
     def __init__(self, code: int, msg: str):
         """Validate and initialize enum member values.
 

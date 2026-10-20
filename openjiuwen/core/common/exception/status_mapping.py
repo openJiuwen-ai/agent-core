@@ -76,6 +76,7 @@ RANGE_RULES = [
     ((180000, 189999), "FrameworkError"),
     ((190000, 198999), "SessionError"),
     ((199000, 199999), "SysOperationError"),
+    ((200000, 200999), "ValidationError"),
 ]
 
 # Manual overrides expressed as names to avoid failing import when some legacy names are absent.
