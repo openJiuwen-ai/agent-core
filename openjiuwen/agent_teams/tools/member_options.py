@@ -42,6 +42,26 @@ class MemberWorktreeOptions(BaseModel):
     head_commit: str | None = None
 
 
+class MemberAgentTemplate(BaseModel):
+    """The expert template a member was spawned from (``spawn_expert``).
+
+    Persisted so the member rebuilds from the row alone — in a subprocess, on
+    cold recovery, after the package was upgraded or removed. A native member
+    carries ``snapshot``; an external-CLI member carries ``external_cli``.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    ref: dict[str, Any] = Field(default_factory=dict)
+    """``{"name": ..., "group": ...}`` (``ExpertRef.to_dict()``)."""
+    version: str = ""
+    """Template version at spawn time; empty when unknown."""
+    snapshot: dict[str, Any] | None = None
+    """Capability snapshot (``AgentTemplateSpec`` without prompt sections) of a native member."""
+    external_cli: dict[str, Any] | None = None
+    """Merged ``ExternalCliAgentSpec`` JSON of an external-CLI member."""
+
+
 class TeamMemberOptions(BaseModel):
     """Extensible per-member configuration blob persisted in TeamMember.options."""
 
@@ -69,6 +89,7 @@ class TeamMemberOptions(BaseModel):
             "to tighten the base config. None when no override was specified."
         ),
     )
+    agent_template: MemberAgentTemplate | None = None
 
 
 def load_member_options(raw: str | None) -> TeamMemberOptions:
@@ -141,9 +162,11 @@ def build_member_options(
     worktree_path: str | None = None,
     permissions_override: dict[str, str] | None = None,
     lifetime: MemberLifetime | None = None,
+    agent_template: MemberAgentTemplate | None = None,
 ) -> str | None:
     """Build a TeamMember.options JSON string for new writes."""
     parsed = TeamMemberOptions()
+    parsed.agent_template = agent_template
     parsed.lifetime = lifetime
     parsed.model_ref = _model_ref_from_mapping(model_ref)
     parsed.fallback_model_ref = _model_ref_from_mapping(fallback_model_ref)
@@ -255,6 +278,11 @@ def _record_value(record: object, key: str) -> Any:
     if isinstance(record, Mapping):
         return record.get(key)
     return getattr(record, key, None)
+
+
+def get_member_agent_template(record: object) -> MemberAgentTemplate | None:
+    """Return the expert template the member was spawned from, or None."""
+    return get_member_options(record).agent_template
 
 
 def get_member_lifetime(record: object) -> MemberLifetime | None:

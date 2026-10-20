@@ -99,13 +99,22 @@ def _external_cli_config_for_member(
     spec: "TeamAgentSpec",
     member_name: str | None,
     cli_agent: str | None,
+    template_config: "ExternalCliAgentSpec | None" = None,
 ) -> "ExternalCliAgentSpec | None":
-    """Prefer a predefined member's config, then the dynamic kind config."""
+    """Pick the launch config of one external CLI member.
+
+    In order: a predefined member's own config; the config persisted on the
+    member row by ``spawn_expert`` (``template_config``, read back into
+    ``TeamRuntimeContext.template_external_cli``); the team's declared config
+    for the CLI kind.
+    """
     from openjiuwen.agent_teams.schema.team import ExternalCliMemberSpec
 
     for member in spec.predefined_members:
         if isinstance(member, ExternalCliMemberSpec) and member.member_name == member_name:
             return member.external_cli
+    if template_config is not None:
+        return template_config
     return next(
         (entry for entry in spec.external_cli_agents if entry.cli_agent == cli_agent),
         None,
@@ -446,7 +455,7 @@ async def external_cli_spawn(
     )
 
     # Resolve the static launch config declared on the spec for this CLI kind.
-    cli_cfg = _external_cli_config_for_member(spec, member_name, ctx.cli_agent)
+    cli_cfg = _external_cli_config_for_member(spec, member_name, ctx.cli_agent, ctx.template_external_cli)
 
     # When the pool allocator assigned a model to this member, convert it to
     # an ExternalCliModelConfig, filtering by provider compatibility: Claude

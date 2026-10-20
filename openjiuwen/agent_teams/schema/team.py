@@ -700,6 +700,21 @@ class TeamRuntimeContext(BaseModel):
             "to tighten the base config. None when no override was specified."
         ),
     )
+    agent_template_spec: Optional[dict[str, Any]] = None
+    """Capability snapshot of a member spawned from an expert template.
+
+    Read back from ``TeamMember.options.agent_template.snapshot`` by
+    ``build_context_from_db``. When the member has no ``agents[<member>]``
+    spec of its own, ``AgentConfigurator.resolve_agent_spec`` applies it to
+    the ``teammate`` base spec (``apply_template_snapshot``).
+    """
+    template_external_cli: Optional[ExternalCliAgentSpec] = None
+    """Launch config of an external-CLI member spawned from an expert template.
+
+    Read back from ``TeamMember.options.agent_template.external_cli``; the
+    external CLI spawn path prefers it over the team's declared config for
+    the same CLI kind.
+    """
 
 
 __all__ = [

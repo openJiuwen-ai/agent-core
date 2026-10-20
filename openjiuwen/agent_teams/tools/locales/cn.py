@@ -224,6 +224,62 @@ STRINGS: dict[str, str] = {
         "可选。推理强度，必须是所选 builtin_model 的 efforts 之一；需同时指定 builtin_model，"
         "省略时取该模型的 default_effort"
     ),
+    # ===== view_experts ========================================================
+    # view_experts._desc lives in descs/cn/expert/view_experts.md
+    "view_experts.action": "list（默认）列出已安装的单个专家；get 查看一个专家的完整信息",
+    "view_experts.query": "仅 list 使用：按包名、显示名、描述做子串过滤（不区分大小写）",
+    "view_experts.name": "get 必填：专家的包名（list 结果中的 name，不是显示名）",
+    # ===== view_expert_groups ==================================================
+    # view_expert_groups._desc lives in descs/cn/expert/view_expert_groups.md
+    "view_expert_groups.action": "list（默认）列出已安装的专家团；get 查看一个专家团及其成员表",
+    "view_expert_groups.query": "仅 list 使用：按团名、显示名、描述做子串过滤（不区分大小写）",
+    "view_expert_groups.capabilities": "仅 list 使用：只列出同时具备全部所列能力标签的专家团",
+    "view_expert_groups.name": "get 必填：专家团名",
+    "view_expert_groups.member": "仅 get 使用，可选：只展开该专家团内这一个成员的详情",
+    # ===== spawn_expert ========================================================
+    # spawn_expert._desc lives in descs/cn/expert/spawn_expert.md
+    "spawn_expert.expert": (
+        "必填。单个专家的包名；给了 group 时是该专家团内的成员名（不能是 leader）"
+    ),
+    "spawn_expert.group": "专家团名；省略表示 expert 是单个专家。拉起专家团内成员时必填",
+    "spawn_expert.member_name": (
+        "[公开] 团队内唯一的成员名（语义化 slug，如 finance-1、clip-2，DNS label 风格 kebab-case）。"
+        "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
+        "同一个专家可以按不同名字拉起多份"
+    ),
+    "spawn_expert.display_name": (
+        "[公开] 可选。省略时用专家的显示名；团队里已有同显示名的成员时自动追加「（member_name）」"
+    ),
+    "spawn_expert.desc": (
+        "[公开] 可选。补充的公开描述，追加在专家自带描述之后，不替换。写本实例与同类实例的分工差异，"
+        "如「负责第 1–10 镜」；禁止写入私密信息"
+    ),
+    "spawn_expert.prompt": (
+        "[私有] 可选。补充的长期约定，追加在专家人设之后，不替换。不要复述人设，也不要写具体任务"
+    ),
+    "spawn_expert.model_name": (
+        "可选。仅当用户明确指定模型时填写，你不得自行选择或推断。本地专家规则同 spawn_teammate，"
+        "外部运行时专家同 spawn_external_cli（团队模型池中与该 CLI 协议兼容的端点）"
+    ),
+    "spawn_expert.external_cli": (
+        "可选对象，只对外部运行时专家（runtime 不是 native）有效，本地专家传入会报错。"
+        "字段含义与校验同 spawn_external_cli 的同名参数"
+    ),
+    "spawn_expert.external_cli.fallback_model_name": (
+        "认证回退模型，规则同 spawn_external_cli.fallback_model_name：只对下方目录 compatible_fallback_models "
+        "中列出的 CLI 类型有效；该 CLI 类型存在兼容模型时必须填写，且当前模型在模型池中且协议兼容时优先选当前模型"
+    ),
+    "spawn_expert.external_cli.builtin_model": (
+        "可选。从下方目录中该专家 CLI 类型的条目里选择一个内置模型，使用 CLI 自身登录运行；与 model_name 互斥"
+    ),
+    "spawn_expert.external_cli.effort": (
+        "可选。推理强度，必须是所选 builtin_model 的 efforts 之一；需同时指定 builtin_model"
+    ),
+    "spawn_expert.isolation": (
+        "可选隔离模式，同 spawn_teammate：仅当用户明确要求或该成员需要在隔离检出中修改仓库文件时设为 "
+        "'worktree'。外部运行时专家不支持"
+    ),
+    "spawn_expert.permissions": "可选，同 spawn_teammate.permissions（只能收紧）。外部运行时专家不支持",
     # ===== set_member_model ====================================================
     # set_member_model._desc lives in descs/cn/member/set_member_model.md
     "set_member_model.member_name": "要切换模型的外部 CLI 成员 member_name（语义化 slug，不是显示名）",

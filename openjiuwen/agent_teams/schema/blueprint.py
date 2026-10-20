@@ -250,6 +250,15 @@ class TeamAgentSpec(BaseModel):
     """
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[PredefinedMemberSpec] = []
+    agent_group_name: Optional[str] = None
+    """Name of the AgentGroup this team was assembled from, if any.
+
+    Set by the host that seeds ``predefined_members`` / ``agents[<member>]``
+    from an AgentGroup package. ``spawn_expert`` uses it to spawn further
+    instances of a bound member from the team's own assembled spec (its
+    ``agents[<member>].agent_template_spec`` and predefined persona) instead
+    of re-reading the package from disk.
+    """
     external_cli_agents: list[ExternalCliAgentSpec] = []
     """Static launch configs for external CLI agents (claudecode / codex / ...).
 

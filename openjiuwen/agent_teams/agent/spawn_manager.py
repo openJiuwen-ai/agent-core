@@ -17,11 +17,13 @@ from typing import (
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.team import (
+    ExternalCliAgentSpec,
     ExternalCliModelConfig,
     TeamRole,
     TeamRuntimeContext,
 )
 from openjiuwen.agent_teams.tools.member_options import (
+    get_member_agent_template,
     get_member_builtin_model,
     get_member_fallback_model_ref,
     get_member_model_ref,
@@ -38,6 +40,17 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
     from openjiuwen.core.runner.spawn.process_manager import SpawnedProcessHandle
     from openjiuwen.core.session.stream.base import OutputSchema
+
+
+def _template_fields(record: object) -> tuple[dict | None, ExternalCliAgentSpec | None]:
+    """Capability snapshot / external CLI config of a member spawned from an expert template."""
+    template = get_member_agent_template(record)
+    if template is None:
+        return None, None
+    external_cli = None
+    if template.external_cli:
+        external_cli = ExternalCliAgentSpec.model_validate(template.external_cli)
+    return template.snapshot, external_cli
 
 
 class SpawnManager:
@@ -504,6 +517,7 @@ class SpawnManager:
                 fallback_member_model = candidates[0].to_team_model_config()
 
         permissions_override = get_member_permissions_override(teammate)
+        agent_template_spec, template_external_cli = _template_fields(teammate)
         builtin = get_member_builtin_model(teammate)
         builtin_model = (
             ExternalCliModelConfig(model=builtin.model, effort=builtin.effort) if builtin is not None else None
@@ -535,6 +549,8 @@ class SpawnManager:
             worktree_path=worktree_path,
             cli_agent=cli_agent,
             permissions_override=permissions_override,
+            agent_template_spec=agent_template_spec,
+            template_external_cli=template_external_cli,
         )
 
     async def publish_restart_event(self, member_name: str, restart_count: int) -> None:

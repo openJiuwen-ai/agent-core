@@ -5,6 +5,7 @@
 
 import json
 from abc import ABC
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable
 
 from openjiuwen.agent_teams.tools.locales import Translator
@@ -19,7 +20,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.schema.team import MemberOpResult
-    from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
+    from openjiuwen.agent_teams.tools.member_options import MemberAgentTemplate, MemberBuiltinModel
 
 
 def validate_member_name(member_name: str | None) -> str | None:
@@ -133,6 +134,303 @@ def check_model_selectable(team: TeamBackend, model_name: Any, allocation: "Allo
     )
 
 
+# ========== External CLI model rules ==========
+#
+# One implementation of "may this team launch this CLI kind, and on which
+# model" shared by every tool that registers an external CLI member
+# (``spawn_external_cli`` and the external path of ``spawn_expert``), so the
+# same inputs always reach the same allocation or the same error.
+
+
+def check_external_cli_declared(team: TeamBackend, cli_agent: str) -> str | None:
+    """Reject a CLI kind the team has not declared (the capability ceiling).
+
+    Returns:
+        An error message when ``cli_agent`` is not declared, otherwise ``None``.
+    """
+    if team.external_cli_config(cli_agent) is not None:
+        return None
+    declared = ", ".join(sorted(team.external_cli_kinds())) or "<none>"
+    return (
+        f"cli_agent '{cli_agent}' is not declared in TeamAgentSpec.external_cli_agents "
+        f"(declared: {declared})"
+    )
+
+
+def external_cli_model_catalog_context(team: TeamBackend) -> str:
+    """Render safe current-model and pool protocol data for the model."""
+    rules = ExternalCliModelRules(team, None)
+    current_model = None
+    if (
+        not team.is_model_group_pool()
+        and team.current_model_name is not None
+        and team.current_model_provider is not None
+    ):
+        current_model = {
+            "model_name": team.current_model_name,
+            "protocol": _model_api_protocol(team.current_model_provider),
+        }
+    compatible_by_cli: dict[str, list[dict[str, str]]] = {}
+    for cli_agent in sorted(team.external_cli_kinds()):
+        if not _takes_auth_fallback(cli_agent):
+            continue
+        provider_filter = _provider_filter_for_cli(cli_agent)
+        if team.is_model_group_pool():
+            options = {
+                (item.model, _model_api_protocol(item.provider))
+                for item in team.list_cli_models(provider_filter=provider_filter)
+                if item.model
+            }
+        else:
+            options = {
+                (entry.model_name, _model_api_protocol(entry.api_provider))
+                for entry in rules.compatible_pool_entries(cli_agent)
+            }
+        compatible_by_cli[cli_agent] = [
+            {"model_name": model_name, "protocol": protocol}
+            for model_name, protocol in sorted(options)
+        ]
+    catalog = {
+        "current_model": current_model,
+        "compatible_fallback_models": compatible_by_cli,
+    }
+    return f"<fallback_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</fallback_model_catalog>"
+
+
+@dataclass(frozen=True)
+class ExternalCliModels:
+    """Model choice of one external CLI member."""
+
+    allocation: "Allocation | None"
+    fallback_allocation: "Allocation | None"
+    builtin_model: "MemberBuiltinModel | None"
+
+
+class ExternalCliModelRules:
+    """Pool model / authentication fallback / built-in model rules of an external CLI member."""
+
+    def __init__(
+        self,
+        team: TeamBackend,
+        allocate_model_config: Callable[..., "Allocation | None"] | None,
+    ):
+        self.team = team
+        self._allocate_model_config = allocate_model_config
+
+    def resolve(
+        self,
+        cli_agent: str,
+        *,
+        model_name: str | None,
+        fallback_model_name: Any,
+        builtin_model: Any,
+        effort: Any,
+        tool_name: str,
+    ) -> tuple[ExternalCliModels | None, str]:
+        """Resolve the member's models; ``(None, reason)`` when the inputs are rejected.
+
+        Args:
+            cli_agent: A CLI kind already checked with ``check_external_cli_declared``.
+            model_name: Team model pool endpoint for the CLI.
+            fallback_model_name: Raw ``fallback_model_name`` argument.
+            builtin_model: Raw ``builtin_model`` argument.
+            effort: Raw ``effort`` argument.
+            tool_name: Calling tool, named in error messages.
+        """
+        raw_fallback_model_name = fallback_model_name
+        if raw_fallback_model_name is not None and not isinstance(raw_fallback_model_name, str):
+            return None, f"{tool_name} requires 'fallback_model_name' to be a model name when given"
+        # Omitted, null and blank all mean "no fallback model".
+        fallback_model_name = (raw_fallback_model_name or "").strip() or None
+        has_auth_fallback = _takes_auth_fallback(cli_agent)
+        if fallback_model_name is not None and not has_auth_fallback:
+            return None, f"cli_agent '{cli_agent}' has no authentication fallback; omit 'fallback_model_name'"
+        allocation = None
+        fallback_allocation = None
+        provider_filter = _provider_filter_for_cli(cli_agent)
+        compatible_entries = self.compatible_pool_entries(cli_agent)
+        compatible_model_names = self._compatible_model_names(cli_agent)
+        preferred_current_model = self._preferred_current_model(cli_agent, compatible_entries)
+        builtin, builtin_error = self._resolve_builtin_model(
+            builtin_model, effort, cli_agent=cli_agent, model_name=model_name
+        )
+        if builtin_error:
+            return None, builtin_error
+        if model_name == "*" or fallback_model_name == "*":
+            return None, "model_name '*' is a Team logical entry and cannot be passed to an external CLI"
+        if model_name:
+            if self.team.is_model_group_pool():
+                candidates = self.team.resolve_cli_models(model_name, provider_filter=provider_filter)
+                logical = self._allocate_model_config(None) if self._allocate_model_config else None
+                if candidates and logical is not None:
+                    from openjiuwen.agent_teams.models.allocator import Allocation
+
+                    allocation = Allocation(logical.entry, logical.group_index, persistence_model_name=model_name)
+            elif self._allocate_model_config is None:
+                return None, self._model_name_failure(
+                    cli_agent=cli_agent,
+                    model_name=model_name,
+                    compatible=compatible_model_names,
+                    cause="cannot be resolved without a team model pool",
+                )
+            elif provider_filter is not None:
+                allocation = self._allocate_model_config(model_name, provider_filter=provider_filter)
+            elif allocation is None:
+                allocation = self._allocate_model_config(model_name)
+            if allocation is None:
+                return None, self._model_name_failure(
+                    cli_agent=cli_agent,
+                    model_name=model_name,
+                    compatible=compatible_model_names,
+                    cause="is unavailable or incompatible",
+                )
+        if fallback_model_name is None:
+            if compatible_model_names and has_auth_fallback:
+                return None, (
+                    "fallback_model_name is required while compatible models are available for "
+                    f"cli_agent '{cli_agent}': {', '.join(compatible_model_names)}"
+                )
+        elif preferred_current_model is not None and fallback_model_name != preferred_current_model:
+            return None, (
+                f"fallback_model_name must use current model '{preferred_current_model}' because it is present "
+                f"in the team model pool and compatible with cli_agent '{cli_agent}'"
+            )
+        elif self._allocate_model_config is None:
+            return None, f"{tool_name} requires a team model pool when 'fallback_model_name' is specified"
+        else:
+            if self.team.is_model_group_pool():
+                candidates = self.team.resolve_cli_models(fallback_model_name, provider_filter=provider_filter)
+                logical = self._allocate_model_config(None)
+                if candidates and logical is not None:
+                    from openjiuwen.agent_teams.models.allocator import Allocation
+
+                    fallback_allocation = Allocation(
+                        logical.entry,
+                        logical.group_index,
+                        persistence_model_name=fallback_model_name,
+                    )
+            elif provider_filter is not None:
+                fallback_allocation = self._allocate_model_config(
+                    fallback_model_name,
+                    provider_filter=provider_filter,
+                )
+            else:
+                fallback_allocation = self._allocate_model_config(fallback_model_name)
+            if fallback_allocation is None:
+                compatible_hint = ", ".join(compatible_model_names) if compatible_model_names else "none"
+                return None, (
+                    f"fallback_model_name '{fallback_model_name}' is unavailable or incompatible with "
+                    f"cli_agent '{cli_agent}' (compatible models: {compatible_hint}); omit 'fallback_model_name' "
+                    "only when no compatible model is available"
+                )
+        return ExternalCliModels(allocation, fallback_allocation, builtin), ""
+
+    def compatible_pool_entries(self, cli_agent: str) -> list["ModelPoolEntry"]:
+        """Return protocol-compatible pool entries for one CLI kind."""
+        provider_filter = _provider_filter_for_cli(cli_agent)
+        return [
+            entry
+            for entry in self.team.get_model_pool()
+            if provider_filter is None or provider_filter(entry.api_provider)
+        ]
+
+    def _compatible_model_names(self, cli_agent: str) -> list[str]:
+        """Return safe model names visible to one CLI kind.
+
+        IntelliRouter/model-group pools contain one logical ``*`` entry while
+        their real deployment names live in the allocator catalog.  Project
+        that catalog here so fallback validation does not accidentally treat
+        a model group as an empty pool.
+        """
+        provider_filter = _provider_filter_for_cli(cli_agent)
+        if self.team.is_model_group_pool():
+            return sorted(
+                {
+                    item.model
+                    for item in self.team.list_cli_models(provider_filter=provider_filter)
+                    if item.model
+                }
+            )
+        return sorted({entry.model_name for entry in self.compatible_pool_entries(cli_agent)})
+
+    def _preferred_current_model(self, cli_agent: str, entries: list["ModelPoolEntry"]) -> str | None:
+        """Return the current model when the pool can allocate it compatibly."""
+        # In a model group the current model is the logical "*" entry, not a
+        # concrete model an external CLI can run; the fallback must be one of
+        # the real deployments instead.
+        if self.team.is_model_group_pool():
+            return None
+        current_name = self.team.current_model_name
+        current_provider = self.team.current_model_provider
+        if current_name is None or current_provider is None:
+            return None
+        current_protocol = _model_api_protocol(current_provider)
+        for entry in entries:
+            if entry.model_name != current_name:
+                continue
+            if _model_api_protocol(entry.api_provider) == current_protocol:
+                return current_name
+        return None
+
+    def _model_name_failure(
+        self,
+        *,
+        cli_agent: str,
+        model_name: str,
+        compatible: list[str],
+        cause: str,
+    ) -> str:
+        """Explain a rejected ``model_name`` and point at the built-in catalog.
+
+        A model the CLI offers on its own login (``"sonnet"``) is a natural
+        value to put in ``model_name``, but that field only resolves team
+        model pool endpoints — so the redirect belongs in the error itself.
+        """
+        config = self.team.external_cli_config(cli_agent)
+        builtin_names = [item.name for item in config.builtin_models] if config is not None else []
+        if model_name in builtin_names:
+            return (
+                f"model_name '{model_name}' is a built-in model of cli_agent '{cli_agent}', not a team model pool "
+                "endpoint; pass it as 'builtin_model' instead (optionally with 'effort')"
+            )
+        message = f"model_name '{model_name}' {cause} for cli_agent '{cli_agent}'"
+        if compatible:
+            message += f"; the team model pool offers: {', '.join(compatible)}"
+        else:
+            message += "; the team model pool has no compatible model"
+        if builtin_names:
+            message += f". Built-in models of this cli_agent, via 'builtin_model': {', '.join(builtin_names)}"
+        return message
+
+    def _resolve_builtin_model(
+        self,
+        builtin_model: Any,
+        effort: Any,
+        *,
+        cli_agent: str,
+        model_name: str | None,
+    ) -> tuple["MemberBuiltinModel | None", str]:
+        """Validate the optional built-in model choice.
+
+        MCP clients do not validate against the schema, so arguments the gate
+        removed are rejected here instead of being silently ignored.
+        """
+        builtin_name = _optional_text(builtin_model)
+        effort = _optional_text(effort)
+        if builtin_name is None and effort is None:
+            return None, ""
+        if not self.team.builtin_models_enabled():
+            return None, "builtin_model / effort are unavailable: no CLI kind declares builtin_models"
+        if builtin_name is None:
+            return None, "'effort' requires 'builtin_model'"
+        if model_name:
+            return None, (
+                "'builtin_model' and 'model_name' are mutually exclusive: a built-in model runs on the CLI's "
+                "own login, 'model_name' on a team model pool endpoint"
+            )
+        return self.team.resolve_builtin_model(cli_agent, builtin_name, effort)
+
+
 # ========== Member Management ==========
 
 
@@ -228,12 +526,14 @@ async def register_teammate(
     isolation: str | None = None,
     permissions_override: dict[str, str] | None = None,
     lifetime: str | None = None,
+    agent_template: "MemberAgentTemplate | None" = None,
 ) -> "MemberOpResult":
     """Register one ordinary LLM teammate row (UNSTARTED) — the single place that
     knows how a teammate's card and mode are derived.
 
-    Used by ``spawn_teammate`` and by ``create_task``'s inline ``member``
-    (F_118), so the two can never drift on card id, mode or options.
+    Used by ``spawn_teammate``, by ``create_task``'s inline ``member``
+    (F_118) and by ``spawn_expert`` (with ``agent_template``), so they can
+    never drift on card id, mode or options.
     """
     from openjiuwen.agent_teams.schema.status import MemberMode
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
@@ -254,6 +554,7 @@ async def register_teammate(
         isolation=isolation,
         permissions_override=permissions_override,
         lifetime=lifetime,
+        agent_template=agent_template,
     )
 
 
@@ -826,90 +1127,9 @@ class SpawnExternalCliTool(_SpawnToolBase):
             }
             properties["effort"] = {"type": "string", "description": t("spawn_external_cli", "effort")}
 
-    def _compatible_pool_entries(self, cli_agent: str) -> list["ModelPoolEntry"]:
-        """Return protocol-compatible pool entries for one CLI kind."""
-        provider_filter = _provider_filter_for_cli(cli_agent)
-        return [
-            entry
-            for entry in self.team.get_model_pool()
-            if provider_filter is None or provider_filter(entry.api_provider)
-        ]
-
-    def _compatible_model_names(self, cli_agent: str) -> list[str]:
-        """Return safe model names visible to one CLI kind.
-
-        IntelliRouter/model-group pools contain one logical ``*`` entry while
-        their real deployment names live in the allocator catalog.  Project
-        that catalog here so fallback validation does not accidentally treat
-        a model group as an empty pool.
-        """
-        provider_filter = _provider_filter_for_cli(cli_agent)
-        if self.team.is_model_group_pool():
-            return sorted(
-                {
-                    item.model
-                    for item in self.team.list_cli_models(provider_filter=provider_filter)
-                    if item.model
-                }
-            )
-        return sorted({entry.model_name for entry in self._compatible_pool_entries(cli_agent)})
-
-    def _preferred_current_model(self, cli_agent: str, entries: list["ModelPoolEntry"]) -> str | None:
-        """Return the current model when the pool can allocate it compatibly."""
-        # In a model group the current model is the logical "*" entry, not a
-        # concrete model an external CLI can run; the fallback must be one of
-        # the real deployments instead.
-        if self.team.is_model_group_pool():
-            return None
-        current_name = self.team.current_model_name
-        current_provider = self.team.current_model_provider
-        if current_name is None or current_provider is None:
-            return None
-        current_protocol = _model_api_protocol(current_provider)
-        for entry in entries:
-            if entry.model_name != current_name:
-                continue
-            if _model_api_protocol(entry.api_provider) == current_protocol:
-                return current_name
-        return None
-
     def _model_catalog_context(self) -> str:
         """Render safe current-model and pool protocol data for the model."""
-        current_model = None
-        if (
-            not self.team.is_model_group_pool()
-            and self.team.current_model_name is not None
-            and self.team.current_model_provider is not None
-        ):
-            current_model = {
-                "model_name": self.team.current_model_name,
-                "protocol": _model_api_protocol(self.team.current_model_provider),
-            }
-        compatible_by_cli: dict[str, list[dict[str, str]]] = {}
-        for cli_agent in sorted(self.team.external_cli_kinds()):
-            if not _takes_auth_fallback(cli_agent):
-                continue
-            provider_filter = _provider_filter_for_cli(cli_agent)
-            if self.team.is_model_group_pool():
-                options = {
-                    (item.model, _model_api_protocol(item.provider))
-                    for item in self.team.list_cli_models(provider_filter=provider_filter)
-                    if item.model
-                }
-            else:
-                options = {
-                    (entry.model_name, _model_api_protocol(entry.api_provider))
-                    for entry in self._compatible_pool_entries(cli_agent)
-                }
-            compatible_by_cli[cli_agent] = [
-                {"model_name": model_name, "protocol": protocol}
-                for model_name, protocol in sorted(options)
-            ]
-        catalog = {
-            "current_model": current_model,
-            "compatible_fallback_models": compatible_by_cli,
-        }
-        return f"<fallback_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</fallback_model_catalog>"
+        return external_cli_model_catalog_context(self.team)
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         err = validate_member_name(inputs.get("member_name"))
@@ -922,12 +1142,9 @@ class SpawnExternalCliTool(_SpawnToolBase):
                 "spawn_external_cli requires 'cli_agent' naming a CLI kind "
                 "declared in TeamAgentSpec.external_cli_agents (e.g. 'claude' or 'codex')"
             )
-        if self.team.external_cli_config(cli_agent) is None:
-            declared = ", ".join(sorted(self.team.external_cli_kinds())) or "<none>"
-            return self._fail(
-                f"cli_agent '{cli_agent}' is not declared in TeamAgentSpec.external_cli_agents "
-                f"(declared: {declared})"
-            )
+        err = check_external_cli_declared(self.team, cli_agent)
+        if err:
+            return self._fail(err)
 
         desc = inputs.get("desc") or ""
         prompt = inputs.get("prompt") or ""
@@ -937,94 +1154,16 @@ class SpawnExternalCliTool(_SpawnToolBase):
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")
         model_name = inputs.get("model_name")
-        raw_fallback_model_name = inputs.get("fallback_model_name")
-        if raw_fallback_model_name is not None and not isinstance(raw_fallback_model_name, str):
-            return self._fail("spawn_external_cli requires 'fallback_model_name' to be a model name when given")
-        # Omitted, null and blank all mean "no fallback model".
-        fallback_model_name = (raw_fallback_model_name or "").strip() or None
-        has_auth_fallback = _takes_auth_fallback(cli_agent)
-        if fallback_model_name is not None and not has_auth_fallback:
-            return self._fail(f"cli_agent '{cli_agent}' has no authentication fallback; omit 'fallback_model_name'")
-        allocation = None
-        fallback_allocation = None
-        provider_filter = _provider_filter_for_cli(cli_agent)
-        compatible_entries = self._compatible_pool_entries(cli_agent)
-        compatible_model_names = self._compatible_model_names(cli_agent)
-        preferred_current_model = self._preferred_current_model(cli_agent, compatible_entries)
-        builtin_model, builtin_error = self._resolve_builtin_model(inputs, cli_agent=cli_agent, model_name=model_name)
-        if builtin_error:
-            return self._fail(builtin_error)
-        if model_name == "*" or fallback_model_name == "*":
-            return self._fail("model_name '*' is a Team logical entry and cannot be passed to an external CLI")
-        if model_name:
-            if self.team.is_model_group_pool():
-                candidates = self.team.resolve_cli_models(model_name, provider_filter=provider_filter)
-                logical = self._allocate_model_config(None) if self._allocate_model_config else None
-                if candidates and logical is not None:
-                    from openjiuwen.agent_teams.models.allocator import Allocation
-
-                    allocation = Allocation(logical.entry, logical.group_index, persistence_model_name=model_name)
-            elif self._allocate_model_config is None:
-                return self._fail(
-                    self._model_name_failure(
-                        cli_agent=cli_agent,
-                        model_name=model_name,
-                        compatible=compatible_model_names,
-                        cause="cannot be resolved without a team model pool",
-                    )
-                )
-            elif provider_filter is not None:
-                allocation = self._allocate_model_config(model_name, provider_filter=provider_filter)
-            elif allocation is None:
-                allocation = self._allocate_model_config(model_name)
-            if allocation is None:
-                return self._fail(
-                    self._model_name_failure(
-                        cli_agent=cli_agent,
-                        model_name=model_name,
-                        compatible=compatible_model_names,
-                        cause="is unavailable or incompatible",
-                    )
-                )
-        if fallback_model_name is None:
-            if compatible_model_names and has_auth_fallback:
-                return self._fail(
-                    "fallback_model_name is required while compatible models are available for "
-                    f"cli_agent '{cli_agent}': {', '.join(compatible_model_names)}"
-                )
-        elif preferred_current_model is not None and fallback_model_name != preferred_current_model:
-            return self._fail(
-                f"fallback_model_name must use current model '{preferred_current_model}' because it is present "
-                f"in the team model pool and compatible with cli_agent '{cli_agent}'"
-            )
-        elif self._allocate_model_config is None:
-            return self._fail("spawn_external_cli requires a team model pool when 'fallback_model_name' is specified")
-        else:
-            if self.team.is_model_group_pool():
-                candidates = self.team.resolve_cli_models(fallback_model_name, provider_filter=provider_filter)
-                logical = self._allocate_model_config(None)
-                if candidates and logical is not None:
-                    from openjiuwen.agent_teams.models.allocator import Allocation
-
-                    fallback_allocation = Allocation(
-                        logical.entry,
-                        logical.group_index,
-                        persistence_model_name=fallback_model_name,
-                    )
-            elif provider_filter is not None:
-                fallback_allocation = self._allocate_model_config(
-                    fallback_model_name,
-                    provider_filter=provider_filter,
-                )
-            else:
-                fallback_allocation = self._allocate_model_config(fallback_model_name)
-            if fallback_allocation is None:
-                compatible_hint = ", ".join(compatible_model_names) if compatible_model_names else "none"
-                return self._fail(
-                    f"fallback_model_name '{fallback_model_name}' is unavailable or incompatible with "
-                    f"cli_agent '{cli_agent}' (compatible models: {compatible_hint}); omit 'fallback_model_name' "
-                    "only when no compatible model is available"
-                )
+        models, err = ExternalCliModelRules(self.team, self._allocate_model_config).resolve(
+            cli_agent,
+            model_name=model_name,
+            fallback_model_name=inputs.get("fallback_model_name"),
+            builtin_model=inputs.get("builtin_model"),
+            effort=inputs.get("effort"),
+            tool_name="spawn_external_cli",
+        )
+        if models is None:
+            return self._fail(err)
         result = await self.team.spawn_external_cli_agent(
             member_name=member_name,
             display_name=display_name,
@@ -1032,9 +1171,9 @@ class SpawnExternalCliTool(_SpawnToolBase):
             desc=desc,
             prompt=prompt,
             model_name=model_name,
-            allocation=allocation,
-            fallback_allocation=fallback_allocation,
-            builtin_model=builtin_model,
+            allocation=models.allocation,
+            fallback_allocation=models.fallback_allocation,
+            builtin_model=models.builtin_model,
         )
         return self._from_result(
             result,
@@ -1043,63 +1182,6 @@ class SpawnExternalCliTool(_SpawnToolBase):
             role_type="external_cli",
             cli_agent=cli_agent,
         )
-
-    def _model_name_failure(
-        self,
-        *,
-        cli_agent: str,
-        model_name: str,
-        compatible: list[str],
-        cause: str,
-    ) -> str:
-        """Explain a rejected ``model_name`` and point at the built-in catalog.
-
-        A model the CLI offers on its own login (``"sonnet"``) is a natural
-        value to put in ``model_name``, but that field only resolves team
-        model pool endpoints — so the redirect belongs in the error itself.
-        """
-        config = self.team.external_cli_config(cli_agent)
-        builtin_names = [item.name for item in config.builtin_models] if config is not None else []
-        if model_name in builtin_names:
-            return (
-                f"model_name '{model_name}' is a built-in model of cli_agent '{cli_agent}', not a team model pool "
-                "endpoint; pass it as 'builtin_model' instead (optionally with 'effort')"
-            )
-        message = f"model_name '{model_name}' {cause} for cli_agent '{cli_agent}'"
-        if compatible:
-            message += f"; the team model pool offers: {', '.join(compatible)}"
-        else:
-            message += "; the team model pool has no compatible model"
-        if builtin_names:
-            message += f". Built-in models of this cli_agent, via 'builtin_model': {', '.join(builtin_names)}"
-        return message
-
-    def _resolve_builtin_model(
-        self,
-        inputs: dict[str, Any],
-        *,
-        cli_agent: str,
-        model_name: str | None,
-    ) -> tuple["MemberBuiltinModel | None", str]:
-        """Validate the optional built-in model choice.
-
-        MCP clients do not validate against the schema, so arguments the gate
-        removed are rejected here instead of being silently ignored.
-        """
-        builtin_name = _optional_text(inputs.get("builtin_model"))
-        effort = _optional_text(inputs.get("effort"))
-        if builtin_name is None and effort is None:
-            return None, ""
-        if not self.team.builtin_models_enabled():
-            return None, "builtin_model / effort are unavailable: no CLI kind declares builtin_models"
-        if builtin_name is None:
-            return None, "'effort' requires 'builtin_model'"
-        if model_name:
-            return None, (
-                "'builtin_model' and 'model_name' are mutually exclusive: a built-in model runs on the CLI's "
-                "own login, 'model_name' on a team model pool endpoint"
-            )
-        return self.team.resolve_builtin_model(cli_agent, builtin_name, effort)
 
 
 class ShutdownMemberTool(TeamTool):

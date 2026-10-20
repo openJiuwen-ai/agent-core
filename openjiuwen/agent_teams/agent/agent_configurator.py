@@ -192,6 +192,16 @@ class _SwarmflowModelResolver:
         return [e.model_name for e in (self._spec.model_pool or [])]
 
 
+def _derive_expert_binding(spec: TeamAgentSpec) -> Any:
+    """What the leader's ``spawn_expert`` needs from the team spec."""
+    from openjiuwen.agent_teams.experts.bound_group import bound_agent_group
+    from openjiuwen.agent_teams.rails.team_context import ExpertBinding
+
+    base = spec.agents.get("teammate") or spec.agents.get("leader")
+    workspace = base.workspace.root_path if base is not None and base.workspace is not None else None
+    return ExpertBinding(bound_group=bound_agent_group(spec), persona_workspace=workspace)
+
+
 def _derive_swarmflow_worker_base_spec(
     spec: TeamAgentSpec,
     observability_rail_specs: list[Any],
@@ -357,7 +367,9 @@ class AgentConfigurator:
         on_team_built: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, prepare team backend."""
-        agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
+        agent_spec = self.resolve_agent_spec(
+            spec, ctx.role, ctx.member_name, agent_template_spec=ctx.agent_template_spec
+        )
         resolved_language = _resolve_language(agent_spec.language)
         self._blueprint = TeamAgentBlueprint(
             card=self._card,
@@ -550,7 +562,9 @@ class AgentConfigurator:
             self._attach_workspace_cache(spec, ctx, resolved_language)
             return member_runtime
 
-        agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
+        agent_spec = self.resolve_agent_spec(
+            spec, ctx.role, ctx.member_name, agent_template_spec=ctx.agent_template_spec
+        )
         resolved_language = self._blueprint.language if self._blueprint else _resolve_language(agent_spec.language)
         member_name = ctx.member_name
 
@@ -889,6 +903,17 @@ class AgentConfigurator:
             # base spec, so both ride the same rails and progressive_tool switch.
             swarmflow_expert_specs = derive_swarmflow_expert_specs(spec, member_observability_rail_specs)
 
+        # The host's expert catalog backs the leader's expert tools; members
+        # never get it (spawning is a leader capability).
+        expert_catalog = None
+        expert_binding = None
+        if ctx.role == TeamRole.LEADER:
+            from openjiuwen.agent_teams.experts.catalog import get_process_expert_catalog
+
+            expert_catalog = get_process_expert_catalog()
+            if expert_catalog is not None:
+                expert_binding = _derive_expert_binding(spec)
+
         inject_team_handles(
             member_build_context.extras,
             team_backend=self.team_backend,
@@ -905,6 +930,8 @@ class AgentConfigurator:
             reliability_components=reliability_components,
             permissions_override=ctx.permissions_override,
             worktree_manager=self.worktree_manager,
+            expert_catalog=expert_catalog,
+            expert_binding=expert_binding,
         )
 
         # Fold the team rails into the spec rails (after the user rails, to keep
@@ -1059,10 +1086,25 @@ class AgentConfigurator:
         spec: TeamAgentSpec,
         role: TeamRole,
         member_name: Optional[str] = None,
+        *,
+        agent_template_spec: Optional[dict[str, Any]] = None,
     ):
+        """Select the ``DeepAgentSpec`` a member is built from.
+
+        A member's own ``agents[<member>]`` entry wins (predefined members,
+        already assembled by the host). A member spawned from an expert
+        template (``spawn_expert``) carries the template's capability
+        snapshot instead, applied to the shared base spec. Everyone else uses
+        the shared base for its role.
+        """
         if member_name and member_name in spec.agents:
             return spec.agents[member_name]
-        return spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
+        base = spec.agents.get(role.value) or spec.agents.get("teammate") or spec.agents["leader"]
+        if agent_template_spec:
+            from openjiuwen.agent_teams.experts.template_member import apply_template_snapshot
+
+            return apply_template_snapshot(base, agent_template_spec)
+        return base
 
     def setup_team_backend(
         self,
@@ -1132,7 +1174,9 @@ class AgentConfigurator:
 
         is_leader = ctx.role == TeamRole.LEADER
         current_member_name = ctx.member_name or (ctx.team_spec.leader_member_name if ctx.team_spec else "")
-        current_agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
+        current_agent_spec = self.resolve_agent_spec(
+            spec, ctx.role, ctx.member_name, agent_template_spec=ctx.agent_template_spec
+        )
         current_model_config = ctx.member_model or current_agent_spec.model
         current_model_name = None
         current_model_provider = None

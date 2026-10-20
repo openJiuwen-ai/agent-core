@@ -27,6 +27,7 @@ from openjiuwen.agent_teams.tools.tool_member import (
 )
 from openjiuwen.agent_teams.tools.tool_message import ReportToLeaderTool, SendMessageTool
 from openjiuwen.agent_teams.tools.tool_permissions import (
+    EXPERT_TOOLS,
     HUMAN_AGENT_TOOLS,
     LEADER_TOOLS,
     MEMBER_TOOLS_BY_DISPATCH,
@@ -46,7 +47,9 @@ from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.experts.catalog import ExpertCatalog
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.rails.team_context import ExpertBinding
 
 
 # ========== Tool Variants ==========
@@ -139,6 +142,8 @@ def create_team_tools(
     concurrency_governor: Any = None,
     swarmflow_budget: Any = None,
     team_permissions_enabled: bool = False,
+    expert_catalog: "ExpertCatalog | None" = None,
+    expert_binding: "ExpertBinding | None" = None,
 ) -> list[Tool]:
     """Create role-appropriate tool instances filtered by permission sets.
 
@@ -196,6 +201,12 @@ def create_team_tools(
             ``enable_swarmflow``; when None the ``swarmflow`` tool is gated out.
         swarmflow_budget: The leader's shared ``BudgetLedger`` capping the tokens
             its swarmflow runs may burn. Non-None only for a swarmflow leader.
+        expert_catalog: The host's expert locating protocol. Non-None only for
+            a leader whose host injected one; when None the expert tools
+            (``view_experts`` / ``view_expert_groups`` / ``spawn_expert``) are
+            gated out together.
+        expert_binding: Team-spec data ``spawn_expert`` works with (the bound
+            AgentGroup and the persona workspace); passed with ``expert_catalog``.
     """
     from openjiuwen.agent_teams.prompts.loader import make_template_loader
     from openjiuwen.agent_teams.tools.locales import make_translator
@@ -291,6 +302,18 @@ def create_team_tools(
         "async_task_cancel": AsyncTaskCancelTool(parent_agent, t, language=lang),
     }
 
+    if expert_catalog is not None:
+        all_tools.update(
+            _expert_tools(
+                agent_team,
+                t,
+                catalog=expert_catalog,
+                binding=expert_binding,
+                language=lang,
+                model_config_allocator=model_config_allocator,
+            )
+        )
+
     org_task_manager = getattr(agent_team, "org_task_manager", None)
     if org_task_manager is not None:
         from openjiuwen.agent_teams.organization.message_service import OrgMessageService
@@ -371,6 +394,10 @@ def create_team_tools(
     # spawn tools.
     if swarmflow_model_resolver is None:
         allowed = allowed - {"swarmflow"}
+    # Expert tools exist only when the host injected an expert catalog — all
+    # three together, so a leader never gets spawn_expert without the views.
+    if expert_catalog is None:
+        allowed = allowed - EXPERT_TOOLS
     if role != "human_agent" and getattr(agent_team, "conversation_mode", "team") == "group_chat":
         from openjiuwen.agent_teams.group_chat.tools import GroupSendMessageTool
 
@@ -385,6 +412,34 @@ def create_team_tools(
         _wrap_invoke_with_logging(tool)
 
     return tools
+
+
+def _expert_tools(
+    agent_team: TeamBackend,
+    t: Any,
+    *,
+    catalog: "ExpertCatalog",
+    binding: "ExpertBinding | None",
+    language: str,
+    model_config_allocator: Any,
+) -> dict[str, Tool]:
+    """Build the three expert tools over one catalog."""
+    from openjiuwen.agent_teams.tools.tool_expert import SpawnExpertTool, ViewExpertGroupsTool, ViewExpertsTool
+
+    bound_group = binding.bound_group if binding is not None else None
+    return {
+        "view_experts": ViewExpertsTool(catalog, t, language=language),
+        "view_expert_groups": ViewExpertGroupsTool(catalog, t, language=language, bound_group=bound_group),
+        "spawn_expert": SpawnExpertTool(
+            agent_team,
+            t,
+            catalog=catalog,
+            language=language,
+            bound_group=bound_group,
+            persona_workspace=binding.persona_workspace if binding is not None else None,
+            model_config_allocator=model_config_allocator,
+        ),
+    }
 
 
 def _wrap_invoke_with_logging(tool: Tool) -> None:

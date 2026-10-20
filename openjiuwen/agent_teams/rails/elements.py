@@ -42,6 +42,8 @@ from openjiuwen.harness.manifest.builtin_elements import (
     observability_dependency_installed,
 )
 from openjiuwen.agent_teams.rails.team_context import (
+    get_expert_binding,
+    get_expert_catalog,
     get_messager,
     get_reliability_components,
     get_swarmflow_budget,
@@ -129,6 +131,8 @@ def build_team_tool_rail(params: dict[str, Any], context: Any) -> Any:
         swarmflow_concurrency_governor=get_swarmflow_concurrency_governor(context),
         swarmflow_budget=get_swarmflow_budget(context),
         team_permissions_enabled=inp.team_permissions_enabled,
+        expert_catalog=get_expert_catalog(context),
+        expert_binding=get_expert_binding(context),
     )
 
 

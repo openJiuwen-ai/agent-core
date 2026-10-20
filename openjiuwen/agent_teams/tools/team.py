@@ -27,7 +27,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.team import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
-    from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
+    from openjiuwen.agent_teams.tools.member_options import MemberAgentTemplate, MemberBuiltinModel
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
@@ -73,6 +73,19 @@ from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+
+def _with_member_config(
+    agent_template: Optional["MemberAgentTemplate"],
+    member_config: Optional[ExternalCliAgentSpec],
+) -> Optional["MemberAgentTemplate"]:
+    """Store an external member's launch config inside its template record."""
+    if member_config is None:
+        return agent_template
+    from openjiuwen.agent_teams.tools.member_options import MemberAgentTemplate
+
+    record = agent_template or MemberAgentTemplate()
+    return record.model_copy(update={"external_cli": member_config.model_dump(mode="json", by_alias=True)})
 
 
 @dataclass
@@ -751,6 +764,7 @@ class TeamBackend:
         builtin_model: Optional["MemberBuiltinModel"] = None,
         permissions_override: Optional[dict[str, str]] = None,
         lifetime: str | None = None,
+        agent_template: Optional["MemberAgentTemplate"] = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
 
@@ -791,6 +805,9 @@ class TeamBackend:
                 (``"shutdown"`` / ``"dormant"``, F_118). None = resident.
                 Persisted in ``options`` so the scheduler's retirement scan
                 and the member's own settle read the same fact.
+            agent_template: Expert template the member is spawned from
+                (``spawn_expert``): reference, version and the capability
+                snapshot / external CLI config the member is rebuilt from.
 
         Returns:
             ``MemberOpResult`` describing the outcome. ``__bool__`` falls
@@ -825,6 +842,7 @@ class TeamBackend:
             worktree_isolation=isolation,
             permissions_override=permissions_override,
             lifetime=lifetime,
+            agent_template=agent_template,
         )
 
         # Resolve the latest identity from the evolvable md before writing the
@@ -3054,6 +3072,8 @@ class TeamBackend:
         allocation: Optional["Allocation"] = None,
         fallback_allocation: Optional["Allocation"] = None,
         builtin_model: Optional["MemberBuiltinModel"] = None,
+        member_config: Optional[ExternalCliAgentSpec] = None,
+        agent_template: Optional["MemberAgentTemplate"] = None,
     ) -> MemberOpResult:
         """Register an external-CLI teammate dynamically.
 
@@ -3083,6 +3103,13 @@ class TeamBackend:
             builtin_model: Built-in CLI model (and effort) resolved through
                 ``resolve_builtin_model``; mutually exclusive with
                 ``allocation`` because it runs on the CLI's own login.
+            member_config: Launch config this member actually runs with (an
+                expert template's config merged over the declared kind
+                config). The capability ceiling is unchanged — ``cli_agent``
+                must still be declared; ``None`` uses the declared config.
+            agent_template: Expert template reference persisted with the
+                member; ``member_config`` is stored in it so the member is
+                rebuilt with the same config on restart and cold recovery.
 
         Returns:
             ``MemberOpResult`` — failure if the backend name is unknown, its
@@ -3141,6 +3168,7 @@ class TeamBackend:
             allocation=allocation,
             fallback_allocation=fallback_allocation,
             builtin_model=builtin_model,
+            agent_template=_with_member_config(agent_template, member_config),
         )
         if not result.ok:
             self._external_cli_specs.pop(member_name, None)

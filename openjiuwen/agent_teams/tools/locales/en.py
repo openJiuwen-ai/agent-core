@@ -291,6 +291,71 @@ STRINGS: dict[str, str] = {
         "Optional. Reasoning effort, one of the chosen builtin_model's efforts; requires builtin_model. "
         "Omit to take the model's default_effort"
     ),
+    # ===== view_experts ========================================================
+    # view_experts._desc lives in descs/en/expert/view_experts.md
+    "view_experts.action": "list (default) lists the installed single experts; get shows one expert in full",
+    "view_experts.query": "list only: case-insensitive substring filter over package name, display name and description",
+    "view_experts.name": "Required for get: the expert's package name (name in the list, not the display name)",
+    # ===== view_expert_groups ==================================================
+    # view_expert_groups._desc lives in descs/en/expert/view_expert_groups.md
+    "view_expert_groups.action": "list (default) lists the installed expert groups; get shows one group and its members",
+    "view_expert_groups.query": (
+        "list only: case-insensitive substring filter over group name, display name and description"
+    ),
+    "view_expert_groups.capabilities": "list only: keep only groups that have all listed capability tags",
+    "view_expert_groups.name": "Required for get: the expert group name",
+    "view_expert_groups.member": "get only, optional: expand just this member of the group",
+    # ===== spawn_expert ========================================================
+    # spawn_expert._desc lives in descs/en/expert/spawn_expert.md
+    "spawn_expert.expert": (
+        "Required. A single expert's package name; with group, a member name of that group (not leader)"
+    ),
+    "spawn_expert.group": "Expert group name; omit when expert is a single expert. Required for a group member",
+    "spawn_expert.member_name": (
+        "[public] Unique member name in the team (semantic slug such as finance-1 or clip-2, DNS-label kebab-case). "
+        "**Must start with a lowercase ASCII letter (a-z), followed only by lowercase letters, digits (0-9) or "
+        "hyphens (-)**; one expert can be spawned several times under different names"
+    ),
+    "spawn_expert.display_name": (
+        "[public] Optional. Defaults to the expert's display name; \" (member_name)\" is appended when a teammate "
+        "already uses that display name"
+    ),
+    "spawn_expert.desc": (
+        "[public] Optional. Added public description, appended after the expert's own description (never replaces "
+        "it). Say how this instance differs from its siblings, e.g. \"covers shots 1-10\"; no private information"
+    ),
+    "spawn_expert.prompt": (
+        "[private] Optional. Added standing agreement, appended after the expert's persona (never replaces it). "
+        "Do not restate the persona or put concrete tasks here"
+    ),
+    "spawn_expert.model_name": (
+        "Optional. Fill only when the user names a model; never pick or infer one yourself. Native experts follow "
+        "spawn_teammate, external-runtime experts follow spawn_external_cli (a team pool endpoint compatible with "
+        "the CLI's protocol)"
+    ),
+    "spawn_expert.external_cli": (
+        "Optional object, only for external-runtime experts (runtime other than native); passing it for a native "
+        "expert is an error. Fields mean and validate like the same-named spawn_external_cli parameters"
+    ),
+    "spawn_expert.external_cli.fallback_model_name": (
+        "Authentication fallback model, same rules as spawn_external_cli.fallback_model_name: valid only for the "
+        "CLI kinds listed under compatible_fallback_models below; required when that kind has compatible models, "
+        "preferring the current model when it is in the pool and protocol-compatible"
+    ),
+    "spawn_expert.external_cli.builtin_model": (
+        "Optional. A built-in model from the expert's CLI kind entry in the catalog below, run on the CLI's own "
+        "login; mutually exclusive with model_name"
+    ),
+    "spawn_expert.external_cli.effort": (
+        "Optional. Reasoning effort, one of the chosen builtin_model's efforts; requires builtin_model"
+    ),
+    "spawn_expert.isolation": (
+        "Optional isolation mode, as in spawn_teammate: set 'worktree' only when the user asks for it or the member "
+        "must modify repository files in an isolated checkout. Not supported for external-runtime experts"
+    ),
+    "spawn_expert.permissions": (
+        "Optional, as spawn_teammate.permissions (tighten only). Not supported for external-runtime experts"
+    ),
     # ===== set_member_model ====================================================
     # set_member_model._desc lives in descs/en/member/set_member_model.md
     "set_member_model.member_name": (

@@ -17,6 +17,9 @@ LEADER_ONLY_TOOLS: set[str] = {
     "spawn_bridge_agent",  # Spawn a bridge to a remote agent
     "spawn_external_cli",  # Spawn a third-party CLI agent teammate
     "set_member_model",  # Switch an external CLI member's built-in model / effort
+    "spawn_expert",  # Spawn a teammate from an installed expert template (gated by an expert catalog)
+    "view_experts",  # Browse installed single experts (gated by an expert catalog)
+    "view_expert_groups",  # Browse installed expert groups and their members (gated by an expert catalog)
     "shutdown_member",  # Shutdown a team member
     "approve_plan",  # Approve or reject a member's plan
     "approve_tool",  # Approve or reject a teammate tool call
@@ -48,6 +51,10 @@ LEADER_ONLY_TOOLS: set[str] = {
     # Root Leader creates a Summary Execution after accepted sources are ready.
     "org_create_summary_execution",
 }
+
+# Leader tools over the host's expert catalog; registered together, only when
+# the host injected a catalog (``create_team_tools(expert_catalog=...)``).
+EXPERT_TOOLS: frozenset[str] = frozenset({"view_experts", "view_expert_groups", "spawn_expert"})
 
 # Tools that only members can use
 MEMBER_ONLY_TOOLS: set[str] = {
