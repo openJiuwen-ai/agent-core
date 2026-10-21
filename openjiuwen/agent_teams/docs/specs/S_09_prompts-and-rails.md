@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-10-15 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md`、`F_80_fork-identity-conversion.md`、`F_122_framework-bootstrapped-generic-team.md` |
 
 ## 范围 / 边界
@@ -49,6 +49,16 @@
    （最新一条含 `<team-policy>…</team-policy>` 的 UserMessage，整块原样）兜底。`NEW_TEAM_IN_SESSION` 的
    leader 换 session 即空基线，准则随首条输入重发——F_76 记录的该遗留在本模式下消失。`dispatch_scheduled_leader.md`
    因此不再提"build_team 的 `enable_task_verification` 参数"，改为模式中立的"团队配置的任务验证开关"。
+
+1a'. **调度模式的成员通信规则是 capability 槽 `{{member_messaging}}`（[[F_126]]）**：只在
+   `dispatch_scheduled_leader.md` / `dispatch_scheduled_teammate.md` 出现，由
+   `build_team_dispatch_section(member_messaging=...)` 在 scheduled 下填充，gate 是
+   `TeamBackend.member_messaging_enabled()`——与工具工厂选 `send_message` 形态的信号同源。
+   leader 两种取值都非空（关 → `dispatch_scheduled_leader_messaging_closed.md`，开 →
+   `..._messaging_open.md`）；teammate 关闭时为空串（关闭规则只写在 `send_message_scheduled.md`
+   描述里），因此该槽必须停在模板最后一行，由 `strip()` 吸收。参数沿
+   `build_team_static_sections` / `build_leader_policy_disclosure` / `build_team_member_system_prompt`
+   一路透传，autonomous 模板无此槽、不调 `format`。
 
 1b. **模式相关的内容按模式拆模板，不在共用模板里加 caveat（[[F_76]]）**：`leader_policy.md` 全模式共用，因此任何"这条在 A 模式如此、在 B 模式如彼"的内容都不属于它。「任务状态流转」原本就违反这条（同一节并列描述自主认领与调度框架两套驱动），已拆成 `task_state_autonomous.md` / `task_state_scheduled.md`，由 `build_team_task_state_section`（P:16，LEADER only）按 `dispatch_mode` 挑版。
    - **autonomous 版不得出现验证闸，连警告也不行**：该模式的 `create_task` 不暴露 `reviewer`，且没有调度 runtime 去唤起验证者（`TeamScheduler` 只在 `dispatch_mode == "scheduled"` 的 leader 上构造），被硬推进 `in_review` 的任务会永久停在那里并占住该成员唯一的活跃任务名额。但模板**不写"本模式没有验证闸"这类说明**——点名一个不存在的能力正是让模型去够它的原因，与 `fork_usage` 槽关闭时整节消失同理。门控理由属于 spec 与代码注释，不属于提示词。

@@ -228,7 +228,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     收件参数 schema 与一条直线 `_dispatch`。**不为「形态就该有基类」的对称感去造 `_XxxBase`**。
     无论哪种，形态子类里都**零形态分支**，因此不变量 12（schema 扁平、invoke 直线、
     无 role 分支）对每个形态仍成立。
-    `send_message` 的形态是 `(dispatch_mode, leader|member)` 二维：scheduled 下
+    `send_message` 的形态是 `(dispatch_mode, leader|member|member_peers)` 二维：scheduled 下
     leader 仍要广播 / 多播 / `_auto_start_members`，只有成员侧收敛成
     `ReportToLeaderTool`（`to` 收成 `enum ["leader", "user"]`——`"leader"` 是
     **角色占位符**，工具在投递时经 `TeamBackend.resolve_leader_member_name()`
@@ -240,6 +240,13 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     行为相反的描述。`ReportToLeaderTool` 的 enum 是给宿主 LLM 的契约，
     `_dispatch` 里的白名单是给 MCP 客户端的执法（`mcp/server.py` 直接
     `invoke`，不校验 schema）——两层都必须有，不是重复。
+    **例外：团队开启成员间通信（`TeamAgentSpec.enable_member_messaging`，F_126）**时，
+    scheduled 成员落到 `member_peers` 列，形态是 `ScheduledPeerMessageTool(SendMessageTool)`：
+    完整 reach（单播 / 多播 / 广播），同时保留 `"leader"` 角色词（`to` 与 `targets` 中都在投递
+    时解析成真实 leader，解析不到软失败）。列由工厂的 `_send_message_reach` 按
+    `TeamBackend.member_messaging_enabled()` 选，leader 与 autonomous 成员的格子不受开关影响；
+    描述 / 参数用独立 desc_key `send_message_scheduled_peers`。同一门控信号也决定 dispatch
+    提示词的 `{{member_messaging}}` 槽（见 S_09），工具与提示词同源。
     `SendMessageTool` 还在工具边界拒绝 leader `to = "user"`：leader 的普通文本输出
     已直接展示给用户，写入 user pseudo-recipient mailbox 会产生无人标记已读的消息。
     teammate / human_agent 发给 `user` 的既有语义保持不变。
@@ -648,6 +655,7 @@ ClaimTaskTool          → TeamTaskManager
 MemberCompleteTaskTool → TeamTaskManager
 SendMessageTool        → TeamMessageManager (+ TeamBackend roster check + autostart_unstarted())
 ReportToLeaderTool     → TeamMessageManager (+ TeamBackend.resolve_leader_member_name()：投递时把 "leader" 角色词解析成真实名，读 team_info DB 行并缓存；team 行缺失则 to="leader" 在 invoke 时软失败，非构造期)
+ScheduledPeerMessageTool → SendMessageTool 的全部依赖 (+ TeamBackend.resolve_leader_member_name()：to / targets 里的 "leader" 角色词同上解析，F_126)
 ```
 
 事件发布与状态迁移由 manager 集中负责；工具只是把入参打包后转发给
