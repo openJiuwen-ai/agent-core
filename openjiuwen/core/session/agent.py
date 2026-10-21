@@ -18,6 +18,7 @@ from openjiuwen.core.foundation.kv_cache.kv_cache_metadata import (
     team_member_cache_identity,
 )
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
+from openjiuwen.core.session.identity import set_current_agent_identity
 from openjiuwen.core.session.interaction.interaction import SimpleAgentInteraction
 from openjiuwen.core.session.internal.agent import AgentSession
 from openjiuwen.core.session.stream.manager import StreamWriterManager
@@ -51,6 +52,19 @@ class Session:
             stream_writer_manager=stream_writer_manager,
         )
         self._card = card
+        # Bind session-scoped identity into the execution context: the one
+        # core-side point every execution mode passes through (runners hand
+        # the agent / group card here), letting telemetry handlers stamp
+        # gen_ai.agent.* on spans raised without rail-forwarded identity
+        # (orchestrated modes). Tasks spawned later inherit it via the
+        # copied context; sessions created without a card leave the ambient
+        # identity untouched.
+        if card is not None:
+            set_current_agent_identity(
+                getattr(card, "id", None),
+                getattr(card, "name", None),
+                getattr(card, "description", None),
+            )
         self._pre_run_done = False
         self._post_run_done = False
         self._interaction = None

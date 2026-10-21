@@ -29,6 +29,7 @@ from openjiuwen.core.common.exception.codes import StatusCode as OJStatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import session_logger
 from openjiuwen.core.graph.pregel import GraphInterrupt
+from openjiuwen.core.session.identity import current_agent_identity
 from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
 from openjiuwen.core.session.tracer.handler import (
     TraceExtAgentHandler,
@@ -415,21 +416,31 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
         ``instance_info`` keys come from ``OtelRail._build_common_info``:
         ``agent_id`` / ``agent_name`` / ``agent_description`` /
-        ``conversation_id`` / ``user_id`` / ``metadata``. Events raised
-        without them (other rails, direct handler callers) simply skip the
-        attributes.
+        ``conversation_id`` / ``user_id`` / ``metadata``.
+
+        Identity falls back to the session-scoped context identity
+        (``session.identity``, bound at ``Session`` creation from the agent
+        / group card): orchestrated modes (Controller / PlanExecute) raise
+        events through studio's own chain and never register OtelRail, so
+        their payloads carry no identity keys. Session facts
+        (``conversation_id`` / ``user_id`` / ``metadata``) stay
+        payload-only — the card carries no such data. With neither source
+        present the attributes are simply skipped.
         """
         info = instance_info or {}
-        agent_id = info.get("agent_id")
+        session_identity = current_agent_identity() or {}
+        agent_id = info.get("agent_id") or session_identity.get("agent_id")
         if agent_id:
             otel_span.set_attribute(GEN_AI_AGENT_ID, str(agent_id))
         # Executing agent name (not the span entity name — on tool spans the
         # entity is the tool). Tool spans also set this via extra_attrs with a
         # class_name fallback for direct callers; via the rail both agree.
-        if info.get("agent_name"):
-            otel_span.set_attribute(GEN_AI_AGENT_NAME, str(info["agent_name"]))
-        if info.get("agent_description"):
-            otel_span.set_attribute(GEN_AI_AGENT_DESCRIPTION, str(info["agent_description"]))
+        agent_name = info.get("agent_name") or session_identity.get("agent_name")
+        if agent_name:
+            otel_span.set_attribute(GEN_AI_AGENT_NAME, str(agent_name))
+        agent_description = info.get("agent_description") or session_identity.get("agent_description")
+        if agent_description:
+            otel_span.set_attribute(GEN_AI_AGENT_DESCRIPTION, str(agent_description))
         if info.get("conversation_id"):
             otel_span.set_attribute(GEN_AI_CONVERSATION_ID, str(info["conversation_id"]))
         if info.get("user_id"):
@@ -450,9 +461,11 @@ class OtelAgentHandler(TraceExtAgentHandler):
         name_val = agent_span.name or (instance_info.get("class_name", "") if instance_info else "")
         otel_span.set_attribute(OJ_AGENT_INVOKE_TYPE, invoke_type_val)
         otel_span.set_attribute(OJ_AGENT_NAME, name_val)
-        # Trace display name: the executing agent (rail-forwarded), falling
-        # back to the span entity name.
-        trace_name = ((instance_info or {}).get("agent_name") or "") or name_val
+        # Trace display name: the executing agent (rail-forwarded or
+        # session-context), falling back to the span entity name.
+        trace_name = (
+            (instance_info or {}).get("agent_name") or (current_agent_identity() or {}).get("agent_name") or name_val
+        )
         otel_span.set_attribute(OJ_GEN_AI_TRACE_NAME, str(trace_name))
         # Agent identity + conversation facts, forwarded by OtelRail
         self._set_agent_identity_attrs(otel_span, instance_info)
@@ -603,9 +616,14 @@ class OtelAgentHandler(TraceExtAgentHandler):
             tool_type = instance_info.get("tool_type")
             if tool_type:
                 extra_attrs[GEN_AI_TOOL_TYPE] = str(tool_type)
-            # Agent executing the tool; OtelRail forwards it, fall back to the
-            # tool name for direct on_plugin_start callers.
-            agent_name = instance_info.get("agent_name") or instance_info.get("class_name", "")
+            # Agent executing the tool; OtelRail forwards it, fall back to
+            # the session-context identity, then the tool name for direct
+            # on_plugin_start callers.
+            agent_name = (
+                instance_info.get("agent_name")
+                or (current_agent_identity() or {}).get("agent_name")
+                or instance_info.get("class_name", "")
+            )
             extra_attrs[GEN_AI_AGENT_NAME] = str(agent_name)
             # Tool-call id rides instance_info (forwarded by OtelRail.before_tool_call).
             tool_call_id = instance_info.get("tool_call_id", "")
@@ -1003,6 +1021,17 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     # --- helper: set workflow / component attributes on an OTel span ---
 
     def _set_workflow_attrs(self, otel_span: trace.Span, metadata: dict | None, invoke_id: str) -> None:
+        # Session-scoped identity (bound at Session creation from the agent
+        # / group card) rides every workflow span: agent-triggered workflows
+        # inherit the calling agent's identity this way. Standalone
+        # workflows run with no session identity bound and skip the attrs.
+        session_identity = current_agent_identity() or {}
+        if session_identity.get("agent_id"):
+            otel_span.set_attribute(GEN_AI_AGENT_ID, str(session_identity["agent_id"]))
+        if session_identity.get("agent_name"):
+            otel_span.set_attribute(GEN_AI_AGENT_NAME, str(session_identity["agent_name"]))
+        if session_identity.get("agent_description"):
+            otel_span.set_attribute(GEN_AI_AGENT_DESCRIPTION, str(session_identity["agent_description"]))
         if metadata is None:
             return
         is_workflow_root = "workflow_id" in metadata and "component_id" not in metadata
