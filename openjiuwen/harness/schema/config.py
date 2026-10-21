@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -91,9 +92,7 @@ class VisionModelConfig:
         default_headers: Optional[Dict[str, str]] = None
         if headers_raw:
             try:
-                import json as _json
-
-                parsed_headers = _json.loads(headers_raw)
+                parsed_headers = json.loads(headers_raw)
                 if isinstance(parsed_headers, dict) and parsed_headers:
                     default_headers = {str(k): str(v) for k, v in parsed_headers.items()}
             except (ValueError, TypeError):
