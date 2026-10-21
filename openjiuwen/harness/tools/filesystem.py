@@ -1227,7 +1227,8 @@ class ReadFileTool(Tool):
                 for page_no in range(1, len(pdf.pages) + 1):
                     try:
                         count = len(pdf.pages[page_no - 1].images)
-                    except Exception as exc:  # noqa: BLE001 — third-party parser, page-scoped
+                    except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
+                        # 损坏页的图片枚举按页降级，不影响文本读取（常见损坏均落在这些内建异常）
                         logger.debug("Failed to enumerate images on PDF page %s: %s", page_no, exc)
                         continue
                     if count > 0:
