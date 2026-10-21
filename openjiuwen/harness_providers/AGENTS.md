@@ -144,6 +144,20 @@ provider packages `.agents/agent-docs/features/harness/F_07_third-party-harness-
    `permission_mode` to `default` so the SDK actually consults `can_use_tool`;
    the Codex harness adds `features.default_mode_request_user_input=true`
    because the tool is off in the CLI's default mode.
+   The native DeepAgent harness maps interrupts by `interrupt_kind`
+   (`request_id` = interrupt id; `provider_data` carries `kind`,
+   `interrupt_id`, `tool_call_id`): approval kinds become
+   `ToolApprovalRequest` under TOOL_APPROVAL when the card lists it (ABORT /
+   `interrupt=True` stop the turn, `updated_arguments` denies the call,
+   ALLOW_FOR_SESSION with `provider_data.persist_allow=True` allows
+   permanently), else a `UserInputRequest` with allow / allow_always / deny
+   choices translated by `interrupt_answer` (no word denies); other kinds,
+   undeclared ones included, get the content as is. A workflow interaction
+   is no interrupt request: its `request_id` is its own id (`interrupt_id`
+   and `kind` empty) and it is answered by that id. As before, every host
+   with an interaction handler is asked, whatever it declared.
+   An auto-approving `HarnessIOAdapter` still surfaces approvals that carry
+   an `interrupt_id`, and matches `update(tool_call_id)` answers to them.
 7. **The IO adapter is the only DeepAgent-facing projection.** `HarnessIOAdapter`
    emits `llm_output` / `llm_reasoning` / `tool_call` / `tool_result` /
    `__interaction__` chunks and resolves `InteractiveInput` against pending

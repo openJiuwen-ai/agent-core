@@ -18,11 +18,33 @@
 
 ## class InterruptKind
 
-中断类型常量（普通字符串，第三方 Rail 可自定义取值）：`PERMISSION="permission"`、`CONFIRM="confirm"`、`ASK_USER="ask_user"`、`SKILL_EVOLUTION_APPROVAL="skill_evolution_approval"`、`TEAM_TOOL_APPROVAL="team_tool_approval"`、`UNDECLARED=""`。
+中断类型常量（普通字符串，第三方 Rail 可自定义取值）：`PERMISSION="permission"`、`CONFIRM="confirm"`、`ASK_USER="ask_user"`、`SKILL_EVOLUTION_APPROVAL="skill_evolution_approval"`、`TEAM_TOOL_APPROVAL="team_tool_approval"`、`UNDECLARED=""`。`APPROVAL_INTERRUPT_KINDS` 为 `interrupt_answer` 按“批准/拒绝”答复的类型集合，包含 `UNDECLARED`：未声明类型的中断可以按类型出现之前所有中断的方式，以 `approved` 形状答复。各宿主对未声明类型保持各自原来的处理：CLI 询问 allow / always / reject，native harness 把宿主的答复原样交回。
 
-`interrupt_kind_of(request)` 返回请求的类型；升级前持久化的技能进化审批只在 `metadata["interrupt_kind"]` 中带类型，也能读出。
+各类型的答复形状：
+
+| interrupt_kind | 答复 |
+|---|---|
+| `permission`、`confirm`、`team_tool_approval`、未声明（`""`） | `{"approved": bool, "feedback": str, "auto_confirm": bool}`；`auto_confirm=True` 且 `"persist_allow": False` 表示本会话内记住 |
+| `skill_evolution_approval` | `{"action": "allow_once" \| "allow_always" \| "reject", "feedback": str}` |
+| `ask_user` | `{"answers": {问题: 答案}}`，或答案文本 |
+
+`interrupt_answer(kind, *, approved=None, remember=False, feedback="", text=None)` 生成审批类的答复：传入决定（`approved`），或传入用户输入的词（`text`，不区分大小写：`y` / `yes` / `ok` / `approve` / `true` / `1` / `allow` / `allow_once` 批准一次，`a` / `always` / `allow_always` 批准并在本会话记住，`n` / `no` / `deny` / `reject` 拒绝，其他文字（包括空文字）拒绝并作为反馈）。其他类型只接受 `text`，原样返回；对非审批类型传 `approved`，或两者都不传，抛 `ValueError`。`interrupt_kind_of(request)` 返回请求的类型；升级前持久化的技能进化审批只在 `metadata["interrupt_kind"]` 中带类型，也能读出。工作流 `session.interact` 的交互值不是 `InterruptRequest`，没有 `interrupt_id` 和类型：宿主先用 `isinstance` 判断，交互值用 `InteractiveInput.update(交互 id, 回答)` 回答。
 
 ## 回答中断
+
+```python
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.single_agent.interrupt import interrupt_answer, interrupt_kind_of, is_approval_kind
+
+answers = InteractiveInput()
+for item in result["state"]:
+    request = item.payload.value          # ToolCallInterruptRequest
+    kind = interrupt_kind_of(request)
+    if is_approval_kind(kind):             # 含未声明类型（CLI 的做法）
+        answers.answer(request.interrupt_id, interrupt_answer(kind, approved=True))
+    else:                                   # ask_user 等：用户的回答
+        answers.answer(request.interrupt_id, "蓝色")
+```
 
 * `InteractiveInput.answer(interrupt_id, value)`：回答指定中断，只有发起该中断的 Rail 收到答复。`interrupt_id` 为空时报错。
 * `InteractiveInput.update(tool_call_id, value)`：兼容旧方式。Agent 恢复时把它换算成对该工具调用当前等待的中断的答复（只换算这一次，此后 Agent 内部只按 `interrupt_id` 认答复）。
