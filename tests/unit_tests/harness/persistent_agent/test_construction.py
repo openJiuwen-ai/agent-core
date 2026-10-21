@@ -337,6 +337,23 @@ def test_factory_returns_native_deep_agent_without_side_effects(api):
     agent.ability_manager.teardown_tools()
 
 
+def test_factory_applies_runtime_prompt_addendum_without_changing_spec_identity(api):
+    spec = spec_for(api, system_prompt="你是群聊助手。")
+    addendum = "群内接力规则：只通过群消息交接。"
+    ctx = context_for(api, spec, system_prompt_addendum=addendum)
+
+    agent = api.create_persistent_agent(spec, context=ctx)
+    try:
+        assert spec.fingerprint() == ctx.execution.config_fingerprint
+        assert spec.system_prompt == "你是群聊助手。"
+        assert addendum in agent.system_prompt_builder.build()
+        assert addendum in agent._react_agent.system_prompt_builder.build()
+        assert agent.deep_config.system_prompt == spec.system_prompt
+        ctx.validate_binding(agent)
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
 @pytest.mark.parametrize("bad", ["session", "card", "fingerprint", "capabilities", "ports"])
 def test_mismatch_rejected_before_build(api, monkeypatch, bad):
     spec = spec_for(api)

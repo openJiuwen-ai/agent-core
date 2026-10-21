@@ -1325,6 +1325,20 @@ async def test_participation_prompt_tells_an_unreadable_body_from_a_recall(harne
 
 
 @pytest.mark.asyncio
+async def test_participation_prompt_includes_runtime_group_guidance(harness):
+    spec = harness.spec(system_prompt="你是群聊助手。")
+    chat = GroupChat((group_message(),))
+    ctx, _ = harness.context(spec, group_chat=chat)
+    ctx.system_prompt_addendum = "当前群内可用同事：学习助手；接力只能通过群消息完成。"
+    harness.model.judgments = [judgment("respond")]
+
+    await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+
+    assert "当前群内可用同事：学习助手" in prompt_text(harness.model)
+    assert "接力只能通过群消息完成" in prompt_text(harness.model)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["respond", "intervene"])
 async def test_unmentioned_group_message_can_continue_into_execution(harness, decision):
     spec = harness.spec(system_prompt="你是团队里的调研专家。")

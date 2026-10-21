@@ -10,6 +10,7 @@ from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.prompts.builder import PromptSection
 from openjiuwen.harness.schema.deep_agent_spec import DeepAgentSpec
 
 from .execution.binding import InvocationState
@@ -48,6 +49,22 @@ def create_persistent_agent(spec: PersistentAgentSpec, *, context: PersistentBui
         claimed = True
         working = context.derive()
         agent = DeepAgentSpec.build(snapshot, context=working)
+        addendum = context.system_prompt_addendum
+        if addendum and addendum.strip():
+            builder = agent.system_prompt_builder
+            if builder is None:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                    error_msg="Persistent runtime system prompt builder unavailable",
+                )
+            builder.add_section(
+                PromptSection(
+                    name="persistent_runtime_context",
+                    content={"cn": addendum, "en": addendum},
+                    priority=11,
+                )
+            )
+            agent.apply_prompt_builder_to_react_agent()
         # Providers must not rebind identity while resolving capabilities.
         context.validate(snapshot)
         if (

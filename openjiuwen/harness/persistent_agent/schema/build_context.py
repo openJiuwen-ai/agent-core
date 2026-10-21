@@ -47,6 +47,7 @@ class PersistentBuildContext(BuildContext):
     execution: ExecutionContext
     session: Session
     ports: PersistentPorts
+    system_prompt_addendum: str | None = None
     binding: ConstructionBinding = field(default_factory=ConstructionBinding, init=False, repr=False)
 
     def __post_init__(self):
@@ -71,6 +72,8 @@ class PersistentBuildContext(BuildContext):
             )
         if not isinstance(self.ports, PersistentPorts):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="PersistentPorts required")
+        if self.system_prompt_addendum is not None and not isinstance(self.system_prompt_addendum, str):
+            raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid system_prompt_addendum")
         if self.session.get_session_id() != self.execution.session_id:
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="Session mismatch")
         if spec.card is None or spec.card.id != self.execution.agent_id:

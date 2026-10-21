@@ -190,10 +190,13 @@ async def judge_participation(spec, context, request, emitter) -> ParticipationO
                 EventType.EXECUTION_PAUSED, {"reason": "budget_denied", "detail": admission.reason}
             )
             return ParticipationOutcome(terminal=True)
+        instruction = _INSTRUCTION
+        if context.system_prompt_addendum:
+            instruction = f"{instruction}\n{context.system_prompt_addendum}"
         try:
             response = await model.invoke(
                 [
-                    {"role": "system", "content": _INSTRUCTION},
+                    {"role": "system", "content": instruction},
                     {
                         "role": "user",
                         "content": (
