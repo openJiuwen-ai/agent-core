@@ -193,6 +193,66 @@ async def test_outputs_and_interaction_share_native_session(adapter):
 
 
 @pytest.mark.asyncio
+async def test_approvals_stay_user_input_requests_for_a_tool_approval_host(adapter):
+    """native_v2 does not list TOOL_APPROVAL, so an approval host still gets the UserInputRequest it got before."""
+    from dataclasses import replace
+
+    from openjiuwen.core.common.constants.constant import INTERACTION
+    from openjiuwen.core.session.interaction.interaction import InteractionOutput
+    from openjiuwen.core.session.stream import OutputSchema
+    from openjiuwen.core.single_agent.interrupt.response import ToolCallInterruptRequest
+    from openjiuwen.harness_protocol import (
+        HostCapability,
+        InteractionResponseStatus,
+        ToolApprovalDecision,
+        ToolApprovalResponse,
+        UserInputRequest,
+        UserInputResponse,
+    )
+
+    class Handler:
+        def __init__(self):
+            self.requests = []
+
+        async def handle(self, request):
+            self.requests.append(request)
+            if isinstance(request, UserInputRequest):
+                return UserInputResponse(request_id=request.request_id, status=InteractionResponseStatus.COMPLETED,
+                                         content="yes")
+            return ToolApprovalResponse(request_id=request.request_id, decision=ToolApprovalDecision.ALLOW)
+
+        async def cancel(self, request_id, *, reason):
+            pass
+
+    handler = Handler()
+    adapter._context = replace(
+        adapter.context, interactions=handler,
+        host_capabilities=frozenset({HostCapability.USER_INPUT, HostCapability.TOOL_APPROVAL}),
+    )
+    fake = await start_harness(adapter.native_harness, answer_output="done")
+    original = fake.write_invoke_result_to_stream
+    calls = 0
+
+    async def output(result, session):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            ask = ToolCallInterruptRequest(interrupt_id="intr_1", interrupt_kind="permission", tool_name="write",
+                                           tool_call_id="t1", message="Allow write?")
+            await session.write_stream(OutputSchema(type=INTERACTION, index=0,
+                                                    payload=InteractionOutput(id="t1", value=ask)))
+        else:
+            await original(result, session)
+
+    fake.write_invoke_result_to_stream = output
+    receipt = await adapter.send(HarnessInput(content="write"))
+    await asyncio.wait_for(collect(adapter, receipt.turn_id), 4)
+    [request] = handler.requests
+    assert isinstance(request, UserInputRequest)
+    assert request.choices == ("allow", "allow_always", "deny")
+
+
+@pytest.mark.asyncio
 async def test_native_prepare_loaded_manifest_and_rebuilds_each_cycle(adapter):
     old = adapter.native_harness
     assert old._active_agent_template[1] == "protocol-native"

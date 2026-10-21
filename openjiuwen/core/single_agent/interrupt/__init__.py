@@ -1,6 +1,12 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
+from openjiuwen.core.single_agent.interrupt.answers import (
+    APPROVAL_CHOICES,
+    APPROVAL_INTERRUPT_KINDS,
+    interrupt_answer,
+    is_approval_kind,
+)
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.response import (
     InterruptKind,
@@ -17,6 +23,10 @@ from openjiuwen.core.single_agent.interrupt.state import (
 )
 
 __all__ = [
+    "APPROVAL_CHOICES",
+    "APPROVAL_INTERRUPT_KINDS",
+    "interrupt_answer",
+    "is_approval_kind",
     "ToolInterruptException",
     "InterruptKind",
     "InterruptRequest",

@@ -17,9 +17,9 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema
+from openjiuwen.core.single_agent.interrupt.answers import APPROVED_ANSWER_KINDS
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.response import (
-    InterruptKind,
     InterruptRequest,
     ToolCallInterruptRequest,
     interrupt_kind_of,
@@ -43,17 +43,6 @@ if TYPE_CHECKING:
     from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
 
 _RESUME_USER_INPUT_KEY_METADATA = "resume_user_input_key"
-
-# Kinds answered in the ``{"approved", "feedback", "auto_confirm"}`` shape: only
-# their answers can switch on auto-confirm, so a host that sends that shape to
-# another kind (a skill evolution approval expects ``{"action": ...}``) cannot.
-# Undeclared kinds keep the behaviour every interrupt had before kinds existed.
-_AUTO_CONFIRM_KINDS = frozenset({
-    InterruptKind.PERMISSION,
-    InterruptKind.CONFIRM,
-    InterruptKind.TEAM_TOOL_APPROVAL,
-    InterruptKind.UNDECLARED,
-})
 
 # tool_call_id (inner, or outer for a sub-agent or wrapper call) -> {interrupt_owner: answer}
 _CallAnswers = Dict[str, Dict[str, InterruptAnswer]]
@@ -515,7 +504,9 @@ class ToolInterruptHandler:
         if not isinstance(config, dict):
             config = {}
         for answer in answers.values():
-            if answer.kind not in _AUTO_CONFIRM_KINDS:
+            # Only the {"approved", ...} shape can switch on auto-confirm, so a host that sends it
+            # to another kind (a skill evolution approval expects {"action": ...}) cannot.
+            if answer.kind not in APPROVED_ANSWER_KINDS:
                 continue
             if isinstance(answer.value, dict) and answer.value.get("auto_confirm") and answer.request.auto_confirm_key:
                 config[answer.request.auto_confirm_key] = True
