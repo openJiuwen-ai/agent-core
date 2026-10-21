@@ -2455,9 +2455,9 @@ def mock_group_history_cleanup(monkeypatch):
 
 
 class _ResumeInterruptAgent(FakeTeamAgent):
-    """FakeTeamAgent with the leader-ready and interrupt-resume faces.
+    """FakeTeamAgent with the recovered marker and interrupt-resume faces.
 
-    ``stream`` emits the ``team.leader_ready`` marker first (simulating
+    ``stream`` emits the ``team.recovered`` marker first (simulating
     the ``kernel.start`` tail), stays open until the interrupt resume
     arrives, then yields a post-resume chunk — mirroring a persistent
     team whose stream outlives the interaction.
@@ -2479,7 +2479,7 @@ class _ResumeInterruptAgent(FakeTeamAgent):
     async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
         self.stream_calls += 1
         self.stream_inputs.append(inputs)
-        yield TeamOutputSchema(type="message", index=0, payload={"event_type": "team.leader_ready"})
+        yield TeamOutputSchema(type="message", index=0, payload={"event_type": "team.recovered"})
         yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
         await self._resume_received.wait()
         yield OutputSchema(type="message", index=2, payload={"event_type": "leader.chunk.2"})
@@ -2497,7 +2497,7 @@ class _FailingStreamAgent(FakeTeamAgent):
 
 
 class _NeverReadyAgent(FakeTeamAgent):
-    """Agent whose stream stays alive but never emits the leader-ready marker."""
+    """Agent whose stream stays alive but never emits the recovered marker."""
 
     def __init__(self, team_name: str) -> None:
         super().__init__(team_name, stream_label="leader.chunk")
@@ -2505,6 +2505,20 @@ class _NeverReadyAgent(FakeTeamAgent):
     async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
         yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
         await asyncio.Event().wait()
+
+
+class _TrickleStreamAgent(FakeTeamAgent):
+    """Agent whose stream trickles frames forever without the recovered marker."""
+
+    def __init__(self, team_name: str) -> None:
+        super().__init__(team_name, stream_label="leader.chunk")
+
+    async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
+        index = 0
+        while True:
+            yield OutputSchema(type="message", index=index, payload={"event_type": "leader.chunk.tick"})
+            index += 1
+            await asyncio.sleep(0.02)
 
 
 class _EndingStreamAgent(FakeTeamAgent):
@@ -2541,7 +2555,7 @@ async def test_runner_resume_agent_team_interrupt_streaming_resumes_and_forwards
 
     assert [chunk.payload["event_type"] for chunk in chunks] == [
         "team.runtime_ready",
-        "team.leader_ready",
+        "team.recovered",
         "leader.chunk.1",
         "leader.chunk.2",
     ]
@@ -2615,7 +2629,7 @@ async def test_runner_resume_times_out_when_leader_never_ready(
     monkeypatch,
 ):
     monkeypatch.setattr(
-        "openjiuwen.core.runner.team_runner._TEAM_LEADER_READY_TIMEOUT_SECONDS",
+        "openjiuwen.core.runner.team_runner._TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS",
         0.1,
     )
     await Runner.start()
@@ -2633,6 +2647,43 @@ async def test_runner_resume_times_out_when_leader_never_ready(
             async for _ in agen:
                 pass
     assert excinfo.value.status is StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT
+
+    await Runner.stop()
+    await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_runner_resume_total_budget_bounds_the_marker_wait(
+    isolated_checkpointer,
+    stateful_team_db,
+    monkeypatch,
+):
+    """A frame trickle that never trips the frame budget is still bounded by the total budget."""
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.team_runner._TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS",
+        10.0,
+    )
+    monkeypatch.setattr(
+        "openjiuwen.core.runner.team_runner._TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS",
+        0.15,
+    )
+    await Runner.start()
+    session_id = f"team_resume_total_{uuid.uuid4().hex}"
+    spec = _runtime_spec("resume_total_team")
+    agent = _TrickleStreamAgent("resume_total_team")
+
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
+        agen = Runner.resume_agent_team_interrupt_streaming(
+            agent_team=spec,
+            user_input=InteractiveInput("answer"),
+            session=session_id,
+        )
+        with pytest.raises(BaseError) as excinfo:
+            async for _ in agen:
+                pass
+    assert excinfo.value.status is StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT
+    assert "timeout=0.15" in str(excinfo.value.message)
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)

@@ -185,17 +185,17 @@ session 切换有两条入口，差异**只在是否先清理旧 handle**：
    `run_agent_team_streaming(inputs=None)` 并转发其 chunk——dispatch 照常选
    `COLD_RECOVER` / `RESUME_FROM_PAUSE` / `CREATE`，`inputs=None` 不伪造首轮
    （`_prepare_initial_input` 对 None 输出空 query）。
-2. **leader 就绪门**：就绪信号是流上的 `team.leader_ready` 标记帧——
+2. **leader 就绪门**：就绪信号是流上的 `team.recovered` 标记帧——
    `kernel.start()` 尾部（`resume_paused_round` 之后，事件总线 / harness 全活）
-   leader-only 经 `StreamController.emit_leader_ready` 入队。消费者读到该帧
-   即可安全 interact；`is_leader_ready_marker`（`schema/stream.py`）是专用判定，
+   leader-only 经 `StreamController.emit_team_recovered` 入队。消费者读到该帧
+   即可安全 interact；`is_team_recovered_marker`（`schema/stream.py`）是专用判定，
    `is_team_event_marker` 将其归入框架标记（非流式 `invoke` 自动跳过）。
 3. **投递**：读到标记后经 `interact_agent_team` 提交 `InteractiveInput`——
    `manager.interact` 仅对该类型走 `agent.resume_interrupt` 分支；裸 `str` 会被
    god-view 路由当普通 steer，中断保持 pending，故入口在边界直接拒绝。
 
 约束：`session` 必填（中断状态与 spec bucket 在原 session checkpoint）；标记静默
-超 `_TEAM_LEADER_READY_TIMEOUT_SECONDS`（30s，按单次 `__anext__` 计，慢消费者
+受双预算约束：帧间 `_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS`（30s，相邻两帧最大间隔）与总计 `_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS`（120s，整个标记等待）；恢复流由后台 pump 转入本地队列（复用流式队列消费模式，无显式 `__anext__`），生产与消费解耦、慢消费者不吃预算，超限抛 `AGENT_TEAM_LEADER_START_TIMEOUT`；失败路径取消 pump
 不误伤）抛 `AGENT_TEAM_LEADER_START_TIMEOUT`；失败路径关闭 recovery 流，run cycle
 经正常 `finalize` 收敛。
 

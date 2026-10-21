@@ -557,14 +557,14 @@ class StreamController:
         )
         self.stream_queue.put_nowait(marker)
 
-    def emit_leader_ready(self) -> None:
-        """Enqueue the leader-ready marker chunk; the stream stays open.
+    def emit_team_recovered(self) -> None:
+        """Enqueue the recovered-team marker chunk; the stream stays open.
 
         Emitted at the tail of ``CoordinationKernel.start`` (leader streams
-        only): everything a consumer needs before interacting -- bus
-        subscription, harness start, paused-round resume -- has completed by
-        then, so a consumer that reads this marker may safely submit an
-        interact. No-op when the queue is gone.
+        only): the session state has been bound (restored from the
+        checkpoint on recovery paths), the bus is subscribed, the harness
+        is started and any paused round has been resumed -- everything a
+        consumer needs before interacting. No-op when the queue is gone.
         """
         if self.stream_queue is None:
             return
@@ -572,7 +572,7 @@ class StreamController:
         marker = TeamOutputSchema(
             type="message",
             index=0,
-            payload={"event_type": "team.leader_ready"},
+            payload={"event_type": "team.recovered"},
             source_member=bp.member_name if bp else None,
             role=bp.role if bp else None,
         )

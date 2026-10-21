@@ -46,7 +46,8 @@ Plus one method:
 from __future__ import annotations
 
 import asyncio
-from contextlib import contextmanager, suppress
+import time
+from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -95,7 +96,11 @@ if TYPE_CHECKING:
 
 
 _TEAM_REJECT_KINDS: Optional[frozenset] = None
-_TEAM_LEADER_READY_TIMEOUT_SECONDS = 30.0
+# Recovery budgets for resume_agent_team_interrupt_streaming: no queue frame
+# may arrive later than the frame budget after the previous one, and the
+# whole wait for the team.recovered marker may not exceed the total budget.
+_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS = 30.0
+_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS = 120.0
 
 
 def _team_reject_kinds() -> frozenset:
@@ -367,13 +372,19 @@ class _TeamRunnerMixin:
     ) -> AsyncIterator[Any]:
         """Start a recovered team and resume its pending interrupt once ready.
 
-        Runs the recovery stream (``run_agent_team_streaming`` with empty
-        inputs) and forwards its chunks until the leader-ready marker
-        (``team.leader_ready``, enqueued at the tail of
-        ``CoordinationKernel.start`` -- everything an interact needs is live
-        by then). Once the marker is read, ``user_input`` is submitted
-        through ``interact_agent_team`` and the remaining stream chunks are
-        forwarded until the team settles the run cycle.
+        The recovery stream (``run_agent_team_streaming`` with empty inputs)
+        is pumped into a local queue whose frames are forwarded to the
+        caller until the recovered marker (``team.recovered``, enqueued at
+        the tail of ``CoordinationKernel.start`` once the session state is
+        bound and the leader runtime is fully live) is read. The wait is
+        bounded twice: no frame may arrive later than
+        ``_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS`` after the previous one, and
+        the whole marker wait may not exceed
+        ``_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS`` -- the pump decouples stream
+        production from consumption, so a slow consumer eats neither budget.
+        Once the marker is read, ``user_input`` is submitted through
+        ``interact_agent_team`` and the remaining frames are forwarded until
+        the team settles the run cycle.
 
         ``user_input`` must be an :class:`InteractiveInput` resolving the
         pending interrupt -- the interact layer only takes the
@@ -383,12 +394,11 @@ class _TeamRunnerMixin:
         pending interrupt) lives in that session's checkpoint.
 
         Raises ``AGENT_TEAM_*`` errors when the stream fails or ends
-        before the leader is ready, no marker arrives within
-        ``_TEAM_LEADER_READY_TIMEOUT_SECONDS`` of stream silence, or the
+        before the marker, either recovery budget is exceeded, or the
         interact is rejected (the ``DeliverResult`` failure reason is
         carried in the error).
         """
-        from openjiuwen.agent_teams.schema.stream import is_leader_ready_marker
+        from openjiuwen.agent_teams.schema.stream import is_team_recovered_marker
         from openjiuwen.core.common.exception.codes import StatusCode
         from openjiuwen.core.common.exception.errors import raise_error
 
@@ -414,40 +424,79 @@ class _TeamRunnerMixin:
             )
         spec = await self._resolve_team_agent_spec(agent_team, session=team_session)
         session_id = team_session.get_session_id()
-        stream = self.run_agent_team_streaming(
-            agent_team=spec,
-            inputs=None,
-            session=team_session,
-            context=context,
-            stream_modes=stream_modes,
-            envs=envs,
-            stream_logger=stream_logger,
-            background_task_controller=background_task_controller,
-            run_context=run_context,
-        )
+        output_queue: asyncio.Queue = asyncio.Queue()
+
+        async def pump_stream() -> None:
+            """Forward stream frames into the queue; ``None`` marks a clean end.
+
+            The stream is driven from this task only, so teardown is a single
+            cancel and the consumer below never touches generator internals.
+            A stream failure is delivered as the exception object itself.
+            """
+            try:
+                async for chunk in self.run_agent_team_streaming(
+                    agent_team=spec,
+                    inputs=None,
+                    session=team_session,
+                    context=context,
+                    stream_modes=stream_modes,
+                    envs=envs,
+                    stream_logger=stream_logger,
+                    background_task_controller=background_task_controller,
+                    run_context=run_context,
+                ):
+                    await output_queue.put(chunk)
+            except Exception as exc:
+                await output_queue.put(exc)
+            else:
+                await output_queue.put(None)
+
+        pump_task = asyncio.create_task(pump_stream())
+        deadline = time.monotonic() + _TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS
         try:
+            # Phase 1: forward frames until the recovered marker. Exits on
+            # marker / clean end (None) / stream failure (exception) / either
+            # recovery budget.
             while True:
-                # The timeout wraps one __anext__ only: a slow consumer must
-                # not trip it, only a stream that goes silent before the
-                # leader ever signals readiness.
-                try:
-                    async with asyncio.timeout(_TEAM_LEADER_READY_TIMEOUT_SECONDS):
-                        chunk = await stream.__anext__()
-                except TimeoutError as exc:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     raise_error(
                         StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT,
                         team_name=spec.team_name,
-                        timeout=_TEAM_LEADER_READY_TIMEOUT_SECONDS,
+                        timeout=_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS,
+                    )
+                try:
+                    item = await asyncio.wait_for(
+                        output_queue.get(),
+                        timeout=min(_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS, remaining),
+                    )
+                except TimeoutError as exc:
+                    if time.monotonic() >= deadline:
+                        raise_error(
+                            StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT,
+                            team_name=spec.team_name,
+                            timeout=_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS,
+                            cause=exc,
+                        )
+                    raise_error(
+                        StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT,
+                        team_name=spec.team_name,
+                        timeout=_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS,
                         cause=exc,
                     )
-                except StopAsyncIteration:
+                if item is None:
                     raise_error(
                         StatusCode.AGENT_TEAM_STATE_INVALID,
                         reason=f"team '{spec.team_name}' stream ended before the leader became ready",
                     )
-                yield chunk
-                if is_leader_ready_marker(chunk):
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
+                if is_team_recovered_marker(item):
                     break
+            # Phase 2: the leader runtime is live, the interrupt is
+            # resolvable now; submit it and forward the remaining frames
+            # until the run cycle settles (stream end / failure).
             result = await self.interact_agent_team(
                 user_input,
                 team_name=spec.team_name,
@@ -460,14 +509,20 @@ class _TeamRunnerMixin:
                     StatusCode.AGENT_TEAM_STATE_INVALID,
                     reason=f"interrupt resume for team '{spec.team_name}' rejected: {reason}",
                 )
-            async for chunk in stream:
-                yield chunk
+            while True:
+                item = await output_queue.get()
+                if item is None:
+                    break
+                if isinstance(item, BaseException):
+                    raise item
+                yield item
         finally:
-            # An abandoned generator may hit the GC finalizer while the inner
-            # stream is already closing concurrently; its own finalizer then
-            # completes the teardown, so only the re-entrant close is ignored.
-            with suppress(RuntimeError):
-                await stream.aclose()
+            if not pump_task.done():
+                pump_task.cancel()
+            try:
+                await pump_task
+            except asyncio.CancelledError:
+                pass
 
     async def _run_base_team(
         self,

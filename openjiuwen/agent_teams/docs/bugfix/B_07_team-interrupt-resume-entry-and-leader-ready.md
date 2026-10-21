@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-10-20 |
 | 严重程度 | 中：中断（ask-user / 审批类）后团队无法程序化恢复；裸文本投递是**静默失败**（无错误、无输出，中断永远挂起）；`inputs=None` 伪造一轮 `"None"` 垃圾输入 |
-| 范围 | `core/runner/team_runner.py`（新增 `resume_agent_team_interrupt_streaming` 实例方法 + 类门面）、`agent_teams/schema/stream.py`（新增 `is_leader_ready_marker`）、`agent_teams/agent/stream_controller.py`（新增 `emit_leader_ready`）、`agent_teams/agent/coordination/kernel.py`（`start()` 尾部 leader-only 发射标记帧）、`agent_teams/agent/team_agent.py`（`_prepare_initial_input` None 防护）、`core/common/exception/codes.py`（新增 `AGENT_TEAM_LEADER_START_TIMEOUT`）、`tests/unit_tests/agent_teams/test_team_agent_coordination.py`、`tests/unit_tests/agent_teams/test_runner_team_runtime.py` |
+| 范围 | `core/runner/team_runner.py`（新增 `resume_agent_team_interrupt_streaming` 实例方法 + 类门面）、`agent_teams/schema/stream.py`（新增 `is_team_recovered_marker`）、`agent_teams/agent/stream_controller.py`（新增 `emit_team_recovered`）、`agent_teams/agent/coordination/kernel.py`（`start()` 尾部 leader-only 发射标记帧）、`agent_teams/agent/team_agent.py`（`_prepare_initial_input` None 防护）、`core/common/exception/codes.py`（新增 `AGENT_TEAM_LEADER_START_TIMEOUT`）、`tests/unit_tests/agent_teams/test_team_agent_coordination.py`、`tests/unit_tests/agent_teams/test_runner_team_runtime.py` |
 | 测试基线 | `pytest tests/unit_tests/agent_teams/test_runner_team_runtime.py tests/unit_tests/agent_teams/runtime/ tests/unit_tests/agent_teams/test_team_agent_coordination.py tests/unit_tests/agent_teams/test_coordination_lifecycle.py tests/unit_tests/agent_teams/agent/test_member_activity.py tests/unit_tests/agent_teams/test_stream_controller.py` → 376 passed, 19 skipped（skip 均为既有条件跳过；含本修复新增 9 例） |
 | 关联 spec | `S_01_public-api-and-spec-flow.md`（不变量 17 + 入口签名与错误语义）、`S_04_session-and-recovery.md`（I-9 中断恢复流）；`agent_teams/AGENTS.md` / `runtime/AGENTS.md` / `coordination/AGENTS.md` 表面同步 |
 | Refs | #4910 |
@@ -44,9 +44,9 @@ SDK 侧没有把"重新拉起团队 + 恢复中断"一次完成的入口，调�
 1. **`Runner.resume_agent_team_interrupt_streaming`**：驱动 `run_agent_team_streaming(inputs=None)`
    的 recovery 流并转发其 chunk，读到就绪标记后经 `interact_agent_team` 提交
    `InteractiveInput`，继续转发直到 run cycle 结束。
-2. **就绪信号是流上的 `team.leader_ready` 标记帧**：`kernel.start()` 尾部
+2. **就绪信号是流上的 `team.recovered` 标记帧**：`kernel.start()` 尾部
    （`resume_paused_round` 之后、kernel 全活）leader-only 经
-   `StreamController.emit_leader_ready` 入队；`is_leader_ready_marker`
+   `StreamController.emit_team_recovered` 入队；`is_team_recovered_marker`
    （`schema/stream.py`）是专用判定，`is_team_event_marker` 将其归入框架标记。
    复用既有的标记 chunk 模式（`team.idle` / `team.completed` / `team.interact.failed`），
    任何流消费者都可用，无需预注册。**初版实现是 manager 侧的一次性 waiter**
@@ -57,9 +57,12 @@ SDK 侧没有把"重新拉起团队 + 恢复中断"一次完成的入口，调�
    `AGENT_TEAM_CONFIG_INVALID`——堵住裸 `str` 静默不恢复的失败模式（中断状态与 spec bucket
    都在原 session 的 checkpoint 里，新 session 无法恢复）。
 4. **错误统一 StatusCode**：流先于标记失败 / 结束 / interact 被拒（reason token 透传）→
-   `AGENT_TEAM_STATE_INVALID`；标记静默超时 → 新增 `AGENT_TEAM_LEADER_START_TIMEOUT`（132009，
-   模板带 `{timeout}`，自动映射 `ExecutionError` 可重试）。超时按**单次 `__anext__`** 计
-   （`asyncio.timeout` 包住一次取帧），慢消费者不误伤，只有流真静默才触发。
+   `AGENT_TEAM_STATE_INVALID`；恢复超时 → 新增 `AGENT_TEAM_LEADER_START_TIMEOUT`（132009，
+   模板带 `{timeout}`，自动映射 `ExecutionError` 可重试）。超时是**双预算**：帧间
+   `_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS`（30s，相邻两帧最大间隔）+ 总计
+   `_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS`（120s，整个标记等待）——recovery 流由后台
+   pump 转入本地队列（复用流式队列消费模式），生产与消费解耦，慢消费者不吃任何预算；
+   逐帧滴流（帧间不超时但总量超时）由总计预算兜底。
 5. **`str(None)` 防护**：`inputs is None` → 空 query，空即不伪造首轮（回归既有契约）。
 
 ## 拒绝的方案
@@ -74,7 +77,10 @@ SDK 侧没有把"重新拉起团队 + 恢复中断"一次完成的入口，调�
   输出队列 / 双 task 收敛——四组件联动约 250 行，只为传一个一次性信号；标记帧方案
   删掉全部跨组件状态，任何消费者直接读流即可。
 - **全局超时预算（整个标记等待共享一个 30s 窗口）**：慢消费者处理 chunk 期间窗口仍在走，
-  会误伤；按单次 `__anext__` 计只在流真静默时触发。
+  会误伤；双预算（帧间 + 总计）配合 pump 解耦，慢消费者不吃预算、逐帧滴流也有总量兜底。
+- **直接 `async for` 消费流 + 单帧超时（第二版方案）**：帧间超时只能靠显式 `__anext__()`
+  实现（可读性差、需手动捕 `StopAsyncIteration`），且超时窗口包住消费侧——慢消费者会
+  误吃预算；改为 pump + 队列后两个问题都消失。
 
 ## 验证
 
@@ -82,18 +88,19 @@ SDK 侧没有把"重新拉起团队 + 恢复中断"一次完成的入口，调�
 
 | 用例 | 覆盖 |
 |---|---|
-| `test_leader_start_emits_leader_ready_marker` | leader 的 `kernel.start()` 尾部入队 `team.leader_ready`，`is_leader_ready_marker` / `is_team_event_marker` 判定 |
-| `test_teammate_start_does_not_emit_leader_ready_marker` | 非 leader kernel 不发射 |
+| `test_leader_start_emits_team_recovered_marker` | leader 的 `kernel.start()` 尾部入队 `team.recovered`，`is_team_recovered_marker` / `is_team_event_marker` 判定 |
+| `test_teammate_start_does_not_emit_team_recovered_marker` | 非 leader kernel 不发射 |
 
 `tests/unit_tests/agent_teams/test_runner_team_runtime.py`（新增）：
 
 | 用例 | 覆盖 |
 |---|---|
-| `..._resumes_and_forwards`（level0） | chunk 顺序（runtime_ready → leader_ready → 前置 chunk → 恢复后 chunk）、`resume_interrupt` 收到原 `InteractiveInput`、recovery 流传 `inputs=None` |
+| `..._resumes_and_forwards`（level0） | chunk 顺序（runtime_ready → recovered → 前置 chunk → 恢复后 chunk）、`resume_interrupt` 收到原 `InteractiveInput`、recovery 流传 `inputs=None` |
 | `test_runner_resume_rejects_non_interactive_input` | 裸 `str` 边界拒绝（`AGENT_TEAM_CONFIG_INVALID`） |
 | `test_runner_resume_rejects_missing_session` | session 缺失拒绝 |
 | `..._propagates_stream_failure_before_ready` | 流先失败：原始异常传播 |
-| `..._times_out_when_leader_never_ready` | 标记永不出现：`AGENT_TEAM_LEADER_START_TIMEOUT` |
+| `..._times_out_when_leader_never_ready` | 标记永不出现（流静默）：帧间预算触发 `AGENT_TEAM_LEADER_START_TIMEOUT` |
+| `..._total_budget_bounds_the_marker_wait` | 逐帧滴流（帧间不超时）：总计预算触发 `AGENT_TEAM_LEADER_START_TIMEOUT` |
 | `..._raises_when_stream_ends_before_marker` | 流静默结束无标记：`AGENT_TEAM_STATE_INVALID` |
 | `..._raises_when_interact_rejected` | interact 被拒（`unsupported_interactive_input` → `AGENT_TEAM_STATE_INVALID`，reason 透传） |
 

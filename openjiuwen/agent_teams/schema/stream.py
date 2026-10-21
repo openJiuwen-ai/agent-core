@@ -54,7 +54,7 @@ def is_team_event_marker(chunk: object) -> bool:
     """Whether a chunk is a framework-emitted team event rather than agent output.
 
     Team markers (``team.idle`` / ``team.completed`` / ``team.interact.failed`` /
-    ``team.leader_ready``) ride the same stream as model output so a streaming
+    ``team.recovered``) ride the same stream as model output so a streaming
     consumer sees them in order, but they carry no agent content. Non-streaming
     callers that reduce a stream to "the last thing produced" use this to skip
     them.
@@ -74,27 +74,28 @@ def is_team_event_marker(chunk: object) -> bool:
     return isinstance(event_type, str) and event_type.startswith("team.")
 
 
-def is_leader_ready_marker(chunk: object) -> bool:
-    """Whether a chunk is the leader coordination runtime's ready marker.
+def is_team_recovered_marker(chunk: object) -> bool:
+    """Whether a chunk is the recovered-team marker.
 
-    The marker (``team.leader_ready``) is enqueued at the tail of
-    ``CoordinationKernel.start`` on leader streams: by the time a consumer
-    reads it, the event bus is subscribed, the harness is started and any
-    paused round has been resumed, so an interact submitted next cannot
-    land on a runtime that is not yet listening.
+    The marker (``team.recovered``) is enqueued at the tail of
+    ``CoordinationKernel.start`` on leader streams: the session state has
+    been bound (restored from the checkpoint on recovery paths), the event
+    bus is subscribed, the harness is started and any paused round has
+    been resumed, so an interact submitted next cannot land on a runtime
+    that is not yet listening.
 
     Args:
         chunk: Any object taken off a member stream queue.
 
     Returns:
-        True when the chunk is the leader-ready marker.
+        True when the chunk is the recovered-team marker.
     """
     if not isinstance(chunk, TeamOutputSchema):
         return False
     payload = chunk.payload
     if not isinstance(payload, dict):
         return False
-    return payload.get("event_type") == "team.leader_ready"
+    return payload.get("event_type") == "team.recovered"
 
 
-__all__ = ["TeamOutputSchema", "is_team_event_marker", "is_leader_ready_marker"]
+__all__ = ["TeamOutputSchema", "is_team_event_marker", "is_team_recovered_marker"]

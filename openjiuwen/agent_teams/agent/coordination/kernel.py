@@ -273,7 +273,7 @@ class CoordinationKernel:
         if host.role == TeamRole.LEADER:
             # Everything a consumer needs before interacting has completed
             # by this point, so publish it on the stream (no-op without one).
-            host.stream_controller.emit_leader_ready()
+            host.stream_controller.emit_team_recovered()
 
     def _build_wake_callback(self):
         """Compose the bus wake callback: coordination first, scheduler second.

@@ -249,27 +249,27 @@ async def test_start_stop_coordination():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_leader_start_emits_leader_ready_marker():
-    """kernel.start() tail enqueues the team.leader_ready marker (leader only)."""
+async def test_leader_start_emits_team_recovered_marker():
+    """kernel.start() tail enqueues the team.recovered marker (leader only)."""
     from openjiuwen.agent_teams.schema.stream import (
-        is_leader_ready_marker,
         is_team_event_marker,
+        is_team_recovered_marker,
     )
 
     agent = _make_leader()
     agent._stream_controller.stream_queue = asyncio.Queue()
     await agent._start_coordination(session=None)
     marker = agent._stream_controller.stream_queue.get_nowait()
-    assert marker.payload["event_type"] == "team.leader_ready"
-    assert is_leader_ready_marker(marker)
+    assert marker.payload["event_type"] == "team.recovered"
+    assert is_team_recovered_marker(marker)
     assert is_team_event_marker(marker)
     await agent._stop_coordination()
 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_teammate_start_does_not_emit_leader_ready_marker():
-    """Non-leader kernels never publish the leader-ready marker."""
+async def test_teammate_start_does_not_emit_team_recovered_marker():
+    """Non-leader kernels never publish the recovered-team marker."""
     agent = _make_teammate()
     agent._stream_controller.stream_queue = asyncio.Queue()
     await agent._start_coordination(session=None)
