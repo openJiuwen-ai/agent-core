@@ -122,6 +122,24 @@ def _vision_default_headers_from_env() -> Optional[Dict[str, str]]:
     return {str(key): str(value) for key, value in parsed.items()}
 
 
+def _normalize_headers(headers: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Normalize header keys to standard HTTP capitalization.
+
+    Ensures a custom auth header (e.g. ``authorization``) correctly overrides
+    the SDK's built-in ``Authorization`` on ALL openai library versions. The
+    merge inside the SDK is a case-sensitive dict update in older releases
+    (≤3.17), so ``authorization`` and ``Authorization`` would coexist as two
+    headers. httpx.Headers in ≥3.35 deduplicates, but normalizing before the
+    SDK sees them is safe everywhere and costs nothing.
+    """
+    if not headers:
+        return headers
+    return {
+        "-".join(word.capitalize() for word in key.split("-")): value
+        for key, value in headers.items()
+    }
+
+
 def _invoke_chat_completion(
     config: VisionModelConfig,
     prompt: str,
@@ -135,7 +153,9 @@ def _invoke_chat_completion(
     client = OpenAI(
         api_key=config.api_key,
         base_url=config.base_url,
-        default_headers=config.default_headers or _vision_default_headers_from_env(),
+        default_headers=_normalize_headers(
+            config.default_headers or _vision_default_headers_from_env()
+        ),
     )
     response = client.chat.completions.create(
         model=config.model,
