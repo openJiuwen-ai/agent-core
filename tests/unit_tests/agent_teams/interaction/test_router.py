@@ -92,6 +92,15 @@ def test_god_view_inline_recipient_segments_fan_out_with_distinct_bodies():
 
 
 @pytest.mark.level0
+def test_multiple_prefix_recipients_do_not_drop_members_when_body_contains_at():
+    payloads = parse_interact_str("# @m1 @m2 ship backend @m3 update docs")
+    assert payloads == [
+        OperatorMessage(body="ship backend @m3 update docs", target="m1"),
+        OperatorMessage(body="ship backend @m3 update docs", target="m2"),
+    ]
+
+
+@pytest.mark.level0
 def test_god_view_at_all_collapses_to_broadcast():
     payloads = parse_interact_str("# @all heads up")
     assert payloads == [OperatorMessage(body="heads up")]
@@ -144,6 +153,23 @@ def test_human_agent_inline_recipient_segments_fan_out_with_distinct_bodies():
     assert payloads == [
         HumanAgentMessage(body="query Hangzhou", sender="alice", target="m1"),
         HumanAgentMessage(body="query Shanghai", sender="alice", target="m2"),
+    ]
+
+
+@pytest.mark.level0
+def test_human_agent_multiple_prefix_recipients_preserve_shared_body():
+    payloads = parse_interact_str("$alice @m1 @m2 query Hangzhou @m3 query Shanghai")
+    assert payloads == [
+        HumanAgentMessage(
+            body="query Hangzhou @m3 query Shanghai",
+            sender="alice",
+            target="m1",
+        ),
+        HumanAgentMessage(
+            body="query Hangzhou @m3 query Shanghai",
+            sender="alice",
+            target="m2",
+        ),
     ]
 
 
