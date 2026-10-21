@@ -181,6 +181,38 @@ def _merge_unique(*sources: list[str]) -> list[str]:
     return out
 
 
+_PPTX_PRESENTATION_RELS_RE = re.compile(r"^ppt/_rels/presentation\.xml\.rels$")
+_PPTX_SLDID_RE = re.compile(r'<p:sldId[^>]*r:id="(rId\d+)"')
+_PPTX_REL_ENTRY_RE = re.compile(r'<Relationship[^>]*Id="(rId\d+)"[^>]*Target="([^"]*slides/slide(\d+)\.xml)"')
+
+
+def _pptx_presentation_order(zf: zipfile.ZipFile) -> list[int]:
+    """Slide FILE numbers in presentation order (from presentation.xml sldIdLst).
+
+    slideN.xml 的 N 不代表播放顺序：用户在 PowerPoint 里调页后，文件名不变、
+    presentation.xml 的 sldIdLst 顺序才是真实页序。返回按播放顺序排列的
+    slide 文件编号列表；解析失败返回空列表（调用方退回文件编号序）。
+    """
+    if "ppt/presentation.xml" not in zf.namelist():
+        return []
+    rels_target: dict[str, int] = {}
+    for name in zf.namelist():
+        if not _PPTX_PRESENTATION_RELS_RE.match(name):
+            continue
+        for rid, _target, slide_no in _PPTX_REL_ENTRY_RE.findall(zf.read(name).decode("utf-8", errors="ignore")):
+            rels_target[rid] = int(slide_no)
+        break
+    if not rels_target:
+        return []
+    content = zf.read("ppt/presentation.xml").decode("utf-8", errors="ignore")
+    order: list[int] = []
+    for rid in _PPTX_SLDID_RE.findall(content):
+        slide_no = rels_target.get(rid)
+        if slide_no is not None and slide_no not in order:
+            order.append(slide_no)
+    return order
+
+
 def _pptx_embedded_images_hint(file_path: str) -> str:
     """Per-slide image mapping for pptx — resolves the slide→layout→master inheritance.
 
@@ -194,6 +226,7 @@ def _pptx_embedded_images_hint(file_path: str) -> str:
             if not media:
                 return ""
             slide_own, slide_layout, layout_media, layout_master, master_media = _pptx_rels_tables(zf)
+            presentation_order = _pptx_presentation_order(zf)
     except (zipfile.BadZipFile, OSError):
         return ""
 
@@ -210,12 +243,18 @@ def _pptx_embedded_images_hint(file_path: str) -> str:
             layout_media.get(layout_no, []),
             master_media.get(master_no, []),
         )
+    # 页序以 presentation.xml 的 sldIdLst 为准（文件编号 ≠ 播放顺序）；
+    # 解析失败退回文件编号序。正文提取（python-pptx）同样按播放顺序编号，
+    # 两边对齐后模型看到的页码才一致。
+    order = presentation_order or sorted(slide_own)
+    ordered_slides = [no for no in order if no in slide_effective]
+    ordered_slides += [no for no in sorted(slide_effective) if no not in order]
     mapped = {f for files in slide_effective.values() for f in files}
     orphan = [m.rsplit("/", 1)[-1] for m in media if m.rsplit("/", 1)[-1] not in mapped]
     groups = "；".join(
-        f"Slide {no}（{'、'.join(files)}）"
-        for no, files in sorted(slide_effective.items())
-        if files
+        f"Slide {pos}（{'、'.join(slide_effective[no])}）"
+        for pos, no in enumerate(ordered_slides, 1)
+        if slide_effective[no]
     )
     if orphan:
         groups += f"；未挂载到具体页（{'、'.join(orphan[:8])}{'…' if len(orphan) > 8 else ''}）"
@@ -1236,15 +1275,28 @@ class ReadFileTool(Tool):
                     parts.append(page_block)
                     extracted_count += 1
 
-                # Report embedded images across all pages (not just the extracted range)
-                # so the model knows to extract and recognize them via VQA.
+                # Report embedded images within the READ RANGE only: page.images
+                # parses the full page layout, so enumerating every page of a
+                # long document (or re-enumerating on each range read) is a
+                # measurable cost. The model only sees the extracted range, so
+                # the hint is scoped to it as well.
                 # Best-effort: a single corrupt page must not fail the whole text read.
+                from pdfminer.pdfparser import PDFException as _PdfminerException
+
                 page_image_counts: list[tuple[int, int]] = []
-                for page_no in range(1, len(pdf.pages) + 1):
+                for page_no in range(start, end + 1):
                     try:
                         count = len(pdf.pages[page_no - 1].images)
-                    except (ValueError, TypeError, KeyError, IndexError, AttributeError) as exc:
-                        # 损坏页的图片枚举按页降级，不影响文本读取（常见损坏均落在这些内建异常）
+                    except (
+                        _PdfminerException,
+                        ValueError,
+                        TypeError,
+                        KeyError,
+                        IndexError,
+                        AttributeError,
+                    ) as exc:
+                        # 损坏页的图片枚举按页降级，不影响文本读取。pdfplumber 的解析
+                        # 错误包装为 pdfminer 异常族（PDFException 及其子类）。
                         logger.debug("Failed to enumerate images on PDF page %s: %s", page_no, exc)
                         continue
                     if count > 0:
@@ -1252,8 +1304,13 @@ class ReadFileTool(Tool):
                 total_images = sum(count for _, count in page_image_counts)
                 if total_images > 0:
                     distribution = "、".join(f"第 {page_no} 页 {count} 张" for page_no, count in page_image_counts)
+                    scope = (
+                        "该PDF"
+                        if start == 1 and end == len(pdf.pages)
+                        else f"本次读取范围（第 {start}-{end} 页）"
+                    )
                     parts.append(
-                        f"\n\n[该PDF包含 {total_images} 张嵌入图片（{distribution}）。"
+                        f"\n\n[{scope}包含 {total_images} 张嵌入图片（{distribution}）。"
                     f"如需理解图片内容，请先用 Python 提取"
                     f"（pdfplumber 或 PyMuPDF 均可），"
                     f"然后调用 visual_question_answering 工具识别。]"
