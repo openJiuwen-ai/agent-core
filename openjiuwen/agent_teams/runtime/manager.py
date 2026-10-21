@@ -907,6 +907,8 @@ class TeamRuntimeManager:
             await checkpointer.release(session_id)
 
         deleted = await db.team.delete_team(team_name)
+        if not deleted:
+            team_logger.info("Team {} already absent from team_info during delete", team_name)
 
         # Remove team filesystem directory (team_home) after database cleanup.
         # This covers the case where the caller has already stopped the runtime
@@ -920,7 +922,10 @@ class TeamRuntimeManager:
             except Exception as exc:
                 team_logger.warning("Failed to remove team directory {}: {}", team_dir, exc)
 
-        return deleted
+        # Reaching the desired terminal state is success even when a prior
+        # attempt already removed the team_info row.  The cleanup above is
+        # deliberately retried so partially-completed deletions can converge.
+        return True
 
     async def reset_session(
         self,
