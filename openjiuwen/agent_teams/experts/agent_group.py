@@ -26,13 +26,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from openjiuwen.agent_teams.experts.catalog import ExpertRef
-from openjiuwen.agent_teams.tools.tool_permissions import _MEMBER_NAME_PATTERN
 from openjiuwen.harness.resources.extension_loader import load_agent_template_package
 from openjiuwen.harness.resources.template_card import (
     AgentTemplateCard,
@@ -51,6 +51,12 @@ from openjiuwen.harness.schema.extension_spec import (
 
 LEADER_MEMBER = "leader"
 """Roster name every AgentGroup must contain; never spawnable as a teammate."""
+
+# Roster names become predefined team member names (routing keys and path
+# segments). Unlike spawn_teammate's ``^[a-z][a-z0-9-]*$`` they also allow
+# ``_``: published Hub packages use names such as ``narrative_designer`` and
+# their prompts refer to members by those names.
+_ROSTER_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
 def group_capabilities(manifest: Mapping[str, Any]) -> tuple[str, ...]:
@@ -369,13 +375,11 @@ def _agent_names(payload: dict[str, Any]) -> list[str]:
     seen: set[str] = set()
     for raw_name in raw_agents:
         name = _safe_component(raw_name, label="agent name")
-        # The agent name becomes the team member_name, which is reused as a
-        # message routing key and a filesystem path segment. Enforce the same
-        # rule spawn_teammate applies so a predefined member cannot bypass it.
-        if not _MEMBER_NAME_PATTERN.fullmatch(name):
+        if not _ROSTER_NAME_PATTERN.fullmatch(name):
             raise ValueError(
                 f"invalid agent name in agent_group manifest: {name!r}; must start with a "
-                "lowercase ASCII letter (a-z), followed by lowercase letters, digits (0-9) or hyphen (-)"
+                "lowercase ASCII letter (a-z), followed by lowercase letters, digits (0-9), "
+                "underscore (_) or hyphen (-)"
             )
         if name in seen:
             raise ValueError(f"duplicate agent name in agent_group manifest: {name}")

@@ -246,7 +246,7 @@ def test_load_agent_group_rejects_invalid_roster(
 
 
 @pytest.mark.level1
-@pytest.mark.parametrize("member_name", ["Member1", "member_1", "1member", "成员"])
+@pytest.mark.parametrize("member_name", ["Member1", "_member", "1member", "成员"])
 def test_load_agent_group_rejects_member_name_outside_routing_pattern(
     tmp_path: Path,
     member_name: str,
@@ -260,14 +260,18 @@ def test_load_agent_group_rejects_member_name_outside_routing_pattern(
 
 
 @pytest.mark.level1
-def test_load_agent_group_accepts_kebab_case_member_name(tmp_path: Path) -> None:
+@pytest.mark.parametrize("member_name", ["backend-dev-1", "narrative_designer"])
+def test_load_agent_group_accepts_kebab_and_snake_case_member_name(
+    tmp_path: Path,
+    member_name: str,
+) -> None:
     group = _minimal_group(tmp_path)
-    (group / "agents" / "member1").rename(group / "agents" / "backend-dev-1")
-    _update_manifest(group / "manifest.json", agents=["leader", "backend-dev-1"])
+    (group / "agents" / "member1").rename(group / "agents" / member_name)
+    _update_manifest(group / "manifest.json", agents=["leader", member_name])
 
     templates = load_agent_group_package(group)
 
-    assert set(templates) == {"leader", "backend-dev-1"}
+    assert set(templates) == {"leader", member_name}
 
 
 # ---------------------------------------------------------------------------
