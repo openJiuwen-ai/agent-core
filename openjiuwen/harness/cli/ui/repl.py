@@ -937,65 +937,66 @@ async def _handle_slash(
 # ---------------------------------------------------------------------------
 
 
-def _extract_question_text(request: Any) -> str:
-    """Extract the human-readable question from an interrupt request.
+def _print_args(args: Any, console: Console) -> None:
+    """Print tool arguments (a JSON object string or a dict), one per line."""
+    if not args:
+        return
+    import json as _json
 
-    The *request* is typically a ``ToolCallInterruptRequest`` (or
-    plain ``InterruptRequest``).  This function tries, in order:
+    if isinstance(args, str):
+        try:
+            args = _json.loads(args)
+        except ValueError:
+            console.print(f"[dim]  args: {args}[/dim]")
+            return
+    if isinstance(args, dict):
+        for k, v in args.items():
+            val = str(v)
+            if len(val) > 200:
+                val = val[:200] + "..."
+            console.print(f"[dim]  {k}: {val}[/dim]")
 
-    1. ``tool_args`` → parse ``query`` from the JSON/dict args
-       (preferred for ``AskUserRail``; the ``message`` field
-       may still be the generic ``"Please input"`` fallback).
-    2. ``message`` field.
-    3. ``str(request)`` as last resort.
 
-    Args:
-        request: The raw interrupt request payload.
+def _answered_as_typed(kind: str) -> bool:
+    """Whether the CLI has no answer shape for ``kind``: the answer is typed."""
+    from openjiuwen.core.single_agent.interrupt import InterruptKind, is_approval_kind
 
-    Returns:
-        A clean string to show the user.
-    """
-    # 1. Try to get the actual query from tool_args
-    tool_args = getattr(request, "tool_args", None)
-    if tool_args:
-        import json as _json
-
-        if isinstance(tool_args, str):
-            try:
-                tool_args = _json.loads(tool_args)
-            except (ValueError, TypeError):
-                pass
-        if isinstance(tool_args, dict):
-            query = tool_args.get("query", "")
-            if query:
-                return str(query)
-
-    # 2. Use the message field
-    message = getattr(request, "message", "")
-    if message and message != "Please input":
-        return message
-
-    # 3. Fallback
-    return str(request)
+    return not is_approval_kind(kind) and kind != InterruptKind.ASK_USER
 
 
 def _render_interaction(request: Any, console: Console) -> None:
     """Render an interaction request to the terminal.
 
-    Shows different formats for different interrupt types:
+    The format follows the interrupt ``kind``:
 
-    - **AskUserRail** (``tool_name == "ask_user"``):
-      prints questions with options in a user-friendly style.
-    - **ConfirmInterruptRail** (other tool names):
-      shows which tool wants approval + its arguments.
+    - ``ask_user``: questions with their options.
+    - ``skill_evolution_approval``: the proposed change and its choices.
+    - approvals (``permission``, ``confirm``, ``team_tool_approval`` and
+      undeclared kinds): which tool wants approval and its arguments.
+    - any other kind: its message and answer schema; the answer is typed as
+      JSON or text.
+
+    A workflow interaction is no interrupt request: its value is shown as
+    the question.
 
     Args:
-        request: The ``ToolCallInterruptRequest`` payload.
+        request: A ``ToolCallInterruptRequest``, or the value a workflow
+            passed to ``session.interact``.
         console: Rich console for output.
     """
-    tool_name = getattr(request, "tool_name", "")
+    import json as _json
 
-    if tool_name == "ask_user":
+    from openjiuwen.core.single_agent.interrupt import InterruptKind, ToolCallInterruptRequest, interrupt_kind_of
+
+    if not isinstance(request, ToolCallInterruptRequest):
+        console.print("\n[bold]Agent needs your input:[/bold]")
+        console.print(request if isinstance(request, str) else _json.dumps(request, ensure_ascii=False, default=str))
+        return
+
+    kind = interrupt_kind_of(request)
+    tool_name = request.tool_name
+
+    if kind == InterruptKind.ASK_USER:
         questions = getattr(request, "questions", None)
         console.print("\n[bold]Agent needs your input:[/bold]")
         if questions:
@@ -1010,34 +1011,73 @@ def _render_interaction(request: Any, console: Console) -> None:
                         label = opt.get("label", "")
                         desc = opt.get("description", "")
                         console.print(f"  [dim]{j}.[/dim] {label} - {desc}")
-    else:
-        from openjiuwen.harness.cli.ui.tool_display import (
-            get_display_name,
+        return
+
+    if kind == InterruptKind.SKILL_EVOLUTION_APPROVAL:
+        console.print("\n[bold yellow]⚠ Skill evolution approval[/bold yellow]")
+        if request.message:
+            console.print(request.message)
+        console.print(
+            "[dim]  (y/yes=allow once, a/always=allow for this session, n/no=reject, or type feedback)[/dim]"
         )
+        return
 
-        display_name = get_display_name(tool_name)
-        console.print(f"\n[bold yellow]⚠ Approve {display_name}?[/bold yellow]")
-        tool_args = getattr(request, "tool_args", None)
-        if tool_args:
-            import json as _json
+    if _answered_as_typed(kind):
+        console.print(f"\n[bold yellow]⚠ {tool_name}: the agent is waiting for an answer ({kind})[/bold yellow]")
+        if request.message:
+            console.print(request.message)
+        if request.payload_schema:
+            console.print(f"[dim]  answer schema: {request.payload_schema}[/dim]")
+        console.print("[dim]  (type the answer as JSON, or as text)[/dim]")
+        return
 
-            if isinstance(tool_args, str):
-                try:
-                    parsed = _json.loads(tool_args)
-                    for k, v in parsed.items():
-                        val = str(v)
-                        if len(val) > 200:
-                            val = val[:200] + "..."
-                        console.print(f"[dim]  {k}: {val}[/dim]")
-                except (ValueError, TypeError):
-                    console.print(f"[dim]  args: {tool_args}[/dim]")
-            elif isinstance(tool_args, dict):
-                for k, v in tool_args.items():
-                    val = str(v)
-                    if len(val) > 200:
-                        val = val[:200] + "..."
-                    console.print(f"[dim]  {k}: {val}[/dim]")
-        console.print("[dim]  (y/yes=approve, n/no=reject, or type feedback)[/dim]")
+    from openjiuwen.harness.cli.ui.tool_display import (
+        get_display_name,
+    )
+
+    display_name = get_display_name(tool_name)
+    console.print(f"\n[bold yellow]⚠ Approve {display_name}?[/bold yellow]")
+    _print_args(request.tool_args, console)
+    console.print("[dim]  (y/yes=approve, a/always=approve for this session, n/no=reject, or type feedback)[/dim]")
+
+
+async def _answer_questions(request: Any, prompt_session: PromptSession) -> dict:
+    """Answer an ``ask_user`` interrupt: one prompt per question, or one free answer."""
+    questions = getattr(request, "questions", None)
+    if not questions:
+        answer = await prompt_session.prompt_async("Answer> ")
+        return {"answer": answer.strip()}
+    answers = {}
+    for q in questions:
+        question_text = q.get("question", "")
+        q_answer = await prompt_session.prompt_async(f"Answer for '{question_text}'> ")
+        answers[question_text] = q_answer.strip()
+    return {"answers": answers}
+
+
+async def _answer_free_form(prompt_session: PromptSession) -> Any:
+    """Answer an interrupt of a kind the CLI does not know: JSON when it parses, else the text."""
+    import json as _json
+
+    answer = (await prompt_session.prompt_async("Answer> ")).strip()
+    try:
+        return _json.loads(answer)
+    except ValueError:
+        return answer
+
+
+async def _answer_for_interaction(request: Any, prompt_session: PromptSession) -> Any:
+    """Prompt for one interrupt and return the answer in the shape its kind expects."""
+    from openjiuwen.core.single_agent.interrupt import InterruptKind, interrupt_answer, interrupt_kind_of
+
+    kind = interrupt_kind_of(request)
+    if kind == InterruptKind.ASK_USER:
+        return await _answer_questions(request, prompt_session)
+    if _answered_as_typed(kind):
+        return await _answer_free_form(prompt_session)
+    # Enter approves, as the CLI always did.
+    answer = (await prompt_session.prompt_async("Approve? (y/a/n)> ")).strip() or "y"
+    return interrupt_answer(kind, text=answer)
 
 
 async def _collect_interaction_answers(
@@ -1049,6 +1089,8 @@ async def _collect_interaction_answers(
 
     Prompts the user for each pending interaction and
     builds an ``InteractiveInput`` ready to resume the agent.
+    An interrupt is answered by its ``interrupt_id``, a workflow
+    interaction by its own id with the text typed.
 
     Args:
         pending: List of ``PendingInteraction`` objects from
@@ -1065,47 +1107,17 @@ async def _collect_interaction_answers(
         return None
 
     from openjiuwen.core.session import InteractiveInput
+    from openjiuwen.core.single_agent.interrupt import ToolCallInterruptRequest
 
     interactive_input = InteractiveInput()
 
     for item in pending:
-        iid = item.interaction_id
         request = item.request
-        tool_name = getattr(request, "tool_name", "")
-
-        if tool_name == "ask_user":
-            questions = getattr(request, "questions", None)
-            if questions:
-                answers = {}
-                for q in questions:
-                    question_text = q.get("question", "")
-                    q_answer = await prompt_session.prompt_async(f"Answer for '{question_text}'> ")
-                    answers[question_text] = q_answer.strip()
-                interactive_input.update(iid, {"answers": answers})
-            else:
-                answer = await prompt_session.prompt_async("Answer> ")
-                interactive_input.update(iid, {"answer": answer.strip()})
+        if isinstance(request, ToolCallInterruptRequest):
+            interactive_input.answer(request.interrupt_id, await _answer_for_interaction(request, prompt_session))
         else:
-            answer = await prompt_session.prompt_async("Approve? (y/n)> ")
-            answer = answer.strip()
-            approved = answer.lower() in (
-                "y",
-                "yes",
-                "ok",
-                "approve",
-                "true",
-                "1",
-                "",
-            )
-            feedback = "" if approved else (answer or "User rejected")
-            interactive_input.update(
-                iid,
-                {
-                    "approved": approved,
-                    "feedback": feedback,
-                    "auto_confirm": False,
-                },
-            )
+            answer = await prompt_session.prompt_async("Answer> ")
+            interactive_input.update(item.interaction_id, answer.strip())
 
     return interactive_input
 
