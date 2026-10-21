@@ -38,20 +38,23 @@ These classes and modules are gone. Use `Model` plus a string `client_provider` 
 - `SiliconFlowModelClient`
 - `InferenceAffinityModelClient`
 - `AscendAffinityModelClient`
-- `HuaweiMaasModelClient` (different migration path, see the section below)
+- `HuaweiMaasModelClient` (capability preserved via the `maas` endpoint profile, see the section below)
 
 Image / speech / video generation is served by `OpenAIModelClient` when `client_provider="DashScope"` (or `endpoint_profile="dashscope"`).
 
 ## Huawei MaaS and x-span-id tracing
 
-`client_provider="HuaweiMaas"` is removed with no alias: the config now fails explicitly (unavailable model provider). The removed `HuaweiMaasModelClient` had one incremental capability: injecting `x-span-id` (uuid4 hex) into every request for request-level tracing on the Huawei Cloud ModelArts MaaS gateway (e.g. `https://api.modelarts-maas.com/v1`).
-
-To migrate: connect to the MaaS gateway with the OpenAI-compatible configuration and inject `x-span-id` at the call site — a fresh span id per call:
+The `HuaweiMaasModelClient` class is gone, but its capability is preserved: `client_provider="HuaweiMaas"` is kept as a legacy alias that normalizes to the OpenAI-compatible client with the `maas` endpoint profile, which injects `x-span-id` (a fresh uuid4 hex per request) into every request for request-level tracing on the Huawei Cloud ModelArts MaaS gateway (e.g. `https://api.modelarts-maas.com/v1`):
 
 ```python
-import uuid
-
-msg = await model.invoke(messages, custom_headers={"x-span-id": uuid.uuid4().hex})
+model = Model(
+    model_client_config=ModelClientConfig(
+        client_provider="HuaweiMaas",  # or client_provider="OpenAI", endpoint_profile="maas"
+        api_base="https://api.modelarts-maas.com/v1",
+        api_key="sk-...",
+    ),
+    model_config=ModelRequestConfig(model="..."),
+)
 ```
 
-`custom_headers` is merged into request headers per call; static headers can also be set on `ModelClientConfig.custom_headers`. To keep business code untouched, wrap the client's `invoke` / `stream` at the host layer and inject after matching the MaaS `api_base`.
+No call-site changes are needed: business code does not pass `custom_headers` for tracing. If you need a custom span id for a specific call, pass `custom_headers={"x-span-id": ...}` — note that the profile transform is applied last and replaces a request-level `x-span-id`, matching the previous client's behavior. The injection lives in the `inject_x_span_id` request header transform declared on the `maas` profile, so other OpenAI-compatible endpoints are unaffected.

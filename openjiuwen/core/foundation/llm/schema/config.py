@@ -21,6 +21,9 @@ class ProviderType(str, Enum):
     DeepSeek = "DeepSeek"
     InferenceAffinity = "InferenceAffinity"
     AscendAffinity = "AscendAffinity"
+    # Legacy alias only: normalized to the OpenAI client with the "maas"
+    # endpoint profile (x-span-id tracing). No dedicated client class.
+    HuaweiMaas = "HuaweiMaas"
     IntelliRouter = "intelli_router"
 
 
@@ -60,6 +63,7 @@ _TOP_LEVEL_API_KEY_PROVIDERS = {
     ProviderType.DashScope.value,
     ProviderType.DeepSeek.value,
     ProviderType.InferenceAffinity.value,
+    ProviderType.HuaweiMaas.value,
 }
 _TOP_LEVEL_API_BASE_PROVIDERS = _TOP_LEVEL_API_KEY_PROVIDERS | {ProviderType.OpenAIAccount.value}
 _DEFAULT_API_BASE_BY_ENDPOINT_PROFILE = {

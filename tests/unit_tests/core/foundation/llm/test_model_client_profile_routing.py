@@ -1,6 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import pytest
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.llm.inference_affinity_model import InferenceAffinityModel
 from openjiuwen.core.foundation.llm.model_clients import create_model_client
@@ -17,7 +21,52 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
     ProviderType,
 )
-from openjiuwen.core.foundation.llm.utils.endpoint_profiles import normalize_model_client_config
+from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
+    normalize_model_client_config,
+    resolve_endpoint_profile,
+)
+
+
+def test_legacy_huawei_maas_provider_routes_to_openai_client_with_maas_profile():
+    config = ModelClientConfig(
+        client_provider="HuaweiMaas",
+        api_key="sk-test",
+        api_base="https://api.modelarts-maas.com/v1",
+    )
+
+    client = create_model_client(config, _request_config())
+
+    assert isinstance(client, OpenAIModelClient)
+    assert client.model_client_config.client_provider == ProviderType.OpenAI.value
+    assert client.model_client_config.endpoint_profile == "maas"
+
+
+def test_legacy_huawei_maas_provider_normalizes_to_maas_profile_metadata():
+    config = ModelClientConfig(
+        client_provider="HuaweiMaas",
+        api_key="sk-test",
+        api_base="https://api.modelarts-maas.com/v1",
+    )
+
+    normalized = normalize_model_client_config(config)
+
+    assert normalized.client_provider == ProviderType.OpenAI.value
+    assert normalized.endpoint_profile == "maas"
+    assert normalized.legacy_client_provider == ProviderType.HuaweiMaas.value
+    assert resolve_endpoint_profile(normalized).request_transforms == ["inject_x_span_id"]
+
+
+def test_huawei_maas_provider_requires_api_key_and_api_base():
+    with pytest.raises(BaseError) as error:
+        ModelClientConfig(client_provider="HuaweiMaas", api_key="sk-test")
+    assert error.value.code == StatusCode.MODEL_SERVICE_CONFIG_ERROR.code
+
+    with pytest.raises(BaseError) as error:
+        ModelClientConfig(
+            client_provider="HuaweiMaas",
+            api_base="https://api.modelarts-maas.com/v1",
+        )
+    assert error.value.code == StatusCode.MODEL_SERVICE_CONFIG_ERROR.code
 
 
 def _request_config() -> ModelRequestConfig:

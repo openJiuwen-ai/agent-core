@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import uuid
 from copy import deepcopy
 from typing import Any, Callable
 
@@ -42,9 +43,25 @@ MESSAGE_TRANSFORMS: dict[str, Callable[[list[dict]], list[dict]]] = {
 }
 
 
+def _inject_x_span_id(headers: dict[str, str]) -> dict[str, str]:
+    # Fresh span id per request for MaaS gateway tracing; replaces any
+    # caller-provided value, matching the removed HuaweiMaasModelClient.
+    headers["x-span-id"] = uuid.uuid4().hex
+    return headers
+
+
+REQUEST_HEADER_TRANSFORMS: dict[str, Callable[[dict[str, str]], dict[str, str]]] = {
+    "inject_x_span_id": _inject_x_span_id,
+}
+
+
 ENDPOINT_PROFILES: dict[str, EndpointProfile] = {
     "openai": EndpointProfile(name="openai"),
     "openai_compatible": EndpointProfile(name="openai_compatible"),
+    "maas": EndpointProfile(
+        name="maas",
+        request_transforms=["inject_x_span_id"],
+    ),
     "deepseek": EndpointProfile(
         name="deepseek",
         message_transforms=["deepseek_reasoning_content"],
@@ -66,6 +83,10 @@ ENDPOINT_PROFILES: dict[str, EndpointProfile] = {
 
 
 LEGACY_PROVIDER_ALIASES: dict[str, dict[str, Any]] = {
+    ProviderType.HuaweiMaas.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "maas",
+    },
     ProviderType.DeepSeek.value: {
         "client_provider": ProviderType.OpenAI.value,
         "endpoint_profile": "deepseek",
@@ -173,6 +194,21 @@ def apply_message_transforms(config: ModelClientConfig, messages: list[dict]) ->
             raise build_error(
                 StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                 error_msg=f"unknown message transform: {name}"
+            )
+        transformed = transform(transformed)
+    return transformed
+
+
+def apply_request_header_transforms(config: ModelClientConfig, headers: dict[str, str]) -> dict[str, str]:
+    """Apply request-level header transforms from the resolved endpoint profile."""
+    profile = resolve_endpoint_profile(config)
+    transformed = headers
+    for name in profile.request_transforms:
+        transform = REQUEST_HEADER_TRANSFORMS.get(name)
+        if transform is None:
+            raise build_error(
+                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                error_msg=f"unknown request header transform: {name}"
             )
         transformed = transform(transformed)
     return transformed

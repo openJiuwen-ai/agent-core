@@ -34,7 +34,10 @@ from openjiuwen.core.foundation.llm.schema.config import (
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, UsageMetadata, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.foundation.llm.utils.endpoint_profiles import apply_message_transforms
+from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
+    apply_message_transforms,
+    apply_request_header_transforms,
+)
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
@@ -441,6 +444,8 @@ class OpenAIModelClient(BaseModelClient):
         OpenRouter attribution headers are config-level only per the OpenRouter
         App Attribution spec, so request-level copies are dropped — but only for
         the openrouter profile; other endpoints pass request headers through.
+        Profile request transforms (e.g. x-span-id injection for the maas
+        profile) run last, per request.
         """
         filtered_request_headers = request_headers
         if request_headers and self._endpoint_profile_name() == "openrouter":
@@ -449,7 +454,8 @@ class OpenAIModelClient(BaseModelClient):
                 for key, value in request_headers.items()
                 if key.lower() not in OPENROUTER_ATTRIBUTION_HEADER_KEYS
             }
-        return merge_request_headers(base_headers, filtered_request_headers)
+        headers = merge_request_headers(base_headers, filtered_request_headers)
+        return apply_request_header_transforms(self.model_client_config, headers)
 
     def _endpoint_profile_name(self) -> str:
         return str(getattr(self.model_client_config, "endpoint_profile", "") or "").strip().lower()

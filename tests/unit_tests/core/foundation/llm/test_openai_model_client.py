@@ -851,6 +851,63 @@ def test_openrouter_profile_still_drops_request_level_attribution_headers():
     assert headers["Authorization"] == "Bearer sk-test-key"
 
 
+def test_maas_profile_injects_x_span_id_per_request():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="maas",
+        api_key="sk-test-key",
+        api_base="https://api.modelarts-maas.com/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="test-model"), client_config)
+
+    first = client._build_request_headers(
+        {"Authorization": "Bearer sk-test-key"},
+        {"X-Custom": "keep"},
+    )
+    second = client._build_request_headers(
+        {"Authorization": "Bearer sk-test-key"},
+        {"X-Custom": "keep"},
+    )
+
+    assert first["X-Custom"] == "keep"
+    assert first["Authorization"] == "Bearer sk-test-key"
+    assert first["x-span-id"] and len(first["x-span-id"]) == 32
+    assert second["x-span-id"] != first["x-span-id"]
+
+
+def test_maas_profile_transform_replaces_request_level_x_span_id():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="maas",
+        api_key="sk-test-key",
+        api_base="https://api.modelarts-maas.com/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="test-model"), client_config)
+
+    headers = client._build_request_headers({}, {"x-span-id": "caller-provided"})
+
+    assert headers["x-span-id"] != "caller-provided"
+
+
+def test_plain_openai_profile_does_not_inject_x_span_id():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="sk-test-key",
+        api_base="https://example.test/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="test-model"), client_config)
+
+    headers = client._build_request_headers(
+        {"Authorization": "Bearer sk-test-key"},
+        {"X-Custom": "keep"},
+    )
+
+    assert "x-span-id" not in headers
+
+
 class _Delta:
     """Lightweight stand-in for an OpenAI SDK delta/message object."""
 
