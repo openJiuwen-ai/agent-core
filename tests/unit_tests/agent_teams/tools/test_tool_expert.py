@@ -884,7 +884,8 @@ async def test_inline_member_runs_as_an_expert_like_spawn_expert(
 @pytest.mark.parametrize(
     ("member", "error"),
     [
-        ({"expert": "claude-expert"}, "cannot be declared inline"),
+        ({"expert": "finance", "external_cli": {"fallback_model_name": "m"}}, "runs natively"),
+        ({"expert": "claude-expert", "cli_agent": "claude"}, "member.cli_agent and member.expert are exclusive"),
         ({"expert": "nobody"}, "member.expert: Expert 'nobody' is not installed"),
         ({"expert": "leader", "group": "designer"}, "cannot be spawned as a teammate"),
         ({"group": "designer"}, "member.group needs member.expert"),
@@ -908,3 +909,153 @@ async def test_inline_expert_without_a_catalog_is_rejected(db: TeamDatabase) -> 
     )
     assert "provides no expert catalog" in result.error
     assert await _member_count(db) == 0
+
+
+# ---------------------------------------------------------------------------
+# Scheduled create_task: inline members on an external CLI
+# ---------------------------------------------------------------------------
+
+
+def _cli_task(task_id: str, member_name: str, **member: Any) -> dict:
+    return _expert_task(
+        task_id,
+        member_name,
+        **{"cli_agent": "claude", "display_name": "Reviewer", "desc": "reviews", "prompt": "review it", **member},
+    )
+
+
+@pytest.mark.level0
+def test_inline_member_offers_cli_fields_only_when_cli_kinds_are_declared(
+    db: TeamDatabase, catalog: FakeCatalog
+) -> None:
+    def _member_props(backend: TeamBackend) -> dict:
+        tool = _scheduled_create_task(backend, catalog)
+        return tool.card.input_params["properties"]["tasks"]["items"]["properties"]["member"]["properties"]
+
+    assert not {"cli_agent", "external_cli"} & set(_member_props(_backend(db)))
+    plain = _member_props(_backend(db, ExternalCliAgentSpec(cli_agent="claude")))
+    assert set(plain["external_cli"]["properties"]) == {"fallback_model_name"}
+    with_catalog = _member_props(
+        _backend(db, ExternalCliAgentSpec(cli_agent="claude", builtin_models=[ExternalCliBuiltinModel(name="sonnet")]))
+    )
+    assert set(with_catalog["external_cli"]["properties"]) == {"fallback_model_name", "builtin_model", "effort"}
+    assert "<builtin_model_catalog>" in with_catalog["external_cli"]["properties"]["builtin_model"]["description"]
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_inline_external_expert_registers_like_spawn_expert(db: TeamDatabase, catalog: FakeCatalog) -> None:
+    declared = ExternalCliAgentSpec(cli_agent="claude", env={"HOST_ONLY": "1"}, skills=[{"dir": "/host/skill"}])
+    backend = _backend(db, declared)
+    spawned = await _tools(backend, catalog)["spawn_expert"].invoke({"expert": "claude-expert", "member_name": "cli-1"})
+    assert spawned.success, spawned.error
+    tool = _scheduled_create_task(backend, catalog)
+    result = await tool.invoke({"tasks": [_expert_task("t1", "cli-2", expert="claude-expert", lifetime="dormant")]})
+    assert result.success, result.error
+    assert "lifetime=dormant, expert=claude-expert, cli_agent=claude]" in tool.render_for_llm(result)
+
+    reference, inline = await backend.get_member("cli-1"), await backend.get_member("cli-2")
+    assert inline.role == TeamRole.EXTERNAL_CLI.value
+    assert backend.get_external_cli_agent("cli-2") == "claude"
+    assert get_member_options(inline).lifetime == "dormant"
+    assert inline.prompt == reference.prompt
+    assert get_member_agent_template(inline) == get_member_agent_template(reference)
+    # Retirement reads the row only: the scheduler's scan and the member's own settle.
+    await db.member.update_member_status("cli-2", _TEAM, "ready")
+    assert ("cli-2", "ready", "dormant") in await backend.list_retirable_members()
+    assert await backend.get_member_lifetime("cli-2") == "dormant"
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_inline_cli_agent_member_registers_like_spawn_external_cli(db: TeamDatabase, catalog: FakeCatalog) -> None:
+    backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
+    tool = _scheduled_create_task(backend, catalog)
+    result = await tool.invoke({"tasks": [_cli_task("t1", "rev-1")]})
+    assert result.success, result.error
+    assert "lifetime=shutdown, cli_agent=claude]" in tool.render_for_llm(result)
+
+    row = await backend.get_member("rev-1")
+    options = get_member_options(row)
+    assert (row.role, row.display_name, row.desc, row.prompt) == (
+        TeamRole.EXTERNAL_CLI.value,
+        "Reviewer",
+        "reviews",
+        "review it",
+    )
+    assert (options.cli_agent, options.lifetime, options.agent_template) == ("claude", "shutdown", None)
+    assert (await backend.task_manager.get("t1")).assignee == "rev-1"
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "models",
+    [
+        {"model_name": "*"},
+        {"fallback_model_name": 3},
+        {"fallback_model_name": "pool-model"},
+        {"builtin_model": "sonnet"},
+        {"effort": "high"},
+    ],
+)
+async def test_inline_cli_member_model_rules_match_spawn_external_cli(
+    db: TeamDatabase, catalog: FakeCatalog, models: dict[str, Any]
+) -> None:
+    backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
+    external_cli = {key: value for key, value in models.items() if key != "model_name"}
+    member = {"external_cli": external_cli, **({"model_name": models["model_name"]} if "model_name" in models else {})}
+    inline = await _scheduled_create_task(backend, catalog).invoke({"tasks": [_cli_task("t1", "rev-1", **member)]})
+    direct = await SpawnExternalCliTool(backend, make_translator("en")).invoke(
+        {"member_name": "rev-2", "display_name": "d", "prompt": "p", "cli_agent": "claude", **models}
+    )
+    assert not inline.success and not direct.success
+    assert inline.error.endswith(direct.error.replace("spawn_external_cli", "create_task"))
+    assert await _member_count(db) == 0
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("member", "error"),
+    [
+        ({"cli_agent": "codex"}, "cli_agent 'codex' is not declared"),
+        ({"prompt": ""}, "member.prompt is required"),
+        ({"cli_agent": None, "external_cli": {"fallback_model_name": "m"}}, "applies only to an external CLI member"),
+        ({"external_cli": "claude"}, "member.external_cli must be an object"),
+    ],
+)
+async def test_inline_cli_member_rejections_write_nothing(
+    db: TeamDatabase, catalog: FakeCatalog, member: dict, error: str
+) -> None:
+    backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
+    result = await _scheduled_create_task(backend, catalog).invoke({"tasks": [_cli_task("t1", "rev-1", **member)]})
+    assert not result.success
+    assert error in result.error
+    assert await _member_count(db) == 0
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_inline_cli_member_needs_declared_cli_kinds(db: TeamDatabase, catalog: FakeCatalog) -> None:
+    result = await _scheduled_create_task(_backend(db), catalog).invoke({"tasks": [_cli_task("t1", "rev-1")]})
+    assert "declares no external CLI kinds" in result.error
+    assert await _member_count(db) == 0
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_rejected_batch_rolls_back_external_cli_members(db: TeamDatabase, catalog: FakeCatalog) -> None:
+    backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
+    result = await _scheduled_create_task(backend, catalog).invoke(
+        {
+            "tasks": [
+                _cli_task("t1", "rev-1"),
+                _expert_task("t2", "cli-2", expert="claude-expert"),
+                _cli_task("t3", "rev-3", external_cli={"fallback_model_name": "pool-model"}),
+            ]
+        }
+    )
+    assert not result.success
+    assert await _member_count(db) == 0
+    assert backend.external_cli_agent_names() == frozenset()
