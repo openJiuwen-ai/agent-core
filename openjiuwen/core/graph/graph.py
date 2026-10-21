@@ -55,7 +55,6 @@ class Branch:
 
 
 class PregelGraph(Graph):
-
     def __init__(self):
         self.pregel: Pregel | None = None
         self.edges: list[Tuple[str | list[str], str]] = []
@@ -65,6 +64,9 @@ class PregelGraph(Graph):
         self.branch_targets: dict[str, set[str]] = {}
         self.checkpointer = None
         self._session = None
+        # 结构解析缓存（_parse_structure 产物）：edges/waits/branches/branch_targets
+        # 均为构建期数据，任何结构修改方法写入时置脏（置 None），compile 命中即复用。
+        self._structure_cache: tuple | None = None
 
     def start_node(self, node_id: str) -> Self:
         self._validate_node_id(node_id)
@@ -89,12 +91,14 @@ class PregelGraph(Graph):
             raise build_error(StatusCode.PREGEL_GRAPH_NODE_INVALID, node_id=node_id, reason="node is None")
 
         if node_id in self.nodes:
-            raise build_error(StatusCode.PREGEL_GRAPH_NODE_ID_INVALID, node_id=node_id,
-                              reason="already exist, can not add again")
+            raise build_error(
+                StatusCode.PREGEL_GRAPH_NODE_ID_INVALID, node_id=node_id, reason="already exist, can not add again"
+            )
         vertex_node = Vertex(node_id, node)
         self.nodes[node_id] = vertex_node
         if wait_for_all:
             self.waits.add(node_id)
+            self._structure_cache = None
         return self
 
     def get_nodes(self) -> dict[str, Vertex]:
@@ -102,33 +106,48 @@ class PregelGraph(Graph):
 
     def add_edge(self, source_node_id: Union[str, list[str]], target_node_id: str) -> Self:
         if not source_node_id:
-            raise build_error(StatusCode.PREGEL_GRAPH_EDGE_INVALID, source_id=source_node_id,
-                              target_node_id=target_node_id,
-                              reason="source_node_id is None or empty")
+            raise build_error(
+                StatusCode.PREGEL_GRAPH_EDGE_INVALID,
+                source_id=source_node_id,
+                target_node_id=target_node_id,
+                reason="source_node_id is None or empty",
+            )
         if isinstance(source_node_id, list):
             for item in source_node_id:
                 if not item:
-                    raise build_error(StatusCode.PREGEL_GRAPH_EDGE_INVALID, source_id=source_node_id,
-                                      target_node_id=target_node_id,
-                                      reason="source_node_id list has None or empty")
+                    raise build_error(
+                        StatusCode.PREGEL_GRAPH_EDGE_INVALID,
+                        source_id=source_node_id,
+                        target_node_id=target_node_id,
+                        reason="source_node_id list has None or empty",
+                    )
 
         if not target_node_id:
-            raise build_error(StatusCode.PREGEL_GRAPH_EDGE_INVALID, source_id=source_node_id,
-                              target_node_id=target_node_id,
-                              reason="target_node_id is None or empty")
+            raise build_error(
+                StatusCode.PREGEL_GRAPH_EDGE_INVALID,
+                source_id=source_node_id,
+                target_node_id=target_node_id,
+                reason="target_node_id is None or empty",
+            )
         self.edges.append((source_node_id, target_node_id))
+        self._structure_cache = None
         return self
 
     def add_conditional_edges(self, source_node_id: str, router: Router) -> Self:
         if not source_node_id:
-            raise build_error(StatusCode.PREGEL_GRAPH_CONDITION_EDGE_INVALID, source_id=source_node_id,
-                              reason="source_node_is is None or empty")
+            raise build_error(
+                StatusCode.PREGEL_GRAPH_CONDITION_EDGE_INVALID,
+                source_id=source_node_id,
+                reason="source_node_is is None or empty",
+            )
         if router is None:
-            raise build_error(StatusCode.PREGEL_GRAPH_CONDITION_EDGE_INVALID, source_id=source_node_id,
-                              reason="router is None")
+            raise build_error(
+                StatusCode.PREGEL_GRAPH_CONDITION_EDGE_INVALID, source_id=source_node_id, reason="router is None"
+            )
 
         name = _get_callable_name(router)
         self.branches[source_node_id][name] = Branch(router)
+        self._structure_cache = None
         return self
 
     def register_branch_targets(self, branch_node_id: str, targets: set[str]) -> Self:
@@ -140,6 +159,7 @@ class PregelGraph(Graph):
         """
         if branch_node_id and targets and len(targets) > 1:
             self.branch_targets[branch_node_id] = targets
+            self._structure_cache = None
         return self
 
     def _forward_reachable(self, start_node: str) -> set[str]:
@@ -151,7 +171,7 @@ class PregelGraph(Graph):
             if node in visited:
                 continue
             visited.add(node)
-            for (src, tgt) in self.edges:
+            for src, tgt in self.edges:
                 if src == node and isinstance(tgt, str) and tgt not in visited:
                     queue.append(tgt)
         return visited
@@ -177,9 +197,7 @@ class PregelGraph(Graph):
             root = branch_parent[root]
         return root
 
-    def _resolve_barrier_groups(
-        self, target_id: str, source_list: list[set[str]]
-    ) -> list[set[str]]:
+    def _resolve_barrier_groups(self, target_id: str, source_list: list[set[str]]) -> list[set[str]]:
         """Resolve mutually exclusive predecessors into CNF OR-groups.
 
         Uses a consumer perspective: for each branch target, perform BFS to find
@@ -261,13 +279,9 @@ class PregelGraph(Graph):
             graph_logger.debug(
                 f"Finished to run graph super-step [{loop.step}]",
                 event_type=LogEventType.GRAPH_SUPER_STEP_END,
-                graph_id=loop.config['ns'],
+                graph_id=loop.config["ns"],
                 session_id=loop.config.get(SESSION_ID),
-                metadata={
-                    "ns": loop.config['ns'],
-                    "step": loop.step,
-                    "active_nodes": list(loop.active_nodes)
-                }
+                metadata={"ns": loop.config["ns"], "step": loop.step, "active_nodes": list(loop.active_nodes)},
             )
 
         checkpointer = session.checkpointer()
@@ -298,14 +312,36 @@ class PregelGraph(Graph):
     def _compile(self, graph_store=None, step_callback=None, nodes=None) -> Pregel:
         # nodes 注入点：compile 传入本次执行的 fresh vertex（默认仍读 self.nodes）
         nodes = nodes if nodes is not None else self.nodes
-        edges: list[Tuple[str | list[str], str]] = []
-        sources: dict[str, list[set[str]]] = {}
         builder = PregelBuilder()
         for node_id, action in nodes.items():
             builder.add_node(node_id, action)
 
-        # Step 1: collect sources as single-element groups
-        for (source_node_id, target_node_id) in self.edges:
+        # 结构解析（edges 分组 + barrier CNF）只依赖构建期结构数据，产物跨
+        # compile 复用；重放时 builder 自行拷贝集合/列表输入，不回写缓存产物。
+        if self._structure_cache is None:
+            self._structure_cache = self._parse_structure()
+        barrier_starts, plain_edges = self._structure_cache
+        for target_node_id, start in barrier_starts:
+            builder.add_edge(start, target_node_id)
+        for source_node_id, target_node_id in plain_edges:
+            builder.add_edge(source_node_id, target_node_id)
+
+        for start, branches in self.branches.items():
+            for name, branch in branches.items():
+                builder.add_branch(start, branch.condition)
+        return builder.build(graph_store, after_step_callback=step_callback)
+
+    def _parse_structure(self) -> tuple[list[Tuple[str | list[str], str]], list[Tuple[str, list[str | set[str]]]]]:
+        """Resolve edges/waits/branch_targets into builder-ready edge specs.
+
+        Pure structural work with no execution-state dependence: barrier
+        targets collect their predecessor CNF OR-groups, remaining edges pass
+        through unchanged. Invalidated by any structural mutation (see the
+        write sites of edges/waits/branches/branch_targets).
+        """
+        plain_edges: list[Tuple[str | list[str], str]] = []
+        sources: dict[str, list[set[str]]] = {}
+        for source_node_id, target_node_id in self.edges:
             if target_node_id in self.waits:
                 if target_node_id not in sources:
                     sources[target_node_id] = []
@@ -315,25 +351,17 @@ class PregelGraph(Graph):
                     for s in source_node_id:
                         sources[target_node_id].append({s})
             else:
-                edges.append((source_node_id, target_node_id))
+                plain_edges.append((source_node_id, target_node_id))
 
-        # Step 2: resolve mutually exclusive predecessors into CNF OR-groups
+        # Resolve mutually exclusive predecessors into CNF OR-groups
         for target_node_id in sources:
-            sources[target_node_id] = self._resolve_barrier_groups(
-                target_node_id, sources[target_node_id]
-            )
+            sources[target_node_id] = self._resolve_barrier_groups(target_node_id, sources[target_node_id])
 
-        # Step 3: pass to builder
-        for (target_node_id, groups) in sources.items():
+        barrier_starts: list[Tuple[str, list[str | set[str]]]] = []
+        for target_node_id, groups in sources.items():
             start = [next(iter(g)) if len(g) == 1 else g for g in groups]
-            builder.add_edge(start, target_node_id)
-        for (source_node_id, target_node_id) in edges:
-            builder.add_edge(source_node_id, target_node_id)
-
-        for start, branches in self.branches.items():
-            for name, branch in branches.items():
-                builder.add_branch(start, branch.condition)
-        return builder.build(graph_store, after_step_callback=step_callback)
+            barrier_starts.append((target_node_id, start))
+        return barrier_starts, plain_edges
 
     async def reset(self):
         for node in self.nodes.values():
@@ -354,6 +382,7 @@ class CompiledGraph(ExecutableGraph):
             reset_workflow_session,
             set_workflow_session,
         )
+
         token = set_workflow_session(session)
         try:
             is_main = False
@@ -379,7 +408,7 @@ class CompiledGraph(ExecutableGraph):
                     graph_logger.debug(
                         "Pregel execution cancelled",
                         event_type=LogEventType.GRAPH_END,
-                        metadata={"session_id": session_id, "workflow_id": workflow_id, "cancelled": True}
+                        metadata={"session_id": session_id, "workflow_id": workflow_id, "cancelled": True},
                     )
                     raise
                 except Exception as e:
@@ -405,9 +434,9 @@ class CompiledGraph(ExecutableGraph):
 
 
 def _get_callable_name(func) -> str:
-    if hasattr(func, '__name__'):
+    if hasattr(func, "__name__"):
         return func.__name__
-    elif hasattr(func, '__class__'):
+    elif hasattr(func, "__class__"):
         return func.__class__.__name__
     else:
         return repr(func)
