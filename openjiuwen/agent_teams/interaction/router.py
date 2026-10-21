@@ -97,7 +97,11 @@ def _split_inline_segments(
     multicast form (``@m1 @m2 shared body``), so it stays on the older
     fan-out path.
     """
-    if not recipients:
+    # Inline segmentation assigns the text before the first inline marker to
+    # exactly one leading recipient.  With multiple leading recipients there
+    # is no unambiguous mapping, so preserve the established shared-body
+    # multicast behaviour instead of silently dropping recipients[1:].
+    if len(recipients) != 1:
         return None
 
     matches = list(_INLINE_RECIPIENT_RE.finditer(body))
@@ -285,7 +289,7 @@ async def resolve_targets(
 
     * Known recipients keep their point-to-point payload untouched.
     * Unknown recipients are not routing directives; their mentions are
-      folded back into a single no-mention message (see
+      folded back into no-mention messages (see
       :func:`_fold_unknown_mentions`) addressed to the channel default
       (leader for ``#``, avatar for ``$``), preserving the user's text.
     * God-view / avatar-drive / broadcast payloads carry no named
@@ -293,7 +297,9 @@ async def resolve_targets(
 
     When every recipient is known the input list is returned as-is.
     Otherwise the result is ``<known point-to-point payloads> +
-    [<one folded no-mention payload>]``.
+    <folded no-mention payloads>``. Unknown recipients that shared one body
+    are rejoined into one payload; recipients with distinct inline-segment
+    bodies remain separate so no text is lost or reassigned.
     """
     unknown: list["InteractPayload"] = []
     kept: list["InteractPayload"] = []
