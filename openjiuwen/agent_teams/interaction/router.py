@@ -55,6 +55,7 @@ _MENTION_RE = re.compile(r"^@(\S+)\s+([\s\S]+)$")
 _GOD_VIEW_PREFIX = "# "
 _HUMAN_AGENT_PREFIX_RE = re.compile(r"^\$([^\s@]+)(?:\s+|(?=@))([\s\S]*)$")
 _RECIPIENT_RE = re.compile(r"^@(\S+)\s+")
+_INLINE_RECIPIENT_RE = re.compile(r"(?<!\S)@(\S+)\s+")
 
 BROADCAST_TARGETS: frozenset[str] = frozenset({"all", "*"})
 """Reserved mention targets that mean "team-wide broadcast"."""
@@ -84,6 +85,36 @@ def is_reserved_name(name: str) -> bool:
     the runtime and must not be reused by user-declared members.
     """
     return name in RESERVED_MEMBER_NAMES
+
+
+def _split_inline_segments(
+    recipients: list[str],
+    body: str,
+) -> list[tuple[str, str]] | None:
+    """Split ``@m1 body1 @m2 body2`` into per-recipient body segments.
+
+    A body that starts with another recipient token is the established
+    multicast form (``@m1 @m2 shared body``), so it stays on the older
+    fan-out path.
+    """
+    if not recipients:
+        return None
+
+    matches = list(_INLINE_RECIPIENT_RE.finditer(body))
+    if not matches:
+        return None
+
+    first_body = body[: matches[0].start()].rstrip()
+    if not first_body:
+        return None
+
+    segments: list[tuple[str, str]] = [(recipients[0], first_body)]
+    for index, match in enumerate(matches):
+        target = match.group(1)
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(body)
+        segments.append((target, body[start:end].strip()))
+    return segments
 
 
 def parse_interact_str(body: str) -> list["InteractPayload"]:
@@ -166,6 +197,15 @@ def parse_interact_str(body: str) -> list["InteractPayload"]:
             return [HumanAgentMessage(body=final_body, sender=sender, target="*")]
         return [OperatorMessage(body=final_body)]
 
+    inline_segments = _split_inline_segments(recipients, final_body)
+    if inline_segments is not None:
+        if is_human_agent:
+            return [
+                HumanAgentMessage(body=segment_body, sender=sender, target=name)
+                for name, segment_body in inline_segments
+            ]
+        return [OperatorMessage(body=segment_body, target=name) for name, segment_body in inline_segments]
+
     if is_human_agent:
         return [
             HumanAgentMessage(body=final_body, sender=sender, target=name)
@@ -204,8 +244,8 @@ def _named_target(payload: "InteractPayload") -> str | None:
     return target
 
 
-def _fold_unknown_mentions(unknown: list["InteractPayload"]) -> "InteractPayload":
-    """Fold unknown ``@<member>`` payloads back into one no-mention message.
+def _fold_unknown_mentions(unknown: list["InteractPayload"]) -> list["InteractPayload"]:
+    """Fold unknown ``@<member>`` payloads into no-mention messages.
 
     An ``@<member>`` that matches no roster row is not a routing
     directive — it is plain text the user typed. We re-attach those
@@ -219,12 +259,17 @@ def _fold_unknown_mentions(unknown: list["InteractPayload"]) -> "InteractPayload
         HumanAgentMessage,
     )
 
-    sample = unknown[0]
-    mentions = " ".join(f"@{p.target}" for p in unknown)
-    general_body = f"{mentions} {sample.body}" if sample.body else mentions
-    if isinstance(sample, HumanAgentMessage):
-        return HumanAgentMessage(body=general_body, sender=sample.sender)
-    return GodViewMessage(body=general_body)
+    def _fold(group: list["InteractPayload"]) -> "InteractPayload":
+        sample = group[0]
+        mentions = " ".join(f"@{payload.target}" for payload in group)
+        general_body = f"{mentions} {sample.body}" if sample.body else mentions
+        if isinstance(sample, HumanAgentMessage):
+            return HumanAgentMessage(body=general_body, sender=sample.sender)
+        return GodViewMessage(body=general_body)
+
+    if all(payload.body == unknown[0].body for payload in unknown):
+        return [_fold(unknown)]
+    return [_fold([payload]) for payload in unknown]
 
 
 async def resolve_targets(
@@ -261,7 +306,7 @@ async def resolve_targets(
 
     if not unknown:
         return payloads
-    return kept + [_fold_unknown_mentions(unknown)]
+    return kept + _fold_unknown_mentions(unknown)
 
 
 async def deliver_direct(
