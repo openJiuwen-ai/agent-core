@@ -132,19 +132,6 @@ def _invoke_chat_completion(
             "Vision model config missing api_key."
         )
 
-    # TEMP-DEBUG: vision call trace — remove after diagnosis
-    try:
-        import datetime as _dt
-        with open('D:/Projects/mutimodal/relay-claw/.multimodal-debug.log', 'a', encoding='utf-8') as _dbg:
-            _dbg.write(
-                f"{_dt.datetime.now().isoformat()} vqa-call: "
-                f"key={config.api_key[:12]} base={config.base_url[:45]} "
-                f"cfg_hdr={'Y' if config.default_headers else 'N'} "
-                f"model={config.model[:30]}\n"
-            )
-    except Exception:
-        pass
-
     client = OpenAI(
         api_key=config.api_key,
         base_url=config.base_url,

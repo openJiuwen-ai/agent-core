@@ -1399,6 +1399,11 @@ async def test_read_pdf_offloads_extract_text_to_thread(sys_op, temp_dir, monkey
     extraction_duration_s = 0.5
 
     class _SlowPage:
+        def __init__(self):
+            # pdfplumber page contract: `images` must exist (may be empty) so the
+            # embedded-image enumeration takes the real path, not the except branch.
+            self.images: list = []
+
         def extract_text(self):
             time.sleep(extraction_duration_s)
             return "page text"
@@ -1423,11 +1428,12 @@ async def test_read_pdf_offloads_extract_text_to_thread(sys_op, temp_dir, monkey
         await asyncio.sleep(0.05)
         return loop.time() - started
 
-    _, elapsed = await asyncio.gather(
+    result, elapsed = await asyncio.gather(
         read_tool.invoke({"file_path": file_path}),
         _watchdog(),
     )
 
+    assert result.success, result.error
     assert elapsed < extraction_duration_s, (
         f"pdfplumber.extract_text blocked the event loop for {elapsed:.2f}s; "
         "it must run in a worker thread so WS ping/pong can proceed."

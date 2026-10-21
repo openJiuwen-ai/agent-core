@@ -217,8 +217,12 @@ def _pptx_embedded_images_hint(file_path: str) -> str:
     except (zipfile.BadZipFile, OSError):
         return ""
 
-def _read_docx_text(file_path: str) -> str:
-    """Extract text and tables from a .docx file as Markdown."""
+def _read_docx_text(file_path: str, *, include_media_hint: bool = True) -> str:
+    """Extract text and tables from a .docx file as Markdown.
+
+    ``include_media_hint=False`` 时仅供写入/编辑路径取纯文本基线——
+    嵌入图片提示绝不能进入写回内容，否则会把提示文案写进文件。
+    """
     from docx import Document
 
     doc = Document(file_path)
@@ -252,11 +256,12 @@ def _read_docx_text(file_path: str) -> str:
             table_lines.append("| " + " | ".join(cells) + " |")
         parts.append("\n".join(table_lines))
 
-    parts.append(_embedded_images_hint(file_path, "word/media/", "Word 文档"))
+    if include_media_hint:
+        parts.append(_embedded_images_hint(file_path, "word/media/", "Word 文档"))
     return "\n\n".join(parts)
 
 
-def _read_xlsx_text(file_path: str) -> str:
+def _read_xlsx_text(file_path: str, *, include_media_hint: bool = True) -> str:
     """Extract data from an .xlsx file as Markdown tables."""
     from openpyxl import load_workbook
 
@@ -280,11 +285,12 @@ def _read_xlsx_text(file_path: str) -> str:
     finally:
         wb.close()
 
-    parts.append(_embedded_images_hint(file_path, "xl/media/", "Excel 工作簿"))
+    if include_media_hint:
+        parts.append(_embedded_images_hint(file_path, "xl/media/", "Excel 工作簿"))
     return "\n\n".join(parts)
 
 
-def _read_pptx_text(file_path: str) -> str:
+def _read_pptx_text(file_path: str, *, include_media_hint: bool = True) -> str:
     """Extract text from a .pptx file as Markdown."""
     from pptx import Presentation
 
@@ -311,19 +317,23 @@ def _read_pptx_text(file_path: str) -> str:
                         parts.append("| " + " | ".join(cells) + " |")
         parts.append("")
 
-    parts.append(_pptx_embedded_images_hint(file_path))
+    if include_media_hint:
+        parts.append(_pptx_embedded_images_hint(file_path))
     return "\n".join(parts)
 
 
 def _read_office_plain_text(file_path: str) -> str:
-    """Extract Office text in the same shape used by read_file (without cat -n)."""
+    """Extract Office text in the same shape used by read_file (without cat -n).
+
+    写入/编辑路径的纯文本基线——不带嵌入图片提示，防止提示文案被写回文件。
+    """
     _, ext = os.path.splitext(file_path.lower())
     if ext == ".docx":
-        return _read_docx_text(file_path)
+        return _read_docx_text(file_path, include_media_hint=False)
     if ext in {".xlsx", ".xls"}:
-        return _read_xlsx_text(file_path)
+        return _read_xlsx_text(file_path, include_media_hint=False)
     if ext in {".pptx", ".ppt"}:
-        return _read_pptx_text(file_path)
+        return _read_pptx_text(file_path, include_media_hint=False)
     raise ValueError(f"Unsupported Office extension: {ext}")
 
 
@@ -1212,11 +1222,16 @@ class ReadFileTool(Tool):
 
                 # Report embedded images across all pages (not just the extracted range)
                 # so the model knows to extract and recognize them via VQA.
-                page_image_counts = [
-                    (page_no, len(pdf.pages[page_no - 1].images))
-                    for page_no in range(1, len(pdf.pages) + 1)
-                    if pdf.pages[page_no - 1].images
-                ]
+                # Best-effort: a single corrupt page must not fail the whole text read.
+                page_image_counts: list[tuple[int, int]] = []
+                for page_no in range(1, len(pdf.pages) + 1):
+                    try:
+                        count = len(pdf.pages[page_no - 1].images)
+                    except Exception as exc:  # noqa: BLE001 — third-party parser, page-scoped
+                        logger.debug("Failed to enumerate images on PDF page %s: %s", page_no, exc)
+                        continue
+                    if count > 0:
+                        page_image_counts.append((page_no, count))
                 total_images = sum(count for _, count in page_image_counts)
                 if total_images > 0:
                     distribution = "、".join(f"第 {page_no} 页 {count} 张" for page_no, count in page_image_counts)
