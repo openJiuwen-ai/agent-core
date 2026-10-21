@@ -122,11 +122,13 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     写入路径被注册是**装配期**的集合选择（不变量 10），不是 `invoke()` 里的
     `if`。`send_message` 是另一个三方共享的名字，但它有两个形态（不变量 18）；
     human_agent 视角下的语义约束在 prompt 层（见上一条），不在 `invoke()` 内。
-12. **每个 role_type 是独立 spawn 工具**（`spawn_teammate` /
-    `spawn_human_agent` / `spawn_bridge_agent` / `spawn_external_cli`），
-    schema 扁平、`invoke` 直线、无 role 分支。能力关闭时对应工具**根本不
+12. **每种成员一个独立 spawn 工具**——按"成员是什么"拆，不按"怎么运行"拆：
+    AI 队友（`spawn_teammate`，本地 LLM 或第三方 CLI）/ 人类（`spawn_human_agent` /
+    `spawn_passive_human`）/ bridge（`spawn_bridge_agent`），schema 扁平、无 role 分支。
+    外部 CLI 成员对 leader 而言就是 AI 队友，区别只在运行时，所以没有单独的 spawn 工具
+    （`spawn_external_cli` 已并入 `spawn_teammate`，F_127）。能力关闭时对应工具**根本不
     注册**到 leader 工具集——`create_team_tools` 按 `hitt_enabled()` /
-    `bridge_enabled()` / `external_cli_kinds()` 门控；`invoke` 内保留同名
+    `bridge_enabled()` 门控；`invoke` 内保留同名
     防御性检查作为运行时降级兜底并给出明确指引（如 `enable_hitt=False`）。
     human 成员的 `model_name` / `prompt` 直接不在 `spawn_human_agent`
     的 schema 中暴露（schema 即契约），无需运行时拒绝。`spawn_teammate`
@@ -141,7 +143,15 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     比缺失的提示词更糟。属性级门控同样保留 `invoke` 内的防御性检查：MCP
     客户端直接调 `invoke`、不校验 schema，被省略的属性必须在那里被拒，且
     要拒在写成员行之前。
-    `spawn_external_cli` 的 `builtin_model` / `effort` 是同一模式（F_113）：
+    在第三方 CLI 上运行也是同一模式（F_127）：信号是 `external_cli_kinds()` 非空，同时门控
+    `spawn_teammate` 的 `cli_agent` / `external_cli` 两个属性、`model_name` 描述追加的外部 CLI 规则与
+    描述槽 `{{external_cli_usage}}`；字段结构与调度模式 `create_task` 内联 `member` 一致。写库前
+    依次拒掉：门关时偷传的 `cli_agent` / `external_cli`、非对象或缺 `cli_agent` 的 `external_cli`、
+    与 `cli_agent` 同时出现的本地专属字段（`isolation` / `permissions` / `fork` / `fork_source` /
+    `fork_mode`）。外部 CLI 分支一律经 `tool_member.register_external_cli_member` 登记
+    （`role_type='external_cli'`），本地分支经 `register_teammate`；`desc` 两种成员都必填，`prompt`
+    都可选。
+    `external_cli.builtin_model` / `effort` 嵌套在其中（F_113）：
     信号是 `builtin_models_enabled()`（某个声明的 CLI kind 带
     `builtin_models` 目录），同时门控这两个属性、描述槽
     `{{builtin_model_param_rows}}` / `{{builtin_model_usage}}` 与 leader 工具
@@ -162,10 +172,10 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     `spawn_expert` 是又一个 `_SpawnToolBase` 子类：模板来源由 `group` 决定（等于
     `TeamAgentSpec.agent_group_name` 时取本 Team spec 里组装好的成员，不调目录、不读磁盘；否则经目录
     定位 + core 加载器），`desc` / `prompt` **只追加不覆盖**模板描述与人设，成员行写
-    `options.agent_template`。外部运行时模板与 `spawn_external_cli` **共用**声明检查
+    `options.agent_template`。外部运行时模板与 `spawn_teammate` 的外部 CLI 分支**共用**声明检查
     （`check_external_cli_declared`）与模型 / 认证回退 / 内置模型规则（`ExternalCliModelRules`），只对
     外部 CLI 有意义的参数收在可选对象 `external_cli` 中，其 `builtin_model` / `effort` 属性与
-    `spawn_external_cli` 同一门控（`builtin_models_enabled()`）；本地专家传入 `external_cli` 在写行前报错。
+    `spawn_teammate.external_cli` 同一门控（`builtin_models_enabled()`）；本地专家传入 `external_cli` 在写行前报错。
 13. **每个 `TeamTool.invoke` 必须返回 `ToolOutput`，永不抛**。工具内部
     `try / except` 捕获后端异常，落 `team_logger.error`，转成
     `ToolOutput(success=False, error=...)` 返回；不允许把 `Exception`
@@ -414,7 +424,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     （card id / mode / options 只在一处推导）。注册与拉起分离不变——内联成员由调度器交接
     拉起（`S_05` 不变量 1）。团队声明了外部 CLI 类型时 `member` 另有 `cli_agent`（与 `expert` 互斥，`prompt` 与本地成员一样可选）
     与 `external_cli` 对象（属性同 `spawn_expert.external_cli`），外部 CLI 内联成员（含外部运行时专家）经
-    `tool_member.register_external_cli_member`（与 `spawn_external_cli` / `spawn_expert` 共用）登记、带 `lifetime`，
+    `tool_member.register_external_cli_member`（与 `spawn_teammate` / `spawn_expert` 共用）登记、带 `lifetime`，
     `delete_unstarted_member` 回滚时一并清掉 `_external_cli_specs` 映射（F_125）。`member` 属性与其描述槽 `{{create_task_inline_member}}` 按
     `team_mode != "predefined"` 一起出现 / 消失（同 `spawn_teammate` 被摘掉的门），偷传在写库前
     拒掉。`TaskCreateTool`（autonomous）**不暴露也不接受 `member`**：schema 里没有该属性，
@@ -561,7 +571,7 @@ openjiuwen/agent_teams/tools/locales/
 
 | 集合常量 | 成员 |
 |---|---|
-| `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_teammate`, `spawn_human_agent`, `spawn_passive_human`, `spawn_bridge_agent`, `spawn_external_cli`, `set_member_model`（gate `builtin_models_enabled()`）, `spawn_expert` / `view_experts` / `view_expert_groups`（`EXPERT_TOOLS`，gate 宿主注入的 `ExpertCatalog`）, `shutdown_member`, `approve_plan`, `approve_tool`, `list_checkpoints`（gate `fork_enabled()`，同 `checkpoint`）, `create_task`, `update_task`, `swarmflow`, `async_tasks_list`, `async_task_output`, `async_task_cancel`，以及组织工具 `org_*`（gate 组织运行时，见 S_29） |
+| `LEADER_ONLY_TOOLS` | `build_team`, `clean_team`, `spawn_teammate`, `spawn_human_agent`, `spawn_passive_human`, `spawn_bridge_agent`, `set_member_model`（gate `builtin_models_enabled()`）, `spawn_expert` / `view_experts` / `view_expert_groups`（`EXPERT_TOOLS`，gate 宿主注入的 `ExpertCatalog`）, `shutdown_member`, `approve_plan`, `approve_tool`, `list_checkpoints`（gate `fork_enabled()`，同 `checkpoint`）, `create_task`, `update_task`, `swarmflow`, `async_tasks_list`, `async_task_output`, `async_task_cancel`，以及组织工具 `org_*`（gate 组织运行时，见 S_29） |
 | `EXPERT_TOOLS` | `view_experts`, `view_expert_groups`, `spawn_expert`——`LEADER_ONLY_TOOLS` 的子集，未注入目录时整体减掉 |
 | `MEMBER_ONLY_TOOLS` | `claim_task`, `submit_plan` |
 | `MEMBER_ONLY_TOOLS_SCHEDULED` | `member_complete_task`, `submit_plan` |

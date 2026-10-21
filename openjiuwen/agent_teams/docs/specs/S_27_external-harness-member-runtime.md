@@ -107,7 +107,7 @@
     三方没有分支，不能跑的选择即 `AGENT_TEAM_CONFIG_INVALID`。端点模型只交给声明 `ENDPOINT_MODELS`
     的三方 provider（`backends.provider_takes_endpoint_models`）：未声明时 spawn 丢弃并记日志，
     `_provider_filter_for_cli` 也不向 leader 列出池里的模型。运行中切换仍走 `set_model_selection`。
-    `spawn_external_cli.fallback_model_name` 可选：省略 / `null` / 空白都是"不回退"；只有能回退的 CLI 才在
+    `external_cli.fallback_model_name`（`spawn_teammate` / `spawn_expert` / 内联成员的同名对象）可选：省略 / `null` / 空白都是"不回退"；只有能回退的 CLI 才在
     存在兼容模型时被要求填写、才出现在 `compatible_fallback_models` 目录里，其余 CLI 给出模型名即报错并提示省略。
 15. **成员启动配置的来源有三层**（`_external_cli_config_for_member`，F_125）：预定义外部成员自己的
     `external_cli` → 成员行持久化的配置（`spawn_expert` 与调度模式 `create_task` 的外部专家内联成员写入
@@ -115,7 +115,7 @@
     `TeamRuntimeContext.template_external_cli` 传入）→ `TeamAgentSpec.external_cli_agents` 中同类型的声明。
     `spawn_expert` 写入的是 `merge_external_cli_config(声明配置, 模板配置)`：以声明的宿主级配置为底，叠加模板
     的技能（追加在声明技能之后）、`skill_conflict` 与非默认的 `runtime.config` 键；三条外部 CLI 登记路径
-    （`spawn_external_cli`、`spawn_expert`、内联成员）共用 `tool_member.register_external_cli_member`（声明检查 +
+    （`spawn_teammate` 带 `cli_agent`、`spawn_expert`、内联成员）共用 `tool_member.register_external_cli_member`（声明检查 +
     模型规则 + 登记），CLI 类型未声明时不登记。
 
 ## 接口契约

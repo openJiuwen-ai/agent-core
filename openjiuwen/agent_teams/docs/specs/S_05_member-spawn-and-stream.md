@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/worktree/`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-10-20 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md、F_74_leader-member-activity-and-team-idle.md、F_77_team-idle-requires-a-settled-task-board.md、F_79_team-scoped-skill-library-and-visibility.md、F_80_fork-identity-conversion.md、F_84_task-creation-starts-members.md、F_125_team-expert-catalog-and-spawn.md |
 
 ## 范围 / 边界
@@ -54,7 +54,7 @@
 1. **注册与拉起是两件事；拉起只有一个漏斗**。
 
    **注册**（写 DB 行，`status=UNSTARTED`，**不启动任何东西**）：`spawn_teammate` /
-   `spawn_human_agent` / `spawn_bridge_agent` / `spawn_external_cli` / `spawn_expert` 等 spawn 工具，以及
+   `spawn_human_agent` / `spawn_bridge_agent` / `spawn_expert` 等 spawn 工具（`spawn_teammate` 带 `cli_agent` 时登记外部 CLI 成员），以及
    `build_team` 的 predefined 成员，全部落到 `TeamBackend.spawn_member`（及其
    role 变体）。该方法的 docstring 就是契约：*"Only persists the member data —
    does NOT start the member."* **spawn 工具不拉起 agent**——工具描述里"何时被拉起

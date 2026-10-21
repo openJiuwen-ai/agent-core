@@ -202,7 +202,7 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 **注册与拉起是两件事**（细则见 `docs/specs/S_05` 不变量 1）：
 
-- **注册**：四个 `spawn_*` 工具与 `build_team` 的 predefined 成员都只落到 `TeamBackend.spawn_member`——**只写 DB 行（`UNSTARTED`），不启动任何东西**（该方法 docstring 即契约："does NOT start the member"）。
+- **注册**：各 `spawn_*` 工具与 `build_team` 的 predefined 成员都只落到 `TeamBackend.spawn_member`——**只写 DB 行（`UNSTARTED`），不启动任何东西**（该方法 docstring 即契约："does NOT start the member"）。
 - **拉起**：只有一条链 —— `TeamAgent.auto_start_member` / `auto_start_all` → `TeamBackend.startup_member` / `startup` → `MemberStatus.UNSTARTED→STARTING` 的 CAS guard（`try_transition_member_status`）→ `_spawn_and_publish` → `_on_teammate_created` → `SpawnManager.spawn_teammate`。
 
 拉起漏斗有五个触发点，全是"活要交给一个还没起来的成员"：leader `send_message` 的 `_auto_start_members`、leader `create_task` 落库后拉起（**仅 autonomous**，F_84）、interact dispatch（`@member` / `@all` / operator 消息）、调度器投递（F_62），外加 leader round-idle 对账兜底（`TeamAgent._reconcile_member_startup`，看板有非终态任务时才动，F_84）。前四个共用入口 `TeamBackend.autostart_unstarted()`——它持有构造期注入的 `on_member_started` 回调、自带 leader 门与回调门，调用方不各自捎带 spawn 回调。CAS 是这条链上唯一的并发闸——**不要在 spawn 工具里顺手把 agent 拉起来**，那会绕过注册与拉起的分离（走 `autostart_unstarted` 不算，它经同一条 CAS 链）。模式由 `TeamAgentSpec.spawn_mode` 决定。
@@ -320,7 +320,7 @@ provider session/Turn 协议合并。
 **team 拉起外部 CLI 成员（F_22）**：CLI 启动知识静态预置在
 `TeamAgentSpec.external_cli_agents`（`ExternalCliAgentSpec` 列表：`cli_agent` 种类标识 +
 `command`/`cwd`/`inject_mcp`/`mcp_server_command`/`env`/`ssh_transport`），非空集即外部 CLI 成员的能力上限。
-leader 用 `spawn_external_cli(cli_agent=<name>)` 按名引用，不在 spawn
+leader 用 `spawn_teammate(cli_agent=<name>)` 按名引用（F_127），不在 spawn
 调用里传启动细节。claude / codex 条目可声明 `builtin_models`（订阅等 CLI 自身登录提供的模型与
 effort 目录）：声明后 leader 可在 spawn 时挑内置模型，并用 `set_member_model` 在运行中切换模型 /
 effort（落库到 `options.builtin_model`，经 `HarnessModelControl.set_model` 下一 turn 生效）；
