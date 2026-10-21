@@ -182,8 +182,6 @@ def _merge_unique(*sources: list[str]) -> list[str]:
 
 
 _PPTX_PRESENTATION_RELS_RE = re.compile(r"^ppt/_rels/presentation\.xml\.rels$")
-_PPTX_SLDID_RE = re.compile(r'<p:sldId[^>]*r:id="(rId\d+)"')
-_PPTX_REL_ENTRY_RE = re.compile(r'<Relationship[^>]*Id="(rId\d+)"[^>]*Target="([^"]*slides/slide(\d+)\.xml)"')
 
 
 def _pptx_presentation_order(zf: zipfile.ZipFile) -> list[int]:
@@ -192,21 +190,43 @@ def _pptx_presentation_order(zf: zipfile.ZipFile) -> list[int]:
     slideN.xml 的 N 不代表播放顺序：用户在 PowerPoint 里调页后，文件名不变、
     presentation.xml 的 sldIdLst 顺序才是真实页序。返回按播放顺序排列的
     slide 文件编号列表；解析失败返回空列表（调用方退回文件编号序）。
+
+    用命名空间感知的 XML 解析（xml.etree.ElementTree）而非正则——.rels 的
+    Relationship 元素属性顺序不保证（Id/Target 可换序），正则按固定顺序匹配
+    会漏掉合法文件。
     """
+    import xml.etree.ElementTree as ET
+
     if "ppt/presentation.xml" not in zf.namelist():
         return []
+
+    # rId -> slide 文件编号（属性顺序无关）
     rels_target: dict[str, int] = {}
     for name in zf.namelist():
         if not _PPTX_PRESENTATION_RELS_RE.match(name):
             continue
-        for rid, _target, slide_no in _PPTX_REL_ENTRY_RE.findall(zf.read(name).decode("utf-8", errors="ignore")):
-            rels_target[rid] = int(slide_no)
+        try:
+            root = ET.fromstring(zf.read(name))
+        except ET.ParseError:
+            return []
+        for rel in root:
+            rid = rel.get("Id", "")
+            target = rel.get("Target", "")
+            match = re.search(r"slide(\d+)\.xml$", target)
+            if rid and match:
+                rels_target[rid] = int(match.group(1))
         break
     if not rels_target:
         return []
-    content = zf.read("ppt/presentation.xml").decode("utf-8", errors="ignore")
+
+    # sldIdLst 顺序 = 播放顺序
+    try:
+        pres_root = ET.fromstring(zf.read("ppt/presentation.xml"))
+    except ET.ParseError:
+        return []
     order: list[int] = []
-    for rid in _PPTX_SLDID_RE.findall(content):
+    for sldid in pres_root.iter("{http://schemas.openxmlformats.org/presentationml/2006/main}sldId"):
+        rid = sldid.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", "")
         slide_no = rels_target.get(rid)
         if slide_no is not None and slide_no not in order:
             order.append(slide_no)
@@ -1281,22 +1301,23 @@ class ReadFileTool(Tool):
                 # measurable cost. The model only sees the extracted range, so
                 # the hint is scoped to it as well.
                 # Best-effort: a single corrupt page must not fail the whole text read.
-                from pdfminer.pdfparser import PDFException as _PdfminerException
+                from pdfplumber.utils.exceptions import PdfminerException
 
                 page_image_counts: list[tuple[int, int]] = []
                 for page_no in range(start, end + 1):
                     try:
                         count = len(pdf.pages[page_no - 1].images)
                     except (
-                        _PdfminerException,
+                        PdfminerException,
                         ValueError,
                         TypeError,
                         KeyError,
                         IndexError,
                         AttributeError,
                     ) as exc:
-                        # 损坏页的图片枚举按页降级，不影响文本读取。pdfplumber 的解析
-                        # 错误包装为 pdfminer 异常族（PDFException 及其子类）。
+                        # 损坏页的图片枚举按页降级，不影响文本读取。pdfplumber 把底层
+                        # pdfminer 的解析错误包装为 PdfminerException（它并不继承
+                        # pdfminer.PDFException，两者无继承关系，不能混用）。
                         logger.debug("Failed to enumerate images on PDF page %s: %s", page_no, exc)
                         continue
                     if count > 0:

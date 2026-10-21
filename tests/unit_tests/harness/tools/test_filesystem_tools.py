@@ -1476,10 +1476,27 @@ def test_pptx_image_hint_follows_presentation_order(tmp_path):
     hint = _pptx_embedded_images_hint(str(reordered))
     assert "Slide 1" in hint
 
+    # 属性换序变体：Target 在 Id 前（正则按固定属性顺序匹配会漏，XML 解析不受影响）
+    rels_name = "ppt/_rels/presentation.xml.rels"
+    rels = items[rels_name].decode("utf-8")
+    for entry in re.findall(r"<Relationship [^>]+/>", rels):
+        rid = re.search(r'Id="(rId\d+)"', entry).group(1)
+        tgt = re.search(r'Target="([^"]+)"', entry).group(1)
+        typ = re.search(r'Type="([^"]+)"', entry).group(1)
+        rels = rels.replace(entry, f'<Relationship Target="{tgt}" Id="{rid}" Type="{typ}"/>')
+    items[rels_name] = rels.encode("utf-8")
+    swapped = tmp_path / "attr-swapped.pptx"
+    with zipfile.ZipFile(swapped, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in items.items():
+            zout.writestr(name, data)
+    with zipfile.ZipFile(swapped) as zf:
+        assert _pptx_presentation_order(zf) == [3, 1, 2], "attr order must not matter"
+    Presentation(str(swapped))  # python-pptx 仍能打开
+
 @pytest.mark.asyncio
 async def test_pdf_image_enumeration_swallows_pdfminer_errors(sys_op, temp_dir, monkeypatch):
     """page.images 抛 pdfminer 异常族（PDFException 及子类）时按页降级，文本读取不失败。"""
-    from pdfminer.pdfparser import PDFException
+    from pdfplumber.utils.exceptions import PdfminerException
 
     import openjiuwen.harness.tools.filesystem as fs_mod
 
@@ -1490,7 +1507,7 @@ async def test_pdf_image_enumeration_swallows_pdfminer_errors(sys_op, temp_dir, 
     class _ExplodingImagesPage:
         @property
         def images(self):
-            raise PDFException("corrupt xobject")
+            raise PdfminerException("corrupt xobject")
 
         def extract_text(self):
             return "page text"
