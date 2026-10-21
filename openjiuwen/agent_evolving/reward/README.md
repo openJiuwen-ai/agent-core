@@ -52,18 +52,21 @@ python -m openjiuwen.agent_evolving.reward --task task.md --artifact report.md t
 
 ```python
 import asyncio
-from openjiuwen.agent_evolving.reward import load_config, reward, render
+from openjiuwen.agent_evolving.reward import RewardOptions, load_config, reward, render
 
 config = load_config()                                        # 也可以直接传入 dict
-result = asyncio.run(reward(task_text, ["report.md", "table.xlsx"], config, txt_response=reply_text))
+options = RewardOptions(txt_response=reply_text)
+result = asyncio.run(reward(task_text, ["report.md", "table.xlsx"], config, options))
 print(render(result))                                         # Markdown 回复
 ```
 
 ## 接口
 
 ```python
-result = await reward(task, artifacts, config, txt_response="", user_note="", process_signal="",
-                      rubric_path=None, previous_result=None)
+result = await reward(task, artifacts, config, options=None)   # options: RewardOptions, every field optional
+
+options = RewardOptions(txt_response="", user_note="", process_signal="", rubric_path=None,
+                        previous_result=None, criteria=None, log=None, warnings=[])
 ```
 
 | 参数 | 命令行 | 类型 | 必需 | 说明 |
@@ -71,17 +74,17 @@ result = await reward(task, artifacts, config, txt_response="", user_note="", pr
 | `task` | `--task` | str | 是 | 任务描述，即用户的原话。评分标准只依据它编写 |
 | `artifacts` | `--artifact` | list[str] | 是 | 交付物路径，文件或目录均可。评测在临时副本上进行，结束后删除，不修改原文件。答案只在回复中时传 `[]`（命令行省略该参数） |
 | `config` | `--config` | dict | 是 | 模型、时限等配置，见「配置」一节；`load_config()` 读取默认配置 |
-| `txt_response` | `--txt-response` | str | 否 | Agent 交付时给用户的文字回复。答案在回复中时评测它 |
-| `user_note` | `--user-note` | str | 否 | 用户对作品的意见，并入评分标准，见「用户意见与过程信号」一节 |
-| `process_signal` | `--process-signal` | str | 否 | 过程信号：Agent 工作中遇到的环境报错和多轮对话中的用户反馈，并入评分标准 |
-| `rubric_path` | `--rubric` | str / Path | 否 | 评分标准文件。不传时每次按任务重新出题；传入时首次写入，之后沿用，见「沿用与重新出题」一节 |
-| `previous_result` | `--previous-result` | dict | 否 | 同一任务上一次的结果 JSON，仅在重新出题时使用 |
+| `options.txt_response` | `--txt-response` | str | 否 | Agent 交付时给用户的文字回复。答案在回复中时评测它 |
+| `options.user_note` | `--user-note` | str | 否 | 用户对作品的意见，并入评分标准，见「用户意见与过程信号」一节 |
+| `options.process_signal` | `--process-signal` | str | 否 | 过程信号：Agent 工作中遇到的环境报错和多轮对话中的用户反馈，并入评分标准 |
+| `options.rubric_path` | `--rubric` | str / Path | 否 | 评分标准文件。不传时每次按任务重新出题；传入时首次写入，之后沿用，见「沿用与重新出题」一节 |
+| `options.previous_result` | `--previous-result` | dict | 否 | 同一任务上一次的结果 JSON，仅在重新出题时使用 |
 
 命令行的文本参数（`--task`、`--txt-response`、`--user-note`、`--process-signal`）可以是文本，也可以是文件路径。
 
 本包不接收轨迹。从会话中取出任务、最终回复、用户意见和过程信号由调用方负责（JiuwenSwarm 使用 `fast_attribution.locate_task_output`）。
 
-其他公开接口：`text_reward()`、`write_criteria()`、`archive_rubric()`、`render()`、`load_config()`、`SCHEMA_VERSION`。
+其他公开接口：`RewardOptions`、`text_reward()`、`write_criteria()`、`archive_rubric()`、`render()`、`load_config()`、`SCHEMA_VERSION`。
 
 ## 输出格式
 
@@ -369,10 +372,11 @@ result = await reward(task, artifacts, config, txt_response="", user_note="", pr
 
 | 文件 | 内容 |
 |---|---|
-| `__init__.py` | 公开接口：`reward`、`text_reward`、`write_criteria`、`render`、`load_config`、`archive_rubric`、`SCHEMA_VERSION` |
+| `__init__.py` | 公开接口：`reward`、`RewardOptions`、`text_reward`、`write_criteria`、`render`、`load_config`、`archive_rubric`、`SCHEMA_VERSION` |
+| `options.py` | `RewardOptions`：`reward()` / `text_reward()` / `score_workspace()` 的可选输入（最终回复、用户意见、过程信号、评分标准文件、上一次结果、给定标准、日志函数、警告） |
 | `__main__.py` | 命令行：调用 `pipeline.reward`，写出 JSON，打印 Markdown |
 | `pipeline.py` | 主流程：`reward()` 建临时目录后调用 `score_workspace()`（写标准 → 取证 → 判定 → 计分 → 总评 → 组装 JSON）；另有 `text_reward()`、`write_criteria()`、`feedback_claims()` / `merge_feedback()`、`ensure_visual()`、`evaluate_terminal()`、`cap_by_critique()`、`default_screenshots()`、`load_rubric()` / `save_rubric()` / `archive_rubric()`、`overall_summary()` |
-| `evidence_agent.py` | 取证 DeepAgent：`gather()` 创建 DeepAgent 并挂载 `run_checks` / `read_evidence`，运行结束后销毁；`EvidenceRun` 保存结果并按维度分配证据；`EvidenceError` |
+| `evidence_agent.py` | 取证 DeepAgent：`gather()`（上限由 `Limits` 给出）创建 DeepAgent 并挂载 `run_checks` / `read_evidence`，运行结束后销毁；`EvidenceRun` 保存结果并按维度分配证据；`EvidenceError` |
 | `checks.py` | 检查工具：`run_check()`、`run_experiment()`（离线浏览器）、`image_views()`、`available_tools()` |
 | `scoring.py` | `score()`（子项状态 → 维度分）、`total()`、`to_result()`、`claim_gains()` |
 | `result.py` | 标准 JSON：`build()`；Markdown：`render()`、`progress()`、`bar()` |

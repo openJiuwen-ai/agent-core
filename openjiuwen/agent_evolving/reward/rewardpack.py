@@ -22,6 +22,7 @@ from pathlib import Path
 from . import pipeline
 from .config import load_config
 from .files import extract_text, read_files
+from .options import RewardOptions
 
 REFERENCE_SUFFIXES = {".md", ".txt", ".csv", ".json", ".jsonl", ".yaml", ".yml", ".tsv", ".xlsx", ".docx", ".pptx",
                       ".html", ".xml", ".py", ".cu", ".h", ".cpp"}
@@ -126,7 +127,7 @@ async def main_async(args):
                 if (case["task"], rnd["round"], arm_name) not in seen:
                     jobs.append((case, rnd, arm_name, refs))
     jobs = jobs[:args.limit] if args.limit else jobs
-    print(f"{len(jobs)} candidate(s) to score, {len(rows)} already done", file=sys.stderr)
+    sys.stderr.write(f"{len(jobs)} candidate(s) to score, {len(rows)} already done\n")
 
     gate = asyncio.Semaphore(args.concurrency)
     lock = asyncio.Lock()
@@ -155,8 +156,9 @@ async def main_async(args):
         async with gate:
             try:
                 criteria = await criteria_for(case, rnd)
-                report = await pipeline.text_reward(rnd["task_prompt"], deliverable, config, response=reply,
-                                              references=refs, criteria=criteria, log=lambda m: None)
+                options = RewardOptions(txt_response=reply, criteria=criteria)
+                report = await pipeline.text_reward(rnd["task_prompt"], deliverable, config, options,
+                                                    references=refs)
                 row = {"total": report["total"]["score"], "report": report}
             except Exception as error:  # noqa: BLE001 - record and move on
                 row = {"total": None, "error": f"{type(error).__name__}: {str(error)[:300]}"}
@@ -166,13 +168,15 @@ async def main_async(args):
             rows.append(row)
             with results_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-        print(f"[{time.monotonic() - started:5.0f}s] {label}: ours {row['total']} official {row['official']:.1f}"
-              + (f" ERROR {row['error']}" if row.get("error") else ""), file=sys.stderr, flush=True)
+        sys.stderr.write(f"[{time.monotonic() - started:5.0f}s] {label}: ours {row['total']} "
+                         f"official {row['official']:.1f}" + (f" ERROR {row['error']}" if row.get("error") else "")
+                         + "\n")
+        sys.stderr.flush()
 
     await asyncio.gather(*(run(*job) for job in jobs))
     summary = summarize(rows)
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    sys.stdout.write(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
 
 
 def main(argv=None):

@@ -247,10 +247,12 @@ class _ProgressLines:
         self.tick(detail)
         return result
 
-    def finish(self, total: Any) -> None:  # not called by the pipeline; the adapter ends the run itself
+    @staticmethod
+    def finish(total: Any) -> None:  # not called by the pipeline; the adapter ends the run itself
         del total
 
-    def fail(self, error: Any) -> None:
+    @staticmethod
+    def fail(error: Any) -> None:
         del error
 
     def log(self, message: str) -> None:
@@ -363,6 +365,7 @@ async def run_reward(
     """
     from openjiuwen.agent_evolving.attribution.events import emit_single_llm_event
     from openjiuwen.agent_evolving.reward import evidence_agent, pipeline, progress
+    from openjiuwen.agent_evolving.reward.options import RewardOptions
 
     counter = status_counter if status_counter is not None else [0]
     task = review_task(task_parse, user_attribution, language)
@@ -386,11 +389,10 @@ async def run_reward(
     if config.get("deadline_seconds"):
         evidence_seconds = min(evidence_seconds, float(config["deadline_seconds"]))
     lines = _ProgressLines(say, language, evidence_seconds)
-    token = progress._current.set(lines)  # noqa: SLF001 - Reward's own per-run progress slot
     try:
-        result = await pipeline.reward(
-            task, artifacts, config, txt_response=reply, user_note=user_attribution or "", log=lines.log
-        )
+        with progress.using(lines):  # Reward's own per-run progress slot, restored on exit
+            options = RewardOptions(txt_response=reply, user_note=user_attribution or "", log=lines.log)
+            result = await pipeline.reward(task, artifacts, config, options)
         payload = to_reward_payload(result, language)
     except Exception as exc:
         emit_single_llm_event(
@@ -403,8 +405,6 @@ async def run_reward(
             error=str(exc)[:200] or type(exc).__name__,
         )
         raise
-    finally:
-        progress._current.reset(token)  # noqa: SLF001
     lines.line(100, _labels(language)["finished"].format(score=payload["overall"]["total_score"]))
     meta = {
         "engine": "reward",

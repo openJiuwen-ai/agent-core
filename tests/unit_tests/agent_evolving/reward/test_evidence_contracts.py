@@ -7,6 +7,7 @@ import shutil
 import pytest
 
 from openjiuwen.agent_evolving.reward import checks, evidence_agent, models, pipeline, workspace
+from openjiuwen.agent_evolving.reward.options import RewardOptions
 
 
 def test_missing_artifact_is_not_silently_graded_as_a_text_only_answer(tmp_path):
@@ -98,7 +99,7 @@ async def test_text_reply_reaches_real_gather_and_judge_without_a_fabricated_che
     monkeypatch.setattr(models, "Model", Judge)
     criterion = {"id": "answer", "claims": [{"text": "Gives an approximate distance", "level": "floor"}]}
     result = await pipeline.score_workspace("北京到上海多远？", tmp_path, {"producer": {}},
-                                            txt_response=reply, criteria=[criterion])
+                                            RewardOptions(txt_response=reply, criteria=[criterion]))
     assert queries[0]["final_reply"] == reply and queries[0]["workspace"]["files"] == {}
     assert result["total"]["score"] == 100 and result["meta"]["tools"]["used"] == []
 

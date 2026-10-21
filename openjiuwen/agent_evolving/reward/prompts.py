@@ -84,11 +84,13 @@ CHECK_TOOLS = """Tools:
   browser : {"tool": "browser", "page": "relative/path.html", "actions": [...], "snapshots": [1, 3]}
 """ + BROWSER_ACTIONS
 
-CHECK_GUIDANCE = """Use only the tools listed as available. Checks measure; the Judge decides, so print facts and values, not
+CHECK_GUIDANCE = """\
+Use only the tools listed as available. Checks measure; the Judge decides, so print facts and values, not
 pass/fail verdicts. Use the work the way its user would: run it, play it, open it. That is the main evidence for
 behaviour and looks. Work used in a browser (a game, a page, an app) is used, not read: its source cannot be read; find
 the names a probe or a controlled setup needs with a probe (Object.keys(window), the page's buttons and their text).
-Read code closely only when code is the deliverable (a script, a library). A controlled setup (calling the work's own functions to reach a late state) is allowed when natural use
+Read code closely only when code is the deliverable (a script, a library). A controlled setup \
+(calling the work's own functions to reach a late state) is allowed when natural use
 cannot reach the claim quickly, and must be named in "note". Make sure a check's own input reaches the situation the
 claim is about: input sent blindly (fixed timers, guessed selectors, wrong field values) often fails or resets the
 work, and then the outcome proves nothing. Probe the state you meant to reach and report whether it was reached.
@@ -100,17 +102,21 @@ over time. Never rebuild its state from pixels (reading the canvas to find a cha
 probes are long, slow and guess; a claim nothing visible settles stays open for the Judge.
 Start a game or app through its start control (a button reading 开始, Start or Play, or the key the screen names), not
 the first button on the page, which is often a sound or settings toggle; confirm by a probe or screenshot that play
-has begun before judging play. For work with pages or slides, look at every page (navigate with the work's own controls, e.g. the right arrow or a
+has begun before judging play. For work with pages or slides, \
+look at every page (navigate with the work's own controls, e.g. the right arrow or a
 "next" button; when the pages are stacked in one long page, scroll one screen or to each page's element instead)
 and screenshot each one, so claims about consistency across pages can be judged.
 To check a fact, number or source the work states, recompute it from the data the work rests on: the delivered
 files themselves, and the inputs when the workspace lists any (./_inputs/, one file each; search them with read and a
 pattern, then read around the hits; "inputs_index" means they are too long to show). When no file here can confirm a
-fact, leave it: do not search for inputs that are not listed. When "domain_knowledge" is given, use its methods where they fit."""
+fact, leave it: do not search for inputs that are not listed. \
+When "domain_knowledge" is given, use its methods where they fit."""
 
-EVIDENCE_AGENT_PROMPT = """You gather evidence about an agent's delivered work for a Judge who decides each claim of each
+EVIDENCE_AGENT_PROMPT = """\
+You gather evidence about an agent's delivered work for a Judge who decides each claim of each
 criterion afterwards. The first message gives the Task, every criterion with its claims, the workspace (file list with
-line counts and excerpts of documents and data; page source is not shown; "inputs_index" when the inputs are too long to show), the agent's "final_reply", the available tools and your limits (model turns and
+line counts and excerpts of documents and data; page source is not shown; "inputs_index" when \
+the inputs are too long to show), the agent's "final_reply", the available tools and your limits (model turns and
 seconds). The final reply is supplied work: when it is the entire deliverable and no files or input materials are
 provided, its wording and structure may need no tool check. Stop without a tool call only when the supplied text
 already gives the evidence these tools can provide; facts still need independent confirmation when applicable.

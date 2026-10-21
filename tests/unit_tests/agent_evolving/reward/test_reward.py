@@ -10,6 +10,7 @@ from openjiuwen.agent_evolving.reward import __main__ as cli
 from openjiuwen.agent_evolving.reward import checks, evidence_agent, guides, models, pipeline, scoring, workspace
 from openjiuwen.agent_evolving.reward import progress as progress_mod
 from openjiuwen.agent_evolving.reward import result as result_mod
+from openjiuwen.agent_evolving.reward.options import RewardOptions
 
 GAME = """<button id="go">Go</button><p id="score">0</p><script>
 var score = 0; var best = Number(localStorage.getItem('best') || 0);
@@ -286,7 +287,8 @@ def scripted_evidence_unless_asked(request, monkeypatch):
             images += [(f"check {number}, {label}", data) for label, data in shots]
         return evidence, images
 
-    async def scripted(criteria, ctx, route, log, rounds=12, seconds=300):
+    async def scripted(criteria, ctx, route, log, limits=None):
+        seconds = limits.seconds if limits else 300
         producer = models.Model(ctx["config"]["producer"])
 
         async def timed(criterion):
@@ -345,7 +347,7 @@ async def test_a_page_is_played_in_the_browser_and_judged_with_comments(tmp_path
     ], seen)
     root = workspace.make_workspace([tmp_path / "index.html"])
     report = await pipeline.score_workspace("Make a click game", root, {"producer": {}, "include_evidence": True},
-                                   txt_response="Done.")
+                                   RewardOptions(txt_response="Done."))
     check = report["evidence"]["click-scores"][0]
     assert check["tool"] == "browser" and check["actions"][1]["value"] == {"score": 1, "best": 0}
     assert not any("SecurityError" in e for e in check["page_errors"])         # real origin, localStorage works
@@ -598,9 +600,9 @@ async def test_later_rounds_reuse_the_kept_rubric_and_keep_no_scores(tmp_path, m
     ], seen)
     rubric = tmp_path / "rubric.json"
     root = workspace.make_workspace(texts={"page.html": "<p>v1</p>"})
-    first = await pipeline.score_workspace("做个游戏", root, {"producer": {}}, rubric_path=rubric)
+    first = await pipeline.score_workspace("做个游戏", root, {"producer": {}}, RewardOptions(rubric_path=rubric))
     root = workspace.make_workspace(texts={"page.html": "<p>v2</p>"})
-    second = await pipeline.score_workspace("做个游戏（改进版）", root, {"producer": {}}, rubric_path=rubric)
+    second = await pipeline.score_workspace("做个游戏（改进版）", root, {"producer": {}}, RewardOptions(rubric_path=rubric))
     assert sum(s[0].startswith("You write evaluation criteria") for s in seen) == 1     # written once
     assert [c["category_id"] for c in second["categories"]] == [c["category_id"] for c in first["categories"]]
     assert first["total"]["score"] < second["total"]["score"]
@@ -609,7 +611,7 @@ async def test_later_rounds_reuse_the_kept_rubric_and_keep_no_scores(tmp_path, m
     assert set(json.loads(rubric.read_text())) == {"criteria"}                       # only the criteria are kept
     root = workspace.make_workspace(texts={"page.html": "<p>v3</p>"})
     assert pipeline.archive_rubric(rubric).name == "rubric.1.json"              # the caller moves the old one aside
-    renewed = await pipeline.score_workspace("做个游戏", root, {"producer": {}}, rubric_path=rubric)
+    renewed = await pipeline.score_workspace("做个游戏", root, {"producer": {}}, RewardOptions(rubric_path=rubric))
     assert sum(s[0].startswith("You write evaluation criteria") for s in seen) == 2     # written again
     assert (tmp_path / "rubric.1.json").exists() and rubric.exists() and "rubric_renewed" not in renewed["meta"]
 
@@ -691,9 +693,9 @@ async def test_a_blind_judge_gets_no_screenshots_and_the_reply_warns(tmp_path, m
 def test_cli_passes_the_product_paths_and_the_text_reply(tmp_path, monkeypatch):
     seen = []
 
-    async def fake_reward(task, artifacts, config, txt_response="", user_note="", process_signal="", rubric_path=None,
-                          previous_result=None, log=None, warnings=()):
-        seen.append(([Path(p).name for p in artifacts], txt_response, user_note, process_signal))
+    async def fake_reward(task, artifacts, config, options):
+        seen.append(([Path(p).name for p in artifacts], options.txt_response, options.user_note,
+                     options.process_signal))
         return result_mod.build(task, [], None, "", {"deliverable": []})
 
     import sys
@@ -752,8 +754,9 @@ async def test_work_without_a_deliverable_file_is_scored_from_the_reply(tmp_path
         ("You judge each claim", {"claims": [{"index": 0, "status": "met"}, {"index": 1, "status": "met"}]}),
     ], seen)
     root = workspace.make_workspace()
-    report = await pipeline.score_workspace("北京到上海多远？一句话回答", root, {"producer": {}}, txt_response="直线约 1070 公里。",
-                                   rubric_path=tmp_path / "rubric.json")
+    report = await pipeline.score_workspace("北京到上海多远？一句话回答", root, {"producer": {}},
+                                        RewardOptions(txt_response="直线约 1070 公里。",
+                                                      rubric_path=tmp_path / "rubric.json"))
     assert report["total"]["score"] == 100
     judged = next(user for system, user, _ in seen if system.startswith("You judge each claim"))
     assert "(no deliverable files)" in judged and "1070" in judged
@@ -834,13 +837,13 @@ async def test_the_users_feedback_becomes_checks_in_the_criteria_it_concerns(tmp
     ], seen)
     rubric = tmp_path / "rubric.json"
     first = await pipeline.score_workspace("做绘本", workspace.make_workspace(texts={"a.md": "x"}), {"producer": {}},
-                                  rubric_path=rubric, user_note="第 2 页多一只手")
+                                  RewardOptions(rubric_path=rubric, user_note="第 2 页多一只手"))
     asked = json.loads(next(u for s, u, _ in seen if s.startswith("You place a user's feedback")))
     assert asked["user_note"] == "第 2 页多一只手" and [c["id"] for c in asked["criteria"]] == ["click-scores", "visual"]
     hands = [i for i in first["sub_category_items"] if i["from_user_note"]]
     assert [(i["category_id"], i["rubric"]) for i in hands] == [("visual", "每页每个人物正好两只手")]
     second = await pipeline.score_workspace("做绘本", workspace.make_workspace(texts={"a.md": "y"}), {"producer": {}},
-                                   rubric_path=rubric, user_note="楼梯不自然")
+                                   RewardOptions(rubric_path=rubric, user_note="楼梯不自然"))
     assert [c["category_id"] for c in second["categories"]] == ["click-scores", "visual"]      # no criterion is added
     stairs, = [i for i in second["sub_category_items"] if i["rubric"] == "楼梯场景里孩子的动作自然"]
     assert stairs["category_id"] == "click-scores" and stairs["from_user_note"]     # unknown id: never the looks-only one
@@ -849,7 +852,7 @@ async def test_the_users_feedback_becomes_checks_in_the_criteria_it_concerns(tmp
     kept = json.loads(rubric.read_text())["criteria"]
     assert sum(x.get("source") == "feedback" for c in kept for x in c["claims"]) == 2   # the rubric grows
     third = await pipeline.score_workspace("做绘本", workspace.make_workspace(texts={"a.md": "z"}), {"producer": {}},
-                                  rubric_path=rubric)
+                                  RewardOptions(rubric_path=rubric))
     assert sum(s.startswith("You place a user's feedback") for s, _, _ in seen) == 2   # no feedback, no call
     assert len([i for i in third["sub_category_items"] if i["from_user_note"]]) == 2
 
@@ -871,7 +874,7 @@ async def test_reward_takes_product_paths_and_places_note_and_signal(tmp_path, m
     monkeypatch.setattr(pipeline, "make_workspace", lambda products: made.append(real(products)) or made[-1])
     (tmp_path / "a.md").write_text("x")
     report = await pipeline.reward("做绘本", [str(tmp_path / "a.md")], {"producer": {}},
-                                   user_note="猫太丑", process_signal="TypeError: x is undefined")
+                                   RewardOptions(user_note="猫太丑", process_signal="TypeError: x is undefined"))
     asked = json.loads(next(u for s, u, _ in seen if s.startswith("You place a user's feedback")))
     assert asked["user_note"] == "猫太丑" and asked["process_signal"] == "TypeError: x is undefined"
     by_text = {i["rubric"]: i for i in report["sub_category_items"]}

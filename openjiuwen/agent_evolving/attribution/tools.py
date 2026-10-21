@@ -578,7 +578,8 @@ def render_partial_view(
     if start is None or end is None:
         return {"error": f"node not found in range: {from_id if start is None else to_id}"}
     low, high = sorted((start, end))
-    selected = nodes[low : high + 1]
+    stop = high + 1
+    selected = nodes[low:stop]
     if len(selected) > 500:
         return render_overview(selected)
     return render_summary(selected, language)

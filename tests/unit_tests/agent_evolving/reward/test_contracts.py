@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from openjiuwen.agent_evolving.reward import checks, evidence_agent, pipeline, prompts
+from openjiuwen.agent_evolving.reward.options import RewardOptions
 
 PACKAGE = Path(pipeline.__file__).parent
 
@@ -72,8 +73,8 @@ async def test_art_judge_receives_task_and_uses_its_own_vision(tmp_path):
     criterion = {"id": "visual", "kind": "visual", "claims": [{"text": "Style fits task", "level": "floor"}]}
     art = Recorder({"critique": [], "claims": [{"index": 0, "status": "met"}], "summary": "Style fits"})
     judge = Recorder(error=AssertionError("ordinary judge must not judge appearance"))
-    result = await pipeline.evaluate_terminal(criterion, context(tmp_path, art), None, judge, lambda _: None,
-                                              ([], [("page", "image")]), seeing=False)
+    ctx = {**context(tmp_path, art), "judge_seeing": False}
+    result = await pipeline.evaluate_terminal(criterion, ctx, judge, ([], [("page", "image")]), lambda _: None)
     assert result["score"] == 100
     assert art.calls[0][1] == {"task": "Use the requested monochrome style", "criterion": criterion}
     assert art.calls[0][2] == [("page", "image")] and judge.calls == []
@@ -84,8 +85,8 @@ async def test_blind_or_missing_visual_evidence_cannot_be_judged_from_source(tmp
     criterion = {"id": "visual", "kind": "visual", "claims": [{"text": "Looks good", "level": "challenge"}]}
     judge = Recorder(error=AssertionError("must not infer appearance from source"))
     for seeing, images in ((False, [("page", "image")]), (True, [])):
-        result = await pipeline.evaluate_terminal(criterion, context(tmp_path, judge, seeing), None, judge,
-                                                  lambda _: None, ([], images), seeing=True)
+        result = await pipeline.evaluate_terminal(criterion, context(tmp_path, judge, seeing), judge,
+                                                  ([], images), lambda _: None)
         assert result["score"] is None and result["claims"][0]["status"] == "unknown"
     assert judge.calls == []
 
@@ -107,7 +108,7 @@ async def test_new_criteria_see_the_earlier_result_so_the_bar_rises():
                    {"category_id": "play", "rubric": "能跳", "type": "floor", "status": "met"},
                    {"category_id": "play", "rubric": "有连击", "type": "proactive_challenge", "status": "met"}]}
     writer = Recorder({"criteria": [{"id": "play", "claims": [{"text": "能跳"}]}]})
-    await pipeline.write_criteria("做个游戏", {"producer": {}}, producer=writer, previous_result=earlier)
+    await pipeline.write_criteria("做个游戏", {"producer": {}}, RewardOptions(previous_result=earlier), producer=writer)
     system, content, _ = writer.calls[0]
     assert "Earlier evaluation" in system and "Earlier evaluation" in content
     assert '"text": "有连击", "level": "challenge", "status": "met"' in content     # what the work already met
@@ -118,10 +119,11 @@ async def test_new_criteria_see_the_earlier_result_so_the_bar_rises():
 @pytest.mark.asyncio
 async def test_optional_stages_leave_a_warning_instead_of_failing_the_run():
     notes, broken = [], Recorder(error=RuntimeError("stream cut"))
-    assert await pipeline.feedback_claims("Task", "Too small", "", [{"id": "quality", "claims": []}], {},
-                                          producer=broken, notes=notes) == []
+    options = RewardOptions(user_note="Too small", warnings=notes)
+    assert await pipeline.feedback_claims("Task", [{"id": "quality", "claims": []}], {}, options,
+                                          producer=broken) == []
     summary = await pipeline.overall_summary("Task", [{"id": "a", "name": "玩法", "score": 75}], 75, broken,
-                                             lambda _: None, notes)
+                                             options)
     assert "玩法" in summary and len(notes) == 2 and all("没有完成" in n for n in notes)
 
 
@@ -133,7 +135,8 @@ async def test_a_weak_models_criteria_and_feedback_are_read_leniently():
         {"id": "p", "scope": "process", "claims": [{"text": "Honest"}]}]})
     criteria = await pipeline.write_criteria("Make a report", {"producer": {}}, producer=written)
     assert [(c["id"], [x["level"] for x in c["claims"]]) for c in criteria] == [("a", ["floor"]), ("a-2", ["challenge"])]
-    placed = await pipeline.feedback_claims("Task", "Hard to read", "TypeError", [{"id": "quality", "claims": []}], {},
+    options = RewardOptions(user_note="Hard to read", process_signal="TypeError")
+    placed = await pipeline.feedback_claims("Task", [{"id": "quality", "claims": []}], {}, options,
                                             producer=Recorder({"claims": [{"criterion": "quality", "text": "Readable"}]}))
     assert placed == [{"criterion": "quality", "text": "Readable", "from": "user_note"}]   # missing "from": first input
 
