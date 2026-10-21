@@ -318,7 +318,7 @@ class Limits:
     """How far the evidence agent may go: model turns, and seconds for the whole evidence step."""
 
     rounds: int = ROUNDS
-    seconds: float = SECONDS
+    seconds: float = float(SECONDS)
 
 
 async def gather(criteria, ctx, route, log, limits=None):

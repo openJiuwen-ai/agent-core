@@ -16,6 +16,7 @@ from pathlib import Path
 
 from . import pipeline, progress
 from .config import load_config
+from .console import line_writer
 from .options import RewardOptions
 from .result import render
 
@@ -54,9 +55,10 @@ def main(argv=None):
     config = {**load_config(args.config), **({"include_evidence": True} if args.evidence else {})}
     started = time.monotonic()
 
+    write_progress = line_writer(sys.stderr)
+
     def log(message):
-        sys.stderr.write(f"[{time.monotonic() - started:5.0f}s] {message}\n")
-        sys.stderr.flush()
+        write_progress(f"[{time.monotonic() - started:5.0f}s] {message}")
 
     run = progress.use(progress.Progress.for_session("general"))
     if args.rubric and args.new_rubric:
@@ -78,7 +80,7 @@ def main(argv=None):
     result["meta"]["artifacts"] = [str(Path(p).resolve()) for p in args.artifact]
     out_path = Path(args.out).resolve()
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    sys.stdout.write(render(result, out_path) + "\n")
+    line_writer(sys.stdout)(render(result, out_path))
 
 
 if __name__ == "__main__":

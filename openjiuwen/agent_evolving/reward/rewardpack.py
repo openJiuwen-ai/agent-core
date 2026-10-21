@@ -21,6 +21,7 @@ from pathlib import Path
 
 from . import pipeline
 from .config import load_config
+from .console import line_writer
 from .files import extract_text, read_files
 from .options import RewardOptions
 
@@ -127,7 +128,8 @@ async def main_async(args):
                 if (case["task"], rnd["round"], arm_name) not in seen:
                     jobs.append((case, rnd, arm_name, refs))
     jobs = jobs[:args.limit] if args.limit else jobs
-    sys.stderr.write(f"{len(jobs)} candidate(s) to score, {len(rows)} already done\n")
+    write_progress = line_writer(sys.stderr)
+    write_progress(f"{len(jobs)} candidate(s) to score, {len(rows)} already done")
 
     gate = asyncio.Semaphore(args.concurrency)
     lock = asyncio.Lock()
@@ -168,15 +170,13 @@ async def main_async(args):
             rows.append(row)
             with results_path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-        sys.stderr.write(f"[{time.monotonic() - started:5.0f}s] {label}: ours {row['total']} "
-                         f"official {row['official']:.1f}" + (f" ERROR {row['error']}" if row.get("error") else "")
-                         + "\n")
-        sys.stderr.flush()
+        write_progress(f"[{time.monotonic() - started:5.0f}s] {label}: ours {row['total']} "
+                       f"official {row['official']:.1f}" + (f" ERROR {row['error']}" if row.get("error") else ""))
 
     await asyncio.gather(*(run(*job) for job in jobs))
     summary = summarize(rows)
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    sys.stdout.write(json.dumps(summary, ensure_ascii=False, indent=2) + "\n")
+    line_writer(sys.stdout)(json.dumps(summary, ensure_ascii=False, indent=2))
 
 
 def main(argv=None):
