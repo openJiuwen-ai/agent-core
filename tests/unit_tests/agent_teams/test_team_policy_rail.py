@@ -517,6 +517,10 @@ class _FakeTeamBackend:
         """The rail probes this at init to gate the static HITT contract."""
         return self._hitt_enabled
 
+    def member_messaging_enabled(self) -> bool:
+        """The rail probes this at init to gate the scheduled messaging rule (F_126)."""
+        return False
+
     def fork_enabled(self) -> bool:
         """Whether the team's fork capability is on (gates the identity block)."""
         return self._fork_enabled
