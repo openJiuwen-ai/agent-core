@@ -254,9 +254,9 @@ STRINGS: dict[str, str] = {
         "list_members — do not put private content here"
     ),
     "spawn_external_cli.prompt": (
-        "[PRIVATE] The private system prompt this CLI member adopts to act as "
-        "this member. **Required**. Visible only to this member, never shown "
-        "in peers' roster"
+        "[PRIVATE] The private working agreement this CLI member adopts to act as "
+        "this member. Optional; without it the member works from the team policy alone. "
+        "Visible only to this member, never shown in peers' roster"
     ),
     "spawn_external_cli.cli_agent": (
         "Identifier of the third-party CLI agent kind to launch, e.g. 'claude' "
@@ -456,8 +456,8 @@ STRINGS: dict[str, str] = {
     ),
     "create_task_scheduled.task.member.cli_agent": (
         "Optional, exclusive with expert. Run this member as a third-party CLI agent, as spawn_external_cli.cli_agent: "
-        "the value must be a CLI kind declared in spec.external_cli_agents. With it, prompt is required (the CLI "
-        "member's private system prompt) and model_name is the team model pool endpoint the CLI uses"
+        "the value must be a CLI kind declared in spec.external_cli_agents; model_name is the team model pool "
+        "endpoint the CLI uses"
     ),
     "create_task_scheduled.task.member.external_cli": (
         "Optional object, only for external CLI members (cli_agent set, or expert is an external-runtime expert); "

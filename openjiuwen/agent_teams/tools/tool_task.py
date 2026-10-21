@@ -255,10 +255,8 @@ def _validate_inline_members(
         error = _check_inline_external_cli(member, expert=expert, external_cli_enabled=external_cli_enabled)
         if error:
             return f"Task {_spec_label(spec)!r}: {error}"
-        cli_agent = (member.get("cli_agent") or "").strip()
-        # An expert member takes its display name and description from the
-        # template; a CLI member needs its private prompt, as in spawn_external_cli.
-        for key in () if expert else ("display_name", "desc", *(("prompt",) if cli_agent else ())):
+        # An expert member takes its display name and description from the template.
+        for key in () if expert else ("display_name", "desc"):
             if not (member.get(key) or "").strip():
                 return f"Task {_spec_label(spec)!r}: member.{key} is required"
         if member.get("lifetime") not in _MEMBER_LIFETIMES:
@@ -348,7 +346,7 @@ async def _materialize_inline_members(
                 member_name=name,
                 display_name=display_name,
                 desc=desc,
-                prompt=prompt,
+                prompt=prompt or "",
                 model_name=member.get("model_name"),
                 fallback_model_name=external_args.get("fallback_model_name"),
                 builtin_model=external_args.get("builtin_model"),

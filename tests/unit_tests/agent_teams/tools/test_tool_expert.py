@@ -987,6 +987,19 @@ async def test_inline_cli_agent_member_registers_like_spawn_external_cli(db: Tea
     assert (await backend.task_manager.get("t1")).assignee == "rev-1"
 
 
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_cli_members_need_no_private_prompt(db: TeamDatabase, catalog: FakeCatalog) -> None:
+    backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
+    inline = await _scheduled_create_task(backend, catalog).invoke({"tasks": [_cli_task("t1", "rev-1", prompt="")]})
+    assert inline.success, inline.error
+    tool = SpawnExternalCliTool(backend, make_translator("en"))
+    assert "prompt" not in tool.card.input_params["required"]
+    direct = await tool.invoke({"member_name": "rev-2", "display_name": "d", "cli_agent": "claude"})
+    assert direct.success, direct.error
+    assert [(await backend.get_member(name)).prompt for name in ("rev-1", "rev-2")] == ["", ""]
+
+
 @pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
@@ -1020,7 +1033,6 @@ async def test_inline_cli_member_model_rules_match_spawn_external_cli(
     ("member", "error"),
     [
         ({"cli_agent": "codex"}, "cli_agent 'codex' is not declared"),
-        ({"prompt": ""}, "member.prompt is required"),
         ({"cli_agent": None, "external_cli": {"fallback_model_name": "m"}}, "applies only to an external CLI member"),
         ({"external_cli": "claude"}, "member.external_cli must be an object"),
     ],

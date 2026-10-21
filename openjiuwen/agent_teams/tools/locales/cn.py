@@ -194,7 +194,7 @@ STRINGS: dict[str, str] = {
         "可选；会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
     ),
     "spawn_external_cli.prompt": (
-        "[私有] 该 CLI 成员的私有系统提示词，CLI 据此扮演本成员角色。**必填**。"
+        "[私有] 该 CLI 成员的私有工作约定，CLI 据此扮演本成员角色。可选，不填时成员只按团队准则工作。"
         "仅本成员自己可见，不进他人花名册"
     ),
     "spawn_external_cli.cli_agent": (
@@ -344,7 +344,7 @@ STRINGS: dict[str, str] = {
     ),
     "create_task_scheduled.task.member.cli_agent": (
         "可选，与 expert 二选一。让该成员以第三方 CLI agent 运行，含义同 spawn_external_cli.cli_agent："
-        "取值必须是 spec.external_cli_agents 中声明过的 CLI 类型。填写后 prompt 必填（CLI 成员的私有系统提示词），"
+        "取值必须是 spec.external_cli_agents 中声明过的 CLI 类型；"
         "model_name 是该 CLI 使用的团队模型池端点"
     ),
     "create_task_scheduled.task.member.external_cli": (

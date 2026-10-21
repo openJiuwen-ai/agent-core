@@ -1199,7 +1199,7 @@ class SpawnExternalCliTool(_SpawnToolBase):
                     "description": fallback_description,
                 },
             },
-            "required": ["member_name", "display_name", "prompt", "cli_agent"],
+            "required": ["member_name", "display_name", "cli_agent"],
         }
         # Built-in model choice is an attribute-level capability: the two
         # properties exist only when some declared CLI kind offers a catalog.
@@ -1232,8 +1232,6 @@ class SpawnExternalCliTool(_SpawnToolBase):
 
         desc = inputs.get("desc") or ""
         prompt = inputs.get("prompt") or ""
-        if not prompt:
-            return self._fail("spawn_external_cli requires a non-empty 'prompt' (the member's private system prompt)")
 
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")

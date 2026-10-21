@@ -82,7 +82,7 @@
     人设渲染、显示名去重（同一次调用内拉起的同类成员也参与去重）与 `spawn_expert` 共用 `ExpertTemplateResolver` /
     `expert_member_texts` / `expert_member_record`，同一份实现。所有 `expert` 在写任何成员行之前解析完，失败时不写行。
 11. **内联成员也可以运行在外部 CLI 上**，两种来源：`expert` 是外部运行时专家，或成员直接写 `cli_agent`
-    （含义同 `spawn_external_cli`，此时 `prompt` 必填，`cli_agent` 与 `expert` 互斥）。只在团队声明了外部 CLI 类型时
+    （含义同 `spawn_external_cli`，`cli_agent` 与 `expert` 互斥）。只在团队声明了外部 CLI 类型时
     （`spawn_external_cli` 的同一门控）schema 才出现 `cli_agent` 与 `external_cli` 对象；`external_cli` 的属性与
     `spawn_expert.external_cli` 相同（`fallback_model_name`，以及仅在有内置模型目录时出现的 `builtin_model` / `effort`），
     两处由 `tool_member.external_cli_option_properties` 生成。三条外部 CLI 登记路径（`spawn_external_cli`、
@@ -94,6 +94,11 @@
     调度器的退场扫描、成员自落 SHUTDOWN / DORMANT、点名经 `recover_member` 唤醒都按成员行工作；唤醒后
     `restart_teammate` 以 `resume_external_backend=True` 重建，没有 CLI 检查点时按新会话启动（只有 swarmflow 传
     `require_checkpoint=True`），不会因还没跑完一轮就休眠而起不来。
+12. **外部 CLI 成员的 `prompt` 改为可选，与本地队友一致**（`spawn_external_cli`、`spawn_external_cli_agent`、
+    内联 `cli_agent` 成员）。必填来自 #751 拆分 `desc` / `prompt` 时：那时 CLI 靠人设拼出的首次启动消息知道自己是谁；
+    首次启动消息取消后，系统提示词只放团队准则，私有 `prompt` 由 `TeamContextTracker` 写进对话历史，两种成员都把空值
+    当"没有私有约定"处理，必填只剩规则不一致。`spawn_bridge_agent` 的 `prompt` 仍必填：它是经 `adapter.connect`
+    下发给远程 agent 的唯一角色说明。
 
 ## 拒绝的方案
 

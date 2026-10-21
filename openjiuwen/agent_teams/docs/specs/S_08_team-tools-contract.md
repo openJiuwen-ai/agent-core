@@ -405,7 +405,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     成员工作区（`MemberWorkspaceBinder.release` + `delete_if_zero`）、清掉它预热的 cache 字段——
     与 `spawn_member` 互为精确逆操作。两条注册路径共用 `tool_member.register_teammate`
     （card id / mode / options 只在一处推导）。注册与拉起分离不变——内联成员由调度器交接
-    拉起（`S_05` 不变量 1）。团队声明了外部 CLI 类型时 `member` 另有 `cli_agent`（与 `expert` 互斥，`prompt` 随之必填）
+    拉起（`S_05` 不变量 1）。团队声明了外部 CLI 类型时 `member` 另有 `cli_agent`（与 `expert` 互斥，`prompt` 与本地成员一样可选）
     与 `external_cli` 对象（属性同 `spawn_expert.external_cli`），外部 CLI 内联成员（含外部运行时专家）经
     `tool_member.register_external_cli_member`（与 `spawn_external_cli` / `spawn_expert` 共用）登记、带 `lifetime`，
     `delete_unstarted_member` 回滚时一并清掉 `_external_cli_specs` 映射（F_125）。`member` 属性与其描述槽 `{{create_task_inline_member}}` 按

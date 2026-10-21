@@ -3069,7 +3069,7 @@ class TeamBackend:
         display_name: str,
         cli_agent: str,
         desc: str = "",
-        prompt: str,
+        prompt: str = "",
         model_name: Optional[str] = None,
         allocation: Optional["Allocation"] = None,
         fallback_allocation: Optional["Allocation"] = None,
@@ -3094,8 +3094,9 @@ class TeamBackend:
                 ``agent_teams/external/cli_agent/adapters.py``.
             desc: Public description stored on the member row (roster view).
                 Optional; defaults to empty.
-            prompt: Private system prompt the CLI adopts to act as this
-                member. Required.
+            prompt: Private working agreement of this member, delivered like
+                a native teammate's. Optional; without it the member works
+                from the team policy alone.
             model_name: Optional model-name hint; passed to the pool allocator
                 to select a matching model endpoint.
             allocation: Optional pool allocation for this member; persisted as a
@@ -3128,8 +3129,6 @@ class TeamBackend:
             missing_sdk_requirement,
         )
 
-        if not prompt:
-            return MemberOpResult.fail("spawn_external_cli_agent requires non-empty 'prompt'")
         # Capability ceiling: the CLI kind must be pre-declared in
         # ``TeamAgentSpec.external_cli_agents`` (all launch knowledge is
         # static there; the spawn call only names the kind).
