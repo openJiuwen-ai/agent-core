@@ -34,14 +34,12 @@ from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
 from openjiuwen.agent_teams.tools.tool_member import (
-    ExternalCliModelRules,
-    _builtin_model_catalog,
     _optional_text,
     _SpawnToolBase,
-    check_external_cli_declared,
     check_model_selectable,
-    external_cli_model_catalog_context,
+    external_cli_option_properties,
     model_name_description,
+    register_external_cli_member,
     register_teammate,
     validate_member_name,
 )
@@ -600,6 +598,19 @@ def expert_member_record(template: ExpertTemplate) -> "MemberAgentTemplate":
     return MemberAgentTemplate(ref=template.ref.to_dict(), version=template.version, snapshot=template.snapshot)
 
 
+def expert_member_cli_config(team: TeamBackend, template: ExpertTemplate) -> "ExternalCliAgentSpec | None":
+    """Launch config of an external-CLI member spawned from ``template``: the template's over the declared kind's.
+
+    ``None`` when the kind is not declared; registration then rejects it.
+    """
+    from openjiuwen.agent_teams.external.manifest import merge_external_cli_config
+
+    declared = team.external_cli_config(template.external_cli.cli_agent)
+    if declared is None:
+        return None
+    return merge_external_cli_config(declared, template.external_cli)
+
+
 class SpawnExpertTool(_SpawnToolBase):
     """Register a teammate that runs as an installed expert template (``role_type`` teammate / external_cli).
 
@@ -633,26 +644,9 @@ class SpawnExpertTool(_SpawnToolBase):
             persona_language=persona_language,
         )
         self._allocate_model_config = model_config_allocator
-        external_cli_properties: dict[str, Any] = {
-            "fallback_model_name": {
-                "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}],
-                "description": (
-                    f"{t('spawn_expert', 'external_cli.fallback_model_name')}\n\n"
-                    f"{external_cli_model_catalog_context(team)}"
-                ),
-            },
-        }
-        # Same gate as spawn_external_cli: the built-in model choice exists
-        # only when some declared CLI kind offers a catalog.
-        if team.builtin_models_enabled():
-            external_cli_properties["builtin_model"] = {
-                "type": "string",
-                "description": f"{t('spawn_expert', 'external_cli.builtin_model')}\n\n{_builtin_model_catalog(team)}",
-            }
-            external_cli_properties["effort"] = {
-                "type": "string",
-                "description": t("spawn_expert", "external_cli.effort"),
-            }
+        external_cli_properties = external_cli_option_properties(
+            team, t, builtin_model_description=t("spawn_expert", "external_cli.builtin_model")
+        )
         model_description = t("spawn_expert", "model_name")
         if team.is_model_group_pool():
             # Inside a model group a native expert takes a route tag; list them.
@@ -758,44 +752,28 @@ class SpawnExpertTool(_SpawnToolBase):
         desc: str,
         prompt: str,
     ) -> ToolOutput:
-        from openjiuwen.agent_teams.external.manifest import merge_external_cli_config
-        from openjiuwen.agent_teams.tools.member_options import MemberAgentTemplate
-
         unsupported = [key for key in ("isolation", "permissions") if inputs.get(key) is not None]
         if unsupported:
             return self._fail(
                 f"{', '.join(unsupported)} cannot be set for expert '{template.ref.label()}': it runs on an "
                 "external CLI runtime"
             )
-        template_config = template.external_cli
-        cli_agent = template_config.cli_agent
-        err = check_external_cli_declared(self.team, cli_agent)
-        if err:
-            return self._fail(err)
-        model_name = inputs.get("model_name")
-        models, err = ExternalCliModelRules(self.team, self._allocate_model_config).resolve(
-            cli_agent,
-            model_name=model_name,
+        cli_agent = template.external_cli.cli_agent
+        result = await register_external_cli_member(
+            self.team,
+            tool_name="spawn_expert",
+            allocate_model_config=self._allocate_model_config,
+            cli_agent=cli_agent,
+            member_name=member_name,
+            display_name=display_name,
+            desc=desc,
+            prompt=prompt,
+            model_name=inputs.get("model_name"),
             fallback_model_name=external_args.get("fallback_model_name"),
             builtin_model=external_args.get("builtin_model"),
             effort=external_args.get("effort"),
-            tool_name="spawn_expert",
-        )
-        if models is None:
-            return self._fail(err)
-        member_config = merge_external_cli_config(self.team.external_cli_config(cli_agent), template_config)
-        result = await self.team.spawn_external_cli_agent(
-            member_name=member_name,
-            display_name=display_name,
-            cli_agent=cli_agent,
-            desc=desc,
-            prompt=prompt,
-            model_name=model_name,
-            allocation=models.allocation,
-            fallback_allocation=models.fallback_allocation,
-            builtin_model=models.builtin_model,
-            member_config=member_config,
-            agent_template=MemberAgentTemplate(ref=template.ref.to_dict(), version=template.version),
+            member_config=expert_member_cli_config(self.team, template),
+            agent_template=expert_member_record(template),
         )
         return self._registered(
             result, template, member_name, display_name, role_type="external_cli", cli_agent=cli_agent
@@ -847,6 +825,7 @@ __all__ = [
     "SpawnExpertTool",
     "ViewExpertGroupsTool",
     "ViewExpertsTool",
+    "expert_member_cli_config",
     "expert_member_record",
     "expert_member_texts",
 ]

@@ -332,14 +332,27 @@ STRINGS: dict[str, str] = {
     ),
     "create_task_scheduled.task.member": (
         "随任务一起创建的承担者（与 assignee 二选一）：字段同 spawn_teammate"
-        "（member_name / display_name / desc / prompt / model_name），外加必填的 lifetime。"
+        "（member_name / display_name / desc / prompt / model_name），外加必填的 lifetime；"
+        "团队声明了外部 CLI 类型时也可以用 cli_agent 让它以外部 CLI 运行。"
         "成员落为该任务的 assignee，由调度框架拉起；名下任务全部终态后按 lifetime 退场"
     ),
     "create_task_scheduled.task.member.expert": (
         "可选。让该成员按一个已安装的专家模板运行：单个专家的包名，给了 group 时是该专家团内的成员名"
         "（不能是 leader）。填写后 display_name / desc 可省略（取专家自带的显示名与描述），"
-        "desc / prompt 只追加在专家描述 / 人设之后。只支持本地运行的专家；外部 CLI 运行时的专家先用 "
-        "spawn_expert 拉起，再用 assignee 指派"
+        "desc / prompt 只追加在专家描述 / 人设之后。外部 CLI 运行时的专家同样可以内联，"
+        "模型参数放在 external_cli 里，规则同 spawn_expert"
+    ),
+    "create_task_scheduled.task.member.cli_agent": (
+        "可选，与 expert 二选一。让该成员以第三方 CLI agent 运行，含义同 spawn_external_cli.cli_agent："
+        "取值必须是 spec.external_cli_agents 中声明过的 CLI 类型。填写后 prompt 必填（CLI 成员的私有系统提示词），"
+        "model_name 是该 CLI 使用的团队模型池端点"
+    ),
+    "create_task_scheduled.task.member.external_cli": (
+        "可选对象，只对外部 CLI 成员有效（填了 cli_agent，或 expert 是外部运行时专家），其余情况传入会报错。"
+        "字段含义与校验同 spawn_external_cli 的同名参数"
+    ),
+    "create_task_scheduled.task.member.builtin_model": (
+        "可选。从下方目录中该成员 CLI 类型的条目里选择一个内置模型，使用 CLI 自身登录运行；与 model_name 互斥"
     ),
     "create_task_scheduled.task.member.group": (
         "可选，需同时给 expert。专家团名，表示 expert 是该团内的成员名；本团队由该专家团组建时，"

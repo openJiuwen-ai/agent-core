@@ -16,7 +16,9 @@ from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
 from openjiuwen.agent_teams.tools.tool_member import (
     check_model_selectable,
+    external_cli_option_properties,
     model_name_description,
+    register_external_cli_member,
     register_teammate,
     validate_member_name,
 )
@@ -84,6 +86,7 @@ def _inline_member_schema(
     member_model_description: str | None = None,
     *,
     expert_enabled: bool = False,
+    external_cli_properties: dict[str, Any] | None = None,
 ) -> dict:
     """Schema of ``create_task``'s inline ``member`` object (scheduled only, F_118).
 
@@ -96,6 +99,10 @@ def _inline_member_schema(
     injected an expert catalog, the same gate as ``spawn_expert``) adds
     ``expert`` / ``group``: the member then runs as that expert template and
     ``display_name`` / ``desc`` become optional additions to the template's own.
+    ``external_cli_properties`` (the team declares external CLI kinds, the
+    same gate as ``spawn_external_cli``) adds ``cli_agent`` — the member runs
+    on that CLI, ``spawn_external_cli``'s way — and the ``external_cli``
+    object of ``spawn_expert``, for either kind of external CLI member.
     """
     schema = {
         "type": "object",
@@ -124,6 +131,17 @@ def _inline_member_schema(
             }
         )
         schema["required"] = ["member_name", "lifetime"]
+    if external_cli_properties is not None:
+        schema["properties"].update(
+            {
+                "cli_agent": {"type": "string", "description": t("create_task_scheduled", "task.member.cli_agent")},
+                "external_cli": {
+                    "type": "object",
+                    "description": t("create_task_scheduled", "task.member.external_cli"),
+                    "properties": external_cli_properties,
+                },
+            }
+        )
     return schema
 
 
@@ -133,6 +151,7 @@ def _scheduled_task_node_schema(
     inline_member_enabled: bool = True,
     member_model_description: str | None = None,
     expert_enabled: bool = False,
+    external_cli_properties: dict[str, Any] | None = None,
 ) -> dict:
     """Build the scheduled create_task node schema.
 
@@ -174,7 +193,12 @@ def _scheduled_task_node_schema(
     )
     if inline_member_enabled:
         properties["member"] = {
-            **_inline_member_schema(t, member_model_description, expert_enabled=expert_enabled),
+            **_inline_member_schema(
+                t,
+                member_model_description,
+                expert_enabled=expert_enabled,
+                external_cli_properties=external_cli_properties,
+            ),
             "description": t("create_task_scheduled", "task.member"),
         }
     return _task_node_schema(properties)
@@ -185,14 +209,17 @@ def _validate_inline_members(
     *,
     leader_member_name: str | None,
     expert_enabled: bool = False,
+    external_cli_enabled: bool = False,
 ) -> str | None:
     """Pure batch checks on inline ``member`` objects, before any write.
 
     One owner per task: an ``assignee`` beside ``member`` must repeat the
     inline ``member_name`` (redundant but unambiguous, tolerated and noted by
     the caller); naming someone else is a conflict. Plus a well-formed,
-    unique, non-leader ``member_name`` and a known ``lifetime``. Existence
-    against the roster is checked by the caller (it needs the backend).
+    unique, non-leader ``member_name`` and a known ``lifetime``. A member
+    runs as an expert or on ``cli_agent``, never both. Existence against the
+    roster, and whether an expert's runtime takes ``external_cli``, are checked
+    by the caller (they need the backend / catalog).
     """
     seen: set[str] = set()
     for spec in tasks:
@@ -225,8 +252,13 @@ def _validate_inline_members(
             )
         if (member.get("group") or "").strip() and not expert:
             return f"Task {_spec_label(spec)!r}: member.group needs member.expert (a member name of that group)"
-        # An expert member takes its display name and description from the template.
-        for key in () if expert else ("display_name", "desc"):
+        error = _check_inline_external_cli(member, expert=expert, external_cli_enabled=external_cli_enabled)
+        if error:
+            return f"Task {_spec_label(spec)!r}: {error}"
+        cli_agent = (member.get("cli_agent") or "").strip()
+        # An expert member takes its display name and description from the
+        # template; a CLI member needs its private prompt, as in spawn_external_cli.
+        for key in () if expert else ("display_name", "desc", *(("prompt",) if cli_agent else ())):
             if not (member.get(key) or "").strip():
                 return f"Task {_spec_label(spec)!r}: member.{key} is required"
         if member.get("lifetime") not in _MEMBER_LIFETIMES:
@@ -234,6 +266,24 @@ def _validate_inline_members(
                 f"Task {_spec_label(spec)!r}: member.lifetime must be one of "
                 f"{', '.join(_MEMBER_LIFETIMES)}"
             )
+    return None
+
+
+def _check_inline_external_cli(member: dict, *, expert: str, external_cli_enabled: bool) -> str | None:
+    """Reject ``cli_agent`` / ``external_cli`` on an inline member that cannot take them."""
+    cli_agent = (member.get("cli_agent") or "").strip()
+    external_args = member.get("external_cli")
+    if (cli_agent or external_args is not None) and not external_cli_enabled:
+        return "member.cli_agent / member.external_cli are unavailable: this team declares no external CLI kinds"
+    if cli_agent and expert:
+        return (
+            "member.cli_agent and member.expert are exclusive: an expert brings its own runtime; drop "
+            "member.cli_agent"
+        )
+    if external_args is not None and not isinstance(external_args, dict):
+        return "member.external_cli must be an object"
+    if external_args and not (cli_agent or expert):
+        return "member.external_cli applies only to an external CLI member: set member.cli_agent, or omit it"
     return None
 
 
@@ -254,9 +304,15 @@ async def _materialize_inline_members(
     Rows written before a later member is rejected are rolled back here.
     A member declared with ``expert`` runs as that template (``templates``,
     resolved before any write): the same persona, snapshot and display-name
-    rule as ``spawn_expert``.
+    rule as ``spawn_expert``. A ``cli_agent`` member, or an expert with an
+    external runtime, is registered like ``spawn_external_cli`` /
+    ``spawn_expert`` register theirs, model rules included.
     """
-    from openjiuwen.agent_teams.tools.tool_expert import expert_member_record, expert_member_texts
+    from openjiuwen.agent_teams.tools.tool_expert import (
+        expert_member_cli_config,
+        expert_member_record,
+        expert_member_texts,
+    )
 
     templates = templates or {}
     created: list[str] = []
@@ -269,11 +325,6 @@ async def _materialize_inline_members(
         if await agent_team.member_exists(name):
             await _discard_inline_members(agent_team, created)
             return [], f"Task {_spec_label(spec)!r}: member {name!r} already exists in the team"
-        allocation = allocate(member.get("model_name")) if allocate else None
-        error = check_model_selectable(agent_team, member.get("model_name"), allocation)
-        if error:
-            await _discard_inline_members(agent_team, created)
-            return [], f"Task {_spec_label(spec)!r}: {error}"
         template = templates.get(name)
         if template is None:
             display_name = member["display_name"].strip()
@@ -286,16 +337,42 @@ async def _materialize_inline_members(
             )
             desc, prompt = expert_member_texts(template, desc=member.get("desc"), prompt=member.get("prompt"))
             agent_template = expert_member_record(template)
-        result = await register_teammate(
-            agent_team,
-            member_name=name,
-            display_name=display_name,
-            desc=desc,
-            prompt=prompt,
-            allocation=allocation,
-            lifetime=member["lifetime"],
-            agent_template=agent_template,
-        )
+        cli_agent = _inline_cli_agent(member, template)
+        if cli_agent is not None:
+            external_args = member.get("external_cli") or {}
+            result = await register_external_cli_member(
+                agent_team,
+                tool_name="create_task",
+                allocate_model_config=allocate,
+                cli_agent=cli_agent,
+                member_name=name,
+                display_name=display_name,
+                desc=desc,
+                prompt=prompt,
+                model_name=member.get("model_name"),
+                fallback_model_name=external_args.get("fallback_model_name"),
+                builtin_model=external_args.get("builtin_model"),
+                effort=external_args.get("effort"),
+                member_config=expert_member_cli_config(agent_team, template) if template is not None else None,
+                agent_template=agent_template,
+                lifetime=member["lifetime"],
+            )
+        else:
+            allocation = allocate(member.get("model_name")) if allocate else None
+            error = check_model_selectable(agent_team, member.get("model_name"), allocation)
+            if error:
+                await _discard_inline_members(agent_team, created)
+                return [], f"Task {_spec_label(spec)!r}: {error}"
+            result = await register_teammate(
+                agent_team,
+                member_name=name,
+                display_name=display_name,
+                desc=desc,
+                prompt=prompt,
+                allocation=allocation,
+                lifetime=member["lifetime"],
+                agent_template=agent_template,
+            )
         if not result.ok:
             await _discard_inline_members(agent_team, created)
             return [], f"Task {_spec_label(spec)!r}: {result.reason}"
@@ -305,15 +382,21 @@ async def _materialize_inline_members(
     return created, None
 
 
+def _inline_cli_agent(member: dict, template: "ExpertTemplate | None") -> str | None:
+    """CLI kind an inline member runs on: its expert's external runtime, or its own ``cli_agent``."""
+    if template is not None:
+        return template.external_cli.cli_agent if template.external_cli is not None else None
+    return (member.get("cli_agent") or "").strip() or None
+
+
 async def _resolve_inline_experts(
     tasks: list[dict],
     resolver: "ExpertTemplateResolver | None",
 ) -> tuple[dict[str, "ExpertTemplate"], str | None]:
     """Resolve every inline member's expert template before anything is written.
 
-    Inline members are registered as LLM teammates, so an expert that runs on
-    an external CLI is rejected here; spawn it with ``spawn_expert`` and name
-    it via ``assignee`` instead.
+    As in ``spawn_expert``, ``external_cli`` is rejected for an expert that
+    runs natively.
     """
     from openjiuwen.agent_teams.tools.tool_expert import ExpertUnavailable
 
@@ -328,10 +411,10 @@ async def _resolve_inline_experts(
             template = await resolver.resolve(expert, group)
         except ExpertUnavailable as exc:
             return {}, f"Task {_spec_label(spec)!r}: member.expert: {exc}"
-        if template.external_cli is not None:
+        if template.external_cli is None and member.get("external_cli"):
             return {}, (
-                f"Task {_spec_label(spec)!r}: expert '{template.ref.label()}' runs on an external CLI and cannot be "
-                "declared inline; spawn it with spawn_expert, then name it via 'assignee'"
+                f"Task {_spec_label(spec)!r}: expert '{template.ref.label()}' runs natively; member.external_cli "
+                "applies only to experts with an external runtime — omit it"
             )
         templates[member["member_name"].strip()] = template
     return templates, None
@@ -701,6 +784,16 @@ class ScheduledTaskCreateTool(TeamTool):
         # Same gate as spawn_expert: inline members may name an expert only
         # when the host injected an expert catalog.
         self._expert_resolver = expert_resolver if inline_member_enabled else None
+        # Same gate as spawn_external_cli: inline members may run on an
+        # external CLI only when the team declares CLI kinds.
+        self._external_cli_enabled = inline_member_enabled and bool(agent_team.external_cli_kinds())
+        external_cli_properties = (
+            external_cli_option_properties(
+                agent_team, t, builtin_model_description=t("create_task_scheduled", "task.member.builtin_model")
+            )
+            if self._external_cli_enabled
+            else None
+        )
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -711,6 +804,7 @@ class ScheduledTaskCreateTool(TeamTool):
                         inline_member_enabled=inline_member_enabled,
                         member_model_description=model_name_description(agent_team, t),
                         expert_enabled=self._expert_resolver is not None,
+                        external_cli_properties=external_cli_properties,
                     ),
                     "description": t("create_task", "tasks"),
                 },
@@ -756,6 +850,7 @@ class ScheduledTaskCreateTool(TeamTool):
             tasks,
             leader_member_name=leader_member_name,
             expert_enabled=self._expert_resolver is not None,
+            external_cli_enabled=self._external_cli_enabled,
         )
         if error:
             return ToolOutput(success=False, error=error)
@@ -830,12 +925,20 @@ class ScheduledTaskCreateTool(TeamTool):
             spec["assignee"]: spec["member"]["lifetime"] for spec in tasks if spec.get("member") is not None
         }
         experts = {name: template.ref.label() for name, template in templates.items()}
+        cli_agents: dict[str, str] = {}
+        for spec in tasks:
+            if spec.get("member") is None:
+                continue
+            cli_agent = _inline_cli_agent(spec["member"], templates.get(spec["assignee"]))
+            if cli_agent:
+                cli_agents[spec["assignee"]] = cli_agent
         briefs = [
             {
                 **task.brief(),
                 "assignee": task.assignee,
                 **_inline_brief(task.assignee, lifetimes),
                 **({"expert": experts[task.assignee]} if task.assignee in experts else {}),
+                **({"cli_agent": cli_agents[task.assignee]} if task.assignee in cli_agents else {}),
             }
             for task in result.tasks
         ]
@@ -851,7 +954,8 @@ class ScheduledTaskCreateTool(TeamTool):
             line += f" {_owner_phrase(task)}"
         if task.get("lifetime"):
             expert = f", expert={task['expert']}" if task.get("expert") else ""
-            line += f" [new member, lifetime={task['lifetime']}{expert}]"
+            cli_agent = f", cli_agent={task['cli_agent']}" if task.get("cli_agent") else ""
+            line += f" [new member, lifetime={task['lifetime']}{expert}{cli_agent}]"
         return line
 
     def render_for_llm(self, output: ToolOutput) -> str:

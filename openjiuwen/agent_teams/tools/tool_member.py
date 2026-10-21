@@ -19,7 +19,7 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
-    from openjiuwen.agent_teams.schema.team import MemberOpResult
+    from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, MemberOpResult
     from openjiuwen.agent_teams.tools.member_options import MemberAgentTemplate, MemberBuiltinModel
 
 
@@ -429,6 +429,90 @@ class ExternalCliModelRules:
                 "own login, 'model_name' on a team model pool endpoint"
             )
         return self.team.resolve_builtin_model(cli_agent, builtin_name, effort)
+
+
+def external_cli_option_properties(
+    team: TeamBackend,
+    t: Translator,
+    *,
+    builtin_model_description: str,
+) -> dict[str, Any]:
+    """Properties of an ``external_cli`` object (``spawn_expert`` / scheduled ``create_task``'s inline member).
+
+    ``builtin_model`` / ``effort`` exist only when some declared CLI kind
+    offers a built-in model catalog, the same gate as ``spawn_external_cli``.
+    """
+    properties: dict[str, Any] = {
+        "fallback_model_name": {
+            "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}],
+            "description": (
+                f"{t('spawn_expert', 'external_cli.fallback_model_name')}\n\n"
+                f"{external_cli_model_catalog_context(team)}"
+            ),
+        },
+    }
+    if team.builtin_models_enabled():
+        properties["builtin_model"] = {
+            "type": "string",
+            "description": f"{builtin_model_description}\n\n{_builtin_model_catalog(team)}",
+        }
+        properties["effort"] = {"type": "string", "description": t("spawn_expert", "external_cli.effort")}
+    return properties
+
+
+async def register_external_cli_member(
+    team: TeamBackend,
+    *,
+    tool_name: str,
+    allocate_model_config: Callable[..., "Allocation | None"] | None,
+    cli_agent: str,
+    member_name: str,
+    display_name: str,
+    desc: str,
+    prompt: str,
+    model_name: str | None,
+    fallback_model_name: Any = None,
+    builtin_model: Any = None,
+    effort: Any = None,
+    member_config: "ExternalCliAgentSpec | None" = None,
+    agent_template: "MemberAgentTemplate | None" = None,
+    lifetime: str | None = None,
+) -> "MemberOpResult":
+    """Register one external CLI member row (UNSTARTED): declared-kind check, model rules, registration.
+
+    Shared by ``spawn_external_cli``, the external path of ``spawn_expert``
+    and scheduled ``create_task``'s inline member, so the same inputs always
+    reach the same row or the same error (only ``tool_name`` differs).
+    """
+    from openjiuwen.agent_teams.schema.team import MemberOpResult
+
+    err = check_external_cli_declared(team, cli_agent)
+    if err:
+        return MemberOpResult.fail(err)
+    models, err = ExternalCliModelRules(team, allocate_model_config).resolve(
+        cli_agent,
+        model_name=model_name,
+        fallback_model_name=fallback_model_name,
+        builtin_model=builtin_model,
+        effort=effort,
+        tool_name=tool_name,
+    )
+    if models is None:
+        return MemberOpResult.fail(err)
+    return await team.spawn_external_cli_agent(
+        member_name=member_name,
+        display_name=display_name,
+        cli_agent=cli_agent,
+        desc=desc,
+        prompt=prompt,
+        model_name=model_name,
+        allocation=models.allocation,
+        fallback_allocation=models.fallback_allocation,
+        builtin_model=models.builtin_model,
+        member_config=member_config,
+        agent_template=agent_template,
+        lifetime=lifetime,
+    )
 
 
 # ========== Member Management ==========
@@ -1153,27 +1237,19 @@ class SpawnExternalCliTool(_SpawnToolBase):
 
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")
-        model_name = inputs.get("model_name")
-        models, err = ExternalCliModelRules(self.team, self._allocate_model_config).resolve(
-            cli_agent,
-            model_name=model_name,
+        result = await register_external_cli_member(
+            self.team,
+            tool_name="spawn_external_cli",
+            allocate_model_config=self._allocate_model_config,
+            cli_agent=cli_agent,
+            member_name=member_name,
+            display_name=display_name,
+            desc=desc,
+            prompt=prompt,
+            model_name=inputs.get("model_name"),
             fallback_model_name=inputs.get("fallback_model_name"),
             builtin_model=inputs.get("builtin_model"),
             effort=inputs.get("effort"),
-            tool_name="spawn_external_cli",
-        )
-        if models is None:
-            return self._fail(err)
-        result = await self.team.spawn_external_cli_agent(
-            member_name=member_name,
-            display_name=display_name,
-            cli_agent=cli_agent,
-            desc=desc,
-            prompt=prompt,
-            model_name=model_name,
-            allocation=models.allocation,
-            fallback_allocation=models.fallback_allocation,
-            builtin_model=models.builtin_model,
         )
         return self._from_result(
             result,

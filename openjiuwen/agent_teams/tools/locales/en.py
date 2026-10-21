@@ -442,7 +442,8 @@ STRINGS: dict[str, str] = {
     ),
     "create_task_scheduled.task.member": (
         "Owner created together with the task (one of assignee / member): same fields as spawn_teammate "
-        "(member_name / display_name / desc / prompt / model_name) plus a required lifetime. The member becomes the "
+        "(member_name / display_name / desc / prompt / model_name) plus a required lifetime; when the team declares "
+        "external CLI kinds, cli_agent runs it on an external CLI instead. The member becomes the "
         "task's assignee and is started by the scheduling framework; once every task on its board is terminal it "
         "retires per lifetime"
     ),
@@ -450,7 +451,21 @@ STRINGS: dict[str, str] = {
         "Optional. Run this member as an installed expert template: a single expert's package name, or, with "
         "group, a member name of that group (not leader). With it, display_name / desc may be omitted (the "
         "expert's own are used) and desc / prompt are appended after the expert's description / persona. "
-        "Native experts only; spawn an external-CLI expert with spawn_expert, then name it via assignee"
+        "Experts with an external CLI runtime may be declared inline too; their model arguments go in external_cli, "
+        "with spawn_expert's rules"
+    ),
+    "create_task_scheduled.task.member.cli_agent": (
+        "Optional, exclusive with expert. Run this member as a third-party CLI agent, as spawn_external_cli.cli_agent: "
+        "the value must be a CLI kind declared in spec.external_cli_agents. With it, prompt is required (the CLI "
+        "member's private system prompt) and model_name is the team model pool endpoint the CLI uses"
+    ),
+    "create_task_scheduled.task.member.external_cli": (
+        "Optional object, only for external CLI members (cli_agent set, or expert is an external-runtime expert); "
+        "passing it otherwise is an error. Fields mean and validate like the same-named spawn_external_cli parameters"
+    ),
+    "create_task_scheduled.task.member.builtin_model": (
+        "Optional. A built-in model from the member's CLI kind entry in the catalog below, run on the CLI's own "
+        "login; mutually exclusive with model_name"
     ),
     "create_task_scheduled.task.member.group": (
         "Optional, requires expert. The expert group name, making expert a member name of that group; when "

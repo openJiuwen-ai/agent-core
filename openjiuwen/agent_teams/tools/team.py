@@ -2595,6 +2595,8 @@ class TeamBackend:
         deleted = await self.db.member.delete_unstarted_member(member_name, self.team_name)
         if not deleted:
             return False
+        # An external-CLI member also left its CLI kind mapping behind.
+        self._external_cli_specs.pop(member_name, None)
         if self._spec_evolution_enabled and self.workspace_cache is not None:
             from openjiuwen.agent_teams.team_workspace.binder import MemberWorkspaceBinder
 
@@ -3074,6 +3076,7 @@ class TeamBackend:
         builtin_model: Optional["MemberBuiltinModel"] = None,
         member_config: Optional[ExternalCliAgentSpec] = None,
         agent_template: Optional["MemberAgentTemplate"] = None,
+        lifetime: str | None = None,
     ) -> MemberOpResult:
         """Register an external-CLI teammate dynamically.
 
@@ -3110,6 +3113,9 @@ class TeamBackend:
             agent_template: Expert template reference persisted with the
                 member; ``member_config`` is stored in it so the member is
                 rebuilt with the same config on restart and cold recovery.
+            lifetime: Retirement policy of a task-scoped member declared
+                inline by scheduled ``create_task`` (F_118); ``None`` keeps
+                the member resident.
 
         Returns:
             ``MemberOpResult`` — failure if the backend name is unknown, its
@@ -3168,6 +3174,7 @@ class TeamBackend:
             allocation=allocation,
             fallback_allocation=fallback_allocation,
             builtin_model=builtin_model,
+            lifetime=lifetime,
             agent_template=_with_member_config(agent_template, member_config),
         )
         if not result.ok:
