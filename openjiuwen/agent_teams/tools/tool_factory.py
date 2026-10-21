@@ -20,7 +20,6 @@ from openjiuwen.agent_teams.tools.tool_member import (
     SetMemberModelTool,
     ShutdownMemberTool,
     SpawnBridgeAgentTool,
-    SpawnExternalCliTool,
     SpawnHumanAgentTool,
     SpawnPassiveHumanTool,
     SpawnTeammateTool,
@@ -193,8 +192,9 @@ def create_team_tools(
         role: "leader" or "teammate".
         agent_team: AgentTeam instance providing task/message/db/messager.
             Also carries the capability gates the toolset is filtered on:
-            ``hitt_enabled`` / ``bridge_enabled`` / ``external_cli_kinds``
-            select the spawn tools, and ``fork_enabled``
+            ``hitt_enabled`` / ``bridge_enabled`` select the spawn tools,
+            ``external_cli_kinds`` adds ``spawn_teammate``'s ``cli_agent`` /
+            ``external_cli`` properties, and ``fork_enabled``
             (``TeamAgentSpec.enable_fork``) drops the ``checkpoint`` tool
             plus ``spawn_teammate``'s fork properties and the description
             section documenting them. The team's resident
@@ -287,7 +287,8 @@ def create_team_tools(
             loader=loader,
         ),
         "clean_team": CleanTeamTool(agent_team, t),
-        # Member management — one tool per role_type (flat schema, no role branching)
+        # Member management — one tool per kind of member: AI teammate (local
+        # or on an external CLI), human, bridge (flat schema, no role branching)
         "spawn_teammate": SpawnTeammateTool(
             agent_team,
             t,
@@ -299,11 +300,6 @@ def create_team_tools(
         "spawn_human_agent": SpawnHumanAgentTool(agent_team, t),
         "spawn_passive_human": SpawnPassiveHumanTool(agent_team, t),
         "spawn_bridge_agent": SpawnBridgeAgentTool(agent_team, t),
-        "spawn_external_cli": SpawnExternalCliTool(
-            agent_team,
-            t,
-            model_config_allocator=model_config_allocator,
-        ),
         "shutdown_member": ShutdownMemberTool(agent_team, t, dispatch_mode=dispatch_mode),
         "set_member_model": SetMemberModelTool(agent_team, t),
         "approve_plan": ApprovePlanTool(agent_team, t),
@@ -416,7 +412,8 @@ def create_team_tools(
         allowed = allowed - {"build_team"}
     # Capability gating for the non-teammate spawn tools: a spawn tool the
     # backend would reject is simply never shown to the LLM. spawn_teammate is
-    # always available. Symmetric to the plan_mode / persistent gates above.
+    # always available; running it on an external CLI is gated per attribute
+    # inside SpawnTeammateTool. Symmetric to the plan_mode / persistent gates above.
     # Unconditional set subtraction is idempotent — teammate / human_agent
     # ``allowed`` sets don't contain these leader-only tools anyway.
     if getattr(agent_team, "conversation_mode", "team") != "group_chat":
@@ -425,8 +422,6 @@ def create_team_tools(
         allowed = allowed - {"spawn_human_agent", "spawn_passive_human"}
     if not agent_team.bridge_enabled():
         allowed = allowed - {"spawn_bridge_agent"}
-    if not agent_team.external_cli_kinds():
-        allowed = allowed - {"spawn_external_cli"}
     # Switching a member's built-in model needs a declared catalog to pick from.
     if not agent_team.builtin_models_enabled():
         allowed = allowed - {"set_member_model"}

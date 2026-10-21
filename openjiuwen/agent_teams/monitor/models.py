@@ -58,7 +58,8 @@ class MemberInfo(BaseModel):
         default=None,
         description=(
             "External CLI backend name ('claude' / 'codex' / ...) for members "
-            "spawned by spawn_external_cli; None for ordinary members. Such a "
+            "spawned on an external CLI (spawn_teammate with cli_agent, an external-runtime "
+            "expert, or an inline task member); None for ordinary members. Such a "
             "member's role is plain TEAMMATE, so this is the only field that "
             "identifies it as CLI-backed."
         ),

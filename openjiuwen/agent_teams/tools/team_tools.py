@@ -24,7 +24,6 @@ from openjiuwen.agent_teams.tools.tool_member import (
     SetMemberModelTool,
     ShutdownMemberTool,
     SpawnBridgeAgentTool,
-    SpawnExternalCliTool,
     SpawnHumanAgentTool,
     SpawnTeammateTool,
 )
@@ -63,7 +62,6 @@ __all__ = [
     "SetMemberModelTool",
     "ShutdownMemberTool",
     "SpawnBridgeAgentTool",
-    "SpawnExternalCliTool",
     "SpawnHumanAgentTool",
     "SpawnTeammateTool",
     "ClaimTaskTool",

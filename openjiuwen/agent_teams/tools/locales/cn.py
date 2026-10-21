@@ -106,6 +106,37 @@ STRINGS: dict[str, str] = {
         "'keep_before_compact_after'（保留前、把后压缩为摘要）、"
         "'keep_after_compact_before'（保留后、把前压缩为摘要）。仅配合命名 checkpoint fork 使用"
     ),
+    "spawn_teammate.cli_agent": (
+        "可选。让该队友以第三方 CLI agent 而不是本地 LLM 运行：填写 spec.external_cli_agents 中预先声明的 "
+        "CLI 类型标识（如 'claude' 或 'codex'）。启动命令、工作目录、MCP 注入等都在那条配置里，"
+        "本字段只负责按名引用。填写后 isolation / permissions / fork 均不可用"
+    ),
+    "spawn_teammate.model_name_external_cli": (
+        "填写了 cli_agent 时：仅当用户明确指定该第三方 Agent 使用的模型时填写，你不得自行选择或推断；"
+        "取值必须是团队模型池中与该 CLI 协议兼容的端点。用户未指定时省略，使该 CLI 使用其自身默认模型；"
+        "CLI 自身登录提供的模型请用 external_cli.builtin_model"
+    ),
+    "spawn_teammate.external_cli": (
+        "可选对象，只能与 cli_agent 一起使用（未填 cli_agent 时传入会报错）：外部 CLI 成员的认证回退与内置模型选择"
+    ),
+    "spawn_teammate.external_cli.fallback_model_name": (
+        "认证回退模型。只对下方目录 compatible_fallback_models 中列出的 cli_agent 有效；"
+        "未列出的 cli_agent 没有认证回退，必须省略本字段。该 cli_agent 存在兼容模型时必须填写，"
+        "从团队模型池中按该第三方 Agent 支持的模型调用协议选择兼容模型。当前模型在模型池中且协议兼容时，"
+        "优先选择当前模型；当前模型不在模型池中或协议不兼容时，再选择其他兼容模型；不得随意填写不存在或"
+        "不兼容的模型。"
+        "该第三方 Agent 使用自身默认模型但认证不可用时，将使用此模型自动回退；"
+        "仅对运行时明确报告的认证失败生效。没有兼容模型时省略本字段，"
+        "此时仍可使用其自身默认模型，但不启用自动回退"
+    ),
+    "spawn_teammate.external_cli.builtin_model": (
+        "可选。从下方目录中该 cli_agent 的条目里选择一个内置模型，使用 CLI 自身登录（如订阅）运行，"
+        "按成员工作量选择；与 model_name 互斥。省略时由 CLI 使用其自身默认模型"
+    ),
+    "spawn_teammate.external_cli.effort": (
+        "可选。推理强度，必须是所选 builtin_model 的 efforts 之一；需同时指定 builtin_model，"
+        "省略时取该模型的 default_effort"
+    ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/cn/member/spawn_human_agent.md
     "spawn_human_agent.member_name": (
@@ -177,53 +208,6 @@ STRINGS: dict[str, str] = {
         "可选。本地调度 LLM 的模型名称（如 gpt-4、claude-sonnet-4 等）；"
         "未指定时由系统自动选择。注意远程 agent 的模型在其自身侧，不由此字段控制"
     ),
-    # ===== spawn_external_cli ===================================================
-    # spawn_external_cli._desc lives in descs/cn/member/spawn_external_cli.md
-    "spawn_external_cli.member_name": (
-        "[公开] CLI 成员唯一名（语义化 slug，如 cli-coder-1，DNS label 风格 kebab-case）。"
-        "**首字符必须是小写英文字母（a-z），其后仅允许小写字母、数字（0-9）和连字符（-）**；"
-        "禁止大写字母、下划线、空白、中文及其他非 ASCII 字符。"
-        "同时作为主键和消息/审批/任务路由键，在同一团队内必须唯一"
-    ),
-    "spawn_external_cli.display_name": (
-        "[公开] CLI 成员的显示名（如「Claude CLI 编码助手」），仅用于展示，不用于路由。"
-        "会注入所有其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
-    ),
-    "spawn_external_cli.desc": (
-        "[公开] 该 CLI 成员的对外花名册描述，仅供其他成员在 list_members / 团队 roster 中识别。"
-        "可选；会注入其他成员的 system prompt 并由 list_members 返回，禁止写入私密信息"
-    ),
-    "spawn_external_cli.prompt": (
-        "[私有] 该 CLI 成员的私有工作约定，CLI 据此扮演本成员角色。可选，不填时成员只按团队准则工作。"
-        "仅本成员自己可见，不进他人花名册"
-    ),
-    "spawn_external_cli.cli_agent": (
-        "要拉起的第三方 CLI agent 类型标识，如 'claude'（claudecode）或 'codex'。"
-        "取值必须命中 spec.external_cli_agents 中预先声明的某条静态配置——"
-        "具体启动命令、工作目录、MCP 注入等都在那条配置里，本字段只负责按名引用"
-    ),
-    "spawn_external_cli.model_name": (
-        "可选。仅当用户明确指定该第三方 Agent 使用的模型名称时填写。"
-        "你不得自行选择、推断或补全；用户未明确指定时必须省略，使该 Agent 使用其自身默认模型"
-    ),
-    "spawn_external_cli.fallback_model_name": (
-        "认证回退模型。只对下方目录 compatible_fallback_models 中列出的 cli_agent 有效；"
-        "未列出的 cli_agent 没有认证回退，必须省略本字段。该 cli_agent 存在兼容模型时必须填写，"
-        "从团队模型池中按该第三方 Agent 支持的模型调用协议选择兼容模型。当前模型在模型池中且协议兼容时，"
-        "优先选择当前模型；当前模型不在模型池中或协议不兼容时，再选择其他兼容模型；不得随意填写不存在或"
-        "不兼容的模型。"
-        "该第三方 Agent 使用自身默认模型但认证不可用时，将使用此模型自动回退；"
-        "仅对运行时明确报告的认证失败生效。没有兼容模型时省略本字段，"
-        "此时仍可使用其自身默认模型，但不启用自动回退"
-    ),
-    "spawn_external_cli.builtin_model": (
-        "可选。从下方目录中该 cli_agent 的条目里选择一个内置模型，使用 CLI 自身登录（如订阅）运行，"
-        "按成员工作量选择；与 model_name 互斥。省略时由 CLI 使用其自身默认模型"
-    ),
-    "spawn_external_cli.effort": (
-        "可选。推理强度，必须是所选 builtin_model 的 efforts 之一；需同时指定 builtin_model，"
-        "省略时取该模型的 default_effort"
-    ),
     # ===== view_experts ========================================================
     # view_experts._desc lives in descs/cn/expert/view_experts.md
     "view_experts.action": "list（默认）列出已安装的单个专家；get 查看一个专家的完整信息",
@@ -259,21 +243,14 @@ STRINGS: dict[str, str] = {
     ),
     "spawn_expert.model_name": (
         "可选。仅当用户明确指定模型时填写，你不得自行选择或推断。本地专家规则同 spawn_teammate，"
-        "外部运行时专家同 spawn_external_cli（团队模型池中与该 CLI 协议兼容的端点）"
+        "外部运行时专家同 spawn_teammate 填写 cli_agent 时（团队模型池中与该 CLI 协议兼容的端点）"
     ),
     "spawn_expert.external_cli": (
         "可选对象，只对外部运行时专家（runtime 不是 native）有效，本地专家传入会报错。"
-        "字段含义与校验同 spawn_external_cli 的同名参数"
-    ),
-    "spawn_expert.external_cli.fallback_model_name": (
-        "认证回退模型，规则同 spawn_external_cli.fallback_model_name：只对下方目录 compatible_fallback_models "
-        "中列出的 CLI 类型有效；该 CLI 类型存在兼容模型时必须填写，且当前模型在模型池中且协议兼容时优先选当前模型"
+        "字段含义与校验同 spawn_teammate.external_cli"
     ),
     "spawn_expert.external_cli.builtin_model": (
         "可选。从下方目录中该专家 CLI 类型的条目里选择一个内置模型，使用 CLI 自身登录运行；与 model_name 互斥"
-    ),
-    "spawn_expert.external_cli.effort": (
-        "可选。推理强度，必须是所选 builtin_model 的 efforts 之一；需同时指定 builtin_model"
     ),
     "spawn_expert.isolation": (
         "可选隔离模式，同 spawn_teammate：仅当用户明确要求或该成员需要在隔离检出中修改仓库文件时设为 "
@@ -343,13 +320,13 @@ STRINGS: dict[str, str] = {
         "模型参数放在 external_cli 里，规则同 spawn_expert"
     ),
     "create_task_scheduled.task.member.cli_agent": (
-        "可选，与 expert 二选一。让该成员以第三方 CLI agent 运行，含义同 spawn_external_cli.cli_agent："
+        "可选，与 expert 二选一。让该成员以第三方 CLI agent 运行，含义同 spawn_teammate.cli_agent："
         "取值必须是 spec.external_cli_agents 中声明过的 CLI 类型；"
         "model_name 是该 CLI 使用的团队模型池端点"
     ),
     "create_task_scheduled.task.member.external_cli": (
         "可选对象，只对外部 CLI 成员有效（填了 cli_agent，或 expert 是外部运行时专家），其余情况传入会报错。"
-        "字段含义与校验同 spawn_external_cli 的同名参数"
+        "字段含义与校验同 spawn_teammate.external_cli"
     ),
     "create_task_scheduled.task.member.builtin_model": (
         "可选。从下方目录中该成员 CLI 类型的条目里选择一个内置模型，使用 CLI 自身登录运行；与 model_name 互斥"

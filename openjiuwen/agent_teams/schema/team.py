@@ -467,7 +467,7 @@ class ExternalCliAgentSpec(BaseModel):
     builtin_models: list[ExternalCliBuiltinModel] = Field(default_factory=list)
     """Models the CLI offers on its own login that the leader may pick.
 
-    Non-empty enables ``spawn_external_cli(builtin_model=..., effort=...)`` and
+    Non-empty enables ``spawn_teammate``'s ``external_cli.builtin_model`` / ``effort`` and
     the ``set_member_model`` tool for members of this kind; empty keeps the
     member on ``model_config`` / the pool / the CLI default. Valid for Claude,
     Codex and third-party harness providers (whose card must declare

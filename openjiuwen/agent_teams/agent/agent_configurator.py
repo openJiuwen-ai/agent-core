@@ -710,9 +710,9 @@ class AgentConfigurator:
         member_observability_rail_specs = observability_rail_specs()
 
         # Predefined teams pin their roster — strip every dynamic spawn tool
-        # (one per role_type) from the leader's tool set.
+        # (one per kind of member) from the leader's tool set.
         exclude = (
-            ["spawn_teammate", "spawn_human_agent", "spawn_bridge_agent", "spawn_external_cli"]
+            ["spawn_teammate", "spawn_human_agent", "spawn_bridge_agent"]
             if _resolve_team_mode(spec) == "predefined"
             else []
         )

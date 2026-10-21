@@ -10,8 +10,8 @@ Spawn a teammate from an installed expert template. The new member runs with the
 | **display_name** | public | Optional. Defaults to the expert's display name; when a teammate already uses it, " (member_name)" is appended |
 | **desc** | public | Optional. **Added** public description, appended after the expert's own description (never replaces it). Use it for how this instance differs from its siblings, e.g. "covers shots 1–10" |
 | **prompt** | **private** | Optional. **Added** standing agreement, appended after the expert's persona (never replaces it). Do not restate the persona or put concrete tasks here |
-| **model_name** | internal | Optional. Only when the user names a model; same rules as `spawn_teammate`, or `spawn_external_cli` for an external-runtime expert |
-| **external_cli** | internal | Optional object, **only for external-runtime experts** (runtime other than `native`); passing it for a native expert is an error. Its fields mean and validate exactly like the same-named `spawn_external_cli` parameters |
+| **model_name** | internal | Optional. Only when the user names a model; same rules as `spawn_teammate`, or `spawn_teammate` with `cli_agent` for an external-runtime expert |
+| **external_cli** | internal | Optional object, **only for external-runtime experts** (runtime other than `native`); passing it for a native expert is an error. Its fields mean and validate exactly like `spawn_teammate.external_cli` |
 | **isolation** | internal | Optional, as in `spawn_teammate` (`"worktree"`). Not supported for external-runtime experts |
 | **permissions** | internal | Optional, as in `spawn_teammate` (tighten only). Not supported for external-runtime experts |
 
@@ -23,5 +23,5 @@ Spawn a teammate from an installed expert template. The new member runs with the
 
 - A group's `leader` cannot be spawned as a teammate.
 - When this team was assembled from an expert group, naming that group in `group` spawns another instance of a group member from the team's own assembled template — identical to the predefined member of the same name, without re-reading the package on disk.
-- An external-runtime expert needs its CLI kind declared for this team (same as `spawn_external_cli`); model, authentication fallback and built-in model rules are also those of `spawn_external_cli`, with the fallback and built-in model given inside the `external_cli` object.
+- An external-runtime expert needs its CLI kind declared for this team (same as `spawn_teammate`'s `cli_agent`); model, authentication fallback and built-in model rules are also those of `spawn_teammate` with `cli_agent`, with the fallback and built-in model given inside the `external_cli` object.
 - The expert's capability snapshot is stored on the member record: upgrading or uninstalling the package later does not change members already spawned.

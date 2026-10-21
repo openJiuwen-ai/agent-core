@@ -100,9 +100,9 @@ def _inline_member_schema(
     ``expert`` / ``group``: the member then runs as that expert template and
     ``display_name`` / ``desc`` become optional additions to the template's own.
     ``external_cli_properties`` (the team declares external CLI kinds, the
-    same gate as ``spawn_external_cli``) adds ``cli_agent`` — the member runs
-    on that CLI, ``spawn_external_cli``'s way — and the ``external_cli``
-    object of ``spawn_expert``, for either kind of external CLI member.
+    same gate as ``spawn_teammate``'s ``cli_agent``) adds ``cli_agent`` — the
+    member runs on that CLI, as with ``spawn_teammate`` — and the
+    ``external_cli`` object, for either kind of external CLI member.
     """
     schema = {
         "type": "object",
@@ -303,8 +303,8 @@ async def _materialize_inline_members(
     A member declared with ``expert`` runs as that template (``templates``,
     resolved before any write): the same persona, snapshot and display-name
     rule as ``spawn_expert``. A ``cli_agent`` member, or an expert with an
-    external runtime, is registered like ``spawn_external_cli`` /
-    ``spawn_expert`` register theirs, model rules included.
+    external runtime, is registered like ``spawn_teammate`` (with
+    ``cli_agent``) / ``spawn_expert`` register theirs, model rules included.
     """
     from openjiuwen.agent_teams.tools.tool_expert import (
         expert_member_cli_config,
@@ -782,7 +782,7 @@ class ScheduledTaskCreateTool(TeamTool):
         # Same gate as spawn_expert: inline members may name an expert only
         # when the host injected an expert catalog.
         self._expert_resolver = expert_resolver if inline_member_enabled else None
-        # Same gate as spawn_external_cli: inline members may run on an
+        # Same gate as spawn_teammate's cli_agent: inline members may run on an
         # external CLI only when the team declares CLI kinds.
         self._external_cli_enabled = inline_member_enabled and bool(agent_team.external_cli_kinds())
         external_cli_properties = (

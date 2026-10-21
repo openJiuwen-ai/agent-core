@@ -134,6 +134,43 @@ STRINGS: dict[str, str] = {
         "compress before into a summary). Only effective with a named "
         "checkpoint fork"
     ),
+    "spawn_teammate.cli_agent": (
+        "Optional. Run this teammate as a third-party CLI agent instead of a local LLM: the identifier of a CLI "
+        "kind pre-declared in spec.external_cli_agents (e.g. 'claude' or 'codex'). The launch command, working "
+        "directory and MCP injection all live in that entry; this field only references it by name. With it set, "
+        "isolation / permissions / fork are unavailable"
+    ),
+    "spawn_teammate.model_name_external_cli": (
+        "With cli_agent set: fill only when the user explicitly names the model for this third-party agent, never "
+        "choose or infer one; it must be a team model pool endpoint compatible with the CLI's protocol. Omit it so "
+        "the CLI uses its own default model; a model the CLI offers on its own login goes in "
+        "external_cli.builtin_model"
+    ),
+    "spawn_teammate.external_cli": (
+        "Optional object, only together with cli_agent (passing it without cli_agent is an error): the external "
+        "CLI member's authentication fallback and built-in model choice"
+    ),
+    "spawn_teammate.external_cli.fallback_model_name": (
+        "Authentication fallback model. Only valid for the cli_agent kinds listed under "
+        "compatible_fallback_models in the catalog below; any other cli_agent has no authentication fallback "
+        "and the field must be omitted. Required when that cli_agent has a compatible model: select it from the "
+        "team model pool according to the model API protocol supported by this third-party agent. "
+        "Prefer the current model when it is present in the pool and its protocol is compatible; when the "
+        "current model is absent from the pool or its protocol is incompatible, select another compatible model. "
+        "Never invent an unavailable or incompatible model. It is used for automatic fallback "
+        "when the agent uses its own default model but authentication is unavailable. It applies only to "
+        "authentication failures explicitly reported by the runtime. Omit it when the team model pool has "
+        "no compatible model; the agent can then use its own default model without automatic fallback"
+    ),
+    "spawn_teammate.external_cli.builtin_model": (
+        "Optional. A built-in model from this cli_agent's entry in the catalog below, running on the CLI's "
+        "own login (e.g. a subscription); pick it to fit the member's workload. Mutually exclusive with "
+        "model_name. Omit to let the CLI use its own default model"
+    ),
+    "spawn_teammate.external_cli.effort": (
+        "Optional. Reasoning effort, one of the chosen builtin_model's efforts; requires builtin_model. "
+        "Omit to take the model's default_effort"
+    ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/en/member/spawn_human_agent.md
     "spawn_human_agent.member_name": (
@@ -231,66 +268,6 @@ STRINGS: dict[str, str] = {
         "Note the remote agent's model lives on its own side, not controlled "
         "by this field"
     ),
-    # ===== spawn_external_cli ===================================================
-    # spawn_external_cli._desc lives in descs/en/member/spawn_external_cli.md
-    "spawn_external_cli.member_name": (
-        "[PUBLIC] Unique name for the CLI member (semantic slug, e.g. "
-        "'cli-coder-1', DNS-label-style kebab-case). **Must start with a "
-        "lowercase ASCII letter (a-z); the rest may be lowercase letters, "
-        "digits (0-9) or hyphen (-)** — no uppercase, underscore, whitespace, "
-        "CJK or any other non-ASCII characters. Serves as the primary "
-        "identifier and routing key; must be unique within the team"
-    ),
-    "spawn_external_cli.display_name": (
-        "[PUBLIC] Human-readable display label for the CLI member "
-        "(e.g. 'Claude CLI Coder'); purely presentational, not used for "
-        "routing. Injected into every other member's system prompt and "
-        "returned by list_members — do not put private content here"
-    ),
-    "spawn_external_cli.desc": (
-        "[PUBLIC] Public roster description of this CLI member — how peers "
-        "recognise it in list_members / the team roster. Optional. Injected "
-        "into other members' system prompts and returned by "
-        "list_members — do not put private content here"
-    ),
-    "spawn_external_cli.prompt": (
-        "[PRIVATE] The private working agreement this CLI member adopts to act as "
-        "this member. Optional; without it the member works from the team policy alone. "
-        "Visible only to this member, never shown in peers' roster"
-    ),
-    "spawn_external_cli.cli_agent": (
-        "Identifier of the third-party CLI agent kind to launch, e.g. 'claude' "
-        "(claudecode) or 'codex'. Must match a static config entry pre-declared "
-        "in spec.external_cli_agents — the launch command, working directory "
-        "and MCP injection all live in that entry; this field only references "
-        "it by name"
-    ),
-    "spawn_external_cli.model_name": (
-        "Optional. Set only when the user explicitly specifies the model for this third-party agent. "
-        "You must not choose, infer, or auto-fill it. Omit it when the user has not explicitly specified "
-        "a model so the agent uses its own default model"
-    ),
-    "spawn_external_cli.fallback_model_name": (
-        "Authentication fallback model. Only valid for the cli_agent kinds listed under "
-        "compatible_fallback_models in the catalog below; any other cli_agent has no authentication fallback "
-        "and the field must be omitted. Required when that cli_agent has a compatible model: select it from the "
-        "team model pool according to the model API protocol supported by this third-party agent. "
-        "Prefer the current model when it is present in the pool and its protocol is compatible; when the "
-        "current model is absent from the pool or its protocol is incompatible, select another compatible model. "
-        "Never invent an unavailable or incompatible model. It is used for automatic fallback "
-        "when the agent uses its own default model but authentication is unavailable. It applies only to "
-        "authentication failures explicitly reported by the runtime. Omit it when the team model pool has "
-        "no compatible model; the agent can then use its own default model without automatic fallback"
-    ),
-    "spawn_external_cli.builtin_model": (
-        "Optional. A built-in model from this cli_agent's entry in the catalog below, running on the CLI's "
-        "own login (e.g. a subscription); pick it to fit the member's workload. Mutually exclusive with "
-        "model_name. Omit to let the CLI use its own default model"
-    ),
-    "spawn_external_cli.effort": (
-        "Optional. Reasoning effort, one of the chosen builtin_model's efforts; requires builtin_model. "
-        "Omit to take the model's default_effort"
-    ),
     # ===== view_experts ========================================================
     # view_experts._desc lives in descs/en/expert/view_experts.md
     "view_experts.action": "list (default) lists the installed single experts; get shows one expert in full",
@@ -334,24 +311,16 @@ STRINGS: dict[str, str] = {
     ),
     "spawn_expert.model_name": (
         "Optional. Fill only when the user names a model; never pick or infer one yourself. Native experts follow "
-        "spawn_teammate, external-runtime experts follow spawn_external_cli (a team pool endpoint compatible with "
-        "the CLI's protocol)"
+        "spawn_teammate, external-runtime experts follow spawn_teammate with cli_agent (a team pool endpoint compatible "
+        "with the CLI's protocol)"
     ),
     "spawn_expert.external_cli": (
         "Optional object, only for external-runtime experts (runtime other than native); passing it for a native "
-        "expert is an error. Fields mean and validate like the same-named spawn_external_cli parameters"
-    ),
-    "spawn_expert.external_cli.fallback_model_name": (
-        "Authentication fallback model, same rules as spawn_external_cli.fallback_model_name: valid only for the "
-        "CLI kinds listed under compatible_fallback_models below; required when that kind has compatible models, "
-        "preferring the current model when it is in the pool and protocol-compatible"
+        "expert is an error. Fields mean and validate like spawn_teammate.external_cli"
     ),
     "spawn_expert.external_cli.builtin_model": (
         "Optional. A built-in model from the expert's CLI kind entry in the catalog below, run on the CLI's own "
         "login; mutually exclusive with model_name"
-    ),
-    "spawn_expert.external_cli.effort": (
-        "Optional. Reasoning effort, one of the chosen builtin_model's efforts; requires builtin_model"
     ),
     "spawn_expert.isolation": (
         "Optional isolation mode, as in spawn_teammate: set 'worktree' only when the user asks for it or the member "
@@ -459,13 +428,13 @@ STRINGS: dict[str, str] = {
         "with spawn_expert's rules"
     ),
     "create_task_scheduled.task.member.cli_agent": (
-        "Optional, exclusive with expert. Run this member as a third-party CLI agent, as spawn_external_cli.cli_agent: "
+        "Optional, exclusive with expert. Run this member as a third-party CLI agent, as spawn_teammate.cli_agent: "
         "the value must be a CLI kind declared in spec.external_cli_agents; model_name is the team model pool "
         "endpoint the CLI uses"
     ),
     "create_task_scheduled.task.member.external_cli": (
         "Optional object, only for external CLI members (cli_agent set, or expert is an external-runtime expert); "
-        "passing it otherwise is an error. Fields mean and validate like the same-named spawn_external_cli parameters"
+        "passing it otherwise is an error. Fields mean and validate like spawn_teammate.external_cli"
     ),
     "create_task_scheduled.task.member.builtin_model": (
         "Optional. A built-in model from the member's CLI kind entry in the catalog below, run on the CLI's own "

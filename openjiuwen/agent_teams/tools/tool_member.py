@@ -138,8 +138,9 @@ def check_model_selectable(team: TeamBackend, model_name: Any, allocation: "Allo
 #
 # One implementation of "may this team launch this CLI kind, and on which
 # model" shared by every tool that registers an external CLI member
-# (``spawn_external_cli`` and the external path of ``spawn_expert``), so the
-# same inputs always reach the same allocation or the same error.
+# (``spawn_teammate`` with ``cli_agent`` and the external path of
+# ``spawn_expert``), so the same inputs always reach the same allocation or
+# the same error.
 
 
 def check_external_cli_declared(team: TeamBackend, cli_agent: str) -> str | None:
@@ -437,16 +438,17 @@ def external_cli_option_properties(
     *,
     builtin_model_description: str,
 ) -> dict[str, Any]:
-    """Properties of an ``external_cli`` object (``spawn_expert`` / scheduled ``create_task``'s inline member).
+    """Properties of an ``external_cli`` object (``spawn_teammate`` / ``spawn_expert`` / scheduled
+    ``create_task``'s inline member).
 
     ``builtin_model`` / ``effort`` exist only when some declared CLI kind
-    offers a built-in model catalog, the same gate as ``spawn_external_cli``.
+    offers a built-in model catalog (``builtin_models_enabled()``).
     """
     properties: dict[str, Any] = {
         "fallback_model_name": {
             "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}],
             "description": (
-                f"{t('spawn_expert', 'external_cli.fallback_model_name')}\n\n"
+                f"{t('spawn_teammate', 'external_cli.fallback_model_name')}\n\n"
                 f"{external_cli_model_catalog_context(team)}"
             ),
         },
@@ -456,7 +458,7 @@ def external_cli_option_properties(
             "type": "string",
             "description": f"{builtin_model_description}\n\n{_builtin_model_catalog(team)}",
         }
-        properties["effort"] = {"type": "string", "description": t("spawn_expert", "external_cli.effort")}
+        properties["effort"] = {"type": "string", "description": t("spawn_teammate", "external_cli.effort")}
     return properties
 
 
@@ -480,7 +482,7 @@ async def register_external_cli_member(
 ) -> "MemberOpResult":
     """Register one external CLI member row (UNSTARTED): declared-kind check, model rules, registration.
 
-    Shared by ``spawn_external_cli``, the external path of ``spawn_expert``
+    Shared by ``spawn_teammate`` with ``cli_agent``, the external path of ``spawn_expert``
     and scheduled ``create_task``'s inline member, so the same inputs always
     reach the same row or the same error (only ``tool_name`` differs).
     """
@@ -519,11 +521,12 @@ async def register_external_cli_member(
 
 
 class _SpawnToolBase(TeamTool, ABC):
-    """Shared scaffolding for the role-specific spawn tools.
+    """Shared scaffolding for the spawn tools.
 
-    Each concrete subclass owns exactly one ``role_type``: it declares its
-    own flat ``input_params`` schema and implements a single straight-line
-    ``invoke`` — no role branching anywhere. The cross-cutting concerns every
+    Each concrete subclass owns exactly one kind of member — an AI teammate
+    (local or on an external CLI), a human, or a bridge: it declares its own
+    flat ``input_params`` schema and implements one ``invoke``. The
+    cross-cutting concerns every
     spawn tool shares live here: ``member_name`` validation, ToolOutput
     construction, and model-facing result mapping.
     """
@@ -643,12 +646,21 @@ async def register_teammate(
 
 
 class SpawnTeammateTool(_SpawnToolBase):
-    """Spawn an ordinary LLM teammate (``role_type='teammate'``).
+    """Spawn an AI teammate: a local LLM (``role_type='teammate'``) or, with
+    ``cli_agent``, a third-party CLI agent (``role_type='external_cli'``).
 
-    Context inheritance is a gated capability: when ``fork_enabled`` is
-    False the ``fork`` / ``fork_source`` / ``compact`` properties are absent
-    from the schema *and* the fork section is dropped from the description,
-    both off the one flag. See ``TeamAgentSpec.enable_fork``.
+    Both are the same kind of member to the leader — only the runtime
+    differs — so one tool registers them. Each optional capability is gated
+    per attribute, schema and description slot off the same signal:
+
+    - context inheritance (``fork`` / ``fork_source`` / ``fork_mode``):
+      ``fork_enabled`` (``TeamAgentSpec.enable_fork``);
+    - running on an external CLI (``cli_agent`` / ``external_cli``):
+      ``team.external_cli_kinds()`` is non-empty;
+    - the CLI's built-in models (``external_cli.builtin_model`` / ``effort``):
+      ``team.builtin_models_enabled()``.
+
+    The shape matches scheduled ``create_task``'s inline ``member`` object.
     """
 
     #: Fork properties and the description slot that documents them. Schema
@@ -656,6 +668,10 @@ class SpawnTeammateTool(_SpawnToolBase):
     #: argument it has no way to pass.
     _FORK_PARAMS = ("fork", "fork_source", "fork_mode")
     _FORK_SLOTS = frozenset({"fork_usage", "fork_param_rows"})
+    #: Properties that only a local teammate can take.
+    _LOCAL_ONLY_PARAMS = ("isolation", "permissions", *_FORK_PARAMS)
+    _EXTERNAL_CLI_SLOTS = frozenset({"external_cli_usage"})
+    _BUILTIN_MODEL_SLOTS = frozenset({"builtin_model_param_rows", "builtin_model_usage"})
 
     def __init__(
         self,
@@ -676,14 +692,20 @@ class SpawnTeammateTool(_SpawnToolBase):
                 (``TeamBackend.fork_enabled()``). Gates the fork properties
                 and the fork section of the description as one unit.
         """
-        super().__init__(
-            team,
-            t,
-            "spawn_teammate",
-            omit_slots=None if fork_enabled else frozenset(self._FORK_SLOTS),
+        external_cli_enabled = bool(team.external_cli_kinds())
+        builtin_models_enabled = external_cli_enabled and team.builtin_models_enabled()
+        omit_slots = frozenset().union(
+            () if fork_enabled else self._FORK_SLOTS,
+            () if external_cli_enabled else self._EXTERNAL_CLI_SLOTS,
+            () if builtin_models_enabled else self._BUILTIN_MODEL_SLOTS,
         )
+        super().__init__(team, t, "spawn_teammate", omit_slots=omit_slots or None)
         self._allocate_model_config = model_config_allocator
         self._fork_enabled = fork_enabled
+        self._external_cli_enabled = external_cli_enabled
+        model_description = model_name_description(team, t)
+        if external_cli_enabled:
+            model_description = f"{model_description}\n\n{t('spawn_teammate', 'model_name_external_cli')}"
         properties: dict[str, Any] = {
             "member_name": {
                 "type": "string",
@@ -697,7 +719,7 @@ class SpawnTeammateTool(_SpawnToolBase):
             "prompt": {"type": "string", "description": t("spawn_teammate", "prompt")},
             "model_name": {
                 "type": "string",
-                "description": model_name_description(team, t),
+                "description": model_description,
             },
             "isolation": {
                 "type": "string",
@@ -737,6 +759,17 @@ class SpawnTeammateTool(_SpawnToolBase):
                     "description": t("spawn_teammate", "fork_mode"),
                 },
             })
+        if external_cli_enabled:
+            properties.update({
+                "cli_agent": {"type": "string", "description": t("spawn_teammate", "cli_agent")},
+                "external_cli": {
+                    "type": "object",
+                    "description": t("spawn_teammate", "external_cli"),
+                    "properties": external_cli_option_properties(
+                        team, t, builtin_model_description=t("spawn_teammate", "external_cli.builtin_model")
+                    ),
+                },
+            })
         self.card.input_params = {
             "type": "object",
             "properties": properties,
@@ -761,6 +794,12 @@ class SpawnTeammateTool(_SpawnToolBase):
                     "disabled (enable_fork=False on TeamAgentSpec). Spawn the "
                     "teammate without these arguments, or enable fork in the team spec."
                 )
+        err = self._check_external_cli_args(inputs)
+        if err:
+            return self._fail(err)
+        cli_agent = _optional_text(inputs.get("cli_agent"))
+        if cli_agent is not None:
+            return await self._spawn_external_cli(inputs, cli_agent)
 
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")
@@ -795,6 +834,55 @@ class SpawnTeammateTool(_SpawnToolBase):
             display_name=display_name,
             role_type="teammate",
             isolation=inputs.get("isolation"),
+        )
+
+    def _check_external_cli_args(self, inputs: dict[str, Any]) -> str | None:
+        """Reject ``cli_agent`` / ``external_cli`` arguments this call cannot take, before any write.
+
+        Same rules as scheduled ``create_task``'s inline ``member``.
+        """
+        cli_agent = _optional_text(inputs.get("cli_agent"))
+        external_args = inputs.get("external_cli")
+        if (cli_agent or external_args is not None) and not self._external_cli_enabled:
+            return "cli_agent / external_cli are unavailable: this team declares no external CLI kinds"
+        if external_args is not None and not isinstance(external_args, dict):
+            return "'external_cli' must be an object"
+        if external_args and not cli_agent:
+            return "'external_cli' applies only to an external CLI member: set 'cli_agent', or omit it"
+        if cli_agent:
+            local_only = [key for key in self._LOCAL_ONLY_PARAMS if inputs.get(key) is not None]
+            if local_only:
+                return (
+                    f"{', '.join(local_only)} cannot be set with cli_agent '{cli_agent}': they apply only to a "
+                    "local teammate; omit them, or omit 'cli_agent'"
+                )
+        return None
+
+    async def _spawn_external_cli(self, inputs: dict[str, Any], cli_agent: str) -> ToolOutput:
+        """Register the teammate as a third-party CLI member (``role_type='external_cli'``)."""
+        external_args = inputs.get("external_cli") or {}
+        member_name = inputs["member_name"]
+        display_name = inputs.get("display_name")
+        result = await register_external_cli_member(
+            self.team,
+            tool_name="spawn_teammate",
+            allocate_model_config=self._allocate_model_config,
+            cli_agent=cli_agent,
+            member_name=member_name,
+            display_name=display_name,
+            desc=inputs.get("desc") or "",
+            prompt=inputs.get("prompt") or "",
+            model_name=inputs.get("model_name"),
+            fallback_model_name=external_args.get("fallback_model_name"),
+            builtin_model=external_args.get("builtin_model"),
+            effort=external_args.get("effort"),
+        )
+        return self._from_result(
+            result,
+            member_name=member_name,
+            display_name=display_name,
+            role_type="external_cli",
+            cli_agent=cli_agent,
         )
 
 
@@ -1138,123 +1226,6 @@ class SpawnBridgeAgentTool(_SpawnToolBase):
             role_type="bridge_agent",
             mailbox_inject_mode=inject_mode.value,
             protocol=protocol,
-        )
-
-
-class SpawnExternalCliTool(_SpawnToolBase):
-    """Spawn a third-party CLI agent as a teammate (``role_type='external_cli'``).
-
-    The teammate's brain is a CLI subprocess (claudecode / codex / ...) driven
-    by an ``ExternalCliRuntime``. ``cli_agent`` names a CLI kind pre-declared in
-    ``TeamAgentSpec.external_cli_agents`` — all launch knowledge lives there, so
-    this call carries only the identifier. ``prompt`` is the private system
-    prompt the CLI adopts to act as this member; ``desc`` is the public roster
-    description peers see. The tool is not wired when no CLI kinds are declared
-    (see ``create_team_tools``).
-    """
-
-    # Description slots that talk about the built-in model parameters; dropped
-    # together with the parameters when no CLI kind declares builtin_models.
-    _BUILTIN_MODEL_SLOTS = frozenset({"builtin_model_param_rows", "builtin_model_usage"})
-
-    def __init__(
-        self,
-        team: TeamBackend,
-        t: Translator,
-        *,
-        model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
-    ):
-        super().__init__(
-            team,
-            t,
-            "spawn_external_cli",
-            omit_slots=None if team.builtin_models_enabled() else self._BUILTIN_MODEL_SLOTS,
-        )
-        self._allocate_model_config = model_config_allocator
-        fallback_description = t("spawn_external_cli", "fallback_model_name")
-        fallback_description = f"{fallback_description}\n\n{self._model_catalog_context()}"
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "member_name": {
-                    "type": "string",
-                    "description": t("spawn_external_cli", "member_name"),
-                },
-                "display_name": {
-                    "type": "string",
-                    "description": t("spawn_external_cli", "display_name"),
-                },
-                "desc": {"type": "string", "description": t("spawn_external_cli", "desc")},
-                "prompt": {"type": "string", "description": t("spawn_external_cli", "prompt")},
-                "cli_agent": {
-                    "type": "string",
-                    "description": t("spawn_external_cli", "cli_agent"),
-                },
-                "model_name": {
-                    "type": "string",
-                    "description": t("spawn_external_cli", "model_name"),
-                },
-                "fallback_model_name": {
-                    "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}],
-                    "description": fallback_description,
-                },
-            },
-            "required": ["member_name", "display_name", "cli_agent"],
-        }
-        # Built-in model choice is an attribute-level capability: the two
-        # properties exist only when some declared CLI kind offers a catalog.
-        if team.builtin_models_enabled():
-            properties = self.card.input_params["properties"]
-            properties["builtin_model"] = {
-                "type": "string",
-                "description": f"{t('spawn_external_cli', 'builtin_model')}\n\n{_builtin_model_catalog(team)}",
-            }
-            properties["effort"] = {"type": "string", "description": t("spawn_external_cli", "effort")}
-
-    def _model_catalog_context(self) -> str:
-        """Render safe current-model and pool protocol data for the model."""
-        return external_cli_model_catalog_context(self.team)
-
-    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
-        err = validate_member_name(inputs.get("member_name"))
-        if err:
-            return self._fail(err)
-
-        cli_agent = (inputs.get("cli_agent") or "").strip()
-        if not cli_agent:
-            return self._fail(
-                "spawn_external_cli requires 'cli_agent' naming a CLI kind "
-                "declared in TeamAgentSpec.external_cli_agents (e.g. 'claude' or 'codex')"
-            )
-        err = check_external_cli_declared(self.team, cli_agent)
-        if err:
-            return self._fail(err)
-
-        desc = inputs.get("desc") or ""
-        prompt = inputs.get("prompt") or ""
-
-        member_name = inputs["member_name"]
-        display_name = inputs.get("display_name")
-        result = await register_external_cli_member(
-            self.team,
-            tool_name="spawn_external_cli",
-            allocate_model_config=self._allocate_model_config,
-            cli_agent=cli_agent,
-            member_name=member_name,
-            display_name=display_name,
-            desc=desc,
-            prompt=prompt,
-            model_name=inputs.get("model_name"),
-            fallback_model_name=inputs.get("fallback_model_name"),
-            builtin_model=inputs.get("builtin_model"),
-            effort=inputs.get("effort"),
-        )
-        return self._from_result(
-            result,
-            member_name=member_name,
-            display_name=display_name,
-            role_type="external_cli",
-            cli_agent=cli_agent,
         )
 
 
