@@ -76,6 +76,12 @@
 9. **不在事件循环上读盘**：卡片读取与两个异步加载器经 `asyncio.to_thread` 在工作线程里跑同步实现（整个
    加载只有一次线程往返，比逐操作走 `aiofiles` 快一个数量级，见 harness F_22）；工具路径上事件循环线程不做
    文件 IO。定位协议的实现由宿主决定，同样不得阻塞事件循环。
+10. **调度模式 `create_task` 的内联成员也能按专家创建**。注入了目录时，内联 `member` 对象多出可选
+    `expert` / `group`（与 `EXPERT_TOOLS` 同一门控，未注入时 schema 不出现、偷传在写库前报错）；给了 `expert`
+    时 `display_name` / `desc` 可省略，`desc` / `prompt` 只追加，成员行同样写 `options.agent_template`。模板解析、
+    人设渲染、显示名去重（同一次调用内拉起的同类成员也参与去重）与 `spawn_expert` 共用 `ExpertTemplateResolver` /
+    `expert_member_texts` / `expert_member_record`，同一份实现。所有 `expert` 在写任何成员行之前解析完，失败时不写行。
+    内联成员是 LLM 队友，外部 CLI 运行时的专家不能内联声明（报错并指引先 `spawn_expert` 再 `assignee`）。
 
 ## 拒绝的方案
 

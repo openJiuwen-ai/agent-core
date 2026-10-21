@@ -109,13 +109,35 @@ _VIEW_TASK_DESC_KEY: dict[str, str] = {
 # branch-free.
 
 
-def _create_task_kwargs(dispatch_mode: str, *, team_mode: str, model_config_allocator: Any) -> dict[str, Any]:
+def _create_task_kwargs(
+    dispatch_mode: str,
+    *,
+    team_mode: str,
+    model_config_allocator: Any,
+    expert_resolver: Any = None,
+) -> dict[str, Any]:
     if dispatch_mode == "scheduled":
         return {
             "inline_member_enabled": team_mode != "predefined",
             "model_config_allocator": model_config_allocator,
+            "expert_resolver": expert_resolver,
         }
     return {}
+
+
+def _expert_resolver(catalog: "ExpertCatalog | None", binding: "ExpertBinding | None", *, language: str) -> Any:
+    """One expert template resolver for spawn_expert and scheduled create_task's inline member."""
+    if catalog is None:
+        return None
+    from openjiuwen.agent_teams.tools.tool_expert import ExpertTemplateResolver
+
+    return ExpertTemplateResolver(
+        catalog=catalog,
+        language=language,
+        bound_group=binding.bound_group if binding is not None else None,
+        persona_workspace=binding.persona_workspace if binding is not None else None,
+        persona_language=binding.persona_language if binding is not None else None,
+    )
 
 
 # ========== Tool Factory ==========
@@ -227,6 +249,7 @@ def create_team_tools(
     # Variant selection is a construction-time table lookup: every tool below
     # still has a flat schema and a branch-free ``invoke``.
     create_task_cls = _CREATE_TASK_CLASS[dispatch_mode]
+    expert_resolver = _expert_resolver(expert_catalog, expert_binding, language=lang)
     send_message_cls = _SEND_MESSAGE_CLASS[(dispatch_mode, "leader" if role == "leader" else "member")]
 
     all_tools = {
@@ -269,7 +292,12 @@ def create_team_tools(
         "create_task": create_task_cls(
             agent_team,
             t,
-            **_create_task_kwargs(dispatch_mode, team_mode=team_mode, model_config_allocator=model_config_allocator),
+            **_create_task_kwargs(
+                dispatch_mode,
+                team_mode=team_mode,
+                model_config_allocator=model_config_allocator,
+                expert_resolver=expert_resolver,
+            ),
         ),
         "update_task": UpdateTaskTool(agent_team, t, dispatch_mode=dispatch_mode),
         "view_task": ViewTaskToolV2(task_mgr, t, desc_key=_VIEW_TASK_DESC_KEY[dispatch_mode]),
@@ -311,6 +339,7 @@ def create_team_tools(
                 binding=expert_binding,
                 language=lang,
                 model_config_allocator=model_config_allocator,
+                resolver=expert_resolver,
             )
         )
 
@@ -422,6 +451,7 @@ def _expert_tools(
     binding: "ExpertBinding | None",
     language: str,
     model_config_allocator: Any,
+    resolver: Any,
 ) -> dict[str, Tool]:
     """Build the three expert tools over one catalog."""
     from openjiuwen.agent_teams.tools.tool_expert import SpawnExpertTool, ViewExpertGroupsTool, ViewExpertsTool
@@ -442,9 +472,8 @@ def _expert_tools(
             catalog=catalog,
             language=language,
             bound_group=bound_group,
-            persona_workspace=binding.persona_workspace if binding is not None else None,
-            persona_language=binding.persona_language if binding is not None else None,
             model_config_allocator=model_config_allocator,
+            resolver=resolver,
         ),
     }
 

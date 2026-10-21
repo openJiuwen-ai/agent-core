@@ -335,6 +335,16 @@ STRINGS: dict[str, str] = {
         "（member_name / display_name / desc / prompt / model_name），外加必填的 lifetime。"
         "成员落为该任务的 assignee，由调度框架拉起；名下任务全部终态后按 lifetime 退场"
     ),
+    "create_task_scheduled.task.member.expert": (
+        "可选。让该成员按一个已安装的专家模板运行：单个专家的包名，给了 group 时是该专家团内的成员名"
+        "（不能是 leader）。填写后 display_name / desc 可省略（取专家自带的显示名与描述），"
+        "desc / prompt 只追加在专家描述 / 人设之后。只支持本地运行的专家；外部 CLI 运行时的专家先用 "
+        "spawn_expert 拉起，再用 assignee 指派"
+    ),
+    "create_task_scheduled.task.member.group": (
+        "可选，需同时给 expert。专家团名，表示 expert 是该团内的成员名；本团队由该专家团组建时，"
+        "新成员与团里预定义的同名成员同源"
+    ),
     "create_task_scheduled.task.member.lifetime": (
         "退场策略：shutdown = 名下任务全部完成后自动关闭（终态，名字不可复用）；"
         "dormant = 自动休眠（保留在名册，不处理任何事件），"

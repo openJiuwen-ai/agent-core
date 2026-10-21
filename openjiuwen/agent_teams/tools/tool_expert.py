@@ -56,6 +56,7 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.tools.member_options import MemberAgentTemplate
     from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
     from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 
@@ -435,7 +436,7 @@ class ViewExpertGroupsTool(TeamTool):
 
 
 @dataclass(frozen=True)
-class _ExpertTemplate:
+class ExpertTemplate:
     """What a spawn needs from an expert template, whatever its source."""
 
     ref: ExpertRef
@@ -447,8 +448,156 @@ class _ExpertTemplate:
     external_cli: "ExternalCliAgentSpec | None"
 
 
-class _TemplateUnavailable(Exception):
+class ExpertUnavailable(Exception):
     """The requested expert template cannot be resolved; the message is model-facing."""
+
+
+class ExpertTemplateResolver:
+    """Resolves an expert template for a new member: ``spawn_expert`` and scheduled ``create_task``'s inline member.
+
+    The template comes from the team's own bound AgentGroup when ``group``
+    names it (no disk access, same snapshot and persona as the predefined
+    member), otherwise from the catalog + core loaders. Personas render in
+    ``persona_language`` (the base spec's, as ``compose_template_member``
+    does); display names in the leader's ``language``.
+    """
+
+    def __init__(
+        self,
+        *,
+        catalog: ExpertCatalog,
+        language: str,
+        bound_group: BoundAgentGroup | None = None,
+        persona_workspace: str | None = None,
+        persona_language: str | None = None,
+    ):
+        self._catalog = catalog
+        self._language = language
+        self._bound_group = bound_group
+        self._persona_workspace = persona_workspace
+        self._persona_language = persona_language
+
+    async def resolve(self, expert: str, group: str | None) -> ExpertTemplate:
+        """Resolve one expert template; ``ExpertUnavailable`` (model-facing message) when it cannot be."""
+        if group is not None and expert == LEADER_MEMBER:
+            raise ExpertUnavailable(f"The leader of expert group '{group}' cannot be spawned as a teammate")
+        bound = self._bound_group
+        if group is not None and bound is not None and group == bound.name:
+            member = bound.member(expert)
+            if member is None:
+                raise ExpertUnavailable(
+                    f"'{expert}' is not a spawnable member of the bound expert group '{group}' "
+                    f"(members: {', '.join(bound.member_names()) or '<none>'})"
+                )
+            return ExpertTemplate(
+                ref=ExpertRef(name=expert, group=group),
+                version="",
+                display_name=member.display_name,
+                desc=member.desc,
+                persona=member.persona,
+                snapshot=member.snapshot,
+                external_cli=member.external_cli,
+            )
+        if group is not None:
+            return await self._group_member_template(expert, group)
+        return await self._single_expert_template(expert)
+
+    async def _single_expert_template(self, expert: str) -> ExpertTemplate:
+        try:
+            location = await self._catalog.locate_expert(expert)
+        except ValueError as exc:
+            installed = [item.name for item in await self._catalog.list_expert_packages()]
+            team_logger.warning("[expert] spawn_expert cannot locate expert {!r}: {}", expert, exc)
+            raise ExpertUnavailable(
+                f"Expert '{expert}' is not installed (installed: {', '.join(installed) or '<none>'})"
+            ) from exc
+        manifest = location.path / _MANIFEST
+        try:
+            template = await aload_agent_template_package(manifest)
+            card = await read_agent_template_card(manifest)
+        except (OSError, ValueError) as exc:
+            team_logger.warning("[expert] spawn_expert cannot load expert {!r} at {}: {}", expert, location.path, exc)
+            raise ExpertUnavailable(f"Expert '{expert}' cannot be loaded: {exc}") from exc
+        return self._from_package(ExpertRef(name=expert), template, card)
+
+    async def _group_member_template(self, expert: str, group: str) -> ExpertTemplate:
+        try:
+            location = await self._catalog.locate_group(group)
+        except ValueError as exc:
+            installed = [item.name for item in await self._catalog.list_group_packages()]
+            team_logger.warning("[expert] spawn_expert cannot locate expert group {!r}: {}", group, exc)
+            raise ExpertUnavailable(
+                f"Expert group '{group}' is not installed (installed: {', '.join(installed) or '<none>'})"
+            ) from exc
+        try:
+            package = await aload_agent_group_package(location.path)
+        except (OSError, ValueError) as exc:
+            team_logger.warning("[expert] spawn_expert cannot load expert group {!r} at {}: {}", group, location.path, exc)
+            raise ExpertUnavailable(f"Expert group '{group}' cannot be loaded: {exc}") from exc
+        template = package.templates.get(expert)
+        if template is None or expert == LEADER_MEMBER:
+            members = [name for name in package.templates if name != LEADER_MEMBER]
+            raise ExpertUnavailable(
+                f"'{expert}' is not a member of expert group '{group}' (members: {', '.join(members)})"
+            )
+        try:
+            card = await read_agent_template_card(package.package_dir / "agents" / expert / _MANIFEST)
+        except ValueError as exc:
+            raise ExpertUnavailable(f"Expert '{group}/{expert}' cannot be loaded: {exc}") from exc
+        return self._from_package(ExpertRef(name=expert, group=group), template, card)
+
+    def _from_package(self, ref: ExpertRef, template: "AgentTemplateSpec", card: AgentTemplateCard) -> ExpertTemplate:
+        from openjiuwen.agent_teams.external.manifest import external_cli_agent_spec_from_template
+
+        try:
+            external_cli = external_cli_agent_spec_from_template(template)
+        except ValueError as exc:
+            raise ExpertUnavailable(f"Expert '{ref.label()}' has an unsupported runtime: {exc}") from exc
+        return ExpertTemplate(
+            ref=ref,
+            version=card.version,
+            display_name=card.display_label(self._language) or template.agent_card.name or ref.name,
+            desc=card.description or template.agent_card.description,
+            persona=render_template_persona(
+                template, language=self._persona_language, workspace=self._persona_workspace
+            ),
+            snapshot=template_snapshot(template) if external_cli is None else None,
+            external_cli=external_cli,
+        )
+
+    async def unique_display_name(
+        self,
+        team: TeamBackend,
+        display_name: str,
+        member_name: str,
+        *,
+        also_taken: frozenset[str] = frozenset(),
+    ) -> str:
+        """Template display name; suffixed with the member name when a teammate already uses it.
+
+        ``also_taken`` adds display names of members being registered in the same call.
+        """
+        taken = {entry.display_name for entry in await team.list_member_roster()} | also_taken
+        if display_name not in taken:
+            return display_name
+        suffix = f"（{member_name}）" if self._language == "cn" else f" ({member_name})"
+        return f"{display_name}{suffix}"
+
+
+
+def expert_member_texts(template: ExpertTemplate, *, desc: Any, prompt: Any) -> tuple[str, str]:
+    """Member ``desc`` / ``prompt``: the template's own, then what the leader adds (never replaced)."""
+    return (
+        "\n\n".join(part for part in (template.desc, _optional_text(desc)) if part),
+        "\n\n".join(part for part in (template.persona, _optional_text(prompt)) if part),
+    )
+
+
+def expert_member_record(template: ExpertTemplate) -> "MemberAgentTemplate":
+    """The ``options.agent_template`` record of a member spawned from ``template``."""
+    from openjiuwen.agent_teams.tools.member_options import MemberAgentTemplate
+
+    return MemberAgentTemplate(ref=template.ref.to_dict(), version=template.version, snapshot=template.snapshot)
 
 
 class SpawnExpertTool(_SpawnToolBase):
@@ -473,15 +622,16 @@ class SpawnExpertTool(_SpawnToolBase):
         persona_workspace: str | None = None,
         persona_language: str | None = None,
         model_config_allocator: Callable[..., "Allocation | None"] | None = None,
+        resolver: "ExpertTemplateResolver | None" = None,
     ):
         super().__init__(team, t, "spawn_expert")
-        self._catalog = catalog
-        self._language = language
-        self._bound_group = bound_group
-        self._persona_workspace = persona_workspace
-        # Same language compose_template_member renders predefined members in
-        # (the base spec's), so both paths yield the same persona.
-        self._persona_language = persona_language
+        self._resolver = resolver or ExpertTemplateResolver(
+            catalog=catalog,
+            language=language,
+            bound_group=bound_group,
+            persona_workspace=persona_workspace,
+            persona_language=persona_language,
+        )
         self._allocate_model_config = model_config_allocator
         external_cli_properties: dict[str, Any] = {
             "fallback_model_name": {
@@ -547,14 +697,12 @@ class SpawnExpertTool(_SpawnToolBase):
         if expert is None:
             return self._fail("'expert' is required: an installed expert package name, or a member name with 'group'")
         group = _optional_text(inputs.get("group"))
-        if group is not None and expert == LEADER_MEMBER:
-            return self._fail(f"The leader of expert group '{group}' cannot be spawned as a teammate")
         external_args = inputs.get("external_cli")
         if external_args is not None and not isinstance(external_args, dict):
             return self._fail("'external_cli' must be an object")
         try:
-            template = await self._resolve_template(expert, group)
-        except _TemplateUnavailable as exc:
+            template = await self._resolver.resolve(expert, group)
+        except ExpertUnavailable as exc:
             return self._fail(str(exc))
         if template.external_cli is None and external_args:
             return self._fail(
@@ -563,121 +711,25 @@ class SpawnExpertTool(_SpawnToolBase):
             )
 
         member_name = inputs["member_name"]
-        display_name = _optional_text(inputs.get("display_name")) or await self._unique_display_name(
-            template.display_name, member_name
+        display_name = _optional_text(inputs.get("display_name")) or await self._resolver.unique_display_name(
+            self.team, template.display_name, member_name
         )
-        desc = "\n\n".join(part for part in (template.desc, _optional_text(inputs.get("desc"))) if part)
-        prompt = "\n\n".join(part for part in (template.persona, _optional_text(inputs.get("prompt"))) if part)
+        desc, prompt = expert_member_texts(template, desc=inputs.get("desc"), prompt=inputs.get("prompt"))
         if template.external_cli is not None:
             return await self._spawn_external(
                 template, inputs, external_args or {}, member_name, display_name, desc, prompt
             )
         return await self._spawn_native(template, inputs, member_name, display_name, desc, prompt)
 
-    async def _resolve_template(self, expert: str, group: str | None) -> _ExpertTemplate:
-        bound = self._bound_group
-        if group is not None and bound is not None and group == bound.name:
-            member = bound.member(expert)
-            if member is None:
-                raise _TemplateUnavailable(
-                    f"'{expert}' is not a spawnable member of the bound expert group '{group}' "
-                    f"(members: {', '.join(bound.member_names()) or '<none>'})"
-                )
-            return _ExpertTemplate(
-                ref=ExpertRef(name=expert, group=group),
-                version="",
-                display_name=member.display_name,
-                desc=member.desc,
-                persona=member.persona,
-                snapshot=member.snapshot,
-                external_cli=member.external_cli,
-            )
-        if group is not None:
-            return await self._group_member_template(expert, group)
-        return await self._single_expert_template(expert)
-
-    async def _single_expert_template(self, expert: str) -> _ExpertTemplate:
-        try:
-            location = await self._catalog.locate_expert(expert)
-        except ValueError as exc:
-            installed = [item.name for item in await self._catalog.list_expert_packages()]
-            team_logger.warning("[expert] spawn_expert cannot locate expert {!r}: {}", expert, exc)
-            raise _TemplateUnavailable(
-                f"Expert '{expert}' is not installed (installed: {', '.join(installed) or '<none>'})"
-            ) from exc
-        manifest = location.path / _MANIFEST
-        try:
-            template = await aload_agent_template_package(manifest)
-            card = await read_agent_template_card(manifest)
-        except (OSError, ValueError) as exc:
-            team_logger.warning("[expert] spawn_expert cannot load expert {!r} at {}: {}", expert, location.path, exc)
-            raise _TemplateUnavailable(f"Expert '{expert}' cannot be loaded: {exc}") from exc
-        return self._from_package(ExpertRef(name=expert), template, card)
-
-    async def _group_member_template(self, expert: str, group: str) -> _ExpertTemplate:
-        try:
-            location = await self._catalog.locate_group(group)
-        except ValueError as exc:
-            installed = [item.name for item in await self._catalog.list_group_packages()]
-            team_logger.warning("[expert] spawn_expert cannot locate expert group {!r}: {}", group, exc)
-            raise _TemplateUnavailable(
-                f"Expert group '{group}' is not installed (installed: {', '.join(installed) or '<none>'})"
-            ) from exc
-        try:
-            package = await aload_agent_group_package(location.path)
-        except (OSError, ValueError) as exc:
-            team_logger.warning("[expert] spawn_expert cannot load expert group {!r} at {}: {}", group, location.path, exc)
-            raise _TemplateUnavailable(f"Expert group '{group}' cannot be loaded: {exc}") from exc
-        template = package.templates.get(expert)
-        if template is None or expert == LEADER_MEMBER:
-            members = [name for name in package.templates if name != LEADER_MEMBER]
-            raise _TemplateUnavailable(
-                f"'{expert}' is not a member of expert group '{group}' (members: {', '.join(members)})"
-            )
-        try:
-            card = await read_agent_template_card(package.package_dir / "agents" / expert / _MANIFEST)
-        except ValueError as exc:
-            raise _TemplateUnavailable(f"Expert '{group}/{expert}' cannot be loaded: {exc}") from exc
-        return self._from_package(ExpertRef(name=expert, group=group), template, card)
-
-    def _from_package(self, ref: ExpertRef, template: "AgentTemplateSpec", card: AgentTemplateCard) -> _ExpertTemplate:
-        from openjiuwen.agent_teams.external.manifest import external_cli_agent_spec_from_template
-
-        try:
-            external_cli = external_cli_agent_spec_from_template(template)
-        except ValueError as exc:
-            raise _TemplateUnavailable(f"Expert '{ref.label()}' has an unsupported runtime: {exc}") from exc
-        return _ExpertTemplate(
-            ref=ref,
-            version=card.version,
-            display_name=card.display_label(self._language) or template.agent_card.name or ref.name,
-            desc=card.description or template.agent_card.description,
-            persona=render_template_persona(
-                template, language=self._persona_language, workspace=self._persona_workspace
-            ),
-            snapshot=template_snapshot(template) if external_cli is None else None,
-            external_cli=external_cli,
-        )
-
-    async def _unique_display_name(self, display_name: str, member_name: str) -> str:
-        """Template display name; suffixed with the member name when a teammate already uses it."""
-        taken = {entry.display_name for entry in await self.team.list_member_roster()}
-        if display_name not in taken:
-            return display_name
-        suffix = f"（{member_name}）" if self._language == "cn" else f" ({member_name})"
-        return f"{display_name}{suffix}"
-
     async def _spawn_native(
         self,
-        template: _ExpertTemplate,
+        template: ExpertTemplate,
         inputs: dict[str, Any],
         member_name: str,
         display_name: str,
         desc: str,
         prompt: str,
     ) -> ToolOutput:
-        from openjiuwen.agent_teams.tools.member_options import MemberAgentTemplate
-
         model_name = inputs.get("model_name")
         allocation = self._allocate_model_config(model_name) if self._allocate_model_config else None
         err = check_model_selectable(self.team, model_name, allocation)
@@ -692,17 +744,13 @@ class SpawnExpertTool(_SpawnToolBase):
             allocation=allocation,
             isolation=inputs.get("isolation"),
             permissions_override=inputs.get("permissions"),
-            agent_template=MemberAgentTemplate(
-                ref=template.ref.to_dict(),
-                version=template.version,
-                snapshot=template.snapshot,
-            ),
+            agent_template=expert_member_record(template),
         )
         return self._registered(result, template, member_name, display_name, role_type="teammate")
 
     async def _spawn_external(
         self,
-        template: _ExpertTemplate,
+        template: ExpertTemplate,
         inputs: dict[str, Any],
         external_args: dict[str, Any],
         member_name: str,
@@ -756,7 +804,7 @@ class SpawnExpertTool(_SpawnToolBase):
     def _registered(
         self,
         result: Any,
-        template: _ExpertTemplate,
+        template: ExpertTemplate,
         member_name: str,
         display_name: str,
         **extra: Any,
@@ -792,4 +840,13 @@ class SpawnExpertTool(_SpawnToolBase):
         )
 
 
-__all__ = ["SpawnExpertTool", "ViewExpertGroupsTool", "ViewExpertsTool"]
+__all__ = [
+    "ExpertTemplate",
+    "ExpertTemplateResolver",
+    "ExpertUnavailable",
+    "SpawnExpertTool",
+    "ViewExpertGroupsTool",
+    "ViewExpertsTool",
+    "expert_member_record",
+    "expert_member_texts",
+]

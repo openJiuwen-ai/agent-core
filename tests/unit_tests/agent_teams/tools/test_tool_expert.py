@@ -809,3 +809,102 @@ async def test_snapshot_of_a_deleted_package_fails_loudly_when_mounted(
     shutil.rmtree(packages["finance"])
     with pytest.raises(Exception, match="lookup.py"):
         resolve_agent_template_parts(AgentTemplateSpec.model_validate(snapshot), BuildContext(language="cn"))
+
+
+# ---------------------------------------------------------------------------
+# Scheduled create_task: inline members declared from an expert template
+# ---------------------------------------------------------------------------
+
+
+def _scheduled_create_task(backend: TeamBackend, catalog: FakeCatalog | None, **binding: Any) -> Any:
+    tools = create_team_tools(
+        role="leader",
+        agent_team=backend,
+        dispatch_mode="scheduled",
+        lang="cn",
+        expert_catalog=catalog,
+        expert_binding=ExpertBinding(persona_workspace="/ws/teammate", **binding),
+    )
+    return {tool.card.name: tool for tool in tools}["create_task"]
+
+
+def _expert_task(task_id: str, member_name: str, **member: Any) -> dict:
+    return {
+        "task_id": task_id,
+        "title": task_id,
+        "content": "shoot it",
+        "member": {"member_name": member_name, "lifetime": "shutdown", **member},
+    }
+
+
+@pytest.mark.level0
+def test_inline_member_offers_expert_fields_only_with_a_catalog(db: TeamDatabase, catalog: FakeCatalog) -> None:
+    def _member_schema(tool: Any) -> dict:
+        return tool.card.input_params["properties"]["tasks"]["items"]["properties"]["member"]
+
+    plain = _member_schema(_scheduled_create_task(_backend(db), None))
+    assert "expert" not in plain["properties"]
+    assert set(plain["required"]) == {"member_name", "display_name", "desc", "lifetime"}
+    with_catalog = _member_schema(_scheduled_create_task(_backend(db), catalog))
+    assert {"expert", "group"} <= set(with_catalog["properties"])
+    assert set(with_catalog["required"]) == {"member_name", "lifetime"}
+
+
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_inline_member_runs_as_an_expert_like_spawn_expert(
+    db: TeamDatabase, catalog: FakeCatalog, packages: dict[str, Path]
+) -> None:
+    backend = _backend(db)
+    tool = _scheduled_create_task(backend, catalog)
+    result = await tool.invoke(
+        {
+            "tasks": [
+                _expert_task("t1", "clip-1", expert="clip", group="designer", desc="负责第 1–10 镜"),
+                _expert_task("t2", "clip-2", expert="clip", group="designer"),
+            ]
+        }
+    )
+    assert result.success, result.error
+    assert "expert=designer/clip" in tool.render_for_llm(result)
+
+    first, second = await backend.get_member("clip-1"), await backend.get_member("clip-2")
+    template = load_agent_group_package(packages["designer"])["clip"]
+    assert first.prompt == compose_template_member(_teammate_base(), template).persona
+    assert first.desc == "clip description\n\n负责第 1–10 镜"
+    assert (first.display_name, second.display_name) == ("视频镜头师", "视频镜头师（clip-2）")
+    record = get_member_agent_template(first)
+    assert record.ref == {"name": "clip", "group": "designer"}
+    assert record.snapshot["prompt_sections"] == []
+    assert get_member_options(first).lifetime == "shutdown"
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("member", "error"),
+    [
+        ({"expert": "claude-expert"}, "cannot be declared inline"),
+        ({"expert": "nobody"}, "member.expert: Expert 'nobody' is not installed"),
+        ({"expert": "leader", "group": "designer"}, "cannot be spawned as a teammate"),
+        ({"group": "designer"}, "member.group needs member.expert"),
+    ],
+)
+async def test_inline_expert_rejections_write_nothing(
+    db: TeamDatabase, catalog: FakeCatalog, member: dict, error: str
+) -> None:
+    backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
+    result = await _scheduled_create_task(backend, catalog).invoke({"tasks": [_expert_task("t1", "x-1", **member)]})
+    assert not result.success
+    assert error in result.error
+    assert await _member_count(db) == 0
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_inline_expert_without_a_catalog_is_rejected(db: TeamDatabase) -> None:
+    result = await _scheduled_create_task(_backend(db), None).invoke(
+        {"tasks": [_expert_task("t1", "clip-1", expert="clip", group="designer", display_name="d", desc="d")]}
+    )
+    assert "provides no expert catalog" in result.error
+    assert await _member_count(db) == 0

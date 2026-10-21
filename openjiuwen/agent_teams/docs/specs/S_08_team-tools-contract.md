@@ -154,7 +154,9 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     信号门控：宿主是否注入了 `ExpertCatalog`**（`create_team_tools(expert_catalog=...)`，由
     `TeamRuntimeManager.set_expert_catalog` 经 leader 装配注入，F_125）。没注入时三者都不构造、都被
     减掉，`create_team_tools` 的输出与没有本特性时逐字节相同；注入后只进 leader 工具集。三者同生同灭，
-    绑定专家团的 Team 不会单独多出 `spawn_expert`。查看工具只读 core 卡片（`read_agent_template_card` /
+    绑定专家团的 Team 不会单独多出 `spawn_expert`。同一信号还门控调度模式 `create_task` 内联 `member` 的
+    `expert` / `group` 属性：内联成员按专家模板创建时与 `spawn_expert` 共用 `ExpertTemplateResolver`
+    （模板来源、人设、显示名去重、`options.agent_template`），只支持本地运行的专家。查看工具只读 core 卡片（`read_agent_template_card` /
     `read_agent_group_card`），读不出的包跳过并记 warning；只有 `spawn_expert` 调用完整加载器。三个
     工具不在事件循环线程上做文件 IO：包读取经 `asyncio.to_thread` 在工作线程里执行。
     `spawn_expert` 是又一个 `_SpawnToolBase` 子类：模板来源由 `group` 决定（等于

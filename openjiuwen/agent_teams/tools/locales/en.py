@@ -446,6 +446,16 @@ STRINGS: dict[str, str] = {
         "task's assignee and is started by the scheduling framework; once every task on its board is terminal it "
         "retires per lifetime"
     ),
+    "create_task_scheduled.task.member.expert": (
+        "Optional. Run this member as an installed expert template: a single expert's package name, or, with "
+        "group, a member name of that group (not leader). With it, display_name / desc may be omitted (the "
+        "expert's own are used) and desc / prompt are appended after the expert's description / persona. "
+        "Native experts only; spawn an external-CLI expert with spawn_expert, then name it via assignee"
+    ),
+    "create_task_scheduled.task.member.group": (
+        "Optional, requires expert. The expert group name, making expert a member name of that group; when "
+        "this team was assembled from that group, the new member matches its predefined member of that name"
+    ),
     "create_task_scheduled.task.member.lifetime": (
         "Retirement policy: shutdown = shut down automatically once its tasks are all done (terminal, the name "
         "cannot be reused); dormant = go dormant automatically (stays on the roster, processes no events) and wakes "
