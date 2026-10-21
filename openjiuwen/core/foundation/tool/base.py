@@ -13,6 +13,7 @@ from pydantic import PrivateAttr
 from openjiuwen.core.common import BaseCard
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.foundation.tool.execution import ToolExecution
 from openjiuwen.core.foundation.tool.exposure import ToolExposure
 from openjiuwen.core.foundation.tool.schema import ToolInfo, ToolOutput
 
@@ -85,6 +86,14 @@ class ToolCard(BaseCard):
         description=(
             "Whether the tool is exposed directly to the model or deferred "
             "until it is discovered by tool_search."
+        ),
+    )
+    execution: ToolExecution = Field(
+        default=ToolExecution.SERVER,
+        description=(
+            "Who executes calls to this tool. 'client' means the connected client "
+            "runs it: the agent pauses the call with a client_tool interrupt instead "
+            "of calling invoke, and the client's answer becomes the tool result."
         ),
     )
     input_params: Dict[str, Any] | Type[BaseModel] = Field(default_factory=dict)

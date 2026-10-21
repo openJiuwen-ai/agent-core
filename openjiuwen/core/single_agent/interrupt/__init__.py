@@ -9,6 +9,7 @@ from openjiuwen.core.single_agent.interrupt.answers import (
 )
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.response import (
+    ClientToolRequest,
     InterruptKind,
     InterruptRequest,
     ToolCallInterruptRequest,
@@ -28,6 +29,7 @@ __all__ = [
     "interrupt_answer",
     "is_approval_kind",
     "ToolInterruptException",
+    "ClientToolRequest",
     "InterruptKind",
     "InterruptRequest",
     "ToolCallInterruptRequest",
