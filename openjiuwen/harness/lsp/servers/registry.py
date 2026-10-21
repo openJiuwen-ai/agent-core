@@ -108,9 +108,7 @@ async def build_configs_async(
                     workspace_folder=cwd,
                     initialization_options=None,
                     startup_timeout=45_000,
-                    extension_to_language={
-                        ext: server_def.language_id for ext in server_def.extensions
-                    },
+                    extension_to_language={ext: server_def.language_id for ext in server_def.extensions},
                 )
             )
             continue
@@ -124,9 +122,7 @@ async def build_configs_async(
                 workspace_folder=cwd,
                 initialization_options=spawn_handle.initialization_options,
                 startup_timeout=spawn_handle.startup_timeout,
-                extension_to_language={
-                    ext: server_def.language_id for ext in server_def.extensions
-                },
+                extension_to_language={ext: server_def.language_id for ext in server_def.extensions},
             )
         )
 
@@ -154,8 +150,7 @@ async def build_configs_async(
                         workspace_folder=cwd,
                         initialization_options=custom.initialization_options,
                         extension_to_language={
-                            ext: custom.language_id or server_id
-                            for ext in (custom.extensions or [])
+                            ext: custom.language_id or server_id for ext in (custom.extensions or [])
                         },
                     )
                 )

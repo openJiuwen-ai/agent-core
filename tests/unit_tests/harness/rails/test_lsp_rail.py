@@ -65,9 +65,7 @@ def _patch_init_deps(agent, *, workspace_root="/workspace", suppress_initializat
     mock_tool = MagicMock()
     mock_tool.card = MagicMock(id="lsp-tool-id", name="lsp")
     initialization_patch = (
-        patch.object(LspRail, "_start_lsp_initialization")
-        if suppress_initialization
-        else nullcontext()
+        patch.object(LspRail, "_start_lsp_initialization") if suppress_initialization else nullcontext()
     )
     with (
         patch("openjiuwen.harness.tools.LspTool") as MockLspTool,
