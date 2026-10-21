@@ -410,6 +410,33 @@ class TestLspRailUninit:
         mock_shutdown.assert_awaited_once()
         agent.ability_manager.remove_ability.assert_called_once_with(mock_tool.card.name)
 
+    @pytest.mark.asyncio
+    async def test_uninit_cancels_initialization_before_shutdown(self):
+        rail = LspRail()
+        agent = _make_agent()
+        initialization_started = asyncio.Event()
+        initialization_cancelled = asyncio.Event()
+
+        async def initialize_until_cancelled():
+            initialization_started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                initialization_cancelled.set()
+                raise
+
+        rail._initialization_task = asyncio.create_task(initialize_until_cancelled())
+        await initialization_started.wait()
+
+        with _patch_uninit_deps() as (_, mock_shutdown):
+            rail.uninit(agent)
+            assert rail._shutdown_task is not None
+            await rail._shutdown_task
+
+        assert initialization_cancelled.is_set()
+        assert rail._initialization_task is None
+        mock_shutdown.assert_awaited_once()
+
 
 # ===========================================================================
 # 5. _async_init_lsp() — 异步初始化

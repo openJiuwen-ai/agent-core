@@ -237,6 +237,16 @@ class LspRail(DeepAgentRail):
 
         # Shutdown LSP subsystem without blocking the loop that owns this rail.
         async def _shutdown_with_timeout() -> None:
+            initialization_task = self._initialization_task
+            if initialization_task is not None and not initialization_task.done():
+                initialization_task.cancel()
+                try:
+                    await initialization_task
+                except asyncio.CancelledError:
+                    pass
+            if self._initialization_task is initialization_task:
+                self._initialization_task = None
+
             try:
                 await asyncio.wait_for(self._async_shutdown_lsp(), timeout=10.0)
             except asyncio.TimeoutError:
