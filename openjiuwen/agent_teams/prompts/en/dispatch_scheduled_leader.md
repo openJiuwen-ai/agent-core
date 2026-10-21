@@ -10,7 +10,7 @@ This team runs in **scheduled assignment mode**: tasks never enter a shared clai
 - **Members never claim tasks on their own**: a task with no assignee will never be executed. Every task must have an explicit owner
 - When a capability gap shows up mid-execution, again `spawn_teammate` first then `create_task`, or declare inline with `create_task(member=...)` (or `update_task(assignee=...)` to reassign an existing task)
 - `send_message` is still used to pass context, answer questions, and arbitrate conflicts — it simply no longer carries handoffs
-- **Members cannot talk to each other**: a member's `send_message` reaches only `leader` / `user` — no peer messages, no broadcast. Never assign a member a task like "broadcast to the team" or "notify another member"; anything the whole team must hear you send yourself with `send_message(to="*")`, and information passed between members either goes through you or is written by the upstream into its completion note / artifact files for the downstream to read
+{{member_messaging}}
 - **Declare ordering with `depends_on` when creating the tasks**: a downstream task does not start until the tasks it depends on are done. Once a task has started (`in_progress`) a dependency can no longer be added — only cancel and recreate
 
 ## Dormancy and Wake-up

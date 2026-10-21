@@ -25,7 +25,11 @@ from openjiuwen.agent_teams.tools.tool_member import (
     SpawnPassiveHumanTool,
     SpawnTeammateTool,
 )
-from openjiuwen.agent_teams.tools.tool_message import ReportToLeaderTool, SendMessageTool
+from openjiuwen.agent_teams.tools.tool_message import (
+    ReportToLeaderTool,
+    ScheduledPeerMessageTool,
+    SendMessageTool,
+)
 from openjiuwen.agent_teams.tools.tool_permissions import (
     EXPERT_TOOLS,
     HUMAN_AGENT_TOOLS,
@@ -67,15 +71,31 @@ _CREATE_TASK_CLASS: dict[str, type] = {
     "scheduled": ScheduledTaskCreateTool,
 }
 
-# Keyed by (dispatch_mode, "leader" | "member"). Under scheduled dispatch the
-# leader still fans out (broadcast / multicast / auto-start), so only the
-# member side collapses to the report-to-leader form.
+# Keyed by (dispatch_mode, "leader" | "member" | "member_peers"). Under
+# scheduled dispatch the leader still fans out (broadcast / multicast /
+# auto-start), so only the member side collapses to the report-to-leader form
+# — unless the team opened peer messaging (F_126), which gives members back
+# the full reach while keeping the ``"leader"`` role word.
 _SEND_MESSAGE_CLASS: dict[tuple[str, str], type] = {
     ("autonomous", "leader"): SendMessageTool,
     ("autonomous", "member"): SendMessageTool,
     ("scheduled", "leader"): SendMessageTool,
     ("scheduled", "member"): ReportToLeaderTool,
+    ("scheduled", "member_peers"): ScheduledPeerMessageTool,
 }
+
+
+def _send_message_reach(role: str, dispatch_mode: str, agent_team: TeamBackend) -> str:
+    """Pick the ``send_message`` table column for one member.
+
+    Peer messaging is a scheduled-only gate: autonomous members reach their
+    peers anyway, so the flag never widens that column.
+    """
+    if role == "leader":
+        return "leader"
+    if dispatch_mode == "scheduled" and agent_team.member_messaging_enabled() is True:
+        return "member_peers"
+    return "member"
 
 # ``member_complete_task`` behaves identically in both modes — only the prose
 # changes (a scheduled member has no claim path to contrast against), so the
@@ -250,7 +270,7 @@ def create_team_tools(
     # still has a flat schema and a branch-free ``invoke``.
     create_task_cls = _CREATE_TASK_CLASS[dispatch_mode]
     expert_resolver = _expert_resolver(expert_catalog, expert_binding, language=lang)
-    send_message_cls = _SEND_MESSAGE_CLASS[(dispatch_mode, "leader" if role == "leader" else "member")]
+    send_message_cls = _SEND_MESSAGE_CLASS[(dispatch_mode, _send_message_reach(role, dispatch_mode, agent_team))]
 
     all_tools = {
         # Team management. ``build_team`` carries the leader's collaboration

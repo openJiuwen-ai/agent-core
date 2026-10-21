@@ -343,6 +343,7 @@ def build_team_dispatch_section(
     *,
     role: TeamRole,
     dispatch_mode: str = "autonomous",
+    member_messaging: bool = False,
     language: str = "cn",
     loader: TemplateLoader = load_template,
 ) -> Optional[PromptSection]:
@@ -357,6 +358,11 @@ def build_team_dispatch_section(
         role: Team role; roles outside ``_DISPATCH_ROLE_SLUGS`` get None.
         dispatch_mode: ``"autonomous"`` (members claim from the board) or
             ``"scheduled"`` (leader assigns, the scheduler starts members).
+        member_messaging: Whether scheduled members may message each other
+            (``TeamAgentSpec.enable_member_messaging``, F_126). Fills the
+            scheduled templates' ``{{member_messaging}}`` capability slot —
+            the same signal that picks the member ``send_message`` variant.
+            Ignored under autonomous dispatch.
         language: Prompt language.
 
     Returns:
@@ -368,13 +374,33 @@ def build_team_dispatch_section(
         return None
     mode = dispatch_mode if dispatch_mode in _DISPATCH_MODES else "autonomous"
     labels = _labels_for(language)
-    dispatch_text = loader(f"dispatch_{mode}_{slug}", language).content.strip()
+    template = loader(f"dispatch_{mode}_{slug}", language)
+    if mode == "scheduled":
+        template = template.format(
+            {"member_messaging": _scheduled_member_messaging(slug, member_messaging, language, loader)}
+        )
+    dispatch_text = template.content.strip()
     body = f"{labels['dispatch_heading']}\n\n{dispatch_text}\n"
     return PromptSection(
         name=TeamSectionName.DISPATCH,
         content={language: body},
         priority=SECTION_PRIORITY[TeamSectionName.DISPATCH],
     )
+
+
+def _scheduled_member_messaging(slug: str, enabled: bool, language: str, loader: TemplateLoader) -> str:
+    """Render the ``{{member_messaging}}`` slot of a scheduled dispatch template.
+
+    The leader always gets a rule (who members can reach decides how it routes
+    information). The teammate's closed rule already lives in its
+    ``send_message`` description, so its slot collapses to empty there and the
+    template keeps the slot on its last line for ``strip()`` to absorb.
+    """
+    if enabled:
+        return loader(f"dispatch_scheduled_{slug}_messaging_open", language).content.strip()
+    if slug == "leader":
+        return loader("dispatch_scheduled_leader_messaging_closed", language).content.strip()
+    return ""
 
 
 def build_team_task_state_section(
@@ -644,6 +670,7 @@ def build_team_static_sections(
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
     dispatch_mode: str = "autonomous",
+    member_messaging: bool = False,
     base_prompt: str | None = None,
     language: str = "cn",
     hitt_enabled: bool = False,
@@ -671,6 +698,8 @@ def build_team_static_sections(
         teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
         team_mode: Team mode ("default" / "predefined" / "hybrid").
         dispatch_mode: How tasks reach members ("autonomous" / "scheduled").
+        member_messaging: Whether scheduled members may message each other
+            (F_126); forwarded to the dispatch section.
         base_prompt: Optional user-supplied prompt appended as the extra section.
         language: Prompt language ("cn" / "en").
         hitt_enabled: Whether HITT is enabled for the team; gates the static
@@ -714,6 +743,7 @@ def build_team_static_sections(
         build_team_dispatch_section(
             role=role,
             dispatch_mode=dispatch_mode,
+            member_messaging=member_messaging,
             language=language,
             loader=loader,
         ),
@@ -749,6 +779,7 @@ def build_leader_policy_disclosure(
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
     dispatch_mode: str = "autonomous",
+    member_messaging: bool = False,
     language: str = "cn",
     hitt_enabled: bool = False,
     loader: TemplateLoader = load_template,
@@ -778,6 +809,8 @@ def build_leader_policy_disclosure(
         teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
         team_mode: Team mode ("default" / "predefined" / "hybrid").
         dispatch_mode: How tasks reach members ("autonomous" / "scheduled").
+        member_messaging: Whether scheduled members may message each other
+            (F_126); decides which messaging rule the leader reads.
         language: Prompt language ("cn" / "en").
         hitt_enabled: The team's effective HITT flag, as resolved by this
             ``build_team`` call — not the spec ceiling.
@@ -792,6 +825,7 @@ def build_leader_policy_disclosure(
         teammate_mode=teammate_mode,
         team_mode=team_mode,
         dispatch_mode=dispatch_mode,
+        member_messaging=member_messaging,
         base_prompt=None,
         language=language,
         hitt_enabled=hitt_enabled,
@@ -811,6 +845,7 @@ def build_team_member_system_prompt(
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
     dispatch_mode: str = "autonomous",
+    member_messaging: bool = False,
     base_prompt: str | None = None,
     language: str = "cn",
     hitt_enabled: bool = False,
@@ -861,6 +896,7 @@ def build_team_member_system_prompt(
         teammate_mode=teammate_mode,
         team_mode=team_mode,
         dispatch_mode=dispatch_mode,
+        member_messaging=member_messaging,
         base_prompt=base_prompt,
         language=language,
         hitt_enabled=hitt_enabled,

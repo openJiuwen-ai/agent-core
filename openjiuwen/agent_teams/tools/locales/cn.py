@@ -476,6 +476,23 @@ STRINGS: dict[str, str] = {
         '或 "user"（仅当收到的消息来源是 user 时用于回复）。'
         "本模式下不能发给其他成员，也不支持多播和广播"
     ),
+    # ===== send_message_scheduled_peers (scheduled member, peers opened) =======
+    # send_message_scheduled_peers._desc lives in
+    # descs/cn/message/send_message_scheduled_peers.md (F_126). ``content`` /
+    # ``summary`` reuse the send_message keys; ``to`` / ``targets`` gain the
+    # "leader" role word.
+    "send_message_scheduled_peers.to": (
+        '单个收件人："leader"（角色名，系统自动投递给真正的 Leader）、'
+        '其他成员的 member_name（点对点私聊，用于协作沟通）、'
+        '"user"（仅当收到的消息来源是 user 时用于回复），'
+        '或 "*" 广播给全体成员——一次广播会唤醒每一个成员各跑一轮 LLM 交互，务必慎用。'
+        "多播不要填写本字段，改用 targets"
+    ),
+    "send_message_scheduled_peers.targets": (
+        '多播收件人数组（如 ["leader","m2"]）：同一份内容分别发给每个成员，'
+        '开销随接收人数线性增长，仅在必要时使用；可以包含 "leader"，'
+        '禁止包含 "*" 或 "user"。不能与 to 同时填写'
+    ),
     # NOTE: worktree tools (enter_worktree / exit_worktree) live in
     # ``openjiuwen.harness.tools.worktree`` and resolve their description
     # / param schema via ``harness.prompts.tools`` providers — no entries

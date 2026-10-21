@@ -158,6 +158,9 @@ class TeamPolicyRail(DeepAgentRail):
         # human agent is spawned; the human roster itself rides the state lane
         # (tagged ``[human]``).
         hitt_enabled = team_backend.hitt_enabled() if team_backend is not None else False
+        # Scheduled peer messaging (F_126): the same backend gate the tool
+        # factory reads to pick the member ``send_message`` variant.
+        member_messaging = team_backend.member_messaging_enabled() is True if team_backend is not None else False
         self._static_sections: list[PromptSection] = self._build_static_sections(
             role=role,
             member_prompt=member_prompt,
@@ -168,6 +171,7 @@ class TeamPolicyRail(DeepAgentRail):
             teammate_mode=teammate_mode,
             team_mode=team_mode,
             dispatch_mode=dispatch_mode,
+            member_messaging=member_messaging,
             base_prompt=base_prompt,
             hitt_enabled=hitt_enabled,
             swarmflow_enabled=swarmflow_enabled,
@@ -188,6 +192,7 @@ class TeamPolicyRail(DeepAgentRail):
                     teammate_mode=teammate_mode,
                     team_mode=team_mode,
                     dispatch_mode=dispatch_mode,
+                    member_messaging=member_messaging,
                     language=language,
                     hitt_enabled=hitt_enabled,
                     loader=self._loader,
@@ -460,6 +465,7 @@ class TeamPolicyRail(DeepAgentRail):
         teammate_mode: str,
         team_mode: str,
         dispatch_mode: str,
+        member_messaging: bool,
         base_prompt: str | None,
         hitt_enabled: bool,
         swarmflow_enabled: bool,
@@ -489,6 +495,7 @@ class TeamPolicyRail(DeepAgentRail):
                 teammate_mode=teammate_mode,
                 team_mode=team_mode,
                 dispatch_mode=dispatch_mode,
+                member_messaging=member_messaging,
                 base_prompt=base_prompt,
                 language=self._language,
                 hitt_enabled=hitt_enabled,

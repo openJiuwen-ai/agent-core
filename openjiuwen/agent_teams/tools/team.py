@@ -136,6 +136,7 @@ class TeamBackend:
         current_model_provider: str | None = None,
         dispatch_mode: str = "autonomous",
         enable_task_verification: bool = False,
+        enable_member_messaging: bool = False,
         enable_fork: bool = False,
         evolution_enabled: bool = True,
         member_workspace_prefix: bool = True,
@@ -203,6 +204,11 @@ class TeamBackend:
             enable_task_verification: Spec-level "verification expected"
                 ceiling (F_62); ``build_team`` may override the runtime
                 instance flag, mirroring ``enable_hitt``.
+            enable_member_messaging: Whether scheduled-dispatch members may
+                message each other directly
+                (``TeamAgentSpec.enable_member_messaging``, F_126). Static,
+                no ``build_team`` override; the tool factory reads it to pick
+                the member ``send_message`` variant.
             enable_fork: Spec-level context-inheritance capability gate
                 (``TeamAgentSpec.enable_fork``). When False the
                 ``checkpoint`` tool is not wired and ``spawn_teammate``
@@ -301,6 +307,9 @@ class TeamBackend:
         # flag, mirroring the ``enable_hitt`` pattern.
         self._spec_enable_task_verification: bool = enable_task_verification
         self._enable_task_verification: bool = enable_task_verification
+        # Peer messaging under scheduled dispatch (F_126): static spec gate,
+        # read by the tool factory and the prompt builders.
+        self._enable_member_messaging: bool = enable_member_messaging
         # Evolution-mechanism master switch (TeamAgentSpec.evolution_enabled),
         # immutable from spec: off means the write side never writes workspace
         # files and the manager carries no cache (the read side falls back to
@@ -489,6 +498,18 @@ class TeamBackend:
         of its description.
         """
         return self._enable_fork
+
+    def member_messaging_enabled(self) -> bool:
+        """Whether scheduled-dispatch members may message each other directly.
+
+        Straight from ``TeamAgentSpec.enable_member_messaging`` (F_126) and
+        meaningful only under scheduled dispatch: autonomous members reach
+        their peers regardless, so consumers combine it with the dispatch
+        mode they were built for. Single gate signal for the member
+        ``send_message`` variant and the messaging prose of the scheduled
+        dispatch prompts.
+        """
+        return self._enable_member_messaging
 
     def bind_group_session(self, session_id: str) -> None:
         if not isinstance(session_id, str) or not session_id.strip():

@@ -224,6 +224,7 @@ class ExternalTeamClient:
             is_leader=self.is_leader,
             db=db,
             messager=self._messager,
+            enable_member_messaging=self._descriptor.enable_member_messaging,
         )
         from types import SimpleNamespace
 

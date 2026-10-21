@@ -212,6 +212,7 @@ class BuildTeamTool(TeamTool):
             teammate_mode=self._teammate_mode,
             team_mode=self._team_mode,
             dispatch_mode=self._dispatch_mode,
+            member_messaging=self.team.member_messaging_enabled() is True,
             language=self._language,
             hitt_enabled=bool(d.get("enable_hitt")),
             loader=self._loader,

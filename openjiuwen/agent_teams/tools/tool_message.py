@@ -349,21 +349,23 @@ class SendMessageTool(_SendMessageBase):
         message_manager: TeamMessageManager,
         t: Translator,
         team: TeamBackend | None = None,
+        *,
+        desc_key: str = "send_message",
     ):
         super().__init__(
             message_manager,
             t,
             team,
-            desc_key="send_message",
+            desc_key=desc_key,
             to_schema={
                 "type": "string",
-                "description": t("send_message", "to"),
+                "description": t(desc_key, "to"),
             },
             targets_schema={
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 1,
-                "description": t("send_message", "targets"),
+                "description": t(desc_key, "targets"),
             },
         )
 
@@ -488,4 +490,63 @@ class ReportToLeaderTool(_SendMessageBase):
                 f"'to' must be one of {list(self._ALLOWED)}; this team runs in scheduled "
                 f"dispatch mode, where members report to the leader instead of contacting peers"
             ),
+        )
+
+
+class ScheduledPeerMessageTool(SendMessageTool):
+    """Scheduled-dispatch member ``send_message`` with peer messaging opened (F_126).
+
+    Same reach as :class:`SendMessageTool` — point-to-point, multicast and
+    broadcast to peers — because the team switched on
+    ``TeamAgentSpec.enable_member_messaging``. What stays from
+    :class:`ReportToLeaderTool` is the ``"leader"`` role word, resolved to
+    the concrete leader at delivery time, and a description that keeps the
+    scheduled handoff contract: completion travels through the task's
+    ``summary`` / ``note``, not through a message.
+    """
+
+    def __init__(
+        self,
+        message_manager: TeamMessageManager,
+        t: Translator,
+        team: TeamBackend | None = None,
+    ):
+        super().__init__(message_manager, t, team, desc_key="send_message_scheduled_peers")
+
+    async def _dispatch_to(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+        """Resolve the ``"leader"`` role word, then route like the full-reach form."""
+        if isinstance(to_raw, str) and to_raw.strip() == LEADER_ROLE_RECIPIENT:
+            leader = await self._resolve_leader()
+            if not leader:
+                return self._unresolved_leader()
+            return await self._send(leader, content, summary)
+        return await super()._dispatch_to(to_raw, content, summary)
+
+    async def _multicast(
+        self,
+        targets: list[str],
+        content: str,
+        summary: str,
+    ) -> ToolOutput:
+        """Resolve a ``"leader"`` entry in ``targets`` before the shared multicast."""
+        if not any(isinstance(item, str) and item.strip() == LEADER_ROLE_RECIPIENT for item in targets):
+            return await super()._multicast(targets, content, summary)
+        leader = await self._resolve_leader()
+        if not leader:
+            return self._unresolved_leader()
+        resolved = [
+            leader if isinstance(item, str) and item.strip() == LEADER_ROLE_RECIPIENT else item for item in targets
+        ]
+        return await super()._multicast(resolved, content, summary)
+
+    async def _resolve_leader(self) -> str:
+        if self._team is None:
+            return ""
+        return (await self._team.resolve_leader_member_name()).strip()
+
+    @staticmethod
+    def _unresolved_leader() -> ToolOutput:
+        return ToolOutput(
+            success=False,
+            error="cannot resolve the team leader to deliver to; the team has no leader on record",
         )

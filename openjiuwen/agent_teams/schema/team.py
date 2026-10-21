@@ -564,6 +564,12 @@ class TeamSpec(BaseModel):
     ``TeamRuntimeContext`` (external CLI member spawn) resolve the same
     tool set and prompt as in-process members.
     """
+    enable_member_messaging: bool = False
+    """Scheduled peer messaging — mirrors ``TeamAgentSpec.enable_member_messaging``.
+
+    Carried for the same reason as ``dispatch_mode``: an external CLI member's
+    ``send_message`` variant has to match the prompt it was spawned with.
+    """
     teammate_mode: str = "build_mode"
     """How teammates execute tasks — mirrors ``TeamAgentSpec.teammate_mode``.
 

@@ -643,6 +643,23 @@ STRINGS: dict[str, str] = {
         'or "user" (only to reply when an incoming message came from the user). You '
         "cannot message other members; multicast and broadcast are unavailable in this mode"
     ),
+    # ===== send_message_scheduled_peers (scheduled member, peers opened) =======
+    # send_message_scheduled_peers._desc lives in
+    # descs/en/message/send_message_scheduled_peers.md (F_126). ``content`` /
+    # ``summary`` reuse the send_message keys; ``to`` / ``targets`` gain the
+    # "leader" role word.
+    "send_message_scheduled_peers.to": (
+        'Single recipient: "leader" (a role name — the system delivers it to the real '
+        "Leader), another member's member_name (a point-to-point DM for coordination), "
+        '"user" (only to reply when an incoming message came from the user), or "*" to '
+        "broadcast to every member — one broadcast wakes every member for a full LLM "
+        "turn, so use it sparingly. For multicast, leave this field unset and use targets"
+    ),
+    "send_message_scheduled_peers.targets": (
+        'Multicast recipient array (e.g. ["leader","m2"]): the same content is sent as '
+        "separate messages to each member; cost grows linearly with recipient count. "
+        'May contain "leader"; cannot contain "*" or "user". Do not provide together with to'
+    ),
     # NOTE: worktree tools (enter_worktree / exit_worktree) live in
     # ``openjiuwen.harness.tools.worktree`` and resolve their description
     # / param schema via ``harness.prompts.tools`` providers — no entries

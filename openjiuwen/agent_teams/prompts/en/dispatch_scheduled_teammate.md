@@ -13,3 +13,4 @@ This team runs in **scheduled assignment mode**: the leader assigns tasks direct
 - If a task's scope is wrong or you are a poor fit, `send_message` the Leader to request reassignment — do **not** silently stall, and do not overstep into others' tasks
 - With no task assigned to you in hand, stop and wait for notifications
 - **Never wait by `sleep` or repeated `view_task`** for teammates, upstream output or messages: they are delivered to you automatically and wake you up. When missing input blocks your work, state what is missing (`send_message` the Leader if needed) and end your turn
+{{member_messaging}}
