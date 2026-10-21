@@ -5,10 +5,10 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-10-20 |
-| 范围 | `experts/`（新：`catalog.py` / `agent_group.py` / `template_member.py` / `bound_group.py`）、`tools/tool_expert.py`（新）、`tools/tool_member.py`（外部 CLI 模型规则抽成共用实现、`register_teammate(agent_template=)`）、`tools/tool_factory.py` / `tool_permissions.py`（`EXPERT_TOOLS` 门控）、`tools/team.py`（`spawn_member(agent_template=)`、`spawn_external_cli_agent(member_config=, agent_template=)`）、`tools/member_options.py`（`MemberAgentTemplate`）、`schema/blueprint.py`（`TeamAgentSpec.agent_group_name`）、`schema/team.py`（`TeamRuntimeContext.agent_template_spec` / `template_external_cli`）、`agent/agent_configurator.py`（`resolve_agent_spec` 快照分支、leader 注入目录）、`agent/spawn_manager.py`（冷恢复读回）、`spawn/external_cli_spawn.py`（成员行配置来源）、`external/manifest.py`（`merge_external_cli_config`）、`rails/team_context.py` / `rails/team_tool_rail.py` / `rails/elements.py`、`runtime/manager.py`（`set_expert_catalog`）、`tools/locales/`（`descs/*/expert/` + 参数文案）、`__init__.py` |
+| 范围 | `experts/`（新：`catalog.py` / `agent_group.py` / `template_member.py` / `bound_group.py`）、`tools/tool_expert.py`（新）、`tools/tool_member.py`（外部 CLI 模型规则抽成共用实现、`register_teammate(agent_template=)`）、`tools/tool_factory.py` / `tool_permissions.py`（`EXPERT_TOOLS` 门控）、`tools/team.py`（`spawn_member(agent_template=)`、`spawn_external_cli_agent(member_config=, agent_template=, lifetime=)`、`delete_unstarted_member` 清 CLI 类型映射）、`tools/tool_task.py`（调度模式内联成员的 `expert` / `group` / `cli_agent` / `external_cli`）、`tools/member_options.py`（`MemberAgentTemplate`）、`schema/blueprint.py`（`TeamAgentSpec.agent_group_name`）、`schema/team.py`（`TeamRuntimeContext.agent_template_spec` / `template_external_cli`）、`agent/agent_configurator.py`（`resolve_agent_spec` 快照分支、leader 注入目录）、`agent/spawn_manager.py`（冷恢复读回）、`spawn/external_cli_spawn.py`（成员行配置来源）、`external/manifest.py`（`merge_external_cli_config`）、`rails/team_context.py` / `rails/team_tool_rail.py` / `rails/elements.py`、`runtime/manager.py`（`set_expert_catalog`）、`tools/locales/`（`descs/*/expert/` + 参数文案）、`__init__.py` |
 | 关联 spec | S_05、S_08、S_12、S_27；harness S_13 |
 | 关联设计 | swarm-design-docs SDD-0032；harness `F_22_agent-template-card-and-async-loader.md` |
-| 测试基线 | 新增 `tests/unit_tests/agent_teams/experts/`（40）与 `tools/test_tool_expert.py`（40）全部通过；`tests/unit_tests/agent_teams` + `tests/unit_tests/harness` + `tests/unit_tests/harness_providers` 全量 10720 passed / 126 skipped / 3 xfailed |
+| 测试基线 | 新增 `tests/unit_tests/agent_teams/experts/`（40）与 `tools/test_tool_expert.py`（40）全部通过；`tests/unit_tests/agent_teams` + `tests/unit_tests/harness` + `tests/unit_tests/harness_providers` 全量 10720 passed / 126 skipped / 3 xfailed；决策 11（内联外部 CLI 成员）落地后 `tests/unit_tests/agent_teams` 3886 passed / 36 skipped / 3 xfailed |
 | Refs | 待定（提交前补） |
 
 ## 背景
@@ -81,9 +81,26 @@
     时 `display_name` / `desc` 可省略，`desc` / `prompt` 只追加，成员行同样写 `options.agent_template`。模板解析、
     人设渲染、显示名去重（同一次调用内拉起的同类成员也参与去重）与 `spawn_expert` 共用 `ExpertTemplateResolver` /
     `expert_member_texts` / `expert_member_record`，同一份实现。所有 `expert` 在写任何成员行之前解析完，失败时不写行。
-    内联成员是 LLM 队友，外部 CLI 运行时的专家不能内联声明（报错并指引先 `spawn_expert` 再 `assignee`）。
+11. **内联成员也可以运行在外部 CLI 上**，两种来源：`expert` 是外部运行时专家，或成员直接写 `cli_agent`
+    （含义同 `spawn_external_cli`，此时 `prompt` 必填，`cli_agent` 与 `expert` 互斥）。只在团队声明了外部 CLI 类型时
+    （`spawn_external_cli` 的同一门控）schema 才出现 `cli_agent` 与 `external_cli` 对象；`external_cli` 的属性与
+    `spawn_expert.external_cli` 相同（`fallback_model_name`，以及仅在有内置模型目录时出现的 `builtin_model` / `effort`），
+    两处由 `tool_member.external_cli_option_properties` 生成。三条外部 CLI 登记路径（`spawn_external_cli`、
+    `spawn_expert` 的外部分支、内联成员）共用 `tool_member.register_external_cli_member`：声明检查、
+    `ExternalCliModelRules`、`spawn_external_cli_agent`，同样的输入得到同样的成员行或同样的报错，只有报错里的工具名不同。
+    外部专家的启动配置由 `tool_expert.expert_member_cli_config` 合并（声明配置为底），两条专家路径共用。
+    `spawn_external_cli_agent` 新增 `lifetime` 透传给 `spawn_member`；`delete_unstarted_member` 回滚时顺带清掉
+    `_external_cli_specs` 里的成员 → CLI 类型映射。退场与唤醒不需要新代码：外部 CLI 成员同样由 TeamAgent 外壳托管，
+    调度器的退场扫描、成员自落 SHUTDOWN / DORMANT、点名经 `recover_member` 唤醒都按成员行工作；唤醒后
+    `restart_teammate` 以 `resume_external_backend=True` 重建，没有 CLI 检查点时按新会话启动（只有 swarmflow 传
+    `require_checkpoint=True`），不会因还没跑完一轮就休眠而起不来。
 
 ## 拒绝的方案
+
+- **内联成员把 `fallback_model_name` / `builtin_model` / `effort` 平铺在 `member` 上**（`spawn_external_cli` 的写法）：
+  外部专家与 `cli_agent` 成员要两套写法，且与 `spawn_expert` 不一致；统一放进 `member.external_cli`。
+- **内联外部成员先为整批算好"登记计划"再统一写行**：与本地内联成员现有的"逐个登记、后一个失败回滚前面已写的行"
+  机制重复；回滚后不留成员行也不留 CLI 类型映射，结果相同。
 
 - **工具做成 jiuwenswarm 的 harness element**：工具 schema、标识语义写在宿主，换宿主就要重写；成员行与 spec
   选择又在 core，两半被拆到两个仓。
@@ -128,7 +145,9 @@ TeamMember.options.agent_template = {
   `resolve` 等打桩为在事件循环线程上抛错后三个工具仍能完成 list / get / spawn；绑定团多实例不调用目录、
   包删除后仍可拉起、显示名自动追加成员名；外部专家登记为 `external_cli`、合并配置保留宿主字段并带上模板技能与
   `runtime.config`、成员行配置可读回；6 组模型参数在 `spawn_expert` 与 `spawn_external_cli` 上报错一致；
-  `external_cli` schema 的内置模型门控；`set_expert_catalog` → leader 构建 → 工具注册的端到端注入；运行时
+  `external_cli` schema 的内置模型门控；内联成员的 `cli_agent` / `external_cli` 门控，外部专家内联登记的成员行与
+  `spawn_expert` 一致（含 `lifetime`、退场扫描可见），`cli_agent` 内联成员登记为 `external_cli`，5 组模型参数在内联成员与
+  `spawn_external_cli` 上报错一致，拒绝路径与整批回滚不留成员行与 CLI 类型映射；`set_expert_catalog` → leader 构建 → 工具注册的端到端注入；运行时
   上下文经 JSON 往返（子进程拉起）保留快照与外部配置。
 
 ## 已知遗留

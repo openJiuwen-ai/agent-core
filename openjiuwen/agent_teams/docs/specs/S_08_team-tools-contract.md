@@ -25,7 +25,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-10-21 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md、F_118_task-scoped-member-lifetime.md、F_119_scheduled-completion-handoff-via-note.md、F_120_autonomous-completion-summary-and-note.md、F_123_team-tools-direct-under-progressive-exposure.md、F_125_team-expert-catalog-and-spawn.md |
 
 ## 范围 / 边界
@@ -156,7 +156,7 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     减掉，`create_team_tools` 的输出与没有本特性时逐字节相同；注入后只进 leader 工具集。三者同生同灭，
     绑定专家团的 Team 不会单独多出 `spawn_expert`。同一信号还门控调度模式 `create_task` 内联 `member` 的
     `expert` / `group` 属性：内联成员按专家模板创建时与 `spawn_expert` 共用 `ExpertTemplateResolver`
-    （模板来源、人设、显示名去重、`options.agent_template`），只支持本地运行的专家。查看工具只读 core 卡片（`read_agent_template_card` /
+    （模板来源、人设、显示名去重、`options.agent_template`），外部运行时专家同样可以内联。查看工具只读 core 卡片（`read_agent_template_card` /
     `read_agent_group_card`），读不出的包跳过并记 warning；只有 `spawn_expert` 调用完整加载器。三个
     工具不在事件循环线程上做文件 IO：包读取经 `asyncio.to_thread` 在工作线程里执行。
     `spawn_expert` 是又一个 `_SpawnToolBase` 子类：模板来源由 `group` 决定（等于
@@ -405,7 +405,10 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     成员工作区（`MemberWorkspaceBinder.release` + `delete_if_zero`）、清掉它预热的 cache 字段——
     与 `spawn_member` 互为精确逆操作。两条注册路径共用 `tool_member.register_teammate`
     （card id / mode / options 只在一处推导）。注册与拉起分离不变——内联成员由调度器交接
-    拉起（`S_05` 不变量 1）。`member` 属性与其描述槽 `{{create_task_inline_member}}` 按
+    拉起（`S_05` 不变量 1）。团队声明了外部 CLI 类型时 `member` 另有 `cli_agent`（与 `expert` 互斥，`prompt` 随之必填）
+    与 `external_cli` 对象（属性同 `spawn_expert.external_cli`），外部 CLI 内联成员（含外部运行时专家）经
+    `tool_member.register_external_cli_member`（与 `spawn_external_cli` / `spawn_expert` 共用）登记、带 `lifetime`，
+    `delete_unstarted_member` 回滚时一并清掉 `_external_cli_specs` 映射（F_125）。`member` 属性与其描述槽 `{{create_task_inline_member}}` 按
     `team_mode != "predefined"` 一起出现 / 消失（同 `spawn_teammate` 被摘掉的门），偷传在写库前
     拒掉。`TaskCreateTool`（autonomous）**不暴露也不接受 `member`**：schema 里没有该属性，
     `invoke` 在批次纯校验之后、任何 DB 访问之前把带 `member` 的任务报错拒掉（指引先

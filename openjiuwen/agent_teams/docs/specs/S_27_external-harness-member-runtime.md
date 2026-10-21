@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/spawn.py`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
-| 最近一次修订日期 | 2026-10-20 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md、F_113_external-harness-builtin-model-selection.md、F_114_swarmflow-thirdparty-agent.md、F_115_external-session-fork.md、F_116_swarmflow-thirdparty-model-source.md、F_117_third-party-harness-provider-members.md、harness F_08_provider-owned-model-config.md、harness F_09_auth-fallback-as-a-protocol-capability.md、F_125_team-expert-catalog-and-spawn.md |
 
 ## 范围 / 边界
@@ -110,11 +110,13 @@
     `spawn_external_cli.fallback_model_name` 可选：省略 / `null` / 空白都是"不回退"；只有能回退的 CLI 才在
     存在兼容模型时被要求填写、才出现在 `compatible_fallback_models` 目录里，其余 CLI 给出模型名即报错并提示省略。
 15. **成员启动配置的来源有三层**（`_external_cli_config_for_member`，F_125）：预定义外部成员自己的
-    `external_cli` → 成员行持久化的配置（`spawn_expert` 写入 `options.agent_template.external_cli`，经
+    `external_cli` → 成员行持久化的配置（`spawn_expert` 与调度模式 `create_task` 的外部专家内联成员写入
+    `options.agent_template.external_cli`，经
     `TeamRuntimeContext.template_external_cli` 传入）→ `TeamAgentSpec.external_cli_agents` 中同类型的声明。
     `spawn_expert` 写入的是 `merge_external_cli_config(声明配置, 模板配置)`：以声明的宿主级配置为底，叠加模板
-    的技能（追加在声明技能之后）、`skill_conflict` 与非默认的 `runtime.config` 键；声明检查与模型规则与
-    `spawn_external_cli` 共用一份实现，CLI 类型未声明时不登记。
+    的技能（追加在声明技能之后）、`skill_conflict` 与非默认的 `runtime.config` 键；三条外部 CLI 登记路径
+    （`spawn_external_cli`、`spawn_expert`、内联成员）共用 `tool_member.register_external_cli_member`（声明检查 +
+    模型规则 + 登记），CLI 类型未声明时不登记。
 
 ## 接口契约
 
