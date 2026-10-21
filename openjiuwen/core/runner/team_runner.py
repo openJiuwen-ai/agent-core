@@ -41,6 +41,7 @@ Plus one method:
 
 from __future__ import annotations
 
+import time
 from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
@@ -935,7 +936,13 @@ class _TeamRunnerMixin:
             )
             if is_initialized():
                 logger.info("_maybe_finalize_trace: calling finalize_team_trace for team={}", team_name)
+                t0 = time.perf_counter()
                 finalize_team_trace(team_name)
+                logger.info(
+                    "[{}] lifecycle_timing stop finalize_team_trace duration_ms={:.0f}",
+                    team_name or "?",
+                    (time.perf_counter() - t0) * 1000,
+                )
             else:
                 logger.debug("_maybe_finalize_trace: observability not initialized, skip team={}", team_name)
         except Exception as exc:

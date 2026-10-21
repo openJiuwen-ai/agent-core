@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -130,6 +131,9 @@ async def _clear_inprocess_members_inflight(entry: "ActiveTeam") -> None:
     """
     spawn_mgr = getattr(getattr(entry, "agent", None), "spawn_manager", None)
     handles = getattr(spawn_mgr, "spawned_handles", None) or {}
+    if not handles:
+        return
+    abort_t0 = time.perf_counter()
     for member_name, handle in list(handles.items()):
         agent_ref = getattr(handle, "agent_ref", None)
         if agent_ref is None:
@@ -168,6 +172,10 @@ async def _clear_inprocess_members_inflight(entry: "ActiveTeam") -> None:
                 member_name,
                 e,
             )
+    team_logger.info(
+        "lifecycle_timing reset reset_member_abort duration_ms={:.0f}",
+        (time.perf_counter() - abort_t0) * 1000,
+    )
 
 
 def _live_team_session(entry: "ActiveTeam"):
@@ -292,6 +300,7 @@ class TeamRuntimeManager:
             )
             return
         agent = entry.agent
+        finalize_t0 = time.perf_counter()
         try:
             shutdown_requested = await agent.is_shutdown_requested()
             if shutdown_requested or agent.lifecycle != "persistent":
@@ -318,6 +327,12 @@ class TeamRuntimeManager:
                 team_name,
                 session_id,
                 exc,
+            )
+        finally:
+            team_logger.info(
+                "[{}] lifecycle_timing finalize finalize_total duration_ms={:.0f}",
+                team_name,
+                (time.perf_counter() - finalize_t0) * 1000,
             )
 
     # team_member statuses that already encode a finalize-side outcome
@@ -762,6 +777,7 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
+        stop_t0 = time.perf_counter()
         try:
             await entry.agent.stop_coordination()
         except Exception as exc:
@@ -772,6 +788,11 @@ class TeamRuntimeManager:
                 exc,
             )
         await self._pool.remove(team_name)
+        team_logger.info(
+            "[{}] lifecycle_timing stop stop_team_total duration_ms={:.0f}",
+            team_name,
+            (time.perf_counter() - stop_t0) * 1000,
+        )
         team_logger.info(
             "stop_team: team {} session {} stopped and removed from pool",
             team_name,
