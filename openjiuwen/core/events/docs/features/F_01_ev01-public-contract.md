@@ -177,7 +177,7 @@ S_01 第 3 节的运行时不变量（唯一 CORE、调用快照、单次推进�
 | 入口 / 消息 | 调用方 / 消费者 | 输入与成功结果 | 失败语义 |
 | --- | --- | --- | --- |
 | `ExtensionEventBusProtocol` 的五个方法 | 消费方实现；Core 在本特性不提供实现 | 参数和返回标注与 S_01 第 4.1 节一致。`handler_level` 缺省 `HandlerLevel.USER`，返回 `HandlerId`。`session` 缺省 `None`，返回 `EventOutput \| None` | 协议上不存在 `state`、`initialize`、`close`。拒绝行为由后续特性实现 |
-| `EventHandlerOpsBuilder.build` | 后续 Builder 实现；本特性只固定签名 | 保留 `package_metadata` 与 `session_context`，默认均为 `None`，返回 `EventHandlerOps` | 冻结、冲突和构建失败属于 EV-04，使用 `EVENTS_OPS_INVALID` |
+| `EventHandlerOpsBuilder.build` | 后续 Builder 实现；本特性只固定签名 | 保留 `package_metadata` 与 `session_context`，默认均为 `None`，返回 `EventHandlerOps` | 冲突和构建失败使用 `EVENTS_OPS_INVALID` |
 | `EventNext.__call__` / `to` | 后续执行链实现 | 推进或跳到指定 `HandlerLevel`，返回 `EventOutput \| None` | 非法跳层属于 EV-03，使用 `EVENTS_NEXT_INVALID` |
 | `EventHandlerOps` | Handler 读取 | 只有 `package_metadata`、`session_context` 两个只读属性 | 不包含 v2 的动态 `__call__` |
 | `openjiuwen.core.events.__all__` | 外部导入 | 17 个模型和 Protocol 名字，顺序见实现与契约测试 | 不导出 `ExtensionEventBus`、`EventDefinition`、`EventsError` 或测试桩 |
@@ -281,6 +281,11 @@ JiuwenSwarm 可以依赖 `openjiuwen.core.events` 的公开名字编写自己的
 | S_01 第 7 节和开发计划第 4 节仍描述实现前状态 | 本次只重排 feature，未改那两份文档 | 读者若只看计划，会认为接口和测试尚未执行 | 以第 7.2 节为技术证据，由计划维护人更新状态 |
 
 ## 9. 设计演进与修订
+
+### 2026-10-20 后续具体类替代说明
+
+- 本文保留 EV-01 当时交付 Protocol 的历史事实、验证结果和章节，不据后续实现重写。
+- EventNext 已由 F_02 的 `openjiuwen/core/events/event_next.py` 公开具体类替代；EventHandlerOpsBuilder、EventHandlerOps 已由 F_03 的 `openjiuwen/core/events/ops.py` 公开具体类替代；ExtensionEventBusProtocol 仍为 Protocol。
 
 ### 2026-10-19 Protocol 方法集合与 mypy 入口
 

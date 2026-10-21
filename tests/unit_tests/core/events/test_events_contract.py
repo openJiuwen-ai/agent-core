@@ -10,13 +10,11 @@ import pytest
 import openjiuwen.core.events.protocol as events_protocol
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ValidationError, build_error
-from openjiuwen.core.events.protocol import (
-    EventHandler,
-    EventHandlerOps,
-    EventHandlerOpsBuilder,
-    EventNext,
-    ExtensionEventBusProtocol,
-)
+from openjiuwen.core.events import EventHandlerOps, EventHandlerOpsBuilder
+from openjiuwen.core.events.event_next import EventNext
+from openjiuwen.core.events.ops import EventHandlerOps as ConcreteEventHandlerOps
+from openjiuwen.core.events.ops import EventHandlerOpsBuilder as ConcreteEventHandlerOpsBuilder
+from openjiuwen.core.events.protocol import EventHandler, ExtensionEventBusProtocol
 from openjiuwen.core.events.types import (
     OPS_BUILD_EVENT_TYPE,
     Event,
@@ -135,14 +133,18 @@ def test_events_protocol_bus_signature():
         "handler",
         "match_pattern",
         "handler_level",
+        "package_metadata",
     ]
     assert [parameter.annotation for parameter in register_handler] == [
         "EventType",
         "EventHandler",
         "MatchPattern",
         "HandlerLevel",
+        "PackageMetadata | None",
     ]
-    assert register_handler[-1].default is HandlerLevel.USER
+    assert register_handler[3].default is HandlerLevel.USER
+    assert register_handler[4].kind is inspect.Parameter.KEYWORD_ONLY
+    assert register_handler[4].default is None
     assert register_handler_return == "HandlerId"
 
     unregister_handler, unregister_handler_return = _method_signature(
@@ -158,13 +160,18 @@ def test_events_protocol_bus_signature():
     assert trigger[1].annotation == "Session | SessionContext | None"
     assert trigger[1].default is None
     assert trigger_return == "EventOutput | None"
-    assert EventHandler == Callable[
-        [Event, EventHandlerOps | None, EventNext],
-        Awaitable[EventOutput | None],
-    ]
+    assert (
+        EventHandler
+        == Callable[
+            [Event, EventHandlerOps | None, EventNext],
+            Awaitable[EventOutput | None],
+        ]
+    )
 
 
-def test_events_protocol_builder_and_event_next_signatures():
+def test_events_builder_ops_and_event_next_signatures():
+    assert not getattr(EventHandlerOpsBuilder, "_is_protocol", False)
+    assert not getattr(EventHandlerOps, "_is_protocol", False)
     assert _contract_functions(EventHandlerOpsBuilder) == {"add_namespace", "add_method", "build"}
 
     add_namespace, add_namespace_return = _method_signature(EventHandlerOpsBuilder.add_namespace)
@@ -183,6 +190,7 @@ def test_events_protocol_builder_and_event_next_signatures():
     assert all(parameter.default is None for parameter in build)
     assert build_return == "EventHandlerOps"
 
+    assert not getattr(EventNext, "_is_protocol", False)
     assert _contract_functions(EventNext) == {"__call__", "to"}
     call, call_return = _method_signature(EventNext.__call__)
     assert [parameter.name for parameter in call] == ["event"]
@@ -218,14 +226,19 @@ _EVENTS_EXPORTS = [
     "EventHandlerOpsBuilder",
     "EventHandlerOps",
     "ExtensionEventBusProtocol",
+    "ExtensionEventBus",
 ]
 
 
 def test_events_exports_match_contract():
     import openjiuwen.core.events as events
+    from openjiuwen.core.events.bus import ExtensionEventBus
 
     assert list(events.__all__) == _EVENTS_EXPORTS
+    assert events.EventHandlerOpsBuilder is ConcreteEventHandlerOpsBuilder
+    assert events.EventHandlerOps is ConcreteEventHandlerOps
+    assert events.ExtensionEventBus is ExtensionEventBus
     for name in _EVENTS_EXPORTS:
         assert hasattr(events, name)
-    for name in ("ExtensionEventBus", "EventDefinition", "EventsError"):
+    for name in ("EventDefinition", "EventsError"):
         assert not hasattr(events, name)

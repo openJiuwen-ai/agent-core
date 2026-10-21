@@ -17,6 +17,7 @@ from openjiuwen.core.events import (
     HandlerLevel,
     MatchPattern,
     MatchPatternFunc,
+    PackageMetadata,
     SessionContext,
 )
 
@@ -44,6 +45,8 @@ class ConsumerEventBus:
         handler: EventHandler,
         match_pattern: MatchPattern,
         handler_level: HandlerLevel = HandlerLevel.USER,
+        *,
+        package_metadata: PackageMetadata | None = None,
     ) -> HandlerId:
         return ""
 

@@ -1,15 +1,12 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Public events contract: models and protocols."""
+"""Public events contract: models, protocols and the extension event bus."""
 
-from openjiuwen.core.events.protocol import (
-    EventHandler,
-    EventHandlerOps,
-    EventHandlerOpsBuilder,
-    EventNext,
-    ExtensionEventBusProtocol,
-)
+from openjiuwen.core.events.bus import ExtensionEventBus
+from openjiuwen.core.events.event_next import EventNext
+from openjiuwen.core.events.ops import EventHandlerOps, EventHandlerOpsBuilder
+from openjiuwen.core.events.protocol import EventHandler, ExtensionEventBusProtocol
 from openjiuwen.core.events.types import (
     OPS_BUILD_EVENT_TYPE,
     Event,
@@ -43,4 +40,5 @@ __all__ = [
     "EventHandlerOpsBuilder",
     "EventHandlerOps",
     "ExtensionEventBusProtocol",
+    "ExtensionEventBus",
 ]

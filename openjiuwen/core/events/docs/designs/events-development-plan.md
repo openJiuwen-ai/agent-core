@@ -8,8 +8,8 @@
 - **模块边界：** Events 只提供通用事件机制，不依赖 JiuwenSwarm、具体业务执行器或插件管理实现。
 - **外部范围：** UI 事件名和 payload、AgentServer、插件装卸、WebUI、E2E 环境由 JiuwenSwarm 对端计划维护。
 - **公共契约：** 以 [S_01](../specs/S_01_events-contract.md) 为唯一来源。
-- **维护日期：** 2026-10-19。
-- **进度摘要：** 完成 1/4；EV-01 已完成，EV-02～EV-04 待开始；M-01、M-02 未验证。
+- **维护日期：** 2026-10-21。
+- **进度摘要：** 完成 4/4；EV-01～EV-04 已完成；M-01、M-02 未验证。
 
 每个未完成工作项开工前，在 `docs/features/` 建立对应 feature 文档，记录实现文件、接口影响、验收命令和实际结果。当前状态和证据只在第 4 节维护。
 
@@ -50,47 +50,46 @@
 - **开工硬前置：** EV-01 的公共模型、Protocol 和错误码。
 - **验收标准：**
   1. EV-02-V-01：三参数事件登记原子完成；重复、非法登记和非唯一 CORE 被拒绝。
-  2. EV-02-V-02：USER / BUILTIN Handler 可登记并幂等注销；普通入口拒绝 CORE，注册记录不保存 PackageMetadata。
-  3. EV-02-V-03：业务调用方不能通过普通入口登记或注销 `ops.` 事件 Handler。
-  4. EV-02-V-04：匹配结果和同层注册顺序正确；无扩展命中时只保留 CORE。
-  5. EV-02-V-05：匹配返回 False 只排除当前 Handler；抛错或返回非 bool 时调用失败。
-  6. EV-02-V-06：已生成快照不受后续注册或注销影响，新快照反映最新注册表。
-  7. EV-02-V-07：完整链按 USER → BUILTIN → CORE 进入并反向返回。
-  8. EV-02-V-08：to(BUILTIN)、to(CORE) 和短路只执行约定范围。
-  9. EV-02-V-09：重复、并发、跨任务或失效 EventNext 被拒绝。
-  10. EV-02-V-10：event_type 变更被拒绝；event_input 可调整但不重新匹配。
+  2. EV-02-V-02：USER / BUILTIN Handler 可登记并幂等注销；注销 EventType 时同步级联删除其 USER / BUILTIN Handler、HandlerId 索引和事件定义；普通入口拒绝 CORE；EV-02 注册记录不含 PackageMetadata，EV-04 起改为随注册记录保存。
+  3. EV-02-V-03：匹配结果和同层注册顺序正确；无扩展命中时只保留 CORE。
+  4. EV-02-V-04：匹配返回 False 只排除当前 Handler；抛错或返回非 bool 时调用失败。
+  5. EV-02-V-05：已生成快照不受后续注册或注销影响，新快照反映最新注册表。
+  6. EV-02-V-06：完整链按 USER → BUILTIN → CORE 进入并反向返回。
+  7. EV-02-V-07：to(BUILTIN)、to(CORE) 和短路只执行约定范围。
+  8. EV-02-V-08：跨任务或失效 EventNext 被拒绝。
+  9. EV-02-V-09：event_type 变更被拒绝；event_input 可调整但不重新匹配。
 - **联合交付：** EV-02 与 EV-03 在 EV-04 汇合，不单独声明 EventBus 运行时可用。
 
-### EV-03 Builder 可冻结并构建独立 Ops
+### EV-03 Builder 可构建独立 Ops
 
 - **目标与范围：** 实现独立于 EventBus 执行引擎的能力目录和上下文 Ops。
-- **交付范围：** namespace/method 登记、冻结、动态访问、Ops 构造、上下文隔离和有效期。
+- **交付范围：** Builder/Ops 公开具体类、namespace/method 登记、动态访问、Ops 构造和上下文隔离；不引入 Ops 失效机制。
 - **关键边界：** `Builder.build(package_metadata, session_context)` 保留 package_metadata；Builder 不保存可变的当前包或当前会话。
 - **开工硬前置：** EV-01 的 EventHandlerOpsBuilder、EventHandlerOps、PackageMetadata 和 SessionContext 契约。
 - **验收标准：**
-  1. EV-03-V-01：合法能力可登记；非法名称、重复能力和冻结后修改被拒绝。
-  2. EV-03-V-02：相同 Builder 以不同 PackageMetadata / SessionContext 并发 build，Ops 绑定相互隔离。
-  3. EV-03-V-03：未知 namespace/method 和失效 Ops 被拒绝。
-  4. EV-03-V-04：冻结后的能力目录保持并发只读。
+  1. EV-03-V-01：Builder/Ops 为公开具体类；合法能力可登记，非法名称、重复和同步函数被拒绝。
+  2. EV-03-V-02：同一 Builder 顺序以不同 PackageMetadata / SessionContext 构建两个 Ops，随后可并发调用共享能力且上下文相互隔离。
+  3. EV-03-V-03：动态调用把当前 Ops 传给能力；未知 namespace/method 被拒绝，业务异常和取消原样传播。
+  4. EV-03-V-04：多个 Ops 可共享能力并发调用（2026-10-21 删除冻结契约后，原“freeze 后 add 被拒绝”不再适用）。
 - **联合交付：** EV-03 与 EV-02 在 EV-04 汇合，不保存 EventBus 注册表或执行状态。
 
 ### EV-04 EventBus 可完成 Build 和业务调用
 
 - **目标与范围：** 将 EV-02 的执行引擎与 EV-03 的 Builder/Ops 组合为完整 EventBus。
 - **交付范围：**
-  1. `ops.build` 内置事件和 Build CORE。
-  2. Builder 首次成功冻结、保存和 Build Handler 变更门禁。
-  3. 普通 `trigger()` 的 Builder 可用性门禁。
-  4. Session 投影和逐 Handler Ops。
+  1. Bus 构造时由 bootstrap 按 `event_types → handler_ops → event_handlers` 自动注册 Core 预置内容，只注册不触发事件；本期只预置 `ops.build` 内置事件和 Build CORE。
+  2. 宿主显式触发 Build 后 Bus 保存 Builder，以及 Build Handler 变更门禁。
+  3. 普通 `trigger()` 的 Builder 可用性门禁：只判断 Bus 是否已保存 Builder。
+  4. `register_event_handler()` 仅关键字 `package_metadata`、Session 投影和逐 Handler Ops。
   5. 名词/动词能力和嵌套事件。
-- **不交付：** initialize、公开状态机、close、drain 和公开锁。
-- **包上下文边界：** EventBus 注册表不保存 PackageMetadata；扩展运行时或 Handler 包装层持有包身份，并在掌握 Builder 调用点时传入。通用 Bus 没有包上下文时使用 None。
+- **不交付：** initialize、公开状态机、close、drain 和 Build 锁；不支持并发 Build，由宿主串行触发。
+- **包上下文边界：** USER / BUILTIN 的 PackageMetadata 随 Handler 注册记录保存，构建 Ops 时传入；CORE 使用 None。不从 Event 或 Session 推断。
 - **开工硬前置：** EV-02 的稳定执行链和 EV-03 的 Builder/Ops。
 - **验收标准：**
   1. EV-04-V-01：宿主显式 `trigger(ops.build)`，Build 链只接受第一次成功结果。
-  2. EV-04-V-02：异常、取消、替换 Builder 或能力冲突时丢弃部分结果，首次成功前允许重试。
+  2. EV-04-V-02：异常、取消、非法结果或能力冲突时丢弃部分结果，首次成功前允许重试。
   3. EV-04-V-03：Build 成功后，重复 Build 和 Build Handler 变更被拒绝。
-  4. EV-04-V-04：没有冻结 Builder 时普通业务 trigger 失败；普通 trigger 不执行 Build。
+  4. EV-04-V-04：Bus 尚未保存 Builder 时普通业务 trigger 失败；普通 trigger 不执行 Build。
   5. EV-04-V-05：SessionContext、单智能体 Session 和 None 按 S_01 规范化。
   6. EV-04-V-06：每个实际进入的 Handler 只构建一次 Ops；被跳过的 Handler 不构建 Ops。
   7. EV-04-V-07：名词能力直接执行；动词能力触发独立新链且不自动推进原链。
@@ -138,7 +137,7 @@ EV-01 已完成，Swarm 不需要等待真实 EventBus 即可开展以下工作�
 | --- | --- | --- |
 | M-02-CONTRACT | 定义 UI 事件字符串、payload、SessionContext 映射、错误到 UI 状态映射 | EV-01 公共接口已具备 |
 | M-02-SERVER | 用消费方自有 Fake 完成 AgentServer 注册、显式 trigger(ops.build) 和业务触发适配 | M-01 真实 Bus |
-| M-02-PLUGIN | 用自有 Fake 完成 USER Handler 登记/注销；包身份保留在运行时或闭包 | M-01 快照语义和真实调用 |
+| M-02-PLUGIN | 用自有 Fake 完成 USER Handler 登记/注销；登记时传入已核实的 PackageMetadata | M-01 快照语义和真实调用 |
 | M-02-WEBUI | 用 Mock payload 完成上行操作与下行渲染 | M-02-CONTRACT |
 | M-02-E2E | 预建环境、插件样例、测试数据和断言 | M-01 与上述真实实现 |
 
@@ -146,7 +145,7 @@ EV-01 已完成，Swarm 不需要等待真实 EventBus 即可开展以下工作�
 
 ### 3.3 交付节点
 
-- **M-01 EventBus MVP：** EV-01～EV-04 全部通过。使用 Fake 业务 CORE/能力验证 `宿主 trigger(ops.build) → Builder 冻结 → 普通事件 → USER/BUILTIN/CORE → 嵌套事件 → 返回`。
+- **M-01 EventBus MVP：** EV-01～EV-04 全部通过。使用 Fake 业务 CORE/能力验证 `宿主 trigger(ops.build) → Bus 保存 Builder → 普通事件 → USER/BUILTIN/CORE → 嵌套事件 → 返回`。
 - **M-02 Swarm 联合验收：** M-01 加 M-02-CONTRACT/SERVER/PLUGIN/WEBUI/E2E。验证真实事件上行、页面下行、插件装卸、在途等待和宿主停止。
 
 M-02 外部开发可以基于 EV-01 和消费方自有 Fake 并行，但 Mock 结果不代表真实 EventBus 已接通。
@@ -156,9 +155,9 @@ M-02 外部开发可以基于 EV-01 和消费方自有 Fake 并行，但 Mock �
 | ID / 名称 | 状态 | 负责人       | 硬前置 | 验收状态 | 进展说明 |
 | --- | --- |-----------| --- | --- | --- |
 | EV-01 公共接口契约 | 完成 | 张瑶        | 无 | EV-01-V-01～04 通过 | 公共模型、Protocol、错误码及导出已实现；`tests/unit_tests/core/events/test_events_contract.py` 8 项通过 |
-| EV-02 EventBus 注册与执行引擎 | 待开始 | 张瑶        | EV-01 | EV-02-V-01～10 未执行 | 注册表、匹配快照和 EventNext 作为一个工作项交付 |
-| EV-03 Builder/Ops | 待开始 | 张瑶        | EV-01 | EV-03-V-01～04 未执行 | 可与 EV-02 并行开发 |
-| EV-04 完整调用链集成 | 待开始 | 张瑶        | EV-02、EV-03 | EV-04-V-01～08 未执行 | 只组装执行引擎与 Builder/Ops，并补齐 Build、Session 和嵌套调用 |
+| EV-02 EventBus 注册与执行引擎 | 完成 | 张瑶        | EV-01 | EV-02-V-01～09 通过 | 注册表、匹配快照、分层执行链和 EventNext 已实现；EV-02 专项、EV-01 契约及 callback wrap 回归共 69 项通过 |
+| EV-03 Builder/Ops | 完成 | 张瑶        | EV-01 | EV-03-V-01～04 通过 | 公开具体类、上下文隔离和动态调用已实现；EV-03 专项 25 项、Events 回归 64 项通过（冻结契约已于 2026-10-21 删除，现专项 21 项） |
+| EV-04 完整调用链集成 | 完成 | 张瑶        | EV-02、EV-03 | EV-04-V-01～08 通过 | builtin 自动注册、外部 Build（只校验结果类型）、状态门禁、Session 规范化、逐 Handler Ops 和 `ExtensionEventBus` 导出已实现；EV-04 集成 5 项、Events 回归 67 项通过；V-02 的异常/取消与 V-06 的跳过不构建、V-08 的异常传播复用 EV-02/EV-03 覆盖，未新增专项用例 |
 | M-01 EventBus MVP | 待开始 | 张瑶        | EV-01～EV-04 | 联合场景未执行 | 使用真实 Bus 和 Fake 业务能力 |
 | M-02 Swarm 联合验收 | 待开始 | 张瑶、李雷、李志远 | M-01、五个外部工作包 | 联合场景未执行 | 对端实现进度由 Swarm 计划维护 |
 
@@ -182,3 +181,4 @@ git diff --check
 | 日期 | 版本  | 变更 | 未解决项 |
 | --- |-----| --- | --- |
 | 2026-10-19 | 1.0 | 将当前计划统一编排为 EV-01～EV-04；公共接口契约记为 EV-01 并标记完成；其余三个编号分别对应注册与执行引擎、Builder/Ops、完整调用链集成 | 真实 Session 输入、包上下文包装层和容量参数仍待后续 feature 或联调验证 |
+| 2026-10-21 | 1.1 | EV-04 完成，记录验收结果；实现记录见 F_04 第 6 节 | M-01 联合场景未执行；`ops.build` Handler 注册期级别/模式不强制 |
