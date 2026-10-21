@@ -226,11 +226,12 @@ def _pptx_embedded_images_hint(file_path: str) -> str:
         f"然后调用 visual_question_answering 工具识别。]"
     )
 
-def _read_docx_text(file_path: str, *, include_media_hint: bool = True) -> str:
-    """Extract text and tables from a .docx file as Markdown.
 
-    ``include_media_hint=False`` 时仅供写入/编辑路径取纯文本基线——
-    嵌入图片提示绝不能进入写回内容，否则会把提示文案写进文件。
+def _read_docx_text(file_path: str) -> str:
+    """Pure text/table extraction from a .docx file (no presentation hints).
+
+    嵌入图片提示在 ReadFileTool 展示层包装处追加（_read_docx 等）——底层保持
+    纯提取，写入/编辑路径复用本函数时绝不会把提示文案写回文件。
     """
     from docx import Document
 
@@ -265,13 +266,11 @@ def _read_docx_text(file_path: str, *, include_media_hint: bool = True) -> str:
             table_lines.append("| " + " | ".join(cells) + " |")
         parts.append("\n".join(table_lines))
 
-    if include_media_hint:
-        parts.append(_embedded_images_hint(file_path, "word/media/", "Word 文档"))
     return "\n\n".join(parts)
 
 
-def _read_xlsx_text(file_path: str, *, include_media_hint: bool = True) -> str:
-    """Extract data from an .xlsx file as Markdown tables."""
+def _read_xlsx_text(file_path: str) -> str:
+    """Pure data extraction from an .xlsx file (no presentation hints)."""
     from openpyxl import load_workbook
 
     parts: list[str] = []
@@ -294,13 +293,11 @@ def _read_xlsx_text(file_path: str, *, include_media_hint: bool = True) -> str:
     finally:
         wb.close()
 
-    if include_media_hint:
-        parts.append(_embedded_images_hint(file_path, "xl/media/", "Excel 工作簿"))
     return "\n\n".join(parts)
 
 
-def _read_pptx_text(file_path: str, *, include_media_hint: bool = True) -> str:
-    """Extract text from a .pptx file as Markdown."""
+def _read_pptx_text(file_path: str) -> str:
+    """Pure text extraction from a .pptx file (no presentation hints)."""
     from pptx import Presentation
 
     prs = Presentation(file_path)
@@ -326,23 +323,22 @@ def _read_pptx_text(file_path: str, *, include_media_hint: bool = True) -> str:
                         parts.append("| " + " | ".join(cells) + " |")
         parts.append("")
 
-    if include_media_hint:
-        parts.append(_pptx_embedded_images_hint(file_path))
     return "\n".join(parts)
 
 
 def _read_office_plain_text(file_path: str) -> str:
-    """Extract Office text in the same shape used by read_file (without cat -n).
+    """Extract Office plain text for write/edit baselines (no presentation hints).
 
-    写入/编辑路径的纯文本基线——不带嵌入图片提示，防止提示文案被写回文件。
+    底层提取函数均为纯提取（无图片提示），写入/编辑路径直接复用即可——
+    提示只在 ReadFileTool 展示层追加，绝无写回污染。
     """
     _, ext = os.path.splitext(file_path.lower())
     if ext == ".docx":
-        return _read_docx_text(file_path, include_media_hint=False)
+        return _read_docx_text(file_path)
     if ext in {".xlsx", ".xls"}:
-        return _read_xlsx_text(file_path, include_media_hint=False)
+        return _read_xlsx_text(file_path)
     if ext in {".pptx", ".ppt"}:
-        return _read_pptx_text(file_path, include_media_hint=False)
+        return _read_pptx_text(file_path)
     raise ValueError(f"Unsupported Office extension: {ext}")
 
 
@@ -439,6 +435,8 @@ async def _write_office_document_async(file_path: str, content: str) -> None:
 
 
 @dataclass
+
+
 class _FileReadState:
     """State recorded when a file is read; used by EditFileTool for pre-read validation."""
     mtime_ns: int
@@ -457,6 +455,8 @@ class _FileReadState:
 
 
 @dataclass(frozen=True)
+
+
 class _ReadStateRecord:
     """Inputs needed to update read coverage for a file."""
 
@@ -468,6 +468,8 @@ class _ReadStateRecord:
 
 
 @dataclass
+
+
 class _RawTextState:
     content: str
     line_count: int
@@ -1109,15 +1111,20 @@ class ReadFileTool(Tool):
 
     @staticmethod
     def _read_docx(file_path: str) -> str:
-        return _read_docx_text(file_path)
+        # 展示层追加嵌入图片提示；底层 _read_docx_text 保持纯提取（写回路径复用）
+        return _read_docx_text(file_path) + _embedded_images_hint(
+            file_path, "word/media/", "Word 文档"
+        )
 
     @staticmethod
     def _read_xlsx(file_path: str) -> str:
-        return _read_xlsx_text(file_path)
+        return _read_xlsx_text(file_path) + _embedded_images_hint(
+            file_path, "xl/media/", "Excel 工作簿"
+        )
 
     @staticmethod
     def _read_pptx(file_path: str) -> str:
-        return _read_pptx_text(file_path)
+        return _read_pptx_text(file_path) + _pptx_embedded_images_hint(file_path)
 
     async def _read_notebook(self, file_path: str) -> str:
         res = await self.operation.fs().read_file(file_path)
