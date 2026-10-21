@@ -72,10 +72,13 @@ from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.handler import ResumeContext, ToolInterruptHandler
 from openjiuwen.core.single_agent.interrupt.state import (
+    DEFERRED_TOOL_IMAGES_KEY,
     INTERRUPTION_KEY,
     RESUME_START_ITERATION_KEY,
+    TOOL_CALLS_STILL_PAUSED_KEY,
     BaseInterruptionState,
     ToolInterruptionState,
 )
@@ -2388,7 +2391,7 @@ class ReActAgent(BaseAgent):
         )
 
         tool_names = {call.id: call.name for call in tool_calls}
-        for tool_result, tool_message in results:
+        for _, tool_message in results:
             if tool_message is not None:
                 await context.add_messages(tool_message)
                 if cast(ReActAgentConfig, self._config).on_max_iterations != "error":
@@ -2396,11 +2399,29 @@ class ReActAgent(BaseAgent):
                     observation["name"] = observation.get("name") or tool_names.get(tool_message.tool_call_id)
                     ctx.extra.setdefault("_iteration_observations", []).append(observation)
 
-        multimodal_message = self._build_multimodal_tool_results_message(tool_result for tool_result, _ in results)
+        await self._add_tool_result_images(ctx, results, context)
+        return results
+
+    async def _add_tool_result_images(self, ctx: AgentCallbackContext, results: list, context: ModelContext) -> None:
+        """Give the model the images of tool results in one user message after the tool messages.
+
+        While a call of this assistant turn is still paused, hold them back: a
+        user message must not come between the tool messages of one turn.
+        """
+        image_items = ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None) or []
+        for tool_result, _ in results:
+            image_items.extend(self._iter_multimodal_image_items(tool_result))
+        turn_paused = bool(ctx.extra.get(TOOL_CALLS_STILL_PAUSED_KEY)) or any(
+            isinstance(tool_result, ToolInterruptException) or self._hitl_handler.is_sub_agent_interrupt(tool_result)
+            for tool_result, _ in results
+        )
+        if turn_paused:
+            if image_items:
+                ctx.extra[DEFERRED_TOOL_IMAGES_KEY] = image_items
+            return
+        multimodal_message = self._build_multimodal_message_from_items(image_items)
         if multimodal_message is not None:
             await context.add_messages(multimodal_message)
-
-        return results
 
     @staticmethod
     def _build_multimodal_tool_result_messages(tool_result: Any) -> List[UserMessage]:
@@ -2409,31 +2430,36 @@ class ReActAgent(BaseAgent):
 
     @staticmethod
     def _build_multimodal_tool_results_message(tool_results: Any) -> Optional[UserMessage]:
+        return ReActAgent._build_multimodal_message_from_items(
+            item for tool_result in tool_results for item in ReActAgent._iter_multimodal_image_items(tool_result)
+        )
+
+    @staticmethod
+    def _build_multimodal_message_from_items(image_items: Any) -> Optional[UserMessage]:
         content: List[dict[str, Any]] = []
         loaded_paths: List[str] = []
         shown_once: set[int] = set()
 
-        for tool_result in tool_results:
-            for item in ReActAgent._iter_multimodal_image_items(tool_result):
-                source = str(item.get("source") or "tool")
-                source_path = str(item.get("source_path") or "unknown image")
-                data_url = item["data_url"]
-                loaded_paths.append(source_path)
-                content.append(
-                    {
-                        "type": "text",
-                        "text": f"Image loaded from {source}: {source_path}",
-                    }
-                )
-                image_part = {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": data_url,
-                    },
+        for item in image_items:
+            source = str(item.get("source") or "tool")
+            source_path = str(item.get("source_path") or "unknown image")
+            data_url = item["data_url"]
+            loaded_paths.append(source_path)
+            content.append(
+                {
+                    "type": "text",
+                    "text": f"Image loaded from {source}: {source_path}",
                 }
-                if item.get("keep_in_context") is False:
-                    shown_once.add(id(image_part))
-                content.append(image_part)
+            )
+            image_part = {
+                "type": "image_url",
+                "image_url": {
+                    "url": data_url,
+                },
+            }
+            if item.get("keep_in_context") is False:
+                shown_once.add(id(image_part))
+            content.append(image_part)
 
         if not content:
             return None
@@ -3123,6 +3149,8 @@ class ReActAgent(BaseAgent):
 
                         finish = ctx.consume_force_finish()
                         if finish:
+                            # The turn ends here; images held for its paused calls go with it.
+                            ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None)
                             await self.context_engine.save_contexts(session)
                             invoke_inputs.result = finish.result
                             break
@@ -3135,6 +3163,8 @@ class ReActAgent(BaseAgent):
                             original_query=ctx.extra.get("_original_query", ""),
                         )
                         if hitl_interrupt:
+                            # Images of the calls that finished wait for the paused ones.
+                            hitl_interrupt.deferred_tool_images = ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None) or []
                             await self._commit_interrupt(
                                 hitl_interrupt, context, session, invoke_inputs, sub_agent_outputs
                             )

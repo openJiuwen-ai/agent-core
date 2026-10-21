@@ -20,16 +20,19 @@ from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.single_agent.interrupt.answers import APPROVED_ANSWER_KINDS
 from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.response import (
+    CLIENT_TOOL_INTERRUPT_OWNER,
     InterruptRequest,
     ToolCallInterruptRequest,
     interrupt_kind_of,
 )
 from openjiuwen.core.single_agent.interrupt.state import (
+    DEFERRED_TOOL_IMAGES_KEY,
     INTERRUPT_AUTO_CONFIRM_KEY,
     INTERRUPTION_KEY,
     RESUME_INTERRUPT_ANSWERS_KEY,
     RESUME_START_ITERATION_KEY,
     RESUME_USER_INPUT_KEY,
+    TOOL_CALLS_STILL_PAUSED_KEY,
     InterruptAnswer,
     ToolInterruptEntry,
     ToolInterruptionState,
@@ -94,8 +97,8 @@ class ToolInterruptHandler:
         return state, payloads
 
     @staticmethod
-    def _is_sub_agent_interrupt(result: Any) -> bool:
-        """Check if result is a sub-agent interrupt dict."""
+    def is_sub_agent_interrupt(result: Any) -> bool:
+        """Whether a tool result is a sub-agent that paused on its own interrupt."""
         if isinstance(result, tuple) and len(result) >= 1:
             tool_result = result[0]
         else:
@@ -167,6 +170,7 @@ class ToolInterruptHandler:
         interrupted_tools[outer_id] = ToolInterruptEntry(
             tool_call=tool_call,
             interrupt_requests={inner_id: tool_result.request},
+            paused_call=inner_tool_call,
         )
 
         payload = ToolCallInterruptRequest.from_tool_call(
@@ -238,7 +242,7 @@ class ToolInterruptHandler:
             if isinstance(tool_result, ToolInterruptException):
                 issue_interrupt_id(tool_result.request, (tool_result.tool_call or tool_call).id, unanswered)
                 self._handle_tool_interrupt_exception(tool_result, tool_call, interrupted_tools, payloads)
-            elif self._is_sub_agent_interrupt(tool_result):
+            elif self.is_sub_agent_interrupt(tool_result):
                 self._handle_sub_agent_interrupt(tool_result, tool_call, interrupted_tools, payloads)
 
         return interrupted_tools, payloads
@@ -335,12 +339,26 @@ class ToolInterruptHandler:
         call_answers = self._call_answers(state, fresh_answers)
         unanswered = self._unanswered_interrupts(state, fresh_answers)
 
+        # Client tool calls nobody answered stay paused as they are: replaying
+        # them would run the rails and build_request again while the client
+        # may still be working on the request it already has.
+        held = {
+            outer_id: entry
+            for outer_id, entry in state.interrupted_tools.items()
+            if self._is_waiting_for_client(entry, fresh_answers)
+        }
+
         resume_user_input_keys = self._resume_user_input_keys_for_state(state)
         ctx.extra.update({key: user_input for key in resume_user_input_keys})
         ctx.extra[RESUME_INTERRUPT_ANSWERS_KEY] = call_answers
+        ctx.extra[DEFERRED_TOOL_IMAGES_KEY] = list(state.deferred_tool_images)
+        if held:
+            ctx.extra[TOOL_CALLS_STILL_PAUSED_KEY] = True
 
         tools_to_execute = []
         for outer_id, entry in state.interrupted_tools.items():
+            if outer_id in held:
+                continue
             tc = copy.deepcopy(entry.tool_call)
             if entry.is_sub_agent:
                 tc = self._build_sub_agent_resume_tool_call(tc, user_input)
@@ -356,17 +374,58 @@ class ToolInterruptHandler:
             for resume_user_input_key in resume_user_input_keys:
                 ctx.extra.pop(resume_user_input_key, None)
             ctx.extra.pop(RESUME_INTERRUPT_ANSWERS_KEY, None)
+            ctx.extra.pop(TOOL_CALLS_STILL_PAUSED_KEY, None)
+            deferred_images = ctx.extra.pop(DEFERRED_TOOL_IMAGES_KEY, None) or []
 
         new_interrupted_tools, sub_agent_outputs = self._collect_interrupts(results, tools_to_execute, unanswered)
         self._carry_answers(new_interrupted_tools, call_answers)
+        new_interrupted_tools, sub_agent_outputs = self._merge_held_calls(
+            state, held, new_interrupted_tools, sub_agent_outputs
+        )
 
         state.interrupted_tools = new_interrupted_tools
+        state.deferred_tool_images = deferred_images if new_interrupted_tools else []
 
         if new_interrupted_tools:
             return await self.commit_interrupt(state, context, session, invoke_inputs, sub_agent_outputs)
 
         ctx.extra[RESUME_START_ITERATION_KEY] = resume_iteration + 1
         return None
+
+    @staticmethod
+    def _is_waiting_for_client(entry: ToolInterruptEntry, fresh_answers: Dict[str, InterruptAnswer]) -> bool:
+        requests = entry.interrupt_requests.values()
+        return not entry.is_sub_agent and bool(requests) and all(
+            request.interrupt_owner == CLIENT_TOOL_INTERRUPT_OWNER and request.interrupt_id not in fresh_answers
+            for request in requests
+        )
+
+    @staticmethod
+    def _merge_held_calls(
+            state: ToolInterruptionState,
+            held: Dict[str, ToolInterruptEntry],
+            replayed: Dict[str, ToolInterruptEntry],
+            payloads: list,
+    ) -> tuple[Dict[str, ToolInterruptEntry], list]:
+        """Put the calls kept waiting for the client back, in the turn's original order.
+
+        A held call is paused for the client exactly as before: same request
+        and interrupt id, and the payload is rebuilt from the call it paused.
+        """
+        if not held:
+            return replayed, payloads
+        payload_by_id = dict(payloads)
+        merged: Dict[str, ToolInterruptEntry] = {}
+        merged_payloads: list = []
+        for outer_id in state.interrupted_tools:
+            if outer_id in held:
+                entry = merged[outer_id] = held[outer_id]
+                [(inner_id, request)] = entry.interrupt_requests.items()
+                merged_payloads.append((inner_id, ToolCallInterruptRequest.from_tool_call(request, entry.paused_call)))
+            elif outer_id in replayed:
+                entry = merged[outer_id] = replayed[outer_id]
+                merged_payloads.extend((inner_id, payload_by_id[inner_id]) for inner_id in entry.interrupt_requests)
+        return merged, merged_payloads
 
     @staticmethod
     def _resume_user_input_keys_for_state(state: ToolInterruptionState) -> set[str]:
@@ -404,7 +463,8 @@ class ToolInterruptHandler:
         - A dict whose keys include pending call ids answers only those calls,
           each with its own value.
         - Any other input (plain text, another dict) is offered to the
-          interrupt pending on every call, as it always was.
+          interrupt pending on every call, as it always was. Plain text is
+          marked ``unaddressed``: it is a new message rather than an answer.
         """
         if user_input is None:
             return {}
@@ -432,6 +492,7 @@ class ToolInterruptHandler:
                 owner=requests[interrupt_id].interrupt_owner,
                 kind=interrupt_kind_of(requests[interrupt_id]),
                 value=value,
+                unaddressed=isinstance(user_input, str),
                 request=requests[interrupt_id],
             )
             for interrupt_id, value in values.items()

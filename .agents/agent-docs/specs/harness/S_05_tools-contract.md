@@ -514,3 +514,28 @@ LLM/Jev 共享 local_context，复杂目标复用可选 objective/绑定；普�
   抛 `COMPONENT_TOOL_INIT_FAILED`。后端在第一次工具调用时才构建，pyautogui 在构建时才导入，所以构建
   工具与导入模块都不触碰显示器。输入始终是前台真实输入；所有阻塞调用经 `asyncio.to_thread` 执行。
 - **依赖**：`cua` extra（`pyautogui`、`psutil`；Windows 上 `pygetwindow`，Linux 上 `python-xlib`）。
+
+## 客户端执行的工具（client tools，当前契约）
+
+- **声明**：`ToolCard(execution="client")`（`execution` 不进模型看到的 `ToolInfo`）。需要定制时继承
+  `ClientTool`：`build_request(arguments, context) -> dict` 生成发给客户端的请求，
+  `complete(arguments, result, context)` 把客户端结果变成工具输出，`context` 为
+  `ClientToolContext(tool_call, session, agent, callback_context)`。`build_request` 抛
+  `ClientToolUnavailable(message)` 时调用直接以工具错误结束，不联系客户端。参数必须是 JSON 对象。
+- **执行**：所有 `before_tool_call` rail 放行后，`AbilityManager` 不调 `invoke`，而是抛
+  `client_tool` 中断，请求为 `ClientToolRequest(tool_name, arguments, client_request)`，`arguments`
+  是 rail 改写后的最终参数。权限 rail 把客户端工具当普通调用：放行 / 询问（批准后才发客户端请求）/
+  拒绝（客户端收不到请求）。
+- **恢复**：宿主用 `InteractiveInput.answer(interrupt_id, result)` 回答，结果经
+  `ClientToolResult.coerce` 成为该调用的正常输出（键全属于 `status` / `content` / `is_error` /
+  `data` 的 dict 是信封；其余 dict 整体作为结果，以 JSON 交给模型）。
+  答复后的调用**不再经过 `before_tool_call`**：它在暂停时已经过了 rail，之后规则变化只影响后续
+  调用，与已在执行的服务端工具一致。事件顺序：`before_tool_call` 一次、`after_tool_call`
+  （`ctx.is_paused`）、带结果的 `after_tool_call`。
+- **并行与部分回答**：一次恢复可只回答部分并行客户端调用；其余保持暂停、不重放（请求、
+  `interrupt_id` 与载荷不变）。同一轮的图片消息等所有调用都有结果后才追加。
+- **`parallel_safe=False`**：客户端暂停不阻塞同一批中排在后面的调用。
+- **超时 / 断开 / 取消**：`timeout` / `client_gone` / `cancelled` 转成 `data["retryable"]=True` 的工具
+  错误，提示模型调用可能已生效、先确认现状。客户端调用等待时用户发纯文本，该调用以 `cancelled`
+  结束，文本附在结果里交给模型。
+- 示例：`examples/client_tool/client_tool_demo.py`。

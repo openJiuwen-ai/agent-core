@@ -41,7 +41,7 @@ author_email: chengshuo5@huawei.com
 
    | provider | card | capabilities | optional host capabilities |
    |---|---|---|---|
-   | `native` | `deepagent` | STEER, FORCE_ABORT | USER_INPUT, TOOL_APPROVAL |
+   | `native` | `deepagent` | STEER, FORCE_ABORT | USER_INPUT, TOOL_APPROVAL, DYNAMIC_TOOL_CALL |
    | `native_v2` | `native_v2` | STEER, GRACEFUL_ABORT, FORCE_ABORT, PAUSE_RESUME, CHECKPOINT, PERSISTENT_SESSION | USER_INPUT, CHECKPOINT_SINK |
    | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION, MODEL_REQUEST_OBSERVATION |
    | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION, MODEL_REQUEST_OBSERVATION |
@@ -74,10 +74,14 @@ author_email: chengshuo5@huawei.com
    ALLOW_FOR_SESSION 为会话内记住（进化审批为 `allow_always`；`provider_data.persist_allow=True` 时为永久允许），
    DENY 带 `reason` 拒绝，ABORT 或 `interrupt=True` 结束 Turn 并保留中断，带 `updated_arguments` 的批准按拒绝处理；
    否则为带 `choices=("allow", "allow_always", "deny")` 的 `UserInputRequest`，答复的词经 `interrupt_answer`
-   转换（字典原样交回），无内容或无法识别的词按拒绝处理。其余类型（`ask_user`、未声明类型及其他 Rail 自定义类型）
+   转换（字典原样交回），无内容或无法识别的词按拒绝处理。`client_tool` 在宿主声明 DYNAMIC_TOOL_CALL 时为
+   `DynamicToolCallRequest`（`arguments` 为最终参数，`provider_data.client_request`）：COMPLETED 的 `result`
+   原样作为结果（`null` 也是结果），FAILED 或 `is_error` 为工具错误，其余非 COMPLETED 为 `cancelled`；未声明时
+   该调用直接以“宿主不能执行客户端工具”的工具错误结束。客户端调用最后询问：会结束 Turn 的询问都在客户端执行之前
+   完成，客户端结果不会被丢弃。其余类型（`ask_user`、未声明类型及其他 Rail 自定义类型）
    为 `UserInputRequest`，答复内容原样交回，与之前一致。工作流交互不是中断请求：为 `UserInputRequest`，`request_id`
-   为交互自身的 id，`interrupt_id` 与 `kind` 为空，按该 id 回答。与之前一样，只要宿主提供了交互处理器就会询问，
-   不看它声明了哪些能力；只有 TOOL_APPROVAL 决定审批走哪种请求。`native_v2` 的 card 未列 TOOL_APPROVAL，
+   为交互自身的 id，`interrupt_id` 与 `kind` 为空，按该 id 回答。与之前一样，只要宿主提供了交互处理器就会询问
+   审批和问题，不看它声明了哪些能力；只有 TOOL_APPROVAL 决定审批走哪种请求。`native_v2` 的 card 未列 TOOL_APPROVAL，
    审批总是 `UserInputRequest`。Turn 以中断结束时，
    `provider_data.pending_interrupt_ids` 仍是**工具调用 id**（沿用旧键名），另有
    `pending_interrupts=[{tool_call_id, interrupt_id, kind}]`。

@@ -151,11 +151,14 @@ provider packages `.agents/agent-docs/features/harness/F_07_third-party-harness-
    `interrupt=True` stop the turn, `updated_arguments` denies the call,
    ALLOW_FOR_SESSION with `provider_data.persist_allow=True` allows
    permanently), else a `UserInputRequest` with allow / allow_always / deny
-   choices translated by `interrupt_answer` (no word denies); other kinds,
+   choices translated by `interrupt_answer` (no word denies); `client_tool`
+   becomes `DynamicToolCallRequest` under DYNAMIC_TOOL_CALL, else the call
+   ends with a tool error, and client calls are asked last; other kinds,
    undeclared ones included, get the content as is. A workflow interaction
    is no interrupt request: its `request_id` is its own id (`interrupt_id`
    and `kind` empty) and it is answered by that id. As before, every host
-   with an interaction handler is asked, whatever it declared.
+   with an interaction handler is asked approvals and questions, whatever it
+   declared.
    An auto-approving `HarnessIOAdapter` still surfaces approvals that carry
    an `interrupt_id`, and matches `update(tool_call_id)` answers to them.
 7. **The IO adapter is the only DeepAgent-facing projection.** `HarnessIOAdapter`

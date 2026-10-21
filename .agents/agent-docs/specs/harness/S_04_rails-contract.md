@@ -131,7 +131,7 @@ author_email: yangzequ1@huawei.com
       同类 rail 时，必须给其中一个设置不同的 `interrupt_owner`**（框架不检查）。
     - **agent 内部只按 `interrupt_id` 认答复**：宿主用 `InteractiveInput.answer(interrupt_id, value)`。
       `update(tool_call_id, value)`、纯文本与 dict 只在恢复开始时换算一次：`update` 给该调用当前等待
-      的中断；键含暂停调用 id 的 dict 只回答这些调用；其他输入给每个
+      的中断；键含暂停调用 id 的 dict 只回答这些调用；其他输入（纯文本标记为 `unaddressed`）给每个
       调用当前等待的中断。原始恢复输入仍放在 `RESUME_USER_INPUT_KEY`（或请求
       `metadata["resume_user_input_key"]` 指定的键）下，供宿主自己的 rail 读取。
     - 升级前持久化的中断没有 id：加载时按调用 id 生成 `intr_<tool_call_id>`，按调用 id 的答复照常
@@ -141,8 +141,10 @@ author_email: yangzequ1@huawei.com
       `is_carried_answer(ctx.extra, tool_call_id)` 避免重复：权限 rail 对携带的批准不再写规则，
       `permission_scene_hook` 的入参带 `answer_carried`。权限 rail 收到的每个批准（新的或携带的）都
       重新做引擎判定，等待期间新增的 deny 规则生效。
-    - **暂停不是异常**：rail 中断在 `@rail` 包装层不触发 `on_tool_exception`、不重试；
-      `after_tool_call` 仍触发，此时 `ctx.is_paused` 为真、调用还没有结果。
+    - **暂停不是异常**：rail 中断与客户端工具暂停在 `@rail` 包装层不触发 `on_tool_exception`、不重试；
+      `after_tool_call` 仍触发，此时 `ctx.is_paused` 为真、调用还没有结果。客户端工具调用的事件顺序：
+      `before_tool_call` 一次（暂停时）、`after_tool_call`（`is_paused`）、收到答复后再一次
+      `after_tool_call`（带结果）；答复后的调用不再经过 `before_tool_call`。
     - 宿主可用 `pending_interrupts(state)` 列出暂停的中断，用 `match_answers(user_input, pending)`
       按处理器同一规则换算 `InteractiveInput` 并找出过期答复。
 
