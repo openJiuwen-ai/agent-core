@@ -44,7 +44,7 @@ from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.tools.member_options import get_member_agent_template, get_member_options
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_factory import create_team_tools
-from openjiuwen.agent_teams.tools.tool_member import SpawnExternalCliTool
+from openjiuwen.agent_teams.tools.tool_member import SpawnTeammateTool
 from openjiuwen.agent_teams.tools.tool_permissions import EXPERT_TOOLS
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.schema.deep_agent_spec import DeepAgentSpec, WorkspaceSpec
@@ -620,7 +620,7 @@ async def test_external_expert_registers_an_external_cli_member_with_the_merged_
         {"effort": "high"},
     ],
 )
-async def test_external_expert_model_rules_match_spawn_external_cli(
+async def test_external_expert_model_rules_match_spawn_teammate_cli_agent(
     db: TeamDatabase, catalog: FakeCatalog, models: dict[str, Any]
 ) -> None:
     backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
@@ -629,11 +629,12 @@ async def test_external_expert_model_rules_match_spawn_external_cli(
         {"expert": "claude-expert", "member_name": "cli-1", "model_name": models.get("model_name"),
          "external_cli": external_cli}
     )
-    direct = await SpawnExternalCliTool(backend, make_translator("en")).invoke(
-        {"member_name": "cli-2", "display_name": "d", "prompt": "p", "cli_agent": "claude", **models}
+    direct = await SpawnTeammateTool(backend, make_translator("en")).invoke(
+        {"member_name": "cli-2", "display_name": "d", "desc": "p", "cli_agent": "claude",
+         "model_name": models.get("model_name"), "external_cli": external_cli}
     )
     assert not expert.success and not direct.success
-    assert expert.error.replace("spawn_expert", "TOOL") == direct.error.replace("spawn_external_cli", "TOOL")
+    assert expert.error.replace("spawn_expert", "TOOL") == direct.error.replace("spawn_teammate", "TOOL")
     assert await _member_count(db) == 0
 
 
@@ -943,6 +944,21 @@ def test_inline_member_offers_cli_fields_only_when_cli_kinds_are_declared(
 
 
 @pytest.mark.level0
+@pytest.mark.parametrize("builtin_models", [[], [ExternalCliBuiltinModel(name="sonnet")]])
+def test_spawn_teammate_cli_fields_match_the_inline_member(
+    db: TeamDatabase, catalog: FakeCatalog, builtin_models: list[ExternalCliBuiltinModel]
+) -> None:
+    """spawn_teammate and scheduled create_task's inline member declare an external CLI member alike."""
+    backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude", builtin_models=builtin_models))
+    tool = _scheduled_create_task(backend, catalog)
+    member = tool.card.input_params["properties"]["tasks"]["items"]["properties"]["member"]["properties"]
+    teammate = SpawnTeammateTool(backend, make_translator("cn")).card.input_params["properties"]
+    for field in ("cli_agent", "external_cli"):
+        assert teammate[field]["type"] == member[field]["type"]
+    assert set(teammate["external_cli"]["properties"]) == set(member["external_cli"]["properties"])
+
+
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_inline_external_expert_registers_like_spawn_expert(db: TeamDatabase, catalog: FakeCatalog) -> None:
     declared = ExternalCliAgentSpec(cli_agent="claude", env={"HOST_ONLY": "1"}, skills=[{"dir": "/host/skill"}])
@@ -968,7 +984,7 @@ async def test_inline_external_expert_registers_like_spawn_expert(db: TeamDataba
 
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_inline_cli_agent_member_registers_like_spawn_external_cli(db: TeamDatabase, catalog: FakeCatalog) -> None:
+async def test_inline_cli_agent_member_registers_like_spawn_teammate(db: TeamDatabase, catalog: FakeCatalog) -> None:
     backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
     tool = _scheduled_create_task(backend, catalog)
     result = await tool.invoke({"tasks": [_cli_task("t1", "rev-1")]})
@@ -993,9 +1009,9 @@ async def test_cli_members_need_no_private_prompt(db: TeamDatabase, catalog: Fak
     backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
     inline = await _scheduled_create_task(backend, catalog).invoke({"tasks": [_cli_task("t1", "rev-1", prompt="")]})
     assert inline.success, inline.error
-    tool = SpawnExternalCliTool(backend, make_translator("en"))
+    tool = SpawnTeammateTool(backend, make_translator("en"))
     assert "prompt" not in tool.card.input_params["required"]
-    direct = await tool.invoke({"member_name": "rev-2", "display_name": "d", "cli_agent": "claude"})
+    direct = await tool.invoke({"member_name": "rev-2", "display_name": "d", "desc": "d", "cli_agent": "claude"})
     assert direct.success, direct.error
     assert [(await backend.get_member(name)).prompt for name in ("rev-1", "rev-2")] == ["", ""]
 
@@ -1012,18 +1028,18 @@ async def test_cli_members_need_no_private_prompt(db: TeamDatabase, catalog: Fak
         {"effort": "high"},
     ],
 )
-async def test_inline_cli_member_model_rules_match_spawn_external_cli(
+async def test_inline_cli_member_model_rules_match_spawn_teammate(
     db: TeamDatabase, catalog: FakeCatalog, models: dict[str, Any]
 ) -> None:
     backend = _backend(db, ExternalCliAgentSpec(cli_agent="claude"))
     external_cli = {key: value for key, value in models.items() if key != "model_name"}
     member = {"external_cli": external_cli, **({"model_name": models["model_name"]} if "model_name" in models else {})}
     inline = await _scheduled_create_task(backend, catalog).invoke({"tasks": [_cli_task("t1", "rev-1", **member)]})
-    direct = await SpawnExternalCliTool(backend, make_translator("en")).invoke(
-        {"member_name": "rev-2", "display_name": "d", "prompt": "p", "cli_agent": "claude", **models}
+    direct = await SpawnTeammateTool(backend, make_translator("en")).invoke(
+        {"member_name": "rev-2", "display_name": "d", "desc": "p", "cli_agent": "claude", **member}
     )
     assert not inline.success and not direct.success
-    assert inline.error.endswith(direct.error.replace("spawn_external_cli", "create_task"))
+    assert inline.error.endswith(direct.error.replace("spawn_teammate", "create_task"))
     assert await _member_count(db) == 0
 
 
