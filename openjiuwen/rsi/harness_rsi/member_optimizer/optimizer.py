@@ -134,18 +134,22 @@ class MemberOptimizer:
         self.config = config
         self._action_group_config_paths: list[str] = list(config.action_group_configs)
 
-        self._role_attributor = role_attributor or RoleAttributor()
-        self._mechanism_attributor = mechanism_attributor or MechanismAttributor()
+        self._role_attributor = role_attributor or RoleAttributor(output_repair=config.output_repair)
+        self._mechanism_attributor = mechanism_attributor or MechanismAttributor(output_repair=config.output_repair)
         self._member_selector = member_selector or MemberSelector()
-        self._action_planner = action_planner or MemberActionPlanner()
+        self._action_planner = action_planner or MemberActionPlanner(output_repair=config.output_repair)
         self._action_executor = action_executor or MemberActionExecutor(
             execution_concurrency=config.execution_concurrency,
             role_execution_concurrency=config.role_execution_concurrency,
             action_execution_concurrency_per_role=config.action_execution_concurrency_per_role,
             agent_skills_dirs=config.agent_skills_dirs,
+            output_repair=config.output_repair,
+            runtime_iteration_hard_limit=config.runtime_iteration_hard_limit,
         )
         self._verifier = verifier or HarnessChangeVerifier(
             agent_skills_dirs=config.agent_skills_dirs,
+            output_repair=config.output_repair,
+            runtime_iteration_hard_limit=config.runtime_iteration_hard_limit,
         )
 
     def register_action_group(self, action_group_config_path: str) -> None:

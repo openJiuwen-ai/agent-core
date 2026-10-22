@@ -38,7 +38,7 @@ async def test_case_cleanup_preserves_concurrent_case_and_judge(tmp_path, monkey
     monkeypatch.setattr(case_backend, "_resolve_single_harness_ref", lambda refs: ("solver", "unused"))
     monkeypatch.setattr(case_backend, "load_member_optimizer_model", Mock())
     monkeypatch.setattr(case_backend, "_single_harness_rails", lambda *args, **kwargs: [])
-    monkeypatch.setattr(case_backend, "_attach_single_harness_trajectory_rail", Mock())
+    monkeypatch.setattr(case_backend, "_attach_single_harness_trajectory_rail", Mock(return_value=None))
 
     def factory(**kwargs):
         card = kwargs["card"]

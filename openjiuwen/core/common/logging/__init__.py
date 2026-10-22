@@ -35,6 +35,7 @@ from openjiuwen.core.common.logging.events import (
     validate_event,
     WorkflowEvent,
 )
+from openjiuwen.core.common.logging.invocation import InvocationLogScope, invocation_log_scope
 from openjiuwen.core.common.logging.manager import LogManager
 from openjiuwen.core.common.logging.protocol import LoggerProtocol
 from openjiuwen.core.common.logging.utils import (
@@ -195,6 +196,8 @@ __all__ = [
     "get_session_id",
     "set_member_id",
     "get_member_id",
+    "InvocationLogScope",
+    "invocation_log_scope",
     # General loggers
     "logger",
     "interface_logger",

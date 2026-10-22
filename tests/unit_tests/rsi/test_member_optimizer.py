@@ -650,7 +650,7 @@ def test_member_optimizer_agent_factory_uses_external_skill_roots(
     assert rails[0].enabled_skills == {"demo_skill"}
 
 
-def test_action_execution_agent_does_not_mount_filesystem_write_tools(
+def test_action_execution_agent_mounts_only_scoped_native_file_tools(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -671,8 +671,11 @@ def test_action_execution_agent_does_not_mount_filesystem_write_tools(
     )
 
     assert captured["card"].name == "member_action_executor"
-    assert captured["tools"] in (None, [])
-    assert captured["sys_operation"] is None
+    assert {tool.card.name for tool in captured["tools"]} == {
+        "read_file", "write_file", "edit_file", "grep", "glob", "list_files",
+    }
+    assert captured["sys_operation"] is not None
+    assert captured["enable_skill_discovery"] is False
 
 
 class _MemberOptimizerMockModelClient(BaseModelClient):
@@ -3828,7 +3831,7 @@ def test_action_executor_accepts_complete_skill_as_structured_file_write() -> No
     assert parsed["file_writes"][0]["content"] == content
 
 
-def test_action_executor_writes_complete_skill_from_one_model_call(
+def test_action_executor_accepts_legacy_skill_payload_from_native_agent(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -3855,7 +3858,14 @@ def test_action_executor_writes_complete_skill_from_one_model_call(
             }
         )
 
-    monkeypatch.setattr(MemberActionExecutorAgent, "_invoke_direct_action", invoke_direct)
+    class NativeAgent:
+        async def invoke(self, inputs, session):
+            return {"output": await invoke_direct(self, inputs["query"])}
+
+    monkeypatch.setattr(
+        "openjiuwen.rsi.harness_rsi.member_optimizer.action_executor.create_action_execution_agent",
+        lambda **kwargs: NativeAgent(),
+    )
     action = MemberOptimizationAction(
         action_id=action_id,
         role="solver",
@@ -3915,7 +3925,14 @@ def test_action_executor_retries_malformed_complete_skill_response(
             }
         )
 
-    monkeypatch.setattr(MemberActionExecutorAgent, "_invoke_direct_action", invoke_direct)
+    class NativeAgent:
+        async def invoke(self, inputs, session):
+            return {"output": await invoke_direct(self, inputs["query"])}
+
+    monkeypatch.setattr(
+        "openjiuwen.rsi.harness_rsi.member_optimizer.action_executor.create_action_execution_agent",
+        lambda **kwargs: NativeAgent(),
+    )
     action_worktree = tmp_path / "action_wt"
     action_worktree.mkdir()
     action = MemberOptimizationAction(
@@ -3969,7 +3986,14 @@ def test_action_executor_does_not_publish_invalid_assembled_skill(
             }
         )
 
-    monkeypatch.setattr(MemberActionExecutorAgent, "_invoke_direct_action", invoke_direct)
+    class NativeAgent:
+        async def invoke(self, inputs, session):
+            return {"output": await invoke_direct(self, inputs["query"])}
+
+    monkeypatch.setattr(
+        "openjiuwen.rsi.harness_rsi.member_optimizer.action_executor.create_action_execution_agent",
+        lambda **kwargs: NativeAgent(),
+    )
     action_worktree = tmp_path / "action_wt"
     action_worktree.mkdir()
     action = MemberOptimizationAction(
@@ -4023,9 +4047,9 @@ def test_action_execution_prompt_requires_native_complete_skill_artifact() -> No
         allowed_tools=["read_file", "write_file", "edit_file"],
     )
 
-    assert "Do not call write_file or edit_file to apply the change" in message
-    assert "complete replacement content in `file_writes`" in message
-    assert '"file_writes"' in message
+    assert "apply the change using write_file or edit_file" in message
+    assert "Paginate long files" in message
+    assert '"changed_files"' in message
     assert "artifact_chunk" not in message
     assert "decision contract's causal distinction" in message
     assert "public task only for broad task-area vocabulary" in message
@@ -4042,7 +4066,7 @@ def test_action_execution_prompt_requires_native_complete_skill_artifact() -> No
     assert "case ids, optimizer provenance, evaluator-only names" in message
     assert "## Evidence Boundary" not in message
     assert "## Regression Attribution Gate" not in message
-    assert "Allowed Tools: []" in message
+    assert "Allowed Tools: read_file, grep, glob, list_files, write_file, edit_file" in message
 
 
 def test_action_execution_projects_only_public_runtime_contract() -> None:
@@ -4993,6 +5017,7 @@ def _safe_payload_tool_source() -> str:
 
 
 def test_action_executor_retries_tool_generation_after_safety_validation_error(
+    monkeypatch,
     tmp_path: Path,
 ) -> None:
     from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
@@ -5004,7 +5029,7 @@ def test_action_executor_retries_tool_generation_after_safety_validation_error(
             super().__init__("unused")
             self.messages: list[str] = []
 
-        async def _invoke_direct_tool_action(self, message: str) -> str:
+        async def native_response(self, message: str) -> str:
             self.messages.append(message)
             if len(self.messages) == 1:
                 return json.dumps(
@@ -5077,6 +5102,15 @@ def test_action_executor_retries_tool_generation_after_safety_validation_error(
         constraints={"class_name": "RiskChecker"},
     )
     agent = _RetryingToolExecutionAgent()
+
+    class NativeAgent:
+        async def invoke(self, inputs, session):
+            return {"output": await agent.native_response(inputs["query"])}
+
+    monkeypatch.setattr(
+        "openjiuwen.rsi.harness_rsi.member_optimizer.action_executor.create_action_execution_agent",
+        lambda **kwargs: NativeAgent(),
+    )
 
     result = asyncio.run(
         agent.execute_action(
@@ -5162,11 +5196,11 @@ def test_member_executor_preseeds_tool_add_with_valid_object_schema(
     assert {"file": "tools/risk_checker.py", "class_name": "RiskChecker"} in manifest["tools"]
 
 
-def test_member_executor_preseeds_missing_tool_modify_with_valid_object_schema(
+def test_member_executor_rejects_missing_tool_modify_baseline(
     tmp_path: Path,
     two_role_harness_dir: Path,
 ) -> None:
-    """tool/modify on a missing package-local tool is add-like in scenario action groups."""
+    """A modify target must exist even when its action_type contains add."""
     run_dir = tmp_path / "member_optimization_001"
     target = MemberOptimizationTarget(
         role="explainer",
@@ -5206,13 +5240,11 @@ def test_member_executor_preseeds_missing_tool_modify_with_valid_object_schema(
         )
     )
 
-    assert results[0].status == "succeeded"
-    assert inspecting_agent.saw_tool_scaffold is True
+    assert results[0].status == "failed"
+    assert "baseline mismatch" in results[0].error
+    assert inspecting_agent.saw_tool_scaffold is False
     integration = integration_worktree_path(run_dir / "wt", "explainer")
-    tool_text = (integration / "tools" / "dom_runtime_validator.py").read_text(encoding="utf-8")
-    manifest = yaml.safe_load((integration / "tools" / "tools.yaml").read_text(encoding="utf-8"))
-    assert "'type': 'object'" in tool_text
-    assert {"file": "tools/dom_runtime_validator.py", "class_name": "DomRuntimeValidator"} in manifest["tools"]
+    assert not (integration / "tools" / "dom_runtime_validator.py").exists()
 
 
 def test_member_executor_rejects_dangerous_tool_before_merge(
@@ -7000,3 +7032,33 @@ def test_skill_safety_scan_rejects_dangerous_script(tmp_path: Path) -> None:
 
     assert scan["status"] == "failed"
     assert any("dangerous import" in error for error in scan["errors"])
+
+
+def test_member_executor_does_not_accept_expanded_write_scope_from_agent(
+    tmp_path: Path,
+    two_role_harness_dir: Path,
+) -> None:
+    class ExpandedScopeExecutor:
+        async def execute_action(self, action_worktree, action, **kwargs):
+            (action_worktree / "identity.md").write_text("updated identity\n")
+            (action_worktree / "soul.md").write_text("unrelated change\n")
+            return {
+                "status": "succeeded", "declared_write_paths": ["identity.md", "soul.md"],
+            }
+
+    target = MemberOptimizationTarget(
+        role="explainer", harness_ref_path=str(two_role_harness_dir / "explainer"),
+        attributed_issue_ids=["issue_001"], confidence=0.9,
+    )
+    action = MemberOptimizationAction(
+        action_id="scope_expansion", role="explainer", action_group="prompt", operation="modify",
+        action_type="prompt_update", target_path="identity.md", declared_write_paths=["identity.md"],
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="scope_expansion", targets=[target], actions=[action], action_waves=[[action.action_id]],
+    )
+    results = asyncio.run(MemberActionExecutor(executor_agent=ExpandedScopeExecutor()).execute(
+        plan=plan, output_dir=str(tmp_path / "member_optimization_001"), model_config_ref="unused",
+    ))
+    assert results[0].status == "failed"
+    assert "outside declared_write_paths" in results[0].error

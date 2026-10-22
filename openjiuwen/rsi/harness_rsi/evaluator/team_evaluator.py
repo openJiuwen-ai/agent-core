@@ -283,11 +283,18 @@ def _evaluation_input_fingerprint(
         "team_skill": _path_identity(team_skill_ref_path),
         "harness_refs": _path_identity(harness_refs_path),
     }
-    if evaluator_config and evaluator_config.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge":
-        from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import judge_protocol_identity
+    packages = {}
+    if harness_refs_path:
+        for role, package_path in _load_harness_refs(harness_refs_path).items():
+            package = Path(package_path).expanduser().resolve()
+            packages[role] = _path_identity(str(package.parent if package.is_file() else package))
+    payload["harness_packages"] = packages
+    if evaluator_config:
         from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import _material_identity
 
         payload["evaluator"] = _material_identity(evaluator_config, Path.cwd())
+    if evaluator_config and evaluator_config.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge":
+        from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import judge_protocol_identity
         payload["llm_judge_score_contract"] = "threshold_binary_v1"
         payload["judge_protocol"] = judge_protocol_identity()
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")

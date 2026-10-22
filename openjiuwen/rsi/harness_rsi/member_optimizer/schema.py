@@ -41,6 +41,7 @@ class OptimizationSurface(str, Enum):
     """Concrete ExpertHarness surface selected for the optimization action."""
 
     NONE = "none"
+    CONFIG = "config"
     PROMPT_SECTION = "prompt_section"
     IDENTITY = "identity"
     SOUL = "soul"

@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-09-15 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联 feature | `F_04_authoritative-terminal-stream.md` |
 
 ## 范围 / 边界
@@ -174,3 +174,18 @@ def loop_coordinator(self) -> Optional[LoopCoordinator]
 - `_load_goal_record_locked` / `_promote_loop_follow_ups` 的 goal 语义见 `S_11`。
 - `switch_mode` / plan 文件路径解析最终落到 `tools/agent_mode_tools.py` 的
   `resolve_plan_file_path` / `get_or_create_plan_slug`，见 `S_05`。
+
+## 迭代耗尽与调用日志
+
+1. 单轮宿主上限在外层 BEFORE_INVOKE 前冻结，经私有调用参数传入内层 ReAct，
+   并与内层配置取较小值。设置硬上限时固定走单轮路线，回调不能通过切换模式扩大预算。
+2. final_answer 复用已有上下文，工具循环耗尽后至多调用一次无工具模型收尾；
+   此调用禁用上下文恢复和 rail 追加重试。收尾失败保持未完成状态，取消继续传播。
+3. 结果保留 termination_reason、iterations_used、truncated_by_max_iterations 和
+   finalization_attempted/finalization_succeeded。回调覆盖答复也不能抹掉这些事实；
+   只有经过检查的 AssistantMessage 才确认 finalization_succeeded。
+4. invocation_log_dir 使用 ContextVar 路由当前调用摘要，不修改进程全局日志路径。
+   核心模块日志与原有全局日志并存；目录创建失败报告缺失，不能伪造采集成功。
+5. stream 由一个独立 producer Task 完成生命周期，使用大小为 8 的队列传递中间事件。
+   消费者同时观察队列和 producer 完成；取消/关闭时取消并等待 producer，避免空队列
+   或满队列下等待终端通知的死锁。日志上下文不会跨异步生成器的消费者 Task 恢复。

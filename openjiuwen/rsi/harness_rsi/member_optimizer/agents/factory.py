@@ -7,8 +7,9 @@ from __future__ import annotations
 import json
 import os
 import re
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 import yaml
 
@@ -21,7 +22,12 @@ from openjiuwen.core.sys_operation import (
     SysOperationCard,
 )
 from openjiuwen.harness.factory import create_deep_agent
-from openjiuwen.harness.tools.filesystem import EditFileTool, ReadFileTool, WriteFileTool
+from openjiuwen.core.foundation.tool import Tool
+from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.rg_binary import resolve_rg_binary
+from openjiuwen.harness.tools.filesystem import (
+    EditFileTool, GlobTool, GrepTool, ListDirTool, ReadFileTool, WriteFileTool,
+)
 from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
     filter_action_definitions,
 )
@@ -51,6 +57,26 @@ _PROMPTS_DIR = _PACKAGE_DIR / "prompts"
 _SKILLS_DIR = _PACKAGE_DIR / "skills"
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)}")
 _PLACEHOLDER_RE = re.compile(r"\{\{([A-Z0-9_]+)\}\}")
+
+
+@asynccontextmanager
+async def optimizer_agent_resources(agent: Any) -> AsyncIterator[Any]:
+    """Release this invocation's native resources without stopping shared Runner."""
+    operation = getattr(getattr(agent, "deep_config", None), "sys_operation", None)
+    operation_id = getattr(operation, "id", None)
+    try:
+        yield agent
+    finally:
+        try:
+            cleanup = getattr(agent, "cleanup_task_resources", None)
+            if callable(cleanup):
+                await cleanup()
+        finally:
+            manager = getattr(agent, "ability_manager", None)
+            if manager is not None:
+                manager.teardown_tools()
+            if operation_id:
+                Runner.resource_mgr.remove_sys_operation(operation_id)
 
 
 def load_member_optimizer_model(model_config_ref: str) -> Model:
@@ -138,7 +164,9 @@ def create_member_optimizer_agent(
         workspace=str(workspace),
         sys_operation=sys_operation,
         enable_task_loop=False,
+        enable_skill_discovery=profile.key not in {ACTION_EXECUTION.key, VERIFICATION_REPAIR.key},
         max_iterations=profile.max_iterations,
+        invocation_log_dir=str(Path(workspace).resolve().parent / "agent_logs" / Path(workspace).name),
         language="en",
         restrict_to_work_dir=True,
         auto_create_workspace=True,
@@ -213,8 +241,13 @@ def create_action_execution_agent(
     agent_skills_dirs: list[str] | None = None,
     extra_rails: list[Any] | None = None,
     enable_skill_creator: bool = True,
+    declared_write_paths: list[str] | None = None,
 ) -> Any:
     """Create the member action execution Member Optimizer Agent."""
+    tools, sys_operation = _build_file_tools_for_workspace(
+        workspace=workspace, agent_name=ACTION_EXECUTION.agent_name,
+        declared_write_paths=declared_write_paths,
+    )
     return create_member_optimizer_agent(
         profile=ACTION_EXECUTION,
         model_config_ref=model_config_ref,
@@ -222,8 +255,8 @@ def create_action_execution_agent(
         agent_skills_dirs=agent_skills_dirs,
         extra_rails=extra_rails,
         enabled_skills_override=(ACTION_EXECUTION.enabled_skills if enable_skill_creator else ()),
-        tools=None,
-        sys_operation=None,
+        tools=tools,
+        sys_operation=sys_operation,
     )
 
 
@@ -235,8 +268,13 @@ def create_verification_repair_agent(
     extra_rails: list[Any] | None = None,
 ) -> Any:
     """Create the verification repair Member Optimizer Agent."""
+    tools, sys_operation = _build_file_tools_for_workspace(
+        workspace=workspace, agent_name=VERIFICATION_REPAIR.agent_name, repair=True,
+    )
     return create_member_optimizer_agent(
         profile=VERIFICATION_REPAIR,
+        tools=tools,
+        sys_operation=sys_operation,
         model_config_ref=model_config_ref,
         workspace=workspace,
         agent_skills_dirs=agent_skills_dirs,
@@ -298,14 +336,21 @@ def _build_file_tools_for_workspace(
     workspace: str | Path,
     agent_name: str,
     sandbox_roots: list[str | Path] | None = None,
+    declared_write_paths: list[str] | None = None,
+    repair: bool = False,
 ) -> tuple[list[Any], Any]:
     workspace_path = Path(workspace).expanduser().resolve()
-    resolved_sandbox_roots = [str(Path(root).expanduser().resolve()) for root in (sandbox_roots or [workspace_path])]
+    read_roots = [workspace_path, *supported_host_read_roots()]
+    resolved_sandbox_roots = [str(Path(root).expanduser().resolve()) for root in (sandbox_roots or read_roots)]
+    operation_roots = list(resolved_sandbox_roots)
+    rg_binary = resolve_rg_binary()
+    if rg_binary:
+        operation_roots.append(str(Path(rg_binary).resolve()))
     sysop_card = SysOperationCard(
         id=f"{agent_name}_{workspace_path.name}_{os.urandom(4).hex()}",
         mode=OperationMode.LOCAL,
         work_config=LocalWorkConfig(
-            sandbox_root=resolved_sandbox_roots,
+            sandbox_root=operation_roots,
             restrict_to_sandbox=True,
             shell_allowlist=[],
         ),
@@ -316,11 +361,106 @@ def _build_file_tools_for_workspace(
     sys_operation = Runner.resource_mgr.get_sys_operation(sysop_card.id)
     if sys_operation is None:
         raise RuntimeError(f"action executor sys_operation not found: {sysop_card.id}")
-    return [
+    native_tools = [
         ReadFileTool(sys_operation, language="en", agent_id=sysop_card.id),
+        GlobTool(sys_operation, language="en", agent_id=sysop_card.id),
+        GrepTool(sys_operation, language="en", agent_id=sysop_card.id),
+        ListDirTool(sys_operation, language="en", agent_id=sysop_card.id),
         WriteFileTool(sys_operation, language="en", agent_id=sysop_card.id),
         EditFileTool(sys_operation, language="en", agent_id=sysop_card.id),
+    ]
+    return [
+        _ScopedPackageTool(
+            tool, workspace_path, [Path(root) for root in resolved_sandbox_roots],
+            declared_write_paths or [], repair=repair,
+        )
+        for tool in native_tools
     ], sys_operation
+
+
+_PROTECTED_PACKAGE_NAMES = {
+    "plan.yaml", "execution_results.json", "verification.json", "fix_result.json",
+    "current_harness_refs.yaml", "member_optimization_ref.yaml",
+}
+
+
+def package_write_allowed(path: str, declared_paths: list[str] | None = None, *, repair: bool = False) -> bool:
+    """Check package-relative mutation scope, independently of model claims."""
+    candidate = Path(path)
+    if candidate.is_absolute() or not candidate.parts or ".." in candidate.parts:
+        return False
+    if any(part.startswith(".") or part in _PROTECTED_PACKAGE_NAMES for part in candidate.parts):
+        return False
+    if candidate.parts[0] in {"current_harnesses", "evaluation", "evaluations", "audit", "checkpoints"}:
+        return False
+    if repair:
+        return (
+            candidate.parts[0] in {"prompt_sections", "skills", "tools", "rails", "subagents"}
+            or candidate.as_posix() in {"harness.yaml", "identity.md", "soul.md"}
+            or candidate.suffix.lower() in {".yaml", ".yml", ".json", ".py"}
+        )
+    return any(
+        candidate == Path(declared) or Path(declared) in candidate.parents
+        for declared in (declared_paths or [])
+        if not Path(declared).is_absolute() and ".." not in Path(declared).parts
+    )
+
+
+def supported_host_read_roots() -> list[Path]:
+    """Expose implementation contracts as read-only context to package authors."""
+    package = Path(__file__).resolve().parents[4]
+    return [
+        package / "core" / "single_agent" / "rail",
+        package / "core" / "foundation" / "tool",
+        package / "harness" / "rails",
+        package / "harness" / "docs",
+    ]
+
+
+class _ScopedPackageTool(Tool):
+    """Keep native filesystem semantics while enforcing the candidate boundary."""
+
+    def __init__(self, tool, workspace: Path, read_roots: list[Path], declared_paths: list[str], *, repair: bool):
+        super().__init__(tool.card)
+        self._tool = tool
+        self._workspace = workspace
+        self._read_roots = read_roots
+        self._declared_paths = declared_paths
+        self._repair = repair
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        if not isinstance(inputs, dict):
+            return ToolOutput(success=False, error="tool inputs must be an object")
+        writing = isinstance(self._tool, (WriteFileTool, EditFileTool))
+        key = "file_path" if isinstance(self._tool, (ReadFileTool, WriteFileTool, EditFileTool)) else "path"
+        value = inputs.get(key, ".")
+        if not isinstance(value, str) or not value.strip():
+            return ToolOutput(success=False, error=f"{key} must be a path string")
+        try:
+            raw_path = Path(value).expanduser()
+            path = (raw_path if raw_path.is_absolute() else self._workspace / raw_path).resolve()
+            if writing:
+                relative = path.relative_to(self._workspace)
+                if not package_write_allowed(relative.as_posix(), self._declared_paths, repair=self._repair):
+                    raise ValueError("write is outside the permitted package paths")
+                lexical = raw_path if raw_path.is_absolute() else self._workspace / raw_path
+                if any(parent.is_symlink() for parent in [lexical, *lexical.parents] if parent != self._workspace):
+                    raise ValueError("writes through symlinks are forbidden")
+            elif not any(path.is_relative_to(root) for root in self._read_roots):
+                raise ValueError("read is outside the package and supported host contracts")
+            if isinstance(self._tool, GlobTool):
+                pattern = str(inputs.get("pattern", ""))
+                if Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+                    raise ValueError("glob pattern must stay within the search path")
+        except (OSError, ValueError) as exc:
+            return ToolOutput(success=False, error=str(exc))
+        return await self._tool.invoke({**inputs, key: str(path)}, **kwargs)
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        return self._tool.render_for_llm(output)
+
+    async def stream(self, inputs: dict[str, Any], **kwargs):
+        yield await self.invoke(inputs, **kwargs)
 
 
 def _build_skill_rail(
@@ -350,6 +490,7 @@ def _build_skill_rail(
         skills_dir=skills_dir,
         skill_mode="all",
         enabled_skills=enabled_skills,
+        include_tools=False,
     )
 
 

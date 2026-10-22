@@ -28,7 +28,7 @@ def _config(**kwargs):
     return EvaluatorConfig(evaluation_method="llm_as_judge", judge_model_config_ref="mock-model.yaml", **kwargs)
 
 
-def test_judge_clears_materialized_model_output_limit(tmp_path, monkeypatch):
+def test_judge_preserves_materialized_model_output_limit(tmp_path, monkeypatch):
     from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
     from openjiuwen.rsi.harness_rsi.evaluator.judger import judge_runtime
 
@@ -39,7 +39,7 @@ def test_judge_clears_materialized_model_output_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(TeamModelConfig, "build", lambda self: self)
     monkeypatch.setattr(judge_runtime, "create_deep_agent", lambda **kwargs: kwargs)
     result = judge_runtime.build_judge_agent(_config(), tmp_path, tmp_path / "tools.jsonl")
-    assert result["model"].model_config.max_tokens is None
+    assert result["model"].model_config.max_tokens == 100000
 
 
 def _case():
@@ -392,7 +392,7 @@ async def test_judge_failures_do_not_become_zero_score_tasks(tmp_path, monkeypat
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", call)
     repair = AsyncMock(return_value="not JSON")
     monkeypatch.setattr(llm_as_judge, "repair_judge_json", repair)
-    runner = CaseRunner(backend=_Backend("done"), judger=LlmAsJudgeJudger(_config()))
+    runner = CaseRunner(backend=_Backend("done"), judger=LlmAsJudgeJudger(_config(judge_max_retries=0)))
     with pytest.raises(EvaluationInfrastructureError):
         await runner.execute(case=_case(), output_dir=str(tmp_path / "case"), team_skill_ref_path="")
     assert json.loads((tmp_path / "case" / "evaluation_error.json").read_text())["score"] is None
@@ -483,7 +483,7 @@ async def test_final_validation_error_remains_actionable(tmp_path, monkeypatch):
     call = AsyncMock(return_value=json.dumps(output))
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", call)
     with pytest.raises(EvaluationInfrastructureError, match="must score every supplied ID"):
-        await LlmAsJudgeJudger(_config()).judge(
+        await LlmAsJudgeJudger(_config(judge_max_retries=0)).judge(
             case=_case(), execution_result=CaseExecutionResult("done", "passed"), output_dir=str(tmp_path)
         )
     assert call.await_count == 1
@@ -548,7 +548,7 @@ def test_read_only_rail_does_not_register_execution_or_write_tools():
     )
     rail = JudgeReadOnlyRail()
     rail.init(agent)
-    assert set(added) == {"ReadFileTool", "ListDirTool", "GlobTool", "GrepTool"}
+    assert set(added) == {"ReadFileTool", "ListDirTool", "GlobTool"}
 
 
 def test_judge_model_or_threshold_changes_invalidate_reused_evaluations(tmp_path):

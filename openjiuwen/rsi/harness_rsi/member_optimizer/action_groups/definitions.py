@@ -17,6 +17,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups.policy import (
 from openjiuwen.rsi.harness_rsi.schema import ActionDefinition
 
 _BUILTIN_GROUP_OPERATIONS: dict[str, tuple[str, ...]] = {
+    "config": ("add", "modify", "remove"),
     "prompt": ("add", "modify", "remove"),
     "rail": ("add", "modify", "remove"),
     "skill": ("add", "modify", "remove"),

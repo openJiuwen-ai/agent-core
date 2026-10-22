@@ -85,3 +85,15 @@ depends_on, run_if (dependency_succeeded | dependency_failed | always),
 allowed_skills, allowed_tools, candidate_query, install_ref, expected_effect,
 risk_notes, constraints (including surface_choice_reason).
 Return an empty actions list if evidence does not support an executable intervention.
+
+## Restricted runtime configuration
+
+When config is offered, a budget/termination defect can target runtime.yaml.
+Only max_iterations and on_max_iterations are editable. Inspect the effective
+runtime evidence and host ceiling before choosing a finite value. The host
+ceiling, models, credentials, dataset, and graders are immutable. Treat budget
+exhaustion as a recorded mechanism; distinguish normal progress, repeated
+failures, and absent finalization before proposing more iterations. Adding a
+runtime.yaml to an old package is config/add; modifying an existing one is
+config/modify. Declare only runtime.yaml. A config change is evaluated with its
+actual runtime cost and must survive the ordinary full regression gates.

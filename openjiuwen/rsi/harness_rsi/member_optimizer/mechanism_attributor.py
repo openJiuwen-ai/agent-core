@@ -15,6 +15,8 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.rsi.harness_rsi.feedback import OutputRepairConfig
+
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     create_mechanism_attribution_agent,
 )
@@ -58,6 +60,9 @@ def _validate_mechanism_attribution_output(
         errors.append("attributions must be a list")
         return errors
     for i, attr in enumerate(attributions):
+        if not isinstance(attr, dict):
+            errors.append(f"attributions[{i}] must be an object")
+            continue
         if "issue_id" not in attr:
             errors.append(f"attribution[{i}]: missing issue_id")
         mt = attr.get("mechanism_type", "")
@@ -95,9 +100,11 @@ class MechanismAttributorAgent:
         attribution_retry_limit: int = 2,
         workspace: str | Path | None = None,
         agent_skills_dirs: list[str] | None = None,
+        output_repair: OutputRepairConfig | None = None,
     ) -> None:
         self._model_config_ref = model_config_ref
         self._retry_limit = attribution_retry_limit
+        self._output_repair = output_repair or OutputRepairConfig()
         self._workspace = Path(workspace).expanduser().resolve() if workspace else None
         self._agent_skills_dirs = list(agent_skills_dirs or [])
 
@@ -128,6 +135,7 @@ class MechanismAttributorAgent:
             user_message=user_message,
             session_id=f"mech_attr_{role}",
             retry_limit=self._retry_limit,
+            output_repair=self._output_repair,
             parse_response=parse_yaml_or_json_object_response,
             validate_response=lambda data: _validate_mechanism_attribution_output(
                 data,
@@ -331,7 +339,9 @@ class MechanismAttributor:
         self,
         mechanism_attributor_agent: MechanismAttributorAgent | None = None,
         max_concurrent_roles: int = 2,
+        output_repair: OutputRepairConfig | None = None,
     ) -> None:
+        self._output_repair = output_repair or OutputRepairConfig()
         self._agent = mechanism_attributor_agent
         self._semaphore = asyncio.Semaphore(max_concurrent_roles)
 
@@ -349,6 +359,7 @@ class MechanismAttributor:
             attribution_retry_limit=attribution_retry_limit,
             workspace=agent_workspace,
             agent_skills_dirs=agent_skills_dirs,
+            output_repair=self._output_repair,
         )
 
     async def attribute(  # pylint: disable=huawei-too-many-arguments

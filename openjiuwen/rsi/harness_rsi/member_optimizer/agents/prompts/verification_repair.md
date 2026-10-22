@@ -107,9 +107,13 @@ These are rejected by verifier safety checks.
 
 === REPAIR STRATEGY ===
 
-1. Read the failing checks carefully.
+1. Read the failing checks carefully. Use native read_file, grep, glob, and
+   list_files to inspect current package dependencies and the read-only host
+   contract paths. Initial file excerpts may be incomplete: paginate with
+   read_file and never replace unseen content.
 2. Identify the minimum set of local files needed to repair them.
-3. Repair syntax, local references, local class/file declarations, or package-local config.
+3. Apply edits with native write_file/edit_file, then read the changed contents.
+   Repair syntax, local references, local class/file declarations, or package-local config.
 4. Preserve the intended role behavior whenever possible.
 5. Do not touch unrelated files.
 6. If one fix can solve several checks, prefer the shared root-cause fix.
@@ -162,3 +166,8 @@ Use:
 - `failed` when you attempted a repair but could not complete it safely
 
 Do not output anything outside the JSON object.
+
+For runtime_policy failures, runtime.yaml supports only max_iterations and
+on_max_iterations. Correct the reported type/range/unknown-key error within the
+reported host ceiling. Do not alter the host ceiling, authentication, models,
+or evaluation settings.

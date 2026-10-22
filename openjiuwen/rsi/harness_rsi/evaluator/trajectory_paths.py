@@ -50,8 +50,10 @@ class RoleFileTrajectoryStore(FileTrajectoryStore):
     and truncated tool payloads.
     """
 
-    def __init__(self, base_dir: Path, role_name: str) -> None:
+    def __init__(self, base_dir: Path, role_name: str, *, merge_invocations: bool = False) -> None:
         self.role_name = _safe_role_file_stem(role_name)
+        self._merge_invocations = merge_invocations
+        self._execution_steps: list[dict[str, Any]] = []
         super().__init__(base_dir)
 
     def _get_file_path(self, version: str | None) -> Path:
@@ -62,6 +64,9 @@ class RoleFileTrajectoryStore(FileTrajectoryStore):
         file_path = self._get_file_path(version)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         data = _bounded_trajectory_dict(_role_trace_dict(trajectory))
+        if self._merge_invocations:
+            self._execution_steps.extend(data["steps"])
+            data["steps"] = list(self._execution_steps)
         with open(_filesystem_path(file_path), "w", encoding="utf-8") as file:
             file.write(json.dumps(data, ensure_ascii=False) + "\n")
 
@@ -86,9 +91,11 @@ def _role_trace_dict(trajectory: Trajectory) -> dict[str, Any]:
             tool_call = read_tool_call(span)
             detail = {
                 "tool_name": tool_call.get("name", ""),
-                "call_args": tool_call.get("input", {}),
-                "call_result": tool_call.get("output", {}),
             }
+            if "input" in tool_call:
+                detail["call_args"] = tool_call["input"]
+            if "output" in tool_call:
+                detail["call_result"] = tool_call["output"]
             error = tool_call.get("error")
         else:
             continue
@@ -201,3 +208,77 @@ def _truncate_text(value: Any, max_chars: int) -> Any:
     if not isinstance(value, str) or len(value) <= max_chars:
         return value
     return f"{value[:max_chars]}...[truncated {len(value) - max_chars} chars]"
+
+
+def role_execution_evidence(
+    trace_root: Path,
+    role_name: str,
+    *,
+    root_recording: bool,
+    capture_issues: set[str] | None = None,
+    expected_model_calls: int | None = None,
+    expected_tool_calls: int | None = None,
+) -> dict[str, Any]:
+    """Report whether a native archive supports negative capability findings.
+
+    Missing or unreadable evidence has unknown call counts. Bounded payloads
+    preserve tool identities, but cannot establish every temporal edit boundary.
+    """
+    path = trace_root / f"{_safe_role_file_stem(role_name)}.jsonl"
+    reasons = set(capture_issues or ())
+    if not root_recording:
+        reasons.add("run_root_not_recording")
+    evidence: dict[str, Any] = {
+        "status": "incomplete", "reasons": [], "role_trace_path": str(path),
+        "llm_call_count": None, "tool_call_count": None, "timing_complete": False,
+    }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        steps = payload["steps"]
+        if not isinstance(steps, list) or any(
+            not isinstance(step, dict)
+            or step.get("kind") not in {"llm", "tool"}
+            or not isinstance(step.get("detail"), dict)
+            for step in steps
+        ):
+            raise ValueError("invalid steps")
+    except FileNotFoundError:
+        reasons.add("missing_role_archive")
+    except (OSError, ValueError, KeyError, TypeError):
+        reasons.add("invalid_role_archive")
+    else:
+        model_calls = sum(step.get("kind") == "llm" for step in steps)
+        tool_calls = sum(step.get("kind") == "tool" for step in steps)
+        evidence.update(llm_call_count=model_calls, tool_call_count=tool_calls)
+        if not model_calls:
+            reasons.add("missing_model_calls")
+        if expected_model_calls is not None and expected_model_calls != model_calls:
+            reasons.add("model_call_count_mismatch")
+        if expected_tool_calls is not None and expected_tool_calls != tool_calls:
+            reasons.add("tool_call_count_mismatch")
+        if any(
+            step.get("kind") == "tool" and step["detail"].get("call_result") is None
+            for step in steps
+        ):
+            reasons.add("missing_tool_result")
+        if any(
+            step.get("kind") == "tool" and step["detail"].get("call_args") is None
+            for step in steps
+        ):
+            reasons.add("missing_tool_arguments")
+        if any(
+            step.get("kind") == "tool"
+            and isinstance(step["detail"].get("call_args"), str)
+            and step["detail"]["call_args"].startswith("sha256:")
+            for step in steps
+        ):
+            reasons.add("redacted_tool_arguments")
+        payloads_truncated = any(
+            "...[truncated " in json.dumps(step.get("detail", {}).get("call_args"), ensure_ascii=False)
+            for step in steps if step.get("kind") == "tool"
+        )
+        evidence["payloads_truncated"] = payloads_truncated
+        evidence["timing_complete"] = not reasons and not payloads_truncated
+        evidence["status"] = "incomplete" if reasons else "complete"
+    evidence["reasons"] = sorted(reasons)
+    return evidence

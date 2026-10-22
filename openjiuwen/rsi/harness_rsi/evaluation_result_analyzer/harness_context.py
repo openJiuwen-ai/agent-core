@@ -137,7 +137,7 @@ def prepare_harness_context(
     destination.mkdir(exist_ok=False)
     result: dict[str, Any] = {
         "status": "available",
-        "scope": "package declarations, not activation evidence; runtime defaults and configuration are excluded",
+        "scope": "package declarations, not activation evidence; runtime_config.json holds effective runtime values",
         "roles": [],
     }
     for index, role in enumerate(roles, 1):
@@ -152,6 +152,27 @@ def prepare_harness_context(
             "skills": [],
             "tools": _resource_names(raw.get("tools")),
             "rails": _resource_names(raw.get("rails")),
+        }
+        runtime = _local_path(root, "runtime.yaml")
+        runtime_declaration: dict[str, Any] = {}
+        if runtime.is_file():
+            runtime_declaration = _read_mapping(root, runtime)
+        restricted_runtime = {
+            key: runtime_declaration[key]
+            for key in ("max_iterations", "on_max_iterations")
+            if key in runtime_declaration
+        }
+        runtime_target = out / "runtime.yaml"
+        runtime_target.write_text(yaml.safe_dump(restricted_runtime, sort_keys=False), encoding="utf-8")
+        row["runtime_config"] = {
+            "status": "declared" if runtime.is_file() else "inherited_defaults",
+            "path": runtime_target.relative_to(runtime_dir).as_posix(),
+            "declaration": restricted_runtime,
+            "editable_fields": ["max_iterations", "on_max_iterations"],
+            "allowed_on_max_iterations": ["error", "return_observations"],
+            "max_iterations_range": "positive integer <= effective runtime_config.json max_iterations_hard_limit",
+            "effective_values": "runtime_evidence/runtime_config.json; missing historical values are unknown",
+            "policy": "Only these two fields are editable. Host limits, models, authentication and scoring are read-only.",
         }
         for name in ("identity.md", "soul.md"):
             _local_path(root, name)

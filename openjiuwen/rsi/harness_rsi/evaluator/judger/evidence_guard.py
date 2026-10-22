@@ -9,7 +9,8 @@ from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import Model, ModelRequestConfig
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
-from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import with_rsi_output_budget
+from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import rsi_output_options, with_rsi_output_budget
+from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_diagnostics import record_judge_model_response
 
 TOOL_BYTES = 12000
 REQUEST_BYTES = 262144
@@ -145,19 +146,20 @@ class GuardedJudgeModel(Model):
         )
 
     def _prepare(self, messages, kwargs):
-        """Bound input evidence without sending an output cap to the provider."""
-        options = dict(kwargs)
-        options.pop("max_tokens", None)
-        options.pop("max_completion_tokens", None)
+        """Bound input evidence while preserving configured request options."""
+        options = rsi_output_options(kwargs)
         tools = options.get("tools")
         guarded = guard_messages(messages, tools)
         return guarded, options
 
     async def invoke(self, messages, **kwargs):
         messages, kwargs = self._prepare(messages, kwargs)
-        return await super().invoke(messages, **kwargs)
+        response = await super().invoke(messages, **kwargs)
+        record_judge_model_response(response)
+        return response
 
     async def stream(self, messages, **kwargs):
         messages, kwargs = self._prepare(messages, kwargs)
         async for chunk in super().stream(messages, **kwargs):
+            record_judge_model_response(chunk)
             yield chunk

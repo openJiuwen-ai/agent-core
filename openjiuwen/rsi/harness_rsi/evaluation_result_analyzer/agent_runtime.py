@@ -39,6 +39,10 @@ _DIAGNOSIS_BASH_DENY_PATTERNS = [
 class DiagnosisAgentExecutionError(RuntimeError):
     """The agent returned an execution failure rather than a diagnosis answer."""
 
+    def __init__(self, message: str, *, termination_reason: str = "") -> None:
+        super().__init__(message)
+        self.termination_reason = termination_reason
+
 
 class _DiagnosisBudgetRail(AgentRail):
     """Reserve the existing final turn for an answer, not another investigation."""
@@ -71,7 +75,9 @@ class DiagnosisAgentRuntime:
     def __init__(self, config: EvaluationResultAnalyzerConfig) -> None:
         self._config = config
 
-    async def build_agent(self, workspace: str, *, system_prompt: str) -> "BaseAgent":
+    async def build_agent(
+        self, workspace: str, *, system_prompt: str, invocation_log_dir: str | None = None,
+    ) -> "BaseAgent":
         """Build a bounded DeepAgent for one isolated evidence workspace."""
         ref_path = self._config.diagnosis_agent_model_config_ref or self._config.model_config_ref
         if not ref_path:
@@ -88,6 +94,7 @@ class DiagnosisAgentRuntime:
             ),
             system_prompt=system_prompt,
             workspace=workspace,
+            invocation_log_dir=invocation_log_dir,
             restrict_to_work_dir=True,
             max_iterations=self._config.diagnosis_agent_max_iterations,
             auto_create_workspace=False,
@@ -127,7 +134,7 @@ async def run_deep_agent_text(
             fallback = json.dumps(result, ensure_ascii=False)
             output = str(result.get("output", result.get("answer", fallback)))
             if result.get("result_type") == "error":
-                raise DiagnosisAgentExecutionError(output)
+                raise DiagnosisAgentExecutionError(output, termination_reason=str(result.get("termination_reason") or ""))
             return output
         return str(result)
 

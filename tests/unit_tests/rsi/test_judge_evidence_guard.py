@@ -39,7 +39,7 @@ def test_explicit_window_and_output_override():
     rows = [{'role': 'user', 'content': 'x' * 300000}]
     assert _prepare(rows, window=1048576)[1] == {}
     small = [{'role': 'user', 'content': 'x' * 190000}]
-    assert 'max_tokens' not in _prepare(small, {'max_tokens': 20000})[1]
+    assert _prepare(small, {'max_tokens': 20000})[1]['max_tokens'] == 20000
     assert _prepare(rows)[0] == rows
 
 
@@ -112,7 +112,7 @@ async def test_actual_model_boundary_forwards_adjusted_budget(tmp_path, monkeypa
     assert rows == messages
     assert isinstance(rows[1], UserMessage)
     assert 'max_tokens' not in options
-    assert model.model_config.max_tokens is None
+    assert model.model_config.max_tokens == 100000
 
 
 def test_byte_cap_and_immutable_input():

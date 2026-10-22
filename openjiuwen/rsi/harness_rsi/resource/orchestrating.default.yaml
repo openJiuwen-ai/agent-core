@@ -18,11 +18,20 @@ data_loader:
     - task_type
 
 evaluator:
+  output_repair:
+    max_attempts: 3
+    max_stagnant_attempts: 2
+  solver_max_iterations: 300
+  solver_on_max_iterations: error
+  solver_max_iterations_hard_limit: 300
   backend: single_harness
   evaluation_method: script-based
   transient_case_retry_limit: 2
 
 evaluation_result_analyzer:
+  output_repair:
+    max_attempts: 3
+    max_stagnant_attempts: 2
   diagnosis_agent_max_retries: 2
   diagnosis_agent_max_concurrency: 5
   diagnosis_agent_max_iterations: 20
@@ -31,7 +40,11 @@ evaluation_result_analyzer:
   output_filename: issues.yaml
 
 member_optimizer:
+  output_repair:
+    max_attempts: 3
+    max_stagnant_attempts: 2
   action_group_configs:
+    - config
     - prompt
     - skill
     - tool

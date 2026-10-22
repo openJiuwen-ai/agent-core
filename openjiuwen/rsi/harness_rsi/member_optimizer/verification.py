@@ -19,6 +19,9 @@ from typing import Any
 import yaml
 
 from openjiuwen.core.session.agent import Session
+from openjiuwen.rsi.harness_rsi.runtime_policy import read_runtime_policy
+from openjiuwen.rsi.harness_rsi.feedback import FeedbackTracker, OutputRepairConfig
+from openjiuwen.rsi.harness_rsi.model_call import is_retryable_model_call_failure
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.resources import (
     find_plugin_manifest,
@@ -31,6 +34,9 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     create_verification_repair_agent,
+    optimizer_agent_resources,
+    package_write_allowed,
+    supported_host_read_roots,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.output import (
     extract_agent_text,
@@ -52,6 +58,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.worktree_coordinator import (
 )
 
 _REPAIRABLE_CHECK_PREFIXES = (
+    "runtime_policy:",
     "integration_dir:",
     "yaml_parse:",
     "json_parse:",
@@ -208,9 +215,18 @@ def _check_rail_runtime_contract(role: str, root: Path, target: str) -> Verifica
             )
         if "_next_model_tool_choice" in reads | writes:
             errors.append("Host does not consume _next_model_tool_choice; use supported callback control APIs")
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            owner = node.func.value
+            if (node.func.attr == "get" and isinstance(owner, ast.Attribute) and owner.attr == "inputs"
+                    and isinstance(owner.value, ast.Name) and owner.value.id == "ctx"):
+                errors.append("Hook inputs are typed dataclasses; use ctx.inputs.response/react_iteration, not ctx.inputs.get")
         for hook in ast.walk(tree):
             if not isinstance(hook, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
+            if hook.name in {"before_task_iteration", "after_task_iteration"}:
+                errors.append(f"{hook.name} does not run with solver enable_task_loop=False; use model/tool hooks")
             if hook.name != "after_model_call":
                 continue
             finish_calls = []
@@ -634,6 +650,7 @@ def _validate_role_integration_worktree(
     role: str,
     integration_path: Path,
     expected_tool_names: set[str] | None = None,
+    runtime_iteration_hard_limit: int = 300,
 ) -> list[VerificationCheck]:
     """Run all static checks on a role's integration worktree."""
     checks: list[VerificationCheck] = []
@@ -655,6 +672,12 @@ def _validate_role_integration_worktree(
         )
     )
 
+    try:
+        read_runtime_policy(integration_path, default_max_iterations=min(300, runtime_iteration_hard_limit),
+                            hard_limit=runtime_iteration_hard_limit)
+        checks.append(VerificationCheck(name=f"runtime_policy:{role}", status="passed"))
+    except (OSError, ValueError, yaml.YAMLError) as exc:
+        checks.append(VerificationCheck(name=f"runtime_policy:{role}", status="failed", error=str(exc)))
     checks.extend(_check_prompt_sections_manifest(role, integration_path))
     checks.extend(_check_skills_manifest(role, integration_path))
 
@@ -1077,6 +1100,34 @@ def _summarize_agent_response(response_text: str) -> str:
     return summary or "DeepAgent repair turn completed."
 
 
+def _snapshot_repair_files(root: Path) -> dict[str, bytes]:
+    """Capture package bytes for progress checks and protected-file rollback."""
+    if not root.is_dir():
+        return {}
+    return {
+        path.relative_to(root).as_posix(): path.read_bytes()
+        for path in root.rglob("*") if path.is_file() and not path.is_symlink()
+        and "__pycache__" not in path.parts and path.suffix != ".pyc"
+    }
+
+
+def _enforce_repair_scope(root: Path, before: dict[str, bytes], after: dict[str, bytes]) -> list[str]:
+    changed = [name for name in before.keys() | after.keys() if before.get(name) != after.get(name)]
+    runtime_names = {"AGENT.md", "SOUL.md", "IDENTITY.md", "USER.md", "HEARTBEAT.md"}
+    forbidden = [
+        name for name in changed if not package_write_allowed(name, repair=True)
+        and name not in runtime_names and not name.startswith(("context/", "memory/"))
+    ]
+    for name in forbidden:
+        path = root / name
+        if name in before:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(before[name])
+        else:
+            path.unlink(missing_ok=True)
+    return forbidden
+
+
 class HarnessRepairAgent:
     """DeepAgent adapter for repairing failed static verification checks."""
 
@@ -1111,6 +1162,7 @@ class HarnessRepairAgent:
                 "repairs": [asdict(repair)],
             }
 
+        before = _snapshot_repair_files(role_integration_worktree)
         agent = create_verification_repair_agent(
             model_config_ref=self._model_config_ref,
             workspace=role_integration_worktree,
@@ -1120,25 +1172,31 @@ class HarnessRepairAgent:
             session_id=f"member_verifier_repair_{role}",
             card=getattr(agent, "card", None) or AgentCard(name="member_verifier_repair"),
         )
-        response = await agent.invoke(
-            inputs={
-                "query": self._build_repair_user_message(
-                    role=role,
-                    role_integration_worktree=role_integration_worktree,
-                    failed_checks=repairable_checks,
-                )
-            },
-            session=session,
-        )
+        async with optimizer_agent_resources(agent):
+            response = await agent.invoke(
+                inputs={
+                    "query": self._build_repair_user_message(
+                        role=role,
+                        role_integration_worktree=role_integration_worktree,
+                        failed_checks=repairable_checks,
+                    )
+                },
+                session=session,
+            )
+        after = _snapshot_repair_files(role_integration_worktree)
+        forbidden = _enforce_repair_scope(role_integration_worktree, before, after)
+        changed = [name for name in before.keys() | after.keys() if before.get(name) != after.get(name)]
+        error = f"repair changed files outside permitted package scope: {forbidden}" if forbidden else ""
+        if not changed:
+            error = "repair made no file changes"
         repair = RepairItem(
-            role=role,
-            action="deepagent_repair",
+            role=role, action="deepagent_repair",
             description=_summarize_agent_response(extract_agent_text(response)),
-            status="attempted",
-            error="",
+            status="failed" if error else "attempted", error=error,
         )
         return {
-            "status": "attempted",
+            "status": repair.status,
+            "changed_files": changed,
             "repairs": [asdict(repair)],
         }
 
@@ -1156,6 +1214,7 @@ class HarnessRepairAgent:
             role_integration_worktree,
             failed_checks,
         )
+        host_roots = "\n".join(f"- {root}" for root in supported_host_read_roots())
         return f"""## Role Expert Harness Repair
 
 Role: {role}
@@ -1173,9 +1232,21 @@ current_harness_refs.yaml, or member_optimization_ref.yaml.
 
 {files_text}
 
-## Failed File Contents
+## Failed File Contents (initial excerpts)
 
 {failed_file_context}
+
+Read full current contents with read_file before replacing files; use offset/limit
+for long files and edit_file for localized edits. Use grep/glob/list_files to find
+package-local dependencies. The following host contract paths are read-only:
+
+{host_roots}
+
+AgentRail hook inputs are typed dataclasses, not dictionaries. Read rail/base.py
+for supported hooks and control callbacks. The solver has enable_task_loop=False;
+task-loop-only hooks will not run. Use ctx.inputs.react_iteration and
+ctx.config.max_iterations for budget decisions, not invented ctx.extra keys.
+Steering is advisory; request_model_continue is needed to require another model turn.
 
 ## Output
 
@@ -1191,8 +1262,12 @@ class HarnessChangeVerifier:
         self,
         repair_agent: HarnessRepairAgent | None = None,
         agent_skills_dirs: list[str] | None = None,
+        output_repair: OutputRepairConfig | None = None,
+        runtime_iteration_hard_limit: int = 300,
     ) -> None:
         self._repair_agent = repair_agent
+        self._output_repair = output_repair or OutputRepairConfig()
+        self._runtime_iteration_hard_limit = runtime_iteration_hard_limit
         self._agent_skills_dirs = list(agent_skills_dirs or [])
 
     def _get_repair_agent(self, model_config_ref: str) -> HarnessRepairAgent:
@@ -1255,6 +1330,7 @@ class HarnessChangeVerifier:
                     role,
                     integration_dir,
                     expected_tool_names_by_role.get(role, set()),
+                    self._runtime_iteration_hard_limit,
                 )
                 for action in plan.actions:
                     if action.role != role or action.action_group != "rail":
@@ -1359,7 +1435,8 @@ class HarnessChangeVerifier:
         role_attempts: dict[str, int] = {}
         remaining_failed_checks: dict[str, list[str]] = {}
         any_role_passed = False
-        max_attempts = max(stage_retry_limit, 0)
+        max_attempts = min(max(stage_retry_limit, 0), self._output_repair.max_attempts)
+        role_stop_reasons: dict[str, str] = {}
 
         for role, rvr in verification_result.role_results.items():
             if not rvr.repairable:
@@ -1375,9 +1452,11 @@ class HarnessChangeVerifier:
                 remaining_failed_checks[role] = [c.name for c in rvr.checks if c.status == "failed"]
                 continue
 
+            tracker = FeedbackTracker(self._output_repair, max_attempts=max_attempts)
             for _attempt in range(max_attempts):
                 role_attempts[role] = role_attempts.get(role, 0) + 1
                 try:
+                    before_attempt = _snapshot_repair_files(integration_dir)
                     repair_result = await agent.repair_role(
                         role_integration_worktree=integration_dir,
                         role=role,
@@ -1386,6 +1465,25 @@ class HarnessChangeVerifier:
                     repair_items = [
                         RepairItem(**r) if isinstance(r, dict) else r for r in repair_result.get("repairs", [])
                     ]
+
+                    after_attempt = _snapshot_repair_files(integration_dir)
+                    forbidden = _enforce_repair_scope(integration_dir, before_attempt, after_attempt)
+                    if forbidden:
+                        reason = f"repair changed files outside permitted package scope: {forbidden}"
+                        repairs.extend(replace(item, status="failed", error=reason) for item in repair_items)
+                        remaining_failed_checks[role] = [c.name for c in rvr.checks if c.status == "failed"]
+                        role_stop_reasons[role] = "scope_violation"
+                        break
+                    if before_attempt == after_attempt:
+                        reason = "repair made no file changes; use read/edit tools to address the failed checks"
+                        repairs.extend(replace(item, status="failed", error=reason) for item in repair_items)
+                        remaining_failed_checks[role] = [c.name for c in rvr.checks if c.status == "failed"]
+                        if not tracker.failed("no_file_changes", after_attempt):
+                            role_stop_reasons[role] = tracker.stop_reason
+                            break
+                        failed = [asdict(check) for check in failed_checks]
+                        failed.append({"name": failed[0]["name"], "status": "failed", "error": reason})
+                        continue
 
                     expected_tool_names = {
                         check.name.rsplit(":", 1)[-1]
@@ -1396,6 +1494,7 @@ class HarnessChangeVerifier:
                         role,
                         integration_dir,
                         expected_tool_names,
+                        self._runtime_iteration_hard_limit,
                     )
                     re_checks.extend(
                         _check_rail_runtime_contract(role, integration_dir, _failed_check_relative_path(check.name))
@@ -1409,6 +1508,7 @@ class HarnessChangeVerifier:
                             ]
                         )
                         any_role_passed = True
+                        role_stop_reasons[role] = "validated"
                         remaining_failed_checks.pop(role, None)
                         break
                     repairs.extend(
@@ -1423,6 +1523,10 @@ class HarnessChangeVerifier:
                     failed = [asdict(c) for c in failed_checks]
                     remaining_failed_checks[role] = [c.name for c in re_checks if c.status == "failed"]
                     if not failed:
+                        role_stop_reasons[role] = "unrepairable_checks"
+                        break
+                    if not tracker.failed(failed, after_attempt):
+                        role_stop_reasons[role] = tracker.stop_reason
                         break
                 except Exception as exc:
                     repair = RepairItem(
@@ -1434,6 +1538,11 @@ class HarnessChangeVerifier:
                     )
                     repairs.append(repair)
                     remaining_failed_checks[role] = [c.name for c in rvr.checks if c.status == "failed"]
+                    if is_retryable_model_call_failure(exc) and tracker.failed(str(exc), _snapshot_repair_files(integration_dir)):
+                        failed = [asdict(check) for check in failed_checks]
+                        failed.append({"name": failed[0]["name"], "status": "failed", "error": str(exc)})
+                        continue
+                    role_stop_reasons[role] = tracker.stop_reason or "non_retryable_failure"
                     break
 
         for role, rvr in verification_result.role_results.items():
@@ -1471,6 +1580,7 @@ class HarnessChangeVerifier:
             metadata={
                 "repair_attempts": len(repairs),
                 "role_attempts": role_attempts,
+                "role_stop_reasons": role_stop_reasons,
                 "remaining_failed_checks": remaining_failed_checks,
                 "any_role_repaired": any_role_passed,
                 "worktrees_dir": str(worktrees_dir),

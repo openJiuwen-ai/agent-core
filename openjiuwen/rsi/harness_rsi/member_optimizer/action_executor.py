@@ -22,6 +22,9 @@ from typing import Any
 import yaml
 
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.rsi.harness_rsi.feedback import FeedbackTracker, OutputRepairConfig
+from openjiuwen.rsi.harness_rsi.runtime_policy import read_runtime_policy
+from openjiuwen.rsi.harness_rsi.model_call import is_retryable_model_call_failure
 from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
     ALLOWED_EXECUTOR_TOOLS,
     build_action_waves,
@@ -32,7 +35,9 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     create_action_execution_agent,
-    load_member_optimizer_model,
+    optimizer_agent_resources,
+    package_write_allowed,
+    supported_host_read_roots,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.output import (
     extract_agent_text,
@@ -52,10 +57,6 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.worktree_coordinator import (
     MEMBER_WORKTREES_DIR_NAME,
     MemberWorktreeCoordinator,
 )
-from openjiuwen.rsi.harness_rsi.model_call import (
-    run_model_call_with_retries,
-)
-
 
 @dataclass(frozen=True)
 class _ActionExecutionContext:
@@ -75,11 +76,6 @@ class _SubwaveMergeRequest:
     results: list[MemberActionExecutionResult]
     integration_dir: Path
     run_dir: Path
-
-
-_ACTION_EXECUTION_PROMPT = (Path(__file__).resolve().parent / "agents" / "prompts" / "action_execution.md").read_text(
-    encoding="utf-8"
-)
 
 
 def _normalize_rel_path(path: str | Path) -> str:
@@ -355,25 +351,16 @@ def _is_runtime_workspace_metadata(path: str) -> bool:
     ) or bool(parts and parts[0] in {"context", "memory"} and len(parts) > 1)
 
 
-def _extract_model_response_text(response: Any) -> str:
-    content = getattr(response, "content", response)
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                parts.append(str(item.get("text", item.get("content", "")) or ""))
-            else:
-                parts.append(str(item))
-        return "".join(parts)
-    return str(content or "")
-
-
 def _action_resource_guidance(action: MemberOptimizationAction) -> str:
     class_name = str(action.constraints.get("class_name", "") or "").strip()
     target_path = _normalize_rel_path(action.target_path)
 
+    if action.action_group == "config":
+        return (
+            "Edit only runtime.yaml. Allowed keys: max_iterations (positive integer under the host ceiling), "
+            "on_max_iterations (error/return_observations). Preserve unrelated current values. "
+            "Do not add model, credentials, host ceiling, or grading settings."
+        )
     if action.action_group == "tool" and (action.operation == "add" or "add" in str(action.action_type or "")):
         class_hint = class_name or "a descriptive Tool subclass"
         return (
@@ -442,8 +429,8 @@ def _action_resource_guidance(action: MemberOptimizationAction) -> str:
             "pad the Skill for a fixed template or optimize for character count. Keep "
             "case ids, optimizer provenance, evaluator-only names, and manifest fields "
             "out of runtime instructions. Move optional long reference material into Skill "
-            "resources only when it is genuinely needed. Return the complete canonical "
-            "`SKILL.md` as one `file_writes` item; the executor updates "
+            "resources only when it is genuinely needed. Write the canonical "
+            "`SKILL.md` using native file tools; the executor updates "
             "`skills/skills.yaml` after validating it. Do not clone, "
             "search, or install external resources for skill/add."
         )
@@ -697,9 +684,13 @@ class MemberActionExecutorAgent:
         self,
         model_config_ref: str,
         agent_skills_dirs: list[str] | None = None,
+        output_repair: OutputRepairConfig | None = None,
+        runtime_iteration_hard_limit: int = 300,
     ) -> None:
         self._model_config_ref = model_config_ref
         self._agent_skills_dirs = list(agent_skills_dirs or [])
+        self._output_repair = output_repair or OutputRepairConfig()
+        self._runtime_iteration_hard_limit = runtime_iteration_hard_limit
 
     async def execute_action(
         self,
@@ -715,139 +706,98 @@ class MemberActionExecutorAgent:
         """
         from openjiuwen.core.session.agent import Session
 
+        declared_paths = resolve_declared_paths(action)
+        target = (action_worktree / action.target_path).resolve()
+        if action.operation == "modify" and not target.exists():
+            return {
+                "status": "failed", "declared_write_paths": declared_paths,
+                "error": f"modify baseline mismatch: target does not exist: {action.target_path}",
+            }
+        before = _snapshot_files(action_worktree)
         user_message = self._build_user_message(
-            action,
-            plan_summary,
-            allowed_skills,
-            allowed_tools,
+            action, plan_summary, allowed_skills, allowed_tools,
             action_worktree=action_worktree,
         )
-        declared_paths = resolve_declared_paths(action)
-
+        user_message += f"\nHost runtime iteration ceiling: {self._runtime_iteration_hard_limit}; runtime.yaml cannot change it."
         message = user_message
         last_response_text = ""
         last_error = ""
-        # Skill and Tool artifacts are authored in one model call. They do not
-        # need a ReAct agent or a meta-skill; the immutable hypothesis already
-        # contains the semantic contract and the executor owns validation.
-        direct_model_execution = action.action_group in {"skill", "tool"}
-        agent = None
-        if not direct_model_execution:
-            agent = create_action_execution_agent(
-                model_config_ref=self._model_config_ref,
-                workspace=action_worktree,
-                agent_skills_dirs=self._agent_skills_dirs,
-                enable_skill_creator=False,
-            )
-        for attempt in range(3):
-            try:
-                if direct_model_execution:
-                    response_text = await (
-                        self._invoke_direct_skill_action(message)
-                        if action.action_group == "skill"
-                        else self._invoke_direct_tool_action(message)
-                    )
-                else:
+        tracker = FeedbackTracker(self._output_repair)
+        agent = create_action_execution_agent(
+            model_config_ref=self._model_config_ref,
+            workspace=action_worktree,
+            agent_skills_dirs=self._agent_skills_dirs,
+            enable_skill_creator=False,
+            declared_write_paths=declared_paths,
+        )
+        async with optimizer_agent_resources(agent):
+            for attempt in range(tracker.max_attempts):
+                try:
                     session = Session(
                         session_id=f"action_exec_{action.action_id}_{attempt}",
                         card=getattr(agent, "card", None) or AgentCard(name="member_action_executor"),
                     )
-                    response = await agent.invoke(
-                        inputs={"query": message},
-                        session=session,
-                    )
+                    response = await agent.invoke(inputs={"query": message}, session=session)
                     response_text = extract_agent_text(response)
-                last_response_text = response_text
-                parsed = self._parse_action_response(response_text)
-                status = str(parsed.get("status", "failed"))
-                errors = [str(error) for error in parsed.get("errors", []) if str(error).strip()]
-                if status != "succeeded":
+                    last_response_text = response_text
+                    parsed = self._parse_action_response(response_text)
+                    errors = [str(error) for error in parsed.get("errors", []) if str(error).strip()]
+                    if str(parsed.get("status", "failed")) != "succeeded":
+                        raise ValueError("; ".join(errors) or "agent reported failed status; inspect and correct the action")
+                    # Accept legacy payloads for compatibility; native tool writes are primary.
+                    if parsed.get("file_writes"):
+                        self._apply_structured_file_writes(
+                            action_worktree=action_worktree, action=action,
+                            declared_paths=declared_paths, file_writes=parsed["file_writes"],
+                        )
+                    changed = _changed_files(before, _snapshot_files(action_worktree))
+                    outside = [
+                        path for path in changed
+                        if not package_write_allowed(path, declared_paths) and not _is_runtime_workspace_metadata(path)
+                    ]
+                    if outside:
+                        raise ValueError(f"changed files outside declared_write_paths: {outside}")
+                    written_files = [path for path in changed if package_write_allowed(path, declared_paths)]
+                    if not written_files:
+                        raise ValueError("agent reported success but no declared_write_paths changed")
+                    written_files = self._sync_action_registries(
+                        action_worktree=action_worktree, action=action,
+                        declared_paths=declared_paths, written_files=written_files,
+                    )
+                    validation_errors = _validate_generated_action_resources(
+                        action_worktree, action, written_files, self._runtime_iteration_hard_limit,
+                    )
+                    if validation_errors:
+                        raise ValueError("; ".join(validation_errors))
                     return {
-                        "status": "failed",
-                        "declared_write_paths": declared_paths,
-                        "response_text": response_text,
-                        "error": "; ".join(errors) or "agent reported failed status",
+                        "status": "succeeded", "declared_write_paths": declared_paths,
+                        "changed_files": written_files, "response_text": response_text, "error": "",
                     }
-
-                file_writes = parsed.get("file_writes")
-                written_files = self._apply_structured_file_writes(
-                    action_worktree=action_worktree,
-                    action=action,
-                    declared_paths=declared_paths,
-                    file_writes=file_writes,
-                )
-                written_files = self._sync_action_registries(
-                    action_worktree=action_worktree,
-                    action=action,
-                    declared_paths=declared_paths,
-                    written_files=written_files,
-                )
-                validation_errors = _validate_generated_action_resources(
-                    action_worktree,
-                    action,
-                    written_files,
-                )
-                if validation_errors:
-                    raise ValueError("; ".join(validation_errors))
-                return {
-                    "status": "succeeded",
-                    "declared_write_paths": declared_paths,
-                    "changed_files": written_files,
-                    "response_text": response_text,
-                    "error": "",
-                }
-            except ValueError as exc:
-                last_error = str(exc)
-                message = self._build_retry_message(
-                    original_message=user_message,
-                    previous_response=last_response_text,
-                    error=last_error,
-                )
-            except Exception as e:
-                return {
-                    "status": "failed",
-                    "declared_write_paths": declared_paths,
-                    "response_text": last_response_text,
-                    "error": str(e),
-                }
-
-        return {
-            "status": "failed",
-            "declared_write_paths": declared_paths,
-            "response_text": last_response_text,
-            "error": last_error or "agent response must be a structured file_writes JSON object",
-        }
-
-    async def _invoke_direct_action(self, message: str) -> str:
-        async def call_once() -> str:
-            model = load_member_optimizer_model(self._model_config_ref)
-            # Keep provider-specific reasoning controls from the model configuration.
-            response = await model.invoke(
-                messages=[
-                    {"role": "system", "content": _ACTION_EXECUTION_PROMPT},
-                    {"role": "user", "content": message},
-                ],
-                tools=None,
-                temperature=0.0,
-            )
-            if getattr(response, "finish_reason", None) == "length":
-                raise RuntimeError(
-                    "member action artifact execution was truncated (finish_reason=length); "
-                    "check the configured output budget before retrying"
-                )
-            return _extract_model_response_text(response)
-
-        return await run_model_call_with_retries(
-            call_once,
-            operation_name="member action artifact execution",
-            max_retries=0,
-        )
-
-    async def _invoke_direct_skill_action(self, message: str) -> str:
-        return await self._invoke_direct_action(message)
-
-    async def _invoke_direct_tool_action(self, message: str) -> str:
-        return await self._invoke_direct_action(message)
+                except ValueError as exc:
+                    last_error = str(exc)
+                    if not tracker.failed(last_error, _snapshot_files(action_worktree, declared_paths)):
+                        break
+                    message = self._build_retry_message(
+                        original_message=user_message, previous_response=last_response_text, error=last_error,
+                    )
+                except Exception as exc:
+                    if is_retryable_model_call_failure(exc):
+                        last_error = str(exc)
+                        if not tracker.failed(last_error, _snapshot_files(action_worktree, declared_paths)):
+                            break
+                        message = self._build_retry_message(
+                            original_message=user_message, previous_response=last_response_text, error=last_error,
+                        )
+                        continue
+                    return {
+                        "status": "failed", "declared_write_paths": declared_paths,
+                        "response_text": last_response_text, "error": str(exc),
+                    }
+            return {
+                "status": "failed", "declared_write_paths": declared_paths,
+                "response_text": last_response_text, "error": last_error,
+                "output_repair": {"attempts": tracker.attempts, "stop_reason": tracker.stop_reason},
+            }
 
     @staticmethod
     def _parse_action_response(response_text: str) -> dict[str, Any]:
@@ -855,11 +805,14 @@ class MemberActionExecutorAgent:
             parsed = parse_json_object_response(response_text)
         except Exception as exc:
             raise ValueError(f"agent response must be a structured file_writes JSON object: {exc}") from exc
-        if "status" not in parsed or "file_writes" not in parsed:
+        if "status" not in parsed:
             raise ValueError("agent response must be a structured file_writes JSON object")
-        file_writes = parsed.get("file_writes")
-        if str(parsed.get("status")) == "succeeded" and (not isinstance(file_writes, list) or not file_writes):
-            raise ValueError("agent response must include non-empty structured file_writes")
+        if parsed["status"] not in ("succeeded", "failed"):
+            raise ValueError("status must be 'succeeded' or 'failed'")
+        if not isinstance(parsed.get("errors", []), list):
+            raise ValueError("errors must be a list of strings (use [] for no errors)")
+        if any(not isinstance(item, str) for item in parsed.get("errors", [])):
+            raise ValueError("errors must contain strings")
         return parsed
 
     @staticmethod
@@ -882,9 +835,9 @@ class MemberActionExecutorAgent:
             if not rel_path:
                 raise ValueError(f"file_writes[{index}].path is required")
             normalized = _normalize_rel_path(rel_path)
-            if Path(normalized).is_absolute() or ".." in Path(normalized).parts:
+            if Path(rel_path).is_absolute() or ".." in Path(normalized).parts:
                 raise ValueError(f"file_writes[{index}].path must be a safe relative path")
-            if not _path_allowed_by_declared(normalized, declared_paths):
+            if not package_write_allowed(normalized, declared_paths):
                 raise ValueError(
                     f"file_writes[{index}].path {normalized} outside declared_write_paths {declared_paths}"
                 )
@@ -910,6 +863,8 @@ class MemberActionExecutorAgent:
             except ValueError as exc:
                 raise ValueError(f"file_writes[{index}].path {normalized} escapes action worktree") from exc
 
+            if target.is_file() and len(target.read_text(encoding="utf-8")) > 12000:
+                raise ValueError("legacy file_writes cannot replace a truncated baseline; use native read/edit tools")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
             written_files.append(normalized)
@@ -981,22 +936,9 @@ class MemberActionExecutorAgent:
 
 {error}
 
-Return ONLY a valid JSON object with this exact shape. Do not emit `<tool_call>`,
-do not describe tool usage, and do not include text outside the JSON object.
-
-```json
-{{
-  "action_id": "<action_id>",
-  "status": "succeeded",
-  "file_writes": [
-    {{
-      "path": "<relative path inside declared_write_paths>",
-      "content": "<complete replacement file content>"
-    }}
-  ],
-  "errors": []
-}}
-```
+Use the native tools to inspect the current files and correct the validation
+failure. Read remaining lines before replacing any existing file. Then return
+JSON with status, changed_files, and errors; the controller verifies real writes.
 """
 
     @staticmethod
@@ -1007,7 +949,6 @@ do not describe tool usage, and do not include text outside the JSON object.
         allowed_tools: list[str],
         action_worktree: Path | None = None,
     ) -> str:
-        del allowed_tools
         resource_guidance = _action_resource_guidance(action)
         declared_paths = resolve_declared_paths(action)
         file_context = _build_declared_file_context(action_worktree, declared_paths)
@@ -1032,27 +973,14 @@ Risk Notes: {", ".join(action.risk_notes) if action.risk_notes else "none"}
 
 {plan_summary}"""
         write_constraint = (
-            "Do not call write_file or edit_file to apply the change. Return the "
-            "complete replacement content in `file_writes`; the executor applies it "
-            "after validation."
+            "Read current files with read_file, inspect related package dependencies with "
+            "grep/glob/list_files, then apply the change using write_file or edit_file. "
+            "Paginate long files; a truncated excerpt is not the full baseline."
         )
-        output_contract = """Return ONLY a JSON object. Do not call file tools in the response. Put the
-complete desired file contents in file_writes; the executor will write them
-after path validation.
-
-```json
-{
-  "action_id": "<action_id>",
-  "status": "succeeded",
-  "file_writes": [
-    {
-      "path": "<relative path inside declared_write_paths>",
-      "content": "<complete replacement file content>"
-    }
-  ],
-  "errors": []
-}
-```"""
+        host_roots = "\n".join(f"- {root}" for root in supported_host_read_roots())
+        output_contract = """After applying edits, return ONLY JSON:
+{"action_id": "<action_id>", "status": "succeeded", "changed_files": ["<relative path>"], "errors": []}
+Actual file changes, scope, syntax, and runtime loading determine success."""
         return f"""## Action to Execute
 
 You are executing the following action in your workspace.
@@ -1065,13 +993,28 @@ Action Type: {action.action_type}
 Target Path: {action.target_path}
 Declared Write Paths: {action.declared_write_paths or [action.target_path]}
 Allowed Skills: {allowed_skills}
-Allowed Tools: []
+Allowed Tools: read_file, grep, glob, list_files, write_file, edit_file
 
 {semantic_context}
 
-## Current Declared File Contents
+## Current Declared File Contents (initial excerpts; read tools are authoritative)
 
 {file_context}
+
+## Supported Host Contracts (read-only)
+
+{host_roots}
+
+Read core/single_agent/rail/base.py for AgentRail hooks and typed event inputs;
+read core/foundation/tool/base.py for Tool and ToolCard interfaces. Package-local
+harness.yaml, manifests, referenced prompts, tools, and rails may be read even
+when they are not declared write paths. Writes remain declared-path-only.
+The solver uses enable_task_loop=False. Task-loop-only hooks do not fire there.
+ModelCallInputs and ToolCallInputs are dataclasses: use ctx.inputs.response,
+ctx.inputs.react_iteration, and ctx.config.max_iterations, never inputs.get(...)
+or invented ctx.extra.remaining_iterations. Check response.tool_calls before
+forcing a final result. Use supported request_model_continue/push_steering callbacks;
+a steering message alone does not require another model iteration.
 
 ## Action-Specific Guidance
 
@@ -1087,8 +1030,8 @@ Allowed Tools: []
 6. This action may only modify local ExpertHarness package files supported by current auto harness.
 7. {write_constraint}
 8. Use the current file contents above as the source of truth. If the file
-   content does not support the requested change, return failed instead of
-   inventing fields or paths.
+   content does not support the requested change, inspect full current files
+   using read_file; return failed if the requested baseline is missing.
 
 ## Output
 
@@ -1100,7 +1043,7 @@ If you cannot produce a valid change, return:
 {{
   "action_id": "{action.action_id}",
   "status": "failed",
-  "file_writes": [],
+  "changed_files": [],
   "errors": ["<specific reason>"]
 }}
 ```
@@ -1118,9 +1061,13 @@ class MemberActionExecutor:
         role_execution_concurrency: int = 2,
         action_execution_concurrency_per_role: int = 2,
         agent_skills_dirs: list[str] | None = None,
+        output_repair: OutputRepairConfig | None = None,
+        runtime_iteration_hard_limit: int = 300,
     ) -> None:
         self._coordinator = worktree_coordinator or MemberWorktreeCoordinator()
         self._executor_agent = executor_agent
+        self._output_repair = output_repair or OutputRepairConfig()
+        self._runtime_iteration_hard_limit = runtime_iteration_hard_limit
         self._agent_skills_dirs = list(agent_skills_dirs or [])
         self._global_sem = asyncio.Semaphore(execution_concurrency)
         self._role_sem = asyncio.Semaphore(role_execution_concurrency)
@@ -1132,6 +1079,8 @@ class MemberActionExecutor:
         return MemberActionExecutorAgent(
             model_config_ref=model_config_ref,
             agent_skills_dirs=self._agent_skills_dirs,
+            output_repair=self._output_repair,
+            runtime_iteration_hard_limit=self._runtime_iteration_hard_limit,
         )
 
     async def execute(
@@ -1391,6 +1340,8 @@ class MemberActionExecutor:
         )
 
         try:
+            if action.operation == "modify" and not (worktree_dir / action.target_path).exists():
+                raise ValueError(f"modify baseline mismatch: target does not exist: {action.target_path}")
             if action.operation == "remove":
                 exec_result = await asyncio.to_thread(
                     _execute_deterministic_remove,
@@ -1481,7 +1432,7 @@ class MemberActionExecutor:
         artifact_path = artifact_dir / "execution.json"
 
         status = exec_result.get("status", "failed")
-        declared_paths = exec_result.get("declared_write_paths", resolve_declared_paths(action))
+        declared_paths = resolve_declared_paths(action)
         out_of_bounds = []
         for path in actual_changed_files:
             if not _path_allowed_by_declared(path, declared_paths) and not _is_runtime_workspace_metadata(path):
@@ -1696,6 +1647,8 @@ def _execute_deterministic_remove(
             target_paths={target_rel},
         ):
             manifest_updates.append("tools/tools.yaml")
+    elif action.action_group == "config":
+        removed_paths.extend(_remove_path(worktree_dir, "runtime.yaml"))
     elif action.action_group == "rail":
         removed_paths.extend(_remove_path(worktree_dir, target_rel))
         manifest = worktree_dir / "rails" / "rails.yaml"
@@ -1735,9 +1688,16 @@ def _validate_generated_action_resources(
     worktree_dir: Path,
     action: MemberOptimizationAction,
     changed_files: list[str],
+    runtime_iteration_hard_limit: int = 300,
 ) -> list[str]:
     """Run cheap action-local checks before merging generated resources."""
     errors: list[str] = []
+    if action.action_group == "config" and action.operation != "remove":
+        try:
+            read_runtime_policy(worktree_dir, default_max_iterations=min(300, runtime_iteration_hard_limit),
+                                hard_limit=runtime_iteration_hard_limit)
+        except (ValueError, OSError, yaml.YAMLError) as exc:
+            errors.append(f"runtime_policy: {exc}")
     if action.action_group == "skill":
         for rel_path in changed_files:
             normalized = _normalize_rel_path(rel_path)
@@ -1747,16 +1707,17 @@ def _validate_generated_action_resources(
             path = worktree_dir / normalized
             if not path.is_file():
                 continue
-            frontmatter = _read_skill_frontmatter(path)
+            try:
+                _validate_generated_skill_contract(path.read_text(encoding="utf-8"))
+                frontmatter = _read_skill_frontmatter(path)
+            except (ValueError, yaml.YAMLError) as exc:
+                errors.append(f"skill_frontmatter:{normalized}: {exc}")
+                continue
             actual_name = str(frontmatter.get("name") or "").strip()
             if actual_name != expected_name:
                 errors.append(f"skill_frontmatter:{normalized}: name must be {expected_name!r}, got {actual_name!r}")
             if not str(frontmatter.get("description") or "").strip():
                 errors.append(f"skill_frontmatter:{normalized}: description is required")
-        return errors
-
-    if action.action_group not in {"tool", "rail"}:
-        return errors
 
     for rel_path in changed_files:
         normalized = _normalize_rel_path(rel_path)
@@ -1772,7 +1733,7 @@ def _validate_generated_action_resources(
                 continue
             safety_errors = _validate_package_python_source(source, path=normalized)
             errors.extend(safety_errors)
-        elif normalized in {"tools/tools.yaml", "rails/rails.yaml"}:
+        elif path.suffix.lower() in {".yaml", ".yml"}:
             try:
                 yaml.safe_load(path.read_text(encoding="utf-8"))
             except Exception as exc:

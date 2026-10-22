@@ -19,6 +19,7 @@ and build_judge_prompt with the class that uses them.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import shutil
@@ -48,6 +49,14 @@ from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
     project_execution_history,
 )
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.harness_context import prepare_harness_context
+from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.runtime_evidence import (
+    prepare_runtime_evidence,
+    read_execution_context,
+)
+from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.task_contract import (
+    build_task_clauses,
+    normalize_contract_checks,
+)
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import (
     build_signal_extractor,
 )
@@ -55,6 +64,7 @@ from openjiuwen.rsi.harness_rsi.model_call import (
     RetryableModelOutputError,
     is_retryable_model_call_failure,
 )
+from openjiuwen.rsi.harness_rsi.feedback import FeedbackTracker, correction_message
 from openjiuwen.rsi.harness_rsi.schema import (
     EvaluationResultAnalysisArtifact,
     EvaluationResultAnalysisInvocation,
@@ -95,6 +105,12 @@ _EXECUTION_HISTORY_NOTICE = (
 # ---------------------------------------------------------------------------
 
 DIAGNOSIS_SYSTEM_PROMPT = """\
+RSI enforces a finite loop budget (default 300) with no extra model call after
+exhaustion. A candidate can adjust max_iterations under the host ceiling.
+Do not recommend final_answer finalization or treat an intentional error-on-limit
+policy as a defect by itself. Diagnose insufficient budget versus ineffective
+work from the recorded progress and logs.
+
 You diagnose observed failures of an evaluated agent or team. Identify a local
 cause supported by the task, execution, and verification evidence. Your output
 is an Issue for the existing Improver, not a repaired task or proof that a
@@ -111,8 +127,10 @@ current_harness identifies the evaluated roles and provides paths to complete
 declared prompts and Skill instructions. Read the relevant instructions before
 claiming a capability is absent, wrong, or unused. These are package
 declarations, not proof of runtime activation; trace events establish what was
-actually called or followed. Runtime defaults and configuration are not
-included. When a Harness was not supplied, do not invent its contents.
+actually called or followed. runtime.yaml is only a restricted declaration;
+runtime_config.json records effective values, including inherited defaults and
+read-only host limits. Missing historical values are unknown. When a Harness
+was not supplied, do not invent its contents.
 
 repository/, when available, is a read-only snapshot of the evaluated
 workspace, including the submitted patch. source_patch.diff records that patch.
@@ -122,6 +140,32 @@ Stay inside the evidence workspace. Never inspect gold/solution patches or
 evaluator implementation. Supplied test assertions are acceptance evidence,
 not an implementation solution. Agent-authored probes are execution evidence,
 not additions to the original task requirements.
+
+## Runtime Evidence and Termination
+First read runtime_evidence/runtime_config.json, runtime_evidence/termination.json,
+and evidence_manifest.json. Record deterministic execution_termination facts before
+causal attribution. Never override recorded limits, iterations, finalization status,
+or termination reason with a model guess. Missing historical evidence stays unknown.
+Runtime logs are root-cause evidence. Search only manifest-listed case/role/invocation
+files. runtime_log_search.json provides the bounded initial search; inspect it first.
+Search WARNING|ERROR|CRITICAL, then Traceback|exception|timeout|timed out|
+max_iterations|termination_reason|failed. INFO and result records can also carry
+termination facts. Limit the first search to 50 matches, each summary to 500 chars,
+and total returned text to 32 KiB; deduplicate adjacent matches. Read about 10 lines
+of context around relevant hits and paginate only as needed. A prompt containing
+"error" is not a runtime error. Do not read all logs or infer scope from timestamps.
+Then consult execution_history.json and artifacts for distinguishing evidence.
+For max_iterations, compare insufficient budget, repeated ineffective actions,
+environmental blockers, absent/failed finalization, and completed work not submitted.
+Reaching the configured iteration limit alone proves neither budget shortage nor a missing delivery
+Prompt. Budget shortage requires visible progress or a controlled budget comparison.
+Use failure_layer runtime/harness/evidence/unknown; observed_failure states facts,
+while candidate_explanations list hypotheses and discriminating_evidence identifies
+what supports/refutes them. Environment, authentication, and collection failures
+remain unassigned; do not fabricate a Prompt/Skill intervention. Budget/exhaustion
+policy can target member_harness.<role>.config only for allowed max_iterations and
+on_max_iterations, within the recorded read-only host limit. Model connection,
+authentication, scoring, and host limits cannot be changed by a candidate.
 
 ## Diagnosis
 1. Anchor one diagnosis to one observed failed behavior or related failed-check
@@ -161,6 +205,12 @@ not additions to the original task requirements.
    cluster unassigned rather than withholding the supported diagnosis.
 
 ## Factual Boundaries
+- Before proposing a change, cite the supplied clause_id for relevant input guarantees and
+  explain why the recommendation preserves them in task_contract_checks.
+  An invalid self-authored probe does not expand the legal input domain.
+  Check a concrete boundary or counterexample before asserting an algebraic
+  implication; an inequality does not imply equality. Keep unresolved causal
+  claims as hypotheses rather than established observations.
 - deterministic_validation_inventory and deterministic_verifier_inventory
   are code-derived observations. If a project test suite passed, do not say it
   was skipped. If patch_successfully_applied=true, do not blame patch
@@ -213,7 +263,7 @@ Variables (member_harness.<role>.<variable>):
 - skill: reusable multi-step capability is not triggered, missing, misused, or procedurally flawed.
 - tool: local atomic tool choice, args, schema, call format, implementation, or result handling is wrong.
 - rail: a lifecycle check, transition, or bounded recovery needs runtime control.
-- config: runtime/model/harness configuration for this role is wrong.
+- config: restricted runtime max_iterations/on_max_iterations for this role requires adjustment.
 
 ### Scope: team_skill
 Choose when the earliest decisive mistake is in team-level coordination,
@@ -259,6 +309,10 @@ Per-case schema (one wrapper containing 1-3 diagnoses):
       "issue_category": "member_harness | team_skill | unassigned",
       "severity": "high | medium | low",
       "summary": "<one sentence: the concrete root cause>",
+      "failure_layer": "runtime | harness | evidence | unknown",
+      "observed_failure": "<deterministic failure facts>",
+      "candidate_explanations": ["<supported or unresolved explanation>"],
+      "discriminating_evidence": ["<evidence separating competing explanations>"],
       "failure_mode": "<short structural failure label>",
       "failure_cluster": {
         "failed_checks": ["<failed verifier/check id>"],
@@ -278,6 +332,11 @@ Per-case schema (one wrapper containing 1-3 diagnoses):
       ],
       "affected_components": ["<member_role>"],
       "recommendation": "<concrete change to the target_ref variable>",
+      "task_contract_checks": [{
+        "clause_id": "<ID from authoritative_task_contract.clauses; controller fills original text>",
+        "interpretation": "<input guarantee and boundary used by this diagnosis>",
+        "recommendation_preserves_contract": true
+      }],
       "decision_contract": {
         "wrong_decision": "<structural decision error; keep this task's literal code in critical_mistake>",
         "causal_distinction": "<relationship that distinguishes the wrong decision from the supported one>",
@@ -536,12 +595,17 @@ def _build_diagnosis_input_json(
         "authoritative_task_contract": {
             "provenance": "case.input",
             "input_excerpt": case.input,
+            "clauses": build_task_clauses(case.input),
             "policy": (
                 "Only this excerpt establishes what the original task or reproduction "
                 "contains. Agent-authored commands and probes are execution evidence, "
                 "not task-contract facts."
             ),
         },
+        "execution_context": read_execution_context(
+            Path(case.result_path).parent, case.execution_metadata, recorded_termination_reason=case.termination_reason,
+        ),
+        "runtime_evidence_manifest": "evidence_manifest.json",
         "authoritative_benchmark_test_contract": case.benchmark_test_contract,
         "primary_evidence": {
             "evidence_summary_available": evidence_summary_available,
@@ -581,6 +645,7 @@ def _build_diagnosis_input_json(
             "status": case.status,
             "score": case.score,
             "evaluation_passed": case.evaluation_passed,
+            "recorded_termination_reason": case.termination_reason or "unknown",
             "evaluation_reason": _truncate_text(case.evaluation_reason, _TEXT_SNIPPET_CHARS),
             "error": _truncate_text(case.error, _TEXT_SNIPPET_CHARS),
             "judge_breakdown": judge_breakdown,
@@ -675,7 +740,7 @@ def _stage_instruction(source_stage: str) -> str:
     if source_stage == "member_stage":
         return (
             "Analyze concrete member harness capability under the current Team Skill. "
-            "Attribute to a specific role's prompt, skill, or tool. Valid target_ref "
+            "Attribute to a specific role's prompt, skill, tool, rail, or restricted runtime config. Valid target_ref "
             'values are member_harness.<role>.<variable> or "unassigned".'
         )
     if source_stage == "team_skill_stage":
@@ -1010,6 +1075,7 @@ def _normalize_case_diagnoses(
     require_cluster = isinstance(raw_diagnoses, list) and len(candidates) > 1
     for index, raw in enumerate(candidates):
         diagnosis = dict(raw)
+        diagnosis.setdefault("failure_layer", "unknown")
         failure_cluster = _diagnosis_failure_cluster(diagnosis)
         if require_cluster and not failure_cluster:
             continue
@@ -1310,6 +1376,13 @@ def _aggregate_structured_diagnoses(
                             else {}
                         ),
                         "failure_cluster": _diagnosis_failure_cluster(strongest),
+                        "failure_layer": strongest.get("failure_layer", "unknown"),
+                        "observed_failure": strongest.get("observed_failure", ""),
+                        "candidate_explanations": strongest.get("candidate_explanations", []),
+                        "discriminating_evidence": strongest.get("discriminating_evidence", []),
+                        "execution_termination": strongest.get("execution_termination", {}),
+                        "evidence_manifest_path": strongest.get("evidence_manifest_path", ""),
+                        "task_contract_checks": strongest.get("task_contract_checks", []),
                         "target_ref": target_ref,
                         "evidence_refs": list(strongest.get("evidence_refs") or []),
                         "confidence": str(strongest.get("confidence", "") or ""),
@@ -1660,6 +1733,11 @@ def _prepare_diagnosis_evidence(*, case: CaseAnalysisInput, runtime_dir: Path) -
     _remove_path(runtime_dir)
     runtime_dir.mkdir(parents=True, exist_ok=True)
     _prepare_repository_snapshot(case=case, runtime_dir=runtime_dir)
+    prepare_runtime_evidence(
+        case_dir=Path(case.result_path).parent, execution=case.execution_metadata, runtime_dir=runtime_dir,
+        recorded_termination_reason=case.termination_reason,
+    )
+    _write_json(runtime_dir / "task_clauses.json", {"provenance": "case.input", "clauses": build_task_clauses(case.input)})
     history = project_execution_history(
         _read_json_if_exists(Path(case.result_path).parent / "judge" / "normalized_trace.json")
     )
@@ -1997,11 +2075,15 @@ def _case_diagnoses_validation_conflicts(
     diagnoses: list[dict[str, Any]],
     inventory: dict[str, Any],
     verifier_inventory: dict[str, Any] | None = None,
+    *,
+    public_task: str | None = None,
 ) -> list[str]:
     """Validate every diagnosis while retaining its position in repair feedback."""
     conflicts: list[str] = []
     for index, diagnosis in enumerate(diagnoses, start=1):
-        diagnosis_conflicts = _diagnosis_validation_conflicts(diagnosis, inventory, verifier_inventory)
+        diagnosis_conflicts = _diagnosis_validation_conflicts(
+            diagnosis, inventory, verifier_inventory, public_task=public_task,
+        )
         conflicts.extend(f"diagnosis[{index}]: {error}" for error in diagnosis_conflicts)
     return conflicts
 
@@ -2054,6 +2136,19 @@ def _diagnosis_validation_conflicts(
 ) -> list[str]:
     """Reject diagnoses that contradict deterministic test and verifier facts."""
     errors: list[str] = []
+    if public_task is not None:
+        errors.extend(normalize_contract_checks(diagnosis, public_task))
+    layer = diagnosis.get("failure_layer", "unknown")
+    if not isinstance(layer, str) or layer not in {"runtime", "harness", "evidence", "unknown"}:
+        errors.append("[failure_attribution] failure_layer must be runtime/harness/evidence/unknown")
+    if isinstance(layer, str) and layer in {"evidence", "runtime"}:
+        target = str(diagnosis.get("target_ref") or "unassigned")
+        if diagnosis["failure_layer"] == "evidence" and target != "unassigned":
+            errors.append("[failure_attribution] failure_layer=evidence requires target_ref=unassigned")
+        if diagnosis["failure_layer"] == "runtime" and target != "unassigned" and not (
+            target.startswith("member_harness.") and target.endswith(".config")
+        ):
+            errors.append("[failure_attribution] runtime failures require restricted member config or unassigned")
     if (
         inventory.get("project_test_suite_result") == "passed"
         and inventory.get("authoritative_verifier_result") == "failed"
@@ -2119,6 +2214,37 @@ def _diagnosis_validation_conflicts(
             errors.append("diagnosis contradicts authoritative successful patch application")
 
     return errors
+
+
+def _diagnosis_repair_progress(errors: list[str], accepted: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fingerprint unresolved fields/codes and accepted claims, ignoring prose churn."""
+    unresolved = []
+    for error in errors:
+        code = re.search(r"\[([a-z_]+)\]", error)
+        field = re.search(r"(?:task_contract_checks|validation_observations|verifier_observations)(?:\[\d+\])?(?:\.[a-z_]+)?", error)
+        if code or field:
+            unresolved.append({"code": code.group(1) if code else "evidence_conflict",
+                               "field": field.group(0) if field else "target_ref"})
+        elif "must be a non-empty string" in error:
+            unresolved.append({"code": "required_field", "field": error.split(": ")[-1].split()[0]})
+        elif "Agent attempt failed:" in error:
+            unresolved.append({"code": "agent_invocation_failed", "field": "agent_output"})
+        elif "usable diagnoses" in error:
+            unresolved.append({"code": "invalid_output", "field": "diagnoses"})
+        else:
+            unresolved.append({"code": "evidence_conflict", "field": error.split(": ")[-1].split(" must ")[0]})
+    passed = [
+        {"target_ref": item.get("target_ref"), "failure_cluster": item.get("failure_cluster"),
+         "evidence_refs": item.get("evidence_refs"),
+         "clause_ids": [check.get("clause_id") for check in (item.get("task_contract_checks") or []) if isinstance(check, dict)]}
+        for item in accepted
+    ]
+
+    def canonical(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+    return {"unresolved": sorted({canonical(item) for item in unresolved}),
+            "accepted": sorted({canonical(item) for item in passed})}
 
 
 def _diagnosis_evidence_conflict_result(
@@ -2480,12 +2606,17 @@ class DiagnosisAgentStrategy:
             prior_candidate_feedback=invocation.prior_candidate_feedback,
             eval_ref_path=invocation.eval_ref_path,
             harness_refs_path=invocation.harness_refs_path,
+            output_dir=output_dir,
         )
         per_case_diagnoses_path = output_dir / "per_case_diagnoses.json"
         _write_json(per_case_diagnoses_path, {"per_case_diagnoses": per_case_results})
         diagnosis_failed_count = len(
             {str(item.get("case_id", "") or "") for item in per_case_results if item.get("analysis_failed")}
         )
+        diagnosis_partial_count = len({
+            str(item.get("case_id", "") or "") for item in per_case_results
+            if isinstance(item.get("output_repair"), dict) and item["output_repair"].get("status") == "partial"
+        })
 
         issues = await self._aggregate_diagnosis(
             per_case_results,
@@ -2499,7 +2630,7 @@ class DiagnosisAgentStrategy:
             "failed"
             if diagnosis_failed_count == len(diagnosis_case_inputs) and diagnosis_failed_count
             else "partial"
-            if diagnosis_failed_count
+            if diagnosis_failed_count or diagnosis_partial_count
             else "completed"
         )
 
@@ -2519,12 +2650,15 @@ class DiagnosisAgentStrategy:
                 "diagnosed_case_count": len(diagnosis_case_inputs),
                 "diagnosis_count": len(per_case_results),
                 "diagnosis_failed_count": diagnosis_failed_count,
+                "diagnosis_partial_count": diagnosis_partial_count,
                 "per_case_diagnoses_path": str(per_case_diagnoses_path),
                 "retrieved_experience": retrieved_experience,
             },
         )
 
-    async def _build_agent(self, workspace: str, *, system_prompt: str | None = None) -> "BaseAgent":
+    async def _build_agent(
+        self, workspace: str, *, system_prompt: str | None = None, invocation_log_dir: str | None = None,
+    ) -> "BaseAgent":
         """Delegate construction of a read-only DeepAgent to its runtime owner.
 
         Args:
@@ -2533,10 +2667,12 @@ class DiagnosisAgentStrategy:
                 ``DIAGNOSIS_SYSTEM_PROMPT`` (per-case trace reader).
                 Pass ``AGGREGATION_SYSTEM_PROMPT`` for the aggregation agent
                 to prevent it from attempting to read trace files.
+            invocation_log_dir: Permanent directory for this agent's invocation logs.
         """
         return await self._agent_runtime.build_agent(
             workspace,
             system_prompt=(system_prompt if system_prompt is not None else DIAGNOSIS_SYSTEM_PROMPT),
+            invocation_log_dir=invocation_log_dir,
         )
 
     async def _per_case_diagnosis(
@@ -2549,6 +2685,7 @@ class DiagnosisAgentStrategy:
         prior_candidate_feedback: dict[str, Any] | None = None,
         eval_ref_path: str = "",
         harness_refs_path: str = "",
+        output_dir: Path | None = None,
     ) -> list[dict[str, Any]]:
         """Run diagnosis for each case in a stable deterministic order.
 
@@ -2557,14 +2694,22 @@ class DiagnosisAgentStrategy:
         evaluated repository. The raw evaluator case directory is never exposed.
         """
         runtime_root = Path(tempfile.mkdtemp(prefix="ach_analyzer_"))
+        artifact_root = output_dir or Path(tempfile.mkdtemp(prefix="ach_analyzer_artifacts_"))
 
         async def _diagnose_one(case: CaseAnalysisInput) -> list[dict[str, Any]]:
             runtime_dir = _make_diagnosis_runtime_dir(runtime_root, case.case_id)
+            attempt_dir = artifact_root / "diagnosis_attempts" / runtime_dir.name
+            evidence_archive = attempt_dir / "evidence"
             try:
                 evidence_summary_available = _prepare_diagnosis_evidence(
                     case=case,
                     runtime_dir=runtime_dir,
                 )
+                attempt_dir.mkdir(parents=True, exist_ok=True)
+                evidence_archive.mkdir(exist_ok=True)
+                shutil.copytree(runtime_dir / "runtime_evidence", evidence_archive / "runtime_evidence", dirs_exist_ok=True)
+                for name in ("evidence_manifest.json", "runtime_log_search.json", "task_clauses.json"):
+                    shutil.copy2(runtime_dir / name, evidence_archive / name)
                 case_feedback = _case_prior_candidate_feedback(
                     prior_candidate_feedback,
                     case.case_id,
@@ -2587,104 +2732,103 @@ class DiagnosisAgentStrategy:
                     prior_candidate_feedback=case_feedback,
                     harness_context=harness_context,
                 )
-                agent = await self._build_agent(str(runtime_dir))
-                raw = await _run_agent(
-                    agent,
-                    prompt,
-                    max_retries=self._config.diagnosis_agent_max_retries,
+                if "invocation_log_dir" in inspect.signature(self._build_agent).parameters:
+                    agent = await self._build_agent(str(runtime_dir), invocation_log_dir=str(attempt_dir / "logs"))
+                else:
+                    agent = await self._build_agent(str(runtime_dir))
+                tracker = FeedbackTracker(
+                    self._config.output_repair,
+                    max_attempts=max(0, self._config.diagnosis_agent_max_retries) + 1,
                 )
-                invalid_outputs = [raw]
-                parsed = _extract_json_object(raw)
-                diagnoses = (
-                    _normalize_case_diagnoses(
-                        parsed,
-                        prior_candidate_feedback=case_feedback,
-                    )
-                    if parsed is not None
-                    else []
-                )
-                if not diagnoses:
-                    repair_raw = await _run_agent(
-                        agent,
-                        _build_json_repair_prompt(prompt, raw),
-                        max_retries=0,
-                    )
-                    invalid_outputs.append(repair_raw)
-                    repair_parsed = _extract_json_object(repair_raw)
-                    if repair_parsed is not None:
-                        repair_diagnoses = _normalize_case_diagnoses(
-                            repair_parsed,
-                            prior_candidate_feedback=case_feedback,
-                        )
-                        if repair_diagnoses:
-                            raw = repair_raw
-                            parsed = repair_parsed
-                            diagnoses = repair_diagnoses
-                if not diagnoses:
-                    raise _unusable_diagnosis_output_error(
-                        case.case_id,
-                        invalid_outputs,
-                    )
                 validation_inventory = _build_validation_inventory(case)
                 verifier_inventory = _build_verifier_inventory(case)
-                validation_conflicts = _case_diagnoses_validation_conflicts(
-                    diagnoses,
-                    validation_inventory,
-                    verifier_inventory,
-                )
-                if validation_conflicts:
-                    repair_raw = await _run_agent(
-                        agent,
-                        _build_evidence_conflict_repair_prompt(
-                            original_prompt=prompt,
-                            previous_output=raw,
-                            conflicts=validation_conflicts,
-                            validation_inventory=validation_inventory,
-                            verifier_inventory=verifier_inventory,
-                        ),
-                        max_retries=0,
-                    )
-                    repair_parsed = _extract_json_object(repair_raw)
-                    if repair_parsed is not None:
-                        repair_diagnoses = _normalize_case_diagnoses(
-                            repair_parsed,
-                            prior_candidate_feedback=case_feedback,
+                message = prompt
+                accepted: list[dict[str, Any]] = []
+                invalid_outputs: list[str] = []
+                validation_conflicts: list[str] = []
+                for attempt in range(tracker.max_attempts):
+                    invocation_error = ""
+                    try:
+                        raw = await _run_agent(agent, message, max_retries=0)
+                    except Exception as exc:
+                        iteration_limit = isinstance(exc, DiagnosisAgentExecutionError) and (
+                            exc.termination_reason == "max_iterations"
+                            or str(exc) == "Max iterations reached without completion"
                         )
-                        if repair_diagnoses:
-                            repaired_conflicts = _case_diagnoses_validation_conflicts(
-                                repair_diagnoses,
-                                validation_inventory,
-                                verifier_inventory,
-                            )
-                            if not repaired_conflicts:
-                                raw = repair_raw
-                                parsed = repair_parsed
-                                diagnoses = repair_diagnoses
-                                validation_conflicts = []
-                            else:
-                                validation_conflicts = repaired_conflicts
-                        else:
-                            validation_conflicts = [
-                                *validation_conflicts,
-                                "evidence-conflict repair output contained no diagnoses",
-                            ]
-                    else:
-                        validation_conflicts = [
-                            *validation_conflicts,
-                            "evidence-conflict repair output did not contain JSON",
+                        if not iteration_limit and not is_retryable_model_call_failure(exc):
+                            raise
+                        invocation_error = f"{type(exc).__name__}: {exc}"
+                        raw = f"Agent attempt failed: {exc}"
+                    if not invocation_error:
+                        invalid_outputs.append(raw)
+                    parsed = _extract_json_object(raw) if not invocation_error else None
+                    diagnoses = (
+                        _normalize_case_diagnoses(parsed, prior_candidate_feedback=case_feedback)
+                        if parsed is not None else []
+                    )
+                    validation_conflicts = [f"Agent attempt failed: {invocation_error}"] if invocation_error else []
+                    if not diagnoses and not invocation_error:
+                        validation_conflicts.append("Output must contain a valid JSON object with usable diagnoses")
+                    for index, diagnosis in enumerate(diagnoses, start=1):
+                        conflicts = [
+                            f"{key} must be a non-empty string"
+                            for key in ("summary", "root_cause", "target_ref")
+                            if not isinstance(diagnosis.get(key), str) or not diagnosis[key].strip()
                         ]
-                if validation_conflicts:
-                    logger.warning(
-                        "per-case diagnosis evidence conflict for %s after repair: %s",
-                        case.case_id,
-                        "; ".join(validation_conflicts),
+                        conflicts.extend(_diagnosis_validation_conflicts(
+                            diagnosis, validation_inventory, verifier_inventory, public_task=case.input,
+                        ))
+                        if conflicts:
+                            validation_conflicts.extend(f"diagnoses[{index - 1}]: {error}" for error in conflicts)
+                        elif not any(_diagnoses_are_duplicate(diagnosis, item) for item in accepted):
+                            accepted.append(diagnosis)
+                    progress_state = _diagnosis_repair_progress(validation_conflicts, accepted)
+                    can_retry = tracker.failed(progress_state["unresolved"], progress_state) if validation_conflicts else False
+                    _write_json(attempt_dir / f"attempt_{attempt + 1:02d}.json", {
+                        "case_id": case.case_id, "raw_output": raw,
+                        "invocation_error": invocation_error,
+                        "validation_errors": validation_conflicts, "accepted_count": len(accepted),
+                        "progress_state": progress_state,
+                        "stop_reason": tracker.stop_reason if validation_conflicts else "validated",
+                    })
+                    if not validation_conflicts or not can_retry:
+                        break
+                    message = correction_message(prompt, raw, validation_conflicts)
+                    message += (
+                        "\nPreviously validated diagnoses are preserved by the controller. "
+                        "Fix the invalid diagnoses without changing their supported causal claims. "
+                        "A quote mismatch or missing field is a schema/citation error, not evidence "
+                        "that the causal recommendation is false. Select a legal clause_id from task_clauses.json; "
+                        "the controller restores the authoritative text. Do not repair a real contract conflict by "
+                        "changing a boolean without correcting the recommendation."
                     )
-                    return [
-                        _diagnosis_evidence_conflict_result(
-                            case,
-                            validation_conflicts,
-                        )
-                    ]
+                diagnoses = accepted[:_MAX_DIAGNOSES_PER_CASE]
+                if not diagnoses:
+                    if not invalid_outputs:
+                        raise DiagnosisAgentExecutionError("Diagnosis attempts exhausted: " + "; ".join(validation_conflicts))
+                    if not any(_extract_json_object(raw) is not None for raw in invalid_outputs):
+                        raise _unusable_diagnosis_output_error(case.case_id, invalid_outputs)
+                    logger.warning("per-case diagnosis validation exhausted for %s: %s", case.case_id,
+                                   "; ".join(validation_conflicts))
+                    failure = _diagnosis_evidence_conflict_result(case, validation_conflicts)
+                    failure.update({
+                        "summary": "Diagnosis did not pass output/evidence validation within the bounded budget.",
+                        "critical_mistake": "Output validation failed; inspect preserved raw attempts for the exact cause.",
+                        "diagnosis_status": "validation_failed",
+                        "evidence_manifest_path": str(evidence_archive / "evidence_manifest.json"),
+                        "execution_termination": read_execution_context(
+                            Path(case.result_path).parent, case.execution_metadata,
+                            recorded_termination_reason=case.termination_reason,
+                        )["execution_termination"],
+                        "output_repair": {"attempts": tracker.attempts, "stop_reason": tracker.stop_reason},
+                    })
+                    return [failure]
+                if validation_conflicts:
+                    for diagnosis in diagnoses:
+                        diagnosis["output_repair"] = {
+                            "status": "partial", "attempts": tracker.attempts,
+                            "stop_reason": tracker.stop_reason, "remaining_errors": validation_conflicts,
+                        }
                 diagnosis_count = len(diagnoses)
                 return [
                     {
@@ -2695,6 +2839,11 @@ class DiagnosisAgentStrategy:
                         "evaluation_passed": case.evaluation_passed,
                         "evaluation_reason": case.evaluation_reason,
                         **diagnosis,
+                        "execution_termination": read_execution_context(
+                            Path(case.result_path).parent, case.execution_metadata,
+                            recorded_termination_reason=case.termination_reason,
+                        )["execution_termination"],
+                        "evidence_manifest_path": str(evidence_archive / "evidence_manifest.json"),
                         "verifier_failure_output_excerpt": str(
                             verifier_inventory.get(
                                 "verifier_failure_output_excerpt",
@@ -2712,14 +2861,30 @@ class DiagnosisAgentStrategy:
                         case.case_id,
                         exc,
                     )
-                    return [_diagnosis_unavailable_result(case, exc)]
+                    failure = _diagnosis_unavailable_result(case, exc)
+                    failure["failure_layer"] = "evidence"
+                    manifest_path = evidence_archive / "evidence_manifest.json"
+                    failure["evidence_manifest_path"] = str(manifest_path) if manifest_path.is_file() else ""
+                    failure["execution_termination"] = read_execution_context(
+                        Path(case.result_path).parent, case.execution_metadata,
+                        recorded_termination_reason=case.termination_reason,
+                    )["execution_termination"]
+                    return [failure]
                 if is_retryable_model_call_failure(exc):
                     logger.warning(
                         "per-case diagnosis unavailable for %s: %s",
                         case.case_id,
                         exc,
                     )
-                    return [_diagnosis_unavailable_result(case, exc)]
+                    failure = _diagnosis_unavailable_result(case, exc)
+                    failure["failure_layer"] = "evidence"
+                    manifest_path = evidence_archive / "evidence_manifest.json"
+                    failure["evidence_manifest_path"] = str(manifest_path) if manifest_path.is_file() else ""
+                    failure["execution_termination"] = read_execution_context(
+                        Path(case.result_path).parent, case.execution_metadata,
+                        recorded_termination_reason=case.termination_reason,
+                    )["execution_termination"]
+                    return [failure]
                 logger.exception("per-case diagnosis failed for %s", case.case_id)
                 raise
             finally:
@@ -2786,22 +2951,9 @@ async def _run_agent(
     *,
     max_retries: int,
 ) -> str:
-    """Run the diagnosis DeepAgent and perform one bounded JSON repair."""
-    model_call_retries = max(0, int(max_retries or 0))
-    last_raw = await run_deep_agent_text(
-        agent,
-        prompt,
-        operation_name="diagnosis agent",
-        max_retries=model_call_retries,
-    )
-    if _extract_json_object(last_raw) is not None or model_call_retries == 0:
-        return last_raw
-
+    """Run one diagnosis attempt; the caller owns output correction budgets."""
     return await run_deep_agent_text(
-        agent,
-        _build_json_repair_prompt(prompt, last_raw),
-        operation_name="diagnosis agent JSON repair",
-        max_retries=model_call_retries,
+        agent, prompt, operation_name="diagnosis agent", max_retries=max_retries,
     )
 
 

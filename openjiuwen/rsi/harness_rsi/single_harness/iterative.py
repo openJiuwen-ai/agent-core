@@ -63,6 +63,7 @@ from openjiuwen.rsi.harness_rsi.schema import (
     EvaluationResultAnalysisInvocation,
 )
 from openjiuwen.rsi.harness_rsi.single_harness.behavior_check import check_candidate_behavior, feedback_route
+from openjiuwen.rsi.harness_rsi.single_harness.runtime_evidence import inconclusive_capability_cases
 from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
     active_epoch_node_event,
     analysis_stage_payload,
@@ -81,7 +82,7 @@ from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import (
 )
 from openjiuwen.rsi.usage import ModelUsageObserver, bind_model_usage, model_usage_stage, set_usage_node
 
-_ALLOWED_ACTION_GROUPS = ["prompt", "skill", "tool", "rail"]
+_ALLOWED_ACTION_GROUPS = ["prompt", "skill", "tool", "rail", "config"]
 _ALLOWED_PROMPT_SURFACES = ["prompt_section"]
 
 
@@ -162,6 +163,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             action_group_configs=list(_ALLOWED_ACTION_GROUPS),
             allowed_action_groups=list(_ALLOWED_ACTION_GROUPS),
             allowed_prompt_surfaces=list(_ALLOWED_PROMPT_SURFACES),
+            runtime_iteration_hard_limit=config.evaluator.solver_max_iterations_hard_limit,
             candidate_holdout_cases=0,
             max_roles_per_run=1,
             max_actions_per_plan=(
@@ -1460,6 +1462,22 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             fallback_target_case_ids=fallback_target_case_ids,
             names_match=_skill_names_match,
         )
+        inconclusive_capability_case_ids = inconclusive_capability_cases(
+            candidate_eval_ref, [*missing_tool_invocations, *missing_skill_invocations],
+        )
+        unverified_capability_invocations = [
+            dict(item) for item in [*missing_tool_invocations, *missing_skill_invocations]
+            if item.get("target_case_id") in inconclusive_capability_case_ids
+        ]
+        missing_tool_invocations = [
+            item for item in missing_tool_invocations
+            if item.get("target_case_id") not in inconclusive_capability_case_ids
+        ]
+        missing_skill_invocations = [
+            item for item in missing_skill_invocations
+            if item.get("target_case_id") not in inconclusive_capability_case_ids
+        ]
+        missing_tools = sorted({item["runtime_name"] for item in missing_tool_invocations})
         missing_skills = sorted({item["runtime_name"] for item in missing_skill_invocations})
         failed_machine_evidence = _failed_machine_evidence(candidate_eval_ref)
         min_target_delta = float(self.config.member_optimizer.candidate_min_target_behavior_delta)
@@ -1498,6 +1516,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             and not missing_tools
             and not missing_skills
             and not failed_machine_evidence
+            and not inconclusive_capability_case_ids
         )
         target_confirmation: dict[str, Any] = {
             "status": "not_needed",
@@ -1516,6 +1535,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         reason = "candidate_improved_target_cases" if accepted else "candidate_did_not_improve_target_cases"
         if _eval_has_errors(candidate_eval_ref):
             reason = "candidate_gate_inconclusive_due_to_error_cases"
+        elif inconclusive_capability_case_ids:
+            reason = "candidate_capability_evidence_inconclusive"
         elif missing_tools:
             if _missing_invocations_were_late(
                 missing_tool_invocations,
@@ -1558,6 +1579,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             capabilities=capabilities,
             model_config_ref=self.config.evaluation_result_analyzer.model_config_ref,
             output_dir=output_dir / "behavior_check",
+            output_repair=self.config.evaluation_result_analyzer.output_repair,
         ) if not _eval_has_errors(candidate_eval_ref) else {}
         for case_id, observation in observations.items():
             required_names = []
@@ -1603,7 +1625,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             }
             for case_id in target_case_ids
         }
-        if (not accepted and not _eval_has_errors(candidate_eval_ref)
+        if (not accepted and not _eval_has_errors(candidate_eval_ref) and "inconclusive" not in reason
+                and failure_class != "behavior_evidence_inconclusive"
                 and not _is_operational_repair({"candidate_behavior_by_case": candidate_behavior_by_case})):
             paired_feedback = {
                 "by_case": {
@@ -1636,7 +1659,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 "accepted"
                 if accepted
                 else "inconclusive"
-                if "inconclusive" in reason or "error_cases" in reason
+                if "inconclusive" in reason or "error_cases" in reason or failure_class == "behavior_evidence_inconclusive"
                 else "rejected"
             ),
             "reason": reason,
@@ -1681,6 +1704,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             },
             "missing_expected_tool_names": missing_tools,
             "missing_expected_tool_invocations": missing_tool_invocations,
+            "inconclusive_capability_case_ids": sorted(inconclusive_capability_case_ids),
+            "unverified_capability_invocations": unverified_capability_invocations,
             "expected_skill_names": expected_skills,
             "invoked_skill_names": invoked_skills,
             "invoked_skill_names_by_case": {
@@ -2860,12 +2885,27 @@ def _verifier_deltas_by_case(
         newly_passed_requirements = _requirement_snapshots(candidate_requirements, newly_passed_keys)
         remaining_failed_requirements = _requirement_snapshots(candidate_requirements, candidate_failed)
         regressed_requirements = _requirement_snapshots(candidate_requirements, regressed_keys)
+        improved_score_keys = set()
+        regressed_score_keys = set()
+        for key in source_requirements.keys() & candidate_requirements.keys():
+            before = _number(source_requirements[key].get("score"))
+            after = _number(candidate_requirements[key].get("score"))
+            if before is None or after is None:
+                continue
+            if after < before:
+                regressed_score_keys.add(key)
+            elif after > before and str(candidate_requirements[key].get("evidence", "")).strip():
+                improved_score_keys.add(key)
+        improved_requirement_scores = _requirement_snapshots(candidate_requirements, improved_score_keys)
+        regressed_requirement_scores = _requirement_snapshots(candidate_requirements, regressed_score_keys)
         deltas[case_id] = {
             "source_requirement_results": list(source_requirements.values()),
             "candidate_requirement_results": list(candidate_requirements.values()),
             "newly_passed_requirements": newly_passed_requirements,
             "remaining_failed_requirements": remaining_failed_requirements,
             "regressed_requirements": regressed_requirements,
+            "improved_requirement_scores": improved_requirement_scores,
+            "regressed_requirement_scores": regressed_requirement_scores,
             "source_fail_to_pass_success": sorted(source_f2p_success),
             "candidate_fail_to_pass_success": sorted(candidate_f2p_success),
             "newly_passed_fail_to_pass": newly_passed,
@@ -2878,7 +2918,10 @@ def _verifier_deltas_by_case(
             "remaining_failed_atomic_checks": sorted(candidate_atomic_failure),
             "regressed_atomic_checks": regressed_atomic,
             "partial_progress": bool(
-                newly_passed_requirements and remaining_failed_requirements and not regressed_requirements
+                (newly_passed_requirements or improved_requirement_scores)
+                and remaining_failed_requirements
+                and not regressed_requirements
+                and not regressed_requirement_scores
             ),
             "source_patch_successfully_applied": source_status.get("patch_successfully_applied"),
             "candidate_patch_successfully_applied": candidate_status.get("patch_successfully_applied"),
@@ -3350,6 +3393,17 @@ def _select_gate_from_epoch_checkpoint(
                     }
                 )
     if missing_runtime_invocations:
+        incomplete = inconclusive_capability_cases(full_eval_ref, missing_runtime_invocations)
+        if incomplete:
+            return {
+                "retained": False,
+                "reason": "candidate_target_inconclusive_at_epoch_checkpoint",
+                "failure_class": "infrastructure_or_evidence_failure",
+                "failed_target_case_ids": [],
+                "inconclusive_target_case_ids": sorted(incomplete),
+                "missing_runtime_invocations": [],
+                "correlated_regression_case_ids": [],
+            }
         return {
             "retained": False,
             "reason": "candidate_capability_not_used_at_epoch_checkpoint",
@@ -3619,6 +3673,9 @@ def _checkpoint_remove_added_capability(
     target_rel: str,
     runtime_name: str,
 ) -> None:
+    if action_group == "config":
+        _checkpoint_remove_path(harness_root, "runtime.yaml")
+        return
     if action_group == "skill":
         parts = Path(target_rel).parts
         skill_root = Path(parts[0], parts[1]).as_posix() if len(parts) >= 2 and parts[0] == "skills" else target_rel
@@ -3663,6 +3720,9 @@ def _checkpoint_copy_capability(
     target_rel: str,
     runtime_name: str,
 ) -> None:
+    if action_group == "config":
+        _checkpoint_copy_path(harness_root, candidate_harness_root, "runtime.yaml")
+        return
     copy_rel = target_rel
     manifest_name = ""
     manifest_key = ""
@@ -4240,6 +4300,7 @@ def _candidate_can_continue_locally(gate: dict[str, Any], cases: list[dict[str, 
         return False
     regression_keys = (
         "regressed_requirements", "regressed_fail_to_pass", "regressed_pass_to_pass", "regressed_atomic_checks",
+        "regressed_requirement_scores",
     )
     for delta in deltas.values():
         if any(delta.get(key) for key in regression_keys):

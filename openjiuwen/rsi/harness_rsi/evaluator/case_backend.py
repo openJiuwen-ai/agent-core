@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -20,6 +21,9 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.setup import get_config, init_observability
 from openjiuwen.harness.factory import create_deep_agent
+from openjiuwen.harness.execution_subject import ExecutionSubject
+from openjiuwen.harness.observability.run_span import close_agent_run_span, open_agent_run_span
+from openjiuwen.harness.observability.setup import acquire_observability
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
 from openjiuwen.rsi.harness_rsi.data_loader.case_files import copy_public_assets, task_input
 from openjiuwen.rsi.harness_rsi.evaluator.controlled_skill_treatment_rail import (
@@ -32,6 +36,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger import JudgeResult
 from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import (
     RSISkillUseRail,
     RSISysOperationRail,
+    RSITrajectoryRail,
     run_agent_with_empty_response_recovery,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.swebench_runtime import prepare_swebench_workspace
@@ -46,11 +51,13 @@ from openjiuwen.rsi.harness_rsi.evaluator.terminal_bench_runtime import (
 from openjiuwen.rsi.harness_rsi.evaluator.trajectory_paths import (
     ROLE_TRAJECTORY_DIR_NAME,
     RoleFileTrajectoryStore,
+    role_execution_evidence,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     load_member_optimizer_model,
 )
 from openjiuwen.rsi.harness_rsi.runtime_reliability import build_single_agent_reliability_rail
+from openjiuwen.rsi.harness_rsi.runtime_policy import read_runtime_policy
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,9 +136,22 @@ class SingleHarnessExecutionBackend:
         solver_container_name = ""
         command_recorder: TerminalBenchCommandRecorder | None = None
         swebench_model_patch_path = ""
+        trajectory_rail: RSITrajectoryRail | None = None
+        root_recording = False
+        sys_operation = None
+        case_root = Path(output_dir).expanduser().resolve()
+        runtime_config: dict[str, Any] = {}
 
         try:
             role_name, harness_path = _resolve_single_harness_ref(harness_refs or {})
+            runtime_policy = read_runtime_policy(
+                harness_path, default_max_iterations=self.config.solver_max_iterations,
+                default_on_max_iterations=self.config.solver_on_max_iterations,
+                hard_limit=self.config.solver_max_iterations_hard_limit,
+            )
+            runtime_config = runtime_policy.to_dict()
+            case_root.mkdir(parents=True, exist_ok=True)
+            (case_root / "runtime_config.json").write_text(json.dumps(runtime_config, indent=2), encoding="utf-8")
             workspace_dir = _single_harness_workspace_dir(
                 case=case,
                 output_dir=Path(output_dir).expanduser().resolve(),
@@ -195,7 +215,10 @@ class SingleHarnessExecutionBackend:
                 workspace=str(workspace_dir),
                 rails=[rail for rail in agent_rails if not isinstance(rail, RSISkillUseRail)],
                 enable_task_loop=False,
-                max_iterations=100,
+                max_iterations=runtime_policy.max_iterations,
+                on_max_iterations=runtime_policy.on_max_iterations,
+                max_iterations_hard_limit=runtime_policy.max_iterations_hard_limit,
+                invocation_log_dir=str(case_root / "logs"),
                 language="en",
                 restrict_to_work_dir=False,
                 auto_create_workspace=True,
@@ -222,18 +245,38 @@ class SingleHarnessExecutionBackend:
                 skill_rail.trigger_at_task_start = True
             if solver_container_name:
                 _enforce_container_sys_operation_rail(agent)
-            _attach_single_harness_trajectory_rail(
+            trajectory_rail = _attach_single_harness_trajectory_rail(
                 agent,
                 output_dir=output_dir,
                 role_name=role_name,
                 trajectory_span_processor=self._trajectory_span_processor,
             )
 
-            response = await run_agent_with_empty_response_recovery(
-                agent,
-                {"query": _case_inputs(case)},
-                session=session_id,
+            run_span = open_agent_run_span(
+                session_id=session_id,
+                mode="rsi.solver",
+                execution_subject=ExecutionSubject(
+                    subject_id=agent.card.id,
+                    display_name=role_name,
+                    kind="main_agent",
+                    session_id=session_id,
+                ),
             )
+            root_recording = bool(run_span is not None and run_span.is_recording())
+            run_error: BaseException | None = None
+            try:
+                response = await run_agent_with_empty_response_recovery(
+                    agent,
+                    {"query": _case_inputs(case)},
+                    session=session_id,
+                )
+            except BaseException as exc:
+                run_error = exc
+                raise
+            finally:
+                close_agent_run_span(
+                    run_span, session_id=session_id, output=response, exception=run_error,
+                )
         except EvaluationInfrastructureError:
             status = "failed"
             raise
@@ -271,6 +314,20 @@ class SingleHarnessExecutionBackend:
                     remove_terminal_bench_container(solver_container_name)
 
         logger.info("[SingleHarnessExecutionBackend] end to execute case: {}".format(case.get("case_id", "")))
+        result_data = response if isinstance(response, dict) else {}
+        termination = {
+            "termination_reason": result_data.get("termination_reason", "exception" if error else "completed"),
+            "iterations_used": result_data.get("iterations_used", trajectory_rail.model_call_count if trajectory_rail else None),
+            "max_iterations": result_data.get("max_iterations", runtime_config.get("max_iterations")),
+            "result_type": result_data.get("result_type", "error" if error else "answer"),
+            "truncated_by_max_iterations": bool(result_data.get("truncated_by_max_iterations", False)),
+            "finalization_attempted": bool(result_data.get("finalization_attempted", False)),
+            "finalization_succeeded": bool(result_data.get("finalization_succeeded", False)),
+            "finalization_error": str(result_data.get("finalization_error", ""))[:2000],
+        }
+        case_root.mkdir(parents=True, exist_ok=True)
+        (case_root / "termination.json").write_text(json.dumps(termination, indent=2), encoding="utf-8")
+        runtime_logs = [path.relative_to(case_root).as_posix() for path in sorted((case_root / "logs").rglob("*.jsonl"))]
         return CaseExecutionResult(
             response=response,
             execution_status=status,
@@ -288,6 +345,18 @@ class SingleHarnessExecutionBackend:
                 skill_triggers=[record for rail in skill_use_rails for record in rail.task_trigger_records()],
                 command_recorder=command_recorder,
                 swebench_model_patch_path=swebench_model_patch_path,
+                solver_max_iterations=runtime_config.get("max_iterations", self.config.solver_max_iterations),
+                runtime_config=runtime_config,
+                execution_termination=termination,
+                runtime_logs=runtime_logs,
+                execution_evidence=role_execution_evidence(
+                    Path(output_dir).expanduser().resolve() / ROLE_TRAJECTORY_DIR_NAME,
+                    role_name or "solver",
+                    root_recording=root_recording,
+                    capture_issues=trajectory_rail.capture_issues if trajectory_rail is not None else None,
+                    expected_model_calls=trajectory_rail.model_call_count if trajectory_rail is not None else None,
+                    expected_tool_calls=trajectory_rail.tool_call_count if trajectory_rail is not None else None,
+                ),
             ),
         )
 
@@ -312,20 +381,24 @@ def _attach_single_harness_trajectory_rail(
     output_dir: str | Path,
     role_name: str,
     trajectory_span_processor: TrajectorySpanProcessor,
-) -> None:
+) -> RSITrajectoryRail:
     """Persist native tool calls so candidate capability gates can observe them."""
-    from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
 
     trace_root = Path(output_dir).expanduser().resolve() / ROLE_TRAJECTORY_DIR_NAME
-    config = get_config() or ObservabilityConfig(exporter="file", traces_dir=str(trace_root))
-    init_observability(config, additional_span_processors=(trajectory_span_processor,))
-    store = RoleFileTrajectoryStore(trace_root, role_name or "solver")
-    agent.add_rail(
-        TrajectoryRail(
-            trajectory_store=store,
-            trajectory_span_processor=trajectory_span_processor,
-        )
+    config = get_config() or ObservabilityConfig(
+        exporter="file", traces_dir=str(trace_root.parent / "otel"),
     )
+    # The shared provider alone does not enable single-agent run roots. Native
+    # LLM/tool callbacks require that root to produce any execution spans.
+    init_observability(config, additional_span_processors=(trajectory_span_processor,))
+    acquire_observability(config)
+    store = RoleFileTrajectoryStore(trace_root, role_name or "solver", merge_invocations=True)
+    rail = RSITrajectoryRail(
+        trajectory_store=store,
+        trajectory_span_processor=trajectory_span_processor,
+    )
+    agent.add_rail(rail)
+    return rail
 
 
 def _single_harness_rails(
@@ -576,10 +649,20 @@ def _single_harness_metadata(
     skill_triggers: list[dict[str, Any]] | None = None,
     command_recorder: TerminalBenchCommandRecorder | None = None,
     swebench_model_patch_path: str = "",
+    solver_max_iterations: int = 300,
+    runtime_config: dict[str, Any] | None = None,
+    execution_termination: dict[str, Any] | None = None,
+    runtime_logs: list[str] | None = None,
+    execution_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     metadata: dict[str, Any] = {
         "member_id": role_name,
         "member_role": role_name,
+        "solver_max_iterations": solver_max_iterations,
+        "runtime_config": runtime_config or {},
+        "execution_termination": execution_termination or {},
+        "runtime_logs": list(runtime_logs or []),
+        "execution_evidence": execution_evidence or {"status": "incomplete", "reasons": ["capture_not_started"]},
         "workspace_changes": _workspace_changes(workspace_before, workspace_after),
     }
     team_skill_metadata = _single_harness_team_skill_metadata(team_skill_ref_path)

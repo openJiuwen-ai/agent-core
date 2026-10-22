@@ -353,7 +353,9 @@ def test_candidate_gate_respects_capability_activation_phase(
                 encoding="utf-8",
             )
             result_path = case_dir / "result.json"
-            result_path.write_text("{}", encoding="utf-8")
+            result_path.write_text(json.dumps({"metadata": {"execution": {"execution_evidence": {
+                "status": "complete", "timing_complete": True,
+            }}}}), encoding="utf-8")
             eval_ref = output_dir / "eval_ref.yaml"
             _write_yaml(
                 eval_ref,

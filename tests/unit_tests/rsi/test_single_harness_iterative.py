@@ -745,7 +745,9 @@ class _Evaluator:
             case_dir.mkdir(parents=True, exist_ok=True)
             result_path = case_dir / "result.json"
             trace_path = case_dir / "trace.json"
-            result_path.write_text("{}", encoding="utf-8")
+            result_path.write_text(json.dumps({"metadata": {"execution": {"execution_evidence": {
+                    "status": "complete", "timing_complete": True,
+                }}}}), encoding="utf-8")
             trace_path.write_text("{}", encoding="utf-8")
             case_refs.append(
                 {
@@ -4141,7 +4143,9 @@ def test_candidate_gate_rejects_capability_first_used_after_workspace_edit(
                 encoding="utf-8",
             )
             result_path = case_dir / "result.json"
-            result_path.write_text("{}", encoding="utf-8")
+            result_path.write_text(json.dumps({"metadata": {"execution": {"execution_evidence": {
+                    "status": "complete", "timing_complete": True,
+                }}}}), encoding="utf-8")
             eval_ref = output_dir / "eval_ref.yaml"
             _write_yaml(
                 eval_ref,
@@ -5137,7 +5141,9 @@ def test_candidate_gate_does_not_evaluate_unrelated_case_for_attribution(
                     encoding="utf-8",
                 )
                 result_path = case_dir / "result.json"
-                result_path.write_text("{}", encoding="utf-8")
+                result_path.write_text(json.dumps({"metadata": {"execution": {"execution_evidence": {
+                    "status": "complete", "timing_complete": True,
+                }}}}), encoding="utf-8")
                 case_refs.append(
                     {
                         "case_id": case_id,
