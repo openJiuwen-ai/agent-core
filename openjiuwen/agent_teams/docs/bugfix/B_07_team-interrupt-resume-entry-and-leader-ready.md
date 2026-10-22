@@ -6,7 +6,8 @@
 |---|---|
 | 日期 | 2026-10-20 |
 | 严重程度 | 中：中断（ask-user / 审批类）后团队无法程序化恢复；裸文本投递是**静默失败**（无错误、无输出，中断永远挂起）；`inputs=None` 伪造一轮 `"None"` 垃圾输入 |
-| 范围 | `core/runner/team_runner.py`（新增 `resume_agent_team_interrupt_streaming` 实例方法 + 类门面）、`agent_teams/schema/stream.py`（新增 `is_team_recovered_marker`）、`agent_teams/agent/stream_controller.py`（新增 `emit_team_recovered`）、`agent_teams/agent/coordination/kernel.py`（`start()` 尾部 leader-only 发射标记帧）、`agent_teams/agent/team_agent.py`（`_prepare_initial_input` None 防护）、`core/common/exception/codes.py`（新增 `AGENT_TEAM_LEADER_START_TIMEOUT`）、`tests/unit_tests/agent_teams/test_team_agent_coordination.py`、`tests/unit_tests/agent_teams/test_runner_team_runtime.py` |
+| 范围 | `core/runner/team_runner.py`（新增 `start_agent_team_streaming` 实例方法 + 类门面 + `_stream_leader_lifecycle` 共享生命周期）、`agent_teams/agent/team_agent.py`（新增 `stream_runtime` 无输入 runtime 流 + `_consume_stream_queue` 共享消费循环）、`agent_teams/schema/stream.py`（新增 `is_team_recovered_marker`）、`agent_teams/agent/stream_controller.py`（新增 `emit_team_recovered`）、`agent_teams/agent/coordination/kernel.py`（`start()` 尾部 leader-only 发射标记帧）、`agent_teams/agent/team_agent.py`（`_prepare_initial_input` None 防护）、`core/common/exception/codes.py`（新增 `AGENT_TEAM_LEADER_START_TIMEOUT`）、`tests/unit_tests/agent_teams/test_team_agent_coordination.py`、`tests/unit_tests/agent_teams/test_runner_team_runtime.py`；宿主编排在 jiuwenswarm `team_helpers.py`（见决策 4） |
+| 测试基线 | `pytest tests/unit_tests/agent_teams/test_runner_team_runtime.py tests/unit_tests/agent_teams/runtime/ tests/unit_tests/agent_teams/test_team_agent_coordination.py tests/unit_tests/agent_teams/test_coordination_lifecycle.py tests/unit_tests/agent_teams/agent/test_member_activity.py tests/unit_tests/agent_teams/test_stream_controller.py` → 372 passed, 19 skipped（skip 均为既有条件跳过）；宿主侧 jiuwenswarm `test_team_helpers.py` → 233 passed |
 | 测试基线 | `pytest tests/unit_tests/agent_teams/test_runner_team_runtime.py tests/unit_tests/agent_teams/runtime/ tests/unit_tests/agent_teams/test_team_agent_coordination.py tests/unit_tests/agent_teams/test_coordination_lifecycle.py tests/unit_tests/agent_teams/agent/test_member_activity.py tests/unit_tests/agent_teams/test_stream_controller.py` → 376 passed, 19 skipped（skip 均为既有条件跳过；含本修复新增 9 例） |
 | 关联 spec | `S_01_public-api-and-spec-flow.md`（不变量 17 + 入口签名与错误语义）、`S_04_session-and-recovery.md`（I-9 中断恢复流）；`agent_teams/AGENTS.md` / `runtime/AGENTS.md` / `coordination/AGENTS.md` 表面同步 |
 | Refs | #4910 |
@@ -39,11 +40,19 @@ SDK 侧没有把"重新拉起团队 + 恢复中断"一次完成的入口，调�
 
 ## 决策
 
-**原则：恢复 = recovery 流 + 就绪门 + 类型化投递，三步一个入口，时序靠信号不靠猜。**
+**原则：Core 提供"无输入启动流 + 可观察就绪门"，恢复编排（何时投递、超时、失败映射）归宿主；时序靠信号不靠猜。**
 
-1. **`Runner.resume_agent_team_interrupt_streaming`**：驱动 `run_agent_team_streaming(inputs=None)`
-   的 recovery 流并转发其 chunk，读到就绪标记后经 `interact_agent_team` 提交
-   `InteractiveInput`，继续转发直到 run cycle 结束。
+1. **`Runner.start_agent_team_streaming`（最终形态）**：无输入 runtime 启动流——与
+   `run_agent_team_streaming` 共享 `_stream_leader_lifecycle`（activate / REJECT /
+   `team.runtime_ready` / observability / controller / finalize / gate / post_run），
+   但驱动 `TeamAgent.stream_runtime`：不投首轮用户输入、不写记忆 query，只绑定
+   session、恢复状态、启动 coordination 并执行 mailbox / task poll。宿主读到
+   `team.recovered` 标记后自行经 `interact_agent_team` 提交 `InteractiveInput`
+   并施加超时 / 失败策略。**中间形态是一个自包含的
+   `resume_agent_team_interrupt_streaming`**（内部 pump `run_agent_team_streaming(inputs=None)`
+   + 队列 + 双预算等标记 + 自动 interact），评审后按"启动与恢复判断分层"的要求
+   拆解：Core 不应理解 ask_user 语义、不应借 `inputs=None` 伪装启动，宿主策略
+   上移 jiuwenswarm。
 2. **就绪信号是流上的 `team.recovered` 标记帧**：`kernel.start()` 尾部
    （`resume_paused_round` 之后、kernel 全活）leader-only 经
    `StreamController.emit_team_recovered` 入队；`is_team_recovered_marker`
@@ -53,16 +62,15 @@ SDK 侧没有把"重新拉起团队 + 恢复中断"一次完成的入口，调�
    （`watch_next_leader_ready` 注册 + `activate` 尾部挂发布回调 + 池身份校验），
    评审后因跨组件状态多（manager 字典 + kernel 回调装卸 + runner 双 task 收敛）
    而简化为标记帧——机制从"manager 里的一次性注册"变成"流上多一种 chunk"。
-3. **契约收紧并边界校验**：`user_input: InteractiveInput` 必填、`session` 必填，违规抛
-   `AGENT_TEAM_CONFIG_INVALID`——堵住裸 `str` 静默不恢复的失败模式（中断状态与 spec bucket
-   都在原 session 的 checkpoint 里，新 session 无法恢复）。
-4. **错误统一 StatusCode**：流先于标记失败 / 结束 / interact 被拒（reason token 透传）→
-   `AGENT_TEAM_STATE_INVALID`；恢复超时 → 新增 `AGENT_TEAM_LEADER_START_TIMEOUT`（132009，
-   模板带 `{timeout}`，自动映射 `ExecutionError` 可重试）。超时是**双预算**：帧间
-   `_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS`（30s，相邻两帧最大间隔）+ 总计
-   `_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS`（120s，整个标记等待）——recovery 流由后台
-   pump 转入本地队列（复用流式队列消费模式），生产与消费解耦，慢消费者不吃任何预算；
-   逐帧滴流（帧间不超时但总量超时）由总计预算兜底。
+3. **契约收紧并边界校验**：`session` 必填（非 `str | AgentTeamSession` 抛
+   `AGENT_TEAM_CONFIG_INVALID`）；`InteractiveInput` 的类型契约由宿主与
+   `manager.interact` 共同守卫（只有该类型走 `agent.resume_interrupt` 分支）。
+4. **错误语义**：流内原始异常原样传播、REJECT 静默结束与 run 路径一致（共享
+   生命周期保证）；新增 `AGENT_TEAM_LEADER_START_TIMEOUT`（132009，模板带
+   `{timeout}`，自动映射 `ExecutionError` 可重试）保留给宿主报告启动超时——
+   帧间 / 总计双预算的实现（含"等待帧时禁用 `asyncio.wait_for` 包 `__anext__`，
+   其临时 Task 会拆散 execution-subject contextvar 作用域"的坑）落在 jiuwenswarm
+   的流消费层。
 5. **`str(None)` 防护**：`inputs is None` → 空 query，空即不伪造首轮（回归既有契约）。
 
 ## 拒绝的方案
@@ -95,14 +103,12 @@ SDK 侧没有把"重新拉起团队 + 恢复中断"一次完成的入口，调�
 
 | 用例 | 覆盖 |
 |---|---|
-| `..._resumes_and_forwards`（level0） | chunk 顺序（runtime_ready → recovered → 前置 chunk → 恢复后 chunk）、`resume_interrupt` 收到原 `InteractiveInput`、recovery 流传 `inputs=None` |
-| `test_runner_resume_rejects_non_interactive_input` | 裸 `str` 边界拒绝（`AGENT_TEAM_CONFIG_INVALID`） |
-| `test_runner_resume_rejects_missing_session` | session 缺失拒绝 |
-| `..._propagates_stream_failure_before_ready` | 流先失败：原始异常传播 |
-| `..._times_out_when_leader_never_ready` | 标记永不出现（流静默）：帧间预算触发 `AGENT_TEAM_LEADER_START_TIMEOUT` |
-| `..._total_budget_bounds_the_marker_wait` | 逐帧滴流（帧间不超时）：总计预算触发 `AGENT_TEAM_LEADER_START_TIMEOUT` |
-| `..._raises_when_stream_ends_before_marker` | 流静默结束无标记：`AGENT_TEAM_STATE_INVALID` |
-| `..._raises_when_interact_rejected` | interact 被拒（`unsupported_interactive_input` → `AGENT_TEAM_STATE_INVALID`，reason 透传） |
+| `..._uses_runtime_stream`（level0） | chunk 顺序（runtime_ready → recovered → 后续 chunk）、`stream_runtime` 被驱动且 `stream` 不被调、不投首轮输入（`stream_inputs` 为空） |
+| `test_runner_start_rejects_missing_session` | session 缺失拒绝（`AGENT_TEAM_CONFIG_INVALID`） |
+| `..._propagates_runtime_stream_failure` | `stream_runtime` 失败：原始异常传播 |
+
+宿主侧编排（读标记后 interact、双预算超时、interact 被拒、contextvar 作用域回归）在
+jiuwenswarm `tests/unit_tests/agentserver/test_team_helpers.py` 覆盖。
 
 ## 已知遗留
 

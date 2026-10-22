@@ -5,9 +5,10 @@
 
 The public ``Runner`` facade exposes the team run pair
 (``run_agent_team`` / ``run_agent_team_streaming``) plus the
-interrupt-resume entry ``resume_agent_team_interrupt_streaming``
-(start a recovered team, resume its pending interrupt once the
-leader is ready, forward the session's stream):
+no-input runtime start entry ``start_agent_team_streaming``
+(activate a team runtime -- cold start or recovery -- and stream it;
+hosts read ``team.recovered`` on the stream to know when interact is
+safe):
 
 * ``Runner.run_agent_team`` / ``run_agent_team_streaming`` — accepts
   ``str | TeamAgentSpec | BaseTeam | BaseAgent`` and routes by two
@@ -45,8 +46,6 @@ Plus one method:
 
 from __future__ import annotations
 
-import asyncio
-import time
 from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
@@ -70,7 +69,6 @@ from openjiuwen.core.multi_agent import (
 )
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import (
     BaseStreamMode,
     OutputSchema,
@@ -96,11 +94,6 @@ if TYPE_CHECKING:
 
 
 _TEAM_REJECT_KINDS: Optional[frozenset] = None
-# Recovery budgets for resume_agent_team_interrupt_streaming: no queue frame
-# may arrive later than the frame budget after the previous one, and the
-# whole wait for the team.recovered marker may not exceed the total budget.
-_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS = 30.0
-_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS = 120.0
 
 
 def _team_reject_kinds() -> frozenset:
@@ -290,6 +283,99 @@ class _TeamRunnerMixin:
                 yield chunk
             return
         spec = await self._resolve_team_agent_spec(agent_team, session=session)
+        async for chunk in self._stream_leader_lifecycle(
+            spec,
+            session,
+            inputs,
+            context=context,
+            stream_modes=stream_modes,
+            envs=envs,
+            stream_logger=stream_logger,
+            background_task_controller=background_task_controller,
+            run_context=run_context,
+        ):
+            yield chunk
+
+    async def start_agent_team_streaming(
+        self,
+        agent_team: Union[str, "TeamAgentSpec"],
+        *,
+        session: Union[str, AgentTeamSession],
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None,
+        stream_logger: Optional["TeamStreamLogger"] = None,
+        background_task_controller: Optional[Any] = None,
+        run_context: RunContextInput | None = None,
+    ) -> AsyncIterator[Any]:
+        """Start (or recover) a team runtime with no user input and stream it.
+
+        Drives the shared leader streaming lifecycle with no inputs: the
+        runtime is activated (cold start / cold recover / resume-from-pause
+        dispatch as usual), then the leader runtime is started via
+        ``TeamAgent.stream_runtime`` -- session binding, state restoration,
+        coordination bus startup and the initial mailbox / task polls, with
+        no first-round user message and no memory query. Chunks (including
+        ``team.runtime_ready`` and ``team.recovered``) are forwarded in
+        order until the team settles the run cycle.
+
+        ``team.recovered`` is the interact gate: once a consumer reads it,
+        the leader runtime is fully live and ``interact_agent_team`` may be
+        submitted safely. Whether a given call is an interrupt resume, when
+        to submit the ``InteractiveInput``, and how long to wait for the
+        marker are host policies -- this entry only provides the stream.
+
+        ``session`` is required: the team state (spec bucket / pending
+        interrupt) lives in that session's checkpoint.
+        """
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        if not isinstance(session, (str, AgentTeamSession)):
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=(
+                    "start_agent_team_streaming requires the session to bind the runtime; "
+                    f"got {type(session).__name__}"
+                ),
+            )
+        spec = await self._resolve_team_agent_spec(agent_team, session=session)
+        async for chunk in self._stream_leader_lifecycle(
+            spec,
+            session,
+            None,
+            context=context,
+            stream_modes=stream_modes,
+            envs=envs,
+            stream_logger=stream_logger,
+            background_task_controller=background_task_controller,
+            run_context=run_context,
+            runtime_only=True,
+        ):
+            yield chunk
+
+    async def _stream_leader_lifecycle(
+        self,
+        spec: "TeamAgentSpec",
+        session: Optional[Union[str, AgentTeamSession]],
+        inputs: Any,
+        *,
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None,
+        stream_logger: Optional["TeamStreamLogger"] = None,
+        background_task_controller: Optional[Any] = None,
+        run_context: RunContextInput | None = None,
+        runtime_only: bool = False,
+    ) -> AsyncIterator[Any]:
+        """Shared leader streaming lifecycle for the team run entries.
+
+        Owns the full run cycle: activation dispatch, the runtime-ready
+        marker, observability / controller attachment, the agent stream
+        (``runtime_only=True`` starts the runtime with no input via
+        ``stream_runtime``), and the finalize / gate-close / post_run
+        teardown. REJECT activations return without touching the pool entry.
+        """
         team_name_for_finally = spec.team_name
         token = self._enter_root_task_group_context()
         try:
@@ -298,7 +384,7 @@ class _TeamRunnerMixin:
                 action = activation.action
                 if _is_team_reject_kind(action.kind):
                     logger.warning(
-                        "run_agent_team_streaming rejected for team/session ({}, {}), kind={}, reason={}",
+                        "team streaming rejected for team/session ({}, {}), kind={}, reason={}",
                         spec.team_name,
                         activation.session.get_session_id(),
                         action.kind.value,
@@ -323,18 +409,22 @@ class _TeamRunnerMixin:
                     # Attach the embedder's pause/resume control surface to the
                     # leader brain; SwarmflowTool reads it to register run handles.
                     activation.agent.set_background_task_controller(background_task_controller)
-                stream_inputs = inputs
-                normalized_run_context = normalize_run_context(run_context)
-                if normalized_run_context is not None:
-                    if isinstance(inputs, dict):
-                        stream_inputs = dict(inputs)
-                        stream_inputs["run_context"] = normalized_run_context
-                    else:
-                        stream_inputs = {
-                            "query": inputs,
-                            "run_context": normalized_run_context,
-                        }
-                async for chunk in activation.agent.stream(stream_inputs, session=activation.session):
+                if runtime_only:
+                    agent_stream = activation.agent.stream_runtime(session=activation.session)
+                else:
+                    stream_inputs = inputs
+                    normalized_run_context = normalize_run_context(run_context)
+                    if normalized_run_context is not None:
+                        if isinstance(inputs, dict):
+                            stream_inputs = dict(inputs)
+                            stream_inputs["run_context"] = normalized_run_context
+                        else:
+                            stream_inputs = {
+                                "query": inputs,
+                                "run_context": normalized_run_context,
+                            }
+                    agent_stream = activation.agent.stream(stream_inputs, session=activation.session)
+                async for chunk in agent_stream:
                     if stream_logger is not None:
                         stream_logger.feed(chunk)
                     yield chunk
@@ -356,173 +446,6 @@ class _TeamRunnerMixin:
                     logger.exception("cleanup after stream failed for team=%s", team_name_for_finally)
         finally:
             self._exit_root_task_group_context(token)
-
-    async def resume_agent_team_interrupt_streaming(
-        self,
-        agent_team: Union[str, "TeamAgentSpec"],
-        user_input: InteractiveInput,
-        *,
-        session: Union[str, AgentTeamSession],
-        context: Optional[ModelContext] = None,
-        stream_modes: Optional[list[BaseStreamMode]] = None,
-        envs: Optional[dict[str, Any]] = None,
-        stream_logger: Optional["TeamStreamLogger"] = None,
-        background_task_controller: Optional[Any] = None,
-        run_context: RunContextInput | None = None,
-    ) -> AsyncIterator[Any]:
-        """Start a recovered team and resume its pending interrupt once ready.
-
-        The recovery stream (``run_agent_team_streaming`` with empty inputs)
-        is pumped into a local queue whose frames are forwarded to the
-        caller until the recovered marker (``team.recovered``, enqueued at
-        the tail of ``CoordinationKernel.start`` once the session state is
-        bound and the leader runtime is fully live) is read. The wait is
-        bounded twice: no frame may arrive later than
-        ``_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS`` after the previous one, and
-        the whole marker wait may not exceed
-        ``_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS`` -- the pump decouples stream
-        production from consumption, so a slow consumer eats neither budget.
-        Once the marker is read, ``user_input`` is submitted through
-        ``interact_agent_team`` and the remaining frames are forwarded until
-        the team settles the run cycle.
-
-        ``user_input`` must be an :class:`InteractiveInput` resolving the
-        pending interrupt -- the interact layer only takes the
-        interrupt-resume branch for that type; a plain string would be
-        routed as a god-view steer and never resolve the interrupt.
-        ``session`` is required: the interrupted team state (spec bucket +
-        pending interrupt) lives in that session's checkpoint.
-
-        Raises ``AGENT_TEAM_*`` errors when the stream fails or ends
-        before the marker, either recovery budget is exceeded, or the
-        interact is rejected (the ``DeliverResult`` failure reason is
-        carried in the error).
-        """
-        from openjiuwen.agent_teams.schema.stream import is_team_recovered_marker
-        from openjiuwen.core.common.exception.codes import StatusCode
-        from openjiuwen.core.common.exception.errors import raise_error
-
-        if not isinstance(user_input, InteractiveInput):
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason=(
-                    "resume_agent_team_interrupt_streaming requires an InteractiveInput "
-                    f"resolving the pending interrupt; got {type(user_input).__name__}"
-                ),
-            )
-        if isinstance(session, AgentTeamSession):
-            team_session = session
-        elif isinstance(session, str):
-            team_session = create_agent_team_session(session_id=session)
-        else:
-            raise_error(
-                StatusCode.AGENT_TEAM_CONFIG_INVALID,
-                reason=(
-                    "resume_agent_team_interrupt_streaming requires the session holding "
-                    f"the interrupted team state; got {type(session).__name__}"
-                ),
-            )
-        spec = await self._resolve_team_agent_spec(agent_team, session=team_session)
-        session_id = team_session.get_session_id()
-        output_queue: asyncio.Queue = asyncio.Queue()
-
-        async def pump_stream() -> None:
-            """Forward stream frames into the queue; ``None`` marks a clean end.
-
-            The stream is driven from this task only, so teardown is a single
-            cancel and the consumer below never touches generator internals.
-            A stream failure is delivered as the exception object itself.
-            """
-            try:
-                async for chunk in self.run_agent_team_streaming(
-                    agent_team=spec,
-                    inputs=None,
-                    session=team_session,
-                    context=context,
-                    stream_modes=stream_modes,
-                    envs=envs,
-                    stream_logger=stream_logger,
-                    background_task_controller=background_task_controller,
-                    run_context=run_context,
-                ):
-                    await output_queue.put(chunk)
-            except Exception as exc:
-                await output_queue.put(exc)
-            else:
-                await output_queue.put(None)
-
-        pump_task = asyncio.create_task(pump_stream())
-        deadline = time.monotonic() + _TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS
-        try:
-            # Phase 1: forward frames until the recovered marker. Exits on
-            # marker / clean end (None) / stream failure (exception) / either
-            # recovery budget.
-            while True:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise_error(
-                        StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT,
-                        team_name=spec.team_name,
-                        timeout=_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS,
-                    )
-                try:
-                    item = await asyncio.wait_for(
-                        output_queue.get(),
-                        timeout=min(_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS, remaining),
-                    )
-                except TimeoutError as exc:
-                    if time.monotonic() >= deadline:
-                        raise_error(
-                            StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT,
-                            team_name=spec.team_name,
-                            timeout=_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS,
-                            cause=exc,
-                        )
-                    raise_error(
-                        StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT,
-                        team_name=spec.team_name,
-                        timeout=_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS,
-                        cause=exc,
-                    )
-                if item is None:
-                    raise_error(
-                        StatusCode.AGENT_TEAM_STATE_INVALID,
-                        reason=f"team '{spec.team_name}' stream ended before the leader became ready",
-                    )
-                if isinstance(item, BaseException):
-                    raise item
-                yield item
-                if is_team_recovered_marker(item):
-                    break
-            # Phase 2: the leader runtime is live, the interrupt is
-            # resolvable now; submit it and forward the remaining frames
-            # until the run cycle settles (stream end / failure).
-            result = await self.interact_agent_team(
-                user_input,
-                team_name=spec.team_name,
-                session_id=session_id,
-                run_context=run_context,
-            )
-            if not result:
-                reason = getattr(result, "reason", None) or "interrupt_resume_rejected"
-                raise_error(
-                    StatusCode.AGENT_TEAM_STATE_INVALID,
-                    reason=f"interrupt resume for team '{spec.team_name}' rejected: {reason}",
-                )
-            while True:
-                item = await output_queue.get()
-                if item is None:
-                    break
-                if isinstance(item, BaseException):
-                    raise item
-                yield item
-        finally:
-            if not pump_task.done():
-                pump_task.cancel()
-            try:
-                await pump_task
-            except asyncio.CancelledError:
-                pass
 
     async def _run_base_team(
         self,
@@ -1214,10 +1137,9 @@ class _TeamRunnerClassMixin:
             yield chunk
 
     @classmethod
-    async def resume_agent_team_interrupt_streaming(
+    async def start_agent_team_streaming(
         cls,
         agent_team: Union[str, "TeamAgentSpec"],
-        user_input: InteractiveInput,
         *,
         session: Union[str, AgentTeamSession],
         context: Optional[ModelContext] = None,
@@ -1227,14 +1149,13 @@ class _TeamRunnerClassMixin:
         background_task_controller: Optional[Any] = None,
         run_context: RunContextInput | None = None,
     ) -> AsyncIterator[Any]:
-        """Resume a recovered TeamAgent interrupt through a dedicated stream.
+        """Start (or recover) a team runtime with no user input and stream it.
 
-        See the instance method for the leader-ready contract and the
-        ``InteractiveInput`` / session requirements.
+        See the instance method for the ``team.recovered`` interact gate and
+        the session requirement.
         """
-        async for chunk in _global_runner().resume_agent_team_interrupt_streaming(
+        async for chunk in _global_runner().start_agent_team_streaming(
             agent_team=agent_team,
-            user_input=user_input,
             session=session,
             context=context,
             stream_modes=stream_modes,

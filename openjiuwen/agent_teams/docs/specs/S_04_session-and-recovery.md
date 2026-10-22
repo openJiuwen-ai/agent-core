@@ -179,25 +179,28 @@ session 切换有两条入口，差异**只在是否先清理旧 handle**：
 ### I-9 中断恢复流（interrupt resume，B_07）
 
 中断（ask-user / 审批类）关闭流之后，恢复不新增 session 状态机路径，而是组合
-既有路径并补一个**就绪门**：
+既有路径并补一个**就绪门**；Core 只提供无输入启动流，恢复编排归宿主：
 
-1. **recovery 流**：`Runner.resume_agent_team_interrupt_streaming` 驱动
-   `run_agent_team_streaming(inputs=None)` 并转发其 chunk——dispatch 照常选
-   `COLD_RECOVER` / `RESUME_FROM_PAUSE` / `CREATE`，`inputs=None` 不伪造首轮
-   （`_prepare_initial_input` 对 None 输出空 query）。
+1. **runtime 启动流**：宿主调 `Runner.start_agent_team_streaming`——与
+   `run_agent_team_streaming` 共享 leader 生命周期，但驱动
+   `TeamAgent.stream_runtime`：不投首轮用户输入、不写记忆 query，只绑定
+   session、恢复状态、启动 coordination 并执行 mailbox / task poll（dispatch
+   照常选 `COLD_RECOVER` / `RESUME_FROM_PAUSE` / `CREATE`）。
 2. **leader 就绪门**：就绪信号是流上的 `team.recovered` 标记帧——
    `kernel.start()` 尾部（`resume_paused_round` 之后，事件总线 / harness 全活）
    leader-only 经 `StreamController.emit_team_recovered` 入队。消费者读到该帧
    即可安全 interact；`is_team_recovered_marker`（`schema/stream.py`）是专用判定，
    `is_team_event_marker` 将其归入框架标记（非流式 `invoke` 自动跳过）。
-3. **投递**：读到标记后经 `interact_agent_team` 提交 `InteractiveInput`——
-   `manager.interact` 仅对该类型走 `agent.resume_interrupt` 分支；裸 `str` 会被
-   god-view 路由当普通 steer，中断保持 pending，故入口在边界直接拒绝。
+3. **投递（宿主编排）**：宿主在流消费层读到标记后经 `interact_agent_team`
+   提交 `InteractiveInput`——`manager.interact` 仅对该类型走
+   `agent.resume_interrupt` 分支；裸 `str` 会被 god-view 路由当普通 steer，
+   中断保持 pending。恢复等待的帧间 / 总计超时与失败映射同样归宿主
+   （jiuwenswarm 在 producer 层实现；等待帧时禁用 `asyncio.wait_for` 包
+   `__anext__`——其临时 Task 会拆散 execution-subject contextvar 作用域）。
 
-约束：`session` 必填（中断状态与 spec bucket 在原 session checkpoint）；标记静默
-受双预算约束：帧间 `_TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS`（30s，相邻两帧最大间隔）与总计 `_TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS`（120s，整个标记等待）；恢复流由后台 pump 转入本地队列（复用流式队列消费模式，无显式 `__anext__`），生产与消费解耦、慢消费者不吃预算，超限抛 `AGENT_TEAM_LEADER_START_TIMEOUT`；失败路径取消 pump
-不误伤）抛 `AGENT_TEAM_LEADER_START_TIMEOUT`；失败路径关闭 recovery 流，run cycle
-经正常 `finalize` 收敛。
+约束：`session` 必填（中断状态与 spec bucket 在原 session checkpoint）；Core 侧
+`AGENT_TEAM_LEADER_START_TIMEOUT` 状态码保留给宿主报告启动超时；失败路径关闭
+启动流，run cycle 经正常 `finalize` 收敛。
 
 ## 接口契约
 

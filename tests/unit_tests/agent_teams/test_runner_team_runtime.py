@@ -1,7 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-import asyncio
 import uuid
 from types import SimpleNamespace
 from typing import (
@@ -41,7 +40,6 @@ from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.checkpointer.checkpointer import InMemoryCheckpointer
-from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent import (
     AgentCard,
@@ -2454,101 +2452,53 @@ def mock_group_history_cleanup(monkeypatch):
     )
 
 
-class _ResumeInterruptAgent(FakeTeamAgent):
-    """FakeTeamAgent with the recovered marker and interrupt-resume faces.
+class _RuntimeStreamAgent(FakeTeamAgent):
+    """FakeTeamAgent whose ``stream_runtime`` emits the recovered marker.
 
-    ``stream`` emits the ``team.recovered`` marker first (simulating
-    the ``kernel.start`` tail), stays open until the interrupt resume
-    arrives, then yields a post-resume chunk — mirroring a persistent
-    team whose stream outlives the interaction.
+    The no-input start entry must drive ``stream_runtime`` (never
+    ``stream``) and forward its frames in order.
     """
 
     def __init__(self, team_name: str) -> None:
         super().__init__(team_name, stream_label="leader.chunk")
-        self.pending_interrupt = True
-        self.resumed_inputs: list[Any] = []
-        self._resume_received = asyncio.Event()
+        self.runtime_stream_calls = 0
+        self.runtime_stream_sessions: list[Any] = []
 
-    def has_pending_interrupt(self) -> bool:
-        return self.pending_interrupt
-
-    async def resume_interrupt(self, user_input: Any, *, run_context: Any = None) -> None:
-        self.resumed_inputs.append(user_input)
-        self._resume_received.set()
-
-    async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
-        self.stream_calls += 1
-        self.stream_inputs.append(inputs)
+    async def stream_runtime(self, session=None) -> AsyncIterator[Any]:
+        self.runtime_stream_calls += 1
+        self.runtime_stream_sessions.append(session)
         yield TeamOutputSchema(type="message", index=0, payload={"event_type": "team.recovered"})
         yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
-        await self._resume_received.wait()
         yield OutputSchema(type="message", index=2, payload={"event_type": "leader.chunk.2"})
 
 
-class _FailingStreamAgent(FakeTeamAgent):
-    """Agent whose stream yields one chunk then fails before leader-ready."""
+class _FailingRuntimeStreamAgent(FakeTeamAgent):
+    """Agent whose ``stream_runtime`` fails after one chunk."""
 
     def __init__(self, team_name: str) -> None:
         super().__init__(team_name, stream_label="leader.chunk")
 
-    async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
+    async def stream_runtime(self, session=None) -> AsyncIterator[Any]:
         yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
-        raise ValueError("stream exploded")
-
-
-class _NeverReadyAgent(FakeTeamAgent):
-    """Agent whose stream stays alive but never emits the recovered marker."""
-
-    def __init__(self, team_name: str) -> None:
-        super().__init__(team_name, stream_label="leader.chunk")
-
-    async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
-        yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
-        await asyncio.Event().wait()
-
-
-class _TrickleStreamAgent(FakeTeamAgent):
-    """Agent whose stream trickles frames forever without the recovered marker."""
-
-    def __init__(self, team_name: str) -> None:
-        super().__init__(team_name, stream_label="leader.chunk")
-
-    async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
-        index = 0
-        while True:
-            yield OutputSchema(type="message", index=index, payload={"event_type": "leader.chunk.tick"})
-            index += 1
-            await asyncio.sleep(0.02)
-
-
-class _EndingStreamAgent(FakeTeamAgent):
-    """Agent whose stream ends quietly without ever emitting the marker."""
-
-    def __init__(self, team_name: str) -> None:
-        super().__init__(team_name, stream_label="leader.chunk")
-
-    async def stream(self, inputs: Any, session=None) -> AsyncIterator[Any]:
-        yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
+        raise ValueError("runtime stream exploded")
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_runner_resume_agent_team_interrupt_streaming_resumes_and_forwards(
+async def test_runner_start_agent_team_streaming_uses_runtime_stream(
     isolated_checkpointer,
     stateful_team_db,
 ):
     await Runner.start()
-    session_id = f"team_resume_{uuid.uuid4().hex}"
-    spec = _runtime_spec("resume_team")
-    agent = _ResumeInterruptAgent("resume_team")
-    interactive = InteractiveInput("resume-answer")
+    session_id = f"team_start_{uuid.uuid4().hex}"
+    spec = _runtime_spec("start_team")
+    agent = _RuntimeStreamAgent("start_team")
 
     with patch.object(TeamAgentSpec, "build", return_value=agent):
         chunks = [
             chunk
-            async for chunk in Runner.resume_agent_team_interrupt_streaming(
+            async for chunk in Runner.start_agent_team_streaming(
                 agent_team=spec,
-                user_input=interactive,
                 session=session_id,
             )
         ]
@@ -2559,8 +2509,11 @@ async def test_runner_resume_agent_team_interrupt_streaming_resumes_and_forwards
         "leader.chunk.1",
         "leader.chunk.2",
     ]
-    assert agent.resumed_inputs == [interactive]
-    assert agent.stream_inputs == [None]
+    # The no-input entry drives stream_runtime only; the input-carrying
+    # stream must not run and no first-round user input may be enqueued.
+    assert agent.runtime_stream_calls == 1
+    assert agent.stream_calls == 0
+    assert agent.stream_inputs == []
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
@@ -2568,26 +2521,10 @@ async def test_runner_resume_agent_team_interrupt_streaming_resumes_and_forwards
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_runner_resume_rejects_non_interactive_input() -> None:
+async def test_runner_start_rejects_missing_session() -> None:
     await Runner.start()
-    agen = Runner.resume_agent_team_interrupt_streaming(
-        agent_team=_runtime_spec("resume_team"),
-        user_input="plain text",
-        session="sess-1",
-    )
-    with pytest.raises(BaseError) as excinfo:
-        await agen.__anext__()
-    assert excinfo.value.status is StatusCode.AGENT_TEAM_CONFIG_INVALID
-    await Runner.stop()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_runner_resume_rejects_missing_session() -> None:
-    await Runner.start()
-    agen = Runner.resume_agent_team_interrupt_streaming(
-        agent_team=_runtime_spec("resume_team"),
-        user_input=InteractiveInput("answer"),
+    agen = Runner.start_agent_team_streaming(
+        agent_team=_runtime_spec("start_team"),
         session=None,
     )
     with pytest.raises(BaseError) as excinfo:
@@ -2598,146 +2535,23 @@ async def test_runner_resume_rejects_missing_session() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_runner_resume_propagates_stream_failure_before_ready(
+async def test_runner_start_propagates_runtime_stream_failure(
     isolated_checkpointer,
     stateful_team_db,
 ):
     await Runner.start()
-    session_id = f"team_resume_fail_{uuid.uuid4().hex}"
-    spec = _runtime_spec("resume_fail_team")
-    agent = _FailingStreamAgent("resume_fail_team")
+    session_id = f"team_start_fail_{uuid.uuid4().hex}"
+    spec = _runtime_spec("start_fail_team")
+    agent = _FailingRuntimeStreamAgent("start_fail_team")
 
     with patch.object(TeamAgentSpec, "build", return_value=agent):
-        agen = Runner.resume_agent_team_interrupt_streaming(
+        agen = Runner.start_agent_team_streaming(
             agent_team=spec,
-            user_input=InteractiveInput("answer"),
             session=session_id,
         )
-        with pytest.raises(ValueError, match="stream exploded"):
+        with pytest.raises(ValueError, match="runtime stream exploded"):
             async for _ in agen:
                 pass
-
-    await Runner.stop()
-    await isolated_checkpointer.release(session_id)
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_runner_resume_times_out_when_leader_never_ready(
-    isolated_checkpointer,
-    stateful_team_db,
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        "openjiuwen.core.runner.team_runner._TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS",
-        0.1,
-    )
-    await Runner.start()
-    session_id = f"team_resume_timeout_{uuid.uuid4().hex}"
-    spec = _runtime_spec("resume_timeout_team")
-    agent = _NeverReadyAgent("resume_timeout_team")
-
-    with patch.object(TeamAgentSpec, "build", return_value=agent):
-        agen = Runner.resume_agent_team_interrupt_streaming(
-            agent_team=spec,
-            user_input=InteractiveInput("answer"),
-            session=session_id,
-        )
-        with pytest.raises(BaseError) as excinfo:
-            async for _ in agen:
-                pass
-    assert excinfo.value.status is StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT
-
-    await Runner.stop()
-    await isolated_checkpointer.release(session_id)
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_runner_resume_total_budget_bounds_the_marker_wait(
-    isolated_checkpointer,
-    stateful_team_db,
-    monkeypatch,
-):
-    """A frame trickle that never trips the frame budget is still bounded by the total budget."""
-    monkeypatch.setattr(
-        "openjiuwen.core.runner.team_runner._TEAM_RECOVERY_FRAME_TIMEOUT_SECONDS",
-        10.0,
-    )
-    monkeypatch.setattr(
-        "openjiuwen.core.runner.team_runner._TEAM_RECOVERY_TOTAL_TIMEOUT_SECONDS",
-        0.15,
-    )
-    await Runner.start()
-    session_id = f"team_resume_total_{uuid.uuid4().hex}"
-    spec = _runtime_spec("resume_total_team")
-    agent = _TrickleStreamAgent("resume_total_team")
-
-    with patch.object(TeamAgentSpec, "build", return_value=agent):
-        agen = Runner.resume_agent_team_interrupt_streaming(
-            agent_team=spec,
-            user_input=InteractiveInput("answer"),
-            session=session_id,
-        )
-        with pytest.raises(BaseError) as excinfo:
-            async for _ in agen:
-                pass
-    assert excinfo.value.status is StatusCode.AGENT_TEAM_LEADER_START_TIMEOUT
-    assert "timeout=0.15" in str(excinfo.value.message)
-
-    await Runner.stop()
-    await isolated_checkpointer.release(session_id)
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_runner_resume_raises_when_stream_ends_before_marker(
-    isolated_checkpointer,
-    stateful_team_db,
-):
-    await Runner.start()
-    session_id = f"team_resume_end_{uuid.uuid4().hex}"
-    spec = _runtime_spec("resume_end_team")
-    agent = _EndingStreamAgent("resume_end_team")
-
-    with patch.object(TeamAgentSpec, "build", return_value=agent):
-        agen = Runner.resume_agent_team_interrupt_streaming(
-            agent_team=spec,
-            user_input=InteractiveInput("answer"),
-            session=session_id,
-        )
-        with pytest.raises(BaseError) as excinfo:
-            async for _ in agen:
-                pass
-    assert excinfo.value.status is StatusCode.AGENT_TEAM_STATE_INVALID
-
-    await Runner.stop()
-    await isolated_checkpointer.release(session_id)
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_runner_resume_raises_when_interact_rejected(
-    isolated_checkpointer,
-    stateful_team_db,
-):
-    await Runner.start()
-    session_id = f"team_resume_reject_{uuid.uuid4().hex}"
-    spec = _runtime_spec("resume_reject_team")
-    agent = _ResumeInterruptAgent("resume_reject_team")
-    agent.pending_interrupt = False
-
-    with patch.object(TeamAgentSpec, "build", return_value=agent):
-        agen = Runner.resume_agent_team_interrupt_streaming(
-            agent_team=spec,
-            user_input=InteractiveInput("answer"),
-            session=session_id,
-        )
-        with pytest.raises(BaseError) as excinfo:
-            async for _ in agen:
-                pass
-    assert excinfo.value.status is StatusCode.AGENT_TEAM_STATE_INVALID
-    assert "unsupported_interactive_input" in str(excinfo.value)
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
