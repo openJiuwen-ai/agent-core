@@ -38,6 +38,11 @@ class UsageMetadata(BaseModel):
     input_cost: float = 0.
     output_cost: float = 0.
     total_cost: float = 0.
+    # Stream latency metrics, backfilled by streaming producers (ReAct engine
+    # stamps TTFT / inter-token latency per call); tracer_otel reads these
+    # keys to stamp span attributes (#1833).
+    inter_token_latency_ms: Optional[float] = None
+    reasoning_duration_ms: Optional[float] = None
 
 
 class BaseMessage(BaseModel):
