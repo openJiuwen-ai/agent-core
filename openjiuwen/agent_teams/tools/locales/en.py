@@ -294,11 +294,15 @@ STRINGS: dict[str, str] = {
     # ===== view_experts ========================================================
     # view_experts._desc lives in descs/en/expert/view_experts.md
     "view_experts.action": "list (default) lists the installed single experts; get shows one expert in full",
-    "view_experts.query": "list only: case-insensitive substring filter over package name, display name and description",
+    "view_experts.query": (
+        "list only: case-insensitive substring filter over package name, display name and description"
+    ),
     "view_experts.name": "Required for get: the expert's package name (name in the list, not the display name)",
     # ===== view_expert_groups ==================================================
     # view_expert_groups._desc lives in descs/en/expert/view_expert_groups.md
-    "view_expert_groups.action": "list (default) lists the installed expert groups; get shows one group and its members",
+    "view_expert_groups.action": (
+        "list (default) lists the installed expert groups; get shows one group and its members"
+    ),
     "view_expert_groups.query": (
         "list only: case-insensitive substring filter over group name, display name and description"
     ),

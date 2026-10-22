@@ -446,6 +446,16 @@ class ExpertTemplate:
     external_cli: "ExternalCliAgentSpec | None"
 
 
+@dataclass(frozen=True)
+class _ExpertMemberIdentity:
+    """Name and texts of the member one ``spawn_expert`` call registers."""
+
+    member_name: str
+    display_name: str
+    desc: str
+    prompt: str
+
+
 class ExpertUnavailable(Exception):
     """The requested expert template cannot be resolved; the message is model-facing."""
 
@@ -530,7 +540,9 @@ class ExpertTemplateResolver:
         try:
             package = await aload_agent_group_package(location.path)
         except (OSError, ValueError) as exc:
-            team_logger.warning("[expert] spawn_expert cannot load expert group {!r} at {}: {}", group, location.path, exc)
+            team_logger.warning(
+                "[expert] spawn_expert cannot load expert group {!r} at {}: {}", group, location.path, exc
+            )
             raise ExpertUnavailable(f"Expert group '{group}' cannot be loaded: {exc}") from exc
         template = package.templates.get(expert)
         if template is None or expert == LEADER_MEMBER:
@@ -709,20 +721,16 @@ class SpawnExpertTool(_SpawnToolBase):
             self.team, template.display_name, member_name
         )
         desc, prompt = expert_member_texts(template, desc=inputs.get("desc"), prompt=inputs.get("prompt"))
+        identity = _ExpertMemberIdentity(member_name=member_name, display_name=display_name, desc=desc, prompt=prompt)
         if template.external_cli is not None:
-            return await self._spawn_external(
-                template, inputs, external_args or {}, member_name, display_name, desc, prompt
-            )
-        return await self._spawn_native(template, inputs, member_name, display_name, desc, prompt)
+            return await self._spawn_external(template, inputs, external_args or {}, identity)
+        return await self._spawn_native(template, inputs, identity)
 
     async def _spawn_native(
         self,
         template: ExpertTemplate,
         inputs: dict[str, Any],
-        member_name: str,
-        display_name: str,
-        desc: str,
-        prompt: str,
+        identity: _ExpertMemberIdentity,
     ) -> ToolOutput:
         model_name = inputs.get("model_name")
         allocation = self._allocate_model_config(model_name) if self._allocate_model_config else None
@@ -731,26 +739,23 @@ class SpawnExpertTool(_SpawnToolBase):
             return self._fail(err)
         result = await register_teammate(
             self.team,
-            member_name=member_name,
-            display_name=display_name,
-            desc=desc,
-            prompt=prompt,
+            member_name=identity.member_name,
+            display_name=identity.display_name,
+            desc=identity.desc,
+            prompt=identity.prompt,
             allocation=allocation,
             isolation=inputs.get("isolation"),
             permissions_override=inputs.get("permissions"),
             agent_template=expert_member_record(template),
         )
-        return self._registered(result, template, member_name, display_name, role_type="teammate")
+        return self._registered(result, template, identity.member_name, identity.display_name, role_type="teammate")
 
     async def _spawn_external(
         self,
         template: ExpertTemplate,
         inputs: dict[str, Any],
         external_args: dict[str, Any],
-        member_name: str,
-        display_name: str,
-        desc: str,
-        prompt: str,
+        identity: _ExpertMemberIdentity,
     ) -> ToolOutput:
         unsupported = [key for key in ("isolation", "permissions") if inputs.get(key) is not None]
         if unsupported:
@@ -764,10 +769,10 @@ class SpawnExpertTool(_SpawnToolBase):
             tool_name="spawn_expert",
             allocate_model_config=self._allocate_model_config,
             cli_agent=cli_agent,
-            member_name=member_name,
-            display_name=display_name,
-            desc=desc,
-            prompt=prompt,
+            member_name=identity.member_name,
+            display_name=identity.display_name,
+            desc=identity.desc,
+            prompt=identity.prompt,
             model_name=inputs.get("model_name"),
             fallback_model_name=external_args.get("fallback_model_name"),
             builtin_model=external_args.get("builtin_model"),
@@ -776,7 +781,12 @@ class SpawnExpertTool(_SpawnToolBase):
             agent_template=expert_member_record(template),
         )
         return self._registered(
-            result, template, member_name, display_name, role_type="external_cli", cli_agent=cli_agent
+            result,
+            template,
+            identity.member_name,
+            identity.display_name,
+            role_type="external_cli",
+            cli_agent=cli_agent,
         )
 
     def _registered(
