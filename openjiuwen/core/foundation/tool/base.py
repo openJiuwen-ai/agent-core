@@ -240,6 +240,9 @@ class Tool(metaclass=_ToolMeta):
         """Return whether this tool may run concurrently with sibling tool calls."""
         return bool(getattr(self.card, "parallel_safe", True))
 
+    # An override hook: subclasses with an internal deadline (Bash) read their
+    # own inputs, and callers dispatch it on the instance.
+    # pylint: disable-next=add-staticmethod-or-classmethod-decorator
     def get_call_timeout(
             self,
             inputs: dict[str, Any],

@@ -605,6 +605,22 @@ class AbilityManager:
         return value if value > 0 else None
 
     @staticmethod
+    def _resolve_invocation_timeout(
+            tool: Any,
+            tool_args: Any,
+            default_timeout: float,
+    ) -> float:
+        """Apply the tool's input-aware ``get_call_timeout`` hook to the card budget.
+
+        ``Runner.resource_mgr`` may hand back any object exposing ``invoke``
+        (third-party or duck-typed tools); only ``Tool`` subclasses carry the
+        hook, so everything else keeps the card-level budget unchanged.
+        """
+        if not isinstance(tool, Tool):
+            return default_timeout
+        return tool.get_call_timeout(tool_args, default_timeout=default_timeout)
+
+    @staticmethod
     def _get_stream_writer_manager(session: Session) -> Any:
         try:
             return session._inner.stream_writer_manager()  # pylint: disable=protected-access
@@ -1439,7 +1455,7 @@ class AbilityManager:
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
-                call_timeout = tool.get_call_timeout(tool_args, default_timeout=call_timeout)
+                call_timeout = self._resolve_invocation_timeout(tool, tool_args, call_timeout)
                 invoke_kwargs = {"session": session}
                 # The fixed progressive ``tool_call`` wrapper needs the active
                 # callback context to dispatch its discovered target through
@@ -1584,7 +1600,7 @@ class AbilityManager:
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
             try:
-                call_timeout = tool.get_call_timeout(tool_args, default_timeout=call_timeout)
+                call_timeout = self._resolve_invocation_timeout(tool, tool_args, call_timeout)
                 with anyio.fail_after(call_timeout):
                     result = await tool.invoke(tool_args, session=session)
             except TimeoutError as e:

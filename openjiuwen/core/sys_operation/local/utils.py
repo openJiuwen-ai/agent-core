@@ -182,6 +182,16 @@ class AsyncProcessHandler:
             self._kill_process_tree()
             # Killing closes the pipes; collect whatever was written before the kill.
             await _finish_readers(30)
+            # Reap the killed child so it leaves no zombie and reports its exit
+            # code: pipe EOF can arrive before the child watcher records the exit.
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                sys_operation_logger.warning(
+                    "Killed process did not exit within the reap grace period",
+                    event_type=LogEventType.SYS_OP_ERROR,
+                    metadata={"pid": self._process.pid},
+                )
             return InvokeData(
                 stdout=_decode(stdout_buf),
                 stderr=_decode(stderr_buf),
