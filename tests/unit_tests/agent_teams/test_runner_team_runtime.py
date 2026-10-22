@@ -1985,8 +1985,8 @@ class TestTeamRuntimeManagerDeleteTeam:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
-    async def test_delete_team_succeeds_when_supplied_sessions_are_already_released(self):
-        """delete_team should be idempotent after supplied sessions are gone."""
+    async def test_delete_team_succeeds_when_supplied_sessions_are_already_released(self, tmp_path):
+        """A retry still removes team_home after supplied sessions are gone."""
         from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 
         manager = TeamRuntimeManager()
@@ -1995,6 +1995,9 @@ class TestTeamRuntimeManagerDeleteTeam:
         fake_checkpointer = AsyncMock()
         fake_checkpointer.session_exists = AsyncMock(return_value=False)
         fake_checkpointer.release = AsyncMock()
+        team_dir = tmp_path / team_name
+        team_dir.mkdir()
+        (team_dir / "stale.db").write_text("stale", encoding="utf-8")
 
         with (
             patch(
@@ -2006,10 +2009,15 @@ class TestTeamRuntimeManagerDeleteTeam:
                 new_callable=AsyncMock,
             ) as resolve_mock,
             patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db") as get_shared_db_mock,
+            patch(
+                "openjiuwen.agent_teams.runtime.manager.team_home",
+                return_value=team_dir,
+            ),
         ):
             result = await manager.delete_team(team_name, [session_id])
 
         assert result is True
+        assert not team_dir.exists()
         fake_checkpointer.session_exists.assert_awaited_once_with(session_id)
         fake_checkpointer.release.assert_not_awaited()
         resolve_mock.assert_not_awaited()
