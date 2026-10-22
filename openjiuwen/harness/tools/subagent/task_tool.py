@@ -391,7 +391,10 @@ class TaskTool(Tool):
             f"Last observed page: {(browser_result.get('current_page') or {}).get('url', '')}. "
             f"Recovery hint: {recovery or 'continue_from_current_page'}. "
             "Repair only what is needed for the original goal using retained source observations. "
-            "Keep valid evidence, correct contradicted evidence, and do not repeat satisfied work or expand scope."
+            "Read retained observations/raw recall before requesting fresh reads. Keep valid facts and correct "
+            "contradictions; do not repeat satisfied work or expand scope. A model error did not undo ACKed "
+            "actions. Inspect the current state before any further mutation; never blindly replay ACKed or "
+            "uncertain writes. Missing entries in a bounded excerpt do not mean work was not performed."
         )
 
     @staticmethod
@@ -466,6 +469,17 @@ class TaskTool(Tool):
             "retryable": bool(browser_result.get("retryable")),
             "browser_result": browser_result,
         }
+        if code == "browser_query_resume_not_allowed":
+            deadline_at = float(record.get("deadline_at") or 0.0)
+            payload["resume_denial_reason"] = (
+                "task_deadline_exhausted" if deadline_at and deadline_at <= time.time() else
+                "resume_limit_exhausted" if int(record.get("resume_count") or 0) >= _BROWSER_QUERY_RESUME_LIMIT else
+                "result_not_retryable"
+            )
+            payload["reporting_guidance"] = (
+                "This query cannot resume under its deadline/recovery limits; this does not diagnose backend "
+                "availability or undo recorded actions. Report retained facts and the local denial reason."
+            )
         return ToolOutput(
             success=True,
             data={
@@ -682,10 +696,17 @@ class TaskTool(Tool):
         record: dict[str, Any],
         reason: str,
     ) -> None:
+        previous = record.get("browser_result")
+        failure = cls._failed_browser_result(reason)
+        result = dict(previous) if isinstance(previous, dict) else dict(failure)
+        result.update({key: failure[key] for key in ("status", "retryable", "terminal_reason")})
+        result["blockers"] = list(dict.fromkeys([*(result.get("blockers") or []), *failure["blockers"]]))
+        if result.get("observations") or result.get("evidence") or result.get("execution"):
+            result["status"] = "partial"
         record.update(
             {
-                "browser_result": cls._failed_browser_result(reason),
-                "status": "failed",
+                "browser_result": result,
+                "status": result["status"],
                 "retryable": False,
                 "updated_at": time.time(),
             }
@@ -840,6 +861,31 @@ class TaskTool(Tool):
         browser_query: _BrowserQueryContext | None,
         subagent: Any,
     ) -> ToolOutput:
+        # A resumed child can fail during setup, before loading its session. The
+        # same query's saved facts remain valid historical observations in that case.
+        browser_result = result.get("authoritative_browser_result")
+        previous = browser_query.record.get("browser_result") if browser_query is not None else None
+        if (isinstance(browser_result, dict) and isinstance(previous, dict)
+                and result.get("result_type") == "error"):
+            if not browser_result.get("observations") and previous.get("observations"):
+                browser_result["observations"] = previous["observations"]
+                if previous.get("observation_excerpt"):
+                    browser_result["observation_excerpt"] = previous["observation_excerpt"]
+            for field in ("evidence", "current_page"):
+                if not browser_result.get(field) and previous.get(field):
+                    browser_result[field] = previous[field]
+            if not any((browser_result.get("execution") or {}).get(key)
+                       for key in ("recent", "business_effects", "unresolved")) and previous.get("execution"):
+                browser_result["execution"] = previous["execution"]
+                if previous["execution"].get("unresolved"):
+                    browser_result["missing_fields"] = list(dict.fromkeys([
+                        *(browser_result.get("missing_fields") or []), "unknown_browser_write",
+                    ]))
+            if browser_result.get("observations") or any(
+                (browser_result.get("execution") or {}).get(key) for key in ("recent", "business_effects", "unresolved")
+            ):
+                browser_result["status"] = "partial"
+            result = {**result, "output": json.dumps({"browser_result": browser_result}, ensure_ascii=False)}
         output = result.get("output", "")
         data = self._build_result_data(
             result,
@@ -1047,7 +1093,7 @@ class TaskTool(Tool):
                     browser_query=browser_query,
                     subagent=subagent,
                 )
-            except TimeoutError:
+            except TimeoutError as exc:
                 if cua_budget_s is not None and task_timeout.expired():
                     logger.warning(
                         "[TaskTool] cua_agent delegation exceeded %.0fs; returning resumable result for sub_session=%s",
@@ -1064,11 +1110,12 @@ class TaskTool(Tool):
                     raise
                 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
 
-                reason = (
-                    "task_deadline_exhausted" if task_timeout is not None and task_timeout.expired()
-                    else "model_provider_unavailable"
+                expired = task_timeout is not None and task_timeout.expired()
+                failure = BrowserRuntimeRail._model_failure_details(exc)
+                reason = "task_deadline_exhausted" if expired else failure["code"]
+                result = BrowserRuntimeRail.interrupted_task_result(
+                    child_session, reason, failure=None if expired else failure,
                 )
-                result = BrowserRuntimeRail.interrupted_task_result(child_session, reason)
                 return self._build_task_output(
                     result, normalized_type=normalized_type, sub_session_id=sub_session_id,
                     parent_session=parent_session, browser_query=browser_query, subagent=subagent,
@@ -1083,6 +1130,18 @@ class TaskTool(Tool):
                     self._save_browser_result(parent_session, browser_query, result["authoritative_browser_result"])
                 raise
             except Exception as exc:
+                if browser_query is not None:
+                    from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserRuntimeRail
+
+                    failure = BrowserRuntimeRail._model_failure_details(exc)
+                    reason = failure["code"] if failure["code"] != "model_error" else "browser_execution_error"
+                    logger.warning("[TaskTool] Browser interrupted: code=%s exception_type=%s",
+                                   reason, type(exc).__name__)
+                    result = BrowserRuntimeRail.interrupted_task_result(child_session, reason, failure=failure)
+                    return self._build_task_output(
+                        result, normalized_type=normalized_type, sub_session_id=sub_session_id,
+                        parent_session=parent_session, browser_query=browser_query, subagent=subagent,
+                    )
                 self._record_browser_execution_failure(
                     parent_session,
                     browser_query,

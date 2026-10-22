@@ -13,6 +13,8 @@ from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 from .site_profiles import profile_detail_link_key, site_profiles_for_url
 
 _PAGE_FIELDS = frozenset({"sort_state", "action_confirmation", "source"})
+SOURCE_TEXT_LIMIT = 12_000
+PARENT_SOURCE_TEXT_BUDGET = 96_000
 
 _SORT_LABELS = {
     "sales": r"销量|sales|sale-desc|sales-desc",
@@ -407,7 +409,9 @@ def merge_evidence_slot(
     del slots[:-20]
 
 
-def source_observations(state: dict[str, Any]) -> list[dict[str, Any]]:
+def source_observations(
+    state: dict[str, Any], *, text_budget: int = PARENT_SOURCE_TEXT_BUDGET,
+) -> list[dict[str, Any]]:
     """Project existing source records without interpreting their business fields."""
     query_id = str(state.get("query_id") or state.get("task_id") or "")
     observations = []
@@ -428,10 +432,78 @@ def source_observations(state: dict[str, Any]) -> list[dict[str, Any]]:
                        if k in record}
         if not content:
             continue
+        text = content if isinstance(content, str) else json.dumps(content, ensure_ascii=False)
+        # Older checkpoints did not record original lengths. Do not label their
+        # possibly clipped raw text as complete merely because this projection fits.
+        original_length = record.get("raw_text_length") if record.get("raw_text") else len(text)
+        truncated = record.get("raw_text_truncated") if record.get("raw_text") else False
         observations.append({
+            **{key: record[key] for key in
+               ("content_hash", "variant", "observation_scope", "read_scope", "recall_handle", "observed_at_ms")
+               if key in record},
             "kind": record.get("kind", "extraction"), "source": source,
             "generation_id": record.get("generation_id") or record.get("generation"),
-            "raw_text": (content if isinstance(content, str) else json.dumps(content, ensure_ascii=False))[:4000],
+            "raw_text": text[:SOURCE_TEXT_LIMIT],
+            "raw_text_length": original_length,
+            "raw_text_truncated": True if len(text) > SOURCE_TEXT_LIMIT else truncated,
             "provenance": {k: provenance[k] for k in ("tool", "target", "expression_sha256") if k in provenance},
         })
-    return observations
+    # Identical source content is one fact, even if several readers returned it.
+    # Keep the latest reference/scope; this is historical text, not a live binding.
+    unique = {}
+    for item in observations:
+        key = (item["source"], item.get("variant"), item.get("content_hash") or item["raw_text"],
+               json.dumps(item.get("read_scope") or {}, sort_keys=True))
+        unique.pop(key, None)
+        unique[key] = item
+    result = list(unique.values())
+    remaining = max(0, text_budget)
+    # All retained sources stay visible. Short text stays complete; long text
+    # shares the remaining budget rather than displacing another source/scope.
+    for index, item in enumerate(sorted(result, key=lambda row: len(row["raw_text"]))):
+        allowance = min(len(item["raw_text"]), remaining // (len(result) - index))
+        if allowance < len(item["raw_text"]):
+            item["raw_text_truncated"] = True
+            item["raw_text"] = item["raw_text"][:allowance]
+        item["returned_text_length"] = len(item["raw_text"])
+        remaining -= allowance
+    return result
+
+
+def bounded_source_records(records: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """Keep recent sources and their latest broad text within the existing window.
+
+    A local find is a different reading scope, not a replacement for page text.
+    Selection ranks scope/recency, never business importance or completion.
+    """
+    if limit <= 0:
+        return []
+    if len(records) <= limit:
+        return list(records)
+    groups = {}
+    for index, item in enumerate(records):
+        key = (item.get("source") or item.get("entity_url") or "", item.get("variant") or "default")
+        groups.setdefault(key, []).append(index)
+    queues = []
+    def source_priority(indices: list[int]) -> tuple[bool, int]:
+        substantive = any(records[i].get("kind") != "page_metadata" for i in indices)
+        return substantive, indices[-1]
+
+    for indices in sorted(groups.values(), key=source_priority, reverse=True)[:limit]:
+        content = [i for i in reversed(indices)
+                   if records[i].get("kind") in {"page_observation", "card_probe", "ordered_results"}]
+        broad = [i for i in content if not (records[i].get("read_scope") or {}).get("query")
+                 and not (records[i].get("read_scope") or {}).get("target")
+                 and (records[i].get("read_scope") or {}).get("operation")
+                 in {None, "read_text", "snapshot", "probe_cards"}]
+        # The latest broad read represents this source before local diagnostics.
+        # Other scopes/updates remain eligible in subsequent round-robin slots.
+        queues.append(list(dict.fromkeys([*broad[:1], *content, *reversed(indices)])))
+    selected = []
+    while len(selected) < limit and any(queues):
+        for queue in queues:
+            if queue:
+                selected.append(queue.pop(0))
+                if len(selected) == limit:
+                    break
+    return [records[i] for i in sorted(selected)]

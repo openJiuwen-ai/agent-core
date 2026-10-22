@@ -65,6 +65,7 @@ BROWSER_AGENT_FACTORY_NAME = "browser_agent"
 BROWSER_AGENT_CARD_ID = "openjiuwen.browser_agent"
 DEFAULT_BROWSER_AGENT_TEMPERATURE = 0.4
 DEFAULT_BROWSER_AGENT_MAX_ITERATIONS = 100
+DEFAULT_BROWSER_AGENT_MAX_OUTPUT_TOKENS = 8192
 _BROWSER_MODEL_TEMPERATURE_MARKER = "_browser_agent_temperature"
 _BROWSER_PARENT_MODEL_MARKER = "_browser_agent_parent_model"
 
@@ -83,9 +84,24 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "constraints. Refresh it when the intent or binding changes, not before every action. "
     "Set always includes op=set and objective, with no phase_version; that version belongs to verify. "
     "Bind only current phase_bindings controls; navigation-only cards remain source objects/URLs, not control IDs. "
+    "If phase.handoff is present, the old bound fragment is historical: use the current interpretation "
+    "turn to update its short objective and remaining operation/object bindings, not the old form. "
+    "After restoring a selected page, keep the remaining work on that object; do not alternate navigation "
+    "or scrolling merely to obtain another sample. Reuse source text or request a specific missing range. "
+    "Optional read_queries (at most six resolved literals) lets Jev find text/controls such as "
+    "[\"Guest rating Great\",\"Breakfast included\"]; this is not a selector or a fill-value binding. "
+    "When you already know the wording of a missing control or text range, pass that literal with the "
+    "same local phase update; do not leave it only in a long objective. On missing_identity, use the "
+    "returned recovery_probe and bind the newly observed unique control, not a same-name guess. "
     "On an action-head uncertain_choice during complex recovery, use that existing LLM turn to prepare "
     "a remaining local objective with browser_phase set when helpful; do not repeat the full task or already "
     "completed navigation/search. Conditions are not required. Bound values name observed fields. "
+    "Opening a candidate to inspect it is not selecting it for mutation. Before browsing/comparing candidates, "
+    "set the current inspection objective once with allowed_operations=[read_text,find,snapshot,scroll,navigate]; "
+    "leave target_ids empty until a current control is selected. The LLM may use ordinary tools to inspect options. "
+    "After interpreting the requirements and selecting the object/variant, update the same phase to its observed "
+    "operation control and required operation (e.g. click). Do not hand off a broad purchase goal between "
+    "candidate navigation and inspection. Preserve > versus >=, budgets and the user's stopping point. "
     "In normal interpretation/recovery too, once you select an object, reuse browser_phase target_ids and "
     "allowed_operations for the remaining local work. If only reading remains, set allowed_operations to "
     "[read_text,find,extract_text,extract_value,snapshot] instead of leaving unrelated clicks as candidates. "
@@ -110,6 +126,11 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "user goal needs. An uncertain business effect must not be blindly replayed through another tool. "
     "Fixed reads and other known local UI actions remain available. Report genuinely unresolved work as partial.\n"
     "Preserve acknowledged steps and observed Added feedback in partial answers, without claiming verified SKU deltas. "
+    "Treat parent search/source suggestions as preferences unless they are explicit user requirements. "
+    "Prefer an available direct answer or inline widget; if absent or insufficient, inspect another suitable "
+    "source while respecting the user's site constraints. Do not repeat a search to satisfy an invented widget rule. "
+    "Preserve the chronology and scope of observations; a later page cannot rewrite earlier facts. "
+    "An unexplained difference remains unknown, and a limited search cannot prove no suitable object exists. "
     "Distinguish source observations, execution limits and hypotheses. Empty blocker lists are not evidence "
     "that no obstacle exists. Do not infer a failure cause from coincident page text "
     "or contradict source restrictions.\n"
@@ -171,8 +192,19 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "页面变更后重新观察；runtime 要求重新规划时，应实质改变策略。\n"
     "browser_phase 是可选入口：需要交接局部目标或已观察字段值时，用 set 提供 objective 即可；"
     "复杂目标只为当前可执行片段一次准备简短 objective、已解析值及观察对象绑定、已知完成条件；"
+    "恢复到已选页面后，剩余工作围绕该对象展开；不要为再次采样往返跳页或上下滚动，优先复用原文或指定缺失范围。"
     "set 必须带 op=set 和 objective，不带仅 verify 接受的 phase_version。target_ids 只用当前 phase_bindings "
     "控件；导航型卡片保留为来源对象/URL，不冒充当前控件绑定。"
+    "phase.handoff 表示旧局部绑定已退出当前范围；在当前解释轮次更新简短 objective 和当前操作/对象绑定，"
+    "不要沿用上一页表单。可选 read_queries 最多六个已解析文本词（如 Guest rating Great），供 Jev 定向 "
+    "find/probe 控件；不是 selector、脚本或字段填写值。"
+    "已经解析出缺失控件或文本的文案时，在同一次局部更新里带上 read_queries，不只放在长 objective 中。"
+    "收到 missing_identity 时按 recovery_probe 重新观察并选择当前唯一控件，不按同名猜测重绑。"
+    "打开候选进行检查不等于已选定对象执行写入。开始候选浏览/比较时，一次设置当前检查 objective，"
+    "allowed_operations=[read_text,find,snapshot,scroll,navigate]，未选当前控件时 target_ids 留空；"
+    "必要选项检查由 LLM 使用普通工具完成。LLM 解释约束并选定对象/规格后，再更新同一 phase，"
+    "绑定实际操作控件和所需操作（如 click），不要在候选导航与检查之间仍交接整段购买目标。"
+    "严格保留 > 与 >=、预算和用户停止点的原义。"
     "正常解释/恢复时也应交接已选对象：复用 target_ids 和 allowed_operations 限定剩余局部工作；"
     "只剩读取时可设 allowed_operations=[read_text,find,snapshot]，避免把无关点击继续作为候选。"
     "仅在意图或绑定改变时更新，不为每个简单步骤加 phase；来源观察足够回答时直接回答。"
@@ -191,6 +223,9 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "只核对用户目标真正需要的事实。真实未知业务效果禁止换工具盲重放，固定读取及其他已知局部 UI "
     "仍可继续。确有未完成工作时报告 partial。\n"
     "partial 答复仍保留已确认步骤和 Added 等已观察反馈，但反馈不等于 SKU 增量通过。"
+    "父委托中的查找路径和来源偏好若不是用户硬性要求，就按建议处理。可优先现成答案或内置卡片；"
+    "缺失或不足时，在用户站点约束内查看其他合适来源，不为自行增加的组件要求反复搜索。"
+    "保留观察的时间和范围，后来的页面不能改写先前事实；差异原因不明就说明未知，有限搜索不能证明对象不存在。"
     "区分页面观察、执行限制和原因推测。阻断列表为空不代表页面没有障碍；不要把同时出现的页面文字当作失败原因，"
     "也不要给出与来源限制冲突的建议。\n"
     "已知搜索引擎和关键词时，简单查询优先直接构造搜索结果 URL。页面控件使用 "
@@ -307,6 +342,17 @@ def _browser_model_with_temperature(model: Model, temperature: float) -> Model:
     else:
         browser_model_config = copy.copy(model_config)
         setattr(browser_model_config, "temperature", resolved_temperature)
+
+    # Use the existing provider request budget, never a second runtime timer.
+    # Explicit caller/provider limits take precedence, including their native aliases.
+    output_limits = [getattr(browser_model_config, key, None)
+                     for key in ("max_tokens", "max_completion_tokens", "max_output_tokens")]
+    if all(value is None for value in output_limits):
+        reasoning = getattr(browser_model_config, "reasoning", None)
+        budget = (reasoning.get("budget_tokens", reasoning.get("max_tokens")) if isinstance(reasoning, dict)
+                  else getattr(reasoning, "budget_tokens", None))
+        requested = budget + 1024 if type(budget) is int and budget > 0 else 0
+        browser_model_config.max_tokens = max(DEFAULT_BROWSER_AGENT_MAX_OUTPUT_TOKENS, requested)
 
     model_client_config = getattr(model, "model_client_config", None)
     if model_client_config is not None:

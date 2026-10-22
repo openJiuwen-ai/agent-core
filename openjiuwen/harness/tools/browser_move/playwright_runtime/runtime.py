@@ -29,7 +29,11 @@ from openjiuwen.core.foundation.llm import ToolMessage
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
+from openjiuwen.core.single_agent.rail.base import (
+    MODEL_VISIBLE_OUTPUT_EMITTED_KEY,
+    AgentCallbackContext,
+    AgentRail,
+)
 from openjiuwen.harness.rails._multimodal import (
     should_enable_read_image_multimodal,
 )
@@ -55,7 +59,10 @@ from .browser_working_context import (
 )
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
 from .evidence import (
+    PARENT_SOURCE_TEXT_BUDGET,
+    SOURCE_TEXT_LIMIT,
     author_is_action_label,
+    bounded_source_records,
     evidence_subject,
     merge_evidence_slot,
     observed_sort,
@@ -66,6 +73,7 @@ from .evidence import (
     today_temperature_fields,
 )
 from .page_state import CARD_EVIDENCE_FIELDS, BrowserPageState, BrowserTarget, decode_ax_text, navigation_destination
+from .phase_contract import save as save_phase
 from .phase_contract import unresolved_writes
 from .probe_semantics import normalize_card_probe_payload
 from .probes import (
@@ -2857,7 +2865,7 @@ class BrowserRuntimeRail(AgentRail):
             state["status"] = "partial" if self._has_task_evidence(state) else "blocked"
             state["terminal_reason"] = "task_deadline_insufficient_for_action"
             state["next_action_class"] = "finish"
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
         if remaining <= 1:
             ctx.request_force_finish(self._structured_terminal_result(state))
             return
@@ -2882,6 +2890,10 @@ class BrowserRuntimeRail(AgentRail):
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("after_model_call", ctx)
+        # Core runs this callback from finally, including failed attempts which
+        # the exception rail is about to retry. Only validate successful output.
+        if getattr(ctx, "exception", None) is not None:
+            return
         response = getattr(getattr(ctx, "inputs", None), "response", None)
         tool_calls = list(getattr(response, "tool_calls", None) or [])
         session = getattr(ctx, "session", None)
@@ -2894,6 +2906,17 @@ class BrowserRuntimeRail(AgentRail):
             ctx.request_force_finish(self._structured_terminal_result(state))
             return
         response_text = str(getattr(response, "content", "") or "")
+        if not tool_calls and not response_text.strip() and isinstance(state, dict) and state:
+            if state.get("status") in _BROWSER_TERMINAL_STATUSES - {"completed"}:
+                ctx.request_force_finish(self._structured_terminal_result(state))
+                return  # Do not relabel a known deadline/interruption as a new model error.
+            # Page metadata and reasoning tokens are observations/output activity, not an answer.
+            reason = ("model_output_incomplete" if getattr(response, "finish_reason", None) == "length"
+                      else "model_output_empty")
+            failure = {"code": reason, "source": "model", "stage": "output", "retryable": True,
+                       "finish_reason": getattr(response, "finish_reason", None)}
+            ctx.request_force_finish(self.interrupted_task_result(session, reason, failure=failure))
+            return
         if self._is_unfinished_model_protocol_response(state, tool_calls, response_text):
             if self._request_model_protocol_recovery(ctx, session, state):
                 return
@@ -2943,7 +2966,7 @@ class BrowserRuntimeRail(AgentRail):
         if retry_count >= _BROWSER_MODEL_PROTOCOL_RETRY_LIMIT or deadline_exhausted:
             return False
         state["model_protocol_retry_count"] = retry_count + 1
-        session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        save_phase(session, state)
         if ctx.steering_queue is None:
             ctx.bind_steering_queue(asyncio.Queue())
         ctx.push_steering(
@@ -2969,7 +2992,7 @@ class BrowserRuntimeRail(AgentRail):
         if "model_tool_protocol_error" not in blockers:
             blockers.append("model_tool_protocol_error")
         state["blockers"] = blockers[:10]
-        session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        save_phase(session, state)
         ctx.request_force_finish(cls._structured_terminal_result(state))
 
     def _prepare_terminal_synthesis(
@@ -2990,7 +3013,7 @@ class BrowserRuntimeRail(AgentRail):
         state[_BROWSER_TERMINAL_SYNTHESIS_KEY] = True
         state["next_action_class"] = "finish"
         if session is not None:
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
         inputs = getattr(ctx, "inputs", None)
         if inputs is not None:
             inputs.tools = []
@@ -3018,53 +3041,58 @@ class BrowserRuntimeRail(AgentRail):
     async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
         self._emit_status("on_model_exception", ctx)
         exception = getattr(ctx, "exception", None)
-        if not self._is_retryable_model_exception(exception):
-            return
         extra = getattr(ctx, "extra", None)
         deadline = float(extra.get(_BROWSER_TASK_DEADLINE_KEY) or 0.0) if isinstance(extra, dict) else 0.0
         remaining_s = deadline - time.monotonic() if deadline else 0.0
         state = ctx.session.get_state(_BROWSER_PHASE_STATE_KEY) if getattr(ctx, "session", None) is not None else {}
         state = state if isinstance(state, dict) else {}
         failure = self._model_failure_details(exception)
+        # The anomaly rail runs first. Do not replace its bounded repeat/stream
+        # recovery with a force-finish or grant another retry after it is exhausted.
+        pending_retry = ctx.consume_retry_request()
+        may_continue = (not deadline or remaining_s > 20.0) and not unresolved_writes(state)
+        if pending_retry is not None and may_continue and failure["source"] != "runtime":
+            ctx.request_retry(delay_seconds=pending_retry.delay_seconds)
+            return
         retry_budget = ctx.retry_attempt < _BROWSER_MODEL_RETRY_LIMIT and remaining_s > 20.0
-        if retry_budget and failure["source"] == "upstream" and not unresolved_writes(state):
+        if (retry_budget and failure["retryable"] and failure["source"] == "upstream"
+                and not unresolved_writes(state) and not (extra or {}).get(MODEL_VISIBLE_OUTPUT_EMITTED_KEY)):
             ctx.request_retry(delay_seconds=min(0.5, max(0.0, remaining_s - 5.0)))
             return
         ctx.request_force_finish(self._structured_model_failure(ctx, exception))
 
     @staticmethod
-    def _is_retryable_model_exception(exception: Optional[Exception]) -> bool:
-        if isinstance(exception, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
-            return True
-        message = str(exception or "").lower()
-        retryable_tokens = (
-            "timeout",
-            "timed out",
-            "429",
-            "500",
-            "502",
-            "503",
-            "504",
-            "upstream",
-            "rate limit",
-            "service unavailable",
-        )
-        return _contains_any_token(message, retryable_tokens)
+    def _is_retryable_model_exception(exception: Exception | None) -> bool:
+        return bool(BrowserRuntimeRail._model_failure_details(exception)["retryable"])
 
     @staticmethod
-    def _model_failure_details(exception: Exception | None) -> dict[str, str]:
+    def _model_failure_details(exception: Exception | None) -> dict[str, Any]:
+        """Classify wrapper envelopes without making fact retention conditional."""
         message = str(exception or "").lower()
         if "browser_task_deadline_exhausted" in message:
-            return {"code": "task_deadline_exhausted", "source": "runtime", "stage": "task"}
-        if "first_chunk" in message:
-            return {"code": "model_first_chunk_timeout", "source": "client", "stage": "first_chunk"}
-        if "idle_chunk" in message:
-            return {"code": "model_idle_chunk_timeout", "source": "client", "stage": "idle_chunk"}
-        if "browser_llm_total_timeout" in message:  # Older persisted/local adapters.
-            return {"code": "model_call_limit_exhausted", "source": "local", "stage": "call"}
-        if isinstance(exception, TimeoutError) or "timeout" in message or "timed out" in message:
-            return {"code": "model_timeout", "source": "unknown", "stage": "unknown"}
-        return {"code": "model_provider_unavailable", "source": "upstream", "stage": "request"}
+            code, source, stage, retryable = "task_deadline_exhausted", "runtime", "task", False
+        elif "llm repeated stream output detected" in message:
+            code, source, stage, retryable = "model_repeated_output", "model", "stream", False
+        elif "first_chunk" in message or "first_token" in message:
+            code, source, stage, retryable = "model_first_chunk_timeout", "client", "first_chunk", True
+        elif "idle_chunk" in message or "idle_token" in message:
+            code, source, stage, retryable = "model_idle_chunk_timeout", "client", "idle_chunk", True
+        elif "browser_llm_total_timeout" in message:
+            code, source, stage, retryable = "model_call_limit_exhausted", "local", "call", True
+        elif isinstance(exception, TimeoutError) or "timeout" in message or "timed out" in message:
+            code, source, stage, retryable = "model_timeout", "unknown", "unknown", True
+        elif isinstance(exception, ConnectionError) or _contains_any_token(message, (
+            "remoteprotocolerror", "incomplete chunked read", "connectionerror", "connecterror",
+            "readerror", "connection reset", "peer closed connection", "server disconnected",
+        )):
+            code, source, stage, retryable = "model_transport_interrupted", "upstream", "transport", True
+        elif _contains_any_token(message, ("429", "500", "502", "503", "504", "upstream",
+                                           "rate limit", "service unavailable")):
+            code, source, stage, retryable = "model_provider_unavailable", "upstream", "request", True
+        else:
+            # Unknown/programming/authentication errors are not proof of an outage.
+            code, source, stage, retryable = "model_error", "unknown", "request", False
+        return {"code": code, "source": source, "stage": stage, "retryable": retryable}
 
     def _structured_model_failure(
         self,
@@ -3074,18 +3102,11 @@ class BrowserRuntimeRail(AgentRail):
         session = getattr(ctx, "session", None)
         state = session.get_state(_BROWSER_PHASE_STATE_KEY) if session is not None else None
         state = state if isinstance(state, dict) else {}
-        evidence_available = self._has_task_evidence(state)
+        evidence_available = self._has_task_evidence(state) or bool(state.get("execution_journal"))
         failure = self._model_failure_details(exception)
         status = "partial" if evidence_available else "failed"
-        if state:
-            state["status"] = "partial" if evidence_available else "blocked"
-            state["next_action_class"] = "finish"
-            state["terminal_reason"] = failure["code"]
-            blockers = list(state.get("blockers") or [])
-            if failure["code"] not in blockers:
-                blockers.append(failure["code"])
-            state["blockers"] = blockers[:10]
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        terminal = self.interrupted_task_result(session, failure["code"], failure=failure)
+        state = session.get_state(_BROWSER_PHASE_STATE_KEY) if session is not None else {}
         payload = {
             "ok": False,
             "status": status,
@@ -3111,7 +3132,7 @@ class BrowserRuntimeRail(AgentRail):
             "output": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
             "result_type": "error",
             "error": failure["code"],
-            "authoritative_browser_result": self._authoritative_terminal_payload(state),
+            "authoritative_browser_result": terminal["authoritative_browser_result"],
             "progress_state": self._load_progress_state(session).to_dict() if session is not None else {},
         }
 
@@ -3131,17 +3152,29 @@ class BrowserRuntimeRail(AgentRail):
         deadline_started_at = float(state.get("deadline_started_at") or 0.0)
         deadline_at = float(state.get("deadline_at") or 0.0)
         now = time.time()
+        observations = cls._task_observations(state)
+        excerpt = observations
         return {
             "status": status,
             "task_id": state.get("task_id"),
             "current_phase": state.get("current_phase"),
             "worker_reported_status": state.get("worker_reported_status"),
+            "model_failure": dict(state.get("model_failure") or {}),
             "missing_fields": missing[:32],
             "missing_slots": cls._missing_evidence_slots(state)[:12] if explicit else [],
             "unavailable_slots": unavailable[:12],
             "requested_slots": list(state.get("required_evidence_slots") or [])[:12] if explicit else [],
             "evidence": list(state.get("evidence_slots") or [])[-12:] if explicit else [],
-            "observations": cls._task_observations(state)[-6:],
+            "observations": excerpt,
+            "observation_excerpt": {
+                "retained_count": len(observations), "returned_count": len(excerpt),
+                "selection_truncated": len(excerpt) < len(observations), "exhaustive": False,
+                "text_budget_chars": PARENT_SOURCE_TEXT_BUDGET,
+                "returned_text_chars": sum(len(item["raw_text"]) for item in excerpt),
+                "text_truncated_count": sum(bool(item.get("raw_text_truncated")) for item in excerpt),
+                "text_completeness_unknown_count": sum(item.get("raw_text_truncated") is None for item in excerpt),
+                "order": "historical_observation_order",
+            },
             "execution": execution_journal.project(state),
             "verification_scope": "execution_and_observations",
             "completion_basis": "worker_judgment",
@@ -3153,7 +3186,14 @@ class BrowserRuntimeRail(AgentRail):
                 "Use source observations, and distinguish observed content from hypotheses about causes. "
                 "Blocker lists are not exhaustive; an empty list does not rule out a page obstacle. "
                 "Do not contradict source restrictions or report an incomplete status as completed. "
-                "Missing field projections do not require another read. Never replay uncertain effects."
+                "Observations are a bounded historical excerpt, not the complete execution record. An absent "
+                "excerpt/field is not evidence of missing work. Review retained raw recall references before "
+                "fresh reads; never replay ACKed or uncertain writes just to recreate evidence. "
+                "A missing conventional URL parameter alone does not disprove observed UI state. "
+                "All retained sources are returned; raw_text_truncated marks incomplete text; null means "
+                "the older checkpoint did not record whether its text was clipped. "
+                "Compare observations at their recorded time/scope. A later page or cart change cannot "
+                "rewrite earlier observations; unexplained differences remain unexplained."
             ),
             "current_page": dict(state.get("last_page") or {}),
             "terminal_reason": "runtime_completion_requirements_missing"
@@ -3183,6 +3223,12 @@ class BrowserRuntimeRail(AgentRail):
         status = str(state.get("status") or "").strip().lower()
         if status == "completed" or int(state.get("resume_count") or 0) >= _BROWSER_TASK_RESUME_LIMIT:
             return False
+        deadline_at = float(state.get("deadline_at") or 0.0)
+        if deadline_at and deadline_at <= time.time():
+            return False
+        failure = state.get("model_failure") or {}
+        if failure and not failure.get("retryable"):
+            return False
         blockers = " ".join(str(item or "").strip().lower() for item in state.get("blockers") or [])
         if any(token in blockers for token in _BROWSER_NON_RETRYABLE_BLOCKER_TOKENS):
             return False
@@ -3194,6 +3240,7 @@ class BrowserRuntimeRail(AgentRail):
             status in {"partial", "blocked"}
             and (
                 requirements
+                or failure.get("retryable")
                 or cls._has_task_evidence(state)
                 or state.get("terminal_reason") in {
                     "model_provider_unavailable",
@@ -3213,6 +3260,9 @@ class BrowserRuntimeRail(AgentRail):
     def _recommended_recovery(state: Dict[str, Any], missing: list[str]) -> str:
         if unresolved_writes(state):
             return "read_and_reconcile_before_business_retry"
+        if state.get("model_failure"):
+            return ("review_retained_observations_then_read_current_page"
+                    if state["model_failure"].get("retryable") else "report_retained_facts_without_retry")
         reported = str(state.get("worker_reported_next_action") or "").strip()
         if reported:
             return reported[:200]
@@ -3619,6 +3669,9 @@ class BrowserRuntimeRail(AgentRail):
                 "result": tool_result,
                 "page_state": self._runtime.export_page_state(),
             }
+        recall_handle = (getattr(tool_msg, "metadata", None) or {}).get("browser_raw_handle")
+        if recall_handle and isinstance(evidence_result, dict):
+            evidence_result = {**evidence_result, "recall_handle": recall_handle}
         progress_delta = self._record_phase_result(
             session,
             tool_name,
@@ -3737,7 +3790,7 @@ class BrowserRuntimeRail(AgentRail):
             "classifications": current_classes,
         }
         if session is not None:
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
         cls._rewrite_tool_message_contract(inputs, tool_result)
 
     @staticmethod
@@ -4120,7 +4173,7 @@ class BrowserRuntimeRail(AgentRail):
                         "state_changed": bool(group.get("state_changed")),
                         "evidence_fields": evidence_fields[:32],
                     }
-                    session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+                    save_phase(session, state)
                 groups.pop(group_id, None)
                 if not groups:
                     extra.pop(_BROWSER_ACTION_GROUP_RESULTS_KEY, None)
@@ -4332,7 +4385,7 @@ class BrowserRuntimeRail(AgentRail):
         status = payload["status"]
         if state.get("status") != status:
             state.update(status=status, terminal_reason=payload.get("terminal_reason"))
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
         progress_state = self._load_progress_state(session)
         result["output"] = output
         result["result_type"] = "answer" if status == "completed" else "error"
@@ -4580,14 +4633,14 @@ class BrowserRuntimeRail(AgentRail):
 
         current_status = str(state.get("status") or "in_progress").strip().lower()
         if current_status in _BROWSER_TERMINAL_STATUSES:
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
             return
 
         if cls._has_unfinished_tool_intent(final):
             state["status"] = "partial"
             state["next_action_class"] = "finish"
             state["terminal_reason"] = "model_tool_protocol_error"
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
             return
 
         runtime_blockers = [str(item) for item in state.get("blockers") or [] if str(item).strip()]
@@ -4596,8 +4649,11 @@ class BrowserRuntimeRail(AgentRail):
         missing_fields = list(dict.fromkeys([*missing_fields, *contract_missing]))
         unavailable_slots = cls._unavailable_evidence_slots(state)
         evidence_available = cls._has_task_evidence(state)
+        # Legacy explicit progress-tool completion can return actual extracted values.
+        # Passive page metadata is not an answer; empty model responses are handled earlier.
         has_typed_answer = any(
-            isinstance(record, dict) and (record.get("value") not in (None, "", [], {}) or record.get("values"))
+            isinstance(record, dict) and record.get("kind") != "page_metadata"
+            and (record.get("value") not in (None, "", [], {}) or record.get("values"))
             for record in [*(state.get("evidence_slots") or []), *(state.get("structured_evidence") or [])]
         )
         completion_requirements_met = (
@@ -4618,12 +4674,13 @@ class BrowserRuntimeRail(AgentRail):
             state["next_action_class"] = "finish"
             state["terminal_reason"] = "runtime_blocked" if runtime_blockers else (
                 "worker_reported_incomplete" if reported_status != "completed"
+                else "model_output_empty" if not final.strip()
                 else "no_task_observation" if not evidence_available
                 else "runtime_completion_requirements_missing"
             )
             if runtime_blockers:
                 state["blockers"] = runtime_blockers[:10]
-        session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        save_phase(session, state)
 
 
     @staticmethod
@@ -4667,6 +4724,7 @@ class BrowserRuntimeRail(AgentRail):
         else:
             self._runtime.service.set_progress_state(session_id, progress_state)
             exported = progress_state.to_dict()
+        session.update_state({_BROWSER_PROGRESS_STATE_KEY: None})
         session.update_state(
             {
                 _BROWSER_PROGRESS_STATE_KEY: exported,
@@ -4691,7 +4749,7 @@ class BrowserRuntimeRail(AgentRail):
         state = session.get_state(_BROWSER_PHASE_STATE_KEY)
         if isinstance(state, dict) and state.get("requirements_source") == "inferred":
             self._retire_inferred_requirements(state)
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
         if isinstance(state, dict) and str(state.get("task") or "").strip() == normalized_task:
             self._runtime.set_task_requested_fields(state.get("required_fields") or [])
             return state
@@ -4707,11 +4765,12 @@ class BrowserRuntimeRail(AgentRail):
         state = self._build_phase_state(goal)
         state["task"] = normalized_task
         self._runtime.set_task_requested_fields(state.get("required_fields") or [])
+        save_phase(session, state)
+        session.update_state({_BROWSER_PROGRESS_STATE_KEY: None})
         session.update_state(
             {
                 _BROWSER_PROGRESS_TASK_KEY: normalized_task,
                 _BROWSER_PROGRESS_STATE_KEY: {},
-                _BROWSER_PHASE_STATE_KEY: state,
             }
         )
         return state
@@ -4761,7 +4820,7 @@ class BrowserRuntimeRail(AgentRail):
         state["deadline_at"] = deadline_at
         remaining_s = max(0.0, deadline_at - now)
         state["deadline_remaining_s"] = round(remaining_s, 3)
-        session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        save_phase(session, state)
         if isinstance(extra, dict):
             invocation_deadline = float(extra.get(_BROWSER_INVOCATION_DEADLINE_KEY) or 0.0)
             if not invocation_deadline:
@@ -4773,7 +4832,7 @@ class BrowserRuntimeRail(AgentRail):
             )
             extra[_BROWSER_TASK_DEADLINE_KEY] = time.monotonic() + effective_remaining_s
             state["invocation_remaining_s"] = round(effective_remaining_s, 3)
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
             return effective_remaining_s
         return remaining_s
 
@@ -4812,7 +4871,7 @@ class BrowserRuntimeRail(AgentRail):
                 0.0 if shared_exhausted else round(max(0.0, deadline_at - time.time()), 3)
             )
             state["invocation_remaining_s"] = 0.0
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
         ctx.request_force_finish(cls._structured_terminal_result(state))
         return True
 
@@ -4831,7 +4890,7 @@ class BrowserRuntimeRail(AgentRail):
             if reason not in blockers:
                 blockers.append(reason)
             state["blockers"] = blockers[:10]
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
         return True
 
     def _resume_task_state(
@@ -4853,6 +4912,7 @@ class BrowserRuntimeRail(AgentRail):
         state["resume_count"] = int(state.get("resume_count") or 0) + 1
         state["resume_instruction"] = resume_instruction[:2_000]
         state.pop("last_worker_final", None)
+        previous_failure = state.pop("model_failure", {})
         state["status"] = "in_progress"
         state["next_action_class"] = "continue_from_current_page"
         state["terminal_reason"] = ""
@@ -4876,7 +4936,8 @@ class BrowserRuntimeRail(AgentRail):
         retained_blockers = []
         for blocker in state.get("blockers") or []:
             normalized_blocker = str(blocker).strip().lower()
-            if normalized_blocker.startswith(recoverable_prefixes):
+            if (normalized_blocker.startswith(recoverable_prefixes)
+                    or normalized_blocker == previous_failure.get("code")):
                 continue
             if normalized_blocker.endswith("_phase_budget_exhausted"):
                 continue
@@ -4887,7 +4948,7 @@ class BrowserRuntimeRail(AgentRail):
             if url not in known_urls:
                 known_urls.append(url)
         state["known_urls"] = known_urls[:4]
-        session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        save_phase(session, state)
         self._runtime.reset_semantic_task()
         return state
 
@@ -5438,7 +5499,7 @@ class BrowserRuntimeRail(AgentRail):
         state["last_action_class"] = action_class
         state["last_strategy_fingerprint"] = strategy_fingerprint
         state["next_action_class"] = ""
-        session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        save_phase(session, state)
         return action_class
 
 
@@ -5580,7 +5641,7 @@ class BrowserRuntimeRail(AgentRail):
             missing_fields = cls._missing_completion_requirements(state) if phase == "extraction" else []
             if completion_evidence and not missing_fields:
                 cls._complete_phase(state, phases, phase, details, completion_evidence)
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+            save_phase(session, state)
             return {"phase": phase, "success": False, **evidence_delta}
 
         details["successes"] = int(details.get("successes") or 0) + 1
@@ -5602,7 +5663,7 @@ class BrowserRuntimeRail(AgentRail):
         elif details.get("status") != "replan_required":
             details["status"] = "in_progress"
             details["missing_fields"] = missing_fields
-        session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        save_phase(session, state)
         return {"phase": phase, "success": True, **evidence_delta}
 
     @staticmethod
@@ -5847,22 +5908,25 @@ class BrowserRuntimeRail(AgentRail):
         for item in (evidence, metadata, observation):
             if not item:
                 continue
-            _, source = cls._evidence_variant_and_url(state, result, tool_args)
+            variant, source = cls._evidence_variant_and_url(state, result, tool_args)
             if source:
                 item["source"] = source
+            item["variant"] = variant
+            if result.get("recall_handle"):
+                item["recall_handle"] = result["recall_handle"]
             item["query_id"] = str(state.get("query_id") or state.get("task_id") or "")
+            item["observed_at_ms"] = int(time.time() * 1000)
             page = result.get("page_state") or {}
             if page.get("page_id") and page.get("generation_id") and type(page.get("interaction_revision")) is int:
                 item["observation_scope"] = {
                     key: page[key] for key in ("page_id", "generation_id", "interaction_revision")
                 }
             signature = cls._evidence_signature(item)
-            if item.get("destination_verified") and signature in known_signatures:
-                # Keep the current landing-page proof with the bounded evidence window.
+            if signature in known_signatures:
+                # A repeated read refreshes its historical reference/recency, not live node bindings.
                 stored_evidence[:] = [old for old in stored_evidence if cls._evidence_signature(old) != signature]
-                stored_evidence.append(item)
-            elif signature not in known_signatures:
-                stored_evidence.append(item)
+            stored_evidence.append(item)
+            known_signatures.add(signature)
         # Keep the current navigation milestone inside the existing bounded
         # evidence window; long reading loops must not resurrect its old gate.
         phase_version = (state.get("active_phase_contract") or {}).get("version", 0)
@@ -5873,10 +5937,10 @@ class BrowserRuntimeRail(AgentRail):
             if item.get("destination_verified") and same_task:
                 destination = item
                 break
-        if destination and destination not in stored_evidence[-20:]:
-            stored_evidence[:] = [destination, *stored_evidence[-19:]]
-        else:
-            del stored_evidence[:-20]
+        retained = bounded_source_records(stored_evidence, 20)
+        if destination and destination not in retained:
+            retained = [destination, *bounded_source_records(stored_evidence, 19)]
+        stored_evidence[:] = retained
         if evidence.get("kind") in {"card_probe", "ordered_results"}:
             state["observed_result_count"] = max(
                 int(state.get("observed_result_count") or 0),
@@ -5990,14 +6054,14 @@ class BrowserRuntimeRail(AgentRail):
             return {}
         if "browser_probe_cards" in tool_name:
             value = []
-            observation_fields = ("title", "summary", "text_preview", "primary_link", "kind")
+            observation_fields = (
+                "title", "summary", "text_preview", "primary_link", "kind", "region", "is_ad", "provenance",
+            )
             for card in result.get("cards") or []:
                 if not isinstance(card, dict):
                     continue
-                if not cls._is_natural_evidence_card(card) and card.get("kind") not in {
-                    "ai_answer", "ai_overview", "answer",
-                }:
-                    continue
+                # Raw observations preserve header/footer/recommendation context;
+                # they do not promote those cards into natural/business result rows.
                 value.append({key: card.get(key) for key in observation_fields if key in card})
         else:
             value = cls._evaluate_result_value(result)
@@ -6012,13 +6076,19 @@ class BrowserRuntimeRail(AgentRail):
             entries = value
         if entries and not any(cls._evaluate_entry_has_content(item) for item in entries.values()):
             return {}
-        raw_text = value if isinstance(value, str) else cls._evidence_signature(value)
+        raw_text = value if isinstance(value, str) else json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+        )
         raw_text = raw_text.split("### Ran Playwright code", 1)[0].strip()
         # AX references and selector spelling are identity metadata, not new facts.
         normalized = re.sub(r"\s*\[(?:ref|target_id|generation_id)=[^\]]+\]", "", raw_text)
         normalized = " ".join(normalized.split())
         if not normalized:
             return {}
+        # Preserve source provenance in the excerpt, but identity/provenance-only
+        # changes must not become new content or task progress.
+        content_key = normalized if isinstance(value, str) else cls._evidence_signature(value)
+        content_key = " ".join(re.sub(r"\s*\[(?:ref|target_id|generation_id)=[^\]]+\]", "", content_key).split())
         _, source = cls._evidence_variant_and_url(state, result, tool_args)
         if not source:
             return {}
@@ -6029,8 +6099,15 @@ class BrowserRuntimeRail(AgentRail):
             "kind": "page_observation",
             "source": source,
             "generation_id": generation,
-            "raw_text": normalized[:4_000],
-            "content_hash": hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:20],
+            "raw_text": raw_text[:SOURCE_TEXT_LIMIT],
+            "raw_text_length": len(raw_text),
+            "raw_text_truncated": len(raw_text) > SOURCE_TEXT_LIMIT,
+            "content_hash": hashlib.sha256(content_key.encode("utf-8")).hexdigest()[:20],
+            "read_scope": {
+                "operation": tool_args.get("op") if is_page_read else tool_name.rsplit("browser_", 1)[-1],
+                **{key: tool_args[key] for key in ("query", "viewport_only") if key in tool_args},
+                **({"target": target} if target else {}),
+            },
             "provenance": {
                 "tool": tool_name,
                 **cls._evaluate_execution_provenance(tool_args, target),
@@ -6223,7 +6300,8 @@ class BrowserRuntimeRail(AgentRail):
     @classmethod
     def _evidence_signature(cls, evidence: Dict[str, Any]) -> str:
         if isinstance(evidence, dict) and evidence.get("kind") == "page_observation":
-            return json.dumps([evidence.get("source"), evidence.get("content_hash")], ensure_ascii=False)
+            return json.dumps([evidence.get("source"), evidence.get("variant"), evidence.get("content_hash"),
+                               evidence.get("read_scope") or {}], ensure_ascii=False, sort_keys=True)
         ignored_keys = {
             "generation",
             "generation_id",
@@ -6239,6 +6317,7 @@ class BrowserRuntimeRail(AgentRail):
             "interaction_revision",
             "capture_id",
             "observed_at_ms",
+            "recall_handle",
         }
 
         def semantic_value(value: Any) -> Any:
@@ -6748,7 +6827,7 @@ class BrowserRuntimeRail(AgentRail):
         )
         state["recent_actions"] = list(recent_actions)
         cls._update_last_page(state, tool_result)
-        session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        save_phase(session, state)
         return bool(progress_delta.get("recovered"))
 
     @classmethod
@@ -7146,18 +7225,20 @@ class BrowserRuntimeRail(AgentRail):
         )
 
     @classmethod
-    def interrupted_task_result(cls, session: Any, reason: str) -> Dict[str, Any]:
-        """Finalize captured progress without another model call or browser action."""
-        cls._terminalize_invoke_failure(session, reason)
+    def interrupted_task_result(
+        cls, session: Any, reason: str, *, failure: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Preserve captured facts on every failure, independently of retry eligibility."""
         state = session.get_state(_BROWSER_PHASE_STATE_KEY) if session is not None else None
-        if not isinstance(state, dict) or not state:
-            state = {"status": "blocked", "terminal_reason": reason, "blockers": [reason]}
-        else:
-            state["status"] = "partial" if cls._has_task_evidence(state) else "blocked"
-            state["terminal_reason"] = reason
-            state["blockers"] = list(dict.fromkeys([*(state.get("blockers") or []), reason]))
-            state["next_action_class"] = "finish"
-            session.update_state({_BROWSER_PHASE_STATE_KEY: state})
+        state = state if isinstance(state, dict) else {}
+        has_facts = cls._has_task_evidence(state) or bool(state.get("execution_journal"))
+        state.update(status="partial" if has_facts else "blocked", terminal_reason=reason,
+                     next_action_class="finish")
+        state["blockers"] = list(dict.fromkeys([*(state.get("blockers") or []), reason]))[:10]
+        if failure is not None:
+            state["model_failure"] = dict(failure)
+        if session is not None:
+            save_phase(session, state)
         return cls._structured_terminal_result(state)
 
     def _clear_progress_state(self, session: Any, *, preserve_task: bool = False) -> None:
@@ -7165,11 +7246,13 @@ class BrowserRuntimeRail(AgentRail):
             return
         session_id = session.get_session_id()
         self._runtime.service.clear_progress_state(session_id)
+        if not preserve_task:
+            save_phase(session, {})
+        session.update_state({_BROWSER_PROGRESS_STATE_KEY: None})
         session.update_state(
             {
                 _BROWSER_PROGRESS_STATE_KEY: {},
                 _BROWSER_PROGRESS_TASK_KEY: "",
-                _BROWSER_PHASE_STATE_KEY: session.get_state(_BROWSER_PHASE_STATE_KEY) if preserve_task else {},
             }
         )
 

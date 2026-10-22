@@ -35,6 +35,10 @@ from ..playwright_runtime.phase_contract import (
     binding_targets,
     constrain_actions,
     project_phase,
+    same_node,
+)
+from ..playwright_runtime.phase_contract import (
+    save as save_phase,
 )
 from ..playwright_runtime.policy_page_action import PAGE_OPERATIONS, READ_PAGE_OPERATIONS
 from .action_space import build_menu, build_request
@@ -45,7 +49,7 @@ from .jev_client import DecisionUnavailable, JevClient, decision_trace, validate
 
 CONTEXT_KEY = "browser_policy_observation"
 # Opt-in: these records carry task text and bound values, which default logs never contain.
-_SCOPED_READ_OPS = {"read_text", "find", "probe_cards", "extract_text", "extract_value"}
+_SCOPED_READ_OPS = {"read_text", "find", "probe_cards", "probe_interactives", "extract_text", "extract_value"}
 _DEBUG_LOG_ENV = "OPENJIUWEN_BROWSER_POLICY_DEBUG_LOG"
 _PHASE_KEY = "__browser_phase_budget_state__"
 _RECENT_RESULT_KEYS = (
@@ -191,7 +195,7 @@ class BrowserPolicyModel(Model):
         if isinstance(phase, dict) and self._task_key(session, phase) == key:
             phase["decision_policy"] = {"task_key": key, **asdict(self._task(key))}
             if callable(getattr(session, "update_state", None)):
-                session.update_state({_PHASE_KEY: phase})
+                save_phase(session, phase)
 
     @staticmethod
     def _count(task: _TaskPolicy, name: str) -> None:
@@ -276,7 +280,8 @@ class BrowserPolicyModel(Model):
         if not isinstance(phase, dict) or not phase.get("goal") or self.decision_config.mode == "llm":
             return False
         self.current_intent = normalize_goal(
-            (phase.get("active_phase_contract") or {}).get("objective") or phase.get("task") or phase["goal"]
+            ("" if (phase.get("active_phase_contract") or {}).get("handoff") else
+             (phase.get("active_phase_contract") or {}).get("objective")) or phase.get("task") or phase["goal"]
         )
         return self._bind_task(session, phase).fallback_scope != "task"
 
@@ -323,7 +328,15 @@ class BrowserPolicyModel(Model):
                     or page.get("url") != current.url
                 ):
                     raise DecisionUnavailable("observation_generation_changed")
-                controls = snapshot.get("controls") or []
+                controls = list(snapshot.get("controls") or [])
+                local_phase = phase.get("active_phase_contract") or {}
+                if local_phase.get("targets") and not local_phase.get("handoff"):
+                    existing = {c.get("target_id") for c in controls}
+                    controls.extend(c for c in current.export_decision_targets(include_current_registry=True)
+                                    if c.get("target_id") not in existing
+                                    and any(same_node(b, c) for b in local_phase["targets"]))
+                    # Candidate limits must not evict the LLM's explicit local objects.
+                    controls.sort(key=lambda c: not any(same_node(b, c) for b in local_phase["targets"]))
                 omitted = int(snapshot.get("omitted_count") or 0)
             except DecisionUnavailable as exc:
                 error = str(exc)
@@ -376,12 +389,12 @@ class BrowserPolicyModel(Model):
             card.get("order_known") for card in page.get("cards") or [])
         progress = captured.get("semantic_progress") or {}
         goal = normalize_goal(phase.get("goal"))
-        intent = (
-            normalize_goal((phase.get("active_phase_contract") or {}).get("objective") or phase.get("task")) or goal
-        )
+        local_phase = phase.get("active_phase_contract") or {}
+        objective = "" if local_phase.get("handoff") else local_phase.get("objective")
+        intent = normalize_goal(objective or phase.get("task")) or goal
         page["visited_urls"] = task.visited_urls
         phase_version = (phase.get("active_phase_contract") or {}).get("version", 0)
-        page["local_objective"] = bool((phase.get("active_phase_contract") or {}).get("objective"))
+        page["local_objective"] = bool(objective)
         destination_milestone = any(
             item.get("destination_verified") and item.get("phase_version", 0) == phase_version
             for item in phase.get("structured_evidence", []) if isinstance(item, dict)
@@ -441,7 +454,8 @@ class BrowserPolicyModel(Model):
                 if key in semantic
             },
             "execution_receipts": copy.deepcopy(task.receipts[-6:]),
-            "llm_recent_actions": copy.deepcopy(task.llm_actions),
+            "llm_recent_actions": [{k: v for k, v in action.items() if k != "call_id"}
+                                   for action in task.llm_actions],
             "page": {k: page.get(k) for k in ("page_id", "generation_id", "url", "title")},
             "read_observation": hashlib.sha256(canonical_arguments(
                 self.runtime.ensure_page_state().read_observation).encode()).hexdigest()[:24],
@@ -495,6 +509,9 @@ class BrowserPolicyModel(Model):
         if refresh and not error and new_capture:
             receipt = task.receipts[-1]
             if receipt.get("postcondition") == "awaiting_observation":
+                receipt["observed_url"] = page.get("url")
+                if receipt.get("operation") == "scroll":
+                    receipt["scroll_to"] = page.get("page_position", {}).get("scroll_y")
                 if reader_step and reader_step["op"] in _SCOPED_READ_OPS:
                     # Retain the successful read's post-observation scope in the existing receipt.
                     receipt["reader_scope"] = self._reader_scope_key(reader_step, self._observations[token])
@@ -529,6 +546,8 @@ class BrowserPolicyModel(Model):
                     task.failed_actions.pop(task.pending.get("action_key", ""), None)
                 self._count(task, receipt["postcondition"])
                 browser_agent_log_info("[BROWSER_POLICY_POSTCONDITION] %s", json.dumps({**receipt, "task_id": key}))
+        if refresh and not error:
+            self._mark_reversed_navigation(task, page)
         while len(self._observations) > 16:
             self._observations.popitem(last=False)
         self._persist(key)
@@ -681,6 +700,17 @@ class BrowserPolicyModel(Model):
                 raise DecisionUnavailable("decision_budget_exhausted")
             if not has_batch_tool and not has_page_tool and not probe_tools:
                 raise DecisionUnavailable("batch_tool_unavailable")
+            phase_view = observation.state.get("phase") or {}
+            diagnostic["phase_version"] = phase_view.get("version", 0)
+            if phase_view.get("handoff"):
+                session = self._sessions.get(observation.task_key)
+                shared = session.get_state(_PHASE_KEY) if session else {}
+                active = (shared or {}).get("active_phase_contract") or {}
+                handoff = active.get("handoff") or {}
+                if active.get("version") == phase_view.get("version") and handoff and not handoff.get("offered"):
+                    handoff["offered"] = True
+                    save_phase(session, shared)
+                    raise DecisionUnavailable("local_intent_changed")
             menu = build_menu(
                 observation.controls if has_batch_tool else [],
                 observation.state["current_intent"],
@@ -688,7 +718,9 @@ class BrowserPolicyModel(Model):
                 page=observation.page,
                 allow_page_actions=has_page_tool,
                 search_bindings=task.search_bindings,
-                field_bindings=(observation.phase_state.get("active_phase_contract") or {}).get("bindings"),
+                field_bindings=[] if phase_view.get("handoff") else
+                (observation.phase_state.get("active_phase_contract") or {}).get("bindings"),
+                read_queries=phase_view.get("read_queries") or [],
                 probe_tools=probe_tools,
                 page_operations=self._page_operations() if has_page_tool else set(),
                 task_literals=task_literals(
@@ -712,6 +744,8 @@ class BrowserPolicyModel(Model):
                           ("unknown_effect_scope" if unknown else "ambiguous_binding")
                           if restricted and not fixed_read and impact not in {"read", "local_ui"}
                           else "")
+                if not reason:
+                    reason = self._local_continuity_reason(task, step, control, observation)
                 recovery_key = self._binding_recovery_key(step, control, observation)
                 stale_receipts = []
                 if recovery_key:
@@ -750,7 +784,7 @@ class BrowserPolicyModel(Model):
                     menu.excluded[reason] = menu.excluded.get(reason, 0) + 1
             phase_view = observation.state.get("phase") or {}
             unverified = phase_view.get("missing_conditions") and phase_view.get("status") != "verified"
-            if has_phase_tool and phase_view.get("version") and unverified:
+            if has_phase_tool and phase_view.get("version") and unverified and not phase_view.get("handoff"):
                 menu.criteria["VERIFY"] = (
                     "READ optional local conditions when fresh facts are needed; this does not certify completion."
                 )
@@ -758,6 +792,11 @@ class BrowserPolicyModel(Model):
             diagnostic["phase_version"] = phase_view.get("version", 0)
             diagnostic.update(
                 candidate_count=len(menu.steps),
+                candidate_operations={op: sum(s["op"] == op for s in menu.steps.values())
+                                      for op in sorted({s["op"] for s in menu.steps.values()})},
+                read_query_count=len(phase_view.get("read_queries") or []),
+                phase_handoff=(phase_view.get("handoff") or {}).get("reason"),
+                input_version="local_scope_v2",
                 excluded=menu.excluded,
                 probe_excluded=observation.state["probe_excluded"],
                 omitted_count=observation.state["omitted_count"] + menu.omitted,
@@ -969,6 +1008,15 @@ class BrowserPolicyModel(Model):
             task.pending = {
                 "decision_id": decision_id,
                 "operation": step["op"],
+                "source_url": observation.page.get("url"),
+                "source_document": observation.page.get("page_guard", {}).get("document"),
+                "llm_call_id": task.llm_actions[-1].get("call_id") if task.llm_actions else None,
+                "llm_navigation_call_id": next((a.get("call_id") for a in reversed(task.llm_actions)
+                                                if a.get("op") in {"navigate", "navigate_back", "select_tab"}), None),
+                "scroll_from": observation.page.get("page_position", {}).get("scroll_y"),
+                "scroll_direction": step.get("direction"),
+                "scroll_layout": {key: observation.page.get("page_position", {}).get(key)
+                                  for key in ("page_height", "viewport_height", "viewport_width")},
                 "navigation_url": step.get("url") if step["op"] == "navigate" else None,
                 "action_key": self._action_key(step, target or {}, observation),
                 "target_key": self._target_key(step, target or {}),
@@ -1070,6 +1118,16 @@ class BrowserPolicyModel(Model):
                 recovery["next"] = ("Judge whether source observations satisfy the user's requested endpoint. "
                                     "Optional phase conditions do not require certification. Answer if sufficient; "
                                     "otherwise continue only the remaining user goal.")
+            elif reason == "local_intent_changed":
+                recovery["next"] = (
+                    "The previous local fragment lost its bound document or the LLM acted on a different control. "
+                    "Its old objective/values are historical, not instructions for this page. Use this interpretation "
+                    "turn to set one short remaining objective, current target_ids/bound_values and needed operations; "
+                    "read_queries can supply resolved literals for find/control probes. Or perform a simple ordinary "
+                    "tool action/answer directly. Do not rebind by name or repeat the completed search. "
+                    "Keep candidate inspection read-only until selecting the object/variant for a business write."
+                )
+                recovery["bindings"] = binding_targets(observation.controls, limit=12)
             elif reason in {"local_intent_required", "no_supported_actions", "missing_task_intent"}:
                 recovery["next"] = ("Choose one current objective; optionally call browser_phase set with objective "
                                     "and observed field/value bindings, or execute one ordinary LLM tool action. "
@@ -1141,6 +1199,9 @@ class BrowserPolicyModel(Model):
             control = next((c for c in observation.controls if c.get("target_id") == step.get("target_id")), {})
             value["content"] = ((control.get("decision_state") or {}).get("current_value")
                                 if step["op"] == "extract_value" else control.get("text"))
+        elif step["op"] == "probe_interactives":
+            value["controls"] = [{k: c.get(k) for k in ("name", "role", "selected", "text")}
+                                 for c in observation.controls]
         elif step["op"] == "probe_cards":
             value["cards"] = [
                 {k: card.get(k) for k in (*CARD_EVIDENCE_FIELDS, "result_index", "is_ad", "order_known")}
@@ -1178,6 +1239,10 @@ class BrowserPolicyModel(Model):
             scope.update(max_cards=min(12, max(1, int(step.get("max_cards", 8)))),
                          viewport_only=step.get("viewport_only", True),
                          include_buttons=step.get("include_buttons", True), query=step.get("query") or "")
+        elif op == "probe_interactives":
+            scope.update(query=str(step.get("query") or "").strip(),
+                         max_items=min(40, max(1, int(step.get("max_items", 30)))),
+                         viewport_only=step.get("viewport_only", True))
         elif op == "find":
             scope["query"] = step.get("query") or ""
         elif op in {"extract_text", "extract_value"}:
@@ -1191,7 +1256,7 @@ class BrowserPolicyModel(Model):
                  "intent": observation.state.get("current_intent"),
                  "binding_version": (observation.state.get("phase") or {}).get("version", 0),
                  "view": view.get("semantic") or {}}
-        if op == "probe_cards" and scope.get("viewport_only"):
+        if op in {"probe_cards", "probe_interactives"} and scope.get("viewport_only"):
             value["position"] = view.get("page_position") or observation.state.get("page_position")
         return hashlib.sha256(canonical_arguments(value).encode()).hexdigest()[:24]
 
@@ -1212,6 +1277,57 @@ class BrowserPolicyModel(Model):
             value["read_state"] = BrowserPolicyModel._reader_fingerprint(step, observation)
             value["binding_version"] = (observation.state.get("phase") or {}).get("version", 0)
         return hashlib.sha256(canonical_arguments(value).encode()).hexdigest()[:24]
+
+    @staticmethod
+    def _mark_reversed_navigation(task: _TaskPolicy, page: dict[str, Any]) -> None:
+        """An explicit LLM return retires the particular detour, not the page's menu."""
+        movement = task.llm_actions[-1] if task.llm_actions else {}
+        if (movement.get("op") not in {"navigate", "navigate_back", "select_tab"}
+                or movement.get("outcome") != "ok" or not movement.get("call_id")):
+            return
+        for receipt in reversed(task.receipts):
+            if (not receipt.get("success") or not receipt.get("target_key")
+                    or receipt.get("operation") not in {"navigate", "select_tab", "click", "press"}):
+                continue
+            if (receipt.get("llm_navigation_call_id") != movement["call_id"]
+                    and receipt.get("source_url") == page.get("url")
+                    and receipt.get("observed_url")
+                    and receipt["observed_url"] != receipt["source_url"]):
+                receipt["reversed_by_llm"] = True
+                return
+
+    @staticmethod
+    def _local_continuity_reason(task: _TaskPolicy, step: dict[str, Any], control: dict[str, Any],
+                                 observation: _Observation) -> str:
+        version = (observation.state.get("phase") or {}).get("version", 0)
+        key = BrowserPolicyModel._target_key(step, control)
+        if key and any(r.get("reversed_by_llm") and r.get("target_key") == key
+                       and r.get("source_url") == observation.page.get("url")
+                       and r.get("phase_version", 0) == version for r in task.receipts):
+            return "llm_reversed_navigation"
+        if step["op"] != "scroll":
+            return ""
+        moves = [r for r in task.receipts if r.get("success") and r.get("operation") not in
+                 READ_PAGE_OPERATIONS | _SCOPED_READ_OPS | {"probe_interactives", "verify"}][-2:]
+        if len(moves) != 2 or any(r.get("operation") != "scroll" for r in moves):
+            return ""
+        first, last = moves
+        document = observation.page.get("page_guard", {}).get("document")
+        llm_call = task.llm_actions[-1].get("call_id") if task.llm_actions else None
+        positions = [first.get("scroll_from"), first.get("scroll_to"), last.get("scroll_from"),
+                     last.get("scroll_to"), observation.page.get("page_position", {}).get("scroll_y")]
+        if not document or not all(isinstance(p, (float, int)) for p in positions):
+            return ""
+        layout = {key: observation.page.get("page_position", {}).get(key)
+                  for key in ("page_height", "viewport_height", "viewport_width")}
+        same_scope = all(r.get("source_document") == document and r.get("phase_version", 0) == version
+                         and r.get("llm_call_id") == llm_call and r.get("scroll_layout") == layout for r in moves)
+        round_trip = (abs(positions[0] - positions[3]) <= 2 and abs(positions[1] - positions[2]) <= 2
+                      and abs(positions[3] - positions[4]) <= 2)
+        if (same_scope and round_trip and first.get("scroll_direction") == step.get("direction")
+                and first.get("scroll_direction") != last.get("scroll_direction")):
+            return "scroll_round_trip"
+        return ""
 
     @staticmethod
     def _binding_recovery_key(step: dict[str, Any], control: dict[str, Any], observation: _Observation) -> str:
@@ -1388,6 +1504,7 @@ class BrowserPolicyModel(Model):
                         for prior in task.receipts:
                             if target_key and prior.get("target_key") == target_key:
                                 prior["binding_recovered"] = True
+                                prior.pop("reversed_by_llm", None)
                         task.failed_actions.pop(self._action_key(compiled, control, observation), None)
             if not outcome.get("success") and not outcome.get("denied") and not outcome.get("observation_invalidated"):
                 from ..playwright_runtime.execution_journal import arguments, step_control
@@ -1458,6 +1575,9 @@ class BrowserPolicyModel(Model):
                 else "dispatched_unknown"
             ),
             "phase_version": task.pending.get("phase_version", 0),
+            **{key: task.pending.get(key) for key in
+               ("source_url", "source_document", "llm_call_id", "llm_navigation_call_id",
+                "scroll_from", "scroll_direction", "scroll_layout")},
             "operation": task.pending.get("operation"),
             "target_label": task.pending.get("target_label", ""),
             "target_key": task.pending.get("target_key", ""),
@@ -1520,7 +1640,10 @@ class BrowserPolicyModel(Model):
                 op = "mouse"  # Raw pointer moves (e.g. a captcha slider drag) are one gesture, not six steps.
                 if task.llm_actions and task.llm_actions[-1].get("op") == "mouse":
                     continue
-            item = {"op": op, "target_label": label, "outcome": result}
+            item = {"op": op, "target_label": label, "outcome": result,
+                    "call_id": str(getattr(getattr(inputs, "tool_call", None), "id", "") or "")}
+            if op in {"find", "probe_interactives", "probe_cards"} and isinstance(step.get("query"), str):
+                item["query"] = step["query"][:160]
             if isinstance(step.get("url"), str) and step["url"]:
                 from urllib.parse import urlsplit
 
@@ -1537,7 +1660,7 @@ class BrowserPolicyModel(Model):
     @staticmethod
     def _compiled(step: dict[str, Any]) -> dict[str, Any]:
         """Project an LLM tool step onto the operation vocabulary of the decision menu."""
-        compiled = {k: step[k] for k in ("op", "value", "key", "checked") if k in step}
+        compiled = {k: step[k] for k in ("op", "value", "key", "checked", "url") if k in step}
         if compiled.get("op") == "type":
             compiled.update(op="fill", value=step.get("text", step.get("value")))
         if compiled.get("op") == "press_key":
@@ -1634,6 +1757,12 @@ class BrowserPolicyModel(Model):
             return
         first = True
         llm_elapsed_ms = 0.0
+        stream_metrics = {
+            "timing_scope": "producer_wait", "chunk_count": 0, "output_chunk_count": 0,
+            "first_chunk_ms": None, "last_chunk_ms": None,
+            "first_output_ms": None, "last_output_ms": None,
+            "content_chars": 0, "reasoning_chars": 0, "tool_call_chunks": 0,
+        }
         self._remaining(deadline)  # Do not count a request after an exhausted task deadline.
         llm_messages = self._llm_messages(messages, diagnostic)
         usage_session = self._sessions.get(diagnostic.get("task_id"))
@@ -1662,6 +1791,22 @@ class BrowserPolicyModel(Model):
                     break
                 finally:
                     llm_elapsed_ms += (time.perf_counter() - pull_started) * 1000
+                offset_ms = round(llm_elapsed_ms, 3)
+                stream_metrics["chunk_count"] += 1
+                if stream_metrics["first_chunk_ms"] is None:
+                    stream_metrics["first_chunk_ms"] = offset_ms
+                stream_metrics["last_chunk_ms"] = offset_ms
+                if chunk.carries_output_token():
+                    stream_metrics["output_chunk_count"] += 1
+                    if stream_metrics["first_output_ms"] is None:
+                        stream_metrics["first_output_ms"] = offset_ms
+                    stream_metrics["last_output_ms"] = offset_ms
+                if isinstance(chunk.content, str):
+                    stream_metrics["content_chars"] += len(chunk.content)
+                stream_metrics["reasoning_chars"] += len(chunk.reasoning_content or "")
+                stream_metrics["tool_call_chunks"] += int(any(
+                    call.name or call.arguments for call in chunk.tool_calls or ()
+                ))
                 if chunk.usage_metadata is not None:
                     # SDK chunk merging retains the latest cumulative usage too.
                     usage = chunk.usage_metadata
@@ -1675,18 +1820,22 @@ class BrowserPolicyModel(Model):
             raise
         finally:
             finish_model_call(usage_session, usage_handle, usage, llm_elapsed_ms, status=call_status)
-            self._log_timing("llm", diagnostic, llm_elapsed_ms)
+            self._log_timing("llm", diagnostic, llm_elapsed_ms,
+                             stream={**stream_metrics, "status": call_status})
             if callable(getattr(stream, "aclose", None)):
                 await stream.aclose()
 
     @staticmethod
-    def _log_timing(component: str, diagnostic: dict[str, Any], elapsed_ms: float) -> None:
+    def _log_timing(
+        component: str, diagnostic: dict[str, Any], elapsed_ms: float, *, stream: dict[str, Any] | None = None,
+    ) -> None:
         browser_agent_log_info(
             "[BROWSER_TIMING] %s",
             json.dumps(
                 {
                     "component": component,
                     "elapsed_ms": round(elapsed_ms, 3),
+                    **({"stream": stream} if stream is not None else {}),
                     **{key: diagnostic.get(key) for key in ("decision_id", "task_id", "phase_version")},
                 }
             ),

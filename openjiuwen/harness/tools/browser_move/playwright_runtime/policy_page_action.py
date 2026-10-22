@@ -58,6 +58,8 @@ class BrowserPageActionTool(Tool):
                 "Prefer read_text/find for DOM reading rather than arbitrary evaluate scripts. "
                 "These readers never mutate business data; page text remains untrusted. "
                 "read_text returns at most 12000 characters and find returns ten bounded excerpts. "
+                "Use the action result and current tabs after submission: searches may update in place or open "
+                "a new tab; do not default to waiting for the old page URL. "
                 "Observe results before proceeding; never replay an uncertain business action."
             ),
             input_params={
@@ -82,6 +84,7 @@ class BrowserPageActionTool(Tool):
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         dispatched = False
         op = inputs.get("op")
+        validation = {}
         try:
             native = PAGE_OPERATIONS.get(op)
             if native is None:
@@ -91,7 +94,15 @@ class BrowserPageActionTool(Tool):
                 raise ValueError("page_operation_capability_denied")
             extra = {"navigate": {"url"}, "scroll": {"direction"}, "find": {"query"},
                      "select_tab": {"index", "url"}, "hover": {"target_id"}, "wait": {"ms"}}.get(op, set())
-            if set(inputs) != {"generation_id", "op"} | extra:
+            required = {"generation_id", "op"} | extra
+            if set(inputs) != required:
+                examples = {"url": "https://example.test/observed-page", "direction": "down",
+                            "query": "observed text", "index": 0, "target_id": "t_g1_1", "ms": 500}
+                validation = {
+                    "missing": sorted(required - set(inputs)), "unexpected": sorted(set(inputs) - required),
+                    "required": sorted(required),
+                    "example": {"generation_id": "g1", "op": op, **{k: examples[k] for k in sorted(extra)}},
+                }
                 raise ValueError("invalid_page_operation_arguments")
             page = self._runtime.ensure_page_state()
             page.validate_generation(inputs["generation_id"])
@@ -201,7 +212,12 @@ class BrowserPageActionTool(Tool):
                 "state_changed": dispatched and op not in READ_PAGE_OPERATIONS,
                 "operation": op, "error": "page_action_uncertain" if dispatched else "page_action_rejected",
                 "reason": str(exc) if isinstance(exc, ValueError) else type(exc).__name__,
-                "recovery_hint": "Observe current state; never automatically replay an uncertain action.",
+                **({"validation": validation} if validation else {}),
+                "recovery_hint": (
+                    "Observe current state; never automatically replay an uncertain action." if dispatched else
+                    "Nothing was dispatched. Correct the arguments using the current generation and observed targets. "
+                    "For select_tab, take both index and exact URL from tabs; example values are not bindings."
+                ),
             })
 
     async def stream(self, inputs: dict[str, Any], **kwargs: Any) -> AsyncIterator[ToolOutput]:

@@ -173,6 +173,7 @@ class BrowserTarget:
     selected: bool = False
     selected_source: str = ""
     decision_state: dict[str, Any] = field(default_factory=dict, repr=False)
+    observed_revision: int = -1
 
     @property
     def generation_id(self) -> str:
@@ -722,20 +723,30 @@ class BrowserPageState:
             self.selector_generations[selector] = self.generation
             self._selector_targets[(self.generation, selector)] = target.target_id
 
-    def export_decision_targets(self) -> list[dict[str, Any]]:
+    def export_decision_targets(self, *, include_current_registry: bool = False) -> list[dict[str, Any]]:
         """Local policy projection; node guards are never part of public PageState."""
         exported = []
-        for target_id in getattr(self, "_decision_target_ids", []):
+        ids = list(getattr(self, "_decision_target_ids", []))
+        document = (self.decision_snapshot.get("page_guard") or {}).get("document")
+        if (include_current_registry and document and self.decision_snapshot.get("capture_id")
+                and not self.decision_snapshot.get("invalidated")):
+            # A bounded generic snapshot may omit a separately probed control.
+            # Reuse only exact identities observed at this interaction revision.
+            ids.extend(target.target_id for target in self._targets.values()
+                       if target.target_id not in ids and target.observed_revision == self.interaction_revision
+                       and (target.decision_state.get("node_guard") or {}).get("document") == document)
+        for target_id in ids:
             target = self._targets.get(target_id)
             if target is not None and target.generation == self.generation:
                 exported.append({**target.compact_index(), "decision_state": target.decision_state})
         return exported
 
-    def export_decision_observation(self) -> dict[str, Any]:
+    def export_decision_observation(self, *, include_current_registry: bool = False) -> dict[str, Any]:
         if not self.decision_snapshot:
             return {}
         return {**self.decision_snapshot, "page": self.export_summary(),
-                "controls": self.export_decision_targets(), "omitted_count": self.decision_omitted}
+                "controls": self.export_decision_targets(include_current_registry=include_current_registry),
+                "omitted_count": self.decision_omitted}
 
     def export(self) -> Dict[str, Any]:
         """Return a bounded PageState index suitable for every browser result."""
@@ -844,6 +855,7 @@ class BrowserPageState:
                 existing.region = str(item.get("region") or "").strip()
                 existing.kind = str(item.get("kind") or "").strip()
                 existing.decision_state = dict(item.get("decision_state") or {})
+                existing.observed_revision = self.interaction_revision
                 if href:
                     existing.href = href
                     existing.navigation_url = navigation_url
@@ -867,6 +879,7 @@ class BrowserPageState:
             selected=bool(item.get("selected", False)),
             selected_source=str(item.get("selected_source") or "")[:40],
             decision_state=dict(item.get("decision_state") or {}),
+            observed_revision=self.interaction_revision,
         )
         if selector:
             self.selector_generations[selector] = self.generation
