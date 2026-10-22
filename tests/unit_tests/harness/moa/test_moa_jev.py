@@ -170,7 +170,7 @@ def test_jev_spec_build_keeps_runtime_client_identity_and_serialized_spec_unchan
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("consult", [False, True])
-async def test_initial_decision_controls_first_call_without_verifier_fallback(consult, monkeypatch):
+async def test_no_initial_decision_or_verifier_fallback(consult, monkeypatch):
     scorer = AsyncMock(side_effect=AssertionError("JEV must not run verifier scoring"))
     monkeypatch.setattr("openjiuwen.harness.rails.moa_rail.score_progress", scorer)
     client = _client(_response(consult))
@@ -180,10 +180,10 @@ async def test_initial_decision_controls_first_call_without_verifier_fallback(co
     deep = agent(primary_model, _config(client, reference))
     result = await deep.invoke("task", session=Session(session_id="jev-initial", card=deep.card))
     assert result["output"] == "done"
-    client.system_one.assert_awaited_once()
+    client.system_one.assert_not_awaited()
     scorer.assert_not_awaited()
-    assert reference.invoke.await_count == int(consult)
-    assert ("private JEV proposal" in str(primary_model.invoke.await_args.kwargs["messages"])) is consult
+    reference.invoke.assert_not_awaited()
+    assert "private JEV proposal" not in str(primary_model.invoke.await_args.kwargs["messages"])
     assert "private JEV proposal" not in str(
         deep.react_agent.context_engine.get_context(session_id="jev-initial").get_messages()
     )
@@ -193,7 +193,7 @@ async def test_initial_decision_controls_first_call_without_verifier_fallback(co
 
 @pytest.mark.asyncio
 async def test_jev_checks_every_three_completed_turns_and_delivers_to_next_turn():
-    client = _client(_response(), _response(True), _response(True))
+    client = _client(_response(True), _response(True))
     primary_model = primary(*[_step(i) for i in range(1, 7)], AssistantMessage(content="done"))
     reference = model()
     reference.invoke = AsyncMock(
@@ -201,7 +201,7 @@ async def test_jev_checks_every_three_completed_turns_and_delivers_to_next_turn(
     )
     deep = agent(primary_model, _config(client, reference), tools=[Echo()])
     await deep.invoke("task", session=Session(session_id="jev-cadence", card=deep.card))
-    assert client.system_one.await_count == 3
+    assert client.system_one.await_count == 2
     assert reference.invoke.await_count == 2
     requests = [str(call.kwargs["messages"]) for call in primary_model.invoke.await_args_list]
     assert ["third-turn proposal" in request for request in requests] == [
@@ -214,7 +214,7 @@ async def test_jev_checks_every_three_completed_turns_and_delivers_to_next_turn(
         False,
     ]
     assert ["sixth-turn proposal" in request for request in requests] == [False] * 6 + [True]
-    third_state = client.system_one.await_args_list[1].kwargs["state"]
+    third_state = client.system_one.await_args_list[0].kwargs["state"]
     assert [message["role"] for message in third_state["messages"]] == [
         "tool",
         "assistant",
@@ -232,7 +232,7 @@ async def test_jev_checks_every_three_completed_turns_and_delivers_to_next_turn(
     assert call.get("name", call.get("function", {}).get("name")) == "echo"
     assert call.get("arguments", call.get("function", {}).get("arguments")) == '{"value": "result"}'
     assert third_state["messages"][-1]["tool_call_id"] == "call-3-0"
-    assert "third-turn proposal" not in str(client.system_one.await_args_list[2].kwargs["state"])
+    assert "third-turn proposal" not in str(client.system_one.await_args_list[1].kwargs["state"])
 
 
 @pytest.mark.asyncio
@@ -241,7 +241,7 @@ async def test_parallel_tool_batch_counts_as_one_completed_turn():
     primary_model = primary(_step(1, "echo", "echo"), _step(2), AssistantMessage(content="done"))
     deep = agent(primary_model, _config(client, interval=2), tools=[Echo()])
     await deep.invoke("task", session=Session(card=deep.card))
-    assert client.system_one.await_count == 2
+    assert client.system_one.await_count == 1
 
 
 def test_state_uses_recent_text_messages_and_detaches_tool_and_todo_data():
@@ -298,7 +298,7 @@ def test_unnamed_tool_results_recover_names_when_assistant_is_outside_latest_k()
 
 @pytest.mark.asyncio
 async def test_k_limits_only_decision_input_and_reference_keeps_consultation_context():
-    client = _client(_response(), _response(True))
+    client = _client(_response(True))
     reference = model()
     reference.invoke = AsyncMock(return_value=AssistantMessage(content="context proposal"))
     deep = agent(
@@ -326,17 +326,18 @@ async def test_real_core_client_receives_typed_question_and_preserves_wire_conte
         client = JevSystemOneClient(api_key="test-key", http_client=http, max_retries=0, model_name="jev-test")
         original = client.system_one
         client.system_one = AsyncMock(wraps=original)
-        primary_model = primary(AssistantMessage(content="done"))
+        primary_model = primary(_step(1), AssistantMessage(content="done"))
         reference = model()
         reference.invoke = AsyncMock(return_value=AssistantMessage(content="wire proposal"))
-        deep = agent(primary_model, _config(client, reference))
+        deep = agent(primary_model, _config(client, reference, interval=1), tools=[Echo()])
         await deep.invoke("wire task", session=Session(card=deep.card))
         question = client.system_one.await_args.kwargs["questions"]["consult_reference"]
         assert isinstance(question, ChoiceQuestion)
         assert set(question.criteria) == {"CONSULT", "CONTINUE"}
         assert requests[0]["model"] == "jev-test"
         assert requests[0]["questions"]["consult_reference"]["type"] == "choice"
-        assert requests[0]["state"] == {"messages": [{"role": "user", "content": "wire task"}]}
+        assert requests[0]["state"]["messages"][0] == {"role": "user", "content": "wire task"}
+        assert requests[0]["state"]["messages"][-1]["role"] == "tool"
         assert not http.is_closed
 
 
@@ -345,7 +346,7 @@ async def test_choice_near_half_confidence_still_consults_without_extra_threshol
     client = _client(_response(True, confidence=0.501, probabilities={"CONSULT": 0.501, "CONTINUE": 0.499}))
     reference = model()
     reference.invoke = AsyncMock(return_value=AssistantMessage(content="proposal"))
-    deep = agent(primary(AssistantMessage(content="done")), _config(client, reference))
+    deep = agent(primary(_step(1), AssistantMessage(content="done")), _config(client, reference, interval=1), tools=[Echo()])
     await deep.invoke("task", session=Session(card=deep.card))
     reference.invoke.assert_awaited_once()
 
@@ -376,7 +377,7 @@ async def test_invalid_jev_response_continues_without_reference_or_verifier(resp
     client = _client(response)
     reference = model()
     reference.invoke = AsyncMock()
-    deep = agent(primary(AssistantMessage(content="done")), _config(client, reference))
+    deep = agent(primary(_step(1), AssistantMessage(content="done")), _config(client, reference, interval=1), tools=[Echo()])
     result = await deep.invoke("task", session=Session(card=deep.card))
     assert result["output"] == "done"
     reference.invoke.assert_not_awaited()
@@ -412,7 +413,7 @@ async def test_request_and_decode_failures_keep_distinct_jev_reasons(response, r
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initial", [_response(), RuntimeError("offline"), None])
-async def test_retry_does_not_repeat_initial_false_or_failed_decision(initial):
+async def test_retry_does_not_trigger_early_decision(initial):
     class RetryOnce(DeepAgentRail):
         async def on_model_exception(self, ctx):
             if ctx.retry_attempt == 0:
@@ -426,12 +427,12 @@ async def test_retry_does_not_repeat_initial_false_or_failed_decision(initial):
     result = await deep.invoke("task", session=Session(card=deep.card))
     assert result["output"] == "done"
     assert primary_model.invoke.await_count == 2
-    client.system_one.assert_awaited_once()
+    client.system_one.assert_not_awaited()
     reference.invoke.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_text_only_continuation_does_not_repeat_initial_decision():
+async def test_text_only_continuation_does_not_count_completed_tool_round():
     class ContinueOnce(DeepAgentRail):
         async def after_model_call(self, ctx):
             if ctx.inputs.react_iteration == 1:
@@ -445,7 +446,7 @@ async def test_text_only_continuation_does_not_repeat_initial_decision():
     )
     result = await deep.invoke("task", session=Session(card=deep.card))
     assert result["output"] == "done"
-    client.system_one.assert_awaited_once()
+    client.system_one.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -517,13 +518,13 @@ async def test_timeout_continues_and_next_checkpoint_can_consult():
     client.system_one = AsyncMock(side_effect=decide)
     reference = model()
     reference.invoke = AsyncMock(return_value=AssistantMessage(content="after timeout"))
-    primary_model = primary(_step(1), AssistantMessage(content="done"))
+    primary_model = primary(_step(1), _step(2), AssistantMessage(content="done"))
     deep = agent(primary_model, _config(client, reference, interval=1, timeout=0.02), tools=[Echo()])
     result = await deep.invoke("task", session=Session(card=deep.card))
     assert result["output"] == "done" and cancelled.is_set()
     assert client.system_one.await_count == 2
     assert "after timeout" not in str(primary_model.invoke.await_args_list[0].kwargs["messages"])
-    assert "after timeout" in str(primary_model.invoke.await_args_list[1].kwargs["messages"])
+    assert "after timeout" in str(primary_model.invoke.await_args_list[2].kwargs["messages"])
 
 
 class _MemoryTodo(TodoTool):
@@ -569,15 +570,15 @@ async def test_timeout_bounds_todo_read_and_spends_one_decision_attempt():
     client = _client()
     capture = CaptureSnapshot()
     deep = agent(
-        primary(AssistantMessage(content="done")),
-        _config(client, timeout=0.02, max_jev_calls=1),
-        tools=[todo],
+        primary(_step(1), AssistantMessage(content="done")),
+        _config(client, interval=1, timeout=0.02, max_jev_calls=1),
+        tools=[todo, Echo()],
         rails=[capture],
     )
     result = await deep.invoke("task", session=Session(card=deep.card))
     assert result["output"] == "done" and cancelled.is_set()
     client.system_one.assert_not_awaited()
-    snapshot = capture.snapshots[0]
+    snapshot = capture.snapshots[1]
     assert snapshot.jev_calls == 1 and snapshot.verifier_calls == 0
     assert snapshot.last_jev_decision is None and snapshot.last_jev_reason == "jev_timeout"
 
@@ -587,9 +588,9 @@ async def test_todo_input_reads_current_registered_native_state_each_checkpoint(
     todo = _MemoryTodo([TodoItem(id="check", content="Check result", status=TodoStatus.PENDING)])
     client = _client()
     deep = agent(
-        primary(_step(1, "native_todo"), AssistantMessage(content="done")),
+        primary(_step(1, "echo"), _step(2, "native_todo"), AssistantMessage(content="done")),
         _config(client, interval=1),
-        tools=[todo],
+        tools=[todo, Echo()],
     )
     await deep.invoke("task", session=Session(session_id="jev-todo", card=deep.card))
     states = [call.kwargs["state"] for call in client.system_one.await_args_list]
@@ -605,7 +606,7 @@ async def test_missing_todo_state_uses_messages_only(kind):
     if kind == "unreadable":
         todo.load_todos.side_effect = RuntimeError("cannot read")
     client = _client()
-    deep = agent(primary(AssistantMessage(content="done")), _config(client), tools=[todo])
+    deep = agent(primary(_step(1), AssistantMessage(content="done")), _config(client, interval=1), tools=[todo, Echo()])
     result = await deep.invoke("task", session=Session(card=deep.card))
     assert result["output"] == "done"
     assert set(client.system_one.await_args.kwargs["state"]) == {"messages"}
@@ -614,7 +615,7 @@ async def test_missing_todo_state_uses_messages_only(kind):
 
 @pytest.mark.asyncio
 async def test_public_stream_delivers_periodic_proposal_once_and_keeps_history_private():
-    client = _client(_response(), _response(True), _response())
+    client = _client(_response(True), _response())
     primary_model = model()
     requests = []
     outputs = [_step(1), _step(2), AssistantMessage(content="done")]
@@ -630,7 +631,7 @@ async def test_public_stream_delivers_periodic_proposal_once_and_keeps_history_p
     reference.invoke = AsyncMock(return_value=AssistantMessage(content="stream proposal"))
     deep = agent(primary_model, _config(client, reference, interval=1), tools=[Echo()])
     chunks = [chunk async for chunk in deep.stream("task", session=Session(session_id="jev-stream", card=deep.card))]
-    assert chunks and client.system_one.await_count == 3
+    assert chunks and client.system_one.await_count == 2
     assert ["stream proposal" in str(request) for request in requests] == [False, True, False]
     assert "stream proposal" not in str(
         deep.react_agent.context_engine.get_context(session_id="jev-stream").get_messages()
@@ -645,7 +646,7 @@ async def test_task_loop_keeps_cadence_across_inner_iterations():
             if ctx.inputs.iteration == 1:
                 await ctx.agent.follow_up("continue", session=ctx.session)
 
-    client = _client(_response(), _response(True))
+    client = _client(_response(True))
     primary_model = model()
     requests = []
     outputs = [_step(1), AssistantMessage(content="first done"), _step(2), AssistantMessage(content="done")]
@@ -668,25 +669,25 @@ async def test_task_loop_keeps_cadence_across_inner_iterations():
     )
     result = await deep.invoke("task", session=Session(card=deep.card))
     assert result["output"] == "done"
-    assert client.system_one.await_count == 2
+    assert client.system_one.await_count == 1
     assert ["second-inner proposal" in str(request) for request in requests] == [False, False, False, True]
 
 
 @pytest.mark.asyncio
-async def test_new_outer_invocation_resets_initial_check_and_budgets_on_same_session():
+async def test_new_outer_invocation_resets_completed_rounds_and_budgets_on_same_session():
     client = _client(_response(True), _response(True))
     reference = model()
     reference.invoke = AsyncMock(
         side_effect=[AssistantMessage(content="first proposal"), AssistantMessage(content="fresh proposal")]
     )
-    primary_model = primary(AssistantMessage(content="one"), AssistantMessage(content="two"))
-    deep = agent(primary_model, _config(client, reference, max_jev_calls=1, max_reference_calls=1))
+    primary_model = primary(_step(1), AssistantMessage(content="one"), _step(2), AssistantMessage(content="two"))
+    deep = agent(primary_model, _config(client, reference, interval=1, max_jev_calls=1, max_reference_calls=1), tools=[Echo()])
     session = Session(session_id="jev-reused", card=deep.card)
     await deep.invoke("first task", session=session)
     await deep.invoke("second task", session=session)
     assert client.system_one.await_count == reference.invoke.await_count == 2
-    assert "fresh proposal" in str(primary_model.invoke.await_args_list[1].kwargs["messages"])
-    assert "first proposal" not in str(primary_model.invoke.await_args_list[1].kwargs["messages"])
+    assert "fresh proposal" in str(primary_model.invoke.await_args_list[3].kwargs["messages"])
+    assert "first proposal" not in str(primary_model.invoke.await_args_list[3].kwargs["messages"])
 
 
 @pytest.mark.asyncio
@@ -700,14 +701,14 @@ async def test_cancelled_jev_propagates_and_next_invocation_starts_fresh():
         await asyncio.sleep(3600)
 
     client.system_one = AsyncMock(side_effect=wait_for_cancel)
-    primary_model = primary(AssistantMessage(content="fresh"))
-    deep = agent(primary_model, _config(client, max_jev_calls=1))
+    primary_model = primary(_step(1), _step(2), AssistantMessage(content="fresh"))
+    deep = agent(primary_model, _config(client, interval=1, max_jev_calls=1), tools=[Echo()])
     task = asyncio.create_task(deep.invoke("cancel", session=Session(session_id="jev-cancel", card=deep.card)))
     await asyncio.wait_for(started.wait(), timeout=2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    primary_model.invoke.assert_not_awaited()
+    assert primary_model.invoke.await_count == 1
     assert get_moa_snapshot() is None
     client.system_one = AsyncMock(return_value=_response())
     result = await deep.invoke("fresh task", session=Session(session_id="jev-fresh", card=deep.card))

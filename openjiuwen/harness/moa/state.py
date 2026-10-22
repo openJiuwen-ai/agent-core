@@ -8,6 +8,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from itertools import count
 from typing import Any
+from uuid import uuid4
 
 from openjiuwen.core.common.logging import agent_logger
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
@@ -60,9 +61,9 @@ class MoAState:
     consultation_rejection: str | None = None
     closed: bool = False
     jev_calls: int = 0
-    jev_initial_checked: bool = False
     last_jev_decision: bool | None = None
     last_jev_reason: str | None = None
+    invoke_id: str = field(default_factory=lambda: uuid4().hex)
 
     def expire_pending(self, reason: str) -> None:
         if self.pending is not None:

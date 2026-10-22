@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from typing import Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -148,11 +149,20 @@ async def decide_reference(
     state.last_jev_decision = None
     if config.max_jev_calls is not None and state.jev_calls >= config.max_jev_calls:
         state.last_jev_reason = "decision_budget_exhausted"
+        agent_logger.info("MoA JEV skipped: invoke=%s checkpoint=%s reason=%s",
+                          state.invoke_id, state.completed_turns, state.last_jev_reason)
         return None
     if config.max_reference_calls is not None and state.reference_calls >= config.max_reference_calls:
         state.last_jev_reason = "reference_budget_exhausted"
+        agent_logger.info("MoA JEV skipped: invoke=%s checkpoint=%s reason=%s",
+                          state.invoke_id, state.completed_turns, state.last_jev_reason)
         return None
     state.jev_calls += 1
+    started = time.monotonic()
+    agent_logger.info(
+        "MoA JEV started: invoke=%s checkpoint=%s calls=%s",
+        state.invoke_id, state.completed_turns, state.jev_calls,
+    )
     try:
         async with asyncio.timeout(config.timeout):
             todos, todo_status = await _read_todos(agent, session)
@@ -169,6 +179,9 @@ async def decide_reference(
                 questions={_QUESTION_KEY: build_jev_question()},
                 request_timeout=config.timeout,
             )
+    except asyncio.CancelledError:
+        agent_logger.info("MoA JEV cancelled: invoke=%s checkpoint=%s", state.invoke_id, state.completed_turns)
+        raise
     except TimeoutError:
         state.last_jev_reason = "jev_timeout"
     except Exception:
@@ -180,11 +193,12 @@ async def decide_reference(
             state.last_jev_reason = "invalid_jev_response"
         else:
             state.last_jev_reason = "consult" if state.last_jev_decision else "continue"
-    agent_logger.debug(
-        "MoA JEV decision: checkpoint=%s calls=%s decision=%s reason=%s",
-        state.completed_turns,
-        state.jev_calls,
-        state.last_jev_decision,
-        state.last_jev_reason,
+    log = agent_logger.warning if state.last_jev_decision is None else agent_logger.info
+    log(
+        "MoA JEV decision: invoke=%s checkpoint=%s calls=%s decision=%s action=%s reason=%s duration_ms=%s",
+        state.invoke_id, state.completed_turns, state.jev_calls,
+        "CONSULT" if state.last_jev_decision is True else "CONTINUE" if state.last_jev_decision is False else None,
+        "consult" if state.last_jev_decision is True else "continue", state.last_jev_reason,
+        round((time.monotonic() - started) * 1000, 3),
     )
     return state.last_jev_decision

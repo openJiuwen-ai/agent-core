@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
+from openjiuwen.core.common.logging import agent_logger
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage
 from openjiuwen.core.runner.callback import AbortError
 from openjiuwen.core.single_agent.rail.base import (
@@ -169,12 +170,6 @@ class MoARail(DeepAgentRail):
             )
         if self._config.mode == "verifier_routed" and state.reference_calls == 0:
             await prepare_reference(self._config, state, list(inputs.messages), key)
-        elif self._config.mode == "jev_routed" and not state.jev_initial_checked:
-            # A negative or failed decision is still the initial check. Mark
-            # before awaiting so retries and new inner task contexts do not
-            # turn it into an implicit per-model-call evaluation.
-            state.jev_initial_checked = True
-            await self._route_jev(ctx, state, list(inputs.messages), key)
 
     async def _route_jev(
         self, ctx: AgentCallbackContext, state: MoAState, messages: list[BaseMessage], target: TurnKey
@@ -259,16 +254,38 @@ class MoARail(DeepAgentRail):
         step = redact(f"Action: {actions}; response: {assistant.content}\nObservations: {observations}"[:8_000])
         state.steps.append(step)
         routing = self._config.verifier
-        if len(state.steps) % routing.interval or (
+        if len(state.steps) % routing.interval:
+            return
+        if (
             routing.max_verifier_calls is not None
             and state.verifier_calls + routing.n_evaluations > routing.max_verifier_calls
         ):
+            agent_logger.debug(
+                "MoA verifier skipped: invoke=%s checkpoint=%s reason=verifier_budget_exhausted",
+                state.invoke_id, len(state.steps),
+            )
             return
+        agent_logger.info(
+            "MoA verifier started: invoke=%s checkpoint=%s planned=%s calls=%s",
+            state.invoke_id, len(state.steps), routing.n_evaluations, state.verifier_calls,
+        )
         state.verifier_calls += routing.n_evaluations
         score = await score_progress(self._config, state)
         if score is None:
+            agent_logger.info(
+                "MoA verifier route: invoke=%s checkpoint=%s score=None previous=%s "
+                "action=continue reason=no_valid_score",
+                state.invoke_id, len(state.steps), state.previous_score,
+            )
             return
+        previous = state.previous_score
         stalled = state.previous_score is not None and score <= state.previous_score
         state.previous_score = score
+        reason = "baseline" if previous is None else "stalled" if stalled else "progress"
+        agent_logger.info(
+            "MoA verifier route: invoke=%s checkpoint=%s score=%s previous=%s action=%s reason=%s",
+            state.invoke_id, len(state.steps), score, previous,
+            "consult" if stalled and current_key is not None else "continue", reason,
+        )
         if stalled and current_key is not None:
             await prepare_reference(self._config, state, messages, (current_key[0], current_key[1] + 1))
