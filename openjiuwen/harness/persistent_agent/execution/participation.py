@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Lightweight group-participation judgment before any window is loaded."""
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -18,13 +19,26 @@ _ATTEMPTS = 3
 _RECENT_LIMIT = 8
 _DETAIL_LIMIT = 4096
 _DECISION = re.compile(r"\{.*\}", re.DOTALL)
+WAITING_REPLIES = (
+    "好的，我先想想，马上回复你。",
+    "收到，稍等一下，我看完就回复。",
+    "我在想了，很快告诉你。",
+    "稍等片刻，整理好就回复你。",
+    "明白，我想一下，马上就来。",
+)
 _INSTRUCTION = (
     "你负责判断是否参与当前群消息。只输出一个 JSON 对象，不要调用工具，不要起草回复。"
-    '格式：{"decision":"ignore|respond|intervene","reason":"原因"}。'
+    '格式：{"decision":"ignore|respond|intervene","effort":"quick|extended","reason":"原因"}。'
     "ignore 表示不参与，respond 表示回应，intervene 表示主动插话。"
-    "这里只判断未明确 @ 当前智能体的消息；明确 @ 当前智能体时会直接进入回复，不由本判断忽略。"
+    "当前消息明确 @ 了该智能体时，decision 必须是 respond，不得 ignore 或 intervene。"
     "未被提及仍可以回应或插话。"
+    "只要 decision 不是 ignore，就必须给出 effort；明确 @ 时也必须给出。"
+    "quick 表示可以马上简短回复，不需要先告诉对方正在思考；"
+    "extended 表示任务较复杂，正式回复前需要检索、阅读、多步处理或整理，因而需要一定时间。"
+    "寒暄、确认和一两句就能回答的内容用 quick。decision 为 ignore 时 effort 填 quick。"
 )
+
+_MENTION_REASON = "当前群消息明确 @ 了该智能体，直接进入回复执行。"
 
 
 @dataclass(frozen=True)
@@ -33,6 +47,28 @@ class ParticipationOutcome:
 
     terminal: bool
     event_id: str | None = None
+
+
+def _waiting_reply(execution_id: str) -> str:
+    """One fixed line for this execution. The same id always selects the same line."""
+    digest = hashlib.sha256(execution_id.encode("utf-8")).digest()
+    return WAITING_REPLIES[digest[0] % len(WAITING_REPLIES)]
+
+
+def _decision_fields(
+    execution_id: str,
+    decision: str,
+    reason: str,
+    evidence_refs,
+    model_call_id=None,
+    needs_wait: bool = False,
+) -> dict:
+    fields = {"decision": decision, "reason": reason, "evidence_refs": evidence_refs}
+    if model_call_id is not None:
+        fields["model_call_id"] = model_call_id
+    if needs_wait:
+        fields["notice"] = _waiting_reply(execution_id)
+    return fields
 
 
 def _clip(text: object) -> str:
@@ -65,7 +101,7 @@ def _content(response) -> str:
     return ""
 
 
-def _parse(text: str) -> tuple[str, str]:
+def _parse(text: str) -> tuple[str, str, bool]:
     match = _DECISION.search(text)
     if match is None:
         raise ValueError("participation output is not JSON")
@@ -78,7 +114,14 @@ def _parse(text: str) -> tuple[str, str]:
         raise ValueError("participation decision is missing")
     if not isinstance(reason, str) or not reason.strip():
         raise ValueError("participation reason is missing")
-    return decision, _clip(reason)
+    return decision, _clip(reason), data.get("effort") == "extended"
+
+
+def _mentioned_decision(decision: str, reason: str, extended: bool) -> tuple[str, str, bool]:
+    """An explicit mention is always answered. The model's effort still selects the waiting line."""
+    if decision != "respond":
+        reason = _MENTION_REASON
+    return "respond", reason, extended
 
 
 def _usage(response) -> ModelUsage:
@@ -149,17 +192,7 @@ async def _finish_failed(emitter, reason: str) -> ParticipationOutcome:
 async def judge_participation(spec, context, request, emitter) -> ParticipationOutcome:
     """Decide ignore, respond, or intervene. Ignore and failure end before the native agent is built."""
     execution = context.execution
-    if execution.agent_id in request.source.mention_ids:
-        decided = await emitter.emit(
-            EventType.PARTICIPATION_DECIDED,
-            {
-                "decision": "respond",
-                "reason": "当前群消息明确 @ 了该智能体，直接进入回复执行。",
-                "evidence_refs": (request.source.message_id,),
-            },
-        )
-        return ParticipationOutcome(terminal=False, event_id=decided.event_id)
-
+    mentioned = execution.agent_id in request.source.mention_ids
     if getattr(spec, "model", None) is None:
         return await _finish_failed(emitter, "participation model unavailable")
     try:
@@ -223,26 +256,33 @@ async def judge_participation(spec, context, request, emitter) -> ParticipationO
             {"model_call_id": model_call_id, "config_version": execution.config_version, "usage": usage},
         )
         try:
-            decision, reason = _parse(_content(response))
+            decision, reason, extended = _parse(_content(response))
         except (ValueError, json.JSONDecodeError) as exc:
             last_error = f"participation judgment failed: {exc}"
             continue
+        if mentioned:
+            decision, reason, needs_wait = _mentioned_decision(decision, reason, extended)
+        else:
+            needs_wait = decision in ("respond", "intervene") and extended
         refs = []
         for item in (request.source.message_id, *(message.message_id for message in recent)):
             if item not in refs:
                 refs.append(item)
         decided = await emitter.emit(
             EventType.PARTICIPATION_DECIDED,
-            {
-                "decision": decision,
-                "reason": reason,
-                "evidence_refs": tuple(refs[:128]),
-                "model_call_id": model_call_id,
-            },
+            _decision_fields(
+                execution.execution_id, decision, reason, tuple(refs[:128]), model_call_id, needs_wait,
+            ),
         )
         if decision == "ignore":
             await emitter.emit_ending(EventType.EXECUTION_FINAL, {"status": "ignored", "reason": reason})
             return ParticipationOutcome(terminal=True)
+        return ParticipationOutcome(terminal=False, event_id=decided.event_id)
+    if mentioned:
+        decided = await emitter.emit(
+            EventType.PARTICIPATION_DECIDED,
+            _decision_fields(execution.execution_id, "respond", _MENTION_REASON, (request.source.message_id,)),
+        )
         return ParticipationOutcome(terminal=False, event_id=decided.event_id)
     return await _finish_failed(emitter, last_error)
 

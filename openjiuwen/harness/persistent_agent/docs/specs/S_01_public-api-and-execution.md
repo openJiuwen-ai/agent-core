@@ -66,11 +66,11 @@ PA-06 已实现新 Request 的窗口组装，PA-18 在同一组装器接入续�
 
 ### 4.2 群消息参与判断
 
-GroupChatPort 的授权、消息与完整性规则由 [S_09](S_09_group-chat-and-knowledge.md) 维护。若当前群消息明确 @ 当前智能体，则直接产生 `participation.decided(respond)` 并进入正常执行，不由参与判断模型忽略；决策事件由 `execution.started` 引用。其他群消息请求最近 8 条记录，排除触发消息，最多进行 3 次判断尝试；只提供职责、当前消息和少量群背景，`tools=None`，不加载正式窗口。未明确 @ 时，@ 和回复关系作为模型判断证据。最近消息中已撤回、正文暂缺（unavailable）和普通但无正文的消息分别标注，正文暂缺不能报为已撤回。
+GroupChatPort 的授权、消息与完整性规则由 [S_09](S_09_group-chat-and-knowledge.md) 维护。群消息都请求最近 8 条记录，排除触发消息，最多进行 3 次判断尝试；只提供职责、当前消息和少量群背景，`tools=None`，不加载正式窗口。若当前群消息明确 @ 当前智能体，模型不得忽略，结果记为 `participation.decided(respond)` 并进入正常执行；`effort` 为 `extended` 时附带等待提示。判断尝试耗尽时仍记 `respond` 且不附带，不记 failed。决策事件由 `execution.started` 引用。未明确 @ 时，@ 和回复关系作为模型判断证据。最近消息中已撤回、正文暂缺（unavailable）和普通但无正文的消息分别标注，正文暂缺不能报为已撤回。
 
 | 情况 | 可观察结果 |
 | --- | --- |
-| 明确 @ 当前智能体 | 不调用参与判断模型、不读取判断用群背景；记录 participation.decided(respond)，进入 execution.started |
+| 明确 @ 当前智能体 | 走同一参与判断；模型返回 ignore 或 intervene 时仍记 participation.decided(respond) 并进入 execution.started。`effort` 为 `extended` 才附带等待提示。三次尝试仍无合法输出时记 respond 且不附带，不记 failed。预算拒绝仍暂停 |
 | ignore | model.completed、participation.decided 后记 final(ignored)，不交出输出 |
 | respond / intervene | 保留决策事件引用，任务路径的 execution.started 携带该引用 |
 | 群记录 incomplete、读取失败、模型或 JSON 判断失败 | 有限尝试；耗尽时 final(failed)，不能记为 ignored |

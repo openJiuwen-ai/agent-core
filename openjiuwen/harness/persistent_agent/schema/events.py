@@ -65,6 +65,7 @@ class ParticipationPayload(ProtocolModel):
     reason: Reason
     evidence_refs: References = ()
     model_call_id: Identifier | None = None
+    notice: Text | None = None
 
 
 class StartedPayload(ProtocolModel):
