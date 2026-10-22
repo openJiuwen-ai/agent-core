@@ -5,11 +5,28 @@
 Tests for guardrail framework data models.
 """
 
+import agent_shield.detection as detection
+
 from openjiuwen.core.security.guardrail import (
     GuardrailResult,
     RiskAssessment,
     RiskLevel,
+    to_guardrail_result,
 )
+from openjiuwen.core.security.guardrail.backends import RuleBasedPromptInjectionBackend
+
+
+class TestForwardedTypes:
+    """Old imports are the detection library types."""
+
+    @staticmethod
+    def test_result_types_match_detection_library():
+        """Test forwarded classes and the converter are the library objects."""
+        assert GuardrailResult is detection.GuardrailResult
+        assert RiskAssessment is detection.RiskAssessment
+        assert RiskLevel is detection.RiskLevel
+        assert to_guardrail_result is detection.to_guardrail_result
+        assert RuleBasedPromptInjectionBackend is detection.RuleBasedPromptInjectionBackend
 
 
 class TestGuardrailResult:
