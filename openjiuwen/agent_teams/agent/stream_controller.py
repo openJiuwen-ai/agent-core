@@ -557,6 +557,27 @@ class StreamController:
         )
         self.stream_queue.put_nowait(marker)
 
+    def emit_team_recovered(self) -> None:
+        """Enqueue the recovered-team marker chunk; the stream stays open.
+
+        Emitted at the tail of ``CoordinationKernel.start`` (leader streams
+        only): the session state has been bound (restored from the
+        checkpoint on recovery paths), the bus is subscribed, the harness
+        is started and any paused round has been resumed -- everything a
+        consumer needs before interacting. No-op when the queue is gone.
+        """
+        if self.stream_queue is None:
+            return
+        bp = self._get_blueprint()
+        marker = TeamOutputSchema(
+            type="message",
+            index=0,
+            payload={"event_type": "team.recovered"},
+            source_member=bp.member_name if bp else None,
+            role=bp.role if bp else None,
+        )
+        self.stream_queue.put_nowait(marker)
+
     # ------------------------------------------------------------------
     # Cancel / abort (forwarded to the runtime; status follows round events)
     # ------------------------------------------------------------------

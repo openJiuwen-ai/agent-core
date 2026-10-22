@@ -86,6 +86,7 @@ def _make_kernel_host(
             resume_agent=AsyncMock(),
             close_stream=MagicMock(),
             stop=AsyncMock(),
+            emit_team_recovered=MagicMock(),
         ),
         persist_allocator_state=MagicMock(),
     )

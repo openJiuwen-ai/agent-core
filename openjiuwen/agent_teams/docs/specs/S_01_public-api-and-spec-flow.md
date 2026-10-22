@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/__init__.py`、`openjiuwen/agent_teams/schema/blueprint.py`、`openjiuwen/agent_teams/schema/team.py`、`openjiuwen/agent_teams/runtime/manager.py`、`openjiuwen/core/runner/team_runner.py`、`openjiuwen/core/runner/runner.py` |
-| 最近一次修订日期 | 2026-10-15 |
-| 关联 feature | `F_122_framework-bootstrapped-generic-team.md`（`bootstrap_mode` / `team_display_name` / `team_desc` 三个 spec 字段） |
+| 最近一次修订日期 | 2026-10-20 |
+| 关联 feature | `F_122_framework-bootstrapped-generic-team.md`（`bootstrap_mode` / `team_display_name` / `team_desc` 三个 spec 字段）、`B_07_team-interrupt-resume-entry-and-leader-ready.md` |
 
 ## 范围 / 边界
 
@@ -51,6 +51,7 @@ Runner 入口：
 14. `member=True` 路径不进对象池、不走 dispatch，是 `inprocess_spawn` / `child_process` 给已构造 teammate / human-agent 用的内部入口。leader-only pool 不变量在此保留。
 15. 团队 lifecycle facade（`pause_agent_team` / `stop_agent_team` / `delete_agent_team` / `register_human_agent_inbound` / `get_agent_team_monitor` / `list_active_teams` / `interact_agent_team`）一律按 `(team_name, session_id)` 寻址；这两个键是 SDK 暴露给外部的运行时身份。
 16. `Runner.release(session_id, *, force=False)` 对 team session 自动回收动态表（tasks / messages 等）+ checkpoint；非 team session 走单纯 checkpoint 释放。`force` 决定遇到仍在跑的 team 是同步停掉（`True`）还是抛 `AGENT_TEAM_BUSY_INVALID`（`False`）。
+17. `Runner.start_agent_team_streaming` 是无输入 runtime 启动流入口：与 `run_agent_team_streaming` 共享 `_stream_leader_lifecycle`（activate / REJECT / `team.runtime_ready` / observability / controller / finalize / gate / post_run），但驱动 `TeamAgent.stream_runtime`——不投首轮用户输入、不写记忆 query，只绑定 session、恢复状态、启动 coordination 并执行 mailbox / task poll。`team.recovered` 标记帧（kernel `start()` 尾部 leader-only 发射，见 S_03）是 interact 门：读到即可安全 `interact_agent_team`。何时投递 `InteractiveInput`、恢复等待超时与失败策略属宿主编排，不在本入口。`session` 必填（非 `str | AgentTeamSession` → `AGENT_TEAM_CONFIG_INVALID`）。见 B_07。
 
 ## 接口契约
 
@@ -84,6 +85,7 @@ leader = spec.build()
 恢复 / 续接：
 
 - 不存在独立的恢复 API。把同一个 `spec` 与目标 `session_id` 交给 `Runner.run_agent_team[_streaming]`，由 runtime 自动识别 cold/warm/switch（详见 S_06 与 S_04）。
+- **中断恢复**：宿主经 `Runner.start_agent_team_streaming(agent_team, *, session, ...)` 拉起无输入 runtime 流，读到 `team.recovered` 标记后自行调用 `interact_agent_team(InteractiveInput, ...)` 并施加恢复超时 / 失败策略（契约见不变量 17，机制见 B_07 / S_04）。
 - 低层入口 `TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` + `await agent.recover_team()` 仅供运维脚本绕开 Runner 直接拿 leader 实例时使用，不是公共 API。
 
 ### TeamAgentSpec 核心契约
@@ -194,6 +196,29 @@ async def run_agent_team_streaming(
 - 默认路径传入 `str` 但池中无对应 entry → `AGENT_TEAM_CONFIG_INVALID`，提示首次必须传 spec。
 - `base=True` 传入既不是 `str` 也不是 `BaseTeam` → `AGENT_TEAM_CONFIG_INVALID`。
 - `activate` 返回 `RunActionKind.REJECT_RUNNING` / `REJECT_ORPHANED` / `REJECT_INCONSISTENT` 的 `RunAction` → 非流式返回 `None`、流式静默结束；这两种情况都会 `logger.warning` 记录并按规则关 `InteractGate` + `session.close_stream()` + `session.commit()`。
+
+无输入 runtime 启动入口（默认路径专用，B_07）：
+
+```python
+@classmethod
+async def start_agent_team_streaming(
+    cls,
+    agent_team: Union[str, TeamAgentSpec],
+    *,
+    session: Union[str, AgentTeamSession],
+    context: Optional[ModelContext] = None,
+    stream_modes: Optional[list[BaseStreamMode]] = None,
+    envs: Optional[dict[str, Any]] = None,
+    stream_logger: Optional[TeamStreamLogger] = None,
+    background_task_controller: Optional[Any] = None,
+    run_context: RunContextInput | None = None,
+) -> AsyncIterator[Any]
+```
+
+- `session` 必填（非 `str | AgentTeamSession` 抛 `AGENT_TEAM_CONFIG_INVALID`）。
+- 与 `run_agent_team_streaming` 共享 `_stream_leader_lifecycle`（activate / REJECT / `team.runtime_ready` / observability / controller / finalize / gate / post_run），但驱动 `TeamAgent.stream_runtime`：不投首轮用户输入、不写记忆 query，只绑定 session、恢复状态、启动 coordination 并执行 mailbox / task poll。
+- `team.recovered` 标记帧（kernel `start()` 尾部 leader-only 发射，见 S_03）是 interact 门；何时投递 `InteractiveInput`、恢复超时与失败策略归宿主（jiuwenswarm 在流消费层实现），本入口不内置。
+- 流内原始异常原样传播；REJECT 派发记录 warning 后静默结束（与 run 路径一致）。
 
 ### 团队 lifecycle facade
 

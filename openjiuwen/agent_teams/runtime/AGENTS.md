@@ -1,6 +1,6 @@
 # Agent Teams Runtime
 
-`TeamAgent` 对象池 + 派发 + 并发门禁子系统。`Runner` 通过这一层把 `TeamAgentSpec`（或已激活的 team_name 字符串）映射成可被 SDK facade（`interact_agent_team` / `register_human_agent_inbound` / `pause_agent_team` / `stop_team` / `release_session` / `delete_team`）操纵的 pool entry。
+`TeamAgent` 对象池 + 派发 + 并发门禁子系统。`Runner` 通过这一层把 `TeamAgentSpec`（或已激活的 team_name 字符串）映射成可被 SDK facade（`start_agent_team_streaming` / `interact_agent_team` / `register_human_agent_inbound` / `pause_agent_team` / `stop_team` / `release_session` / `delete_team`）操纵的 pool entry。
 
 ## 模块构成
 

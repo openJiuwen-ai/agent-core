@@ -22,8 +22,8 @@ from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.harness.prompts import resolve_language as _resolve_language
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
+from openjiuwen.harness.prompts import resolve_language as _resolve_language
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
@@ -289,6 +289,10 @@ class CoordinationKernel:
         # new message arrives. Runs last, once the kernel is fully live, and
         # is a no-op when there is nothing suspended to resume.
         await self.resume_paused_round()
+        if host.role == TeamRole.LEADER:
+            # Everything a consumer needs before interacting has completed
+            # by this point, so publish it on the stream (no-op without one).
+            host.stream_controller.emit_team_recovered()
 
     def _build_wake_callback(self):
         """Compose the bus wake callback: coordination first, scheduler second.

@@ -3,7 +3,12 @@
 
 """Team-runtime surface mixed into the Runner.
 
-The public ``Runner`` facade exposes a single team entry pair:
+The public ``Runner`` facade exposes the team run pair
+(``run_agent_team`` / ``run_agent_team_streaming``) plus the
+no-input runtime start entry ``start_agent_team_streaming``
+(activate a team runtime -- cold start or recovery -- and stream it;
+hosts read ``team.recovered`` on the stream to know when interact is
+safe):
 
 * ``Runner.run_agent_team`` / ``run_agent_team_streaming`` — accepts
   ``str | TeamAgentSpec | BaseTeam | BaseAgent`` and routes by two
@@ -202,7 +207,7 @@ class _TeamRunnerMixin:
         Accepts:
         - ``TeamAgentSpec``: canonical assembly blueprint; goes through
           ``TeamRuntimeManager.activate`` (cold/warm/recover dispatch).
-        - ``str`` (team_name): re-uses an already-active pool entry —
+        - ``str`` (team_name): reuses an already-active pool entry —
           the first call must pass a spec to seed the pool.
 
         For the multi_agent ``BaseTeam`` path call the
@@ -278,6 +283,99 @@ class _TeamRunnerMixin:
                 yield chunk
             return
         spec = await self._resolve_team_agent_spec(agent_team, session=session)
+        async for chunk in self._stream_leader_lifecycle(
+            spec,
+            session,
+            inputs,
+            context=context,
+            stream_modes=stream_modes,
+            envs=envs,
+            stream_logger=stream_logger,
+            background_task_controller=background_task_controller,
+            run_context=run_context,
+        ):
+            yield chunk
+
+    async def start_agent_team_streaming(
+        self,
+        agent_team: Union[str, "TeamAgentSpec"],
+        *,
+        session: Union[str, AgentTeamSession],
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None,
+        stream_logger: Optional["TeamStreamLogger"] = None,
+        background_task_controller: Optional[Any] = None,
+        run_context: RunContextInput | None = None,
+    ) -> AsyncIterator[Any]:
+        """Start (or recover) a team runtime with no user input and stream it.
+
+        Drives the shared leader streaming lifecycle with no inputs: the
+        runtime is activated (cold start / cold recover / resume-from-pause
+        dispatch as usual), then the leader runtime is started via
+        ``TeamAgent.stream_runtime`` -- session binding, state restoration,
+        coordination bus startup and the initial mailbox / task polls, with
+        no first-round user message and no memory query. Chunks (including
+        ``team.runtime_ready`` and ``team.recovered``) are forwarded in
+        order until the team settles the run cycle.
+
+        ``team.recovered`` is the interact gate: once a consumer reads it,
+        the leader runtime is fully live and ``interact_agent_team`` may be
+        submitted safely. Whether a given call is an interrupt resume, when
+        to submit the ``InteractiveInput``, and how long to wait for the
+        marker are host policies -- this entry only provides the stream.
+
+        ``session`` is required: the team state (spec bucket / pending
+        interrupt) lives in that session's checkpoint.
+        """
+        from openjiuwen.core.common.exception.codes import StatusCode
+        from openjiuwen.core.common.exception.errors import raise_error
+
+        if not isinstance(session, (str, AgentTeamSession)):
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason=(
+                    "start_agent_team_streaming requires the session to bind the runtime; "
+                    f"got {type(session).__name__}"
+                ),
+            )
+        spec = await self._resolve_team_agent_spec(agent_team, session=session)
+        async for chunk in self._stream_leader_lifecycle(
+            spec,
+            session,
+            None,
+            context=context,
+            stream_modes=stream_modes,
+            envs=envs,
+            stream_logger=stream_logger,
+            background_task_controller=background_task_controller,
+            run_context=run_context,
+            runtime_only=True,
+        ):
+            yield chunk
+
+    async def _stream_leader_lifecycle(
+        self,
+        spec: "TeamAgentSpec",
+        session: Optional[Union[str, AgentTeamSession]],
+        inputs: Any,
+        *,
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None,
+        stream_logger: Optional["TeamStreamLogger"] = None,
+        background_task_controller: Optional[Any] = None,
+        run_context: RunContextInput | None = None,
+        runtime_only: bool = False,
+    ) -> AsyncIterator[Any]:
+        """Shared leader streaming lifecycle for the team run entries.
+
+        Owns the full run cycle: activation dispatch, the runtime-ready
+        marker, observability / controller attachment, the agent stream
+        (``runtime_only=True`` starts the runtime with no input via
+        ``stream_runtime``), and the finalize / gate-close / post_run
+        teardown. REJECT activations return without touching the pool entry.
+        """
         team_name_for_finally = spec.team_name
         token = self._enter_root_task_group_context()
         try:
@@ -286,7 +384,7 @@ class _TeamRunnerMixin:
                 action = activation.action
                 if _is_team_reject_kind(action.kind):
                     logger.warning(
-                        "run_agent_team_streaming rejected for team/session ({}, {}), kind={}, reason={}",
+                        "team streaming rejected for team/session ({}, {}), kind={}, reason={}",
                         spec.team_name,
                         activation.session.get_session_id(),
                         action.kind.value,
@@ -311,18 +409,22 @@ class _TeamRunnerMixin:
                     # Attach the embedder's pause/resume control surface to the
                     # leader brain; SwarmflowTool reads it to register run handles.
                     activation.agent.set_background_task_controller(background_task_controller)
-                stream_inputs = inputs
-                normalized_run_context = normalize_run_context(run_context)
-                if normalized_run_context is not None:
-                    if isinstance(inputs, dict):
-                        stream_inputs = dict(inputs)
-                        stream_inputs["run_context"] = normalized_run_context
-                    else:
-                        stream_inputs = {
-                            "query": inputs,
-                            "run_context": normalized_run_context,
-                        }
-                async for chunk in activation.agent.stream(stream_inputs, session=activation.session):
+                if runtime_only:
+                    agent_stream = activation.agent.stream_runtime(session=activation.session)
+                else:
+                    stream_inputs = inputs
+                    normalized_run_context = normalize_run_context(run_context)
+                    if normalized_run_context is not None:
+                        if isinstance(inputs, dict):
+                            stream_inputs = dict(inputs)
+                            stream_inputs["run_context"] = normalized_run_context
+                        else:
+                            stream_inputs = {
+                                "query": inputs,
+                                "run_context": normalized_run_context,
+                            }
+                    agent_stream = activation.agent.stream(stream_inputs, session=activation.session)
+                async for chunk in agent_stream:
                     if stream_logger is not None:
                         stream_logger.feed(chunk)
                     yield chunk
@@ -1024,6 +1126,36 @@ class _TeamRunnerClassMixin:
             agent_team=agent_team,
             inputs=inputs,
             member=member,
+            session=session,
+            context=context,
+            stream_modes=stream_modes,
+            envs=envs,
+            stream_logger=stream_logger,
+            background_task_controller=background_task_controller,
+            run_context=run_context,
+        ):
+            yield chunk
+
+    @classmethod
+    async def start_agent_team_streaming(
+        cls,
+        agent_team: Union[str, "TeamAgentSpec"],
+        *,
+        session: Union[str, AgentTeamSession],
+        context: Optional[ModelContext] = None,
+        stream_modes: Optional[list[BaseStreamMode]] = None,
+        envs: Optional[dict[str, Any]] = None,
+        stream_logger: Optional["TeamStreamLogger"] = None,
+        background_task_controller: Optional[Any] = None,
+        run_context: RunContextInput | None = None,
+    ) -> AsyncIterator[Any]:
+        """Start (or recover) a team runtime with no user input and stream it.
+
+        See the instance method for the ``team.recovered`` interact gate and
+        the session requirement.
+        """
+        async for chunk in _global_runner().start_agent_team_streaming(
+            agent_team=agent_team,
             session=session,
             context=context,
             stream_modes=stream_modes,

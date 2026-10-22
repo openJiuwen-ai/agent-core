@@ -935,13 +935,44 @@ class TeamAgent(BaseAgent):
                         await self._coordination.enqueue_user_input(inputs)
                     await self._coordination.enqueue_initial_mailbox_poll()
                     await self._coordination.enqueue_initial_task_poll()
-                while True:
-                    chunk = await self._stream_controller.stream_queue.get()
-                    if chunk is None:
-                        break
+                async for chunk in self._consume_stream_queue():
                     yield chunk
             finally:
                 await self._coordination.finalize_round()
+
+    async def stream_runtime(self, session=None):
+        """Start this member's runtime with no user input and stream its output.
+
+        Shares the run-cycle skeleton of :meth:`stream` minus every
+        input-related step: no ``_prepare_initial_input`` (no memory query,
+        no initial leader route) and no first-round user message -- the
+        runtime only binds the session, restores persisted state, starts the
+        coordination bus and delivers pending mailbox / task work. Hosts
+        that need to submit an interrupt answer wait for the
+        ``team.recovered`` marker on this stream and then deliver it through
+        the interact entry.
+        """
+        team_logger.info("[{}] runtime stream start, role={}", self._member_name() or "?", self.role.value)
+        self._stream_controller.stream_queue = asyncio.Queue()
+        # No input means no pending query: keep the memory pipeline's view of
+        # this run cycle empty instead of leaking the previous round's query.
+        self._state.pending_user_query = ""
+        with self._observability_execution_scope(session):
+            await self._coordination.start(session)
+            try:
+                await self._coordination.enqueue_initial_mailbox_poll()
+                await self._coordination.enqueue_initial_task_poll()
+                async for chunk in self._consume_stream_queue():
+                    yield chunk
+            finally:
+                await self._coordination.finalize_round()
+
+    async def _consume_stream_queue(self):
+        while True:
+            chunk = await self._stream_controller.stream_queue.get()
+            if chunk is None:
+                break
+            yield chunk
 
     async def interact(self, message: str) -> None:
         await self._coordination.enqueue_user_input(message)
@@ -1079,7 +1110,7 @@ class TeamAgent(BaseAgent):
         """Prepare routing and cache only non-group input for the memory pipeline."""
         from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
 
-        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
+        raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else ("" if inputs is None else str(inputs))
         payloads = self._initial_leader_route_payloads(inputs)
         is_group_input = payloads and isinstance(payloads[0], GroupChatMessage)
         self._state.pending_user_query = "" if is_group_input else raw_query

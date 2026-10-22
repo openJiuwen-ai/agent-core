@@ -27,7 +27,7 @@ from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
-from openjiuwen.agent_teams.team_context import TeamContextTracker
+from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     LeaderSpec,
@@ -43,12 +43,12 @@ from openjiuwen.agent_teams.schema.events import (
     MessageEvent,
     TaskCancelledEvent,
     TaskClaimedEvent,
-    TaskRevokedEvent,
-    TaskRevisionRequestedEvent,
     TaskCompletedEvent,
     TaskCreatedEvent,
     TaskListDrainedEvent,
     TaskReleasedEvent,
+    TaskRevisionRequestedEvent,
+    TaskRevokedEvent,
     TaskSubmittedForReviewEvent,
     TaskUnblockedEvent,
     TaskUpdatedEvent,
@@ -59,7 +59,6 @@ from openjiuwen.agent_teams.schema.events import (
     ToolApprovalResultEvent,
 )
 from openjiuwen.agent_teams.schema.status import MemberStatus
-from openjiuwen.agent_teams.message_template import ExpandedMessage
 from openjiuwen.agent_teams.schema.team import (
     MemberRosterEntry,
     TeamCompletionSnapshot,
@@ -68,6 +67,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
     TeamSpec,
 )
+from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.single_agent.schema.agent_card import (
@@ -245,6 +245,36 @@ async def test_start_stop_coordination():
     assert agent.coordination_loop.is_running is True
     await agent._stop_coordination()
     assert agent.coordination_loop.is_running is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_start_emits_team_recovered_marker():
+    """kernel.start() tail enqueues the team.recovered marker (leader only)."""
+    from openjiuwen.agent_teams.schema.stream import (
+        is_team_event_marker,
+        is_team_recovered_marker,
+    )
+
+    agent = _make_leader()
+    agent._stream_controller.stream_queue = asyncio.Queue()
+    await agent._start_coordination(session=None)
+    marker = agent._stream_controller.stream_queue.get_nowait()
+    assert marker.payload["event_type"] == "team.recovered"
+    assert is_team_recovered_marker(marker)
+    assert is_team_event_marker(marker)
+    await agent._stop_coordination()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_teammate_start_does_not_emit_team_recovered_marker():
+    """Non-leader kernels never publish the recovered-team marker."""
+    agent = _make_teammate()
+    agent._stream_controller.stream_queue = asyncio.Queue()
+    await agent._start_coordination(session=None)
+    assert agent._stream_controller.stream_queue.empty()
+    await agent._stop_coordination()
 
 
 @pytest.mark.asyncio

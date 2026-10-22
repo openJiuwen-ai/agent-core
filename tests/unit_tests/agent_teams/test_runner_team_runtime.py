@@ -27,11 +27,14 @@ from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
     TeamAgentSpec,
 )
+from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import (
     TeamRole,
     TeamRuntimeContext,
     TeamSpec,
 )
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent_team import create_agent_team_session
@@ -2447,3 +2450,108 @@ def mock_group_history_cleanup(monkeypatch):
     monkeypatch.setattr(
         "openjiuwen.agent_teams.group_chat.conversation.GroupConversationLog.delete_registered", lambda *a: None,
     )
+
+
+class _RuntimeStreamAgent(FakeTeamAgent):
+    """FakeTeamAgent whose ``stream_runtime`` emits the recovered marker.
+
+    The no-input start entry must drive ``stream_runtime`` (never
+    ``stream``) and forward its frames in order.
+    """
+
+    def __init__(self, team_name: str) -> None:
+        super().__init__(team_name, stream_label="leader.chunk")
+        self.runtime_stream_calls = 0
+        self.runtime_stream_sessions: list[Any] = []
+
+    async def stream_runtime(self, session=None) -> AsyncIterator[Any]:
+        self.runtime_stream_calls += 1
+        self.runtime_stream_sessions.append(session)
+        yield TeamOutputSchema(type="message", index=0, payload={"event_type": "team.recovered"})
+        yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
+        yield OutputSchema(type="message", index=2, payload={"event_type": "leader.chunk.2"})
+
+
+class _FailingRuntimeStreamAgent(FakeTeamAgent):
+    """Agent whose ``stream_runtime`` fails after one chunk."""
+
+    def __init__(self, team_name: str) -> None:
+        super().__init__(team_name, stream_label="leader.chunk")
+
+    async def stream_runtime(self, session=None) -> AsyncIterator[Any]:
+        yield OutputSchema(type="message", index=1, payload={"event_type": "leader.chunk.1"})
+        raise ValueError("runtime stream exploded")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_runner_start_agent_team_streaming_uses_runtime_stream(
+    isolated_checkpointer,
+    stateful_team_db,
+):
+    await Runner.start()
+    session_id = f"team_start_{uuid.uuid4().hex}"
+    spec = _runtime_spec("start_team")
+    agent = _RuntimeStreamAgent("start_team")
+
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
+        chunks = [
+            chunk
+            async for chunk in Runner.start_agent_team_streaming(
+                agent_team=spec,
+                session=session_id,
+            )
+        ]
+
+    assert [chunk.payload["event_type"] for chunk in chunks] == [
+        "team.runtime_ready",
+        "team.recovered",
+        "leader.chunk.1",
+        "leader.chunk.2",
+    ]
+    # The no-input entry drives stream_runtime only; the input-carrying
+    # stream must not run and no first-round user input may be enqueued.
+    assert agent.runtime_stream_calls == 1
+    assert agent.stream_calls == 0
+    assert agent.stream_inputs == []
+
+    await Runner.stop()
+    await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_runner_start_rejects_missing_session() -> None:
+    await Runner.start()
+    agen = Runner.start_agent_team_streaming(
+        agent_team=_runtime_spec("start_team"),
+        session=None,
+    )
+    with pytest.raises(BaseError) as excinfo:
+        await agen.__anext__()
+    assert excinfo.value.status is StatusCode.AGENT_TEAM_CONFIG_INVALID
+    await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_runner_start_propagates_runtime_stream_failure(
+    isolated_checkpointer,
+    stateful_team_db,
+):
+    await Runner.start()
+    session_id = f"team_start_fail_{uuid.uuid4().hex}"
+    spec = _runtime_spec("start_fail_team")
+    agent = _FailingRuntimeStreamAgent("start_fail_team")
+
+    with patch.object(TeamAgentSpec, "build", return_value=agent):
+        agen = Runner.start_agent_team_streaming(
+            agent_team=spec,
+            session=session_id,
+        )
+        with pytest.raises(ValueError, match="runtime stream exploded"):
+            async for _ in agen:
+                pass
+
+    await Runner.stop()
+    await isolated_checkpointer.release(session_id)
