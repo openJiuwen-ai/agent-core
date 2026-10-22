@@ -814,6 +814,7 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
     if not session_id:
         team_logger.warning("No session_id in context, cannot create session tables")
         return
+
     async def _ddl_once() -> None:
         if session_id in sessions.ready_session_ids:
             # Other processes/instances can delete tables without invalidating
@@ -866,10 +867,14 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
 
 def _session_tables_exist(sync_conn) -> bool:
     inspector = inspect(sync_conn)
-    return all(inspector.has_table(model().__tablename__) for model in (
+    models = (
         _get_task_model, _get_task_dependency_model, _get_message_model,
         _get_message_read_status_model, _get_review_vote_model,
-    ))
+    )
+    for model in models:
+        if not inspector.has_table(model().__tablename__):
+            return False
+    return True
 
 
 async def drop_cur_session_tables(engine: AsyncEngine) -> None:

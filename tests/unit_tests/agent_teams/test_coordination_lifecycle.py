@@ -21,11 +21,14 @@ from openjiuwen.agent_teams.runtime.metadata import (
     merge_pending_resume,
     read_pending_resume,
 )
+from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+from openjiuwen.agent_teams.runtime.pool import ActiveTeam
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TeamEvent,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.schema.status import MemberStatus
 
 
 class _StubSession:
@@ -612,6 +615,7 @@ async def test_member_cleanup_errors_preserve_liveness_and_safe_teardown(action,
     handle = SimpleNamespace(is_alive=True, stop_health_check=AsyncMock())
     if failure == "health":
         handle.stop_health_check.side_effect = RuntimeError("health cleanup failed")
+
     async def kill():
         handle.is_alive = remains_alive
         if failure == "kill":
@@ -701,3 +705,96 @@ async def test_stop_also_drains_a_handle_registered_during_leader_cancellation()
     await asyncio.wait_for(kernel.stop(), 1)
     assert not host.spawn_manager.spawned_handles
     assert host.spawn_manager.shutdown_all_handles.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["park", "park_error", "rollback", "memory", "members", "release"])
+async def test_stop_takes_over_inflight_pause_without_releasing_twice(phase):
+    memory = SimpleNamespace(extract_after_round=AsyncMock(), close=AsyncMock())
+    host = _make_kernel_host(memory, SimpleNamespace(stop=AsyncMock()))
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def pending():
+        entered.set()
+        await release.wait()
+        if phase == "park_error":
+            raise RuntimeError("park interrupted")
+        if phase == "members":
+            host.spawn_manager.spawned_handles.clear()
+
+    boundaries = {"park": host.stream_controller.pause_agent,
+                  "park_error": host.stream_controller.pause_agent,
+                  "memory": memory.extract_after_round,
+                  "members": host.spawn_manager.shutdown_all_handles}
+    if phase in ("members", "release"):
+        host.spawn_manager.spawned_handles["member"] = object()
+        host.infra.team_backend = SimpleNamespace(
+            list_member_roster=AsyncMock(return_value=[SimpleNamespace(member_name="member", status="busy")]),
+            db=SimpleNamespace(member=SimpleNamespace(update_member_status=AsyncMock())),
+        )
+        if phase == "release":
+            host.spawn_manager.shutdown_all_handles.side_effect = host.spawn_manager.spawned_handles.clear
+    if phase == "release":
+        kernel.unsubscribe_transport = AsyncMock(side_effect=pending)
+    elif phase == "rollback":
+        host.stream_controller.pause_agent.side_effect = RuntimeError("park failed")
+        kernel._dispatcher = SimpleNamespace(deactivate=AsyncMock(), activate_and_flush=AsyncMock(side_effect=pending))
+    else:
+        boundaries[phase].side_effect = pending
+    host.stream_controller.drain_agent_task.side_effect = cancelled.set
+    manager = TeamRuntimeManager()
+    entry = ActiveTeam(team_name="test-team", current_session_id="s", agent=SimpleNamespace(
+        pause_coordination=kernel.pause, stop_coordination=kernel.stop))
+    await manager.pool.add(entry)
+    pause = asyncio.create_task(manager.pause(team_name=entry.team_name, session_id="s"))
+    stop = None
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        stop = asyncio.create_task(manager.stop_team(team_name=entry.team_name, session_id="s"))
+        # Hard cancellation must be issued even while pause is waiting.
+        await asyncio.wait_for(cancelled.wait(), 1)
+        release.set()
+        assert await asyncio.wait_for(pause, 1) is False
+        assert await asyncio.wait_for(stop, 1) is True
+        assert kernel._lifecycle_state == "stopped"
+        assert await manager.pool.get(entry.team_name) is None
+        host.stream_controller.close_stream.assert_called_once()
+        host.session_manager.release_session.assert_called_once()
+        host.resources.harness.dispose.assert_awaited_once()
+        host.infra.messager.stop.assert_awaited_once()
+        if phase == "members":
+            assert host.spawn_manager.shutdown_all_handles.await_count == 1
+        if phase in ("members", "release"):
+            host.infra.team_backend.db.member.update_member_status.assert_awaited_with(
+                "member", "test-team", MemberStatus.STOPPED.value,
+            )
+        if phase == "release":
+            kernel.unsubscribe_transport.assert_awaited_once()
+    finally:
+        release.set()
+        await asyncio.gather(pause, *(task for task in (stop,) if task is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["dispose", "memory_close", "extract", "allocator"])
+async def test_stop_releases_other_resources_and_retries_only_failed_cleanup(failure):
+    memory = SimpleNamespace(extract_after_round=AsyncMock(), close=AsyncMock())
+    host = _make_kernel_host(memory, SimpleNamespace(stop=AsyncMock()))
+    steps = {"dispose": host.resources.harness.dispose, "memory_close": memory.close,
+             "extract": memory.extract_after_round, "allocator": host.persist_allocator_state}
+    steps[failure].side_effect = [RuntimeError("cleanup failed"), None]
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        await kernel.stop()
+    assert (kernel._lifecycle_state == "stopped") == (failure in ("extract", "allocator"))
+    host.infra.messager.stop.assert_awaited_once()
+    host.session_manager.release_session.assert_called_once()
+    await kernel.stop()
+    assert kernel._lifecycle_state == "stopped"
+    assert steps[failure].call_count == (1 if failure in ("extract", "allocator") else 2)
+    assert host.resources.harness.dispose.await_count == (2 if failure == "dispose" else 1)
+    host.stream_controller.close_stream.assert_called_once()
+    host.session_manager.release_session.assert_called_once()

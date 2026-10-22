@@ -608,13 +608,40 @@ async def test_cooperative_cancel_forwards_graceful_abort() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_drain_agent_task_forwards_immediate_abort() -> None:
+@pytest.mark.parametrize("scenario", [
+    "active", "terminated", "raced", "failed", "cancelled", "terminated_busy", "raced_busy",
+])
+async def test_drain_agent_task_forwards_immediate_abort(scenario) -> None:
     runtime = _FakeRuntime()
     sc = _make_controller(runtime)
+    if scenario.startswith("terminated"):
+        runtime.state = HarnessState.TERMINATED
+    runtime.active_round = object() if scenario.endswith("busy") else None
 
-    await sc.drain_agent_task()
+    async def abort(*, immediate=False):
+        runtime.abort_calls.append(immediate)
+        if scenario.startswith("raced"):
+            runtime.state = HarnessState.TERMINATED
+        if scenario == "cancelled":
+            raise asyncio.CancelledError()
+        if scenario != "active":
+            raise RuntimeError("abort failed")
 
-    assert runtime.abort_calls == [True]
+    runtime.abort = abort
+    if scenario.endswith("busy"):
+        with pytest.raises(RuntimeError, match="undrained active round"):
+            await sc.drain_agent_task()
+    elif scenario == "failed":
+        with pytest.raises(RuntimeError, match="abort failed"):
+            await sc.drain_agent_task()
+    elif scenario == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            await sc.drain_agent_task()
+    else:
+        await sc.drain_agent_task()
+
+    assert runtime.abort_calls == ([] if scenario.startswith("terminated") else [True])
+    assert sc._terminal_interrupt_resume_closed
 
 
 @pytest.mark.asyncio
