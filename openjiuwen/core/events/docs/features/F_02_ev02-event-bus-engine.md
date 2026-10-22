@@ -412,14 +412,14 @@ async def adapter(call_next, event, matched_handler_ids, target_level):
 Adapter 只负责三件事：
 
 - 未匹配或被跳层排除时调用 `call_next`；
-- 实际进入 Handler 时，把 `call_next` 包装成 EventNext；
-- 调用 `await event_handler(event, None, event_next)`。
+- 实际进入 Handler 时，用只接收 Event 和目标层级的 `forward` 包装 `call_next`，再创建 EventNext；
+- 调用 Handler，并拒绝非 awaitable 返回值。
 
-洋葱链仍由 callback framework 构造，EventBus 不直接调用 composer，也不手工拼接 USER 和 BUILTIN 链。返回值和异常沿原有 `await` 调用栈向外传播。
+领域 Handler 不直接接触 framework `call_next`；匹配结果和调用上下文由 adapter 闭包固定，Handler 只能通过 EventNext 传递 Event 或请求向内层跳转。洋葱链仍由 callback framework 构造，EventBus 不直接调用 composer，也不手工拼接 USER 和 BUILTIN 链。返回值和异常沿原有 `await` 调用栈向外传播。
 
 #### 3.3.3 EventNext、短路与跳层
 
-每次实际进入一个 Handler 都创建新的 EventNext。EventNext 内部保存当前 Handler 层级、原始 event_type、所属 asyncio Task 和 framework `call_next`。
+每次实际进入一个 Handler 都创建新的 EventNext。EventNext 内部保存当前 Handler 层级、原始 event_type、所属 asyncio Task、有效状态和 adapter 提供的 `forward`，不直接持有 framework `call_next` 或匹配结果。
 
 | 调用 | 行为 |
 | --- | --- |
@@ -434,7 +434,9 @@ Adapter 只负责三件事：
 - 到达首个匹配目标层时清除 target，正常执行该 Handler；
 - 目标是 CORE 时，所有剩余 adapter 都透传，由 `core_terminal` 接收。
 
-EventNext 推进前依次校验：仍在有效期内、由创建它的 Task 调用、Event 类型正确、event_type 未改变、跳层合法。同一 Handler 执行期间可以多次推进。Handler 退出时在 `finally` 中使 EventNext 失效。
+EventNext 推进前依次校验：仍在有效期内、由创建它的 Task 调用、参数是 Event、event_type 未改变、目标是合法的 HandlerLevel 且只能向内层跳转。EventBus 使用 `with EventNext(...)` 限定有效期，Handler 正常返回、抛错或取消后都会使它失效；违规调用统一以 `EVENTS_NEXT_INVALID` 拒绝。
+
+同一 Handler 在有效期内、同一 Task 中可以多次推进，每次都会从相同下一节点重新执行下游链，可能重复产生副作用。EventNext 不校验具体 `event_input` 和返回值的业务结构。
 
 #### 3.3.4 调用隔离与异常语义
 
@@ -453,6 +455,7 @@ EventNext 推进前依次校验：仍在有效期内、由创建它的 Task 调�
 - USER、BUILTIN、CORE 的业务异常保持原类型向外传播。
 - `asyncio.CancelledError` 原样传播，不转换成 `None`，也不补跑 CORE。
 - 未匹配 adapter 只透传，不吞掉下游返回值或异常。
+- Handler 返回非 awaitable 时以 `EVENTS_REGISTRATION_INVALID` 失败。
 - EventNext 的状态错误转换为 `EVENTS_NEXT_INVALID`；matcher 契约错误转换为 `EVENTS_MATCH_INVALID`。
 
 ## 4. 实施影响
@@ -496,7 +499,9 @@ WrapHandler registry key 的拼接属于唯一实现耦合点，应封装在 Eve
 | 匹配与顺序 | 部分 Pattern 命中，混合 USER/BUILTIN | 只执行命中项；USER 在外、BUILTIN 在内，同层保持注册顺序 |
 | 洋葱执行 | 每层在 EventNext 前后记录 trace | USER → BUILTIN → CORE 进入，反向返回 |
 | 短路与跳层 | 不调用 next、to(BUILTIN)、to(CORE) | 只执行约定的当前层和内层范围 |
-| EventNext 约束 | 重复、并发、跨 Task、退出后使用、改变 event_type | 进入下游前以 `EVENTS_NEXT_INVALID` 拒绝 |
+| EventNext 非法使用 | 跨 Task、退出后使用、非 Event、改变 event_type、非法层级或跳转 | 进入下游前以 `EVENTS_NEXT_INVALID` 拒绝 |
+| EventNext 重复推进 | 同一 Handler 在有效期内连续推进两次 | 两次均从相同下一节点执行下游链 |
+| Handler 返回协议 | USER / BUILTIN / CORE 返回非 awaitable | 以 `EVENTS_REGISTRATION_INVALID` 拒绝 |
 | 热注册与注销 | U1 等待期间注销 U2、注册 U3，再触发第二次 | 旧调用仍执行 U2 且不见 U3；新调用执行 U3 且不见 U2 |
 | 异常与取消 | USER/BUILTIN/CORE 抛错或取消 | 原异常或 CancelledError 向外传播，不补跑后续链 |
 | callback framework 回归 | 运行既有 `test_framework_wrap.py` | priority、动态成员、短路、反向返回行为不变 |
@@ -508,6 +513,7 @@ WrapHandler registry key 的拼接属于唯一实现耦合点，应封装在 Eve
 - `on_wrap()` 使用 `__wrap__:{event_type}` 保存 Handler，但 callback framework 没有公开同步 `unregister_wrap()`；EventBus 必须集中封装该 key，避免多处依赖内部前缀。
 - 当前一致性保证建立在同一 asyncio 事件循环、注册方法无 `await` 的前提上；跨线程热加载需要宿主切回 EventBus 所属事件循环。
 - 注销没有 drain 语义。若未来插件卸载需要等待旧 Handler 结束，应由扩展运行时跟踪自己发起的任务，不能把即时注销改成隐式等待。
+- EventNext 只约束当前链的推进，不校验业务输入输出，也不提供副作用隔离、幂等、重试或调用次数限制。
 - EV-02 的 `ops=None` 仅用于隔离注册与执行引擎开发，不代表完整 EventBus 已可供业务使用；完整运行时依赖 EV-03 和 EV-04。
 
 
