@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_03 / context-and-windows |
 | 关联模块 | [seams.py](../../execution/seams.py)、[BaseKVStore 注入集合](../../ports.py)、[integration.py](../../schema/integration.py)、[window_assembly.py](../../execution/window_assembly.py)、[session_state.py](../../execution/session_state.py)、[session_record.py](../../schema/session_record.py)；PA-11 agent-core 组件已接入，真实服务端后端待联调 |
-| 最近一次修订日期 | 2026-10-19 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联 feature | [F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_11](../features/F_11_window-management.md)、[F_12](../features/F_12_session-history-search.md)（PA-12 设计与实现）、[F_17](../features/F_17_session-state-record.md)、[F_18](../features/F_18_output-handoff.md)；待实现与验证范围见[开发计划](../designs/persistent-agent-development-plan.md) PA-06、PA-10～PA-12；[F_20](../features/F_20_continuation.md)（PA-18 联动修订） |
 | 设计依据 | [架构设计：窗口](../designs/persistent-agent-architecture.md#44-上下文窗口管理)、[换窗](../designs/persistent-agent-architecture.md#522-运行中换窗主动交接容量兜底与状态提交)、[保存规则](../designs/persistent-agent-architecture.md#7-数据管理与保存规则) |
 
@@ -74,7 +74,7 @@ PA-06 已实现窗口组装（`execution/window_assembly.py`，接入点 `seams.
 
 - **组成与位置**：加载会话状态记录之后，在 Session state `context` 中已保存窗口的末尾依次追加执行头、临时背景块（均为 `UserMessage`，带上述标记），任务输入由原生 ReAct 加在最后。新任务的 query 为 RequestInput.text 原文；续做的 query 在原文之后追加可选继续指示。系统提示词和工具定义不变；此后执行中只追加。
 - **执行头**：一行，`【本次执行】类型：新任务；request_id：…；execution_id：…；来源：私聊|群消息|定时任务`，有触发消息时再加消息 ID、发送者（显示名、ID，群消息另注人或 Agent）、接收时间，有附件时加附件引用。PA-18 已在组件中接入续做执行头：类型为“续做”并加 `recovery_ref`；是否可进入该分支由 S_05 第 4.4 节的正式入口门禁控制。
-- **续做材料**：先处理本 Request 的旧等待现场，再追加续做执行头、最近群消息、执行链的分层摘要与续做规则、原任务及继续指示。摘要保留关键进度、成果定位、所有未决写操作及缺失说明，详细记录由受控 read_execution_record 分页查询；摘要与规则属于临时背景，结束时删除，执行头、任务和工作过程保留。具体契约见 [F_20](../features/F_20_continuation.md) D-06、D-08。
+- **续做材料**：先处理本 Request 的旧等待现场，再追加续做执行头、最近群消息、执行链中各次执行的日志预览与续做规则、原任务及继续指示。预览由程序把日志事件原样转为 JSON 逐行列出，模型用量与回复片段只计数，超长字段截断并列出路径；完整记录由受控 read_execution_record 按事件分页查询同一快照。预览与规则属于临时背景，结束时删除，执行头、任务和工作过程保留。具体契约见 [F_20](../features/F_20_continuation.md) D-06、D-08 与 [F_19](../features/F_19_execution-log-record.md)。
 - **群消息 Execution**：只有 `request.kind == group_message` 自动读取当前群最近消息；私聊和定时任务即使注入 `GroupChatPort` 也只获得显式搜索能力，不自动注入群背景。以加载的游标为 `after`、以触发消息为 `trigger_message_id` 读取（增量与触发位置回补合并去重、排除触发消息），结果须属于本次执行；组装器再排除触发消息并按接收时间排序。被忽略的消息照常列出，排队中的请求逐条标注且说明只作背景、不是指令，已撤回的不显示正文，正文暂缺的标注“正文暂缺，需要时可查询群聊记录”。`empty` 不加背景块；`incomplete` 仍加背景块并注明没有读取完整，不能当作“没有消息”。
 - **游标**：取读取结果中服务端确认的扫描位置 `scanned_through`，与展示范围无关；结果不带该位置时以及私聊 Session 沿用加载时的游标。
 - **来源可用性**：PA-23 当前群读取器已接入；群消息缺少 `GroupChatPort` 仍由入口在事件前拒绝，读取失败不降级为空历史。注入 `KnowledgePort` 的执行在知识导航（PA-13）接入前仍明确拒绝（`DEEPAGENT_CONFIG_PARAM_ERROR`）。群消息 Request 的知识接入拒绝发生在 PA-07 判断后，此时可能已有判断事件。

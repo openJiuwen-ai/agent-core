@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_02 / events-and-result-handoff |
 | 关联模块 | [events.py](../../schema/events.py)、[emitter.py](../../execution/emitter.py)、[CommitPort](../../ports.py) |
-| 最近一次修订日期 | 2026-10-16 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联 feature | [F_02](../features/F_02_execution-protocol.md)、[F_04](../features/F_04_contract-convergence.md)、[F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_18](../features/F_18_output-handoff.md)、[F_19](../features/F_19_execution-log-record.md)、[F_20](../features/F_20_continuation.md) |
 | 设计依据 | [架构设计：事件与确认](../designs/persistent-agent-architecture.md#62-事件传递确认与流量边界)、[结果交接](../designs/persistent-agent-architecture.md#63-完成与结果交接)、[日志读取](../designs/persistent-agent-architecture.md#833-执行日志的读取整理与能力边界) |
 
@@ -68,9 +68,9 @@ reply.delta 保留非空的空格、换行与制表符片段，空字符串不�
 
 宿主只允许读取同一 Session、同一 Request 下的执行，按 local_seq 返回已保存事件的 tuple；允许缺口，非空不保证完整，失败直接抛异常。
 
-消费方（[F_19](../features/F_19_execution-log-record.md) 的 `summarize_execution`）先整份校验再使用：返回值须是非空 tuple，每项重新 model_validate；租户、Agent、Session、Request 与当前执行一致，execution_id 为读取目标；同一份日志只有一个 source_ref（可以与当前执行不同）；同一 local_seq 只对应一份规范化提案，内容相同的重复只保留一条。任一项不满足即整份弃用，不向模型交出任何事件内容，结果标为记录缺失（`missing=True`）；`missing` 只表示没有取得可用日志，不表示上一次没有执行。诊断只含失败类别与定位身份：读取失败与空日志记 warning，其余契约不符记 error。execution_id 不是合法标识时在读取前抛参数错误，不转为记录缺失。
+消费方（[F_19](../features/F_19_execution-log-record.md) 的 `read_snapshot`）逐条使用：返回值应为 tuple，list 作为容错接受，不代表宿主符合契约；其他类型、读取失败或空日志判为不可用。每项重新 model_validate，租户、Agent、Session、Request 须与当前执行一致，execution_id 须为读取目标；不满足的项跳过，无法校验的按返回序列中的位置记录、不采信其自带序号，不属于读取目标的不输出任何内容。同一 local_seq 有内容不同的事件时整组跳过，完全相同的重复只保留一条；source_ref 可以与当前执行不同，日志内不一致时保留并标记。其余事件照常使用，没有一条可用事件时判为不可用；不可用只表示没有取得可用日志，不表示上一次没有执行。诊断只含类别、数量与定位身份：读取失败与空日志记 warning，跳过项与其他契约不符记 error。execution_id 不是合法标识时在读取前抛参数错误，不转为不可用。
 
-读不到、空日志或契约不符按“上一次记录缺失”处理，不据此启动整段重放；序号缺口与缺少结束记录照常整理并写明。整理规则见 F_19，查证与续做由 S_05 定义。
+一次读取只代表那一刻已保存的事件：普通事件可能迟到，续做在一次执行内共用同一份快照（F_20 D-08）。不可用、跳过项与序号缺口都写进记录说明，不据此启动整段重放；记录与预览的格式见 F_19，查证与续做由 S_05 定义。
 
 #### 4.3.1 `read_execution_link(execution, execution_id) -> ExecutionLink`（可选，续做使用）
 

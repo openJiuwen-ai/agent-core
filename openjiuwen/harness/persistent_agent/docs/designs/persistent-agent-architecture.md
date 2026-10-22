@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 | 当前详细架构设计；标注"已实现"的部分以代码为准，其余均为拟议 |
-| 最近一次修订日期 | 2026-10-19 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联模块 | `openjiuwen.harness.persistent_agent` |
 | 设计概览 | [Persistent Agent 设计概览](persistent-agent-overview.md) |
 | 文档定位 | 描述 Persistent Agent 的架构方案，作为后续开发的设计依据 |
@@ -12,7 +12,7 @@
 
 本文说明 Persistent Agent 的定位、核心概念、模块设计、协作流程、状态、数据与故障处理。Agent 侧说明怎样执行；AgentServer 侧说明必须提供的保证，具体实现由服务端所属模块设计。
 
-**实现状态：** 构造、实例隔离、执行入口编排、群参与判断、写前意图、PA-06 新 Request 窗口组装、PA-10 V1 会话状态记录及 PA-08 候选交接（最终回答分段、`share_file` 文件交接、结束事件补交重试）已有组件实现；PA-11 的逐轮 checkpoint、最终 V1 记录结构、主动换窗、容量兜底、归档和精确恢复已在 agent-core 接入 Persistent Agent 执行链并通过组件测试；真实 BaseKVStore、provider 容量边界和 JiuwenSwarm 联调仍待完成。工具执行中途结束时原生保留真实事实的 core 改动已有组件实现、待 core 维护者评审；PA-17 执行日志整理与 PA-18 续做（执行链追溯、分层材料与 `read_execution_record`）已有组件实现，PA-18 的最终请求容量检查已于 2026-10-19 按开发者决定移除，续做在正式入口的开放条件满足前仍拒绝，最终请求检查的 core 接缝（现用于换窗处理与预算准入）待 core 维护者评审；PA-06 容量验收、交互适配及真实宿主联调仍待完成。当前支持范围、负责人和证据以[统一开发计划](persistent-agent-development-plan.md)为准。
+**实现状态：** 构造、实例隔离、执行入口编排、群参与判断、写前意图、PA-06 新 Request 窗口组装、PA-10 V1 会话状态记录及 PA-08 候选交接（最终回答分段、`share_file` 文件交接、结束事件补交重试）已有组件实现；PA-11 的逐轮 checkpoint、最终 V1 记录结构、主动换窗、容量兜底、归档和精确恢复已在 agent-core 接入 Persistent Agent 执行链并通过组件测试；真实 BaseKVStore、provider 容量边界和 JiuwenSwarm 联调仍待完成。工具执行中途结束时原生保留真实事实的 core 改动已有组件实现、待 core 维护者评审；PA-17 执行日志快照与 PA-18 续做（执行链追溯、日志预览与按事件分页的 `read_execution_record`）已有组件实现，PA-18 的最终请求容量检查已于 2026-10-19 按开发者决定移除，续做在正式入口的开放条件满足前仍拒绝，最终请求检查的 core 接缝（现用于换窗处理与预算准入）待 core 维护者评审；PA-06 容量验收、交互适配及真实宿主联调仍待完成。当前支持范围、负责人和证据以[统一开发计划](persistent-agent-development-plan.md)为准。
 
 PA-11 的 agent-core 组件实现与测试证据见 [F_11](../features/F_11_window-management.md)、[S_03](../specs/S_03_context-and-windows.md) 和统一开发计划；生产持久化及跨仓闭环仍待验证。
 
@@ -226,7 +226,7 @@ flowchart LR
 | **窗口存储后端** | Server → Agent（必需注入） | `BaseKVStore`（`set / get / delete / get_by_prefix / delete_by_prefix` 等） | 读写失败按第 7.3 节 `WindowStore` 的失败语义处理 |
 | **群聊记录** `GroupChatPort` | Agent → Server | `recent_messages(execution, cursor=None, limit=20) -> GroupMessagesResult` 读取当前 Session 的群；`search_messages(execution, query: GroupMessageQuery) -> GroupMessageSearchResult` 按 Agent 当前获授权群搜索。近期读取结果中的 `scanned_through` 是服务端确认的扫描位置。Persistent 私聊或群聊 Execution 可注入该端口供显式搜索；只有群消息 Request 自动读取当前群近期消息 | 近期读取区分确定没有与没查完；历史搜索区分 found / empty / incomplete / forbidden / unavailable / failed；错误或授权不确定不能伪装为空 |
 | **记账** | Agent → Server | `record(event)`：普通事件接收入队后返回，普通日志缺失不阻塞；关键事件等待自身落盘后返回，paused 与 final 还须确认所引用的候选输出已可靠保存（第 6.2 节） | 普通日志失败：只记诊断并继续；关键事件自身或必要候选输出保存失败：停止当前执行 |
-| **执行日志** | Agent → Server | `read_execution_log(execution_id)`：按 local_seq 返回该次执行的已保存事件，允许缺口；只允许读取同一 Session、同一 Request 下的执行 | 读不到：提示 Agent "上一次记录缺失"；非空日志也可能不完整，工具结果缺失时先查证，查不清时可询问发起人，是否询问由模型判断 |
+| **执行日志** | Agent → Server | `read_execution_log(execution_id)`：按 local_seq 返回该次执行的已保存事件，允许缺口；只允许读取同一 Session、同一 Request 下的执行 | 读不到：记录说明标为不可用；不合格的事件逐条跳过并写明；非空日志也可能不完整，工具结果缺失时先查证，查不清时可询问发起人，是否询问由模型判断 |
 | **执行前序关系**（可选） | Agent → Server | `read_execution_link(execution_id)`：返回该执行的前一次执行与关系（`first` / `confirmation_resume` / `continuation`），只允许读取同一 Session、同一 Request 下的执行；只在续做时需要，续做开放时检查宿主是否提供 | 读取失败或不合规：停止继续追溯，写明更早执行未知，已读到的日志照常使用 |
 | **预算** | Agent → Server | `admit(model_call_id)`、`report(model_call_id, usage)` | 拒绝准入：不调用模型，产出 `execution.paused(budget_denied)` |
 | **知识** `KnowledgePort` | Agent → Server | 解析授权和知识版本、读取正文 | 无权限与不存在要能区分 |
@@ -603,15 +603,15 @@ sequenceDiagram
 
 **触发与参与：** 服务端定位原 Request 并选择 recovery_ref，窗口管理恢复最新记录并处理过期现场，服务端事件存储与 WindowStore 提供日志与归档，DeepAgent 按规则查证进度。触发与允许条件统一见第 8.3 节。
 
-**恢复引用：** `recovery_ref` 指向同一 Session、同一 Request 下本次要接续的 Execution，由 AgentServer 根据原任务的执行记录填写。继续过后再次暂停或异常中断，下次引用更新为该任务最近一次待接续的执行，不能取 Session 中其他任务的执行。新的 Request 或尚未执行过的任务没有恢复引用；续做时无法定位引用的，先按"上一次记录缺失"处理，不猜造 ID，也不当作新任务直接重做。
+**恢复引用：** `recovery_ref` 指向同一 Session、同一 Request 下本次要接续的 Execution，由 AgentServer 根据原任务的执行记录填写。继续过后再次暂停或异常中断，下次引用更新为该任务最近一次待接续的执行，不能取 Session 中其他任务的执行。新的 Request 或尚未执行过的任务没有恢复引用；续做时无法定位引用的，先按记录不可用处理，不猜造 ID，也不当作新任务直接重做。
 
 **步骤（顺序固定）：**
 
 1. 沿用原 Request，由 AgentServer 提供新的 `execution_id`、原 Request 的 Spec 和 `recovery_ref`。
 2. 加载 **Session 最新的会话状态记录**，写回新的空 Session。即使暂停期间执行过其他任务，也不加载原任务的旧窗口。
 3. **如果加载的记录带有中断状态，先核对等待现场归属**：属于其他 Request 则拒绝，保护其现场；只有本 Request 的旧等待现场才继续处理。为窗口里每个缺少结果的工具调用补一条匹配 `tool_call_id` 的工具结果，沿用停止补位的说明"结果未取得，实际效果需核实"与 `stopped_tool_placeholder` 标记；已有真实结果原样保留，不重复补齐。把补齐的消息写回 Session，清掉 `__react_agent_interruption__` 和本次加载结果的 waiting，保留会话授权 `__interrupt_auto_confirm__` 与群消息游标。
-4. 从 `recovery_ref` 开始沿前序关系（`read_execution_link`）追溯执行链，每一步核对归属，调用 `read_execution_log` 读取该次日志，并按 `execution_id` 查询归档，按第 8.3.3 节整理分层摘要。达到配置的追溯上限、关联断裂或某次日志缺失时分别写明，不推断操作未执行，也不宣称取得了完整进度；是否询问发起人由模型判断。
-5. 在窗口末尾追加续做执行头（含 `recovery_ref` 指向的执行 ID）、临时背景块（执行链、分层摘要与续做规则）和原任务输入；有用户的继续指示时一并追加。
+4. 从 `recovery_ref` 开始沿前序关系（`read_execution_link`）追溯执行链，每一步核对归属，调用 `read_execution_log` 读取该次日志（每次执行只读一次，逐条校验后形成快照），并按 `execution_id` 查询归档，按第 8.3.3 节生成预览。达到配置的追溯上限、关联断裂或某次日志缺失时分别写明，不推断操作未执行，也不宣称取得了完整进度；是否询问发起人由模型判断。
+5. 在窗口末尾追加续做执行头（含 `recovery_ref` 指向的执行 ID）、临时背景块（执行链、各次执行的日志预览与续做规则）和原任务输入；有用户的继续指示时一并追加。
 6. 调用 DeepAgent，**先由模型按续做规则判断进度**。其他任务可能改变了文件或外部状态，需要重新查证；"已登记意图、无结果"的写操作不能直接重做。
 
 **为什么清除旧中断状态：** E1 等待确认时保存的记录包含中断状态；E2 收到同意后可能已经执行写操作，但在保存新记录前崩溃，E3 加载到的仍是 E1 的记录。原生 ReAct 发现中断状态后，会先恢复保存的工具调用，再进入模型循环（[react_agent.py:2775](../../../../core/single_agent/agents/react_agent.py#L2775)、[handler.py:344](../../../../core/single_agent/interrupt/handler.py#L344)）。若不先处理，日志里的"结果不明先查证"来不及生效；会话内已记住的授权还可能让旧调用直接放行。
@@ -884,7 +884,7 @@ PA-11 复用 PA-10 的 Session state 键和一次 `set` 写整条记录，不增
 | 模型、工具或原生运行错误 | 入口区分可接续和明确无法完成，按下文确定结局 |
 | 状态与关键事件失败 | 入口停止并抛异常，服务端核对本次已保存结束记录 |
 | PA-11 归档或 Session 状态提交失败 | 归档失败不提交新窗口；状态写入失败或结果未知时停止当前执行，恢复时按当前 state 与精确匹配的归档元数据对账；无法安全对账则失败关闭 |
-| 执行日志读取失败或缺失 | 提示 Agent“上一次记录缺失”；非空日志也可能不完整，工具结果缺失时先查证，不能据此认定操作未发生，见第 3.5、8.3.3 节 |
+| 执行日志读取失败或缺失 | 记录说明标为不可用；非空日志也可能不完整，工具结果缺失时先查证，不能据此认定操作未发生，见第 3.5、8.3.3 节 |
 | 群聊或历史归档查询失败 | 区分“确定没有”和“没查完或失败”，不能把查询失败当作没有结果，见第 3.5、7.3 节 |
 | 知识查询 | 知识端口须区分无权限与不存在，见第 3.5 节 |
 | 预算、发送失败 | 准入不可确认不调用模型；报告失败诊断对账；发送失败只重试发送 |
@@ -958,32 +958,30 @@ PA-11 复用 PA-10 的 Session state 键和一次 `set` 写整条记录，不增
 | 读取权限 | 只能读取**同一 Session、同一 Request** 下的执行日志 |
 | 为什么不写本地文件 | 本地文件放在 Agent 工具可访问的位置，模型可以改写（与附录 A 第 17 条冲突）；换机器或沙箱回收后可能丢失；和事件流是两份记录，可能不一致 |
 
-**Agent 怎么看到日志：** 分两层。崩溃续做和非确认暂停后继续的 Execution 开始时，由 Persistent Agent（程序）从 `recovery_ref` 开始沿 AgentServer 保存的前序关系追溯执行链，逐次核对归属并读取各次执行的日志，把关键进度、已有成果、所有未决写操作的必要信息以及缺失或不完整的提示整理成分层摘要，作为临时背景块追加到窗口末尾。模型需要核实具体步骤或候选正文时，用受控工具 `read_execution_record` 分页读取完整记录：该工具由 Spec 固定声明，只在续做中回答，且只回答本次已核验的执行链，查询仅限当前 Session、当前 Request。停止清理可能删除没有结果的工具调用，所以即使窗口保存成功，也要读日志，不能只根据窗口判断写操作的进度。
+**Agent 怎么看到日志：** 分两层，来自同一次读取。崩溃续做和非确认暂停后继续的 Execution 开始时，由 Persistent Agent（程序）从 `recovery_ref` 开始沿 AgentServer 保存的前序关系追溯执行链，逐次核对归属；每次执行只读一次日志，逐条校验后形成快照，按执行先后把各快照的预览作为临时背景块追加到窗口末尾。预览是程序从日志转出的事件，每条一行 JSON，不合并、不翻译、不加结论；模型用量与流式回复片段只计数（记录不代表用户已经收到），超长字段只保留开头并列出路径。模型需要完整内容时，用受控工具 `read_execution_record` 按行读取同一快照（记录说明为第 0 行，超长时与超长事件一样分段）：该工具由 Spec 固定声明，只在续做中回答，且只回答本次已核验的执行链，查询仅限当前 Session、当前 Request；快照不含之后才落盘的事件。停止清理可能删除没有结果的工具调用，所以即使窗口保存成功，也要读日志，不能只根据窗口判断写操作的进度。
 
 **日志非空也可能不完整。** 缺少 tool.completed 时，已登记的写操作仍按“有意图、无结果”先查证；查不清时可询问发起人，是否询问由模型判断，不能因为没有结果记录而直接重做。中间结论缺失可能需要重新分析；model.completed 缺失不代替预算端口的用量回报，实际用量仍由 BudgetPort.report 负责。
 
-**整理规则：**
+**读取与呈现规则：**
 
-1. 丢弃对判断进度无用的事件：`reply.delta`、`model.completed`、`execution.started` 与参与判断；
-2. 意图和结果只在能唯一关联时合并成一行；operation_id 复用或调用身份不一致时分开列出并注明；
-3. 保留中间结论（`progress.updated`）、交出的候选及其是否被结束记录引用；
-4. 列出本次执行期间的归档（按 `execution_id` 查询待 PA-12 接入）；
-5. 自动提供的摘要中**写操作一条不省略**，`share_file` 登记逐条保留；其余只读操作只给次数，候选正文只给字数，并注明可用 `read_execution_record` 查询；序号缺口、记录缺失、关联断裂与材料省略分别说明。
+1. 逐条校验：不能重新校验、属于他人或与同序号事件内容冲突的项跳过（冲突则整组），其余照用，跳过项在记录说明中按固定类别写明；读取失败、返回值不是序列、空日志或没有一条可用事件时，记录说明标为不可用；
+2. 事件原样转为 JSON，按 local_seq 排列，只省略记录说明已写的身份、未被引用的 event_id 与空值，不合并、不翻译；
+3. 程序不判断意图是否有结果；续做规则写明怎样按 operation_id 与 tool_call_id 核对，结果不明、没有对应结果、ID 复用或调用身份不一致的写操作先查证；
+4. `window.switched` 中的归档引用原样给出（按 `execution_id` 查询归档待 PA-12 接入）；
+5. 预览中 `model.completed`、`reply.delta` 只计数，超过 2000 字的字段截断并列出 JSON 路径；序号缺口在省略之前计算，与跳过项、记录不可用、关联断裂分别说明。
 
-**整理后的样子：**
+**预览的样子（记录说明一行较长，此处省略部分字段）：**
 
 ```text
 执行链：E2（首次执行） → E4（续做） → E5（本次续做）
-执行 E4（请求 Q3）的执行日志摘要：
-本摘要省略了只读操作的明细与候选正文，完整记录可用 read_execution_record 按执行 ID 分页查询。
-1. [结论] 审批停在财务复核环节
-2. [已登记，无结果] submit_reminder(单号=BX-0930)（写操作 op_12，调用 call-12）：结果不明，先查证，不能直接重做
-3. [只读操作] read_file 1 次（明细未列出）
-结局：未记录结束；无法仅凭日志确定执行是否已结束。
-归档：archive#7（仅为日志中的归档引用，尚未按 execution_id 查询，可能不全）
+{"kind":"execution_log","encoding":"pa17-jsonl/1","preview":true,"execution_id":"E4","usable":true,…,"events":4,"missing_seq_ranges":[],"skipped":{},"ending_seqs":[],"counted_only":{"model.completed":{"events":0},"reply.delta":{"events":0,"chars":0}},"truncated":[]}
+{"event_type":"progress.updated","local_seq":1,…,"payload":{"text":"审批停在财务复核环节"}}
+{"event_type":"tool.completed","local_seq":2,…,"payload":{"tool_call_id":"call-11","tool_name":"read_file",…}}
+{"event_type":"tool.intent","local_seq":3,…,"payload":{"operation_id":"op_12","tool_call_id":"call-12","tool_name":"submit_reminder","params_digest":"…","args_summary":"单号=BX-0930"}}
+{"event_type":"window.switched","local_seq":4,…,"payload":{"archive_ref":"archive#7","window_seq":2}}
 ```
 
-需要比摘要更完整的结果时，模型可以用 `read_execution_record` 分页读取完整执行记录、重新执行只读操作（续做规则允许），或者到当次执行的归档里检索。
+需要比预览更完整的内容时，模型可以用 `read_execution_record` 按事件读取完整执行记录、重新执行只读操作（续做规则允许），或者到当次执行的归档里检索。
 
 崩溃续做查找归档**不依赖 `window.switched` 事件**，而是直接按 `execution_id` 查询窗口存储（第 5.2.2 节）。
 
@@ -1286,5 +1284,6 @@ sequenceDiagram
 | 2026-10-19 | PA-11 的 `context_window` 改为每次模型调用前从当前 `ModelContext.context_window_tokens()` 获取；模型切换后刷新有效窗口和 80% 阈值；解析失败时暂停为 `error` | 与上下文引擎的有效窗口解析保持一致；上下文压缩器沿用自身触发比例，见 [F_11](../features/F_11_window-management.md) |
 | 2026-10-19 | PA-11 请求 token 计数改为与上下文压缩器共享用量感知策略，接受其估算回退；有效窗口来源、80% 阈值和 PA-18 容量移除决定不变 | 同一计数实现供 forked compressor 和 PA-11 使用，详见 [F_11](../features/F_11_window-management.md) |
 | 2026-10-19 | 移除 PA-18 的最终请求容量检查：正式 execute / resume 不再要求容量配置，不再因请求超限或计数不可靠暂停；最终请求接缝保留，用于 PA-11 换窗处理与预算准入；模型容量只在启用 `window_management` 时由 PA-11 使用 | 应用端使用不同模型，context window 各不相同，部分模型的上限未知，无法为所有正式执行配置（开发者决定，见 [F_20](../features/F_20_continuation.md)） |
+| 2026-10-21 | 执行日志改为逐条校验的快照：不合格的事件按类别跳过，其余原样以 JSON 交出，不合并、不翻译；续做注入预览（模型用量与回复片段只计数、超长字段截断并列出路径），`read_execution_record` 按事件分页读取同一快照 | 原整理会因一条坏事件丢掉整份日志与未决写操作，合并与翻译丢字段且复杂；断点继续优先于可读性（PA-17、PA-18，见 [F_19](../features/F_19_execution-log-record.md)、[F_20](../features/F_20_continuation.md)） |
 
 **停止路径的既有验证说明（非本次验证）：** 模型调用中途停止时，Session state 中已有的上下文（含已完成的工具调用及结果）能经会话状态记录接入点保存，再记 `paused(stopped)`；第一次模型调用中途停止时，原生会在上下文末尾追加“[Request cancelled by user]”占位回复。工具执行中途停止后不完整工具调用的处理尚未验证。
