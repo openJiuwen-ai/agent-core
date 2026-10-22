@@ -628,7 +628,9 @@ def test_target_options_carry_observed_state_on_the_wire_only():
     check = next(option for action, option in options.items() if action.startswith("SET_CHECKED"))
     assert check == {"action": check["action"], "role": "checkbox", "region": "filters", "checked": False}
     assert options["READ visible page text and metadata for missing task facts"] == {
-        "action": "READ visible page text and metadata for missing task facts"}
+        "action": "READ visible page text and metadata for missing task facts",
+        "choice_kind": "bound_reader_scope", "scope": "current_document",
+        "parameters": {}}
 
 
 @pytest.mark.asyncio

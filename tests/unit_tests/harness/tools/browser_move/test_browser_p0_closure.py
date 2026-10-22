@@ -384,6 +384,7 @@ async def test_first_chunk_timeout_preserves_execution_and_does_not_replay_model
     ctx = SimpleNamespace(
         session=session,
         exception=TimeoutError("first_chunk_elapsed"),
+        consume_retry_request=lambda: None,
         retry_attempt=0,
         extra={},
         request_retry=MagicMock(),
