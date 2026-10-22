@@ -383,6 +383,45 @@ Because the `TaskTool` derives a deterministic sub-session ID for `browser_agent
 
 ## Observability
 
+### Browser delivery and model limits (2026-10-21)
+
+The browser's structured result separates dispatch receipts, historical source observations,
+and the worker's interpretation. The existing history retains at most 20 source records.
+The parent receives every deduplicated retained observation, rather than a second six-record
+selection. Each record retains up to 12,000 characters; the returned source text shares a
+96,000-character budget. Source, reading scope, available timestamp and recall handle remain
+visible even when text is shortened. Inspect `raw_text_truncated`, `raw_text_length`,
+`returned_text_length` and `observation_excerpt`; absence from bounded history is not proof
+that a read or an action never occurred. Historical text is not a current executable binding.
+For older checkpoints without original-length metadata, `raw_text_truncated=null` means
+completeness is unknown; it does not mean that the old text was complete.
+
+For a parent with a configured browser subagent, `ContextProcessorRail` uses the existing
+offloader's protected tool/argument pattern to keep this bounded task result inline. It does
+not protect other subagent results or disable whole-context compression. `TaskTool` renders
+the browser result once, without duplicating it through `resume_context`.
+
+Failed model attempts are handled by the existing exception/retry rail; the after callback
+only checks an actually returned response. A successful stream ending with no answer or tool
+call remains incomplete, including `finish_reason=length`. The browser model clone defaults
+to `ModelRequestConfig.max_tokens=8192` only when no total output limit is configured. Explicit
+total limits and provider-native aliases remain unchanged. An explicit reasoning token budget
+is preserved, with at least 1,024 tokens of headroom for answer/tool output in the default total.
+The parent model is not modified. Provider interpretation of output/reasoning budgets varies;
+this is a starting budget, not a completion or latency guarantee. Client waits and the shared
+task deadline still apply; there is no new whole-stream 60-second cutoff or automatic replay.
+
+New local phase bindings replace retired handoff state through Session's existing explicit
+deletion semantics. Pure URL navigation checks page/document identity without requiring the
+viewport geometry to remain unchanged. Observed links retain their link/order checks, and
+node actions retain exact identity and actionability. A missing phase identity returns an
+existing fixed-probe suggestion; it never silently rebinds a similarly named control.
+
+Parent delegation may suggest useful search strategies and preferred sources. Keep these
+separate from explicit user requirements: an inline weather answer can be preferred, with
+another suitable source used if unavailable or insufficient. Preserve user restrictions,
+comparisons, budgets and the authorized endpoint. Later observations do not erase earlier facts.
+
 - **Dedicated log file** — Browser activity is written to `./logs/browser_agent.log` through the `openjiuwen.browser_agent` logger, keeping it separate from the common application log. Override the path with `OPENJIUWEN_BROWSER_AGENT_LOG_FILE` (a falsy value such as `0`/`off` disables the file), the level with `OPENJIUWEN_BROWSER_AGENT_LOG_LEVEL` (default `INFO`), and mirroring into the common log with `OPENJIUWEN_BROWSER_AGENT_LOG_MIRROR_COMMON` (default off).
 - **Status telemetry** — When `BROWSER_SUBAGENT_STATUS_LOG` is enabled (default on), compact JSON records tagged `[BROWSER_SUBAGENT]` are emitted for task/model/tool start, end, and exceptions, including per-tool counts, batch step aggregates, and detection of fallbacks from a failed batch to primitive tools. Sensitive values are redacted and URLs are query-stripped.
 
