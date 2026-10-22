@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.logging import LogEventType
 from openjiuwen.core.foundation import llm
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
@@ -423,3 +424,104 @@ class TestJevSystemOneClientRequest:
             )
 
         assert isinstance(error.value.cause, ValidationError)
+
+
+_LOGGER = "openjiuwen.core.foundation.llm.system_one.client.llm_logger"
+_IS_SENSITIVE = "openjiuwen.core.foundation.llm.system_one.client.UserConfig.is_sensitive"
+
+
+async def _evaluate(client: JevSystemOneClient) -> SystemOneResponse:
+    return await client.system_one(state="hello", questions={"result": NoulQuestion(instructions="Greeting?")})
+
+
+def _logged(logger_method) -> dict:
+    logger_method.assert_called_once()
+    return logger_method.call_args.kwargs
+
+
+class TestJevSystemOneClientLogging:
+    @pytest.mark.asyncio
+    async def test_success_logs_response_body_and_usage(self):
+        client, _ = _make_client(_response(_response_data({"type": "noul", "noul": 0.9})))
+
+        with patch(_LOGGER) as logger:
+            await _evaluate(client)
+
+        logged = logger.info.call_args_list[-1].kwargs
+        assert logged["event_type"] == LogEventType.LLM_CALL_END
+        assert logged["model_provider"] == "jev"
+        assert logged["usage"] == {"input_tokens": 12, "output_tokens": 3, "cost": None}
+        assert logged["metadata"]["status_code"] == 200
+        assert '"noul":0.9' in logged["metadata"]["response"]
+        logger.error.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_wrong_api_key_logs_status_and_error(self):
+        client, _ = _make_client(_response({"error": "invalid api key"}, status_code=401))
+
+        with patch(_LOGGER) as logger, patch(_IS_SENSITIVE, return_value=False), pytest.raises(BaseError):
+            await _evaluate(client)
+
+        logged = _logged(logger.error)
+        assert logged["event_type"] == LogEventType.LLM_CALL_ERROR
+        assert logged["metadata"]["status_code"] == 401
+        assert "invalid api key" in logged["metadata"]["response"]
+        assert "401" in logged["exception"]
+
+    @pytest.mark.asyncio
+    async def test_sensitive_mode_hides_error_body(self):
+        client, _ = _make_client(_response({"error": "echoed state"}, status_code=422))
+
+        with patch(_LOGGER) as logger, patch(_IS_SENSITIVE, return_value=True), pytest.raises(BaseError):
+            await _evaluate(client)
+
+        logged = _logged(logger.error)
+        assert logged["metadata"]["status_code"] == 422
+        assert logged["metadata"]["response"] is None
+
+    @pytest.mark.asyncio
+    async def test_unreachable_api_base_logs_transport_error(self):
+        client, http_client = _make_client()
+        http_client.post.side_effect = httpx.ConnectError("connection refused")
+
+        with patch(_LOGGER) as logger, pytest.raises(BaseError):
+            await _evaluate(client)
+
+        logged = _logged(logger.error)
+        assert logged["event_type"] == LogEventType.LLM_CALL_ERROR
+        assert logged["metadata"]["status_code"] is None
+        assert "connection refused" in logged["exception"]
+
+    @pytest.mark.asyncio
+    async def test_invalid_response_body_is_logged(self):
+        client, _ = _make_client(_response({"answers": {}}))
+
+        with patch(_LOGGER) as logger, pytest.raises(BaseError):
+            await _evaluate(client)
+
+        assert _logged(logger.error)["metadata"]["response"] == '{"answers":{}}'
+
+    @pytest.mark.asyncio
+    async def test_cancellation_is_logged_and_propagated(self):
+        client, http_client = _make_client()
+        http_client.post.side_effect = asyncio.CancelledError()
+
+        with patch(_LOGGER) as logger, pytest.raises(asyncio.CancelledError):
+            await _evaluate(client)
+
+        assert _logged(logger.warning)["event_type"] == LogEventType.LLM_CALL_ERROR
+        logger.error.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_retryable_status_is_logged(self):
+        client, http_client = _make_client(max_retries=1)
+        http_client.post.side_effect = [
+            _response({"error": "busy"}, status_code=529, headers={"Retry-After": "0"}),
+            _response(_response_data({"type": "noul", "noul": 0.5})),
+        ]
+
+        with patch(_LOGGER) as logger:
+            await _evaluate(client)
+
+        logged = _logged(logger.warning)
+        assert logged["metadata"] == {"status_code": 529, "attempt": 1, "delay_s": 0.0}
