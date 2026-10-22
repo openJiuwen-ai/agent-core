@@ -599,6 +599,52 @@ async def test_stop_closes_messager_transport():
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("action", ["stop", "pause"])
+@pytest.mark.parametrize("failure", ["health", "kill"])
+@pytest.mark.parametrize("remains_alive", [False, True])
+async def test_member_cleanup_errors_preserve_liveness_and_safe_teardown(action, failure, remains_alive):
+    from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
+
+    host = _make_kernel_host(messager=SimpleNamespace(stop=AsyncMock()))
+    host.spawn_manager = SpawnManager(state=SimpleNamespace(), configurator=SimpleNamespace(),
+                                      team_agent_getter=lambda: host)
+    handle = SimpleNamespace(is_alive=True, stop_health_check=AsyncMock())
+    if failure == "health":
+        handle.stop_health_check.side_effect = RuntimeError("health cleanup failed")
+    async def kill():
+        handle.is_alive = remains_alive
+        if failure == "kill":
+            raise RuntimeError("kill cleanup failed")
+    handle.force_kill = AsyncMock(side_effect=kill)
+    host.spawn_manager.spawned_handles["member"] = handle
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+
+    if remains_alive:
+        with pytest.raises(RuntimeError):
+            await getattr(kernel, action)()
+        assert host.spawn_manager.has_live_handle("member")
+        host.session_manager.release_session.assert_not_called()
+        host.stream_controller.close_stream.assert_not_called()
+        host.resources.harness.dispose.assert_not_awaited()
+        # A later explicit stop can finish the same retained runtime.
+        handle.is_alive = False
+        await kernel.stop()
+    else:
+        await getattr(kernel, action)()
+        assert kernel._lifecycle_state == ("stopped" if action == "stop" else "paused")
+    handle.force_kill.assert_awaited_once()
+    assert not host.spawn_manager.has_live_handle("member")
+    assert not host.spawn_manager.spawned_handles
+    host.stream_controller.close_stream.assert_called_once()
+    host.session_manager.release_session.assert_called_once()
+    if action == "stop" or remains_alive:
+        host.resources.harness.dispose.assert_awaited_once()
+        host.infra.messager.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 @pytest.mark.level0
 async def test_finalize_round_does_not_extract_memory():
     """Round cleanup no longer performs team memory extraction."""

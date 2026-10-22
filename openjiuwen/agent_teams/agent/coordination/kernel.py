@@ -32,6 +32,10 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 
 
+class PauseCleanupError(RuntimeError):
+    """A pause could not finish tearing down its members; runtime is unsafe to resume."""
+
+
 class CoordinationKernel:
     """Owns the coordination subsystem: lifecycle, transport wiring, and
     inner event ingress.
@@ -413,7 +417,10 @@ class CoordinationKernel:
             await self._mark_live_teammates(MemberStatus.PAUSED)
             await host.spawn_manager.cancel_recovery_tasks()
             t_shutdown = time.perf_counter()
-            await host.spawn_manager.shutdown_all_handles()
+            try:
+                await host.spawn_manager.shutdown_all_handles()
+            except Exception as exc:
+                raise PauseCleanupError("Members are still stopping during pause") from exc
             team_logger.info(
                 "[{}] lifecycle_timing pause shutdown_all_handles duration_ms={:.0f}",
                 member,

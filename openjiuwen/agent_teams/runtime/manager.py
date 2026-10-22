@@ -327,9 +327,7 @@ class TeamRuntimeManager:
                     team_name,
                     session_id,
                 )
-                await agent.pause_coordination()
-                if entry.state is not RuntimeState.STOPPING:
-                    entry.state = RuntimeState.PAUSED
+                await self._pause_entry(entry)
         except Exception as exc:
             team_logger.warning(
                 "Failed to finalize team {} on session {}: {}",
@@ -457,9 +455,24 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
+        return await self._pause_entry(entry)
+
+    async def _pause_entry(self, entry: ActiveTeam) -> bool:
+        team_name, session_id = entry.team_name, entry.current_session_id
         if entry.state is RuntimeState.STOPPING:
             return False
-        await entry.agent.pause_coordination()
+        from openjiuwen.agent_teams.agent.coordination.kernel import PauseCleanupError
+
+        try:
+            await entry.agent.pause_coordination()
+        except PauseCleanupError:
+            # A partial pause must not accept new work while members may still
+            # be exiting. Reuse the owned stop task and its bounded caller wait.
+            try:
+                await self._stop_entry(entry)
+            except Exception as exc:
+                team_logger.warning("Failed to stop team {} after pause failure: {}", team_name, exc)
+            raise
         if entry.state is RuntimeState.STOPPING:
             return False
         entry.state = RuntimeState.PAUSED
@@ -792,6 +805,10 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
+        return await self._stop_entry(entry)
+
+    async def _stop_entry(self, entry: ActiveTeam) -> bool:
+        team_name, session_id = entry.team_name, entry.current_session_id
         entry.state = RuntimeState.STOPPING
         if entry.stop_task is None or (entry.stop_task.done() and
                                       (entry.stop_task.cancelled() or entry.stop_task.exception() is not None)):

@@ -248,7 +248,10 @@ class SpawnedProcessHandle:
             return
 
         self._shutdown_requested = True
-        await self.stop_health_check()
+        try:
+            await self.stop_health_check()
+        except Exception as exc:
+            logger.warning("Failed to stop health check before killing process {}: {}", self.process_id, exc)
 
         try:
             self.process.kill()

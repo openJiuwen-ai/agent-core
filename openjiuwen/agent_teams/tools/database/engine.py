@@ -320,8 +320,11 @@ def _ensure_dynamic_table_columns(sync_conn, table_names: list[str] | None = Non
     inspector = inspect(sync_conn)
     for table_name in table_names if table_names is not None else inspector.get_table_names():
         if table_name.startswith("team_message_"):
+            # Match MySQL's bounded string representation without TEXT's
+            # version-dependent default-value restrictions.
+            protocol_type = "VARCHAR(255)" if sync_conn.dialect.name == "mysql" else "TEXT"
             definitions = (
-                ("protocol", "TEXT NOT NULL DEFAULT 'plain'"),
+                ("protocol", f"{protocol_type} NOT NULL DEFAULT 'plain'"),
                 ("meta", "TEXT"),
                 ("coordination_meta", "TEXT"),
             )
@@ -730,13 +733,29 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
             autoflush=False,
         )
 
-    # DDL + migrations run on the writer engine (they are writes).
-    async with write_engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
-        await conn.run_sync(_ensure_team_member_role_column)
-        await conn.run_sync(_ensure_team_member_options_column)
-        await conn.run_sync(_ensure_team_info_capability_columns)
-        await conn.run_sync(_ensure_dynamic_table_columns)
+    # Retry startup contention in a fresh transaction. Missing required columns
+    # must still fail initialization rather than publish an unusable database.
+    try:
+        for attempt in range(_DB_RETRY_ATTEMPTS):
+            try:
+                async with write_engine.begin() as conn:
+                    await conn.run_sync(SQLModel.metadata.create_all)
+                    await conn.run_sync(_ensure_team_member_role_column)
+                    await conn.run_sync(_ensure_team_member_options_column)
+                    await conn.run_sync(_ensure_team_info_capability_columns)
+                    await conn.run_sync(_ensure_dynamic_table_columns)
+                break
+            except (OperationalError, SATimeoutError):
+                if attempt == _DB_RETRY_ATTEMPTS - 1:
+                    raise
+                delay = _DB_RETRY_BASE_DELAY * (2**attempt)
+                team_logger.warning("Database initialization retry %s in %ss", attempt + 1, delay)
+                await asyncio.sleep(delay)
+    except BaseException:
+        # TeamDatabase has not received these engines yet, so its close() cannot
+        # release them after failed initialization (including external cancel).
+        await asyncio.gather(*(engine.dispose() for engine in {write_engine, read_engine}), return_exceptions=True)
+        raise
 
     return SqlEngines(write_engine, read_engine, write_session_local, read_session_local)
 
@@ -789,10 +808,15 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
     if not session_id:
         team_logger.warning("No session_id in context, cannot create session tables")
         return
-    if session_id in sessions.ready_session_ids:
-        return
-
     async def _ddl_once() -> None:
+        if session_id in sessions.ready_session_ids:
+            # Other processes/instances can delete tables without invalidating
+            # our cache. Probe only this session's five tables, never the catalog.
+            async with sessions.read() as session:
+                conn = await session.connection()
+                if await conn.run_sync(_session_tables_exist):
+                    return
+            sessions.ready_session_ids.discard(session_id)
         async with sessions.write() as session:
             # Concurrent binds queue on the existing writer lock. Only the first
             # successful bind performs DDL; failed/cancelled attempts stay retryable.
@@ -832,6 +856,14 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
         last_err,
     )
     return
+
+
+def _session_tables_exist(sync_conn) -> bool:
+    inspector = inspect(sync_conn)
+    return all(inspector.has_table(model().__tablename__) for model in (
+        _get_task_model, _get_task_dependency_model, _get_message_model,
+        _get_message_read_status_model, _get_review_vote_model,
+    ))
 
 
 async def drop_cur_session_tables(engine: AsyncEngine) -> None:

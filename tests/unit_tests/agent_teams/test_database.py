@@ -319,6 +319,8 @@ class TestTeamDatabaseInit:
         engine_module._ensure_dynamic_table_columns(conn)
         statements = [call.args[0] for call in conn.exec_driver_sql.call_args_list]
         assert len(statements) == 6
+        protocol_type = "VARCHAR(255)" if dialect_name == "mysql" else "TEXT"
+        assert any(f"protocol {protocol_type} NOT NULL DEFAULT 'plain'" in statement for statement in statements)
         assert all(statement.startswith("ALTER TABLE ") and " ADD COLUMN " in statement for statement in statements)
         for table in ("team_message_old", "team_task_old"):
             assert any(statement.startswith(f"ALTER TABLE {quote}{table}{quote} ") for statement in statements)

@@ -214,12 +214,13 @@ class SpawnManager:
     def has_live_handle(self, member_name: str) -> bool:
         """Return whether ``member_name`` already has a registered spawn handle.
 
-        A present handle means the member was spawned in this runtime and has
-        not been cleaned up; ``recover_team`` uses this to skip re-spawning a
+        A live handle means the member is still running in this runtime;
+        ``recover_team`` uses this to skip re-spawning a
         teammate that is already running (unhealthy members are restarted via
         the ``on_unhealthy`` callback, not by ``recover_team``).
         """
-        return self.spawned_handles.get(member_name) is not None
+        handle = self.spawned_handles.get(member_name)
+        return handle is not None and handle.is_alive
 
     async def cleanup_teammate(self, member_name: str) -> None:
         handle = self.spawned_handles.get(member_name)
@@ -236,11 +237,17 @@ class SpawnManager:
             handle.chunk_forward = None
         try:
             await handle.stop_health_check()
+        except Exception as exc:
+            team_logger.warning("Error stopping health check for teammate {}: {}", member_name, exc)
+        try:
             if handle.is_alive:
                 await handle.force_kill()
         except Exception as e:
             team_logger.error("Error cleaning up teammate {}: {}", member_name, e)
-            raise
+            if handle.is_alive:
+                raise
+        if handle.is_alive:
+            raise RuntimeError(f"Teammate {member_name} is still running after cleanup")
         if self.spawned_handles.get(member_name) is handle:
             self.spawned_handles.pop(member_name, None)
 

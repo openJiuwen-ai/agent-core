@@ -660,12 +660,14 @@ async def test_concurrent_session_binds_initialize_once(file_db, monkeypatch):
         statements = []
         def record(conn, cursor, statement, parameters, context, executemany):
             statements.append(statement)
-        event.listen(file_db.engine.sync_engine, "before_cursor_execute", record)
+        event.listen(file_db.read_engine.sync_engine, "before_cursor_execute", record)
         try:
             await file_db.create_cur_session_tables()
-            assert statements == []
+            assert 0 < len(statements) <= 10
+            assert all(statement.startswith("PRAGMA ") and "table_info(" in statement for statement in statements)
+            assert initialize.await_count == 1
         finally:
-            event.remove(file_db.engine.sync_engine, "before_cursor_execute", record)
+            event.remove(file_db.read_engine.sync_engine, "before_cursor_execute", record)
     finally:
         reset_session_id(token)
 
@@ -690,6 +692,87 @@ async def test_failed_session_initialization_can_retry(file_db, monkeypatch):
         assert initialize.await_count == engine_module._DB_RETRY_ATTEMPTS + 1
     finally:
         reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("partial_drop", [False, True])
+async def test_cached_bind_repairs_tables_deleted_by_another_instance(file_db, partial_drop):
+    from sqlalchemy import inspect
+    from openjiuwen.agent_teams.tools.models import _sanitize_session_id_for_table
+
+    other = TeamDatabase(file_db.config)
+    token = set_session_id("external_drop")
+    try:
+        await other.initialize()
+        await file_db.create_cur_session_tables()
+        if partial_drop:
+            name = "team_review_vote_" + _sanitize_session_id_for_table("external_drop")
+            async with other.engine.begin() as conn:
+                await conn.exec_driver_sql(f'DROP TABLE "{name}"')
+        else:
+            await other.drop_session_tables_by_id("external_drop")
+        await file_db.create_cur_session_tables()
+        async with file_db.engine.connect() as conn:
+            assert await conn.run_sync(lambda sc: inspect(sc).has_table(
+                "team_review_vote_" + _sanitize_session_id_for_table("external_drop")
+            ))
+        # Exercise a real DAO after rebind, not just the cache flag.
+        assert await file_db.task.get_team_tasks("team") == []
+        assert await file_db.message.get_team_messages("team") == []
+    finally:
+        await other.close()
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("failure", ["transient", "exhausted", "permanent", "cancelled"])
+@pytest.mark.parametrize("file_backed", [False, True])
+async def test_startup_migration_retries_or_releases_unpublished_engines(monkeypatch, tmp_path, failure, file_backed):
+    from unittest.mock import Mock
+    from sqlalchemy.ext.asyncio import AsyncEngine
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+    created = []
+    disposed = []
+    factory = engine_module.create_async_engine
+    dispose_engine = AsyncEngine.dispose
+    async def dispose(engine, *args, **kwargs):
+        disposed.append(engine)
+        await dispose_engine(engine, *args, **kwargs)
+
+    def create(*args, **kwargs):
+        engine = factory(*args, **kwargs)
+        created.append(engine)
+        return engine
+
+    error = {
+        "transient": OperationalError("ALTER", {}, Exception("database is locked")),
+        "exhausted": OperationalError("ALTER", {}, Exception("database is locked")),
+        "permanent": ValueError("invalid schema"),
+        "cancelled": asyncio.CancelledError(),
+    }[failure]
+    migrate = Mock(side_effect=[error, None] if failure == "transient" else error)
+    monkeypatch.setattr(engine_module, "create_async_engine", create)
+    monkeypatch.setattr(AsyncEngine, "dispose", dispose)
+    monkeypatch.setattr(engine_module, "_ensure_dynamic_table_columns", migrate)
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0)
+    database = TeamDatabase(DatabaseConfig(connection_string=str(tmp_path / "startup.db") if file_backed else ":memory:"))
+    try:
+        if failure == "transient":
+            await database.initialize()
+            assert database._initialized
+            assert migrate.call_count == 2
+            assert disposed == []
+        else:
+            with pytest.raises(type(error)):
+                await database.initialize()
+            assert not database._initialized and database.engine is None
+            assert migrate.call_count == (engine_module._DB_RETRY_ATTEMPTS if failure == "exhausted" else 1)
+            assert len(disposed) == len(created) and set(disposed) == set(created)
+    finally:
+        await database.close()
 
 
 @pytest.mark.asyncio
