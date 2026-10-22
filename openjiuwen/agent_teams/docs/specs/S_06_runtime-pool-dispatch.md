@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/runtime/`、`openjiuwen/core/runner/team_runner.py`（`_resolve_team_agent_spec` 入参归一化） |
-| 最近一次修订日期 | 2026-09-08 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联 feature | `F_05_lifecycle-finalize-relocation.md`、`F_06_name-old-session-recover.md`、`F_75_idle-trigger-interrupt-resume-deadlock.md` |
 
 ## 范围 / 边界
@@ -49,6 +49,7 @@
 12. **finalize 决策权归 manager**：leader run cycle 的 pause vs stop 决策由 `TeamRuntimeManager.finalize` 拥有（`shutdown_requested or lifecycle != "persistent"` → stop+`pool.remove`；否则 pause+`state=PAUSED`）。`CoordinationKernel.finalize_round` 不再做该决策——外部 `stop_team` 不会被 stream finally 路径上的隐式 re-pause 静默盖掉。
 13. **finalize_member 决策权归 manager，且它是 graceful 退场写 `SHUTDOWN` 的那个人**：teammate / human-agent run cycle 的 pause vs stop 由 `TeamRuntimeManager.finalize_member` 拥有。`team_member` 持久化状态属于 `_MEMBER_FINALIZED_STATUSES`（`STOPPED` / `PAUSED` / `SHUTDOWN` —— **不含 `SHUTDOWN_REQUESTED`**）时跳过写状态，只 tear down kernel，避免覆盖 leader 的 `_mark_live_teammates` 标记或 `shutdown_self` 写下的 `SHUTDOWN`。否则按**当前状态**（不是 lifecycle）分流：`SHUTDOWN_REQUESTED` → `stop_coordination` + 写 `SHUTDOWN`；其余 → `pause_coordination` + 写 `READY`。`SHUTDOWN_REQUESTED` **必须**留在 finalized 集之外——它一旦被当成"外部已写好终态"，跑完末轮的成员就永远停在 `SHUTDOWN_REQUESTED`，`clean_team` 的全员 SHUTDOWN 前置条件再也不成立。
 14. **db_config 单一来源**：`release_session` / `delete_team` 走 `resolve_team_session_release_info` 从 session checkpoint 的任一 team bucket 解析出 `db_config`；不依赖外部传入，避免调用方传错 DB。
+14a. **delete_team 重试收敛**：调用方传入的 session 已从 checkpointer 释放时，`delete_team` 不再访问已不可恢复的 DB 配置，但仍必须以 best-effort 方式删除 `team_home(team_name)`。这样前一次删除在 checkpoint / team_info 已清理、目录清理前中断后，重试仍能收敛到完整终态。
 15. **lazy import**：`Runner._get_team_runtime_manager` 通过函数内 import 拉取 `TeamRuntimeManager`，避免子进程 bootstrap（`spawn` 路径）拉链 agent_teams 模块树。
 
 ## 接口契约
