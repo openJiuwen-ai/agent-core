@@ -152,12 +152,13 @@ online-rl = [
 all-mq = ["openjiuwen[pulsar]"]
 all-storage = ["openjiuwen[sqlite,postgres,mysql,gaussdb,redis,elasticsearch,obs]"]
 all-vector = ["openjiuwen[pgvector,chromadb,gaussvector]"]
+all-memory = ["openjiuwen[jiuwen-memory]"]
 
 cli = ["click>=8.0", "rich>=13.0", "prompt-toolkit>=3.0"]
 
 default = []
 # Includes A2A SDK so the A2A remote/server plugins work when using `openjiuwen[all]`.
-all = ["openjiuwen[all-mq,all-storage,all-vector,all-a2a]"]
+all = ["openjiuwen[all-mq,all-storage,all-vector,all-a2a,all-memory]"]
 
 [dependency-groups]
 # Testing
