@@ -381,6 +381,9 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
+    "send_message.error_group_to_user": (
+        "群聊回复必须使用 group_send_message；send_message(to='user') 不是公开群消息入口。"
+    ),
     "send_message.error_leader_to_user": "Leader 不能 send_message 给 'user'。请直接用普通回复输出给用户。",
     "send_message.error_content_too_long": (
         "'content' 过长（{actual} 字符，上限 {limit}）：这个体量的内容是产物，不是消息。"

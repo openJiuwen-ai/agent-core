@@ -1,5 +1,7 @@
 Send a message to team members. Use for task assignment notifications, progress reports, escalation of blockers, or dependency coordination.
 
+**Group chat exception:** public replies must use `group_send_message`, not `send_message(to="user")`. The user-reply rules below apply only to ordinary teams. Private coordination between group members still uses this tool.
+
 | Parameter | Meaning |
 |---|---|
 | `to=<member name>` | Point-to-point message (DM / direct message / private chat) — visible ONLY to you and that member, like a 1:1 private chat in any IM tool; no other teammate (and not even the leader) receives it. To reach a subset with the same content, use `targets`; to reach everyone, use `to="*"` |
