@@ -3,7 +3,7 @@
 """PA-18 continuation with a real DeepAgent, a local model and the real session state record.
 
 Records are written into the window backend in their stored form, so loading, the stale scene
-handling, the log summaries, the chain tracing and the saved record are the real ones; only the
+handling, the log previews, the chain tracing and the saved record are the real ones; only the
 model, the host ports, the workspace grant and the group message reader are doubles. The formal
 entry keeps continuation closed (F_20 D-10); the fixture opens it through the internal seam.
 """
@@ -46,7 +46,6 @@ SEAMS = import_module(f"{PKG}.execution.seams")
 STATE = import_module(f"{PKG}.execution.session_state")
 HANDOFF = import_module(f"{PKG}.execution.handoff")
 CONTINUATION = import_module(f"{PKG}.execution.continuation")
-LOG = import_module(f"{PKG}.execution.execution_log")
 RECORD = import_module(f"{PKG}.schema.session_record")
 EVENTS = import_module(f"{PKG}.schema.events")
 INTEGRATION = import_module(f"{PKG}.schema.integration")
@@ -412,6 +411,23 @@ def background(messages):
     return next(message.content for message in messages if (message.metadata or {}).get(PART) == "temporary_background")
 
 
+def previews(text):
+    """Each Execution's preview in the background, in the order shown: execution_id -> (header, events)."""
+    shown: dict[str, tuple[dict, list[dict]]] = {}
+    current = None
+    for line in text.split("\n"):
+        if not line.startswith("{"):
+            continue
+        data = json.loads(line)
+        if data.get("kind") == "execution_log":
+            current = data["execution_id"]
+            shown[current] = (data, [])
+        else:
+            assert current is not None, "an event line follows its header"
+            shown[current][1].append(data)
+    return shown
+
+
 @pytest.mark.asyncio
 async def test_a_continuation_checks_progress_before_the_original_task(harness):
     """PA-18-V-01: the log is read even though a window was saved."""
@@ -438,8 +454,11 @@ async def test_a_continuation_checks_progress_before_the_original_task(harness):
     assert shown[3][2] == SEAMS.TEMPORARY_BACKGROUND and shown[4] == ("UserMessage", TASK, None)
     record_text = shown[3][1]
     assert record_text.startswith("【续做记录】本次接续执行 execution-2。")
-    assert "[已登记，无结果] submit_reminder(单号=BX-0930)（写操作 op_12，调用 call-op_12）" in record_text
-    assert "[结论] 已核对 3 笔报销" in record_text
+    head, shown_events = previews(record_text)["execution-2"]
+    assert head["usable"] is True and head["preview"] is True
+    assert [item["event_type"] for item in shown_events] == ["execution.started", "tool.intent", "progress.updated"]
+    assert shown_events[1]["payload"]["operation_id"] == "op_12" and shown_events[1]["local_seq"] == 2
+    assert shown_events[2]["payload"]["text"] == "已核对 3 笔报销"
     assert record_text.endswith(CONTINUATION._RULES), "the rules close the background, right before the task"
     _, saved = await harness.saved()
     saved_parts = [part for _, _, part in parts(saved)]
@@ -535,7 +554,9 @@ async def test_a_missing_log_still_continues_and_asks_the_initiator_first(harnes
     events = await harness.run(spec, ctx, scheduled())
     assert events[-1].payload.status == "completed"
     record_text = background(harness.model.seen[0])
-    assert LOG._MISSING in record_text and record_text.endswith(CONTINUATION._RULES)
+    head, shown_events = previews(record_text)["execution-2"]
+    assert head["usable"] is False and head["unusable_reason"] == "read_failed" and shown_events == []
+    assert record_text.endswith(CONTINUATION._RULES)
     assert "先向发起人确认" not in record_text, "whether to ask is the Agent's call (Q-09)"
     assert "denied" not in record_text
 
@@ -615,12 +636,9 @@ async def test_the_chain_is_read_back_and_shown_in_causal_order(harness):
         "执行链：execution-0（首次执行） → execution-1（确认恢复） → execution-2（续做） → execution-3（本次续做）"
         in text
     )
-    order = [
-        text.index(f"执行 {name}（请求 request-1）的执行日志摘要")
-        for name in ("execution-0", "execution-1", "execution-2")
-    ]
-    assert order == sorted(order), "earliest first, by the links and not by time"
-    assert "[已登记，无结果] submit_reminder(单号=BX-0930)（写操作 op_old" in text
+    shown = previews(text)
+    assert list(shown) == ["execution-0", "execution-1", "execution-2"], "earliest first, by the links and not by time"
+    assert shown["execution-0"][1][0]["payload"]["operation_id"] == "op_old"
     assert "更早执行未查完" not in text and "之前是否还有执行" not in text and "停止追溯" not in text
 
 
@@ -673,7 +691,9 @@ async def test_a_link_that_cannot_be_used_stops_tracing_but_keeps_what_was_read(
     assert events[-1].payload.status == "completed"
     assert host.reads == ["execution-2", "execution-1"], "execution-1's own log is still read"
     text = background(harness.model.seen[0])
-    assert "[结论] 审批已同意" in text and "[结论] 预算不足，暂停" in text
+    shown = previews(text)
+    assert shown["execution-1"][1][0]["payload"]["text"] == "审批已同意"
+    assert shown["execution-2"][1][0]["payload"]["text"] == "预算不足，暂停"
     assert ("停止追溯" if broken in ("cycle", "active") else "无法确认 execution-1 之前") in text
     assert "更早的执行" in text and "首次执行" not in text and "host busy" not in text
 
@@ -688,8 +708,11 @@ async def test_a_missing_log_with_a_sound_link_goes_on_to_earlier_executions(har
     await harness.run(spec, ctx, scheduled())
     assert host.reads == ["execution-2", "execution-1", "execution-0"]
     text = background(harness.model.seen[0])
-    assert f"上一次执行 execution-1：{LOG._MISSING}" in text
-    assert "（写操作 op_old" in text, "the earliest pending write is still found"
+    shown = previews(text)
+    assert shown["execution-1"][0]["unusable_reason"] == "read_failed" and shown["execution-1"][1] == []
+    assert shown["execution-0"][1][0]["payload"]["operation_id"] == "op_old", (
+        "the earliest pending write is still found"
+    )
 
 
 class WorkspaceAccess:
@@ -795,6 +818,11 @@ async def test_formal_execution_needs_no_model_capacity(harness, overrides, reco
 # F_20 D-08: read_execution_record is declared for every Execution of the Spec and answers in a continuation.
 
 
+def test_the_rules_do_not_take_a_logged_reply_delta_for_a_delivered_one():
+    """The emitter records and queues a delta; the log is no proof that the user received it."""
+    assert "记录不代表用户已经收到" in CONTINUATION._RULES and "发给用户" not in CONTINUATION._RULES
+
+
 @pytest.mark.asyncio
 async def test_the_record_tool_is_declared_for_every_execution_of_a_continuing_spec(harness):
     """PA-18-V-20: tool definitions stay the same from the first Execution to its continuation."""
@@ -833,13 +861,11 @@ async def test_the_record_tool_reads_a_verified_execution_and_refuses_others(har
     window = harness.model.seen[2]
     results = [message for message in window if isinstance(message, ToolMessage)]
     page = json.loads(str(results[-2].content))
-    assert page["execution_id"] == "execution-0" and page["next_cursor"] is None
-    text = "\n".join(segment["text"] for segment in page["segments"])
-    assert text.startswith("上一次执行 execution-0（请求 request-1）的执行日志整理："), (
-        "the full summary, not the brief"
-    )
+    assert page["execution_id"] == "execution-0" and page["next"] is None
+    assert page["log"]["preview"] is False, "the full record, not the preview"
+    assert page["events"][0]["payload"]["operation_id"] == "op_old"
     assert "不在本次续做已核验的执行链中" in results[-1].content
-    assert host.reads.count("execution-0") == 2, "the tool checks the whole log again"
+    assert host.reads.count("execution-0") == 1, "the tool pages the snapshot the preview came from"
 
 
 @pytest.mark.asyncio
