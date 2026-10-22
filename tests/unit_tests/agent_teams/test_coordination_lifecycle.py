@@ -604,7 +604,7 @@ async def test_stop_closes_messager_transport():
 @pytest.mark.asyncio
 @pytest.mark.level1
 @pytest.mark.parametrize("action", ["stop", "pause"])
-@pytest.mark.parametrize("failure", ["health", "kill"])
+@pytest.mark.parametrize("failure", ["health", "kill", "cancelled"])
 @pytest.mark.parametrize("remains_alive", [False, True])
 async def test_member_cleanup_errors_preserve_liveness_and_safe_teardown(action, failure, remains_alive):
     from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
@@ -618,6 +618,8 @@ async def test_member_cleanup_errors_preserve_liveness_and_safe_teardown(action,
 
     async def kill():
         handle.is_alive = remains_alive
+        if failure == "cancelled":
+            raise asyncio.CancelledError("cleanup cancelled")
         if failure == "kill":
             raise RuntimeError("kill cleanup failed")
     handle.force_kill = AsyncMock(side_effect=kill)
@@ -625,10 +627,12 @@ async def test_member_cleanup_errors_preserve_liveness_and_safe_teardown(action,
     kernel = CoordinationKernel(host)
     kernel._lifecycle_state = "running"
 
-    if remains_alive:
-        with pytest.raises(RuntimeError):
+    if remains_alive or failure == "cancelled":
+        error = asyncio.CancelledError if failure == "cancelled" else RuntimeError
+        with pytest.raises(error):
             await getattr(kernel, action)()
-        assert host.spawn_manager.has_live_handle("member")
+        assert host.spawn_manager.has_live_handle("member") is remains_alive
+        assert ("member" in host.spawn_manager.spawned_handles) is remains_alive
         host.session_manager.release_session.assert_not_called()
         host.stream_controller.close_stream.assert_not_called()
         host.resources.harness.dispose.assert_not_awaited()
@@ -665,22 +669,35 @@ async def test_finalize_round_does_not_extract_memory():
 
 
 @pytest.mark.asyncio
-async def test_stop_drains_leader_and_members_concurrently():
+@pytest.mark.parametrize("failure", [None, "leader", "members"])
+async def test_stop_drains_leader_and_members_concurrently(failure):
     host = _make_kernel_host()
     leader, members = asyncio.Event(), asyncio.Event()
 
     async def drain_leader():
         leader.set()
         await members.wait()
+        if failure == "leader":
+            raise RuntimeError("leader drain failed")
 
     async def stop_members():
         members.set()
         await leader.wait()
+        if failure == "members":
+            raise RuntimeError("member drain failed")
 
     host.stream_controller.drain_agent_task.side_effect = drain_leader
     host.spawn_manager.shutdown_all_handles.side_effect = stop_members
     kernel = CoordinationKernel(host)
     kernel._lifecycle_state = "running"
+    if failure:
+        with pytest.raises(RuntimeError, match="drain failed"):
+            await asyncio.wait_for(kernel.stop(), 1)
+        assert kernel._lifecycle_state == "running"
+        host.session_manager.release_session.assert_not_called()
+        host.resources.harness.dispose.assert_not_awaited()
+        host.stream_controller.drain_agent_task.side_effect = None
+        host.spawn_manager.shutdown_all_handles.side_effect = None
     await asyncio.wait_for(kernel.stop(), 1)
     assert kernel._lifecycle_state == "stopped"
 
@@ -705,6 +722,104 @@ async def test_stop_also_drains_a_handle_registered_during_leader_cancellation()
     await asyncio.wait_for(kernel.stop(), 1)
     assert not host.spawn_manager.spawned_handles
     assert host.spawn_manager.shutdown_all_handles.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("late_member", [False, True])
+@pytest.mark.parametrize("metadata_error", ["roster", "status"])
+@pytest.mark.parametrize("member_status", [MemberStatus.READY, MemberStatus.SHUTDOWN_REQUESTED])
+async def test_stop_metadata_error_still_cancels_members_and_releases_resources(
+    late_member,
+    metadata_error,
+    member_status,
+):
+    from openjiuwen.agent_teams.agent.spawn_manager import SpawnManager
+    from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
+
+    host = _make_kernel_host(messager=SimpleNamespace(stop=AsyncMock()))
+    host.infra.team_backend = SimpleNamespace(
+        list_member_roster=AsyncMock(
+            side_effect=RuntimeError("roster unavailable") if metadata_error == "roster" else None,
+            return_value=[SimpleNamespace(member_name="member", status="busy")],
+        ),
+        db=SimpleNamespace(
+            member=SimpleNamespace(update_member_status=AsyncMock(side_effect=RuntimeError("write failed")))
+        ),
+    )
+    host.spawn_manager = SpawnManager(
+        state=SimpleNamespace(), configurator=SimpleNamespace(), team_agent_getter=lambda: host
+    )
+    memory = SimpleNamespace(extract_after_round=AsyncMock(), close=AsyncMock())
+    child = _make_kernel_host(memory, SimpleNamespace(stop=AsyncMock()))
+    child.member_name, child.role = "member", TeamRole.TEAMMATE
+    child.team_member = SimpleNamespace(status=AsyncMock(return_value=member_status), update_status=AsyncMock())
+    child_kernel = CoordinationKernel(child)
+    child_kernel._lifecycle_state = "running"
+    child.stop_coordination, child.pause_coordination = child_kernel.stop, child_kernel.pause
+    started, first_shutdown = asyncio.Event(), asyncio.Event()
+
+    async def run_member():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await child_kernel.finalize_round()
+            await TeamRuntimeManager.finalize_member(child)
+
+    task = asyncio.create_task(run_member())
+    await started.wait()
+    handle = InProcessSpawnHandle(_task=task, agent_ref=child)
+    if not late_member:
+        host.spawn_manager.spawned_handles["member"] = handle
+
+    async def drain_leader():
+        if late_member:
+            await first_shutdown.wait()
+            host.spawn_manager.spawned_handles["member"] = handle
+
+    shutdown = host.spawn_manager.shutdown_all_handles
+
+    async def stop_members():
+        await shutdown()
+        first_shutdown.set()
+
+    host.stream_controller.drain_agent_task.side_effect = drain_leader
+    host.spawn_manager.shutdown_all_handles = AsyncMock(side_effect=stop_members)
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    manager = TeamRuntimeManager()
+    entry = ActiveTeam(
+        team_name="test-team", current_session_id="s", agent=SimpleNamespace(stop_coordination=kernel.stop)
+    )
+    await manager.pool.add(entry)
+    try:
+        if metadata_error == "roster":
+            with pytest.raises(RuntimeError, match="roster unavailable"):
+                await asyncio.wait_for(manager.stop_team(team_name="test-team", session_id="s"), 1)
+        else:
+            assert await asyncio.wait_for(manager.stop_team(team_name="test-team", session_id="s"), 1)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert child_kernel._lifecycle_state == "stopped"
+    child.resources.harness.dispose.assert_awaited_once()
+    memory.close.assert_awaited_once()
+    child.infra.messager.stop.assert_awaited_once()
+    if member_status is MemberStatus.SHUTDOWN_REQUESTED:
+        child.team_member.update_status.assert_awaited_once_with(MemberStatus.SHUTDOWN)
+    else:
+        child.team_member.update_status.assert_not_awaited()
+    assert not host.spawn_manager.spawned_handles
+    assert kernel._lifecycle_state == "stopped"
+    assert host.spawn_manager.shutdown_all_handles.await_count == (2 if late_member else 1)
+    host.resources.harness.dispose.assert_awaited_once()
+    host.infra.messager.stop.assert_awaited_once()
+    host.session_manager.release_session.assert_called_once()
+    if metadata_error == "roster":
+        assert await manager.stop_team(team_name="test-team", session_id="s")
+    assert await manager.pool.get("test-team") is None
+    host.resources.harness.dispose.assert_awaited_once()
+    host.session_manager.release_session.assert_called_once()
 
 
 @pytest.mark.asyncio

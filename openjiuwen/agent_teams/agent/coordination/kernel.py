@@ -694,26 +694,29 @@ class CoordinationKernel:
         # Leader cancellation must not wait for pause's lifecycle lock: its
         # abort ACK releases a pause parked at an iteration boundary.
         t_cancel_join = time.perf_counter()
+        cleanup_errors: list[Exception] = []
         results = await asyncio.gather(
-            self.drain_agent_task(), self._stop_members(members_to_stop),
+            self.drain_agent_task(), self._stop_members(members_to_stop, cleanup_errors),
             return_exceptions=True,
         )
-        for result in results:
-            if isinstance(result, BaseException):
-                raise result
+        stop_errors = [result for result in results if isinstance(result, BaseException)]
         # An in-flight leader spawn may finish after the first handle snapshot.
-        # The leader has now exited, so drain those late handles before releasing resources.
-        if host.spawn_manager.spawned_handles:
-            if host.role == TeamRole.LEADER:
-                await self._mark_live_teammates(MemberStatus.STOPPED)
-            await host.spawn_manager.shutdown_all_handles()
+        # Attempt their cancellation even if another drain failed.
+        if not isinstance(results[1], BaseException) and host.spawn_manager.spawned_handles:
+            try:
+                await self._stop_members(set(host.spawn_manager.spawned_handles), cleanup_errors)
+            except Exception as exc:
+                stop_errors.append(exc)
+        # A failed drain cannot prove quiescence. Retain the runtime and its
+        # dependencies for retry; auxiliary metadata errors do not prevent teardown.
+        if stop_errors:
+            raise stop_errors[0]
         if time_stop:
             team_logger.info(
                 "[{}] lifecycle_timing stop cancel_and_join duration_ms={:.0f}",
                 member,
                 (time.perf_counter() - t_cancel_join) * 1000,
             )
-        cleanup_errors: list[Exception] = []
         try:
             host.persist_allocator_state()
         except Exception as exc:
@@ -762,7 +765,7 @@ class CoordinationKernel:
         if cleanup_errors:
             raise cleanup_errors[0]
 
-    async def _stop_members(self, members_to_stop: set[str]) -> None:
+    async def _stop_members(self, members_to_stop: set[str], cleanup_errors: list[Exception]) -> None:
         async with self._lifecycle_lock:
             # A pause rollback may have been awaiting dispatcher activation
             # when stop took ownership. Close admission again after it exits.
@@ -772,10 +775,14 @@ class CoordinationKernel:
                 self._scheduler.deactivate()
             await self._host.spawn_manager.cancel_recovery_tasks()
             if self._host.role == TeamRole.LEADER:
-                await self._mark_live_teammates(
-                    MemberStatus.STOPPED,
-                    spawned_members=members_to_stop | set(self._host.spawn_manager.spawned_handles),
-                )
+                try:
+                    await self._mark_live_teammates(
+                        MemberStatus.STOPPED,
+                        spawned_members=members_to_stop | set(self._host.spawn_manager.spawned_handles),
+                    )
+                except Exception as exc:
+                    team_logger.warning("[{}] member stop status persistence failed: {}", self._host.member_name, exc)
+                    cleanup_errors.append(exc)
             if "members" not in self._completed_cleanup or self._host.spawn_manager.spawned_handles:
                 await self._host.spawn_manager.shutdown_all_handles()
                 self._completed_cleanup.add("members")

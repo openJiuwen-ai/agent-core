@@ -420,6 +420,12 @@ class TeamRuntimeManager:
                 if member is not None:
                     await member.update_status(MemberStatus.SHUTDOWN)
                 return
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                # A cancelled member shell will not resume. Its resources must
+                # close even when the leader could not persist STOPPED/PAUSED.
+                await agent.stop_coordination()
+                return
             team_logger.info(
                 "finalize_member: pausing team member {}; marking READY for next assignment",
                 member_name,

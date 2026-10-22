@@ -236,20 +236,21 @@ class SpawnManager:
                 agent_ref.stream_controller.remove_chunk_observer(forward)
             handle.chunk_forward = None
         try:
-            await handle.stop_health_check()
-        except Exception as exc:
-            team_logger.warning("Error stopping health check for teammate {}: {}", member_name, exc)
-        try:
+            try:
+                await handle.stop_health_check()
+            except Exception as exc:
+                team_logger.warning("Error stopping health check for teammate {}: {}", member_name, exc)
             if handle.is_alive:
                 await handle.force_kill()
         except Exception as e:
             team_logger.error("Error cleaning up teammate {}: {}", member_name, e)
             if handle.is_alive:
                 raise
+        finally:
+            if not handle.is_alive and self.spawned_handles.get(member_name) is handle:
+                self.spawned_handles.pop(member_name, None)
         if handle.is_alive:
             raise RuntimeError(f"Teammate {member_name} is still running after cleanup")
-        if self.spawned_handles.get(member_name) is handle:
-            self.spawned_handles.pop(member_name, None)
 
     async def restart_teammate(self, member_name: str, max_retries: int = 3) -> bool:
         if member_name in self._spawning:
