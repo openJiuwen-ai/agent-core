@@ -553,3 +553,56 @@ async def test_setup_agent_builds_teammate_member_handle() -> None:
     handle = teammate._state.team_member
     assert handle is not None
     assert handle.member_name == "be-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_failure_wiring_end_to_end() -> None:
+    """贯通回归：回调接线 → state latch → StreamController 收尾补帧。
+
+    目标防的回归：configurator 没把 on_team_build_failed 传进 TeamBackend、
+    接到了另一个 state 实例、字段名写错——这类断裂会让"建团失败可见化"
+    整体失效，而 latch 两端各自的单测（工具回调触发 / 手工置位 latch 后
+    补帧）仍然全绿。本用例全程真实对象，不手工置位 latch。
+    """
+    import asyncio
+
+    from openjiuwen.agent_teams.agent.stream_controller import _detect_task_failed
+
+    team_spec = TeamSpec(
+        team_name="delivery",
+        display_name="delivery",
+        leader_member_name="leader",
+    )
+    spec = TeamAgentSpec(agents=_dummy_agents(), team_name="delivery")
+    ctx = TeamRuntimeContext(
+        role=TeamRole.LEADER,
+        member_name="leader",
+        desc="leader",
+        team_spec=team_spec,
+    )
+    leader = TeamAgent(AgentCard(id="leader", name="leader", description="t")).configure(spec, ctx)
+
+    backend = leader._configurator.team_backend
+    # 接线身份：TeamBackend 持有的回调确实来自 TeamAgent（而非丢失/接错）
+    assert backend._on_team_build_failed is not None
+
+    # 回调触发（不经工具层，直接驱动 TeamBackend 的通知口）→ latch 置位
+    await backend.notify_build_failed("RuntimeError: Failed to create team delivery")
+    assert leader._state.team_build_error == "RuntimeError: Failed to create team delivery"
+
+    # controller 读的是同一个 state 实例（接错实例此处即暴露）
+    assert leader._stream_controller._state is leader._state
+
+    # 收尾对账补帧：IDLE 时从 stream_queue 拿到 task_failed 帧且 latch 清空
+    # （未初始化 DB 的环境下先把 team_member 句柄摘掉——_on_idle_settled 的
+    # SHUTDOWN_REQUESTED 检查会读库，与本用例的接线断言无关）
+    leader._state.team_member = None
+    leader._stream_controller.stream_queue = asyncio.Queue()
+    await leader._stream_controller._on_idle_settled()
+    chunk = leader._stream_controller.stream_queue.get_nowait()
+    assert _detect_task_failed(chunk) is not None
+    code, text = _detect_task_failed(chunk)
+    assert code == 132001
+    assert "Failed to create team delivery" in text
+    assert leader._state.team_build_error is None

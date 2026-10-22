@@ -253,6 +253,8 @@ class AgentConfigurator:
         on_before_team_cleaned=None,
         on_team_cleaned=None,
         on_team_built=None,
+        on_team_build_failed=None,
+        on_team_build_recovered=None,
     ) -> None:
         """Phase 1: set spec/context, create messager, workspace manager, prepare team backend."""
         agent_spec = self.resolve_agent_spec(spec, ctx.role, ctx.member_name)
@@ -294,6 +296,8 @@ class AgentConfigurator:
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
+            on_team_build_failed=on_team_build_failed,
+            on_team_build_recovered=on_team_build_recovered,
         )
 
         if ctx.role == TeamRole.LEADER and spec.worktree and spec.worktree.enabled:
@@ -833,6 +837,8 @@ class AgentConfigurator:
         on_before_team_cleaned=None,
         on_team_cleaned=None,
         on_team_built=None,
+        on_team_build_failed=None,
+        on_team_build_recovered=None,
     ) -> TeamBackend:
         """Construct the TeamBackend and register cleanup paths.
 
@@ -852,6 +858,9 @@ class AgentConfigurator:
             on_team_built: Optional async callback threaded into the
                 ``TeamBackend`` so the hosting ``TeamAgent`` can persist
                 DB lifecycle state after ``build_team`` succeeds.
+            on_team_build_failed: Optional async callback threaded into
+                the ``TeamBackend`` so the hosting ``TeamAgent`` can latch
+                a ``build_team`` failure for round-end surfacing.
         """
         from openjiuwen.agent_teams.schema.status import MemberMode
         from openjiuwen.agent_teams.spawn.shared_resources import get_shared_db
@@ -880,6 +889,8 @@ class AgentConfigurator:
             on_before_team_cleaned=on_before_team_cleaned,
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
+            on_team_build_failed=on_team_build_failed,
+            on_team_build_recovered=on_team_build_recovered,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
             member_reviver=self._on_teammate_revive,
             on_member_started=self._on_teammate_created,
