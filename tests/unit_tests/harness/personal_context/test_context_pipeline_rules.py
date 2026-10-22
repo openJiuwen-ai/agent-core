@@ -857,8 +857,7 @@ async def test_two_batches_share_run_inputs_and_finish_publishes_once(
             isinstance(value, FetchBatch) for state in service._run_states.values() for value in state.values()
         )
 
-        # Finish validates and publishes real files; allow for slower CI disks.
-        await _put_event(queue, "finish", "local", "run-shared", None, timeout=10)
+        await _put_event(queue, "finish", "local", "run-shared", None)
 
         assert published == [("local", "run-shared")]
         assert (tmp_path / "workspace" / "context" / "description.md").is_file()
