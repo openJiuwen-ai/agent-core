@@ -859,6 +859,16 @@ class TeamRuntimeManager:
                     session_id=entry.current_session_id,
                 )
 
+        async def _remove_team_directory() -> None:
+            """Best-effort removal shared by fresh and retried deletions."""
+            team_dir = team_home(team_name)
+            if team_dir.is_dir():
+                try:
+                    await asyncio.to_thread(shutil.rmtree, str(team_dir))
+                    team_logger.info("Removed team directory: {}", team_dir)
+                except Exception as exc:
+                    team_logger.warning("Failed to remove team directory {}: {}", team_dir, exc)
+
         checkpointer = CheckpointerFactory.get_checkpointer()
         if session_ids:
             existing_session_ids: list[str] = []
@@ -872,6 +882,7 @@ class TeamRuntimeManager:
                     session_ids,
                     type(checkpointer).__name__,
                 )
+                await _remove_team_directory()
                 return True
         else:
             existing_session_ids = []
@@ -914,13 +925,7 @@ class TeamRuntimeManager:
         # This covers the case where the caller has already stopped the runtime
         # (removing the pool entry) before calling delete_team, so we cannot
         # access TeamBackend._remove_cleanup_paths().
-        team_dir = team_home(team_name)
-        if team_dir.is_dir():
-            try:
-                await asyncio.to_thread(shutil.rmtree, str(team_dir))
-                team_logger.info("Removed team directory: {}", team_dir)
-            except Exception as exc:
-                team_logger.warning("Failed to remove team directory {}: {}", team_dir, exc)
+        await _remove_team_directory()
 
         # Reaching the desired terminal state is success even when a prior
         # attempt already removed the team_info row.  The cleanup above is
