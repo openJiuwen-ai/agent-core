@@ -185,4 +185,5 @@ def build_skills_section(
         name=SectionName.SKILLS,
         content={language: content},
         priority=40,
+        category="skills",
     )

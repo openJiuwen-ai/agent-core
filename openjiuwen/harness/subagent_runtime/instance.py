@@ -66,6 +66,7 @@ class SubagentInstance:
         on_status_changed: Callable[[SubagentStatus], Awaitable[None]] | None = None,
         on_turn_stream_start: Callable[[UserInputOp], Awaitable[None]] | None = None,
         on_turn_stream_end: Callable[[UserInputOp, TurnOutputAggregator], Awaitable[None]] | None = None,
+        on_turn_released: Callable[[], None] | None = None,
     ) -> None:
         self.subagent_id = subagent_id
         self.subagent_type = subagent_type
@@ -95,6 +96,7 @@ class SubagentInstance:
         self._on_status_changed = on_status_changed
         self._on_turn_stream_start = on_turn_stream_start
         self._on_turn_stream_end = on_turn_stream_end
+        self._on_turn_released = on_turn_released
 
         self._ops: asyncio.Queue[SubagentOp] = asyncio.Queue()
         self._worker_task: asyncio.Task[None] | None = None
@@ -229,6 +231,10 @@ class SubagentInstance:
                     self._current_run = None
         finally:
             self._turn_claimed = False
+            # Status callbacks fire while the turn is still claimed; this is the
+            # first point where has_active_turn() is False and the slot can be reused.
+            if self._on_turn_released is not None:
+                self._on_turn_released()
         if propagate_cancel:
             raise asyncio.CancelledError()
 

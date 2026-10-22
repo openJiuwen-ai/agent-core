@@ -32,6 +32,7 @@ def _resolve_pyright_command() -> tuple[str, list[str]] | None:
             text=True,
             encoding="utf-8",
             errors="replace",
+            timeout=8,
         )
         if result.returncode == 0:
             lines = (result.stdout or "").splitlines()
@@ -107,14 +108,8 @@ def _spawn_python(root: str) -> SpawnHandle | None:
     ]
     for venv_path in [p for p in potential_venv_paths if p]:
         is_windows = os.name == "nt"
-        python_path = (
-            Path(venv_path, "Scripts" if is_windows else "bin", "python").as_posix()
-        )
-        candidate = (
-            python_path.replace("/bin/", "/Scripts/")
-            if is_windows
-            else python_path
-        )
+        python_path = Path(venv_path, "Scripts" if is_windows else "bin", "python").as_posix()
+        candidate = python_path.replace("/bin/", "/Scripts/") if is_windows else python_path
         if Path(candidate).exists():
             initialization_options["pythonPath"] = python_path
             break

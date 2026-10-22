@@ -45,6 +45,9 @@ dependencies = [
     # MCP server
     "fastmcp>=2.14.2,<3.0",
     "mcp>=1.26.0",
+    # Shell command parsing
+    "tree-sitter>=0.25.0,<0.26.0",
+    "tree-sitter-bash>=0.25.0,<0.26.0",
     # Document processing
     "beautifulsoup4>=4.12.0",
     "trafilatura>=1.6.0",

@@ -25,6 +25,8 @@ from openjiuwen.harness.security.patterns import contains_path
 from openjiuwen.harness.security.tiered_policy import (
     _PATH_TOOLS,
     _iter_path_strings,
+)
+from openjiuwen.harness.security.tiered_policy import (
     strictest as tiered_strictest,
 )
 
@@ -504,6 +506,13 @@ def extract_paths_legacy(
             workdir_resolved = workspace
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
         paths = _extract_paths_from_command(cmd, workdir_resolved)
+        from openjiuwen.harness.security.literal_shell import parse_literal_shell
+
+        if parse_literal_shell(cmd) is not None:
+            from openjiuwen.harness.security.files.extract import extract_shell_path_accesses
+
+            # Supplement the legacy checks; never remove previously guarded paths.
+            paths.extend(p for p, _ in extract_shell_path_accesses(cmd, workdir_resolved))
     elif tool_name in _PATH_TOOLS:
         for s in _iter_path_strings(tool_name, tool_args):
             raw = s.strip().strip('"').strip("'")

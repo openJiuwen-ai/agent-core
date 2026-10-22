@@ -26,10 +26,14 @@ class PromptSection:
         name: str,
         content: Dict[str, str],
         priority: int = 100,
+        category: Optional[str] = None,
     ):
         self.name = name
         self.content: Dict[str, str] = dict(content)
         self.priority = priority
+        # Optional context-usage.v1 bucket (e.g. "skills"). Analyzers also
+        # fall back to the section name when this is unset.
+        self.category = category
 
     def render(self, language: str = "cn") -> str:
         if language in self.content:

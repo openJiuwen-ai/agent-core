@@ -249,7 +249,11 @@ STRINGS: dict[str, str] = {
     "create_task.tasks": "Task list — wrap single tasks in an array too",
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
-    "create_task.task.content": "Task details including goals and acceptance criteria",
+    "create_task.task.content": (
+        "Task details including goals and acceptance criteria; when dispatching a "
+        "document-parsing task for a file you already read via read_file, carry over "
+        "the embedded-image info (count and file names) into the task content"
+    ),
     # Both create_task variants expose assignee_display_name. Autonomous treats
     # it as optional; scheduled requires it. DB still stores member_name.
     "create_task.task.assignee_display_name": (

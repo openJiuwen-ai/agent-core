@@ -26,6 +26,13 @@ def test_wait_card_exempts_resilience_timeout() -> None:
     assert AbilityManager._resolve_call_timeout(wait_tool.card) is None
 
 
+def test_spawn_card_exempts_resilience_timeout() -> None:
+    tools = build_subagent_tools(SimpleNamespace())
+    spawn_tool = next(tool for tool in tools if tool.card.name == "subagent_spawn")
+    assert spawn_tool.card.properties["resilience"]["timeout_s"] is None
+    assert AbilityManager._resolve_call_timeout(spawn_tool.card) is None
+
+
 @pytest.mark.asyncio
 async def test_wait_tool_returns_timed_out_above_turn_default() -> None:
     wait_tool = _wait_tool()

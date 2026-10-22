@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any, Dict, List
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -26,6 +27,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
+from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import (
     DeepAgentConfig,
@@ -41,6 +43,9 @@ from openjiuwen.harness.task_loop.task_loop_event_executor import (
 )
 from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
+)
+from openjiuwen.harness.task_loop.task_loop_controller import (
+    TaskLoopController,
 )
 
 
@@ -389,3 +394,65 @@ async def test_wait_completion_propagates_cancelled_error() -> None:
         await wait_task
 
     assert handler.last_result == {"error": "cancelled"}
+
+
+@pytest.mark.asyncio
+async def test_wait_completion_timeout_cancels_task_and_returns_error() -> None:
+    """A timed-out round is visible to callers and cannot keep running."""
+    agent = _make_agent()
+    handler = TaskLoopEventHandler(agent)
+    handler._task_manager = FakeTaskManager()
+    handler._task_scheduler = AsyncMock()
+    handler._task_scheduler.cancel_task.return_value = True
+
+    event = InputEvent.from_user_input("slow task")
+    session = FakeSession()
+    inputs = EventHandlerInput.model_construct(
+        event=event, session=session
+    )
+    round_id = handler.prepare_round()
+    event.metadata = event.metadata or {}
+    event.metadata["_handler_round_id"] = round_id
+
+    ack = await handler.handle_input(inputs)
+    result = await handler.wait_completion(timeout=0.01)
+
+    assert result == {
+        "output": "Task loop round timed out after 0.01 seconds.",
+        "result_type": "error",
+        "error": "completion_timeout",
+    }
+    handler._task_scheduler.cancel_task.assert_awaited_once_with(
+        ack["task_id"]
+    )
+    assert handler.last_result is result
+
+
+@pytest.mark.asyncio
+async def test_submit_round_waits_until_input_handler_finishes() -> None:
+    """The completion timeout must start only after task registration."""
+    controller = TaskLoopController()
+    handler = TaskLoopEventHandler(_make_agent())
+    handler._task_manager = FakeTaskManager()
+    controller._card = AgentCard(name="controller", description="t")
+    controller._event_handler = handler
+
+    async def publish_event(_agent_id, session, event) -> None:
+        await handler.handle_input(
+            EventHandlerInput(event=event, session=session)
+        )
+
+    controller._event_queue = AsyncMock()
+    controller._event_queue.publish_event.side_effect = publish_event
+    await controller.submit_round(
+        create_agent_session(
+            session_id="registered",
+            card=AgentCard(name="test", description="t"),
+        ),
+        "registered",
+    )
+
+    assert handler._round_task_ids == {
+        handler._round_id: handler._task_manager.added_tasks[0].task_id
+    }
+    controller._event_queue.publish_event.assert_awaited_once()

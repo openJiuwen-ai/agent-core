@@ -77,6 +77,7 @@ MODEL_DEFAULT_CONTEXT_WINDOW_TOKENS: Dict[str, int] = {
     # DeepSeek
     "deepseek-v4-pro": 1048576,
     "deepseek-v4-flash": 1048576,
+    "deepseek-v4.1-flash": 1048576,
     "deepseek-v3.2": 163840,
     "deepseek-v3.1-terminus": 163840,
     "deepseek-r1": 163840,

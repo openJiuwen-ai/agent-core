@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import urlparse
@@ -101,6 +103,25 @@ def _extract_response_text(response: Any) -> str:
     return str(content).strip()
 
 
+def _vision_default_headers_from_env() -> Optional[Dict[str, str]]:
+    """Auth headers injected by the host relay via VISION_DEFAULT_HEADERS (JSON).
+
+    Session-mode accounts authenticate with a custom Authorization header
+    instead of the placeholder bearer key; the OpenAI client merges
+    default_headers over its built-in Authorization, so the real header wins.
+    """
+    raw = (os.getenv("VISION_DEFAULT_HEADERS") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or not parsed:
+        return None
+    return {str(key): str(value) for key, value in parsed.items()}
+
+
 def _invoke_chat_completion(
     config: VisionModelConfig,
     prompt: str,
@@ -111,7 +132,11 @@ def _invoke_chat_completion(
             "Vision model config missing api_key."
         )
 
-    client = OpenAI(api_key=config.api_key, base_url=config.base_url)
+    client = OpenAI(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        default_headers=config.default_headers or _vision_default_headers_from_env(),
+    )
     response = client.chat.completions.create(
         model=config.model,
         messages=[

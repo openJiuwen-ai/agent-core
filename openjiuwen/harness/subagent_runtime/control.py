@@ -72,6 +72,7 @@ def _runtime_sticky_subagent_type(subagent_type: str) -> bool:
 
 
 _TASK_DESCRIPTION_MAX_LEN = 2000
+_SLOT_RECHECK_INTERVAL_S = 1.0
 
 
 def _cursor_start_index(turns: list[SubagentTurn], cursor: str | None) -> int:
@@ -132,6 +133,10 @@ class SubagentControl:
         self._registry = SubagentRegistry(self._config)
         self._semaphore = asyncio.Semaphore(self._config.max_concurrent_running)
         self._closed_records: dict[str, SubagentRecord] = {}
+        self._slot_waiters: list[asyncio.Future[None]] = []
+        self._evicted_finals: dict[str, SubagentStatus] = {}
+        self._claimed_sids: set[str] = set()
+        self._shutting_down = False
         self._turns: dict[str, deque[SubagentTurn]] = {}
         self._turn_seq: dict[str, int] = {}
         self._activities: dict[str, deque[SubagentActivity]] = {}
@@ -156,6 +161,7 @@ class SubagentControl:
             activity_handler=self._handle_activity if self._config.enable_activity_stream else None,
             transcript_handler=(self._handle_transcript_message if self._config.enable_transcript_stream else None),
             chunk_handler=self._on_child_chunk,
+            turn_released_handler=lambda _sid: self._notify_slot_waiters(),
         )
 
     async def _on_child_chunk(self, subagent_id: str, chunk: Any) -> None:
@@ -184,51 +190,53 @@ class SubagentControl:
             subagent_type,
             sticky=sticky,
         )
-        existing = self._manager.find(sid)
-        if existing is not None and not existing.is_closed():
-            raise build_subagent_runtime_error(
-                f"subagent already live: {sid}; use subagent_wait to collect its result",
-            )
-
-        task_id = new_task_id()
-        resolved_name, resolved_role = self._resolve_spawn_presentation(
-            subagent_type,
-            display_name,
-            role,
-        )
-        task_description = self._truncate_task_description(query)
-        reservation = await self._acquire_slot()
-
+        self._claim_sid(sid, f"subagent already live: {sid}; use subagent_wait to collect its result")
         try:
-            instance = await self._manager.create(
-                subagent_type=subagent_type,
-                subagent_id=sid,
-                parent_session_id=self._parent_session_id,
-                display_name=resolved_name,
-                role=resolved_role,
-                browser_capabilities=browser_capabilities,
-                create_options=options,
+            task_id = new_task_id()
+            resolved_name, resolved_role = self._resolve_spawn_presentation(
+                subagent_type,
+                display_name,
+                role,
             )
-            reservation.commit(
-                SubagentMetadataBuildParams(
-                    subagent_id=sid,
+            task_description = self._truncate_task_description(query)
+            reservation = await self._acquire_slot()
+
+            try:
+                instance = await self._manager.create(
                     subagent_type=subagent_type,
-                    task_id=task_id,
+                    subagent_id=sid,
+                    parent_session_id=self._parent_session_id,
                     display_name=resolved_name,
                     role=resolved_role,
-                    task_description=task_description,
+                    browser_capabilities=browser_capabilities,
                     create_options=options,
-                ).to_metadata(parent_session_id=self._parent_session_id),
-            )
-        except Exception:
-            reservation.rollback()
-            raise
+                )
+                reservation.commit(
+                    SubagentMetadataBuildParams(
+                        subagent_id=sid,
+                        subagent_type=subagent_type,
+                        task_id=task_id,
+                        display_name=resolved_name,
+                        role=resolved_role,
+                        task_description=task_description,
+                        create_options=options,
+                    ).to_metadata(parent_session_id=self._parent_session_id),
+                )
+            except BaseException:
+                reservation.rollback()
+                self._notify_slot_waiters()
+                raise
+        finally:
+            self._claimed_sids.discard(sid)
+        await self._discard_if_shutting_down(sid)
+        self._evicted_finals.pop(sid, None)
 
         try:
             await instance.enqueue(UserInputOp(query=query, task_id=task_id))
         except Exception:
             await self._manager.remove(sid, reason="spawn_failed")
             self._registry.release(sid)
+            self._notify_slot_waiters()
             raise
 
         self._registry.touch(sid)
@@ -256,7 +264,7 @@ class SubagentControl:
         for sid in targets:
             instance = self._manager.find(sid)
             if instance is None:
-                statuses[sid] = SubagentStatus.not_found()
+                statuses[sid] = self._evicted_finals.get(sid) or SubagentStatus.not_found()
                 continue
             self._registry.touch(sid)
             receiver = instance.subscribe_status()
@@ -297,9 +305,10 @@ class SubagentControl:
             if statuses[sid].kind is not SubagentStatusKind.COMPLETED:
                 continue
             instance = self._manager.find(sid)
-            if instance is None or not instance.last_output:
+            output = instance.last_output if instance is not None else statuses[sid].message
+            if not output:
                 continue
-            results[sid] = instance.last_output
+            results[sid] = output
         output_files: dict[str, str] = {}
         for sid in targets:
             if statuses[sid].kind is not SubagentStatusKind.COMPLETED:
@@ -476,24 +485,31 @@ class SubagentControl:
         if not await checkpointer.session_exists(subagent_id):
             raise_subagent_not_found(subagent_id)
 
-        reservation = await self._acquire_slot()
+        self._claim_sid(subagent_id, f"subagent is already live or being restored: {subagent_id}")
         try:
-            await self._manager.restore(
-                subagent_id=subagent_id,
-                subagent_type=record.subagent_type,
-                parent_session_id=self._parent_session_id,
-                display_name=record.display_name,
-                role=record.role,
-                create_options=record.create_options,
-            )
-            reservation.commit(
-                self._build_metadata_from_record(record, task_id=None),
-            )
-        except Exception:
-            reservation.rollback()
-            raise
+            reservation = await self._acquire_slot()
+            try:
+                await self._manager.restore(
+                    subagent_id=subagent_id,
+                    subagent_type=record.subagent_type,
+                    parent_session_id=self._parent_session_id,
+                    display_name=record.display_name,
+                    role=record.role,
+                    create_options=record.create_options,
+                )
+                reservation.commit(
+                    self._build_metadata_from_record(record, task_id=None),
+                )
+            except BaseException:
+                reservation.rollback()
+                self._notify_slot_waiters()
+                raise
+        finally:
+            self._claimed_sids.discard(subagent_id)
+        await self._discard_if_shutting_down(subagent_id)
 
         self._closed_records.pop(subagent_id, None)
+        self._evicted_finals.pop(subagent_id, None)
         restored = self._manager.find(subagent_id)
         if restored is None:
             return ResumeResult(status=SubagentStatus.pending_init(), restored=True)
@@ -512,6 +528,8 @@ class SubagentControl:
 
     async def cancel_all(self, reason: str = "parent_ended") -> list[str]:
         """Force-close every live subagent regardless of RUNNING state."""
+        # The control is being torn down: spawns still waiting for a slot must fail, not refill it.
+        self._shutting_down = True
         closed: list[str] = []
         for sid in list(self._manager.list_ids()):
             try:
@@ -520,6 +538,7 @@ class SubagentControl:
                 logger.warning("[SubagentControl] cancel_all failed: sid=%s", sid)
                 self._registry.release(sid)
             closed.append(sid)
+        self._notify_slot_waiters()
         await self.persist()
         return closed
 
@@ -716,27 +735,92 @@ class SubagentControl:
         metadata = self._registry.find_metadata(subagent_id)
         if metadata is not None and metadata.closed_at_ms is None:
             metadata.closed_at_ms = time.time() * 1000
+        if reason == "evicted":
+            self._remember_evicted_final(subagent_id)
         await self._manager.remove(subagent_id, reason=reason)
         if metadata is not None:
             self._store_closed_record(metadata, close_reason=reason)
         self._registry.release(subagent_id)
+        self._notify_slot_waiters()
         if persist:
             await self.persist()
         else:
             self.flush()
 
+    def _remember_evicted_final(self, subagent_id: str) -> None:
+        instance = self._manager.find(subagent_id)
+        status = instance.status.current() if instance is not None else None
+        if status is None or not status.is_final():
+            return
+        self._evicted_finals.pop(subagent_id, None)
+        self._evicted_finals[subagent_id] = status
+        limit = max_persisted_records(self._config.max_subagents)
+        while len(self._evicted_finals) > limit:
+            self._evicted_finals.pop(next(iter(self._evicted_finals)))
+
     async def _acquire_slot(self) -> SpawnReservation:
+        loop = asyncio.get_running_loop()
+        deadline: float | None = None
+        while True:
+            if self._shutting_down:
+                raise build_subagent_runtime_error("parent session ended; subagent spawn cancelled")
+            try:
+                return self._registry.reserve_slot()
+            except BaseError:
+                if not self._config.enable_lru_eviction:
+                    raise
+                if await self._evict_one_idle():
+                    continue
+                if deadline is None:
+                    deadline = loop.time() + max(self._config.spawn_slot_wait_timeout_s, 0.0)
+                    if deadline > loop.time():
+                        logger.info(
+                            "[SubagentControl] all %d subagent slots busy; waiting up to %.0fs for one",
+                            self._config.max_subagents,
+                            self._config.spawn_slot_wait_timeout_s,
+                        )
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    raise
+                await self._wait_slot_change(min(remaining, _SLOT_RECHECK_INTERVAL_S))
+
+    def _claim_sid(self, sid: str, conflict_message: str) -> None:
+        existing = self._manager.find(sid)
+        if sid in self._claimed_sids or (existing is not None and not existing.is_closed()):
+            raise build_subagent_runtime_error(conflict_message)
+        self._claimed_sids.add(sid)
+
+    async def _discard_if_shutting_down(self, sid: str) -> None:
+        if not self._shutting_down:
+            return
+        await self._manager.remove(sid, reason="parent_ended")
+        self._registry.release(sid)
+        raise build_subagent_runtime_error("parent session ended; subagent spawn cancelled")
+
+    async def _evict_one_idle(self) -> bool:
+        for sid in self._registry.lru_candidates():
+            instance = self._manager.find(sid)
+            if instance is not None and instance.is_evictable() and not instance.has_active_turn():
+                await self.close(sid, reason="evicted")
+                return True
+        return False
+
+    async def _wait_slot_change(self, timeout_s: float) -> None:
+        waiter: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._slot_waiters.append(waiter)
         try:
-            return self._registry.reserve_slot()
-        except BaseError:
-            if not self._config.enable_lru_eviction:
-                raise
-            for sid in self._registry.lru_candidates():
-                instance = self._manager.find(sid)
-                if instance is not None and instance.is_evictable():
-                    await self.close(sid, reason="evicted")
-                    return self._registry.reserve_slot()
-            raise
+            await asyncio.wait_for(waiter, timeout_s)
+        except TimeoutError:
+            pass
+        finally:
+            if waiter in self._slot_waiters:
+                self._slot_waiters.remove(waiter)
+
+    def _notify_slot_waiters(self) -> None:
+        waiters, self._slot_waiters = self._slot_waiters, []
+        for waiter in waiters:
+            if not waiter.done():
+                waiter.set_result(None)
 
     def _build_metadata_from_record(
         self,
@@ -1128,6 +1212,7 @@ class SubagentControl:
             self._append_turn(subagent_id, metadata, instance, status)
         await self.emit_status_update(subagent_id)
         self.flush()
+        self._notify_slot_waiters()
 
     def _resolve_final(
         self,

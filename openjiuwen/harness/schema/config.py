@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -59,6 +60,9 @@ class VisionModelConfig:
     base_url: str = DEFAULT_OPENAI_BASE_URL
     model: str = DEFAULT_OPENAI_VISION_MODEL
     max_retries: int = 3
+    #: Optional auth headers (e.g. session-mode accounts that authenticate via a
+    #: custom Authorization header instead of the bearer api_key).
+    default_headers: Optional[Dict[str, str]] = None
 
     @classmethod
     def from_env(cls) -> "VisionModelConfig":
@@ -84,11 +88,22 @@ class VisionModelConfig:
             else:
                 model = DEFAULT_OPENAI_VISION_MODEL
 
+        headers_raw = (os.getenv("VISION_DEFAULT_HEADERS") or "").strip()
+        default_headers: Optional[Dict[str, str]] = None
+        if headers_raw:
+            try:
+                parsed_headers = json.loads(headers_raw)
+                if isinstance(parsed_headers, dict) and parsed_headers:
+                    default_headers = {str(k): str(v) for k, v in parsed_headers.items()}
+            except (ValueError, TypeError):
+                default_headers = None
+
         return cls(
             api_key=api_key,
             base_url=base_url,
             model=model,
             max_retries=_parse_int_from_env("VISION_MAX_RETRIES", 3),
+            default_headers=default_headers,
         )
 
 
@@ -217,6 +232,7 @@ class DeepAgentConfig:
         completion_timeout: Max seconds to wait for a
             single task-loop iteration to complete.
             Used by the outer loop's wait_completion().
+            None means no limit.
         enable_plan_mode: Whether to enable plan mode.
         permissions: Tool permission policy dict (enabled, tools, rules, …); when
             enabled, DeepAgent mounts PermissionInterruptRail automatically.
@@ -258,7 +274,7 @@ class DeepAgentConfig:
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
     auto_create_workspace: bool = True
-    completion_timeout: float = 600.0
+    completion_timeout: Optional[float] = 600.0
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None

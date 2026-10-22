@@ -20,6 +20,7 @@ from openjiuwen.harness.security.files.registry import (
     FileToolSpec,
     lookup_file_tool_specs,
 )
+from openjiuwen.harness.security.literal_shell import is_script_interpreter, parse_literal_shell
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 from openjiuwen.harness.security.tiered_policy import _PATH_TOOLS, _iter_path_strings
 
@@ -200,6 +201,25 @@ def extract_shell_path_accesses(
         return []
     base = Path(workdir).resolve()
     results: list[tuple[Path, FileAction]] = []
+
+    literal = parse_literal_shell(command)
+    if literal is not None:
+        # Use the same complete command boundaries as the automatic allow path.
+        # Interpreter scripts must be checked even when their name has no slash.
+        for call in literal.commands:
+            executable = _basename_lower(call.argv[0])
+            if executable == "cd":
+                target = Path(call.argv[-1])
+                base = (target if target.is_absolute() else base / target).resolve()
+                results.append((base, "read"))
+                continue
+            accesses, _ = _path_aware_one_segment(call.text, base)
+            results.extend(accesses)
+            if is_script_interpreter(executable):
+                target = Path(call.argv[1])
+                target = (target if target.is_absolute() else base / target).resolve()
+                results.append((target, "exec"))
+        return results
 
     def _resolve(tok: str) -> Path | None:
         tok = tok.strip().strip('"').strip("'")
