@@ -24,7 +24,7 @@ def get_process_org_manager(
     messager: Messager | None = None,
     session_id: str | None = None,
 ) -> TeamOrganizationManager:
-    """Return the process-local manager for ``organization_id`` and DB handle."""
+    """Reuse a manager by DB key, organization and session, attaching a missing transport."""
 
     key = (_db_registry_key(db), organization_id, session_id)
     manager = _MANAGERS.get(key)
@@ -36,6 +36,12 @@ def get_process_org_manager(
             session_id=session_id,
         )
         _MANAGERS[key] = manager
+    elif manager.messager is None and messager is not None:
+        # A read-only caller may have populated the registry before activation.
+        # Preserve existing service references held by tools and team backends.
+        manager.messager = messager
+        manager.task_pool.messager = messager
+        manager.message_service.messager = messager
     return manager
 
 
