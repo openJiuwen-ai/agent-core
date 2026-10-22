@@ -19,7 +19,7 @@
 
 **Core Handler** 指 Events 中 CORE 层级的默认处理器，每个事件有且只有一个。Extension 模块为这些处理器提供包管理、计划和运行时能力，一个处理器可以使用多个模块。下文将 **Extension Orchestrator** 和 **Extension Runtime** 简称为 Orchestrator 和 Runtime。
 
-第 1 节介绍目标与范围，第 2 节解释核心对象和职责，第 3 节说明工作流程及完成条件，第 4 节说明状态、资源和安全约束，第 5 节介绍现状与后续实现条件。具体机制见详细架构。工作项与进度见 [开发计划](extension-development-plan.md)。已实现控制面见 [S_01](../specs/S_01_package-loading.md)、[F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md)。Registry 与 Bus 发布对应 EX-03、EX-04，尚未实现；对应 feature 在开工时再建。
+第 1 节介绍目标与范围，第 2 节解释核心对象和职责，第 3 节说明工作流程及完成条件，第 4 节说明状态、资源和安全约束，第 5 节介绍现状与后续实现条件。具体机制见详细架构。工作项与进度见 [开发计划](extension-development-plan.md)。已实现能力见 [S_01](../specs/S_01_package-loading.md)、[S_02](../specs/S_02_registry-and-bus.md)、[F_01](../features/F_01_package-source.md)～[F_04](../features/F_04_bus-wiring.md)。
 
 ## 1. 目标与范围
 
@@ -146,7 +146,7 @@ Handler 的包身份使用 Events 的 `PackageMetadata`（`package_id`、`packag
 
 从提交本地包路径到扩展参与业务，共有以下六个确认步骤。事件名和接口均用于说明目标设计。
 
-1. **初始化装配。** 进程启动时，EventBus 的初始化登记 core 内置事件，包括 9 类管理事件及其 Core Handler。随后调用一次 `Registry.init`。它只拿到这份已经初始化好的 EventBus，并登记 jiuwenswarm 的内置事件。这一步不读取用户 manifest，不安装扩展，也不触发 `ops.build`。
+1. **初始化装配。** 进程启动时，EventBus 的初始化登记 core 内置事件，包括 9 类管理事件及其 Core Handler。随后调用一次 `Registry.init`。它只拿到这份已经初始化好的 EventBus，并登记 jiuwenswarm 的内置事件。这一步不读取用户 manifest，不安装扩展。宿主回调返回后，`init` 触发一次 `ops.build`。
 2. **启动时批量安装。** `init` 返回后，jiuwenswarm 读出安装目录路径，把该目录下的包目录作为一批路径传给 `package.install`。Extension 只接收这些路径。进程重启后靠这一步重新装上已经放进安装目录的包。
 3. **接收安装请求。** `Registry.install` 显式触发 `package.install`。zip 会先解压到临时目录，再进入解析。安装 Handler 负责推进子事件并汇总结果。
 4. **解析包和依赖。** 安装 Handler 逐路径触发 `package.parse`，再触发 `package.resolve`。Package Manager 读取声明并排列包序。Runtime 提供已经生效的包、版本和依赖，用来判断新包能不能装。
@@ -225,9 +225,9 @@ Runtime 负责扩展实例及注册归属，Package Manager 负责自己创建�
 
 ### 5.1 可复用基础与待建设能力
 
-目前，Package Manager、依赖排序、安装目录和 candidate 加载已有实现及单元测试（EX-01、EX-02）。Registry 触发管理事件，以及向 EventBus 发布 Handler（EX-03、EX-04）尚未实现，依赖 Events 的 EventBus 与 9 类管理事件就绪。
+目前，EX-01～EX-04 均已实现：控制面、Registry、九类管理事件编排与 Bus 发布。
 
-Events 的[目标架构](../../../events/docs/designs/events-architecture.md)提供公共接口和生命周期协作的设计依据。本期 9 类包管理事件及其 Core Handler 在 Events 目录实现，并在 EventBus 初始化时登记；Extension 提供这些 Handler 调用的包管理与 Runtime 能力。通用事件机制由 Events 文档维护。
+Events 的[目标架构](../../../events/docs/designs/events-architecture.md)提供公共 Bus、匹配与 Ops。九类包管理事件的编排在 extension；`events/builtins` 负责登记转发。通用事件机制由 Events 文档维护。
 
 Core 已有[工具抽象](../../../foundation/tool/base.py)，可作为工具事件接入的基础；仍需将实际工具调用接入事件入口，才能验证扩展是否参与执行。
 

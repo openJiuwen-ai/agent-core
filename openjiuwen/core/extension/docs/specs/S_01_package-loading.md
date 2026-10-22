@@ -6,12 +6,12 @@
 | --- | --- |
 | 类型 | spec |
 | 编号 / slug | `S_01 / package-loading` |
-| 关联模块 | `openjiuwen/core/extension/`；消费方包括管理事件 Core Handler（未实现）与宿主启动逻辑 |
+| 关联模块 | `openjiuwen/core/extension/`；消费方包括管理事件 Core Handler 与宿主启动逻辑 |
 | 最近一次修订日期 | 2026-10-21 |
-| 关联 feature | [F_01 声明与定序](../features/F_01_package-source.md)、[F_02 Plan 与 Runtime](../features/F_02_plan-runtime.md) |
+| 关联 feature | [F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md) |
 | 设计依据 | [设计概览](../designs/extension-overview.md)、[详细架构](../designs/extension-architecture.md)、[开发计划](../designs/extension-development-plan.md) |
 
-本规约是扩展包**加载控制面**的唯一契约维护位置：声明与安装目录、依赖与排序、Plan 与 candidate、生效记录与卸载判断、错误码。对应已完成工作项 EX-01、EX-02。管理事件的触发顺序、Registry.init，以及把 Handler 写入 EventBus 注册表，见架构目标设计与开发计划 EX-03、EX-04；9 类管理事件的 Core Handler 在 Events 目录实现。Event 机制接线后的正式契约另建或回写，并回引本文控制面条款。
+本规约是扩展包**加载控制面**的唯一契约维护位置：声明与安装目录、依赖与排序、Plan 与 candidate、生效记录与卸载判断、错误码。对应 EX-01、EX-02。Registry、九类管理事件与 Bus 发布见 [S_02](S_02_registry-and-bus.md)。
 
 ## 1. 范围、术语与责任
 
@@ -19,8 +19,8 @@
 
 - **本规约定义：** `manifest.yaml` 字段与入口边界；安装目录布局与打开目录/zip；包级 / 包内扩展依赖与稳定排序；单包 Plan；prepare 产生 candidate 的成功/失败语义；受限登记可接受的 `handler_level`；Runtime 生效记录与卸载判断；`ActivationReport.error` 使用的 `StatusCode` 名称。
 - **本规约不定义：** EventBus 的 `trigger` 语义、Bus 注册表快照、9 类管理事件的 Core Handler 时序、宿主 `config.yaml` 解析、远程仓库与多版本同时生效。
-- **宿主负责：** 解析 `extensions.install_dir`（默认 `~/.jiuwenswarm/extensions`），把 `Path` 交给本模块；在进程启动流程中于适当时机发起批量安装（经管理事件，管理事件侧未实现）。
-- **Events 负责：** 注册表存储、调用快照与 Handler 执行。扩展包加载在发布 candidate 时写入 Bus（发布未实现）。
+- **宿主负责：** 解析 `extensions.install_dir`（默认 `~/.jiuwenswarm/extensions`），把 `Path` 交给本模块；在进程启动流程中于适当时机发起批量安装（经管理事件，见 S_02）。
+- **Events 负责：** 注册表存储、调用快照与 Handler 执行。扩展包加载在发布 candidate 时写入 Bus（见 S_02）。
 
 ### 1.2 术语
 
@@ -30,7 +30,7 @@
 | 安装副本 | `<install_dir>/<package.id>/<version>/` |
 | 用户来源 | 调用方传入的原始目录或 zip |
 | 生效记录 | Runtime 中的 `ActivePackageRecord`，供后续依赖与卸载判断 |
-| candidate | 一次 prepare 收集齐的 Handler 声明与已加载模块；发布前对业务调用不可见（发布未实现） |
+| candidate | 一次 prepare 收集齐的 Handler 声明与已加载模块；发布前对业务调用不可见 |
 | Plan | 单包的有序扩展列表与 generation |
 
 ### 1.3 事实归属
@@ -39,8 +39,8 @@
 | --- | --- | --- |
 | 安装副本文件 | 安装目录 / Package Manager | `copy_into_store` / `remove_installed` |
 | 生效记录 | Runtime | 发布成功后的 `record_active`；允许卸载后的 `drop_active` |
-| 在途调用计数 | Runtime | `begin_calls` / `end_calls`（由事件层在 `trigger` 进出时调用；事件层接线未实现） |
-| Bus 上的 Handler | EventBus | `extension.apply` 一次同步写入（未实现） |
+| 在途调用计数 | Runtime | `begin_calls` / `end_calls`（由事件层或发布路径配合调用） |
+| Bus 上的 Handler | EventBus | `extension.apply` 一次同步写入（见 S_02） |
 
 ## 2. 声明与安装目录
 
@@ -145,7 +145,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 4. handler 不可调用或 `match_pattern` 非映射 → `EXTENSION_LOAD_FAILED`。
 5. `abort` 只移除 candidate 模块，不删除安装副本或用户来源。
 
-将 candidate 一次同步写入 Bus 注册表，由 `extension.apply` 完成（未实现）。写入时 Runtime 调用 `register_event_handler(..., package_metadata=...)`，传入 Plan 上已核实的 `PackageMetadata`（含 `package_id`、`package_version`、`root`）；业务 `trigger` 进入该 Handler 时，Ops 使用该登记信息。写入前业务 `trigger` 不得看见该 candidate。
+将 candidate 一次同步写入 Bus 注册表，由 `extension.apply` 完成（细则见 S_02）。写入时 Runtime 调用 `register_event_handler(..., package_metadata=...)`，传入 Plan 上已核实的 `PackageMetadata`（含 `package_id`、`package_version`、`root`）；业务 `trigger` 进入该 Handler 时，Ops 使用该登记信息。写入前业务 `trigger` 不得看见该 candidate。
 
 `ExtensionPlan.package` 即 Events 的 `PackageMetadata`（含包根）。`ActivePackageRecord.root` 与之对应，供依赖与卸载判断。
 
@@ -162,7 +162,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 
 ### 4.4 报告状态
 
-`ActivationReport.status` 只有 `SUCCESS` 与 `FAILED`。依赖未满足等业务失败写在 `error` 中。调用方未拿到 Report 时，用查询类事件核对生效记录（查询事件未实现）；查询不补做安装。
+`ActivationReport.status` 只有 `SUCCESS` 与 `FAILED`。依赖未满足等业务失败写在 `error` 中。调用方未拿到 Report 时，用 `package.query` 核对生效记录；查询不补做安装。
 
 ### 4.5 错误码
 
@@ -192,7 +192,7 @@ generation：进程内首次成功从 `1` 起；之后每次成功替换加 `1`�
 ## 5. 生命周期与资源责任
 
 - 安装副本的所有权在 Package Manager；用户来源永不由本模块删除。
-- 生效记录在发布成功后写入（发布未实现）；卸载判断通过后删除。
+- 生效记录在发布成功后写入；卸载判断通过后删除。
 - prepare 失败或 `abort` 只清理本次 `sys.modules` 条目。
 - 旧 prepare 产生的函数对象在模块被 abort 后仍可执行其创建时的字节码；是否继续持有引用由调用方与事件层快照决定。
 

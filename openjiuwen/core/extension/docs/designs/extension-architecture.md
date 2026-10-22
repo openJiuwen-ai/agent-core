@@ -18,9 +18,9 @@
 
 **Core Handler** 指 Events 中 CORE 层级的默认处理器，每个事件有且只有一个。Extension 的 Package Manager、Extension Orchestrator 和 Extension Runtime 为管理事件的 Core Handler 提供能力，一个处理器可以按需使用多个模块。下文将 **Extension Orchestrator** 和 **Extension Runtime** 简称为 Orchestrator 和 Runtime。
 
-**实现状态：** 来源解析、依赖排序、安装目录复制、candidate 加载和生效记录已经有代码。Registry 触发 9 类管理事件，以及把 Handler 写入 EventBus，尚未实现，依赖 Events 的公共接口落地。本文的管理事件流程按目标设计描述。
+**实现状态：** EX-01～EX-04 已落地：控制面、Registry、九类管理事件编排与 Bus 发布。本文管理事件流程与实现一致；待确认项见第 12 节。
 
-已实现控制面的契约见 [S_01 包加载规约](../specs/S_01_package-loading.md)；方案与验证见 [F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md)。工作项见 [开发计划](extension-development-plan.md)。错误码使用仓库统一 `StatusCode`（`EXTENSION_*`，201000–201015）。9 类管理事件的 Core Handler 在 Events 目录实现；Registry 与 Bus 发布对应 EX-03、EX-04，尚未实现，对应 feature 在开工时再建。
+契约见 [S_01](../specs/S_01_package-loading.md)、[S_02](../specs/S_02_registry-and-bus.md)；方案见 [F_01](../features/F_01_package-source.md)～[F_04](../features/F_04_bus-wiring.md)。工作项见 [开发计划](extension-development-plan.md)。错误码使用仓库统一 `StatusCode`（`EXTENSION_*`，201000–201015）。九类事件编排在 extension；`events/builtins` 登记转发。
 
 | 阅读目的 | 章节入口 |
 | --- | --- |
@@ -116,7 +116,7 @@ Extension 维护包、实例、计划和注册归属记录，不维护 Events �
 | EX-A02 分别处理包与包内扩展的依赖 | Package Manager 排列包，Orchestrator 排列包内扩展 | 拒绝缺失、循环或超出允许范围的依赖；依赖失败时跳过依赖方 | 第 4.2～4.3 节 |
 | EX-A03 每条成功注册都有可信归属 | Runtime 的受限登记入口 | 拒绝来源不明或层级不合法的注册，不留下没有归属的记录 | 第 4.4 节 |
 | EX-A04 失败时丢掉尚未发布的 candidate | Runtime；范围是当前包的本次计划 | 不把半套 Handler 留在 Bus 上。已经生效的其他包保持不变 | 第 5.2.1 节 |
-| EX-A05 初始化只装配事件与处理器 | Registry 接收已初始化的 EventBus，并登记 jiuwenswarm 内置回调 | EventBus 初始化时已登记 core 内置事件（含 9 类管理事件）。装配失败时不受理包操作。`init` 不读取用户 manifest，不安装扩展，不触发 `ops.build`。启动批量安装发生在 `init` 之后 | 第 4.1 节 |
+| EX-A05 初始化只装配事件与处理器 | Registry 接收已初始化的 EventBus，并登记 jiuwenswarm 内置回调 | EventBus 初始化时已登记 core 内置事件（含 9 类管理事件）。装配失败时不受理包操作。`init` 不读取用户 manifest，不安装扩展。宿主回调返回后，`init` 触发一次 `ops.build`。启动批量安装发生在 `init` 之后 | 第 4.1 节 |
 | EX-A06 有在途调用时拒绝卸载 | Runtime | 返回失败，不注销，不删除安装目录，也不等待调用结束 | 第 5.2.2 节 |
 | EX-A07 重载是热切换 | `package.reload` 的 Core Handler | 依赖方仍接受新版本才继续。准备失败时当前注册表不变。新调用读新快照，旧调用保持自己的快照 | 第 5.2.3 节 |
 | EX-A08 报告必须反映实际注册和清理情况 | Runtime 提供记录，管理事件的 Core Handler 核对，Registry 交回 | 提前返回、取消或未收到结果时先核对，不凭空报告 SUCCESS | 第 6.3、8 节 |
@@ -210,7 +210,7 @@ EventBus 只提供事件调用服务，不根据 Plan、包依赖或处理结果
 
 ### 3.4 已有基础与需要补齐的部分
 
-包加载控制面（声明、安装目录、依赖定序、Plan、candidate、生效记录）已有实现与单元测试，契约见 [S_01](../specs/S_01_package-loading.md)，进度见 [开发计划](extension-development-plan.md) EX-01、EX-02。Registry 入口与向 EventBus 发布 Handler（EX-03、EX-04）尚未实现。
+包加载控制面、Registry 与 Bus 发布均已实现，契约见 [S_01](../specs/S_01_package-loading.md)、[S_02](../specs/S_02_registry-and-bus.md)，进度见 [开发计划](extension-development-plan.md)。
 
 [Events 架构](../../../events/docs/designs/events-architecture.md)提供公共接口的设计依据。9 类包管理事件及其 Core Handler 在 Events 目录实现，并在 EventBus 初始化时登记；Extension 提供这些 Handler 调用的包管理与 Runtime 能力。
 
@@ -222,9 +222,9 @@ Core 业务模块需要提供所属业务事件的默认行为和能力处理器
 
 业务代码调用 `Registry.install`、`uninstall` 或 `reload` 时，对应方法体内显式调用受控 `trigger`，发起 `package.install`、`package.uninstall` 或 `package.reload`，并等待结果。Registry 不观察包状态、不自主扫描，也不驱动下一事件。业务代码直接调用受控 `trigger` 时，遵守相同授权及准入规则；解析、查询等请求也由业务或 Handler 明确发起。
 
-`init` 是 jiuwenswarm 显式调用的方法。EventBus 初始化时已经登记 core 内置事件，包括 9 类管理事件及其 Core Handler。`init` 只接收这份 EventBus，并执行 jiuwenswarm 的事件和处理器登记回调。进程启动时只调用一次。它不读取用户 manifest，不加载扩展代码，不执行包安装，也不触发 `ops.build`。
+`init` 是 jiuwenswarm 显式调用的方法。EventBus 初始化时已经登记 core 内置事件，包括 9 类管理事件及其 Core Handler。`init` 只接收这份 EventBus，并执行 jiuwenswarm 的事件和处理器登记回调。进程启动时只调用一次。它不读取用户 manifest，不加载扩展代码，不执行包安装。宿主回调返回后，它触发一次 `ops.build`，调用方不再单独触发。
 
-`init` 返回后，jiuwenswarm 把安装目录路径传进来。Extension 列出该目录中的包目录，作为一批路径触发 `package.install`。这样进程重启后会重新装上安装目录里的包。
+`init` 返回后，jiuwenswarm 把安装目录路径交给 `open_install_dir`。Extension 列出该目录中的包目录，作为一批路径触发 `package.install`。`host_version` 在同一次调用里传入，用来和 `requires.host` 比较。这一步不安装。这样进程重启后会重新装上安装目录里的包。
 
 必需事件或平台处理器登记失败时，Registry 不能标为就绪。目前建议拒绝重复 `init`，失败实例清理后由调用方重建。事件基础设施的准备方式遵循 Events 公共约定，Extension 不重复定义。
 

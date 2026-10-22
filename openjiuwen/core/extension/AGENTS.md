@@ -16,12 +16,10 @@
   [详细架构第 3 节](docs/designs/extension-architecture.md#3-架构总览与模块分工)。
   复用 Events 的公共事件模型、EventHandlerOps 和生命周期接口，不在本模块复制通用事件机制，
   也不让 Events 反向依赖包管理实现。`openjiuwen/extensions/` 中的可选集成不属于本文适用范围。
-- 当前目标方案从本模块的设计概览和详细架构进入；正式规约建立后，已确认契约在主责 spec 中唯一维护，
-  概览与架构引用该位置。设计中的 Registry、Plan / Report、manifest 和事件名均为目标设计，
-  不代表已有公共 API；待确认事项保留相应标识。
+- 当前方案从本模块的设计概览和详细架构进入；已确认契约在主责 spec 中唯一维护，
+  概览与架构引用该位置。待确认事项保留相应标识。
 - 修改前阅读已有实现、公开导出、调用方、相关测试和模块设计，核对本次变化的实际影响。
-  包加载控制面（manifest、安装目录、排序、prepare、生效记录）已有实现与单元测试；
-  Registry、管理事件触发和 Bus 注册表发布未实现。
+  包加载控制面、Registry、九类管理事件编排与 Bus 注册表发布均已实现（EX-01～EX-04）。
 
 ## 文档分类与目录用途
 
@@ -42,16 +40,17 @@
 | --- | --- |
 | [设计概览](docs/designs/extension-overview.md) | 整体定位、核心对象、包管理流程、职责边界及能力开放条件 |
 | [详细架构](docs/designs/extension-architecture.md) | Registry、Package Manager、Orchestrator 与 Runtime 分工，管理事件、两级依赖与顺序、注册归属、生命周期 |
-| [开发计划](docs/designs/extension-development-plan.md) | EX-01～EX-04 工作项、依赖顺序、负责人与进度；9 类管理事件归属 Events |
-| [包加载规约](docs/specs/S_01_package-loading.md) | 已实现控制面契约：manifest、安装目录、依赖排序、Plan/candidate、生效记录、错误码；事件接线边界 |
+| [开发计划](docs/designs/extension-development-plan.md) | EX-01～EX-04 工作项、依赖顺序、负责人与进度 |
+| [包加载规约](docs/specs/S_01_package-loading.md) | 控制面契约：manifest、安装目录、依赖排序、Plan/candidate、生效记录、错误码 |
+| [Registry 与 Bus 规约](docs/specs/S_02_registry-and-bus.md) | Registry、九类管理事件、candidate 发布语义 |
 | [F_01 声明与定序](docs/features/F_01_package-source.md) | EX-01：来源、安装目录、依赖选择与排序 |
 | [F_02 Plan 与 Runtime](docs/features/F_02_plan-runtime.md) | EX-02：单包 Plan、candidate、生效记录与卸载判断 |
+| [F_03 Registry](docs/features/F_03_registry.md) | EX-03：Registry 与九类事件编排 |
+| [F_04 Bus 接线](docs/features/F_04_bus-wiring.md) | EX-04：candidate 发布与 Runtime–Bus 接线 |
 
-EX-03、EX-04 的 feature 在开工时再建。
-
-Events 的协作契约从 [Events 设计概览](../events/docs/designs/events-overview.md)和
-[Events 详细架构](../events/docs/designs/events-architecture.md)进入；两者仍为目标设计草案，
-不能据此认定相关接口或生命周期协作已实现。9 类包管理事件的登记与 Core Handler 在 Events 目录开发，见开发计划第 1 节。
+九类包管理事件的 feature/spec 维护在本模块 docs；`events/builtins` 仅保留登记与转发。Events 公共机制见
+[Events 设计概览](../events/docs/designs/events-overview.md)与
+[Events 详细架构](../events/docs/designs/events-architecture.md)。
 
 ## 命名与编号
 

@@ -1,26 +1,31 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
-"""Load extension code into a candidate and remember active package facts.
+"""Load extension code into a candidate and publish it to the EventBus.
 
-Publishing handlers to the EventBus is not implemented here. A business
-trigger reads the Bus registry snapshot; this module only prepares the
-candidate that a later commit would write in one synchronous update.
+``prepare`` only fills a candidate, so a business trigger cannot see half a
+package. ``publish`` / ``replace_published`` / ``unpublish`` write that
+candidate to the Bus in one synchronous pass and keep the handler ids of each
+package, so reload can hot-switch and uninstall can remove exactly its own
+registrations.
 """
 
+import functools
 import hashlib
 import importlib.util
+import inspect
 import sys
 import threading
 import types
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.events.types import HandlerLevel
+from openjiuwen.core.events.protocol import ExtensionEventBusProtocol
+from openjiuwen.core.events.types import HandlerId, HandlerLevel
 from openjiuwen.core.extension.errors import ExtensionFailure, OperationError, operation_error
 from openjiuwen.core.extension.schema.manifest import Manifest
 from openjiuwen.core.extension.schema.records import ActivePackageRecord, ExtensionPlan
@@ -56,6 +61,14 @@ class PrepareResult:
     """Either a complete candidate or the reason loading stopped."""
 
     candidate: ActivationCandidate | None
+    error: OperationError | None
+
+
+@dataclass(frozen=True, slots=True)
+class PublishResult:
+    """Handler ids written to the EventBus, or why the batch was dropped."""
+
+    handler_ids: tuple[HandlerId, ...]
     error: OperationError | None
 
 
@@ -120,6 +133,7 @@ class Runtime:
         self._lock = threading.RLock()
         self._active: dict[str, ActivePackageRecord] = {}
         self._inflight: dict[str, int] = {}
+        self._published: dict[str, tuple[HandlerId, ...]] = {}
         self._load_serial = 0
 
     def active_packages(self) -> tuple[ActivePackageRecord, ...]:
@@ -277,9 +291,134 @@ class Runtime:
             )
         return None
 
+    def published_handlers(self, package_id: str) -> tuple[HandlerId, ...]:
+        """Return the handler ids this Runtime published for one package."""
+        with self._lock:
+            return self._published.get(package_id, ())
+
+    def publish(
+        self,
+        candidate: ActivationCandidate,
+        plan: ExtensionPlan,
+        bus: ExtensionEventBusProtocol,
+        *,
+        manifest: Manifest | None = None,
+    ) -> PublishResult:
+        """Write a whole candidate to the EventBus in one synchronous pass.
+
+        Each declaration is registered with the plan's ``PackageMetadata``. If
+        one registration fails, the ids already written are unregistered and
+        the candidate is aborted, so the Bus never shows half a package. On
+        success the package becomes an active record.
+
+        ``manifest`` is optional; when given, the active record keeps the
+        declared package dependencies that later installs consult.
+        """
+        registered, error = self._register_batch(candidate, plan, bus)
+        if error is not None:
+            self.abort(candidate)
+            return PublishResult((), error)
+        with self._lock:
+            self._published[candidate.package_id] = tuple(registered)
+            self.record_active(self._active_record(plan, candidate, manifest))
+        return PublishResult(tuple(registered), None)
+
+    def replace_published(
+        self,
+        candidate: ActivationCandidate,
+        plan: ExtensionPlan,
+        bus: ExtensionEventBusProtocol,
+        *,
+        manifest: Manifest | None = None,
+    ) -> PublishResult:
+        """Hot-switch one package: register the new batch, then drop the old ids.
+
+        A failure only clears the new batch, so the handlers already on the Bus
+        keep serving. Calls that started before the switch keep their own
+        registry snapshot and therefore the previous code.
+        """
+        registered, error = self._register_batch(candidate, plan, bus)
+        if error is not None:
+            self.abort(candidate)
+            return PublishResult((), error)
+        with self._lock:
+            previous = self._published.get(candidate.package_id, ())
+            self._published[candidate.package_id] = tuple(registered)
+            self.record_active(self._active_record(plan, candidate, manifest))
+        _unregister_batch(bus, previous)
+        return PublishResult(tuple(registered), None)
+
+    def unpublish(self, package_id: str, bus: ExtensionEventBusProtocol) -> None:
+        """Remove every handler of one package, then drop its active record.
+
+        Raises:
+            ExtensionFailure: The package is missing, still required, or busy.
+                The handlers are removed first, so the caller must check
+                ``uninstall_decision`` before calling this.
+        """
+        with self._lock:
+            handler_ids = self._published.pop(package_id, ())
+        _unregister_batch(bus, handler_ids)
+        self.drop_active(package_id)
+
     def abort(self, candidate: ActivationCandidate) -> None:
-        """Drop a candidate that was not published. Package files stay in place."""
+        """Drop a candidate that was not published. Package files stay in place.
+
+        Calling this twice for the same candidate is harmless.
+        """
         _release_modules(candidate.module_names)
+
+    def _register_batch(
+        self,
+        candidate: ActivationCandidate,
+        plan: ExtensionPlan,
+        bus: ExtensionEventBusProtocol,
+    ) -> tuple[list[HandlerId], OperationError | None]:
+        """Register every declaration, or undo the ids written so far."""
+        registered: list[HandlerId] = []
+        for declaration in candidate.declarations:
+            try:
+                handler_id = bus.register_event_handler(
+                    declaration.event_type,
+                    _async_handler(declaration.handler),
+                    declaration.match_pattern,
+                    HandlerLevel(declaration.handler_level),
+                    package_metadata=plan.package,
+                )
+            except ExtensionFailure as exc:
+                _unregister_batch(bus, registered)
+                return [], exc.as_error()
+            except Exception as exc:
+                logger.exception(
+                    "failed to publish a handler of package %s",
+                    candidate.package_id,
+                )
+                _unregister_batch(bus, registered)
+                return [], operation_error(
+                    StatusCode.EXTENSION_LOAD_FAILED,
+                    reason=(
+                        f"cannot register a handler for {declaration.event_type}: {exc}"
+                    ),
+                )
+            registered.append(handler_id)
+        return registered, None
+
+    def _active_record(
+        self,
+        plan: ExtensionPlan,
+        candidate: ActivationCandidate,
+        manifest: Manifest | None,
+    ) -> ActivePackageRecord:
+        root = plan.package.root or Path()
+        if manifest is not None:
+            return self.active_record_for(manifest, root, candidate)
+        return ActivePackageRecord(
+            package_id=candidate.package_id,
+            version=plan.package.package_version or "",
+            root=root.resolve(),
+            generation=candidate.generation,
+            requires_packages=(),
+        )
 
     def active_record_for(
         self,
@@ -303,6 +442,38 @@ class Runtime:
             generation=candidate.generation,
             requires_packages=manifest.requires_packages,
         )
+
+
+def _unregister_batch(
+    bus: ExtensionEventBusProtocol,
+    handler_ids: Sequence[HandlerId],
+) -> None:
+    """Remove handler ids in reverse registration order, best effort."""
+    for handler_id in reversed(tuple(handler_ids)):
+        try:
+            bus.unregister_event_handler(handler_id)
+        except Exception:
+            logger.exception("failed to unregister handler %s", handler_id)
+
+
+def _async_handler(handler: Callable[..., Any]) -> Callable[..., Awaitable[Any]]:
+    """Return a handler the EventBus can await.
+
+    Extensions may register plain functions, but the Bus rejects a handler
+    whose result is not awaitable. A synchronous callable therefore runs
+    inside an async adapter; an async one is published unchanged.
+    """
+    if inspect.iscoroutinefunction(handler):
+        return handler
+
+    @functools.wraps(handler)
+    async def adapter(event: Any, ops: Any, event_next: Any) -> Any:
+        result = handler(event, ops, event_next)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    return adapter
 
 
 def _module_name(package_id: str, generation: int, extension_id: str, serial: int) -> str:
