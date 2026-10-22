@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 
 from ..schema.integration import (
@@ -20,11 +21,12 @@ from ..schema.integration import (
     WINDOW_PART_KEY,
     SessionCheckpoint,
 )
-from ..schema.window import WindowRollover, WindowSeed, WindowSwitchRequest
+from ..schema.window import SEED_ITEM_MAX_CHARS, SEED_LIST_MAX_ITEMS, WindowRollover, WindowSeed, WindowSwitchRequest
 from ..tools.effect_policy import is_read_only_tool_name
 from . import capacity
 from .control import ExecutionControl
 from .model_rail import PAUSE_MARKER
+from .tool_outcome import completed_tool_note, has_completed_tool_receipt
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -38,6 +40,7 @@ _FALLBACK_NEXT_STEP = "根据原始任务和保留的工具结果继续；不要
 _PROMPT_ATTACHMENT_HISTORY = "_openjiuwen_prompt_attachment_history"
 _PROTECTED_TOOL_NAMES = frozenset({"share_file"})
 _ROLLOVER_CONTEXT_RATIO = 0.8
+_NEW_WINDOW_CONTEXT_RATIO = 0.4
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,7 @@ class _MessageGroup:
     messages: tuple
     protected: bool
     write_call_ids: tuple[str, ...] = ()
+    completed_write: bool = False
 
 
 @dataclass(frozen=True)
@@ -103,19 +107,24 @@ def _message_groups(messages: list, start: int, stop: int) -> list[_MessageGroup
         if calls:
             call_names = {call.id: call.name for call in calls}
             answered = set()
+            results = {}
             while index < stop and isinstance(messages[index], ToolMessage):
                 result = messages[index]
                 if result.tool_call_id not in call_names or result.tool_call_id in answered:
                     raise ValueError("tool result does not match its assistant tool-call group")
                 answered.add(result.tool_call_id)
+                results[result.tool_call_id] = result
                 index += 1
             if answered != set(call_names):
                 raise ValueError("assistant tool-call group has no complete result set")
-            write_call_ids = tuple(call_id for call_id, name in call_names.items() if not is_read_only_tool_name(name))
+            writes = [call for call in calls if not is_read_only_tool_name(call.name)]
+            write_call_ids = tuple(call.id for call in writes if not has_completed_tool_receipt(call, results[call.id]))
             protected = bool(write_call_ids or any(name in _PROTECTED_TOOL_NAMES for name in call_names.values()))
+            completed_write = bool(writes) and not protected
         else:
             write_call_ids = ()
             protected = False
+            completed_write = False
         groups.append(
             _MessageGroup(
                 group_start,
@@ -123,6 +132,7 @@ def _message_groups(messages: list, start: int, stop: int) -> list[_MessageGroup
                 tuple(messages[group_start:index]),
                 protected,
                 write_call_ids,
+                completed_write,
             )
         )
     return groups
@@ -161,6 +171,35 @@ def _header_and_request(messages: list, request_text: str | None) -> tuple[int, 
 
 def _message_ref(group: _MessageGroup) -> str:
     return f"messages:{group.start}-{group.end - 1}"
+
+
+def _completion_seed(seed: WindowSeed, groups: list[_MessageGroup]) -> WindowSeed:
+    """Keep existing Agent handoff; add only a few completion hints, never another full transcript."""
+    completed = [group for group in groups if group.completed_write]
+    if not completed or len(seed.completed) >= SEED_LIST_MAX_ITEMS:
+        return seed
+    notes = [
+        "部分写操作的工具回执已明确成功，原始调用和结果留在旧窗归档；"
+        "不代表整个任务验收成功。先核对已落盘产物再续做，不要重复初始化。"
+    ]
+    for group in reversed(completed):
+        results = {message.tool_call_id: message for message in group.messages if isinstance(message, ToolMessage)}
+        for call in _tool_calls(group.messages[0]):
+            if not is_read_only_tool_name(call.name):
+                note = completed_tool_note(call, results[call.id])
+                if len(note) <= SEED_ITEM_MAX_CHARS:
+                    notes.append(note)
+                if len(notes) >= 5:
+                    break
+        if len(notes) >= 5:
+            break
+    payload = seed.model_dump(mode="json")
+    payload["completed"] = [*seed.completed, *notes[:SEED_LIST_MAX_ITEMS - len(seed.completed)]]
+    try:
+        return WindowSeed.model_validate(payload)
+    except ValueError:
+        # Completion hints are optional; never truncate the Agent's validated handoff to add them.
+        return seed
 
 
 def _pause(reason: str, detail: str) -> dict:
@@ -233,6 +272,7 @@ class WindowSwitchManager:
         self._last_group_message_id = last_group_message_id
         self._context_window = 0
         self._rollover_threshold = 0
+        self._new_window_limit = 0
         self._prepared: _PreparedRollover | None = None
 
     async def after_react_iteration(self, ctx: "AgentCallbackContext | ExecutionControl") -> None:
@@ -300,6 +340,7 @@ class WindowSwitchManager:
             return False
         self._context_window = context_window
         self._rollover_threshold = context_window * 4 // 5
+        self._new_window_limit = context_window * 2 // 5
         return True
 
     async def _checkpoint(self, control: ExecutionControl, iteration_seq: int) -> None:
@@ -345,9 +386,13 @@ class WindowSwitchManager:
             counter = ctx.context.token_counter() if ctx.context is not None else None
         except Exception:  # noqa: BLE001 - failure to obtain the ContextEngine counter is unexpected
             return None
+        # A rebuilt prefix cannot reuse cumulative usage from the old window.
+        # Invalidate only counting copies, preserving messages and archive evidence.
+        candidate_messages = deepcopy([*window.system_messages, *messages])
+        ContextUtils.invalidate_usage_metadata(candidate_messages)
         return capacity.count_request(
             counter,
-            [*window.system_messages, *messages],
+            candidate_messages,
             window.tools,
         )
 
@@ -380,10 +425,28 @@ class WindowSwitchManager:
         control = self._context.binding.control
         old_messages = list(ctx.context.get_messages())
         try:
-            candidate, refs = self._build_candidate(ctx, old_messages, request.seed)
+            header, query, _ = _header_and_request(old_messages, self._request_text)
+            start = query + 1 if query is not None else header + 1
+            end = next(
+                (i for i in range(start, len(old_messages)) if _part(old_messages[i]) == EXECUTION_END),
+                len(old_messages),
+            )
+            seed = _completion_seed(request.seed, _message_groups(old_messages, start, end))
+            try:
+                candidate, refs = self._build_candidate(ctx, old_messages, seed)
+            except _RequiredContextUnfit:
+                if seed is request.seed:
+                    raise
+                # Optional completion hints must not crowd out the validated
+                # original handoff and genuinely required evidence.
+                seed = request.seed
+                candidate, refs = self._build_candidate(ctx, old_messages, seed)
         except _RequiredContextUnfit:
             control.pending_window_switch = None
-            return _pause("context_unfit", "新窗口的任务和必须保留内容超过可用输入上限；未截断信息，也未切换。")
+            return _pause(
+                "context_unfit",
+                "新窗口的任务和必须保留内容超过 context_window 的 40% 上限；未截断信息，也未切换。",
+            )
         except _ContextCountUnavailable:
             control.pending_window_switch = None
             return _pause("error", "新窗口必要内容无法可靠计数，已暂停；不会使用估算值继续。")
@@ -400,18 +463,18 @@ class WindowSwitchManager:
         if needed is None:
             control.pending_window_switch = None
             return _pause("error", "新窗口请求无法可靠计数，已暂停；不会使用估算值继续。")
-        if needed > self._rollover_threshold:
+        if needed > self._new_window_limit:
             control.pending_window_switch = None
             return _pause(
                 "context_unfit",
-                f"新窗口的必要内容需要 {needed} 个输入 token，超过 context_window 的 80% 阈值 "
-                f"({self._rollover_threshold})；未删除必要信息，也未切换。",
+                f"新窗口的必要内容需要 {needed} 个输入 token，超过 context_window 的 40% 上限 "
+                f"({self._new_window_limit})；未删除必要信息，也未切换。",
             )
 
         self._prepared = _PreparedRollover(
             old_messages=tuple(old_messages),
             new_messages=tuple(candidate),
-            seed=request.seed,
+            seed=seed,
             trigger_kind=request.trigger_kind,
             retained_item_refs=tuple(refs),
             iteration_seq=iteration_seq,
@@ -450,21 +513,23 @@ class WindowSwitchManager:
         )
         base = [deepcopy(old_messages[header_index]), *attachments, seed_message, original_request]
         protected = [group for group in groups if group.protected]
-        optional = [group for group in groups if not group.protected]
+        # Confirmed completed writes are archive-only. Refilling them up to the
+        # threshold would defeat rollover for long coding tasks.
+        optional = [group for group in groups if not group.protected and not group.completed_write]
         selected = list(protected)
         required = [*base, *(deepcopy(message) for group in selected for message in group.messages)]
         required_count = self._count_candidate(ctx, required)
         if required_count is None:
             raise _ContextCountUnavailable("required candidate content cannot be counted reliably")
-        if required_count > self._rollover_threshold:
-            raise _RequiredContextUnfit("required candidate content exceeds 80% of context_window")
+        if required_count > self._new_window_limit:
+            raise _RequiredContextUnfit("required candidate content exceeds 40% of context_window")
 
         for group in reversed(optional):
             proposed = [*required, *(deepcopy(message) for message in group.messages)]
             measured = self._count_candidate(ctx, proposed)
             if measured is None:
                 raise _ContextCountUnavailable("recent message group cannot be counted reliably")
-            if measured > self._rollover_threshold:
+            if measured > self._new_window_limit:
                 break
             selected.append(group)
             required = proposed
@@ -485,21 +550,22 @@ class WindowSwitchManager:
             self._prepared = None
             control.pending_window_switch = None
             return _pause("error", "重建后的模型请求无法可靠计数，已暂停；换窗没有提交。")
-        if needed > self._rollover_threshold:
+        if needed > self._new_window_limit:
             self._restore_old_context(ctx, prepared)
             self._prepared = None
             control.pending_window_switch = None
             return _pause(
                 "context_unfit",
-                f"新窗口完整请求需要 {needed} 个输入 token，超过 context_window 的 80% 阈值 "
-                f"({self._rollover_threshold})；必要内容未被截断。",
+                f"新窗口完整请求需要 {needed} 个输入 token，超过 context_window 的 40% 上限 "
+                f"({self._new_window_limit})；必要内容未被截断。",
             )
 
         token_usage = {
             "candidate_input_tokens": needed,
-            "input_limit": self._rollover_threshold,
+            "input_limit": self._new_window_limit,
             "context_window": self._context_window,
             "rollover_threshold_ratio": _ROLLOVER_CONTEXT_RATIO,
+            "new_window_limit_ratio": _NEW_WINDOW_CONTEXT_RATIO,
         }
         transition = WindowRollover(
             trigger_kind=prepared.trigger_kind,

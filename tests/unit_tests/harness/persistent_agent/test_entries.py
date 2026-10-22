@@ -1996,6 +1996,48 @@ async def test_new_context_switches_only_after_the_tool_result_and_commits_archi
 
 
 @pytest.mark.asyncio
+async def test_native_rollover_archives_successful_write_results_and_keeps_only_bounded_handoff(
+    real_state, monkeypatch,
+):
+    from openjiuwen.core.foundation.tool.schema import ToolOutput
+
+    harness = real_state
+
+    async def successful_write(tool, inputs, **kwargs):
+        tool.calls.append(inputs)
+        return ToolOutput(success=True, data={"content": "saved artifact " + "x" * 5000})
+
+    monkeypatch.setattr(Remember, "invoke", successful_write)
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    ctx, _ = harness.context(spec)
+    seed = {"objective": "finish the task", "completed": ["keep the model's progress"], "next_steps": ["answer"]}
+    harness.model.turns = ["tool", ("new_context", json.dumps(seed)), "answer"]
+
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, request()))
+
+    assert events[-1].payload.status == "completed"
+    assert kinds(events).count("window.switched") == 1
+    record = await saved_record(harness)
+    active = window_of(record)
+    assert not any(getattr(message, "tool_call_id", None) == "call-1" for message in active)
+    assert not any(call.id == "call-1" for message in active for call in (getattr(message, "tool_calls", None) or []))
+    archive = await module("execution.session_state").WindowStore(harness.backend).load_archive(
+        "business-agent", "session-a", 1,
+    )
+    archived = module("schema.session_record").decode_messages(archive.messages)
+    assert any("saved artifact " in message.content for message in archived)
+    assert archive.seed["completed"][0] == "keep the model's progress"
+    assert any("remember" in note for note in archive.seed["completed"])
+    assert "secret-value" not in json.dumps(archive.seed)
+    assert record["window_seq"] == 2
+    history = await module("execution.session_state").WindowStore(harness.backend).search(
+        "business-agent", "session-a", "saved artifact",
+    )
+    assert history.status == "found" and history.query_complete
+    assert any(hit.role == "tool" and hit.old_window_seq == 1 for hit in history.hits)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reason", ["stop", "cancel"])
 async def test_tool_facts_survive_a_control_mid_batch(real_state, reason):
     """PA-10-V-07 / V-14 / V-23: call-a finished, call-b in flight; the next task still sees call-a.

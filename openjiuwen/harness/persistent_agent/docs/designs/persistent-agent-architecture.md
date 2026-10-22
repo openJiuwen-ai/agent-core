@@ -563,7 +563,7 @@ sequenceDiagram
 
 #### 5.2.2 运行中换窗：主动交接、容量兜底与状态提交
 
-**触发：** Agent 在阶段边界通过内部 `new_context` 控制动作主动提交有界 WindowSeed，是主路径。PA-11 每次模型调用前从当前 `ModelContext.context_window_tokens()` 读取上下文引擎解析出的有效窗口；若当前回合没有主动请求，Persistent Agent 按上下文引擎压缩器的用量感知策略计算下一次完整请求的 token 数，超过 `floor(context_window × 80%)` 时触发容量兜底。新窗口候选也使用同一策略并须不超过该阈值。有效模型用量作为累计基线，其后的新增消息按清理后文本长度估算；无有效用量时使用当前计数器，计数器缺失或失败则以清理后文本估算。80% 是换窗阈值，不是 provider hard-limit 保证；估算值照常参与判断，不因估算本身暂停。有效窗口无法解析或发生不可恢复计数异常时暂停为 `error`。
+**触发：** Agent 在阶段边界通过内部 `new_context` 控制动作主动提交有界 WindowSeed，是主路径。PA-11 每次模型调用前从当前 `ModelContext.context_window_tokens()` 读取上下文引擎解析出的有效窗口；若当前回合没有主动请求，Persistent Agent 按上下文引擎压缩器的用量感知策略计算下一次完整请求的 token 数，超过 `floor(context_window × 80%)` 时触发容量兜底。新窗口候选也使用同一计数策略，但须不超过 `floor(context_window × 40%)`。有效模型用量作为累计基线，其后的新增消息按清理后文本长度估算；无有效用量时使用当前计数器，计数器缺失或失败则以清理后文本估算。80% 是换窗阈值，不是 provider hard-limit 保证；估算值照常参与判断，不因估算本身暂停。有效窗口无法解析或发生不可恢复计数异常时暂停为 `error`。
 
 **主动交接的事实边界：** `new_context` 是 Persistent Agent 内部控制动作，不是用户业务工具或公共 Python API；模型发出请求不等于切换已提交。WindowSeed 有界且字段经过校验，表达目标、进度、下一步、约束 / 决策、未决问题、待核实副作用和稳定证据引用。它是交接建议，不是工具回执、授权或事实权威。容量兜底无 Agent 提供的 seed 时，由窗口管理组件依据已保存任务目标、执行事实和最近完整交互构造最小交接，不额外调用模型生成摘要。
 
@@ -1007,7 +1007,7 @@ Agent 配置、办公空间公共部分和授权发布知识可共享；Session 
 
 同一 Session 串行，其他 Execution 可由服务端分别处理，不要求全局串行。PA-11 以 Agent 主动换窗为主；未主动请求时，按上下文引擎计数策略计算的完整请求 token 数超过 `floor(context_window × 80%)` 即触发换窗。必要内容放不下时暂停为 `context_unfit`，不静默截断；估算计数可用，不因估算本身暂停。80% 只是换窗阈值，不是 provider hard-limit 或输出 token 数保证；其适用性需用真实模型请求验证。事件容量检查见第 6.2.2 节，超长最终回答的分段交接见第 6.3 节。
 
-**最终请求接缝：** 每次原生模型调用（含重试）在最终请求装配之后，经原生调用路径上按实例注入、默认关闭的接缝处理，顺序为“最终请求 → 换窗处理（启用 `window_management` 时，PA-11）→ 预算准入 → 模型调用”；接缝返回的结束结果是明确的结局，不经过模型错误重试或上下文恢复。PA-18 不检查模型容量，正式 execute / resume 不要求旧容量字段，也不由 PA-18 预先按容量阻断，请求能否放下由模型服务判断。PA-11 按当前 `ModelContext.context_window_tokens()` 解析出的有效窗口计算 `floor(context_window × 80%)`，用于换窗触发和候选检查；请求 token 数复用上下文引擎压缩器的用量感知计数和估算回退。有效窗口解析失败或不可恢复计数异常时暂停为 `error`，必要候选内容超过换窗阈值时暂停为 `context_unfit`；估算值参与判断，不因估算本身暂停。80% 不作为 provider hard-limit 保证。Spec 的 `model_input_limit_tokens`、`capacity_safety_margin_tokens` 仅为可选兼容字段，保留原值及指纹，不参与执行准入或 PA-11 阈值计算，不再校验旧四项配置组合。PA-11 复用 `capacity.count_request`（见 [F_11](../features/F_11_window-management.md)）。续做材料只含必需层，详细日志通过受控工具按需分页读取。事件容量检查见第 6.2.2 节，超长最终回答的分段交接见第 6.3 节。
+**最终请求接缝：** 每次原生模型调用（含重试）在最终请求装配之后，经原生调用路径上按实例注入、默认关闭的接缝处理，顺序为“最终请求 → 换窗处理（启用 `window_management` 时，PA-11）→ 预算准入 → 模型调用”；接缝返回的结束结果是明确的结局，不经过模型错误重试或上下文恢复。PA-18 不检查模型容量，正式 execute / resume 不要求旧容量字段，也不由 PA-18 预先按容量阻断，请求能否放下由模型服务判断。PA-11 按当前 `ModelContext.context_window_tokens()` 解析出的有效窗口计算 `floor(context_window × 80%)`，用于自动换窗触发，候选检查独立使用 `floor(context_window × 40%)`；请求 token 数复用上下文引擎压缩器的用量感知计数和估算回退。有效窗口解析失败或不可恢复计数异常时暂停为 `error`，必要候选内容超过 40% 新窗上限时暂停为 `context_unfit`；估算值参与判断，不因估算本身暂停。80% 不作为 provider hard-limit 保证。Spec 的 `model_input_limit_tokens`、`capacity_safety_margin_tokens` 仅为可选兼容字段，保留原值及指纹，不参与执行准入或 PA-11 阈值计算，不再校验旧四项配置组合。PA-11 复用 `capacity.count_request`（见 [F_11](../features/F_11_window-management.md)）。续做材料只含必需层，详细日志通过受控工具按需分页读取。事件容量检查见第 6.2.2 节，超长最终回答的分段交接见第 6.3 节。
 
 ## 10. 运行保障与版本维护
 
