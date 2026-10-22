@@ -7,11 +7,11 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-05，F_05 为文档编号 |
-| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14；PA-08 交接替代说明：2026-10-14；v0.1.20 冲突修复与入口测试适配、PA-18 接入与容量契约同步：2026-10-16；PA-18 容量检查移除同步：2026-10-19（见附录 A.2） |
+| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14；PA-08 交接替代说明：2026-10-14；v0.1.20 冲突修复与入口测试适配、PA-18 接入与容量契约同步：2026-10-16；PA-18 容量检查移除同步：2026-10-19；PA-17 日志快照联动：2026-10-21；群消息接缝现状核对：2026-10-22（见附录 A.2） |
 | 负责人 | Song Haoran、Chen Ran；认领和后续安排以统一开发计划为准 |
 | 方案依据 | 沿用已确认架构及现行 spec；原阶段记录注明 D1～D7 已确认，本次不新增设计确认或修改架构 |
 | 原实现范围 | 内部 `persistent_agent/schema/request.py`、`execution/{entries,control,emitter,model_rail,seams}.py`、`schema/spec.py`，外层 `__init__.py` 与对应单测；复用共享 Session 接缝 |
-| 本次修订范围 | 2026-10-12 重组设计与验证记录；2026-10-14 修复控制拒绝的工具消息并同步 PA-10；2026-10-16 同步 PA-18 的续做组件、窗口接缝、最终容量检查及预算准入时点；2026-10-19 同步移除 PA-18 容量检查；三个公开执行入口签名不变，core 接缝与 Spec 配置见 F_20 |
+| 本次修订范围 | 2026-10-12 重组设计与验证记录；2026-10-14 修复控制拒绝的工具消息并同步 PA-10；2026-10-16 同步 PA-18 的续做组件、窗口接缝、最终容量检查及预算准入时点；2026-10-19 同步移除 PA-18 容量检查；2026-10-22 核对已合入的 PA-23 群背景与游标接缝，仅纠正过时现状；三个公开执行入口签名不变，core 接缝与 Spec 配置见 F_20 |
 | 唯一开发计划 | [Persistent Agent 开发计划](../designs/persistent-agent-development-plan.md) PA-05；开发状态、排期、交付分类和节点进度在该计划维护 |
 | 验证摘要 | 2026-10-12 历史定向复核 94 passed / 2 failed；2026-10-14 控制修复独立回归及推送前复核均为 823 passed，历史与最新记录分开保留；真实宿主与 M1 联调未完成，见第 4 节及附录 A.2 |
 | Refs / 关联 PR | 原记录未提供 issue；控制 Rail 修复已合入 [PR #72](https://gitcode.com/huenrui_/agent-core/pull/72)，未关联 issue |
@@ -396,7 +396,7 @@ flowchart LR
 | SessionStateStore.load / PA-10 | 写回 Session state，返回 LoadedRecord(waiting, last_group_message_id)；确定无记录返回空 LoadedRecord | 已接入（[F_17](F_17_session-state-record.md)）；后端异常为运行失败，记录无效为校验拒绝，均不退回空窗口 |
 | SessionStateStore.save / PA-10 | 收到 ExecutionEnding(outcome, request_id, reply_target, output_refs, last_group_message_id 及交接摘要)，整理白名单后一次保存 | 游标须原样保存并进入结束标记；交接摘要进入结束标记（[F_18](F_18_output-handoff.md)）；已接入，写入前失败不调用写入，后端写入抛错时记录可能已改变 |
 | WindowAssembler.assemble / PA-06、PA-18 | load 之后组装，返回 WindowAssembly(native_input, last_group_message_id)；游标为服务端确认的扫描位置，无可信进度则保留加载时游标；续做先核对并清理本 Request 的旧等待现场，再追加执行链证据、规则及原任务 | 新任务与续做组件已接入，正式续做门禁仍关闭；容量筛选与换窗验收未关闭；正常确认恢复不调用 |
-| GroupMessageReader.recent_messages / PA-23 | after 游标后的新消息及少量衔接，trigger_message_id 排除触发消息，返回 GroupMessagesResult | getter 未接入；PA-06 背景消费它。当前 PA-07 直接调用 GroupChatPort，不等待该 getter |
+| GroupMessageReader.recent_messages / PA-23 | after 游标后的新消息及少量衔接，trigger_message_id 排除触发消息，返回 GroupMessagesResult | getter 已返回 ExecutionGroupMessageReader；配置 GroupChatPort 后由 PA-06 组装当前群的增量背景与游标。PA-07 仍直接调用 GroupChatPort，走独立的参与判断路径 |
 | NativeReplyAdapter.to_native / PA-09 | 匹配后的单项回复转原生载荷，入口按交互 ID 组装 InteractiveInput | getter 未接入；测试适配器不是正式实现 |
 
 窗口消息元信息使用 `WINDOW_PART_KEY=persistent_window_part`。PA-06 写 execution_header / temporary_background，PA-10 保存前分别保留并压缩为一行 / 删除；无标记消息按普通窗口内容保留。等待确认时末尾未完成工具调用不动，结束标记放记录元信息，完整整理契约见 S_03。PA-05 只传递这些协议，不自行定义第二套窗口格式。
@@ -453,8 +453,8 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 | 性质 | 缺口 / 限制 | 影响及后续归属 |
 | --- | --- | --- |
 | 历史验证失败，本轮不再复现 | 2026-10-12 记录的两个入口流式事件链失败 | 2026-10-14 基于 8e0d1067 的独立回归通过：PA 包与 core Session 823 passed；历史失败记录保留，真实宿主验收仍待进行 |
-| 未实现接入 | PA-06、PA-10 已接入（2026-10-12、2026-10-14，见 [F_17](F_17_session-state-record.md)）；PA-09 回复适配与 PA-23 群消息读取的 getter 仍拒绝 | 确认恢复与群 Session 任务仍拒绝；私聊和定时任务的正式入口可执行，但 M1 真实组件验收前不声明 execution 能力 |
-| 组件已实现、正式门禁未开放 | PA-18 续做；PA-23 游标群背景仍未接入 | PA-18 已实现执行链、旧现场处理、分层材料与分页工具（最终容量检查已于 2026-10-19 移除）；正式 recovery_ref 入口仍按 F_20 D-10 拒绝，等待 PA-12 与 M2c。PA-08 文件候选与超长回答分段见 F_18，真实服务端联调待完成 |
+| 未实现接入 | PA-06、PA-10 已接入（2026-10-12、2026-10-14，见 [F_17](F_17_session-state-record.md)）；PA-09 回复适配 getter 仍拒绝 | 正常确认恢复仍等待 PA-09。PA-23 当前群背景与游标已接入；群消息入口要求宿主提供 GroupChatPort，不能再把群 Session 任务一概写成未接入。M1 真实组件验收仍待进行 |
+| 组件已实现、正式门禁未开放 | PA-18 续做 | PA-18 已实现执行链、旧现场处理、日志预览与按事件分页工具（2026-10-21 起；最终容量检查已于 2026-10-19 移除）；正式 recovery_ref 入口仍按 F_20 D-10 拒绝，等待 PA-12 与 M2c。PA-08 文件候选与超长回答分段见 F_18，真实服务端联调待完成 |
 | 有意保留范围 | task-loop、同步 / 异步 / 持久子代理关闭 | PA-24～PA-26 逐项验证后开放，不由配置偷偷启用 |
 | 已有组件验证、真实集成待完成 | 工具停止、取消或报错后的调用组保留、残缺结果补位和状态保存已有 PA-10 组件证据 | 见 F_17；真实宿主与 PA-18 续做仍须查证日志和外部效果，不能据此宣称完整安全续做 |
 | 预算覆盖限制 | 原生 Rail 之外的内部模型调用，例如独立 task planning 模型，不经过本 Rail | 一期不启用这类 Rail；开放时评估额外预算消费者 |
@@ -497,6 +497,10 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 | 2026-10-14 PA-10 联动（Q-03） | 被控制 Rail 阻止的工具调用写入结果“本次执行正在结束，该工具未调用。”，不再以强制结束载荷的文字作为窗口中的工具结果：PA-10 接入后窗口跨任务保存，内部停止信号会带到下一任务，停止时也显示 error | 第 2 节控制检查第 4 条；[F_17](F_17_session-state-record.md) Q-03；test_entries.py 中的 `test_calls_refused_after_a_control_say_they_did_not_run`（停止、取消）与 `test_the_control_rail_refuses_every_call_with_the_same_note`（含致命错误） |
 | 2026-10-16 v0.1.20 基线适配 | 清理第 4.3 节的冲突标记与重复旧状态，保留 PA-10、PA-08 已接入的说明；完整保留各方入口测试，将终结错误替身明确为不可重试错误，并补充瞬态重试恢复、耗尽及逐次调用记账验证，保留新基线重试策略 | [F_17 第 9 节](F_17_session-state-record.md#2026-10-16-v0120-基线冲突修复)；原验收预期与共享接入契约不变 |
 
+### 2026-10-22 群消息接缝现状更正
+
+本轮随 PA-17 落地核对最新主仓：`seams.group_message_reader` 已返回 `ExecutionGroupMessageReader`，`window_assembler` 在提供 GroupChatPort 时注入它，由 PA-06 消费当前群的增量背景及扫描游标。第 3.2、4.3 节仍写 getter 未接入，与已合入代码不符，现据代码更正。PA-07 的独立参与判断仍直接调用 GroupChatPort；PA-09 回复转换与 PA-18 正式续做的门禁保留。此次仅修正文档，没有改变 PA-23 实现、接口、负责人或验收状态；历史接入前记录保留。
+
 ### 2026-10-14 控制 Rail 说明文字修复与独立验证
 
 - 问题：停止、取消或致命错误后，尚未调用的工具由控制 Rail 拒绝；原生原先把内部强制结束载荷当作工具结果，窗口因此显示内部信号。
@@ -518,3 +522,9 @@ M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer�
 - 原结论与范围：上一条记录的当前效力为预算按“最终请求 → 容量检查 → 准入 → 模型调用”执行，正式 execute / resume 须完整配置容量。
 - 新依据与变化：开发者决定移除 PA-18 的容量检查（应用端使用不同模型，context window 各不相同，部分模型的上限未知）。最终请求接缝与预算准入时点不变，顺序改为“最终请求 → 换窗处理（启用 window_management 时）→ 准入 → 模型调用”；正式入口不再要求容量配置。
 - 当前效力：上一条中容量检查与强制容量配置的部分作废，其余不变；验证见 F_20 第 8.2.2 节。
+
+### 2026-10-21 PA-17 日志快照联动
+
+- 原结论与范围：续做组件使用 PA-17 的分层摘要，查询工具按游标分页。
+- 新依据与变化：PA-17 改为逐条校验的快照与无损 JSON，续做注入预览、查询工具按事件分页（[F_19](F_19_execution-log-record.md)、[F_20](F_20_continuation.md) D-08）。三个公开执行入口与预算时点不变。
+- 当前效力：第 6 节续做组件状态的“分层材料”改为“日志预览”；验证见 F_20 第 8.2.4 节。

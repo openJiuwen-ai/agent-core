@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 状态 | feature；PA-06，已实现（组件验收）。PA-18 已接入续做组装组件（其最终容量检查已于 2026-10-19 移除）；容量验收未关闭。正式续做入口仍拒绝；确认恢复在 PA-09 接入前仍拒绝 |
-| 日期 | 2026-10-09；引用修订：2026-10-13；PA-18 联动修订：2026-10-16、2026-10-19 |
+| 日期 | 2026-10-09；引用修订：2026-10-13；PA-18 联动修订：2026-10-16、2026-10-19、2026-10-21；日志快照方案落地核对：2026-10-22 |
 | 负责人 | Song Haoran |
 | 范围 | 新增 `persistent_agent/execution/window_assembly.py`；`execution/seams.py` 的 `window_assembler` 接入点；`schema/spec.py` 的 `resolve_parts`；单测新增 `test_window_assembly.py`，`test_entries.py` 删去“窗口组装未接入”的用例。共享值对象、协议和标记已移至 `schema/integration.py`，由 `seams.py` 兼容再导出。不改 `entries.py` 的编排，不改变共享契约的字段和语义，不改共享 harness / core 代码 |
 | 测试基线 | 改动前：PA 包与 `tests/unit_tests/core/session` 共 665 passed；共享回归集 213 passed；`tests/unit_tests/harness` 与 `tests/unit_tests/core/session` 联合回归 5868 passed / 39 skipped。改动后：PA 包 270 passed，PA 包与 core session 共 681 passed，共享回归集 213 passed，联合回归 5884 passed / 39 skipped（Python 3.11.17）。第二轮（2026-10-12）后：PA 包与 core session 共 777 passed，共享回归集 213 passed，联合回归 5980 passed / 39 skipped |
@@ -49,7 +49,7 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 
 - 架构设计只要求执行类型、request_id、execution_id。来源、发送者、接收时间和附件引用也放进执行头：它们是“谁、在什么时候提出了这件事”的事实，执行头在结束时保留，后续 Request 仍能看到；任务输入保持原文。显示名中的空白合并为一个空格，保证单行。
 - 执行头本身已是一行，PA-10 整理时可原样保留。
-- PA-18 已在同一组装器接入续做分支：`类型：续做`，并增加 `recovery_ref：<execution_id>`。组装器先按 F_20 D-02 核对并处理旧等待现场，再追加分层材料、规则和原任务；`chain_limit` 由 Spec 传入。正式入口仍在任何事件之前通过 continuation_support 拒绝续做，直到 PA-12 归档查询及 M2c 放行条件满足；门禁不表示组装器组件尚未实现。
+- PA-18 已在同一组装器接入续做分支：`类型：续做`，并增加 `recovery_ref：<execution_id>`。组装器先按 F_20 D-02 核对并处理旧等待现场，再追加各次执行的日志预览、规则和原任务；`chain_limit` 由 Spec 传入。正式入口仍在任何事件之前通过 continuation_support 拒绝续做，直到 PA-12 归档查询及 M2c 放行条件满足；门禁不表示组装器组件尚未实现。
 
 ### 3. 临时背景块：最近群消息
 
@@ -204,3 +204,9 @@ PA-05 的执行入口在加载会话状态记录之后调用窗口组装接入�
 - 原结论与范围：上一条记录写明共用容量模块和最终请求检查由 PA-18 提供，PA-06 容量验收不因最终检查存在而关闭。
 - 新依据与变化：开发者决定移除 PA-18 的容量检查（应用端使用不同模型，context window 各不相同，部分模型的上限未知）；正式入口不再要求容量配置。`capacity.py` 保留，只由 PA-11 换窗使用。
 - 当前效力：PA-06 的组装行为不变；容量验收仍未关闭，关闭条件待确认。同时更正已知遗留中 `context_engine_config` 一项为已解决。验证见 F_20 第 8.2.2 节。
+
+## 2026-10-21 PA-17 日志快照联动
+
+- 原结论与范围：续做分支追加 PA-17 的分层材料。
+- 新依据与变化：PA-17 改为逐条校验的快照与无损 JSON，续做追加各次执行的预览（[F_20](F_20_continuation.md) D-08）；组装器的签名、顺序与临时背景标记不变。
+- 当前效力：PA-06 的组装行为与容量验收状态不变；验证见 F_20 第 8.2.4 节。
