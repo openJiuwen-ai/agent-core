@@ -311,8 +311,8 @@ STRINGS: dict[str, str] = {
     ),
     "spawn_expert.model_name": (
         "Optional. Fill only when the user names a model; never pick or infer one yourself. Native experts follow "
-        "spawn_teammate, external-runtime experts follow spawn_teammate with cli_agent (a team pool endpoint compatible "
-        "with the CLI's protocol)"
+        "spawn_teammate, external-runtime experts follow spawn_teammate with cli_agent (a team pool endpoint "
+        "compatible with the CLI's protocol)"
     ),
     "spawn_expert.external_cli": (
         "Optional object, only for external-runtime experts (runtime other than native); passing it for a native "
