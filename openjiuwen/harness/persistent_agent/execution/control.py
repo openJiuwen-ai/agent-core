@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
     from ..schema.window import WindowSwitchRequest
     from .emitter import EventEmitter
+    from .execution_log import LogSnapshot
     from .handoff import Registration
 
 AbortReason = Literal["cancel", "stop"]
@@ -30,8 +31,9 @@ class ExecutionControl:
     # Listings share_file accepted, with a confirmation chain's, for the merge and the 64-file limit at call
     # time. The ending hands off only listings whose result reached the final window (entries._finish).
     registrations: "dict[tuple[str, str], Registration]" = field(default_factory=dict, repr=False)
-    # Executions a continuation reached through verified links; read_execution_record answers only for them.
-    verified_chain: tuple[str, ...] = ()
+    # Log snapshots of the Executions a continuation reached through verified links, taken once; the
+    # injected preview and read_execution_record both use them, and only them.
+    log_snapshots: "dict[str, LogSnapshot]" = field(default_factory=dict, repr=False)
     # PA-11 writes only after AFTER_REACT_ITERATION marks a complete boundary.
     pending_window_switch: "WindowSwitchRequest | None" = None
     safe_boundary_pending: bool = False
