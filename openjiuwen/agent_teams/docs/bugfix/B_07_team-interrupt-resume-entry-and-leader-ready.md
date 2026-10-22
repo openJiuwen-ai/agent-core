@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-10-20 |
 | 严重程度 | 中：中断（ask-user / 审批类）后团队无法程序化恢复；裸文本投递是**静默失败**（无错误、无输出，中断永远挂起）；`inputs=None` 伪造一轮 `"None"` 垃圾输入 |
-| 范围 | `core/runner/team_runner.py`（新增 `start_agent_team_streaming` 实例方法 + 类门面 + `_stream_leader_lifecycle` 共享生命周期）、`agent_teams/agent/team_agent.py`（新增 `stream_runtime` 无输入 runtime 流 + `_consume_stream_queue` 共享消费循环）、`agent_teams/schema/stream.py`（新增 `is_team_recovered_marker`）、`agent_teams/agent/stream_controller.py`（新增 `emit_team_recovered`）、`agent_teams/agent/coordination/kernel.py`（`start()` 尾部 leader-only 发射标记帧）、`agent_teams/agent/team_agent.py`（`_prepare_initial_input` None 防护）、`core/common/exception/codes.py`（新增 `AGENT_TEAM_LEADER_START_TIMEOUT`）、`tests/unit_tests/agent_teams/test_team_agent_coordination.py`、`tests/unit_tests/agent_teams/test_runner_team_runtime.py`；宿主编排在 jiuwenswarm `team_helpers.py`（见决策 4） |
+| 范围 | `core/runner/team_runner.py`（新增 `start_agent_team_streaming` 实例方法 + 类门面 + `_stream_leader_lifecycle` 共享生命周期）、`agent_teams/agent/team_agent.py`（新增 `stream_runtime` 无输入 runtime 流 + `_consume_stream_queue` 共享消费循环）、`agent_teams/schema/stream.py`（新增 `is_team_recovered_marker`）、`agent_teams/agent/stream_controller.py`（新增 `emit_team_recovered`）、`agent_teams/agent/coordination/kernel.py`（`start()` 尾部 leader-only 发射标记帧）、`agent_teams/agent/team_agent.py`（`_prepare_initial_input` None 防护）、`tests/unit_tests/agent_teams/test_team_agent_coordination.py`、`tests/unit_tests/agent_teams/test_runner_team_runtime.py`；宿主编排在 jiuwenswarm `team_helpers.py`（见决策 4） |
 | 测试基线 | `pytest tests/unit_tests/agent_teams/test_runner_team_runtime.py tests/unit_tests/agent_teams/runtime/ tests/unit_tests/agent_teams/test_team_agent_coordination.py tests/unit_tests/agent_teams/test_coordination_lifecycle.py tests/unit_tests/agent_teams/agent/test_member_activity.py tests/unit_tests/agent_teams/test_stream_controller.py` → 372 passed, 19 skipped（skip 均为既有条件跳过）；宿主侧 jiuwenswarm `test_team_helpers.py` → 233 passed |
 | 测试基线 | `pytest tests/unit_tests/agent_teams/test_runner_team_runtime.py tests/unit_tests/agent_teams/runtime/ tests/unit_tests/agent_teams/test_team_agent_coordination.py tests/unit_tests/agent_teams/test_coordination_lifecycle.py tests/unit_tests/agent_teams/agent/test_member_activity.py tests/unit_tests/agent_teams/test_stream_controller.py` → 376 passed, 19 skipped（skip 均为既有条件跳过；含本修复新增 9 例） |
 | 关联 spec | `S_01_public-api-and-spec-flow.md`（不变量 17 + 入口签名与错误语义）、`S_04_session-and-recovery.md`（I-9 中断恢复流）；`agent_teams/AGENTS.md` / `runtime/AGENTS.md` / `coordination/AGENTS.md` 表面同步 |
@@ -66,11 +66,11 @@ SDK 侧没有把"重新拉起团队 + 恢复中断"一次完成的入口，调�
    `AGENT_TEAM_CONFIG_INVALID`）；`InteractiveInput` 的类型契约由宿主与
    `manager.interact` 共同守卫（只有该类型走 `agent.resume_interrupt` 分支）。
 4. **错误语义**：流内原始异常原样传播、REJECT 静默结束与 run 路径一致（共享
-   生命周期保证）；新增 `AGENT_TEAM_LEADER_START_TIMEOUT`（132009，模板带
-   `{timeout}`，自动映射 `ExecutionError` 可重试）保留给宿主报告启动超时——
-   帧间 / 总计双预算的实现（含"等待帧时禁用 `asyncio.wait_for` 包 `__anext__`，
-   其临时 Task 会拆散 execution-subject contextvar 作用域"的坑）落在 jiuwenswarm
-   的流消费层。
+   生命周期保证）。恢复超时在宿主侧映射为前端 `chat.error` 事件（不经过
+   StatusCode）；帧间 / 总计双预算的实现（含"等待帧时禁用 `asyncio.wait_for`
+   包 `__anext__`，其临时 Task 会拆散 execution-subject contextvar 作用域"的
+   坑）落在 jiuwenswarm 的流消费层。曾随中间形态新增的
+   `AGENT_TEAM_LEADER_START_TIMEOUT`（132009）在编排上移后无引用，已删除。
 5. **`str(None)` 防护**：`inputs is None` → 空 query，空即不伪造首轮（回归既有契约）。
 
 ## 拒绝的方案

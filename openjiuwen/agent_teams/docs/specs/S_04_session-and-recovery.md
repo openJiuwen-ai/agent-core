@@ -198,9 +198,9 @@ session 切换有两条入口，差异**只在是否先清理旧 handle**：
    （jiuwenswarm 在 producer 层实现；等待帧时禁用 `asyncio.wait_for` 包
    `__anext__`——其临时 Task 会拆散 execution-subject contextvar 作用域）。
 
-约束：`session` 必填（中断状态与 spec bucket 在原 session checkpoint）；Core 侧
-`AGENT_TEAM_LEADER_START_TIMEOUT` 状态码保留给宿主报告启动超时；失败路径关闭
-启动流，run cycle 经正常 `finalize` 收敛。
+约束：`session` 必填（中断状态与 spec bucket 在原 session checkpoint）；恢复
+超时由宿主映射为前端错误事件；失败路径关闭启动流，run cycle 经正常 `finalize`
+收敛。
 
 ## 接口契约
 

@@ -437,8 +437,6 @@ class StatusCode(Enum):
     AGENT_TEAM_STATE_INVALID = (132006, "agent team state inconsistent, reason: {reason}")
     AGENT_TEAM_SSH_CONNECT_ERROR = (132007, "ssh connect failed, host='{host}', reason='{reason}'")
     AGENT_TEAM_SSH_EXECUTION_ERROR = (132008, "ssh remote execution failed, reason='{reason}'")
-    AGENT_TEAM_LEADER_START_TIMEOUT = (132009,
-                                       "agent team leader start timed out, team='{team_name}', timeout={timeout}")
 
     # =========================
     # DevTools / AgentBuilder 140000 - 140099
