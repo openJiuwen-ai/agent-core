@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / package-loading` |
 | 关联模块 | `openjiuwen/core/extension/`；消费方包括管理事件 Core Handler 与宿主启动逻辑 |
-| 最近一次修订日期 | 2026-10-21 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联 feature | [F_01](../features/F_01_package-source.md)、[F_02](../features/F_02_plan-runtime.md) |
 | 设计依据 | [设计概览](../designs/extension-overview.md)、[详细架构](../designs/extension-architecture.md)、[开发计划](../designs/extension-development-plan.md) |
 
@@ -18,8 +18,8 @@
 ### 1.1 责任范围
 
 - **本规约定义：** `manifest.yaml` 字段与入口边界；安装目录布局与打开目录/zip；包级 / 包内扩展依赖与稳定排序；单包 Plan；prepare 产生 candidate 的成功/失败语义；受限登记可接受的 `handler_level`；Runtime 生效记录与卸载判断；`ActivationReport.error` 使用的 `StatusCode` 名称。
-- **本规约不定义：** EventBus 的 `trigger` 语义、Bus 注册表快照、9 类管理事件的 Core Handler 时序、宿主 `config.yaml` 解析、远程仓库与多版本同时生效。
-- **宿主负责：** 解析 `extensions.install_dir`（默认 `~/.jiuwenswarm/extensions`），把 `Path` 交给本模块；在进程启动流程中于适当时机发起批量安装（经管理事件，见 S_02）。
+- **本规约不定义：** EventBus 的 `trigger` 语义、Bus 注册表快照、9 类管理事件的 Core Handler 时序、宿主配置解析、远程仓库与多版本同时生效。
+- **宿主负责：** 确定安装目录，通过 `open_install_dir(install_dir: Path, ...)` 传入本模块；配置键和默认路径由宿主维护。宿主在启动流程中于适当时机发起批量安装（经管理事件，见 S_02）。
 - **Events 负责：** 注册表存储、调用快照与 Handler 执行。扩展包加载在发布 candidate 时写入 Bus（见 S_02）。
 
 ### 1.2 术语

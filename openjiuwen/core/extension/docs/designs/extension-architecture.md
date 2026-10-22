@@ -3,7 +3,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 文档类型 | 目标设计草案；尚未确定的内容标为补充建议或待确认项 |
-| 最近一次修订日期 | 2026-10-21 |
+| 最近一次修订日期 | 2026-10-22 |
 | 责任人 | Core Extension 模块维护者；与 Events 的协作由双方维护者共同确认 |
 | 所属模块 | `agent-core/openjiuwen/core/extension/` |
 | 配套文档 | [设计概览](extension-overview.md)、[Core 公共规范](../../../AGENTS.md) |
@@ -14,7 +14,7 @@
 
 包管理和真实业务操作通过事件执行，由业务代码或 Handler 在明确的调用点发起。Registry 是业务调用的便捷封装，各管理事件的 Core Handler 负责决定是否触发下一项包操作。EventBus 提供通用事件服务，不承担包流程编排。事件机制的具体设计以 Events 文档为准。
 
-本文用 **Extension** 指扩展包管理模块，用“扩展单元”（manifest 中的 extension）指包内可以独立声明和加载的扩展。**Handler** 是响应事件的处理函数，**Ops** 是 Handler 使用平台能力的入口。jiuwenswarm 从 `config.yaml` 的 `extensions.install_dir` 读出安装目录，默认 `~/.jiuwenswarm/extensions`，再把路径交给 Extension。Extension 不解析这份配置。进程启动时先 `init` 一次，再对这个目录批量安装。前端转发和 Gateway 协议不在本文范围内。
+本文用 **Extension** 指扩展包管理模块，用“扩展单元”（manifest 中的 extension）指包内可以独立声明和加载的扩展。**Handler** 是响应事件的处理函数，**Ops** 是 Handler 使用平台能力的入口。安装目录由调用方确定，以 `install_dir: Path` 传入 `open_install_dir`；配置键、配置解析和默认路径由调用方维护。进程启动时先 `init` 一次，再设置安装目录并批量安装。前端转发和 Gateway 协议不在本文范围内。
 
 **Core Handler** 指 Events 中 CORE 层级的默认处理器，每个事件有且只有一个。Extension 的 Package Manager、Extension Orchestrator 和 Extension Runtime 为管理事件的 Core Handler 提供能力，一个处理器可以按需使用多个模块。下文将 **Extension Orchestrator** 和 **Extension Runtime** 简称为 Orchestrator 和 Runtime。
 
@@ -290,7 +290,7 @@ Core 业务模块需要提供所属业务事件的默认行为和能力处理器
 
 Package Manager 的来源与声明解析能力由 `package.parse` 的 Core Handler 使用；版本、包依赖与包级排序能力由 `package.resolve` 的 Core Handler 使用。调用方和安装 Handler 通过这两个独立事件取得结果，不在事件入口前先执行同一项操作。
 
-Package Manager 接受调用方传入的本地目录或 zip。zip 解压到新建的临时目录，读完 manifest 并完成复制后只删除这个临时目录。目录则直接读取。通过检查的包复制到 `extensions.install_dir/<package.id>/<version>/`。源路径已经是这个安装目录时，就地使用，不再复制。调用方原来的目录和 zip 一律不删除。
+Package Manager 接受调用方传入的本地目录或 zip。zip 解压到新建的临时目录，读完 manifest 并完成复制后只删除这个临时目录。目录则直接读取。通过检查的包复制到 `<install_dir>/<package.id>/<version>/`，其中 `install_dir` 是调用方传入的安装目录。源路径已经是这个安装目录时，就地使用，不再复制。调用方原来的目录和 zip 一律不删除。
 
 同一个 `package.id` 在安装目录里只保留一个版本目录。同一批候选里这个 id 出现两次，`package.resolve` 让整批失败，错误码是 `EXTENSION_DUPLICATE_PACKAGE_ID`。id 已经在 Runtime 的生效记录里时，返回 `EXTENSION_PACKAGE_EXISTS`，不替换。要换这个包，先卸载，或直接改安装目录里的文件再 `reload`。
 
