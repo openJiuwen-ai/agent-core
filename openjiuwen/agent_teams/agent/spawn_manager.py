@@ -222,7 +222,7 @@ class SpawnManager:
         return self.spawned_handles.get(member_name) is not None
 
     async def cleanup_teammate(self, member_name: str) -> None:
-        handle = self.spawned_handles.pop(member_name, None)
+        handle = self.spawned_handles.get(member_name)
         if handle is None:
             return
         # Detach chunk forwarder before tearing the task down so a
@@ -240,6 +240,9 @@ class SpawnManager:
                 await handle.force_kill()
         except Exception as e:
             team_logger.error("Error cleaning up teammate {}: {}", member_name, e)
+            raise
+        if self.spawned_handles.get(member_name) is handle:
+            self.spawned_handles.pop(member_name, None)
 
     async def restart_teammate(self, member_name: str, max_retries: int = 3) -> bool:
         if member_name in self._spawning:
@@ -430,12 +433,13 @@ class SpawnManager:
         # Route through cleanup_teammate so chunk forwarders are
         # detached the same way as the single-member teardown path —
         # otherwise inprocess observers would leak across team shutdowns.
-        for member_name in list(self.spawned_handles.keys()):
-            try:
-                await self.cleanup_teammate(member_name)
-            except Exception as e:
-                team_logger.error("Error shutting down teammate {}: {}", member_name, e)
-        self.spawned_handles.clear()
+        results = await asyncio.gather(
+            *(self.cleanup_teammate(name) for name in list(self.spawned_handles)),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def cancel_recovery_tasks(self) -> None:
         if self.recovery_tasks:

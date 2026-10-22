@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from collections.abc import Awaitable, Callable
 from typing import (
     TYPE_CHECKING,
@@ -590,7 +592,24 @@ class CoordinationKernel:
             await self._dispatcher.deactivate()
         if self._scheduler is not None:
             self._scheduler.deactivate()
-        await self.drain_agent_task()
+        await host.spawn_manager.cancel_recovery_tasks()
+        if host.role == TeamRole.LEADER:
+            # Persist the stop reason before any member's finally runs.
+            await self._mark_live_teammates(MemberStatus.STOPPED)
+        # Signal leader and all members without waiting for earlier members.
+        results = await asyncio.gather(
+            self.drain_agent_task(), host.spawn_manager.shutdown_all_handles(),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        # An in-flight leader spawn may finish after the first handle snapshot.
+        # The leader has now exited, so drain those late handles before releasing resources.
+        if host.spawn_manager.spawned_handles:
+            if host.role == TeamRole.LEADER:
+                await self._mark_live_teammates(MemberStatus.STOPPED)
+            await host.spawn_manager.shutdown_all_handles()
         host.persist_allocator_state()
         if on_quiesced is not None:
             try:
@@ -604,16 +623,7 @@ class CoordinationKernel:
         memory_manager = host.resources.memory_manager
         if memory_manager and self._lifecycle_state == "running":
             await memory_manager.extract_after_round()
-        if host.role == TeamRole.LEADER:
-            # Mirror of the pause path: mark every spawned teammate so the
-            # persistence layer captures why the runtime went away. STOPPED
-            # is a non-disbanding teardown — ``recover_team`` re-spawns from
-            # here. Done before ``shutdown_all_handles`` so the in-process
-            # task cancellations cannot race with the status write.
-            await self._mark_live_teammates(MemberStatus.STOPPED)
         await self.unsubscribe_transport()
-        await host.spawn_manager.cancel_recovery_tasks()
-        await host.spawn_manager.shutdown_all_handles()
         if memory_manager:
             await memory_manager.close()
         if self._event_bus is not None:

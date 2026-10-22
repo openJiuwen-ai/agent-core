@@ -24,7 +24,7 @@ from openjiuwen.extensions.observability.demand import (
     release_observability_demand,
 )
 from openjiuwen.extensions.observability.setup import (
-    force_flush_provider,
+    force_flush_provider as force_flush_provider,
     get_config as get_shared_config,
     get_observability_runtime,
     get_tracer,
@@ -117,10 +117,10 @@ def finalize_team_trace(team_name: str) -> None:
 
         team_logger.info("otel: finalize_team_trace for team={}", team_name)
         if _monitor_handler is not None:
-            _monitor_handler.close_team_spans(team_name)
+            _monitor_handler.close_team_spans(team_name, flush=False)
 
         finalize_trace(team_name)
-        force_flush_provider()
+        _runtime.request_force_flush()
 
 
 def shutdown_observability() -> None:

@@ -612,3 +612,46 @@ async def test_finalize_round_does_not_extract_memory():
     host.stream_controller.stop.assert_awaited_once()
     host.resources.harness.stop.assert_awaited_once()
     assert host.stream_controller.stream_queue is None
+
+
+@pytest.mark.asyncio
+async def test_stop_drains_leader_and_members_concurrently():
+    host = _make_kernel_host()
+    leader, members = asyncio.Event(), asyncio.Event()
+
+    async def drain_leader():
+        leader.set()
+        await members.wait()
+
+    async def stop_members():
+        members.set()
+        await leader.wait()
+
+    host.stream_controller.drain_agent_task.side_effect = drain_leader
+    host.spawn_manager.shutdown_all_handles.side_effect = stop_members
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    await asyncio.wait_for(kernel.stop(), 1)
+    assert kernel._lifecycle_state == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_stop_also_drains_a_handle_registered_during_leader_cancellation():
+    host = _make_kernel_host()
+    first_snapshot = asyncio.Event()
+
+    async def drain_leader():
+        await first_snapshot.wait()
+        host.spawn_manager.spawned_handles["late"] = object()
+
+    async def stop_members():
+        host.spawn_manager.spawned_handles.clear()
+        first_snapshot.set()
+
+    host.stream_controller.drain_agent_task.side_effect = drain_leader
+    host.spawn_manager.shutdown_all_handles.side_effect = stop_members
+    kernel = CoordinationKernel(host)
+    kernel._lifecycle_state = "running"
+    await asyncio.wait_for(kernel.stop(), 1)
+    assert not host.spawn_manager.spawned_handles
+    assert host.spawn_manager.shutdown_all_handles.await_count == 2
