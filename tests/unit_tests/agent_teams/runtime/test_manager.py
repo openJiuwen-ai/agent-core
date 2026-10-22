@@ -346,12 +346,13 @@ async def test_stop_timeout_retains_runtime_and_coalesces_until_exit(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_stop_failure_retains_runtime_and_can_retry():
+@pytest.mark.parametrize("failure", [RuntimeError("stop failed"), asyncio.CancelledError("stop failed")])
+async def test_stop_failure_retains_runtime_and_can_retry(failure):
     manager = TeamRuntimeManager()
-    agent = SimpleNamespace(stop_coordination=AsyncMock(side_effect=[RuntimeError("stop failed"), None]))
+    agent = SimpleNamespace(stop_coordination=AsyncMock(side_effect=[failure, None]))
     entry = ActiveTeam(team_name="stop-test", agent=agent, current_session_id="s")
     await manager.pool.add(entry)
-    with pytest.raises(RuntimeError, match="stop failed"):
+    with pytest.raises(type(failure), match="stop failed"):
         await manager.stop_team(team_name="stop-test", session_id="s")
     assert await manager.pool.get("stop-test") is entry
     assert entry.state is RuntimeState.STOPPING

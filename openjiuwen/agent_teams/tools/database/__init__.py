@@ -213,7 +213,7 @@ class TeamDatabase:
         """Drop dynamic tables for current session."""
         if self.engine is None:
             return
-        async with self._sessions._write_lock:
+        async with self._sessions.serialize_writes():
             self._sessions.ready_session_ids.discard(get_session_id())
             await _drop_cur_session_tables(self.engine)
 
@@ -222,7 +222,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         if self.engine is None:
             return [], []
-        async with self._sessions._write_lock:
+        async with self._sessions.serialize_writes():
             self._sessions.ready_session_ids.clear()
             return await _cleanup_all_runtime_state(self.engine)
 
@@ -241,7 +241,7 @@ class TeamDatabase:
         await self._ensure_initialized()
         if self.engine is None:
             return []
-        async with self._sessions._write_lock:
+        async with self._sessions.serialize_writes():
             self._sessions.ready_session_ids.discard(session_id)
             return await _drop_session_tables_by_id(self.engine, session_id)
 

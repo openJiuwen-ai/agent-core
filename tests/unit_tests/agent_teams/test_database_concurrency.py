@@ -232,12 +232,12 @@ async def test_concurrent_create_messages_succeed(file_db: TeamDatabase) -> None
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_write_lock_serializes_writes(file_db: TeamDatabase) -> None:
-    """``DbSessions.write`` holds a process-wide lock: writers never overlap."""
+    """Session writes and engine-level DDL share the same serialization lock."""
     sessions = DbSessions(file_db.session_local)
     order: list[tuple[str, int]] = []
 
     async def writer(i: int) -> None:
-        async with sessions.write():
+        async with sessions.serialize_writes() if i == 2 else sessions.write():
             order.append(("enter", i))
             await asyncio.sleep(0.05)
             order.append(("exit", i))

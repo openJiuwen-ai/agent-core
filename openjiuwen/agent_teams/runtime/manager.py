@@ -810,8 +810,10 @@ class TeamRuntimeManager:
     async def _stop_entry(self, entry: ActiveTeam) -> bool:
         team_name, session_id = entry.team_name, entry.current_session_id
         entry.state = RuntimeState.STOPPING
-        if entry.stop_task is None or (entry.stop_task.done() and
-                                      (entry.stop_task.cancelled() or entry.stop_task.exception() is not None)):
+        retry_stop = False
+        if entry.stop_task is not None and entry.stop_task.done():
+            retry_stop = entry.stop_task.cancelled() or entry.stop_task.exception() is not None
+        if entry.stop_task is None or retry_stop:
             async def stop_owned_runtime() -> None:
                 stop_t0 = time.perf_counter()
                 await entry.agent.stop_coordination()

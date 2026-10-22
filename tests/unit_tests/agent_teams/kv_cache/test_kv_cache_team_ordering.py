@@ -231,6 +231,7 @@ class _SpawnManager:
 
     async def shutdown_all_handles(self) -> None:
         self.events.append("Teammates done")
+        self.spawned_handles.clear()
 
 
 class _Harness:
@@ -351,6 +352,7 @@ async def test_resume_from_pause_keeps_baseline_gate_reset_without_kvc_action(
     manager = TeamRuntimeManager()
     agent = SimpleNamespace()
     entry = ActiveTeam("team-a", agent, "sess-a", RuntimeState.PAUSED, _Gate(events))
+    await manager.pool.add(entry)
 
     async def _pre_run(session: Any, inputs: object) -> None:
         return None
@@ -381,6 +383,7 @@ async def test_resume_without_actionable_record_skips_prefetch_and_resets_gate(
         resources=SimpleNamespace(team_kv_cache_registry=_ActionableRegistry(events, actionable=False))
     )
     entry = ActiveTeam("team-a", agent, "sess-a", RuntimeState.PAUSED, _Gate(events))
+    await manager.pool.add(entry)
     monkeypatch.setattr(
         TeamRuntimeManager, "_pre_run_with_inputs", staticmethod(AsyncMock(return_value=None))
     )
@@ -524,8 +527,8 @@ async def test_whole_team_stop_order(monkeypatch: pytest.MonkeyPatch) -> None:
 
     original_remove = manager.pool.remove
 
-    async def _remove(team_name: str) -> None:
-        await original_remove(team_name)
+    async def _remove(team_name: str, *, expected: ActiveTeam | None = None) -> None:
+        await original_remove(team_name, expected=expected)
         events.append("pool remove")
 
     monkeypatch.setattr(manager.pool, "remove", _remove)

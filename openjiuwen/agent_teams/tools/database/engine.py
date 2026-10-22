@@ -93,6 +93,12 @@ class DbSessions:
         self.ready_session_ids: set[str] = set()
 
     @asynccontextmanager
+    async def serialize_writes(self) -> AsyncIterator[None]:
+        """Serialize writes and DDL without opening a session; non-reentrant."""
+        async with self._write_lock:
+            yield
+
+    @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
         """Yield a session for read-only work; the write lock is not held.
 
@@ -125,7 +131,7 @@ class DbSessions:
         behind each other) runs under ``_DB_SESSION_WATCHDOG_SECONDS`` so a
         wedged driver surfaces as a loud ``TimeoutError``.
         """
-        async with self._write_lock:
+        async with self.serialize_writes():
             try:
                 async with asyncio.timeout(_DB_SESSION_WATCHDOG_SECONDS):
                     async with self._write_session_local() as session:
