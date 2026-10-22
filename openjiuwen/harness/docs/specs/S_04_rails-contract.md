@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/`（70 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-10-14 |
-| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md` |
+| 最近一次修订日期 | 2026-10-15 |
+| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
 
@@ -57,6 +57,8 @@
    BaseSecurityRail / VerificationRail` → `85 AgentModeRail / SafetyPromptRail /
    ContextAssembleRail / Context*ProcessorRail / MultimodalContextSummarizerRail / Skill*CreateRail` →
    `80 MemoryRail / CodingMemoryRail / HeartbeatRail / Skill*EvolutionRail` →
+   `75 ExternalMemoryRail / JiuwenMemoryRail`（外接记忆 rail，在 MemoryRail(80) 之后、
+   LLMRetry(70) 之前） →
    `70 LLMRetryRail / ToolCallResilienceRail` → `60 EvolutionRail / LspRail` →
    `50 core 默认`（含 `tools/cua/rails.py` 的 Cua*Rail） → `10 TrajectoryRail / TaskCompletionRail`。
 5. **`init` 从不被回调框架调用**，只由 core 模块级 `init_rail(rail, agent)` 调用（>0.1s 升
@@ -111,7 +113,7 @@
 AgentModeRail, AskUserPayload, AskUserRail, BaseInterruptRail, BaseSecurityRail,
 CodingMemoryRail, ConfirmInterruptRail, ContextEvolutionRail, DeepAgentRail,
 EvolutionRail, EvolutionInterruptRail, ExternalMemoryRail, HeartbeatRail,
-ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRail,
+JiuwenMemoryRail, ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRail,
 MultimodalContextSummarizerRail, ARCHIVED_SCREEN_PLACEHOLDER,
 PermissionInterruptRail, ProgressiveToolRail, SafetyPromptRail, SecurityAllow,
 SecurityCheckContext, SecurityDecision, SecurityInterrupt, SecurityReject, SecurityRail,

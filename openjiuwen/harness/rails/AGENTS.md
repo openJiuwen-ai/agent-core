@@ -76,6 +76,7 @@ dataclass），本包只在其上加 `DeepAgentRail` 的两个 task-loop 钩子�
     / BaseSecurityRail / VerificationRail
  85 AgentModeRail / SafetyPromptRail / ContextAssembleRail / Context*ProcessorRail / Skill*CreateRail
  80 MemoryRail / CodingMemoryRail / HeartbeatRail / Skill*EvolutionRail
+ 75 ExternalMemoryRail / JiuwenMemoryRail
  70 LLMRetryRail / ToolCallResilienceRail
  60 EvolutionRail / LspRail
  50 core 默认

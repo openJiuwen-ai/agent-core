@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/cli/`（24 文件） |
-| 最近一次修订日期 | 2026-08-23 |
-| 关联 feature | N/A |
+| 最近一次修订日期 | 2026-10-15 |
+| 关联 feature | `F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
 
@@ -22,7 +22,9 @@
 - `cli/agent/config.py`：配置管理（`SETTINGS_PATH = ~/.openjiuwen/settings.json`，
   **三层优先级：settings.json < 环境变量 < CLI 参数**）、`load_settings_json` /
   `_default_workspace`（`~/.openjiuwen/workspace`）。
-- `cli/agent/factory.py`：agent 装配（消费 `S_01` 的 `create_deep_agent`）。
+- `cli/agent/factory.py`：agent 装配（消费 `S_01` 的 `create_deep_agent`）。特性 rail
+  经 env 开关在装配层挂载：`_build_memory_rail`（`EMBEDDING_*`）、
+  `_build_jiuwen_memory_rail`（`JIUWEN_MEMORY_*`，见接口契约）。
 - `cli/prompts/`：CLI 侧 prompt builder。
 - `cli/rails/`：`token_tracker.py` / `tool_tracker.py`（CLI 侧 rail）。
 - `cli/storage/session_store.py`：会话存储。
@@ -66,6 +68,13 @@ openjiuwen run PROMPT  # 非交互单轮
 SETTINGS_PATH = Path.home() / ".openjiuwen" / "settings.json"
 def load_settings_json(path: Optional[Path] = None) -> dict[str, Any]
 def _default_workspace() -> str  # ~/.openjiuwen/workspace
+
+# cli/agent/factory.py —— JiuwenMemoryRail 挂载开关（env 面，F_22）
+JIUWEN_MEMORY_ENABLED     # 总开关：1/true/yes/on 才挂载，缺省 off（不构造不挂载）
+JIUWEN_MEMORY_BASE_URL    # 服务地址；非空→HTTP，空→in-process SDK，缺省空（SDK 模式）
+JIUWEN_MEMORY_API_KEY     # Bearer 凭据（HTTP 模式可选；--auth-mode required 时必需）
+JIUWEN_MEMORY_TENANT_ID   # 租户轴，映射 rail scope_id，缺省 default
+JIUWEN_MEMORY_USER_ID     # 用户记忆轴，映射 rail user_id，缺省 jiuwenswarm-user
 ```
 
 错误 / 返回语义：
