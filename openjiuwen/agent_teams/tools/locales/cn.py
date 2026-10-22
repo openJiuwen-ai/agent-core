@@ -30,6 +30,21 @@ STRINGS: dict[str, str] = {
         "开启后你在创建任务时应按自己的判断为任务指派 0~N 个 reviewer（关键交付必配、"
         "琐碎任务可不配）；带 reviewer 的任务完成后进入验收，通过才算完成"
     ),
+    # 运行时错误消息（{reason} 插值）。
+    "build_team.retry_once": (
+        "团队初始化失败：{reason}。可重试 build_team 一次；"
+        "再次失败将自动熔断，之后请直接由主理人单人完成任务。"
+    ),
+    "build_team.circuit_open": (
+        "团队初始化失败（{reason}），build_team 已熔断——禁止再调用 build_team。"
+        "请由你（主理人）直接完成用户任务：不建任务、不拉成员、不使用团队协作能力；"
+        "并在答复开头明确告知用户「专家团队初始化失败，本次由主理人单人完成」。"
+    ),
+    "build_team.partial_built": (
+        "团队已创建（团队行已落库），但初始化未完整完成：{reason}。"
+        "禁止再调用 build_team——团队已存在，重试只会撞「已存在」失败；"
+        "请用 list_members 查看已有成员，用 spawn_member 逐个拉起缺失成员后继续。"
+    ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/cn/clean_team.md
     # ===== spawn_teammate ======================================================

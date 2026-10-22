@@ -113,6 +113,16 @@ def sample_agent_card():
     return AgentCard(name="TestAgent", description="A test agent", version="1.0.0")
 
 
+def _patch_create_team_boom(backend, monkeypatch, text="db gone"):
+    """让 build_team 在 create_team 处确定性失败（RuntimeError 不经
+    with_db_retry 重试，传播即时）。"""
+
+    async def _create_boom(**kwargs):
+        raise RuntimeError(text)
+
+    monkeypatch.setattr(backend.db.team, "create_team", _create_boom)
+
+
 # ========== Team Management Tools ==========
 
 
@@ -172,6 +182,376 @@ class TestBuildTeamTool:
         team_info = await db.team.get_team("test_team")
         assert team_info.display_name == "Minimal Team"
         assert team_info.desc == "A minimal team"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_failure_fires_callback_and_returns_retry_once(self, db, message_bus, t, monkeypatch):
+        """A failed build_team latches via the callback and returns a retry-once message.
+
+        the tool boundary digests tool failures into LLM-facing tool
+        messages, so the failure would otherwise be invisible outside the
+        round. The callback must fire exactly once with the error text; the
+        tool returns success=False (not raise) so the LLM-facing message is
+        ours: the first failure invites exactly one retry.
+        """
+        failures: list[str] = []
+
+        async def _on_failed(error: str) -> None:
+            failures.append(error)
+
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            on_team_build_failed=_on_failed,
+        )
+        tool = BuildTeamTool(backend, t)
+
+        # 基础设施失败（DB 写炸）——配置类错误（enable_hitt 越限）已豁免
+        # 熔断计数，不能再用它做确定性失败源。
+        _patch_create_team_boom(backend, monkeypatch)
+        result = await tool.invoke(
+            {
+                "display_name": "X",
+                "team_desc": "d",
+                "leader_display_name": "L",
+                "leader_desc": "d",
+            }
+        )
+
+        assert result.success is False
+        assert result.error and "db gone" in result.error
+        assert len(failures) == 1
+        assert "db gone" in failures[0]
+        assert backend.consecutive_build_failures == 1
+        assert backend.build_circuit_open is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_failure_callback_error_does_not_mask_build_error(self, db, message_bus, t, monkeypatch):
+        """A raising on_team_build_failed callback must not mask the build failure."""
+        async def _boom(_: str) -> None:
+            raise RuntimeError("callback exploded")
+
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            on_team_build_failed=_boom,
+        )
+        tool = BuildTeamTool(backend, t)
+
+        _patch_create_team_boom(backend, monkeypatch)
+        result = await tool.invoke(
+            {
+                "display_name": "X",
+                "team_desc": "d",
+                "leader_display_name": "L",
+                "leader_desc": "d",
+            }
+        )
+
+        assert result.success is False
+        assert result.error and "callback exploded" not in result.error
+        assert "db gone" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_failure_without_callback_still_reports(self, agent_team_without_team, t, monkeypatch):
+        """No callback wired: failure still returns a clean failure (no-op notify)."""
+        tool = BuildTeamTool(agent_team_without_team, t)
+        _patch_create_team_boom(agent_team_without_team, monkeypatch)
+        result = await tool.invoke(
+            {
+                "display_name": "X",
+                "team_desc": "d",
+                "leader_display_name": "L",
+                "leader_desc": "d",
+            }
+        )
+        assert result.success is False
+        assert result.error and "db gone" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_circuit_opens_after_threshold_and_refuses_fast(self, db, message_bus, t, monkeypatch):
+        """Second consecutive failure opens the circuit; later calls never reach build_team."""
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        tool = BuildTeamTool(backend, t)
+        _patch_create_team_boom(backend, monkeypatch)
+        bad_args = {
+            "display_name": "X",
+            "team_desc": "d",
+            "leader_display_name": "L",
+            "leader_desc": "d",
+        }
+
+        first = await tool.invoke(bad_args)
+        assert first.success is False
+        assert backend.build_circuit_open is False
+
+        second = await tool.invoke(bad_args)
+        assert second.success is False
+        assert backend.build_circuit_open is True
+        assert backend.consecutive_build_failures == 2
+
+        # Circuit open: fast refuse — build_team must not run at all.
+        async def _explode(**kwargs):  # pragma: no cover - must never run
+            raise AssertionError("build_team called while circuit open")
+
+        backend.build_team = _explode  # type: ignore[method-assign]
+        third = await tool.invoke(bad_args)
+        assert third.success is False
+        assert third.error and "db gone" in third.error  # carries the last failure reason
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_config_error_exempt_from_circuit_and_latch(self, db, message_bus, t, monkeypatch):
+        """配置/参数类错误（能力天花板越限）不计熔断、不 latch：
+
+        两次同类参数错不得开闸——LLM 修正参数后必须还能建团。
+        """
+        failures: list[str] = []
+
+        async def _on_failed(error: str) -> None:
+            failures.append(error)
+
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            on_team_build_failed=_on_failed,
+        )
+        tool = BuildTeamTool(backend, t)
+        bad_args = {
+            "display_name": "X",
+            "team_desc": "d",
+            "leader_display_name": "L",
+            "leader_desc": "d",
+            "enable_hitt": True,  # spec 天花板 False → AGENT_TEAM_CONFIG_INVALID
+        }
+        for _ in range(2):
+            result = await tool.invoke(bad_args)
+            assert result.success is False
+            assert result.error and "enable_hitt" in result.error
+
+        assert backend.consecutive_build_failures == 0
+        assert backend.build_circuit_open is False
+        assert failures == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_missing_required_arg_key_error_exempt_from_circuit(self, db, message_bus, t):
+        """缺必需参数的 KeyError 在 try 之外抛出：
+
+        参数缺失是 LLM 可修正的用法错误——不计熔断、不 latch，
+        两次漏参不得开闸，否则熔断被毒化成永久且推出误导性降级告警。
+        """
+        failures: list[str] = []
+
+        async def _on_failed(error: str) -> None:
+            failures.append(error)
+
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            on_team_build_failed=_on_failed,
+        )
+        tool = BuildTeamTool(backend, t)
+        missing_desc_args = {
+            "display_name": "X",
+            "team_desc": "d",
+            "leader_display_name": "L",
+            # leader_desc 缺失
+        }
+        for _ in range(2):
+            with pytest.raises(KeyError):
+                await tool.invoke(missing_desc_args)
+
+        assert backend.consecutive_build_failures == 0
+        assert backend.build_circuit_open is False
+        assert failures == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_partial_built_failure_does_not_count_circuit(self, db, message_bus, t):
+        """create_team 落行后的失败（成员注册等）= 半建成，不按"未建成"熔断/告警。
+
+        否则行已在 → 重试必撞「已存在」→ 两次即熔断，
+        leader 被永久禁用团队能力，而团队实际可用（spawn_member 可补齐）。
+        """
+        failures: list[str] = []
+
+        async def _on_failed(error: str) -> None:
+            failures.append(error)
+
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            on_team_build_failed=_on_failed,
+        )
+        tool = BuildTeamTool(backend, t)
+
+        async def _spawn_boom(**kwargs):
+            raise RuntimeError("spawn exploded")
+
+        backend.spawn_member = _spawn_boom  # type: ignore[method-assign]
+        args = {
+            "display_name": "X",
+            "team_desc": "d",
+            "leader_display_name": "L",
+            "leader_desc": "d",
+        }
+        # 两次失败（第二次 create_team 撞行已存在）都不应计熔断/触发 latch
+        for _ in range(2):
+            result = await tool.invoke(args)
+            assert result.success is False
+            assert result.error and "spawn_member" in result.error
+
+        assert backend.consecutive_build_failures == 0
+        assert backend.build_circuit_open is False
+        assert failures == []
+        # 团队行确实已落库（半建成前提成立）
+        assert await db.team.get_team("test_team") is not None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_partial_built_clears_stale_latch(self, db, message_bus, t):
+        """半建成分支必须清掉前轮"未建成"遗留的 latch：
+
+        先有一次未建成失败（latch 置位）→ 同一轮内重试时 create_team 已把
+        行写入但后续失败 → 半建成 → on_team_build_recovered 触发清 latch，
+        否则收尾会推出与"团队已存在"提示自相矛盾的 degraded 告警。
+        """
+        events: list[str] = []
+
+        async def _on_failed(error: str) -> None:
+            events.append(f"failed:{error}")
+
+        async def _on_recovered() -> None:
+            events.append("recovered")
+
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            on_team_build_failed=_on_failed,
+            on_team_build_recovered=_on_recovered,
+        )
+        tool = BuildTeamTool(backend, t)
+        args = {
+            "display_name": "X",
+            "team_desc": "d",
+            "leader_display_name": "L",
+            "leader_desc": "d",
+        }
+
+        # 第一次：未建成失败（create_team 即炸）→ latch 路径
+        async def _create_boom(**kwargs):
+            raise RuntimeError("db gone")
+
+        real_create = backend.db.team.create_team
+        backend.db.team.create_team = _create_boom  # type: ignore[method-assign]
+        first = await tool.invoke(args)
+        assert first.success is False
+        assert events == ["failed:RuntimeError: db gone"]
+
+        # 第二次：行落库后 spawn 失败 → 半建成 → 清 latch
+        backend.db.team.create_team = real_create  # type: ignore[method-assign]
+
+        async def _spawn_boom(**kwargs):
+            raise RuntimeError("spawn exploded")
+
+        backend.spawn_member = _spawn_boom  # type: ignore[method-assign]
+        second = await tool.invoke(args)
+        assert second.success is False
+        assert second.error and "spawn_member" in second.error
+        assert events[-1] == "recovered"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_successful_build_rearms_circuit(self, db, message_bus, t, monkeypatch):
+        """A successful build resets the counter so a later failure starts fresh."""
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+        )
+        tool = BuildTeamTool(backend, t)
+        _patch_create_team_boom(backend, monkeypatch)
+        bad_args = {
+            "display_name": "X",
+            "team_desc": "d",
+            "leader_display_name": "L",
+            "leader_desc": "d",
+        }
+        await tool.invoke(bad_args)
+        assert backend.consecutive_build_failures == 1
+
+        monkeypatch.undo()  # 解除 create_team 爆破——成功路径需要真 DAO
+        ok = await tool.invoke(
+            {
+                "display_name": "OK Team",
+                "team_desc": "d",
+                "leader_display_name": "L",
+                "leader_desc": "d",
+            }
+        )
+        assert ok.success is True
+        assert backend.consecutive_build_failures == 0
+        assert backend.build_circuit_open is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_success_does_not_fire_failure_callback(self, db, message_bus, t):
+        """Successful build never touches the failure callback."""
+        failures: list[str] = []
+
+        async def _on_failed(error: str) -> None:
+            failures.append(error)
+
+        backend = TeamBackend(
+            team_name="test_team",
+            member_name="leader1",
+            is_leader=True,
+            db=db,
+            messager=message_bus,
+            on_team_build_failed=_on_failed,
+        )
+        tool = BuildTeamTool(backend, t)
+        result = await tool.invoke(
+            {
+                "display_name": "OK Team",
+                "team_desc": "d",
+                "leader_display_name": "L",
+                "leader_desc": "d",
+            }
+        )
+
+        assert result.success is True
+        assert failures == []
 
 
 class TestCleanTeamTool:
