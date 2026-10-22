@@ -110,17 +110,25 @@ def release_observability() -> None:
 
 
 def finalize_team_trace(team_name: str) -> None:
-    """Close Team monitor spans and the Team root trace."""
-    with _lifecycle_lock:
-        if not team_name:
-            return
+    """Close Team monitor spans and the Team root trace, then flush once.
 
+    Span teardown runs under `_lifecycle_lock`. The provider flush is done
+    afterwards outside the lock so a slow exporter cannot stall other team
+    lifecycle operations that need the same lock. `close_team_spans` does not
+    flush on its own - a prior inner flush would be redundant and still miss
+    spans ended by `finalize_trace` below.
+    """
+    if not team_name:
+        return
+
+    with _lifecycle_lock:
         team_logger.info("otel: finalize_team_trace for team={}", team_name)
         if _monitor_handler is not None:
             _monitor_handler.close_team_spans(team_name)
 
         finalize_trace(team_name)
-        force_flush_provider()
+
+    force_flush_provider()
 
 
 def shutdown_observability() -> None:

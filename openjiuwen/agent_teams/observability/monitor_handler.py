@@ -146,7 +146,13 @@ class OtelTeamMonitorHandler:
         self._force_flush_provider()
 
     def close_team_spans(self, team_name: str) -> None:
-        """Close task spans for a specific team."""
+        """Close task spans for a specific team without flushing the provider.
+
+        Caller (``finalize_team_trace``) ends the team root / child spans next
+        and performs a single ``force_flush_provider``. Flushing here would be a
+        redundant synchronous exporter flush that still misses those later ends.
+        Process-wide shutdown keeps flushing via :meth:`close_all_spans`.
+        """
         for task_id, span in list(self._task_spans.items()):
             if span.is_recording():
                 span_team = span.attributes.get(AT_TEAM_NAME, "")
@@ -154,7 +160,6 @@ class OtelTeamMonitorHandler:
                     span.set_status(Status(StatusCode.OK))
                     span.end()
                     self._task_spans.pop(task_id, None)
-        self._force_flush_provider()
 
     @staticmethod
     def _force_flush_provider() -> None:

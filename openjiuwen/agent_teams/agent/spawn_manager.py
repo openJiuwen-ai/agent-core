@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -427,14 +428,55 @@ class SpawnManager:
             team_logger.error("Failed to publish restart event for {}: {}", member_name, e)
 
     async def shutdown_all_handles(self) -> None:
-        # Route through cleanup_teammate so chunk forwarders are
-        # detached the same way as the single-member teardown path —
-        # otherwise inprocess observers would leak across team shutdowns.
-        for member_name in list(self.spawned_handles.keys()):
-            try:
-                await self.cleanup_teammate(member_name)
-            except Exception as e:
-                team_logger.error("Error shutting down teammate {}: {}", member_name, e)
+        """Tear down every spawned teammate handle.
+
+        Routes through :meth:`cleanup_teammate` so chunk forwarders are
+        detached the same way as the single-member path — otherwise in-process
+        observers would leak across team shutdowns.
+
+        Cleanups run concurrently. Callers (``Kernel.pause`` / ``Kernel.stop``)
+        already persist teammate ``PAUSED`` / ``STOPPED`` status before this
+        method, so each cancelled member task only closes its kernel; gathering
+        independent ``force_kill`` awaits cuts wall time from sum(member) to
+        roughly max(member) without changing that mark-before-kill contract.
+        """
+        member_names = list(self.spawned_handles.keys())
+        if not member_names:
+            self.spawned_handles.clear()
+            return
+
+        async def _cleanup_timed(name: str) -> tuple[str, float]:
+            t0 = time.perf_counter()
+            await self.cleanup_teammate(name)
+            return name, (time.perf_counter() - t0) * 1000
+
+        results = await asyncio.gather(
+            *(_cleanup_timed(name) for name in member_names),
+            return_exceptions=True,
+        )
+        slowest_name = ""
+        slowest_ms = -1.0
+        for member_name, result in zip(member_names, results, strict=True):
+            if isinstance(result, BaseException):
+                team_logger.error(
+                    "Error shutting down teammate {}: {}",
+                    member_name,
+                    result,
+                )
+                continue
+            _name, duration_ms = result
+            if duration_ms > slowest_ms:
+                slowest_ms = duration_ms
+                slowest_name = _name
+        if slowest_name:
+            # One line: gather wall clock ≈ this member when teardown is skewed.
+            team_logger.info(
+                "lifecycle_timing teardown shutdown_all_handles "
+                "members={} slowest={} duration_ms={:.0f}",
+                len(member_names),
+                slowest_name,
+                slowest_ms,
+            )
         self.spawned_handles.clear()
 
     async def cancel_recovery_tasks(self) -> None:
