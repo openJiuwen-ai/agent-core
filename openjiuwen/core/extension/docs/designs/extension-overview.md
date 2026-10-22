@@ -5,7 +5,7 @@
 | 项 | 说明 |
 | --- | --- |
 | 类型 | 目标设计草案；尚未完成实现与验收 |
-| 最近一次修订日期 | 2026-10-21 |
+| 最近一次修订日期 | 2026-10-22 |
 | 责任人 | Core Extension 模块维护者；与 Events 的协作由双方维护者共同确认 |
 | 所属模块 | `agent-core/openjiuwen/core/extension/` |
 | 详细设计 | [Extension 详细架构](extension-architecture.md) |
@@ -41,7 +41,7 @@ Extension 负责把本地扩展包中的处理逻辑注册到 Events 已有的�
 
 EventBus 提供通用事件注册和调用服务，交回处理结果或异常。事件执行、平台能力和会话等公共约定以 Events 文档为准，本模块聚焦包管理事件及其 Core Handler 与模块能力的协作。
 
-调用方提供包路径。路径可以是安装目录里的包目录，也可以是 zip。jiuwenswarm 读取 `config.yaml` 的 `extensions.install_dir`，没有这项时用 `~/.jiuwenswarm/extensions`，再把得到的路径传给 Extension。Extension 不读取 `config.yaml`。它也不解析前端和 Gateway 的转发协议。
+调用方提供包来源和安装目录。包来源可以是本地包目录或 zip；安装目录通过 `open_install_dir(install_dir: Path, ...)` 传入。安装目录的选择、配置解析和默认值由调用方负责，Extension 只使用传入的路径。前端和 Gateway 的转发协议也由调用方适配。
 
 ### 1.3 当前范围与后续扩展
 
