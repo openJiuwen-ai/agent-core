@@ -20,14 +20,14 @@ from openjiuwen.harness.schema.interaction import (
     RoundWorkItem,
     SendInputRequest,
 )
-from tests.unit_tests.agent_teams.harness.fixtures import (
-    FakeReactAgent,
-)
 from openjiuwen.harness.tools.worktree import session as worktree_session_state
 from openjiuwen.harness.tools.worktree.models import WorktreeSession
 from openjiuwen.harness.tools.worktree.session import (
     get_current_session,
     set_current_session,
+)
+from tests.unit_tests.agent_teams.harness.fixtures import (
+    FakeReactAgent,
 )
 
 

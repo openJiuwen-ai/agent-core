@@ -2,6 +2,8 @@
 
 """Tests for openjiuwen.harness.tools.worktree.manager."""
 
+import os
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +16,7 @@ from openjiuwen.harness.tools.worktree.models import (
     WorktreeLifecyclePolicy,
 )
 from openjiuwen.harness.tools.worktree.session import get_current_session, set_current_session
+from openjiuwen.harness.tools.worktree.slug import worktree_path_for
 from openjiuwen.core.sys_operation.cwd import CwdState, _cwd_state, init_cwd
 from tests.test_logger import logger
 
@@ -93,7 +96,7 @@ class TestEnter:
         mock_backend.create.assert_awaited_once_with(
             "my-slug",
             "/repo",
-            f"{MOCK_WORKSPACE}/.worktrees/my-slug",
+            worktree_path_for(os.path.realpath(MOCK_WORKSPACE), "my-slug"),
         )
 
         # ContextVar should be set
