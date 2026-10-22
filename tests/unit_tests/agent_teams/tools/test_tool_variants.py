@@ -17,9 +17,9 @@ import pytest_asyncio
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.prompts import load_template
+from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 from openjiuwen.agent_teams.schema.status import MemberMode, TaskStatus
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamRole
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -113,14 +113,18 @@ async def test_swarmflow_guidance_matches_registered_tool(db, lang, enabled):
         lang=lang,
         swarmflow_model_resolver=resolver,
     )
-    policy = load_template("leader_policy", lang).content
+    static_prompt = build_team_member_system_prompt(
+        role=TeamRole.LEADER,
+        member_name=LEADER_NAME,
+        language=lang,
+    )
     tool_names = _tool_names(tools)
-    model_input = policy + "\n" + "\n".join(tool.card.description for tool in tools)
+    model_input = static_prompt + "\n" + "\n".join(tool.card.description for tool in tools)
 
-    # The always-present role policy stays capability-neutral. Swarmflow
+    # Every always-present static section stays capability-neutral. Swarmflow
     # guidance reaches the model only through the tool description, which is
     # registered under the same resolver gate as the executable tool itself.
-    assert "swarmflow" not in policy.lower()
+    assert "swarmflow" not in static_prompt.lower()
     assert ("swarmflow" in tool_names) is enabled
     assert ("swarmflow" in model_input.lower()) is enabled
 
