@@ -1238,8 +1238,11 @@ def group_request(**source_overrides):
     return request(kind="group_message", source=source)
 
 
-def judgment(decision, reason="需要处理"):
-    return json.dumps({"decision": decision, "reason": reason}, ensure_ascii=False)
+def judgment(decision, reason="需要处理", effort=None):
+    payload = {"decision": decision, "reason": reason}
+    if effort is not None:
+        payload["effort"] = effort
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def prompt_text(model):
@@ -1275,7 +1278,7 @@ async def test_group_message_without_port_is_rejected_before_events(harness):
 
 
 @pytest.mark.asyncio
-async def test_mentioned_group_message_bypasses_judgment_and_enters_execution(harness):
+async def test_mentioned_group_message_cannot_be_ignored(harness):
     spec = harness.spec(system_prompt="你是团队里的调研专家。")
     chat = GroupChat(
         (
@@ -1293,14 +1296,56 @@ async def test_mentioned_group_message_bypasses_judgment_and_enters_execution(ha
     final = next(event for event in events if event.event_type == "execution.final")
 
     assert decided.payload.decision == "respond"
-    assert decided.payload.evidence_refs == ("m-1",)
-    assert decided.payload.model_call_id is None
+    assert decided.payload.reason == module("execution.participation")._MENTION_REASON
+    assert decided.payload.notice is None
+    assert decided.payload.evidence_refs == ("m-1", "m-0")
+    assert decided.payload.model_call_id is not None
     assert started.payload.decision_event_id == decided.event_id
     assert final.payload.status == "completed"
-    assert harness.model.calls == 1 and harness.model.judge_calls == 0
-    assert chat.calls == []
+    assert harness.model.calls == 1 and harness.model.judge_calls == 1
+    assert chat.calls
+    assert "被提及: 是" in prompt_text(harness.model)
     assert harness.assembler.calls and ctx.binding.attempted
     assert host.events == events
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effort, expects_notice", [("extended", True), ("quick", False)])
+async def test_a_mention_waits_only_when_the_task_needs_time(harness, effort, expects_notice):
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    ctx, _ = harness.context(spec, group_chat=GroupChat((group_message(),)))
+    harness.model.judgments = [judgment("ignore", "模型不得忽略明确提及", effort=effort)]
+
+    events = await collect(
+        harness.api.execute_persistent_request(spec, ctx, group_request(mention_ids=("business-agent",)))
+    )
+
+    decided = next(event for event in events if event.event_type == "participation.decided")
+    assert decided.payload.decision == "respond"
+    if expects_notice:
+        assert decided.payload.notice in module("execution.participation").WAITING_REPLIES
+    else:
+        assert decided.payload.notice is None
+    assert events[-1].payload.status == "completed"
+    assert harness.model.judge_calls == 1 and harness.model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_a_mention_still_replies_when_the_effort_judgment_fails(harness):
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    ctx, _ = harness.context(spec, group_chat=GroupChat((group_message(),)))
+    harness.model.judgments = [RuntimeError("down"), RuntimeError("down"), RuntimeError("down")]
+
+    events = await collect(
+        harness.api.execute_persistent_request(spec, ctx, group_request(mention_ids=("business-agent",)))
+    )
+
+    decided = next(event for event in events if event.event_type == "participation.decided")
+    assert decided.payload.decision == "respond"
+    assert decided.payload.notice is None
+    assert decided.payload.model_call_id is None
+    assert events[-1].payload.status == "completed"
+    assert harness.model.judge_calls == 3 and harness.model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -1349,6 +1394,7 @@ async def test_unmentioned_group_message_can_continue_into_execution(harness, de
     decided = next(event for event in events if event.event_type == "participation.decided")
     started = next(event for event in events if event.event_type == "execution.started")
     assert decided.payload.decision == decision
+    assert decided.payload.notice is None
     assert started.payload.decision_event_id == decided.event_id
     assert "被提及: 否" in prompt_text(harness.model)
     assert events[-1].payload.status == "completed"
@@ -1356,6 +1402,46 @@ async def test_unmentioned_group_message_can_continue_into_execution(harness, de
     assert harness.model.judge_calls == 1 and harness.model.calls == 1
     assert len(harness.assembler.calls) == 1
     assert kinds(events).index("participation.decided") < kinds(events).index("execution.started")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("decision", "effort", "expects_notice"),
+    [
+        ("respond", "extended", True),
+        ("intervene", "extended", True),
+        ("respond", "quick", False),
+    ],
+)
+async def test_waiting_notice_follows_only_an_extended_reply(harness, decision, effort, expects_notice):
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    ctx, _ = harness.context(spec, group_chat=GroupChat((group_message(),)))
+    harness.model.judgments = [judgment(decision, effort=effort)]
+
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request(mention_ids=())))
+
+    decided = next(event for event in events if event.event_type == "participation.decided")
+    assert decided.payload.decision == decision
+    if expects_notice:
+        assert decided.payload.notice in module("execution.participation").WAITING_REPLIES
+    else:
+        assert decided.payload.notice is None
+    assert events[-1].payload.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_an_ignored_extended_label_does_not_send_a_waiting_notice(harness):
+    spec = harness.spec(system_prompt="你是团队里的调研专家。")
+    ctx, _ = harness.context(spec, group_chat=GroupChat((group_message(),)))
+    harness.model.judgments = [judgment("ignore", "与当前职责无关", effort="extended")]
+
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request(mention_ids=())))
+
+    decided = next(event for event in events if event.event_type == "participation.decided")
+    assert decided.payload.decision == "ignore"
+    assert decided.payload.notice is None
+    assert events[-1].payload.status == "ignored"
+    assert harness.model.calls == 0
 
 
 @pytest.mark.asyncio
@@ -2516,6 +2602,9 @@ async def test_a_participation_ending_is_retried_once_after_a_record_failure(har
     host.fail_once = {kind}
     events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
     assert (str(events[-1].event_type), ending_value(events[-1])) == (kind, value)
+    if ending == "ignored":
+        decided = next(event for event in events if event.event_type == "participation.decided")
+        assert decided.payload.notice is None
     recorded = [event for event in host.events if event.event_type == kind]
     assert recorded == [events[-1]], "recorded once, on the retry"
     assert ctx.binding.control.fatal is None

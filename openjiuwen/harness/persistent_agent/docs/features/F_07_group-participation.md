@@ -37,7 +37,7 @@ PA-07 负责消费宿主提供的群消息，作出三选一判断并交接结�
 
 ### 2.1 背景、目标与范围
 
-原执行入口在校验 RequestInput 时拒绝全部群消息。PA-07 将群消息分流为 `ignore / respond / intervene`，让无须参与的消息在正式 Agent 构造和窗口加载之前结束；需要参与的消息才进入已有执行路径。明确 @ 当前智能体时，直接记录 `respond` 并进入执行，不由模型判断忽略；未明确 @ 当前智能体时，人类与其他 Agent 消息继续走同一判断流程。
+原执行入口在校验 RequestInput 时拒绝全部群消息。PA-07 将群消息分流为 `ignore / respond / intervene`，让无须参与的消息在正式 Agent 构造和窗口加载之前结束；需要参与的消息才进入已有执行路径。明确 @ 当前智能体时，模型不得把它判成忽略，结果仍记为 `respond` 并进入执行；同一判断给出 `effort`，只有 `extended` 才附带等待提示。未明确 @ 时，人类与其他 Agent 消息继续走同一判断流程。
 
 本项包含独立模型调用、有限重试、预算消费、判断事件和终结分支，以及回应 / 插话与 `execution.started` 的关联。不包含群消息存储和检索适配（PA-23）、窗口组装与会话记录（PA-06、PA-10）、候选交接与发送（PA-08 / AgentServer），也不新增推理循环、前端页面或排队前判断入口。
 
@@ -45,20 +45,19 @@ PA-07 负责消费宿主提供的群消息，作出三选一判断并交接结�
 
 ### 2.2 总体方案
 
-[execute_persistent_request](../../execution/entries.py)先校验模式、上下文及 NoopCheckpointer、RequestInput、续做限制和群端口，再建立 emitter 并启动 runner。只有 `kind == group_message` 调用 [judge_participation](../../execution/participation.py)。明确 @ 当前智能体时直接记 `respond`，不读取群背景、不调用参与判断模型；其他群消息才读取 `GroupChatPort.recent_messages` 并做轻量判断，不调用尚不可用的 `seams.group_message_reader`。
+[execute_persistent_request](../../execution/entries.py)先校验模式、上下文及 NoopCheckpointer、RequestInput、续做限制和群端口，再建立 emitter 并启动 runner。只有 `kind == group_message` 调用 [judge_participation](../../execution/participation.py)。明确 @ 与其他群消息都读取 `GroupChatPort.recent_messages` 并做同一次轻量判断，不调用尚不可用的 `seams.group_message_reader`。明确 @ 的模型结论若不是 `respond`，仍改记 `respond`；判断尝试耗尽时也进入回复，且不附带等待提示。
 
 ```mermaid
 flowchart TD
     E["execute 首次迭代：基础校验"] --> K{"group_message？"}
     K -->|否| B["获取状态 / 窗口接入点"]
-    K -->|是，群端口存在| M{"明确 @ 当前智能体？"}
-    M -->|是| D["participation.decided(respond)"] --> B
-    M -->|否| J["独立判断：读取最近消息<br/>预算准入 → 无工具模型调用"]
-    J -->|ignore| I["participation.decided<br/>final ignored：本次不写窗口、无候选"]
-    J -->|respond / intervene| R["participation.decided<br/>保留 decision_event_id"]
+    K -->|是，群端口存在| J["独立判断：读取最近消息<br/>预算准入 → 无工具模型调用"]
+    J -->|ignore，且未明确 @| I["participation.decided<br/>final ignored：本次不写窗口、无候选"]
+    J -->|respond / intervene，或明确 @| R["participation.decided<br/>effort 为 extended 才带 notice"]
     R --> B
     J -->|预算拒绝 / 准入异常| P["paused budget_denied / error"]
-    J -->|模型不可用 / 尝试耗尽| F["final failed"]
+    J -->|未明确 @ 且模型不可用 / 尝试耗尽| F["final failed"]
+    J -->|明确 @ 且尝试耗尽| R2["participation.decided(respond)<br/>不带 notice"] --> B
     B --> A["构造 DeepAgent → execution.started<br/>加载记录 → 组装窗口 → 原生执行"]
 ```
 
@@ -70,9 +69,10 @@ flowchart TD
 | --- | --- |
 | D-01：判断前置且独立 | 只提供职责、当前消息和少量群背景，`tools=None`。忽略不构造 DeepAgent、不调用状态存储或窗口组装，也不产生候选回复；代价是不能使用正式窗口中的工作历史来判断 |
 | D-02：直接消费宿主群端口 | 依赖 PA-04 已有的 GroupChatPort / DTO 契约，避开未实现的 GroupMessageReader，允许与 PA-06、PA-23 并行；后续若统一读取接缝，须保持无需加载窗口和现有错误语义 |
-| D-03：明确 @ 与普通群消息分流 | 明确 @ 当前智能体时，直接产生 `participation.decided(respond)` 并进入普通执行路径；其他群消息才由轻量模型选择 ignore / respond / intervene。明确 @ 不保证模型、工具或外部渠道永不失败 |
+| D-03：明确 @ 必须回复，但仍做同一判断 | 明确 @ 与其他群消息共用同一次轻量判断。模型返回 ignore 或 intervene 时仍改记 `respond` 并进入执行；`effort` 为 `extended` 时附带等待提示。判断尝试耗尽时仍 `respond` 且不附带。预算拒绝或准入异常仍暂停。明确 @ 不保证模型、工具或外部渠道永不失败 |
 | D-04：失败、忽略与暂停分开 | 合法 ignore 才记 ignored；读取 / 模型 / 格式错误有限尝试后记 failed；预算拒绝或准入异常记 paused，避免把执行障碍解释为同事主动不参与 |
 | D-05：每次真实调用独立计量 | 每次准入生成新的 model_call_id，调用成功或模型异常均报告用量并产生 model.completed；未知用量明确标 unknown，不能伪造零消耗 |
+| D-06：只有需要思考时间的回复才附带等待提示 | `respond` 或 `intervene` 且 `effort` 为 `extended` 时，`participation.decided.notice` 才是按 `execution_id` 选取的一句固定文案。明确 @ 被改记为 `respond` 后，同样只看 `effort` 是否为 `extended`。`quick`、缺省或其他取值不附带。未明确 @ 的 `ignore` 不附带。判断只写入事件，不连接渠道、不产生 `output.proposed` 或 `reply.delta`。宿主读取该字段后自行投递 |
 
 | 原候选方案 | 拒绝或暂缓原因 | 重新评估条件 |
 | --- | --- | --- |
@@ -93,13 +93,13 @@ flowchart TD
 | 最近消息的提示格式 | 按端口返回顺序保留发送者名称和正文；queued_request 标为“排队背景”，其他为“群消息”。正文按状态展示：`recalled` 显示“已撤回”，`unavailable` 显示“正文暂缺”，其余状态正文为空时显示“（无正文）”，与当前消息的无正文占位一致（2026-10-13 修订；此前 recalled 或 text 为 None 一律显示“已撤回”，见第 4.4 节） |
 | 模型 | 复用发布配置中的 `spec.model.build()`，在尝试循环之前构建一次；缺少模型或 build 异常立即 final(failed)。没有单独的参与模型配置 |
 | 调用 | 两条消息：system 给出判断指令，user 提供职责、当前消息和最近背景；直接 `model.invoke(..., tools=None)`，不挂正式 Agent 的工具或 Rails、不起草公开回复 |
-| 输出 | 期望一个 JSON 对象，decision 为 ignore / respond / intervene，reason 为非空字符串；reason 压缩空白并截到 4096 字符 |
+| 输出 | 期望一个 JSON 对象，decision 为 ignore / respond / intervene，reason 为非空字符串；reason 压缩空白并截到 4096 字符。respond / intervene 另给 effort：`quick` 表示可以马上简短回复，`extended` 表示正式回复前需要一定思考或处理时间。只有后者写入 `notice`。effort 缺失或不是 `extended` 不使本次判断失败 |
 
 “最近 8 条”是请求端口的 limit，不是本地强制上限：实现仅排除触发消息，不再次切片；GroupMessagesResult 的 Schema 上限为 500。符合 limit 的宿主最多提供 8 条，排除触发消息后可能更少。当前不补足条数，也不保证所取页面涵盖全部历史。
 
 “轻量”表示输入与职责有限、无工具且独立于正式执行；没有独立小模型、总 token 上限或本层超时保证。正常成功只调用一次模型，异常可能增加到三次，最近消息读取失败则可能一次模型也不调用。
 
-输出解析先从响应提取文本：字符串直接使用；列表仅拼接字符串或字典中的 text。随后用 `_DECISION` 的贪婪 `{.*}` 匹配提取 JSON，再验证 decision / reason。因此可接受对象外的包裹文本，多个对象则可能解析失败；它不是严格的结构化输出 API，也不校验模型对象中的额外键。模型返回有效标签只证明决策可消费，不证明语义判断准确率。
+输出解析先从响应提取文本：字符串直接使用；列表仅拼接字符串或字典中的 text。随后用 `_DECISION` 的贪婪 `{.*}` 匹配提取 JSON，再验证 decision / reason。`effort` 只有精确等于 `extended` 且 decision 为 respond 或 intervene 时，才表示需要等待提示；其他取值、缺省和 ignore 都不附带。effort 不合法不导致本次判断失败。因此可接受对象外的包裹文本，多个对象则可能解析失败；它不是严格的结构化输出 API，也不校验模型对象中的额外键。模型返回有效标签只证明决策可消费，不证明语义判断准确率。
 
 #### 2.4.1 关键类、判断函数与接口定义
 
@@ -110,11 +110,12 @@ flowchart TD
 | 关键函数 / 完整源码签名 | 调用方、输入和返回值 | 异常与副作用 |
 | --- | --- | --- |
 | `async judge_participation(spec, context, request, emitter) -> ParticipationOutcome` | execute 的 runner 在状态 / 窗口加载和 Agent 构造之前调用；spec / context / request 分别为已校验的 PersistentAgentSpec、PersistentBuildContext、group_message RequestInput，emitter 为本 Execution 的 EventEmitter | 构建模型一次，最多三次尝试读取背景和判断；可产生预算预留、用量回报、model.completed、participation.decided、final / paused；关键记账异常传播，不加载 / 保存窗口 |
-| `_parse(text: str) -> tuple[str, str]`（同步） | 判断响应文本经 `_content(response) -> str` 提取后解析，返回合法 decision 和压缩、限长后的 reason | 无可匹配对象、标签或原因非法为 ValueError，坏 JSON 为 JSONDecodeError；不接受模型证据 ID，不产生事件 |
+| `_parse(text: str) -> tuple[str, str, bool]`（同步） | 判断响应文本经 `_content(response) -> str` 提取后解析，返回合法 decision、压缩并限长后的 reason，以及 `effort` 是否精确为 `extended` | 无可匹配对象、标签或原因非法为 ValueError，坏 JSON 为 JSONDecodeError；effort 缺失或不为 `extended` 时第三项为 False，不因此失败；调用方对明确 @ 改记 respond 后再决定是否写 `notice`；不接受模型证据 ID，不产生事件 |
 | `async _recent(port, execution, trigger_id: str)` | 使用 GroupChatPort，返回去掉触发消息后的 GroupMessage tuple；原调用是 recent_messages(execution, None, 8) | 重新校验响应并匹配归属；incomplete 为 RuntimeError，端口 / DTO 异常传播给判断重试；不追读游标或补足 8 条 |
 | `_usage(response) -> ModelUsage`（同步） | 从 usage_metadata 的两项计数构造 known；缺 metadata 或任一计数为 unknown | 不伪造零用量；计数类型错误仍可触发 DTO ValidationError，不能把所有非法 metadata 都写成已兜底 |
 | `async _report(budget, execution, model_call_id: str, usage: ModelUsage) -> None` | await BudgetPort.report，重新校验 BudgetReport 与调用归属 | 普通 Exception 只记诊断；report 是宿主记账副作用，失败不重跑已完成的模型 |
 | `async _finish_failed(emitter, reason: str) -> ParticipationOutcome` | 压缩原因并产生 final(failed)，返回 terminal=True | 关键记账失败传播（2026-10-15 起先按原事件重试一次，见下文第 2.5 节注明）；不伪装成 ignored，不保存空窗口 |
+| `_waiting_reply(execution_id: str) -> str`（同步） | 用 `execution_id` 的 SHA-256 首字节对 `WAITING_REPLIES` 取模，返回五句固定文案之一 | 同一 Execution 始终得到同一句；不读取模型输出，不向群发送 |
 
 这些签名没有为未注解参数补造类型声明；完整定义与辅助格式化函数来源均为 [participation.py](../../execution/participation.py)。`_duty(spec) -> str` 选择非空 system_prompt 或 Card 职责，`_current_block(source, agent_id: str) -> str` / `_recent_block(messages) -> str` 只构造判断文本，原始消息、排队背景及已撤回 / 正文暂缺 / 无正文的展示见第 2.4 节。它们不读取附件内容，也不向群发送消息。
 
@@ -129,12 +130,12 @@ flowchart TD
 ### 2.5 正常流程、预算与事件交接
 
 1. 群消息基础校验通过后 `_start` 创建本次 Execution 的 EventEmitter；上下文已有 emitter 时拒绝复用。缺少 GroupChatPort 在 `_start` 之前抛 `DEEPAGENT_CONFIG_PARAM_ERROR`，错误文本为 `group chat port is required for group participation`，不产生事件或构造实例。
-2. 若 `execution.agent_id` 出现在当前来源消息的 `mention_ids` 中，直接产生 `participation.decided(respond)`，证据只引用当前触发消息；跳过判断模型、群背景读取和 PA-07 判断预算。否则进入以下轻量模型判断流程。
-3. 对未明确 @ 的消息构建判断模型。每次尝试先读取并校验最近消息；读取失败不申请模型额度。读取成功后生成 `mc_` 加 UUID 的新调用 ID，调用 `BudgetPort.admit`，重新校验 BudgetAdmission 并匹配执行归属与调用 ID。
+2. 明确 @ 与其他群消息进入同一轻量判断。缺少模型或 build 异常时，两条路径都记 final(failed)。
+3. 每次尝试先读取并校验最近消息；读取失败不申请模型额度。读取成功后生成 `mc_` 加 UUID 的新调用 ID，调用 `BudgetPort.admit`，重新校验 BudgetAdmission 并匹配执行归属与调用 ID。明确 @ 的预算拒绝或准入异常同样暂停，不进入正式回复。
 4. 准入后调用模型。成功时提取 known / unknown 用量，先调用 `BudgetPort.report` 并校验 BudgetReport，再产生 `model.completed(model_call_id, config_version, usage)`，随后解析输出。缺少输入或输出 token 计数时用量为 unknown。
-5. 合法模型输出产生 `participation.decided`，携带 decision、reason、model_call_id 和 evidence_refs。证据引用按“触发消息 ID → 本次最近消息 ID”的顺序去重，最多 128 项；引用由实现生成，不接受模型猜造的消息 ID。
-6. ignore 随后记 `execution.final(status=ignored, reason=reason)`，output_refs 默认空，结束 runner。无 execution.started、reply.delta、output.proposed，也不读取 / 保存会话记录、不改写工作目标或窗口。
-7. 明确 @ 的 respond，或模型判断出的 respond / intervene，都会返回内部 `ParticipationOutcome(terminal=False, event_id=...)`。入口取得状态 / 窗口接入点，构造并复核 DeepAgent 后，才产生 `execution.started(goal=request.text, decision_event_id=...)`，随后 load → assemble → 原生执行。参与判断本身不完成任务或发送回复。
+5. 合法模型输出产生 `participation.decided`，携带 decision、reason、model_call_id 和 evidence_refs。当前智能体被明确 @ 时，ignore 与 intervene 都改记为 `respond`，reason 改用固定说明；`effort` 为 `extended` 时仍附带 `notice`。未被提及时，仅 `respond` 或 `intervene` 且 `effort` 为 `extended` 才附带 `notice`。`quick`、缺省和其他取值的 `notice` 为空。证据引用按“触发消息 ID → 本次最近消息 ID”的顺序去重，最多 128 项；引用由实现生成，不接受模型猜造的消息 ID。
+6. ignore 随后记 `execution.final(status=ignored, reason=reason)`，output_refs 默认空，结束 runner。无 execution.started、reply.delta、output.proposed，也不读取 / 保存会话记录、不改写工作目标或窗口，且不附带等待提示。
+7. 明确 @ 的 respond，或模型判断出的 respond / intervene，都会返回内部 `ParticipationOutcome(terminal=False, event_id=...)`。`effort` 为 `extended` 时带 `notice`，`quick` 不带。明确 @ 的判断在三次尝试后仍无合法输出时，记 `respond` 且不带 `notice`，然后进入执行，不记 failed。入口取得状态 / 窗口接入点，构造并复核 DeepAgent 后，才产生 `execution.started(goal=request.text, decision_event_id=...)`，随后 load → assemble → 原生执行。参与判断本身不完成任务，不产生候选回复，也不连接渠道；宿主若要让用户先看到等待提示，只投递事件里已经写好的 `notice`。
 
 [ParticipationPayload](../../schema/events.py)已有 DTO；本项新增的是生产者接入。participation.decided 和 model.completed 默认 visibility=private，属于普通事件；不能直接当作群公开回复。final 和 paused 属于关键事件，失败不得伪装成终结成功。
 
@@ -179,8 +180,8 @@ flowchart TD
 | 场景 | 操作与预期 | 现有测试 / 证据边界 |
 | --- | --- | --- |
 | PA-07-V-01：缺少群端口 | 执行合法群请求但不注入 GroupChatPort；在事件和实例构造之前拒绝 | `test_group_message_without_port_is_rejected_before_events` |
-| PA-07-V-02：明确 @ 当前智能体 | 不调用参与判断模型、不读群背景；产生 `participation.decided(respond)` 后进入 `execution.started`，后续走原执行路径 | `test_mentioned_group_message_bypasses_judgment_and_enters_execution`；使用 PA-06 / PA-10 替身，不证明真实服务端与渠道投递 |
-| PA-07-V-03：未被 @ 可回应或插话 | 分别返回 respond / intervene；started 引用同一个决策事件，替身窗口后进入原生流 | `test_unmentioned_group_message_can_continue_into_execution`（两个参数）；不证明真实窗口和渠道发送 |
+| PA-07-V-02：明确 @ 当前智能体 | 调用同一参与判断。模型返回 ignore 时仍记 `respond` 并进入执行；`effort` 为 `extended` 才带 `notice`。判断尝试耗尽时仍 `respond` 且不带 `notice` | `test_mentioned_group_message_cannot_be_ignored`、`test_a_mention_waits_only_when_the_task_needs_time`、`test_a_mention_still_replies_when_the_effort_judgment_fails`；使用 PA-06 / PA-10 替身，不证明真实服务端与渠道投递 |
+| PA-07-V-03：未被 @ 可回应或插话 | 分别返回 respond / intervene；started 引用同一个决策事件。只有 `effort=extended` 带 `notice`；`quick`、缺省和 `ignore` 的 `notice` 为空 | `test_unmentioned_group_message_can_continue_into_execution`、`test_waiting_notice_follows_only_an_extended_reply`、`test_an_ignored_extended_label_does_not_send_a_waiting_notice`；不证明真实窗口和渠道发送 |
 | PA-07-V-04：判断失败不记忽略 | 格式错误或模型异常三次；final(failed)，无 participation.decided、无正式模型流、无窗口调用 | `test_participation_failure_after_retries_is_not_ignored`（两个参数） |
 | PA-07-V-05：预算拒绝 | admit denied；只产生 paused(budget_denied)，不调用模型、不 report、不加载窗口 | `test_budget_denial_skips_the_participation_model` |
 | PA-07-V-06：不完整群背景 | 连续返回 incomplete；群读取三次、模型零次、final(failed)，无决策和窗口加载 | `test_incomplete_group_history_is_not_treated_as_ignore` |
@@ -232,7 +233,7 @@ PYTHONPATH=$PWD .venv/bin/python -m pytest tests/unit_tests/harness/persistent_a
 
 ### 4.2 验证结论
 
-现有定向测试证明：缺端口前置拒绝、明确 @ 绕过忽略判断并进入执行、未被 @ 可回应 / 插话或忽略、格式或模型错误三次后失败、预算拒绝不调用模型、incomplete 不伪装为空或忽略，以及私聊 / 定时任务旁路。明确 @ 只保证进入回复执行路径，不保证模型、工具或渠道发送一定成功。
+现有定向测试证明：缺端口前置拒绝、明确 @ 即使被模型判成忽略也进入回复、复杂的明确 @ 才附带等待提示、判断失败的明确 @ 仍回复且不附带、未被 @ 可回应 / 插话或忽略、格式或模型错误三次后失败、预算拒绝不调用模型、incomplete 不伪装为空或忽略，以及私聊 / 定时任务旁路。明确 @ 只保证进入回复执行路径，不保证模型、工具或渠道发送一定成功。
 
 替身提供了 PA-06、PA-10 的协作，因此“参与后 completed”只证明入口组合契约。当前生产 getter 仍拒绝，真实授权、群消息存储、预算对账、关键记账落盘、候选发送与模型判断质量未由本次测试证明。F_05 另有正式入口回归和未通过场景，以其验证记录为准；本次 10 项通过不覆盖或关闭那些缺口。
 
@@ -271,3 +272,6 @@ PYTHONPATH=$PWD .venv/bin/python -m pytest tests/unit_tests/harness/persistent_a
 - **2026-10-20：明确 @ 当前智能体必须进入回复执行。**
   - 最终变化：`judge_participation` 检查规范化后的 `mention_ids`；包含当前 `execution.agent_id` 时直接记录 `participation.decided(respond)` 并继续执行，不调用判断模型或读取判断用群背景。未明确 @ 的群消息维持原模型判断；私聊与定时任务不变。
   - 验证映射：PA-07-V-02 更新为明确 @ 必须进入执行；JiuwenSwarm JM-08 负责将当前接收 Bot 的 Feishu open_id 映射成对应内部 agent_id，仅放在该 Request 的来源消息中，公共群归档仍保留原始 Feishu mention ID。
+- **2026-10-22：只有需要思考时间的回复才附带固定等待提示。**
+  - 最终变化：`ParticipationPayload` 增加可选 `notice`。参与判断增加 `effort`：`quick` 表示可以马上简短回复，`extended` 表示正式回复前需要一定时间。只有将要回复且 `effort` 为 `extended` 时，`participation.decided` 写入 `WAITING_REPLIES` 中按 `execution_id` 稳定选取的一句。明确 @ 也走这道判断：模型不得把它忽略，`extended` 同样写 `notice`；三次尝试仍无合法输出时记 `respond` 且不写 `notice`，不记 failed。`quick`、缺省和其他取值不写。effort 缺失不使判断失败。判断仍不产生 `output.proposed` / `reply.delta`，也不连接渠道。
+  - 验证：`test_waiting_notice_follows_only_an_extended_reply`、`test_an_ignored_extended_label_does_not_send_a_waiting_notice`、`test_mentioned_group_message_cannot_be_ignored`、`test_a_mention_waits_only_when_the_task_needs_time`、`test_a_mention_still_replies_when_the_effort_judgment_fails`。渠道投递由宿主读取 `notice` 完成，不在本项验收。
