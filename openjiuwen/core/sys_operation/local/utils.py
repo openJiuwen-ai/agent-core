@@ -89,6 +89,7 @@ class AsyncProcessHandler:
         self._overall_timeout = timeout
         self._queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
         self._is_executed = False
+        self._background_tasks: set[asyncio.Task[str]] = set()
 
     def _kill_process_tree(self) -> None:
         """Kill the subprocess and all its children using process group.
@@ -308,6 +309,25 @@ class AsyncProcessHandler:
                 data=f"process wait error: {str(e)}"
             )
 
+    async def _drain_background_stderr(self, limit: int = 8192) -> str:
+        """Drain stderr without allowing retained diagnostics to grow without bound."""
+        if self._process.stderr is None:
+            return ""
+
+        retained = bytearray()
+        truncated = False
+        while chunk := await self._process.stderr.read(self._chunk_size):
+            remaining = limit - len(retained)
+            if remaining > 0:
+                retained.extend(chunk[:remaining])
+            if len(chunk) > remaining:
+                truncated = True
+
+        message = retained.decode(self._encoding, errors="replace").strip()
+        if truncated:
+            message = f"{message}\n[stderr truncated]" if message else "[stderr truncated]"
+        return message
+
     async def background(self, grace: float = 3.0) -> tuple[int, Optional[str]]:
         """Launch process in background and wait briefly for early failure detection.
 
@@ -328,11 +348,18 @@ class AsyncProcessHandler:
 
         self._is_executed = True
         pid = self._process.pid
+        stderr_task = asyncio.create_task(self._drain_background_stderr())
+        self._background_tasks.add(stderr_task)
+        stderr_task.add_done_callback(self._background_tasks.discard)
         try:
             await asyncio.wait_for(self._process.wait(), timeout=grace)
             code = self._process.returncode
             if code != 0:
-                return pid, f"process exited early with code {code}"
+                stderr = await stderr_task
+                error = f"process exited early with code {code}"
+                if stderr:
+                    error = f"{error}: {stderr}"
+                return pid, error
             return pid, None
         except asyncio.TimeoutError:
             return pid, None  # still running after grace period — success
