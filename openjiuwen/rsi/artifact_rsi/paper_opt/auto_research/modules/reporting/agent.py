@@ -1108,7 +1108,11 @@ class ReportingAgent:
         for section_id in DOCUMENT_ORDER:
             section_path = sections_dir / f"{section_id}.tex"
             if section_path.is_file():
-                drafts[section_id] = section_path.read_text(encoding="utf-8")
+                # errors="replace": a section file the agent's own session wrote
+                # can end up with a stray non-UTF-8 byte (e.g. an em dash written
+                # under the host's local codepage); one bad byte must not crash
+                # the whole reporting attempt and burn a retry over it.
+                drafts[section_id] = section_path.read_text(encoding="utf-8", errors="replace")
 
         notes: list[str] = []
         if session_error:
@@ -1154,10 +1158,14 @@ class ReportingAgent:
         title_path = workspace / "title.txt"
         if title_path.is_file():
             keywords_path = workspace / "keywords.txt"
-            keywords = keywords_path.read_text(encoding="utf-8").strip() if keywords_path.is_file() else None
+            keywords = (
+                keywords_path.read_text(encoding="utf-8", errors="replace").strip()
+                if keywords_path.is_file()
+                else None
+            )
             (workspace / "main.tex").write_text(
                 assemble_document(
-                    title=title_path.read_text(encoding="utf-8").strip(),
+                    title=title_path.read_text(encoding="utf-8", errors="replace").strip(),
                     section_bodies=drafts,
                     document_order=DOCUMENT_ORDER,
                     keywords=keywords,
