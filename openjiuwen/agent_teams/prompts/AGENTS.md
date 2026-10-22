@@ -20,9 +20,9 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 | 模板文件 | 触发条件 | 装配位置 | 主要内容 |
 |---|---|---|---|
 | （无模板，Python 装配） | `member_name` 或 `member_prompt` 非空 | `messages.build_identity_text` → `build_team_identity_section` | **唯一的 per-member 内容**：自身 `member_name` 一行 + `## 私有工作约定` 子节（`member_prompt` 为空则只出名字）。正文只有一份（`build_identity_text`），section 只是它给外部 CLI 用的包装（P:10，`include_member_specific=True` 内联进静态 prompt）；**进程内成员经对话历史收到它**（`<team-context>`），留在系统提示词会让每个成员各占一份前缀 KV cache。见 [[F_68]] / [[F_70]] |
-| `leader_policy.md` | `role == LEADER` | `build_team_role_section` | Leader 的核心理念、职责、成果交接、决策原则、响应节奏、任务状态流转。能力开关控制的工具（如 swarmflow）不得在这里写静态指引；其说明只随实际注册的工具描述进入模型输入 |
+| `leader_policy.md` | `role == LEADER` | `build_team_role_section` | Leader 的核心理念、职责、成果交接、决策原则、响应节奏、任务状态流转。能力开关控制的工具不得在无条件静态模板中写指引；其说明只随实际注册的工具描述进入模型输入 |
 | `teammate_policy.md` / `teammate_policy_external.md` | `role == TEAMMATE`，按 workspace variant 选择 | `build_team_role_section` | Native / external Teammate 的自主规划、领取、通信和代码 / 文件协作规范 |
-| `leader_workflow*.md` | Leader，按 `team_mode` 与 `dispatch_mode` 选版 | `build_team_workflow_section` | scheduled 继续使用 stable 的 default / predefined / hybrid 任务流程；autonomous 使用对应的 `*_autonomous` 版本，先按最终结果形态分为思辨或任务协作，只有任务协作才进入任务板流程 |
+| `leader_workflow*.md` | Leader，按 `team_mode` 与 `dispatch_mode` 选版 | `build_team_workflow_section` | scheduled 继续使用 stable 的 default / predefined / hybrid 任务流程；autonomous 使用对应的 `*_autonomous` 版本。该静态 section 必须保持能力中立，不得无条件指引可能被关闭的工具（如 swarmflow） |
 | `dispatch_autonomous_leader.md` · `dispatch_autonomous_teammate.md` | `dispatch_mode="autonomous"`（默认），按角色挑版 | `build_team_dispatch_section` | 思辨的参与范围、P2P 和软收束协议；任务协作经公共看板自主认领，也可在 `create_task` 时预指派。`human_agent` 无 `claim_task`、需 Leader 显式指派的说明也在 leader 版里 |
 | `dispatch_scheduled_leader.md` · `dispatch_scheduled_teammate.md` | `dispatch_mode="scheduled"`，按角色挑版 | `build_team_dispatch_section` | 任务由 Leader 直接指派：`create_task` 必带 assignee（已存在且非 leader）、成员先于任务存在、**不广播启动**（调度框架自动通知并拉起）；Teammate 不自主认领，用 `member_complete_task` 完成 |
 | `lifecycle_persistent.md` | Leader 且 `lifecycle="persistent"` | `build_team_lifecycle_section` | 长期团队收尾语义（完成任务后待命，不解散） |

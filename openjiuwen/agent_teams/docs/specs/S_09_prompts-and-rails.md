@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-10-21 |
+| 最近一次修订日期 | 2026-10-22 |
 | 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_team-debate-single-wrapup.md` |
 
 ## 范围 / 边界
@@ -47,7 +47,7 @@
    - **TEAMMATE 默认走 anonymous 变体（F_18）**：`_hitt_template_name` 对 `role == TEAMMATE` 默认选 `hitt_teammate_anonymous`——**无 `[human]` 引用、无 "real humans" 标签**的 role-neutral 契约。开关 `TeamAgentSpec.expose_human_agents_to_teammates=True` 切回 `hitt_teammate`（引用 `[human]` 标签）。该开关**同时**门控名册消息里 `[human]` 标记对 teammate 的可见性（`mark_humans`）：LEADER / HUMAN_AGENT 恒见，TEAMMATE 仅 expose 时见。
 8. **多数 `cn/` `en/` 模板为纯文本**：policy / workflow / lifecycle / inbound_tags / HITT leader・teammate・anonymous 不含占位符，`load_template` 原样返回。**例外**：`bridge_agent` 与 `hitt_human_agent` 用 `{{self_line}}`（自身名字行），由 builder `load_template(...).format({"self_line": ...})` 渲染（`{{ }}` 定界符），builder 仅在 BRIDGE_AGENT / HUMAN_AGENT 时才算 `self_line`。（早期 `system_prompt.md` 壳模板随 legacy `build_system_prompt` 一并移除。）
 
-8a. **能力门控指引只随工具描述出现**：`leader_policy` 等无条件注入的静态 section 不得提及 `swarmflow` 等可能被配置关闭的工具。`swarmflow` 的选择与使用说明集中在其工具 description；`create_team_tools` 仅在 resolver 存在时注册该工具，因此工具能力、指引和可执行表面由同一个 gate 控制。通用异步任务工具的描述也不得用 `swarmflow` 作为示例，否则关闭能力后仍会向模型泄露不存在的机制。
+8a. **能力门控指引只随工具描述出现**：所有无条件注入的静态 section（包括 `leader_policy` 与全部 `leader_workflow*` 变体）不得提及 `swarmflow` 等可能被配置关闭的工具。`swarmflow` 的选择与使用说明集中在其工具 description；`create_team_tools` 仅在 resolver 存在时注册该工具，因此工具能力、指引和可执行表面由同一个 gate 控制。通用异步任务工具的描述也不得用 `swarmflow` 作为示例，否则关闭能力后仍会向模型泄露不存在的机制。
 
 ### 双语 / i18n
 
