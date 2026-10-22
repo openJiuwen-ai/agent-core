@@ -1,11 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""PA-17 execution log summary: reading, contract checks and the summary given to the Agent."""
+"""PA-17 execution log snapshot: per-event checks, the lossless record and the injected preview."""
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any
 
 import pytest
 
@@ -83,11 +83,11 @@ def build_context(commit):
     )
 
 
-async def summarize(log=(), error=None, **options):
+async def snapshot(log=(), error=None):
     commit = Commit(log, error)
-    summary = await LOG.summarize_execution(build_context(commit), TARGET, **options)
+    taken = await LOG.read_snapshot(build_context(commit), TARGET)
     assert commit.calls == [(CURRENT, TARGET)], "reads the target Execution under the current invocation"
-    return summary
+    return taken
 
 
 def event(seq, kind, payload, source=OLD):
@@ -156,7 +156,7 @@ def paused(seq, reason="error", refs=(), detail="model failed"):
 
 
 def capture(monkeypatch):
-    """Diagnostics as (level, text); the summary never logs anything else."""
+    """Diagnostics as (level, text); reading a log never logs anything else."""
     logged = []
     for level in ("warning", "error"):
         monkeypatch.setattr(
@@ -168,61 +168,103 @@ def capture(monkeypatch):
 def noise(seq):
     usage = {"status": "known", "input_tokens": 1, "output_tokens": 2}
     kinds = [
-        (EventType.EXECUTION_STARTED, {"goal": SECRET}),
-        (EventType.REPLY_DELTA, {"text": SECRET}),
-        (EventType.MODEL_COMPLETED, {"model_call_id": "mc-" + SECRET, "config_version": "v1", "usage": usage}),
+        (EventType.EXECUTION_STARTED, {"goal": "整理报销"}),
+        (EventType.REPLY_DELTA, {"text": "正在核对"}),
+        (EventType.MODEL_COMPLETED, {"model_call_id": f"mc-{seq}", "config_version": "v1", "usage": usage}),
     ]
     kind, payload = kinds[seq % 3]
     return event(seq, kind, payload)
 
 
-@pytest.mark.asyncio
-async def test_a_full_log_lists_tools_conclusions_and_candidates_then_the_ending():
-    """PA-17-V-01."""
-    log = (
-        noise(1),
-        noise(2),
+def rebuilt(head, line):
+    """The saved event back from the header and one line: what the header states is put back in."""
+    data = json.loads(line)
+    shared = {name: head[name] for name in ("namespace_id", "agent_id", "session_id", "request_id", "source_ref")}
+    shared.update(execution_id=head["execution_id"], schema_version=head["event_schema_version"])
+    return AgentEvent.model_validate({**shared, **data})
+
+
+def preview_of(taken):
+    head, *lines = LOG.preview(taken).split("\n")
+    return json.loads(head), [json.loads(line) for line in lines]
+
+
+def mixed_log():
+    decided = event(
+        1, EventType.PARTICIPATION_DECIDED, {"decision": "respond", "reason": "被 @", "model_call_id": "mc-0"}
+    )
+    started = event(2, EventType.EXECUTION_STARTED, {"goal": "整理报销", "decision_event_id": decided.event_id})
+    confirm = {
+        "reason": "awaiting_confirmation",
+        "intercepted": [
+            {"tool_call_id": "call-a", "tool_name": "delete_file", "arguments": "path=a.xlsx"},
+            {"tool_call_id": "call-b", "tool_name": "send_mail", "arguments": "x", "arguments_truncated": True},
+        ],
+    }
+    return (
+        decided,
+        started,
         noise(3),
         completed(4, "read_file", args="reports/0930.xlsx", result="已读取，共 12 行"),
-        progress(5, "审批停在财务复核环节"),
-        intent(6, "op_12", target="reminder:BX-0930"),
-        completed(7, "submit_reminder", op="op_12", args="单号=BX-0930", result="已提醒", refs=("receipt:77",)),
-        answer(8, "out_a"),
-        final(9, refs=("out_a",)),
+        intent(5, "op_12", target="reminder:BX-0930"),
+        completed(6, "submit_reminder", op="op_12", args="单号=BX-0930", result="已提醒", refs=("receipt:77",)),
+        shared_file(7, "out_f", caption="季度报告"),
+        event(8, EventType.WINDOW_SWITCHED, {"archive_ref": "archive#7", "window_seq": 2}),
+        event(9, EventType.EXECUTION_PAUSED, confirm),
     )
-    summary = await summarize(log)
-    assert summary.missing is False
-    assert summary.text.split("\n") == [
-        "上一次执行 execution-2（请求 request-1）的执行日志整理：",
-        "1. [成功] read_file(reports/0930.xlsx) → 已读取，共 12 行（调用 call-4）",
-        "2. [结论] 审批停在财务复核环节",
-        "3. [成功] submit_reminder(单号=BX-0930) → 已提醒（结果引用 receipt:77）"
-        "（写操作 op_12，调用 call-op_12，目标 reminder:BX-0930）",
-        "4. [交出候选] 最终回答第 1 段（out_a，目标 chat-1，message）："
-        "被结束记录“已完成”引用（服务端负责投递，不代表已送达）：回答正文",
-        "结局：已完成；引用候选 out_a",
-        "归档：日志中没有换窗记录（仅为日志中的归档引用，尚未按 execution_id 查询，可能不全）",
-        LOG._FOOTER,
-    ]
-    assert SECRET not in summary.text
 
 
 @pytest.mark.asyncio
-async def test_an_empty_log_is_a_missing_record(monkeypatch):
+async def test_the_record_keeps_every_event_and_rebuilds_it_exactly():
+    """PA-17-V-01: header plus line give back the saved event; nothing is merged, translated or dropped."""
+    log = mixed_log()
+    taken = await snapshot(log)
+    head, lines = LOG.header(taken), LOG.event_lines(taken)
+    assert taken.unusable is None and head["usable"] is True and head["events"] == len(log)
+    assert [seq for seq, _ in lines] == list(range(1, 10))
+    for original, (_, line) in zip(log, lines):
+        again = rebuilt(head, line)
+        assert again.event_id == original.event_id and again.proposal_digest() == original.proposal_digest()
+    assert head["ending_seqs"] == [9] and head["source_mismatch"] is False
+    assert head["missing_seq_ranges"] == [] and head["skipped"] == {} and head["duplicates_removed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_only_referenced_event_ids_stay_and_false_or_zero_values_are_kept():
+    """PA-17-V-20: null and empty values go; 0, false and an event ID another event names stay."""
+    taken = await snapshot(
+        (
+            *mixed_log(),
+            shared_file(10, "out_z", path="empty.md"),
+        )
+    )
+    rows = {seq: json.loads(line) for seq, line in LOG.event_lines(taken)}
+    assert rows[1]["event_id"] == taken.events[0].event_id, "named by execution.started.decision_event_id"
+    assert all("event_id" not in row for seq, row in rows.items() if seq != 1)
+    assert rows[9]["payload"]["intercepted"][0]["arguments_truncated"] is False
+    assert rows[4]["visibility"] == "private"
+    assert "target_ref" not in rows[4]["payload"] and "result_refs" not in rows[4]["payload"]
+    assert all(name not in rows[4] for name in ("namespace_id", "request_id", "execution_id", "source_ref"))
+
+
+@pytest.mark.asyncio
+async def test_an_empty_log_is_unusable(monkeypatch):
     """PA-17-V-02."""
     logged = capture(monkeypatch)
-    summary = await summarize(())
+    taken = await snapshot(())
     [(level, text)] = logged
-    assert summary.missing is True and level == "warning" and "log is empty" in text, "nothing saved can be real"
-    assert summary.text == f"上一次执行 {TARGET}：{LOG._MISSING}"
+    assert taken.unusable == "empty" and level == "warning" and "log is empty" in text
+    head = LOG.header(taken)
+    assert head["usable"] is False and head["unusable_reason"] == "empty" and head["events"] == 0
+    assert LOG.event_lines(taken) == ()
 
 
 @pytest.mark.asyncio
-async def test_a_failed_read_is_a_missing_record_without_host_detail(monkeypatch):
+async def test_a_failed_read_is_unusable_without_host_detail(monkeypatch):
     """PA-17-V-03."""
     logged = capture(monkeypatch)
-    summary = await summarize(error=PermissionError(SECRET))
-    assert summary.missing is True and SECRET not in summary.text
+    taken = await snapshot(error=PermissionError(SECRET))
+    assert taken.unusable == "read_failed" and SECRET not in LOG.preview(taken)
     [(level, text)] = logged
     assert level == "warning" and SECRET not in text and "PermissionError" in text and TARGET in text
 
@@ -230,19 +272,7 @@ async def test_a_failed_read_is_a_missing_record_without_host_detail(monkeypatch
 @pytest.mark.asyncio
 async def test_cancellation_propagates():
     with pytest.raises(asyncio.CancelledError):
-        await summarize(error=asyncio.CancelledError())
-
-
-@pytest.mark.parametrize("detail", ["full", "brief", "missing"])
-@pytest.mark.asyncio
-async def test_log_material_leaves_asking_the_initiator_to_the_model(detail):
-    if detail == "missing":
-        summary = await summarize(error=OSError("not available"))
-    else:
-        summary = await summarize((progress(1, "核对进度"),), detail=detail)
-    assert "查不清时可以询问发起人，是否询问由模型判断" in summary.text
-    assert "不能直接重做" in summary.text
-    assert "查不清询问发起人" not in summary.text
+        await snapshot(error=asyncio.CancelledError())
 
 
 @pytest.mark.parametrize("bad", ["", "has space", "a\x00b", "a\nb", "x" * 513, None, 123, b"execution-2"])
@@ -251,7 +281,7 @@ async def test_an_invalid_execution_id_is_rejected_before_the_port(bad):
     """PA-17-V-15: the Identifier constraint applies; an argument error is not a missing record."""
     commit = Commit()
     with pytest.raises(BaseError) as exc_info:
-        await LOG.summarize_execution(build_context(commit), bad)
+        await LOG.read_snapshot(build_context(commit), bad)
     assert exc_info.value.status == StatusCode.DEEPAGENT_INPUT_PARAM_ERROR
     assert commit.calls == [], "the port is not called"
 
@@ -259,7 +289,7 @@ async def test_an_invalid_execution_id_is_rejected_before_the_port(bad):
 @pytest.mark.asyncio
 async def test_a_wrong_context_is_rejected_before_the_port():
     with pytest.raises(BaseError) as exc_info:
-        await LOG.summarize_execution(object(), TARGET)
+        await LOG.read_snapshot(object(), TARGET)
     assert exc_info.value.status == StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR
 
 
@@ -268,322 +298,164 @@ OTHERS = {
     "agent": {"agent_id": "agent-b"},
     "session": {"session_id": "session-b"},
     "request": {"request_id": "request-9"},
+    "execution": {"execution_id": "e-1"},
 }
 
 
-@pytest.mark.parametrize(
-    "bad",
-    [
-        *OTHERS,
-        "execution",
-        "mixed_source",
-        "not_an_event",
-        "same_event_id",
-        "same_local_seq",
-        "none",
-        "text",
-        "mapping",
-        "list",
-    ],
-)
+@pytest.mark.parametrize("bad", [*OTHERS, "not_an_event"])
 @pytest.mark.asyncio
-async def test_a_log_that_breaks_the_contract_is_not_used_at_all(bad, monkeypatch):
-    """PA-17-V-04: nothing from such a log reaches the summary or the diagnostics."""
+async def test_an_item_that_cannot_be_used_is_skipped_and_the_rest_stays(bad, monkeypatch):
+    """PA-17-V-04: the pending write is still there; the skipped item is named by its place, not its content."""
     logged = capture(monkeypatch)
-    good = (progress(1, SECRET), completed(2, "read_file", result=SECRET))
     if bad in OTHERS:
-        source = replace(OLD, **OTHERS[bad])
-        log = good + (event(3, EventType.PROGRESS_UPDATED, {"text": SECRET}, source=source),)
-    elif bad == "execution":
-        log = good + (event(3, EventType.PROGRESS_UPDATED, {"text": SECRET}, source=replace(OLD, execution_id="e-1")),)
-    elif bad == "mixed_source":
-        log = good + (event(3, EventType.PROGRESS_UPDATED, {"text": SECRET}, source=replace(OLD, source_ref="s-2")),)
-    elif bad == "not_an_event":
-        log = good + ({"event_type": "progress.updated", "payload": {"text": SECRET}},)
-    elif bad == "same_event_id":
-        log = good + (progress(1, SECRET + " changed"),)
-    elif bad == "same_local_seq":
-        log = good + (event(1, EventType.PROGRESS_UPDATED, {"text": SECRET}, source=replace(OLD, source_ref="s-2")),)
+        stray = event(3, EventType.PROGRESS_UPDATED, {"text": SECRET}, source=replace(OLD, **OTHERS[bad]))
     else:
-        log = {"none": None, "text": SECRET, "mapping": {"events": [SECRET]}, "list": list(good)}[bad]
-    summary = await summarize(log)
-    assert summary.missing is True and summary.text == f"上一次执行 {TARGET}：{LOG._MISSING}"
+        stray = {"event_type": "progress.updated", "local_seq": 3, "payload": {"text": SECRET}}
+    taken = await snapshot((progress(1, "已核对"), stray, intent(2, "op_a", "send_mail")))
+    category = "invalid_event" if bad == "not_an_event" else "foreign_event"
+    assert taken.unusable is None and [event.local_seq for event in taken.events] == [1, 2]
+    head, lines = preview_of(taken)
+    assert head["skipped"] == {category: {"count": 1, "indexes": [1]}}, "its own local_seq is not trusted"
+    assert head["missing_seq_ranges"] == [] and lines[1]["payload"]["operation_id"] == "op_a"
+    assert SECRET not in LOG.preview(taken) and SECRET not in json.dumps(LOG.header(taken))
     [(level, text)] = logged
-    assert level == "error" and SECRET not in text, "a log that breaks the port contract is an error"
-    category = {
-        "none": "not a tuple",
-        "text": "not a tuple",
-        "mapping": "not a tuple",
-        "list": "not a tuple",
-        "mixed_source": "different sources",
-    }.get(bad)
-    assert category is None or category in text
+    assert level == "error" and f"{category}=1" in text and SECRET not in text
 
 
 @pytest.mark.asyncio
-async def test_the_earlier_execution_may_have_its_own_source():
-    """PA-17-V-04: one source per log; it need not be the current Execution's."""
+async def test_a_local_seq_with_different_events_skips_the_whole_group():
+    """PA-17-V-16: which one was saved for real cannot be told, so neither is used; identical copies count once."""
+    again = progress(2, "b")
+    log = (progress(1, "a"), again, progress(2, "b changed"), again, intent(3, "op_a"), intent(3, "op_a"))
+    taken = await snapshot(log)
+    assert [event.local_seq for event in taken.events] == [1, 3]
+    head = LOG.header(taken)
+    assert head["skipped"] == {"conflicting_events": {"count": 3, "local_seqs": [2]}}
+    assert head["duplicates_removed"] == 1 and head["missing_seq_ranges"] == [], "a conflicting seq is not a gap"
+
+
+@pytest.mark.asyncio
+async def test_a_different_source_is_kept_on_its_event_and_flagged():
+    """PA-17-V-17."""
+    other = replace(OLD, source_ref="source:message-2")
+    taken = await snapshot((progress(1, "a"), event(2, EventType.PROGRESS_UPDATED, {"text": "b"}, source=other)))
+    head, lines = LOG.header(taken), LOG.event_lines(taken)
+    assert head["source_ref"] == OLD.source_ref and head["source_mismatch"] is True
+    assert "source_ref" not in json.loads(lines[0][1]) and json.loads(lines[1][1])["source_ref"] == "source:message-2"
+
+
+@pytest.mark.asyncio
+async def test_the_header_source_comes_from_the_log_not_the_current_execution():
     own = replace(OLD, source_ref="source:message-0")
-    log = (
-        event(1, EventType.PROGRESS_UPDATED, {"text": "a"}, source=own),
-        event(2, EventType.PROGRESS_UPDATED, {"text": "b"}, source=own),
-    )
-    summary = await summarize(log)
-    assert summary.missing is False and "[结论] b" in summary.text
+    taken = await snapshot((event(1, EventType.PROGRESS_UPDATED, {"text": "a"}, source=own),))
+    assert LOG.header(taken)["source_ref"] == "source:message-0" != CURRENT.source_ref
+
+
+@pytest.mark.parametrize("returned", [None, SECRET, {"events": [SECRET]}])
+@pytest.mark.asyncio
+async def test_a_return_value_that_is_not_a_sequence_is_unusable(returned, monkeypatch):
+    """PA-17-V-18."""
+    logged = capture(monkeypatch)
+    taken = await snapshot(returned)
+    assert taken.unusable == "not_a_sequence" and SECRET not in LOG.preview(taken)
+    [(level, text)] = logged
+    assert level == "error" and "not a sequence" in text
 
 
 @pytest.mark.asyncio
-async def test_gaps_and_a_missing_ending_are_stated_but_the_log_is_used():
-    """PA-17-V-05."""
-    summary = await summarize((progress(1, "a"), progress(4, "b"), progress(5, "c"), progress(9, "d")))
-    assert summary.missing is False
-    lines = summary.text.split("\n")
-    assert lines[1] == "日志缺少第 2～3、6～8 条记录。"
-    assert "结局：未记录结束；无法仅凭日志确定执行是否已结束。" in lines
-    single = await summarize((progress(1, "a"), progress(3, "b"), final(4)))
-    assert "日志缺少第 2 条记录。" in single.text
+async def test_a_list_is_accepted_as_a_tolerance():
+    taken = await snapshot([progress(1, "a")])
+    assert taken.unusable is None and len(taken.events) == 1
 
 
 @pytest.mark.asyncio
-async def test_each_write_keeps_its_status_and_none_is_called_done():
-    """PA-17-V-06."""
-    log = (
-        intent(1, "op_a", "send_mail"),
-        intent(2, "op_b", "upload_report"),
-        completed(3, "upload_report", status="unknown", op="op_b", result="上传超时", reason="timed out"),
-        intent(4, "op_c", "delete_draft"),
-        completed(5, "delete_draft", status="failed", op="op_c", result="权限不足", reason="forbidden"),
-        completed(6, "write_file", op="op_d", result="已写入"),
-        completed(7, "read_file", status="unknown", result="读取超时", reason="timed out"),
-        completed(8, "custom_tool", result="已处理"),
+async def test_a_log_without_one_usable_event_is_unusable_and_says_what_was_skipped():
+    """PA-17-V-19."""
+    taken = await snapshot(
+        ({"local_seq": 1}, event(2, EventType.PROGRESS_UPDATED, {"text": "x"}, source=replace(OLD, request_id="r-9")))
     )
-    lines = (await summarize(log)).text.split("\n")
-    assert lines[1] == (
-        "1. [已登记，无结果] send_mail(单号=BX-0930)（写操作 op_a，调用 call-op_a）：结果不明，先查证，不能直接重做"
-    )
-    assert lines[2] == (
-        "2. [结果不明] upload_report(单号=BX-0930) → 上传超时（原因：timed out）（写操作 op_b，调用 call-op_b）："
-        "先查证，不能直接重做"
-    )
-    assert lines[3] == (
-        "3. [失败] delete_draft(单号=BX-0930) → 权限不足（原因：forbidden）（写操作 op_c，调用 call-op_c）："
-        "失败不代表没有副作用，必要时查证"
-    )
-    assert lines[4] == "4. [成功] write_file(x) → 已写入（写操作 op_d，调用 call-op_d）（未见对应的意图记录）"
-    assert lines[5] == "5. [结果不明] read_file(x) → 读取超时（原因：timed out）（调用 call-7）"
-    assert lines[6] == "6. [成功] custom_tool(x) → 已处理（写操作，调用 call-8）（未见对应的意图记录）", (
-        "not on the read-only list"
-    )
+    head = LOG.header(taken)
+    assert taken.unusable == "no_usable_event" and head["usable"] is False
+    assert head["skipped"] == {
+        "invalid_event": {"count": 1, "indexes": [0]},
+        "foreign_event": {"count": 1, "indexes": [1]},
+    }
 
 
 @pytest.mark.asyncio
-async def test_a_result_is_merged_only_when_it_matches_one_intent():
-    """PA-17-V-11: a reused operation_id never lets a result stand for a later pending intent."""
-    reused = (
-        intent(1, "op_r", "send_mail", args="第一次"),
-        completed(2, "send_mail", op="op_r", result="已发送"),
-        intent(3, "op_r", "send_mail", args="第二次"),
-    )
-    lines = (await summarize(reused)).text.split("\n")
-    assert lines[1] == "1. [成功] send_mail(第一次) → 已发送（写操作 op_r，调用 call-op_r）", "merged before the reuse"
-    assert lines[2].startswith("2. [已登记，无结果] send_mail(第二次)"), "the later intent stays unresolved"
-    assert "operation_id 与其他调用重复，结果无法唯一关联" in lines[2]
-
-    late = reused + (completed(4, "send_mail", op="op_r", result="已发送"),)
-    summary = await summarize(late)
-    lines = summary.text.split("\n")
-    assert summary.missing is False
-    assert lines[2].startswith("2. [已登记，无结果] send_mail(第二次)"), "a late result of A does not resolve B"
-    assert lines[3].startswith("3. [成功] send_mail(x) → 已发送") and "无法确定对应哪次意图，未合并" in lines[3]
-
-    ambiguous = (
-        intent(1, "op_r", "send_mail", args="甲"),
-        intent(2, "op_r", "send_mail", args="乙"),
-        completed(3, "send_mail", op="op_r", result="已发送"),
-    )
-    lines = (await summarize(ambiguous)).text.split("\n")
-    assert lines[1].startswith("1. [已登记，无结果] send_mail(甲)") and "结果无法唯一关联" in lines[1]
-    assert lines[2].startswith("2. [已登记，无结果] send_mail(乙)") and "结果无法唯一关联" in lines[2]
-    assert lines[3].startswith("3. [成功] send_mail(x) → 已发送") and "无法确定对应哪次意图，未合并" in lines[3]
-
-    orphan = (
-        completed(1, "send_mail", op="op_r", result="已发送"),
-        intent(2, "op_r", "send_mail", args="第二次"),
-        completed(3, "send_mail", op="op_r", result="已发送"),
-    )
-    lines = (await summarize(orphan)).text.split("\n")
-    assert lines[1].startswith("1. [成功] send_mail(x) → 已发送") and "未见对应的意图记录" in lines[1]
-    assert lines[2].startswith("2. [已登记，无结果] send_mail(第二次)"), "an intent after a result means a reused ID"
-    assert "结果无法唯一关联" in lines[2]
-    assert lines[3].startswith("3. [成功] send_mail(x)") and "无法确定对应哪次意图，未合并" in lines[3]
-
-    repeated = (
-        intent(1, "op_r"),
-        completed(2, "submit_reminder", op="op_r"),
-        completed(3, "submit_reminder", op="op_r"),
-    )
-    lines = (await summarize(repeated)).text.split("\n")
-    assert "该 operation_id 已有一条结果，本条未合并" in lines[2]
+async def test_a_long_skip_list_keeps_the_exact_count():
+    """PA-17-V-23."""
+    strays = tuple({"local_seq": index} for index in range(30))
+    head = LOG.header(await snapshot((progress(1, "a"), *strays)))
+    assert head["skipped"]["invalid_event"]["count"] == 30 and len(head["skipped"]["invalid_event"]["indexes"]) == 20
 
 
-@pytest.mark.parametrize("change", [{"call": "call-other"}, {"name": "other_tool"}])
 @pytest.mark.asyncio
-async def test_a_result_whose_call_identity_differs_is_kept_apart(change):
-    """PA-17-V-14: tool_call_id and tool name must agree before a result is paired with an intent."""
-    result = completed(
-        2, change.get("name", "send_mail"), op="op_x", result="已发送", call=change.get("call", "call-op_x")
-    )
-    summary = await summarize((intent(1, "op_x", "send_mail"), result))
-    lines = summary.text.split("\n")
-    assert summary.missing is False, "an ambiguous pairing is an incomplete log, not a missing one"
-    assert (
-        lines[1].startswith("1. [已登记，无结果] send_mail(单号=BX-0930)")
-        and "调用身份不一致的结果，未合并" in lines[1]
-    )
-    assert lines[2].startswith("2. [成功]") and "调用身份与意图不一致（tool_call_id 或工具名），未合并" in lines[2]
+async def test_gaps_are_computed_before_the_preview_leaves_events_out():
+    """PA-17-V-05: counted events are present in the log, so their seqs are not reported missing."""
+    taken = await snapshot((progress(1, "a"), noise(2), progress(3, "b"), progress(6, "c")))
+    head, lines = preview_of(taken)
+    assert head["missing_seq_ranges"] == [[4, 5]] and head["ending_seqs"] == []
+    assert head["counted_only"]["model.completed"] == {"events": 1}
+    assert [line["local_seq"] for line in lines] == [1, 3, 6]
 
 
-@pytest.mark.parametrize("ending", ["final", "paused", "none"])
 @pytest.mark.asyncio
-async def test_candidates_say_whether_an_ending_references_them_never_whether_delivered(ending):
-    """PA-17-V-07: the full text is kept; paused and final references count alike."""
-    log = [
-        answer(1, "out_a", "第一段\n第二行"),
-        answer(2, "out_b", "第二段"),
-        shared_file(3, "out_f", caption="季度报告"),
-        shared_file(4, "out_x", "notes.txt", "attachment"),
+async def test_the_preview_counts_usage_and_deltas_and_lists_every_other_event():
+    """PA-17-V-21: reply deltas are streamed pieces, not proof of delivery; counted with their length."""
+    deltas = (noise(1), event(2, EventType.REPLY_DELTA, {"text": "第二段回复"}), noise(5), noise(8))
+    taken = await snapshot((*deltas, intent(3, "op_a", "send_mail"), progress(4, "已核对")))
+    head, lines = preview_of(taken)
+    assert head["preview"] is True and head["usable"] is True
+    assert head["counted_only"] == {"model.completed": {"events": 2}, "reply.delta": {"events": 2, "chars": 9}}
+    assert [line["event_type"] for line in lines] == ["tool.intent", "progress.updated"]
+    assert len(LOG.event_lines(taken)) == 6, "the record keeps them"
+
+
+@pytest.mark.asyncio
+async def test_long_strings_are_cut_in_the_preview_only_and_each_cut_has_its_path():
+    """PA-17-V-22."""
+    long_text = "长" * 6500
+    confirm = {
+        "reason": "awaiting_confirmation",
+        "intercepted": [
+            {"tool_call_id": "call-a", "tool_name": "delete_file", "arguments": "path=a.xlsx"},
+            {"tool_call_id": "call-b", "tool_name": "send_mail", "arguments": "m" * 3000},
+        ],
+    }
+    log = (answer(1, "out_a", text=long_text), event(2, EventType.EXECUTION_PAUSED, confirm))
+    taken = await snapshot(log)
+    head, lines = preview_of(taken)
+    assert head["truncated"] == [
+        {"local_seq": 1, "path": "/payload/text", "original_chars": 6500, "included_chars": 2000},
+        {"local_seq": 2, "path": "/payload/intercepted/1/arguments", "original_chars": 3000, "included_chars": 2000},
     ]
-    if ending == "final":
-        log.append(final(5, refs=("out_a", "out_b", "out_f")))
-    elif ending == "paused":
-        log.append(paused(5, refs=("out_f",)))
-    text = (await summarize(tuple(log))).text
-    lines = text.split("\n")
-    assert lines[1].startswith("1. [交出候选] 最终回答第 1 段（out_a，目标 chat-1，message）")
-    assert lines[2:4] == ["    第一段", "    第二行"], "the answer is kept line for line"
-    assert "最终回答第 2 段（out_b，目标 chat-1，message）" in lines[4] and lines[4].endswith("：第二段")
-    assert f"文件 reports/q3.md（out_f，目标 chat-1，upload，sha256:{'b' * 64}，13 字节）" in lines[5]
-    assert lines[5].endswith("：季度报告")
-    assert "文件 notes.txt（out_x，目标 chat-1，attachment" in lines[6]
-    referenced = {"final": {1, 4, 5}, "paused": {5}, "none": set()}[ending]
-    for number, line in ((1, lines[1]), (4, lines[4]), (5, lines[5]), (6, lines[6])):
-        if ending == "none":
-            assert "未见结束记录，无法判断是否被引用" in line
-        elif number in referenced:
-            assert "引用（服务端负责投递，不代表已送达）" in line
-        else:
-            assert "未被结束记录引用，服务端不会投递" in line
-    assert "已投递" not in text and "已送达）" not in text.replace("不代表已送达）", "")
+    assert lines[0]["payload"]["text"] == long_text[:2000]
+    assert lines[1]["payload"]["intercepted"][0]["arguments"] == "path=a.xlsx", "short fields are untouched"
+    assert taken.events[0].payload.text == long_text, "the snapshot is not changed"
+    assert json.loads(LOG.event_lines(taken)[0][1])["payload"]["text"] == long_text, "nor the record"
+
+
+def test_a_cut_path_escapes_its_keys():
+    truncated: list = []
+    LOG._cut({"a/b~c": "x" * 2001}, "", 7, truncated)
+    assert truncated[0]["path"] == "/a~1b~0c"
 
 
 @pytest.mark.asyncio
-async def test_endings_that_disagree_or_cite_unseen_candidates_are_stated():
-    """PA-17-V-12."""
-    text = (await summarize((answer(1, "out_a"), paused(2, refs=()), final(3, refs=("out_a", "out_z"))))).text
-    assert "结局记录冲突，无法确定以哪一条为准：“暂停（error）：model failed”；“已完成；引用候选 out_a、out_z”" in text
-    assert "结束记录引用了 out_z，但日志中未见对应候选。" in text
-
-
-@pytest.mark.asyncio
-async def test_a_long_log_is_not_cut_and_every_write_is_kept():
-    """PA-17-V-08: no length limit yet (D-05); nothing is left out or merged."""
+async def test_a_long_log_keeps_every_write_in_the_preview():
+    """PA-17-V-08: nothing is merged; every intent and result stays, in order."""
     log, seq = [], 0
     for index in range(60):
         seq += 1
-        log.append(completed(seq, "read_file", args=f"file-{index}.md " + "r" * 400, result="x" * 400))
-        seq += 1
-        log.append(progress(seq, f"结论 {index} " + "c" * 480))
+        log.append(completed(seq, "read_file", args=f"file-{index}.md", result="x" * 400))
         seq += 1
         log.append(intent(seq, f"op_{index}", "send_mail", "m" * 480))
-    text = (await summarize(tuple(log))).text
-    assert len(text) > 50000
-    assert text.count("[成功] read_file(") == 60 and text.count("[结论] 结论 ") == 60
-    assert text.count("（写操作 op_") == 60
-    assert "省略" not in text and "[只读]" not in text
+    _, lines = preview_of(await snapshot(tuple(log)))
+    assert [line["event_type"] for line in lines].count("tool.intent") == 60
+    assert [line["local_seq"] for line in lines] == list(range(1, 121))
 
 
-@pytest.mark.asyncio
-async def test_a_log_of_only_display_and_usage_events_is_used_and_says_so():
-    """PA-17-V-13."""
-    summary = await summarize((noise(1), noise(2), noise(3)))
-    assert summary.missing is False
-    assert LOG._NOTHING in summary.text and SECRET not in summary.text
-
-
-@pytest.mark.asyncio
-async def test_archives_are_those_the_log_names_and_say_no_query_was_made():
-    """PA-17-V-09."""
-    switched = event(1, EventType.WINDOW_SWITCHED, {"archive_ref": "archive#7", "window_seq": 2})
-    again = event(3, EventType.WINDOW_SWITCHED, {"archive_ref": "archive#8", "window_seq": 3})
-    text = (await summarize((switched, progress(2, "a"), again, final(4)))).text
-    assert "归档：archive#7、archive#8（仅为日志中的归档引用，尚未按 execution_id 查询，可能不全）" in text
-
-
-@pytest.mark.asyncio
-async def test_identical_events_recorded_twice_count_once():
-    """PA-17-V-10: a retried ending and its outputs may be stored again with the same identity."""
-    out, end = answer(1, "out_a"), final(2, refs=("out_a",))
-    summary = await summarize((end, out, out, end))
-    assert summary.missing is False and summary.text.count("[交出候选]") == 1 and "日志缺少" not in summary.text
-
-
-# F_20 D-08: the brief summary a continuation starts from, and the full one its record tool pages.
-
-
-def brief_log():
-    return (
-        noise(1),
-        completed(2, "read_file", result="已读取"),
-        completed(3, "read_file", result="已读取"),
-        completed(4, "list_files", result="3 个文件"),
-        completed(5, "share_file", result="已登记 reports/q3.md"),
-        intent(6, "op_a", "send_mail"),
-        intent(7, "op_b", "submit_reminder"),
-        completed(8, "submit_reminder", op="op_b", result="已提醒"),
-        completed(9, "upload_report", status="unknown", op="op_c", result="超时", reason="timed out"),
-        progress(10, "审批停在财务复核环节"),
-        answer(12, "out_a", text="回答" * 300),
-        final(13, refs=("out_a",)),
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_brief_summary_keeps_every_write_outcome_and_gap_and_counts_reads():
-    brief = (await summarize(brief_log(), detail="brief")).text
-    lines = brief.split("\n")
-    assert lines[0] == "执行 execution-2（请求 request-1）的执行日志摘要："
-    assert lines[1] == "日志缺少第 11 条记录。" and lines[2] == LOG._OMITTED, "gaps and omissions are told apart"
-    assert "[成功] share_file(x) → 已登记 reports/q3.md（调用 call-5）" in brief, "listings are kept one by one"
-    assert "[已登记，无结果] send_mail(单号=BX-0930)（写操作 op_a" in brief
-    assert "[成功] submit_reminder(单号=BX-0930) → 已提醒（写操作 op_b" in brief
-    assert "[结果不明] upload_report(x) → 超时（原因：timed out）（写操作 op_c" in brief
-    assert "[结论] 审批停在财务复核环节" in brief
-    assert "[只读操作] read_file 2 次、list_files 1 次（明细未列出）" in brief
-    assert "out_a" in brief and "（正文 600 字，未列出）" in brief and "回答回答" not in brief
-    assert "结局：已完成；引用候选 out_a" in brief and brief.endswith(LOG._FOOTER)
-
-
-@pytest.mark.asyncio
-async def test_a_brief_summary_with_nothing_left_out_does_not_say_so():
-    brief = (await summarize((intent(1, "op_a", "send_mail"), final(2)), detail="brief")).text
-    assert LOG._OMITTED not in brief and "[只读操作]" not in brief
-
-
-@pytest.mark.asyncio
-async def test_an_unknown_detail_is_rejected_before_the_port():
-    commit = Commit((progress(1, "a"),))
-    raw_detail: Any = "short"  # Deliberately invalid input at the runtime boundary.
-    with pytest.raises(BaseError) as exc_info:
-        await LOG.summarize_execution(build_context(commit), TARGET, detail=raw_detail)
-    assert exc_info.value.status == StatusCode.DEEPAGENT_INPUT_PARAM_ERROR
-    assert commit.calls == []
-
-
-@pytest.mark.asyncio
-async def test_record_blocks_join_into_the_full_summary_after_the_same_checks():
-    commit = Commit(brief_log())
-    blocks, missing = await LOG.record_blocks(build_context(commit), TARGET)
-    assert missing is False and "\n".join(blocks) == (await summarize(brief_log())).text
-    assert any("回答回答" in block for block in blocks), "the full record keeps the bodies"
-    missing_blocks, missing = await LOG.record_blocks(build_context(Commit(())), TARGET)
-    assert missing is True and missing_blocks == (f"上一次执行 {TARGET}：{LOG._MISSING}",)
+def test_the_declared_event_schema_version_is_the_events_own():
+    """PA-17-V-24."""
+    assert LOG.EVENT_SCHEMA_VERSION == AgentEvent.model_fields["schema_version"].default
