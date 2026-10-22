@@ -16,6 +16,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 
 from ..schema.events import EventType
 from ..tools.effect_policy import is_read_only_tool_name
+from .tool_outcome import record_tool_completion
 
 if TYPE_CHECKING:
     from ..schema.build_context import ConstructionBinding
@@ -175,6 +176,20 @@ class PersistentToolIntentRail(DeepAgentRail):
         else:
             status = "succeeded"
             reason = None
+
+        # Retention uses the actual final dispatch result, never success prose in a transcript.
+        # Bind the receipt to the result before later rails may replace its model-visible text.
+        call = getattr(ctx.inputs, "tool_call", None)
+        if (
+            state["operation_id"] is not None
+            and call is not None
+            and call.id == state["tool_call_id"]
+            and call.name == state["tool_name"]
+            and self._params_digest(call.arguments) == state["params_digest"]
+        ):
+            record_tool_completion(
+                getattr(ctx.inputs, "tool_msg", None), call, result, exception, state["args_summary"]
+            )
 
         try:
             result_summary = self._result_summary(result, exception)

@@ -50,20 +50,32 @@ def create_persistent_agent(spec: PersistentAgentSpec, *, context: PersistentBui
         working = context.derive()
         agent = DeepAgentSpec.build(snapshot, context=working)
         addendum = context.system_prompt_addendum
-        if addendum and addendum.strip():
+        manage_windows = "window_management" in snapshot.enabled_features
+        if manage_windows or (addendum and addendum.strip()):
             builder = agent.system_prompt_builder
             if builder is None:
                 raise build_error(
                     StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
                     error_msg="Persistent runtime system prompt builder unavailable",
                 )
-            builder.add_section(
-                PromptSection(
-                    name="persistent_runtime_context",
-                    content={"cn": addendum, "en": addendum},
-                    priority=11,
+            if manage_windows:
+                from .prompts import WINDOW_MANAGEMENT_PROMPT
+
+                builder.add_section(
+                    PromptSection(
+                        name="persistent_context_management",
+                        content=dict(WINDOW_MANAGEMENT_PROMPT),
+                        priority=12,
+                    )
                 )
-            )
+            if addendum and addendum.strip():
+                builder.add_section(
+                    PromptSection(
+                        name="persistent_runtime_context",
+                        content={"cn": addendum, "en": addendum},
+                        priority=11,
+                    )
+                )
             agent.apply_prompt_builder_to_react_agent()
         # Providers must not rebind identity while resolving capabilities.
         context.validate(snapshot)

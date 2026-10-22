@@ -354,6 +354,50 @@ def test_factory_applies_runtime_prompt_addendum_without_changing_spec_identity(
         agent.ability_manager.teardown_tools()
 
 
+@pytest.mark.parametrize("language,other_language", [("cn", "en"), ("en", "cn")])
+@pytest.mark.parametrize("addendum", [None, "Host execution context"])
+def test_window_management_guidance_reaches_react_in_the_selected_language(api, language, other_language, addendum):
+    spec = spec_for(
+        api, system_prompt="Agent identity", language=language,
+        enabled_features={"construction", "window_management"},
+    )
+    before = spec.model_dump_json()
+    ctx = context_for(api, spec, system_prompt_addendum=addendum)
+    agent = api.create_persistent_agent(spec, context=ctx)
+    try:
+        section = agent.system_prompt_builder.get_section("persistent_context_management")
+        assert section is not None
+        assert set(section.content) == {"cn", "en"}
+        assert all(text.strip() for text in section.content.values())
+        assert section.content[language] != section.content[other_language]
+        for builder in (agent.system_prompt_builder, agent.react_agent.system_prompt_builder):
+            rendered = builder.build()
+            assert section.content[language] in rendered
+            assert section.content[other_language] not in rendered
+            assert "Agent identity" in rendered
+            if addendum:
+                assert addendum in rendered
+        assert spec.model_dump_json() == before
+        assert agent.deep_config.system_prompt == "Agent identity"
+        ctx.validate_binding(agent)
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
+def test_window_management_guidance_is_absent_without_the_capability(api):
+    spec = spec_for(api)
+    agent = api.create_persistent_agent(spec, context=context_for(api, spec))
+    personal = DeepAgentSpec(
+        card=spec.card, enable_sys_operation=False, enable_task_loop=False, auto_create_workspace=False,
+    ).build()
+    try:
+        for current in (agent, personal):
+            assert current.system_prompt_builder.get_section("persistent_context_management") is None
+    finally:
+        agent.ability_manager.teardown_tools()
+        personal.ability_manager.teardown_tools()
+
+
 @pytest.mark.parametrize("bad", ["session", "card", "fingerprint", "capabilities", "ports"])
 def test_mismatch_rejected_before_build(api, monkeypatch, bad):
     spec = spec_for(api)

@@ -167,7 +167,7 @@ WindowStore 是本模块内部组件，定义会话状态记录、归档、索�
 
 **上下文。** 新任务在 Execution 开始时加载 Session 当前记录；同一 Session 首次进入正式执行且尚无会话状态记录时，创建空窗口。记录读取失败时拒绝执行，不降级为空窗口。随后在窗口末尾依次追加执行头、临时背景和任务输入。背景包含最近群消息和知识导航；触发消息从群背景中排除，排队中的其他请求只作为背景。执行中模型回复、工具调用、结果和动态附件只追加到末尾，不改写既有内容；本模块不挂载默认的 ContextAssembleRail、PersonalContextRail 和 ContextProcessorRail。
 
-**窗口与归档（PA-11，agent-core 组件已实现，宿主待联调）。** Agent 在任务阶段边界主动请求换窗是主路径；PA-11 每次模型调用前从当前 `ModelContext.context_window_tokens()` 获取上下文引擎解析出的有效窗口；若本回合没有请求，窗口管理组件按上下文引擎压缩器的用量感知计数策略计算下一次完整请求，并在超过 `floor(context_window × 80%)` 时兜底，新窗口候选也使用同一策略并不得超过该阈值。计数策略可使用最近一次模型用量或清理后文本长度估算，估算值照常参与判断；窗口无法解析或计数过程异常时暂停为 `error`。80% 是换窗策略，不是 provider hard-limit 保证。仅在模型回复结束、工具调用与结果成组且并行工具收敛的安全边界换窗。新窗由当前原始 Request、受校验的 WindowSeed、预算内近期完整消息组及固定系统指令 / 工具组成；不额外调用模型生成摘要。必要内容放不下时暂停为 `context_unfit`，不静默截断。
+**窗口与归档（PA-11，agent-core 组件已实现，宿主待联调）。** Agent 在任务阶段边界主动请求换窗是主路径；PA-11 每次模型调用前从当前 `ModelContext.context_window_tokens()` 获取上下文引擎解析出的有效窗口；若本回合没有请求，窗口管理组件按上下文引擎压缩器的用量感知计数策略计算下一次完整请求，并在超过 `floor(context_window × 80%)` 时兜底，新窗口候选也使用同一计数策略，但不得超过独立的 `floor(context_window × 40%)` 上限。计数策略可使用最近一次模型用量或清理后文本长度估算，估算值照常参与判断；窗口无法解析或计数过程异常时暂停为 `error`。80% 是换窗策略，不是 provider hard-limit 保证。仅在模型回复结束、工具调用与结果成组且并行工具收敛的安全边界换窗。新窗由当前原始 Request、受校验的 WindowSeed、预算内近期完整消息组及固定系统指令 / 工具组成；不额外调用模型生成摘要。必要内容放不下时暂停为 `context_unfit`，不静默截断。
 
 换窗不改变 Session、Request 或 Execution。顺序是先幂等归档完整旧窗，再把新窗口、`current_window_id`、`window_seq` 和 `last_rollover` 写入 PA-10 使用的同一条 Session 状态记录；状态提交成功后才替换运行时上下文，`window.switched` 只是可缺失的普通通知。agent-core 组件已按精确 Session、窗口、Request、recovery_ref、Spec 指纹和轮次信息恢复归档后未提交的新状态；归档属于 Session 私有。PA-11 不等于 Agent 已有历史检索工具，检索由 PA-12 单独提供。真实 AgentServer 后端及 JiuwenSwarm 联调未完成，当前不宣称宿主闭环。
 

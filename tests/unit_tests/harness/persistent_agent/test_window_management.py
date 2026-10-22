@@ -11,10 +11,14 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolMessage, UserMessage
+from openjiuwen.core.context_engine import ContextEngineConfig
+from openjiuwen.core.context_engine.context.context import SessionModelContext
+from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolMessage, UsageMetadata, UserMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.store import InMemoryKVStore
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.persistent_agent.execution.control import ExecutionControl
+from openjiuwen.harness.persistent_agent.execution.tool_intent_rail import PersistentToolIntentRail
 from openjiuwen.harness.persistent_agent.schema.integration import (
     TEMPORARY_BACKGROUND,
     WINDOW_PART_KEY,
@@ -674,7 +678,8 @@ async def test_unavailable_window_after_candidate_rebuild_restores_the_old_conte
 
 
 @pytest.mark.asyncio
-async def test_required_new_window_content_that_does_not_fit_pauses_without_writing():
+@pytest.mark.parametrize("old_total_tokens", [None, 1])
+async def test_required_new_window_content_that_does_not_fit_pauses_without_writing(old_total_tokens):
     manager_module = import_module(f"{PKG}.execution.window_management")
     control = ExecutionControl()
     control.safe_boundary_pending = True
@@ -694,25 +699,35 @@ async def test_required_new_window_content_that_does_not_fit_pauses_without_writ
         UserMessage(content="【本次执行】", metadata={"persistent_window_part": "execution_header"}),
         UserMessage(content="task"),
     ]
+    if old_total_tokens is not None:
+        old_messages.extend([
+            AssistantMessage(
+                content="",
+                tool_calls=[ToolCall(id="bash-1", type="function", name="bash", arguments="{}")],
+                usage_metadata=UsageMetadata(total_tokens=old_total_tokens),
+            ),
+            ToolMessage(content="created", tool_call_id="bash-1"),
+        ])
     system_message = SystemMessage(content="system")
     callback_context = SimpleNamespace(
         context=SimpleNamespace(
             token_counter=lambda: ExactCounter(),
             context_window_tokens=lambda: 1000,
             get_messages=lambda: old_messages,
-            set_messages=AsyncMock(),
+            set_messages=Mock(),
         ),
         inputs=SimpleNamespace(messages=[system_message, *old_messages], tools=[], react_iteration=1),
         extra={"_final_request_context_window": SimpleNamespace(system_messages=[system_message], tools=[])},
-        request_context_rebuild=AsyncMock(),
+        request_context_rebuild=Mock(),
     )
 
     result = await manager.before_model_request(callback_context)
 
+    assert result is not None
     assert result["reason"] == "context_unfit"
     store.checkpoint.assert_not_awaited()
     store.rollover.assert_not_awaited()
-    callback_context.request_context_rebuild.assert_not_awaited()
+    callback_context.request_context_rebuild.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -779,6 +794,106 @@ async def test_capacity_fallback_uses_eighty_percent_context_window_threshold():
     assert store.transition.trigger_kind == "capacity_fallback"
     assert store.transition.old_messages == archived_messages
     assert store.transition.new_messages == tuple(candidate_messages)
+
+
+@pytest.mark.parametrize("old_total_tokens", [128120, 1])
+@pytest.mark.parametrize("with_counter, expected_tokens", [(True, 18), (False, 5)])
+def test_candidate_recounts_system_messages_and_tools_without_mutating_old_usage(
+    old_total_tokens, with_counter, expected_tokens,
+):
+    manager = WINDOW_MANAGER.WindowSwitchManager(None, "task", None, None, None, last_group_message_id=None)
+    messages = [
+        AssistantMessage(content="keep", usage_metadata=UsageMetadata(total_tokens=old_total_tokens)),
+        UserMessage(content="tail"),
+    ]
+    original = message_fingerprint(messages)
+    ctx = SimpleNamespace(
+        context=SimpleNamespace(token_counter=lambda: ExactCounter() if with_counter else None),
+        extra={"_final_request_context_window": SimpleNamespace(
+            system_messages=[SystemMessage(content="system")], tools=["tool"],
+        )},
+    )
+
+    # ExactCounter: 6 + 4 + 4 + 4 = 18; char fallback: 2 + 1 + 1 + 1 = 5.
+    assert manager._count_candidate(ctx, messages) == expected_tokens
+    assert message_fingerprint(messages) == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger_kind", ["agent", "capacity_fallback"])
+async def test_small_candidate_with_protected_tool_batch_does_not_reuse_old_window_usage(trigger_kind):
+    control = ExecutionControl()
+    control.safe_boundary_pending = True
+    control.pending_iteration_seq = 1
+    if trigger_kind == "agent":
+        control.queue_window_switch(WINDOW.WindowSwitchRequest(
+            trigger_kind="agent", seed=WINDOW.WindowSeed(objective="continue the task"),
+        ))
+    context = SimpleNamespace(
+        binding=SimpleNamespace(control=control),
+        execution=SimpleNamespace(execution_id="execution-1"),
+    )
+    store = SimpleNamespace(
+        checkpoint=AsyncMock(),
+        rollover=AsyncMock(return_value=SimpleNamespace(archive_ref="archive:1", new_window_seq=2)),
+    )
+    manager = WINDOW_MANAGER.WindowSwitchManager(
+        context, "task", None, store, SimpleNamespace(emit=AsyncMock()), last_group_message_id=None,
+    )
+    old_messages = [
+        UserMessage(content="previous execution history " + "x" * 105000),
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"),
+        AssistantMessage(
+            content="",
+            tool_calls=[ToolCall(id="bash-1", type="function", name="bash", arguments='{"command":"mkdir demo"}')],
+            usage_metadata=UsageMetadata(total_tokens=128120),
+        ),
+        ToolMessage(content="created", tool_call_id="bash-1"),
+    ]
+    model_context = SessionModelContext(
+        "ctx", "session-1",
+        ContextEngineConfig(context_window_tokens=131072, enable_openrouter_model_context_window_tokens=False),
+        history_messages=old_messages, token_counter=ExactCounter(),
+    )
+    original = message_fingerprint(old_messages)
+    ctx = SimpleNamespace(
+        context=model_context,
+        inputs=SimpleNamespace(messages=[SystemMessage(content="system"), *old_messages], tools=[], react_iteration=2),
+        extra={"_final_request_context_window": SimpleNamespace(
+            system_messages=[SystemMessage(content="system")], tools=[],
+        )},
+        request_context_rebuild=Mock(),
+    )
+
+    assert manager._count_request(ctx) > 104857
+    result = await manager.before_model_request(ctx)
+
+    assert result is None
+    candidate = manager._prepared.new_messages
+    assert manager._prepared.trigger_kind == trigger_kind
+    assert not any("previous execution history" in message.content for message in candidate)
+    assert [
+        call.id for message in candidate if isinstance(message, AssistantMessage) for call in message.tool_calls
+    ] == [
+        "bash-1",
+    ]
+    assert candidate[-1].content == "created"
+    assert manager._count_candidate(ctx, list(candidate)) < 104857
+    assert message_fingerprint(old_messages) == original
+    assert manager._count_request(ctx) > 104857
+    ctx.request_context_rebuild.assert_called_once()
+    store.rollover.assert_not_awaited()
+
+    ctx.inputs.messages = [SystemMessage(content="system"), *model_context.get_messages()]
+    assert await manager.before_model_request(ctx) is None
+
+    transition = store.rollover.await_args.args[1]
+    assert transition.trigger_kind == trigger_kind
+    assert message_fingerprint(transition.old_messages) == original
+    assert transition.token_usage["candidate_input_tokens"] <= 52428
+    assert transition.token_usage["input_limit"] == 52428
+    assert control.rollover_committed is True
 
 
 def test_entry_installs_the_window_manager_only_for_opted_in_persistent_agents():
@@ -875,3 +990,345 @@ def test_window_switch_request_does_not_accept_session_or_storage_identity_from_
                 "session_id": "attacker-selected-session",
             }
         )
+
+
+async def finished_write_batch(call_id, *, result=None, exception=None, arguments=None, name="bash"):
+    """Exercise the real Persistent dispatch/completion callbacks, not hand-made success metadata."""
+    arguments = arguments or {"command": "create artifact.txt"}
+    call = ToolCall(id=call_id, type="function", name=name, arguments=json.dumps(arguments))
+    result = {"success": True, "data": {"content": "completed artifact " + "x" * 5000}} if result is None else result
+    message = ToolMessage(content=json.dumps(result), tool_call_id=call_id)
+    binding = SimpleNamespace(
+        control=ExecutionControl(emitter=SimpleNamespace(emit=AsyncMock())),
+        execution=SimpleNamespace(namespace_id="tenant", agent_id="agent", session_id="session", request_id="request"),
+    )
+    rail = PersistentToolIntentRail(binding)
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=ToolCallInputs(tool_call=call, tool_name=name, tool_args=arguments),
+    )
+    await rail.before_tool_call(ctx)
+    ctx.inputs.tool_result = result
+    ctx.inputs.tool_msg = message
+    ctx.exception = exception
+    await rail.after_tool_call(ctx)
+    return [AssistantMessage(content="", tool_calls=[call]), message]
+
+
+def retention_context(messages, *, trigger_kind="agent", window=8000):
+    control = ExecutionControl(safe_boundary_pending=True, pending_iteration_seq=1)
+    if trigger_kind == "agent":
+        control.queue_window_switch(WINDOW.WindowSwitchRequest(
+            trigger_kind="agent", seed=WINDOW.WindowSeed(objective="finish task", completed=["keep agent handoff"]),
+        ))
+    store = SimpleNamespace(
+        checkpoint=AsyncMock(),
+        rollover=AsyncMock(return_value=SimpleNamespace(archive_ref="archive:1", new_window_seq=2)),
+    )
+    context = SimpleNamespace(binding=SimpleNamespace(control=control), execution=SimpleNamespace(execution_id="exec"))
+    manager = WINDOW_MANAGER.WindowSwitchManager(
+        context, "task", None, store, SimpleNamespace(emit=AsyncMock()), last_group_message_id=None,
+    )
+    active = list(messages)
+    ctx = SimpleNamespace(
+        context=SimpleNamespace(
+            get_messages=lambda: list(active),
+            set_messages=lambda values: active.__setitem__(slice(None), values),
+            context_window_tokens=lambda: window,
+            token_counter=lambda: ExactCounter(),
+        ),
+        inputs=SimpleNamespace(messages=[SystemMessage(content="system"), *messages], tools=[], react_iteration=2),
+        extra={"_final_request_context_window": SimpleNamespace(
+            system_messages=[SystemMessage(content="system")], tools=[],
+        )},
+        request_context_rebuild=Mock(),
+    )
+    return manager, ctx, store
+
+
+@pytest.mark.asyncio
+async def test_new_window_drops_optional_history_to_fit_forty_percent():
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"),
+        AssistantMessage(content="optional history " + "x" * 800),
+    ]
+    manager, ctx, store = retention_context(messages, window=2000)
+
+    assert await manager.before_model_request(ctx) is None
+    candidate = list(ctx.context.get_messages())
+    assert not any("optional history" in message.content for message in candidate)
+    assert manager._count_candidate(ctx, candidate) <= 800
+    ctx.inputs.messages = [SystemMessage(content="system"), *candidate]
+    assert await manager.before_model_request(ctx) is None
+    usage = store.rollover.await_args.args[1].token_usage
+    assert usage["input_limit"] == 800
+    assert usage["new_window_limit_ratio"] == 0.4
+    assert usage["rollover_threshold_ratio"] == 0.8
+
+
+@pytest.mark.asyncio
+async def test_required_content_over_forty_percent_pauses_without_replacing_old_window():
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"),
+        AssistantMessage(content="", tool_calls=[
+            ToolCall(id="pending", type="function", name="bash", arguments="{}"),
+        ]),
+        ToolMessage(content="unverified " + "x" * 800, tool_call_id="pending"),
+    ]
+    manager, ctx, store = retention_context(messages, window=2000)
+
+    result = await manager.before_model_request(ctx)
+
+    assert result is not None
+    assert result["reason"] == "context_unfit"
+    assert ctx.context.get_messages() == messages
+    ctx.request_context_rebuild.assert_not_called()
+    store.rollover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("extra_part", ["system", "tools"])
+@pytest.mark.parametrize("total_tokens", [800, 801])
+@pytest.mark.parametrize("window", [2000, 2001])
+async def test_rebuilt_request_enforces_forty_percent_including_system_and_tools(extra_part, total_tokens, window):
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"),
+    ]
+    manager, ctx, store = retention_context(messages, window=window)
+    assert await manager.before_model_request(ctx) is None
+    candidate = ctx.context.get_messages()
+    padding = total_tokens - sum(len(message.content) for message in candidate)
+    ctx.inputs.messages = [SystemMessage(content="x" * padding if extra_part == "system" else "system"), *candidate]
+    ctx.inputs.tools = ["x" * (padding - 6)] if extra_part == "tools" else []
+
+    result = await manager.before_model_request(ctx)
+
+    if total_tokens == 800:
+        assert result is None
+        assert store.rollover.await_args.args[1].token_usage["candidate_input_tokens"] == 800
+        return
+    assert result is not None
+    assert result["reason"] == "context_unfit"
+    assert ctx.context.get_messages() == messages
+    assert manager._prepared is None
+    store.rollover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_new_window_limit_refreshes_when_model_window_shrinks_before_commit():
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"),
+        AssistantMessage(content="", tool_calls=[
+            ToolCall(id="pending", type="function", name="bash", arguments="{}"),
+        ]),
+        ToolMessage(content="x" * 400, tool_call_id="pending"),
+    ]
+    manager, ctx, store = retention_context(messages, window=2000)
+    assert await manager.before_model_request(ctx) is None
+    ctx.inputs.messages = [SystemMessage(content="system"), *ctx.context.get_messages()]
+    ctx.context.context_window_tokens = lambda: 1000
+
+    result = await manager.before_model_request(ctx)
+
+    assert result["reason"] == "context_unfit"
+    assert ctx.context.get_messages() == messages
+    store.rollover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("input_tokens", [800, 801])
+async def test_forty_percent_new_window_limit_does_not_lower_eighty_percent_trigger(input_tokens):
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"),
+        AssistantMessage(content="x" * (input_tokens - 16)),
+    ]
+    manager, ctx, store = retention_context(messages, trigger_kind="capacity_fallback", window=1000)
+    manager._context.execution.request_id = "request-1"
+
+    assert await manager.before_model_request(ctx) is None
+
+    if input_tokens == 800:
+        assert manager._prepared is None
+        store.checkpoint.assert_awaited_once()
+        ctx.request_context_rebuild.assert_not_called()
+    else:
+        assert manager._prepared.trigger_kind == "capacity_fallback"
+        assert manager._count_candidate(ctx, list(manager._prepared.new_messages)) <= 400
+        ctx.request_context_rebuild.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger_kind", ["agent", "capacity_fallback"])
+async def test_completed_writes_are_archived_not_refilled_and_uncertain_writes_and_share_file_survive(trigger_kind):
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}), UserMessage(content="task"),
+    ]
+    for index in range(20):
+        messages.extend(await finished_write_batch(f"done-{index}"))
+    messages.extend(await finished_write_batch(
+        "uncertain", result={"success": False, "error": "partial write possible"},
+    ))
+    messages.extend(await finished_write_batch(
+        "share-1", name="share_file", arguments={"file_path": "output/report.zip"},
+        result={"success": True, "data": {"status": "registered", "file_path": "output/report.zip"}},
+    ))
+    original = message_fingerprint(messages)
+    manager, ctx, store = retention_context(messages, trigger_kind=trigger_kind)
+
+    assert await manager.before_model_request(ctx) is None
+
+    prepared = manager._prepared
+    retained_calls = [
+        call.id for message in prepared.new_messages for call in (getattr(message, "tool_calls", None) or [])
+    ]
+    assert retained_calls == ["uncertain", "share-1"]
+    assert any("bash" in note for note in prepared.seed.completed)
+    if trigger_kind == "agent":
+        assert prepared.seed.completed[0] == "keep agent handoff"
+    assert "tool_call:uncertain" in manager._fallback_seed(SimpleNamespace(context=SimpleNamespace(
+        get_messages=lambda: messages,
+    ))).pending_effects
+    assert "tool_call:done-0" not in manager._fallback_seed(SimpleNamespace(context=SimpleNamespace(
+        get_messages=lambda: messages,
+    ))).pending_effects
+    restored = WINDOW_MANAGER.restore_rollover_candidate(messages, prepared.seed, list(prepared.retained_item_refs))
+    assert restored == list(prepared.new_messages)
+    assert message_fingerprint(messages) == original
+    ctx.inputs.messages = [SystemMessage(content="system"), *ctx.context.get_messages()]
+    assert await manager.before_model_request(ctx) is None
+    transition = store.rollover.await_args.args[1]
+    assert message_fingerprint(transition.old_messages) == original
+    assert transition.token_usage["candidate_input_tokens"] < 6400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("uncertain", [
+    "failure", "exception", "started", "background", "text_only", "rewritten", "args_changed", "malformed_status",
+    "missing_receipt", "renamed_call", "accepted", "nonzero_exit",
+])
+async def test_ambiguous_or_modified_write_receipts_cannot_remove_the_tool_group(uncertain):
+    result = {"success": True, "data": {"content": "work"}}
+    exception = None
+    arguments = None
+    if uncertain == "failure":
+        result = {"success": False, "error": "may have written"}
+    elif uncertain == "exception":
+        exception = TimeoutError("unknown effect")
+    elif uncertain == "started":
+        result = {"success": True, "data": {"status": "started", "pid": 123}}
+    elif uncertain == "background":
+        arguments = {"command": "start worker", "run_in_background": True}
+    elif uncertain == "text_only":
+        result = 'success=True; operation completed'
+    elif uncertain == "malformed_status":
+        result = {"success": True, "data": {"status": {"unexpected": "shape"}}}
+    elif uncertain == "accepted":
+        result = {"success": True, "data": {"status": "accepted"}}
+    elif uncertain == "nonzero_exit":
+        result = {"success": True, "data": {"exit_code": 1}}
+    batch = await finished_write_batch("maybe", result=result, exception=exception, arguments=arguments)
+    if uncertain == "rewritten":
+        batch[-1].content = "a security rail replaced the result"
+    elif uncertain == "args_changed":
+        batch[0].tool_calls[0].arguments = '{"command":"different operation"}'
+    elif uncertain == "missing_receipt":
+        batch[1].metadata = {}
+    elif uncertain == "renamed_call":
+        batch[0].tool_calls[0].name = "different_writer"
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"), *batch,
+    ]
+    manager, ctx, _ = retention_context(messages)
+
+    assert await manager.before_model_request(ctx) is None
+    assert manager._prepared.new_messages[-2:] == tuple(batch)
+
+
+@pytest.mark.asyncio
+async def test_a_mixed_tool_batch_stays_complete_when_one_write_is_unresolved():
+    completed = await finished_write_batch("done", result={"success": True, "data": {"content": "saved"}})
+    unknown = await finished_write_batch("maybe", result={"success": False, "error": "timeout"})
+    batch = [
+        AssistantMessage(content="", tool_calls=[completed[0].tool_calls[0], unknown[0].tool_calls[0]]),
+        completed[1], unknown[1],
+    ]
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"), *batch,
+    ]
+    manager, ctx, _ = retention_context(messages)
+
+    assert await manager.before_model_request(ctx) is None
+    assert manager._prepared.new_messages[-3:] == tuple(batch)
+
+
+@pytest.mark.asyncio
+async def test_completion_hints_do_not_displace_a_full_agent_handoff():
+    batch = await finished_write_batch("done")
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"), *batch,
+    ]
+    manager, ctx, _ = retention_context(messages)
+    progress = [f"existing progress {index}" for index in range(16)]
+    manager._context.binding.control.pending_window_switch = WINDOW.WindowSwitchRequest(
+        trigger_kind="agent", seed=WINDOW.WindowSeed(objective="task", completed=progress),
+    )
+
+    assert await manager.before_model_request(ctx) is None
+    assert manager._prepared.seed.completed == progress
+    assert not any(getattr(message, "tool_calls", None) for message in manager._prepared.new_messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", [
+    "nohup python worker.py >worker.log 2>&1 &",
+    "python worker.py &",
+    "start python worker.py",
+    "Start-Process python worker.py",
+])
+async def test_background_launch_in_shell_syntax_is_not_a_completed_effect(command):
+    batch = await finished_write_batch(
+        "background", arguments={"command": command}, result={"success": True, "data": {"content": "started"}},
+    )
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"), *batch,
+    ]
+    manager, ctx, _ = retention_context(messages)
+
+    assert await manager.before_model_request(ctx) is None
+    assert manager._prepared.new_messages[-2:] == tuple(batch)
+
+
+@pytest.mark.asyncio
+async def test_optional_completion_hints_are_removed_before_pausing_an_otherwise_fitting_candidate():
+    batch = await finished_write_batch("done")
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"), *batch,
+    ]
+    manager, ctx, _ = retention_context(messages, window=700)
+
+    assert await manager.before_model_request(ctx) is None
+    assert manager._prepared.seed.completed == ["keep agent handoff"]
+    assert manager._count_candidate(ctx, list(manager._prepared.new_messages)) <= 280
+
+
+@pytest.mark.asyncio
+async def test_foreground_shell_chain_with_fd_redirect_can_be_archived_after_success():
+    batch = await finished_write_batch("done", arguments={"command": "cd demo && python check.py 2>&1"})
+    messages = [
+        UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+        UserMessage(content="task"), *batch,
+    ]
+    manager, ctx, _ = retention_context(messages)
+
+    assert await manager.before_model_request(ctx) is None
+    assert not any(getattr(message, "tool_calls", None) for message in manager._prepared.new_messages)
