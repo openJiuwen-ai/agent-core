@@ -46,6 +46,7 @@ async def sync_history(conversation, message_manager) -> list[ConversationMessag
 async def context_for(backend, member_name: str, trigger) -> str:
     """Render a recent excerpt; the DB, not the history file, selects the range."""
     from openjiuwen.agent_teams.i18n import STRINGS
+    from openjiuwen.harness.prompts import resolve_language
 
     conversation = await backend.group_conversation()
     messages = await sync_history(conversation, backend.message_manager)
@@ -62,7 +63,8 @@ async def context_for(backend, member_name: str, trigger) -> str:
         excerpt.update(content=item.content[:2000], content_truncated=len(item.content) > 2000,
                        attachment_count=len(item.attachments))
         excerpts.append(json.dumps(excerpt, ensure_ascii=False))
-    language = getattr(backend.group_chat_spec, "language", None) or "cn"
+    language = str(getattr(backend.group_chat_spec, "language", None) or "cn").strip().lower()
+    language = resolve_language("cn" if language == "zh" else language)
     return STRINGS[language]["conversation.context"].format(
         from_timestamp=after, to_timestamp=trigger.timestamp, trigger_message_id=trigger.message_id,
         path=str(conversation.history_path), excerpts="\n".join(excerpts),

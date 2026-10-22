@@ -14,6 +14,8 @@ author_email: cla@openjiuwen.com
 
 # 群消息文件归档与成员通知
 
+> 本文保留最初方案；当前广播、JSONL 和运行时模式协议以 [S_28](../specs/S_28_group-conversation-and-delegation.md) 为准。
+
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-09-17 |
