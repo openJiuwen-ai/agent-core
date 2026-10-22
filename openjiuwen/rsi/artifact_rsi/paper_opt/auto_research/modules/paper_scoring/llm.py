@@ -15,11 +15,14 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.env import load_project_dotenv
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import get_logger
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_scoring.schemas import (
     FigureAsset,
     LLMCallMeta,
     PaperScoringSettings,
 )
+
+_LOGGER = get_logger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -34,10 +37,6 @@ _VISION_ERROR_RE = re.compile(
 
 class StructuredCompletionError(RuntimeError):
     """JSON parse or schema validation failed after retries."""
-
-
-class VisionModelError(RuntimeError):
-    """Configured model rejected image inputs."""
 
 
 def extract_json_payload(text: str) -> Any:
@@ -239,6 +238,10 @@ class StructuredCompleter:
         self._complete_fn = complete_fn
         self._model = model
         self.calls: list[LLMCallMeta] = []
+        # Set on the first vision-rejection from the configured model (see
+        # _one_call's fallback) so every later call in this scoring session
+        # skips the doomed image attempt instead of re-hitting the same 404.
+        self._vision_unsupported = False
 
     async def complete(
         self,
@@ -287,6 +290,8 @@ class StructuredCompleter:
         temperature: float,
         images: list[FigureAsset],
     ) -> tuple[Any, LLMCallMeta]:
+        if self._vision_unsupported:
+            images = []
         schema_json = json.dumps(schema.model_json_schema(), ensure_ascii=False)
         system_with_schema = (
             f"{system}\n\nReturn ONLY JSON conforming to this schema:\n{schema_json}"
@@ -336,12 +341,22 @@ class StructuredCompleter:
         try:
             response = await self._invoke_structured(model, messages, schema, has_images=bool(images))
         except Exception as exc:
-            if images and _VISION_ERROR_RE.search(str(exc)):
-                raise VisionModelError(
-                    "configured model does not accept image input required for paper figures: "
-                    f"{exc}"
-                ) from exc
-            raise
+            if not (images and _VISION_ERROR_RE.search(str(exc))):
+                raise
+            # The configured model/route rejected the image input -- fall
+            # back to a text-only call for this request and remember it for
+            # the rest of this scoring session, instead of losing the whole
+            # node over a capability mismatch.
+            self._vision_unsupported = True
+            _LOGGER.warning("scoring model rejected image input, falling back to text-only: %s", exc)
+            images = []
+            prompt_chars = len(system_with_schema) + len(user)
+            user_content = build_user_content(user, images)
+            fallback_messages: list[dict[str, Any]] = [
+                {"role": "system", "content": system_with_schema},
+                {"role": "user", "content": user_content},
+            ]
+            response = await self._invoke_structured(model, fallback_messages, schema, has_images=False)
         text = _response_text(response)
         payload = extract_json_payload(text)
         prompt_tokens, completion_tokens = _usage_tokens(response)
