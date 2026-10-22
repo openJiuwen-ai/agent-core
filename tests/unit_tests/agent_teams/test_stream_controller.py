@@ -21,11 +21,16 @@ import pytest
 
 from openjiuwen.agent_teams.agent.resources import PrivateAgentResources
 from openjiuwen.agent_teams.agent.state import TeamAgentState
-from openjiuwen.agent_teams.agent.stream_controller import _RETRY_QUERY, StreamController
+from openjiuwen.agent_teams.agent.stream_controller import (
+    _RETRY_QUERY,
+    StreamController,
+    _detect_task_failed,
+)
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.core.controller.schema.event import EventType
 from openjiuwen.core.session.stream.base import OutputSchema
 
 
@@ -56,10 +61,10 @@ class _FakeRuntime:
         return _gen()
 
     async def subscribe(
-        self,
-        *,
-        on_state: Callable[..., Any] | None = None,
-        on_round: Callable[..., Any] | None = None,
+            self,
+            *,
+            on_state: Callable[..., Any] | None = None,
+            on_round: Callable[..., Any] | None = None,
     ) -> None:
         if on_state is not None:
             self._state_cbs.append(on_state)
@@ -89,15 +94,15 @@ class _FakeRuntime:
 
 
 def _make_controller(
-    runtime: _FakeRuntime,
-    *,
-    member_name: str = "m",
-    role: TeamRole = TeamRole.LEADER,
-    state: TeamAgentState | None = None,
-    status_updater: Callable[[MemberStatus], Any] | None = None,
-    execution_updater: Callable[[ExecutionStatus], Any] | None = None,
-    wake_mailbox_callback: Callable[[], Any] | None = None,
-    request_completion_poll_callback: Callable[[], Any] | None = None,
+        runtime: _FakeRuntime,
+        *,
+        member_name: str = "m",
+        role: TeamRole = TeamRole.LEADER,
+        state: TeamAgentState | None = None,
+        status_updater: Callable[[MemberStatus], Any] | None = None,
+        execution_updater: Callable[[ExecutionStatus], Any] | None = None,
+        wake_mailbox_callback: Callable[[], Any] | None = None,
+        request_completion_poll_callback: Callable[[], Any] | None = None,
 ) -> StreamController:
     """Wire a StreamController against a fake runtime with overridable hooks."""
     blueprint = SimpleNamespace(member_name=member_name, role=role)
@@ -684,6 +689,114 @@ async def test_idle_settled_wakes_mailbox_and_polls() -> None:
     await sc._map_state(HarnessState.IDLE)
 
     assert order == ["wake", "poll"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_idle_settled_emits_terminal_task_failed_on_latched_build_error() -> None:
+    """A latched build_team failure surfaces as controller_output/task_failed.
+
+    The chunk shape must match what the runtime itself emits for round
+    failures so downstream (jiuwenswarm) maps it to chat.error: type
+    ``controller_output``, payload.type ``task_failed``, ``[code] text`` in
+    the first data frame. The stream stays open (no None sentinel) — the
+    user may follow up, and lifecycle closure stays with teardown paths.
+    """
+    state = TeamAgentState()
+    state.team_build_error = "RuntimeError: Failed to create team t"
+    sc = _make_controller(_FakeRuntime(), state=state)
+    sc.stream_queue = asyncio.Queue()
+
+    await sc._map_state(HarnessState.IDLE)
+
+    chunk = sc.stream_queue.get_nowait()
+    assert isinstance(chunk, TeamOutputSchema)
+    assert chunk.type == "controller_output"
+    assert chunk.source_member == "m"
+    assert chunk.role == TeamRole.LEADER
+    payload = chunk.payload
+    assert payload.type == EventType.TASK_FAILED
+    # Degraded marker: downstream (jiuwenswarm team_helpers) must keep this
+    # out of the leader error history so the round ends "completed + warning".
+    assert payload.metadata == {"degraded": True}
+    text = payload.data[0].text
+    assert text.startswith("[132001]")
+    assert "Failed to create team t" in text
+    # One-shot: the latch is consumed by the report.
+    assert state.team_build_error is None
+    # Stream NOT closed — no None sentinel.
+    assert sc.stream_queue.empty()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_idle_settled_build_error_reported_once() -> None:
+    """The same failed build is reported exactly once, not on every settle."""
+    state = TeamAgentState()
+    state.team_build_error = "boom"
+    sc = _make_controller(_FakeRuntime(), state=state)
+    sc.stream_queue = asyncio.Queue()
+
+    await sc._map_state(HarnessState.IDLE)
+    await sc._map_state(HarnessState.IDLE)
+
+    assert sc.stream_queue.qsize() == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_idle_settled_no_emit_without_latch() -> None:
+    """No latched error -> no chunk, and the wake/poll tail still runs."""
+    order: list[str] = []
+
+    async def _poll() -> None:
+        order.append("poll")
+
+    sc = _make_controller(_FakeRuntime(), request_completion_poll_callback=_poll)
+    sc.stream_queue = asyncio.Queue()
+
+    await sc._map_state(HarnessState.IDLE)
+
+    assert sc.stream_queue.empty()
+    assert order == ["poll"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_build_failed_chunk_passes_retry_handler_untouched() -> None:
+    """The emitted terminal chunk is detectable as task_failed but NOT retryable.
+
+    Guards the code choice: 132001 must never enter _RETRYABLE_ERROR_CODES,
+    or the failure would be re-driven instead of surfaced.
+    """
+    state = TeamAgentState()
+    state.team_build_error = "boom"
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime, state=state)
+    sc.stream_queue = asyncio.Queue()
+
+    await sc._map_state(HarnessState.IDLE)
+    chunk = sc.stream_queue.get_nowait()
+
+    assert _detect_task_failed(chunk) is not None
+    assert await sc._handle_retry(chunk) is False
+    assert runtime.sent == []  # no retry query re-drive
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_idle_settled_team_cleaned_takes_precedence_over_build_error() -> None:
+    """A cleaned team closes the stream without reporting a stale latch."""
+    state = TeamAgentState()
+    state.team_cleaned = True
+    state.team_build_error = "boom"
+    sc = _make_controller(_FakeRuntime(), state=state)
+    sc.stream_queue = asyncio.Queue()
+
+    await sc._map_state(HarnessState.IDLE)
+
+    assert sc.stream_queue.get_nowait() is None
+    assert sc.stream_queue.empty()
 
 
 # ----------------------------------------------------------------------

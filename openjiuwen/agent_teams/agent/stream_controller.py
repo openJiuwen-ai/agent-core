@@ -35,7 +35,14 @@ from openjiuwen.agent_teams.schema.status import (
     MemberStatus,
 )
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
+from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import set_member_id, team_logger
+from openjiuwen.core.controller.schema.controller_output import (
+    ControllerOutputChunk,
+    ControllerOutputPayload,
+)
+from openjiuwen.core.controller.schema.dataframe import TextDataFrame
+from openjiuwen.core.controller.schema.event import EventType
 from openjiuwen.core.session.stream.base import OutputSchema
 
 if TYPE_CHECKING:
@@ -354,9 +361,69 @@ class StreamController:
         if team_member is not None and await team_member.status() == MemberStatus.SHUTDOWN_REQUESTED:
             self.close_stream()
             return
+        # a failed build_team was digested at the tool boundary (fed back
+        # to the LLM as a tool message), so the round ended "normally" for a
+        # team that does not exist. Surface the latched failure once per
+        # failed build; a successful retry clears the latch before we get
+        # here (TeamAgent._mark_team_built).
+        build_error = self._state.team_build_error
+        if build_error is not None:
+            self._state.team_build_error = None
+            await self._emit_team_build_failed(build_error)
         await self._wake_mailbox_if_interrupt_cleared()
         if self._request_completion_poll is not None:
             await self._request_completion_poll()
+
+    async def _emit_team_build_failed(self, error: str) -> None:
+        """Emit a degraded-warning task_failed chunk for a failed ``build_team``.
+
+        Written directly onto the stream queue (bypassing ``_handle_retry``,
+        which only watches ``harness.outputs()``) so it always reaches the
+        consumer; downstream (jiuwenswarm) maps a
+        ``controller_output``/``task_failed`` chunk to ``chat.error``. The
+        code prefix is deliberately NOT in ``_RETRYABLE_ERROR_CODES`` — a
+        build failure must not be re-driven by the transient-retry path.
+        The stream is intentionally left open: the user may follow up (e.g.
+        ask the leader to retry), and lifecycle closure stays with the
+        normal teardown paths.
+
+        ``metadata.degraded=True`` marks this as a *session-level
+        degradation* (the team is unavailable), not a failed turn: by then
+        the circuit breaker has steered the leader to complete the task
+        solo, so the round typically ends with a real deliverable. Downstream
+        (jiuwenswarm team_helpers) honours the flag by broadcasting/recording
+        the warning WITHOUT feeding the leader error history — the round's
+        terminal frame stays clean ("completed + warning banner" rather than
+        "failed").
+        """
+        code = StatusCode.AGENT_TEAM_CREATE_RUNTIME_ERROR.code
+        text = f"[{code}] build_team failed: {error}"
+        team_logger.error(
+            "[{}] surfacing build_team failure to stream: {}",
+            self._member_name() or "?",
+            text,
+        )
+        chunk = self._tag_chunk(
+            ControllerOutputChunk(
+                index=0,
+                payload=ControllerOutputPayload(
+                    type=EventType.TASK_FAILED,
+                    data=[TextDataFrame(text=text)],
+                    metadata={"degraded": True},
+                ),
+            )
+        )
+        if self.stream_queue is not None:
+            await self.stream_queue.put(chunk)
+        for observer in list(self._chunk_observers):
+            try:
+                await observer(chunk)
+            except Exception as e:
+                team_logger.exception(
+                    "[{}] build-failed observer raised; detaching {}",
+                    self._member_name() or "?", e
+                )
+                self.remove_chunk_observer(observer)
 
     async def _wake_mailbox_if_interrupt_cleared(self) -> None:
         """Notify owner so it can re-poll the mailbox after interrupt clears."""

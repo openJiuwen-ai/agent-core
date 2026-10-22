@@ -553,6 +553,7 @@ class TeamAgent(BaseAgent):
             on_before_team_cleaned=self._finalize_team_worktrees_before_clean,
             on_team_cleaned=self._mark_team_cleaned,
             on_team_built=self._mark_team_built,
+            on_team_build_failed=self._note_team_build_failed,
         )
 
     def _setup_agent(
@@ -1077,10 +1078,29 @@ class TeamAgent(BaseAgent):
         from openjiuwen.agent_teams.runtime.metadata import TEAM_DB_STATE_CREATED
 
         self._state.team_cleaned = False
+        # A successful (re)build supersedes any earlier failure latch.
+        self._state.team_build_error = None
         await self._persist_team_db_state(TEAM_DB_STATE_CREATED)
         # F_62: build_team may have chosen scheduled dispatch — arm the
         # scheduler now, before any teammate spawn or task creation.
         await self._coordination.notify_team_built()
+
+    async def _note_team_build_failed(self, error: str) -> None:
+        """Latch a build_team failure for the round-end settle path.
+
+        Wired into ``TeamBackend`` via
+        ``setup_team_backend(on_team_build_failed=...)`` and fired by the
+        build_team tool wrapper before the exception is re-raised into the
+        tool boundary. ``StreamController._on_idle_settled`` reads (and
+        clears) the latch at round-chain end to emit a terminal task_failed
+        chunk, so a failed build cannot pass as a clean round.
+        """
+        team_logger.error(
+            "[{}] build_team failed; latching for round-end report: {}",
+            self._member_name() or "?",
+            error,
+        )
+        self._state.team_build_error = error
 
     async def _persist_team_db_state(self, db_state: str) -> None:
         """Persist the team DB lifecycle state into the active checkpoint."""

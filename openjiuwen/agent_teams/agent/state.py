@@ -57,6 +57,19 @@ class TeamAgentState:
     # in TeamAgentState per the four-quadrant rule.
     team_cleaned: bool = False
 
+    # One-shot latch raised when the leader's ``build_team`` tool call fails,
+    # wired via ``TeamBackend.on_team_build_failed`` ->
+    # ``TeamAgent._note_team_build_failed``. The tool boundary digests the
+    # exception into an LLM-facing tool message, so without this latch a
+    # failed build ends the round "normally" for a team that does not exist
+    # . ``StreamController._on_idle_settled`` reads (and
+    # clears) it at round-chain end to emit a terminal task_failed chunk —
+    # surfaced downstream as chat.error. ``_mark_team_built`` clears it on a
+    # successful (re)build so a retry suppresses the report. Cross-operator
+    # (written from the tool/build path, read from the stream round-end
+    # path), so it belongs in TeamAgentState per the four-quadrant rule.
+    team_build_error: Optional[str] = None
+
     # ``time.monotonic()`` stamp of the moment this member last settled into
     # runtime IDLE (MemberStatus.READY); ``None`` while it is mid-round
     # (BUSY) or has never settled. Written by ``StreamController._map_state``
