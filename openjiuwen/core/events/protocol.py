@@ -40,9 +40,13 @@ class ExtensionEventBusProtocol(Protocol):
         event_type: EventType,
         match_pattern_func: MatchPatternFunc,
         core_handler: EventHandler,
-    ) -> None: ...
+    ) -> None:
+        """Register an event type and its CORE handler."""
+        ...
 
-    def unregister_event_type(self, event_type: EventType) -> None: ...
+    def unregister_event_type(self, event_type: EventType) -> None:
+        """Remove an event type and its handlers."""
+        ...
 
     def register_event_handler(
         self,
@@ -52,12 +56,18 @@ class ExtensionEventBusProtocol(Protocol):
         handler_level: HandlerLevel = HandlerLevel.USER,
         *,
         package_metadata: PackageMetadata | None = None,
-    ) -> HandlerId: ...
+    ) -> HandlerId:
+        """Register a USER or BUILTIN handler and return its handler id."""
+        ...
 
-    def unregister_event_handler(self, handler_id: HandlerId) -> None: ...
+    def unregister_event_handler(self, handler_id: HandlerId) -> None:
+        """Remove a USER or BUILTIN handler."""
+        ...
 
     async def trigger(
         self,
         event: Event,
         session: Session | SessionContext | None = None,
-    ) -> EventOutput | None: ...
+    ) -> EventOutput | None:
+        """Dispatch one event and await the handler chain result."""
+        ...

@@ -1,11 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Internal EventBus state and validation helpers."""
+"""Extension event bus registration, matching, and dispatch."""
 
 from __future__ import annotations
 
-import functools
 import inspect
 import re
 import uuid
@@ -40,15 +39,6 @@ if TYPE_CHECKING:
 
 _EVENT_TYPE_PATTERN = re.compile(r"^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$")
 _PATTERN_SCALAR_TYPES = (bool, int, float, str)
-
-
-def _reject_unregister_event_type(event_type: EventType) -> None:
-    if (
-        not isinstance(event_type, str)
-        or _EVENT_TYPE_PATTERN.fullmatch(event_type) is None
-        or event_type.startswith("ops.")
-    ):
-        raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="invalid event type")
 
 
 EventDispatcher: TypeAlias = Callable[..., Awaitable[EventOutput | None]]
@@ -117,6 +107,44 @@ def _freeze_match_pattern(match_pattern: MatchPattern) -> MatchPattern:
     return cast(MatchPattern, frozen)
 
 
+def _validate_handler_package_metadata(package_metadata: PackageMetadata | None) -> None:
+    if package_metadata is None:
+        return
+    if not isinstance(package_metadata, PackageMetadata):
+        raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="package_metadata must be PackageMetadata or None")
+    if not isinstance(package_metadata.package_id, str) or not package_metadata.package_id:
+        raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="package_metadata.package_id must be a non-empty string")
+    if package_metadata.package_version is not None and not isinstance(package_metadata.package_version, str):
+        raise_error(
+            StatusCode.EVENTS_PAYLOAD_INVALID,
+            reason="package_metadata.package_version must be a string or None",
+        )
+
+
+def _reject_ops_build_handler_mutation(
+    event_type: EventType,
+    builder: EventHandlerOpsBuilder | None,
+) -> None:
+    if event_type == OPS_BUILD_EVENT_TYPE and builder is not None:
+        raise_error(StatusCode.EVENTS_STATE_INVALID, reason="ops.build handlers cannot change after build")
+
+
+def _validate_handler_registration(
+    events: Mapping[EventType, _EventRegistration],
+    builder: EventHandlerOpsBuilder | None,
+    event_type: EventType,
+    handler: EventHandler,
+    handler_level: HandlerLevel,
+) -> None:
+    if not isinstance(event_type, str) or event_type not in events:
+        raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="event type is not registered")
+    if not callable(handler):
+        raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="handler must be callable")
+    if not isinstance(handler_level, HandlerLevel) or handler_level is HandlerLevel.CORE:
+        raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="handler level must be USER or BUILTIN")
+    _reject_ops_build_handler_mutation(event_type, builder)
+
+
 def _normalize_session(session: object) -> SessionContext | None:
     if session is None:
         return None
@@ -143,9 +171,15 @@ def _normalize_session(session: object) -> SessionContext | None:
 
 
 class ExtensionEventBus:
-    """In-memory registration state for the extension event bus."""
+    """In-process extension event bus with USER, BUILTIN, and CORE handler chains.
+
+    Hosts register event types and handlers, run a one-time ``ops.build`` to
+    collect platform capabilities, then dispatch ordinary events with per-handler
+    Ops views bound to package and session context.
+    """
 
     def __init__(self) -> None:
+        """Create a bus and register Core builtin event definitions."""
         self._framework = AsyncCallbackFramework()
         self._events: dict[EventType, _EventRegistration] = {}
         self._handlers: dict[HandlerId, _HandlerRegistration] = {}
@@ -160,8 +194,6 @@ class ExtensionEventBus:
         core_handler: EventHandler,
     ) -> None:
         if not isinstance(event_type, str) or _EVENT_TYPE_PATTERN.fullmatch(event_type) is None:
-            raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="invalid event type")
-        if event_type.startswith("ops.") and event_type != OPS_BUILD_EVENT_TYPE:
             raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="invalid event type")
         if event_type in self._events:
             raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="event type is already registered")
@@ -178,28 +210,13 @@ class ExtensionEventBus:
         match_pattern_func: MatchPatternFunc,
         core_handler: EventHandler,
     ) -> None:
-        """Register an event type and its CORE handler.
-
-        ``ops.build`` may be registered once. Every other ``ops.`` name is rejected.
-        """
+        """Register an event type and its CORE handler."""
         self._validate_new_event_type(event_type, match_pattern_func, core_handler)
 
-        async def core_terminal(
-            event: Event,
-            *,
-            matched_handler_ids: frozenset[HandlerId],
-            target_level: HandlerLevel | None,
-            session_context: SessionContext | None,
-        ) -> EventOutput | None:
-            del target_level
-            ops = None if self._builder is None else self._builder.build(None, session_context)
-            with EventNext(event.event_type, HandlerLevel.CORE, None, matched_handler_ids) as event_next:
-                result = cast(Callable[..., object], core_handler)(event, ops, event_next)
-                if not inspect.isawaitable(result):
-                    raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="core handler result must be awaitable")
-                return await cast(Awaitable[EventOutput | None], result)
-
-        dispatch = cast(EventDispatcher, self._framework.wrap(event_type)(core_terminal))
+        # CORE sits at the tail of the framework wrap chain; ``wrap()`` returns the
+        # dispatch entry that resolves the current WrapHandlers on every call.
+        core_terminal = self._create_core_terminal(core_handler)
+        dispatch: EventDispatcher = self._framework.wrap(event_type)(core_terminal)
         self._events[event_type] = _EventRegistration(match_pattern_func, dispatch)
 
     def register_event_handler(
@@ -211,24 +228,71 @@ class ExtensionEventBus:
         *,
         package_metadata: PackageMetadata | None = None,
     ) -> HandlerId:
-        if not isinstance(event_type, str) or event_type not in self._events:
-            raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="event type is not registered")
-        if not callable(handler):
-            raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="handler must be callable")
-        if not isinstance(handler_level, HandlerLevel) or handler_level is HandlerLevel.CORE:
-            raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="handler level must be USER or BUILTIN")
-        if event_type == OPS_BUILD_EVENT_TYPE and self._builder is not None:
-            raise_error(StatusCode.EVENTS_STATE_INVALID, reason="ops.build handlers cannot change after build")
-        if package_metadata is not None and (
-            not isinstance(package_metadata, PackageMetadata)
-            or not isinstance(package_metadata.package_id, str)
-            or not package_metadata.package_id
-            or not (package_metadata.package_version is None or isinstance(package_metadata.package_version, str))
-        ):
-            raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="invalid package metadata")
+        """Register a USER or BUILTIN handler and return its handler id."""
+        _validate_handler_registration(self._events, self._builder, event_type, handler, handler_level)
+        _validate_handler_package_metadata(package_metadata)
 
         frozen_pattern = _freeze_match_pattern(match_pattern)
         handler_id = uuid.uuid4().hex
+
+        # USER handlers are outermost (higher priority), BUILTIN next; the framework
+        # keeps registration order within the same priority.
+        adapter = self._create_handler_adapter(handler_id, handler, handler_level, package_metadata)
+        priority = 200 if handler_level is HandlerLevel.USER else 100
+        self._framework.on_wrap(event_type, priority=priority)(adapter)
+        registration = _HandlerRegistration(event_type, frozen_pattern, adapter, package_metadata)
+        try:
+            self._handlers[handler_id] = registration
+        except BaseException:
+            # Keep framework and bus registries in sync: never leave an adapter
+            # that no handler id can unregister.
+            self._framework.unregister_sync(_wrap_registry_key(event_type), adapter)
+            raise
+        return handler_id
+
+    # Every function in the framework chain (dispatch, adapters, core terminal)
+    # shares one keyword contract:
+    #   matched_handler_ids - handler ids selected by the matcher for this trigger
+    #   target_level        - layer requested by EventNext.to(); None means "next"
+    #   session_context     - normalized once at trigger(); read-only afterwards
+    # Only ``target_level`` changes between hops; the other two travel unchanged.
+
+    def _create_core_terminal(self, core_handler: EventHandler) -> EventDispatcher:
+        """Wrap the CORE handler as the innermost function of the framework chain."""
+
+        async def core_terminal(
+            event: Event,
+            *,
+            matched_handler_ids: frozenset[HandlerId],
+            target_level: HandlerLevel | None,
+            session_context: SessionContext | None,
+        ) -> EventOutput | None:
+            del matched_handler_ids, target_level  # the chain ends here; nothing left to skip
+            # CORE has no package identity; it still gets its own Ops bound to this session.
+            ops = None if self._builder is None else self._builder.build(None, session_context)
+            # ``forward=None``: EventNext at the tail returns None instead of advancing.
+            with EventNext(event.event_type, HandlerLevel.CORE, None) as event_next:
+                result = core_handler(event, ops, event_next)
+                if not inspect.isawaitable(result):
+                    raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="core handler result must be awaitable")
+                return await result
+
+        return core_terminal
+
+    def _create_handler_adapter(
+        self,
+        handler_id: HandlerId,
+        handler: EventHandler,
+        handler_level: HandlerLevel,
+        package_metadata: PackageMetadata | None,
+    ) -> WrapHandler:
+        """Adapt a USER / BUILTIN handler to a framework WrapHandler.
+
+        The adapter passes through when this handler is not matched or a layer
+        jump targets a layer inward of it; otherwise it builds the handler's Ops,
+        hands it an EventNext whose ``forward`` continues the framework chain,
+        and awaits the handler.
+        """
 
         async def adapter(
             call_next: Callable[..., Awaitable[EventOutput | None]],
@@ -239,15 +303,13 @@ class ExtensionEventBus:
             target_level: HandlerLevel | None,
             session_context: SessionContext | None,
         ) -> EventOutput | None:
-            should_skip = (
-                handler_id not in matched_handler_ids  # 原因 1：没匹配上
-                or target_level is HandlerLevel.CORE  # 原因 2：全链直奔 CORE
-                or (
-                    target_level is HandlerLevel.BUILTIN
-                    and handler_level is HandlerLevel.USER  # 原因 3：跳 BUILTIN 时跳过 USER 层
-                )
-            )
-            if should_skip:
+            # Pass-through cases: the handler was not matched, or an upstream
+            # ``to()`` asked for a layer inward of this one. Skipped handlers
+            # build no Ops and leave the chain arguments untouched.
+            not_matched = handler_id not in matched_handler_ids
+            skip_to_core = target_level is HandlerLevel.CORE
+            skip_user_layer = target_level is HandlerLevel.BUILTIN and handler_level is HandlerLevel.USER
+            if not_matched or skip_to_core or skip_user_layer:
                 return await call_next(
                     event,
                     matched_handler_ids=matched_handler_ids,
@@ -255,30 +317,33 @@ class ExtensionEventBus:
                     session_context=session_context,
                 )
 
+            async def forward(next_event: Event, next_target: HandlerLevel | None) -> EventOutput | None:
+                # Called by EventNext.__call__ / to(): continue the framework chain
+                # with the handler-supplied event and jump target.
+                return await call_next(
+                    next_event,
+                    matched_handler_ids=matched_handler_ids,
+                    target_level=next_target,
+                    session_context=session_context,
+                )
+
+            # One Ops per entered handler, bound to its own package and this session.
             ops = None if self._builder is None else self._builder.build(package_metadata, session_context)
-            bound_next = functools.partial(call_next, session_context=session_context)
-            with EventNext(event.event_type, handler_level, bound_next, matched_handler_ids) as event_next:
-                result = cast(Callable[..., object], handler)(event, ops, event_next)
+            # The ``with`` block scopes EventNext to this handler invocation.
+            with EventNext(event.event_type, handler_level, forward) as event_next:
+                result = handler(event, ops, event_next)
                 if not inspect.isawaitable(result):
                     raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="handler result must be awaitable")
-                return await cast(Awaitable[EventOutput | None], result)
+                return await result
 
-        priority = 200 if handler_level is HandlerLevel.USER else 100
-        self._framework.on_wrap(event_type, priority=priority)(adapter)
-        registration = _HandlerRegistration(event_type, frozen_pattern, adapter, package_metadata)
-        try:
-            self._handlers[handler_id] = registration
-        except BaseException:
-            self._framework.unregister_sync(_wrap_registry_key(event_type), adapter)
-            raise
-        return handler_id
+        return adapter
 
     def unregister_event_handler(self, handler_id: HandlerId) -> None:
+        """Remove a USER or BUILTIN handler; unknown ids are ignored."""
         registration = self._handlers.get(handler_id)
         if registration is None:
             return
-        if registration.event_type == OPS_BUILD_EVENT_TYPE and self._builder is not None:
-            raise_error(StatusCode.EVENTS_STATE_INVALID, reason="ops.build handlers cannot change after build")
+        _reject_ops_build_handler_mutation(registration.event_type, self._builder)
         self._framework.unregister_sync(
             _wrap_registry_key(registration.event_type),
             registration.wrap_handler,
@@ -286,7 +351,7 @@ class ExtensionEventBus:
         del self._handlers[handler_id]
 
     def unregister_event_type(self, event_type: EventType) -> None:
-        _reject_unregister_event_type(event_type)
+        """Remove an event type and all handlers registered for it."""
         if event_type not in self._events:
             return
 
@@ -308,6 +373,7 @@ class ExtensionEventBus:
         event: Event,
         session: Session | SessionContext | None = None,
     ) -> EventOutput | None:
+        """Run one event through matched handlers and return the final output."""
         if (
             not isinstance(event, Event)
             or not isinstance(event.event_type, str)
@@ -322,6 +388,8 @@ class ExtensionEventBus:
             return await self._build(event, registration)
         if self._builder is None:
             raise_error(StatusCode.EVENTS_STATE_INVALID, reason="ops.build has not succeeded")
+        # Session and match results are fixed here, before the first await, and
+        # then handed to the framework chain; the chain never re-matches.
         session_context = _normalize_session(session)
         matched_handler_ids = self._match_handlers(event, registration)
         return await registration.dispatch(
@@ -341,10 +409,11 @@ class ExtensionEventBus:
             target_level=None,
             session_context=None,
         )
-        if not isinstance(result, EventHandlerOpsBuilder):
-            raise_error(StatusCode.EVENTS_OPS_INVALID, reason="ops.build must return an EventHandlerOpsBuilder")
-        self._builder = cast(EventHandlerOpsBuilder, result)
-        return self._builder
+        if isinstance(result, EventHandlerOpsBuilder):
+            self._builder = result
+            return result
+        raise_error(StatusCode.EVENTS_OPS_INVALID, reason="ops.build must return an EventHandlerOpsBuilder")
+        return None
 
     def _match_handlers(self, event: Event, registration: _EventRegistration) -> frozenset[HandlerId]:
         candidates = [
@@ -353,20 +422,15 @@ class ExtensionEventBus:
             if handler_registration.event_type == event.event_type
         ]
         matched_handler_ids: set[HandlerId] = set()
-        matcher = cast(Callable[[object, MatchPattern], object], registration.matcher)
         for handler_id, handler_registration in candidates:
             try:
-                matched = matcher(event.event_input, handler_registration.match_pattern)
+                matched = registration.matcher(event.event_input, handler_registration.match_pattern)
             except Exception as error:
                 raise_error(
                     StatusCode.EVENTS_MATCH_INVALID,
                     reason="matcher raised an exception",
                     cause=error,
                 )
-            if inspect.isawaitable(matched):
-                if inspect.iscoroutine(matched):
-                    matched.close()
-                raise_error(StatusCode.EVENTS_MATCH_INVALID, reason="matcher must return bool synchronously")
             if not isinstance(matched, bool):
                 raise_error(StatusCode.EVENTS_MATCH_INVALID, reason="matcher must return bool")
             if matched:

@@ -16,9 +16,10 @@ from openjiuwen.core.events.types import OpsMethod, PackageMetadata, SessionCont
 
 
 class EventHandlerOpsBuilder:
-    """Declare an operations catalog and build isolated views."""
+    """Collect platform capability definitions and build per-handler Ops views."""
 
     def __init__(self) -> None:
+        """Start with an empty capability catalog."""
         self._catalog: dict[str, dict[str, OpsMethod]] = {}
 
     def add_namespace(self, namespace: str) -> None:
@@ -68,7 +69,7 @@ class EventHandlerOpsBuilder:
 
 
 class EventHandlerOps:
-    """Read-only invocation context with dynamic access to built capabilities."""
+    """Per-handler view of package, session, and registered platform capabilities."""
 
     def __init__(
         self,
@@ -76,6 +77,7 @@ class EventHandlerOps:
         package_metadata: PackageMetadata | None,
         session_context: SessionContext | None,
     ) -> None:
+        """Bind one catalog snapshot to package and session facts for this handler."""
         self._catalog = catalog
         self._package_metadata = package_metadata
         self._session_context = session_context
@@ -91,6 +93,7 @@ class EventHandlerOps:
         return self._session_context
 
     def __getattr__(self, namespace: str) -> Any:
+        """Resolve ``ops.<namespace>`` to a namespace-specific method accessor."""
         if namespace not in self._catalog:
             raise_error(StatusCode.EVENTS_OPS_INVALID, reason=f"unknown namespace: {namespace}")
         return _OpsNamespace(self, self._catalog[namespace])

@@ -16,14 +16,16 @@ if TYPE_CHECKING:
 
 
 def match_pattern_func(event_input: EventInput, match_pattern: MatchPattern) -> bool:
+    """Return True only for empty build input and an empty match pattern."""
     return event_input is None and not match_pattern
 
 
 async def core_handler(event: Event, ops: EventHandlerOps | None, event_next: EventNext) -> EventHandlerOpsBuilder:
+    """Create the empty Builder that BUILTIN handlers extend during ``ops.build``."""
     del event, ops, event_next
     return EventHandlerOpsBuilder()
 
 
 def register(bus: ExtensionEventBus) -> None:
-    """Register ``ops.build``"""
+    """Register the Core ``ops.build`` event type on ``bus``."""
     bus.register_event_type(OPS_BUILD_EVENT_TYPE, match_pattern_func, core_handler)

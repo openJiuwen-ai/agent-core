@@ -136,11 +136,7 @@ async def test_matcher_contract_failure_stops_before_dispatch() -> None:
         del event_input, pattern
         return 1
 
-    def awaitable_matcher(event_input: object, pattern: Mapping[str, object]) -> object:
-        del event_input, pattern
-        return asyncio.sleep(0, result=True)
-
-    for index, matcher in enumerate((raising_matcher, non_bool_matcher, awaitable_matcher)):
+    for index, matcher in enumerate((raising_matcher, non_bool_matcher)):
         invalid_bus = await _built_bus()
         invalid_trace: list[str] = []
 

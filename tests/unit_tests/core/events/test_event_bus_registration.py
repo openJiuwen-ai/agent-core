@@ -35,7 +35,6 @@ async def _core_handler(event: Event, ops: object | None, event_next: EventNext)
     ("event_type", "matcher", "core_handler"),
     [
         ("", _matches, _core_handler),
-        ("ops.custom", _matches, _core_handler),
         ("demo.invalid_matcher", object(), _core_handler),
         ("demo.async_matcher", _async_matcher, _core_handler),
         ("demo.invalid_core", _matches, object()),
@@ -77,19 +76,17 @@ async def test_event_type_registration_is_atomic_and_bus_scoped(
     assert first_bus._events == before_events
 
 
-def test_new_bus_preregisters_protected_ops_build() -> None:
+def test_new_bus_preregisters_ops_build() -> None:
     bus = ExtensionEventBus()
-    bus.register_event_handler(OPS_BUILD_EVENT_TYPE, _core_handler, {}, HandlerLevel.BUILTIN)
-    builtin_event = bus._events[OPS_BUILD_EVENT_TYPE]
+    handler_id = bus.register_event_handler(OPS_BUILD_EVENT_TYPE, _core_handler, {}, HandlerLevel.BUILTIN)
 
     with pytest.raises(ValidationError) as overwrite:
         bus.register_event_type(OPS_BUILD_EVENT_TYPE, _matches, _core_handler)
     assert overwrite.value.status is StatusCode.EVENTS_REGISTRATION_INVALID
-    with pytest.raises(ValidationError) as unregister:
-        bus.unregister_event_type(OPS_BUILD_EVENT_TYPE)
-    assert unregister.value.status is StatusCode.EVENTS_REGISTRATION_INVALID
-    assert bus._events[OPS_BUILD_EVENT_TYPE] is builtin_event
-    assert len(bus._handlers) == 1
+
+    bus.unregister_event_type(OPS_BUILD_EVENT_TYPE)
+    assert OPS_BUILD_EVENT_TYPE not in bus._events
+    assert handler_id not in bus._handlers
 
 
 @pytest.mark.asyncio
