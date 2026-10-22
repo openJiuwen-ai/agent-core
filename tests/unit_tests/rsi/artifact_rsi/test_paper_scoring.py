@@ -113,7 +113,7 @@ async def test_structured_completion_falls_back_to_text_when_model_rejects_image
     assert len(model.calls) == 2
     assert isinstance(model.calls[0][-1]["content"], list), "first call still attempted images"
     assert model.calls[1][-1]["content"] == "Return a score.", "fallback call must drop images"
-    assert completer._vision_unsupported is True
+    assert completer.vision_unsupported is True
 
 
 @pytest.mark.asyncio
@@ -131,3 +131,33 @@ async def test_structured_completion_skips_images_after_first_rejection():
     # single text-only call for the second request -- no repeat 404.
     assert len(model.calls) == 3
     assert all(not isinstance(call[-1]["content"], list) for call in model.calls[1:])
+
+
+class _UnrelatedlyFailingModel:
+    """Raises an error that has nothing to do with vision support, to
+    confirm the fallback doesn't swallow unrelated failures (e.g. a rate
+    limit or auth error) just because the request happened to carry images."""
+
+    def invoke(self, messages):
+        raise RuntimeError("rate limit exceeded, retry after 30s")
+
+
+@pytest.mark.asyncio
+async def test_structured_completion_reraises_non_vision_errors_with_images():
+    completer = StructuredCompleter(
+        {"paper_scoring": {"max_validation_retries": 1}},
+        model=_UnrelatedlyFailingModel(),
+    )
+
+    # complete()'s retry loop only catches (StructuredCompletionError,
+    # ValueError); an unrelated RuntimeError from the model must propagate
+    # as-is, not get relabeled or retried as a vision/JSON-schema failure.
+    with pytest.raises(RuntimeError, match="rate limit exceeded"):
+        await completer.complete(
+            _Review,
+            system="Review the paper.",
+            user="Return a score.",
+            images=[_figure()],
+        )
+
+    assert completer.vision_unsupported is False

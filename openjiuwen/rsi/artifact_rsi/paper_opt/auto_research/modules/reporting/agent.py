@@ -385,7 +385,12 @@ class ReportingAgent:
         if summary_path is None:
             return None
         try:
-            summary = summary_path.read_text(encoding="utf-8")
+            # errors="replace": this is the same research_summary.md the
+            # bibliography pass below reads leniently -- every other local
+            # source read in this function (HTML excerpt, plain-text excerpt
+            # below) already tolerates bad bytes, this first/earliest read
+            # must not be the one that still crashes the whole attempt.
+            summary = summary_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return None
 

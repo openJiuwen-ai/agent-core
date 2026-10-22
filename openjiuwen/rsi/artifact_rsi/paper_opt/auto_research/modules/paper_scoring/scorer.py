@@ -148,12 +148,19 @@ class PaperScorer:
             tex_path=paper.tex_path,
         )
         scoresheet_path = write_scoresheet(output_dir, scoresheet)
+        # Surface the StructuredCompleter's vision fallback (see llm.py) here
+        # rather than leaving it buried in per-call image_count=0 entries --
+        # a caller reading only the top-level notes must still be able to
+        # tell this score was computed without the paper's figures.
+        notes = "scored"
+        if self.llm.vision_unsupported:
+            notes = "scored (configured model rejected image input; figures were omitted from scoring)"
         write_named(
             output_dir,
             "audit.json",
             {
                 "schema_version": SCHEMA_VERSION,
-                "notes": "scored",
+                "notes": notes,
                 "settings": self.settings.model_dump(mode="json"),
                 "llm_calls": [call.model_dump(mode="json") for call in self.llm.calls],
                 "scoresheet": scoresheet.model_dump(mode="json"),
@@ -162,7 +169,7 @@ class PaperScorer:
         return PaperScoringOutput(
             status="scored",
             scoresheet_path=str(scoresheet_path),
-            notes="scored",
+            notes=notes,
             scoresheet=scoresheet,
         )
 
