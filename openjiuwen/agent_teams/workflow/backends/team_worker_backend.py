@@ -194,7 +194,7 @@ class TeamWorkerBackend(AgentBackend):
                     e.tokens = call_tokens
             elif call_tokens is not None:
                 # Wrap a non-backend error so _attempt_calls can still read .tokens
-                e = BackendError(str(e), tokens=call_tokens)
+                raise BackendError(str(e), tokens=call_tokens) from e
             raise
         finally:
             await self._worktrees.finalize(member_name)

@@ -534,6 +534,31 @@ def test_execute_worker_surfaces_task_loop_model_error():
     assert _text_from_invoke_result({"output": "ok"}, member_name="wf-w-5") == "ok"
 
 
+@pytest.mark.asyncio
+async def test_worker_wraps_non_backend_failure_with_burned_tokens(monkeypatch):
+    """A generic worker failure must preserve its model-call token attribution."""
+    from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+
+    class _FailingWorkerBackend(_FakeWorkerBackend):
+        async def _execute_worker(self, prompt, tools, *, member_name, has_schema, model, budget_rail=None):
+            budget_rail.call_tokens = 321
+            raise RuntimeError("provider disconnected")
+
+    backend = _FailingWorkerBackend(model=None)
+
+    async def _noop(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(backend._worktrees, "ensure", _noop)
+    monkeypatch.setattr(backend._worktrees, "finalize", _noop)
+
+    with pytest.raises(BackendError, match="provider disconnected") as exc_info:
+        await backend.run("fail me", {"label": "broken"}, None)
+
+    assert exc_info.value.tokens == 321
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+
+
 def test_agent_emits_failed_when_worker_backend_raises(tmp_path):
     """BackendError from a model failure surfaces as agent_failed, not empty completed."""
     from openjiuwen.agent_teams.workflow.engine.errors import BackendError
