@@ -67,7 +67,9 @@ class NodeBackedRuntime:
         self.invalid_signals: set[str] = set()
         self.artifact_improvement: str | None = None
         self.artifact_improvement_required = True
-        self.skill_improvements: dict[str, str] = {}
+        self.skill_evolutions: dict[str, str] = {}
+        # reserved for the future experience consolidation tool
+        self.ttse_advice: bool = True
         for nodes in nodes_by_subagent.values():
             for node in nodes:
                 self._index[node.node_id] = node
@@ -131,9 +133,9 @@ class NodeBackedRuntime:
         self.artifact_improvement = md
         return status
 
-    def record_skill_improvement(self, key: str, md: str) -> str:
-        status = "updated" if key in self.skill_improvements else "recorded"
-        self.skill_improvements[key] = md
+    def record_skill_evolution(self, key: str, md: str) -> str:
+        status = "updated" if key in self.skill_evolutions else "recorded"
+        self.skill_evolutions[key] = md
         return status
 
     def completion_overview(self) -> dict[str, Any]:
@@ -469,6 +471,8 @@ async def run_attribution(
     reward_overall: RewardOverall | None = None,
     language: str = "zh",
     swarm_mode: bool = False,
+    skill_evolution: bool = True,
+    ttse_advice: bool = True,
     runtime: AttributionAgentRuntime | None = None,
     status_sink: StatusSink | None = None,
     model_name: str = "",
@@ -488,6 +492,11 @@ async def run_attribution(
     ``tier == "perfect"`` signals never enter this stage: they are filtered
     here (proposal §4.5) and reported via ``skipped_signal_ids`` so the host
     can surface the skip in state.
+
+    ``skill_evolution=False`` (host switch pass-through) removes the skill
+    improvement tool from the agent's toolset.  ``ttse_advice`` is the
+    matching switch for the future experience consolidation tool; it is
+    accepted and recorded but has no behaviour on this stage yet.
     """
     active_signals = [signal for signal in signals if signal.tier != "perfect"]
     skipped_signal_ids = sorted(signal.signal_id for signal in signals if signal.tier == "perfect")
@@ -503,6 +512,8 @@ async def run_attribution(
     # a deliverable was reviewed only when the Reward scored one: without it there is nothing to improve
     review_deliverables = any(signal.source == SignalSource.REWARD for signal in signals)
     active_runtime.artifact_improvement_required = review_deliverables
+    if isinstance(active_runtime, NodeBackedRuntime):
+        active_runtime.ttse_advice = ttse_advice
     agent, rail = build_attribution_agent(
         model=model,
         signals=active_signals,
@@ -511,6 +522,7 @@ async def run_attribution(
         reward_overall=reward_overall,
         language=language,
         swarm_mode=swarm_mode,
+        skill_evolution=skill_evolution,
         total_token_budget=total_token_budget,
         max_iterations=max_iterations,
         max_context_messages=max_context_messages,
@@ -528,6 +540,7 @@ async def run_attribution(
         subjects=active_runtime.subjects(),
         language=language,
         review_deliverables=review_deliverables,
+        skill_evolution=skill_evolution,
     )
 
     def outcome(completed: bool, wake_attempted: bool) -> AttributionRunOutcome:
@@ -538,7 +551,7 @@ async def run_attribution(
             "skill": 0,
         }
         if isinstance(active_runtime, NodeBackedRuntime):
-            counts["skill"] = len(active_runtime.skill_improvements)
+            counts["skill"] = len(active_runtime.skill_evolutions)
         if rail.exceeded:
             return AttributionRunOutcome(
                 status="failed",

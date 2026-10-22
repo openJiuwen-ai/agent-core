@@ -520,12 +520,15 @@ class _FakeRail:
         self.spent = 0
 
 
-def _patch_build(monkeypatch: Any, fake_agent: _FakeDeepAgent, fake_rail: _FakeRail) -> None:
+def _patch_build(monkeypatch: Any, fake_agent: _FakeDeepAgent, fake_rail: _FakeRail) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
     def fake_build(**kwargs: Any) -> tuple[Any, _FakeRail]:
-        del kwargs
+        captured.update(kwargs)
         return fake_agent, fake_rail
 
     monkeypatch.setattr(run_module, "build_attribution_agent", fake_build)
+    return captured
 
 
 class _FakeSession:
@@ -724,3 +727,38 @@ async def test_run_attribution_agent_error(monkeypatch: Any) -> None:
     assert outcome.status == "failed"
     assert outcome.failure_kind == "error"
     assert "model broke" in outcome.error_detail or True
+
+
+async def test_run_attribution_forwards_advice_switches(monkeypatch: Any) -> None:
+    runtime = NodeBackedRuntime(_nodes())
+    signals = [_signal()]
+    fake_agent = _FakeDeepAgent(runtime, signals, rounds_to_finish=1)
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    captured = _patch_build(monkeypatch, fake_agent, _FakeRail())
+    await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=signals,
+        task_description="写报告",
+        runtime=runtime,
+        skill_evolution=False,
+        ttse_advice=False,
+        total_timeout_s=None,
+    )
+    assert captured["skill_evolution"] is False
+    assert runtime.ttse_advice is False
+    # the disabled tool never appears as a capability in the initial prompt
+    assert "submit_skill_evolution" not in fake_agent.prompts[0]
+
+    fake_agent_default = _FakeDeepAgent(runtime, signals, rounds_to_finish=1)
+    captured = _patch_build(monkeypatch, fake_agent_default, _FakeRail())
+    await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=signals,
+        task_description="写报告",
+        runtime=runtime,
+        total_timeout_s=None,
+    )
+    assert captured["skill_evolution"] is True
+    assert runtime.ttse_advice is True
