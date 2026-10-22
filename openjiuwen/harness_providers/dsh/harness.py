@@ -50,7 +50,7 @@ class DshHarness(SerializedTurnHarness):
         implementation_version=ADAPTER_VERSION,
         protocol_version=PROTOCOL_VERSION,
         compatible_protocol_versions=frozenset({PROTOCOL_VERSION}),
-        capabilities=frozenset({HarnessCapability.MCP_TOOLS}),
+        capabilities=frozenset({HarnessCapability.MCP_TOOLS, HarnessCapability.ENDPOINT_MODELS}),
         optional_host_capabilities=frozenset({HostCapability.MCP_SERVERS}),
     )
 

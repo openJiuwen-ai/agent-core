@@ -33,8 +33,9 @@ Nothing inside `openjiuwen` imports it.
 The relationship between the two packages is fixed:
 
 - The dependency is one-way and narrow. `tracer_otel/semconv.py` re-exports
-  exactly six standard GenAI keys from `semconv.py` here so there is one
-  authoritative definition per standard key. This package imports nothing from
+  standard GenAI keys from `semconv.py` here (grew from the original six with
+  the GenAI semconv completion work) so there is one authoritative definition
+  per standard key. This package imports nothing from
   `tracer_otel`, at any time.
 - The two vocabularies overlap and stay separate on purpose. `tracer_otel`
   owns `openjiuwen.workflow.*` / `openjiuwen.agent.*` and its own span shape;
@@ -49,6 +50,13 @@ The relationship between the two packages is fixed:
 
 - `runtime.py` / `setup.py`: process-wide `TracerProvider` lifecycle and the
   facade (`init_observability`). This stack owns the **global** provider.
+- `instrumentation.py`: the single authority for the process-wide HTTP
+  instrumentation switch (`global_instrument_enable` /
+  `OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE`): patches `httpx` / `requests` /
+  `aiohttp` for W3C traceparent propagation plus `fastapi` for inbound trace
+  extraction, once per process, always after a
+  global SDK provider exists. `extensions/tracer_otel` delegates here through
+  a provider factory instead of touching global state itself.
 - `demand.py`: acquire/release bookkeeping so one runtime's shutdown never
   tears down a provider another runtime still depends on. OTel allows exactly
   one global provider per process; first initializer wins.

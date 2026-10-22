@@ -415,6 +415,7 @@ class ShellOperation(BaseShellOperation):
             command: Command to execute.
             cwd: Working directory for command execution (default: current directory).
             timeout: Command execution timeout in seconds (default: 300 seconds).
+                Explicit budgets are not shortened by an additional local shell cap.
             environment: Key-value dict of custom environment variables.
             options: Additional execution configuration options.
             shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
@@ -475,9 +476,8 @@ class ShellOperation(BaseShellOperation):
                     data=ExecuteCmdData(command=command, cwd=str(actual_cwd)),
                 )
 
-            # 框架层超时上限，防止 LLM 设置过长 timeout 导致 agent 长时间无响应
-            _max_exec_cmd_timeout = int(os.getenv("JW_EXECUTE_CMD_MAX_TIMEOUT", "600"))
-            timeout = min(timeout or 300, _max_exec_cmd_timeout)
+            # The caller owns the execution budget; do not shorten it here.
+            timeout = timeout or 300
 
             exec_env = OperationUtils.prepare_environment(environment)
             is_tui, tui_warning = self._detect_and_mitigate_tui(command, exec_env)
@@ -552,6 +552,7 @@ class ShellOperation(BaseShellOperation):
             command: Command to execute.
             cwd: Working directory for command execution (default: current directory).
             timeout: Command execution timeout in seconds (default: 300 seconds).
+                Explicit budgets are not shortened by an additional local shell cap.
             environment: Key-value dict of custom environment variables.
             options: Additional execution configuration options.
             shell_type: Shell to use, one of "auto"/"cmd"/"powershell"/"bash"/"sh" (default: "auto").
@@ -622,9 +623,8 @@ class ShellOperation(BaseShellOperation):
                 )
                 return
 
-            # 框架层超时上限，防止 LLM 设置过长 timeout 导致 agent 长时间无响应
-            _max_exec_cmd_timeout = int(os.getenv("JW_EXECUTE_CMD_MAX_TIMEOUT", "600"))
-            timeout = min(timeout or 300, _max_exec_cmd_timeout)
+            # Match execute_cmd: preserve the caller's execution budget.
+            timeout = timeout or 300
 
             exec_env = OperationUtils.prepare_environment(environment)
             is_tui, tui_warning = self._detect_and_mitigate_tui(command, exec_env)

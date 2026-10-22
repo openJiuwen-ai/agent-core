@@ -11,7 +11,7 @@ workflow/
 │   ├── facade.py        # 脚本 import 的稳定原语面（agent/agent_session/human_session/human/parallel/pipeline/phase/log/...）
 │   ├── seam.py          # Provider 协议 + contextvar（引擎可整体替换的接缝）
 │   ├── provider.py      # EngineProvider（把原语转发到 primitives）
-│   ├── primitives.py    # 原语实现：call-path keys / agent_gate.acquire() 并发 / journal；单轮 agent() + 有状态 AgentSession(send/notify/fork, 含 _member_name 首轮命名) + options bag；phase/log/agent 起止发 progress 事件；缓存命中经 run_id 隔离并重建 per-run 花费（F_87）
+│   ├── primitives.py    # 原语实现：call-path keys / agent_gate.acquire() 并发 / journal；单轮 agent() + 有状态 AgentSession(send/notify/fork, 含 _member_name 首轮命名 + _opened_model 首轮模型锁定) + options bag（未知键 + model 池外值 fail-fast，F_115）；phase/log/agent 起止发 progress 事件；缓存命中经 run_id 隔离并重建 per-run 花费（F_87）
 │   ├── journal.py       # content-addressed resume（结构化 call-path 键 + sig）+ run 级记录（get_cached 按 run_id 双重检查 / find_run_record / write_run_record，F_87 / F_88）
 │   ├── loader.py        # AST 提取 META + 确定性 lint + importlib 导入
 │   ├── schema.py        # agent(schema=) 解析/校验（dict / pydantic / None）
@@ -21,10 +21,11 @@ workflow/
 │   ├── cap.py           # resolve_agents_per_run_cap（build 期与运行期共享的 L2 纯函数）
 │   ├── runtime.py       # Runtime：backend / journal / log_sink / progress_sink / agent_gate（替代旧 sem）/ budget（BudgetLedger，session 级）/ workflow_budget（per-run BudgetLedger，F_87）/ run_id / current_agent / cap_override（仅 fallback）
 │   ├── runner.py        # run_workflow：装 provider、建 Runtime、发 workflow 起止事件、finally aclose backend
-│   └── backends/{base,mock}.py  # AgentBackend 抽象（run + 可选 open_session/send_turn/close_session/aclose + KNOWN_OPTIONS；progress_sink/bind_progress_sink = engine→backend 的进度接缝，worker 实时活动经它上抛，见 F_112）+ 离线确定性 MockBackend（含 session 实现）
+│   └── backends/{base,mock}.py  # AgentBackend 抽象（run + 可选 open_session/send_turn/close_session/aclose + KNOWN_OPTIONS + model_pool_names——池自声明，None=不校验，F_115；progress_sink/bind_progress_sink = engine→backend 的进度接缝，worker 实时活动经它上抛，见 F_112）+ 离线确定性 MockBackend（含 session 实现）
 ├── backends/
-│   ├── team_worker_backend.py   # TeamWorkerBackend：把每个 agent() 映射成一个 WORKER TeamHarness（核心对接）；委派会话四方法给 AvatarSessionManager；SwarmflowActivityRail 在 worker 的 harness 上钩 tool call，节流上抛 AGENT_ACTIVITY（F_112）
-│   ├── avatar_session_backend.py # AvatarSessionManager：有状态会话（agent_session/human_session）的长生命周期 NativeHarness + 多轮 send-等-收 + human 推-等-格式化（_pending_human 实例字段，无全局 registry）+ fork（capture_fork 双来源[live native / checkpointer 恢复] / ensure_member_name 首轮命名 / 稳定 session_id 派生 / fork_data 注入 / 镜像兜底，见 F_81）
+│   ├── team_worker_backend.py   # TeamWorkerBackend：把每个 agent() 映射成一个 WORKER TeamHarness（核心对接）；委派会话四方法给 AvatarSessionManager；SwarmflowActivityRail 在 worker 的 harness 上钩 tool call（before/after 双钩、不节流，一次工具执行发一对 AGENT_ACTIVITY，按 tool_call_id 配对，结构化 activity_type/tool_call_id/tool_name/content，见 F_112）
+│   ├── activity_emitter.py      # 共享 emitter 工厂：truncate_activity_content（ACTIVITY_CONTENT_LIMIT=65536 防护上限 + …(truncated)）+ build_activity_event（结构化 AGENT_ACTIVITY 形状）——worker rail / avatar rail / external runtime 三处共用（F_112）
+│   ├── avatar_session_backend.py # AvatarSessionManager：有状态会话（agent_session/human_session）的长生命周期 NativeHarness + 多轮 send-等-收 + human 推-等-格式化（_pending_human 实例字段，无全局 registry）+ fork（capture_fork 双来源[live native / checkpointer 恢复] / ensure_member_name 首轮命名 / 稳定 session_id 派生 / fork_data 注入 / 镜像兜底，见 F_81）；有 agent_id 的 avatar 挂 SwarmflowActivityRail，活动事件带当前轮 correlation_id（F_112）
 │   ├── budget_rail.py           # SwarmflowBudgetRail：挂在每个 worker/avatar harness 上，after_model_call 读 usage_metadata 记真实 token、超预算 force-finish 就地停 harness（见 F_66）；workflow_budget 非 None 时同时记 session 级 + per-run 级两层（F_87）
 │   └── _member_spec.py          # derive_member_spec / derive_member_build_context：worker 与 avatar 共享的 spec / build_context 派生
 │   # StructuredOutputTool 已下沉到 tools/structured_output_tool.py（通用工具，tiny_agent 也复用）；backends/__init__ 仍 re-export

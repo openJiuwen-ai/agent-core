@@ -1,0 +1,143 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Three-stage attribution pipeline (attr-new redesign).
+
+Stage one parses the selected trajectory into a task description and task
+artifacts; stage two diagnoses (keyword rules or Jev, plus an optional Reward
+deep agent); stage three attributes every diagnostic signal through a deep
+agent with ten tools.  Nothing here imports jiuwenswarm: all IO is injected.
+"""
+
+from openjiuwen.agent_evolving.attribution.agent import (
+    AttributionAgentRuntime,
+    ContextBudgetRail,
+    LlmStatusRail,
+    build_attribution_agent,
+    build_attribution_initial_prompt,
+    build_attribution_system_prompt,
+    build_wake_text,
+    render_signal_block,
+    render_subjects_block,
+)
+from openjiuwen.agent_evolving.attribution.model import (
+    AttributionEntry,
+    AttributionRunOutcome,
+    DiagnosisRequest,
+    DiagnosisResult,
+    DiagnosticSignal,
+    LlmRequestEvent,
+    RewardDimension,
+    RewardOverall,
+    SignalSource,
+    StatusSink,
+    SubjectRef,
+    TaskParseRequest,
+    TaskParseResult,
+    jev_tier,
+    make_signal_id,
+    new_attr_id,
+    new_signal_id,
+    reward_tier,
+)
+from openjiuwen.agent_evolving.attribution.nodes import (
+    TrajectoryNode,
+    detect_language,
+    is_error_node,
+    render_node_detail,
+    render_node_field,
+    render_overview,
+    render_summary,
+    search_keyword,
+)
+from openjiuwen.agent_evolving.attribution.run import (
+    NodeBackedRuntime,
+    build_reward_user_prompt,
+    run_attribution,
+    run_diagnosis,
+    run_task_parse,
+)
+from openjiuwen.agent_evolving.attribution.snapshot import (
+    SNAPSHOT_SCHEMA_VERSION,
+    assign_node_ids,
+    build_nodes_from_snapshot,
+    build_subject_nodes,
+    detect_trajectory_language,
+    node_native_key,
+    slice_nodes_by_range,
+)
+from openjiuwen.agent_evolving.attribution.task_parse import (
+    TASK_PARSE_TOOLS,
+    TaskParseError,
+    TaskParseLLM,
+    build_task_parse_digest,
+    extract_file_candidates,
+    load_task_parse_prompt,
+)
+from openjiuwen.agent_evolving.attribution.tools import (
+    build_attribution_tools,
+    render_partial_view,
+    render_trajectory_view,
+    same_subagent,
+    split_node_id,
+)
+
+__all__ = [
+    "AttributionAgentRuntime",
+    "AttributionEntry",
+    "AttributionRunOutcome",
+    "ContextBudgetRail",
+    "DiagnosisRequest",
+    "DiagnosisResult",
+    "DiagnosticSignal",
+    "LlmRequestEvent",
+    "LlmStatusRail",
+    "NodeBackedRuntime",
+    "RewardDimension",
+    "RewardOverall",
+    "SNAPSHOT_SCHEMA_VERSION",
+    "SignalSource",
+    "StatusSink",
+    "SubjectRef",
+    "TASK_PARSE_TOOLS",
+    "TaskParseError",
+    "TaskParseLLM",
+    "TaskParseRequest",
+    "TaskParseResult",
+    "TrajectoryNode",
+    "assign_node_ids",
+    "build_attribution_agent",
+    "build_attribution_initial_prompt",
+    "build_attribution_system_prompt",
+    "build_attribution_tools",
+    "build_nodes_from_snapshot",
+    "build_reward_user_prompt",
+    "build_subject_nodes",
+    "build_task_parse_digest",
+    "build_wake_text",
+    "detect_language",
+    "detect_trajectory_language",
+    "extract_file_candidates",
+    "is_error_node",
+    "jev_tier",
+    "load_task_parse_prompt",
+    "make_signal_id",
+    "new_attr_id",
+    "new_signal_id",
+    "node_native_key",
+    "render_node_detail",
+    "render_node_field",
+    "render_overview",
+    "render_partial_view",
+    "render_signal_block",
+    "render_subjects_block",
+    "render_summary",
+    "render_trajectory_view",
+    "reward_tier",
+    "run_attribution",
+    "run_diagnosis",
+    "run_task_parse",
+    "same_subagent",
+    "search_keyword",
+    "slice_nodes_by_range",
+    "split_node_id",
+]

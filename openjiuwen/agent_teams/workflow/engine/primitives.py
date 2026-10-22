@@ -42,11 +42,11 @@ from contextvars import ContextVar
 from dataclasses import asdict, dataclass, is_dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
-from .errors import BudgetExhausted, EngineError, WorkflowAborted
+from .errors import BackendError, BudgetExhausted, EngineError, WorkflowAborted
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
-from .verify import Reviewer, SCORE_SCHEMA, VERDICT_SCHEMA, VerifyResult, VerifyVote, settle_verify_tally
+from .verify import SCORE_SCHEMA, VERDICT_SCHEMA, Reviewer, VerifyResult, VerifyVote, settle_verify_tally
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -100,6 +100,10 @@ class _BackendCallResult:
                        ``None`` when the provider reported none.
         input_tokens / output_tokens: the prompt / completion split of ``tokens``
                        for display (``AgentResult.input_tokens`` / ``.output_tokens``).
+        model:         The model the backend actually ran the call on, as reported
+                       by the provider (``AgentResult.model`` / ``BackendError.
+                       model``); ``None`` for native calls. Display-only, never
+                       journaled.
         attempts:      Attempts actually spent when the call failed — the loop can
                        short-circuit (skip / budget fail-fast) before using all
                        ``rt.retries + 1``; ``None`` when no attempt ran (e.g. a
@@ -114,6 +118,7 @@ class _BackendCallResult:
     cache_tokens: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    model: str | None = None
     attempts: int | None = None
 
 
@@ -377,6 +382,19 @@ def _emit_log(rt, message: str, *, nested_phase: str | None = None) -> None:
     )
 
 
+def _display_model(rt, opts: dict) -> str | None:
+    """The model name to show for this call: backend-described, else the raw hint."""
+    describe = getattr(rt.backend, "describe_model", None)
+    described = describe(opts) if callable(describe) else None
+    return described or opts.get("model")
+
+
+def _display_agent_template(rt, opts: dict) -> str | None:
+    """The expert display name for this call, when the backend can name it."""
+    describe = getattr(rt.backend, "describe_agent_template", None)
+    return describe(opts) if callable(describe) else None
+
+
 def _emit_agent_started(
     rt,
     opts: dict,
@@ -400,7 +418,10 @@ def _emit_agent_started(
             phase=opts.get("phase") or _current_phase.get(),
             label=opts.get("label"),
             prompt=prompt,
-            model=opts.get("model"),
+            model=_display_model(rt, opts),
+            agent_type=opts.get("agent_type"),
+            agent_template=opts.get("agent_template"),
+            display_name=_display_agent_template(rt, opts),
             agent_id=agent_id,
             node_type=node_type,
             parent_session_id=parent_session_id,
@@ -416,6 +437,7 @@ def _emit_agent_completed(
     tokens: int | None = None, budget_snapshot: dict | None = None,
     nested_phase: str | None = None, cache_tokens: int | None = None,
     token_input: int | None = None, token_output: int | None = None,
+    model: str | None = None,
 ) -> None:
     """Emit an AGENT_COMPLETED progress event.
 
@@ -427,6 +449,8 @@ def _emit_agent_completed(
     (``None`` when the provider reported none; a subset of ``tokens``).
     ``token_input`` / ``token_output``: the prompt / completion split of
     ``tokens`` for display (``None`` when the provider reported no split).
+    ``model``: the model the provider reported running this call on, when it
+    did (an external CLI); display-only, never journaled.
     """
     rt.workflow_budget.add_phase(opts.get("phase") or _current_phase.get() or "?", tokens)
     rt.current_agent = None
@@ -441,6 +465,7 @@ def _emit_agent_completed(
             cache_tokens=cache_tokens,
             token_input=token_input,
             token_output=token_output,
+            model=model,
             budget=budget_snapshot,
             workflow_budget=_wf_budget_snapshot(rt),
             nested_phase=_resolved_nested_phase(nested_phase),
@@ -451,7 +476,7 @@ def _emit_agent_completed(
 def _emit_agent_failed(
     rt, opts: dict, message: str, *, agent_id: str | None = None,
     tokens: int | None = None, budget_snapshot: dict | None = None,
-    nested_phase: str | None = None,
+    nested_phase: str | None = None, model: str | None = None,
 ) -> None:
     rt.workflow_budget.add_phase(opts.get("phase") or _current_phase.get() or "?", tokens)
     rt.current_agent = None
@@ -463,6 +488,7 @@ def _emit_agent_failed(
             message=message,
             agent_id=agent_id,
             tokens=tokens,
+            model=model,
             budget=budget_snapshot,
             workflow_budget=_wf_budget_snapshot(rt),
             nested_phase=_resolved_nested_phase(nested_phase),
@@ -474,7 +500,8 @@ def _emit_agent_failed(
 #: Engine-owned ``options`` keys. A backend may widen this via its
 #: ``KNOWN_OPTIONS``; anything outside the union is a typo and fails fast.
 _ENGINE_OPTIONS = frozenset(
-    {"label", "phase", "schema", "model", "timeout", "isolation", "agent_type"}
+    {"label", "phase", "schema", "model", "timeout", "isolation", "agent_type",
+     "builtin_model", "effort"}
 )
 
 
@@ -496,7 +523,8 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
         The merged, validated, ``None``-stripped options dict.
 
     Raises:
-        EngineError: If any key is outside the allowed set.
+        EngineError: If any key is outside the allowed set, or ``agent_template``
+            carries a non-string value (it can never name a member).
     """
     merged: dict = {}
     for key, value in (options or {}).items():
@@ -511,7 +539,35 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
         raise EngineError(
             f"unknown option(s) {unknown}; allowed: {sorted(allowed)}"
         )
+    # Validated here, not in agent(): one validator covers agent(),
+    # AgentSession.send() and fork-merged options, all before AGENT_STARTED is
+    # emitted. The backend keeps its own isinstance guard (defence in depth).
+    template = merged.get("agent_template")
+    if template is not None and not isinstance(template, str):
+        raise EngineError(
+            f"agent_template must be a member name string, got {type(template).__name__}"
+        )
     return merged
+
+
+def _validate_model_hint(rt, opts: dict) -> None:
+    """Fail fast on a ``model`` hint the backend cannot honor.
+
+    Symmetric with ``_build_opts``' unknown-KEY fail-fast: an untrusted
+    script's option VALUE gets the same treatment. Runs before the signature
+    and the start event, so the journal and the UI never see a call that
+    would silently fall back to the base spec's model.
+    """
+    name = opts.get("model")
+    if name is None:
+        return
+    names = rt.backend.model_pool_names()
+    if names is None or name in names:
+        return
+    raise EngineError(
+        f"agent(options={{'model': {name!r}}}) is not in the model pool; "
+        f"available: {sorted(names) or '(empty — no model pool configured)'}"
+    )
 
 
 def _resolve_agent_gate(rt):
@@ -574,6 +630,7 @@ async def agent(
     opts = _build_opts(rt, {"label": label, "phase": phase, "schema": schema}, options)
     if opts.get("isolation") not in (None, "worktree"):
         raise EngineError("agent(options={'isolation': ...}) only supports 'worktree'")
+    _validate_model_hint(rt, opts)
     json_schema, model_cls = resolve_schema(opts.get("schema"))
 
     ks = key_str(_path.get() + (("call", _next_ordinal()),))
@@ -647,6 +704,7 @@ async def agent(
         _emit_agent_failed(
             rt, opts, msg, agent_id=ks,
             tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
+            model=call_result.model,
         )
         return None
 
@@ -677,6 +735,7 @@ async def agent(
         cache_tokens=call_result.cache_tokens,
         token_input=call_result.input_tokens,
         token_output=call_result.output_tokens,
+        model=call_result.model,
     )
     return call_result.result
 
@@ -786,7 +845,23 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
             else:
                 res = await make_call(feedback)
         except Exception as e:  # backend / timeout error -> retry, then skip
+            # A non-retryable BackendError (e.g. a third-party model-option
+            # rule violation) is deterministic: repeating it can only fail
+            # again, so surface it immediately instead of retrying it.
+            if isinstance(e, BackendError) and not e.retryable:
+                rt.log_sink(
+                    f"[wf] agent {label!r} failed (non-retryable): {str(e)}"
+                )
+                return _BackendCallResult(
+                    result=None, succeeded=False, error_detail=str(e), attempts=attempt,
+                    tokens=getattr(e, "tokens", 0) or None,
+                    model=getattr(e, "model", None) or None,
+                )
             last_err = e
+            if isinstance(e, TimeoutError) and timeout is not None:
+                # py3.11 bare TimeoutError str() is empty; inject the budget so
+                # the existing error_detail pipeline carries it to AGENT_FAILED.
+                last_err = TimeoutError(f"timed out after {timeout}s")
             # This attempt burned real tokens before failing (budget-exhausted,
             # backend error, etc.). Accumulate so the final failed result can
             # attribute the agent's full cost, not just the last attempt's.
@@ -805,6 +880,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
                 return _BackendCallResult(
                     result=None, succeeded=False, error_detail=ex[1], attempts=attempt,
                     tokens=burned_tokens if burned_tokens > 0 else None,
+                    model=getattr(last_err, "model", None) or None,
                 )
             rt.log_sink(
                 f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}"
@@ -828,6 +904,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
                     cache_tokens=res.cache_tokens,
                     input_tokens=res.input_tokens,
                     output_tokens=res.output_tokens,
+                    model=getattr(res, "model", None),
                 )
             except Exception as e:  # validation failure -> retry with feedback
                 last_err = e
@@ -842,12 +919,14 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
             cache_tokens=res.cache_tokens,
             input_tokens=res.input_tokens,
             output_tokens=res.output_tokens,
+            model=getattr(res, "model", None),
         )
     detail = str(last_err) if last_err else "unknown error"
     rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")
     return _BackendCallResult(
         result=None, succeeded=False, error_detail=detail, attempts=attempts,
         tokens=burned_tokens if burned_tokens > 0 else None,
+        model=getattr(last_err, "model", None) or None,
     )
 
 
@@ -1257,6 +1336,92 @@ def _warn_concurrent_session(rt) -> None:
     )
 
 
+# One avatar runs one model: the first live turn records its model identity as
+# the session's lock; a later live turn that resolves differently raises. The
+# sentinel marks "no first live turn yet" (a human session never locks).
+_NOT_LOCKED = object()
+
+
+@dataclass(frozen=True)
+class _ModelIdentity:
+    """Comparable model identity of one session turn (see ``_session_model_identity``).
+
+    ``supply`` keeps the external supply paths apart: ``"pool"`` (a pool
+    endpoint via ``model=``), ``"builtin"`` (the CLI's own login via
+    ``builtin_model=``), ``"both"`` (an invalid combo that can never equal a
+    single-supply lock) and ``"none"`` (no hint — the CLI's default).
+    """
+
+    kind: str
+    agent_type: str | None = None
+    model: str | None = None
+    effort: str | None = None
+    supply: str | None = None
+    builtin: str | None = None
+
+
+def _session_model_identity(opts: dict) -> _ModelIdentity:
+    """Comparable model identity of one session turn (one avatar = one model).
+
+    Differs across supply paths so ``model="X"`` (a pool endpoint) never equals
+    ``builtin_model="X"`` (the CLI's own login). Third-party hints are resolved
+    through the backend's planner when the engine has a resolution context; a
+    plain backend has neither a pool nor a CLI catalog, so the planner raises
+    for any hint-bearing turn and the raw supply path below carries the lock —
+    the launch backend rejects invalid combos anyway.
+    """
+    if not opts.get("agent_type"):
+        return _ModelIdentity("native", model=opts.get("model"))
+    agent_type = opts["agent_type"]
+    model_hint = opts.get("model")
+    builtin_hint = opts.get("builtin_model")
+    effort = opts.get("effort")
+    # Imported lazily: backends.external_model pulls in agent_teams.external,
+    # which re-enters this module mid-init through workflow/__init__.
+    from openjiuwen.agent_teams.workflow.backends.external_model import plan_external_model
+
+    try:
+        primary = plan_external_model(
+            cli_agent=agent_type,
+            model_hint=model_hint,
+            builtin_hint=builtin_hint,
+            effort_hint=effort,
+            entry=None,
+            team_backend=None,
+        ).primary
+    except BackendError:
+        primary = None  # planner has no pool/catalog here; lock by raw hints
+    if primary is not None:
+        supply = "pool" if primary.api_base is not None else "builtin"
+        return _ModelIdentity("external", agent_type, primary.model, primary.effort, supply)
+    if model_hint is not None and builtin_hint is not None:
+        # Mutually exclusive to the planner: an invalid combo can never equal a
+        # single-supply lock, so a both-supplied turn reads as a model switch.
+        return _ModelIdentity("external", agent_type, model_hint, effort, "both", builtin=builtin_hint)
+    if model_hint is not None:
+        return _ModelIdentity("external", agent_type, model_hint, None, "pool")
+    if builtin_hint is not None:
+        return _ModelIdentity("external", agent_type, builtin_hint, effort, "builtin")
+    return _ModelIdentity("external", agent_type, None, None, "none")
+
+
+def _locked_model_display(identity: _ModelIdentity, backend: Any = None) -> str:
+    """Human-readable name of a locked identity.
+
+    A no-hint lock names what actually runs: the backend's base-spec model
+    when it exposes ``describe_base_model`` (native path), the CLI's own
+    default for a third-party avatar (opaque to the engine — named honestly
+    by kind), and the generic phrase as the hookless fallback.
+    """
+    if identity.model:
+        return identity.model
+    if identity.kind == "external":
+        return f"the {identity.agent_type} CLI's own default model"
+    describe = getattr(backend, "describe_base_model", None)
+    named = describe() if callable(describe) else None
+    return named or "the base spec model"
+
+
 @dataclass
 class _TurnRequest:
     """One session turn's request payload, threaded through ``_drive``/``_turn``.
@@ -1290,7 +1455,7 @@ class AgentSession:
     __slots__ = (
         "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
         "_history", "_sid", "_member_name", "_in_flight", "_fork_data",
-        "_parent_session_id",
+        "_parent_session_id", "_opened_model", "_opened_template", "_completed_turns",
     )
 
     def __init__(
@@ -1318,6 +1483,15 @@ class AgentSession:
         self._in_flight = False
         self._fork_data = _fork_data
         self._parent_session_id = _parent_session_id
+        # Model lock: the first live turn's identity, or the sentinel while the
+        # avatar has never opened (a human session never locks).
+        self._opened_model = _NOT_LOCKED
+        # Template lock: the expert the first live turn picked (None = none picked).
+        self._opened_template: str | None = None
+        # Live turns completed since the avatar opened. The lock is set before
+        # the first live turn runs, so it only means "used" once a turn landed;
+        # a failed first turn may re-lock (see _ensure_open).
+        self._completed_turns = 0
 
     @overload
     async def send(self, prompt: str, *, notify: Literal[True], options: dict | None = ...) -> None:
@@ -1358,6 +1532,7 @@ class AgentSession:
             {"label": self._label, "phase": phase_val, "schema": schema},
             {**self._options, **(options or {})},
         )
+        _validate_model_hint(rt, opts)
         json_schema, model_cls = resolve_schema(opts.get("schema"))
 
         ks = key_str(_path.get() + (("call", _next_ordinal()),))
@@ -1415,7 +1590,12 @@ class AgentSession:
 
             req = _TurnRequest(
                 prompt=prompt,
-                opts=opts,
+                # Mirror ``_call_backend``'s injection: the session backend
+                # needs the deterministic node key to tag live activity events.
+                # The copy (never the journaled original — ``opts`` below stays
+                # raw for ``_make_record`` / the emits) is what open_session /
+                # send_turn see.
+                opts={**opts, "agent_id": ks},
                 json_schema=json_schema,
                 model_cls=model_cls,
                 correlation_id=correlation_id,
@@ -1432,6 +1612,7 @@ class AgentSession:
                 _emit_agent_failed(
                     rt, opts, msg, agent_id=ks,
                     tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
+                    model=call_result.model,
                 )
                 return None
 
@@ -1456,6 +1637,7 @@ class AgentSession:
                 ),
             )
             self._append_history(prompt, result, model_cls)
+            self._completed_turns += 1  # a live turn landed; the model lock is now "used"
             outcome_text = _outcome_from_result(call_result.raw_text, result)
             _emit_agent_completed(
                 rt, opts, outcome_text, agent_id=ks,
@@ -1463,6 +1645,7 @@ class AgentSession:
                 cache_tokens=call_result.cache_tokens,
                 token_input=call_result.input_tokens,
                 token_output=call_result.output_tokens,
+                model=call_result.model,
             )
             return None if notify else result
         finally:
@@ -1496,7 +1679,10 @@ class AgentSession:
         omitting it raises (there is no truncation without a split point).
         ``keep_rounds`` beyond the parent's actual round count is not an error;
         the backend warns and silently falls back to a full-context fork (the
-        team fork's "wrong name → full" guard). The parent context is captured
+        team fork's "wrong name → full" guard). External (``agent_type``)
+        sessions are stricter: an unsupported mode or an out-of-range
+        ``keep_rounds`` raises instead of degrading to full.
+        The parent context is captured
         **eagerly** here (the fork point), so later ``send()``s on this session
         do not affect the child.
 
@@ -1604,7 +1790,39 @@ class AgentSession:
 
     async def _ensure_open(self, rt, opts) -> None:
         """Open the backend session on the first real turn (one avatar per session)."""
+        # The model lock lives here: only live turns reach _ensure_open (cache
+        # hits return earlier in send), and a still-unopened session has nothing
+        # locked yet — the first live turn records, later live turns compare.
+        identity = _session_model_identity(opts) if not self._human else _NOT_LOCKED
         if self._sid is not None:
+            template = opts.get("agent_template")
+            if not self._human and template != self._opened_template:
+                if self._completed_turns == 0:
+                    self._opened_template = template
+                else:
+                    locked_text = (
+                        "no agent_template" if self._opened_template is None
+                        else f"agent_template {self._opened_template!r}"
+                    )
+                    raise EngineError(
+                        f"agent session {opts.get('label') or 'agent'!r} is locked to {locked_text} "
+                        f"(set by its first live turn); one avatar runs one expert, "
+                        f"so switching experts needs a new session — fork() it instead"
+                    )
+            if identity is not _NOT_LOCKED and identity != self._opened_model:
+                if self._completed_turns == 0:
+                    # The lock was recorded on the first live turn before it ran;
+                    # that turn never landed, so the lock was never "used" — the
+                    # corrected hint re-locks instead of bricking the session.
+                    self._opened_model = identity
+                    return
+                locked = _locked_model_display(self._opened_model, backend=getattr(rt, "backend", None))
+                raise EngineError(
+                    f"agent session {opts.get('label') or 'agent'!r} is locked to model "
+                    f"{locked!r} (set by its first live "
+                    f"turn); one avatar runs one model, so switching models needs a new "
+                    f"session — fork() it instead"
+                )
             return
         if not self._human:
             rt.spawn_count += 1  # the avatar is this session's one spawned agent
@@ -1620,6 +1838,10 @@ class AgentSession:
             fork_data=self._fork_data,
             member_name=self._member_name,
         )
+        # Record the first live turn's identity as the session's lock. A fork
+        # child is a fresh AgentSession (own sentinel), so it locks afresh.
+        self._opened_model = identity
+        self._opened_template = opts.get("agent_template")
 
     def _append_history(self, prompt: str, result: Any, model_cls) -> None:
         """Append the ``(user, assistant)`` pair so the next turn carries context."""

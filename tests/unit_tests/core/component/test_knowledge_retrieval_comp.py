@@ -188,6 +188,31 @@ class TestKnowledgeRetrievalOutput:
 
 
 class TestKnowledgeRetrievalExecutable:
+    def test_trace_metadata_exports_retrieval_facts(self):
+        """trace_metadata() exports top_k and the bound kb ids for the trace span."""
+        config = _default_kr_config()
+        exe = KnowledgeRetrievalExecutable(config)
+        assert exe.trace_metadata() == {"top_k": 3, "data_source_ids": ["test_kb"]}
+
+    def test_trace_metadata_includes_agentic_model(self):
+        """Agentic retrieval makes a model request, so the model id is exported."""
+        config = _default_kr_config()
+        config.retrieval_config.agentic = True
+        config.model_id = "agentic-llm"
+        exe = KnowledgeRetrievalExecutable(config)
+        assert exe.trace_metadata() == {
+            "top_k": 3,
+            "data_source_ids": ["test_kb"],
+            "request_model": "agentic-llm",
+        }
+
+    def test_trace_metadata_omits_model_when_not_agentic(self):
+        """Plain retrieval makes no model request; request_model stays absent."""
+        config = _default_kr_config()
+        config.model_id = "unused-llm"
+        exe = KnowledgeRetrievalExecutable(config)
+        assert "request_model" not in exe.trace_metadata()
+
     @pytest.mark.asyncio
     @patch(f"{_KR_MOD}.retrieve_multi_kb_with_source")
     @patch(f"{_KR_MOD}.SimpleKnowledgeBase")

@@ -14,7 +14,7 @@ bare ``swarmflow`` the loader always maps), so a script may import either.
 """
 from __future__ import annotations
 
-from typing import Any, Callable
+from typing import Any, Callable, Mapping, Sequence
 
 import aiofiles
 import aiofiles.os
@@ -245,13 +245,17 @@ async def run_swarmflow(
     run_id: str | None = None,
     agent_gate: Any = None,
     budget: BudgetLedger | None = None,
+    external_cli_agents: Sequence[Any] = (),
+    team_backend: Any = None,
+    expert_specs: Mapping[str, Any] | None = None,
 ) -> Any:
     """Execute a swarmflow script with real LLM workers.
 
     Args:
         script_path: Path to the ``.py`` swarmflow script (``META`` + ``run``).
         model: Default LLM ``Model`` each worker DeepAgent runs on when a call
-            carries no ``model`` hint (or the hint can't be resolved).
+            carries no ``model`` hint. An unresolvable hint is a pool miss and
+            fails the call (non-retryable) rather than falling back.
         observer: Receives the progress-event stream; the caller reads
             ``observer.run`` afterwards for the 4-layer structure.
         args: Value passed to the script's ``run(args)``.
@@ -286,6 +290,13 @@ async def run_swarmflow(
             to it and are cut short at their next model call once its ceiling is
             reached; ``agent()`` then refuses to start another. ``None`` runs
             unbounded (the ledger still counts, so ``budget.spent()`` works).
+        team_backend: The host team backend handle — source of the team model
+            pool for third-party worker/session planning (``plan_external_model``
+            reads ``get_model_pool()`` off it). ``None`` (a swarmflow run outside
+            a team shell) leaves the pool empty, so any ``model`` hint fails as a
+            pool miss.
+        expert_specs: AgentGroup expert table for ``agent_template`` picks; empty
+            when none bound.
 
     Returns:
         Whatever the script's ``run(args)`` returned.
@@ -331,6 +342,9 @@ async def run_swarmflow(
         on_human_replied=_on_human_replied,
         run_id=run_id,
         workflow_name=_workflow_name(script_path),
+        external_cli_agents=external_cli_agents,
+        team_backend=team_backend,
+        expert_specs=expert_specs,
     )
     if on_backend_ready is not None:
         on_backend_ready(backend)

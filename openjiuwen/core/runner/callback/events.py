@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 """
 Callback Framework Preset Events
@@ -152,6 +152,10 @@ class LLMCallEvents(EventBase):
         LLM_CALL_STARTED: LLM call initiated
         LLM_CALL_ERROR: LLM call failed with an error
         LLM_RESPONSE_RECEIVED: LLM response received (streaming)
+        LLM_RESPONSE_STARTED: Fired once per streaming request when the
+            provider's response headers arrive, before any body chunk. Carries
+            ``retry_count`` (transport-level retries the SDK made before this
+            response, or None when unknown) and marks time to first byte.
         LLM_INVOKE_INPUT: Fired before BaseModelClient.invoke with call arguments
         LLM_INVOKE_OUTPUT: Fired after BaseModelClient.invoke with the result
         LLM_STREAM_INPUT: Fired before BaseModelClient.stream with call arguments
@@ -166,6 +170,7 @@ class LLMCallEvents(EventBase):
     LLM_CALL_STARTED = EventBase.get_event("llm_call_started")
     LLM_CALL_ERROR = EventBase.get_event("llm_call_error")
     LLM_RESPONSE_RECEIVED = EventBase.get_event("llm_response_received")
+    LLM_RESPONSE_STARTED = EventBase.get_event("llm_response_started")
     LLM_INVOKE_INPUT = EventBase.get_event("llm_invoke_input")
     LLM_INVOKE_OUTPUT = EventBase.get_event("llm_invoke_output")
     LLM_STREAM_INPUT = EventBase.get_event("llm_stream_input")

@@ -26,6 +26,7 @@ from openjiuwen.harness_protocol import (
     HarnessProtocolError,
     HostCapability,
     InteractionResponseStatus,
+    JsonObject,
     ModelOption,
     ModelSelection,
     ProviderEvent,
@@ -68,8 +69,6 @@ from openjiuwen.harness_providers.skills import install_skills
 
 ADAPTER_VERSION = "0.1.0"
 ASK_USER_TOOL_NAME = "AskUserQuestion"
-# Provider interaction asking the host to ratify (persist) an auth fallback.
-AUTH_FALLBACK_REQUEST_TYPE = "auth_fallback"
 # Provider event announcing the model / effort the session now runs on.
 MODEL_CHANGED_EVENT = "session/model_changed"
 _INTERACTIVE_HOST_CAPABILITIES = frozenset({HostCapability.USER_INPUT, HostCapability.TOOL_APPROVAL})
@@ -122,6 +121,8 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                 HarnessCapability.MCP_TOOLS,
                 HarnessCapability.MODEL_SELECTION,
                 HarnessCapability.MODEL_DISCOVERY,
+                HarnessCapability.ENDPOINT_MODELS,
+                HarnessCapability.AUTH_FALLBACK,
             }
         ),
         optional_host_capabilities=frozenset(
@@ -134,6 +135,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                 HostCapability.MODEL_REQUEST_OBSERVATION,
             }
         ),
+        fork_modes=frozenset({"full", "before"}),
     )
 
     def __init__(
@@ -159,18 +161,12 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         # The native endpoint with any runtime model selection applied; the
         # endpoint a declined fallback goes back to.
         self._primary_model: ClaudeModelConfig | None = self._config.model
-        self._fallback_activated = False
         self._claude_session_id: str | None = None
         self._request_observer: ClaudeRequestObserver | None = None
         self._request_log_env: dict[str, str] = {}
         self._cycle_tracker: TurnCycleTracker | None = None
         # The CLI reports cost per session; a turn reports what it added.
         self._session_cost_usd = 0.0
-
-    @property
-    def fallback_activated(self) -> bool:
-        """Return whether the authentication fallback endpoint is in use."""
-        return self._fallback_activated
 
     # ------------------------------------------------------------------
     # Provider hooks
@@ -202,7 +198,6 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         self._claude_session_id = resume or session_id
         self._active_model = self._config.model
         self._primary_model = self._config.model
-        self._fallback_activated = False
         self._client = await self._connect(context, model=self._active_model, resume=resume, session_id=session_id)
         await self._publish_checkpoint(
             {"session_id": self._claude_session_id, "resumed": resume is not None},
@@ -439,70 +434,53 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         if turn.abort_requested:
             await self._disconnect_client()
             return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
-        for _attempt in range(2):
-            client = self._client
-            if client is None:
-                raise HarnessProtocolError("Claude Code client disappeared during an active cycle")
-            try:
-                tracker = self._cycle_tracker
-                if tracker is not None:
-                    tracker.begin_turn(turn.turn_id)
-                await self._submit(client, message_id=turn.message_id, text=text)
-                # The stream runs to the tap's settled sentinel, not to the
-                # first result: a steered message the CLI answers as a new
-                # cycle carries a result of its own, and its output belongs to
-                # this turn.
-                retry = False
-                async for message in client.receive_messages():
-                    if not self._turn_settled(message):
-                        await self._publish(message, accumulator, turn)
-                        continue
-                    await self._report_cycle_diagnostics(turn)
-                    if not accumulator.has_result:
-                        break
-                    kind, result = accumulator.build_terminal_result(turn=turn, timing=timing)
-                    self._session_cost_usd = accumulator.session_cost_usd
-                    if kind is TurnEventKind.FAILED and await self._maybe_activate_fallback(
-                        result.error, accumulator, turn
-                    ):
-                        retry = True
-                        break
-                    return kind, result
-                if retry:
+        client = self._client
+        if client is None:
+            raise HarnessProtocolError("Claude Code client disappeared during an active cycle")
+        try:
+            tracker = self._cycle_tracker
+            if tracker is not None:
+                tracker.begin_turn(turn.turn_id)
+            await self._submit(client, message_id=turn.message_id, text=text)
+            # The stream runs to the tap's settled sentinel, not to the
+            # first result: a steered message the CLI answers as a new
+            # cycle carries a result of its own, and its output belongs to
+            # this turn.
+            async for message in client.receive_messages():
+                if not self._turn_settled(message):
+                    await self._publish(message, accumulator, turn)
                     continue
-                error = _incomplete_turn_error(settled=accumulator.has_result)
-                # A stream that ends before the turn does is the signature of a
-                # message channel that already died (transport error, CLI
-                # exit): ``query`` writes to a still-open stdin while the
-                # reader drains a closed stream. The client cannot recover in
-                # place, so drop it; the next turn reconnects.
-                await self._disconnect_client()
-                return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
-            except Exception as exc:
-                if turn.abort_requested:
-                    return TurnEventKind.ABORTED, interrupted_result(
-                        turn,
-                        provider_name=PROVIDER_NAME,
-                        timing=timing,
-                        messages=tuple(accumulator.messages),
-                        final_output=accumulator.last_text_output,
-                    )
-                error = classify_claude_exception(exc, phase="turn")
-                if await self._maybe_activate_fallback(error, accumulator, turn):
-                    continue
-                # A transport/decode exception kills the SDK read task and its
-                # message stream for good; a reused client accepts the next
-                # ``query`` (stdin is fine) but returns an empty stream, so the
-                # member would look READY while silently producing nothing.
-                # Drop the client here so the next turn reconnects cleanly.
-                await self._disconnect_client()
-                return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
-        error = TurnError(
-            message="Claude Code authentication fallback did not recover the turn",
-            code="CLAUDE_FALLBACK_EXHAUSTED",
-            category="auth_required",
-        )
-        return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
+                await self._report_cycle_diagnostics(turn)
+                if not accumulator.has_result:
+                    break
+                kind, result = accumulator.build_terminal_result(turn=turn, timing=timing)
+                self._session_cost_usd = accumulator.session_cost_usd
+                return kind, result
+            error = _incomplete_turn_error(settled=accumulator.has_result)
+            # A stream that ends before the turn does is the signature of a
+            # message channel that already died (transport error, CLI
+            # exit): ``query`` writes to a still-open stdin while the
+            # reader drains a closed stream. The client cannot recover in
+            # place, so drop it; the next turn reconnects.
+            await self._disconnect_client()
+            return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
+        except Exception as exc:
+            if turn.abort_requested:
+                return TurnEventKind.ABORTED, interrupted_result(
+                    turn,
+                    provider_name=PROVIDER_NAME,
+                    timing=timing,
+                    messages=tuple(accumulator.messages),
+                    final_output=accumulator.last_text_output,
+                )
+            error = classify_claude_exception(exc, phase="turn")
+            # A transport/decode exception kills the SDK read task and its
+            # message stream for good; a reused client accepts the next
+            # ``query`` (stdin is fine) but returns an empty stream, so the
+            # member would look READY while silently producing nothing.
+            # Drop the client here so the next turn reconnects cleanly.
+            await self._disconnect_client()
+            return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
 
     async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
         _ = turn
@@ -585,112 +563,22 @@ class ClaudeCodeHarness(SerializedTurnHarness):
     # Authentication fallback
     # ------------------------------------------------------------------
 
-    def _fallback_applies(
-        self,
-        error: TurnError | None,
-        fallback: ClaudeModelConfig | None,
-        turn: PendingTurn,
-    ) -> bool:
-        """Report whether the auth fallback may still replace this turn.
-
-        The category itself is the gate: an ``auth_required`` failure means the
-        request never reached the model on the native endpoint, so replaying
-        the turn on the fallback cannot duplicate meaningful work — even when
-        the CLI reported the failure as synthetic assistant text, which would
-        otherwise look like consumed output. A mid-turn token expiry may have
-        emitted partial output before failing; replaying it is still preferred
-        over failing the turn, and no worse than the manual retry the caller
-        would perform anyway.
-
-        Args:
-            error: The failure classified so far, when there is one.
-            fallback: The configured fallback endpoint, when there is one.
-            turn: The turn being considered for a restart.
-
-        Returns:
-            True when every precondition for activating the fallback holds.
-        """
-        if error is None or fallback is None:
-            return False
-        if error.category != "auth_required" or self._fallback_activated:
-            return False
-        return not turn.abort_requested
-
-    async def _maybe_activate_fallback(
-        self,
-        error: TurnError | None,
-        accumulator: ClaudeTurnAccumulator,
-        turn: PendingTurn,
-    ) -> bool:
-        """Switch to the fallback endpoint once when native auth fails early."""
-
+    def _auth_fallback_payload(self) -> JsonObject | None:
         fallback = self._config.fallback_model
-        if not self._fallback_applies(error, fallback, turn):
-            return False
+        if fallback is None:
+            return None
+        return {"model": fallback.model, "api_base": fallback.api_base}
+
+    async def _reconnect_for_auth(self, *, fallback: bool) -> None:
         context = self._context
         if context is None:
-            return False
-        old_client = self._client
-        self._client = None
-        if old_client is not None:
-            try:
-                await old_client.disconnect()
-            except Exception as exc:
-                logger.debug("[claude-code] disconnect before auth fallback failed: %s", exc)
-        try:
-            self._client = await self._connect(
-                context,
-                model=fallback,
-                resume=self._claude_session_id,
-                session_id=None,
-            )
-        except ProviderStartupError as exc:
-            logger.warning("[claude-code] authentication fallback activation failed: %s", exc)
-            return False
-        ratified = await self._confirm_provider_extension(
-            AUTH_FALLBACK_REQUEST_TYPE,
-            {"model": fallback.model, "api_base": fallback.api_base},
-        )
-        if not ratified:
-            # The host could not persist the switch; go back to the native
-            # endpoint so the member does not silently run on an unrecorded one.
-            logger.warning("[claude-code] host declined the authentication fallback; restoring the native endpoint")
-            await self._reconnect_native_endpoint(context)
-            return False
-        self._active_model = fallback
-        self._fallback_activated = True
-        await self._emit(
-            ProviderEvent(
-                provider=PROVIDER_NAME,
-                event_type="auth_fallback_activated",
-                schema_version="1",
-                payload={"model": fallback.model, "api_base": fallback.api_base},
-            ),
-            turn=turn,
-        )
-        return True
+            raise HarnessProtocolError("Claude Code has no active context to reconnect")
+        model = self._config.fallback_model if fallback else self._primary_model
+        await self._disconnect_client()
+        self._client = await self._connect(context, model=model, resume=self._claude_session_id, session_id=None)
 
-    async def _reconnect_native_endpoint(self, context: HarnessContext) -> None:
-        """Drop the fallback client and resume the session on the native endpoint."""
-        fallback_client = self._client
-        self._client = None
-        if fallback_client is not None:
-            try:
-                await fallback_client.disconnect()
-            except Exception as exc:
-                logger.debug("[claude-code] disconnect after declined fallback failed: %s", exc)
-        try:
-            self._client = await self._connect(
-                context,
-                model=self._primary_model,
-                resume=self._claude_session_id,
-                session_id=None,
-            )
-        except ProviderStartupError as exc:
-            logger.warning("[claude-code] restoring the native endpoint failed: %s", exc)
-            return
-        self._active_model = self._primary_model
-        self._fallback_activated = False
+    async def _on_auth_endpoint_changed(self, *, fallback: bool) -> None:
+        self._active_model = self._config.fallback_model if fallback else self._primary_model
 
     # ------------------------------------------------------------------
     # Permission / user-input routing

@@ -1,10 +1,16 @@
-"""Covers ReportingAgent._verify_and_build_output's tex-only fallback: when
-this environment has no latexmk/pdflatex, a clean main.tex should still ship
-as status="compiled" instead of failing and burning the manager's reporting
-retry budget on a problem retrying can never fix. Toolchain discovery itself
-(LatexRuntime/discover_latex_runtime/preflight_latex_runtime) is covered by
-test_paper_latex_runtime.py; this file only covers the success/failure gate
-in reporting/agent.py::_verify_and_build_output.
+"""Covers ReportingAgent._verify_and_build_output's tex-only fallback: a
+clean main.tex should still ship as status="compiled" instead of failing
+and burning the manager's reporting retry budget on a problem retrying
+can never fix. Two independent triggers short-circuit immediately: no
+latexmk/pdflatex on PATH at all, and the manager's reporting retry budget
+being exhausted. A ts-latex skill deployment missing its scripts/
+directory does *not* short-circuit on its own -- the agent's general
+shell/python tools can still work around it while a real toolchain is
+present -- so it only shows up once one of the two triggers above is
+already true. Toolchain discovery itself (LatexRuntime/
+discover_latex_runtime/preflight_latex_runtime) is covered by
+test_paper_latex_runtime.py; this file only covers the success/failure
+gate in reporting/agent.py::_verify_and_build_output.
 """
 
 from __future__ import annotations
@@ -24,7 +30,10 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
     ExperimentResult,
 )
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.agent import ReportingAgent
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.agent import (
+    _MATERIALIZED_SKILLS_DIRNAME,
+    ReportingAgent,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.sections import DOCUMENT_ORDER
 
 
@@ -39,12 +48,28 @@ def _write_minimal_sections(run_id: str, *, cite_key: str | None = None) -> None
     paper_refs_bib_path(run_id).write_text("", encoding="utf-8")
 
 
-def _verify(run_id: str, *, toolchain_available: bool):
+def _verify(
+    run_id: str,
+    *,
+    toolchain_available: bool,
+    skill_scripts_present: bool = True,
+    is_final_attempt: bool = False,
+):
     agent = ReportingAgent({})
     # Bypass the real discover_latex_runtime() probe -- _run_async normally
     # resolves this once up front and _verify_and_build_output just reuses
     # it, so a fake with the one attribute the gate reads is enough here.
     agent._latex_runtime = SimpleNamespace(available=toolchain_available)
+    # _build_paper_agent normally materializes the ts-latex skill (incl.
+    # scripts/compile.py) into the workspace before the session runs;
+    # _verify_and_build_output is exercised here without going through
+    # that step, so a healthy deployment has to be faked explicitly --
+    # otherwise every case here would spuriously look like the "skill
+    # deployment is missing scripts/" environment failure.
+    if skill_scripts_present:
+        scripts_dir = paper_workspace_dir(run_id) / _MATERIALIZED_SKILLS_DIRNAME / "ts-latex" / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        (scripts_dir / "compile.py").write_text("", encoding="utf-8")
     result = ExperimentResult(run_id=run_id, workspace_dir=str(paper_workspace_dir(run_id)))
     return agent._verify_and_build_output(
         run_id=run_id,
@@ -54,6 +79,7 @@ def _verify(run_id: str, *, toolchain_available: bool):
         figure_paths=[],
         known_keys=set(),
         result=result,
+        is_final_attempt=is_final_attempt,
     )
 
 
@@ -145,6 +171,74 @@ def test_failed_output_exposes_lint_issues_as_a_list():
     assert output.status == "failed"
     assert output.lint_issues
     assert any("no compiled PDF" in issue for issue in output.lint_issues)
+
+
+def test_latex_skill_missing_scripts_still_retries_when_toolchain_present():
+    # A skill deployment that materializes ts-latex without its scripts/
+    # directory does not sever the agent's only path to a compiler: with a
+    # real toolchain on the host, the agent's own general shell/python
+    # tools can still invoke pdflatex/latexmk directly once it notices the
+    # canned script isn't where {SKILLS_DIR} said it would be (observed
+    # against real task history). So this alone must not short-circuit to
+    # tex-only on a non-final attempt -- it should keep failing/retrying
+    # exactly like test_toolchain_present_pdf_missing_still_fails, giving
+    # the agent a real chance across the manager's reporting retry budget.
+    run_id = "rsi-test-skill-incomplete"
+    _write_minimal_sections(run_id)
+    paper_tex_path(run_id).write_text("\\documentclass{article}\\begin{document}x\\end{document}", encoding="utf-8")
+
+    output = _verify(run_id, toolchain_available=True, skill_scripts_present=False)
+
+    assert output.status == "failed"
+    assert output.paper_pdf_path is None
+
+
+def test_latex_skill_missing_scripts_ships_tex_on_final_attempt():
+    # Once the manager's reporting retries are exhausted, the final-attempt
+    # safety net still applies regardless of *why* no PDF ever appeared --
+    # including a persistently incomplete ts-latex skill deployment.
+    run_id = "rsi-test-skill-incomplete-final-attempt"
+    _write_minimal_sections(run_id)
+    paper_tex_path(run_id).write_text("\\documentclass{article}\\begin{document}x\\end{document}", encoding="utf-8")
+
+    output = _verify(run_id, toolchain_available=True, skill_scripts_present=False, is_final_attempt=True)
+
+    assert output.status == "compiled"
+    assert output.paper_pdf_path is not None
+    assert output.paper_pdf_path.endswith(".tex")
+
+
+def test_final_attempt_with_valid_tex_ships_even_though_pdf_missing():
+    # Neither toolchain-missing nor skill-incomplete is detected here, so
+    # an earlier attempt would correctly keep failing (see
+    # test_toolchain_present_pdf_missing_still_fails) -- but once the
+    # manager has no reporting retries left, losing the whole node over a
+    # rendering-only gap is worse than shipping the tex it already
+    # verified.
+    run_id = "rsi-test-final-attempt-fallback"
+    _write_minimal_sections(run_id)
+    paper_tex_path(run_id).write_text("\\documentclass{article}\\begin{document}x\\end{document}", encoding="utf-8")
+
+    output = _verify(run_id, toolchain_available=True, is_final_attempt=True)
+
+    assert output.status == "compiled"
+    assert output.paper_pdf_path is not None
+    assert output.paper_pdf_path.endswith(".tex")
+    assert "exhausting all reporting retries" in (output.notes or "")
+
+
+def test_hallucinated_citation_fails_even_on_final_attempt():
+    # The final-attempt safety net only covers a rendering-only gap -- it
+    # must not paper over a genuine content problem just because the
+    # retry budget is spent.
+    run_id = "rsi-test-hallucinated-final-attempt"
+    _write_minimal_sections(run_id, cite_key="not-a-real-key")
+    paper_tex_path(run_id).write_text("\\documentclass{article}\\begin{document}x\\end{document}", encoding="utf-8")
+
+    output = _verify(run_id, toolchain_available=True, is_final_attempt=True)
+
+    assert output.status == "failed"
+    assert output.paper_pdf_path is None
 
 
 def test_task_query_inlines_manager_contract_brief():

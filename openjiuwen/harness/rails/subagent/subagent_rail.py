@@ -367,6 +367,9 @@ class SubagentRail(DeepAgentRail):
             "browser_probe_cards, browser_probe_interactives, browser_custom_action, "
             "browser_list_custom_actions, browser_runtime_health"
         ),
+        "cua_agent": (
+            "list_apps, list_windows, get_window_state, click, type_text, press_key, hotkey, scroll, launch_app"
+        ),
     }
 
     def _build_available_agents_description(self, subagents: List[SubAgentConfig | "DeepAgent"]) -> str:

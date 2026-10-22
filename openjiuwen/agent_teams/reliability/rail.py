@@ -115,6 +115,11 @@ class ReliabilityRail(DeepAgentRail):
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Mark a successful tool completion."""
+        if ctx.exception is not None:
+            # after_tool_call also runs after a failure (reported by
+            # on_tool_exception) and for a paused call (no result yet); neither
+            # is a success, and a success signal would reset the error streak.
+            return
         inputs = ctx.inputs
         await self._emit(
             Signal(

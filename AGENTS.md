@@ -23,7 +23,9 @@ settings, and `Makefile` defines the common lint/test entry points.
   value objects only) for driving third-party agent harnesses.
 - `openjiuwen/harness_providers/`: built-in implementations of that SPI
   (`native` DeepAgent, `claudecode`, `codex`, `dsh`), the DeepAgent-style
-  `HarnessIOAdapter`, and the manifest-driven `create_harness` factory.
+  `HarnessIOAdapter`, and the manifest-driven `create_harness` factory, which
+  also resolves third-party provider packages through the
+  `openjiuwen.harness_providers` entry point.
 - `openjiuwen/extensions/`: optional integrations such as storage,
   checkpointers, sandbox providers, and vendor-specific adapters.
 - `openjiuwen/agent_evolving/` and `openjiuwen/dev_tools/`: optimization,
@@ -78,5 +80,6 @@ Pass `COMMITS=N` to check recent commits instead.
 - Error codes (StatusCode / BaseError): `.claude/rules/error-codes.md`
 - Logging: `.claude/rules/logging.md`
 - Git workflow: `.claude/rules/git-workflow.md`
+- Reviewer/merger ownership files (`CODEREVIEWER`, `COMMITTER`, `USER.json`): `.claude/rules/ownership-files.md`
 - Deep operational guides: `.claude/skills/`
 - Permissions and env vars: `.claude/settings.json`

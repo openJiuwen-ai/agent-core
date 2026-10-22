@@ -1,17 +1,28 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import inspect
 import json
 from collections.abc import Mapping as MappingABC
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import httpx
-
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import ModelError, build_error
+from openjiuwen.core.common.exception.errors import ModelError, ValidationError, build_error
 from openjiuwen.core.common.logging import LogEventType, llm_logger, logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
@@ -54,6 +65,8 @@ from openjiuwen.core.foundation.llm.utils.provider_error import (
     format_provider_exception,
     summarize_provider_error_text,
 )
+from openjiuwen.core.foundation.llm.utils.request_encoding import create_encoding_aware_openai_client
+from openjiuwen.core.foundation.llm.utils.request_sanitizer import json_arguments, sanitize_chat_request
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -580,6 +593,13 @@ class OpenAIModelClient(BaseModelClient):
                         f"API returned error {response.status_code}: "
                         f"{summarize_provider_error_text(error_text, status_code=response.status_code)}"
                     )
+                # A bare httpx stream makes exactly one attempt.
+                await trigger(
+                    LLMCallEvents.LLM_RESPONSE_STARTED,
+                    model_name=params.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                    retry_count=0,
+                )
                 content_type = str(response.headers.get("Content-Type", "")).lower()
                 if "text/event-stream" in content_type:
                     async for raw_line in response.aiter_lines():
@@ -651,7 +671,7 @@ class OpenAIModelClient(BaseModelClient):
                     "index": tc.get("index"),
                     "function": {
                         "name": func.get("name", ""),
-                        "arguments": func.get("arguments", ""),
+                        "arguments": json_arguments(func.get("arguments", "")),
                     },
                 })
             msg["tool_calls"] = cleaned
@@ -748,6 +768,7 @@ class OpenAIModelClient(BaseModelClient):
             *,
             session_id: Optional[str] = None,
             parent_session_id: Optional[str] = None,
+            turn_num: Optional[int] = None,
             action: Optional[str] = None,
             target: str = "session",
             manage_request: Optional[bool] = None,
@@ -766,6 +787,15 @@ class OpenAIModelClient(BaseModelClient):
             "session_id": session_id,
             "parent_session_id": parent_session_id,
         }
+        if turn_num is not None:
+            if isinstance(turn_num, bool) or not isinstance(turn_num, int) or turn_num < 1:
+                logger.warning(
+                    "Ignore invalid Ascend KV cache turn_num; normal inference will continue. "
+                    "turn_num=%r",
+                    turn_num,
+                )
+            else:
+                hint["turn_num"] = turn_num
 
         if action is None:
             if manage_request is not None:
@@ -795,6 +825,7 @@ class OpenAIModelClient(BaseModelClient):
             session: object = None,
             session_id: Optional[str] = None,
             parent_session_id: Optional[str] = None,
+            turn_num: Optional[int] = None,
             enable_kv_cache_affinity: bool = False,
             **_: Any,
     ) -> dict:
@@ -804,11 +835,17 @@ class OpenAIModelClient(BaseModelClient):
         if cache_id is None and session is not None and hasattr(session, "get_session_id"):
             cache_id = session.get_session_id()
         if not cache_id:
-            self._raise_kv_cache_error("session_id is required when KV cache affinity is enabled")
-        return {
+            logger.warning(
+                "Ignore KVC affinity because session_id is unavailable; continue normal flow"
+            )
+            return {}
+        invoke_kwargs = {
             "session_id": cache_id,
             "parent_session_id": parent_session_id or cache_id,
         }
+        if turn_num is not None:
+            invoke_kwargs["turn_num"] = turn_num
+        return invoke_kwargs
 
     async def evict_kvc(self, **kwargs) -> bool:
         return await self._invoke_kv_cache_affinity_action("evict", **kwargs)
@@ -926,6 +963,7 @@ class OpenAIModelClient(BaseModelClient):
         """
         session_id = kwargs.pop("session_id", None)
         parent_session_id = kwargs.pop("parent_session_id", None)
+        turn_num = kwargs.pop("turn_num", None)
         kv_action = kwargs.pop("kv_action", None)
         kv_target = kwargs.pop("target", "session")
         manage_request = kwargs.pop("manage_request", None)
@@ -1011,22 +1049,34 @@ class OpenAIModelClient(BaseModelClient):
 
         if kv_mode == "affinity" and session_id:
             kv_cache = self._kv_cache_config()
-            params[getattr(kv_cache, "affinity_field", "agent_hint")] = self._build_agent_hint(
-                session_id=session_id,
-                parent_session_id=parent_session_id or session_id,
-                action=kv_action,
-                target=kv_target,
-                manage_request=manage_request,
-                msg_start=msg_start,
-                msg_end=msg_end,
-                tools_start=tools_start,
-                tools_end=tools_end,
-                include_tools=include_tools,
-            )
+            try:
+                params[getattr(kv_cache, "affinity_field", "agent_hint")] = self._build_agent_hint(
+                    session_id=session_id,
+                    parent_session_id=parent_session_id or session_id,
+                    turn_num=turn_num,
+                    action=kv_action,
+                    target=kv_target,
+                    manage_request=manage_request,
+                    msg_start=msg_start,
+                    msg_end=msg_end,
+                    tools_start=tools_start,
+                    tools_end=tools_end,
+                    include_tools=include_tools,
+                )
+            except Exception as exc:
+                if kv_action is not None:
+                    # Management calls must not accidentally degrade into an
+                    # ordinary empty chat request. Their public API catches the
+                    # validation error and reports a best-effort False result.
+                    raise
+                logger.warning(
+                    "Ignore invalid KVC affinity hint; continue normal inference: %s",
+                    exc,
+                )
 
         self._apply_openrouter_profile(params)
 
-        return params
+        return sanitize_chat_request(params)
 
     def _apply_openrouter_profile(self, params: dict) -> None:
         if self._endpoint_profile_name() != "openrouter":
@@ -1392,8 +1442,6 @@ class OpenAIModelClient(BaseModelClient):
 
     def _build_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """Build a fresh ``AsyncOpenAI`` client with its own httpx connection pool."""
-        from openai import AsyncOpenAI
-
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
 
@@ -1429,7 +1477,7 @@ class OpenAIModelClient(BaseModelClient):
             max_retries=0,
         )
 
-        return AsyncOpenAI(
+        return create_encoding_aware_openai_client(
             api_key=self._resolved_api_key(),
             base_url=_normalize_openai_base_url(self.model_client_config.api_base),
             http_client=http_client,
@@ -1954,6 +2002,8 @@ class OpenAIModelClient(BaseModelClient):
                 is_stream=False,
                 exception=_format_exception_detail(e)
             )
+            if isinstance(e, ValidationError) and getattr(e, "details", None) == {"stage": "request_encoding"}:
+                raise
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=f"openAI API async invoke error: {_format_exception_detail(e)}"
@@ -2098,6 +2148,13 @@ class OpenAIModelClient(BaseModelClient):
                     params,
                     is_stream=True,
                 )
+                # The awaited create returns once the response headers arrive.
+                await trigger(
+                    LLMCallEvents.LLM_RESPONSE_STARTED,
+                    model_name=params.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                    retry_count=self._sdk_retry_count(getattr(response_stream, "response", None)),
+                )
                 if output_parser:
                     async for parsed_result in self._astream_with_parser(response_stream, output_parser):
                         await trigger(
@@ -2162,6 +2219,8 @@ class OpenAIModelClient(BaseModelClient):
                 is_stream=True,
                 exception=error_detail
             )
+            if isinstance(e, ValidationError) and getattr(e, "details", None) == {"stage": "request_encoding"}:
+                raise
             raise build_error(
                 StatusCode.MODEL_CALL_FAILED,
                 error_msg=f"openAI API async stream error: {error_detail}"

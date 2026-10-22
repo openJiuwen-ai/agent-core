@@ -23,6 +23,9 @@ class AbortError(ExecutionError):
     Attributes:
         reason: Human-readable reason for abort
         cause: Optional inner exception to re-raise at trigger() boundary
+        is_error: False when aborting is the expected control flow (an agent
+            interrupt waiting for the user or a client): the framework then logs
+            it at info and does not count it as a callback failure
 
     Examples:
         Abort and re-raise inner exception (caller sees ValueError)::
@@ -51,8 +54,10 @@ class AbortError(ExecutionError):
         *,
         cause: Optional[Exception] = None,
         details: Optional[Any] = None,
+        is_error: bool = True,
     ):
         self.reason = reason
+        self.is_error = is_error
         super().__init__(
             StatusCode.CALLBACK_EXECUTION_ABORTED,
             details=details,

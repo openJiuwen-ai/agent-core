@@ -1,0 +1,131 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Failure classification for the __DISPLAY__ harness.
+
+Turns vendor error records and runtime exceptions into a provider-neutral
+:class:`TurnError` carrying one of the shared failure categories, so hosts
+(and the team reliability layer) classify without parsing message text.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Mapping
+
+from openjiuwen.harness_protocol import TurnError
+
+# The shared vocabulary; the team reliability layer maps it one to one.
+FAILURE_CATEGORIES = frozenset(
+    {
+        "auth_required",
+        "quota_exceeded",
+        "rate_limited",
+        "request_rejected",
+        "server_unavailable",
+        "network_timeout",
+        "process_start_failed",
+        "sdk_error",
+        "unknown",
+    }
+)
+_RETRYABLE = frozenset({"rate_limited", "server_unavailable", "network_timeout"})
+_HTTP_STATUS_CATEGORY: dict[int, str] = {
+    400: "request_rejected",
+    401: "auth_required",
+    403: "auth_required",
+    408: "network_timeout",
+    429: "rate_limited",
+    500: "server_unavailable",
+    502: "server_unavailable",
+    503: "server_unavailable",
+    504: "network_timeout",
+    529: "server_unavailable",
+}
+# SCAFFOLD(failure-codes): map the vendor's stable error codes (the ``code`` of
+# its error records) to the shared categories. Read them from real error
+# records; never classify by guessed message text.
+_VENDOR_CODE_CATEGORY: dict[str, str] = {}
+_MAX_MESSAGE_CHARS = 2000
+
+
+def turn_error(
+    message: str,
+    *,
+    category: str,
+    code: str | None = None,
+    sdk_error_type: str | None = None,
+    http_status: int | None = None,
+    provider_data: Mapping[str, Any] | None = None,
+) -> TurnError:
+    """Build a :class:`TurnError` in the shared vocabulary."""
+    if category not in FAILURE_CATEGORIES:
+        category = "unknown"
+    data: dict[str, Any] = dict(provider_data or {})
+    if sdk_error_type:
+        data["sdk_error_type"] = sdk_error_type
+    if http_status is not None:
+        data["http_status"] = http_status
+    return TurnError(
+        message=(message or category)[:_MAX_MESSAGE_CHARS],
+        code=code or None,
+        category=category,
+        retryable=category in _RETRYABLE,
+        provider_data=data,
+    )
+
+
+def classify_error_record(record: Mapping[str, Any]) -> TurnError:
+    """Classify one vendor error record (an error event or a failed result)."""
+    code = record.get("code")
+    code_text = str(code) if code is not None else None
+    http_status = _int(record.get("http_status")) or _int(record.get("status"))
+    category = _VENDOR_CODE_CATEGORY.get(code_text or "", "sdk_error")
+    if http_status in _HTTP_STATUS_CATEGORY:
+        category = _HTTP_STATUS_CATEGORY[http_status]
+    message = record.get("message")
+    return turn_error(
+        message if isinstance(message, str) else "",
+        category=category,
+        code=code_text,
+        http_status=http_status,
+    )
+
+
+def classify_exception(exc: BaseException) -> TurnError:
+    """Classify an exception raised while starting or driving the vendor runtime.
+
+    Only the exception type and its first line reach the error: SDK
+    exceptions may embed subprocess stderr, request bodies or credentials.
+
+    SCAFFOLD(failure-exceptions): add the vendor SDK's own exception types
+    here (resolve them lazily, the SDK is optional), e.g. its "CLI not found"
+    type as ``process_start_failed`` and its HTTP error type by status.
+    """
+    name = type(exc).__name__
+    http_status = _int(getattr(exc, "status_code", None)) or _int(getattr(exc, "http_status", None))
+    if http_status in _HTTP_STATUS_CATEGORY:
+        return turn_error(
+            _first_line(exc),
+            category=_HTTP_STATUS_CATEGORY[http_status],
+            sdk_error_type=name,
+            http_status=http_status,
+        )
+    if isinstance(exc, (FileNotFoundError, PermissionError)):
+        return turn_error(_first_line(exc), category="process_start_failed", sdk_error_type=name)
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError, ConnectionError)):
+        return turn_error(_first_line(exc), category="network_timeout", sdk_error_type=name)
+    return turn_error(_first_line(exc), category="sdk_error", sdk_error_type=name)
+
+
+def _first_line(exc: BaseException) -> str:
+    text = str(exc).strip()
+    first = text.splitlines()[0][:200] if text else ""
+    return f"{type(exc).__name__}: {first}" if first else type(exc).__name__
+
+
+def _int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+__all__ = ["FAILURE_CATEGORIES", "classify_error_record", "classify_exception", "turn_error"]

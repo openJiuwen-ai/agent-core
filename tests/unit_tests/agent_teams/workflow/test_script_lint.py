@@ -1,10 +1,12 @@
 # coding: utf-8
 from __future__ import annotations
-import asyncio
-import pytest
-from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
-from openjiuwen.agent_teams.workflow.engine.errors import MetaError
 
+import asyncio
+
+import pytest
+
+from openjiuwen.agent_teams.workflow.engine.errors import MetaError
+from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
 
 _OLD = 'META = {"name": "abc", "phases": []}\nasync def run(args): pass\n'
 

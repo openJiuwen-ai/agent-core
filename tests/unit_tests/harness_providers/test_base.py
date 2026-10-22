@@ -11,6 +11,8 @@ from typing import Any
 import pytest
 
 from openjiuwen.harness_protocol import (
+    AUTH_FALLBACK_EVENT_TYPE,
+    AUTH_FALLBACK_REQUEST_TYPE,
     PROTOCOL_VERSION,
     AbortMode,
     CheckpointReason,
@@ -36,7 +38,10 @@ from openjiuwen.harness_protocol import (
     OutputEvent,
     OutputKind,
     OutputOperation,
+    ProviderEvent,
+    ProviderInteractionResponse,
     StateChangedEvent,
+    TurnError,
     TurnEventKind,
     TurnLifecycleEvent,
     TurnResult,
@@ -444,4 +449,196 @@ async def test_failed_deferred_selection_warns_and_keeps_the_turn_running() -> N
     assert warnings[0].data["model"] == "small"
     assert _terminal(events).kind is TurnEventKind.FINISHED
     logger.info("deferred selection warning: %s", warnings[0].message)
+    await harness.stop()
+
+
+class _FallbackHarness(SerializedTurnHarness):
+    """Provider whose login fails authentication until it moves to the fallback."""
+
+    card = HarnessCard(
+        name="fallbacking",
+        implementation_version="1.0",
+        protocol_version=PROTOCOL_VERSION,
+        capabilities=frozenset({HarnessCapability.AUTH_FALLBACK}),
+    )
+
+    def __init__(self, *, reconnect_fails: bool = False) -> None:
+        super().__init__(event_buffer_capacity=64)
+        self.on_fallback = False
+        self.reconnects: list[bool] = []
+        self.changes: list[bool] = []
+        self.reconnect_fails = reconnect_fails
+        self.executions = 0
+
+    async def _open_session(self, context: HarnessContext) -> str | None:
+        _ = context
+        return "fallback-session"
+
+    async def _close_session(self) -> None:
+        return None
+
+    async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
+        _ = turn
+        self.executions += 1
+        if self.on_fallback:
+            return TurnEventKind.FINISHED, TurnResult(status=TurnStatus.COMPLETED, final_output="fallback ok")
+        error = TurnError(message="401", code="401", category="auth_required")
+        return TurnEventKind.FAILED, TurnResult(status=TurnStatus.FAILED, error=error)
+
+    def _auth_fallback_payload(self) -> dict[str, Any]:
+        return {"model": "pool-model", "api_base": "https://pool"}
+
+    async def _reconnect_for_auth(self, *, fallback: bool) -> None:
+        self.reconnects.append(fallback)
+        if self.reconnect_fails:
+            raise RuntimeError("endpoint unreachable")
+        self.on_fallback = fallback
+
+    async def _on_auth_endpoint_changed(self, *, fallback: bool) -> None:
+        self.changes.append(fallback)
+
+
+class _Ratifier:
+    def __init__(self, status: InteractionResponseStatus) -> None:
+        self.status = status
+        self.requests: list[Any] = []
+
+    async def handle(self, request: Any) -> Any:
+        self.requests.append(request)
+        return ProviderInteractionResponse(request_id=request.request_id, status=self.status)
+
+    async def cancel(
+        self,
+        request_id: str,
+        *,
+        reason: InteractionCancelReason = InteractionCancelReason.PROVIDER_WITHDREW,
+    ) -> None:
+        _ = request_id, reason
+
+
+async def _fallback_turn(
+    harness: _FallbackHarness,
+    status: InteractionResponseStatus,
+) -> tuple[_Ratifier, list[HarnessEvent]]:
+    ratifier = _Ratifier(status)
+    await harness.start(
+        _context(interactions=ratifier, host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION}))
+    )
+    receipt = await harness.send(HarnessInput(content="hi"))
+    return ratifier, await _collect_turn(harness, receipt.turn_id)
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_switches_once_to_the_ratified_fallback_and_replays() -> None:
+    harness = _FallbackHarness()
+    ratifier, events = await _fallback_turn(harness, InteractionResponseStatus.COMPLETED)
+
+    assert _terminal(events).result.final_output == "fallback ok"
+    assert harness.fallback_activated
+    assert (harness.reconnects, harness.changes, harness.executions) == ([True], [True], 2)
+    assert [request.request_type for request in ratifier.requests] == [AUTH_FALLBACK_REQUEST_TYPE]
+    activations = [event.event for event in events if isinstance(event.event, ProviderEvent)]
+    assert [(event.event_type, dict(event.payload)) for event in activations] == [
+        (AUTH_FALLBACK_EVENT_TYPE, {"model": "pool-model", "api_base": "https://pool"})
+    ]
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_declined_fallback_restores_the_primary_and_keeps_the_failure() -> None:
+    harness = _FallbackHarness()
+    _, events = await _fallback_turn(harness, InteractionResponseStatus.DECLINED)
+
+    assert _terminal(events).result.error.category == "auth_required"
+    assert not harness.fallback_activated
+    assert (harness.reconnects, harness.changes, harness.executions) == ([True, False], [False], 1)
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_fallback_switch_is_tried_once_per_turn() -> None:
+    harness = _FallbackHarness(reconnect_fails=True)
+    ratifier, events = await _fallback_turn(harness, InteractionResponseStatus.COMPLETED)
+
+    assert _terminal(events).result.error.category == "auth_required"
+    assert harness.reconnects == [True]
+    assert ratifier.requests == []
+    # The next turn may try again: the login might still fail and the endpoint recover.
+    receipt = await harness.send(HarnessInput(content="again"))
+    await _collect_turn(harness, receipt.turn_id)
+    assert harness.reconnects == [True, True]
+    await harness.stop()
+
+
+class _BrokenRatifier:
+    """Host whose ratification raises or answers out of protocol."""
+
+    def __init__(self, *, mismatched: bool) -> None:
+        self.mismatched = mismatched
+
+    async def handle(self, request: Any) -> Any:
+        if self.mismatched:
+            return ProviderInteractionResponse(request_id="someone-else", status=InteractionResponseStatus.COMPLETED)
+        raise RuntimeError("promotion store unavailable")
+
+    async def cancel(
+        self,
+        request_id: str,
+        *,
+        reason: InteractionCancelReason = InteractionCancelReason.PROVIDER_WITHDREW,
+    ) -> None:
+        _ = request_id, reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mismatched", [False, True])
+async def test_broken_ratification_restores_the_primary_and_ends_the_turn(mismatched: bool) -> None:
+    harness = _FallbackHarness()
+    await harness.start(
+        _context(
+            interactions=_BrokenRatifier(mismatched=mismatched),
+            host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION}),
+        )
+    )
+    receipt = await harness.send(HarnessInput(content="hi"))
+    events = await asyncio.wait_for(_collect_turn(harness, receipt.turn_id), 5)
+
+    assert _terminal(events).result.error.category == "auth_required"
+    assert not harness.fallback_activated
+    assert harness.reconnects == [True, False], "the unratified fallback is left for the primary"
+    assert harness.state is HarnessState.IDLE
+    assert harness.active_turn is None
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_fallback_bookkeeping_still_replays_the_ratified_turn() -> None:
+    harness = _FallbackHarness()
+
+    async def broken_change(*, fallback: bool) -> None:
+        _ = fallback
+        raise RuntimeError("checkpoint store unavailable")
+
+    harness._on_auth_endpoint_changed = broken_change
+    _, events = await _fallback_turn(harness, InteractionResponseStatus.COMPLETED)
+
+    assert _terminal(events).result.final_output == "fallback ok", "the host already persisted the switch"
+    assert harness.fallback_activated
+    assert any(isinstance(event.event, ProviderEvent) for event in events)
+    assert harness.state is HarnessState.IDLE
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_breaking_fallback_hook_still_ends_the_turn() -> None:
+    harness = _FallbackHarness()
+
+    def broken_payload() -> dict[str, Any]:
+        raise RuntimeError("payload unavailable")
+
+    harness._auth_fallback_payload = broken_payload
+    _, events = await _fallback_turn(harness, InteractionResponseStatus.COMPLETED)
+
+    assert _terminal(events).kind is TurnEventKind.FAILED
+    assert harness.state is HarnessState.IDLE
     await harness.stop()

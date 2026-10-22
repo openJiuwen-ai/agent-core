@@ -55,6 +55,7 @@ class CaseAnalysisInput:
     normalized_trace_summary: dict[str, Any] = field(default_factory=dict)
     training_signal: dict[str, Any] = field(default_factory=dict)
     benchmark_test_contract: dict[str, Any] = field(default_factory=dict)
+    termination_reason: str = ""
 
 
 class CaseReader:
@@ -170,6 +171,7 @@ class CaseReader:
                     ),
                     training_signal=training_signal,
                     benchmark_test_contract=benchmark_test_contract,
+                    termination_reason=_read_termination_reason(trace_data, result_data),
                 )
             )
 
@@ -403,3 +405,11 @@ def project_execution_history(trace_data: Any) -> dict[str, Any]:
             }
         )
     return {"traces": history}
+
+
+def _read_termination_reason(trace_data: dict[str, Any], result_data: dict[str, Any]) -> str:
+    """Read structured termination before the response is flattened to text."""
+    for value in (trace_data.get("response"), result_data.get("result"), result_data.get("metadata")):
+        if isinstance(value, dict) and value.get("termination_reason"):
+            return str(value["termination_reason"])
+    return ""

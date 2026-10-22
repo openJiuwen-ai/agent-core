@@ -161,6 +161,8 @@ def test_usage_does_not_fallback_to_legacy_cache_fields() -> None:
         span=span,
         first_chunk_ns=None,
         last_chunk_ns=None,
+        first_token_ns=None,
+        last_token_ns=None,
     )
     usage = UsageMetadata(
         input_tokens=100,

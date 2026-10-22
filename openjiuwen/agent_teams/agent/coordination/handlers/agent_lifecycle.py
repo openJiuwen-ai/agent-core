@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Agent-lifecycle coordination events.
 
 Owns the inner USER_INPUT bootstrap path plus the TEAM_STANDBY /
@@ -52,7 +52,10 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         """
         content = event.payload.get("content", "")
         team_logger.info("user_input → deliver_input")
-        await self._round.deliver_input(content)
+        await self._round.deliver_input(
+            content,
+            run_context=event.payload.get("run_context"),
+        )
 
     async def on_standby(self, event: EventMessage) -> None:
         """Pause periodic polling on TEAM_STANDBY."""

@@ -40,6 +40,7 @@ from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.status import (
     ExecutionStatus,
     MemberStatus,
+    retire_target,
 )
 from openjiuwen.agent_teams.schema.stream import is_team_event_marker
 from openjiuwen.agent_teams.schema.team import (
@@ -52,6 +53,7 @@ from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner.spawn.agent_config import SpawnAgentConfig
 from openjiuwen.core.runner.spawn.process_manager import SpawnConfig
 from openjiuwen.core.single_agent.base import BaseAgent
@@ -73,7 +75,99 @@ if TYPE_CHECKING:
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
+def team_member_execution_subject(
+    *,
+    session_id: str,
+    team_name: str,
+    member_name: str,
+    display_name: str,
+    is_leader: bool = False,
+) -> ExecutionSubject:
+    """Build the trajectory owner identity of one Team member execution.
+
+    Shared by every execution acting under a member name (long-lived members,
+    swarmflow workers and avatars), so they land in the same trajectory lane.
+    One-shot reviewers use :func:`team_reviewer_execution_subject` instead.
+
+    Args:
+        session_id: Session the Team runs in.
+        team_name: Team the member belongs to.
+        member_name: Member name, unique within the team.
+        display_name: Name shown on the trajectory lane.
+        is_leader: Whether the member is the team leader.
+
+    Returns:
+        The execution subject to bind around the member's spans.
+    """
+    return ExecutionSubject(
+        subject_id=f"team-member:{session_id}:{team_name}:{member_name}",
+        display_name=display_name,
+        kind="team_leader" if is_leader else "team_member",
+        parent_subject_id="",
+        session_id=session_id,
+    )
+
+
+def team_reviewer_execution_subject(
+    *,
+    session_id: str,
+    team_name: str,
+    task_id: str,
+    reviewer: str,
+    review_round: int,
+    attempt: int = 0,
+    assignee: str | None = None,
+) -> ExecutionSubject:
+    """Build the trajectory owner identity of one temp reviewer harness run.
+
+    A scheduled-dispatch reviewer is a one-shot harness built per review round
+    (and rebuilt per retry attempt) with a fresh context, so each run is its
+    own execution and gets its own subject. Keying on the reviewer name alone
+    is wrong twice over: ``reviewer_id`` is numbered per task (every task's
+    first verifier is ``verifier_1``), so concurrent reviews of different tasks
+    would interleave in one lane, and successive rounds would be recorded as
+    one conversation whose context was swapped out mid-way.
+
+    The kind stays ``team_member`` so the run shows as a team lane; the parent
+    points at the assignee whose deliverable is under review.
+
+    Args:
+        session_id: Session the Team runs in.
+        team_name: Team the reviewed task belongs to.
+        task_id: Task under review.
+        reviewer: Reviewer id stored on the task (e.g. ``challenger_1``).
+        review_round: Review round this run votes in.
+        attempt: Zero-based retry attempt within the round.
+        assignee: Member whose deliverable is reviewed, if any.
+
+    Returns:
+        The execution subject to bind around the reviewer harness run.
+    """
+    subject_id = f"team-reviewer:{session_id}:{team_name}:{task_id}:{reviewer}:r{review_round}"
+    display_name = f"{reviewer} · {task_id} · R{review_round}"
+    if attempt:
+        subject_id = f"{subject_id}:a{attempt}"
+        display_name = f"{display_name} · retry {attempt}"
+    parent_subject_id = ""
+    if assignee:
+        parent_subject_id = team_member_execution_subject(
+            session_id=session_id,
+            team_name=team_name,
+            member_name=assignee,
+            display_name=assignee,
+        ).subject_id
+    return ExecutionSubject(
+        subject_id=subject_id,
+        display_name=display_name,
+        kind="team_member",
+        parent_subject_id=parent_subject_id,
+        session_id=session_id,
+    )
+
+
 # pylint: disable=too-many-public-methods
+
+
 class TeamAgent(BaseAgent):
     """One implementation that can act as leader or teammate.
 
@@ -434,14 +528,27 @@ class TeamAgent(BaseAgent):
     def has_in_flight_round(self) -> bool:
         return self._has_in_flight_round()
 
-    async def deliver_input(self, content: Any, *, use_steer: bool = True) -> None:
+    async def deliver_input(
+        self,
+        content: Any,
+        *,
+        use_steer: bool = True,
+        run_context: RunContext | None = None,
+    ) -> None:
         # The runtime's single supervisor serialises inputs: send() starts a
         # round when idle, steers (use_steer) or queues a follow-up when running.
         # No transition-window race, so no manual branch / pending queue here.
         harness = self.harness
         if harness is None:
             return
-        await harness.send(content, immediate=use_steer)
+        if run_context is None:
+            await harness.send(content, immediate=use_steer)
+            return
+        await harness.send(
+            content,
+            immediate=use_steer,
+            run_context=run_context,
+        )
 
     def set_background_task_controller(self, controller: Any) -> None:
         """Attach the embedder's background task controller to this member's brain.
@@ -537,7 +644,12 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             await harness.send(content, immediate=True)
 
-    async def resume_interrupt(self, user_input) -> None:
+    async def resume_interrupt(
+        self,
+        user_input: Any,
+        *,
+        run_context: RunContext | None = None,
+    ) -> None:
         if not self._stream_controller.is_valid_interrupt_resume(user_input):
             team_logger.info("[{}] dropping stale interrupt resume input", self._member_name() or "?")
             return
@@ -545,7 +657,10 @@ class TeamAgent(BaseAgent):
         # round (idle) or steers it into the active one — no pending queue.
         harness = self.harness
         if harness is not None:
-            await harness.send(user_input)
+            if run_context is None:
+                await harness.send(user_input)
+            else:
+                await harness.send(user_input, run_context=run_context)
 
     # ------------------------------------------------------------------
     # BaseAgent abstract method: configure
@@ -735,15 +850,13 @@ class TeamAgent(BaseAgent):
 
     def observability_execution_subject(self, session_id: str = "") -> ExecutionSubject:
         """Return the stable trajectory owner identity for this Team member."""
-        team_name = str(self.team_name or "")
         member_name = str(self.member_name or self.card.name or self.card.id)
-        display_name = str(getattr(self.runtime_context, "display_name", "") or member_name)
-        return ExecutionSubject(
-            subject_id=f"team-member:{session_id}:{team_name}:{member_name}",
-            display_name=display_name,
-            kind="team_leader" if self.role == TeamRole.LEADER else "team_member",
-            parent_subject_id="",
+        return team_member_execution_subject(
             session_id=session_id,
+            team_name=str(self.team_name or ""),
+            member_name=member_name,
+            display_name=str(getattr(self.runtime_context, "display_name", "") or member_name),
+            is_leader=self.role == TeamRole.LEADER,
         )
 
     async def invoke(self, inputs, session=None):
@@ -884,13 +997,23 @@ class TeamAgent(BaseAgent):
     async def _cancel_agent(self) -> None:
         await self._stream_controller.cancel_agent()
 
-    async def shutdown_self(self) -> None:
+    async def shutdown_self(self, *, force: bool = False) -> None:
+        """Settle this member's retire request now.
+
+        The terminal state is ``retire_target`` of the lifetime policy on the
+        member's own row: SHUTDOWN for resident members (and always under
+        ``force``), DORMANT for a task-scoped member declared with
+        ``lifetime="dormant"`` (F_118). Either way the runtime goes away; only
+        the roster row's meaning differs.
+        """
         member_name = self._member_name() or "?"
-        team_logger.info("[{}] shutdown_self requested", member_name)
+        team_logger.info("[{}] shutdown_self requested (force={})", member_name, force)
         await self._stream_controller.cooperative_cancel()
+        target = await self.resolve_retire_target(force=force)
+        self._state.retired_status = target
         if self._state.team_member is not None:
             try:
-                await self._state.team_member.update_status(MemberStatus.SHUTDOWN)
+                await self._state.team_member.update_status(target)
             except Exception as e:
                 team_logger.debug(
                     "[{}] post-clean status update failed (expected): {}",
@@ -899,6 +1022,23 @@ class TeamAgent(BaseAgent):
                 )
         await self._dispose_tiny_agents()
         self._close_stream()
+
+    @property
+    def retired_status(self) -> MemberStatus | None:
+        """Terminal status this member settled itself into, or None (see ``finalize_member``)."""
+        return self._state.retired_status
+
+    async def resolve_retire_target(self, *, force: bool = False) -> MemberStatus:
+        """SHUTDOWN or DORMANT, from this member's persisted lifetime policy."""
+        backend = self.team_backend
+        name = self._member_name()
+        lifetime = None
+        if backend is not None and name and not force:
+            try:
+                lifetime = await backend.get_member_lifetime(name)
+            except Exception as exc:
+                team_logger.debug("[{}] lifetime lookup failed; settling to SHUTDOWN: {}", name, exc)
+        return retire_target(lifetime, force=force)
 
     async def finalize_non_contributing_worktrees(self) -> None:
         """Finalize current-session worktrees that did not contribute commits."""
@@ -1764,6 +1904,88 @@ class TeamAgent(BaseAgent):
         spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
 
+        # A checkpoint contains the model pool that was active when the team
+        # was first built.  The runtime spec is assembled for the current
+        # request, and may carry a newly selected compiler-driven model group.
+        # Keep the conversational/session state from the checkpoint, but use
+        # the current model selection for all newly configured runtimes.
+        # Without this merge a cold recovery silently rebuilt the old
+        # by-model-name allocator even though the UI had selected a model
+        # group for the current request.
+        if runtime_spec is not None and runtime_spec.model_pool:
+            current_pool = list(runtime_spec.model_pool)
+            current_strategy = runtime_spec.model_pool_strategy
+            if context.team_spec is None:
+                raise ValueError(f"No team spec found for '{team_name}' recovery")
+            context.team_spec = context.team_spec.model_copy(
+                update={
+                    "model_pool": current_pool,
+                    "model_pool_strategy": current_strategy,
+                }
+            )
+            # ``TeamAgentSpec.model_pool`` is persisted again at the next
+            # lifecycle boundary.  Clear convenience inputs so the snapshot
+            # cannot contain two competing model sources.
+            spec.model_pool = current_pool
+            spec.model_pool_strategy = current_strategy
+            spec.model_router = None
+            spec.model_intelli_router = None
+            # ``ctx.member_model`` takes precedence over the per-agent model in
+            # AgentConfigurator. Re-materialize it from the current pool
+            # instead of retaining the checkpoint's old client.  Name-routed
+            # strategies need an explicit logical name; IntelliRouter always
+            # uses its single wildcard entry.
+            checkpoint_name = None
+            checkpoint_model = context.member_model
+            if checkpoint_model is not None and checkpoint_model.model_request_config is not None:
+                checkpoint_name = checkpoint_model.model_request_config.model_name
+            allocation_name = checkpoint_name
+            allocation = None
+            resolved_model = None
+            if current_strategy == "intelli_router":
+                allocation_name = "*"
+                spec.leader.model_name = "*"
+            elif current_strategy == "by_model_name" and current_pool:
+                from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+                allocation = (
+                    resolve_member_model(
+                        context.team_spec,
+                        model_name=allocation_name,
+                        model_index=0,
+                    )
+                    if allocation_name
+                    else None
+                )
+                if allocation is None:
+                    allocation_name = current_pool[0].model_name
+                    team_logger.warning(
+                        "[{}] checkpoint model {!r} is unavailable; falling back to pool model {!r}",
+                        team_name,
+                        checkpoint_name,
+                        allocation_name,
+                    )
+                spec.leader.model_name = allocation_name
+                resolved_model = resolve_member_model(
+                    context.team_spec,
+                    model_name=allocation_name,
+                    model_index=0,
+                )
+
+            if current_strategy == "intelli_router":
+                from openjiuwen.agent_teams.models.allocator import build_model_allocator
+
+                allocator = build_model_allocator(spec, context.team_spec)
+                allocation = allocator.allocate(allocation_name) if allocator is not None else None
+            else:
+                from openjiuwen.agent_teams.models.allocator import build_model_allocator
+
+                allocator = build_model_allocator(spec, context.team_spec)
+                allocation = allocator.allocate(None) if allocator is not None else None
+            context.member_model = (
+                allocation.to_team_model_config() if allocation is not None else resolved_model
+            )
+
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
         card_id = f"{team_name}_{context.member_name}" if context.member_name else "leader"
         card = agent_spec.card or AgentCard(
@@ -1801,4 +2023,4 @@ class TeamAgent(BaseAgent):
         return agent
 
 
-__all__ = ["TeamAgent"]
+__all__ = ["TeamAgent", "team_member_execution_subject", "team_reviewer_execution_subject"]

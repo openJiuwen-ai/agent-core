@@ -15,7 +15,7 @@ import json
 from typing import Dict, Optional, cast
 
 from sqlalchemy import BigInteger, Index, Table
-from sqlmodel import SQLModel, Field
+from sqlmodel import Field, SQLModel
 from sqlmodel.main import SQLModelMetaclass
 
 from openjiuwen.agent_teams.context import get_session_id
@@ -35,8 +35,10 @@ TEAM_STATIC_TABLES_TO_CLEAR = (
 
 # ----------------- Static Table Models -----------------
 
+
 class Team(SQLModel, table=True):
     """Team info table model"""
+
     __tablename__ = "team_info"
 
     team_name: str = Field(primary_key=True)
@@ -60,6 +62,7 @@ class Team(SQLModel, table=True):
 
 class TeamMember(SQLModel, table=True):
     """Team member table model"""
+
     __tablename__ = "team_member"
 
     member_name: str = Field(primary_key=True)
@@ -101,6 +104,7 @@ class TeamMember(SQLModel, table=True):
 
 # ============== Dynamic Table Base Classes (abstract) ==============
 
+
 class TeamTaskBase(SQLModel):
     """Base class for task tables (one per session).
 
@@ -112,6 +116,7 @@ class TeamTaskBase(SQLModel):
     title/content edits do not bump this column — it tracks the state
     lifecycle, not arbitrary writes.
     """
+
     __abstract__ = True
 
     task_id: str = Field(primary_key=True)
@@ -146,6 +151,16 @@ class TeamTaskBase(SQLModel):
     # still fails, the scheduler escalates to the leader instead of looping
     # rework. NULL falls back to ``TeamAgentSpec.default_max_review_rounds``.
     max_review_rounds: Optional[int] = Field(default=None, nullable=True)
+    # Author's one-line completion summary (F_119): what was delivered and
+    # where. Rendered in lightweight places (leader digest, upstream briefs);
+    # stored in full, truncated only when rendered. Cleared together with
+    # ``note`` whenever the task leaves its assignee (reassign / reset).
+    summary: Optional[str] = Field(default=None, nullable=True)
+    # Author's completion note (F_118 / D7): artifact paths and key decisions
+    # written by ``member_complete_task(note=...)``. Persisted so downstream
+    # members, reviewers and the leader (``view_task``) can read it; events
+    # never carry it. Since F_119 it is the full detail behind ``summary``.
+    note: Optional[str] = Field(default=None, nullable=True)
     updated_at: Optional[int] = Field(default=None, sa_type=BigInteger, nullable=True)
 
     def brief(self) -> dict:
@@ -200,22 +215,27 @@ class TeamTaskBase(SQLModel):
         result: list[dict[str, str]] = []
         for entry in parsed:
             if isinstance(entry, dict):
-                result.append({
-                    "type": entry.get("type", "verifier"),
-                    "reviewer_id": str(entry.get("reviewer_id", "")),
-                    "instruction": str(entry.get("instruction", "")),
-                })
+                result.append(
+                    {
+                        "type": entry.get("type", "verifier"),
+                        "reviewer_id": str(entry.get("reviewer_id", "")),
+                        "instruction": str(entry.get("instruction", "")),
+                    }
+                )
             elif isinstance(entry, str):
-                result.append({
-                    "type": "verifier",
-                    "reviewer_id": entry,
-                    "instruction": "",
-                })
+                result.append(
+                    {
+                        "type": "verifier",
+                        "reviewer_id": entry,
+                        "instruction": "",
+                    }
+                )
         return result
 
 
 class TeamTaskDependencyBase(SQLModel):
     """Base class for task dependency tables (one per session)"""
+
     __abstract__ = True
 
     # No index on team_name (A1) — see TeamTaskBase.
@@ -233,6 +253,7 @@ class TeamTaskReviewVoteBase(SQLModel):
     voting history stays auditable. Verdict policy (threshold math) lives in
     the leader-side scheduler, not here.
     """
+
     __abstract__ = True
 
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -248,6 +269,7 @@ class TeamTaskReviewVoteBase(SQLModel):
 
 class TeamMessageBase(SQLModel):
     """Base class for team message table (one per session)"""
+
     __abstract__ = True
 
     message_id: str = Field(primary_key=True)
@@ -303,6 +325,7 @@ class MessageReadStatusBase(SQLModel):
     Tracks which broadcast message each member has read up to.
     Each member has one record per team, storing the timestamp of the broadcast message they have read.
     """
+
     __abstract__ = True
 
     member_name: str = Field(primary_key=True)
@@ -311,6 +334,7 @@ class MessageReadStatusBase(SQLModel):
 
 
 # ============== Session ID Sanitization ==============
+
 
 def _sanitize_session_id_for_table(session_id: str) -> str:
     """Return a fixed-length, SQL-safe hex suffix derived from session_id.
@@ -347,9 +371,7 @@ def _get_task_model() -> type[TeamTaskBase]:
         # (D4). Kept in sync with the migration in ``database/engine.py``.
         attrs = {
             "__tablename__": table_name,
-            "__table_args__": (
-                Index(f"ix_{table_name}_assignee_status", "assignee", "status"),
-            ),
+            "__table_args__": (Index(f"ix_{table_name}_assignee_status", "assignee", "status"),),
         }
 
         model_cls = SQLModelMetaclass(class_name, (TeamTaskBase,), attrs, table=True)
@@ -368,10 +390,7 @@ def _get_task_dependency_model() -> type[TeamTaskDependencyBase]:
         table_name = f"team_task_dependency_{suffix}"
         task_table_name = f"team_task_{suffix}"
 
-        attrs = {
-            "__tablename__": table_name,
-            "__annotations__": {}
-        }
+        attrs = {"__tablename__": table_name, "__annotations__": {}}
 
         attrs["__annotations__"]["task_id"] = str
         attrs["task_id"] = Field(
@@ -468,9 +487,7 @@ def _get_review_vote_model() -> type[TeamTaskReviewVoteBase]:
         # composite serves it and INSERT pays 2 B-tree writes (PK + 1).
         attrs = {
             "__tablename__": table_name,
-            "__table_args__": (
-                Index(f"ix_{table_name}_task_round", "task_id", "review_round"),
-            ),
+            "__table_args__": (Index(f"ix_{table_name}_task_round", "task_id", "review_round"),),
         }
 
         model_cls = SQLModelMetaclass(class_name, (TeamTaskReviewVoteBase,), attrs, table=True)
@@ -491,12 +508,12 @@ def static_tables() -> list[Table]:
     creating a schema grow with that history rather than with the schema. The
     per-session tables are owned by ``create_cur_session_tables()``, which
     creates exactly the current session's set.
+    Organization tables (``org_*``) live in the same metadata registry once
+    imported but are owned by the org task pool's DDL path, not TeamDatabase
+    initialization — whitelist ``TEAM_STATIC_TABLES_TO_CLEAR`` rather than
+    "everything that is not dynamic".
     """
-    return [
-        table
-        for name, table in SQLModel.metadata.tables.items()
-        if not name.startswith(TEAM_DYNAMIC_TABLE_PREFIXES)
-    ]
+    return [table for name, table in SQLModel.metadata.tables.items() if name in TEAM_STATIC_TABLES_TO_CLEAR]
 
 
 def _clear_session_model_cache(session_id: str) -> None:

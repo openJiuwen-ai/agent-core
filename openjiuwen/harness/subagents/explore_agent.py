@@ -170,7 +170,7 @@ def build_explore_agent_config(
     language: Optional[str] = None,
     prompt_mode: Optional[str] = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 15,
+    max_iterations: int = 50,
     search_via_bash: bool = False,
 ) -> SubAgentConfig:
     """Build a SubAgentConfig for the built-in Explore subagent."""
@@ -212,7 +212,7 @@ def create_explore_agent(
     subagents: Optional[List[SubAgentConfig | DeepAgent]] = None,
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 15,
+    max_iterations: int = 50,
     workspace: Optional[str | Workspace] = None,
     skills: Optional[List[str]] = None,
     backend: Optional[Any] = None,

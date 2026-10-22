@@ -314,3 +314,54 @@ class TestLoadConfig:
         )
         cfg = load_config()
         assert cfg.max_iterations == 15
+
+
+    def test_non_integer_max_tokens_is_a_clean_value_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        """A wrong-typed settings.json value must surface as ValueError.
+
+        The CLI catches ValueError and prints one error line; letting int()
+        raise TypeError escaped both handlers and crashed with a traceback.
+        """
+        p = tmp_path / "settings.json"
+        p.write_text(
+            '{"apiKey": "k", "maxTokens": {"bad": 1}}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "openjiuwen.harness.cli.agent.config"
+            ".SETTINGS_PATH",
+            p,
+        )
+        monkeypatch.delenv(
+            "OPENJIUWEN_MAX_TOKENS", raising=False
+        )
+
+        with pytest.raises(ValueError, match="max_tokens"):
+            load_config()
+
+    def test_non_integer_max_iterations_is_a_clean_value_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        """maxIterations with a list value is a ValueError, not a TypeError."""
+        p = tmp_path / "settings.json"
+        p.write_text(
+            '{"apiKey": "k", "maxIterations": [1, 2]}',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "openjiuwen.harness.cli.agent.config"
+            ".SETTINGS_PATH",
+            p,
+        )
+        monkeypatch.delenv(
+            "OPENJIUWEN_MAX_ITERATIONS", raising=False
+        )
+
+        with pytest.raises(ValueError, match="max_iterations"):
+            load_config()

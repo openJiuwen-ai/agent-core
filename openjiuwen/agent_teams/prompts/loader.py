@@ -30,6 +30,18 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
 _DEFAULT_LANGUAGE = "cn"
+# Runtime / UI may report Chinese as ``zh``; prompt packs live under ``cn``.
+_LANGUAGE_ALIASES = {
+    "zh": "cn",
+}
+
+
+def _normalize_language(language: str | None) -> str:
+    raw = (language or "").strip().lower()
+    if not raw:
+        return _DEFAULT_LANGUAGE
+    return _LANGUAGE_ALIASES.get(raw, raw)
+
 
 #: ``(name, language) -> PromptTemplate`` — the shared loader contract.
 #: ``load_template`` and every ``make_template_loader`` closure satisfy it.
@@ -50,7 +62,7 @@ def load_template(name: str, language: str = _DEFAULT_LANGUAGE) -> PromptTemplat
     team workspace this is the framework read-only loader (all existing
     callers / UTs stay unchanged).
     """
-    return _load(name, language)
+    return _load(name, _normalize_language(language))
 
 
 def make_template_loader(ws_cache: WorkspaceCache | None = None) -> TemplateLoader:
@@ -72,7 +84,7 @@ def make_template_loader(ws_cache: WorkspaceCache | None = None) -> TemplateLoad
         evolved = ws_cache.get_template(name)
         if evolved is not None:
             return evolved
-        return _load(name, language)
+        return _load(name, _normalize_language(language))
 
     return load
 

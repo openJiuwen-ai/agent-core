@@ -1,0 +1,242 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Subprocess plumbing for the __DISPLAY__ CLI.
+
+Owns one child process: launch with pipes, newline-delimited reads and
+writes on stdin/stdout, a drained-and-discarded stderr, and a bounded
+close-stdin / terminate / kill shutdown.  Nothing here knows the CLI's wire
+format; the harness frames records on top of :class:`CliProcess`.
+
+stderr is drained so the child never blocks on a full pipe, and dropped:
+it can carry credentials, request bodies and environment dumps, none of
+which may reach events, results, checkpoints or logs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import json
+import os
+import shutil
+from dataclasses import dataclass, field
+from typing import Any, Mapping
+
+from openjiuwen.harness_protocol import HarnessError
+
+# Stdout lines that are not a JSON object (banners, progress bars) surface
+# under this record type, so the mapping keeps them as provider events
+# instead of the reader silently dropping them.
+NON_JSON_RECORD = "__non_json_line__"
+
+
+class CliLaunchError(HarnessError):
+    """The CLI executable could not be resolved or started."""
+
+
+class CliProtocolError(HarnessError):
+    """The CLI wrote output this adapter cannot frame."""
+
+
+@dataclass(frozen=True, slots=True)
+class CliLaunch:
+    """Everything needed to start one CLI process.
+
+    Attributes:
+        argv: Executable followed by its arguments; the executable is resolved
+            against the child's ``PATH``.
+        env: Complete child environment (never logged).
+        cwd: Child working directory.
+    """
+
+    argv: tuple[str, ...]
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
+    cwd: str | None = None
+
+
+def resolve_executable(binary: str, env: Mapping[str, str]) -> str:
+    """Resolve ``binary`` the way the child will see it.
+
+    A bare name is looked up on the child's ``PATH`` (``PATHEXT`` applies on
+    Windows, so npm shims resolve to their ``.cmd``); a path must exist.
+
+    Args:
+        binary: Executable name or path.
+        env: The child environment whose ``PATH`` is searched.
+
+    Returns:
+        The executable path to launch.
+
+    Raises:
+        CliLaunchError: When the executable cannot be found.
+    """
+    if os.path.dirname(binary):
+        if os.path.isfile(binary):
+            return binary
+        raise CliLaunchError(f"CLI executable not found: {binary}")
+    resolved = shutil.which(binary, path=env.get("PATH"))
+    if resolved is None:
+        raise CliLaunchError(f"CLI executable {binary!r} is not on PATH")
+    return resolved
+
+
+class CliProcess:
+    """One child process spoken to in newline-delimited records."""
+
+    def __init__(self, *, max_line_bytes: int) -> None:
+        self._max_line_bytes = max_line_bytes
+        self._process: asyncio.subprocess.Process | None = None
+        self._stderr_task: asyncio.Task[None] | None = None
+        self._write_lock = asyncio.Lock()
+
+    @property
+    def returncode(self) -> int | None:
+        """Return the exit code once the child has exited."""
+        process = self._process
+        return process.returncode if process is not None else None
+
+    @property
+    def running(self) -> bool:
+        """Return whether the child was started and has not exited."""
+        process = self._process
+        return process is not None and process.returncode is None
+
+    async def start(self, launch: CliLaunch) -> None:
+        """Launch the child with stdin/stdout/stderr pipes.
+
+        Raises:
+            CliLaunchError: When the executable is missing or cannot start.
+        """
+        executable = resolve_executable(launch.argv[0], launch.env)
+        try:
+            process = await asyncio.create_subprocess_exec(
+                executable,
+                *launch.argv[1:],
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=dict(launch.env),
+                cwd=launch.cwd,
+                limit=self._max_line_bytes,
+            )
+        except OSError as exc:
+            raise CliLaunchError(f"failed to start {launch.argv[0]!r}: {type(exc).__name__}") from exc
+        self._process = process
+        self._stderr_task = asyncio.create_task(_discard(process.stderr), name="cli_stderr_drain")
+
+    async def write_line(self, text: str) -> None:
+        """Write one line to the child's stdin."""
+        stdin = self._require().stdin
+        if stdin is None or stdin.is_closing():
+            raise CliProtocolError("CLI stdin is closed")
+        async with self._write_lock:
+            stdin.write(text.encode("utf-8") + b"\n")
+            await stdin.drain()
+
+    async def write_json(self, record: Mapping[str, Any]) -> None:
+        """Write one compact JSON object as a line."""
+        await self.write_line(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+
+    async def close_stdin(self) -> None:
+        """Signal end of input; many CLIs exit once stdin is closed."""
+        process = self._process
+        stdin = process.stdin if process is not None else None
+        if stdin is None or stdin.is_closing():
+            return
+        with contextlib.suppress(OSError):
+            stdin.close()
+            await stdin.wait_closed()
+
+    async def read_record(self) -> dict[str, Any] | None:
+        """Return the next stdout record, or ``None`` at end of stream.
+
+        Raises:
+            CliProtocolError: When a line exceeds ``max_line_bytes``.
+        """
+        stdout = self._require().stdout
+        if stdout is None:
+            return None
+        while True:
+            try:
+                line = await stdout.readline()
+            except ValueError as exc:
+                raise CliProtocolError(f"CLI output line exceeds {self._max_line_bytes} bytes") from exc
+            if not line:
+                return None
+            text = line.decode("utf-8", errors="replace").strip()
+            if text:
+                return _parse_line(text)
+
+    async def shutdown(self, timeout_s: float) -> int | None:
+        """Close stdin, give the child ``timeout_s`` to exit, then terminate it."""
+        process = self._process
+        if process is None:
+            return None
+        await self.close_stdin()
+        if process.returncode is None:
+            try:
+                await asyncio.wait_for(process.wait(), timeout_s)
+            except asyncio.TimeoutError:
+                return await self.terminate(timeout_s)
+        await self._reap_stderr()
+        return process.returncode
+
+    async def terminate(self, timeout_s: float) -> int | None:
+        """Terminate the child now, escalating to kill after ``timeout_s``."""
+        process = self._process
+        if process is None:
+            return None
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout_s)
+            except asyncio.TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+                await process.wait()
+        await self._reap_stderr()
+        return process.returncode
+
+    def _require(self) -> asyncio.subprocess.Process:
+        process = self._process
+        if process is None:
+            raise CliProtocolError("CLI process is not started")
+        return process
+
+    async def _reap_stderr(self) -> None:
+        task = self._stderr_task
+        self._stderr_task = None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+
+def _parse_line(text: str) -> dict[str, Any]:
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return {"type": NON_JSON_RECORD, "text": text}
+    if not isinstance(value, dict):
+        return {"type": NON_JSON_RECORD, "text": text}
+    return value
+
+
+async def _discard(stream: asyncio.StreamReader | None) -> None:
+    if stream is None:
+        return
+    while await stream.read(65536):
+        pass
+
+
+__all__ = [
+    "NON_JSON_RECORD",
+    "CliLaunch",
+    "CliLaunchError",
+    "CliProcess",
+    "CliProtocolError",
+    "resolve_executable",
+]

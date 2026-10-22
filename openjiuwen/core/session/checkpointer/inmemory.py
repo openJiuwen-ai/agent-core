@@ -362,7 +362,10 @@ class InMemoryCheckpointer(Checkpointer):
                     session_id=session_id,
                     metadata={"storage_type": "inmemory"}
                 )
-            matching_session_ids = [sid for sid in list(self._agent_stores.keys()) if sid.startswith(session_id)]
+            session_prefix = f"{session_id}:"
+            matching_session_ids = [
+                sid for sid in list(self._agent_stores) if sid == session_id or sid.startswith(session_prefix)
+            ]
             for sid in matching_session_ids:
                 removed = self._agent_stores.pop(sid, None)
                 if removed:

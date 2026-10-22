@@ -158,7 +158,7 @@ def _god_view_query(workspace_path: Path) -> str:
     return (
         "请组建一个 4 人临时团队，完成 Codex CLI 协同写文件验证，全程自主推进：\n\n"
         "1. 调用 build_team 建立团队。\n"
-        "2. 调用 spawn_external_cli 创建以下成员，cli_agent 都必须是 codex：\n"
+        "2. 调用 spawn_teammate 创建以下成员，cli_agent 都必须是 codex：\n"
         f"{roster}\n"
         "3. 团队使用自主认领模式。成员全部创建成功后，用一次 create_task "
         "批量创建 4 个任务。tasks 中每项只填写 task_id、title、content，"

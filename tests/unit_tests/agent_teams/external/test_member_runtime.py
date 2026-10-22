@@ -6,11 +6,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any
 
 import pytest
 
 from openjiuwen.agent_teams.agent.member_runtime import MemberRuntime
+from openjiuwen.agent_teams.inbound_render import render_clock
+from openjiuwen.agent_teams.timefmt import format_absolute_time
 from openjiuwen.agent_teams.external.member_runtime import (
     ExternalHarnessMemberRuntime,
     TeamContextAwareRuntime,
@@ -35,6 +38,7 @@ from openjiuwen.harness_protocol import (
     OutputEvent,
     OutputKind,
     OutputOperation,
+    ProviderEvent,
     ProviderInteractionRequest,
     ResumePolicy,
     SendReceipt,
@@ -46,6 +50,16 @@ from openjiuwen.harness_protocol import (
     UnsupportedHarnessCapabilityError,
 )
 from tests.test_logger import logger
+
+# Pinned clock so the current-time anchor every send carries is predictable.
+_NOW_MS = 1_700_000_000_000
+_CLOCK = render_clock(now=format_absolute_time(_NOW_MS))
+
+
+@pytest.fixture(autouse=True)
+def _pinned_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Freeze the time the runtime stamps onto each outgoing input."""
+    monkeypatch.setattr("openjiuwen.agent_teams.external.member_runtime.get_current_time", lambda: _NOW_MS)
 
 
 class _FakeEventCursor:
@@ -493,7 +507,7 @@ async def test_immediate_send_from_idle_uses_auto() -> None:
 
     receipt = await runtime.send("start", immediate=True)
 
-    assert harness.send_calls[0][0].content == "start"
+    assert harness.send_calls[0][0].content == f"{_CLOCK}\n\nstart"
     assert harness.send_calls[0][1] is DeliveryMode.AUTO
     assert receipt.accepted_mode is DeliveryMode.AUTO
 
@@ -643,8 +657,8 @@ async def test_concurrent_sends_deliver_pending_team_context_once() -> None:
     await asyncio.gather(first, second)
 
     assert [content.content for content, _mode in harness.send_calls] == [
-        f"{tracker.text}\n\nfirst",
-        "second",
+        f"{tracker.text}\n\n{_CLOCK}\n\nfirst",
+        f"{_CLOCK}\n\nsecond",
     ]
     assert tracker.commits == 1
     await runtime.stop()
@@ -703,6 +717,7 @@ async def test_team_context_riding_along_is_recorded_as_its_own_input() -> None:
     # is what the turn reports as its input.
     assert inputs == [
         ("input", ("turn-1", "review the parser")),
+        ("input", ("turn-1", _CLOCK)),
         ("input", ("turn-1", pending)),
     ]
 
@@ -736,6 +751,7 @@ async def test_trajectory_recorder_receives_inputs_member_turns_and_every_event(
     assert HostCapability.MODEL_REQUEST_OBSERVATION in harness.start_contexts[0].host_capabilities
     assert recorder.calls == [
         ("input", ("turn-1", "list the files")),
+        ("input", ("turn-1", _CLOCK)),
         ("identity", ("turn-1", member_turn["turn_id"], 1)),
         ("observe", "TurnLifecycleEvent"),
         ("observe", "ItemLifecycleEvent"),
@@ -848,3 +864,265 @@ async def test_resume_without_a_saved_checkpoint_starts_a_new_session() -> None:
     assert started.resume_policy is not ResumePolicy.REQUIRE_RESUME
     await runtime.stop()
     logger.info("resume without a checkpoint starts a new session")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_require_checkpoint_rejects_resume_without_a_pointer() -> None:
+    """A cold resume that finds no saved session pointer must fail loudly, not start fresh."""
+    from openjiuwen.harness_protocol import HarnessProtocolError
+
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness,
+        context=_context(),
+        resume_external_backend=True,
+        require_checkpoint=True,
+    )
+    with pytest.raises(HarnessProtocolError):
+        await runtime.start(team_session=_FakeTeamSession())
+    assert harness.start_contexts == []
+    await runtime.stop()  # must not raise; runtime was never started
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_require_checkpoint_resumes_when_a_pointer_exists() -> None:
+    """With a stored pointer the strict flag behaves exactly like resume_external_backend."""
+    harness = _FakeHarness()
+    team_session = _FakeTeamSession()
+    team_session.member_session.state["external_runtime"] = {
+        "backend": "fake",
+        "checkpoint": {
+            "provider": "fake", "schema_version": "1", "agent_id": "member-agent",
+            "host_session_id": "team-session", "checkpoint_id": "cp-1", "sequence": 1,
+            "data": {"session_id": "provider-session"}, "provider_session_id": "provider-session",
+            "revision": None,
+        },
+    }
+    runtime = ExternalHarnessMemberRuntime(
+        harness=harness, context=_context(), resume_external_backend=True, require_checkpoint=True,
+    )
+    await runtime.start(team_session=team_session)
+    await runtime.stop()
+    assert harness.start_contexts[0].resume_policy is ResumePolicy.REQUIRE_RESUME
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reported_model_tracks_cli_model_events() -> None:
+    """The model the CLI reports (``session/model_changed``) surfaces on the runtime."""
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context(), agent_kind="claude")
+    runtime.bind_reliability_context(
+        session_id="s1",
+        team_backend=None,
+        leader_name="leader",
+        update_status_cb=lambda status: None,
+        messager=None,
+    )
+    await runtime.start(team_session=_FakeTeamSession())
+    await harness.emit(
+        ProviderEvent(
+            provider="claude",
+            event_type="session/model_changed",
+            schema_version="1",
+            payload={"model": "GLM-5.3"},
+        )
+    )
+    await runtime.stop()
+    assert runtime.reported_model == "GLM-5.3"
+
+
+# ---------------------------------------------------------------------------
+# live activity: external harness tool events -> AGENT_ACTIVITY (Task 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_bound_activity_sink_maps_claude_tool_pair() -> None:
+    """A Claude-style tool_use/tool_result pair becomes a truncated AGENT_ACTIVITY pair."""
+    from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
+
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    received: list = []
+    pair_seen = asyncio.Event()
+
+    def sink(event: Any) -> None:
+        received.append(event)
+        if len(received) == 2:
+            pair_seen.set()
+
+    runtime.bind_activity_sink(
+        sink,
+        agent_id="main/call:7",
+        phase="review",
+        label="coder",
+        correlation_id="review:coder:0",
+    )
+    await runtime.start()
+
+    await harness.emit(
+        ItemLifecycleEvent(
+            kind=ItemEventKind.STARTED,
+            item_type="tool",
+            data={"name": "Write", "arguments": {"path": "a.txt", "content": "x" * 600}},
+        ),
+        turn_id="turn-1",
+        item_id="toolu_1",
+    )
+    await harness.emit(
+        ItemLifecycleEvent(
+            kind=ItemEventKind.COMPLETED,
+            item_type="tool",
+            data={"tool_name": "Write", "result": {"ok": True}},
+        ),
+        turn_id="turn-1",
+        item_id="toolu_1",
+    )
+    await asyncio.wait_for(pair_seen.wait(), timeout=1)
+    await runtime.stop()
+
+    call, result = received
+    assert [e.kind for e in received] == [ProgressKind.AGENT_ACTIVITY, ProgressKind.AGENT_ACTIVITY]
+    assert call.activity_type == "tool_call"
+    assert result.activity_type == "tool_result"
+    assert call.tool_call_id == result.tool_call_id == "toolu_1"
+    assert call.tool_name == result.tool_name == "Write"
+    expected_args = json.dumps({"path": "a.txt", "content": "x" * 600}, ensure_ascii=False, separators=(",", ":"))
+    # Full arguments pass through — the member call list shows the same
+    # complete payload a real teammate's tool_call frame carries.
+    assert call.content == expected_args
+    assert result.content == '{"ok":true}'
+    assert call.message == "tool: Write"
+    # The bind-time identity rides every event.
+    assert all(e.agent_id == "main/call:7" for e in received)
+    assert all(e.phase == "review" and e.label == "coder" for e in received)
+    assert all(e.correlation_id == "review:coder:0" for e in received)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_bound_activity_sink_maps_codex_item_pair() -> None:
+    """A Codex-style item/started + item/completed pair maps onto one activity pair."""
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    received: list = []
+    pair_seen = asyncio.Event()
+
+    def sink(event: Any) -> None:
+        received.append(event)
+        if len(received) == 2:
+            pair_seen.set()
+
+    runtime.bind_activity_sink(sink, agent_id="main/call:8", phase="build", label="sheller")
+    await runtime.start()
+
+    await harness.emit(
+        ItemLifecycleEvent(
+            kind=ItemEventKind.STARTED,
+            item_type="tool",
+            data={"name": "shell", "arguments": {"command": "ls", "cwd": "/tmp"}, "item_type": "commandExecution"},
+        ),
+        turn_id="turn-1",
+        item_id="item_1",
+    )
+    await harness.emit(
+        ItemLifecycleEvent(
+            kind=ItemEventKind.COMPLETED,
+            item_type="tool",
+            data={
+                "tool_name": "shell",
+                "result": "a.txt\nb.txt",
+                "item_type": "commandExecution",
+                "status": "completed",
+            },
+        ),
+        turn_id="turn-1",
+        item_id="item_1",
+    )
+    await asyncio.wait_for(pair_seen.wait(), timeout=1)
+    await runtime.stop()
+
+    call, result = received
+    assert call.activity_type == "tool_call"
+    assert result.activity_type == "tool_result"
+    assert call.tool_call_id == result.tool_call_id == "item_1"
+    assert call.tool_name == result.tool_name == "shell"
+    assert call.content == '{"command":"ls","cwd":"/tmp"}'
+    assert result.content == "a.txt\nb.txt"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_activity_sink_drops_idless_and_unparsable_tool_events() -> None:
+    """Tool events without a pair id, or an unmapped kind, are dropped and never raise."""
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    received: list = []
+    finished = asyncio.Event()
+
+    async def on_round(*, kind: str, round_id: str | None, result: Any) -> None:
+        if kind == "finished":
+            finished.set()
+
+    runtime.bind_activity_sink(received.append, agent_id="main/call:1", phase="p", label="l")
+    await runtime.subscribe(on_round=on_round)
+    await runtime.start()
+
+    await harness.emit(
+        ItemLifecycleEvent(kind=ItemEventKind.STARTED, item_type="tool", data={"name": "Write"}),
+        turn_id="turn-1",
+        item_id=None,
+    )
+    await harness.emit(
+        ItemLifecycleEvent(kind=ItemEventKind.UPDATED, item_type="tool", data={"name": "Write"}),
+        turn_id="turn-1",
+        item_id="toolu_2",
+    )
+    await harness.emit(
+        ItemLifecycleEvent(kind=ItemEventKind.STARTED, item_type="tool", data={"arguments": "{}"}),
+        turn_id="turn-1",
+        item_id="toolu_3",
+    )
+    await harness.emit(
+        ItemLifecycleEvent(kind=ItemEventKind.COMPLETED, item_type="agentMessage", data={"text": "hi"}),
+        turn_id="turn-1",
+        item_id="msg_1",
+    )
+    await harness.emit(
+        TurnLifecycleEvent(kind=TurnEventKind.FINISHED, result=TurnResult(status=TurnStatus.COMPLETED)),
+        turn_id="turn-1",
+    )
+    await asyncio.wait_for(finished.wait(), timeout=1)
+    await runtime.stop()
+
+    assert received == []
+
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_review_pass_notice_rides_once_and_is_recorded_as_its_own_input() -> None:
+    """F_119: the outcome tracker's notice joins the next send, then is committed."""
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    recorder = _RecordingTrajectoryRecorder()
+    runtime.bind_trajectory_recorder(recorder)  # type: ignore[arg-type]
+    notice = '<team-event kind="task-verified">\ndone\n</team-event>'
+    tracker = _OneShotTeamContextTracker(notice)
+    runtime.bind_task_outcome_tracker(tracker)  # type: ignore[arg-type]
+    await runtime.start(team_session=_FakeTeamSession())
+
+    await runtime.send("next task")
+    await runtime.send("another")
+    await runtime.stop()
+
+    inputs = [call for call in recorder.calls if call[0] == "input"]
+    assert inputs[0] == ("input", ("turn-1", "next task"))
+    assert ("input", ("turn-1", notice)) in inputs
+    assert sum(1 for call in inputs if call[1][1] == notice) == 1
+    assert tracker.commits == 1

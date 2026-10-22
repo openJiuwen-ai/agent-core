@@ -175,7 +175,7 @@ class HttpSession(RefCountedResource):
         This method is called when the reference count reaches zero.
         Closes the underlying aiohttp ClientSession.
         """
-        if self._session and not self._session.close():
+        if self._session is not None and not self._session.closed:
             await self._session.close()
 
 

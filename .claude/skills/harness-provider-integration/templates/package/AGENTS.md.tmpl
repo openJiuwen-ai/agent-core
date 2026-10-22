@@ -1,0 +1,43 @@
+# __DIST__
+
+把 __DISPLAY__ 接入 openjiuwen 的 `harness_protocol` 1.0，接入模式：__MODE_LABEL__。
+本包通过 `openjiuwen.harness_providers` entry point 注册，安装即可被 `create_harness(..., provider="__PROVIDER__")`
+解析。附近代码、测试与厂商当前版本的真实记录优先于本文；不要根据其它厂商的能力推断 __DISPLAY__ 的能力。
+
+## 模块职责
+
+__MODULE_TABLE__
+- `provider.py`：openjiuwen 发现入口；`model_config` 把宿主的 `ModelChoice`（内置模型，或 card 声明 `ENDPOINT_MODELS` 时的端点模型）映射成本包配置，manifest 工厂与团队成员都走它。
+
+生命周期状态机、输入队列、有界事件流、交互与 checkpoint 由 openjiuwen 的
+`openjiuwen.harness_providers.base.SerializedTurnHarness` 提供，本包只实现 `_open_session` /
+`_close_session` / `_execute_turn`（及卡片声明对应的 `_steer` / `_interrupt_turn`）。
+
+## 验证过的厂商事实
+
+<!-- SCAFFOLD(agents-md): 用真实运行记录填完下列各项后删掉本行。每一条写清厂商版本、在哪条真实记录里看到的、它决定了哪段代码。 -->
+
+- 厂商版本：（填写）
+- 一个外部 Turn 对应：（填写，例如一次 `session/prompt`）
+- Turn 结束信号：（填写）
+- 会话延续方式：（填写）
+- MCP 工具在模型侧的名字形状：（填写）
+- 技能发现目录：（填写）
+- 是否自带 CLI；自带时的 CLI 版本与各平台二进制来源：（填写）
+
+## 不变量
+
+1. 卡片只声明真实运行端到端证明过的能力；未声明的命令抛 `UnsupportedHarnessCapabilityError`。
+2. 厂商运行时只在 `start()` 内解析/启动；config、provider 与包 import 不触发厂商依赖或子进程。
+3. 失败一律映射到共享类别（`auth_required / quota_exceeded / rate_limited / request_rejected /
+   server_unavailable / network_timeout / process_start_failed / sdk_error / unknown`），不解析消息文本。
+4. 子进程 stderr、凭据、环境变量与原始异常正文不进入事件、结果、checkpoint 或日志。
+5. 未识别的厂商记录保留为 namespaced `ProviderEvent`，不静默丢弃。
+6. 只依赖 openjiuwen 的公开扩展面：`openjiuwen.harness_protocol`、`openjiuwen.harness_providers` 的
+   `base` / `jsonsafe` / `inputs` / `mcp_naming` / `skills` 与工厂注册接口。
+
+## 变更要求
+
+- 映射改动同时更新单测夹具，夹具形状取自真实运行记录。
+- 新增能力前先用 e2e 在真实运行时上证明，再改卡片。
+- 发布前 `pytest` 全绿；`openjiuwen` 依赖下限不低于提供 entry point 发现的版本。

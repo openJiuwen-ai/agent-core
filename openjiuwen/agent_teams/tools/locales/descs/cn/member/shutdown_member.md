@@ -14,3 +14,5 @@
 - 这不是"立即完成关闭"的同步操作，而是发起关闭请求
 - 调用后应等待成员真正进入 SHUTDOWN，再执行 clean_team 或依赖其已退出的后续操作
 - force=true 仅用于异常兜底，可能中断未完成工作，不应作为常规路径
+
+{{shutdown_member_lifetime}}

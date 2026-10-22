@@ -28,6 +28,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
     OJ_INFERENCE_ID,
+    OJ_INFERENCE_INPUT_OBSERVED,
     OJ_SPAN_INPUT,
     OJ_SPAN_OUTPUT,
     OJ_STEP_NUMBER,
@@ -260,6 +261,7 @@ def test_model_request_becomes_inference_with_window_commit(exporter: InMemorySp
     first, second = inferences
     assert first.parent.span_id == turn.context.span_id
     assert first.attributes[OJ_INFERENCE_ID] == f"{first.context.span_id:016x}"
+    assert OJ_INFERENCE_INPUT_OBSERVED not in first.attributes
     assert [span.attributes[OJ_STEP_NUMBER] for span in inferences] == [1, 2]
     assert [span.attributes[OJ_EXECUTION_SUBJECT_REQUEST_NUMBER] for span in inferences] == [1, 2]
     assert first.start_time == 100_500_000_000
@@ -480,6 +482,7 @@ def test_unobserved_request_records_output_without_committing_a_window(exporter:
 
     inference = _by_kind(exporter, "inference")[0]
     assert GEN_AI_INPUT_MESSAGES not in inference.attributes
+    assert inference.attributes[OJ_INFERENCE_INPUT_OBSERVED] is False
     assert json.loads(inference.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"] == "partial"
     assert inference.status.status_code is StatusCode.ERROR
     assert not _by_kind(exporter, "event")

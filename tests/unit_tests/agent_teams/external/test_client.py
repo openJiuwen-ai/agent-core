@@ -77,6 +77,29 @@ async def test_fetch_inbox_marks_messages_read(team_db, make_descriptor):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_inbox_is_oldest_first_across_direct_and_broadcast(team_db, make_descriptor):
+    """Direct and broadcast queries are each time-ordered; the merge must be too.
+
+    Regression: the inbox used to list every direct message before every
+    broadcast, so a broadcast sent earlier was read after a later direct one.
+    """
+    async with ExternalTeamClient(make_descriptor(member="leader", role="leader")) as leader:
+        await leader.send_message("*", "earlier announcement")
+        await asyncio.sleep(0.01)
+        await leader.send_message("dev-1", "later direct")
+
+    async with ExternalTeamClient(make_descriptor(member="dev-1")) as dev:
+        inbox = await dev.fetch_inbox(mark_read=False)
+        assert [m.content for m in inbox.messages] == ["earlier announcement", "later direct"]
+
+        text = await dev.read_inbox()
+        # The clock anchor comes first: the messages carry absolute send times only.
+        assert text.startswith('<team-clock now="')
+        assert text.index("earlier announcement") < text.index("later direct")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_claim_and_complete_task(team_db, make_descriptor):
     await team_db.task.create_task(
         task_id="t1",
@@ -336,7 +359,7 @@ async def test_group_inbox_only_consumes_mentions(
         workspace_config=TeamWorkspaceConfig(enabled=True, root_path=str(tmp_path)),
     )
     async with ExternalTeamClient(descriptor) as client:
-        assert "group_send_message" in client.tools
+        assert "group_send_message" not in client.tools
         await client._backend.append_group_message("user", "Earlier discussion", client_message_id="one")
         assert (await client.fetch_inbox()).messages == []
         assert await team_db.message.get_broadcast_read_at("ext_team", "dev-1") == 0

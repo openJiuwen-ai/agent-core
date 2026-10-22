@@ -32,7 +32,9 @@ def _manifest(*, with_tools: bool = False) -> AgentTemplateSpec:
             model_request_config=ModelRequestConfig(model="gpt-x"),
         ),
         prompt_sections=[
-            PromptSectionSpec(name="rules", content={"en": "Follow {{language}} rules.", "cn": "遵守规则"}, priority=20),
+            PromptSectionSpec(
+                name="rules", content={"en": "Follow {{language}} rules.", "cn": "遵守规则"}, priority=20
+            ),
             PromptSectionSpec(name="identity", content={"en": "You are an expert."}, priority=10),
         ],
         mcps=[McpServerSpec(type="stdio", server_name="fs", command="mcp-fs", args=["--root", "/tmp"])],
@@ -101,7 +103,29 @@ def test_build_harness_context_renders_prompt_and_mcp_servers() -> None:
     assert context.mcp_servers[0].command == ("mcp-fs", "--root", "/tmp")
     assert HostCapability.MCP_SERVERS in context.host_capabilities
 
-    native_context = build_harness_context(manifest, provider="native", host_session_id="host-1", extra_system_prompt="x")
+
+def test_stdio_mcp_script_arg_is_resolved_against_package_cwd(tmp_path: Path) -> None:
+    script = tmp_path / "echo_server.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+    manifest = _manifest().model_copy(
+        update={
+            "mcps": [
+                McpServerSpec(
+                    type="stdio",
+                    server_name="harness-echo",
+                    command="python",
+                    args=["echo_server.py"],
+                    cwd=str(tmp_path),
+                )
+            ]
+        }
+    )
+    context = build_harness_context(manifest, provider="codex", host_session_id="host-1")
+    assert context.mcp_servers[0].command == ("python", str(script.resolve()))
+
+    native_context = build_harness_context(
+        manifest, provider="native", host_session_id="host-1", extra_system_prompt="x"
+    )
     assert native_context.system_prompt == "x"
     assert native_context.mcp_servers == ()
 
@@ -130,15 +154,19 @@ def test_create_harness_loads_a_manifest_package(tmp_path: Path) -> None:
 
 def test_native_v2_factory_uses_native_harness_template_construction():
     from openjiuwen.agent_teams.harness import NativeHarnessProtocolAdapter
-    from openjiuwen.harness_protocol import HarnessProvider, HarnessCapability
+    from openjiuwen.harness_protocol import HarnessCapability, HarnessProvider
 
     manifest = _manifest(with_tools=True)
     provider = resolve_provider("native_v2")
     assert isinstance(provider, HarnessProvider)
     assert provider.card.name == "native_v2"
     assert provider.card.supports(HarnessCapability.CHECKPOINT)
-    harness = create_harness(manifest, provider="native_v2", language="en",
-                             config={"deep_agent": {"max_iterations": 9}, "event_buffer_capacity": 32})
+    harness = create_harness(
+        manifest,
+        provider="native_v2",
+        language="en",
+        config={"deep_agent": {"max_iterations": 9}, "event_buffer_capacity": 32},
+    )
     assert isinstance(harness, NativeHarnessProtocolAdapter)
     assert harness.native_harness is None
     assert harness._spec.card == manifest.agent_card
@@ -147,7 +175,9 @@ def test_native_v2_factory_uses_native_harness_template_construction():
     assert harness._spec.language == "en"
     assert harness._spec.max_iterations == 9
     assert harness.event_buffer_config.capacity == 32
-    context = build_harness_context(manifest, provider="native_v2", host_session_id="session", extra_system_prompt="extra")
+    context = build_harness_context(
+        manifest, provider="native_v2", host_session_id="session", extra_system_prompt="extra"
+    )
     assert context.system_prompt == "extra"
     assert not context.mcp_servers
     with pytest.raises(ValueError, match="unknown native_v2"):
@@ -157,13 +187,17 @@ def test_native_v2_factory_uses_native_harness_template_construction():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("provider,relative,loader", [
-    ("claudecode", ".claude/skills", "load_claude_sdk"),
-    ("codex", ".agents/skills", "load_codex_sdk"),
-    ("dsh", ".dsh/skills", "_load_dsh_sdk"),
-])
+@pytest.mark.parametrize(
+    "provider,relative,loader",
+    [
+        ("claudecode", ".claude/skills", "load_claude_sdk"),
+        ("codex", ".agents/skills", "load_codex_sdk"),
+        ("dsh", ".dsh/skills", "_load_dsh_sdk"),
+    ],
+)
 async def test_manifest_skills_are_copied_at_start_before_sdk_launch(tmp_path, monkeypatch, provider, relative, loader):
     import importlib
+
     from openjiuwen.harness.schema.extension_spec import SkillSpec
     from openjiuwen.harness_protocol import HarnessContext
     from tests.unit_tests.harness_providers.test_skills import bundle
@@ -176,9 +210,15 @@ async def test_manifest_skills_are_copied_at_start_before_sdk_launch(tmp_path, m
     assert not (project / relative).exists()
     assert harness._config.skills[0].dir == str(source)
     module = importlib.import_module(f"openjiuwen.harness_providers.{provider}.harness")
+
     def fail_loading():
         assert (project / relative / "example/scripts/run.sh").is_file()
         raise RuntimeError("SDK launch reached")
+
     monkeypatch.setattr(module, loader, fail_loading)
     with pytest.raises(RuntimeError, match="SDK launch reached"):
-        await harness.start(HarnessContext(agent_name="test", agent_id="test", host_session_id="test", system_prompt="", cwd=str(project)))
+        await harness.start(
+            HarnessContext(
+                agent_name="test", agent_id="test", host_session_id="test", system_prompt="", cwd=str(project)
+            )
+        )

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.harness_protocol.state import HarnessState
 
 if TYPE_CHECKING:
@@ -68,11 +69,14 @@ class InboxMessage:
             resume; the supervisor starts a single-round resume for it.
         immediate: When True, inject into the active round's steering channel;
             when False, buffer until the active round finishes.
+        run_context: Request-local invocation context that must remain isolated
+            from messages belonging to other model rounds.
     """
 
     seq: int
     content: "str | InteractiveInput"
     immediate: bool
+    run_context: RunContext | None = None
 
 
 @dataclass(slots=True)
@@ -147,6 +151,7 @@ class ActiveRound:
     task: asyncio.Task
     steering_queue: asyncio.Queue
     turn: "MemberTurn"
+    run_context: RunContext | None = None
     turn_opened: bool = False
     graceful_abort: bool = False
     failure_retry: bool = False

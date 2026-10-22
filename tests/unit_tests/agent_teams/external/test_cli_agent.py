@@ -5,6 +5,7 @@
 
 import asyncio
 import os
+import re
 
 import pytest
 
@@ -409,7 +410,9 @@ async def test_member_runtime_surface_drives_turn_and_emits_events():
     assert rounds == ["started", "finished"]
     assert HarnessState.RUNNING in states and HarnessState.IDLE in states
     assert runtime.state is HarnessState.TERMINATED
-    assert injector.writes == ["do it"]
+    # The runtime stamps the input with the current-time anchor (F_24).
+    assert len(injector.writes) == 1
+    assert re.fullmatch(r'<team-clock now="[^"]+"/>\ndo it', injector.writes[0])
 
 
 @pytest.mark.asyncio

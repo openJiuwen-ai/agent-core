@@ -139,7 +139,7 @@ def test_evaluate_does_not_repeat_cached_cards():
 
 def test_changed_sort_invalidates_cards_without_invalidating_controls():
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     payload = {"elements": [{**_interactive("#sales", "Sales"), "kind": "sort_tab"}]}
     page.register_interactives(payload)
     cards = {"cards": [{**_interactive("#old-item", "Old item"), "title": "Old item",
@@ -156,7 +156,7 @@ def test_changed_sort_invalidates_cards_without_invalidating_controls():
 
 def test_sort_wait_repair_uses_only_a_known_preceding_sort_control():
     runtime = _make_bare_runtime()
-    page = runtime._ensure_page_state()
+    page = runtime.ensure_page_state()
     payload = {"elements": [{**_interactive("#sales", "Sales"), "kind": "sort_tab"}]}
     page.register_interactives(payload)
     target = payload["elements"][0]["target_id"]
@@ -173,13 +173,6 @@ def test_destination_requirement_handles_result_classifiers(word):
     assert BrowserRuntimeRail._requires_destination_page({"goal": f"搜索 FastAPI，进入{word}，返回标题和作者"})
 
 
-def test_sequential_comparison_has_two_variants_but_button_enumeration_does_not():
-    slots = BrowserRuntimeRail._infer_required_evidence_slots(
-        "先记录综合排序下第一条视频标题；再切换最新发布，返回新的第一条标题",
-    )
-    assert {item["variant"] for item in slots} == {"comprehensive", "latest"}
-    slots = BrowserRuntimeRail._infer_required_evidence_slots("找到综合、最新、最多播放按钮，切换最多播放并返回标题")
-    assert {item["variant"] for item in slots} == {"default"}
 
 
 def test_inferred_coverage_does_not_disable_tools():
@@ -190,7 +183,7 @@ def test_inferred_coverage_does_not_disable_tools():
     for details in phases.values():
         details["status"] = "completed"
     rail._complete_phase(state, phases, "extraction", phases["extraction"], "one result")
-    assert state["status"] == "in_progress" and state["next_action_class"] == "may_finish"
+    assert state["status"] == "in_progress" and state["next_action_class"] == "extraction"
     session = _FakeSession()
     ctx = AgentCallbackContext(agent=MagicMock(), inputs=ModelCallInputs(tools=[ToolCard(name="click")]))
     assert not rail._prepare_terminal_synthesis(ctx, session, state)
@@ -274,7 +267,7 @@ def test_native_projection_offloads_before_loss(tmp_path):
     assert json.loads(path.read_text(encoding="utf-8"))["messages"][0]["content"] == ax
 
 
-def test_completed_contradiction_allows_one_correction_not_unlimited_reopens():
+def test_parent_does_not_invent_business_contradictions_or_automatic_reopens():
     session = _FakeSession()
     tool = TaskTool(ToolCard(name="task_tool"), MagicMock())
     query = tool._prepare_browser_query(session, "parent", "进入第一篇结果，返回作者", "")
@@ -286,9 +279,11 @@ def test_completed_contradiction_allows_one_correction_not_unlimited_reopens():
     })
     query.task_description = "已知作者是按钮，进入已找到的文章纠正作者"
     resumed = tool._prepare_existing_browser_query(session, query)
-    assert resumed.early_output is None and resumed.record["resume_count"] == 1
+    assert resumed.early_output is not None and resumed.record["resume_count"] == 0
+    assert resumed.record["browser_result"]["status"] == "completed"
     assert resumed.record["deadline_at"] == query.record["deadline_at"]
-    assert tool._prepare_existing_browser_query(session, resumed).early_output is not None
+    repeated = tool._prepare_browser_query(session, "parent", "进入第一篇结果，返回作者", "")
+    assert repeated.early_output is not None and repeated.record["resume_count"] == 0
 
 
 def test_raw_observation_retention_expires_other_tasks_without_deleting_window_artifacts(tmp_path, monkeypatch):

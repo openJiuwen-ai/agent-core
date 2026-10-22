@@ -6,6 +6,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from ..decision.guard import NODE_STATE_JS, PAGE_STATE_JS
+
 
 def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     try:
@@ -15,10 +17,10 @@ def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, parsed))
 
 
-def build_browser_state_metadata_js() -> str:
+def build_browser_state_metadata_js(*, decision_probe: str = "") -> str:
     """Build Playwright code for fresh page, tab, and position state."""
 
-    return r"""
+    script = r"""
 async (page) => {
   const pages = page.context().pages();
 
@@ -241,6 +243,13 @@ async (page) => {
   };
 }
 """.strip()
+    if decision_probe:
+        return (
+            "async (page) => { const metadata = await (" + script + ")(page);"
+            "try { metadata.decision_probe = await (" + decision_probe + ")(page); }"
+            "catch (_) { metadata.decision_probe = {ok:false}; } return metadata; }"
+        )
+    return script
 
 
 def build_interactive_probe_js(
@@ -250,6 +259,9 @@ def build_interactive_probe_js(
     query: str = "",
     site_profiles: Optional[List[Dict[str, Any]]] = None,
     generation_id: str = "g0",
+    decision_mode: bool = False,
+    intent: str = "",
+    target_selectors: Optional[List[str]] = None,
 ) -> str:
     """Build browser_run_code JavaScript for compact interactive-element probing."""
 
@@ -259,6 +271,9 @@ def build_interactive_probe_js(
         "query": str(query or "").strip().lower(),
         "site_profiles": site_profiles or [],
         "generation_id": str(generation_id or "g0"),
+        "decision_mode": bool(decision_mode),
+        "intent": str(intent or "").lower(),
+        "target_selectors": list(target_selectors or [])[:30],
     }
     params_json = json.dumps(params, ensure_ascii=False)
 
@@ -475,10 +490,20 @@ async (page) => {{
       const style = window.getComputedStyle(el);
       if (!style || style.pointerEvents === 'none') return 'pointer_events_none';
       if (!inViewport(rect)) return 'requires_scroll';
-      const x = (Math.max(0, rect.left) + Math.min(window.innerWidth - 1, rect.right)) / 2;
-      const y = (Math.max(0, rect.top) + Math.min(window.innerHeight - 1, rect.bottom)) / 2;
-      const hit = document.elementFromPoint(x, y);
+      const hit = centerHit(rect);
       return hit && hit !== el && !el.contains(hit) ? 'occluded' : '';
+    }};
+    const centerHit = (rect) => document.elementFromPoint(
+      (Math.max(0, rect.left) + Math.min(window.innerWidth - 1, rect.right)) / 2,
+      (Math.max(0, rect.top) + Math.min(window.innerHeight - 1, rect.bottom)) / 2);
+    // Information only: names what covers an occluded control; never makes it a target.
+    const blockerName = (rect) => {{
+      const hit = centerHit(rect);
+      if (!hit) return '';
+      const cover = hit.closest('[role="dialog"],[role="alertdialog"],[aria-modal="true"],[role="banner"]');
+      return (normalize(hit.getAttribute('aria-label') || '') ||
+        (cover ? normalize(cover.getAttribute('aria-label') || cover.innerText || '') : '') ||
+        hit.tagName.toLowerCase()).slice(0, 80);
     }};
 
     const elementText = (el) => {{
@@ -490,8 +515,14 @@ async (page) => {{
     }};
 
     const accessibleName = (el) => {{
+      const labelledBy = String(el.getAttribute('aria-labelledby') || '').split(/\\s+/)
+        .filter(Boolean).map(id => document.getElementById(id)?.textContent || '').join(' ');
+      const labels = Array.from(el.labels || []).map(label => label.textContent || '').join(' ');
       return normalize(
+        labelledBy ||
         el.getAttribute('aria-label') ||
+        labels ||
+        el.closest('label')?.textContent ||
         el.getAttribute('title') ||
         el.getAttribute('placeholder') ||
         el.getAttribute('alt') ||
@@ -591,6 +622,14 @@ async (page) => {{
       const sortLabel = /(?:^|\s)(sales?|volume|price|latest|newest|relevance|comprehensive)(?:\s|$)/.test(own) ||
         /(\u9500\u91cf|\u4ef7\u683c|\u6700\u65b0|\u7efc\u5408|\u8bc4\u5206)/.test(own);
       if ((role === 'tab' || /(sort-item|sort-option|sort-tab)/.test(own)) && (sortAncestor || sortLabel)) return 'sort_tab';
+      if (sortAncestor && (tag === 'button' || role === 'button') &&
+          el.closest('[class*="sort" i],[id*="sort" i],[aria-label*="排序"]')) return 'sort_tab';
+      const orderingLabel = (node) => /^(综合排序|最多播放|最新发布|最多点击|销量|价格|评分|relevance|most views|newest|sales|price)$/i
+        .test(normalize(node.textContent || '', 80));
+      if ((tag === 'button' || role === 'button') && orderingLabel(el)) {{
+        const siblings = Array.from(el.parentElement?.querySelectorAll('button,[role="button"],[role="tab"]') || []);
+        if (siblings.length <= 20 && siblings.filter(orderingLabel).length >= 2) return 'sort_tab';
+      }}
       const ratingAncestor = /(rating|score|star|rating-filter)/.test(ancestor) || /\u8bc4\u5206|\u661f\u7ea7/.test(ancestor);
       if ((role === 'option' || /(rating-item|rating-option|star-item)/.test(own)) && ratingAncestor) return 'rating_filter';
       if (role === 'tab') return 'tab';
@@ -733,6 +772,7 @@ async (page) => {{
       if (query && queryMatches(`${{actionLikelihood}} ${{tag}} ${{role}}`)) score += 20;
       if (text) score += Math.min(20, text.length / 4);
       if (name) score += Math.min(15, name.length / 5);
+      if (params.decision_mode && name && String(params.intent).includes(name.toLowerCase())) score += 100;
 
       if (rect.top >= 0 && rect.top <= window.innerHeight) score += 15;
       if (rect.left >= 0 && rect.left <= window.innerWidth) score += 5;
@@ -742,10 +782,84 @@ async (page) => {{
       return score;
     }};
 
+    const isSearchField = (el) => {{
+      if (!el || !['INPUT', 'TEXTAREA'].includes(el.tagName)) return false;
+      if (el.tagName === 'INPUT' && !['text', 'search'].includes(el.type)) return false;
+      if (el.matches('[type="password"],[autocomplete^="cc-"]')) return false;
+      return el.type === 'search' || el.getAttribute('role') === 'searchbox' ||
+        /^(q|wd|query|keyword|keywords|search_query|search)$/i.test(el.getAttribute('name') || '') ||
+        /search|搜索|查询/i.test(`${{accessibleName(el)}} ${{el.getAttribute('placeholder') || ''}}`);
+    }};
+    const searchFieldFor = (el) => {{
+      if (isSearchField(el)) return el;
+      if (!el.matches('button,input[type="submit"],input[type="button"],[role="button"]')) return false;
+      const scope = el.form || el.closest('form,[role="search"],search,[class*="search" i],[id*="search" i]');
+      if (!scope || scope.querySelector('input[type="password"],[autocomplete^="cc-"]')) return false;
+      const fields = Array.from(scope.querySelectorAll(
+        'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]),textarea,select'));
+      // A submit/adjacent search control must be tied to one observed query field,
+      // not merely live somewhere on a search-results page.
+      return fields.length === 1 && isSearchField(fields[0]) ? fields[0] : null;
+    }};
+    const decisionStateFor = (el, full = true) => {{
+      if (!params.decision_mode) return {{}};
+      const tag = el.tagName.toLowerCase();
+      const type = el.getAttribute('type') || '';
+      const name = accessibleName(el);
+      const registry = full ? (window.__openjiuwenDecisionNodes || (window.__openjiuwenDecisionNodes = {{
+        document: String(Date.now()) + ':' + String(Math.random()), nodes: new WeakMap(), next: 0
+      }})) : null;
+      if (registry && !registry.nodes.has(el)) registry.nodes.set(el, ++registry.next);
+      const sensitive = type === 'password' || /password|secret|token|credit.card|card.number|cc-number|cc-csc/i.test(
+        `${{name}} ${{el.getAttribute('name') || ''}} ${{el.getAttribute('autocomplete') || ''}}`);
+      const checked = 'checked' in el ? Boolean(el.checked) : el.getAttribute('aria-checked');
+      // Observed capability metadata stays local; tool arguments cannot declare safety.
+      const cartLabel = `${{name}} ${{elementText(el)}} ${{el.getAttribute('data-action') || ''}}`;
+      const cartOperation = /add.{{0,8}}cart|加购|加入.{{0,5}}购物车/i.test(cartLabel) ? 'add' :
+        /remove.{{0,8}}cart|移除/i.test(cartLabel) && el.closest('[class*="cart" i],[id*="cart" i]') ? 'remove' :
+        /quantity|数量/i.test(cartLabel) && el.closest('[class*="cart" i],[id*="cart" i]') ? 'set_quantity' : '';
+      const queryField = cartOperation ? null : searchFieldFor(el);
+      if (registry && queryField && !registry.nodes.has(queryField)) registry.nodes.set(queryField, ++registry.next);
+      const identities = {{}};
+      if (cartOperation) for (const attr of ['data-sku', 'data-sku-id', 'data-skuid', 'data-variant-id']) {{
+        const owner = el.closest(`[${{attr}}]`);
+        if (owner && owner.getAttribute(attr)) identities[attr] = owner.getAttribute(attr);
+      }}
+      return {{
+        tag, input_type: type, sensitive, readonly: Boolean(el.readOnly),
+        autocomplete: el.getAttribute('role') === 'combobox' || el.hasAttribute('aria-autocomplete'),
+        search_like: Boolean(queryField),
+        search_query: queryField ? {{value: String(queryField.value || ''),
+          document: registry?.document || null, node: registry?.nodes.get(queryField) ?? null}} : null,
+        current_value: sensitive ? null : ('value' in el ? String(el.value) : null),
+        checked: typeof checked === 'boolean' ? checked : checked === 'true' ? true : checked === 'false' ? false : null,
+        options: tag === 'select' ? Array.from(el.options).slice(0, 80).map(o => ({{
+          value: o.value, label: o.label, disabled: o.disabled, selected: o.selected
+        }})) : [],
+        options_omitted: tag === 'select' ? Math.max(0, el.options.length - 80) : 0,
+        effect: cartOperation ? {{domain:'cart', operation:cartOperation, identities}} : null,
+        node_guard: sensitive || !full ? null : ({NODE_STATE_JS})(el)
+      }};
+    }};
+    if (params.target_selectors.length) {{
+      // Runtime-only exact target enrichment. Hidden/unnamed nodes still have
+      // capabilities; this does not make them executable Jev candidates.
+      const capabilities = params.target_selectors.flatMap(selector => {{
+        let nodes;
+        try {{ nodes = document.querySelectorAll(selector); }} catch (_error) {{ return []; }}
+        if (nodes.length !== 1) return [];
+        const el = nodes[0], text = elementText(el), name = accessibleName(el);
+        const kind = classifyControlKind(el, text, name);
+        return [{{selector, role: roleFromTag(el), kind: kind || classifyActionLikelihood(el, name, kind),
+          href: String(el.href || ''), decision_state: decisionStateFor(el)}}];
+      }});
+      return {{ok:true, url:window.location.href, capabilities}};
+    }}
     const all = Array.from(document.querySelectorAll(selectors.join(',')));
     const seen = new Set();
     const candidates = [];
     const widenedCandidates = [];
+    const decisionExcluded = {{}};
 
     for (const el of all) {{
       if (!el || seen.has(el)) continue;
@@ -803,7 +917,26 @@ async (page) => {{
         /(^|[\\s_-])(active|selected|checked)([\\s_-]|$)/i.test(className) ? 'class' :
         selectionSourceFromUrl(el, kind);
 
+      let decisionState = {{}};
+      if (params.decision_mode) {{
+        decisionState = decisionStateFor(el, false);
+        const field = ['input', 'textarea', 'select'].includes(tag) &&
+          ['textbox', 'searchbox', 'combobox'].includes(role) &&
+          (tag !== 'input' || ['', 'text', 'search', 'email', 'url', 'tel', 'number', 'date'].includes(type.toLowerCase()));
+        const checkbox = tag === 'input' && type === 'checkbox';
+        const click = clickable && !['textbox', 'searchbox', 'combobox', 'slider', 'spinbutton'].includes(role);
+        const excluded = !enabled || !actionable || !clickable ? 'not_actionable' :
+          !(name || text) ? 'missing_name' : decisionState.sensitive ? 'sensitive' :
+          decisionState.readonly ? 'readonly' :
+          (el.closest('form,[role="dialog"]')?.querySelectorAll('input,textarea,select').length || 0) > 128 ? 'large_form' :
+          !(field || checkbox || click) ? 'unsupported_control' : '';
+        if (excluded) {{
+          decisionExcluded[excluded] = (decisionExcluded[excluded] || 0) + 1;
+          continue;
+        }}
+      }}
       const candidate = {{
+        decision_state: decisionState,
         tag,
         role,
         action_likelihood: actionLikelihood,
@@ -811,6 +944,7 @@ async (page) => {{
         kind: kind || actionLikelihood,
         text,
         accessible_name: name,
+        _decision_element: el,
         aria_label: normalize(el.getAttribute('aria-label') || ''),
         testid: normalize(testid),
         input_type: normalize(type),
@@ -826,6 +960,7 @@ async (page) => {{
         in_viewport: inViewport(rect),
         requires_scroll: reason === 'requires_scroll',
         actionability_reason: reason || (matchCount === 1 ? '' : 'selector_not_unique'),
+        blocked_by: reason === 'occluded' ? blockerName(rect) : '',
         clickable,
         match_count: matchCount,
         generation_id: generationId,
@@ -853,6 +988,9 @@ async (page) => {{
 
     const elements = selectedCandidates.slice(0, maxItems).map((item, index) => {{
       const copy = {{ ...item }};
+      copy.decision_state = decisionStateFor(copy._decision_element);
+      if (copy.blocked_by && copy.decision_state) copy.decision_state.blocked_by = copy.blocked_by;
+      delete copy._decision_element;
       copy.id = `e${{index + 1}}`;
       delete copy.score;
       return copy;
@@ -872,9 +1010,17 @@ async (page) => {{
       viewport_only: viewportOnly,
       generation_id: generationId,
       total_candidates: selectedCandidates.length,
+      decision_excluded: decisionExcluded,
       query_widened: Boolean(exactQuery && !candidates.length && widenedCandidates.length),
       returned: elements.length,
       elements,
+      decision_snapshot: params.decision_mode ? {{
+        capture_id: String(Date.now()) + ':' + String(Math.random()),
+        observed_at_ms: Date.now(), visibility: document.visibilityState,
+        url: window.location.href, title: document.title,
+        page_text: Array.from(document.body?.innerText || '').slice(0, 6000).join(''),
+        page_guard: ({PAGE_STATE_JS})(), excluded: decisionExcluded
+      }} : null,
       local_excerpt: elements.filter((item) => !item.clickable).slice(0, 5)
         .map((item) => `${{item.role || item.tag}} "${{item.accessible_name || item.text}}" ` +
           `(${{item.actionability_reason}})`)

@@ -1,0 +1,413 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Unit tests for the __DISPLAY__ SDK harness, driven by a fake ``__SDK_MODULE__`` module.
+
+SCAFFOLD(fixtures): the fake SDK below implements the *assumed* API the
+scaffold's ``_sdk_*`` methods call, and emits the scaffold's *reference*
+records.  Rewrite both after the harness is ported to the real SDK, and
+shape the records like ones captured from a real run.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+import uuid
+from dataclasses import dataclass, field
+from types import ModuleType
+from typing import Any, AsyncIterator
+
+import pytest
+
+from openjiuwen.harness_protocol import (
+    AbortMode,
+    DeliveryMode,
+    DiagnosticEvent,
+    HarnessCapability,
+    HarnessContext,
+    HarnessError,
+    HarnessEvent,
+    HarnessInput,
+    HarnessProtocol,
+    HarnessState,
+    ItemEventKind,
+    ItemLifecycleEvent,
+    OutputChannel,
+    OutputEvent,
+    OutputOperation,
+    ResumePolicy,
+    TurnEventKind,
+    TurnLifecycleEvent,
+    TurnTerminationKind,
+    UnsupportedHarnessCapabilityError,
+    UsageUpdatedEvent,
+)
+from openjiuwen.harness_providers.base import ProviderStartupError
+from __PKG__ import (
+    __CLASS__Harness,
+    __CLASS__HarnessConfig,
+    __CLASS__HarnessProvider,
+)
+from __PKG__.harness import SDK_MODULE
+
+logger = logging.getLogger(__name__)
+TURN_TIMEOUT_S = 10.0
+
+
+@dataclass
+class _FakeSdkState:
+    clients: list["_FakeClient"] = field(default_factory=list)
+    sessions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    inputs: list[str] = field(default_factory=list)
+    start_error: Exception | None = None
+
+
+class _FakeSession:
+    def __init__(self, state: _FakeSdkState, session_id: str) -> None:
+        self.state = state
+        self.id = session_id
+        self.cancelled = asyncio.Event()
+
+    async def run(self, text: str) -> AsyncIterator[dict[str, Any]]:
+        self.state.inputs.append(text)
+        memory = self.state.sessions.setdefault(self.id, {"memory": None})
+        last_line = text.strip().splitlines()[-1] if text.strip() else ""
+        self.cancelled.clear()
+        if "SLOW" in text:
+            for index in range(400):
+                if self.cancelled.is_set():
+                    yield {"type": "turn_end", "status": "interrupted"}
+                    return
+                yield {"type": "text_delta", "text": f"{index}\n"}
+                await asyncio.sleep(0.01)
+        if "FAILREC" in text:
+            yield {"type": "error", "code": "rate_limit", "http_status": 429, "message": "slow down"}
+            yield {"type": "turn_end", "status": "failed"}
+            return
+        if "RAISE" in text:
+            raise ConnectionError("socket closed")
+        if "RETRY" in text:
+            yield {"type": "error", "will_retry": True, "http_status": 503, "message": "overloaded"}
+        if "TOOL" in text:
+            yield {"type": "tool_call", "id": "call_1", "name": "read", "arguments": {"path": "secret.txt"}}
+            yield {"type": "tool_result", "id": "call_1", "result": "TOKEN-1"}
+            reply = "TOKEN-1"
+        elif "REMEMBER" in text:
+            memory["memory"] = last_line.split()[-1]
+            reply = "OK"
+        elif "RECALL" in text:
+            reply = f"recall: {memory['memory']}"
+        else:
+            reply = f"echo: {last_line}"
+        yield {"type": "reasoning_delta", "text": "thinking"}
+        yield {"type": "text_delta", "text": reply}
+        yield {"type": "message", "text": reply}
+        yield {"type": "usage", "input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+        yield {"type": "turn_end", "status": "completed"}
+
+    async def cancel(self) -> None:
+        self.cancelled.set()
+
+
+class _FakeClient:
+    def __init__(self, state: _FakeSdkState, options: dict[str, Any]) -> None:
+        self.state = state
+        self.options = options
+        self.session_kwargs: dict[str, Any] = {}
+        self.open_sessions: list[_FakeSession] = []
+        self.closed = False
+        state.clients.append(self)
+
+    async def start(self) -> None:
+        if self.state.start_error is not None:
+            raise self.state.start_error
+
+    async def new_session(self, **kwargs: Any) -> _FakeSession:
+        self.session_kwargs = kwargs
+        return self._track(_FakeSession(self.state, "ses_" + uuid.uuid4().hex[:8]))
+
+    async def resume_session(self, session_id: str, **kwargs: Any) -> _FakeSession:
+        self.session_kwargs = {"resume": session_id, **kwargs}
+        return self._track(_FakeSession(self.state, session_id))
+
+    async def close(self) -> None:
+        # Closing the client ends a running stream, like a real SDK closing
+        # its transport; the harness relies on this to stop an active turn.
+        self.closed = True
+        for session in self.open_sessions:
+            session.cancelled.set()
+
+    def _track(self, session: _FakeSession) -> _FakeSession:
+        self.open_sessions.append(session)
+        return session
+
+
+def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> _FakeSdkState:
+    state = _FakeSdkState()
+    module = ModuleType(SDK_MODULE)
+
+    def client(**options: Any) -> _FakeClient:
+        return _FakeClient(state, options)
+
+    module.Client = client  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, SDK_MODULE, module)
+    return state
+
+
+def _context(**overrides: Any) -> HarnessContext:
+    values: dict[str, Any] = {
+        "agent_name": "worker",
+        "agent_id": "agent-1",
+        "host_session_id": "host-1",
+        "system_prompt": "Be terse.",
+    }
+    values.update(overrides)
+    return HarnessContext(**values)
+
+
+async def _turn(harness: HarnessProtocol, turn_id: str) -> list[HarnessEvent]:
+    async def _collect() -> list[HarnessEvent]:
+        return [event async for event in harness.turn_events(turn_id)]
+
+    return await asyncio.wait_for(_collect(), TURN_TIMEOUT_S)
+
+
+def _terminal(events: list[HarnessEvent]) -> TurnLifecycleEvent:
+    payload = events[-1].event
+    assert isinstance(payload, TurnLifecycleEvent)
+    return payload
+
+
+def _of_type(events: list[HarnessEvent], kind: type) -> list[Any]:
+    return [event.event for event in events if isinstance(event.event, kind)]
+
+
+def test_config_validates_and_rejects_unknown_fields() -> None:
+    config = __CLASS__HarnessConfig.from_mapping({"model": "m", "api_key": "secret"})
+    assert config.model == "m"
+    assert "secret" not in repr(config)
+    with pytest.raises(ValueError, match="unknown"):
+        __CLASS__HarnessConfig.from_mapping({"nope": 1})
+    with pytest.raises(ValueError):
+        __CLASS__HarnessConfig(system_prompt_mode="merge")  # type: ignore[arg-type]
+
+
+def test_provider_creates_an_unstarted_harness_without_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, SDK_MODULE, None)
+    harness = __CLASS__HarnessProvider().create({})
+    assert isinstance(harness, HarnessProtocol)
+    assert harness.state is HarnessState.TERMINATED
+
+
+@pytest.mark.asyncio
+async def test_missing_sdk_fails_start_without_opening_a_cycle(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, SDK_MODULE, None)
+    harness = __CLASS__Harness()
+    with pytest.raises(HarnessError):
+        await harness.start(_context())
+    assert harness.state is HarnessState.TERMINATED
+
+
+@pytest.mark.asyncio
+async def test_startup_failure_raises_a_classified_provider_startup_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _install_fake_sdk(monkeypatch)
+    state.start_error = FileNotFoundError("vendor CLI not found")
+    harness = __CLASS__Harness()
+    with pytest.raises(ProviderStartupError) as caught:
+        await harness.start(_context())
+    assert caught.value.error.category == "process_start_failed"
+    assert harness.state is HarnessState.TERMINATED
+
+
+@pytest.mark.asyncio
+async def test_text_turn_maps_outputs_and_usage(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _install_fake_sdk(monkeypatch)
+    harness = __CLASS__Harness(__CLASS__HarnessConfig(model="vendor-model", api_key="k"))
+    await harness.start(_context())
+    try:
+        client = state.clients[0]
+        assert client.options["model"] == "vendor-model"
+        assert client.session_kwargs["system_prompt"] == "Be terse."
+        receipt = await harness.send(HarnessInput(content="hello"))
+        events = await _turn(harness, receipt.turn_id)
+        logger.info("text turn events: %s", [type(event.event).__name__ for event in events])
+        terminal = _terminal(events)
+        assert terminal.kind is TurnEventKind.FINISHED, terminal.result
+        assert terminal.result.final_output == "echo: hello"
+        answer = [output for output in _of_type(events, OutputEvent) if output.channel is OutputChannel.ANSWER]
+        assert [output.operation for output in answer] == [OutputOperation.DELTA, OutputOperation.FINAL]
+        assert _of_type(events, UsageUpdatedEvent)[0].usage.input_tokens == 10
+    finally:
+        await harness.stop()
+    assert state.clients[0].closed
+
+
+@pytest.mark.asyncio
+async def test_tool_items_pair_on_one_item_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_sdk(monkeypatch)
+    harness = __CLASS__Harness()
+    await harness.start(_context())
+    try:
+        receipt = await harness.send(HarnessInput(content="TOOL read"))
+        events = await _turn(harness, receipt.turn_id)
+        items = [event for event in events if isinstance(event.event, ItemLifecycleEvent)]
+        assert [event.event.kind for event in items] == [ItemEventKind.STARTED, ItemEventKind.COMPLETED]
+        assert items[0].item_id == items[1].item_id == "call_1"
+        assert items[1].event.data["tool_name"] == "read"
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_follow_up_turns_run_serially(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _install_fake_sdk(monkeypatch)
+    harness = __CLASS__Harness()
+    await harness.start(_context())
+    try:
+        first = await harness.send(HarnessInput(content="one"))
+        second = await harness.send(HarnessInput(content="two"))
+        assert second.accepted_mode is DeliveryMode.FOLLOW_UP
+        first_events = await _turn(harness, first.turn_id)
+        second_events = await _turn(harness, second.turn_id)
+        assert max(event.sequence for event in first_events) < min(event.sequence for event in second_events)
+        assert state.inputs == ["one", "two"]
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_vendor_error_record_fails_with_the_shared_category(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_sdk(monkeypatch)
+    harness = __CLASS__Harness()
+    await harness.start(_context())
+    try:
+        receipt = await harness.send(HarnessInput(content="FAILREC"))
+        terminal = _terminal(await _turn(harness, receipt.turn_id))
+        assert terminal.kind is TurnEventKind.FAILED
+        assert terminal.result.error.category == "rate_limited"
+        raised = await harness.send(HarnessInput(content="RAISE"))
+        terminal = _terminal(await _turn(harness, raised.turn_id))
+        assert terminal.result.error.category == "network_timeout"
+        assert terminal.result.error.provider_data["sdk_error_type"] == "ConnectionError"
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_retrying_error_is_a_diagnostic_not_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_sdk(monkeypatch)
+    harness = __CLASS__Harness()
+    await harness.start(_context())
+    try:
+        receipt = await harness.send(HarnessInput(content="RETRY please"))
+        events = await _turn(harness, receipt.turn_id)
+        assert _terminal(events).kind is TurnEventKind.FINISHED
+        assert _of_type(events, DiagnosticEvent)[0].data["kind"] == "retrying"
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_aborts_queued_turns(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_sdk(monkeypatch)
+    harness = __CLASS__Harness()
+    await harness.start(_context())
+    first = await harness.send(HarnessInput(content="SLOW count"))
+    queued = await harness.send(HarnessInput(content="never runs"))
+    events: list[HarnessEvent] = []
+
+    async def _consume() -> None:
+        async for event in harness.events():
+            events.append(event)
+            if isinstance(event.event, OutputEvent) and len(_of_type(events, OutputEvent)) == 1:
+                asyncio.get_running_loop().create_task(harness.stop())
+
+    await asyncio.wait_for(_consume(), TURN_TIMEOUT_S)
+    terminals = {
+        event.turn_id: event.event
+        for event in events
+        if isinstance(event.event, TurnLifecycleEvent) and event.event.kind is not TurnEventKind.STARTED
+    }
+    assert first.turn_id in terminals
+    assert terminals[queued.turn_id].result.termination.kind is TurnTerminationKind.HARNESS_STOP
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not __CLASS__Harness.card.supports(HarnessCapability.GRACEFUL_ABORT),
+    reason="the card does not declare GRACEFUL_ABORT",
+)
+async def test_abort_interrupts_the_active_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_sdk(monkeypatch)
+    harness = __CLASS__Harness()
+    await harness.start(_context())
+    try:
+        receipt = await harness.send(HarnessInput(content="SLOW count"))
+        events: list[HarnessEvent] = []
+        aborted = False
+
+        async def _consume() -> None:
+            nonlocal aborted
+            async for event in harness.turn_events(receipt.turn_id):
+                events.append(event)
+                if not aborted and isinstance(event.event, OutputEvent):
+                    aborted = True
+                    await harness.abort(mode=AbortMode.GRACEFUL)
+
+        await asyncio.wait_for(_consume(), TURN_TIMEOUT_S)
+        assert _terminal(events).kind is TurnEventKind.ABORTED
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    __CLASS__Harness.card.supports(HarnessCapability.GRACEFUL_ABORT),
+    reason="the card declares GRACEFUL_ABORT",
+)
+async def test_undeclared_abort_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_sdk(monkeypatch)
+    harness = __CLASS__Harness()
+    await harness.start(_context())
+    try:
+        with pytest.raises(UnsupportedHarnessCapabilityError):
+            await harness.abort()
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    not __CLASS__Harness.card.supports(HarnessCapability.CHECKPOINT),
+    reason="the card does not declare CHECKPOINT",
+)
+async def test_checkpoint_resumes_the_vendor_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _install_fake_sdk(monkeypatch)
+    first = __CLASS__Harness()
+    await first.start(_context())
+    receipt = await first.send(HarnessInput(content="REMEMBER zebra"))
+    await _turn(first, receipt.turn_id)
+    checkpoint = await first.export_checkpoint()
+    await first.stop()
+    second = __CLASS__Harness()
+    await second.start(_context(resume_policy=ResumePolicy.REQUIRE_RESUME, checkpoint=checkpoint))
+    try:
+        assert state.clients[-1].session_kwargs["resume"] == checkpoint.data["session_id"]
+        receipt = await second.send(HarnessInput(content="RECALL"))
+        assert _terminal(await _turn(second, receipt.turn_id)).result.final_output == "recall: zebra"
+    finally:
+        await second.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    __CLASS__Harness.card.supports(HarnessCapability.CHECKPOINT),
+    reason="the card declares CHECKPOINT",
+)
+async def test_undeclared_checkpoint_resume_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_sdk(monkeypatch)
+    harness = __CLASS__Harness()
+    with pytest.raises(UnsupportedHarnessCapabilityError):
+        await harness.start(_context(resume_policy=ResumePolicy.REQUIRE_RESUME))

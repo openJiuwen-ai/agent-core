@@ -197,6 +197,8 @@ class TaskLoopEventExecutor(TaskExecutor):
                 effective["run_kind"] = metadata.get("run_kind")
             if metadata.get("run_context") is not None:
                 effective["run_context"] = metadata.get("run_context")
+            if metadata.get("_turn_number") is not None:
+                effective["_turn_number"] = metadata.get("_turn_number")
             # Continuation round (NativeHarness.resume): the inner loop must not
             # append a new user turn — it resumes the preserved context.
             if metadata.get("_resume_continuation"):

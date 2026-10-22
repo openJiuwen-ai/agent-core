@@ -1,0 +1,91 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Provider-owned configuration for the __DISPLAY__ harness.
+
+The optional ``__SDK_MODULE__`` SDK is deliberately not imported here, so a
+host can validate provider settings without the vendor dependency installed.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, fields
+from types import MappingProxyType
+from typing import Any, Literal, Mapping
+
+from openjiuwen.harness_protocol import JsonObject
+from openjiuwen.harness_providers.skills import SkillSource, normalize_skills
+
+
+@dataclass(frozen=True, slots=True)
+class __CLASS__HarnessConfig:
+    """Configuration for one __DISPLAY__ SDK session.
+
+    SCAFFOLD(config): add the SDK options a host must be able to set, mirroring
+    the SDK's own option names; keep credentials ``repr=False``.
+
+    Attributes:
+        cwd: Default working directory; ``HarnessContext.cwd`` wins.
+        env: Extra environment for the vendor runtime (never logged).
+        inherit_process_env: Start from the host process environment.
+        model: Model name passed to the SDK; ``None`` keeps its default.
+        api_base: Endpoint override; ``None`` keeps the vendor default.
+        api_key: Credential for ``api_base``; never logged or emitted.
+        system_prompt_mode: ``append`` keeps the vendor's own system prompt and
+            adds the host's; ``replace`` substitutes it.
+        skills: Portable skill bundles copied before startup.
+        skill_conflict: ``skip`` / ``replace`` / ``append`` for existing skills.
+        turn_idle_timeout_s: Fail a turn that yields no record for this long;
+            ``None`` waits indefinitely.
+        event_buffer_capacity: Bounded protocol event buffer size.
+    """
+
+    cwd: str | None = None
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
+    inherit_process_env: bool = True
+    model: str | None = None
+    api_base: str | None = None
+    api_key: str | None = field(default=None, repr=False)
+    system_prompt_mode: Literal["append", "replace"] = "append"
+    skills: tuple[SkillSource, ...] = ()
+    skill_conflict: str = "skip"
+    turn_idle_timeout_s: float | None = None
+    event_buffer_capacity: int = 1024
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
+        for name in ("cwd", "model", "api_base", "api_key"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise TypeError(f"__DISPLAY__ {name} must be a non-empty string when provided")
+        if self.system_prompt_mode not in ("append", "replace"):
+            raise ValueError("__DISPLAY__ system_prompt_mode must be 'append' or 'replace'")
+        if not isinstance(self.env, Mapping):
+            raise TypeError("__DISPLAY__ env must be an object")
+        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.env.items()):
+            raise TypeError("__DISPLAY__ env must map strings to strings")
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        timeout = self.turn_idle_timeout_s
+        if timeout is not None and (isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0):
+            raise ValueError("__DISPLAY__ turn_idle_timeout_s must be a positive number when provided")
+        capacity = self.event_buffer_capacity
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
+            raise ValueError("__DISPLAY__ event_buffer_capacity must be a positive integer")
+
+    @classmethod
+    def from_mapping(cls, config: JsonObject) -> "__CLASS__HarnessConfig":
+        """Validate a provider SPI mapping without importing the SDK."""
+        values: dict[str, Any] = dict(config)
+        known = {item.name for item in fields(cls)}
+        unknown = sorted(set(values) - known)
+        if unknown:
+            raise ValueError(f"unknown __DISPLAY__ configuration fields: {', '.join(unknown)}")
+        env = values.get("env")
+        if env is not None:
+            if not isinstance(env, Mapping):
+                raise TypeError("__DISPLAY__ env must be an object")
+            values["env"] = dict(env)
+        return cls(**values)
+
+
+__all__ = ["__CLASS__HarnessConfig"]

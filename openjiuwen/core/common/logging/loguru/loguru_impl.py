@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 """Loguru-backed logger adapter."""
 
@@ -544,6 +544,12 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 2)
+        # ``exc_info`` is the stdlib logging contract for attaching a traceback
+        # (True for the in-flight exception, or an exception instance / exc_info
+        # tuple). Loguru spells it ``opt(exception=...)``; without this mapping
+        # the keyword was swallowed and every ``error(..., exc_info=True)``
+        # silently lost its stack.
+        exc_info = kwargs.pop("exc_info", None) or None
 
         formatted_msg = self._auto_format_message(msg, args)
         sanitized_msg = self._sanitize_message(formatted_msg)
@@ -556,7 +562,7 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
             event_text=event_text,
             rendered_message=rendered_message,
         )
-        bound_logger.opt(depth=stacklevel).log(level, sanitized_msg)
+        bound_logger.opt(exception=exc_info, depth=stacklevel).log(level, sanitized_msg)
 
     def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._emit("DEBUG", LogLevel.DEBUG, msg, args, **kwargs)

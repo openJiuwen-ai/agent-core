@@ -345,13 +345,19 @@ class WorktreeManager:
 
         Raises:
             ValueError: If slug is invalid.
-            RuntimeError: If not in a git repository.
+            FrameworkError: If not in a git repository.
         """
         validate_slug(slug)
 
         repo_root = await find_canonical_git_root(source_dir or get_cwd())
         if not repo_root:
-            raise RuntimeError("Cannot create owner worktree: not in a git repository")
+            raise_error(
+                StatusCode.TOOL_WORKTREE_INIT_FAILED,
+                reason=(
+                    "Cannot create owner worktree: not in a git repository. "
+                    "Select a project directory for this session before using worktree isolation"
+                ),
+            )
 
         target_path = self._resolve_target_path(slug)
         async with repo_lock(

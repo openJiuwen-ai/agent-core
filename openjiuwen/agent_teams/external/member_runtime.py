@@ -17,6 +17,7 @@ import asyncio
 import dataclasses
 import inspect
 import json
+import uuid
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -31,24 +32,32 @@ from typing import (
 
 from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn
-from openjiuwen.agent_teams.team_context import TeamContextTracker
+from openjiuwen.agent_teams.inbound_render import render_clock
+from openjiuwen.agent_teams.team_context import TaskOutcomeTracker, TeamContextTracker
+from openjiuwen.agent_teams.timefmt import format_absolute_time
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.harness_protocol import (
+    AUTH_FALLBACK_EVENT_TYPE,
+    AUTH_FALLBACK_REQUEST_TYPE,
     CheckpointReason,
     CheckpointSaveReceipt,
     DiagnosticEvent,
+    HarnessCapability,
     HarnessCheckpoint,
     HarnessContext,
-    HarnessCapability,
     HarnessEvent,
     HarnessModelControl,
     HarnessProtocol,
+    HarnessProtocolError,
     HarnessState,
     HarnessStateError,
     HostCapability,
     InteractionResponseStatus,
+    ItemEventKind,
+    ItemLifecycleEvent,
     McpServerConfig,
     ModelSelection,
     ProviderEvent,
@@ -78,8 +87,6 @@ _EVENT_NAMESPACE = "external_harness_runtime"
 _EXTERNAL_RUNTIME_STATE_KEY = "external_runtime"
 _EXTERNAL_BACKEND_KEY = "backend"
 _EXTERNAL_CHECKPOINT_KEY = "checkpoint"
-_AUTH_FALLBACK_EVENT = "auth_fallback_activated"
-_AUTH_FALLBACK_REQUEST = "auth_fallback"
 # Provider events carrying the model a member actually runs on, fed into the
 # reliability context so failure reports name the endpoint instead of
 # ``<unknown>``: Codex harnesses announce the thread's model
@@ -202,6 +209,9 @@ class ExternalHarnessMemberRuntime:
             asks for an immediate abort the provider cannot deliver.
         resume_external_backend: Require the provider to resume its persisted
             session from the member checkpoint instead of starting fresh.
+        require_checkpoint: With ``resume_external_backend``, refuse to start
+            when no checkpoint pointer is stored instead of falling back to a
+            fresh session — for hosts that know the member already has history.
         agent_kind: Reliability vocabulary for this member (``claude`` /
             ``codex``); ``None`` disables the external-runtime reliability loop.
         inject_mcp: Whether the spawn path should mount the team MCP server.
@@ -216,6 +226,8 @@ class ExternalHarnessMemberRuntime:
         team_context_tracker: TeamContextTracker | None = None,
         stop_on_unsupported_force_abort: bool = False,
         resume_external_backend: bool = False,
+        require_checkpoint: bool = False,
+        seed_checkpoint: dict | None = None,
         agent_kind: str | None = None,
         cli_path: str | None = None,
         inject_mcp: bool = False,
@@ -224,7 +236,12 @@ class ExternalHarnessMemberRuntime:
         self._harness = harness
         self._context_source = context
         self._team_context_tracker = team_context_tracker
+        # Scheduled dispatch only (F_119): review passes folded into the next
+        # message. Bound after construction, like the team-context tracker.
+        self._task_outcome_tracker: TaskOutcomeTracker | None = None
         self._resume_external_backend = resume_external_backend
+        self._require_checkpoint = require_checkpoint
+        self._seed_checkpoint = seed_checkpoint
         self._agent_kind = agent_kind
         self._cli_path = cli_path
         self.inject_mcp = inject_mcp
@@ -255,6 +272,14 @@ class ExternalHarnessMemberRuntime:
         self._teardown_hooks: list[Callable[[], Awaitable[None]]] = []
         self._round_seq = 0
         self._current_round_id: int | None = None
+        self._reported_model: str | None = None
+        self._activity_sink: Callable[[Any], None] | None = None
+        self._activity_identity: tuple[str | None, str | None, str | None, str | None] = (
+            None,
+            None,
+            None,
+            None,
+        )
 
     # ------------------------------------------------------------------
     # Read-only surface
@@ -278,9 +303,30 @@ class ExternalHarnessMemberRuntime:
         return self._harness.provider_session_id
 
     @property
+    def reported_model(self) -> str | None:
+        """The model this member's CLI reported it runs on (``None`` until one is seen).
+
+        Captured directly from Claude ``system/init`` / Codex
+        ``session/model_changed`` events; the reliability context (when bound)
+        is kept in sync but is no longer the source — swarmflow workers bind
+        none, and their reports must still carry the real endpoint.
+        """
+        return self._reported_model
+
+    @property
     def trajectory_recorder(self) -> "HarnessTrajectoryRecorder | None":
         """Return the recorder turning this member's events into trajectory spans."""
         return self._trajectory
+
+    @property
+    def member_session(self) -> Any:
+        """The member's child AgentSession while started (``None`` otherwise).
+
+        A host that must persist its own state alongside the provider checkpoint
+        writes through this session: the runtime commits its whole state on every
+        checkpoint, so a parallel session over the same bucket would be erased.
+        """
+        return self._member_session
 
     @property
     def reliability_agent_kind(self) -> str | None:
@@ -292,6 +338,10 @@ class ExternalHarnessMemberRuntime:
 
     def bind_team_context_tracker(self, tracker: TeamContextTracker | None) -> None:
         self._team_context_tracker = tracker
+
+    def bind_task_outcome_tracker(self, tracker: TaskOutcomeTracker | None) -> None:
+        """Bind the tracker that folds untold review passes into the next message."""
+        self._task_outcome_tracker = tracker
 
     def bind_mcp_servers(self, servers: Sequence[McpServerConfig]) -> None:
         """Mount additional MCP servers on the next ``start``."""
@@ -318,6 +368,24 @@ class ExternalHarnessMemberRuntime:
         the provider restores its native endpoint.
         """
         self._promote_fallback_model = promote
+
+    def bind_activity_sink(
+        self,
+        sink: Callable[[Any], None] | None,
+        *,
+        agent_id: str | None = None,
+        phase: str | None = None,
+        label: str | None = None,
+        correlation_id: str | None = None,
+    ) -> None:
+        """Bind the sink receiving this member's structured ``AGENT_ACTIVITY`` events.
+
+        Mirrors ``AgentBackend.bind_progress_sink``: ``None`` keeps the runtime
+        silent. The identity tuple rides every event so a consumer locates the
+        node by the same ``agent_id`` the session injection provides.
+        """
+        self._activity_sink = sink
+        self._activity_identity = (agent_id, phase, label, correlation_id)
 
     def add_teardown_hook(self, hook: Callable[[], Awaitable[None]]) -> None:
         """Run ``hook`` after the harness stopped (observability receivers...)."""
@@ -369,6 +437,9 @@ class ExternalHarnessMemberRuntime:
         self._member_name = context.agent_name
         self._member_agent_id = context.agent_id
         await self._ensure_member_session(team_session)
+        if self._seed_checkpoint is not None and self._member_session is not None:
+            await self._write_seed_checkpoint(context)
+            self._seed_checkpoint = None
         context = self._host_context(context)
         if self._reliability_ctx is not None:
             self._reliability_ctx.begin_attempt(phase="startup", round_id=None)
@@ -401,6 +472,11 @@ class ExternalHarnessMemberRuntime:
             capabilities.add(HostCapability.CHECKPOINT_SINK)
         if self._resume_external_backend:
             if checkpoint is None:
+                if self._require_checkpoint:
+                    raise HarnessProtocolError(
+                        f"member {self._member_name} must resume its {self._harness.card.name} "
+                        "session but no checkpoint pointer is stored"
+                    )
                 team_logger.warning(
                     "[external-cli] member {} has no saved checkpoint; starting a new session",
                     self._member_name,
@@ -426,6 +502,22 @@ class ExternalHarnessMemberRuntime:
             mcp_servers=mcp_servers,
             tools=tools,
         )
+
+    async def _write_seed_checkpoint(self, context: HarnessContext) -> None:
+        """Persist a host-produced pointer as this member's own checkpoint envelope."""
+        checkpoint = HarnessCheckpoint(
+            provider=self._harness.card.name,
+            schema_version="1",
+            agent_id=context.agent_id,
+            host_session_id=context.host_session_id,
+            checkpoint_id=f"seed-{uuid.uuid4().hex}",
+            sequence=0,
+            data=dict(self._seed_checkpoint or {}),
+            provider_session_id=None,
+            revision=None,
+        )
+        sink = _MemberSessionCheckpointSink(self._member_session, backend=self._harness.card.name)
+        await sink.save(checkpoint, reason=CheckpointReason.SESSION_ACTIVATED)
 
     async def stop(self) -> None:
         """Stop the provider and close the projected MemberRuntime output."""
@@ -473,15 +565,27 @@ class ExternalHarnessMemberRuntime:
                 return await self._adapter.send(content, immediate=immediate)
             external_input = to_harness_input(content)
             delivered_text = harness_input_text(external_input)
+            # Inbound messages carry absolute send times only; the anchor
+            # tells the member what "now" is, the way TeamPolicyRail does for
+            # an in-process member.
+            clock = render_clock(now=format_absolute_time(get_current_time()))
+            external_input = _prepend_context(external_input, clock)
+            pending_outcome = await self._pending_task_outcome()
+            if pending_outcome:
+                external_input = _prepend_context(external_input, pending_outcome)
             pending_context = await self._pending_team_context()
             if pending_context:
                 external_input = _prepend_context(external_input, pending_context)
             receipt = await self._adapter.send(external_input, immediate=immediate)
-            # Both halves are recorded, and the message first so it is the one
+            # Every part is recorded, and the message first so it is the one
             # the turn states as its input. A provider splits the delivery into
             # a message per block, so the combined text would match none of
             # them and the turn would read as if nobody had said anything.
             self._record_input(receipt, delivered_text)
+            self._record_input(receipt, clock)
+            if pending_outcome:
+                self._record_input(receipt, pending_outcome)
+                await self._commit_task_outcome()
             if pending_context:
                 self._record_input(receipt, pending_context)
                 await self._commit_team_context()
@@ -550,7 +654,9 @@ class ExternalHarnessMemberRuntime:
             await self._on_turn_event(envelope, payload)
         elif isinstance(payload, DiagnosticEvent):
             await self._on_diagnostic(payload)
-        elif isinstance(payload, ProviderEvent) and payload.event_type == _AUTH_FALLBACK_EVENT:
+        elif isinstance(payload, ItemLifecycleEvent):
+            self._on_tool_item(envelope, payload)
+        elif isinstance(payload, ProviderEvent) and payload.event_type == AUTH_FALLBACK_EVENT_TYPE:
             team_logger.info(
                 "[external-cli] member {} switched to the authentication fallback {}",
                 self._member_name,
@@ -559,10 +665,16 @@ class ExternalHarnessMemberRuntime:
         elif isinstance(payload, ProviderEvent) and (
             payload.event_type == _MODEL_CHANGED_EVENT or payload.event_type == _SYSTEM_INIT_EVENT
         ):
-            ctx = self._reliability_ctx
             model = payload.payload.get("model")
-            if ctx is not None and isinstance(model, str) and model.strip():
-                ctx.update_model(model)
+            if isinstance(model, str) and model.strip():
+                # Captured on the runtime itself: swarmflow workers run with no
+                # reliability context bound, and their AGENT_COMPLETED model
+                # must still name the endpoint the CLI actually served (the
+                # plan's hint goes stale on auth fallback / CLI defaults).
+                self._reported_model = model.strip()
+                ctx = self._reliability_ctx
+                if ctx is not None:
+                    ctx.update_model(model)
 
     async def _on_turn_event(self, envelope: HarnessEvent, payload: TurnLifecycleEvent) -> None:
         kind = _member_round_kind(payload.kind)
@@ -592,9 +704,104 @@ class ExternalHarnessMemberRuntime:
             summary=f"{self._member_name} {self._agent_kind} SDK retrying: {category}",
         )
 
+    def _on_tool_item(self, envelope: HarnessEvent, payload: ItemLifecycleEvent) -> None:
+        """Forward one tool-class item as the tool_call / tool_result pair half.
+
+        Both providers already normalize their native tool events into this
+        shape — Claude ``tool_use`` / ``tool_result`` content blocks and Codex
+        ``item/started`` / ``item/completed`` for the tool-class item kinds —
+        with the envelope ``item_id`` carrying the pair key. A tool item whose
+        other half can never be matched (no pair id, no dict data, a kind that
+        is not a lifecycle endpoint) is dropped with a debug note, never raised.
+        """
+        if payload.item_type != "tool":
+            return
+        data = json_value_to_builtin(payload.data)
+        if not isinstance(data, dict):
+            team_logger.debug(
+                "[external-cli] member {} dropped a tool item with unparsable data ({} {})",
+                self._member_name,
+                payload.kind.value,
+                payload.item_type,
+            )
+            return
+        item_id = envelope.item_id
+        if item_id is None:
+            team_logger.debug(
+                "[external-cli] member {} dropped an id-less tool item ({} {})",
+                self._member_name,
+                payload.kind.value,
+                payload.item_type,
+            )
+            return
+        name = _activity_name(data.get("tool_name") or data.get("name"))
+        if name is None:
+            team_logger.debug(
+                "[external-cli] member {} dropped a tool item without a tool name ({} {})",
+                self._member_name,
+                payload.kind.value,
+                payload.item_type,
+            )
+            return
+        if payload.kind is ItemEventKind.STARTED:
+            pair = (
+                "tool_call",
+                item_id,
+                name,
+                _activity_preview(data.get("arguments")),
+            )
+        elif payload.kind is ItemEventKind.COMPLETED:
+            pair = (
+                "tool_result",
+                item_id,
+                name,
+                _activity_preview(data.get("result")),
+            )
+        else:
+            team_logger.debug(
+                "[external-cli] member {} dropped a tool item with an unmapped kind ({} {})",
+                self._member_name,
+                payload.kind.value,
+                payload.item_type,
+            )
+            return
+        self._emit_activity(*pair)
+
+    def _emit_activity(
+        self,
+        activity_type: str,
+        tool_call_id: str,
+        tool_name: str | None,
+        content: str | None,
+    ) -> None:
+        """Build the structured ``AGENT_ACTIVITY`` event and push it to the sink."""
+        sink = self._activity_sink
+        if sink is None:
+            return
+        agent_id, phase, label, correlation_id = self._activity_identity
+        try:
+            # Lazy: importing workflow.backends at module load would re-enter
+            # agent_teams.external through the package __init__.
+            from openjiuwen.agent_teams.workflow.backends.activity_emitter import build_activity_event
+
+            sink(
+                build_activity_event(
+                    activity_type=activity_type,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    content=content,
+                    agent_id=agent_id,
+                    phase=phase,
+                    label=label,
+                    correlation_id=correlation_id,
+                )
+            )
+        except Exception:
+            team_logger.debug("[external-cli] member {} activity emit failed", self._member_name, exc_info=True)
+
     async def _on_provider_interaction(self, request: ProviderInteractionRequest) -> ProviderInteractionResponse:
         """Answer provider extension requests; only ``auth_fallback`` is understood."""
-        if request.request_type != _AUTH_FALLBACK_REQUEST:
+        if request.request_type != AUTH_FALLBACK_REQUEST_TYPE:
             return ProviderInteractionResponse(request_id=request.request_id, status=InteractionResponseStatus.DECLINED)
         persisted = await self._persist_fallback()
         status = InteractionResponseStatus.COMPLETED if persisted else InteractionResponseStatus.DECLINED
@@ -732,6 +939,16 @@ class ExternalHarnessMemberRuntime:
             return
         await self._team_context_tracker.commit(self._member_session)
 
+    async def _pending_task_outcome(self) -> str | None:
+        if self._task_outcome_tracker is None or self._member_session is None:
+            return None
+        return await self._task_outcome_tracker.pending_text(self._member_session)
+
+    async def _commit_task_outcome(self) -> None:
+        if self._task_outcome_tracker is None or self._member_session is None:
+            return
+        await self._task_outcome_tracker.commit(self._member_session)
+
     # ------------------------------------------------------------------
     # MemberRuntime: interrupt helpers and no-op hooks
     # ------------------------------------------------------------------
@@ -800,6 +1017,26 @@ def _member_round_kind(kind: TurnEventKind) -> str:
         TurnEventKind.ABORTED: "aborted",
         TurnEventKind.FAILED: "failed",
     }[kind]
+
+
+def _activity_name(value: Any) -> str | None:
+    """Coerce a provider tool name to a string; ``None`` when absent."""
+    if isinstance(value, str) and value:
+        return value
+    return None
+
+
+def _activity_preview(value: Any) -> str | None:
+    """Render a tool call/result payload as a compact one-line preview.
+
+    Strings pass through untouched; structured payloads dump on one line so a
+    spectator shows a preview, not a wall of JSON.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
 def _failure_reason(*, message: str, code: Any = None, sdk_error_type: Any = None, http_status: Any = None) -> Any:

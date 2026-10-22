@@ -1,0 +1,226 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""JSON-RPC 2.0 over the __DISPLAY__ CLI's stdio (Agent Client Protocol transport).
+
+One reader task owns stdout.  Responses resolve the matching request future;
+notifications are awaited inline in arrival order, so the harness's bounded
+event buffer back-pressures the reader instead of an unbounded queue
+growing behind it; requests the agent sends to the client run as their own
+tasks, because answering one may wait on the host (a tool approval) while
+the agent keeps streaming notifications.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+from typing import Any, Awaitable, Callable, Mapping
+
+from openjiuwen.harness_protocol import HarnessError
+from openjiuwen.harness_providers.base import logger
+from __PKG__.process import NON_JSON_RECORD, CliProcess
+
+NotificationHandler = Callable[[str, dict[str, Any]], Awaitable[None]]
+RequestHandler = Callable[[str, dict[str, Any]], Awaitable[dict[str, Any]]]
+
+METHOD_NOT_FOUND = -32601
+INTERNAL_ERROR = -32603
+
+
+class JsonRpcError(HarnessError):
+    """The agent answered a request with a JSON-RPC error object."""
+
+    def __init__(self, method: str, code: int | None, message: str, data: Any = None) -> None:
+        super().__init__(f"{method} failed ({code}): {message}")
+        self.method = method
+        self.code = code
+        self.rpc_message = message
+        self.data = data
+
+
+class JsonRpcConnectionClosed(HarnessError):
+    """The agent process closed stdout (exited) while requests were pending."""
+
+    def __init__(self, exit_code: int | None) -> None:
+        super().__init__(f"agent process exited (code {exit_code})")
+        self.exit_code = exit_code
+
+
+class MethodNotFound(HarnessError):
+    """Raised by a request handler for a method the client does not serve."""
+
+
+class JsonRpcConnection:
+    """A JSON-RPC 2.0 peer over one :class:`CliProcess`."""
+
+    def __init__(
+        self,
+        process: CliProcess,
+        *,
+        on_notification: NotificationHandler,
+        on_request: RequestHandler,
+    ) -> None:
+        self._process = process
+        self._on_notification = on_notification
+        self._on_request = on_request
+        self._next_id = 0
+        self._pending: dict[int, tuple[str, asyncio.Future[dict[str, Any]]]] = {}
+        self._reader: asyncio.Task[None] | None = None
+        self._request_tasks: set[asyncio.Task[None]] = set()
+        self._closed: JsonRpcConnectionClosed | None = None
+
+    @property
+    def closed(self) -> bool:
+        """Return whether the agent side has gone away."""
+        return self._closed is not None
+
+    def start(self) -> None:
+        """Start the single stdout reader."""
+        self._reader = asyncio.create_task(self._read_loop(), name="acp_rpc_reader")
+
+    def send_request(self, method: str, params: Mapping[str, Any]) -> asyncio.Future[dict[str, Any]]:
+        """Send a request and return the future of its ``result`` object.
+
+        The caller decides how long to wait. Wrap the future in
+        ``asyncio.shield`` to keep it alive past a timeout, so the late
+        answer is still consumed instead of being attributed to nothing.
+        """
+        future: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        if self._closed is not None:
+            future.set_exception(self._closed)
+            return future
+        self._next_id += 1
+        request_id = self._next_id
+        self._pending[request_id] = (method, future)
+        message = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": dict(params)}
+        task = asyncio.create_task(self._write_or_fail(request_id, message))
+        self._request_tasks.add(task)
+        task.add_done_callback(self._request_tasks.discard)
+        return future
+
+    async def request(
+        self,
+        method: str,
+        params: Mapping[str, Any],
+        *,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """Send a request and await its ``result`` object."""
+        return await asyncio.wait_for(self.send_request(method, params), timeout_s)
+
+    async def notify(self, method: str, params: Mapping[str, Any]) -> None:
+        """Send a notification (no response expected)."""
+        if self._closed is not None:
+            return
+        await self._process.write_json({"jsonrpc": "2.0", "method": method, "params": dict(params)})
+
+    async def close(self) -> None:
+        """Stop reading; pending requests fail as closed."""
+        reader = self._reader
+        self._reader = None
+        if reader is not None:
+            reader.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await reader
+        for task in tuple(self._request_tasks):
+            task.cancel()
+        self._fail_pending(JsonRpcConnectionClosed(self._process.returncode))
+
+    async def _write_or_fail(self, request_id: int, message: dict[str, Any]) -> None:
+        try:
+            await self._process.write_json(message)
+        except Exception as exc:
+            entry = self._pending.pop(request_id, None)
+            if entry is not None and not entry[1].done():
+                entry[1].set_exception(exc)
+
+    async def _read_loop(self) -> None:
+        try:
+            while True:
+                record = await self._process.read_record()
+                if record is None:
+                    break
+                await self._dispatch(record)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("[__CARD__] JSON-RPC reader stopped", exc_info=True)
+        self._fail_pending(JsonRpcConnectionClosed(self._process.returncode))
+
+    async def _dispatch(self, record: dict[str, Any]) -> None:
+        if record.get("type") == NON_JSON_RECORD:
+            # The text may hold anything the CLI printed; it is never logged.
+            logger.debug("[__CARD__] ignored a non-JSON stdout line")
+            return
+        method = record.get("method")
+        has_id = "id" in record
+        if isinstance(method, str) and has_id:
+            task = asyncio.create_task(self._serve_request(record["id"], method, _params(record)))
+            self._request_tasks.add(task)
+            task.add_done_callback(self._request_tasks.discard)
+            return
+        if isinstance(method, str):
+            await self._on_notification(method, _params(record))
+            return
+        if has_id:
+            self._resolve(record)
+
+    def _resolve(self, record: dict[str, Any]) -> None:
+        request_id = record.get("id")
+        entry = self._pending.pop(request_id, None) if isinstance(request_id, int) else None
+        if entry is None:
+            return
+        method, future = entry
+        if future.done():
+            return
+        error = record.get("error")
+        if isinstance(error, dict):
+            code = error.get("code")
+            future.set_exception(
+                JsonRpcError(
+                    method,
+                    code if isinstance(code, int) else None,
+                    str(error.get("message") or "error"),
+                    error.get("data"),
+                )
+            )
+            return
+        result = record.get("result")
+        future.set_result(result if isinstance(result, dict) else {})
+
+    async def _serve_request(self, request_id: Any, method: str, params: dict[str, Any]) -> None:
+        try:
+            result = await self._on_request(method, params)
+            reply: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "result": result}
+        except MethodNotFound:
+            reply = {"jsonrpc": "2.0", "id": request_id, "error": {"code": METHOD_NOT_FOUND, "message": method}}
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("[__CARD__] serving %s failed: %s", method, type(exc).__name__)
+            reply = {"jsonrpc": "2.0", "id": request_id, "error": {"code": INTERNAL_ERROR, "message": "client error"}}
+        with contextlib.suppress(Exception):
+            await self._process.write_json(reply)
+
+    def _fail_pending(self, error: JsonRpcConnectionClosed) -> None:
+        if self._closed is None:
+            self._closed = error
+        pending = tuple(self._pending.values())
+        self._pending.clear()
+        for _method, future in pending:
+            if not future.done():
+                future.set_exception(error)
+
+
+def _params(record: Mapping[str, Any]) -> dict[str, Any]:
+    params = record.get("params")
+    return dict(params) if isinstance(params, Mapping) else {}
+
+
+__all__ = [
+    "JsonRpcConnection",
+    "JsonRpcConnectionClosed",
+    "JsonRpcError",
+    "MethodNotFound",
+]

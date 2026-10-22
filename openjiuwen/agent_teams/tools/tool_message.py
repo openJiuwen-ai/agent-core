@@ -31,6 +31,21 @@ LEADER_ROLE_RECIPIENT = "leader"
 # far below it.
 MAX_CONTENT_CHARS = 2000
 
+# Appended to a successful send when ``targets`` only repeated ``to``.
+_REDUNDANT_TARGETS_NOTE = (
+    "Note: 'targets' only repeated 'to', so this was sent as a direct message. "
+    "Next time fill only 'to' for one recipient; 'targets' is for two or more."
+)
+
+
+def _targets_repeat_to(to_raw: Any, targets_raw: Any) -> bool:
+    """Tell whether ``targets`` is a one-element array naming the same member as ``to``."""
+    if not isinstance(to_raw, str) or not isinstance(targets_raw, list):
+        return False
+    if len(targets_raw) != 1 or not isinstance(targets_raw[0], str):
+        return False
+    return targets_raw[0].strip() == to_raw.strip()
+
 
 # ========== Messaging ==========
 
@@ -295,10 +310,13 @@ class _SendMessageBase(TeamTool, ABC):
                 return self._format_multicast_text(base, d)
             return base
         if d["type"] == "broadcast":
-            return f"Broadcast Already sent from {d['from']} Success"
-        if d["type"] == "multicast":
+            text = f"Broadcast Already sent from {d['from']} Success"
+        elif d["type"] == "multicast":
             return self._format_multicast_text(None, d)
-        return f"Message Already sent from {d['from']} to {d['to']} Success"
+        else:
+            text = f"Message Already sent from {d['from']} to {d['to']} Success"
+        note = d.get("note")
+        return f"{text}\n{note}" if note else text
 
     @staticmethod
     def _format_multicast_text(error: str | None, d: dict[str, Any]) -> str:
@@ -331,21 +349,23 @@ class SendMessageTool(_SendMessageBase):
         message_manager: TeamMessageManager,
         t: Translator,
         team: TeamBackend | None = None,
+        *,
+        desc_key: str = "send_message",
     ):
         super().__init__(
             message_manager,
             t,
             team,
-            desc_key="send_message",
+            desc_key=desc_key,
             to_schema={
                 "type": "string",
-                "description": t("send_message", "to"),
+                "description": t(desc_key, "to"),
             },
             targets_schema={
                 "type": "array",
                 "items": {"type": "string"},
                 "minItems": 1,
-                "description": t("send_message", "targets"),
+                "description": t(desc_key, "targets"),
             },
         )
 
@@ -356,13 +376,28 @@ class SendMessageTool(_SendMessageBase):
         content: str,
         summary: str,
     ) -> ToolOutput:
-        """Route exactly one separated recipient field."""
-        if to_raw is not None and targets_raw is not None:
-            return ToolOutput(success=False, error="Use exactly one of 'to' or 'targets'")
-        if targets_raw is not None:
+        """Route exactly one separated recipient field.
+
+        Both fields together are tolerated only when ``targets`` merely
+        repeats ``to`` as a one-element array: the intent is unambiguous, so
+        the message goes out as a unicast and the result carries a note
+        steering the caller back to ``to`` alone.
+        """
+        if targets_raw is None:
+            return await self._dispatch_to(to_raw, content, summary)
+        if to_raw is None:
             if not isinstance(targets_raw, list):
                 return ToolOutput(success=False, error="'targets' must be an array of strings")
             return await self._multicast(targets_raw, content, summary)
+        if not _targets_repeat_to(to_raw, targets_raw):
+            return ToolOutput(success=False, error="Use exactly one of 'to' or 'targets'")
+        result = await self._dispatch_to(to_raw, content, summary)
+        if result.success:
+            result.data["note"] = _REDUNDANT_TARGETS_NOTE
+        return result
+
+    async def _dispatch_to(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+        """Route the ``to`` field: unicast, broadcast, or a shape correction."""
         if isinstance(to_raw, list):
             return ToolOutput(success=False, error="'to' must be a string; use 'targets' for multicast")
         if isinstance(to_raw, str):
@@ -455,4 +490,63 @@ class ReportToLeaderTool(_SendMessageBase):
                 f"'to' must be one of {list(self._ALLOWED)}; this team runs in scheduled "
                 f"dispatch mode, where members report to the leader instead of contacting peers"
             ),
+        )
+
+
+class ScheduledPeerMessageTool(SendMessageTool):
+    """Scheduled-dispatch member ``send_message`` with peer messaging opened (F_126).
+
+    Same reach as :class:`SendMessageTool` — point-to-point, multicast and
+    broadcast to peers — because the team switched on
+    ``TeamAgentSpec.enable_member_messaging``. What stays from
+    :class:`ReportToLeaderTool` is the ``"leader"`` role word, resolved to
+    the concrete leader at delivery time, and a description that keeps the
+    scheduled handoff contract: completion travels through the task's
+    ``summary`` / ``note``, not through a message.
+    """
+
+    def __init__(
+        self,
+        message_manager: TeamMessageManager,
+        t: Translator,
+        team: TeamBackend | None = None,
+    ):
+        super().__init__(message_manager, t, team, desc_key="send_message_scheduled_peers")
+
+    async def _dispatch_to(self, to_raw: Any, content: str, summary: str) -> ToolOutput:
+        """Resolve the ``"leader"`` role word, then route like the full-reach form."""
+        if isinstance(to_raw, str) and to_raw.strip() == LEADER_ROLE_RECIPIENT:
+            leader = await self._resolve_leader()
+            if not leader:
+                return self._unresolved_leader()
+            return await self._send(leader, content, summary)
+        return await super()._dispatch_to(to_raw, content, summary)
+
+    async def _multicast(
+        self,
+        targets: list[str],
+        content: str,
+        summary: str,
+    ) -> ToolOutput:
+        """Resolve a ``"leader"`` entry in ``targets`` before the shared multicast."""
+        if not any(isinstance(item, str) and item.strip() == LEADER_ROLE_RECIPIENT for item in targets):
+            return await super()._multicast(targets, content, summary)
+        leader = await self._resolve_leader()
+        if not leader:
+            return self._unresolved_leader()
+        resolved = [
+            leader if isinstance(item, str) and item.strip() == LEADER_ROLE_RECIPIENT else item for item in targets
+        ]
+        return await super()._multicast(resolved, content, summary)
+
+    async def _resolve_leader(self) -> str:
+        if self._team is None:
+            return ""
+        return (await self._team.resolve_leader_member_name()).strip()
+
+    @staticmethod
+    def _unresolved_leader() -> ToolOutput:
+        return ToolOutput(
+            success=False,
+            error="cannot resolve the team leader to deliver to; the team has no leader on record",
         )

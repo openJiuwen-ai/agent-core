@@ -4,6 +4,13 @@
 
 {{task.content}}
 
+## 上下游
+
+- 上游（已完成、你可依赖的交付）：
+{{task.upstream_brief}}
+- 下游（等待你交付的任务）：
+{{task.downstream_brief}}
+
 ## 交付方式
 
 - 先用 `submit_plan` 提交执行计划，不要直接动手执行。

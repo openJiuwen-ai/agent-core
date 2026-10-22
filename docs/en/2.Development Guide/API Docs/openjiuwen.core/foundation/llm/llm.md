@@ -4,8 +4,40 @@
 
 - Providing `Model` as the unified entry; `client_provider` selects the OpenAI-compatible or Anthropic protocol;
 - Defining `BaseModelClient` plus `OpenAIModelClient` and `AnthropicModelClient`; legacy vendor names are aliases, see [LLM Protocol Consolidation](../../../Basic%20Functions/LLM%20Protocol%20Consolidation.md);
+- Providing `JevSystemOneClient` as a standalone lightweight client for System One typed evaluations;
 - Providing model request/client configuration (`ModelRequestConfig`, `ModelClientConfig`) and schemas for messages, streaming chunks, tool calls, etc.;
 - Providing output parser abstraction (`BaseOutputParser`) and `JsonOutputParser` implementation.
+
+---
+
+## Jev System One typed evaluations
+
+`JevSystemOneClient` calls `POST /v1/systemone` directly. System One accepts a shared `state` plus typed `NoulQuestion`, `ChoiceQuestion`, or `ScoreQuestion` objects and returns typed answers. Because this is not the messages-in/assistant-message-out chat protocol, the client is instantiated directly and is not selected through `Model`, `ModelClientConfig`, or the model-client registry.
+
+```python
+import os
+
+from openjiuwen.core.foundation.llm.system_one import JevSystemOneClient, NoulQuestion
+
+
+async def evaluate_request():
+    async with JevSystemOneClient(api_key=os.environ["TYPESAFE_API_KEY"]) as client:
+        response = await client.system_one(
+            state="I was charged twice. Please help.",
+            questions={
+                "needs_refund": NoulQuestion(
+                    instructions="Is the customer asking for a refund?",
+                )
+            },
+        )
+        return response.answers["needs_refund"]
+```
+
+The default endpoint is TypeSafe (`https://api.typesafe.ai`) and the default model alias is `jev-latest`. To use OpenRouter's TypeSafe-compatible route, set `api_base="https://openrouter.ai/api"`, `model_name="typesafe/jev-1.13"`, and provide your OpenRouter API key. The client retries documented `429` and `529` responses with backoff.
+
+`endpoint_path` defaults to `/v1/systemone` and is appended to `api_base` without rewriting its prefix. The same typed client also supports OpenRouter Decisions with `api_base="https://openrouter.ai/api/alpha"` and `endpoint_path="/decisions"`. For an existing TypeSafe base ending in `/v1`, set `endpoint_path="/systemone"`. Endpoint overrides must be absolute paths, not origins, query strings or fragments.
+
+Responses are parsed with strict types: boolean or string probabilities are rejected, rather than coerced to numbers. Callers still enforce candidate membership, distribution validity and confidence thresholds. Applications with a shared task deadline can set `max_retries=0` and apply their bounded retry/deadline policy around `system_one`; this avoids nesting the standalone retry loop. Injected HTTP clients remain caller-owned.
 
 ---
 

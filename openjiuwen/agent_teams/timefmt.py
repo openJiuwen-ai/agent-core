@@ -99,4 +99,27 @@ def format_time_context(timestamp_ms: int | None, now_ms: int) -> str:
     return f"{_format_absolute(timestamp_ms)} ({relative})"
 
 
-__all__ = ["format_time_context"]
+def format_absolute_time(timestamp_ms: int | None) -> str:
+    """Render a timestamp as absolute local time only, with no relative diff.
+
+    For text that is written into an agent's conversation history and stays
+    there. A relative diff is true only at the moment it is rendered: a message
+    delivered as "just now" still reads "just now" an hour later, when the
+    member reasons over it again. Such text carries the absolute time alone and
+    the reader measures elapsed time against the current-time anchor delivered
+    with each input (``inbound_render.render_clock``).
+
+    Args:
+        timestamp_ms: Millisecond UTC epoch to render, or ``None`` when the
+            source field is unset.
+
+    Returns:
+        Text such as ``2026-05-27 14:30:05 +08:00``, or ``time.unknown`` when
+        ``timestamp_ms`` is ``None``.
+    """
+    if timestamp_ms is None:
+        return t("time.unknown")
+    return _format_absolute(timestamp_ms)
+
+
+__all__ = ["format_absolute_time", "format_time_context"]

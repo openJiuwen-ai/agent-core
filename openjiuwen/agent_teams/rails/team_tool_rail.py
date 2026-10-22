@@ -29,7 +29,8 @@ from typing import (
 
 from openjiuwen.agent_teams.paths import async_tool_output_dir
 from openjiuwen.agent_teams.tools.team_tools import create_team_tools
-from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.foundation.tool import ToolExposure
+from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 if TYPE_CHECKING:
@@ -38,6 +39,23 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tools.team import TeamBackend
+
+
+def declare_team_tool_direct(card: ToolCard) -> None:
+    """Keep a team tool visible when progressive tool exposure is on.
+
+    ``AbilityManager`` defers every card that neither declared ``exposure``
+    nor is named in the harness default-direct set. The coordination surface
+    (``send_message`` / ``create_task`` / ``spawn_*`` / ``view_task`` ...) is a
+    member's primary interface: hiding it behind a ``tool_search`` round-trip
+    would break the team protocol for the one member kind that mounts
+    ``ProgressiveToolRail`` on the host's single-agent switch. A card that
+    already declared its own exposure keeps it — explicit always wins.
+    """
+    if "exposure" in card.model_fields_set or card.get_exposure_declared():
+        return
+    card.exposure = ToolExposure.DIRECT
+    card.set_exposure_declared(True)
 
 
 class TeamToolRail(DeepAgentRail):
@@ -53,6 +71,11 @@ class TeamToolRail(DeepAgentRail):
     suffixes each ``ToolCard.id`` with ``{team_name}.{member_name}`` so
     multiple in-process members do not collide on the shared
     ``Runner.resource_mgr``.
+
+    Every card it mounts is declared ``ToolExposure.DIRECT`` before
+    registration (see :func:`declare_team_tool_direct`), so a member built
+    with ``progressive_tool`` enabled still sees its whole coordination
+    surface in the advertised tools list.
     """
 
     priority = 90
@@ -66,6 +89,7 @@ class TeamToolRail(DeepAgentRail):
         dispatch_mode: str = "autonomous",
         lifecycle: str = "temporary",
         team_mode: str = "default",
+        bootstrap_mode: str = "leader",
         language: str = "cn",
         model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
         exclude_tools: Optional[Set[str]] = None,
@@ -80,6 +104,8 @@ class TeamToolRail(DeepAgentRail):
         swarmflow_concurrency_governor: Optional[Any] = None,
         swarmflow_budget: Optional[Any] = None,
         team_permissions_enabled: bool = False,
+        expert_catalog: Optional[Any] = None,
+        expert_binding: Optional[Any] = None,
     ) -> None:
         super().__init__()
         self._team_backend = team_backend
@@ -88,6 +114,7 @@ class TeamToolRail(DeepAgentRail):
         self._dispatch_mode = dispatch_mode
         self._lifecycle = lifecycle
         self._team_mode = team_mode
+        self._bootstrap_mode = bootstrap_mode
         self._language = language
         self._model_config_allocator = model_config_allocator
         self._exclude_tools = exclude_tools
@@ -102,6 +129,8 @@ class TeamToolRail(DeepAgentRail):
         self._swarmflow_concurrency_governor = swarmflow_concurrency_governor
         self._swarmflow_budget = swarmflow_budget
         self._team_permissions_enabled = team_permissions_enabled
+        self._expert_catalog = expert_catalog
+        self._expert_binding = expert_binding
         self._tools: list[Tool] | None = None
 
     def init(self, agent: Any) -> None:
@@ -130,6 +159,7 @@ class TeamToolRail(DeepAgentRail):
             dispatch_mode=self._dispatch_mode,
             lifecycle=self._lifecycle,
             team_mode=self._team_mode,
+            bootstrap_mode=self._bootstrap_mode,
             model_config_allocator=self._model_config_allocator,
             exclude_tools=self._exclude_tools,
             lang=self._language,
@@ -142,6 +172,8 @@ class TeamToolRail(DeepAgentRail):
             concurrency_governor=self._swarmflow_concurrency_governor,
             swarmflow_budget=self._swarmflow_budget,
             team_permissions_enabled=self._team_permissions_enabled,
+            expert_catalog=self._expert_catalog,
+            expert_binding=self._expert_binding,
         )
 
         if self._workspace_manager is not None:
@@ -171,6 +203,7 @@ class TeamToolRail(DeepAgentRail):
         ability_manager = getattr(agent, "ability_manager", None)
         if ability_manager is not None:
             for tool in tools:
+                declare_team_tool_direct(tool.card)
                 ability_manager.add_ability(tool.card, tool)
 
         self._wire_async_spill(agent)

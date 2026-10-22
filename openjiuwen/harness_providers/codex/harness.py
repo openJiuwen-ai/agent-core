@@ -25,6 +25,7 @@ from openjiuwen.harness_protocol import (
     HarnessStateError,
     HostCapability,
     InteractionResponseStatus,
+    JsonObject,
     ModelOption,
     ModelSelection,
     ProviderEvent,
@@ -80,8 +81,6 @@ DYNAMIC_TOOL_CALL_METHOD = "item/tool/call"
 _SERVER_REQUEST_HOST_CAPABILITIES = frozenset(
     {HostCapability.TOOL_APPROVAL, HostCapability.USER_INPUT, HostCapability.DYNAMIC_TOOL_CALL}
 )
-# Provider interaction asking the host to ratify (persist) an auth fallback.
-AUTH_FALLBACK_REQUEST_TYPE = "auth_fallback"
 # Provider event announcing the active model (session activation / fallback
 # switch) so the host reliability context can attribute failures to it.
 _MODEL_CHANGED_EVENT = "session/model_changed"
@@ -126,6 +125,8 @@ class CodexHarness(SerializedTurnHarness):
                 HarnessCapability.MCP_TOOLS,
                 HarnessCapability.MODEL_SELECTION,
                 HarnessCapability.MODEL_DISCOVERY,
+                HarnessCapability.ENDPOINT_MODELS,
+                HarnessCapability.AUTH_FALLBACK,
                 HarnessCapability.NATIVE_TOOLS,
             }
         ),
@@ -141,6 +142,7 @@ class CodexHarness(SerializedTurnHarness):
                 HostCapability.MODEL_REQUEST_OBSERVATION,
             }
         ),
+        fork_modes=frozenset({"full", "before"}),
     )
 
     def __init__(self, config: CodexHarnessConfig | None = None) -> None:
@@ -168,15 +170,9 @@ class CodexHarness(SerializedTurnHarness):
         # Model / effort overrides the next ``thread.turn()`` carries; the App
         # Server keeps them for the following turns of the thread.
         self._turn_overrides: dict[str, str] = {}
-        self._fallback_activated = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._dynamic_tools: tuple[ToolDefinition, ...] = ()
         self._dynamic_tools_fingerprint = dynamic_tools_fingerprint(())
-
-    @property
-    def fallback_activated(self) -> bool:
-        """Return whether the authentication fallback endpoint is in use."""
-        return self._fallback_activated
 
     # ------------------------------------------------------------------
     # Provider hooks
@@ -229,7 +225,6 @@ class CodexHarness(SerializedTurnHarness):
         self._active_model = self._config.model
         self._primary_model = self._config.model
         self._turn_overrides = {}
-        self._fallback_activated = False
         try:
             await self._connect(context, model=self._active_model, resume_thread_id=resume_thread_id)
         except asyncio.CancelledError:
@@ -418,68 +413,52 @@ class CodexHarness(SerializedTurnHarness):
             self._pending_steers.clear()
             await self._disconnect_client()
             return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
-        for _attempt in range(2):
-            idle_retries = 0
-            try:
-                while True:
-                    try:
-                        await self._run_turn(turn, text, accumulator)
-                    except _TurnIdleTimeout as exc:
-                        can_retry = (
-                            idle_retries < self._config.turn_idle_retries
-                            and exc.notifications_seen == 0
-                            and exc.interrupted
-                            and not turn.abort_requested
-                        )
-                        if not can_retry:
-                            raise
-                        idle_retries += 1
-                        logger.warning(
-                            "[codex] turn was silent for %ss; retrying prompt on the same thread (%s/%s)",
-                            self._config.turn_idle_timeout_s,
-                            idle_retries,
-                            self._config.turn_idle_retries,
-                        )
-                        continue
-                    break
-            except Exception as exc:
-                if turn.abort_requested:
-                    return TurnEventKind.ABORTED, interrupted_result(
-                        turn,
-                        provider_name=PROVIDER_NAME,
-                        timing=timing,
-                        messages=tuple(accumulator.messages),
-                        final_output=accumulator.last_text_output,
-                        usage=accumulator.total_usage,
+        idle_retries = 0
+        try:
+            while True:
+                try:
+                    await self._run_turn(turn, text, accumulator)
+                except _TurnIdleTimeout as exc:
+                    can_retry = (
+                        idle_retries < self._config.turn_idle_retries
+                        and exc.notifications_seen == 0
+                        and exc.interrupted
+                        and not turn.abort_requested
                     )
-                if isinstance(exc, _RetryBudgetExceeded):
-                    error = exc.error
-                    if await self._maybe_activate_fallback(error, accumulator, turn):
-                        accumulator = CodexTurnAccumulator(turn_id=turn.turn_id)
-                        continue
-                elif isinstance(exc, _TurnIdleTimeout):
-                    error = TurnError(
-                        message=f"Codex produced no turn events for {self._config.turn_idle_timeout_s:g}s",
-                        code="CODEX_TURN_IDLE_TIMEOUT",
-                        category="network_timeout",
-                        retryable=True,
+                    if not can_retry:
+                        raise
+                    idle_retries += 1
+                    logger.warning(
+                        "[codex] turn was silent for %ss; retrying prompt on the same thread (%s/%s)",
+                        self._config.turn_idle_timeout_s,
+                        idle_retries,
+                        self._config.turn_idle_retries,
                     )
-                else:
-                    error = classify_codex_exception(exc)
-                    if await self._maybe_activate_fallback(error, accumulator, turn):
-                        continue
-                return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
-            kind, result = accumulator.build_terminal_result(turn=turn, timing=timing)
-            if kind is TurnEventKind.FAILED and await self._maybe_activate_fallback(result.error, accumulator, turn):
-                accumulator = CodexTurnAccumulator(turn_id=turn.turn_id)
-                continue
-            return kind, result
-        error = TurnError(
-            message="Codex authentication fallback did not recover the turn",
-            code="CODEX_FALLBACK_EXHAUSTED",
-            category="auth_required",
-        )
-        return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
+                    continue
+                break
+        except Exception as exc:
+            if turn.abort_requested:
+                return TurnEventKind.ABORTED, interrupted_result(
+                    turn,
+                    provider_name=PROVIDER_NAME,
+                    timing=timing,
+                    messages=tuple(accumulator.messages),
+                    final_output=accumulator.last_text_output,
+                    usage=accumulator.total_usage,
+                )
+            if isinstance(exc, _RetryBudgetExceeded):
+                error = exc.error
+            elif isinstance(exc, _TurnIdleTimeout):
+                error = TurnError(
+                    message=f"Codex produced no turn events for {self._config.turn_idle_timeout_s:g}s",
+                    code="CODEX_TURN_IDLE_TIMEOUT",
+                    category="network_timeout",
+                    retryable=True,
+                )
+            else:
+                error = classify_codex_exception(exc)
+            return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
+        return accumulator.build_terminal_result(turn=turn, timing=timing)
 
     async def _run_turn(self, turn: PendingTurn, text: str, accumulator: CodexTurnAccumulator) -> None:
         thread = self._thread
@@ -569,34 +548,34 @@ class CodexHarness(SerializedTurnHarness):
     # Authentication fallback
     # ------------------------------------------------------------------
 
-    def _fallback_applies(
-        self,
-        error: TurnError | None,
-        fallback: CodexModelConfig | None,
-        turn: PendingTurn,
-    ) -> bool:
-        """Report whether the auth fallback may still replace this turn.
+    def _auth_fallback_payload(self) -> JsonObject | None:
+        fallback = self._config.fallback_model
+        if fallback is None:
+            return None
+        return {"model": fallback.model, "provider": fallback.provider, "api_base": fallback.api_base}
 
-        The category itself is the gate: an ``auth_required`` failure means the
-        request never reached the model on the native endpoint, so replaying
-        the turn on the fallback cannot duplicate meaningful work. A mid-turn
-        token expiry may have emitted partial output before failing; replaying
-        it is still preferred over failing the turn, and no worse than the
-        manual retry the caller would perform anyway.
+    async def _reconnect_for_auth(self, *, fallback: bool) -> None:
+        context = self._context
+        if context is None:
+            raise HarnessProtocolError("Codex has no active context to reconnect")
+        model = self._config.fallback_model if fallback else self._primary_model
+        thread_id = self._thread_id
+        await self._disconnect_client()
+        await self._connect(context, model=model, resume_thread_id=thread_id)
 
-        Args:
-            error: The failure classified so far, when there is one.
-            fallback: The configured fallback endpoint, when there is one.
-            turn: The turn being considered for a restart.
-
-        Returns:
-            True when every precondition for activating the fallback holds.
-        """
-        if error is None or fallback is None:
-            return False
-        if error.category != "auth_required" or self._fallback_activated:
-            return False
-        return not turn.abort_requested
+    async def _on_auth_endpoint_changed(self, *, fallback: bool) -> None:
+        self._active_model = self._config.fallback_model if fallback else self._primary_model
+        await self._emit_model_changed()
+        if fallback:
+            await self._publish_checkpoint(
+                {
+                    "thread_id": self._thread_id,
+                    "resumed": True,
+                    "fallback": True,
+                    **self._dynamic_tools_checkpoint_data(),
+                },
+                reason=CheckpointReason.STATE_CHANGED,
+            )
 
     async def _emit_model_changed(self) -> None:
         """Announce the model the Codex thread actually runs on.
@@ -666,66 +645,6 @@ class CodexHarness(SerializedTurnHarness):
         if selection.model is not None:
             self._confirmed_model = selection.model
         await self._emit_model_changed()
-
-    async def _maybe_activate_fallback(
-        self,
-        error: TurnError | None,
-        accumulator: CodexTurnAccumulator,
-        turn: PendingTurn,
-    ) -> bool:
-        fallback = self._config.fallback_model
-        if not self._fallback_applies(error, fallback, turn):
-            return False
-        context = self._context
-        if context is None:
-            return False
-        thread_id = self._thread_id
-        await self._disconnect_client()
-        try:
-            await self._connect(context, model=fallback, resume_thread_id=thread_id)
-        except Exception as exc:
-            logger.warning("[codex] authentication fallback activation failed: %s", exc)
-            return False
-        ratified = await self._confirm_provider_extension(
-            AUTH_FALLBACK_REQUEST_TYPE,
-            {"model": fallback.model, "provider": fallback.provider, "api_base": fallback.api_base},
-        )
-        if not ratified:
-            # The host could not persist the switch; resume the thread on the
-            # native endpoint so the member does not run on an unrecorded one.
-            logger.warning("[codex] host declined the authentication fallback; restoring the native endpoint")
-            await self._disconnect_client()
-            try:
-                await self._connect(context, model=self._primary_model, resume_thread_id=thread_id)
-            except Exception as exc:
-                logger.warning("[codex] restoring the native endpoint failed: %s", exc)
-                return False
-            self._active_model = self._primary_model
-            self._fallback_activated = False
-            await self._emit_model_changed()
-            return False
-        self._active_model = fallback
-        self._fallback_activated = True
-        await self._emit_model_changed()
-        await self._publish_checkpoint(
-            {
-                "thread_id": self._thread_id,
-                "resumed": True,
-                "fallback": True,
-                **self._dynamic_tools_checkpoint_data(),
-            },
-            reason=CheckpointReason.STATE_CHANGED,
-        )
-        await self._emit(
-            ProviderEvent(
-                provider=PROVIDER_NAME,
-                event_type="auth_fallback_activated",
-                schema_version="1",
-                payload={"model": fallback.model, "provider": fallback.provider, "api_base": fallback.api_base},
-            ),
-            turn=turn,
-        )
-        return True
 
     # ------------------------------------------------------------------
     # Approval routing (runs on the SDK reader thread)

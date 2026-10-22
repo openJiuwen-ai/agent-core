@@ -1,0 +1,18 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Shared fixtures for the __DISPLAY__ provider tests."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture
+def workdir(tmp_path: Path) -> Path:
+    """An isolated working directory the CLI may read and write."""
+    target = tmp_path / "work"
+    target.mkdir()
+    return target

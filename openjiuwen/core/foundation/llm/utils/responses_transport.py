@@ -17,12 +17,14 @@ import httpx
 from openjiuwen.core.common.logging import llm_logger as logger
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback.events import LLMCallEvents
 from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import DEFAULT_OPENAI_ACCOUNT_BASE_URL
 from openjiuwen.core.foundation.llm.utils.responses_utils import (
     build_headers,
     message_from_stream_chunk,
     parse_sse_block,
-    parse_stream_event,
+    ResponsesStreamParser,
     raise_for_http_error,
 )
 
@@ -101,19 +103,27 @@ class OpenAIAccountResponsesTransport:
             if response.status_code >= 400:
                 await response.aread()
             raise_for_http_error(response)
+            # httpx transport retries only cover failed connects and are not
+            # reported back, so the retry count is unknown here.
+            await trigger(
+                LLMCallEvents.LLM_RESPONSE_STARTED,
+                model_name=effective_model,
+                retry_count=None,
+            )
+            parser = ResponsesStreamParser(model_name=effective_model)
             buffer: list[str] = []
             async for line in response.aiter_lines():
                 if line == "":
                     event = parse_sse_block(buffer)
                     buffer = []
-                    chunk = parse_stream_event(event, model_name=effective_model)
+                    chunk = parser.parse(event)
                     if chunk:
                         yield chunk
                 else:
                     buffer.append(line)
             if buffer:
                 event = parse_sse_block(buffer)
-                chunk = parse_stream_event(event, model_name=effective_model)
+                chunk = parser.parse(event)
                 if chunk:
                     yield chunk
 

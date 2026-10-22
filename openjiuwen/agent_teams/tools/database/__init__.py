@@ -56,6 +56,9 @@ from openjiuwen.agent_teams.tools.database.graph import (
     detect_cycle_in_adjacency as detect_cycle_in_adjacency,
 )
 from openjiuwen.agent_teams.tools.database.member_dao import MemberDao as MemberDao
+from openjiuwen.agent_teams.tools.database.member_dao import (
+    MemberExecutionUpdateResult as MemberExecutionUpdateResult,
+)
 from openjiuwen.agent_teams.tools.database.message_dao import MessageDao as MessageDao
 from openjiuwen.agent_teams.tools.database.task_dao import TaskDao as TaskDao
 from openjiuwen.agent_teams.tools.database.team_dao import TeamDao as TeamDao
@@ -302,6 +305,9 @@ class TeamDatabase:
             self.task = None
             self.message = None
             team_logger.info("Team database closed")
+        from openjiuwen.agent_teams.organization.pool import remove_process_org_managers_for_db
+
+        remove_process_org_managers_for_db(self)
 
     async def _ensure_initialized(self) -> None:
         """Initialize on first call; idempotent thereafter."""

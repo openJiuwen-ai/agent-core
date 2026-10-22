@@ -16,6 +16,7 @@ from openjiuwen.harness_protocol.models import (
     HarnessContext,
     HarnessInput,
     JsonObject,
+    ModelChoice,
     ModelOption,
     ModelSelection,
     SendReceipt,
@@ -169,4 +170,31 @@ class HarnessProvider(Protocol):
         ...
 
 
-__all__ = ["HarnessModelControl", "HarnessProtocol", "HarnessProvider"]
+@runtime_checkable
+class ModelConfigProvider(Protocol):
+    """Optional provider hook mapping a host's model choice onto its configuration.
+
+    A ``HarnessProvider`` implements it next to ``create`` so a host never
+    knows the provider's configuration fields: the host picks a model (and
+    effort) from the provider's built-in catalog or from an endpoint it owns,
+    and merges the returned fragment into the ``create`` mapping. A choice
+    with an ``endpoint`` requires the card to declare ``ENDPOINT_MODELS``.
+    """
+
+    def model_config(self, choice: ModelChoice, *, fallback: ModelChoice | None = None) -> JsonObject:
+        """Return the configuration fragment that runs ``choice``.
+
+        Args:
+            choice: The model to create the harness on.
+            fallback: A model the provider may switch to on its own (the
+                Claude Code / Codex authentication fallback); providers
+                without such a mechanism raise when it is given.
+
+        Raises:
+            ValueError: When the provider cannot run the choice, e.g. an
+                effort its runtime has no selector for.
+        """
+        ...
+
+
+__all__ = ["HarnessModelControl", "HarnessProtocol", "HarnessProvider", "ModelConfigProvider"]

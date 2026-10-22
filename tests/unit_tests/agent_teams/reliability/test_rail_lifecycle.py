@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
+from openjiuwen.agent_teams.reliability.anomaly import AnomalyKind
 from openjiuwen.agent_teams.reliability.detectors.model_error import ModelStreamErrorDetector
 from openjiuwen.agent_teams.reliability.detectors.tool_error import ToolErrorRateDetector
 from openjiuwen.agent_teams.reliability.monitor import ReliabilityMonitor
@@ -20,6 +21,7 @@ from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent import AgentCard, ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import AgentRail
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from tests.unit_tests.fixtures.mock_llm import MockLLMModel, create_text_response, create_tool_call_response
 
 
@@ -168,7 +170,7 @@ async def test_reliability_rail_observes_model_failure_finally_lifecycle(agent_f
 
 
 @pytest.mark.asyncio
-async def test_reliability_rail_observes_failed_tool_exception_then_finally(agent_factory):
+async def test_reliability_rail_reports_a_failed_tool_as_exception_not_success(agent_factory):
     def fail_tool(a, b):
         raise ValueError("mock tool failure")
 
@@ -188,9 +190,8 @@ async def test_reliability_rail_observes_failed_tool_exception_then_finally(agen
 
     kinds = [signal.kind for signal in monitor.signals]
     tool_error_index = kinds.index(SignalKind.TOOL_EXCEPTION)
-    assert kinds[tool_error_index + 1] == SignalKind.AFTER_TOOL_CALL
     assert "mock tool failure" in monitor.signals[tool_error_index].error
-    assert monitor.signals[tool_error_index + 1].tool_result is None
+    assert SignalKind.AFTER_TOOL_CALL not in kinds
 
 
 @pytest.mark.asyncio
@@ -310,10 +311,6 @@ async def test_real_model_failures_reach_consecutive_threshold(agent_factory):
     assert len(reporter.reported) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="AFTER_TOOL_CALL fires after a final exception and currently resets the tool-error streak",
-)
 @pytest.mark.asyncio
 async def test_real_tool_failures_reach_consecutive_threshold(agent_factory):
     def fail_tool(a, b):
@@ -342,3 +339,41 @@ async def test_real_tool_failures_reach_consecutive_threshold(agent_factory):
         await agent.invoke({"query": "fail tool twice"})
 
     assert len(reporter.reported) == 1
+
+
+@pytest.mark.asyncio
+async def test_three_consecutive_tool_failures_raise_the_tool_error_anomaly(agent_factory):
+    def fail_tool(a, b):
+        raise ValueError("persistent tool failure")
+
+    agent = agent_factory("reliability_mock_three_failures", fail_tool)
+    reporter = _RecordingReporter()
+    monitor = ReliabilityMonitor([ToolErrorRateDetector()], reporter, RemediationPolicy())
+    await agent.register_rail(ReliabilityRail(monitor=monitor, member_name="worker"))
+    mock_llm = MockLLMModel()
+    mock_llm.set_responses(
+        [create_tool_call_response("reliability_mock_three_failures", '{"a": 1, "b": 2}') for _ in range(3)]
+        + [create_text_response("giving up")]
+    )
+
+    with patch.object(agent, "_get_llm", return_value=mock_llm):
+        await agent.invoke({"query": "keep failing"})
+
+    assert [anomaly.kind for anomaly in reporter.reported] == [AnomalyKind.TOOL_ERROR_RATE]
+
+
+@pytest.mark.asyncio
+async def test_paused_tool_call_emits_no_tool_outcome_signal(agent_factory):
+    agent = agent_factory("reliability_mock_paused", lambda a, b: a + b)
+    monitor = _RecordingMonitor()
+    await agent.register_rail(ReliabilityRail(monitor=monitor, member_name="worker"))
+    await agent.register_rail(ConfirmInterruptRail(tool_names=["reliability_mock_paused"]))
+    mock_llm = MockLLMModel()
+    mock_llm.set_responses([create_tool_call_response("reliability_mock_paused", '{"a": 1, "b": 2}')])
+
+    with patch.object(agent, "_get_llm", return_value=mock_llm):
+        result = await agent.invoke({"query": "needs approval"})
+
+    assert result["result_type"] == "interrupt"
+    # The confirm rail runs first and pauses the call; the call never ends here.
+    assert [signal.kind for signal in monitor.signals] == [SignalKind.BEFORE_MODEL_CALL, SignalKind.AFTER_MODEL_CALL]

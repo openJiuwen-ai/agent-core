@@ -38,7 +38,8 @@ ExternalRuntimeFailureCategory = Literal[
     "unknown",
 ]
 
-ExternalRuntimeAgentKind = Literal["claude", "codex"]
+# ``claude`` / ``codex`` or the name of the third-party harness provider.
+ExternalRuntimeAgentKind = str
 
 ExternalRuntimePhase = Literal["startup", "turn"]
 

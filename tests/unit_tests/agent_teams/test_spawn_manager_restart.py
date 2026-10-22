@@ -59,3 +59,28 @@ async def test_restart_teammate_passes_no_initial_message():
     sm.spawn_teammate.assert_awaited_once()
     assert sm.spawn_teammate.await_args.kwargs["initial_message"] is None
     sm._configurator.team_backend.get_member.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_unhealthy_dormant_member_is_not_restarted():
+    """A retired member's runtime exiting is its retirement, not a failure (F_118)."""
+    from openjiuwen.agent_teams.schema.status import MemberStatus
+
+    member_dao = SimpleNamespace(
+        get_member=AsyncMock(return_value=SimpleNamespace(status=MemberStatus.DORMANT.value)),
+        update_member_status=AsyncMock(),
+    )
+    configurator = SimpleNamespace(
+        member_name="leader",
+        team_backend=SimpleNamespace(db=SimpleNamespace(member=member_dao)),
+        team_name="t",
+    )
+    sm = SpawnManager(state=TeamAgentState(), configurator=configurator, team_agent_getter=lambda: None)
+    sm.cleanup_teammate = AsyncMock()
+    sm.restart_teammate = AsyncMock(return_value=True)
+
+    await sm.on_teammate_unhealthy("sleepy")
+
+    sm.restart_teammate.assert_not_awaited()
+    member_dao.update_member_status.assert_not_awaited()

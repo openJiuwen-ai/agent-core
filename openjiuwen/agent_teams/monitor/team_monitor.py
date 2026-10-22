@@ -94,6 +94,18 @@ class TeamMonitor:
     def session_id(self) -> str:
         return self._session_id
 
+    @property
+    def team_agent(self) -> TeamAgent:
+        """Leader TeamAgent this monitor listens on.
+
+        A runtime rebuild (e.g. ``stop_team`` + cold recovery after the
+        model selection changes) replaces the leader instance in the pool,
+        and a monitor bound to the old instance stops receiving events.
+        Callers compare this against a freshly resolved monitor's leader to
+        detect that and rebind.
+        """
+        return self._team_agent
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

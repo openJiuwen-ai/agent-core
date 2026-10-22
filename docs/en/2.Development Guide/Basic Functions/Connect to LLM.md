@@ -1,5 +1,11 @@
 # Connect to LLM
 
+## Malformed Unicode in messages
+
+For OpenAI-compatible Chat Completions, `invoke` and `stream` reuse the shared request sanitizer to replace isolated UTF-16 surrogate halves with U+FFFD and combine valid surrogate pairs. Message content, tool arguments and request options are normalized without modifying the caller's messages or stored history.
+
+Local encoding or JSON serialization failures during SDK HTTP request construction raise `MODEL_INVOKE_PARAM_ERROR` (181004), retain the original cause, and set `details.stage=request_encoding`. Provider failures and response parsing errors retain their existing model-call error handling. Default file logs use `backslashreplace` to retain unencodable surrogate characters as escapes such as `\ud83d` instead of dropping the error record.
+
 Different models have their own strengths in reasoning ability, conversational fluency, and multi-turn interaction. Users can flexibly choose the most suitable model based on specific application scenarios—for example, selecting a model with stronger reasoning for complex logical tasks, or a model with more natural interaction for a smoother conversational experience.
 
 openJiuwen provides a unified **model client + configuration** system through `openjiuwen.core.foundation.llm`. The recommended integration approach is:

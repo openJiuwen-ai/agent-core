@@ -23,7 +23,7 @@ from typing import Any, AsyncIterator
 import jsonschema
 
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
-from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.foundation.tool import ToolCard, ToolExposure
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
@@ -82,6 +82,10 @@ class StructuredOutputTool(Tool):
                 id=tool_id,
                 name="structured_output",
                 description=translator("structured_output"),
+                # Declared explicitly so progressive tool exposure never defers
+                # the submit tool: the model must be able to finish without a
+                # tool_search round-trip.
+                exposure=ToolExposure.DIRECT,
             )
         )
         self.card.input_params = schema_json or _DEFAULT_SCHEMA

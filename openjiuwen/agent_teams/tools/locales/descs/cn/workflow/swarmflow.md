@@ -56,7 +56,7 @@ META = {
     "name": "deep-research",
     "description": "一行描述，权限对话框里展示",
     "whenToUse": "适合做什么（可选，工作流列表里展示）",
-    "phases": [{"title": "Search", "detail": "并行检索"}, {"title": "Verify", "model": "..."}],  # title 也可为纯字符串
+    "phases": [{"title": "Search", "detail": "并行检索"}, {"title": "Verify", "detail": "交叉验证"}],  # title 也可为纯字符串
     # 仅当用户明确给出预算数字时才写这行（见「预算」节）；用户没给时【必须省略】：
     # "workflow_token_limit": 200000,
 }
@@ -69,7 +69,7 @@ async def run(args):
 
 - `META` 必须是**纯字面量**——不能有变量、函数调用、f-string、字符串拼接（加载期静态提取）。
 - 必填 `name` / `description`；可选 `whenToUse`（工作流列表展示）、`phases`、`workflow_token_limit`（本次 run 的独立 token 额度，纯整数；**仅当用户明确给出预算数字时才写**，用户没给时**必须省略**——见「预算 budget」节）。
-- `phases[].title` 与脚本里 `phase()` 调用的标题**精确匹配**；没有对应 `phase()` 的项自成一个进度组。某阶段项可带 `model` 覆盖该阶段默认模型（`{"title": "Verify", "model": "..."}`）。
+- `phases[].title` 与脚本里 `phase()` 调用的标题**精确匹配**；没有对应 `phase()` 的项自成一个进度组。
 - **返回值语义**：worker 被告知"它的最终文本**就是**返回值"（不是给人看的消息），所以它返回**原始数据**。`run(args)` 的返回值（通常是 dict）即工作流最终结果，自动回灌给调用者。
 
 ## 编排原语（`from swarmflow import ...`）
@@ -78,14 +78,19 @@ async def run(args):
   - `label` 覆盖进度显示里的标签。
   - `phase` 显式把这次 `agent()` 归入某进度组——在 `pipeline`/`parallel` 的 stage **内部**务必显式传 `phase`，避免对全局 `phase()` 状态产生竞态；相同 `phase` 字符串归入同一进度组。
   - `options` 是调优 / 前向兼容参数袋（dict），键经引擎 + backend 白名单校验，未知键 fail-fast。当前可用键：
-    - `model` 覆盖本次 worker 的模型。**默认省略**——worker 继承团队 teammate 模型（几乎总是正确）；只有当你高度确信某 worker 需要不同档位时才设。
-    - `timeout` 本次 worker 调用的超时秒数。
+    - `model` 覆盖本次 worker 的模型。**默认省略**——worker 继承团队 teammate 模型（几乎总是正确）；只有当你高度确信某 worker 需要不同档位时才设。**三方节点（配了 `agent_type`，见下）**：名字命中团队 model pool 且与 CLI 协议兼容 → 跑在 pool 端点；命中但不兼容 / 不在 pool → **发射前直接失败**（错误给出可兼容的 pool 模型名单，该 CLI 声明了内置模型时一并给出并指路 `builtin_model`）。**`model` / `builtin_model` / `effort` 全留空** → CLI 用自己登录的默认模型。**绝不回退**：认证失败等环境问题按 `AGENT_FAILED` 上抛（文案含根因与改法），改脚本后重跑——不会偷偷换一个模型继续。
+    - `builtin_model`（仅三方节点）：在该 CLI **自身登录**（如订阅）上选一个内置模型，与 `model` **互斥**（`model` 跑 pool 端点、`builtin_model` 跑 CLI 登录）。只接受该 CLI 声明的内置模型名——哪些 kind 声明了内置模型、各有哪几个可选，见工具描述末尾注入的 `<builtin_model_catalog>`（未注入说明未开放）。
+    - `effort`（仅三方节点）：所选 `builtin_model` 的推理强度，从该模型的 `efforts` 里选；**必须伴随 `builtin_model`**，省略取该模型的 `default_effort`。
+    - `timeout` 本次 worker 调用的超时秒数。agent 路径：超时视为本次尝试失败并自动重试（默认再试 2 次），全部失败后该 agent 以失败收场、脚本继续（失败消息自带秒数）；human 路径：等待真人回复的时限，超时视为"未回答"跳过该轮（不重试）。省略则不限时。
+
     - `isolation='worktree'`：在全新 git worktree 里跑 worker，**昂贵**（每 worker 约 200-500ms 设置 + 磁盘开销），**仅当** worker 并行改文件且会互相冲突时才用；worktree 若无更改则自动回收。**缓存命中重放时不重建 worktree**——resume/relaunch 命中的 `agent()` 调用直接复用 journal 结果、跳过 worker 执行，其 worktree 内的文件产物不会重新出现；worker 的产出应通过返回值（文本/schema）交付，不要假设 worktree 文件在重放后仍存在。**同 run_id 续跑复用**：pause 后 resume 重跑被打断的 `isolation` worker 时，它会在自己上次留下的同一个 worktree 里继续（含上次未完成的修改）；给已完成的调用新增/移除 `isolation` 会使该调用重算。
-    - `agent_type`：用具名专家 subagent（如团队里某类 teammate）替代默认 worker，从与团队相同的注册表解析；与 `schema` 组合使用（专家系统提示词会被追加结构化输出指令）。（接口就位、执行推进中。）
+    - `agent_type`：把这个节点派给**三方 CLI Agent**（`'claude'` / `'codex'`），`agent()` 与 `agent_session()` 均可用。取值必须同时是引擎支持的 CLI 后端**且**在本团队的三方 Agent 白名单内，否则该节点直接失败（错误里给出两个名单）。与 `schema` 组合时走"提示词约束 + JSON 解析"：CLI 未返回合法 JSON 视同未提交（重试后为 `None`）。模型选项见上方 `model` / `builtin_model` / `effort` 三条（pool 端点或 CLI 自身登录，**无回退**）；三方轮次的 token 在轮末计入预算（最坏超支一轮）。`agent_session` 的记忆按 run 隔离：同一 run 续跑找回上下文，全新 run 从零开始。
+    - `agent_template`：把这个节点交给**当前会话已绑定专家团的某个成员**来干（填成员名，如 `'clip'`；不带组前缀）。worker 以该成员的人设 + 能力快照（技能 / 工具 / 门禁 / MCP）运行，不再继承 teammate 的通用工具；`agent()` 与 `agent_session()` 均可用，会话在首个真实轮次锁定成员，中途换人需 `fork()`。名字不在专家团内、填 `'leader'`（Team Leader 不是 worker）、带 `/`、与 `agent_type` 同时出现、或该成员声明了外部运行时 → 发射前直接失败并给出可用成员名。不写则与以前完全一样（通用 worker）。
 - `await verify(reviewers, *, threshold=0.85, label=None, phase=None, options=None)` —— 对一份产物跑一轮**多 reviewer 验收判定**并返回结构化 `VerifyResult`（`{verdict: "pass"|"fail"|None, votes, feedback, passed}`）。每个 reviewer 是并行的一次结构化 `agent()`：`verdict` 类投 pass/fail（一票否决），`score` 类投 0~1 分（平均分 ≥ `threshold` 才通过）。任一 reviewer 未投票 → `verdict=None`（undecided），脚本自行决定重试或放弃。**单次判定、不驱动返工**——返回 `feedback` 供脚本组织执行者重做后再 `verify()`。**推荐用业务辅助 `build_reviewers(deliverable, specs, ...)` 从 `type`（`verifier` / `inspector` / `challenger`）+ 产物（文本或文件路径）构建 reviewer**（省 token、提示词一致、自动映射 kind）；仅在需要完全定制提示词时才直接构造 `Reviewer{kind, prompt, label, options}`（见「验证（verify）」一节）。
-- `agent_session(label=, phase=, instructions=, options=)` + `await s.send(prompt, *, schema=, notify=False)` —— **有状态**多轮 agent，跨轮记忆，第二轮无需重述第一轮上下文。`notify=True` 单向推送、返回 `None`。
+- `agent_session(label=, phase=, instructions=, options=)` + `await s.send(prompt, *, schema=, notify=False)` —— **有状态**多轮 agent，跨轮记忆，第二轮无需重述第一轮上下文。`notify=True` 单向推送、返回 `None`。`options.model` **仅在会话首轮生效**（avatar 开启时解析并固化）；中途传不同 `model` 会直接报错，需要不同模型请用 `fork()` 派生新会话。
 - `await s.fork(fork_mode=, keep_rounds=, label=, phase=, instructions=, options=)` —— 从 `agent_session` 派生一个**独立分支**（`fork_mode` 五种）：`full` 全量继承；`before`/`after` 以第 N 轮为界保留前/后；`keep_before_compact_after`/`keep_after_compact_before` 保留一侧、另一侧压成摘要。`keep_rounds` 是**轮数**（每次 `send()` 计一轮）：**`full` 之外的模式必填**（缺省会直接报错，没有截断点就没法截断）；传入的轮数超过父会话实际轮数时**降级为全量**并告警，不报错。fork 在调用时刻冻结父上下文，此后两条线互不影响；子会话可继续 `send`、也可再 `fork`（链式）。`human_session` 不支持 fork。
   - **链式 fork 约束**：**不要 `fork` 一个尚未发送过任何消息的 fork 子会话**——它会降级为镜像兜底（丢失 ToolMessage）。链式派生时，每个被 `fork` 的会话都必须先 `send` 过；若想基于父会话的早期状态派生，直接用父会话的 `fork_mode` + `keep_rounds`（如 `before`/`after`）表达，而不是先 fork 出一个未发送的子再 fork 它。
+  - **三方会话（`agent_type`）的 fork 更严格**：只支持 `full` / `before`（走 CLI 原生分支），`after` 与两种 compact 模式直接报错；`before` 的 `keep_rounds` 越界**直接报错、不降级为 full**；子会话的 `agent_type` 必须与父相同。
 - `await human(prompt, *, schema=)` / `human_session()` + `.send()` —— 一次性 / 有状态的**人类参与**（HITL），等真人不占并发 permit、不计 spawn 预算，可被 journal 重放。
 - `await parallel([thunk, ...])` —— fork-join **栅栏**：并发跑、等齐才返回；分支抛错落 `None`，调用**永不抛**（用前 `compact` 过滤）。thunk 是 `lambda: agent(...)` 这样的零参可调用。
 - `await pipeline(items, stage1, stage2, ...)` —— **无栅栏**流式：每个 item 独立穿过所有 stage（A 可在 stage3 而 B 还在 stage1）；每个 stage 回调收 `(prev, item, index)`——后续 stage 可用 `item`/`index` 标注工作，无需把上下文穿过 `prev`；某 stage 抛错只把该 item 落为 `None`、跳过它剩余 stage。

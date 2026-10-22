@@ -342,10 +342,12 @@ class ExternalCliAgentSpec(BaseModel):
 
     cli_agent: str
     """External agent kind identifier (``"claude"`` / ``"codex"`` /
-    ``"openclaw"`` / ``"hermes"``). ``"claude"`` selects the SDK backend,
-    ``"codex"`` the Codex Python SDK backend, and other values built-in adapters.
-    This is passed to ``spawn_member(cli_agent=...)``. See
-    ``agent_teams/external/cli_agent``."""
+    ``"openclaw"`` / ``"hermes"`` / a third-party harness provider name).
+    ``"claude"`` selects the SDK backend, ``"codex"`` the Codex Python SDK
+    backend, built-in adapter names their subprocess adapters, and any other
+    value a third-party harness provider installed through the
+    ``openjiuwen.harness_providers`` entry point group. This is passed to
+    ``spawn_member(cli_agent=...)``. See ``agent_teams/external/cli_agent``."""
 
     skills: list[str | dict[str, Any]] = Field(default_factory=list)
     """Portable skill directories or manifest SkillSpec mappings for local CLI members."""
@@ -363,11 +365,12 @@ class ExternalCliAgentSpec(BaseModel):
     """
 
     cli_path: str | None = Field(default=None, min_length=1)
-    """Optional executable path for SDK-backed CLI agents.
+    """Optional executable path for SDK- and provider-backed CLI agents.
 
     For Claude this is passed to ``ClaudeAgentOptions.cli_path``. For Codex it
-    maps to ``CodexConfig.codex_bin``. Adapter-backed CLIs should continue to
-    use :attr:`command` when overriding the full launch argv.
+    maps to ``CodexConfig.codex_bin``. A third-party harness provider receives
+    it as its ``cli_path`` configuration key. Adapter-backed CLIs should
+    continue to use :attr:`command` when overriding the full launch argv.
     """
 
     codex_bin: str | None = Field(default=None, min_length=1)
@@ -464,10 +467,11 @@ class ExternalCliAgentSpec(BaseModel):
     builtin_models: list[ExternalCliBuiltinModel] = Field(default_factory=list)
     """Models the CLI offers on its own login that the leader may pick.
 
-    Non-empty enables ``spawn_external_cli(builtin_model=..., effort=...)`` and
+    Non-empty enables ``spawn_teammate``'s ``external_cli.builtin_model`` / ``effort`` and
     the ``set_member_model`` tool for members of this kind; empty keeps the
-    member on ``model_config`` / the pool / the CLI default. Only valid for
-    ``cli_agent`` ``"claude"`` / ``"codex"``.
+    member on ``model_config`` / the pool / the CLI default. Valid for Claude,
+    Codex and third-party harness providers (whose card must declare
+    ``MODEL_SELECTION`` for a member to run one); not for adapter-backed CLIs.
     """
 
     ssh_transport: SshTransportConfig | None = None
@@ -491,8 +495,12 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError(
                 "Codex SDK config does not support command; use cli_path to select a custom executable",
             )
-        if self.cli_agent not in {"claude", "codex"} and self.cli_path is not None:
-            raise ValueError("cli_path is only valid when cli_agent is 'claude' or 'codex'")
+        # Imported here: the adapter registry lives in the external package,
+        # which imports this schema module.
+        from openjiuwen.agent_teams.external.cli_agent.adapters import available_adapters
+
+        if self.cli_path is not None and self.cli_agent in available_adapters():
+            raise ValueError("cli_path is not valid for adapter-backed CLI agents; use command instead")
         if self.cli_agent != "codex" and self.codex_bin is not None:
             raise ValueError("codex_bin is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.mcp_default_tools_approval_mode is not None:
@@ -514,10 +522,11 @@ class ExternalCliAgentSpec(BaseModel):
         # including ``None``, and must still validate for non-Claude members.
         if self.cli_agent != "claude" and self.claude_max_buffer_size is not None:
             raise ValueError("claude_max_buffer_size is only valid when cli_agent='claude'")
-        if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
-            raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
-        if self.cli_agent not in {"claude", "codex"} and self.builtin_models:
-            raise ValueError("builtin_models is only valid when cli_agent is 'claude' or 'codex'")
+        adapter_backed = self.cli_agent in available_adapters()
+        if adapter_backed and self.external_model_config is not None:
+            raise ValueError("model_config is not valid for adapter-backed CLI agents")
+        if adapter_backed and self.builtin_models:
+            raise ValueError("builtin_models is not valid for adapter-backed CLI agents")
         names = [model.name for model in self.builtin_models]
         if len(names) != len(set(names)):
             raise ValueError("builtin_models names must be unique")
@@ -544,6 +553,8 @@ class TeamSpec(BaseModel):
 
     team_name: str
     display_name: str
+    conversation_mode: Literal["team", "group_chat"] = "team"
+    """Fixed runtime mode, inherited by members and persisted with their context."""
     leader_member_name: Optional[str] = None
     language: Optional[str] = None
     dispatch_mode: str = "autonomous"
@@ -552,6 +563,12 @@ class TeamSpec(BaseModel):
     Carried on the runtime spec so paths that only see a
     ``TeamRuntimeContext`` (external CLI member spawn) resolve the same
     tool set and prompt as in-process members.
+    """
+    enable_member_messaging: bool = False
+    """Scheduled peer messaging — mirrors ``TeamAgentSpec.enable_member_messaging``.
+
+    Carried for the same reason as ``dispatch_mode``: an external CLI member's
+    ``send_message`` variant has to match the prompt it was spawned with.
     """
     teammate_mode: str = "build_mode"
     """How teammates execute tasks — mirrors ``TeamAgentSpec.teammate_mode``.
@@ -689,6 +706,21 @@ class TeamRuntimeContext(BaseModel):
             "to tighten the base config. None when no override was specified."
         ),
     )
+    agent_template_spec: Optional[dict[str, Any]] = None
+    """Capability snapshot of a member spawned from an expert template.
+
+    Read back from ``TeamMember.options.agent_template.snapshot`` by
+    ``build_context_from_db``. When the member has no ``agents[<member>]``
+    spec of its own, ``AgentConfigurator.resolve_agent_spec`` applies it to
+    the ``teammate`` base spec (``apply_template_snapshot``).
+    """
+    template_external_cli: Optional[ExternalCliAgentSpec] = None
+    """Launch config of an external-CLI member spawned from an expert template.
+
+    Read back from ``TeamMember.options.agent_template.external_cli``; the
+    external CLI spawn path prefers it over the team's declared config for
+    the same CLI kind.
+    """
 
 
 __all__ = [

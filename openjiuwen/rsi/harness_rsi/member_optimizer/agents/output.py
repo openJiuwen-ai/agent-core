@@ -114,10 +114,11 @@ async def invoke_member_optimizer_agent_structured(
             raise RuntimeError(f"{agent_name} execution failed: {exc}") from exc
         if isinstance(response, dict) and response.get("result_type") == "error":
             raw_text = extract_agent_text(response)
-            if (
-                recover_response is None or attempt >= retry_limit
-                or raw_text != "Max iterations reached without completion"
-            ):
+            is_iteration_limit = (
+                response.get("termination_reason") == "max_iterations"
+                or raw_text == "Max iterations reached without completion"
+            )
+            if recover_response is None or attempt >= retry_limit or not is_iteration_limit:
                 raise RuntimeError(f"{agent_name} execution failed: {raw_text}")
             last_error = raw_text
             previous = {}

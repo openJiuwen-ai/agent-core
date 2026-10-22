@@ -4,11 +4,15 @@
 import asyncio
 import os
 import shutil
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.dialects import mysql, postgresql, sqlite
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from openjiuwen.core.foundation.store.kv.db_based_kv_store import DbBasedKVStore
+from openjiuwen.core.foundation.store.kv.db_based_kv_store import DbBasedKVStore, KVStoreTable
 
 
 @pytest.fixture(name="sqlite_kv_store")
@@ -103,3 +107,81 @@ async def test_sqlite_kv_store(sqlite_kv_store):
 @pytest.mark.asyncio
 async def test_mysql_kv_store(mysql_kv_store):
     await run_default_kv_store(mysql_kv_store)
+
+
+# The upsert and the value column follow the database dialect. SQLite ignores
+# VARCHAR lengths and accepts any insert construct, so the SQLite tests above
+# cannot catch a PostgreSQL or MySQL regression; these tests compile for each
+# dialect without needing a database or its driver.
+
+_DIALECTS = {
+    "postgresql": (postgresql.dialect(), ("ON CONFLICT", "DO UPDATE"), "TEXT"),
+    "mysql": (mysql.dialect(), ("ON DUPLICATE KEY UPDATE",), "LONGTEXT"),
+    "sqlite": (sqlite.dialect(), ("ON CONFLICT", "DO UPDATE"), "TEXT"),
+}
+
+
+def _store_for(dialect):
+    return DbBasedKVStore(SimpleNamespace(dialect=dialect))
+
+
+@pytest.mark.parametrize("name", sorted(_DIALECTS))
+def test_upsert_statement_compiles_for_dialect(name):
+    dialect, clauses, _ = _DIALECTS[name]
+    sql = str(_store_for(dialect)._get_upsert_stmt("key", "value").compile(dialect=dialect))
+    assert all(clause in sql for clause in clauses), sql
+
+
+@pytest.mark.parametrize("name", sorted(_DIALECTS))
+def test_value_column_is_not_length_limited(name):
+    dialect, _, column_type = _DIALECTS[name]
+    assert KVStoreTable.__table__.c.value.type.compile(dialect=dialect) == column_type
+
+
+@pytest.mark.asyncio
+async def test_pipeline_set_uses_the_dialect_upsert(sqlite_kv_store):
+    with mock.patch.object(sqlite_kv_store, "_get_upsert_stmt",
+                           wraps=sqlite_kv_store._get_upsert_stmt) as upsert:
+        pipeline = sqlite_kv_store.pipeline()
+        await pipeline.set("pipeline_key", "pipeline_value")
+        await pipeline.execute()
+    upsert.assert_called_once()
+    assert await sqlite_kv_store.get("pipeline_key") == "pipeline_value"
+
+
+# A checkpoint-sized value round trip, on a real database when one is given:
+# KV_STORE_TEST_URLS="postgresql+asyncpg://...;mysql+aiomysql://..."
+
+_LARGE_VALUE = "x" * 100_000
+_TEST_URLS = [url for url in os.getenv("KV_STORE_TEST_URLS", "").split(";") if url]
+
+
+async def _large_value_round_trip(kv_store):
+    await kv_store.set("large", _LARGE_VALUE)
+    assert await kv_store.get("large") == _LARGE_VALUE
+    await kv_store.set("large", _LARGE_VALUE + "y")
+    assert await kv_store.get("large") == _LARGE_VALUE + "y"
+    pipeline = kv_store.pipeline()
+    await pipeline.set("piped", _LARGE_VALUE)
+    await pipeline.execute()
+    assert await kv_store.get("piped") == _LARGE_VALUE
+
+
+@pytest.mark.asyncio
+async def test_sqlite_large_value(sqlite_kv_store):
+    await _large_value_round_trip(sqlite_kv_store)
+
+
+@pytest.mark.skipif(not _TEST_URLS, reason="set KV_STORE_TEST_URLS to run against real databases")
+@pytest.mark.parametrize("url", _TEST_URLS or ["unused"])
+@pytest.mark.asyncio
+async def test_database_kv_store(url):
+    engine = create_async_engine(url)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("DROP TABLE IF EXISTS kv_store"))
+        kv_store = DbBasedKVStore(engine)
+        await run_default_kv_store(kv_store)
+        await _large_value_round_trip(kv_store)
+    finally:
+        await engine.dispose()

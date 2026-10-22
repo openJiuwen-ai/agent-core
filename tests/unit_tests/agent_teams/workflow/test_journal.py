@@ -554,3 +554,53 @@ def test_new_records_go_to_per_run_wal_not_legacy(tmp_path):
     )
     assert reloaded.get_cached(key_str([["call", 0]]), "s", "run-A") is not None
     assert reloaded.get_cached(key_str([["call", 1]]), "s", "run-A") is not None
+
+
+def test_call_signature_ignores_progressive_tool_key():
+    """Flipping the team's progressive-tool switch must not invalidate cached rounds:
+    only label/phase/model(/isolation) identify a call."""
+    base_opts = {"label": "coder", "phase": "build", "model": "m1"}
+    with_switch = {**base_opts, "progressive_tool": True}
+
+    assert call_signature("p", base_opts, None) == call_signature("p", with_switch, None)
+
+
+def test_call_signature_folds_agent_type_when_set():
+    """agent_type re-keys the call so a third-party round never replays a native cache row.
+    Absent / None stays byte-identical to the legacy signature."""
+    plain = call_signature("task A", {"label": "A"}, None)
+    codex = call_signature("task A", {"label": "A", "agent_type": "codex"}, None)
+    claude = call_signature("task A", {"label": "A", "agent_type": "claude"}, None)
+    assert codex != plain
+    assert claude != plain
+    assert codex != claude
+    assert call_signature("task A", {"label": "A", "agent_type": None}, None) == plain
+
+
+def test_call_signature_folds_builtin_model_and_effort():
+    """builtin_model / effort re-key a third-party call on top of agent_type.
+    Absent / None stays byte-identical to the agent_type-only signature (a native
+    opts dict never carries these keys, so existing caches stay valid)."""
+    base = {"label": "x", "agent_type": "codex"}
+    plain = call_signature("task A", base, None)
+    third_party = call_signature(
+        "task A", {**base, "builtin_model": "gpt-5-codex", "effort": "high"}, None,
+    )
+    assert third_party != plain
+    # Explicit None is the same as absent (option bag strips None before opts).
+    assert call_signature(
+        "task A", {**base, "builtin_model": None, "effort": None}, None,
+    ) == plain
+
+
+def test_call_signature_folds_agent_template_when_set():
+    """Two experts on the same prompt are two calls; no agent_template keeps the legacy bytes."""
+    from openjiuwen.agent_teams.workflow.engine.journal import call_signature
+
+    base = {"label": "x", "phase": "p", "model": None}
+    legacy = call_signature("prompt", base, None)
+    assert call_signature("prompt", {**base, "agent_template": "clip"}, None) != legacy
+    assert call_signature("prompt", {**base, "agent_template": "clip"}, None) != call_signature(
+        "prompt", {**base, "agent_template": "scene"}, None
+    )
+    assert call_signature("prompt", {**base, "agent_template": None}, None) == legacy

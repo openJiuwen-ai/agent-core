@@ -33,7 +33,7 @@ def search_wikipedia(query: str) -> str:
     
     try:
         # First, search for the page
-        response = requests.get(url, params=params, headers=headers)
+        response = requests.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         search_results = response.json().get("query", {}).get("search", [])
         
@@ -54,7 +54,7 @@ def search_wikipedia(query: str) -> str:
             "exlimit": 1
         }
         
-        summary_response = requests.get(url, params=summary_params, headers=headers)
+        summary_response = requests.get(url, params=summary_params, headers=headers, timeout=10)
         summary_response.raise_for_status()
         
         pages = summary_response.json().get("query", {}).get("pages", {})

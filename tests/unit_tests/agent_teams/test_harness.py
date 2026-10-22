@@ -29,8 +29,15 @@ import pytest
 from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.harness import team_harness as harness_module
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.core.foundation.llm import AssistantMessage
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
+from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPTION_KEY,
+    ToolInterruptEntry,
+    ToolInterruptionState,
+)
 
 
 class _FakeNative:
@@ -201,6 +208,34 @@ def test_outputs_delegates_to_native() -> None:
     native.outputs.assert_called_once_with()
 
 
+def test_dynamic_tools_survive_native_rebuild() -> None:
+    first_native = _stub_native()
+    second_native = _stub_native()
+    harness = _make_harness(first_native)
+    tool = SimpleNamespace(card=SimpleNamespace(name="org_dissolve_organization"))
+
+    harness.add_tool(tool)
+    harness._native = second_native
+    harness._remount_dynamic_tools()
+
+    first_native.ability_manager.add_ability.assert_called_once_with(tool.card, tool)
+    second_native.ability_manager.add_ability.assert_called_once_with(tool.card, tool)
+
+
+def test_remove_dynamic_tool_prevents_rebuild_remount() -> None:
+    first_native = _stub_native()
+    second_native = _stub_native()
+    harness = _make_harness(first_native)
+    tool = SimpleNamespace(card=SimpleNamespace(name="org_dissolve_organization"))
+
+    harness.add_tool(tool)
+    harness.remove_tool("org_dissolve_organization")
+    harness._native = second_native
+    harness._remount_dynamic_tools()
+
+    second_native.ability_manager.add_ability.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_subscribe_forwards_to_native() -> None:
     native = _stub_native()
@@ -282,6 +317,21 @@ def test_has_pending_interrupt_returns_true_when_state_present() -> None:
     assert harness.has_pending_interrupt() is True
 
 
+def _paused_state(**interrupt_ids: str) -> ToolInterruptionState:
+    """A paused state with one interrupt per tool call: ``call_id=interrupt_id``."""
+    calls = [ToolCall(id=call_id, type="function", name="tool", arguments="{}") for call_id in interrupt_ids]
+    return ToolInterruptionState(
+        ai_message=AssistantMessage(content="", tool_calls=calls),
+        iteration=0,
+        interrupted_tools={
+            call.id: ToolInterruptEntry(
+                tool_call=call, interrupt_requests={call.id: InterruptRequest(interrupt_id=interrupt_ids[call.id])}
+            )
+            for call in calls
+        },
+    )
+
+
 def test_pending_interrupt_read_from_active_agent_session_after_loop_cleanup() -> None:
     """ask_user interrupts can outlive native ``loop_session`` cleanup.
 
@@ -289,11 +339,7 @@ def test_pending_interrupt_read_from_active_agent_session_after_loop_cleanup() -
     session bound at ``start`` — so a pending interrupt is still visible and a
     matching resume is still valid.
     """
-    pending_state = SimpleNamespace(
-        interrupted_tools={
-            "ask-user": SimpleNamespace(interrupt_requests={"tool-ask-1": object()}),
-        }
-    )
+    pending_state = _paused_state(**{"tool-ask-1": "intr_ask"})
 
     class _AgentSession:
         def get_state(self, key: str) -> Any:
@@ -321,7 +367,7 @@ def test_is_pending_interrupt_resume_valid_rejects_non_interactive_input() -> No
 def test_is_pending_interrupt_resume_valid_returns_false_without_pending_ids() -> None:
     """No interrupted tools means no resume is valid."""
     session = MagicMock(name="LoopSession")
-    session.get_state.return_value = SimpleNamespace(interrupted_tools={})
+    session.get_state.return_value = _paused_state()
     native = _stub_native(loop_session=session)
     harness = _make_harness(native)
 
@@ -332,10 +378,8 @@ def test_is_pending_interrupt_resume_valid_returns_false_without_pending_ids() -
 
 
 def test_is_pending_interrupt_resume_valid_accepts_matching_ids() -> None:
-    entry = SimpleNamespace(interrupt_requests={"call-1": object()})
-    state = SimpleNamespace(interrupted_tools={"call-1": entry})
     session = MagicMock(name="LoopSession")
-    session.get_state.return_value = state
+    session.get_state.return_value = _paused_state(**{"call-1": "intr_1"})
     native = _stub_native(loop_session=session)
     harness = _make_harness(native)
 
@@ -346,10 +390,8 @@ def test_is_pending_interrupt_resume_valid_accepts_matching_ids() -> None:
 
 
 def test_is_pending_interrupt_resume_valid_rejects_mismatched_ids() -> None:
-    entry = SimpleNamespace(interrupt_requests={"call-1": object()})
-    state = SimpleNamespace(interrupted_tools={"call-1": entry})
     session = MagicMock(name="LoopSession")
-    session.get_state.return_value = state
+    session.get_state.return_value = _paused_state(**{"call-1": "intr_1"})
     native = _stub_native(loop_session=session)
     harness = _make_harness(native)
 
@@ -357,6 +399,22 @@ def test_is_pending_interrupt_resume_valid_rejects_mismatched_ids() -> None:
     interactive.update("call-2", {"approved": True})
 
     assert harness.is_pending_interrupt_resume_valid(interactive) is False
+
+
+def test_is_pending_interrupt_resume_valid_accepts_answers_by_interrupt_id() -> None:
+    state = _paused_state(**{"call-1": "intr_1"})
+    session = MagicMock(name="LoopSession")
+    session.get_state.return_value = state
+    harness = _make_harness(_stub_native(loop_session=session))
+
+    by_id = InteractiveInput()
+    by_id.answer("intr_1", {"approved": True})
+    assert harness.is_pending_interrupt_resume_valid(by_id) is True
+
+    stale = InteractiveInput()
+    stale.answer("intr_1", {"approved": True})
+    stale.answer("intr_gone", {"approved": True})
+    assert harness.is_pending_interrupt_resume_valid(stale) is False
 
 
 def test_init_cwd_for_round_no_op_without_workspace() -> None:

@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（agent 层 span 在 `openjiuwen/harness/observability/`） |
-| 最近一次修订日期 | 2026-09-03 |
-| 关联 feature | F_09_team-stream-logging.md、F_37_observability-otel-trace.md、F_83_agent-tier-rail-split.md、F_110_genai-semconv-canonicalization.md |
+| 最近一次修订日期 | 2026-10-16 |
+| 关联 feature | F_09_team-stream-logging.md、F_37_observability-otel-trace.md、F_83_agent-tier-rail-split.md、F_110_genai-semconv-canonicalization.md、B_01_team-root-adopts-foreign-session-root.md、F_124_monitor-message-template-meta.md |
 
 ## 范围 / 边界
 
@@ -56,6 +56,7 @@
 14. **聚合按 source 独立维护**。`_runs: dict[(member, role), _Run]`——每个 source 有自己的待定累积段；同一 source 切换 category 或遇到该 source 的离散 chunk 时 flush **该 source 的段**，**不同 source 的 chunk 交错不互相打断**。leader 与 teammate 在 inprocess fan-out 下 chunk 必然交错，单一游标模型会把每个 token 切成独立记录、彻底破坏聚合，故须按 source 分桶。
 15. **`hide_dm` 是 monitor 实例级别的对称过滤**。`TeamMonitor(hide_dm=True)` 同时作用于 pull 与 push 两条路径：`get_messages` 把非广播消息（`MessageInfo.broadcast=False`）从结果中剔除——单收件人 DM 视图（带 `to_member_name`）直接返 `[]`，全 team 视图走 `get_team_messages(broadcast=True)` 下推到 DAO；`_on_event` 丢弃 `MonitorEventType.MESSAGE` 事件，`BROADCAST` 不动。两路必须一致：单边过滤会让"流里看不到 DM 但 query 仍能查到"或反之，破坏调用方对"hide_dm = DM 不可见"的语义预期。`hide_dm` 只屏蔽消息维度，team / member / task 事件不受影响。
 16. **GenAI 标准键只有一套写入真相**。所有模型、工具、Codex/Claude bridge、trajectory、RL 与前端投影都使用 OpenTelemetry GenAI semantic conventions 的当前名称；后端类型不得改变字段形状。OpenJiuwen 关联信息只能写入 `openjiuwen.*`。旧 `gen_ai.prompt.*`、`gen_ai.completion.*`、`gen_ai.tool.input/output/id` 等不再有任何读取边界：历史轨迹不被读取，也不得重新引入回退。
+17. **run root 只按 session 归属，绝不跨会话猜测**。单 Agent 与 Team 会话天然隔离：已知自身 session 的调用方（`_maybe_attach_observability`、`get_team_span(session_id=...)`、`get_or_create_team_span`）只能拿到本 session 的 root——`get_session_root_span(session_id)` 仅接受绑定 session 为空或相等的上下文 root，其余只查 `_root_registry[session_id]`，不走 ambient、不回退到其他 session。`get_root_span()` 在无 session 时只看上下文绑定的 root 与宿主显式设置的 ambient root，**不存在"注册表唯一存活 root"兜底**：进程里唯一在飞的 root 只是恰好在跑的那个会话，认领它会让本会话的 root 永远不被创建、整条轨迹静默丢失（见 B_01）。harness 的 `resolve_run_root_span` 同样只按 session 精确查自己的 `_ROOT_SPANS`（单 Agent run 和子 Agent 别名；Team root 不进入该表），它依赖 `DeepAgent.start()` 在派生 supervisor 等 task 之前绑定 observability session。订阅投递来的事件由 `CoordinationKernel` 在整个处理期间绑定订阅 topic 所属的 session（listener 分发和 per-session 表查询都在其中），所以 monitor handler / rail 里的 `get_team_span()` 总能按本会话解析。
 
 ## 接口契约
 
@@ -104,6 +105,9 @@ class TeamMonitor:
     def team_name(self) -> str: ...
     @property
     def session_id(self) -> str: ...
+    @property
+    def team_agent(self) -> TeamAgent:
+        """Leader instance the listener is registered on (read-only)."""
 
     async def start(self) -> None:
         """Idempotent. Registers self._on_event on the leader."""
@@ -111,6 +115,8 @@ class TeamMonitor:
     async def stop(self) -> None:
         """Idempotent. Unregisters listener and terminates events() iterator."""
 ```
+
+`team_agent` 暴露监听所挂的 leader 实例。runtime 被重建（如 `activate` 因模型选择变化 `stop_team` 后冷恢复）时 pool 里换成新的 leader，挂在旧实例上的 monitor 不会再收到事件、也不会收到结束 sentinel；宿主应在每次 runtime ready 时重新 `get_agent_team_monitor`，用 `is` 比较新旧 `team_agent`，不一致就 `stop()` 旧 monitor 并改挂新的。
 
 #### `TeamMonitor` 查询 API
 
@@ -261,7 +267,12 @@ flush / close**，**不走 `team_logger`**。
 - token 使用 `gen_ai.usage.input_tokens`、`output_tokens`、`cache_read.input_tokens`、
   `cache_write.input_tokens`、`reasoning.output_tokens`；不推导 total，也不按 exporter 扣减。
 - 首包耗时以秒写入 `gen_ai.response.time_to_first_chunk`，结束原因写入数组
-  `gen_ai.response.finish_reasons`。
+  `gen_ai.response.finish_reasons`。首包可能是不含输出的空 delta（如仅含 role 的首帧），
+  因此首 token 耗时另以毫秒写入 `openjiuwen.gen_ai.response.time_to_first_token_ms`
+  （首个含 content、reasoning 或 tool call 片段的 chunk），响应头到达耗时写入
+  `openjiuwen.gen_ai.response.time_to_first_byte_ms`，SDK 传输层重试次数写入
+  `openjiuwen.request.retry_count`；`openjiuwen.gen_ai.response.tpot_ms` 在首尾两个含输出的
+  chunk 之间计算。以上耗时均以 LLM span 打开时刻为起点，属于客户端端到端测量。
 - request id、消息计数、reasoning wall-clock 等非标准信息使用 `openjiuwen.*`，不得占用
   `gen_ai.*` 命名空间。
 
@@ -330,7 +341,7 @@ class MonitorEvent(BaseModel):
 | `TeamInfo` | `Team` SQLModel | `team_name`, `display_name`, `leader_member_name`, `desc`, `created` (ms) |
 | `MemberInfo` | `TeamMember` SQLModel | `member_name`, `team_name`, `display_name`, `desc`, `status`, `execution_status`, `mode` |
 | `TaskInfo` | `TeamTaskBase` SQLModel | `task_id`, `team_name`, `title`, `content`, `status`, `assignee`, `updated_at` (ms, 与当前 `status` 绑定) |
-| `MessageInfo` | `TeamMessageBase` SQLModel | `message_id`, `team_name`, `from_member_name`, `to_member_name`, `content`, `protocol` (`"plain"` 普通文本 / `"json"` 结构化 payload 如审批请求和结果), `timestamp` (ms), `broadcast`, `is_read` |
+| `MessageInfo` | `TeamMessageBase` SQLModel | `message_id`, `team_name`, `from_member_name`, `to_member_name`, `content`, `protocol` (`"plain"` 普通文本 / `"json"` 结构化 payload 如审批请求和结果), `timestamp` (ms), `broadcast`, `is_read`, `meta`（仅框架模板消息：`message_template.parse_meta` 解析出的 `{template, refs, params}`；此类行 `content` 恒空、正文投递时才渲染，观察者据 `meta` 自行组展示文案，见 F_124；普通 / 畸形行为 `None`） |
 
 适配层的存在意义：让监控 API 与内部 db schema 解耦。新增 db 字段不会自动暴露给 monitor 消费方；要暴露需要**显式**在对应 `Info` 上加字段并改 `from_internal`。
 

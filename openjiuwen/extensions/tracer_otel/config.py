@@ -33,6 +33,10 @@ class OtelTracerConfig:
     redact_prompts: bool | None = None  # None → fallback to redaction_enabled; True/False overrides
     redact_completions: bool | None = None  # None → fallback to redaction_enabled; True/False overrides
     max_attr_length: int = 4096  # general cap; canonical system instructions are exempt
+    # Process-wide HTTP instrumentation switch (traceparent propagation).
+    # Overrides come from OPENJIWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE; the private
+    # tracer provider above is unaffected either way.
+    global_instrument_enable: bool = False
 
     def __post_init__(self):
         if not (_SAMPLE_RATE_RANGE[0] <= self.sample_rate <= _SAMPLE_RATE_RANGE[1]):

@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from pydantic import BaseModel, Field
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt import InterruptRequest
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind
 from openjiuwen.core.single_agent.rail import AgentCallbackContext
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.tools.ask_user import AskUserTool
@@ -35,6 +36,8 @@ class AskUserRail(BaseInterruptRail):
         rail = AskUserRail()
         await agent.register_rail(rail)
     """
+
+    interrupt_kind: str = InterruptKind.ASK_USER
 
     def __init__(
             self,

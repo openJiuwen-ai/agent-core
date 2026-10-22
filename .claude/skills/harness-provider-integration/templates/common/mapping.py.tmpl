@@ -1,0 +1,341 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Translate __DISPLAY__ records into protocol v1 events.
+
+One accumulator lives for one external Turn.  Each record the vendor emits
+goes through :meth:`__CLASS__TurnAccumulator.consume`, which returns the
+protocol events it maps to; the terminal result is built once the record
+stream ends.
+
+SCAFFOLD(mapping): the branches below handle the scaffold's *reference*
+record shape (``{"type": "text_delta" | "message" | "tool_call" | ...}``),
+not the vendor's.  Capture real records first, then rewrite ``consume`` and
+its helpers for them and reshape the unit-test fixtures to match.  Unknown
+records must stay ``ProviderEvent``s; never drop vendor information.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Mapping
+
+from openjiuwen.harness_protocol import (
+    ContentBlock,
+    DiagnosticEvent,
+    DiagnosticLevel,
+    ItemEventKind,
+    ItemLifecycleEvent,
+    MessageRole,
+    OutputChannel,
+    OutputEvent,
+    OutputKind,
+    OutputOperation,
+    ProviderEvent,
+    TurnError,
+    TurnEventKind,
+    TurnMessage,
+    TurnResult,
+    TurnStatus,
+    TurnTermination,
+    TurnTerminationKind,
+    TurnUsage,
+    UsageUpdatedEvent,
+    UsageUpdateMode,
+)
+from openjiuwen.harness_providers.base import PendingTurn, TurnTiming, interrupted_result
+from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
+from __PKG__.failure_classifier import classify_error_record, turn_error
+
+PROVIDER_NAME = "__CARD__"
+SCHEMA_VERSION = "1"
+# SCAFFOLD(turn-end): whether the end of the record stream (iterator
+# exhausted / process EOF with exit code 0) is itself the end of the turn.
+# Keep False when the vendor always writes an explicit terminal record.
+STREAM_END_IS_TURN_END = False
+
+
+@dataclass(frozen=True, slots=True)
+class MappedEvent:
+    """One protocol payload plus the provider item it is about."""
+
+    payload: Any
+    item_id: str | None = None
+
+
+@dataclass(slots=True)
+class _OpenOutput:
+    output_id: str
+    parts: list[str] = field(default_factory=list)
+
+
+class __CLASS__TurnAccumulator:
+    """State needed to normalize the records of one external Turn."""
+
+    def __init__(self, *, turn_id: str) -> None:
+        self.turn_id = turn_id
+        self.messages: list[TurnMessage] = []
+        self.session_id: str | None = None
+        self.last_text_output = ""
+        self.records_seen = 0
+        self.ended = False
+        self.end_status: str | None = None
+        self.error: TurnError | None = None
+        self.usage: TurnUsage | None = None
+        self._open: dict[OutputChannel, _OpenOutput] = {}
+        self._output_seq = 0
+        self._tool_names: dict[str, str] = {}
+
+    def consume(self, record: Mapping[str, Any]) -> list[MappedEvent]:
+        """Map one vendor record to protocol events."""
+        self.records_seen += 1
+        session_id = record.get("session_id")
+        if isinstance(session_id, str) and session_id:
+            self.session_id = session_id
+        record_type = str(record.get("type") or "unknown")
+        if record_type == "session":
+            return []
+        if record_type == "text_delta":
+            return self._delta(OutputChannel.ANSWER, record)
+        if record_type == "reasoning_delta":
+            return self._delta(OutputChannel.REASONING, record)
+        if record_type == "message":
+            return self._message(record)
+        if record_type == "tool_call":
+            return [*self.finish(), self._tool_started(record)]
+        if record_type == "tool_result":
+            return [self._tool_completed(record)]
+        if record_type == "usage":
+            return self._usage(record)
+        if record_type == "error":
+            return self._error(record)
+        if record_type == "turn_end":
+            return self._turn_end(record)
+        return [_provider_event(record_type, record)]
+
+    def close_stream(self, *, exit_code: int | None = None) -> None:
+        """Record that the record stream ended (iterator exhausted or EOF)."""
+        if self.ended:
+            return
+        if STREAM_END_IS_TURN_END and exit_code in (None, 0) and self.error is None:
+            self.ended = True
+            self.end_status = "completed"
+            return
+        if exit_code not in (None, 0) and self.error is None:
+            self.error = turn_error(
+                f"__DISPLAY__ exited with code {exit_code}",
+                category="sdk_error",
+                code="__UPPER___EXIT",
+                provider_data={"exit_code": exit_code},
+            )
+
+    def finish(self) -> list[MappedEvent]:
+        """Finalize every open output; call before building the terminal result."""
+        mapped: list[MappedEvent] = []
+        for channel in (OutputChannel.REASONING, OutputChannel.ANSWER):
+            mapped.extend(self._finalize(channel, None))
+        return mapped
+
+    def build_terminal_result(self, *, turn: PendingTurn, timing: TurnTiming) -> tuple[TurnEventKind, TurnResult]:
+        """Build the single terminal result once the record stream is over."""
+        if turn.abort_requested:
+            return TurnEventKind.ABORTED, self.build_interrupted_result(turn, timing=timing)
+        if self.error is not None:
+            return TurnEventKind.FAILED, self.build_failed_result(self.error, timing=timing)
+        if self.end_status == "interrupted":
+            return TurnEventKind.ABORTED, TurnResult(
+                status=TurnStatus.INTERRUPTED,
+                termination=TurnTermination(
+                    kind=TurnTerminationKind.PROVIDER,
+                    message="__DISPLAY__ interrupted the turn",
+                ),
+                **self._common(timing),
+            )
+        if self.end_status == "failed":
+            error = turn_error("__DISPLAY__ reported a failed turn", category="sdk_error")
+            return TurnEventKind.FAILED, self.build_failed_result(error, timing=timing)
+        if not self.ended:
+            error = turn_error(
+                "__DISPLAY__ ended the record stream without ending the turn",
+                category="sdk_error",
+                code="__UPPER___MISSING_TURN_END",
+            )
+            return TurnEventKind.FAILED, self.build_failed_result(error, timing=timing)
+        return TurnEventKind.FINISHED, TurnResult(status=TurnStatus.COMPLETED, **self._common(timing))
+
+    def build_failed_result(self, error: TurnError, *, timing: TurnTiming) -> TurnResult:
+        """Build a FAILED result carrying ``error``."""
+        return TurnResult(status=TurnStatus.FAILED, error=error, **self._common(timing))
+
+    def build_interrupted_result(self, turn: PendingTurn, *, timing: TurnTiming) -> TurnResult:
+        """Build the INTERRUPTED result matching how ``turn`` was stopped."""
+        return interrupted_result(
+            turn,
+            provider_name=PROVIDER_NAME,
+            timing=timing,
+            messages=tuple(self.messages),
+            final_output=self.last_text_output,
+            usage=self.usage,
+        )
+
+    # ------------------------------------------------------------------
+    # Record handlers (reference shape)
+    # ------------------------------------------------------------------
+
+    def _delta(self, channel: OutputChannel, record: Mapping[str, Any]) -> list[MappedEvent]:
+        text = record.get("text")
+        if not isinstance(text, str) or not text:
+            return []
+        current = self._open.get(channel)
+        if current is None:
+            self._output_seq += 1
+            current = _OpenOutput(output_id=f"{self.turn_id}:{channel.value}:{self._output_seq}")
+            self._open[channel] = current
+        current.parts.append(text)
+        return [
+            MappedEvent(
+                OutputEvent(
+                    output_id=current.output_id,
+                    kind=OutputKind.TEXT,
+                    content=text,
+                    operation=OutputOperation.DELTA,
+                    channel=channel,
+                )
+            )
+        ]
+
+    def _message(self, record: Mapping[str, Any]) -> list[MappedEvent]:
+        """A complete assistant message closes the reasoning and answer outputs."""
+        text = record.get("text")
+        mapped = self._finalize(OutputChannel.REASONING, None)
+        mapped.extend(self._finalize(OutputChannel.ANSWER, text if isinstance(text, str) else None))
+        return mapped
+
+    def _finalize(self, channel: OutputChannel, text: str | None) -> list[MappedEvent]:
+        current = self._open.pop(channel, None)
+        if current is None and text is None:
+            return []
+        if current is None:
+            self._output_seq += 1
+            current = _OpenOutput(output_id=f"{self.turn_id}:{channel.value}:{self._output_seq}")
+        final = text if text is not None else "".join(current.parts)
+        block_kind = "text" if channel is OutputChannel.ANSWER else "reasoning"
+        if channel is OutputChannel.ANSWER:
+            self.last_text_output = final
+        self.messages.append(
+            TurnMessage(
+                message_id=current.output_id,
+                role=MessageRole.ASSISTANT,
+                content=(ContentBlock(block_id=current.output_id, kind=block_kind, content=final),),
+            )
+        )
+        return [
+            MappedEvent(
+                OutputEvent(
+                    output_id=current.output_id,
+                    kind=OutputKind.TEXT,
+                    content=final,
+                    operation=OutputOperation.FINAL,
+                    channel=channel,
+                )
+            )
+        ]
+
+    def _tool_started(self, record: Mapping[str, Any]) -> MappedEvent:
+        call_id = _string(record.get("id")) or f"{self.turn_id}:tool:{len(self._tool_names) + 1}"
+        name = _string(record.get("name")) or "tool"
+        self._tool_names[call_id] = name
+        return MappedEvent(
+            ItemLifecycleEvent(
+                kind=ItemEventKind.STARTED,
+                item_type="tool",
+                data={"name": name, "arguments": to_json_safe(record.get("arguments") or {})},
+            ),
+            item_id=call_id,
+        )
+
+    def _tool_completed(self, record: Mapping[str, Any]) -> MappedEvent:
+        call_id = _string(record.get("id")) or "unknown-tool-call"
+        result = record.get("result")
+        data: dict[str, Any] = {
+            "tool_name": self._tool_names.get(call_id, _string(record.get("name")) or "tool"),
+            "result": to_json_safe(result),
+            "is_error": bool(record.get("is_error")),
+        }
+        if isinstance(result, str):
+            data["rendered_result"] = result
+        return MappedEvent(
+            ItemLifecycleEvent(kind=ItemEventKind.COMPLETED, item_type="tool", data=data),
+            item_id=call_id,
+        )
+
+    def _usage(self, record: Mapping[str, Any]) -> list[MappedEvent]:
+        """Usage records carry the turn's cumulative counts."""
+        usage = TurnUsage(
+            input_tokens=_int(record.get("input_tokens")),
+            output_tokens=_int(record.get("output_tokens")),
+            cached_input_tokens=_int(record.get("cached_input_tokens")),
+            reasoning_output_tokens=_int(record.get("reasoning_output_tokens")),
+            total_tokens=_int(record.get("total_tokens")),
+        )
+        self.usage = usage
+        return [MappedEvent(UsageUpdatedEvent(usage=usage, mode=UsageUpdateMode.CUMULATIVE))]
+
+    def _error(self, record: Mapping[str, Any]) -> list[MappedEvent]:
+        error = classify_error_record(record)
+        if record.get("will_retry") is True:
+            # The vendor keeps retrying; the turn is still running.
+            return [
+                MappedEvent(
+                    DiagnosticEvent(
+                        level=DiagnosticLevel.WARNING,
+                        message=error.message,
+                        data={"kind": "retrying", "category": error.category, "code": error.code},
+                    )
+                )
+            ]
+        self.error = error
+        return []
+
+    def _turn_end(self, record: Mapping[str, Any]) -> list[MappedEvent]:
+        self.ended = True
+        status = _string(record.get("status")) or "completed"
+        self.end_status = status
+        error = record.get("error")
+        if status == "failed" and isinstance(error, Mapping) and self.error is None:
+            self.error = classify_error_record(error)
+        return self.finish()
+
+    def _common(self, timing: TurnTiming) -> dict[str, Any]:
+        return {
+            "messages": tuple(self.messages),
+            "final_output": self.last_text_output,
+            "stop_reason": self.end_status,
+            "usage": self.usage,
+            "started_at": timing.started_at,
+            "completed_at": timing.completed_at(),
+            "duration_ms": timing.duration_ms(),
+            "provider_data": {"records_seen": self.records_seen},
+        }
+
+
+def _provider_event(event_type: str, record: Mapping[str, Any]) -> MappedEvent:
+    return MappedEvent(
+        ProviderEvent(
+            provider=PROVIDER_NAME,
+            event_type=event_type,
+            schema_version=SCHEMA_VERSION,
+            payload=to_json_object(record),
+        )
+    )
+
+
+def _string(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+__all__ = ["PROVIDER_NAME", "SCHEMA_VERSION", "STREAM_END_IS_TURN_END", "MappedEvent", "__CLASS__TurnAccumulator"]

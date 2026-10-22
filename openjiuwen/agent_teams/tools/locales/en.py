@@ -93,6 +93,21 @@ STRINGS: dict[str, str] = {
         "(e.g. gpt-4, claude-sonnet-4); "
         "the system picks an appropriate model when omitted"
     ),
+    "spawn_teammate.model_name_group": (
+        "Optional. Set only when the user explicitly asks for this member to use a "
+        "specific model, and copy the value verbatim from selectable_models below. "
+        "Omit it when the user did not mention a model; the model group chooses.\n"
+        "Before setting it, compare the user's wording with each entry in "
+        "selectable_models (ignoring case, spaces and hyphens):\n"
+        "- Exactly equal to one entry: that entry is the only match; use it.\n"
+        "- Otherwise, every entry whose name contains the user's wording is a match. "
+        "Use it when there is exactly one; when there are several, call ask_user to "
+        "ask the user to choose among them, and never pick the shortest or "
+        "closest-looking one yourself. For example, if the user says \"use GLM\" "
+        "and the list has GLM-5.3 and GLM-5.3-Flash, you must ask.\n"
+        "- No match: call ask_user to tell the user which models are selectable, "
+        "and never substitute another model"
+    ),
     "spawn_teammate.permissions": (
         "Narrow the teammate's tool permissions (only tightening, never loosening). "
         "Keys are tool names, values are permission levels: 'allow', 'ask', or 'deny'. "
@@ -118,6 +133,43 @@ STRINGS: dict[str, str] = {
         "after into a summary), 'keep_after_compact_before' (keep after verbatim, "
         "compress before into a summary). Only effective with a named "
         "checkpoint fork"
+    ),
+    "spawn_teammate.cli_agent": (
+        "Optional. Run this teammate as a third-party CLI agent instead of a local LLM: the identifier of a CLI "
+        "kind pre-declared in spec.external_cli_agents (e.g. 'claude' or 'codex'). The launch command, working "
+        "directory and MCP injection all live in that entry; this field only references it by name. With it set, "
+        "isolation / permissions / fork are unavailable"
+    ),
+    "spawn_teammate.model_name_external_cli": (
+        "With cli_agent set: fill only when the user explicitly names the model for this third-party agent, never "
+        "choose or infer one; it must be a team model pool endpoint compatible with the CLI's protocol. Omit it so "
+        "the CLI uses its own default model; a model the CLI offers on its own login goes in "
+        "external_cli.builtin_model"
+    ),
+    "spawn_teammate.external_cli": (
+        "Optional object, only together with cli_agent (passing it without cli_agent is an error): the external "
+        "CLI member's authentication fallback and built-in model choice"
+    ),
+    "spawn_teammate.external_cli.fallback_model_name": (
+        "Authentication fallback model. Only valid for the cli_agent kinds listed under "
+        "compatible_fallback_models in the catalog below; any other cli_agent has no authentication fallback "
+        "and the field must be omitted. Required when that cli_agent has a compatible model: select it from the "
+        "team model pool according to the model API protocol supported by this third-party agent. "
+        "Prefer the current model when it is present in the pool and its protocol is compatible; when the "
+        "current model is absent from the pool or its protocol is incompatible, select another compatible model. "
+        "Never invent an unavailable or incompatible model. It is used for automatic fallback "
+        "when the agent uses its own default model but authentication is unavailable. It applies only to "
+        "authentication failures explicitly reported by the runtime. Omit it when the team model pool has "
+        "no compatible model; the agent can then use its own default model without automatic fallback"
+    ),
+    "spawn_teammate.external_cli.builtin_model": (
+        "Optional. A built-in model from this cli_agent's entry in the catalog below, running on the CLI's "
+        "own login (e.g. a subscription); pick it to fit the member's workload. Mutually exclusive with "
+        "model_name. Omit to let the CLI use its own default model"
+    ),
+    "spawn_teammate.external_cli.effort": (
+        "Optional. Reasoning effort, one of the chosen builtin_model's efforts; requires builtin_model. "
+        "Omit to take the model's default_effort"
     ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/en/member/spawn_human_agent.md
@@ -216,63 +268,66 @@ STRINGS: dict[str, str] = {
         "Note the remote agent's model lives on its own side, not controlled "
         "by this field"
     ),
-    # ===== spawn_external_cli ===================================================
-    # spawn_external_cli._desc lives in descs/en/member/spawn_external_cli.md
-    "spawn_external_cli.member_name": (
-        "[PUBLIC] Unique name for the CLI member (semantic slug, e.g. "
-        "'cli-coder-1', DNS-label-style kebab-case). **Must start with a "
-        "lowercase ASCII letter (a-z); the rest may be lowercase letters, "
-        "digits (0-9) or hyphen (-)** — no uppercase, underscore, whitespace, "
-        "CJK or any other non-ASCII characters. Serves as the primary "
-        "identifier and routing key; must be unique within the team"
+    # ===== view_experts ========================================================
+    # view_experts._desc lives in descs/en/expert/view_experts.md
+    "view_experts.action": "list (default) lists the installed single experts; get shows one expert in full",
+    "view_experts.query": (
+        "list only: case-insensitive substring filter over package name, display name and description"
     ),
-    "spawn_external_cli.display_name": (
-        "[PUBLIC] Human-readable display label for the CLI member "
-        "(e.g. 'Claude CLI Coder'); purely presentational, not used for "
-        "routing. Injected into every other member's system prompt and "
-        "returned by list_members — do not put private content here"
+    "view_experts.name": "Required for get: the expert's package name (name in the list, not the display name)",
+    # ===== view_expert_groups ==================================================
+    # view_expert_groups._desc lives in descs/en/expert/view_expert_groups.md
+    "view_expert_groups.action": (
+        "list (default) lists the installed expert groups; get shows one group and its members"
     ),
-    "spawn_external_cli.desc": (
-        "[PUBLIC] Public roster description of this CLI member — how peers "
-        "recognise it in list_members / the team roster. Optional. Injected "
-        "into other members' system prompts and returned by "
-        "list_members — do not put private content here"
+    "view_expert_groups.query": (
+        "list only: case-insensitive substring filter over group name, display name and description"
     ),
-    "spawn_external_cli.prompt": (
-        "[PRIVATE] The private system prompt this CLI member adopts to act as "
-        "this member. **Required**. Visible only to this member, never shown "
-        "in peers' roster"
+    "view_expert_groups.capabilities": "list only: keep only groups that have all listed capability tags",
+    "view_expert_groups.name": "Required for get: the expert group name",
+    "view_expert_groups.member": "get only, optional: expand just this member of the group",
+    # ===== spawn_expert ========================================================
+    # spawn_expert._desc lives in descs/en/expert/spawn_expert.md
+    "spawn_expert.expert": (
+        "Required. A single expert's package name; with group, a member name of that group (not leader)"
     ),
-    "spawn_external_cli.cli_agent": (
-        "Identifier of the third-party CLI agent kind to launch, e.g. 'claude' "
-        "(claudecode) or 'codex'. Must match a static config entry pre-declared "
-        "in spec.external_cli_agents — the launch command, working directory "
-        "and MCP injection all live in that entry; this field only references "
-        "it by name"
+    "spawn_expert.group": "Expert group name; omit when expert is a single expert. Required for a group member",
+    "spawn_expert.member_name": (
+        "[public] Unique member name in the team (semantic slug such as finance-1 or clip-2, DNS-label kebab-case). "
+        "**Must start with a lowercase ASCII letter (a-z), followed only by lowercase letters, digits (0-9) or "
+        "hyphens (-)**; one expert can be spawned several times under different names"
     ),
-    "spawn_external_cli.model_name": (
-        "Optional. Set only when the user explicitly specifies the model for this third-party agent. "
-        "You must not choose, infer, or auto-fill it. Omit it when the user has not explicitly specified "
-        "a model so the agent uses its own default model"
+    "spawn_expert.display_name": (
+        "[public] Optional. Defaults to the expert's display name; \" (member_name)\" is appended when a teammate "
+        "already uses that display name"
     ),
-    "spawn_external_cli.fallback_model_name": (
-        "Required, but may be null when no compatible model exists. When a compatible model is available, "
-        "select it from the team model pool according to the model API protocol supported by this third-party "
-        "agent. Prefer the current model when it is present in the pool and its protocol is compatible; when the "
-        "current model is absent from the pool or its protocol is incompatible, select another compatible model. "
-        "Never invent an unavailable or incompatible model. It is used for automatic fallback "
-        "when the agent uses its own default model but authentication is unavailable. It applies only to "
-        "authentication failures explicitly reported by the runtime. Use null only when the team model pool has "
-        "no compatible model; the agent can then use its own default model without automatic fallback"
+    "spawn_expert.desc": (
+        "[public] Optional. Added public description, appended after the expert's own description (never replaces "
+        "it). Say how this instance differs from its siblings, e.g. \"covers shots 1-10\"; no private information"
     ),
-    "spawn_external_cli.builtin_model": (
-        "Optional. A built-in model from this cli_agent's entry in the catalog below, running on the CLI's "
-        "own login (e.g. a subscription); pick it to fit the member's workload. Mutually exclusive with "
-        "model_name. Omit to let the CLI use its own default model"
+    "spawn_expert.prompt": (
+        "[private] Optional. Added standing agreement, appended after the expert's persona (never replaces it). "
+        "Do not restate the persona or put concrete tasks here"
     ),
-    "spawn_external_cli.effort": (
-        "Optional. Reasoning effort, one of the chosen builtin_model's efforts; requires builtin_model. "
-        "Omit to take the model's default_effort"
+    "spawn_expert.model_name": (
+        "Optional. Fill only when the user names a model; never pick or infer one yourself. Native experts follow "
+        "spawn_teammate, external-runtime experts follow spawn_teammate with cli_agent (a team pool endpoint "
+        "compatible with the CLI's protocol)"
+    ),
+    "spawn_expert.external_cli": (
+        "Optional object, only for external-runtime experts (runtime other than native); passing it for a native "
+        "expert is an error. Fields mean and validate like spawn_teammate.external_cli"
+    ),
+    "spawn_expert.external_cli.builtin_model": (
+        "Optional. A built-in model from the expert's CLI kind entry in the catalog below, run on the CLI's own "
+        "login; mutually exclusive with model_name"
+    ),
+    "spawn_expert.isolation": (
+        "Optional isolation mode, as in spawn_teammate: set 'worktree' only when the user asks for it or the member "
+        "must modify repository files in an isolated checkout. Not supported for external-runtime experts"
+    ),
+    "spawn_expert.permissions": (
+        "Optional, as spawn_teammate.permissions (tighten only). Not supported for external-runtime experts"
     ),
     # ===== set_member_model ====================================================
     # set_member_model._desc lives in descs/en/member/set_member_model.md
@@ -346,12 +401,53 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
     "create_task.task.content": "Task details including goals and acceptance criteria",
-    # Both create_task variants expose assignee. Autonomous treats it as
-    # optional; scheduled requires it.
+    # ``assignee`` reads differently per create_task variant: autonomous has
+    # no inline member, so its string must not mention one. The scheduled
+    # strings live under the ``create_task_scheduled`` namespace below.
     "create_task.task.assignee": (
-        "Member name that carries this task; the member must already exist and must not be the leader. "
-        "Optional in autonomous mode (omitted tasks enter the shared claim pool); required in scheduled mode "
-        "because members never claim there"
+        "Member name that carries this task (optional); the member must already exist (spawn_teammate first) "
+        "and must not be the leader. Omit it to put the task on the shared claim pool for members to claim"
+    ),
+    "create_task_scheduled.task.assignee": (
+        "Member name that carries this task (one of assignee / member); the member must already exist (it may "
+        "also be a member declared inline via 'member' by another task of the same call) and must not be the "
+        "leader. Scheduled mode requires an owner because members never claim there"
+    ),
+    "create_task_scheduled.task.member": (
+        "Owner created together with the task (one of assignee / member): same fields as spawn_teammate "
+        "(member_name / display_name / desc / prompt / model_name) plus a required lifetime; when the team declares "
+        "external CLI kinds, cli_agent runs it on an external CLI instead. The member becomes the "
+        "task's assignee and is started by the scheduling framework; once every task on its board is terminal it "
+        "retires per lifetime"
+    ),
+    "create_task_scheduled.task.member.expert": (
+        "Optional. Run this member as an installed expert template: a single expert's package name, or, with "
+        "group, a member name of that group (not leader). With it, display_name / desc may be omitted (the "
+        "expert's own are used) and desc / prompt are appended after the expert's description / persona. "
+        "Experts with an external CLI runtime may be declared inline too; their model arguments go in external_cli, "
+        "with spawn_expert's rules"
+    ),
+    "create_task_scheduled.task.member.cli_agent": (
+        "Optional, exclusive with expert. Run this member as a third-party CLI agent, as spawn_teammate.cli_agent: "
+        "the value must be a CLI kind declared in spec.external_cli_agents; model_name is the team model pool "
+        "endpoint the CLI uses"
+    ),
+    "create_task_scheduled.task.member.external_cli": (
+        "Optional object, only for external CLI members (cli_agent set, or expert is an external-runtime expert); "
+        "passing it otherwise is an error. Fields mean and validate like spawn_teammate.external_cli"
+    ),
+    "create_task_scheduled.task.member.builtin_model": (
+        "Optional. A built-in model from the member's CLI kind entry in the catalog below, run on the CLI's own "
+        "login; mutually exclusive with model_name"
+    ),
+    "create_task_scheduled.task.member.group": (
+        "Optional, requires expert. The expert group name, making expert a member name of that group; when "
+        "this team was assembled from that group, the new member matches its predefined member of that name"
+    ),
+    "create_task_scheduled.task.member.lifetime": (
+        "Retirement policy: shutdown = shut down automatically once its tasks are all done (terminal, the name "
+        "cannot be reused); dormant = go dormant automatically (stays on the roster, processes no events) and wakes "
+        "only when addressed directly (send_message(to=<member>) or a new task assigned to it)"
     ),
     "create_task.task.depends_on": (
         "Prerequisite task IDs; may reference tasks created in this same call "
@@ -384,10 +480,11 @@ STRINGS: dict[str, str] = {
     "view_task.action": (
         "View mode: 'list' (default, summary of all tasks), "
         "'get' (single task detail, requires task_id), "
+        "'note' (a task's full completion summary and note, requires task_id), "
         "'claimable' (pending tasks ready to claim), "
         "'in_review' (tasks assigned to you to verify, currently in_review)"
     ),
-    "view_task.task_id": "Task ID — required when action=get, ignored otherwise",
+    "view_task.task_id": "Task ID — required when action=get or note, ignored otherwise",
     "view_task.status": (
         "Status filter for action=list only: "
         "pending/blocked/planning/in_progress/in_review/completed/cancelled. "
@@ -445,13 +542,32 @@ STRINGS: dict[str, str] = {
     # claim_task._desc lives in descs/en/task/claim_task.md
     "claim_task.task_id": "The ID of the task to claim or complete",
     "claim_task.status": "New status: 'claimed' (start work) or 'completed' (mark done)",
+    "claim_task.summary": (
+        "Only with status=completed: one-sentence completion summary — what you delivered and where the main "
+        "artifact is; this is what the leader and your downstream see; when the deliverable itself is short "
+        "(one sentence, a number, a verdict), put it in the summary itself rather than only a file path"
+    ),
+    "claim_task.note": (
+        "Only with status=completed: the full completion detail — artifact paths, key decisions or follow-ups"
+    ),
+    "claim_task.fields_ignored": "summary / note only take effect with status=completed; ignored for this claim.",
+    "claim_task.upstream_header": "Upstream deliveries (this task's direct dependencies):",
+    "claim_task.upstream_note_hint": (
+        "For an upstream task's full completion note, call `view_task(action='note', task_id=...)`."
+    ),
     # ===== member_complete_task ===============================================
     # member_complete_task._desc lives in descs/en/task/member_complete_task.md
     "member_complete_task.task_id": (
         "ID of the task to mark completed (must be a task the leader has assigned to you)"
     ),
+    "member_complete_task.summary": (
+        "One-sentence completion summary: what you delivered and where the main artifact is; shown in the "
+        "leader digest and in downstream upstream lists; when the deliverable itself is short "
+        "(one sentence, a number, a verdict), put it in the summary itself rather than only a file path"
+    ),
     "member_complete_task.note": (
-        "Optional completion note describing your result or any follow-up the team should know about"
+        "Full completion detail: artifact paths, key decisions or follow-ups the team should know about; "
+        "reviewers and view_task(action='note') read it in full"
     ),
     # ===== verify_task ========================================================
     # verify_task._desc lives in descs/en/task/verify_task.md
@@ -499,6 +615,23 @@ STRINGS: dict[str, str] = {
         "Leader; use it for progress, completion, blockers, reassignment requests) "
         'or "user" (only to reply when an incoming message came from the user). You '
         "cannot message other members; multicast and broadcast are unavailable in this mode"
+    ),
+    # ===== send_message_scheduled_peers (scheduled member, peers opened) =======
+    # send_message_scheduled_peers._desc lives in
+    # descs/en/message/send_message_scheduled_peers.md (F_126). ``content`` /
+    # ``summary`` reuse the send_message keys; ``to`` / ``targets`` gain the
+    # "leader" role word.
+    "send_message_scheduled_peers.to": (
+        'Single recipient: "leader" (a role name — the system delivers it to the real '
+        "Leader), another member's member_name (a point-to-point DM for coordination), "
+        '"user" (only to reply when an incoming message came from the user), or "*" to '
+        "broadcast to every member — one broadcast wakes every member for a full LLM "
+        "turn, so use it sparingly. For multicast, leave this field unset and use targets"
+    ),
+    "send_message_scheduled_peers.targets": (
+        'Multicast recipient array (e.g. ["leader","m2"]): the same content is sent as '
+        "separate messages to each member; cost grows linearly with recipient count. "
+        'May contain "leader"; cannot contain "*" or "user". Do not provide together with to'
     ),
     # NOTE: worktree tools (enter_worktree / exit_worktree) live in
     # ``openjiuwen.harness.tools.worktree`` and resolve their description

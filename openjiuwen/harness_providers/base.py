@@ -25,6 +25,8 @@ from typing import Any, Mapping
 
 from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.harness_protocol import (
+    AUTH_FALLBACK_EVENT_TYPE,
+    AUTH_FALLBACK_REQUEST_TYPE,
     AbortMode,
     CheckpointConflictError,
     CheckpointReason,
@@ -52,6 +54,7 @@ from openjiuwen.harness_protocol import (
     JsonObject,
     ModelOption,
     ModelSelection,
+    ProviderEvent,
     ProviderInteractionRequest,
     SendReceipt,
     StateChangedEvent,
@@ -146,10 +149,18 @@ class SerializedTurnHarness(ABC):
         self._checkpoint_storage_revision: str | None = None
         # A model switch accepted while a turn runs; applied before the next turn.
         self._pending_model_selection: ModelSelection | None = None
+        # The authentication fallback serves the session once per cycle; the
+        # supervisor tries it at most once per turn.
+        self._fallback_activated = False
 
     # ------------------------------------------------------------------
     # Read-only surface
     # ------------------------------------------------------------------
+
+    @property
+    def fallback_activated(self) -> bool:
+        """Return whether the authentication fallback model serves the session."""
+        return self._fallback_activated
 
     @property
     def state(self) -> HarnessState:
@@ -215,6 +226,35 @@ class SerializedTurnHarness(ABC):
         """Probe the provider catalog when MODEL_DISCOVERY is declared."""
         raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support model discovery")
 
+    def _auth_fallback_payload(self) -> JsonObject | None:
+        """Describe the configured authentication fallback model.
+
+        Providers declaring ``AUTH_FALLBACK`` override this together with
+        ``_reconnect_for_auth``. The payload is what the host ratifies and what
+        the activation event carries; it never includes a credential.
+
+        Returns:
+            ``None`` when no fallback model is configured.
+        """
+        return None
+
+    async def _reconnect_for_auth(self, *, fallback: bool) -> None:
+        """Reconnect the vendor runtime on the fallback or the primary model.
+
+        Resumes the same vendor session so the replayed turn keeps its context.
+        Only connects; state and events follow in ``_on_auth_endpoint_changed``
+        once the switch is final.
+
+        Raises:
+            Exception: Any failure; the caller logs it and keeps the turn result.
+        """
+        _ = fallback
+        raise HarnessProtocolError(f"{self.card.name} has no authentication fallback")
+
+    async def _on_auth_endpoint_changed(self, *, fallback: bool) -> None:
+        """Record that the session now runs on the fallback (or primary) model."""
+        _ = fallback
+
     async def _apply_model_selection(self, selection: ModelSelection) -> None:
         """Switch the live session to ``selection`` when MODEL_SELECTION is declared.
 
@@ -248,6 +288,7 @@ class SerializedTurnHarness(ABC):
             self._checkpoint_sequence = 0
             self._checkpoint_storage_revision = None
             self._pending_model_selection = None
+            self._fallback_activated = False
             try:
                 self._session_id = await self._open_session(context)
             except BaseException:
@@ -467,11 +508,9 @@ class SerializedTurnHarness(ABC):
             await self._emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), turn=active)
             if selection is not None:
                 await self._apply_deferred_model_selection(selection, active)
-            try:
-                terminal_kind, result = await self._execute_turn(active)
-            except Exception as exc:
-                logger.exception("[%s] turn %s crashed inside the provider", self.card.name, active.turn_id)
-                terminal_kind, result = self._crash_result(active, exc)
+            terminal_kind, result = await self._run_provider_turn(active)
+            if terminal_kind is TurnEventKind.FAILED and await self._try_auth_fallback(result.error, active):
+                terminal_kind, result = await self._run_provider_turn(active)
             await self._emit(TurnLifecycleEvent(kind=terminal_kind, result=result), turn=active)
 
             async with self._command_lock:
@@ -490,6 +529,87 @@ class SerializedTurnHarness(ABC):
                 return
             if self._stopping:
                 return
+
+    async def _run_provider_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
+        try:
+            return await self._execute_turn(turn)
+        except Exception as exc:
+            logger.exception("[%s] turn %s crashed inside the provider", self.card.name, turn.turn_id)
+            return self._crash_result(turn, exc)
+
+    async def _try_auth_fallback(self, error: TurnError | None, turn: PendingTurn) -> bool:
+        """Run the fallback without ever escaping the supervisor.
+
+        Every turn must reach its terminal event; a fallback that breaks for
+        any reason keeps the original failure instead.
+        """
+        try:
+            return await self._activate_auth_fallback(error, turn)
+        except Exception:
+            logger.exception("[%s] authentication fallback broke; the turn keeps its failure", self.card.name)
+            return False
+
+    async def _activate_auth_fallback(self, error: TurnError | None, turn: PendingTurn) -> bool:
+        """Switch the session to the fallback model once when its login fails.
+
+        The ``auth_required`` category is the gate: the request never reached
+        the model, so replaying the turn on the fallback cannot duplicate work
+        (a mid-turn token expiry may have emitted partial output; a replay is
+        still preferred over failing the turn). The host ratifies the switch
+        first; when it declines, the session goes back to the primary model so
+        the member never runs on an unrecorded one.
+
+        Returns:
+            True when the fallback is active and the turn should be replayed.
+        """
+        if error is None or error.category != "auth_required":
+            return False
+        if self._fallback_activated or turn.abort_requested:
+            return False
+        payload = self._auth_fallback_payload()
+        if payload is None:
+            return False
+        try:
+            await self._reconnect_for_auth(fallback=True)
+        except Exception as exc:
+            logger.warning("[%s] authentication fallback activation failed: %s", self.card.name, exc)
+            return False
+        try:
+            ratified = await self._confirm_provider_extension(AUTH_FALLBACK_REQUEST_TYPE, payload)
+        except Exception as exc:
+            # A handler that raises (or answers out of protocol) has not
+            # persisted the switch: treat it as a decline.
+            logger.warning("[%s] host failed to ratify the authentication fallback: %s", self.card.name, exc)
+            ratified = False
+        if not ratified:
+            logger.warning(
+                "[%s] host declined the authentication fallback; restoring the primary model",
+                self.card.name,
+            )
+            try:
+                await self._reconnect_for_auth(fallback=False)
+            except Exception as exc:
+                logger.warning("[%s] restoring the primary model failed: %s", self.card.name, exc)
+                return False
+            await self._on_auth_endpoint_changed(fallback=False)
+            return False
+        self._fallback_activated = True
+        try:
+            await self._on_auth_endpoint_changed(fallback=True)
+        except Exception as exc:
+            # The host persisted the switch and the session already runs on
+            # the fallback; a bookkeeping failure must not cost the replay.
+            logger.warning("[%s] recording the authentication fallback failed: %s", self.card.name, exc)
+        await self._emit(
+            ProviderEvent(
+                provider=self.card.name,
+                event_type=AUTH_FALLBACK_EVENT_TYPE,
+                schema_version="1",
+                payload=payload,
+            ),
+            turn=turn,
+        )
+        return True
 
     async def _apply_deferred_model_selection(self, selection: ModelSelection, turn: PendingTurn) -> None:
         """Apply a switch accepted mid-turn; a failure is reported, not fatal.

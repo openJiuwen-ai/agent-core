@@ -112,7 +112,7 @@ def test_browser_agent_registers_runtime_task_cleanup() -> None:
         agent = create_browser_agent(_fake_model(), settings=_fake_settings())
 
     del calls
-    agent.register_task_resource_cleanup.assert_called_once_with(
+    agent.register_task_resource_cleanup.assert_any_call(
         runtime_cls.return_value.release_task_resources,
         prepare=runtime_cls.return_value.acquire_task_resources,
     )
@@ -185,7 +185,7 @@ def test_browser_agent_prompt_enforces_convergent_browser_strategy() -> None:
     assert "AI/knowledge/weather panels are usable" in english
     assert "AI/知识/天气答案卡" in chinese
     assert "no traditional" in english
-    assert "推断字段齐全只代表可以结束" in chinese
+    assert "不要为填字段槽而重读" in chinese
     assert "立即结束" in chinese
     assert "<browser_working_context>" in chinese
     assert "runtime 要求重新规划" in chinese

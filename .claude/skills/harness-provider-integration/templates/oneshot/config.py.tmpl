@@ -1,0 +1,112 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""Provider-owned configuration for the __DISPLAY__ one-shot CLI harness.
+
+Validating this config never resolves or launches the CLI, so a host can
+check provider settings on a machine where ``__BINARY__`` is not installed.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field, fields
+from types import MappingProxyType
+from typing import Any, Mapping
+
+from openjiuwen.harness_protocol import JsonObject
+from openjiuwen.harness_providers.skills import SkillSource, normalize_skills
+
+_DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024
+
+
+@dataclass(frozen=True, slots=True)
+class __CLASS__HarnessConfig:
+    """Configuration for the __DISPLAY__ CLI run once per turn.
+
+    Attributes:
+        command: Argv prefix of every turn's invocation (binary + the flags that
+            select structured, non-interactive output).
+        cli_path: Explicit CLI executable replacing ``command[0]``. Without it
+            ``command[0]`` is looked up on ``PATH``, and the CLI bundled in
+            this package's platform wheel (when built with one) is the last
+            resort.
+        extra_args: Arguments appended after ``command``.
+        cwd: Default working directory; ``HarnessContext.cwd`` wins.
+        env: Extra child environment, layered over the inherited one.
+        inherit_process_env: Start the child from the host environment.
+        model: Model passed through the CLI's own flag; ``None`` keeps its default.
+        skills: Portable skill bundles copied before startup.
+        skill_conflict: ``skip`` / ``replace`` / ``append`` for existing skills.
+        turn_idle_timeout_s: Fail a turn whose CLI prints nothing for this long;
+            ``None`` waits indefinitely.
+        shutdown_timeout_s: Grace period before a stopped CLI is killed.
+        max_line_bytes: Largest stdout line accepted from the CLI.
+        event_buffer_capacity: Bounded protocol event buffer size.
+    """
+
+    command: tuple[str, ...] = __COMMAND__
+    extra_args: tuple[str, ...] = ()
+    cli_path: str | None = None
+    cwd: str | None = None
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
+    inherit_process_env: bool = True
+    model: str | None = None
+    skills: tuple[SkillSource, ...] = ()
+    skill_conflict: str = "skip"
+    turn_idle_timeout_s: float | None = None
+    shutdown_timeout_s: float = 5.0
+    max_line_bytes: int = _DEFAULT_MAX_LINE_BYTES
+    event_buffer_capacity: int = 1024
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
+        for name in ("command", "extra_args"):
+            values = getattr(self, name)
+            if not isinstance(values, (list, tuple)) or any(not isinstance(item, str) or not item for item in values):
+                raise TypeError(f"__DISPLAY__ {name} must be an array of non-empty strings")
+            object.__setattr__(self, name, tuple(values))
+        if not self.command:
+            raise ValueError("__DISPLAY__ command must not be empty")
+        for name in ("cwd", "model", "cli_path"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise TypeError(f"__DISPLAY__ {name} must be a non-empty string when provided")
+        if not isinstance(self.env, Mapping):
+            raise TypeError("__DISPLAY__ env must be an object")
+        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.env.items()):
+            raise TypeError("__DISPLAY__ env must map strings to strings")
+        object.__setattr__(self, "env", MappingProxyType(dict(self.env)))
+        for name in ("turn_idle_timeout_s", "shutdown_timeout_s"):
+            value = getattr(self, name)
+            if value is None and name == "turn_idle_timeout_s":
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+                raise ValueError(f"__DISPLAY__ {name} must be a positive number")
+        for name in ("max_line_bytes", "event_buffer_capacity"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"__DISPLAY__ {name} must be a positive integer")
+
+    @classmethod
+    def from_mapping(cls, config: JsonObject) -> "__CLASS__HarnessConfig":
+        """Validate a provider SPI mapping without touching the CLI."""
+        values: dict[str, Any] = dict(config)
+        known = {item.name for item in fields(cls)}
+        unknown = sorted(set(values) - known)
+        if unknown:
+            raise ValueError(f"unknown __DISPLAY__ configuration fields: {', '.join(unknown)}")
+        for name in ("command", "extra_args"):
+            items = values.get(name)
+            if items is not None:
+                if not isinstance(items, (list, tuple)):
+                    raise TypeError(f"__DISPLAY__ {name} must be an array")
+                values[name] = tuple(items)
+        env = values.get("env")
+        if env is not None:
+            if not isinstance(env, Mapping):
+                raise TypeError("__DISPLAY__ env must be an object")
+            values["env"] = dict(env)
+        return cls(**values)
+
+
+__all__ = ["__CLASS__HarnessConfig"]

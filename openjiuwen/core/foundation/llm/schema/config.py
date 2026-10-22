@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 import uuid
 from enum import Enum
 from typing import Optional, Union, Any, Self, Literal
@@ -148,12 +148,15 @@ class ModelClientConfig(BaseModel):
     stream_first_chunk_timeout: Optional[float] = Field(
         default=300.0,
         gt=0,
-        description="Maximum seconds to wait for the first parsed streaming chunk; None disables it"
+        description="Maximum seconds to wait for the first streaming chunk that carries model output "
+                    "(content, reasoning, or a tool call fragment); framing-only chunks such as a "
+                    "role-only delta do not satisfy it. None disables it"
     )
     stream_idle_timeout: Optional[float] = Field(
         default=60.0,
         gt=0,
-        description="Maximum seconds to wait between parsed streaming chunks; None disables it"
+        description="Maximum seconds to wait between streaming chunks that carry model output; "
+                    "framing-only chunks such as heartbeat deltas do not reset it. None disables it"
     )
 
     max_retries: int = Field(

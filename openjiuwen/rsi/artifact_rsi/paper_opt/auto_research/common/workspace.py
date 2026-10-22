@@ -181,6 +181,17 @@ def paper_scoring_dir(run_id: str) -> Path:
     return workspace_dir(run_id) / "paper_scoring"
 
 
+def paper_dist_dir(run_id: str) -> Path:
+    """Clean, front-end-facing copy of the paper's real content (main.tex,
+    main.pdf, sections/*.tex, figures/*, refs.bib) — distinct from
+    paper_workspace_dir, which also holds the reporting agent's own
+    scratch/bookkeeping files (.skills/, lint overrides, LaTeX compile
+    byproducts, etc.) that would otherwise clutter a file browser pointed
+    at the workspace directly.
+    """
+    return workspace_dir(run_id) / "paper_dist"
+
+
 def smoke_test_dir(run_id: str) -> Path:
     """code_implementation's own acceptance-gate artifacts (per-variant smoke
     test stdout/stderr + whatever metrics.json got written) — kept on disk

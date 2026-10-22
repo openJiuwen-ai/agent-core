@@ -72,7 +72,7 @@ create_code_agent(
     subagents: list[SubAgentConfig] | None = None,
     rails: list[Rail] | None = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 15,
+    max_iterations: int = 50,
     workspace: Workspace | str | None = None,
     skills: list[str] | None = None,
     backend: str | None = None,
@@ -95,7 +95,7 @@ Create a sub-agent specialized for coding tasks. Comes pre-configured with file 
 - **subagents** (list[[SubAgentConfig](../schema/config.md#class-openjiuwenharnessschemasubagentconfig)], optional): Nested sub-agents. Default: `None`.
 - **rails** (list[Rail], optional): Guardrails. Default: `None`.
 - **enable_task_loop** (bool, optional): Enable the task loop. Default: `False`.
-- **max_iterations** (int, optional): Maximum iterations. Default: `15`.
+- **max_iterations** (int, optional): Maximum iterations. Default: `50`.
 - **workspace** ([Workspace](../workspace/workspace.md#class-openjiuwenharnessworkspaceworkspace) | str, optional): Workspace. Default: `None`.
 - **skills** (list[str], optional): Skills. Default: `None`.
 - **backend** (str, optional): LLM backend. Default: `None`.
@@ -123,7 +123,7 @@ create_research_agent(
     subagents: list[SubAgentConfig] | None = None,
     rails: list[Rail] | None = None,
     enable_task_loop: bool = False,
-    max_iterations: int = 15,
+    max_iterations: int = 50,
     workspace: Workspace | str | None = None,
     skills: list[str] | None = None,
     backend: str | None = None,
@@ -146,7 +146,7 @@ Create a sub-agent specialized for research tasks. Comes pre-configured with web
 - **subagents** (list[[SubAgentConfig](../schema/config.md#class-openjiuwenharnessschemasubagentconfig)], optional): Nested sub-agents. Default: `None`.
 - **rails** (list[Rail], optional): Guardrails. Default: `None`.
 - **enable_task_loop** (bool, optional): Enable the task loop. Default: `False`.
-- **max_iterations** (int, optional): Maximum iterations. Default: `15`.
+- **max_iterations** (int, optional): Maximum iterations. Default: `50`.
 - **workspace** ([Workspace](../workspace/workspace.md#class-openjiuwenharnessworkspaceworkspace) | str, optional): Workspace. Default: `None`.
 - **skills** (list[str], optional): Skills. Default: `None`.
 - **backend** (str, optional): LLM backend. Default: `None`.
@@ -158,3 +158,41 @@ Create a sub-agent specialized for research tasks. Comes pre-configured with web
 **Returns**:
 
 **[DeepAgent](../deep_agent.md#class-openjiuwenharnessdeepagent)**: A configured research sub-agent.
+
+---
+
+## function openjiuwen.harness.subagents.create_cua_agent
+
+```python
+create_cua_agent(
+    model: Model,
+    *,
+    card: AgentCard | None = None,
+    system_prompt: str | None = None,
+    tools: list[Tool | ToolCard] | None = None,
+    mcps: list[McpServerConfig] | None = None,
+    subagents: list[SubAgentConfig | DeepAgent] | None = None,
+    rails: list[AgentRail] | None = None,
+    enable_task_loop: bool = False,
+    max_iterations: int = 25,
+    workspace: str | Workspace | None = None,
+    skills: list[str] | None = None,
+    backend: Any | None = None,
+    sys_operation: SysOperation | None = None,
+    language: str | None = None,
+    prompt_mode: str | None = None,
+    cua_capabilities: list[str] | None = None,
+    cua_instance_key: str = "",
+    cua_snapshot_keep_last_k: int = 3,
+    cua_pause_on_user_input: bool = False,
+    **config_kwargs,
+) -> DeepAgent
+```
+
+Create a desktop sub-agent that operates native applications on the host computer through window screenshots and real mouse and keyboard input; it needs a vision-capable model. `build_cua_agent_config` builds the matching `SubAgentConfig` for delegation through `task_tool`.
+
+See [`cua_agent`](./cua_agent.md) for full documentation: setup, parameters, desktop tools, capabilities, built-in rails, delegation results and resume, and permissions.
+
+**Returns**:
+
+**[DeepAgent](../deep_agent.md#class-openjiuwenharnessdeepagent)**: A configured desktop sub-agent.

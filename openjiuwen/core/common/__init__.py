@@ -1,13 +1,19 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
+from openjiuwen.core.common.run_context import (
+    HeartbeatReason,
+    RunContext,
+    RunContextInput,
+    normalize_run_context,
+)
 from openjiuwen.core.common.schema import Param
 from openjiuwen.core.common.schema.card import BaseCard
 
-_SCHEMA_CLASSES = [
+__all__ = [
     "BaseCard",
-    "Param"
+    "HeartbeatReason",
+    "Param",
+    "RunContext",
+    "RunContextInput",
+    "normalize_run_context",
 ]
-
-__all__ = (
-    _SCHEMA_CLASSES
-)

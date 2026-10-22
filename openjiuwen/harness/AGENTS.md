@@ -44,12 +44,12 @@ harness/
 ├── personal_context/      # 个人化上下文：fetch/ + context_graph / source_metadata（S_17）
 ├── prompts/               # 提示词构建：builder / sections/ / tools/ / l10n（S_06）
 ├── rails/                 # 行为约束层：三层基类 + 事件路由 + priority（见 rails/AGENTS.md，S_04）
-├── resources/             # 内置资源：builtin_rules.yaml / extension_loader（S_13）
+├── resources/             # 扩展包：extension_loader / extension_resolver / template_card（展示卡片）（S_13）
 ├── schema/                # 数据模型：config / state / task / stop_condition / interaction（S_07）
 ├── security/              # 工具权限引擎：tiered_policy / file_guard / shell_ast（S_08）
 ├── skills/                # skill 库状态（library_state）（S_16）
 ├── subagent_runtime/      # 子代理运行时：registry / instance / control / persistence（S_10）
-├── subagents/             # 内置子代理：browser / code / explore / plan / research / verification（S_18）
+├── subagents/             # 内置子代理：browser / code / cua / explore / mobile_gui / plan / research / verification（S_18）
 ├── task_loop/             # 任务循环：controller / event_handler / event_executor（S_03）
 ├── tools/                 # 工具集合：shell / web / worktree / subagent / skills ...（S_05）
 └── workspace/             # 工作空间：workspace.py / directory_builder.py（S_09）

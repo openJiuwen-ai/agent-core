@@ -87,6 +87,10 @@ from openjiuwen.harness_protocol.models import (
     HostCapability,
     JsonObject,
     JsonValue,
+    AUTH_FALLBACK_EVENT_TYPE,
+    AUTH_FALLBACK_REQUEST_TYPE,
+    ModelChoice,
+    ModelEndpoint,
     ModelOption,
     ModelSelection,
     ResumePolicy,
@@ -97,6 +101,7 @@ from openjiuwen.harness_protocol.models import (
 )
 from openjiuwen.harness_protocol.protocol import (
     HarnessModelControl,
+    ModelConfigProvider,
     HarnessProtocol,
     HarnessProvider,
 )
@@ -152,6 +157,7 @@ __all__ = [
     "HarnessError",
     "HarnessInput",
     "HarnessModelControl",
+    "ModelConfigProvider",
     "HarnessProtocol",
     "HarnessProtocolError",
     "HarnessProvider",
@@ -180,6 +186,10 @@ __all__ = [
     "ItemLifecycleEvent",
     "JsonObject",
     "JsonValue",
+    "AUTH_FALLBACK_EVENT_TYPE",
+    "AUTH_FALLBACK_REQUEST_TYPE",
+    "ModelChoice",
+    "ModelEndpoint",
     "ModelOption",
     "ModelSelection",
     "McpServerConfig",

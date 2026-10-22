@@ -47,6 +47,23 @@ _DEFERRED_TOOL_FULL_SNAPSHOT_INTERVAL = 10
 _NESTED_TOOL_CALL_KEY = "__progressive_nested_tool_call__"
 
 
+def _relayed_result(target_result: Any) -> Dict[str, Any]:
+    """The wrapper's ``result`` and, when the target returned images, its ``multimodal``.
+
+    The agent hands a tool's images to the model from the tool's own
+    ``data["multimodal"]``, so the images move up out of the nested result
+    instead of being carried twice.
+    """
+    target_data = getattr(target_result, "data", None)
+    if not (isinstance(target_result, BaseModel) and isinstance(target_data, dict) and target_data.get("multimodal")):
+        return {"result": target_result}
+    rest = {key: value for key, value in target_data.items() if key != "multimodal"}
+    return {
+        "result": target_result.model_copy(update={"data": rest}),
+        "multimodal": target_data["multimodal"],
+    }
+
+
 class ProgressiveToolRail(DeepAgentRail):
     """Rail that enables progressive tool discovery and callable-tool filtering."""
 
@@ -589,7 +606,7 @@ class ProgressiveToolRail(DeepAgentRail):
             success=True,
             data={
                 "name": target_name,
-                "result": target_result,
+                **_relayed_result(target_result),
             },
             rendered_text=target_message_content,
         )

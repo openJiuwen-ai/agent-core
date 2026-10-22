@@ -250,3 +250,73 @@ async def test_description_states_the_limit_in_both_languages(db, lang):
     send = _leader_send(db, lang=lang)
 
     assert str(MAX_CONTENT_CHARS) in send.card.description
+
+
+# ---------------------------------------------------------------------------
+# F_118: addressing a dormant member wakes it; a broadcast does not
+# ---------------------------------------------------------------------------
+
+
+async def _dormant(db, name: str) -> None:
+    await db.member.create_member(
+        member_name=name,
+        team_name=TEAM_NAME,
+        display_name=name,
+        agent_card=AgentCard().model_dump_json(),
+        status=MemberStatus.DORMANT.value,
+        mode=MemberMode.BUILD_MODE.value,
+    )
+
+
+def _leader_backend(db, on_restarted: AsyncMock) -> TeamBackend:
+    return TeamBackend(
+        team_name=TEAM_NAME,
+        member_name=LEADER_NAME,
+        is_leader=True,
+        db=db,
+        messager=AsyncMock(spec=Messager),
+        on_member_restarted=on_restarted,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_direct_message_wakes_dormant_recipient(db):
+    """A unicast is an explicit address: the dormant recipient is claimed for restart first."""
+    await _dormant(db, "sleepy")
+    on_restarted = AsyncMock(return_value=True)
+    send = _send_tool(create_team_tools(role="leader", agent_team=_leader_backend(db, on_restarted), lang="cn"))
+
+    result = await send.invoke({"to": "sleepy", "content": "one more thing"})
+
+    assert result.success
+    on_restarted.assert_awaited_once_with("sleepy")
+    assert (await db.member.get_member("sleepy", TEAM_NAME)).status == MemberStatus.RESTARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_multicast_wakes_named_dormant_recipients(db):
+    await _dormant(db, "sleepy")
+    on_restarted = AsyncMock(return_value=True)
+    send = _send_tool(create_team_tools(role="leader", agent_team=_leader_backend(db, on_restarted), lang="cn"))
+
+    result = await send.invoke({"targets": ["sleepy", DEV_1], "content": "sync"})
+
+    assert result.success, result.error
+    on_restarted.assert_awaited_once_with("sleepy")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_broadcast_leaves_dormant_members_asleep(db):
+    """Fan-out never wakes: the broadcast lands in the mailbox, read on the next explicit address."""
+    await _dormant(db, "sleepy")
+    on_restarted = AsyncMock(return_value=True)
+    send = _send_tool(create_team_tools(role="leader", agent_team=_leader_backend(db, on_restarted), lang="cn"))
+
+    result = await send.invoke({"to": "*", "content": "all hands"})
+
+    assert result.success, result.error
+    on_restarted.assert_not_awaited()
+    assert (await db.member.get_member("sleepy", TEAM_NAME)).status == MemberStatus.DORMANT.value

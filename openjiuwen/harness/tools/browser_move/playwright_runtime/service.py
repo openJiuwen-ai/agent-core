@@ -1552,7 +1552,10 @@ class BrowserService:
             _ctx_observer_request_id.reset(token_request)
         output_text = result.get("output") if isinstance(result, dict) else result
         parsed = extract_json_object(output_text)
+        exhausted = isinstance(result, dict) and result.get("termination_reason") == "max_iterations"
         if parsed:
+            if exhausted:
+                parsed["termination_reason"] = "max_iterations"
             self._update_progress_from_worker_result(
                 session_id=session_id,
                 request_id=request_id,
@@ -1562,7 +1565,7 @@ class BrowserService:
 
         output_str = str(output_text) if output_text is not None else ""
         output_lower = output_str.lower()
-        if MAX_ITERATION_MESSAGE.lower() in output_lower:
+        if exhausted or MAX_ITERATION_MESSAGE.lower() in output_lower:
             parsed = {
                 "ok": False,
                 "final": output_str,
@@ -1600,6 +1603,8 @@ class BrowserService:
     def _is_max_iteration_result(parsed: Dict[str, Any]) -> bool:
         if not isinstance(parsed, dict):
             return False
+        if parsed.get("termination_reason") == "max_iterations":
+            return True
         if str(parsed.get("error", "")).strip().lower() == "max_iterations_reached":
             return True
         marker = MAX_ITERATION_MESSAGE.lower()

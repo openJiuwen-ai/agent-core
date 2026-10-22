@@ -7,8 +7,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-import yaml
-
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
@@ -27,6 +25,7 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails._multimodal import (
     build_read_image_multimodal_resolver,
 )
+from openjiuwen.harness.skills.mount import SkillRootMount, split_skill_front_matter
 from openjiuwen.harness.tools import BashTool, ReadFileTool, ListSkillTool, SkillTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 
@@ -163,6 +162,62 @@ class SkillUseRail(DeepAgentRail):
         self._skill_order.clear()
         self.skills = []
         self._skills_snapshot_signature = None
+
+    def mount_skill_root(self, directory: str | Path) -> SkillRootMount:
+        """Append a native discovery root and return its ownership handle."""
+        root = Path(directory).expanduser().resolve()
+        roots = self._normalize_skill_dirs(self.skills_dir)
+        owned = root not in roots
+        if owned:
+            self.skills_dir = [*(str(item) for item in roots), str(root)]
+            self.clear_skills()
+        return SkillRootMount(self, root, owned)
+
+    def unmount_skill_root(self, directory: str | Path) -> None:
+        """Remove an explicitly owned root; callers retain the ownership handle."""
+        root = Path(directory).expanduser().resolve()
+        roots = self._normalize_skill_dirs(self.skills_dir)
+        self.skills_dir = [str(item) for item in roots if item != root]
+        self.clear_skills()
+
+    def owns_tool(self, card: ToolCard | None) -> bool:
+        """Whether the ability card is still the native tool this rail registered."""
+        return card is not None and self._owned_tool_cards.get(card.name) is card
+
+    def check_skill_source(self, name: str, directory: str | Path) -> None:
+        """Reject filters and same-name sources that hide a required skill."""
+        if (self.enabled_skills and name not in self.enabled_skills) or name in self.disabled_skills:
+            raise ValueError(f"is filtered: {name}.")
+        expected = Path(directory).resolve()
+        roots = self._normalize_skill_dirs(self.skills_dir)
+        for discovered, _ in self._discover_skill_dirs(roots):
+            if discovered.name == name and discovered.resolve() != expected:
+                raise ValueError(f"name conflict: {name}.")
+
+    async def validate_skill_source(
+        self,
+        name: str,
+        directory: str | Path,
+        session: Any = None,
+        *,
+        refresh: bool = False,
+    ) -> None:
+        """Validate a required skill against discovery, visibility and session state."""
+        self.check_skill_source(name, directory)
+        if refresh:
+            await self.reload_skills()
+        expected = Path(directory).resolve()
+        # Check all sources before name deduplication: a hidden duplicate is
+        # still a conflict for a capability that requires this exact resource.
+        for skill in self._skill_cache.values():
+            if skill.name == name and skill.directory.resolve() != expected:
+                raise ValueError(f"name conflict: {name}.")
+        visible = next((item for item in self.skills if item.name == name), None)
+        if visible is None or visible.directory.resolve() != expected:
+            raise ValueError(f"is missing or filtered: {name}.")
+        baseline = next((item for item in self.get_skills_for_session(session) if item.name == name), None)
+        if baseline is None or baseline.directory.resolve() != expected:
+            raise ValueError(f"conflicts with the session baseline: {name}.")
 
     async def _prepare_skills(self) -> None:
         """Refresh skills incrementally from skills_dir and apply filters."""
@@ -884,13 +939,7 @@ class SkillUseRail(DeepAgentRail):
             The parsed front matter and the remaining body, or None when the
             text does not open with a complete ``---`` delimited block.
         """
-        if not text.startswith("---"):
-            return None
-        parts = text.split("---", 2)
-        if len(parts) < 3:
-            return None
-        _, yaml_block, body = parts
-        return yaml.safe_load(yaml_block) or {}, body.lstrip()
+        return split_skill_front_matter(text)
 
     async def _load_front_matter(self, path: Path) -> Optional[dict]:
         """Load only the YAML front matter of a SKILL.md.
@@ -935,14 +984,8 @@ class SkillUseRail(DeepAgentRail):
 
         text = content if isinstance(content, str) else str(content)
 
-        if text.startswith("---"):
-            parts = text.split("---", 2)
-            if len(parts) >= 3:
-                _, yaml_block, body = parts
-                yaml_data = yaml.safe_load(yaml_block) or {}
-                return yaml_data, body.lstrip()
-
-        return None, text
+        parsed = self._split_front_matter(text)
+        return parsed if parsed is not None else (None, text)
 
     async def _load_description(self, path: Path) -> str:
         """Load description from YAML front matter."""
@@ -1037,6 +1080,16 @@ class SkillUseRail(DeepAgentRail):
                 return
             visited.add(dir_key)
 
+            # An explicit root may itself be a skill rather than a library.
+            # Keep the same first-SKILL.md boundary for both entry points.
+            skill_md_path = directory / "SKILL.md"
+            if skill_md_path.is_file():
+                try:
+                    found.append((directory, skill_md_path.stat().st_mtime))
+                except OSError as exc:
+                    logger.debug("[SkillUseRail] cannot stat %s: %s", skill_md_path, exc)
+                return
+
             try:
                 children = sorted(directory.iterdir(), key=lambda p: p.name)
             except OSError as exc:
@@ -1047,14 +1100,6 @@ class SkillUseRail(DeepAgentRail):
                 if not child.is_dir():
                     continue
                 if child.name.startswith(".") or child.name in _SKILL_SCAN_SKIP_DIRS:
-                    continue
-
-                skill_md_path = child / "SKILL.md"
-                if skill_md_path.is_file():
-                    try:
-                        found.append((child, skill_md_path.stat().st_mtime))
-                    except OSError as exc:
-                        logger.debug("[SkillUseRail] cannot stat %s: %s", skill_md_path, exc)
                     continue
 
                 _walk(child)

@@ -13,16 +13,19 @@ from typing import (
 
 from sqlalchemy import (
     Column,
+    String,
+    Text,
     delete,
     select,
-    String,
 )
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.dialects.mysql import insert as mysql_insert
-from sqlalchemy.dialects.sqlite import insert
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import (
-    async_sessionmaker,
     AsyncEngine,
     AsyncSession,
+    async_sessionmaker,
 )
 from sqlalchemy.orm import DeclarativeBase
 
@@ -42,7 +45,10 @@ class Base(DeclarativeBase):
 class KVStoreTable(Base):
     __tablename__ = "kv_store"
     key = Column(String(255), primary_key=True)
-    value = Column(String(4096), nullable=False)
+    # Values are often far larger than 4096 characters (an agent checkpoint is
+    # tens to hundreds of KB). SQLite ignores VARCHAR lengths; PostgreSQL and
+    # MySQL enforce them, and MySQL TEXT stops at 64 KB.
+    value = Column(Text().with_variant(LONGTEXT(), "mysql"), nullable=False)
 
 
 class DbBasedKVStore(BaseKVStore):
@@ -67,6 +73,7 @@ class DbBasedKVStore(BaseKVStore):
                 .on_duplicate_key_update(value=value)
             )
         else:
+            insert = postgresql_insert if dialect_name == "postgresql" else sqlite_insert
             stmt = (
                 insert(KVStoreTable)
                 .values(key=key, value=value)
@@ -296,14 +303,7 @@ class DbBasedKVStore(BaseKVStore):
                     if set_ops:
                         for key, value in set_ops:
                             encoded_value = self._encode_value(value)
-                            stmt = (
-                                insert(KVStoreTable)
-                                .values(key=key, value=encoded_value)
-                                .on_conflict_do_update(
-                                    index_elements=["key"],
-                                    set_={"value": encoded_value}
-                                )
-                            )
+                            stmt = self._get_upsert_stmt(key, encoded_value)
                             await session.execute(stmt)
 
                     # Batch get operations

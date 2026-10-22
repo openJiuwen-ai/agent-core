@@ -45,9 +45,15 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from openjiuwen.harness.rails.interrupt.interrupt_base import BaseInterruptRail
 from openjiuwen.harness.rails.lsp_rail import LspRail
 from openjiuwen.harness.rails.mcp_rail import McpRail
+from openjiuwen.harness.rails._multimodal import build_read_image_multimodal_resolver
+from openjiuwen.harness.rails.multimodal_context_summarizer_rail import (
+    ARCHIVED_SCREEN_PLACEHOLDER,
+    MultimodalContextSummarizerRail,
+)
 from openjiuwen.harness.rails.memory import (
     CodingMemoryRail,
     ExternalMemoryRail,
+    JiuwenMemoryRail,
     MemoryRail,
 )
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
@@ -80,6 +86,7 @@ from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 # fmt: on
 
 __all__ = [
+    "ARCHIVED_SCREEN_PLACEHOLDER",
     "AgentModeRail",
     "AskUserPayload",
     "AskUserRail",
@@ -98,6 +105,7 @@ __all__ = [
     "EvolutionTriggerPoint",
     "ExternalMemoryRail",
     "HeartbeatRail",
+    "JiuwenMemoryRail",
     "ModelAnomalyDetectionRail",
     "ToolLoopCompactConfig",
     "LspRail",
@@ -105,6 +113,7 @@ __all__ = [
     "MemoryRail",
     "MemberSkillEvolutionRail",
     "MetisContextEvolveRail",
+    "MultimodalContextSummarizerRail",
     "PermissionInterruptRail",
     "ProgressiveToolRail",
     "SafetyPromptRail",
@@ -133,6 +142,7 @@ __all__ = [
     "TeamSkillEvolutionRail",
     "TeamSymphonyGraphEvolutionRail",
     "TeamSkillRail",
+    "build_read_image_multimodal_resolver",
     "configure_skill_evolution",
     "configure_skill_evolution_runtime",
     "configure_ttse_evolution",

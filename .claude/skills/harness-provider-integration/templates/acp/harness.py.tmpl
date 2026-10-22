@@ -1,0 +1,794 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""HarnessProtocol implementation driving __DISPLAY__ as an Agent Client Protocol agent.
+
+The CLI runs as one long-lived ACP agent over stdio (JSON-RPC 2.0).  A
+harness cycle is ``initialize`` plus one ``session/new`` (or
+``session/load`` when resuming); each external Turn is one
+``session/prompt`` whose ``session/update`` notifications become protocol
+events and whose response carries the stop reason.  Abort is ACP's
+``session/cancel``; tool permission requests become host tool approvals.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import uuid
+from typing import Any, Callable, Mapping
+
+from openjiuwen.harness_protocol import (
+    PROTOCOL_VERSION,
+    AbortMode,
+    CheckpointReason,
+    HarnessCapability,
+    HarnessCard,
+    HarnessContext,
+    HarnessProtocolError,
+    HostCapability,
+    JsonObject,
+    McpTransport,
+    ModelOption,
+    ModelRequestEvent,
+    ModelRequestStatus,
+    ModelSelection,
+    ResumePolicy,
+    ToolApprovalDecision,
+    ToolApprovalRequest,
+    TurnEventKind,
+    TurnResult,
+    UnsupportedHarnessCapabilityError,
+)
+from openjiuwen.harness_providers.base import (
+    PendingTurn,
+    ProviderStartupError,
+    SerializedTurnHarness,
+    TurnTiming,
+    logger,
+)
+from openjiuwen.harness_providers.inputs import harness_input_text
+from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
+from openjiuwen.harness_providers.mcp_naming import TOOL_PLACEHOLDER, mcp_tool_naming_preamble
+from openjiuwen.harness_providers.skills import install_skills
+from __PKG__.bundled import select_executable
+from __PKG__.config import __CLASS__HarnessConfig, __CLASS__ModelConfig
+from __PKG__.failure_classifier import classify_exception, turn_error
+from __PKG__.mapping import PROVIDER_NAME, MappedEvent, __CLASS__TurnAccumulator
+from __PKG__.process import CliLaunch, CliProcess
+from __PKG__.rpc import JsonRpcConnection, JsonRpcConnectionClosed, MethodNotFound
+
+ADAPTER_VERSION = "0.1.0"
+ACP_PROTOCOL_VERSION = 1
+# SCAFFOLD(skills-dir): the project-relative directory this CLI discovers
+# skills in (e.g. ".opencode/skills"); ``None`` when it has none, in which
+# case configured skills are rejected instead of silently ignored.
+SKILLS_SCAN_DIR: str | None = None
+# SCAFFOLD(model): how this CLI selects a model. Try both on the real CLI and
+# keep what works, agents differ: opencode 1.17 answers
+# ``session/set_config_option`` with "model not found" even for the values it
+# lists, while Kimi Code 2.1.1 rejects a launch flag but switches through it.
+# MODEL_ARGS is the launch flag with ``{model}`` where the name goes, e.g.
+# ("--model", "{model}"). MODEL_CONFIG_ID is the ``id`` of the model selector
+# in ``session/new``'s ``configOptions`` (e.g. "model"); the session is then
+# switched and the reported ``currentValue`` checked. With neither, a
+# configured model is rejected at start.
+MODEL_ARGS: tuple[str, ...] = ()
+MODEL_CONFIG_ID: str | None = None
+# SCAFFOLD(mcp-naming): how this CLI names an MCP server's tools to the model,
+# with ``{server}`` and ``{tool}``, e.g. "mcp__{server}__{tool}". Read it from
+# the ``title`` of a real ``tool_call`` for a tool of a mounted server; keep
+# ``None`` only if the CLI shows the bare tool name.
+MCP_TOOL_NAME_PATTERN: str | None = None
+# SCAFFOLD(endpoint): how this CLI runs a model on a host endpoint instead of
+# its own login: a function returning the child environment that makes the
+# endpoint model the session default (e.g. a config-content variable, or
+# vendor ``*_BASE_URL`` / ``*_API_KEY`` / ``*_MODEL`` variables). It enables
+# ENDPOINT_MODELS and, with ``loadSession``, AUTH_FALLBACK: the fallback
+# restarts the agent with the fallback endpoint and loads the same session.
+# Keep ``None`` when the CLI cannot be pointed at an endpoint.
+ENDPOINT_ENV: Callable[[__CLASS__ModelConfig], dict[str, str]] | None = None
+# ACP has no system prompt field; the host prompt rides on the first prompt
+# of a fresh session, fenced so it reads as instructions, not as the request.
+_SYSTEM_PROMPT_FENCE = "<system-instructions>\n{prompt}\n</system-instructions>\n\n"
+_ALLOW_KINDS = ("allow_once", "allow_always")
+_ALLOW_SESSION_KINDS = ("allow_always", "allow_once")
+_REJECT_KINDS = ("reject_once", "reject_always")
+# A per-session model selector is also a live one: the same
+# ``session/set_config_option`` switches the model between turns, and the
+# selector's ``options`` list what the agent offers.
+_MODEL_CAPABILITIES = (
+    frozenset({HarnessCapability.MODEL_DISCOVERY, HarnessCapability.MODEL_SELECTION})
+    if MODEL_CONFIG_ID is not None
+    else frozenset()
+)
+_ENDPOINT_CAPABILITIES = frozenset({HarnessCapability.ENDPOINT_MODELS}) if ENDPOINT_ENV is not None else frozenset()
+_AUTH_FALLBACK_NEEDS = frozenset({HarnessCapability.ENDPOINT_MODELS, HarnessCapability.PERSISTENT_SESSION})
+
+
+def _with_auth_fallback(capabilities: frozenset[HarnessCapability]) -> frozenset[HarnessCapability]:
+    """Add AUTH_FALLBACK when the agent takes endpoints and loads sessions.
+
+    The fallback restarts the agent on the fallback endpoint and loads the live
+    session into it, so it needs ENDPOINT_MODELS and PERSISTENT_SESSION
+    (``loadSession``); without either it could never activate.
+    """
+    if _AUTH_FALLBACK_NEEDS <= capabilities:
+        return capabilities | {HarnessCapability.AUTH_FALLBACK}
+    return capabilities
+
+
+class __CLASS__Harness(SerializedTurnHarness):
+    """Adapt one __DISPLAY__ ACP agent process and one ACP session to protocol v1."""
+
+    card = HarnessCard(
+        name=PROVIDER_NAME,
+        implementation_version=ADAPTER_VERSION,
+        protocol_version=PROTOCOL_VERSION,
+        compatible_protocol_versions=frozenset({PROTOCOL_VERSION}),
+        # SCAFFOLD(capabilities): GRACEFUL_ABORT is ``session/cancel`` and
+        # MCP_TOOLS is ``session/new``'s ``mcpServers``; both are mandatory ACP.
+        # PERSISTENT_SESSION and CHECKPOINT need ``agentCapabilities.loadSession``.
+        # Keep exactly what the e2e suite proved against the real CLI.
+        capabilities=_with_auth_fallback(
+            frozenset(
+                {
+                    HarnessCapability.GRACEFUL_ABORT,
+                    HarnessCapability.MCP_TOOLS,
+                    HarnessCapability.PERSISTENT_SESSION,
+                    HarnessCapability.CHECKPOINT,
+                }
+            )
+            | _MODEL_CAPABILITIES
+            | _ENDPOINT_CAPABILITIES
+        ),
+        optional_host_capabilities=frozenset(
+            {
+                HostCapability.TOOL_APPROVAL,
+                HostCapability.MCP_SERVERS,
+                HostCapability.CHECKPOINT_SINK,
+                HostCapability.MODEL_REQUEST_OBSERVATION,
+            }
+        ),
+    )
+
+    def __init__(self, config: __CLASS__HarnessConfig | None = None) -> None:
+        """Bind the provider configuration; the CLI starts on ``start``.
+
+        Args:
+            config: Provider-owned options; defaults launch ``__BINARY__``.
+        """
+        self._config = config or __CLASS__HarnessConfig()
+        super().__init__(event_buffer_capacity=self._config.event_buffer_capacity)
+        self._process: CliProcess | None = None
+        self._rpc: JsonRpcConnection | None = None
+        self._agent_capabilities: dict[str, Any] = {}
+        self._acp_session_id: str | None = None
+        # The live session's ``configOptions`` as last reported by the agent.
+        self._config_options: Any = None
+        self._accumulator: __CLASS__TurnAccumulator | None = None
+        # The endpoint model the agent process was launched on; ``None`` runs
+        # on the CLI's own login. The auth fallback moves it to the fallback.
+        self._active_endpoint: __CLASS__ModelConfig | None = self._config.endpoint_model
+        # The CLI-login model the session runs on, runtime selections included;
+        # a restart on the primary restores it rather than the configured one.
+        self._primary_model: str | None = self._config.model
+        # A restart left no agent behind; the next turn reloads the session.
+        self._restore_pending = False
+        self._cwd: str | None = None
+        self._prelude = ""
+
+    # ------------------------------------------------------------------
+    # Provider hooks
+    # ------------------------------------------------------------------
+
+    def _validate_context(self, context: HarnessContext) -> None:
+        super()._validate_context(context)
+        resumes = context.resume_policy is ResumePolicy.REQUIRE_RESUME or context.checkpoint is not None
+        if resumes and not self.card.supports(HarnessCapability.CHECKPOINT):
+            raise UnsupportedHarnessCapabilityError("__DISPLAY__ cannot restore protocol checkpoints")
+        if context.mcp_servers and not self.card.supports(HarnessCapability.MCP_TOOLS):
+            raise UnsupportedHarnessCapabilityError("__DISPLAY__ cannot mount host MCP servers")
+        if any(server.transport is McpTransport.IN_PROCESS for server in context.mcp_servers):
+            raise UnsupportedHarnessCapabilityError("an ACP agent cannot mount in-process MCP servers")
+        if context.system_prompt and self._config.system_prompt_delivery == "none":
+            raise UnsupportedHarnessCapabilityError("system_prompt_delivery='none' cannot carry a system prompt")
+        if self._config.skills and SKILLS_SCAN_DIR is None:
+            raise UnsupportedHarnessCapabilityError("__DISPLAY__ has no skill discovery directory for portable skills")
+        uses_endpoint = self._config.endpoint_model is not None or self._config.fallback_model is not None
+        if uses_endpoint and ENDPOINT_ENV is None:
+            raise UnsupportedHarnessCapabilityError("__DISPLAY__ cannot run a model on a host endpoint")
+        if self._config.model is not None and not MODEL_ARGS and MODEL_CONFIG_ID is None:
+            raise UnsupportedHarnessCapabilityError("__DISPLAY__ cannot select a model")
+
+    async def _open_session(self, context: HarnessContext) -> str | None:
+        cwd = os.path.abspath(context.cwd or self._config.cwd or os.getcwd())
+        if self._config.skills:
+            await asyncio.to_thread(
+                install_skills,
+                self._config.skills,
+                provider=PROVIDER_NAME,
+                cwd=cwd,
+                conflict=self._config.skill_conflict,
+                scan_dir=SKILLS_SCAN_DIR,
+            )
+        self._cwd = cwd
+        self._active_endpoint = self._config.endpoint_model
+        self._primary_model = self._config.model
+        self._restore_pending = False
+        try:
+            rpc = await self._start_agent(context, cwd)
+            session_id, resumed, config_options = await self._open_acp_session(rpc, context, cwd)
+            config_options = await self._select_model(rpc, session_id, config_options)
+        except (asyncio.CancelledError, ProviderStartupError, HarnessProtocolError, UnsupportedHarnessCapabilityError):
+            raise
+        except Exception as exc:
+            error = classify_exception(exc)
+            raise ProviderStartupError(f"__DISPLAY__ startup failed: {type(exc).__name__}", error=error) from exc
+        self._acp_session_id = session_id
+        self._config_options = config_options
+        self._prelude = "" if resumed else self._system_prelude(context)
+        if self.card.supports(HarnessCapability.CHECKPOINT):
+            await self._publish_checkpoint(
+                {"session_id": session_id, "resumed": resumed},
+                reason=CheckpointReason.SESSION_ACTIVATED,
+            )
+        return session_id
+
+    async def _start_agent(self, context: HarnessContext, cwd: str) -> JsonRpcConnection:
+        """Launch the agent process on the active model and complete ``initialize``."""
+        process = CliProcess(max_line_bytes=self._config.max_line_bytes)
+        self._process = process
+        argv, env = self._launch(context)
+        await process.start(CliLaunch(argv=argv, env=env, cwd=cwd))
+        rpc = JsonRpcConnection(process, on_notification=self._on_notification, on_request=self._on_request)
+        self._rpc = rpc
+        rpc.start()
+        await self._initialize(rpc)
+        return rpc
+
+    async def _close_session(self) -> None:
+        process, rpc = self._process, self._rpc
+        self._process = None
+        self._rpc = None
+        self._accumulator = None
+        self._acp_session_id = None
+        self._config_options = None
+        # Shut the child down first so the reader keeps draining stdout until
+        # EOF; cancelling the reader first could leave the child blocked on a
+        # full pipe until the terminate deadline.
+        if process is not None:
+            await process.shutdown(self._config.shutdown_timeout_s)
+        if rpc is not None:
+            await rpc.close()
+
+    async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
+        timing = TurnTiming()
+        context = self._context
+        observed = context is not None and HostCapability.MODEL_REQUEST_OBSERVATION in context.host_capabilities
+        accumulator = __CLASS__TurnAccumulator(
+            turn_id=turn.turn_id,
+            observe_requests=observed,
+            model=self._session_model(),
+        )
+        if turn.abort_requested:
+            return TurnEventKind.ABORTED, accumulator.build_interrupted_result(turn, timing=timing)
+        if self._restore_pending:
+            try:
+                await self._restore_session()
+            except Exception as exc:
+                return TurnEventKind.FAILED, accumulator.build_failed_result(classify_exception(exc), timing=timing)
+        rpc = self._rpc
+        if rpc is None or rpc.closed:
+            exit_code = self._process.returncode if self._process is not None else None
+            error = classify_exception(JsonRpcConnectionClosed(exit_code))
+            return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
+        text = self._prelude + harness_input_text(turn.content)
+        self._accumulator = accumulator
+        try:
+            future = rpc.send_request(
+                "session/prompt",
+                {"sessionId": self._acp_session_id, "prompt": [{"type": "text", "text": text}]},
+            )
+            try:
+                response = await asyncio.wait_for(asyncio.shield(future), self._config.turn_timeout_s)
+            except asyncio.TimeoutError:
+                return TurnEventKind.FAILED, await self._time_out(turn, accumulator, future, timing)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            status = ModelRequestStatus.CANCELLED if turn.abort_requested else ModelRequestStatus.FAILED
+            await self._emit_mapped(turn, accumulator.finish(status))
+            if turn.abort_requested:
+                return TurnEventKind.ABORTED, accumulator.build_interrupted_result(turn, timing=timing)
+            return TurnEventKind.FAILED, accumulator.build_failed_result(classify_exception(exc), timing=timing)
+        finally:
+            self._accumulator = None
+        # The agent answered, so it has seen the prelude: never send it twice.
+        self._prelude = ""
+        await self._emit_mapped(turn, [*accumulator.finish(), *accumulator.usage_event(response)])
+        return accumulator.build_terminal_result(response, turn=turn, timing=timing)
+
+    async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
+        _ = turn, mode
+        await self._cancel_prompt()
+
+    async def _list_models(self) -> tuple[ModelOption, ...]:
+        config_options = self._config_options
+        if config_options is None:
+            config_options = await self._probe_config_options()
+        selector = _model_option(config_options)
+        current = selector.get("currentValue")
+        return tuple(
+            ModelOption(
+                model_id=value,
+                display_name=str(entry.get("name") or value),
+                description=str(entry.get("description") or ""),
+                is_default=value == current,
+            )
+            for entry, value in _offered_entries(selector)
+        )
+
+    async def _apply_model_selection(self, selection: ModelSelection) -> None:
+        if selection.effort is not None:
+            raise UnsupportedHarnessCapabilityError("__DISPLAY__ has no reasoning effort selector")
+        if selection.model is None:
+            return
+        rpc, session_id = self._rpc, self._acp_session_id
+        if rpc is None or rpc.closed or session_id is None:
+            raise HarnessProtocolError("__DISPLAY__ has no live session to switch the model of")
+        try:
+            self._config_options = await self._switch_model(rpc, session_id, self._config_options, selection.model)
+        except ProviderStartupError as exc:
+            raise HarnessProtocolError(exc.error.message) from exc
+        if self._active_endpoint is None:
+            self._primary_model = selection.model
+
+    async def _probe_config_options(self) -> Any:
+        """Read the session ``configOptions`` from a throwaway agent; prompts nothing."""
+        cwd = os.path.abspath(self._config.cwd or os.getcwd())
+        env: dict[str, str] = dict(os.environ) if self._config.inherit_process_env else {}
+        env.update(self._config.env)
+        executable = select_executable(self._config.cli_path, self._config.command[0], env)
+        process = CliProcess(max_line_bytes=self._config.max_line_bytes)
+        argv = (executable, *self._config.command[1:], *self._config.extra_args)
+        await process.start(CliLaunch(argv=argv, env=env, cwd=cwd))
+        rpc = JsonRpcConnection(process, on_notification=_ignore_notification, on_request=_refuse_request)
+        rpc.start()
+        try:
+            await self._initialize(rpc)
+            created = await rpc.request(
+                "session/new",
+                {"cwd": cwd, "mcpServers": []},
+                timeout_s=self._config.initialize_timeout_s,
+            )
+            return created.get("configOptions")
+        finally:
+            await process.shutdown(self._config.shutdown_timeout_s)
+            await rpc.close()
+
+    # ------------------------------------------------------------------
+    # ACP session setup
+    # ------------------------------------------------------------------
+
+    async def _initialize(self, rpc: JsonRpcConnection) -> None:
+        result = await rpc.request(
+            "initialize",
+            {
+                "protocolVersion": ACP_PROTOCOL_VERSION,
+                # The agent keeps its own file and terminal tools: the client
+                # serves neither, so every tool call stays observable as the
+                # agent's own item.
+                "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
+                "clientInfo": {"name": "openjiuwen", "version": ADAPTER_VERSION},
+            },
+            timeout_s=self._config.initialize_timeout_s,
+        )
+        version = result.get("protocolVersion")
+        if version != ACP_PROTOCOL_VERSION:
+            error = turn_error(
+                f"__DISPLAY__ speaks ACP version {version!r}, expected {ACP_PROTOCOL_VERSION}",
+                category="sdk_error",
+                code="__UPPER___ACP_VERSION",
+            )
+            raise ProviderStartupError("__DISPLAY__ ACP version mismatch", error=error)
+        capabilities = result.get("agentCapabilities")
+        self._agent_capabilities = dict(capabilities) if isinstance(capabilities, Mapping) else {}
+
+    async def _open_acp_session(
+        self,
+        rpc: JsonRpcConnection,
+        context: HarnessContext,
+        cwd: str,
+    ) -> tuple[str, bool, Any]:
+        """Load the checkpointed session when asked and possible, else create one.
+
+        Returns:
+            The ACP session id, whether it was resumed, and the session's
+            ``configOptions`` as the agent reported them.
+        """
+        mcp_servers = self._acp_mcp_servers(context)
+        restored = self._restored_checkpoint_data(context)
+        restored_id = restored.get("session_id") if restored else None
+        if not isinstance(restored_id, str) or not restored_id:
+            restored_id = None
+        policy = context.resume_policy
+        if policy is ResumePolicy.REQUIRE_RESUME and restored_id is None:
+            raise HarnessProtocolError("__DISPLAY__ checkpoint does not carry a session id to resume")
+        if restored_id is not None and policy is not ResumePolicy.NEW:
+            if self._agent_capabilities.get("loadSession") is True:
+                # The agent replays the history as session/update notifications
+                # before it answers; no turn is active, so they are not events.
+                loaded = await rpc.request(
+                    "session/load",
+                    {"sessionId": restored_id, "cwd": cwd, "mcpServers": mcp_servers},
+                    timeout_s=self._config.initialize_timeout_s,
+                )
+                return restored_id, True, loaded.get("configOptions")
+            if policy is ResumePolicy.REQUIRE_RESUME:
+                error = turn_error(
+                    "__DISPLAY__ does not advertise loadSession",
+                    category="sdk_error",
+                    code="__UPPER___LOAD_UNSUPPORTED",
+                )
+                raise ProviderStartupError("__DISPLAY__ cannot resume a session", error=error)
+        created = await rpc.request(
+            "session/new",
+            {"cwd": cwd, "mcpServers": mcp_servers},
+            timeout_s=self._config.initialize_timeout_s,
+        )
+        session_id = created.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            raise HarnessProtocolError("__DISPLAY__ session/new returned no sessionId")
+        return session_id, False, created.get("configOptions")
+
+    async def _select_model(self, rpc: JsonRpcConnection, session_id: str, config_options: Any) -> Any:
+        """Switch the session to the configured model and confirm the switch.
+
+        Only for agents selecting the model per session (``MODEL_CONFIG_ID``);
+        a launch flag already applied it.
+
+        Returns:
+            The session ``configOptions`` after the switch.
+
+        Raises:
+            ProviderStartupError: When the session does not offer the model or
+                the agent did not apply it.
+        """
+        model = self._primary_model
+        if model is None or MODEL_CONFIG_ID is None or self._active_endpoint is not None:
+            return config_options
+        return await self._switch_model(rpc, session_id, config_options, model)
+
+    async def _switch_model(self, rpc: JsonRpcConnection, session_id: str, config_options: Any, model: str) -> Any:
+        """Set the session model through its selector and check the agent applied it.
+
+        Returns:
+            The session ``configOptions`` the agent reported after the switch.
+
+        Raises:
+            ProviderStartupError: When the session does not offer the model or
+                the agent kept another one.
+        """
+        offered = _offered_models(_model_option(config_options))
+        if model not in offered:
+            error = turn_error(
+                f"__DISPLAY__ does not offer model {model!r}",
+                category="request_rejected",
+                code="__UPPER___UNKNOWN_MODEL",
+                provider_data={"offered": offered},
+            )
+            raise ProviderStartupError("__DISPLAY__ model is not available", error=error)
+        result = await rpc.request(
+            "session/set_config_option",
+            {"sessionId": session_id, "configId": MODEL_CONFIG_ID, "value": model},
+            timeout_s=self._config.initialize_timeout_s,
+        )
+        updated = result.get("configOptions")
+        current = _model_option(updated).get("currentValue")
+        if current != model:
+            error = turn_error(
+                f"__DISPLAY__ kept model {current!r} instead of {model!r}",
+                category="sdk_error",
+                code="__UPPER___MODEL_NOT_APPLIED",
+            )
+            raise ProviderStartupError("__DISPLAY__ did not switch the model", error=error)
+        return updated
+
+    def _acp_mcp_servers(self, context: HarnessContext) -> list[dict[str, Any]]:
+        mcp_capabilities = self._agent_capabilities.get("mcpCapabilities")
+        http_supported = isinstance(mcp_capabilities, Mapping) and mcp_capabilities.get("http") is True
+        servers: list[dict[str, Any]] = []
+        for server in context.mcp_servers:
+            if server.transport is McpTransport.STDIO:
+                servers.append(
+                    {
+                        "name": server.name,
+                        "command": server.command[0],
+                        "args": list(server.command[1:]),
+                        "env": [{"name": key, "value": value} for key, value in server.env.items()],
+                    }
+                )
+            elif server.transport is McpTransport.HTTP and http_supported:
+                servers.append(
+                    {
+                        "type": "http",
+                        "name": server.name,
+                        "url": server.url,
+                        "headers": [{"name": key, "value": value} for key, value in server.headers.items()],
+                    }
+                )
+            else:
+                raise UnsupportedHarnessCapabilityError(
+                    f"__DISPLAY__ cannot mount MCP server {server.name!r} over {server.transport.value}"
+                )
+        return servers
+
+    # ------------------------------------------------------------------
+    # Agent -> client traffic
+    # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Authentication fallback
+    # ------------------------------------------------------------------
+
+    def _auth_fallback_payload(self) -> JsonObject | None:
+        fallback = self._config.fallback_model
+        if fallback is None or ENDPOINT_ENV is None:
+            return None
+        return {"model": fallback.model, "api_base": fallback.api_base}
+
+    async def _reconnect_for_auth(self, *, fallback: bool) -> None:
+        """Restart the agent on the fallback (or primary) model and load the same session."""
+        context, session_id, cwd = self._context, self._acp_session_id, self._cwd
+        if context is None or session_id is None or cwd is None:
+            raise HarnessProtocolError("__DISPLAY__ has no live session to move to another model")
+        if self._agent_capabilities.get("loadSession") is not True:
+            raise HarnessProtocolError("__DISPLAY__ cannot resume its session on another model")
+        await self._close_session()
+        # Keep the session id across a failed restart: the next attempt (the
+        # primary model after a declined switch, or the next turn) loads it.
+        self._acp_session_id = session_id
+        self._active_endpoint = self._config.fallback_model if fallback else self._config.endpoint_model
+        try:
+            await self._restore_session()
+        except BaseException:
+            # The host never ratified a fallback whose restart failed: the
+            # next turn restores the primary model, not the fallback.
+            self._active_endpoint = self._config.endpoint_model
+            raise
+
+    async def _restore_session(self) -> None:
+        """Start the agent on the active model and load the live session into it.
+
+        A failure leaves no half-started agent behind and marks the session
+        for the next turn, which tries again once the cause is gone.
+        """
+        context, session_id, cwd = self._context, self._acp_session_id, self._cwd
+        if context is None or session_id is None or cwd is None:
+            raise HarnessProtocolError("__DISPLAY__ has no session to restore")
+        self._restore_pending = True
+        try:
+            rpc = await self._start_agent(context, cwd)
+            loaded = await rpc.request(
+                "session/load",
+                {"sessionId": session_id, "cwd": cwd, "mcpServers": self._acp_mcp_servers(context)},
+                timeout_s=self._config.initialize_timeout_s,
+            )
+            self._config_options = await self._select_model(rpc, session_id, loaded.get("configOptions"))
+        except BaseException:
+            await self._close_session()
+            self._acp_session_id = session_id
+            raise
+        self._restore_pending = False
+
+    async def _on_notification(self, method: str, params: dict[str, Any]) -> None:
+        if method != "session/update" or params.get("sessionId") != self._acp_session_id:
+            return
+        accumulator = self._accumulator
+        turn = self.active_turn
+        update = params.get("update")
+        # Outside a turn the agent is replaying a loaded session (or chatting
+        # between prompts, e.g. command lists); neither is a turn event.
+        if accumulator is None or turn is None or not isinstance(update, Mapping):
+            return
+        await self._emit_mapped(turn, accumulator.consume(update))
+
+    async def _on_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        if method == "session/request_permission":
+            return await self._answer_permission(params)
+        raise MethodNotFound(method)
+
+    async def _answer_permission(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        """Answer ``session/request_permission`` from the host or the auto-approve default."""
+        raw_options = params.get("options")
+        options = [option for option in raw_options if isinstance(option, Mapping)] if isinstance(raw_options, list) else []
+        turn = self.active_turn
+        if turn is None or turn.abort_requested:
+            return {"outcome": {"outcome": "cancelled"}}
+        decision = await self._permission_decision(turn, params, options)
+        if turn.abort_requested:
+            return {"outcome": {"outcome": "cancelled"}}
+        option_id = _pick_option(options, decision)
+        if option_id is None:
+            return {"outcome": {"outcome": "cancelled"}}
+        return {"outcome": {"outcome": "selected", "optionId": option_id}}
+
+    async def _permission_decision(
+        self,
+        turn: PendingTurn,
+        params: Mapping[str, Any],
+        options: list[Mapping[str, Any]],
+    ) -> ToolApprovalDecision:
+        context = self._context
+        routed = context is not None and HostCapability.TOOL_APPROVAL in context.host_capabilities
+        if not routed or not self._has_host_interactions():
+            return ToolApprovalDecision.ALLOW if self._config.auto_approve else ToolApprovalDecision.DENY
+        tool_call = params.get("toolCall")
+        call = tool_call if isinstance(tool_call, Mapping) else {}
+        call_id = str(call.get("toolCallId") or uuid.uuid4().hex)
+        request = ToolApprovalRequest(
+            request_id=f"{PROVIDER_NAME}:permission:{call_id}:{uuid.uuid4().hex[:8]}",
+            call_id=call_id,
+            tool_name=str(call.get("title") or call.get("kind") or "tool"),
+            arguments=to_json_object(call.get("rawInput") or {}),
+            provider_session_id=self._session_id,
+            turn_id=turn.turn_id,
+            provider_data={"kind": to_json_safe(call.get("kind")), "options": to_json_safe(options)},
+        )
+        response = await self._request_interaction(request)
+        decision = getattr(response, "decision", None)
+        return decision if isinstance(decision, ToolApprovalDecision) else ToolApprovalDecision.DENY
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    async def _time_out(
+        self,
+        turn: PendingTurn,
+        accumulator: __CLASS__TurnAccumulator,
+        future: asyncio.Future[dict[str, Any]],
+        timing: TurnTiming,
+    ) -> TurnResult:
+        """Cancel a prompt that outlived ``turn_timeout_s`` and wait briefly for its answer."""
+        await self._cancel_prompt()
+        # Let the cancelled prompt settle so its trailing updates stay in this turn.
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(asyncio.shield(future), self._config.shutdown_timeout_s)
+        await self._emit_mapped(turn, accumulator.finish(ModelRequestStatus.CANCELLED))
+        error = turn_error(
+            f"__DISPLAY__ did not finish the turn within {self._config.turn_timeout_s:g}s",
+            category="network_timeout",
+            code="__UPPER___TURN_TIMEOUT",
+        )
+        return accumulator.build_failed_result(error, timing=timing)
+
+    async def _cancel_prompt(self) -> None:
+        rpc = self._rpc
+        if rpc is None or self._acp_session_id is None:
+            return
+        try:
+            await rpc.notify("session/cancel", {"sessionId": self._acp_session_id})
+        except Exception as exc:
+            logger.warning("[%s] session/cancel failed: %s", PROVIDER_NAME, type(exc).__name__)
+
+    async def _emit_mapped(self, turn: PendingTurn, mapped: list[MappedEvent]) -> None:
+        for event in mapped:
+            payload = event.payload
+            if isinstance(payload, ModelRequestEvent):
+                payload = await self._observe_request(payload)
+            await self._emit(payload, turn=turn, item_id=event.item_id, causation_ids=event.causation_ids)
+
+    # Overridden per vendor; instance state (the session's record) lives there.
+    # pylint: disable-next=add-staticmethod-or-classmethod-decorator
+    async def _observe_request(self, request: ModelRequestEvent) -> ModelRequestEvent:
+        """Complete a request derived from the ACP stream with the vendor's own record.
+
+        SCAFFOLD(observation): the stream only shows what the model produced.
+        When the CLI records its requests (Kimi Code's ``wire.jsonl``, a local
+        database, request logs), find the record of this request and return
+        the event with what it states: ``system_instructions``,
+        ``input_messages`` (with stable message ids) and
+        ``input_observed=True``, ``tool_definitions``, ``usage``, the served
+        ``model``. Keep ``request_id``: tool items already cite it. Wait for a
+        record briefly at most, and return ``request`` unchanged when none
+        arrives. See ``references/observation.md``.
+        """
+        return request
+
+    def _session_model(self) -> str | None:
+        """Return the model the session runs on: the endpoint model, else the CLI-login one."""
+        endpoint = self._active_endpoint
+        return endpoint.model if endpoint is not None else self._primary_model
+
+    def _launch(self, context: HarnessContext) -> tuple[tuple[str, ...], dict[str, str]]:
+        """Argv and environment of the agent process.
+
+        The executable is ``cli_path`` when configured, else ``command[0]``
+        found on ``PATH``, else the CLI bundled in this package (whose helper
+        directory then goes first on ``PATH``).
+        """
+        env = self._child_env(context)
+        executable = select_executable(self._config.cli_path, self._config.command[0], env)
+        endpoint = self._active_endpoint
+        if endpoint is not None and ENDPOINT_ENV is not None:
+            env.update(ENDPOINT_ENV(endpoint))
+        model = self._primary_model if endpoint is None else None
+        model_args = tuple(arg.format(model=model) for arg in MODEL_ARGS) if model is not None else ()
+        command = (executable, *self._config.command[1:])
+        return (*command, *model_args, *self._config.extra_args), env
+
+    def _child_env(self, context: HarnessContext) -> dict[str, str]:
+        env: dict[str, str] = dict(os.environ) if self._config.inherit_process_env else {}
+        env.update(self._config.env)
+        env.update(context.env)
+        return env
+
+    def _system_prelude(self, context: HarnessContext) -> str:
+        parts = [part for part in (_mcp_naming(context), context.system_prompt) if part]
+        if not parts or self._config.system_prompt_delivery == "none":
+            return ""
+        return _SYSTEM_PROMPT_FENCE.format(prompt="\n\n".join(parts))
+
+
+def _mcp_naming(context: HarnessContext) -> str:
+    if MCP_TOOL_NAME_PATTERN is None or not context.mcp_servers:
+        return ""
+    patterns = {
+        server.name: MCP_TOOL_NAME_PATTERN.format(server=server.name, tool=TOOL_PLACEHOLDER)
+        for server in context.mcp_servers
+    }
+    return mcp_tool_naming_preamble(patterns)
+
+
+def _pick_option(options: list[Mapping[str, Any]], decision: ToolApprovalDecision) -> str | None:
+    """Return the ``optionId`` matching ``decision``, preferring the narrowest grant."""
+    if decision is ToolApprovalDecision.ALLOW_FOR_SESSION:
+        preferred = _ALLOW_SESSION_KINDS
+    elif decision is ToolApprovalDecision.ALLOW:
+        preferred = _ALLOW_KINDS
+    else:
+        preferred = _REJECT_KINDS
+    for kind in preferred:
+        for option in options:
+            option_id = option.get("optionId")
+            if option.get("kind") == kind and isinstance(option_id, str):
+                return option_id
+    return None
+
+
+def _model_option(config_options: Any) -> Mapping[str, Any]:
+    """Return the session's model selector from ACP ``configOptions``, or ``{}``."""
+    if not isinstance(config_options, list):
+        return {}
+    for option in config_options:
+        if isinstance(option, Mapping) and option.get("id") == MODEL_CONFIG_ID:
+            return option
+    return {}
+
+
+def _offered_entries(option: Mapping[str, Any]) -> list[tuple[Mapping[str, Any], str]]:
+    """Return the selector's choices with their ``value``, skipping malformed ones."""
+    values = option.get("options")
+    if not isinstance(values, list):
+        return []
+    entries = [value for value in values if isinstance(value, Mapping)]
+    return [(entry, entry["value"]) for entry in entries if isinstance(entry.get("value"), str)]
+
+
+def _offered_models(option: Mapping[str, Any]) -> list[str]:
+    return [value for _entry, value in _offered_entries(option)]
+
+
+async def _ignore_notification(method: str, params: dict[str, Any]) -> None:
+    _ = method, params
+
+
+async def _refuse_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
+    _ = params
+    raise MethodNotFound(method)
+
+
+__all__ = ["ACP_PROTOCOL_VERSION", "ADAPTER_VERSION", "__CLASS__Harness"]

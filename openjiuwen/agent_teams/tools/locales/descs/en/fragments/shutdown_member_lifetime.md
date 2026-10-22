@@ -1,0 +1,1 @@
+The terminal state follows the member's lifetime: a regular member lands in SHUTDOWN; a member declared inline on `create_task` with `lifetime=dormant` lands in DORMANT (dormant, still on the roster). To close a dormant member for good, call this tool on it once more — it lands in SHUTDOWN directly; `force=true` always lands in SHUTDOWN.

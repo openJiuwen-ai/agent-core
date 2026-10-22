@@ -205,6 +205,20 @@ class TeamAgentSpec(BaseModel):
     model_config = {"protected_namespaces": ()}
 
     agents: dict[str, DeepAgentSpec]
+    reviewer_agent: DeepAgentSpec | None = None
+    """Base spec for the one-shot reviewers spawned per review round.
+
+    Under scheduled dispatch a task's reviewers run as temporary harnesses that
+    only inspect a deliverable and cast a vote, so they should carry a narrow,
+    read-only capability set rather than a teammate's full one. The host that
+    assembles member capabilities builds this spec. ``None`` falls back to the
+    teammate spec with the framework-level trimming the scheduler applies
+    (read-only file tools, no todo planning, no sub-agents).
+
+    Kept out of ``agents`` on purpose: that dict is also looked up by member
+    name, so a reserved ``"reviewer"`` key would collide with a member of that
+    name.
+    """
     team_name: str = "agent_team"
     lifecycle: str = TeamLifecycle.TEMPORARY
     evolution_enabled: bool = True
@@ -236,6 +250,15 @@ class TeamAgentSpec(BaseModel):
     """
     leader: LeaderSpec = LeaderSpec()
     predefined_members: list[PredefinedMemberSpec] = []
+    agent_group_name: Optional[str] = None
+    """Name of the AgentGroup this team was assembled from, if any.
+
+    Set by the host that seeds ``predefined_members`` / ``agents[<member>]``
+    from an AgentGroup package. ``spawn_expert`` uses it to spawn further
+    instances of a bound member from the team's own assembled spec (its
+    ``agents[<member>].agent_template_spec`` and predefined persona) instead
+    of re-reading the package from disk.
+    """
     external_cli_agents: list[ExternalCliAgentSpec] = []
     """Static launch configs for external CLI agents (claudecode / codex / ...).
 
@@ -294,17 +317,15 @@ class TeamAgentSpec(BaseModel):
     deployment tpm / rpm budgets and (optionally) health checks.
 
     At ``build()`` time the config expands into ``TeamSpec.model_pool``
-    (one entry per logical model name, each carrying the full deployment
-    list) and ``model_pool_strategy`` is set to ``"intelli_router"``, so
+    (one logical ``"*"`` entry carrying the full deployment list) and
+    ``model_pool_strategy`` is set to ``"intelli_router"``, so
     all downstream machinery (``resolve_member_model``,
     ``inherit_pool_ids``, ``update_model_pool``) keeps working against
     the flat pool view.
 
     Mutually exclusive with ``model_pool`` and ``model_router``. The
-    first resolved model name — ``"*"`` (unified routing) unless
-    ``model_names`` overrides the order — is the team default, so a
-    leader without an explicit ``leader.model_name`` gets the broadest
-    failover.
+    The sole logical model name is ``"*"`` (unified routing), so a leader
+    without an explicit ``leader.model_name`` gets the broadest failover.
     """
     model_pool_strategy: Literal["round_robin", "by_model_name", "router", "intelli_router"] = "round_robin"
     """Allocation strategy applied to ``model_pool``.
@@ -349,6 +370,44 @@ class TeamAgentSpec(BaseModel):
     reviewer). The reviewer machinery itself (column, guards, voting) is
     always available regardless of this flag. Overridable per team
     instance at ``build_team`` time. See F_62.
+    """
+    enable_member_messaging: bool = False
+    """Let scheduled-dispatch members message each other directly.
+
+    Scheduled dispatch narrows a member's ``send_message`` to the leader and
+    the user, so the leader routes every exchange. When True, members keep
+    the full reach an autonomous member has — point-to-point, multicast and
+    broadcast to peers — while ``"leader"`` stays a valid role recipient.
+    Prompts and the tool description follow the same flag. Static
+    configuration; ignored under ``dispatch_mode="autonomous"``, where
+    members already reach each other. See F_126.
+    """
+    bootstrap_mode: Literal["leader", "framework"] = "leader"
+    """Who materializes the team row, and how the leader receives its policy.
+
+    ``"leader"`` (default): the leader calls the ``build_team`` tool, which
+    creates the team and discloses the collaboration policy in its result
+    (F_76). ``"framework"``: the leader's coordination kernel builds the team
+    itself on ``start()`` when no team row exists yet, the leader's tool set
+    carries no ``build_team``, and the policy reaches the leader through the
+    ``TeamContextTracker`` as a ``<team-policy>`` block ahead of its first
+    input. Only valid together with ``dispatch_mode="scheduled"`` — the
+    task-driven handoffs are what make a pre-built, memberless team usable.
+    See F_122.
+    """
+    team_display_name: str | None = None
+    """Team label written to the team row by a framework bootstrap.
+
+    ``None`` falls back to the generic i18n default (per ``language``).
+    Ignored under ``bootstrap_mode="leader"``, where the leader names the
+    team in its ``build_team`` call.
+    """
+    team_desc: str | None = None
+    """Team description written to the team row by a framework bootstrap.
+
+    Lands in ``team_card.md`` and in the team info every member reads.
+    ``None`` falls back to the generic i18n default (per ``language``).
+    Ignored under ``bootstrap_mode="leader"``.
     """
     default_max_review_rounds: int = 3
     """Default per-task review-round ceiling (scheduled dispatch).
@@ -535,8 +594,29 @@ class TeamAgentSpec(BaseModel):
     runs draw down one pool rather than getting a ceiling each.
     """
 
+    progressive_tool: bool = False
+    """Opt swarmflow worker avatars into progressive tool exposure.
+
+    True writes ``ProgressiveToolSpec(enabled=True)`` into the worker base spec
+    so each worker mounts the harness ``ProgressiveToolRail`` (``tool_search``
+    meta-tool + deferred tools). Team-level and independent of the single-agent
+    global ``progressive_tool_enabled`` switch: the two member kinds expose
+    different tool surfaces, so one deployment may want them set differently.
+    Only meaningful when ``enable_swarmflow`` is True; ignored otherwise.
+    """
+
     enable_permissions: bool = False
     """Team-specific permission control."""
+
+    enable_organization: bool = True
+    """Spec-level gate for organization tool mounting.
+
+    True mounts org control tools on the leader and rehydrates existing
+    organization bindings. False skips both, so the leader sees no
+    organization tools at all. Default True preserves standalone library
+    behavior; hosts map their own switch to this field, JiuwenSwarm maps
+    its experimental team organization toggle.
+    """
 
     language: Optional[str] = None
     """Preferred language for prompts and tool descriptions ("cn" or "en").
@@ -683,6 +763,23 @@ class TeamAgentSpec(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _validate_bootstrap_mode(self) -> "TeamAgentSpec":
+        """Reject a framework bootstrap outside scheduled dispatch (F_122).
+
+        A framework-built team starts with no members; only the scheduling
+        runtime turns ``create_task`` into member handoffs, so under
+        autonomous dispatch the pre-built team would sit idle while its
+        leader lacks the ``build_team`` call that normally hands it the
+        policy. Failing here keeps that combination from ever being built.
+        """
+        if self.bootstrap_mode == "framework" and self.dispatch_mode != "scheduled":
+            raise ValueError(
+                "bootstrap_mode='framework' requires dispatch_mode='scheduled'; "
+                f"got dispatch_mode={self.dispatch_mode!r}",
+            )
+        return self
+
+    @model_validator(mode="after")
     def _validate_steer_batch_size(self) -> "TeamAgentSpec":
         """Reject a steering batch that would consume nothing (F_78).
 
@@ -734,7 +831,7 @@ class TeamAgentSpec(BaseModel):
             db_config.connection_string = str(get_agent_teams_home() / "team.db")
         return db_config
 
-    def build(self) -> "TeamAgent":
+    def build(self, *, conversation_mode: Literal["team", "group_chat"] = "team") -> "TeamAgent":
         """Materialize a configured TeamAgent from this spec."""
         from openjiuwen.agent_teams.agent.team_agent import TeamAgent as _TeamAgent
         from openjiuwen.harness.prompts import resolve_language
@@ -775,9 +872,11 @@ class TeamAgentSpec(BaseModel):
         team_spec = TeamSpec(
             team_name=self.team_name,
             display_name=self.team_name,
+            conversation_mode=conversation_mode,
             leader_member_name=self.leader.member_name,
             language=resolved_language,
             dispatch_mode=self.dispatch_mode,
+            enable_member_messaging=self.enable_member_messaging,
             teammate_mode=str(self.teammate_mode),
             model_pool=team_pool,
             model_pool_strategy=team_strategy,

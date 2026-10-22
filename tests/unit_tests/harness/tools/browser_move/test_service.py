@@ -815,3 +815,15 @@ def test_run_task_does_not_reset_browser_runtime_after_completion() -> None:
 
     assert result["ok"] is True
     assert reset_calls["count"] == 0
+
+
+@pytest.mark.parametrize("output", ["Partial localized output", '{"ok": false, "final": "Partial"}'])
+def test_structured_iteration_reason_reaches_browser_consumer(output):
+    service = _make_service()
+    service._browser_agent = MagicMock()
+    with patch(
+        "openjiuwen.harness.tools.browser_move.playwright_runtime.service.Runner.run_agent",
+        new=AsyncMock(return_value={"output": output, "termination_reason": "max_iterations"}),
+    ):
+        result = _run(service._run_task_once(task="lookup", session_id="s", request_id="r"))
+    assert service._is_max_iteration_result(result)

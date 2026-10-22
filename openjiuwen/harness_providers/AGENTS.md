@@ -25,13 +25,20 @@ harness_providers/
 └── dsh/            # DshHarness over deepseek-harness (moved from agent_teams.external.dsh; see dsh/AGENTS.md)
 ```
 
-Provider names accepted by the factory: `native`, `native_v2`, `claudecode`, `codex`, `dsh`.
+Built-in provider names accepted by the factory: `native`, `native_v2`, `claudecode`, `codex`, `dsh`.
+Third-party providers resolve after them: in-process `register_harness_provider(name, factory)`,
+then installed packages declaring an entry point in the `openjiuwen.harness_providers` group
+(`HARNESS_PROVIDER_ENTRY_POINT_GROUP`, a stable public name). `available_providers()` lists all.
+An installed provider replaced on disk (its `RECORD` digest changed) is reimported by the next
+`resolve_provider`: its top-level packages leave `sys.modules`, harnesses already created keep the
+old modules, new ones get the new code (F_10).
 The provider card names are `deepagent`, `native_v2`, `claude-code`, `codex`, `deepseek-harness`.
 `native_v2` is resolved lazily to `agent_teams.harness.protocol_adapter.NativeV2HarnessProvider`;
 its implementation stays in the team package and reuses NativeHarness manifest construction.
 
 Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, feature
-`openjiuwen/harness/docs/features/F_03_harness-providers-and-manifest-factory.md`, team wiring
+`openjiuwen/harness/docs/features/F_03_harness-providers-and-manifest-factory.md`, third-party
+provider packages `openjiuwen/harness/docs/features/F_07_third-party-harness-provider-packages.md`, team wiring
 `openjiuwen/agent_teams/docs/specs/S_27_external-harness-member-runtime.md` and
 `openjiuwen/agent_teams/docs/features/F_96_protocol-harness-providers-and-member-migration.md`.
 
@@ -49,10 +56,10 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    from the receipt down to its own transport.
 2. **Capabilities are truthful.** A card declares only what the SDK can do
    end to end; unsupported commands raise `UnsupportedHarnessCapabilityError`.
-   DSH keeps an empty capability set; Claude Code / Codex declare STEER,
-   GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS,
-   MODEL_SELECTION, MODEL_DISCOVERY; the DeepAgent harness declares STEER and
-   FORCE_ABORT.
+   DSH declares MCP_TOOLS and ENDPOINT_MODELS; Claude Code / Codex declare
+   STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS,
+   MODEL_SELECTION, MODEL_DISCOVERY, ENDPOINT_MODELS; the DeepAgent harness
+   declares STEER and FORCE_ABORT.
 3. **Vendor SDKs stay optional.** Config / provider / package imports never
    import a vendor SDK; `_open_session` loads it lazily and a missing SDK
    surfaces as `HarnessError`. Startup failures raise `ProviderStartupError`
@@ -90,7 +97,10 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    caused are held until that request is reported and cite it in
    `causation_ids`; a request whose vendor record does not arrive within
    `request_observation_wait_s` is reported from its reply
-   (`input_observed=False`). A tool call the vendor never announces as an item
+   (`input_observed=False`). That wait starts once the reply has finished
+   streaming (Claude Code: `message_stop` or the next top-level message), not
+   at its first content block, because the response body is logged only after
+   the whole call. A tool call the vendor never announces as an item
    (Codex answers its own tool search, and a code cell that invokes nothing) is
    reported from the response that made it and the request that read its
    result, between those two requests. Codex states first-token latency on
@@ -142,14 +152,22 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    and adds `rendered_result` (the text the model read) as a separate field when
    the provider supplies it; DeepAgent's `_ObservationRail` carries it through
    `ItemLifecycleEvent.data` and the tool-result `ContentBlock.data`.
-8. **Provider extensions are ratified before they commit.** A switch that
-   changes the provider's persistent identity (today: the Claude Code / Codex
-   authentication fallback) goes through
-   `SerializedTurnHarness._confirm_provider_extension`, which sends a
-   `ProviderInteractionRequest(request_type="auth_fallback")`. A host without
+8. **The authentication fallback runs in the skeleton and is ratified before
+   it commits.** Providers declaring `AUTH_FALLBACK` implement only
+   `_auth_fallback_payload`, `_reconnect_for_auth(fallback=)` and
+   `_on_auth_endpoint_changed(fallback=)`; `SerializedTurnHarness` reacts to an
+   `auth_required` turn failure (once per turn, one activation per cycle) by
+   reconnecting the same session on the fallback, then sending a
+   `ProviderInteractionRequest(request_type=AUTH_FALLBACK_REQUEST_TYPE)` through
+   `_confirm_provider_extension`, and replays the turn. A host without
    `PROVIDER_INTERACTION` implicitly agrees; a host that declines makes the
-   harness reconnect the native endpoint (same session / thread) and fail the
-   turn with the original `auth_required` error. If reconnecting the original
+   harness reconnect the primary model (same session / thread) and fail the
+   turn with the original `auth_required` error. A ratification that raises
+   or answers out of protocol counts as a decline, and nothing in the fallback
+   flow may escape the supervisor: the turn always ends. A provider whose
+   restart can fail keeps the session id and restores it on the next turn,
+   on the model selected at runtime. Never loop on the fallback inside a
+   provider's own turn code. If reconnecting the original
    endpoint fails, the next accepted input attempts one reconnect before
    dispatch. Keep the same session/thread; never replay the failed input or
    silently use the declined fallback. `HarnessIOAdapter` only
@@ -164,6 +182,14 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    `skill_conflict` defaults to skip; replace stages a complete bundle before
    renaming the existing directory. Never remove copied skills at stop.
    Manifests carrying `tools` / `rails` / `subagents` are still rejected.
+   Every provider that runs a model implements
+   `ModelConfigProvider.model_config(ModelChoice, *, fallback=None)`; the
+   manifest factory and the team spawn path both call it through
+   `factory.provider_model_config`, which refuses a provider without the hook
+   and an endpoint choice on a card without `ENDPOINT_MODELS`. Claude Code /
+   Codex / DSH implement it; no host code branches on a provider name to set a
+   model. Third-party providers pass their own skill directory to
+   `install_skills(..., scan_dir=...)`.
 10. **Model control is base-class owned.** `SerializedTurnHarness` implements
     `HarnessModelControl`: `list_models` / `set_model` gate on the card,
     `set_model` applies under `_command_lock` while idle and otherwise merges
@@ -217,7 +243,12 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
 
 ## Change requirements
 
-- New provider: subclass `SerializedTurnHarness`, add a `*HarnessProvider`,
+- Third-party providers are separate pip packages generated with the
+  `harness-provider-integration` skill; they may only depend on `harness_protocol`
+  and on `base` / `jsonsafe` / `inputs` / `mcp_naming` / `skills` / the factory
+  registration API here. Treat those as public: changing them breaks installed
+  provider packages.
+- New built-in provider: subclass `SerializedTurnHarness`, add a `*HarnessProvider`,
   register the name in `factory.resolve_provider` / `PROVIDER_NAMES`, add
   fake-SDK unit tests under `tests/unit_tests/harness_providers/` and a real
   CLI suite under `tests/system_tests/harness_providers/` reusing

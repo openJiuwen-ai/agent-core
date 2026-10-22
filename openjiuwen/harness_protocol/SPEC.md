@@ -90,6 +90,15 @@ capability 的实现抛 `UnsupportedHarnessCapabilityError`。
 | `set_model(selection)` | `MODEL_SELECTION` | 切换后续 Turn 的模型和/或推理强度。IDLE 时立即应用；有 Turn 运行时暂存（多次调用按字段合并），在下一个 Turn 开始前应用；**运行中的 Turn 不换模型**；本 cycle 内 provider 重连后保持。未启动或已停止时抛 `HarnessStateError` |
 
 - `ModelSelection(model, effort)`：`None` 表示该字段保持不变，至少设一个。
+- 创建前的模型由宿主以 `ModelChoice(model, effort, endpoint)` 表达：`endpoint is None` 是内置模型（厂商
+  运行时自身登录 / 配置提供的模型），否则是宿主提供的 `ModelEndpoint(api_base, api_key, provider)`。
+  provider 实现可选 SPI `ModelConfigProvider.model_config(choice, *, fallback=None) -> JsonObject`，
+  返回并入 `create(config)` 的配置片段，不能跑的组合抛 `ValueError`；接收端点模型须在 card 声明
+  `ENDPOINT_MODELS`。`fallback` 是认证失败时切换的备选模型，只交给声明 `AUTH_FALLBACK` 的 provider：
+  回合以 `auth_required` 失败时，harness 在回退模型上恢复同一会话，先发 `ProviderInteractionRequest`
+  （`request_type = AUTH_FALLBACK_REQUEST_TYPE = "auth_fallback"`）请宿主确认（落库），确认后发
+  `ProviderEvent(event_type = AUTH_FALLBACK_EVENT_TYPE = "auth_fallback_activated")` 并重放本回合；
+  宿主拒绝则回到主模型、回合保持失败。
 - `ModelOption(model_id, display_name, description, efforts, default_effort, is_default, extensions)`：
   `efforts` 为空表示不可调；`default_effort` 必须属于 `efforts`；`extensions` 保留厂商目录字段。
 - effort 是 provider 词汇（字符串），协议层不枚举。延后应用失败时，实现应发 WARNING

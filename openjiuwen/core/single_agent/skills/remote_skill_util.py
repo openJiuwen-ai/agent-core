@@ -88,7 +88,8 @@ class RemoteSkillUtil:
 
         if len(relative_directory.parts) == 0: # Fetch entire tree
             # NOTE: "recursive" only checks whether it is set or not. Remove the param to not use recursive.
-            resp = requests.get(url, headers=headers, params={"recursive": "492"})
+            resp = requests.get(url, headers=headers, params={"recursive": "492"}, timeout=10)
+            resp.raise_for_status()
             data = resp.json()
             if "message" in data:
                 raise Exception(data["message"])
@@ -102,7 +103,8 @@ class RemoteSkillUtil:
                 file["path"] = current_directory / file["path"]
             return files, data.get("truncated", False)
         else: # Search for relative_directory
-            resp = requests.get(url, headers=headers, params={})
+            resp = requests.get(url, headers=headers, params={}, timeout=10)
+            resp.raise_for_status()
             data = resp.json()
             if "message" in data:
                 raise GitHubError(data["message"])
@@ -150,7 +152,7 @@ class RemoteSkillUtil:
             headers["Authorization"] = f"Bearer {token}"
 
         url = f"https://api.github.com/repos/{tree.repo_owner}/{tree.repo_name}/contents/{file_path}"
-        resp = requests.get(url, headers=headers, params={"ref": tree.tree_ref})
+        resp = requests.get(url, headers=headers, params={"ref": tree.tree_ref}, timeout=10)
 
         if resp.status_code != 200:
             raise GitHubError(f"HTTP {resp.status_code} while downloading {file_path}")

@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import codecs
 import os
 import signal
 import tempfile
@@ -181,6 +182,16 @@ class AsyncProcessHandler:
             self._kill_process_tree()
             # Killing closes the pipes; collect whatever was written before the kill.
             await _finish_readers(30)
+            # Reap the killed child so it leaves no zombie and reports its exit
+            # code: pipe EOF can arrive before the child watcher records the exit.
+            try:
+                await asyncio.wait_for(self._process.wait(), timeout=5)
+            except asyncio.TimeoutError:
+                sys_operation_logger.warning(
+                    "Killed process did not exit within the reap grace period",
+                    event_type=LogEventType.SYS_OP_ERROR,
+                    metadata={"pid": self._process.pid},
+                )
             return InvokeData(
                 stdout=_decode(stdout_buf),
                 stderr=_decode(stderr_buf),
@@ -345,17 +356,27 @@ class AsyncProcessHandler:
         """
         try:
             total_num = 0
+            decoder = codecs.getincrementaldecoder(self._encoding)(errors="replace")
             while True:
                 chunk = await stream.read(self._chunk_size)
                 # Terminate loop when stream has no more data
                 if not chunk:
+                    # Flush any bytes buffered by the incremental decoder so a
+                    # multi-byte sequence split across chunks is not dropped.
+                    tail = decoder.decode(b"", final=True)
+                    if tail:
+                        await self._queue.put(StreamEvent(type=stream_type, data=tail))
                     sys_operation_logger.info("Receive stream eof",
                                               event_type=LogEventType.SYS_OP_STREAM,
                                               metadata={"total_num": total_num,
                                                         "returncode": self._process.returncode,
                                                         "queue_size": self._queue.qsize()})
                     break
-                data = chunk.decode(self._encoding, errors="replace")
+                data = decoder.decode(chunk)
+                if not data:
+                    # All bytes of this chunk belong to a character that is
+                    # still incomplete; carry them over to the next chunk.
+                    continue
                 event = StreamEvent(type=stream_type, data=data)
                 await self._queue.put(event)
                 total_num += 1

@@ -476,6 +476,16 @@ def _ensure_dynamic_table_indexes(
                 sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN max_review_rounds INTEGER')
                 team_logger.info("Migrated task table %s: added max_review_rounds column", table_name)
 
+            # F_118: author's completion note, read by handoff briefs / view_task.
+            if "note" not in task_columns:
+                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN note TEXT')
+                team_logger.info("Migrated task table %s: added note column", table_name)
+
+            # F_119: author's one-line completion summary, read by digests / briefs.
+            if "summary" not in task_columns:
+                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN summary TEXT')
+                team_logger.info("Migrated task table %s: added summary column", table_name)
+
             # F_59: fold the legacy execution states into the condition-named
             # IN_PROGRESS. claimed / started / plan_approved were all "a member
             # is executing it"; map them uniformly. Distinguishing an unapproved

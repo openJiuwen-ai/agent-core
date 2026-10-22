@@ -174,6 +174,39 @@ def test_agent_template_manifest_validates_skill_directories(tmp_path: Path) -> 
         load_agent_template_package(manifest)
 
 
+def test_agent_template_manifest_rejects_runtime_on_subtemplate(tmp_path: Path) -> None:
+    """Only a root single-agent template may select an external runtime."""
+    from openjiuwen.harness.resources import load_agent_template_package
+
+    package_dir = tmp_path / "root"
+    subagent_dir = package_dir / "subagents" / "reviewer"
+    subagent_dir.mkdir(parents=True)
+    (subagent_dir / ".subagent.json").write_text(
+        json.dumps(
+            {
+                "agent_name": "reviewer",
+                "runtime": {"provider_name": "codex"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = package_dir / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "package_type": "agent_template",
+                "name": "root",
+                "description": "Root agent with a child template.",
+                "subagents": [{"dir": "./subagents/reviewer"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Subagent template.*runtime"):
+        load_agent_template_package(manifest)
+
+
 def test_legacy_yaml_tool_aliases_remap_to_rails(tmp_path: Path) -> None:
     """Legacy tools short names become rails before PluginSpec resolve."""
     from openjiuwen.harness.resources.extension_loader import load_plugin_package

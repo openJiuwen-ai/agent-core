@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/`） |
-| 最近一次修订日期 | 2026-09-18 |
-| 关联 feature | F_03_harness-providers-and-manifest-factory.md、agent_teams F_113_external-harness-builtin-model-selection.md |
+| 最近一次修订日期 | 2026-10-13 |
+| 关联 feature | F_03_harness-providers-and-manifest-factory.md、F_07_third-party-harness-provider-packages.md、F_08_provider-owned-model-config.md、F_09_auth-fallback-as-a-protocol-capability.md、F_10_hot-replacing-installed-providers.md、agent_teams F_113_external-harness-builtin-model-selection.md |
 
 ## 范围 / 边界
 
@@ -64,18 +64,28 @@
    DELTA 直出，FINAL/SNAPSHOT 只补前缀增量；`send(InteractiveInput)` 先应答 pending interaction，
    未匹配时以 `metadata.kind="interactive_input"` 转发；`delivery_mode(immediate)` 按状态与 STEER
    能力选 AUTO / STEER / FOLLOW_UP。
-8. **provider 扩展先 ratify 再提交**：会改变 provider 持久身份的一次性切换（当前只有 Claude Code /
-   Codex 的认证 fallback）在生效前经 `SerializedTurnHarness._confirm_provider_extension(request_type,
-   payload)` 发 `ProviderInteractionRequest`（`request_type="auth_fallback"`，payload
-   `{model, api_base[, provider]}`）。宿主未声明 `PROVIDER_INTERACTION` 或未装 interactions 时视为
-   同意；声明了但应答非 `COMPLETED` 时 harness 必须断开 fallback client、用原 session / thread 重连
-   原生端点并让当前 Turn 按原 `auth_required` 失败，不发布 `auth_fallback_activated`。
+8. **认证回退由骨架执行、先 ratify 再提交**（F_09）：card 声明 `AUTH_FALLBACK` 的 provider 只实现
+   `_auth_fallback_payload` / `_reconnect_for_auth(fallback=)` / `_on_auth_endpoint_changed(fallback=)`
+   三个钩子；`SerializedTurnHarness` 在回合 `FAILED` 且类别为 `auth_required` 时执行
+   `_activate_auth_fallback`：supervisor 每回合至多调用一次、每 cycle 至多激活一次，先在回退模型上恢复同一会话重连，再经
+   `_confirm_provider_extension` 发 `ProviderInteractionRequest`（`AUTH_FALLBACK_REQUEST_TYPE`，payload
+   `{model, api_base[, provider]}`）；宿主未声明 `PROVIDER_INTERACTION` 或未装 interactions 时视为同意。
+   确认后置 `fallback_activated`、发 `AUTH_FALLBACK_EVENT_TYPE` 并重放本回合；应答非 `COMPLETED` 时重连回主模型、
+   当前 Turn 按原 `auth_required` 失败，不发布激活事件。确认处理器抛异常或应答不合协议等同拒绝；回退流程的任何
+   异常都不得逃出 supervisor，回合保留原失败照常终结；宿主确认之后 `_on_auth_endpoint_changed` 失败只记日志，
+   照常发激活事件并重放（切换已落库、会话已在回退上）。回退重启失败时 provider 把活动端点复位为主模型，
+   下一回合恢复的永远是宿主知道的模型。Claude Code / Codex / 三方 ACP / codex-app-server
+   走同一流程，provider 内部不再各自循环重试。
 9. **manifest 是 DeepAgent-first**：`create_harness` 对 `native` 传整份 template
    （`NativeHarnessProvider.create({"deep_agent", "agent_template", "session_id", "language",
-   "event_buffer_capacity"})`）；对 `claudecode` / `codex` / `dsh` 只把 `model` 端点映射进 provider
-   配置（显式 `config` 优先），manifest 的 `tools` / `rails` / `subagents` 非空时
+   "event_buffer_capacity"})`）；对其余 provider 只把 manifest 的模型映射进 provider 配置（显式
+   `config` 优先，逐键 `setdefault`），manifest 的 `tools` / `rails` / `subagents` 非空时
    `ValueError`。`build_harness_context` 对三方 provider 渲染 prompt sections 与 MCP，对 `native`
-   只放 `extra_system_prompt`。
+   只放 `extra_system_prompt`。模型映射一律经 `provider_model_config` 调 provider 的
+   `ModelConfigProvider.model_config(ModelChoice)`（F_08）：manifest 模型有 `api_base` 即端点模型，
+   card 未声明 `ENDPOINT_MODELS` 时 `ValueError`；provider 没有 `model_config` 时 manifest 不能带模型。
+   claudecode / codex / dsh 都实现 `model_config` 并声明 `ENDPOINT_MODELS`；团队成员的模型走同一入口。
+   `fallback=` 只交给声明 `AUTH_FALLBACK` 的 provider（claudecode / codex），否则 `ValueError`。
 10. **模型控制由骨架承担**（F_113）：`SerializedTurnHarness` 实现 `HarnessModelControl`——`list_models`
     / `set_model` 先按 card 门控；`set_model` 在 `_command_lock` 内判空闲则立即经
     `_apply_model_selection` 应用，否则按字段合并进暂存选择，由 supervisor 在 STARTED 之后、
@@ -87,18 +97,35 @@
     的 `models`，Codex 调 `model/list`（过滤 hidden），未启动时用临时 client，只握手不请求模型。
     Codex 仅 `CodexModelConfig.is_external`（有 `provider` 或 `api_base`）时强制
     `deny_all + full_access`；官方内置模型保留 auto-review reviewer。
+11. **provider 名的解析顺序固定**（F_07）：内置 `PROVIDER_NAMES` 是封闭集合且永远优先；其次
+    `register_harness_provider` 的进程内注册（内置名不可注册）；最后是已安装包在 entry point 组
+    `HARNESS_PROVIDER_ENTRY_POINT_GROUP = "openjiuwen.harness_providers"` 中的同名入口，值为
+    `HarnessProvider` 类（无参实例化）或实例，加载 / 实例化失败或不满足 SPI 都抛带原因的
+    `ValueError`，不静默跳过。组名是对外稳定 API。每次解析都重新读取安装元数据，所以运行中
+    `pip install` 的 wheel 下一次解析即可见。**已导入的已安装包被原地替换时下一次解析重新导入**（F_10）：
+    以发行包 `RECORD` 的哈希为指纹，指纹变化就把该发行包的顶层包（`top_level.txt`，缺省时取 RECORD 的
+    顶层路径）从 `sys.modules` 移除再加载；已创建的 harness 继续用旧模块，新 harness 用新代码。内置与
+    进程内注册的 provider 不参与；openjiuwen 自身的改动仍需重启进程。
 
 ## 接口契约
 
 ```python
-def create_harness(manifest: AgentTemplateSpec | str | Path, *, provider: HarnessProviderName,
+def create_harness(manifest: AgentTemplateSpec | str | Path, *, provider: str,
                    config: Mapping[str, Any] | None = None, language: str | None = None) -> HarnessProtocol
 def build_harness_context(manifest, *, provider, host_session_id, agent_id=None, agent_name=None,
                           language="cn", cwd=None, env=None, extra_system_prompt=None,
                           host_capabilities=frozenset(), resume_policy=ResumePolicy.NEW,
                           checkpoint=None, checkpoint_sink=None, interactions=None, metadata=None) -> HarnessContext
-def resolve_provider(provider: str) -> HarnessProvider
+def resolve_provider(provider: str) -> HarnessProvider          # 内置 > 注册 > entry point
+def available_providers() -> tuple[str, ...]
+def register_harness_provider(name: str, factory: Callable[[], HarnessProvider]) -> None
+def unregister_harness_provider(name: str) -> None
 PROVIDER_NAMES == ("native", "native_v2", "claudecode", "codex", "dsh")
+HARNESS_PROVIDER_ENTRY_POINT_GROUP == "openjiuwen.harness_providers"
+def provider_model_config(provider: str, choice: ModelChoice, *, fallback: ModelChoice | None = None) -> dict
+# provider 可选 SPI（harness_protocol.ModelConfigProvider）：
+#   model_config(choice: ModelChoice, *, fallback: ModelChoice | None = None) -> JsonObject
+def install_skills(sources, *, provider, cwd, conflict="skip", scan_dir=None) -> tuple[Path, ...]
 
 class HarnessIOAdapter:
     def __init__(self, harness, *, event_observer=None, auto_approve_tools=True,
@@ -163,7 +190,8 @@ bundle 的 library。包路径按现有 manifest loader 解析为绝对路径，
 同名的 config.skills 显式覆盖 manifest 声明；skill_conflict 为 skip（Provider 默认）、replace 或 append。
 
 start 在 SDK 启动前复制完整目录到 cwd/.claude/skills（claudecode）、cwd/.agents/skills（codex）、
-cwd/.dsh/skills（dsh）。cwd 优先取 HarnessContext，再取 provider config，再取当前进程目录。
+cwd/.dsh/skills（dsh）；第三方 provider 没有内置条目，必须传 `scan_dir`（项目内相对路径，越界拒绝），
+缺省时 `install_skills` 抛 `ValueError`。cwd 优先取 HarnessContext，再取 provider config，再取当前进程目录。
 名称取 SKILL.md front matter.name，缺省取目录名；同名按不区分大小写比较，同时识别已有目录里的
 声明名。enabled_skills 非空时筛选声明名；mode 仍被解析校验，但原生 CLI 决定加载/调用方式，
 不仿造 DeepAgent 的 auto_list 工具。skip 保留已有目录全部内容，replace 完整替换（清除旧文件），

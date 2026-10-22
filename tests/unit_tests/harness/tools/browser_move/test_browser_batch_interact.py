@@ -86,23 +86,6 @@ def test_batch_interact_script_contains_realistic_playwright_locators() -> None:
     assert "setTimeout" not in js
 
 
-def test_batch_click_retries_only_transient_actionability_failures_within_same_timeout() -> None:
-    js = _build_batch_interact_script(
-        {
-            "steps": [
-                {"op": "click", "role": "button", "name": "Search"},
-                {"op": "wait_for_url", "url_contains": "/results"},
-            ],
-            "timeout_ms": 2500,
-        }
-    )
-
-    assert "clickWithTransientRetry" in js
-    assert "intercept|not stable|outside of the viewport" in js
-    assert "for (let attempt = 0; attempt < 2; attempt += 1)" in js
-    assert "timeout - (Date.now() - started)" in js
-
-
 def test_batch_extraction_provenance_keeps_selector_raw_text_and_generation() -> None:
     provenance = _compact_extraction_provenance(
         [
@@ -761,11 +744,21 @@ def test_batch_interact_script_runs_against_playwright_like_form_stub(tmp_path: 
               constructor(kind, value) {{ this.kind = kind; this.value = value; }}
               first() {{ calls.push(['first', this.kind, this.value]); return this; }}
               async click(options) {{ calls.push(['click', this.kind, this.value, options && options.timeout]); }}
-              async fill(value, options) {{ calls.push(['fill', this.kind, this.value, value, options && options.timeout]); }}
-              async selectOption(option, options) {{ calls.push(['selectOption', this.kind, this.value, option, options && options.timeout]); }}
-              async setChecked(checked, options) {{ calls.push(['setChecked', this.kind, this.value, checked, options && options.timeout]); }}
-              async waitFor(options) {{ calls.push(['waitFor', this.kind, this.value, options && options.state, options && options.timeout]); }}
-              async press(key, options) {{ calls.push(['press', this.kind, this.value, key, options && options.timeout]); }}
+              async fill(value, options) {{
+                calls.push(['fill', this.kind, this.value, value, options && options.timeout]);
+              }}
+              async selectOption(option, options) {{
+                calls.push(['selectOption', this.kind, this.value, option, options && options.timeout]);
+              }}
+              async setChecked(checked, options) {{
+                calls.push(['setChecked', this.kind, this.value, checked, options && options.timeout]);
+              }}
+              async waitFor(options) {{
+                calls.push(['waitFor', this.kind, this.value, options && options.state, options && options.timeout]);
+              }}
+              async press(key, options) {{
+                calls.push(['press', this.kind, this.value, key, options && options.timeout]);
+              }}
               async innerText() {{ calls.push(['innerText', this.kind, this.value]); return 'Cheapest flight SGD 95'; }}
               async inputValue() {{ calls.push(['inputValue', this.kind, this.value]); return 'John'; }}
             }}

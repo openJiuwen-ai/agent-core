@@ -4077,3 +4077,27 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False), encoding="utf-8")
+
+
+def test_structured_iteration_reason_survives_case_reader(tmp_path):
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import CaseReader, EvaluationSummaryInput
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import RewardSignalExtractor
+
+    case_dir = tmp_path / "case_structured"
+    case_dir.mkdir()
+    (case_dir / "result.json").write_text(json.dumps({"case_id": "case_structured", "status": "completed"}))
+    (case_dir / "trace.json").write_text(
+        json.dumps(
+            {
+                "response": {
+                    "output": "A partial localized answer",
+                    "result_type": "answer",
+                    "termination_reason": "max_iterations",
+                }
+            }
+        )
+    )
+    cases = CaseReader.read_case_inputs(str(tmp_path))
+    assert cases[0].termination_reason == "max_iterations"
+    signals = RewardSignalExtractor.extract(EvaluationSummaryInput(evaluation_method="reward"), cases)
+    assert "case_structured" in signals.method_specific["max_iteration_cases"]

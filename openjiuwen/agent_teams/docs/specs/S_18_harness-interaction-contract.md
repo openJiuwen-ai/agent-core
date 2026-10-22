@@ -1,6 +1,6 @@
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
-最近一次修订日期：2026-08-13
+最近一次修订日期：2026-10-10
 
 本 spec 定义 agent_teams harness 层的对外交互契约。阶段 1（NativeHarness 接管 task
 loop）的实现细节见 [[F_27_native-harness-task-loop]]；阶段 B（NativeHarness 收编
@@ -51,6 +51,18 @@ DeepAgent 的同名配置仍是单轮硬超时；超时时 task-loop 负责取�
 `is_pending_interrupt_resume_valid` / `init_cwd_for_round`、`find_rails` /
 `register_rail` / `unregister_rail` / `register_member_tools` /
 `inject_member_memory` / `run_agent_customizer`、`workspace` / `sys_operation`。
+
+## RunContext 类型边界
+
+`RunContext` 是单 Agent 与 Team 共用的请求级运行上下文，不属于任何特定调用方的专用协议。
+宿主可以通过该对象携带本次调用的数据（调度原因、会话标识、调用形态等已声明字段）；
+领域扩展字段统一存放在 `RunContext.extra`，其键含义由宿主自行约定，core 不解析、不列举。
+
+Runner 等公共输入边界接受 `RunContext | Mapping[str, Any] | None`，并立即将 mapping 规范化为
+`RunContext`：已声明字段写入对应字段，未知顶层字段并入 `extra`。从 TeamRuntimeManager 开始，
+TeamAgent、coordination、TeamHarness、NativeHarness、输入队列和 task-loop metadata 只传递
+`RunContext | None`，不得再以 `object` 或 `Any` 掩盖上下文形态。这样既兼容 wire/dict 调用方，
+也保证同一上下文实例在一次模型轮次内保持隔离；follow-up 仅能合并连续且 `RunContext` 相等的输入。
 
 **并发安全契约**：所有方法可从任意协程并发调用，无需外部加锁。NativeHarness 侧以单
 supervisor 协程 + control channel 串行化所有状态转换（唯一 state writer）；CLI runtime

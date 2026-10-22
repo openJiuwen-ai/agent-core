@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | S_02 / team-agent-architecture |
 | 关联模块 | `openjiuwen/agent_teams/agent/` |
-| 最近一次修订日期 | 2026-07-14 |
+| 最近一次修订日期 | 2026-10-20 |
 | 关联 feature | F_11_leader-member-status-tracking.md、F_10_temporary-leader-clean-team-stream-end.md、F_38_team-teammate-worktree-isolation-agenttool.md |
 
 ## 范围 / 边界
@@ -173,13 +173,16 @@ class AgentConfigurator:
     def setup_agent(self, spec: TeamAgentSpec, ctx: TeamRuntimeContext) -> TeamHarness:
         """Phase 2: build TeamHarness (which owns DeepAgent), attach rails, build memory manager."""
 
+    @staticmethod
     def resolve_agent_spec(
-        self,
         spec: TeamAgentSpec,
         role: TeamRole,
         member_name: str | None = None,
-    ) -> AgentSpec:
-        """Pick the per-member agent spec, falling back: member_name → role → 'teammate' → 'leader'."""
+        *,
+        agent_template_spec: dict[str, Any] | None = None,
+    ) -> DeepAgentSpec:
+        """Pick the per-member agent spec: member_name → (role → 'teammate' → 'leader')
+        with the expert-template snapshot applied when one is given (F_125)."""
 
     # Spawn payload delegation
     def build_spawn_payload(self, ctx, *, initial_message=None) -> dict[str, Any]: ...

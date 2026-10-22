@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -28,6 +29,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
 )
 from openjiuwen.harness.tools.subagent.task_tool import TaskTool, _run_subagent_with_observable_stream
 from tests.unit_tests.harness.test_deep_agent import FakeReactAgent, _create_dummy_model
+from tests.unit_tests.harness.tools.browser_move.test_browser_runtime_rail import _declare_output
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -217,9 +219,14 @@ async def test_stream_cancellation_finalizes_without_late_answer(close_mode):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "outcome", ["completed", "partial", "blocked", "provider_error", "max_iterations", "raw_weather"]
+    ("outcome", "explicit_contract"),
+    [
+        ("completed", False), ("partial", False), ("blocked", False),
+        ("provider_error", False), ("max_iterations", False), ("raw_weather", False),
+        ("completed", True), ("partial", True),
+    ],
 )
-async def test_real_browser_rail_stream_reaches_tasktool(monkeypatch, outcome):
+async def test_real_browser_rail_stream_reaches_tasktool(monkeypatch, outcome, explicit_contract):
     browser = DeepAgent(AgentCard(id="openjiuwen.browser_agent", name="browser_agent")).configure(
         DeepAgentConfig(model=_create_dummy_model(), enable_task_loop=False, tools=[], mcps=[], skills=[])
     )
@@ -229,6 +236,9 @@ async def test_real_browser_rail_stream_reaches_tasktool(monkeypatch, outcome):
     runtime.service.build_failure_summary.return_value = "browser task incomplete"
     rail = BrowserRuntimeRail(runtime)
     monkeypatch.setattr(rail, "_ensure_browser_mcp_ability", AsyncMock())
+    if explicit_contract:
+        build_state = rail._build_phase_state
+        monkeypatch.setattr(rail, "_build_phase_state", lambda task: _declare_output(build_state(task), ["title"]))
     browser.add_rail(rail)
     seen_sessions = []
 
@@ -237,21 +247,15 @@ async def test_real_browser_rail_stream_reaches_tasktool(monkeypatch, outcome):
         seen_sessions.append(session)
         state = session.get_state("__browser_phase_budget_state__")
         assert state is not None  # The real BEFORE_INVOKE had the same session.
+        assert state["requirements_source"] == ("explicit" if explicit_contract else "observations")
+        assert state["required_fields"] == (["title"] if explicit_contract else [])
         if outcome == "completed":
-            state["field_coverage"] = ["title"]
-            state["structured_evidence"] = [{"kind": "snapshot", "values": {"title": "Weather"}}]
-            state["evidence_slots"] = [
-                {
-                    **slot,
-                    "value": "Weather",
-                    "status": "present",
-                    "source": "browser_evaluate",
-                    "generation": "g1",
-                    "selector": ".weather",
-                    "raw_text": "Weather",
-                }
-                for slot in state["required_evidence_slots"]
-            ]
+            state["last_page"] = {"url": "https://example.test/weather", "generation_id": "g1"}
+            BrowserRuntimeRail._record_tool_evidence(
+                state, {"result": {"title": "Weather"}, "generation_id": "g1"},
+                tool_name="mcp_playwright-official_browser_evaluate",
+                tool_args={"function": "() => ({title: document.title})"},
+            )
         elif outcome == "raw_weather":
             state["last_page"] = {"url": "https://www.bing.com/search?q=Singapore+weather"}
             BrowserRuntimeRail._record_tool_evidence(
@@ -288,19 +292,32 @@ async def test_real_browser_rail_stream_reaches_tasktool(monkeypatch, outcome):
     assert authority["status"] == (expected if expected in {"completed", "partial", "blocked"} else "blocked")
     assert "authoritative_browser_result_missing" not in str(result.data)
     assert seen_sessions[0].get_session_id().startswith("parent_sub_browser_agent_")
+    assert authority["verification_scope"] == "execution_and_observations"
+    assert authority["completion_basis"] == "worker_judgment"
+    assert "unverified_fields" not in authority
+    if not explicit_contract:
+        assert authority["requested_slots"] == authority["evidence"] == []
     if outcome == "completed":
-        assert authority["evidence"][0]["value"] == "Weather"
+        observation = authority["observations"][0]
+        assert observation["source"] == "https://example.test/weather"
+        assert observation["generation_id"] == "g1"
+        assert "Weather" in observation["raw_text"]
         assert authority["missing_fields"] == []
+        if explicit_contract:
+            assert authority["evidence"][0]["value"] == "Weather"
+            assert authority["requested_slots"][0]["field"] == "title"
     elif outcome == "partial":
-        assert "title" in authority["unverified_fields"]
+        assert authority["missing_fields"] == (["title"] if explicit_contract else [])
+        assert authority["observations"] == []
         assert authority["terminal_reason"] == "no_task_observation"
         assert authority["retryable"]
         assert authority["summary"] == "Weather"
     elif outcome == "raw_weather":
         assert authority["missing_fields"] == []
-        assert authority["unverified_fields"] == ["low_temperature"]
         assert "26 C" in authority["summary"]
         assert "26 C" in authority["observations"][0]["raw_text"]
+        assert authority["observations"][0]["source"] == "https://www.bing.com/search?q=Singapore+weather"
+        assert authority["observations"][0]["generation_id"] == "g1"
 
 
 @pytest.mark.asyncio
@@ -325,7 +342,8 @@ async def test_react_emitter_preserves_result_extensions():
 
 
 @pytest.mark.asyncio
-async def test_focused_tasktool_resume_preserves_real_browser_requirements(monkeypatch):
+@pytest.mark.parametrize("explicit_contract", [False, True])
+async def test_focused_tasktool_resume_preserves_real_browser_requirements(monkeypatch, explicit_contract):
     observed_states = []
 
     def create_browser(*_args, **_kwargs):
@@ -338,25 +356,36 @@ async def test_focused_tasktool_resume_preserves_real_browser_requirements(monke
         runtime.semantic_progress = {}
         rail = BrowserRuntimeRail(runtime)
         monkeypatch.setattr(rail, "_ensure_browser_mcp_ability", AsyncMock())
+        if explicit_contract:
+            build_state = rail._build_phase_state
+            monkeypatch.setattr(rail, "_build_phase_state", lambda task: _declare_output(
+                build_state(task), ["title", "product_rating"],
+            ))
         browser.add_rail(rail)
 
         async def call_model(ctx, _context, _tools):
             state = ctx.session.get_state("__browser_phase_budget_state__")
-            assert set(state["required_fields"]) == {"title", "product_rating"}
+            assert state["requirements_source"] == ("explicit" if explicit_contract else "observations")
+            assert state["required_fields"] == (["title", "product_rating"] if explicit_contract else [])
             run_context = rail._browser_run_context(ctx)
             if observed_states:
                 assert run_context["browser_resume"] is True
                 assert state["task_id"] == observed_states[0]["task_id"]
                 assert state["deadline_at"] == observed_states[0]["deadline_at"]
-                assert any(slot["field"] == "title" for slot in state["evidence_slots"])
+                assert BrowserRuntimeRail._task_observations(state) == BrowserRuntimeRail._task_observations(
+                    observed_states[0]
+                )
+                if explicit_contract:
+                    assert any(slot["field"] == "title" for slot in state["evidence_slots"])
                 assert state["resume_count"] == 1
+            state["last_page"] = {"url": "https://example.test/item/keyboard", "generation_id": "g1"}
             extracted = {"product_rating": "4.8"} if observed_states else {"title": "Keyboard"}
             BrowserRuntimeRail._record_tool_evidence(
                 state, {"extracted": extracted, "generation_id": "g1"},
                 tool_name="browser_batch_interact", tool_args={},
             )
             ctx.session.update_state({"__browser_phase_budget_state__": state})
-            observed_states.append(dict(state))
+            observed_states.append(copy.deepcopy(state))
             content = "Keyboard, rated 4.8"
             if len(observed_states) == 1:
                 content = (
@@ -377,6 +406,12 @@ async def test_focused_tasktool_resume_preserves_real_browser_requirements(monke
     }, session=session)
     assert first.success
     assert first.data["browser_result"]["status"] == "partial"
+    first_observations = first.data["browser_result"]["observations"]
+    assert any("Keyboard" in observation["raw_text"] for observation in first_observations)
+    if explicit_contract:
+        assert first.data["browser_result"]["missing_fields"] == ["product_rating"]
+    else:
+        assert first.data["browser_result"]["requested_slots"] == []
     second = await tool.invoke({
         "subagent_type": "browser_agent", "task_description": "Only read the missing product rating",
         "resume_task_id": first.data["resume_task_id"],
@@ -385,3 +420,7 @@ async def test_focused_tasktool_resume_preserves_real_browser_requirements(monke
     assert len(observed_states) == 2
     assert second.data["browser_result"]["status"] == "completed"
     assert second.data["browser_result"]["missing_fields"] == []
+    second_observations = second.data["browser_result"]["observations"]
+    assert all(observation in second_observations for observation in first_observations)
+    assert any("4.8" in observation["raw_text"] for observation in second_observations)
+    assert all(observation["source"] == "https://example.test/item/keyboard" for observation in second_observations)

@@ -872,10 +872,9 @@ sequenceDiagram
 |------|----|--------|----------|-----------|
 | `build_team` | `BuildTeamTool` | ✓ | | |
 | `clean_team` | `CleanTeamTool` | ✓ | | |
-| `spawn_teammate` | `SpawnTeammateTool` | ✓（非 predefined） | | |
+| `spawn_teammate` | `SpawnTeammateTool` | ✓（非 predefined；声明 external_cli 时可带 `cli_agent`） | | |
 | `spawn_human_agent` | `SpawnHumanAgentTool` | ✓（非 predefined，HITT 开启） | | |
 | `spawn_bridge_agent` | `SpawnBridgeAgentTool` | ✓（非 predefined，Bridge 开启） | | |
-| `spawn_external_cli` | `SpawnExternalCliTool` | ✓（非 predefined，external_cli 声明） | | |
 | `shutdown_member` | `ShutdownMemberTool` | ✓ | | |
 | `approve_plan` | `ApprovePlanTool` | ✓（plan_mode） | | |
 | `approve_tool` | `ApproveToolCallTool` | ✓（plan_mode） | | |
@@ -889,7 +888,7 @@ sequenceDiagram
 
 ```python
 LEADER_ONLY_TOOLS = {"build_team", "clean_team", "spawn_teammate", "spawn_human_agent",
-                     "spawn_bridge_agent", "spawn_external_cli", "shutdown_member",
+                     "spawn_bridge_agent", "shutdown_member",
                      "approve_plan", "approve_tool", "create_task", "update_task"}
 MEMBER_ONLY_TOOLS = {"claim_task"}
 SHARED_TOOLS      = {"view_task", "send_message", "workspace_meta"}

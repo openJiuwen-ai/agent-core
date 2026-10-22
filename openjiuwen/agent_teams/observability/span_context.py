@@ -24,6 +24,7 @@ from openjiuwen.extensions.observability.span_context import (
     get_current_tool_span,
     get_bound_root_span,
     get_root_span,
+    get_session_root_span,
     pop_any_tool_span,
     pop_current_llm_span,
     pop_tool_span,
@@ -37,10 +38,41 @@ from openjiuwen.extensions.observability.span_context import (
 )
 
 
-def get_team_span(team_name: str | None = None) -> Span | None:
-    """Resolve the current root through the historical Team-facing accessor."""
+def _resolve_team_session_id(session_id: str | None = None) -> str:
+    """Return the Team session a root lookup is scoped to, or "" when none is known.
+
+    An explicit *session_id* wins; otherwise the Team runtime's own session
+    ContextVar, then the observability session published around execution.
+    """
+    if session_id:
+        return str(session_id)
+    from openjiuwen.agent_teams.context import get_session_id
+
+    return get_session_id() or get_current_session_id() or ""
+
+
+def get_team_span(team_name: str | None = None, *, session_id: str | None = None) -> Span | None:
+    """Resolve the Team root of the calling session, never another session's.
+
+    A Team root is looked up by its own session only. Without a session in
+    reach, only a root bound to the current execution context answers; the
+    process-wide fallbacks are never consulted, because the one live root in
+    the process may belong to a concurrent session of another mode (for
+    example a single-agent run) and adopting it silently drops this Team's
+    whole trace.
+
+    Args:
+        team_name: Historical parameter, unused; roots are keyed by session.
+        session_id: Session the Team runs in; defaults to the ambient one.
+
+    Returns:
+        The session's recording Team root, or None.
+    """
     del team_name
-    return get_root_span()
+    sid = _resolve_team_session_id(session_id)
+    if sid:
+        return get_session_root_span(sid)
+    return get_bound_root_span()
 
 
 def set_team_span(span: Span, team_name: str | None = None) -> None:
@@ -66,20 +98,20 @@ def get_or_create_team_span(team_name: str, tracer, *, session_id: str | None = 
     """
     if not team_name:
         return None
-    span = get_bound_root_span()
+    session_id = _resolve_team_session_id(session_id)
+    # Only this session's own root is reused: a root bound in this context for
+    # a different session is not ours to extend.
+    span = get_session_root_span(session_id) if session_id else get_bound_root_span()
     if span is not None:
         return span
 
     from opentelemetry.trace import SpanKind
-    from openjiuwen.agent_teams.context import get_session_id
     from openjiuwen.extensions.observability.semconv import (
         AT_TEAM_ID,
         AT_TEAM_NAME,
         GEN_AI_CONVERSATION_ID,
         OJ_AGENT_MODE,
     )
-
-    session_id = str(session_id or "") or get_session_id() or get_current_session_id() or ""
 
     span = tracer.start_span(name=f"team.{team_name}", kind=SpanKind.SERVER)
     span.set_attribute(AT_TEAM_NAME, team_name)
@@ -157,6 +189,7 @@ __all__ = [
     "get_bound_root_span",
     "get_or_create_team_span",
     "get_root_span",
+    "get_session_root_span",
     "get_team_span",
     "pop_any_tool_span",
     "pop_current_llm_span",

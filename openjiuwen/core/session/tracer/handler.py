@@ -47,6 +47,13 @@ class TraceExtAgentHandler(ABC):
         Called by ``Tracer.init()`` to associate extension handlers with
         the current tracer session. Subclasses can use ``self._trace_id``
         to bridge OTel traces with tracer's UUID.
+
+        .. note::
+            Handlers are registered as process-wide singletons. When several
+            tracers are active concurrently this value is overwritten by the
+            most recent ``Tracer.init()``. Prefer the per-event ``trace_id``
+            injected into ``**kwargs`` by ``Tracer.trigger`` for
+            concurrency-safe attribution.
         """
         self._trace_id = trace_id
 
@@ -169,6 +176,13 @@ class TraceExtWorkflowHandler(ABC):
         Called by ``Tracer.init()`` to associate extension handlers with
         the current tracer session. Subclasses can use ``self._trace_id``
         to bridge OTel traces with tracer's UUID.
+
+        .. note::
+            Handlers are registered as process-wide singletons. When several
+            tracers are active concurrently this value is overwritten by the
+            most recent ``Tracer.init()``. Prefer the per-event ``trace_id``
+            injected into ``**kwargs`` by ``Tracer.trigger`` for
+            concurrency-safe attribution.
         """
         self._trace_id = trace_id
 

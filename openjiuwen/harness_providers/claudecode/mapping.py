@@ -225,6 +225,11 @@ class ClaudeTurnAccumulator:
         if isinstance(usage, Mapping):
             message_data["usage"] = to_json_safe(usage)
         message_id = getattr(message, "message_id", None) or f"claude-message:{message_index}"
+        transcript_uuid = getattr(message, "uuid", None)
+        if transcript_uuid:
+            # The API message id names nothing on disk; only this uuid addresses the
+            # JSONL entry, which is what the offline fork primitive cuts at.
+            message_data["uuid"] = transcript_uuid
         self.messages.append(
             TurnMessage(
                 message_id=message_id,

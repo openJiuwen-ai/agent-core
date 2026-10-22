@@ -24,6 +24,7 @@ _SLOTTED = (
     "create_task_scheduled",
     "update_task",
     "build_team",
+    "shutdown_member",
 )
 _SLOTLESS = ("view_task", "claim_task")
 
@@ -34,6 +35,7 @@ _CAPABILITY_SLOTS = (
     ("spawn_teammate", "fork_usage"),
     ("update_task", "update_task_verify_gate"),
     ("build_team", "build_team_verify_gate"),
+    ("shutdown_member", "shutdown_member_lifetime"),
 )
 
 
@@ -111,7 +113,10 @@ def test_param_descriptions_are_shared_across_variants(lang):
     t = make_translator(lang)
     # Same key namespace: the scheduled create_task variant reads these too.
     assert t("create_task", "task.title")
-    assert t("create_task", "task.assignee")
+    # ``assignee`` reads differently per variant (only scheduled has an inline
+    # ``member`` to mention), so it lives under its own namespace there.
+    assert t("create_task_scheduled", "task.assignee") != t("create_task", "task.assignee")
+    assert {"cn": "member 内联", "en": "via 'member'"}[lang] not in t("create_task", "task.assignee")
     # send_message_scheduled redefines only ``to``; content/summary are reused.
     assert t("send_message_scheduled", "to") != t("send_message", "to")
 

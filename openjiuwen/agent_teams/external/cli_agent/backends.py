@@ -11,7 +11,7 @@ from typing import Literal
 
 from openjiuwen.agent_teams.external.cli_agent.adapters import available_adapters, build_adapter
 
-BackendKind = Literal["sdk", "adapter"]
+BackendKind = Literal["sdk", "adapter", "provider"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,6 +38,8 @@ class ExternalCliBackend:
     injects_system_prompt_via_arg: bool
     sdk_requirement: SdkRequirement | None = None
     """SDK the backend needs at spawn time; ``None`` for subprocess adapters."""
+    provider: str | None = None
+    """Harness provider driving the member; ``None`` for subprocess adapters."""
 
 
 _SDK_BACKENDS: dict[str, ExternalCliBackend] = {
@@ -51,6 +53,7 @@ _SDK_BACKENDS: dict[str, ExternalCliBackend] = {
             distribution="claude-agent-sdk",
             extra="claude",
         ),
+        provider="claudecode",
     ),
     "codex": ExternalCliBackend(
         name="codex",
@@ -62,12 +65,19 @@ _SDK_BACKENDS: dict[str, ExternalCliBackend] = {
             distribution="openai-codex",
             extra="codex",
         ),
+        provider="codex",
     ),
 }
 
 
 def backend_for(name: str) -> ExternalCliBackend | None:
-    """Return backend metadata for ``name``, or None when unsupported."""
+    """Return backend metadata for ``name``, or None when unsupported.
+
+    Lookup order: SDK backends, subprocess adapters, then third-party harness
+    providers (registered in process or installed through the
+    ``openjiuwen.harness_providers`` entry point group). Built-in providers are
+    not member backends; Claude Code and Codex members use their SDK backends.
+    """
     sdk_backend = _SDK_BACKENDS.get(name)
     if sdk_backend is not None:
         return sdk_backend
@@ -79,12 +89,65 @@ def backend_for(name: str) -> ExternalCliBackend | None:
             supports_command_override=True,
             injects_system_prompt_via_arg=adapter.injects_system_prompt_via_arg(),
         )
+    if name in third_party_providers():
+        # The system prompt travels in HarnessContext.system_prompt; the
+        # provider decides how its runtime receives it.
+        return ExternalCliBackend(
+            name=name,
+            kind="provider",
+            supports_command_override=False,
+            injects_system_prompt_via_arg=True,
+            provider=name,
+        )
     return None
+
+
+def third_party_providers() -> tuple[str, ...]:
+    """Return the harness provider names that are not built into openjiuwen."""
+    from openjiuwen.harness_providers.factory import PROVIDER_NAMES, available_providers
+
+    return tuple(name for name in available_providers() if name not in PROVIDER_NAMES)
+
+
+def provider_takes_endpoint_models(name: str) -> bool:
+    """Return whether third-party provider ``name`` runs models on host endpoints.
+
+    True only when the provider maps models at all (``ModelConfigProvider``)
+    and its card declares ``ENDPOINT_MODELS``.
+    """
+    from openjiuwen.harness_protocol import HarnessCapability, ModelConfigProvider
+    from openjiuwen.harness_providers.factory import resolve_provider
+
+    provider = resolve_provider(name)
+    return isinstance(provider, ModelConfigProvider) and provider.card.supports(HarnessCapability.ENDPOINT_MODELS)
+
+
+def takes_auth_fallback(name: str) -> bool:
+    """Return whether CLI kind ``name`` switches to a team model when its login fails.
+
+    The fallback is a team pool entry on a host endpoint, so the member's
+    provider must map models (``ModelConfigProvider``) and its card must declare
+    both ``AUTH_FALLBACK`` and ``ENDPOINT_MODELS``; subprocess adapters never do.
+    """
+    backend = backend_for(name)
+    if backend is None or backend.provider is None:
+        return False
+    from openjiuwen.harness_protocol import HarnessCapability, ModelConfigProvider
+    from openjiuwen.harness_providers.factory import resolve_provider
+
+    provider = resolve_provider(backend.provider)
+    card = provider.card
+    return (
+        isinstance(provider, ModelConfigProvider)
+        and card.supports(HarnessCapability.AUTH_FALLBACK)
+        and card.supports(HarnessCapability.ENDPOINT_MODELS)
+    )
 
 
 def available_backends() -> tuple[str, ...]:
     """Return all supported external CLI backend names."""
-    return (*_SDK_BACKENDS, *available_adapters())
+    known = (*_SDK_BACKENDS, *available_adapters())
+    return (*known, *(name for name in third_party_providers() if name not in known))
 
 
 def is_known_backend(name: str) -> bool:
@@ -121,4 +184,7 @@ __all__ = [
     "backend_for",
     "is_known_backend",
     "missing_sdk_requirement",
+    "provider_takes_endpoint_models",
+    "takes_auth_fallback",
+    "third_party_providers",
 ]

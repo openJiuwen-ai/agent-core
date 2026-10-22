@@ -1,15 +1,16 @@
 Create team tasks and assign their owners (Leader only).
 **Tasks should focus on deliverable outcomes and acceptance criteria, not execution steps.**
 
-This team runs in **scheduled assignment mode**: tasks never enter a shared claim pool and members never claim work themselves. **Every task must name its owner via `assignee` — an unassigned task will never be executed.**
+This team runs in **scheduled assignment mode**: tasks never enter a shared claim pool and members never claim work themselves. **Every task must have an owner — `assignee` naming an existing member, or `member` declaring one inline with the task; an unassigned task will never be executed.**
 
 {{create_task_edge_semantics}}
 
 ## Task Fields
 
 - **title**: Concise description of the goal (imperative form, e.g. "Implement user auth")
-- **content**: Goals, acceptance criteria, and constraints — not specific operations
-- **assignee** (required): Member name that will carry this task. **That member must already exist and must not be the leader** — `spawn_teammate` first, then `create_task`
+- **content**: Goals, acceptance criteria, and constraints — not specific operations. Do **not** ask the member to `send_message` you a report or progress update on completion: the completion summary it writes (`summary` / `note`) reaches you with the scheduler's terminal digest, and an extra report only repeats it and wakes you once more. There is also **no need** to write "before starting, read the upstream tasks' notes with view_task": the start notice already lists the completion summaries of the task's direct upstream, and the member calls `view_task(action='note')` itself when it needs the full text
+- **assignee** (one of assignee / member): Member name that will carry this task. **That member must already exist and must not be the leader** — `spawn_teammate` first, then `create_task`; it may also name a member declared inline via `member` by another task of the same call, e.g. a later aggregation task owned by a member an earlier task creates
+- **member** (one of assignee / member): owner object declared inline with the task, see "Inline task member" below
 - **reviewer** (at least 1 per task): List of structured objects, each with required `type` (verifier / inspector / challenger) and `reviewer_id` (name, must differ from assignee), plus optional `instruction` (verification focus for verifier type). Example: `{"type": "verifier", "reviewer_id": "functional check", "instruction": "Run test cases..."}`. A reviewed task enters `in_review` on completion; any reviewer fail fails the round (one-vote veto). Reviewers do NOT need to be pre-spawned — the scheduling framework automatically creates the correct type of temporary verification agent based on `type`.
 - **max_review_rounds** (optional, requires reviewer): Rework-round ceiling for the verify gate; beyond it a failing round escalates to you instead of looping. Omitted uses the team default
 - **task_id** (required): Custom ID for dependency reference.
@@ -20,7 +21,9 @@ The initial status follows the dependencies: a task with **no dependencies** lan
 
 {{create_task_granularity}}
 
+{{create_task_inline_member}}
+
 ## Required Workflow
 
-1. **Before creating**: all `assignee`s must already exist (`spawn_teammate` first), and assignee must not be the leader; reviewers are written as structured objects `{type, reviewer_id, instruction}` in the `reviewer` field — the scheduling framework creates the correct type of temporary verification agent based on `type`; you MUST call `view_task` to inspect the current task board — prevents duplicates, surfaces missing dependencies, and reveals reusable task IDs
+1. **Before creating**: `assignee` must already exist (`spawn_teammate` first) and must not be the leader, or declare the owner inline with `member`; reviewers are written as structured objects `{type, reviewer_id, instruction}` in the `reviewer` field — the scheduling framework creates the correct type of temporary verification agent based on `type`; you MUST call `view_task` to inspect the current task board — prevents duplicates, surfaces missing dependencies, and reveals reusable task IDs
 2. **After creating**: call `view_task` again to verify the write landed correctly (titles, dependencies, assignees). **Do not broadcast to start members** — the scheduling framework notifies and launches each assignee automatically

@@ -10,36 +10,74 @@ relationships, and error marking.
 import json
 
 import pytest
-
 from opentelemetry import trace
 
-from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
+from openjiuwen.core.common.exception.codes import StatusCode as OJStatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm.schema.message import (
     AssistantMessage,
     SystemMessage,
+    UsageMetadata,
     UserMessage,
 )
 from openjiuwen.core.graph.pregel import GraphInterrupt, Interrupt
-from openjiuwen.core.session.tracer.handler import TracerHandlerName
 from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
+from openjiuwen.core.session.tracer.handler import TracerHandlerName
 from openjiuwen.core.session.tracer.span import SpanManager
 from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.handler import OtelAgentHandler, OtelWorkflowHandler
 from openjiuwen.extensions.tracer_otel.semconv import (
+    ERROR_TYPE,
+    GEN_AI_AGENT_DESCRIPTION,
+    GEN_AI_AGENT_ID,
+    GEN_AI_AGENT_NAME,
+    GEN_AI_CONVERSATION_ID,
+    GEN_AI_DATA_SOURCE_ID,
+    GEN_AI_EMBEDDINGS_DIMENSION_COUNT,
     GEN_AI_INPUT_MESSAGES,
+    GEN_AI_MEMORY_RECORD_COUNT,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_PROVIDER_NAME,
+    GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
+    GEN_AI_REQUEST_REASONING_LEVEL,
+    GEN_AI_REQUEST_STOP_SEQUENCES,
+    GEN_AI_REQUEST_TEMPERATURE,
+    GEN_AI_REQUEST_TOP_K,
+    GEN_AI_REQUEST_TOP_P,
+    GEN_AI_RESPONSE_FINISH_REASONS,
+    GEN_AI_RESPONSE_MODEL,
+    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
+    GEN_AI_RETRIEVAL_DOCUMENTS,
+    GEN_AI_RETRIEVAL_QUERY_TEXT,
+    GEN_AI_RETRIEVAL_TOP_K,
     GEN_AI_SYSTEM_INSTRUCTIONS,
+    GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_NAME,
+    GEN_AI_TOOL_TYPE,
+    GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
+    GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
     OJ_AGENT_ERROR_MESSAGE,
     OJ_AGENT_INVOKE_TYPE,
     OJ_AGENT_NAME,
     OJ_ELAPSED_TIME,
     OJ_END_TIME,
     OJ_ERROR,
+    OJ_GEN_AI_METADATA,
+    OJ_GEN_AI_REASONING_DURATION_MS,
+    OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS,
+    OJ_GEN_AI_TRACE_NAME,
+    OJ_GEN_AI_USAGE_INPUT_COST,
+    OJ_GEN_AI_USAGE_OUTPUT_COST,
+    OJ_GEN_AI_USAGE_TOTAL_COST,
+    OJ_GEN_AI_USER_ID,
     OJ_INVOKE_ID,
+    OJ_LLM_PREV_MESSAGE_COUNT,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
     OJ_SESSION_ID,
@@ -54,6 +92,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_WORKFLOW_ID,
     OJ_WORKFLOW_INVOKE_DATA,
 )
+from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
 
 pytestmark = pytest.mark.asyncio
 
@@ -677,6 +716,129 @@ class TestOtelWorkflowHandler:
         assert s.name == "execute_tool tool_node"
         assert s.attributes[GEN_AI_TOOL_NAME] == "tool_node"
 
+    async def test_workflow_retrieval_component_tagged_as_retrieval(self):
+        """KnowledgeRetrievalExecutable gets the standard retrieval name and
+        gen_ai.operation.name="retrieval"; query/documents are projected onto
+        gen_ai.retrieval.query.text / gen_ai.retrieval.documents from the
+        component inputs/outputs."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "什么是向量检索"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(
+            invoke_id="kb_node",
+            outputs={"results": ["doc-1 内容", "doc-2 内容"], "context": "doc-1 内容\ndoc-2 内容"},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.kind == trace.SpanKind.INTERNAL
+        assert s.name == "retrieval kb_node"
+        assert s.attributes[GEN_AI_OPERATION_NAME] == "retrieval"
+        assert s.attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "什么是向量检索"
+        assert list(s.attributes[GEN_AI_RETRIEVAL_DOCUMENTS]) == ["doc-1 内容", "doc-2 内容"]
+
+    async def test_workflow_retrieval_documents_redacted(self):
+        """gen_ai.retrieval.documents follows the same redaction policy as
+        query.text / workflow.outputs: hashed when redaction_enabled=True,
+        never raw document text."""
+        config = OtelTracerConfig(redaction_enabled=True)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "什么是向量检索"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(
+            invoke_id="kb_node",
+            outputs={"results": ["doc-1 内容", "doc-2 内容"]},
+        )
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        docs = list(finished[0].attributes[GEN_AI_RETRIEVAL_DOCUMENTS])
+        assert docs[0].startswith("sha256:")
+        assert docs[1].startswith("sha256:")
+        assert finished[0].attributes[GEN_AI_RETRIEVAL_QUERY_TEXT].startswith("sha256:")
+
+    async def test_workflow_retrieval_query_refreshed_on_pre_invoke(self):
+        """Transform callbacks may mutate inputs in place; on_pre_invoke refreshes
+        gen_ai.retrieval.query.text together with openjiuwen.workflow.inputs."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "旧查询"},
+            parent_node_id="",
+        )
+        await handler.on_pre_invoke(
+            invoke_id="kb_node",
+            inputs={"query": "新查询"},
+            component_metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+        )
+        await handler.on_call_done(invoke_id="kb_node")
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        assert finished[0].attributes[GEN_AI_RETRIEVAL_QUERY_TEXT] == "新查询"
+
+    async def test_workflow_non_retrieval_component_keeps_generic_name(self):
+        """Components whose type carries no "Retrieval" substring keep the generic
+        component.<invoke_id> name and get no gen_ai.operation.name tag."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="other_node",
+            metadata={
+                "component_id": "other_node",
+                "component_type": "SomeExecutable",
+                "component_name": "other_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "不是检索组件"},
+            parent_node_id="",
+        )
+        await handler.on_call_done(invoke_id="other_node", outputs={"results": ["x"]})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        s = finished[0]
+        assert s.name == "component.other_node"
+        assert GEN_AI_OPERATION_NAME not in s.attributes
+        assert GEN_AI_RETRIEVAL_QUERY_TEXT not in s.attributes
+        assert GEN_AI_RETRIEVAL_DOCUMENTS not in s.attributes
+
     async def test_workflow_non_llm_internal_span(self):
         """Non-LLM component → INTERNAL span kind."""
         config = OtelTracerConfig(redaction_enabled=False)
@@ -1087,6 +1249,52 @@ class TestComponentSpansInvokeIdKey:
         invoke_ids = {s.attributes.get(OJ_INVOKE_ID) for s in finished}
         assert invoke_ids == {"node_1_inv_1", "node_1_inv_2"}
 
+    async def test_leftover_component_span_ended_on_workflow_failure(self, monkeypatch):
+        """A component span still open when its workflow fails must be fully
+        cleaned up by on_invoke's defensive _component_spans loop: end + detach +
+        _span_manager pop. Dropping only the index entry would leak the span and
+        its ambient-context token, and leave the manager entry unreachable for
+        the stale-session cleanup safety net."""
+        detached = []
+        orig_detach = OtelWorkflowHandler._detach_state
+
+        def _spy_detach(state):
+            detached.append(state)
+            orig_detach(state)
+
+        monkeypatch.setattr(OtelWorkflowHandler, "_detach_state", staticmethod(_spy_detach))
+
+        await self.handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        await self.handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+            },
+            inputs={"query": "q"},
+            parent_node_id="",
+        )
+        comp_state = self.handler._component_spans["kb_node"]
+        assert comp_state.context_token is not None  # attach is active on component spans
+        # Defensive-loop condition: state.invoke_id equals the failing workflow's
+        # invoke_id (component created under the workflow's id).
+        comp_state.invoke_id = "wf_root"
+
+        await self.handler.on_invoke(invoke_id="wf_root", exception=RuntimeError("wf failed"))
+
+        names = {s.name for s in _EXPORTER.get_finished_spans()}
+        assert "wf_root" in names  # root ended via the normal error path
+        assert "retrieval kb_node" in names  # component ended by the cleanup loop
+        assert self.handler._span_manager.get("kb_node") is None
+        assert not self.handler._component_spans
+        assert comp_state in detached  # ambient context token released
+
 
 class TestWorkflowIsolation:
     """Test workflow isolation via workflow_id field (Problem B part 3).
@@ -1212,5 +1420,566 @@ class TestMultiRoundConversationTraceContinuity:
         # Different sessions get different traces
         assert s1_spans[0].context.trace_id != s2_spans[0].context.trace_id, \
             "Different sessions should have different OTel traces"
+
+
+# ---------------------------------------------------------------------------
+# GenAI semantic-convention attribute additions (issue #1833)
+# ---------------------------------------------------------------------------
+
+
+class TestGenAiSemconvAttrs:
+    """Covers request params, identity attrs, response/usage/cost, tool, error.type."""
+
+    async def test_llm_start_sets_request_params_and_message_count(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={"messages": ["m1", "m2"]},
+            instance_info={
+                "class_name": "TestModel",
+                "request_params": {
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "top_k": 40,
+                    "max_tokens": 4096,
+                    "stop_sequences": ["END"],
+                    "reasoning_level": "high",
+                },
+                "message_count": 3,
+            },
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_REQUEST_TEMPERATURE] == 0.7
+        assert s.attributes[GEN_AI_REQUEST_TOP_P] == 0.9
+        assert s.attributes[GEN_AI_REQUEST_TOP_K] == 40
+        assert s.attributes[GEN_AI_REQUEST_MAX_TOKENS] == 4096
+        assert list(s.attributes[GEN_AI_REQUEST_STOP_SEQUENCES]) == ["END"]
+        assert s.attributes[GEN_AI_REQUEST_REASONING_LEVEL] == "high"
+        assert s.attributes[OJ_LLM_PREV_MESSAGE_COUNT] == 3
+
+    async def test_llm_start_sets_agent_identity_attrs(self):
+        """agent_id / name / description / conversation_id / user_id /
+        metadata ride the same instance_info block from
+        OtelRail._build_common_info."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={
+                "class_name": "TestModel",
+                "agent_id": "card-1",
+                "agent_name": "HelperAgent",
+                "agent_description": "A helper",
+                "conversation_id": "sess-42",
+                "user_id": "u-9",
+                "metadata": {"user_id": "u-9", "channel": "web"},
+            },
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_AGENT_ID] == "card-1"
+        # Executing agent name — distinct from the span entity (the model).
+        assert s.attributes[GEN_AI_AGENT_NAME] == "HelperAgent"
+        assert s.attributes[GEN_AI_AGENT_DESCRIPTION] == "A helper"
+        assert s.attributes[GEN_AI_CONVERSATION_ID] == "sess-42"
+        assert s.attributes[OJ_GEN_AI_USER_ID] == "u-9"
+        assert json.loads(s.attributes[OJ_GEN_AI_METADATA]) == {"user_id": "u-9", "channel": "web"}
+
+    async def test_llm_start_without_params_sets_no_request_attrs(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert GEN_AI_REQUEST_TEMPERATURE not in s.attributes
+        assert OJ_LLM_PREV_MESSAGE_COUNT not in s.attributes
+
+    async def test_llm_end_extracts_response_usage_and_cost_attrs(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(
+            content="answer",
+            finish_reason="stop",
+            usage_metadata=UsageMetadata(
+                model_name="claude-test",
+                input_tokens=11,
+                output_tokens=22,
+                cache_read_tokens=5,
+                cache_creation_input_tokens=7,
+                reasoning_tokens=3,
+                input_cost=0.001,
+                output_cost=0.002,
+                total_cost=0.003,
+            ),
+        )
+        # OtelRail wraps the response in {"outputs": ...}
+        await handler.on_llm_end(span=agent_span, outputs={"outputs": message})
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert list(s.attributes[GEN_AI_RESPONSE_FINISH_REASONS]) == ["stop"]
+        assert s.attributes[GEN_AI_RESPONSE_MODEL] == "claude-test"
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 11
+        assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 22
+        assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 5
+        assert s.attributes[GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS] == 7
+        assert s.attributes[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 3
+        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.001)
+        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(0.002)
+        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.003)
+
+    async def test_llm_end_unwraps_outputs_container_into_content(self):
+        """The {"outputs": AssistantMessage} wrapper must not swallow content."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(content="final answer")
+        await handler.on_llm_end(span=agent_span, outputs={"outputs": message})
+
+        s = _EXPORTER.get_finished_spans()[0]
+        payload = json.loads(s.attributes[GEN_AI_OUTPUT_MESSAGES])
+        assert payload[0]["role"] == "assistant"
+        assert payload[0]["parts"][0]["content"] == "final answer"
+
+    async def test_llm_end_cache_read_falls_back_to_cache_tokens(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(
+            content="x",
+            usage_metadata=UsageMetadata(input_tokens=1, output_tokens=1, cache_tokens=9),
+        )
+        await handler.on_llm_end(span=agent_span, outputs=message)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 9
+
+    async def test_plugin_start_sets_tool_semconv_attrs(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        tool_span = span_manager.create_agent_span()
+
+        await handler.on_plugin_start(
+            span=tool_span,
+            inputs={"name": "echo", "type": "function"},
+            instance_info={
+                "class_name": "echo",
+                "tool_type": "function",
+                "agent_name": "HelperAgent",
+                "tool_call_id": "call-1",
+            },
+        )
+        await handler.on_plugin_end(span=tool_span, outputs="ok")
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.name == "execute_tool echo"
+        assert s.attributes[GEN_AI_TOOL_NAME] == "echo"
+        assert s.attributes[GEN_AI_TOOL_TYPE] == "function"
+        assert s.attributes[GEN_AI_TOOL_CALL_ID] == "call-1"
+        assert s.attributes[GEN_AI_AGENT_NAME] == "HelperAgent"
+        assert s.attributes[GEN_AI_OPERATION_NAME] == "execute_tool"
+
+    async def test_error_type_set_for_plain_and_base_error(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_error(span=agent_span, error=RuntimeError("boom"))
+
+        s = _EXPORTER.get_finished_spans()[0]
+        # error.type carries the exception class name (OTel standard string form)
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+
+        # BaseError carries its own classification code
+        _EXPORTER.clear()
+        base_error = build_error(OJStatusCode.TOOL_EXECUTION_ERROR, reason="tool failed")
+        agent_span2 = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span2, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_error(span=agent_span2, error=base_error)
+
+        s2 = _EXPORTER.get_finished_spans()[0]
+        assert s2.attributes[ERROR_TYPE] == type(base_error).__name__
+
+    async def test_chain_start_sets_agent_identity_attrs(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_chain_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={
+                "class_name": "MyAgent",
+                "type": "agent",
+                "agent_id": "abc123",
+                "agent_name": "MyAgent",
+                "agent_description": "Root agent",
+                "conversation_id": "sess-7",
+                "user_id": "u-1",
+                "metadata": {"user_id": "u-1"},
+            },
+        )
+        await handler.on_chain_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_AGENT_ID] == "abc123"
+        assert s.attributes[GEN_AI_AGENT_NAME] == "MyAgent"
+        assert s.attributes[GEN_AI_AGENT_DESCRIPTION] == "Root agent"
+        assert s.attributes[GEN_AI_CONVERSATION_ID] == "sess-7"
+        assert s.attributes[OJ_GEN_AI_USER_ID] == "u-1"
+        assert json.loads(s.attributes[OJ_GEN_AI_METADATA]) == {"user_id": "u-1"}
+
+    async def test_chain_start_without_agent_id_omits_attr(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_chain_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={"class_name": "MyAgent", "type": "agent"},
+        )
+        await handler.on_chain_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert GEN_AI_AGENT_ID not in s.attributes
+
+    async def test_retriever_start_sets_top_k(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        retriever_span = span_manager.create_agent_span()
+
+        await handler.on_retriever_start(
+            span=retriever_span,
+            inputs={"query": "hello", "top_k": 5, "data_source_id": "kb-7"},
+            instance_info={"class_name": "kb"},
+        )
+        await handler.on_retriever_end(span=retriever_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_RETRIEVAL_TOP_K] == 5
+        assert s.attributes[GEN_AI_DATA_SOURCE_ID] == "kb-7"
+
+    async def test_provider_name_and_trace_name_on_llm_span(self):
+        """gen_ai.provider.name rides every span; trace name prefers the
+        rail-forwarded agent_name, falling back to the model name."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={"class_name": "TestModel", "agent_name": "MyAgent"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_PROVIDER_NAME] == "openjiuwen"
+        assert s.attributes[OJ_GEN_AI_TRACE_NAME] == "MyAgent"
+
+    async def test_trace_name_falls_back_to_entity_name(self):
+        """Without an agent_name (direct callers) the span entity name wins."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_chain_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={"class_name": "MyChain", "type": "agent"},
+        )
+        await handler.on_chain_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_PROVIDER_NAME] == "openjiuwen"
+        assert s.attributes[OJ_GEN_AI_TRACE_NAME] == "MyChain"
+
+    async def test_llm_end_sets_zero_usage_values(self):
+        """Present-but-zero usage facts are recorded, not skipped."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(content="x", usage_metadata=UsageMetadata())
+        await handler.on_llm_end(span=agent_span, outputs=message)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 0
+        assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 0
+        assert s.attributes[GEN_AI_RESPONSE_MODEL] == ""
+        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == 0.0
+        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == 0.0
+        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == 0.0
+
+    async def test_llm_end_sets_streaming_and_reasoning_latency(self):
+        """first_token_time parses to time_to_first_chunk; the *_ms latency
+        keys flow through raw-dict usage payloads schema-transparently."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(
+            content="x",
+            usage_metadata=UsageMetadata(first_token_time="0.35"),
+        )
+        await handler.on_llm_end(span=agent_span, outputs=message)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.35)
+        # Declared schema has no producer for these yet — absent, not zero.
+        assert OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS not in s.attributes
+        assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes
+
+        # Raw-dict callers (and future UsageMetadata fields) flow through.
+        _EXPORTER.clear()
+        agent_span2 = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span2, inputs=None, instance_info={"class_name": "M"},
+        )
+        raw = {
+            "outputs": {
+                "usage_metadata": {
+                    "inter_token_latency_ms": 12.5,
+                    "reasoning_duration_ms": 300.0,
+                }
+            }
+        }
+        await handler.on_llm_end(span=agent_span2, outputs=raw)
+
+        s2 = _EXPORTER.get_finished_spans()[0]
+        assert s2.attributes[OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS] == pytest.approx(12.5)
+        assert s2.attributes[OJ_GEN_AI_REASONING_DURATION_MS] == pytest.approx(300.0)
+
+    async def test_llm_end_malformed_latency_skips_attrs_not_finalization(self):
+        """A malformed latency value (str / list off a raw-dict caller) must
+        skip its attribute, never raise into on_llm_end — an exception there
+        would abort _set_end_attrs/_end_and_pop and the span would never end."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        raw = {
+            "outputs": {
+                "usage_metadata": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "inter_token_latency_ms": "not-a-number",
+                    "reasoning_duration_ms": ["bad"],
+                }
+            }
+        }
+        await handler.on_llm_end(span=agent_span, outputs=raw)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS not in s.attributes
+        assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes
+        # Finalization survived: end attrs set, span closed, manager drained.
+        assert OJ_END_TIME in s.attributes
+        assert handler._span_manager.get(agent_span.invoke_id) is None
+
+    async def test_embedding_start_sets_dimension_count(self):
+        """EMBEDDING span: embeddings operation, GenAI "{operation} {model}"
+        naming, request model and dimension count (core emitter:
+        APIEmbedding._get_embeddings)."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        embedding_span = span_manager.create_agent_span()
+
+        await handler.on_embedding_start(
+            span=embedding_span,
+            inputs={"text": "hello", "dimension": 768},
+            instance_info={"class_name": "APIEmbedding", "model_name": "bge-m3"},
+        )
+        await handler.on_embedding_end(
+            span=embedding_span,
+            outputs={
+                "vector_count": 1,
+                "dimension": 768,
+                "response_model": "bge-m3-20260101",
+                "usage_input_tokens": 12,
+            },
+        )
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.name == "embeddings bge-m3"
+        assert s.attributes[GEN_AI_OPERATION_NAME] == "embeddings"
+        assert s.attributes[GEN_AI_REQUEST_MODEL] == "bge-m3"
+        assert s.attributes[GEN_AI_RESPONSE_MODEL] == "bge-m3-20260101"
+        assert s.attributes[GEN_AI_EMBEDDINGS_DIMENSION_COUNT] == 768
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 12
+        assert s.attributes[GEN_AI_PROVIDER_NAME] == "openjiuwen"
+        assert s.status.status_code == trace.StatusCode.OK
+
+    async def test_embedding_error_marks_error(self):
+        """on_embedding_error (fired by the core emitter on final failure)
+        closes the span with ERROR status and error.type."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        embedding_span = span_manager.create_agent_span()
+
+        await handler.on_embedding_start(
+            span=embedding_span,
+            inputs={"text": "hello"},
+            instance_info={"class_name": "APIEmbedding", "model_name": "bge-m3"},
+        )
+        await handler.on_embedding_error(span=embedding_span, error=RuntimeError("boom"))
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.status.status_code == trace.StatusCode.ERROR
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
+
+    async def test_embedding_span_parents_onto_ambient_component_span(self):
+        """End-to-end parenting: while a retrieval component span is open
+        (context attached by on_call_start), an embedding span triggered from
+        inside the component resolves the component span as its OTel parent
+        instead of becoming an orphan root."""
+        wf_handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig(redaction_enabled=False))
+        agent_handler = OtelAgentHandler(_OTEL_TRACER, OtelTracerConfig(redaction_enabled=False))
+
+        await wf_handler.on_call_start(
+            invoke_id="kb_node",
+            metadata={
+                "component_id": "kb_node",
+                "component_type": "KnowledgeRetrievalExecutable",
+                "component_name": "kb_node",
+                "workflow_id": "wf1",
+                "top_k": 5,
+                "data_source_ids": ["kb-a", "kb-b"],
+            },
+            inputs={"query": "q"},
+            parent_node_id="",
+        )
+
+        # Simulate the core emitter firing inside component execution: the
+        # ambient OTel context is whatever on_call_start attached (same task).
+        agent_span = SpanManager("t").create_agent_span()
+        await agent_handler.on_embedding_start(
+            span=agent_span,
+            inputs={"text": "q", "dimension": 1024},
+            instance_info={"class_name": "APIEmbedding", "model_name": "bge-m3"},
+        )
+        await agent_handler.on_embedding_end(span=agent_span, outputs={"vector_count": 1})
+
+        await wf_handler.on_call_done(invoke_id="kb_node", outputs={"results": ["d1"]})
+
+        finished = _EXPORTER.get_finished_spans()
+        by_name = {s.name: s for s in finished}
+        comp = by_name["retrieval kb_node"]
+        emb = by_name["embeddings bge-m3"]
+        assert emb.parent is not None and emb.parent.span_id == comp.context.span_id
+        assert emb.context.trace_id == comp.context.trace_id
+        # Component-level metadata attrs exported via trace_metadata()
+        assert comp.attributes[GEN_AI_RETRIEVAL_TOP_K] == 5
+        assert list(comp.attributes[GEN_AI_DATA_SOURCE_ID]) == ["kb-a", "kb-b"]
+
+    async def test_memory_start_sets_record_count(self):
+        """MEMORY span entry point: record count from inputs."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        memory_span = span_manager.create_agent_span()
+
+        await handler.on_memory_start(
+            span=memory_span,
+            inputs={"query": "q", "record_count": 12},
+            instance_info={"class_name": "session-memory"},
+        )
+        await handler.on_memory_end(span=memory_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.name == "memory.session-memory"
+        assert s.attributes[GEN_AI_MEMORY_RECORD_COUNT] == 12
+
+    async def test_workflow_invoke_error_sets_error_type(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        await handler.on_invoke(invoke_id="wf_root", exception=RuntimeError("wf failed"))
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
 
 

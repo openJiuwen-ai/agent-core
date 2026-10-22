@@ -70,6 +70,13 @@ class AsyncStreamQueue:
             event_type=LogEventType.SESSION_STREAM_ERROR,
             metadata={"max_retries": max_retries, "timeout": attempt_timeout}
         )
+        # Silently returning would make emit()/write() report success while
+        # the chunk (or END_FRAME) was never queued; the consumer would wait
+        # forever and the caller could not retry or observe the loss.
+        raise TimeoutError(
+            f"failed to send stream data after {max_retries} attempts "
+            f"(attempt_timeout={attempt_timeout}s)"
+        )
 
     async def receive(self, timeout: float = DEFAULT_RECEIVE_TIMEOUT) -> Optional[Any]:
         if self._closed:

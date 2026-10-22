@@ -78,6 +78,11 @@ class TeamJoinDescriptor(BaseModel):
             spawn time). The leader name a scheduled member's ``send_message``
             targets is not carried here — the backend reads it from the shared
             ``team_info`` DB row (``TeamBackend.resolve_leader_member_name``).
+        enable_member_messaging: Whether a scheduled-dispatch member may
+            message its peers directly (``TeamAgentSpec.enable_member_messaging``,
+            F_126). A ``"member"``-scope connection picks its ``send_message``
+            variant from this together with ``dispatch_mode``, matching the
+            system prompt the member was spawned with.
         teammate_mode: How teammates execute tasks — ``"build_mode"`` or
             ``"plan_mode"``. A ``"member"``-scope connection resolves its tool
             set against this so plan-mode members get ``submit_plan`` when the
@@ -102,6 +107,7 @@ class TeamJoinDescriptor(BaseModel):
     scope: Literal["operator", "member"] = "operator"
     language: str = "cn"
     dispatch_mode: Literal["autonomous", "scheduled"] = "autonomous"
+    enable_member_messaging: bool = False
     teammate_mode: Literal["build_mode", "plan_mode"] = "build_mode"
     db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
     transport_config: MessagerTransportConfig = Field(default_factory=MessagerTransportConfig)

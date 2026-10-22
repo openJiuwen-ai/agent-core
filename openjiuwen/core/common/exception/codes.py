@@ -922,6 +922,7 @@ class StatusCode(Enum):
 
     # worktree tool 182510 - 182519
     TOOL_WORKTREE_EXIT_INVALID = (182510, "worktree exit is invalid, reason='{reason}'")
+    TOOL_WORKTREE_INIT_FAILED = (182511, "worktree initialization failed, reason='{reason}'")
 
     # web tool 182600 - 182699
     TOOL_WEB_SEARCH_ENGINE_ERROR = (182600, "web search engine error, engine='{engine}', reason='{reason}'")

@@ -110,3 +110,14 @@ async def test_security_interrupt_on_model_event_auto_rejected():
     finish = ctx.consume_force_finish()
     assert finish is not None
     assert "Should be auto-rejected" in finish.result.get("output", "")
+
+def test_security_interrupt_is_an_expected_abort():
+    """A security interrupt waits for the user: the callback framework must not log it as an error."""
+    from openjiuwen.core.runner.callback import AbortError
+    from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
+
+    rail = _ModelInterruptRail()
+    with pytest.raises(AbortError) as raised:
+        rail._raise_tool_interrupt("read_file", None, InterruptRequest(message="confirm"))
+    assert raised.value.is_error is False
+    assert isinstance(raised.value.cause, ToolInterruptException)

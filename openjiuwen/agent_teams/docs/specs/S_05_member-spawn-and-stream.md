@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/spawn/`、`openjiuwen/agent_teams/agent/spawn_manager.py`、`openjiuwen/agent_teams/agent/stream_controller.py`、`openjiuwen/agent_teams/agent/payload.py`、`openjiuwen/agent_teams/agent/agent_configurator.py`、`openjiuwen/agent_teams/worktree/`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-08-17 |
-| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md、F_74_leader-member-activity-and-team-idle.md、F_77_team-idle-requires-a-settled-task-board.md、F_79_team-scoped-skill-library-and-visibility.md、F_80_fork-identity-conversion.md、F_84_task-creation-starts-members.md |
+| 最近一次修订日期 | 2026-10-22 |
+| 关联 feature | F_38_team-teammate-worktree-isolation-agenttool.md、F_28_native-harness-team-adoption.md、F_60_native-harness-pause-abort-resume.md、F_69_cwd-workspace-project-root-separation.md、F_74_leader-member-activity-and-team-idle.md、F_77_team-idle-requires-a-settled-task-board.md、F_79_team-scoped-skill-library-and-visibility.md、F_80_fork-identity-conversion.md、F_84_task-creation-starts-members.md、F_125_team-expert-catalog-and-spawn.md |
 
 ## 范围 / 边界
 
@@ -54,7 +54,7 @@
 1. **注册与拉起是两件事；拉起只有一个漏斗**。
 
    **注册**（写 DB 行，`status=UNSTARTED`，**不启动任何东西**）：`spawn_teammate` /
-   `spawn_human_agent` / `spawn_bridge_agent` / `spawn_external_cli` 四个工具，以及
+   `spawn_human_agent` / `spawn_bridge_agent` / `spawn_expert` 等 spawn 工具（`spawn_teammate` 带 `cli_agent` 时登记外部 CLI 成员），以及
    `build_team` 的 predefined 成员，全部落到 `TeamBackend.spawn_member`（及其
    role 变体）。该方法的 docstring 就是契约：*"Only persists the member data —
    does NOT start the member."* **spawn 工具不拉起 agent**——工具描述里"何时被拉起
@@ -70,6 +70,14 @@
      → on_created = TeamAgent._on_teammate_created
      → SpawnManager.spawn_teammate → process | inprocess
    ```
+
+   **唤醒**（F_118）是拉起之外的第二条重建链，入口同为 `TeamAgent.auto_start_member`
+   （`startup_member` 未命中时回落 `TeamBackend.recover_member`）与 leader `send_message`
+   单播 / 多播的 `_recover_members`：`recover_member` 的接受集是 `{ERROR, DORMANT}`，
+   CAS `<源态>→RESTARTING` 后经 `restart_teammate`（先 `cleanup_teammate` 替换死 handle，
+   再以 `initial_message=None` + 同一 child AgentSession 重建；外部 harness 续 provider
+   checkpoint），失败回滚到被认领时的源态。**撒网不唤醒**：`autostart_unstarted()`、
+   round-idle 对账、`recover_team` 冷恢复都不碰 DORMANT——休眠成员只认点名。
 
    CAS 守卫是这条链上**唯一**的并发闸：第一个到的路径把 `UNSTARTED→STARTING` 抢
    成功，其余并发路径查到 `STARTING`/`READY` 直接返回 False。spawn 失败回滚
@@ -118,6 +126,14 @@
      bootstrap 读取，并通过 `Runner.run_agent_team(..., session=...)`
      最终走到 `SessionManager.bind_session` 里 `set_session_id`。
    两条路径的目的都是让 `get_session_id()` 在子运行体内返回同一个值。
+5a. **按专家模板拉起的成员只靠成员行重建**（F_125）。`spawn_expert` 把人设写进成员行 `prompt`，把
+   `{ref, version, snapshot | external_cli}` 写进 `TeamMember.options.agent_template`；
+   `build_context_from_db` 把快照读进 `TeamRuntimeContext.agent_template_spec`、把外部 CLI 配置读进
+   `TeamRuntimeContext.template_external_cli`。`AgentConfigurator.resolve_agent_spec` 的选择顺序：
+   `agents[成员名]`（预定义成员，宿主已组装）→ `agent_template_spec` 非空时
+   `apply_template_snapshot(角色基线, 快照)` → 角色基线。成员进程（含 `spawn_mode="process"` 子进程）
+   与冷恢复都不需要宿主的专家目录，包被升级或卸载也不改变已拉起成员的人设与能力；快照里的绝对路径
+   在包目录被物理删除后于 `_prepare` 热挂时报错。
 6. **Worktree 隔离由 leader 侧 spawn 托管，实现落在 `agent_teams/worktree/`**：
    `SpawnManager.build_context_from_db` 委托
    `TeammateWorktreeLifecycle.ensure_member_worktree(teammate, role)`（
@@ -499,8 +515,8 @@ runtime round event (kind)            →  ExecutionStatus     [_map_round]
 1. `state.team_cleaned` 置位 → `close_stream()`（临时团队 leader 调完 `clean_team` 后
    结束自身 stream 的**唯一**路径，见 [[F_10]]）；
 2. `team_member.status() == SHUTDOWN_REQUESTED` → `close_stream()`（成员跑完末轮后的
-   graceful 退场；**终态 `SHUTDOWN` 不在这里写**，由 Runner finally 的
-   `manager.finalize_member` 落，见 `S_06` 不变量 13 与 `S_03` 机制 18）；
+   graceful 退场；**终态不在这里写**，由 Runner finally 的 `manager.finalize_member` 按
+   `retire_target` 落 `SHUTDOWN` 或 `DORMANT`（F_118），见 `S_06` 不变量 13 与 `S_03` 机制 18）；
 3. 否则 → `_wake_mailbox_if_interrupt_cleared()` + `request_completion_poll_callback`
    （leader 用它立刻重估团队完成度）。
 

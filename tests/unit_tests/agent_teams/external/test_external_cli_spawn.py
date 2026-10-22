@@ -6,10 +6,12 @@
 import asyncio
 import sys
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams.external.cli_agent.backends import available_backends, backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import (
     build_cli_runtime,
     descriptor_from_context,
@@ -19,6 +21,7 @@ from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, Reinvoke
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.build_context import BuildContext
+from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import (
     ExternalCliAgentSpec,
     ExternalCliMemberSpec,
@@ -33,7 +36,8 @@ from openjiuwen.agent_teams.spawn.external_cli_spawn import (
 )
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.harness_protocol import ModelSelection
+from openjiuwen.harness_protocol import HarnessCapability, HarnessCard, McpTransport, ModelChoice, ModelSelection
+from openjiuwen.harness_providers import register_harness_provider, unregister_harness_provider
 from openjiuwen.harness_providers.claudecode import ClaudeCodeHarness
 from openjiuwen.harness_providers.codex import CodexHarness
 from tests.test_logger import logger
@@ -498,3 +502,279 @@ async def test_member_on_an_endpoint_takes_no_auth_fallback(cli_agent: str):
 
     assert runtime.harness._config.fallback_model is None
     logger.info("%s member on an endpoint runs without an auth fallback", cli_agent)
+
+
+class _RecordingProviderHarness:
+    """Stands in for a third-party provider harness; records its creation config."""
+
+    def __init__(self, config: dict, card: HarnessCard) -> None:
+        self.config = config
+        self.card = card
+
+
+class _ThirdPartyProvider:
+    """A third-party provider registered in process, with or without MCP tools."""
+
+    def __init__(self, *, mcp_tools: bool) -> None:
+        capabilities = frozenset({HarnessCapability.MCP_TOOLS}) if mcp_tools else frozenset()
+        self._card = HarnessCard(name="acme", implementation_version="0.1.0", capabilities=capabilities)
+
+    @property
+    def card(self) -> HarnessCard:
+        return self._card
+
+    def create(self, config: dict) -> _RecordingProviderHarness:
+        return _RecordingProviderHarness(dict(config), self._card)
+
+
+@pytest.fixture
+def acme_provider():
+    provider = _ThirdPartyProvider(mcp_tools=True)
+    register_harness_provider("acme", lambda: provider)
+    yield provider
+    unregister_harness_provider("acme")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_cli_runtime_dispatches_third_party_provider(acme_provider):
+    token = set_session_id("sess-1")
+    try:
+        runtime = await build_cli_runtime(
+            _ctx(member="dev-1", cli_agent="acme"),
+            cwd="/workspace",
+            cli_path="/opt/acme",
+            inject_mcp=True,
+            mcp_server_name="team",
+            system_prompt="ROLE: isolated developer",
+            system_prompt_mode="replace",
+            skills=({"dir": "/portable-skills"},),
+            skill_conflict="replace",
+            member_agent_id="ext_team_dev-1",
+        )
+    finally:
+        reset_session_id(token)
+
+    assert isinstance(runtime, ExternalHarnessMemberRuntime)
+    assert runtime.reliability_agent_kind == "acme"
+    config = runtime.harness.config
+    assert config["cwd"] == "/workspace"
+    assert config["cli_path"] == "/opt/acme"
+    assert config["system_prompt_mode"] == "replace"
+    assert config["inherit_process_env"] is False
+    assert config["skill_conflict"] == "replace"
+    assert config["skills"] == ({"dir": "/portable-skills"},)
+    assert "OPENJIUWEN_TEAM_JOIN" in config["env"]
+    (server,) = runtime._extra_mcp_servers
+    assert server.name == "team"
+    assert server.transport is McpTransport.STDIO
+    assert server.command == ("openjiuwen-team-mcp",)
+    assert set(server.env) == {"OPENJIUWEN_TEAM_JOIN", "OPENJIUWEN_HOME"}
+    context = runtime._context_source
+    assert context.system_prompt == "ROLE: isolated developer"
+    assert context.agent_id == "ext_team_dev-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_third_party_provider_without_mcp_tools_gets_no_team_server():
+    register_harness_provider("acme", lambda: _ThirdPartyProvider(mcp_tools=False))
+    token = set_session_id("sess-1")
+    try:
+        runtime = await build_cli_runtime(_ctx(member="dev-1", cli_agent="acme"), inject_mcp=True)
+    finally:
+        reset_session_id(token)
+        unregister_harness_provider("acme")
+
+    assert "cli_path" not in runtime.harness.config
+    assert "system_prompt_mode" not in runtime.harness.config
+    assert runtime._extra_mcp_servers == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_third_party_provider_rejects_backend_specific_options(acme_provider):
+    token = set_session_id("sess-1")
+    try:
+        with pytest.raises(BaseError, match="does not support: codex_bin, ssh_transport"):
+            await build_cli_runtime(
+                _ctx(member="dev-1", cli_agent="acme"),
+                codex_bin="/opt/codex",
+                ssh_transport=SshTransportConfig(host="remote", agent=True),
+            )
+    finally:
+        reset_session_id(token)
+
+
+def test_third_party_provider_is_a_known_backend_and_accepts_cli_path(acme_provider):
+    backend = backend_for("acme")
+
+    assert backend is not None
+    assert backend.kind == "provider"
+    assert "acme" in available_backends()
+    assert ExternalCliAgentSpec(cli_agent="acme", cli_path="/opt/acme").cli_path == "/opt/acme"
+    with pytest.raises(ValueError, match="adapter-backed"):
+        ExternalCliAgentSpec(cli_agent="gemini", cli_path="/opt/gemini")
+
+
+class _ModelAwareProvider(_ThirdPartyProvider):
+    """A third-party provider mapping models through ``model_config``."""
+
+    def __init__(self, *, endpoints: bool, auth_fallback: bool = False) -> None:
+        super().__init__(mcp_tools=False)
+        capabilities = {HarnessCapability.ENDPOINT_MODELS} if endpoints else set()
+        if auth_fallback:
+            capabilities.add(HarnessCapability.AUTH_FALLBACK)
+        self._card = HarnessCard(name="acme", implementation_version="0.1.0", capabilities=frozenset(capabilities))
+
+    @staticmethod
+    def model_config(choice: ModelChoice, *, fallback: ModelChoice | None = None) -> dict:
+        if choice.effort is not None:
+            raise ValueError("acme has no effort selector")
+        fragment = {"model": choice.model}
+        if choice.endpoint is not None:
+            fragment.update(base_url=choice.endpoint.api_base, token=choice.endpoint.api_key)
+        if fallback is not None:
+            fragment["fallback"] = {"model": fallback.model, "base_url": fallback.endpoint.api_base}
+        return fragment
+
+
+async def _provider_runtime(
+    provider: _ThirdPartyProvider,
+    model: ExternalCliModelConfig | None,
+    *,
+    fallback: ExternalCliModelConfig | None = None,
+    promote: Any = None,
+) -> object:
+    register_harness_provider("acme", lambda: provider)
+    token = set_session_id("sess-1")
+    try:
+        return await build_cli_runtime(
+            _ctx(member="dev-1", cli_agent="acme"),
+            inject_mcp=False,
+            external_model_config=model,
+            fallback_external_model_config=fallback,
+            promote_fallback_model=promote,
+            member_agent_id="ext_team_dev-1",
+        )
+    finally:
+        reset_session_id(token)
+        unregister_harness_provider("acme")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        (ExternalCliModelConfig(model="vendor/model-x"), {"model": "vendor/model-x"}),
+        (
+            ExternalCliModelConfig(provider="openai", model="gpt-x", api_base="https://gw", api_key="k"),
+            {"model": "gpt-x", "base_url": "https://gw", "token": "k"},
+        ),
+    ],
+)
+async def test_provider_member_model_goes_through_model_config(model: ExternalCliModelConfig, expected: dict):
+    runtime = await _provider_runtime(_ModelAwareProvider(endpoints=True), model)
+
+    config = runtime.harness.config
+    assert {key: config[key] for key in expected} == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize(
+    ("provider", "model", "message"),
+    [
+        (_ThirdPartyProvider(mcp_tools=False), ExternalCliModelConfig(model="m"), "does not configure models"),
+        (_ModelAwareProvider(endpoints=True), ExternalCliModelConfig(model="m", effort="high"), "no effort selector"),
+        (
+            _ModelAwareProvider(endpoints=False),
+            ExternalCliModelConfig(model="gpt-x", api_base="https://gw"),
+            "does not take endpoint models",
+        ),
+    ],
+)
+async def test_provider_member_rejects_models_it_cannot_take(
+    provider: _ThirdPartyProvider,
+    model: ExternalCliModelConfig,
+    message: str,
+):
+    with pytest.raises(BaseError, match=message):
+        await _provider_runtime(provider, model)
+
+
+@pytest.mark.level0
+@pytest.mark.parametrize(("endpoints", "kept"), [(True, True), (False, False)])
+def test_spawn_hands_endpoint_models_only_to_providers_that_take_them(endpoints: bool, kept: bool):
+    from openjiuwen.agent_teams.spawn.external_cli_spawn import _negotiate_provider_endpoint
+    from openjiuwen.agent_teams.tools.tool_member import _provider_filter_for_cli
+
+    endpoint = ExternalCliModelConfig(provider="openai", model="gpt-x", api_base="https://gw")
+    builtin = ExternalCliModelConfig(model="vendor/model-x")
+    register_harness_provider("acme", lambda: _ModelAwareProvider(endpoints=endpoints))
+    try:
+        ctx = _ctx(member="dev-1", cli_agent="acme")
+        assert (_negotiate_provider_endpoint(ctx, endpoint) is endpoint) is kept
+        assert _negotiate_provider_endpoint(ctx, builtin) is builtin
+        provider_filter = _provider_filter_for_cli("acme")
+        assert (provider_filter is None) is kept
+        if provider_filter is not None:
+            assert provider_filter("openai") is False
+    finally:
+        unregister_harness_provider("acme")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_provider_member_with_auth_fallback_gets_the_pool_fallback():
+    fallback = ExternalCliModelConfig(provider="openai", model="pool-model", api_base="https://pool", api_key="k")
+
+    async def promote() -> bool:
+        return True
+
+    runtime = await _provider_runtime(
+        _ModelAwareProvider(endpoints=True, auth_fallback=True),
+        None,
+        fallback=fallback,
+        promote=promote,
+    )
+
+    assert runtime.harness.config["fallback"] == {"model": "pool-model", "base_url": "https://pool"}
+    assert "model" not in runtime.harness.config, "only the fallback was chosen; the CLI keeps its default model"
+    assert runtime._promote_fallback_model is promote
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_provider_member_without_auth_fallback_rejects_a_fallback():
+    fallback = ExternalCliModelConfig(provider="openai", model="pool-model", api_base="https://pool")
+
+    with pytest.raises(BaseError, match="no authentication fallback"):
+        await _provider_runtime(_ModelAwareProvider(endpoints=True), None, fallback=fallback)
+
+
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("endpoints", "auth_fallback", "kept"),
+    [(True, True, True), (True, False, False), (False, True, False)],
+)
+def test_spawn_hands_the_fallback_only_to_providers_with_auth_fallback(
+    endpoints: bool,
+    auth_fallback: bool,
+    kept: bool,
+):
+    from openjiuwen.agent_teams.external.cli_agent.backends import takes_auth_fallback
+    from openjiuwen.agent_teams.spawn.external_cli_spawn import _negotiate_provider_fallback
+
+    fallback = ExternalCliModelConfig(provider="openai", model="pool-model", api_base="https://pool")
+    # The fallback is a pool entry: AUTH_FALLBACK without ENDPOINT_MODELS cannot take it.
+    register_harness_provider("acme", lambda: _ModelAwareProvider(endpoints=endpoints, auth_fallback=auth_fallback))
+    try:
+        assert takes_auth_fallback("acme") is kept
+        assert (_negotiate_provider_fallback(_ctx(member="dev-1", cli_agent="acme"), fallback) is fallback) is kept
+    finally:
+        unregister_harness_provider("acme")
+    assert takes_auth_fallback("claude")
+    assert takes_auth_fallback("codex")
+    assert not takes_auth_fallback("gemini")

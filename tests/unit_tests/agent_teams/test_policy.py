@@ -175,3 +175,49 @@ def test_teammate_policy_omits_leader_collaboration_boundary():
     assert "协作机制选择" not in policy
     assert "涌现式" not in policy
     assert "顺序接力" not in policy
+
+
+# ---------------------------------------------------------------------------
+# F_118: scheduled prompts — inline members, dormancy, self-sufficient handoff
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+def test_scheduled_prompts_describe_inline_members_and_dormancy(lang):
+    from openjiuwen.agent_teams.prompts.loader import load_template
+
+    leader = load_template("dispatch_scheduled_leader", lang).content
+    teammate = load_template("dispatch_scheduled_teammate", lang).content
+    start = load_template("scheduler_task_start", lang).content
+    plan = load_template("scheduler_task_start_plan", lang).content
+
+    assert "lifetime" in leader and "dormant" in leader
+    # The teammate no longer re-reads its own task; the handoff is self-sufficient.
+    assert "view_task(action=get)" not in teammate
+    assert "view_task(action=get, task_id=" in teammate
+    for template in (start, plan):
+        assert "{{task.upstream_brief}}" in template
+        assert "{{task.downstream_brief}}" in template
+    assert "note=" in start
+
+
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+def test_execution_mode_lines_and_shared_policies_are_dispatch_neutral(lang):
+    """The role section is shared by both dispatch modes: it must not tell a scheduled member to claim."""
+    from openjiuwen.agent_teams.prompts.loader import load_template
+    from openjiuwen.agent_teams.prompts.sections import _LABELS
+
+    claim_words = ("领取", "认领", "claim")
+    for key in ("leader_mode_plan", "leader_mode_build", "teammate_mode_plan", "teammate_mode_build"):
+        line = _LABELS[lang][key]
+        assert not any(word in line.lower() for word in claim_words), (key, line)
+    for name in ("teammate_policy", "teammate_policy_external"):
+        text = load_template(name, lang).content
+        # The one line that mentions claiming spells out both modes side by side.
+        offending = [
+            ln for ln in text.splitlines()
+            if any(w in ln.lower() for w in claim_words) and ("调度" not in ln and "scheduled" not in ln.lower())
+        ]
+        assert offending == [], offending

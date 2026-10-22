@@ -1,0 +1,47 @@
+# __DIST__
+
+__DISPLAY__ harness provider for [openjiuwen](https://pypi.org/project/openjiuwen/). Integration mode: __MODE_LABEL__.
+
+## Install
+
+```bash
+pip install openjiuwen
+pip install __DIST__          # or: pip install -e . from this directory
+```
+
+Installing registers the provider through the `openjiuwen.harness_providers` entry point; no code change in
+openjiuwen is needed:
+
+```python
+from openjiuwen.harness_providers import available_providers, create_harness, build_harness_context
+
+assert "__PROVIDER__" in available_providers()
+harness = create_harness("path/to/agent_template", provider="__PROVIDER__")
+context = build_harness_context("path/to/agent_template", provider="__PROVIDER__", host_session_id="session-1")
+await harness.start(context)
+```
+
+__RUNTIME_NOTE__
+
+## Wheels and the managed runtime
+
+```bash
+# pure wheel, CLI installed by the user, one build for every platform
+python <skill>/scripts/build_runtime.py --project . --platform macos-arm64 --platform windows-x86_64 --base-url <url>
+# optional: bundle the CLI as a fallback, one build per platform
+python <skill>/scripts/build_runtime.py --project . --platform macos-arm64 --binary /path/to/__BINARY__ --base-url <url>
+```
+
+Both write `dist/runtime-manifest.json`, which a frozen host uses to download, verify (sha256), extract into a
+private `site-packages` and append to `sys.path`. A bundled CLI lives under `__PKG__/_bundled/bin/` and is used
+only when no CLI is configured or found on `PATH`.
+
+## Develop
+
+```bash
+pip install -e ".[test]"
+pytest tests/test_harness.py          # fake runtime, no network
+pytest tests/test_e2e.py              # the real runtime; skipped when it is not installed
+```
+
+See `AGENTS.md` for the verified vendor facts and the invariants this provider keeps.

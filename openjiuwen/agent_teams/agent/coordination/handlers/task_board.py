@@ -23,6 +23,7 @@ from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordina
 from openjiuwen.agent_teams.external.format import render_task_line
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.inbound_render import render_event
+from openjiuwen.agent_teams.message_template import completion_summary, completion_summary_truncated
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
@@ -74,6 +75,35 @@ class TaskBoardHandler(BaseCoordinationHandler):
         {TeamEvent.TASK_CREATED, TeamEvent.TASK_UNBLOCKED, TeamEvent.TASK_RELEASED}
     )
 
+    # Board events that mean "a task just finished": the leader's nudge for
+    # them leads with that task's completion summary (F_120).
+    _LEADER_COMPLETION_EVENTS: ClassVar[frozenset[str]] = frozenset(
+        {TeamEvent.TASK_COMPLETED, TeamEvent.TASK_VERIFIED}
+    )
+
+    # Board events that never need a leader decision (F_121), so they do not
+    # wake it: a member claiming work or an assignment taking effect
+    # (TASK_CLAIMED fall-through), a human assignee's task auto-starting
+    # (TASK_STARTED), and the review back-and-forth between author and
+    # reviewers (TASK_SUBMITTED_FOR_REVIEW / TASK_REVISION_REQUESTED
+    # fall-through) — its outcome, a pass, still arrives as TASK_VERIFIED.
+    # The leader's next wake shows the full board, so nothing is lost; a
+    # stalled task still reaches it through the stale-task sweep.
+    _LEADER_QUIET_EVENTS: ClassVar[frozenset[str]] = frozenset(
+        {
+            TeamEvent.TASK_CLAIMED,
+            TeamEvent.TASK_STARTED,
+            TeamEvent.TASK_SUBMITTED_FOR_REVIEW,
+            TeamEvent.TASK_REVISION_REQUESTED,
+        }
+    )
+
+    # i18n keys of the steers that move a member off a task it lost. They
+    # point the member back at the claimable pool; a dispatch mode without
+    # one overrides them.
+    _REVOKED_FROM_SELF_KEY: ClassVar[str] = "dispatcher.task_revoked_from_self"
+    _CANCELLED_TO_SELF_KEY: ClassVar[str] = "dispatcher.task_cancelled_to_self"
+
     async def on_task_claimed(self, event: EventMessage) -> None:
         """Directed assignment from another node.
 
@@ -91,7 +121,9 @@ class TaskBoardHandler(BaseCoordinationHandler):
 
         Self-assignment rendering is role-aware: a teammate / leader
         sees the teammate-oriented ``dispatcher.task_assigned_to_self``
-        prompt ("call view_task and start working"). A human_agent
+        prompt, which carries the task title and body and says to claim it —
+        only once the task is workable (``pending``); a blocked assignment is
+        left to the board, which wakes the member when it unblocks. A human_agent
         avatar sees the HITT-specific ``hitt.task_assigned_to_self_human``
         prompt, which frames the event as a notification for the
         controlling human and tells the avatar LLM not to autonomously
@@ -142,9 +174,27 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 note_text=t("hitt.silence_note"),
             )
         else:
+            # The notice carries the task itself, so the member starts without
+            # a view_task round-trip. A task that is not workable yet (still
+            # blocked, or already gone) is not announced: the member is woken
+            # by the board once it unblocks.
+            task = await self._infra.task_manager.get(payload.task_id)
+            if task is None or task.status != "pending":
+                team_logger.debug(
+                    "[{}] assignment of {} not announced: task is {}",
+                    member_name,
+                    payload.task_id,
+                    "gone" if task is None else task.status,
+                )
+                return
             content = render_event(
                 kind="task-assigned",
-                body=t("dispatcher.task_assigned_to_self", task_id=payload.task_id),
+                body=t(
+                    "dispatcher.task_assigned_to_self",
+                    task_id=task.task_id,
+                    title=task.title or "",
+                    content=task.content or "",
+                ),
                 task_id=payload.task_id,
             )
 
@@ -232,7 +282,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
         await self._poll.resume_polls()
         content = render_event(
             kind="task-revoked",
-            body=t("dispatcher.task_revoked_from_self", task_id=payload.task_id),
+            body=t(self._REVOKED_FROM_SELF_KEY, task_id=payload.task_id),
             task_id=payload.task_id,
         )
         team_logger.info(
@@ -264,7 +314,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
         await self._poll.resume_polls()
         content = render_event(
             kind="task-cancelled",
-            body=t("dispatcher.task_cancelled_to_self", task_id=payload.task_id),
+            body=t(self._CANCELLED_TO_SELF_KEY, task_id=payload.task_id),
             task_id=payload.task_id,
         )
         team_logger.info(
@@ -445,8 +495,10 @@ class TaskBoardHandler(BaseCoordinationHandler):
         Any other board churn — a member editing / completing /
         cancelling a task, or someone else claiming one — never adds
         claimable work, so waking an idle teammate for it just burns a
-        round. The leader stays exempt: it owns board-level decisions
-        (re-plan / assign / conclude) and must see every transition.
+        round. The leader is woken only by events that may need its
+        decision (F_121): ``_LEADER_QUIET_EVENTS`` and the unblocking of a
+        task that already has an assignee are progress only, so they are
+        skipped; its next wake surveys the full board anyway.
         ``resume_polls`` fires for every event regardless, so the nudge
         filter never stalls periodic polling.
         """
@@ -461,8 +513,33 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 event.event_type,
             )
             return
+        if self._blueprint.role == TeamRole.LEADER and await self._leader_needs_no_decision(event):
+            team_logger.debug(
+                "[{}] skip leader nudge: event {} needs no leader decision",
+                member_name,
+                event.event_type,
+            )
+            return
         team_logger.debug("task trigger detected, nudging idle agent: member_name={}", member_name)
-        await self._nudge_idle_agent(member_name)
+        just_completed = None
+        if self._blueprint.role == TeamRole.LEADER and event.event_type in self._LEADER_COMPLETION_EVENTS:
+            just_completed = event.get_payload().task_id
+        await self._nudge_idle_agent(member_name, just_completed=just_completed)
+
+    async def _leader_needs_no_decision(self, event: EventMessage) -> bool:
+        """Whether a board event is progress only, from the leader's point of view (F_121).
+
+        ``TASK_UNBLOCKED`` splits on the task's owner: an assigned task is
+        picked up by its assignee, while an unowned one enters the claimable
+        pool and may need the leader to assign it (e.g. to a human member).
+        A task row that is already gone needs nothing either.
+        """
+        if event.event_type in self._LEADER_QUIET_EVENTS:
+            return True
+        if event.event_type != TeamEvent.TASK_UNBLOCKED:
+            return False
+        task = await self._infra.task_manager.get(event.get_payload().task_id)
+        return task is None or bool(task.assignee)
 
     async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
         """First board survey after this member's runtime comes up (F_69).
@@ -484,7 +561,12 @@ class TaskBoardHandler(BaseCoordinationHandler):
             return
         await self._nudge_idle_agent(member_name)
 
-    async def _nudge_idle_agent(self, member_name: str, from_poll: bool = False) -> None:
+    async def _nudge_idle_agent(
+        self,
+        member_name: str,
+        from_poll: bool = False,
+        just_completed: str | None = None,
+    ) -> None:
         """Feed task context to an idle agent.
 
         Leader: reviews the full task board (every incomplete task) to
@@ -502,6 +584,10 @@ class TaskBoardHandler(BaseCoordinationHandler):
                 empty-team) returns silently — real task-completion
                 prompts arrive via the TASK_EVENTS path so polling
                 should not re-trigger them.
+            just_completed: The task whose completion triggered this leader
+                nudge. Its completion summary is listed ahead of the board
+                (and ahead of the all-done prompt): the board shows only
+                incomplete work and would otherwise drop it (F_120).
         """
         all_tasks = await self._infra.task_manager.list_tasks()
         terminal = {"completed", "cancelled"}
@@ -512,33 +598,48 @@ class TaskBoardHandler(BaseCoordinationHandler):
 
         team_logger.debug("[{}] nudge_idle_agent: {} incomplete tasks", member_name, len(incomplete))
         if self._blueprint.role == TeamRole.LEADER:
+            completed_block = _just_completed_block(all_tasks, just_completed)
             if not incomplete:
                 lifecycle = self._blueprint.lifecycle
                 if lifecycle == "persistent":
                     prompt = t("dispatcher.all_done_persistent")
                 else:
                     prompt = t("dispatcher.all_done_temporary")
-                await self._round.deliver_input(render_event(kind="all-done", body=prompt))
+                body = "\n\n".join([*completed_block, prompt])
+                await self._round.deliver_input(render_event(kind="all-done", body=body))
                 return
-            lines = [t("dispatcher.leader_task_board")]
-            board_tasks = incomplete
+            lines = [*completed_block, t("dispatcher.leader_task_board")]
+            # The leader authored every task body, so its board is one light
+            # line per task (status, owner, what blocks it) instead of
+            # re-sending each body on every nudge; view_task(get) has it.
+            summaries = await self._infra.task_manager.list_tasks_with_deps()
+            now_ms = get_current_time()
+            lines.extend(
+                render_task_line(task, now_ms=now_ms, with_content=False, blocked_by=task.blocked_by)
+                for task in summaries.tasks
+                if task.status not in terminal
+            )
         else:
-            # Teammate: surface claimable work (pending + unassigned) and
-            # explicitly assigned self work. Assigned pending tasks may have
-            # been created before this member started; feeding them here makes
-            # the startup poll actionable without exposing other members' work.
+            # Teammate: surface only work it can start now — claimable tasks
+            # (pending + unassigned) and pending tasks assigned to it. Assigned
+            # pending tasks may have been created before this member started;
+            # feeding them here makes the startup poll actionable without
+            # exposing other members' work. Its own blocked or in-flight tasks
+            # are left out: a blocked one wakes it when it unblocks, an
+            # in-flight one is already in hand (and the stale-claim sweep
+            # catches a stalled one), so listing them only wakes it for nothing.
             board_tasks = [
                 task
                 for task in incomplete
-                if (task.status == "pending" and not task.assignee) or task.assignee == member_name
+                if task.status == "pending" and (not task.assignee or task.assignee == member_name)
             ]
             if not board_tasks:
                 return
+            # A teammate keeps the bodies: it did not write them and picks
+            # work by matching them against its own expertise.
+            now_ms = get_current_time()
             lines = [t("dispatcher.teammate_task_list")]
-
-        now_ms = get_current_time()
-        for task in board_tasks:
-            lines.append(render_task_line(task, now_ms=now_ms))
+            lines.extend(render_task_line(task, now_ms=now_ms) for task in board_tasks)
 
         # A board survey is a reminder, not a reason to drop what the member is
         # doing (decision dimension 3): it never says "the work you are on is
@@ -549,6 +650,33 @@ class TaskBoardHandler(BaseCoordinationHandler):
             render_event(kind="task-board", body="\n".join(lines)),
             use_steer=False,
         )
+
+
+def _just_completed_block(all_tasks: list, task_id: str | None) -> list[str]:
+    """Render the "just completed" lines for the task behind a leader nudge (F_120).
+
+    One headline, the task line with its completion summary, and — when there
+    is more to read (a completion note, or a summary cut for length) — the
+    ``view_task(action='note')`` hint. Empty when no completed task is named.
+    """
+    if task_id is None:
+        return []
+    task = next((row for row in all_tasks if row.task_id == task_id), None)
+    if task is None or task.status != "completed":
+        return []
+    line = t(
+        "dispatcher.leader_just_completed_line",
+        task_id=task.task_id,
+        title=task.title,
+        assignee=task.assignee or "-",
+    )
+    summary = completion_summary(task)
+    if summary:
+        line += t("dispatcher.leader_just_completed_summary", summary=summary)
+    lines = [t("dispatcher.leader_just_completed"), line]
+    if (task.note or "").strip() or completion_summary_truncated(task):
+        lines.append(t("dispatcher.leader_just_completed_note_hint", task_id=task.task_id))
+    return ["\n".join(lines)]
 
 
 class ScheduledTaskBoardHandler(TaskBoardHandler):
@@ -584,6 +712,11 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
         TeamEvent.TASK_REVISION_REQUESTED: "on_task_board_event",
     }
 
+    # No claimable pool here: a member that loses a task waits for the next
+    # assignment instead of surveying the board for work to claim.
+    _REVOKED_FROM_SELF_KEY: ClassVar[str] = "dispatcher.task_revoked_from_self_scheduled"
+    _CANCELLED_TO_SELF_KEY: ClassVar[str] = "dispatcher.task_cancelled_to_self_scheduled"
+
     async def on_initial_task_poll(self, event: InnerEventMessage) -> None:
         """No startup board survey under scheduled dispatch (F_69).
 
@@ -592,7 +725,10 @@ class ScheduledTaskBoardHandler(TaskBoardHandler):
         scheduled dispatch it does: the scheduler's start scan runs on every
         wake, and its handoff lands in the mailbox as a durable row that the
         startup mailbox sweep drains. Surveying the board here would deliver
-        the same task a second time, next to the scheduler's mail.
+        the same task a second time, next to the scheduler's mail. That
+        covers a task handed over while already active, too: the scheduler's
+        handoff scan mails the new owner its start when the mailbox holds
+        none for it.
         """
         team_logger.debug(
             "[{}] scheduled dispatch: startup board survey skipped",

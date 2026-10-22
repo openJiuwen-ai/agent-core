@@ -443,3 +443,42 @@ def test_tool_add_handles_none_content():
 
     result = chunk1 + chunk2
     assert result.content == "result"
+
+
+# Tests for AssistantMessageChunk.carries_output_token
+@pytest.mark.parametrize(
+    "chunk",
+    [
+        AssistantMessageChunk(content="hello"),
+        AssistantMessageChunk(content=" "),
+        AssistantMessageChunk(content="", reasoning_content="thinking"),
+        AssistantMessageChunk(
+            content="",
+            tool_calls=[ToolCall(id="call_1", type="function", name="search", arguments="")],
+        ),
+        AssistantMessageChunk(
+            content="",
+            tool_calls=[ToolCall(id="", type="function", name="", arguments='{"q"')],
+        ),
+    ],
+)
+def test_carries_output_token_true_for_model_output(chunk):
+    """Content, reasoning, and named or argument-bearing tool call fragments count."""
+    assert chunk.carries_output_token()
+
+
+@pytest.mark.parametrize(
+    "chunk",
+    [
+        AssistantMessageChunk(content=""),
+        AssistantMessageChunk(content="", reasoning_content=""),
+        AssistantMessageChunk(content="", finish_reason="stop"),
+        AssistantMessageChunk(
+            content="",
+            tool_calls=[ToolCall(id="call_1", type="function", name="", arguments="")],
+        ),
+    ],
+)
+def test_carries_output_token_false_for_framing_chunks(chunk):
+    """Role-only, finish-only, and empty tool call fragments are stream framing."""
+    assert not chunk.carries_output_token()

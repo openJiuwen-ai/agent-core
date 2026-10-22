@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
     InnerEventType,
 )
 from openjiuwen.agent_teams.harness.state import HarnessState
+from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -173,7 +174,8 @@ class CoordinationKernel:
 
         team_row_present = False
         if host.role == TeamRole.LEADER and infra.team_backend:
-            existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
+            backend = infra.team_backend
+            existing = await backend.db.team.get_team(backend.team_name)
             if existing is not None:
                 # A team row that is still there is a team to rejoin, whatever
                 # its roster looks like. "Every teammate is SHUTDOWN" used to be
@@ -184,6 +186,23 @@ class CoordinationKernel:
                 # clean_team tool, or the operator's delete_agent_team.
                 team_row_present = True
                 await host.recover_team()
+            elif blueprint is not None and blueprint.spec.bootstrap_mode == "framework":
+                # The symmetric branch (F_122): no row and the spec asks the
+                # framework to build the team, so it is built right here —
+                # before the first user input is enqueued — with the generic
+                # identity from the spec. ``overrides=None`` keeps every
+                # capability at its spec ceiling: there is no leader choice
+                # to honour. ``build_team`` fires ``on_team_built`` as usual,
+                # which latches the checkpoint ``db_state`` (the session is
+                # already bound above) and arms the scheduler.
+                spec = blueprint.spec
+                await backend.build_team(
+                    display_name=spec.team_display_name or t("blueprint.generic_team_display_name"),
+                    desc=spec.team_desc or t("blueprint.generic_team_desc"),
+                    leader_display_name=spec.leader.display_name,
+                    leader_desc=spec.leader.desc,
+                )
+                team_row_present = True
 
         if infra.workspace_manager and not infra.workspace_initialized:
             spec = blueprint.spec if blueprint else None
@@ -582,12 +601,26 @@ class CoordinationKernel:
         messager = host.infra.messager
         if not messager or not self._event_bus:
             return
-        from openjiuwen.agent_teams.context import get_session_id
+        from openjiuwen.agent_teams.context import get_session_id, reset_session_id, set_session_id
         from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent, TeamTopic
 
         local_member_name = host.member_name or ""
+        # The topics below are scoped to this session, so every event they
+        # deliver belongs to it. The messager invokes the handler from its own
+        # receive loop or from the publisher's task, neither of which is bound
+        # to this session; listeners (observability included) and the
+        # per-session DB tables resolve the session through the contextvar, so
+        # the whole delivery runs with it bound.
+        session_id = get_session_id()
 
         async def _filter_self(event: EventMessage) -> None:
+            token = set_session_id(session_id)
+            try:
+                await _deliver(event)
+            finally:
+                reset_session_id(token)
+
+        async def _deliver(event: EventMessage) -> None:
             for listener in host.state.event_listeners:
                 try:
                     await listener(event)
@@ -618,7 +651,6 @@ class CoordinationKernel:
                 return
             await self._event_bus.enqueue(event)
 
-        session_id = get_session_id()
         await messager.register_direct_message_handler(self._event_bus.enqueue)
         for topic in TeamTopic:
             topic_str = topic.build(session_id, team_name)
@@ -651,10 +683,14 @@ class CoordinationKernel:
         if self._event_bus is None:
             return
         query = inputs.get("query", "") if isinstance(inputs, dict) else inputs
+        run_context = inputs.get("run_context") if isinstance(inputs, dict) else None
         await self._event_bus.enqueue(
             InnerEventMessage(
                 event_type=InnerEventType.USER_INPUT,
-                payload={"content": query},
+                payload={
+                    "content": query,
+                    "run_context": run_context,
+                },
             )
         )
 

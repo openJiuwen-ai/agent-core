@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Dict, List
 
 import pytest
@@ -15,7 +16,13 @@ from openjiuwen.agent_evolving.ttse.consult import (
     render_consult_result_async,
 )
 from openjiuwen.agent_evolving.ttse.index import _BM25Index, TOKENIZER_VERSION, _rrf
-from openjiuwen.agent_evolving.ttse.stores import TTSERecordStore, reset_shared_stores
+from openjiuwen.agent_evolving.ttse.stores import (
+    TTSERecordStore,
+    _EMBED_PROBE_RETRY_S,
+    _EMBED_PROBE_TEXT,
+    _norm,
+    reset_shared_stores,
+)
 
 OFFICE = "documents-office-and-records"
 
@@ -496,13 +503,165 @@ class _HalfEmbedding:
         self.model = model
 
     async def embed_query(self, text: str) -> List[float]:
-        if text == self.hit_text:
+        if text == self.hit_text or text == _EMBED_PROBE_TEXT:
             return [1.0, 0.0]
         raise RuntimeError("embed skip")
 
     async def embed_documents(self, texts: List[str]) -> List[List[float]]:
         del texts
         raise RuntimeError("batch skip")
+
+
+class _DownEmbedding:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def embed_query(self, text: str) -> List[float]:
+        del text
+        self.calls += 1
+        raise RuntimeError('Embedding API failed: {"error_code":"APIG.0101"}')
+
+    async def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        del texts
+        self.calls += 1
+        raise RuntimeError("batch down")
+
+
+@pytest.mark.asyncio
+async def test_embedding_probe_skips_bank_scan(tmp_path, monkeypatch):
+    emb = _DownEmbedding()
+    store = await _office_store(tmp_path, [HIT, *NOISE], embedding=emb)
+    fake = _FakeChroma()
+    monkeypatch.setattr(store.index, "_chroma_store", lambda: fake)
+    store.index._chroma_stale = True
+    store.index._chroma_fingerprint = ""
+    await store.index.rebuild_chroma(store)
+    result = await store.index.retrieve(store, category=OFFICE, query="PresentBench slides.md", top_k=2)
+    assert emb.calls == 1
+    assert fake.wipes == 0
+    assert fake.docs == []
+    assert store.index._chroma_stale is True
+    assert result.mode == "bm25"
+    assert result.facts[0]["text"] == HIT
+
+
+@pytest.mark.asyncio
+async def test_embedding_probe_retries_after_outage_window(tmp_path, monkeypatch):
+    emb = _DownEmbedding()
+    store = await _office_store(tmp_path, [HIT], embedding=emb)
+    fake = _FakeChroma()
+    monkeypatch.setattr(store.index, "_chroma_store", lambda: fake)
+    store.index._chroma_stale = True
+    await store.index.ensure_chroma(store)
+    assert emb.calls == 1
+    await store.index.ensure_chroma(store)
+    assert emb.calls == 1
+    store._embedding_probe_at -= _EMBED_PROBE_RETRY_S
+    await store.index.ensure_chroma(store)
+    assert emb.calls == 2
+
+
+class _ToggleEmbedding(DictEmbedding):
+    def __init__(self, table: Dict[str, List[float]], model: str = "same-v1") -> None:
+        super().__init__(table, model=model)
+        self.down = False
+
+    async def embed_query(self, text: str) -> List[float]:
+        if self.down:
+            raise RuntimeError("embedding down")
+        return await super().embed_query(text)
+
+    async def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        if self.down:
+            raise RuntimeError("batch down")
+        return await super().embed_documents(texts)
+
+
+@pytest.mark.asyncio
+async def test_same_fingerprint_stale_rebuilds_after_probe_recovers(tmp_path, monkeypatch):
+    emb = _ToggleEmbedding(_office_vectors(HIT, *NOISE))
+    store = await _office_store(tmp_path, [HIT, *NOISE])
+    fake = _FakeChroma()
+    monkeypatch.setattr(store.index, "_chroma_store", lambda: fake)
+    store.attach_embedding(emb)
+    await store.index.ensure_chroma(store)
+    assert fake.wipes == 1
+    assert store.index._chroma_stale is False
+    assert store.index._chroma_fingerprint == "same-v1"
+    built = {item["id"] for item in fake.docs}
+
+    added = dict(store.facts[0])
+    added["id"] = "new-after-outage"
+    added["text"] = "fresh office record after the outage"
+    store.facts.append(added)
+    store.index.align(store.facts, store.tips, store.record_category)
+    assert store.index._chroma_stale is True
+    store._embedding_probe = None
+    store._embedding_probe_at = 0.0
+    emb.down = True
+    await store.index.ensure_chroma(store)
+    assert fake.wipes == 1
+    assert store.index._chroma_stale is True
+    assert {item["id"] for item in fake.docs} == built
+
+    store._embedding_probe_at -= _EMBED_PROBE_RETRY_S
+    emb.down = False
+    await store.index.ensure_chroma(store)
+    assert fake.wipes == 2
+    assert store.index._chroma_stale is False
+    assert "new-after-outage" in {item["id"] for item in fake.docs}
+
+
+@pytest.mark.asyncio
+async def test_probe_failure_does_not_search_chroma_with_cached_query(tmp_path, monkeypatch):
+    query = "PresentBench slides.md"
+    emb = _DownEmbedding()
+    store = await _office_store(tmp_path, [HIT, *NOISE], embedding=emb)
+    store._store_embedding(_norm(query), [1.0, 0.0])
+    searched: List[List[float]] = []
+
+    async def spy_ann(self, query_vector, *, track, category, top_k, embedding):
+        del self, track, category, top_k, embedding
+        searched.append(list(query_vector))
+        return []
+
+    monkeypatch.setattr(type(store.index), "_search_ann", spy_ann)
+    result = await store.index.retrieve(
+        store, category=OFFICE, query=query, top_k=2, retrieve_mode="hybrid",
+    )
+    assert searched == []
+    assert result.fact_mode == "bm25"
+    assert result.facts[0]["text"] == HIT
+
+
+@pytest.mark.asyncio
+async def test_embedding_probe_single_flight(tmp_path):
+    class _GatedDownEmbedding:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def embed_query(self, text: str) -> List[float]:
+            del text
+            self.calls += 1
+            self.entered.set()
+            await self.release.wait()
+            raise RuntimeError("down")
+
+    store = await _office_store(tmp_path, [HIT], embedding=_DownEmbedding())
+    emb = _GatedDownEmbedding()
+    store._embedding = emb
+    store._embedding_probe = None
+    store._embedding_probe_at = 0.0
+    first = asyncio.create_task(store.embedding_available())
+    await emb.entered.wait()
+    second = asyncio.create_task(store.embedding_available())
+    await asyncio.sleep(0)
+    emb.release.set()
+    assert await first is False
+    assert await second is False
+    assert emb.calls == 1
 
 
 @pytest.mark.asyncio

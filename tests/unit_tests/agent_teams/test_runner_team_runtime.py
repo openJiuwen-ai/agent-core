@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
     TeamSpec,
 )
+from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
@@ -107,6 +108,7 @@ class FakeTeamAgent:
         self.team_name = team_name
         self.stream_label = stream_label
         self.spec = spec
+        self.runtime_context = SimpleNamespace(team_spec=spec)
         self.resume_calls: list[str] = []
         self.pause_calls = 0
         self.cancel_calls = 0
@@ -214,6 +216,7 @@ async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_re
                 agent_team=spec,
                 inputs={"query": "hello"},
                 session=session_id,
+                run_context={"chain_id": "chain-1"},
             )
         ]
 
@@ -223,6 +226,9 @@ async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_re
     assert chunks[0].payload["team_name"] == "spec_team"
     assert chunks[0].payload["session_id"] == session_id
     assert chunks[1].payload["event_type"] == "team.chunk"
+    assert agent.stream_inputs[0]["run_context"] == RunContext(
+        extra={"chain_id": "chain-1"},
+    )
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
@@ -586,6 +592,7 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     agent = FakeTeamAgent("cold_recover_team", stream_label="team.chunk")
     reset_execution = AsyncMock(return_value=1)
     agent.team_backend = SimpleNamespace(
+        conversation_mode="team",
         db=SimpleNamespace(
             initialize=AsyncMock(),
             member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
@@ -1466,7 +1473,13 @@ class TestTeamRuntimeManagerInteract:
         class _Agent:
             team_backend = None
 
-            async def deliver_input(self, content):
+            async def deliver_input(
+                self,
+                content: str,
+                *,
+                run_context: RunContext | None = None,
+            ) -> None:
+                del run_context
                 delivered.append(content)
 
         await _activate_pool_entry(manager, team_name, session_id, _Agent())
@@ -1507,8 +1520,13 @@ class TestTeamRuntimeManagerInteract:
         class _Agent:
             team_backend = None
 
-            async def deliver_input(self, content):
-                pass
+            async def deliver_input(
+                self,
+                content: str,
+                *,
+                run_context: RunContext | None = None,
+            ) -> None:
+                del content, run_context
 
         await _activate_pool_entry(manager, team_name, session_id, _Agent())
         entry = await manager.pool.get(team_name)
@@ -1572,7 +1590,13 @@ class TestTeamRuntimeManagerInteract:
             class _Agent:
                 team_backend = None
 
-                async def deliver_input(self, content):
+                async def deliver_input(
+                    self,
+                    content: str,
+                    *,
+                    run_context: RunContext | None = None,
+                ) -> None:
+                    del run_context
                     delivered.append(content)
                     seen_context.append(get_session_id())
 
@@ -1587,6 +1611,55 @@ class TestTeamRuntimeManagerInteract:
             assert result.ok is True
             assert delivered == ["follow"]
             assert seen_context == [session_id]
+        finally:
+            await Runner.stop()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_interact_runner_normalizes_mapping_run_context(self):
+        """Runner converts public mapping input before Team dispatch."""
+        from openjiuwen.core.runner.team_runner import _global_runner
+
+        await Runner.start()
+        try:
+            manager = _global_runner()._get_team_runtime_manager()
+            team_name = "runner_typed_context_team"
+            session_id = f"runner_typed_context_{uuid.uuid4().hex}"
+            seen_context: list[RunContext | None] = []
+
+            class _Agent:
+                team_backend = None
+
+                async def deliver_input(
+                    self,
+                    content: str,
+                    *,
+                    run_context: RunContext | None = None,
+                ) -> None:
+                    del content
+                    seen_context.append(run_context)
+
+            await _activate_pool_entry(manager, team_name, session_id, _Agent())
+
+            result = await Runner.interact_agent_team(
+                "follow",
+                team_name=team_name,
+                session_id=session_id,
+                run_context={
+                    "extra": {"message_id": "message-1"},
+                    "chain_id": "chain-1",
+                },
+            )
+
+            assert result.ok is True
+            assert seen_context == [
+                RunContext(
+                    extra={
+                        "message_id": "message-1",
+                        "chain_id": "chain-1",
+                    }
+                )
+            ]
         finally:
             await Runner.stop()
 

@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/prompts/`, `openjiuwen/agent_teams/rails/` |
-| 最近一次修订日期 | 2026-09-16 |
-| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md`、`F_80_fork-identity-conversion.md` |
+| 最近一次修订日期 | 2026-10-22 |
+| 关联 feature | `F_18_hide-human-agent-role-from-teammate.md`、`F_25_external-cli-hardening-and-gemini.md`、`F_50_hitt-contract-roster-split-and-finish-md-externalization.md`、`F_51_external-cli-inbound-xml-and-tag-notice-relocation.md`、`F_52_unify-member-roster-and-static-sections.md`、`F_68_member-identity-out-of-prompt-prefix.md`、`F_70_team-context-into-history.md`、`F_72_nested-team-note-inside-annotated-block.md`、`F_73_avatar-controller-channel-separation.md`、`F_76_leader-progressive-policy-disclosure.md`、`F_78_steering-batch-quota-hook.md`、`F_80_fork-identity-conversion.md`、`F_122_framework-bootstrapped-generic-team.md` |
 
 ## 范围 / 边界
 
@@ -35,6 +35,30 @@
    - **HITT gate 读实际生效值**：`render_for_llm` 取 `output.data["enable_hitt"]`（`build_team` 解析 spec 天花板 × 本次选择后的结果），**不是**构造期的 spec `hitt_enabled`。这正是把披露挪到 `build_team` 才能修掉的偏差。
    - **只有 LEADER 走这条道**：其余角色的协同约定 spawn 时即固定，也没有 `build_team` 可挂载，一律走原来的全量静态集。分流在 `TeamPolicyRail._build_static_sections` 的一个 `role == LEADER` 分支，不下推到各 builder。
    - **披露内容会被压缩，须重注入**：`core.context_engine.processor.compressor.util.build_team_policy_reinjected_messages`（在 `FullCompactProcessor` 注册名 `team_policy`）在 full compact 后原样重注入那条 tool result，**不得截断**（返回 `list[UserMessage]` 绕开 `state_snapshot_max_chars`）。core 侧按工具名 `build_team` 匹配，**不 import `agent_teams`**——与既有 `TEAM_TOOL_CALL_NAMES` 同法，依赖方向不变。
+
+1c. **framework 建队的 leader：起手段换 `team_prebuilt`，准则经 tracker 的 policy 频道投递（[[F_122]]）**：
+   `bootstrap_mode="framework"` 时 `TeamPolicyRail._build_leader_sections` 用 `build_leader_prebuilt_section`
+   （P:11，读 `leader_prebuilt.md`，无 `{{collaboration_mechanism}}` 槽——"build_team 路径"这个词在本模式下不存在）
+   替换 `team_bootstrap`，`team_extra` 照旧；系统提示词**仍只有两个 team section**，准则不进前缀。准则文本在 rail
+   构造期用同一个 `build_leader_policy_disclosure(...)` 渲染（`hitt_enabled` 取 spec 天花板——没有 `build_team`
+   调用，天花板即生效值；loader 用 rail 绑定的工作空间 loader），经 `inbound_render.render_team_policy_inline`
+   包成 `<team-policy>`（无 `tools` 属性、无 tool-namespace note、正文不转义），作为 `policy_text` 交给
+   `TeamContextTracker`。tracker 的 policy 频道基线是 `team_prompt_context.policy_hash`（文本 sha256）：首次 /
+   文本变化（工作空间演进）时投递一次，块顺序 `<team-context>` → `<team-policy>` → 名册；`snapshot_text()`
+   同样带它，所以附件通道压缩后的全量重注册自带准则；历史消息通道下由 `team_policy` 重注入器的第二种匹配
+   （最新一条含 `<team-policy>…</team-policy>` 的 UserMessage，整块原样）兜底。`NEW_TEAM_IN_SESSION` 的
+   leader 换 session 即空基线，准则随首条输入重发——F_76 记录的该遗留在本模式下消失。`dispatch_scheduled_leader.md`
+   因此不再提"build_team 的 `enable_task_verification` 参数"，改为模式中立的"团队配置的任务验证开关"。
+
+1a'. **调度模式的成员通信规则是 capability 槽 `{{member_messaging}}`（[[F_126]]）**：只在
+   `dispatch_scheduled_leader.md` / `dispatch_scheduled_teammate.md` 出现，由
+   `build_team_dispatch_section(member_messaging=...)` 在 scheduled 下填充，gate 是
+   `TeamBackend.member_messaging_enabled()`——与工具工厂选 `send_message` 形态的信号同源。
+   leader 两种取值都非空（关 → `dispatch_scheduled_leader_messaging_closed.md`，开 →
+   `..._messaging_open.md`）；teammate 关闭时为空串（关闭规则只写在 `send_message_scheduled.md`
+   描述里），因此该槽必须停在模板最后一行，由 `strip()` 吸收。参数沿
+   `build_team_static_sections` / `build_leader_policy_disclosure` / `build_team_member_system_prompt`
+   一路透传，autonomous 模板无此槽、不调 `format`。
 
 1b. **模式相关的内容按模式拆模板，不在共用模板里加 caveat（[[F_76]]）**：`leader_policy.md` 全模式共用，因此任何"这条在 A 模式如此、在 B 模式如彼"的内容都不属于它。「任务状态流转」原本就违反这条（同一节并列描述自主认领与调度框架两套驱动），已拆成 `task_state_autonomous.md` / `task_state_scheduled.md`，由 `build_team_task_state_section`（P:16，LEADER only）按 `dispatch_mode` 挑版。
    - **autonomous 版不得出现验证闸，连警告也不行**：该模式的 `create_task` 不暴露 `reviewer`，且没有调度 runtime 去唤起验证者（`TeamScheduler` 只在 `dispatch_mode == "scheduled"` 的 leader 上构造），被硬推进 `in_review` 的任务会永久停在那里并占住该成员唯一的活跃任务名额。但模板**不写"本模式没有验证闸"这类说明**——点名一个不存在的能力正是让模型去够它的原因，与 `fork_usage` 槽关闭时整节消失同理。门控理由属于 spec 与代码注释，不属于提示词。
@@ -124,6 +148,23 @@
     `_render_block(tag, attrs, body, note="")`，无 note 时拼进空串，**不存在「有没有 note」
     的分支**。`inbound_tags.md`（cn/en）必须与此逐字一致：正文边界写作「除 `<team-note>`
     子元素外」，并明确「看嵌在哪个标签里，不要按前后位置猜」。
+
+28a. **`<team-inbound>` 的 `time` 只写绝对发送时间，"现在"由 `<team-clock>` 锚点给出（[[B_04]]）**：
+    入站块写进成员的对话历史后会被反复重读，渲染那一刻算出的相对差（「刚刚」「3 分钟前」）
+    到下一轮就是错的，所以 `time` 只用 `timefmt.format_absolute_time` 渲染。成员靠
+    `inbound_render.render_clock(now=...)` 渲染的自闭合 `<team-clock now="..."/>` 知道当前时间，
+    用最近一个锚点减去 `time` 自己算间隔。四条硬约束：
+    - **每次被消费的输入都带一个锚点**：进程内成员由 `TeamPolicyRail.on_user_message` 在
+      剔除被覆盖快照（不变量 13a）**之后**、折入团队状态**之前** `insert(0, ...)`，新一轮
+      query / follow-up / steering / resume 一视同仁；外部 CLI 成员在 `CliRuntimeBase.send`、
+      三方 harness 成员在 `ExternalHarnessMemberRuntime.send` 前置同一个锚点；operator 的
+      `read_inbox` 结果以锚点开头。三条接入路径必须对齐，少一条就有成员只剩绝对时间可读。
+    - **锚点只写不刷新**：旧锚点是"那条输入送达时"的事实，与不变量 13 的"只插入，不重写"同源。
+    - **`<team-clock>` 与 `<team-inbound>` / `<team-event>` / `<team-context>` 平级，不是快照事件**：
+      `snapshot_kind_of` 对它返回 `None`，13a 的剔除永远不会动它。
+    - `inbound_tags.md`（cn/en）必须列出 `<team-clock>` 并说明 `time` 是绝对发送时间。
+    任务看板、`view_task` 等**工具结果 / 事件正文**仍用 `format_time_context`（绝对 + 相对）——
+    它们描述的是"截至这次调用"的快照，下次会重新渲染一份新的，不在本条范围内。
 
 ### 输入批次配额
 

@@ -184,7 +184,10 @@ async def run_judge_agent(
         result = await Runner.run_agent(agent=agent, inputs={"query": prompt}, session=f"judge_{agent.card.id}")
         if isinstance(result, dict):
             if result.get("result_type") == "error":
-                if result.get("output") == "Max iterations reached without completion":
+                if (
+                    result.get("termination_reason") == "max_iterations"
+                    or result.get("output") == "Max iterations reached without completion"
+                ):
                     raise JudgeIterationLimitError("Judge reading iteration limit reached")
                 raise RuntimeError(str(result.get("output") or "evaluator agent failed"))
             result = result.get("output", result.get("answer", result))

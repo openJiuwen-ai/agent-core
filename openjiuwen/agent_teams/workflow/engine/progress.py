@@ -76,7 +76,11 @@ class WorkflowProgressEvent:
       without tracking state.
     * ``label``               — the ``agent()`` call's label (``AGENT_*``).
     * ``prompt``              — the agent's rendered prompt (``AGENT_STARTED``).
-    * ``model``               — the ``agent(model=...)`` name hint (``AGENT_STARTED``).
+    * ``model``               — the ``agent(model=...)`` name hint
+      (``AGENT_STARTED``); ``AGENT_COMPLETED`` / ``AGENT_FAILED`` carry the
+      model the provider reported actually running the call (an external CLI),
+      so the endpoint that served (or failed) a call is visible. ``None`` on
+      native calls and cache-hit replays (never journaled).
     * ``outcome``             — a short preview of the agent's result
       (``AGENT_COMPLETED``); absent on ``AGENT_FAILED`` (use ``message`` instead).
     * ``message``             — free narration text (``LOG``); a short "what the
@@ -84,6 +88,15 @@ class WorkflowProgressEvent:
       human-readable term on ``WORKFLOW_STARTED`` / ``WORKFLOW_COMPLETED`` (e.g.
       "Workflow started", "Workflow completed"), and the error description on
       ``WORKFLOW_FAILED`` / ``AGENT_FAILED``.
+    * ``activity_type`` / ``tool_call_id`` / ``tool_name`` / ``content`` — the
+      structured payload of ``AGENT_ACTIVITY`` tool activity. ``activity_type``
+      is ``"tool_call"`` (before a tool runs) or ``"tool_result"`` (after); the
+      two events of one tool execution pair on ``tool_call_id`` and share
+      ``tool_name``. ``content`` is the full payload up to a guard bound
+      (``ACTIVITY_CONTENT_LIMIT``, 64 KiB; an ``…(truncated)`` suffix marks
+      the cut) — the tool's compacted arguments on ``"tool_call"``, the
+      result / exception text on ``"tool_result"``.
+      ``message`` stays for legacy consumers.
     * ``phases``              — the static phase plan from the script's ``META``
       dict (``WORKFLOW_STARTED``); ``None`` on all other kinds.
     * ``correlation_id``      — a pending human turn's id (``HUMAN_PROMPT`` /
@@ -148,6 +161,11 @@ class WorkflowProgressEvent:
     * ``token_input`` / ``token_output`` — the prompt / completion split of
       ``tokens`` for display (``AGENT_COMPLETED``); ``None`` when the provider
       reported no split.
+    * ``agent_type``          — external provider name (claude / codex) on AGENT_STARTED; None for native workers.
+    * ``agent_template``      — the AgentGroup member picked via ``options.agent_template``
+      on AGENT_STARTED; None for the generic native worker.
+    * ``display_name``        — that expert's display name as the backend describes it
+      (AGENT_STARTED); None when no expert or the backend cannot name it.
     """
 
     kind: str
@@ -184,6 +202,13 @@ class WorkflowProgressEvent:
     cache_tokens: int | None = None
     token_input: int | None = None
     token_output: int | None = None
+    agent_type: str | None = None
+    agent_template: str | None = None
+    display_name: str | None = None
+    activity_type: str | None = None
+    tool_call_id: str | None = None
+    tool_name: str | None = None
+    content: str | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has

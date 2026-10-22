@@ -854,12 +854,14 @@ def test_kv_affinity_agent_hint_moves_to_extra_body_for_openai_sdk():
         stream=False,
         session_id="child",
         parent_session_id="parent",
+        turn_num=6,
     )
     client._move_openai_extra_body_extensions(params)
 
     assert params["extra_body"]["agent_hint"] == {
         "session_id": "child",
         "parent_session_id": "parent",
+        "turn_num": 6,
     }
     assert "agent_hint" not in params
 

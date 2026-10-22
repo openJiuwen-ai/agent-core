@@ -13,7 +13,7 @@ from copy import deepcopy
 
 from typing import Any, Iterable, Optional, cast
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind, InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.interrupt.confirm_rail import (
@@ -69,6 +69,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     """
 
     priority: int = 90
+    interrupt_kind: str = InterruptKind.PERMISSION
 
     def __init__(
         self,
@@ -413,6 +414,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_args = self.parse_tool_args(tool_call)
         auto_confirm_key = self._get_auto_confirm_key(tool_call)
         session_id = self._resolve_session_id(ctx)
+        answer_carried = self.is_carried_answer(ctx.extra, self._resolve_tool_call_id(tool_call))
 
         logger.info(
             "[PermissionEngine] permission.rail.resolve tool=%s normalized=%s "
@@ -431,6 +433,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         normalized_tool_name=normalized_name,
                         tool_args=tool_args,
                         engine=self._engine,
+                        answer_carried=answer_carried,
                     ),
                 )
             except Exception:
@@ -451,37 +454,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 "[PermissionEngine] permission.rail.first_check tool=%s normalized=%s",
                 tool_name, normalized_name
             )
-            # 与磁盘上的 permissions 对齐：若仅写盘未先/未后刷新内存，此处用旧 _static_config
-            # 会抹掉 approval_overrides 等；应提供 get_permissions_snapshot 或在落盘后已 update_config。
-            fresh: dict | None = None
-            if self._host.get_permissions_snapshot is not None:
-                try:
-                    snap = self._invoke_permissions_hook(
-                        self._host.get_permissions_snapshot,
-                        session_id=session_id,
-                    )
-                    fresh = snap if isinstance(snap, dict) else None
-                except Exception:
-                    logger.debug(
-                        "[PermissionEngine] permission.rail.snapshot_failed",
-                        exc_info=True,
-                    )
-            if isinstance(fresh, dict):
-                self.update_config(fresh)
-            else:
-                self._engine.update_config(self._static_config)
-            try:
-                result = await self._engine.check_permission(
-                    tool_name=normalized_name,
-                    tool_args=tool_args,
-                )
-            except Exception:
-                logger.error(
-                    "[PermissionEngine] permission.rail.check_failed tool=%s normalized=%s",
-                    tool_name,
-                    normalized_name,
-                )
-                raise
+            result = await self._check_with_fresh_config(tool_name, normalized_name, tool_args, session_id)
 
             if result.permission == PermissionLevel.ALLOW:
                 logger.info(
@@ -612,6 +585,25 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 metadata=self._build_interrupt_metadata(tool_call, invalid),
             ))
 
+        if payload.approved:
+            # A deny rule added while the call waited for this approval wins.
+            current = await self._check_with_fresh_config(tool_name, normalized_name, tool_args, session_id)
+            if current.permission == PermissionLevel.DENY:
+                logger.warning(
+                    "[PermissionEngine] permission.rail.result tool=%s decision=deny_after_approval matched_rule=%s",
+                    tool_name,
+                    current.matched_rule,
+                )
+                return self.reject(tool_result=f"[PERMISSION_DENIED] {current.reason or 'Operation not allowed'}")
+            if answer_carried:
+                # Approved in an earlier resume round of this still-paused call;
+                # its rules and auto-confirm were stored then.
+                logger.info(
+                    "[PermissionEngine] permission.user.decision tool=%s confirm_path=carried decision=allow",
+                    tool_name,
+                )
+                return self.approve()
+
         persisted = False
         if payload.wants_permanent_persist():
             persisted = self._persist_allow_always(
@@ -668,6 +660,45 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             self._confirm_path_label(),
         )
         return self.reject(tool_result=payload.feedback or "[PERMISSION_REJECTED] User rejected the request.")
+
+    async def _check_with_fresh_config(
+        self,
+        tool_name: str,
+        normalized_name: str,
+        tool_args: dict,
+        session_id: str | None,
+    ) -> PermissionResult:
+        # 与磁盘上的 permissions 对齐：若仅写盘未先/未后刷新内存，此处用旧 _static_config
+        # 会抹掉 approval_overrides 等；应提供 get_permissions_snapshot 或在落盘后已 update_config。
+        fresh: dict | None = None
+        if self._host.get_permissions_snapshot is not None:
+            try:
+                snap = self._invoke_permissions_hook(
+                    self._host.get_permissions_snapshot,
+                    session_id=session_id,
+                )
+                fresh = snap if isinstance(snap, dict) else None
+            except Exception:
+                logger.debug(
+                    "[PermissionEngine] permission.rail.snapshot_failed",
+                    exc_info=True,
+                )
+        if isinstance(fresh, dict):
+            self.update_config(fresh)
+        else:
+            self._engine.update_config(self._static_config)
+        try:
+            return await self._engine.check_permission(
+                tool_name=normalized_name,
+                tool_args=tool_args,
+            )
+        except Exception:
+            logger.error(
+                "[PermissionEngine] permission.rail.check_failed tool=%s normalized=%s",
+                tool_name,
+                normalized_name,
+            )
+            raise
 
     @staticmethod
     def parse_tool_args(tool_call: Optional[ToolCall]) -> dict:

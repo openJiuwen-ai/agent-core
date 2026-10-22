@@ -144,19 +144,30 @@ def _rename_copied_skill(bundle: Path, name: str) -> None:
 
 
 def install_skills(sources: tuple[SkillSource, ...], *, provider: str,
-                   cwd: str | None, conflict: str = "skip") -> tuple[Path, ...]:
+                   cwd: str | None, conflict: str = "skip", scan_dir: str | None = None) -> tuple[Path, ...]:
     """Copy complete bundles before runtime startup, preserving project skills.
 
     Replacement is staged outside the discovery directory and rolls back a
     failed rename. Copies remain in the project after harness stop. Internal
     symlinks are materialized; escaping/cyclic links are rejected before copy.
+
+    Args:
+        sources: Skill bundles or libraries to copy.
+        provider: Provider name; selects a built-in discovery directory.
+        cwd: Project directory; defaults to the process working directory.
+        conflict: ``skip`` / ``replace`` / ``append`` for existing skills.
+        scan_dir: Project-relative discovery directory of the CLI. Required
+            for third-party providers, which have no built-in entry.
     """
     if not sources:
         return ()
     if conflict not in {"skip", "replace", "append"}:
         raise ValueError("skill_conflict must be skip, replace or append")
+    relative = scan_dir or _SCAN_DIRS.get(provider)
+    if not relative:
+        raise ValueError(f"provider {provider!r} declares no skill discovery directory")
     project = Path(cwd or os.getcwd()).expanduser().resolve(strict=True)
-    scan = project / _SCAN_DIRS[provider]
+    scan = project / relative
     planned = []
     for source in sources:
         root = Path(source.dir).expanduser().resolve(strict=True)

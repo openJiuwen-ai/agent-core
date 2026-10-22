@@ -146,6 +146,10 @@ class _MockSession:
 
 
 class MockBackend(AgentBackend):
+    #: The offline preview must accept every option the team backend accepts,
+    #: or a script that runs fine is rejected before it is ever previewed.
+    KNOWN_OPTIONS = frozenset({"agent_template"})
+
     def __init__(
         self,
         fixtures: dict[str, Any] | None = None,

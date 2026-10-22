@@ -21,6 +21,9 @@ abstractmethod async execute_cmd(
 
 异步执行Shell命令。
 
+本地实现直接使用传入的 `timeout`，不再通过 `JW_EXECUTE_CMD_MAX_TIMEOUT` 施加第二层上限。
+省略或传入 `None` 时使用 300 秒；调用方负责校验和限制执行预算。
+
 **参数**：
 
 * **command**(str)：要执行的命令。
@@ -46,6 +49,8 @@ abstractmethod async execute_cmd_stream(
 ```
 
 异步流式执行Shell命令。
+
+本地实现与 `execute_cmd` 使用相同的超时规则，直接使用调用方传入的执行预算。
 
 **参数**：
 

@@ -40,7 +40,6 @@ from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcess
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent, _DEFAULT_DIRECT_TOOL_NAMES
 from openjiuwen.harness.observability.rail import AgentObservabilityRail
-from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.schema.config import (
@@ -167,6 +166,9 @@ class FakeReactAgent:
 
     def configure(self, config: ReActAgentConfig) -> None:
         self.config = config
+
+    def set_llm(self, model: Model) -> None:
+        self._llm = model
 
 
 class SlowReactAgent(FakeReactAgent):
@@ -1884,3 +1886,213 @@ async def test_create_subagent_writes_relative_files_to_inherited_artifact_root(
     sub2 = parent.create_subagent("worker", "sub_sess_2")
     assert sub2._inherited_artifact_root == str(artifact_root.resolve())
     assert "sub_agents" not in sub2._inherited_artifact_root
+
+
+# ---------------------------------------------------------------------------
+# Hot-reload model propagation to context processors (compressors)
+# ---------------------------------------------------------------------------
+
+def test_hot_reload_model_updates_context_processor_config() -> None:
+    """``configure()`` with a new model should propagate to processor configs."""
+    from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
+        DialogueCompressorConfig,
+    )
+    from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
+        RoundLevelCompressorConfig,
+    )
+
+    old_model = _create_dummy_model()
+    old_model.model_config.model_name = "old-model"
+    old_model.model_client_config.api_base = "http://old-endpoint"
+
+    dialogue_cfg = DialogueCompressorConfig(
+        trigger_context_ratio=0.8,
+        min_target_context_ratio=0.1,
+        model=old_model.model_config,
+        model_client=old_model.model_client_config,
+    )
+    round_cfg = RoundLevelCompressorConfig(
+        trigger_context_ratio=0.8,
+        min_target_context_ratio=0.1,
+        keep_recent_messages=4,
+        model=old_model.model_config,
+        model_client=old_model.model_client_config,
+    )
+
+    agent = create_deep_agent(
+        model=old_model,
+        auto_create_workspace=False,
+        enable_task_loop=False,
+    )
+    fake_react = FakeReactAgent()
+    fake_react.config.context_processors = [
+        ("DialogueCompressor", dialogue_cfg),
+        ("RoundLevelCompressor", round_cfg),
+    ]
+    agent.set_react_agent(fake_react, initialized=True)
+
+    # Hot-reload to a new model
+    new_model = _create_dummy_model()
+    new_model.model_config.model_name = "new-model"
+    new_model.model_client_config.api_base = "http://new-endpoint"
+
+    agent.configure(DeepAgentConfig(
+        model=new_model,
+        enable_task_loop=False,
+    ))
+
+    # After hot-reload, the processor configs should carry the new model
+    processors = agent.react_agent.config.context_processors
+    for _key, cfg in processors:
+        assert cfg.model is not None
+        assert cfg.model.model_name == "new-model"
+        assert cfg.model_client is not None
+        assert cfg.model_client.api_base == "http://new-endpoint"
+
+
+@pytest.mark.asyncio
+async def test_hot_reload_model_rebinds_cached_builtin_processors() -> None:
+    """Built-in compressors cached in the real context pool must drop the old ``Model``."""
+    from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
+        DialogueCompressor,
+        DialogueCompressorConfig,
+    )
+    from openjiuwen.core.context_engine.processor.compressor.round_level_compressor import (
+        RoundLevelCompressor,
+        RoundLevelCompressorConfig,
+    )
+
+    old_model = _create_dummy_model()
+    old_model.model_config.model_name = "old-model"
+    old_model.model_client_config.api_base = "http://old-endpoint"
+
+    agent = create_deep_agent(
+        model=old_model,
+        auto_create_workspace=False,
+        enable_task_loop=False,
+    )
+    react_agent = agent.react_agent
+    react_agent.config.context_processors = [
+        (
+            "DialogueCompressor",
+            DialogueCompressorConfig(
+                trigger_context_ratio=0.8,
+                min_target_context_ratio=0.1,
+                model=old_model.model_config,
+                model_client=old_model.model_client_config,
+            ),
+        ),
+        (
+            "RoundLevelCompressor",
+            RoundLevelCompressorConfig(
+                trigger_context_ratio=0.8,
+                min_target_context_ratio=0.1,
+                keep_recent_messages=4,
+                model=old_model.model_config,
+                model_client=old_model.model_client_config,
+            ),
+        ),
+    ]
+    context = await react_agent.context_engine.create_context(
+        "ctx",
+        processors=react_agent.config.context_processors,
+    )
+    dialogue, round_level = context._processors
+    assert isinstance(dialogue, DialogueCompressor)
+    assert isinstance(round_level, RoundLevelCompressor)
+    old_dialogue_model = dialogue._model
+    assert old_dialogue_model.model_client_config.api_base == "http://old-endpoint"
+
+    new_model = _create_dummy_model()
+    new_model.model_config.model_name = "new-model"
+    new_model.model_client_config.api_base = "http://new-endpoint"
+    agent.configure(DeepAgentConfig(model=new_model, enable_task_loop=False))
+
+    cached = react_agent.context_engine.get_context("ctx", "default_session_id")
+    assert cached is context, "configure() must keep the cached context, not rebuild the engine"
+    for processor in (dialogue, round_level):
+        assert processor._model is new_model
+        assert processor._config.model.model_name == "new-model"
+        assert processor._config.model_client.api_base == "http://new-endpoint"
+    assert old_dialogue_model is not new_model
+
+
+def test_hot_reload_model_propagates_processor_rebind_errors() -> None:
+    """A failed cached-processor rebind must surface instead of leaving the old model silently."""
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        auto_create_workspace=False,
+        enable_task_loop=False,
+    )
+    with patch.object(
+        agent.react_agent,
+        "update_model_context",
+        side_effect=RuntimeError("rebind failed"),
+    ):
+        with pytest.raises(RuntimeError, match="rebind failed"):
+            agent.configure(DeepAgentConfig(model=_create_dummy_model(), enable_task_loop=False))
+
+
+def test_hot_reload_context_processor_models_noop_without_model() -> None:
+    """``_hot_reload_context_processor_models`` should be a no-op when model is None."""
+    agent = DeepAgent(AgentCard(name="test"))
+    agent.set_react_agent(FakeReactAgent(), initialized=True)
+
+    # Should not raise
+    agent._hot_reload_context_processor_models(
+        DeepAgentConfig(enable_task_loop=False)
+    )
+
+
+def test_hot_reload_context_processor_models_noop_without_react_agent() -> None:
+    """``_hot_reload_context_processor_models`` should be a no-op when react_agent is None."""
+    agent = DeepAgent(AgentCard(name="test"))
+    model = _create_dummy_model()
+
+    # Should not raise
+    agent._hot_reload_context_processor_models(
+        DeepAgentConfig(model=model, enable_task_loop=False)
+    )
+
+
+def test_hot_reload_model_skips_processors_without_model_fields() -> None:
+    """Processors whose configs have ``model=None`` should be skipped (not force-updated)."""
+    from openjiuwen.core.context_engine.processor.compressor.dialogue_compressor import (
+        DialogueCompressorConfig,
+    )
+
+    old_model = _create_dummy_model()
+    # Config with model=None — simulates pre-injection state
+    dialogue_cfg = DialogueCompressorConfig(
+        trigger_context_ratio=0.8,
+        min_target_context_ratio=0.1,
+        model=None,
+        model_client=None,
+    )
+
+    agent = create_deep_agent(
+        model=old_model,
+        auto_create_workspace=False,
+        enable_task_loop=False,
+    )
+    fake_react = FakeReactAgent()
+    fake_react.config.context_processors = [
+        ("DialogueCompressor", dialogue_cfg),
+    ]
+    agent.set_react_agent(fake_react, initialized=True)
+
+    new_model = _create_dummy_model()
+    new_model.model_config.model_name = "new-model"
+
+    agent.configure(DeepAgentConfig(
+        model=new_model,
+        enable_task_loop=False,
+    ))
+
+    # Processors with model=None should not have been force-updated
+    processors = agent.react_agent.config.context_processors
+    for _key, cfg in processors:
+        # model was None, should still be None after hot-reload
+        # (the fix only updates configs that already have a model)
+        assert cfg.model is None
+        assert cfg.model_client is None

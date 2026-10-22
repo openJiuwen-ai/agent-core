@@ -167,7 +167,12 @@ async def test_create_task_variant_classes_and_schema(db):
     assert "max_review_rounds" not in node(autonomous)["properties"]
     assert "max_review_rounds" in node(scheduled)["properties"]
     assert "assignee" not in node(autonomous)["required"]
-    assert "assignee" in node(scheduled)["required"]
+    # Scheduled: an owner is mandatory, but it is one of ``assignee`` /
+    # ``member`` (F_118) — enforced in invoke, not by a schema ``required``.
+    assert "assignee" not in node(scheduled)["required"]
+    assert "member" in node(scheduled)["properties"]
+    assert "member" not in node(autonomous)["properties"]
+    assert node(scheduled)["properties"]["member"]["required"] == ["member_name", "display_name", "desc", "lifetime"]
 
     # Parameter descriptions are shared: same locale key, same string.
     assert (
@@ -1069,3 +1074,352 @@ async def test_build_team_omitted_verification_inherits_the_ceiling(db):
     result = await _by_name(tools, "build_team").invoke(dict(_BUILD_ARGS))
 
     assert result.data["enable_task_verification"] is True
+
+
+# ---------------------------------------------------------------------------
+# F_118: inline task members (scheduled create_task ``member``)
+# ---------------------------------------------------------------------------
+
+
+def _inline(name: str, lifetime: str = "dormant", **extra) -> dict:
+    node = {"member_name": name, "display_name": name.title(), "desc": "specialist", "lifetime": lifetime}
+    return {**node, **extra}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_create_task_declares_member_inline(db):
+    """An inline member lands as an UNSTARTED roster row carrying its lifetime and owns the task."""
+    from openjiuwen.agent_teams.schema.status import MemberStatus
+    from openjiuwen.agent_teams.tools.member_options import get_member_lifetime
+
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke(
+        {
+            "tasks": [
+                {
+                    "task_id": "t1",
+                    "title": "build api",
+                    "content": "c",
+                    "member": _inline("api-dev", "dormant", prompt="private rule"),
+                    "reviewer": [{"type": "verifier", "instruction": "run tests"}],
+                },
+                {"task_id": "t2", "title": "second", "content": "c", "assignee": DEV_1, "depends_on": ["t1"]},
+            ]
+        }
+    )
+    assert result.success, result.error
+
+    row = await db.member.get_member("api-dev", TEAM_NAME)
+    assert row is not None
+    assert row.status == MemberStatus.UNSTARTED.value
+    assert row.prompt == "private rule"
+    assert get_member_lifetime(row) == "dormant"
+    t1 = await backend.task_manager.get("t1")
+    assert t1.assignee == "api-dev"
+    assert t1.status == TaskStatus.PENDING.value
+    text = create_task.render_for_llm(result)
+    assert "api-dev" in text and "lifetime=dormant" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_create_task_assignee_may_name_an_inline_member_of_the_batch(db):
+    """A later task can be owned by a member an earlier task of the same call declares."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke(
+        {
+            "tasks": [
+                {"task_id": "write", "title": "write", "content": "c", "member": _inline("poet-a")},
+                {"task_id": "collect", "title": "collect", "content": "c", "assignee": "poet-a", "depends_on": ["write"]},
+            ]
+        }
+    )
+    assert result.success, result.error
+
+    collect = await backend.task_manager.get("collect")
+    assert collect.assignee == "poet-a"
+    assert collect.status == TaskStatus.BLOCKED.value
+    assert (await backend.task_manager.get("write")).assignee == "poet-a"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_create_task_tolerates_assignee_repeating_inline_member(db):
+    """An assignee equal to the inline member_name is redundant, not a conflict: created, with a note."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke(
+        {
+            "tasks": [
+                {"task_id": "b-1", "title": "t", "content": "c", "assignee": "api-dev", "member": _inline("api-dev")},
+                {"task_id": "b-2", "title": "t", "content": "c", "member": _inline("ui-dev")},
+            ]
+        }
+    )
+
+    assert result.success, result.error
+    assert (await backend.task_manager.get("b-1")).assignee == "api-dev"
+    assert await backend.member_exists("api-dev")
+    text = create_task.render_for_llm(result)
+    assert "'b-1'" in text and "'b-2'" not in text
+    assert "fill only 'member'" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_create_task_inline_member_alone_carries_no_note(db):
+    """The canonical inline form renders without the redundancy note."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    node = {"task_id": "b-1", "title": "t", "content": "c", "member": _inline("api-dev")}
+    result = await create_task.invoke({"tasks": [node]})
+
+    assert result.success, result.error
+    assert "note" not in result.data
+    assert "Note:" not in create_task.render_for_llm(result)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_create_task_unknown_assignee_still_rejected_beside_inline_members(db):
+    """Names outside both the roster and the batch's inline members stay rejected, with nothing written."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+
+    result = await create_task.invoke(
+        {
+            "tasks": [
+                {"task_id": "write", "title": "write", "content": "c", "member": _inline("poet-a")},
+                {"task_id": "collect", "title": "collect", "content": "c", "assignee": "ghost"},
+            ]
+        }
+    )
+
+    assert not result.success
+    assert "'ghost' not found" in result.error
+    assert not await backend.member_exists("poet-a")
+    assert await backend.task_manager.get("write") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("member", "assignee", "needle"),
+    [
+        (_inline("api-dev"), DEV_1, "conflicts with inline member"),
+        (_inline("Bad_Name"), None, "member.Invalid member_name"),
+        (_inline(DEV_1), None, "already exists"),
+        (_inline("api-dev", "forever"), None, "lifetime"),
+        ({"member_name": "api-dev", "display_name": "x", "lifetime": "shutdown"}, None, "member.desc"),
+    ],
+)
+async def test_scheduled_create_task_rejects_malformed_inline_member(db, member, assignee, needle):
+    """Every inline-member rejection happens before any row or task is written."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+    node = {"task_id": "t1", "title": "t", "content": "c", "member": member}
+    if assignee:
+        node["assignee"] = assignee
+
+    result = await create_task.invoke({"tasks": [node]})
+
+    assert not result.success
+    assert needle in result.error
+    assert await backend.task_manager.get("t1") is None
+    assert not await backend.member_exists("api-dev")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_create_task_rolls_back_inline_members_when_graph_fails(db):
+    """The member row lands before add_graph; a rejected graph must not leave it behind."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled")
+    create_task = _by_name(tools, "create_task")
+    # Duplicate member names across the batch fail in validation; an in-batch
+    # dependency cycle fails inside add_graph — the second is the rollback path.
+    result = await create_task.invoke(
+        {
+            "tasks": [
+                {"task_id": "a", "title": "a", "content": "c", "member": _inline("m-a"), "depends_on": ["b"]},
+                {"task_id": "b", "title": "b", "content": "c", "member": _inline("m-b"), "depends_on": ["a"]},
+            ]
+        }
+    )
+
+    assert not result.success
+    assert not await backend.member_exists("m-a")
+    assert not await backend.member_exists("m-b")
+    assert await backend.task_manager.get("a") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_scheduled_create_task_member_property_gated_by_predefined_roster(db):
+    """A predefined roster cannot grow: the property, its prose and the argument all go."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    create_task = _by_name(
+        create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled", team_mode="predefined"),
+        "create_task",
+    )
+    node = create_task.card.input_params["properties"]["tasks"]["items"]
+    assert "member" not in node["properties"]
+    assert "lifetime" not in create_task.card.description
+
+    node = {"task_id": "t1", "title": "t", "content": "c", "member": _inline("x")}
+    result = await create_task.invoke({"tasks": [node]})
+
+    assert not result.success
+    assert "predefined" in result.error
+    assert not await backend.member_exists("x")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_view_task_description_follows_dispatch_mode(db):
+    """The scheduled view_task prose carries no claim loop; the autonomous one keeps it."""
+    backend = _backend(db, DEV_1, False, dispatch_mode="scheduled")
+    scheduled = _by_name(create_team_tools(role="teammate", agent_team=backend, dispatch_mode="scheduled"), "view_task")
+    autonomous = _by_name(create_team_tools(role="teammate", agent_team=_backend(db, DEV_1, False)), "view_task")
+
+    assert scheduled.card.name == autonomous.card.name == "view_task"
+    assert "claim_task" in autonomous.card.description
+    assert "claim_task" not in scheduled.card.description
+    assert "note" in scheduled.card.description
+
+
+@pytest.mark.level0
+def test_inline_member_validator_rejects_the_leader_name():
+    """The leader cannot be re-declared as a task-scoped member (checked before any write)."""
+    from openjiuwen.agent_teams.tools.tool_task import _validate_inline_members
+
+    error = _validate_inline_members(
+        [{"task_id": "t1", "title": "t", "content": "c", "member": _inline("lead-1")}],
+        leader_member_name="lead-1",
+    )
+    assert error is not None and "team leader" in error
+
+
+# ---------------------------------------------------------------------------
+# B_04: the inline member must not leak into the autonomous variant
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autonomous_create_task_rejects_inline_member(db):
+    """A smuggled ``member`` is refused loudly, never dropped into an unassigned task.
+
+    The leader of session web_1a13ef76fa3 passed ``member`` without ``assignee``
+    to the autonomous variant; the field was silently ignored, five unowned
+    tasks landed on the board and the leader reported five dormant members
+    that never existed.
+    """
+    backend = _backend(db, LEADER_NAME, True)
+    create_task = _by_name(create_team_tools(role="leader", agent_team=backend), "create_task")
+
+    result = await create_task.invoke(
+        {"tasks": [{"task_id": "a1", "title": "x", "content": "c", "member": _inline("writer-1")}]}
+    )
+    assert not result.success
+    assert "'member'" in result.error
+    assert "autonomous" in result.error
+    assert "spawn_teammate" in result.error
+    assert await backend.task_manager.get("a1") is None
+    assert not await backend.member_exists("writer-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+async def test_create_task_assignee_prose_follows_dispatch_mode(db, lang):
+    """Only the scheduled ``assignee`` prose may mention the inline ``member``."""
+    backend = _backend(db, LEADER_NAME, True)
+
+    def assignee_desc(dispatch_mode: str) -> str:
+        tool = _by_name(
+            create_team_tools(role="leader", agent_team=backend, dispatch_mode=dispatch_mode, lang=lang),
+            "create_task",
+        )
+        return tool.card.input_params["properties"]["tasks"]["items"]["properties"]["assignee"]["description"]
+
+    # The phrase that points the model at the inline object, per language.
+    needle = {"cn": "member 内联", "en": "via 'member'"}[lang]
+    assert needle not in assignee_desc("autonomous")
+    assert needle in assignee_desc("scheduled")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+async def test_shutdown_member_lifetime_prose_follows_dispatch_mode(db, lang):
+    """The DORMANT / lifetime note appears only where ``create_task`` can declare a lifetime."""
+    backend = _backend(db, LEADER_NAME, True)
+
+    def desc(dispatch_mode: str) -> str:
+        return _by_name(
+            create_team_tools(role="leader", agent_team=backend, dispatch_mode=dispatch_mode, lang=lang),
+            "shutdown_member",
+        ).card.description
+
+    autonomous, scheduled = desc("autonomous"), desc("scheduled")
+    assert "DORMANT" not in autonomous
+    assert "lifetime" not in autonomous
+    assert "{{" not in autonomous
+    assert "DORMANT" in scheduled
+    assert "lifetime=dormant" in scheduled
+
+
+# ---------------------------------------------------------------------------
+# Framework bootstrap drops build_team (F_122)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_framework_bootstrap_drops_build_team_for_the_leader(db):
+    """A framework-built team already exists: the leader holds no ``build_team``."""
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    leader_default = _tool_names(create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled"))
+    leader_framework = _tool_names(
+        create_team_tools(
+            role="leader",
+            agent_team=backend,
+            dispatch_mode="scheduled",
+            bootstrap_mode="framework",
+        )
+    )
+    assert "build_team" in leader_default
+    assert "build_team" not in leader_framework
+    # Only build_team goes; the rest of the leader surface is untouched.
+    assert leader_default - leader_framework == {"build_team"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_framework_bootstrap_leaves_member_tools_alone(db):
+    """Members never had ``build_team``; the bootstrap mode does not touch their set."""
+    backend = _backend(db, DEV_1, False, dispatch_mode="scheduled")
+    default = _tool_names(create_team_tools(role="teammate", agent_team=backend, dispatch_mode="scheduled"))
+    framework = _tool_names(
+        create_team_tools(
+            role="teammate",
+            agent_team=backend,
+            dispatch_mode="scheduled",
+            bootstrap_mode="framework",
+        )
+    )
+    assert default == framework

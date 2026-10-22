@@ -18,7 +18,7 @@ from openjiuwen.core.foundation.llm.utils.responses_utils import (
     message_from_stream_chunk,
     parse_response,
     parse_sse_block,
-    parse_stream_event,
+    ResponsesStreamParser,
     raise_for_http_error,
 )
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
@@ -43,7 +43,7 @@ __all__ = [
     "message_from_stream_chunk",
     "parse_response",
     "parse_sse_block",
-    "parse_stream_event",
+    "ResponsesStreamParser",
     "raise_for_http_error",
     "OpenAIAccountResponsesTransport",
     "MAX_PROVIDER_ERROR_CHARS",

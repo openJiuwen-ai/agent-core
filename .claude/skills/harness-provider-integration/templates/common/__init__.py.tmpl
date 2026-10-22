@@ -1,0 +1,19 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. __YEAR__. All rights reserved.
+
+"""__DISPLAY__ implementation of the external harness protocol.
+
+Importing this package never imports the vendor runtime; it is resolved
+when a harness starts.
+"""
+
+from __PKG__.config import __CLASS__HarnessConfig
+from __PKG__.harness import ADAPTER_VERSION, __CLASS__Harness
+from __PKG__.provider import __CLASS__HarnessProvider
+
+__all__ = [
+    "ADAPTER_VERSION",
+    "__CLASS__Harness",
+    "__CLASS__HarnessConfig",
+    "__CLASS__HarnessProvider",
+]

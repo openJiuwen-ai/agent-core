@@ -165,6 +165,64 @@ def _build_memory_rail(cfg: CLIConfig) -> Any:
         return None
 
 
+def _build_jiuwen_memory_rail(cfg: CLIConfig) -> Any:
+    """Build a :class:`JiuwenMemoryRail` when explicitly enabled.
+
+    Mounts the dependency-package :class:`AgentMemoryMemoryProvider`
+    (``jiuwen_memory_adapter.jiuwenswarm.agent_memory_provider``) —
+    the AgentMemory engine, exposing tools ``agent_memory_search`` /
+    ``agent_memory_conclude`` / ``agent_memory_read_md_file`` /
+    ``agent_memory_edit_md_file``.  Dual-mode: ``JIUWEN_MEMORY_BASE_URL``
+    set → HTTP client (recommended for production); empty → in-process
+    ``assemble_runtime()`` SDK.
+
+    Reads settings from environment variables:
+
+    - ``JIUWEN_MEMORY_ENABLED`` — master switch; must be truthy
+      (``1`` / ``true`` / ``yes`` / ``on``) to mount.  Default off.
+    - ``JIUWEN_MEMORY_BASE_URL`` — AgentMemory server URL.  Empty runs
+      the in-process SDK instead of HTTP.
+    - ``JIUWEN_MEMORY_API_KEY`` — optional bearer token (HTTP mode).
+    - ``JIUWEN_MEMORY_TENANT_ID`` — tenant/org axis, mapped to the rail
+      ``scope_id`` (default ``default``).
+    - ``JIUWEN_MEMORY_USER_ID`` — per-user memory axis, mapped to the
+      rail ``user_id`` (default ``jiuwenswarm-user``).
+
+    Returns:
+        :class:`JiuwenMemoryRail` instance, or ``None`` when the
+        switch is off or the dependency package is not importable.
+    """
+    enabled = os.getenv("JIUWEN_MEMORY_ENABLED", "").strip().lower()
+    if enabled not in ("1", "true", "yes", "on"):
+        return None
+    try:
+        from jiuwen_memory_adapter.jiuwenswarm.agent_memory_provider import (
+            AgentMemoryMemoryProvider,
+        )
+        from openjiuwen.harness.rails.memory.jiuwen_memory_rail import (
+            JiuwenMemoryRail,
+        )
+
+        base_url = os.getenv("JIUWEN_MEMORY_BASE_URL", "").strip()
+        user_id = os.getenv("JIUWEN_MEMORY_USER_ID", "").strip()
+        scope_id = os.getenv("JIUWEN_MEMORY_TENANT_ID", "").strip()
+        provider = AgentMemoryMemoryProvider(
+            base_url=base_url or None,
+            api_key=os.getenv("JIUWEN_MEMORY_API_KEY", ""),
+            user_id=user_id or "jiuwenswarm-user",
+        )
+        return JiuwenMemoryRail(
+            provider,
+            user_id=user_id or "jiuwenswarm-user",
+            scope_id=scope_id or "default",
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug(
+            "JiuwenMemoryRail not available", exc_info=True
+        )
+        return None
+
+
 def _build_subagents(
     model: Any,
 ) -> list[Any]:
@@ -449,6 +507,8 @@ def create_agent(
       (includes ``DialogueCompressor`` for ``/compact`` support)
     - ``MemoryRail`` — vector-memory tools (when embedding
       config is available)
+    - ``JiuwenMemoryRail`` — external JiuwenMemory service
+      (when ``JIUWEN_MEMORY_ENABLED`` is truthy)
     - ``SessionRail`` — async subagent spawning (auto-injected
       when subagents are present)
     - Subagents — ``code_agent``, ``research_agent``,
@@ -526,6 +586,13 @@ def create_agent(
     _memory_rail = _build_memory_rail(cfg)
     if _memory_rail is not None:
         rails.append(_memory_rail)
+
+    # --- JiuwenMemoryRail ---
+    # External JiuwenMemory (agent-memory) service integration,
+    # gated by JIUWEN_MEMORY_ENABLED (default off).
+    _jiuwen_memory_rail = _build_jiuwen_memory_rail(cfg)
+    if _jiuwen_memory_rail is not None:
+        rails.append(_jiuwen_memory_rail)
 
     # --- SessionRail ---
     # Enables spawning async subagent tasks (browser,

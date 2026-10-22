@@ -28,6 +28,10 @@ class AgentResult:
       does **not** accumulate it — see :meth:`AgentBackend.bind_budget`.
     * ``input_tokens`` / ``output_tokens`` - the prompt / completion split of
       ``tokens`` for display (``None`` when the provider reported no split).
+    * ``model``      - the model the backend actually ran this call on, as
+      reported by the provider (an external CLI); display-only for
+      ``AGENT_COMPLETED`` / ``AGENT_FAILED``, never journaled. ``None`` for
+      native backends (they do not report it).
     * ``skipped``    - the backend declined to answer; the call returns ``None``
       (also how a human turn signals a timeout / no answer).
     """
@@ -38,6 +42,7 @@ class AgentResult:
     cache_tokens: int | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
+    model: str | None = None
     skipped: bool = False
 
 
@@ -57,6 +62,16 @@ class AgentBackend(abc.ABC):
     #: ``_ENGINE_OPTIONS | backend.KNOWN_OPTIONS`` and fails fast on anything
     #: else, so a typo never silently no-ops. Empty by default.
     KNOWN_OPTIONS: frozenset[str] = frozenset()
+
+    def model_pool_names(self) -> list[str] | None:
+        """Names this backend accepts for the ``model`` option hint.
+
+        ``None`` (default) means the backend has no model-pool concept and
+        hints pass unvalidated (MockBackend, test stubs). A list means the
+        engine fails fast on a hint not in it — symmetric with
+        ``KNOWN_OPTIONS``' unknown-KEY fail-fast, applied to the VALUE.
+        """
+        return None
 
     def __init__(self) -> None:
         self._budget = BudgetLedger()
@@ -118,6 +133,32 @@ class AgentBackend(abc.ABC):
         silent (a no-op), which is fine for test backends.
         """
         self._progress_sink = progress_sink
+
+    def describe_base_model(self) -> str | None:
+        """Name the model a no-hint native call runs on, for lock messages.
+
+        ``None`` = "cannot name it" — the engine falls back to the generic
+        phrase. Overridden by backends that hold a base spec.
+        """
+        return None
+
+    def describe_model(self, opts: dict) -> str | None:
+        """Name the model this backend would assemble for ``opts``, for progress events.
+
+        The engine emits ``AGENT_STARTED`` before it calls the backend, so the
+        raw ``opts["model"]`` hint is all it knows; a backend that resolves the
+        model elsewhere (an external CLI's configured default) reports it here.
+        ``None`` keeps the raw hint.
+        """
+        return None
+
+    def describe_agent_template(self, opts: dict) -> str | None:
+        """Display name of the expert ``opts["agent_template"]`` resolves to, for progress events.
+
+        ``None`` (default) = this backend has no expert table; the engine emits the
+        raw member name alone.
+        """
+        return None
 
     @abc.abstractmethod
     async def run(

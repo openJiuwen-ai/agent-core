@@ -1147,6 +1147,13 @@ class AnthropicModelClient(BaseModelClient):
             accumulated_for_parser = ""
 
             async with async_client.messages.stream(**params) as response_stream:
+                # Entering the stream context returns once the response headers arrive.
+                await trigger(
+                    LLMCallEvents.LLM_RESPONSE_STARTED,
+                    model_name=params.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                    retry_count=self._sdk_retry_count(getattr(response_stream, "response", None)),
+                )
                 async for event in response_stream:
                     chunk = self._event_to_chunk(event, tool_use_acc)
                     if chunk is None:

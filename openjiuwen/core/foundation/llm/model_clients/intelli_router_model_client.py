@@ -22,7 +22,7 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, ModelError, ValidationError
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.logging import llm_logger, logger
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 from openjiuwen.core.foundation.llm.schema.generation_response import (
@@ -142,6 +142,8 @@ class _CoreRoutingEventBridge:
         return self.__class__.__name__
 
     async def handle_event(self, event: Any) -> None:
+        if self._event_type_value(event) == "request_retried":
+            self._log_route_failover(event)
         payload = self._payload_from_event(event)
         if payload is None:
             return
@@ -151,11 +153,39 @@ class _CoreRoutingEventBridge:
             routing_event=event,
         )
 
-    @classmethod
-    def _payload_from_event(cls, event: Any) -> dict[str, Any] | None:
+    @staticmethod
+    def _event_type_value(event: Any) -> str:
         event_type = getattr(getattr(event, "event_type", None), "value", None)
         if event_type is None:
             event_type = str(getattr(event, "event_type", "") or "")
+        return event_type
+
+    @classmethod
+    def _log_route_failover(cls, event: Any) -> None:
+        """Record the route that failed before the router tries the next one."""
+        extra = getattr(event, "extra", None)
+        if not isinstance(extra, dict):
+            extra = {}
+        route_id = extra.get("route_id") or getattr(event, "deployment_id", None)
+        provider = extra.get("provider") or getattr(event, "provider", None)
+        error_type = getattr(event, "error_type", None) or extra.get("fallback_reason")
+        llm_logger.warning(
+            "model group route failed, trying the next candidate: "
+            "model_group_id=%s route_id=%s model_name=%s provider=%s "
+            "attempt=%s/%s error_type=%s error_message=%s",
+            extra.get("model_group_id"),
+            route_id,
+            extra.get("model_name"),
+            provider,
+            getattr(event, "attempt", None),
+            getattr(event, "total_attempts", None),
+            error_type,
+            getattr(event, "error_message", None),
+        )
+
+    @classmethod
+    def _payload_from_event(cls, event: Any) -> dict[str, Any] | None:
+        event_type = cls._event_type_value(event)
 
         if event_type in cls._SELECTED_EVENTS:
             status = "selected"

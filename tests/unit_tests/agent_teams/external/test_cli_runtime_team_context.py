@@ -12,6 +12,7 @@ event cannot wait for the next one.
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
@@ -20,6 +21,16 @@ import pytest
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TEAM_CONTEXT_STATE_KEY, TeamContextTracker
+
+
+# Every outgoing message starts with a current-time anchor; tests about team
+# state strip it so they assert on what they are about.
+_CLOCK_LINE = re.compile(r'<team-clock now="[^"]+"/>\n?')
+
+
+def _without_clock(text: str) -> str:
+    """Drop the one current-time anchor a sent message carries."""
+    return _CLOCK_LINE.sub("", text, count=1)
 
 
 class _StubMemberSession:
@@ -200,7 +211,7 @@ async def test_start_without_a_team_session_is_tolerated():
     runtime, _ = _make_runtime()
     await runtime.start(team_session=None)
     await runtime.send("hello")
-    assert runtime.sent == [("hello", False)]
+    assert [(_without_clock(text), immediate) for text, immediate in runtime.sent] == [("hello", False)]
 
 
 @pytest.mark.asyncio
@@ -232,7 +243,7 @@ async def test_second_send_carries_nothing_extra():
     await runtime.send("first")
     await runtime.send("second")
 
-    assert runtime.sent[1][0] == "second"
+    assert _without_clock(runtime.sent[1][0]) == "second"
 
 
 @pytest.mark.asyncio
@@ -286,7 +297,7 @@ async def test_announce_then_send_does_not_repeat_the_state():
     await runtime.announce_team_context()
     await runtime.send("carry on")
 
-    assert runtime.sent[1][0] == "carry on"
+    assert _without_clock(runtime.sent[1][0]) == "carry on"
 
 
 @pytest.mark.asyncio
@@ -352,3 +363,75 @@ async def test_baseline_is_persisted_and_survives_a_new_runtime():
     await restarted.start(team_session=team_session)
     await restarted.announce_team_context()
     assert restarted.sent == []
+
+
+# ---------------------------------------------------------------------------
+# F_119: review passes ride the next outbound message under scheduled dispatch
+# ---------------------------------------------------------------------------
+
+
+class _OutcomeBackend:
+    """Backend stand-in whose task manager reports one reviewed completion."""
+
+    def __init__(self) -> None:
+        from types import SimpleNamespace
+
+        task = SimpleNamespace(task_id="done-1", title="ship it", reviewers=lambda: ["v1"])
+
+        class _Manager:
+            async def get_tasks_by_assignee(self, member_name: str, status: str | None = None) -> list:
+                return [task]
+
+        self.task_manager = _Manager()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_send_carries_review_passes_once_after_team_context():
+    from openjiuwen.agent_teams.team_context import TaskOutcomeTracker
+
+    runtime, _ = _make_runtime()
+    runtime.bind_task_outcome_tracker(TaskOutcomeTracker(team_backend=_OutcomeBackend(), member_name="claude-1"))
+    await runtime.start(team_session=_StubTeamSession())
+
+    await runtime.send("next task")
+    await runtime.send("another")
+
+    first = runtime.sent[0][0]
+    assert first.index("<team-context>") < first.index('<team-event kind="task-verified">')
+    assert "done-1 · ship it" in first
+    assert first.endswith("next task")
+    assert _without_clock(runtime.sent[1][0]) == "another"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_standalone_announcement_does_not_carry_review_passes():
+    from openjiuwen.agent_teams.team_context import TaskOutcomeTracker
+
+    runtime, _ = _make_runtime()
+    runtime.bind_task_outcome_tracker(TaskOutcomeTracker(team_backend=_OutcomeBackend(), member_name="claude-1"))
+    await runtime.start(team_session=_StubTeamSession())
+
+    await runtime.announce_team_context()
+
+    assert "task-verified" not in runtime.sent[0][0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_send_stamps_every_message_with_a_clock_anchor():
+    """Each outgoing message carries the current time, right before its body.
+
+    The external CLI has no rail, so the runtime adds the anchor an in-process
+    member gets from TeamPolicyRail; pending team state still goes first.
+    """
+    runtime, _ = _make_runtime()
+    await runtime.start(team_session=_StubTeamSession())
+
+    await runtime.send("next task")
+    await runtime.send("another")
+
+    first, second = runtime.sent[0][0], runtime.sent[1][0]
+    assert first.index("<team-context>") < first.index("<team-clock now=") < first.index("next task")
+    assert re.fullmatch(r'<team-clock now="[^"]+"/>\nanother', second)
