@@ -126,6 +126,14 @@ observability = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
 ]
+desktop = [
+    "pillow>=12.2.0,<13",
+    "psutil>=7.2.2,<8",
+    "pyobjc-framework-Cocoa>=11; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=11; sys_platform == 'darwin'",
+    "pyobjc-framework-ApplicationServices>=11; sys_platform == 'darwin'",
+    "pyobjc-framework-ScreenCaptureKit>=12.2.2; sys_platform == 'darwin'",
+]
 cua = [
     # Install: pip install 'openjiuwen[cua]' (desktop tools for the cua agent; Windows and Linux X11).
     "pyautogui>=0.9.54",

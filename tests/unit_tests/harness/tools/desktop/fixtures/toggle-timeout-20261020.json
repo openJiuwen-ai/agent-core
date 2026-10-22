@@ -1,0 +1,11 @@
+{
+  "source": "evidence/three-way-live-20261020-101915-262508",
+  "native_press": {
+    "event": "accessibility_toggle_press",
+    "role": "AXCheckBox",
+    "native_status": -25204
+  },
+  "elapsed_seconds": 1.7061798572540283,
+  "model_calls": 0,
+  "post_action_state_observed": false
+}

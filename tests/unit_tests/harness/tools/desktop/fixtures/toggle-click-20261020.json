@@ -1,0 +1,84 @@
+{
+  "source": "evidence/three-way-live-20261020-095411-605476",
+  "optimized_before": {
+    "width": 1280,
+    "height": 827,
+    "bounds": [
+      0.0,
+      0.0,
+      1728.0,
+      1117.0
+    ],
+    "generation": 6,
+    "element": {
+      "id": "6-698c1201e9e3-7",
+      "role": "AXCheckBox",
+      "label": "Follow up",
+      "value": "0",
+      "bounds": [
+        237.77777777777777,
+        344.64503133393015,
+        177.77777777777777,
+        25.1727842435094
+      ],
+      "enabled": true,
+      "focused": false,
+      "actionable": true,
+      "editable": false
+    }
+  },
+  "optimized_after_center": {
+    "width": 1280,
+    "height": 827,
+    "bounds": [
+      0.0,
+      0.0,
+      1728.0,
+      1117.0
+    ],
+    "generation": 7,
+    "element": {
+      "id": "7-a77d51e04c06-7",
+      "role": "AXCheckBox",
+      "label": "Follow up",
+      "value": "0",
+      "bounds": [
+        237.77777777777777,
+        344.64503133393015,
+        177.77777777777777,
+        25.1727842435094
+      ],
+      "enabled": true,
+      "focused": false,
+      "actionable": true,
+      "editable": false
+    }
+  },
+  "batching_after_indicator": {
+    "width": 1280,
+    "height": 827,
+    "bounds": [
+      0.0,
+      0.0,
+      1728.0,
+      1117.0
+    ],
+    "generation": 12,
+    "element": {
+      "id": "12-007d14404458-7",
+      "role": "AXCheckBox",
+      "label": "Follow up",
+      "value": "1",
+      "bounds": [
+        237.77777777777777,
+        344.64503133393015,
+        177.77777777777777,
+        25.1727842435094
+      ],
+      "enabled": true,
+      "focused": false,
+      "actionable": true,
+      "editable": false
+    }
+  }
+}

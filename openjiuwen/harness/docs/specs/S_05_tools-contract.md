@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-10-14 |
-| 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent |
+| 最近一次修订日期 | 2026-10-21 |
+| 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_22_scoped-macos-desktop-tool |
 
 ## 范围 / 边界
 
@@ -479,3 +479,51 @@ LLM/Jev 共享 local_context，复杂目标复用可选 objective/绑定；普�
   抛 `COMPONENT_TOOL_INIT_FAILED`。后端在第一次工具调用时才构建，pyautogui 在构建时才导入，所以构建
   工具与导入模块都不触碰显示器。输入始终是前台真实输入；所有阻塞调用经 `asyncio.to_thread` 执行。
 - **依赖**：`cua` extra（`pyautogui`、`psutil`；Windows 上 `pygetwindow`，Linux 上 `python-xlib`）。
+
+## Scoped macOS desktop tool
+
+`tools/desktop/` exports `DesktopSettings` and `DirectComputerUseTool`, registered
+explicitly as `computer_use` through `create_deep_agent(tools=[...])` or the existing
+`harness.tool.import` plugin provider. It is separate from `tools/cua/` and its
+Windows/Linux subagent. See F_22 for integration, F_23 for active-window observations,
+and F_24 for exact-point toggle activation.
+
+1. The host model selects actions. The tool makes no model calls and does not
+   change the host context, cache, provider, permissions or tool catalog.
+2. Targets are immutable host grants, scoped to explicit windows (or explicitly
+   authorized launches). Attached sheets follow their shared parent; new modal
+   dialogs require opt-in. Transient opening metadata may be observed again only
+   within the original two-second grant deadline, without input replay or an
+   early capture grant. Unshared document windows remain excluded.
+3. An action requires the latest observation token and the owning session. A batch
+   contains up to eight actions with native checks between them, stops at changed
+   windows/controls, and returns completed-action progress with a final image.
+   Missing or unshared focus at the initial action guard returns a fresh scoped
+   observation without closing the session, provided capture and release succeed.
+   No input is sent or replayed; the caller must explicitly focus a listed window.
+   Focus loss after an action starts, contamination and unverifiable identity
+   remain fatal. A fresh returned observation needs no extra observe call.
+4. Worker-side batching and in-memory capture reduce local overhead without caching
+   pixels. Model/provider caching support is unnecessary. With
+   `active_window_screenshots=True`, an unambiguous active shared window is captured
+   alone and identified by `context.view_window_id`; image bounds and coordinates
+   describe that crop. Other shared windows remain in the metadata catalog for
+   explicit focus. After focus loss, the last successfully observed active window
+   remains the crop while its live handle is still shared; `active_window_id` is
+   null, so the crop is not evidence of input focus. With no retained shared window,
+   or when another shared window overlaps it from above, a masked display overview
+   is returned. Setting this
+   option to false restores the overview for every capture.
+   Optional `observation_settle_seconds` polls final full screenshots for matching
+   pixel/geometry/window signatures within at most 0.5 configured seconds; it
+   returns the latest frame/token and counts all captures. It does not execute
+   input or establish application readiness. Both options are disabled by default.
+5. Done, close, deadline, cancellation and host turn-end cleanup fence input and
+   reap owned processes. Standalone callers close explicitly. No other application's
+   process is terminated. Native execution requires an interactive macOS session.
+6. With accessibility enabled, an unmodified single left click can activate a native
+   checkbox/radio button through AXPress when its exact screenshot point lies in one
+   observed actionable toggle and fresh native hit testing proves the same recipient.
+   Recheck the original point before activation; never snap to nearby controls or
+   infer desired state. Unsupported capability preserves the original physical click.
+   An attempted AXPress is never followed by a mouse click or retried on failure.
