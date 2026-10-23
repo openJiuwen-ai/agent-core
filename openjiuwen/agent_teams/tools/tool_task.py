@@ -653,9 +653,11 @@ class ScheduledTaskCreateTool(TeamTool):
         # rejects the same argument from an MCP client, which calls ``invoke``
         # directly. Checked before anything is written.
         if not self._inline_member_enabled and any(spec.get("member") is not None for spec in tasks):
+            # Off for a predefined roster (it cannot grow) and behind the
+            # INLINE_TASK_MEMBER_ENABLED hard switch; the remedy is the same.
             return ToolOutput(
                 success=False,
-                error="Cannot use 'member': this team's roster is predefined (team_mode='predefined'); "
+                error="Cannot use 'member': this team does not declare task owners inline; "
                 "name an existing member via 'assignee' instead",
             )
         leader_member_name = await self.agent_team.resolve_leader_member_name()

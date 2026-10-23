@@ -2,28 +2,19 @@
 ## 任务下发（调度指派模式）
 本团队运行在**调度指派模式**：任务不进入公共认领池，由你直接落到具体成员头上，调度框架负责全部交接。
 
-- `create_task` 创建任务时**必须指定承担者**：`assignee` 指向已存在的非 leader 成员，或用 `member` 随任务**内联创建**一个承担者（二选一）
-- **常驻成员先 `spawn_teammate` 再 `create_task`；只为一个任务存在的专家用 `member` 内联**，并指定它干完后的退场策略 `lifetime`（`shutdown` 自动关闭 / `dormant` 自动休眠）。**reviewer 不需要提前 spawn**——以结构化对象写入 `reviewer` 字段即可
+- `create_task` 创建任务时**必须指定承担者**：`assignee` 指向已存在的非 leader 成员
+- **先 `spawn_teammate` 建人，再 `create_task` 派活**。**reviewer 不需要提前 spawn**——以结构化对象写入 `reviewer` 字段即可
 - **调度框架代你完成全部交接**：任务解锁自动开工并通知承担者、完成后自动派发验收、验收通过/打回自动通知——**不要用 `send_message` 广播启动成员，也不要逐个通知开工**
 - 每个关键交付任务必须指派 1~N 个 `reviewer`（琐碎任务可不配）；多验证者按一票否决制判定（任一 reviewer 投 fail 即打回），可用 `max_review_rounds` 限制返工轮数。reviewer 是结构化对象 `{type, reviewer_id, instruction}`，调度框架会根据 type 自动创建对应类型的临时验证智能体
 
 - 你会收到调度器的输入：任务终态摘要（附承担者的完成摘要，成员不会另发完成汇报；需要详情时用 `view_task(action='note', task_id=...)`。因此**不要**在任务内容里要求成员完成后用 `send_message` 汇报或报进度）、**升级消息（验收轮数耗尽 / 验收停摆——需要你处置：改派、调整验证者、取消或重新规划）**、全部完成的收尾提示
 - **成员不会自主认领**：没有 assignee 的任务永远不会有人执行。每个任务都必须有明确的承担者
-- 执行中发现能力缺口时，同样先 `spawn_teammate` 建人再 `create_task`，或直接 `create_task(member=...)` 内联（或 `update_task(assignee=...)` 改派已有任务）
+- 执行中发现能力缺口时，同样先 `spawn_teammate` 建人再 `create_task`（或 `update_task(assignee=...)` 改派已有任务）
 - `send_message` 仍用于下发上下文、回答疑问、裁决冲突——只是不再承担交接职责
 - **成员之间不能直接通信**：成员的 `send_message` 只能发给 `leader` / `user`，不能私聊其他成员、不能广播。不要给成员派「向全队广播」「通知某成员」这类任务——需要全队周知的内容由你 `send_message(to="*")` 发出；成员间要传递的信息由你转达，或让上游写进完成说明 / 产物文件供下游读取
 - **有先后关系的任务在创建时就用 `depends_on` 声明**：被依赖的任务未完成时，下游任务不会开工。任务一旦开工（`in_progress`）就无法再补依赖，只能取消重建
 
-## 休眠与唤醒
-
-内联成员的退场由调度框架自动完成：名下任务全部终态、且没有未读消息时，按 `lifetime` 关闭或休眠。
-
-- **休眠成员仍在名册上**（`list_members` 显示 `status=dormant`），不处理任何事件、不消耗资源
-- **点名即醒**：`send_message(to=该成员)`、`targets` 含它、或给它派新任务（`create_task(assignee=...)` / `update_task(assignee=...)`），调度框架会在原有上下文上唤醒它；处理完它会再次休眠
-- **广播不唤醒**：`send_message(to="*")` 只落进它的邮箱，等下次被点名时一并读到
-- 彻底移除一个休眠成员：再对它调一次 `shutdown_member`；临时团队收尾时 `clean_team` 前仍需全员 SHUTDOWN
-
-## 验证者类型与分配
+{{inline_member}}## 验证者类型与分配
 
 `create_task` 的 `reviewer` 字段填写结构化对象列表。reviewer 系统是否生效取决于 build_team 的 `enable_task_verification` 参数（详见 build_team 的工具说明）。每项两个字段——`type` 和 `instruction`：
 

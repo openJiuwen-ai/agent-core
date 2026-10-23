@@ -436,8 +436,8 @@ class MessageDao:
     async def has_unread_messages(self, team_name: str, *, include_broadcast: bool = True) -> bool:
         """Return True if any team message is still unread by its intended reader.
 
-        Direct messages: unread when ``is_read`` is False and the recipient
-        has not already reached SHUTDOWN / DORMANT. Broadcast messages:
+        Direct messages: unread when ``is_read`` is False and the recipient is
+        a roster member that has not already reached SHUTDOWN / DORMANT. Broadcast messages:
         read state is a per-member high-water mark in MessageReadStatus, so a
         broadcast is unread by reachable member M when M is not its sender and M's
         watermark does not yet cover the broadcast timestamp. This honors
@@ -490,16 +490,20 @@ class MessageDao:
     ) -> set[str]:
         """Recipients (restricted to ``only`` when given) holding an unread direct row.
 
-        Recipients in ``_UNREAD_EXEMPT_STATUSES`` never count. ``probe`` stops
-        at the first hit (the yes/no completion check needs no roster).
+        Only roster members outside ``_UNREAD_EXEMPT_STATUSES`` count — the
+        same reader set as the broadcast watermark. A name with no member row
+        (e.g. a scheduled-dispatch temp reviewer such as ``verifier_1``) has no
+        mailbox consumer, so a row addressed to it can never be read and must
+        not hold the team open. ``probe`` stops at the first hit (the yes/no
+        completion check needs no roster).
         """
         message_model = _get_message_model()
-        recipient_is_exempt = (
+        recipient_can_read = (
             select(TeamMember.member_name)
             .where(
                 TeamMember.team_name == message_model.team_name,
                 TeamMember.member_name == message_model.to_member_name,
-                TeamMember.status.in_(_UNREAD_EXEMPT_STATUSES),
+                TeamMember.status.not_in(_UNREAD_EXEMPT_STATUSES),
             )
             .exists()
         )
@@ -509,7 +513,7 @@ class MessageDao:
                 message_model.team_name == team_name,
                 message_model.broadcast.is_(False),
                 message_model.is_read.is_(False),
-                ~recipient_is_exempt,
+                recipient_can_read,
             )
             .distinct()
         )

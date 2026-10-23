@@ -455,7 +455,8 @@ async def test_stalled_round_escalates_with_vote_status(db, bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_silent_reviewers_get_renudged_once_per_window(db, bus):
+async def test_silent_reviewers_are_not_messaged(db, bus):
+    """Temp reviewers have no mailbox: a DM to one is never read and would block team completion."""
     scheduler, host, mm, tm = _build_scheduler(db, bus, review_stall_timeout=3600)
     await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
     assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "pass")).ok
@@ -464,10 +465,213 @@ async def test_silent_reviewers_get_renudged_once_per_window(db, bus):
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
 
-    handoffs_to_silent = [(to, meta) for to, meta in _dm_targets(mm) if to == "rev-2"]
-    templates = [meta["template"] for _, meta in handoffs_to_silent]
-    # Renudge still delivered via DM.
-    assert "scheduler_review_renudge" in templates
+    assert [to for to, _meta in _dm_targets(mm) if to in ("rev-1", "rev-2")] == []
+
+
+def _wire_fake_reviewer(scheduler, db, monkeypatch, run_once, *, steers: list[str] | None = None) -> AsyncMock:
+    """Run temp reviewers on a fake harness; return the mock that records dispatches.
+
+    Text steered into a running reviewer is appended to ``steers`` when given.
+    """
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler as _Scheduler
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    scheduler._blueprint.spec.agents = {"teammate": DeepAgentSpec()}
+    scheduler._blueprint.spec.dispatch_mode = "scheduled"
+    scheduler._blueprint.language = "cn"
+    scheduler._infra.team_backend.db = db
+    scheduler._infra.team_backend.workspace_cache = None
+    scheduler._infra.team_backend.task_verification_enabled = lambda: True
+    dispatch = AsyncMock()
+    monkeypatch.setattr(_Scheduler, "_dispatch_to_reviewer", dispatch)
+    steered = steers if steers is not None else []
+
+    class _FakeHarness:
+        async def run_once(self, _prompt, *, team_session=None):
+            return await run_once()
+
+        def get_deep_agent(self):
+            return self
+
+        async def steer(self, msg):
+            steered.append(msg)
+
+        async def dispose(self):
+            return None
+
+    monkeypatch.setattr(TeamHarness, "build", staticmethod(lambda **_kwargs: _FakeHarness()))
+    return dispatch
+
+
+async def _times_out():
+    return {"output": "Task loop round timed out after 1200 seconds.", "error": "completion_timeout"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_voteless_reviewer_run_is_dispatched_again_then_escalated(db, bus, monkeypatch):
+    """A run that ends without a vote (e.g. the round timeout) must not leave the task stuck in review."""
+    scheduler, host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    dispatch = _wire_fake_reviewer(scheduler, db, monkeypatch, _times_out)
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+    # Run 1 ended voteless: it released the mark and rescanned.
+    assert [call.args[0] for call in dispatch.await_args_list] == ["rev-1"]
+    assert not [text for text in host.leader_inputs if "rev-1" in text]
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+    # Run 2: no more re-dispatch; the leader is told once.
+    assert len(dispatch.await_args_list) == 1
+    escalations = [text for text in host.leader_inputs if "rev-1" in text]
+    assert len(escalations) == 1
+    assert "2" in escalations[0]
+    assert (await tm.get("r")).status == TaskStatus.IN_REVIEW.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_voteless_reviewer_is_steered_once_mid_run(db, bus, monkeypatch):
+    """Halfway through a run, a reviewer that has not voted gets one reminder steered into the run itself."""
+    from openjiuwen.agent_teams.agent.scheduling import scheduler as scheduler_module
+
+    monkeypatch.setattr(scheduler_module, "_REVIEW_NUDGE_SECONDS", 0.01)
+
+    async def _slow_timeout():
+        await asyncio.sleep(0.1)
+        return await _times_out()
+
+    scheduler, _host, mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    steers: list[str] = []
+    _wire_fake_reviewer(scheduler, db, monkeypatch, _slow_timeout, steers=steers)
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    assert len(steers) == 1
+    assert "verify_task" in steers[0]
+    # Never mailed: a mailbox row to a temp reviewer would stay unread forever.
+    assert [to for to, _meta in _dm_targets(mm) if to == "rev-1"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reviewer_that_already_voted_is_not_steered(db, bus, monkeypatch):
+    from openjiuwen.agent_teams.agent.scheduling import scheduler as scheduler_module
+
+    monkeypatch.setattr(scheduler_module, "_REVIEW_NUDGE_SECONDS", 0.01)
+
+    async def _keeps_going_after_voting():
+        await asyncio.sleep(0.1)
+        return {"output": "voted"}
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
+    steers: list[str] = []
+    _wire_fake_reviewer(scheduler, db, monkeypatch, _keeps_going_after_voting, steers=steers)
+    # The vote is on the board before the reminder fires.
+    assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "pass")).ok
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    assert steers == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reminder_is_dropped_when_the_run_ends_first(db, bus, monkeypatch):
+    from openjiuwen.agent_teams.agent.scheduling import scheduler as scheduler_module
+
+    monkeypatch.setattr(scheduler_module, "_REVIEW_NUDGE_SECONDS", 0.05)
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    steers: list[str] = []
+    _wire_fake_reviewer(scheduler, db, monkeypatch, _times_out, steers=steers)
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+    await asyncio.sleep(0.1)
+
+    assert steers == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_no_vote_escalation_is_not_swallowed_by_an_earlier_stall_escalation(db, bus, monkeypatch):
+    """Two 1200s voteless runs end right at the 2400s stall timeout, so the
+    stall escalation may come first; the no-vote escalation of the same round
+    must still reach the leader, and only once."""
+    scheduler, host, _mm, tm = _build_scheduler(db, bus, review_stall_timeout=60)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    _wire_fake_reviewer(scheduler, db, monkeypatch, _times_out)
+    await _age_task(db, "r", seconds=120)
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    assert len(host.leader_inputs) == 1  # the stall escalation
+
+    for _ in range(4):
+        await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    assert len(host.leader_inputs) == 2
+    assert "rev-1" in host.leader_inputs[1]
+    assert host.leader_inputs[0] != host.leader_inputs[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reviewer_that_voted_is_not_followed_up(db, bus, monkeypatch):
+    async def _votes():
+        assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "pass")).ok
+        return {"output": "voted"}
+
+    scheduler, host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
+    dispatch = _wire_fake_reviewer(scheduler, db, monkeypatch, _votes)
+    scheduler._review_dispatched.update({("r", 1, "rev-1"), ("r", 1, "rev-2")})
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    dispatch.assert_not_awaited()
+    assert scheduler._review_runs == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_review_dispatch_skips_reviewers_that_already_voted(db, bus, monkeypatch):
+    """Lost bookkeeping (leader restart) re-dispatches only the reviewers still owing a vote."""
+
+    async def _unused():
+        return {"output": ""}
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
+    dispatch = _wire_fake_reviewer(scheduler, db, monkeypatch, _unused)
+    assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "pass")).ok
+    scheduler._review_dispatched.clear()
+
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert [call.args[0] for call in dispatch.await_args_list] == ["rev-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancelled_reviewer_run_releases_its_mark_without_counting(db, bus, monkeypatch):
+    """A leader pause cancels the run; that is not a missed vote."""
+
+    async def _cancelled():
+        raise asyncio.CancelledError
+
+    scheduler, host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    _wire_fake_reviewer(scheduler, db, monkeypatch, _cancelled)
+    scheduler._review_dispatched.add(("r", 1, "rev-1"))
+
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    assert ("r", 1, "rev-1") not in scheduler._review_dispatched
+    assert scheduler._review_runs == {}
+    assert not any("rev-1" in text for text in host.leader_inputs)
 
 
 # ---------------------------------------------------------------------------
@@ -698,6 +902,14 @@ async def test_task_list_drained_waits_for_task_feedback_then_finalizes_team_fee
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def inline_members_on(monkeypatch):
+    """Turn on the inline-member hard switch for tests of the retirement scan itself."""
+    from openjiuwen.agent_teams import constants
+
+    monkeypatch.setattr(constants, "INLINE_TASK_MEMBER_ENABLED", True)
+
+
 def _retirement_scheduler(db, bus, *, candidates, unread=frozenset()):
     """Scheduler whose backend reports ``candidates`` as retirable and ``unread`` as pending input."""
     from openjiuwen.agent_teams.tools.team import MemberOpResult
@@ -720,6 +932,7 @@ def _retirement_scheduler(db, bus, *, candidates, unread=frozenset()):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 async def test_retirement_requested_once_board_is_empty(db, bus):
     """READY + no open task + nothing unread -> one ordinary shutdown_member request."""
     scheduler, backend, tm = _retirement_scheduler(db, bus, candidates=[("dev-1", "ready", "dormant")])
@@ -731,6 +944,19 @@ async def test_retirement_requested_once_board_is_empty(db, bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_retirement_scan_is_off_with_inline_members(db, bus):
+    """Lifetimes exist only on inline members; with the hard switch off the pass does nothing."""
+    scheduler, backend, _tm = _retirement_scheduler(db, bus, candidates=[("dev-1", "ready", "shutdown")])
+
+    await scheduler.activate()
+
+    backend.shutdown_member.assert_not_awaited()
+    backend.list_retirable_members.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 async def test_retirement_waits_for_open_tasks_including_review(db, bus):
     """A task under review (or pending / blocked) keeps its author around."""
     scheduler, backend, tm = _retirement_scheduler(db, bus, candidates=[("dev-1", "ready", "shutdown")])
@@ -748,6 +974,7 @@ async def test_retirement_waits_for_open_tasks_including_review(db, bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 async def test_retirement_waits_for_unread_input(db, bus):
     """The just-woken window: READY before the waking message was read must not retire."""
     scheduler, backend, _tm = _retirement_scheduler(
@@ -761,6 +988,7 @@ async def test_retirement_waits_for_unread_input(db, bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
+@pytest.mark.usefixtures("inline_members_on")
 async def test_retirement_ignores_members_without_policy(db, bus):
     """Nothing to retire -> no board queries, no requests."""
     scheduler, backend, _tm = _retirement_scheduler(db, bus, candidates=[])

@@ -41,7 +41,6 @@ _REVIEW_REQUEST = "scheduler_review_request"
 _REVIEW_PREVIOUS_FEEDBACK = "scheduler_review_previous_feedback"
 _REVIEW_SUBMISSION_NOTE = "scheduler_review_submission_note"
 _REVIEW_UPSTREAM = "scheduler_review_upstream"
-_REVIEW_RENUDGE = "scheduler_review_renudge"
 _REWORK = "scheduler_rework"
 _REWORK_SUMMARY = "scheduler_rework_summary"
 
@@ -75,11 +74,6 @@ def is_task_start_meta(meta: dict | None, task_id: str) -> bool:
 def meta_review_request(task) -> dict:
     """Delivery payload for one reviewer of a freshly opened round."""
     return build_meta(_REVIEW_REQUEST, refs={"task": task.task_id})
-
-
-def meta_review_renudge(task) -> dict:
-    """Delivery payload for a reviewer that has not voted in the open round."""
-    return build_meta(_REVIEW_RENUDGE, refs={"task": task.task_id})
 
 
 def meta_rework(task, max_rounds: int, feedback: str) -> dict:
@@ -157,9 +151,26 @@ def render_leader_escalation_stall(task, *, minutes: int, voted: list[str], pend
     )
 
 
+def render_leader_escalation_no_vote(task, *, reviewer: str, runs: int) -> str:
+    """Escalation injected into the leader when a reviewer keeps ending its run without a vote."""
+    return t(
+        "scheduler.leader_escalation_no_vote",
+        task_id=task.task_id,
+        title=task.title,
+        round=task.review_round,
+        reviewer=reviewer,
+        runs=runs,
+    )
+
+
 def render_leader_all_done(count: int) -> str:
     """Final digest injected into the leader when the board drains."""
     return t("scheduler.leader_all_done", count=count)
+
+
+def render_reviewer_nudge(*, elapsed_minutes: int) -> str:
+    """Reminder steered into a temp reviewer still running without a vote."""
+    return t("scheduler.reviewer_nudge", elapsed=elapsed_minutes)
 
 
 def format_fail_feedback(fail_feedback: dict[str, str]) -> str:

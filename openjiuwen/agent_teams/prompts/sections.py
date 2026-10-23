@@ -45,6 +45,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
+from openjiuwen.agent_teams import constants
 from openjiuwen.agent_teams.inbound_render import render_team_policy
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -335,7 +336,15 @@ def build_team_dispatch_section(
         return None
     mode = dispatch_mode if dispatch_mode in _DISPATCH_MODES else "autonomous"
     labels = _labels_for(language)
-    dispatch_text = loader(f"dispatch_{mode}_{slug}", language).content.strip()
+    template = loader(f"dispatch_{mode}_{slug}", language)
+    if mode == "scheduled" and slug == "leader":
+        # Inline task members (F_118) sit behind a hard switch; when it is off
+        # the passage that teaches `member` / `lifetime` / dormancy goes with it.
+        inline_member = ""
+        if constants.INLINE_TASK_MEMBER_ENABLED:
+            inline_member = loader("dispatch_scheduled_leader_inline_member", language).content.strip() + "\n\n"
+        template = template.format({"inline_member": inline_member})
+    dispatch_text = template.content.strip()
     body = f"{labels['dispatch_heading']}\n\n{dispatch_text}\n"
     return PromptSection(
         name=TeamSectionName.DISPATCH,

@@ -133,7 +133,7 @@ def test_spec_review_knobs_validation():
     base = {"agents": {"leader": DeepAgentSpec()}, "spawn_mode": "inprocess"}
     spec = TeamAgentSpec(**base)
     assert spec.default_max_review_rounds == 3
-    assert spec.review_stall_timeout == 1800
+    assert spec.review_stall_timeout == 2400
 
     with pytest.raises(ValueError):
         TeamAgentSpec(**base, default_max_review_rounds=0)
