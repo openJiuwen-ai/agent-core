@@ -548,7 +548,17 @@ class ContextEngine:
             fields = cls._CONTEXT_OVERFLOW_FIELDS
 
         for field in fields:
-            nested_value = getattr(value, field, None)
+            try:
+                nested_value = getattr(value, field, None)
+            except Exception as exc:
+                # Reading one field must not abort the context-length check.
+                # An unread streaming response raises when its body is touched.
+                context_engine_logger.warning(
+                    "Could not read field '%s' while checking the model error. Reason: %s",
+                    field,
+                    exc,
+                )
+                continue
             if nested_value is None or nested_value is value or callable(nested_value):
                 continue
             yield from cls._iter_exception_texts(
