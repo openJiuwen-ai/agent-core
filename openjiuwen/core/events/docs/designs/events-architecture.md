@@ -444,7 +444,7 @@ EventNext 只能在所属 Handler 激活期间、由创建它的同一 asyncio T
 
 多次推进可能重复执行下游和外部副作用，Core 不做幂等保护。CORE 通常不使用 next，保留统一签名是为了简化协议。
 
-EventBus 校验事件结构、事件名、注册状态、matcher 返回值和 EventNext 控制约束，但不维护通用业务输入/输出 schema，也不校验 Handler 返回值是否符合某个业务模型。EventInput / EventOutput 是角色别名；具体输入、输出和 None 的合法性由事件定义、Handler 与业务入口负责。
+EventBus 校验事件结构、事件名、注册状态、matcher 返回值和 EventNext 控制约束。EventType 注册可选的 `input_validator` 与 `output_validator`（同步 callable，严格 `bool`），在 matcher 前、EventNext 转发前及 Handler/CORE 正常返回后执行业务校验；未配置时跳过对应项。USER / BUILTIN Adapter 对扩展 Handler 自身故障执行固定 skip 与禁止重放恢复；CORE、下游、Validator 自身故障及取消仍传播。EventInput / EventOutput 仍是角色别名；无 Validator 时业务合法性仍由事件定义方与调用方约定。
 
 ### 4.4 Session 入口适配
 
@@ -598,11 +598,12 @@ Builder 没有 freeze 状态，也不在 `add_*` 或 `build()` 中检查阶段�
 | --- | --- | --- |
 | 1. 检查事件与 Build 门禁 | Bus 校验 Event 和 event_type，读取事件定义，并确认已保存 Builder | 未知事件、事件格式无效或 Build 未成功时拒绝 |
 | 2. 准备本次会话上下文 | 会话适配器按第 4.4 节处理 Session、SessionContext 或 None，由本次调用保留结果 | 每次普通 trigger 只在入口处理一次；参数无效时不开始构建 Ops，None 保持为空 |
-| 3. 筛选扩展 Handler | 匹配器对候选注册逐条判断 USER / BUILTIN 的模式，产生 handler_id 集合 | 匹配函数报错、返回 awaitable 或非 bool 时失败；CORE 不参加筛选 |
-| 4. 进入 callback 链 | framework 按 USER、BUILTIN、CORE 优先级和同层注册顺序调度 | adapter 根据命中集合和目标层级跳过不应进入的 Handler |
-| 5. 创建当前 Handler 的 Ops | adapter 从共享 Builder 绑定当前 Handler 的 PackageMetadata 和本次 SessionContext | 被跳过的 Handler 不构建 Ops；build 失败则不进入该 Handler |
-| 6. 调用 Handler | 从第一条开始，传入该 Handler 的 Ops 和专属 next | Handler 决定继续、跳层或短路；进入下一条前再次执行第 5 步 |
-| 7. 返回并结束调用 | CORE 或短路 Handler 产生结果，已进入的外层依次处理并返回 | Bus 释放本次临时状态并交回最终结果；业务方仍须核对工具实际结果 |
+| 3. 校验初始输入 | 若事件定义配置了 `input_validator`，校验 `event_input` | 返回 `False` 时 trigger 失败，matcher 与 Handler 不执行；Validator 自身故障传播 |
+| 4. 筛选扩展 Handler | 匹配器对候选注册逐条判断 USER / BUILTIN 的模式，产生 handler_id 集合 | 匹配函数报错、返回 awaitable 或非 bool 时失败；CORE 不参加筛选 |
+| 5. 进入 callback 链 | framework 按 USER、BUILTIN、CORE 优先级和同层注册顺序调度 | adapter 根据命中集合和目标层级跳过不应进入的 Handler |
+| 6. 创建当前 Handler 的 Ops | adapter 从共享 Builder 绑定当前 Handler 的 PackageMetadata 和本次 SessionContext | 被跳过的 Handler 不构建 Ops；build 失败则不进入该 Handler |
+| 7. 调用 Handler | 从第一条开始，传入该 Handler 的 Ops 和专属 next | USER / BUILTIN Adapter 在 forward 前校验 EventNext 新输入、在 Handler 返回后校验输出，并按 EV-05 处理扩展故障；进入下一条前再次执行第 6 步 |
+| 8. 返回并结束调用 | CORE 或短路 Handler 产生合法结果，已进入的外层依次处理并返回 | CORE 输出经 Validator 后交回；Bus 释放本次临时状态；业务方仍须核对工具实际结果 |
 
 ```mermaid
 sequenceDiagram
@@ -1023,12 +1024,13 @@ Events 不保存待执行消息、调用栈或自动恢复日志。进程重启�
 | 匹配函数抛错、返回 awaitable 或非 bool | 本次 trigger 失败，不进入 dispatch | 事件定义方修复同步匹配规则 |
 | `ops.build` 冲突、异常、取消或返回非 Builder | 不提交 `_builder`；首次成功前宿主可修正后重试 | 能力提供方修复构建逻辑；Bus 不自动重试 |
 | `builder.build()` 参数或 Ops 动态访问无效 | 不进入目标 Handler，或能力调用处失败 | 错误沿等待关系返回；不自动改跑 CORE |
-| Handler 或能力抛错 | 错误沿等待关系返回；外层可按业务约定捕获处理 | Bus 不自动隐藏错误，也不回滚已经完成的操作 |
+| USER / BUILTIN 自身故障 | skip 当前 Handler，按下游尚未执行 / 最后成功 / 最后失败三种事实恢复；写一条 error 日志 | 不重放已执行下游或 CORE；不回滚副作用 |
+| 下游 Handler、CORE、Validator 自身故障或能力抛错 | 错误沿等待关系返回 | Bus 不 skip、不伪造成功；外层可按业务约定捕获下游异常 |
 | EventNext 跨任务、退出后使用、改变 event_type 或非法跳层 | 在进入下游前拒绝 | 有效期内重复调用不拒绝，重复副作用由 Handler 负责 |
 | 超时或取消 | 向调用方报告异常或取消，不改成正常 None，不自动重试 | Handler 清理自身资源，业务方核对工具实际结果 |
 | 进程退出 | 未持久保存的调用状态丢失 | 平台重建注册配置，业务方核对可能尚未完成的操作 |
 
-外层 Handler 可以捕获下游异常，但 Bus 不校验它返回的对象是否符合业务模型，也无法仅凭“外层正常返回”判断业务已恢复。必须执行的检查应由平台限制注册权限或在能力入口落实，不能只依赖扩展主动报告错误。
+外层 Handler 可以捕获下游异常并返回合法输出；配置了 `output_validator` 时 Bus 在校验通过后才接受 USER / BUILTIN 的正常返回。未配置 Validator 时仍无法仅凭“外层正常返回”判断业务已恢复。必须执行的检查应由平台限制注册权限或在能力入口落实，不能只依赖扩展主动报告错误。
 
 ### 8.2 外部副作用、结果未知与重试
 
@@ -1102,9 +1104,9 @@ Handler 层级只决定顺序，包元信息说明所属扩展，SessionContext 
 
 **并发注销。** 调用 A 已保存包含 U1 的注册快照，随后等待外部能力返回。此时扩展运行时注销 U1；之后开始的调用 B 读取新注册表，不再包含 U1。A 仍按旧快照执行，运行时要等 A 退出后再释放它使用的包资源。注销返回只证明注册记录已移除。
 
-**工具已完成而外层失败。** CORE 的外部请求成功，U1 在结果加工时异常，trigger 向调用方报错。调用方先查业务回执，不能直接重复触发。若回执暂时未知，保持结果未知，由业务核对处理；Bus 不提供自动续跑。
+**工具已完成而外层失败。** CORE 的外部请求成功，U1 在结果加工时异常。若下游已成功且 EV-05 恢复条件成立，`trigger()` 返回下游结果且 CORE 不会重跑；否则向调用方报错。调用方先查业务回执，不能直接重复触发。若回执暂时未知，保持结果未知，由业务核对处理；Bus 不提供自动续跑。
 
-**改写输入与短路。** USER 可以替换 event_input 后调用 next，只要 event_type 不变；Bus 不重新匹配，所以下游链仍按入口命中结果执行。USER 直接返回任意对象或 None 时形成短路，Bus 不做通用业务输出校验，也不补跑 CORE；业务合法性由事件与调用方检查。
+**改写输入与短路。** USER 可以替换 event_input 后调用 next，只要 event_type 不变；Bus 不重新匹配，所以下游链仍按入口命中结果执行。转发前若配置了 `input_validator` 且返回 `False`，非法输入不进入下游并按扩展故障 skip 恢复。USER 直接返回任意对象或 None 时形成短路；配置了 `output_validator` 时在校验通过前按扩展故障处理，未配置时 Bus 仍不做通用业务输出校验，也不补跑 CORE。
 
 **子调用授权与停止。** 扩展通过动词申请工具操作，新链 CORE 的空包身份不能扩大原请求权限。停止准入由宿主实现，Bus 本身不会拒绝新 trigger 或跟踪父子调用；宿主必须等待自己跟踪的调用退出后再释放资源。Handler 退出后 EventNext 会失效，但缓存的 Ops 不会被框架自动拒绝。
 

@@ -99,6 +99,58 @@ async def test_complete_registration_and_layered_execution_smoke() -> None:
 
 
 @pytest.mark.asyncio
+async def test_event_validators_run_in_execution_order() -> None:
+    bus = await _built_bus()
+    trace: list[str] = []
+
+    def input_validator(event_input: object) -> bool:
+        trace.append(f"input:{event_input}")
+        return True
+
+    def output_validator(event_output: object | None) -> bool:
+        trace.append(f"output:{event_output}")
+        return True
+
+    def matcher(event_input: object, pattern: Mapping[str, object]) -> bool:
+        del pattern
+        trace.append("matcher")
+        return event_input == "initial"
+
+    async def core(event: Event, ops: object | None, event_next: EventNext) -> object:
+        del ops, event_next
+        trace.append("core")
+        return f"core:{event.event_input}"
+
+    async def user(event: Event, ops: object | None, event_next: EventNext) -> object:
+        del ops
+        trace.append("user:enter")
+        result = await event_next(Event(event.event_type, "forwarded"))
+        trace.append("user:exit")
+        return f"user:{result}"
+
+    bus.register_event_type(
+        "demo.validated_order",
+        matcher,
+        core,
+        input_validator=input_validator,
+        output_validator=output_validator,
+    )
+    bus.register_event_handler("demo.validated_order", user, {}, HandlerLevel.USER)
+
+    assert await bus.trigger(Event("demo.validated_order", "initial")) == "user:core:forwarded"
+    assert trace == [
+        "input:initial",
+        "matcher",
+        "user:enter",
+        "input:forwarded",
+        "core",
+        "output:core:forwarded",
+        "user:exit",
+        "output:user:core:forwarded",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_matching_preserves_layer_and_registration_order() -> None:
     bus = await _built_bus()
     trace: list[str] = []
@@ -208,7 +260,8 @@ async def test_onion_return_and_short_circuit(short_circuit: bool) -> None:
         ("user", HandlerLevel.BUILTIN, ["user", "builtin", "core"], False),
         ("user", HandlerLevel.CORE, ["user", "core"], False),
         ("builtin", HandlerLevel.CORE, ["user", "builtin", "core"], False),
-        ("user", HandlerLevel.USER, ["user"], True),
+        # An invalid jump is a handler fault: the USER handler is skipped and the chain continues.
+        ("user", HandlerLevel.USER, ["user", "builtin", "core"], True),
     ],
 )
 async def test_layer_jumps_execute_only_the_allowed_range(
@@ -250,18 +303,14 @@ async def test_layer_jumps_execute_only_the_allowed_range(
         bus.register_event_handler("demo.jump", skipped_user, {}, HandlerLevel.USER)
     bus.register_event_handler("demo.jump", builtin, {}, HandlerLevel.BUILTIN)
 
-    if is_invalid:
-        with pytest.raises(ValidationError) as invalid:
-            await bus.trigger(Event("demo.jump", {}))
-        assert invalid.value.status is StatusCode.EVENTS_NEXT_INVALID
-    else:
-        assert await bus.trigger(Event("demo.jump", {})) == "core"
+    assert await bus.trigger(Event("demo.jump", {})) == "core"
     assert trace == expected_trace
 
 
 async def _assert_event_next_rejected(mode: str) -> None:
     bus = await _built_bus()
     captured: list[EventNext] = []
+    rejected: list[ValidationError] = []
 
     async def core(event: Event, ops: object | None, event_next: EventNext) -> object:
         del event, ops, event_next
@@ -270,10 +319,14 @@ async def _assert_event_next_rejected(mode: str) -> None:
     async def user(event: Event, ops: object | None, event_next: EventNext) -> object:
         del ops
         captured.append(event_next)
-        if mode == "cross-task":
-            return await asyncio.create_task(event_next(event))
-        if mode == "changed-type":
-            return await event_next(Event("demo.other", event.event_input))
+        try:
+            if mode == "cross-task":
+                return await asyncio.create_task(event_next(event))
+            if mode == "changed-type":
+                return await event_next(Event("demo.other", event.event_input))
+        except ValidationError as error:
+            rejected.append(error)
+            raise
         return "short"
 
     bus.register_event_type("demo.next", _matches, core)
@@ -283,10 +336,11 @@ async def _assert_event_next_rejected(mode: str) -> None:
         assert await bus.trigger(Event("demo.next", {})) == "short"
         with pytest.raises(ValidationError) as invalid:
             await captured[0](Event("demo.next", {}))
+        rejected.append(invalid.value)
     else:
-        with pytest.raises(ValidationError) as invalid:
-            await bus.trigger(Event("demo.next", {}))
-    assert invalid.value.status is StatusCode.EVENTS_NEXT_INVALID
+        # The rejection reaches the handler; the failed handler is then skipped.
+        assert await bus.trigger(Event("demo.next", {})) == "core"
+    assert [error.status for error in rejected] == [StatusCode.EVENTS_NEXT_INVALID]
 
 
 @pytest.mark.asyncio
@@ -358,15 +412,8 @@ async def test_inflight_call_keeps_old_handlers_while_new_call_sees_updates() ->
     assert trace == ["old:u1", "old:u2", "old:core", "new:u1", "new:u3", "new:core"]
 
 
-class _BusinessFailure(Exception):
-    """Representative exception raised by extension business code."""
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("exception_type", [_BusinessFailure, asyncio.CancelledError])
-async def test_handler_exception_and_cancellation_propagate_unchanged(
-    exception_type: type[BaseException],
-) -> None:
+async def test_handler_cancellation_propagates_unchanged() -> None:
     bus = await _built_bus()
     captured: list[EventNext] = []
 
@@ -377,12 +424,12 @@ async def test_handler_exception_and_cancellation_propagate_unchanged(
     async def failing_handler(event: Event, ops: object | None, event_next: EventNext) -> object:
         del event, ops
         captured.append(event_next)
-        raise exception_type("business failure")
+        raise asyncio.CancelledError("cancelled")
 
     bus.register_event_type("demo.failure", _matches, core)
     bus.register_event_handler("demo.failure", failing_handler, {}, HandlerLevel.USER)
 
-    with pytest.raises(exception_type, match="business failure"):
+    with pytest.raises(asyncio.CancelledError, match="cancelled"):
         await bus.trigger(Event("demo.failure", {}))
 
     with pytest.raises(ValidationError) as invalid:
@@ -391,7 +438,7 @@ async def test_handler_exception_and_cancellation_propagate_unchanged(
 
 
 @pytest.mark.asyncio
-async def test_handler_result_must_be_awaitable() -> None:
+async def test_non_awaitable_handler_is_skipped() -> None:
     bus = await _built_bus()
 
     async def core(event: Event, ops: object | None, event_next: EventNext) -> object:
@@ -405,6 +452,4 @@ async def test_handler_result_must_be_awaitable() -> None:
     bus.register_event_type("demo.non_awaitable_handler", _matches, core)
     bus.register_event_handler("demo.non_awaitable_handler", non_awaitable_handler, {}, HandlerLevel.USER)
 
-    with pytest.raises(ValidationError) as invalid:
-        await bus.trigger(Event("demo.non_awaitable_handler", {}))
-    assert invalid.value.status is StatusCode.EVENTS_REGISTRATION_INVALID
+    assert await bus.trigger(Event("demo.non_awaitable_handler", {})) == "unexpected"

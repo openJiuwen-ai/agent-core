@@ -14,7 +14,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, TypeAlias, cast
 
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import ValidationError, raise_error
+from openjiuwen.core.common.exception.errors import ValidationError, build_error, raise_error
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.events.bootstrap import register_builtins
 from openjiuwen.core.events.event_next import EventNext
 from openjiuwen.core.events.ops import EventHandlerOpsBuilder
@@ -22,7 +23,9 @@ from openjiuwen.core.events.protocol import EventHandler
 from openjiuwen.core.events.types import (
     OPS_BUILD_EVENT_TYPE,
     Event,
+    EventInputValidator,
     EventOutput,
+    EventOutputValidator,
     EventType,
     HandlerId,
     HandlerLevel,
@@ -48,6 +51,8 @@ EventDispatcher: TypeAlias = Callable[..., Awaitable[EventOutput | None]]
 class _EventRegistration:
     matcher: MatchPatternFunc
     dispatch: EventDispatcher
+    input_validator: EventInputValidator | None
+    output_validator: EventOutputValidator | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +126,36 @@ def _validate_handler_package_metadata(package_metadata: PackageMetadata | None)
         )
 
 
+def _run_validator(
+    validator: Callable[[object], bool] | None,
+    value: object,
+    value_name: str,
+) -> bool:
+    if validator is None:
+        return True
+    result = validator(value)
+    if not isinstance(result, bool):
+        raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason=f"{value_name} validator must return bool")
+    return result
+
+
+def _passes_through(
+    handler_id: HandlerId,
+    handler_level: HandlerLevel,
+    matched_handler_ids: frozenset[HandlerId],
+    target_level: HandlerLevel | None,
+) -> bool:
+    if handler_id not in matched_handler_ids or target_level is HandlerLevel.CORE:
+        return True
+    return target_level is HandlerLevel.BUILTIN and handler_level is HandlerLevel.USER
+
+
+async def _await_handler_result(result: object) -> EventOutput | None:
+    if not inspect.isawaitable(result):
+        raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="handler result must be awaitable")
+    return await result  # type: ignore[misc]
+
+
 def _reject_ops_build_handler_mutation(
     event_type: EventType,
     builder: EventHandlerOpsBuilder | None,
@@ -192,6 +227,8 @@ class ExtensionEventBus:
         event_type: EventType,
         matcher: MatchPatternFunc,
         core_handler: EventHandler,
+        input_validator: EventInputValidator | None,
+        output_validator: EventOutputValidator | None,
     ) -> None:
         if not isinstance(event_type, str) or _EVENT_TYPE_PATTERN.fullmatch(event_type) is None:
             raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="invalid event type")
@@ -203,21 +240,43 @@ class ExtensionEventBus:
             raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="matcher must be synchronous")
         if not callable(core_handler):
             raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="core handler must be callable")
+        for name, validator in (
+            ("input validator", input_validator),
+            ("output validator", output_validator),
+        ):
+            if validator is not None and not callable(validator):
+                raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason=f"{name} must be callable")
+            if validator is not None and inspect.iscoroutinefunction(validator):
+                raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason=f"{name} must be synchronous")
 
     def register_event_type(
         self,
         event_type: EventType,
         match_pattern_func: MatchPatternFunc,
         core_handler: EventHandler,
+        *,
+        input_validator: EventInputValidator | None = None,
+        output_validator: EventOutputValidator | None = None,
     ) -> None:
         """Register an event type and its CORE handler."""
-        self._validate_new_event_type(event_type, match_pattern_func, core_handler)
+        self._validate_new_event_type(
+            event_type,
+            match_pattern_func,
+            core_handler,
+            input_validator,
+            output_validator,
+        )
 
         # CORE sits at the tail of the framework wrap chain; ``wrap()`` returns the
         # dispatch entry that resolves the current WrapHandlers on every call.
-        core_terminal = self._create_core_terminal(core_handler)
+        core_terminal = self._create_core_terminal(core_handler, output_validator)
         dispatch: EventDispatcher = self._framework.wrap(event_type)(core_terminal)
-        self._events[event_type] = _EventRegistration(match_pattern_func, dispatch)
+        self._events[event_type] = _EventRegistration(
+            match_pattern_func,
+            dispatch,
+            input_validator,
+            output_validator,
+        )
 
     def register_event_handler(
         self,
@@ -237,7 +296,15 @@ class ExtensionEventBus:
 
         # USER handlers are outermost (higher priority), BUILTIN next; the framework
         # keeps registration order within the same priority.
-        adapter = self._create_handler_adapter(handler_id, handler, handler_level, package_metadata)
+        event_registration = self._events[event_type]
+        adapter = self._create_handler_adapter(
+            handler_id,
+            handler,
+            handler_level,
+            package_metadata,
+            event_registration.input_validator,
+            event_registration.output_validator,
+        )
         priority = 200 if handler_level is HandlerLevel.USER else 100
         self._framework.on_wrap(event_type, priority=priority)(adapter)
         registration = _HandlerRegistration(event_type, frozen_pattern, adapter, package_metadata)
@@ -257,7 +324,11 @@ class ExtensionEventBus:
     #   session_context     - normalized once at trigger(); read-only afterwards
     # Only ``target_level`` changes between hops; the other two travel unchanged.
 
-    def _create_core_terminal(self, core_handler: EventHandler) -> EventDispatcher:
+    def _create_core_terminal(
+        self,
+        core_handler: EventHandler,
+        output_validator: EventOutputValidator | None,
+    ) -> EventDispatcher:
         """Wrap the CORE handler as the innermost function of the framework chain."""
 
         async def core_terminal(
@@ -275,7 +346,10 @@ class ExtensionEventBus:
                 result = core_handler(event, ops, event_next)
                 if not inspect.isawaitable(result):
                     raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="core handler result must be awaitable")
-                return await result
+                output = await result
+                if not _run_validator(output_validator, output, "output"):
+                    raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="core handler output is invalid")
+                return output
 
         return core_terminal
 
@@ -285,6 +359,8 @@ class ExtensionEventBus:
         handler: EventHandler,
         handler_level: HandlerLevel,
         package_metadata: PackageMetadata | None,
+        input_validator: EventInputValidator | None,
+        output_validator: EventOutputValidator | None,
     ) -> WrapHandler:
         """Adapt a USER / BUILTIN handler to a framework WrapHandler.
 
@@ -303,23 +379,7 @@ class ExtensionEventBus:
             target_level: HandlerLevel | None,
             session_context: SessionContext | None,
         ) -> EventOutput | None:
-            # Pass-through cases: the handler was not matched, or an upstream
-            # ``to()`` asked for a layer inward of this one. Skipped handlers
-            # build no Ops and leave the chain arguments untouched.
-            not_matched = handler_id not in matched_handler_ids
-            skip_to_core = target_level is HandlerLevel.CORE
-            skip_user_layer = target_level is HandlerLevel.BUILTIN and handler_level is HandlerLevel.USER
-            if not_matched or skip_to_core or skip_user_layer:
-                return await call_next(
-                    event,
-                    matched_handler_ids=matched_handler_ids,
-                    target_level=target_level,
-                    session_context=session_context,
-                )
-
-            async def forward(next_event: Event, next_target: HandlerLevel | None) -> EventOutput | None:
-                # Called by EventNext.__call__ / to(): continue the framework chain
-                # with the handler-supplied event and jump target.
+            async def continue_chain(next_event: Event, next_target: HandlerLevel | None) -> EventOutput | None:
                 return await call_next(
                     next_event,
                     matched_handler_ids=matched_handler_ids,
@@ -327,14 +387,81 @@ class ExtensionEventBus:
                     session_context=session_context,
                 )
 
-            # One Ops per entered handler, bound to its own package and this session.
+            # Fast path: a skipped handler must not build Ops or create invocation state.
+            if _passes_through(handler_id, handler_level, matched_handler_ids, target_level):
+                return await continue_chain(event, target_level)
+
+            # Invocation-local facts. ``None`` means downstream has not run yet.
+            last_downstream_outcome: tuple[EventOutput | None, BaseException | None] | None = None
+            validator_failure: Exception | None = None
+            invalid_input_failure: Exception | None = None
+
+            # EventNext boundary: validate first, then remember the latest downstream outcome.
+            async def forward(next_event: Event, next_target: HandlerLevel | None) -> EventOutput | None:
+                nonlocal last_downstream_outcome, validator_failure, invalid_input_failure
+                try:
+                    input_is_valid = _run_validator(input_validator, next_event.event_input, "input")
+                except Exception as failure:
+                    validator_failure = failure
+                    raise
+                if not input_is_valid:
+                    invalid_input_failure = build_error(
+                        StatusCode.EVENTS_PAYLOAD_INVALID,
+                        reason="forwarded event input is invalid",
+                    )
+                    raise invalid_input_failure
+                try:
+                    output = await continue_chain(next_event, next_target)
+                except BaseException as failure:
+                    last_downstream_outcome = (None, failure)
+                    raise
+                last_downstream_outcome = (output, None)
+                return output
+
+            # Skip the current handler without replaying downstream.
+            async def skip_handler(failure: Exception) -> EventOutput | None:
+                downstream_output, downstream_failure = last_downstream_outcome or (None, None)
+                if failure is not downstream_failure:
+                    package_id = None if package_metadata is None else package_metadata.package_id
+                    logger.error(
+                        "Skipping failed extension event handler: "
+                        "event_type=%s handler_id=%s handler_level=%s package_id=%s error=%s",
+                        event.event_type,
+                        handler_id,
+                        handler_level.value,
+                        package_id,
+                        failure,
+                    )
+                if last_downstream_outcome is None:
+                    return await continue_chain(event, target_level)
+                if downstream_failure is not None:
+                    raise downstream_failure
+                return downstream_output
+
+            # Framework faults from Ops construction remain outside the handler fault boundary.
             ops = None if self._builder is None else self._builder.build(package_metadata, session_context)
-            # The ``with`` block scopes EventNext to this handler invocation.
-            with EventNext(event.event_type, handler_level, forward) as event_next:
-                result = handler(event, ops, event_next)
-                if not inspect.isawaitable(result):
-                    raise_error(StatusCode.EVENTS_REGISTRATION_INVALID, reason="handler result must be awaitable")
-                return await result
+            output: EventOutput | None = None
+            try:
+                with EventNext(event.event_type, handler_level, forward) as event_next:
+                    output = await _await_handler_result(handler(event, ops, event_next))
+            except Exception as handler_failure:
+                if validator_failure is None:
+                    return await skip_handler(handler_failure)
+
+            # A handler cannot swallow an event-definition failure or an invalid forwarded input.
+            if validator_failure is not None:
+                raise validator_failure
+            if invalid_input_failure is not None:
+                return await skip_handler(invalid_input_failure)
+
+            if not _run_validator(output_validator, output, "output"):
+                return await skip_handler(
+                    build_error(
+                        StatusCode.EVENTS_PAYLOAD_INVALID,
+                        reason="handler output is invalid",
+                    )
+                )
+            return output
 
         return adapter
 
@@ -384,6 +511,8 @@ class ExtensionEventBus:
         registration = self._events.get(event.event_type)
         if registration is None:
             raise_error(StatusCode.EVENTS_UNKNOWN_EVENT_INVALID, reason=f"unknown event type: {event.event_type}")
+        if not _run_validator(registration.input_validator, event.event_input, "input"):
+            raise_error(StatusCode.EVENTS_PAYLOAD_INVALID, reason="initial event input is invalid")
         if event.event_type == OPS_BUILD_EVENT_TYPE:
             return await self._build(event, registration)
         if self._builder is None:

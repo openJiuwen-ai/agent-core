@@ -59,4 +59,6 @@ class PackageMetadata:
 
 MatchPattern: TypeAlias = Mapping[str, object]
 MatchPatternFunc: TypeAlias = Callable[[EventInput, MatchPattern], bool]
+EventInputValidator: TypeAlias = Callable[[EventInput], bool]
+EventOutputValidator: TypeAlias = Callable[[EventOutput | None], bool]
 OpsMethod: TypeAlias = Callable[..., Awaitable[object]]

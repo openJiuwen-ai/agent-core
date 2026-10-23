@@ -25,6 +25,19 @@ async def _async_matcher(event_input: object, pattern: Mapping[str, object]) -> 
     return True
 
 
+def _input_is_mapping(event_input: object) -> bool:
+    return isinstance(event_input, Mapping)
+
+
+def _output_is_mapping(event_output: object | None) -> bool:
+    return isinstance(event_output, Mapping)
+
+
+async def _async_validator(value: object) -> bool:
+    del value
+    return True
+
+
 async def _core_handler(event: Event, ops: object | None, event_next: EventNext) -> object:
     del ops, event_next
     return event.event_input
@@ -74,6 +87,45 @@ async def test_event_type_registration_is_atomic_and_bus_scoped(
         first_bus.register_event_type(event_type, matcher, core_handler)
     assert invalid.value.status is StatusCode.EVENTS_REGISTRATION_INVALID
     assert first_bus._events == before_events
+
+
+def test_event_type_registration_stores_sync_validators() -> None:
+    bus = ExtensionEventBus()
+
+    bus.register_event_type(
+        "demo.validated",
+        _matches,
+        _core_handler,
+        input_validator=_input_is_mapping,
+        output_validator=_output_is_mapping,
+    )
+
+    registration = bus._events["demo.validated"]
+    assert registration.input_validator is _input_is_mapping
+    assert registration.output_validator is _output_is_mapping
+
+
+@pytest.mark.parametrize(
+    ("options", "reason"),
+    [
+        ({"input_validator": object()}, "input validator"),
+        ({"output_validator": object()}, "output validator"),
+        ({"input_validator": _async_validator}, "input validator"),
+        ({"output_validator": _async_validator}, "output validator"),
+    ],
+)
+def test_event_type_registration_rejects_invalid_validators_without_state(
+    options: dict[str, object],
+    reason: str,
+) -> None:
+    bus = ExtensionEventBus()
+    before_events = dict(bus._events)
+
+    with pytest.raises(ValidationError, match=reason) as invalid:
+        bus.register_event_type("demo.invalid_validator", _matches, _core_handler, **options)
+
+    assert invalid.value.status is StatusCode.EVENTS_REGISTRATION_INVALID
+    assert bus._events == before_events
 
 
 def test_new_bus_preregisters_ops_build() -> None:

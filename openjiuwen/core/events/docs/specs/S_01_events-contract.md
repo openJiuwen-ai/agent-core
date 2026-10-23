@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 编号 / slug | `S_01 / events-contract` |
 | 关联模块 | `openjiuwen/core/events/`；消费方包括 Core 业务模块、扩展运行时和 JiuwenSwarm 宿主 |
-| 最近一次修订日期 | 2026-10-21 |
+| 最近一次修订日期 | 2026-10-23 |
 | 关联 feature | [F_01 EV-08 公共契约](../features/F_01_ev08-public-contract.md)；进度见[开发计划 EV-08](../designs/events-development-plan.md#ev-08-公共契约与接口基线可供外部并行开发) |
 | 设计依据 | [设计概览](../designs/events-overview.md)、[详细架构](../designs/events-architecture.md) |
 
@@ -37,7 +37,7 @@
 
 | 对象 | 事实持有者 | 修改入口或责任 |
 | --- | --- | --- |
-| 事件类型、匹配函数、唯一 CORE | EventBus | `register_event_type()` / `unregister_event_type()` |
+| 事件类型、匹配函数、唯一 CORE、可选输入/输出 Validator | EventBus | `register_event_type()` / `unregister_event_type()` |
 | USER / BUILTIN Handler、模式、层级、注册顺序 | EventBus | `register_event_handler()` / `unregister_event_handler()` |
 | Event 与业务输入 | 调用方 | 构造 Event；链内如需改参则构造新 Event 交给 EventNext |
 | SessionContext | 调用入口 | 每次 `trigger()` 规范化一次，调用内只读 |
@@ -91,6 +91,8 @@ class PackageMetadata:
 
 MatchPattern: TypeAlias = Mapping[str, object]
 MatchPatternFunc: TypeAlias = Callable[[EventInput, MatchPattern], bool]
+EventInputValidator: TypeAlias = Callable[[EventInput], bool]
+EventOutputValidator: TypeAlias = Callable[[EventOutput | None], bool]
 
 
 class EventNext:
@@ -117,13 +119,13 @@ EventType 使用字符串，不使用枚举。业务事件名由业务平台在�
 - HandlerId 是所属 Bus 实例内唯一的不透明字符串，只用于注销注册记录。
 - `PackageMetadata.package_id` 和 `SessionContext.session_id` 必须非空；缺失字段不得从 EventInput 推断。
 - `SessionContext.metadata` 和 MatchPattern 只允许 `None`、`bool`、`int`、`float`、`str`，以及由这些值递归组成的映射和序列。Bus 在边界复制并转成只读形态。
-- MatchPatternFunc 必须同步、无阻塞、无业务副作用，并且返回 `bool`。
+- MatchPatternFunc 与 EventType 可选 Validator 必须同步、无阻塞、无业务副作用，并且返回严格的 `bool`。
 
 ### 2.3 公共导出
 
 `openjiuwen.core.events` 的目标公共导出为：
 
-- 标识与模型：EventType、EventInput、EventOutput、HandlerId、OPS_BUILD_EVENT_TYPE、HandlerLevel、Event、SessionContext、PackageMetadata、MatchPattern、MatchPatternFunc。
+- 标识与模型：EventType、EventInput、EventOutput、HandlerId、OPS_BUILD_EVENT_TYPE、HandlerLevel、Event、SessionContext、PackageMetadata、MatchPattern、MatchPatternFunc、EventInputValidator、EventOutputValidator。
 - 回调与协议：EventHandler、OpsMethod、ExtensionEventBusProtocol。
 - 运行时对象：EventNext（`openjiuwen/core/events/event_next.py`）、EventHandlerOpsBuilder 和 EventHandlerOps（`openjiuwen/core/events/ops.py`）、ExtensionEventBus。
 
@@ -133,7 +135,7 @@ EventType 使用字符串，不使用枚举。业务事件名由业务平台在�
 
 1. **唯一 CORE：** 每个已登记 EventType 必须且只能有一个 CORE；CORE 只通过 `register_event_type()` 登记。
 2. **固定层级：** 单次调用按 USER → BUILTIN → CORE 进入，同层按注册顺序进入；正常返回顺序相反。
-3. **调用快照：** 普通 `trigger()` 在首次 `await` 前固定匹配函数、CORE 和 Handler 记录；之后的注册或注销只影响后续调用。
+3. **调用快照：** 普通 `trigger()` 在首次 `await` 前固定匹配函数、CORE、可选 Validator 和 Handler 记录；之后的注册或注销只影响后续调用。
 4. **单次推进：** 每个 EventNext 只能由当前 Handler 所属异步任务，在 Handler 执行期间成功调用一次。
 5. **Build 一次成功：** Bus 构造和普通业务调用都不触发 Build；宿主可以在首次成功前重试 `trigger(ops.build)`；第一次成功后 Bus 保存 Builder，同一 Bus 不再执行第二次 Build。
 6. **业务调用依赖 Builder：** Bus 尚未保存 Builder 时，普通业务 `trigger()` 必须失败；普通业务调用不执行 `ops.build`。
@@ -153,6 +155,9 @@ class ExtensionEventBusProtocol(Protocol):
         event_type: EventType,
         match_pattern_func: MatchPatternFunc,
         core_handler: EventHandler,
+        *,
+        input_validator: EventInputValidator | None = None,
+        output_validator: EventOutputValidator | None = None,
     ) -> None: ...
 
     def unregister_event_type(self, event_type: EventType) -> None: ...
@@ -180,11 +185,13 @@ class ExtensionEventBusProtocol(Protocol):
 
 ### 4.2 注册和注销
 
-#### `register_event_type(event_type, match_pattern_func, core_handler)`
+#### `register_event_type(event_type, match_pattern_func, core_handler, *, input_validator=None, output_validator=None)`
 
-- 三个参数作为一个原子事实登记；重复 EventType 不覆盖旧定义。
+- 前三个位置参数作为一个原子事实登记；重复 EventType 不覆盖旧定义。
+- `input_validator` 与 `output_validator` 是仅关键字可选参数。未传入时保持与未配置 Validator 的现有行为一致。
+- 可选 Validator 必须是同步 callable，并返回严格的 `bool`；与 matcher、CORE 一并保存在事件定义中，`unregister_event_type()` 时一并释放。
 - 调用方不得登记 `ops.` 前缀事件。`ops.build` 及其 CORE 由 Core 内部预置。
-- EventType、匹配函数或 CORE 非法时，以 `EVENTS_REGISTRATION_INVALID` 拒绝且不留下部分记录。
+- EventType、匹配函数、CORE 或 Validator 配置非法时，以 `EVENTS_REGISTRATION_INVALID` 拒绝且不留下部分记录。
 
 #### `register_event_handler(event_type, handler, match_pattern, handler_level=USER, *, package_metadata=None)`
 
@@ -218,14 +225,15 @@ class ExtensionEventBusProtocol(Protocol):
 Bus 按以下顺序处理普通调用：
 
 1. 校验 EventType 和 Event；Bus 尚未保存 Builder 时以 `EVENTS_STATE_INVALID` 拒绝。
-2. 在首次 `await` 前固定匹配函数、CORE 和 USER / BUILTIN Handler 快照。
+2. 在首次 `await` 前固定匹配函数、CORE、可选 Validator 和 USER / BUILTIN Handler 快照。
 3. 将受支持 Session、SessionContext 或 None 规范化一次。
-4. 用 MatchPatternFunc 筛选 USER / BUILTIN；CORE 不参与筛选。
-5. 按 USER → BUILTIN → CORE 执行，链内不重新匹配。
-6. 每次进入 Handler 前构建独立 Ops。`Builder.build(package_metadata, session_context)` 的 package_metadata 取自该 Handler 注册记录，CORE 传 `None`。
-7. 将最外层 Handler 返回的 `EventOutput | None` 原样交给调用方。
+4. 若事件定义配置了 `input_validator`，校验初始 `event_input`；返回 `False` 时以 `EVENTS_PAYLOAD_INVALID` 拒绝，matcher 和 Handler 均不执行。
+5. 用 MatchPatternFunc 筛选 USER / BUILTIN；CORE 不参与筛选。
+6. 按 USER → BUILTIN → CORE 执行，链内不重新匹配。USER / BUILTIN Adapter 在 Handler 调用 `EventNext` 传入新 Event 前校验 `event_input`；Handler 正常返回后校验 Handler 输出；CORE 正常返回后校验 CORE 输出。未配置对应 Validator 时跳过该项业务校验。
+7. 每次进入 Handler 前构建独立 Ops。`Builder.build(package_metadata, session_context)` 的 package_metadata 取自该 Handler 注册记录，CORE 传 `None`。
+8. 将最外层合法结果交给调用方；CORE 或入口校验失败时 `trigger()` 失败。
 
-本规约不引入通用输入/输出校验器。具体 payload 约束由业务事件自己的模型或 Handler/CORE 负责。
+Validator 返回 `False` 表示业务值非法；Validator 抛异常或返回非 `bool` 时视为事件定义错误，原样传播，不适用扩展 Handler 的 skip。预置事件通过同一注册参数声明 Validator，不增加专用容错分支。
 
 ### 4.5 EventNext
 
@@ -293,12 +301,14 @@ Events 不定义专属异常类。契约失败通过 Core `raise_error` 使用�
 | `EVENTS_REGISTRATION_INVALID` | 重复事件、非法层级、非法回调/模式或非法 `ops.` 登记 |
 | `EVENTS_UNKNOWN_EVENT_INVALID` | trigger 使用未知事件 |
 | `EVENTS_STATE_INVALID` | Bus 尚未保存 Builder、重复 Build 或 Build 成功后变更 Build Handler |
-| `EVENTS_PAYLOAD_INVALID` | Event、SessionContext 或 PackageMetadata 的结构/只读值非法 |
+| `EVENTS_PAYLOAD_INVALID` | Event、SessionContext、PackageMetadata 的结构/只读值非法，或初始 `event_input` 未通过事件定义的 `input_validator` |
 | `EVENTS_MATCH_INVALID` | 匹配函数抛错、阻塞契约被违反或返回非 bool |
 | `EVENTS_NEXT_INVALID` | 非法跳层、跨任务、失效后推进或改变 event_type |
 | `EVENTS_OPS_INVALID` | 能力冲突/缺失或构建失败 |
 
-Handler、能力函数和业务 CORE 抛出的业务异常保持原类型和原因链向外传播。`asyncio.CancelledError` 原样传播，不转换成正常 `None`。
+下游 Handler、能力函数和业务 CORE 抛出的异常，以及 Validator 自身故障，保持原类型和原因链向外传播。`asyncio.CancelledError` 原样传播，不转换成正常 `None`，也不记录为扩展 Handler 被隔离。
+
+USER / BUILTIN Handler 在自身抛异常、返回非 awaitable、转发输入未通过 `input_validator`（返回 `False`）或输出未通过 `output_validator`（返回 `False`）时，跳过当前 Handler 并执行固定恢复：下游尚未执行时使用该 Handler 收到的原始 Event 继续下游一次；最后一次下游已成功时复用该结果（含合法 `None`）；最后一次下游已失败时传播该失败，不得再次调用下游，也不得回退到更早的成功结果。容错机制不得重放已执行的下游或 CORE。每次进入 skip 时通过 Core 日志输出一条 error，字段限于 `event_type`、`handler_id`、`handler_level`、可用的 `package_id` 和异常信息，不记录业务输入、输出或工具数据；调用方在恢复成功时取得正常结果。CORE 不参与 skip。Handler 超时与 `.catch()` 自定义兜底不在本期范围。
 
 ## 5. 生命周期与资源责任
 
