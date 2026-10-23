@@ -10,10 +10,21 @@ from typing import Dict, Optional, Union, Callable, Any, Coroutine, List
 from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.graph.pregel.base import TriggerMessage, PregelNode, Channel, Interrupt, GraphInterrupt
 from openjiuwen.core.graph.pregel.channels import ChannelManager
-from openjiuwen.core.graph.pregel.config import PregelConfig, DEFAULT_PREGEL_CONFIG, InnerPregelConfig, \
-    create_inner_config
-from openjiuwen.core.graph.pregel.constants import END, TASK_STATUS_INTERRUPT, START, \
-    PARENT_NS, NS, SESSION_ID, RECURSION_LIMIT
+from openjiuwen.core.graph.pregel.config import (
+    PregelConfig,
+    DEFAULT_PREGEL_CONFIG,
+    InnerPregelConfig,
+    create_inner_config,
+)
+from openjiuwen.core.graph.pregel.constants import (
+    END,
+    TASK_STATUS_INTERRUPT,
+    START,
+    PARENT_NS,
+    NS,
+    SESSION_ID,
+    RECURSION_LIMIT,
+)
 from openjiuwen.core.graph.pregel.task import TaskExecutorPool
 from openjiuwen.core.graph.store import GraphState, PendingNode, Store, create_state
 from openjiuwen.core.runner.callback import trigger
@@ -66,7 +77,8 @@ class PregelLoop:
             # Add GRAPH_SUPER_STEP_ERROR log
             if not isinstance(e, GraphInterrupt):
                 graph_logger.error(
-                    f"Failed to run graph super-step[{self.step}]",
+                    "Failed to run graph super-step[%s]",
+                    self.step,
                     event_type=LogEventType.GRAPH_SUPER_STEP_ERROR,
                     exception=e,
                     graph_id=self.config.get(NS),
@@ -75,7 +87,7 @@ class PregelLoop:
                         "ns": self.config.get(NS),
                         "step": self.step,
                         "active_nodes": list(self.active_nodes) if self.active_nodes else [],
-                    }
+                    },
                 )
             await self._save_state_on_error(e)
             raise e
@@ -83,20 +95,17 @@ class PregelLoop:
     @staticmethod
     def _is_resume(state: GraphState) -> bool:
         return state is not None and (
-                bool(state.pending_node) or bool(state.pending_buffer) or bool(state.channel_values))
+            bool(state.pending_node) or bool(state.pending_buffer) or bool(state.channel_values)
+        )
 
     async def _run_step(self) -> bool:
         # Add GRAPH_SUPER_STEP_START log
         graph_logger.debug(
-            f"Start to run graph super-step[{self.step}]",
+            "Start to run graph super-step[%s]",
+            self.step,
             event_type=LogEventType.GRAPH_SUPER_STEP_START,
             graph_id=self.config.get(NS),
             session_id=self.config.get(SESSION_ID),
-            metadata={
-                "ns": self.config.get(NS),
-                "step": self.step,
-                "active_nodes": list(self.active_nodes) if self.active_nodes else []
-            }
         )
         # Retry tasks from graph state
         if self._retry_pending_nodes:
@@ -123,9 +132,7 @@ class PregelLoop:
             return True
 
         if self.step > self.max_step:
-            raise RecursionError(
-                f"Recursion limit of {self.max_step} reached at step {self.step}"
-            )
+            raise RecursionError(f"Recursion limit of {self.max_step} reached at step {self.step}")
 
         # 1. Consume and submit each node in one pass.
         for name in self.active_nodes:
@@ -159,16 +166,12 @@ class PregelLoop:
 
     async def _save_state_on_error(self, exception: Exception):
         graph_logger.debug(
-            f"Failed to run graph super-step[{self.step}], caused by save state",
+            "Failed to run graph super-step[%s], caused by save state",
+            self.step,
             event_type=LogEventType.GRAPH_SUPER_STEP_ERROR,
             exception=exception,
             graph_id=self.config.get(NS),
             session_id=self.config.get(SESSION_ID),
-            metadata={
-                "ns": self.config.get(NS),
-                "step": self.step,
-                "active_nodes": list(self.active_nodes) if self.active_nodes else [],
-            }
         )
         if not self.config.get(SESSION_ID) or not self.config.get(NS) or not self.saver:
             return
@@ -183,29 +186,21 @@ class PregelLoop:
             channel_snapshot=self.manager.snapshot(),
             pending_buffer=pending_buffer,
             pending_node=pending_node,
-            node_version=self.node_version
+            node_version=self.node_version,
         )
-        await self.saver.save(
-            session_id=self.config[SESSION_ID],
-            ns=self.config[NS],
-            state=error_state
-        )
+        await self.saver.save(session_id=self.config[SESSION_ID], ns=self.config[NS], state=error_state)
 
 
 class Pregel:
-
     def __init__(
-            self,
-            nodes: Dict[str, PregelNode],
-            channels: List[Channel],
-            initial: str = START,
-            store: Store | None = None,
-            after_step: Optional[
-                Union[
-                    Callable[[PregelLoop], Any],
-                    Callable[[PregelLoop], Coroutine[Any, Any, Any]]
-                ]
-            ] = None,
+        self,
+        nodes: Dict[str, PregelNode],
+        channels: List[Channel],
+        initial: str = START,
+        store: Store | None = None,
+        after_step: Optional[
+            Union[Callable[[PregelLoop], Any], Callable[[PregelLoop], Coroutine[Any, Any, Any]]]
+        ] = None,
     ):
         self.nodes = nodes
         self.store = store
@@ -214,8 +209,9 @@ class Pregel:
         self.initial = initial
         self.after_step = after_step
 
-    async def run(self, config: Optional[PregelConfig] = None) -> None | dict[
-        Any, Any] | dict[str, Interrupt | tuple[Interrupt, ...] | None]:
+    async def run(
+        self, config: Optional[PregelConfig] = None
+    ) -> None | dict[Any, Any] | dict[str, Interrupt | tuple[Interrupt, ...] | None]:
         inner_config: InnerPregelConfig = create_inner_config(config or DEFAULT_PREGEL_CONFIG)
         is_top_level = not inner_config.get(PARENT_NS)
         if is_top_level:
@@ -229,42 +225,34 @@ class Pregel:
             event_type=LogEventType.GRAPH_START,
             graph_id=inner_config.get(NS),
             session_id=inner_config.get(SESSION_ID),
-            metadata={"is_top_level": is_top_level}
+            metadata={"is_top_level": is_top_level},
         )
 
         loop = PregelLoop(self, inner_config)
         try:
             await loop.init()
-            await trigger(
-                WorkflowEvents.LOOP_STARTED,
-                graph_id=inner_config.get(NS))
+            await trigger(WorkflowEvents.LOOP_STARTED, graph_id=inner_config.get(NS))
             while await loop.run_step():
                 pass
-            await trigger(
-                WorkflowEvents.LOOP_FINISHED,
-                graph_id=inner_config.get(NS),
-                total_steps=loop.step)
+            await trigger(WorkflowEvents.LOOP_FINISHED, graph_id=inner_config.get(NS), total_steps=loop.step)
             # Add GRAPH_END log
             graph_logger.debug(
                 "Pregel graph engine execution completed",
                 event_type=LogEventType.GRAPH_END,
                 graph_id=inner_config.get(NS),
                 session_id=inner_config.get(SESSION_ID),
-                metadata={"total_steps": loop.step}
+                metadata={"total_steps": loop.step},
             )
             return {}
         except GraphInterrupt as e:
-            await trigger(
-                WorkflowEvents.LOOP_FINISHED,
-                graph_id=inner_config.get(NS),
-                total_steps=loop.step)
+            await trigger(WorkflowEvents.LOOP_FINISHED, graph_id=inner_config.get(NS), total_steps=loop.step)
             # Add GRAPH_END log (interrupted case)
             graph_logger.debug(
                 "Pregel graph engine execution interrupted",
                 event_type=LogEventType.GRAPH_END,
                 graph_id=inner_config.get(NS),
                 session_id=inner_config.get(SESSION_ID),
-                metadata={"total_steps": loop.step}
+                metadata={"total_steps": loop.step},
             )
             if is_top_level:
                 return {TASK_STATUS_INTERRUPT: e.value}

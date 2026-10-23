@@ -277,11 +277,11 @@ class PregelGraph(Graph):
             if session:
                 session.state().commit()
             graph_logger.debug(
-                f"Finished to run graph super-step [{loop.step}]",
+                "Finished to run graph super-step [%s]",
+                loop.step,
                 event_type=LogEventType.GRAPH_SUPER_STEP_END,
                 graph_id=loop.config["ns"],
                 session_id=loop.config.get(SESSION_ID),
-                metadata={"ns": loop.config["ns"], "step": loop.step, "active_nodes": list(loop.active_nodes)},
             )
 
         checkpointer = session.checkpointer()

@@ -583,12 +583,14 @@ class WorkflowStreamEvent(StreamEvent):
 @dataclass
 class GraphEvent(BaseLogEvent):
     """Graph execution related event"""
+
     graph_id: Optional[str] = None
     node_id: Optional[str] = None
     node_name: Optional[str] = None
     inputs: Optional[Any] = None  # batch inputs
     outputs: Optional[Any] = None  # batch outputs
     chunk: Optional[Any] = None  # Stream chunk data
+    duration_ms: Optional[float] = None  # Node ability call wall time
 
 
 @dataclass
@@ -676,12 +678,10 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     # Graph stream events
     LogEventType.GRAPH_SEND_STREAM_CHUNK: GraphEvent,
     LogEventType.GRAPH_RECEIVE_STREAM_CHUNK: GraphEvent,
-
     # Session stream events
     LogEventType.SESSION_STREAM_CHUNK: SessionEvent,
     LogEventType.SESSION_STREAM_ERROR: SessionEvent,
     # Graph events
-
     LogEventType.GRAPH_VERTEX_INIT: GraphEvent,
     LogEventType.GRAPH_VERTEX_CALL_START: GraphEvent,
     LogEventType.GRAPH_VERTEX_CALL_END: GraphEvent,
@@ -695,7 +695,6 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.GRAPH_VERTEX_ABILITY_RUNNING: GraphEvent,
     LogEventType.GRAPH_VERTEX_ABILITY_END: GraphEvent,
     LogEventType.GRAPH_VERTEX_ABILITY_ERROR: GraphEvent,
-
     LogEventType.GRAPH_SUPER_STEP_START: GraphEvent,
     LogEventType.GRAPH_SUPER_STEP_END: GraphEvent,
     LogEventType.GRAPH_SUPER_STEP_ERROR: GraphEvent,
@@ -706,11 +705,9 @@ EVENT_CLASS_MAP: Dict[LogEventType, type] = {
     LogEventType.GRAPH_STORE_SAVE: GraphEvent,
     LogEventType.GRAPH_STORE_DELETE: GraphEvent,
     LogEventType.GRAPH_STORE_GET: GraphEvent,
-
     # Runner events
     LogEventType.RUNNER_START: RunnerEvent,
     LogEventType.RUNNER_STOP: RunnerEvent,
-
     LogEventType.RESOURCE_MGR_ADD_RESOURCE: RunnerEvent,
     LogEventType.RESOURCE_MGR_REMOVE_RESOURCE: RunnerEvent,
     LogEventType.RESOURCE_MGR_GET_RESOURCE: RunnerEvent,
@@ -862,7 +859,7 @@ def create_log_event(event_type: LogEventType | str, **kwargs: Any) -> BaseLogEv
 
     # Smart detection: Stream events choose specific class based on context
     if event_class == StreamEvent:
-        workflow_indicators = {'workflow_id', 'component_id', 'component_type_str'}
+        workflow_indicators = {"workflow_id", "component_id", "component_type_str"}
         if any(key in kwargs for key in workflow_indicators):
             event_class = WorkflowStreamEvent
 

@@ -154,7 +154,8 @@ class ActorManager:
                 )
         else:
             logger.debug(
-                f"Discard chunk send from [{producer_id}] to none consumer",
+                "Discard chunk send from [%s] to none consumer",
+                producer_id,
                 event_type=LogEventType.GRAPH_SEND_STREAM_CHUNK,
                 chunk=message_content,
             )
