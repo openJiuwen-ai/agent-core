@@ -3,6 +3,11 @@
 workspace_dir: .local/rsi/workspace
 max_epochs: 5
 
+promotion:
+  policy_version: continuous_two_stage_v2
+  min_improvement: 0.05
+  non_target_max_regression: 0.05
+
 model_configs:
   evaluation: ""
   analysis: ""
@@ -18,6 +23,7 @@ data_loader:
     - task_type
 
 evaluator:
+  score_mode: continuous
   output_repair:
     max_attempts: 3
     max_stagnant_attempts: 2

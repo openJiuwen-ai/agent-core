@@ -267,6 +267,7 @@ class CaseRunner:
                     "execution_status": execution_result.execution_status,
                     "evaluation_method": judge_result.method,
                     "evaluation_passed": judge_result.passed,
+                    "score_mode": judge_result.metadata.get("score_mode", "binary"),
                 },
             )
         except Exception as exc:

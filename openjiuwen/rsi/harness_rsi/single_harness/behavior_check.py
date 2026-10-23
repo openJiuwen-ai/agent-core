@@ -164,12 +164,15 @@ def _observation_errors(raw: dict[str, Any], checked: dict[str, Any]) -> list[st
     return errors
 
 
-def feedback_route(observation: dict[str, Any], *, task_passed: bool) -> str:
+def feedback_route(
+    observation: dict[str, Any], *, task_passed: bool, score_improved: bool | None = None,
+) -> str:
     """Keep score, availability and semantic evidence separate."""
     if observation.get("availability") == "no":
         return "repair_activation"
     if observation.get("source_check") == "no" and observation.get("candidate_check") == "yes":
-        return "verified" if task_passed else "investigate_residuals"
+        numerical_acceptance = task_passed if score_improved is None else score_improved
+        return "verified" if numerical_acceptance else "investigate_residuals"
     if observation.get("behavior_changed") == "no":
         return "repair_execution" if observation.get("availability") == "yes" else "collect_behavior_evidence"
     if observation.get("behavior_changed") == "yes" and observation.get("candidate_check") == "no":

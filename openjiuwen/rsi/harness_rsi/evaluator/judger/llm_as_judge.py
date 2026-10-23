@@ -298,7 +298,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
         passed = score >= self._config.judge_success_score
         return JudgeResult(
             method=self.method,
-            score=float(passed),
+            score=score if self._config.score_mode == "continuous" else float(passed),
             passed=passed,
             reason=normalized["overall_reason"],
             metadata={
@@ -307,6 +307,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
                 "requirement_results": requirements,
                 "judge_dir": str(judge_dir),
                 "pass_threshold": self._config.judge_success_score,
+                "score_mode": self._config.score_mode,
                 "optimization_signals": optimization_signals_contract(
                     continuous_score=score,
                     source="llm_as_judge.assessment.overall_score",

@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+import math
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 from openjiuwen.rsi.harness_rsi.model_call import DEFAULT_MODEL_CALL_MAX_RETRIES
@@ -61,6 +62,7 @@ class EvaluatorConfig:
     judge_max_retries: int = 2
     output_repair: OutputRepairConfig = field(default_factory=OutputRepairConfig)
     judge_success_score: float = 0.8
+    score_mode: str = "binary"
     transient_case_retry_limit: int = 2
     solver_backend: str = "deep_agent"
     solver_max_iterations: int = 300
@@ -74,6 +76,8 @@ class EvaluatorConfig:
     solver_max_iterations_hard_limit: int = 300
 
     def __post_init__(self) -> None:
+        if self.score_mode not in {"binary", "continuous"}:
+            raise ValueError("evaluator.score_mode must be binary or continuous")
         if type(self.solver_max_iterations) is not int or self.solver_max_iterations < 1:
             raise ValueError("evaluator.solver_max_iterations must be a positive integer")
         if type(self.solver_max_iterations_hard_limit) is not int or self.solver_max_iterations_hard_limit < self.solver_max_iterations:
@@ -95,6 +99,7 @@ class EvaluatorConfig:
             judge_max_retries=_int_value(data.get("judge_max_retries"), default=2),
             output_repair=OutputRepairConfig.from_dict(data.get("output_repair")),
             judge_success_score=float(data.get("judge_success_score", 0.8)),
+            score_mode=str(data.get("score_mode", "binary")),
             transient_case_retry_limit=_int_value(
                 data.get("transient_case_retry_limit"),
                 default=2,
@@ -118,6 +123,14 @@ class EvaluatorConfig:
             ),
             jiuwenswarm_runtime_profile=str(data.get("jiuwenswarm_runtime_profile", "task86")),
         )
+
+
+def evaluator_protocol_config(config: EvaluatorConfig) -> dict[str, Any]:
+    """Keep historical evaluator fingerprints stable for legacy binary runs."""
+    payload = asdict(config)
+    if config.score_mode == "binary":
+        payload.pop("score_mode")
+    return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,6 +314,41 @@ class OrchestratorSchedulingConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PromotionConfig:
+    """Versioned score authority; historical tasks retain their original policy."""
+
+    policy_version: str = "legacy_epoch_v1"
+    min_improvement: float = 0.05
+    non_target_max_regression: float = 0.05
+
+    def __post_init__(self) -> None:
+        if self.policy_version not in {"legacy_epoch_v1", "continuous_two_stage_v2"}:
+            raise ValueError("unsupported promotion.policy_version; start a new task using continuous_two_stage_v2")
+        if (isinstance(self.min_improvement, bool) or not isinstance(self.min_improvement, (int, float))
+                or not math.isfinite(self.min_improvement) or not 0 <= self.min_improvement <= 1):
+            raise ValueError("promotion.min_improvement must be a finite number between 0 and 1")
+        if (isinstance(self.non_target_max_regression, bool)
+                or not isinstance(self.non_target_max_regression, (int, float))
+                or not math.isfinite(self.non_target_max_regression) or not 0 <= self.non_target_max_regression <= 1):
+            raise ValueError("promotion.non_target_max_regression must be a finite number between 0 and 1")
+
+    @property
+    def continuous(self) -> bool:
+        """Whether the run uses full-package continuous promotion."""
+        return self.policy_version == "continuous_two_stage_v2"
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "PromotionConfig":
+        if data.get("policy_version") == "continuous_two_stage_v2" and "confirmation_runs" in data:
+            raise ValueError("continuous_two_stage_v2 has only target and full evaluations; remove confirmation_runs")
+        return cls(
+            policy_version=str(data.get("policy_version", "legacy_epoch_v1")),
+            min_improvement=_float_value(data.get("min_improvement"), default=0.05),
+            non_target_max_regression=_float_value(data.get("non_target_max_regression"), default=0.05),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AutoCoordinatingHarnessConfig:
     """Top-level standalone Harness optimization configuration."""
 
@@ -312,6 +360,7 @@ class AutoCoordinatingHarnessConfig:
     evaluation_result_analyzer: EvaluationResultAnalyzerConfig = field(default_factory=EvaluationResultAnalyzerConfig)
     member_optimizer: MemberOptimizerConfig = field(default_factory=MemberOptimizerConfig)
     scheduling: OrchestratorSchedulingConfig = field(default_factory=OrchestratorSchedulingConfig)
+    promotion: PromotionConfig = field(default_factory=PromotionConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AutoCoordinatingHarnessConfig":
@@ -319,6 +368,9 @@ class AutoCoordinatingHarnessConfig:
         evaluator = EvaluatorConfig.from_dict(_mapping(data.get("evaluator")))
         analyzer = EvaluationResultAnalyzerConfig.from_dict(_mapping(data.get("evaluation_result_analyzer")))
         optimizer = MemberOptimizerConfig.from_dict(_mapping(data.get("member_optimizer")))
+        promotion = PromotionConfig.from_dict(_mapping(data.get("promotion")))
+        if promotion.continuous:
+            evaluator = replace(evaluator, score_mode="continuous")
         model_configs = ModelConfigs(
             evaluation=model_configs.evaluation or evaluator.model_config_ref,
             analysis=model_configs.analysis or analyzer.model_config_ref,
@@ -336,6 +388,7 @@ class AutoCoordinatingHarnessConfig:
                 runtime_iteration_hard_limit=evaluator.solver_max_iterations_hard_limit,
             ),
             scheduling=OrchestratorSchedulingConfig.from_dict(_mapping(data.get("scheduling"))),
+            promotion=promotion,
         )
         config.validate()
         return config
@@ -433,4 +486,5 @@ __all__ = [
     "MemberOptimizerConfig",
     "ModelConfigs",
     "OrchestratorSchedulingConfig",
+    "PromotionConfig",
 ]

@@ -241,6 +241,9 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
     }
     if full_evaluation_skipped_reason:
         extra["full_evaluation_skipped_reason"] = full_evaluation_skipped_reason
+    if state.get("promotion_policy", {}).get("policy_version") in {"continuous_margin_v1", "continuous_two_stage_v2"}:
+        extra.update({"score_mode": "continuous", "best_reference_score": state.get("best_reference_score"),
+                      "latest_evaluated_score": checkpoint.get("score"), "promotion_policy": state["promotion_policy"]})
     return EventNode(
         node=RsiTreeNode(
             node_id=f"epoch-{epoch:03d}",

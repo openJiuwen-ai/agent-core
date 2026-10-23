@@ -2596,7 +2596,10 @@ class DiagnosisAgentStrategy:
 
         diagnosis_case_inputs = [
             case for case in case_inputs
-            if not case.evaluation_passed or (case.evaluation_method != "llm_as_judge" and case.score < 1.0)
+            if not case.evaluation_passed or (
+                case.score < 1.0 and (case.evaluation_method != "llm_as_judge"
+                                     or case.evaluation_metadata.get("score_mode") == "continuous")
+            )
         ]
         per_case_results = await self._per_case_diagnosis(
             diagnosis_case_inputs,

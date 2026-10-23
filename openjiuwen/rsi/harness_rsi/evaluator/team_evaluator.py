@@ -17,6 +17,7 @@ from typing import Any
 import yaml
 
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.config.config import evaluator_protocol_config
 from openjiuwen.rsi.harness_rsi.data_loader import load_json_cases
 from openjiuwen.rsi.harness_rsi.data_loader.case_files import file_fingerprint, validate_case_fields
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
@@ -292,11 +293,11 @@ def _evaluation_input_fingerprint(
     if evaluator_config:
         from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import _material_identity
 
-        payload["evaluator"] = _material_identity(evaluator_config, Path.cwd())
+        payload["evaluator"] = _material_identity(evaluator_protocol_config(evaluator_config), Path.cwd())
     if evaluator_config and evaluator_config.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge":
         from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import judge_protocol_identity
-        payload["llm_judge_score_contract"] = "threshold_binary_v1"
-        payload["judge_protocol"] = judge_protocol_identity()
+        payload["llm_judge_score_contract"] = "threshold_binary_v1" if evaluator_config.score_mode == "binary" else "continuous"
+        payload["judge_protocol"] = judge_protocol_identity(evaluator_config.score_mode)
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 

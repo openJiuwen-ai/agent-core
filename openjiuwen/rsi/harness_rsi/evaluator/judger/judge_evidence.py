@@ -18,7 +18,7 @@ _RESPONSE_PAGE_BYTES = 24000
 _RESPONSE_PAGE_LINES = 1000
 
 
-def judge_protocol_identity() -> dict[str, str]:
+def judge_protocol_identity(score_mode: str = "binary") -> dict[str, str]:
     """Invalidate cached grades when the evidence layout or grading policy changes."""
     return {
         "evidence_layout": "complete_evidence_closeout_v7",
