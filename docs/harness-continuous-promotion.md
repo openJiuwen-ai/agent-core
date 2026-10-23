@@ -36,7 +36,17 @@ baseline. A historical peak or target precheck score never replaces that vector.
 Whole packages are accepted independently; epochs are scheduling budgets without
 filtering and recombining provisional packages at the end.
 
-Outputs: `target/` and `full/` under each attempt, `single_harness_state.yaml` / `single_harness_report.yaml` for proofs,
+Both candidate judge stages receive the SAME frozen same-case baseline answer,
+artifacts, continuous score, criterion scores and reasons in a read-only snapshot.
+Baseline grading details are inline; larger files have accessible inventory and
+lossless pages. The full-stage judge does NOT see the candidate's target precheck
+score. Baseline material never enters Solver inputs. Historical grades are
+comparison evidence, not required scores or reference solutions. Missing or
+changed recorded artifacts invalidate the comparison rather than silently grading
+without baseline evidence.
+
+Outputs: `target/` and `full/` under each attempt, `baseline_context.json` per
+judge, and `single_harness_state.yaml` / `single_harness_report.yaml` for proofs,
 per-case deltas, full-check outcomes and official Best references. Only packages
 accepted by both stages and engineering checks can be published and installed.
 

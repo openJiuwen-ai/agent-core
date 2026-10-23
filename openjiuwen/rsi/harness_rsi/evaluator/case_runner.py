@@ -4,6 +4,8 @@
 
 from __future__ import annotations
 
+from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
+
 import hashlib
 import json
 import os
@@ -70,6 +72,7 @@ class CaseRunner:
         output_dir: str,
         team_skill_ref_path: str | Path | None = None,
         harness_refs: dict[str, str] | None = None,
+        baseline_context: BaselineJudgeContext | None = None,
     ) -> EvaluationCaseTraceRef:
         """Run one case and persist final trace/result artifacts.
 
@@ -174,6 +177,7 @@ class CaseRunner:
                 case=case,
                 execution_result=execution_result,
                 output_dir=str(case_dir),
+                baseline_context=baseline_context,
             )
             final_status = _case_result_status(
                 execution_status=execution_result.execution_status,
@@ -313,16 +317,25 @@ class CaseRunner:
         case: dict[str, Any],
         execution_result: CaseExecutionResult,
         output_dir: str,
+        baseline_context: BaselineJudgeContext | None = None,
     ) -> JudgeResult:
         """Require an actual evaluation result, never a completion-based score."""
         if execution_result.judge_result is not None:
+            if baseline_context is not None:
+                raise EvaluationInfrastructureError("Backend grade cannot bypass baseline-aware LLM judging")
             result = execution_result.judge_result
         elif self.judger is not None:
-            result = await self.judger.judge(
-                case=case,
-                execution_result=execution_result,
-                output_dir=output_dir,
-            )
+            if baseline_context is not None:
+                if self.judger.method != "llm_as_judge":
+                    raise EvaluationInfrastructureError("Baseline comparison requires the LLM judger")
+                result = await self.judger.judge(
+                    case=case, execution_result=execution_result, output_dir=output_dir,
+                    baseline_context=baseline_context,
+                )
+            else:
+                result = await self.judger.judge(
+                    case=case, execution_result=execution_result, output_dir=output_dir,
+                )
         else:
             raise EvaluationInfrastructureError(
                 "Cannot score this case: no judger configured and no backend JudgeResult. "

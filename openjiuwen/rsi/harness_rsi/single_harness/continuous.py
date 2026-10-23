@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.rsi.events import NodeStageEvent, emit
+from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import baseline_contexts
 from openjiuwen.rsi.harness_rsi.evaluator.task_identity import case_identity
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.member_optimizer.hypothesis import compile_optimization_hypotheses, load_optimization_hypotheses
@@ -135,6 +136,13 @@ async def run_continuous(
                 raise EvaluationInfrastructureError("Comparison parent no longer matches its recorded full evaluation")
             directory = output_dir / "evaluations" / f"e{epoch:03d}" / f"b{batch_index:03d}"
             source = await _subset(owner, cases, reference_eval, parent_refs, directory / "source")
+            llm = owner.config.evaluator.evaluation_method.replace("-", "_") == "llm_as_judge"
+            contexts = baseline_contexts(reference_eval, all_cases) if llm and owner.config.evaluator.judge_baseline_comparison else None
+            fingerprints = {cid: ctx.fingerprint for cid, ctx in (contexts or {}).items()}
+            if "baseline_contexts" in frozen_batch and frozen_batch["baseline_contexts"] != fingerprints:
+                raise EvaluationInfrastructureError("Frozen batch baseline evidence changed during recovery")
+            frozen_batch["baseline_contexts"] = fingerprints
+            save()
             repair_refs, repair_source, repair_caps = parent_refs, source, []
             promoted = False
             last_gate: dict[str, Any] = {}
@@ -192,7 +200,7 @@ async def run_continuous(
                     "baseline_eval": reference_eval, "baseline_score": parent_score,
                     "cases": {str(case["case_id"]): case_identity(case) for case in all_cases},
                     # The initial protocol signature is stable across candidate directory aliases.
-                    "protocol_signature": state["evaluation_protocol_signature"],
+                    "protocol_signature": state["evaluation_protocol_signature"], "baseline_contexts": fingerprints,
                     "promotion_policy": state["promotion_policy"],
                 }
                 identity = digest(identity_data)
@@ -225,6 +233,7 @@ async def run_continuous(
                             before_harness_refs_path=parent_refs, candidate_harness_refs_path=candidate_refs,
                             member_status=str(member.get("status", "")), capabilities=capabilities,
                             output_dir=attempt_dir / "target", dataset=dataset, node_ref=node, on_event=on_event,
+                            baseline_contexts=contexts,
                         )
                     record["target_gate"] = dict(gate)
                     save()
@@ -247,7 +256,7 @@ async def run_continuous(
                         target_cases = [case for case in all_cases if str(case["case_id"]) in target_ids]
                         target_ref = gate["candidate_eval_ref_path"]
                         if _read_yaml(target_ref).get("evaluation_context") != owner._evaluation_context(
-                            target_cases, candidate_refs,
+                            target_cases, candidate_refs, contexts,
                         ):
                             raise EvaluationInfrastructureError("Target evaluation does not match the frozen candidate and baseline")
                         target_scores = complete_scores(target_ref, target_ids)
@@ -273,7 +282,7 @@ async def run_continuous(
                         full_ref = await owner._evaluate(
                             cases=all_cases, harness_refs_path=candidate_refs,
                             output_dir=attempt_dir / "full", dataset=dataset, node_ref=node,
-                            on_event=on_event,
+                            on_event=on_event, baseline_contexts=contexts,
                             case_concurrency=owner.config.scheduling.full_evaluation_concurrency,
                         )
                         full_scores = complete_scores(full_ref, ids)

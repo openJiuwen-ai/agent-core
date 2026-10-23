@@ -12,18 +12,24 @@ from typing import Any
 from openjiuwen.rsi.harness_rsi.artifact_io import _io_path
 from openjiuwen.rsi.harness_rsi.data_loader.case_files import referenced_files, task_input
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import _reference_answer
+from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
 
 _RESPONSE_PAGE_CHARS = 12000
 _RESPONSE_PAGE_BYTES = 24000
 _RESPONSE_PAGE_LINES = 1000
 
 
-def judge_protocol_identity(score_mode: str = "binary") -> dict[str, str]:
+def judge_protocol_identity(score_mode: str = "binary", baseline_comparison: bool = True) -> dict[str, str]:
     """Invalidate cached grades when the evidence layout or grading policy changes."""
-    return {
+    compare = score_mode == "continuous" and baseline_comparison
+    prompt_name = "judge_prompt.md" if compare else "judge_prompt.legacy.md"
+    identity = {
         "evidence_layout": "complete_evidence_closeout_v7",
-        "prompt_sha256": hashlib.sha256(Path(__file__).with_name("judge_prompt.md").read_bytes()).hexdigest(),
+        "prompt_sha256": hashlib.sha256(Path(__file__).with_name(prompt_name).read_bytes()).hexdigest(),
     }
+    if compare:
+        identity["baseline_comparison"] = "baseline_reference_v1"
+    return identity
 
 
 def _json_safe_response(response: Any) -> Any:
@@ -121,16 +127,26 @@ def prepare_judge_workspace(
     workspace: Path,
     behaviors: list[dict[str, Any]],
     forbidden: list[dict[str, Any]],
+    baseline_context: BaselineJudgeContext | None = None,
+    score_mode: str = "binary",
 ) -> None:
-    """Copy only grading inputs; exclude live workspaces, model configs and past grades."""
+    """Copy grading inputs and one explicit baseline, excluding live workspaces/configs."""
     _io_path(workspace).mkdir(parents=True, exist_ok=False)
     inventory = [f"artifacts/{path}" for path in _copy_tree(case_dir / "artifacts", workspace / "artifacts")]
+    write_judge_json(workspace.parent / "artifact_manifest.json", {
+        "files": {name.removeprefix("artifacts/"): hashlib.sha256((workspace / name).read_bytes()).hexdigest()
+                  for name in inventory},
+    })
     response, response_files = _response_evidence(response, workspace)
     inventory.extend(response_files)
     trace = _io_path(case_dir / "judge" / "normalized_trace.json")
     if trace.is_file():
         shutil.copy2(trace, _io_path(workspace / "execution_trace.json"))
         inventory.append("execution_trace.json")
+    baseline = None
+    if baseline_context is not None:
+        baseline, baseline_files = _prepare_baseline(case, baseline_context, workspace)
+        inventory.extend(baseline_files)
     reference = case.get("reference", {})
     if case.get("assets") or reference.get("files"):
         if not case.get("case_path"):
@@ -142,9 +158,7 @@ def prepare_judge_workspace(
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(_io_path(path), target)
             inventory.append(name)
-    write_judge_json(
-        workspace / "request.json",
-        {
+    request = {
             "task": task_input(case),
             "response": response,
             "reference_answer": _reference_answer(case),
@@ -161,6 +175,51 @@ def prepare_judge_workspace(
                    "The submitted response is inline in response, with no response pages. "
                    "Missing answer sections do not mean this snapshot was truncated.")
             ),
-            "judge_protocol": judge_protocol_identity(),
-        },
-    )
+            "judge_protocol": judge_protocol_identity(score_mode, baseline is not None),
+    }
+    if baseline is not None:
+        request.update(comparison_role="candidate", baseline=baseline)
+    write_judge_json(workspace / "request.json", request)
+
+
+def _prepare_baseline(
+    case: dict[str, Any], context: BaselineJudgeContext, workspace: Path,
+) -> tuple[dict[str, Any], list[str]]:
+    """Snapshot same-case baseline evidence inside the judge's read boundary."""
+    result = context.validate(case)
+    source = Path(context.result_path).parent
+    target = workspace / "baseline"
+    target.mkdir()
+    files = [f"baseline/artifacts/{name}" for name in _copy_tree(source / "artifacts", target / "artifacts")]
+    response, response_files = _response_evidence(result.get("result"), target)
+    # Response paths are relative to this explicitly named baseline root.
+    files.extend(f"baseline/{name}" for name in response_files)
+    evaluation = result.get("evaluation", {})
+    metadata = evaluation.get("metadata", {})
+    assessment = metadata.get("parsed", {})
+    grade = {
+        "score": result["score"], "reason": evaluation.get("reason", ""),
+        "assessment": assessment, "requirement_results": metadata.get("requirement_results", {}),
+    }
+    write_judge_json(target / "assessment.json", grade)
+    files.append("baseline/assessment.json")
+    trace = source / "judge" / "normalized_trace.json"
+    if trace.is_file():
+        shutil.copy2(_io_path(trace), _io_path(target / "execution_trace.json"))
+        files.append("baseline/execution_trace.json")
+    provenance = {
+        "case_id": context.case_id, "eval_ref_path": context.eval_ref_path,
+        "fingerprint": context.fingerprint, "evidence_digest": context.evidence_digest,
+        "files": [{"path": name, "sha256": hashlib.sha256((workspace / name).read_bytes()).hexdigest()}
+                  for name in files],
+    }
+    write_judge_json(target / "manifest.json", provenance)
+    files.append("baseline/manifest.json")
+    write_judge_json(workspace.parent / "baseline_context.json", provenance)
+    context.validate(case)
+    return {
+        "case_id": context.case_id, "score": result["score"], "grading": grade,
+        "response": response, "response_root": "baseline/", "manifest": "baseline/manifest.json",
+        "context_fingerprint": context.fingerprint,
+        "role": "historical comparison evidence; not a reference solution or a required candidate score",
+    }, files

@@ -63,6 +63,7 @@ class EvaluatorConfig:
     output_repair: OutputRepairConfig = field(default_factory=OutputRepairConfig)
     judge_success_score: float = 0.8
     score_mode: str = "binary"
+    judge_baseline_comparison: bool = True
     transient_case_retry_limit: int = 2
     solver_backend: str = "deep_agent"
     solver_max_iterations: int = 300
@@ -78,6 +79,8 @@ class EvaluatorConfig:
     def __post_init__(self) -> None:
         if self.score_mode not in {"binary", "continuous"}:
             raise ValueError("evaluator.score_mode must be binary or continuous")
+        if not isinstance(self.judge_baseline_comparison, bool):
+            raise ValueError("evaluator.judge_baseline_comparison must be a boolean")
         if type(self.solver_max_iterations) is not int or self.solver_max_iterations < 1:
             raise ValueError("evaluator.solver_max_iterations must be a positive integer")
         if type(self.solver_max_iterations_hard_limit) is not int or self.solver_max_iterations_hard_limit < self.solver_max_iterations:
@@ -100,6 +103,7 @@ class EvaluatorConfig:
             output_repair=OutputRepairConfig.from_dict(data.get("output_repair")),
             judge_success_score=float(data.get("judge_success_score", 0.8)),
             score_mode=str(data.get("score_mode", "binary")),
+            judge_baseline_comparison=_bool_value(data.get("judge_baseline_comparison"), default=True),
             transient_case_retry_limit=_int_value(
                 data.get("transient_case_retry_limit"),
                 default=2,
@@ -130,6 +134,8 @@ def evaluator_protocol_config(config: EvaluatorConfig) -> dict[str, Any]:
     payload = asdict(config)
     if config.score_mode == "binary":
         payload.pop("score_mode")
+    if config.score_mode == "binary" or not config.judge_baseline_comparison:
+        payload.pop("judge_baseline_comparison")
     return payload
 
 

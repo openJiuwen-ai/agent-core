@@ -147,6 +147,14 @@ async def repair_judge_json(config: EvaluatorConfig, raw: str, error: str) -> st
     return response.content or ""
 
 
+def _has_baseline(config: EvaluatorConfig, workspace: Path) -> bool:
+    """Keep the original grading prompt when no baseline is actually supplied."""
+    if config.score_mode != "continuous" or not config.judge_baseline_comparison:
+        return False
+    request = json.loads(_io_path(workspace / "request.json").read_text(encoding="utf-8"))
+    return isinstance(request.get("baseline"), dict)
+
+
 def build_judge_agent(
     config: EvaluatorConfig, workspace: Path, log_path: Path, *, budget: JudgeBudgetRail | None = None,
 ) -> Any:
@@ -154,7 +162,9 @@ def build_judge_agent(
     return create_deep_agent(
         model=_judge_model(config),
         card=AgentCard(name="evaluator_agent", description="Independent reference-based evaluator"),
-        system_prompt=Path(__file__).with_name("judge_prompt.md").read_text(encoding="utf-8"),
+        system_prompt=Path(__file__).with_name(
+            "judge_prompt.md" if _has_baseline(config, workspace) else "judge_prompt.legacy.md"
+        ).read_text(encoding="utf-8"),
         workspace=str(workspace),
         restrict_to_work_dir=True,
         auto_create_workspace=False,
@@ -175,7 +185,7 @@ async def run_judge_agent(
 
     payload = await asyncio.to_thread(inline_evidence, workspace, include_images=True)
     if payload is not None:
-        return await _invoke_complete_evidence(_judge_model(config), payload)
+        return await _invoke_complete_evidence(_judge_model(config), payload, legacy=not _has_baseline(config, workspace))
     budget = JudgeBudgetRail(config.judge_agent_max_iterations, log_path)
     agent = build_judge_agent(config, workspace, log_path, budget=budget)
     try:
@@ -212,10 +222,12 @@ async def run_judge_closeout(config: EvaluatorConfig, workspace: Path, *, feedba
     )
     if payload is None:  # ``required=True`` makes this defensive only.
         raise EvaluationInfrastructureError("Judge closeout evidence is unavailable; no score produced")
-    return await _invoke_complete_evidence(model, payload, feedback=feedback)
+    return await _invoke_complete_evidence(model, payload, feedback=feedback, legacy=not _has_baseline(config, workspace))
 
 
-async def _invoke_complete_evidence(model: Model, payload: str | list, *, feedback: str = "") -> str:
+async def _invoke_complete_evidence(
+    model: Model, payload: str | list, *, feedback: str = "", legacy: bool = False,
+) -> str:
     if isinstance(payload, list):
         declared = getattr(model.model_client_config, "supports_vision", None)
         supported = declared if isinstance(declared, bool) else get_cached_image_support(model)
@@ -224,7 +236,10 @@ async def _invoke_complete_evidence(model: Model, payload: str | list, *, feedba
                 "Judge image evidence requires a vision-capable model with confirmed image support; "
                 "no evidence omitted and no score produced"
             )
-    policy = await asyncio.to_thread(Path(__file__).with_name("judge_prompt.md").read_text, encoding="utf-8")
+    policy = await asyncio.to_thread(
+        Path(__file__).with_name("judge_prompt.legacy.md" if legacy else "judge_prompt.md").read_text,
+        encoding="utf-8",
+    )
     policy = "All grading evidence is supplied inline. Evaluate it directly.\nEvaluation policy:" + policy.split(
         "Evaluation policy:", 1,
     )[1]

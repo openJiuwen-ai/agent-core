@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
+
 import asyncio
 import json
 import uuid
@@ -103,8 +105,11 @@ class LlmAsJudgeJudger(EvaluationJudger):
         case: dict[str, Any],
         execution_result: CaseExecutionResult,
         output_dir: str = "",
+        baseline_context: BaselineJudgeContext | None = None,
     ) -> JudgeResult:
         self.validate_case(case)
+        if baseline_context is not None and not self._config.judge_baseline_comparison:
+            raise EvaluationInfrastructureError("Baseline comparison is disabled for this evaluator")
         case = normalize_grading_case(case)
         if execution_result.execution_status != "passed":
             return self._failure_result(execution_result.error)
@@ -123,14 +128,20 @@ class LlmAsJudgeJudger(EvaluationJudger):
                 workspace=workspace,
                 behaviors=behaviors,
                 forbidden=forbidden,
+                baseline_context=baseline_context,
+                score_mode=self._config.score_mode,
             )
-            return await self._evaluate(
+            result = await self._evaluate(
                 workspace,
                 judge_dir,
                 behaviors,
                 forbidden,
                 penalty_mode=case.get("reference", {}).get("penalty_mode", "ceiling"),
             )
+            if baseline_context is not None:
+                baseline_context.validate(case)
+                result.metadata["baseline_context_fingerprint"] = baseline_context.fingerprint
+            return result
         except EvaluationInfrastructureError as exc:
             write_judge_json(judge_dir / "error.json", {"error_type": type(exc).__name__, "message": str(exc)})
             raise
@@ -294,6 +305,22 @@ class LlmAsJudgeJudger(EvaluationJudger):
                         "assessment_attempt": assessment_attempts, "recovery": recovery,
                         "model_calls": diagnostics, "stop_reason": tracker.stop_reason,
                     })
+        request = json.loads((workspace / "request.json").read_text(encoding="utf-8"))
+        if request.get("baseline") is not None:
+            # The caller computes the numeric delta; model commentary cannot change either grade.
+            baseline = request["baseline"]
+            baseline_behaviors = {
+                str(item["id"]): item for item in baseline["grading"].get("assessment", {}).get("behaviors", [])
+            }
+            normalized["baseline_comparison"] = {
+                "case_id": baseline["case_id"], "baseline_score": baseline["score"],
+                "context_fingerprint": baseline["context_fingerprint"],
+                "score_delta": score - baseline["score"],
+                "criteria": [{"id": item["id"], "candidate_score": item["score"],
+                              "baseline": baseline_behaviors.get(str(item["id"])),
+                              "candidate_reason": item["reason"], "candidate_evidence": item["evidence"]}
+                             for item in normalized["behaviors"]],
+            }
         write_judge_json(judge_dir / "assessment.json", normalized)
         passed = score >= self._config.judge_success_score
         return JudgeResult(

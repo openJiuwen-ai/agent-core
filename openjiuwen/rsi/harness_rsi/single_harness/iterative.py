@@ -26,6 +26,7 @@ from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
     EvaluationResultAnalyzer,
 )
 from openjiuwen.rsi.harness_rsi.evaluator import TeamEvaluator
+from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import BaselineJudgeContext
 from openjiuwen.rsi.harness_rsi.evaluator.optimization_signals import (
     evaluation_optimization_signals,
 )
@@ -1084,6 +1085,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
 
     def _evaluation_context(
         self, cases: list[dict[str, Any]], harness_refs_path: str,
+        baseline_contexts: dict[str, BaselineJudgeContext] | None = None,
     ) -> dict[str, Any]:
         from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import judge_protocol_identity
 
@@ -1098,13 +1100,16 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 "adapter_config": adapter_config,
                 **({"llm_judge_score_contract": "threshold_binary_v1" if self.config.evaluator.score_mode == "binary" else "continuous",
                     "judge_protocol": judge_protocol_identity(
-                        self.config.evaluator.score_mode,
+                        self.config.evaluator.score_mode, self.config.evaluator.judge_baseline_comparison,
                     )}
                    if self.config.evaluator.evaluation_method.strip().lower().replace("-", "_") == "llm_as_judge"
                    else {}),
             },
             cases=cases,
         )
+        if baseline_contexts:
+            context["baseline_contexts"] = {str(case["case_id"]): baseline_contexts[str(case["case_id"])].fingerprint
+                                             for case in cases}
         return context
 
     def _source_passing_case_ids(
@@ -1193,8 +1198,12 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         node_ref: str = "h0",
         on_event: OnEvent | None = None,
         case_concurrency: int = 1,
+        baseline_contexts: dict[str, BaselineJudgeContext] | None = None,
     ) -> str:
-        context = self._evaluation_context(cases, harness_refs_path)
+        if baseline_contexts is not None:
+            for case in cases:
+                baseline_contexts[str(case["case_id"])].validate(case)
+        context = self._evaluation_context(cases, harness_refs_path, baseline_contexts)
         existing = output_dir / "eval_ref.yaml"
         if _eval_ref_complete(existing):
             if _read_yaml(existing).get("evaluation_context") != context:
@@ -1231,6 +1240,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         )
         stage_kwargs = {"on_case_stage": emit_case_stage} if supports_stages and on_event is not None else {}
+        if baseline_contexts is not None:
+            if "baseline_contexts" not in parameters:
+                raise ValueError("evaluator does not support baseline-aware candidate judging")
+            stage_kwargs["baseline_contexts"] = {str(case["case_id"]): baseline_contexts[str(case["case_id"])] for case in cases}
         if "case_concurrency" in parameters or any(
             parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
         ):
@@ -1243,8 +1256,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             dataset=dataset,
             **stage_kwargs,
         )
-        if context != self._evaluation_context(cases, harness_refs_path):
+        if context != self._evaluation_context(cases, harness_refs_path, baseline_contexts):
             raise ValueError("evaluation inputs changed during execution; results cannot be reused")
+        if baseline_contexts is not None:
+            for case in cases:
+                baseline_contexts[str(case["case_id"])].validate(case)
         stamp_evaluation(result, context)
         return result
 
@@ -1315,6 +1331,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         frozen_target_case_ids: set[str] | None = None,
         node_ref: str | None = None,
         on_event: OnEvent | None = None,
+        baseline_contexts: dict[str, BaselineJudgeContext] | None = None,
     ) -> dict[str, Any]:
         original_source_score = _eval_score(source_eval_ref)
         base = {
@@ -1397,6 +1414,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             dataset=dataset,
             node_ref=node_ref or "h0",
             on_event=on_event,
+            baseline_contexts=baseline_contexts,
         )
         skipped_target_case_ids = sorted(_skipped_case_ids(candidate_eval_ref) & target_case_ids)
         if skipped_target_case_ids:
