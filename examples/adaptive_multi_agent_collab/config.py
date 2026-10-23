@@ -10,7 +10,8 @@ from dataclasses import asdict, dataclass, field
 import math
 from typing import Any
 
-from .failure_policy import FailurePolicyConfig
+from .infrastructure.failure_policy import FailurePolicyConfig
+from .workflows.recovery import WorkflowRecoveryConfig
 
 
 CapacityValue = int | tuple[int, ...]
@@ -172,9 +173,11 @@ class SafetyConfig:
     call_timeout_seconds: float = 120.0
     session_timeout_seconds: float = 600.0
     parse_retries: int = 1
+    answer_stability_patience: int = 3
     max_concurrent_model_calls: int = 3
 
     def __post_init__(self) -> None:
+        _positive("answer_stability_patience", self.answer_stability_patience)
         _positive("max_internal_rounds", self.max_internal_rounds)
         _positive("call_timeout_seconds", self.call_timeout_seconds)
         _positive("session_timeout_seconds", self.session_timeout_seconds)
@@ -223,7 +226,8 @@ class ResourceConfig:
     """Declared request ceilings; monetary choices require explicit registration."""
 
     initial_input: int = 1024
-    conversation_input: int = 2048
+    role_input: int = 2560
+    revision_input: int = 2048
     judge_input: int = 4096
     tie_input: int = 8192
     textgrad_input: int = 8192
@@ -241,7 +245,8 @@ class ResourceConfig:
     def __post_init__(self) -> None:
         for name in (
             "initial_input",
-            "conversation_input",
+            "role_input",
+            "revision_input",
             "judge_input",
             "tie_input",
             "textgrad_input",
@@ -265,8 +270,8 @@ class ResourceConfig:
             return self.textgrad_input, self.textgrad_output
         inputs = {
             "initial": self.initial_input,
-            "role": self.conversation_input,
-            "revision": self.conversation_input,
+            "role": self.role_input,
+            "revision": self.revision_input,
             "judge": self.judge_input,
             "tie": self.tie_input,
         }
@@ -350,7 +355,7 @@ class TrainingConfig:
     gradient_norm_type: float = 2.0
     gradient_error_if_nonfinite: bool = True
     bootstrap_weighting_updates: int = 10
-    bootstrap_weighting_attempts: int = 30
+    bootstrap_weighting_attempts: int = 50
     bootstrap_routing_updates: int = 10
     max_outer_cycles: int = 5
     weighting_phase: PhaseConfig = field(default_factory=PhaseConfig)
@@ -363,7 +368,8 @@ class TrainingConfig:
     system_validation_batch_size: int = 20
     outer_min_improvement: float = 1e-4
     outer_patience: int = 2
-    routing_objective: str = "conversation_shaped"
+    routing_objective: str = "mixed_q"
+    p_mix: float = 0.75
 
     def __post_init__(self) -> None:
         for name in ("weighting_learning_rate", "routing_learning_rate"):
@@ -394,8 +400,10 @@ class TrainingConfig:
             "outer_patience",
         ):
             _positive(name, getattr(self, name))
-        if self.routing_objective not in {"conversation_shaped", "standard_reinforce"}:
-            raise ValueError("routing_objective must be 'conversation_shaped' or 'standard_reinforce'")
+        if self.routing_objective != "mixed_q":
+            raise ValueError("routing_objective must be mixed_q; older objectives require a new condition")
+        if not math.isfinite(self.p_mix) or not 0 <= self.p_mix <= 1:
+            raise ValueError("p_mix must be in [0, 1]")
 
     @property
     def weighting_bootstrap(self) -> PhaseConfig:
@@ -432,10 +440,44 @@ class ReproducibilityConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SchemeRegistration:
+    """Append-only extension contract for the supported role/revision interface."""
+
+    label: str
+    legal_edges: tuple[tuple[int, int], ...]
+    init_prompt: str
+    role_prompt: str
+    revision_prompt: str
+    purpose: str
+    execution: str = "feedback_revision"
+    fallback: str = "latest_valid"
+    cost_attribution: str = "conversation"
+
+    def __post_init__(self) -> None:
+        from .schemas import SCHEME_ORDER, Scheme
+        label = Scheme(self.label)
+        if label in SCHEME_ORDER:
+            raise ValueError("extension labels cannot redefine an inherited scheme")
+        if (self.execution, self.fallback, self.cost_attribution) != (
+            "feedback_revision", "latest_valid", "conversation"
+        ):
+            raise ValueError("unsupported extension execution/fallback/cost contract")
+        edges = tuple(tuple(edge) for edge in self.legal_edges)
+        if not edges or len(set(edges)) != len(edges) or any(len(edge) != 2 or min(edge) < 0 for edge in edges):
+            raise ValueError("new scheme requires explicit unique legal directed edges")
+        object.__setattr__(self, "legal_edges", edges)
+        for name in ("init_prompt", "role_prompt", "revision_prompt", "purpose"):
+            if not getattr(self, name).strip():
+                raise ValueError(f"scheme contract requires {name}")
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Complete validated configuration shared by training and inference."""
 
     n_agents: int = 3
+    scheme_registry: tuple[SchemeRegistration, ...] = ()
+    history_categories: tuple[tuple[str, tuple[str, ...]], ...] = ()
     network: NetworkConfig = field(default_factory=NetworkConfig)
     encoders: EncoderConfig = field(default_factory=EncoderConfig)
     agent_pool: tuple[LogicalAgentConfig, ...] = ()
@@ -445,6 +487,7 @@ class Config:
     selection: SelectionConfig = field(default_factory=SelectionConfig)
     resources: ResourceConfig = field(default_factory=ResourceConfig)
     failure_policy: FailurePolicyConfig = field(default_factory=FailurePolicyConfig)
+    workflow_recovery: WorkflowRecoveryConfig = field(default_factory=WorkflowRecoveryConfig)
     termination: TerminationConfig = field(default_factory=TerminationConfig)
     training: TrainingConfig = field(default_factory=TrainingConfig)
     reproducibility: ReproducibilityConfig = field(default_factory=ReproducibilityConfig)
@@ -452,12 +495,24 @@ class Config:
     def __post_init__(self) -> None:
         _positive("n_agents", self.n_agents)
         self.capacity.resolve(self.n_agents)
+        labels = [item.label for item in self.scheme_registry]
+        if len(set(labels)) != len(labels) or any(max(edge) >= self.n_agents for item in self.scheme_registry for edge in item.legal_edges):
+            raise ValueError("extension scheme labels/edges are invalid")
         pool = self.agent_pool or tuple(
             LogicalAgentConfig(agent_id=index, backend_key=f"agent-{index}") for index in range(self.n_agents)
         )
         if tuple(agent.agent_id for agent in pool) != tuple(range(self.n_agents)):
             raise ValueError("agent_pool must contain exactly one entry per logical agent in index order")
         object.__setattr__(self, "agent_pool", tuple(pool))
+
+    @property
+    def scheme_order(self):
+        from .schemas import SCHEME_ORDER, Scheme
+        return (*SCHEME_ORDER, *(Scheme(item.label) for item in self.scheme_registry))
+
+    @property
+    def scheme_legality(self):
+        return {item.label: item.legal_edges for item in self.scheme_registry}
 
     @property
     def agent_ids(self) -> tuple[int, ...]:
@@ -479,6 +534,8 @@ class Config:
         # Nondefault candidates and enabled policies have distinct fingerprints.
         if self.failure_policy == FailurePolicyConfig():
             payload.pop("failure_policy")
+        if self.workflow_recovery == WorkflowRecoveryConfig():
+            payload.pop("workflow_recovery")
         groups: dict[str, list[int]] = {}
         for agent in self.agent_pool:
             groups.setdefault(agent.backend_key, []).append(agent.agent_id)
@@ -502,6 +559,7 @@ class Config:
             "selection": SelectionConfig,
             "resources": ResourceConfig,
             "failure_policy": FailurePolicyConfig,
+            "workflow_recovery": WorkflowRecoveryConfig,
             "termination": TerminationConfig,
             "reproducibility": ReproducibilityConfig,
         }
@@ -519,6 +577,10 @@ class Config:
             if "prompt_phase" in training:
                 training["prompt_phase"] = PromptPhaseConfig(**training["prompt_phase"])
             data["training"] = TrainingConfig(**training)
+        if "history_categories" in data:
+            data["history_categories"] = tuple((key, tuple(labels)) for key, labels in data["history_categories"])
+        if "scheme_registry" in data:
+            data["scheme_registry"] = tuple(SchemeRegistration(**item) for item in data["scheme_registry"])
         if "agent_pool" in data:
             data["agent_pool"] = tuple(LogicalAgentConfig(**item) for item in data["agent_pool"])
         result = cls(**data)

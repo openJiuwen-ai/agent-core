@@ -1,0 +1,122 @@
+{
+  "source": "canonical ledger, recorded dispatches406/407; observed malformed role responses, not expected answers",
+  "ledger_sha256": "c005395f198a1f8de339eb12b3d5bfcd14c70afc3f08805abd4cfc888aa1785d",
+  "rows": [
+    {
+      "dispatch_id": 406,
+      "generation_id": "gen-1790144386-F7gUtwFP9kPzvGk5UWMN",
+      "source_request_sha256": "67d85efe7b4a4c76e424fba29ffbfdfe0b874e93c7a45d3047e062abda3a6b47",
+      "raw_output": "```json\n{\n \"status\": \"continue\",\n \"feedback\": \"The explanation correctly states that gorillas and humans 'share a recent common ancestor,' addressing the previous feedback. However, the claim that 'Both belong to the family Hominidae (great apes)' is partially inaccurate. While humans belong to Hominidae, gorillas are typically classified within the family Hominidae but sometimes in their own family, Pongidae. Clarifying this classification would improve accuracy.\",\n \"answer\": \"yes\",\n \"explanation\": \"Yes, gorillas and humans are closely related. Both belong to the family Hominidae (great apes) and share a recent common ancestor, indicating a close evolutionary relationship. Gorillas are classified in the subfamily Gorillinae, while humans are in the subfamily Homininae, a distinction within the broader Hominidae family, further supported by genetic evidence.\"\n}\n```",
+      "raw_output_sha256": "e3335e5b45cd0f0c3c99d2beeb24af981b6b1a85516c72c36b17f708ca11d440",
+      "request_parameters": {
+        "model": "google/gemini-2.5-flash",
+        "temperature": 0.7,
+        "max_tokens": 256,
+        "stream": true,
+        "provider": {
+          "only": [
+            "google-ai-studio"
+          ],
+          "order": [
+            "google-ai-studio"
+          ],
+          "allow_fallbacks": false,
+          "require_parameters": true
+        },
+        "plugins": [
+          {
+            "id": "web",
+            "enabled": false
+          },
+          {
+            "id": "file-parser",
+            "enabled": false
+          },
+          {
+            "id": "response-healing",
+            "enabled": false
+          },
+          {
+            "id": "context-compression",
+            "enabled": false
+          },
+          {
+            "id": "pareto-router",
+            "enabled": false
+          },
+          {
+            "id": "fusion",
+            "enabled": false
+          }
+        ],
+        "transforms": [],
+        "reasoning": {
+          "enabled": false
+        },
+        "seed": 1809545519
+      },
+      "native_input_tokens": 628,
+      "native_output_tokens": 182,
+      "charge": 0.0006434,
+      "finish_reason": "stop"
+    },
+    {
+      "dispatch_id": 407,
+      "generation_id": "gen-1790144391-ijB9fqoKhdpjKWacTfGG",
+      "source_request_sha256": "0b97ef783adedfca399c537828ac318aeebbc64fbea7890ad797e98c3e253708",
+      "raw_output": "```json\n{\n \"status\": \"continue\",\n \"feedback\": \"The explanation still uses 'recent common ancestor' without explicitly stating *how* recent this ancestor is. While 'recent' implies a timeframe, quantifying it, even broadly (e.g., 'within the last X million years'), would strengthen the argument for 'closely related' by providing a more concrete measure of proximity.\",\n \"answer\": \"yes\",\n \"explanation\": \"Yes, gorillas and humans are closely related. Both belong to the family Hominidae (great apes) and share a recent common ancestor, indicating a close evolutionary relationship. Genetic evidence further supports this, showing a high degree of DNA similarity. Gorillas are classified in the subfamily Gorillinae, while humans are in the subfamily Homininae, a distinction within the broader Hominidae family.\",\n \"query\": \"Are gorillas closely related to humans?\"\n}\n```",
+      "raw_output_sha256": "07ba59e5380a6533371412a496b5128e653bfb621199fae32d38da47b54851fc",
+      "request_parameters": {
+        "model": "google/gemini-2.5-flash",
+        "temperature": 0.7,
+        "max_tokens": 256,
+        "stream": true,
+        "provider": {
+          "only": [
+            "google-ai-studio"
+          ],
+          "order": [
+            "google-ai-studio"
+          ],
+          "allow_fallbacks": false,
+          "require_parameters": true
+        },
+        "plugins": [
+          {
+            "id": "web",
+            "enabled": false
+          },
+          {
+            "id": "file-parser",
+            "enabled": false
+          },
+          {
+            "id": "response-healing",
+            "enabled": false
+          },
+          {
+            "id": "context-compression",
+            "enabled": false
+          },
+          {
+            "id": "pareto-router",
+            "enabled": false
+          },
+          {
+            "id": "fusion",
+            "enabled": false
+          }
+        ],
+        "transforms": [],
+        "reasoning": {
+          "enabled": false
+        },
+        "seed": 352149502
+      },
+      "native_input_tokens": 669,
+      "native_output_tokens": 188,
+      "charge": 0.0006707,
+      "finish_reason": "stop"
+    }
+  ]
+}

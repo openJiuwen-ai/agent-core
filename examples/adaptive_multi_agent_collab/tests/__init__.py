@@ -1,2 +1,1 @@
-"""Tests for the adaptive collaboration pilot."""
-
+"""Offline tests for the collaboration example."""

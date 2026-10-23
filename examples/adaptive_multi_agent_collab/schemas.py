@@ -16,6 +16,7 @@ AgentId: TypeAlias = int
 Answer: TypeAlias = str
 Edge: TypeAlias = tuple[AgentId, AgentId]
 FEEDBACK_GUARD_ID = "answer_whitespace_seen_feedback_v1"
+ANSWER_STABILITY_GUARD_ID = "canonical_alternating_revision_patience_v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +148,17 @@ class Scheme(str, Enum):
     TEACHER = "S_T"
     REVIEWER = "S_V"
 
+    @classmethod
+    def _missing_(cls, value):
+        # Parsing is not execution authorization: Config and routing legality validate registration.
+        import re
+        if isinstance(value, str) and re.fullmatch(r"S_[A-Za-z][A-Za-z0-9_]{0,63}", value):
+            member = str.__new__(cls, value)
+            member._name_ = value
+            member._value_ = value
+            return member
+        return None
+
     @property
     def is_active(self) -> bool:
         return self is not Scheme.ZERO
@@ -184,6 +196,7 @@ class SafeguardTrigger(str, Enum):
     VALIDATION_EXHAUSTED = "validation-exhausted"
     WORKER_FAILURE = "worker-failure"
     REPEATED_FEEDBACK = "repeated-feedback"
+    ANSWER_STABILITY = "answer-stability"
 
 
 class MessageFormat(str, Enum):
@@ -217,7 +230,7 @@ class ConversationTag:
         if not self.scheme.is_active:
             raise ValueError("zero routing labels do not create conversation tags")
         is_self = self.initiator_id == self.receiver_id
-        if is_self != (self.scheme is Scheme.SELF):
+        if self.scheme in SCHEME_ORDER and is_self != (self.scheme is Scheme.SELF):
             raise ValueError("S_self is legal exactly on self-edges")
 
     @property
@@ -277,7 +290,7 @@ class StructuredMessage:
             raise ValueError("judge returns must carry complete status")
         object.__setattr__(self, "payload", dict(self.payload))
         if not self.text:
-            from .prompts import MESSAGE_SERIALIZATION_ID
+            from .workflows.prompts import MESSAGE_SERIALIZATION_ID
 
             # Fixed receiver-visible serialization deliberately excludes generation
             # prompts, audit payloads and predecessor messages.
@@ -571,6 +584,7 @@ class SampledDecision:
     legal_mask: tuple[bool, ...] = ()
     base_probabilities: tuple[float, ...] = ()
     masked_probabilities: tuple[float, ...] = ()
+    q_value: Tensor | None = None
 
     def __post_init__(self) -> None:
         if self.session < 1 or self.position < 0 or min(self.initiator_id, self.receiver_id) < 0:
@@ -581,8 +595,8 @@ class SampledDecision:
             raise ValueError("a routing position must be either free or forced-zero")
         if self.forced_zero and (self.scheme is not Scheme.ZERO or self.legal_schemes != (Scheme.ZERO,)):
             raise ValueError("forced-zero positions permit and select only zero")
-        if self.legal_mask and len(self.legal_mask) != len(SCHEME_ORDER):
-            raise ValueError("legal_mask must align with SCHEME_ORDER")
+        if self.legal_mask and (len(self.legal_mask) < len(SCHEME_ORDER) or (self.base_probabilities and len(self.legal_mask) != len(self.base_probabilities))):
+            raise ValueError("legal_mask must align with the registered action rows")
 
     @property
     def edge(self) -> Edge:
@@ -618,7 +632,7 @@ class RoutingAction:
             raise ValueError("routing matrix must contain every ordered edge")
         for (initiator, receiver), scheme in self.matrix.items():
             legal = SELF_SCHEMES if initiator == receiver else CROSS_AGENT_SCHEMES
-            if scheme not in legal:
+            if scheme in SCHEME_ORDER and scheme not in legal:
                 raise ValueError(f"illegal scheme {scheme!s} on edge {(initiator, receiver)}")
         if self.permutation and (len(self.permutation) != len(expected) or set(self.permutation) != expected):
             raise ValueError("routing permutation must contain every ordered edge exactly once")
@@ -645,7 +659,7 @@ class RoutingAction:
                 raise ValueError("routing_substream session_id must match routing action session")
             # Deferred to avoid a module-import cycle while still validating
             # the version identifier and recomputed seed at the trace boundary.
-            from .policies import RoutingSubstream
+            from .models.policies import RoutingSubstream
 
             try:
                 descriptor = RoutingSubstream.from_dict(dict(self.routing_substream))
@@ -772,6 +786,7 @@ class ConversationTrace:
     safeguard_trigger: SafeguardTrigger | None = None
     feedback_state: FeedbackState = field(default_factory=FeedbackState)
     judge_event_ref: str | None = None
+    unchanged_revisions: int = 0
 
     def append(self, message: StructuredMessage, output: ParsedOutput | None = None) -> None:
         if message.tag != self.tag:
@@ -822,6 +837,7 @@ class SafeguardDiagnostics:
     validation_exhaustion_completions: int = 0
     worker_failure_completions: int = 0
     repeated_feedback_completions: int = 0
+    answer_stability_completions: int = 0
     reason_counts: Mapping[str, int] = field(default_factory=dict)
     safeguard_usage: UsageRecord = field(default_factory=UsageRecord)
 
@@ -835,6 +851,7 @@ class SafeguardDiagnostics:
             self.validation_exhaustion_completions,
             self.worker_failure_completions,
             self.repeated_feedback_completions,
+            self.answer_stability_completions,
         )
         if min(counts) < 0:
             raise ValueError("safeguard diagnostic counts must be non-negative")
@@ -872,6 +889,7 @@ class SafeguardDiagnostics:
             validation_exhaustion_completions=trigger_counts[SafeguardTrigger.VALIDATION_EXHAUSTED],
             worker_failure_completions=trigger_counts[SafeguardTrigger.WORKER_FAILURE],
             repeated_feedback_completions=trigger_counts[SafeguardTrigger.REPEATED_FEEDBACK],
+            answer_stability_completions=trigger_counts[SafeguardTrigger.ANSWER_STABILITY],
             reason_counts=reasons,
             safeguard_usage=usage,
         )
@@ -920,6 +938,9 @@ class SessionResult:
     return_value: float | None = None
     future_return: float | None = None
     conversation_credits: Mapping[ConversationTag, float] = field(default_factory=dict)
+    routing_local_labels: Mapping[ConversationTag, float] = field(default_factory=dict)
+    routing_zero_labels: Mapping[AgentId, float] = field(default_factory=dict)
+    conversation_costs: Mapping[ConversationTag, float | None] = field(default_factory=dict)
     termination: TerminationMetrics | None = None
     safeguard_diagnostics: SafeguardDiagnostics = field(default_factory=SafeguardDiagnostics)
     elapsed_seconds: float = 0.0
@@ -971,6 +992,11 @@ class Trajectory:
     fallback_records: tuple[Mapping[str, Any], ...] = ()
     operational_halt: Mapping[str, Any] | None = None
     execution_counters: Mapping[str, Any] = field(default_factory=dict)
+    routing_mixture: float = 0.75
+    routing_cost_coefficient: float = 0.002
+    # Operational provenance only: never encoded into observable history.
+    workflow_recovery: Mapping[str, Any] = field(default_factory=dict)
+    training_execution_id: int | None = None
 
     @property
     def complete_labelled(self) -> bool:
@@ -985,22 +1011,38 @@ class Trajectory:
 
     @property
     def routing_eligible(self) -> bool:
-        """Eligibility for the primary conversation-shaped routing objective."""
+        return self.routing_eligible_for("mixed_q")
 
-        return self.routing_eligible_for("conversation_shaped")
+    def routing_eligible_for(self, objective: str, *, p_mix: float | None = None,
+                             lambda_conversation: float | None = None) -> bool:
+        """Require precisely the positive-weight mixed-target inputs, over all decisions."""
+        p_mix = self.routing_mixture if p_mix is None else p_mix
+        lambda_conversation = self.routing_cost_coefficient if lambda_conversation is None else lambda_conversation
+        if objective != "mixed_q" or not 0 <= p_mix <= 1:
+            raise ValueError("unknown routing objective or mixture")
+        if not self.complete_labelled:
+            return False
+        def available(value: float | None) -> bool:
+            return value is not None and math.isfinite(value)
 
-    def routing_eligible_for(self, objective: str) -> bool:
-        """Check the selected loss's inputs across the complete trajectory."""
-
-        if objective not in {"conversation_shaped", "standard_reinforce"}:
-            raise ValueError("unknown routing objective")
-        if objective == "standard_reinforce":
-            return self.complete_labelled and all(session.return_value is not None for session in self.sessions)
-        return self.complete_labelled and all(
-            session.future_return is not None
-            and all(trace.tag in session.conversation_credits for trace in session.traces)
-            for session in self.sessions
-        )
+        for session in self.sessions:
+            for decision in session.routing.decisions:
+                if decision.forced_zero:
+                    continue
+                if p_mix and not available(session.future_return):
+                    return False
+                if decision.scheme is Scheme.ZERO:
+                    if p_mix < 1 and not available(session.routing_zero_labels.get(decision.initiator_id)):
+                        return False
+                else:
+                    tag = ConversationTag(session.session, decision.initiator_id,
+                                          decision.receiver_id, decision.scheme)
+                    if p_mix and not available(session.conversation_credits.get(tag)):
+                        return False
+                    if p_mix < 1 and (not available(session.routing_local_labels.get(tag)) or
+                        (lambda_conversation and not available(session.conversation_costs.get(tag)))):
+                        return False
+        return True
 
     @property
     def selection_eligible(self) -> bool:

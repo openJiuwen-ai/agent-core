@@ -60,7 +60,7 @@ def smoke_summary(trajectory: Trajectory) -> dict[str, object]:
 
 
 async def _smoke() -> int:
-    from .runtime import run_fake_smoke
+    from .workflows.runtime import run_fake_smoke
 
     trajectory = await run_fake_smoke()
     print(json.dumps(smoke_summary(trajectory), indent=2, sort_keys=True))
@@ -87,6 +87,17 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--operation", choices=("compatibility", "pilot", "train", "test"), default="pilot")
     preflight.add_argument("--authorization")
     preflight.add_argument("--checkpoint")
+    preflight.add_argument("--bootstrap-only", action="store_true")
+    preflight.add_argument("--bootstrap-forecast")
+    preflight.add_argument("--supplement-plan")
+    preflight.add_argument("--supplement-forecast")
+    preflight.add_argument("--calibration-only", action="store_true")
+    preflight.add_argument("--calibration-plan")
+    preflight.add_argument("--calibration-forecast")
+    preflight.add_argument("--regular-plan")
+    preflight.add_argument("--regular-forecast")
+    preflight.add_argument("--extension-scope")
+    preflight.add_argument("--extension-scope-authorization")
     finalize = subcommands.add_parser(
         "finalize-evidence", help="record the canonical compatibility findings without changing execution settings"
     )
@@ -95,21 +106,33 @@ def build_parser() -> argparse.ArgumentParser:
     project = subcommands.add_parser("project", help="offline spending scenarios, without API calls")
     project.add_argument("specification")
     project.add_argument("--pilot-report")
-    revised = subcommands.add_parser(
-        "revised-condition-plan", help="read-only handoff plan retaining original spending and unresolved holds"
-    )
-    revised.add_argument("specification")
-    revised.add_argument("--source-campaign", required=True)
-    policy_plan = subcommands.add_parser(
-        "policy-plan", help="prepare an offline bounded-failure candidate and pending approvals"
-    )
-    policy_plan.add_argument("specification")
-    policy_plan.add_argument("--output", required=True)
     policy_activate = subcommands.add_parser(
         "policy-activate", help="establish a separately approved bounded-failure condition; no generation"
     )
     policy_activate.add_argument("--plan", required=True)
     policy_activate.add_argument("--authorization", required=True)
+    amend = subcommands.add_parser("supplement-transition", help="apply an approved prospective W continuation offline")
+    amend.add_argument("specification")
+    amend.add_argument("--plan", required=True)
+    amend.add_argument("--forecast", required=True)
+    amend.add_argument("--authorization", required=True)
+    calibration = subcommands.add_parser("calibration-transition", help="activate an approved calibration limit amendment offline")
+    calibration.add_argument("specification")
+    calibration.add_argument("--plan", required=True)
+    calibration.add_argument("--forecast", required=True)
+    calibration.add_argument("--authorization", required=True)
+    regular = subcommands.add_parser("regular-transition", help="publish an approved TextGrad recovery amendment offline")
+    regular.add_argument("specification")
+    regular.add_argument("--plan", required=True)
+    regular.add_argument("--forecast", required=True)
+    regular.add_argument("--authorization", required=True)
+    recovery = subcommands.add_parser(
+        "publication-recover", help="recover an exactly authorized interrupted offline policy publication")
+    recovery.add_argument("specification")
+    recovery.add_argument("--plan", required=True)
+    recovery.add_argument("--forecast", required=True)
+    recovery.add_argument("--authorization", required=True)
+    recovery.add_argument("--recovery-authority", required=True)
     archive = subcommands.add_parser("archive-campaign", help="verify and retire an explicitly approved local campaign")
     archive.add_argument("--plan", required=True)
     initialize = subcommands.add_parser("initialize-pilot", help="register fresh unactivated pilot state offline")
@@ -119,6 +142,23 @@ def build_parser() -> argparse.ArgumentParser:
     initialize.add_argument("--source-sha256", required=True)
     initialize.add_argument("--source-attachment")
     initialize.add_argument("--authorization", required=True)
+    for command in ("extension-validate", "extension-prepare", "extension-adapt", "extension-test"):
+        command_parser = subcommands.add_parser(command, help="explicitly registered incremental extension")
+        command_parser.add_argument("registration")
+        if command != "extension-validate":
+            command_parser.add_argument("--output", required=True)
+        if command == "extension-adapt":
+            command_parser.add_argument("--authorization", required=True)
+            command_parser.add_argument("--development-authorization", required=True)
+            command_parser.add_argument("--resume", required=True)
+            command_parser.add_argument("--escalation-scope")
+            command_parser.add_argument("--escalation-authorization")
+        if command == "extension-test":
+            command_parser.add_argument("--checkpoint", required=True)
+            command_parser.add_argument("--authorization", required=True)
+    retire = subcommands.add_parser("retire-directory", help="remove a verified closed campaign's former directory")
+    retire.add_argument("--campaign", required=True)
+    retire.add_argument("--authorization", required=True)
     accounting = subcommands.add_parser(
         "reconcile-accounting", help="perform only the approved bounded historical generation-metadata lookups"
     )
@@ -126,6 +166,8 @@ def build_parser() -> argparse.ArgumentParser:
     accounting.add_argument("--audit", required=True)
     accounting.add_argument("--authorization", required=True)
     accounting.add_argument("--disposition", required=True)
+    accounting.add_argument("--dispatch-id", type=int, action="append", required=True,
+                            help="exact authorized physical request ID (repeat for up to three)")
     settlement = subcommands.add_parser(
         "settle-accounting", help="adjudicate saved metadata receipts using frozen public identity evidence; no network"
     )
@@ -139,24 +181,6 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="MODEL=PATH",
         help="exact requested model identifier and its saved endpoint catalog (repeat per model)",
     )
-    continuation = subcommands.add_parser(
-        "apply-continuation", help="apply an approved retained-reservation exception under the original campaign lock"
-    )
-    continuation.add_argument("--campaign", required=True)
-    continuation.add_argument("--audit", required=True)
-    continuation.add_argument("--authorization", required=True)
-    for command in ("recheck-preflight", "transition-revised", "recheck"):
-        stage = subcommands.add_parser(
-            command, help="audited revised boundary or the separately authorized six-probe recheck"
-        )
-        stage.add_argument("specification")
-        stage.add_argument("--plan", required=True)
-        stage.add_argument("--authorization", required=True)
-        accounting_basis = stage.add_mutually_exclusive_group(required=True)
-        accounting_basis.add_argument("--reconciliation")
-        accounting_basis.add_argument("--retained-reservation-exception")
-        if command == "recheck":
-            stage.add_argument("--checkpoint", required=True)
     prepare = subcommands.add_parser("prepare", help="inspect a local experiment and its isolated query partitions")
     prepare.add_argument("specification", help="local experiment JSON path")
     for command, help_text in (
@@ -169,6 +193,17 @@ def build_parser() -> argparse.ArgumentParser:
         stage.add_argument("--output", required=True, help="registered campaign directory")
         stage.add_argument("--resume", required=command == "train", help="compatible safe-boundary checkpoint")
         stage.add_argument("--authorization", required=True, help="exact separate stage approval artifact")
+        if command == "train":
+            stage.add_argument("--bootstrap-only", action="store_true",
+                               help="stop after W then routing bootstrap validation, before calibration")
+            stage.add_argument("--bootstrap-forecast", help="separately reviewed bootstrap spending forecast")
+            stage.add_argument("--supplement-plan", help="audited supplementary W continuation")
+            stage.add_argument("--supplement-forecast", help="approved supplementary workload and headroom")
+            stage.add_argument("--calibration-only", action="store_true", help="calibrate, publish checkpoint0 and stop before cycle1")
+            stage.add_argument("--calibration-plan", help="audited uncertainty-limit amendment")
+            stage.add_argument("--calibration-forecast", help="approved shared-prefix calibration workload")
+            stage.add_argument("--regular-plan", help="audited regular-development TextGrad amendment")
+            stage.add_argument("--regular-forecast", help="approved finite regular-development workload")
     test = subcommands.add_parser(
         "test", help="evaluate a completed selected checkpoint under its frozen test protocol"
     )
@@ -183,15 +218,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     configure_logging()
     result: Any
+    if args.command.startswith("extension-"):
+        from .operations.extension_experiment import (
+            validate_extension_registration, prepare_extension, adapt_extension, evaluate_extension,
+        )
+        if args.command == "extension-validate":
+            result = validate_extension_registration(args.registration)
+        elif args.command == "extension-prepare":
+            result = prepare_extension(args.registration, args.output)
+        elif args.command == "extension-adapt":
+            from .infrastructure.shutdown import run_stage
+            result = run_stage(adapt_extension(args.registration, args.output,
+                authorization=args.authorization, development_authorization=args.development_authorization,
+                resume=args.resume, escalation_scope=args.escalation_scope,
+                escalation_authorization=args.escalation_authorization))
+        else:
+            from .infrastructure.shutdown import run_stage
+            result = run_stage(evaluate_extension(args.registration, args.checkpoint, args.output,
+                authorization=args.authorization))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result.get("stage_complete", result.get("accepted", True)) else 1
+    if args.command == "retire-directory":
+        from .operations.campaigns import remove_closed_campaign_directory
+        result = remove_closed_campaign_directory(args.campaign,
+            authorization=json.loads(Path(args.authorization).read_text()))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
     if args.command == "archive-campaign":
-        from .campaigns import archive_campaign
+        from .operations.campaigns import archive_campaign
 
         plan = json.loads(Path(args.plan).read_text())
         result = archive_campaign(**plan)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     if args.command == "initialize-pilot":
-        from .campaigns import initialize_pilot
+        from .operations.campaigns import initialize_pilot
 
         result = initialize_pilot(
             args.specification,
@@ -203,28 +264,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
-    if args.command in {"policy-plan", "policy-activate"}:
-        from .policy_activation import activate_policy_plan, build_policy_plan
+    if args.command == "policy-activate":
+        from .operations.policy_activation import activate_policy_plan
 
-        result = (
-            build_policy_plan(args.specification, args.output)
-            if args.command == "policy-plan"
-            else activate_policy_plan(args.plan, args.authorization)
-        )
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0
-    if args.command == "apply-continuation":
-        from .continuation import apply_historical_exception
-
-        result = apply_historical_exception(
-            args.campaign,
-            args.audit,
-            authorization=json.loads(Path(args.authorization).read_text(encoding="utf-8")),
-        )
+        result = activate_policy_plan(args.plan, args.authorization)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     if args.command == "settle-accounting":
-        from .reconciliation import settle_cached_receipts
+        from .operations.reconciliation import settle_cached_receipts
 
         endpoints: dict[str, str] = {}
         for item in args.endpoint_catalog:
@@ -245,8 +292,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "reconcile-accounting":
         import os
         from functools import partial
-        from .gateway import lookup_generation_metadata
-        from .reconciliation import reconcile_campaign
+        from .providers.gateway import lookup_generation_metadata
+        from .operations.reconciliation import reconcile_campaign
 
         result = asyncio.run(
             reconcile_campaign(
@@ -254,7 +301,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.audit,
                 lookup=partial(lookup_generation_metadata, api_key=os.environ["OPENROUTER_API_KEY"]),
                 authorization=json.loads(Path(args.authorization).read_text(encoding="utf-8")),
-                dispatch_ids=(400, 401, 402),
+                dispatch_ids=tuple(args.dispatch_id),
                 disposition=args.disposition,
             )
         )
@@ -263,7 +310,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "smoke":
         return asyncio.run(_smoke())
     if args.command == "assets":
-        from .assets import (
+        from .datasets.assets import (
             TARGET_DIRECTORY,
             asset_plan,
             download_approval_template,
@@ -290,19 +337,56 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result["protected_id_count"] = 100
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
+    if args.command == "supplement-transition":
+        from .operations.supplement import apply_transition
+        result = apply_transition(args.specification, args.plan, args.authorization, args.forecast)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if args.command == "publication-recover":
+        from .operations.publication_recovery import recover_interrupted
+        result = recover_interrupted(args.specification, args.plan, args.forecast,
+                                     args.authorization, args.recovery_authority)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if args.command == "regular-transition":
+        from .operations.regular_development import apply_transition
+        result = apply_transition(args.specification, args.plan, args.authorization, args.forecast)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    if args.command == "calibration-transition":
+        from .operations.calibration_launch import apply_transition
+        result = apply_transition(args.specification, args.plan, args.authorization, args.forecast)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
     if args.command == "preflight":
-        from .preflight import inspect_preflight
+        from .operations.preflight import inspect_preflight
 
+        scope = {}
+        if args.extension_scope is not None or args.extension_scope_authorization is not None:
+            if args.extension_scope is None or args.extension_scope_authorization is None:
+                raise ValueError("prospective extension preflight requires both scope and its approval")
+            scope = {"extension_scope": args.extension_scope, "extension_scope_authorization":
+                     json.loads(Path(args.extension_scope_authorization).read_text())}
+        if args.supplement_plan is not None or args.supplement_forecast is not None:
+            scope.update(supplement_plan_path=args.supplement_plan, supplement_forecast_path=args.supplement_forecast)
+        if args.calibration_only or args.calibration_plan is not None or args.calibration_forecast is not None:
+            scope.update(calibration_only=args.calibration_only, calibration_plan_path=args.calibration_plan,
+                         calibration_forecast_path=args.calibration_forecast)
+        if args.regular_plan is not None or args.regular_forecast is not None:
+            scope.update(regular_plan_path=args.regular_plan, regular_forecast_path=args.regular_forecast)
         report = inspect_preflight(
             args.specification,
             operation=args.operation,
             authorization_path=args.authorization,
             checkpoint_path=args.checkpoint,
+            bootstrap_only=args.bootstrap_only,
+            bootstrap_forecast_path=args.bootstrap_forecast,
+            **scope,
         )
         print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
         return 0 if report.ready else 2
     if args.command == "prepare":
-        from .experiment import prepare_experiment
+        from .operations.experiment import prepare_experiment
 
         prepared = prepare_experiment(args.specification)
         print(
@@ -313,42 +397,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0
-    if args.command == "revised-condition-plan":
-        from .experiment import revised_condition_plan
-
-        print(json.dumps(revised_condition_plan(args.specification, args.source_campaign), indent=2, sort_keys=True))
-        return 0
-    if args.command in {"recheck-preflight", "transition-revised", "recheck"}:
-        from .transition import inspect_recheck_preflight, initialize_revised_condition, execute_recheck
-
-        kwargs = dict(plan_path=args.plan, authorization_path=args.authorization)
-        if args.retained_reservation_exception is not None:
-            kwargs["retained_reservation_path"] = args.retained_reservation_exception
-        else:
-            kwargs["reconciliation_path"] = args.reconciliation
-        if args.command == "recheck-preflight":
-            report = inspect_recheck_preflight(args.specification, **kwargs)
-            print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
-            return 0 if report.ready else 2
-        if args.command == "transition-revised":
-            result = initialize_revised_condition(args.specification, **kwargs)
-        else:
-            result = asyncio.run(execute_recheck(args.specification, checkpoint_path=args.checkpoint, **kwargs))
-        print(json.dumps(result, indent=2, sort_keys=True))
-        return 0 if args.command == "transition-revised" or result.get("stage_complete") is True else 1
     if args.command == "finalize-evidence":
-        from .preflight import finalize_compatibility_evidence
+        from .operations.preflight import finalize_compatibility_evidence
 
         print(json.dumps(finalize_compatibility_evidence(args.specification, args.report), indent=2, sort_keys=True))
         return 0
     if args.command == "project":
-        from .projection import spending_projection
+        from .operations.projection import spending_projection
 
         specification = json.loads(Path(args.specification).read_text(encoding="utf-8"))
         pilot_report = json.loads(Path(args.pilot_report).read_text(encoding="utf-8")) if args.pilot_report else None
         compatibility_report = None
         if specification.get("attestations", {}).get("compatibility", {}).get("state") == "validated":
-            from .preflight import validate_finalized_compatibility
+            from .operations.preflight import validate_finalized_compatibility
 
             compatibility_report = validate_finalized_compatibility(specification, Path(args.specification).resolve())
         print(
@@ -360,8 +421,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 0
     if args.command in {"compatibility", "pilot", "train"}:
-        from .experiment import compatibility_experiment, pilot_experiment, run_experiment
-        from .shutdown import run_stage, StageInterrupted
+        from .operations.experiment import compatibility_experiment, pilot_experiment, run_experiment
+        from .infrastructure.shutdown import run_stage, StageInterrupted
 
         runners: dict[str, Callable[..., Any]] = {
             "compatibility": compatibility_experiment,
@@ -369,9 +430,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             "train": run_experiment,
         }
         runner = runners[args.command]
+        scope = ({"bootstrap_only": args.bootstrap_only, "bootstrap_forecast_path": args.bootstrap_forecast}
+                 if args.command == "train" else {})
+        if args.command == "train":
+            if args.supplement_plan is not None or args.supplement_forecast is not None:
+                scope.update(supplement_plan_path=args.supplement_plan, supplement_forecast_path=args.supplement_forecast)
+            if args.calibration_only or args.calibration_plan is not None or args.calibration_forecast is not None:
+                scope.update(calibration_only=args.calibration_only, calibration_plan_path=args.calibration_plan,
+                             calibration_forecast_path=args.calibration_forecast)
+            if args.regular_plan is not None or args.regular_forecast is not None:
+                scope.update(regular_plan_path=args.regular_plan, regular_forecast_path=args.regular_forecast)
         try:
             result = run_stage(
-                runner(args.specification, args.output, resume=args.resume, authorization_path=args.authorization)
+                runner(args.specification, args.output, resume=args.resume, authorization_path=args.authorization, **scope)
             )
         except StageInterrupted as exc:
             print(json.dumps({
@@ -388,8 +459,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if result.get("status") == "complete" and result.get("assessment", {}).get("passed") else 1
         return 0 if result.get("stage_complete") is True else 1
     if args.command == "test":
-        from .experiment import evaluate_experiment
-        from .shutdown import run_stage, StageInterrupted
+        from .operations.experiment import evaluate_experiment
+        from .infrastructure.shutdown import run_stage, StageInterrupted
 
         try:
             result = run_stage(
