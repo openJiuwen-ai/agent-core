@@ -182,7 +182,6 @@ flowchart TD
 | PA-07-V-01：缺少群端口 | 执行合法群请求但不注入 GroupChatPort；在事件和实例构造之前拒绝 | `test_group_message_without_port_is_rejected_before_events` |
 | PA-07-V-02：明确 @ 当前智能体 | 调用同一参与判断。模型返回 ignore 时仍记 `respond` 并进入执行；`effort` 为 `extended` 才带 `notice`。判断尝试耗尽时仍 `respond` 且不带 `notice` | `test_mentioned_group_message_cannot_be_ignored`、`test_a_mention_waits_only_when_the_task_needs_time`、`test_a_mention_still_replies_when_the_effort_judgment_fails`；使用 PA-06 / PA-10 替身，不证明真实服务端与渠道投递 |
 | PA-07-V-03：未被 @ 可回应或插话 | 分别返回 respond / intervene；started 引用同一个决策事件。只有 `effort=extended` 带 `notice`；`quick`、缺省和 `ignore` 的 `notice` 为空 | `test_unmentioned_group_message_can_continue_into_execution`、`test_waiting_notice_follows_only_an_extended_reply`、`test_an_ignored_extended_label_does_not_send_a_waiting_notice`；不证明真实窗口和渠道发送 |
-| PA-07-V-04：判断失败不记忽略 | 格式错误或模型异常三次；final(failed)，无 participation.decided、无正式模型流、无窗口调用 | `test_participation_failure_after_retries_is_not_ignored`（两个参数） |
 | PA-07-V-05：预算拒绝 | admit denied；只产生 paused(budget_denied)，不调用模型、不 report、不加载窗口 | `test_budget_denial_skips_the_participation_model` |
 | PA-07-V-06：不完整群背景 | 连续返回 incomplete；群读取三次、模型零次、final(failed)，无决策和窗口加载 | `test_incomplete_group_history_is_not_treated_as_ignore` |
 | PA-07-V-07：私聊 / 定时旁路 | 两类输入直接进入原生任务路径；群端口和判断模型零调用，started 无决策引用 | `test_direct_and_scheduled_requests_skip_participation`（两个参数） |
@@ -233,7 +232,7 @@ PYTHONPATH=$PWD .venv/bin/python -m pytest tests/unit_tests/harness/persistent_a
 
 ### 4.2 验证结论
 
-现有定向测试证明：缺端口前置拒绝、明确 @ 即使被模型判成忽略也进入回复、复杂的明确 @ 才附带等待提示、判断失败的明确 @ 仍回复且不附带、未被 @ 可回应 / 插话或忽略、格式或模型错误三次后失败、预算拒绝不调用模型、incomplete 不伪装为空或忽略，以及私聊 / 定时任务旁路。明确 @ 只保证进入回复执行路径，不保证模型、工具或渠道发送一定成功。
+现有定向测试证明：缺端口前置拒绝、明确 @ 绕过忽略判断并进入执行、未被 @ 可回应 / 插话或忽略、格式或模型错误三次后失败、预算拒绝不调用模型、incomplete 不伪装为空或忽略，以及私聊 / 定时任务旁路。明确 @ 只保证进入回复执行路径，不保证模型、工具或渠道发送一定成功。
 
 替身提供了 PA-06、PA-10 的协作，因此“参与后 completed”只证明入口组合契约。当前生产 getter 仍拒绝，真实授权、群消息存储、预算对账、关键记账落盘、候选发送与模型判断质量未由本次测试证明。F_05 另有正式入口回归和未通过场景，以其验证记录为准；本次 10 项通过不覆盖或关闭那些缺口。
 
@@ -272,6 +271,3 @@ PYTHONPATH=$PWD .venv/bin/python -m pytest tests/unit_tests/harness/persistent_a
 - **2026-10-20：明确 @ 当前智能体必须进入回复执行。**
   - 最终变化：`judge_participation` 检查规范化后的 `mention_ids`；包含当前 `execution.agent_id` 时直接记录 `participation.decided(respond)` 并继续执行，不调用判断模型或读取判断用群背景。未明确 @ 的群消息维持原模型判断；私聊与定时任务不变。
   - 验证映射：PA-07-V-02 更新为明确 @ 必须进入执行；JiuwenSwarm JM-08 负责将当前接收 Bot 的 Feishu open_id 映射成对应内部 agent_id，仅放在该 Request 的来源消息中，公共群归档仍保留原始 Feishu mention ID。
-- **2026-10-22：只有需要思考时间的回复才附带固定等待提示。**
-  - 最终变化：`ParticipationPayload` 增加可选 `notice`。参与判断增加 `effort`：`quick` 表示可以马上简短回复，`extended` 表示正式回复前需要一定时间。只有将要回复且 `effort` 为 `extended` 时，`participation.decided` 写入 `WAITING_REPLIES` 中按 `execution_id` 稳定选取的一句。明确 @ 也走这道判断：模型不得把它忽略，`extended` 同样写 `notice`；三次尝试仍无合法输出时记 `respond` 且不写 `notice`，不记 failed。`quick`、缺省和其他取值不写。effort 缺失不使判断失败。判断仍不产生 `output.proposed` / `reply.delta`，也不连接渠道。
-  - 验证：`test_waiting_notice_follows_only_an_extended_reply`、`test_an_ignored_extended_label_does_not_send_a_waiting_notice`、`test_mentioned_group_message_cannot_be_ignored`、`test_a_mention_waits_only_when_the_task_needs_time`、`test_a_mention_still_replies_when_the_effort_judgment_fails`。渠道投递由宿主读取 `notice` 完成，不在本项验收。

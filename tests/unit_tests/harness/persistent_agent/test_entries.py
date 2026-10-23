@@ -1443,7 +1443,6 @@ async def test_an_ignored_extended_label_does_not_send_a_waiting_notice(harness)
     assert events[-1].payload.status == "ignored"
     assert harness.model.calls == 0
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "judgments",
@@ -2644,10 +2643,10 @@ async def test_a_participation_ending_is_retried_once_after_a_record_failure(har
     host.fail_once = {kind}
     events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
     assert (str(events[-1].event_type), ending_value(events[-1])) == (kind, value)
+    recorded = [event for event in host.events if event.event_type == kind]
     if ending == "ignored":
         decided = next(event for event in events if event.event_type == "participation.decided")
         assert decided.payload.notice is None
-    recorded = [event for event in host.events if event.event_type == kind]
     assert recorded == [events[-1]], "recorded once, on the retry"
     assert ctx.binding.control.fatal is None
     assert harness.model.judge_calls == {"ignored": 1, "failed": 3}.get(ending, 0), "the judgment is not rerun"
