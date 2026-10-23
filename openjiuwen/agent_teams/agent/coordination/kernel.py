@@ -409,7 +409,13 @@ class CoordinationKernel:
                     (time.perf_counter() - t_extract) * 1000,
                 )
         if host.role == TeamRole.LEADER:
+            t_mark = time.perf_counter()
             await self._mark_live_teammates(MemberStatus.PAUSED)
+            team_logger.info(
+                "[{}] lifecycle_timing pause mark_live_teammates duration_ms={:.0f}",
+                member,
+                (time.perf_counter() - t_mark) * 1000,
+            )
             await host.spawn_manager.cancel_recovery_tasks()
             t_shutdown = time.perf_counter()
             await host.spawn_manager.shutdown_all_handles()
@@ -667,7 +673,14 @@ class CoordinationKernel:
             # is a non-disbanding teardown — ``recover_team`` re-spawns from
             # here. Done before ``shutdown_all_handles`` so the in-process
             # task cancellations cannot race with the status write.
+            t_mark = time.perf_counter()
             await self._mark_live_teammates(MemberStatus.STOPPED)
+            if time_stop:
+                team_logger.info(
+                    "[{}] lifecycle_timing stop mark_live_teammates duration_ms={:.0f}",
+                    member,
+                    (time.perf_counter() - t_mark) * 1000,
+                )
         await self.unsubscribe_transport()
         await host.spawn_manager.cancel_recovery_tasks()
         t_shutdown = time.perf_counter()
