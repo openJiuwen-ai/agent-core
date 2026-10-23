@@ -54,9 +54,18 @@ class HttpXConnectorPool(ConnectorPool):
     """
     HTTPX-based connector pool implementation.
 
-    This class provides a connection pool using HTTPX's AsyncConnectionPool,
-    enabling efficient connection reuse for HTTP/1.1 and HTTP/2 requests.
-    It integrates with the global connector pool manager for resource sharing.
+    This class provides a shared ``httpx.HTTPTransport`` / ``httpx.AsyncHTTPTransport``
+    (which wraps an httpcore connection pool internally), enabling efficient
+    connection reuse for HTTP/1.1 and HTTP/2 requests. It integrates with the
+    global connector pool manager for resource sharing.
+
+    Note:
+        A raw ``httpcore.ConnectionPool`` must NOT be passed to ``httpx.Client``
+        as ``transport``: httpx hands an ``httpx.Request`` (``method`` is ``str``)
+        to the transport, while httpcore expects an ``httpcore.Request``
+        (``method`` is ``bytes``), which raises
+        ``'str' object has no attribute 'decode'``. Only the httpx transport
+        classes implement the httpx transport protocol.
     """
 
     def __init__(self, config: HttpXConnectorPoolConfig):
@@ -69,24 +78,25 @@ class HttpXConnectorPool(ConnectorPool):
         """
         super().__init__(config)
         import httpx
-        from httpcore import ConnectionPool, AsyncConnectionPool
 
-        # Build connection pool arguments from configuration
-        pool_kwargs = {
-            'max_connections': config.limit,
-            'max_keepalive_connections': config.max_keepalive_connections,
-            'keepalive_expiry': config.keepalive_timeout,
+        # Build transport arguments from configuration
+        transport_kwargs = {
+            'verify': config.create_ssl_context(),
+            'limits': httpx.Limits(
+                max_connections=config.limit,
+                max_keepalive_connections=config.max_keepalive_connections,
+                keepalive_expiry=config.keepalive_timeout,
+            ),
             'local_address': config.local_address,
-            'ssl_context': config.create_ssl_context(),
             'proxy': httpx.Proxy(config.proxy) if config.proxy else None,
             **config.extend_params
         }
         # Remove None values to avoid passing invalid arguments
-        pool_kwargs = {k: v for k, v in pool_kwargs.items() if v is not None}
+        transport_kwargs = {k: v for k, v in transport_kwargs.items() if v is not None}
         if config.need_async:
-            self._conn = AsyncConnectionPool(**pool_kwargs)
+            self._conn = httpx.AsyncHTTPTransport(**transport_kwargs)
         else:
-            self._conn = ConnectionPool(**pool_kwargs)
+            self._conn = httpx.HTTPTransport(**transport_kwargs)
 
     async def _do_close(self) -> None:
         """
@@ -99,11 +109,12 @@ class HttpXConnectorPool(ConnectorPool):
         return
 
     def conn(self) -> Any:
+
         """
-        Get the underlying connection pool instance.
+        Get the underlying transport instance.
 
         Returns:
-            Any: The HTTPX AsyncConnectionPool instance
+            Any: The ``httpx.AsyncHTTPTransport`` or ``httpx.HTTPTransport`` instance
         """
         return self._conn
 
@@ -141,11 +152,13 @@ async def create_httpx_client(config: Union[HttpXConnectorPoolConfig, Dict[str, 
         config = config.model_copy(update={"need_async": need_async})
     connector_pool = await get_connector_pool_manager().get_connector_pool("httpx", config=config)
 
+    # SSL verification and proxy are already configured on the shared transport.
+    # Passing ``proxy`` here would make httpx mount a separate, non-shared transport
+    # for proxied requests and bypass the pooled one.
     if need_async:
-        return httpx.AsyncClient(transport=connector_pool.conn(), verify=config.create_ssl_context(),
-                                 proxy=config.proxy)
+        return httpx.AsyncClient(transport=connector_pool.conn())
     else:
-        return httpx.Client(transport=connector_pool.conn(), verify=config.create_ssl_context(), proxy=config.proxy)
+        return httpx.Client(transport=connector_pool.conn())
 
 
 @get_client_registry().register_client("async_openai")
