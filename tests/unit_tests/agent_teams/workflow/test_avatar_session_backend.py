@@ -17,7 +17,10 @@ import pytest
 
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
-from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
+from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import (
+    AvatarSessionManager,
+    _output_text,
+)
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 
 
@@ -93,6 +96,13 @@ def _patch_build(monkeypatch, harnesses: list) -> None:
 def _mgr(**kw) -> AvatarSessionManager:
     base = DeepAgentSpec(enable_task_loop=True, enable_task_planning=True, tools=[])
     return AvatarSessionManager(worker_base_spec=base, team_name="t", language="en", **kw)
+
+
+def test_output_text_preserves_turn_tokens_on_error_result():
+    with pytest.raises(BackendError) as exc_info:
+        _output_text({"result_type": "error", "error": "boom"}, tokens=37)
+
+    assert exc_info.value.tokens == 37
 
 
 def test_agent_session_reuses_one_harness_across_turns(monkeypatch):

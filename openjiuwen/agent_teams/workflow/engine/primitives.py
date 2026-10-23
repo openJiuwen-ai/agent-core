@@ -582,22 +582,34 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
         if res.skipped:
             detail = "backend declined (skipped)"
             rt.log_sink(f"[wf] agent {label!r} skipped")
-            return _BackendCallResult(result=None, succeeded=False, error_detail=detail)
+            return _BackendCallResult(
+                result=None,
+                succeeded=False,
+                error_detail=detail,
+                tokens=burned_tokens if burned_tokens > 0 else None,
+            )
         if json_schema is not None:
             try:
                 coerced = coerce(res.structured, json_schema, model)
                 return _BackendCallResult(
-                    result=coerced, succeeded=True, raw_text=res.text, tokens=res.tokens
+                    result=coerced,
+                    succeeded=True,
+                    raw_text=res.text,
+                    tokens=burned_tokens + (res.tokens or 0) or None,
                 )
             except Exception as e:  # validation failure -> retry
                 last_err = e
+                burned_tokens += res.tokens or 0
                 rt.log_sink(
                     f"[wf] agent {label!r} attempt {attempt}/{attempts} "
                     f"validation failed: {str(e)}"
                 )
                 continue
         return _BackendCallResult(
-            result=res.text, succeeded=True, raw_text=res.text, tokens=res.tokens
+            result=res.text,
+            succeeded=True,
+            raw_text=res.text,
+            tokens=burned_tokens + (res.tokens or 0) or None,
         )
     detail = str(last_err) if last_err else "unknown error"
     rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")

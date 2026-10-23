@@ -447,13 +447,15 @@ class AvatarSessionManager:
                     tokens=turn_tokens or None,
                 )
             # Prefer free-text narration from the round; fall back to JSON capture.
-            text = prefer_natural_or_structured_text(_output_text(result), submit.captured)
+            text = prefer_natural_or_structured_text(
+                _output_text(result, tokens=turn_tokens or None), submit.captured
+            )
             return AgentResult(
                 text=text,
                 structured=submit.captured,
                 tokens=turn_tokens,
             )
-        text = _output_text(result)
+        text = _output_text(result, tokens=turn_tokens or None)
         return AgentResult(text=text, tokens=turn_tokens)
 
     @staticmethod
@@ -595,13 +597,13 @@ class AvatarSessionManager:
         return f"{prefix}-{slug}-{n}"
 
 
-def _output_text(result: Any) -> str:
+def _output_text(result: Any, *, tokens: int | None = None) -> str:
     """Extract the final output text from a round result dict."""
     if isinstance(result, dict):
         err = result.get("error")
         if err or result.get("result_type") == "error":
             msg = str(err or result.get("output") or "session turn failed")
-            raise BackendError(msg)
+            raise BackendError(msg, tokens=tokens)
         return str(result.get("output", ""))
     return str(result or "")
 

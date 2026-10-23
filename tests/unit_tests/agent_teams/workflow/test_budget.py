@@ -31,7 +31,7 @@ from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, A
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 from openjiuwen.agent_teams.workflow.engine.runtime import Runtime
-from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
+from openjiuwen.agent_teams.workflow.engine.errors import BackendError, BudgetExhausted
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
 from openjiuwen.core.single_agent.rail.base import ModelCallInputs
@@ -449,6 +449,52 @@ async def test_attempt_calls_threads_tokens_on_success():
     assert out.succeeded is True
     assert out.result == "hello"
     assert out.tokens == 4321
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_accumulates_failed_and_successful_attempt_tokens():
+    class _Res:
+        skipped = False
+        text = "hello"
+        structured = None
+        tokens = 7
+
+    calls = 0
+
+    async def make_call():
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise BackendError("retry", tokens=11)
+        return _Res()
+
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(), retries=1)
+    out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
+    assert out.succeeded is True
+    assert out.tokens == 18
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_accumulates_schema_validation_tokens():
+    class _Res:
+        skipped = False
+        text = "invalid"
+        structured = {"value": "not-an-int"}
+        tokens = 13
+
+    async def make_call():
+        return _Res()
+
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(), retries=1)
+    out = await _p._attempt_calls(
+        rt,
+        {"label": "t"},
+        {"type": "object", "properties": {"value": {"type": "integer"}}},
+        None,
+        make_call,
+    )
+    assert out.succeeded is False
+    assert out.tokens == 26
 
 
 @pytest.mark.asyncio
