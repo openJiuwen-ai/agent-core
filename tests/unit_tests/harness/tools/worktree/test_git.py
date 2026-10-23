@@ -70,6 +70,20 @@ class TestGitEnv:
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         logger.info("_git_env GIT_TERMINAL_PROMPT verified")
 
+    @pytest.mark.level1
+    def test_contains_askpass(self):
+        env = _git_env()
+        assert env["GIT_ASKPASS"] == ""
+
+    @pytest.mark.level1
+    def test_inherits_environment(self):
+        """Should inherit the existing environment."""
+        import os
+
+        env = _git_env()
+        assert "PATH" in env
+        assert env["PATH"] == os.environ["PATH"]
+
 
 @pytest.mark.asyncio
 @pytest.mark.level0
@@ -84,20 +98,6 @@ async def test_set_longpaths_updates_repository_config(tmp_git_repo):
         text=True,
     )
     assert result.stdout.strip() == "true"
-
-    @pytest.mark.level1
-    def test_contains_askpass(self):
-        env = _git_env()
-        assert env["GIT_ASKPASS"] == ""
-
-    @pytest.mark.level1
-    def test_inherits_environment(self):
-        """Should inherit the existing environment."""
-        import os
-
-        env = _git_env()
-        assert "PATH" in env
-        assert env["PATH"] == os.environ["PATH"]
 
 
 @pytest.mark.asyncio

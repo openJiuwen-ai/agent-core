@@ -15,6 +15,7 @@ name through :func:`create_backend`.
 import os
 from typing import Callable, Protocol, runtime_checkable
 
+from openjiuwen.core.common.logging import agent_logger
 from openjiuwen.harness.tools.worktree.git import (
     GitError,
     branch_delete,
@@ -31,6 +32,8 @@ from openjiuwen.harness.tools.worktree.git import (
 )
 from openjiuwen.harness.tools.worktree.models import WorktreeConfig, WorktreeCreateResult
 from openjiuwen.harness.tools.worktree.slug import worktree_branch_name
+
+_IS_WINDOWS = os.name == "nt"
 
 
 @runtime_checkable
@@ -138,8 +141,17 @@ class GitBackend:
             )
 
         # Phase 1b: enable Windows long-path support before checkout (rc=128).
-        if self._config.longpaths_support:
-            await set_longpaths(repo_root, enabled=True)
+        # This is a best-effort Windows optimisation: failure to persist an
+        # optional git setting must not prevent an otherwise valid checkout.
+        if self._config.longpaths_support and _IS_WINDOWS:
+            try:
+                await set_longpaths(repo_root, enabled=True)
+            except GitError as exc:
+                agent_logger.warning(
+                    "Failed to enable core.longpaths for %s; continuing worktree creation: %s",
+                    repo_root,
+                    exc,
+                )
 
         # Phase 2: resolve base branch
         os.makedirs(os.path.dirname(wt_path), exist_ok=True)

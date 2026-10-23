@@ -153,7 +153,8 @@ class WorktreeManager:
 
         Raises:
             ValueError: If slug is invalid.
-            RuntimeError: If not in a git repository.
+            RuntimeError: If not in a git repository or the repository
+                lifecycle lock cannot be acquired.
         """
         validate_slug(slug)
 
@@ -345,7 +346,8 @@ class WorktreeManager:
 
         Raises:
             ValueError: If slug is invalid.
-            RuntimeError: If not in a git repository.
+            RuntimeError: If not in a git repository or the repository
+                lifecycle lock cannot be acquired.
         """
         validate_slug(slug)
 
@@ -392,6 +394,9 @@ class WorktreeManager:
 
         Returns:
             True if the backend successfully removed the worktree.
+
+        Raises:
+            RuntimeError: If the repository lifecycle lock cannot be acquired.
         """
         async with repo_lock(
             repo_root,

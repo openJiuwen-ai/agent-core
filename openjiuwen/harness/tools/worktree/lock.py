@@ -32,7 +32,7 @@ from filelock import AsyncFileLock, Timeout as FileLockTimeout
 from openjiuwen.core.common.logging import team_logger
 
 
-class WorktreeLockTimeout(TimeoutError):
+class WorktreeLockTimeout(TimeoutError, RuntimeError):
     """Repo lock not acquired within the timeout.
 
     Raised rather than degrading to lock-free, which would reintroduce the
