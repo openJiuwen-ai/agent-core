@@ -51,13 +51,19 @@ class _StreamingFinishReasonRail(AgentRail):
 
 
 class _StreamingLatencyRail(AgentRail):
-    """Capture usage_metadata as seen by after_model_call hooks (tracer path)."""
+    """Snapshot usage_metadata as seen by after_model_call hooks (tracer path).
+
+    A model_dump() copy freezes the values at hook time — the response object
+    itself is mutated by the backfill, so storing the live reference could
+    never observe a pre-backfill state.
+    """
 
     def __init__(self):
         self.captured_usages = []
 
     async def after_model_call(self, ctx):
-        self.captured_usages.append(ctx.inputs.response.usage_metadata)
+        usage = ctx.inputs.response.usage_metadata
+        self.captured_usages.append(usage.model_dump() if usage else None)
 
 
 @pytest.mark.asyncio
@@ -241,14 +247,26 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
 
         usage = result.usage_metadata
         self.assertIsNotNone(usage)
+        # first_token_time is seconds (gen_ai.response.time_to_first_chunk
+        # semconv); the fake stream answers in milliseconds, so a seconds
+        # value must stay well under 1.0 — a raw ms write (e.g. "2.5" for
+        # 2.5ms) fails this magnitude lock.
         self.assertGreaterEqual(float(usage.first_token_time), 0.0)
+        self.assertLess(float(usage.first_token_time), 1.0)
         self.assertIsNotNone(usage.inter_token_latency_ms)
         self.assertGreaterEqual(usage.inter_token_latency_ms, 0.0)
-        # after_model_call hooks (OtelRail -> on_llm_end) observe the same
-        # backfilled values on the same response object.
+        self.assertLess(usage.inter_token_latency_ms, 1000.0)
+        # after_model_call hooks (OtelRail -> on_llm_end) already observed
+        # the backfilled values — the rail snapshots a copy at hook time, so
+        # equality proves the backfill happened before after_model_call.
         self.assertEqual(len(rail.captured_usages), 1)
-        self.assertEqual(rail.captured_usages[0].first_token_time, usage.first_token_time)
-        self.assertEqual(rail.captured_usages[0].inter_token_latency_ms, usage.inter_token_latency_ms)
+        self.assertEqual(
+            rail.captured_usages[0]["first_token_time"], usage.first_token_time
+        )
+        self.assertEqual(
+            rail.captured_usages[0]["inter_token_latency_ms"],
+            usage.inter_token_latency_ms,
+        )
 
     @pytest.mark.asyncio
     async def test_no_session_falls_back_to_invoke(self):
