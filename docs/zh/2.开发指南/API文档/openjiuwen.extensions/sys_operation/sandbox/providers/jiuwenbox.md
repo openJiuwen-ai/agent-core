@@ -536,7 +536,7 @@ async def retire_jiuwenbox_service(base_url: str) -> list[str]
 
 仅供宿主管理服务生命周期时调用，必须与 provider 的在途删除任务使用同一事件循环。宿主必须已经确认**自己管理的旧服务进程退出，并完成其子进程回收**，并在启动替代沙箱前等待本函数完成。连接失败、超时或 URL 变化均不能作为调用依据；外部服务不可达仍走严格删除与待删除重试。
 
-该函数等待对应 URL 已在执行的删除结束，完成该 URL 下缓存及待删除条目的删除钩子，不再请求已退出的旧端点；随后收敛共享 ID、创建锁 / 失败记录、钩子与 idle-timeout 缓存。其他 URL 不受影响，生命周期钩子仍按严格语义执行。返回已收敛的沙箱 ID 列表。普通 disable / restart 应通过 `delete_jiuwenbox_sandbox(delete_all=True)` 覆盖进程内所有历史 URL 的缓存和待删除记录，不能只按当前配置 URL 弹出 ID 后自行发送 DELETE。
+该函数循环等待对应 URL 的在途删除，包含等待期间新登记的任务。批量本地收敛若遇到并发 teardown，先等待该 identity 的任务结束，再按服务已退出的语义处理；不会复用远端任务的传输错误或重复执行已完成条目的钩子。retire 自身不向已退出的旧端点发请求，但其他调用方已发出的请求仍需等待结束。随后收敛共享 ID、创建锁 / 失败记录、钩子与 idle-timeout 缓存。其他 URL 不受影响，生命周期钩子仍按严格语义执行。返回已收敛的沙箱 ID 列表。普通 disable / restart 应通过 `delete_jiuwenbox_sandbox(delete_all=True)` 覆盖进程内所有历史 URL 的缓存和待删除记录，不能只按当前配置 URL 弹出 ID 后自行发送 DELETE。
 
 ## 实现细节：_JiuwenBoxProviderMixin
 

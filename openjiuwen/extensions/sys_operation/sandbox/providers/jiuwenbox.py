@@ -950,7 +950,26 @@ class _JiuwenBoxProviderMixin:
         failures: list[tuple[Exception, Optional[BaseException]]] = []
         for entry_key, entry_id, hook in entries:
             identity = (entry_key, entry_id)
+            if service_stopped:
+                # Other scopes may enqueue teardown while this batch awaits an
+                # earlier entry. Drain this identity, then use the stopped-service
+                # semantics instead of reusing a task that still performs HTTP.
+                while True:
+                    with cls._shared_lock:
+                        task = cls._delete_tasks.get(identity)
+                    if task is None:
+                        break
+                    await asyncio.gather(asyncio.shield(task), return_exceptions=True)
             with cls._shared_lock:
+                if service_stopped:
+                    pending = cls._pending_deletions.get(identity)
+                    if pending is None and cls._shared_sandbox_ids.get(entry_key) != entry_id:
+                        # The joined teardown already completed this identity;
+                        # do not repeat its hooks or remove a newer cached ID.
+                        deleted.append(entry_id)
+                        continue
+                    if pending is not None:
+                        hook = pending[1]
                 task = cls._delete_tasks.get(identity)
                 if task is None:
                     cls._pending_deletions.setdefault(identity, (False, hook))
@@ -1225,11 +1244,14 @@ async def retire_jiuwenbox_service(base_url: str) -> list[str]:
     base_url = base_url.rstrip("/")
     if not base_url:
         raise ValueError("retired service base_url must be non-empty")
-    with cls._shared_lock:
-        tasks = [task for (key, _), task in cls._delete_tasks.items() if key.split("|", 1)[0] == base_url]
-    if tasks:
+    while True:
+        with cls._shared_lock:
+            tasks = [task for (key, _), task in cls._delete_tasks.items() if key.split("|", 1)[0] == base_url]
+        if not tasks:
+            break
         # A DELETE already in flight may fail when its service exits. Let its
-        # worker finish before completing the same identity locally.
+        # worker finish before completing the same identity locally. Resnapshot
+        # after each join to include teardowns registered while we were awaiting.
         await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
     deleted = await cls.delete_cached_sandboxes(
         base_url=base_url, service_stopped=True, reason="service_stopped", raise_on_error=True,

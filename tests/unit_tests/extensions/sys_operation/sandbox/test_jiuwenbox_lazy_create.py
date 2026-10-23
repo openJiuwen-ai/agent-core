@@ -136,6 +136,98 @@ async def test_service_retirement_joins_inflight_delete_before_finishing_hooks(m
 
 
 @pytest.mark.asyncio
+async def test_service_retirement_drains_deletes_started_while_joining(monkeypatch):
+    cls = jb._JiuwenBoxProviderMixin
+    url = "http://localhost:8321"
+    keys = {sid: f"{url}|{sid}" for sid in ("first", "late")}
+    cls._shared_sandbox_ids.update({key: sid for sid, key in keys.items()})
+    hooks = {sid: Mock() for sid in keys}
+    for sid, key in keys.items():
+        cls.register_lifecycle_hook(key, hooks[sid])
+    entered = {sid: threading.Event() for sid in keys}
+    release = {sid: threading.Event() for sid in keys}
+    requested = []
+
+    def delete(sid):
+        requested.append(sid)
+        entered[sid].set()
+        assert release[sid].wait(2)
+        raise httpx.ConnectError("service exited")
+
+    client = Mock(__enter__=Mock(), __exit__=Mock(return_value=False))
+    client.__enter__.return_value = client
+    client.delete_sandbox.side_effect = delete
+    monkeypatch.setattr(jb, "_JiuwenBoxClient", Mock(return_value=client))
+    first_task = asyncio.create_task(jb.delete_jiuwenbox_sandbox(shared_key=keys["first"]))
+    try:
+        assert await asyncio.to_thread(entered["first"].wait, 1)
+        retire_task = asyncio.create_task(jb.retire_jiuwenbox_service(url))
+        await asyncio.sleep(0)  # Retirement is now joining the first task.
+        late_task = asyncio.create_task(jb.delete_jiuwenbox_sandbox(shared_key=keys["late"]))
+        assert await asyncio.to_thread(entered["late"].wait, 1)
+        release["first"].set()
+        assert await first_task == []
+        assert not retire_task.done()
+    finally:
+        for event in release.values():
+            event.set()
+    assert await late_task == []
+    assert await retire_task == ["first", "late"]
+    assert requested == ["first", "late"]
+    assert not cls._shared_sandbox_ids and not cls._pending_deletions and not cls._delete_tasks
+    for hook in hooks.values():
+        assert [call.args[0] for call in hook.call_args_list] == ["before_delete", "after_delete"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_failure", [False, True])
+async def test_service_retirement_does_not_reuse_remote_task_started_during_local_cleanup(monkeypatch, remote_failure):
+    cls = jb._JiuwenBoxProviderMixin
+    url = "http://localhost:8321"
+    first_key, late_key = url + "|first", url + "|late"
+    cls._shared_sandbox_ids.update({first_key: "first", late_key: "late"})
+    cls._idle_timeout_cache[url] = (10, 2)
+    late_tasks = []
+    first_events, late_hook = [], Mock()
+
+    def first_hook(event, context):
+        first_events.append(event)
+        if event == "before_delete":
+            # The local first-scope task schedules a normal per-agent teardown
+            # before retirement resumes to process the next scope.
+            late_tasks.append(asyncio.create_task(jb.delete_jiuwenbox_sandbox(shared_key=late_key)))
+
+    cls.register_lifecycle_hook(first_key, first_hook)
+    cls.register_lifecycle_hook(late_key, late_hook)
+    entered, release = threading.Event(), threading.Event()
+
+    def delete(sid):
+        assert sid == "late"
+        entered.set()
+        assert release.wait(2)
+        if remote_failure:
+            raise httpx.ConnectError("late teardown reached dead port")
+
+    client = Mock(__enter__=Mock(), __exit__=Mock(return_value=False))
+    client.__enter__.return_value = client
+    client.delete_sandbox.side_effect = delete
+    monkeypatch.setattr(jb, "_JiuwenBoxClient", Mock(return_value=client))
+    retire_task = asyncio.create_task(jb.retire_jiuwenbox_service(url))
+    try:
+        assert await asyncio.to_thread(entered.wait, 1)
+        assert not retire_task.done()
+    finally:
+        release.set()
+    assert await late_tasks[0] == ([] if remote_failure else ["late"])
+    assert await retire_task == ["first", "late"]
+    client.delete_sandbox.assert_called_once_with("late")
+    assert first_events == ["before_delete", "after_delete"]
+    assert [call.args[0] for call in late_hook.call_args_list] == ["before_delete", "after_delete"]
+    assert not cls._shared_sandbox_ids and not cls._pending_deletions and not cls._delete_tasks
+    assert not cls._lifecycle_hooks and not cls._idle_timeout_cache
+
+
+@pytest.mark.asyncio
 async def test_bulk_delete_includes_pending_only_historical_urls_and_keeps_unreachable_entries(monkeypatch):
     cls = jb._JiuwenBoxProviderMixin
     key = "http://localhost:8321|old"
