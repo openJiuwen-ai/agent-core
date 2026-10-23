@@ -520,13 +520,23 @@ async def delete_jiuwenbox_sandbox(
 * **delete_all**(bool, 可选)：为 `True` 时批量删除进程内全部缓存和待清理沙箱，成功后移除对应缓存（非单 agent 网关释放）。默认值 `False`。
 * **reason**(str, 可选)：传入删除钩子上下文的原因，默认值 `"teardown"`。
 * **timeout_seconds**(float, 可选)：HTTP 客户端超时（秒），默认值 `30.0`。
-* **raise_on_error**(bool, 可选)：为 `True` 时抛出包含原始远端删除原因的 `RuntimeError`；默认记录失败并继续。
+* **raise_on_error**(bool, 可选)：为 `True` 时尝试全部匹配条目后，抛出包含首个远端删除原因的 `RuntimeError`，保留原异常链；默认记录远端删除失败并继续。生命周期钩子失败不受此开关控制，仍在遍历结束后严格抛出。
 
-远端删除失败时保留缓存与钩子，标记为待清理；显式重试删除成功前，不允许复用或自动重建该作用域沙箱。重试不重复执行已成功的 `before_delete`，删除成功后执行一次 `after_delete`；后置钩子失败不恢复已删除条目。
+远端删除失败时保留缓存与钩子，标记为待清理；显式重试删除成功前，不允许复用或自动重建该作用域沙箱。单条失败不跳过其余匹配条目，成功项立即收敛，失败项留待重试；批量严格清理最终仍报错，宿主不得进入创建阶段。重试不重复执行已成功的 `before_delete`，删除成功后执行一次 `after_delete`；后置钩子失败不恢复已删除条目。
 
 **返回**：
 
 * **list[str]**：成功删除的 `sandbox_id` 列表（按顺序）。
+
+### async retire_jiuwenbox_service
+
+```python
+async def retire_jiuwenbox_service(base_url: str) -> list[str]
+```
+
+仅供宿主管理服务生命周期时调用，必须与 provider 的在途删除任务使用同一事件循环。宿主必须已经确认**自己管理的旧服务进程退出，并完成其子进程回收**，并在启动替代沙箱前等待本函数完成。连接失败、超时或 URL 变化均不能作为调用依据；外部服务不可达仍走严格删除与待删除重试。
+
+该函数等待对应 URL 已在执行的删除结束，完成该 URL 下缓存及待删除条目的删除钩子，不再请求已退出的旧端点；随后收敛共享 ID、创建锁 / 失败记录、钩子与 idle-timeout 缓存。其他 URL 不受影响，生命周期钩子仍按严格语义执行。返回已收敛的沙箱 ID 列表。普通 disable / restart 应通过 `delete_jiuwenbox_sandbox(delete_all=True)` 覆盖进程内所有历史 URL 的缓存和待删除记录，不能只按当前配置 URL 弹出 ID 后自行发送 DELETE。
 
 ## 实现细节：_JiuwenBoxProviderMixin
 

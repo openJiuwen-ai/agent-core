@@ -922,6 +922,8 @@ class _JiuwenBoxProviderMixin:
         reason: str = "teardown",
         timeout_seconds: float = 30.0,
         raise_on_error: bool = False,
+        base_url: Optional[str] = None,
+        service_stopped: bool = False,
     ) -> list[str]:
         """Delete cached sandboxes. See ``delete_jiuwenbox_sandbox`` for the public contract."""
         with cls._shared_lock:
@@ -931,7 +933,7 @@ class _JiuwenBoxProviderMixin:
                 candidates[(shared_key, sandbox_id)] = None
             entries = []
             for key, sid in candidates:
-                matches = delete_all or (
+                matches = delete_all or (base_url and key.split("|", 1)[0] == base_url.rstrip("/")) or (
                     shared_key and key == shared_key and (not sandbox_id or sid == sandbox_id)
                 ) or (not shared_key and sandbox_id and sid == sandbox_id)
                 if not matches:
@@ -945,6 +947,7 @@ class _JiuwenBoxProviderMixin:
                 entries.append((key, sid, hook))
 
         deleted: list[str] = []
+        failures: list[tuple[Exception, Optional[BaseException]]] = []
         for entry_key, entry_id, hook in entries:
             identity = (entry_key, entry_id)
             with cls._shared_lock:
@@ -952,7 +955,7 @@ class _JiuwenBoxProviderMixin:
                 if task is None:
                     cls._pending_deletions.setdefault(identity, (False, hook))
                     task = asyncio.create_task(cls._finish_cached_delete(
-                        entry_key, entry_id, hook, reason, timeout_seconds,
+                        entry_key, entry_id, hook, reason, timeout_seconds, service_stopped,
                     ))
                     cls._delete_tasks[identity] = task
                     task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
@@ -961,11 +964,21 @@ class _JiuwenBoxProviderMixin:
             except _DeleteTransportError as exc:
                 logger.warning("[jiuwenbox] sandbox %s cleanup failed: %s", entry_id, exc)
                 if raise_on_error:
-                    raise RuntimeError(
-                        f"could not delete sandbox {entry_id}: {exc}"
-                    ) from exc.__cause__
+                    failures.append((
+                        RuntimeError(f"could not delete sandbox {entry_id}: {exc}"), exc.__cause__,
+                    ))
+                continue
+            except Exception as exc:
+                # Hooks remain strict, but one failed scope must not prevent
+                # cleanup of the other entries in an explicit bulk operation.
+                failures.append((exc, exc.__cause__))
                 continue
             deleted.append(entry_id)
+        if failures:
+            error, cause = failures[0]
+            if len(failures) > 1:
+                error.add_note(f"Sandbox cleanup failed for {len(failures)} entries; all matching entries were attempted.")
+            raise error from cause
         return deleted
 
     @classmethod
@@ -976,6 +989,7 @@ class _JiuwenBoxProviderMixin:
         hook: Optional[Callable[[str, dict], None]],
         reason: str,
         timeout_seconds: float,
+        service_stopped: bool = False,
     ) -> None:
         identity = (shared_key, sandbox_id)
         try:
@@ -991,13 +1005,14 @@ class _JiuwenBoxProviderMixin:
                     raise
                 with cls._shared_lock:
                     cls._pending_deletions[identity] = (True, hook)
-            try:
-                with _JiuwenBoxClient(
-                    base_url=shared_key.split("|", 1)[0], timeout_seconds=timeout_seconds,
-                ) as client:
-                    await asyncio.to_thread(client.delete_sandbox, sandbox_id)
-            except Exception as exc:
-                raise _DeleteTransportError(f"{type(exc).__name__}: {exc}") from exc
+            if not service_stopped:
+                try:
+                    with _JiuwenBoxClient(
+                        base_url=shared_key.split("|", 1)[0], timeout_seconds=timeout_seconds,
+                    ) as client:
+                        await asyncio.to_thread(client.delete_sandbox, sandbox_id)
+                except Exception as exc:
+                    raise _DeleteTransportError(f"{type(exc).__name__}: {exc}") from exc
             with cls._shared_lock:
                 cls._pending_deletions.pop(identity, None)
                 if cls._shared_sandbox_ids.get(shared_key) == sandbox_id:
@@ -1193,6 +1208,42 @@ def clear_jiuwenbox_shared_sandbox(base_url: str) -> list[str]:
 def build_jiuwenbox_shared_scope_key(base_url: str, isolation_key: str) -> str:
     """Build the provider shared-cache key for a base_url + isolation_key pair."""
     return f"{base_url.rstrip('/')}|{isolation_key}"
+
+
+async def retire_jiuwenbox_service(base_url: str) -> list[str]:
+    """Converge local state after the host confirms its owned service has exited.
+
+    The host must also finish child-process teardown before calling this function,
+    and must await it before starting replacement sandboxes. Connection failures
+    or a changed URL alone are not evidence of service exit. No DELETE is sent to
+    the retired endpoint; captured delete hooks still run with their usual strict
+    semantics. Other service URLs are untouched.
+
+    Call on the event loop that owns the provider's in-flight deletion tasks.
+    """
+    cls = _JiuwenBoxProviderMixin
+    base_url = base_url.rstrip("/")
+    if not base_url:
+        raise ValueError("retired service base_url must be non-empty")
+    with cls._shared_lock:
+        tasks = [task for (key, _), task in cls._delete_tasks.items() if key.split("|", 1)[0] == base_url]
+    if tasks:
+        # A DELETE already in flight may fail when its service exits. Let its
+        # worker finish before completing the same identity locally.
+        await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+    deleted = await cls.delete_cached_sandboxes(
+        base_url=base_url, service_stopped=True, reason="service_stopped", raise_on_error=True,
+    )
+    # Invalidate in-flight creation tickets and failures, including scopes that
+    # never published a sandbox ID. Pending deletion hooks have completed above.
+    cls.clear_shared_sandbox(base_url)
+    with cls._shared_lock:
+        for key in list(cls._lifecycle_hooks):
+            if key.split("|", 1)[0] == base_url:
+                cls._lifecycle_hooks.pop(key, None)
+    with cls._idle_timeout_cache_lock:
+        cls._idle_timeout_cache.pop(base_url, None)
+    return deleted
 
 
 def _iter_host_files_for_upload(
@@ -1465,7 +1516,9 @@ async def delete_jiuwenbox_sandbox(
         delete_all: When True, delete every cached sandbox in this process.
         reason: Passed to delete hook context; default "teardown".
         timeout_seconds: HTTP client timeout.
-        raise_on_error: Propagate remote deletion failures for explicit restart.
+        raise_on_error: Attempt all matching entries, then propagate the first
+            remote deletion failure for explicit restart. Hook failures remain
+            strict regardless of this flag and are also raised after traversal.
 
     Returns:
         sandbox_ids successfully deleted, in order.

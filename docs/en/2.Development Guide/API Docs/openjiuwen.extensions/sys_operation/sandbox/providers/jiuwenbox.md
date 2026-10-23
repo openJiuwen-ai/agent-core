@@ -335,6 +335,18 @@ After execution completes, yields stdout and stderr line chunks followed by a fi
 
 ## Error Handling and Lifecycle
 
+### Retiring an owned service
+
+```python
+async def retire_jiuwenbox_service(base_url: str) -> list[str]
+```
+
+Hosts may call this only after confirming that their owned service process has exited and its child processes have been torn down. Use the same event loop as the provider's in-flight deletion tasks and await completion before starting replacement sandboxes. A connection error, timeout, or changed URL alone does not prove service exit; unreachable external services retain strict DELETE/retry behavior.
+
+Retirement joins in-flight deletes for that URL, completes cached and pending delete entries with their captured lifecycle hooks, and sends no HTTP request to the stopped endpoint. It clears shared IDs, creation locks/failures, hooks, and idle-timeout state for that URL only, returning the retired sandbox IDs. Hooks retain their strict failure semantics. For ordinary disable/restart cleanup, use `delete_jiuwenbox_sandbox(delete_all=True, raise_on_error=True)` to include cached and pending entries across all process-known historical URLs. Failed remote deletions remain pending for retry.
+
+Bulk cleanup attempts every matching entry even if an earlier DELETE or lifecycle hook fails. Successful entries converge immediately; failed remote deletions retain their cache and pending state. Strict cleanup raises the first error after traversal, preserving its original cause, and still blocks replacement creation. Hook failures propagate after traversal regardless of `raise_on_error`.
+
 Provider methods generally convert file-system, shell, and code-execution exceptions into the corresponding error `*Result` rather than raising them directly. Automatic recreation occurs only for an HTTP 404 that can be identified specifically as “sandbox not found”; an ordinary missing-file or missing-directory 404 does not trigger recreation.
 
 File-system, shell, and code providers with the same `base_url` and `isolation_key` share one sandbox. Lifecycle callbacks may receive these events:
