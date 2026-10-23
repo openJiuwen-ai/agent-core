@@ -26,6 +26,7 @@ from typing import (
     Dict,
     List,
     Literal,
+    NamedTuple,
     Optional,
     Set,
 )
@@ -48,7 +49,6 @@ from openjiuwen.core.runner.callback.decorator import (
     WrapHandler,
 )
 from openjiuwen.core.runner.callback.enums import (
-    ChainAction,
     FilterAction,
     HookType,
 )
@@ -134,6 +134,55 @@ def _get_signature(func: Callable):
         return None
 
 
+class _NarrowSpec(NamedTuple):
+    """Pre-resolved parameter traits of a callback (constants per callable)."""
+
+    positional_count: int
+    has_var_positional: bool
+    has_var_keyword: bool
+    accepted_kwargs: Optional[frozenset]  # None → **kwargs swallows everything
+    takes_session: bool
+
+
+@lru_cache(maxsize=4096)
+def _get_narrow_spec(func: Callable) -> Optional[_NarrowSpec]:
+    """Resolve the traits used by ``_narrow_call`` / session injection once.
+
+    The signature itself is cached by ``_get_signature``, but walking its
+    parameters to count positionals / collect accepted names was re-done on
+    every callback invocation. Callbacks are long-lived registrations, so
+    resolve once per callable and reuse.
+    """
+    sig = _get_signature(func)
+    if sig is None:
+        return None
+
+    has_var_positional = False
+    has_var_keyword = False
+    positional_count = 0
+    accepted: list[str] = []
+    for name, param in sig.parameters.items():
+        if param.kind == inspect.Parameter.VAR_POSITIONAL:
+            has_var_positional = True
+        elif param.kind == inspect.Parameter.VAR_KEYWORD:
+            has_var_keyword = True
+        else:
+            if param.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                positional_count += 1
+            accepted.append(name)
+
+    return _NarrowSpec(
+        positional_count=positional_count,
+        has_var_positional=has_var_positional,
+        has_var_keyword=has_var_keyword,
+        accepted_kwargs=None if has_var_keyword else frozenset(accepted),
+        takes_session="session" in sig.parameters or has_var_keyword,
+    )
+
+
 def _narrow_call(
     func: Callable,
     args: tuple,
@@ -146,35 +195,16 @@ def _narrow_call(
     Keyword arguments are filtered to declared parameter names (unless it has
     **kwargs).
     """
-    sig = _get_signature(func)
-    if sig is None:
+    spec = _get_narrow_spec(func)
+    if spec is None:
         return args, kwargs
 
-    has_var_positional = False
-    has_var_keyword = False
-    positional_count = 0
+    narrowed_args = args if spec.has_var_positional else args[: spec.positional_count]
 
-    for param in sig.parameters.values():
-        if param.kind == inspect.Parameter.VAR_POSITIONAL:
-            has_var_positional = True
-        elif param.kind == inspect.Parameter.VAR_KEYWORD:
-            has_var_keyword = True
-        elif param.kind in (
-            inspect.Parameter.POSITIONAL_ONLY,
-            inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        ):
-            positional_count += 1
-
-    narrowed_args = args if has_var_positional else args[:positional_count]
-
-    if has_var_keyword:
+    if spec.has_var_keyword:
         narrowed_kwargs = kwargs
     else:
-        skip_kinds = (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
-        accepted: set[str] = set()
-        for name, p in sig.parameters.items():
-            if p.kind not in skip_kinds:
-                accepted.add(name)
+        accepted = spec.accepted_kwargs
         narrowed_kwargs = {k: v for k, v in kwargs.items() if k in accepted}
 
     return narrowed_args, narrowed_kwargs
@@ -189,24 +219,16 @@ def _inject_session_if_needed(callback, narrowed_args, narrowed_kwargs):
         narrowed_args: Positional arguments
         narrowed_kwargs: Keyword arguments
     """
-    # Check if session injection is needed
-    need_session = False
-
-    sig = _get_signature(callback)
-    if sig is not None:
-        # Check if callback has explicit 'session' parameter
-        if 'session' in sig.parameters:
-            need_session = True
-        # Check if callback has **kwargs parameter
-        elif any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-            need_session = True
+    spec = _get_narrow_spec(callback)
+    if spec is None or not spec.takes_session:
+        return
 
     # Inject session if needed and not already provided
-    if need_session:
-        session = narrowed_kwargs.get("session", None)
-        if not session:
-            from openjiuwen.core.session import get_current_session
-            narrowed_kwargs['session'] = get_current_session()
+    session = narrowed_kwargs.get("session", None)
+    if not session:
+        from openjiuwen.core.session import get_current_session
+
+        narrowed_kwargs["session"] = get_current_session()
 
 
 class AsyncCallbackFramework:
@@ -229,11 +251,7 @@ class AsyncCallbackFramework:
         logger: Logger instance
     """
 
-    def __init__(
-            self,
-            enable_metrics: bool = True,
-            enable_logging: bool = True
-    ):
+    def __init__(self, enable_metrics: bool = True, enable_logging: bool = True):
         """Initialize the callback framework.
 
         Args:
@@ -250,9 +268,7 @@ class AsyncCallbackFramework:
         self._callback_filters: Dict[Callable, List[EventFilter]] = {}
 
         # Hooks
-        self._hooks: Dict[str, Dict[HookType, List[Callable]]] = defaultdict(
-            lambda: defaultdict(list)
-        )
+        self._hooks: Dict[str, Dict[HookType, List[Callable]]] = defaultdict(lambda: defaultdict(list))
 
         # Metrics
         self.enable_metrics = enable_metrics
@@ -305,18 +321,18 @@ class AsyncCallbackFramework:
     # ========== Registration ==========
 
     def on(
-            self,
-            event: str,
-            *,
-            priority: int = 0,
-            once: bool = False,
-            namespace: str = "default",
-            tags: Optional[Set[str]] = None,
-            filters: Optional[List[EventFilter]] = None,
-            max_retries: int = 0,
-            retry_delay: float = 0.0,
-            timeout: Optional[float] = None,
-            callback_type: str = "",
+        self,
+        event: str,
+        *,
+        priority: int = 0,
+        once: bool = False,
+        namespace: str = "default",
+        tags: Optional[Set[str]] = None,
+        filters: Optional[List[EventFilter]] = None,
+        max_retries: int = 0,
+        retry_delay: float = 0.0,
+        timeout: Optional[float] = None,
+        callback_type: str = "",
     ):
         """Decorator to register an async callback.
 
@@ -360,19 +376,19 @@ class AsyncCallbackFramework:
         )
 
     def on_chain(
-            self,
-            event: str,
-            *,
-            priority: int = 0,
-            once: bool = False,
-            namespace: str = "default",
-            tags: Optional[Set[str]] = None,
-            rollback_handler: Optional[Callable] = None,
-            error_handler: Optional[Callable] = None,
-            max_retries: int = 0,
-            retry_delay: float = 0.0,
-            timeout: Optional[float] = None,
-            callback_type: str = "",
+        self,
+        event: str,
+        *,
+        priority: int = 0,
+        once: bool = False,
+        namespace: str = "default",
+        tags: Optional[Set[str]] = None,
+        rollback_handler: Optional[Callable] = None,
+        error_handler: Optional[Callable] = None,
+        max_retries: int = 0,
+        retry_delay: float = 0.0,
+        timeout: Optional[float] = None,
+        callback_type: str = "",
     ):
         """Decorator to register an async callback specifically for callback chains.
 
@@ -419,22 +435,22 @@ class AsyncCallbackFramework:
         )
 
     def register_sync(
-            self,
-            event: str,
-            callback: Callable[..., Awaitable[Any]],
-            *,
-            priority: int = 0,
-            once: bool = False,
-            namespace: str = "default",
-            tags: Optional[Set[str]] = None,
-            filters: Optional[List[EventFilter]] = None,
-            rollback_handler: Optional[Callable] = None,
-            error_handler: Optional[Callable] = None,
-            max_retries: int = 0,
-            retry_delay: float = 0.0,
-            timeout: Optional[float] = None,
-            callback_type: str = "",
-    ) -> 'CallbackInfo':
+        self,
+        event: str,
+        callback: Callable[..., Awaitable[Any]],
+        *,
+        priority: int = 0,
+        once: bool = False,
+        namespace: str = "default",
+        tags: Optional[Set[str]] = None,
+        filters: Optional[List[EventFilter]] = None,
+        rollback_handler: Optional[Callable] = None,
+        error_handler: Optional[Callable] = None,
+        max_retries: int = 0,
+        retry_delay: float = 0.0,
+        timeout: Optional[float] = None,
+        callback_type: str = "",
+    ) -> "CallbackInfo":
         """Synchronous registration method for decorator use.
 
         This is an internal method used by the decorator to register callbacks
@@ -465,11 +481,7 @@ class AsyncCallbackFramework:
         if rollback_handler or error_handler:
             if event not in self._chains:
                 self._chains[event] = CallbackChain(event)
-            self._chains[event].add(
-                callback_info,
-                rollback_handler,
-                error_handler
-            )
+            self._chains[event].add(callback_info, rollback_handler, error_handler)
 
         if self.enable_logging:
             self.logger.info(f"Registered callback: {event} -> {callback.__name__}")
@@ -477,11 +489,11 @@ class AsyncCallbackFramework:
         return callback_info
 
     def emit_before(
-            self,
-            event: str,
-            *,
-            pass_args: bool = True,
-            extra_kwargs: Optional[dict[str, Any]] = None,
+        self,
+        event: str,
+        *,
+        pass_args: bool = True,
+        extra_kwargs: Optional[dict[str, Any]] = None,
     ):
         """Decorator to trigger event BEFORE the decorated function is called.
 
@@ -507,18 +519,17 @@ class AsyncCallbackFramework:
         Returns:
             Decorator function
         """
-        return create_emit_before_decorator(self, event, pass_args=pass_args,
-                                            extra_kwargs=extra_kwargs)
+        return create_emit_before_decorator(self, event, pass_args=pass_args, extra_kwargs=extra_kwargs)
 
     def emit_after(
-            self,
-            event: str,
-            *,
-            result_key: str = "result",
-            item_key: str = "item",
-            pass_args: bool = False,
-            stream_mode: Literal["per_item", "once"] = "per_item",
-            extra_kwargs: Optional[dict[str, Any]] = None,
+        self,
+        event: str,
+        *,
+        result_key: str = "result",
+        item_key: str = "item",
+        pass_args: bool = False,
+        stream_mode: Literal["per_item", "once"] = "per_item",
+        extra_kwargs: Optional[dict[str, Any]] = None,
     ):
         """Decorator to trigger event AFTER the decorated function completes.
 
@@ -570,7 +581,8 @@ class AsyncCallbackFramework:
             Decorator function
         """
         return create_emit_after_decorator(
-            self, event,
+            self,
+            event,
             result_key=result_key,
             item_key=item_key,
             pass_args=pass_args,
@@ -579,12 +591,12 @@ class AsyncCallbackFramework:
         )
 
     def emit_around(
-            self,
-            before_event: str,
-            after_event: str,
-            pass_args: bool = True,
-            pass_result: bool = True,
-            on_error_event: Optional[str] = None
+        self,
+        before_event: str,
+        after_event: str,
+        pass_args: bool = True,
+        pass_result: bool = True,
+        on_error_event: Optional[str] = None,
     ):
         """Decorator to trigger events before and after function execution.
 
@@ -626,14 +638,14 @@ class AsyncCallbackFramework:
         )
 
     def transform_io(
-            self,
-            *,
-            input_event: Optional[str] = None,
-            output_event: Optional[str] = None,
-            result_key: str = "result",
-            input_transform: Optional[InputTransform] = None,
-            output_transform: Optional[OutputTransform] = None,
-            output_mode: Literal["frame", "generator"] = "frame",
+        self,
+        *,
+        input_event: Optional[str] = None,
+        output_event: Optional[str] = None,
+        result_key: str = "result",
+        input_transform: Optional[InputTransform] = None,
+        output_transform: Optional[OutputTransform] = None,
+        output_mode: Literal["frame", "generator"] = "frame",
     ):
         """Decorator to transform function inputs and outputs via callbacks.
 
@@ -779,9 +791,9 @@ class AsyncCallbackFramework:
                 print("after fetch")
                 return result
 
+
             @framework.wrap("fetch")
-            async def fetch_data(url: str) -> dict:
-                ...
+            async def fetch_data(url: str) -> dict: ...
 
         For a static chain (handlers fixed at decoration time, no framework
         involvement) use :func:`create_wrap_decorator` directly.
@@ -839,10 +851,13 @@ class AsyncCallbackFramework:
             The return value of the last transform callback, or
             ``_TRANSFORM_NOOP`` when no transform callbacks are registered.
         """
-        callbacks = [
-            info for info in self._callbacks.get(event, [])
-            if info.enabled and info.callback_type == "transform"
-        ]
+        # Fast path: no registrations for this event at all — skip building
+        # the transform-callback list on every call (the common no-subscriber
+        # case for event-driven transform_io decorated components).
+        callbacks_raw = self._callbacks.get(event)
+        if not callbacks_raw:
+            return _TRANSFORM_NOOP
+        callbacks = [info for info in callbacks_raw if info.enabled and info.callback_type == "transform"]
         if not callbacks:
             return _TRANSFORM_NOOP
         result: Any = _TRANSFORM_NOOP
@@ -853,21 +868,21 @@ class AsyncCallbackFramework:
         return result
 
     async def register(
-            self,
-            event: str,
-            callback: Callable[..., Awaitable[Any]],
-            *,
-            priority: int = 0,
-            once: bool = False,
-            namespace: str = "default",
-            tags: Optional[Set[str]] = None,
-            filters: Optional[List[EventFilter]] = None,
-            rollback_handler: Optional[Callable] = None,
-            error_handler: Optional[Callable] = None,
-            max_retries: int = 0,
-            retry_delay: float = 0.0,
-            timeout: Optional[float] = None,
-            callback_type: str = "",
+        self,
+        event: str,
+        callback: Callable[..., Awaitable[Any]],
+        *,
+        priority: int = 0,
+        once: bool = False,
+        namespace: str = "default",
+        tags: Optional[Set[str]] = None,
+        filters: Optional[List[EventFilter]] = None,
+        rollback_handler: Optional[Callable] = None,
+        error_handler: Optional[Callable] = None,
+        max_retries: int = 0,
+        retry_delay: float = 0.0,
+        timeout: Optional[float] = None,
+        callback_type: str = "",
     ) -> CallbackInfo:
         """Register a callback for an event.
 
@@ -929,23 +944,21 @@ class AsyncCallbackFramework:
                 callback_to_remove = callback_info.callback
                 break
             # Check if callback is a wrapper with __wrapped__ pointing to the original
-            elif hasattr(callback, '__wrapped__'):
-                wrapped_func = getattr(callback, '__wrapped__', None)
+            elif hasattr(callback, "__wrapped__"):
+                wrapped_func = getattr(callback, "__wrapped__", None)
                 if wrapped_func is not None and callback_info.callback == wrapped_func:
                     callback_to_remove = callback_info.callback
                     break
 
         if callback_to_remove is not None:
-            self._callbacks[event] = [
-                ci for ci in self._callbacks[event] if ci.callback != callback_to_remove
-            ]
+            self._callbacks[event] = [ci for ci in self._callbacks[event] if ci.callback != callback_to_remove]
             self._callback_filters.pop(callback_to_remove, None)
 
             if event in self._chains:
                 self._chains[event].remove(callback_to_remove)
 
             if self.enable_logging:
-                callback_name = getattr(callback_to_remove, '__name__', 'unknown')
+                callback_name = getattr(callback_to_remove, "__name__", "unknown")
                 self.logger.info(f"Unregistered callback: {event} -> {callback_name}")
 
     async def unregister(self, event: str, callback: Callable) -> None:
@@ -969,10 +982,7 @@ class AsyncCallbackFramework:
         """
         async with self._locks["registration"]:
             for event in list(self._callbacks.keys()):
-                self._callbacks[event] = [
-                    ci for ci in self._callbacks[event]
-                    if ci.namespace != namespace
-                ]
+                self._callbacks[event] = [ci for ci in self._callbacks[event] if ci.namespace != namespace]
 
     async def unregister_by_tags(self, tags: Set[str]) -> None:
         """Unregister callbacks matching any of the given tags.
@@ -982,10 +992,7 @@ class AsyncCallbackFramework:
         """
         async with self._locks["registration"]:
             for event in list(self._callbacks.keys()):
-                self._callbacks[event] = [
-                    ci for ci in self._callbacks[event]
-                    if not ci.tags.intersection(tags)
-                ]
+                self._callbacks[event] = [ci for ci in self._callbacks[event] if not ci.tags.intersection(tags)]
 
     async def unregister_event(self, event: str) -> None:
         """Unregister all callbacks for a specific event.
@@ -1048,12 +1055,7 @@ class AsyncCallbackFramework:
 
         # Record history
         if self._enable_history:
-            self._event_history.append({
-                "event": event,
-                "args": args,
-                "kwargs": kwargs,
-                "timestamp": time.time()
-            })
+            self._event_history.append({"event": event, "args": args, "kwargs": kwargs, "timestamp": time.time()})
 
         # Execute BEFORE hooks
         await self._execute_hooks(event, HookType.BEFORE, *args, **kwargs)
@@ -1073,9 +1075,7 @@ class AsyncCallbackFramework:
 
             try:
                 # Apply filters
-                filter_result = await self._apply_filters(
-                    event, callback, args, kwargs
-                )
+                filter_result = await self._apply_filters(event, callback, args, kwargs)
 
                 if filter_result.action == FilterAction.STOP:
                     if self.enable_logging:
@@ -1083,10 +1083,7 @@ class AsyncCallbackFramework:
                     break
                 elif filter_result.action == FilterAction.SKIP:
                     if self.enable_logging:
-                        self.logger.debug(
-                            f"Filter skipped callback {callback.__name__}: "
-                            f"{filter_result.reason}"
-                        )
+                        self.logger.debug(f"Filter skipped callback {callback.__name__}: {filter_result.reason}")
                     continue
 
                 final_args = filter_result.modified_args or args
@@ -1132,9 +1129,7 @@ class AsyncCallbackFramework:
                 # Record circuit breaker success
                 cb_key = f"{event}:{callback.__name__}"
                 if cb_key in self._circuit_breakers:
-                    await self._circuit_breakers[cb_key].record_success(
-                        event, callback
-                    )
+                    await self._circuit_breakers[cb_key].record_success(event, callback)
 
                 results.append(result)
 
@@ -1162,9 +1157,7 @@ class AsyncCallbackFramework:
                             f"(caused by {type(e.cause).__name__}: {e.cause})"
                         )
                     else:
-                        self.logger.error(
-                            f"Callback execution aborted: {callback.__name__} - {e.reason}"
-                        )
+                        self.logger.error(f"Callback execution aborted: {callback.__name__} - {e.reason}")
 
                 # An aborted chain is exactly when the split matters, so report
                 # what ran before reraising.
@@ -1186,18 +1179,13 @@ class AsyncCallbackFramework:
                 # Record circuit breaker failure
                 cb_key = f"{event}:{callback.__name__}"
                 if cb_key in self._circuit_breakers:
-                    await self._circuit_breakers[cb_key].record_failure(
-                        event, callback
-                    )
+                    await self._circuit_breakers[cb_key].record_failure(event, callback)
 
                 # Execute ERROR hooks
                 await self._execute_hooks(event, HookType.ERROR, e, *args, **kwargs)
 
                 if self.enable_logging:
-                    self.logger.error(
-                        f"Callback execution failed: {callback.__name__} - {e}",
-                        exc_info=True
-                    )
+                    self.logger.error(f"Callback execution failed: {callback.__name__} - {e}", exc_info=True)
 
         _log_callback_chain_breakdown(event, chain_timings)
 
@@ -1206,13 +1194,7 @@ class AsyncCallbackFramework:
 
         return results
 
-    async def trigger_delayed(
-            self,
-            event: str,
-            delay: float,
-            *args,
-            **kwargs
-    ) -> List[Any]:
+    async def trigger_delayed(self, event: str, delay: float, *args, **kwargs) -> List[Any]:
         """Trigger an event after a delay.
 
         Args:
@@ -1256,11 +1238,7 @@ class AsyncCallbackFramework:
         else:
             chain = self._chains[event]
 
-        context = ChainContext(
-            event=event,
-            initial_args=args,
-            initial_kwargs=kwargs
-        )
+        context = ChainContext(event=event, initial_args=args, initial_kwargs=kwargs)
 
         return await chain.execute(context)
 
@@ -1302,9 +1280,7 @@ class AsyncCallbackFramework:
             async def execute_callback(cb_info=callback_info, cb=callback):
                 try:
                     # Apply filters
-                    filter_result = await self._apply_filters(
-                        event, cb, args, kwargs
-                    )
+                    filter_result = await self._apply_filters(event, cb, args, kwargs)
 
                     if filter_result.action == FilterAction.STOP:
                         if self.enable_logging:
@@ -1312,10 +1288,7 @@ class AsyncCallbackFramework:
                         return None
                     elif filter_result.action == FilterAction.SKIP:
                         if self.enable_logging:
-                            self.logger.debug(
-                                f"Filter skipped {cb.__name__}: "
-                                f"{filter_result.reason}"
-                            )
+                            self.logger.debug(f"Filter skipped {cb.__name__}: {filter_result.reason}")
                         return None
 
                     final_args = filter_result.modified_args or args
@@ -1337,9 +1310,7 @@ class AsyncCallbackFramework:
 
                 except Exception as e:
                     if self.enable_logging:
-                        self.logger.error(
-                            f"Callback {cb.__name__} failed in parallel execution: {e}"
-                        )
+                        self.logger.error(f"Callback {cb.__name__} failed in parallel execution: {e}")
                     return None
 
             tasks.append(execute_callback())
@@ -1358,13 +1329,7 @@ class AsyncCallbackFramework:
 
         return clean_results
 
-    async def trigger_until(
-            self,
-            event: str,
-            condition: Callable[[Any], bool],
-            *args,
-            **kwargs
-    ) -> Optional[Any]:
+    async def trigger_until(self, event: str, condition: Callable[[Any], bool], *args, **kwargs) -> Optional[Any]:
         """Trigger callbacks until a condition is satisfied.
 
         Executes callbacks in priority order, stopping when one returns
@@ -1399,9 +1364,7 @@ class AsyncCallbackFramework:
 
             try:
                 # Apply filters
-                filter_result = await self._apply_filters(
-                    event, callback, args, kwargs
-                )
+                filter_result = await self._apply_filters(event, callback, args, kwargs)
 
                 if filter_result.action == FilterAction.STOP:
                     break
@@ -1419,9 +1382,7 @@ class AsyncCallbackFramework:
                 # Check condition
                 if condition(result):
                     if self.enable_logging:
-                        self.logger.info(
-                            f"Condition satisfied by {callback.__name__}: {result}"
-                        )
+                        self.logger.info(f"Condition satisfied by {callback.__name__}: {result}")
 
                     # Handle once-only callbacks
                     if callback_info.once:
@@ -1435,19 +1396,11 @@ class AsyncCallbackFramework:
 
             except Exception as e:
                 if self.enable_logging:
-                    self.logger.error(
-                        f"Callback {callback.__name__} failed in trigger_until: {e}"
-                    )
+                    self.logger.error(f"Callback {callback.__name__} failed in trigger_until: {e}")
 
         return None
 
-    async def trigger_with_timeout(
-            self,
-            event: str,
-            timeout: float,
-            *args,
-            **kwargs
-    ) -> List[Any]:
+    async def trigger_with_timeout(self, event: str, timeout: float, *args, **kwargs) -> List[Any]:
         """Trigger event with timeout control.
 
         Executes all callbacks but will abort if total execution
@@ -1474,18 +1427,10 @@ class AsyncCallbackFramework:
                 return await self.trigger(event, *args, **kwargs)
         except TimeoutError:
             if self.enable_logging:
-                self.logger.warning(
-                    f"Event '{event}' execution timeout after {timeout}s"
-                )
+                self.logger.warning(f"Event '{event}' execution timeout after {timeout}s")
             return []
 
-    async def trigger_stream(
-            self,
-            event: str,
-            input_stream: AsyncIterator[Any],
-            *args,
-            **kwargs
-    ) -> AsyncIterator[Any]:
+    async def trigger_stream(self, event: str, input_stream: AsyncIterator[Any], *args, **kwargs) -> AsyncIterator[Any]:
         """Trigger event for each item in an async input stream.
 
         Processes each item from the input stream through registered callbacks,
@@ -1533,12 +1478,7 @@ class AsyncCallbackFramework:
                 self.logger.error(f"Stream processing error for event '{event}': {e}")
             raise
 
-    async def trigger_generator(
-            self,
-            event: str,
-            *args,
-            **kwargs
-    ) -> AsyncIterator[Any]:
+    async def trigger_generator(self, event: str, *args, **kwargs) -> AsyncIterator[Any]:
         """Trigger event and aggregate async generator outputs from callbacks.
 
         Executes all callbacks for an event and yields items from any callbacks
@@ -1576,9 +1516,7 @@ class AsyncCallbackFramework:
 
                 try:
                     # Apply filters
-                    filter_result = await self._apply_filters(
-                        event, callback, args, kwargs
-                    )
+                    filter_result = await self._apply_filters(event, callback, args, kwargs)
 
                     if filter_result.action == FilterAction.STOP:
                         if self.enable_logging:
@@ -1586,10 +1524,7 @@ class AsyncCallbackFramework:
                         break
                     elif filter_result.action == FilterAction.SKIP:
                         if self.enable_logging:
-                            self.logger.debug(
-                                f"Filter skipped callback {callback.__name__}: "
-                                f"{filter_result.reason}"
-                            )
+                            self.logger.debug(f"Filter skipped callback {callback.__name__}: {filter_result.reason}")
                         continue
 
                     final_args = filter_result.modified_args or args
@@ -1640,9 +1575,7 @@ class AsyncCallbackFramework:
                         self._metrics[key].update(execution_time, is_error=True)
 
                     if self.enable_logging:
-                        self.logger.error(
-                            f"Callback {callback.__name__} failed in generator mode: {e}"
-                        )
+                        self.logger.error(f"Callback {callback.__name__} failed in generator mode: {e}")
 
                     # Execute ERROR hooks
                     await self._execute_hooks(event, HookType.ERROR, e, *args, **kwargs)
@@ -1674,11 +1607,7 @@ class AsyncCallbackFramework:
         self._global_filters.append(filter_obj)
 
     def add_circuit_breaker(
-            self,
-            event: str,
-            callback: Callable,
-            failure_threshold: int = 5,
-            timeout: float = 60.0
+        self, event: str, callback: Callable, failure_threshold: int = 5, timeout: float = 60.0
     ) -> None:
         """Add circuit breaker protection to a callback.
 
@@ -1693,13 +1622,7 @@ class AsyncCallbackFramework:
         self._circuit_breakers[key] = breaker
         self.add_filter(event, breaker)
 
-    async def _apply_filters(
-            self,
-            event: str,
-            callback: Callable,
-            args: tuple,
-            kwargs: dict
-    ) -> FilterResult:
+    async def _apply_filters(self, event: str, callback: Callable, args: tuple, kwargs: dict) -> FilterResult:
         """Apply all relevant filters to a callback.
 
         Filters are applied in order: global -> event -> callback-specific.
@@ -1724,9 +1647,7 @@ class AsyncCallbackFramework:
 
         # Apply filters sequentially
         for filter_obj in all_filters:
-            result = await filter_obj.filter(
-                event, callback, *current_args, **current_kwargs
-            )
+            result = await filter_obj.filter(event, callback, *current_args, **current_kwargs)
 
             if result.action in [FilterAction.STOP, FilterAction.SKIP]:
                 return result
@@ -1736,20 +1657,11 @@ class AsyncCallbackFramework:
                 if result.modified_kwargs is not None:
                     current_kwargs = result.modified_kwargs
 
-        return FilterResult(
-            FilterAction.CONTINUE,
-            modified_args=current_args,
-            modified_kwargs=current_kwargs
-        )
+        return FilterResult(FilterAction.CONTINUE, modified_args=current_args, modified_kwargs=current_kwargs)
 
     # ========== Hooks ==========
 
-    def add_hook(
-            self,
-            event: str,
-            hook_type: HookType,
-            hook: Callable
-    ) -> None:
+    def add_hook(self, event: str, hook_type: HookType, hook: Callable) -> None:
         """Add a lifecycle hook to an event.
 
         Args:
@@ -1759,13 +1671,7 @@ class AsyncCallbackFramework:
         """
         self._hooks[event][hook_type].append(hook)
 
-    async def _execute_hooks(
-            self,
-            event: str,
-            hook_type: HookType,
-            *args,
-            **kwargs
-    ) -> None:
+    async def _execute_hooks(self, event: str, hook_type: HookType, *args, **kwargs) -> None:
         """Execute all hooks of a specific type for an event.
 
         Args:
@@ -1785,11 +1691,7 @@ class AsyncCallbackFramework:
 
     # ========== Metrics ==========
 
-    def get_metrics(
-            self,
-            event: Optional[str] = None,
-            callback: Optional[str] = None
-    ) -> Dict[str, Dict[str, Any]]:
+    def get_metrics(self, event: Optional[str] = None, callback: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
         """Get performance metrics for callbacks.
 
         Args:
@@ -1830,12 +1732,14 @@ class AsyncCallbackFramework:
 
         for key, metrics in self._metrics.items():
             if metrics.avg_time > threshold:
-                slow_callbacks.append({
-                    "callback": key,
-                    "avg_time": metrics.avg_time,
-                    "max_time": metrics.max_time,
-                    "call_count": metrics.call_count
-                })
+                slow_callbacks.append(
+                    {
+                        "callback": key,
+                        "avg_time": metrics.avg_time,
+                        "max_time": metrics.max_time,
+                        "call_count": metrics.call_count,
+                    }
+                )
 
         return sorted(slow_callbacks, key=lambda x: x["avg_time"], reverse=True)
 
@@ -1849,11 +1753,7 @@ class AsyncCallbackFramework:
         """
         self._enable_history = enabled
 
-    def get_event_history(
-            self,
-            event: Optional[str] = None,
-            since: Optional[datetime] = None
-    ) -> List[Dict[str, Any]]:
+    def get_event_history(self, event: Optional[str] = None, since: Optional[datetime] = None) -> List[Dict[str, Any]]:
         """Get recorded event history.
 
         Args:
@@ -1883,11 +1783,7 @@ class AsyncCallbackFramework:
         history = self.get_event_history(since=since)
 
         for record in history:
-            await self.trigger(
-                record["event"],
-                *record["args"],
-                **record["kwargs"]
-            )
+            await self.trigger(record["event"], *record["args"], **record["kwargs"])
 
     # ========== Persistence ==========
 
@@ -1902,7 +1798,7 @@ class AsyncCallbackFramework:
         state = {
             "callbacks": {},
             "metrics": {k: v.to_dict() for k, v in self._metrics.items()},
-            "history": list(self._event_history)
+            "history": list(self._event_history),
         }
 
         # Serialize callback metadata
@@ -1913,12 +1809,12 @@ class AsyncCallbackFramework:
                     "priority": ci.priority,
                     "namespace": ci.namespace,
                     "tags": list(ci.tags),
-                    "enabled": ci.enabled
+                    "enabled": ci.enabled,
                 }
                 for ci in callback_list
             ]
 
-        with open(filepath, 'w') as f:
+        with open(filepath, "w") as f:
             json.dump(state, f, indent=2)
 
     # ========== Queries ==========
@@ -1963,7 +1859,7 @@ class AsyncCallbackFramework:
                 "tags": list(ci.tags),
                 "once": ci.once,
                 "max_retries": ci.max_retries,
-                "timeout": ci.timeout
+                "timeout": ci.timeout,
             }
             callbacks.append(info)
 
@@ -1987,10 +1883,8 @@ class AsyncCallbackFramework:
             "total_events": total_events,
             "total_callbacks": total_callbacks,
             "namespaces": list(namespaces),
-            "total_filters": len(self._global_filters) + sum(
-                len(filters) for filters in self._filters.values()
-            ),
+            "total_filters": len(self._global_filters) + sum(len(filters) for filters in self._filters.values()),
             "total_chains": len(self._chains),
             "history_size": len(self._event_history),
-            "metrics_collected": len(self._metrics)
+            "metrics_collected": len(self._metrics),
         }

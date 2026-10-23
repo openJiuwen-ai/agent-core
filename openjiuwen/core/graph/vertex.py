@@ -25,7 +25,7 @@ from openjiuwen.core.session.utils import is_ref_path, extract_origin_key
 from openjiuwen.core.graph.stream_actor.base import StreamConsumer
 from openjiuwen.core.session.tracer import TracerWorkflowUtils
 from openjiuwen.core.graph.pregel import GraphInterrupt
-from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback import get_callback_framework, trigger
 from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 SUB_WORKFLOW_COMPONENT = "sub_workflow"
@@ -389,15 +389,19 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 **self._log_message,
             )
             node_output = self._session.state().get(self._node_id)
-            # Emit node executed event with inputs and outputs
-            await trigger(
-                WorkflowEvents.NODE_EXECUTED,
-                node_id=self._node_id,
-                ability=[a.name for a in self._component_ability],
-                graph_id=self._session.workflow_id(),
-                inputs=state,
-                outputs=node_output,
-            )
+            # Emit node executed event with inputs and outputs. Event name is
+            # fixed: gate on subscribers so the kwargs construction (including
+            # the ability-name list) is skipped when nobody listens.
+            fw = get_callback_framework()
+            if fw.has_subscribers(WorkflowEvents.NODE_EXECUTED):
+                await fw.trigger(
+                    WorkflowEvents.NODE_EXECUTED,
+                    node_id=self._node_id,
+                    ability=[a.name for a in self._component_ability],
+                    graph_id=self._session.workflow_id(),
+                    inputs=state,
+                    outputs=node_output,
+                )
 
             return {"source_node_id": [self._node_id]}
         except Exception as e:

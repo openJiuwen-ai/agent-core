@@ -12,7 +12,7 @@ from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.graph.pregel.base import Message, PregelNode, GraphInterrupt
 from openjiuwen.core.graph.pregel.config import PregelConfig, InnerPregelConfig, create_inner_config
 from openjiuwen.core.graph.pregel.constants import TASK_STATUS_INTERRUPT, TASK_STATUS_ERROR, PARENT_NS, NS
-from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback import get_callback_framework
 from openjiuwen.core.runner.callback.events import WorkflowEvents
 
 
@@ -253,13 +253,17 @@ class NodeTask:
                 self.messages.extend(msgs)
 
             if self.messages:
-                for msg in self.messages:
-                    await trigger(
-                        WorkflowEvents.EDGE_TRAVERSED,
-                        source_node=msg.sender,
-                        target_node=msg.target,
-                        graph_id=self.config.get(NS),
-                    )
+                # Event name is fixed here: resolve the subscriber check once
+                # per task instead of once per traversed edge.
+                fw = get_callback_framework()
+                if fw.has_subscribers(WorkflowEvents.EDGE_TRAVERSED):
+                    for msg in self.messages:
+                        await fw.trigger(
+                            WorkflowEvents.EDGE_TRAVERSED,
+                            source_node=msg.sender,
+                            target_node=msg.target,
+                            graph_id=self.config.get(NS),
+                        )
 
             return self.messages
 
