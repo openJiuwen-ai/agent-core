@@ -16,6 +16,7 @@ from typing import (
     Any,
     Awaitable,
     Callable,
+    Iterable,
     List,
     Optional,
 )
@@ -73,6 +74,17 @@ from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+# How many entries an incomplete-team log line names before summarising.
+_INCOMPLETE_PREVIEW_LIMIT = 5
+
+
+def _preview(items: Iterable[str]) -> str:
+    """Join the first few items, noting how many more were left out."""
+    entries = list(items)
+    shown = ", ".join(entries[:_INCOMPLETE_PREVIEW_LIMIT])
+    hidden = len(entries) - _INCOMPLETE_PREVIEW_LIMIT
+    return f"{shown} (+{hidden} more)" if hidden > 0 else shown
 
 
 @dataclass
@@ -307,6 +319,9 @@ class TeamBackend:
         # build_team result -- a cold recovery. Set by
         # ``TeamAgent.recover_from_session``; see ``rejects_rebuild``.
         self._history_restored: bool = False
+        # Last reason ``is_team_completed`` reported the team as not complete,
+        # so a stuck team logs why once per change instead of on every poll.
+        self._last_incomplete_reason: str | None = None
         # Fired once on the build_team / clean_team success paths so the
         # hosting TeamAgent can persist DB lifecycle state and latch
         # state.team_cleaned deterministically inside the leader's round.
@@ -1751,7 +1766,8 @@ class TeamBackend:
 
         Read-only; safe to call repeatedly. Queries the member DAO directly
         so the leader itself is part of the roster check (``list_members``
-        excludes the calling member).
+        excludes the calling member). The failing condition is logged once
+        per change, so a team that never concludes says what holds it open.
 
         Returns:
             A ``TeamCompletionSnapshot`` when the team is complete,
@@ -1759,20 +1775,41 @@ class TeamBackend:
         """
         tasks = await self.task_manager.list_tasks()
         if not tasks:
+            self._note_incomplete("the task board is empty")
             return None
-        if any(task.status not in TASK_TERMINAL_STATUSES for task in tasks):
+        open_tasks = [task for task in tasks if task.status not in TASK_TERMINAL_STATUSES]
+        if open_tasks:
+            self._note_incomplete(
+                "non-terminal task(s): "
+                + _preview(f"{task.task_id}({task.status}, {task.assignee or '-'})" for task in open_tasks)
+            )
             return None
 
         members = await self.db.member.get_team_members(self.team_name)
         if not members:
+            self._note_incomplete("the team has no members")
             return None
-        if any(member.status not in MEMBER_SETTLED_STATUSES for member in members):
+        unsettled = [member for member in members if member.status not in MEMBER_SETTLED_STATUSES]
+        if unsettled:
+            self._note_incomplete(
+                "unsettled member(s): " + _preview(f"{member.member_name}({member.status})" for member in unsettled)
+            )
             return None
 
         if await self.message_manager.has_unread_messages(include_broadcast=True):
+            pending = await self.message_manager.members_with_unread([member.member_name for member in members])
+            self._note_incomplete("unread message(s) for: " + (_preview(sorted(pending)) or "-"))
             return None
 
+        self._last_incomplete_reason = None
         return TeamCompletionSnapshot(member_count=len(members), task_count=len(tasks))
+
+    def _note_incomplete(self, reason: str) -> None:
+        """Log why the team is not complete, once per distinct reason."""
+        if reason == self._last_incomplete_reason:
+            return
+        self._last_incomplete_reason = reason
+        team_logger.info("[leader] team {} not complete: {}", self.team_name, reason)
 
     async def get_team_updated_at(self) -> int:
         """Probe ``max(team_info.updated_at, md updated_at)`` for change detection.

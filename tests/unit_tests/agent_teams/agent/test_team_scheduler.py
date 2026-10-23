@@ -455,7 +455,8 @@ async def test_stalled_round_escalates_with_vote_status(db, bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_silent_reviewers_get_renudged_once_per_window(db, bus):
+async def test_silent_reviewers_are_not_messaged(db, bus):
+    """Temp reviewers have no mailbox: a DM to one is never read and would block team completion."""
     scheduler, host, mm, tm = _build_scheduler(db, bus, review_stall_timeout=3600)
     await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
     assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "pass")).ok
@@ -464,10 +465,143 @@ async def test_silent_reviewers_get_renudged_once_per_window(db, bus):
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
     await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
 
-    handoffs_to_silent = [(to, meta) for to, meta in _dm_targets(mm) if to == "rev-2"]
-    templates = [meta["template"] for _, meta in handoffs_to_silent]
-    # Renudge still delivered via DM.
-    assert "scheduler_review_renudge" in templates
+    assert [to for to, _meta in _dm_targets(mm) if to in ("rev-1", "rev-2")] == []
+
+
+def _wire_fake_reviewer(scheduler, db, monkeypatch, run_once) -> AsyncMock:
+    """Run temp reviewers on a fake harness; return the mock that records dispatches."""
+    from openjiuwen.agent_teams.agent.scheduling.scheduler import TeamScheduler as _Scheduler
+    from openjiuwen.agent_teams.harness.team_harness import TeamHarness
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+
+    scheduler._blueprint.spec.agents = {"teammate": DeepAgentSpec()}
+    scheduler._blueprint.spec.dispatch_mode = "scheduled"
+    scheduler._blueprint.language = "cn"
+    scheduler._infra.team_backend.db = db
+    scheduler._infra.team_backend.workspace_cache = None
+    scheduler._infra.team_backend.task_verification_enabled = lambda: True
+    dispatch = AsyncMock()
+    monkeypatch.setattr(_Scheduler, "_dispatch_to_reviewer", dispatch)
+
+    class _FakeHarness:
+        async def run_once(self, _prompt, *, team_session=None):
+            return await run_once()
+
+        async def dispose(self):
+            return None
+
+    monkeypatch.setattr(TeamHarness, "build", staticmethod(lambda **_kwargs: _FakeHarness()))
+    return dispatch
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_voteless_reviewer_run_is_dispatched_again_then_escalated(db, bus, monkeypatch):
+    """A run that ends without a vote (e.g. the 600s round timeout) must not leave the task stuck in review."""
+
+    async def _times_out():
+        return {"output": "Task loop round timed out after 900 seconds.", "error": "completion_timeout"}
+
+    scheduler, host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    dispatch = _wire_fake_reviewer(scheduler, db, monkeypatch, _times_out)
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+    # Runs 1 and 2 ended voteless: each released the mark and rescanned.
+    assert [call.args[0] for call in dispatch.await_args_list] == ["rev-1", "rev-1"]
+    assert not [text for text in host.leader_inputs if "rev-1" in text]
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+    # Run 3: no more re-dispatch; the leader is told once.
+    assert len(dispatch.await_args_list) == 2
+    escalations = [text for text in host.leader_inputs if "rev-1" in text]
+    assert len(escalations) == 1
+    assert "3" in escalations[0]
+    assert (await tm.get("r")).status == TaskStatus.IN_REVIEW.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_no_vote_escalation_is_not_swallowed_by_an_earlier_stall_escalation(db, bus, monkeypatch):
+    """Three 900s voteless runs outlast the 1800s stall timeout, so the stall
+    escalation comes first; the no-vote escalation of the same round must still
+    reach the leader, and only once."""
+
+    async def _times_out():
+        return {"output": "Task loop round timed out after 900 seconds.", "error": "completion_timeout"}
+
+    scheduler, host, _mm, tm = _build_scheduler(db, bus, review_stall_timeout=60)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    _wire_fake_reviewer(scheduler, db, monkeypatch, _times_out)
+    await _age_task(db, "r", seconds=120)
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+    assert len(host.leader_inputs) == 1  # the stall escalation
+
+    for _ in range(4):
+        await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    assert len(host.leader_inputs) == 2
+    assert "rev-1" in host.leader_inputs[1]
+    assert host.leader_inputs[0] != host.leader_inputs[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reviewer_that_voted_is_not_followed_up(db, bus, monkeypatch):
+    async def _votes():
+        assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "pass")).ok
+        return {"output": "voted"}
+
+    scheduler, host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
+    dispatch = _wire_fake_reviewer(scheduler, db, monkeypatch, _votes)
+    scheduler._review_dispatched.update({("r", 1, "rev-1"), ("r", 1, "rev-2")})
+
+    await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    dispatch.assert_not_awaited()
+    assert scheduler._review_runs == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_review_dispatch_skips_reviewers_that_already_voted(db, bus, monkeypatch):
+    """Lost bookkeeping (leader restart) re-dispatches only the reviewers still owing a vote."""
+
+    async def _unused():
+        return {"output": ""}
+
+    scheduler, _host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1", "rev-2"))
+    dispatch = _wire_fake_reviewer(scheduler, db, monkeypatch, _unused)
+    assert (await _reviewer_mgr(db, bus, "rev-1").verify_task("r", "pass")).ok
+    scheduler._review_dispatched.clear()
+
+    await scheduler.on_event(InnerEventMessage(event_type=InnerEventType.SCHEDULER_SCAN))
+
+    assert [call.args[0] for call in dispatch.await_args_list] == ["rev-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_cancelled_reviewer_run_releases_its_mark_without_counting(db, bus, monkeypatch):
+    """A leader pause cancels the run; that is not a missed vote."""
+
+    async def _cancelled():
+        raise asyncio.CancelledError
+
+    scheduler, host, _mm, tm = _build_scheduler(db, bus)
+    await _seed_review(db, bus, scheduler, tm, reviewers=("rev-1",))
+    _wire_fake_reviewer(scheduler, db, monkeypatch, _cancelled)
+    scheduler._review_dispatched.add(("r", 1, "rev-1"))
+
+    with pytest.raises(asyncio.CancelledError):
+        await scheduler._spawn_temp_reviewer("rev-1", await tm.get("r"))
+
+    assert ("r", 1, "rev-1") not in scheduler._review_dispatched
+    assert scheduler._review_runs == {}
+    assert not any("rev-1" in text for text in host.leader_inputs)
 
 
 # ---------------------------------------------------------------------------
