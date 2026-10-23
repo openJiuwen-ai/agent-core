@@ -123,6 +123,40 @@ class TestSchemaArgHash:
             )
         assert h1 != h2
 
+    def test_hash_with_schema_and_invalid_args_uses_full_args(self):
+        det = RepeatToolCallDetector()
+        with patch.object(det, "_schema_keys", return_value=("search", "fetch")):
+            h1 = det._hash_args(
+                "web_flash",
+                {"query": "大纲研究一", "max_results": 8},
+            )
+            h2 = det._hash_args(
+                "web_flash",
+                {"query": "大纲研究二", "max_results": 8},
+            )
+        assert h1 != h2
+
+    def test_hash_with_schema_and_same_invalid_args_is_stable(self):
+        det = RepeatToolCallDetector()
+        args = {"query": "大纲研究一", "max_results": 8}
+        with patch.object(det, "_schema_keys", return_value=("search", "fetch")):
+            h1 = det._hash_args("web_flash", args)
+            h2 = det._hash_args("web_flash", dict(args))
+        assert h1 == h2
+
+    def test_hash_with_schema_and_partial_valid_args_keeps_whitelist(self):
+        det = RepeatToolCallDetector()
+        with patch.object(det, "_schema_keys", return_value=("path",)):
+            h1 = det._hash_args(
+                "read_file",
+                {"path": "/a.txt", "call_goal": "第1次读取", "unknown": "one"},
+            )
+            h2 = det._hash_args(
+                "read_file",
+                {"path": "/a.txt", "call_goal": "第2次读取", "unknown": "two"},
+            )
+        assert h1 == h2
+
     def test_keys_from_parameters_dict(self):
         keys = RepeatToolCallDetector._keys_from_parameters(
             {"type": "object", "properties": {"path": {"type": "string"}}},
