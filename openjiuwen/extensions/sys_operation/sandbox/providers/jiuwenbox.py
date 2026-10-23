@@ -913,6 +913,35 @@ class _JiuwenBoxProviderMixin:
             return any(key.split("|", 1)[0] == prefix for key, _ in cls._pending_deletions)
 
     @classmethod
+    async def retire_service(cls, base_url: str) -> list[str]:
+        """Converge cached state after the host confirms the owned service exited."""
+        base_url = base_url.rstrip("/")
+        if not base_url:
+            raise ValueError("retired service base_url must be non-empty")
+        while True:
+            with cls._shared_lock:
+                tasks = [task for (key, _), task in cls._delete_tasks.items() if key.split("|", 1)[0] == base_url]
+            if not tasks:
+                break
+            # A DELETE already in flight may fail when its service exits. Let its
+            # worker finish before completing the same identity locally. Resnapshot
+            # after each join to include teardowns registered while we were awaiting.
+            await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+        deleted = await cls.delete_cached_sandboxes(
+            base_url=base_url, service_stopped=True, reason="service_stopped", raise_on_error=True,
+        )
+        # Invalidate in-flight creation tickets and failures, including scopes that
+        # never published a sandbox ID. Pending deletion hooks have completed above.
+        cls.clear_shared_sandbox(base_url)
+        with cls._shared_lock:
+            for key in list(cls._lifecycle_hooks):
+                if key.split("|", 1)[0] == base_url:
+                    cls._lifecycle_hooks.pop(key, None)
+        with cls._idle_timeout_cache_lock:
+            cls._idle_timeout_cache.pop(base_url, None)
+        return deleted
+
+    @classmethod
     async def delete_cached_sandboxes(
         cls,
         *,
@@ -996,7 +1025,9 @@ class _JiuwenBoxProviderMixin:
         if failures:
             error, cause = failures[0]
             if len(failures) > 1:
-                error.add_note(f"Sandbox cleanup failed for {len(failures)} entries; all matching entries were attempted.")
+                error.add_note(
+                    f"Sandbox cleanup failed for {len(failures)} entries; all matching entries were attempted."
+                )
             raise error from cause
         return deleted
 
@@ -1240,32 +1271,7 @@ async def retire_jiuwenbox_service(base_url: str) -> list[str]:
 
     Call on the event loop that owns the provider's in-flight deletion tasks.
     """
-    cls = _JiuwenBoxProviderMixin
-    base_url = base_url.rstrip("/")
-    if not base_url:
-        raise ValueError("retired service base_url must be non-empty")
-    while True:
-        with cls._shared_lock:
-            tasks = [task for (key, _), task in cls._delete_tasks.items() if key.split("|", 1)[0] == base_url]
-        if not tasks:
-            break
-        # A DELETE already in flight may fail when its service exits. Let its
-        # worker finish before completing the same identity locally. Resnapshot
-        # after each join to include teardowns registered while we were awaiting.
-        await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
-    deleted = await cls.delete_cached_sandboxes(
-        base_url=base_url, service_stopped=True, reason="service_stopped", raise_on_error=True,
-    )
-    # Invalidate in-flight creation tickets and failures, including scopes that
-    # never published a sandbox ID. Pending deletion hooks have completed above.
-    cls.clear_shared_sandbox(base_url)
-    with cls._shared_lock:
-        for key in list(cls._lifecycle_hooks):
-            if key.split("|", 1)[0] == base_url:
-                cls._lifecycle_hooks.pop(key, None)
-    with cls._idle_timeout_cache_lock:
-        cls._idle_timeout_cache.pop(base_url, None)
-    return deleted
+    return await _JiuwenBoxProviderMixin.retire_service(base_url)
 
 
 def _iter_host_files_for_upload(
