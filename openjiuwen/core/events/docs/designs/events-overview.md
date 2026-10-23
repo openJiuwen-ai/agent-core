@@ -146,7 +146,7 @@ Build Handler 只组装能力定义；共享服务、连接池及其关闭顺序
 
 进入每个实际执行的 Handler 前，EventBus 使用已保存的 Builder 调用 `build(package_metadata, session_context)`，得到独立 Ops。被匹配但因短路或跳层未进入的 Handler 不构建 Ops。EventNext 可替换 `event_input`，但必须保持 `event_type` 不变；同一条链不会因输入变化重新匹配。
 
-EventBus 当前只校验核心控制契约，例如事件类型存在、matcher 返回 bool、EventNext 的 Task 和层级合法性；它不提供通用业务输入/输出 schema 校验。具体 EventInput、EventOutput 和 `None` 的业务合法性由事件定义和 Handler 负责。
+EventBus 校验核心控制契约（事件存在、matcher 返回 bool、EventNext 任务与层级合法性）。EventType 还可通过 `register_event_type(..., input_validator=..., output_validator=...)` 声明可选业务输入/输出 Validator；顺序为初始输入 → matcher → Handler → EventNext 新输入 → 下游 → Handler/CORE 输出。未配置 Validator 时行为与现网一致。USER / BUILTIN 在自身故障时固定 skip 并写一条 error 日志；下游、CORE、Validator 自身故障及 `asyncio.CancelledError` 仍传播。详见 [S_01 规约](../specs/S_01_events-contract.md) 与 [F_05](../features/F_05_ev05-handler-fault-tolerance.md)。
 
 ```mermaid
 sequenceDiagram
@@ -211,9 +211,9 @@ sequenceDiagram
 
 `to()` 只允许跳向尚未执行的内层级，不能返回当前或外层级。EventNext 只能在所属 Handler 尚未退出且由创建它的同一 asyncio Task 调用。当前实现允许在有效期内多次调用；这会重复执行同一后续链，调用方必须自行评估副作用。
 
-某个 Pattern 未命中表示该扩展不加入链，与匹配函数抛错不同。未知事件、未完成 Build、matcher 非 bool、非法 EventNext、注册冲突和 Builder 冲突由 Events 抛错；Handler 异常、取消及能力调用错误沿当前 await 链传播。当前机制不自动补跑 CORE，不自动重试，也不吞掉业务异常。
+某个 Pattern 未命中表示该扩展不加入链，与匹配函数抛错不同。未知事件、未完成 Build、matcher 非 bool、注册冲突由 Events 抛错；非法 EventNext 与 Builder 冲突先抛给当前 Handler。USER / BUILTIN 在自身异常（含未处理的 EventNext、Ops 错误）、非 awaitable、转发输入或输出协议违规时被隔离，并按下游执行事实恢复或复用最后一次下游结果；下游、CORE、Validator 自身故障和 `asyncio.CancelledError` 仍沿 await 链传播。容错不重放已执行的下游或 CORE，也不自动补跑 CORE 或吞掉不可恢复错误。Handler 超时与 `.catch()` 不在本期范围。
 
-工具调用可能已经产生外部副作用，外层 Handler 仍可能在加工结果时失败。此时不能仅凭 `trigger()` 未返回正常结果就判定工具未执行；业务调用方须依据工具及下游系统的事实核对结果，再按业务幂等约束决定是否重试。该核对责任不由 EventBus 的执行顺序替代。
+工具调用可能已经产生外部副作用，外层 Handler 仍可能在加工结果时失败。下游已成功且符合 EV-05 恢复条件时，`trigger()` 可能返回下游结果且 CORE 不会重跑；否则调用方收到失败。无论哪种情况，都不能仅凭返回值推断工具是否执行；业务调用方须依据工具及下游系统的事实核对结果，再按业务幂等约束决定是否重试。
 
 ### 3.5 开发者接入路径
 

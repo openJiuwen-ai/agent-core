@@ -10,7 +10,7 @@ import pytest
 import openjiuwen.core.events.protocol as events_protocol
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ValidationError, build_error
-from openjiuwen.core.events import EventHandlerOps, EventHandlerOpsBuilder
+from openjiuwen.core.events import EventHandlerOps, EventHandlerOpsBuilder, ExtensionEventBus
 from openjiuwen.core.events.event_next import EventNext
 from openjiuwen.core.events.ops import EventHandlerOps as ConcreteEventHandlerOps
 from openjiuwen.core.events.ops import EventHandlerOpsBuilder as ConcreteEventHandlerOpsBuilder
@@ -19,7 +19,9 @@ from openjiuwen.core.events.types import (
     OPS_BUILD_EVENT_TYPE,
     Event,
     EventInput,
+    EventInputValidator,
     EventOutput,
+    EventOutputValidator,
     EventType,
     HandlerId,
     HandlerLevel,
@@ -70,6 +72,8 @@ def test_events_models_aliases_and_handler_level():
     assert all(isinstance(level, str) for level in HandlerLevel)
     assert MatchPattern == Mapping[str, object]
     assert MatchPatternFunc == Callable[[EventInput, MatchPattern], bool]
+    assert EventInputValidator == Callable[[EventInput], bool]
+    assert EventOutputValidator == Callable[[EventOutput | None], bool]
     assert OpsMethod == Callable[..., Awaitable[object]]
 
 
@@ -117,10 +121,25 @@ def test_events_protocol_bus_signature():
     for name in ("state", "initialize", "close"):
         assert not hasattr(ExtensionEventBusProtocol, name)
 
-    register_type, register_type_return = _method_signature(ExtensionEventBusProtocol.register_event_type)
-    assert [parameter.name for parameter in register_type] == ["event_type", "match_pattern_func", "core_handler"]
-    assert [parameter.annotation for parameter in register_type] == ["EventType", "MatchPatternFunc", "EventHandler"]
-    assert register_type_return == "None"
+    for bus_type in (ExtensionEventBusProtocol, ExtensionEventBus):
+        register_type, register_type_return = _method_signature(bus_type.register_event_type)
+        assert [parameter.name for parameter in register_type] == [
+            "event_type",
+            "match_pattern_func",
+            "core_handler",
+            "input_validator",
+            "output_validator",
+        ]
+        assert [parameter.annotation for parameter in register_type] == [
+            "EventType",
+            "MatchPatternFunc",
+            "EventHandler",
+            "EventInputValidator | None",
+            "EventOutputValidator | None",
+        ]
+        assert all(parameter.kind is inspect.Parameter.KEYWORD_ONLY for parameter in register_type[3:])
+        assert all(parameter.default is None for parameter in register_type[3:])
+        assert register_type_return == "None"
 
     unregister_type, unregister_type_return = _method_signature(ExtensionEventBusProtocol.unregister_event_type)
     assert [parameter.name for parameter in unregister_type] == ["event_type"]
@@ -220,6 +239,8 @@ _EVENTS_EXPORTS = [
     "PackageMetadata",
     "MatchPattern",
     "MatchPatternFunc",
+    "EventInputValidator",
+    "EventOutputValidator",
     "EventHandler",
     "EventNext",
     "OpsMethod",

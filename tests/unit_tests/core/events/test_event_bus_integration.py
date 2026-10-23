@@ -104,25 +104,57 @@ async def test_business_trigger_requires_external_build_and_build_commits_once()
 
 
 @pytest.mark.asyncio
-async def test_failed_build_commits_nothing_and_host_can_rebuild() -> None:
+async def test_conflicting_build_handler_is_skipped_and_build_commits() -> None:
     bus = ExtensionEventBus()
     build_calls: list[str] = []
     _register_echo_build(bus, build_calls)
-    conflict_id = _register_echo_build(bus, build_calls)
+    _register_echo_build(bus, build_calls)
     bus.register_event_type("demo.echo", _matches, _core)
     bus.register_event_handler("demo.echo", _echo_user, {}, package_metadata=_PACKAGE)
 
-    with pytest.raises(ValidationError) as conflict:
-        await bus.trigger(_BUILD)
-    assert conflict.value.status is StatusCode.EVENTS_OPS_INVALID
-    with pytest.raises(ValidationError) as not_built:
-        await bus.trigger(Event("demo.echo", {"value": 1}), _SESSION)
-    assert not_built.value.status is StatusCode.EVENTS_STATE_INVALID
-
-    bus.unregister_event_handler(conflict_id)
-    await bus.trigger(_BUILD)
-
+    # The outer handler hits a duplicate namespace after the inner one ran; it is skipped
+    # and the inner handler's Builder is committed without rebuilding.
+    assert isinstance(await bus.trigger(_BUILD), EventHandlerOpsBuilder)
+    assert build_calls == [OPS_BUILD_EVENT_TYPE, OPS_BUILD_EVENT_TYPE]
     assert await bus.trigger(Event("demo.echo", {"value": 2}), _SESSION) == (_PACKAGE, _SESSION, 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["before_next", "after_next", "invalid_output"])
+async def test_failed_build_handler_is_skipped_without_rebuilding(failure: str) -> None:
+    bus = ExtensionEventBus()
+    downstream_calls: list[str] = []
+
+    async def failing_build(event: Event, ops: EventHandlerOps | None, event_next: EventNext) -> object:
+        del ops
+        if failure == "before_next":
+            raise RuntimeError("build handler failed")
+        builder = await event_next(event)
+        if failure == "after_next":
+            raise RuntimeError("build handler failed")
+        del builder
+        return "not a builder"
+
+    async def count_downstream(event: Event, ops: EventHandlerOps | None, event_next: EventNext) -> object:
+        del ops
+        downstream_calls.append(event.event_type)
+        return await event_next(event)
+
+    bus.register_event_handler(OPS_BUILD_EVENT_TYPE, failing_build, {}, HandlerLevel.BUILTIN)
+    bus.register_event_handler(OPS_BUILD_EVENT_TYPE, count_downstream, {}, HandlerLevel.BUILTIN)
+
+    assert isinstance(await bus.trigger(_BUILD), EventHandlerOpsBuilder)
+    assert downstream_calls == [OPS_BUILD_EVENT_TYPE]
+
+
+@pytest.mark.asyncio
+async def test_build_rejects_non_none_input() -> None:
+    bus = ExtensionEventBus()
+
+    with pytest.raises(ValidationError) as invalid:
+        await bus.trigger(Event(OPS_BUILD_EVENT_TYPE, {}))
+    assert invalid.value.status is StatusCode.EVENTS_PAYLOAD_INVALID
+    assert isinstance(await bus.trigger(_BUILD), EventHandlerOpsBuilder)
 
 
 @pytest.mark.asyncio

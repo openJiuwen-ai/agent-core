@@ -12,7 +12,9 @@ from openjiuwen.core.events.event_next import EventNext
 from openjiuwen.core.events.ops import EventHandlerOps
 from openjiuwen.core.events.types import (
     Event,
+    EventInputValidator,
     EventOutput,
+    EventOutputValidator,
     EventType,
     HandlerId,
     HandlerLevel,
@@ -40,6 +42,9 @@ class ExtensionEventBusProtocol(Protocol):
         event_type: EventType,
         match_pattern_func: MatchPatternFunc,
         core_handler: EventHandler,
+        *,
+        input_validator: EventInputValidator | None = None,
+        output_validator: EventOutputValidator | None = None,
     ) -> None:
         """Register an event type and its CORE handler."""
         ...

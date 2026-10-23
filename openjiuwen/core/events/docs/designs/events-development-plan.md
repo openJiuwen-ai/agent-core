@@ -2,14 +2,14 @@
 
 ## 1. 计划范围与维护规则
 
-- **目标：** 用 4 个可认领、可验证的工作项交付 Events。
-- **本期工作项：** EV-01～EV-04，共 4 项；M-01、M-02 是交付节点，不计入工作项数量。
-- **负责人：** 4 个工作项及 M-01、M-02 统一由张瑶负责。
+- **目标：** 用 5 个可认领、可验证的工作项交付 Events。
+- **本期工作项：** EV-01～EV-05，共 5 项；M-01、M-02 是交付节点，不计入工作项数量。
+- **负责人：** 5 个工作项及 M-01、M-02 统一由张瑶负责。
 - **模块边界：** Events 只提供通用事件机制，不依赖 JiuwenSwarm、具体业务执行器或插件管理实现。
 - **外部范围：** UI 事件名和 payload、AgentServer、插件装卸、WebUI、E2E 环境由 JiuwenSwarm 对端计划维护。
 - **公共契约：** 以 [S_01](../specs/S_01_events-contract.md) 为唯一来源。
-- **维护日期：** 2026-10-21。
-- **进度摘要：** 完成 4/4；EV-01～EV-04 已完成；M-01、M-02 未验证。
+- **维护日期：** 2026-10-22。
+- **进度摘要：** 完成 5/5；EV-01～EV-05 已完成；M-01、M-02 未验证。
 
 每个未完成工作项开工前，在 `docs/features/` 建立对应 feature 文档，记录实现文件、接口影响、验收命令和实际结果。当前状态和证据只在第 4 节维护。
 
@@ -94,7 +94,26 @@
   6. EV-04-V-06：每个实际进入的 Handler 只构建一次 Ops；被跳过的 Handler 不构建 Ops。
   7. EV-04-V-07：名词能力直接执行；动词能力触发独立新链且不自动推进原链。
   8. EV-04-V-08：嵌套调用的 Session 传递正确，异常和取消沿等待关系传播。
-- **联合交付：** EV-04 验收通过后进入 M-01 EventBus MVP 联合场景验证。
+- **联合交付：** EV-04 验收通过后进入 EV-05；M-01 必须等待故障隔离语义完成。
+
+### EV-05 扩展 Handler 故障隔离与输出校验
+
+- **优先级：** P0；阻止单个扩展 Handler 击穿 AgentLoop，是 M-01 的硬前置。
+- **目标与范围：** USER 与 BUILTIN 使用同一套固定 skip 规则。Handler 自身异常、非 awaitable、输入/输出协议违规时跳过当前 Handler；已执行的下游或 CORE 不得因恢复逻辑重放。
+- **交付范围：**
+  1. EventType 注册增加可选、仅关键字的 `input_validator` 与 `output_validator`；现有三参数注册和未声明 Validator 的事件保持原行为。
+  2. 校验顺序：初始输入 → matcher → Handler → EventNext 新输入 → 下游 → Handler/CORE 输出；`ops.build` 通过普通注册参数声明 Validator，无专用容错分支。
+  3. 每次 USER / BUILTIN Adapter 调用仅用局部事实记录下游执行次数、最后成功输出与最后失败；不写入 Bus、Session 或持久化状态。
+  4. 下游尚未执行：用该 Handler 收到的原始 Event 继续下游一次；最后一次下游成功：复用该结果（含合法 `None`）；最后一次下游失败：传播该失败，不重跑下游。
+  5. 对被隔离的 Handler 写一条 Core error 日志（`event_type`、`handler_id`、`handler_level`、可用的 `package_id`、异常信息），不记录业务 payload，不新增诊断对象或前端错误协议。
+- **固定失败边界：**
+  - USER / BUILTIN 自身故障（异常、非 awaitable、转发输入或输出 Validator 返回 `False`）：进入上述 skip 恢复。
+  - CORE、下游 Handler、Validator 自身故障及 `asyncio.CancelledError`：原样传播，不适用 skip。
+  - matcher、Ops 构建等框架错误：原样传播。
+- **不交付：** Handler 超时、`.catch()`、策略枚举、自动重试、熔断、自动禁用、Worker/进程隔离、副作用回滚。Handler 超时与 `.catch()` 作为二期独立特性评估。
+- **开工硬前置：** EV-04 完整调用链；[F_05](../features/F_05_ev05-handler-fault-tolerance.md) 已建档；S_01、概览、架构与本节 EV-05 范围已对齐。
+- **验收标准：** 见 F_05 第 8.1 节 EV-05-V-01～V-14（注册兼容、USER/BUILTIN 前置与后置故障、禁止重放、初始/转发输入、Validator/CORE/取消传播、`ops.build` 通用链路、error 日志与回归）。
+- **联合交付：** EV-05 验收通过后进入 M-01 EventBus MVP 联合场景验证。
 
 ## 3. 依赖关系与开发顺序
 
@@ -105,6 +124,7 @@ flowchart LR
     EV01 --> EV03["EV-03 Builder/Ops"]
     EV02 --> EV04["EV-04 完整调用链"]
     EV03 --> EV04
+    EV04 --> EV05["EV-05 Handler 故障隔离"]
 
     EV01 --> Contract["M-02-CONTRACT\nUI 事件与 Session 映射"]
     Contract --> Server["M-02-SERVER"]
@@ -112,7 +132,7 @@ flowchart LR
     Contract --> WebUI["M-02-WEBUI"]
     Contract --> E2E["M-02-E2E 夹具"]
 
-    EV04 -.-> M01{"M-01 EventBus MVP"}
+    EV05 -.-> M01{"M-01 EventBus MVP"}
     M01 ==> M02{"M-02 Swarm 联合验收"}
     Server -.-> M02
     Plugin -.-> M02
@@ -126,8 +146,9 @@ flowchart LR
 2. EV-02 和 EV-03 只依赖 EV-01，代码边界独立，可以并行开发。
 3. EV-02 和 EV-03 全部通过后，执行 EV-04 完整调用链集成。
 4. EV-04 只组装已有执行引擎和 Builder/Ops，并补齐跨模块门禁，不重复实现前两项的内部能力。
+5. EV-04 完成后执行 EV-05；先同步失败与输入/输出校验契约，再实现 USER / BUILTIN 固定 skip 与禁止重放，最后进入 M-01。
 
-建议 EV-02、EV-03、EV-04 分别提交 PR；已经完成的 EV-01 不再作为待开发工作重复排期。
+建议 EV-02、EV-03、EV-04、EV-05 分别提交 PR；已经完成的 EV-01 不再作为待开发工作重复排期。
 
 ### 3.2 M-02 如何并行
 
@@ -137,7 +158,7 @@ EV-01 已完成，Swarm 不需要等待真实 EventBus 即可开展以下工作�
 | --- | --- | --- |
 | M-02-CONTRACT | 定义 UI 事件字符串、payload、SessionContext 映射、错误到 UI 状态映射 | EV-01 公共接口已具备 |
 | M-02-SERVER | 用消费方自有 Fake 完成 AgentServer 注册、显式 trigger(ops.build) 和业务触发适配 | M-01 真实 Bus |
-| M-02-PLUGIN | 用自有 Fake 完成 USER Handler 登记/注销；登记时传入已核实的 PackageMetadata | M-01 快照语义和真实调用 |
+| M-02-PLUGIN | 用自有 Fake 完成 USER Handler 登记/注销；登记时传入已核实的 PackageMetadata | M-01 快照、故障隔离语义和真实调用 |
 | M-02-WEBUI | 用 Mock payload 完成上行操作与下行渲染 | M-02-CONTRACT |
 | M-02-E2E | 预建环境、插件样例、测试数据和断言 | M-01 与上述真实实现 |
 
@@ -145,7 +166,7 @@ EV-01 已完成，Swarm 不需要等待真实 EventBus 即可开展以下工作�
 
 ### 3.3 交付节点
 
-- **M-01 EventBus MVP：** EV-01～EV-04 全部通过。使用 Fake 业务 CORE/能力验证 `宿主 trigger(ops.build) → Bus 保存 Builder → 普通事件 → USER/BUILTIN/CORE → 嵌套事件 → 返回`。
+- **M-01 EventBus MVP：** EV-01～EV-05 全部通过。使用 Fake 业务 CORE/能力验证 `宿主 trigger(ops.build) → Bus 保存 Builder → 普通事件 → USER/BUILTIN/CORE → 故障扩展 Handler 被隔离且下游不重复 → 嵌套事件 → 返回`。
 - **M-02 Swarm 联合验收：** M-01 加 M-02-CONTRACT/SERVER/PLUGIN/WEBUI/E2E。验证真实事件上行、页面下行、插件装卸、在途等待和宿主停止。
 
 M-02 外部开发可以基于 EV-01 和消费方自有 Fake 并行，但 Mock 结果不代表真实 EventBus 已接通。
@@ -158,10 +179,11 @@ M-02 外部开发可以基于 EV-01 和消费方自有 Fake 并行，但 Mock �
 | EV-02 EventBus 注册与执行引擎 | 完成 | 张瑶        | EV-01 | EV-02-V-01～09 通过 | 注册表、匹配快照、分层执行链和 EventNext 已实现；EV-02 专项、EV-01 契约及 callback wrap 回归共 69 项通过 |
 | EV-03 Builder/Ops | 完成 | 张瑶        | EV-01 | EV-03-V-01～04 通过 | 公开具体类、上下文隔离和动态调用已实现；EV-03 专项 25 项、Events 回归 64 项通过（冻结契约已于 2026-10-21 删除，现专项 21 项） |
 | EV-04 完整调用链集成 | 完成 | 张瑶        | EV-02、EV-03 | EV-04-V-01～08 通过 | builtin 自动注册、外部 Build（只校验结果类型）、状态门禁、Session 规范化、逐 Handler Ops 和 `ExtensionEventBus` 导出已实现；EV-04 集成 5 项、Events 回归 67 项通过；V-02 的异常/取消与 V-06 的跳过不构建、V-08 的异常传播复用 EV-02/EV-03 覆盖，未新增专项用例 |
-| M-01 EventBus MVP | 待开始 | 张瑶        | EV-01～EV-04 | 联合场景未执行 | 使用真实 Bus 和 Fake 业务能力 |
+| EV-05 扩展 Handler 故障隔离 | 已完成 | 张瑶        | EV-04 | EV-05-V-01～14 已覆盖；Events + callback 468 passed | 外部取消 `trigger()` 未单独覆盖；二期超时/`.catch` 不在范围 |
+| M-01 EventBus MVP | 待开始 | 张瑶        | EV-01～EV-05 | 联合场景未执行 | 使用真实 Bus 和 Fake 业务能力 |
 | M-02 Swarm 联合验收 | 待开始 | 张瑶、李雷、李志远 | M-01、五个外部工作包 | 联合场景未执行 | 对端实现进度由 Swarm 计划维护 |
 
-本期进度只统计 EV-01～EV-04 四个实际工作项，交付节点不计入特性数量。
+本期进度只统计 EV-01～EV-05 五个实际工作项，交付节点不计入特性数量。
 
 ## 附录 A. 验证命令基线
 
@@ -182,3 +204,6 @@ git diff --check
 | --- |-----| --- | --- |
 | 2026-10-19 | 1.0 | 将当前计划统一编排为 EV-01～EV-04；公共接口契约记为 EV-01 并标记完成；其余三个编号分别对应注册与执行引擎、Builder/Ops、完整调用链集成 | 真实 Session 输入、包上下文包装层和容量参数仍待后续 feature 或联调验证 |
 | 2026-10-21 | 1.1 | EV-04 完成，记录验收结果；实现记录见 F_04 第 6 节 | M-01 联合场景未执行；`ops.build` Handler 注册期级别/模式不强制 |
+| 2026-10-22 | 1.2 | 新增 P0 工作项 EV-05，确定一期 USER Handler 固定 skip、下游结果复用和输出校验边界；M-01 改为依赖 EV-01～EV-05 | EV-05 尚未建立 feature、同步公共契约或开始实现；二期 `.catch` 尚未设计 |
+| 2026-10-23 | 1.3 | EV-05 范围对齐 F_05：USER/BUILTIN 统一 skip、input/output Validator、禁止下游重放；同步 S_01、概览、架构与本计划 | 代码与 EV-05-V-01～14 测试尚未执行 |
+| 2026-10-23 | 1.4 | EV-05 实现并验收：Validator、USER/BUILTIN skip 与禁止重放、`ops.build` 通用 Validator | 见 F_05 第 8.2 节；M-01 联合场景待执行 |

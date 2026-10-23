@@ -1,4 +1,4 @@
-# ExtensionEventBus 开发说明
+# ExtensionEventBus 事件与扩展开发指南
 
 ## 1. 机制简介
 
@@ -78,7 +78,7 @@ builtins/
 - 匹配函数必须同步返回 `bool`。抛异常或返回其他类型时，整次触发失败。
 - CORE Handler 与普通 Handler 使用相同签名：`async (event, ops, event_next)`。
 - CORE 不参与 Pattern 筛选，始终位于事件链尾部。
-- EventBus 不校验具体业务输入和输出结构，事件定义方负责校验。
+- 可通过 `register_event_type(..., input_validator=..., output_validator=...)` 声明同步 Validator（严格返回 `bool`）；未声明时 EventBus 不校验业务输入输出结构。Validator 抛异常或返回非 `bool` 时整次触发失败。
 - EventType 注册成功只表示 Bus 已认识该事件，不表示真实业务入口已经接入。
 - 普通事件必须在 `ops.build` 成功后触发，否则返回 `EVENTS_STATE_INVALID`。
 - `trigger()` 是进程内异步调用，不提供跨进程投递、持久化、自动重试或失败恢复。
@@ -207,8 +207,9 @@ Handler 可以构造同 EventType 的新 Event 并替换 `event_input`，但 Eve
 - Handler 返回、抛错或取消后，EventNext 立即失效。
 - EventNext 不能改变 `event_type`。
 - 多次推进不会去重。下游 Handler、CORE 和外部副作用都会重复执行。
-- EventBus 不自动重试 Handler，不回滚已经发生的副作用，也不验证业务返回值。
-- Handler、CORE 抛出的业务异常和 `CancelledError` 会继续向外传播。
+- EventBus 不自动重试 Handler，也不回滚已经发生的副作用。
+- USER / BUILTIN Handler 抛异常、返回非 awaitable、转发输入或输出未通过 Validator 时被跳过并记录一条 error 日志：下游未执行则用原始 Event 继续，已成功则复用最后一次结果，已失败则传播该错误；不会重放下游。
+- CORE 异常、下游异常、Validator 自身故障（即使被 Handler 捕获）、matcher / Ops 构建错误和 `CancelledError` 会继续向外传播。Handler 内的 EventNext 误用、Ops 方法或 Builder 报错若未被 Handler 处理，视为 Handler 故障并被跳过。
 
 ### 4.3 完整示例
 
@@ -361,7 +362,7 @@ OpsMethod 有两种常见实现：
 - 首次 Build 失败时 Builder 不会保存，宿主修正注册后可以重试。
 - EventBus 不提供并发 Build 保护；宿主必须串行执行 Build。
 - 未知 namespace、未知 method、能力冲突和非法名称都会返回 `EVENTS_OPS_INVALID`。
-- OpsMethod 的业务异常和取消会直接传播，EventBus 不自动降级或重试。
+- OpsMethod 的业务异常和取消会直接传播给调用它的 Handler，EventBus 不自动降级或重试；Handler 未处理的业务异常按 Handler 故障跳过，取消继续向外传播。
 
 ### 5.3 完整示例
 
