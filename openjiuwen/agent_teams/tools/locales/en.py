@@ -39,6 +39,23 @@ STRINGS: dict[str, str] = {
         "reviewers; trivial chores may skip them); a reviewed task only completes after "
         "verification passes"
     ),
+    # Runtime error messages (interpolated with {reason}).
+    "build_team.retry_once": (
+        "Team initialization failed: {reason}. You may retry build_team once; "
+        "if it fails again the circuit opens and you must finish the task solo as the leader."
+    ),
+    "build_team.circuit_open": (
+        "Team initialization failed ({reason}); build_team is now circuit-broken — do NOT "
+        "call build_team again. Complete the user's task directly as the leader: no task "
+        "creation, no member spawns, no team coordination. State clearly at the start of "
+        "your reply: 'Team initialization failed; this task was completed solo by the leader.'"
+    ),
+    "build_team.partial_built": (
+        "The team was created (team row persisted) but initialization did not finish: "
+        "{reason}. Do NOT call build_team again — the team already exists and a retry "
+        "will only fail with 'already exists'; use list_members to inspect the roster "
+        "and spawn_member to bring up the missing members, then continue."
+    ),
     # ===== clean_team ==========================================================
     # clean_team._desc lives in descs/en/clean_team.md
     # ===== spawn_teammate ======================================================

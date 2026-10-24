@@ -30,6 +30,7 @@ class BuildTeamTool(TeamTool):
         self.team = team
         self.db = team.db
         self.messager = team.messager
+        self._t = t
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -60,16 +61,53 @@ class BuildTeamTool(TeamTool):
         # (subject to the spec ceiling check).
         enable_hitt_arg = inputs.get("enable_hitt")
         enable_task_verification_arg = inputs.get("enable_task_verification")
-        await self.team.build_team(
-            display_name=display_name,
-            desc=inputs.get("team_desc"),
-            leader_display_name=leader_display_name,
-            leader_desc=inputs["leader_desc"],
-            overrides=CapabilityOverrides(
-                enable_hitt=enable_hitt_arg,
-                enable_task_verification=enable_task_verification_arg,
-            ),
-        )
+        # Circuit open: refuse fast (no DB hit) and steer the leader to
+        # degrade to solo completion. The DB layer already retries each real
+        # attempt 3x with backoff; past the threshold another attempt is
+        # near-certain to fail and only burns ~12s per call.
+        if self.team.build_circuit_open:
+            return ToolOutput(
+                success=False,
+                error=self._t("build_team", "circuit_open", reason=self.team.last_build_error),
+            )
+        try:
+            await self.team.build_team(
+                display_name=display_name,
+                desc=inputs.get("team_desc"),
+                leader_display_name=leader_display_name,
+                leader_desc=inputs["leader_desc"],
+                overrides=CapabilityOverrides(
+                    enable_hitt=enable_hitt_arg,
+                    enable_task_verification=enable_task_verification_arg,
+                ),
+            )
+        except Exception as e:
+            # The tool boundary digests failures into an LLM-facing tool
+            # message, and the round may then end "normally" for a team that
+            # does not exist. Latch the failure first so the round-end
+            # settle path can surface it as a stream-level warning.
+            err_text = f"{type(e).__name__}: {e}"
+            # 半建成区分：build_team 的失败面不止
+            # "团队没建成"——create_team 落行后的步骤（成员注册等）也可能失败。
+            # 行已在 = 团队已建立：不计熔断、不 latch 告警（团队能力可用），
+            # 引导 leader 用 spawn_member 补齐成员。读不出（锁库等）按未建成
+            # 保守进熔断。
+            try:
+                existing = await self.db.team.get_team(self.team.team_name)
+            except Exception:
+                existing = None
+            if existing is not None:
+                return ToolOutput(
+                    success=False,
+                    error=self._t("build_team", "partial_built", reason=err_text),
+                )
+            self.team.note_build_failure(err_text)
+            await self.team.notify_build_failed(err_text)
+            # Return (not raise) so the LLM-facing message is ours: the first
+            # failure invites one retry; once the circuit opens, the message
+            # explicitly directs degrade-to-solo.
+            key = "circuit_open" if self.team.build_circuit_open else "retry_once"
+            return ToolOutput(success=False, error=self._t("build_team", key, reason=err_text))
         return ToolOutput(
             success=True,
             data={
