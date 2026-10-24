@@ -32,7 +32,7 @@ if TYPE_CHECKING:
 
 _PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
-_DEFAULT_CONTEXT_BUDGET_TOKENS = 3_000_000
+_DEFAULT_CONTEXT_BUDGET_TOKENS: int | None = None  # no token limit: tokens are only counted
 _DEFAULT_MAX_ITERATIONS = 80
 _DEFAULT_MAX_CONTEXT_MESSAGES = 100
 _AGENT_CARD_ID = "attribution-agent"
@@ -70,7 +70,7 @@ def _usage_tokens(response: object | None) -> int:
 
 
 class ContextBudgetRail(AgentRail):
-    """Bill provider-reported tokens and force-finish past the budget.
+    """Bill provider-reported tokens and force-finish past the budget (``None``: count only, never finish).
 
     A force-finish (not an abort) keeps whatever the tools already recorded.
     The host reads :attr:`exceeded` to mark the run ``failed: tokens exceeded``.
@@ -78,9 +78,11 @@ class ContextBudgetRail(AgentRail):
 
     priority = 950
 
-    def __init__(self, budget_tokens: int = _DEFAULT_CONTEXT_BUDGET_TOKENS, reason_prefix: str = "attribution") -> None:
+    def __init__(
+        self, budget_tokens: int | None = _DEFAULT_CONTEXT_BUDGET_TOKENS, reason_prefix: str = "attribution"
+    ) -> None:
         super().__init__()
-        if budget_tokens <= 0:
+        if budget_tokens is not None and budget_tokens <= 0:
             raise ValueError("budget_tokens must be greater than zero")
         self._budget = budget_tokens
         self._reason_prefix = reason_prefix
@@ -104,7 +106,7 @@ class ContextBudgetRail(AgentRail):
         tokens = _usage_tokens(inputs.response)
         if tokens > 0:
             self.spent += tokens
-        if self.spent > self._budget:
+        if self._budget is not None and self.spent > self._budget:
             if not self.exceeded:
                 self.exceeded = True
                 logger.warning(
@@ -504,7 +506,7 @@ def build_attribution_agent(
     reward_overall: RewardOverall | None,
     language: str = "zh",
     swarm_mode: bool = False,
-    total_token_budget: int = _DEFAULT_CONTEXT_BUDGET_TOKENS,
+    total_token_budget: int | None = _DEFAULT_CONTEXT_BUDGET_TOKENS,
     max_iterations: int = _DEFAULT_MAX_ITERATIONS,
     max_context_messages: int = _DEFAULT_MAX_CONTEXT_MESSAGES,
     status_sink: StatusSink | None = None,
@@ -519,7 +521,8 @@ def build_attribution_agent(
     not registered and its prompt paragraphs are dropped.  The host reads
     ``rail.exceeded`` after ``invoke``.
 
-    The model has no time limit (:func:`without_time_limits`), and a failed model
+    The model has no time limit (:func:`without_time_limits`) and, by default, no
+    token limit (``total_token_budget=None``: tokens are counted, never cut); a failed model
     call (a dropped connection, 429, 5xx) is retried by the model anomaly rail.
     """
     from openjiuwen.agent_evolving.attribution.tools import build_attribution_tools

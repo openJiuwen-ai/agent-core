@@ -79,7 +79,8 @@ def expand(value, env_file):
 
 def model_config(value):
     """A model config dict. "session" (or {"model": "session", ...overrides}) means: the model the JiuwenSwarm
-    session runs on, with its address and key from ~/.jiuwenswarm/config/config.yaml.
+    session runs on, with its address and key from ~/.jiuwenswarm/config/config.yaml (and its supports_vision as
+    "vision", so it is not probed).
     """
     overrides = dict(value) if isinstance(value, dict) else {}
     if value != "session" and overrides.get("model") != "session":
@@ -93,8 +94,9 @@ def model_config(value):
     extra = next((v for k, v in SESSION_EXTRA.items() if k in name.lower()), {})
     overrides.pop("model", None)
     env_file = config_file.parent / ".env"
+    declared = {"vision": client["supports_vision"]} if isinstance(client.get("supports_vision"), bool) else {}
     return {"model": name, "base_url": expand(client["api_base"], env_file),
-            "api_key": expand(client["api_key"], env_file), "extra_body": extra, **overrides}
+            "api_key": expand(client["api_key"], env_file), "extra_body": extra, **declared, **overrides}
 
 
 def resolve_models(config):
@@ -117,6 +119,9 @@ VISION_PROBE = (  # a 32x32 red square
 )
 
 
+RED = re.compile(r"red|crimson|scarlet|红", re.I)   # "Red", "red (#FF0000)", "红色", "纯红"
+
+
 def vision_cache_path():
     """Where probe results are kept: $REWARD_HOME/vision.json, default ~/.reward/vision.json."""
     return Path(os.environ.get("REWARD_HOME") or Path.home() / ".reward") / "vision.json"
@@ -134,7 +139,7 @@ async def can_see(model, log=lambda message: None, notes=None):
         cache = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         cache = {}
-    key = f"v2|{getattr(model, 'base_url', '')}|{model.name}"   # v2: older caches may hold a wrong "blind"
+    key = f"v3|{getattr(model, 'base_url', '')}|{model.name}"   # v3: v2 took "Red (#FF0000)" for a wrong color
     if key in cache:
         return cache[key]
     problem = "no color in the answer"
@@ -153,12 +158,13 @@ async def can_see(model, log=lambda message: None, notes=None):
             continue
         color = answer.get("color") if isinstance(answer, dict) else None
         if isinstance(color, str) and color.strip():
-            cache[key] = color.strip().casefold().strip(".。") in {"red", "红", "红色", "crimson"}
+            cache[key] = bool(RED.search(color))
             break
     if key not in cache:
         log(f"vision probe for {model.name} unclear: {problem[:200]}")
         if notes is not None:
-            notes.append(f"没能确认模型 {model.name} 能否看图，本次没有发截图；在配置里写 \"vision\": true 可跳过试探。")
+            notes.append(f"没能确认模型 {model.name} 能否看图，本次没有发截图；在 Reward 配置里写 \"vision\": true，"
+                         "或在模型配置里写 supports_vision: true，可跳过试探。")
         return False
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

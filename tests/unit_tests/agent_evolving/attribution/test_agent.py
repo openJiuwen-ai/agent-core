@@ -203,6 +203,15 @@ async def test_context_budget_rail_refuses_when_exceeded() -> None:
     assert "refused" in str(ctx._force_finish)
 
 
+async def test_context_budget_rail_has_no_limit_by_default() -> None:
+    rail = ContextBudgetRail()
+    ctx = _FakeCtx(_Response(usage_metadata=_Usage(total_tokens=5_000_000)))
+    await rail.after_model_call(ctx)
+    await rail.before_model_call(ctx)
+    assert rail.spent == 5_000_000  # still counted for the run's token usage
+    assert not rail.exceeded and ctx._force_finish is None
+
+
 def test_context_budget_rail_rejects_nonpositive() -> None:
     with pytest.raises(ValueError):
         ContextBudgetRail(0)

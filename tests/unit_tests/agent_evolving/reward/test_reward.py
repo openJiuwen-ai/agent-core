@@ -179,6 +179,7 @@ def test_session_model_comes_from_the_session_and_jiuwenswarm_config(tmp_path, m
     - model_client_config: {api_base: https://d.example, api_key: kd, model_name: deepseek-v4-flash}
 """)
     monkeypatch.setenv("JIUWENSWARM_HOME", str(tmp_path))
+    assert "vision" not in models.model_config("session")  # nothing declared: Reward probes
     config = models.resolve_models({"producer": "session",
                                          "judge": {"model": "qwen3.8-flash", "base_url": "u", "api_key": "k"}})
     assert config["producer"] == {"model": "deepseek-v4-flash", "base_url": "https://d.example", "api_key": "kd",
@@ -186,6 +187,10 @@ def test_session_model_comes_from_the_session_and_jiuwenswarm_config(tmp_path, m
     assert config["judge"]["base_url"] == "u"                                  # fixed judge left alone
     judge = models.model_config({"model": "session", "timeout": 100})
     assert judge["model"] == "deepseek-v4-flash" and judge["timeout"] == 100
+    text = (tmp_path / "config/config.yaml").read_text().replace("model_name: deepseek-v4-flash", "model_name: "
+                                                                 "deepseek-v4-flash, supports_vision: true")
+    (tmp_path / "config/config.yaml").write_text(text)
+    assert models.model_config("session")["vision"] is True  # declared in the JiuwenSwarm config: not probed
 
 
 def test_progress_file_moves_through_the_stages(tmp_path, monkeypatch):
@@ -243,8 +248,10 @@ async def test_vision_probe_is_cached_per_model_and_config_can_decide(tmp_path, 
     assert await models.can_see(model("qwen-vl", {"color": "blue"})) is True          # cached
     assert await models.can_see(model("deepseek", error=RuntimeError("image_url not supported"))) is False
     assert await models.can_see(model("guesser", {"color": "blue"})) is False
+    assert await models.can_see(model("glm", {"color": "Red (#FF0000)"})) is True     # a fuller answer still counts
+    assert await models.can_see(model("glm-zh", {"color": "纯红色"})) is True
     assert await models.can_see(model("forced", vision=True)) is True                  # no probe
-    assert asked == ["qwen-vl", "deepseek", "guesser"]
+    assert asked == ["qwen-vl", "deepseek", "guesser", "glm", "glm-zh"]
 
 
 

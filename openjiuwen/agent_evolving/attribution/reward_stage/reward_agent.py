@@ -168,7 +168,7 @@ def build_reward_agent(
     system_prompt: str,
     workspace: str,
     language: str = "zh",
-    context_budget_tokens: int = 600_000,
+    context_budget_tokens: int | None = None,
     max_iterations: int = 32,
     reward_sink: RewardSink | None = None,
     status_sink: StatusSink | None = None,

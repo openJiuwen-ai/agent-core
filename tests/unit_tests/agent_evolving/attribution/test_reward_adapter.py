@@ -143,6 +143,8 @@ def test_route_from_model_reads_the_core_model_and_refuses_a_bare_one() -> None:
     }  # the model's own timeout is not carried over: Reward waits for a slow model
     with pytest.raises(ValueError):
         adapter.route_from_model(object())
+    model.model_client_config.supports_vision = True  # declared in JiuwenSwarm's model config: Reward does not probe
+    assert adapter.route_from_model(model)["vision"] is True
 
 
 def test_the_reward_config_sets_no_time_limit(monkeypatch: Any, tmp_path: Any) -> None:

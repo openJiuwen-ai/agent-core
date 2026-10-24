@@ -561,8 +561,8 @@ async def score_with(task, root, config, options, *, deliverable, inputs, tools,
         evidence_seeing = seeing if same_as_judge else await sees(models.Model(evidence_route))
     ctx["judge_seeing"], ctx["art_seeing"], ctx["seeing"] = seeing, art_seeing, evidence_seeing
     if not seeing:
-        warn(f"判定模型 {getattr(judge, 'name', '')} 看不到图片（看图试探的结论；在模型配置里写 \"vision\": true "
-             "可跳过试探），普通维度只按文字和运行数值判定。")
+        warn(f"判定模型 {getattr(judge, 'name', '')} 看不到图片（看图试探的结论；模型能看图时，在模型配置里写 "
+             "supports_vision: true 可跳过试探），普通维度只按文字和运行数值判定。")
     if not art_seeing and any(c.get("kind") == "visual" for c in criteria):
         warn(f"画面判定模型 {getattr(art, 'name', '')} 看不到图片，画面维度不评分、不计入总分；"
              "换用能看图的 art_judge 可评价这部分。")

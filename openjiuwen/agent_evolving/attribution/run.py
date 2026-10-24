@@ -276,7 +276,7 @@ async def run_diagnosis(
     jev_concurrency: int = 8,
     model: Any = None,
     reward_card: Any = None,
-    reward_budget_tokens: int = 600_000,
+    reward_budget_tokens: int | None = None,
     reward_max_iterations: int = 32,
     status_sink: StatusSink | None = None,
     model_name: str = "",
@@ -482,7 +482,7 @@ async def run_attribution(
     status_sink: StatusSink | None = None,
     model_name: str = "",
     status_counter: list[int] | None = None,
-    total_token_budget: int = 3_000_000,
+    total_token_budget: int | None = None,
     max_iterations: int = 80,
     max_context_messages: int = 100,
     total_timeout_s: float | None = None,
@@ -492,8 +492,9 @@ async def run_attribution(
 
     The host may pass its own runtime and session; otherwise a
     :class:`NodeBackedRuntime` and a fresh agent session are used.  There is no
-    time limit by default (a slow model is waited for); a caller that needs one
-    sets ``total_timeout_s``, which then covers both invoke rounds.
+    time or token limit by default (a slow model is waited for; tokens are only
+    counted); a caller that needs one sets ``total_timeout_s`` (covering both
+    invoke rounds) or ``total_token_budget``.
 
     ``tier == "perfect"`` signals never enter this stage: they are filtered
     here (proposal §4.5) and reported via ``skipped_signal_ids`` so the host
@@ -669,10 +670,11 @@ async def run_agent(agent: Any, prompt: Any, session: Any = None) -> None:
     A non-streaming call sends nothing until the whole answer is ready; behind a gateway that drops a connection
     idle for about 60 seconds (seen with yibuapi.com), a slow model thinking that long loses the call with
     ``APIConnectionError: Connection error``.  Streamed, the reasoning keeps the connection busy.  A failure the
-    stream reports as an item (``result_type: error``) is raised, as ``invoke`` would.  An agent without ``stream``
-    (a test double) is invoked.
+    stream reports as an item (``result_type: error``) is raised, as ``invoke`` would; reaching the step limit
+    ("Max iterations reached ...") is not a failure: the round just ends, and the wake round may follow.  An
+    agent without ``stream`` (a test double) is invoked.
     """
-    from openjiuwen.agent_evolving.reward.evidence_agent import stream_error
+    from openjiuwen.agent_evolving.reward.evidence_agent import LIMIT_REACHED, stream_error
 
     extra = {"session": session} if session is not None else {}
     stream = getattr(agent, "stream", None)
@@ -683,7 +685,7 @@ async def run_agent(agent: Any, prompt: Any, session: Any = None) -> None:
     async with aclosing(stream(prompt, **extra)) as items:
         async for item in items:
             failure = failure or stream_error(item)
-    if failure:
+    if failure and not LIMIT_REACHED.search(failure):
         raise RuntimeError(failure)
 
 

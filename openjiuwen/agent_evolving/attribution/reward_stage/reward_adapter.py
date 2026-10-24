@@ -109,7 +109,8 @@ def reward_enabled() -> bool:
 def route_from_model(model: Any) -> dict[str, Any]:
     """An OpenAI-compatible route (``model``, ``base_url``, ``api_key``) read from a core ``Model``.
 
-    The model's own time limits are not carried over: Reward waits for a slow model.
+    The model's own time limits are not carried over: Reward waits for a slow model.  A ``supports_vision``
+    declared on the model (JiuwenSwarm's model config) becomes the route's ``vision``, so Reward does not probe.
 
     Raises:
         ValueError: The model carries no name or endpoint (e.g. a model group); set ``REWARD_CONFIG``.
@@ -129,6 +130,9 @@ def route_from_model(model: Any) -> dict[str, Any]:
     extra = getattr(request, "extra_body", None)
     if isinstance(extra, Mapping):
         route["extra_body"] = dict(extra)
+    vision = getattr(client, "supports_vision", None)
+    if isinstance(vision, bool):
+        route["vision"] = vision
     return route
 
 

@@ -415,7 +415,7 @@ async def test_run_diagnosis_forwards_reward_status_and_budget(monkeypatch: Any)
     assert captured["status_sink"] is sink
     assert captured["model_name"] == "m1"
     assert captured["status_counter"] is counter
-    assert captured["context_budget_tokens"] == 600_000
+    assert captured["context_budget_tokens"] is None  # no token limit by default
     assert captured["max_iterations"] == 32
 
 
@@ -490,7 +490,7 @@ async def test_build_reward_agent_wires_llm_status_rail(monkeypatch: Any) -> Non
     assert status_rail._counter == [3]
     budget_rails = [rail for rail in rails if type(rail).__name__ == "ContextBudgetRail"]
     assert len(budget_rails) == 1
-    assert budget_rails[0]._budget == 600_000
+    assert budget_rails[0]._budget is None
 
 
 class _FakeDeepAgent:
@@ -926,6 +926,25 @@ async def test_a_failure_the_stream_reports_is_raised_like_invoke_would() -> Non
     with pytest.raises(RuntimeError, match="Connection error"):
         await run_module.run_agent(_StreamingAgent([failed]), "p")
     await run_module.run_agent(_SlowAgent(), "p")  # an agent without stream is invoked
+
+
+async def test_reaching_the_step_limit_ends_the_round_and_the_wake_round_still_runs(monkeypatch: Any) -> None:
+    limit = {
+        "type": "answer",
+        "payload": {"result_type": "error", "output": "Max iterations reached without completion"},
+    }
+    agent = _StreamingAgent([limit])
+    monkeypatch.setattr(run_module, "build_attribution_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    outcome = await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+    )
+    assert len(agent.prompts) == 2  # not an error: the wake round ran
+    assert outcome.failure_kind == "incomplete" and outcome.wake_attempted
 
 
 async def test_a_real_attribution_agent_calls_its_model_streaming(monkeypatch: Any) -> None:
