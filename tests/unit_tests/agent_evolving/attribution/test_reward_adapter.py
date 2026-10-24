@@ -139,11 +139,22 @@ def test_route_from_model_reads_the_core_model_and_refuses_a_bare_one() -> None:
         "base_url": "https://example.com/v1",
         "api_key": "k",
         "provider": "OpenAI",
-        "timeout": 300.0,
         "extra_body": {"enable_thinking": False},
-    }
+    }  # the model's own timeout is not carried over: Reward waits for a slow model
     with pytest.raises(ValueError):
         adapter.route_from_model(object())
+
+
+def test_the_reward_config_sets_no_time_limit(monkeypatch: Any, tmp_path: Any) -> None:
+    monkeypatch.delenv("REWARD_CONFIG", raising=False)
+    monkeypatch.setenv("REWARD_HOME", str(tmp_path))  # no config file
+    monkeypatch.setenv("REWARD_DEADLINE", "600")  # an old setting: no longer read
+    model = SimpleNamespace(
+        model_client_config=SimpleNamespace(api_base="https://example.com/v1", api_key="k", timeout=300),
+        model_config=SimpleNamespace(model_name="glm"),
+    )
+    config = adapter.reward_config(model)
+    assert "deadline_seconds" not in config and "timeout" not in config["producer"]
 
 
 def _keyword(signals: list[DiagnosticSignal]) -> Any:
@@ -260,7 +271,7 @@ async def test_progress_streams_what_reward_does_now(monkeypatch: Any, tmp_path:
 
 def test_the_evidence_bar_keeps_moving_while_checks_come() -> None:
     lines: list[str] = []
-    steps = adapter._ProgressLines(lines.append, "zh", evidence_seconds=300)
+    steps = adapter._ProgressLines(lines.append, "zh")
     steps.stage("evidence", total=5)
     for index in range(1, 19):  # more checks than two per criterion
         steps.log(f"evidence c{index} (python) for plan")
@@ -301,3 +312,62 @@ def test_reward_is_the_default_and_the_reward_agent_stays_one_switch_away(monkey
     assert adapter.reward_enabled() is False
     monkeypatch.delenv("ATTRIBUTION_REWARD")
     assert adapter.reward_enabled() is True
+
+
+def test_an_unscored_looks_category_is_named_with_its_reason_not_counted_as_unknown() -> None:
+    result = {
+        "total": {"score": 80, "summary": "ok"},
+        "categories": [
+            {"category_id": "story", "category_name": "故事", "score": 80},
+            {"category_id": "visual", "category_name": "画面质量", "score": None, "unscored": "blind"},
+        ],
+        "sub_category_items": [
+            {"category_id": "story", "category_name": "故事", "type": "floor", "status": "met", "rubric": "a"},
+            {"category_id": "story", "category_name": "故事", "type": "floor", "status": "unknown", "rubric": "b"},
+            *[
+                {"category_id": "visual", "category_name": "画面质量", "type": "floor", "status": "unknown"}
+                for _ in range(6)
+            ],
+        ],
+    }
+    comment = adapter.to_reward_payload(result, "zh")["overall"]["comment"]
+    assert "另有 1 项因证据不足未能判定" in comment  # the six looks items are not counted here
+    assert "画面维度「画面质量」未评：所用模型 - 不支持读图" in comment and "这不代表作品有问题" in comment
+    result["meta"] = {"models": {"judge": "deepseek-v4.1-flash"}, "vision": {"judge": False, "art_judge": False}}
+    comment = adapter.to_reward_payload(result, "zh")["overall"]["comment"]
+    assert "所用模型 deepseek-v4.1-flash 不支持读图，需要看图才能判定的子项也在其中" in comment  # the 1 unknown
+    assert "画面维度「画面质量」未评：所用模型 deepseek-v4.1-flash 不支持读图" in comment
+    result["categories"][1]["unscored"] = "no_screenshots"
+    assert "没有拿到作品的截图" in adapter.to_reward_payload(result, "zh")["overall"]["comment"]
+
+
+def test_warnings_and_failed_checks_show_in_the_progress_with_their_reason() -> None:
+    from openjiuwen.agent_evolving.reward.pipeline import WARNING
+
+    lines: list[str] = []
+    steps = adapter._ProgressLines(lines.append, "zh")
+    steps.stage("evidence", total=2)
+    steps.log(WARNING + "默认浏览没能运行（RuntimeError: no browser could start）")
+    steps.log("evidence c1 (browser) for play, visual: RuntimeError: no browser could start")
+    steps.log("evidence c2 (python) for play")
+    assert "⚠ 默认浏览没能运行（RuntimeError: no browser could start）" in lines[1] and "15%" in lines[1]
+    assert "第 1 项检查没能运行（browser）：RuntimeError: no browser could start" in lines[2]
+    assert "第 2 项检查完成（python）" in lines[3]
+
+
+def test_files_sent_with_the_reply_are_named_to_the_judges() -> None:
+    parse = TaskParseResult(
+        task_description="t",
+        message_artifacts=[],
+        file_artifacts=["/w/page-1.png"],
+        file_candidates=[
+            ("/w/out/page-1.png", "main:3", "send_file_to_user"),
+            ("/w/out/page-2.png", "main:3", "send_file_to_user"),
+            ("/w/notes.md", "main:2", "write_file"),
+        ],
+    )
+    reply = adapter.with_sent_files("绘本做好了：page-1.png、page-2.png", parse, "zh")
+    assert reply.startswith("绘本做好了") and "已作为附件发送给用户" in reply
+    assert "page-1.png、page-2.png）" in reply and "notes.md" not in reply
+    bare = TaskParseResult(task_description="t", message_artifacts=[], file_artifacts=[], file_candidates=[])
+    assert adapter.with_sent_files("done", bare, "en") == "done"

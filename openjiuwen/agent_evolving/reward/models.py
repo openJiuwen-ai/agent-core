@@ -1,8 +1,7 @@
-"""Model access: a streamed JSON client with per-call quotas, the answer language, the session's model, and
+"""Model access: a streamed JSON client (no time limits), the answer language, the session's model, and
 whether a model can see images.
 """
 
-import asyncio
 import json
 import os
 import re
@@ -164,11 +163,20 @@ async def can_see(model, log=lambda message: None, notes=None):
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as error:   # the answer still holds for this run; it is just asked again next time
+        log(f"vision probe result not saved: {error}")
     return cache[key]
 
 ANSWER_LANGUAGE = ContextVar("reward_answer_language", default=None)
+
+# base64 prefixes of the picture formats a screenshot or a delivered picture can have
+PICTURE_KINDS = (("iVBORw0KGgo", "image/png"), ("/9j/", "image/jpeg"), ("R0lGOD", "image/gif"), ("UklGR", "image/webp"))
+
+
+def data_url(data):
+    """A data URL for a base64 picture, with its real type (a PNG page sent as image/jpeg is rejected by some APIs)."""
+    kind = next((name for prefix, name in PICTURE_KINDS if data.startswith(prefix)), "image/jpeg")
+    return f"data:{kind};base64,{data}"
 
 
 def items(found, *keys):
@@ -199,10 +207,8 @@ def resolve(value):
 
 
 class Model:
-    """One JSON-answering model, streamed so a slow but working call is told apart from a stuck one.
-
-    Config: "timeout" is the call's whole quota in seconds, retries included (default 360);
-    "first_chunk_timeout" and "idle_timeout" (default 60 each) catch a stream that never starts or stalls.
+    """One JSON-answering model, streamed. No time limit: a slow model is waited for, however long it takes; a call
+    that fails (an error, a cut connection, a reply that is not JSON) is tried once more.
     """
 
     def __init__(self, config):
@@ -210,59 +216,38 @@ class Model:
 
         self.name = config["model"]
         self.extra = config.get("extra_body") or {}
-        self.quota = float(config.get("timeout", 360))
-        self.first_chunk = float(config.get("first_chunk_timeout", 60))
-        self.idle = float(config.get("idle_timeout", 60))
-        self.deadline = None  # loop time the whole run must end by; set by reward
         self.vision = config.get("vision")  # True / False, or None to probe once
         self.base_url = resolve(config["base_url"])
+        # timeout=None: no HTTP time limit (the SDK's default would be 600 s)
         self.client = AsyncOpenAI(base_url=resolve(config["base_url"]), api_key=resolve(config["api_key"]),
-                                  timeout=self.quota, max_retries=0)
+                                  timeout=None, max_retries=0)
 
     async def json(self, system, user, images=()):
         content = [{"type": "text", "text": user}]
         for label, data in images:
             content += [{"type": "text", "text": label},
-                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + data}}]
+                        {"type": "image_url", "image_url": {"url": data_url(data)}}]
         language = (f"\nWrite explanatory text in {ANSWER_LANGUAGE.get()}. Keep JSON keys, IDs, enum values and "
                     "code unchanged." if ANSWER_LANGUAGE.get() else "")
         messages = [{"role": "system", "content": system + language + "\nReply with one JSON object only."},
                     {"role": "user", "content": content if images else user}]
-        loop = asyncio.get_running_loop()
-        end = loop.time() + self.quota
-        if self.deadline is not None:
-            end = min(end, self.deadline)
         error = None
-        for _ in range(2):  # one retry, inside the same quota
-            if end - loop.time() < 5:
-                break
+        for _ in range(2):  # one retry
             try:
-                text = await self._stream(messages, end)
+                text = await self._stream(messages)
                 return json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text.strip()))
-            except Exception as failure:  # noqa: BLE001 - retry once while the quota lasts
+            except Exception as failure:  # noqa: BLE001 - retry once
                 error = failure
-        raise error or TimeoutError(f"{self.name}: no time left for the call")
+        raise error
 
-    async def _stream(self, messages, end):
-        """Collect the answer text; reasoning chunks count as activity but are not part of the answer."""
-        loop = asyncio.get_running_loop()
-        stream = await asyncio.wait_for(self.client.chat.completions.create(
+    async def _stream(self, messages):
+        """Collect the answer text; reasoning chunks are not part of the answer."""
+        stream = await self.client.chat.completions.create(
             model=self.name, response_format={"type": "json_object"}, extra_body=self.extra or None,
-            messages=messages, stream=True), max(1.0, min(self.first_chunk, end - loop.time())))
-        parts, wait = [], self.first_chunk
-        chunks = stream.__aiter__()
+            messages=messages, stream=True)
+        parts = []
         try:
-            while True:
-                left = end - loop.time()
-                if left <= 0:
-                    raise TimeoutError(f"{self.name}: call quota used up")
-                try:
-                    chunk = await asyncio.wait_for(chunks.__anext__(), min(wait, left))
-                except StopAsyncIteration:
-                    break
-                except asyncio.TimeoutError:
-                    raise TimeoutError(f"{self.name}: no data for {min(wait, left):.0f}s") from None
-                wait = self.idle
+            async for chunk in stream:
                 for choice in getattr(chunk, "choices", None) or []:
                     delta = getattr(choice, "delta", None)
                     if delta is not None and getattr(delta, "content", None):

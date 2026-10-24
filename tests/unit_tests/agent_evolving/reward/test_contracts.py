@@ -122,9 +122,34 @@ async def test_optional_stages_leave_a_warning_instead_of_failing_the_run():
     options = RewardOptions(user_note="Too small", warnings=notes)
     assert await pipeline.feedback_claims("Task", [{"id": "quality", "claims": []}], {}, options,
                                           producer=broken) == []
-    summary = await pipeline.overall_summary("Task", [{"id": "a", "name": "玩法", "score": 75}], 75, broken,
-                                             options)
-    assert "玩法" in summary and len(notes) == 2 and all("没有完成" in n for n in notes)
+    assert len(notes) == 1 and "没有完成" in notes[0]
+
+
+def test_the_overall_summary_is_made_in_code_from_the_scores_and_the_weakest_comment():
+    results = [{"id": "a", "name": "玩法", "score": 90, "summary": "能玩。"},
+               {"id": "b", "name": "画面", "score": 60, "summary": "主角变形。"}, {"id": "c", "score": None}]
+    assert pipeline.overall_summary("做个游戏", results) == "最强的是「玩法」（90），最弱的是「画面」（60）：主角变形。"
+    assert pipeline.overall_summary("Make a game", results) == "Strongest: 玩法 (90); weakest: 画面 (60): 主角变形。"
+    assert pipeline.overall_summary("做个游戏", results[:1]) == "「玩法」得分 90：能玩。"
+    assert pipeline.overall_summary("做个游戏", [results[2]]) == ""
+
+
+@pytest.mark.asyncio
+async def test_feedback_written_with_the_criteria_is_marked_capped_and_made_a_requirement():
+    note = [{"text": f"note {i}", "level": "challenge", "source": "user_note"} for i in range(8)]
+    writer = Recorder({"criteria": [{"id": "quality", "claims": [
+        {"text": "plain", "source": "user_note"}, *note, {"text": "signal", "source": "something else"}]}]})
+    options = RewardOptions(user_note="Too small")
+    criteria = await pipeline.write_criteria("Make a report", {"producer": {}}, options, producer=writer,
+                                             with_feedback=True)
+    system, content, _ = writer.calls[0]
+    assert system.endswith(prompts.CRITERIA_FEEDBACK) and '"user_note": "Too small"' in content
+    marked = [x for x in criteria[0]["claims"] if x.get("source")]
+    assert len(marked) == pipeline.MAX_FEEDBACK_CLAIMS
+    assert {(x["source"], x["level"]) for x in marked} == {("feedback", "floor")}
+    plain = await pipeline.write_criteria("Make a report", {"producer": {}}, options, producer=writer)
+    assert not any(x.get("source") for x in plain[0]["claims"])                  # not asked: no source kept
+    assert "Feedback:" not in writer.calls[1][1] and not writer.calls[1][0].endswith(prompts.CRITERIA_FEEDBACK)
 
 
 @pytest.mark.asyncio
@@ -152,7 +177,7 @@ def policy_texts():
 
 def test_prompts_and_guides_have_no_task_specific_rules_or_numeric_quality_thresholds():
     # These are execution time budgets, not quality requirements; keep them tied to code constants.
-    operational_limits = {f"{checks.PYTHON_SECONDS} s", f"{checks.MAX_WAIT_MS} ms"}
+    operational_limits = {f"{checks.PYTHON_SECONDS} s", f"{checks.MAX_WAIT_MS} ms", f"{checks.PROBE_SECONDS} s"}
     for name, text in policy_texts():
         for term in TOPIC_WORDS:
             assert term.casefold() not in text.casefold(), (name, term)
@@ -179,3 +204,12 @@ def test_browser_actions_and_check_types_are_implemented():
     assert tools == {name for _, name in evidence_agent.TOOL_BY_FIELD}
 
 
+
+
+def test_what_the_judges_write_is_about_the_work_not_the_evaluation():
+    # their reasons and summaries reach the user beside the scores; how the evaluation went is said by code
+    for prompt in (prompts.JUDGE_PROMPT, prompts.ART_JUDGE_PROMPT):
+        assert prompts.READER_NOTE in prompt
+        assert prompt.index(prompts.READER_NOTE) < prompt.index("Return JSON")
+    assert "never mention checks" in prompts.READER_NOTE
+    assert "the work or the agent as the subject" in prompts.READER_NOTE

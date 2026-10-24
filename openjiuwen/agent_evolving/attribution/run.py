@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import uuid
+from contextlib import aclosing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -352,7 +354,8 @@ async def run_diagnosis(
         status_counter=counter,
     )
     try:
-        await agent.invoke(
+        await run_agent(
+            agent,
             build_reward_user_prompt(
                 task_description=task_parse.task_description,
                 message_artifacts=task_parse.message_artifacts,
@@ -361,11 +364,13 @@ async def run_diagnosis(
                 user_attribution=user_attribution,
                 language=language,
                 user_request=task_parse.user_request,
-            )
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - fallback to rule/Jev signals
         run_meta["reward"] = {"failed": type(exc).__name__, "error": str(exc)[:200]}
         return _rule_jev_result(signals, run_meta, user_attribution)
+    finally:
+        _release_tools(agent)
     run_meta["reward"] = {
         "submitted": gate.submitted,
         "budget_exceeded": rail.exceeded,
@@ -480,14 +485,15 @@ async def run_attribution(
     total_token_budget: int = 3_000_000,
     max_iterations: int = 80,
     max_context_messages: int = 100,
-    total_timeout_s: float | None = 600.0,
+    total_timeout_s: float | None = None,
     session: Any = None,
 ) -> AttributionRunOutcome:
     """Run stage three with the one-shot wake (proposal §5.4).
 
     The host may pass its own runtime and session; otherwise a
-    :class:`NodeBackedRuntime` and a fresh agent session are used.  The 600s
-    timeout covers both invoke rounds when ``total_timeout_s`` is set.
+    :class:`NodeBackedRuntime` and a fresh agent session are used.  There is no
+    time limit by default (a slow model is waited for); a caller that needs one
+    sets ``total_timeout_s``, which then covers both invoke rounds.
 
     ``tier == "perfect"`` signals never enter this stage: they are filtered
     here (proposal §4.5) and reported via ``skipped_signal_ids`` so the host
@@ -532,7 +538,15 @@ async def run_attribution(
     )
     from openjiuwen.core.session.agent import create_agent_session
 
-    active_session = session if session is not None else create_agent_session()
+    # A streamed round closes its session's stream at the end, so each round gets a session of its own; they share one
+    # id, so the wake round goes on from the first round's conversation. Our sessions carry the agent's card (a
+    # streamed round checks it in first). A session given by the host is used as it is.
+    session_id = f"attribution_{uuid.uuid4().hex[:12]}"
+    card = getattr(agent, "card", None)
+
+    def round_session() -> Any:
+        return session if session is not None else create_agent_session(session_id=session_id, card=card)
+
     initial_prompt = build_attribution_initial_prompt(
         task_description=task_description,
         reward_overall=reward_overall,
@@ -592,7 +606,7 @@ async def run_attribution(
             raise asyncio.TimeoutError
         try:
             await asyncio.wait_for(
-                agent.invoke(prompt, session=active_session),
+                run_agent(agent, prompt, session=round_session()),
                 timeout=remaining,
             )
         except asyncio.TimeoutError:
@@ -645,6 +659,44 @@ async def run_attribution(
             counts={},
             token_usage={"attribution": rail.spent},
         )
+    finally:
+        _release_tools(agent)
+
+
+async def run_agent(agent: Any, prompt: Any, session: Any = None) -> None:
+    """``agent.invoke(prompt)``, driven through ``agent.stream`` so every model call streams.
+
+    A non-streaming call sends nothing until the whole answer is ready; behind a gateway that drops a connection
+    idle for about 60 seconds (seen with yibuapi.com), a slow model thinking that long loses the call with
+    ``APIConnectionError: Connection error``.  Streamed, the reasoning keeps the connection busy.  A failure the
+    stream reports as an item (``result_type: error``) is raised, as ``invoke`` would.  An agent without ``stream``
+    (a test double) is invoked.
+    """
+    from openjiuwen.agent_evolving.reward.evidence_agent import stream_error
+
+    extra = {"session": session} if session is not None else {}
+    stream = getattr(agent, "stream", None)
+    if stream is None:
+        await agent.invoke(prompt, **extra)
+        return
+    failure = None
+    async with aclosing(stream(prompt, **extra)) as items:
+        async for item in items:
+            failure = failure or stream_error(item)
+    if failure:
+        raise RuntimeError(failure)
+
+
+def _release_tools(agent: Any) -> None:
+    """Drop this run's tools from the process-wide resource manager (their ids carry the run's tool owner id)."""
+    from openjiuwen.core.common.exception.errors import BaseError
+
+    teardown = getattr(getattr(agent, "ability_manager", None), "teardown_tools", None)
+    if callable(teardown):
+        try:
+            teardown()
+        except BaseError:  # cleanup never replaces the run's outcome
+            logger.exception("[attribution] releasing the attribution tools failed")
 
 
 def _pending(runtime: AttributionAgentRuntime, signals: list[DiagnosticSignal]) -> list[str]:

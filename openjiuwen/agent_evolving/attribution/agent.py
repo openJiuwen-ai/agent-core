@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -35,6 +36,22 @@ _DEFAULT_CONTEXT_BUDGET_TOKENS = 3_000_000
 _DEFAULT_MAX_ITERATIONS = 80
 _DEFAULT_MAX_CONTEXT_MESSAGES = 100
 _AGENT_CARD_ID = "attribution-agent"
+
+
+def without_time_limits(model: Any) -> Any:
+    """A copy of ``model`` whose client has no HTTP, first-chunk or idle time limit; the caller's model is untouched.
+
+    The limits are the ones the Reward evidence agent runs with (``NO_TIME_LIMITS``), own HTTP client included: a
+    shared client is reused by endpoint and key and keeps the timeout it was built with.  Anything that is not a core
+    ``Model`` with a client config (a test double) is returned as it is.
+    """
+    from openjiuwen.agent_evolving.reward.evidence_agent import NO_TIME_LIMITS
+    from openjiuwen.core.foundation.llm.model import Model
+
+    client = getattr(model, "model_client_config", None)
+    if not isinstance(model, Model) or client is None:
+        return model
+    return Model(model_client_config=client.model_copy(update=NO_TIME_LIMITS), model_config=model.model_config)
 
 
 def _usage_tokens(response: object | None) -> int:
@@ -501,6 +518,9 @@ def build_attribution_agent(
     skills stay off.  With ``skill_evolution=False`` the skill improvement tool is
     not registered and its prompt paragraphs are dropped.  The host reads
     ``rail.exceeded`` after ``invoke``.
+
+    The model has no time limit (:func:`without_time_limits`), and a failed model
+    call (a dropped connection, 429, 5xx) is retried by the model anomaly rail.
     """
     from openjiuwen.agent_evolving.attribution.tools import build_attribution_tools
     from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
@@ -529,7 +549,10 @@ def build_attribution_agent(
             )
         )
     agents = create_deep_agent(
-        model,
+        without_time_limits(model),
+        # The agent's tools are registered process-wide under "<tool>_<owner id>": one owner per run, so a diagnosis
+        # running at the same time cannot take over this run's tools (and with them its trajectory and submissions).
+        tool_owner_id=f"{_AGENT_CARD_ID}-{uuid.uuid4().hex[:12]}",
         card=AgentCard(
             id=_AGENT_CARD_ID,
             name="AttributionAgent",
@@ -550,7 +573,8 @@ def build_attribution_agent(
         max_iterations=max_iterations,
         context_engine_config=ContextEngineConfig(max_context_message_num=max_context_messages),
         enable_security_rail=False,
-        enable_model_anomaly_detection_rail=False,
+        # retries a dropped connection, 429 or 5xx (up to 3 times); tool-loop compaction stays off by default
+        enable_model_anomaly_detection_rail=True,
         enable_sys_operation=False,
     )
     return agents, rail

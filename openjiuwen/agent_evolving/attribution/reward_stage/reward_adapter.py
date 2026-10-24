@@ -29,8 +29,6 @@ from openjiuwen.agent_evolving.attribution.nodes import TrajectoryNode
 
 #: ``ATTRIBUTION_REWARD=agent`` switches the Reward stage back to the Reward deep agent.
 REWARD_ENGINE_ENV = "ATTRIBUTION_REWARD"
-#: Seconds Reward may take for one diagnosis (``REWARD_DEADLINE`` overrides).
-DEFAULT_DEADLINE_SECONDS = 600
 
 _REQUIREMENT_TIER = {"met": "perfect", "partial": "fair", "unmet": "weak"}
 _CHALLENGE_TIER = {"met": "perfect", "partial": "fair", "unmet": "fair"}
@@ -45,6 +43,13 @@ _LABELS = {
         "challenge": "挑战",
         "counts": "要求 {floor_met}/{floor} 满足 · 挑战 {challenge_done}/{challenge} 做到",
         "unknown": "另有 {count} 项因证据不足未能判定。",
+        "blind_unknown": "所用模型 {model} 不支持读图，需要看图才能判定的子项也在其中。",
+        "unscored_blind": "画面维度「{name}」未评：所用模型 {model} 不支持读图，Reward 无法评价需要看图的维度；"
+        "这不代表作品有问题，换用能读图的模型即可评价。",
+        "unscored_no_screenshots": "画面维度「{name}」未评：没有拿到作品的截图（浏览器没能运行或没有截图）。",
+        "sent_files": "（随回复已作为附件发送给用户的文件，用户在对话中能直接看到、打开：{files}）",
+        "check_failed": "取证：第 {count} 项检查没能运行（{tool}）：{reason}",
+        "warning": "⚠ {text}",
         "criteria": "出题：根据用户的请求写判定项",
         "criteria_done": "出题完成：{count} 个维度",
         "evidence": "取证：实际运行交付物，覆盖 {count} 个维度",
@@ -65,6 +70,15 @@ _LABELS = {
         "challenge": "Challenge",
         "counts": "requirements {floor_met}/{floor} met · challenges {challenge_done}/{challenge} done",
         "unknown": "{count} more claims could not be settled.",
+        "blind_unknown": "The model {model} cannot read images; claims that need seeing are among them.",
+        "unscored_blind": 'Looks category "{name}" not scored: the model {model} cannot read images, so Reward '
+        "cannot judge what needs seeing; this is no fault of the work, and a model that reads images can judge it.",
+        "unscored_no_screenshots": 'Looks category "{name}" not scored: no screenshot of the work was taken '
+        "(the browser did not run or took none).",
+        "sent_files": "(Files sent to the user with the reply, shown in the chat as attachments the user can open: "
+        "{files})",
+        "check_failed": "Evidence: check {count} could not run ({tool}): {reason}",
+        "warning": "⚠ {text}",
         "criteria": "Criteria: writing claims from the user's request",
         "criteria_done": "Criteria written: {count} criteria",
         "evidence": "Evidence: running the deliverable for {count} criteria",
@@ -95,6 +109,8 @@ def reward_enabled() -> bool:
 def route_from_model(model: Any) -> dict[str, Any]:
     """An OpenAI-compatible route (``model``, ``base_url``, ``api_key``) read from a core ``Model``.
 
+    The model's own time limits are not carried over: Reward waits for a slow model.
+
     Raises:
         ValueError: The model carries no name or endpoint (e.g. a model group); set ``REWARD_CONFIG``.
     """
@@ -109,7 +125,6 @@ def route_from_model(model: Any) -> dict[str, Any]:
         "base_url": base_url,
         "api_key": str(getattr(client, "api_key", "") or ""),
         "provider": str(getattr(client, "client_provider", "") or "OpenAI"),
-        "timeout": float(getattr(client, "timeout", 360) or 360),
     }
     extra = getattr(request, "extra_body", None)
     if isinstance(extra, Mapping):
@@ -119,7 +134,7 @@ def route_from_model(model: Any) -> dict[str, Any]:
 
 def reward_config(model: Any) -> dict[str, Any]:
     """The Reward config: ``$REWARD_CONFIG`` or ``~/.reward/config.json`` when present,
-    else every model role on the diagnosis model.
+    else every model role on the diagnosis model. No time limit is set: Reward runs until it is done.
     """
     from openjiuwen.agent_evolving.reward.config import config_path, load_config
 
@@ -128,7 +143,6 @@ def reward_config(model: Any) -> dict[str, Any]:
     else:
         route = route_from_model(model)
         config = {"producer": route, "judge": route, "evidence_model": route, "criteria_budget": 3}
-    config.setdefault("deadline_seconds", float(os.environ.get("REWARD_DEADLINE") or DEFAULT_DEADLINE_SECONDS))
     return config
 
 
@@ -160,6 +174,22 @@ def final_reply(task_parse: TaskParseResult, nodes_by_subagent: Mapping[str, Seq
     if not pool:
         return ""
     return max(pool, key=lambda item: getattr(nodes.get(item[0]), "start_ts_ns", 0))[1]
+
+
+def with_sent_files(reply: str, task_parse: TaskParseResult, language: str) -> str:
+    """The final reply, plus the files sent to the user with ``send_file_to_user``: the chat shows them as
+    attachments, which the reply text alone does not say (a reply naming only the files would read as showing none).
+    """
+    sent = [
+        Path(path).name
+        for path, _, tool in getattr(task_parse, "file_candidates", None) or ()
+        if tool == "send_file_to_user"
+    ]
+    if not sent:
+        return reply
+    names = ("、" if not str(language).lower().startswith("en") else ", ").join(dict.fromkeys(sent))
+    note = _labels(language)["sent_files"].format(files=names)
+    return f"{reply}\n\n{note}" if reply else note
 
 
 def review_task(task_parse: TaskParseResult, user_note: str, language: str) -> str:
@@ -196,17 +226,15 @@ class _ProgressLines:
     Installed as Reward's progress object (its ``stage``/``tick``/``counted`` calls) and as its log
     (evidence checks are counted from it); every step the user would care about becomes one line.
 
-    The evidence step has no known number of checks, so its share of the bar follows the larger of the
-    time used against its time limit and a count of checks that slows down but never stops: each check
-    moves the bar a little, and it does not sit at one number while checks keep coming.
+    The evidence step has no known number of checks and no time limit, so its share of the bar follows a
+    count of checks that slows down but never stops: each check moves the bar a little, and it does not
+    sit at one number while checks keep coming.
     """
 
-    def __init__(self, say: Any, language: str, evidence_seconds: float = 300.0) -> None:
+    def __init__(self, say: Any, language: str) -> None:
         self._say = say
         self._labels = _labels(language)
         self._started = time.monotonic()
-        self._evidence_seconds = max(1.0, float(evidence_seconds))
-        self._evidence_started = self._started
         self._percent = 0
         self._criteria = 0
         self._checks = 0
@@ -228,7 +256,6 @@ class _ProgressLines:
             self.line(3, self._labels["criteria"])
         elif stage == "evidence":
             self._criteria = total
-            self._evidence_started = time.monotonic()
             self.line(15, self._labels["evidence"].format(count=total))
         elif stage == "judging":
             if self._checks:
@@ -256,14 +283,20 @@ class _ProgressLines:
         del error
 
     def log(self, message: str) -> None:
-        if message.startswith("evidence ") and " for " in message:
+        from openjiuwen.agent_evolving.reward.pipeline import WARNING
+
+        if message.startswith(WARNING):  # what keeps part of the work unseen: shown as it is, the bar stays
+            self.line(self._percent, self._labels["warning"].format(text=message[len(WARNING) :]))
+        elif message.startswith("evidence ") and " for " in message:
             self._checks += 1
             tool = message.split("(", 1)[-1].split(")", 1)[0] if "(" in message else "-"
-            by_time = (time.monotonic() - self._evidence_started) / self._evidence_seconds
             by_checks = 1 - math.exp(-self._checks / max(6, 2 * self._criteria))
-            percent = 15 + round(52 * min(0.98, max(by_time, by_checks)))
+            percent = 15 + round(52 * min(0.98, by_checks))
             percent = max(percent, min(self._percent + 1, 66))  # a new check always shows, up to 66%
-            self.line(percent, self._labels["check"].format(count=self._checks, tool=tool))
+            served = message.split(" for ", 1)[1]
+            reason = served.split(": ", 1)[1] if ": " in served else ""
+            label = "check_failed" if reason else "check"
+            self.line(percent, self._labels[label].format(count=self._checks, tool=tool, reason=reason))
         elif " criteria: " in message and "; tools: " in message:
             count = message.split(" criteria: ", 1)[0].strip()
             self.line(12, self._labels["criteria_done"].format(count=count))
@@ -286,8 +319,16 @@ def to_reward_payload(result: Mapping[str, Any], language: str = "zh") -> dict[s
     dimensions = []
     unknown = 0
     counts = {"floor": 0, "floor_met": 0, "challenge": 0, "challenge_done": 0}
+    # a looks category without a single picture is not "claims without evidence": it is said once, with the reason
+    unscored = {
+        c.get("category_id"): c
+        for c in result.get("categories") or ()
+        if c.get("unscored") in ("blind", "no_screenshots")
+    }
     for item in result.get("sub_category_items") or ():
         status = item.get("status")
+        if item.get("category_id") in unscored:
+            continue
         challenge = item.get("type") == "proactive_challenge"
         tier = (_CHALLENGE_TIER if challenge else _REQUIREMENT_TIER).get(status)
         if tier is None:
@@ -325,8 +366,18 @@ def to_reward_payload(result: Mapping[str, Any], language: str = "zh") -> dict[s
         else f"{labels['counts'].format(**counts)}. "
     )
     comment += str((result.get("total") or {}).get("summary") or "-")
+    meta = result.get("meta") or {}
+    models = meta.get("models") or {}
+    vision = meta.get("vision") or {}
     if unknown:
         comment = f"{comment} {labels['unknown'].format(count=unknown)}"
+        if vision.get("judge") is False:  # say that seeing, not the work, is what is missing
+            joint = "" if labels is _LABELS["zh"] else " "
+            comment += joint + labels["blind_unknown"].format(model=models.get("judge") or "-")
+    for category in unscored.values():
+        name = category.get("category_name") or category.get("category_id") or "-"
+        model = models.get("art_judge") or models.get("judge") or "-"
+        comment = f"{comment} {labels['unscored_' + category['unscored']].format(name=name, model=model)}"
     categories = [
         {
             "name": str(c.get("category_name") or c.get("category_id") or "-"),
@@ -364,13 +415,13 @@ async def run_reward(
             failed Reward run.
     """
     from openjiuwen.agent_evolving.attribution.events import emit_single_llm_event
-    from openjiuwen.agent_evolving.reward import evidence_agent, pipeline, progress
+    from openjiuwen.agent_evolving.reward import pipeline, progress
     from openjiuwen.agent_evolving.reward.options import RewardOptions
 
     counter = status_counter if status_counter is not None else [0]
     task = review_task(task_parse, user_attribution, language)
     artifacts = existing_paths(task_parse.file_artifacts)
-    reply = final_reply(task_parse, nodes_by_subagent)
+    reply = with_sent_files(final_reply(task_parse, nodes_by_subagent), task_parse, language)
     config = reward_config(model)
     started = time.time_ns()
 
@@ -385,10 +436,7 @@ async def run_reward(
             preview=line,
         )
 
-    evidence_seconds = float(config.get("evidence_seconds", evidence_agent.SECONDS))
-    if config.get("deadline_seconds"):
-        evidence_seconds = min(evidence_seconds, float(config["deadline_seconds"]))
-    lines = _ProgressLines(say, language, evidence_seconds)
+    lines = _ProgressLines(say, language)
     try:
         with progress.using(lines):  # Reward's own per-run progress slot, restored on exit
             options = RewardOptions(txt_response=reply, user_note=user_attribution or "", log=lines.log)
