@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import getpass
 import os
+import re
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
@@ -149,6 +151,36 @@ def upload_local_dir_to_s3(local_dir: str | Path, base_uri: str) -> None:
             raise last_error
 
 
+def _user_scope() -> str:
+    """Return a filesystem-safe token that identifies the current account."""
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        return str(getuid())
+    try:
+        name = getpass.getuser()
+    except (KeyError, OSError):
+        return "unknown"
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name) or "unknown"
+
+
+def user_cache_root(cache_namespace: str) -> Path:
+    """Return a private per-account cache root under the system temp directory.
+
+    The temp directory is shared between accounts, so a fixed name belongs to
+    whichever account creates it first and is denied to every other one. The
+    account token keeps the accounts apart and mode 0700 keeps the contents
+    private. ``exist_ok`` skips the mode on a directory that already exists,
+    so the mode is applied again. A directory another account owns fails the
+    ``chmod`` instead of being reused.
+    """
+    root = Path(tempfile.gettempdir()) / f"{cache_namespace}-{_user_scope()}"
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeError(f"Cache root is not a directory: {root}")
+    os.chmod(root, 0o700)
+    return root
+
+
 def materialize_s3_dir(
     base_uri: str,
     *,
@@ -156,8 +188,7 @@ def materialize_s3_dir(
     cache_namespace: str = "s3-dir-cache",
 ) -> Path:
     normalized_base = str(base_uri).rstrip("/")
-    cache_root = Path(tempfile.gettempdir()) / cache_namespace
-    cache_root.mkdir(parents=True, exist_ok=True)
+    cache_root = user_cache_root(cache_namespace)
     cache_key = sha1(normalized_base.encode("utf-8")).hexdigest()[:16]
     local_dir = cache_root / cache_key
     local_dir.mkdir(parents=True, exist_ok=True)
@@ -296,4 +327,5 @@ __all__ = [
     "read_s3_text",
     "upload_local_dir_to_s3",
     "upload_s3_bytes",
+    "user_cache_root",
 ]
