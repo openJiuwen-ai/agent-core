@@ -386,6 +386,16 @@ class AbilityManager:
         )
         try:
             return await task
+        except asyncio.CancelledError as exc:
+            # Distinguish a self-cancelled tool task (map to a value so it is
+            # surfaced as an "Interrupted" tool message downstream) from an
+            # outer-scope cancellation such as task.cancel() / asyncio.timeout,
+            # which must propagate so the run aborts instead of continuing to
+            # call the model. This mirrors _execute_single_tool_call's re-raise.
+            current = asyncio.current_task()
+            if current is not None and current.cancelling() > 0:
+                raise
+            return exc
         except BaseException as exc:  # Match gather(return_exceptions=True).
             return exc
 
