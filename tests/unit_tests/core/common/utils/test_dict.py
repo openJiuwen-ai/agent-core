@@ -1,7 +1,42 @@
 import json
 
-from openjiuwen.core.common.utils.dict_utils import extract_leaf_nodes, rebuild_dict_from_paths, \
-    rebuild_dict, format_path
+import pytest
+
+from openjiuwen.core.common.utils.dict_utils import (
+    extract_leaf_nodes,
+    flatten_dict,
+    format_path,
+    rebuild_dict,
+    rebuild_dict_from_paths,
+)
+
+
+@pytest.mark.parametrize("value", [0, 0.0, False, ""])
+def test_extract_leaf_preserves_falsy_scalars(value):
+    assert extract_leaf_nodes(value) == [([], value)]
+    assert extract_leaf_nodes({"nested": {"value": value}, "items": [value]}) == [
+        (["nested", "value"], value),
+        (["items", "[0]"], value),
+    ]
+
+
+@pytest.mark.parametrize("value", [None, {}, []])
+def test_extract_leaf_omits_none_and_empty_containers(value):
+    assert extract_leaf_nodes(value) == []
+    assert extract_leaf_nodes({"missing": value, "items": [value, "present"]}) == [
+        (["items", "[1]"], "present"),
+    ]
+
+
+def test_flatten_dict_preserves_falsy_values_and_list_indices():
+    assert flatten_dict({"nested": {"zero": 0, "false": False, "empty": ""}, "items": [0, False, ""]}) == {
+        "nested.zero": 0,
+        "nested.false": False,
+        "nested.empty": "",
+        "items[0]": 0,
+        "items[1]": False,
+        "items[2]": "",
+    }
 
 
 def test_extract_leaf():
