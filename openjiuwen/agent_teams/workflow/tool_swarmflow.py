@@ -345,6 +345,11 @@ class SwarmflowTool(AsyncTool):
                 node_type=progress.node_type,
                 agent_id=progress.agent_id,
                 answer=progress.answer,
+                tokens=progress.tokens,
+                budget=progress.budget,
+                phase_type=progress.phase_type,
+                nested_phase=progress.nested_phase,
+                parent_phase=progress.parent_phase,
             )
             message = EventMessage(
                 event_type=TeamEvent.WORKFLOW_PROGRESS,
