@@ -4,6 +4,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
+from urllib.parse import unquote
 
 
 class Scope(ABC):
@@ -202,7 +203,12 @@ class GroupUserSubject(Subject):
         self.user_id = user_id
 
     def __str__(self) -> str:
-        return f"group:{self.group_id}:user:{self.user_id}"
+        # Encode ':' inside ids so the fixed group/user separators stay
+        # unambiguous; '%' must be encoded too so decoding is reversible.
+        # Other characters keep their existing persisted-key form.
+        group_id = self.group_id.replace("%", "%25").replace(":", "%3A")
+        user_id = self.user_id.replace("%", "%25").replace(":", "%3A")
+        return f"group:{group_id}:user:{user_id}"
 
     @classmethod
     def from_string(cls, subject_str: str) -> 'GroupUserSubject':
@@ -212,7 +218,7 @@ class GroupUserSubject(Subject):
                 f"GroupUserSubject must have format "
                 f"'group:{{group_id}}:user:{{user_id}}', got '{subject_str}'"
             )
-        group_id, user_id = parts[1], parts[3]
+        group_id, user_id = unquote(parts[1]), unquote(parts[3])
         if not group_id or not user_id:
             raise ValueError("GroupUserSubject group_id and user_id cannot be empty")
         return cls(group_id, user_id)
