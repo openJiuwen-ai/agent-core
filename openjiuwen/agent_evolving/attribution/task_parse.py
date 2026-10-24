@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import ntpath
+import os
 import posixpath
 import re
 from collections.abc import Callable, Mapping, Sequence
@@ -39,6 +40,17 @@ _UNRESOLVED_PATH = re.compile(r"[~$%]")
 _WRITE_TOOLS = {"write_file"}
 _EDIT_TOOLS = {"edit_file", "apply_patch"}
 _SHELL_TOOLS = frozenset({"bash", "mcp_exec_command", "cmd", "powershell", "create_terminal"})
+# Pictures and videos are often made by a script (an image generator run with --output page-1.png) and then only
+# named in the reply, never sent with send_file_to_user, so no rule above sees them. They are found where their paths
+# show up -- any tool call's arguments, tool results ("saved to /.../page-1.png"), the assistant's own messages (a
+# path, a markdown image) -- and kept as created files when they exist on disk.
+_MEDIA_SUFFIXES = ("png", "jpg", "jpeg", "webp", "gif", "bmp", "svg", "mp4", "webm", "mov")
+_RE_MEDIA_PATH = re.compile(
+    r"(?:file://)?(?P<path>[^\s'\"`<>()\[\]{}|;,=*?，、；：。！？（）【】「」《》“”‘’]+\.(?:"
+    + "|".join(_MEDIA_SUFFIXES)
+    + r"))(?![\w.])",
+    re.IGNORECASE,
+)
 _R0_TOOL = "send_file_to_user"
 _TEAM_MEMBER_KIND = "team_member"
 
@@ -225,6 +237,84 @@ def _normalize_path(path: str, workspace: str | None) -> str | None:
     if not posixpath.isabs(normalized) and not ntpath.isabs(normalized) and workspace:
         normalized = norm(str(Path(workspace) / normalized))
     return normalized
+
+
+def _strings(value: Any) -> list[str]:
+    """Every string inside a tool call's arguments (nested dicts and lists included)."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        return [text for item in value.values() for text in _strings(item)]
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in _strings(item)]
+    return []
+
+
+def _is(path: str, test: Callable[[Path], bool]) -> bool:
+    """``test(Path(path))`` (``Path.is_file`` / ``Path.is_dir``), False when the path cannot even be looked at."""
+    try:
+        return test(Path(path))
+    except OSError:  # a name too long, a folder without permission: not a usable path
+        return False
+
+
+_RE_ABSOLUTE_PATH = re.compile(
+    r"(?:(?<!\w)[A-Za-z]:[\\/]|(?<![\w.:/])/)[^\s'\"`<>()\[\]{}|;,=*?，、；：。！？（）【】「」《》“”‘’]+"
+)
+_FOLDER_LIMIT = 200  # folders of the session searched for a picture named without its folder
+
+
+def _session_folders(nodes_by_subagent: Mapping[str, list[TrajectoryNode]], workspace: str | None) -> list[str]:
+    """Existing folders the session worked in, latest first: the folders of every absolute path its tool calls, tool
+    results and messages name. A picture the reply names without its folder (``page-1.png``) is looked for there.
+    """
+    texts: list[str] = []
+    for rows in nodes_by_subagent.values():
+        for node in rows:
+            texts.append(str(node.content or ""))
+            texts.extend(text for call in node.tool_calls for text in _strings(_arguments(call)))
+    folders: list[str] = []
+    seen: set[str] = set()
+    for text in reversed(texts):
+        for match in _RE_ABSOLUTE_PATH.finditer(text):
+            path = _normalize_path(match.group(0).rstrip(".:"), workspace)
+            if path is None:
+                continue
+            for folder in (path, os.path.dirname(path)):
+                if folder in seen:
+                    continue
+                seen.add(folder)
+                if _is(folder, Path.is_dir):
+                    folders.append(folder)
+                    break
+            if len(folders) >= _FOLDER_LIMIT:
+                return folders
+    return folders
+
+
+def _media_paths(text: str, workspace: str | None, folders: Sequence[str] = ()) -> list[str]:
+    """Normalized paths of the existing picture and video files a text names: absolute, ``~``, under workspace, or --
+    for a bare or relative name -- in one of the session's folders (the latest one that has it).
+    """
+    found: list[str] = []
+    for match in _RE_MEDIA_PATH.finditer(text or ""):
+        raw = match.group("path")
+        if match.start() >= 3 and text.endswith("://", 0, match.start()):  # a web URL, not a file
+            continue
+        path = _normalize_path(os.path.expanduser(raw), workspace)
+        if path is None:
+            continue
+        tries = [path]
+        relative = not posixpath.isabs(raw) and not ntpath.isabs(raw) and not raw.startswith("~")
+        if relative:
+            tries += [p for p in (_normalize_path(os.path.join(folder, raw), None) for folder in folders) if p]
+        for candidate in tries:
+            if candidate in found:
+                break
+            if _is(candidate, Path.is_file):
+                found.append(candidate)
+                break
+    return found
 
 
 def _extract_r0(arguments: Any) -> list[str]:
@@ -438,8 +528,17 @@ def extract_file_candidates(
         else:
             r0_entries[path] = (node_id, tool_type)
 
+    def touch_media(text: str, node_id: str, tool_type: str) -> None:
+        for path in _media_paths(text, workspace, folders):
+            if path not in r0_entries:  # a file sent to the user keeps that as its source
+                touch(path, node_id, tool_type, "create")
+
+    folders = _session_folders(nodes_by_subagent, workspace)
     for subagent in sorted(nodes_by_subagent):
         for node in nodes_by_subagent[subagent]:
+            if node.role in ("assistant", "tool") and node.content:  # a reply or a tool result naming a picture
+                kind = "reply:media" if node.role == "assistant" else "tool_result:media"
+                touch_media(str(node.content), node.node_id, kind)
             if node.role != "assistant" or not node.tool_calls:
                 continue
             for tool_call in node.tool_calls:
@@ -447,6 +546,8 @@ def extract_file_candidates(
                 arguments = _arguments(tool_call)
                 if not isinstance(arguments, Mapping):
                     arguments = {}
+                if name != _R0_TOOL:  # e.g. an image generator's --output, or an image tool's output_path
+                    touch_media("\n".join(_strings(arguments)), node.node_id, f"{name}:media")
                 if name == _R0_TOOL:
                     for raw_path in _extract_r0(arguments):
                         path = _normalize_path(raw_path, workspace)

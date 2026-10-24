@@ -16,6 +16,7 @@ from openjiuwen.agent_evolving.attribution.agent import (
     build_attribution_initial_prompt,
     build_attribution_system_prompt,
     build_wake_text,
+    filter_skill_evolution_tool,
     render_signal_block,
     render_subjects_block,
 )
@@ -49,6 +50,25 @@ def test_build_attribution_system_prompt_languages_and_swarm() -> None:
     assert swarm_zh.index("轨迹归因 Agent") < swarm_zh.index("多 Agent 协作")
     swarm_en = build_attribution_system_prompt("en", swarm_mode=True)
     assert "Multi-Agent (swarm)" in swarm_en
+
+
+def test_build_attribution_system_prompt_without_skill_evolution() -> None:
+    zh = build_attribution_system_prompt("zh", skill_evolution=False)
+    en = build_attribution_system_prompt("en", skill_evolution=False)
+    assert "submit_skill_evolution" not in zh
+    assert "submit_skill_evolution" not in en
+    # the goal list closes up: check_attribution_complete becomes item three
+    assert "\n3. 调用 check_attribution_complete" in zh
+    assert "\n3. Call check_attribution_complete" in en
+    # other numbered lists are untouched
+    assert "\n1. 已有明确文本线索" in zh
+
+
+def test_filter_skill_evolution_tool_drops_only_skill_tool() -> None:
+    keep = SimpleNamespace(tool_name="view_node_detail")
+    drop = SimpleNamespace(tool_name="submit_skill_evolution")
+    assert filter_skill_evolution_tool([keep, drop]) == [keep, drop]
+    assert filter_skill_evolution_tool([keep, drop], enabled=False) == [keep]
 
 
 def test_render_signal_block_verbatim() -> None:
@@ -108,6 +128,27 @@ def test_build_initial_prompt_without_reward() -> None:
     assert "(no reward overall this run)" in en
 
 
+def test_build_initial_prompt_without_skill_evolution() -> None:
+    zh = build_attribution_initial_prompt(
+        task_description="写报告",
+        reward_overall=None,
+        signals=[_signal()],
+        subjects=_subjects(),
+        language="zh",
+        skill_evolution=False,
+    )
+    assert "技能改进意见" not in zh
+    en = build_attribution_initial_prompt(
+        task_description="x",
+        reward_overall=None,
+        signals=[_signal()],
+        subjects=_subjects(),
+        language="en",
+        skill_evolution=False,
+    )
+    assert "skill improvements" not in en
+
+
 def test_build_wake_text_contains_check_json() -> None:
     check = {"all_done": False, "pending_signal_ids": ["diag-a"], "missing_artifact_improvement": True}
     zh = build_wake_text(check, "zh")
@@ -160,6 +201,15 @@ async def test_context_budget_rail_refuses_when_exceeded() -> None:
     await rail.before_model_call(ctx)
     assert ctx._force_finish is not None
     assert "refused" in str(ctx._force_finish)
+
+
+async def test_context_budget_rail_has_no_limit_by_default() -> None:
+    rail = ContextBudgetRail()
+    ctx = _FakeCtx(_Response(usage_metadata=_Usage(total_tokens=5_000_000)))
+    await rail.after_model_call(ctx)
+    await rail.before_model_call(ctx)
+    assert rail.spent == 5_000_000  # still counted for the run's token usage
+    assert not rail.exceeded and ctx._force_finish is None
 
 
 def test_context_budget_rail_rejects_nonpositive() -> None:

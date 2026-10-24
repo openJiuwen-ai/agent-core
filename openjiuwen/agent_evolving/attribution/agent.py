@@ -11,6 +11,8 @@ the host through one :class:`AttributionAgentRuntime` per run.
 from __future__ import annotations
 
 import json
+import re
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -30,10 +32,26 @@ if TYPE_CHECKING:
 
 _PROMPT_DIR = Path(__file__).resolve().parent / "prompts"
 
-_DEFAULT_CONTEXT_BUDGET_TOKENS = 3_000_000
+_DEFAULT_CONTEXT_BUDGET_TOKENS: int | None = None  # no token limit: tokens are only counted
 _DEFAULT_MAX_ITERATIONS = 80
 _DEFAULT_MAX_CONTEXT_MESSAGES = 100
 _AGENT_CARD_ID = "attribution-agent"
+
+
+def without_time_limits(model: Any) -> Any:
+    """A copy of ``model`` whose client has no HTTP, first-chunk or idle time limit; the caller's model is untouched.
+
+    The limits are the ones the Reward evidence agent runs with (``NO_TIME_LIMITS``), own HTTP client included: a
+    shared client is reused by endpoint and key and keeps the timeout it was built with.  Anything that is not a core
+    ``Model`` with a client config (a test double) is returned as it is.
+    """
+    from openjiuwen.agent_evolving.reward.evidence_agent import NO_TIME_LIMITS
+    from openjiuwen.core.foundation.llm.model import Model
+
+    client = getattr(model, "model_client_config", None)
+    if not isinstance(model, Model) or client is None:
+        return model
+    return Model(model_client_config=client.model_copy(update=NO_TIME_LIMITS), model_config=model.model_config)
 
 
 def _usage_tokens(response: object | None) -> int:
@@ -52,7 +70,7 @@ def _usage_tokens(response: object | None) -> int:
 
 
 class ContextBudgetRail(AgentRail):
-    """Bill provider-reported tokens and force-finish past the budget.
+    """Bill provider-reported tokens and force-finish past the budget (``None``: count only, never finish).
 
     A force-finish (not an abort) keeps whatever the tools already recorded.
     The host reads :attr:`exceeded` to mark the run ``failed: tokens exceeded``.
@@ -60,9 +78,11 @@ class ContextBudgetRail(AgentRail):
 
     priority = 950
 
-    def __init__(self, budget_tokens: int = _DEFAULT_CONTEXT_BUDGET_TOKENS, reason_prefix: str = "attribution") -> None:
+    def __init__(
+        self, budget_tokens: int | None = _DEFAULT_CONTEXT_BUDGET_TOKENS, reason_prefix: str = "attribution"
+    ) -> None:
         super().__init__()
-        if budget_tokens <= 0:
+        if budget_tokens is not None and budget_tokens <= 0:
             raise ValueError("budget_tokens must be greater than zero")
         self._budget = budget_tokens
         self._reason_prefix = reason_prefix
@@ -86,7 +106,7 @@ class ContextBudgetRail(AgentRail):
         tokens = _usage_tokens(inputs.response)
         if tokens > 0:
             self.spent += tokens
-        if self.spent > self._budget:
+        if self._budget is not None and self.spent > self._budget:
             if not self.exceeded:
                 self.exceeded = True
                 logger.warning(
@@ -282,7 +302,7 @@ class AttributionAgentRuntime(Protocol):
         """Record Markdown advice for improving the artifact."""
         ...
 
-    def record_skill_improvement(self, key: str, md: str) -> str:
+    def record_skill_evolution(self, key: str, md: str) -> str:
         """Record Markdown advice for improving a skill."""
         ...
 
@@ -308,12 +328,69 @@ def _load_prompt(filename: str) -> str:
     return _prompt_cache[filename]
 
 
-def build_attribution_system_prompt(language: str = "zh", swarm_mode: bool = False) -> str:
-    """Assemble the system prompt; the swarm addendum is appended when enabled."""
+_SKILL_TOOL_NAME = "submit_skill_evolution"
+
+
+def filter_skill_evolution_tool(tools: list[Any], *, enabled: bool = True) -> list[Any]:
+    """Drop the skill evolution tool when skill evolution is disabled.
+
+    The tool stays out of the agent's toolset entirely, so a disabled host
+    switch turns into a hard capability boundary rather than a prompt hint.
+    """
+    if enabled:
+        return tools
+    return [tool for tool in tools if getattr(tool, "tool_name", "") != _SKILL_TOOL_NAME]
+
+
+def _strip_skill_evolution(prompt: str) -> str:
+    """Remove every prompt paragraph that advertises ``submit_skill_evolution``.
+
+    Used when the tool is not registered so the system prompt never names a
+    tool the agent cannot call.  Numbered list items that keep their leading
+    number after a removal are closed up, which only affects the goal list.
+    """
+    lines = [line for line in prompt.splitlines() if _SKILL_TOOL_NAME not in line]
+    out: list[str] = []
+    index = 0
+    while index < len(lines):
+        if not re.match(r"^\d+\. ", lines[index]):
+            out.append(lines[index])
+            index += 1
+            continue
+        run_end = index
+        while run_end < len(lines) and re.match(r"^\d+\. ", lines[run_end]):
+            run_end += 1
+        run = lines[index:run_end]
+        numbers = []
+        for line in run:
+            match = re.match(r"^(\d+)\. ", line)
+            if match:
+                numbers.append(int(match.group(1)))
+        if numbers and numbers != list(range(numbers[0], numbers[0] + len(numbers))):
+            base = numbers[0]
+            out.extend(re.sub(r"^\d+\. ", f"{base + offset}. ", line) for offset, line in enumerate(run))
+        else:
+            out.extend(run)
+        index = run_end
+    return "\n".join(out)
+
+
+def build_attribution_system_prompt(
+    language: str = "zh",
+    swarm_mode: bool = False,
+    skill_evolution: bool = True,
+) -> str:
+    """Assemble the system prompt; the swarm addendum is appended when enabled.
+
+    ``skill_evolution=False`` drops the ``submit_skill_evolution`` goals and
+    reporting paragraphs instead of advertising an unregistered tool.
+    """
     lang = _normalize_language(language)
     prompt = _load_prompt(f"{lang}.md")
     if swarm_mode:
         prompt = f"{prompt}\n\n{_load_prompt(f'swarm_{lang}.md')}"
+    if not skill_evolution:
+        prompt = _strip_skill_evolution(prompt)
     return prompt
 
 
@@ -335,11 +412,14 @@ def build_attribution_initial_prompt(
     subjects: list[SubjectRef],
     language: str = "zh",
     review_deliverables: bool = True,
+    skill_evolution: bool = True,
 ) -> str:
     """Assemble the initial user prompt template (task, reward, signals, subjects).
 
     ``review_deliverables=False`` (no deliverable was reviewed: the selection holds none's final version)
     adds a scope note: analyse the process only and submit no artifact improvement.
+    ``skill_evolution=False`` drops the skill improvement clause because the tool is
+    not registered for such runs.
     """
     lang = _normalize_language(language)
     reward_block = (
@@ -364,8 +444,9 @@ def build_attribution_initial_prompt(
             "## Subagent List (subagent_id = subagent_key; display_name is the display name; kind is the type)\n"
             f"{render_subjects_block(subjects)}\n\n"
             "Process every diagnostic signal above: attribute it (submit_attribution) or mark it "
-            "invalid (mark_signal_invalid); submit the artifact/task-execution improvement and, when "
-            "applicable, skill improvements; finally call check_attribution_complete until all_done=true."
+            "invalid (mark_signal_invalid); submit the artifact/task-execution improvement"
+            + (" and, when applicable, skill improvements" if skill_evolution else "")
+            + "; finally call check_attribution_complete until all_done=true."
             + (
                 ""
                 if review_deliverables
@@ -384,8 +465,8 @@ def build_attribution_initial_prompt(
         "## subagent 列表（subagent_id = subagent_key；display_name 为展示名；kind 为类型）\n"
         f"{render_subjects_block(subjects)}\n\n"
         "请逐条处理上述诊断信号：定位归因（submit_attribution）或标记无效（mark_signal_invalid）；"
-        "提交产物/任务执行改进意见与（如适用）技能改进意见；最后调用 check_attribution_complete，"
-        "直到 all_done=true。"
+        "提交产物/任务执行改进意见" + ("与（如适用）技能改进意见" if skill_evolution else "")
+        + "；最后调用 check_attribution_complete，直到 all_done=true。"
         + (
             ""
             if review_deliverables
@@ -429,17 +510,24 @@ def build_attribution_agent(
     reward_overall: RewardOverall | None,
     language: str = "zh",
     swarm_mode: bool = False,
-    total_token_budget: int = _DEFAULT_CONTEXT_BUDGET_TOKENS,
+    total_token_budget: int | None = _DEFAULT_CONTEXT_BUDGET_TOKENS,
     max_iterations: int = _DEFAULT_MAX_ITERATIONS,
     max_context_messages: int = _DEFAULT_MAX_CONTEXT_MESSAGES,
     status_sink: StatusSink | None = None,
     model_name: str = "",
     status_counter: list[int] | None = None,
+    skill_evolution: bool = True,
 ) -> tuple["DeepAgent", ContextBudgetRail]:
     """Build the attribution agent and its budget rail.
 
     Only the ten custom tools are registered; task loop, subagents, mcps and
-    skills stay off.  The host reads ``rail.exceeded`` after ``invoke``.
+    skills stay off.  With ``skill_evolution=False`` the skill improvement tool is
+    not registered and its prompt paragraphs are dropped.  The host reads
+    ``rail.exceeded`` after ``invoke``.
+
+    The model has no time limit (:func:`without_time_limits`) and, by default, no
+    token limit (``total_token_budget=None``: tokens are counted, never cut); a failed model
+    call (a dropped connection, 429, 5xx) is retried by the model anomaly rail.
     """
     from openjiuwen.agent_evolving.attribution.tools import build_attribution_tools
     from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
@@ -468,21 +556,32 @@ def build_attribution_agent(
             )
         )
     agents = create_deep_agent(
-        model,
+        without_time_limits(model),
+        # The agent's tools are registered process-wide under "<tool>_<owner id>": one owner per run, so a diagnosis
+        # running at the same time cannot take over this run's tools (and with them its trajectory and submissions).
+        tool_owner_id=f"{_AGENT_CARD_ID}-{uuid.uuid4().hex[:12]}",
         card=AgentCard(
             id=_AGENT_CARD_ID,
             name="AttributionAgent",
             description="Trajectory attribution agent / 轨迹归因 Agent",
         ),
-        system_prompt=build_attribution_system_prompt(language, swarm_mode=swarm_mode),
-        tools=list(
-            build_attribution_tools(runtime, [signal.signal_id for signal in signals]),  # type: ignore[arg-type]
+        system_prompt=build_attribution_system_prompt(
+            language,
+            swarm_mode=swarm_mode,
+            skill_evolution=skill_evolution,
+        ),
+        tools=filter_skill_evolution_tool(
+            list(
+                build_attribution_tools(runtime, [signal.signal_id for signal in signals]),  # type: ignore[arg-type]
+            ),
+            enabled=skill_evolution,
         ),
         rails=rails,
         max_iterations=max_iterations,
         context_engine_config=ContextEngineConfig(max_context_message_num=max_context_messages),
         enable_security_rail=False,
-        enable_model_anomaly_detection_rail=False,
+        # retries a dropped connection, 429 or 5xx (up to 3 times); tool-loop compaction stays off by default
+        enable_model_anomaly_detection_rail=True,
         enable_sys_operation=False,
     )
     return agents, rail
@@ -496,6 +595,7 @@ __all__ = [
     "build_attribution_initial_prompt",
     "build_attribution_system_prompt",
     "build_wake_text",
+    "filter_skill_evolution_tool",
     "render_signal_block",
     "render_subjects_block",
 ]

@@ -4,7 +4,7 @@ import io
 import sys
 
 from openjiuwen.agent_evolving.reward.console import line_writer
-from openjiuwen.agent_evolving.reward.evidence_agent import SECONDS, Limits
+from openjiuwen.agent_evolving.reward.evidence_agent import ROUNDS, Limits
 
 
 def test_line_writer_writes_the_message_and_a_newline_to_its_stream() -> None:
@@ -30,6 +30,6 @@ def test_line_writer_keeps_non_ascii_text() -> None:
     assert stream.getvalue() == "总评：第 2 页少了一只猫\n"
 
 
-def test_limits_seconds_is_a_float_by_default() -> None:
-    assert isinstance(Limits().seconds, float)
-    assert Limits().seconds == SECONDS
+def test_limits_are_four_rounds_and_no_time_limit() -> None:
+    assert Limits().rounds == ROUNDS == 4
+    assert not hasattr(Limits(), "seconds")

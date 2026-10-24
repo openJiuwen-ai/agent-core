@@ -10,10 +10,11 @@ change without touching the orchestration layer.
 
 from __future__ import annotations
 
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
-from openjiuwen.agent_evolving.attribution.agent import ContextBudgetRail, LlmStatusRail
+from openjiuwen.agent_evolving.attribution.agent import ContextBudgetRail, LlmStatusRail, without_time_limits
 from openjiuwen.agent_evolving.attribution.model import StatusSink
 from openjiuwen.agent_evolving.attribution.reward_stage.reward_schema import (
     SCHEMA_VERSION,
@@ -167,7 +168,7 @@ def build_reward_agent(
     system_prompt: str,
     workspace: str,
     language: str = "zh",
-    context_budget_tokens: int = 600_000,
+    context_budget_tokens: int | None = None,
     max_iterations: int = 32,
     reward_sink: RewardSink | None = None,
     status_sink: StatusSink | None = None,
@@ -179,7 +180,8 @@ def build_reward_agent(
     Returns ``(agent, rail, gate)``; the host reads ``gate.submitted`` after
     ``invoke`` to know whether a valid submission was recorded.  When
     ``status_sink`` is given, request-level LLM events (stage ``reward``) are
-    reported through a :class:`LlmStatusRail`.
+    reported through a :class:`LlmStatusRail`.  The model has no time limit and a
+    failed model call is retried, as for the attribution agent.
     """
     from openjiuwen.harness.factory import create_deep_agent
     from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
@@ -199,7 +201,9 @@ def build_reward_agent(
             )
         )
     agent = create_deep_agent(
-        model,
+        without_time_limits(model),
+        # one tool owner per run, as for the attribution agent: concurrent diagnoses keep their own tools
+        tool_owner_id=f"{_AGENT_CARD_ID}-{uuid.uuid4().hex[:12]}",
         card=card,
         system_prompt=system_prompt,
         tools=[SubmitRewardTool(reward_sink, gate)],
@@ -208,7 +212,7 @@ def build_reward_agent(
         restrict_to_work_dir=True,
         max_iterations=max_iterations,
         enable_security_rail=False,
-        enable_model_anomaly_detection_rail=False,
+        enable_model_anomaly_detection_rail=True,
     )
     return agent, rail, gate
 

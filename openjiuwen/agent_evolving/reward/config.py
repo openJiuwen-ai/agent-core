@@ -1,4 +1,5 @@
-"""Run configuration: models, time limits, rubric budget, guides and evidence output.
+"""Run configuration: models, rubric budget, guides and evidence output. There are no time limits: a slow model is
+waited for.
 
 Looked up in this order: an explicit path, $REWARD_CONFIG, ~/.reward/config.json (or $REWARD_HOME),
 else DEFAULT_CONFIG. "session" model entries are resolved to the model the JiuwenSwarm session runs on.
@@ -11,9 +12,9 @@ from pathlib import Path
 from .models import resolve_models
 
 DEFAULT_CONFIG = {
-    "producer": {"model": "session", "timeout": 360},   # writes criteria and places notes/signals
-    "judge": {"model": "session", "timeout": 360},      # judges claims, writes the comments
-    "criteria_budget": 3,                               # terminal criteria besides "quality"
+    "producer": {"model": "session"},   # writes criteria and places notes/signals
+    "judge": {"model": "session"},      # judges claims
+    "criteria_budget": 3,               # terminal criteria besides "quality"
 }
 
 

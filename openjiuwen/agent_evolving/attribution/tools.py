@@ -472,11 +472,11 @@ class SubmitArtifactImprovementTool(_AttributionTool):
         return self.ok({"status": status})
 
 
-class SubmitSkillImprovementTool(_AttributionTool):
+class SubmitSkillEvolutionTool(_AttributionTool):
     """提交技能改进意见（仅在问题源于 skill 时）。"""
 
-    tool_name = "submit_skill_improvement"
-    tool_id = "SubmitSkillImprovementTool"
+    tool_name = "submit_skill_evolution"
+    tool_id = "SubmitSkillEvolutionTool"
     description = (
         "提交技能改进意见；仅当归因发现问题是某个 skill 导致、或可通过优化 skill 改善时才调用；"
         "轨迹中没有任何 `skill_tool`/`list_skill` 工具调用、也未读取任何 skill.md 文件时禁止调用；"
@@ -501,7 +501,7 @@ class SubmitSkillImprovementTool(_AttributionTool):
         md_string = str(inputs.get("md_string") or "")
         if not key.strip():
             return self.fail("skill_name_or_filename must be a non-empty string")
-        status = self._runtime.record_skill_improvement(key, md_string)
+        status = self._runtime.record_skill_evolution(key, md_string)
         return self.ok({"status": status, "key": key})
 
 
@@ -548,7 +548,7 @@ _TOOLS: list[type[_AttributionTool]] = [
     SubmitAttributionTool,
     MarkSignalInvalidTool,
     SubmitArtifactImprovementTool,
-    SubmitSkillImprovementTool,
+    SubmitSkillEvolutionTool,
     CheckAttributionCompleteTool,
 ]
 

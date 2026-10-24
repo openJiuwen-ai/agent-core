@@ -9,8 +9,10 @@ the workspace and the tools, and gathers evidence for all of them:
                                screenshots, and where the full result is saved
     read_evidence(id, ...)     reads a saved result in part (lines or a pattern), when a browser summary is not enough
 
-Full results stay on disk; the context grows only by what the agent asked to see. The agent stops by replying
-without a tool call, or at the round / time limit. Code then hands each criterion its own checks for judging.
+Checks run before the agent started (the default walk through the work, see pipeline.default_walk) are saved like its
+own and shown to it in its first message. Full results stay on disk; the context grows only by what the agent
+asked to see. The agent stops by replying without a tool call, or at the round limit; there is no time limit.
+Code then hands each criterion its own checks for judging.
 For a text-only reply, that reply is itself the work to inspect; a tool check is optional. An agent failure,
 or no check of a file-based deliverable, raises EvidenceError with the cause.
 """
@@ -24,13 +26,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from . import checks
+from . import checks, models
 from .files import clip
 from .models import resolve
 from .prompts import EVIDENCE_AGENT_PROMPT
 
-ROUNDS = 12           # model turns of the agent: a safety cap; the time limit is the one meant to bind
-SECONDS = 300         # the whole evidence step
+ROUNDS = 4            # model turns of the agent; with no time limit, this is what bounds the evidence step
 SUMMARY = 1500        # characters of a browser check's result shown to the agent (its screenshots come along)
 SHOWN = checks.CHECK_OUTPUT + 1500   # read / python: what the agent asked for comes back whole
 IDLE_HINT = 2         # run_checks calls in a row that ran no new check before the agent is told to stop
@@ -42,6 +43,13 @@ MAX_IMAGES = 16       # the latest screenshots per criterion handed to its judge
 LIMIT_REACHED = re.compile(r"max(imum)?[ _-]*iterations?", re.I)   # agent-core's "Max iterations reached ..."
 
 TOOL_BY_FIELD = (("actions", "browser"), ("page", "browser"), ("code", "python"), ("path", "read"))
+
+# The evidence agent's model client has no time limit. ModelClientConfig needs a positive HTTP timeout: 30 days is
+# none in practice. It gets its own HTTP client, since one shared with JiuwenSwarm's agents (same endpoint and key)
+# keeps the timeout it was built with.
+NO_LIMIT_SECONDS = 30 * 24 * 3600.0
+NO_TIME_LIMITS = {"timeout": NO_LIMIT_SECONDS, "stream_first_chunk_timeout": None, "stream_idle_timeout": None,
+                  "use_shared_llm_http_client": False}
 
 
 def with_tool(check):
@@ -59,22 +67,52 @@ class EvidenceError(RuntimeError):
 
 
 def pool_entry(route):
-    """A Reward model route ({"model", "base_url", "api_key", "extra_body"?, "timeout"?}) as the agent-core
-    model entry DeepAgent takes; an entry given as such (e.g. by JiuwenSwarm) is used as it is.
+    """A Reward model route ({"model", "base_url", "api_key", "extra_body"?}) as the agent-core model entry
+    DeepAgent takes; an entry given as such (e.g. by JiuwenSwarm) keeps its fields. Either way its client gets
+    NO_TIME_LIMITS (time limits it carried are dropped).
     """
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
 
     if isinstance(route, ModelPoolEntry):
-        return route
-    if not isinstance(route, dict):   # an entry-like object (model_name, api_base_url, api_key, metadata?)
-        return ModelPoolEntry(model_name=route.model_name, api_key=route.api_key, api_base_url=route.api_base_url,
-                              api_provider=getattr(route, "api_provider", None) or "OpenAI",
-                              metadata=dict(getattr(route, "metadata", None) or {}))
-    return ModelPoolEntry(model_name=route["model"], api_key=resolve(route["api_key"]),
-                          api_base_url=resolve(route["base_url"]), api_provider=route.get("provider", "OpenAI"),
-                          # A stream cut mid-way is retried.
-                          metadata={"client": {"timeout": float(route.get("timeout", 360)), "max_retries": 2},
-                                    "request": dict(route.get("extra_body") or {})})
+        entry = route
+    elif not isinstance(route, dict):   # an entry-like object (model_name, api_base_url, api_key, metadata?)
+        entry = ModelPoolEntry(model_name=route.model_name, api_key=route.api_key, api_base_url=route.api_base_url,
+                               api_provider=getattr(route, "api_provider", None) or "OpenAI",
+                               metadata=dict(getattr(route, "metadata", None) or {}))
+    else:
+        entry = ModelPoolEntry(model_name=route["model"], api_key=resolve(route["api_key"]),
+                               api_base_url=resolve(route["base_url"]), api_provider=route.get("provider", "OpenAI"),
+                               metadata={"request": dict(route.get("extra_body") or {})})
+    metadata = dict(entry.metadata or {})
+    metadata["client"] = {**dict(metadata.get("client") or {}), **NO_TIME_LIMITS}
+    return entry.model_copy(update={"metadata": metadata})
+
+
+def check_key(check):
+    """What makes two checks the same (bookkeeping fields aside): a repeat is not run again."""
+    return json.dumps({k: v for k, v in check.items() if k not in ("criteria", "note", "claims")},
+                      ensure_ascii=False, sort_keys=True)
+
+
+def done_line(rid, serves, facts):
+    """The log line of a finished check; one not run by rule (e.g. a page's source) says "skipped: <why>"."""
+    failed = check_failed(facts)
+    why = f"skipped: {facts['skipped']}" if facts.get("skipped") else failed
+    return f"evidence {rid} ({facts.get('tool')}) for {', '.join(serves)}" + (f": {str(why)[:120]}" if why else "")
+
+
+def check_failed(facts):
+    """Whether a check produced no evidence (it could not run, was skipped, or ran out of time)."""
+    return facts.get("could_not_run") or facts.get("skipped") or facts.get("timed_out")
+
+
+def result_row(rid, serves, facts, labelled):
+    """A new check's result as the agent sees it."""
+    return {"id": rid, "criteria": serves, "tool": facts.get("tool"),
+            "ok": not check_failed(facts) and facts.get("exit_code") in (0, None),
+            "result": clip(json.dumps(shown(facts), ensure_ascii=False),
+                           SUMMARY if facts.get("tool") == "browser" else SHOWN),
+            "screenshots": [label for label, _ in labelled], "full": f"read_evidence id={rid}"}
 
 
 class EvidenceRun:
@@ -98,13 +136,31 @@ class EvidenceRun:
         except Exception as error:  # noqa: BLE001 - shown to the agent, which can fix the check
             facts, shots = {"tool": check.get("tool"), "note": check.get("note", ""),
                             "could_not_run": f"{type(error).__name__}: {str(error)[:400]}"}, []
+        return self.record(number, check, serves, facts, shots)
+
+    def add_done(self, check, facts, shots):
+        """A check run before the agent started (the default walk): saved and served to every criterion like the
+        agent's own, counted as already run, and returned as the row the agent sees.
+        """
+        number = self.next_number
+        self.next_number += 1
+        rid, serves, facts, labelled = self.record(number, check, list(self.ids), facts, shots)
+        done = asyncio.get_running_loop().create_future()
+        done.set_result((rid, serves, facts, labelled))
+        self.seen[check_key(check)] = done
+        self.log(done_line(rid, serves, facts))
+        self.log(BATCH_DONE)
+        return result_row(rid, serves, facts, labelled)
+
+    def record(self, number, check, serves, facts, shots):
+        """Save check `number`: its file, its pictures per criterion, its result entry. Returns its parts."""
         rid = f"c{number}"
         labelled = [(f"check {number}, {label}", data) for label, data in shots]
         (self.folder / f"{rid}.txt").write_text(readable(check, serves, facts, labelled), encoding="utf-8")
         for cid in serves:
             self.images[cid].extend(labelled)
         self.results.append({"id": rid, "criteria": serves, "request": check,
-                             "facts": {"check": number, **facts}})
+                             "facts": {"check": number, **facts}, "row": result_row(rid, serves, facts, labelled)})
         return rid, serves, facts, labelled
 
     def stalled(self, new):
@@ -124,8 +180,7 @@ class EvidenceRun:
         pending, fresh = [], 0
         for c in checks_list:
             c = with_tool(c if isinstance(c, dict) else {})
-            key = json.dumps({k: v for k, v in c.items() if k not in ("criteria", "note", "claims")},
-                             ensure_ascii=False, sort_keys=True)
+            key = check_key(c)
             repeat = key in self.seen
             if not repeat:
                 number = self.next_number
@@ -150,18 +205,14 @@ class EvidenceRun:
                 rows.append({"id": rid, "repeat": True, "criteria": serves,
                              "summary": f"already run as {rid}; use its result (read_evidence)"})
                 continue
-            failed = facts.get("could_not_run") or facts.get("skipped") or facts.get("timed_out")
-            rows.append({"id": rid, "criteria": serves, "tool": facts.get("tool"),
-                         "ok": not failed and facts.get("exit_code") in (0, None),
-                         "result": clip(json.dumps(shown(facts), ensure_ascii=False),
-                                        SUMMARY if facts.get("tool") == "browser" else SHOWN),
-                         "screenshots": [label for label, _ in labelled], "full": f"read_evidence id={rid}"})
+            rows.append(result_row(rid, serves, facts, labelled))
             shots += labelled
-            self.log(f"evidence {rid} ({facts.get('tool')}) for {', '.join(serves)}"
-                     + (f": {str(failed)[:120]}" if failed else ""))
+            self.log(done_line(rid, serves, facts))
+        if fresh:
+            self.log(BATCH_DONE)
         out = {"results": rows, **self.stalled(bool(fresh))}
         if self.ctx.get("seeing") and shots:
-            out["multimodal"] = [{"type": "image", "data_url": "data:image/jpeg;base64," + data,
+            out["multimodal"] = [{"type": "image", "data_url": models.data_url(data),
                                   "source": "reward check", "source_path": label}
                                  for label, data in shots[-SHOWN_IMAGES:]]
         return out
@@ -280,8 +331,10 @@ def evidence_tools(run):
 
 
 def stream_error(output):
-    """The error text of an agent stream item that reports a failed run ({"result_type": "error"}), else None."""
-    payload = getattr(output, "payload", output)
+    """The error text of an agent stream item that reports a failed run ({"result_type": "error"}), else None.
+    The item may be an output object or a dict, either carrying the result in "payload".
+    """
+    payload = output.get("payload", output) if isinstance(output, dict) else getattr(output, "payload", output)
     for value in (payload, getattr(payload, "__dict__", None)):
         if isinstance(value, dict):
             inner = value.get("data") if isinstance(value.get("data"), dict) else value
@@ -306,81 +359,110 @@ def build_agent(route, workspace, rounds):
         model=entry.to_team_model_config(), system_prompt=EVIDENCE_AGENT_PROMPT, prompt_mode="none",
         enable_task_loop=False, enable_sys_operation=False, enable_task_planning=False,
         enable_subagent_runtime=False, enable_skill_discovery=False, enable_read_image_multimodal=False,
-        tools=[], rails=[], mcps=[], subagents=[], skills=[], max_iterations=rounds,
+        tools=[], rails=[], mcps=[], subagents=[], skills=[], max_iterations=rounds, completion_timeout=None,
         workspace=WorkspaceSpec(root_path=str(workspace)), auto_create_workspace=False,
         context_engine_config=ContextEngineConfig(context_window_tokens=window, model_name=entry.model_name,
                                                   compression_recall_config=CompressionRecallConfig(enabled=False)))
     return spec.build(), run_id
 
 
-@dataclass(frozen=True)
-class Limits:
-    """How far the evidence agent may go: model turns, and seconds for the whole evidence step."""
-
-    rounds: int = ROUNDS
-    seconds: float = float(SECONDS)
+BATCH_DONE = "evidence batch done"   # logged after the checks of one run_checks call (the progress shows one line)
+AGENT_RESTARTS = 1   # a dropped model connection restarts the evidence agent once, from the checks already run
+RESTARTABLE = re.compile(r"connection|disconnect|reset|timed? ?out|incomplete|stream error|5\d\d|overloaded", re.I)
+WARNING = "warning: "   # shown as it is in the attribution progress (as pipeline.WARNING)
 
 
-async def gather(criteria, ctx, route, log, limits=None):
-    """{criterion id: (evidence, images)} gathered by one DeepAgent for all criteria, within `limits`."""
+async def run_agent(route, workspace, run, seed, turns):
+    """One evidence agent run on `seed` until it stops; the failure it reports (an exception's text included),
+    or None.
+    """
     from openjiuwen.core.session.agent import create_agent_session
 
-    limits = limits or Limits()
-    rounds, seconds = limits.rounds, limits.seconds
+    stage = "building the evidence agent"
+    agent = session = streaming = stopping = None
+    try:
+        agent, run_id = build_agent(route, workspace, turns)
+        agent.add_rail(evidence_tools(run))
+        stage = "running the evidence agent"
+        session = create_agent_session(session_id=run_id, card=agent.card)
+        inputs = {"query": json.dumps(seed, ensure_ascii=False)}
+        await session.pre_run(inputs=inputs)
+
+        async def drain():
+            found = None
+            async with aclosing(agent.stream(inputs, session=session)) as outputs:
+                async for out in outputs:
+                    found = found or stream_error(out)
+            return found
+
+        streaming = asyncio.ensure_future(drain())
+        stopping = asyncio.ensure_future(run.stop.wait())
+        done, _ = await asyncio.wait({streaming, stopping}, return_when=asyncio.FIRST_COMPLETED)
+        stopping.cancel()
+        if streaming in done:
+            return streaming.result()
+        streaming.cancel()   # no new evidence for several tool calls: stop and judge what was gathered
+        await asyncio.gather(streaming, return_exceptions=True)
+        return None
+    except Exception as error:
+        if stage == "building the evidence agent":
+            raise EvidenceError(f"Reward evidence failed while {stage}: {type(error).__name__}: {error}") \
+                from error
+        return f"{type(error).__name__}: {error}"
+    finally:
+        tasks = [task for task in (streaming, stopping) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if session is not None:
+            await session.post_run()
+        if agent is not None:
+            await agent.cleanup_task_resources()
+
+
+@dataclass(frozen=True)
+class Limits:
+    """How far the evidence agent may go: model turns (there is no time limit)."""
+
+    rounds: int = ROUNDS
+
+
+async def gather(criteria, ctx, route, log, limits=None, prefetched=()):
+    """{criterion id: (evidence, images)} gathered by one DeepAgent for all criteria, within `limits`.
+    prefetched: [(check, facts, screenshots)] run before the agent started; they serve every criterion.
+    A model call the provider drops mid-stream is not retried by the framework (output was already streamed), so
+    the agent is started once more from the checks already run; if that fails too, what was gathered is judged.
+    """
+    rounds = (limits or Limits()).rounds
 
     with TemporaryDirectory(prefix="reward_evidence_") as tmp:
         folder = Path(tmp) / "evidence"
         folder.mkdir()
         run = EvidenceRun(criteria, ctx, folder, log)
+        for check, facts, shots in prefetched or ():
+            run.add_done(check, facts, shots)
         seed = {**ctx["plan_input"], "seeing_screenshots": bool(ctx.get("seeing")),
-                "limits": {"rounds": rounds, "seconds": int(seconds)},
                 "criteria": [{"id": c["id"], "name": c.get("name", ""), "kind": c.get("kind", ""),
                               "claims": [{"index": i, "text": x["text"], "level": x.get("level", "floor")}
                                          for i, x in enumerate(c["claims"])]} for c in criteria]}
-        stage = "building the evidence agent"
-        agent = session = failure = streaming = stopping = None
-        try:
-            agent, run_id = build_agent(route, Path(tmp), rounds)
-            agent.add_rail(evidence_tools(run))
-            stage = "running the evidence agent"
-            session = create_agent_session(session_id=run_id, card=agent.card)
-            inputs = {"query": json.dumps(seed, ensure_ascii=False)}
-            await session.pre_run(inputs=inputs)
-
-            async def drain():
-                found = None
-                async with aclosing(agent.stream(inputs, session=session)) as outputs:
-                    async for out in outputs:
-                        found = found or stream_error(out)
-                return found
-
-            streaming = asyncio.ensure_future(drain())
-            stopping = asyncio.ensure_future(run.stop.wait())
-            done, _ = await asyncio.wait({streaming, stopping}, timeout=seconds, return_when=asyncio.FIRST_COMPLETED)
-            stopping.cancel()
-            if streaming in done:
-                failure = streaming.result()
-            else:   # the time limit, or no new evidence for several tool calls: stop and judge what was gathered
-                streaming.cancel()
-                await asyncio.gather(streaming, return_exceptions=True)
-                if not run.stop.is_set():
-                    log(f"evidence agent stopped at the {int(seconds)} s limit after {len(run.results)} check(s)")
-        except Exception as error:
-            raise EvidenceError(f"Reward evidence failed while {stage}: {type(error).__name__}: {error}") \
-                from error
-        finally:
-            tasks = [task for task in (streaming, stopping) if task is not None]
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            if session is not None:
-                await session.post_run()
-            if agent is not None:
-                await agent.cleanup_task_resources()
-        if failure and LIMIT_REACHED.search(failure):   # the round limit is a normal stop, like the time limit
-            log(f"evidence agent stopped at the {rounds}-round limit after {len(run.results)} check(s)")
-            failure = None
+        for attempt in range(1 + AGENT_RESTARTS):
+            already = [r["row"] for r in run.results]
+            turns = rounds if attempt == 0 else max(2, rounds // 2)
+            failure = await run_agent(route, Path(tmp), run, {
+                **seed, "limits": {"rounds": turns}, **({"already_run": already} if already else {})}, turns)
+            if failure and LIMIT_REACHED.search(failure):   # the round limit is a normal stop
+                log(f"evidence agent stopped at the {turns}-round limit after {len(run.results)} check(s)")
+                failure = None
+            if not failure or not RESTARTABLE.search(failure):
+                break
+            if attempt < AGENT_RESTARTS:
+                log(f"{WARNING}取证时模型连接中断（{failure[:120]}），"
+                    f"带着已完成的 {len(run.results)} 项检查重新开始取证。")
+            elif any(not check_failed(r["facts"]) for r in run.results):
+                log(f"{WARNING}取证时模型连接再次中断（{failure[:120]}），"
+                    f"按已完成的 {len(run.results)} 项检查判定。")
+                failure = None
         if failure:   # the agent reports model errors in its stream instead of raising; fail loudly
             raise EvidenceError(f"Reward evidence failed while running the evidence agent "
                                 f"(after {len(run.results)} check(s)): {failure}")
@@ -391,10 +473,8 @@ async def gather(criteria, ctx, route, log, limits=None):
                 log("text-only reply supplied directly; evidence agent requested no additional check")
                 return {cid: ([], []) for cid in run.ids}
             raise EvidenceError("Reward evidence failed: the evidence agent ran no check, so no usable reward "
-                                "can be given (the model may not call tools, or the time limit is too short)")
-        if not any(not (r["facts"].get("could_not_run") or r["facts"].get("skipped") or
-                        r["facts"].get("timed_out")) and r["facts"].get("exit_code") in (None, 0)
-                   for r in run.results):
+                                "can be given (the model may not call tools)")
+        if not any(not check_failed(r["facts"]) and r["facts"].get("exit_code") in (None, 0) for r in run.results):
             raise EvidenceError("Reward evidence failed: every check failed to execute; "
                                 "check errors are not evidence of product defects")
         missing = [cid for cid in run.ids if not run.evidence_for(cid)[0]]
