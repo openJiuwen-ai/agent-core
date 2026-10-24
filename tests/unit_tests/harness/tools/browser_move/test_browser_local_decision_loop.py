@@ -201,6 +201,7 @@ async def test_sort_receipt_and_post_action_cards_share_revision_but_later_chang
 @pytest.mark.asyncio
 async def test_combined_rpc_reuses_facts_once_and_never_after_another_action():
     runtime = _make_bare_runtime()
+    runtime.decision_policy = SimpleNamespace(decision_config=SimpleNamespace(mode="hybrid"))
     runtime.ensure_runtime_ready = AsyncMock()
     runtime.call_playwright_tool = AsyncMock()
     runtime.call_playwright_run_code_unsafe = AsyncMock(return_value={

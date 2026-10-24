@@ -188,25 +188,32 @@ def _admit(rail, ctx, call):
     return ctx.inputs.tool_result
 
 
-def test_same_group_reads_do_not_require_a_replan_trial():
-    calls = [ToolCall(id=str(index), type="function", name="mcp_playwright-official_browser_find",
-                      arguments=json.dumps({"query": query})) for index, query in enumerate(("humidity", "wind"))]
+@pytest.mark.parametrize("tool_name", [
+    "browser_probe_cards", "browser_probe_interactives",
+    "mcp_playwright-official_browser_snapshot", "mcp_playwright-official_browser_find",
+])
+def test_same_group_parallel_reads_do_not_consume_replan_trials(tool_name):
+    calls = [ToolCall(id=str(index), type="function", name=tool_name,
+                      arguments=json.dumps({"text": query})) for index, query in enumerate(("humidity", "wind"))]
     rail, ctx, state = _admission_context(calls)
     assert _admit(rail, ctx, calls[0]) is None
     assert _admit(rail, ctx, calls[1]) is None
     assert state["replan_count"] == 0
-    assert not state["replan_trial_pending"]
+    assert state["replan_trial_pending"] is False
 
 
-def test_read_then_local_key_do_not_conflict_with_a_global_replan_trial():
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_read_exemption_does_not_bypass_mutation_gate_in_same_group(exhausted):
     calls = [
-        ToolCall(id="find", type="function", name="mcp_playwright-official_browser_find", arguments='{"query":"wind"}'),
+        ToolCall(id="find", type="function", name="mcp_playwright-official_browser_find", arguments='{"text":"wind"}'),
         ToolCall(id="key", type="function", name="mcp_playwright-official_browser_press_key",
                  arguments='{"key":"End"}'),
     ]
-    rail, ctx, _ = _admission_context(calls)
+    rail, ctx, state = _admission_context(calls)
+    state["replan_count"] = 2 if exhausted else 0
     assert _admit(rail, ctx, calls[0]) is None
     assert _admit(rail, ctx, calls[1]) is None
+    assert state["replan_count"] == (2 if exhausted else 0)
 
 
 def test_schema_error_does_not_reserve_or_consume_replan_trial():

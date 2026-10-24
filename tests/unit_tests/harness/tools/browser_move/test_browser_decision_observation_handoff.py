@@ -176,6 +176,7 @@ const {chromium} = require(args.package);
 @pytest.mark.asyncio
 async def test_fixed_read_receipt_and_compact_capture_share_one_vm_rpc(monkeypatch):
     runtime = vm_runtime(monkeypatch)
+    runtime.decision_policy = SimpleNamespace(decision_config=BrowserDecisionConfig(mode="hybrid"))
     runtime.call_playwright_run_code_unsafe = AsyncMock(side_effect=lambda code: execute_vm(code)["result"])
     monkeypatch.setattr(
         "openjiuwen.harness.tools.browser_move.playwright_runtime.policy_page_action.fixed_text_script",
@@ -213,6 +214,7 @@ async def test_only_missing_hybrid_decision_data_gets_one_metadata_repair(monkey
         assert captured["capture_source"] == "decision_repair_rpc"
         runtime.capture_reconciliation_browser_state.assert_awaited_once_with(
             action_group_id="read", include_decision=True,
+            observation_only=True, _metadata_only=True,
         )
 
 

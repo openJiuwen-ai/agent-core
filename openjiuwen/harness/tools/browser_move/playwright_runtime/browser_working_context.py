@@ -448,6 +448,16 @@ class BrowserWorkingContextStore:
         body = self._serialize_prompt_payload(rendered_state)
         return f"<browser_working_context>\n{instructions}\n{body}\n</browser_working_context>"
 
+    def refresh_runtime_projection(self, session: Any, text: str) -> str:
+        """Refresh runtime facts in an existing window without consuming one-step memory again."""
+        prefix, body, suffix = text.rsplit("\n", 2)
+        payload = json.loads(body)
+        task = self.load_task_state(session)
+        payload["task"] = self.project_task_state(task)
+        payload["runtime_directive"] = self._runtime_directive(task)
+        payload["recent_actions"] = list(task.get("recent_actions") or [])[-self.config.max_recent_steps:]
+        return f"{prefix}\n{self._serialize_prompt_payload(payload)}\n{suffix}"
+
     def _compact_retained_tool_evidence(self, steps: Iterable[BrowserStepRecord]) -> list[Dict[str, Any]]:
         evidence: list[Dict[str, Any]] = []
         for step in list(steps)[-self.config.max_recent_steps:]:
@@ -597,6 +607,7 @@ class BrowserWorkingContextStore:
         semantic_keys = (
             "progress",
             "observable_progress",
+            "observation_only",
             "consecutive_no_progress",
             "state_revisit_count",
             "aba_loop",
@@ -870,7 +881,13 @@ class BrowserWorkingContextStore:
         if not isinstance(action, dict):
             return False
         outcome_status = str(action.get("outcome_status") or "")
-        if outcome_status not in {"success", "ambiguous"}:
+        semantic_state = progress.get("semantic_state")
+        semantic_state = semantic_state if isinstance(semantic_state, dict) else {}
+        changed_fields = {str(field) for field in progress.get("changed_fields") or [] if str(field).strip()}
+        # A baseline or content-only change cannot verify the action's intended effect.
+        initial_content_observation = progress.get("progress") == "initial" and semantic_state.get("page_content_hash")
+        ambiguous_content_change = outcome_status == "ambiguous" and changed_fields == {"page_content_hash"}
+        if outcome_status not in {"success", "ambiguous"} or initial_content_observation or ambiguous_content_change:
             return False
         journal = next(
             (e for e in state.get("execution_journal", []) if e.get("call_id") == action.get("call_id")), None
@@ -887,13 +904,6 @@ class BrowserWorkingContextStore:
             action["outcome"] = "success_after_observation"
         action["semantic_delta"] = "progress"
 
-        semantic_state = progress.get("semantic_state")
-        semantic_state = semantic_state if isinstance(semantic_state, dict) else {}
-        changed_fields = {
-            str(field)
-            for field in progress.get("changed_fields") or []
-            if str(field).strip()
-        }
         phase = str(action.get("phase") or "")
         phase_progress = BrowserWorkingContextStore._phase_has_semantic_progress(
             phase,
@@ -955,6 +965,9 @@ class BrowserWorkingContextStore:
             return
         if recovered:
             cls.mark_replan_recovered(state)
+        elif progress.get("observation_only"):
+            # An unchanged read does not evaluate the pending interaction strategy.
+            return
         elif state.get("replan_trial_pending"):
             trial_strategy = str(state.get("trial_strategy") or "")
             cls.record_failed_strategy(state, trial_strategy)
@@ -1012,6 +1025,7 @@ class BrowserWorkingContextStore:
         compact_semantic: Dict[str, Any] = {}
         if isinstance(semantic_progress, dict):
             semantic_keys = (
+                "observation_only",
                 "consecutive_no_progress",
                 "state_revisit_count",
                 "replan_reason",
