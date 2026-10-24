@@ -5,7 +5,10 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Dict, OrderedDict, Tuple
 
-import pulsar
+try:
+    import pulsar
+except ImportError:
+    pulsar = None  # type: ignore[assignment]
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -21,8 +24,15 @@ from openjiuwen.core.runner.message_queue_base import (
 from openjiuwen.core.runner.runner_config import PulsarConfig
 
 
+def _require_pulsar():
+    if pulsar is None:
+        raise ImportError(
+            "pulsar-client is required for PulsarMessageQueue. Install with: pip install 'openjiuwen[pulsar]'"
+        )
+
+
 class PulsarSubscription(SubscriptionBase):
-    def __init__(self, topic: str, consumer: pulsar.Consumer, executor: ThreadPoolExecutor):
+    def __init__(self, topic: str, consumer: "pulsar.Consumer", executor: ThreadPoolExecutor):
         self._topic = topic
         self._consumer = consumer
         self._executor = executor
@@ -51,9 +61,7 @@ class PulsarSubscription(SubscriptionBase):
             try:
                 await asyncio.wait_for(self._drain_event.wait(), timeout=drain_timeout)
             except asyncio.TimeoutError:
-                logger.warning(
-                    f"[PulsarSubscription] drain timed out for topic={self._topic}"
-                )
+                logger.warning(f"[PulsarSubscription] drain timed out for topic={self._topic}")
             self._draining = False
 
         self._active = False
@@ -80,15 +88,14 @@ class PulsarSubscription(SubscriptionBase):
         loop = asyncio.get_running_loop()
         while self._active:
             try:
-                msg = await loop.run_in_executor(
-                    self._executor, lambda: self._consumer.receive(timeout_millis=1000)
-                )
+                msg = await loop.run_in_executor(self._executor, lambda: self._consumer.receive(timeout_millis=1000))
 
                 data = msg.data()
                 payload = deserialize_message(data)
                 logger.info(
                     f"[PulsarSubscription] Received message, topic={self._topic}, message_id={payload.message_id}, "
-                    f"type:{payload.type}")
+                    f"type:{payload.type}"
+                )
                 if self._handler:
                     await self._handler(payload)
                 await loop.run_in_executor(self._executor, lambda: self._consumer.acknowledge(msg))
@@ -105,6 +112,7 @@ class PulsarSubscription(SubscriptionBase):
 
 class MessageQueuePulsar(MessageQueueBase):
     """Pulsar MQ Wrapper"""
+
     MAX_PRODUCERS = 10000
     DEFAULT_SUBSCRIPTION_NAME = "default"
     DEFAULT_MAX_RETRIES = 3
@@ -113,9 +121,9 @@ class MessageQueuePulsar(MessageQueueBase):
     def __init__(self, pulsar_config: PulsarConfig):
         self._url = pulsar_config.url
         self._max_workers = pulsar_config.max_workers or 8
-        self._client: Optional[pulsar.Client] = None
+        self._client: Optional["pulsar.Client"] = None
         self._executor: Optional[ThreadPoolExecutor] = None
-        self._producers: OrderedDict[str, pulsar.Producer] = OrderedDict()
+        self._producers: OrderedDict[str, "pulsar.Producer"] = OrderedDict()
         self._subs: Dict[str, PulsarSubscription] = {}
         self._is_running = False
         self._lock = asyncio.Lock()
@@ -134,15 +142,11 @@ class MessageQueuePulsar(MessageQueueBase):
             try:
                 mq = cls(pulsar_config)
                 mq.start()
-                logger.info(
-                    f"[MessageQueuePulsar] initialized (attempt {attempt})"
-                )
+                logger.info(f"[MessageQueuePulsar] initialized (attempt {attempt})")
                 return mq, False
             except Exception as e:
                 last_error = e
-                logger.warning(
-                    f"[MessageQueuePulsar] init failed (attempt {attempt}/{max_retries}): {e}"
-                )
+                logger.warning(f"[MessageQueuePulsar] init failed (attempt {attempt}/{max_retries}): {e}")
                 if attempt < max_retries:
                     await asyncio.sleep(retry_delay * attempt)
 
@@ -150,8 +154,7 @@ class MessageQueuePulsar(MessageQueueBase):
             raise last_error
 
         logger.error(
-            f"[MessageQueuePulsar] All {max_retries} attempts failed, "
-            f"falling back to FakeMQ. Last error: {last_error}"
+            f"[MessageQueuePulsar] All {max_retries} attempts failed, falling back to FakeMQ. Last error: {last_error}"
         )
 
         fake_mq = FakeMQ()
@@ -175,6 +178,7 @@ class MessageQueuePulsar(MessageQueueBase):
         return fake_mq, True
 
     def start(self):
+        _require_pulsar()
         if self._is_running:
             return
         self._client = pulsar.Client(self._url)
@@ -198,15 +202,16 @@ class MessageQueuePulsar(MessageQueueBase):
 
         self._executor.shutdown(wait=True)
         self._client.close()
-        logger.info(f"[MessageQueuePulsar] stopped")
+        logger.info("[MessageQueuePulsar] stopped")
 
     def subscribe(self, topic: str) -> PulsarSubscription:
         try:
             self._validate_running()
             if topic in self._subs:
                 return self._subs[topic]
-            consumer = self._client.subscribe(topic, subscription_name=self.DEFAULT_SUBSCRIPTION_NAME,
-                                              consumer_type=pulsar.ConsumerType.KeyShared)
+            consumer = self._client.subscribe(
+                topic, subscription_name=self.DEFAULT_SUBSCRIPTION_NAME, consumer_type=pulsar.ConsumerType.KeyShared
+            )
             # All Pulsar operations reuse the same thread pool
             sub = PulsarSubscription(topic, consumer, self._executor)
             self._subs[topic] = sub
@@ -238,25 +243,19 @@ class MessageQueuePulsar(MessageQueueBase):
 
             loop = asyncio.get_running_loop()
 
-            logger.info(
-                f"[MessageQueuePulsar] Sending message to topic={topic}, message_id={message.message_id}")
+            logger.info(f"[MessageQueuePulsar] Sending message to topic={topic}, message_id={message.message_id}")
 
-            await loop.run_in_executor(
-                self._executor,
-                lambda: producer.send(
-                    content,
-                    partition_key=message.message_id
-                )
-            )
+            await loop.run_in_executor(self._executor, lambda: producer.send(content, partition_key=message.message_id))
 
             logger.info(
                 f"[MessageQueuePulsar] Message sent successfully: topic={topic}, message_id={message.message_id}"
             )
         except Exception as e:
-            raise build_error(StatusCode.MESSAGE_QUEUE_TOPIC_MESSAGE_PRODUCTION_ERROR, cause=e, topic=topic,
-                              message=message, reason=e)
+            raise build_error(
+                StatusCode.MESSAGE_QUEUE_TOPIC_MESSAGE_PRODUCTION_ERROR, cause=e, topic=topic, message=message, reason=e
+            )
 
-    async def _get_or_create_producer(self, topic: str) -> pulsar.Producer:
+    async def _get_or_create_producer(self, topic: str) -> "pulsar.Producer":
         producer = self._producers.get(topic)
         if producer:
             # LRU move
@@ -279,10 +278,7 @@ class MessageQueuePulsar(MessageQueueBase):
             logger.info(f"[MessageQueuePulsar] Creating new producer for topic={topic}")
 
             loop = asyncio.get_running_loop()
-            producer = await loop.run_in_executor(
-                self._executor,
-                lambda: self._client.create_producer(topic)
-            )
+            producer = await loop.run_in_executor(self._executor, lambda: self._client.create_producer(topic))
 
             self._producers[topic] = producer
             return producer
