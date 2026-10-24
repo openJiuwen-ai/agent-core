@@ -509,6 +509,7 @@ class TestRunOrganizationTurn:
         entry.interact_gate.close_and_drain.assert_not_called()
         session.post_run.assert_not_called()
         agent.invoke.assert_not_called()
+        assert manager.activate.await_args.kwargs["preserve_conversation_mode"] is True
 
     @pytest.mark.asyncio
     async def test_idle_marker_ends_turn_and_runs_finalize(self):

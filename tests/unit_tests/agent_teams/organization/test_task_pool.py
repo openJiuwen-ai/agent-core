@@ -5047,3 +5047,123 @@ async def test_hierarchical_root_accepts_multiple_inputs_and_a_specialist_delive
     assert completed.task.aggregation.mode is OrgTaskAggregationMode.HIERARCHICAL
     assert completed.task.aggregation.summary_task_id is None
     assert completed.task.output_context.result_uri == "/artifacts/resume.pptx"
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_keeps_group_chat_mode(active_organization_runtime, monkeypatch):
+    """A group-chat leader receives the org wake without a team-mode interact."""
+    org_runtime, agents, session_id = active_organization_runtime
+    delivered: list[tuple[str, str, str]] = []
+    interact_calls: list[object] = []
+
+    async def deliver(query, *, team_name: str, session_id: str):
+        delivered.append((query, team_name, session_id))
+        from openjiuwen.agent_teams.interaction.payload import DeliverResult
+
+        return DeliverResult.success(None)
+
+    async def interact(*_args, **_kwargs):
+        interact_calls.append(_args)
+        from openjiuwen.agent_teams.interaction.payload import DeliverResult
+
+        return DeliverResult.failure("conversation_mode_mismatch")
+
+    async def settled(_entry) -> bool:
+        return True
+
+    agents["team-a"].team_backend.conversation_mode = "group_chat"
+    monkeypatch.setattr(org_runtime, "_team_is_idle_settled_for_org_wake", settled)
+    org_runtime._team_runtime_manager.deliver_organization_prompt = deliver
+    org_runtime._team_runtime_manager.interact = interact
+
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.RUNNING
+    key = (session_id, "team-a")
+    org_runtime._leader_turn_queues[key] = deque([{"query": "review the business result"}])
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert delivered == [("review the business result", "team-a", session_id)]
+    assert interact_calls == []
+    assert key not in org_runtime._leader_turn_queues
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_drops_mode_mismatch(active_organization_runtime, monkeypatch):
+    """A permanent mode rejection does not park the wake for another identical try."""
+    org_runtime, _agents, session_id = active_organization_runtime
+
+    async def interact(*_args, **_kwargs):
+        from openjiuwen.agent_teams.interaction.payload import DeliverResult
+
+        return DeliverResult.failure("conversation_mode_mismatch")
+
+    async def settled(_entry) -> bool:
+        return True
+
+    monkeypatch.setattr(org_runtime, "_team_is_idle_settled_for_org_wake", settled)
+    org_runtime._team_runtime_manager.interact = interact
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.RUNNING
+    key = (session_id, "team-a")
+    org_runtime._leader_turn_queues[key] = deque([{"query": "review the business result"}])
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert key not in org_runtime._leader_turn_queues
+    assert key not in org_runtime._leader_turn_workers
+
+
+@pytest.mark.asyncio
+async def test_release_membership_keeps_tasks_and_team_context(active_organization_runtime):
+    org_runtime, agents, session_id = active_organization_runtime
+    manager, _leader = await _seed_two_team_org(
+        org_runtime, agents, session_id, "org-keep"
+    )
+    created = await manager.create_task(
+        task_id="root-keep",
+        title="kept output",
+        description="the child result stays after membership is released",
+        required_capabilities=["coordination"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id="org-keep",
+        ),
+    )
+    assert created.ok
+    agents["team-a"].kept_context = "private notes"
+    stops = []
+
+    class _Launcher:
+        async def stop(self, **kwargs):
+            stops.append(kwargs)
+
+    org_runtime._expert_team_launcher = _Launcher()
+    org_runtime._summary_team_launcher = _Launcher()
+
+    await org_runtime.release_membership(
+        organization_id="org-keep",
+        owner_team_id="team-a",
+        session_id=session_id,
+    )
+
+    kept = await manager.get_task("root-keep")
+    organization = await manager.get_organization()
+    assert kept is not None
+    assert kept.title == "kept output"
+    assert organization is not None
+    assert organization.owner_team_id is None
+    assert organization.leaders == []
+    assert agents["team-a"].kept_context == "private notes"
+    assert agents["team-a"].team_backend.org_task_manager is None
+    assert agents["team-b"].team_backend.org_task_manager is None
+    assert await org_runtime._team_runtime_manager.pool.get("team-a") is not None
+    assert await org_runtime._team_runtime_manager.pool.get("team-b") is not None
+    assert stops == []
+
+    rebound = await org_runtime.create_organization(
+        organization_id="org-keep",
+        owner_team_id="team-c",
+        session_id=session_id,
+    )
+    assert rebound.owner_team_id == "team-c"
+    assert (await manager.get_task("root-keep")).title == "kept output"

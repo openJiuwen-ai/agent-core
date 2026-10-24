@@ -132,6 +132,8 @@ class TeamRuntimeManager:
         spec: "TeamAgentSpec",
         session: str | AgentTeamSession | None,
         inputs: object = None,
+        *,
+        preserve_conversation_mode: bool = False,
     ) -> TeamRuntimeActivation:
         """Resolve the TeamAgent to run for the target team/session."""
         team_session = TeamRuntimeManager._build_session(session)
@@ -189,7 +191,7 @@ class TeamRuntimeManager:
                 await self.stop_team(team_name=team_name, session_id=target_session_id)
                 pool_entry = None
         requested_mode = self._conversation_mode(inputs)
-        if pool_entry is not None and requested_mode is not None:
+        if pool_entry is not None and requested_mode is not None and not preserve_conversation_mode:
             if getattr(getattr(pool_entry.agent, "team_backend", None), "conversation_mode", "team") != requested_mode:
                 raise ValueError("Team conversation mode cannot change within a session")
         team_in_session, team_in_db, team_db_state = await self._inspect_session(
@@ -334,7 +336,12 @@ class TeamRuntimeManager:
         ran_turn = False
         finalized = False
         try:
-            activation = await self.activate(spec, session_id, inputs)
+            activation = await self.activate(
+                spec,
+                session_id,
+                inputs,
+                preserve_conversation_mode=True,
+            )
             if activation.action.kind in _REJECT_KINDS or activation.agent is None:
                 return False
             ran_turn = True
@@ -615,6 +622,37 @@ class TeamRuntimeManager:
                 entry=entry,
                 run_context=run_context,
             )
+        finally:
+            await entry.interact_gate.consume_done(ticket)
+
+    async def deliver_organization_prompt(
+        self,
+        query: str,
+        *,
+        team_name: str,
+        session_id: str,
+    ) -> DeliverResult:
+        """Inject an organization wake into the leader already running this session.
+
+        Organization coordination is not a user conversation-mode change. A
+        group-chat session therefore keeps its current runtime instead of
+        sending a team-mode ``interact`` that the mode lock must reject.
+        """
+
+        text = str(query or "").strip()
+        if not text:
+            return DeliverResult.failure("empty_organization_prompt")
+        entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+        if entry is None:
+            return DeliverResult.failure("not_active")
+        if entry.state is not RuntimeState.RUNNING:
+            return DeliverResult.failure("not_running")
+        ticket = await entry.interact_gate.admit()
+        if ticket is None:
+            return DeliverResult.failure("gate_closed")
+        try:
+            await entry.agent.deliver_input(text)
+            return DeliverResult.success(None)
         finally:
             await entry.interact_gate.consume_done(ticket)
 
