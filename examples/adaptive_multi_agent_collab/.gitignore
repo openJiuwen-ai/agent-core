@@ -1,0 +1,67 @@
+# Future local runs must not commit prompts, model outputs, or checkpoints.
+artifacts/
+checkpoints/
+tmp/
+*.partial
+*.download
+
+# Python/test caches
+__pycache__/
+.pytest_cache/
+*.py[cod]
+
+# Disposable verification scratch only; summaries/evidence beside these stay visible.
+/reports/*/mypy/
+/reports/*/mypy_*/
+/reports/*/mypy-*/
+/reports/*/probe_mypy/
+/reports/*/.mypy_cache/
+/reports/*/cache/
+/reports/*/pytest_tmp/
+/reports/*/pytest_tmp_*/
+/reports/*/full_pytest_tmp/
+/reports/*/full_pytest_final_tmp/
+/reports/*/assets_pytest_tmp/
+/reports/*/probe_pytest_tmp/
+/reports/*/pytest-runtime/
+/reports/*/probe_pytest_cache/
+/reports/*/black/
+/reports/*/pylint/
+/reports/*/matplotlib/
+/reports/failure_policy/scratch/
+/reports/publication_repair/scratch/
+/reports/publication_repair/recovery_tmp/
+/reports/publication_repair/recovery_tmp_new/
+/reports/publication_repair/recovery_boundary_tmp/
+/reports/publication_repair/recovery_durability_tmp/
+/reports/publication_repair/recovery_json_tmp/
+/reports/publication_repair/recovery_json_affected_tmp/
+/reports/publication_repair/test_tmp_saved_evidence/
+
+# Never store local environment or credential files here
+.env
+.env.*
+
+# Local approved assets, private approvals, and paid-run records
+assets/
+approvals/
+runs/
+# Archived private campaign records and byte-preserved paid compatibility receipts.
+/archive/Pilot_1/
+/archive/Pilot_2/
+/evidence/compatibility/
+
+# Immutable completed Pilot3 campaign evidence (local paid-run artifacts).
+/archive/Pilot_3/
+/archive/Pilot_4/
+
+/.DS_Store
+
+# Bounded offline startup verification scratch (summaries remain visible).
+/reports/startup_optimization/scratch/
+/reports/startup_optimization/cache/
+/reports/startup_optimization/tmp/
+
+# Guard/recovery relocation verification scratch; reports remain visible.
+/reports/guard_recovery/scratch/
+/reports/guard_recovery/tmp/
