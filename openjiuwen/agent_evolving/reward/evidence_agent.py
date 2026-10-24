@@ -26,6 +26,9 @@ from tempfile import TemporaryDirectory
 from . import checks
 from .files import clip
 from .models import resolve
+from .options import (
+    EvidenceOptions,
+)
 from .prompts import EVIDENCE_AGENT_PROMPT
 
 ROUNDS = 12           # model turns of the agent: a safety cap; the time limit is the one meant to bind
@@ -165,13 +168,13 @@ class EvidenceRun:
                                  for label, data in shots[-SHOWN_IMAGES:]]
         return out
 
-    def read_evidence(self, id, pattern=None, start=1, count=80):  # noqa: A002 - the tool's own argument name
-        return self.read_saved(id, pattern, start, count)   # reading saved results is normal work, never idle
+    def read_evidence(self, evidence_id, pattern=None, start=1, count=80):
+        return self.read_saved(evidence_id, pattern, start, count)   # reading saved results is normal work, never idle
 
-    def read_saved(self, id, pattern=None, start=1, count=80):  # noqa: A002
-        path = self.folder / f"{id}.txt"
-        if not re.fullmatch(r"c\d+", str(id)) or not path.is_file():
-            return {"action_error": f"no saved result {id!r}; use an id returned by run_checks"}
+    def read_saved(self, evidence_id, pattern=None, start=1, count=80):
+        path = self.folder / f"{evidence_id}.txt"
+        if not re.fullmatch(r"c\d+", str(evidence_id)) or not path.is_file():
+            return {"action_error": f"no saved result {evidence_id!r}; use an id returned by run_checks"}
         lines = path.read_text(encoding="utf-8").splitlines()
         try:
             if pattern:
@@ -182,7 +185,7 @@ class EvidenceRun:
                 body = [f"{i}: {line}" for i, line in enumerate(lines[start - 1:start - 1 + count], start)]
         except (re.error, TypeError, ValueError) as error:
             return {"action_error": f"bad pattern or line numbers: {error}"}
-        return {"id": id, "lines": len(lines), "text": clip("\n".join(body) or "(no line matches)", 6000)}
+        return {"id": evidence_id, "lines": len(lines), "text": clip("\n".join(body) or "(no line matches)", 6000)}
 
     def evidence_for(self, cid):
         rows = sorted((r for r in self.results if cid in r["criteria"]), key=lambda r: r["facts"]["check"])
@@ -230,6 +233,9 @@ def evidence_tools(run):
             self.handler = handler
 
         async def invoke(self, inputs, **kwargs):
+            if self.card.name == "read_evidence":
+                inputs = dict(inputs)
+                inputs["evidence_id"] = inputs.pop("id")
             result = self.handler(**inputs)
             if asyncio.iscoroutine(result):
                 result = await result
@@ -307,8 +313,12 @@ def build_agent(route, workspace, rounds):
     return spec.build(), run_id
 
 
-async def gather(criteria, ctx, route, log, rounds=ROUNDS, seconds=SECONDS):
+async def gather(criteria, ctx, route, *args, **kwargs):
     """{criterion id: (evidence, images)} gathered by one DeepAgent for all criteria."""
+    options = EvidenceOptions(*args, **kwargs)
+    log = options.log
+    rounds = options.rounds
+    seconds = options.seconds
     from openjiuwen.core.session.agent import create_agent_session
 
     with TemporaryDirectory(prefix="reward_evidence_") as tmp:

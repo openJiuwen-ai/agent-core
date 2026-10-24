@@ -253,7 +253,7 @@ def render_overview(nodes: list[TrajectoryNode]) -> dict[str, Any]:
 
     chunks: list[dict[str, Any]] = []
     for start in range(0, len(nodes), _OVERVIEW_CHUNK_SIZE):
-        chunk_nodes = nodes[start : start + _OVERVIEW_CHUNK_SIZE]
+        chunk_nodes = nodes[start: start + _OVERVIEW_CHUNK_SIZE]
         markers: list[dict[str, Any]] = []
         markers_truncated = False
         for kind, predicate, brief in _marker_kinds():
@@ -561,8 +561,8 @@ def search_keyword(
 
 
 def _excerpt(text: str, start: int, end: int) -> str:
-    left = text[max(0, start - _KEYWORD_CONTEXT_CHARS) : start]
-    right = text[end : end + _KEYWORD_CONTEXT_CHARS]
+    left = text[max(0, start - _KEYWORD_CONTEXT_CHARS): start]
+    right = text[end: end + _KEYWORD_CONTEXT_CHARS]
     return f"...{left}{text[start:end]}{right}..."
 
 

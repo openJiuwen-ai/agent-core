@@ -143,7 +143,8 @@ class NodeBackedRuntime:
             "artifact_improvement_submitted": self.artifact_improvement is not None,
         }
 
-    def on_progress(self) -> None:
+    @staticmethod
+    def on_progress() -> None:
         return None
 
 

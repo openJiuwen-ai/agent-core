@@ -15,11 +15,13 @@ import time
 from pathlib import Path
 
 from . import pipeline, progress
+from .cli_logging import progress_logger, result_logger
 from .config import load_config
 from .result import render
 
 
 def main(argv=None):
+    logger = progress_logger()
     parser = argparse.ArgumentParser(prog="python -m openjiuwen.agent_evolving.reward", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--task", required=True, help="task text or a file containing it")
@@ -54,7 +56,7 @@ def main(argv=None):
     started = time.monotonic()
 
     def log(message):
-        print(f"[{time.monotonic() - started:5.0f}s] {message}", file=sys.stderr, flush=True)
+        logger.info("[%5.0fs] %s", time.monotonic() - started, message)
 
     run = progress.use(progress.Progress.for_session("general"))
     if args.rubric and args.new_rubric:
@@ -75,7 +77,7 @@ def main(argv=None):
     result["meta"]["artifacts"] = [str(Path(p).resolve()) for p in args.artifact]
     out_path = Path(args.out).resolve()
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(render(result, out_path))
+    result_logger().info(render(result, out_path))
 
 
 if __name__ == "__main__":

@@ -79,6 +79,16 @@ result = await reward(task, artifacts, config, txt_response="", user_note="", pr
 
 命令行的文本参数（`--task`、`--txt-response`、`--user-note`、`--process-signal`）可以是文本，也可以是文件路径。
 
+`reward`、`text_reward`、`write_criteria` 的可选参数在内部按具名参数组绑定；现有位置参数顺序、
+关键字名称和默认值保留。未知参数、重复传值和缺失必需参数仍抛出 `TypeError`。
+运行时函数签名使用 `*args, **kwargs` 接收可选参数，完整参数字段见 `options.py`，
+不要依赖 `inspect.signature` 从包装函数自动生成参数表。
+命令行的进度日志使用独立的 stderr logger；stdout 保留原始 Markdown/JSON 结果，不添加日志前缀。
+
+宿主临时替换进度接收器时，使用 `with progress.scoped(receiver):` 包裹调用。
+退出作用域（包括异常和取消）会恢复原接收器，并发任务各自独立；`progress.use()` 的现有行为不变。
+
+
 本包不接收轨迹。从会话中取出任务、最终回复、用户意见和过程信号由调用方负责（JiuwenSwarm 使用 `fast_attribution.locate_task_output`）。
 
 其他公开接口：`text_reward()`、`write_criteria()`、`archive_rubric()`、`render()`、`load_config()`、`SCHEMA_VERSION`。

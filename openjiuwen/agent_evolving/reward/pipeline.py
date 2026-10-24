@@ -11,6 +11,16 @@ from pathlib import Path
 
 from . import checks, evidence_agent, guides, models, progress
 from .files import FILE_LIMIT, bundle, clip
+from .options import (
+    CriteriaOptions,
+    FeedbackOptions,
+    OptionalCall,
+    RewardOptions,
+    SummaryOptions,
+    TerminalJudge,
+    TextRewardOptions,
+    WorkspaceOptions,
+)
 from .prompts import ART_JUDGE_PROMPT, BLIND_NOTE, CRITERIA_PROMPT, FEEDBACK_PROMPT, JUDGE_PROMPT, SUMMARY_PROMPT
 from .result import build
 from .scoring import to_result, total
@@ -29,10 +39,14 @@ async def ask(model, prompt, content, stage, images=()):
         raise evidence_agent.EvidenceError(f"{stage} failed: {type(error).__name__}: {error}") from error
 
 
-async def optional(model, prompt, content, stage, notes, log):
+async def optional(model, prompt, content, *args, **kwargs):
     """A model call the score does not depend on (feedback placement, summary): a failure becomes a
     warning in the result, not a failed run.
     """
+    options = OptionalCall(*args, **kwargs)
+    stage = options.stage
+    notes = options.notes
+    log = options.log
     try:
         return await model.json(prompt, content)
     except Exception as error:  # noqa: BLE001 - reported in the result's warnings
@@ -64,8 +78,13 @@ def text_evidence(task, deliverable, response, references):
     }
 
 
-async def evaluate_terminal(criterion, ctx, producer, judge, log, gathered, seeing=True):
+async def evaluate_terminal(criterion, ctx, producer, *args, **kwargs):
     """Judge one criterion from its evidence: (evidence, images) from the evidence agent."""
+    options = TerminalJudge(*args, **kwargs)
+    judge = options.judge
+    log = options.log
+    gathered = options.gathered
+    seeing = options.seeing
     name = criterion["id"]
     evidence, images = gathered
     visual = criterion.get("kind") == "visual"
@@ -99,20 +118,28 @@ def cap_by_critique(criterion, verdict):
     if not major:
         return verdict
     levels = [c.get("level", "floor") for c in criterion.get("claims") or []]
-    affected = {i: issue for issue in reversed(major) for i in issue.get("claims") or []
-                if isinstance(i, int) and not isinstance(i, bool) and 0 <= i < len(levels)}
+    affected = {}
+    for issue in reversed(major):
+        for index in issue.get("claims") or []:
+            if isinstance(index, bool) or not isinstance(index, int):
+                continue
+            if 0 <= index < len(levels):
+                affected[index] = issue
     for row in models.items(verdict, "claims"):
         index = row.get("index") if isinstance(row, dict) else None
-        if isinstance(index, int) and not isinstance(index, bool) and index in affected \
-                and levels[index] == "challenge" and row.get("status") == "met":
+        if isinstance(index, bool) or not isinstance(index, int) or index not in affected:
+            continue
+        if levels[index] == "challenge" and row.get("status") == "met":
             row["status"] = "partial"
             row["reason"] = (row.get("reason", "") + f"（主要问题：{affected[index].get('issue', '')}）").strip()
     return verdict
 
 # the control that starts the work (not the first button, which is often a sound or settings toggle)
-START_BUTTON = ", ".join([f'button:has-text("{t}")' for t in ("开始", "Start", "START", "start", "Play", "PLAY", "play",
-                                                              "进入", "Begin", "Go")]
-                         + ["#startBtn", "#start", ".start", "[data-action=start]"])
+START_LABELS = ("开始", "Start", "START", "start", "Play", "PLAY", "play", "进入", "Begin", "Go")
+START_BUTTON = ", ".join(
+    [f'button:has-text("{label}")' for label in START_LABELS]
+    + ["#startBtn", "#start", ".start", "[data-action=start]"]
+)
 
 
 async def default_screenshots(root, log):
@@ -124,8 +151,10 @@ async def default_screenshots(root, log):
     pages = sorted((p for p in root.rglob("*.htm*") if checks.INPUTS_DIR not in p.parts),
                    key=lambda p: (len(p.relative_to(root).parts), str(p)))   # the work's own page first
     if not pages:  # a work made of pictures (book pages, a poster): look at the pictures themselves
-        pictures = [p for p in root.rglob("*") if p.suffix.lower() in checks.IMAGE_SUFFIXES
-                    and checks.INPUTS_DIR not in p.parts]
+        pictures = []
+        for path in root.rglob("*"):
+            if path.suffix.lower() in checks.IMAGE_SUFFIXES and checks.INPUTS_DIR not in path.parts:
+                pictures.append(path)
         if not pictures:
             return []
         try:
@@ -134,8 +163,10 @@ async def default_screenshots(root, log):
             log(f"picture views failed: {str(error)[:200]}")
             return []
     try:
-        flips = [a for _ in range(7) for a in ({"type": "key", "key": "ArrowRight"}, {"type": "scroll", "pages": 1},
-                                               {"type": "wait", "ms": 500})]
+        flips = []
+        for _ in range(7):
+            flips.extend([{"type": "key", "key": "ArrowRight"}, {"type": "scroll", "pages": 1},
+                          {"type": "wait", "ms": 500}])
         _, shots = await checks.run_experiment(pages[0], {"actions": [
             {"type": "click", "selector": START_BUTTON}, {"type": "wait", "ms": 600},
             {"type": "key", "key": "Space"}, {"type": "wait", "ms": 900},
@@ -148,9 +179,13 @@ async def default_screenshots(root, log):
 
 # names that mean looks only; "界面" (UI) and "chart" are not, since a UI or chart criterion is also about behaviour
 # and data, and a visual criterion is judged from screenshots alone
-VISUAL_NAME = re.compile(r"视觉|画面|美术|外观|造型|画风|观感|美观|\b(?:visual|looks?|art|artwork|graphics?|appearance)\b", re.I)
-MIXED_VISUAL_NAME = re.compile(r"交互|操作|流程|手感|数据|行为|\b(?:interaction|controls?|flow|feel|data|behaviou?r)\b", re.I)
-VISUAL_TASK = re.compile(r"游戏|画面|页面|网页|海报|图表|界面|动画|插画|绘本|图画书|漫画|幻灯片|小程序|game|web ?page|poster|chart|\bui\b|"
+VISUAL_NAME = re.compile(
+    r"视觉|画面|美术|外观|造型|画风|观感|美观|"
+    r"\b(?:visual|looks?|art|artwork|graphics?|appearance)\b", re.I)
+MIXED_VISUAL_NAME = re.compile(
+    r"交互|操作|流程|手感|数据|行为|\b(?:interaction|controls?|flow|feel|data|behaviou?r)\b", re.I)
+VISUAL_TASK = re.compile(r"游戏|画面|页面|网页|海报|图表|界面|动画|插画|绘本|图画书|漫画|幻灯片|小程序|"
+                         r"game|web ?page|poster|chart|\bui\b|"
                          r"website|animation|illustration|landing|picture ?book|storybook|comic|slides", re.I)
 LOOK_CLAIM = {"zh": "整体画面达到同类已发布作品的水准，没有业余感。",
               "en": "The look matches published work of this kind; nothing looks amateur."}
@@ -163,8 +198,10 @@ def visual_criterion(chinese):
                 "goal": "主体和整体画面看起来像已发布的同类成品。", "claims": [
                     {"text": "主体（角色、产品或图表）一眼就能认出来。", "level": "floor"},
                     {"text": "画面风格符合任务主题。", "level": "floor"},
-                    {"text": "主体按所选画风造型到位：一眼可读，比例和简化符合该画风，没有错位、穿插或被截断。", "level": "challenge"},
-                    {"text": "构图服务于作品用途，主体大小、位置和留白符合同类已发布作品的惯例。", "level": "challenge"},
+                    {"text": ("主体按所选画风造型到位：一眼可读，比例和简化符合该画风，"
+                              "没有错位、穿插或被截断。"), "level": "challenge"},
+                    {"text": "构图服务于作品用途，主体大小、位置和留白符合同类已发布作品的惯例。",
+                     "level": "challenge"},
                     {"text": "画风统一，配色和谐。", "level": "challenge"},
                     {"text": LOOK_CLAIM["zh"], "level": "challenge"}]}
     return {"id": "visual", "scope": "terminal", "kind": "visual", "name": "Visual quality",
@@ -224,12 +261,16 @@ def earlier_rubric(result):
             for c in result.get("categories") or []]
 
 
-async def write_criteria(task, config, log=lambda message: None, knowledge="", producer=None,
-                         previous_result=None):
+async def write_criteria(task, config, *args, **kwargs):
     """Criteria from the Task alone (plus domain knowledge and an earlier result, if any); reusable to score several
     candidates alike. Claims without text are dropped, an unknown level counts as floor, a repeated id gets a
     suffix.
     """
+    options = CriteriaOptions(*args, **kwargs)
+    log = options.log
+    knowledge = options.knowledge
+    producer = options.producer
+    previous_result = options.previous_result
     models.set_language(task)
     producer = producer or models.Model(config["producer"])
     log("writing criteria from the task")
@@ -257,12 +298,17 @@ async def write_criteria(task, config, log=lambda message: None, knowledge="", p
 write_text_criteria = write_criteria  # the batch script's name for it
 
 
-async def feedback_claims(task, user_note, process_signal, criteria, config, log=lambda message: None,
-                          producer=None, notes=None):
+async def feedback_claims(task, user_note, process_signal, *args, **kwargs):
     """The user's note and the process signal as checks placed in the rubric: each one goes to the existing
     criterion closest to its aspect (by id) and says which input it came from. A remark about one place becomes a
     rule for the whole work. [] when both are empty, or when the call failed (then a warning says so).
     """
+    options = FeedbackOptions(*args, **kwargs)
+    criteria = options.criteria
+    config = options.config
+    log = options.log
+    producer = options.producer
+    notes = options.notes
     user_note, process_signal = (user_note or "").strip(), (process_signal or "").strip()
     if not (user_note or process_signal):
         return []
@@ -337,10 +383,14 @@ def archive_rubric(path):
     return target
 
 
-async def overall_summary(task, results, score, judge, log, notes):
+async def overall_summary(task, results, score, *args, **kwargs):
     """The total verdict in two or three sentences, written by the judge from the category comments; when that
     call fails, one sentence made in code from the scores.
     """
+    options = SummaryOptions(*args, **kwargs)
+    judge = options.judge
+    log = options.log
+    notes = options.notes
     rows = [{"category": r.get("name") or r["id"], "score": r["score"], "comment": r.get("summary", "")}
             for r in results]
     found = await optional(judge, SUMMARY_PROMPT, json.dumps({"task": task, "total": score, "categories": rows},
@@ -355,8 +405,7 @@ async def overall_summary(task, results, score, judge, log, notes):
             f"最弱的是「{worst.get('name') or worst['id']}」（{worst['score']}）。")
 
 
-async def reward(task, artifacts, config, txt_response="", user_note="", process_signal="", rubric_path=None,
-                 previous_result=None, log=lambda message: None, warnings=()):
+async def reward(task, artifacts, config, *args, **kwargs):
     """Score delivered work; returns the standard result JSON (result.py).
 
     artifacts: the delivered files or directories (paths); [] when the answer is only in txt_response. They are
@@ -370,6 +419,14 @@ async def reward(task, artifacts, config, txt_response="", user_note="", process
     previous_result: an earlier result JSON of the same Task, used only when new criteria are written: they keep its
     floor claims and raise the challenge claims above what the work already met.
     """
+    options = RewardOptions(*args, **kwargs)
+    txt_response = options.txt_response
+    user_note = options.user_note
+    process_signal = options.process_signal
+    rubric_path = options.rubric_path
+    previous_result = options.previous_result
+    log = options.log
+    warnings = options.warnings
     root = make_workspace(artifacts)
     try:
         return await score_workspace(task, root, config, txt_response=txt_response, log=log, warnings=warnings,
@@ -379,11 +436,19 @@ async def reward(task, artifacts, config, txt_response="", user_note="", process
         shutil.rmtree(root, ignore_errors=True)
 
 
-async def score_workspace(task, root, config, txt_response="", criteria=None, log=lambda message: None,
-                          warnings=(), rubric_path=None, user_note="", process_signal="", previous_result=None):
+async def score_workspace(task, root, config, *args, **kwargs):
     """reward() on a scratch folder that already exists (deliverable at the top, inputs under _inputs/); criteria
     given by the caller are used as they are (batch runs).
     """
+    options = WorkspaceOptions(*args, **kwargs)
+    txt_response = options.txt_response
+    criteria = options.criteria
+    log = options.log
+    warnings = options.warnings
+    rubric_path = options.rubric_path
+    user_note = options.user_note
+    process_signal = options.process_signal
+    previous_result = options.previous_result
     response, notes = txt_response, list(warnings)
     models.set_language(task)
     root = Path(root)
@@ -413,14 +478,16 @@ async def score_workspace(task, root, config, txt_response="", criteria=None, lo
     if placed:   # the user's concerns and the run's errors become part of the rubric, kept for the next rounds
         criteria = merge_feedback(criteria, placed)
         log(f"user note / process signal placed in: {', '.join(sorted({str(p['criterion']) for p in placed}))}")
-    if rubric_path and not fixed and (not kept or placed):
-        save_rubric(rubric_path, criteria)
+    if rubric_path and not fixed:
+        if not kept or placed:
+            save_rubric(rubric_path, criteria)
     deliverable, inputs = workspace_files(root)
     tools = checks.available_tools(root, config)
     # work used in a browser is judged by using it, as its user would: its source is shown to no one
-    readable = {
-        n: t for n, t in deliverable.items() if "browser" not in tools or not n.lower().endswith(checks.PAGE_CODE)
-    }
+    readable = {}
+    for name, text in deliverable.items():
+        if "browser" not in tools or not name.lower().endswith(checks.PAGE_CODE):
+            readable[name] = text
     evidence = text_evidence(task, readable, response, inputs)
     if readable != deliverable:
         evidence["deliverable"] = (bundle(readable) + "\n" if readable else "") + "(page source is not shown: " \
@@ -474,8 +541,12 @@ async def score_workspace(task, root, config, txt_response="", criteria=None, lo
     if not art_seeing:
         warnings.append(f"画面判定模型 {getattr(art, 'name', '')} 不支持看图，画面维度整项不计分、不计入总分；"
                         "换用支持图片的 art_judge 可评价这部分。")
-    used = sorted({e.get("tool") for r in results for e in r.get("evidence") or []
-                   if isinstance(e, dict) and e.get("tool") and "skipped" not in e})
+    used_tools = set()
+    for result in results:
+        for item in result.get("evidence") or []:
+            if isinstance(item, dict) and item.get("tool") and "skipped" not in item:
+                used_tools.add(item.get("tool"))
+    used = sorted(used_tools)
     meta = {"deliverable": sorted(deliverable), "final_reply": bool(response), "inputs": sorted(inputs),
             **({"user_note": user_note} if user_note else {}),
             **({"process_signal": process_signal} if process_signal else {}),
@@ -490,9 +561,13 @@ async def score_workspace(task, root, config, txt_response="", criteria=None, lo
     return result
 
 
-async def text_reward(task, deliverable, config, response="", references=None, criteria=None,
-                      log=lambda message: None):
+async def text_reward(task, deliverable, config, *args, **kwargs):
     """Score work given as text ({name: text}) with the same pipeline; used by the batch script."""
+    options = TextRewardOptions(*args, **kwargs)
+    response = options.response
+    references = options.references
+    criteria = options.criteria
+    log = options.log
     root = make_workspace(texts=deliverable, reference_texts=references)
     try:
         return await score_workspace(task, root, config, txt_response=response, criteria=criteria, log=log)

@@ -258,7 +258,7 @@ def _scan_redirects(segment: str) -> list[tuple[str, str]]:
         if char != ">":
             index += 1
             continue
-        if segment[index - 1 : index] in ("=", "<", ">", "&", "-"):
+        if segment[index - 1: index] in ("=", "<", ">", "&", "-"):
             index += 1
             continue
         run_end = index
@@ -395,7 +395,7 @@ def _ps_create_paths(segment: str) -> list[tuple[str, str]]:
         if len(positional) >= 2:
             result.append((positional[1], "create"))
     for match in _RE_DOTNET_IO.finditer(segment):
-        operation = "create" if "write" in segment[match.start() : match.end()].lower() else "edit"
+        operation = "create" if "write" in segment[match.start(): match.end()].lower() else "edit"
         result.append((match.group("path"), operation))
     if _RE_PS_COPY.search(segment):
         destination = re.search(r"(?i)-Destination\s+(\S+)", segment)
@@ -456,8 +456,9 @@ def extract_file_candidates(
                     continue
                 if name in _WRITE_TOOLS:
                     for key in ("file_path", "path"):
-                        if arguments.get(key):
-                            path = _normalize_path(str(arguments[key]), workspace)
+                        value = arguments.get(key)
+                        if value:
+                            path = _normalize_path(str(value), workspace)
                             if path is None:
                                 stats["unresolved"] += 1
                                 continue
@@ -469,8 +470,9 @@ def extract_file_candidates(
                         stats["low_confidence"] += 1
                         continue
                     for key in ("file_path", "path"):
-                        if arguments.get(key):
-                            path = _normalize_path(str(arguments[key]), workspace)
+                        value = arguments.get(key)
+                        if value:
+                            path = _normalize_path(str(value), workspace)
                             if path is None:
                                 stats["unresolved"] += 1
                                 continue
@@ -516,7 +518,12 @@ def user_request_of(nodes_by_subagent: Mapping[str, list[TrajectoryNode]]) -> li
     nodes = getattr(nodes_by_subagent, "user_requests", None)
     if nodes is None:
         nodes = user_request_nodes(nodes_by_subagent)
-    return [(node.node_id, text) for node in nodes if (text := user_request_text(node))]
+    requests = []
+    for node in nodes:
+        text = user_request_text(node)
+        if text:
+            requests.append((node.node_id, text))
+    return requests
 
 
 def build_task_parse_digest(
@@ -964,10 +971,18 @@ class DeliveryRound:
             for node in nodes:
                 if node.kind in _LEAD_KINDS and self.holds(node) and _sends_file(node):
                     steps.add(node.node_id)
-        lead = {node.node_id: node for nodes in self.whole.values() for node in nodes if node.kind in _LEAD_KINDS}
+        lead = {}
+        for nodes in self.whole.values():
+            for node in nodes:
+                if node.kind in _LEAD_KINDS:
+                    lead[node.node_id] = node
         written = last_writes(self.whole, self.workspace)
         steps.update(written[path] for path in self.files(list(reported)) if written.get(path) in lead)
-        timed = [lead[node_id] for node_id in steps if node_id in lead]
+        timed = []
+        for node_id in steps:
+            lead_node = lead.get(node_id)
+            if lead_node is not None:
+                timed.append(lead_node)
         if not timed:
             return set()
         last = max(timed, key=lambda node: (node.start_ts_ns, node.end_ts_ns))
@@ -981,16 +996,13 @@ class DeliveryRound:
         return any(node.node_id in steps for nodes in nodes_by_subagent.values() for node in nodes)
 
     def replies(self) -> list[TrajectoryNode]:
-        rows = [
-            node
-            for nodes in self.whole.values()
-            for node in nodes
-            if node.kind in _LEAD_KINDS
-            and node.role == "assistant"
-            and not node.tool_calls
-            and node.content
-            and self.holds(node)
-        ]
+        rows = []
+        for nodes in self.whole.values():
+            for node in nodes:
+                if node.kind not in _LEAD_KINDS or node.role != "assistant":
+                    continue
+                if not node.tool_calls and node.content and self.holds(node):
+                    rows.append(node)
         return sorted(rows, key=lambda node: node.start_ts_ns)
 
     def reply(self) -> list[tuple[str, str]]:
