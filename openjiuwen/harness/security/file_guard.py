@@ -737,23 +737,76 @@ class FileGuardChecker:
         return defaults.read, "file_guard:defaults"
 
 
+class DevStableFileGuard:
+    """Pipeline B adapter. Judgment comes from agent-shield FileGuardComponent."""
+
+    def __init__(self, engine: Any) -> None:
+        self._engine = engine
+
+    def evaluate(
+        self,
+        tool_name: str,
+        tool_args: Mapping[str, Any],
+    ) -> PermissionResult | None:
+        result = self._engine.evaluate_component("file_guard", tool_name, tool_args)
+        if result is None or result.permission is None:
+            return None
+        level_name = str(result.permission.value)
+        if level_name not in {"allow", "ask", "deny"}:
+            level_name = "ask"
+        external = list(result.external_paths) if result.external_paths else None
+        return PermissionResult(
+            permission=PermissionLevel(level_name),
+            matched_rule=result.matched_rule,
+            reason=result.reason,
+            external_paths=external,
+        )
+
+    def collect_ask_accesses(
+        self,
+        tool_name: str,
+        tool_args: Mapping[str, Any],
+    ) -> list[tuple[str, str]]:
+        return [
+            (path, action)
+            for path, action in self._engine.collect_file_guard_ask_accesses(
+                tool_name, tool_args,
+            )
+        ]
+
+
 def build_file_guard_checker(
     permissions: Mapping[str, Any] | None,
     *,
     workspace_root: Path | None = None,
     trusted_dirs: Sequence[Path] | None = None,
-) -> FileGuardChecker | None:
-    """编译配置；若路径层关闭则返回 ``None``。"""
-    perms = permissions if isinstance(permissions, Mapping) else {}
+) -> DevStableFileGuard | None:
+    """编译配置；若路径层关闭则返回 ``None``。
+
+    The dev-stable caller builds agent-shield PermissionEngine. FileGuardComponent
+    reads ``file_guard.dev_stable`` plus ``runtime.workspace_root`` and
+    ``runtime.trusted_dirs``. Sensitive paths and immutable roots stay off.
+    """
+    from agent_shield.tool_permission.engine import PermissionEngine
+
+    perms = dict(permissions) if isinstance(permissions, Mapping) else {}
     report_legacy_path_rules_at_load(perms)
-    effective = normalize_path_guard_config(
-        perms,
-        workspace_root=workspace_root,
-        trusted_dirs=trusted_dirs,
-    )
-    if not effective.enabled:
+    raw_file_guard = perms.get("file_guard")
+    file_guard = dict(raw_file_guard) if isinstance(raw_file_guard, dict) else {}
+    file_guard["dev_stable"] = True
+    perms["file_guard"] = file_guard
+    perms.pop("builtin", None)
+    perms["package_builtin_rules"] = False
+    runtime: dict[str, Any] = {
+        "trusted_dirs": [str(path) for path in (trusted_dirs or ())],
+    }
+    if workspace_root is not None:
+        runtime["workspace_root"] = str(workspace_root)
+    perms["runtime"] = runtime
+    engine = PermissionEngine(perms)
+    if not engine.component_active("file_guard"):
         return None
-    return FileGuardChecker(effective)
+    return DevStableFileGuard(engine)
 
 
 _PATH_CLASS_TOOLS = frozenset({
@@ -816,6 +869,7 @@ def report_legacy_path_rules_at_load(permissions: Mapping[str, Any]) -> list[str
 __all__ = [
     "EffectiveFileGuardConfig",
     "FileGuardAxisDefaults",
+    "DevStableFileGuard",
     "FileGuardChecker",
     "FileGuardPathRule",
     "build_file_guard_checker",
