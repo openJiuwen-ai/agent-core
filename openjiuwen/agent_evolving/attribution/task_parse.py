@@ -299,7 +299,7 @@ def _media_paths(text: str, workspace: str | None, folders: Sequence[str] = ()) 
     found: list[str] = []
     for match in _RE_MEDIA_PATH.finditer(text or ""):
         raw = match.group("path")
-        if match.start() >= 3 and text[match.start() - 3 : match.start()] == "://":  # a web URL, not a file
+        if match.start() >= 3 and text.endswith("://", 0, match.start()):  # a web URL, not a file
             continue
         path = _normalize_path(os.path.expanduser(raw), workspace)
         if path is None:

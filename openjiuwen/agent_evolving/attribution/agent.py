@@ -361,7 +361,11 @@ def _strip_skill_evolution(prompt: str) -> str:
         while run_end < len(lines) and re.match(r"^\d+\. ", lines[run_end]):
             run_end += 1
         run = lines[index:run_end]
-        numbers = [int(match.group(1)) for line in run if (match := re.match(r"^(\d+)\. ", line))]
+        numbers = []
+        for line in run:
+            match = re.match(r"^(\d+)\. ", line)
+            if match:
+                numbers.append(int(match.group(1)))
         if numbers and numbers != list(range(numbers[0], numbers[0] + len(numbers))):
             base = numbers[0]
             out.extend(re.sub(r"^\d+\. ", f"{base + offset}. ", line) for offset, line in enumerate(run))

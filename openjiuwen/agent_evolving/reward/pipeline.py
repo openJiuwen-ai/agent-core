@@ -473,11 +473,13 @@ async def rubric_for(task, config, options, producer):
     elif not fixed:
         progress.current().stage("criteria")
         criteria = await write_criteria(task, config, options, knowledge, producer, with_feedback=True)
-        placed = [{"criterion": c["id"]} for c in criteria for x in c["claims"] if x.get("source")]
+        for c in criteria:
+            placed.extend({"criterion": c["id"]} for x in c["claims"] if x.get("source"))
     if placed:   # the user's concerns and the run's errors become part of the rubric, kept for the next rounds
         log(f"user note / process signal placed in: {', '.join(sorted({str(p['criterion']) for p in placed}))}")
-    if rubric_path and not fixed and (not kept or placed):
-        save_rubric(rubric_path, criteria)
+    if rubric_path and not fixed:
+        if not kept or placed:
+            save_rubric(rubric_path, criteria)
     return criteria, chosen, knowledge
 
 
@@ -578,8 +580,12 @@ async def score_with(task, root, config, options, *, deliverable, inputs, tools,
     # one DeepAgent gathers evidence for every criterion, starting from the default walk
     gathered = await evidence_agent.gather(criteria, ctx, evidence_route, log, limits,
                                            prefetched=[walked] if walked else [])
-    browser_runs = list({id(f): f for evidence, _ in gathered.values()   # a check serving several criteria counts once
-                         for f in evidence if isinstance(f, dict) and f.get("tool") == "browser"}.values())
+    browser_checks = {}   # a check serving several criteria counts once
+    for evidence, _ in gathered.values():
+        for f in evidence:
+            if isinstance(f, dict) and f.get("tool") == "browser":
+                browser_checks[id(f)] = f
+    browser_runs = list(browser_checks.values())
     if browser_runs and all(f.get("could_not_run") for f in browser_runs):
         warn(f"浏览器检查全部没能运行（{str(browser_runs[0]['could_not_run'])[:200]}），"
              "作品的画面和交互都没有被实际看到。")

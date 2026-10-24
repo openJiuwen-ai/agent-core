@@ -290,7 +290,7 @@ class _ProgressLines:
         from openjiuwen.agent_evolving.reward.pipeline import WARNING
 
         if message.startswith(WARNING):  # what keeps part of the work unseen: shown as it is, the bar stays
-            self.line(self._percent, self._labels["warning"].format(text=message[len(WARNING) :]))
+            self.line(self._percent, self._labels["warning"].format(text=message.removeprefix(WARNING)))
         elif message.startswith("evidence ") and " for " in message:
             self._checks += 1
             tool = message.split("(", 1)[-1].split(")", 1)[0] if "(" in message else "-"
