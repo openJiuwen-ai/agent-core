@@ -131,6 +131,45 @@ class MemberDao:
             )
             return (await session.execute(stmt)).scalar_one_or_none() is not None
 
+    async def is_passive_human(self, team_name: str, member_name: str) -> bool:
+        """Return True if ``member_name`` is a passive human, including departed rows."""
+        return await self._is_role(team_name, member_name, "passive_human", ())
+
+    async def is_live_passive_human(self, team_name: str, member_name: str) -> bool:
+        """Return True if a passive human is still on the team."""
+        return await self._is_role(team_name, member_name, "passive_human", _DEPARTED_STATUS_VALUES)
+
+    async def is_reachable_passive_human(self, team_name: str, member_name: str) -> bool:
+        """Return True if a passive human can still be delivered to."""
+        return await self._is_role(team_name, member_name, "passive_human", _UNREACHABLE_STATUS_VALUES)
+
+    async def list_reachable_passive_human_names(self, team_name: str) -> list[str]:
+        """Return passive humans that can still receive a directed message."""
+        async with self._sessions.read() as session:
+            stmt = select(TeamMember.member_name).where(
+                TeamMember.team_name == team_name,
+                TeamMember.role == "passive_human",
+                TeamMember.status.notin_(_UNREACHABLE_STATUS_VALUES),
+            )
+            return list((await session.execute(stmt)).scalars().all())
+
+    async def _is_role(
+        self,
+        team_name: str,
+        member_name: str,
+        role: str,
+        excluded: tuple[str, ...],
+    ) -> bool:
+        async with self._sessions.read() as session:
+            stmt = select(TeamMember.member_name).where(
+                TeamMember.team_name == team_name,
+                TeamMember.member_name == member_name,
+                TeamMember.role == role,
+            )
+            if excluded:
+                stmt = stmt.where(TeamMember.status.notin_(excluded))
+            return (await session.execute(stmt)).scalar_one_or_none() is not None
+
     async def _is_human_agent_excluding(
         self,
         team_name: str,

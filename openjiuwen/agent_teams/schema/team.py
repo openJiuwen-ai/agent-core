@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.models.pool import ModelPoolEntry
-from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
+from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec, TeamModelConfig
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 
@@ -104,6 +104,7 @@ class TeamRole(str, Enum):
     LEADER = "leader"
     TEAMMATE = "teammate"
     HUMAN_AGENT = "human_agent"
+    PASSIVE_HUMAN = "passive_human"
     BRIDGE_AGENT = "bridge_agent"
     WORKER = "worker"
 
@@ -182,7 +183,16 @@ class TeamMemberSpec(MemberSpecBase):
         TeamRole.LEADER,
         TeamRole.TEAMMATE,
         TeamRole.HUMAN_AGENT,
+        TeamRole.PASSIVE_HUMAN,
     ] = TeamRole.TEAMMATE
+
+    agent_spec: Optional[DeepAgentSpec] = None
+    """Optional per-member DeepAgent spec for this run.
+
+    ``spawn_team_member`` writes it to ``agents[member_name]`` so
+    ``resolve_agent_spec`` hits it. Passive humans have no harness, so the
+    field is unused for that role.
+    """
 
 
 class BridgeMemberSpec(TeamMemberSpec):

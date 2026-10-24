@@ -153,6 +153,15 @@ class TeamMessageManager:
             team_logger.error(f"Failed to create broadcast message {message_id}")
             return None
 
+        await self.publish_broadcast(message_id, sender)
+        team_logger.debug(f"Broadcast message sent from {sender}: {message_id}")
+        return message_id
+
+    async def publish_broadcast(self, message_id: str, from_member_name: str) -> bool:
+        """Publish a broadcast event for a row that is already stored.
+
+        The event carries only the message id. Recipients load the row.
+        """
         try:
             await self.messager.publish(
                 topic_id=TeamTopic.MESSAGE.build(get_session_id(), self.team_name),
@@ -160,16 +169,15 @@ class TeamMessageManager:
                     BroadcastEvent(
                         message_id=message_id,
                         team_name=self.team_name,
-                        from_member_name=sender,
+                        from_member_name=from_member_name,
                     )
                 ),
             )
             team_logger.debug(f"Broadcast event published: {message_id}")
-        except Exception as e:
-            team_logger.error(f"Failed to publish broadcast event for {message_id}: {e}")
-
-        team_logger.debug(f"Broadcast message sent from {sender}: {message_id}")
-        return message_id
+            return True
+        except Exception as exc:
+            team_logger.error(f"Failed to publish broadcast event for {message_id}: {exc}")
+            return False
 
     async def multicast_message(
         self,

@@ -67,6 +67,19 @@ class TeamSectionName:
     LIFECYCLE = "team_lifecycle"
     EXTRA = "team_extra"
     INBOUND_TAGS = "team_inbound_tags"
+    ALL = frozenset(
+        {
+            IDENTITY,
+            ROLE,
+            HITT,
+            BRIDGE,
+            WORKFLOW,
+            DISPATCH,
+            LIFECYCLE,
+            EXTRA,
+            INBOUND_TAGS,
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -536,6 +549,36 @@ def build_team_bridge_section(
     )
 
 
+def _apply_prompt_overrides(
+    sections: list[PromptSection],
+    prompt_overrides: dict[str, str] | None,
+) -> list[PromptSection]:
+    """Replace or drop sections named in ``prompt_overrides``.
+
+    An empty string removes the section. A non-empty string replaces the
+    rendered body and keeps the original priority. A listed name that this
+    role did not render is left absent.
+    """
+    if not prompt_overrides:
+        return sections
+    result: list[PromptSection] = []
+    for section in sections:
+        if section.name not in prompt_overrides:
+            result.append(section)
+            continue
+        text = prompt_overrides[section.name]
+        if text == "":
+            continue
+        result.append(
+            PromptSection(
+                name=section.name,
+                content={language: text for language in section.content},
+                priority=section.priority,
+            )
+        )
+    return result
+
+
 def build_team_static_sections(
     *,
     role: TeamRole,
@@ -553,6 +596,7 @@ def build_team_static_sections(
     expose_human_agents_to_teammates: bool = False,
     include_member_specific: bool = False,
     workspace_prompt_variant: Literal["native", "external"] = "native",
+    prompt_overrides: dict[str, str] | None = None,
 ) -> list[PromptSection]:
     """Build the never-changing team sections for one member.
 
@@ -653,7 +697,7 @@ def build_team_static_sections(
     # <team-event> / <team-context> XML, so the inbound tag notice is always
     # included.
     sections.append(build_team_inbound_tags_section(language=language))
-    return sections
+    return _apply_prompt_overrides(sections, prompt_overrides)
 
 
 def build_team_member_system_prompt(
@@ -672,6 +716,7 @@ def build_team_member_system_prompt(
     hitt_enabled: bool = False,
     expose_human_agents_to_teammates: bool = False,
     workspace_prompt_variant: Literal["native", "external"] = "native",
+    prompt_overrides: dict[str, str] | None = None,
 ) -> str:
     """Render a member's team sections into a single standalone system prompt.
 
@@ -707,6 +752,7 @@ def build_team_member_system_prompt(
         expose_human_agents_to_teammates=expose_human_agents_to_teammates,
         include_member_specific=True,
         workspace_prompt_variant=workspace_prompt_variant,
+        prompt_overrides=prompt_overrides,
     )
     builder = SystemPromptBuilder(language=language)
     for section in sections:
