@@ -7,7 +7,7 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/`（70 文件，7 个子目录） |
 | 最近一次修订日期 | 2026-10-15 |
-| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
+| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_04_task-description-rail.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
 
@@ -56,7 +56,7 @@
    `90 TaskPlanningRail / ProgressiveToolRail / BaseInterruptRail / PermissionInterruptRail /
    BaseSecurityRail / VerificationRail` → `85 AgentModeRail / SafetyPromptRail /
    ContextAssembleRail / Context*ProcessorRail / MultimodalContextSummarizerRail / Skill*CreateRail` →
-   `80 MemoryRail / CodingMemoryRail / HeartbeatRail / Skill*EvolutionRail` →
+   `80 MemoryRail / CodingMemoryRail / HeartbeatRail / TaskDescriptionRail / Skill*EvolutionRail` →
    `75 ExternalMemoryRail / JiuwenMemoryRail`（外接记忆 rail，在 MemoryRail(80) 之后、
    LLMRetry(70) 之前） →
    `70 LLMRetryRail / ToolCallResilienceRail` → `60 EvolutionRail / LspRail` →
@@ -146,7 +146,7 @@ MultimodalContextSummarizerRail, ARCHIVED_SCREEN_PLACEHOLDER,
 PermissionInterruptRail, ProgressiveToolRail, SafetyPromptRail, SecurityAllow,
 SecurityCheckContext, SecurityDecision, SecurityInterrupt, SecurityReject, SecurityRail,
 SessionRail, SkillCreateRail, SkillEvolutionRail, SkillUseRail, SubagentRail,
-SysOperationRail, TaskCompletionRail, TaskPlanningRail, Team*Rail, TrajectoryRail,
+SysOperationRail, TaskCompletionRail, TaskDescriptionRail, TaskPlanningRail, Team*Rail, TrajectoryRail,
 VerificationContractRail, VerificationRail, ...
 
 class DeepAgentRail(AgentRail):
