@@ -82,6 +82,9 @@ async def memory_search_with_context(
             "results": results,
             "provider": status.get("provider"),
             "model": status.get("model"),
+            "search_mode": "semantic" if status.get("embedding", {}).get("available") else "keyword_only",
+            "embedding_available": bool(status.get("embedding", {}).get("available")),
+            "embedding_error": status.get("embedding", {}).get("error"),
             "disabled": False,
         }
     except Exception as e:
