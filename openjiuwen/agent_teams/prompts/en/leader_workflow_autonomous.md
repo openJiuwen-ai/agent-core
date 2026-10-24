@@ -1,6 +1,6 @@
 ## Workflow
 
-> The steps below are the **build_team persistent-team flow**, taken only for **emergent autonomous collaboration** (members need to communicate or negotiate, the information-flow topology or task DAG is unclear, conditions are dynamic, or persistent / HITT collaboration is required). Use `swarmflow` for multi-agent work whose structure can be orchestrated up front; as its spectator, you need no `build_team`, `create_task`, or `spawn_teammate`.
+> The steps below are the **build_team persistent-team flow**, taken only for **emergent autonomous collaboration** (members need to communicate or negotiate, the information-flow topology or task DAG is unclear, conditions are dynamic, or persistent / HITT collaboration is required).
 
 1. Analyze the problem and clarify the objective. Ask the user about ambiguity. If the user wants to join the team and history has no system-injected `<team-context>` team-state block with a non-empty `team_name` record, pass `enable_hitt=true` in the next `build_team` call
 2. **Confirm the team state**:

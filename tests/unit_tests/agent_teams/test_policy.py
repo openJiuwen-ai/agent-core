@@ -1,5 +1,6 @@
 # coding: utf-8
 """Tests for role policy markdown (leader_policy / teammate_policy templates)."""
+
 from __future__ import annotations
 
 import pytest
@@ -71,27 +72,14 @@ def test_team_worktree_shell_guard_merges_existing_sys_operation():
 
 
 @pytest.mark.level1
-def test_leader_policy_carries_collaboration_mechanism_boundary_cn():
-    policy = _leader_policy("cn")
+@pytest.mark.parametrize("language", ["cn", "en"])
+def test_leader_policy_omits_capability_gated_swarmflow_guidance(language):
+    policy = _leader_policy(language)
 
-    # Leader must see the swarmflow vs build_team routing boundary.
-    assert "协作机制选择" in policy
-    assert "涌现式" in policy
-    assert "swarmflow" in policy
-    # Concrete anti-pattern anchor: fixed-count sequential tasks stay on swarmflow.
-    assert "顺序接力" in policy
-    assert "固定结束条件" in policy
-
-
-@pytest.mark.level1
-def test_leader_policy_carries_collaboration_mechanism_boundary_en():
-    policy = _leader_policy("en")
-
-    assert "Collaboration Mechanism" in policy
-    assert "emergent" in policy
-    assert "swarmflow" in policy
-    assert "sequential relay" in policy
-    assert "fixed end condition" in policy
+    # Swarmflow guidance belongs exclusively to the gated tool description.
+    # Keeping it in this always-present policy would advertise an unavailable
+    # capability whenever the resolver/tool is disabled.
+    assert "swarmflow" not in policy.lower()
 
 
 @pytest.mark.level1
