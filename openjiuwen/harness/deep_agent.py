@@ -3649,11 +3649,11 @@ class DeepAgent(BaseAgent):
             self.save_state(session)
             self.clear_state(session)
             return RoundOutcome(next_work=next_work)
-        except Exception:
+        except Exception as exc:
             logger.exception("[DeepAgent] interaction round execution failed")
             return RoundOutcome(
                 error_code="round_execution_error",
-                error_message="interaction round execution failed",
+                error_message=str(exc) or "interaction round execution failed",
             )
         finally:
             self._invoke_active = False
@@ -4325,12 +4325,12 @@ class DeepAgent(BaseAgent):
                 )
         except asyncio.CancelledError:
             logger.info("[DeepAgent] round cancelled")
-        except Exception:
+        except Exception as exc:
             logger.exception("[DeepAgent] round execution failed")
             self._emit_interaction_event(
                 InteractionEvent.execution_error(
                     code="round_execution_error",
-                    message="round execution failed",
+                    message=str(exc) or "round execution failed",
                 )
             )
         finally:

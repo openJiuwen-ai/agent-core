@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-09-15 |
-| 关联 feature | `F_04_authoritative-terminal-stream.md` |
+| 最近一次修订日期 | 2026-10-18 |
+| 关联 feature | `F_04_authoritative-terminal-stream.md`、`F_22_interaction-round-error-causes.md` |
 
 ## 范围 / 边界
 
@@ -82,6 +82,12 @@
 15. 最终 payload 与 `invoke` 的返回契约一致，允许 rail 替换整个 result 对象。结构化 Browser
     partial/blocked 不是传输异常，TaskTool 保留其 evidence、retryable 和恢复字段；没有结构化
     结果的执行错误仍走框架异常路径。
+
+16. `run_one_round` 捕获普通异常时，`RoundOutcome` 保留 `str(exc)`；异常消息为空时才回退到
+    `interaction round execution failed`。`_execute_round` 的外层普通异常路径同样保留消息，
+    为空时回退到 `round execution failed`。两条路径继续使用 `round_execution_error`，
+    通过 `execution.error` 事件交付；日志保留异常 traceback，输出消息不附加 traceback、
+    异常属性或请求上下文。取消语义与 `finally` 中的运行态清理不变。
 
 ## 接口契约
 
