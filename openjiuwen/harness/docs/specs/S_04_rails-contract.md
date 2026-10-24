@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/rails/`（70 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-10-15 |
-| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_21_cua-desktop-subagent.md`、`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
+| ???????? | 2026-10-15 |
+| ?? feature | `F_01_ask-user-otel-events.md`?`F_02_genai-semconv-tool-spans.md`?`F_04_budget-notice-rail.md`?`F_21_cua-desktop-subagent.md`?`F_22_cli-jiuwen-memory-rail-mount-and-switch.md` |
 
 ## 范围 / 边界
 
@@ -139,7 +139,7 @@
 ```python
 # rails/__init__.py 公开导出（__all__ 节选）
 AgentModeRail, AskUserPayload, AskUserRail, BaseInterruptRail, BaseSecurityRail,
-CodingMemoryRail, ConfirmInterruptRail, ContextEvolutionRail, DeepAgentRail,
+BudgetNoticeRail, CodingMemoryRail, ConfirmInterruptRail, ContextEvolutionRail, DeepAgentRail,
 EvolutionRail, EvolutionInterruptRail, ExternalMemoryRail, HeartbeatRail,
 JiuwenMemoryRail, ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRail,
 MultimodalContextSummarizerRail, ARCHIVED_SCREEN_PLACEHOLDER,

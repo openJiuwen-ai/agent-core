@@ -28,6 +28,7 @@ from openjiuwen.harness.manifest import (
 )
 from openjiuwen.harness.prompts.tools.task_tool import GENERAL_PURPOSE_AGENT_DESC
 from openjiuwen.harness.rails.agent_mode_rail import AgentModeRail
+from openjiuwen.harness.rails.budget_notice_rail import BudgetNoticeRail
 from openjiuwen.harness.rails.context_engineer.context_assemble_rail import ContextAssembleRail
 from openjiuwen.harness.rails.mcp_rail import McpRail
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
@@ -59,6 +60,7 @@ TASK_COMPLETION = "core.task_completion"
 VERIFICATION = "core.verification"
 AGENT_MODE = "core.agent_mode"
 SKILL_CREATE = "core.skill_create"
+BUDGET_NOTICE = "core.budget_notice"
 
 SUBAGENT_EXPLORE = "core.subagent.explore_agent"
 SUBAGENT_PLAN = "core.subagent.plan_agent"
@@ -151,6 +153,7 @@ class TaskCompletionInput(ConstructionInput):
     allow_promise_details: bool = param_field(default=False, description="Allow promise detail tags.")
     max_rounds: int | None = param_field(default=None, description="Max task-loop rounds.")
     timeout_seconds: float | None = param_field(default=None, description="Task-loop timeout seconds.")
+    max_tokens: int | None = param_field(default=None, description="Task-loop cumulative token budget.")
 
 
 class VerificationInput(ConstructionInput):
@@ -170,6 +173,47 @@ def _build_verification_rail(params: dict[str, Any], context: Any) -> Verificati
     if allowed is not None and not isinstance(allowed, frozenset):
         allowed = frozenset(allowed)
     return VerificationRail(allowed_tools=allowed)
+
+
+class BudgetNoticeInput(ConstructionInput):
+    """Construction inputs for BudgetNoticeRail."""
+
+    enabled: bool = param_field(
+        default=True,
+        description="Whether the budget notice rail is active.",
+    )
+    round_remaining: int | None = param_field(
+        default=None,
+        description=(
+            "Absolute remaining-rounds threshold; overrides round_ratio for "
+            "the rounds budget."
+        ),
+    )
+    round_ratio: float | None = param_field(
+        default=None,
+        description="Fraction of the rounds budget remaining that warns.",
+    )
+    token_ratio: float | None = param_field(
+        default=None,
+        description="Fraction of the token budget remaining that warns.",
+    )
+    time_ratio: float | None = param_field(
+        default=None,
+        description="Fraction of the wall-clock budget remaining that warns.",
+    )
+
+
+def _build_budget_notice_rail(params: dict[str, Any], context: Any) -> BudgetNoticeRail:
+    """Build BudgetNoticeRail from resolved construction inputs."""
+    del context
+    p = dict(params or {})
+    return BudgetNoticeRail(
+        enabled=bool(p.get("enabled", True)),
+        round_remaining=p.get("round_remaining"),
+        round_ratio=p.get("round_ratio"),
+        token_ratio=p.get("token_ratio"),
+        time_ratio=p.get("time_ratio"),
+    )
 
 
 class AgentModeInput(ConstructionInput):
@@ -279,6 +323,13 @@ harness_element(
     description="Skill-creation evolution rail.",
     input_model=SkillCreateInput,
     builder=_build_skill_create_rail,
+)
+harness_element(
+    kind=ElementKind.RAIL,
+    name=BUDGET_NOTICE,
+    description="Task-loop budget wind-down notice rail.",
+    input_model=BudgetNoticeInput,
+    builder=_build_budget_notice_rail,
 )
 
 

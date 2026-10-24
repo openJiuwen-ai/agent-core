@@ -36,6 +36,7 @@ from openjiuwen.harness.rails.evolution import (
     TrajectoryRail,
 )
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
+from openjiuwen.harness.rails.budget_notice_rail import BudgetNoticeRail
 from openjiuwen.harness.rails.model_anomaly_detection_rail import (
     ModelAnomalyDetectionRail,
     ToolLoopCompactConfig,
@@ -92,6 +93,7 @@ __all__ = [
     "AskUserRail",
     "BaseInterruptRail",
     "BaseSecurityRail",
+    "BudgetNoticeRail",
     "CodingMemoryRail",
     "CapabilityIdentity",
     "CapabilitySnapshotProvider",
