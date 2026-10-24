@@ -3,19 +3,19 @@
 """TaskPlanningRail — registers todo tools on DeepAgent."""
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ToolCallInputs,
 )
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.prompts.sections.todo import (
     build_progress_reminder_user_prompt,
     build_todo_advance_reminder_user_prompt,
@@ -28,6 +28,7 @@ from openjiuwen.harness.schema.task import (
     TodoStatus,
 )
 from openjiuwen.harness.tools import TodoCreateTool, TodoTool
+from openjiuwen.harness.tools.todo_store import TODO_CONTEXT_KEY, bind_todo_context, todo_v2_enabled
 from openjiuwen.harness.workspace.workspace import WorkspaceNode
 
 _TODO_PROGRESS_REMINDER_KEY = "todo_progress_reminder"  # also tags advance injects (ent name)
@@ -197,9 +198,9 @@ class TaskPlanningRail(DeepAgentRail):
         """Register todo tools on the agent."""
         from openjiuwen.harness.deep_agent import DeepAgent
         from openjiuwen.harness.tools import (
+            TodoGetTool,
             TodoListTool,
             TodoModifyTool,
-            TodoGetTool,
         )
 
         if not (
@@ -271,6 +272,9 @@ class TaskPlanningRail(DeepAgentRail):
         reminder scheduled with language fallback is not stranded in the pending
         dict (enterprise returns early before inject; we keep inject first).
         """
+        todo_tool = self._find_todo_create_tool()
+        if todo_v2_enabled() and todo_tool is not None and ctx.session is not None:
+            ctx.extra[TODO_CONTEXT_KEY] = await todo_tool.prepare_context(ctx.session)
         await self._inject_pending_todo_reminder(ctx)
 
         if self.system_prompt_builder is None:
@@ -400,6 +404,14 @@ class TaskPlanningRail(DeepAgentRail):
         if tool is None:
             return
         tool.reset_invoke_marker(ctx.session.get_session_id())
+        if todo_v2_enabled():
+            ctx.extra[TODO_CONTEXT_KEY] = await tool.prepare_context(ctx.session, new_execution=True)
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        binding = ctx.extra.get(TODO_CONTEXT_KEY)
+        tool = self._find_todo_create_tool()
+        if isinstance(binding, dict) and tool is not None and ctx.session is not None:
+            bind_todo_context(tool.todo_store(ctx.session.get_session_id()).key, binding)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         """Log token usage summary and clean up caches after agent invoke."""
@@ -480,6 +492,13 @@ class TaskPlanningRail(DeepAgentRail):
             return
 
         session_id = ctx.session.get_session_id()
+
+        if isinstance(tool, TodoTool):
+            await tool.sync_plan_statuses(
+                session_id, {task.id: task.status for task in plan.tasks}, session=ctx.session,
+                expected={todo.id: todo.status for todo in self._todos_cache.get(session_id, [])},
+            )
+            return
 
         try:
             todos = await tool.load_todos(session_id)

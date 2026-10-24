@@ -1,21 +1,34 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-from typing import Any, Dict, List, Optional, Tuple, Literal, AsyncIterator
+import hashlib
+import json
+from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Tuple
 
+from openjiuwen.core.sys_operation.base import OperationMode
 from openjiuwen.core.sys_operation.fs import (
-    BaseFsOperation, DEFAULT_READ_CHUNK_SIZE, DEFAULT_READ_STREAM_CHUNK_SIZE,
-    DEFAULT_UPLOAD_CHUNK_SIZE, DEFAULT_UPLOAD_STREAM_CHUNK_SIZE,
-    DEFAULT_DOWNLOAD_CHUNK_SIZE, DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE
+    DEFAULT_DOWNLOAD_CHUNK_SIZE,
+    DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE,
+    DEFAULT_READ_CHUNK_SIZE,
+    DEFAULT_READ_STREAM_CHUNK_SIZE,
+    DEFAULT_UPLOAD_CHUNK_SIZE,
+    DEFAULT_UPLOAD_STREAM_CHUNK_SIZE,
+    BaseFsOperation,
 )
 from openjiuwen.core.sys_operation.registry import operation
-from openjiuwen.core.sys_operation.base import OperationMode
+from openjiuwen.core.sys_operation.result import (
+    DownloadFileResult,
+    DownloadFileStreamResult,
+    ListDirsResult,
+    ListFilesResult,
+    ReadFileResult,
+    ReadFileStreamResult,
+    SearchFilesResult,
+    UploadFileResult,
+    UploadFileStreamResult,
+    WriteFileResult,
+)
 from openjiuwen.core.sys_operation.sandbox.run_config import SandboxRunConfig
 from openjiuwen.core.sys_operation.sandbox.sandbox_mixin import BaseSandboxMixin
-from openjiuwen.core.sys_operation.result import (
-    ReadFileResult, ReadFileStreamResult, WriteFileResult,
-    UploadFileResult, UploadFileStreamResult, DownloadFileResult,
-    DownloadFileStreamResult, ListFilesResult, ListDirsResult, SearchFilesResult
-)
 
 
 @operation(name="fs", mode=OperationMode.SANDBOX, description="Sandbox file system operation")
@@ -28,6 +41,18 @@ class FsOperation(BaseFsOperation, BaseSandboxMixin):
     def __init__(self, name: str, mode: OperationMode, description: str, run_config: SandboxRunConfig):
         super().__init__(name, mode, description, run_config)
         self._init_sandbox_context(run_config, op_type="fs")
+
+    async def capabilities(self) -> dict[str, Any]:
+        """Ask the storage owner; proxy support is not a server guarantee."""
+        result = await self.invoke("capabilities")
+        return result if isinstance(result, dict) else {}
+
+    @property
+    def storage_namespace(self) -> str:
+        client = getattr(self, "_gateway_client", None)
+        isolation = client._isolation_key if client is not None else self._get_resolved_isolation_key()
+        identity = json.dumps(self._config.model_dump(mode="json"), sort_keys=True) + ":" + isolation
+        return "sandbox:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
 
     async def read_file(
             self, path: str, *, mode: Literal['text', 'bytes'] = "text",

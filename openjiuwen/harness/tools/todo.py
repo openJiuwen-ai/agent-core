@@ -1,16 +1,17 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import asyncio
+import copy
 import json
 import os.path
 import uuid as _uuid
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, List, Optional, Dict
+from typing import Any, AsyncIterator, Dict, List, Optional
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import tool_logger, LogEventType
-from openjiuwen.core.foundation.tool import Tool, ToolCard, Input, Output
+from openjiuwen.core.common.logging import LogEventType, tool_logger
+from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import build_tool_card
@@ -18,6 +19,19 @@ from openjiuwen.harness.schema.task import (
     STATUS_ICONS,
     TodoItem,
     TodoStatus,
+)
+from openjiuwen.harness.tools.todo_store import (
+    TODO_CONTEXT_KEY,
+    TODO_EXECUTION_KEY,
+    TodoCommitReceipt,
+    TodoItems,
+    TodoResult,
+    TodoSnapshot,
+    TodoStore,
+    bind_todo_context,
+    decode_todo_snapshot,
+    session_todo_binding,
+    todo_v2_enabled,
 )
 
 # Session-state key holding the current todo generation token. The host
@@ -110,6 +124,157 @@ class TodoTool(Tool):
         # 本 invoke 内是否已执行过 todo_create（由 TaskPlanningRail 在
         # before_invoke 重置，用于"同一 invoke 至多一次整表重建"的 guard）
         self._created_in_invoke: set = set()
+        self._invoke_ids: dict[str, str] = {}
+        self._stores: dict[str, TodoStore] = {}
+
+    def todo_store(self, session_id: str) -> TodoStore:
+        namespace = getattr(self.fs, "storage_namespace", "local")
+        namespace = namespace if isinstance(namespace, str) else "local"
+        key = f"{namespace}:{session_id}"
+        if key not in self._stores:
+            self._stores[key] = TodoStore(self.fs, self._get_file_path(session_id), namespace=namespace)
+        return self._stores[key]
+
+    async def transact(self, session_id: str, callback, *, session=None):
+        store = self.todo_store(session_id)
+        if store.active() is not None:
+            return await callback()
+        binding = session_todo_binding(session, store.key)
+        if await store.capable():
+            invoke_id = (binding or {}).get("invoke_id") or self._invoke_ids.setdefault(session_id, str(_uuid.uuid4()))
+            result = await store.transact(callback, binding=binding, invoke_id=invoke_id)
+            receipt = getattr(result, "todo_receipt", None)
+            if receipt is not None and receipt.snapshot.metadata is not None:
+                self.publish_commit_context(session_id, receipt, session=session, invoke_id=invoke_id)
+            return result[0] if isinstance(result, tuple) else result
+        if todo_v2_enabled():
+            raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                              reason="Todo v2 requires backend atomic compare-and-replace support")
+        return await store.coordinated(callback)
+
+    def publish_commit_context(self, session_id, receipt, *, session=None, invoke_id=""):
+        self.adopt_snapshot_context(session_id, receipt.snapshot, session=session, invoke_id=invoke_id)
+
+    def adopt_snapshot_context(self, session_id, snapshot, *, session=None, invoke_id=""):
+        if snapshot.metadata is None:
+            return
+        store = self.todo_store(session_id)
+        if store.active() is not None:
+            return
+        key = store.key
+        pinned = session_todo_binding(session, key)
+        if pinned and any(pinned.get(field) != snapshot.metadata.get(field) for field in ("store_id", "writer_epoch")):
+            return
+        invoke_id = invoke_id or (pinned or {}).get("invoke_id") or self._invoke_ids.setdefault(session_id, str(_uuid.uuid4()))
+        bind_todo_context(key, {**snapshot.binding(), "invoke_id": invoke_id, "revision": snapshot.metadata["revision"]})
+        self._publish_context(session, snapshot, invoke_id)
+
+    def _read_result(self, result, tasks, session_id, session):
+        snapshot = getattr(tasks, "todo_snapshot", None)
+        if snapshot is None:
+            return result
+        self.adopt_snapshot_context(session_id, snapshot, session=session)
+        return TodoResult(result, TodoCommitReceipt(snapshot, False, 0, 0.0, 0.0))
+
+    @staticmethod
+    def _publish_context(session, snapshot, invoke_id):
+        getter, setter = getattr(session, "get_state", None), getattr(session, "update_state", None)
+        if not callable(setter):
+            return
+        current = getter(TODO_CONTEXT_KEY) if callable(getter) else None
+        binding = {**snapshot.binding(), "invoke_id": invoke_id, "revision": snapshot.metadata["revision"]}
+        if isinstance(current, dict):
+            if current.get("writer_epoch") != binding["writer_epoch"]:
+                return
+            if int(current.get("revision", "0")) > int(binding["revision"]):
+                return
+        setter({TODO_CONTEXT_KEY: binding})
+
+    async def prepare_context(self, session, *, new_execution: bool = False):
+        """Pin model/tool tasks to an execution before they can run concurrently."""
+        if not todo_v2_enabled() or session is None:
+            return None
+        session_id = session.get_session_id()
+        store = self.todo_store(session_id)
+        if store.active() is not None:
+            return session_todo_binding(session, store.key)
+        getter = getattr(session, "get_state", None)
+        requested = getter(TODO_EXECUTION_KEY) if callable(getter) else None
+        invoke_id = requested if isinstance(requested, str) and requested else self._invoke_ids.setdefault(
+            session_id, str(_uuid.uuid4()))
+        previous = session_todo_binding(session, store.key)
+        if not new_execution and previous:
+            current = getter(TODO_CONTEXT_KEY) if callable(getter) else None
+            if isinstance(current, dict):
+                if current.get("writer_epoch") != previous.get("writer_epoch"):
+                    raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                                      reason="This Todo execution has been superseded")
+                bind_todo_context(store.key, current)
+                return current
+            return previous
+
+        async def prepare():
+            transaction = store.active()
+            meta = transaction.metadata
+            if new_execution:
+                meta["writer_epoch"] = invoke_id
+            elif previous and previous.get("writer_epoch") != meta["writer_epoch"]:
+                raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                                  reason="This Todo execution has been superseded")
+            if "generation_token" not in meta:
+                meta["generation_token"] = self._session_generation_token(session)
+            return {}
+
+        result = await store.transact(prepare, invoke_id=invoke_id)
+        binding = {**result.todo_receipt.snapshot.binding(), "invoke_id": invoke_id,
+                   "revision": result.todo_receipt.snapshot.metadata["revision"]}
+        bind_todo_context(store.key, binding)
+        setter = getattr(session, "update_state", None)
+        if callable(setter):
+            setter({TODO_CONTEXT_KEY: dict(binding)})
+        return binding
+
+    async def update_todos(self, session_id: str, mutation, *, session=None):
+        """Apply a synchronous, side-effect-free mutation to the latest items."""
+        async def apply():
+            todos = await self.load_todos(session_id)
+            changed = mutation(todos)
+            if changed is not False:
+                await self.save_todos(session_id, todos)
+            return {"changed": changed is not False}
+        return await self.transact(session_id, apply, session=session)
+
+    async def sync_plan_statuses(self, session_id: str, statuses: dict, *, expected: dict | None = None, session=None):
+        """Merge status intentions; never replay cached TaskPlan membership."""
+        def merge(todos):
+            changed = False
+            for todo in todos:
+                if (todo.meta_data or {}).get("persistent") or todo.status in (TodoStatus.COMPLETED, TodoStatus.CANCELLED):
+                    continue
+                desired = statuses.get(todo.id)
+                if desired is None or desired == todo.status:
+                    continue
+                if expected and todo.id in expected and expected[todo.id] != todo.status:
+                    continue
+                todo.status = desired
+                changed = True
+            return changed
+        return await self.update_todos(session_id, merge, session=session)
+
+    @staticmethod
+    def _stable_new_ids(inputs):
+        data = copy.deepcopy(inputs)
+        if not isinstance(data, dict):
+            return data
+        creating = "tasks" in data
+        items = data.get("tasks") if creating else data.get("todos") if data.get("action") == "append" else None
+        if data.get("action") in ("insert_before", "insert_after") and isinstance(data.get("todo_data"), dict):
+            items = data["todo_data"].get("items")
+        if isinstance(items, list):
+            for item in items:
+                if isinstance(item, dict) and (creating or "id" in item):
+                    item["id"] = str(item.get("id") or "").strip() or str(_uuid.uuid4())
+        return data
 
     def _get_file_path(self, session_id: str) -> str:
         """Get the file path for a given session_id.
@@ -134,6 +299,13 @@ class TodoTool(Tool):
         Raises:
             ToolError: If file loading/parsing fails.
         """
+        store = self.todo_store(session_id)
+        transaction = store.active()
+        if transaction is not None:
+            return TodoItems(TodoSnapshot(transaction.todos, transaction.metadata,
+                                          transaction.original.content_sha256, transaction.original.exists))
+        if await store.capable():
+            return TodoItems(await store.read())
         async with self._lock_manager.operation(session_id):
             file_path = self._get_file_path(session_id)
             abs_path = os.path.abspath(file_path)
@@ -153,7 +325,7 @@ class TodoTool(Tool):
                 )
 
             data = json.loads(read_res.data.content)
-            todos = [TodoItem.from_dict(item) for item in data]
+            todos = TodoItems(decode_todo_snapshot(data))
             tool_logger.info(
                 "Successfully loaded todo items",
                 event_type=LogEventType.TOOL_CALL_END
@@ -170,6 +342,29 @@ class TodoTool(Tool):
         Raises:
             ToolError: If file writing fails.
         """
+        store = self.todo_store(session_id)
+        transaction = store.active()
+        if transaction is not None:
+            transaction.stage(todos)
+            return
+        snapshot = getattr(todos, "todo_snapshot", None)
+        if await store.capable():
+            async def save():
+                current = store.active()
+                if snapshot is not None:
+                    if snapshot.content_sha256 != current.original.content_sha256:
+                        raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                                          reason="Todo snapshot changed; use update_todos with an incremental mutation")
+                elif current.original.exists:
+                    raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                                      reason="Saving an existing Todo list requires its read snapshot")
+                current.stage(todos)
+                return {}
+            await store.transact(save, binding=snapshot.binding() if snapshot else None)
+            return
+        if snapshot is not None and snapshot.metadata is not None:
+            raise build_error(StatusCode.TOOL_TODOS_SAVE_FAILED,
+                              reason="This backend cannot safely write a versioned Todo snapshot")
         async with self._lock_manager.operation(session_id):
             file_path = self._get_file_path(session_id)
             abs_path = os.path.abspath(file_path)
@@ -201,6 +396,7 @@ class TodoTool(Tool):
         整表覆盖自然清理。
         """
         self._created_in_invoke.discard(session_id)
+        self._invoke_ids[session_id] = str(_uuid.uuid4())
 
     def cleanup_session(self, session_id: str) -> None:
         """Clean up resources for a session (call when session ends).
@@ -210,6 +406,8 @@ class TodoTool(Tool):
         """
         self._lock_manager.cleanup_session(session_id)
         self._created_in_invoke.discard(session_id)
+        self._invoke_ids.pop(session_id, None)
+        self._stores = {key: store for key, store in self._stores.items() if not key.endswith(f":{session_id}")}
 
     @staticmethod
     def _session_generation_token(session: Any) -> Optional[str]:
@@ -236,7 +434,7 @@ class TodoCreateTool(TodoTool):
         operation: SysOperation,
         workspace: Optional[str] = None,
         language: str = "cn",
-        agent_id: Optional[str] = None,
+        agent_id: str | None = None,
         lock_manager: Optional[TodoLockManager] = None,
     ):
         super().__init__(
@@ -248,6 +446,23 @@ class TodoCreateTool(TodoTool):
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
         """Asynchronous invocation handler for TodoCreate tool operations
+
+        The complete create operation, including host reminder adapters, can
+        nest in a transaction. The in-memory marker changes only after commit.
+        """
+        session = kwargs.get("session")
+        session_id = session.get_session_id() if session and hasattr(session, "get_session_id") else None
+        if session_id is None:
+            return await self._invoke_uncommitted(inputs, **kwargs)
+        prepared = self._stable_new_ids(inputs)
+        outer = self.todo_store(session_id).active() is None
+        result = await self.transact(session_id, lambda: self._invoke_uncommitted(prepared, **kwargs), session=session)
+        if outer:
+            self._created_in_invoke.add(session_id)
+        return result
+
+    async def _invoke_uncommitted(self, inputs: Input, **kwargs) -> Output:
+        """Validate and stage task creation.
 
         Args:
             inputs: Input parameters dictionary containing task creation data
@@ -273,7 +488,8 @@ class TodoCreateTool(TodoTool):
             if tasks_input and isinstance(tasks_input, list):
                 generation_token = self._session_generation_token(session)
                 results["message"] = await self._create_from_list(
-                    session_id, tasks_input, generation_token=generation_token
+                    session_id, tasks_input, generation_token=generation_token,
+                    plan_action=inputs.get("plan_action", "initialize"),
                 )
                 return results
 
@@ -343,6 +559,19 @@ class TodoCreateTool(TodoTool):
         tasks_data: List[Dict[str, Any]],
         *,
         generation_token: Optional[str] = None,
+        plan_action: str = "initialize",
+    ) -> str:
+        prepared = self._stable_new_ids({"tasks": tasks_data})["tasks"]
+        outer = self.todo_store(session_id).active() is None
+        result = await self.transact(session_id, lambda: self._create_from_list_uncommitted(
+            session_id, prepared, generation_token=generation_token, plan_action=plan_action))
+        if outer:
+            self._created_in_invoke.add(session_id)
+        return result
+
+    async def _create_from_list_uncommitted(
+        self, session_id: str, tasks_data: List[Dict[str, Any]], *,
+        generation_token: Optional[str] = None, plan_action: str = "initialize",
     ) -> str:
         """Create todo items from a JSON array of task objects."""
         if not tasks_data:
@@ -351,6 +580,23 @@ class TodoCreateTool(TodoTool):
                 reason="Task list cannot be empty"
             )
         await self._reject_recreate_within_invoke(session_id)
+        transaction = self.todo_store(session_id).active()
+        if transaction is not None and transaction.metadata is not None:
+            if plan_action not in {"initialize", "new", "rebuild"}:
+                raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID, reason="Invalid plan_action")
+            if transaction.metadata.get("last_create_invoke_id") == transaction.invoke_id:
+                raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                                  reason="todo_create has already rebuilt this invoke; use todo_modify")
+            active = [item for item in transaction.todos
+                      if item.get("status", "pending") in {"pending", "in_progress"}
+                      and not (item.get("meta_data") or {}).get("persistent")]
+            if active and plan_action == "initialize":
+                raise build_error(StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                                  reason="An active plan exists. Use todo_modify to adjust it, or explicitly "
+                                         "choose plan_action=new/rebuild for a new plan")
+            transaction.metadata.update(plan_id=str(_uuid.uuid5(_uuid.NAMESPACE_OID, transaction.commit_id)),
+                                        last_create_invoke_id=transaction.invoke_id,
+                                        generation_token=generation_token, legacy_plan=False)
         new_todos = []
         seen_ids: set = set()
         for i, task_data in enumerate(tasks_data):
@@ -386,7 +632,6 @@ class TodoCreateTool(TodoTool):
             )
 
         await self.save_todos(session_id, new_todos)
-        self._created_in_invoke.add(session_id)
         tool_logger.info("Created todo items from JSON array", event_type=LogEventType.TOOL_CALL_END)
         return self._format_create_result(new_todos)
 
@@ -399,7 +644,7 @@ class TodoListTool(TodoTool):
         operation: SysOperation,
         workspace: Optional[str] = None,
         language: str = "cn",
-        agent_id: Optional[str] = None,
+        agent_id: str | None = None,
         lock_manager: Optional[TodoLockManager] = None,
     ):
         super().__init__(
@@ -431,14 +676,19 @@ class TodoListTool(TodoTool):
             )
 
         try:
+            await self.prepare_context(session)
             tasks = await self.load_todos(session_id)
+            snapshot = getattr(tasks, "todo_snapshot", None)
+            if snapshot is not None:
+                self.adopt_snapshot_context(session_id, snapshot, session=session)
             active_tasks = [
                 t for t in tasks
                 if t.status not in (TodoStatus.CANCELLED, TodoStatus.COMPLETED)
             ]
             # 请求隔离：过滤已被新一轮请求取代的旧代条目，让 LLM 视图与
             # 前端广播（todo.updated / task.update）一致。未打标条目放行。
-            generation_token = self._session_generation_token(session)
+            generation_token = snapshot.metadata.get("generation_token") if snapshot is not None and snapshot.metadata is not None \
+                else self._session_generation_token(session)
             if generation_token:
                 active_tasks = [
                     t for t in active_tasks
@@ -453,7 +703,7 @@ class TodoListTool(TodoTool):
                 }
                 for t in active_tasks
             ]
-            return {"tasks": simplified}
+            return self._read_result({"tasks": simplified}, tasks, session_id, session)
         except Exception as e:
             tool_logger.error(
                 "Todo list tool invocation failed",
@@ -478,7 +728,7 @@ class TodoGetTool(TodoTool):
         operation: SysOperation,
         workspace: Optional[str] = None,
         language: str = "cn",
-        agent_id: Optional[str] = None,
+        agent_id: str | None = None,
         lock_manager: Optional[TodoLockManager] = None,
     ):
         super().__init__(
@@ -505,10 +755,11 @@ class TodoGetTool(TodoTool):
             )
 
         try:
+            await self.prepare_context(session)
             tasks = await self.load_todos(session_id)
             for task in tasks:
                 if task.id == task_id:
-                    return {"todo": task.to_dict()}
+                    return self._read_result({"todo": task.to_dict()}, tasks, session_id, session)
             raise build_error(
                 StatusCode.TOOL_TODOS_INVOKE_FAILED,
                 reason=f"Task with id '{task_id}' not found"
@@ -540,7 +791,7 @@ class TodoModifyTool(TodoTool):
         operation: SysOperation,
         workspace: Optional[str] = None,
         language: str = "cn",
-        agent_id: Optional[str] = None,
+        agent_id: str | None = None,
         lock_manager: Optional[TodoLockManager] = None,
     ):
         super().__init__(
@@ -551,6 +802,14 @@ class TodoModifyTool(TodoTool):
         )
 
     async def invoke(self, inputs: Input, **kwargs) -> Output:
+        session = kwargs.get("session")
+        session_id = session.get_session_id() if session and hasattr(session, "get_session_id") else None
+        if session_id is None:
+            return await self._invoke_uncommitted(inputs, **kwargs)
+        prepared = self._stable_new_ids(inputs)
+        return await self.transact(session_id, lambda: self._invoke_uncommitted(prepared, **kwargs), session=session)
+
+    async def _invoke_uncommitted(self, inputs: Input, **kwargs) -> Output:
         session = kwargs.get("session", None)
         session_id = session.get_session_id() if session and hasattr(session, "get_session_id") else None
         if session_id is None:
@@ -569,7 +828,9 @@ class TodoModifyTool(TodoTool):
                 )
 
             current_todos = await self.load_todos(session_id)
-            generation_token = self._session_generation_token(session)
+            transaction = self.todo_store(session_id).active()
+            generation_token = transaction.metadata.get("generation_token") if transaction is not None and transaction.metadata is not None \
+                else self._session_generation_token(session)
 
             if action == "delete":
                 ids = inputs.get("ids")
@@ -841,7 +1102,7 @@ class TodoModifyTool(TodoTool):
         self,
         session_id: str,
         target_id: str,
-        insert_todos_data: List[Dict],
+        insert_todos_data: List[dict],
         current_todos: List[TodoItem],
         *,
         generation_token: Optional[str] = None,
@@ -873,7 +1134,7 @@ class TodoModifyTool(TodoTool):
         self,
         session_id: str,
         target_id: str,
-        insert_todos_data: List[Dict],
+        insert_todos_data: List[dict],
         current_todos: List[TodoItem],
         *,
         generation_token: Optional[str] = None,
@@ -906,8 +1167,8 @@ def create_todos_tool(
     operation: SysOperation,
     workspace: Optional[str] = None,
     language: str = "cn",
-    agent_id: Optional[str] = None,
-) -> List[TodoTool]:
+    agent_id: str | None = None,
+) -> list[TodoTool]:
     """Create a set of todo tools that share the same lock manager.
 
 

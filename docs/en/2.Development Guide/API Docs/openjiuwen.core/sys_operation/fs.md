@@ -295,3 +295,14 @@ Asynchronously search files under the specified path.
 **Returns**:
 
 **[SearchFilesResult](./result.md#class-searchfilesresult)**, search files result.
+
+
+## Conditional atomic writes
+
+`capabilities()` explicitly reports `atomic_compare_replace`; the local backend supports it, while sandbox support must be confirmed by the remote service. `storage_namespace` identifies the actual backend isolation domain. These helpers are not model-facing tools.
+
+A complete `read_file` with `options={"include_content_sha256": True, "missing_ok": True}` returns the raw-byte digest and `exists` with the content. A missing file and an empty file are distinct. Partial snapshot reads are rejected.
+
+Use `write_file(..., prepend_newline=False, options={"atomic_replace": True, "expected_exists": exists, "expected_content_sha256": digest})`. Preconditions and same-directory atomic replacement run under one backend file lock. Successful writes confirm `data.atomic_replace`; a stale precondition returns `failure_kind="conflict"`. Append is incompatible with atomic replacement; ordinary writes retain their defaults.
+
+Cancellation drains the worker before releasing the lock. A canceled call may already have committed: read back before retrying. This provides complete-file publication, not a power-loss durability guarantee. Cross-machine/shared-volume deployment needs its own backend and lock-topology validation.

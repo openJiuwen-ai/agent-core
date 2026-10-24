@@ -1,8 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-from typing import Union, Literal, List, Optional
+from typing import List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from openjiuwen.core.sys_operation.result import BaseResult
 
@@ -12,6 +12,8 @@ class ReadFileData(BaseModel):
     path: str = Field(..., description="File path of the read file")
     content: Union[str, bytes] = Field(..., description="File content (text string or binary bytes)")
     mode: Literal['text', 'bytes'] = Field(..., description="File read mode: 'text' (string) or 'bytes' (binary)")
+    content_sha256: str | None = None
+    exists: bool | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -33,6 +35,7 @@ class WriteFileData(BaseModel):
     path: str = Field(..., description="File path of the write file")
     size: int = Field(..., description="File content size in bytes")
     mode: Literal['text', 'bytes'] = Field(..., description="File write mode: 'text' (string) or 'bytes' (binary)")
+    atomic_replace: bool | None = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
@@ -113,7 +116,7 @@ class SearchFilesData(BaseModel):
 
 class ReadFileResult(BaseResult[ReadFileData]):
     """ReadFileResult"""
-    pass
+    failure_kind: str | None = None
 
 
 class ReadFileStreamResult(BaseResult[ReadFileChunkData]):
@@ -123,7 +126,7 @@ class ReadFileStreamResult(BaseResult[ReadFileChunkData]):
 
 class WriteFileResult(BaseResult[WriteFileData]):
     """WriteFileResult"""
-    pass
+    failure_kind: str | None = None
 
 
 class UploadFileResult(BaseResult[UploadFileData]):

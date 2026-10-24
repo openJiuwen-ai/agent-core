@@ -2,13 +2,22 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import re
 from abc import ABC, abstractmethod
-from typing import Literal, Optional, Tuple, Dict, Any, AsyncIterator, List
+from typing import Any, AsyncIterator, Dict, List, Literal, Optional, Tuple
 
-from openjiuwen.core.sys_operation.base import BaseOperation
 from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.sys_operation.result import ReadFileResult, ReadFileStreamResult, WriteFileResult, \
-    UploadFileResult, UploadFileStreamResult, DownloadFileResult, DownloadFileStreamResult, ListFilesResult, \
-    ListDirsResult, SearchFilesResult
+from openjiuwen.core.sys_operation.base import BaseOperation
+from openjiuwen.core.sys_operation.result import (
+    DownloadFileResult,
+    DownloadFileStreamResult,
+    ListDirsResult,
+    ListFilesResult,
+    ReadFileResult,
+    ReadFileStreamResult,
+    SearchFilesResult,
+    UploadFileResult,
+    UploadFileStreamResult,
+    WriteFileResult,
+)
 
 SAFE_PATH_PATTERN = re.compile(r'[^\w.-]')
 
@@ -24,6 +33,16 @@ TAIL_CHUNK_SIZE = 1024
 
 class BaseFsOperation(BaseOperation, ABC):
     """Base file system operation"""
+
+    supports_atomic_compare_replace = False
+
+    @property
+    def storage_namespace(self) -> str:
+        return "local"
+
+    async def capabilities(self) -> dict[str, Any]:
+        """Backend guarantees, never inferred merely from accepted options."""
+        return {"atomic_compare_replace": self.supports_atomic_compare_replace}
 
     def list_tools(self) -> List[ToolCard]:
         method_names = [

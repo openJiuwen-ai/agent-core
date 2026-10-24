@@ -11,7 +11,7 @@ import uuid
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TodoStatus(str, Enum):
@@ -48,6 +48,8 @@ class TodoItem(BaseModel):
         selected_model_id: Optional model ID to use when executing this task.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     id: str = Field(
         default_factory=lambda: str(uuid.uuid4()),
         description="Unique task identifier (short semantic string preferred, e.g. 'translate_doc')",
@@ -74,6 +76,7 @@ class TodoItem(BaseModel):
     def to_dict(self) -> Dict[str, Any]:
         """Convert to JSON-serializable dict."""
         return {
+            **(self.model_extra or {}),
             "id": self.id,
             "content": self.content,
             "activeForm": self.activeForm,
@@ -90,6 +93,7 @@ class TodoItem(BaseModel):
     def from_dict(cls, data: Dict[str, Any]) -> "TodoItem":
         """Build from persisted dict."""
         return cls(
+            **{key: value for key, value in data.items() if key not in cls.model_fields},
             id=data.get("id", str(uuid.uuid4())),
             content=data.get("content", ""),
             activeForm=data.get("activeForm", ""),

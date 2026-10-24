@@ -295,3 +295,14 @@ abstractmethod async search_files(
 **返回**：
 
 **[SearchFilesResult](./result.md#class-searchfilesresult)**，搜索文件结果。
+
+## 条件原子写入（Todo 提交）
+
+`capabilities()` 返回 `atomic_compare_replace`，本地后端为 true；沙箱需远端服务明确返回 true，不能从可透传 options 推断支持。
+`storage_namespace` 用于区分实际后端/沙箱隔离域。能力查询不注册为模型可调用文件工具。
+
+完整读取使用 `read_file(..., options={"include_content_sha256": True, "missing_ok": True})`，同一次读取返回原始字节 `content_sha256` 和 `exists`。缺文件不等于空文件；空文件仍须由 Todo codec 拒绝。不能与分段读取组合。
+
+提交使用 `write_file(..., prepend_newline=False, options={"atomic_replace": True, "expected_exists": exists, "expected_content_sha256": digest})`。本地后端在同一文件锁内核对前置条件并同目录原子替换；成功 data.atomic_replace 为 true，前置条件冲突返回 failure_kind=conflict。普通文件写入默认语义不变，atomic_replace 不支持 append。
+
+取消会等待后台文件发布结束后释放锁；可能已提交，调用方须读回确认，不能盲目重放。该接口保证进程并发与完整文件发布，不宣称断电 fsync 持久性。跨机器共享卷须确认锁目录/后端拓扑支持，单机文件锁不能证明分布式互斥。

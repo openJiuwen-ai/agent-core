@@ -26,7 +26,7 @@ TODO_CREATE_DESCRIPTION_CN = """
 - 第一个任务自动设为 in_progress，其余为 pending
 - 同一时间只能有一个 in_progress 任务
 - 任务描述必须具体、可执行、清晰明确
-- 调用本工具会覆盖当前会话的任务列表；若需追加任务，请使用 todo_modify
+- 当前计划的追加、描述和状态调整请使用 todo_modify。明确开始新计划使用 plan_action=new，明确重建使用 plan_action=rebuild；默认 initialize 只用于初始化，不用于替换活跃计划
 - 当没有获取到当前可用模型信息时，不要添加 selected_model_id 字段；否则必须添加 selected_model_id 指定执行任务的模型 ID
 """
 
@@ -44,7 +44,7 @@ Input is a JSON array (each task must include an id field):
 - First task is automatically set to in_progress, others to pending
 - Only one task can be in_progress at a time
 - Task descriptions must be specific, actionable, and clear
-- Calling this tool replaces the current session's task list; use todo_modify to append tasks
+- Use todo_modify for additions and changes to the current plan. Choose plan_action=new for an explicit new plan or rebuild for explicit replanning; initialize is the default and does not replace an active plan
 - When the currently available model information is not obtained, the selected_model_id field should not be added; otherwise, selected_model_id must be added to specify the model ID for executing the task.
 """
 
@@ -385,6 +385,10 @@ def get_todo_create_input_params(language: str = "cn") -> Dict[str, Any]:
     return {
         "type": "object",
         "properties": {
+            "plan_action": {
+                "type": "string", "enum": ["initialize", "new", "rebuild"],
+                "description": "Explicit plan boundary; use todo_modify for ordinary changes",
+            },
             "tasks": {
                 "type": "array",
                 "description": tasks_desc,

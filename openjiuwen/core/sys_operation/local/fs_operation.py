@@ -8,29 +8,51 @@ import os
 import pathlib
 from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
-from typing import Optional, Tuple, Dict, Any, Literal, List, AsyncIterator, Iterator
-
-from pydantic import BaseModel, field_validator
+from typing import Any, AsyncIterator, Dict, Iterator, List, Literal, Optional, Tuple
 
 import aiofiles
+from pydantic import BaseModel, field_validator
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import LogEventType, sys_operation_logger
-from openjiuwen.core.sys_operation.fs import BaseFsOperation, DEFAULT_READ_STREAM_CHUNK_SIZE, DEFAULT_READ_CHUNK_SIZE, \
-    DEFAULT_UPLOAD_CHUNK_SIZE, DEFAULT_UPLOAD_STREAM_CHUNK_SIZE, DEFAULT_DOWNLOAD_CHUNK_SIZE, \
-    DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE, TAIL_CHUNK_SIZE
 from openjiuwen.core.sys_operation.base import OperationMode
+from openjiuwen.core.sys_operation.fs import (
+    DEFAULT_DOWNLOAD_CHUNK_SIZE,
+    DEFAULT_DOWNLOAD_STREAM_CHUNK_SIZE,
+    DEFAULT_READ_CHUNK_SIZE,
+    DEFAULT_READ_STREAM_CHUNK_SIZE,
+    DEFAULT_UPLOAD_CHUNK_SIZE,
+    DEFAULT_UPLOAD_STREAM_CHUNK_SIZE,
+    TAIL_CHUNK_SIZE,
+    BaseFsOperation,
+)
+from openjiuwen.core.sys_operation.local._atomic_file import atomic_replace_file
+from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 from openjiuwen.core.sys_operation.registry import operation
 from openjiuwen.core.sys_operation.result import (
-    ReadFileResult, WriteFileResult, \
-    UploadFileResult, DownloadFileResult, ListFilesResult, ListDirsResult, SearchFilesResult, \
-    ReadFileStreamResult, DownloadFileStreamResult, UploadFileStreamResult,
-    ReadFileData, ReadFileChunkData, WriteFileData, UploadFileData, DownloadFileData,
-    FileSystemItem, FileSystemData, SearchFilesData, DownloadFileChunkData, UploadFileChunkData
+    DownloadFileChunkData,
+    DownloadFileData,
+    DownloadFileResult,
+    DownloadFileStreamResult,
+    FileSystemData,
+    FileSystemItem,
+    ListDirsResult,
+    ListFilesResult,
+    ReadFileChunkData,
+    ReadFileData,
+    ReadFileResult,
+    ReadFileStreamResult,
+    SearchFilesData,
+    SearchFilesResult,
+    UploadFileChunkData,
+    UploadFileData,
+    UploadFileResult,
+    UploadFileStreamResult,
+    WriteFileData,
+    WriteFileResult,
 )
 from openjiuwen.core.sys_operation.result.base_result import build_operation_error_result
-from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 
 # Text-mode read_file cannot decode these as UTF-8. Office/PDF are ZIP or binary
 # containers; callers should use dedicated parsers or mode='bytes'.
@@ -164,6 +186,8 @@ class _ErrorLogParams:
 class FsOperation(BaseFsOperation):
     """File system operation"""
 
+    supports_atomic_compare_replace = True
+
     @staticmethod
     def _get_lock_timeout(options: Optional[Dict[str, Any]] = None) -> float:
         """Gets the file lock timeout value from options or uses default.
@@ -273,6 +297,27 @@ class FsOperation(BaseFsOperation):
         ))
         try:
             # Create _ReadParams object
+            if options and options.get("include_content_sha256"):
+                if head is not None or tail is not None or line_range is not None or chunk_size:
+                    raise build_error(StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+                                      execution="read_file", error_msg="A snapshot read must read the complete file")
+                file_path = self._resolve_path(path)
+                if options.get("expected_resolved_path") and os.path.normcase(str(file_path)) != os.path.normcase(options["expected_resolved_path"]):
+                    raise OSError("Snapshot path changed while resolving the file")
+                async with self._file_lock(file_path, "read", self._get_lock_timeout(options)):
+                    try:
+                        raw = await self._read_bytes(file_path, 0)
+                        exists = True
+                    except FileNotFoundError:
+                        if not options.get("missing_ok"):
+                            raise
+                        raw, exists = b"", False
+                return ReadFileResult(
+                    code=0, message=StatusCode.SUCCESS.errmsg,
+                    data=ReadFileData(path=str(file_path), mode=mode,
+                                      content=raw.decode(encoding) if mode == "text" else raw,
+                                      content_sha256=hashlib.sha256(raw).hexdigest(), exists=exists),
+                )
             read_params = _ReadParams(
                 path=path,
                 head=head,
@@ -467,6 +512,8 @@ class FsOperation(BaseFsOperation):
         ))
         try:
             file_path = self._resolve_path(path, create_parent=True)
+            if options and options.get("expected_resolved_path") and os.path.normcase(str(file_path)) != os.path.normcase(options["expected_resolved_path"]):
+                raise OSError("Atomic-write path changed while resolving the file")
             if file_path.is_dir():
                 return self._create_error_result("write_file", f"Target path is a directory:"
                                                                f" {file_path}", WriteFileResult,
@@ -479,6 +526,15 @@ class FsOperation(BaseFsOperation):
             timeout = self._get_lock_timeout(options)
 
             async with self._file_lock(file_path, "write", timeout):
+                atomic = bool(options and options.get("atomic_replace"))
+                if atomic and append:
+                    raise build_error(StatusCode.SYS_OPERATION_FS_EXECUTION_ERROR,
+                                      execution="write_file", error_msg="atomic_replace does not support append")
+                expected_exists = options.get("expected_exists") if options else None
+                if expected_exists is not None and file_path.exists() != expected_exists:
+                    result = self._create_error_result("write_file", "File existence changed", WriteFileResult)
+                    result.failure_kind = "conflict"
+                    return result
                 expected_hash = options.get("expected_content_sha256") if options else None
                 if expected_hash is not None:
                     try:
@@ -487,7 +543,7 @@ class FsOperation(BaseFsOperation):
                         current_bytes = b""
                     current_hash = hashlib.sha256(current_bytes).hexdigest()
                     if current_hash != expected_hash:
-                        return self._create_error_result(
+                        result = self._create_error_result(
                             "write_file",
                             (
                                 f"File changed while preparing the write: {file_path}. "
@@ -496,6 +552,8 @@ class FsOperation(BaseFsOperation):
                             WriteFileResult,
                             _ErrorLogParams(method_name, method_params, start_time),
                         )
+                        result.failure_kind = "conflict"
+                        return result
                 if mode == "text":
                     txt = str(content)
                     if prepend_newline:
@@ -506,16 +564,20 @@ class FsOperation(BaseFsOperation):
                 else:
                     data_bytes = content if isinstance(content, (bytes, bytearray)) else bytes(content)
 
-                write_mode = "ab" if append else "wb"
-                async with aiofiles.open(file_path, mode=write_mode) as f:
-                    await f.write(data_bytes)
-
-                self._apply_permissions(file_path, permissions)
+                if atomic:
+                    identity = options.get("expected_parent_identity") if options else None
+                    await atomic_replace_file(file_path, data_bytes, permissions, tuple(identity) if identity else None)
+                else:
+                    write_mode = "ab" if append else "wb"
+                    async with aiofiles.open(file_path, mode=write_mode) as f:
+                        await f.write(data_bytes)
+                    self._apply_permissions(file_path, permissions)
 
             success_result = WriteFileResult(
                 code=StatusCode.SUCCESS.code,
                 message=StatusCode.SUCCESS.errmsg,
-                data=WriteFileData(path=str(file_path), size=len(data_bytes), mode=mode)
+                data=WriteFileData(path=str(file_path), size=len(data_bytes), mode=mode,
+                                   atomic_replace=True if atomic else None)
             )
             sys_operation_logger.info("End to write file", event=self._create_sys_operation_event(
                 event_type=LogEventType.SYS_OP_END,
