@@ -63,6 +63,7 @@ async def context_for(backend, member_name: str, trigger) -> str:
         excerpt.update(content=item.content[:2000], content_truncated=len(item.content) > 2000,
                        attachment_count=len(item.attachments))
         excerpts.append(json.dumps(excerpt, ensure_ascii=False))
+    # Team specs may carry UI language ``zh``; the runtime string table uses ``cn``.
     language = str(getattr(backend.group_chat_spec, "language", None) or "cn").strip().lower()
     language = resolve_language("cn" if language == "zh" else language)
     return STRINGS[language]["conversation.context"].format(
