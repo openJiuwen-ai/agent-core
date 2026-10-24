@@ -123,17 +123,19 @@ class A2AAgentExecutor(AgentExecutor):
     ) -> bool:
         artifacts = result.artifacts
         last_index = len(artifacts) - 1
+        status = result.status or (TaskStatus.COMPLETED if final else TaskStatus.WORKING)
+        is_terminal = final or status in self._HALT_STATUSES
         for index, artifact in enumerate(artifacts):
             await updater.add_artifact(
                 parts=[A2ATransformer.to_a2a_part(part) for part in artifact.parts],
                 artifact_id=artifact.artifactId,
                 name=artifact.name,
                 metadata=artifact.metadata or None,
-                last_chunk=final and index == last_index,
+                # A streaming result may carry the terminal status (e.g.
+                # COMPLETED) before _execute_streaming calls updater.complete().
+                # The artifact is still the last chunk of this task.
+                last_chunk=is_terminal and index == last_index,
             )
-
-        status = result.status or (TaskStatus.COMPLETED if final else TaskStatus.WORKING)
-        is_terminal = final or status in self._HALT_STATUSES
 
         if not is_terminal:
             await updater.start_work()
