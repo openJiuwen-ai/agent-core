@@ -1560,6 +1560,38 @@ async def test_reassign_missing_new_member_leaves_task_intact(task_manager, mess
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.parametrize("departed_status", ["shut_down", "shutdown_requested"])
+async def test_departed_member_cannot_take_tasks(task_manager, db, message_bus, departed_status):
+    """A departed member keeps its row but nothing restarts it; a task handed to
+    it would stay active with nobody working on it. Create, assign, reassign and
+    start all refuse it with a reason the leader can act on."""
+    await db.member.create_member(
+        member_name="retired",
+        team_name="test_team",
+        display_name="retired",
+        agent_card=AgentCard().model_dump_json(),
+        status=departed_status,
+        mode=MemberMode.BUILD_MODE.value,
+    )
+
+    created = await task_manager.add_graph([TaskGraphSpec(title="T", content="c", assignee="retired")])
+    assert not created.ok
+    assert "has left the team" in created.reason
+    assert await task_manager.list_tasks() == []
+
+    task = await task_manager.add(title="T", content="c")
+    assigned = await task_manager.assign(task.task_id, "retired")
+    assert not assigned.ok
+    assert "has left the team" in assigned.reason
+
+    assert (await task_manager.assign(task.task_id, "member1")).ok
+    reassigned = await task_manager.reassign(task.task_id, "retired")
+    assert not reassigned.ok
+    assert (await task_manager.get(task.task_id)).assignee == "member1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_cancel_claimed_task_notifies_assignee(task_manager, message_bus):
     """Cancelling a claimed task fires TASK_CANCELLED carrying the (former)
     assignee, so its dispatcher can steer it off — no member-wide cancel."""

@@ -17,6 +17,12 @@ from collections.abc import Collection
 from openjiuwen.harness.manifest.builtin_elements import SYS_OPERATION
 from openjiuwen.harness.schema.deep_agent_spec import BuiltinToolSpec, DeepAgentSpec, RailSpec
 
+# A temp reviewer runs through ``run_once``, where ``completion_timeout`` is a
+# hard cap that cancels the round (for resident members it is only a slow-round
+# log threshold). The member's value is therefore not a fit; reviews that run
+# the deliverable routinely exceed the 600s default.
+_REVIEWER_COMPLETION_TIMEOUT_SECONDS = 900.0
+
 
 def build_reviewer_agent_spec(
     base: DeepAgentSpec,
@@ -27,8 +33,9 @@ def build_reviewer_agent_spec(
     """Derive a reviewer base spec from a member spec.
 
     Always applied: file tools become read-only, harness todo planning is off,
-    and no sub-agent is mounted (declared or general-purpose). MCP servers and
-    raw tool cards are inherited untouched.
+    no sub-agent is mounted (declared or general-purpose), and the round is
+    capped at ``_REVIEWER_COMPLETION_TIMEOUT_SECONDS``. MCP servers and raw
+    tool cards are inherited untouched.
 
     Args:
         base: The member spec to derive from (usually the teammate spec).
@@ -57,6 +64,7 @@ def build_reviewer_agent_spec(
             "add_general_purpose_agent": False,
             "enable_async_subagent": False,
             "enable_task_planning": False,
+            "completion_timeout": _REVIEWER_COMPLETION_TIMEOUT_SECONDS,
         }
     )
 

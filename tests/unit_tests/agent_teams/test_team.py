@@ -988,6 +988,43 @@ async def test_is_team_completed_unread_message_returns_none(agent_team, db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_is_team_completed_ignores_unread_direct_to_non_member(agent_team, db):
+    """A scheduled-dispatch temp reviewer has no member row and no mailbox; a row
+    addressed to it can never be read and must not hold the team open."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _drain_one_task(agent_team)
+    await agent_team.message_manager.send_message(content="", to_member_name="verifier_1")
+
+    assert await agent_team.is_team_completed() is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_is_team_completed_logs_what_blocks_it_once_per_change(agent_team, db, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from openjiuwen.agent_teams.tools import team as team_module
+
+    logger = MagicMock()
+    monkeypatch.setattr(team_module, "team_logger", logger)
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.BUSY.value)
+    await _drain_one_task(agent_team)
+
+    assert await agent_team.is_team_completed() is None
+    assert await agent_team.is_team_completed() is None
+    reasons = [call.args[-1] for call in logger.info.call_args_list]
+    assert reasons == ["unsettled member(s): member1(busy)"]
+
+    await db.member.update_member_status("member1", "test_team", MemberStatus.READY.value)
+    await agent_team.message_manager.send_message(content="ping", to_member_name="member1")
+    assert await agent_team.is_team_completed() is None
+    assert logger.info.call_args_list[-1].args[-1] == "unread message(s) for: member1"
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_is_team_completed_ignores_unread_direct_to_shutdown_member(agent_team, db):
     """Unread direct messages to SHUTDOWN members do not block completion."""

@@ -42,6 +42,7 @@ from openjiuwen.agent_teams.schema.events import (
     TeamTopic,
 )
 from openjiuwen.agent_teams.schema.status import (
+    MEMBER_DEPARTED_STATUSES,
     TASK_TRANSITIONS,
     MemberMode,
     TaskStatus,
@@ -164,7 +165,13 @@ class TeamTaskManager:
             self.team_plan_id = _safe_token(team_plan_id, "team_plan")
 
     async def _validate_task_owner(self, member_name: str) -> TaskOpResult:
-        """Validate that a task owner exists and is not the team leader."""
+        """Validate that a task owner exists, is not the team leader, and has not left the team.
+
+        A departed member (shutdown requested / shut down) keeps its row but no
+        startup or recovery path brings it back, so a task handed to it would
+        sit active with nobody working on it and hold the team open forever.
+        Every owner write — create, assign, reassign, start — checks here.
+        """
         owner = str(member_name or "").strip()
         if not owner:
             return TaskOpResult.success()
@@ -177,6 +184,11 @@ class TeamTaskManager:
         member = await self.db.member.get_member(owner, self.team_name)
         if not member:
             return TaskOpResult.fail(f"Member {owner} not found in team {self.team_name}")
+        if member.status in {status.value for status in MEMBER_DEPARTED_STATUSES}:
+            return TaskOpResult.fail(
+                f"Member {owner} has left the team (status {member.status}) and cannot take tasks; "
+                "assign the task to an active member or declare a new member for it"
+            )
         return TaskOpResult.success()
 
     async def add_graph(self, specs: list[TaskGraphSpec]) -> TaskGraphResult:
