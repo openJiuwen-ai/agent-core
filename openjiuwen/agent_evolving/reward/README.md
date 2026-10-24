@@ -8,23 +8,27 @@
 
 一次评分按以下五步进行：
 
-1. **出题**：根据任务描述（和匹配到的评测知识）写出若干一级维度，每个维度包含基础项和主动挑战项；有用户意见或过程信号时，将其推广为子项并入对应维度。
-2. **取证**：在交付物的临时副本中读取文件、运行 Python 脚本、用离线浏览器操作网页并截图。
+1. **出题**：根据任务描述（和匹配到的评测知识）写出若干一级维度，每个维度包含基础项和主动挑战项；有用户意见或过程信号时，在同一次调用中将其推广为子项并入对应维度。
+2. **取证**：在交付物的临时副本中读取文件、运行 Python 脚本、用离线浏览器操作网页并截图。网页或图片作品的默认浏览（预取证）与出题并行，结果作为第一项检查交给取证 Agent。
 3. **判定**：由独立的模型调用逐条判定子项（met / partial / unmet / unknown），给出理由和维度评价；画面维度只依据截图判定。
 4. **计分**：由代码按固定规则计算子项、维度和总分，模型不直接给分。
-5. **总评**：根据各维度分数和评价生成两三句总评。
+5. **总评**：由代码根据各维度分数和最弱维度的评价拼出，不调用模型。
+
+整次运行没有时间上限：慢模型也会等它跑完。取证最多 4 轮模型调用（第一轮把检查一次规划完，之后最多补查一轮）；只保留检查工具自身的时限（Python 检查 60 秒、浏览器等待），防止交付物卡死。
 
 只有取证由一个 DeepAgent 以 ReAct 方式完成，其余步骤都是代码按顺序发起的普通模型调用：
 
 ```
 reward()
-  ├─ 建临时目录；写评分标准，并入用户意见和过程信号        （模型调用，JSON 输出）
-  ├─ 取证 DeepAgent（每次新建，用完销毁）
+  ├─ 建临时目录
+  ├─ 写评分标准，并入用户意见和过程信号                    （一次模型调用，JSON 输出）
+  │  ‖ 同时：默认浏览网页 / 展示图片（预取证）              （代码，不调用模型）
+  ├─ 取证 DeepAgent（每次新建，用完销毁），预取证结果作为 c1
   │     工具：run_checks（一批检查并发执行）、read_evidence（读取已保存的结果）
-  │     每轮根据上一轮的摘要决定补查什么；证据充分或达到轮数、时间上限即停止
+  │     每轮根据上一轮的摘要决定补查什么；证据充分或达到轮数上限（默认 4 轮）即停止
   ├─ 各维度判定                                            （并行的模型调用）
   ├─ 计分                                                  （代码）
-  └─ 总评 → 组装 JSON → 删除临时目录
+  └─ 总评（代码）→ 组装 JSON → 删除临时目录
 ```
 
 ## 快速开始
@@ -111,7 +115,7 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 |---|---|
 | `meta` | 评测时间；评测对象（交付物、是否有最终回复、用户意见、过程信号）；使用的模型、工具和评测知识（`guides`）；计分规则；`warnings` 记录未完成的非关键步骤 |
 | `total.score` | 总分，0–100，各维度分数的平均 |
-| `total.summary` | 总评，依据各维度分数和评价生成，不含建议 |
+| `total.summary` | 总评，由代码根据各维度分数拼出：最强、最弱的维度及分数，加上最弱维度的评价；不含建议 |
 | `categories[]` | 一级维度。`category_name`：评什么（2–6 个词）；`rubric`：怎样算好；`comment`：维度评价（判定模型未写时用子项理由代替）；`score`；`issues`：仅画面维度有，为看图判定发现的严重画面问题 |
 | `sub_category_items[]` | 全部二级子项。`sub_category_id` 形如 `维度id#序号`，供归因模块引用；`rubric`：子项要求；`comment`：判定理由；`status` 和 `score` 见下表；`type`：`floor`（基础项）或 `proactive_challenge`（主动挑战项）；`gain`：该项达成后总分可提高多少，供归因排序；`from_user_note` / `from_process_signal`：是否由用户意见 / 过程信号生成 |
 
@@ -147,13 +151,13 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 
 ### 用户意见与过程信号
 
-有 `user_note` 或 `process_signal` 时，单独调用一次模型（`FEEDBACK_PROMPT`），对照现有维度将其推广为适用于整部作品的子项。例如「某一页文字难读」推广为「每页文字都清晰可读」。
+有 `user_note` 或 `process_signal` 时，将其推广为适用于整部作品的子项。例如「某一页文字难读」推广为「每页文字都清晰可读」。新写评分标准时，这一步与出题在同一次模型调用中完成（`CRITERIA_FEEDBACK` 追加在出题提示词后，子项带 `source` 返回），不再单独调用；沿用已保存的评分标准时，才单独调用一次模型（`FEEDBACK_PROMPT`）对照现有维度放置。
 
 - 子项放入意见涉及的维度，不新增维度；找不到合适维度时放入最接近的非画面维度（通常是「质量」维度）。
 - 不凭空增加数量或门槛。
 - 环境报错只在作品本身仍可能出现时才写成子项，例如「运行时不出现这类错误」。
 - 模型跳过语义重复的意见，代码再排除逐字重复；每次最多 6 条。
-- 生成的子项为基础项，标记 `from_user_note` 或 `from_process_signal`，并写入评分标准文件，之后每轮都会检查（`pipeline.feedback_claims` / `merge_feedback`）。
+- 生成的子项为基础项，标记 `from_user_note` 或 `from_process_signal`，并写入评分标准文件，之后每轮都会检查（`pipeline.write_criteria(with_feedback=True)`，沿用标准时为 `pipeline.feedback_claims` / `merge_feedback`）。
 
 ### 评测知识
 
@@ -193,7 +197,9 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 - `run_checks`：一次提交一批检查，批内并发执行；每个检查注明为哪些维度取证，一个检查可同时服务多个维度。
 - `read_evidence`：按需读取已保存的完整检查结果。
 
-完整结果保存在临时目录中。每批检查最后两张截图进入 Agent 上下文（模型支持图片时），每个维度最新的 16 张截图交给判定。
+完整结果保存在临时目录中。每个维度最新的 16 张截图交给判定。取证 Agent 默认不看截图（只看文字结果），以免每轮都带图片拖慢模型；截图照常保存并交给判定。配置 `"evidence_sees_images": true` 时，每批检查最后两张截图进入 Agent 上下文（模型支持图片时）。
+
+**预取证**：作品有网页或图片时，代码在出题的同时按默认流程浏览一遍（`pipeline.default_walk`：点击开始按钮、按空格、截取特写，再 7 次按右方向键并向下滚动一屏，每次截图；只有图片时逐张展示），不调用模型。结果作为第一项检查（c1）保存，服务所有维度，并以 `already_run` 写进取证 Agent 的第一条消息，Agent 在此基础上补查，不必再花一轮打开页面。预取证失败时只记日志，取证照常进行。
 
 **Agent 能看到的内容**：任务、各维度子项、交付物的文件清单（每个文件几行），以及文档和数据文件的摘录。
 
@@ -213,7 +219,7 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 
 | 工具 | 用途 | 默认 | 说明 |
 |---|---|---|---|
-| `read` | 引用文件内容，或按正则搜索 | 开启 | 路径限于临时目录；读目录时返回文件列表；网页作品的源码不可读（见上文） |
+| `read` | 引用文件内容，或按正则搜索；读图片文件（png/jpg/webp/gif/bmp）时把图片交给判定 | 开启 | 路径限于临时目录；读目录时返回文件列表；网页作品的源码不可读（见上文）；图片不经过浏览器，直接读文件 |
 | `python` | 编写小脚本测量：重算汇总、核对行数、解析表格、校验格式 | 开启 | 仅限标准库，超时 60 秒；安全限制见下文 |
 | `browser` | 在离线浏览器中点击、按键、等待、读取运行时数值、截图 | 有网页时开启 | 见下文 |
 
@@ -222,6 +228,8 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 - 默认通过本地虚拟地址加载；检查写 `"via": "file"` 时用 `file://` 直接打开，与用户双击文件一致（子项涉及「直接打开」时使用）。
 - 动作 `drag`（按住拖动，如旋转 3D 视角、拖动棋子）和 `wheel`（滚轮，如缩放 3D 视角）用于测试鼠标交互；`closeup` 截取元素或其局部的 2 倍特写，用于查看主角、图表等细节。
 - 支持中文文件名和 `localStorage`；累计等待最多 60 秒。
+- 每个探针脚本最多执行 20 秒（`checks.PROBE_SECONDS`）。探针在作品页面里同步运行，"一直玩到游戏结束"这类循环一旦停不下来，会把页面和整个 Reward 永远卡住；超时后这一步记为失败，结果带 `page_stuck`，本次检查剩下的动作不再执行。每项浏览器检查整体最多 4 分钟（`checks.BROWSER_CHECK_SECONDS`），超出记为 `timed_out`。这两个限制只针对作品和检查，不限制模型。
+- 浏览器优先用 Playwright 自带的 Chromium；启动不了（例如没运行 `playwright install chromium`）时，在同一次检查里改用本机安装的 Chrome，再不行用 Edge（`checks.launch_browser`）。这一步不调用模型；三者都启动不了时，检查报 `no browser could start`。
 - 页面本身加载失败时，该次检查记为失败，不作为作品证据。
 - 外网请求一律拦截，唯一例外是 jsdelivr、unpkg、cdnjs 上写明确切版本号的库文件（如 `three@0.160.0`）：由评测代码下载一次并缓存在 `~/.reward/cdn/`，再提供给页面。未写版本号（如 `@latest`）的请求同样拦截。
 
@@ -280,7 +288,9 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 - 画面维度只包含「看起来怎样」的子项。为用户意见寻找维度时，代码只回退到非画面维度，没有合适维度时明确报错。
 - 画面由一次只看截图、不看源码的调用判定（`ART_JUDGE_PROMPT`）：先列出用户一眼能看到的问题，再判定子项。存在严重问题时，相关主动挑战项最多为 `partial`，问题写入该维度的 `issues`。
 - 评判尺度是「同题材、同画风的已发布作品」，不设固定尺寸或比例。
-- 截图来源：取证 Agent 按作品实际导航逐页截图。未截图时，代码按默认流程补拍（`pipeline.default_screenshots`）：打开页面、尝试开始操作、截取特写，再尝试翻页和滚动；默认流程不保证覆盖所有页面，未看到的内容仍判为无证据。作品只有图片时，直接使用交付的图片，按页码排序取前 8 张（`checks.image_views`）。
+- 画面维度一张截图都没有时整项不评分，结果里该维度带 `unscored`：`blind`（判定模型看不到图片）或 `no_screenshots`（没有拿到截图）。归因展示时这些子项不计入"未能判定"的数量，改为单独说明画面维度未评及原因。
+- 截图来源：预取证的默认浏览，加上取证 Agent 按作品实际导航逐页截图。预取证没有成功、画面维度又没有截图时，代码按同一默认流程补拍（`pipeline.default_screenshots`）；默认流程不保证覆盖所有页面，未看到的内容仍判为无证据。作品只有图片时，或网页在浏览器里打不开而文件夹里有图片时，直接读交付的图片文件，按页码排序取前 8 张（`checks.image_views`），不需要浏览器。图片按原样发送；格式不是 PNG/JPEG/GIF/WEBP、文件超过 3 MB 或最长边超过 1600 像素时，先缩成最长边 1600 像素的 JPEG（`checks.picture_data`）。发给模型时按图片的真实类型标注（`models.data_url`）。
+- 图片交付物从哪里来：归因的任务解析除了 `send_file_to_user`、`write_file` 和 shell 里明确创建的文件，还会把这些地方出现的、磁盘上确实存在的图片和视频路径列为候选：任何工具调用的参数（如生成脚本的 `--output page-1.png`）、工具结果（如"已保存到 /…/page-1.png"）、助手消息（路径或 `![](...)` 图片链接）。网址和不存在的文件不算。
 - 可以为画面判定单独配置看图能力更强的模型（`art_judge`）。
 
 ## 计分
@@ -298,8 +308,9 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 
 ## 错误处理
 
-- **决定分数的环节**（出题、取证、各维度判定）失败时抛出 `EvidenceError`，说明失败的步骤和原因，不给出没有依据的分数。取证达到轮数或时间上限不算失败，用已有证据继续判定。
-- **不决定分数的环节**（挑选评测知识、并入用户意见和过程信号、生成总评、看图能力试探、默认截图）失败时跳过该步骤，在 `meta.warnings` 和回复开头说明；总评失败时由代码根据分数生成一句。
+- **决定分数的环节**（出题、取证、各维度判定）失败时抛出 `EvidenceError`，说明失败的步骤和原因，不给出没有依据的分数。每次模型调用失败（报错、连接中断、返回的不是 JSON）时重试一次。取证达到轮数上限不算失败，用已有证据继续判定。没有任何时间上限：模型慢就等。
+- **不决定分数的环节**（挑选评测知识、沿用标准时放置用户意见和过程信号、看图能力试探、预取证和默认截图）失败时跳过该步骤，在 `meta.warnings` 和回复开头说明。总评由代码生成，不会失败。
+- **当场说明看不到作品的原因**：看图试探认定模型看不到图片、默认浏览没能运行、浏览器检查全部没能运行时，代码立即写一行以 `warning: ` 开头的日志（归因进度里显示为「⚠ …」），并记入 `meta.warnings`。单项检查没能运行时，归因进度显示该检查的报错。
 - **宽松解析模型输出**：没有文字的子项丢弃；无法识别的级别按基础项处理；重复的维度编号自动加后缀；检查缺少 `tool` 字段时按其他字段补全（有 `page` / `actions` 为浏览器，有 `code` 为 Python，有 `path` 为读文件）。
 
 ## 配置
@@ -313,11 +324,10 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 ```json
 {
   "producer": {"model": "deepseek-v4-flash", "base_url": "https://api.deepseek.com/v1", "api_key": "env:DEEPSEEK_API_KEY",
-               "timeout": 360, "extra_body": {"thinking": {"type": "enabled"}, "reasoning_effort": "low"}},
+               "extra_body": {"thinking": {"type": "enabled"}, "reasoning_effort": "low"}},
   "judge": {"model": "deepseek-v4-flash", "base_url": "https://api.deepseek.com/v1", "api_key": "env:DEEPSEEK_API_KEY",
-            "timeout": 360, "extra_body": {"thinking": {"type": "enabled"}, "reasoning_effort": "low"}},
-  "evidence_rounds": 12,
-  "evidence_seconds": 300,
+            "extra_body": {"thinking": {"type": "enabled"}, "reasoning_effort": "low"}},
+  "evidence_rounds": 6,
   "criteria_budget": 3,
   "metric_guides": ["/path/to/my_guides/"]
 }
@@ -327,13 +337,12 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 
 | 键 | 类型 | 默认 | 作用 | 注意 |
 |---|---|---|---|---|
-| `producer` | 模型配置 | `{"model": "session", "timeout": 360}` | 编写评分标准，并入用户意见和过程信号 | 必填；`"session"` 仅在 JiuwenSwarm 环境可用 |
-| `judge` | 模型配置 | 同 `producer` | 逐条判定子项，编写维度评价和总评 | 与生成作品的模型相同时，判定可能偏宽松；需要稳定的奖励信号时应固定为独立模型 |
+| `producer` | 模型配置 | `{"model": "session"}` | 编写评分标准，并入用户意见和过程信号 | 必填；`"session"` 仅在 JiuwenSwarm 环境可用 |
+| `judge` | 模型配置 | 同 `producer` | 逐条判定子项，编写维度评价 | 与生成作品的模型相同时，判定可能偏宽松；需要稳定的奖励信号时应固定为独立模型 |
 | `art_judge` | 模型配置 | 同 `judge` | 只看截图判定画面维度 | 必须支持图片输入，否则画面子项全部为无证据 |
-| `evidence_model` | 模型配置或 agent-core `ModelPoolEntry` | 同 `producer` | 取证 DeepAgent 使用的模型 | 必须支持工具调用（function calling），否则报 `EvidenceError: ran no check`；支持图片时 Agent 能看到截图 |
-| `evidence_rounds` | int | 12 | 取证最多几轮模型调用 | 防止死循环的保险；达到上限后继续判定，不报错 |
-| `evidence_seconds` | int | 300 | 取证最长秒数 | 设置 `deadline_seconds` 时会被进一步缩短，为判定和总评留出时间 |
-| `deadline_seconds` | int | 不限 | 整次运行的总时限，出题、意见整理、判定和总评共用 | 仅当调用方外层有超时时设置，且应小于外层超时。JiuwenSwarm 的 `/reward` 传 720；归因诊断默认 600（`REWARD_DEADLINE` 可改），余下时间留给归因 |
+| `evidence_model` | 模型配置或 agent-core `ModelPoolEntry` | 同 `producer` | 取证 DeepAgent 使用的模型 | 必须支持工具调用（function calling），否则报 `EvidenceError: ran no check`。其 HTTP、首包、流间隔时限一律关闭，并使用独立的 HTTP 客户端 |
+| `evidence_rounds` | int | 6 | 取证最多几轮模型调用 | 没有时间上限时，这是取证耗时的唯一上限；达到上限后继续判定，不报错 |
+| `evidence_sees_images` | bool | false | 取证 Agent 是否看截图 | 截图无论如何都交给判定；打开后每轮多带两张图，慢模型会更慢 |
 | `criteria_budget` | int | 3 | 交付物维度的上限（另有「质量」维度和必要时的「画面」维度） | 调大会增加判定耗时 |
 | `include_evidence` | bool | false | 结果 JSON 是否包含每个检查的完整输出 | 仅用于排查判定；打开后 JSON 体积很大；命令行为 `--evidence` |
 | `metric_guides` | 路径列表 | 无 | 额外的评测知识文件或目录 | 只写通用原则，见「评测知识」一节 |
@@ -347,15 +356,16 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 | `model` | 是 | 模型名；`"session"` 表示使用 JiuwenSwarm 当前会话的模型 |
 | `base_url` | 是（`"session"` 时不需要） | OpenAI 兼容接口地址 |
 | `api_key` | 是（`"session"` 时不需要） | 不要写明文，写 `"env:变量名"`，运行时从环境变量读取 |
-| `timeout` | 否 | 单次调用的总时限（秒），包含一次重试，默认 360 |
-| `first_chunk_timeout` / `idle_timeout` | 否 | 流式返回迟迟不开始、或中途长时间无新数据时判为卡住，默认各 60 秒 |
+
 | `extra_body` | 否 | 原样传给接口的额外参数，如 DeepSeek 的 `{"thinking": {"type": "enabled"}, "reasoning_effort": "low"}`、Qwen 的 `{"enable_thinking": false}`。开启思考会明显变慢 |
 | `vision` | 否 | 显式声明是否支持图片输入，跳过看图能力试探 |
 | `provider` | 否 | 取证 DeepAgent 的模型提供方，默认 `OpenAI`；其余 JSON 模型调用仍走 OpenAI 兼容接口 |
 
-**`"session"` 模型**：从 JiuwenSwarm 最近的会话记录读取模型名，再从 `~/.jiuwenswarm/config/config.yaml` 读取地址和密钥。其中的 `${变量名}`（可写作 `${变量名:-默认值}`）依次从环境变量、`~/.jiuwenswarm/config/.env` 取值，都没有时报错。不在 JiuwenSwarm 环境中（没有会话记录或 config.yaml）时直接报错，需要写完整配置。可以用 `{"model": "session", "timeout": 600}` 覆盖个别字段。
+**`"session"` 模型**：从 JiuwenSwarm 最近的会话记录读取模型名，再从 `~/.jiuwenswarm/config/config.yaml` 读取地址和密钥。其中的 `${变量名}`（可写作 `${变量名:-默认值}`）依次从环境变量、`~/.jiuwenswarm/config/.env` 取值，都没有时报错。不在 JiuwenSwarm 环境中（没有会话记录或 config.yaml）时直接报错，需要写完整配置。可以用 `{"model": "session", "vision": true}` 覆盖个别字段。
 
-**看图能力试探**：未配置 `vision` 时，评测网页或图片前，判定、看图判定、取证三个角色各试探一次（同一模型只试一次），结果按接口地址和模型名缓存在 `~/.reward/vision.json`。模型能力变化（如同名模型升级）后需删除该缓存。结果不明确或调用出错时重试一次；仍不明确时，本次不发送截图、不写缓存，并在回复开头提示。看图判定无法看图时，画面维度整体不计分，不以源码代替外观判定。
+**没有时间上限**：旧配置里的 `timeout`、`first_chunk_timeout`、`idle_timeout`、`evidence_seconds`、`deadline_seconds` 以及环境变量 `REWARD_DEADLINE` 不再读取，写了也不报错。
+
+**看图能力试探**：未配置 `vision` 时，评测网页或图片前，判定、看图判定两个角色（打开 `evidence_sees_images` 时还有取证）各试探一次（同一模型只试一次），结果按接口地址和模型名缓存在 `~/.reward/vision.json`。模型能力变化（如同名模型升级）后需删除该缓存。结果不明确或调用出错时重试一次；仍不明确时，本次不发送截图、不写缓存，并在回复开头提示。看图判定无法看图时，画面维度整体不计分，不以源码代替外观判定。
 
 ## 与 JiuwenSwarm 集成
 
@@ -375,12 +385,12 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 | `__init__.py` | 公开接口：`reward`、`RewardOptions`、`text_reward`、`write_criteria`、`render`、`load_config`、`archive_rubric`、`SCHEMA_VERSION` |
 | `options.py` | `RewardOptions`：`reward()` / `text_reward()` / `score_workspace()` 的可选输入（最终回复、用户意见、过程信号、评分标准文件、上一次结果、给定标准、日志函数、警告） |
 | `__main__.py` | 命令行：调用 `pipeline.reward`，写出 JSON，打印 Markdown |
-| `pipeline.py` | 主流程：`reward()` 建临时目录后调用 `score_workspace()`（写标准 → 取证 → 判定 → 计分 → 总评 → 组装 JSON）；另有 `text_reward()`、`write_criteria()`、`feedback_claims()` / `merge_feedback()`、`ensure_visual()`、`evaluate_terminal()`、`cap_by_critique()`、`default_screenshots()`、`load_rubric()` / `save_rubric()` / `archive_rubric()`、`overall_summary()` |
+| `pipeline.py` | 主流程：`reward()` 建临时目录后调用 `score_workspace()`（写标准 ‖ 预取证 → 取证 → 判定 → 计分 → 总评 → 组装 JSON）；另有 `text_reward()`、`rubric_for()`、`write_criteria()`、`feedback_claims()` / `merge_feedback()`、`ensure_visual()`、`evaluate_terminal()`、`cap_by_critique()`、`default_walk()` / `default_screenshots()`、`load_rubric()` / `save_rubric()` / `archive_rubric()`、`overall_summary()` |
 | `evidence_agent.py` | 取证 DeepAgent：`gather()`（上限由 `Limits` 给出）创建 DeepAgent 并挂载 `run_checks` / `read_evidence`，运行结束后销毁；`EvidenceRun` 保存结果并按维度分配证据；`EvidenceError` |
 | `checks.py` | 检查工具：`run_check()`、`run_experiment()`（离线浏览器）、`image_views()`、`available_tools()` |
 | `scoring.py` | `score()`（子项状态 → 维度分）、`total()`、`to_result()`、`claim_gains()` |
 | `result.py` | 标准 JSON：`build()`；Markdown：`render()`、`progress()`、`bar()` |
-| `prompts.py` | 各环节提示词：出题、取证（`EVIDENCE_AGENT_PROMPT`）、判定、看图判定、并入用户意见、总评 |
+| `prompts.py` | 各环节提示词：出题（`CRITERIA_PROMPT`，有意见时追加 `CRITERIA_FEEDBACK`）、取证（`EVIDENCE_AGENT_PROMPT`）、判定、看图判定、沿用标准时并入用户意见（`FEEDBACK_PROMPT`） |
 | `guides.py`、`metrics/` | 评测知识的选取逻辑和自带文档 |
 | `workspace.py` | 临时目录：`make_workspace()`、`copy_work_folder()`、`linked_files()`、`workspace_files()` |
 | `files.py` | 将文件读取为文本 |
@@ -393,7 +403,7 @@ options = RewardOptions(txt_response="", user_note="", process_signal="", rubric
 
 ## 局限
 
-- 取证受轮数和时间上限约束：默认最多 12 轮模型调用（`evidence_rounds`）、300 秒（`evidence_seconds`），实际起作用的通常是时间；设置了总时限 `deadline_seconds` 时，取证时间还会被缩短，为判定和总评留出余量（在归因诊断中总时限默认 600 秒，可用环境变量 `REWARD_DEADLINE` 修改）。复杂交互中仍可能有子项判为无证据。
+- 取证只受轮数约束：默认最多 4 轮模型调用（`evidence_rounds`），没有时间上限。整次运行耗时随模型速度变化，慢模型可能要十几分钟；服务端连接卡死（既不报错也不返回数据）时会一直等待，需要调用方取消。复杂交互中仍可能有子项判为无证据。
 - 每次浏览器检查都启动新的浏览器并重新加载页面，不保留上一次检查的状态；要到达某个状态，需要在同一次检查中重复前面的操作。
 - `python` 检查只能使用标准库，不能运行其他程序或联网，不适用于需要登录或联网才能验证的内容。
 - 网页副本会复制 HTML/CSS 中显式引用的资源（包括 CSS 中的图片和嵌套样式），但不会推断 JavaScript 动态拼接的文件路径。依赖这类路径的作品需确认副本完整，不能把副本缺少资源当作原作品缺陷。资源超出复制上限时明确报错。

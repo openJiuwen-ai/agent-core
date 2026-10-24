@@ -2,8 +2,8 @@
 
     {"schema_version": "reward/3",
      "meta": {...},                                    # when, what was evaluated, with which models
-     "total": {"score", "summary"},                   # 0-100 and the overall verdict (model-written)
-     "categories": [{"category_id", "category_name", "rubric", "comment", "score", "issues"}],
+     "total": {"score", "summary"},                   # 0-100 and the overall verdict (made in code)
+     "categories": [{"category_id", "category_name", "rubric", "comment", "score", "issues", "unscored"?}],
      "sub_category_items": [{"sub_category_id", "category_id", "category_name", "rubric", "comment", "score",
                              "status", "type", "gain", "from_user_note", "from_process_signal"}]}
 
@@ -11,6 +11,8 @@ Scores are 0-100; null means no evidence, not zero. "status" is how far a sub-it
 partial (in part, 50), unmet (not, 0), unknown (no evidence either way, null). "issues" are the major visual
 weaknesses the art judge saw (looks only). "gain" is how many points the total would rise if the item were met;
 "type" is "floor" (asked for by the Task) or "proactive_challenge" (what the best work does unasked).
+"unscored" says why a looks-only category has no score at all: "blind" (the art judge cannot read images) or
+"no_screenshots" (no check got a picture of the work); its items are then all unknown.
 "from_user_note" / "from_process_signal" mark the sub-items made from the user's note / the process signal.
 One result describes one evaluation: no earlier scores are kept here. Nothing here proposes
 changes: that is the job of whoever reads this result (e.g. fast_attribution).
@@ -46,7 +48,8 @@ def build(task, results, total_score, summary, meta):
         categories.append({"category_id": r["id"], "category_name": name, "rubric": r.get("goal", ""),
                            "comment": r.get("summary") or fallback_comment(r), "score": r["score"],
                            "issues": [i["issue"] for i in r.get("critique") or []
-                                      if isinstance(i, dict) and i.get("issue") and i.get("severity") == "major"]})
+                                      if isinstance(i, dict) and i.get("issue") and i.get("severity") == "major"],
+                           **({"unscored": r["unscored"]} if r.get("unscored") else {})})
         for index, c in enumerate(r["claims"]):
             ref = f"{r['id']}#{index}"
             items.append({"sub_category_id": ref, "category_id": r["id"], "category_name": name, "rubric": c["text"],

@@ -57,6 +57,24 @@ The specific requirements go into the claims, not into the name or goal.
 Return JSON: {{"criteria": [{{"id": "short-id", "scope": "terminal", "name": "...", "goal": "...",
 "claims": [{{"text": "...", "level": "floor|challenge"}}]}}]}}. Add "kind": "visual" only to a looks-only criterion."""
 
+# How the user's note and the process signal become checks; shared by the two calls that place them.
+FEEDBACK_RULES = """An error counts only if the delivered work can still show it: turn it into a check that the work
+runs without that kind of failure. A remark about one place becomes a rule for the whole work (text is hard to read in
+one view -> "text is legible in every view"), keeping the user's own words for how good it must be; never add a number
+or threshold the user did not give. A criterion with "kind": "visual" is judged from screenshots alone: give it only
+checks about how the work looks, never errors, behaviour or data. Skip a check the rubric already has in the same
+meaning, and requests that are not about the work (e.g. "save it as a new file"). Keep the user's concerns; do not add
+new ones. At most 6 checks, each one short checkable sentence of at most 20 words, in the user's language."""
+
+# Appended to CRITERIA_PROMPT (after .format) when the user's note or the process signal is given, so they are placed
+# in the same call as the criteria instead of a call of their own (FEEDBACK_PROMPT, for a kept rubric).
+CRITERIA_FEEDBACK = """
+The input also has a "Feedback" section: "user_note" (the user's remarks on the work) and/or "process_signal"
+(environment errors met while the agent worked, and the user's feedback across turns). Turn it into checks too: floor
+claims, each with "source": "user_note" or "process_signal", placed in the criterion whose aspect it concerns (often
+"quality"); never write a criterion only for them. Claims you write from the Task itself have no "source".
+""" + FEEDBACK_RULES
+
 BROWSER_ACTIONS = """browser actions:
   {"type": "click", "selector": "css"} | {"type": "click_at", "selector": "css", "x": 0.5, "y": 0.5}
   {"type": "key", "key": "Space", "hold_ms": 0} | {"type": "wait", "ms": 1000}
@@ -69,6 +87,8 @@ BROWSER_ACTIONS = """browser actions:
   of a part of it (region = x, y, width, height as fractions of the element); use it to see the main subject
   (a character, a chart, a form) up close when a claim is about how it looks
   Probes see page globals only (window, document, top-level var/let/const of classic scripts). Total wait <= 60000 ms.
+  A probe must return within 20 s: never loop until something happens (game over, a score) in one probe; step a
+  bounded number of times and probe again in a later action.
   {"type": "screenshot"} takes a screenshot at that point; "snapshots": [indices] does the same after those actions; request every view needed to judge the claims. The page loads offline from a local http origin (a library pinned to an exact version on a public CDN still
   loads); add
   "via": "file" to open it from disk with file:// instead, as a user who double-clicks the file would (use it when
@@ -77,7 +97,9 @@ BROWSER_ACTIONS = """browser actions:
 CHECK_TOOLS = """Tools:
   read    : {"tool": "read", "path": "relative/path", "pattern": "optional regex", "context": 0, "start": 1, "count": 200}
             with "pattern": the matching lines (at most 60), each with "context" lines around it (0-5); without it:
-            "count" lines (at most 400) from line "start"; the result says which lines it holds.
+            "count" lines (at most 400) from line "start"; the result says which lines it holds. A picture file
+            (png, jpg, webp, gif, bmp) read this way is shown to the Judge as a picture: read each delivered
+            picture that a claim about looks needs, wherever it lies in the workspace.
   python  : {"tool": "python", "code": "..."}  runs in a scratch copy of the workspace (cwd); inputs, when the workspace
             lists any, are under ./_inputs/; standard library only; print measured facts as JSON; 60 s limit; it cannot
             start programs, open network connections or touch files outside its folder
@@ -116,21 +138,33 @@ EVIDENCE_AGENT_PROMPT = """\
 You gather evidence about an agent's delivered work for a Judge who decides each claim of each
 criterion afterwards. The first message gives the Task, every criterion with its claims, the workspace (file list with
 line counts and excerpts of documents and data; page source is not shown; "inputs_index" when \
-the inputs are too long to show), the agent's "final_reply", the available tools and your limits (model turns and
-seconds). The final reply is supplied work: when it is the entire deliverable and no files or input materials are
+the inputs are too long to show), the agent's "final_reply", the available tools and your limit of model turns
+("already_run": checks run for you before you started, see below). The final reply is supplied work: when it is
+the entire deliverable and no files or input materials are
 provided, its wording and structure may need no tool check. Stop without a tool call only when the supplied text
 already gives the evidence these tools can provide; facts still need independent confirmation when applicable.
 You have two tools:
 - run_checks(checks=[...]): runs a batch of checks in parallel and returns each result (browser runs as a summary
   with the last screenshots, when you can see them). Put every check that does not depend on another one's result
-  into the same call. For work with a page, the first call runs it in the browser right away (start it, play or use it, look at
+  into the same call: your first call holds every check you can already plan, for all criteria at once. Make at most
+  one later call, only to fix a failed check or follow up on what a result revealed; when the first results give
+  every criterion evidence, stop. With few calls, aim each check: before the first call, go claim by claim and decide
+  what observation settles it (a state probed right after the action, a screenshot of the right screen, a number
+  recomputed), then write the check that reaches exactly that, naming in "criteria" what it serves; a short targeted
+  run per behaviour (with a controlled setup when needed) beats a long playthrough that may never reach it, and never
+  plan a read of a page's source. For work with a page, the first call runs it in the
+  browser right away (start it, play or use it, look at
   each page or screen and screenshot it); one visit usually serves several criteria at once. A page's source is not
   shown and cannot be read: how the work behaves and looks is seen by using it. Each check is one object as below, plus
   "criteria": the ids of the criteria it gives evidence for.
 - read_evidence(id, pattern | start, count): reads a saved result as text, in part, when a browser summary is not
   enough. read and python results come back whole, so never read the same lines again.
-You see at most the last two screenshots of each call; the Judge sees every screenshot of every check, so never re-run
-a check to look at its screenshots. A check identical to one already run is not run again (the reply names the id of
+"already_run" holds checks run before you started: a default walk through the work (its start control and Space,
+then the right arrow and one screen down, seven times, with screenshots), or its picture files shown whole. Use
+their results; build on them instead of repeating that walk, and plan only what they do not already show.
+You see at most the last two screenshots of each call, or none ("seeing_screenshots": false); the Judge sees every
+screenshot of every check, so never re-run a check to look at its screenshots. A check identical to one already run
+is not run again (the reply names the id of
 its result), even when the work is random: to try again, change the timing, the actions or the setup.
 Claims about behaviour (what happens when the work is used: scoring, collisions, winning, page turns) need a run that
 reaches the situation and observes it (a probe of the state after the action, or a screenshot); reading the source
@@ -150,6 +184,15 @@ Check objects:
 BLIND_NOTE = """
 You cannot see screenshots in this run. Judge from check outputs, values, errors and the files; a claim that needs
 seeing the screen (look, art, animation, layout) is unknown."""
+
+# Appended to what the judges write: the user who asked for the work reads it next to the scores.
+READER_NOTE = """
+The reasons and the summary are shown to the user who asked for the work, next to the scores. Write them about the
+agent's work, with the work or the agent as the subject ("the final reply names the files only; it shows no picture
+and gives no link to open them"), so no reader takes a weakness of the work for a fault of the evaluation. For a claim
+that is met, partial or unmet, and in the summary, leave out how the evaluation went: never mention checks,
+screenshots, evidence, tools, scores or other criteria, and never write that something was not judged, has no score
+or could not be seen (that is the "unknown" status, and the evaluation explains it itself)."""
 
 JUDGE_PROMPT = """You judge each claim of one criterion about an agent's delivered work. Evidence: the checks that
 were run on the work (tool, what it shows, output, values, errors; screenshots labelled by check and action), the
@@ -191,22 +234,15 @@ evidence shows it fully and you cannot name a clear, concrete way top work does 
 work is partial, and when in doubt choose partial. For each claim give "reason" (what you saw; for work with
 pages, slides or sections, name the affected ones, e.g. "p3, p6"), in simplified technical style (ASD-STE100): one
 short sentence of at most 20 words, active voice, one fact, no hedging. Then give "summary": the criterion as a whole
-in one or two short sentences (what works, the main gap), without advice.
+in one or two short sentences (what works, the main gap), without advice.""" + READER_NOTE + """
 Return JSON: {"claims": [{"index": 0, "status": "met", "reason": "..."}], "summary": "..."}"""
 
 FEEDBACK_PROMPT = """You place a user's feedback on a piece of work into its evaluation rubric. You see the Task, the
 rubric's criteria (id, name, goal, current claims) and one or both inputs: "user_note" (the user's remarks on the work)
-and "process_signal" (environment errors met while the agent worked, and the user's feedback across turns). An error
-counts only if the delivered work can still show it; turn it into a check that the work runs without that kind of
-failure. Give each check "from": "user_note" or "process_signal". Turn the feedback into checks the work must pass
-everywhere, not only where the user pointed: a remark about one page or screen becomes a rule for every page or screen
-(text is hard to read in one view -> "text is legible in every view"), keeping the user's own
-words for how good it must be; never add a number or threshold the user did not give. For each check give
-"criterion": the id of the existing criterion whose aspect it belongs to, or the closest one (often "quality"); never
-invent a new id. A criterion with "kind": "visual" is judged from screenshots alone: put only checks about how the
-work looks there, never errors, behaviour or data. Skip a check a criterion already has in the
-same meaning. Keep the user's concerns; do not add new ones. At most 6 checks, each one short checkable sentence of at
-most 20 words, in the user's language. Skip requests that are not about the work (e.g. "save it as a new file").
+and "process_signal" (environment errors met while the agent worked, and the user's feedback across turns). Give each
+check "from": "user_note" or "process_signal", and "criterion": the id of the existing criterion whose aspect it
+belongs to, or the closest one (often "quality"); never invent a new id.
+""" + FEEDBACK_RULES + """
 Return JSON: {"claims": [{"criterion": "id", "text": "...", "from": "user_note"}]} (empty when there are none)."""
 
 
@@ -227,14 +263,7 @@ unknown (the screenshots do not show what the claim is about). A challenge claim
 partial; floor claims keep their direct evidence-based judgment. Challenge claims ("level": "challenge") are judged against the best published work of this kind: met only
 when you cannot name a clear, concrete way such work does it better; when in doubt, partial. For each claim give "reason" (what you see; name the pages or views concerned when there are several, e.g. "p2
 and p5: the subject's visual identity changes"). Then give "summary": the look as a whole in one or two short
-sentences (what works, the main weakness), without advice.
+sentences (what works, the main weakness), without advice.""" + READER_NOTE + """
 Write in simplified technical style: short sentences, active voice.
 Return JSON: {"critique": [{"issue": "...", "severity": "major|minor", "claims": [0]}],
 "claims": [{"index": 0, "status": "met", "reason": "..."}], "summary": "..."}"""
-
-
-SUMMARY_PROMPT = """You write the overall verdict on an agent's delivered work from its evaluation: the Task, the total
-score (0-100) and each category with its score and the judges' comment. Write "summary": two or three short sentences
-in plain words: how good the work is overall, its strongest point and its biggest gap, naming categories by their
-names. No advice, no numbers other than the scores given, nothing the comments do not say.
-Return JSON: {"summary": "..."}"""

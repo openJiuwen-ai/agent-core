@@ -281,3 +281,60 @@ async def test_run_task_parse_mixed_error_and_report_retries() -> None:
     result = await run_task_parse(nodes, "zh", llm)
     assert result.task_description == "写报告"
     assert result.run_meta["attempts"] == 2
+
+
+def test_pictures_made_by_a_script_and_only_named_are_found(tmp_path: Any) -> None:
+    pages = tmp_path / "outputs"
+    pages.mkdir()
+    for name in ("page-1.png", "page-2.png", "cover.jpg", "clip.mp4"):
+        (pages / name).write_bytes(b"x")
+    nodes = {
+        "main": [
+            _node(0, "assistant", calls=[_call("bash", {"command": f"bun main.ts --output {pages}/page-1.png"})]),
+            _node(1, "tool", content=f"Saved image to {pages / 'page-2.png'} (1024x1024)"),
+            _node(2, "assistant", calls=[_call("image_gen", {"options": {"output_path": str(pages / "cover.jpg")}})]),
+            _node(3, "assistant", content=f"好了：![封面]({pages / 'cover.jpg'})，file://{pages / 'clip.mp4'}"),
+            _node(4, "assistant", content="参考 https://example.com/a.png 和不存在的 /nowhere/b.png 以及 notes.png"),
+        ]
+    }
+    candidates, _ = extract_file_candidates(nodes, str(tmp_path))
+    found = {path: tool for path, _, tool in candidates}
+    assert found == {
+        f"{pages}/page-1.png": "bash:media",
+        f"{pages}/page-2.png": "tool_result:media",
+        f"{pages}/cover.jpg": "reply:media",  # the last place it was named
+        f"{pages}/clip.mp4": "reply:media",
+    }  # web URLs and files that do not exist are not candidates
+
+
+def test_a_sent_picture_stays_a_send_file_candidate(tmp_path: Any) -> None:
+    picture = tmp_path / "page-1.png"
+    picture.write_bytes(b"x")
+    sent = _call("send_file_to_user", {"abs_file_path_list": json.dumps([str(picture)])})
+    nodes = {
+        "main": [
+            _node(0, "assistant", calls=[sent]),
+            _node(1, "assistant", content=f"已发送 {picture}"),
+        ]
+    }
+    candidates, _ = extract_file_candidates(nodes, str(tmp_path))
+    assert [(path, tool) for path, _, tool in candidates] == [(str(picture), "send_file_to_user")]
+
+
+def test_a_picture_named_without_its_folder_is_found_in_the_sessions_folders(tmp_path: Any) -> None:
+    outputs = tmp_path / "team-workspace" / "artifacts" / "chat-1" / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "page-1.png").write_bytes(b"x")
+    (outputs / "page-2.png").write_bytes(b"x")
+    project = tmp_path / "project"
+    project.mkdir()
+    nodes = {
+        "main": [
+            _node(0, "assistant", calls=[_call("bash", {"command": f"cd {outputs} && bun gen.ts -o page-1.png"})]),
+            _node(1, "tool", content="done"),
+            _node(2, "assistant", content="绘本做好了：page-1.png、page-2.png，还有 page-9.png"),
+        ]
+    }
+    candidates, _ = extract_file_candidates(nodes, str(project))
+    assert {path for path, _, _ in candidates} == {str(outputs / "page-1.png"), str(outputs / "page-2.png")}
+    # page-9.png exists nowhere the session worked: not a candidate

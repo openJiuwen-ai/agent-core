@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -415,7 +416,7 @@ async def test_run_diagnosis_forwards_reward_status_and_budget(monkeypatch: Any)
     assert captured["status_sink"] is sink
     assert captured["model_name"] == "m1"
     assert captured["status_counter"] is counter
-    assert captured["context_budget_tokens"] == 600_000
+    assert captured["context_budget_tokens"] is None  # no token limit by default
     assert captured["max_iterations"] == 32
 
 
@@ -490,7 +491,7 @@ async def test_build_reward_agent_wires_llm_status_rail(monkeypatch: Any) -> Non
     assert status_rail._counter == [3]
     budget_rails = [rail for rail in rails if type(rail).__name__ == "ContextBudgetRail"]
     assert len(budget_rails) == 1
-    assert budget_rails[0]._budget == 600_000
+    assert budget_rails[0]._budget is None
 
 
 class _FakeDeepAgent:
@@ -520,16 +521,20 @@ class _FakeRail:
         self.spent = 0
 
 
-def _patch_build(monkeypatch: Any, fake_agent: _FakeDeepAgent, fake_rail: _FakeRail) -> None:
+def _patch_build(monkeypatch: Any, fake_agent: _FakeDeepAgent, fake_rail: _FakeRail) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
     def fake_build(**kwargs: Any) -> tuple[Any, _FakeRail]:
-        del kwargs
+        captured.update(kwargs)
         return fake_agent, fake_rail
 
     monkeypatch.setattr(run_module, "build_attribution_agent", fake_build)
+    return captured
 
 
 class _FakeSession:
-    pass
+    def __init__(self, **kwargs: Any) -> None:
+        self.kwargs = kwargs
 
 
 async def test_run_attribution_success_single_round(monkeypatch: Any) -> None:
@@ -724,3 +729,322 @@ async def test_run_attribution_agent_error(monkeypatch: Any) -> None:
     assert outcome.status == "failed"
     assert outcome.failure_kind == "error"
     assert "model broke" in outcome.error_detail or True
+
+
+async def test_run_attribution_forwards_advice_switches(monkeypatch: Any) -> None:
+    runtime = NodeBackedRuntime(_nodes())
+    signals = [_signal()]
+    fake_agent = _FakeDeepAgent(runtime, signals, rounds_to_finish=1)
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    captured = _patch_build(monkeypatch, fake_agent, _FakeRail())
+    await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=signals,
+        task_description="写报告",
+        runtime=runtime,
+        skill_evolution=False,
+        ttse_advice=False,
+        total_timeout_s=None,
+    )
+    assert captured["skill_evolution"] is False
+    assert runtime.ttse_advice is False
+    # the disabled tool never appears as a capability in the initial prompt
+    assert "submit_skill_evolution" not in fake_agent.prompts[0]
+
+    fake_agent_default = _FakeDeepAgent(runtime, signals, rounds_to_finish=1)
+    captured = _patch_build(monkeypatch, fake_agent_default, _FakeRail())
+    await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=signals,
+        task_description="写报告",
+        runtime=runtime,
+        total_timeout_s=None,
+    )
+    assert captured["skill_evolution"] is True
+    assert runtime.ttse_advice is True
+
+
+def _core_model() -> Any:
+    from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+    from openjiuwen.core.foundation.llm.model import Model
+
+    return Model(
+        model_client_config=ModelClientConfig(
+            client_provider="OpenAI", api_key="k", api_base="http://127.0.0.1:9/v1", timeout=360.0
+        ),
+        model_config=ModelRequestConfig(model="glm"),
+    )
+
+
+async def test_attribution_models_have_no_time_limit_and_the_callers_model_is_untouched() -> None:
+    from openjiuwen.agent_evolving.attribution.agent import without_time_limits
+
+    model = _core_model()
+    free = without_time_limits(model)
+    client = free.model_client_config
+    assert free is not model and free.model_config is model.model_config
+    assert client.timeout >= 30 * 24 * 3600 and client.use_shared_llm_http_client is False
+    assert client.stream_first_chunk_timeout is None and client.stream_idle_timeout is None
+    assert model.model_client_config.timeout == 360.0  # the host's model keeps its own limits
+    assert model.model_client_config.stream_idle_timeout == 60.0
+    double = object()
+    assert without_time_limits(double) is double  # a test double passes through
+
+
+@pytest.mark.parametrize("which", ["attribution", "reward"])
+async def test_attribution_agents_retry_failed_model_calls_and_wait_for_slow_models(
+    monkeypatch: Any, which: str
+) -> None:
+    from openjiuwen.agent_evolving.attribution.agent import build_attribution_agent
+    from openjiuwen.agent_evolving.attribution.reward_stage.reward_agent import build_reward_agent
+    from openjiuwen.harness import factory as harness_factory
+
+    captured: dict[str, Any] = {}
+
+    def fake_create_deep_agent(model: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs, model=model)
+        return object()
+
+    monkeypatch.setattr(harness_factory, "create_deep_agent", fake_create_deep_agent)
+    if which == "attribution":
+        build_attribution_agent(
+            model=_core_model(),
+            signals=[_signal()],
+            runtime=NodeBackedRuntime(_nodes()),
+            task_description="写报告",
+            reward_overall=None,
+        )
+    else:
+        build_reward_agent(model=_core_model(), card=object(), system_prompt="p", workspace="/w")
+    assert captured["enable_model_anomaly_detection_rail"] is True  # a dropped connection is retried
+    client = captured["model"].model_client_config
+    assert client.stream_idle_timeout is None and client.stream_first_chunk_timeout is None
+
+
+async def test_run_attribution_has_no_time_limit_by_default(monkeypatch: Any) -> None:
+    import inspect
+
+    assert inspect.signature(run_attribution).parameters["total_timeout_s"].default is None
+    fake_rail = _FakeRail()
+    monkeypatch.setattr(run_module, "build_attribution_agent", lambda **kwargs: (_SlowAgent(), fake_rail))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    outcome = await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+    )
+    assert outcome.failure_kind != "timeout"  # the slow agent was waited for
+
+
+async def test_two_diagnoses_at_once_keep_their_own_attribution_tools() -> None:
+    from openjiuwen.agent_evolving.attribution.agent import build_attribution_agent
+    from openjiuwen.core.runner import Runner
+
+    def build(task: str) -> tuple[Any, NodeBackedRuntime]:
+        runtime = NodeBackedRuntime(_nodes())
+        agent, _ = build_attribution_agent(
+            model=_core_model(), signals=[_signal()], runtime=runtime, task_description=task, reward_overall=None
+        )
+        return agent, runtime
+
+    (first, first_runtime), (second, second_runtime) = build("绘本"), build("家庭日程")
+    assert first.card.id == second.card.id == "attribution-agent"  # persistence identity unchanged
+    ids = [
+        {card.id for card in agent.ability_manager.list() if card.name == "submit_attribution"}
+        for agent in (first, second)
+    ]
+    assert ids[0] and ids[1] and ids[0].isdisjoint(ids[1])  # one owner per run
+    for owned, runtime in zip(ids, (first_runtime, second_runtime)):  # each run's tool sees its own trajectory
+        tool = Runner.resource_mgr.get_tool(next(iter(owned)))
+        assert tool is not None and tool._runtime is runtime
+    run_module._release_tools(first)
+    assert Runner.resource_mgr.get_tool(next(iter(ids[0]))) is None  # released after the run
+    assert Runner.resource_mgr.get_tool(next(iter(ids[1]))) is not None  # the other diagnosis keeps its tools
+    run_module._release_tools(second)
+
+
+class _AgentWithTools(_SlowAgent):
+    def __init__(self) -> None:
+        self.released = 0
+
+        def teardown(manager: Any) -> None:
+            del manager
+            self.released += 1
+
+        self.ability_manager = type("AM", (), {"teardown_tools": teardown})()
+
+
+async def test_run_attribution_releases_its_tools_whatever_the_outcome(monkeypatch: Any) -> None:
+    agent = _AgentWithTools()
+    monkeypatch.setattr(run_module, "build_attribution_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+        total_timeout_s=0.05,
+    )
+    assert agent.released == 1  # also after a timeout
+
+
+class _StreamingAgent:
+    """An agent driven through ``stream`` only: what it yields stands for the model's streamed output."""
+
+    def __init__(self, items: list[Any]) -> None:
+        self.items, self.prompts = items, []
+
+    async def invoke(self, prompt: str, session: Any = None) -> dict[str, Any]:
+        raise AssertionError("the attribution agent is driven through stream, so its model calls stream")
+
+    async def stream(self, prompt: str, session: Any = None) -> Any:
+        self.prompts.append(prompt)
+        for item in self.items:
+            yield item
+
+
+async def test_the_attribution_agent_is_streamed_so_a_slow_model_keeps_the_connection_busy(monkeypatch: Any) -> None:
+    agent = _StreamingAgent([{"type": "llm_output", "payload": {"content": "thinking..."}}])
+    monkeypatch.setattr(run_module, "build_attribution_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    outcome = await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+    )
+    assert agent.prompts and outcome.failure_kind == "incomplete"  # streamed to the end, signal still open
+
+
+async def test_a_failure_the_stream_reports_is_raised_like_invoke_would() -> None:
+    failed = {"type": "answer", "payload": {"result_type": "error", "output": "APIConnectionError: Connection error."}}
+    with pytest.raises(RuntimeError, match="Connection error"):
+        await run_module.run_agent(_StreamingAgent([failed]), "p")
+    await run_module.run_agent(_SlowAgent(), "p")  # an agent without stream is invoked
+
+
+async def test_reaching_the_step_limit_ends_the_round_and_the_wake_round_still_runs(monkeypatch: Any) -> None:
+    limit = {
+        "type": "answer",
+        "payload": {"result_type": "error", "output": "Max iterations reached without completion"},
+    }
+    agent = _StreamingAgent([limit])
+    monkeypatch.setattr(run_module, "build_attribution_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    outcome = await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+    )
+    assert len(agent.prompts) == 2  # not an error: the wake round ran
+    assert outcome.failure_kind == "incomplete" and outcome.wake_attempted
+
+
+class _SessionRecordingAgent(_StreamingAgent):
+    async def stream(self, prompt: str, session: Any = None) -> Any:
+        self.prompts.append(session)
+        yield {"type": "llm_output", "payload": {"content": "thinking..."}}
+
+
+async def test_a_host_session_serves_the_first_round_and_the_wake_round_gets_a_new_one_under_its_id(
+    monkeypatch: Any,
+) -> None:
+    host = SimpleNamespace(get_session_id=lambda: "host-session")
+    agent = _SessionRecordingAgent([])
+    monkeypatch.setattr(run_module, "build_attribution_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+        session=host,
+    )
+    first, wake = agent.prompts
+    assert first is host  # the host's session, as given
+    assert wake is not host and wake.kwargs["session_id"] == "host-session"  # its stream was closed by round 1
+
+
+class _DroppedOnceAgent(_StreamingAgent):
+    """The provider drops the first round's model call mid-stream; the wake round runs."""
+
+    async def stream(self, prompt: str, session: Any = None) -> Any:
+        self.prompts.append(prompt)
+        yield {"type": "llm_output", "payload": {"content": "thinking..."}}
+        if len(self.prompts) == 1:
+            raise RuntimeError("[181001] model call failed: APIConnectionError: Connection error.")
+
+
+async def test_a_dropped_model_connection_goes_on_to_the_wake_round_instead_of_failing(monkeypatch: Any) -> None:
+    agent = _DroppedOnceAgent([])
+    monkeypatch.setattr(run_module, "build_attribution_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    outcome = await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+    )
+    assert len(agent.prompts) == 2 and outcome.wake_attempted
+    assert outcome.failure_kind == "incomplete"  # not "error": the signal is just still open
+
+
+async def test_a_real_attribution_agent_calls_its_model_streaming(monkeypatch: Any) -> None:
+    from openjiuwen.core.foundation.llm.model import Model
+
+    calls: list[str] = []
+
+    async def invoke(self: Any, *args: Any, **kwargs: Any) -> Any:
+        calls.append("invoke")
+        raise RuntimeError("invalid api key (invoke)")  # not retried: the test needs no backoff
+
+    async def stream(self: Any, *args: Any, **kwargs: Any) -> Any:
+        calls.append("stream")
+        raise RuntimeError("invalid api key (stream)")
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(Model, "invoke", invoke)
+    monkeypatch.setattr(Model, "stream", stream)
+    outcome = await run_attribution(
+        model=_core_model(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+    )
+    # the agent's own turn streamed (an "invoke" here can only be the harness's background image probe)
+    assert "stream" in calls
+    assert outcome.status == "failed" and "invalid api key (stream)" in (outcome.error_detail or "")
+
+
+async def test_a_real_attribution_agent_streams_both_rounds_through_one_session(monkeypatch: Any) -> None:
+    from openjiuwen.core.foundation.llm.model import Model
+    from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+
+    rounds: list[str] = []
+
+    async def stream(self: Any, messages: Any, *args: Any, **kwargs: Any) -> Any:
+        rounds.append(str(messages))
+        yield AssistantMessageChunk(content="还在看轨迹。")  # no tool call: the signal stays open, so a wake follows
+
+    monkeypatch.setattr(Model, "stream", stream)
+    outcome = await run_attribution(
+        model=_core_model(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+    )
+    assert len(rounds) >= 2 and outcome.wake_attempted  # the wake round streamed too
+    assert "还在看轨迹。" in rounds[-1]  # ... and went on from the first round's conversation
+    assert outcome.failure_kind == "incomplete" and not outcome.error_detail  # no "StreamQueue is already closed"

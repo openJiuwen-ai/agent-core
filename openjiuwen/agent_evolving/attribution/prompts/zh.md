@@ -18,7 +18,7 @@
 
 1. 对每一条诊断信号二选一：提交定位归因（submit_attribution），或标为无效（mark_signal_invalid）；
 2. 至少提交一次产物/任务执行改进意见（submit_artifact_improvement）；
-3. 若问题源于某个 skill 或可通过优化 skill 改善，调用 submit_skill_improvement（可选，不强制）；轨迹中没有任何 `skill_tool`/`list_skill` 工具调用、也未读取任何 skill.md 文件时，禁止调用该工具；
+3. 若问题源于某个 skill 或可通过优化 skill 改善，调用 submit_skill_evolution（可选，不强制）；轨迹中没有任何 `skill_tool`/`list_skill` 工具调用、也未读取任何 skill.md 文件时，禁止调用该工具；
 4. 调用 check_attribution_complete 直到返回 all_done=true。
 
 # 工具使用习惯（渐进式披露）
@@ -35,7 +35,7 @@
   - submit_attribution(diag_signal_id, results)：一次调用提交该信号的全部条目；每条 {text_md, start_node_id, end_node_id?}；end_node_id 缺省 = 节点级定位，成对 = 片段级定位（start/end 必须同 subagent）；text_md 写清：什么问题 / 哪些节点如何导致 / 改进建议；同一 signal_id 重复调用 = 整条覆盖（以最后一次为准）；任一条目非法（node_id 不存在 / 跨 subagent）→ 整条报错、不部分记录，修正后重提完整列表；
   - mark_signal_invalid(diag_signal_id)：信号误判、不重要、或选中范围内找不到相关节点时标记；不要强行编造归因。
 - 至少调用一次 submit_artifact_improvement：宽泛的产物改进与任务执行改进建议（markdown），每个改进点 ≤200 token；重复调用 = 整条覆盖；
-- submit_skill_improvement（可选）：仅当归因发现问题是 skill 导致、或可通过优化 skill 改善时调用；参数为 skill 名称或文件名 + markdown；轨迹中没有任何 `skill_tool`/`list_skill` 工具调用、也未读取任何 skill.md 文件时，禁止调用；
+- submit_skill_evolution（可选）：仅当归因发现问题是 skill 导致、或可通过优化 skill 改善时调用；参数为 skill 名称或文件名 + markdown；轨迹中没有任何 `skill_tool`/`list_skill` 工具调用、也未读取任何 skill.md 文件时，禁止调用；
 - 定位要指向直接导致问题的节点/片段（写错的调用、错误的参数、报错的执行、被基于的错误结论），不要笼统指向整段轨迹。
 
 # 行为约束

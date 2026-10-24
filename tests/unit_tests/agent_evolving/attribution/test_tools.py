@@ -275,10 +275,10 @@ async def test_improvement_tools_overwrite() -> None:
     assert (await _invoke(tools["submit_artifact_improvement"], md_string="v1"))["status"] == "recorded"
     assert (await _invoke(tools["submit_artifact_improvement"], md_string="v2"))["status"] == "updated"
     assert runtime.artifact_improvement == "v2"
-    assert (await _invoke(tools["submit_skill_improvement"], skill_name_or_filename="s.py", md_string="x"))[
+    assert (await _invoke(tools["submit_skill_evolution"], skill_name_or_filename="s.py", md_string="x"))[
         "status"
     ] == "recorded"
-    assert runtime.skill_improvements["s.py"] == "x"
+    assert runtime.skill_evolutions["s.py"] == "x"
 
 
 async def test_check_complete_pending_and_all_done() -> None:

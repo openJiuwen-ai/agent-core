@@ -47,11 +47,9 @@ class _Stream:
         self.closed = True
 
 
-def _model(streams, **config):
+def _model(streams):
     model = models.Model.__new__(models.Model)
-    model.name, model.extra, model.deadline = "m", {}, None
-    model.quota = config.get("timeout", 30)
-    model.first_chunk = model.idle = config.get("idle_timeout", 0.2)
+    model.name, model.extra = "m", {}
     calls = []
 
     async def create(**kwargs):
@@ -71,19 +69,36 @@ async def test_stream_keeps_only_the_answer_and_closes():
     assert calls[0]["stream"] is True and stream.closed
 
 
-@pytest.mark.asyncio
-async def test_stalled_stream_is_cut_by_idle_timeout_and_retried_once():
-    stalled = _Stream([_Chunk(reasoning="..."), _Chunk('{"a": 1}')], stall_after=1)
-    model, calls = _model([stalled, _Stream([_Chunk('{"a": 2}')])])
-    assert await asyncio.wait_for(model.json("sys", "user"), 5) == {"a": 2}
-    assert len(calls) == 2 and stalled.closed
+class _Pausing(_Stream):
+    """A stream that goes quiet for a while between chunks, like a slow model."""
+
+    async def __anext__(self):
+        await asyncio.sleep(0.3)
+        return await super().__anext__()
 
 
 @pytest.mark.asyncio
-async def test_call_quota_covers_the_retry_too():
-    model, calls = _model([_Stream([], stall_after=0), _Stream([], stall_after=0)], timeout=0.3, idle_timeout=10)
-    with pytest.raises(TimeoutError):
-        await asyncio.wait_for(model.json("sys", "user"), 5)
+async def test_a_slow_stream_is_waited_for_not_cut():
+    slow = _Pausing([_Chunk(reasoning="..."), _Chunk('{"a"'), _Chunk(": 1}")])
+    model, calls = _model([slow])
+    assert await model.json("sys", "user") == {"a": 1}
+    assert len(calls) == 1 and slow.closed
+
+
+@pytest.mark.asyncio
+async def test_a_failed_call_is_retried_once_then_its_error_is_raised():
+    model, calls = _model([_Stream([_Chunk("not json")]), _Stream([_Chunk('{"a": 2}')])])
+    assert await model.json("sys", "user") == {"a": 2} and len(calls) == 2
+    model, calls = _model([_Stream([_Chunk("x")]), _Stream([_Chunk("y")])])
+    with pytest.raises(ValueError):
+        await model.json("sys", "user")
+    assert len(calls) == 2
+
+
+def test_the_reward_model_client_has_no_time_limit():
+    model = models.Model({"model": "m", "base_url": "http://127.0.0.1:9/v1", "api_key": "k"})
+    assert model.client.timeout is None and model.client.max_retries == 0
+    assert not hasattr(model, "quota") and not hasattr(model, "deadline")
 
 
 def test_score_weights_floor_and_proactive_challenge_and_caps_a_failed_floor():
@@ -164,6 +179,7 @@ def test_session_model_comes_from_the_session_and_jiuwenswarm_config(tmp_path, m
     - model_client_config: {api_base: https://d.example, api_key: kd, model_name: deepseek-v4-flash}
 """)
     monkeypatch.setenv("JIUWENSWARM_HOME", str(tmp_path))
+    assert "vision" not in models.model_config("session")  # nothing declared: Reward probes
     config = models.resolve_models({"producer": "session",
                                          "judge": {"model": "qwen3.8-flash", "base_url": "u", "api_key": "k"}})
     assert config["producer"] == {"model": "deepseek-v4-flash", "base_url": "https://d.example", "api_key": "kd",
@@ -171,6 +187,10 @@ def test_session_model_comes_from_the_session_and_jiuwenswarm_config(tmp_path, m
     assert config["judge"]["base_url"] == "u"                                  # fixed judge left alone
     judge = models.model_config({"model": "session", "timeout": 100})
     assert judge["model"] == "deepseek-v4-flash" and judge["timeout"] == 100
+    text = (tmp_path / "config/config.yaml").read_text().replace("model_name: deepseek-v4-flash", "model_name: "
+                                                                 "deepseek-v4-flash, supports_vision: true")
+    (tmp_path / "config/config.yaml").write_text(text)
+    assert models.model_config("session")["vision"] is True  # declared in the JiuwenSwarm config: not probed
 
 
 def test_progress_file_moves_through_the_stages(tmp_path, monkeypatch):
@@ -228,8 +248,10 @@ async def test_vision_probe_is_cached_per_model_and_config_can_decide(tmp_path, 
     assert await models.can_see(model("qwen-vl", {"color": "blue"})) is True          # cached
     assert await models.can_see(model("deepseek", error=RuntimeError("image_url not supported"))) is False
     assert await models.can_see(model("guesser", {"color": "blue"})) is False
+    assert await models.can_see(model("glm", {"color": "Red (#FF0000)"})) is True     # a fuller answer still counts
+    assert await models.can_see(model("glm-zh", {"color": "纯红色"})) is True
     assert await models.can_see(model("forced", vision=True)) is True                  # no probe
-    assert asked == ["qwen-vl", "deepseek", "guesser"]
+    assert asked == ["qwen-vl", "deepseek", "guesser", "glm", "glm-zh"]
 
 
 
@@ -287,17 +309,12 @@ def scripted_evidence_unless_asked(request, monkeypatch):
             images += [(f"check {number}, {label}", data) for label, data in shots]
         return evidence, images
 
-    async def scripted(criteria, ctx, route, log, limits=None):
-        seconds = limits.seconds if limits else 300
+    async def scripted(criteria, ctx, route, log, limits=None, prefetched=()):
         producer = models.Model(ctx["config"]["producer"])
-
-        async def timed(criterion):
-            try:
-                return await asyncio.wait_for(one(criterion, ctx, producer), seconds)
-            except asyncio.TimeoutError:
-                return [{"could_not_run": "checks ran out of time"}], []
-        found = await asyncio.gather(*(timed(c) for c in criteria))
-        return {c["id"]: f for c, f in zip(criteria, found)}
+        found = await asyncio.gather(*(one(c, ctx, producer) for c in criteria))
+        walked = [({"check": 0, **facts}, shots) for _, facts, shots in prefetched or ()]   # served to every criterion
+        return {c["id"]: ([f for f, _ in walked] + evidence, [s for _, shots in walked for s in shots] + images)
+                for c, (evidence, images) in zip(criteria, found)}
 
     monkeypatch.setattr(evidence_agent, "gather", scripted)
 
@@ -320,10 +337,9 @@ def dispatcher(answers, seen):
 
 
 def install(monkeypatch, answers, seen, name="judge-model", vision=True):
-    answers = [*answers, ("You read an agent's final reply", {"claims": []}),
-               ("You write the overall verdict", {"summary": "Scripted evaluation summary."})]
+    answers = [*answers, ("You read an agent's final reply", {"claims": []})]
     monkeypatch.setattr(models.Model, "__init__",
-                        lambda self, config: self.__dict__.update(name=name, vision=vision, quota=360))
+                        lambda self, config: self.__dict__.update(name=name, vision=vision))
     monkeypatch.setattr(models.Model, "json", dispatcher(answers, seen))
 
 
@@ -343,26 +359,26 @@ async def test_a_page_is_played_in_the_browser_and_judged_with_comments(tmp_path
                                                                        {"type": "probe", "script": "() => ({score, best})"}]}]}),
         ("You judge each claim of one criterion about an agent's delivered work", {**JUDGED, "summary": "能玩，反馈平淡。"}),
         ("You are an art director", {"critique": [], "claims": [], "summary": "No scripted visual verdict."}),
-        ("You write the overall verdict", {"summary": "可玩但朴素。"}),
     ], seen)
     root = workspace.make_workspace([tmp_path / "index.html"])
     report = await pipeline.score_workspace("Make a click game", root, {"producer": {}, "include_evidence": True},
                                    RewardOptions(txt_response="Done."))
-    check = report["evidence"]["click-scores"][0]
+    walked, check = report["evidence"]["click-scores"][:2]
+    assert walked["page"] == "index.html" and walked["note"] == pipeline.DEFAULT_WALK   # the default walk came first
+    assert walked["actions"][0]["ok"] and len(walked["actions"]) == 26
     assert check["tool"] == "browser" and check["actions"][1]["value"] == {"score": 1, "best": 0}
     assert not any("SecurityError" in e for e in check["page_errors"])         # real origin, localStorage works
     judged = [x for x in seen if x[0].startswith("You judge each claim of one criterion about an agent's delivered")]
-    assert judged[0][2] == ["check 1, loaded", "check 1, after action 0"]       # screenshots reach the judge
+    assert judged[0][2][-2:] == ["check 1, loaded", "check 1, after action 0"]  # screenshots reach the judge
+    assert judged[0][2][:2] == ["default view, loaded", "default view, after action 3"]   # the walk's views too
     assert "Make a click game" in judged[0][1]                                  # claims are read with the Task in mind
     assert "<button" not in seen[0][1]                                         # criteria see the Task only
     assert [c["category_id"] for c in report["categories"]] == ["click-scores", "visual"]   # no process criterion; a game is looked at
     page = report["categories"][0]
     assert page["score"] == 75 and page["comment"] == "能玩，反馈平淡。"
-    assert report["total"]["summary"] == "可玩但朴素。"
+    assert report["total"]["summary"] == "click-scores scored 75: 能玩，反馈平淡。"   # made in code, no model call
     assert report["meta"]["tools"] == {"available": ["read", "python", "browser"], "used": ["browser"]}
     assert "suggestions" not in report and "improvements" not in report      # proposing is attribution's job
-    verdict = next(user for system, user, _ in seen if system.startswith("You write the overall verdict"))
-    assert "能玩，反馈平淡。" in verdict
 
 
 @pytest.mark.asyncio
@@ -643,24 +659,24 @@ async def test_looks_are_judged_by_eye_only_and_a_major_flaw_caps_them(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_slow_checks_stop_at_the_deadline_and_the_judge_still_runs(tmp_path, monkeypatch):
+async def test_a_slow_run_is_waited_for_and_an_old_deadline_setting_is_ignored(tmp_path, monkeypatch):
     seen = []
+    real = checks.run_check
 
-    async def hangs(check, root, tools, number=1):
-        await asyncio.sleep(60)
+    async def slow(check, root, tools, number=1):
+        await asyncio.sleep(1)
+        return await real(check, root, tools, number)
 
-    monkeypatch.setattr(checks, "run_check", hangs)
+    monkeypatch.setattr(checks, "run_check", slow)
     install(monkeypatch, [
         ("You write evaluation criteria", {"criteria": [PAGE_CRITERIA["criteria"][0]]}),
         ("You plan checks", {"checks": [{"tool": "python", "code": "print(1)"}]}),
-        ("You judge each claim", {"claims": [{"index": 0, "status": "unknown"}, {"index": 1, "status": "unknown"}]}),
+        ("You judge each claim", JUDGED),
     ], seen)
-    monkeypatch.setattr(models.Model, "__init__", lambda self, config: self.__dict__.update(
-        name="m", vision=True, quota=0))
     report = await asyncio.wait_for(pipeline.text_reward("t", {"a.txt": "x"}, {
-        "producer": {}, "deadline_seconds": 0.5, "include_evidence": True}), 20)
-    assert "ran out of time" in json.dumps(report["evidence"])
-    assert report["categories"][0]["score"] is None  # the time limit is a normal stop; nothing seen, nothing scored
+        "producer": {}, "deadline_seconds": 0.1, "include_evidence": True}), 20)
+    assert report["evidence"]["click-scores"][0]["stdout"].strip() == "1"   # the check ran to the end
+    assert report["categories"][0]["score"] == 75
 
 
 @pytest.mark.asyncio
@@ -685,9 +701,11 @@ async def test_a_blind_judge_gets_no_screenshots_and_the_reply_warns(tmp_path, m
     assert report["categories"][0]["score"] == 100         # an unknown challenge is left out, like an unknown floor
     assert report["categories"][1]["score"] is None        # blind visual criterion is excluded as a whole
     assert report["total"]["score"] == 100
-    assert "deepseek-v4-flash 不支持看图" in report["meta"]["warnings"][0]
-    assert "⚠️ 当前模型 deepseek-v4-flash 不支持看图" in result_mod.render(report)
-    assert "画面维度整项不计分、不计入总分" in result_mod.render(report).split("输入：", 1)[0]
+    assert "判定模型 deepseek-v4-flash 看不到图片" in report["meta"]["warnings"][0]
+    assert "⚠️ 判定模型 deepseek-v4-flash 看不到图片" in result_mod.render(report)
+    assert "画面维度不评分、不计入总分" in result_mod.render(report).split("输入：", 1)[0]
+    assert report["categories"][1]["unscored"] == "blind"
+    assert report["meta"]["vision"] == {"judge": False, "art_judge": False}
 
 
 def test_cli_passes_the_product_paths_and_the_text_reply(tmp_path, monkeypatch):
@@ -785,16 +803,18 @@ def test_a_claim_naming_a_judge_is_reworded():
 
 
 @pytest.mark.asyncio
-async def test_a_work_made_of_pictures_is_seen_through_its_picture_files(tmp_path):
-    pytest.importorskip("playwright")
+async def test_a_work_made_of_pictures_is_seen_through_its_picture_files(tmp_path, monkeypatch):
     import base64 as b64
     png = b64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
     for name in ("page10.png", "page2.png", "page1.png"):
         (tmp_path / name).write_bytes(png)
+    (tmp_path / "notes.png").write_bytes(b"not a picture")
+    monkeypatch.setattr(checks, "launch_browser", None)   # no browser is needed for pictures
     shots = await pipeline.default_screenshots(tmp_path, print)
     assert [label for label, _ in shots] == ["delivered picture page1.png", "delivered picture page2.png",
-                                             "delivered picture page10.png"]
-    assert all(b64.b64decode(data)[:2] == b"\xff\xd8" for _, data in shots)          # jpeg, as the models expect
+                                             "delivered picture page10.png"]   # in page order; a broken file left out
+    assert all(b64.b64decode(data) == png for _, data in shots)                  # a small PNG is sent as it is
+    assert models.data_url(shots[0][1]).startswith("data:image/png;base64,")    # with its real type
 
 
 @pytest.mark.asyncio
@@ -825,12 +845,14 @@ def test_a_work_folder_is_copied_without_other_versions_beside_it(tmp_path):
 @pytest.mark.asyncio
 async def test_the_users_feedback_becomes_checks_in_the_criteria_it_concerns(tmp_path, monkeypatch):
     seen = []
-    placements = iter([{"claims": [{"criterion": "visual", "text": "每页每个人物正好两只手"}]},
-                       {"claims": [{"criterion": "nope", "text": "楼梯场景里孩子的动作自然"},
-                                   {"criterion": "visual", "text": "每页每个人物正好两只手"}]}])
+    written = {"criteria": [PAGE_CRITERIA["criteria"][0], {
+        "id": "visual", "scope": "terminal", "kind": "visual", "name": "画面质量",
+        "claims": [{"text": "主体一眼能认出", "level": "floor"},
+                   {"text": "每页每个人物正好两只手", "level": "challenge", "source": "user_note"}]}]}
     install(monkeypatch, [
-        ("You write evaluation criteria", {"criteria": [PAGE_CRITERIA["criteria"][0]]}),
-        ("You place a user's feedback", lambda user: next(placements)),
+        ("You write evaluation criteria", written),
+        ("You place a user's feedback", {"claims": [{"criterion": "nope", "text": "楼梯场景里孩子的动作自然"},
+                                                    {"criterion": "visual", "text": "每页每个人物正好两只手"}]}),
         ("You plan checks", {"checks": []}),
         ("You judge each claim", JUDGED),
         ("You are an art director", {"critique": [], "claims": []}),
@@ -838,12 +860,16 @@ async def test_the_users_feedback_becomes_checks_in_the_criteria_it_concerns(tmp
     rubric = tmp_path / "rubric.json"
     first = await pipeline.score_workspace("做绘本", workspace.make_workspace(texts={"a.md": "x"}), {"producer": {}},
                                   RewardOptions(rubric_path=rubric, user_note="第 2 页多一只手"))
-    asked = json.loads(next(u for s, u, _ in seen if s.startswith("You place a user's feedback")))
-    assert asked["user_note"] == "第 2 页多一只手" and [c["id"] for c in asked["criteria"]] == ["click-scores", "visual"]
+    # new criteria: the note is placed in the same call, not in one of its own
+    assert not any(s.startswith("You place a user's feedback") for s, _, _ in seen)
+    criteria_call = next(u for s, u, _ in seen if s.startswith("You write evaluation criteria"))
+    assert "Feedback:" in criteria_call and "第 2 页多一只手" in criteria_call
     hands = [i for i in first["sub_category_items"] if i["from_user_note"]]
     assert [(i["category_id"], i["rubric"]) for i in hands] == [("visual", "每页每个人物正好两只手")]
     second = await pipeline.score_workspace("做绘本", workspace.make_workspace(texts={"a.md": "y"}), {"producer": {}},
                                    RewardOptions(rubric_path=rubric, user_note="楼梯不自然"))
+    asked = json.loads(next(u for s, u, _ in seen if s.startswith("You place a user's feedback")))   # a kept rubric
+    assert asked["user_note"] == "楼梯不自然" and [c["id"] for c in asked["criteria"]] == ["click-scores", "visual"]
     assert [c["category_id"] for c in second["categories"]] == ["click-scores", "visual"]      # no criterion is added
     stairs, = [i for i in second["sub_category_items"] if i["rubric"] == "楼梯场景里孩子的动作自然"]
     assert stairs["category_id"] == "click-scores" and stairs["from_user_note"]     # unknown id: never the looks-only one
@@ -853,18 +879,19 @@ async def test_the_users_feedback_becomes_checks_in_the_criteria_it_concerns(tmp
     assert sum(x.get("source") == "feedback" for c in kept for x in c["claims"]) == 2   # the rubric grows
     third = await pipeline.score_workspace("做绘本", workspace.make_workspace(texts={"a.md": "z"}), {"producer": {}},
                                   RewardOptions(rubric_path=rubric))
-    assert sum(s.startswith("You place a user's feedback") for s, _, _ in seen) == 2   # no feedback, no call
+    assert sum(s.startswith("You place a user's feedback") for s, _, _ in seen) == 1   # no feedback, no call
     assert len([i for i in third["sub_category_items"] if i["from_user_note"]]) == 2
 
 
 @pytest.mark.asyncio
 async def test_reward_takes_product_paths_and_places_note_and_signal(tmp_path, monkeypatch):
     seen = []
+    first = PAGE_CRITERIA["criteria"][0]
     install(monkeypatch, [
-        ("You write evaluation criteria", {"criteria": [PAGE_CRITERIA["criteria"][0]]}),
-        ("You place a user's feedback", {"claims": [
-            {"criterion": "visual", "text": "主角造型可爱", "from": "user_note"},
-            {"criterion": "click-scores", "text": "运行时控制台没有报错", "from": "process_signal"}]}),
+        ("You write evaluation criteria", {"criteria": [
+            {**first, "claims": [*first["claims"], {"text": "运行时控制台没有报错", "source": "process_signal"}]},
+            {"id": "visual", "kind": "visual", "name": "画面质量",
+             "claims": [{"text": "主角造型可爱", "level": "floor", "source": "user_note"}]}]}),
         ("You plan checks", {"checks": []}),
         ("You judge each claim", JUDGED),
         ("You are an art director", {"critique": [], "claims": []}),
@@ -875,13 +902,18 @@ async def test_reward_takes_product_paths_and_places_note_and_signal(tmp_path, m
     (tmp_path / "a.md").write_text("x")
     report = await pipeline.reward("做绘本", [str(tmp_path / "a.md")], {"producer": {}},
                                    RewardOptions(user_note="猫太丑", process_signal="TypeError: x is undefined"))
-    asked = json.loads(next(u for s, u, _ in seen if s.startswith("You place a user's feedback")))
-    assert asked["user_note"] == "猫太丑" and asked["process_signal"] == "TypeError: x is undefined"
+    system, asked, _ = next(x for x in seen if x[0].startswith("You write evaluation criteria"))
+    feedback = json.loads(asked.split("Feedback:\n", 1)[1])
+    assert feedback == {"user_note": "猫太丑", "process_signal": "TypeError: x is undefined"}
+    assert not any(s.startswith("You place a user's feedback") for s, _, _ in seen)   # one call for both
     by_text = {i["rubric"]: i for i in report["sub_category_items"]}
     assert by_text["主角造型可爱"]["from_user_note"] and not by_text["主角造型可爱"]["from_process_signal"]
     assert by_text["运行时控制台没有报错"]["from_process_signal"]
     assert report["meta"]["user_note"] == "猫太丑" and report["meta"]["process_signal"].startswith("TypeError")
     assert made and not made[0].exists() and (tmp_path / "a.md").exists()   # scratch copy removed, original kept
+
+
+DROPPED = object()
 
 
 class ScriptedLM:
@@ -899,6 +931,9 @@ class ScriptedLM:
         turn = self.turns.pop(0)
         if isinstance(turn, Exception):
             raise turn
+        if turn is DROPPED:   # the provider drops the call after some output streamed
+            yield AssistantMessageChunk(content="thinking", tool_calls=[])
+            raise RuntimeError("APIConnectionError: Connection error.")
         if isinstance(turn, str):
             yield AssistantMessageChunk(content=turn, tool_calls=[])
             return
@@ -967,6 +1002,25 @@ async def test_the_evidence_agent_fails_loudly(monkeypatch):
         await pipeline.text_reward("t", {"a.md": "x"}, {"producer": ROUTE})
 
 
+@pytest.mark.real_agent
+@pytest.mark.asyncio
+async def test_a_dropped_model_connection_restarts_the_evidence_agent_from_the_checks_already_run(monkeypatch):
+    from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
+
+    install(monkeypatch, [("You write evaluation criteria", TWO_CRITERIA), ("You judge each claim", JUDGED)], [])
+    check = [("run_checks", {"checks": [{"tool": "read", "path": "a.md", "criteria": ["facts"]}]})]
+    lm = ScriptedLM([check, DROPPED, "enough evidence"])
+    monkeypatch.setattr(ReActAgent, "_get_llm", lambda self: lm)
+    report = await pipeline.text_reward("t", {"a.md": "x"}, {"producer": ROUTE, "include_evidence": True})
+    assert len(report["evidence"]["facts"]) == 1  # the check is not run again
+    assert "already_run" in lm.seen[-1] and "read_evidence id=c1" in lm.seen[-1]  # the new agent starts from it
+
+    lm = ScriptedLM([check, DROPPED, DROPPED])  # dropped again: what was gathered is judged
+    monkeypatch.setattr(ReActAgent, "_get_llm", lambda self: lm)
+    report = await pipeline.text_reward("t", {"a.md": "x"}, {"producer": ROUTE, "include_evidence": True})
+    assert len(report["evidence"]["facts"]) == 1 and len(lm.seen) == 3
+
+
 def test_the_evidence_model_can_be_a_route_dict_or_an_agent_core_entry(monkeypatch):
     from types import SimpleNamespace
 
@@ -976,10 +1030,18 @@ def test_the_evidence_model_can_be_a_route_dict_or_an_agent_core_entry(monkeypat
     entry = evidence_agent.pool_entry({**ROUTE, "api_key": "env:FR_TEST_KEY", "extra_body": {"enable_thinking": False}})
     assert (entry.model_name, entry.api_key, entry.metadata["request"]) == ("scripted-model", "secret",
                                                                             {"enable_thinking": False})
-    given = ModelPoolEntry(model_name="m", api_key="k", api_base_url="u", api_provider="OpenAI")
-    assert evidence_agent.pool_entry(given) is given
+    given = ModelPoolEntry(model_name="m", api_key="k", api_base_url="u", api_provider="OpenAI",
+                           metadata={"client": {"timeout": 360, "stream_idle_timeout": 60}})
+    used = evidence_agent.pool_entry(given)
+    assert (used.model_name, used.api_key, used.model_id) == ("m", "k", given.model_id)
+    assert given.metadata == {"client": {"timeout": 360, "stream_idle_timeout": 60}}     # the caller's entry stays
     like = evidence_agent.pool_entry(SimpleNamespace(model_name="chat", api_base_url="u", api_key="k"))
     assert like.model_name == "chat" and like.api_provider == "OpenAI"
+    for made in (entry, used, like):   # no time limit, whatever the entry carried; its own HTTP client
+        client = made.to_team_model_config().model_client_config
+        assert client.timeout == evidence_agent.NO_LIMIT_SECONDS
+        assert client.stream_first_chunk_timeout is None and client.stream_idle_timeout is None
+        assert client.use_shared_llm_http_client is False
 
 
 @pytest.mark.real_agent
@@ -1024,5 +1086,6 @@ async def test_reading_saved_results_many_times_is_never_cut_off(monkeypatch):
     read = [("read_evidence", {"id": "c1", "start": 1})]
     lm = ScriptedLM([check] + [read] * 6 + ["enough evidence"])
     monkeypatch.setattr(ReActAgent, "_get_llm", lambda self: lm)
-    await pipeline.text_reward("t", {"a.md": "x"}, {"producer": ROUTE, "include_evidence": True})
+    await pipeline.text_reward("t", {"a.md": "x"}, {"producer": ROUTE, "include_evidence": True,
+                                                    "evidence_rounds": 12})
     assert len(lm.seen) == 8 and not any("Stop now" in turn for turn in lm.seen)   # progressive reading runs on

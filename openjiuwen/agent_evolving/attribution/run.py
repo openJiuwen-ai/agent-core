@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import uuid
+from contextlib import aclosing
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -67,7 +69,9 @@ class NodeBackedRuntime:
         self.invalid_signals: set[str] = set()
         self.artifact_improvement: str | None = None
         self.artifact_improvement_required = True
-        self.skill_improvements: dict[str, str] = {}
+        self.skill_evolutions: dict[str, str] = {}
+        # reserved for the future experience consolidation tool
+        self.ttse_advice: bool = True
         for nodes in nodes_by_subagent.values():
             for node in nodes:
                 self._index[node.node_id] = node
@@ -131,9 +135,9 @@ class NodeBackedRuntime:
         self.artifact_improvement = md
         return status
 
-    def record_skill_improvement(self, key: str, md: str) -> str:
-        status = "updated" if key in self.skill_improvements else "recorded"
-        self.skill_improvements[key] = md
+    def record_skill_evolution(self, key: str, md: str) -> str:
+        status = "updated" if key in self.skill_evolutions else "recorded"
+        self.skill_evolutions[key] = md
         return status
 
     def completion_overview(self) -> dict[str, Any]:
@@ -272,7 +276,7 @@ async def run_diagnosis(
     jev_concurrency: int = 8,
     model: Any = None,
     reward_card: Any = None,
-    reward_budget_tokens: int = 600_000,
+    reward_budget_tokens: int | None = None,
     reward_max_iterations: int = 32,
     status_sink: StatusSink | None = None,
     model_name: str = "",
@@ -350,7 +354,8 @@ async def run_diagnosis(
         status_counter=counter,
     )
     try:
-        await agent.invoke(
+        await run_agent(
+            agent,
             build_reward_user_prompt(
                 task_description=task_parse.task_description,
                 message_artifacts=task_parse.message_artifacts,
@@ -359,11 +364,13 @@ async def run_diagnosis(
                 user_attribution=user_attribution,
                 language=language,
                 user_request=task_parse.user_request,
-            )
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - fallback to rule/Jev signals
         run_meta["reward"] = {"failed": type(exc).__name__, "error": str(exc)[:200]}
         return _rule_jev_result(signals, run_meta, user_attribution)
+    finally:
+        _release_tools(agent)
     run_meta["reward"] = {
         "submitted": gate.submitted,
         "budget_exceeded": rail.exceeded,
@@ -469,25 +476,34 @@ async def run_attribution(
     reward_overall: RewardOverall | None = None,
     language: str = "zh",
     swarm_mode: bool = False,
+    skill_evolution: bool = True,
+    ttse_advice: bool = True,
     runtime: AttributionAgentRuntime | None = None,
     status_sink: StatusSink | None = None,
     model_name: str = "",
     status_counter: list[int] | None = None,
-    total_token_budget: int = 3_000_000,
+    total_token_budget: int | None = None,
     max_iterations: int = 80,
     max_context_messages: int = 100,
-    total_timeout_s: float | None = 600.0,
+    total_timeout_s: float | None = None,
     session: Any = None,
 ) -> AttributionRunOutcome:
     """Run stage three with the one-shot wake (proposal §5.4).
 
     The host may pass its own runtime and session; otherwise a
-    :class:`NodeBackedRuntime` and a fresh agent session are used.  The 600s
-    timeout covers both invoke rounds when ``total_timeout_s`` is set.
+    :class:`NodeBackedRuntime` and a fresh agent session are used.  There is no
+    time or token limit by default (a slow model is waited for; tokens are only
+    counted); a caller that needs one sets ``total_timeout_s`` (covering both
+    invoke rounds) or ``total_token_budget``.
 
     ``tier == "perfect"`` signals never enter this stage: they are filtered
     here (proposal §4.5) and reported via ``skipped_signal_ids`` so the host
     can surface the skip in state.
+
+    ``skill_evolution=False`` (host switch pass-through) removes the skill
+    improvement tool from the agent's toolset.  ``ttse_advice`` is the
+    matching switch for the future experience consolidation tool; it is
+    accepted and recorded but has no behaviour on this stage yet.
     """
     active_signals = [signal for signal in signals if signal.tier != "perfect"]
     skipped_signal_ids = sorted(signal.signal_id for signal in signals if signal.tier == "perfect")
@@ -503,6 +519,8 @@ async def run_attribution(
     # a deliverable was reviewed only when the Reward scored one: without it there is nothing to improve
     review_deliverables = any(signal.source == SignalSource.REWARD for signal in signals)
     active_runtime.artifact_improvement_required = review_deliverables
+    if isinstance(active_runtime, NodeBackedRuntime):
+        active_runtime.ttse_advice = ttse_advice
     agent, rail = build_attribution_agent(
         model=model,
         signals=active_signals,
@@ -511,6 +529,7 @@ async def run_attribution(
         reward_overall=reward_overall,
         language=language,
         swarm_mode=swarm_mode,
+        skill_evolution=skill_evolution,
         total_token_budget=total_token_budget,
         max_iterations=max_iterations,
         max_context_messages=max_context_messages,
@@ -520,7 +539,25 @@ async def run_attribution(
     )
     from openjiuwen.core.session.agent import create_agent_session
 
-    active_session = session if session is not None else create_agent_session()
+    # A streamed round closes its session's stream at the end, so each round gets a session of its own; they share one
+    # id, so the wake round goes on from the first round's conversation. Our sessions carry the agent's card (a
+    # streamed round checks it in first). A session given by the host is used as it is.
+    session_id = (
+        str(session.get_session_id())
+        if callable(getattr(session, "get_session_id", None))
+        else f"attribution_{uuid.uuid4().hex[:12]}"
+    )
+    card = getattr(agent, "card", None)
+    rounds_begun = [0]
+
+    def round_session() -> Any:
+        """The host's session for the first round; a streamed round closes its session's stream, so every later
+        round gets a new session object under the same id (it sees the earlier rounds' conversation)."""
+        rounds_begun[0] += 1
+        if session is not None and rounds_begun[0] == 1:
+            return session
+        return create_agent_session(session_id=session_id, card=card)
+
     initial_prompt = build_attribution_initial_prompt(
         task_description=task_description,
         reward_overall=reward_overall,
@@ -528,6 +565,7 @@ async def run_attribution(
         subjects=active_runtime.subjects(),
         language=language,
         review_deliverables=review_deliverables,
+        skill_evolution=skill_evolution,
     )
 
     def outcome(completed: bool, wake_attempted: bool) -> AttributionRunOutcome:
@@ -538,7 +576,7 @@ async def run_attribution(
             "skill": 0,
         }
         if isinstance(active_runtime, NodeBackedRuntime):
-            counts["skill"] = len(active_runtime.skill_improvements)
+            counts["skill"] = len(active_runtime.skill_evolutions)
         if rail.exceeded:
             return AttributionRunOutcome(
                 status="failed",
@@ -579,15 +617,22 @@ async def run_attribution(
             raise asyncio.TimeoutError
         try:
             await asyncio.wait_for(
-                agent.invoke(prompt, session=active_session),
+                run_agent(agent, prompt, session=round_session()),
                 timeout=remaining,
             )
         except asyncio.TimeoutError:
             raise
-        except Exception:
+        except Exception as exc:
+            from openjiuwen.agent_evolving.reward.evidence_agent import RESTARTABLE
+
             if rail.exceeded:
                 return True
-            raise
+            if not RESTARTABLE.search(f"{type(exc).__name__}: {exc}"):
+                raise
+            # A call the provider drops mid-stream is not retried by the framework (output already streamed);
+            # what the tools recorded stays, and the wake round picks up the signals still open.
+            logger.warning("[attribution] model connection dropped, moving on: %s", str(exc)[:200])
+            return False
         return True
 
     try:
@@ -632,6 +677,45 @@ async def run_attribution(
             counts={},
             token_usage={"attribution": rail.spent},
         )
+    finally:
+        _release_tools(agent)
+
+
+async def run_agent(agent: Any, prompt: Any, session: Any = None) -> None:
+    """``agent.invoke(prompt)``, driven through ``agent.stream`` so every model call streams.
+
+    A non-streaming call sends nothing until the whole answer is ready; behind a gateway that drops a connection
+    idle for about 60 seconds (seen with yibuapi.com), a slow model thinking that long loses the call with
+    ``APIConnectionError: Connection error``.  Streamed, the reasoning keeps the connection busy.  A failure the
+    stream reports as an item (``result_type: error``) is raised, as ``invoke`` would; reaching the step limit
+    ("Max iterations reached ...") is not a failure: the round just ends, and the wake round may follow.  An
+    agent without ``stream`` (a test double) is invoked.
+    """
+    from openjiuwen.agent_evolving.reward.evidence_agent import LIMIT_REACHED, stream_error
+
+    extra = {"session": session} if session is not None else {}
+    stream = getattr(agent, "stream", None)
+    if stream is None:
+        await agent.invoke(prompt, **extra)
+        return
+    failure = None
+    async with aclosing(stream(prompt, **extra)) as items:
+        async for item in items:
+            failure = failure or stream_error(item)
+    if failure and not LIMIT_REACHED.search(failure):
+        raise RuntimeError(failure)
+
+
+def _release_tools(agent: Any) -> None:
+    """Drop this run's tools from the process-wide resource manager (their ids carry the run's tool owner id)."""
+    from openjiuwen.core.common.exception.errors import BaseError
+
+    teardown = getattr(getattr(agent, "ability_manager", None), "teardown_tools", None)
+    if callable(teardown):
+        try:
+            teardown()
+        except BaseError:  # cleanup never replaces the run's outcome
+            logger.exception("[attribution] releasing the attribution tools failed")
 
 
 def _pending(runtime: AttributionAgentRuntime, signals: list[DiagnosticSignal]) -> list[str]:

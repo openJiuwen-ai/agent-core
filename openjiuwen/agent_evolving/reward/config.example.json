@@ -1,11 +1,9 @@
 {
   "producer": {
-    "model": "session",
-    "timeout": 360
+    "model": "session"
   },
   "judge": {
-    "model": "session",
-    "timeout": 360
+    "model": "session"
   },
   "criteria_budget": 3
 }
