@@ -19,6 +19,7 @@ from openjiuwen.harness.prompts.sections.skills import (
     build_skill_line,
     build_skill_lines,
     build_skills_section,
+    resolve_skill_directory,
 )
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -541,7 +542,7 @@ class SkillUseRail(DeepAgentRail):
                         skill_name=skill.name,
                         description=skill.description,
                         language=self.system_prompt_builder.language,
-                        # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
+                        skill_directory=self._skill_directory(skill),
                     )
                 )
             return build_skills_section(
@@ -813,6 +814,7 @@ class SkillUseRail(DeepAgentRail):
                         skill_name=skill.name,
                         description=skill.description,
                         language=self.system_prompt_builder.language,
+                        skill_directory=self._skill_directory(skill),
                     )
                     for index, skill in enumerate(additions)
                 )
@@ -835,6 +837,7 @@ class SkillUseRail(DeepAgentRail):
                     skill_name=skill.name,
                     description=skill.description,
                     language=self.system_prompt_builder.language,
+                    skill_directory=self._skill_directory(skill),
                 )
                 for index, skill in enumerate(additions)
             )
@@ -859,7 +862,7 @@ class SkillUseRail(DeepAgentRail):
                     skill_name=skill.name,
                     description=self._get_skill_description(skill),
                     language=self.system_prompt_builder.language,
-                    # skill_md_path=str(self._skill_md_path(skill)), # No longer needed with SkillTool
+                    skill_directory=self._skill_directory(skill),
                 )
             )
 
@@ -1002,9 +1005,14 @@ class SkillUseRail(DeepAgentRail):
         return str(description).strip()
 
     @staticmethod
-    def _skill_md_path(skill: Skill) -> Path:
-        """Return SKILL.md path for a skill."""
-        return skill.directory / "SKILL.md"
+    def _skill_directory(skill: Skill) -> str:
+        """Return the absolute directory a skill and its bundled files live in.
+
+        Empty when the skill carries no directory to render; see
+        ``resolve_skill_directory``, which the skill_tool result text renders
+        through as well so the field has one normalization rather than two.
+        """
+        return resolve_skill_directory(skill.directory)
 
     @staticmethod
     def _parse_skill_dirs(raw: str) -> List[str]:
