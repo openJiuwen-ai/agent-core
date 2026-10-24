@@ -242,13 +242,34 @@ async def main():
 
 ### Register Tools
 
-To utilize Agent Skills, the ReActAgent needs access to the following additional tools:
+To utilize Agent Skills, the ReActAgent needs access to the following system-operation tools:
 
-- `view_file`: Views the file content of a file
-- `execute_python_code`: Runs Python code
-- `run_command`: Runs a bash command in a Terminal/Shell
+- `read_file`: Reads file content (including `SKILL.md` and images to process)
+- `execute_code`: Runs Python code
+- `execute_cmd`: Runs a command in a Terminal/Shell
 
-Registering a skill automatically adds these tools to the agent.
+`register_skill` does **not** mount these tools automatically. After configuring the agent, fetch them from `SysOperation` and add them to `ability_manager`:
+
+```python
+async def main():
+    # ...
+    cfg.sys_operation_id = sysop_card.id
+    agent.configure(cfg)
+
+    # Mount sys_operation tools onto ability_manager for skill use
+    for operation_name, tool_name in (
+        ("fs", "read_file"),
+        ("code", "execute_code"),
+        ("shell", "execute_cmd"),
+    ):
+        tool_card = Runner.resource_mgr.get_sys_op_tool_cards(
+            sys_operation_id=sysop_card.id,
+            operation_name=operation_name,
+            tool_name=tool_name,
+        )
+        if tool_card is not None:
+            agent.ability_manager.add(tool_card)
+```
 
 ## Run Agent
 
@@ -332,6 +353,20 @@ async def main():
         )
     cfg.sys_operation_id = sysop_card.id
     agent.configure(cfg)
+
+    # Mount sys_operation tools onto ability_manager for skill use
+    for operation_name, tool_name in (
+        ("fs", "read_file"),
+        ("code", "execute_code"),
+        ("shell", "execute_cmd"),
+    ):
+        tool_card = Runner.resource_mgr.get_sys_op_tool_cards(
+            sys_operation_id=sysop_card.id,
+            operation_name=operation_name,
+            tool_name=tool_name,
+        )
+        if tool_card is not None:
+            agent.ability_manager.add(tool_card)
 
     # Add skills to the agent
     if skills_dir.exists():
