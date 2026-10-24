@@ -146,8 +146,13 @@ already gives the evidence these tools can provide; facts still need independent
 You have two tools:
 - run_checks(checks=[...]): runs a batch of checks in parallel and returns each result (browser runs as a summary
   with the last screenshots, when you can see them). Put every check that does not depend on another one's result
-  into the same call: your first call holds every check you can already plan, for all criteria at once; later calls
-  only fix a failed check or follow up on what a result revealed. For work with a page, the first call runs it in the
+  into the same call: your first call holds every check you can already plan, for all criteria at once. Make at most
+  one later call, only to fix a failed check or follow up on what a result revealed; when the first results give
+  every criterion evidence, stop. With few calls, aim each check: before the first call, go claim by claim and decide
+  what observation settles it (a state probed right after the action, a screenshot of the right screen, a number
+  recomputed), then write the check that reaches exactly that, naming in "criteria" what it serves; a short targeted
+  run per behaviour (with a controlled setup when needed) beats a long playthrough that may never reach it, and never
+  plan a read of a page's source. For work with a page, the first call runs it in the
   browser right away (start it, play or use it, look at
   each page or screen and screenshot it); one visit usually serves several criteria at once. A page's source is not
   shown and cannot be read: how the work behaves and looks is seen by using it. Each check is one object as below, plus

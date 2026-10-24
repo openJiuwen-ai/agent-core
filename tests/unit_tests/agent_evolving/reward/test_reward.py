@@ -913,6 +913,9 @@ async def test_reward_takes_product_paths_and_places_note_and_signal(tmp_path, m
     assert made and not made[0].exists() and (tmp_path / "a.md").exists()   # scratch copy removed, original kept
 
 
+DROPPED = object()
+
+
 class ScriptedLM:
     """The evidence agent's model: one scripted turn per call (tool calls, or a final line)."""
 
@@ -928,6 +931,9 @@ class ScriptedLM:
         turn = self.turns.pop(0)
         if isinstance(turn, Exception):
             raise turn
+        if turn is DROPPED:   # the provider drops the call after some output streamed
+            yield AssistantMessageChunk(content="thinking", tool_calls=[])
+            raise RuntimeError("APIConnectionError: Connection error.")
         if isinstance(turn, str):
             yield AssistantMessageChunk(content=turn, tool_calls=[])
             return
@@ -994,6 +1000,25 @@ async def test_the_evidence_agent_fails_loudly(monkeypatch):
     monkeypatch.setattr(ReActAgent, "_get_llm", lambda self: ScriptedLM([RuntimeError("401 bad key")]))
     with pytest.raises(evidence_agent.EvidenceError, match="401 bad key"):
         await pipeline.text_reward("t", {"a.md": "x"}, {"producer": ROUTE})
+
+
+@pytest.mark.real_agent
+@pytest.mark.asyncio
+async def test_a_dropped_model_connection_restarts_the_evidence_agent_from_the_checks_already_run(monkeypatch):
+    from openjiuwen.core.single_agent.agents.react_agent import ReActAgent
+
+    install(monkeypatch, [("You write evaluation criteria", TWO_CRITERIA), ("You judge each claim", JUDGED)], [])
+    check = [("run_checks", {"checks": [{"tool": "read", "path": "a.md", "criteria": ["facts"]}]})]
+    lm = ScriptedLM([check, DROPPED, "enough evidence"])
+    monkeypatch.setattr(ReActAgent, "_get_llm", lambda self: lm)
+    report = await pipeline.text_reward("t", {"a.md": "x"}, {"producer": ROUTE, "include_evidence": True})
+    assert len(report["evidence"]["facts"]) == 1  # the check is not run again
+    assert "already_run" in lm.seen[-1] and "read_evidence id=c1" in lm.seen[-1]  # the new agent starts from it
+
+    lm = ScriptedLM([check, DROPPED, DROPPED])  # dropped again: what was gathered is judged
+    monkeypatch.setattr(ReActAgent, "_get_llm", lambda self: lm)
+    report = await pipeline.text_reward("t", {"a.md": "x"}, {"producer": ROUTE, "include_evidence": True})
+    assert len(report["evidence"]["facts"]) == 1 and len(lm.seen) == 3
 
 
 def test_the_evidence_model_can_be_a_route_dict_or_an_agent_core_entry(monkeypatch):

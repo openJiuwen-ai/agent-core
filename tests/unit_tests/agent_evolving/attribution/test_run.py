@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -945,6 +946,57 @@ async def test_reaching_the_step_limit_ends_the_round_and_the_wake_round_still_r
     )
     assert len(agent.prompts) == 2  # not an error: the wake round ran
     assert outcome.failure_kind == "incomplete" and outcome.wake_attempted
+
+
+class _SessionRecordingAgent(_StreamingAgent):
+    async def stream(self, prompt: str, session: Any = None) -> Any:
+        self.prompts.append(session)
+        yield {"type": "llm_output", "payload": {"content": "thinking..."}}
+
+
+async def test_a_host_session_serves_the_first_round_and_the_wake_round_gets_a_new_one_under_its_id(
+    monkeypatch: Any,
+) -> None:
+    host = SimpleNamespace(get_session_id=lambda: "host-session")
+    agent = _SessionRecordingAgent([])
+    monkeypatch.setattr(run_module, "build_attribution_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+        session=host,
+    )
+    first, wake = agent.prompts
+    assert first is host  # the host's session, as given
+    assert wake is not host and wake.kwargs["session_id"] == "host-session"  # its stream was closed by round 1
+
+
+class _DroppedOnceAgent(_StreamingAgent):
+    """The provider drops the first round's model call mid-stream; the wake round runs."""
+
+    async def stream(self, prompt: str, session: Any = None) -> Any:
+        self.prompts.append(prompt)
+        yield {"type": "llm_output", "payload": {"content": "thinking..."}}
+        if len(self.prompts) == 1:
+            raise RuntimeError("[181001] model call failed: APIConnectionError: Connection error.")
+
+
+async def test_a_dropped_model_connection_goes_on_to_the_wake_round_instead_of_failing(monkeypatch: Any) -> None:
+    agent = _DroppedOnceAgent([])
+    monkeypatch.setattr(run_module, "build_attribution_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+    outcome = await run_attribution(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        signals=[_signal()],
+        task_description="写报告",
+        runtime=NodeBackedRuntime(_nodes()),
+    )
+    assert len(agent.prompts) == 2 and outcome.wake_attempted
+    assert outcome.failure_kind == "incomplete"  # not "error": the signal is just still open
 
 
 async def test_a_real_attribution_agent_calls_its_model_streaming(monkeypatch: Any) -> None:

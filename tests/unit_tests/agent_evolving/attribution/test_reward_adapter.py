@@ -241,6 +241,7 @@ async def test_progress_streams_what_reward_does_now(monkeypatch: Any, tmp_path:
         steps.stage("evidence", total=3)
         options.log("evidence c1 (python) for plan")
         options.log("evidence c2 (read) for list, message")
+        options.log("evidence batch done")
         steps.stage("judging", total=3)
         for name in ("plan", "list", "message"):
             await steps.counted(asyncio.sleep(0), name)
@@ -263,7 +264,7 @@ async def test_progress_streams_what_reward_does_now(monkeypatch: Any, tmp_path:
     lines = [e.response_preview for e in events if e.stage == "reward"]
     assert lines[0].startswith("░░░░░░░░░░ 3% · 出题：根据用户的请求写判定项 · 已用 0分")
     assert any("出题完成：3 个维度" in line for line in lines)
-    assert any("取证：第 2 项检查完成（read）" in line for line in lines)
+    assert any("取证第 1 轮：2 项检查完成（python、read），累计 2 项" in line for line in lines)  # one line a round
     assert any("判定：3/3 个维度已判定" in line for line in lines)
     assert lines[-1].startswith("▓▓▓▓▓▓▓▓▓▓ 100% · 完成：总分 72")
     percents = [int(line.split("% ")[0].split(" ")[-1]) for line in lines]
@@ -275,8 +276,9 @@ def test_the_evidence_bar_keeps_moving_while_checks_come() -> None:
     lines: list[str] = []
     steps = adapter._ProgressLines(lines.append, "zh")
     steps.stage("evidence", total=5)
-    for index in range(1, 19):  # more checks than two per criterion
+    for index in range(1, 19):  # more checks than two per criterion, one round each
         steps.log(f"evidence c{index} (python) for plan")
+        steps.log("evidence batch done")
     percents = [int(line.split("% ")[0].split(" ")[-1]) for line in lines[1:]]
     assert percents == sorted(set(percents))  # every check moves the bar
     assert percents[-1] < 68  # judging starts at 68
@@ -352,9 +354,15 @@ def test_warnings_and_failed_checks_show_in_the_progress_with_their_reason() -> 
     steps.log(WARNING + "默认浏览没能运行（RuntimeError: no browser could start）")
     steps.log("evidence c1 (browser) for play, visual: RuntimeError: no browser could start")
     steps.log("evidence c2 (python) for play")
+    steps.log("evidence c3 (read) for play: skipped: the source of a page is not read: use the page in the browser")
+    steps.log("evidence batch done")
     assert "⚠ 默认浏览没能运行（RuntimeError: no browser could start）" in lines[1] and "15%" in lines[1]
-    assert "第 1 项检查没能运行（browser）：RuntimeError: no browser could start" in lines[2]
-    assert "第 2 项检查完成（python）" in lines[3]
+    assert "第 1 项检查没能运行（browser）：RuntimeError: no browser could start" in lines[2]  # said at once
+    # one line for the round; a check not run by rule is said as such, not as a failure
+    assert lines[3].split(" · ")[1] == (
+        "取证第 1 轮：2 项检查完成（browser、python），累计 3 项；"
+        "1 项按规则不执行（网页作品不读源码，改在浏览器里实际使用）"
+    )
 
 
 def test_files_sent_with_the_reply_are_named_to_the_judges() -> None:

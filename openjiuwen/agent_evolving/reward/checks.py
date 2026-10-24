@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import shutil
+import struct
 import sys
 import tempfile
 from pathlib import Path
@@ -271,13 +272,13 @@ def picture_data(path):
 
 
 def picture_or_none(path):
-    """picture_data(path), or None when the file is not a usable picture (Pillow's errors are OSError/ValueError)."""
+    """picture_data(path), or None when the file is not a usable picture."""
     from PIL import Image
 
     try:
         return picture_data(path)
-    except (OSError, ValueError, Image.DecompressionBombError):
-        return None
+    except (OSError, ValueError, SyntaxError, EOFError, struct.error, Image.DecompressionBombError):
+        return None   # Pillow: OSError (unidentified, truncated), SyntaxError (a broken PNG), struct.error
 
 
 async def image_views(paths, max_images=8):

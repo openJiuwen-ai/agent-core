@@ -542,11 +542,21 @@ async def run_attribution(
     # A streamed round closes its session's stream at the end, so each round gets a session of its own; they share one
     # id, so the wake round goes on from the first round's conversation. Our sessions carry the agent's card (a
     # streamed round checks it in first). A session given by the host is used as it is.
-    session_id = f"attribution_{uuid.uuid4().hex[:12]}"
+    session_id = (
+        str(session.get_session_id())
+        if callable(getattr(session, "get_session_id", None))
+        else f"attribution_{uuid.uuid4().hex[:12]}"
+    )
     card = getattr(agent, "card", None)
+    rounds_begun = [0]
 
     def round_session() -> Any:
-        return session if session is not None else create_agent_session(session_id=session_id, card=card)
+        """The host's session for the first round; a streamed round closes its session's stream, so every later
+        round gets a new session object under the same id (it sees the earlier rounds' conversation)."""
+        rounds_begun[0] += 1
+        if session is not None and rounds_begun[0] == 1:
+            return session
+        return create_agent_session(session_id=session_id, card=card)
 
     initial_prompt = build_attribution_initial_prompt(
         task_description=task_description,
@@ -612,10 +622,17 @@ async def run_attribution(
             )
         except asyncio.TimeoutError:
             raise
-        except Exception:
+        except Exception as exc:
+            from openjiuwen.agent_evolving.reward.evidence_agent import RESTARTABLE
+
             if rail.exceeded:
                 return True
-            raise
+            if not RESTARTABLE.search(f"{type(exc).__name__}: {exc}"):
+                raise
+            # A call the provider drops mid-stream is not retried by the framework (output already streamed);
+            # what the tools recorded stays, and the wake round picks up the signals still open.
+            logger.warning("[attribution] model connection dropped, moving on: %s", str(exc)[:200])
+            return False
         return True
 
     try:

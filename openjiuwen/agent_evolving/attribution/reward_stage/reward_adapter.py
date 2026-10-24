@@ -49,11 +49,13 @@ _LABELS = {
         "unscored_no_screenshots": "画面维度「{name}」未评：没有拿到作品的截图（浏览器没能运行或没有截图）。",
         "sent_files": "（随回复已作为附件发送给用户的文件，用户在对话中能直接看到、打开：{files}）",
         "check_failed": "取证：第 {count} 项检查没能运行（{tool}）：{reason}",
+        "batch": "取证第 {batch} 轮：{count} 项检查完成（{tools}），累计 {total} 项",
+        "batch_skipped": "；{count} 项按规则不执行（{reason}）",
+        "page_source": "网页作品不读源码，改在浏览器里实际使用",
         "warning": "⚠ {text}",
         "criteria": "出题：根据用户的请求写判定项",
         "criteria_done": "出题完成：{count} 个维度",
         "evidence": "取证：实际运行交付物，覆盖 {count} 个维度",
-        "check": "取证：第 {count} 项检查完成（{tool}）",
         "evidence_done": "取证结束，共 {count} 项检查",
         "judging": "判定：逐条判定 0/{total} 个维度",
         "judged": "判定：{done}/{total} 个维度已判定",
@@ -78,11 +80,13 @@ _LABELS = {
         "sent_files": "(Files sent to the user with the reply, shown in the chat as attachments the user can open: "
         "{files})",
         "check_failed": "Evidence: check {count} could not run ({tool}): {reason}",
+        "batch": "Evidence round {batch}: {count} checks done ({tools}), {total} in all",
+        "batch_skipped": "; {count} not run by rule ({reason})",
+        "page_source": "a page's source is not read; it is used in the browser",
         "warning": "⚠ {text}",
         "criteria": "Criteria: writing claims from the user's request",
         "criteria_done": "Criteria written: {count} criteria",
         "evidence": "Evidence: running the deliverable for {count} criteria",
-        "check": "Evidence: check {count} done ({tool})",
         "evidence_done": "Evidence done: {count} checks",
         "judging": "Judging: 0/{total} criteria",
         "judged": "Judging: {done}/{total} criteria judged",
@@ -242,6 +246,9 @@ class _ProgressLines:
         self._percent = 0
         self._criteria = 0
         self._checks = 0
+        self._batches = 0
+        self._batch: dict[str, int] = {}
+        self._skipped: list[str] = []
         self._done = 0
         self._total = 0
         self._stage = ""
@@ -262,10 +269,29 @@ class _ProgressLines:
             self._criteria = total
             self.line(15, self._labels["evidence"].format(count=total))
         elif stage == "judging":
+            self._round_line()  # checks logged without a round end (older callers)
             if self._checks:
                 self.line(68, self._labels["evidence_done"].format(count=self._checks))
             self._done, self._total = 0, total
             self.line(70, self._labels["judging"].format(total=total))
+
+    def _round_line(self) -> None:
+        """One line for the checks of one run_checks call (or the default walk), then a fresh count."""
+        if not self._batch and not self._skipped:
+            return
+        self._batches += 1
+        by_checks = 1 - math.exp(-self._checks / max(6, 2 * self._criteria))
+        percent = max(15 + round(52 * min(0.98, by_checks)), min(self._percent + 1, 66))
+        tools = "、".join(f"{tool}×{n}" if n > 1 else tool for tool, n in self._batch.items()) or "-"
+        text = self._labels["batch"].format(
+            batch=self._batches, count=sum(self._batch.values()), tools=tools, total=self._checks
+        )
+        if self._skipped:
+            text += self._labels["batch_skipped"].format(
+                count=len(self._skipped), reason="；".join(dict.fromkeys(self._skipped))
+            )
+        self.line(percent, text)
+        self._batch, self._skipped = {}, []
 
     def tick(self, detail: str = "") -> None:
         del detail
@@ -287,20 +313,27 @@ class _ProgressLines:
         del error
 
     def log(self, message: str) -> None:
-        from openjiuwen.agent_evolving.reward.pipeline import WARNING
+        from openjiuwen.agent_evolving.reward.evidence_agent import BATCH_DONE, WARNING
 
         if message.startswith(WARNING):  # what keeps part of the work unseen: shown as it is, the bar stays
             self.line(self._percent, self._labels["warning"].format(text=message.removeprefix(WARNING)))
-        elif message.startswith("evidence ") and " for " in message:
+        elif message.startswith("evidence ") and " for " in message:  # one check: summed up per round
             self._checks += 1
             tool = message.split("(", 1)[-1].split(")", 1)[0] if "(" in message else "-"
-            by_checks = 1 - math.exp(-self._checks / max(6, 2 * self._criteria))
-            percent = 15 + round(52 * min(0.98, by_checks))
-            percent = max(percent, min(self._percent + 1, 66))  # a new check always shows, up to 66%
             served = message.split(" for ", 1)[1]
             reason = served.split(": ", 1)[1] if ": " in served else ""
-            label = "check_failed" if reason else "check"
-            self.line(percent, self._labels[label].format(count=self._checks, tool=tool, reason=reason))
+            if reason.startswith("skipped: "):  # not run by rule, not a failure
+                reason = reason.removeprefix("skipped: ")
+                page = reason.startswith("the source of a page is not read")
+                self._skipped.append(self._labels["page_source"] if page else reason)
+                return
+            self._batch[tool] = self._batch.get(tool, 0) + 1
+            if reason:  # a check that could not run is said with its reason
+                self.line(
+                    self._percent, self._labels["check_failed"].format(count=self._checks, tool=tool, reason=reason)
+                )
+        elif message == BATCH_DONE:
+            self._round_line()
         elif " criteria: " in message and "; tools: " in message:
             count = message.split(" criteria: ", 1)[0].strip()
             self.line(12, self._labels["criteria_done"].format(count=count))

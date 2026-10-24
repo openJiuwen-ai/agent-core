@@ -461,7 +461,7 @@ async def rubric_for(task, config, options, producer):
     if chosen:
         log(f"domain knowledge: {', '.join(name for name, _ in chosen)}")
     kept = load_rubric(rubric_path) if rubric_path and not criteria else None
-    fixed = criteria is not None   # criteria given by the caller (batch runs) are used as they are
+    fixed = bool(criteria)   # criteria given by the caller (batch runs) are used as they are; [] means none given
     placed = []
     if kept:
         log("reusing the kept rubric")
@@ -507,7 +507,7 @@ async def score_workspace(task, root, config, options=None):
             await asyncio.gather(walk, return_exceptions=True)
 
 
-WARNING = "warning: "   # a log line meant for the person watching (the attribution progress shows it as it is)
+WARNING = evidence_agent.WARNING   # a log line meant for the person watching (the attribution progress shows it)
 
 
 async def score_with(task, root, config, options, *, deliverable, inputs, tools, has_pictures, walk, walk_errors):

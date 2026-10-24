@@ -266,7 +266,7 @@ async def test_a_check_run_before_the_agent_serves_every_criterion_and_is_not_ru
     walk = {"tool": "browser", "page": "index.html", "note": "default walk", "actions": [], "snapshots": [0]}
     row = run.add_done(walk, {"tool": "browser", "page": "index.html", "actions": []}, [("after action 0", "IMG")])
     assert row["id"] == "c1" and row["criteria"] == ["a", "b"] and row["screenshots"] == ["check 1, after action 0"]
-    assert lines == ["evidence c1 (browser) for a, b"]                    # counted like any check (progress bar)
+    assert lines == ["evidence c1 (browser) for a, b", evidence_agent.BATCH_DONE]  # counted like any check
     for cid in ("a", "b"):
         evidence, images = run.evidence_for(cid)
         assert evidence[0]["check"] == 1 and images == [("check 1, after action 0", "IMG")]

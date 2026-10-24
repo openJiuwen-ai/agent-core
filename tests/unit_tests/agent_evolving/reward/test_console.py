@@ -30,6 +30,6 @@ def test_line_writer_keeps_non_ascii_text() -> None:
     assert stream.getvalue() == "总评：第 2 页少了一只猫\n"
 
 
-def test_limits_are_six_rounds_and_no_time_limit() -> None:
-    assert Limits().rounds == ROUNDS == 6
+def test_limits_are_four_rounds_and_no_time_limit() -> None:
+    assert Limits().rounds == ROUNDS == 4
     assert not hasattr(Limits(), "seconds")
