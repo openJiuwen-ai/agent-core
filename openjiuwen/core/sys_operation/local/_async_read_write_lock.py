@@ -28,10 +28,10 @@ if AsyncReadWriteLock is not None and ReadWriteLock is not None:
                 timeout: float,
                 *,
                 blocking: bool,
-                start_time: float,
+                **kwargs,
         ) -> None:
             try:
-                super()._configure_and_begin(mode, timeout, blocking=blocking, start_time=start_time)
+                super()._configure_and_begin(mode, timeout, blocking=blocking, **kwargs)
             except sqlite3.OperationalError as exc:
                 if mode != "read" or "no such table: sqlite_schema" not in str(exc).lower():
                     raise
@@ -40,9 +40,11 @@ if AsyncReadWriteLock is not None and ReadWriteLock is not None:
         @classmethod
         def evict_singleton(cls, lock_file: str, expected: ReadWriteLock) -> None:
             normalized_path = pathlib.Path(lock_file).resolve()
-            with cls._instances_lock:
-                if cls._instances.get(normalized_path) is expected:
-                    cls._instances.pop(normalized_path, None)
+            backend_class = type(expected)
+            # filelock has no public eviction API; remove only the expected backend.
+            with backend_class._instances_lock:  # pylint: disable=protected-access
+                if backend_class._instances.get(normalized_path) is expected:  # pylint: disable=protected-access
+                    backend_class._instances.pop(normalized_path, None)  # pylint: disable=protected-access
 
 
     class _ManagedAsyncReadWriteLock(AsyncReadWriteLock):
@@ -104,6 +106,8 @@ class HybridAsyncReadWriteLock:
         self._writer = False
         self._writers_waiting = 0
         self._closed = False
+        self._owner_task: asyncio.Task[None] | None = None
+        self._release_requested: asyncio.Event | None = None
 
     @property
     def file_lock(self) -> AsyncReadWriteLock:
@@ -128,35 +132,86 @@ class HybridAsyncReadWriteLock:
         except asyncio.TimeoutError:
             raise self._timeout() from None
 
-    async def _acquire_file(self, mode: Literal["read", "write"], deadline: float) -> None:
-        """Poll without a long-running executor call that could outlive cancellation."""
+    async def _own_file_lock(
+        self,
+        mode: Literal["read", "write"],
+        deadline: float,
+        acquired: asyncio.Future[None],
+        release_requested: asyncio.Event,
+    ) -> None:
+        """Acquire and release the backend lock in the same asyncio task."""
         acquire = self._file.acquire_read if mode == "read" else self._file.acquire_write
-        while True:
-            task = asyncio.create_task(acquire(timeout=0, blocking=False))
-            try:
-                await asyncio.shield(task)
-                return
-            except asyncio.CancelledError:
+
+        try:
+            while True:
                 try:
-                    await task
+                    await acquire(timeout=0, blocking=False)
+                    break
                 except FileLockTimeout:
-                    pass
-                else:
-                    await self._file.release()
-                raise
-            except FileLockTimeout:
-                remaining = deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    raise self._timeout() from None
-                await asyncio.sleep(min(self._poll_interval, remaining))
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise self._timeout() from None
+                    await asyncio.sleep(min(self._poll_interval, remaining))
+        except Exception as exc:
+            acquired.set_exception(exc)
+            return
+
+        acquired.set_result(None)
+        try:
+            await release_requested.wait()
+        finally:
+            await self._file.release()
+
+    async def _acquire_file(self, mode: Literal["read", "write"], deadline: float) -> None:
+        loop = asyncio.get_running_loop()
+        acquired: asyncio.Future[None] = loop.create_future()
+        release_requested = asyncio.Event()
+        owner = asyncio.create_task(self._own_file_lock(mode, deadline, acquired, release_requested))
+        self._owner_task = owner
+        self._release_requested = release_requested
+
+        try:
+            await asyncio.shield(acquired)
+        except BaseException:
+            # If acquisition completes after cancellation, release it immediately.
+            release_requested.set()
+            try:
+                while not owner.done():
+                    try:
+                        await asyncio.shield(owner)
+                    except asyncio.CancelledError:
+                        continue
+                owner.result()
+            finally:
+                # Retrieve any acquisition exception to avoid an unhandled Future.
+                if acquired.done() and not acquired.cancelled():
+                    acquired.exception()
+                self._owner_task = None
+                self._release_requested = None
+            raise
 
     async def _release_file(self) -> None:
-        task = asyncio.create_task(self._file.release())
+        owner = self._owner_task
+        release_requested = self._release_requested
+        if owner is None or release_requested is None:
+            raise RuntimeError("No backend lock owner to release")
+
+        release_requested.set()
+        cancelled = False
         try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            await task
-            raise
+            while not owner.done():
+                try:
+                    await asyncio.shield(owner)
+                except asyncio.CancelledError:
+                    cancelled = True
+            owner.result()
+        finally:
+            if owner.done():
+                self._owner_task = None
+                self._release_requested = None
+
+        if cancelled:
+            raise asyncio.CancelledError
 
     @asynccontextmanager
     async def read(self, timeout: float):
@@ -172,9 +227,11 @@ class HybridAsyncReadWriteLock:
         finally:
             async with self._condition:
                 self._readers -= 1
-                if self._readers == 0:
-                    await self._release_file()
-                self._condition.notify_all()
+                try:
+                    if self._readers == 0:
+                        await self._release_file()
+                finally:
+                    self._condition.notify_all()
 
     @asynccontextmanager
     async def write(self, timeout: float):
@@ -192,9 +249,12 @@ class HybridAsyncReadWriteLock:
             yield
         finally:
             async with self._condition:
-                await self._release_file()
-                self._writer = False
-                self._condition.notify_all()
+                try:
+                    await self._release_file()
+                finally:
+                    if self._owner_task is None:
+                        self._writer = False
+                    self._condition.notify_all()
 
     async def close(self) -> None:
         async with self._condition:
