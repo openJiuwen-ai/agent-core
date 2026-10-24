@@ -2926,6 +2926,9 @@ class DeepAgent(BaseAgent):
                     }
                 # Note: MaxOuterRounds yields its own error result inside the loop,
                 # so no additional yield is needed here.
+        except asyncio.CancelledError:
+            await self._cancel_session_deep_tasks(session_id)
+            raise
         finally:
             # Clear stop_condition_state so the next invoke starts fresh.
             _state = self.load_state(session)
