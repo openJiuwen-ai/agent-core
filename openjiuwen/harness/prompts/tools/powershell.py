@@ -233,6 +233,17 @@ POWERSHELL_PARAMS: Dict[str, Dict[str, str]] = {
             "preventing oversized output from flooding context. Pass 0 explicitly to disable the limit (use with care)"
         ),
     },
+    "head_ratio": {
+        "cn": (
+            "输出超限被截断时保留开头（head）的比例（0~1，默认 0.6）："
+            "剩余比例保留结尾（tail），确保输出结尾的错误或最终状态不被截掉"
+        ),
+        "en": (
+            "Fraction (0-1, default 0.6) of the truncated-output budget kept from "
+            "the beginning (head); the remainder keeps the tail, so trailing errors "
+            "and final status stay visible"
+        ),
+    },
     "description": {
         "cn": "命令描述（可选），用于日志和审计",
         "en": "Optional command description for logging and audit trail",
@@ -257,6 +268,10 @@ def get_powershell_input_params(language: str = "cn") -> Dict[str, Any]:
             "max_output_chars": {
                 "type": "integer",
                 "description": p["max_output_chars"][lang],
+            },
+            "head_ratio": {
+                "type": "number",
+                "description": p["head_ratio"][lang],
             },
             "description": {
                 "type": "string",

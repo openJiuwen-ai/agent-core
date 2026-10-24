@@ -77,14 +77,16 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
      （`tools/subagent/subagent_tools.py`），消费 `subagent_runtime` —— `S_10`。
    - worktree：`WorktreeManager` / `WorktreeConfig` / `WorktreeLifecyclePolicy` +
      `EnterWorktreeTool` / `ExitWorktreeTool`（`tools/worktree/`）。
-   - shell：`BashTool` / `PowerShellTool` / `CodeTool`（`tools/shell/` + `code.py`）。
-     Bash 前台命令的执行期限统一取输入 `timeout`，经既有校验后默认 300 秒，
-     上限由 `BASH_TOOL_MAX_TIMEOUT_SECONDS` 控制（默认 3600 秒）。本地 Shell 的普通与
-     流式执行均直接使用调用方传入的期限，不再读取 `JW_EXECUTE_CMD_MAX_TIMEOUT` 截断。
-     `Tool.get_call_timeout(inputs, default_timeout=...)` 是实例级调用预算扩展点：默认保留
-     AbilityManager 从卡片或默认值解析的预算；Bash 前台覆写为执行期限加 30 秒清理窗口，
-     供杀进程、收集已有输出和回传结果使用，执行本身不会延长。注册与资源回退两条调用路径
-     均使用该扩展点；后台启动继续使用原调用预算，不受命令 `timeout` 控制。
+   - shell?`BashTool` / `PowerShellTool` / `CodeTool`?`tools/shell/` + `code.py`??
+     Bash ?????????????? `timeout`????????? 300 ??
+     ??? `BASH_TOOL_MAX_TIMEOUT_SECONDS` ????? 3600 ????? Shell ????
+     ?????????????????????? `JW_EXECUTE_CMD_MAX_TIMEOUT` ???
+     `Tool.get_call_timeout(inputs, default_timeout=...)` ????????????????
+     AbilityManager ?????????????Bash ?????????? 30 ??????
+     ?????????????????????????????????????????
+     ?????????????????????????? `timeout` ???
+     ????> `max_output_chars`??? 20000????? `<persisted-output>` ?? head+tail
+     ?????`truncate_output`?`head_ratio` ?? 0.6????????/???????
    - cron：`create_cron_tools()` + `CronToolContext` / `CronToolBackend`(Protocol)。
    - memory：`MemorySearchTool` / `MemoryGetTool` / `ReadMemoryTool` / `WriteMemoryTool` /
      `EditMemoryTool` + `CompressionRecallTool` + `CodingMemory{Read,Write,Edit}Tool`。
@@ -153,6 +155,10 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 13. **可执行数据不是展示文本**：URL、selector、target/generation 标识完整保留；紧凑投影
     超过容量时删除整项或省略字段，不产生貌似可执行的截断链接。滚动 transport 最长等待
     15 秒（仍受更短的任务期限约束），点击和脚本等副作用操作超时不能自动重放。
+14. **Shell 大输出以 head+tail 回显**：`BashTool` / `PowerShellTool` 对超过
+    `max_output_chars`（默认 20000）的输出落盘并在 `<persisted-output>` 块中回显带缺口标记的
+    head+tail 预览（`truncate_output`，`head_ratio` 默认 0.6），使尾部错误/结束状态可见；
+    小输出内联、不落盘。
 
 14. **Browser 管理与执行分离**：browser_phase 只更新意图/读取核验，不占页面动作预算；
     逐步骤执行回执保留部分完成与未派发事实。业务验证在 llm/hybrid 中一致，见 S_18 / F_10。
