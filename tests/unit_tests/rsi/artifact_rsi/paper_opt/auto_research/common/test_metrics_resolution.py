@@ -9,6 +9,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     item_failure_rate,
     materialize_handoff_metrics,
     metric_number,
+    numeric_metric_values,
     primary_metric_unresolved,
     resolve_metric,
     run_sanity,
@@ -19,12 +20,14 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_exec
     ExperimentResult,
     VariantResult,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting import lint
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.evidence import (
     normalize_current_run_evidence,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.figures import (
     numeric_metric_names,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.sections import section_by_id
 
 
 def _variant(name: str, metrics: dict, *, status: str = "completed") -> VariantResult:
@@ -233,3 +236,41 @@ def test_run_sanity_invalid_when_primary_missing():
     }
     assert run_sanity(metrics, primary_metric="accuracy") == "invalid_run"
 
+
+def _nested_payload() -> dict:
+    return {
+        "status": "completed",
+        "metrics": {"accuracy": 0.6612},
+        "budget_match": {"threshold": {"value": 0.95}, "delta_vs_baseline": -0.08},
+        "per_question": [{"tokens": 1234.5}, {"tokens": 987.25}],
+        "flag": True,
+    }
+
+
+def test_numeric_metric_values_reaches_nested_summaries_but_not_item_records():
+    values = numeric_metric_values(_nested_payload())
+    assert 0.6612 in values
+    assert 0.95 in values
+    assert -0.08 in values
+    assert 1234.5 not in values
+    assert 987.25 not in values
+    assert not any(isinstance(value, bool) for value in values)
+
+
+def test_lint_knows_the_values_the_host_table_renders():
+    result = ExperimentResult(
+        run_id="r1",
+        workspace_dir="",
+        variants=[_variant("proposed", _nested_payload())],
+        status="completed",
+    )
+    # The host results table resolves this plan metric from metrics.accuracy ...
+    assert numeric_metric_names(result, plan_metrics=["accuracy"]) == ["accuracy"]
+    # ... so quoting it (or a nested summary value) in prose must not be flagged.
+    text = "The proposed variant reaches 0.6612 accuracy (66.12%), a -0.08 delta at the 0.95 threshold."
+    known = lint.known_numbers(result)
+    assert lint._extract_unmatched_numbers(text, known) == []
+    violations = lint.lint_section(text, section_by_id("experiments"), result)
+    assert not [v for v in violations if v.startswith("number(s) not found")]
+    # A per-item raw value is still not a reportable result.
+    assert lint._extract_unmatched_numbers("one question used 1234.5 tokens", known) == [1234.5]
