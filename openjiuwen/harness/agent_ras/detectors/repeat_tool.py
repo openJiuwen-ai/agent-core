@@ -618,6 +618,8 @@ class RepeatToolCallDetector:
         src = params or {}
         if keys is None:
             return dict(src)
+        if not any(k in src for k in keys):
+            return dict(src)
         return {k: src[k] for k in keys if k in src}
 
     def _resolve_tool_card(self, tool_name: str) -> tuple[Any | None, str]:
