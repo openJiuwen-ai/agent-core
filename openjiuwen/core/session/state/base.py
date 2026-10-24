@@ -129,9 +129,10 @@ class InMemoryStateLike(StateLike):
             return self._state
         return deepcopy(self._state)
 
-    def set_state(self, state: dict) -> None:
-        if state:
-            self._state = state
+    def set_state(self, state: dict | None) -> None:
+        # An empty/None state is a legitimate restore value (e.g. a VCS
+        # snapshot with no state); it must clear, not preserve, live state.
+        self._state = state if state else {}
 
 
 class InMemoryCommitState(CommitStateLike):
