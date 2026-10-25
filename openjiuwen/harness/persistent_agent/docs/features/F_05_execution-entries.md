@@ -7,7 +7,7 @@
 | 项 | 内容 |
 | --- | --- |
 | 类型 / 计划条目 | feature；PA-05，F_05 为文档编号 |
-| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14；PA-08 交接替代说明：2026-10-14；v0.1.20 冲突修复与入口测试适配、PA-18 接入与容量契约同步：2026-10-16；PA-18 容量检查移除同步：2026-10-19；PA-17 日志快照联动：2026-10-21；群消息接缝现状核对：2026-10-22（见附录 A.2） |
+| 日期 | 原阶段归档：2026-10-08；本次文档修订：2026-10-12；引用修订：2026-10-13；控制 Rail 修复与独立验证：2026-10-14；PA-10 联动修订与当前接入状态同步：2026-10-14；PA-08 交接替代说明：2026-10-14；v0.1.20 冲突修复与入口测试适配、PA-18 接入与容量契约同步：2026-10-16；PA-18 容量检查移除同步：2026-10-19；PA-17 日志快照联动：2026-10-21；群消息接缝现状核对：2026-10-22（见附录 A.2）；PA-09 权限配置和回复适配接入：2026-10-24 |
 | 负责人 | Song Haoran、Chen Ran；认领和后续安排以统一开发计划为准 |
 | 方案依据 | 沿用已确认架构及现行 spec；原阶段记录注明 D1～D7 已确认，本次不新增设计确认或修改架构 |
 | 原实现范围 | 内部 `persistent_agent/schema/request.py`、`execution/{entries,control,emitter,model_rail,seams}.py`、`schema/spec.py`，外层 `__init__.py` 与对应单测；复用共享 Session 接缝 |
@@ -44,7 +44,7 @@ PA-05 组合已有构造、原生流和清理接缝，负责入口校验、事�
 | 群消息参与判断 | 已由 [F_07](F_07_group-participation.md)接入。忽略、判断失败或预算暂停可在构造正式 Agent、加载窗口前结束 |
 | 工具意图与完成 | 已由 [F_15](F_15_tool-intent-before-side-effect.md)接入，复用 PA-05 emitter / fatal 通道，不再列为未实现接入点 |
 | 新任务正式执行 | `session_state_store`（PA-10）已接入（2026-10-14，见 [F_17](F_17_session-state-record.md)），新任务正式入口可执行；PA-06 组装器已接入，但注入 GroupChatPort（需要 PA-23 群消息读取）或 KnowledgePort（PA-13 知识导航）时仍拒绝；回应 / 插话也受这些条件约束 |
-| 正式确认恢复 | `session_state_store`（PA-10）已接入（2026-10-14，见 [F_17](F_17_session-state-record.md)）；确认恢复因 `native_reply_adapter`（PA-09）尚未接入而拒绝 |
+| 正式确认恢复 | `session_state_store`（PA-10）与正式 `native_reply_adapter`（PA-09）已接入；权限与问答回复映射及精确调用恢复通过组件回归，宿主鉴权和真实 Feishu 验收见 [F_24](F_24_permission-confirmation.md) |
 | 非确认暂停后继续、崩溃续做 | 带 `recovery_ref` 的 execute 仍明确拒绝，待 PA-18 接入 |
 | 执行能力声明 | `enabled_features` 当前只允许 construction / workspace_read，没有 execution；声明条件见第 3.3 节 |
 
@@ -178,7 +178,7 @@ abort 是需 await 的控制协程，返回 None 只说明本次控制路径已�
 | `async GroupMessageReader.recent_messages(self, context: PersistentBuildContext, *, after: str \| None = None, trigger_message_id: str \| None = None) -> GroupMessagesResult` | PA-23：游标后新消息及连续性背景，排除触发消息；当前 F_07 直接调用 GroupChatPort，不通过此接口 |
 | `NativeReplyAdapter.to_native(self, response: PermissionResponse \| AnswerResponse, request: InterruptRequest) -> Any`（同步） | PA-09：合法响应转为原生中断输入值，不创建新任务正文；等待场景及工具 ID 由入口先校验，适配器异常可传播 |
 
-获取接口分别为 `session_state_store(context: PersistentBuildContext) -> SessionStateStore`、`window_assembler(context: PersistentBuildContext, *, chain_limit: int | None = None) -> WindowAssembler`、`group_message_reader(context: PersistentBuildContext) -> GroupMessageReader`、`native_reply_adapter() -> NativeReplyAdapter`，均为同步内部函数。当前 `session_state_store` 返回 PA-10 的正式实现，`window_assembler` 返回 PA-06 / PA-18 共用组装器，入口传入 Spec.continuation_chain_limit（注入 KnowledgePort 时抛 CONFIG_PARAM_ERROR；注入 GroupChatPort 时仍需要 PA-23 群消息读取）。`continuation_support(context) -> None` 是 PA-18 正式入口门禁，在 PA-12 归档查询接入前明确拒绝；`group_message_reader`（PA-23）与 `native_reply_adapter`（PA-09）仍拒绝，测试替身只证明组件。WindowAssembler.assemble 的共享签名、值对象和标记不变，权威定义在 schema/integration.py，seams.py 兼容再导出。宿主 record / budget 仍复用 F_02 的契约，新增可选执行链接口由 [S_02 第 4.3.1 节](../specs/S_02_events-and-result-handoff.md) 与 [F_20](F_20_continuation.md) D-06 定义，不新增执行权或控制端口。
+获取接口分别为 `session_state_store(context: PersistentBuildContext) -> SessionStateStore`、`window_assembler(context: PersistentBuildContext, *, chain_limit: int | None = None) -> WindowAssembler`、`group_message_reader(context: PersistentBuildContext) -> GroupMessageReader`、`native_reply_adapter() -> NativeReplyAdapter`，均为同步内部函数。当前 `session_state_store` 返回 PA-10 的正式实现，`window_assembler` 返回 PA-06 / PA-18 共用组装器，入口传入 Spec.continuation_chain_limit（注入 KnowledgePort 时抛 CONFIG_PARAM_ERROR；注入 GroupChatPort 时仍需要 PA-23 群消息读取）。`continuation_support(context) -> None` 是 PA-18 正式入口门禁，在 PA-12 归档查询接入前明确拒绝；`group_message_reader`（PA-23）仍拒绝；`native_reply_adapter`（PA-09）返回正式回复映射器，回复转换与验收边界见 [S_05](../specs/S_05_confirmation-and-continuation.md) 和 [F_24](F_24_permission-confirmation.md)。WindowAssembler.assemble 的共享签名、值对象和标记不变，权威定义在 schema/integration.py，seams.py 兼容再导出。宿主 record / budget 仍复用 F_02 的契约，新增可选执行链接口由 [S_02 第 4.3.1 节](../specs/S_02_events-and-result-handoff.md) 与 [F_20](F_20_continuation.md) D-06 定义，不新增执行权或控制端口。
 
 ### 2.4 执行与确认恢复流程
 
@@ -397,7 +397,7 @@ flowchart LR
 | SessionStateStore.save / PA-10 | 收到 ExecutionEnding(outcome, request_id, reply_target, output_refs, last_group_message_id 及交接摘要)，整理白名单后一次保存 | 游标须原样保存并进入结束标记；交接摘要进入结束标记（[F_18](F_18_output-handoff.md)）；已接入，写入前失败不调用写入，后端写入抛错时记录可能已改变 |
 | WindowAssembler.assemble / PA-06、PA-18 | load 之后组装，返回 WindowAssembly(native_input, last_group_message_id)；游标为服务端确认的扫描位置，无可信进度则保留加载时游标；续做先核对并清理本 Request 的旧等待现场，再追加执行链证据、规则及原任务 | 新任务与续做组件已接入，正式续做门禁仍关闭；容量筛选与换窗验收未关闭；正常确认恢复不调用 |
 | GroupMessageReader.recent_messages / PA-23 | after 游标后的新消息及少量衔接，trigger_message_id 排除触发消息，返回 GroupMessagesResult | getter 已返回 ExecutionGroupMessageReader；配置 GroupChatPort 后由 PA-06 组装当前群的增量背景与游标。PA-07 仍直接调用 GroupChatPort，走独立的参与判断路径 |
-| NativeReplyAdapter.to_native / PA-09 | 匹配后的单项回复转原生载荷，入口按交互 ID 组装 InteractiveInput | getter 未接入；测试适配器不是正式实现 |
+| NativeReplyAdapter.to_native / PA-09 | 匹配后的单项回复转原生载荷，入口按交互 ID 组装 InteractiveInput | getter 已返回正式适配器；精确调用恢复由入口校验，真实宿主审批验收见 F_24 |
 
 窗口消息元信息使用 `WINDOW_PART_KEY=persistent_window_part`。PA-06 写 execution_header / temporary_background，PA-10 保存前分别保留并压缩为一行 / 删除；无标记消息按普通窗口内容保留。等待确认时末尾未完成工具调用不动，结束标记放记录元信息，完整整理契约见 S_03。PA-05 只传递这些协议，不自行定义第二套窗口格式。
 
@@ -407,7 +407,7 @@ flowchart LR
 
 M1 汇合 PA-02～PA-03、PA-05、PA-06、PA-08、PA-09、PA-10 与 AgentServer。须用真实实现验证私聊 / 定时执行、状态跨 Execution 加载保存、取消 / 停止、确认恢复及本 Session 记住 / 超时，连同预算、普通日志缺口、关键失败、候选保存、实例隔离和清理。
 
-宿主还须证明前端断开不关闭业务流、final / paused 后继续消费至清理结束、等待确认阻塞 Session 而其他暂停按约定释放队列，以及原 Request 恢复仍使用旧版 Spec。PA-09 暂缓不降低完整确认恢复门槛。未接入换窗时容量不足须明确暂停，不静默截断。只有上述接入和联合验收完成后才可新增并声明 execution 能力。
+宿主还须证明前端断开不关闭业务流、final / paused 后继续消费至清理结束、等待确认阻塞 Session 而其他暂停按约定释放队列，以及原 Request 恢复仍使用旧版 Spec。PA-09 组件已实现，但宿主接入与联合验收仍待完成，不降低完整确认恢复门槛。未接入换窗时容量不足须明确暂停，不静默截断。只有上述接入和联合验收完成后才可新增并声明 execution 能力。
 
 2026-10-12 的文档重构只改设计记录，不迁移配置、会话状态或公开接口；2026-10-14 的修复只改变控制拒绝的工具消息，见附录 A.2。原 PA-01 构造测试已从“执行入口尚未导出”改为检查三个入口导出；导出存在仍不表示生产执行开放。个人版默认 checkpointer / DeepAgent 行为沿用共享实现，不通过修改全局配置获得隔离。普通绑定、直接原生调用不能替代业务入口的预算、记账和结局保证。
 

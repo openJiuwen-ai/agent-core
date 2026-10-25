@@ -46,6 +46,7 @@ class WaitingScene:
 
     request_id: str
     reply_target: str
+    spec_fingerprint: str | None = None
 
 
 @dataclass(frozen=True)

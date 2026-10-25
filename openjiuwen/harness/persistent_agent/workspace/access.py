@@ -13,6 +13,7 @@ from ..schema.execution import ExecutionContext
 
 WorkspaceReadStatus = Literal["allowed", "forbidden", "unknown"]
 WorkspaceWriteStatus = Literal["allowed", "forbidden", "unknown"]
+PermissionProfile = Literal["default", "automatic", "full_access"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -28,6 +29,7 @@ class WorkspaceReadScope:
     current_session_root: Path | None
     source_ref: str
     policy_revision: str
+    host_wide: bool = False
     principal_ref: str | None = None
     reason: str | None = None
 
@@ -45,6 +47,8 @@ class WorkspaceReadScope:
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid workspace principal_ref")
         if self.reason is not None and not isinstance(self.reason, str):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid workspace reason")
+        if not isinstance(self.host_wide, bool):
+            raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid host-wide workspace flag")
         if not isinstance(self.workspace_root, (str, Path)):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid workspace root")
         if not isinstance(self.allowed_roots, (tuple, list)) or any(
@@ -73,7 +77,12 @@ class WorkspaceAccessPort(Protocol):
         ...
 
 
-def validate_read_scope(scope: WorkspaceReadScope, execution: ExecutionContext) -> WorkspaceReadScope:
+def validate_read_scope(
+    scope: WorkspaceReadScope,
+    execution: ExecutionContext,
+    *,
+    permission_profile: PermissionProfile = "default",
+) -> WorkspaceReadScope:
     """Reject a scope that is not bound to the current immutable Execution identity."""
     if not isinstance(scope, WorkspaceReadScope):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid workspace access scope")
@@ -84,6 +93,10 @@ def validate_read_scope(scope: WorkspaceReadScope, execution: ExecutionContext) 
         or scope.policy_revision != execution.policy_revision
     ):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="workspace access scope mismatch")
+    if permission_profile not in {"default", "automatic", "full_access"} or scope.host_wide != (
+        permission_profile == "full_access"
+    ):
+        raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="workspace access profile mismatch")
     return scope
 
 
@@ -100,6 +113,7 @@ class WorkspaceWriteScope:
     current_session_root: Path | None
     source_ref: str
     policy_revision: str
+    host_wide: bool = False
     principal_ref: str | None = None
     reason: str | None = None
 
@@ -126,6 +140,11 @@ class WorkspaceWriteScope:
             )
         if self.reason is not None and not isinstance(self.reason, str):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid workspace reason")
+        if not isinstance(self.host_wide, bool):
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg="invalid host-wide workspace write flag",
+            )
         if not isinstance(self.workspace_root, (str, Path)):
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid workspace root")
         if not isinstance(self.allowed_write_roots, (tuple, list)) or any(
@@ -157,7 +176,12 @@ class WorkspaceWriteAccessPort(Protocol):
         ...
 
 
-def validate_write_scope(scope: WorkspaceWriteScope, execution: ExecutionContext) -> WorkspaceWriteScope:
+def validate_write_scope(
+    scope: WorkspaceWriteScope,
+    execution: ExecutionContext,
+    *,
+    permission_profile: PermissionProfile = "default",
+) -> WorkspaceWriteScope:
     """Reject a scope that is not bound to the current immutable Execution identity."""
     if not isinstance(scope, WorkspaceWriteScope):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid workspace write scope")
@@ -168,6 +192,13 @@ def validate_write_scope(scope: WorkspaceWriteScope, execution: ExecutionContext
         or scope.policy_revision != execution.policy_revision
     ):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="workspace write scope mismatch")
+    if permission_profile not in {"default", "automatic", "full_access"} or scope.host_wide != (
+        permission_profile == "full_access"
+    ):
+        raise build_error(
+            StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+            error_msg="workspace write profile mismatch",
+        )
     return scope
 
 

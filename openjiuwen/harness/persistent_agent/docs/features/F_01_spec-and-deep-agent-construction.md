@@ -230,7 +230,7 @@ execute / resume 使用 spec 与 context。RequestInput 是宿主已保存 Reque
 
 一期正式执行另要求 enable_task_loop=False、关闭全部子代理开关和自动通用子代理，新的空 runtime Session 注入 NoopCheckpointer；这些是执行校验，不能声称工厂自身已验证全部条件。默认父类配置不被悄悄重写。
 
-[seams.py](../../execution/seams.py) 中 SessionStateStore（PA-10，2026-10-14，见 [F_17](F_17_session-state-record.md)）与 WindowAssembler（PA-06）已接入，后者容量验收仍待完成；GroupMessageReader（PA-23）、NativeReplyAdapter（PA-09）仍有未接入门禁。普通任务路径不能降级为空状态 / 窗口；带 recovery_ref 的执行明确拒绝。群消息可在正式 Agent 构造前完成参与判断及 ignored / failed 等独立分支，不表示任务执行链路开放。
+[seams.py](../../execution/seams.py) 中 SessionStateStore（PA-10，2026-10-14，见 [F_17](F_17_session-state-record.md)）与 WindowAssembler（PA-06）已接入，后者容量验收仍待完成；GroupMessageReader（PA-23）仍有未接入门禁；NativeReplyAdapter（PA-09）已接入，宿主审批验收见 [F_24](F_24_permission-confirmation.md)。普通任务路径不能降级为空状态 / 窗口；带 recovery_ref 的执行明确拒绝。群消息可在正式 Agent 构造前完成参与判断及 ignored / failed 等独立分支，不表示任务执行链路开放。
 
 | 能力 | 当前保证及依赖 | 不能据此推导的结论 / 失败边界 |
 | --- | --- | --- |

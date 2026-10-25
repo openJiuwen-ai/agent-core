@@ -7,15 +7,15 @@
 | 类型 | spec |
 | 编号 / slug | S_05 / confirmation-and-continuation |
 | 关联模块 | [request.py](../../schema/request.py)、[entries.py](../../execution/entries.py)、[control.py](../../execution/control.py)、[确认接入协议](../../execution/seams.py) |
-| 最近一次修订日期 | 2026-10-22 |
-| 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_19](../features/F_19_execution-log-record.md)、[F_20](../features/F_20_continuation.md)；接入与验证见[开发计划](../designs/persistent-agent-development-plan.md) PA-09、PA-17、PA-18 |
+| 最近一次修订日期 | 2026-10-24 |
+| 关联 feature | [F_05](../features/F_05_execution-entries.md)、[F_15](../features/F_15_tool-intent-before-side-effect.md)、[F_19](../features/F_19_execution-log-record.md)、[F_20](../features/F_20_continuation.md)、[F_24](../features/F_24_permission-confirmation.md)；接入与验证见[开发计划](../designs/persistent-agent-development-plan.md) PA-09、PA-17、PA-18 |
 | 设计依据 | [架构设计：确认](../designs/persistent-agent-architecture.md#521-确认卡片等待与原生恢复)、[控制](../designs/persistent-agent-architecture.md#523-停止取消与补充消息)、[统一续做](../designs/persistent-agent-architecture.md#524-崩溃续做与非确认暂停后继续的统一流程)、[恢复边界](../designs/persistent-agent-architecture.md#83-根据什么恢复什么时候可以继续) |
 
 本规约维护 ConfirmReply、确认恢复、停止 / 取消、控制截止及原 Request 的继续方式。原 Checkpoint 文档改名后，状态保存转由 S_03 唯一负责。
 
 ## 1. 范围、术语与适用条件
 
-确认回复 DTO、恢复与控制入口及结局锁定已有组件实现；NativeReplyAdapter 和会话记录接入仍不可用，完整确认恢复不开放。崩溃续做与非确认暂停后继续已有组件实现（F_20），正式入口在开放条件满足前仍明确拒绝带 recovery_ref 的执行。
+确认回复 DTO、恢复与控制入口、NativeReplyAdapter 和 PA-10 会话记录均已实现并通过组件测试。NativeReplyAdapter 将已验证的 PermissionResponse / AnswerResponse 映射回原生中断输入；员工身份、审批持久化与渠道路由由宿主按 F_24 接入。真实飞书部署验收尚未完成。崩溃续做与非确认暂停后继续仍按 F_20 的正式入口条件处理。
 
 确认使用既有 PermissionInterruptRail / AskUserRail 与原生中断恢复，不另写确认 Rail，不用 TaskLoop 的活动 follow-up 队列替代宿主业务队列。构造 / 绑定、执行编排、事件可靠性、记录格式及副作用查证条件分别引用 S_07、S_01、S_02、S_03、S_08。
 
@@ -78,9 +78,9 @@ reason 仅 cancel / stop；非法原因为 DEEPAGENT_INPUT_PARAM_ERROR，非法�
 
 续做的组装顺序、执行链追溯与登记范围见 [F_20](../features/F_20_continuation.md)；放行条件不替代 M2c 原有的确认恢复、生命周期、记账和宿主验收要求。
 
-### 4.5 `NativeReplyAdapter.to_native(response, request) -> Any`（内部接入，待实现）
+### 4.5 NativeReplyAdapter.to_native(response, request) -> Any
 
-该同步协议把已经匹配的 PermissionResponse / AnswerResponse 与原生 InterruptRequest 转换为 `InteractiveInput.user_inputs[tool_call_id]` 对应的值；它不提供另一套鉴权或确认决策。当前 native_reply_adapter getter 明确拒绝。转换失败不能继续进入原生恢复，不返回假同意；异常按入口现有边界传播。
+该同步适配器把入口已匹配的 PermissionResponse / AnswerResponse 与原生 InterruptRequest 转换为 InteractiveInput.user_inputs[tool_call_id] 对应的值；它不提供另一套鉴权或确认决策。批准仅同意当前调用；本会话记住映射为 auto_confirm=True、persist_allow=False，不写入永久允许规则。拒绝带用户反馈；问答支持部分回答，漏答及超时分别填入明确占位答复。转换失败不能继续进入原生恢复，不返回假同意；native_reply_adapter() 当前返回正式适配器。
 
 ## 5. 控制、调度与恢复生命周期
 
@@ -134,4 +134,4 @@ S_01 负责实际结局编排，本文负责控制截止及继续方式；S_02 �
 - 流生产者、取消及关闭：[test_binding.py](../../../../../tests/unit_tests/harness/persistent_agent/test_binding.py)。
 - 确认后写意图与取消后未决工具：[test_tool_intent_rail.py](../../../../../tests/unit_tests/harness/persistent_agent/test_tool_intent_rail.py)。
 - 执行日志快照、记录与预览：[test_execution_log.py](../../../../../tests/unit_tests/harness/persistent_agent/test_execution_log.py)（PA-17 组件验证）。
-- 会话状态记录已由 PA-10 接入（组件验证，等待现场含中断请求类型）；真实确认适配与跨执行续做验证尚待 PA-09、PA-18 接入；测试入口与模拟结果不证明生产恢复能力。
+- PA-10 会话状态记录与 PA-09 NativeReplyAdapter 已接入；test_entries.py 使用真实原生 ConfirmInterruptRail 验证批准后仅恢复指定 tool_call_id，拒绝及本会话记住不产生永久允许规则。PA 定向套件 291 passed（2 条既有 Pydantic 弃用警告）。宿主审批身份与持久化、真实飞书渠道和进程重启仍需按 F_24 / JM-26 验收。

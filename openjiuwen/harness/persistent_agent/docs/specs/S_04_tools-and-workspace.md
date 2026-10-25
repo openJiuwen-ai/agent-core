@@ -7,17 +7,17 @@
 | 类型 | spec |
 | 编号 / slug | S_04 / tools-and-workspace |
 | 关联模块 | [workspace/access.py](../../workspace/access.py)、[path_policy.py](../../workspace/path_policy.py)、[file_access.py](../../workspace/file_access.py)、[tools/workspace_read.py](../../tools/workspace_read.py)、[execution/share_file.py](../../execution/share_file.py)、[execution/handoff.py](../../execution/handoff.py) |
-| 最近一次修订日期 | 2026-10-16 |
-| 关联 feature | [F_14](../features/F_14_workspace-file-read.md)、[F_18](../features/F_18_output-handoff.md)（`share_file`）、[F_20](../features/F_20_continuation.md)（续做的登记范围）；文件修改接入见[开发计划](../designs/persistent-agent-development-plan.md) PA-16 |
+| 最近一次修订日期 | 2026-10-24 |
+| 关联 feature | [F_14](../features/F_14_workspace-file-read.md)、[F_18](../features/F_18_output-handoff.md)（share_file）、[F_20](../features/F_20_continuation.md)（续做的登记范围）、[F_24](../features/F_24_permission-confirmation.md)；文件修改接入见开发计划 PA-16 |
 | 设计依据 | [架构设计：办公空间](../designs/persistent-agent-architecture.md#47-办公空间与知识)、[身份与隔离](../designs/persistent-agent-architecture.md#9-权限隔离与资源限制) |
 
 本规约维护 WorkspaceAccessPort、调用级读取授权、逻辑路径、文件读取结果、私有草稿隔离及 `share_file` 的文件登记。通用副作用和工具事件从本文拆出，由 S_08 唯一维护。
 
 ## 1. 范围、术语与适用条件
 
-PA-14 只读组件已实现：复用 Harness ReadFileTool / ListDirTool，并注册受保护的 `read_file` / `list_files`。实际目录部署、业务授权、平台 SDK 与宿主端口实现归 AgentServer；真实宿主联调仍未验证，不能以本地只读组件证明 PA-16 写入或跨进程恢复已开放。
+PA-14 只读组件已实现：复用 Harness ReadFileTool / ListDirTool，并注册受保护的 `read_file` / `list_files`。实际目录部署、业务授权、平台 SDK 与宿主端口实现归 AgentServer；真实宿主联调仍未验证。JM-26 增加 full_access 的 host-wide 读写 scope，契约见 F_24；这不代表 PA-16 写入或跨进程恢复已开放。
 
-启用条件为 Spec.enabled_features 含 workspace_read、enable_sys_operation=true，且 PersistentPorts.workspace_access 存在并提供异步 resolve_read_scope。上下文及装配阶段均校验，不等到模型读取时才发现缺少依赖。未开启时不添加本读取 Rail 与 `share_file`；普通 DeepAgent 仍遵循通用行为。`share_file`（PA-08）随读取能力装配，不新增能力标记，见第 4.3 节。
+启用条件为 Spec.enabled_features 含 workspace_read、enable_sys_operation=true，且 PersistentPorts.workspace_access 存在并提供异步 resolve_read_scope。workspace_write 另须开启 workspace_write 并提供写授权端口。上下文及装配阶段均校验，不等到模型读取时才发现缺少依赖。未开启时不添加本读取 Rail 与 `share_file`；普通 DeepAgent 仍遵循通用行为。full_access 仅可由宿主提供与权限 Spec 匹配的 host_wide 读写 scope；所有路径仍受服务 OS 用户权限约束。`share_file`（PA-08）随读取能力装配，不新增能力标记，见第 4.3 节。
 
 公共 [工具](../../../docs/specs/S_05_tools-contract.md)、[安全](../../../docs/specs/S_08_security-engine.md)、[工作空间](../../../docs/specs/S_09_workspace.md)机制继续由 Harness 负责，本模块补充业务身份、私有 Session 路径及来源。Shell、CLI、MCP、写工具和子进程不因注册本读取 Rail 就获得相同的沙箱隔离保证。
 
@@ -25,7 +25,7 @@ DeepAgent 工具路径还须遵守既有 allow / ask / deny 及配置范围；�
 
 ## 2. 数据结构与事实归属
 
-WorkspaceReadScope 为宿主返回的不可变运行对象，不进入可序列化 Spec，不保存 Session、锁或取消状态。定义位置为 [access.py](../../workspace/access.py)。
+WorkspaceReadScope 与 WorkspaceWriteScope 为宿主按 Execution 返回的不可变运行对象，不进入可序列化 Spec，不保存 Session、锁或取消状态。定义位置为 [access.py](../../workspace/access.py)。host_wide 仅可与已发布 permission_profile=full_access 相匹配；default / automatic 继续受员工目录与 Session 私有范围限制。
 
 | 字段 | 语义与约束 |
 | --- | --- |
@@ -35,6 +35,7 @@ WorkspaceReadScope 为宿主返回的不可变运行对象，不进入可序列�
 | workspace_root、allowed_roots | 实际根与宿主授予的可读根；字符串被规范化为 Path，根目录本身不是授权 |
 | private_sessions_root、current_session_root | 可选私有范围根；保护其他 Session 草稿，当前 Session 范围仍由宿主授予 |
 | source_ref、policy_revision | 稳定来源及当前执行策略关联，必须非空；策略修订须匹配 ExecutionContext |
+| host_wide | 显式宿主级授权；读写 scope 的该值必须与 full_access Spec 匹配；default / automatic 不得授予此标志 |
 | reason | 可选诊断；不能把宿主异常或实际主机路径直接暴露给模型 |
 
 读取成功沿用 Harness 内容 / 列表数据，并附逻辑路径、source_refs、version、status、completeness、next_cursor。version 是本次 stat 元数据观察得到的不透明摘要，可能为空；不是文件内容哈希、不可变快照或防并发变更的凭证。路径和版本只说明此次读取观察，不授予下一次使用权限。
@@ -42,8 +43,8 @@ WorkspaceReadScope 为宿主返回的不可变运行对象，不进入可序列�
 ## 3. 不变量
 
 1. **I-1 授权先行：** 每次读取 / 列举先从宿主解析范围，再验证 Agent、Session、可选主体和策略修订。查不清、端口异常或归属错配都不能放行。
-2. **I-2 私有范围：** 同 Agent、同项目根或共享工作空间不授予其他 Session 草稿访问权；其他 Session 私有路径即使在共享允许根内仍拒绝。
-3. **I-3 路径受控：** 模型只能提供逻辑相对路径；词法边界和规范化真实路径均须检查，符号链接不能逃逸允许根。
+2. **I-2 私有范围：** default / automatic 下，同 Agent、同项目根或共享工作空间不授予其他 Session 草稿访问权；full_access 只有在宿主明确提供并经 Spec 验证的 host_wide scope 时才移除此员工目录边界。
+3. **I-3 路径受控：** default / automatic 只接受逻辑相对路径；full_access 可在 host_wide scope 下使用绝对主机路径。两种模式均检查规范化路径和符号链接，且不绕过 OS 权限。
 4. **I-4 安全结果：** 拒绝先于底层读取，不因错误差异泄露未经授权的目标是否存在；授权成功后才区分 not_found 与后端不可用。
 5. **I-5 只读边界：** 读取适配只注册读取与列举，不承担写入、外部回执核对、工具完成判定或发送交接；`share_file` 只把文件登记到本次执行的登记表，不发送、不上传，读授权不代表允许公开。
 

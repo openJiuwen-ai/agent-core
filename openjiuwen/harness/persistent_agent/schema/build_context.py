@@ -82,6 +82,17 @@ class PersistentBuildContext(BuildContext):
             raise build_error(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, error_msg="config fingerprint mismatch")
         if spec.enabled_features != self.execution.capability_snapshot:
             raise build_error(StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR, error_msg="capability snapshot mismatch")
+        if spec.permission_profile == "automatic":
+            if self.ports.permission_rail_factory is None:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="permission_rail_factory is required for automatic permission profile",
+                )
+            if not isinstance(spec.permissions, dict) or not spec.permissions.get("enabled"):
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                    error_msg="automatic permission profile requires an enabled policy snapshot",
+                )
         if self.tool_owner_id != self.binding.owner_id:
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="owner mismatch")
         if "workspace_write" in spec.enabled_features:

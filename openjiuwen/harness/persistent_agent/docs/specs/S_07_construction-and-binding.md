@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | S_07 / construction-and-binding |
 | 关联模块 | [factory.py](../../factory.py)、[Spec](../../schema/spec.py)、[构造上下文](../../schema/build_context.py)、[执行上下文](../../schema/execution.py)、[绑定接缝](../../execution/binding.py) |
-| 最近一次修订日期 | 2026-10-19 |
-| 关联 feature | [F_01](../features/F_01_spec-and-deep-agent-construction.md)、[F_02](../features/F_02_execution-protocol.md)、[F_03](../features/F_03_invocation-binding-and-isolation.md)、[F_04](../features/F_04_contract-convergence.md)、[F_14](../features/F_14_workspace-file-read.md) ；[F_20](../features/F_20_continuation.md)（PA-18 联动修订） |
+| 最近一次修订日期 | 2026-10-24 |
+| 关联 feature | [F_01](../features/F_01_spec-and-deep-agent-construction.md)、[F_02](../features/F_02_execution-protocol.md)、[F_03](../features/F_03_invocation-binding-and-isolation.md)、[F_04](../features/F_04_contract-convergence.md)、[F_14](../features/F_14_workspace-file-read.md)、[F_24](../features/F_24_permission-confirmation.md)；[F_20](../features/F_20_continuation.md)（PA-18 联动修订） |
 | 设计依据 | [架构设计：构造与隔离](../designs/persistent-agent-architecture.md#41-构造与实例隔离已实现)、[宿主保证](../designs/persistent-agent-architecture.md#34-agentserver-必须提供的保证) |
 
 本规约维护配置、调用身份、依赖形状、原生 DeepAgent 构造和实例内绑定；这些内容从 S_01 分离后由本文唯一维护。
@@ -30,7 +30,7 @@
 | `ConstructionBinding` / `InvocationState` | 原对象身份、关键声明值、占用、停止及清理状态 | 本实例私有状态 | 内部绑定接缝 |
 | `InvocationRef` / `ProtocolModel` | 事件及宿主响应共用的归属和 DTO 约束 | [protocol.py](../../schema/protocol.py) | 构造、重新校验及归属匹配 |
 
-Spec 继承 DeepAgentSpec，JSON 字段平铺、拒绝额外字段。`schema_version=1`；`enabled_features` 允许 `construction`、`workspace_read`、`workspace_write`、`window_management`，默认仅含 `construction`，集合不能为空。办公空间能力及 share_file_max_bytes 的依赖和行为由 [S_04](S_04_tools-and-workspace.md) 定义；不支持 `execution` 能力声明或未实现的策略字段。
+Spec 继承 DeepAgentSpec，JSON 字段平铺、拒绝额外字段。`schema_version=1`；`enabled_features` 允许 `construction`、`workspace_read`、`workspace_write`、`window_management`，默认仅含 `construction`，集合不能为空。办公空间能力及 share_file_max_bytes 的依赖和行为由 [S_04](S_04_tools-and-workspace.md) 定义；不支持 `execution` 能力声明或未实现的策略字段。员工权限扩展见 [F_24](../features/F_24_permission-confirmation.md)：`permission_profile` 为 `default | automatic | full_access`，旧 Spec 缺省为 `default`；`permissions` 保存该发布版本的有效策略快照。两字段进入 JSON 序列化和 fingerprint；每次构造仅按该快照装配 Rail，不读取共享可变权限配置。
 
 续做追溯上限由 [F_20](../features/F_20_continuation.md) D-06 确认；两个容量字段原为 PA-18 的最终请求容量检查新增，该检查已于 2026-10-19 移除（F_20 D-09），字段仅为可选兼容字段，不参与运行判断；PA-11 阈值由 [S_03](S_03_context-and-windows.md) 定义：
 

@@ -8,17 +8,18 @@ from unittest.mock import patch
 
 import pytest
 
-from openjiuwen.harness.persistent_agent.workspace.access import WorkspaceReadScope
+from openjiuwen.harness.persistent_agent.workspace.access import WorkspaceReadScope, WorkspaceWriteScope
 from openjiuwen.harness.persistent_agent.workspace.path_policy import (
     WorkspacePathError,
     observe_version,
     resolve_read_path,
+    resolve_write_path,
 )
 
 pytestmark = pytest.mark.level0
 
 
-def scope_for(root: Path, *, status="allowed", current_session="session-a"):
+def scope_for(root: Path, *, status="allowed", current_session="session-a", host_wide=False):
     return WorkspaceReadScope(
         status=status,
         agent_id="agent-a",
@@ -29,6 +30,22 @@ def scope_for(root: Path, *, status="allowed", current_session="session-a"):
         current_session_root=root / "sessions" / current_session,
         source_ref="workspace://agent-a",
         policy_revision="policy-1",
+        host_wide=host_wide,
+    )
+
+
+def write_scope_for(root: Path, *, host_wide=False):
+    return WorkspaceWriteScope(
+        status="allowed",
+        agent_id="agent-a",
+        session_id="session-a",
+        workspace_root=root,
+        allowed_write_roots=(root / "work",),
+        private_sessions_root=root / "sessions",
+        current_session_root=root / "sessions" / "session-a",
+        source_ref="workspace://agent-a",
+        policy_revision="policy-1",
+        host_wide=host_wide,
     )
 
 
@@ -100,6 +117,31 @@ def test_symlink_escape_is_rejected_when_symlinks_are_available(tmp_path):
         resolve_read_path(scope_for(tmp_path), "work/link/secret.md")
 
     assert exc_info.value.status == "forbidden"
+
+
+def test_host_wide_read_scope_accepts_an_absolute_host_path(tmp_path):
+    target = tmp_path.parent / f"{tmp_path.name}-host-secret.txt"
+    resolved = resolve_read_path(scope_for(tmp_path, host_wide=True), str(target))
+
+    assert resolved.path == target.resolve()
+    assert resolved.relative_path == str(target.resolve())
+
+
+def test_default_write_scope_rejects_an_absolute_path_outside_employee_root(tmp_path):
+    target = tmp_path.parent / f"{tmp_path.name}-outside.txt"
+
+    with pytest.raises(WorkspacePathError) as exc_info:
+        resolve_write_path(write_scope_for(tmp_path), str(target))
+
+    assert exc_info.value.status == "forbidden"
+
+
+def test_host_wide_write_scope_accepts_an_absolute_host_path(tmp_path):
+    target = tmp_path.parent / f"{tmp_path.name}-host-file.txt"
+    resolved = resolve_write_path(write_scope_for(tmp_path, host_wide=True), str(target))
+
+    assert resolved.path == target.resolve()
+    assert resolved.relative_path == str(target.resolve())
 
 
 def test_observe_version_uses_metadata_without_exposing_path(tmp_path):

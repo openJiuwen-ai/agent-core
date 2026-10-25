@@ -42,6 +42,9 @@ def resolve_read_path(scope: WorkspaceReadScope, requested_path: str) -> Resolve
     if not isinstance(requested_path, str) or "\x00" in requested_path:
         raise WorkspacePathError("forbidden")
 
+    if scope.host_wide:
+        return _resolve_host_path(scope.workspace_root, scope.source_ref, requested_path)
+
     normalized = requested_path.replace("\\", "/")
     if not normalized:
         normalized = "."
@@ -137,6 +140,37 @@ def _is_within(candidate: Path, root: Path) -> bool:
     return True
 
 
+def _resolve_host_path(
+    workspace_root: Path,
+    source_ref: str,
+    requested_path: str,
+    *,
+    writable: bool = False,
+) -> ResolvedWorkspacePath:
+    """Resolve full-access paths and leave access checks to the host OS."""
+    message = "workspace path is not writable" if writable else "workspace path is not readable"
+    windows_path = PureWindowsPath(requested_path)
+    if os.name != "nt" and (windows_path.drive or windows_path.is_absolute()):
+        raise WorkspacePathError("forbidden", message)
+    try:
+        requested = Path(requested_path).expanduser()
+        if windows_path.is_absolute() and not requested.is_absolute():
+            raise WorkspacePathError("forbidden", message)
+        candidate = requested if requested.is_absolute() else Path(workspace_root) / requested
+        canonical = _canonical(candidate)
+    except WorkspacePathError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise WorkspacePathError("forbidden", message) from exc
+
+    logical_path = os.fspath(canonical)
+    return ResolvedWorkspacePath(
+        path=canonical,
+        relative_path=logical_path,
+        source_ref=f"{source_ref.rstrip('/')}:{logical_path}",
+    )
+
+
 def resolve_write_path(scope: WorkspaceWriteScope, requested_path: str) -> ResolvedWorkspacePath:
     """Resolve one model path inside the host-granted write scope."""
     if scope.status == "unknown":
@@ -147,6 +181,9 @@ def resolve_write_path(scope: WorkspaceWriteScope, requested_path: str) -> Resol
         raise WorkspacePathError("forbidden", "workspace path is not writable")
     if any(ord(character) < 32 or ord(character) == 127 for character in requested_path):
         raise WorkspacePathError("forbidden", "workspace path is not writable")
+
+    if scope.host_wide:
+        return _resolve_host_path(scope.workspace_root, scope.source_ref, requested_path, writable=True)
 
     normalized = requested_path.replace("\\", "/")
     posix_path = PurePosixPath(normalized)
