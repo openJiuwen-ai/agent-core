@@ -185,10 +185,17 @@ class PersistentWorkspaceReadRail(DeepAgentRail):
 
     priority = 100
 
-    def __init__(self, execution: ExecutionContext, workspace_access: WorkspaceAccessPort) -> None:
+    def __init__(
+        self,
+        execution: ExecutionContext,
+        workspace_access: WorkspaceAccessPort,
+        *,
+        permission_profile: str = "default",
+    ) -> None:
         super().__init__()
         self.execution = execution
         self.workspace_access = workspace_access
+        self.permission_profile = permission_profile
         self.tools = []
 
     def init(self, agent) -> None:
@@ -206,6 +213,7 @@ class PersistentWorkspaceReadRail(DeepAgentRail):
             base_tool=ReadFileTool(self.sys_operation, language, agent_id),
             execution=self.execution,
             workspace_access=self.workspace_access,
+            permission_profile=self.permission_profile,
         )
         list_tool = PersistentWorkspaceListTool(
             base_tool=ListDirTool(self.sys_operation, language, agent_id),
@@ -231,10 +239,17 @@ class PersistentWorkspaceWriteRail(DeepAgentRail):
     # those decisions but before the PA-15 intent rail (priority 5).
     priority = 80
 
-    def __init__(self, execution: ExecutionContext, workspace_access: WorkspaceWriteAccessPort) -> None:
+    def __init__(
+        self,
+        execution: ExecutionContext,
+        workspace_access: WorkspaceWriteAccessPort,
+        *,
+        permission_profile: str = "default",
+    ) -> None:
         super().__init__()
         self.execution = execution
         self.workspace_access = workspace_access
+        self.permission_profile = permission_profile
         self.tools = []
 
     def init(self, agent) -> None:
@@ -292,7 +307,7 @@ class PersistentWorkspaceWriteRail(DeepAgentRail):
 
         try:
             scope = await self.workspace_access.resolve_write_scope(self.execution)
-            scope = validate_write_scope(scope, self.execution)
+            scope = validate_write_scope(scope, self.execution, permission_profile=self.permission_profile)
             resolved = resolve_write_path(scope, requested_path)
         except WorkspacePathError as exc:
             self._block(ctx, exc.status, self._safe_error(exc.status))

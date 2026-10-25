@@ -87,5 +87,34 @@ def group_message_reader(context: "PersistentBuildContext") -> GroupMessageReade
 
 
 def native_reply_adapter() -> NativeReplyAdapter:
-    """Return the adapter from ConfirmReply items to native interrupt input."""
-    raise _not_integrated("interactive reply adaptation", "PA-09")
+    """Return the adapter from validated ConfirmReply items to native interrupt input."""
+
+    class Adapter:
+        def to_native(self, response, request):
+            from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload
+            from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
+
+            from ..schema.request import AnswerResponse, PermissionResponse
+
+            if isinstance(response, PermissionResponse):
+                approved = response.choice != "reject"
+                return ConfirmPayload(
+                    approved=approved,
+                    feedback=response.feedback or ("" if approved else "用户拒绝此次调用"),
+                    auto_confirm=response.choice == "approve_for_session",
+                    persist_allow=False if response.choice == "approve_for_session" else None,
+                )
+            if isinstance(response, AnswerResponse):
+                question_texts = [
+                    item["question"]
+                    for item in getattr(request, "questions", ())
+                    if isinstance(item, dict) and isinstance(item.get("question"), str)
+                ]
+                if response.outcome == "timed_out":
+                    answers = {question: "（超时未获得回答）" for question in question_texts}
+                else:
+                    answers = {question: response.answers.get(question, "（未回答）") for question in question_texts}
+                return AskUserPayload(answers=answers)
+            raise TypeError(f"unsupported confirmation response: {type(response).__name__}")
+
+    return Adapter()

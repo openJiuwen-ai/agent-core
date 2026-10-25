@@ -129,6 +129,11 @@ def record(**overrides):
     }
     data.update(overrides)
     ending_value = data.get("ending")
+    if isinstance(ending_value, dict) and ending_value.get("outcome") == "awaiting_confirmation":
+        ending_value = dict(ending_value)
+        ending_value.setdefault("spec_fingerprint", "a" * 64)
+        data["ending"] = ending_value
+        ending_value = data["ending"]
     if isinstance(ending_value, dict) and "last_group_message_id" in ending_value:
         ending_value = dict(ending_value)
         if "last_group_message_id" not in overrides:
@@ -159,6 +164,17 @@ def test_key_prefix_encodes_each_identity_on_its_own():
     assert STATE.session_key_prefix("代理", "会话 1") == "pa:%E4%BB%A3%E7%90%86:%E4%BC%9A%E8%AF%9D%201:"
     assert STATE.WindowStore.state_key("a:b", "c") == "pa:a%3Ab:c:state"
     assert import_module(PKG).session_key_prefix is STATE.session_key_prefix, "the host imports it from the package"
+
+
+def test_waiting_record_requires_the_original_spec_fingerprint():
+    data = record(
+        interruption=RECORD.encode_interruption(interruption()),
+        ending={"outcome": "awaiting_confirmation", "request_id": "r", "execution_id": "e"},
+    )
+    data["ending"].pop("spec_fingerprint")
+
+    with pytest.raises(FrameworkValidationError):
+        STATE.parse_record(json.dumps(data))
 
 
 class FailingBackend(InMemoryKVStore):
@@ -377,6 +393,7 @@ async def test_load_restores_state_and_the_waiting_scene():
             "request_id": "request-0",
             "execution_id": "execution-0",
             "reply_target": "chat-0",
+            "spec_fingerprint": "a" * 64,
             "last_group_message_id": "m-3",
         },
     )
@@ -384,7 +401,7 @@ async def test_load_restores_state_and_the_waiting_scene():
     await backend.set(STATE.WindowStore.state_key("agent:1", "session%a"), json.dumps(data))
     ctx = context()
     loaded = await state_store.load(ctx)
-    assert loaded.waiting == INTEGRATION.WaitingScene("request-0", "chat-0")
+    assert loaded.waiting == INTEGRATION.WaitingScene("request-0", "chat-0", "a" * 64)
     assert loaded.last_group_message_id == "m-3"
     assert window(ctx.session) == window_messages, "a waiting scene's unpaired call is legitimate"
     assert ctx.session.get_state(INTERRUPTION_KEY) == state
@@ -916,6 +933,7 @@ async def test_new_records_carry_no_pending_answer(monkeypatch):
         "outcome",
         "request_id",
         "execution_id",
+        "spec_fingerprint",
         "reply_target",
         "output_refs",
     }

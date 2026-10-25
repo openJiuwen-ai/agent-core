@@ -51,6 +51,7 @@ class RecordEnding(BaseModel):
     outcome: StrictStr
     request_id: StrictStr
     execution_id: StrictStr
+    spec_fingerprint: StrictStr | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     reply_target: StrictStr | None = None
     output_refs: list[StrictStr] = Field(default_factory=list)
 
@@ -249,6 +250,12 @@ class SessionStateRecord(BaseModel):
                 or self.window_seq != self.last_rollover.new_window_seq
             ):
                 raise ValueError("last rollover must point at the current window")
+        if (
+            self.ending is not None
+            and self.ending.outcome == "awaiting_confirmation"
+            and self.ending.spec_fingerprint is None
+        ):
+            raise ValueError("a waiting confirmation must identify its published Spec")
         if self.checkpoint is not None and self.checkpoint.kind == "rollover" and self.last_rollover is None:
             raise ValueError("a rollover checkpoint requires rollover metadata")
         if self.checkpoint is not None and self.checkpoint.kind == "rollover":

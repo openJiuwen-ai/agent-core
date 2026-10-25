@@ -288,7 +288,106 @@ def test_flat_spec_roundtrip_and_inheritance(api):
     assert "deep_agent" not in raw and "session" not in raw
     restored = api.PersistentAgentSpec.model_validate_json(spec.model_dump_json())
     assert restored.fingerprint() == spec.fingerprint()
+
+
+def test_automatic_profile_builds_invocation_rail_from_its_published_policy(api):
+    policy = {"enabled": True, "mode": "auto", "defaults": {"*": "ask"}}
+    spec = spec_for(api, permission_profile="automatic", permissions=policy)
+
+    class Factory:
+        def __init__(self):
+            self.calls = []
+
+        def build(self, **kwargs):
+            rail = object()
+            self.calls.append((kwargs, rail))
+            return rail
+
+    factory = Factory()
+    context = context_for(api, spec)
+    context.ports = ports_for(api, permission_rail_factory=factory)
+    context.claim(spec)
+    parts = spec.resolve_parts(context)
+
+    assert len(factory.calls) == 1
+    assert factory.calls[0][0]["execution"] is context.execution
+    assert factory.calls[0][0]["permissions"] == policy
+    assert factory.calls[0][0]["permissions"] is not spec.permissions
+    assert factory.calls[0][1] in parts.rails
+    assert parts.config.permissions == {"enabled": False}
+
+
+def test_automatic_profile_requires_a_host_rail_factory(api):
+    spec = spec_for(api, permission_profile="automatic", permissions={"enabled": True, "mode": "auto"})
+    context = context_for(api, spec)
+
+    with pytest.raises(BaseError, match="permission_rail_factory"):
+        context.validate(spec)
     assert spec.model_copy(update={"system_prompt": "changed"}).fingerprint() != spec.fingerprint()
+
+
+def test_permission_profile_defaults_for_legacy_specs_and_roundtrips(api):
+    spec = spec_for(api, permissions={"enabled": True, "tools": {"write_file": "ask"}})
+
+    raw = spec.model_dump(mode="json")
+    assert raw["permission_profile"] == "default"
+    assert raw["permissions"] == {"enabled": True, "tools": {"write_file": "ask"}}
+
+    raw.pop("permission_profile")
+    legacy = api.PersistentAgentSpec.model_validate(raw)
+    restored = api.PersistentAgentSpec.model_validate_json(spec.model_dump_json())
+
+    assert legacy.permission_profile == "default"
+    assert restored.permissions == spec.permissions
+    assert restored.fingerprint() == spec.fingerprint()
+
+
+def test_permission_profile_rejects_unknown_values(api):
+    with pytest.raises(ValidationError):
+        spec_for(api, permission_profile="unrestricted")
+
+
+def test_permission_profile_and_policy_snapshot_change_fingerprint(api):
+    policy = {"enabled": True, "tools": {"write_file": "ask"}}
+    default = spec_for(api, permission_profile="default", permissions=policy)
+    automatic = spec_for(api, permission_profile="automatic", permissions=policy)
+    changed_policy = spec_for(api, permission_profile="default", permissions={"enabled": True, "tools": {"write_file": "allow"}})
+
+    assert default.fingerprint() != automatic.fingerprint()
+    assert default.fingerprint() != changed_policy.fingerprint()
+
+
+@pytest.mark.parametrize(
+    ("permission_profile", "permissions", "expected"),
+    [
+        (
+            "automatic",
+            {"enabled": True, "tools": {"write_file": "ask"}},
+            {"enabled": False},
+        ),
+        ("full_access", {"enabled": True, "tools": {"write_file": "ask"}}, {"enabled": False}),
+    ],
+)
+def test_permission_policy_is_resolved_per_spec_without_mutating_snapshot(
+    api,
+    permission_profile,
+    permissions,
+    expected,
+):
+    spec = spec_for(api, permission_profile=permission_profile, permissions=permissions)
+    context = context_for(api, spec)
+    if permission_profile == "automatic":
+        class Factory:
+            def build(self, **_kwargs):
+                return object()
+
+        context.ports = ports_for(api, permission_rail_factory=Factory())
+    context.claim(spec)
+    parts = spec.resolve_parts(context)
+
+    assert parts.config.permissions == expected
+    if permission_profile == "automatic":
+        assert spec.permissions["tools"]["write_file"] == "ask"
 
 
 @pytest.mark.parametrize(

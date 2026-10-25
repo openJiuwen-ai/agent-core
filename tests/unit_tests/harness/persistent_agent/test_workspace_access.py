@@ -17,7 +17,9 @@ from openjiuwen.harness.persistent_agent.schema.spec import PersistentAgentSpec
 from openjiuwen.harness.persistent_agent.workspace.access import (
     WorkspaceAccessPort,
     WorkspaceReadScope,
+    WorkspaceWriteScope,
     validate_read_scope,
+    validate_write_scope,
 )
 
 pytestmark = pytest.mark.level0
@@ -168,3 +170,43 @@ def test_scope_identity_mismatch_is_rejected():
 
     with pytest.raises(BaseError, match="workspace access scope mismatch"):
         validate_read_scope(scope, execution_for(spec))
+
+
+def test_host_wide_read_scope_is_bound_to_full_access_profile():
+    spec = PersistentAgentSpec(card=AgentCard(id="agent-a", name="test"), permission_profile="full_access")
+    scope = WorkspaceReadScope(
+        status="allowed",
+        agent_id="agent-a",
+        session_id="session-a",
+        workspace_root=Path("workspace"),
+        allowed_roots=(),
+        private_sessions_root=Path("workspace/sessions"),
+        current_session_root=Path("workspace/sessions/session-a"),
+        source_ref="workspace:agent-a",
+        policy_revision="policy-1",
+        host_wide=True,
+    )
+
+    assert validate_read_scope(scope, execution_for(spec), permission_profile="full_access") is scope
+    with pytest.raises(BaseError, match="workspace access profile mismatch"):
+        validate_read_scope(scope, execution_for(spec), permission_profile="default")
+
+
+def test_host_wide_write_scope_is_bound_to_full_access_profile():
+    spec = PersistentAgentSpec(card=AgentCard(id="agent-a", name="test"), permission_profile="full_access")
+    scope = WorkspaceWriteScope(
+        status="allowed",
+        agent_id="agent-a",
+        session_id="session-a",
+        workspace_root=Path("workspace"),
+        allowed_write_roots=(),
+        private_sessions_root=Path("workspace/sessions"),
+        current_session_root=Path("workspace/sessions/session-a"),
+        source_ref="workspace:agent-a",
+        policy_revision="policy-1",
+        host_wide=True,
+    )
+
+    assert validate_write_scope(scope, execution_for(spec), permission_profile="full_access") is scope
+    with pytest.raises(BaseError, match="workspace write profile mismatch"):
+        validate_write_scope(scope, execution_for(spec), permission_profile="automatic")

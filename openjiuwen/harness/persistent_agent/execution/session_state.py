@@ -874,7 +874,7 @@ class ExecutionStateStore:
         context.session.update_state(state)
         ending = record.ending
         waiting = (
-            WaitingScene(ending.request_id, ending.reply_target)
+            WaitingScene(ending.request_id, ending.reply_target, ending.spec_fingerprint)
             if ending is not None and ending.outcome == WAITING
             else None
         )
@@ -1066,6 +1066,7 @@ class ExecutionStateStore:
                 outcome=ending.outcome,
                 request_id=ending.request_id,
                 execution_id=execution.execution_id,
+                spec_fingerprint=execution.config_fingerprint if ending.outcome == WAITING else None,
                 reply_target=ending.reply_target,
                 output_refs=list(ending.output_refs),
             ),

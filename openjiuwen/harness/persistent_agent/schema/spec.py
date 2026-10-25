@@ -4,7 +4,8 @@
 
 import hashlib
 import json
-from typing import TYPE_CHECKING, Literal
+from copy import deepcopy
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import ConfigDict, Field
 
@@ -55,12 +56,15 @@ def _context_engine_config(config):
 
 
 class PersistentAgentSpec(DeepAgentSpec):
-    """Construction-only v1 spec. Declaring a policy does not implement execution."""
+    """Persistent Agent v1 spec with immutable permission policy snapshots."""
 
     model_config = ConfigDict(extra="forbid")
 
     # Identifies this serialized Spec shape so unsupported configuration versions fail closed.
     schema_version: Literal[1] = 1
+    # Employee-level permission mode and the exact policy used by this publication.
+    permission_profile: Literal["default", "automatic", "full_access"] = "default"
+    permissions: dict[str, Any] | None = None
     # Advertises only capabilities the runtime can validate and bind for this Agent.
     enabled_features: frozenset[Literal["construction", "workspace_read", "workspace_write", "window_management"]] = (
         Field(default=frozenset({"construction"}), min_length=1)
@@ -110,6 +114,37 @@ class PersistentAgentSpec(DeepAgentSpec):
                 )
         parts = super().resolve_parts(context)
         context.binding.parts = parts
+        # Permissions belong to this published Spec, never to mutable global
+        # config. Full access explicitly disables confirmation policies.
+        published_permissions = {"enabled": False} if self.permission_profile == "full_access" else self.permissions
+        parts.config.permissions = deepcopy(published_permissions)
+        if self.permission_profile == "automatic":
+            factory = context.ports.permission_rail_factory
+            if factory is None:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                    error_msg="permission_rail_factory is required for automatic permission profile",
+                )
+            workspace = parts.config.workspace
+            workspace_root = getattr(workspace, "root_path", None) if workspace is not None else None
+            model = parts.config.model
+            tool_names = tuple(card.name for card in parts.tool_cards)
+            rail = factory.build(
+                execution=context.execution,
+                permissions=deepcopy(self.permissions),
+                model=model,
+                model_name=getattr(model, "model_name", None),
+                workspace_root=str(workspace_root) if workspace_root is not None else None,
+                sys_operation=parts.config.sys_operation,
+                tool_names=tool_names,
+            )
+            if rail is None:
+                raise build_error(
+                    StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                    error_msg="permission_rail_factory did not return a rail",
+                )
+            parts.config.permissions = {"enabled": False}
+            parts.rails.append(rail)
         if parts.config.context_engine_config is not None:
             parts.config.context_engine_config = _context_engine_config(parts.config.context_engine_config)
         from openjiuwen.harness.rails.context_engineer import ContextAssembleRail, ContextProcessorRail
@@ -145,7 +180,13 @@ class PersistentAgentSpec(DeepAgentSpec):
                 )
             from ..workspace.file_access import PersistentWorkspaceReadRail
 
-            parts.rails.append(PersistentWorkspaceReadRail(context.execution, workspace_access))
+            parts.rails.append(
+                PersistentWorkspaceReadRail(
+                    context.execution,
+                    workspace_access,
+                    permission_profile=self.permission_profile,
+                )
+            )
             parts.rails.append(_share_file_rail(context, workspace_access, self.share_file_max_bytes))
         if "workspace_write" in self.enabled_features:
             workspace_write_access = context.ports.workspace_write_access
@@ -156,7 +197,13 @@ class PersistentAgentSpec(DeepAgentSpec):
                 )
             from ..workspace.file_access import PersistentWorkspaceWriteRail
 
-            parts.rails.append(PersistentWorkspaceWriteRail(context.execution, workspace_write_access))
+            parts.rails.append(
+                PersistentWorkspaceWriteRail(
+                    context.execution,
+                    workspace_write_access,
+                    permission_profile=self.permission_profile,
+                )
+            )
         from ..execution.model_rail import PersistentModelCallRail
         from ..execution.stream_lifecycle import NativeStreamTaskLifecycle
         from ..execution.tool_intent_rail import PersistentToolIntentRail

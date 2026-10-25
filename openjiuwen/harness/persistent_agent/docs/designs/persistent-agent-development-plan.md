@@ -10,8 +10,8 @@
 | 文档定位 | 当前开发计划，按详细架构设计编制；此前计划仅保留在 Git 历史中 |
 | 更新日期 | 2026-10-25 |
 | 交付分类 | 本期 20 项（PA-01～PA-18、PA-22～PA-23）；独立学习扩展 3 项（PA-19～PA-21）；后续执行模式扩展 3 项（PA-24～PA-26） |
-| 本轮安排 | 按 2026-10-09 确认的分工推进 PA-05～PA-08、PA-10～PA-12、PA-14～PA-18、PA-23；PA-07 单列模块。PA-09、PA-13、PA-22、主动学习 PA-19～PA-21、执行模式 PA-24～PA-26 暂不开发，条目和完整验收要求保留，暂缓项不出现在本轮分工图中 |
-| 当前进度 | 共 6/26 项完成：本期 6/20、学习扩展 0/3、执行模式扩展 0/3；PA-01～PA-03 已按各自独立验收边界完成，PA-04 已按架构设计收敛已实现的契约，M0 完成；PA-05 已用测试替身完成组件验收；PA-10 会话状态记录已接入并完成组件验证，新任务正式入口可执行，确认恢复入口在 PA-09 接入前仍明确拒绝，M1 集成仍待开发；PA-07 已完成群消息参与判断的组件验收，AgentServer 联调仍待进行 |
+| 本轮安排 | 按 2026-10-09 确认的分工推进 PA-05～PA-12、PA-14～PA-18、PA-23；PA-07 单列模块，PA-09 按员工权限配置与确认恢复设计重新开工。PA-13、PA-22、主动学习 PA-19～PA-21、执行模式 PA-24～PA-26 暂不开发，条目和完整验收要求保留，暂缓项不出现在本轮分工图中 |
+| 当前进度 | 共 6/26 项完成：本期 6/20、学习扩展 0/3、执行模式扩展 0/3；PA-01～PA-03 已按各自独立验收边界完成，PA-04 已按架构设计收敛已实现的契约，M0 完成；PA-05 已用测试替身完成组件验收；PA-10 会话状态记录已接入并完成组件验证；PA-09 员工权限策略快照、执行级装配和 NativeReplyAdapter 已实现，PA 定向回归 291 项通过；JiuwenSwarm 宿主审批集成见 JM-26，真实飞书与 M1 联合验收待完成，PA-09 与 M1 均未完成；PA-07 已完成群消息参与判断的组件验收，AgentServer 联调仍待进行 |
 
 ### 1.1 范围、约束与术语
 
@@ -59,7 +59,7 @@ Persistent Agent 接收一次已经确定归属的任务，在对应会话中运
 
 ### 1.2 待确认事项
 
-架构设计 §12.2 的待确认事项在相关特性开工前与对端确认：本期不支持跨进程部署；归档保留期（影响 PA-11、PA-12）和确认超时时长（影响 PA-09）由 AgentServer 按 Agent 配置决定；系统提示词中 `tools` 片段随工具列表变化的问题，在 PA-06 中以固定工具列表规避。
+架构设计 §12.2 的待确认事项在相关特性开工前与对端确认：本期不支持跨进程部署；归档保留期（影响 PA-11、PA-12）由 AgentServer 决定；PA-09 人工审批默认等待 15 分钟，宿主可按产品配置调整；系统提示词中 `tools` 片段随工具列表变化的问题，在 PA-06 中以固定工具列表规避。
 
 架构设计尚未覆盖、需先补充设计并确认的事项：
 
@@ -114,6 +114,8 @@ Persistent Agent 接收一次已经确定归属的任务，在对应会话中运
 
 - **验收标准（怎样证明做成）：** 确认完全复用 harness 的 `PermissionInterruptRail` 与原生中断恢复，不新写确认 rail；Spec 新增 `permissions` 字段（复用 `PermissionsSection`，构造时传入 DeepAgent 配置并纳入指纹），提供 `describe_confirmable_operations(spec)`；判定 ask 时保存含中断状态的会话状态记录，并同步记账 `execution.paused(awaiting_confirmation)`（附被拦截的工具名和脱敏参数摘要；摘要超出事件容量时截断并标记 `arguments_truncated`，卡片须提示已截断，批准按交互 ID 关联完整调用，见 [F_18](../features/F_18_output-handoff.md) D-13）；`resume_persistent_request` 由新实例放回记录、以 `ConfirmReply` 作为恢复输入，不向窗口追加任何内容；`ConfirmReply` 的权限确认项在恢复入口统一转换：同意为 `approved=True`，同意并本会话记住为 `approved=True, auto_confirm=True, persist_allow=False`，拒绝为 `approved=False` 并附反馈，其他组合（含 `auto_confirm=True` 而 `persist_allow` 为空或为真）一律拒绝，不能进入永久允许分支；同意时执行被拦截的调用（写操作照常先记账），拒绝时把反馈作为工具结果，权限确认超时按拒绝处理；主动提问回复（AskUserRail）转换为 `AskUserPayload.answers`，允许部分回答和自由文本，漏答的问题填“（未回答）”，`outcome=timed_out` 时每个问题填“（超时未获得回答）”，原生 rail 不重复提问，不扩展原生类型，Agent 不猜测缺失信息；本会话记住的选择写入 `INTERRUPT_AUTO_CONFIRM_KEY` 并随记录保存，同一 Session 在新 Execution、新实例中仍有效，其他 Session 不继承，不写入全局权限配置或权限 YAML；取消（`abort_persistent_request(reason="cancel")`）时保存记录并记账 `final(cancelled)`，停止（`reason="stop"`）时保存记录并记账 `paused(stopped)`；补充消息一律作为新 Request，不使用 follow_up / steer；续做中的询问复用 AskUserRail；开放确认恢复前须联调验证：确认前被 Rail 改写参数时，恢复后窗口中的调用与实际执行的参数一致（PA-10 遗留，见 [F_17](../features/F_17_session-state-record.md) 第 8.2 节）；若需修复，位置在原生恢复执行与窗口更新，不由本项的回复转换承担
 - **开工硬前置：** PA-05、PA-10
+
+- **本轮扩展验收：** `PersistentAgentSpec` 明确持有员工权限模式和有效策略快照并计入 fingerprint；每次 Execution 只按其固定 Spec 装配权限行为。`automatic` 只能批准精确评估且达到阈值的单次调用，评估失败或不确定时走原生确认；`full_access` 的主机范围由可信宿主 Scope 提供，默认模式保持员工目录边界。审批身份、等待期限和持久路由由 AgentServer 负责，PA-09 只提供可校验的暂停现场与精确调用恢复契约。设计与跨仓验收见 [F_24](../features/F_24_permission-confirmation.md) 和 JiuwenSwarm [JM-26](../../../../../../huenrui_jiuwenswarm/jiuwenswarm/server/jiuwenmate/docs/features/F_26_employee-permission-profiles.md)。
 
 
 PA-02 只验证构造入口；PA-03 验证实例内部的归属校验与状态隔离；PA-04 先把已实现的契约与架构设计对齐；PA-05 验证执行与恢复入口到事件出口的完整链路。PA-05 不重写 DeepAgent 的任务循环或另建一套流式输出；事件映射及按事件级别等待入队或落盘由 Persistent Agent 适配。AgentServer 负责调用执行与恢复入口、保证同一 Session 同时只有一个执行者、为并行 Session 分配不同实例并管理实例生命周期；PA-03 不实现这些调度工作。群内模型调用额度由 AgentServer 管理，本模块仅遵守宿主准入结果并回传实际用量，不维护预算账户。
@@ -247,19 +249,19 @@ PA-05 一期只开放单轮执行。以下执行模式各自验证生命周期�
 | --- | --- | --- | --- |
 | SHR / CR | Song Haoran、Chen Ran | PA-05、PA-06、PA-08、PA-10、PA-17、PA-18 | PA-05 已完成组件验收，继续负责接入与联调；PA-06、PA-08、PA-10、PA-17 可以并行开发；PA-18 等 PA-06、PA-10、PA-17 |
 | YZJ | Yan Zhijun | PA-11、PA-12、PA-14、PA-15、PA-16、PA-23 | PA-14、PA-15、PA-23 可并行安排；PA-15 的副作用声明来源已按 F_15 确认为 agent-core 精确名称白名单；PA-11 等 PA-10，PA-12 等 PA-11；PA-16 等 PA-14、PA-15 |
-| CYC | Chang Yucong | PA-07 独立参与判断模块；与 AgentServer 配合的接口对齐和联合验证 | PA-07 满足 PA-04 后可独立开发，与其他工作线并行；AgentServer 接口准备也可并行，联调时等待对应组件就绪 |
+| CYC | Chang Yucong | PA-07 独立参与判断模块；PA-09 员工权限策略与确认恢复契约；与 AgentServer 配合的接口对齐和联合验证 | PA-07 满足 PA-04 后可独立开发；PA-09 与 AgentServer 权限配置和审批路由协同推进；接口准备可与组件实现并行，联调时等待对应组件就绪 |
 
 | 暂缓部分 | 本轮安排 |
 | --- | --- |
-| PA-09 确认与用户交互、PA-13 授权知识读取、PA-22 来源版本与失效 | 暂不开发；第 2 节保留特性、原硬前置和完整验收要求，不纳入本轮分工图 |
+| PA-13 授权知识读取、PA-22 来源版本与失效 | 暂不开发；第 2 节保留特性、原硬前置和完整验收要求，不纳入本轮分工图 |
 | PA-19～PA-21 主动学习 | 暂不开发；保留独立扩展分类、既有负责人及后续顺序，不纳入本轮分工图 |
 | PA-24～PA-26 执行模式 | 暂不开发；保留后续扩展分类和逐项开放要求，不纳入本轮分工图 |
 
-本轮共有 13 项已分工特性（其中 PA-05 已完成组件验收）和 4 项已完成基线出现在图中；9 项暂缓。特性总数、完成状态和原交付分类不变。暂缓是开发安排，不表示取消设计、解除依赖或验收完成。
+本轮共有 14 项已分工特性（其中 PA-05 已完成组件验收）和 4 项已完成基线出现在图中；8 项暂缓。特性总数、完成状态和原交付分类不变。暂缓是开发安排，不表示取消设计、解除依赖或验收完成。
 
 | 工作线 / 模块 | 负责人 | 本轮立即做 | 后续安排与汇合 |
 | --- | --- | --- | --- |
-| A：实例与执行 | SHR / CR | PA-05 接入与联调（PA-01～PA-04 基线已完成） | 与 B、C、R 线和 AgentServer 汇合；完整 M1 的确认恢复验收仍等待暂缓的 PA-09 |
+| A：实例与执行 | SHR / CR / CYC | PA-05 接入与联调（PA-01～PA-04 基线已完成）；PA-09 员工权限策略、暂停与确认恢复 | 与 B、C、R 线和 AgentServer 汇合；PA-09 宿主审批与渠道恢复由 JiuwenSwarm 联合验收 |
 | B：上下文与交接 | SHR / CR | PA-06 上下文、PA-08 响应交接可并行 | 与 A、C 线联调执行头、背景注入和候选交接；PA-09 本轮暂不开发；PA-07 独立到 G 模块 |
 | C：窗口与检索 | PA-10：SHR / CR；PA-11、PA-12、PA-23：YZJ | PA-10 会话状态记录、PA-23 群聊记录可并行 | PA-10 → PA-11 → PA-12；与 A、B、R、G 联调；原计划中的 PA-13、PA-22 本轮暂不开发 |
 | D：办公空间 | YZJ | PA-14 文件读取、PA-15 意图记账可并行安排 | 两项完成后做 PA-16；与 A、R 线验证工具失败收敛和写操作续做；文件来源失效的完整验收仍等待 PA-22 |
@@ -385,7 +387,7 @@ flowchart LR
 
 PA-07 只负责参与判断；“参与后执行任务”与“结果交接”由 CYC 同 SHR / CR 联调 PA-05、PA-08，AgentServer 决定派发并处理投递。预算、记账、群聊记录、存储后端和执行日志的真实接口由 CYC 与对端对齐，模拟端口验证和真实联调证据分开记录。
 
-本轮暂缓 PA-09，因此完整 M1 的确认恢复验收仍待完成；PA-13、PA-22 暂缓，完整 M2a 的知识 / 来源失效和 M2b 的文件来源失效验收仍待完成。M2c 包含 M1 执行链和确认恢复后崩溃等场景，也不能仅凭本轮组件联调宣告完整通过。正式入口仍按第 3.4 节验证能力后开放，本轮组件完成与完整里程碑验收分别登记。
+PA-09 权限策略与确认恢复组件已实现，宿主审批接入及 M1 联合验收仍待完成；PA-13、PA-22 暂缓，完整 M2a 的知识 / 来源失效和 M2b 的文件来源失效验收仍待完成。M2c 包含 M1 执行链和确认恢复后崩溃等场景，也不能仅凭本轮组件联调宣告完整通过。正式入口仍按第 3.4 节验证能力后开放，本轮组件完成与完整里程碑验收分别登记。
 
 | 扩展工作线 | 启动条件与安排 | 交付节点 |
 | --- | --- | --- |
@@ -432,7 +434,7 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 | PA-06 | 本期 | 待验收 | Song Haoran | 组件验收完成，容量相关验收待“容量边界”对齐后关闭。代码：`execution/window_assembly.py`、`schema/integration.py`、`schema/spec.py`；测试：`test_window_assembly.py`；设计与验证见 [F_06](../features/F_06_window-assembly.md) |
 | PA-07 | 本期 | 已完成 | Chang Yucong | 组件验收完成：群端口缺失时前置拒绝；明确 @ 当前智能体时直接产生 `participation.decided(respond)` 并进入执行，不调用 PA-07 判断模型或读取判断用群背景；其他群消息才经 `GroupChatPort.recent_messages` 做有限重试的无工具模型判断。合法 ignore 记 `execution.final(ignored)` 且不写窗口，也不带等待提示；`respond` 与 `intervene`（含明确 @）在 `participation.decided.notice` 写入按 `execution_id` 选取的固定等待提示，判断本身不投递渠道；判断失败不伪装为 ignore；私聊和定时任务旁路。明确 @ 定向测试：`test_mentioned_group_message_bypasses_judgment_and_enters_execution`；最近消息展示、历史测试和接入限制见 [F_07](../features/F_07_group-participation.md)。PA-23 群记录、PA-06 / PA-10 窗口、PA-08 候选发送及 AgentServer 联调不属于本项。 |
 | PA-08 | 本期 | 进行中 | Song Haoran | 设计已确认（2026-10-14）：[F_18](../features/F_18_output-handoff.md) 的 D-01～D-13、S-01、Q-01～Q-04、文件检查分层与大小上限配置均由开发者确认，记录版本保持 1；替代 `docs/pa-08-output-handoff-design` 分支上未合入的 F_08 草稿 → 组件实现（2026-10-14～15，按代码、测试、文档三个连续提交交付）：I-01～I-08——事件契约（文件候选的摘要、路径与大小，暂停事件引用候选，确认摘要截断标记）、`share_file` 工具与装配、按内容派生身份、超长回答确定性分段、整批准备与失败处理、暂停交文件、结束事件补交重试、确认链登记、交接正文与结束标记；按独立审阅与复审修复：收尾先同步窗口并以最终窗口确定有效登记，宿主 Rail 阻断或改写（含保留格式、只改内容）的登记不再交出（回执内容校验值，不是签名），群参与判断的结束事件接入同一重试；开发阶段无历史数据，`pending_answer` 及兼容代码删除 → macOS、Python 3.11.17，真实 DeepAgent、本地模型、临时目录办公空间与 `InMemoryKVStore`，宿主端口与宿主 Rail 用测试替身 → 2026-10-15 最终：PA 包 621 passed；harness 与 core Session 6243 passed、39 skipped；42 项变异检查全部被发现；Ruff、codespell 通过；Pylint 余留均为 HEAD 已有；mypy 新文件 `share_file.py` 出现 4 条与 PA-14 同因的 override 诊断（core `Tool` 泛型约定，本轮不改 core）；Codex 独立复核：覆盖率 92.77%，Mermaid 12.2.0 语法解析 23 段图 0 失败，未做 SVG 渲染（详见 F_18 §8.2） → 剩余：审阅第 3 项（极端合法输入下确认事件仍可能超限）按开发者决定暂缓；服务端保证与 JiuwenSwarm 联调（PA-08-V-15，M1）；服务端须先发布支持新事件字段的版本，并确认 Spec 指纹与正式大小上限（Chang Yucong）；PA-11 换窗保留登记依据、PA-15 名单口径（Yan Zhijun） |
-| PA-09 | 本期 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
+| PA-09 | 本期 | 进行中 | Chang Yucong | 2026-10-24 按员工级权限设计重新开工。现有 `PermissionInterruptRail`、Session state 与执行入口已具备基础组件并通过基线测试；员工权限模式 / 策略快照、逐 Execution 装配、确认恢复与 JiuwenSwarm 路由契约正在实现。PA-09 及 M1 未验收；实现与后续证据见 [F_24](../features/F_24_permission-confirmation.md) 和 JiuwenSwarm [JM-26](../../../../../../huenrui_jiuwenswarm/jiuwenswarm/server/jiuwenmate/docs/features/F_26_employee-permission-profiles.md)。 |
 | PA-10 | 本期 | 进行中 | Song Haoran | 组件实现（2026-10-14）：[F_17](../features/F_17_session-state-record.md) 的 I-01～I-07 已提交——记录加载与保存、保存前同步窗口与 DeepAgent 状态、带类型标记的中断状态、无效记录与存储故障分开处理、存储键编码与导出的 `session_key_prefix`、卸载处理器在构造时与 Rail 注册后拒绝、中途结束的补位与加载修补；I-08 与审阅修复已提交——停止、取消、报错时原生保留调用组，后续处理完成的结果按最终结果保留、未完成的只留说明（D-06 选项 B）；同日按两轮审阅修复按调用组配对、等待现场按调用内容核对、卸载处理器子类识别、`role` 类型校验、覆盖日志时机，并按确认的 Q-03 让控制 Rail 为被阻止的调用写入说明 → macOS、Python 3.11.17，真实 DeepAgent、本地模型与 `InMemoryKVStore`，宿主安全 Rail 用测试替身 → I-01～I-07：PA 包与 core Session 872 passed、5 项变异检查；I-08 与审阅修复历史验证：相关套件 7010 passed、23 项变异检查均被发现；PA-05 PR #72 合入后推送前复核：7012 passed、42 skipped，指定范围覆盖率 87.00%，文档、Mermaid 与链接检查通过；完整静态检查仍有 core 既有诊断及复杂度增加，详见 F_17 §7.2；类型检查中新增与改动的 PA 文件自身零报错，core 两个文件无新增 → 剩余：core 维护者评审标为待完成，按开发者决定不作为本次合入前置；确认恢复后窗口与实际执行参数一致列为开放确认恢复前的验收条件（PA-09 联调）；宿主安全 Rail 拦截后同批调用仍会执行，作为一期边界保留；真实服务端后端联调；`pending_answer` 已随 PA-08 退出，开发阶段无历史数据，兼容代码已删除（[F_18](../features/F_18_output-handoff.md)，2026-10-14，D-08 关闭）；确认恢复依赖 PA-09 |
 | PA-11 | 本期 | 进行中 | Yan Zhijun | agent-core 组件实现：新增完整 ReAct 轮次 checkpoint、Persistent 专用 `new_context`、安全边界换窗、80% 容量兜底与独立的 40% 候选检查、窗口归档 / 可重建索引、archive 先写和单条 V1 活动状态后写；提交异常后仅在 Session、旧窗快照、Request、recovery_ref、Spec 指纹及轮次精确匹配时，从旧窗、seed 和保留项引用重建候选并校验指纹，先持久化修复状态再加载；任何错配失败关闭。未启用 PA-11 的普通 Agent 与个人版默认 ReAct 路径不装管理器。代码：`openjiuwen/core/single_agent/{agents/react_agent.py,rail/base.py}`、`openjiuwen/harness/persistent_agent/{execution/{control,entries,model_rail,session_state,window_management}.py,schema/{integration,session_record,spec,window}.py,tools/{effect_policy,new_context}.py}`；测试：`test_window_management.py`、`test_construction.py`、`test_entries.py`、`test_session_state.py`。验证环境 Windows / Python 3.11.9，最新测试数据见本条对应实施记录与 [F_11](../features/F_11_window-management.md)。尚未验证：JiuwenSwarm 真实 BaseKVStore 的持久性、隔离、单 Session 串行，80% 阈值对真实模型容量边界的适用性 / 写入开销；首次启用前需检查旧 V1 记录。  PA-18 联动删除共享 Spec 中的旧容量门槛，保留本项 80% 策略；旧字段仅兼容保留，见 F_20 PA-18-V-31，不改变本项负责人或状态。 |
 | PA-12 | 本期 | 待验收 | Yan Zhijun | agent-core PA 全包 856 passed / 10 skipped；个人版定向回归 243 passed。真实 JiuwenSwarm 后端、跨 Execution / 重启与隔离验证待完成，见 [F_12](../features/F_12_session-history-search.md) |
@@ -451,10 +453,10 @@ M2a、M2b、M2c 可并行汇合，本期完成要求 M0、M1、M2a、M2b、M2c �
 | PA-25 | 后续执行模式扩展 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
 | PA-26 | 后续执行模式扩展 | 暂不开发 | 待分配 | 本轮暂不开发（2026-10-09）；保留特性、硬前置和验收标准，不纳入本轮分工图。 |
 | M0：接口基线 | 本期 | 已完成 | yan_zj | PA-01 按旧版架构定义调用身份与宿主端口协议；PA-04 按架构设计收敛执行上下文、端口、事件与群消息结构，PA 包 173 passed、共享回归 213 passed，见 [F_04](../features/F_04_contract-convergence.md)。实际宿主适配和存储后端不属于接口基线，列在 PA-05、PA-10～PA-13、PA-23 |
-| M1：可执行任务 | 本期 | 待开始 | 本轮 SHR / CR；CYC 负责 AgentServer 配合 | 执行与恢复入口、会话状态记录、确认与控制、结果交接；PA-09 暂不开发，完整确认恢复验收仍待完成 |
+| M1：可执行任务 | 本期 | 待开始 | 本轮 SHR / CR；CYC 负责 AgentServer 配合 | 执行与恢复入口、会话状态记录、确认与控制、结果交接；PA-09 组件已实现，宿主接入和完整确认恢复验收仍待完成 |
 | M2a：群消息与长上下文 | 本期 | 待开始 | 本轮 SHR / CR、YZJ、CYC | 群消息判断、换窗与归档、群聊与历史检索、知识与 PA-22 失效联调；PA-13、PA-22 暂不开发，相关完整验收待完成 |
 | M2b：办公空间读写 | 本期 | 待开始 | 本轮 YZJ；CYC 负责 AgentServer 配合 | 文件读写、写操作意图记账、并发修改及 PA-22 文件失效联调；PA-22 暂不开发，完整文件失效验收待完成 |
-| M2c：崩溃后续做原任务 | 本期 | 待开始 | 本轮 SHR / CR、YZJ；CYC 负责 AgentServer 配合 | 执行日志整理、崩溃续做与停止后继续；完整验收仍包含 M1 执行链及确认恢复后崩溃场景，不能因 PA-09 暂缓而视为通过 |
+| M2c：崩溃后续做原任务 | 本期 | 待开始 | 本轮 SHR / CR、YZJ；CYC 负责 AgentServer 配合 | 执行日志整理、崩溃续做与停止后继续；完整验收仍包含 M1 执行链及确认恢复后崩溃场景，PA-09 宿主接入与确认恢复联合验收未完成，不能视为通过 |
 | M2d：主动学习 | 独立学习扩展 | 暂不开发 | zhaominjun1997 | 本轮暂不开发；保留目标、处理批次与反馈关联的后续安排 |
 
 ### 4.2 架构设计 §12.2.1 验证点

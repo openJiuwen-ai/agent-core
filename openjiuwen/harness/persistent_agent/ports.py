@@ -8,7 +8,7 @@ execution boundary; annotations cannot attest durability or authorization.
 
 from dataclasses import dataclass
 from inspect import iscoroutinefunction
-from typing import Protocol
+from typing import Any, Protocol
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -119,6 +119,24 @@ class KnowledgePort(Protocol):
         ...
 
 
+class PermissionRailFactoryPort(Protocol):
+    """Build one host-owned Smart Approval rail from a frozen employee policy."""
+
+    def build(
+        self,
+        *,
+        execution: ExecutionContext,
+        permissions: dict[str, Any],
+        model: Any,
+        model_name: str | None,
+        workspace_root: str | None,
+        sys_operation: Any,
+        tool_names: tuple[str, ...],
+    ) -> Any:
+        """Return a fresh rail for this invocation; must not mutate global policy or share review state."""
+        ...
+
+
 @dataclass(frozen=True, kw_only=True)
 class PersistentPorts:
     """Collection of host contracts required or optionally enabled at build time."""
@@ -131,6 +149,7 @@ class PersistentPorts:
     knowledge: KnowledgePort | None = None
     workspace_access: WorkspaceAccessPort | None = None
     workspace_write_access: WorkspaceWriteAccessPort | None = None
+    permission_rail_factory: PermissionRailFactoryPort | None = None
 
     def validate(self) -> None:
         """Reject missing or malformed dependencies without contacting the host or storage."""
@@ -156,6 +175,13 @@ class PersistentPorts:
                         StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
                         error_msg=f"missing async port {name}.{method}",
                     )
+        if self.permission_rail_factory is not None and not callable(
+            getattr(self.permission_rail_factory, "build", None)
+        ):
+            raise build_error(
+                StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR,
+                error_msg="missing permission_rail_factory.build",
+            )
         if not isinstance(self.window_backend, BaseKVStore):
             raise build_error(
                 StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="window_backend must be a BaseKVStore"

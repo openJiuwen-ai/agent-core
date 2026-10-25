@@ -521,6 +521,8 @@ def _native_resume_input(context: PersistentBuildContext, reply: ConfirmReply, w
         raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "no Execution is waiting for a reply in this Session")
     if waiting.request_id != context.execution.request_id:
         raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "reply targets a different Request than the waiting one")
+    if waiting.spec_fingerprint != context.execution.config_fingerprint:
+        raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "reply targets a different Spec than the waiting one")
     state = context.session.get_state(INTERRUPTION_KEY)
     if not isinstance(state, ToolInterruptionState):
         raise _reject(StatusCode.DEEPAGENT_INPUT_PARAM_ERROR, "no interrupted call is waiting")

@@ -56,7 +56,7 @@ def module(name):
 
 SEAMS = module("execution.seams")
 REAL_STATE_STORE, REAL_ASSEMBLER = SEAMS.session_state_store, SEAMS.window_assembler
-UNINTEGRATED_ADAPTER = SEAMS.native_reply_adapter
+PRODUCTION_REPLY_ADAPTER = SEAMS.native_reply_adapter
 
 
 def kinds(events):
@@ -254,7 +254,11 @@ class StateStore:
         ending = self.record["ending"]
         waiting = None
         if ending.outcome == "awaiting_confirmation":
-            waiting = SEAMS.WaitingScene(ending.request_id, ending.reply_target)
+            waiting = SEAMS.WaitingScene(
+                ending.request_id,
+                ending.reply_target,
+                context.execution.config_fingerprint,
+            )
         return SEAMS.LoadedRecord(waiting, ending.last_group_message_id)
 
     async def save(self, context, ending):
@@ -366,6 +370,9 @@ class Harness:
         )
         checkpointer = NoopCheckpointer() if isolated else None
         host = Host(self.log)
+        permission_rail_factory = None
+        if spec.permission_profile == "automatic":
+            permission_rail_factory = SimpleNamespace(build=lambda **_: DeepAgentRail())
         ctx = self.api.PersistentBuildContext(
             execution=replace(execution, **changes),
             session=create_agent_session(
@@ -377,6 +384,7 @@ class Harness:
                 window_backend=self.backend or InMemoryKVStore(),
                 group_chat=group_chat,
                 workspace_access=workspace_access,
+                permission_rail_factory=permission_rail_factory,
             ),
         )
         return ctx, host
@@ -836,6 +844,76 @@ async def test_confirmation_pause_then_resume_completes(harness):
 
 
 @pytest.mark.asyncio
+async def test_production_reply_adapter_resumes_the_native_permission_rail(harness, monkeypatch):
+    monkeypatch.setattr(SEAMS, "native_reply_adapter", PRODUCTION_REPLY_ADAPTER)
+    spec = harness.spec(confirm=True)
+    await pause_for_confirmation(harness, spec)
+    ctx, host = harness.context(spec, execution_id="execution-2")
+
+    resumed = await collect(harness.api.resume_persistent_request(spec, ctx, permission()))
+
+    assert harness.tool_calls == [{"value": "x", "api_token": "secret-value"}]
+    assert "tool.intent" in kinds(resumed) and "tool.completed" in kinds(resumed)
+    assert resumed[-1].payload.status == "completed"
+    assert resumed == host.events
+
+
+def test_session_only_permission_reply_never_becomes_a_persistent_allow_rule():
+    request_models = module("schema.request")
+    response = request_models.PermissionResponse(
+        tool_call_id="call-1", choice="approve_for_session"
+    )
+
+    native = PRODUCTION_REPLY_ADAPTER().to_native(response, SimpleNamespace())
+
+    assert native.approved is True
+    assert native.auto_confirm is True
+    assert native.persist_allow is False
+
+
+@pytest.mark.parametrize(
+    ("outcome", "answers", "expected"),
+    [
+        ("answered", {"first question": "yes"}, {"first question": "yes", "second question": "（未回答）"}),
+        ("timed_out", {}, {"first question": "（超时未获得回答）", "second question": "（超时未获得回答）"}),
+    ],
+)
+def test_question_reply_adapter_fills_unanswered_questions(outcome, answers, expected):
+    request_models = module("schema.request")
+    response = request_models.AnswerResponse(
+        tool_call_id="call-ask",
+        outcome=outcome,
+        answers=answers,
+    )
+    request = SimpleNamespace(questions=[{"question": "first question"}, {"question": "second question"}])
+
+    native = PRODUCTION_REPLY_ADAPTER().to_native(response, request)
+
+    assert native.answers == expected
+
+
+@pytest.mark.asyncio
+async def test_confirmation_resume_rejects_a_different_spec_fingerprint(real_state):
+    harness = real_state
+    spec = harness.spec(confirm=True)
+    await pause_for_confirmation(harness, spec)
+    record = await saved_record(harness)
+    assert record["ending"]["spec_fingerprint"] == spec.fingerprint()
+
+    changed_spec = spec.model_copy(
+        update={"permission_profile": "automatic", "permissions": {"enabled": True, "mode": "auto"}}
+    )
+    ctx, _ = harness.context(changed_spec, execution_id="execution-2")
+
+    with pytest.raises(BaseError, match="different Spec"):
+        await collect(harness.api.resume_persistent_request(changed_spec, ctx, permission()))
+
+    assert harness.tool_calls == [], "a tool call may only resume under its original published permission snapshot"
+    record = await saved_record(harness)
+    assert record["ending"]["outcome"] == "awaiting_confirmation" and record["interruption"] is not None
+
+
+@pytest.mark.asyncio
 async def test_permission_rejection_records_no_write_intent_or_completion(harness):
     spec = harness.spec(confirm=True)
     await pause_for_confirmation(harness, spec)
@@ -1165,17 +1243,12 @@ async def test_execute_rejects_before_any_event(harness, monkeypatch, change, co
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["invalid_reply", "adapter_not_integrated"])
-async def test_resume_rejects_before_any_event(harness, monkeypatch, case):
+async def test_resume_rejects_before_any_event(harness):
     spec = harness.spec(confirm=True)
     ctx, host = harness.context(spec)
-    reply, code = {"responses": []}, StatusCode.DEEPAGENT_INPUT_PARAM_ERROR
-    if case == "adapter_not_integrated":
-        monkeypatch.setattr(SEAMS, "native_reply_adapter", UNINTEGRATED_ADAPTER)
-        reply, code = permission(), StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR
     with pytest.raises(BaseError) as exc_info:
-        await collect(harness.api.resume_persistent_request(spec, ctx, reply))
-    assert_rejected(exc_info, code)
+        await collect(harness.api.resume_persistent_request(spec, ctx, {"responses": []}))
+    assert_rejected(exc_info, StatusCode.DEEPAGENT_INPUT_PARAM_ERROR)
     assert host.events == [] and harness.model.calls == 0
     assert not ctx.binding.attempted
 
