@@ -7,7 +7,9 @@ import sys
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
+from openai import BadRequestError
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import AssistantMessage
@@ -209,7 +211,7 @@ async def test_model_retry_reuses_proposal_without_mutating_original_messages() 
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_unknown_output_budget_skips_proposal_without_blocking_primary() -> None:
+async def test_unspecified_output_budget_delivers_proposal_without_changing_primary() -> None:
     primary_model = model()
     primary_model.model_config.max_tokens = None
     primary_model.invoke = AsyncMock(return_value=AssistantMessage(content="done"))
@@ -222,7 +224,46 @@ async def test_unknown_output_budget_skips_proposal_without_blocking_primary() -
     result = await deep.invoke("task", session=Session(session_id="moa-unknown-output", card=deep.card))
     assert result["output"] == "done"
     reference.invoke.assert_awaited_once()
-    assert "private" not in str(primary_model.invoke.await_args.kwargs["messages"])
+    assert "private" in str(primary_model.invoke.await_args.kwargs["messages"][-1])
+    assert primary_model.model_config.max_tokens is None
+    assert "max_tokens" not in primary_model.invoke.await_args.kwargs
+    assert "private" not in str(
+        deep.react_agent.context_engine.get_context(session_id="moa-unknown-output").get_messages()
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_unspecified_proposal_overflow_recovery_does_not_consult_again() -> None:
+    primary_model = model()
+    primary_model.model_config.max_tokens = None
+    request = httpx.Request("POST", "https://example.test/v1/chat/completions")
+    overflow = BadRequestError(
+        "maximum context length exceeded",
+        response=httpx.Response(400, request=request),
+        body={"error": {"code": "context_length_exceeded", "message": "maximum context length exceeded"}},
+    )
+    primary_model.invoke = AsyncMock(side_effect=[overflow, AssistantMessage(content="done")])
+    reference = model()
+    reference.invoke = AsyncMock(return_value=AssistantMessage(content="private recovery proposal"))
+    deep = agent(
+        primary_model,
+        MoAConfig(mode="verifier_routed", reference_models=(reference,), scorer=lambda *_: 0.5),
+    )
+
+    result = await deep.invoke("task", session=Session(session_id="moa-budget-recovery", card=deep.card))
+
+    assert result["output"] == "done"
+    reference.invoke.assert_awaited_once()
+    assert primary_model.invoke.await_count == 2
+    calls = primary_model.invoke.await_args_list
+    assert "private recovery proposal" in str(calls[0].kwargs["messages"])
+    assert "private recovery proposal" not in str(calls[1].kwargs["messages"])
+    assert primary_model.model_config.max_tokens is None
+    assert all("max_tokens" not in call.kwargs for call in calls)
+    assert "private recovery proposal" not in str(
+        deep.react_agent.context_engine.get_context(session_id="moa-budget-recovery").get_messages()
+    )
 
 
 @pytest.mark.asyncio
@@ -446,6 +487,7 @@ async def test_task_loop_new_inner_iteration_number_does_not_reuse_old_proposal(
 @pytest.mark.level1
 async def test_stream_verifier_uses_private_proposal() -> None:
     primary_model = model()
+    primary_model.model_config.max_tokens = None
     requests = []
 
     async def stream(messages, **kwargs):
@@ -473,6 +515,7 @@ async def test_stream_verifier_uses_private_proposal() -> None:
     ]
     assert chunks
     assert "private stream proposal" in str(requests[0])
+    assert primary_model.model_config.max_tokens is None
     assert "private stream proposal" not in str(
         deep.react_agent.context_engine.get_context(session_id="moa-stream").get_messages()
     )

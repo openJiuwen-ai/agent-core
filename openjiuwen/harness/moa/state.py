@@ -7,7 +7,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from itertools import count
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from openjiuwen.core.common.logging import agent_logger
@@ -33,6 +33,8 @@ class ProposalAttempt:
     injected: bool
     reason: str
     kept_chars: int = 0
+    budget_mode: Literal["known", "unspecified", "unresolved"] = "unresolved"
+    fallback: bool = False
 
 
 @dataclass
@@ -41,6 +43,7 @@ class ProposalBatch:
     target: TurnKey
     attempts: list[ProposalAttempt] = field(default_factory=list)
     batch_id: int = field(default_factory=lambda: next(_batch_ids), compare=False)
+    disabled_reason: str | None = None
 
 
 @dataclass

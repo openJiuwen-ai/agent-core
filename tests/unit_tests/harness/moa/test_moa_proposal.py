@@ -152,7 +152,18 @@ def test_responses_output_reserve_matches_body_override_precedence(configured, o
         **overrides,
     )
     assert body["max_output_tokens"] == _output_tokens(model, {"send_max_output_tokens": True, **overrides}) == expected
-    assert _output_tokens(model, overrides) is None
+    default_body = model._client._build_responses_request_body(
+        messages=[UserMessage(content="task")],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        send_max_output_tokens=False,
+        **overrides,
+    )
+    assert default_body["max_output_tokens"] == _output_tokens(model, overrides) == expected
     assert overrides == original
 
 
@@ -245,7 +256,7 @@ async def test_responses_conversion_keeps_multimodal_tool_pair_and_tail() -> Non
 
 
 @pytest.mark.asyncio
-async def test_responses_default_unknown_output_allowance_skips_proposal() -> None:
+async def test_responses_unspecified_output_allowance_injects_without_adding_a_cap() -> None:
     model = primary(api_mode=LLMApiMode.Responses)
     sent = {}
 
@@ -263,10 +274,10 @@ async def test_responses_default_unknown_output_allowance_skips_proposal() -> No
         "_make_responses_transport",
         return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
     ):
-        attempt = await invoke_with_proposals(model, request_messages(), expected_injected=False)
-    assert attempt.reason == "unknown_output_tokens"
+        attempt = await invoke_with_proposals(model, request_messages())
+    assert attempt.budget_mode == "unspecified"
     assert "max_output_tokens" not in sent
-    assert "reference-1" not in str(sent["input"])
+    assert "reference-1" in str(sent["input"][-1])
 
 
 @pytest.mark.asyncio
