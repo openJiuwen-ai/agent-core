@@ -4,7 +4,12 @@
 import asyncio
 import hashlib
 import json
+import os
+import stat
+import struct
+import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -222,6 +227,85 @@ async def test_atomic_replace_failure_preserves_old_file(operation, tmp_path, mo
     assert result.code != 0
     assert path.read_text() == "old"
     assert not list(tmp_path.glob(".state.json-*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "nt" and os.geteuid() == 0, reason="Requires an unprivileged writer")
+@pytest.mark.asyncio
+async def test_readonly_todo_rejects_update_and_can_resume_after_permission_restored(operation, tmp_path):
+    tool = TodoModifyTool(operation, str(tmp_path))
+    await seed(tool)
+    path = Path(tool.todo_store("session").path)
+    original = path.read_bytes()
+    path.chmod(0o400)
+    try:
+        with pytest.raises(BaseError):
+            await tool.invoke(update("A"), session=session())
+        assert path.read_bytes() == original
+        assert not list(path.parent.glob(".todo.json-*.tmp"))
+    finally:
+        path.chmod(0o600)
+    result = await tool.invoke(update("A"), session=session())
+    assert "Successfully updated 1" in result["message"]
+    assert (await tool.load_todos("session"))[0].status == TodoStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_atomic_write_preserves_owner_and_honors_requested_permissions(operation, tmp_path):
+    path = tmp_path / "mode.json"
+    path.write_bytes(b"old")
+    before = path.stat()
+    result = await operation.fs().write_file(
+        str(path), b"new", mode="bytes", permissions="640", options={"atomic_replace": True}
+    )
+    assert result.code == 0 and path.read_bytes() == b"new"
+    if os.name != "nt":
+        after = path.stat()
+        assert stat.S_IMODE(after.st_mode) == 0o640
+        assert (after.st_uid, after.st_gid) == (before.st_uid, before.st_gid)
+
+
+@pytest.mark.asyncio
+async def test_atomic_write_rejects_hardlink_without_splitting_aliases(operation, tmp_path):
+    path, alias = tmp_path / "target.json", tmp_path / "alias.json"
+    path.write_bytes(b"old")
+    os.link(path, alias)
+    result = await operation.fs().write_file(str(path), "new", options={"atomic_replace": True})
+    assert result.code != 0
+    assert path.read_bytes() == alias.read_bytes() == b"old"
+    assert path.stat().st_nlink == 2
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux POSIX access ACL format")
+@pytest.mark.parametrize("case", ["explicit", "inherited", "copy_failure"])
+@pytest.mark.asyncio
+async def test_atomic_write_preserves_posix_access_acl(operation, tmp_path, monkeypatch, case):
+    def acl(owner):
+        # Linux UAPI: version, then tag/permissions/id entries including one named user.
+        entries = [(1, owner, 0xFFFFFFFF), (2, 4, 65534), (4, 0, 0xFFFFFFFF),
+                   (16, 4, 0xFFFFFFFF), (32, 0, 0xFFFFFFFF)]
+        return struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *entry) for entry in entries)
+
+    if case == "inherited":
+        os.setxattr(tmp_path, "system.posix_acl_default", acl(7))
+    path = tmp_path / "acl.json"
+    path.write_bytes(b"old")
+    os.setxattr(path, "system.posix_acl_access", acl(6))
+    if case == "inherited":
+        os.removexattr(path, "system.posix_acl_access")
+    if case == "copy_failure":
+        def deny_copy(*_args, **_kwargs):
+            raise PermissionError("ACL copy denied")
+        monkeypatch.setattr(os, "setxattr", deny_copy)
+    result = await operation.fs().write_file(
+        str(path), b"new", mode="bytes", permissions="640", options={"atomic_replace": True}
+    )
+    assert (result.code == 0) == (case != "copy_failure")
+    assert path.read_bytes() == (b"old" if case == "copy_failure" else b"new")
+    if case == "inherited":
+        assert "system.posix_acl_access" not in os.listxattr(path)
+    else:
+        assert os.getxattr(path, "system.posix_acl_access") == acl(6)
+    assert not list(tmp_path.glob(".acl.json-*.tmp"))
 
 
 @pytest.mark.asyncio

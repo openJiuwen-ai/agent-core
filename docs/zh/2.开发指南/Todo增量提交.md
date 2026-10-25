@@ -12,4 +12,6 @@ SDK 写入方改用 `update_todos(session_id, mutation, session=session)` 或 `s
 
 JiuwenBox需配套其`file-snapshot`协议：SDK provider/client向实际daemon查询能力，并通过同一协议读取原字节hash/存在性、条件原子写入。比较与替换在沙箱内部完成，不在宿主路径上替换；普通upload/download不变。旧服务/旧daemon不支持时拒绝激活，传输异常与不支持协议分开报告；条件写不自动重建沙箱或重放。TaskPlanningRail以及宿主Flash/Code回调在准备失败时请求错误收尾，防止回调框架记录异常后继续调用模型。
 
+原子替换已有文件时，先按实际执行身份检查写权限，拒绝非普通文件和硬链接目标。Linux保留owner/group与访问ACL，再按本地`write_file.permissions`调整权限位和ACL mask；JiuwenBox保留已有mode。临时文件不能把父目录默认ACL额外带到原本没有访问ACL的目标。Windows保留owner/group/DACL及原有继承状态。安全属性无法复制时拒绝发布、保留旧文件并清理本次临时文件；取消仍等待在途写入收尾。
+
 回退优先停止新写入并保留 v2 reader。若必须降到旧二进制，先停掉所有 writer，导出最新 todos 到隔离副本，并用目标旧 SDK 完成一次读取、修改、保存的字段对照；不得恢复旧备份覆盖新提交。旧 SDK 可能在写回时丢掉未知扩展字段：存在这类字段且不能无损往返时，禁止直接降级，保留 v2 reader 和原文件。通过字段核对也会失去版本隔离保证，实际部署和依赖升级由宿主安排。
