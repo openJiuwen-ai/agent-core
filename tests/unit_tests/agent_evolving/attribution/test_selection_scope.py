@@ -278,10 +278,11 @@ async def test_no_artifact_improvement_when_no_deliverable_was_reviewed() -> Non
     signal = DiagnosticSignal.create("write_file: Error", source=SignalSource.KEYWORD_TOOL, node_ids=[f"{LEADER}:2"])
     runtime = NodeBackedRuntime(nodes)
     runtime.artifact_improvement_required = False  # what run_attribution sets without reward signals
-    tools = {tool.tool_name: tool for tool in build_attribution_tools(runtime, [signal.signal_id])}
+    tools = {tool.tool_name: tool for tool in build_attribution_tools(runtime, [signal])}
     assert "error" in await _invoke(tools["submit_artifact_improvement"], md_string="改产物")
     assert runtime.artifact_improvement is None
     await _invoke(tools["mark_signal_invalid"], diag_signal_id=signal.signal_id)
+    await _invoke(tools["submit_trajectory_summary"], summary="团队已组建，无失败归因")
     assert (await _invoke(tools["check_attribution_complete"]))["all_done"] is True
 
 

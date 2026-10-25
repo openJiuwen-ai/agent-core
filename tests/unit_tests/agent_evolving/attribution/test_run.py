@@ -510,8 +510,10 @@ class _FakeDeepAgent:
         self.prompts.append(prompt)
         if self.invocations >= self._rounds_to_finish:
             for signal in self._signals:
-                self._runtime.record_attribution(signal.signal_id, [{"text_md": "cause", "start_node_id": "main:1"}])
-            self._runtime.record_artifact_improvement("improve it")
+                self._runtime.record_reward_failure(
+                    signal.signal_id, [{"text_md": "cause", "start_node_id": "main:1"}]
+                )
+            self._runtime.record_trajectory_summary("summary")
         return {}
 
 
@@ -556,7 +558,7 @@ async def test_run_attribution_success_single_round(monkeypatch: Any) -> None:
     assert outcome.wake_attempted is False
     assert fake_agent.invocations == 1
     assert outcome.counts["attributed"] == 1
-    entry = runtime.attributions[signals[0].signal_id][0]
+    entry = runtime.reward_attributions[signals[0].signal_id][0]
     assert re.fullmatch(r"attr-[0-9a-f]{8}", entry["attr_id"])
     assert entry["start_node_id"] == "main:1"
 
@@ -579,7 +581,8 @@ async def test_run_attribution_wake_once_then_success(monkeypatch: Any) -> None:
     assert outcome.completed is True
     assert outcome.wake_attempted is True
     assert fake_agent.invocations == 2
-    assert "pending_signal_ids" in fake_agent.prompts[1]
+    assert "pending_reward_signal_ids" in fake_agent.prompts[1]
+    assert "missing_trajectory_summary" in fake_agent.prompts[1]
 
 
 async def test_run_attribution_wake_fails_incomplete(monkeypatch: Any) -> None:
@@ -599,7 +602,9 @@ async def test_run_attribution_wake_fails_incomplete(monkeypatch: Any) -> None:
     assert outcome.status == "failed"
     assert outcome.failure_kind == "incomplete"
     assert outcome.wake_attempted is True
-    assert outcome.pending_signal_ids == [signals[0].signal_id]
+    # an unmarked rule_jev signal has no submission obligation; only the summary is missing
+    assert outcome.pending_signal_ids == []
+    assert outcome.trajectory_summary
     assert fake_agent.invocations == 2
 
 
@@ -679,8 +684,8 @@ async def test_run_attribution_skips_perfect_signals(monkeypatch: Any) -> None:
     assert outcome.status == "success"
     assert outcome.completed is True
     assert outcome.skipped_signal_ids == [perfect.signal_id]
-    assert set(runtime.attributions) == {fair.signal_id, weak.signal_id, uncertain.signal_id}
-    assert perfect.signal_id not in runtime.attributions
+    assert set(runtime.reward_attributions) == {fair.signal_id, weak.signal_id, uncertain.signal_id}
+    assert perfect.signal_id not in runtime.reward_attributions
     assert fake_agent.invocations == 1
     assert perfect.text not in fake_agent.prompts[0]
 
@@ -854,7 +859,7 @@ async def test_two_diagnoses_at_once_keep_their_own_attribution_tools() -> None:
     (first, first_runtime), (second, second_runtime) = build("绘本"), build("家庭日程")
     assert first.card.id == second.card.id == "attribution-agent"  # persistence identity unchanged
     ids = [
-        {card.id for card in agent.ability_manager.list() if card.name == "submit_attribution"}
+        {card.id for card in agent.ability_manager.list() if card.name == "submit_reward_failure"}
         for agent in (first, second)
     ]
     assert ids[0] and ids[1] and ids[0].isdisjoint(ids[1])  # one owner per run
