@@ -306,6 +306,30 @@ def group_conversation_registry_dir(team_name: str) -> Path:
     return root
 
 
+# A full sha256 hex tail costs 64 characters per scope level. Two nested
+# levels plus the workspace prefix overflow the default Windows MAX_PATH
+# (FileNotFoundError: [WinError 206] 文件名或扩展名太长), so the tail is
+# truncated the same way project_worktree_hash() truncates its own digest.
+_CONVERSATION_SCOPE_HASH_LEN = 12
+
+
+def _conversation_scope(segment: str, value: str) -> tuple[str, str]:
+    """Return the current scope component and its legacy full-digest form.
+
+    Args:
+        segment: Sanitized human-readable prefix.
+        value: Raw team name or session id the digest is derived from.
+
+    Returns:
+        A ``(current, legacy)`` pair of single path segment names.
+    """
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return (
+        f"{segment}-{digest[:_CONVERSATION_SCOPE_HASH_LEN]}",
+        f"{segment}-{digest}",
+    )
+
+
 def group_conversation_dir(
     team_name: str,
     session_id: str,
@@ -316,9 +340,12 @@ def group_conversation_dir(
     group_conversation_registry_dir(team_name)
     root = Path(workspace_path).expanduser() if workspace_path is not None else team_workspace_dir(team_name)
     root = root.resolve()
-    team_scope = _safe_segment(team_name) + "-" + hashlib.sha256(team_name.encode("utf-8")).hexdigest()
-    session_scope = _safe_segment(session_id) + "-" + hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-    path = root / "conversations" / team_scope / session_scope
+    team_scope, team_legacy = _conversation_scope(_safe_segment(team_name), team_name)
+    session_scope, session_legacy = _conversation_scope(_safe_segment(session_id), session_id)
+    conversations = root / "conversations"
+    # Archives written before the digest was truncated stay reachable.
+    legacy_path = conversations / team_legacy / session_legacy
+    path = legacy_path if legacy_path.is_dir() else conversations / team_scope / session_scope
     if path.resolve() != path:
         raise ValueError("Conversation history must remain inside its own workspace directory without symlinks")
     return path

@@ -4,6 +4,8 @@
 
 from pathlib import Path
 
+import hashlib
+
 import pytest
 
 from openjiuwen.agent_teams import paths
@@ -97,3 +99,62 @@ def test_per_run_journal_and_wal_layout():
     )
     # A traversal-style run_id is sanitized like every other segment.
     assert ".." not in paths.workflow_run_wal_path("demo-team", "sess1", "wf", "../../x").parts
+
+
+def _digest(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.level0
+def test_group_conversation_scope_stays_short_enough_for_windows_max_path(tmp_path):
+    """Two full sha256 tails used to overflow the default Windows MAX_PATH.
+
+    ``<workspace>/.agent_teams/<team>/team-workspace/conversations`` plus a
+    96-char prefix and a 64-char digest per scope level exceeded 260 characters
+    and made every group delivery fail with WinError 206, so both scope levels
+    now carry a truncated digest.
+    """
+    team = "group-one"
+    session_id = "group-one-b8664196765c95a900ac77d2394882d1c4aef5370c1ad240fd84dcb2f5e0f872"
+
+    path = paths.group_conversation_dir(team, session_id, workspace_path=tmp_path)
+
+    assert path.parent.parent == (tmp_path / "conversations").resolve()
+    assert path.parent.name == f"{team}-{_digest(team)[:12]}"
+    assert path.name == f"{session_id}-{_digest(session_id)[:12]}"
+    # Deterministic and well under a single path component limit.
+    assert paths.group_conversation_dir(team, session_id, workspace_path=tmp_path) == path
+    assert len(path.name) < 128
+
+
+@pytest.mark.level1
+def test_group_conversation_dir_keeps_legacy_full_digest_archive_reachable(tmp_path):
+    """Archives written before the truncation must stay addressable."""
+    team, session_id = "group-one", "session-legacy"
+    legacy = (
+        tmp_path
+        / "conversations"
+        / f"{team}-{_digest(team)}"
+        / f"{session_id}-{_digest(session_id)}"
+    )
+    legacy.mkdir(parents=True)
+
+    assert paths.group_conversation_dir(team, session_id, workspace_path=tmp_path) == legacy
+
+
+@pytest.mark.level1
+def test_group_conversation_dir_rejects_conflicting_symlinked_scope(tmp_path):
+    """A scope component that resolves elsewhere is still rejected."""
+    team, session_id = "group-one", "session-link"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    conversations = tmp_path / "conversations"
+    conversations.mkdir()
+    link = conversations / f"{team}-{_digest(team)[:12]}"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):  # pragma: no cover - Windows without symlink rights
+        pytest.skip("symlinks are not available in this environment")
+
+    with pytest.raises(ValueError):
+        paths.group_conversation_dir(team, session_id, workspace_path=tmp_path)
