@@ -285,7 +285,7 @@ class WindowStore:
             or archive.execution_id != checkpoint.execution_id
             or archive.execution_id != recovery_ref
             or archive.spec_fingerprint != spec_fingerprint
-            or checkpoint.kind != "react_iteration"
+            or checkpoint.kind != ("request_start" if archive.trigger_kind == "request_entry" else "react_iteration")
             or archive.iteration_seq != checkpoint.iteration_seq
         ):
             raise invalid_record("pending rollover does not match the active Session checkpoint")
@@ -807,6 +807,7 @@ class ExecutionStateStore:
                         messages,
                         WindowSeed.model_validate(pending_rollover.seed),
                         pending_rollover.retained_item_refs,
+                        candidate_version=pending_rollover.candidate_version,
                     )
                 except (PydanticValidationError, TypeError, ValueError):
                     raise invalid_record("pending rollover candidate cannot be reconstructed") from None
@@ -898,7 +899,7 @@ class ExecutionStateStore:
         )
 
     async def checkpoint(self, context: "PersistentBuildContext", checkpoint: SessionCheckpoint) -> None:
-        """Save a complete active iteration without terminal cleanup or an end marker."""
+        """Save a safe request-start/iteration boundary without terminal cleanup or an end marker."""
         execution, session = context.execution, context.session
         await self._sync_native(context)
         contexts = session.get_state(CONTEXT_STATE_KEY) or {}
@@ -987,6 +988,7 @@ class ExecutionStateStore:
                 "token_usage": transition.token_usage,
                 "messages": encode_messages(old_messages),
                 "candidate_fingerprint": _message_fingerprint(new_messages),
+                "candidate_version": transition.candidate_version,
                 "iteration_seq": transition.iteration_seq,
                 "last_group_message_id": transition.last_group_message_id,
             },

@@ -121,6 +121,8 @@ class LocalModel:
         item = self.judgments.pop(0)
         if isinstance(item, BaseException):
             raise item
+        if isinstance(item, AssistantMessage):
+            return item
         return AssistantMessage(content=item, usage_metadata=usage(2, 3))
 
     async def stream(self, messages, **kwargs):
@@ -1245,6 +1247,12 @@ def judgment(decision, reason="需要处理", effort=None):
     return json.dumps(payload, ensure_ascii=False)
 
 
+def window_call(seed):
+    return AssistantMessage(content="", tool_calls=[ToolCall(
+        id="window-entry-call", type="function", name="new_context", arguments=json.dumps(seed),
+    )], usage_metadata=usage(2, 3))
+
+
 def prompt_text(model):
     parts = []
     for messages in model.judge_messages:
@@ -1992,6 +2000,225 @@ async def test_new_context_switches_only_after_the_tool_result_and_commits_archi
     archived = module("schema.session_record").decode_messages(archive.messages)
     assert any(getattr(message, "tool_calls", None) for message in archived)
     assert any(getattr(message, "tool_call_id", None) == "call-1" for message in archived)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", ["switch", "continue"])
+async def test_new_user_request_judges_once_before_business_without_tool_iteration(real_state, decision):
+    harness = real_state
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    assert harness.model.judge_calls == 0, "first empty conversation needs no decision"
+    previous_window = (await saved_record(harness))["window_seq"]
+    harness.model.judgments = [
+        window_call({"objective": "discuss deployment", "completed": ["previous analysis done"]})
+        if decision == "switch" else '{"decision":"continue","reason":"same topic"}'
+    ]
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2")
+    before = harness.model.calls
+    events = await collect(harness.api.execute_persistent_request(
+        spec, ctx, {**direct_request(), "text": "discuss deployment"}))
+    assert events[-1].payload.status == "completed"
+    assert harness.model.judge_calls == 1
+    assert harness.model.calls == before + 1, "no synthetic tool call or extra summary"
+    record = await saved_record(harness)
+    assert record["window_seq"] == (2 if decision == "switch" else previous_window)
+    assert ("window.switched" in kinds(events)) == (decision == "switch")
+    if decision == "switch":
+        completed = next(event for event in events if str(event.event_type) == "tool.completed")
+        assert completed.payload.tool_name == "new_context"
+        assert completed.payload.tool_call_id == "window-entry-call"
+        assert completed.payload.operation_id is None
+        assert kinds(events).index("tool.completed") < kinds(events).index("window.switched")
+        archive = await STATE.WindowStore(harness.backend).load_archive("business-agent", "session-a", 1)
+        assert archive.trigger_kind == "request_entry"
+        assert archive.iteration_seq == 0, "no ReAct iteration has completed"
+        seen = "\n".join(str(item) for item in harness.model.seen[-1])
+        assert "previous analysis done" in seen
+        assert "please summarize" not in seen, "old original request is archive-only"
+
+
+@pytest.mark.asyncio
+async def test_bad_window_judgment_continues_existing_window_once(real_state):
+    harness = real_state
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    previous_window = (await saved_record(harness))["window_seq"]
+    harness.model.judgments = ["bad json"]
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2")
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    assert events[-1].payload.status == "completed"
+    assert harness.model.judge_calls == 1
+    assert (await saved_record(harness))["window_seq"] == previous_window
+
+
+@pytest.mark.asyncio
+async def test_group_ignore_does_not_load_private_history_or_judge_window(real_state, monkeypatch):
+    harness = real_state
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    harness.model.judgments = [judgment("ignore")]
+    async def forbidden_load(*args):
+        raise AssertionError("ignored group message must not load the private window")
+    monkeypatch.setattr(STATE.ExecutionStateStore, "load", forbidden_load)
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2",
+                             group_chat=GroupChat([group_message()]))
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    assert events[-1].payload.status == "ignored"
+    assert harness.model.judge_calls == 1, "participation only"
+
+
+@pytest.mark.asyncio
+async def test_accepted_group_judges_window_once_even_with_multiple_business_calls(real_state):
+    harness = real_state
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    harness.model.judgments = [judgment("respond"), '{"decision":"continue","reason":"same topic"}']
+    harness.model.turns = [("remember", TOOL_ARGS), "answer"]
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2",
+                             group_chat=GroupChat([group_message()]))
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    assert events[-1].payload.status == "completed"
+    assert harness.model.judge_calls == 2, "one participation plus one window decision"
+    assert len(harness.tool_calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled,scheduled", [(False, False), (True, True)])
+async def test_window_decision_skips_disabled_feature_and_schedules(real_state, enabled, scheduled):
+    harness = real_state
+    features = {"construction", "window_management"} if enabled else {"construction"}
+    spec = harness.spec(enabled_features=frozenset(features))
+    for index in range(2):
+        ctx, _ = harness.context(spec, execution_id=f"execution-{index}", request_id=f"request-{index}")
+        events = await collect(harness.api.execute_persistent_request(
+            spec, ctx, request() if scheduled else direct_request()))
+        assert events[-1].payload.status == "completed"
+    assert harness.model.judge_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_entry_archive_failure_stops_before_business_call(real_state, monkeypatch):
+    harness = real_state
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    harness.model.judgments = [window_call({"objective": "new goal"})]
+    async def fail_archive(*args):
+        raise RuntimeError("archive unavailable")
+    monkeypatch.setattr(STATE.WindowStore, "archive_window", fail_archive)
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2")
+    before = harness.model.calls
+    with pytest.raises(BaseError):
+        await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    assert harness.model.calls == before
+    assert harness.model.judge_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_confirmation_resume_and_waiting_request_do_not_judge_window(real_state):
+    harness = real_state
+    spec = harness.spec(confirm=True, enabled_features=frozenset({"construction", "window_management"}))
+    events = await pause_for_confirmation(harness, spec)
+    assert events[-1].payload.reason == "awaiting_confirmation"
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2")
+    with pytest.raises(BaseError):
+        await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    assert harness.model.judge_calls == 0
+    ctx, _ = harness.context(spec, execution_id="execution-3")
+    events = await collect(harness.api.resume_persistent_request(spec, ctx, permission()))
+    assert events[-1].payload.status == "completed"
+    assert harness.model.judge_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_originated_group_request_skips_user_entry_judgment(real_state):
+    harness = real_state
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    harness.model.judgments = [judgment("respond")]
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2",
+                             group_chat=GroupChat([group_message()]))
+    events = await collect(harness.api.execute_persistent_request(
+        spec, ctx, group_request(sender_kind="agent", sender_id="other-agent")))
+    assert events[-1].payload.status == "completed"
+    assert harness.model.judge_calls == 1, "internal Agent message does not add a window judgment"
+
+
+@pytest.mark.asyncio
+async def test_entry_switch_keeps_current_group_background_in_the_first_business_call(real_state):
+    harness = real_state
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    harness.model.judgments = [judgment("respond"), window_call({"objective": "answer current question"})]
+    fact = "CURRENT-GROUP-FACT release deadline is Friday"
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2",
+                             group_chat=GroupChat([group_message(text=fact)]))
+    events = await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    assert events[-1].payload.status == "completed"
+    assert (await saved_record(harness))["window_seq"] == 2
+    assert fact in "\n".join(str(item) for item in harness.model.seen[-1])
+
+
+@pytest.mark.asyncio
+async def test_entry_handoff_survives_completion_and_reaches_the_next_followup(real_state):
+    harness = real_state
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    constraint = "HANDOFF-CONSTRAINT all deployments require two-person approval"
+    harness.model.judgments = [window_call({"objective": "deployment", "constraints_and_decisions": [constraint]})]
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2")
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    assert constraint in json.dumps((await saved_record(harness))["messages"])
+    harness.model.judgments = ['{"decision":"continue","reason":"follow up"}']
+    ctx, _ = harness.context(spec, execution_id="execution-3", request_id="request-3")
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    assert constraint in "\n".join(str(item) for item in harness.model.seen[-1])
+    assert constraint in json.dumps(harness.model.judge_messages[-1])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry_switch", [True, False])
+async def test_native_entry_archive_recovers_after_new_state_commit_failure(real_state, monkeypatch, entry_switch):
+    harness = real_state
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    ctx, _ = harness.context(spec)
+    await collect(harness.api.execute_persistent_request(spec, ctx, direct_request()))
+    constraint, fact = "keep approvals", "CURRENT-GROUP-RECOVERY-FACT"
+    seed = {"objective": "deployment", "constraints_and_decisions": [constraint]}
+    harness.model.judgments = [judgment("respond"), window_call(seed) if entry_switch else
+                              '{"decision":"continue","reason":"same topic"}']
+    if not entry_switch:
+        harness.model.turns = [("remember", TOOL_ARGS), ("new_context", json.dumps(seed)), "answer"]
+    original_set = harness.backend.set
+    async def fail_new_state_only(key, value):
+        if key == state_key() and (json.loads(value).get("checkpoint") or {}).get("kind") == "rollover":
+            raise RuntimeError("new state commit failed")
+        await original_set(key, value)
+    monkeypatch.setattr(harness.backend, "set", fail_new_state_only)
+    ctx, _ = harness.context(spec, execution_id="execution-2", request_id="request-2",
+                             group_chat=GroupChat([group_message(text=fact)]))
+    with pytest.raises(BaseError):
+        await collect(harness.api.execute_persistent_request(spec, ctx, group_request()))
+    archive = await STATE.WindowStore(harness.backend).load_archive("business-agent", "session-a", 1)
+    assert archive is not None and archive.candidate_version == 2
+    assert (await saved_record(harness))["checkpoint"]["kind"] == (
+        "request_start" if entry_switch else "react_iteration"
+    )
+    monkeypatch.setattr(harness.backend, "set", original_set)
+    recovering, _ = harness.context(spec, execution_id="execution-3", request_id="request-2",
+                                    recovery_ref="execution-2")
+    loaded = await STATE.ExecutionStateStore(STATE.WindowStore(harness.backend)).load(recovering)
+    assert loaded.window_seq == 2 and loaded.checkpoint.iteration_seq == (0 if entry_switch else 2)
+    recovered = json.dumps((await saved_record(harness))["messages"])
+    assert constraint in recovered and fact in recovered
 
 
 @pytest.mark.asyncio
