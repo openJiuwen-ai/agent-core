@@ -180,7 +180,7 @@ class TodoStore:
             raise _error("invalid_transaction", "A Todo transaction cannot be inherited by another task")
         return transaction
 
-    async def capable(self) -> bool:
+    async def capable(self, *, strict: bool = False) -> bool:
         if self._capable is None:
             if getattr(type(self.fs), "supports_atomic_compare_replace", False) is True:
                 self._capable = True
@@ -189,8 +189,10 @@ class TodoStore:
                 try:
                     value = await capabilities() if callable(capabilities) else {}
                     self._capable = isinstance(value, dict) and value.get("atomic_compare_replace") is True
-                except Exception:  # noqa: BLE001 - provider-specific capability RPC failures must fail closed
+                except Exception as exc:
                     # A transient capability RPC failure is not permanent lack of support.
+                    if strict:
+                        raise _error("capability_unavailable", f"Cannot verify Todo backend capability: {exc}") from exc
                     return False
         return self._capable
 
@@ -252,7 +254,7 @@ class TodoStore:
     ) -> Any:
         if self.active() is not None:
             return await callback()
-        if not await self.capable():
+        if not await self.capable(strict=True):
             raise _error("unsupported_backend", "Todo v2 requires backend atomic compare-and-replace support")
         lock = _object_lock(self.key)
         started = asyncio.get_running_loop().time()

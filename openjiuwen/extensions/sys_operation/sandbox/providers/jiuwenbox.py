@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import fnmatch
+import hashlib
 import json
 import logging
 import os
@@ -394,6 +395,36 @@ class _JiuwenBoxClient:
         )
         _raise_for_status(response)
         return dict(response.json())
+
+    def file_snapshot(
+        self,
+        sandbox_id: str,
+        *,
+        operation: str,
+        path: str = "",
+        options: dict[str, Any] | None = None,
+        content: bytes = b"",
+    ) -> dict[str, Any]:
+        response = self._client.post(
+            f"/api/v1/sandboxes/{sandbox_id}/file-snapshot",
+            json={
+                "operation": operation,
+                "path": path,
+                "options": options or {},
+                "content_base64": base64.b64encode(content).decode("ascii"),
+            },
+            timeout=max(float((options or {}).get("lock_timeout", 30)) + 5, 35),
+        )
+        try:
+            _raise_for_status(response)
+        except httpx.HTTPStatusError as exc:
+            if operation == "capabilities" and response.status_code == 404 and not _is_sandbox_not_found_error(exc):
+                return {"ok": False, "error": "unsupported", "atomic_compare_replace": False}
+            raise
+        value = response.json()
+        if not isinstance(value, dict):
+            raise TypeError("Invalid file snapshot response")
+        return value
 
     def upload_bytes(self, sandbox_id: str, sandbox_path: str, content: bytes) -> None:
         response = self._client.post(
@@ -1423,6 +1454,37 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         super().__init__(endpoint, config)
         self._init_jiuwenbox(endpoint, config)
 
+    async def _file_snapshot(self, **kwargs) -> dict[str, Any]:
+        client = self._get_client()
+        if kwargs.get("operation") != "compare_replace":
+            return await self._execute_with_sandbox_retry(lambda sid: client.file_snapshot(sid, **kwargs))
+
+        def invoke():
+            return client.file_snapshot(self._get_sandbox_id(), **kwargs)
+
+        # No automatic sandbox recreation/replay for a conditional write.
+        # The server may have committed even if the response was lost.
+        worker = asyncio.create_task(asyncio.to_thread(invoke))
+        settled = asyncio.gather(worker, return_exceptions=True)
+        cancelled = False
+        while not worker.done():
+            try:
+                await asyncio.shield(settled)
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled:
+            worker.exception()
+            raise asyncio.CancelledError
+        return worker.result()
+
+    async def capabilities(self) -> dict[str, Any]:
+        value = await self._file_snapshot(operation="capabilities")
+        return {
+            "atomic_compare_replace": value.get("ok") is True
+            and value.get("protocol_version") == 1
+            and value.get("atomic_compare_replace") is True
+        }
+
     async def read_file(self, path: str, mode: str = "text", **kwargs) -> ReadFileResult:
         tail = kwargs.pop("tail", None)
         head = kwargs.pop("head", None)
@@ -1432,6 +1494,34 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         if validation_error:
             return _build_fs_error_result("read_file", validation_error, ReadFileResult)
         try:
+            options = kwargs.get("options") or {}
+            if options.get("include_content_sha256") or options.get("missing_ok"):
+                if head is not None or tail is not None or line_range is not None:
+                    raise ValueError("Snapshot reads require the whole file")
+                value = await self._file_snapshot(operation="read", path=path, options=options)
+                if value.get("ok") is not True:
+                    raise ValueError(value.get("stderr") or value.get("error") or "Snapshot read failed")
+                raw = base64.b64decode(value["content_base64"], validate=True)
+                if (
+                    type(value.get("exists")) is not bool
+                    or hashlib.sha256(raw).hexdigest() != value.get("content_sha256")
+                    or type(value.get("content_size")) is not int
+                    or len(raw) != value.get("content_size")
+                    or (value["exists"] is False and raw)
+                ):
+                    raise ValueError("Invalid snapshot metadata or content")
+                content = raw if mode == "bytes" else raw.decode(kwargs.get("encoding", "utf-8"))
+                return ReadFileResult(
+                    code=StatusCode.SUCCESS.code,
+                    message=StatusCode.SUCCESS.errmsg,
+                    data=ReadFileData(
+                        path=path,
+                        content=content,
+                        mode=mode,
+                        exists=value["exists"],
+                        content_sha256=value["content_sha256"],
+                    ),
+                )
             raw = await self._execute_with_sandbox_retry(
                 lambda sid: self._get_client().download_bytes(sid, path)
             )
@@ -1453,7 +1543,12 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         append = bool(kwargs.get("append", False))
         prepend_newline = kwargs.get("prepend_newline", True)
         append_newline = kwargs.get("append_newline", False)
+        options = kwargs.get("options") or {}
+        conditional = bool(options.get("atomic_replace")) or "expected_content_sha256" in options or "expected_exists" in options
+        submitted = False
         try:
+            if conditional and append:
+                raise ValueError("Conditional atomic replacement does not support append")
             if mode == "bytes":
                 raw = content if isinstance(content, bytes) else bytes(content)
             else:
@@ -1463,6 +1558,34 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
                 if append_newline:
                     text += "\n"
                 raw = text.encode("utf-8")
+            if conditional:
+                submitted = True
+                value = await self._file_snapshot(
+                    operation="compare_replace",
+                    path=path,
+                    content=raw,
+                    options={**options, "permissions": kwargs.get("permissions", "644"),
+                             "create_if_not_exist": kwargs.get("create_if_not_exist", True)},
+                )
+                if (
+                    value.get("ok") is not True
+                    or value.get("atomic_replace") is not True
+                    or value.get("content_size") != len(raw)
+                ):
+                    result = _build_fs_error_result(
+                        "write_file",
+                        str(value.get("stderr") or value.get("error") or "Atomic commit not confirmed"),
+                        WriteFileResult,
+                    )
+                    result.failure_kind = (
+                        "conflict" if value.get("error") == "conflict" else str(value.get("error") or "outcome_unknown")
+                    )
+                    return result
+                return WriteFileResult(
+                    code=StatusCode.SUCCESS.code,
+                    message=StatusCode.SUCCESS.errmsg,
+                    data=WriteFileData(path=path, size=len(raw), mode=mode or "text", atomic_replace=True),
+                )
             if append:
                 await self._execute_with_sandbox_retry(
                     lambda sid: self._get_client().append_bytes(sid, path, raw)
@@ -1477,7 +1600,10 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
                 data=WriteFileData(path=path, size=len(raw), mode=mode or "text"),
             )
         except Exception as exc:
-            return _build_fs_error_result("write_file", str(exc), WriteFileResult)
+            result = _build_fs_error_result("write_file", str(exc), WriteFileResult)
+            if conditional:
+                result.failure_kind = "outcome_unknown" if submitted else "bad_request"
+            return result
 
     async def list_files(
         self,

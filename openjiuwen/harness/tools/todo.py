@@ -140,7 +140,7 @@ class TodoTool(Tool):
         if store.active() is not None:
             return await callback()
         binding = session_todo_binding(session, store.key)
-        if await store.capable():
+        if await store.capable(strict=todo_v2_enabled()):
             invoke_id = (binding or {}).get("invoke_id") or self._invoke_ids.setdefault(session_id, str(_uuid.uuid4()))
             result = await store.transact(callback, binding=binding, invoke_id=invoke_id)
             receipt = getattr(result, "todo_receipt", None)

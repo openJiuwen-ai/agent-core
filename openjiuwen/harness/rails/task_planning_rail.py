@@ -265,6 +265,16 @@ class TaskPlanningRail(DeepAgentRail):
 
     # -- hook methods --
 
+    @staticmethod
+    async def _prepare_todo_callback(tool, ctx, *, new_execution=False):
+        try:
+            return await tool.prepare_context(ctx.session, new_execution=new_execution)
+        except Exception as exc:
+            # Callback errors are logged by the framework; explicitly stop the
+            # model boundary so unavailable storage cannot trigger tool retries.
+            ctx.request_force_finish({"result_type": "error", "output": f"Todo storage is unavailable: {exc}"})
+            raise
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject deferred todo reminders and task planning system prompt.
 
@@ -274,7 +284,7 @@ class TaskPlanningRail(DeepAgentRail):
         """
         todo_tool = self._find_todo_create_tool()
         if todo_v2_enabled() and todo_tool is not None and ctx.session is not None:
-            ctx.extra[TODO_CONTEXT_KEY] = await todo_tool.prepare_context(ctx.session)
+            ctx.extra[TODO_CONTEXT_KEY] = await self._prepare_todo_callback(todo_tool, ctx)
         await self._inject_pending_todo_reminder(ctx)
 
         if self.system_prompt_builder is None:
@@ -405,7 +415,7 @@ class TaskPlanningRail(DeepAgentRail):
             return
         tool.reset_invoke_marker(ctx.session.get_session_id())
         if todo_v2_enabled():
-            ctx.extra[TODO_CONTEXT_KEY] = await tool.prepare_context(ctx.session, new_execution=True)
+            ctx.extra[TODO_CONTEXT_KEY] = await self._prepare_todo_callback(tool, ctx, new_execution=True)
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         binding = ctx.extra.get(TODO_CONTEXT_KEY)
