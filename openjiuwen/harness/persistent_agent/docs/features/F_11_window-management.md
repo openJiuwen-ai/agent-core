@@ -1,5 +1,50 @@
 # F_11 上下文窗口管理设计方案
 
+## 2026-10-25 已确认增量：入口与执行中共用 new_context 工具
+
+用户确认采用真实工具调用方案：独立入口模型仅开放已有 `new_context` 的 ToolInfo，
+需要切换时返回标准 ToolCall（WindowSeed 参数）；不切换只返回 continue 和理由。
+旧的 switch+seed JSON 协议不再接受。模型调用仍至多一次，不添加第二次总结调用。
+`PersistentNewContextTool` 统一校验、去重及排队；宿主构造时绑定 request_entry 或 agent，
+不向模型开放 trigger_kind / 安全边界参数。管理器消费同一 pending_window_switch，
+删除独立 `_entry_seed` 路径，入口仍用 request_start/0，执行中仍等待完整工具轮次。
+工具回执及私有 tool.completed 只表示申请接收，不表示归档/提交成功。
+80% 兜底仍由框架内部触发，40% 复核与已实现的归档/恢复规则不变。
+采用真工具调用而非框架把 switch JSON 代转工具，消除两套模型输出协议；
+不取消入口判断，避免重新完全依赖业务模型自发调用。组件实现已接线，验证另记；
+真实模型的工具选择效果和宿主联调尚未验证。
+
+```mermaid
+flowchart LR
+  E[新请求入口模型] -->|真实 ToolCall| T[new_context]
+  A[任务执行中的模型] -->|真实 ToolCall| T
+  T --> Q[同一申请队列]
+  Q --> B[宿主确定安全边界]
+  B --> R[校验候选 / 归档 / 提交新窗]
+```
+
+上图统一的是工具与申请队列，不是把两次模型调用合成一次；入口仍在回答前切换，
+执行中仍等待整批工具收敛。容量兜底不经过模型工具选择，继续复用后续提交流水线。
+
+## 2026-10-23 已确认：新请求入口的独立换窗判断
+
+本节保留当时设计依据；其中 switch+seed 文本输出及独立入口申请路径已由上方
+2026-10-25 统一工具协议替代，安全边界与持久化约束不变。
+
+群参与判断仍在前，不参与的消息不得读取私有窗口。接受的新私聊/群聊请求，
+加载同 Agent、同 Session 历史后，在正式回答前至多调用一次模型判断 continue/switch；
+只给有界可见历史及当前请求，不给思维链和工具原始输出。switch 同次返回有界交接，
+复用现有候选重建、40% 复核、旧窗归档与状态提交，不另调总结模型。
+首次空窗、确认恢复、崩溃续跑、定时及 Bot 内部请求跳过；失败或超时只降级继续原窗并留私有诊断，
+真实归档/提交失败仍显式停止。模型判断计入预算，无工具、无应用层重试。
+入口是独立 request_start 安全边界（iteration_seq=0），不伪造已完成的 ReAct；
+归档 trigger_kind=request_entry，原有 agent/capacity_fallback、80% 兜底和个人版不变。
+先保存该入口检查点再归档，恢复仍必须匹配请求、执行、配置指纹及候选指纹。
+判断输入限当前请求前 6000 字符、最近 8 条可见文本（每条 1500 字符）及前一目标；
+不发送思维链、工具参数或结果。模型输出上限 2048 token、调用超时 20 秒，无应用层重试。
+这使判断成为必经步骤，不保证真实模型的语义判断总是正确；被截断材料需谨慎处理。
+执行计划见 docs/superpowers/plans/2026-10-23-request-entry-window-decision.md。
+
 ## 1. 元信息
 
 | 项 | 值 |
@@ -57,8 +102,9 @@
 PA-11 有两个触发入口，但只有一套换窗流程：
 
 - **Agent 主动请求是主路径。** Agent 判断当前阶段适合交接时，通过内部 `new_context` 控制动作提交交接要点（handoff，例如当前目标、已完成进度和下一步）。它不是用户调用的业务工具，也不直接改写存储。
+- **新用户请求有一次入口判断。** 接受消息并加载私有历史后，模型用有界可见材料选择继续或真正调用 `new_context`；工具接收申请后在正式回答前完成换窗，不再接受 switch+seed 文本协议。首次、恢复、定时与 Bot 内部请求跳过，判断失败继续原窗。
 - **Persistent Agent 容量检查是兜底。** 如果 Agent 没请求，Persistent Agent 按上下文引擎策略计算下一次完整模型请求；若 `next_request_tokens > floor(context_window × 80%)`，触发同一条换窗流程，并根据已保存的任务目标、执行事实和最近完整交互整理最小交接要点。正好等于阈值时不换窗。计数采用上下文引擎既有策略，不因估算或计数器缺失 / 失败单独暂停。`context_window` 来自当前运行中 `ModelContext.context_window_tokens()` 解析出的有效窗口，每次模型调用前刷新。
-- **只在完整 ReAct 迭代之间切换。** 一轮迭代指一次模型回复及其工具调用批次；必须等回复结束、批次内所有工具执行完成、所有调用与结果成组写入上下文后，在下一次模型调用之前提交切换。这里不要求等整个 Agent 调用返回最终答案；也不允许在工具调用批次中途切换。换窗可以发生在同一个用户请求仍在执行时。
+- **只在安全边界切换。** 新请求入口判断使用独立 `request_start` 边界，尚无已完成 ReAct 轮次（序号 0）。执行中工具主动或容量兜底仍只在完整 ReAct 迭代之间切换：模型回复、整批工具和结果全部收敛后，在下一次模型调用前提交；不允许在工具批次中途切换。
 
 ```mermaid
 flowchart TD
@@ -339,14 +385,14 @@ Archive 的转换元数据只需保存恢复同一个候选所需的信息：old
 
 ### 5.7 正常执行流程
 
-以下步骤是第 4.1 节主流程图的实现级展开；“安全边界”“新窗口内容”和两种触发入口已在该图及第 4.2 节定义。
+以下步骤展开执行中的模型主动申请与容量兜底；新请求入口的同工具申请及 request_start 边界见本文开头的 2026-10-25 修订。安全边界与新窗口内容的约束共用。
 
 1. 每轮 ReAct 迭代结束后，turn loop 确认模型回复和整批工具结果均已完成、没有未配对工具调用或仍在运行的并行工具；尚未完成的模型流或工具批次不是检查点。
 2. 若本轮会结束 Execution，走现有结束保存并写入终态；若将继续，先检查是否有有效 new_context 请求；没有主动请求时，按上下文引擎计数策略计算下一次完整模型请求，再与 `floor(context_window × 80%)` 比较。窗口无法解析或计数过程异常时暂停为 `error`，不继续调用模型。
 3. 若不换窗，PA-10 同步原生窗口和 DeepAgent 状态，把本轮完整窗口及检查点元数据作为一条记录写入同一 Session state 键；不删除临时背景、不压缩执行头、不追加结束标记。写入确认成功后才开始下一次模型调用。
 4. 若主动请求或容量兜底触发换窗，构造候选新窗：固定系统提示与工具定义 + 当前 Request 原始任务输入 + 经过字段 / 大小校验的 WindowSeed + 预算内最近完整消息组。若是 fallback 且没有 Agent handoff，窗口管理组件使用已保存任务目标、当前执行事实和最后完整交互组构造最小 seed，不调用额外摘要模型。
-5. 将本轮完成后的旧 ActiveWindow 的完整规范化历史及必要来源引用按稳定 archive_ref 幂等归档。归档转换元数据包含新窗口序号、handoff、所选近期消息组的 item 引用、触发类型、token 用量及原 Spec 指纹，供状态提交失败后的 load 对账和候选重建。
-6. 在 PA-10 Session state 的同一条记录中保存新上下文、current_window_id、window_seq、last_rollover 和本轮检查点元数据。该写入就是本轮检查点；只有写成功才切换到新窗口并继续模型调用。
+5. 候选通过校验后，先持久化本轮源窗口检查点，再将同一份旧 ActiveWindow 的完整规范化历史及必要来源引用按稳定 archive_ref 幂等归档；不能把上一轮检查点当作本轮归档的源。归档转换元数据包含新窗口序号、handoff、所选近期消息组的 item 引用、触发类型、token 用量及原 Spec 指纹，供状态提交失败后的 load 对账和候选重建。
+6. 在 PA-10 Session state 的同一条记录中保存新上下文、current_window_id、window_seq、last_rollover 和 rollover 检查点元数据，覆盖上述源检查点。只有写成功才发布新窗口并继续模型调用。
 7. 将运行时 ContextEngine 替换为已提交的新上下文，随后通过现有普通事件生产者记录 window.switched。事件缺失由状态记录和归档元数据识别，不回滚换窗。
 
 主动切换与容量兜底的区别只在步骤 2 的 trigger 和 seed 来源；步骤 3～6 完全共用。
@@ -497,6 +543,25 @@ PA-11 的验收标准以[开发计划](../designs/persistent-agent-development-p
 
 2026-10-22 / 40% 新窗上限验证（Windows / Python 3.11.9，当前工作区）：新增测试先在旧实现下复现可选历史及重建请求超过 40% 仍放行，再实现独立限制。扩大回归命令为 `.\.venv\Scripts\python.exe -m pytest tests/unit_tests/harness/persistent_agent tests/unit_tests/harness/prompts tests/unit_tests/core/context_engine/test_compressor_token_budget.py tests/unit_tests/core/context_engine/test_round_level_compressor.py tests/unit_tests/core/context_engine/test_model_rebind.py tests/unit_tests/core/single_agent -q -o addopts='' -o asyncio_mode=auto --tb=short`，结果 1162 passed、10 skipped、2 个既有 Pydantic warnings。覆盖可选历史裁剪、必要内容超限不写入、系统 / 工具开销、40% 等值允许与多一个 token 拒绝、非整除窗口向下取整、重建期间模型窗口缩小回滚、80% 等值不触发与超过后兜底；Ruff 与 `git diff --check` 通过。全仓 `pytest -q --maxfail=1 -o addopts='' -o asyncio_mode=auto --tb=short` 仍在 `tests/cli/e2e/test_auto_harness.py` 收集阶段因缺少 `opentelemetry.exporter` 中止，不宣称全仓通过。未重启真实宿主或修改数据库；估算计数仍不是 provider hard-limit 保证。
 
+### 8.4 2026-10-25 请求入口判断组件验证
+
+- 独立审查发现并复现两项整合缺陷（2 failed）：入口换窗漏带本次群聊背景，seed 被结束整理删除。已补当前前缀必要项、持久 window_handoff 标记与候选格式 2 的精确引用恢复；既有归档缺少 candidate_version 时按 1 重建，保持旧重建规则。故障注入再复现原生随机消息 ID 导致指纹不匹配，以及执行中切换的上一轮源检查点不匹配；修复为确定性 seed ID、候选 stale 元数据一致化、归档前保存准确源检查点，未放宽恢复校验。独立复审 23 项定向测试通过，无剩余问题。
+
+- 新增 `test_window_decision.py`；入口、零序号安全边界、40% 复核和归档恢复分别在 `test_entries.py`、`test_window_management.py`、`test_continuation.py` 补充。假模型只返回业务数据，不接真实服务。
+- 红绿证据：初始分类器 7 failed → 7 passed；入口/记录扩展先出现 6 failed、4 passed，再接线转绿。后续先复现“执行头/改写交付正文误当目标”和“Bot 内部消息多判断一次”，再修复。
+- 最终回归命令：`.venv/Scripts/python.exe -m pytest tests/unit_tests/harness/persistent_agent tests/unit_tests/core/single_agent -o addopts='' -o asyncio_mode=auto -q --tb=short --show-capture=no`，结果 **1097 passed、10 skipped、2 warnings**（既有 Pydantic 配置弃用警告）；相关改动文件 Ruff 检查通过，`git diff --check` 通过。
+- 全仓尝试：同解释器 `-m pytest -o addopts='' -o asyncio_mode=auto -q --tb=short --show-capture=no --maxfail=5`，收集阶段 **5 errors、1 skipped**：缺少 `prompt_toolkit` 与 `opentelemetry.exporter`。不安装依赖、不称全仓通过。
+- 已证明：一次判断/无工具时先切换再回答；continue/无效 JSON/超时/预算拒绝降级；忽略群消息在读私窗前结束；确认、续做、定时、Bot 内部消息和关闭功能跳过；入口 archive-before-state 恢复仍核对身份、快照和指纹，真实存储错误停止业务调用。
+- 未证明：真实模型是否正确识别所有话题/阶段边界、有界预览省略信息的影响、真实 provider 延迟与宿主端到端。判断结果的私有日志不等于提交成功，以 `last_rollover`、归档及 `window.switched` 核对；不重启服务或重放真实请求。
+
+### 8.5 2026-10-25 统一真实 new_context 工具调用验证
+
+- 采用方案的确认依据为用户选择“入口模型真正调用工具”，保留独立预判。入口只传一个 ToolInfo，执行实际响应里的函数调用；不把旧 switch+seed 文本代转工具，不伪造 ReAct 工具消息。
+- TDD：首轮新场景 3 failed / 6 passed，分别发现未开放工具、未执行真实调用和缺少可信入口绑定；旧文本拒绝场景另有 2 failed / 3 passed。实现后 14 项定向通过，再运行入口/窗口/分类器 267 项通过；新增日志故障及去重场景后分类器 23 项通过。
+- 最终相关回归：`.venv/Scripts/python.exe -m pytest tests/unit_tests/harness/persistent_agent tests/unit_tests/core/single_agent -o addopts='' -o asyncio_mode=auto -q --tb=short --show-capture=no` → **1108 passed、10 skipped、2 warnings**。相关改动 Ruff 与 `git diff --check` 通过。
+- 全仓尝试同解释器 `-m pytest -o addopts='' -o asyncio_mode=auto -q --tb=short --show-capture=no --maxfail=5` → **5 个收集错误、1 skipped**，仍缺 `prompt_toolkit`、`opentelemetry.exporter`；未修改依赖，不称全仓通过。
+- 覆盖：同工具 Schema/校验/去重与队列，真实调用 ID 的私有回执先于 window.switched；多调用、未知工具、无效参数/调用标识、伪造边界不能部分排队；普通回执写入失败不撤销接收；原有入口/执行中归档故障恢复与 40% 规则仍通过。独立只读审查无 Critical/Important/Minor 问题；真实模型工具选择及宿主端到端未验证，未重启服务、未提交代码。
+
 ## 9. 风险与已知遗留
 
 ### 9.1 设计风险
@@ -608,3 +673,20 @@ PA-11 的验收标准以[开发计划](../designs/persistent-agent-development-p
 - **采用方案：** Persistent 回调记录与调用和结果绑定的内部完成标记；普通成功写操作只归档，交接承接少量线索。未知、失败可能部分成功、后台工作及无标记旧记录仍保守保留完整组，任一未决调用保护全批；不改变副作用工具白名单或写前意图。
 - **拒绝方案：** 不从“成功”文本猜结果，不把 failed 当作没有副作用，不把已完成组又按剩余空间填回候选，也不取消 share_file 的收尾依据。自动提示不能反过来导致必要候选超限。
 - **边界与证据：** 安全边界、80% 比例、个人版和存储 schema 不变；没有自动补标旧记录。未知组仍可能真实超限，不能保证任意长任务永不暂停。组件、正式入口与回归结果见第 8.3 节；真实模型与宿主端到端复测仍需重启后重新发起任务。
+
+### 2026-10-23 分块上下文管理指引
+
+- **确认与范围：** 用户确认五部分系统提示词，并将话题切换补充为主动换窗时机；合并精简交接要求，删除先前限制继续当前窗口的句子。`prompts.py` 中英文同步，章节使用 H1，内部小节使用 H2。
+- **采用与排除：** 沿用既有能力门控和运行时注入，不改用户人设、发布 Spec、个人版或通用 PromptBuilder；不在宿主新增强制话题识别，也不根据提示词推断模型已经换窗。安全边界、80% 兜底和 40% 候选上限不变。
+- **跨仓配套：** JiuwenSwarm 的内置办公目录、命令、网页、资源、飞书 CLI 和执行目录章节改用 H1；旧发布配置沿既有能力刷新升级标题，保留用户自定义内容和旧请求固定版本。宿主的回归及遗留在对端 F_14 记录。
+- **验证：** `python -m pytest tests/unit_tests/harness/persistent_agent/test_construction.py -o addopts='' -q --tb=short`：55 passed，2 项既有 Pydantic 弃用警告。覆盖中英文提示进入内外层 Builder、能力关闭和个人版不注入；未调用真实模型、未启动服务，不能证明模型自主换窗概率提升。
+- **扩大回归与基线：** `python -m pytest tests/unit_tests/harness/persistent_agent -o addopts='' -q --tb=short`：893 passed、10 skipped、2 failed、2 warnings。失败为 `test_completed_execution_records_events_in_order` 和 `test_confirmation_pause_then_resume_completes`，均因实际 `model.completed` 出现在旧断言期待的 `reply.delta` 之前。仅在内存中将 `WINDOW_MANAGEMENT_PROMPT` 替换为 HEAD 文案后重跑这两个用例，仍复现同样失败；未回写源码或修改检查点，不将其记为本轮提示词通过项，也未扩大修复事件协议。
+
+### 2026-10-23 统一主动换窗的模型侧指引
+
+- **原因与确认：** 真实多轮话题切换测试未出现 `new_context` 调用；正式请求日志确认系统策略和工具均已下发，但工具说明仍保留“可以直接回答用户时无需换窗”的豁免，与系统的话题切换规则不一致。用户确认修正文案，不据此断言已证明模型未调用的唯一原因。
+- **采用方案：** `prompts.py.WINDOW_SWITCH_GUIDANCE` 同源维护主动换窗时机与操作顺序；系统分节按既有语言选择中英文版本，工具沿用中文说明并复用中文版本。进入新话题 / 新阶段前先交接并请求换窗，不因新问题可以直接回答而跳过。同一转折已成功换窗后继续任务，不重复申请。
+- **排除与边界：** 不新增宿主话题分类或强制换窗，不改工具参数、归档、安全边界、80% 兜底、40% 新窗上限及个人版。不启动服务、修改现用数据库或调用真实模型；已有窗口不自动重置。
+- **验证：** 新增 `test_model_facing_window_tool_and_system_share_the_same_transition_policy`，真实构造后检查系统第二节的策略完整进入模型可见工具卡片，先在旧代码上得到 1 failed，再修改为同源装配；不锁定某句文案，也不使用模拟模型选择来声称调用意愿通过。Windows / Python 3.11.9，`.venv/Scripts/python.exe -m pytest tests/unit_tests/harness/persistent_agent/test_construction.py tests/unit_tests/harness/persistent_agent/test_window_management.py tests/unit_tests/harness/persistent_agent/test_session_history.py tests/unit_tests/harness/persistent_agent/test_session_state.py -o addopts='' -o asyncio_mode=auto -q --tb=short --show-capture=no`：209 passed；扩大为 `tests/unit_tests/harness/persistent_agent tests/unit_tests/core/single_agent` 同参数：1056 passed、10 skipped。均有两项既有 Pydantic 弃用警告。组件检查不能证明真实模型自主换窗意愿，需重新加载代码后重测。
+- **全仓尝试与遗留：** `.venv/Scripts/python.exe -m pytest -o addopts='' -o asyncio_mode=auto -q --tb=short --show-capture=no --maxfail=5` 在收集阶段停止：`tests/cli/e2e/test_auto_harness.py`、`tests/system_tests/rsi/test_evaluator_agent_live.py` 缺 `opentelemetry.exporter`；`tests/cli/integration/test_repl_dispatch.py`、`tests/cli/unit/test_skill_slash_commands.py`、`tests/cli/unit/test_slash_completer.py` 缺 `prompt_toolkit`，合计 5 errors、1 skipped。未安装或修改依赖，不将定向回归扩大为全仓通过；未启动服务、未写入现用数据库、未调用真实模型或发送飞书消息。
+- **独立审查与检查边界：** 无 Critical / Important 问题。审查指出一项 Minor：同源正文包含检查不能检测任意后续追加的矛盾句，也不能评估中英文语义是否漂移；保留为检查边界，不把测试描述为语义一致性或真实模型调用验收。重复申请约束也仅是模型指引，未新增跨批次的宿主转折去重状态。

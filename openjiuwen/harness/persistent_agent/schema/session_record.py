@@ -56,14 +56,22 @@ class RecordEnding(BaseModel):
 
 
 class RecordCheckpoint(BaseModel):
-    """Last complete active ReAct boundary; never describes a partially settled tool batch."""
+    """Safe active boundary; request_start has no completed ReAct iteration."""
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
     request_id: StrictStr
     execution_id: StrictStr
-    iteration_seq: StrictInt = Field(ge=1)
-    kind: Literal["react_iteration", "rollover"]
+    iteration_seq: StrictInt = Field(ge=0)
+    kind: Literal["react_iteration", "request_start", "rollover"]
+
+    @model_validator(mode="after")
+    def _validate_boundary(self):
+        if self.kind == "request_start" and self.iteration_seq != 0:
+            raise ValueError("request start has no completed iteration")
+        if self.kind == "react_iteration" and self.iteration_seq < 1:
+            raise ValueError("ReAct checkpoint requires a completed iteration")
+        return self
 
 
 class RecordRollover(BaseModel):
@@ -76,7 +84,7 @@ class RecordRollover(BaseModel):
     new_window_id: StrictStr = Field(min_length=1)
     new_window_seq: StrictInt = Field(ge=2)
     archive_ref: StrictStr = Field(min_length=1)
-    trigger_kind: Literal["agent", "capacity_fallback"]
+    trigger_kind: Literal["agent", "capacity_fallback", "request_entry"]
     token_usage: dict[StrictStr, StrictInt | StrictFloat | StrictStr | StrictBool | None]
 
     @model_validator(mode="after")
@@ -95,7 +103,7 @@ class WindowArchivePayload(BaseModel):
     old_window_seq: StrictInt = Field(ge=1)
     new_window_id: StrictStr = Field(min_length=1)
     new_window_seq: StrictInt = Field(ge=2)
-    trigger_kind: Literal["agent", "capacity_fallback"]
+    trigger_kind: Literal["agent", "capacity_fallback", "request_entry"]
     request_id: StrictStr
     execution_id: StrictStr
     spec_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
@@ -104,13 +112,17 @@ class WindowArchivePayload(BaseModel):
     token_usage: dict[StrictStr, StrictInt | StrictFloat | StrictStr | StrictBool | None]
     messages: list[dict[StrictStr, Any]]
     candidate_fingerprint: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
-    iteration_seq: StrictInt = Field(ge=1)
+    # Missing on existing archives: reconstruct their original temporary-seed format exactly.
+    candidate_version: StrictInt = Field(default=1, ge=1, le=2)
+    iteration_seq: StrictInt = Field(ge=0)
     last_group_message_id: StrictStr | None
 
     @model_validator(mode="after")
     def _validate_transition(self):
         if self.old_window_id == self.new_window_id or self.new_window_seq != self.old_window_seq + 1:
             raise ValueError("archive must identify one consecutive successor window")
+        if (self.iteration_seq == 0) != (self.trigger_kind == "request_entry"):
+            raise ValueError("only request-entry archives have zero completed iterations")
         return self
 
 
@@ -239,6 +251,9 @@ class SessionStateRecord(BaseModel):
                 raise ValueError("last rollover must point at the current window")
         if self.checkpoint is not None and self.checkpoint.kind == "rollover" and self.last_rollover is None:
             raise ValueError("a rollover checkpoint requires rollover metadata")
+        if self.checkpoint is not None and self.checkpoint.kind == "rollover":
+            if (self.checkpoint.iteration_seq == 0) != (self.last_rollover.trigger_kind == "request_entry"):
+                raise ValueError("rollover boundary does not match its trigger")
         return self
 
 

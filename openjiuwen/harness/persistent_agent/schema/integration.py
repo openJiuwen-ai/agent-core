@@ -27,6 +27,8 @@ WINDOW_PART_KEY = "persistent_window_part"
 EXECUTION_HEADER = "execution_header"
 # Deleted when the Execution ends; injected again with the latest content next time.
 TEMPORARY_BACKGROUND = "temporary_background"
+# Window seed survives terminal save and is replaced by the next rollover, not by every Request.
+WINDOW_HANDOFF = "window_handoff"
 # Set by PA-10 on the one-line marker it appends when an Execution ends, unless it waits for a reply.
 EXECUTION_END = "execution_end"
 # Set on the user message, before the end marker, that keeps the final answer as it was handed off
@@ -48,12 +50,12 @@ class WaitingScene:
 
 @dataclass(frozen=True)
 class SessionCheckpoint:
-    """Identity of a complete, non-terminal ReAct boundary committed to Session state."""
+    """Identity of a safe request-start or completed ReAct boundary committed to Session state."""
 
     request_id: str
     execution_id: str
     iteration_seq: int
-    kind: Literal["react_iteration", "rollover"]
+    kind: Literal["react_iteration", "request_start", "rollover"]
     last_group_message_id: str | None = None
 
 
@@ -66,7 +68,7 @@ class RolloverCheckpoint:
     new_window_id: str
     new_window_seq: int
     archive_ref: str
-    trigger_kind: Literal["agent", "capacity_fallback"]
+    trigger_kind: Literal["agent", "capacity_fallback", "request_entry"]
     token_usage: dict[str, int | float | str | bool | None]
 
 
@@ -121,7 +123,7 @@ class SessionStateStore(Protocol):
         """Tidy the window and save the record in one write."""
 
     async def checkpoint(self, context: "PersistentBuildContext", checkpoint: SessionCheckpoint) -> None:
-        """Save one complete active ReAct boundary without terminal window cleanup."""
+        """Save a safe request-start or completed ReAct boundary without terminal cleanup."""
 
     async def rollover(self, context: "PersistentBuildContext", transition: "WindowRollover") -> "RolloverCheckpoint":
         """Archive the old window, then atomically save its successor and the iteration checkpoint."""

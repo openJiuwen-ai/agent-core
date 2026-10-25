@@ -53,7 +53,7 @@ class WindowSwitchRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", strict=True)
 
-    trigger_kind: Literal["agent", "capacity_fallback"]
+    trigger_kind: Literal["agent", "capacity_fallback", "request_entry"]
     seed: WindowSeed
 
 
@@ -72,7 +72,7 @@ class WindowSwitchResult(BaseModel):
 class WindowRollover:
     """Internal persistence input; Session and window identity are derived by WindowStore."""
 
-    trigger_kind: Literal["agent", "capacity_fallback"]
+    trigger_kind: Literal["agent", "capacity_fallback", "request_entry"]
     seed: WindowSeed
     old_messages: tuple[Any, ...]
     new_messages: tuple[Any, ...]
@@ -80,3 +80,4 @@ class WindowRollover:
     token_usage: dict[str, int | float | str | bool | None]
     iteration_seq: int
     last_group_message_id: str | None
+    candidate_version: Literal[1, 2] = 1

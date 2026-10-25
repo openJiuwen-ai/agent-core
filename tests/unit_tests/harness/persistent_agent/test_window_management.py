@@ -13,6 +13,7 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolMessage, UsageMetadata, UserMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.store import InMemoryKVStore
@@ -88,6 +89,30 @@ def archive_payload(**overrides):
 def message_fingerprint(messages):
     canonical = json.dumps(RECORD.encode_messages(messages), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def test_v2_candidate_restore_preserves_background_and_persistent_handoff():
+    messages = [UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+                UserMessage(content="group fact", metadata={WINDOW_PART_KEY: TEMPORARY_BACKGROUND}),
+                UserMessage(content="task")]
+    seed = WINDOW.WindowSeed(objective="task", constraints_and_decisions=["preserve constraint"])
+    candidate = WINDOW_MANAGER.restore_rollover_candidate(messages, seed, ["message:1"], candidate_version=2)
+    assert candidate[1] == messages[1]
+    assert candidate[2].metadata[WINDOW_PART_KEY] == "window_handoff"
+    assert candidate[3] == messages[2]
+
+
+@pytest.mark.asyncio
+async def test_current_background_is_required_and_not_dropped_to_fit_new_window():
+    messages = [UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+                UserMessage(content="group fact " + "x" * 900, metadata={WINDOW_PART_KEY: TEMPORARY_BACKGROUND}),
+                UserMessage(content="task")]
+    manager, ctx, store = retention_context(messages, window=2000)
+    result = await manager.before_model_request(ctx)
+    assert result["reason"] == "context_unfit"
+    assert ctx.context.get_messages() == messages
+    store.rollover.assert_not_awaited()
+    ctx.request_context_rebuild.assert_not_called()
 
 
 def window_store(backend=None):
@@ -273,7 +298,9 @@ async def test_pending_rollover_with_mismatched_identity_fails_closed(changes):
 
 
 @pytest.mark.asyncio
-async def test_load_repairs_a_matching_archive_before_exposing_the_active_window():
+@pytest.mark.parametrize("request_start", [False, True])
+@pytest.mark.parametrize("candidate_version", [1, 2])
+async def test_load_repairs_a_matching_archive_before_exposing_the_active_window(request_start, candidate_version):
     backend = InMemoryKVStore()
     state_store = STATE.ExecutionStateStore(STATE.WindowStore(backend))
     old_messages = [
@@ -291,10 +318,12 @@ async def test_load_repairs_a_matching_archive_before_exposing_the_active_window
         UserMessage(
             content="【窗口交接要点；事实与副作用状态仍需核实】\n"
             + json.dumps(seed.model_dump(mode="json"), ensure_ascii=False, sort_keys=True),
-            metadata={WINDOW_PART_KEY: TEMPORARY_BACKGROUND},
+            metadata={WINDOW_PART_KEY: "window_handoff" if candidate_version == 2 else TEMPORARY_BACKGROUND},
         ),
         old_messages[1],
     ]
+    if candidate_version == 2:
+        new_messages[1] = WINDOW_MANAGER._handoff_message(old_messages, seed, candidate_version=2)
     current = RECORD.SessionStateRecord(
         agent_id="agent:1",
         session_id="session-1",
@@ -303,7 +332,8 @@ async def test_load_repairs_a_matching_archive_before_exposing_the_active_window
         auto_confirm={},
         deepagent_state=None,
         checkpoint=RECORD.RecordCheckpoint(
-            request_id="request-1", execution_id="execution-1", iteration_seq=4, kind="react_iteration"
+            request_id="request-1", execution_id="execution-1",
+            iteration_seq=0 if request_start else 4, kind="request_start" if request_start else "react_iteration"
         ),
         last_group_message_id=None,
         current_window_id="window-1",
@@ -320,7 +350,9 @@ async def test_load_repairs_a_matching_archive_before_exposing_the_active_window
             seed=seed.model_dump(mode="json"),
             retained_item_refs=[],
             candidate_fingerprint=message_fingerprint(new_messages),
-            iteration_seq=4,
+            iteration_seq=0 if request_start else 4,
+            trigger_kind="request_entry" if request_start else "agent",
+            candidate_version=candidate_version,
             last_group_message_id="group-message-4",
         ),
     )
@@ -333,7 +365,8 @@ async def test_load_repairs_a_matching_archive_before_exposing_the_active_window
         current_window_id="window-1",
         window_seq=1,
         checkpoint=SessionCheckpoint(
-            request_id="request-1", execution_id="execution-1", iteration_seq=4, kind="react_iteration"
+            request_id="request-1", execution_id="execution-1",
+            iteration_seq=0 if request_start else 4, kind="request_start" if request_start else "react_iteration"
         ),
         request_id="request-1",
         recovery_ref="execution-1",
@@ -361,7 +394,21 @@ async def test_load_repairs_a_matching_archive_before_exposing_the_active_window
     assert loaded.checkpoint.kind == "rollover" and loaded.checkpoint.execution_id == "execution-1"
     assert RECORD.decode_messages(stored.messages) == new_messages
     assert stored.last_rollover.archive_ref == "archive:1"
+    assert stored.checkpoint.iteration_seq == (0 if request_start else 4)
     assert (session.get_state("context") or {})["default_context_id"]["messages"] == new_messages
+
+
+@pytest.mark.parametrize("kind,iteration,valid", [
+    ("react_iteration", 0, False), ("react_iteration", 1, True),
+    ("request_start", 0, True), ("request_start", 1, False), ("rollover", 0, True),
+])
+def test_zero_iteration_is_only_an_explicit_request_start_boundary(kind, iteration, valid):
+    values = dict(request_id="r1", execution_id="e1", iteration_seq=iteration, kind=kind)
+    if valid:
+        assert RECORD.RecordCheckpoint(**values).iteration_seq == iteration
+    else:
+        with pytest.raises(ValueError):
+            RECORD.RecordCheckpoint(**values)
 
 
 @pytest.mark.asyncio
@@ -496,6 +543,22 @@ async def test_new_context_rejects_a_second_request_in_the_same_tool_batch():
     assert first.success is True
     assert second.success is False
     assert control.pending_window_switch.trigger_kind == "agent"
+
+
+@pytest.mark.asyncio
+async def test_entry_and_agent_tool_share_validation_and_duplicate_guard():
+    tool_module = import_module(f"{PKG}.tools.new_context")
+    control = ExecutionControl()
+    entry = tool_module.PersistentNewContextTool(control, trigger_kind="request_entry")
+    invalid = await entry.invoke({"objective": "task", "trigger_kind": "agent"})
+    assert invalid.success is False and control.pending_window_switch is None
+    accepted = await entry.invoke({"objective": "task"})
+    assert accepted.success is True
+    assert control.pending_window_switch.trigger_kind == "request_entry"
+    repeated = await tool_module.PersistentNewContextTool(control).invoke({"objective": "other task"})
+    assert repeated.success is False
+    assert control.pending_window_switch.seed.objective == "task"
+    assert control.safe_boundary_pending is False and control.rollover_committed is False
 
 
 @pytest.mark.asyncio
@@ -744,6 +807,10 @@ async def test_capacity_fallback_uses_eighty_percent_context_window_threshold():
     class RolloverStore:
         def __init__(self):
             self.transition = None
+            self.checkpoints = []
+
+        async def checkpoint(self, _context, checkpoint):
+            self.checkpoints.append(checkpoint)
 
         async def rollover(self, _context, transition):
             self.transition = transition
@@ -783,6 +850,7 @@ async def test_capacity_fallback_uses_eighty_percent_context_window_threshold():
     first = await manager.before_model_request(callback_context)
 
     assert first is None and store.transition is None
+    assert len(store.checkpoints) == 1 and store.checkpoints[0].iteration_seq == 1
     callback_context.request_context_rebuild.assert_called_once()
     candidate_messages = list(model_context.get_messages())
     assert all("optional historical result" not in getattr(message, "content", "") for message in candidate_messages)
@@ -831,7 +899,7 @@ async def test_small_candidate_with_protected_tool_batch_does_not_reuse_old_wind
         ))
     context = SimpleNamespace(
         binding=SimpleNamespace(control=control),
-        execution=SimpleNamespace(execution_id="execution-1"),
+        execution=SimpleNamespace(request_id="request-1", execution_id="execution-1"),
     )
     store = SimpleNamespace(
         checkpoint=AsyncMock(),
@@ -1025,7 +1093,8 @@ def retention_context(messages, *, trigger_kind="agent", window=8000):
         checkpoint=AsyncMock(),
         rollover=AsyncMock(return_value=SimpleNamespace(archive_ref="archive:1", new_window_seq=2)),
     )
-    context = SimpleNamespace(binding=SimpleNamespace(control=control), execution=SimpleNamespace(execution_id="exec"))
+    context = SimpleNamespace(binding=SimpleNamespace(control=control),
+                              execution=SimpleNamespace(request_id="req", execution_id="exec"))
     manager = WINDOW_MANAGER.WindowSwitchManager(
         context, "task", None, store, SimpleNamespace(emit=AsyncMock()), last_group_message_id=None,
     )
@@ -1047,6 +1116,25 @@ def retention_context(messages, *, trigger_kind="agent", window=8000):
 
 
 @pytest.mark.asyncio
+async def test_v2_reconstruction_matches_native_context_metadata_mutations():
+    messages = [UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+                UserMessage(content="task"), AssistantMessage(content="retained analysis", usage_metadata=UsageMetadata(
+                    input_tokens=40, output_tokens=10, total_tokens=50,
+                ))]
+    ContextUtils.ensure_context_message_ids(messages)
+    manager, ctx, _ = retention_context(messages)
+    assert await manager.before_model_request(ctx) is None
+    candidate = list(ctx.context.get_messages())
+    ContextUtils.ensure_context_message_ids(candidate)
+    ContextUtils.invalidate_usage_metadata(candidate)
+    prepared = manager._prepared
+    restored = WINDOW_MANAGER.restore_rollover_candidate(
+        messages, prepared.seed, list(prepared.retained_item_refs), candidate_version=2,
+    )
+    assert restored == candidate
+
+
+@pytest.mark.asyncio
 async def test_new_window_drops_optional_history_to_fit_forty_percent():
     messages = [
         UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
@@ -1065,6 +1153,40 @@ async def test_new_window_drops_optional_history_to_fit_forty_percent():
     assert usage["input_limit"] == 800
     assert usage["new_window_limit_ratio"] == 0.4
     assert usage["rollover_threshold_ratio"] == 0.8
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_entry_boundary_checkpoints_zero_and_preserves_forty_percent_guard(oversized):
+    messages = [UserMessage(content="header", metadata={WINDOW_PART_KEY: "execution_header"}),
+                UserMessage(content="task")]
+    manager, ctx, store = retention_context(messages, window=2000)
+    control = manager._context.binding.control
+    control.safe_boundary_pending = False
+    control.pending_iteration_seq = 0
+    control.pending_window_switch = None
+    manager._context.execution.request_id = "req-entry"
+    seed = WINDOW.WindowSeed(objective="new topic", completed=["x" * 500] * 3 if oversized else ["old work done"])
+    tool_module = import_module(f"{PKG}.tools.new_context")
+    tool = tool_module.PersistentNewContextTool(control, trigger_kind="request_entry")
+    assert (await tool.invoke(seed.model_dump())).success
+
+    result = await manager.before_model_request(ctx)
+
+    checkpoint = store.checkpoint.await_args.args[1]
+    assert checkpoint.kind == "request_start" and checkpoint.iteration_seq == 0
+    store.rollover.assert_not_awaited()
+    if oversized:
+        assert result["reason"] == "context_unfit"
+        assert ctx.context.get_messages() == messages
+        ctx.request_context_rebuild.assert_not_called()
+    else:
+        assert result is None
+        assert manager._count_candidate(ctx, ctx.context.get_messages()) <= 800
+        ctx.inputs.messages = [SystemMessage(content="system"), *ctx.context.get_messages()]
+        assert await manager.before_model_request(ctx) is None
+        transition = store.rollover.await_args.args[1]
+        assert transition.iteration_seq == 0 and transition.trigger_kind == "request_entry"
 
 
 @pytest.mark.asyncio
@@ -1196,7 +1318,9 @@ async def test_completed_writes_are_archived_not_refilled_and_uncertain_writes_a
     assert "tool_call:done-0" not in manager._fallback_seed(SimpleNamespace(context=SimpleNamespace(
         get_messages=lambda: messages,
     ))).pending_effects
-    restored = WINDOW_MANAGER.restore_rollover_candidate(messages, prepared.seed, list(prepared.retained_item_refs))
+    restored = WINDOW_MANAGER.restore_rollover_candidate(
+        messages, prepared.seed, list(prepared.retained_item_refs), candidate_version=2,
+    )
     assert restored == list(prepared.new_messages)
     assert message_fingerprint(messages) == original
     ctx.inputs.messages = [SystemMessage(content="system"), *ctx.context.get_messages()]

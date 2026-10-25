@@ -1,7 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""PA-11: prepare, validate and commit a new active context at a complete ReAct boundary."""
+"""PA-11: prepare, validate and commit at request start or a complete ReAct boundary."""
 
+import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from typing import TYPE_CHECKING
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.context.context_utils import CONTEXT_MESSAGE_ID_KEY, ContextUtils
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 
 from ..schema.integration import (
@@ -18,9 +19,11 @@ from ..schema.integration import (
     EXECUTION_HEADER,
     HANDOFF_TEXT,
     TEMPORARY_BACKGROUND,
+    WINDOW_HANDOFF,
     WINDOW_PART_KEY,
     SessionCheckpoint,
 )
+from ..schema.session_record import encode_messages
 from ..schema.window import SEED_ITEM_MAX_CHARS, SEED_LIST_MAX_ITEMS, WindowRollover, WindowSeed, WindowSwitchRequest
 from ..tools.effect_policy import is_read_only_tool_name
 from . import capacity
@@ -149,7 +152,9 @@ def _header_and_request(messages: list, request_text: str | None) -> tuple[int, 
         message = messages[index]
         if _part(message) == EXECUTION_END:
             break
-        if not isinstance(message, UserMessage) or _part(message) in (TEMPORARY_BACKGROUND, HANDOFF_TEXT):
+        if not isinstance(message, UserMessage) or _part(message) in (
+            TEMPORARY_BACKGROUND, HANDOFF_TEXT, WINDOW_HANDOFF,
+        ):
             continue
         if _prompt_attachment(message):
             continue
@@ -206,10 +211,25 @@ def _pause(reason: str, detail: str) -> dict:
     return {"result_type": PAUSE_MARKER, "reason": reason, "detail": detail, "output": ""}
 
 
+def _handoff_message(old_messages: list, seed: WindowSeed, *, candidate_version: int) -> UserMessage:
+    """Create the same handoff before native ID assignment and during exact recovery."""
+    content = _SEED_PREFIX + json.dumps(seed.model_dump(mode="json"), ensure_ascii=False, sort_keys=True)
+    metadata = {WINDOW_PART_KEY: TEMPORARY_BACKGROUND}
+    if candidate_version == 2:
+        source = json.dumps(encode_messages(old_messages), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        metadata = {
+            WINDOW_PART_KEY: WINDOW_HANDOFF,
+            CONTEXT_MESSAGE_ID_KEY: hashlib.sha256((source + "\n" + content).encode("utf-8")).hexdigest(),
+        }
+    return UserMessage(content=content, metadata=metadata)
+
+
 def restore_rollover_candidate(
     old_messages: list,
     seed: WindowSeed,
     retained_item_refs: list[str],
+    *,
+    candidate_version: int = 1,
 ) -> list:
     """Rebuild the committed candidate from the archived source window and exact retained references."""
     header_index, query_index, original_request = _header_and_request(old_messages, None)
@@ -226,10 +246,14 @@ def restore_rollover_candidate(
         if not any(_prompt_attachment(message) for message in group.messages)
     ]
     group_by_ref = {_message_ref(group): group for group in groups}
+    if candidate_version not in (1, 2):
+        raise ValueError("unknown candidate version")
     attachments_by_ref = {
         f"message:{index}": deepcopy(message)
         for index, message in enumerate(old_messages[header_index + 1 : group_end], start=header_index + 1)
-        if _prompt_attachment(message)
+        if _prompt_attachment(message) or (
+            candidate_version == 2 and index < query_index and _part(message) == TEMPORARY_BACKGROUND
+        )
     }
     if len(retained_item_refs) != len(set(retained_item_refs)):
         raise ValueError("retained references contain duplicates")
@@ -243,16 +267,16 @@ def restore_rollover_candidate(
     selected_groups = sorted(
         (group_by_ref[ref] for ref in retained_item_refs if ref in group_by_ref), key=lambda group: group.start
     )
-    seed_message = UserMessage(
-        content=_SEED_PREFIX + json.dumps(seed.model_dump(mode="json"), ensure_ascii=False, sort_keys=True),
-        metadata={WINDOW_PART_KEY: TEMPORARY_BACKGROUND},
-    )
+    seed_message = _handoff_message(old_messages, seed, candidate_version=candidate_version)
     base = [deepcopy(old_messages[header_index]), *attachments, seed_message, original_request]
-    return [*base, *(deepcopy(message) for group in selected_groups for message in group.messages)]
+    candidate = [*base, *(deepcopy(message) for group in selected_groups for message in group.messages)]
+    if candidate_version == 2:
+        ContextUtils.invalidate_usage_metadata(candidate)
+    return candidate
 
 
 class WindowSwitchManager:
-    """One PA-11 coordinator for Agent requests and the 80% rollover fallback."""
+    """One PA-11 coordinator for entry decisions, Agent tools and the 80% fallback."""
 
     def __init__(
         self,
@@ -296,6 +320,12 @@ class WindowSwitchManager:
             return _pause("error", "上下文引擎未能解析有效上下文窗口，已暂停；不会调用模型。")
         if self._prepared is not None:
             return await self._finish_prepared(ctx)
+        request = control.pending_window_switch
+        if request is not None and request.trigger_kind == "request_entry":
+            # The native query is now present; save that exact pre-model snapshot so
+            # archive-before-state failure can recover without inventing tool work.
+            await self._checkpoint(control, 0, kind="request_start")
+            return await self._prepare(ctx, request, 0)
         if not control.safe_boundary_pending:
             return None
 
@@ -343,7 +373,7 @@ class WindowSwitchManager:
         self._new_window_limit = context_window * 2 // 5
         return True
 
-    async def _checkpoint(self, control: ExecutionControl, iteration_seq: int) -> None:
+    async def _checkpoint(self, control: ExecutionControl, iteration_seq: int, *, kind="react_iteration") -> None:
         execution = self._context.execution
         try:
             await self._state_store.checkpoint(
@@ -352,7 +382,7 @@ class WindowSwitchManager:
                     request_id=execution.request_id,
                     execution_id=execution.execution_id,
                     iteration_seq=iteration_seq,
-                    kind="react_iteration",
+                    kind=kind,
                     last_group_message_id=self._last_group_message_id,
                 ),
             )
@@ -360,7 +390,7 @@ class WindowSwitchManager:
             error = build_error(
                 StatusCode.DEEPAGENT_RUNTIME_ERROR,
                 cause=exc,
-                error_msg="PA-10 ReAct 检查点写入失败；本轮之后不再调用模型",
+                error_msg="PA-10 安全边界检查点写入失败；当前执行不再调用模型",
             )
             control.mark_fatal(error)
             raise error from exc
@@ -471,6 +501,10 @@ class WindowSwitchManager:
                 f"({self._new_window_limit})；未删除必要信息，也未切换。",
             )
 
+        if iteration_seq > 0:
+            # Archive recovery must refer to this exact source snapshot, not the
+            # preceding iteration's checkpoint. Candidate failures above write nothing.
+            await self._checkpoint(control, iteration_seq)
         self._prepared = _PreparedRollover(
             old_messages=tuple(old_messages),
             new_messages=tuple(candidate),
@@ -504,14 +538,16 @@ class WindowSwitchManager:
             for group in _message_groups(old_messages, group_start, group_end)
             if not any(_prompt_attachment(message) for message in group.messages)
         ]
-        attachments = [
-            deepcopy(message) for message in old_messages[header_index + 1 : group_end] if _prompt_attachment(message)
+        prefix_items = [
+            (index, deepcopy(message))
+            for index, message in enumerate(old_messages[header_index + 1 : group_end], start=header_index + 1)
+            if _prompt_attachment(message) or (
+                query_index is not None and index < query_index and _part(message) == TEMPORARY_BACKGROUND
+            )
         ]
-        seed_message = UserMessage(
-            content=_SEED_PREFIX + json.dumps(seed.model_dump(mode="json"), ensure_ascii=False, sort_keys=True),
-            metadata={WINDOW_PART_KEY: TEMPORARY_BACKGROUND},
-        )
-        base = [deepcopy(old_messages[header_index]), *attachments, seed_message, original_request]
+        seed_message = _handoff_message(old_messages, seed, candidate_version=2)
+        base = [deepcopy(old_messages[header_index]), *(message for _, message in prefix_items),
+                seed_message, original_request]
         protected = [group for group in groups if group.protected]
         # Confirmed completed writes are archive-only. Refilling them up to the
         # threshold would defeat rollover for long coding tasks.
@@ -536,8 +572,9 @@ class WindowSwitchManager:
 
         selected.sort(key=lambda group: group.start)
         candidate = [*base, *(deepcopy(message) for group in selected for message in group.messages)]
+        ContextUtils.invalidate_usage_metadata(candidate)
         refs = [_message_ref(group) for group in selected]
-        refs.extend(f"message:{index}" for index, message in enumerate(old_messages) if _prompt_attachment(message))
+        refs.extend(f"message:{index}" for index, _ in prefix_items)
         return candidate, refs
 
     async def _finish_prepared(self, ctx: "AgentCallbackContext") -> dict | None:
@@ -576,6 +613,7 @@ class WindowSwitchManager:
             token_usage=token_usage,
             iteration_seq=prepared.iteration_seq,
             last_group_message_id=self._last_group_message_id,
+            candidate_version=2,
         )
         try:
             committed = await self._state_store.rollover(self._context, transition)

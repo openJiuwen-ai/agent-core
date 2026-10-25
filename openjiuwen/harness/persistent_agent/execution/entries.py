@@ -39,6 +39,7 @@ from .emitter import EventEmitter, escaped_bytes, longest_prefix, widest_size
 from .model_rail import PAUSE_MARKER
 from .participation import judge_participation
 from .session_state import sync_native, window_messages
+from .window_decision import history_preview, judge_window
 
 _UNSUPPORTED_FLAGS = ("enable_async_subagent", "enable_subagent_runtime", "add_general_purpose_agent")
 _SENSITIVE_KEYS = ("password", "secret", "token", "key", "credential", "authorization")
@@ -479,6 +480,16 @@ async def execute_persistent_request(spec, context, inputs) -> AsyncIterator[Age
                 started["decision_event_id"] = decision_event_id
             await control.emitter.emit(EventType.EXECUTION_STARTED, started)
             record = await _load(context, store)
+            if (
+                "window_management" in spec.enabled_features
+                and request.kind in {"direct_message", "group_message"}
+                and (request.kind == "direct_message" or request.source.sender_kind == "human")
+                and context.execution.recovery_ref is None
+                and record.waiting is None
+            ):
+                history = window_messages(context.session)
+                if history_preview(history)["recent"]:
+                    await judge_window(spec, context, request.text, history, control.emitter)
             assembly = await _assemble(assembler, context, request, record)
             _install_window_switch_manager(
                 spec,

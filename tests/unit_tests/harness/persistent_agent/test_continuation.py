@@ -593,6 +593,21 @@ async def test_a_group_continuation_does_not_judge_participation_again(harness, 
     assert shown[1][1].startswith("【最近群消息】") and shown[2][1].startswith("【续做记录】")
 
 
+@pytest.mark.asyncio
+async def test_direct_continuation_with_private_history_does_not_judge_window(harness, monkeypatch):
+    spec = harness.spec(enabled_features=frozenset({"construction", "window_management"}))
+    await harness.store([UserMessage(content="previous private task"), AssistantMessage(content="done")])
+    async def forbidden_judgment(*args):
+        raise AssertionError("a recovery must not repeat the request-entry judgment")
+    monkeypatch.setattr(import_module(f"{PKG}.execution.entries"), "judge_window", forbidden_judgment)
+    ctx, _ = harness.context(spec)
+    events = await harness.run(spec, ctx, {
+        "kind": "direct_message", "text": TASK, "reply_target": "chat-1",
+        "source": {"message_id": "dm-1", "sender_id": "u-1", "sender_name": "李四", "received_at": WHEN},
+    })
+    assert events[-1].payload.status == "completed"
+
+
 @pytest.mark.parametrize("missing", ["gate", "link_reader", "chain_limit"])
 @pytest.mark.asyncio
 async def test_continuation_stays_closed_until_its_integrations_are_in(harness, monkeypatch, missing):

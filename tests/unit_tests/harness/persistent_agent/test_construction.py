@@ -384,6 +384,19 @@ def test_window_management_guidance_reaches_react_in_the_selected_language(api, 
         agent.ability_manager.teardown_tools()
 
 
+def test_model_facing_window_tool_and_system_share_the_same_transition_policy(api):
+    spec = spec_for(api, enabled_features={"construction", "window_management"})
+    agent = api.create_persistent_agent(spec, context=context_for(api, spec))
+    try:
+        section = agent.react_agent.system_prompt_builder.get_section("persistent_context_management")
+        policy = section.content["cn"].split("## 2. ", 1)[1].split("\n\n", 1)[1].split("## 3. ", 1)[0].strip()
+        card = agent.ability_manager.get("new_context")
+        assert policy
+        assert policy in card.description
+    finally:
+        agent.ability_manager.teardown_tools()
+
+
 def test_window_management_guidance_is_absent_without_the_capability(api):
     spec = spec_for(api)
     agent = api.create_persistent_agent(spec, context=context_for(api, spec))

@@ -34,7 +34,8 @@ class ExecutionControl:
     # Log snapshots of the Executions a continuation reached through verified links, taken once; the
     # injected preview and read_execution_record both use them, and only them.
     log_snapshots: "dict[str, LogSnapshot]" = field(default_factory=dict, repr=False)
-    # PA-11 writes only after AFTER_REACT_ITERATION marks a complete boundary.
+    # Tool-driven PA-11 writes follow AFTER_REACT_ITERATION; request-entry switching
+    # has its own explicit pre-model boundary in WindowSwitchManager.
     pending_window_switch: "WindowSwitchRequest | None" = None
     safe_boundary_pending: bool = False
     pending_iteration_seq: int = 0
