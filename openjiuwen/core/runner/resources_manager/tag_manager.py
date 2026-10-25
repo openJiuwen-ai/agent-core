@@ -6,6 +6,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.resources_manager.base import GLOBAL, Tag, TagUpdateStrategy, TagMatchStrategy
+from openjiuwen.core.runner.resources_manager.registration_logging import registration_success_log
 
 
 class TagMgr:
@@ -39,18 +40,18 @@ class TagMgr:
         # Check if GLOBAL tag is included
         if GLOBAL in tags_to_add:
             old_tags = self._set_global_resource(resource_id)
-            logger.info(
-                f"Added GLOBAL tag to resource. resource_id={resource_id}, "
-                f"changed from {old_tags} to [GLOBAL]"
+            registration_success_log(logger)(
+                "Added GLOBAL tag to resource. resource_id=%s, changed from %s to [GLOBAL]",
+                resource_id, old_tags,
             )
             return [GLOBAL]
 
         # Add tags
         current_tags = self._add_resource_tags(resource_id, tags_to_add)
 
-        logger.info(
-            f"Added tags to resource. resource_id={resource_id}, "
-            f"added_tags={tags_to_add}, current_tags={current_tags}"
+        registration_success_log(logger)(
+            "Added tags to resource. resource_id=%s, added_tags=%s, current_tags=%s",
+            resource_id, tags_to_add, current_tags,
         )
         return current_tags
 
