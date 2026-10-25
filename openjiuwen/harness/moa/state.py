@@ -44,6 +44,38 @@ class ProposalBatch:
     attempts: list[ProposalAttempt] = field(default_factory=list)
     batch_id: int = field(default_factory=lambda: next(_batch_ids), compare=False)
     disabled_reason: str | None = None
+    origin: TurnKey | None = None
+
+
+@dataclass
+class ProposalStore:
+    """Private candidate storage owned by one logical user task."""
+
+    active: ProposalBatch | None = None
+    ready: ProposalBatch | None = None
+    epoch: int = 0
+    issued_ticket: int = 0
+    accepted_ticket: int = 0
+    closed: bool = False
+
+    def activate(self, key: TurnKey) -> None:
+        """Promote ready advice only at a different logical decision."""
+        if not self.closed and self.ready is not None and self.ready.origin != key:
+            self.active = self.ready
+            self.ready = None
+
+    def invalidate(self, reason: str, *, clear: bool = True) -> None:
+        """Fence asynchronous work, optionally retaining committed advice."""
+        self.epoch += 1
+        if clear:
+            self.active = None
+            self.ready = None
+        agent_logger.debug("MoA proposal store invalidated: reason=%s clear=%s", reason, clear)
+
+    def close(self, reason: str) -> None:
+        """Retire the task without allowing late publication."""
+        self.closed = True
+        self.invalidate(reason)
 
 
 @dataclass
@@ -52,7 +84,9 @@ class MoAState:
 
     problem: str = ""
     baseline: list[BaseMessage] = field(default_factory=list)
-    pending: ProposalBatch | None = None
+    proposals: ProposalStore = field(default_factory=ProposalStore)
+    work_binding: str | None = None
+    owns_proposals: bool = True
     active_key: TurnKey | None = None
     completed_turns: int = 0
     steps: list[str] = field(default_factory=list)
@@ -68,18 +102,19 @@ class MoAState:
     last_jev_reason: str | None = None
     invoke_id: str = field(default_factory=lambda: uuid4().hex)
 
-    def expire_pending(self, reason: str) -> None:
-        if self.pending is not None:
-            agent_logger.debug(
-                "MoA proposal expired: turn=%s sources=%s reason=%s",
-                self.pending.target[1],
-                len(self.pending.sources),
-                reason,
-            )
-            self.pending = None
+    def accepts_result(self, epoch: int) -> bool:
+        """Check the captured task epoch and current work binding after awaits."""
+        return (
+            not self.closed and not self.proposals.closed and self.proposals.epoch == epoch
+            and self.work_binding == active_moa_work_binding.get()
+        )
 
 
 active_moa: ContextVar[MoAState | None] = ContextVar("active_moa", default=None)
+active_proposal_store: ContextVar[ProposalStore | None] = ContextVar("active_proposal_store", default=None)
+active_moa_work_binding: ContextVar[str | None] = ContextVar("active_moa_work_binding", default=None)
+InputOrigin = Literal["user_request", "internal", "interaction_response", "steering"]
+active_moa_input_origin: ContextVar[InputOrigin | None] = ContextVar("active_moa_input_origin", default=None)
 
 
 @dataclass(frozen=True)
@@ -112,9 +147,10 @@ class MoASnapshot:
 def get_moa_snapshot() -> MoASnapshot | None:
     """Read the active invocation's diagnostics without exposing its state."""
     state = active_moa.get()
-    if state is None or state.closed:
+    if state is None or not state.accepts_result(state.proposals.epoch):
         return None
-    batch = state.pending
+    batch = state.proposals.active
+    pending = state.proposals.ready or batch
     latest = batch.attempts[-1] if batch is not None and batch.attempts else None
     attempt = (
         ProposalAttemptSnapshot(
@@ -133,7 +169,7 @@ def get_moa_snapshot() -> MoASnapshot | None:
         reference_calls=state.reference_calls,
         verifier_calls=state.verifier_calls,
         previous_score=state.previous_score,
-        pending_target=batch.target if batch is not None else None,
+        pending_target=pending.target if pending is not None else None,
         latest_attempt=attempt,
         jev_calls=state.jev_calls,
         last_jev_decision=state.last_jev_decision,

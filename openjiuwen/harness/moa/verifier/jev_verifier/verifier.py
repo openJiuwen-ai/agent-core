@@ -146,6 +146,9 @@ async def decide_reference(
     config: JevConfig, state: MoAState, messages: list[BaseMessage], agent: Any, session: Any
 ) -> bool | None:
     """Spend one bounded decision attempt; None continues the primary model."""
+    epoch = state.proposals.epoch
+    if not state.accepts_result(epoch):
+        return None
     state.last_jev_decision = None
     if config.max_jev_calls is not None and state.jev_calls >= config.max_jev_calls:
         state.last_jev_reason = "decision_budget_exhausted"
@@ -163,9 +166,13 @@ async def decide_reference(
         "MoA JEV started: invoke=%s checkpoint=%s calls=%s",
         state.invoke_id, state.completed_turns, state.jev_calls,
     )
+    decision = None
+    reason = None
     try:
         async with asyncio.timeout(config.timeout):
             todos, todo_status = await _read_todos(agent, session)
+            if not state.accepts_result(epoch):
+                return None
             payload = build_jev_state(messages, config.recent_messages, todos)
             agent_logger.debug(
                 "MoA JEV input: checkpoint=%s todo_status=%s messages=%s todos=%s",
@@ -183,16 +190,20 @@ async def decide_reference(
         agent_logger.info("MoA JEV cancelled: invoke=%s checkpoint=%s", state.invoke_id, state.completed_turns)
         raise
     except TimeoutError:
-        state.last_jev_reason = "jev_timeout"
+        reason = "jev_timeout"
     except Exception:
-        state.last_jev_reason = "jev_request_failed"
+        reason = "jev_request_failed"
     else:
         try:
-            state.last_jev_decision = _decode_decision(response)
+            decision = _decode_decision(response)
         except BaseError:
-            state.last_jev_reason = "invalid_jev_response"
+            reason = "invalid_jev_response"
         else:
-            state.last_jev_reason = "consult" if state.last_jev_decision else "continue"
+            reason = "consult" if decision else "continue"
+    if not state.accepts_result(epoch):
+        return None
+    state.last_jev_decision = decision
+    state.last_jev_reason = reason
     log = agent_logger.warning if state.last_jev_decision is None else agent_logger.info
     log(
         "MoA JEV decision: invoke=%s checkpoint=%s calls=%s decision=%s action=%s reason=%s duration_ms=%s",

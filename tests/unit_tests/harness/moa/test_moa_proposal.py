@@ -23,7 +23,7 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.harness.moa import MoAConfig
 from openjiuwen.harness.moa.consultation import consult
 from openjiuwen.harness.moa.proposal import ProposalModel, _output_tokens
-from openjiuwen.harness.moa.state import MoAState, ProposalBatch, ProposalSource, active_moa
+from openjiuwen.harness.moa.state import MoAState, ProposalBatch, ProposalSource, ProposalStore, active_moa
 from openjiuwen.harness.prompts.moa import REFERENCE_SYSTEM_PROMPT, render_reference_proposals
 
 
@@ -55,7 +55,7 @@ class FixedBudgetContext:
 async def invoke_with_proposals(model, messages, *, expected_injected=True, **kwargs):
     key = (object(), 1)
     state = MoAState(
-        pending=ProposalBatch((ProposalSource(1, "<ignore>& proposal"),), key),
+        proposals=ProposalStore(active=ProposalBatch((ProposalSource(1, "<ignore>& proposal"),), key)),
         active_key=key,
         context=FixedBudgetContext(),
     )
@@ -66,8 +66,8 @@ async def invoke_with_proposals(model, messages, *, expected_injected=True, **kw
     finally:
         active_moa.reset(token)
     assert [message.model_dump() for message in messages] == before
-    assert state.pending is not None and state.pending.attempts[0].injected is expected_injected
-    return state.pending.attempts[0]
+    assert state.proposals.active is not None and state.proposals.active.attempts[0].injected is expected_injected
+    return state.proposals.active.attempts[0]
 
 
 def primary(provider="OpenAI", api_mode=None):
@@ -181,7 +181,7 @@ async def test_anthropic_thinking_ceiling_prevents_proposal_that_would_overfill_
     sdk = SimpleNamespace(messages=SimpleNamespace(create=AsyncMock(return_value=response)), close=AsyncMock())
     key = (object(), 1)
     state = MoAState(
-        pending=ProposalBatch((ProposalSource(1, "private proposal"),), key),
+        proposals=ProposalStore(active=ProposalBatch((ProposalSource(1, "private proposal"),), key)),
         active_key=key,
         context=FixedBudgetContext(limit=1500),
     )
@@ -191,7 +191,7 @@ async def test_anthropic_thinking_ceiling_prevents_proposal_that_would_overfill_
             await ProposalModel(model).invoke(messages=[UserMessage(content="task")])
     finally:
         active_moa.reset(token)
-    attempt = state.pending.attempts[0]
+    attempt = state.proposals.active.attempts[0]
     assert not attempt.injected and attempt.reason == "insufficient_context"
     sent = sdk.messages.create.await_args.kwargs
     assert sent["max_tokens"] == 3024
@@ -325,7 +325,7 @@ async def test_budget_trims_original_body_then_wraps_and_preserves_requested_out
     context = FixedBudgetContext(limit=900)
     key = (object(), 1)
     state = MoAState(
-        pending=ProposalBatch((ProposalSource(1, "<attack>&" + "x" * 4_000),), key),
+        proposals=ProposalStore(active=ProposalBatch((ProposalSource(1, "<attack>&" + "x" * 4_000),), key)),
         active_key=key,
         context=context,
     )
@@ -335,7 +335,7 @@ async def test_budget_trims_original_body_then_wraps_and_preserves_requested_out
             await ProposalModel(model).invoke(messages, tools=tools, max_tokens=400)
     finally:
         active_moa.reset(token)
-    attempt = state.pending.attempts[0]
+    attempt = state.proposals.active.attempts[0]
     assert attempt.reason == "trimmed" and 0 < attempt.kept_chars < 4_009
     request = sdk.chat.completions.create.await_args.kwargs
     assert request["max_tokens"] == 400

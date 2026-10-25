@@ -70,6 +70,38 @@ class TaskLoopEventExecutor(TaskExecutor):
         task_id: str,
         session: Session,
     ) -> AsyncIterator[ControllerOutputChunk]:
+        """Restore the trusted MoA work binding across the scheduler boundary."""
+        tasks = await self._task_manager.get_task(task_filter=self._make_filter(task_id))
+        metadata = (tasks[0].metadata or {}) if tasks else {}
+        identity = metadata.get("_moa_work_binding")
+        owner = getattr(self._deep_agent, "_moa_scope_owner", None)
+        tokens = None
+        if isinstance(identity, str) and owner is not None:
+            if owner.resolve(identity) is None:
+                yield ControllerOutputChunk(
+                    index=0,
+                    payload=ControllerOutputPayload(
+                        type=EventType.TASK_FAILED,
+                        data=[TextDataFrame(text="The MoA work binding is no longer active.")],
+                        metadata={"task_id": task_id},
+                    ),
+                    last_chunk=True,
+                )
+                return
+            tokens = owner.activate(identity, internal=metadata.get("_moa_input_origin") == "internal")
+        try:
+            async for chunk in self._execute_bound_ability(task_id, session, tasks):
+                yield chunk
+        finally:
+            if tokens is not None:
+                owner.reset(tokens)
+
+    async def _execute_bound_ability(
+        self,
+        task_id: str,
+        session: Session,
+        tasks: list,
+    ) -> AsyncIterator[ControllerOutputChunk]:
         """Execute a task via the inner ReActAgent.
 
         Args:
@@ -86,10 +118,6 @@ class TaskLoopEventExecutor(TaskExecutor):
                 "react_agent"
             )
             return
-
-        tasks = await self._task_manager.get_task(
-            task_filter=self._make_filter(task_id)
-        )
 
         query: Any = task_id
         raw_input: Any = None

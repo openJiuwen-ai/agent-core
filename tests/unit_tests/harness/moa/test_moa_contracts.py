@@ -16,6 +16,7 @@ from openjiuwen.harness.moa.state import (
     ProposalAttempt,
     ProposalBatch,
     ProposalSource,
+    ProposalStore,
     active_moa,
     get_moa_snapshot,
 )
@@ -156,7 +157,7 @@ def test_snapshot_is_frozen_detached_and_excludes_reference_text():
     batch = ProposalBatch((ProposalSource(1, "secret reference body"),), key)
     batch.attempts.append(ProposalAttempt(key, True, "injected", 21))
     state = MoAState(
-        pending=batch,
+        proposals=ProposalStore(active=batch),
         active_key=key,
         completed_turns=2,
         reference_calls=1,
@@ -206,11 +207,11 @@ def test_snapshot_is_frozen_detached_and_excludes_reference_text():
 def test_snapshot_handles_missing_closed_and_expired_state():
     assert get_moa_snapshot() is None
     key = (object(), 1)
-    state = MoAState(pending=ProposalBatch((ProposalSource(1, "text"),), key))
+    state = MoAState(proposals=ProposalStore(active=ProposalBatch((ProposalSource(1, "text"),), key)))
     token = active_moa.set(state)
     try:
         assert get_moa_snapshot().latest_attempt is None
-        state.expire_pending("test")
+        state.proposals.invalidate("test")
         assert get_moa_snapshot().pending_target is None
         state.closed = True
         assert get_moa_snapshot() is None
@@ -221,11 +222,11 @@ def test_snapshot_handles_missing_closed_and_expired_state():
 def test_snapshot_attempt_identity_distinguishes_batches_for_the_same_turn():
     key = (object(), 1)
     first = ProposalBatch((ProposalSource(1, "first"),), key, [ProposalAttempt(key, True, "injected")])
-    state = MoAState(pending=first, active_key=key)
+    state = MoAState(proposals=ProposalStore(active=first), active_key=key)
     token = active_moa.set(state)
     try:
         identity = get_moa_snapshot().latest_attempt.identity
-        state.pending = ProposalBatch((ProposalSource(1, "second"),), key, [ProposalAttempt(key, True, "injected")])
+        state.proposals.active = ProposalBatch((ProposalSource(1, "second"),), key, [ProposalAttempt(key, True, "injected")])
         assert get_moa_snapshot().latest_attempt.identity != identity
     finally:
         active_moa.reset(token)

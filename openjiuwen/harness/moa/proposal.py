@@ -18,8 +18,17 @@ from openjiuwen.core.foundation.llm.reasoning import (
 )
 from openjiuwen.core.foundation.llm.schema.message import BaseMessage, UserMessage
 from openjiuwen.core.foundation.llm.utils.endpoint_profiles import normalize_model_client_config
-from openjiuwen.harness.moa.state import ProposalAttempt, ProposalBatch, active_moa
+from openjiuwen.harness.moa.state import ProposalAttempt, ProposalBatch, TurnKey, active_moa
 from openjiuwen.harness.prompts.moa import render_reference_proposals
+
+
+_INPUT_CONTEXT_OVERFLOW_PATTERNS = (
+    r"\b(?:prompt|input)(?: tokens?(?: count| length)?| length)? (?:is |was )?too long\b",
+    r"\b(?:prompt|input)(?: tokens?(?: count| length)?| length)? "
+    r"(?:exceeds?|exceeded|is over) (?:the )?(?:maximum |model's )?"
+    r"(?:context (?:length|window)|(?:input |prompt )?(?:token )?limit)\b",
+    r"\bcontext (?:length|window) (?:is |was |has been )?(?:exceeded|over (?:the )?limit)\b",
+)
 
 
 @dataclass(frozen=True)
@@ -218,6 +227,7 @@ class _ProposalRequest:
     batch: ProposalBatch | None = None
     budget_mode: Literal["known", "unspecified", "unresolved"] = "unresolved"
     injected: bool = False
+    key: TurnKey | None = None
 
 
 def _is_input_context_overflow(exception: Exception) -> bool:
@@ -240,11 +250,12 @@ def _is_input_context_overflow(exception: Exception) -> bool:
             ):
                 return False
             messages.append(str(value))
-            pending.extend(
-                item for item in (
-                    getattr(value, "cause", None), value.__cause__, value.__context__,
-                ) if item is not None
+            causes = (
+                getattr(value, "cause", None), value.__cause__, value.__context__,
             )
+            for item in causes:
+                if item is not None:
+                    pending.append(item)
         if isinstance(value, Mapping):
             status = value.get("status_code", value.get("status"))
             code = value.get("code")
@@ -256,11 +267,12 @@ def _is_input_context_overflow(exception: Exception) -> bool:
             code = getattr(value, "code", None)
             parameter = getattr(value, "param", None)
             message = getattr(value, "message", None)
-            pending.extend(
-                item for item in (
-                    getattr(value, "body", None), getattr(value, "error", None), getattr(value, "response", None),
-                ) if item is not None
+            details = (
+                getattr(value, "body", None), getattr(value, "error", None), getattr(value, "response", None),
             )
+            for item in details:
+                if item is not None:
+                    pending.append(item)
         if isinstance(status, int) and status not in (400, 413, 422):
             return False
         if parameter in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
@@ -280,13 +292,7 @@ def _is_input_context_overflow(exception: Exception) -> bool:
         text = message.casefold().replace("_", " ").replace("-", " ")
         if any(key in text for key in ("max tokens", "max completion tokens", "max output tokens")):
             continue
-        if any(re.search(pattern, text) for pattern in (
-            r"\b(?:prompt|input)(?: tokens?(?: count| length)?| length)? (?:is |was )?too long\b",
-            r"\b(?:prompt|input)(?: tokens?(?: count| length)?| length)? "
-            r"(?:exceeds?|exceeded|is over) (?:the )?(?:maximum |model's )?"
-            r"(?:context (?:length|window)|(?:input |prompt )?(?:token )?limit)\b",
-            r"\bcontext (?:length|window) (?:is |was |has been )?(?:exceeded|over (?:the )?limit)\b",
-        )):
+        if any(re.search(pattern, text) for pattern in _INPUT_CONTEXT_OVERFLOW_PATTERNS):
             return True
     return False
 
@@ -302,13 +308,16 @@ class ProposalModel:
 
     def _prepare_request(self, messages: list[BaseMessage], kwargs: dict[str, Any]) -> _ProposalRequest:
         state = active_moa.get()
-        if state is None or state.closed:
+        if state is None or not state.accepts_result(state.proposals.epoch):
             return _ProposalRequest(messages)
-        if state.pending is None or state.active_key is None:
+        if state.active_key is None:
             return _ProposalRequest(messages)
-        batch = state.pending
-        if batch.target != state.active_key:
+        state.proposals.activate(state.active_key)
+        batch = state.proposals.active
+        if batch is None:
             return _ProposalRequest(messages)
+        # Target records the initial decision; task ownership permits later reuse.
+        # Promotion already prevents a ready refresh from replacing a same-turn retry.
         budget = _output_budget(self._model, kwargs)
         if batch.disabled_reason is not None:
             request, reason, kept_chars = messages, "batch_disabled", 0
@@ -326,7 +335,7 @@ class ProposalModel:
             state.invoke_id, batch.batch_id, state.active_key[1], len(batch.sources),
             budget.mode, injected, reason, kept_chars, batch.disabled_reason is not None,
         )
-        return _ProposalRequest(request, batch, budget.mode, injected)
+        return _ProposalRequest(request, batch, budget.mode, injected, state.active_key)
 
     def _request(self, messages: list[BaseMessage], kwargs: dict[str, Any]) -> list[BaseMessage]:
         return self._prepare_request(messages, kwargs).messages
@@ -335,10 +344,11 @@ class ProposalModel:
     def _disable_for_fallback(request: _ProposalRequest, exception: Exception) -> bool:
         batch = request.batch
         state = active_moa.get()
-        if (
-            request.budget_mode != "unspecified" or not request.injected or batch is None
-            or batch.disabled_reason is not None or state is None or state.closed
-        ):
+        if request.budget_mode != "unspecified" or not request.injected or batch is None:
+            return False
+        if request.key is None or batch.disabled_reason is not None:
+            return False
+        if state is None or not state.accepts_result(state.proposals.epoch):
             return False
         try:
             if not _is_input_context_overflow(exception):
@@ -347,12 +357,12 @@ class ProposalModel:
             return False
         batch.disabled_reason = "context_overflow"
         batch.attempts.append(ProposalAttempt(
-            batch.target, False, "context_overflow_fallback", budget_mode="unspecified", fallback=True,
+            request.key, False, "context_overflow_fallback", budget_mode="unspecified", fallback=True,
         ))
         agent_logger.info(
             "MoA proposal request: invoke=%s batch=%s turn=%s sources=%s budget_mode=unspecified "
             "injected=False reason=context_overflow_fallback kept_chars=0 fallback=True disabled=True",
-            state.invoke_id, batch.batch_id, batch.target[1], len(batch.sources),
+            state.invoke_id, batch.batch_id, request.key[1], len(batch.sources),
         )
         return True
 
