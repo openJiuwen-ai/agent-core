@@ -3,6 +3,7 @@
 import asyncio
 import os.path
 import uuid as _uuid
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, List, Optional, Dict
 
@@ -112,6 +113,8 @@ class TodoTool(Tool):
         # 本 invoke 内是否已执行过 todo_create（由 TaskPlanningRail 在
         # before_invoke 重置，用于"同一 invoke 至多一次整表重建"的 guard）
         self._created_in_invoke: set = set()
+        # Host-owned lifecycle evidence; never supplied by model arguments.
+        self.snapshot_guard: Callable[..., Awaitable[None]] | None = None
 
     def _get_file_path(self, session_id: str) -> str:
         """Get the file path for a given session_id.
@@ -133,6 +136,8 @@ class TodoTool(Tool):
             return tx.items
         try:
             snapshot = await read_snapshot(self.fs, os.path.abspath(self._get_file_path(session_id)))
+            from openjiuwen.harness.tools.todo_store import check_snapshot_lifecycle
+            await check_snapshot_lifecycle(self, session_id, snapshot)
         except Exception as exc:
             raise build_error(StatusCode.TOOL_TODOS_LOAD_FAILED, reason=str(exc)) from exc
         if not snapshot.exists:

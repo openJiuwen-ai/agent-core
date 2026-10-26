@@ -26,6 +26,19 @@ async def env(tmp_path, monkeypatch):
     session = Session("session", card=AgentCard(id="todo-batch-test", name="test"))
     token = _BINDING.set(None)
     engines = [cls(operation, str(tmp_path)) for cls in (TodoCreateTool, TodoModifyTool, TodoListTool)]
+    fresh = True
+
+    async def lifecycle(_session_id, snapshot, *, committing=False):
+        nonlocal fresh
+        if not snapshot.exists and not fresh:
+            raise ValueError("Todo file lost")
+        if committing:
+            fresh = False
+
+    # This fixture explicitly creates a new object; production hosts persist
+    # this permission in their existing session metadata before publication.
+    for engine in engines:
+        engine.snapshot_guard = lifecycle
     yield (*engines, session, tmp_path / "session/todo.json")
     _BINDING.reset(token)
     await ReadWriteLockManager.stop()
@@ -56,6 +69,17 @@ async def test_parallel_updates_and_separate_instances(env):
     assert saved["todos"][0]["status"] == "completed"
     assert saved["todos"][1]["content"] == "changed"
     assert len({r.todo_snapshot["revision"] for r in results}) == 2
+
+
+@pytest.mark.asyncio
+async def test_deleted_file_cannot_be_recreated_by_new_or_rebuild(env):
+    c, _, _, session, path = env
+    await create(c, session)
+    path.unlink()
+    c.reset_invoke_marker("session")
+    with pytest.raises(FrameworkError, match="file lost"):
+        await create(c, session, plan_action="rebuild")
+    assert not path.exists()
 
 
 @pytest.mark.asyncio
@@ -100,6 +124,34 @@ async def test_legacy_read_migration_empty_and_corruption(env):
 
 
 @pytest.mark.asyncio
+async def test_delayed_empty_capture_reuses_confirmed_no_plan(env, monkeypatch):
+    from openjiuwen.harness.tools.todo_store import capture_plan
+
+    c, m, _, session, _ = env
+    ctx = SimpleNamespace(extra={}, session=session)
+    prepare_todo_batch(ctx)
+    bind_todo_batch(ctx, m)
+    read_started, release = asyncio.Event(), asyncio.Event()
+    original = m.fs.read_file
+
+    async def delayed(*args, **kwargs):
+        snapshot = await original(*args, **kwargs)
+        if not read_started.is_set():
+            read_started.set()
+            await release.wait()
+        return snapshot
+
+    monkeypatch.setattr(m.fs, "read_file", delayed)
+    captured = asyncio.create_task(capture_plan(m, "session"))
+    await read_started.wait()
+    await create(c, session)
+    release.set()
+    # The batch confirmed no plan before creation. This old work cannot bind
+    # the newly created plan, nor revalidate a superseded missing-file read.
+    assert await captured is None
+
+
+@pytest.mark.asyncio
 async def test_noop_and_deleted_id_do_not_publish(env):
     c, m, _, session, path = env
     await create(c, session)
@@ -108,6 +160,33 @@ async def test_noop_and_deleted_id_do_not_publish(env):
     assert path.read_bytes() == previous
     result = await update(m, session, "missing", content="bad")
     assert "failed" in result["message"] and path.read_bytes() == previous
+
+
+@pytest.mark.asyncio
+async def test_owner_expiring_during_snapshot_read_cannot_commit(env, monkeypatch):
+    from openjiuwen.harness.tools.todo_store import transact
+
+    c, m, _, session, path = env
+    await create(c, session)
+    before = path.read_bytes()
+    active = True
+    original = m.fs.read_file
+
+    async def expire(*args, **kwargs):
+        nonlocal active
+        result = await original(*args, **kwargs)
+        active = False
+        return result
+
+    def check_active():
+        if not active:
+            raise ValueError("request expired")
+
+    monkeypatch.setattr(m.fs, "read_file", expire)
+    with pytest.raises(ValueError, match="request expired"):
+        await transact(m, "session", lambda: update(m, session, "A", status="completed"),
+                       check_active=check_active)
+    assert path.read_bytes() == before
 
 
 @pytest.mark.asyncio

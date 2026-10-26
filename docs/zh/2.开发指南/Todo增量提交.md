@@ -1,5 +1,10 @@
 # Todo 增量提交
 
+Flash宿主为Todo工具设置异步`snapshot_guard(session_id, snapshot, committing=False)`。
+它依据既有会话生命周期校验首次创建，并在`committing=True`时、文件可能发布前可靠登记
+初始化已使用。文件不存在不能单独作为首次创建依据。Jiuwenswarm的Flash装配使用现有会话
+元数据实现该约束，不改变模型工具参数；未装配guard的其他调用保持既有行为。
+
 Todo 工具仍按任务 ID 增、删、改；同一清单的完整读改写在进程内协调，跨进程由文件端条件原子替换保护。模型传递修改意图，不传版本字段。
 
 ## 文件与创建规则

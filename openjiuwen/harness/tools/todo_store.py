@@ -166,6 +166,13 @@ async def read_snapshot(fs, path):
     return snapshot
 
 
+async def check_snapshot_lifecycle(tool, session_id, snapshot, *, committing=False):
+    """Ask the owning host for first-creation evidence, not file existence."""
+    guard = getattr(tool, "snapshot_guard", None)
+    if guard is not None:
+        await guard(session_id, snapshot, committing=committing)
+
+
 def observe_plan(tool, session_id, snapshot):
     binding = _BINDING.get()
     if binding is None:
@@ -185,14 +192,20 @@ async def capture_plan(tool, session_id):
     if ref.value is _UNRESOLVED:
         observed = await read_snapshot(tool.fs, path)
         if ref.value is _UNRESOLVED:
-            ref.value = observed.plan_id
+            await check_snapshot_lifecycle(tool, session_id, observed)
+            if ref.value is _UNRESOLVED:
+                ref.value = observed.plan_id
     return ref.value
 
 
-async def transact(tool, session_id, callback, *, expected_plan=_UNRESOLVED):
+async def transact(
+    tool, session_id, callback, *, expected_plan=_UNRESOLVED, check_active=None
+):
     path = os.path.abspath(tool._get_file_path(session_id))
     key = object_key(tool.fs, path)
     if current_transaction(tool, session_id) is not None:
+        if check_active is not None:
+            check_active()
         return await callback()
     loop = asyncio.get_running_loop()
     locks = _LOCKS.setdefault(loop, weakref.WeakValueDictionary())
@@ -203,7 +216,10 @@ async def transact(tool, session_id, callback, *, expected_plan=_UNRESOLVED):
         reference = binding[0].setdefault(key, PlanReference())
     async with lock:
         for _ in range(3):
+            if check_active is not None:
+                check_active()
             snapshot = await read_snapshot(tool.fs, path)
+            await check_snapshot_lifecycle(tool, session_id, snapshot)
             if reference.value is _UNRESOLVED:
                 reference.value = snapshot.plan_id
             if reference.value != snapshot.plan_id:
@@ -225,6 +241,12 @@ async def transact(tool, session_id, callback, *, expected_plan=_UNRESOLVED):
                 committed = TodoSnapshot(
                     tx.pending, tx.new_plan or snapshot.plan_id or uuid.uuid4().hex, snapshot.revision + 1
                 )
+                # The owner can expire while awaiting the lock/read or retrying.
+                if check_active is not None:
+                    check_active()
+                await check_snapshot_lifecycle(tool, session_id, snapshot, committing=True)
+                if check_active is not None:
+                    check_active()
                 response = await tool.fs.write_file(
                     path,
                     json.dumps(committed.document(), ensure_ascii=False),
