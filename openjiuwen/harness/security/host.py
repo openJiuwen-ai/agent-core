@@ -20,7 +20,7 @@ class PermissionSceneHookInput:
     user_input: Any
     normalized_tool_name: str
     tool_args: dict[str, Any]
-    engine: Any
+    permission_key: str
 
 
 PermissionSceneHook = Callable[
@@ -67,14 +67,14 @@ class ToolPermissionHost:
     """返回与 ``config['permissions']`` 同结构的 dict，用于热同步磁盘配置。"""
 
     persist_allow_rule: Callable[[dict[str, Any]], bool] | None = None
-    """自定义「总是允许」写盘；入参为护栏已合并好的整份 ``permissions`` dict（与默认 YAML
-    路径下内存中的结果一致，含 ``external_directory`` 等）。
+    """自定义「总是允许」持久化；入参为护栏已合并好的整份 ``permissions`` dict（含
+    ``external_directory`` 等）。
 
-    调用顺序：护栏先 ``merge_permission_allow_rule_into_permissions``、按需
-    ``merge_external_directory_allow_into_permissions``，再 ``update_config(merged)``，
-    最后调用本回调；返回 ``False`` 时护栏会回滚内存配置。未设置本回调时则使用
-    :func:`openjiuwen.harness.security.patterns.write_permissions_section_to_agent_config_yaml`
-    写入 ``permission_yaml_path``。
+    谁持久化，谁负责刷新：回调持久化成功后，须自行把新配置登记到权限管理器
+    （``get_permission_manager().update_config(cfg, key)``），返回 ``True``；护栏不会
+    替回调刷新，失败时返回 ``False`` 且不得登记，护栏也无需回滚。未设置本回调时由护栏
+    用 :func:`openjiuwen.harness.security.patterns.write_permissions_section_to_agent_config_yaml`
+    写入 ``permission_yaml_path``，写盘成功后护栏自己登记。
     """
 
     resolve_workspace_dir: Callable[[], Path] | None = None

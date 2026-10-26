@@ -26,6 +26,7 @@ from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import (
 )
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+from openjiuwen.harness.security.models import PermissionLevel, PermissionResult
 
 
 class _StateSession:
@@ -514,19 +515,21 @@ async def test_evolve_resume_allow_always_stores_auto_confirm():
     assert session.state["__interrupt_auto_confirm__"] == {"evolution:evolve_skill_experiences:skill:skill-a": True}
 
 
-@pytest.mark.asyncio
-async def test_permission_rail_passes_evolution_allow_always_resume_to_evolution_rail():
-    runtime, review_ref = _runtime_with_completed_proposal()
-    permission_rail = PermissionInterruptRail(
-        config={
-            "enabled": True,
-            "schema": "tiered_policy",
-            "permission_mode": "normal",
-            "defaults": {"*": "allow"},
-            "rules": [],
-            "approval_overrides": [],
-        }
+def _permission_rail_deciding(monkeypatch, level: PermissionLevel) -> PermissionInterruptRail:
+    """Rail whose manager always decides ``level`` (these tests are about the rail flow, not the engine)."""
+    manager = Mock()
+    manager.check_permission = AsyncMock(return_value=PermissionResult(permission=level, reason="unit-test"))
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.security.tool_security_rail.get_permission_manager",
+        lambda: manager,
     )
+    return PermissionInterruptRail()
+
+
+@pytest.mark.asyncio
+async def test_permission_rail_passes_evolution_allow_always_resume_to_evolution_rail(monkeypatch):
+    runtime, review_ref = _runtime_with_completed_proposal()
+    permission_rail = _permission_rail_deciding(monkeypatch, PermissionLevel.ALLOW)
     evolution_rail = _make_rail(runtime)
     session = _StateSession()
     ctx = _evolve_ctx(review_ref, session=session)
@@ -543,19 +546,9 @@ async def test_permission_rail_passes_evolution_allow_always_resume_to_evolution
 
 
 @pytest.mark.asyncio
-async def test_permission_rail_does_not_let_evolution_resume_payload_bypass_tool_ask():
+async def test_permission_rail_does_not_let_evolution_resume_payload_bypass_tool_ask(monkeypatch):
     runtime, review_ref = _runtime_with_completed_proposal()
-    permission_rail = PermissionInterruptRail(
-        config={
-            "enabled": True,
-            "schema": "tiered_policy",
-            "permission_mode": "normal",
-            "defaults": {"*": "allow"},
-            "tools": {"evolve_skill_experiences": "ask"},
-            "rules": [],
-            "approval_overrides": [],
-        }
-    )
+    permission_rail = _permission_rail_deciding(monkeypatch, PermissionLevel.ASK)
     ctx = _evolve_ctx(review_ref, session=_StateSession())
     ctx.extra[EVOLUTION_RESUME_USER_INPUT_KEY] = {"action": "allow_always"}
 

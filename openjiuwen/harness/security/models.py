@@ -12,40 +12,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import Enum
 from typing import Any, NotRequired, TypedDict
 
+from agent_shield.tool_permission import PermissionLevel, PermissionResult
 
-class PermissionLevel(str, Enum):
-    """权限级别.
-
-    - ALLOW: 直接执行，无需确认
-    - ASK:   弹出确认框，用户决定
-    - DENY:  拒绝执行，返回错误
-    """
-    ALLOW = "allow"
-    ASK = "ask"
-    DENY = "deny"
-
-
-@dataclass
-class PermissionResult:
-    permission: PermissionLevel
-    matched_rule: str | None = None
-    reason: str | None = None
-    external_paths: list[str] | None = None
-
-    @property
-    def is_allowed(self) -> bool:
-        return self.permission == PermissionLevel.ALLOW
-
-    @property
-    def is_denied(self) -> bool:
-        return self.permission == PermissionLevel.DENY
-
-    @property
-    def needs_approval(self) -> bool:
-        return self.permission == PermissionLevel.ASK
+# 判定结果类型由 agent_shield 定义；这里转出，保持原有导入路径可用。
 
 
 @dataclass(frozen=True)

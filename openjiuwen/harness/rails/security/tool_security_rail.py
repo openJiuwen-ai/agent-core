@@ -2,7 +2,7 @@
 
 """PermissionInterruptRail - tool permission guardrail using ConfirmInterruptRail.
 
-Implements permission checks via PermissionEngine and triggers HITL interrupts
+Implements permission checks via the agent_shield permission manager and triggers HITL interrupts
 for ASK decisions using the built-in interrupt rail flow.
 """
 from __future__ import annotations
@@ -10,8 +10,12 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
-
+from pathlib import Path
 from typing import Any, Iterable, Optional, cast
+
+from agent_shield.tool_permission import get_permission_manager
+
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import (
@@ -23,9 +27,6 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import (
     ConfirmInterruptRail,
     ConfirmPayload,
 )
-
-from openjiuwen.core.common.logging import logger
-from openjiuwen.harness.security.core import PermissionEngine
 from openjiuwen.harness.security.host import (
     PermissionConfirmationRequest,
     PermissionSceneHookInput,
@@ -35,14 +36,14 @@ from openjiuwen.harness.security.models import (
     PermissionConfirmResponse,
     PermissionLevel,
     PermissionResult,
+    PermissionsSection,
 )
-from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.patterns import (
     merge_permission_allow_rule_into_permissions,
     write_permissions_section_to_agent_config_yaml,
 )
+from openjiuwen.harness.security.permission_key import DEFAULT_KEY
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
-
 
 TOOL_NAME_ALIASES = {
     "free_search": "mcp_free_search",
@@ -131,46 +132,35 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     def __init__(
         self,
-        config: Optional[PermissionsSection | dict[str, Any]] = None,
-        engine: Optional[PermissionEngine] = None,
         tool_names: Optional[Iterable[str]] = None,
         llm: Any = None,
         model_name: str | None = None,
         host: ToolPermissionHost | None = None,
+        permission_key: str | None = None,
     ) -> None:
+        """Create the rail.
+
+        The rail owns no permission config.  It decides with the config the
+        host registered under ``permission_key`` in the process-wide permission
+        manager (``default`` when omitted); registering, replacing and removing
+        that config is the host's job.  A key nobody registered makes the
+        decision raise ``KeyError``.
+        """
         super().__init__(tool_names=tool_names)
-        self._static_config = cast(dict[str, Any], config or {})
+        if permission_key is not None and (not isinstance(permission_key, str) or not permission_key.strip()):
+            raise ValueError("permission_key must be a non-empty string")
         self._host = host or ToolPermissionHost()
-        if engine is not None:
-            self._engine = engine
-        else:
-            workspace_root = None
-            if self._host.resolve_workspace_dir is not None:
-                try:
-                    workspace_root = self._host.resolve_workspace_dir()
-                except Exception:
-                    logger.debug(
-                        "[PermissionEngine] permission.rail.workspace_resolve_failed",
-                        exc_info=True,
-                    )
-            trusted_dirs = []
-            self._engine = PermissionEngine(
-                config=self._static_config,
-                llm=llm,
-                model_name=model_name,
-                workspace_root=workspace_root,
-                trusted_dirs=trusted_dirs,
-            )
-        if self._host.tool_permission_checks_active is not None:
-            self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
+        self._key = permission_key if permission_key is not None else DEFAULT_KEY
         logger.info(
-            "[PermissionEngine] permission.rail.init intercept=all_tools optional_tool_tags=%s "
-            "tools_keys=%s llm_enabled=%s model_name=%s",
+            "[PermissionEngine] permission.rail.init intercept=all_tools optional_tool_tags=%s key=%s",
             sorted(self._tool_names),
-            list((self._static_config.get("tools") or {}).keys()),
-            self._engine._llm is not None,
-            self._engine._model_name,
+            self._key,
         )
+
+    @property
+    def permission_key(self) -> str:
+        """The key of the permission config this rail decides with."""
+        return self._key
 
     def _normalize_tool_name(self, tool_name: str) -> str:
         """Normalize tool name using aliases.
@@ -178,25 +168,6 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         Maps tool names from openjiuwen.harness.tools to mcp_* names used in config.
         """
         return TOOL_NAME_ALIASES.get(tool_name, tool_name)
-
-    def _get_permissions_snapshot(self, ctx: AgentCallbackContext) -> dict[str, Any] | None:
-        """Return the permissions snapshot for this tool call.
-
-        Product adapters may override this hook to compose request-scoped policy
-        overlays. Persistence continues to read the host's unmodified baseline.
-        """
-        if self._host.get_permissions_snapshot is None:
-            return None
-        snapshot = self._host.get_permissions_snapshot()
-        return snapshot if isinstance(snapshot, dict) else None
-
-    def _refresh_permissions_for_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Refresh the engine policy used by the current tool call."""
-        snapshot = self._get_permissions_snapshot(ctx)
-        if snapshot is not None:
-            self.update_config(snapshot)
-            return
-        self._engine.update_config(self._static_config)
 
     def _get_auto_confirm_key(self, tool_call: ToolCall) -> str:
         """Generate a conservative session auto-confirm key for the tool call."""
@@ -274,50 +245,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         ctx.extra["_interrupt_decision"] = decision
         self._apply_decision(ctx, tool_call, tool_name, decision)
 
-    def set_trusted_dirs(self, trusted_dirs: Optional[Iterable[Any]]) -> None:
-        """Per-request hot update of trusted directories.
-
-        Hosts (e.g. JiuWenSwarm adapter) call this when ``trusted_dirs`` arrives
-        with each request so that the external_directory check treats these
-        subtrees as internal and skips ask/deny for them.
-
-        Accepts raw strings (resolved to absolute ``Path``); ``None``/empty
-        clears the list. ``Path`` objects are passed through as-is.
-        """
-        from pathlib import Path as _Path
-
-        normalized: list[_Path] = []
-        if trusted_dirs:
-            for d in trusted_dirs:
-                if not d:
-                    continue
-                try:
-                    normalized.append(_Path(str(d)).expanduser().resolve(strict=False))
-                except (OSError, RuntimeError):
-                    continue
-        self._engine.update_trusted_dirs(normalized)
-        logger.info(
-            "[PermissionEngine] permission.rail.trusted_dirs_updated count=%d",
-            len(normalized),
-        )
-
-    def update_config(
-        self,
-        config: PermissionsSection | dict[str, Any],
-        tool_names: Optional[Iterable[str]] = None,
-    ) -> None:
-        """Hot-update static permission config；可选 ``tool_names`` 仅更新基类标签集合。"""
-        cfg_dict = cast(dict[str, Any], config)
-        self._static_config = cfg_dict
-        self._engine.update_config(cfg_dict)
-        if self._host.tool_permission_checks_active is not None:
-            self._engine.set_permission_checks_active(self._host.tool_permission_checks_active)
-        if tool_names is not None:
-            self._tool_names = {str(x).strip() for x in tool_names if str(x).strip()}
-        logger.info(
-            "[PermissionEngine] permission.rail.config_updated intercept=all_tools optional_tool_tags=%s",
-            sorted(self._tool_names),
-        )
+    def _registered_config(self) -> dict[str, Any]:
+        """Deep copy of the config registered under this rail's key."""
+        return deepcopy(dict(get_permission_manager().get_config(self._key)))
 
     def _collect_file_guard_persist_accesses(
         self,
@@ -338,9 +268,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 exc_info=True,
             )
             return []
-        # Use the engine's per-request trusted_dirs (set via set_trusted_dirs)
-        # so persist-time external-path detection matches the runtime check.
-        trusted_dirs = list(self._engine.trusted_dirs)
+        # Use the trusted_dirs the host put into the registered config's
+        # ``runtime`` so persist-time external-path detection matches the
+        # runtime check.
+        runtime = self._registered_config().get("runtime")
+        raw_dirs = runtime.get("trusted_dirs") if isinstance(runtime, dict) else None
+        trusted_dirs = [Path(d) for d in raw_dirs] if isinstance(raw_dirs, list) else []
         try:
             checker = build_file_guard_checker(
                 permissions_cfg,
@@ -365,8 +298,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         # Read from on-disk snapshot first (via host callback) so that
         # entries the user already deleted from config.yaml are NOT
-        # restored.  Fall back to engine.config only when snapshot is
-        # unavailable.
+        # restored.  Fall back to the registered config only when the snapshot
+        # is unavailable.
         base_cfg: PermissionsSection | None = None
         if self._host.get_permissions_snapshot is not None:
             try:
@@ -379,7 +312,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     exc_info=True,
                 )
         if base_cfg is None:
-            base_cfg = cast(PermissionsSection, deepcopy(self._engine.config))
+            base_cfg = cast(PermissionsSection, self._registered_config())
 
         cfg, ok_tool = merge_permission_allow_rule_into_permissions(
             base_cfg, normalized_name, tool_args
@@ -393,9 +326,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         if not ok_tool and not ok_ext:
             return False
 
-        prev_cfg = deepcopy(self._engine.config)
-        self.update_config(cfg)
-
+        # Whoever persists the rule refreshes the registered config.  A host
+        # callback does both; with the built-in yaml writer the rail is the
+        # persister, so it refreshes after a successful write.
         if self._host.persist_allow_rule is not None:
             try:
                 persisted = bool(
@@ -407,18 +340,24 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     exc_info=True,
                 )
                 persisted = False
-            if not persisted:
-                self.update_config(prev_cfg)
         else:
-            if not write_permissions_section_to_agent_config_yaml(
-                self._host.permission_yaml_path,
-                cfg,
-            ):
-                self.update_config(prev_cfg)
-                persisted = False
-            else:
-                persisted = True
+            persisted = bool(
+                write_permissions_section_to_agent_config_yaml(
+                    self._host.permission_yaml_path,
+                    cfg,
+                )
+            )
+            if persisted:
+                self._publish_persisted(cast(dict[str, Any], cfg))
         return persisted
+
+    def _publish_persisted(self, cfg: dict[str, Any]) -> None:
+        """Register ``cfg`` under this rail's key, keeping the registered ``runtime``."""
+        merged = dict(cfg)
+        runtime = self._registered_config().get("runtime")
+        if runtime is not None and "runtime" not in merged:
+            merged["runtime"] = runtime
+        get_permission_manager().update_config(merged, self._key)
 
     async def resolve_interrupt(
         self,
@@ -448,7 +387,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         user_input=user_input,
                         normalized_tool_name=normalized_name,
                         tool_args=tool_args,
-                        engine=self._engine,
+                        permission_key=self._key,
                     ),
                 )
             except Exception:
@@ -469,26 +408,21 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 "[PermissionEngine] permission.rail.first_check tool=%s normalized=%s",
                 tool_name, normalized_name
             )
-            # 与磁盘上的 permissions 对齐：若仅写盘未先/未后刷新内存，此处用旧 _static_config
-            # 会抹掉 approval_overrides 等；应提供 get_permissions_snapshot 或在落盘后已 update_config。
+            checks_active = self._host.tool_permission_checks_active
+            if checks_active is not None and not checks_active():
+                return self.approve()
             try:
-                self._refresh_permissions_for_tool_call(ctx)
-            except Exception:
-                logger.debug(
-                    "[PermissionEngine] permission.rail.snapshot_failed",
-                    exc_info=True,
-                )
-                self._engine.update_config(self._static_config)
-            try:
-                result = await self._engine.check_permission(
-                    tool_name=normalized_name,
-                    tool_args=tool_args,
+                result = await get_permission_manager().check_permission(
+                    normalized_name,
+                    tool_args,
+                    self._key,
                 )
             except Exception:
                 logger.error(
-                    "[PermissionEngine] permission.rail.check_failed tool=%s normalized=%s",
+                    "[PermissionEngine] permission.rail.check_failed tool=%s normalized=%s key=%s",
                     tool_name,
                     normalized_name,
+                    self._key,
                 )
                 raise
 

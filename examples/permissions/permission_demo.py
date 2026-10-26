@@ -42,12 +42,14 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
+from agent_shield.tool_permission import get_permission_manager
+
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.interrupt.response import ToolCallInterruptRequest
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.factory import create_deep_agent
-from openjiuwen.harness.security.core import PermissionEngine
+from openjiuwen.harness.security.models import PermissionLevel
 from openjiuwen.harness.security.factory import build_permission_interrupt_rail
 from openjiuwen.harness.security.host import ToolPermissionHost
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
@@ -82,20 +84,25 @@ def example_permission_host(workspace: Path, config_yaml: Path | None) -> ToolPe
     )
 
 
-def demo_sync_permission_engine(workspace: Path) -> None:
+def register_demo_permissions(workspace: Path) -> None:
+    """本脚本自己持有配置，所以先把权限配置登记到权限管理器的 ``default``。"""
     perms = example_permissions_dict()
-    engine = PermissionEngine(perms, workspace_root=workspace.resolve())
-    level, rule = engine.evaluate_global_policy_directly(
+    perms["runtime"] = {"workspace_root": str(workspace.resolve())}
+    get_permission_manager().update_config(perms)
+
+
+async def demo_sync_permission_engine(workspace: Path) -> None:
+    register_demo_permissions(workspace)
+    level, rule = await get_permission_manager().evaluate_global_policy_directly(
         "read_file",
         {"path": str(workspace / "notes.txt")},
     )
-    print("[Sync] evaluate_global_policy_directly(read_file) ->", level, "| rule:", rule)
+    print("[Global] evaluate_global_policy_directly(read_file) ->", level, "| rule:", rule)
 
 
 async def demo_async_check_permission(workspace: Path) -> None:
-    perms = example_permissions_dict()
-    engine = PermissionEngine(perms, workspace_root=workspace.resolve())
-    result = await engine.check_permission(
+    register_demo_permissions(workspace)
+    result = await get_permission_manager().check_permission(
         "read_file",
         {"path": str(workspace / "notes.txt")},
     )
@@ -104,8 +111,8 @@ async def demo_async_check_permission(workspace: Path) -> None:
         result.permission.value,
         "| matched_rule:",
         result.matched_rule,
-        "| needs_approval:",
-        result.needs_approval,
+        "| ask:",
+        result.permission == PermissionLevel.ASK,
     )
 
 
@@ -315,7 +322,7 @@ async def main() -> None:
     )
     print("Workspace:", workspace)
 
-    demo_sync_permission_engine(workspace)
+    await demo_sync_permission_engine(workspace)
     await demo_async_check_permission(workspace)
     demo_standalone_rail_factory(workspace)
     await demo_deep_agent_mounts_rails(workspace)
