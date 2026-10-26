@@ -434,13 +434,13 @@ _REWARD_ENTRY_SCHEMA = {
 }
 
 
-def _cause_schema(entry_schema: dict[str, Any] = _ENTRY_SCHEMA) -> dict[str, Any]:
+def _cause_schema(entry_schema: dict[str, Any] | None = None) -> dict[str, Any]:
     return _schema(
         {
             "diag_signal_id": _text_prop(
                 "诊断信号 id（照抄信号列表）", "Diagnostic signal id (copy verbatim from the signal list)"
             ),
-            "results": entry_schema,
+            "results": entry_schema if entry_schema is not None else _ENTRY_SCHEMA,
         },
         ["diag_signal_id", "results"],
     )

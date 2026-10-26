@@ -26,13 +26,14 @@ def completion_state(
     invalid = set(getattr(runtime, "invalid_signals", ()) or ())
     marks: dict[str, dict[str, Any]] = getattr(runtime, "marks", {}) or {}
 
-    reward_pending = sorted(
-        signal.signal_id
-        for signal in signals
-        if signal.source == SignalSource.REWARD
-        and signal.signal_id not in invalid
-        and signal.signal_id not in runtime.reward_attributions
-    )
+    reward_pending: list[str] = []
+    for signal in signals:
+        if signal.source != SignalSource.REWARD:
+            continue
+        if signal.signal_id in invalid or signal.signal_id in runtime.reward_attributions:
+            continue
+        reward_pending.append(signal.signal_id)
+    reward_pending.sort()
 
     marked_skill = sorted(
         signal_id

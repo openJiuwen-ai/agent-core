@@ -103,12 +103,11 @@ def _skills_in_node(node: TrajectoryNode) -> list[tuple[str, str]]:
 def detect_skill_usage(nodes_by_subagent: Mapping[str, list[TrajectoryNode]]) -> list[SkillUsage]:
     """Return the skills used in the selected range, each with its earliest node."""
     earliest: dict[str, tuple[int, str, str]] = {}
-    rows = [
-        (node.start_ts_ns, node.node_id, *usage)
-        for nodes in nodes_by_subagent.values()
-        for node in nodes
-        for usage in _skills_in_node(node)
-    ]
+    rows: list[tuple[int, str, str, str]] = []
+    for nodes in nodes_by_subagent.values():
+        for node in nodes:
+            for usage in _skills_in_node(node):
+                rows.append((node.start_ts_ns, node.node_id, *usage))
     for ts_ns, node_id, skill_key, kind in sorted(rows):
         previous = earliest.get(skill_key)
         if previous is None or (ts_ns, node_id) < (previous[0], previous[1]):
@@ -147,7 +146,7 @@ def rule_premarks(
             while start >= 0 and nodes[start].role != "user":
                 start -= 1
             keys: list[str] = []
-            for node in nodes[max(start, 0) : index + 1]:
+            for node in nodes[max(start, 0): index + 1]:
                 for skill_key, _kind in _skills_in_node(node):
                     if skill_key not in keys:
                         keys.append(skill_key)

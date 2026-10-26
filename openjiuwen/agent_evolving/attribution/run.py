@@ -145,8 +145,8 @@ class NodeBackedRuntime:
         )
         return status
 
+    @staticmethod
     def _record_bucket(
-        self,
         bucket: dict[str, list[dict[str, Any]]],
         signal_id: str,
         entries: list[dict[str, Any]],
