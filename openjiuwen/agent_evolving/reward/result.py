@@ -25,7 +25,8 @@ SCHEMA_VERSION = "reward/3"
 
 ITEM_SCORE = {"met": 100, "partial": 50, "unmet": 0, "unknown": None}
 
-SCORING_RULE = (f"每个维度 0–100：基础项占 {round(100 * FLOOR_WEIGHT)}%，主动挑战项占 {round(100 * (1 - FLOOR_WEIGHT))}%"
+SCORING_RULE = (f"每个维度 0–100：基础项占 {round(100 * FLOOR_WEIGHT)}%，"
+                f"主动挑战项占 {round(100 * (1 - FLOOR_WEIGHT))}%"
                 f"（达成 1、部分 0.5、未达成 0；无证据的项不计入）；基础项有未达成时该维度最多 {FLOOR_FAIL_CAP} 分；"
                 "基础项无证据不计入；整个维度都没有证据时不计分；总分是有分数维度的平均分。")
 

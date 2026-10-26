@@ -3,6 +3,7 @@
 import contextvars
 import json
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from .session import latest_session_history
@@ -80,3 +81,13 @@ def use(progress):
     """Make `progress` the current run's progress file in this context and the tasks it starts."""
     _current.set(progress)
     return progress
+
+
+@contextmanager
+def scoped(progress):
+    """Use a run's progress temporarily; restore the previous context even on cancellation."""
+    token = _current.set(progress)
+    try:
+        yield progress
+    finally:
+        _current.reset(token)
