@@ -2,6 +2,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import contextlib
+import asyncio
 import sys
 import types
 import unittest
@@ -82,6 +83,37 @@ def _streamable_client_patches(*, mock_tools, call_tool_mock):
 
 
 class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
+    async def test_connect_propagates_cancelled_error_group(self):
+        cancelled = asyncio.CancelledError("shutdown")
+
+        def fake_streamablehttp_client(*args, **kwargs):
+            raise BaseExceptionGroup("connect cancelled", [cancelled, GeneratorExit()])
+
+        fake_mcp = types.ModuleType("mcp")
+        fake_mcp.ClientSession = object
+        fake_mcp_client = types.ModuleType("mcp.client")
+        fake_streamable_http = types.ModuleType("mcp.client.streamable_http")
+        fake_streamable_http.streamablehttp_client = fake_streamablehttp_client
+        fake_streamable_http.streamable_http_client = fake_streamablehttp_client
+        fake_mcp_client.streamable_http = fake_streamable_http
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "mcp": fake_mcp,
+                    "mcp.client": fake_mcp_client,
+                    "mcp.client.streamable_http": fake_streamable_http,
+                },
+                clear=False,
+            ),
+            patch.object(Runner.callback_framework, "trigger", AsyncMock(return_value=None)),
+        ):
+            client = StreamableHttpClient("http://127.0.0.1:8930/mcp", "test-server")
+            with self.assertRaises(BaseExceptionGroup):
+                await client.connect(timeout=10.0)
+            self.assertIsNone(client._last_connect_error)
+
     async def test_connect_list_call_disconnect_lifecycle(self):
         call_args = {}
 

@@ -229,10 +229,9 @@ async def test_add_tool_server_coerces_exception_group_into_base_error() -> None
 
     err = exc_info.value
     assert err.status == StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR
-    # The mixed group is wrapped into a RuntimeError cause (the non-Exception
-    # sub-group cannot be re-raised as a plain Exception), surfacing a readable
-    # reason that names the server.
-    assert isinstance(err.cause, RuntimeError)
-    assert "demo" in str(err.cause)  # server_name
+    # The ordinary exception is extracted even when teardown also contributes
+    # a non-Exception base exception, preserving the actionable root cause.
+    assert err.cause is inner
+    assert "boom from list_tools" in str(err.cause)
     # connect() returned True, so disconnect cleanup must run on the failure path.
     assert fake_client.disconnect.await_count == 1

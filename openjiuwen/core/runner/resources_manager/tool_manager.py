@@ -170,21 +170,17 @@ class ToolMgr:
                             "add_tool_server cleanup failed: %s, server_id=%s",
                             disconnect_exc, server_config.server_id,
                         )
-                if isinstance(e, Exception) and not isinstance(e, asyncio.CancelledError):
-                    cause = e
-                elif isinstance(e, BaseExceptionGroup):
-                    exc_subgroup, base_subgroup = e.split(Exception)
-                    if exc_subgroup is not None and base_subgroup is None:
+                if isinstance(e, BaseExceptionGroup):
+                    exc_subgroup, _ = e.split(Exception)
+                    if exc_subgroup is not None:
                         subs = list(exc_subgroup.exceptions)
                         cause = subs[0] if len(subs) == 1 else exc_subgroup
-                    elif base_subgroup is not None:
-                        cause = RuntimeError(
-                            f"MCP server '{server_config.server_name}' register failed: {base_subgroup}"
-                        )
                     else:
                         cause = RuntimeError(
                             f"MCP server '{server_config.server_name}' register failed: {e}"
                         )
+                elif isinstance(e, Exception):
+                    cause = e
                 else:
                     cause = RuntimeError(
                         f"MCP server '{server_config.server_name}' register failed: "

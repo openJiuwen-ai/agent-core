@@ -198,12 +198,31 @@ class TestSseDoLifecycleIntegration:
             # exception raised (cleanup does not fail-fast).
             assert result is False
             assert state["session_aexit_called"] is True
+            assert state["client_aexit_called"] is True
             # Even though __aexit__ hung, the client state is reset.
             assert client._session is None
             assert client._client is None
             assert client._read is None
             assert client._write is None
             assert client._is_disconnected is True
+            await _stop(client)
+        finally:
+            state["patcher"].stop()
+
+    @pytest.mark.asyncio
+    async def test_do_disconnect_propagates_external_cancellation(self) -> None:
+        """Cancellation not raised by the local watchdog must terminate the
+        owner operation instead of being reported as a cleanup timeout."""
+        state = _install_fake_mcp(aexit_delay=10.0)
+        try:
+            client = _make_client()
+            with patch.object(Runner.callback_framework, "trigger", AsyncMock(return_value=None)):
+                await client.connect(timeout=NO_TIMEOUT)
+                task = asyncio.create_task(client.disconnect(timeout=10.0))
+                await asyncio.sleep(0)
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
             await _stop(client)
         finally:
             state["patcher"].stop()

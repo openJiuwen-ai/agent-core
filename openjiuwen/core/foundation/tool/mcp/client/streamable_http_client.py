@@ -117,9 +117,13 @@ class StreamableHttpClient(McpClient):
             # Extract HTTPStatusError from BaseExceptionGroup (caused by GeneratorExit
             # being BaseException) so real HTTP errors aren't misreported as cancelled.
             # CancelledError/KeyboardInterrupt propagate.
-            if isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)) \
-                and not isinstance(e, BaseExceptionGroup):
+            if isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)):
                 raise
+            if isinstance(e, BaseExceptionGroup):
+                cancelled_group, _ = e.split(asyncio.CancelledError)
+                keyboard_group, _ = e.split(KeyboardInterrupt)
+                if cancelled_group is not None or keyboard_group is not None:
+                    raise
             logger.error(f"Streamable-http connection failed to {self._server_path}: {e}")
             real_err: BaseException = e
             if isinstance(e, BaseExceptionGroup):
