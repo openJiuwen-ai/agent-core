@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from openjiuwen.agent_evolving.attribution.language import output_language_directive
 from openjiuwen.agent_evolving.attribution.model import (
     DiagnosticSignal,
     LlmRequestEvent,
@@ -440,7 +441,7 @@ def build_attribution_system_prompt(
         disabled.add("experience")
     if disabled:
         prompt = _renumber_goals(_strip_named_blocks(prompt, disabled))
-    return prompt
+    return f"{prompt}\n\n{output_language_directive(lang)}"
 
 
 def render_signal_block(signals: list[DiagnosticSignal], premarks: dict[str, list[str]] | None = None) -> str:
@@ -649,7 +650,8 @@ def build_wake_text(check_json: dict[str, Any], language: str = "zh") -> str:
 
 def build_trajectory_summary_system_prompt(language: str = "zh") -> str:
     """System prompt of the summary-only agent (no signals, no findings)."""
-    return _load_prompt(f"summary_{_normalize_language(language)}.md")
+    lang = _normalize_language(language)
+    return f"{_load_prompt(f'summary_{lang}.md')}\n\n{output_language_directive(lang)}"
 
 
 def build_trajectory_summary_initial_prompt(

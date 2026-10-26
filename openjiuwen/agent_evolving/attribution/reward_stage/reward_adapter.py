@@ -452,6 +452,7 @@ async def run_reward(
             failed Reward run.
     """
     from openjiuwen.agent_evolving.attribution.events import emit_single_llm_event
+    from openjiuwen.agent_evolving.reward import models as reward_models
     from openjiuwen.agent_evolving.reward import pipeline, progress
     from openjiuwen.agent_evolving.reward.options import RewardOptions
 
@@ -474,10 +475,14 @@ async def run_reward(
         )
 
     lines = _ProgressLines(say, language)
+    language_token = reward_models.set_requested_language(language)
     try:
-        with progress.using(lines):  # Reward's own per-run progress slot, restored on exit
-            options = RewardOptions(txt_response=reply, user_note=user_attribution or "", log=lines.log)
-            result = await pipeline.reward(task, artifacts, config, options)
+        try:
+            with progress.using(lines):  # Reward's own per-run progress slot, restored on exit
+                options = RewardOptions(txt_response=reply, user_note=user_attribution or "", log=lines.log)
+                result = await pipeline.reward(task, artifacts, config, options)
+        finally:
+            reward_models.reset_requested_language(language_token)
         payload = to_reward_payload(result, language)
     except Exception as exc:
         emit_single_llm_event(

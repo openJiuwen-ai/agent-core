@@ -51,6 +51,8 @@ def test_build_trajectory_summary_prompts() -> None:
     assert "300" in zh and "main:0" in zh
     assert "trajectory summary agent" in en
     assert "300" in en and "main:0" in en
+    assert "输出语言：中文" in zh
+    assert "Output language: English" in en
 
     initial_zh = build_trajectory_summary_initial_prompt(
         task_hint="写报告", subjects=_subjects(), language="zh"
@@ -69,6 +71,8 @@ def test_build_attribution_system_prompt_languages_and_swarm() -> None:
     en = build_attribution_system_prompt("en")
     assert "轨迹归因 Agent" in zh
     assert "trajectory attribution agent" in en
+    assert "输出语言：中文" in zh
+    assert "Output language: English" in en
     assert "swarm" not in zh
     swarm_zh = build_attribution_system_prompt("zh", swarm_mode=True)
     assert "多 Agent 协作" in swarm_zh
