@@ -39,16 +39,32 @@ class CompressionError(Exception):
         return self.kind == CompressionErrorKind.CONTEXT_OVERFLOW
 
 
+# Canonical, ambiguity-free context-length markers. These are used verbatim by
+# the strict main-call overflow predicate AND as the base for the compression
+# chain, so they must not overlap with TPM rate-limit wording ("token limit"/
+# "too many tokens") nor with arbitrary numeric substrings ("413" inside a
+# request id or a value): a false positive on the main-call path force-compacts
+# and irreversibly replaces real session messages with a summary.
 _CONTEXT_OVERFLOW_MARKERS = (
     "context length",
     "context_length",
     "maximum context",
     "max context",
-    "token limit",
-    "too many tokens",
     "prompt is too long",
     "input is too long",
     "request too large",
+)
+
+# Extra markers the compression chain may additionally treat as an overflow.
+# They are intentionally NOT used by the strict main-call predicate, because
+# there a false positive is destructive. On the compression chain a false
+# positive costs only one extra retry (history is never rewritten), so the
+# chain accepts ambiguous wording and a bare "413": an upstream gateway often
+# wraps a payload-too-large error as `RuntimeError("HTTP 413: request entity
+# too large")` without exposing a status attribute.
+_CONTEXT_OVERFLOW_LENIENT_MARKERS = (
+    "token limit",
+    "too many tokens",
     "413",
 )
 
@@ -178,10 +194,30 @@ def classify_compression_error(error: BaseException) -> CompressionError:
     )
 
 
+def is_strict_context_overflow(error: BaseException) -> bool:
+    """Strict context-overflow check for the destructive main-call recovery.
+
+    Unlike ``classify_compression_error`` (which trades precision for recall
+    because a false positive inside the compression chain costs only one extra
+    retry), this predicate is intentionally conservative: it returns True only
+    for an explicit 413 status code or an unambiguous context-length text
+    marker. A bare "413" substring or TPM-style "token limit"/"too many tokens"
+    wording therefore never triggers the main-call recovery, which would
+    otherwise force-compact the session and irreversibly replace real messages
+    with a summary on an unrelated error.
+    """
+    if _extract_status_code(error) == 413:
+        return True
+    normalized = _error_text(error).lower()
+    return _contains_any(normalized, _CONTEXT_OVERFLOW_MARKERS)
+
+
 def _classify_compression_error_kind(error: BaseException, message: str) -> CompressionErrorKind:
     normalized = message.lower()
     status_code = _extract_status_code(error)
-    if _contains_any(normalized, _CONTEXT_OVERFLOW_MARKERS):
+    if _contains_any(normalized, _CONTEXT_OVERFLOW_MARKERS) or _contains_any(
+        normalized, _CONTEXT_OVERFLOW_LENIENT_MARKERS
+    ):
         return CompressionErrorKind.CONTEXT_OVERFLOW
     if status_code == 413:
         return CompressionErrorKind.CONTEXT_OVERFLOW

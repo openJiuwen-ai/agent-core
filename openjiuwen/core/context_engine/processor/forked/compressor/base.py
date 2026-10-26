@@ -417,9 +417,16 @@ class PrefixCompactProcessor(ContextProcessor):
     def _auto_compression_executors(
         self, kwargs: dict[str, Any]
     ) -> tuple[CompressionExecutor | None, Callable[[], CompressionExecutor] | None]:
-        """Select per-call models only for passive compression."""
+        """Select the dedicated auto-compression models for passive and forced calls.
+
+        ``force=True`` (manual /compact and overflow recovery) no longer bypasses
+        this selection: forced compaction uses the same dedicated model pair
+        (``auto_compression.model_name`` primary + ``fallback_model_name`` backup)
+        with credentials reused from the main conversation model. Only a missing
+        ``auto_compression`` config falls back to ``self._compression_executor``.
+        """
         auto_config = getattr(self.config, "auto_compression", None)
-        if auto_config is None or kwargs.get("force"):
+        if auto_config is None:
             return None, None
 
         request_config = kwargs.get("model_config") or getattr(self.config, "model", None)

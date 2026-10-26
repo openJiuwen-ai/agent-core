@@ -57,10 +57,10 @@ def _client():
     [
         ("", False, "desktop-selected"),
         ("compact-primary", False, "compact-primary"),
-        ("compact-primary", True, "startup-model"),
+        ("compact-primary", True, "compact-primary"),
     ],
 )
-async def test_auto_compression_selects_configured_or_current_model_without_changing_manual_path(
+async def test_auto_compression_selects_configured_or_current_model(
     configured_name, force, expected_name
 ):
     created = []
@@ -333,7 +333,7 @@ async def test_auto_compression_preserves_context_when_both_models_return_empty(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("force", [False, True])
-async def test_empty_response_preserves_context_without_applicable_backup(force):
+async def test_empty_response_preserves_context_when_backup_exhausted_or_absent(force):
     calls = []
 
     def model_factory(client, request):
@@ -365,4 +365,40 @@ async def test_empty_response_preserves_context_without_applicable_backup(force)
     assert event is None
     assert updated.context_messages == original
     context.set_messages.assert_not_called()
-    assert calls == ["startup-model" if force else "compact-primary"] * 3
+    # force now also uses the dedicated pair: primary retries plus the
+    # backup ladder when a fallback model is configured.
+    assert calls == ["compact-primary"] * 3 + (["compact-backup"] * 3 if force else [])
+
+
+@pytest.mark.asyncio
+async def test_force_compression_falls_back_to_auto_compression_backup():
+    calls = []
+
+    def model_factory(client, request):
+        model = MagicMock()
+
+        async def invoke(**kwargs):
+            calls.append(request.model_name)
+            if request.model_name != "compact-backup":
+                raise TimeoutError("model timed out")
+            return AssistantMessage(content="Backup compact state")
+
+        model.invoke = invoke
+        return model
+
+    with patch("openjiuwen.core.context_engine.processor.forked.compressor.base.Model", side_effect=model_factory):
+        compressor = DialogueCompressor(
+            DialogueCompressorConfig(
+                model=ModelRequestConfig(model_name="startup-model"),
+                model_client=_client(),
+                auto_compression={"model_name": "compact-primary", "fallback_model_name": "compact-backup"},
+            )
+        )
+        event, _ = await compressor.on_get_context_window(
+            _context(), _window(), force=True,
+            model_config=ModelRequestConfig(model_name="desktop-selected"),
+            model_client_config=_client(),
+        )
+
+    assert event is not None
+    assert calls == ["compact-primary", "compact-primary", "compact-primary", "compact-backup"]
