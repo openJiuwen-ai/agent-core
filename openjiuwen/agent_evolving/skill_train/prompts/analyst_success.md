@@ -16,6 +16,7 @@ focusing on the most broadly applicable patterns. You may produce fewer if warra
 Respond ONLY with a valid JSON object:
 {
   "batch_size": <number of trajectories analysed>,
+  "skill_name": "<required when multiple skills are listed; omit for a single skill>",
   "success_patterns": ["<pattern 1>", "<pattern 2>"],
   "patch": {
     "reasoning": "<why these patterns are worth encoding>",

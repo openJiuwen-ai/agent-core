@@ -30,12 +30,15 @@ from openjiuwen.agent_evolving.skill_train.sleep import (
     adopt_staged_skill_async,
     run_sleep_cycle,
 )
+from openjiuwen.agent_evolving.skill_train.skill_bundle import SkillBundle, load_skill_bundle
 from openjiuwen.agent_evolving.skill_train.trainer import SkillReflACTTrainer, SkillTrainResult
 
 __all__ = [
     "SkillTrainConfig",
     "SkillReflACTTrainer",
     "SkillTrainResult",
+    "SkillBundle",
+    "load_skill_bundle",
     "get_env_adapter",
     "SleepConfig",
     "CycleOutcome",

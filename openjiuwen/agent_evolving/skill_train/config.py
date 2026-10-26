@@ -15,6 +15,8 @@ class SkillTrainConfig:
     env_name: str = "searchqa"
     output_dir: str = "./outputs/skill_train"
     skill_init: str = ""
+    # name → initial SKILL.md path; combined with skill_init (default name).
+    skill_inits: Dict[str, str] = field(default_factory=dict)
     num_epochs: int = 4
     train_size: int = 0
     batch_size: int = 40
@@ -93,5 +95,7 @@ class SkillTrainConfig:
         }
         if self.skill_init:
             cfg["skill_init"] = self.skill_init
+        if self.skill_inits:
+            cfg["skill_inits"] = dict(self.skill_inits)
         cfg.update(self.env_kwargs)
         return cfg

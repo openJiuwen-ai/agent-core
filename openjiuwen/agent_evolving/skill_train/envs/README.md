@@ -17,6 +17,7 @@
 - 工具多轮环路（参考 officeqa）
 - 多模态特殊输入（参考 docvqa）
 - 自定义 reflect、非 item-list env manager
+- 容器 verifier 评分（参考 [skillsbench/](./skillsbench/)）
 
 ## 目录骨架
 
@@ -63,7 +64,7 @@ def load_split_items(self, split_path: str) -> list[dict]:
 | 字段 | 含义 |
 |------|------|
 | `hard` | 0/1，门禁与准确率统计 |
-| `soft` | 0.0–1.0，连续分 |
+| `soft` | 0.0–1.0，连续分（SkillsBench 用 verifier 的 `passed/total`） |
 
 ### 3. Rollout：`process_one` + 薄 `run_batch`
 
@@ -146,7 +147,17 @@ target 换成 jiuwenswarm coding agent，本仓库只做适配，实际由 `jiuw
    从 `--jsonl` 事件流中提取最终回答（`chat.final` → 退化到 `chat.delta` 拼接），空回答会带提示重试一次。
 3. 事件流被压成 `[n] tool_call: read_file task.md` 形式写入 `predictions/<id>/jiuwenswarm_trace_steps.txt`
    （附带 `jiuwenswarm_raw.txt` / `jiuwenswarm_trace_summary.txt`），reflect 阶段通过
-   `REFLACT_JIUWENSWARM_TRACE_TO_OPTIMIZER=1` 把它作为 `JiuwenSwarm Trace Steps` 附件喂给 analyst。
+   `REFLACT_JIUWENSWARM_TRACE_TO_OPTIMIZER=1` 把它作为 `JiuwenSwarm Trace Steps` 附件喂给 analyst，
+   并把完整最终回答作为 `Final Answer` 附件一并给出。
+   压缩预算可用环境变量调整（单条轨迹默认 12000 字符，超出时从中间掐断、保留头尾并标注省略区间）：
+
+   | 变量 | 默认 | 含义 |
+   |------|------|------|
+   | `REFLACT_TRACE_MAX_CHARS` | 12000 | 单条轨迹渲染后的总字符预算 |
+   | `REFLACT_TRACE_CALL_CHARS` | 500 | 单条 tool_call 参数摘要 |
+   | `REFLACT_TRACE_RESULT_CHARS` | 900 | 单条 tool_result 摘要 |
+   | `REFLACT_TRACE_TEXT_CHARS` | 900 | 单条正文 / 最终答案 |
+   | `REFLACT_VERIFIER_OUTPUT_CHARS` | 3000 | verifier 输出摘录 |
 
 新 env 接入时，在 `process_one` 开头按 `is_target_exec_backend()` 分流即可：
 

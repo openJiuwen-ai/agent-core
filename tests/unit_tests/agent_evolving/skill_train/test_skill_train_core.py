@@ -258,7 +258,7 @@ class TestEpochEndHooks:
         trainer = SkillReflACTTrainer.__new__(SkillReflACTTrainer)
         out_root = str(tmp_path)
         current = "# Skill\nbody"
-        current, *_rest, pairs = trainer._run_epoch_slow_update(
+        outcome = trainer._run_epoch_slow_update(
             SlowUpdateRequest(
                 adapter=None,
                 dataloader=None,
@@ -283,8 +283,8 @@ class TestEpochEndHooks:
                 sel_cache={},
             )
         )
-        assert has_slow_update_field(current)
-        assert pairs is None
+        assert has_slow_update_field(outcome.current_skill)
+        assert outcome.comparison_pairs is None
         slow_result = load_json(tmp_path / "slow_update" / "epoch_01" / "slow_result.json")
         assert slow_result["action"] == "inject_placeholder"
 
