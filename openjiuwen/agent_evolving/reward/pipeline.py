@@ -233,7 +233,7 @@ def ensure_visual(criteria, task):
     criterion exists, a standard one is added. A "kind": "visual" that neither the Task nor the criterion's name
     supports (e.g. "clarity" of a text answer) is dropped: it would be judged from screenshots that do not exist.
     """
-    chinese = models.is_chinese(task)
+    chinese = models.is_chinese_answer(task)
     looked_at = bool(VISUAL_TASK.search(task or ""))
     found = False
     for c in criteria:
@@ -418,7 +418,7 @@ def overall_summary(task, results):
     scored = [r for r in results if r.get("score") is not None]
     if not scored:
         return ""
-    chinese = models.is_chinese(task)
+    chinese = models.is_chinese_answer(task)
     best, worst = max(scored, key=lambda r: r["score"]), min(scored, key=lambda r: r["score"])
     top, low = best.get("name") or best["id"], worst.get("name") or worst["id"]
     if len(scored) == 1:

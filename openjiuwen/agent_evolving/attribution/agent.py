@@ -16,6 +16,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from openjiuwen.agent_evolving.attribution.language import output_language_directive
 from openjiuwen.agent_evolving.attribution.model import (
     DiagnosticSignal,
     LlmRequestEvent,
@@ -290,8 +291,26 @@ class AttributionAgentRuntime(Protocol):
         """Render a character window of one node field."""
         ...
 
-    def record_attribution(self, signal_id: str, entries: list[dict[str, Any]]) -> str:
-        """Record attribution entries for a signal."""
+    def mark_signal_topic(
+        self,
+        signal_id: str,
+        category: str,
+        skill_key: str | None = None,
+        relation: str | None = None,
+    ) -> str:
+        """Mark a signal as belonging to a skill or experience topic."""
+        ...
+
+    def record_reward_failure(self, signal_id: str, entries: list[dict[str, Any]]) -> str:
+        """Record located causes for one reward-source signal."""
+        ...
+
+    def record_skill_cause(self, signal_id: str, entries: list[dict[str, Any]]) -> str:
+        """Record located causes for one skill-marked signal."""
+        ...
+
+    def record_experience_cause(self, signal_id: str, entries: list[dict[str, Any]]) -> str:
+        """Record located causes for one experience-marked signal."""
         ...
 
     def mark_signal_invalid(self, signal_id: str) -> str:
@@ -299,15 +318,23 @@ class AttributionAgentRuntime(Protocol):
         ...
 
     def record_artifact_improvement(self, md: str) -> str:
-        """Record Markdown advice for improving the artifact."""
+        """Record Markdown advice for improving the artifact (experimental path)."""
         ...
 
-    def record_skill_evolution(self, key: str, md: str) -> str:
+    def record_skill_evolution(self, key: str, md: str, confidence: float = 0.5) -> str:
         """Record Markdown advice for improving a skill."""
         ...
 
-    def completion_overview(self) -> dict[str, Any]:
-        """Return the attribution completion state."""
+    def record_experience_evolution(self, outcome: str, suggestions: list[str]) -> str:
+        """Record the experience verdict of this diagnosis."""
+        ...
+
+    def record_trajectory_summary(self, summary: str) -> str:
+        """Record the trajectory narrative."""
+        ...
+
+    def skill_keys(self) -> set[str]:
+        """Return the Skill keys usable by this run (the prompt inventory)."""
         ...
 
     def on_progress(self) -> None:
@@ -328,80 +355,119 @@ def _load_prompt(filename: str) -> str:
     return _prompt_cache[filename]
 
 
-_SKILL_TOOL_NAME = "submit_skill_evolution"
+_SKILL_TOOLS = frozenset(
+    {
+        "submit_skill_evolution",
+        "submit_skill_evolution_cause",
+    }
+)
+_EXPERIENCE_TOOLS = frozenset(
+    {
+        "submit_experience_evolution",
+        "submit_experience_cause",
+    }
+)
+_MARK_TOOL = "mark_signal_topic"
+_BLOCK_PATTERN = re.compile(r"<!--\s*(\w+):start\s*-->\n?(.*?)<!--\s*\1:end\s*-->\n?", re.S)
+
+
+def filter_attribution_tools(
+    tools: list[Any],
+    *,
+    skill_evolution: bool = True,
+    ttse_advice: bool = True,
+) -> list[Any]:
+    """Drop the tools of a disabled switch (and the mark tool when both are off)."""
+    dropped: set[str] = set()
+    if not skill_evolution:
+        dropped |= _SKILL_TOOLS
+    if not ttse_advice:
+        dropped |= _EXPERIENCE_TOOLS
+    if not skill_evolution and not ttse_advice:
+        dropped.add(_MARK_TOOL)
+    return [tool for tool in tools if getattr(tool, "tool_name", "") not in dropped]
 
 
 def filter_skill_evolution_tool(tools: list[Any], *, enabled: bool = True) -> list[Any]:
-    """Drop the skill evolution tool when skill evolution is disabled.
-
-    The tool stays out of the agent's toolset entirely, so a disabled host
-    switch turns into a hard capability boundary rather than a prompt hint.
-    """
-    if enabled:
-        return tools
-    return [tool for tool in tools if getattr(tool, "tool_name", "") != _SKILL_TOOL_NAME]
+    """Backward-compatible wrapper: drop only the skill evolution tools when disabled."""
+    return filter_attribution_tools(tools, skill_evolution=enabled, ttse_advice=True)
 
 
-def _strip_skill_evolution(prompt: str) -> str:
-    """Remove every prompt paragraph that advertises ``submit_skill_evolution``.
+def _strip_named_blocks(prompt: str, disabled: set[str]) -> str:
+    """Remove the optional prompt blocks of disabled switches."""
 
-    Used when the tool is not registered so the system prompt never names a
-    tool the agent cannot call.  Numbered list items that keep their leading
-    number after a removal are closed up, which only affects the goal list.
-    """
-    lines = [line for line in prompt.splitlines() if _SKILL_TOOL_NAME not in line]
-    out: list[str] = []
-    index = 0
-    while index < len(lines):
-        if not re.match(r"^\d+\. ", lines[index]):
-            out.append(lines[index])
-            index += 1
-            continue
-        run_end = index
-        while run_end < len(lines) and re.match(r"^\d+\. ", lines[run_end]):
-            run_end += 1
-        run = lines[index:run_end]
-        numbers = []
-        for line in run:
-            match = re.match(r"^(\d+)\. ", line)
-            if match:
-                numbers.append(int(match.group(1)))
-        if numbers and numbers != list(range(numbers[0], numbers[0] + len(numbers))):
-            base = numbers[0]
-            out.extend(re.sub(r"^\d+\. ", f"{base + offset}. ", line) for offset, line in enumerate(run))
-        else:
-            out.extend(run)
-        index = run_end
-    return "\n".join(out)
+    def replace(match: re.Match[str]) -> str:
+        return "" if match.group(1) in disabled else match.group(2)
+
+    return _BLOCK_PATTERN.sub(replace, prompt)
+
+
+def _renumber_goals(prompt: str) -> str:
+    """Close up the numbered goal list after optional goals were removed."""
+    lines = prompt.splitlines()
+    try:
+        start = next(
+            index for index, line in enumerate(lines) if line.strip().startswith(("# 目标", "# Goals"))
+        )
+    except StopIteration:
+        return prompt
+    number = 0
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if line.startswith("# "):
+            break
+        match = re.match(r"^\d+\. (.*)$", line)
+        if match:
+            number += 1
+            lines[index] = f"{number}. {match.group(1)}"
+    return "\n".join(lines)
 
 
 def build_attribution_system_prompt(
     language: str = "zh",
     swarm_mode: bool = False,
     skill_evolution: bool = True,
+    ttse_advice: bool = True,
 ) -> str:
-    """Assemble the system prompt; the swarm addendum is appended when enabled.
-
-    ``skill_evolution=False`` drops the ``submit_skill_evolution`` goals and
-    reporting paragraphs instead of advertising an unregistered tool.
-    """
+    """Assemble the system prompt; disabled switches lose their optional blocks."""
     lang = _normalize_language(language)
     prompt = _load_prompt(f"{lang}.md")
     if swarm_mode:
         prompt = f"{prompt}\n\n{_load_prompt(f'swarm_{lang}.md')}"
+    disabled: set[str] = set()
     if not skill_evolution:
-        prompt = _strip_skill_evolution(prompt)
-    return prompt
+        disabled.add("skill_evolution")
+    if not ttse_advice:
+        disabled.add("experience")
+    if disabled:
+        prompt = _renumber_goals(_strip_named_blocks(prompt, disabled))
+    return f"{prompt}\n\n{output_language_directive(lang)}"
 
 
-def render_signal_block(signals: list[DiagnosticSignal]) -> str:
-    """One JSON object per diagnostic signal, verbatim and untranslated."""
-    return "\n".join(json.dumps(signal.to_dict(), ensure_ascii=False) for signal in signals)
+def render_signal_block(signals: list[DiagnosticSignal], premarks: dict[str, list[str]] | None = None) -> str:
+    """One JSON object per diagnostic signal, verbatim and untranslated.
+
+    ``premarks`` (signal id -> skill keys) appends a rule hint to that line; it
+    never creates an obligation.
+    """
+    rows: list[str] = []
+    for signal in signals:
+        data = signal.to_dict()
+        keys = (premarks or {}).get(signal.signal_id)
+        if keys:
+            data["rule_premark"] = list(keys)
+        rows.append(json.dumps(data, ensure_ascii=False))
+    return "\n".join(rows)
 
 
 def render_subjects_block(subjects: list[SubjectRef]) -> str:
     """One line per participating subagent."""
     return "\n".join(f"- {subject.id} | {subject.display_name} | {subject.kind}" for subject in subjects)
+
+
+def render_skill_block(usages: list[Any]) -> str:
+    """One line per used skill: its key and the node it first appeared in."""
+    return "\n".join(f"- {usage.skill_key}（最早调用节点 {usage.first_node_id}）" for usage in usages)
 
 
 def build_attribution_initial_prompt(
@@ -413,40 +479,74 @@ def build_attribution_initial_prompt(
     language: str = "zh",
     review_deliverables: bool = True,
     skill_evolution: bool = True,
+    ttse_advice: bool = True,
+    skill_usages: list[Any] | None = None,
+    premarks: dict[str, list[str]] | None = None,
 ) -> str:
-    """Assemble the initial user prompt template (task, reward, signals, subjects).
+    """Assemble the initial user prompt (task, reward, signals, subjects, Skill list).
 
-    ``review_deliverables=False`` (no deliverable was reviewed: the selection holds none's final version)
-    adds a scope note: analyse the process only and submit no artifact improvement.
-    ``skill_evolution=False`` drops the skill improvement clause because the tool is
-    not registered for such runs.
+    ``skill_usages`` (rule-detected, optional) adds the Skill list section and
+    the constraint that global skill advice must come from it.  ``premarks``
+    append per-signal hints only.  Disabled switches drop their sections.
     """
     lang = _normalize_language(language)
-    reward_block = (
-        f"- 总分：{reward_overall.total_score}\n- 总评：{reward_overall.comment}"
-        if reward_overall is not None
-        else "（本次无 Reward 总评）"
-    )
+    usages = list(skill_usages or ()) if skill_evolution else []
     if lang == "en":
         reward_block = (
             f"- Total score: {reward_overall.total_score}\n- Comment: {reward_overall.comment}"
             if reward_overall is not None
             else "(no reward overall this run)"
         )
-    if lang == "en":
+        skill_section = (
+            "\n\n## Skills Used by This Trajectory\n"
+            f"{render_skill_block(usages)}\n"
+            "`submit_skill_evolution` and `mark_signal_topic(category=\"skill\")` must use a name "
+            "from this list."
+            if usages
+            else ""
+        )
+        experience_section = (
+            "\n\n## Experience (TTSE) Hints\n"
+            "- Tool execution failed -> outcome is at least `partial`;\n"
+            "- A user negative-feedback signal exists -> `partial`;\n"
+            "- Fewer than 5 tool calls -> do not submit an experience entry.\n"
+            "Decide first, mark second: call `mark_signal_topic(category=\"experience\")` only when "
+            "you will distill an experience; if you change your mind, undo the mark with "
+            "`mark_signal_invalid`."
+            if ttse_advice
+            else ""
+        )
+        marked = skill_evolution or ttse_advice
+        route_extra = (
+            "- Signal marked skill/experience -> its `submit_*_cause` tool; unmarked rule signals are "
+            "not submitted (their conclusion goes into `submit_trajectory_summary`).\n"
+            if marked
+            else ""
+        )
+        order = (
+            "Work order: read with `view_*` -> judge and `mark_signal_topic` -> directed cause tools -> "
+            "global advice tools -> `submit_trajectory_summary` -> `check_attribution_complete` until it "
+            "returns all_done=true. The mark of a signal must precede its cause; interleaving is fine."
+            if marked
+            else "Work order: read with `view_*` -> directed cause tools -> `submit_trajectory_summary` -> "
+            "`check_attribution_complete` until it returns all_done=true."
+        )
         return (
             "## Task Description\n"
             f"{task_description}\n\n"
             "## Reward Overall\n"
             f"{reward_block}\n\n"
             "## Diagnostic Signals (one JSON per line, verbatim, not translated)\n"
-            f"{render_signal_block(signals) or '(none)'}\n\n"
+            f"{render_signal_block(signals, premarks) or '(none)'}\n\n"
             "## Subagent List (subagent_id = subagent_key; display_name is the display name; kind is the type)\n"
-            f"{render_subjects_block(subjects)}\n\n"
-            "Process every diagnostic signal above: attribute it (submit_attribution) or mark it "
-            "invalid (mark_signal_invalid); submit the artifact/task-execution improvement"
-            + (" and, when applicable, skill improvements" if skill_evolution else "")
-            + "; finally call check_attribution_complete until all_done=true."
+            f"{render_subjects_block(subjects)}"
+            f"{skill_section}"
+            f"{experience_section}\n\n"
+            "## Routing and order\n"
+            "Route every signal exactly as follows:\n"
+            "- Reward-source signal -> `submit_reward_failure` (or `mark_signal_invalid`);\n"
+            f"{route_extra}"
+            f"{order}"
             + (
                 ""
                 if review_deliverables
@@ -455,18 +555,60 @@ def build_attribution_initial_prompt(
                 "used) and do not call submit_artifact_improvement; check_attribution_complete does not ask for it."
             )
         )
+    reward_block = (
+        f"- 总分：{reward_overall.total_score}\n- 总评：{reward_overall.comment}"
+        if reward_overall is not None
+        else "（本次无 Reward 总评）"
+    )
+    skill_section = (
+        "\n\n## 本次轨迹使用的 Skill 清单\n"
+        f"{render_skill_block(usages)}\n"
+        "`submit_skill_evolution` 的 target 与 `mark_signal_topic(category=\"skill\")` 的 skill_key "
+        "必须从本清单选择。"
+        if usages
+        else ""
+    )
+    experience_section = (
+        "\n\n## 经验判定（TTSE）提示\n"
+        "- 轨迹存在工具执行失败 → outcome 至少 `partial`；\n"
+        "- 存在用户负反馈信号 → `partial`；\n"
+        "- 工具调用次数 < 5 → 本次不产出 experience 条目。\n"
+        "先判定后标记：只有确定会沉淀经验时才调用 `mark_signal_topic(category=\"experience\")`；"
+        "若标记后推翻判定，用 `mark_signal_invalid` 解除。"
+        if ttse_advice
+        else ""
+    )
+    marked = skill_evolution or ttse_advice
+    route_extra = (
+        "- 被标 skill/experience 的信号 → 对应的 `submit_*_cause` 工具；未标记的规则信号不提交，"
+        "结论写进 `submit_trajectory_summary`。\n"
+        if marked
+        else ""
+    )
+    order = (
+        "工作顺序：`view_*` 读轨迹 → 判定并 `mark_signal_topic` → 定向归因工具 → 全局演进工具 → "
+        "`submit_trajectory_summary` → `check_attribution_complete`，直到返回 all_done=true。每个信号的"
+        "标记必须先于其定向提交；允许边判边标边提。"
+        if marked
+        else "工作顺序：`view_*` 读轨迹 → 定向归因工具 → `submit_trajectory_summary` → "
+        "`check_attribution_complete`，直到返回 all_done=true。"
+    )
     return (
         "## 任务描述\n"
         f"{task_description}\n\n"
         "## Reward 总评\n"
         f"{reward_block}\n\n"
         "## 待归因诊断信号（每行一条 JSON，原文未翻译）\n"
-        f"{render_signal_block(signals) or '（无）'}\n\n"
+        f"{render_signal_block(signals, premarks) or '（无）'}\n\n"
         "## subagent 列表（subagent_id = subagent_key；display_name 为展示名；kind 为类型）\n"
-        f"{render_subjects_block(subjects)}\n\n"
-        "请逐条处理上述诊断信号：定位归因（submit_attribution）或标记无效（mark_signal_invalid）；"
-        "提交产物/任务执行改进意见" + ("与（如适用）技能改进意见" if skill_evolution else "")
-        + "；最后调用 check_attribution_complete，直到 all_done=true。"
+        f"{render_subjects_block(subjects)}"
+        f"{skill_section}"
+        f"{experience_section}\n\n"
+        "## 信号路由与工作顺序\n"
+        "按以下规则逐条路由：\n"
+        "- reward 源信号 → `submit_reward_failure`（或 `mark_signal_invalid`）；\n"
+        f"{route_extra}"
+        f"{order}"
         + (
             ""
             if review_deliverables
@@ -484,10 +626,12 @@ def build_wake_text(check_json: dict[str, Any], language: str = "zh") -> str:
             "The previous run ended naturally, but the completion check did not pass. "
             f"check_attribution_complete returned:\n\n{block}\n\n"
             "Please finish the remaining items:\n"
-            "- For each signal in pending_signal_ids: complete its attribution via submit_attribution, "
-            "or mark it invalid via mark_signal_invalid;\n"
-            "- If missing_artifact_improvement=true: submit the artifact improvement via "
-            "submit_artifact_improvement;\n"
+            "- pending_reward_signal_ids: submit_reward_failure or mark_signal_invalid;\n"
+            "- pending_skill_cause_signal_ids / pending_experience_cause_signal_ids: submit the "
+            "matching submit_*_cause tool;\n"
+            "- missing_skill_globals: submit_skill_evolution for each listed skill;\n"
+            "- missing_experience_evolution=true: submit_experience_evolution;\n"
+            "- missing_trajectory_summary=true: submit_trajectory_summary;\n"
             "- Then call check_attribution_complete again until all_done=true; at the end, echo that "
             "JSON verbatim."
         )
@@ -495,10 +639,106 @@ def build_wake_text(check_json: dict[str, Any], language: str = "zh") -> str:
         "上一轮运行已自然结束，但完成度检查未通过。check_attribution_complete 返回：\n\n"
         f"{block}\n\n"
         "请继续完成未汇报项：\n"
-        "- pending_signal_ids 中的每条信号：用 submit_attribution 完成定位归因，或 mark_signal_invalid 标记无效；\n"
-        "- 若 missing_artifact_improvement=true：调用 submit_artifact_improvement 补交改进意见；\n"
+        "- pending_reward_signal_ids：用 submit_reward_failure 完成定位归因，或 mark_signal_invalid 标记无效；\n"
+        "- pending_skill_cause_signal_ids / pending_experience_cause_signal_ids：调用对应的 submit_*_cause 工具；\n"
+        "- missing_skill_globals：为列出的每个 skill 调用 submit_skill_evolution；\n"
+        "- missing_experience_evolution=true：调用 submit_experience_evolution；\n"
+        "- missing_trajectory_summary=true：调用 submit_trajectory_summary；\n"
         "- 完成后再次调用 check_attribution_complete，直到 all_done=true；结束时原样复述该 JSON。"
     )
+
+
+def build_trajectory_summary_system_prompt(language: str = "zh") -> str:
+    """System prompt of the summary-only agent (no signals, no findings)."""
+    lang = _normalize_language(language)
+    return f"{_load_prompt(f'summary_{lang}.md')}\n\n{output_language_directive(lang)}"
+
+
+def build_trajectory_summary_initial_prompt(
+    *,
+    task_hint: str,
+    subjects: list[SubjectRef],
+    language: str = "zh",
+) -> str:
+    """Initial user prompt for the summary-only agent."""
+    lang = _normalize_language(language)
+    hint = (task_hint or "").strip()
+    if lang == "en":
+        return (
+            "## Task Hint (may be empty or incomplete)\n"
+            f"{hint or '(none)'}\n\n"
+            "## Subagent List (subagent_id = subagent_key; display_name is the display name; kind is the type)\n"
+            f"{render_subjects_block(subjects)}\n\n"
+            "Read the selected trajectory, then call submit_trajectory_summary with one paragraph of at "
+            "most 300 characters that contains no concrete node ids."
+        )
+    return (
+        "## 任务线索（可能为空或不完整）\n"
+        f"{hint or '（无）'}\n\n"
+        "## subagent 列表（subagent_id = subagent_key；display_name 为展示名；kind 为类型）\n"
+        f"{render_subjects_block(subjects)}\n\n"
+        "请阅读选中范围的轨迹，然后调用 submit_trajectory_summary 提交一段不超过 300 字、"
+        "不包含具体节点 id 的摘要。"
+    )
+
+
+def build_trajectory_summary_agent(
+    *,
+    model: "Model",
+    runtime: AttributionAgentRuntime,
+    language: str = "zh",
+    total_token_budget: int | None = _DEFAULT_CONTEXT_BUDGET_TOKENS,
+    max_iterations: int = 40,
+    max_context_messages: int = _DEFAULT_MAX_CONTEXT_MESSAGES,
+    status_sink: StatusSink | None = None,
+    model_name: str = "",
+    status_counter: list[int] | None = None,
+) -> tuple["DeepAgent", ContextBudgetRail]:
+    """Build the summary-only agent: read tools + submit_trajectory_summary."""
+    from openjiuwen.agent_evolving.attribution.tools import build_summary_tools
+    from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+    from openjiuwen.harness.factory import create_deep_agent
+
+    rail = ContextBudgetRail(total_token_budget)
+    try:
+        from openjiuwen.harness.observability import maybe_agent_observability_rail
+
+        observability_rail = maybe_agent_observability_rail()
+    except ImportError:
+        observability_rail = None
+        logger.warning("[summary] observability rail unavailable; run spans disabled")
+    rails: list[Any] = [rail]
+    if observability_rail is not None:
+        rails.append(observability_rail)
+    if status_sink is not None:
+        rails.append(
+            LlmStatusRail(
+                status_sink,
+                stage="attribution",
+                agent_id=_AGENT_CARD_ID,
+                model=model_name,
+                counter=status_counter if status_counter is not None else [0],
+            )
+        )
+    agents = create_deep_agent(
+        without_time_limits(model),
+        tool_owner_id=f"{_AGENT_CARD_ID}-summary-{uuid.uuid4().hex[:12]}",
+        card=AgentCard(
+            id=f"{_AGENT_CARD_ID}-summary",
+            name="TrajectorySummaryAgent",
+            description="Trajectory summary agent / 轨迹摘要 Agent",
+        ),
+        system_prompt=build_trajectory_summary_system_prompt(language),
+        tools=build_summary_tools(runtime),
+        rails=rails,
+        max_iterations=max_iterations,
+        context_engine_config=ContextEngineConfig(max_context_message_num=max_context_messages),
+        enable_security_rail=False,
+        enable_model_anomaly_detection_rail=True,
+        enable_sys_operation=False,
+    )
+    return agents, rail
 
 
 def build_attribution_agent(
@@ -517,17 +757,13 @@ def build_attribution_agent(
     model_name: str = "",
     status_counter: list[int] | None = None,
     skill_evolution: bool = True,
+    ttse_advice: bool = True,
 ) -> tuple["DeepAgent", ContextBudgetRail]:
     """Build the attribution agent and its budget rail.
 
-    Only the ten custom tools are registered; task loop, subagents, mcps and
-    skills stay off.  With ``skill_evolution=False`` the skill improvement tool is
-    not registered and its prompt paragraphs are dropped.  The host reads
-    ``rail.exceeded`` after ``invoke``.
-
-    The model has no time limit (:func:`without_time_limits`) and, by default, no
-    token limit (``total_token_budget=None``: tokens are counted, never cut); a failed model
-    call (a dropped connection, 429, 5xx) is retried by the model anomaly rail.
+    Only the custom tools are registered; task loop, subagents, mcps and
+    skills stay off.  Disabled switches drop their tools and prompt blocks.
+    The host reads ``rail.exceeded`` after ``invoke``.
     """
     from openjiuwen.agent_evolving.attribution.tools import build_attribution_tools
     from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
@@ -569,12 +805,12 @@ def build_attribution_agent(
             language,
             swarm_mode=swarm_mode,
             skill_evolution=skill_evolution,
+            ttse_advice=ttse_advice,
         ),
-        tools=filter_skill_evolution_tool(
-            list(
-                build_attribution_tools(runtime, [signal.signal_id for signal in signals]),  # type: ignore[arg-type]
-            ),
-            enabled=skill_evolution,
+        tools=filter_attribution_tools(
+            build_attribution_tools(runtime, list(signals)),
+            skill_evolution=skill_evolution,
+            ttse_advice=ttse_advice,
         ),
         rails=rails,
         max_iterations=max_iterations,
@@ -594,8 +830,13 @@ __all__ = [
     "build_attribution_agent",
     "build_attribution_initial_prompt",
     "build_attribution_system_prompt",
+    "build_trajectory_summary_agent",
+    "build_trajectory_summary_initial_prompt",
+    "build_trajectory_summary_system_prompt",
     "build_wake_text",
+    "filter_attribution_tools",
     "filter_skill_evolution_tool",
     "render_signal_block",
+    "render_skill_block",
     "render_subjects_block",
 ]

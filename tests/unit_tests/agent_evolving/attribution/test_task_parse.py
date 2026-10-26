@@ -338,3 +338,10 @@ def test_a_picture_named_without_its_folder_is_found_in_the_sessions_folders(tmp
     candidates, _ = extract_file_candidates(nodes, str(project))
     assert {path for path, _, _ in candidates} == {str(outputs / "page-1.png"), str(outputs / "page-2.png")}
     # page-9.png exists nowhere the session worked: not a candidate
+
+
+def test_task_parse_prompt_requires_the_requested_output_language() -> None:
+    from openjiuwen.agent_evolving.attribution.task_parse import load_task_parse_prompt
+
+    assert "输出语言：中文" in load_task_parse_prompt("zh")
+    assert "Output language: English" in load_task_parse_prompt("en")

@@ -260,6 +260,21 @@ class DiagnosisResult:
 
 
 @dataclass(frozen=True)
+class SignalMark:
+    """One topic mark an attribution agent put on a diagnostic signal.
+
+    ``skill`` marks must carry ``skill_key`` (validated by the tool); an
+    ``experience`` mark leaves it ``None``.  ``relation`` is the agent's own
+    note about how the skill took part and is never persisted by the host.
+    """
+
+    category: Literal["skill", "experience"]
+    skill_key: str | None = None
+    relation: Literal["uses_skill", "caused_by_skill"] | None = None
+    source: Literal["rule", "agent"] = "agent"
+
+
+@dataclass(frozen=True)
 class AttributionEntry:
     """One located attribution entry (node-level or span-level)."""
 
@@ -290,6 +305,8 @@ class AttributionRunOutcome:
     wake_attempted: bool = False
     counts: dict[str, Any] = field(default_factory=dict)
     token_usage: dict[str, Any] = field(default_factory=dict)
+    trajectory_summary: str | None = None
+    """Trajectory narrative; always non-empty on a successful run (agent submission or fallback)."""
 
 
 @dataclass(frozen=True)
@@ -357,6 +374,7 @@ __all__ = [
     "LlmRequestEvent",
     "RewardDimension",
     "RewardOverall",
+    "SignalMark",
     "SignalSource",
     "StatusSink",
     "SubjectRef",

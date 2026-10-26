@@ -51,8 +51,9 @@ When the input has a "Domain knowledge" section, use it to choose the aspects an
 Task; it is not a template: skip what does not apply and never invent content the Task leaves open (a fixed plot,
 exact wording). For work with pages, slides or scenes, a claim may be about one page, a pair of adjacent pages or
 the whole work; say which in the claim ("on every page", "between consecutive pages", "the last page").
-Each criterion is one aspect of the work, not a requirement: "name" names the aspect in 2-6 words (e.g. "核心功能",
-"视觉表现", "数据准确性", "自查与诚实"); "goal" says in one short sentence what good looks like in that aspect.
+Each criterion is one aspect of the work, not a requirement: "name" names the aspect in 2-6 words in the output
+language (for example a core-functionality aspect, a visual-presentation aspect, a data-accuracy aspect, or a
+self-check aspect); "goal" says in one short sentence what good looks like in that aspect.
 The specific requirements go into the claims, not into the name or goal.
 Return JSON: {{"criteria": [{{"id": "short-id", "scope": "terminal", "name": "...", "goal": "...",
 "claims": [{{"text": "...", "level": "floor|challenge"}}]}}]}}. Add "kind": "visual" only to a looks-only criterion."""
@@ -64,7 +65,7 @@ one view -> "text is legible in every view"), keeping the user's own words for h
 or threshold the user did not give. A criterion with "kind": "visual" is judged from screenshots alone: give it only
 checks about how the work looks, never errors, behaviour or data. Skip a check the rubric already has in the same
 meaning, and requests that are not about the work (e.g. "save it as a new file"). Keep the user's concerns; do not add
-new ones. At most 6 checks, each one short checkable sentence of at most 20 words, in the user's language."""
+new ones. At most 6 checks, each one short checkable sentence of at most 20 words, in the output language."""
 
 # Appended to CRITERIA_PROMPT (after .format) when the user's note or the process signal is given, so they are placed
 # in the same call as the criteria instead of a call of their own (FEEDBACK_PROMPT, for a kept rubric).
