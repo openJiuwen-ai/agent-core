@@ -2435,8 +2435,6 @@ class OrganizationRuntimeManager:
                             or not await service.is_actionable(persisted)
                         ):
                             continue
-                        from openjiuwen.agent_teams.prompts.loader import load_template
-
                         language = getattr(entry.agent.spec, "language", None) or "cn"
                         inputs["query"] = (
                             load_template(
@@ -2515,8 +2513,6 @@ class OrganizationRuntimeManager:
         manager = getattr(backend, "org_task_manager", None)
         if manager is None:
             return
-        from openjiuwen.agent_teams.prompts.loader import load_template
-
         active = []
         for execution in await manager.list_incomplete_summary_executions():
             if execution.summary_team_id != team_id:
@@ -2589,8 +2585,6 @@ class OrganizationRuntimeManager:
             self._summary_closeout_attempts[attempt_key] = 1
             closeout_inputs = dict(original_inputs)
             closeout_inputs["_org_summary_closeout"] = True
-            from openjiuwen.agent_teams.prompts.loader import load_template
-
             language = getattr(getattr(entry.agent, "spec", None), "language", None) or "cn"
             workspace = getattr(getattr(entry.agent, "harness", None), "workspace", None)
             workspace_path = getattr(workspace, "root_path", None) or "(unavailable)"
