@@ -1713,3 +1713,88 @@ async def test_fs_read_office_docx_as_text_rejects_without_utf8_codec_error(sys_
     res_bytes = await sys_op.fs().read_file(path=docx_name, mode="bytes")
     assert res_bytes.code == StatusCode.SUCCESS.code
     assert res_bytes.data.content[:4] == b"PK\x03\x04"
+
+
+@pytest.mark.asyncio
+async def test_conditional_snapshot_publication(sys_op, work_dir, monkeypatch):
+    import hashlib
+    path = Path(work_dir) / "snapshot.json"
+    fs = sys_op.fs()
+    absent = await fs.read_file(str(path), options={"snapshot": True, "missing_ok": True})
+    assert absent.code == 0 and absent.data.exists is False
+    options = {"atomic_replace": True, "expected_exists": False,
+               "expected_content_sha256": absent.data.content_sha256}
+    first = await fs.write_file(str(path), b"a\r\nb", mode="bytes", options=options)
+    assert first.code == 0 and first.data.atomic_replace
+    stale = await fs.write_file(str(path), b"bad", mode="bytes", options=options)
+    assert stale.data.conflict and path.read_bytes() == b"a\r\nb"
+    path.chmod(0o640)
+    read = await fs.read_file(str(path), options={"snapshot": True})
+    assert read.data.content == "a\r\nb"
+    assert read.data.content_sha256 == hashlib.sha256(b"a\r\nb").hexdigest()
+    options.update(expected_exists=True, expected_content_sha256=read.data.content_sha256)
+    good = await fs.write_file(str(path), b"complete", mode="bytes", options=options)
+    assert good.data.atomic_replace and path.stat().st_mode & 0o777 == 0o640
+    def fail(*args, **kwargs):
+        raise OSError("injected replace failure")
+    monkeypatch.setattr(os, "replace", fail)
+    options["expected_content_sha256"] = hashlib.sha256(b"complete").hexdigest()
+    failed = await fs.write_file(str(path), b"lost", mode="bytes", options=options)
+    assert failed.code != 0 and path.read_bytes() == b"complete"
+    assert not list(path.parent.glob(".snapshot.json-*.tmp"))
+
+
+@pytest.mark.asyncio
+async def test_cancelled_publication_keeps_lock_until_worker_finishes(sys_op, work_dir, monkeypatch):
+    import hashlib
+    import threading
+
+    from openjiuwen.core.sys_operation.local import _atomic_file
+    path = Path(work_dir) / "cancel.json"
+    path.write_bytes(b"old")
+    entered, release = threading.Event(), threading.Event()
+    replace = _atomic_file._replace_file
+    def blocked(*args):
+        entered.set()
+        assert release.wait(5)
+        return replace(*args)
+    monkeypatch.setattr(_atomic_file, "_replace_file", blocked)
+    options = {"atomic_replace": True, "expected_exists": True,
+               "expected_content_sha256": hashlib.sha256(b"old").hexdigest()}
+    first = asyncio.create_task(sys_op.fs().write_file(str(path), b"first", mode="bytes", options=options))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        first.cancel()
+        second = asyncio.create_task(sys_op.fs().write_file(str(path), b"second", mode="bytes", options=options))
+        await asyncio.sleep(0)
+        assert not first.done() and not second.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        result = await second
+        assert result.data.conflict and path.read_bytes() == b"first"
+    finally:
+        release.set()
+        await asyncio.gather(first, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="POSIX access ACL")
+async def test_conditional_replace_preserves_acl_and_readonly(sys_op, work_dir):
+    import hashlib
+    import struct
+    path = Path(work_dir) / "protected.json"
+    path.write_bytes(b"old")
+    entries = [(1, 6, 0xFFFFFFFF), (2, 4, 65534), (4, 0, 0xFFFFFFFF),
+               (16, 4, 0xFFFFFFFF), (32, 0, 0xFFFFFFFF)]
+    acl = struct.pack("<I", 2) + b"".join(struct.pack("<HHI", *e) for e in entries)
+    os.setxattr(path, "system.posix_acl_access", acl)
+    options = {"atomic_replace": True, "expected_exists": True,
+               "expected_content_sha256": hashlib.sha256(b"old").hexdigest()}
+    result = await sys_op.fs().write_file(str(path), b"new", mode="bytes", options=options)
+    assert result.data.atomic_replace and os.getxattr(path, "system.posix_acl_access") == acl
+    if os.geteuid() != 0:
+        path.chmod(0o400)
+        options["expected_content_sha256"] = hashlib.sha256(b"new").hexdigest()
+        denied = await sys_op.fs().write_file(str(path), b"bad", mode="bytes", options=options)
+        assert denied.code != 0 and path.read_bytes() == b"new"

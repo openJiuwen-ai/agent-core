@@ -139,12 +139,24 @@ def test_priority_is_90() -> None:
 # ================================================================
 
 
+def _snapshot_boundary(tool, todos):
+    # Algorithm-only fixtures; real file transactions have separate coverage.
+    import hashlib
+    import json
+    from types import SimpleNamespace
+
+    raw = json.dumps([t.to_dict() for t in todos])
+    tool.fs = SimpleNamespace(read_file=AsyncMock(return_value=SimpleNamespace(code=0,
+        data=SimpleNamespace(content=raw, exists=True, content_sha256=hashlib.sha256(raw.encode()).hexdigest()))))
+
+
 def _make_ctx(session=None):
     """Build a minimal AgentCallbackContext mock."""
     ctx = MagicMock()
     if not session:
         session = Session()
     ctx.session = session
+    ctx.extra = {}
     return ctx
 
 
@@ -205,6 +217,7 @@ async def test_after_task_iteration_bridges_todos() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    _snapshot_boundary(tool, todos)
     tool.save_todos = AsyncMock(side_effect=_capture_saved)
 
     await rail.after_task_iteration(ctx)
@@ -247,6 +260,7 @@ async def test_after_task_iteration_syncs_todo_status_from_plan() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    _snapshot_boundary(tool, todos)
     tool.save_todos = AsyncMock(side_effect=_capture_saved)
 
     await rail.after_task_iteration(ctx)
@@ -288,6 +302,7 @@ async def test_sync_todos_from_plan_terminal_guard() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    _snapshot_boundary(tool, todos)
     tool.save_todos = AsyncMock()
 
     await rail.after_task_iteration(ctx)
@@ -335,6 +350,7 @@ async def test_sync_plan_from_todos_syncs_terminal_states() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    _snapshot_boundary(tool, todos)
 
     await rail._sync_plan_from_todos(ctx)
 
@@ -432,6 +448,7 @@ async def test_bridge_skips_when_no_pending() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    _snapshot_boundary(tool, todos)
 
     await rail.after_task_iteration(ctx)
 
@@ -514,6 +531,7 @@ async def test_after_tool_call_schedules_progress_reminder() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    _snapshot_boundary(tool, todos)
 
     await rail.after_tool_call(ctx)
 
@@ -622,6 +640,7 @@ async def test_after_tool_call_schedules_advance_reminder_on_gap() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    _snapshot_boundary(tool, todos)
 
     await rail.after_tool_call(ctx)
 
@@ -813,6 +832,7 @@ async def test_after_tool_call_custom_interval() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    _snapshot_boundary(tool, todos)
 
     await rail.after_tool_call(ctx)
     await rail.after_tool_call(ctx)
@@ -1215,6 +1235,7 @@ async def test_before_model_call_switches_model_for_in_progress_task() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    _snapshot_boundary(tool, todos)
 
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-model-switch"
@@ -1246,6 +1267,7 @@ async def test_before_model_call_restores_default_when_no_model_id() -> None:
     tool = rail._find_todo_tool()
     assert tool is not None
     tool.load_todos = AsyncMock(return_value=todos)
+    _snapshot_boundary(tool, todos)
 
     ctx = _make_ctx(session=MagicMock())
     ctx.session.get_session_id.return_value = "sess-default-restore"

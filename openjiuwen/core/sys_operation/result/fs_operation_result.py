@@ -13,6 +13,10 @@ class ReadFileData(BaseModel):
     content: Union[str, bytes] = Field(..., description="File content (text string or binary bytes)")
     mode: Literal['text', 'bytes'] = Field(..., description="File read mode: 'text' (string) or 'bytes' (binary)")
 
+    exists: bool | None = None
+    content_sha256: str | None = None
+    backend_id: str | None = None
+
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
@@ -33,6 +37,9 @@ class WriteFileData(BaseModel):
     path: str = Field(..., description="File path of the write file")
     size: int = Field(..., description="File content size in bytes")
     mode: Literal['text', 'bytes'] = Field(..., description="File write mode: 'text' (string) or 'bytes' (binary)")
+
+    conflict: bool = False
+    atomic_replace: bool = False
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 

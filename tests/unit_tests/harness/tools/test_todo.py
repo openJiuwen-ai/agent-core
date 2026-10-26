@@ -1,6 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import json
+import hashlib
+from types import SimpleNamespace
 import unittest
 import uuid
 from unittest.mock import patch, MagicMock, mock_open, AsyncMock, PropertyMock
@@ -92,8 +94,10 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
         self.mock_operation.fs.return_value = self.mock_fs
-        self.mock_fs.read_file = AsyncMock()
-        self.mock_fs.write_file = AsyncMock()
+        self.mock_fs.read_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            content="[]", exists=True, content_sha256=hashlib.sha256(b"[]").hexdigest())))
+        self.mock_fs.write_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            conflict=False, atomic_replace=True)))
         self.logger_mocks = {
             "info": patch.object(tool_logger, "info", MagicMock()).start(),
             "error": patch.object(tool_logger, "error", MagicMock()).start(),
@@ -110,6 +114,8 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
             code=0,
             data=MagicMock(content=json.dumps([todo.to_dict() for todo in self.test_todos]))
         )
+        mock_read_result.data.exists = True
+        mock_read_result.data.content_sha256 = hashlib.sha256(mock_read_result.data.content.encode()).hexdigest()
         self.mock_fs.read_file.return_value = mock_read_result
         tool = TodoTool(MagicMock(), self.mock_operation)
         with patch("os.path.abspath", return_value="/mock/path"):
@@ -142,9 +148,11 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
 
     async def test_save_todos_success(self):
         """save_todos serializes TodoItem list to JSON file."""
-        self.mock_fs.write_file.return_value = MagicMock(code=0)
+        self.mock_fs.write_file.return_value = SimpleNamespace(code=0, data=SimpleNamespace(conflict=False, atomic_replace=True))
         tool = TodoTool(MagicMock(), self.mock_operation)
-        await tool.save_todos("test_session", self.test_todos)
+        items = await tool.load_todos("test_session")
+        items.extend(self.test_todos)
+        await tool.save_todos("test_session", items)
         self.mock_fs.write_file.assert_called_once()
         call_args = self.mock_fs.write_file.call_args
         self.assertIn("Task 1", call_args[0][1])
@@ -152,11 +160,13 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
 
     async def test_save_todos_write_fail(self):
         """save_todos raises FrameworkError on write failure."""
-        self.mock_fs.write_file.return_value = MagicMock(code=1)
+        self.mock_fs.write_file.return_value = SimpleNamespace(code=1, message="denied", data=None)
         tool = TodoTool(MagicMock(), self.mock_operation)
+        items = await tool.load_todos("test_session")
+        items.extend(self.test_todos)
         with self.assertRaises(FrameworkError) as cm:
-            await tool.save_todos("test_session", self.test_todos)
-        self.assertIn("Failed to save todo list, because write_file fail", str(cm.exception))
+            await tool.save_todos("test_session", items)
+        self.assertIn("Todo commit failed", str(cm.exception))
 
 
 class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
@@ -166,6 +176,10 @@ class TestTodoCreateTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
         self.mock_operation.fs.return_value = self.mock_fs
+        self.mock_fs.read_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            content="[]", exists=True, content_sha256=hashlib.sha256(b"[]").hexdigest())))
+        self.mock_fs.write_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            conflict=False, atomic_replace=True)))
         self.tool = TodoCreateTool(operation=self.mock_operation)
         self.tool.load_todos = AsyncMock(return_value=[])
         self.tool.save_todos = AsyncMock()
@@ -306,6 +320,10 @@ class TestTodoListTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
         self.mock_operation.fs.return_value = self.mock_fs
+        self.mock_fs.read_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            content="[]", exists=True, content_sha256=hashlib.sha256(b"[]").hexdigest())))
+        self.mock_fs.write_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            conflict=False, atomic_replace=True)))
         self.tool = TodoListTool(operation=self.mock_operation)
         self.test_todos = [
             TodoItem(id="in_progress_task", content="In Progress Task", status=TodoStatus.IN_PROGRESS),
@@ -348,6 +366,10 @@ class TestTodoModifyTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
         self.mock_operation.fs.return_value = self.mock_fs
+        self.mock_fs.read_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            content="[]", exists=True, content_sha256=hashlib.sha256(b"[]").hexdigest())))
+        self.mock_fs.write_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            conflict=False, atomic_replace=True)))
         self.tool = TodoModifyTool(operation=self.mock_operation)
         self.test_todos = [
             TodoItem(
@@ -497,6 +519,10 @@ class TestTodoGetTool(unittest.IsolatedAsyncioTestCase):
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
         self.mock_operation.fs.return_value = self.mock_fs
+        self.mock_fs.read_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            content="[]", exists=True, content_sha256=hashlib.sha256(b"[]").hexdigest())))
+        self.mock_fs.write_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            conflict=False, atomic_replace=True)))
         self.tool = TodoGetTool(operation=self.mock_operation)
         self.test_todos = [
             TodoItem(
@@ -563,6 +589,10 @@ class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
         self.mock_operation = MagicMock(spec=SysOperation)
         self.mock_fs = MagicMock(spec=BaseFsOperation)
         self.mock_operation.fs.return_value = self.mock_fs
+        self.mock_fs.read_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            content="[]", exists=True, content_sha256=hashlib.sha256(b"[]").hexdigest())))
+        self.mock_fs.write_file = AsyncMock(return_value=SimpleNamespace(code=0, data=SimpleNamespace(
+            conflict=False, atomic_replace=True)))
         self.create_tool = TodoCreateTool(operation=self.mock_operation)
         self.create_tool.load_todos = AsyncMock(return_value=[])
         self.create_tool.save_todos = AsyncMock()

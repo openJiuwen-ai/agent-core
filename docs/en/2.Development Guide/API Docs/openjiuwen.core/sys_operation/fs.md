@@ -295,3 +295,14 @@ Asynchronously search files under the specified path.
 **Returns**:
 
 **[SearchFilesResult](./result.md#class-searchfilesresult)**, search files result.
+
+
+### Todo snapshots and conditional atomic replacement
+
+Local FS and the matching JiuwenBox backend support these optional operations; ordinary reads and writes retain their defaults.
+
+- `read_file(path, options={"snapshot": True, "missing_ok": True})` returns complete content, existence, and the SHA256 of the original bytes from one read. Partial reads are not supported; a missing file differs from an empty file.
+- `write_file(..., prepend_newline=False, options={"atomic_replace": True, "expected_exists": ..., "expected_content_sha256": ...})` compares both conditions under the backend file lock and atomically replaces the complete file. Append is forbidden. Success sets `data.atomic_replace=True`. A definite conflict has a nonzero code and `data.conflict=True`; other errors or unknown outcomes must not be replayed as conflicts.
+- Sandbox snapshots return their existing `backend_id`. Passing it as `expected_backend_id` prevents a backend switch between read and commit without another network query.
+
+Replacement preserves existing write-access constraints, owner/group and ACL. Cancellation waits for an in-flight replacement to settle. This is not a power-loss durability guarantee; unsupported backends must not fall back to an ordinary overwrite.

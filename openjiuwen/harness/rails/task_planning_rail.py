@@ -10,6 +10,8 @@ from openjiuwen.core.foundation.llm import BaseMessage
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.harness.tools.todo_store import TodoItems, snapshot_from_result
+
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.single_agent.rail.base import (
@@ -330,15 +332,16 @@ class TaskPlanningRail(DeepAgentRail):
             tool_name = ctx.inputs.tool_name
             if tool_name and tool_name.startswith("todo_"):
                 session_id = ctx.session.get_session_id()
-                if tool_name == "todo_create" and ctx.exception is None:
-                    # todo_create 整表覆盖后旧 plan 任务 ID 全部失配，
-                    # _sync_plan_from_todos 会跳过它们；若不取消，外层
-                    # task loop 仍会调度旧任务并把新输入改写为旧任务内容。
-                    # 仅在 todo_create 成功时取消：失败时 todo.json 未被覆盖，
-                    # 旧 plan 仍有效，误取消会导致 in-flight 任务丢失
-                    self._cancel_stale_plan_tasks(ctx)
                 try:
-                    todos = await tool.load_todos(session_id)
+                    snapshot = snapshot_from_result(ctx.inputs.tool_result)
+                    todos = TodoItems(snapshot) if snapshot is not None else await tool.load_todos(session_id)
+                    previous = self._todos_cache.get(session_id)
+                    if (snapshot is not None and isinstance(previous, TodoItems)
+                            and previous.snapshot.revision > snapshot.revision):
+                        return
+                    if tool_name == "todo_create" and ctx.exception is None:
+                        # A delayed old create must not cancel a newer cached plan.
+                        self._cancel_stale_plan_tasks(ctx)
                     self._todos_cache[session_id] = todos
                 except Exception:
                     logger.debug("TaskPlanningRail: after tool call refresh cache failed")
@@ -367,6 +370,8 @@ class TaskPlanningRail(DeepAgentRail):
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Accumulate token usage per model_id after each LLM call."""
+        from openjiuwen.harness.tools.todo_store import prepare_todo_batch
+        prepare_todo_batch(ctx)
         use_model = getattr(ctx.agent, "_llm", None)
         if use_model is None:
             return
@@ -385,6 +390,10 @@ class TaskPlanningRail(DeepAgentRail):
             self._usage_records[model_id] = ModelUsageRecord(model_id=model_id)
         self._usage_records[model_id].add(input_tokens, output_tokens)
 
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        from openjiuwen.harness.tools.todo_store import bind_todo_batch
+        bind_todo_batch(ctx, self._find_todo_tool())
+
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """invoke 开始时重置 todo_create 的本轮标记（无数据副作用）。
 
@@ -394,6 +403,8 @@ class TaskPlanningRail(DeepAgentRail):
         in-flight 任务不受影响；上一轮中止残留的任务由新请求真正调用
         todo_create 时整表覆盖自然清理（见 TodoCreateTool 的 guard）。
         """
+        from openjiuwen.harness.tools.todo_store import reset_todo_binding
+        reset_todo_binding()
         if ctx.session is None:
             return
         tool = self._find_todo_create_tool()
@@ -481,41 +492,46 @@ class TaskPlanningRail(DeepAgentRail):
 
         session_id = ctx.session.get_session_id()
 
-        try:
-            todos = await tool.load_todos(session_id)
-        except Exception:
-            logger.debug("TaskPlanningRail: no todos to sync")
-            return
+        from openjiuwen.harness.tools.todo_store import bind_todo_batch, transact
+        bind_todo_batch(ctx, self._find_todo_tool())
+        async def apply():
+            try:
+                todos = await tool.load_todos(session_id)
+            except Exception:
+                logger.debug("TaskPlanningRail: no todos to sync")
+                return
 
-        if not todos:
-            return
+            if not todos:
+                return
 
-        # Sync todo.json FROM TaskPlan (but don't regress terminal states)
-        status_by_task_id = {
-            task.id: task.status
-            for task in plan.tasks
-        }
-        changed = False
+            # Sync todo.json FROM TaskPlan (but don't regress terminal states)
+            status_by_task_id = {
+                task.id: task.status
+                for task in plan.tasks
+            }
+            changed = False
 
-        for todo in todos:
-            desired = status_by_task_id.get(todo.id)
-            if desired is None:
-                continue
-            # 不回退已终态的任务：completed/cancelled 不应被覆盖为 in_progress/pending
-            if todo.status in (TodoStatus.COMPLETED, TodoStatus.CANCELLED):
-                continue
-            if todo.status != desired:
-                todo.status = desired
-                changed = True
+            for todo in todos:
+                desired = status_by_task_id.get(todo.id)
+                if desired is None:
+                    continue
+                # 不回退已终态的任务：completed/cancelled 不应被覆盖为 in_progress/pending
+                if todo.status in (TodoStatus.COMPLETED, TodoStatus.CANCELLED):
+                    continue
+                if todo.status != desired:
+                    todo.status = desired
+                    changed = True
 
-        if not changed:
-            return
+            if not changed:
+                return
 
-        await tool.save_todos(session_id, todos)
-        logger.info(
-            "TaskPlanningRail: synced %d todos from TaskPlan",
-            len(todos),
-        )
+            await tool.save_todos(session_id, todos)
+            logger.info(
+                "TaskPlanningRail: synced %d todos from TaskPlan",
+                len(todos),
+            )
+
+        await transact(tool, session_id, apply)
 
     async def _sync_plan_from_todos(self, ctx: AgentCallbackContext) -> None:
         """Sync TaskPlan FROM todo.json (terminal states only).
@@ -537,7 +553,8 @@ class TaskPlanningRail(DeepAgentRail):
 
         session_id = ctx.session.get_session_id()
         try:
-            todos = await tool.load_todos(session_id)
+            snapshot = snapshot_from_result(getattr(ctx.inputs, "tool_result", None))
+            todos = TodoItems(snapshot) if snapshot is not None else await tool.load_todos(session_id)
         except Exception as exc:
             logger.warning(
                 "TaskPlanningRail: failed to load todos from session %s, error: %s",
@@ -547,6 +564,9 @@ class TaskPlanningRail(DeepAgentRail):
             return
 
         if not todos:
+            if getattr(todos, "snapshot", None) is not None:
+                state.task_plan = None
+                ctx.agent.save_state(ctx.session, state)
             return
 
         todo_status_by_id = {todo.id: todo.status for todo in todos}
