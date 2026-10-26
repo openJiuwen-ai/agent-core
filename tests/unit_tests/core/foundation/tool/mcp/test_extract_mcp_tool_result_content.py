@@ -31,7 +31,7 @@ def test_all_empty_text_blocks_return_last_block() -> None:
     assert extract_mcp_tool_result_content(_text_result("", "")) == ""
 
 
-def test_mixed_text_and_image_keeps_last_block_behavior() -> None:
+def test_mixed_text_and_image_keeps_both_blocks() -> None:
     result = SimpleNamespace(
         content=[
             SimpleNamespace(text=PAYLOAD),
@@ -39,4 +39,35 @@ def test_mixed_text_and_image_keeps_last_block_behavior() -> None:
         ]
     )
 
-    assert extract_mcp_tool_result_content(result) == "[image content: image/png, 6 base64 chars]"
+    assert extract_mcp_tool_result_content(result) == (PAYLOAD + "\n[image content: image/png, 6 base64 chars]")
+
+
+def test_mixed_image_and_text_preserves_order() -> None:
+    result = SimpleNamespace(
+        content=[
+            SimpleNamespace(mimeType="image/png", data="abc123"),
+            SimpleNamespace(text=PAYLOAD),
+        ]
+    )
+
+    assert extract_mcp_tool_result_content(result) == ("[image content: image/png, 6 base64 chars]\n" + PAYLOAD)
+
+
+def test_multiple_text_blocks_and_image_keep_all_text() -> None:
+    result = SimpleNamespace(
+        content=[
+            SimpleNamespace(text=PAYLOAD),
+            SimpleNamespace(text=TRAILER),
+            SimpleNamespace(mimeType="image/png", data="abc123"),
+        ]
+    )
+
+    assert extract_mcp_tool_result_content(result) == (
+        PAYLOAD + "\n" + TRAILER + "\n[image content: image/png, 6 base64 chars]"
+    )
+
+
+def test_pure_image_returns_placeholder() -> None:
+    result = SimpleNamespace(content=[SimpleNamespace(mimeType="image/png", data="abc123")])
+
+    assert extract_mcp_tool_result_content(result) == ("[image content: image/png, 6 base64 chars]")

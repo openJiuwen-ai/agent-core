@@ -16,29 +16,7 @@ from openjiuwen.core.runner.callback.events import ToolCallEvents
 NO_TIMEOUT = -1
 
 
-def extract_mcp_tool_result_content(tool_result: Any) -> Any:
-    """Return a compact value from an MCP CallToolResult.
-
-    MCP servers may split one payload across multiple text blocks or append a
-    metadata block after the payload.  Keep every text block instead of only
-    the last one; mixed text/image results keep the last-block behavior.
-    """
-    content = getattr(tool_result, "content", None)
-    if not content:
-        return None
-
-    texts = [getattr(item, "text", None) for item in content]
-    if texts and all(isinstance(text, str) for text in texts):
-        non_empty = [text for text in texts if text]
-        if not non_empty:
-            return texts[-1]
-        return non_empty[0] if len(non_empty) == 1 else "\n".join(non_empty)
-
-    item = content[-1]
-    text = getattr(item, "text", None)
-    if text is not None:
-        return text
-
+def _non_text_content_summary(item: Any) -> Any:
     mime_type = getattr(item, "mimeType", None) or getattr(item, "mime_type", None)
     data = getattr(item, "data", None)
     if data is not None:
@@ -51,6 +29,35 @@ def extract_mcp_tool_result_content(tool_result: Any) -> Any:
         dumped.pop("data", None)
         return dumped
     return str(item)
+
+
+def extract_mcp_tool_result_content(tool_result: Any) -> Any:
+    """Return a compact value from an MCP CallToolResult.
+
+    MCP servers may split one payload across multiple text blocks, append a
+    metadata block after the payload, or attach non-text blocks such as images.
+    Keep every text block and summarize non-text blocks in their original order
+    so a text payload followed by an image is not lost.
+    """
+    content = getattr(tool_result, "content", None)
+    if not content:
+        return None
+
+    parts: list[str] = []
+    for item in content:
+        text = getattr(item, "text", None)
+        if isinstance(text, str):
+            if text:
+                parts.append(text)
+            continue
+        summary = _non_text_content_summary(item)
+        if summary is not None:
+            parts.append(summary if isinstance(summary, str) else str(summary))
+    if parts:
+        return "\n".join(parts)
+    if all(isinstance(getattr(item, "text", None), str) for item in content):
+        return getattr(content[-1], "text", None)
+    return None
 
 
 class McpServerConfig(BaseModel):
