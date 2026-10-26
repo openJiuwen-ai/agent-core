@@ -84,6 +84,35 @@ class WorktreeConfig(BaseModel):
     DURABLE: always preserve across sessions.
     """
 
+    repo_lock: bool = True
+    """Serialize worktree create/remove critical sections per repo_root.
+
+    When True, ``WorktreeManager`` wraps create / post-setup / remove in a
+    repo-bucketed in-process ``asyncio.Lock`` + cross-process
+    ``filelock.AsyncFileLock`` (see ``lock.repo_lock``). Remote backends
+    that manage their own isolation may disable this.
+    """
+
+    repo_lock_timeout: float = 120.0
+    """Seconds to wait for the repo lock before raising (no silent downgrade).
+
+    Covers a worst-case serialized chain (e.g. 5 workers each doing fetch +
+    worktree add). Timeout raises rather than degrading to lock-free, which
+    would reintroduce the race.
+    """
+
+    longpaths_support: bool = True
+    """Set ``core.longpaths=true`` on repo_root before worktree add (Windows).
+
+    The primary worktree failure on Windows is rc=128: ``git worktree add``
+    trips the MAX_PATH (260-char) limit while checking out deeply-nested
+    repository content. ``core.longpaths`` makes git use the extended-length
+    path prefix, bypassing the 260-char Win32 API limit without altering the
+    source repo's directory structure or ``project_dir``. Default on because
+    rc=128 is the dominant failure; disable when git config writes on the
+    source repo are forbidden.
+    """
+
 
 class WorktreeSession(BaseModel):
     """Runtime state of an active worktree.

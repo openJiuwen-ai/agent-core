@@ -26,6 +26,7 @@ from openjiuwen.core.runner.resources_manager.base import (
     ModelProvider)
 from openjiuwen.core.runner.resources_manager.resource_registry import ResourceRegistry
 
+from openjiuwen.core.runner.resources_manager.registration_logging import registration_success_log
 from openjiuwen.core.runner.resources_manager.tag_manager import TagMgr
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
@@ -1439,7 +1440,7 @@ class ResourceMgr:
             if resource_card:
                 self._id_to_card[resource_id] = resource_card
             self._tag_mgr.tag_resource(resource_id, tag if tag else GLOBAL)
-            logger.info("add resource succeed",
+            registration_success_log(logger)("add resource succeed",
                         event_type=LogEventType.RESOURCE_MGR_ADD_RESOURCE,
                         resource_id=resource_id,
                         resource_type=resource_type,

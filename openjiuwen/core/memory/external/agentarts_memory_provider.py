@@ -26,7 +26,12 @@ _STRATEGY_TYPES = ["semantic", "summary", "user_preference", "episodic", "event"
 EXTERNAL_MEMORY_SEARCH_SCHEMA = {
     "name": "external_memory_search",
     "description": (
-        "Search long-term external memory for durable facts, user preferences, and prior conversation context."
+        "Search long-term external memory for durable facts, user preferences, and prior conversation context. "
+        "Returns JSON: on success "
+        "`{\"results\": [{\"memory\": str, \"score\": float, \"created_at\": str}], \"count\": int}` "
+        "(`created_at` is the memory record's creation timestamp, ISO 8601, may be empty); "
+        "when no matches `{\"result\": \"No relevant memories found.\", \"count\": 0}`; "
+        "on error `{\"error\": str}` (e.g. missing query returns `{\"error\": \"Missing required parameter: query\"}`)."
     ),
     "parameters": {
         "type": "object",
@@ -67,6 +72,7 @@ class AgentArtsMemoryProvider(MemoryProvider):
         actor_id: str | None = None,
         assistant_id: str | None = None,
         session_mapping_store: BaseKVStore | None = None,
+        verify_ssl: bool = True,
     ):
         self._base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
         self._api_key = api_key
@@ -80,6 +86,7 @@ class AgentArtsMemoryProvider(MemoryProvider):
         self._session_mapping_store = session_mapping_store or InMemoryKVStore()
         self._initialized = False
         self._consecutive_failures = 0
+        self._verify_ssl = verify_ssl
 
     @property
     def name(self) -> str:
@@ -125,7 +132,7 @@ class AgentArtsMemoryProvider(MemoryProvider):
         try:
             from agentarts.sdk.memory import MemoryClient
 
-            self._client = MemoryClient(api_key=self._api_key)
+            self._client = MemoryClient(api_key=self._api_key, verify_ssl=self._verify_ssl)
         except ImportError as exc:
             raise RuntimeError(
                 f"AgentArts SDK is unavailable. Install with `pip install openjiuwen[{AGENTARTS_EXTRA}]` "
@@ -179,7 +186,11 @@ class AgentArtsMemoryProvider(MemoryProvider):
             record = _read_attr_or_key(item, "record", {})
             content = _read_attr_or_key(record, "content", "")
             if content:
-                normalized.append({"memory": content, "score": _read_attr_or_key(item, "score", 0)})
+                normalized.append({
+                    "memory": content,
+                    "score": _read_attr_or_key(item, "score", 0),
+                    "created_at": _read_attr_or_key(record, "created_at", "") or "",
+                })
         return normalized
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:

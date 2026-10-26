@@ -2,6 +2,9 @@
 
 """Tests for openjiuwen.harness.tools.worktree.manager."""
 
+import os
+from contextlib import asynccontextmanager
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +17,7 @@ from openjiuwen.harness.tools.worktree.models import (
     WorktreeLifecyclePolicy,
 )
 from openjiuwen.harness.tools.worktree.session import get_current_session, set_current_session
+from openjiuwen.harness.tools.worktree.slug import worktree_path_for
 from openjiuwen.core.sys_operation.cwd import CwdState, _cwd_state, init_cwd
 from tests.test_logger import logger
 
@@ -59,8 +63,14 @@ def _make_manager(
     event_handler: AsyncMock | None = None,
     rails: list | None = None,
 ) -> WorktreeManager:
+    # repo_lock=False: these tests mock find_canonical_git_root to return a
+    # non-existent path ("/repo"), so the cross-process filelock layer would
+    # try to mkdir("/repo") and hit PermissionError on CI. These are unit
+    # tests of manager business logic. Lock mechanics are covered by
+    # test_lock.py; dedicated tests below verify manager lock integration.
+    default = WorktreeConfig(enabled=True, repo_lock=False)
     return WorktreeManager(
-        config=config or WorktreeConfig(enabled=True),
+        config=config or default,
         backend=backend,
         event_handler=event_handler,
         rails=rails,
@@ -87,7 +97,7 @@ class TestEnter:
         mock_backend.create.assert_awaited_once_with(
             "my-slug",
             "/repo",
-            f"{MOCK_WORKSPACE}/.worktrees/my-slug",
+            worktree_path_for(os.path.realpath(MOCK_WORKSPACE), "my-slug"),
         )
 
         # ContextVar should be set
@@ -268,6 +278,55 @@ class TestCreateAgentWorktree:
         with pytest.raises(ValueError, match="Invalid worktree name"):
             await mgr.create_agent_worktree("../../bad")
         logger.info("create_agent_worktree rejects invalid slug")
+
+
+class TestManagerRepoLockIntegration:
+    @pytest.mark.asyncio
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.manager.get_current_branch", new_callable=AsyncMock)
+    @pytest.mark.level0
+    async def test_enter_acquires_repo_lock(
+        self, mock_branch, mock_git_root, mock_backend, monkeypatch
+    ):
+        mock_git_root.return_value = "/repo"
+        mock_branch.return_value = "main"
+        calls = []
+
+        @asynccontextmanager
+        async def recording_lock(repo_root, *, timeout, enabled):
+            calls.append((repo_root, timeout, enabled))
+            yield
+
+        monkeypatch.setattr("openjiuwen.harness.tools.worktree.manager.repo_lock", recording_lock)
+        config = WorktreeConfig(enabled=True, repo_lock=True, repo_lock_timeout=3.5)
+        mgr = _make_manager(mock_backend, config=config)
+
+        await mgr.enter("locked-enter")
+
+        assert calls == [("/repo", 3.5, True)]
+
+    @pytest.mark.asyncio
+    @patch("openjiuwen.harness.tools.worktree.manager.find_canonical_git_root", new_callable=AsyncMock)
+    @pytest.mark.level0
+    async def test_owner_create_and_remove_acquire_repo_lock(
+        self, mock_git_root, mock_backend, monkeypatch
+    ):
+        mock_git_root.return_value = "/repo"
+        calls = []
+
+        @asynccontextmanager
+        async def recording_lock(repo_root, *, timeout, enabled):
+            calls.append((repo_root, timeout, enabled))
+            yield
+
+        monkeypatch.setattr("openjiuwen.harness.tools.worktree.manager.repo_lock", recording_lock)
+        config = WorktreeConfig(enabled=True, repo_lock=True, repo_lock_timeout=4.0)
+        mgr = _make_manager(mock_backend, config=config)
+
+        result = await mgr.create_owner_worktree("locked-owner")
+        await mgr._remove_worktree(result.worktree_path, "/repo")
+
+        assert calls == [("/repo", 4.0, True), ("/repo", 4.0, True)]
 
 
 class TestOwnerSlug:
