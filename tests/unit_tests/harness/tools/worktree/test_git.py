@@ -2,6 +2,8 @@
 
 """Tests for openjiuwen.harness.tools.worktree.git."""
 
+import subprocess
+
 import pytest
 
 from openjiuwen.harness.tools.worktree.git import (
@@ -13,6 +15,7 @@ from openjiuwen.harness.tools.worktree.git import (
     get_current_branch,
     read_worktree_head_sha,
     rev_parse,
+    set_longpaths,
     status_porcelain,
 )
 from tests.test_logger import logger
@@ -80,6 +83,21 @@ class TestGitEnv:
         env = _git_env()
         assert "PATH" in env
         assert env["PATH"] == os.environ["PATH"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_set_longpaths_updates_repository_config(tmp_git_repo):
+    await set_longpaths(tmp_git_repo)
+
+    result = subprocess.run(
+        ["git", "config", "--get", "core.longpaths"],
+        cwd=tmp_git_repo,
+        capture_output=True,
+        check=True,
+        text=True,
+    )
+    assert result.stdout.strip() == "true"
 
 
 @pytest.mark.asyncio
