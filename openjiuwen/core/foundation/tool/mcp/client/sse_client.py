@@ -157,8 +157,7 @@ class SseClient(McpClient):
         except Exception as e:
             logger.error("[SseClient] SSE connection failed to %s: %s: %r", self._server_path,
                          type(e).__name__, e)
-            # Clean up whatever partial state we have, but don't let cleanup
-            # exceptions mask the original connection error.
+            self._last_connect_error = e
             try:
                 await self._do_disconnect(timeout=NO_TIMEOUT)
             except Exception as cleanup_exc:
@@ -175,34 +174,44 @@ class SseClient(McpClient):
         # that must not block the caller for long, whereas a live call may
         # legitimately wait up to the full 60s for a slow server.
         actual_timeout = timeout if timeout != NO_TIMEOUT else 10.0
+
+        # The only safe shape is to await ``__aexit__`` bare,
+        # in-task, with no enclosing scope. The deadline is enforced instead by
+        # a watchdog (``loop.call_later``) that cancels this owner task at
+        # ``actual_timeout``; ``disconnect()``'s trailing
+        # ``self._owner_task.cancel()`` remains the final backstop if even that
+        # fails to interrupt a hung receive_loop (e.g. httpx's sync recv on a
+        # dead TCP connection after RST).
+        owner_task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+
+        def _cancel_owner(task: "asyncio.Task[Any]") -> None:
+            if not task.done():
+                logger.warning(
+                    "[SseClient] disconnect watchdog fired after %ss; "
+                    "cancelling owner task (receive_loop may be hung on a "
+                    "dead TCP connection after RST).",
+                    actual_timeout,
+                )
+                task.cancel()
+
+        watchdog = loop.call_later(actual_timeout, _cancel_owner, owner_task)
+
         try:
             if self._session is not None:
                 try:
-                    await asyncio.wait_for(
-                        self._session.__aexit__(None, None, None),
-                        timeout=actual_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[SseClient] session __aexit__ timed out after "
-                        "%ss; forcing cleanup. The receive_loop may be hung "
-                        "on a dead TCP connection after RST.",
-                        actual_timeout,
-                    )
+                    await self._session.__aexit__(None, None, None)
+                except asyncio.CancelledError:
+                    logger.debug("[SseClient] session __aexit__ cancelled")
+                    raise
                 except Exception as e:
                     logger.debug("[SseClient] session __aexit__ raised %r (ignored)", e)
             if self._client is not None:
                 try:
-                    await asyncio.wait_for(
-                        self._client.__aexit__(None, None, None),
-                        timeout=actual_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[SseClient] sse_client generator __aexit__ "
-                        "timed out after %ss; forcing cleanup.",
-                        actual_timeout,
-                    )
+                    await self._client.__aexit__(None, None, None)
+                except asyncio.CancelledError:
+                    logger.debug("[SseClient] sse_client __aexit__ cancelled")
+                    raise
                 except Exception as e:
                     logger.debug("[SseClient] sse_client generator __aexit__ raised %r (ignored)", e)
             self._session = None
@@ -212,9 +221,26 @@ class SseClient(McpClient):
             self._is_disconnected = True
             logger.info("[SseClient] SSE client disconnected successfully")
             return True
+        except asyncio.CancelledError:
+            # Watchdog fired: a __aexit__ hung past the deadline. Transport
+            # scopes may not have exited cleanly; clear references and let the
+            # owner task (about to be stopped by disconnect()) reap the rest.
+            logger.warning(
+                "[SseClient] disconnect aborted by watchdog after %ss; "
+                "transport scopes may not have exited cleanly.",
+                actual_timeout,
+            )
+            self._session = None
+            self._client = None
+            self._read = None
+            self._write = None
+            self._is_disconnected = True
+            return False
         except Exception as e:
             logger.error("[SseClient] SSE disconnection failed: %s: %r", type(e).__name__, e)
             return False
+        finally:
+            watchdog.cancel()
 
     async def _do_reconnect(self, *, timeout: float) -> bool:
         logger.debug("[SseClient] Executing reconnect sequence")

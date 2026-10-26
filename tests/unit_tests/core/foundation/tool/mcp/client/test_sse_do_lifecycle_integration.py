@@ -179,20 +179,24 @@ class TestSseDoLifecycleIntegration:
 
     @pytest.mark.asyncio
     async def test_do_disconnect_times_out_on_hung_aexit_and_resets_state(self) -> None:
-        """S5: A hung __aexit__ on teardown is bounded by the 10s fallback;
-        the test forces it via a short timeout and asserts state is reset and
-        disconnect returns True (cleanup does not fail-fast)."""
+        """S5: A hung __aexit__ on teardown is bounded by the disconnect
+        watchdog (loop.call_later → owner_task.cancel()); the test forces it
+        via a short timeout and asserts state is reset and disconnect returns
+        False (cleanup aborted by watchdog, not a clean exit — but it does not
+        fail-fast / raise)."""
         state = _install_fake_mcp(aexit_delay=10.0)
         try:
             client = _make_client()
             with patch.object(Runner.callback_framework, "trigger", AsyncMock(return_value=None)):
                 await client.connect(timeout=NO_TIMEOUT)
                 assert client._session is not None
-                # Force the teardown to hit its timeout bound: we pass a tiny
+                # Force the teardown to hit its watchdog bound: we pass a tiny
                 # explicit timeout so the hung __aexit__ is observable quickly
                 # (rather than waiting out the 10s NO_TIMEOUT fallback).
                 result = await client.disconnect(timeout=0.05)
-            assert result is True
+            # Watchdog aborted the teardown → False (not a clean exit), but no
+            # exception raised (cleanup does not fail-fast).
+            assert result is False
             assert state["session_aexit_called"] is True
             # Even though __aexit__ hung, the client state is reset.
             assert client._session is None

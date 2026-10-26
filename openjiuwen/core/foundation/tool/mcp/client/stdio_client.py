@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
 from contextlib import AsyncExitStack
-from typing import Any, List, Optional, Dict
+from typing import Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
@@ -53,6 +53,7 @@ class StdioClient(McpClient):
             return True
         except Exception as e:
             logger.error(f"Stdio connection failed: {e}")
+            self._last_connect_error = e
             await self.disconnect()
             return False
 

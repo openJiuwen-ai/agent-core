@@ -8,7 +8,7 @@ from typing import Any, List, Optional
 
 from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import runner_logger as logger
 from openjiuwen.core.foundation.tool import (
     McpClient,
@@ -120,18 +120,68 @@ class ToolMgr:
                         cards.append(deepcopy(tool.card))
                 return cards
             client = self._create_client(server_config)
+            connected = False
             try:
                 connected = await client.connect()
                 if not connected:
+                    last_err = getattr(client, "_last_connect_error", None)
+                    reason = f"{type(last_err).__name__}: {last_err}" if last_err else ""
                     raise build_error(
-                        StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR, server_config=server_config, reason=""
+                        StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR,
+                        server_config=server_config, reason=reason,
                     )
                 results = await self._inner_refresh_mcp_tools(client, server_config, expiry_time)
                 self._mcp_server_name_to_ids.setdefault(server_config.server_name, []).append(server_config.server_id)
                 return results
-            except Exception as e:
+            except BaseException as e:
+                # ``connect``/``list_tools`` may raise a bare ``CancelledError`` or a
+                # ``BaseExceptionGroup`` (anyio task-group teardown, closing the
+                # generator-based client). Both are ``BaseException`` subclasses that
+                # escape ``except Exception``; coerce them into a ``BaseError`` so
+                # ``add_mcp_server`` wraps it in an ``Error`` and the real reason
+                # reaches the frontend instead of a silent "task cancelled".
+                if isinstance(e, KeyboardInterrupt):
+                    raise
+                # ``connect()`` False path already raised CONNECTION_ERROR above;
+                # let it through to keep its status/reason.
+                if isinstance(e, BaseError) and e.status is StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR:
+                    raise
+                if connected:
+                    try:
+                        await client.disconnect()
+                    except BaseException as disconnect_exc:  # noqa: BLE001
+                        logger.warning(
+                            "add_tool_server cleanup failed: %s, server_id=%s",
+                            disconnect_exc, server_config.server_id,
+                        )
+                if isinstance(e, Exception) and not isinstance(e, asyncio.CancelledError):
+                    cause = e
+                elif isinstance(e, asyncio.CancelledError):
+                    cause = RuntimeError(
+                        f"MCP server '{server_config.server_name}' connect/register cancelled "
+                        f"(anyio task-group teardown): {e}"
+                    )
+                elif isinstance(e, BaseExceptionGroup):
+                    exc_subgroup, base_subgroup = e.split(Exception)
+                    if exc_subgroup is not None and base_subgroup is None:
+                        subs = list(exc_subgroup.exceptions)
+                        cause = subs[0] if len(subs) == 1 else exc_subgroup
+                    elif base_subgroup is not None:
+                        cause = RuntimeError(
+                            f"MCP server '{server_config.server_name}' register failed: {base_subgroup}"
+                        )
+                    else:
+                        cause = RuntimeError(
+                            f"MCP server '{server_config.server_name}' register failed: {e}"
+                        )
+                else:
+                    cause = RuntimeError(
+                        f"MCP server '{server_config.server_name}' register failed: "
+                        f"{type(e).__name__}: {e}"
+                    )
                 raise build_error(
-                    StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, cause=e, server_config=server_config, reason=str(e)
+                    StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR, cause=cause, server_config=server_config,
+                    reason=str(cause),
                 ) from e
 
     @staticmethod
