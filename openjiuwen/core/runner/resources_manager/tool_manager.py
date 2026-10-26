@@ -141,26 +141,26 @@ class ToolMgr:
                 # ``add_mcp_server`` wraps it in an ``Error`` and the real reason
                 # reaches the frontend instead of a silent "task cancelled".
                 if isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)):
-                    raise
+                    raise e
                 if isinstance(e, BaseExceptionGroup):
                     cancelled_group, _ = e.split(asyncio.CancelledError)
                     keyboard_group, _ = e.split(KeyboardInterrupt)
                     if cancelled_group is not None or keyboard_group is not None:
-                        raise
+                        raise e
                 # ``connect()`` False path already raised CONNECTION_ERROR above;
                 # let it through to keep its status/reason.
                 if isinstance(e, BaseError) and e.status is StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR:
-                    raise
+                    raise e
                 if connected:
                     try:
                         await client.disconnect()
-                    except (KeyboardInterrupt, asyncio.CancelledError):
-                        raise
+                    except (KeyboardInterrupt, asyncio.CancelledError) as disconnect_exc:
+                        raise disconnect_exc
                     except BaseExceptionGroup as disconnect_exc:
                         cancelled_group, _ = disconnect_exc.split(asyncio.CancelledError)
                         keyboard_group, _ = disconnect_exc.split(KeyboardInterrupt)
                         if cancelled_group is not None or keyboard_group is not None:
-                            raise
+                            raise disconnect_exc
                         logger.warning(
                             "add_tool_server cleanup failed: %s, server_id=%s",
                             disconnect_exc, server_config.server_id,
