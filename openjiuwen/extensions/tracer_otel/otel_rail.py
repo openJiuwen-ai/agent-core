@@ -15,6 +15,7 @@ Usage (opt-in)::
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from openjiuwen.core.common.logging import session_logger
@@ -48,9 +49,22 @@ class OtelRail(AgentRail):
 
     priority: int = 0
 
+    # Tool spans are stored on the per-call callback context (isolated per
+    # tool call by AbilityManager.execute) instead of a rail-instance stack:
+    # parallel calls to the same tool must never pop each other's span, and
+    # @rail reuses one ctx across retry attempts so before/on_exception stay
+    # balanced per attempt. LLM calls are strictly sequential within one
+    # agent loop, so the LLM span stack stays as-is.
+    #
+    # The slot key is suffixed with the tool-call id (see
+    # _pending_tool_span_key): release branches that share one ``extra``
+    # dict across parallel tool contexts (0.1.17_hotfix) would otherwise let
+    # call B's before hook clobber call A's pending span, leaving A's span
+    # open forever and unexported.
+    _TOOL_SPAN_EXTRA_KEY = "_otel_rail_tool_span"
+
     def __init__(self) -> None:
         self._llm_spans: list = []
-        self._tool_spans: list = []
 
     # ------------------------------------------------------------------
     # Common info shared by root / LLM / tool spans
@@ -287,15 +301,55 @@ class OtelRail(AgentRail):
             params["reasoning_level"] = str(effort)
         return params
 
+    @staticmethod
+    def _parse_tool_arguments(raw_args: Any) -> Any:
+        """Best-effort parse of raw tool arguments for the span payload.
+
+        At BEFORE_TOOL_CALL time ``tool_call.arguments`` is still the raw
+        model-emitted JSON string — argument parsing/repair happens inside
+        the tool-call body, after the before event. The legacy session-tracer
+        decorator records the parsed dict it passes to ``tool.invoke``; parse
+        here so the rail span carries the same payload shape (bug #2046).
+        Unparseable values pass through unchanged — this must never raise.
+        """
+        if isinstance(raw_args, str):
+            if not raw_args:
+                return {}
+            try:
+                return json.loads(raw_args)
+            except (TypeError, ValueError):
+                return raw_args
+        return raw_args
+
+    def _pending_tool_span_key(self, ctx: AgentCallbackContext) -> str:
+        """Extra-dict slot for this tool call's pending span.
+
+        Keyed by tool-call id so concurrent same-name calls never overwrite
+        each other's slot — ``ctx.inputs`` is per-call even on branches
+        whose AbilityManager shares one ``extra`` dict across parallel tool
+        contexts (0.1.17_hotfix), so both hooks derive the same key.
+        Id-less calls fall back to the bare key (the single-call shape).
+        """
+        tool_call = getattr(ctx.inputs, "tool_call", None)
+        call_id = str(getattr(tool_call, "id", "") or "") if tool_call is not None else ""
+        return f"{self._TOOL_SPAN_EXTRA_KEY}:{call_id}" if call_id else self._TOOL_SPAN_EXTRA_KEY
+
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         try:
             session = ctx.session
             if session is None:
                 return
 
+            # The pending-span slot lives in ctx.extra; when extra is not a
+            # dict there is nowhere to record it and the span would dangle
+            # open forever — while its dedupe still suppressed the legacy
+            # decorator's twin event. Skip emission entirely instead.
+            if not isinstance(ctx.extra, dict):
+                return
+
             tracer = session.tracer()
             tool_span = tracer.tracer_agent_span_manager.create_agent_span(session.agent_span)
-            self._tool_spans.append(tool_span)
+            ctx.extra[self._pending_tool_span_key(ctx)] = tool_span
 
             tool_call = getattr(ctx.inputs, "tool_call", None)
             tool_name = getattr(ctx.inputs, "tool_name", "") or (getattr(tool_call, "name", "") if tool_call else "")
@@ -309,11 +363,19 @@ class OtelRail(AgentRail):
                 "tool_call_id": str(getattr(tool_call, "id", "") or ""),
             }
 
+            # Payload shape follows the pre-existing decorator contract —
+            # {"inputs": <parsed arguments>} — plus the tool-call identity
+            # keys, so the surviving span is a superset of both emitters.
             inputs_dict: dict = {}
             if tool_call is not None:
                 inputs_dict["id"] = str(getattr(tool_call, "id", "") or "")
                 inputs_dict["name"] = str(getattr(tool_call, "name", "") or "")
                 inputs_dict["type"] = str(getattr(tool_call, "type", "") or "")
+            raw_args = getattr(tool_call, "arguments", None) if tool_call is not None else None
+            if raw_args is None:
+                raw_args = getattr(ctx.inputs, "tool_args", None)
+            if raw_args is not None:
+                inputs_dict["inputs"] = self._parse_tool_arguments(raw_args)
 
             await tracer.trigger(
                 TracerHandlerName.TRACE_AGENT.value,
@@ -327,28 +389,36 @@ class OtelRail(AgentRail):
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         try:
-            if not self._tool_spans:
+            tool_span = (
+                ctx.extra.pop(self._pending_tool_span_key(ctx), None)
+                if isinstance(ctx.extra, dict) else None
+            )
+            if tool_span is None:
                 return
-            tool_span = self._tool_spans.pop()
             session = ctx.session
             if session is None:
                 return
 
             tracer = session.tracer()
+            # Wrap like the decorator contract ({"outputs": result}) so the
+            # span payload shape is identical whichever emitter survives.
             await tracer.trigger(
                 TracerHandlerName.TRACE_AGENT.value,
                 "on_plugin_end",
                 span=tool_span,
-                outputs=getattr(ctx.inputs, "tool_result", None),
+                outputs={"outputs": getattr(ctx.inputs, "tool_result", None)},
             )
         except Exception as exc:
             session_logger.warning("otel rail: after_tool_call failed: %s", exc)
 
     async def on_tool_exception(self, ctx: AgentCallbackContext) -> None:
         try:
-            if not self._tool_spans:
+            tool_span = (
+                ctx.extra.pop(self._pending_tool_span_key(ctx), None)
+                if isinstance(ctx.extra, dict) else None
+            )
+            if tool_span is None:
                 return
-            tool_span = self._tool_spans.pop()
             session = ctx.session
             if session is None:
                 return
