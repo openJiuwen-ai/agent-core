@@ -488,10 +488,8 @@ class SessionModelContext(ModelContext):
         waited = 0.0
         while True:
             try:
-                await asyncio.wait_for(
-                    self._processor_lock.acquire(),
-                    timeout=_PROCESSOR_LOCK_WARN_INTERVAL_SECONDS,
-                )
+                async with asyncio.timeout(_PROCESSOR_LOCK_WARN_INTERVAL_SECONDS):
+                    await self._processor_lock.acquire()
                 if waited:
                     logger.warning(
                         "context %s (session %s): %s acquired the processor lock "

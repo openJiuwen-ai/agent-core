@@ -41,6 +41,32 @@ def _build_model_with_stream(
 
 
 @pytest.mark.asyncio
+async def test_stream_chunk_completion_does_not_swallow_external_cancel():
+    reader = asyncio.current_task()
+    closed = []
+
+    async def stream(**kwargs):
+        try:
+            # Cancel immediately after a chunk becomes available. wait_for's
+            # completed-child branch used to consume this cancellation.
+            asyncio.get_running_loop().call_soon(reader.cancel)
+            yield AssistantMessageChunk(content="first")
+            await asyncio.sleep(0)
+            yield AssistantMessageChunk(content="must-not-arrive")
+        finally:
+            closed.append(True)
+
+    model = _build_model_with_stream(stream)
+    received = []
+    with pytest.raises(asyncio.CancelledError):
+        async for chunk in model.stream(messages=[]):
+            received.append(chunk.content)
+    reader.uncancel()  # This test deliberately cancelled its own pytest task.
+    assert "must-not-arrive" not in received
+    assert closed == [True]
+
+
+@pytest.mark.asyncio
 async def test_model_stream_raises_first_chunk_timeout():
     async def slow_first_chunk_stream(**kwargs):
         await asyncio.sleep(0.05)

@@ -87,3 +87,20 @@ async def test_compress_context_busy_path_unaffected() -> None:
     finally:
         ctx._processor_lock.release()
     assert result == "busy"
+
+
+@pytest.mark.asyncio
+async def test_processor_lock_completion_does_not_swallow_external_cancel() -> None:
+    ctx = await _make_context()
+    await ctx._processor_lock.acquire()
+    acquirer = asyncio.create_task(ctx._acquire_processor_lock("cancel-race"))
+    await asyncio.sleep(0)
+    ctx._processor_lock.release()
+    acquirer.cancel()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await acquirer
+        assert not ctx._processor_lock.locked()
+    finally:
+        if ctx._processor_lock.locked():
+            ctx._processor_lock.release()

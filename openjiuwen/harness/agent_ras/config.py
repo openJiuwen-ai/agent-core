@@ -33,6 +33,14 @@ class RepeatToolConfig(BaseModel):
     critical_threshold: int = Field(default=10, ge=2)
     global_breaker_threshold: int = Field(default=10, ge=2)
     unknown_tool_threshold: int = Field(default=10, ge=2)
+    recoverable_error_threshold: int = Field(
+        default=20, ge=2,
+        description=(
+            "Consecutive LLM turns of recoverable precondition failures "
+            "(e.g. read-before-edit / externally-modified file) tolerated "
+            "before escalating; hard failures keep using unknown_tool_threshold"
+        ),
+    )
     ignored_tool_calls: list[IgnoredToolCallRule] = Field(
         default_factory=list,
         description="Outer tool and top-level argument rules excluded from repeat detection",
@@ -44,6 +52,7 @@ class RepeatToolConfig(BaseModel):
             4 * self.critical_threshold,
             2 * self.global_breaker_threshold,
             2 * self.unknown_tool_threshold,
+            2 * self.recoverable_error_threshold,
         )
 
 

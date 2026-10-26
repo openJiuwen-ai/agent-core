@@ -90,6 +90,13 @@ class DbSessions:
         self._write_session_local = write_session_local
         self._read_session_local = read_session_local or write_session_local
         self._write_lock = asyncio.Lock()
+        self.ready_session_ids: set[str] = set()
+
+    @asynccontextmanager
+    async def serialize_writes(self) -> AsyncIterator[None]:
+        """Serialize writes and DDL without opening a session; non-reentrant."""
+        async with self._write_lock:
+            yield
 
     @asynccontextmanager
     async def read(self) -> AsyncIterator[AsyncSession]:
@@ -124,7 +131,7 @@ class DbSessions:
         behind each other) runs under ``_DB_SESSION_WATCHDOG_SECONDS`` so a
         wedged driver surfaces as a loud ``TimeoutError``.
         """
-        async with self._write_lock:
+        async with self.serialize_writes():
             try:
                 async with asyncio.timeout(_DB_SESSION_WATCHDOG_SECONDS):
                     async with self._write_session_local() as session:
@@ -310,79 +317,49 @@ def _ensure_team_info_capability_columns(sync_conn) -> None:
         team_logger.info("Migrated legacy team_info table: added enable_task_verification column")
 
 
-def _ensure_message_protocol_column(sync_conn) -> None:
-    """Backfill the ``protocol`` column on pre-existing per-session message tables.
+def _ensure_dynamic_table_columns(sync_conn, table_names: list[str] | None = None) -> None:
+    """Add missing read-model columns without changing indexes or task states.
 
-    ``SQLModel.metadata.create_all`` only creates tables that don't exist;
-    it never alters live tables.  Per-session message tables created before
-    the ``protocol`` column was introduced therefore lack it after upgrading.
-    Probe each message table and run ``ALTER TABLE ... ADD COLUMN`` with a
-    default of ``"plain"`` so legacy rows retain their original semantics.
+    Database initialization visits historical tables once. Session binding
+    passes explicit table names, never the whole database.
     """
     inspector = inspect(sync_conn)
-    for table_name in inspector.get_table_names():
-        if not table_name.startswith("team_message_"):
-            continue
-        columns = {col["name"] for col in inspector.get_columns(table_name)}
-        if "protocol" in columns:
-            continue
-        sync_conn.exec_driver_sql(
-            f"ALTER TABLE {table_name} ADD COLUMN protocol TEXT NOT NULL DEFAULT 'plain'"
-        )
-        team_logger.info(
-            "Migrated legacy message table %s: added protocol column",
-            table_name,
-        )
-
-
-def _ensure_message_meta_column(sync_conn) -> None:
-    """Backfill the ``meta`` column on pre-existing per-session message tables.
-
-    Same reason as ``_ensure_message_protocol_column``: ``create_all`` never
-    alters a live table. Legacy rows get NULL meta, which the delivery path
-    reads as "plain message, render content verbatim" — the pre-F_63 behavior.
-    """
-    inspector = inspect(sync_conn)
-    for table_name in inspector.get_table_names():
-        if not table_name.startswith("team_message_"):
-            continue
-        columns = {col["name"] for col in inspector.get_columns(table_name)}
-        if "meta" in columns:
-            continue
-        sync_conn.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN meta TEXT")
-        team_logger.info("Migrated legacy message table %s: added meta column", table_name)
-
-
-def _ensure_message_coordination_meta_column(sync_conn) -> None:
-    """Backfill nullable debate coordination metadata on legacy messages."""
-    inspector = inspect(sync_conn)
-    for table_name in inspector.get_table_names():
-        if not table_name.startswith("team_message_"):
-            continue
-        columns = {col["name"] for col in inspector.get_columns(table_name)}
-        if "coordination_meta" in columns:
-            continue
-        if sync_conn.dialect.name == "postgresql":
-            sync_conn.exec_driver_sql(
-                f"ALTER TABLE {table_name} "
-                "ADD COLUMN IF NOT EXISTS coordination_meta TEXT"
+    for table_name in table_names if table_names is not None else inspector.get_table_names():
+        if table_name.startswith("team_message_"):
+            # Match MySQL's bounded string representation without TEXT's
+            # version-dependent default-value restrictions.
+            protocol_type = "VARCHAR(255)" if sync_conn.dialect.name == "mysql" else "TEXT"
+            definitions = (
+                ("protocol", f"{protocol_type} NOT NULL DEFAULT 'plain'"),
+                ("meta", "TEXT"),
+                ("coordination_meta", "TEXT"),
+            )
+        elif table_name.startswith("team_task_") and not table_name.startswith("team_task_dependency_"):
+            definitions = (
+                ("reviewer", "TEXT"),
+                ("review_round", "INTEGER NOT NULL DEFAULT 0"),
+                ("max_review_rounds", "INTEGER"),
             )
         else:
+            continue
+        columns = {col["name"] for col in inspector.get_columns(table_name)}
+        quoted_table = sync_conn.dialect.identifier_preparer.quote_identifier(table_name)
+        for name, definition in definitions:
+            if name in columns:
+                continue
             try:
+                if_not_exists = "IF NOT EXISTS " if sync_conn.dialect.name == "postgresql" else ""
                 sync_conn.exec_driver_sql(
-                    f"ALTER TABLE {table_name} ADD COLUMN coordination_meta TEXT"
+                    f"ALTER TABLE {quoted_table} ADD COLUMN {if_not_exists}{name} {definition}"
                 )
             except DBAPIError:
-                refreshed = inspect(sync_conn)
+                # Another process may have migrated the column after inspection.
                 refreshed_columns = {
-                    col["name"] for col in refreshed.get_columns(table_name)
+                    col["name"] for col in inspect(sync_conn).get_columns(table_name)
                 }
-                if "coordination_meta" not in refreshed_columns:
+                if name not in refreshed_columns:
                     raise
-        team_logger.info(
-            "Migrated legacy message table %s: added coordination_meta column",
-            table_name,
-        )
+            team_logger.info("Migrated legacy table %s: added %s column", table_name, name)
 
 
 def _current_session_migration_tables() -> list[str]:
@@ -478,21 +455,7 @@ def _ensure_dynamic_table_indexes(
                     table_name,
                 )
 
-            # F_59: add the verify-gate ``reviewer`` column to pre-existing tables.
-            task_columns = {c["name"] for c in inspector.get_columns(table_name)}
-            if "reviewer" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN reviewer TEXT')
-                team_logger.info("Migrated task table %s: added reviewer column", table_name)
-
-            # F_62: review voting — round counter + per-task round ceiling.
-            if "review_round" not in task_columns:
-                sync_conn.exec_driver_sql(
-                    f'ALTER TABLE "{table_name}" ADD COLUMN review_round INTEGER NOT NULL DEFAULT 0'
-                )
-                team_logger.info("Migrated task table %s: added review_round column", table_name)
-            if "max_review_rounds" not in task_columns:
-                sync_conn.exec_driver_sql(f'ALTER TABLE "{table_name}" ADD COLUMN max_review_rounds INTEGER')
-                team_logger.info("Migrated task table %s: added max_review_rounds column", table_name)
+            _ensure_dynamic_table_columns(sync_conn, [table_name])
 
             # F_59: fold the legacy execution states into the condition-named
             # IN_PROGRESS. claimed / started / plan_approved were all "a member
@@ -776,12 +739,29 @@ async def initialize_engine(config: DatabaseConfig) -> SqlEngines:
             autoflush=False,
         )
 
-    # DDL + migrations run on the writer engine (they are writes).
-    async with write_engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.create_all)
-        await conn.run_sync(_ensure_team_member_role_column)
-        await conn.run_sync(_ensure_team_member_options_column)
-        await conn.run_sync(_ensure_team_info_capability_columns)
+    # Retry startup contention in a fresh transaction. Missing required columns
+    # must still fail initialization rather than publish an unusable database.
+    try:
+        for attempt in range(_DB_RETRY_ATTEMPTS):
+            try:
+                async with write_engine.begin() as conn:
+                    await conn.run_sync(SQLModel.metadata.create_all)
+                    await conn.run_sync(_ensure_team_member_role_column)
+                    await conn.run_sync(_ensure_team_member_options_column)
+                    await conn.run_sync(_ensure_team_info_capability_columns)
+                    await conn.run_sync(_ensure_dynamic_table_columns)
+                break
+            except (OperationalError, SATimeoutError):
+                if attempt == _DB_RETRY_ATTEMPTS - 1:
+                    raise
+                delay = _DB_RETRY_BASE_DELAY * (2**attempt)
+                team_logger.warning("Database initialization retry %s in %ss", attempt + 1, delay)
+                await asyncio.sleep(delay)
+    except BaseException:
+        # TeamDatabase has not received these engines yet, so its close() cannot
+        # release them after failed initialization (including external cancel).
+        await asyncio.gather(*(engine.dispose() for engine in {write_engine, read_engine}), return_exceptions=True)
+        raise
 
     return SqlEngines(write_engine, read_engine, write_session_local, read_session_local)
 
@@ -802,12 +782,9 @@ async def _ensure_session_tables(session: AsyncSession) -> None:
     existing_before_create = await conn.run_sync(_snapshot_existing_tables, candidates)
     for model in (task_model, dep_model, message_model, read_status_model, review_vote_model):
         await conn.run_sync(model.__table__.create, checkfirst=True)
-    await conn.run_sync(_ensure_message_protocol_column)
-    await conn.run_sync(_ensure_message_meta_column)
-    await conn.run_sync(_ensure_message_coordination_meta_column)
-    await conn.run_sync(
-        _ensure_dynamic_table_indexes, candidates, existing_before_create
-    )
+    if message_model.__tablename__ in existing_before_create:
+        await conn.run_sync(_ensure_dynamic_table_columns, [message_model.__tablename__])
+    await conn.run_sync(_ensure_dynamic_table_indexes, candidates, existing_before_create)
 
 
 async def create_cur_session_tables(sessions: DbSessions) -> None:
@@ -839,9 +816,22 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
         return
 
     async def _ddl_once() -> None:
+        if session_id in sessions.ready_session_ids:
+            # Other processes/instances can delete tables without invalidating
+            # our cache. Probe only this session's five tables, never the catalog.
+            async with sessions.read() as session:
+                conn = await session.connection()
+                if await conn.run_sync(_session_tables_exist):
+                    return
+            sessions.ready_session_ids.discard(session_id)
         async with sessions.write() as session:
+            # Concurrent binds queue on the existing writer lock. Only the first
+            # successful bind performs DDL; failed/cancelled attempts stay retryable.
+            if session_id in sessions.ready_session_ids:
+                return
             await _ensure_session_tables(session)
             await session.commit()
+            sessions.ready_session_ids.add(session_id)
 
     last_err: BaseException | None = None
     for attempt in range(_DB_RETRY_ATTEMPTS):
@@ -873,6 +863,18 @@ async def create_cur_session_tables(sessions: DbSessions) -> None:
         last_err,
     )
     return
+
+
+def _session_tables_exist(sync_conn) -> bool:
+    inspector = inspect(sync_conn)
+    models = (
+        _get_task_model, _get_task_dependency_model, _get_message_model,
+        _get_message_read_status_model, _get_review_vote_model,
+    )
+    for model in models:
+        if not inspector.has_table(model().__tablename__):
+            return False
+    return True
 
 
 async def drop_cur_session_tables(engine: AsyncEngine) -> None:

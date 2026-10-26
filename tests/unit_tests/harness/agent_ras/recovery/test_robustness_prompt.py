@@ -6,6 +6,7 @@ from __future__ import annotations
 from openjiuwen.harness.agent_ras.models import Anomaly, AnomalyKind, Severity
 from openjiuwen.harness.agent_ras.recovery.robustness_prompt import (
     _repeat_tool_fields,
+    critical_text_for,
     steer_text_for,
     user_warning_text_for,
 )
@@ -75,3 +76,88 @@ class TestRepeatToolPromptRender:
         assert text is not None
         assert "main_agent" in text
         assert "read_file" in text
+
+
+def _anomaly_with_msg_key(msg_key: str, *, severity: Severity = Severity.LOW) -> Anomaly:
+    evidence: dict = {
+        "detector_kind": msg_key,
+        "msg_key": msg_key,
+        "count": 10,
+        "tool_name": "edit_file",
+        "tool_arguments": '{"file_path": "/a.html"}',
+    }
+    return Anomaly(
+        detector="repeat_tool_call",
+        kind=AnomalyKind.REPEAT_TOOL_CALL,
+        severity=severity,
+        member_name="main_agent",
+        summary=f"repeat_tool_call on edit_file",
+        evidence=evidence,
+    )
+
+
+class TestFailureRepeatCriticalRender:
+    def test_registered_tool_critical_has_no_unknown_wording(self):
+        text = critical_text_for(
+            _anomaly_with_msg_key("tool_failure_repeat", severity=Severity.CRITICAL),
+            locale="cn",
+        )
+        assert text == "main_agent 的工具 edit_file 已连续 10 次调用失败，停止重试"
+
+    def test_unknown_tool_critical_keeps_legacy_wording(self):
+        text = critical_text_for(
+            _anomaly_with_msg_key("unknown_tool_repeat", severity=Severity.CRITICAL),
+            locale="cn",
+        )
+        assert text == "main_agent 的未知工具 edit_file 连续调用 10 次，停止重试"
+
+    def test_en_registered_tool_critical(self):
+        text = critical_text_for(
+            _anomaly_with_msg_key("tool_failure_repeat", severity=Severity.CRITICAL),
+            locale="en",
+        )
+        assert "main_agent" in text
+        assert "edit_file" in text
+        assert "unknown" not in text
+
+
+class TestRecoverableRepeatRender:
+    def test_user_notice_reports_precondition(self):
+        text = user_warning_text_for(
+            _anomaly_with_msg_key("recoverable_error_repeat_warning"),
+            locale="cn",
+        )
+        assert text is not None
+        assert "main_agent" in text
+        assert "edit_file" in text
+        assert "前置条件" in text
+
+    def test_steering_mentions_read_file(self):
+        text = steer_text_for(
+            _anomaly_with_msg_key("recoverable_error_repeat_warning"),
+            locale="cn",
+        )
+        assert text is not None
+        assert "- Agent：main_agent" in text
+        assert "- 工具：edit_file" in text
+        assert "read_file" in text
+        assert "write_file" in text
+
+    def test_critical_reports_precondition(self):
+        text = critical_text_for(
+            _anomaly_with_msg_key("recoverable_error_repeat", severity=Severity.CRITICAL),
+            locale="cn",
+        )
+        assert "main_agent" in text
+        assert "edit_file" in text
+        assert "前置条件" in text
+        assert "未知工具" not in text
+
+    def test_en_steering_mentions_read_file(self):
+        text = steer_text_for(
+            _anomaly_with_msg_key("recoverable_error_repeat_warning"),
+            locale="en",
+        )
+        assert text is not None
+        assert "read_file" in text
+        assert "main_agent" in text

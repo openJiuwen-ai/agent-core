@@ -39,6 +39,7 @@ class RuntimeState(str, Enum):
 
     RUNNING = "running"
     PAUSED = "paused"
+    STOPPING = "stopping"
 
 
 @dataclass(slots=True)
@@ -50,6 +51,7 @@ class ActiveTeam:
     current_session_id: str
     state: RuntimeState = RuntimeState.RUNNING
     interact_gate: InteractGate = field(default_factory=InteractGate)
+    stop_task: asyncio.Task | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,9 +91,11 @@ class TeamRuntimePool:
         async with self._lock:
             self._teams[entry.team_name] = entry
 
-    async def remove(self, team_name: str) -> ActiveTeam | None:
+    async def remove(self, team_name: str, *, expected: ActiveTeam | None = None) -> ActiveTeam | None:
         """Drop the entry for ``team_name`` and return it, or ``None`` if absent."""
         async with self._lock:
+            if expected is not None and self._teams.get(team_name) is not expected:
+                return None
             return self._teams.pop(team_name, None)
 
     async def list_team_names(self) -> list[str]:

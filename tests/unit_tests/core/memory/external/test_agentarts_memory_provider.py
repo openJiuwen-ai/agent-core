@@ -18,13 +18,14 @@ from openjiuwen.core.memory.external import AgentArtsMemoryProvider
 
 
 class FakeRecord:
-    def __init__(self, content: str):
+    def __init__(self, content: str, created_at: str = "2026-10-22T00:00:00Z"):
         self.content = content
+        self.created_at = created_at
 
 
 class FakeSearchResult:
-    def __init__(self, content: str, score: float):
-        self.record = FakeRecord(content)
+    def __init__(self, content: str, score: float, created_at: str = "2026-10-22T00:00:00Z"):
+        self.record = FakeRecord(content, created_at)
         self.score = score
 
 
@@ -242,8 +243,36 @@ def test_get_client_uses_sdk_api_key_and_configures_client_endpoint(monkeypatch)
     client = provider._get_client()
 
     assert client is provider._client
-    assert calls == [{"api_key": "k"}]
+    # Base provider defaults to verify_ssl=True.
+    assert calls == [{"api_key": "k", "verify_ssl": True}]
     assert client._data_plane.client._get_base_url() == "https://custom.example.com"
+
+
+def test_get_client_respects_constructor_verify_ssl_false(monkeypatch):
+    calls = []
+
+    class FakeHttpService:
+        def _get_base_url(self, space_id=None):
+            return "https://original.example.com"
+
+    class FakeMemoryClient:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            self._data_plane = types.SimpleNamespace(client=FakeHttpService())
+
+    memory_module = types.ModuleType("agentarts.sdk.memory")
+    setattr(memory_module, "MemoryClient", FakeMemoryClient)
+    monkeypatch.setitem(sys.modules, "agentarts", types.ModuleType("agentarts"))
+    monkeypatch.setitem(sys.modules, "agentarts.sdk", types.ModuleType("agentarts.sdk"))
+    monkeypatch.setitem(sys.modules, "agentarts.sdk.memory", memory_module)
+
+    provider = AgentArtsMemoryProvider(
+        base_url="https://custom.example.com", api_key="k", space_id="space", verify_ssl=False
+    )
+    client = provider._get_client()
+
+    assert client is provider._client
+    assert calls == [{"api_key": "k", "verify_ssl": False}]
 
 
 def test_missing_sdk_error_is_actionable(monkeypatch):
@@ -355,12 +384,32 @@ async def test_search_tool_returns_json_results_and_filters():
     assert data["count"] == 1
     assert data["results"][0]["memory"] == "remember this"
     assert data["results"][0]["score"] == 0.91
+    assert data["results"][0]["created_at"] == "2026-10-22T00:00:00Z"
     filters = fake.search_calls[-1]["filters"]
     assert filters.query == "x"
     assert filters.top_k == 2
     assert filters.strategy_type == "semantic"
     assert filters.min_score == 0.7
     assert filters.actor_id == "u1"
+
+
+@pytest.mark.asyncio
+async def test_search_tool_normalizes_missing_created_at_to_empty_string():
+    # FakeRecord defaults created_at to a timestamp; override to "" to model
+    # records without a creation time. _search must coerce that to "".
+    provider = AgentArtsMemoryProvider(api_key="k", space_id="space")
+    fake = FakeAgentArtsClient(
+        search_response=FakeSearchResponse(
+            results=[FakeSearchResult("no-timestamp memory", 0.8, created_at="")],
+        ),
+    )
+    provider._client = fake
+    await provider.initialize(session_id="search-session")
+
+    data = json.loads(
+        await provider.handle_tool_call("external_memory_search", {"query": "x"})
+    )
+    assert data["results"][0]["created_at"] == ""
 
 
 @pytest.mark.asyncio

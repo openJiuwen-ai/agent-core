@@ -48,6 +48,7 @@ class SafeSpanProcessor(SpanProcessor):
         self._processor = processor
         self._shutdown_called = False
         self._lifecycle_lock = threading.RLock()
+        self._export_lock = threading.Lock()
 
     def on_start(self, span: Any, parent_context: Any = None) -> None:
         with self._lifecycle_lock:
@@ -68,9 +69,10 @@ class SafeSpanProcessor(SpanProcessor):
                 self._log_failure("on_end", exc)
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
-        with self._lifecycle_lock:
-            if self._shutdown_called:
-                return True
+        with self._export_lock:
+            with self._lifecycle_lock:
+                if self._shutdown_called:
+                    return True
             try:
                 result = self._processor.force_flush(timeout_millis)
             except Exception as exc:
@@ -84,7 +86,7 @@ class SafeSpanProcessor(SpanProcessor):
             return True
 
     def shutdown(self) -> None:
-        with self._lifecycle_lock:
+        with self._export_lock, self._lifecycle_lock:
             if self._shutdown_called:
                 return
             self._shutdown_called = True
@@ -168,6 +170,9 @@ class ObservabilityRuntime:
         self._callback_framework: Any | None = None
         self._callback_namespace = "extensions.observability"
         self._lock = threading.RLock()
+        self._export_lock = threading.Lock()
+        self._flush_worker_running = False
+        self._pending_flush_timeout: int | None = None
         self._initializing = False
 
     def initialize(
@@ -323,19 +328,42 @@ class ObservabilityRuntime:
         with self._lock:
             return self._provider is not None
 
-    def force_flush(self, timeout_millis: int = 5000) -> None:
-        """Flush all registered processors."""
+    def request_force_flush(self, timeout_millis: int = 5000) -> None:
+        """Coalesce background exports into one worker and at most one pending flush."""
         with self._lock:
             if self._provider is None:
                 return
+            self._pending_flush_timeout = max(self._pending_flush_timeout or 0, timeout_millis)
+            if self._flush_worker_running:
+                return
+            self._flush_worker_running = True
+            threading.Thread(target=self._drain_flush_requests, name="otel-flush", daemon=True).start()
+
+    def _drain_flush_requests(self) -> None:
+        while True:
+            with self._lock:
+                timeout = self._pending_flush_timeout
+                self._pending_flush_timeout = None
+                if timeout is None:
+                    self._flush_worker_running = False
+                    return
+            self.force_flush(timeout_millis=timeout)
+
+    def force_flush(self, timeout_millis: int = 5000) -> None:
+        """Flush all registered processors."""
+        with self._export_lock:
+            with self._lock:
+                provider = self._provider
+            if provider is None:
+                return
             try:
-                self._provider.force_flush(timeout_millis=timeout_millis)
+                provider.force_flush(timeout_millis=timeout_millis)
             except Exception as exc:
                 logger.warning("otel: force_flush failed - {}", exc)
 
     def shutdown(self, timeout_millis: int = 5000) -> None:
         """Flush and release the provider, shutting it down only when owned."""
-        with self._lock:
+        with self._export_lock, self._lock:
             provider = self._provider
             tracker = self._tracker
             owns_provider = self._owns_provider

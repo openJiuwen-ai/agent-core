@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import gc
+import threading
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 from weakref import ref
@@ -330,3 +333,62 @@ def test_borrowed_provider_stops_managed_processors_on_initialization_rollback(
     finally:
         runtime.shutdown()
         provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_background_flush_coalesces_and_does_not_hold_runtime_lock():
+    runtime = ObservabilityRuntime()
+    entered, release, flushed = threading.Event(), threading.Event(), threading.Event()
+    calls = []
+
+    def export(**kwargs):
+        calls.append(threading.current_thread().name)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+        else:
+            flushed.set()
+        return True
+
+    provider = SimpleNamespace(force_flush=export, get_tracer=lambda name: name)
+    runtime._provider = provider
+    try:
+        runtime.request_force_flush()
+        assert await asyncio.to_thread(entered.wait, 1)
+        # These APIs run on the event loop while the exporter is still blocked.
+        assert runtime.get_tracer("responsive") == "responsive"
+        assert runtime.is_initialized()
+        for _ in range(50):
+            runtime.request_force_flush()
+        await asyncio.sleep(0)
+        assert len(calls) == 1
+    finally:
+        release.set()
+    assert await asyncio.to_thread(flushed.wait, 1)
+    assert calls == ["otel-flush", "otel-flush"]
+
+
+def test_additional_processor_flush_does_not_block_new_spans():
+    from openjiuwen.extensions.observability.runtime import SafeSpanProcessor
+
+    entered, release = threading.Event(), threading.Event()
+    processor = MagicMock(spec=SpanProcessor)
+
+    def export(*args):
+        entered.set()
+        assert release.wait(5)
+        return True
+
+    processor.force_flush.side_effect = export
+    adapter = SafeSpanProcessor(processor)
+    worker = threading.Thread(target=adapter.force_flush)
+    worker.start()
+    try:
+        assert entered.wait(1)
+        adapter.on_end(MagicMock())
+        processor.on_end.assert_called_once()
+        assert not release.is_set()
+    finally:
+        release.set()
+        worker.join(1)
+    assert not worker.is_alive()

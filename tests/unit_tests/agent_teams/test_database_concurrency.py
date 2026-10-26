@@ -232,12 +232,12 @@ async def test_concurrent_create_messages_succeed(file_db: TeamDatabase) -> None
 @pytest.mark.asyncio
 @pytest.mark.level1
 async def test_write_lock_serializes_writes(file_db: TeamDatabase) -> None:
-    """``DbSessions.write`` holds a process-wide lock: writers never overlap."""
+    """Session writes and engine-level DDL share the same serialization lock."""
     sessions = DbSessions(file_db.session_local)
     order: list[tuple[str, int]] = []
 
     async def writer(i: int) -> None:
-        async with sessions.write():
+        async with sessions.serialize_writes() if i == 2 else sessions.write():
             order.append(("enter", i))
             await asyncio.sleep(0.05)
             order.append(("exit", i))
@@ -502,11 +502,16 @@ async def test_session_ddl_runs_under_write_lock(
 
     monkeypatch.setattr(engine_module.DbSessions, "write", spy_write)
 
-    await file_db.create_cur_session_tables()
+    token = set_session_id("lock_scope_session")
+    try:
+        await file_db.create_cur_session_tables()
 
-    # The DDL must have acquired the process-wide write lock. A regression
-    # back to ``engine.begin()`` never calls ``write()`` and fails here.
-    assert entered == [True]
+        # The DDL must have acquired the process-wide write lock. A regression
+        # back to ``engine.begin()`` never calls ``write()`` and fails here.
+        assert entered == [True]
+
+    finally:
+        reset_session_id(token)
 
 
 @pytest.mark.asyncio
@@ -623,12 +628,190 @@ async def test_create_cur_session_tables_retries_on_watchdog_timeout(
     monkeypatch.setattr(engine_module.DbSessions, "write", flaky_write)
     monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
 
-    await file_db.create_cur_session_tables()  # must not raise
+    token = set_session_id("watchdog_retry_session")
+    try:
+        await file_db.create_cur_session_tables()  # must not raise
 
-    assert attempts["n"] == 2
-    from openjiuwen.agent_teams.tools.database.engine import _current_session_migration_tables
+        assert attempts["n"] == 2
+        from openjiuwen.agent_teams.tools.database.engine import _current_session_migration_tables
 
-    task_table = _current_session_migration_tables()[0]
-    async with file_db.read_session_local() as session:
-        conn = await session.connection()
-        assert await conn.run_sync(lambda sc: inspect(sc).has_table(task_table))
+        task_table = _current_session_migration_tables()[0]
+        async with file_db.read_session_local() as session:
+            conn = await session.connection()
+            assert await conn.run_sync(lambda sc: inspect(sc).has_table(task_table))
+
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_concurrent_session_binds_initialize_once(file_db, monkeypatch):
+    from unittest.mock import AsyncMock
+    from sqlalchemy import event
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+    token = set_session_id("coalesced_bind")
+    initialize = AsyncMock(wraps=engine_module._ensure_session_tables)
+    monkeypatch.setattr(engine_module, "_ensure_session_tables", initialize)
+    try:
+        await asyncio.gather(*(file_db.create_cur_session_tables() for _ in range(12)))
+        assert initialize.await_count == 1
+        statements = []
+        def record(conn, cursor, statement, parameters, context, executemany):
+            statements.append(statement)
+        event.listen(file_db.read_engine.sync_engine, "before_cursor_execute", record)
+        try:
+            await file_db.create_cur_session_tables()
+            assert 0 < len(statements) <= 10
+            assert all(statement.startswith("PRAGMA ") and "table_info(" in statement for statement in statements)
+            assert initialize.await_count == 1
+        finally:
+            event.remove(file_db.read_engine.sync_engine, "before_cursor_execute", record)
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_failed_session_initialization_can_retry(file_db, monkeypatch):
+    from unittest.mock import AsyncMock
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+    token = set_session_id("failed_bind")
+    initialize = AsyncMock(side_effect=TimeoutError("watchdog"))
+    original = engine_module._ensure_session_tables
+    monkeypatch.setattr(engine_module, "_ensure_session_tables", initialize)
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0)
+    try:
+        await file_db.create_cur_session_tables()
+        assert initialize.await_count == engine_module._DB_RETRY_ATTEMPTS
+        initialize.side_effect = original
+        await file_db.create_cur_session_tables()
+        await file_db.create_cur_session_tables()
+        assert initialize.await_count == engine_module._DB_RETRY_ATTEMPTS + 1
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("partial_drop", [False, True])
+async def test_cached_bind_repairs_tables_deleted_by_another_instance(file_db, partial_drop):
+    from sqlalchemy import inspect
+    from openjiuwen.agent_teams.tools.models import _sanitize_session_id_for_table
+
+    other = TeamDatabase(file_db.config)
+    token = set_session_id("external_drop")
+    try:
+        await other.initialize()
+        await file_db.create_cur_session_tables()
+        if partial_drop:
+            name = "team_review_vote_" + _sanitize_session_id_for_table("external_drop")
+            async with other.engine.begin() as conn:
+                await conn.exec_driver_sql(f'DROP TABLE "{name}"')
+        else:
+            await other.drop_session_tables_by_id("external_drop")
+        await file_db.create_cur_session_tables()
+        async with file_db.engine.connect() as conn:
+            assert await conn.run_sync(lambda sc: inspect(sc).has_table(
+                "team_review_vote_" + _sanitize_session_id_for_table("external_drop")
+            ))
+        # Exercise a real DAO after rebind, not just the cache flag.
+        assert await file_db.task.get_team_tasks("team") == []
+        assert await file_db.message.get_team_messages("team") == []
+    finally:
+        await other.close()
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("failure", ["transient", "exhausted", "permanent", "cancelled"])
+@pytest.mark.parametrize("file_backed", [False, True])
+async def test_startup_migration_retries_or_releases_unpublished_engines(monkeypatch, tmp_path, failure, file_backed):
+    from unittest.mock import Mock
+    from sqlalchemy.ext.asyncio import AsyncEngine
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+    created = []
+    disposed = []
+    factory = engine_module.create_async_engine
+    dispose_engine = AsyncEngine.dispose
+    async def dispose(engine, *args, **kwargs):
+        disposed.append(engine)
+        await dispose_engine(engine, *args, **kwargs)
+
+    def create(*args, **kwargs):
+        engine = factory(*args, **kwargs)
+        created.append(engine)
+        return engine
+
+    error = {
+        "transient": OperationalError("ALTER", {}, Exception("database is locked")),
+        "exhausted": OperationalError("ALTER", {}, Exception("database is locked")),
+        "permanent": ValueError("invalid schema"),
+        "cancelled": asyncio.CancelledError(),
+    }[failure]
+    migrate = Mock(side_effect=[error, None] if failure == "transient" else error)
+    monkeypatch.setattr(engine_module, "create_async_engine", create)
+    monkeypatch.setattr(AsyncEngine, "dispose", dispose)
+    monkeypatch.setattr(engine_module, "_ensure_dynamic_table_columns", migrate)
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0)
+    database = TeamDatabase(DatabaseConfig(connection_string=str(tmp_path / "startup.db") if file_backed else ":memory:"))
+    try:
+        if failure == "transient":
+            await database.initialize()
+            assert database._initialized
+            assert migrate.call_count == 2
+            assert disposed == []
+        else:
+            with pytest.raises(type(error)):
+                await database.initialize()
+            assert not database._initialized and database.engine is None
+            assert migrate.call_count == (engine_module._DB_RETRY_ATTEMPTS if failure == "exhausted" else 1)
+            assert len(disposed) == len(created) and set(disposed) == set(created)
+    finally:
+        await database.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_database_reopen_upgrades_columns_without_rewriting_historical_tasks(tmp_path):
+    from sqlalchemy import create_engine, inspect
+    from openjiuwen.agent_teams.tools.database import engine as engine_module
+    from unittest.mock import patch
+
+    database_path = tmp_path / "legacy.db"
+    engine = create_engine(f"sqlite:///{database_path}")
+    with engine.begin() as conn:
+        conn.exec_driver_sql("CREATE TABLE team_message_historical (message_id TEXT PRIMARY KEY, content TEXT)")
+        conn.exec_driver_sql("INSERT INTO team_message_historical VALUES ('old', 'keep me')")
+        conn.exec_driver_sql(
+            "CREATE TABLE team_task_historical (task_id TEXT PRIMARY KEY, team_name TEXT, "
+            "assignee TEXT, status TEXT, updated_at INTEGER)"
+        )
+        conn.exec_driver_sql("INSERT INTO team_task_historical VALUES ('t1', 'team', 'worker', 'started', 1)")
+        conn.exec_driver_sql("CREATE INDEX ix_team_task_historical_assignee ON team_task_historical (assignee)")
+    engine.dispose()
+    database = TeamDatabase(DatabaseConfig(connection_string=str(database_path)))
+    try:
+        with patch.object(engine_module, "_ensure_dynamic_table_columns", wraps=engine_module._ensure_dynamic_table_columns) as migrate:
+            await asyncio.gather(database.initialize(), database.initialize())
+            await database.initialize()
+            assert migrate.call_count == 1
+        async with database.read_session_local() as session:
+            row = (await session.execute(text("SELECT * FROM team_message_historical"))).mappings().one()
+            assert (row["content"], row["protocol"], row["meta"], row["coordination_meta"]) == ("keep me", "plain", None, None)
+            task = (await session.execute(text("SELECT * FROM team_task_historical"))).mappings().one()
+            assert (task["status"], task["reviewer"], task["review_round"], task["max_review_rounds"]) == (
+                "started", None, 0, None
+            )
+            conn = await session.connection()
+            indexes = await conn.run_sync(lambda sc: inspect(sc).get_indexes("team_task_historical"))
+            assert {index["name"] for index in indexes} == {"ix_team_task_historical_assignee"}
+        await database.close()
+        await database.initialize()
+        await database.create_cur_session_tables()
+    finally:
+        await database.close()

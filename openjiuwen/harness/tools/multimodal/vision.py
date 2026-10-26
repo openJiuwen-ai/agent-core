@@ -122,6 +122,28 @@ def _vision_default_headers_from_env() -> Optional[Dict[str, str]]:
     return {str(key): str(value) for key, value in parsed.items()}
 
 
+def _normalize_headers(headers: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Normalize only the auth header key; every other header name passes through.
+
+    Ensures a custom auth header (e.g. ``authorization``) correctly overrides
+    the SDK's built-in ``Authorization`` on ALL openai library versions. The
+    merge inside the SDK is a case-sensitive dict update, so ``authorization``
+    and ``Authorization`` would coexist as two headers (placeholder Bearer +
+    real session credential).
+
+    Other header names are preserved verbatim: rewriting them (e.g.
+    ``OpenAI-Organization`` → ``Openai-Organization``) would defeat the
+    override of the SDK's org/project headers and send both values in the
+    request.
+    """
+    if not headers:
+        return headers
+    return {
+        "Authorization" if key.lower() == "authorization" else key: value
+        for key, value in headers.items()
+    }
+
+
 def _invoke_chat_completion(
     config: VisionModelConfig,
     prompt: str,
@@ -135,7 +157,9 @@ def _invoke_chat_completion(
     client = OpenAI(
         api_key=config.api_key,
         base_url=config.base_url,
-        default_headers=config.default_headers or _vision_default_headers_from_env(),
+        default_headers=_normalize_headers(
+            config.default_headers or _vision_default_headers_from_env()
+        ),
     )
     response = client.chat.completions.create(
         model=config.model,

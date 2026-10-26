@@ -485,11 +485,21 @@ class StreamController:
         """Gracefully abort; terminal callers remain closed until next start."""
         await self._cancel_with_interrupt_closure(immediate=False, terminal=terminal)
 
+    @staticmethod
+    def _terminal_drain_complete(harness: Any) -> bool:
+        if harness.state is not HarnessState.TERMINATED:
+            return False
+        # A crashed supervisor can terminate before its execution task exits.
+        if getattr(harness, "active_round", None) is not None:
+            raise RuntimeError("Terminated harness still has an undrained active round")
+        return True
+
     async def _cancel_with_interrupt_closure(
         self,
         *,
         immediate: bool,
         terminal: bool = False,
+        allow_terminated: bool = False,
     ) -> None:
         harness = self._resources.harness
         self._interrupt_resume_cancel_depth += 1
@@ -499,7 +509,17 @@ class StreamController:
         drains = [self._detach_pending_interrupt_resumes()]
         try:
             if harness is not None:
-                await harness.abort(immediate=immediate)
+                # Lifecycle teardown may follow round-end harness.stop(). Keep
+                # ordinary cancel semantics, but make teardown safe to retry.
+                if allow_terminated and self._terminal_drain_complete(harness):
+                    return
+                try:
+                    await harness.abort(immediate=immediate)
+                except Exception:
+                    if not allow_terminated or not self._terminal_drain_complete(harness):
+                        raise
+                if allow_terminated:
+                    self._terminal_drain_complete(harness)
         finally:
             drains.append(self._detach_pending_interrupt_resumes())
             try:
@@ -538,7 +558,7 @@ class StreamController:
         through :meth:`pause_agent`, which stops at a clean iteration boundary
         and keeps the round resumable.
         """
-        await self._cancel_with_interrupt_closure(immediate=True, terminal=True)
+        await self._cancel_with_interrupt_closure(immediate=True, terminal=True, allow_terminated=True)
 
     # ------------------------------------------------------------------
     # Interrupt-resume queries (forwarded to the runtime)

@@ -88,6 +88,44 @@ robustness_prompts_cn: dict[str, str] = {
     "repeat_tool_unknown_tool_critical": (
         "{member_name} 的未知工具 {tool_name} 连续调用 {count} 次，停止重试"
     ),
+    "repeat_tool_failure_critical": (
+        "{member_name} 的工具 {tool_name} 已连续 {count} 次调用失败，停止重试"
+    ),
+    "repeat_tool_failure_user": (
+        "[工具调用异常] {member_name} 的工具 {tool_name} 已连续失败 {count} 次。"
+    ),
+    "repeat_tool_failure_steering": (
+        "工具已被连续多次调用并持续失败，且未取得进展。\n"
+        "重复工具调用检测结果：\n"
+        "- Agent：{member_name}\n"
+        "- 工具：{tool_name}\n"
+        "- 重复次数：{count}\n"
+        "- 参数：{tool_arguments}\n"
+        "上述重复调用未产生有效进展。请勿再次使用完全相同的工具与参数进行调用。\n"
+        "请分析导致工具重复失败的原因，并采取应对方案：立刻停止重复调用，"
+        "调整参数、更换工具/策略，或在已有证据充分时结束任务。"
+    ),
+    "repeat_tool_recoverable_warning": (
+        "{member_name} 的工具 {tool_name} 因前置条件未满足已连续失败 {count} 次"
+        "（例如文件被外部修改后未重新读取），请先满足前置条件再重试。"
+    ),
+    "repeat_tool_recoverable_user": (
+        "[工具调用异常] {member_name} 的工具 {tool_name} 因前置条件未满足已连续失败 {count} 次。"
+    ),
+    "repeat_tool_recoverable_steering": (
+        "工具因前置条件未满足而连续失败（例如：文件在读取后被外部修改，或尚未读取就尝试编辑）。\n"
+        "- Agent：{member_name}\n"
+        "- 工具：{tool_name}\n"
+        "- 失败次数：{count}\n"
+        "- 参数：{tool_arguments}\n"
+        "请先消除前置条件再重试：对目标文件先调用 read_file 重新读取"
+        "（外部修改会使旧的读取记录失效），再进行 edit_file；"
+        "改动较大时可直接用 write_file 全量重写。"
+        "不要在未重新读取的情况下用相同参数反复重试编辑。"
+    ),
+    "repeat_tool_recoverable_critical": (
+        "{member_name} 的工具 {tool_name} 因前置条件未满足已连续失败 {count} 次，停止重试"
+    ),
     "thinking_loop_lock_judge_intro": (
         "检测到思考/输出陷入重复循环（检测模式={mode}，重复 **{count}** 次）。"
         "请阅读下方重复片段并判断是否属于正常表达："
@@ -280,6 +318,54 @@ robustness_prompts_en: dict[str, str] = {
         "{member_name}'s unknown tool {tool_name} called {count} times "
         "in a row, stopping retries"
     ),
+    "repeat_tool_failure_critical": (
+        "{member_name}'s tool {tool_name} has failed {count} times in a row, "
+        "stopping retries"
+    ),
+    "repeat_tool_failure_user": (
+        "[Tool Call Anomaly] {member_name}'s tool {tool_name} has failed "
+        "{count} times in a row."
+    ),
+    "repeat_tool_failure_steering": (
+        "The tool has been called repeatedly and keeps failing with no progress.\n"
+        "Repeated tool call detected:\n"
+        "- agent: {member_name}\n"
+        "- tool: {tool_name}\n"
+        "- repeated_times: {count}\n"
+        "- arguments: {tool_arguments}\n"
+        "The previous repeated calls did not make progress. "
+        "Do not call this exact same tool with the exact same arguments again.\n"
+        "Analyze why the tool keeps failing and take corrective action: "
+        "stop repeating the same tool call immediately, adjust parameters, "
+        "switch tools/strategy, or finish the task if enough evidence has been gathered."
+    ),
+    "repeat_tool_recoverable_warning": (
+        "{member_name}'s tool {tool_name} has failed {count} times in a row "
+        "on unmet preconditions (e.g. the file was modified externally after "
+        "it was read); satisfy the precondition before retrying."
+    ),
+    "repeat_tool_recoverable_user": (
+        "[Tool Call Anomaly] {member_name}'s tool {tool_name} has failed "
+        "{count} times in a row on unmet preconditions."
+    ),
+    "repeat_tool_recoverable_steering": (
+        "The tool keeps failing on unmet preconditions (e.g. the file was "
+        "modified externally after it was read, or it was edited without "
+        "being read first).\n"
+        "- agent: {member_name}\n"
+        "- tool: {tool_name}\n"
+        "- failed_times: {count}\n"
+        "- arguments: {tool_arguments}\n"
+        "Satisfy the precondition before retrying: call read_file on the "
+        "target file again (external modifications invalidate the previous "
+        "read), then edit_file; for large changes use write_file to rewrite "
+        "the whole file. Do not retry the same edit with identical arguments "
+        "without re-reading."
+    ),
+    "repeat_tool_recoverable_critical": (
+        "{member_name}'s tool {tool_name} has failed {count} times in a row "
+        "on unmet preconditions, stopping retries"
+    ),
     "thinking_loop_lock_judge_intro": (
         "Thinking/output stuck in a repeat loop (mode={mode}, **{count}** repeats). "
         "Review the repeated excerpt below and judge whether it is expected:"
@@ -417,17 +503,23 @@ _STEERING_BY_EVIDENCE: dict[str, str] = {
     "generic_repeat": "repeat_tool_generic_steering",
     "ping_pong_warning": "repeat_tool_pingpong_steering",
     "unknown_tool_repeat_warning": "repeat_tool_unknown_steering",
+    "tool_failure_repeat_warning": "repeat_tool_failure_steering",
+    "recoverable_error_repeat_warning": "repeat_tool_recoverable_steering",
 }
 
 _USER_WARNING_BY_EVIDENCE: dict[str, str] = {
     "generic_repeat": "repeat_tool_generic_user",
     "ping_pong_warning": "repeat_tool_pingpong_user",
     "unknown_tool_repeat_warning": "repeat_tool_unknown_user",
+    "tool_failure_repeat_warning": "repeat_tool_failure_user",
+    "recoverable_error_repeat_warning": "repeat_tool_recoverable_user",
 }
 
 _CRITICAL_BY_EVIDENCE: dict[str, str] = {
     "global_circuit_breaker": "repeat_tool_global_breaker_critical",
     "unknown_tool_repeat": "repeat_tool_unknown_tool_critical",
+    "tool_failure_repeat": "repeat_tool_failure_critical",
+    "recoverable_error_repeat": "repeat_tool_recoverable_critical",
     "ping_pong_critical": "repeat_tool_pingpong_critical",
 }
 

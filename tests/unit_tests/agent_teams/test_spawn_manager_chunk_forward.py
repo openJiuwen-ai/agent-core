@@ -130,3 +130,33 @@ async def test_wire_skips_when_leader_or_agent_ref_missing() -> None:
     handle_no_ref = InProcessSpawnHandle(process_id="inproc-test", agent_ref=None)
     sm._wire_inprocess_chunk_forward(handle_no_ref)
     assert handle_no_ref.chunk_forward is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_signals_all_members_before_waiting_for_exit():
+    sm = _make_spawn_manager_with(_make_stream_controller("leader", role=TeamRole.LEADER))
+    cancelled = [asyncio.Event(), asyncio.Event()]
+    release = asyncio.Event()
+
+    async def member(index):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled[index].set()
+            await release.wait()
+            raise
+
+    tasks = [asyncio.create_task(member(index)) for index in range(2)]
+    await asyncio.sleep(0)
+    for index, task in enumerate(tasks):
+        handle = _make_handle_with(_make_stream_controller(f"member-{index}"))
+        handle._task = task
+        sm.spawned_handles[str(index)] = handle
+    stopping = asyncio.create_task(sm.shutdown_all_handles())
+    try:
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in cancelled)), 1)
+        assert not stopping.done()
+    finally:
+        release.set()
+        await stopping
+    assert not sm.spawned_handles

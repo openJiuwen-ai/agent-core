@@ -13,6 +13,8 @@ from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.harness.agent_ras.config import RepeatToolConfig
 from openjiuwen.harness.agent_ras.detectors.repeat_tool import (
     RepeatToolCallDetector,
+    ToolCallRecord,
+    ToolResultErrorDetector,
     _INTERRUPTION_KEY,
     _SESSION_HISTORIES_KEY,
 )
@@ -664,3 +666,437 @@ class TestInterruptKindFilter:
         assert payload["interrupt_kind"] == "permission_ask_signal"
         restored = Signal.from_dict(payload)
         assert restored.interrupt_kind is SignalInterruptKind.PERMISSION_ASK_SIGNAL
+
+
+def _before_model(member_name: str = "main") -> Signal:
+    return Signal(kind=SignalKind.BEFORE_MODEL_CALL, member_name=member_name)
+
+
+def _failing(
+    tool_name: str,
+    tool_args: dict,
+    *,
+    error: str = "boom",
+    member_name: str = "main",
+) -> Signal:
+    return Signal(
+        kind=SignalKind.AFTER_TOOL_CALL,
+        member_name=member_name,
+        tool_name=tool_name,
+        tool_args=tool_args,
+        tool_result={"success": False, "data": None, "error": error},
+    )
+
+
+_READ_BEFORE_EDIT = (
+    "File must be read before editing. Call read_file on '/a.html' first."
+)
+_MODIFIED_EXTERNALLY = (
+    "'/a.html' has been modified externally since it was last read. "
+    "Re-read the file before editing."
+)
+
+
+class TestBatchCollapse:
+    """Parallel calls of one LLM turn collapse into a single streak unit."""
+
+    @pytest.mark.asyncio
+    async def test_before_model_call_starts_new_batch(self):
+        det = RepeatToolCallDetector()
+        with patch.object(det, "_schema_keys", return_value=("file_path",)):
+            assert await det.observe(_before_model()) is None
+            await det.observe(
+                _failing("edit_file", {"file_path": "/a"}, error=_READ_BEFORE_EDIT),
+            )
+        assert det._history("main")[-1].batch_seq == 1
+
+    @pytest.mark.asyncio
+    async def test_same_turn_recoverable_batch_does_not_trip(self):
+        """The production incident: 10 parallel read-before-edit failures."""
+        cfg = RepeatToolConfig(
+            warning_threshold=100,
+            critical_threshold=100,
+            global_breaker_threshold=100,
+            unknown_tool_threshold=10,
+            recoverable_error_threshold=20,
+        )
+        det = RepeatToolCallDetector(cfg)
+        with patch.object(det, "_schema_keys", return_value=("file_path",)):
+            assert await det.observe(_before_model()) is None
+            for i in range(10):
+                error = _MODIFIED_EXTERNALLY if i == 0 else _READ_BEFORE_EDIT
+                anomaly = await det.observe(
+                    _failing(
+                        "edit_file",
+                        {"file_path": "/a.html", "old_string": f"s{i}"},
+                        error=error,
+                    ),
+                )
+                assert anomaly is None
+            history = list(det._history("main"))
+            assert len(history) == 10
+            assert all(record.batch_seq == 1 for record in history)
+            assert all(record.recoverable for record in history)
+            assert det._get_failing_tool_streaks(history, "edit_file") == (0, 1, 10)
+
+    @pytest.mark.asyncio
+    async def test_hard_failures_accumulate_per_turn(self):
+        cfg = RepeatToolConfig(
+            warning_threshold=100,
+            critical_threshold=100,
+            global_breaker_threshold=100,
+            unknown_tool_threshold=4,
+        )
+        det = RepeatToolCallDetector(cfg)
+        with patch.object(det, "_schema_keys", return_value=("file_path",)):
+            assert await det.observe(_before_model()) is None
+            await det.observe(_failing("edit_file", {"file_path": "/1"}))
+            await det.observe(_failing("edit_file", {"file_path": "/2"}))
+
+            assert await det.observe(_before_model()) is None
+            low = await det.observe(_failing("edit_file", {"file_path": "/3"}))
+            assert low is not None
+            assert low.severity == Severity.LOW
+            assert low.evidence["msg_key"] == "unknown_tool_repeat_warning"
+            assert low.evidence["count"] == 3
+
+            assert await det.observe(_before_model()) is None
+            # Same (kind, severity, detector_kind) signature → deduped.
+            assert await det.observe(_failing("edit_file", {"file_path": "/4"})) is None
+
+            assert await det.observe(_before_model()) is None
+            critical = await det.observe(_failing("edit_file", {"file_path": "/5"}))
+            assert critical is not None
+            assert critical.severity == Severity.CRITICAL
+            assert critical.evidence["count"] == 5
+
+    @pytest.mark.asyncio
+    async def test_global_breaker_same_turn_identical_calls_collapse(self):
+        cfg = RepeatToolConfig(
+            warning_threshold=100,
+            critical_threshold=100,
+            global_breaker_threshold=3,
+            unknown_tool_threshold=100,
+        )
+        det = RepeatToolCallDetector(cfg)
+        with patch.object(det, "_schema_keys", return_value=("file_path",)):
+            assert await det.observe(_before_model()) is None
+            for _ in range(3):
+                assert await det.observe(
+                    _failing("read_file", {"file_path": "/a"}, error="locked"),
+                ) is None
+
+            assert await det.observe(_before_model()) is None
+            assert await det.observe(
+                _failing("read_file", {"file_path": "/a"}, error="locked"),
+            ) is None
+
+            assert await det.observe(_before_model()) is None
+            anomaly = await det.observe(
+                _failing("read_file", {"file_path": "/a"}, error="locked"),
+            )
+        assert anomaly is not None
+        assert anomaly.evidence["detector_kind"] == "global_circuit_breaker"
+        assert anomaly.evidence["count"] == 3
+
+
+class TestRecoverableErrorStreak:
+    @pytest.mark.asyncio
+    async def test_recoverable_failures_excluded_from_hard_streak(self):
+        cfg = RepeatToolConfig(
+            warning_threshold=100,
+            critical_threshold=100,
+            global_breaker_threshold=100,
+            unknown_tool_threshold=4,
+            recoverable_error_threshold=100,
+        )
+        det = RepeatToolCallDetector(cfg)
+        with patch.object(det, "_schema_keys", return_value=("file_path",)):
+            for turn in range(3):
+                assert await det.observe(_before_model()) is None
+                assert await det.observe(
+                    _failing(
+                        "edit_file",
+                        {"file_path": f"/r{turn}"},
+                        error=_READ_BEFORE_EDIT,
+                    ),
+                ) is None
+
+            # Hard streak only counts hard failures: 2 hard turns reach the
+            # LOW threshold even though 3 recoverable failures preceded.
+            assert await det.observe(_before_model()) is None
+            assert await det.observe(
+                _failing("edit_file", {"file_path": "/h1"}),
+            ) is None
+            assert await det.observe(_before_model()) is None
+            low = await det.observe(
+                _failing("edit_file", {"file_path": "/h2"}),
+            )
+        assert low is not None
+        assert low.severity == Severity.LOW
+        assert low.evidence["msg_key"] == "unknown_tool_repeat_warning"
+        assert low.evidence["count"] == 5
+
+    @pytest.mark.asyncio
+    async def test_recoverable_soft_cap_still_terminates(self):
+        cfg = RepeatToolConfig(
+            warning_threshold=100,
+            critical_threshold=100,
+            global_breaker_threshold=100,
+            unknown_tool_threshold=100,
+            recoverable_error_threshold=4,
+        )
+        det = RepeatToolCallDetector(cfg)
+        with patch.object(det, "_schema_keys", return_value=("file_path",)):
+            assert await det.observe(_before_model()) is None
+            assert await det.observe(
+                _failing("edit_file", {"file_path": "/1"}, error=_READ_BEFORE_EDIT),
+            ) is None
+
+            assert await det.observe(_before_model()) is None
+            low = await det.observe(
+                _failing("edit_file", {"file_path": "/2"}, error=_READ_BEFORE_EDIT),
+            )
+            assert low is not None
+            assert low.severity == Severity.LOW
+            assert low.evidence["msg_key"] == "recoverable_error_repeat_warning"
+
+            assert await det.observe(_before_model()) is None
+            assert await det.observe(
+                _failing("edit_file", {"file_path": "/3"}, error=_READ_BEFORE_EDIT),
+            ) is None
+
+            assert await det.observe(_before_model()) is None
+            critical = await det.observe(
+                _failing("edit_file", {"file_path": "/4"}, error=_READ_BEFORE_EDIT),
+            )
+        assert critical is not None
+        assert critical.severity == Severity.CRITICAL
+        assert critical.evidence["msg_key"] == "recoverable_error_repeat"
+        assert critical.evidence["count"] == 4
+
+
+class TestRegisteredVsUnknownMessage:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("card", "source", "expected_msg_key"),
+        [
+            (object(), "ability_manager", "tool_failure_repeat"),
+            (None, "resource_mgr", "tool_failure_repeat"),
+            (None, "none", "unknown_tool_repeat"),
+        ],
+    )
+    async def test_critical_msg_key_follows_tool_resolution(
+        self, card, source, expected_msg_key,
+    ):
+        cfg = RepeatToolConfig(
+            warning_threshold=100,
+            critical_threshold=100,
+            global_breaker_threshold=100,
+            unknown_tool_threshold=2,
+        )
+        det = RepeatToolCallDetector(cfg)
+        with patch.object(det, "_schema_keys", return_value=("file_path",)), \
+             patch.object(det, "_resolve_tool_card", return_value=(card, source)):
+            for turn in range(2):
+                assert await det.observe(_before_model()) is None
+                anomaly = await det.observe(
+                    _failing("edit_file", {"file_path": f"/{turn}"}),
+                )
+        assert anomaly is not None
+        assert anomaly.severity == Severity.CRITICAL
+        assert anomaly.evidence["detector_kind"] == expected_msg_key
+        assert anomaly.evidence["msg_key"] == expected_msg_key
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("card", "source", "expected_detector_kind", "expected_msg_key"),
+        [
+            (
+                object(), "ability_manager",
+                "tool_failure_repeat", "tool_failure_repeat_warning",
+            ),
+            (
+                None, "resource_mgr",
+                "tool_failure_repeat", "tool_failure_repeat_warning",
+            ),
+            (
+                None, "none",
+                "unknown_tool_repeat", "unknown_tool_repeat_warning",
+            ),
+        ],
+    )
+    async def test_warning_msg_key_follows_tool_resolution(
+        self, card, source, expected_detector_kind, expected_msg_key,
+    ):
+        cfg = RepeatToolConfig(
+            warning_threshold=100,
+            critical_threshold=100,
+            global_breaker_threshold=100,
+            unknown_tool_threshold=4,
+        )
+        det = RepeatToolCallDetector(cfg)
+        with patch.object(det, "_schema_keys", return_value=("file_path",)), \
+             patch.object(det, "_resolve_tool_card", return_value=(card, source)):
+            anomaly = None
+            for turn in range(2):
+                assert await det.observe(_before_model()) is None
+                anomaly = await det.observe(
+                    _failing("edit_file", {"file_path": f"/{turn}"}),
+                )
+        assert anomaly is not None
+        assert anomaly.severity == Severity.LOW
+        assert anomaly.evidence["detector_kind"] == expected_detector_kind
+        assert anomaly.evidence["msg_key"] == expected_msg_key
+
+
+class TestHydrationBatchCounter:
+    @pytest.mark.asyncio
+    async def test_hydration_continues_batch_counter(self):
+        session = _mock_session(pending_interrupt=True)
+        cfg = RepeatToolConfig()
+        with patch.object(
+            RepeatToolCallDetector,
+            "_schema_keys",
+            return_value=("file_path",),
+        ):
+            first = RepeatToolCallDetector(cfg)
+            first.reset(session)
+            assert await first.observe(_before_model()) is None
+            await first.observe(_failing("edit_file", {"file_path": "/a"}))
+            first.reset(session)  # stash preserved
+
+            second = RepeatToolCallDetector(cfg)
+            second.reset(session)  # hydrate
+            assert await second.observe(_before_model()) is None
+            await second.observe(_failing("edit_file", {"file_path": "/b"}))
+            assert second._history("main")[-1].batch_seq == 2
+
+
+class TestRecordSerialization:
+    def test_round_trip_with_new_fields(self):
+        record = ToolCallRecord(
+            tool_name="edit_file",
+            args_hash="h",
+            result_hash="r",
+            timestamp=1.0,
+            has_error=True,
+            recoverable=True,
+            batch_seq=7,
+        )
+        restored = ToolCallRecord.from_dict(record.to_dict())
+        assert restored == record
+
+    def test_from_dict_legacy_payload_defaults(self):
+        record = ToolCallRecord.from_dict({
+            "tool_name": "edit_file",
+            "args_hash": "h",
+            "has_error": True,
+        })
+        assert record is not None
+        assert record.recoverable is False
+        assert record.batch_seq == 0
+
+
+class TestRecoverableClassification:
+    def test_structured_recoverable_flag(self):
+        assert ToolResultErrorDetector.is_recoverable({
+            "success": False, "recoverable": True,
+        }) is True
+
+    def test_error_code_marker(self):
+        assert ToolResultErrorDetector.is_recoverable({
+            "success": False, "error_code": "read_before_edit",
+        }) is True
+        assert ToolResultErrorDetector.is_recoverable({
+            "success": False, "errorCode": "FILE_MODIFIED_EXTERNALLY",
+        }) is True
+
+    def test_error_text_markers(self):
+        assert ToolResultErrorDetector.is_recoverable({
+            "success": False, "error": _READ_BEFORE_EDIT,
+        }) is True
+        assert ToolResultErrorDetector.is_recoverable({
+            "success": False, "error": _MODIFIED_EXTERNALLY,
+        }) is True
+
+    def test_repr_string_with_error_text(self):
+        result = (
+            "success=False data=None "
+            "error=\"File must be read before editing. Call read_file on 'x' first.\""
+        )
+        assert ToolResultErrorDetector.has_error(result) is True
+        assert ToolResultErrorDetector.is_recoverable(result) is True
+
+    def test_repr_string_without_error_text_not_recoverable(self):
+        assert ToolResultErrorDetector.has_error("success=False data=None") is True
+        assert ToolResultErrorDetector.is_recoverable("success=False data=None") is False
+
+    def test_success_result_not_recoverable(self):
+        assert ToolResultErrorDetector.is_recoverable({"success": True}) is False
+
+    def test_generic_error_not_recoverable(self):
+        assert ToolResultErrorDetector.is_recoverable({
+            "success": False, "error": "permission denied",
+        }) is False
+
+    def test_bare_error_text_marker(self):
+        assert ToolResultErrorDetector.is_recoverable(_MODIFIED_EXTERNALLY) is True
+
+    def test_register_extra_marker(self):
+        try:
+            ToolResultErrorDetector.register_recoverable_marker(
+                "custom precondition marker",
+            )
+            assert ToolResultErrorDetector.is_recoverable({
+                "success": False,
+                "error": "failed: Custom Precondition Marker not met",
+            }) is True
+        finally:
+            ToolResultErrorDetector._extra_recoverable_markers.clear()
+
+    @pytest.mark.asyncio
+    async def test_recoverable_via_signal_error_and_msg_content(self):
+        """Classification also honors tool_msg_content and signal.error text."""
+        cfg = RepeatToolConfig(
+            warning_threshold=100,
+            critical_threshold=100,
+            global_breaker_threshold=100,
+            unknown_tool_threshold=10,
+            recoverable_error_threshold=100,
+        )
+        det = RepeatToolCallDetector(cfg)
+        with patch.object(det, "_schema_keys", return_value=("file_path",)):
+            assert await det.observe(_before_model()) is None
+            await det.observe(Signal(
+                kind=SignalKind.TOOL_EXCEPTION,
+                member_name="main",
+                tool_name="edit_file",
+                tool_args={"file_path": "/a"},
+                error=(
+                    "RuntimeError: File must be read before editing. "
+                    "Call read_file on '/a' first."
+                ),
+            ))
+            await det.observe(Signal(
+                kind=SignalKind.AFTER_TOOL_CALL,
+                member_name="main",
+                tool_name="edit_file",
+                tool_args={"file_path": "/b"},
+                tool_result={"success": False, "error": ""},
+                tool_msg_content=(
+                    "success=False error=\"'/b' has been modified externally "
+                    "since it was last read. Re-read the file before editing.\""
+                ),
+            ))
+            assert await det.observe(_before_model()) is None
+            await det.observe(Signal(
+                kind=SignalKind.TOOL_EXCEPTION,
+                member_name="main",
+                tool_name="edit_file",
+                tool_args={"file_path": "/c"},
+                error="connection reset",
+            ))
+        history = list(det._history("main"))
+        assert [r.recoverable for r in history] == [True, True, False]
+        assert det._get_failing_tool_streaks(history, "edit_file") == (1, 1, 3)

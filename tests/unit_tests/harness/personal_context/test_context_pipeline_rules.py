@@ -21,6 +21,8 @@ from openjiuwen.harness.personal_context.source_metadata import (
     upsert_source_metadata,
 )
 
+_EVENT_TIMEOUT_SECONDS = 10.0
+
 
 @pytest.mark.asyncio
 async def test_rules_directory_selection_does_not_block_event_loop_and_cancels_promptly(
@@ -600,7 +602,7 @@ async def _put_event(
     run_id: str,
     payload: FetchBatch | None,
     *,
-    timeout: float = 2,
+    timeout: float = _EVENT_TIMEOUT_SECONDS,
 ) -> None:
     completion = asyncio.get_running_loop().create_future()
     await queue.put((tag, service_id, run_id, payload, completion))
@@ -612,7 +614,7 @@ async def _submit_run(
     service_id: str,
     run_id: str,
     *batches: FetchBatch,
-    timeout: float = 2,
+    timeout: float = _EVENT_TIMEOUT_SECONDS,
 ) -> None:
     for batch in batches:
         await _put_event(queue, "batch", service_id, run_id, batch, timeout=timeout)
@@ -828,7 +830,9 @@ async def test_two_batches_share_run_inputs_and_finish_publishes_once(
 
     monkeypatch.setattr(service, "_publish_processed", record_publish)
     await service.start()
-    large_content = "full source body " * 20_000
+    # Above the large-run thresholds (60k total / 40k per document) while
+    # keeping CI file I/O bounded; the full 340k body made this timing-sensitive.
+    large_content = "full source body " * 4_000
     first_batch = _batch(_item(content=large_content), batch_id="batch-1")
     second_batch = _batch(
         _item("notes/two", revision_id="rev-2", content="Second source."),

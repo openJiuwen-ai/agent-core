@@ -185,11 +185,8 @@ class Model:
         first_chunk_timeout = self._resolve_stream_timeout("stream_first_chunk_timeout")
         idle_timeout = self._resolve_stream_timeout("stream_idle_timeout")
 
-        # The scope is opened here, in the frame that drives the stream, and
-        # not further down inside the callback handlers: every ``__anext__``
-        # below runs in its own ``asyncio.wait_for`` task, and such a task
-        # copies the context, so an id bound inside a chunk callback would be
-        # gone by the time the next chunk arrives. See ``call_scope``.
+        # Bind one call id for the entire stream, including callbacks and
+        # timeout/error reporting, and restore the caller's context on exit.
         with LlmCallScope(unified_completion=True):
             stream_iterable = self._client.stream(
                 messages=messages,
@@ -215,10 +212,10 @@ class Model:
                 next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
 
                 try:
-                    if next_timeout is None:
+                    # wait_for can lose an external cancellation when its
+                    # child completes concurrently on Python 3.11.
+                    async with asyncio.timeout(next_timeout):
                         chunk = await stream_iterator.__anext__()
-                    else:
-                        chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError as exc:

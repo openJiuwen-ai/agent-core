@@ -35,7 +35,12 @@ _STRATEGY_TYPES = ["semantic", "summary", "user_preference", "episodic", "event"
 EXTERNAL_MEMORY_SEARCH_SCHEMA = {
     "name": "external_memory_search",
     "description": (
-        "Search long-term external memory for durable facts, user preferences, and prior conversation context."
+        "Search long-term external memory for durable facts, user preferences, and prior conversation context. "
+        "Returns JSON: on success "
+        "`{\"results\": [{\"memory\": str, \"score\": float, \"created_at\": str}], \"count\": int}` "
+        "(`created_at` is the memory record's creation timestamp, ISO 8601, may be empty); "
+        "when no matches `{\"result\": \"No relevant memories found.\", \"count\": 0}`; "
+        "on error `{\"error\": str}` (e.g. missing query returns `{\"error\": \"Missing required parameter: query\"}`)."
     ),
     "parameters": {
         "type": "object",
@@ -169,6 +174,7 @@ class OfficeAceMemoryPcProvider(MemoryProvider):
                 {
                     "memory": content,
                     "score": _read_attr_or_key(item, "score", 0),
+                    "created_at": _read_attr_or_key(item, "created_at", "") or "",
                 }
             )
         logger.info("[OfficeAceMemoryPcProvider] appapi search found %d memory records", len(normalized))
