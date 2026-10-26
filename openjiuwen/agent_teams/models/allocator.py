@@ -223,6 +223,11 @@ def _router_config(entry: ModelPoolEntry) -> dict:
     return router if isinstance(router, dict) else {}
 
 
+def _tag_key(tag: str) -> str:
+    """Comparison key for model names: spellings differing only in case are one model."""
+    return tag.strip().casefold()
+
+
 def _group_fallback_tag(router: dict) -> str | None:
     """The tag a ``tag-filtered`` model group is already restricted to, if any."""
     if router.get("strategy") != "tag-filtered":
@@ -234,19 +239,53 @@ def _group_fallback_tag(router: dict) -> str | None:
 def _selectable_route_tags(router: dict) -> list[str]:
     """Tags a member can be pinned to: deployment ``fallback_tag`` values.
 
+    Spellings that differ only in case (``GLM-5.3-Flash`` / ``GLM-5.3-flash``)
+    collapse into one entry, written as the first spelling in group order; the
+    member pinned to it is routed to all of them (see ``_with_route_tag``).
+
     A ``tag-filtered`` group only ever routes to its own tag, so pinning a
     member to any other tag would bypass the group's restriction.
     """
-    tags = {
-        str(item.get("fallback_tag") or "").strip()
-        for item in router.get("deployments") or []
-        if isinstance(item, dict)
-    }
-    tags.discard("")
+    spellings: dict[str, str] = {}
+    for item in router.get("deployments") or []:
+        if not isinstance(item, dict):
+            continue
+        tag = str(item.get("fallback_tag") or "").strip()
+        if tag:
+            spellings.setdefault(_tag_key(tag), tag)
     group_tag = _group_fallback_tag(router)
     if group_tag is not None:
-        tags &= {group_tag}
-    return sorted(tags)
+        spellings = {key: tag for key, tag in spellings.items() if key == _tag_key(group_tag)}
+    return sorted(spellings.values())
+
+
+def _match_route_tag(tag: str, router: dict) -> str | None:
+    """The selectable spelling of ``tag`` (case-insensitive), or None if not served."""
+    key = _tag_key(tag)
+    return next((item for item in _selectable_route_tags(router) if _tag_key(item) == key), None)
+
+
+def _group_tag_spelling(router: Any) -> str | None:
+    """The deployment spelling of a ``tag-filtered`` group's own tag, if any.
+
+    ``router`` is the structured ``IntelliRouterConfig``. Returns None when
+    the group is not ``tag-filtered``, has no tag, or no deployment carries
+    the tag in any letter case.
+    """
+    if getattr(router, "strategy", None) != "tag-filtered":
+        return None
+    group_tag = str((getattr(router, "strategy_kwargs", None) or {}).get("fallback_tag") or "").strip()
+    if not group_tag:
+        return None
+    key = _tag_key(group_tag)
+    return next(
+        (
+            deployment.fallback_tag.strip()
+            for deployment in router.deployments
+            if deployment.fallback_tag and _tag_key(deployment.fallback_tag) == key
+        ),
+        None,
+    )
 
 
 def _with_route_tag(config: "TeamModelConfig", tag: str | None) -> "TeamModelConfig":
@@ -254,15 +293,41 @@ def _with_route_tag(config: "TeamModelConfig", tag: str | None) -> "TeamModelCon
 
     Uses the router's existing ``tag-filtered`` strategy. ``strategy_kwargs``
     is replaced, not merged: kwargs of the group's own strategy are not valid
-    for ``tag-filtered``. The shared pool entry is never modified.
+    for ``tag-filtered``. Deployments whose tag differs from ``tag`` only in
+    case are re-tagged to ``tag`` in this member's copy, so ``tag-filtered``
+    (exact match) routes to all of them. The shared pool entry is never
+    modified.
+
+    Without ``tag``, a group that is itself ``tag-filtered`` gets the same
+    treatment for its own tag: it is matched ignoring case against the
+    deployment tags, the first matching spelling in group order (the one
+    ``_selectable_route_tags`` shows) replaces it, and the deployments are
+    re-tagged. A pinned member and a group-wide member therefore compare
+    tags the same way. A group tag that matches no deployment is left as
+    configured, so the router reports that no deployment matches.
     """
     router = config.model_client_config.intelli_router
-    if not tag or router is None:
+    if router is None:
         return config
+    if not tag:
+        tag = _group_tag_spelling(router)
+        if tag is None:
+            return config
+    key = _tag_key(tag)
+    deployments = [
+        deployment.model_copy(update={"fallback_tag": tag})
+        if deployment.fallback_tag and deployment.fallback_tag != tag and _tag_key(deployment.fallback_tag) == key
+        else deployment
+        for deployment in router.deployments
+    ]
     client = config.model_client_config.model_copy(
         update={
             "intelli_router": router.model_copy(
-                update={"strategy": "tag-filtered", "strategy_kwargs": {"fallback_tag": tag}},
+                update={
+                    "strategy": "tag-filtered",
+                    "strategy_kwargs": {"fallback_tag": tag},
+                    "deployments": deployments,
+                },
             ),
         },
     )
@@ -634,11 +699,12 @@ class IntelliRouterAllocator:
 
         Physical deployments are never allocated: a pinned member still gets
         the ``"*"`` entry, routed through ``tag-filtered`` to the deployments
-        whose ``fallback_tag`` equals ``model_name``.
+        whose ``fallback_tag`` equals ``model_name`` ignoring case.
 
         Args:
             model_name: Empty or ``"*"`` selects the whole group; any other
-                value must be a selectable ``fallback_tag``.
+                value must be a selectable ``fallback_tag`` (any letter case;
+                stored as the spelling ``list_route_tags`` shows).
             provider_filter: Ignored. Provider filtering applies to physical
                 CLI deployments, not the logical IntelliRouter entry.
 
@@ -649,9 +715,10 @@ class IntelliRouterAllocator:
         tag = str(model_name or "").strip()
         if tag in ("", INTELLI_ROUTER_UNIFIED_MODEL):
             return Allocation(entry=self._pool[0], group_index=0)
-        if tag not in self.list_route_tags():
+        matched = _match_route_tag(tag, _router_config(self._pool[0]))
+        if matched is None:
             return None
-        return Allocation(entry=self._pool[0], group_index=0, route_tag=tag)
+        return Allocation(entry=self._pool[0], group_index=0, route_tag=matched)
 
     def list_route_tags(self) -> list[str]:
         """Models (``fallback_tag`` values) a member can be pinned to, sorted."""
@@ -771,13 +838,15 @@ def resolve_member_model(
         return None
     idx = model_index if isinstance(model_index, int) and 0 <= model_index < len(group) else 0
     entry = group[idx]
-    if route_tag and route_tag not in _selectable_route_tags(_router_config(entry)):
-        team_logger.warning(
-            "persisted route tag {!r} is no longer served by the current model group; "
-            "falling back to group-wide routing",
-            route_tag,
-        )
-        route_tag = None
+    if route_tag:
+        matched = _match_route_tag(route_tag, _router_config(entry))
+        if matched is None:
+            team_logger.warning(
+                "persisted route tag {!r} is no longer served by the current model group; "
+                "falling back to group-wide routing",
+                route_tag,
+            )
+        route_tag = matched
     return _with_route_tag(entry.to_team_model_config(), route_tag)
 
 

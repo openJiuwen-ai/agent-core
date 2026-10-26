@@ -50,6 +50,9 @@ class Signal:
         peer_member: The conversation peer (MESSAGE), for pingpong tracking.
         tool_result: Tool execution result (AFTER_TOOL_CALL); fed to
             result-aware repeat detection to tell real loops from progress.
+        model_failure: Routing verdict a model-group client attached to the
+            error (MODEL_EXCEPTION): ``route_case``, ``reason``,
+            ``pinned_model``, ``failures`` and ``user_action_required``.
     """
 
     kind: SignalKind
@@ -62,3 +65,4 @@ class Signal:
     message_count: int | None = None
     peer_member: str | None = None
     tool_result: Any | None = None
+    model_failure: dict[str, Any] | None = None

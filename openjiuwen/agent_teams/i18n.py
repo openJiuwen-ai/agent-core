@@ -88,6 +88,50 @@ STRINGS: dict[str, dict[str, str]] = {
         "reliability.escalate_user": (
             "[可靠性·严重] {summary}。已超出自动处理范围，建议立即上报控制者 / 用户决策。"
         ),
+        # reliability/detectors/model_error.py — model-group routing verdicts
+        "reliability.model_unavailable": (
+            "模型 {model} 不可用：{reason}。{no_substitute}，该成员无法自动切换。"
+            "请立即调用 ask_user 告知用户并询问处理方式"
+            "（改用其他模型新建成员接手 / 等待恢复后重试 / 修复配置后重试 / 终止任务）；"
+            "用户答复前，不要再给该成员派发任务或催促"
+        ),
+        "reliability.model_route_switched": "模型组中{model}{reason}，已自动改用{alternatives}",
+        "reliability.model_route_interrupted": (
+            "模型组中{model}{reason}，本轮已中断，将自动重跑并由{alternatives}重新生成"
+        ),
+        "reliability.model_route_other": "组内其他模型",
+        "reliability.model_not_in_group": "指定的模型不在当前模型组中",
+        "reliability.model_no_substitute_pinned": "模型组中没有可以替代它的同名模型",
+        "reliability.model_no_substitute_group": "模型组中的其他模型也都不可用",
+        "reliability.model_label": "{name}（{where}）",
+        "reliability.model_label_ranked": "第 {position} 顺位 {name}（{where}）",
+        "reliability.model_failure_separator": "；",
+        "reliability.model_failure": "{model}{reason}",
+        "reliability.reason_api_key": "API Key 校验未通过（HTTP {status}）",
+        "reliability.reason_not_found": "在配置的地址上找不到该模型（HTTP 404）",
+        "reliability.reason_rate_limited": "被限流（HTTP 429）",
+        "reliability.reason_server_error": "服务端出错（HTTP {status}）",
+        "reliability.reason_rejected": "拒绝了本次请求（HTTP {status}）",
+        "reliability.reason_rejected_detail": "拒绝了本次请求（HTTP {status}）：{detail}",
+        "reliability.reason_timeout": "响应超时",
+        "reliability.reason_unreachable": "无法连接",
+        "reliability.reason_unavailable": "暂时不可用",
+        "reliability.reason_failed": "调用失败",
+        "reliability.reason_interrupted": "回答到一半中断（{reason}）",
+        # reliability/handler.py — notice wrapper for MODEL_ROUTE_NOTICE
+        "reliability.route_notice": (
+            "[模型路由通知] {summary}。已自动处理，不需要调整成员或任务。{scope}"
+            "如需告知用户，只说明哪个模型（模型组顺位、提供商、地址）出了什么问题、已改用哪个模型、"
+            "用户需要做什么（例如检查该模型的 API Key）；不要推测对成员的影响。"
+        ),
+        "reliability.route_notice_scope_group": (
+            "这是模型组的状态，不是某个成员的：没有指定模型的成员（包括你）都已改用新模型，"
+            "不要说成某个成员原来在用这个模型。"
+        ),
+        "reliability.route_notice_scope_pinned": (
+            "这只影响指定使用 {model} 的成员，它们已改用新模型；其他成员不受这条通知影响，"
+            "不要说成整个团队都已切换。"
+        ),
         # reliability/external_handler.py + message.py — external runtime
         "reliability.external_runtime_retrying": (
             "[三方运行时] 成员 {member_name}（{agent_kind}，模型 {model}）正在自动重试：{category}。"
@@ -503,6 +547,56 @@ STRINGS: dict[str, dict[str, str]] = {
         "reliability.escalate_user": (
             "[reliability critical] {summary}. Beyond automated handling; escalate to the "
             "controller/user for a decision now."
+        ),
+        # reliability/detectors/model_error.py — model-group routing verdicts
+        "reliability.model_unavailable": (
+            "model {model} is unavailable: {reason}. {no_substitute}, so this member cannot switch by itself. "
+            "Call ask_user now to tell the user and ask how to proceed "
+            "(spawn a new member on another model to take over / retry after it recovers / "
+            "retry after fixing the configuration / stop the task); "
+            "until the user answers, do not assign work to or nudge this member"
+        ),
+        "reliability.model_route_switched": (
+            "{model} in the model group {reason}; switched to {alternatives} automatically"
+        ),
+        "reliability.model_route_interrupted": (
+            "{model} in the model group {reason}; this round was interrupted and will be re-run on "
+            "{alternatives} automatically"
+        ),
+        "reliability.model_route_other": "another model in the group",
+        "reliability.model_not_in_group": "the pinned model is not in the current model group",
+        "reliability.model_no_substitute_pinned": "No same-name model in the model group can replace it",
+        "reliability.model_no_substitute_group": "No other model in the model group is available either",
+        "reliability.model_label": "{name} ({where})",
+        "reliability.model_label_ranked": "#{position} {name} ({where})",
+        "reliability.model_failure_separator": "; ",
+        "reliability.model_failure": "{model} {reason}",
+        "reliability.reason_api_key": "rejected the API key (HTTP {status})",
+        "reliability.reason_not_found": "was not found at its endpoint (HTTP 404)",
+        "reliability.reason_rate_limited": "is rate limited (HTTP 429)",
+        "reliability.reason_server_error": "returned a server error (HTTP {status})",
+        "reliability.reason_rejected": "rejected the request (HTTP {status})",
+        "reliability.reason_rejected_detail": "rejected the request (HTTP {status}): {detail}",
+        "reliability.reason_timeout": "did not respond in time",
+        "reliability.reason_unreachable": "could not be reached",
+        "reliability.reason_unavailable": "is temporarily unavailable",
+        "reliability.reason_failed": "failed",
+        "reliability.reason_interrupted": "stopped in the middle of its answer ({reason})",
+        # reliability/handler.py — notice wrapper for MODEL_ROUTE_NOTICE
+        "reliability.route_notice": (
+            "[model route notice] {summary}. Already handled; no member or task changes needed. {scope}"
+            "If you tell the user, state only which model (its place in the model group, provider, "
+            "endpoint) failed and why, which model is used instead, and what the user should do "
+            "(for example, check that model's API key); do not speculate about the impact on members."
+        ),
+        "reliability.route_notice_scope_group": (
+            "This is the state of the model group, not of one member: every member not pinned to a "
+            "model (you included) now uses the replacement model, so do not say a particular member "
+            "was using the failed model. "
+        ),
+        "reliability.route_notice_scope_pinned": (
+            "This only affects the members pinned to {model}, which now use the replacement model; "
+            "other members are not affected by this notice, so do not say the whole team switched. "
         ),
         # reliability/external_handler.py + message.py — external runtime
         "reliability.external_runtime_retrying": (

@@ -49,6 +49,10 @@ class AnomalyKind(str, Enum):
     REPEAT_TOOL_CALL = "repeat_tool_call"
     TOOL_CALL_LOOP = "tool_call_loop"
     MODEL_ERROR = "model_error"
+    # A model group cannot serve the member and retrying will not help.
+    MODEL_UNAVAILABLE = "model_unavailable"
+    # A model group switched away from a failing deployment (notice only).
+    MODEL_ROUTE_NOTICE = "model_route_notice"
     OUTPUT_TOO_LONG = "output_too_long"
     THINKING_TOO_LONG = "thinking_too_long"
     FREQUENT_COMPACTION = "frequent_compaction"
