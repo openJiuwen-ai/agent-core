@@ -4,6 +4,8 @@
 from unittest.mock import AsyncMock, MagicMock, patch, ANY, Mock
 import pytest
 
+import httpx
+
 from openjiuwen.core.common.clients.llm_client import (
     HttpXConnectorPoolConfig,
     HttpXConnectorPool,
@@ -259,12 +261,12 @@ class TestCreateHttpxClient:
             assert call_args.ssl_verify is False
             assert call_args.limit == 200
 
-            # Verify client was created with transport - now this will be a MagicMock, not a coroutine
-            mock_httpx_client.assert_called_once_with(
-                transport=mock_pool.conn.return_value,
-                verify=False,
-                proxy="http://proxy:8080"
-            )
+            # The shared pool is wrapped in an httpx transport before the client
+            # is built: a raw httpcore pool cannot serve as an httpx transport.
+            mock_httpx_client.assert_called_once()
+            transport = mock_httpx_client.call_args.kwargs["transport"]
+            assert isinstance(transport, httpx.BaseTransport)
+            assert transport._pool is mock_pool.conn.return_value
             assert client == mock_client_instance
 
     @pytest.mark.asyncio
@@ -291,12 +293,12 @@ class TestCreateHttpxClient:
                 config=config_obj
             )
 
-            # Verify async client was created - now this will be a MagicMock, not a coroutine
-            mock_async_client.assert_called_once_with(
-                transport=mock_pool.conn.return_value,
-                verify=False,
-                proxy="http://proxy:8080"
-            )
+            # The shared pool is wrapped in an httpx transport before the client
+            # is built: a raw httpcore pool cannot serve as an httpx transport.
+            mock_async_client.assert_called_once()
+            transport = mock_async_client.call_args.kwargs["transport"]
+            assert isinstance(transport, httpx.AsyncBaseTransport)
+            assert transport._pool is mock_pool.conn.return_value
             assert client == mock_client_instance
 
 
@@ -529,11 +531,10 @@ class TestIntegration:
 
                 # Verify the factory was called correctly
                 mock_get_pool_manager.assert_called_once()
-                mock_httpx_client.assert_called_once_with(
-                    transport=mock_transport,  # Use the stored transport mock
-                    verify=False,
-                    proxy='http://proxy:8080'
-                )
+                mock_httpx_client.assert_called_once()
+                transport = mock_httpx_client.call_args.kwargs["transport"]
+                assert isinstance(transport, httpx.BaseTransport)
+                assert transport._pool is mock_transport
 
     @pytest.mark.asyncio
     async def test_connector_pool_lifecycle(self):
@@ -575,12 +576,11 @@ class TestIntegration:
             # Verify connector pool was acquired
             mock_manager.get_connector_pool.assert_called_once()
 
-            # Verify httpx client was created with the transport from mock_pool.conn.return_value
-            mock_httpx_client.assert_called_once_with(
-                transport=mock_transport,  # Use the stored transport mock
-                verify=False,
-                proxy='http://proxy:8080'
-            )
+            # Verify the httpx client got the shared pool wrapped in an httpx transport
+            mock_httpx_client.assert_called_once()
+            transport = mock_httpx_client.call_args.kwargs["transport"]
+            assert isinstance(transport, httpx.BaseTransport)
+            assert transport._pool is mock_transport
 
             # Verify OpenAI client was created (defaults: timeout=360, max_retries=0)
             mock_openai.assert_called_once_with(
@@ -613,3 +613,67 @@ class TestErrorCases:
 
             with pytest.raises(Exception, match="Pool creation failed"):
                 await create_httpx_client(config)
+
+
+class TestHttpxClientTransport:
+    """The shared httpcore pool must be exposed through httpx's transport API."""
+
+    @staticmethod
+    def _start_server():
+        import threading
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                body = b"ok"
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):  # noqa: D102
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    @pytest.mark.asyncio
+    async def test_async_client_can_send_a_request(self):
+        """A raw httpcore pool used as transport raised AttributeError on request."""
+        from openjiuwen.core.common.clients.connector_pool import get_connector_pool_manager
+
+        server = self._start_server()
+        config = HttpXConnectorPoolConfig(ssl_verify=False, limit=17, need_async=True)
+        try:
+            client = await create_httpx_client(config, need_async=True)
+            try:
+                response = await client.get(f"http://127.0.0.1:{server.server_port}/")
+                assert response.status_code == 200
+                assert response.text == "ok"
+            finally:
+                await client.aclose()
+        finally:
+            await get_connector_pool_manager().close_connector_pool(config=config, force=True)
+            server.shutdown()
+            server.server_close()
+
+    @pytest.mark.asyncio
+    async def test_sync_client_can_send_a_request(self):
+        """The sync pool path had the same AttributeError on the first request."""
+        from openjiuwen.core.common.clients.connector_pool import get_connector_pool_manager
+
+        server = self._start_server()
+        config = HttpXConnectorPoolConfig(ssl_verify=False, limit=18, need_async=False)
+        try:
+            client = await create_httpx_client(config, need_async=False)
+            try:
+                response = client.get(f"http://127.0.0.1:{server.server_port}/")
+                assert response.status_code == 200
+                assert response.text == "ok"
+            finally:
+                client.close()
+        finally:
+            await get_connector_pool_manager().close_connector_pool(config=config, force=True)
+            server.shutdown()
+            server.server_close()
