@@ -23,6 +23,7 @@ from openjiuwen.harness.security.permission_engine.toolguard.shell_ast import (
     ShellAstParseResult,
     ShellSubcommand,
     parse_shell_for_permission,
+    split_shell_for_grants,
 )
 from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
     _CATEGORY_SHELL,
@@ -304,8 +305,8 @@ def _collect_approval_override_hits(
         if action != "allow":
             continue
         match_type = str(rule.get("match_type") or "").strip().lower()
-        if match_type == "exact_operation":
-            # Evaluated only after every guard has run, without command patterns.
+        if match_type in {"exact_operation", "shell_subcommand"}:
+            # Object grants are matched separately, never as command patterns.
             continue
         if match_type == "path":
             logger.debug(
@@ -829,6 +830,16 @@ def evaluate_tiered_policy(
             and shell_parse.kind == "simple"
     ):
         subcommand_results: list[tuple[str, PermissionLevel, str]] = []
+        shell_grant_used = False
+        # Only reliably reusable structures may consume split approvals.
+        from openjiuwen.harness.security.permission_engine.approve.operation_grants import (
+            has_shell_subcommand_grant,
+        )
+
+        reusable_commands = split_shell_for_grants(original_cmd) if (
+            not priority_blocks_override
+            and any(isinstance(g, dict) and g.get("match_type") == "shell_subcommand" for g in approval_overrides)
+        ) else ()
         for subcommand in shell_parse.subcommands:
             if not subcommand.text:
                 continue
@@ -838,6 +849,13 @@ def evaluate_tiered_policy(
                 sub_args,
                 command_ctx,
             )
+            if (
+                sub_permission != PermissionLevel.DENY
+                and subcommand.text in reusable_commands
+                and has_shell_subcommand_grant(permission_config, tool_name, sub_args)
+            ):
+                sub_permission, sub_rule = PermissionLevel.ALLOW, "shell_subcommand_grant"
+                shell_grant_used = True
             subcommand_results.append((subcommand.text, sub_permission, sub_rule))
             if sub_permission == PermissionLevel.DENY:
                 break
@@ -856,6 +874,9 @@ def evaluate_tiered_policy(
         if full_candidates:
             full_level = strictest(*(lvl for lvl, _ in full_candidates))
             full_rule = next(rule for lvl, rule in full_candidates if lvl == full_level)
+            if shell_grant_used and permission == PermissionLevel.ALLOW and full_level != PermissionLevel.DENY:
+                # Every child is covered by policy or approval; retain full-command DENY.
+                full_level, full_rule = PermissionLevel.ALLOW, matched_rule
             can_apply_full_command_allow = (
                 strict_merge
                 and permission == PermissionLevel.UNDETERMINED
@@ -877,7 +898,10 @@ def evaluate_tiered_policy(
                     f"{sink_rule}|{matched_rule}" if matched_rule else sink_rule
                 )
         if strict_merge:
-            permission, matched_rule = _merge_tool_command_result(invocation_ctx, permission, matched_rule)
+            merge_ctx = invocation_ctx
+            if shell_grant_used and permission == PermissionLevel.ALLOW:
+                merge_ctx = replace(invocation_ctx, baseline_level=PermissionLevel.ALLOW)
+            permission, matched_rule = _merge_tool_command_result(merge_ctx, permission, matched_rule)
         return _apply_shell_ast_floor(permission, matched_rule, shell_floor, shell_floor_rule)
 
     eval_args = canon_args if _tool_category(tool_name, permission_config) == "shell" else tool_args

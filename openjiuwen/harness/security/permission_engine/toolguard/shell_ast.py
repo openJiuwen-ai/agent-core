@@ -107,6 +107,39 @@ def parse_shell_for_permission(command: str) -> ShellAstParseResult:
     return _parse_with_conservative_fallback(text)
 
 
+def split_shell_for_grants(command: str) -> tuple[str, ...]:
+    """Return literal reusable children only when the AST covers the whole input."""
+    from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
+        canonicalize_shell_command_for_permission,
+    )
+
+    text = command.strip()
+    # Unwrapping a launcher would lose its interpreter and execution semantics.
+    if not text or canonicalize_shell_command_for_permission(text) != text:
+        return ()
+    parsed = parse_shell_for_permission(text)
+    if parsed.kind != "simple" or not parsed.subcommands:
+        return ()
+    if parsed.flags.has_input_redirection or parsed.flags.has_output_redirection:
+        return ()
+    source, cursor = text.encode("utf-8"), 0
+    commands = []
+    for subcommand in parsed.subcommands:
+        if not subcommand.text or subcommand.source_span is None:
+            return ()
+        start, end = subcommand.source_span
+        gap = source[cursor:start].decode("utf-8")
+        if start < cursor or end > len(source) or not re.fullmatch(r"\s*(?:(?:&&|\|\||;|\|)\s*)*", gap):
+            return ()
+        if source[start:end].decode("utf-8") != subcommand.text:
+            return ()
+        commands.append(subcommand.text)
+        cursor = end
+    if source[cursor:].strip():
+        return ()
+    return tuple(dict.fromkeys(commands))
+
+
 def _get_tree_sitter_bash_parser() -> Any | None:
     global _TREE_SITTER_BASH_READY, _TREE_SITTER_PARSER
     if _TREE_SITTER_BASH_READY is False:
