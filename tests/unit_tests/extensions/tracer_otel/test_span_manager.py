@@ -5,6 +5,11 @@
 
 import pytest
 
+from openjiuwen.extensions.tracer_otel.semconv import (
+    GEN_AI_TOOL_CALL_ID,
+    GEN_AI_TOOL_NAME,
+    OJ_TRACE_ID,
+)
 from openjiuwen.extensions.tracer_otel.span_manager import (
     OtelAgentSpanManager,
     OtelSpanState,
@@ -65,6 +70,35 @@ class TestOtelAgentSpanManager:
         # After parent is popped, child can no longer find parent
         mgr.pop("parent_inv")
         assert mgr.get("parent_inv") is None
+
+    def test_has_open_tool_span_matches_rail_flag_without_call_id(self):
+        """Id-less tool calls (no ToolCall object / empty id): the rail span
+        carries no gen_ai.tool.call.id, so identification must rely on the
+        from_tool_rail flag — attribute presence would silently skip the
+        dedupe and re-emit the duplicate span (bug #2046)."""
+        mgr = OtelAgentSpanManager()
+
+        def _push(invoke_id: str, attrs: dict, from_rail: bool) -> None:
+            span = _MockSpan()
+            span.attributes = attrs
+            state = OtelSpanState(span=span, context_token=_MockToken(), invoke_id=invoke_id)
+            state.from_tool_rail = from_rail
+            mgr.push(invoke_id, state)
+
+        # Rail span WITHOUT gen_ai.tool.call.id — still matched.
+        _push("inv-rail", {GEN_AI_TOOL_NAME: "get_weather", OJ_TRACE_ID: "trace-1"}, True)
+        assert mgr.has_open_tool_span("get_weather", "trace-1") is True
+        # Different tool name or trace id does not match.
+        assert mgr.has_open_tool_span("other_tool", "trace-1") is False
+        assert mgr.has_open_tool_span("get_weather", "trace-2") is False
+        # Unflagged span (legacy decorator path) never matches, even with an id.
+        _push(
+            "inv-deco",
+            {GEN_AI_TOOL_NAME: "get_weather", OJ_TRACE_ID: "trace-1", GEN_AI_TOOL_CALL_ID: "call-1"},
+            False,
+        )
+        mgr.pop("inv-rail")
+        assert mgr.has_open_tool_span("get_weather", "trace-1") is False
 
 
 class TestOtelWorkflowSpanManager:
