@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import tempfile
+import threading
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
@@ -491,3 +492,92 @@ class TestParsePsRemoveTargets(unittest.TestCase):
 
     def test_glob_in_path_flag_returns_empty(self):
         assert _parse_ps_remove_targets("Remove-Item -Path *.py") == []
+
+
+# ---------------------------------------------------------------------------
+# Event-loop non-blocking and cancel-during-write
+# ---------------------------------------------------------------------------
+
+class TestAppendOpHistoryEventLoop(unittest.IsolatedAsyncioTestCase):
+
+    @pytest.mark.asyncio
+    async def test_sync_rmw_does_not_block_event_loop(self):
+        """Slow sync RMW must not stall the event loop beyond 100ms heartbeats."""
+        import time
+        from openjiuwen.harness.tools import filesystem as fs_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            history_path = os.path.join(tmpdir, ".agent_history", "file_ops_test.json")
+            await _append_op_history(history_path, "/foo/bar.py", "write", None, "seed")
+
+            original = fs_mod._append_op_history_sync
+
+            def slow_sync(history_path, file_path, entry):
+                time.sleep(0.5)
+                return original(history_path, file_path, entry)
+
+            beats = []
+
+            async def heartbeat():
+                for _ in range(8):
+                    t0 = time.perf_counter()
+                    await asyncio.sleep(0.02)
+                    beats.append(time.perf_counter() - t0)
+
+            with unittest.mock.patch.object(fs_mod, "_append_op_history_sync", side_effect=slow_sync):
+                await asyncio.gather(
+                    _append_op_history(history_path, "/foo/bar.py", "edit", "seed", "v2"),
+                    heartbeat(),
+                )
+
+            assert beats, "heartbeat did not run"
+            assert max(beats) < 0.1, f"event loop stalled: max beat={max(beats):.3f}s"
+
+    @pytest.mark.asyncio
+    async def test_cancel_during_append_still_persists_both_entries(self):
+        """Cancel during worker RMW: cancelled write completes; second append adds; no .tmp left."""
+        import time
+        from openjiuwen.harness.tools import filesystem as fs_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            history_path = os.path.join(tmpdir, ".agent_history", "file_ops_test.json")
+            started = threading.Event()
+            real_get_lock = fs_mod._get_history_file_lock
+
+            def slow_get_lock(path):
+                lock = real_get_lock(path)
+
+                class _SlowLock:
+                    def __enter__(self):
+                        lock.__enter__()
+                        started.set()
+                        time.sleep(0.4)
+                        return None
+
+                    def __exit__(self, exc_type, exc, tb):
+                        return lock.__exit__(exc_type, exc, tb)
+
+                return _SlowLock()
+
+            with unittest.mock.patch.object(fs_mod, "_get_history_file_lock", side_effect=slow_get_lock):
+                task = asyncio.create_task(
+                    _append_op_history(history_path, "/foo/bar.py", "write", None, "v1")
+                )
+                for _ in range(50):
+                    if started.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                assert started.is_set(), "sync RMW did not start"
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+                # Immediate second append; must wait on the same file lock held by the first write.
+                await _append_op_history(history_path, "/foo/bar.py", "write", None, "v2")
+
+            data = _load(history_path)
+            entries = data["/foo/bar.py"]
+            assert len(entries) == 2, f"expected 2 entries, got {len(entries)}: {entries}"
+            assert entries[0]["new_content"] == "v1"
+            assert entries[1]["new_content"] == "v2"
+            assert not os.path.exists(history_path + ".tmp")
