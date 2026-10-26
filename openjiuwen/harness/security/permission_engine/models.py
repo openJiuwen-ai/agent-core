@@ -69,8 +69,9 @@ class PermissionConfirmResponse:
     feedback: str = ""
     auto_confirm: bool = False
     persist_allow: bool | None = None
-    authorization_mode: str = "allow"
-    authorization_scope: str = "exact"
+    # None lets the permission rail select the applicable default scope.
+    authorization_mode: str | None = None
+    authorization_scope: str | None = None
 
     def wants_permanent_persist(self) -> bool:
         if not self.approved or not self.auto_confirm:

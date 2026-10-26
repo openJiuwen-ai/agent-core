@@ -161,6 +161,7 @@ async def test_rail_interrupt_resume_and_lifetime(tmp_path, choice):
             "approved": choice != "reject",
             "auto_confirm": choice in {"session", "always"},
             "persist_allow": choice == "always",
+            "authorization_scope": "exact",
         },
     )
     assert isinstance(result, RejectResult if choice == "reject" else ApproveResult)

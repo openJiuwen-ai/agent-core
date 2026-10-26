@@ -1,10 +1,16 @@
 """Split approvals retain the invocation directory and only lift ShellGuard ASK."""
 
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.rails.interrupt.interrupt_base import ApproveResult, InterruptResult, RejectResult
+from openjiuwen.harness.rails.security.tool_security_rail import PermissionInterruptRail
+from openjiuwen.harness.security.host import ToolPermissionHost
 from openjiuwen.harness.security.permission_engine.approve.operation_grants import (
     build_operation_grants,
     operation_subject,
@@ -147,9 +153,78 @@ def test_parser_unavailable_does_not_offer_split_compound(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("choice", ["once", "session", "always", "reject"])
+@pytest.mark.parametrize("explicit_scope", [False, True])
+async def test_one_approval_persists_a_batch_with_the_requested_lifetime(tmp_path, choice, explicit_scope):
+    disk, overlay, state, writes = config(), {}, {}, []
+
+    def snapshot():
+        return {**disk, "approval_overrides": [*disk.get("approval_overrides", []), *overlay.get("approval_overrides", [])]}
+
+    def save(target, cfg, *, approval_grants=None, session_id=None):
+        target.update(deepcopy(cfg))
+        writes.append(approval_grants or cfg["approval_overrides"])
+        return True
+
+    host = ToolPermissionHost(
+        get_permissions_snapshot=snapshot,
+        persist_allow_rule=lambda cfg, **kwargs: save(disk, cfg, **kwargs),
+        persist_session_allow_rule=lambda cfg: save(overlay, cfg),
+    )
+    rail = PermissionInterruptRail(config=disk, host=host)
+    session = SimpleNamespace(get_state=lambda key: state.get(key), update_state=state.update, session_id="scope-test")
+    ctx = AgentCallbackContext(agent=object(), session=session)
+    args = arguments(tmp_path)
+    call = ToolCall(id="chain", type="function", name="bash", arguments=json.dumps(args))
+    pending = await rail.resolve_interrupt(ctx, call, None)
+    assert isinstance(pending, InterruptResult)
+    result = await rail.resolve_interrupt(ctx, call, {
+        "approved": choice != "reject", "auto_confirm": choice in {"session", "always"},
+        "persist_allow": choice == "always",
+        **({"authorization_mode": "allow_with_scope", "authorization_scope": "subcommands"} if explicit_scope else {}),
+    })
+    assert isinstance(result, RejectResult if choice == "reject" else ApproveResult)
+    child = ToolCall(id="child", type="function", name="bash", arguments=json.dumps({**args, "command": "git status"}))
+    assert isinstance(await rail.resolve_interrupt(ctx, child, None),
+                      ApproveResult if choice in {"session", "always"} else InterruptResult)
+    other = await PermissionEngine(disk).check_permission("bash", {**args, "command": "git status"})
+    assert other.is_allowed == (choice == "always")
+    assert len(writes) == (1 if choice in {"session", "always"} else 0)
+    if writes:
+        assert len(writes[0]) == 2
+        # A session auto-confirm key would skip fresh FileGuard ASK on this chain.
+        assert not state
+
+
+@pytest.mark.asyncio
 async def test_composed_source_priority_still_blocks_lower_user_grants(tmp_path):
     cfg, args = config(), arguments(tmp_path, "git status")
     remember(cfg, args)
     cfg["composition"] = {"schema_version": 1, "source_order": ["cloud", "user", "builtin"]}
     cfg["rules"] = [{"tools": ["bash"], "pattern": "git status", "action": "ask", "layer": "cloud"}]
     assert (await PermissionEngine(cfg).check_permission("bash", args)).needs_approval
+
+
+@pytest.mark.asyncio
+async def test_session_remember_rechecks_file_guard_for_the_same_original_call(tmp_path):
+    cfg, state = config(), {}
+    args = arguments(tmp_path, "cat ./secret.txt && git status")
+    session = SimpleNamespace(get_state=lambda key: state.get(key), update_state=state.update, session_id="file-recheck")
+
+    def save(updated):
+        cfg.update(deepcopy(updated))
+        return True
+
+    rail = PermissionInterruptRail(config=cfg, host=ToolPermissionHost(
+        get_permissions_snapshot=lambda: cfg, persist_session_allow_rule=save,
+        resolve_workspace_dir=lambda: tmp_path,
+    ))
+    ctx = AgentCallbackContext(agent=object(), session=session)
+    call = ToolCall(id="same-call", type="function", name="bash", arguments=json.dumps(args))
+    assert isinstance(await rail.resolve_interrupt(ctx, call, {
+        "approved": True, "auto_confirm": True, "persist_allow": False,
+        "authorization_mode": "allow_with_scope", "authorization_scope": "subcommands",
+    }), ApproveResult)
+    assert isinstance(await rail.resolve_interrupt(ctx, call, None), ApproveResult)
+    cfg["file_guard"] = {"enabled": True, "defaults": {"read": "ask"}, "workspace": {"read": "ask"}}
+    assert isinstance(await rail.resolve_interrupt(ctx, call, None), InterruptResult)

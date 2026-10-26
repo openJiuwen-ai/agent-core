@@ -169,7 +169,7 @@ def _ask_bash_rail(*, persist_session=None, persist_permanent=None):
 
 @pytest.mark.asyncio
 async def test_session_remember_stores_auto_confirm_when_session_persist_succeeds() -> None:
-    """Web resume path: persist_allow=False + persist hook True still stores the key."""
+    """Explicit exact session approval still stores the shortcut key."""
     from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
     from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
     from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -192,7 +192,7 @@ async def test_session_remember_stores_auto_confirm_when_session_persist_succeed
     decision = await rail.resolve_interrupt(
         ctx=ctx,
         tool_call=tool_call,
-        user_input={"approved": True, "auto_confirm": True, "persist_allow": False},
+        user_input={"approved": True, "auto_confirm": True, "persist_allow": False, "authorization_scope": "exact"},
     )
     assert isinstance(decision, ApproveResult)
     assert session_calls
@@ -211,7 +211,7 @@ async def test_session_remember_stores_auto_confirm_when_session_persist_succeed
 
 @pytest.mark.asyncio
 async def test_session_remember_without_hook_still_stores_auto_confirm() -> None:
-    """No persist_session_allow_rule: memory-only persist returns True, still store."""
+    """Explicit exact memory-only approval still stores the shortcut key."""
     from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
     from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
     from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -231,7 +231,7 @@ async def test_session_remember_without_hook_still_stores_auto_confirm() -> None
     decision = await rail.resolve_interrupt(
         ctx=ctx,
         tool_call=tool_call,
-        user_input={"approved": True, "auto_confirm": True, "persist_allow": False},
+        user_input={"approved": True, "auto_confirm": True, "persist_allow": False, "authorization_scope": "exact"},
     )
     assert isinstance(decision, ApproveResult)
     auto = stored.get(INTERRUPT_AUTO_CONFIRM_KEY) or {}

@@ -98,6 +98,7 @@ class ToolPermissionHost:
     写入 ``permission_yaml_path``。产品层应写入 User 文件，不要整段覆盖 Global ``tools``。
     若回调接受 ``approval_grant`` 关键字，另传本次对象授权记录，便于仅持久化
     此记录，避免把快照中已有的会话授权一并提升为永久授权。
+    Shell 拆分授权改传 ``approval_grants`` 列表，宿主应整批保存，且只保存本次增量。
     """
 
     persist_session_allow_rule: Callable[..., bool] | None = None

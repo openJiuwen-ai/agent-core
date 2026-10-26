@@ -40,7 +40,7 @@ from openjiuwen.harness.security.patterns import (
     write_permissions_section_to_agent_config_yaml,
 )
 from openjiuwen.harness.security.permission_engine.approve.operation_grants import (
-    build_operation_grant, operation_subject, scope_options,
+    build_operation_grant, build_operation_grants, operation_subject, scope_options,
 )
 from openjiuwen.harness.security.shell_ast import parse_shell_for_permission
 
@@ -375,7 +375,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         authorization_mode: str = "allow",
         authorization_scope: str = "exact",
     ) -> bool:
-        """Merge one object-scoped grant; hosts may persist just this delta."""
+        """Merge one approval batch; hosts may persist just this delta."""
         base_cfg: PermissionsSection | None = None
         if self._host.get_permissions_snapshot is not None:
             try:
@@ -397,14 +397,15 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                                  trusted_dirs=list(self._engine.trusted_dirs))
         if check.evaluate_global_policy_directly(normalized_name, tool_args)[0] == PermissionLevel.DENY:
             return False
-        grant = build_operation_grant(normalized_name, tool_args, base_cfg,
-                                      self._approval_workspace(), mode=authorization_mode,
-                                      scope=authorization_scope)
+        grants = build_operation_grants(normalized_name, tool_args, base_cfg,
+                                        self._approval_workspace(), mode=authorization_mode,
+                                        scope=authorization_scope)
         cfg = deepcopy(base_cfg)
         overrides = list(cfg.get("approval_overrides") or [])
+        grant_ids = {grant["id"] for grant in grants}
         cfg["approval_overrides"] = [
-            g for g in overrides if isinstance(g, dict) and g.get("id") != grant["id"]
-        ] + [grant]
+            g for g in overrides if isinstance(g, dict) and g.get("id") not in grant_ids
+        ] + grants
 
         prev_cfg = deepcopy(self._engine.config)
         self.update_config(cfg)
@@ -416,7 +417,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                         persist_hook,
                         cast(dict[str, Any], cfg),
                         session_id=session_id,
-                        approval_grant=grant,
+                        **({"approval_grant": grants[0]} if authorization_scope != "subcommands"
+                           else {"approval_grants": grants}),
                     )
                 )
             except Exception:
@@ -455,9 +457,19 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             if self._host.get_permissions_snapshot:
                 self.update_config(self._invoke_permissions_hook(
                     self._host.get_permissions_snapshot, session_id=session_id))
-            build_operation_grant(tool_name, tool_args, self._engine.config,
-                                  self._approval_workspace(), mode=payload.authorization_mode,
-                                  scope=payload.authorization_scope)
+            scope = payload.authorization_scope
+            if scope is None:
+                subject = operation_subject(tool_name, tool_args, self._engine.config, self._approval_workspace())
+                scope = "exact" if payload.authorization_mode == "allow" else next(
+                    (option["value"] for option in scope_options(subject) if option["value"] != "exact"), "exact",
+                )
+            mode = payload.authorization_mode
+            if mode is None:
+                mode = "allow" if scope == "exact" else "allow_with_scope"
+            payload = replace(payload, authorization_mode=mode, authorization_scope=scope)
+            build_operation_grants(tool_name, tool_args, self._engine.config,
+                                   self._approval_workspace(), mode=payload.authorization_mode,
+                                   scope=payload.authorization_scope)
             result = await self._engine.check_permission(tool_name, tool_args)
             if result.is_denied:
                 return payload, "[PERMISSION_DENIED] " + (
@@ -677,7 +689,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     )
                     if self._should_store_auto_confirm(
                         approved=confirm_payload.approved,
-                        auto_confirm=confirm_payload.auto_confirm,
+                        auto_confirm=confirm_payload.auto_confirm and confirm_payload.authorization_scope != "subcommands",
                         session=ctx.session,
                         auto_confirm_key=auto_confirm_key,
                         persisted=persisted,
@@ -763,7 +775,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         if self._should_store_auto_confirm(
             approved=payload.approved,
-            auto_confirm=payload.auto_confirm,
+            # Split grants must go through ShellGuard again, before FileGuard.
+            auto_confirm=payload.auto_confirm and payload.authorization_scope != "subcommands",
             session=ctx.session,
             auto_confirm_key=auto_confirm_key,
             persisted=persisted,
@@ -934,6 +947,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         *args: Any,
         session_id: str | None = None,
         approval_grant: dict[str, Any] | None = None,
+        approval_grants: list[dict[str, Any]] | None = None,
     ) -> Any:
         """Forward optional context without changing legacy callback signatures."""
         kwargs: dict[str, Any] = {}
@@ -945,6 +959,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             hook, "approval_grant"
         ):
             kwargs["approval_grant"] = approval_grant
+        if approval_grants is not None and PermissionInterruptRail._hook_accepts_keyword(
+            hook, "approval_grants"
+        ):
+            kwargs["approval_grants"] = approval_grants
         return hook(*args, **kwargs)
 
     @staticmethod
@@ -1027,8 +1045,8 @@ class PermissionInterruptRail(ConfirmInterruptRail):
     def _build_always_allow_hint(self, tool_call: Optional[ToolCall]) -> str:
         if tool_call is None:
             return ""
-        return ('\n\n> 默认仅授权当前对象；会话内记住仅对本会话有效，永久记住写入配置。'
-                '文件或 URL 可选择放宽范围，命令始终按原始命令授权。')
+        return ('\n\n> 默认按可用范围授权：文件为上一级目录，URL 为域名，命令为可独立或组合复用的子命令；'
+                '无可用范围时仅授权当前对象。会话内记住仅对本会话有效，永久记住写入配置。')
 
 
 __all__ = [

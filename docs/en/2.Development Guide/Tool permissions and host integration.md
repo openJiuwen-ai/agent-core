@@ -100,6 +100,10 @@ Persistence targets the full **`permissions`** policy dict after merges and in-m
 
 For the built-in YAML writer, **`_resolve_agent_config_yaml_path`** uses **only** the explicit **`config_yaml_path`** argument (typically **`ToolPermissionHost.permission_yaml_path`** passed by the rail). If missing, persistence cannot locate a file. Environment variables such as **`OPENJIUWEN_AGENT_CONFIG`** are **not** used for this resolution.
 
+Permission interrupt metadata includes `authorization_scopes`: `exact` plus the applicable `parent` (files), `domain` (URLs), or `subcommands` (reliably parsed shell calls). When confirmation fields are omitted, the server selects the applicable broader scope, falling back to `exact`; client changes are not required. Explicit `exact`, or `authorization_mode: allow` alone, retains exact authorization. A scope-only reply infers the matching mode. Split shell approval creates multiple `shell_subcommand` records, binding each literal child to the original invocation directory, tool and interpreter. Both children of `cd repo && git status` retain that initial directory. They lift shell ASK/undetermined results only, preserving structural checks and other guards. Existing exact grants are not converted; allow-once still saves no grant.
+
+Persistence hooks accepting `approval_grants` receive the current shell approval batch and should save only that batch, without promoting unrelated session grants. Single-object approvals still pass `approval_grant`. Session approvals use `persist_session_allow_rule`; allow-once saves no grant.
+
 ---
 
 ## 6. Source index
