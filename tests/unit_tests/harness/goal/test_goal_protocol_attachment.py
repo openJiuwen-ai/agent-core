@@ -113,11 +113,49 @@ async def test_second_goal_round_upserts_same_section_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_skips_protocol_when_no_attachment_manager() -> None:
+async def test_goal_round_falls_back_when_no_attachment_manager() -> None:
     rail = TaskCompletionRail(goal_manager=object())
     rail.attachment_manager = None
     ctx, agent, builder = _make_ctx(run_kind="goal", attachment_manager=None)
     agent.prompt_attachment_manager = None
+
+    await rail.before_model_call(ctx)
+
+    assert len(builder.added_sections) == 1
+    assert builder.added_sections[0].name == "goal_protocol"
+    assert (
+        builder.added_sections[0].render("cn")
+        == _expected_protocol_content("cn")
+    )
+
+
+@pytest.mark.asyncio
+async def test_refreshes_attachment_manager_from_context_agent() -> None:
+    manager = PromptAttachmentManager()
+    rail = TaskCompletionRail(goal_manager=object())
+    rail.attachment_manager = None
+    ctx, _, builder = _make_ctx(
+        run_kind="goal", attachment_manager=manager
+    )
+
+    await rail.before_model_call(ctx)
+
+    assert rail.attachment_manager is manager
+    assert builder.added_sections == []
+    assert await manager.get_by_id(
+        "session.sess1.goal_protocol"
+    ) is not None
+
+
+@pytest.mark.asyncio
+async def test_normal_round_without_session_does_not_clear() -> None:
+    manager = PromptAttachmentManager()
+    rail = TaskCompletionRail(goal_manager=object())
+    rail.attachment_manager = manager
+    ctx, _, builder = _make_ctx(
+        run_kind="normal", attachment_manager=manager
+    )
+    ctx.session = None
 
     await rail.before_model_call(ctx)
 
