@@ -2474,6 +2474,37 @@ class OrgTaskManager:
             await self._publish_task_delegated(task, task.created_by.team_id or "", task.assignment.team_id or "")
         return ready
 
+    async def get_summary_source_blockers(self, *, summary_task_id: str) -> list[dict[str, Any]]:
+        """Describe unready required bindings without exposing source output content."""
+        await self.initialize()
+        async with self._read() as session:
+            summary = await session.get(OrgTaskRecord, summary_task_id)
+            if summary is None or summary.organization_id != self.organization_id:
+                return []
+            sources = (
+                await session.execute(
+                    select(OrgTaskSourceRecord).where(
+                        col(OrgTaskSourceRecord.summary_task_id) == summary_task_id,
+                        col(OrgTaskSourceRecord.required).is_(True),
+                    ).order_by(col(OrgTaskSourceRecord.source_task_id))
+                )
+            ).scalars().all()
+            blockers = []
+            for source in sources:
+                task = await session.get(OrgTaskRecord, source.source_task_id)
+                review = await self._get_latest_review_row(session, source.source_task_id)
+                if task is not None and _is_accepted_task(task.status, review):
+                    continue
+                blockers.append({
+                    "task_id": source.source_task_id,
+                    "task_status": task.status if task is not None else None,
+                    "review_status": review.review_status if review is not None else None,
+                    "reviewer_team_id": (
+                        review.reviewer_team_id if review is not None else task.creator_team_id if task else None
+                    ),
+                })
+            return blockers
+
     async def get_summary_inputs(
         self,
         *,
@@ -2510,6 +2541,10 @@ class OrgTaskManager:
                 return None
             if execution.root_task_id != summary.root_task_id:
                 return None
+            root = await session.get(OrgTaskRecord, execution.root_task_id)
+            if root is None or root.organization_id != self.organization_id:
+                return None
+            root_task = self._to_task(root)
             stmt = select(OrgTaskSourceRecord).where(col(OrgTaskSourceRecord.summary_task_id) == summary_task_id)
             source_rows = (await session.execute(stmt)).scalars().all()
             sources = []
@@ -2528,6 +2563,12 @@ class OrgTaskManager:
             return {
                 "execution_id": execution.execution_id,
                 "root_task_id": execution.root_task_id,
+                "root_task": {
+                    "task_id": root_task.task_id,
+                    "title": root_task.title,
+                    "description": root_task.description,
+                    "output_spec": root_task.output_spec.model_dump() if root_task.output_spec is not None else None,
+                },
                 "summary_task": self._to_task(summary).model_dump(),
                 "source_tasks": sources,
             }

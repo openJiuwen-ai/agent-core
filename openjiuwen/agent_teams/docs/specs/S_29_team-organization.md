@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/organization/`、`runtime/manager.py` |
-| 最近一次修订日期 | 2026-10-14 |
+| 最近一次修订日期 | 2026-10-26 |
 | 关联 feature | `F_115_team-organization-develop-integration.md` |
 
 ## 范围 / 边界
@@ -51,6 +51,16 @@ Owner 及原本独立存在的受邀团队保持运行实例；专家团模板�
 组织工具由现有工具工厂和角色权限链装配，组织命名空间与原有团队工具分开。
 挂载入口 `ensure_control_tools` 与 `ensure_team_binding` 受 `TeamAgentSpec.enable_organization` 门控，
 关闭时 Leader 不挂载组织工具，既有绑定也不回灌。
+
+本 Team 承担组织子任务时，开始执行或向内部成员派发工作前，Leader 应先调用 `org_update_task(action='start')`。内部成果完成后，Leader 检查成果并及时回写对应组织子任务，再按创建者权限显式验收。成员分工使用团内工具；本团承担的组织任务仍用组织工具管理状态。内部任务完成不自动完成或验收组织任务，不新增调度、轮询或状态联动。
+
+## 聚合选择与交付输入
+
+认领根任务后、拆分前显式选择模式。根据根任务要求和各团队实际承担的交付范围选择模式。不存在承担完整根交付的专业团队，且各团队分别提供并列、独立的领域结论，根任务需要汇集、编排或综合这些结论时，必须选择 SUMMARY_TEAM。无论内容多少、任务大小或是否存在冲突，均不得以节约时间、降低开销、只是收集或 Owner 能自行整理为由改选 HIERARCHICAL。只有某个专业团队承担完整根交付，其最终输出本身即可满足根任务，其他团队提供所需输入、组件或验证时，才选择 HIERARCHICAL。团队领域正交不改变这一条件。Owner 名义上的汇总职责不构成完整专业交付，也不得虚设最终集成团队。用户明确指定模式时，在运行时约束允许的范围内遵循。规则不改变数据库默认值、已有选择或状态转换。
+
+`org_summary_get_inputs` 在既有执行与来源字段外返回 `root_task`（task_id、title、description、output_spec）；只有该执行绑定的 Summary Team 可读取，根任务也必须属于同一组织。根任务和汇总任务约束交付目标与格式，事实仍只来自绑定来源。Summary 自有最终文件仍须发布到组织 `summary/`，来源成品保留路径与类型，不默认替换为报告。
+
+`org_create_summary_execution` 允许在来源未就绪时创建执行，但必须返回最新任务状态。等待时返回 `blocked_sources`（绑定的必需来源中未完成或未验收项的 task_id、task_status、review_status、reviewer_team_id），提示 Owner 处理来源；本团执行的子任务也需要显式验收。仅返回来源状态，不向 Owner 开放 Summary 专用输入快照。等待阶段发布 `summary_execution_waiting_sources`，不得报告已委派或提示只等待交付；只有运行中的执行发布 `summary_execution_delegated`。验收门槛和现有唤醒逻辑保持不变。
 
 ## 与其他 spec 的关系
 

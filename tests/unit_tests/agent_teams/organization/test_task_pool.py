@@ -1059,7 +1059,8 @@ async def test_summary_execution_waits_for_accepted_sources_then_completes_root(
     root = await manager.create_task(
         task_id="summary-root",
         title="Root",
-        description="Root",
+        description="Deliver the accepted presentation with a brief explanation.",
+        output_spec={"description": "Preserve the presentation format", "inline_rules": ["Do not add a report"]},
         required_capabilities=["analysis"],
         aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
         created_by=client,
@@ -1120,6 +1121,24 @@ async def test_summary_execution_waits_for_accepted_sources_then_completes_root(
     )
     assert summary_inputs is not None
     assert summary_inputs["root_task_id"] == "summary-root"
+    assert summary_inputs["root_task"] == {
+        "task_id": "summary-root",
+        "title": "Root",
+        "description": "Deliver the accepted presentation with a brief explanation.",
+        "output_spec": root.task.output_spec.model_dump(),
+    }
+    assert summary_inputs["source_tasks"][0]["task"]["task_id"] == "summary-source"
+    async with manager._write() as session:
+        root_row = await session.get(OrgTaskRecord, "summary-root")
+        root_row.organization_id = "foreign-org"
+        await session.commit()
+    assert await manager.get_summary_inputs(
+        summary_task_id="summary-sibling", requester_team_id="summary-team",
+    ) is None
+    async with manager._write() as session:
+        root_row = await session.get(OrgTaskRecord, "summary-root")
+        root_row.organization_id = "org-1"
+        await session.commit()
     ready = await manager.get_task("summary-sibling")
     assert ready is not None and ready.status is OrgTaskStatus.DELEGATED
     reassigned = await manager.delegate_task(
@@ -3042,6 +3061,10 @@ async def test_active_teams_can_create_and_join_organization(active_organization
     assert "In-team ≠ cross-team" in collaboration_prompt.content["en"]
     assert "团内 ≠ 跨 Team" in collaboration_prompt.content["cn"]
     assert "Never pass a member name" in collaboration_prompt.content["en"]
+    assert "before executing it or dispatching internal work" in collaboration_prompt.content["en"]
+    assert "Handle ready own-Team results before waiting" in collaboration_prompt.content["en"]
+    assert "开始执行或向内部成员派发工作前" in collaboration_prompt.content["cn"]
+    assert "内部任务完成不等于组织任务完成" in collaboration_prompt.content["cn"]
     assert "never org_delegate_task the root" in collaboration_prompt.content["en"]
     assert "禁止对根任务调用 org_delegate_task" in collaboration_prompt.content["cn"]
     owner_tools = {tool.card.name: tool for tool in agents["team-a"].harness.tools}
@@ -3298,6 +3321,8 @@ async def test_summary_execution_prompt_requires_source_aggregation_only(active_
     assert "not Summary Task completion" in prompts[0]
     assert "does not change this Team's two-tool protocol" in prompts[0]
     assert "org_create_task(parent_task_id=" not in prompts[0]
+    assert "root_task and summary_task" in prompts[0]
+    assert "Do not replace a requested artifact with a report" in prompts[0]
 
     runtime.schedule_summary_execution(
         team_id="summary-team",
@@ -3326,11 +3351,16 @@ def test_claimed_root_prompt_distinguishes_aggregation_modes(active_organization
     assert len(scheduled) == 1
     prompt = scheduled[0]["prompt"]
     assert "HIERARCHICAL" in prompt
-    assert "small, local supporting pieces" in prompt
+    from openjiuwen.agent_teams.organization.aggregation import ROOT_AGGREGATION_GUIDANCE
+
+    assert ROOT_AGGREGATION_GUIDANCE["en"] in prompt
+    assert "its final output itself satisfies the root" in prompt
+    assert "Domain orthogonality does not change this condition" in prompt
+    assert "do not invent a final integrator" in prompt
     assert "complete the root yourself" in prompt
     assert "SUMMARY_TEAM" in prompt
-    assert "default preference" in prompt
-    assert "distinct parts or specialist domains" in prompt
+    assert "must choose SUMMARY_TEAM" in prompt
+    assert "parallel independent domain conclusions" in prompt
     assert "org_create_summary_execution" in prompt
     assert "Do not directly complete a SUMMARY_TEAM root" in prompt
     assert scheduled[0]["relay_source"] == "org_root_background"
@@ -3490,6 +3520,8 @@ async def test_summary_execution_tool_uses_fresh_task_status_for_initial_schedul
     )
 
     assert result.success
+    assert result.data["status"] == OrgTaskStatus.DELEGATED
+    assert "End this turn instead of polling" in result.data["next_action"]
     assert runtime.calls == [
         {
             "team_id": "summary-team",
@@ -3500,6 +3532,98 @@ async def test_summary_execution_tool_uses_fresh_task_status_for_initial_schedul
             "root_task_id": "root-task",
         }
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_state", ["unfinished", "PENDING", "REJECTED", "NEEDS_REVISION", "ACCEPTED"])
+async def test_summary_creation_reports_bound_source_blockers_and_resumes_after_review(org_manager, source_state):
+    """Owner contributions need acceptance; waiting feedback must identify the actual bound blockers."""
+    from unittest.mock import AsyncMock, Mock
+
+    manager, _ = org_manager
+    for team in ("team-a", "team-b"):
+        await manager.register_leader(team_id=team, leader_id=f"leader-{team}")
+    leader = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a",
+    )
+    root = await manager.create_task(
+        task_id="feedback-root", title="Root", description="Root", required_capabilities=["analysis"],
+        created_by=leader,
+    )
+    assert root.ok
+    assert (await manager.claim_task(task_id="feedback-root", team_id="team-a")).ok
+    await _select_summary_aggregation(manager, root_task_id="feedback-root", leader=leader)
+    for task_id, team in (("owner-source", "team-a"), ("expert-source", "team-b")):
+        child = await manager.create_task(
+            task_id=task_id, parent_task_id="feedback-root", title=task_id, description="Source",
+            required_capabilities=["analysis"], delegated_to_team_id=team, created_by=leader,
+        )
+        assert child.ok
+        if task_id == "owner-source" and source_state == "unfinished":
+            continue
+        assert (await manager.complete_task(task_id=task_id, team_id=team, output_abstract="Result")).ok
+        if task_id == "expert-source" or source_state != "PENDING":
+            status = OrgTaskReviewStatus.ACCEPTED if task_id == "expert-source" else OrgTaskReviewStatus(source_state)
+            assert (await manager.review_task(
+                task_id=task_id, reviewer_team_id="team-a", review_status=status,
+            )).ok
+
+    runtime = SimpleNamespace(
+        ensure_summary_team=AsyncMock(return_value=("summary-team", "summary-leader")),
+        schedule_summary_execution=Mock(),
+        publish_organization_progress=AsyncMock(),
+    )
+    tool = OrgCreateSummaryExecutionTool(manager, "team-a", "leader-a", runtime, "session-1")
+    inputs = {
+        "root_task_id": "feedback-root", "task_id": "feedback-summary", "title": "Summary",
+        "description": "Summary", "source_task_ids": ["owner-source", "expert-source"],
+    }
+    result = await tool.invoke(inputs)
+    assert result.success
+    if source_state == "ACCEPTED":
+        assert result.data["status"] == OrgTaskStatus.DELEGATED
+        assert "End this turn instead of polling" in result.data["next_action"]
+        assert runtime.publish_organization_progress.call_args.args[2]["phase"] == "summary_execution_delegated"
+        runtime.schedule_summary_execution.assert_called_once()
+        return
+
+    expected = [{
+        "task_id": "owner-source",
+        "task_status": "DELEGATED" if source_state == "unfinished" else "COMPLETED",
+        "review_status": None if source_state == "unfinished" else source_state,
+        "reviewer_team_id": "team-a",
+    }]
+    assert result.data["status"] == OrgTaskStatus.WAITING_SOURCES
+    assert result.data["blocked_sources"] == expected
+    assert "org_review_task" in result.data["next_action"]
+    assert "own Team" in result.data["next_action"]
+    assert "End this turn" not in result.data["next_action"]
+    assert runtime.publish_organization_progress.call_args.args[2]["phase"] == "summary_execution_waiting_sources"
+    runtime.schedule_summary_execution.assert_not_called()
+
+    # Repeated creation must inspect persisted bindings, not a changed request's sources.
+    repeated = await tool.invoke({**inputs, "source_task_ids": ["unbound-source"]})
+    assert repeated.success
+    assert repeated.data["blocked_sources"] == expected
+    execution = await manager.get_summary_execution(summary_task_id="feedback-summary")
+    assert execution.status == OrgSummaryExecutionStatus.WAITING_SOURCES.value
+    assert (await manager.get_task_review("expert-source")).review_status is OrgTaskReviewStatus.ACCEPTED
+    if source_state == "unfinished":
+        assert (await manager.complete_task(
+            task_id="owner-source", team_id="team-a", output_abstract="Owner result",
+        )).ok
+    review_tool = OrgReviewTaskTool(manager, "team-a", "leader-a")
+    assert "own Team" in review_tool.card.description
+    assert (await review_tool.invoke({"task_id": "owner-source", "review_status": "ACCEPTED"})).success
+    execution = await manager.get_summary_execution(summary_task_id="feedback-summary")
+    assert execution.status == OrgSummaryExecutionStatus.RUNNING.value
+    assert await manager.activate_ready_summary_tasks() == []
+    ready = await tool.invoke(inputs)
+    assert ready.success
+    assert ready.data["status"] == OrgTaskStatus.DELEGATED
+    assert "blocked_sources" not in ready.data
+    assert "End this turn instead of polling" in ready.data["next_action"]
+    runtime.schedule_summary_execution.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -4848,3 +4972,74 @@ async def test_drain_leader_turns_delivers_via_interact_when_running_idle(active
     assert sleep_calls == []
     assert key not in org_runtime._leader_turn_queues
     assert key not in org_runtime._leader_turn_workers
+
+
+def test_aggregation_guidance_is_shared_by_system_prompt_and_update_tool():
+    """Keep mode selection consistent across language and tool entry points."""
+    from openjiuwen.agent_teams.organization.aggregation import ROOT_AGGREGATION_GUIDANCE
+    from openjiuwen.agent_teams.organization.runtime import _ORG_COLLABORATION_PROMPT
+
+    for language in ("cn", "en"):
+        assert ROOT_AGGREGATION_GUIDANCE[language] in _ORG_COLLABORATION_PROMPT[language]
+    tool = OrgUpdateTaskTool(SimpleNamespace(), "owner", "leader")
+    assert ROOT_AGGREGATION_GUIDANCE["en"] in tool.card.description
+    assert "must choose SUMMARY_TEAM" in tool.card.description
+    assert "no specialist Team is responsible for the complete root deliverable" in tool.card.description
+    assert "不存在承担完整根交付的专业团队，且" in ROOT_AGGREGATION_GUIDANCE["cn"]
+    assert "the output is short, the task is small" in tool.card.description
+    assert "time or overhead can be reduced" in tool.card.description
+    assert "Choose HIERARCHICAL only" in tool.card.description
+    assert "its final output itself satisfies the root" in tool.card.description
+    assert ROOT_AGGREGATION_GUIDANCE["en"].index("must choose SUMMARY_TEAM") < ROOT_AGGREGATION_GUIDANCE["en"].index(
+        "Choose HIERARCHICAL only"
+    )
+    assert ROOT_AGGREGATION_GUIDANCE["cn"].index("必须选择 SUMMARY_TEAM") < ROOT_AGGREGATION_GUIDANCE["cn"].index(
+        "才选择 HIERARCHICAL"
+    )
+    mode_description = tool.card.input_params["properties"]["aggregation_mode"]["description"]
+    assert "no specialist Team is responsible for the complete root deliverable" in mode_description
+    assert "parallel independent domain conclusions" in mode_description
+    assert "regardless of length, time, overhead or conflicts" in mode_description
+    assert "Owner compilation alone does not qualify" in mode_description
+    for guidance in ROOT_AGGREGATION_GUIDANCE.values():
+        assert "PPT" not in guidance
+        assert "例如" not in guidance
+        assert "such as" not in guidance
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_root_accepts_multiple_inputs_and_a_specialist_deliverable(org_manager):
+    """Several input Teams can feed one final specialist without a Summary Execution."""
+    manager, _ = org_manager
+    for team in ("team-a", "content-team", "design-team", "ppt-team"):
+        await manager.register_leader(team_id=team, leader_id=f"leader-{team}")
+    await _create_claimed_parent(manager, org_id="org-1", parent_id="ppt-root")
+    _, leader = _org1_creators()
+    for task_id, team, result in (
+        ("content", "content-team", "Accepted page content"),
+        ("design", "design-team", "Accepted design specification"),
+        ("presentation", "ppt-team", "Finished presentation integrating content and design"),
+    ):
+        created = await manager.create_task(
+            task_id=task_id,
+            parent_task_id="ppt-root",
+            title=task_id,
+            description=result,
+            required_capabilities=["presentation"],
+            delegated_to_team_id=team,
+            created_by=leader,
+        )
+        assert created.ok
+        assert (await manager.complete_task(task_id=task_id, team_id=team, output_abstract=result)).ok
+        assert (await manager.review_task(
+            task_id=task_id, reviewer_team_id="team-a", review_status=OrgTaskReviewStatus.ACCEPTED,
+        )).ok
+    completed = await manager.complete_task(
+        task_id="ppt-root", team_id="team-a",
+        output_context={"description": "Accepted presentation", "result_uri": "/artifacts/resume.pptx"},
+    )
+    assert completed.ok
+    assert completed.task.status is OrgTaskStatus.COMPLETED
+    assert completed.task.aggregation.mode is OrgTaskAggregationMode.HIERARCHICAL
+    assert completed.task.aggregation.summary_task_id is None
+    assert completed.task.output_context.result_uri == "/artifacts/resume.pptx"

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from openjiuwen.agent_teams.organization.aggregation import ROOT_AGGREGATION_GUIDANCE
 from openjiuwen.agent_teams.organization.schema import (
     OrgSummaryExecutionStatus,
     OrgTaskAggregationMode,
@@ -624,13 +625,16 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
         super().__init__(
             name="org_update_task",
             description=(
-                "Start, complete, or fail an assigned task. Completing a child task requires "
+                "Start, complete, or fail an assigned task, including organization tasks assigned to your own Team. "
+                "Call start before execution or internal dispatch. After teammates finish, inspect their results "
+                "and promptly complete the corresponding organization child, then have its creator Team review it. "
+                "Internal task completion does not automatically complete or accept an organization task. "
+                "Completing a child task requires "
                 "output_context.description, output_context.result_uri, or output_abstract; "
                 "an output field is not supported. set_aggregation_mode lets the Root Leader "
                 "explicitly choose HIERARCHICAL or SUMMARY_TEAM after claiming a root task; "
-                "SUMMARY_TEAM is preferred unless other Teams supply only small supporting pieces "
-                "and this Team owns the root's core work and final judgment; "
-                "revise_description lets the creator "
+                + ROOT_AGGREGATION_GUIDANCE["en"]
+                + "revise_description lets the creator "
                 "supplement an unclaimed task once when requested by the organization."
             ),
             manager=manager,
@@ -651,7 +655,14 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
                         OrgTaskAggregationMode.HIERARCHICAL.value,
                         OrgTaskAggregationMode.SUMMARY_TEAM.value,
                     ],
-                    "description": "Required when action=set_aggregation_mode on a claimed root task.",
+                    "description": (
+                        "Required when action=set_aggregation_mode on a claimed root task. Use SUMMARY_TEAM when no "
+                        "specialist Team is responsible for the complete root deliverable and Teams provide "
+                        "parallel independent domain conclusions requiring collection, organization or synthesis, "
+                        "regardless of length, time, overhead or conflicts. Use HIERARCHICAL only when one specialist "
+                        "Team's complete output directly satisfies the entire root goal; other Teams may provide "
+                        "inputs, components or validation. Owner compilation alone does not qualify."
+                    ),
                 },
                 "request_id": {"type": "string"},
                 "expected_description_revision": {"type": "integer", "minimum": 0},
@@ -987,7 +998,10 @@ class OrgReviewTaskTool(_OrgLeaderTool):
     ) -> None:
         super().__init__(
             name="org_review_task",
-            description="Review a completed child task created by this team.",
+            description=(
+                "Review a completed child task created by this team, including tasks executed by your own Team. "
+                "COMPLETED is not ACCEPTED; own-Team contributions also require explicit acceptance."
+            ),
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -1062,7 +1076,9 @@ class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
             description=(
                 "Create the one Summary Team execution for a claimed root task that already selected "
                 "SUMMARY_TEAM aggregation. Do not use this tool for HIERARCHICAL roots; their Root Leader "
-                "must integrate accepted child outputs and complete the root directly."
+                "must integrate accepted child outputs and complete the root directly. Required sources must be "
+                "COMPLETED and ACCEPTED, including contributions executed by the Root Leader's own Team. "
+                "Creation may return WAITING_SOURCES; resolve the reported blockers before waiting for delivery."
             ),
             manager=manager,
             team_id=team_id,
@@ -1156,26 +1172,40 @@ class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
                         execution_id=execution.execution_id,
                         root_task_id=execution.root_task_id,
                     )
-            if callable(publish_progress):
+            current_task = summary_task or bound.task
+            data = current_task.brief()
+            phase = None
+            if current_task.status is OrgTaskStatus.WAITING_SOURCES:
+                data["blocked_sources"] = await self.manager.get_summary_source_blockers(
+                    summary_task_id=current_task.task_id,
+                )
+                data["next_action"] = (
+                    "Summary Team has not started; required sources are not yet COMPLETED and ACCEPTED. "
+                    "Inspect blocked_sources. Use org_view_pending_reviews and org_review_task for completed "
+                    "sources awaiting your review, including contributions executed by your own Team. "
+                    "Resolve unfinished or rejected sources with their assigned Teams. Do not report that "
+                    "Summary Team is already working or poll it while sources remain blocked."
+                )
+                phase = "summary_execution_waiting_sources"
+            elif execution is not None and execution.status == OrgSummaryExecutionStatus.RUNNING.value:
+                data["next_action"] = (
+                    "Summary Team is responsible for final delivery. End this turn instead of polling; "
+                    "you may send a focused message to its leader if clarification is needed."
+                )
+                phase = "summary_execution_delegated"
+            else:
+                data["next_action"] = "Inspect the returned task status; do not recreate this Summary Execution."
+            if phase is not None and callable(publish_progress):
                 await publish_progress(
                     self.session_id,
                     self.team_id,
                     {
-                        "phase": "summary_execution_delegated",
+                        "phase": phase,
                         "root_task_id": root_task_id,
-                        "summary_task_id": bound.task.task_id,
+                        "summary_task_id": current_task.task_id,
                     },
                 )
-            return ToolOutput(
-                success=True,
-                data={
-                    **bound.task.brief(),
-                    "next_action": (
-                        "Summary Team is responsible for final delivery. End this turn instead of polling; "
-                        "you may send a focused message to its leader if clarification is needed."
-                    ),
-                },
-            )
+            return ToolOutput(success=True, data=data)
         except Exception as exc:
             reason = f"summary team provisioning failed: {exc}"
             logger.error(
@@ -1208,7 +1238,7 @@ class OrgSummaryGetInputsTool(_OrgLeaderTool):
         """Expose a Summary Team-only name for reading bound source snapshots."""
         super().__init__(
             name="org_summary_get_inputs",
-            description="Read only the bound, accepted inputs for this Summary Team execution.",
+            description="Read root delivery requirements and bound, accepted inputs for this Summary Team execution.",
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -1290,7 +1320,7 @@ class OrgSummaryCompleteTool(_OrgLeaderTool):
             return ToolOutput(success=False, error="summary task is not assigned to this Summary Team")
         context = inputs.get("output_context")
         if not isinstance(context, dict) or not str(context.get("description") or "").strip():
-            return ToolOutput(success=False, error="output_context.description must contain the final report")
+            return ToolOutput(success=False, error="output_context.description must contain the final deliverable")
         result_uri = str(context.get("result_uri") or "").strip()
         if result_uri:
             from pathlib import Path
