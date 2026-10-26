@@ -55,6 +55,12 @@ class OtelRail(AgentRail):
     # @rail reuses one ctx across retry attempts so before/on_exception stay
     # balanced per attempt. LLM calls are strictly sequential within one
     # agent loop, so the LLM span stack stays as-is.
+    #
+    # The slot key is suffixed with the tool-call id (see
+    # _pending_tool_span_key): release branches that share one ``extra``
+    # dict across parallel tool contexts (0.1.17_hotfix) would otherwise let
+    # call B's before hook clobber call A's pending span, leaving A's span
+    # open forever and unexported.
     _TOOL_SPAN_EXTRA_KEY = "_otel_rail_tool_span"
 
     def __init__(self) -> None:
@@ -315,16 +321,35 @@ class OtelRail(AgentRail):
                 return raw_args
         return raw_args
 
+    def _pending_tool_span_key(self, ctx: AgentCallbackContext) -> str:
+        """Extra-dict slot for this tool call's pending span.
+
+        Keyed by tool-call id so concurrent same-name calls never overwrite
+        each other's slot — ``ctx.inputs`` is per-call even on branches
+        whose AbilityManager shares one ``extra`` dict across parallel tool
+        contexts (0.1.17_hotfix), so both hooks derive the same key.
+        Id-less calls fall back to the bare key (the single-call shape).
+        """
+        tool_call = getattr(ctx.inputs, "tool_call", None)
+        call_id = str(getattr(tool_call, "id", "") or "") if tool_call is not None else ""
+        return f"{self._TOOL_SPAN_EXTRA_KEY}:{call_id}" if call_id else self._TOOL_SPAN_EXTRA_KEY
+
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         try:
             session = ctx.session
             if session is None:
                 return
 
+            # The pending-span slot lives in ctx.extra; when extra is not a
+            # dict there is nowhere to record it and the span would dangle
+            # open forever — while its dedupe still suppressed the legacy
+            # decorator's twin event. Skip emission entirely instead.
+            if not isinstance(ctx.extra, dict):
+                return
+
             tracer = session.tracer()
             tool_span = tracer.tracer_agent_span_manager.create_agent_span(session.agent_span)
-            if isinstance(ctx.extra, dict):
-                ctx.extra[self._TOOL_SPAN_EXTRA_KEY] = tool_span
+            ctx.extra[self._pending_tool_span_key(ctx)] = tool_span
 
             tool_call = getattr(ctx.inputs, "tool_call", None)
             tool_name = getattr(ctx.inputs, "tool_name", "") or (getattr(tool_call, "name", "") if tool_call else "")
@@ -364,7 +389,10 @@ class OtelRail(AgentRail):
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         try:
-            tool_span = ctx.extra.pop(self._TOOL_SPAN_EXTRA_KEY, None) if isinstance(ctx.extra, dict) else None
+            tool_span = (
+                ctx.extra.pop(self._pending_tool_span_key(ctx), None)
+                if isinstance(ctx.extra, dict) else None
+            )
             if tool_span is None:
                 return
             session = ctx.session
@@ -385,7 +413,10 @@ class OtelRail(AgentRail):
 
     async def on_tool_exception(self, ctx: AgentCallbackContext) -> None:
         try:
-            tool_span = ctx.extra.pop(self._TOOL_SPAN_EXTRA_KEY, None) if isinstance(ctx.extra, dict) else None
+            tool_span = (
+                ctx.extra.pop(self._pending_tool_span_key(ctx), None)
+                if isinstance(ctx.extra, dict) else None
+            )
             if tool_span is None:
                 return
             session = ctx.session

@@ -17,7 +17,6 @@ from typing import Any
 from opentelemetry import trace
 
 from openjiuwen.extensions.tracer_otel.semconv import (
-    GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_NAME,
     OJ_TRACE_ID,
 )
@@ -38,6 +37,13 @@ class OtelSpanState:
     inputs: Any | None = None
     # Track which workflow this span belongs to for cross-workflow isolation.
     workflow_id: str | None = None
+    # Marks tool spans emitted by OtelRail's tool hooks, as opposed to the
+    # legacy session-tracer decorator's tool event. Used by
+    # OtelAgentSpanManager.has_open_tool_span; deliberately an internal
+    # field, not an exported attribute — gen_ai.tool.call.id is only
+    # written when the model supplied an id, but the dedupe must also
+    # cover id-less tool calls (bug #2046).
+    from_tool_rail: bool = False
     # P0 perf: cache is_recording() result at construction time.
     # Non-recording spans (the vast majority under low sample rates) skip
     # all attribute serialisation and stream buffering.
@@ -70,20 +76,22 @@ class OtelAgentSpanManager:
     def has_open_tool_span(self, tool_name: str, trace_id: str = "") -> bool:
         """Whether an OtelRail-emitted tool span is still open.
 
-        Rail-emitted tool spans carry ``gen_ai.tool.call.id`` (only OtelRail
-        forwards the tool-call id); spans created from the legacy decorator
-        event never do. Matching is by ``gen_ai.tool.name`` attribute, not
-        span name — display naming differs across release branches while
-        the attributes do not. Scoping by trace id keeps concurrent agents
-        in different traces from matching each other. Used to drop the
+        Rail emission is identified by the ``from_tool_rail`` span-state
+        flag (set in OtelAgentHandler.on_plugin_start) — not by attribute
+        presence, because ``gen_ai.tool.call.id`` is only written when the
+        model supplied an id while the dedupe must also cover id-less
+        calls. Matching is by ``gen_ai.tool.name`` attribute, not span
+        name — display naming differs across release branches while the
+        attributes do not. Scoping by trace id keeps concurrent agents in
+        different traces from matching each other. Used to drop the
         decorator's duplicate tool event for the same physical call
         (bug #2046). ``getattr`` defensively: non-recording spans expose
         neither ``name`` nor ``attributes``.
         """
         for state in list(self._spans.values()):
-            attributes = getattr(state.span, "attributes", None) or {}
-            if not attributes.get(GEN_AI_TOOL_CALL_ID):
+            if not state.from_tool_rail:
                 continue
+            attributes = getattr(state.span, "attributes", None) or {}
             if str(attributes.get(GEN_AI_TOOL_NAME, "")) != tool_name:
                 continue
             if trace_id and str(attributes.get(OJ_TRACE_ID, "")) != trace_id:

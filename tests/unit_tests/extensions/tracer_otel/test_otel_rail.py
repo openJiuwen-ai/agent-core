@@ -260,7 +260,8 @@ class TestOtelRailToolCallbacks:
         assert kwargs["instance_info"]["tool_call_id"] == "call-9"
         # Identity keys plus the decorator-contract parsed-arguments payload.
         assert kwargs["inputs"] == {"id": "call-9", "name": "echo", "type": "function", "inputs": {"a": 1}}
-        assert ctx.extra[OtelRail._TOOL_SPAN_EXTRA_KEY] is not None
+        # Slot key is suffixed with the tool-call id (per-call isolation).
+        assert ctx.extra[f"{OtelRail._TOOL_SPAN_EXTRA_KEY}:call-9"] is not None
 
     async def test_before_tool_call_defaults_when_no_tool_call_object(self):
         tracer = _StubTracer()
@@ -319,6 +320,52 @@ class TestOtelRailToolCallbacks:
         await rail.on_tool_exception(_make_ctx(_StubAgent(), session, ToolCallInputs(), exception=RuntimeError("x")))
 
         assert tracer.calls == []
+
+    async def test_interleaved_calls_sharing_one_extra_dict_stay_isolated(self):
+        """0.1.17_hotfix's AbilityManager shares one ``extra`` dict across
+        parallel tool contexts. With a fixed slot key, call B's before hook
+        clobbered call A's pending span: A's after ended B's span and B's
+        after was a no-op, so one span stayed open forever, unexported
+        (CI flake on PR !3390). The per-tool-call key must keep the two
+        lifecycles isolated even when they interleave on a shared dict."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        agent = _StubAgent(card=_StubCard(name="HelperAgent"))
+        rail = OtelRail()
+        shared_extra: dict = {}
+
+        def _make_shared_ctx(call_id: str, city: str):
+            tool_call = ToolCall(
+                id=call_id, type="function", name="get_weather",
+                arguments=json.dumps({"city": city}),
+            )
+            inputs = ToolCallInputs(
+                tool_call=tool_call, tool_name="get_weather", tool_args=tool_call.arguments
+            )
+            return AgentCallbackContext(agent=agent, session=session, inputs=inputs, extra=shared_extra)
+
+        ctx_a = _make_shared_ctx("mock_call_beijing", "Beijing")
+        ctx_b = _make_shared_ctx("mock_call_shanghai", "Shanghai")
+        # Interleave exactly as parallel execution does: both before hooks
+        # fire before either tool finishes.
+        await rail.before_tool_call(ctx_a)
+        await rail.before_tool_call(ctx_b)
+        ctx_a.inputs.tool_result = "Beijing: 22C"
+        ctx_b.inputs.tool_result = "Shanghai: 25C"
+        await rail.after_tool_call(ctx_a)
+        await rail.after_tool_call(ctx_b)
+
+        assert _events(tracer) == [
+            "on_plugin_start", "on_plugin_start", "on_plugin_end", "on_plugin_end",
+        ]
+        started = [c[2]["span"] for c in tracer.calls if c[1] == "on_plugin_start"]
+        ended = [c[2]["span"] for c in tracer.calls if c[1] == "on_plugin_end"]
+        # Each end event carries its own call's span — no clobbering.
+        assert ended[0] is started[0]
+        assert ended[1] is started[1]
+        assert started[0] is not started[1]
+        # Both slots were popped; nothing dangles in the shared dict.
+        assert shared_extra == {}
 
 
 class TestOtelRailNoSession:

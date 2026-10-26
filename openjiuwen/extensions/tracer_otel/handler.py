@@ -730,6 +730,13 @@ class OtelAgentHandler(TraceExtAgentHandler):
                 span, inputs, instance_info, InvokeType.PLUGIN.value, "tool",
                 extra_attrs=extra_attrs,
             )
+            if instance_info.get("type") == InvokeType.PLUGIN.value:
+                # OtelRail's tool event (the decorator's carries type="tool"):
+                # flag the span state so has_open_tool_span can identify it
+                # without relying on the optional gen_ai.tool.call.id.
+                state = self._span_manager.get(span.invoke_id)
+                if state is not None:
+                    state.from_tool_rail = True
         except Exception as exc:
             session_logger.warning("otel agent handler: on_plugin_start failed: %s", exc)
 
