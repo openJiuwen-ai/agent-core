@@ -66,7 +66,7 @@ agent_teams/
 ├── rails/               # 团队 Rail + manifest 元素声明（team rail / 内置 rail·tool / context handle / team confirm payload）
 ├── security/            # Team 权限安全辅助（permission narrowing 等）
 ├── runtime/             # Runner 进程内 TeamAgent 对象池 + 派发决策 + Run/Interact 并发门禁
-├── organization/        # 进程内跨团队组织、任务池、消息、专家与汇总团队、共享工作空间；见 docs/specs/S_29_team-organization.md
+├── organization/        # 进程内跨团队组织、任务池、消息、专家与汇总团队、共享工作空间；见 .agents/agent-docs/specs/agent_teams/S_29_team-organization.md
 ├── experts/             # Team 专家：ExpertCatalog 定位协议（宿主只答"装了哪些包、在哪"）+ AgentGroup 包格式（加载器同步/异步 + 卡片）+ 模板 → Team 成员组装（唯一实现）+ 绑定团视图；leader 的 view_experts / view_expert_groups / spawn_expert 消费它。见 F_125
 ├── interaction/         # 外部交互入口（UserInbox / HumanAgentInbox / @ 路由）
 ├── tools/               # 团队工具（Leader / Teammate / Human Agent 可调用的原子操作）
@@ -114,7 +114,7 @@ MCP server。Codex 例外：团队工具以裸名注册为顶层 Dynamic Tools�
 ### rails/ — 团队 Rail 注入 + manifest 声明
 
 team rail 全部经 **manifest 声明式装配**（`@harness_element` provider），不再手搓 `new` —— 见
-`docs/features/F_32_declarative-harness-assembly.md`。`AgentConfigurator` 把 team rail 作为
+`.agents/agent-docs/features/agent_teams/F_32_declarative-harness-assembly.md`。`AgentConfigurator` 把 team rail 作为
 `RailSpec` 注入 `build_spec.rails`，live handle 经 `BuildContext.extras` 传给工厂，rail 随
 `spec.build` + `ensure_initialized` 自动挂载 / init（不再有 `_MountedRails` / 手动 set/init /
 customizer 后处理）。
@@ -201,7 +201,7 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 ### spawn/ — 成员启动
 
-**注册与拉起是两件事**（细则见 `docs/specs/S_05` 不变量 1）：
+**注册与拉起是两件事**（细则见 `.agents/agent-docs/specs/agent_teams/S_05` 不变量 1）：
 
 - **注册**：各 `spawn_*` 工具与 `build_team` 的 predefined 成员都只落到 `TeamBackend.spawn_member`——**只写 DB 行（`UNSTARTED`），不启动任何东西**（该方法 docstring 即契约："does NOT start the member"）。
 - **拉起**：只有一条链 —— `TeamAgent.auto_start_member` / `auto_start_all` → `TeamBackend.startup_member` / `startup` → `MemberStatus.UNSTARTED→STARTING` 的 CAS guard（`try_transition_member_status`）→ `_spawn_and_publish` → `_on_teammate_created` → `SpawnManager.spawn_teammate`。
@@ -235,7 +235,7 @@ Messager 是点对点 + broadcast 的统一抽象，**任何直接新建 socket 
 
 三种交互视角（`GodViewMessage` / `OperatorMessage` / `HumanAgentMessage`）+ `UserInbox` / `HumanAgentInbox` 的实现层，所有 HITT runtime 表面（`enable_hitt` 分层开关、人类成员来源、一致性约束、运行约束）也落在这里。
 
-Bridge Agent 把外部独立 agent（claudecode / codex / openclaw / hermes 等）以"团队成员"形式接入：`bridge_protocol.py` 定义纯文本 `BridgeProtocolAdapter`（connect / relay / close），`BridgeMemberSpec(TeamMemberSpec)` 子类 + `enable_bridge` 是 capability ceiling，dynamic spawn 走 `spawn_bridge_agent` 工具；bridge avatar 本地是完整 teammate，远程做实际工作，框架在 mailbox 路径自动转发原消息给远程并把回复组合进 avatar context（参见 `agent/coordination/handlers/message.py:_bridge_deliverable_for`）。详见 `docs/features/F_07_bridge-agent.md`。
+Bridge Agent 把外部独立 agent（claudecode / codex / openclaw / hermes 等）以"团队成员"形式接入：`bridge_protocol.py` 定义纯文本 `BridgeProtocolAdapter`（connect / relay / close），`BridgeMemberSpec(TeamMemberSpec)` 子类 + `enable_bridge` 是 capability ceiling，dynamic spawn 走 `spawn_bridge_agent` 工具；bridge avatar 本地是完整 teammate，远程做实际工作，框架在 mailbox 路径自动转发原消息给远程并把回复组合进 avatar context（参见 `agent/coordination/handlers/message.py:_bridge_deliverable_for`）。详见 `.agents/agent-docs/features/agent_teams/F_07_bridge-agent.md`。
 
 详见 [`interaction/AGENTS.md`](interaction/AGENTS.md)。
 
@@ -343,8 +343,8 @@ claude `--append-system-prompt` / codex `-c developer_instructions` / 其余 pre
 stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内成员同路 fan-out。
 详见 [[F_22]] 与 [[F_25_external-cli-hardening-and-gemini]]。
 
-设计文档见 `docs/features/F_21_external-agent-access.md`（接入面 + spawn 接线）与
-`docs/features/F_22_external-cli-spawn-member-and-mcp-injection.md`（external_cli spawn 工具 +
+设计文档见 `.agents/agent-docs/features/agent_teams/F_21_external-agent-access.md`（接入面 + spawn 接线）与
+`.agents/agent-docs/features/agent_teams/F_22_external-cli-spawn-member-and-mcp-injection.md`（external_cli spawn 工具 +
 静态 spec 配置 + MCP 自动注入）。
 
 ### worktree — Git worktree 隔离
@@ -396,15 +396,15 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 ## 设计文档归档与双向同步（仅本模块强制）
 
-本模块的设计文档**全部**落在 `docs/` 下，命名与结构规约见 [`docs/AGENTS.md`](docs/AGENTS.md)。
+本模块文档已集中到仓库根 `.agents/agent-docs/{designs,specs,features,bugfix}/agent_teams/`。设计阶段使用 `.agents/skills/jw-design/SKILL.md`，开发记忆规则使用 `.agents/skills/jw-dev/SKILL.md`。新 feature / bugfix 使用 `YYYYMMDD_HHMM` 分钟时间命名，历史文件名保持不变。
 
-把 **`openjiuwen/agent_teams/` 下的代码 + 本目录 `docs/specs/` + `docs/features/` + `docs/bugfix/`
+把 **`openjiuwen/agent_teams/` 下的代码 + 仓库根 `.agents/agent-docs/specs/agent_teams/` + `.agents/agent-docs/features/agent_teams/` + `.agents/agent-docs/bugfix/agent_teams/`
 + 各级 `<subdir>/AGENTS.md`** 当作**一个一致性单元**来维护——`agent_teams` 子系统
 对契约一致性的要求高于仓库其它模块（多角色 + 多进程 + 持久化状态 + 公共 SDK 表面），
 所以本节的强制约束**只限于** `openjiuwen/agent_teams/` 子树，不上推到仓库其它模块。
 
 **前置铁律——文档先是设计的输入，才是提交的产出。** 动手改任何代码设计**之前**，先
-`grep` + 读相关的 `docs/specs/S_NN_*`（现有契约 / 不变量 / 边界）与 `docs/features/F_NN_*`
+`grep` + 读相关的 `.agents/agent-docs/specs/agent_teams/S_NN_*`（现有契约 / 不变量 / 边界）与 `.agents/agent-docs/features/agent_teams/F_YYYYMMDD_HHMM_*`
 （为什么长这样、当初拒绝了哪些方案），拿它们校准方案——spec 说"系统是什么样"、feature 说
 "为什么这么改"，先读才不会撞坏既有契约、也不会重蹈已被拒绝的方案。方案定了**当场**同步改掉
 对应 S / F，让文档和方案一起成形。**先码后档、拖到提交前才补文档是把流程做反了**：那样文档
@@ -413,21 +413,21 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 三条强制约束，提交时必查：
 
-1. **每次特性更新必须归档 feature 文档，且 `feat` 改动的特性代码、测试代码、文档拆成三个连续提交**：在 `docs/features/`
-   下新增一份 `F_NN_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。commit message 只写
+1. **每次特性更新必须归档 feature 文档，且 `feat` 改动的特性代码、测试代码、文档拆成三个连续提交**：在 `.agents/agent-docs/features/agent_teams/`
+   下新增一份 `F_YYYYMMDD_HHMM_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。commit message 只写
    what，feature 文档负责写 why / why-not。`feat` 改动落地顺序**固定为三个紧邻的提交**——提交 1 落特性代码
    （`feat(swarm): ...`），提交 2 落本次新增/改动的单测（`test(swarm): ...`），提交 3
-   落本次涉及的全部文档：`docs/features/F_NN_*.md` 新增 + 下面 #2 要求的 `docs/specs/S_NN_*.md`
+   落本次涉及的全部文档：`.agents/agent-docs/features/agent_teams/F_YYYYMMDD_HHMM_*.md` 新增 + 下面 #2 要求的 `.agents/agent-docs/specs/agent_teams/S_NN_*.md`
    修订（`docs(swarm): ...`）。特性代码、测试、文档不再混进同一次 commit——既不让大段文档 diff 淹没
    代码评审，也让测试改动独立可审，还避免文档归档拖延导致设计上下文随时间漂移。
-   **只有 `feat` 拆**：`fix` / `refactor` / `perf` 等其它类型的改动，代码、测试、文档（含 `docs/bugfix/B_NN_*.md`、
-   对已有 `F_NN` 的追补及连带的 spec 修订）合并为**一个**对应 type 的提交——它们是同一条证据链，
+   **只有 `feat` 拆**：`fix` / `refactor` / `perf` 等其它类型的改动，代码、测试、文档（含 `.agents/agent-docs/bugfix/agent_teams/B_YYYYMMDD_HHMM_*.md`、
+   对已有 `F_YYYYMMDD_HHMM` 的追补及连带的 spec 修订）合并为**一个**对应 type 的提交——它们是同一条证据链，
    需要作为整体评审、cherry-pick 和 revert。
 2. **所有模块设计规约变动必须更新 specs 文档**：模块契约、跨子模块的公共协议、不变量、
-   公共 API 形态发生变化时，同步修订对应 `docs/specs/S_NN_<slug>.md`；新规约 = 新 spec 文件。
+   公共 API 形态发生变化时，同步修订对应 `.agents/agent-docs/specs/agent_teams/S_NN_<slug>.md`；新规约 = 新 spec 文件。
    规约变了但 specs 没改，下次读 spec 的人就被误导——这是设计债，不是文档懒。
 3. **双向同步：读到与代码不一致的描述必须当场修文档**。在本模块任何一份
-   `AGENTS.md` / `docs/specs/S_*` / `docs/features/F_*` 里读到的接口名、枚举值、
+   `AGENTS.md` / `.agents/agent-docs/specs/agent_teams/S_*` / `.agents/agent-docs/features/agent_teams/F_*` 里读到的接口名、枚举值、
    truth table 行数、文件路径、不变量等只要与当前代码不符，**不要**把过时表述当作新约束去执行、
    也不要原样转述给用户；先 `grep` 代码、以代码为准刷新文档，在同一次改动里落地。
    `AGENTS.md` 里每条点名了"X 个分支 / Y 路 dispatch / Z 方法"的句子都是契约的一部分。
@@ -439,11 +439,11 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 - spec 头部"最近一次修订日期"字段在每次修订该 spec 时填当天日期（`YYYY-MM-DD`）；feature 文档用
   头部"日期"字段记录归档当天，不设独立修订字段。**不要在元信息里写 commit hash**——避免"提交后
   回填"的来回反复。
-- 子模块自身的本地约定继续放各 `<subdir>/AGENTS.md`；跨子模块的设计规约一律落到 `docs/specs/`，
+- 子模块自身的本地约定继续放各 `<subdir>/AGENTS.md`；跨子模块的设计规约一律落到 `.agents/agent-docs/specs/agent_teams/`，
   不要塞进单一子目录的 AGENTS.md。
 - **`CLAUDE.md` 是只读壳，不要编辑它**：本模块每个子目录的 `CLAUDE.md` 仅含 `@AGENTS.md` 一行，
   编辑 `CLAUDE.md` 的修改不会被保留在任何有效文档里。需要更新文档时，直接编辑 `AGENTS.md`。
-- 拿不准某次改动算 feature-grade（要 `F_NN_*.md`）还是普通修复（不必归档）时，先问用户。
+- 拿不准某次改动算 feature-grade（要 `F_YYYYMMDD_HHMM_*.md`）还是普通修复（不必归档）时，先问用户。
   歧义情况默认**归档**——多一份 markdown 的成本远低于丢失设计上下文。
 
 ## 提交约定
@@ -452,4 +452,4 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 footer 用 `Refs: #<issue>` 格式关联 issue。issue 号若无法从当前上下文明确，必须先询问用户，不要臆造或留空。
 
-**只有 `feat` 改动拆提交**：涉及 `docs/features/F_*` / `docs/specs/S_*` 文档更新的 `feat` 改动，特性代码、测试代码、文档拆成三个连续提交（提交 1 特性代码 `feat(swarm)`，提交 2 单测 `test(swarm)`，提交 3 文档 `docs(swarm)`），细则见上文「设计文档归档与双向同步」约束 #1。`fix` / `refactor` 等其它类型一律不拆，代码、测试、文档合并为一个对应 type 的提交。
+**只有 `feat` 改动拆提交**：涉及 `.agents/agent-docs/features/agent_teams/F_*` / `.agents/agent-docs/specs/agent_teams/S_*` 文档更新的 `feat` 改动，特性代码、测试代码、文档拆成三个连续提交（提交 1 特性代码 `feat(swarm)`，提交 2 单测 `test(swarm)`，提交 3 文档 `docs(swarm)`），细则见上文「设计文档归档与双向同步」约束 #1。`fix` / `refactor` 等其它类型一律不拆，代码、测试、文档合并为一个对应 type 的提交。

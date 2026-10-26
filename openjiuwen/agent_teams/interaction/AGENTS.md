@@ -29,7 +29,7 @@
 - **mailbox 自动转发**：`agent/coordination/handlers/message.py:_bridge_deliverable_for` 把入站团队消息按 `mailbox_inject_mode`（`PASSTHROUGH` / `REPHRASE`）包装后调 `adapter.relay`，把"原消息 + 远程回复"组合后 deliver 进 avatar context。bridge avatar 自身无任何"咨询远程"工具——通信通道唯一就是自动转发。
 - **spec 层**：`BridgeMemberSpec(TeamMemberSpec)` 子类，`enable_bridge` 是 capability ceiling（与 `enable_hitt` 平行），dynamic spawn 走 `SpawnMemberTool(role_type='bridge_agent')` → `TeamBackend.spawn_bridge_agent`。
 
-详见 `agent_teams/docs/features/F_07_bridge-agent.md`。
+详见 `agent_teams/.agents/agent-docs/features/agent_teams/F_07_bridge-agent.md`。
 
 ## HITT（Human in the Team）
 
@@ -58,7 +58,7 @@
   （avatar 绝不代标，F_20）。
 - **透传仅 passive**：avatar 型 sender 传入 tool call 被拒
   （`tool_passthrough_avatar_not_supported`，治理链完整性）。
-- 详见 `agent_teams/docs/features/F_111_passive-human-member.md`。
+- 详见 `agent_teams/.agents/agent-docs/features/agent_teams/F_111_passive-human-member.md`。
 
 ### 一致性约束（`TeamAgentSpec.build()` 时 fail-fast）
 
@@ -72,7 +72,7 @@
 1. `human_agent` 是保留成员名（`constants.RESERVED_MEMBER_NAMES`），用作动态 spawn 的默认人类成员名；自定 HUMAN_AGENT 成员名可避开此保留名。普通 teammate 的 predefined 成员仍然不允许撞保留名（`_validate_reserved_names`）。
 2. human-agent 走标准 UNSTARTED → spawn 流程（与 teammate 一致），但工具集仅保留 `view_task` + `member_complete_task`（`HUMAN_AGENT_TOOLS`）；rail 装配会剥离 `TeamToolApprovalRail`。
 3. 一旦 `task.assignee` 指向某个 human-agent 且状态 CLAIMED，`UpdateTaskTool` 拒绝 reassign 和 cancel；批量 cancel 链路也跳过。
-4. 发送给 human-agent 的点对点消息与广播 **保持 `is_read=False`**——human-agent 与 teammate 共用 `MessageHandler._process_unread_messages` poll 路径，由该路径在 deliver 完成后调 `mark_message_read`。在写入侧自动标已读会绕过 poll 路径，让 avatar 的 DeepAgent 永远收不到消息。见 `docs/features/F_20_human-agent-mailbox-unread-flip.md`。
+4. 发送给 human-agent 的点对点消息与广播 **保持 `is_read=False`**——human-agent 与 teammate 共用 `MessageHandler._process_unread_messages` poll 路径，由该路径在 deliver 完成后调 `mark_message_read`。在写入侧自动标已读会绕过 poll 路径，让 avatar 的 DeepAgent 永远收不到消息。见 `.agents/agent-docs/features/agent_teams/F_20_human-agent-mailbox-unread-flip.md`。
 5. TeamPolicyRail 注入 `team_hitt` section（priority=12），按 role 给 leader/teammate/human_agent 下达角色特定的行为约束。section 注入条件来自 `backend.hitt_enabled()` —— 反映运行时 effective flag，不依赖 roster 是否已 spawn。
 6. **控制者输入带显式来源标记**：`HumanAgentInbox._drive_agent` 把控制者的 body 经
    `inbound_render.render_controller_input` 包成 `<team-inbound from="controller" type="direct">`

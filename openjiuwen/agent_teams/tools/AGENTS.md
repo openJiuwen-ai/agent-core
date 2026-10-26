@@ -156,7 +156,7 @@ operator；leader 是唯一能把它收尾的人。
 `clean_team` 成功路径上触发（best-effort —— 回调抛错只记日志，不上抛）。宿主
 `TeamAgent` 把它接到在 leader 本轮内同步置位 `TeamAgentState.team_cleaned`，这正是临时
 团队 leader 在 `clean_team` 后结束自己 stream 的方式（leader 忽略自己的
-`TeamCleanedEvent`）。见 `docs/specs/S_08` + `docs/features/F_10`。
+`TeamCleanedEvent`）。见 `.agents/agent-docs/specs/agent_teams/S_08` + `.agents/agent-docs/features/agent_teams/F_10`。
 
 `TeamBackend.__init__` 还接一个 keyword-only 的 `on_team_built`，在 `build_team` 创建
 DB 行与初始成员之后触发。宿主 `TeamAgent` 用 `on_team_built` / `on_team_cleaned` 持久化

@@ -36,11 +36,11 @@ The provider card names are `deepagent`, `native_v2`, `claude-code`, `codex`, `d
 `native_v2` is resolved lazily to `agent_teams.harness.protocol_adapter.NativeV2HarnessProvider`;
 its implementation stays in the team package and reuses NativeHarness manifest construction.
 
-Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, feature
-`openjiuwen/harness/docs/features/F_03_harness-providers-and-manifest-factory.md`, third-party
-provider packages `openjiuwen/harness/docs/features/F_07_third-party-harness-provider-packages.md`, team wiring
-`openjiuwen/agent_teams/docs/specs/S_27_external-harness-member-runtime.md` and
-`openjiuwen/agent_teams/docs/features/F_96_protocol-harness-providers-and-member-migration.md`.
+Design records: spec `.agents/agent-docs/specs/harness/S_19_harness-providers.md`, feature
+`.agents/agent-docs/features/harness/F_03_harness-providers-and-manifest-factory.md`, third-party
+provider packages `.agents/agent-docs/features/harness/F_07_third-party-harness-provider-packages.md`, team wiring
+`.agents/agent-docs/specs/agent_teams/S_27_external-harness-member-runtime.md` and
+`.agents/agent-docs/features/agent_teams/F_96_protocol-harness-providers-and-member-migration.md`.
 
 ## Invariants
 

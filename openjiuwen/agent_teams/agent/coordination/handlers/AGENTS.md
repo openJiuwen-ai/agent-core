@@ -6,7 +6,7 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
 
 上层结构（EventBus / dispatcher / kernel 三者的接线、三条铁律）见
 [`../AGENTS.md`](../AGENTS.md)；跨子模块的协议契约与不变量编号见
-[`docs/specs/S_03_coordination-protocol.md`](../../../docs/specs/S_03_coordination-protocol.md)。
+[`.agents/agent-docs/specs/agent_teams/S_03_coordination-protocol.md`](../../../../../.agents/agent-docs/specs/agent_teams/S_03_coordination-protocol.md)。
 本文件只讲**这些 handler 各自的决策规则**，以及它们共用的那套判断维度。
 
 ## 类契约

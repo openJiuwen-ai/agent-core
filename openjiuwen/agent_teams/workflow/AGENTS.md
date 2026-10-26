@@ -1,6 +1,6 @@
 # Agent Teams Workflow（Swarmflow 编排）
 
-用一个 swarmflow 脚本（普通 Python 模块，`META={...}` + `async def run(args)`，用 `agent()`/`parallel()`/`pipeline()`/`phase()` 等原语）声明式编排多 agent 工作流，底层复用 agent_teams 基础设施。设计来龙去脉见 `docs/features/F_27`，运行时契约见 `docs/specs/S_18`。
+用一个 swarmflow 脚本（普通 Python 模块，`META={...}` + `async def run(args)`，用 `agent()`/`parallel()`/`pipeline()`/`phase()` 等原语）声明式编排多 agent 工作流，底层复用 agent_teams 基础设施。设计来龙去脉见 `.agents/agent-docs/features/agent_teams/F_27`，运行时契约见 `.agents/agent-docs/specs/agent_teams/S_18`。
 
 ## 模块地图
 

@@ -83,3 +83,18 @@ Pass `COMMITS=N` to check recent commits instead.
 - Reviewer/merger ownership files (`CODEREVIEWER`, `COMMITTER`, `USER.json`): `.claude/rules/ownership-files.md`
 - Deep operational guides: `.claude/skills/`
 - Permissions and env vars: `.claude/settings.json`
+
+## AI coding 流程与文档基础设施
+
+本仓库项目级 skill 维护在 `.agents/skills/`，按当前任务阶段读取：
+
+- `.agents/skills/jw-coding-flow/SKILL.md`：需求、设计、开发、检视与交付的流程入口。
+- `.agents/skills/jw-design/SKILL.md`：仅设计阶段，包含设计概览、架构和特性方案参考。
+- `.agents/skills/jw-dev/SKILL.md`：开发、测试、契约同步及 feature / bugfix 记忆维护。
+- `.agents/skills/jw-review/SKILL.md`：本地代码或已确认提交范围的检视流程、关注点、证据核对与复查交接。
+- `.agents/skills/jw-testing/SKILL.md`：独立撰写与维护转测文档，输出暂存本地被忽略的 designs/testing/，不进入设计生命周期或索引。
+
+实际资产位于 `.agents/agent-docs/` 的 `designs/`、`specs/`、`features/`、`bugfix/`。
+新 design 使用 `D-YYYYMMDD-HHMM-<slug>`；feature / bugfix 使用 `F_` / `B_` 加 `YYYYMMDD_HHMM` 和主题。时间均采用 Asia/Singapore，
+精确到分钟；历史编号不调整，spec 沿用原命名规则。具体位置与交接规则见对应 skill。
+不运行格式化工具或静态检查，不运行 ruff、pylint、mypy、make check 或 make format。

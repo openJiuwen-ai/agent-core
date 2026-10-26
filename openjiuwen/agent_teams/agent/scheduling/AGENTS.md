@@ -42,8 +42,8 @@ leader 侧的调度分发 runtime，与 `coordination/`（唤醒层）平齐：c
 
 `default_max_review_rounds`（默认 3）、`review_stall_timeout`（默认 1800s）只在本包消费，不跨进程镜像。催办间隔 `_REVIEW_RENUDGE_SECONDS`（600s）是包内常量。
 
-设计上下文见 `docs/features/F_62_scheduled-dispatch-runtime-and-review-voting.md`（调度器 + 投票）、
-`docs/features/F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）与
-`docs/features/F_73_reviewer-feedback-skill-evolution-boundaries.md`（review feedback 外部接入边界）、
-`docs/bugfix/B_06_scheduled-reassign-active-task-handoff-gap.md`（改派活跃任务的交接缺口）及
-`docs/specs/S_22_scheduling-runtime.md`。
+设计上下文见 `.agents/agent-docs/features/agent_teams/F_62_scheduled-dispatch-runtime-and-review-voting.md`（调度器 + 投票）、
+`.agents/agent-docs/features/agent_teams/F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）与
+`.agents/agent-docs/features/agent_teams/F_73_reviewer-feedback-skill-evolution-boundaries.md`（review feedback 外部接入边界）、
+`.agents/agent-docs/bugfix/agent_teams/B_06_scheduled-reassign-active-task-handoff-gap.md`（改派活跃任务的交接缺口）及
+`.agents/agent-docs/specs/agent_teams/S_22_scheduling-runtime.md`。

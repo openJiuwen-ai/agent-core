@@ -20,7 +20,7 @@
 | 文件 | 类 | 职责 |
 |---|---|---|
 | `team_agent.py` | `TeamAgent(BaseAgent)` | 唯一对外类。leader / teammate 都是它，行为由 `blueprint.role` 切。`auto_start_member` / `auto_start_all` 用于 interact dispatch 层 best-effort lazy startup |
-| `agent_configurator.py` | `AgentConfigurator` | DeepAgent 装配：team rail 经 `RailSpec` 声明式注入 `build_spec.rails` + live handle 注入 `BuildContext.extras`（不再手动 `new` rail / 不再有 customizer，见 `docs/features/F_32`）；`_resolve_team_mode` 在这里 |
+| `agent_configurator.py` | `AgentConfigurator` | DeepAgent 装配：team rail 经 `RailSpec` 声明式注入 `build_spec.rails` + live handle 注入 `BuildContext.extras`（不再手动 `new` rail / 不再有 customizer，见 `.agents/agent-docs/features/agent_teams/F_32`）；`_resolve_team_mode` 在这里 |
 | `member.py` | `TeamMember` | 成员状态机封装 |
 | `member_factory.py` | `create_member_handle(...)` | 集中 TeamMember 构造，leader / teammate 路径共用一份实现 |
 | `member_activity.py` | `MemberActivityRegistry` + `IdleSignal` + `parse_member_status` | **leader-only** 的全成员状态内存视图（含自己）。唯一问题是"团队里还有没有东西在动"：`record()` 写状态并返回 `IdleSignal`（有人在动→`CANCEL`，全员静止的上升沿→`SCHEDULE`，其余 `NONE`；初始不武装——刚建好的团队天然静止，报 idle 是噪音），`seed()` 用 DB 名册整体替换（团队不存在 / 成员为空不报错）。静止集是 `MEMBER_QUIESCENT_STATUSES`，**不是**完成判定的 `MEMBER_SETTLED_STATUSES`。**本文件不含任何计时概念**——2s 去抖窗口与那个 task 归 `StreamController`；**也不含任务板概念**——idle 的第二条件（任务板无非终态任务）由 `StreamController` 在去抖之后另问，registry 只回答成员那半个问题。见 [[F_74_leader-member-activity-and-team-idle]] / [[F_77_team-idle-requires-a-settled-task-board]] |
@@ -36,14 +36,14 @@
 
 ## scheduling/ — 调度模式决策引擎（F_62）
 
-leader 侧的调度分发 runtime，与 coordination 平齐：coordination 只唤醒不决策，本包只决策（开工 `start_task`、改派后补发交接、验票判定 `settle_review`、轮数/停摆升级、退场请求）且从不直接触碰其他成员的 round——所有成员交接都是 **leader 身份的邮箱消息**（投递即经 `auto_start_member` 幂等拉起离线成员）。仅当 `spec.dispatch_mode == "scheduled"`（静态配置）时 `CoordinationKernel.setup(role=LEADER)` 构造（休眠），团队物化（build_team 成功 / start 读到已有 team 行）时激活；wake 路径由 kernel 组合为 "coordination dispatch → scheduler.on_event"，leader 自发事件经 `SCHEDULER_SCAN` inner 回声可见。详见 [`scheduling/AGENTS.md`](scheduling/AGENTS.md) 与 `docs/specs/S_22_scheduling-runtime.md`。
+leader 侧的调度分发 runtime，与 coordination 平齐：coordination 只唤醒不决策，本包只决策（开工 `start_task`、改派后补发交接、验票判定 `settle_review`、轮数/停摆升级、退场请求）且从不直接触碰其他成员的 round——所有成员交接都是 **leader 身份的邮箱消息**（投递即经 `auto_start_member` 幂等拉起离线成员）。仅当 `spec.dispatch_mode == "scheduled"`（静态配置）时 `CoordinationKernel.setup(role=LEADER)` 构造（休眠），团队物化（build_team 成功 / start 读到已有 team 行）时激活；wake 路径由 kernel 组合为 "coordination dispatch → scheduler.on_event"，leader 自发事件经 `SCHEDULER_SCAN` inner 回声可见。详见 [`scheduling/AGENTS.md`](scheduling/AGENTS.md) 与 `.agents/agent-docs/specs/agent_teams/S_22_scheduling-runtime.md`。
 
 ## 跨文件协作的几个关键点
 
 - **同一 team 的 leader 和 teammate 不在同一进程**：`infra.py` 的 "per-process" 语义就来自这里。要让两边都看到的状态走 db / messager，不要走对象引用。
 - **`payload.py` 的 wire 格式是公共契约**：`build_spawn_payload(...)` 的所有输出键 = `TeamAgent.from_spawn_payload` 的所有读取键，改一边必须改另一边。
 - **stream_controller 不直接驱动 DeepAgent**：它管理 stream queue 和 round 状态；驱动 DeepAgent 的入口是 `team_agent.py` 的 `start_agent / steer / follow_up / deliver_input`。
-- **初始消息只首启注入，空则不 send**（见 [`docs/features/F_33`](../docs/features/F_33_spawn-first-start-message-injection.md)）：spawn 不再 fabricate `"Join the team and wait..."` 占位符；`TeamAgent.invoke` / `stream` 仅在 `raw_query` 非空时 `enqueue_user_input`（首轮 send），空 query（首启无 prompt / restart / recover / resume）只起来订阅、靠 `enqueue_initial_mailbox_poll` 的 `POLL_MAILBOX` 投递真实消息——`MessageHandler` 收件箱为空即不 send。`restart_teammate` 因此恒传 `initial_message=None`，不 replay DB 里的 `teammate.prompt`。例外：external CLI 成员（`external_cli_spawn`）仍自带 join prompt，未纳入此模型。
+- **初始消息只首启注入，空则不 send**（见 [`.agents/agent-docs/features/agent_teams/F_33`](../../../.agents/agent-docs/features/agent_teams/F_33_spawn-first-start-message-injection.md)）：spawn 不再 fabricate `"Join the team and wait..."` 占位符；`TeamAgent.invoke` / `stream` 仅在 `raw_query` 非空时 `enqueue_user_input`（首轮 send），空 query（首启无 prompt / restart / recover / resume）只起来订阅、靠 `enqueue_initial_mailbox_poll` 的 `POLL_MAILBOX` 投递真实消息——`MessageHandler` 收件箱为空即不 send。`restart_teammate` 因此恒传 `initial_message=None`，不 replay DB 里的 `teammate.prompt`。例外：external CLI 成员（`external_cli_spawn`）仍自带 join prompt，未纳入此模型。
 - **stream chunk 跨成员 fan-out**：每个 `StreamController` 在 chunk 进 queue 之前用 `_tag_chunk` 把 chunk 升级为 `TeamOutputSchema`（带 `source_member` + `role`），再 fan-out 给注册在 `_chunk_observers` 上的回调。inprocess 模式下，`SpawnManager._wire_inprocess_chunk_forward` 会把每个 spawn 出来的 teammate `StreamController` 上挂一个 forward observer——把 chunk 转投到 leader 的 `stream_queue`，让 `Runner.run_agent_team_streaming` 对外流出全成员 chunk。observer 抛错自动 detach 不阻塞主流；teardown 时由 `cleanup_teammate` 反注册。subprocess 模式不挂 observer（不同进程不共享对象），扩展点已留好（messager-driven observer）。
 
 ## 跟其他子目录的边界

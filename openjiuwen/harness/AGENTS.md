@@ -6,8 +6,8 @@ session）之上，为编码场景提供**深度代理**：模型调用、工具
 
 本文件是本模块的**入口索引**。深入细节时跳转到：
 - `rails/AGENTS.md` — rail 三层基类、回调双命名空间路由、priority 梯队
-- `docs/AGENTS.md` — 设计归档结构与命名规约（specs / features / 方法论）
-- `docs/specs/S_*` — 各子系统的设计规约（跨子模块契约、协议、边界、不变量）
+- `.agents/skills/jw-dev/SKILL.md` — 开发文档与归档入口（路径相对仓库根）
+- `.agents/agent-docs/specs/harness/S_*` — 各子系统的设计规约（跨子模块契约、协议、边界、不变量）
 
 ## 公开入口（public API）
 
@@ -36,7 +36,7 @@ harness/
 ├── subagent_lifecycle.py  # 子代理生命周期（S_18）
 ├── image_modality_probe.py# 图像模态探测（多模态开关）
 ├── cli/                   # 命令行表面：agent/ prompts/ rails/ storage/ ui/ + __main__
-├── docs/                  # 设计归档：specs/ + features/ + spec-design-methodology.md
+├── docs/                  # 文档迁移入口；实际资产在仓库根 .agents/agent-docs/
 ├── goal/                  # 目标与评估：manager / evaluation / schema / store（S_11）
 ├── kv_cache/              # KV 缓存 + 日志 hooks（S_16）
 ├── lsp/                   # LSP 集成：core/ servers/ types.py（S_14）
@@ -124,23 +124,26 @@ harness/
 
 ## 设计文档归档与双向同步（仅本模块强制）
 
+文档路径均相对仓库根；归档细则见 `.agents/skills/jw-dev/references/harness-documentation.md`。
+新 feature 使用分钟时间命名，历史文件名保留；spec 沿用已有编号。
+
 前置铁律——**文档先是设计的输入，才是提交的产出**。动手改任何代码设计**之前**，先 `grep` +
-读相关的 `docs/specs/S_NN_*`（现有契约 / 不变量 / 边界）与 `docs/features/F_NN_*`（为什么长
+读相关的 `.agents/agent-docs/specs/harness/S_NN_*`（现有契约 / 不变量 / 边界）与 `.agents/agent-docs/features/harness/F_YYYYMMDD_HHMM_*`（为什么长
 这样、当初拒绝了哪些方案），拿它们校准方案；方案定了**当场**同步改掉对应 S / F。先码后档、
 拖到提交前才补文档是把流程做反了。
 
 三条强制约束，提交时必查：
 
 1. **每次特性更新必须归档 feature 文档，且特性代码、测试代码、文档拆成三个连续提交**：在
-   `docs/features/` 下新增 `F_NN_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。落地
+   `.agents/agent-docs/features/harness/` 下新增 `F_YYYYMMDD_HHMM_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。落地
    顺序固定为三个紧邻的提交——提交 1 特性代码（`feat(harness): ...` 或对应 type），提交 2 单测
-   （`test(harness): ...`），提交 3 文档（`docs(harness): ...`，含 `F_NN_*.md` 新增 +
+   （`test(harness): ...`），提交 3 文档（`docs(harness): ...`，含 `F_YYYYMMDD_HHMM_*.md` 新增 +
    `S_NN_*.md` 修订）。
 2. **所有模块设计规约变动必须更新 specs 文档**：模块契约、跨子模块的公共协议、不变量、公共
-   API 形态变化时同步修订 `docs/specs/S_NN_<slug>.md`；新规约 = 新 spec 文件（编号 = 目录内
+   API 形态变化时同步修订 `.agents/agent-docs/specs/harness/S_NN_<slug>.md`；新规约 = 新 spec 文件（编号 = 目录内
    现有最大号 + 1）。
 3. **双向同步：读到与代码不一致的描述必须当场修文档**。在本模块任何一份 `AGENTS.md` /
-   `docs/specs/S_*` / `docs/features/F_*` 里读到的接口名、枚举值、truth table 行数、文件路径、
+   `.agents/agent-docs/specs/harness/S_*` / `.agents/agent-docs/features/harness/F_*` 里读到的接口名、枚举值、truth table 行数、文件路径、
    不变量只要与当前代码不符，**不要**把过时表述当作新约束执行、也不要原样转述给用户；先
    `grep` 代码、以代码为准刷新文档，在同一次改动里落地。`AGENTS.md` 里每条点名了"X 个分支 /
    Y 路 dispatch / Z 方法"的句子都是契约的一部分。**更新目标是 `AGENTS.md`，不是 `CLAUDE.md`**。
@@ -150,10 +153,10 @@ harness/
 - spec 头部"最近一次修订日期"字段在每次修订时填当天日期（`YYYY-MM-DD`）；feature 文档用头部
   "日期"字段记录归档当天；**不要在元信息里写 commit hash**。
 - 子模块自身的本地约定放各 `<subdir>/AGENTS.md`（现在只有 `rails/` 有，新增时按需补）；跨子模块
-  的设计规约一律落 `docs/specs/`，不塞进单一子目录的 AGENTS.md。
+  的设计规约一律落 `.agents/agent-docs/specs/harness/`，不塞进单一子目录的 AGENTS.md。
 - **`CLAUDE.md` 是只读壳，不要编辑它**：`CLAUDE.md` 仅含 `@AGENTS.md` 一行，编辑它的修改不会
   保留在任何有效文档里。需要更新文档时，直接编辑 `AGENTS.md`。
-- 拿不准某次改动算 feature-grade（要 `F_NN_*.md`）还是普通修复（不必归档）时，先问用户。歧义
+- 拿不准某次改动算 feature-grade（要 `F_YYYYMMDD_HHMM_*.md`）还是普通修复（不必归档）时，先问用户。歧义
   情况默认**归档**。
 
 ## 提交约定
@@ -164,6 +167,6 @@ harness/
 footer 用 `Refs: #<issue>` 格式关联 issue。issue 号若无法从当前上下文明确，必须先询问用户，
 不要臆造或留空。
 
-涉及 `docs/features/F_*` / `docs/specs/S_*` 文档更新的特性改动，**特性代码、测试代码、文档拆
+涉及 `.agents/agent-docs/features/harness/F_*` / `.agents/agent-docs/specs/harness/S_*` 文档更新的特性改动，**特性代码、测试代码、文档拆
 成三个连续提交**（`feat(harness)` → `test(harness)` → `docs(harness)`），细则见上文「设计文档
 归档与双向同步」约束 #1。

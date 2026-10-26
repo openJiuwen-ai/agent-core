@@ -210,5 +210,5 @@ skill 的真实名字拼出可用的那条调用。
   `request_retry` / `request_force_finish`）都在 `openjiuwen/core/single_agent/rail/base.py`。
 - **team**：team rail 在 `openjiuwen/agent_teams/rails/`，经 `RailSpec` + `@harness_element`
   声明式装配，但走的是本包同一条注册路径，所以上面的路由约束、priority 语义、uninit 要求对
-  它们同样成立。其设计规约在 `openjiuwen/agent_teams/docs/specs/S_09_prompts-and-rails.md`。
+  它们同样成立。其设计规约在 `.agents/agent-docs/specs/agent_teams/S_09_prompts-and-rails.md`。
 - **工具**：rail 只负责注册/过滤/拦截，工具本身在 `openjiuwen/harness/tools/`。
