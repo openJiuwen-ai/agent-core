@@ -186,8 +186,22 @@ class ProgressiveToolRail(DeepAgentRail):
         self._tool_search_index_revision = None
         self._tool_search_registry = None
 
+    def _bind_tool_search_registry(self, agent: Any) -> None:
+        """Keep BM25 search bound to the registry the prompt catalog is read from.
+
+        The deferred directory shown to the model is collected from the live
+        agent's ability manager on every turn, while the search index was
+        captured at init/finalize time. Re-binding here prevents a rail that
+        outlives a registry swap from searching a different catalog than the
+        one rendered in the prompt.
+        """
+        ability_manager = getattr(agent, "ability_manager", None)
+        if ability_manager is not None:
+            self._tool_search_registry = ability_manager
+
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Cache the full registered tool inventory for discovery authorization."""
+        self._bind_tool_search_registry(ctx.agent)
         self._cached_all_tool_infos = await self._list_tool_infos(ctx.agent)
         self._ensure_initial_deferred_catalog(ctx)
 
@@ -207,6 +221,7 @@ class ProgressiveToolRail(DeepAgentRail):
 
         builder = self._get_prompt_builder(ctx)
         agent = getattr(ctx, "agent", None)
+        self._bind_tool_search_registry(agent)
         current_deferred_tools = self._collect_deferred_tool_descriptions(agent)
         initial_deferred_tools = self._ensure_initial_deferred_catalog(
             ctx,

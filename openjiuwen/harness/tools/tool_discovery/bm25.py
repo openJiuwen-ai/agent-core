@@ -12,12 +12,14 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+from collections import Counter
 from typing import Any, List, Sequence
 
 from pydantic import BaseModel
 
 from openjiuwen.core.context_engine.processor.forked.compressor.recall.bm25 import (
     BM25Index,
+    tokenize,
 )
 from openjiuwen.core.foundation.tool import ToolInfo
 
@@ -72,6 +74,21 @@ def _is_tool_name_boundary_char(value: str) -> bool:
     return bool(value) and value.isascii() and (value.isalnum() or value in "_.-")
 
 
+def _tool_name_family(name: str) -> str:
+    """Return the leading ASCII identifier component that groups a tool family.
+
+    Tool names conventionally start with a capability/domain component
+    (``heartbeat_create_job``, ``cron_list_jobs``, ``session_read``). Users and
+    models search for that family word ("heartbeat", "cron") rather than the
+    full identifier, so it needs its own ranking signal.
+    """
+    normalized = str(name or "").strip().casefold()
+    if not normalized:
+        return ""
+    family = normalized.split("_", 1)[0]
+    return family if family.isascii() and family.isalnum() else ""
+
+
 def _contains_exact_tool_name(query: str, tool_name: str) -> bool:
     """Check whether ``query`` contains ``tool_name`` as a complete identifier.
 
@@ -119,6 +136,16 @@ class BM25ToolIndex:
         self._documents = tuple(documents)
         self._index = index
         self._source_fingerprint = source_fingerprint or self.fingerprint(documents)
+        # Number of indexed tools per leading name component. A component
+        # shared by several tools is a family word ("heartbeat", "cron"); one
+        # used by a single tool is too generic to outrank description matches.
+        families = (
+            _tool_name_family(getattr(document, "name", ""))
+            for document in self._documents
+        )
+        self._name_family_counts: Counter[str] = Counter(
+            family for family in families if family
+        )
 
     @classmethod
     def build(
@@ -175,26 +202,37 @@ class BM25ToolIndex:
         if not query or not self._documents:
             return []
 
+        # Family words are only honored when several tools share the leading
+        # name component, so a single tool cannot hijack an ordinary query.
+        query_family_tokens = {
+            token
+            for token in tokenize(query)
+            if self._name_family_counts.get(token, 0) >= 2
+        }
+
         scored = []
         for index, score in enumerate(self._index.scores(query)):
             document = self._documents[index]
-            exact_name_match = _contains_exact_tool_name(
-                query,
-                str(getattr(document, "name", "") or ""),
+            name = str(getattr(document, "name", "") or "")
+            exact_name_match = _contains_exact_tool_name(query, name)
+            family_match = (
+                bool(query_family_tokens)
+                and _tool_name_family(name) in query_family_tokens
             )
-            if score <= 0.0 and not exact_name_match:
+            if score <= 0.0 and not exact_name_match and not family_match:
                 continue
-            scored.append((exact_name_match, score, index, document))
+            scored.append((exact_name_match, family_match, score, index, document))
 
         scored.sort(
             key=lambda item: (
                 not item[0],
-                -item[1],
-                str(getattr(item[3], "name", "") or ""),
-                item[2],
+                not item[1],
+                -item[2],
+                str(getattr(item[4], "name", "") or ""),
+                item[3],
             )
         )
-        return [document for _, _, _, document in scored[:limit]]
+        return [document for _, _, _, _, document in scored[:limit]]
 
 
 __all__ = ["BM25ToolIndex"]
