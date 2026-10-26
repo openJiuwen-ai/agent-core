@@ -20,6 +20,8 @@ class UsageMetadata(BaseModel):
     prompt: str = ""
     task_id: str = ""
     model_name: str = ""
+    #: 本次调用总耗时，单位**秒**（与 `ttft_seconds` 同口径）。同一 `llm_usage` 帧里的
+    #: `inter_token_latency_ms` / `reasoning_duration_ms` 是毫秒，两者不可混用。
     total_latency: float = 0.
     first_token_time: str = ""
     request_start_time: str = ""
