@@ -43,6 +43,10 @@ class UsageMetadata(BaseModel):
     # keys to stamp span attributes (#1833).
     inter_token_latency_ms: Optional[float] = None
     reasoning_duration_ms: Optional[float] = None
+    #: 首 chunk 的**相对延迟**（秒）。与 `first_token_time` 是两种东西：后者是「首 token
+    #: 时刻」（与 `request_start_time` 同族的时刻字符串），这里是「等了多久」。分开之后
+    #: OTel 侧与按字段名理解的下游不会对同一字段给出两种解释。
+    ttft_seconds: Optional[float] = None
 
 
 class BaseMessage(BaseModel):

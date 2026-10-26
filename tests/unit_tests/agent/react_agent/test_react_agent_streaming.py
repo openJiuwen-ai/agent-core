@@ -247,12 +247,19 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
 
         usage = result.usage_metadata
         self.assertIsNotNone(usage)
-        # first_token_time is seconds (gen_ai.response.time_to_first_chunk
-        # semconv); the fake stream answers in milliseconds, so a seconds
-        # value must stay well under 1.0 — a raw ms write (e.g. "2.5" for
-        # 2.5ms) fails this magnitude lock.
-        self.assertGreaterEqual(float(usage.first_token_time), 0.0)
-        self.assertLess(float(usage.first_token_time), 1.0)
+        # ttft_seconds is the explicit "delay" field (gen_ai.response.time_to_first_chunk
+        # semconv unit is seconds); the fake stream answers in milliseconds, so a
+        # seconds value must stay well under 1.0 — a raw ms write fails this
+        # magnitude lock. first_token_time keeps its "first token instant"
+        # contract and must NOT be reused as a delay carrier.
+        self.assertIsNotNone(usage.ttft_seconds)
+        self.assertGreaterEqual(float(usage.ttft_seconds), 0.0)
+        self.assertLess(float(usage.ttft_seconds), 1.0)
+        self.assertEqual(usage.first_token_time, "")
+        # total latency is backfilled too (seconds), so the span never sees
+        # "TTFT present, total latency 0".
+        self.assertGreater(float(usage.total_latency), 0.0)
+        self.assertLess(float(usage.total_latency), 1.0)
         self.assertIsNotNone(usage.inter_token_latency_ms)
         self.assertGreaterEqual(usage.inter_token_latency_ms, 0.0)
         self.assertLess(usage.inter_token_latency_ms, 1000.0)
@@ -261,7 +268,7 @@ class TestReActAgentStreaming(unittest.IsolatedAsyncioTestCase):
         # equality proves the backfill happened before after_model_call.
         self.assertEqual(len(rail.captured_usages), 1)
         self.assertEqual(
-            rail.captured_usages[0]["first_token_time"], usage.first_token_time
+            rail.captured_usages[0]["ttft_seconds"], usage.ttft_seconds
         )
         self.assertEqual(
             rail.captured_usages[0]["inter_token_latency_ms"],

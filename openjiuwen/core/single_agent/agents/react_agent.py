@@ -1972,14 +1972,21 @@ class ReActAgent(BaseAgent):
             # Backfill latency onto usage_metadata so tracer consumers
             # (OtelRail after_model_call -> on_llm_end) can stamp TTFT /
             # inter-token latency on the LLM span (#1833); perf_metrics alone
-            # only reaches the UI stream channel below. first_token_time feeds
-            # gen_ai.response.time_to_first_chunk (GenAI semconv, seconds) so
-            # the ms measurement must be converted; inter_token_latency_ms
-            # targets a custom *_ms attribute and stays in milliseconds.
+            # only reaches the UI stream channel below.
+            #
+            # **写语义明确的字段，不再复用 `first_token_time`**：该字段在既有契约里是
+            # 「首 token 时刻」（与 `request_start_time` 同族的时间戳字符串），而这里要说
+            # 的是「等了多久」。此前把 `ttft_ms/1000` 写进去，OTel 侧当秒数解析（自洽），
+            # 任何按字段名理解的下游（studio 侧、其他 provider 回填）会把 `0.35` 当成
+            # 绝对时间戳。`ttft_seconds` 承载相对延迟（GenAI semconv 的
+            # `gen_ai.response.time_to_first_chunk` 单位是秒），`first_token_time` 保持原义。
             if "ttft_ms" in perf_metrics:
-                ai_message.usage_metadata.first_token_time = str(
-                    round(perf_metrics["ttft_ms"] / 1000, 6)
+                ai_message.usage_metadata.ttft_seconds = round(
+                    perf_metrics["ttft_ms"] / 1000, 6
                 )
+            # 总时延一并回填（单位秒，与 ttft_seconds 对齐）：只回填 TTFT 会让 span 出现
+            # 「TTFT 有、total latency 为 0」的半缺失状态。
+            ai_message.usage_metadata.total_latency = round(call_latency / 1000, 6)
             if "tpot_ms" in perf_metrics:
                 ai_message.usage_metadata.inter_token_latency_ms = perf_metrics["tpot_ms"]
 
