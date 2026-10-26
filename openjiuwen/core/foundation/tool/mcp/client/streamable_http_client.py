@@ -123,7 +123,7 @@ class StreamableHttpClient(McpClient):
                 cancelled_group, _ = e.split(asyncio.CancelledError)
                 keyboard_group, _ = e.split(KeyboardInterrupt)
                 if cancelled_group is not None or keyboard_group is not None:
-                    raise
+                    raise e
             logger.error(f"Streamable-http connection failed to {self._server_path}: {e}")
             real_err: BaseException = e
             if isinstance(e, BaseExceptionGroup):
