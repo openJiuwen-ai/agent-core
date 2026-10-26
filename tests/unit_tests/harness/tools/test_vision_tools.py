@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.schema.config import VisionModelConfig
@@ -13,6 +16,48 @@ from openjiuwen.harness.tools import (
     VisualQuestionAnsweringTool,
     create_vision_tools,
 )
+from openjiuwen.harness.tools.multimodal.vision import _invoke_chat_completion
+
+
+def test_vision_request_ignores_system_proxy(monkeypatch):
+    captured = {}
+
+    class FakeHttpClient:
+        def __init__(self, **kwargs):
+            captured["http_options"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+    def fake_openai(**kwargs):
+        captured["openai_options"] = kwargs
+        return SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(
+                    create=lambda **_kwargs: SimpleNamespace(
+                        choices=[SimpleNamespace(message=SimpleNamespace(content="visible text"))]
+                    )
+                )
+            )
+        )
+
+    monkeypatch.setattr("httpx.Client", FakeHttpClient)
+    monkeypatch.setattr("openjiuwen.harness.tools.multimodal.vision.OpenAI", fake_openai)
+    config = VisionModelConfig(api_key="test-key", base_url="https://example.com/v1", model="mock-model")
+
+    result = _invoke_chat_completion(
+        config,
+        "Read this",
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}},
+    )
+
+    assert result == "visible text"
+    assert captured["http_options"]["trust_env"] is False
+    assert isinstance(captured["http_options"]["timeout"], httpx.Timeout)
+    assert isinstance(captured["openai_options"]["http_client"], FakeHttpClient)
 
 
 def _write_test_png(path: Path) -> None:
@@ -201,9 +246,7 @@ def test_image_ocr_tool_returns_clear_error_without_vision_config():
         await Runner.start()
         try:
             tool = ImageOCRTool()
-            return await tool.invoke(
-                {"image_path_or_url": "https://example.com/image.png"}
-            )
+            return await tool.invoke({"image_path_or_url": "https://example.com/image.png"})
         finally:
             await Runner.stop()
 
