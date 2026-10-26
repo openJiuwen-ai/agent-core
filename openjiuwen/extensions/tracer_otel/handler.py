@@ -681,8 +681,36 @@ class OtelAgentHandler(TraceExtAgentHandler):
     # Plugin (Tool) events — SpanKind.INTERNAL
     # ================================================================
 
+    def _is_duplicate_tool_event(self, span: TraceAgentSpan, instance_info: dict) -> bool:
+        """Whether this on_plugin_start duplicates an open OtelRail tool span.
+
+        Bug #2046: with OtelRail registered, one physical tool call emits TWO
+        on_plugin_start events — the rail's (instance_info type="plugin",
+        carries tool_call_id) wraps the tool execution, and the legacy
+        session-tracer decorator on ``tool.invoke`` (type="tool", no
+        tool_call_id) fires strictly nested inside it (rail-before →
+        decorator-start → decorator-end → rail-after). The decorator's
+        event is the duplicate: its rail twin span is still open at that
+        point, so skipping it leaves exactly one execute_tool span per
+        call. Same-name parallel calls stay correct — each call keeps its
+        own rail span — and the decorator's matching end/error events are
+        natural no-ops because this start never registered a span.
+        """
+        # Decorator fingerprint; rail events carry type="plugin" plus the id.
+        if instance_info.get("type") != "tool" or instance_info.get("tool_call_id"):
+            return False
+        tool_name = str(instance_info.get("class_name") or "")
+        if not tool_name:
+            return False
+        return self._span_manager.has_open_tool_span(
+            tool_name,
+            str(getattr(span, "trace_id", "") or ""),
+        )
+
     async def on_plugin_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
+            if self._is_duplicate_tool_event(span, instance_info):
+                return
             extra_attrs: dict[str, Any] = {
                 GEN_AI_OPERATION_NAME: _OPERATION_NAME_EXECUTE_TOOL,
                 GEN_AI_TOOL_NAME: instance_info.get("class_name", ""),

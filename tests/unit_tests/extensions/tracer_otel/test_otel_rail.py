@@ -246,10 +246,11 @@ class TestOtelRailToolCallbacks:
         session = _StubSession(tracer)
         agent = _StubAgent(card=_StubCard(name="HelperAgent"))
         rail = OtelRail()
-        tool_call = ToolCall(id="call-9", type="function", name="echo", arguments="{}")
-        inputs = ToolCallInputs(tool_call=tool_call, tool_name="echo", tool_args={})
+        tool_call = ToolCall(id="call-9", type="function", name="echo", arguments='{"a": 1}')
+        inputs = ToolCallInputs(tool_call=tool_call, tool_name="echo", tool_args='{"a": 1}')
 
-        await rail.before_tool_call(_make_ctx(agent, session, inputs))
+        ctx = _make_ctx(agent, session, inputs)
+        await rail.before_tool_call(ctx)
 
         assert _events(tracer) == ["on_plugin_start"]
         _, _, kwargs = tracer.calls[0]
@@ -257,8 +258,9 @@ class TestOtelRailToolCallbacks:
         assert kwargs["instance_info"]["tool_type"] == "function"
         assert kwargs["instance_info"]["agent_name"] == "HelperAgent"
         assert kwargs["instance_info"]["tool_call_id"] == "call-9"
-        assert kwargs["inputs"] == {"id": "call-9", "name": "echo", "type": "function"}
-        assert len(rail._tool_spans) == 1
+        # Identity keys plus the decorator-contract parsed-arguments payload.
+        assert kwargs["inputs"] == {"id": "call-9", "name": "echo", "type": "function", "inputs": {"a": 1}}
+        assert ctx.extra[OtelRail._TOOL_SPAN_EXTRA_KEY] is not None
 
     async def test_before_tool_call_defaults_when_no_tool_call_object(self):
         tracer = _StubTracer()
@@ -281,14 +283,15 @@ class TestOtelRailToolCallbacks:
         rail = OtelRail()
         inputs = ToolCallInputs(tool_name="echo")
 
-        await rail.before_tool_call(_make_ctx(agent, session, inputs))
+        ctx = _make_ctx(agent, session, inputs)
+        await rail.before_tool_call(ctx)
         inputs.tool_result = "ok"
-        await rail.after_tool_call(_make_ctx(agent, session, inputs))
+        await rail.after_tool_call(ctx)
 
         assert _events(tracer) == ["on_plugin_start", "on_plugin_end"]
         _, _, kwargs = tracer.calls[1]
-        assert kwargs["outputs"] == "ok"
-        assert rail._tool_spans == []
+        assert kwargs["outputs"] == {"outputs": "ok"}
+        assert OtelRail._TOOL_SPAN_EXTRA_KEY not in ctx.extra
 
     async def test_on_tool_exception_forwards_error(self):
         tracer = _StubTracer()
@@ -297,14 +300,15 @@ class TestOtelRailToolCallbacks:
         rail = OtelRail()
         inputs = ToolCallInputs(tool_name="echo")
 
-        await rail.before_tool_call(_make_ctx(agent, session, inputs))
-        error = RuntimeError("tool boom")
-        await rail.on_tool_exception(_make_ctx(agent, session, inputs, exception=error))
+        ctx = _make_ctx(agent, session, inputs)
+        await rail.before_tool_call(ctx)
+        ctx.exception = error = RuntimeError("tool boom")
+        await rail.on_tool_exception(ctx)
 
         assert _events(tracer) == ["on_plugin_start", "on_plugin_error"]
         _, _, kwargs = tracer.calls[1]
         assert kwargs["error"] is error
-        assert rail._tool_spans == []
+        assert OtelRail._TOOL_SPAN_EXTRA_KEY not in ctx.extra
 
     async def test_after_tool_call_without_pending_span_is_noop(self):
         tracer = _StubTracer()
@@ -325,10 +329,11 @@ class TestOtelRailNoSession:
         await rail.before_invoke(_make_ctx(agent, None, inputs={}))
         await rail.after_invoke(_make_ctx(agent, None, inputs={}))
         await rail.before_model_call(_make_ctx(agent, None, ModelCallInputs()))
-        await rail.before_tool_call(_make_ctx(agent, None, ToolCallInputs()))
+        tool_ctx = _make_ctx(agent, None, ToolCallInputs())
+        await rail.before_tool_call(tool_ctx)
         # No exception, no span leaks
         assert rail._llm_spans == []
-        assert rail._tool_spans == []
+        assert tool_ctx.extra == {}
 
 
 class _ExplodingTracerSession(_StubSession):
@@ -369,14 +374,14 @@ class TestOtelRailCallbackHardening:
         await rail.on_model_exception(model_ctx)
 
         await rail.before_tool_call(tool_ctx)
-        rail._tool_spans.append(object())
+        tool_ctx.extra[OtelRail._TOOL_SPAN_EXTRA_KEY] = object()
         await rail.after_tool_call(tool_ctx)
-        rail._tool_spans.append(object())
+        tool_ctx.extra[OtelRail._TOOL_SPAN_EXTRA_KEY] = object()
         await rail.on_tool_exception(tool_ctx)
 
         # Reaching here means no callback let the failure escape.
         assert rail._llm_spans == []
-        assert rail._tool_spans == []
+        assert OtelRail._TOOL_SPAN_EXTRA_KEY not in tool_ctx.extra
 
     async def test_before_invoke_swallows_session_id_failure(self):
         """A raising get_session_id inside _build_common_info must not leak:
@@ -449,12 +454,14 @@ class TestOtelRailEndToEnd:
             ctx = _make_ctx(agent, session, ModelCallInputs(response=response))
             await rail.after_model_call(ctx)
 
-            # Tool child span
-            tool_call = ToolCall(id="call-1", type="function", name="echo", arguments="{}")
-            tool_inputs = ToolCallInputs(tool_call=tool_call, tool_name="echo", tool_args="{}")
-            await rail.before_tool_call(_make_ctx(agent, session, tool_inputs))
+            # Tool child span — one ctx across before/after, mirroring the
+            # real @rail dispatch (AbilityManager reuses the per-call ctx).
+            tool_call = ToolCall(id="call-1", type="function", name="echo", arguments='{"k": "v"}')
+            tool_inputs = ToolCallInputs(tool_call=tool_call, tool_name="echo", tool_args='{"k": "v"}')
+            tool_ctx = _make_ctx(agent, session, tool_inputs)
+            await rail.before_tool_call(tool_ctx)
             tool_inputs.tool_result = "ok"
-            await rail.after_tool_call(_make_ctx(agent, session, tool_inputs))
+            await rail.after_tool_call(tool_ctx)
 
             # Agent root span end
             end_ctx = _make_ctx(agent, session, InvokeInputs(query="hi"))

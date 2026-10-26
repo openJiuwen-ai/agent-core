@@ -16,6 +16,12 @@ from typing import Any
 
 from opentelemetry import trace
 
+from openjiuwen.extensions.tracer_otel.semconv import (
+    GEN_AI_TOOL_CALL_ID,
+    GEN_AI_TOOL_NAME,
+    OJ_TRACE_ID,
+)
+
 
 @dataclass
 class OtelSpanState:
@@ -60,6 +66,30 @@ class OtelAgentSpanManager:
 
     def get(self, invoke_id: str) -> OtelSpanState | None:
         return self._spans.get(invoke_id)
+
+    def has_open_tool_span(self, tool_name: str, trace_id: str = "") -> bool:
+        """Whether an OtelRail-emitted tool span is still open.
+
+        Rail-emitted tool spans carry ``gen_ai.tool.call.id`` (only OtelRail
+        forwards the tool-call id); spans created from the legacy decorator
+        event never do. Matching is by ``gen_ai.tool.name`` attribute, not
+        span name — display naming differs across release branches while
+        the attributes do not. Scoping by trace id keeps concurrent agents
+        in different traces from matching each other. Used to drop the
+        decorator's duplicate tool event for the same physical call
+        (bug #2046). ``getattr`` defensively: non-recording spans expose
+        neither ``name`` nor ``attributes``.
+        """
+        for state in list(self._spans.values()):
+            attributes = getattr(state.span, "attributes", None) or {}
+            if not attributes.get(GEN_AI_TOOL_CALL_ID):
+                continue
+            if str(attributes.get(GEN_AI_TOOL_NAME, "")) != tool_name:
+                continue
+            if trace_id and str(attributes.get(OJ_TRACE_ID, "")) != trace_id:
+                continue
+            return True
+        return False
 
 
 class OtelWorkflowSpanManager:
