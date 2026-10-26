@@ -20,6 +20,7 @@ import json
 import re
 import uuid
 from contextlib import aclosing
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -165,13 +166,13 @@ class EvidenceRun:
                                  for label, data in shots[-SHOWN_IMAGES:]]
         return out
 
-    def read_evidence(self, id, pattern=None, start=1, count=80):  # noqa: A002 - the tool's own argument name
-        return self.read_saved(id, pattern, start, count)   # reading saved results is normal work, never idle
+    def read_evidence(self, evidence_id, pattern=None, start=1, count=80):
+        return self.read_saved(evidence_id, pattern, start, count)   # reading saved results is normal work, never idle
 
-    def read_saved(self, id, pattern=None, start=1, count=80):  # noqa: A002
-        path = self.folder / f"{id}.txt"
-        if not re.fullmatch(r"c\d+", str(id)) or not path.is_file():
-            return {"action_error": f"no saved result {id!r}; use an id returned by run_checks"}
+    def read_saved(self, evidence_id, pattern=None, start=1, count=80):
+        path = self.folder / f"{evidence_id}.txt"
+        if not re.fullmatch(r"c\d+", str(evidence_id)) or not path.is_file():
+            return {"action_error": f"no saved result {evidence_id!r}; use an id returned by run_checks"}
         lines = path.read_text(encoding="utf-8").splitlines()
         try:
             if pattern:
@@ -182,7 +183,7 @@ class EvidenceRun:
                 body = [f"{i}: {line}" for i, line in enumerate(lines[start - 1:start - 1 + count], start)]
         except (re.error, TypeError, ValueError) as error:
             return {"action_error": f"bad pattern or line numbers: {error}"}
-        return {"id": id, "lines": len(lines), "text": clip("\n".join(body) or "(no line matches)", 6000)}
+        return {"id": evidence_id, "lines": len(lines), "text": clip("\n".join(body) or "(no line matches)", 6000)}
 
     def evidence_for(self, cid):
         rows = sorted((r for r in self.results if cid in r["criteria"]), key=lambda r: r["facts"]["check"])
@@ -242,6 +243,11 @@ def evidence_tools(run):
         async def stream(self, inputs, **kwargs):
             yield await self.invoke(inputs, **kwargs)
 
+    def read_saved_result(**inputs):
+        """The tool's argument is called "id" (the model sees that name); the method calls it evidence_id."""
+        options = {key: value for key, value in inputs.items() if key != "id"}
+        return run.read_evidence(inputs.get("id"), **options)
+
     tools = [
         EvidenceTool("run_checks",
                      "Run several checks at once, in parallel. Put every check that does not depend on another one's "
@@ -256,7 +262,7 @@ def evidence_tools(run):
         EvidenceTool("read_evidence",
                      "Read a saved check result in part: lines from `start`, or the lines matching `pattern`.",
                      {"id": {"type": "string"}, "pattern": {"type": "string"}, "start": {"type": "integer"},
-                      "count": {"type": "integer"}}, ["id"], run.read_evidence),
+                      "count": {"type": "integer"}}, ["id"], read_saved_result),
     ]
 
     class EvidenceRail(AgentRail):
@@ -307,9 +313,20 @@ def build_agent(route, workspace, rounds):
     return spec.build(), run_id
 
 
-async def gather(criteria, ctx, route, log, rounds=ROUNDS, seconds=SECONDS):
-    """{criterion id: (evidence, images)} gathered by one DeepAgent for all criteria."""
+@dataclass(frozen=True)
+class Limits:
+    """How far the evidence agent may go: model turns, and seconds for the whole evidence step."""
+
+    rounds: int = ROUNDS
+    seconds: float = float(SECONDS)
+
+
+async def gather(criteria, ctx, route, log, limits=None):
+    """{criterion id: (evidence, images)} gathered by one DeepAgent for all criteria, within `limits`."""
     from openjiuwen.core.session.agent import create_agent_session
+
+    limits = limits or Limits()
+    rounds, seconds = limits.rounds, limits.seconds
 
     with TemporaryDirectory(prefix="reward_evidence_") as tmp:
         folder = Path(tmp) / "evidence"

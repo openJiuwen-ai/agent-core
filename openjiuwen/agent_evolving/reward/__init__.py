@@ -11,18 +11,20 @@ two packages do not import each other.
 
 Use from code::
 
-    from openjiuwen.agent_evolving.reward import load_config, reward, render
+    from openjiuwen.agent_evolving.reward import RewardOptions, load_config, reward, render
 
     config = load_config()                                   # or a dict like config.DEFAULT_CONFIG
-    result = asyncio.run(reward(task, ["index.html"], config, txt_response=reply, user_note=note))
+    options = RewardOptions(txt_response=reply, user_note=note)
+    result = asyncio.run(reward(task, ["index.html"], config, options))
     print(render(result))
 
 or from the command line: ``python -m openjiuwen.agent_evolving.reward --help``.
 """
 
 from .config import DEFAULT_CONFIG, load_config
+from .options import RewardOptions
 from .pipeline import archive_rubric, reward, text_reward, write_criteria
 from .result import SCHEMA_VERSION, render
 
-__all__ = ["DEFAULT_CONFIG", "SCHEMA_VERSION", "archive_rubric", "load_config", "reward", "text_reward",
-           "write_criteria", "render"]
+__all__ = ["DEFAULT_CONFIG", "SCHEMA_VERSION", "RewardOptions", "archive_rubric", "load_config", "reward",
+           "text_reward", "write_criteria", "render"]

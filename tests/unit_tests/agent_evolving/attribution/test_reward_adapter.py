@@ -157,8 +157,8 @@ def _keyword(signals: list[DiagnosticSignal]) -> Any:
 async def test_reward_diagnosis_keeps_failed_tool_calls(monkeypatch: Any, tmp_path: Any) -> None:
     seen: dict[str, Any] = {}
 
-    async def fake_reward(task: str, artifacts: list[str], config: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
-        seen.update(task=task, artifacts=artifacts, config=config, **kwargs)
+    async def fake_reward(task: str, artifacts: list[str], config: dict[str, Any], options: Any) -> dict[str, Any]:
+        seen.update(task=task, artifacts=artifacts, config=config, options=options)
         return _fast_result()
 
     from openjiuwen.agent_evolving.reward import pipeline
@@ -203,7 +203,7 @@ async def test_reward_diagnosis_keeps_failed_tool_calls(monkeypatch: Any, tmp_pa
         "帮我安排周六：外婆 5 点以后有空"
     )
     assert seen["artifacts"] == [str(tmp_path / "schedule.md")]  # a missing file is left out
-    assert seen["txt_response"] == "最终答复" and seen["user_note"] == "外婆的时间要核对"
+    assert seen["options"].txt_response == "最终答复" and seen["options"].user_note == "外婆的时间要核对"
     assert result.signal_mode == "reward" and result.reward_overall.total_score == 72
     # tiers follow each claim's status, and each score sits in its tier's band (>= 90 / >= 75 / else)
     assert [s.tier for s in result.signals] == ["weak", "fair", "fair", "perfect", "uncertain", "uncertain"]
@@ -221,13 +221,13 @@ async def test_progress_streams_what_reward_does_now(monkeypatch: Any, tmp_path:
 
     from openjiuwen.agent_evolving.reward import pipeline, progress
 
-    async def fake_reward(task: str, artifacts: list[str], config: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+    async def fake_reward(task: str, artifacts: list[str], config: dict[str, Any], options: Any) -> dict[str, Any]:
         steps = progress.current()
         steps.stage("criteria")
-        kwargs["log"]("3 criteria: plan, list, message; tools: ['read', 'python']")
+        options.log("3 criteria: plan, list, message; tools: ['read', 'python']")
         steps.stage("evidence", total=3)
-        kwargs["log"]("evidence c1 (python) for plan")
-        kwargs["log"]("evidence c2 (read) for list, message")
+        options.log("evidence c1 (python) for plan")
+        options.log("evidence c2 (read) for list, message")
         steps.stage("judging", total=3)
         for name in ("plan", "list", "message"):
             await steps.counted(asyncio.sleep(0), name)

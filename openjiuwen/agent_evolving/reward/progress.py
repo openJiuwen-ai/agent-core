@@ -1,5 +1,6 @@
 """A small JSON file the JiuwenSwarm web UI polls to draw a progress card; a no-op outside JiuwenSwarm."""
 
+import contextlib
 import contextvars
 import json
 import time
@@ -80,3 +81,13 @@ def use(progress):
     """Make `progress` the current run's progress file in this context and the tasks it starts."""
     _current.set(progress)
     return progress
+
+
+@contextlib.contextmanager
+def using(progress):
+    """Like use(), but only inside the `with` block: the previous progress file is restored on exit."""
+    token = _current.set(progress)
+    try:
+        yield progress
+    finally:
+        _current.reset(token)

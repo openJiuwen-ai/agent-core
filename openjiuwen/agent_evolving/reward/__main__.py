@@ -16,6 +16,8 @@ from pathlib import Path
 
 from . import pipeline, progress
 from .config import load_config
+from .console import line_writer
+from .options import RewardOptions
 from .result import render
 
 
@@ -53,21 +55,24 @@ def main(argv=None):
     config = {**load_config(args.config), **({"include_evidence": True} if args.evidence else {})}
     started = time.monotonic()
 
+    write_progress = line_writer(sys.stderr)
+
     def log(message):
-        print(f"[{time.monotonic() - started:5.0f}s] {message}", file=sys.stderr, flush=True)
+        write_progress(f"[{time.monotonic() - started:5.0f}s] {message}")
 
     run = progress.use(progress.Progress.for_session("general"))
     if args.rubric and args.new_rubric:
         archived = pipeline.archive_rubric(args.rubric)
         if archived:
             log(f"the kept rubric is moved aside as {archived.name}; writing a new one")
-    try:
-        result = asyncio.run(pipeline.reward(task, args.artifact, config, txt_response=text_of(args.txt_response),
-                                             user_note=text_of(args.user_note),
-                                             process_signal=text_of(args.process_signal),
-                                             rubric_path=args.rubric, log=log,
-                                             previous_result=json.loads(Path(args.previous_result).read_text(
-                                                 encoding="utf-8")) if args.previous_result else None))
+    try:   # reading the input files is part of the run: a bad file marks the progress card as failed too
+        previous_result = None
+        if args.previous_result:
+            previous_result = json.loads(Path(args.previous_result).read_text(encoding="utf-8"))
+        options = RewardOptions(txt_response=text_of(args.txt_response), user_note=text_of(args.user_note),
+                                process_signal=text_of(args.process_signal), rubric_path=args.rubric,
+                                previous_result=previous_result, log=log)
+        result = asyncio.run(pipeline.reward(task, args.artifact, config, options))
     except BaseException as error:
         run.fail(f"{type(error).__name__}: {error}")
         raise
@@ -75,7 +80,7 @@ def main(argv=None):
     result["meta"]["artifacts"] = [str(Path(p).resolve()) for p in args.artifact]
     out_path = Path(args.out).resolve()
     out_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(render(result, out_path))
+    line_writer(sys.stdout)(render(result, out_path))
 
 
 if __name__ == "__main__":

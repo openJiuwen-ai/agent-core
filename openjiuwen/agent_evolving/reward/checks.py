@@ -56,6 +56,14 @@ def cdn_file(url):
     return body
 
 
+def _field(action, name):
+    """A required field of an action; a missing one fails that action (reported as evidence), not the run."""
+    value = action.get(name)
+    if value is None:
+        raise ValueError(f"action {action.get('type')!r} needs '{name}'")
+    return value
+
+
 async def run_experiment(product, experiment):
     """Run one experiment on the Product, offline. By default the page is served from a local http origin;
     "via": "file" opens it from disk with file://, as a user who double-clicks it would. Raises if it cannot
@@ -111,11 +119,11 @@ async def run_experiment(product, experiment):
                     action = {**action, "ms": max(0, min(int(action.get("ms", 0)), MAX_WAIT_MS - waited))}
                     waited += action["ms"]
                 try:
-                    kind = action["type"]
+                    kind = _field(action, "type")
                     if kind == "click":
-                        await page.click(action["selector"], timeout=3000)
+                        await page.click(_field(action, "selector"), timeout=3000)
                     elif kind == "click_at":
-                        box = await page.locator(action["selector"]).first.bounding_box(timeout=3000)
+                        box = await page.locator(_field(action, "selector")).first.bounding_box(timeout=3000)
                         await page.mouse.click(box["x"] + box["width"] * action.get("x", 0.5),
                                                box["y"] + box["height"] * action.get("y", 0.5))
                     elif kind == "drag" or kind == "wheel":   # rotate or zoom a 3D view, drag a piece
@@ -140,13 +148,14 @@ async def run_experiment(product, experiment):
                             await page.mouse.up()
                         await page.wait_for_timeout(300)
                     elif kind == "key":
-                        await page.keyboard.down(action["key"])
+                        key = _field(action, "key")
+                        await page.keyboard.down(key)
                         await page.wait_for_timeout(int(action.get("hold_ms", 0)))
-                        await page.keyboard.up(action["key"])
+                        await page.keyboard.up(key)
                     elif kind == "wait":
-                        await page.wait_for_timeout(action["ms"])
+                        await page.wait_for_timeout(action.get("ms", 0))
                     elif kind == "probe":
-                        result["value"] = await page.evaluate(action["script"])
+                        result["value"] = await page.evaluate(_field(action, "script"))
                     elif kind == "closeup":
                         box = await page.locator(action.get("selector") or "body").first.bounding_box(timeout=3000)
                         x, y, w, h = (list(action.get("region") or [0, 0, 1, 1]) + [0, 0, 1, 1])[:4]
@@ -155,8 +164,9 @@ async def run_experiment(product, experiment):
                         data = await page.screenshot(type="jpeg", quality=90, clip=region, scale="device")
                         shots.append((f"close-up at action {index}", base64.b64encode(data).decode()))
                     elif kind == "scroll":   # to an element, or down by viewport heights (pages stacked in one page)
-                        if action.get("selector"):
-                            await page.locator(action["selector"]).first.scroll_into_view_if_needed(timeout=3000)
+                        target = action.get("selector")
+                        if target:
+                            await page.locator(target).first.scroll_into_view_if_needed(timeout=3000)
                         else:
                             await page.evaluate("n => window.scrollBy(0, window.innerHeight * n)",
                                                 float(action.get("pages", 1)))
