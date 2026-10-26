@@ -451,6 +451,8 @@ class SessionModelContext(ModelContext):
                                 force=False,
                                 context_max=context_max,
                                 overhead_tokens=self._measure_window_overhead(window),
+                                model_config=kwargs.get("model_config"),
+                                model_client_config=kwargs.get("model_client_config"),
                             )
                         )
                         started_emitted = True
@@ -475,6 +477,8 @@ class SessionModelContext(ModelContext):
                                 compact_summary=str(getattr(event, "compact_summary", "") or ""),
                                 compression_usage=getattr(event, "compression_usage", None),
                                 overhead_tokens=self._measure_window_overhead(window),
+                                model_config=kwargs.get("model_config"),
+                                model_client_config=kwargs.get("model_client_config"),
                             )
                         )
                 except asyncio.CancelledError:
@@ -518,6 +522,8 @@ class SessionModelContext(ModelContext):
                                 model_context_window_tokens=self._model_context_window_tokens,
                             ),
                             overhead_tokens=self._measure_window_overhead(window),
+                            model_config=kwargs.get("model_config"),
+                            model_client_config=kwargs.get("model_client_config"),
                         )
                     )
                     logger.warning(
@@ -750,6 +756,8 @@ class SessionModelContext(ModelContext):
                             messages_to_modify=[],
                             force=force,
                             context_max=context_max,
+                            model_config=kwargs.get("model_config"),
+                            model_client_config=kwargs.get("model_client_config"),
                         )
                     )
                     started_emitted = True
@@ -779,6 +787,8 @@ class SessionModelContext(ModelContext):
                             context_max=context_max,
                             compact_summary=str(getattr(event, "compact_summary", "") or ""),
                             compression_usage=getattr(event, "compression_usage", None),
+                            model_config=kwargs.get("model_config"),
+                            model_client_config=kwargs.get("model_client_config"),
                         )
                     )
                     if event is not None:
@@ -822,6 +832,8 @@ class SessionModelContext(ModelContext):
                             fallback_context_window_tokens=self._context_window_tokens,
                             model_context_window_tokens=self._model_context_window_tokens,
                         ),
+                        model_config=kwargs.get("model_config"),
+                        model_client_config=kwargs.get("model_client_config"),
                     )
                 )
                 logger.warning(
@@ -889,6 +901,8 @@ class SessionModelContext(ModelContext):
                         messages_to_modify=[],
                         force=True,
                         context_max=context_max,
+                        model_config=kwargs.get("model_config"),
+                        model_client_config=kwargs.get("model_client_config"),
                     )
                 )
                 started_emitted = True
@@ -933,6 +947,8 @@ class SessionModelContext(ModelContext):
                         context_max=context_max,
                         compact_summary=str(getattr(event, "compact_summary", "") or ""),
                         compression_usage=getattr(event, "compression_usage", None),
+                        model_config=kwargs.get("model_config"),
+                        model_client_config=kwargs.get("model_client_config"),
                     )
                 )
                 if event is not None:
@@ -976,6 +992,8 @@ class SessionModelContext(ModelContext):
                             fallback_context_window_tokens=self._context_window_tokens,
                             model_context_window_tokens=self._model_context_window_tokens,
                         ),
+                        model_config=kwargs.get("model_config"),
+                        model_client_config=kwargs.get("model_client_config"),
                     )
                 )
                 logger.warning(

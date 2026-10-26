@@ -40,6 +40,9 @@ from openjiuwen.core.context_engine import (
     ContextEngineConfig,
     ModelContext
 )
+from openjiuwen.core.context_engine.processor.forked.compressor.support.compression_executor import (
+    is_strict_context_overflow,
+)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     Model,
@@ -52,6 +55,7 @@ from openjiuwen.core.foundation.kv_cache import (
     KVCacheAffinityConfig,
 )
 from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.single_agent.kv_cache.kv_cache_hooks import KVCacheRuntime
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
@@ -85,6 +89,10 @@ _IDENTITY_SECTION_PRIORITY = 10
 _SKILLS_SECTION_PRIORITY = 90
 _PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY = "_openjiuwen_prompt_attachment_commit_callbacks"
 _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
+# ctx.extra key guarding the once-per-invoke context-overflow recovery, so a
+# compaction that keeps failing cannot burn a recovery attempt on every ReAct
+# iteration of the same invoke.
+_OVERFLOW_RECOVERY_USED_KEY = "_openjiuwen_context_overflow_recovery_used"
 # Above this, the per-stage breakdown of invoke preparation is reported at INFO
 # so a slow start shows up without having to enable debug logging. Preparation
 # loads interruption state and builds the prompt, which is normal work worth a
@@ -294,6 +302,14 @@ class ReActAgentConfig(BaseModel):
     kv_cache_affinity_config: KVCacheAffinityConfig = Field(
         default_factory=KVCacheAffinityConfig,
         description="KV cache release and affinity configuration",
+    )
+    context_overflow_recovery: bool = Field(
+        default=True,
+        description=(
+            "Whether to attempt one force-compaction retry when the main model "
+            "call fails with a context-overflow error (compress-then-retry, "
+            "at most once per invoke)"
+        ),
     )
 
     context_processors: List[Tuple[str, BaseModel]] = Field(
@@ -953,6 +969,11 @@ class ReActAgent(BaseAgent):
 
         Uses llm.stream() when ctx.extra["_streaming"] is True,
         falls back to llm.invoke() otherwise.
+
+        The window resolution and the actual model call are delegated to
+        ``_model_call_with_overflow_recovery`` so both streaming and
+        non-streaming paths share the single-shot context-overflow
+        recovery (force-compaction + retry).
         """
         # --- Finalize system message and context window (post-rails) ---
         final_system = [SystemMessage(content=self.prompt_builder.build())]
@@ -982,6 +1003,61 @@ class ReActAgent(BaseAgent):
                 )
             ]
 
+        # HITL 续跑轮强制流式：模型调用逐 token 写 session（llm_reasoning/llm_output），
+        # 前端才能实时看到思考/正文；不满足则继续原 invoke 语义。
+        if ctx.extra.get("_resumed_from_hitl") and not ctx.extra.get("_streaming"):
+            ctx.extra["_streaming"] = True
+
+        return await self._model_call_with_overflow_recovery(
+            ctx=ctx,
+            llm=llm,
+            kv_runtime=kv_runtime,
+            context_window_kwargs=context_window_kwargs,
+            overflow_recovery_used=False,
+        )
+
+    async def _model_call_with_overflow_recovery(
+            self,
+            *,
+            ctx: AgentCallbackContext,
+            llm: Model,
+            kv_runtime: KVCacheRuntime,
+            context_window_kwargs: dict,
+            overflow_recovery_used: bool,
+    ) -> AssistantMessage:
+        """Run one main-model-call attempt with single-shot overflow recovery.
+
+        Every attempt (the initial call and the recovery retry alike) resolves
+        the context window from scratch, so a retry automatically picks up the
+        messages left behind by the forced compaction, and re-runs the KV-cache
+        window-diff handling for the changed window.
+
+        When the main call fails with a context-overflow error and recovery has
+        not been used yet, ``_recover_context_overflow`` force-compacts the
+        context once (manual-compaction protocol, dedicated ``auto_compression``
+        model pair). Only a compaction that actually changed the context leads
+        to exactly one retry; any other outcome propagates the original error
+        unchanged.
+
+        Args:
+            ctx: Shared AgentCallbackContext for this invoke.
+            llm: Model instance used for the main call.
+            kv_runtime: Resolved KV-cache runtime for this call.
+            context_window_kwargs: Keyword arguments for
+                ``ModelContext.get_context_window``.
+            overflow_recovery_used: Whether the overflow-recovery retry was
+                already consumed for this main call.
+
+        Returns:
+            AssistantMessage from the LLM.
+        """
+        session = ctx.session
+        session_id, parent_session_id = self._kv_cache_model_call_hook.resolve_lineage(
+            kv_runtime,
+            session,
+            ctx.context.session_id(),
+        )
+
         context_window = await ctx.context.get_context_window(
             **context_window_kwargs
         )
@@ -993,14 +1069,6 @@ class ReActAgent(BaseAgent):
 
         log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
         # --- End context window finalization ---
-
-        session = ctx.session
-        session_id, parent_session_id = self._kv_cache_model_call_hook.resolve_lineage(
-            kv_runtime,
-            session,
-            ctx.context.session_id(),
-        )
-        image_input_present = self._messages_contain_image_input(ctx.inputs.messages)
 
         await self._kv_cache_model_call_hook.handle_context_window_change(
             runtime=kv_runtime,
@@ -1026,10 +1094,8 @@ class ReActAgent(BaseAgent):
             extra_kwargs["logprobs"] = True
             extra_kwargs["top_logprobs"] = self._config.llm_top_logprobs
 
-        # HITL 续跑轮强制流式：模型调用逐 token 写 session（llm_reasoning/llm_output），
-        # 前端才能实时看到思考/正文；不满足则继续原 invoke 语义。
-        if ctx.extra.get("_resumed_from_hitl") and not ctx.extra.get("_streaming"):
-            ctx.extra["_streaming"] = True
+        image_input_present = self._messages_contain_image_input(ctx.inputs.messages)
+
         if not ctx.extra.get("_streaming"):
             try:
                 ai_message = await llm.invoke(
@@ -1041,6 +1107,14 @@ class ReActAgent(BaseAgent):
             except Exception as exc:
                 if image_input_present and self._is_image_input_unsupported_error(exc):
                     ai_message = self._build_image_input_unsupported_message()
+                elif not overflow_recovery_used and await self._recover_context_overflow(ctx, exc):
+                    return await self._model_call_with_overflow_recovery(
+                        ctx=ctx,
+                        llm=llm,
+                        kv_runtime=kv_runtime,
+                        context_window_kwargs=context_window_kwargs,
+                        overflow_recovery_used=True,
+                    )
                 else:
                     raise
             if _is_dead_model_response(ai_message):
@@ -1108,6 +1182,21 @@ class ReActAgent(BaseAgent):
                     payload={"content": ai_message.content, "result_type": "answer"},
                 ))
                 return ai_message
+            if (
+                not overflow_recovery_used
+                and accumulated_chunk is None
+                and chunk_index == 0
+                and await self._recover_context_overflow(ctx, exc)
+            ):
+                # 413 溢出在网关拒绝请求时发生，必然先于任何 chunk；
+                # 零 chunk 时重试不会造成重复输出，已有增量则不重试。
+                return await self._model_call_with_overflow_recovery(
+                    ctx=ctx,
+                    llm=llm,
+                    kv_runtime=kv_runtime,
+                    context_window_kwargs=context_window_kwargs,
+                    overflow_recovery_used=True,
+                )
             raise
 
         if accumulated_chunk is None:
@@ -1152,6 +1241,94 @@ class ReActAgent(BaseAgent):
                 },
             ))
         return ai_message
+
+    @staticmethod
+    def _is_context_overflow_error(exc: Exception) -> bool:
+        """Classify a main-call exception as a genuine context overflow.
+
+        Uses the strict ``is_strict_context_overflow`` predicate rather than the
+        shared ``classify_compression_error`` taxonomy. The compression-chain
+        classifier deliberately keeps broad/bare markers (e.g. a bare "413"
+        substring, or TPM-overlapping "token limit"/"too many tokens" wording)
+        because a false positive there only costs one extra retry. On the main
+        call, however, a false positive would force-compact the session
+        (``compress_context(force=True)``) and irreversibly replace real
+        messages with a summary before retrying, so only an exact 413 status or
+        an unambiguous length marker counts as an overflow.
+        """
+        return is_strict_context_overflow(exc)
+
+    async def _recover_context_overflow(
+            self,
+            ctx: AgentCallbackContext,
+            exc: Exception,
+    ) -> bool:
+        """Force-compact the context once after a main-call context overflow.
+
+        Uses the manual-compaction protocol (``SessionModelContext.compress_context``),
+        which runs the compression chain with ``force=True`` and therefore the
+        dedicated ``auto_compression`` model pair (primary + fallback),
+        credentials reused from the main conversation model.
+
+        At most one recovery is attempted per invoke (flag in ``ctx.extra``),
+        so a compaction that keeps failing cannot burn a recovery attempt on
+        every ReAct iteration of the same invoke.
+
+        Args:
+            ctx: Shared AgentCallbackContext for this invoke.
+            exc: The context-overflow error raised by the main model call.
+
+        Returns:
+            True when the caller should retry the main call with the
+            compacted window; False when the original error must propagate
+            (recovery disabled, not an overflow, already used, compaction
+            returned busy/noop, or the compaction itself raised).
+        """
+        if not self._config.context_overflow_recovery:
+            return False
+        if not ReActAgent._is_context_overflow_error(exc):
+            return False
+        if ctx.extra.get(_OVERFLOW_RECOVERY_USED_KEY):
+            return False
+        ctx.extra[_OVERFLOW_RECOVERY_USED_KEY] = True
+
+        compress = getattr(ctx.context, "compress_context", None)
+        if not callable(compress):
+            return False
+
+        logger.warning(
+            "[ReActAgent] main model call hit context overflow; forcing one "
+            "compaction before retrying: %s",
+            exc,
+        )
+        try:
+            result = await compress(
+                model_config=self._config.model_config_obj,
+                model_client_config=self._config.model_client_config,
+            )
+        except Exception as compress_exc:  # noqa: BLE001 - recovery is best-effort
+            logger.warning(
+                "[ReActAgent] overflow recovery compaction failed; propagating "
+                "original error: %s",
+                compress_exc,
+                exc_info=True,
+            )
+            return False
+        result_code = result.get("result") if isinstance(result, dict) else result
+        if result_code != "compressed":
+            # busy / noop: the window is unchanged, a retry would overflow
+            # again with the identical request - not worth a doomed call.
+            logger.warning(
+                "[ReActAgent] overflow recovery compaction returned '%s'; context "
+                "unchanged, propagating original error",
+                result_code,
+            )
+            return False
+        logger.info(
+            "[ReActAgent] overflow recovery compaction succeeded; retrying main "
+            "model call once"
+        )
+        return True
 
     @staticmethod
     def _messages_contain_image_input(messages: Optional[List[Any]]) -> bool:
@@ -1336,22 +1513,22 @@ class ReActAgent(BaseAgent):
         if lowered_name == "task_tool" and isinstance(parsed, dict):
             task_description = parsed.get("task_description")
             task_text = "" if task_description is None else str(task_description)
-            summary: Dict[str, Any] = {
+            task_summary: Dict[str, Any] = {
                 "kind": "task_tool",
                 "keys": sorted(str(key) for key in parsed.keys()),
             }
             if "subagent_type" in parsed:
-                summary["subagent_type"] = str(parsed.get("subagent_type") or "")[:120]
+                task_summary["subagent_type"] = str(parsed.get("subagent_type") or "")[:120]
             if task_text:
                 task_hash = hashlib.sha256(
                     task_text.encode("utf-8", errors="ignore")
                 ).hexdigest()[:12]
-                summary["task_description"] = {
+                task_summary["task_description"] = {
                     "redacted": True,
                     "length": len(task_text),
                     "sha256_12": task_hash,
                 }
-            return summary
+            return task_summary
 
         is_browser_tool = ReActAgent._is_browser_tool_name(lowered_name)
         if not is_browser_tool:
