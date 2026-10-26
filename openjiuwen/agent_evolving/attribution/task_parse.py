@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Protocol
 
+from openjiuwen.agent_evolving.attribution.language import output_language_directive
 from openjiuwen.agent_evolving.attribution.model import TaskParseResult
 from openjiuwen.agent_evolving.attribution.nodes import TrajectoryNode, user_request_nodes, user_request_text
 
@@ -816,7 +817,7 @@ def load_task_parse_prompt(language: str) -> str:
     lang = "zh" if str(language).strip().lower() in {"zh", "cn"} else "en"
     if lang not in _prompt_cache:
         _prompt_cache[lang] = (_PROMPT_DIR / f"task_parse_{lang}.md").read_text(encoding="utf-8")
-    return _prompt_cache[lang]
+    return f"{_prompt_cache[lang]}\n\n{output_language_directive(lang)}"
 
 
 def _response_tool_calls(response: Any) -> list[dict[str, Any]]:

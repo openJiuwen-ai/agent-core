@@ -188,7 +188,7 @@ def ensure_visual(criteria, task):
     criterion exists, a standard one is added. A "kind": "visual" that neither the Task nor the criterion's name
     supports (e.g. "clarity" of a text answer) is dropped: it would be judged from screenshots that do not exist.
     """
-    chinese = models.is_chinese(task)
+    chinese = models.is_chinese_answer(task)
     looked_at = bool(VISUAL_TASK.search(task or ""))
     found = False
     for c in criteria:

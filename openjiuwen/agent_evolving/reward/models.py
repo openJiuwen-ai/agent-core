@@ -169,6 +169,8 @@ async def can_see(model, log=lambda message: None, notes=None):
     return cache[key]
 
 ANSWER_LANGUAGE = ContextVar("reward_answer_language", default=None)
+REQUESTED_LANGUAGE = ContextVar("reward_requested_language", default=None)
+"""Explicit output language from the host; wins over detecting the task's language."""
 
 
 def items(found, *keys):
@@ -188,7 +190,35 @@ def is_chinese(text):
     return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
 
 
+def set_requested_language(language):
+    """Pin Reward's output language for this run (contextvar token; reset it afterwards).
+
+    Reward ordinarily infers the language from whether the task text has Chinese
+    characters, which mirrors a Chinese task even when the UI asked for English.
+    """
+    lang = str(language).strip().lower()
+    value = "Chinese (简体中文)" if lang in {"zh", "cn"} else "English"
+    return REQUESTED_LANGUAGE.set(value)
+
+
+def reset_requested_language(token):
+    """Restore the previous requested language."""
+    REQUESTED_LANGUAGE.reset(token)
+
+
+def is_chinese_answer(task=""):
+    """Whether Reward should write its answer in Chinese (requested language wins over the task's)."""
+    requested = REQUESTED_LANGUAGE.get()
+    if requested:
+        return requested.startswith("Chinese")
+    return is_chinese(task)
+
+
 def set_language(task):
+    requested = REQUESTED_LANGUAGE.get()
+    if requested:
+        ANSWER_LANGUAGE.set(requested)
+        return
     ANSWER_LANGUAGE.set("Chinese (简体中文)" if re.search(r"[\u4e00-\u9fff]", task or "") else "English")
 
 
@@ -224,8 +254,13 @@ class Model:
         for label, data in images:
             content += [{"type": "text", "text": label},
                         {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + data}}]
-        language = (f"\nWrite explanatory text in {ANSWER_LANGUAGE.get()}. Keep JSON keys, IDs, enum values and "
-                    "code unchanged." if ANSWER_LANGUAGE.get() else "")
+        language = (
+            f"\nWrite every explanatory text field in {ANSWER_LANGUAGE.get()}, including criterion names, "
+            "goals, claims, comments, summaries and suggestions; translate any example wording from the "
+            "system prompt into that language. Keep JSON keys, IDs, enum values and code unchanged."
+            if ANSWER_LANGUAGE.get()
+            else ""
+        )
         messages = [{"role": "system", "content": system + language + "\nReply with one JSON object only."},
                     {"role": "user", "content": content if images else user}]
         loop = asyncio.get_running_loop()

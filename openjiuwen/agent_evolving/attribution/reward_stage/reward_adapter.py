@@ -363,6 +363,7 @@ async def run_reward(
     """
     from openjiuwen.agent_evolving.attribution.events import emit_single_llm_event
     from openjiuwen.agent_evolving.reward import evidence_agent, pipeline, progress
+    from openjiuwen.agent_evolving.reward import models as reward_models
 
     counter = status_counter if status_counter is not None else [0]
     task = review_task(task_parse, user_attribution, language)
@@ -387,6 +388,7 @@ async def run_reward(
         evidence_seconds = min(evidence_seconds, float(config["deadline_seconds"]))
     lines = _ProgressLines(say, language, evidence_seconds)
     token = progress._current.set(lines)  # noqa: SLF001 - Reward's own per-run progress slot
+    language_token = reward_models.set_requested_language(language)
     try:
         result = await pipeline.reward(
             task, artifacts, config, txt_response=reply, user_note=user_attribution or "", log=lines.log
@@ -404,6 +406,7 @@ async def run_reward(
         )
         raise
     finally:
+        reward_models.reset_requested_language(language_token)
         progress._current.reset(token)  # noqa: SLF001
     lines.line(100, _labels(language)["finished"].format(score=payload["overall"]["total_score"]))
     meta = {

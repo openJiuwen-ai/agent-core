@@ -22,6 +22,7 @@ from openjiuwen.agent_evolving.attribution.run import (
     prepare_reward_temp_dir,
     run_attribution,
     run_diagnosis,
+    run_trajectory_summary,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -509,8 +510,10 @@ class _FakeDeepAgent:
         self.prompts.append(prompt)
         if self.invocations >= self._rounds_to_finish:
             for signal in self._signals:
-                self._runtime.record_attribution(signal.signal_id, [{"text_md": "cause", "start_node_id": "main:1"}])
-            self._runtime.record_artifact_improvement("improve it")
+                self._runtime.record_reward_failure(
+                    signal.signal_id, [{"text_md": "cause", "start_node_id": "main:1"}]
+                )
+            self._runtime.record_trajectory_summary("summary")
         return {}
 
 
@@ -529,7 +532,8 @@ def _patch_build(monkeypatch: Any, fake_agent: _FakeDeepAgent, fake_rail: _FakeR
 
 
 class _FakeSession:
-    pass
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
 
 
 async def test_run_attribution_success_single_round(monkeypatch: Any) -> None:
@@ -551,7 +555,7 @@ async def test_run_attribution_success_single_round(monkeypatch: Any) -> None:
     assert outcome.wake_attempted is False
     assert fake_agent.invocations == 1
     assert outcome.counts["attributed"] == 1
-    entry = runtime.attributions[signals[0].signal_id][0]
+    entry = runtime.reward_attributions[signals[0].signal_id][0]
     assert re.fullmatch(r"attr-[0-9a-f]{8}", entry["attr_id"])
     assert entry["start_node_id"] == "main:1"
 
@@ -574,7 +578,8 @@ async def test_run_attribution_wake_once_then_success(monkeypatch: Any) -> None:
     assert outcome.completed is True
     assert outcome.wake_attempted is True
     assert fake_agent.invocations == 2
-    assert "pending_signal_ids" in fake_agent.prompts[1]
+    assert "pending_reward_signal_ids" in fake_agent.prompts[1]
+    assert "missing_trajectory_summary" in fake_agent.prompts[1]
 
 
 async def test_run_attribution_wake_fails_incomplete(monkeypatch: Any) -> None:
@@ -594,7 +599,9 @@ async def test_run_attribution_wake_fails_incomplete(monkeypatch: Any) -> None:
     assert outcome.status == "failed"
     assert outcome.failure_kind == "incomplete"
     assert outcome.wake_attempted is True
-    assert outcome.pending_signal_ids == [signals[0].signal_id]
+    # an unmarked rule_jev signal has no submission obligation; only the summary is missing
+    assert outcome.pending_signal_ids == []
+    assert outcome.trajectory_summary
     assert fake_agent.invocations == 2
 
 
@@ -674,8 +681,8 @@ async def test_run_attribution_skips_perfect_signals(monkeypatch: Any) -> None:
     assert outcome.status == "success"
     assert outcome.completed is True
     assert outcome.skipped_signal_ids == [perfect.signal_id]
-    assert set(runtime.attributions) == {fair.signal_id, weak.signal_id, uncertain.signal_id}
-    assert perfect.signal_id not in runtime.attributions
+    assert set(runtime.reward_attributions) == {fair.signal_id, weak.signal_id, uncertain.signal_id}
+    assert perfect.signal_id not in runtime.reward_attributions
     assert fake_agent.invocations == 1
     assert perfect.text not in fake_agent.prompts[0]
 
@@ -724,3 +731,61 @@ async def test_run_attribution_agent_error(monkeypatch: Any) -> None:
     assert outcome.status == "failed"
     assert outcome.failure_kind == "error"
     assert "model broke" in outcome.error_detail or True
+
+
+class _SummaryAgent:
+    def __init__(self, runtime: NodeBackedRuntime, rounds_to_finish: int = 1) -> None:
+        self._runtime = runtime
+        self._rounds_to_finish = rounds_to_finish
+        self.invocations = 0
+        self.prompts: list[str] = []
+
+    async def invoke(self, prompt: str, session: Any = None) -> dict[str, Any]:
+        del session
+        self.invocations += 1
+        self.prompts.append(prompt)
+        if self.invocations >= self._rounds_to_finish:
+            self._runtime.record_trajectory_summary("选中范围共 3 个步骤，期间一次工具调用失败。")
+        return {}
+
+
+async def test_run_trajectory_summary_returns_the_agent_summary(monkeypatch: Any) -> None:
+    runtime = NodeBackedRuntime(_nodes())
+    agent = _SummaryAgent(runtime)
+    monkeypatch.setattr(run_module, "build_trajectory_summary_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+
+    outcome = await run_trajectory_summary(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        runtime=runtime,
+        task_hint="写报告",
+        total_timeout_s=None,
+    )
+
+    assert outcome.status == "success" and outcome.completed is True
+    assert outcome.trajectory_summary == "选中范围共 3 个步骤，期间一次工具调用失败。"
+    assert agent.invocations == 1
+    assert "写报告" in agent.prompts[0]
+
+
+async def test_run_trajectory_summary_wakes_once_and_reports_missing_summary(monkeypatch: Any) -> None:
+    runtime = NodeBackedRuntime(_nodes())
+    agent = _SummaryAgent(runtime, rounds_to_finish=2)
+    monkeypatch.setattr(run_module, "build_trajectory_summary_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+
+    outcome = await run_trajectory_summary(
+        model=object(), nodes_by_subagent=_nodes(), runtime=runtime, total_timeout_s=None
+    )
+    assert outcome.status == "success" and outcome.wake_attempted is True
+    assert agent.invocations == 2
+
+    missing_runtime = NodeBackedRuntime(_nodes())
+    missing = _SummaryAgent(missing_runtime, rounds_to_finish=99)
+    monkeypatch.setattr(run_module, "build_trajectory_summary_agent", lambda **kwargs: (missing, _FakeRail()))
+    outcome = await run_trajectory_summary(
+        model=object(), nodes_by_subagent=_nodes(), runtime=missing_runtime, total_timeout_s=None
+    )
+    assert outcome.status == "failed" and outcome.failure_kind == "incomplete"
+    assert outcome.trajectory_summary is None

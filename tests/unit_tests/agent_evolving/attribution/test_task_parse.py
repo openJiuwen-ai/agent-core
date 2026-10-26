@@ -281,3 +281,10 @@ async def test_run_task_parse_mixed_error_and_report_retries() -> None:
     result = await run_task_parse(nodes, "zh", llm)
     assert result.task_description == "写报告"
     assert result.run_meta["attempts"] == 2
+
+
+def test_task_parse_prompt_requires_the_requested_output_language() -> None:
+    from openjiuwen.agent_evolving.attribution.task_parse import load_task_parse_prompt
+
+    assert "输出语言：中文" in load_task_parse_prompt("zh")
+    assert "Output language: English" in load_task_parse_prompt("en")

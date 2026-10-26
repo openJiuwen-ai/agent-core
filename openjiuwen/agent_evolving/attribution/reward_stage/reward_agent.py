@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from openjiuwen.agent_evolving.attribution.agent import ContextBudgetRail, LlmStatusRail
+from openjiuwen.agent_evolving.attribution.language import output_language_directive
 from openjiuwen.agent_evolving.attribution.model import StatusSink
 from openjiuwen.agent_evolving.attribution.reward_stage.reward_schema import (
     SCHEMA_VERSION,
@@ -39,7 +40,7 @@ def load_reward_prompt(language: str) -> str:
     lang = "zh" if str(language).strip().lower() in {"zh", "cn"} else "en"
     if lang not in _prompt_cache:
         _prompt_cache[lang] = (_PROMPT_DIR / f"reward_{lang}.md").read_text(encoding="utf-8")
-    return _prompt_cache[lang]
+    return f"{_prompt_cache[lang]}\n\n{output_language_directive(lang)}"
 
 
 class RewardSink(Protocol):

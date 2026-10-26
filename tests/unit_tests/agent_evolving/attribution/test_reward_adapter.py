@@ -301,3 +301,52 @@ def test_reward_is_the_default_and_the_reward_agent_stays_one_switch_away(monkey
     assert adapter.reward_enabled() is False
     monkeypatch.delenv("ATTRIBUTION_REWARD")
     assert adapter.reward_enabled() is True
+
+
+def test_reward_prompt_requires_the_requested_output_language() -> None:
+    from openjiuwen.agent_evolving.attribution.reward_stage.reward_agent import load_reward_prompt
+
+    assert "输出语言：中文" in load_reward_prompt("zh")
+    assert "Output language: English" in load_reward_prompt("en")
+
+
+def test_requested_language_overrides_reward_task_detection() -> None:
+    from openjiuwen.agent_evolving.reward import models
+
+    english = models.set_requested_language("en")
+    try:
+        models.set_language("中文任务")
+        assert models.ANSWER_LANGUAGE.get() == "English"
+        assert models.is_chinese_answer("中文任务") is False
+    finally:
+        models.reset_requested_language(english)
+        models.ANSWER_LANGUAGE.set(None)
+
+    chinese = models.set_requested_language("zh")
+    try:
+        models.set_language("An English task")
+        assert models.ANSWER_LANGUAGE.get() == "Chinese (简体中文)"
+        assert models.is_chinese_answer("An English task") is True
+    finally:
+        models.reset_requested_language(chinese)
+        models.ANSWER_LANGUAGE.set(None)
+
+
+def test_visual_criterion_follows_the_requested_language() -> None:
+    from openjiuwen.agent_evolving.reward import models, pipeline
+
+    english = models.set_requested_language("en")
+    try:
+        criteria = pipeline.ensure_visual([], "一个图表任务")
+        assert criteria[-1]["name"] == "Visual quality"
+    finally:
+        models.reset_requested_language(english)
+        models.ANSWER_LANGUAGE.set(None)
+
+    chinese = models.set_requested_language("zh")
+    try:
+        criteria = pipeline.ensure_visual([], "a chart task")
+        assert criteria[-1]["name"] == "画面质量"
+    finally:
+        models.reset_requested_language(chinese)
+        models.ANSWER_LANGUAGE.set(None)
