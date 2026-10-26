@@ -39,6 +39,31 @@ def _subjects() -> list[SubjectRef]:
     return [SubjectRef(id="main", display_name="Main Agent", kind="main_agent")]
 
 
+def test_build_trajectory_summary_prompts() -> None:
+    from openjiuwen.agent_evolving.attribution.agent import (
+        build_trajectory_summary_initial_prompt,
+        build_trajectory_summary_system_prompt,
+    )
+
+    zh = build_trajectory_summary_system_prompt("zh")
+    en = build_trajectory_summary_system_prompt("en")
+    assert "轨迹摘要 Agent" in zh
+    assert "300" in zh and "main:0" in zh
+    assert "trajectory summary agent" in en
+    assert "300" in en and "main:0" in en
+
+    initial_zh = build_trajectory_summary_initial_prompt(
+        task_hint="写报告", subjects=_subjects(), language="zh"
+    )
+    initial_en = build_trajectory_summary_initial_prompt(
+        task_hint="write report", subjects=_subjects(), language="en"
+    )
+    assert "任务线索" in initial_zh and "main | Main Agent" in initial_zh
+    assert "300" in initial_zh and "节点 id" in initial_zh
+    assert "Task Hint" in initial_en and "main | Main Agent" in initial_en
+    assert "300" in initial_en and "node ids" in initial_en
+
+
 def test_build_attribution_system_prompt_languages_and_swarm() -> None:
     zh = build_attribution_system_prompt("zh")
     en = build_attribution_system_prompt("en")

@@ -15,6 +15,9 @@ from openjiuwen.agent_evolving.attribution.agent import (
     build_attribution_agent,
     build_attribution_initial_prompt,
     build_attribution_system_prompt,
+    build_trajectory_summary_agent,
+    build_trajectory_summary_initial_prompt,
+    build_trajectory_summary_system_prompt,
     build_wake_text,
     filter_attribution_tools,
     render_signal_block,
@@ -59,6 +62,7 @@ from openjiuwen.agent_evolving.attribution.run import (
     run_attribution,
     run_diagnosis,
     run_task_parse,
+    run_trajectory_summary,
 )
 from openjiuwen.agent_evolving.attribution.skill_inventory import (
     SkillUsage,
@@ -84,6 +88,7 @@ from openjiuwen.agent_evolving.attribution.task_parse import (
 )
 from openjiuwen.agent_evolving.attribution.tools import (
     build_attribution_tools,
+    build_summary_tools,
     render_partial_view,
     render_trajectory_view,
     same_subagent,
@@ -121,6 +126,10 @@ __all__ = [
     "build_attribution_system_prompt",
     "build_attribution_tools",
     "build_nodes_from_snapshot",
+    "build_summary_tools",
+    "build_trajectory_summary_agent",
+    "build_trajectory_summary_initial_prompt",
+    "build_trajectory_summary_system_prompt",
     "build_reward_user_prompt",
     "build_subject_nodes",
     "build_task_parse_digest",
@@ -152,6 +161,7 @@ __all__ = [
     "run_diagnosis",
     "rule_premarks",
     "run_task_parse",
+    "run_trajectory_summary",
     "same_subagent",
     "search_keyword",
     "slice_nodes_by_range",

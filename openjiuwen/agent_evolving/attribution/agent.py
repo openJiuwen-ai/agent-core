@@ -647,6 +647,98 @@ def build_wake_text(check_json: dict[str, Any], language: str = "zh") -> str:
     )
 
 
+def build_trajectory_summary_system_prompt(language: str = "zh") -> str:
+    """System prompt of the summary-only agent (no signals, no findings)."""
+    return _load_prompt(f"summary_{_normalize_language(language)}.md")
+
+
+def build_trajectory_summary_initial_prompt(
+    *,
+    task_hint: str,
+    subjects: list[SubjectRef],
+    language: str = "zh",
+) -> str:
+    """Initial user prompt for the summary-only agent."""
+    lang = _normalize_language(language)
+    hint = (task_hint or "").strip()
+    if lang == "en":
+        return (
+            "## Task Hint (may be empty or incomplete)\n"
+            f"{hint or '(none)'}\n\n"
+            "## Subagent List (subagent_id = subagent_key; display_name is the display name; kind is the type)\n"
+            f"{render_subjects_block(subjects)}\n\n"
+            "Read the selected trajectory, then call submit_trajectory_summary with one paragraph of at "
+            "most 300 characters that contains no concrete node ids."
+        )
+    return (
+        "## 任务线索（可能为空或不完整）\n"
+        f"{hint or '（无）'}\n\n"
+        "## subagent 列表（subagent_id = subagent_key；display_name 为展示名；kind 为类型）\n"
+        f"{render_subjects_block(subjects)}\n\n"
+        "请阅读选中范围的轨迹，然后调用 submit_trajectory_summary 提交一段不超过 300 字、"
+        "不包含具体节点 id 的摘要。"
+    )
+
+
+def build_trajectory_summary_agent(
+    *,
+    model: "Model",
+    runtime: AttributionAgentRuntime,
+    language: str = "zh",
+    total_token_budget: int | None = _DEFAULT_CONTEXT_BUDGET_TOKENS,
+    max_iterations: int = 40,
+    max_context_messages: int = _DEFAULT_MAX_CONTEXT_MESSAGES,
+    status_sink: StatusSink | None = None,
+    model_name: str = "",
+    status_counter: list[int] | None = None,
+) -> tuple["DeepAgent", ContextBudgetRail]:
+    """Build the summary-only agent: read tools + submit_trajectory_summary."""
+    from openjiuwen.agent_evolving.attribution.tools import build_summary_tools
+    from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+    from openjiuwen.harness.factory import create_deep_agent
+
+    rail = ContextBudgetRail(total_token_budget)
+    try:
+        from openjiuwen.harness.observability import maybe_agent_observability_rail
+
+        observability_rail = maybe_agent_observability_rail()
+    except ImportError:
+        observability_rail = None
+        logger.warning("[summary] observability rail unavailable; run spans disabled")
+    rails: list[Any] = [rail]
+    if observability_rail is not None:
+        rails.append(observability_rail)
+    if status_sink is not None:
+        rails.append(
+            LlmStatusRail(
+                status_sink,
+                stage="attribution",
+                agent_id=_AGENT_CARD_ID,
+                model=model_name,
+                counter=status_counter if status_counter is not None else [0],
+            )
+        )
+    agents = create_deep_agent(
+        without_time_limits(model),
+        tool_owner_id=f"{_AGENT_CARD_ID}-summary-{uuid.uuid4().hex[:12]}",
+        card=AgentCard(
+            id=f"{_AGENT_CARD_ID}-summary",
+            name="TrajectorySummaryAgent",
+            description="Trajectory summary agent / 轨迹摘要 Agent",
+        ),
+        system_prompt=build_trajectory_summary_system_prompt(language),
+        tools=build_summary_tools(runtime),
+        rails=rails,
+        max_iterations=max_iterations,
+        context_engine_config=ContextEngineConfig(max_context_message_num=max_context_messages),
+        enable_security_rail=False,
+        enable_model_anomaly_detection_rail=True,
+        enable_sys_operation=False,
+    )
+    return agents, rail
+
+
 def build_attribution_agent(
     *,
     model: "Model",
@@ -736,6 +828,9 @@ __all__ = [
     "build_attribution_agent",
     "build_attribution_initial_prompt",
     "build_attribution_system_prompt",
+    "build_trajectory_summary_agent",
+    "build_trajectory_summary_initial_prompt",
+    "build_trajectory_summary_system_prompt",
     "build_wake_text",
     "filter_attribution_tools",
     "filter_skill_evolution_tool",

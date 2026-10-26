@@ -23,6 +23,8 @@ from openjiuwen.agent_evolving.attribution.agent import (
     ContextBudgetRail,
     build_attribution_agent,
     build_attribution_initial_prompt,
+    build_trajectory_summary_agent,
+    build_trajectory_summary_initial_prompt,
     build_wake_text,
 )
 from openjiuwen.agent_evolving.attribution.closure import completion_state
@@ -798,6 +800,135 @@ async def run_attribution(
         _release_tools(agent)
 
 
+async def run_trajectory_summary(
+    *,
+    model: Any,
+    nodes_by_subagent: dict[str, list[TrajectoryNode]],
+    language: str = "zh",
+    runtime: AttributionAgentRuntime | None = None,
+    status_sink: StatusSink | None = None,
+    model_name: str = "",
+    status_counter: list[int] | None = None,
+    total_token_budget: int | None = None,
+    max_iterations: int = 40,
+    max_context_messages: int = 80,
+    total_timeout_s: float | None = None,
+    session: Any = None,
+    task_hint: str = "",
+) -> AttributionRunOutcome:
+    """Run a summary-only agent over a valid trajectory range.
+
+    Used when the normal attribution agent will not run (task parsing failed,
+    no signals, or only perfect signals): it still writes a narrative summary
+    with the read tools.  The host supplies a deterministic fallback when this
+    run cannot produce one.
+    """
+    active_runtime = runtime or NodeBackedRuntime(nodes_by_subagent, language)
+    setattr(active_runtime, "skill_evolution_enabled", False)
+    setattr(active_runtime, "ttse_advice", False)
+    setattr(active_runtime, "artifact_improvement_required", False)
+    agent, rail = build_trajectory_summary_agent(
+        model=model,
+        runtime=active_runtime,
+        language=language,
+        total_token_budget=total_token_budget,
+        max_iterations=max_iterations,
+        max_context_messages=max_context_messages,
+        status_sink=status_sink,
+        model_name=model_name,
+        status_counter=status_counter,
+    )
+    from openjiuwen.core.session.agent import create_agent_session
+
+    session_id = (
+        str(session.get_session_id())
+        if callable(getattr(session, "get_session_id", None))
+        else f"summary_{uuid.uuid4().hex[:12]}"
+    )
+    card = getattr(agent, "card", None)
+    rounds_begun = [0]
+
+    def round_session() -> Any:
+        rounds_begun[0] += 1
+        if session is not None and rounds_begun[0] == 1:
+            return session
+        return create_agent_session(session_id=session_id, card=card)
+
+    initial_prompt = build_trajectory_summary_initial_prompt(
+        task_hint=task_hint,
+        subjects=active_runtime.subjects(),
+        language=language,
+    )
+    wake_text = (
+        "The previous round did not submit a summary. Continue reading the trajectory and call "
+        "submit_trajectory_summary with a paragraph of at most 300 characters and no concrete node ids."
+        if _language_key(language) == "en"
+        else "上一轮未提交摘要。请继续阅读轨迹，并调用 submit_trajectory_summary 提交一段不超过 300 字、"
+        "不包含具体节点 id 的摘要。"
+    )
+
+    def summary() -> str | None:
+        return str(getattr(active_runtime, "trajectory_summary", None) or "").strip() or None
+
+    def outcome() -> AttributionRunOutcome:
+        value = summary()
+        if rail.exceeded:
+            status, failure, completed = "failed", "tokens_exceeded", False
+        elif value is not None:
+            status, failure, completed = "success", None, True
+        else:
+            status, failure, completed = "failed", "incomplete", False
+        return AttributionRunOutcome(
+            status=status,  # type: ignore[arg-type]
+            failure_kind=failure,  # type: ignore[arg-type]
+            completed=completed,
+            wake_attempted=rounds_begun[0] > 1,
+            counts={},
+            token_usage={"attribution": rail.spent},
+            trajectory_summary=value,
+        )
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + total_timeout_s if total_timeout_s else None
+
+    async def invoke(prompt: str) -> None:
+        remaining = deadline - loop.time() if deadline is not None else None
+        if remaining is not None and remaining <= 0:
+            raise asyncio.TimeoutError
+        await asyncio.wait_for(run_agent(agent, prompt, session=round_session()), timeout=remaining)
+
+    try:
+        await invoke(initial_prompt)
+        if summary() is None and not rail.exceeded:
+            if deadline is None or deadline - loop.time() > 0:
+                await invoke(wake_text)
+        return outcome()
+    except asyncio.TimeoutError:
+        return AttributionRunOutcome(
+            status="failed",
+            failure_kind="timeout",
+            completed=False,
+            wake_attempted=rounds_begun[0] > 1,
+            counts={},
+            token_usage={"attribution": rail.spent},
+            trajectory_summary=summary(),
+        )
+    except Exception as exc:  # noqa: BLE001 - the host falls back to a deterministic summary
+        logger.exception("[summary] run failed: model=%s", model_name or "-")
+        return AttributionRunOutcome(
+            status="failed",
+            failure_kind="error",
+            error_detail=str(exc)[:300],
+            completed=False,
+            wake_attempted=rounds_begun[0] > 1,
+            counts={},
+            token_usage={"attribution": rail.spent},
+            trajectory_summary=summary(),
+        )
+    finally:
+        _release_tools(agent)
+
+
 async def run_agent(agent: Any, prompt: Any, session: Any = None) -> None:
     """``agent.invoke(prompt)``, driven through ``agent.stream`` so every model call streams.
 
@@ -841,6 +972,7 @@ __all__ = [
     "run_attribution",
     "run_diagnosis",
     "run_task_parse",
+    "run_trajectory_summary",
     "TaskParseLLM",
     "ContextBudgetRail",
 ]

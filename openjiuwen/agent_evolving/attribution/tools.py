@@ -818,12 +818,18 @@ class SubmitTrajectorySummaryTool(_AttributionTool):
     tool_id = "SubmitTrajectorySummaryTool"
     description = (
         "提交这段轨迹的叙事摘要：发生了什么、存在哪些问题（含未标记规则信号的归因结论）。一段话即可，"
-        "覆盖式；收口必交。/ Submit this trajectory's narrative summary: what happened and what "
-        "problems exist (including conclusions for unmarked rule signals). One paragraph; "
-        "overwrites; required before finishing."
+        "控制在 300 字以内，不要包含具体节点 id（如 main:0）；覆盖式；收口必交。/ Submit this "
+        "trajectory's narrative summary: what happened and what problems exist (including conclusions "
+        "for unmarked rule signals). One paragraph; keep it within 300 characters; do not include "
+        "concrete node ids (e.g. main:0); overwrites; required before finishing."
     )
     input_schema = _schema(
-        {"summary": _text_prop("轨迹摘要（一段话）", "Trajectory summary (one paragraph)")},
+        {
+            "summary": _text_prop(
+                "轨迹摘要（一段话，≤300 字，不含节点 id）",
+                "Trajectory summary (one paragraph, ≤300 chars, no node ids)",
+            )
+        },
         ["summary"],
     )
 
@@ -887,6 +893,21 @@ def build_attribution_tools(runtime: AttributionAgentRuntime, signals: list[Diag
     return [tool_cls(runtime, list(signals)) for tool_cls in _TOOLS]
 
 
+_SUMMARY_TOOLS: list[type[_AttributionTool]] = [
+    KeywordRegTool,
+    ViewTrajectoryTool,
+    ViewPartialTrajectoryTool,
+    ViewNodeDetailTool,
+    ViewNodeFieldTool,
+    SubmitTrajectorySummaryTool,
+]
+
+
+def build_summary_tools(runtime: AttributionAgentRuntime) -> list[Tool]:
+    """Instantiate the read + summary tools for a summary-only run."""
+    return [tool_cls(runtime, []) for tool_cls in _SUMMARY_TOOLS]
+
+
 def render_trajectory_view(nodes: list[TrajectoryNode], language: str) -> dict[str, Any]:
     """Route a subagent's nodes to the overview or summary tier."""
     if len(nodes) > 500:
@@ -916,6 +937,7 @@ def render_partial_view(
 
 __all__ = [
     "build_attribution_tools",
+    "build_summary_tools",
     "render_partial_view",
     "render_trajectory_view",
     "same_subagent",

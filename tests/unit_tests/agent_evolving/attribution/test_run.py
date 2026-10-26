@@ -23,6 +23,7 @@ from openjiuwen.agent_evolving.attribution.run import (
     prepare_reward_temp_dir,
     run_attribution,
     run_diagnosis,
+    run_trajectory_summary,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -1053,3 +1054,61 @@ async def test_a_real_attribution_agent_streams_both_rounds_through_one_session(
     assert len(rounds) >= 2 and outcome.wake_attempted  # the wake round streamed too
     assert "还在看轨迹。" in rounds[-1]  # ... and went on from the first round's conversation
     assert outcome.failure_kind == "incomplete" and not outcome.error_detail  # no "StreamQueue is already closed"
+
+
+class _SummaryAgent:
+    def __init__(self, runtime: NodeBackedRuntime, rounds_to_finish: int = 1) -> None:
+        self._runtime = runtime
+        self._rounds_to_finish = rounds_to_finish
+        self.invocations = 0
+        self.prompts: list[str] = []
+
+    async def invoke(self, prompt: str, session: Any = None) -> dict[str, Any]:
+        del session
+        self.invocations += 1
+        self.prompts.append(prompt)
+        if self.invocations >= self._rounds_to_finish:
+            self._runtime.record_trajectory_summary("选中范围共 3 个步骤，期间一次工具调用失败。")
+        return {}
+
+
+async def test_run_trajectory_summary_returns_the_agent_summary(monkeypatch: Any) -> None:
+    runtime = NodeBackedRuntime(_nodes())
+    agent = _SummaryAgent(runtime)
+    monkeypatch.setattr(run_module, "build_trajectory_summary_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+
+    outcome = await run_trajectory_summary(
+        model=object(),
+        nodes_by_subagent=_nodes(),
+        runtime=runtime,
+        task_hint="写报告",
+        total_timeout_s=None,
+    )
+
+    assert outcome.status == "success" and outcome.completed is True
+    assert outcome.trajectory_summary == "选中范围共 3 个步骤，期间一次工具调用失败。"
+    assert agent.invocations == 1
+    assert "写报告" in agent.prompts[0]
+
+
+async def test_run_trajectory_summary_wakes_once_and_reports_missing_summary(monkeypatch: Any) -> None:
+    runtime = NodeBackedRuntime(_nodes())
+    agent = _SummaryAgent(runtime, rounds_to_finish=2)
+    monkeypatch.setattr(run_module, "build_trajectory_summary_agent", lambda **kwargs: (agent, _FakeRail()))
+    monkeypatch.setattr("openjiuwen.core.session.agent.create_agent_session", _FakeSession)
+
+    outcome = await run_trajectory_summary(
+        model=object(), nodes_by_subagent=_nodes(), runtime=runtime, total_timeout_s=None
+    )
+    assert outcome.status == "success" and outcome.wake_attempted is True
+    assert agent.invocations == 2
+
+    missing_runtime = NodeBackedRuntime(_nodes())
+    missing = _SummaryAgent(missing_runtime, rounds_to_finish=99)
+    monkeypatch.setattr(run_module, "build_trajectory_summary_agent", lambda **kwargs: (missing, _FakeRail()))
+    outcome = await run_trajectory_summary(
+        model=object(), nodes_by_subagent=_nodes(), runtime=missing_runtime, total_timeout_s=None
+    )
+    assert outcome.status == "failed" and outcome.failure_kind == "incomplete"
+    assert outcome.trajectory_summary is None

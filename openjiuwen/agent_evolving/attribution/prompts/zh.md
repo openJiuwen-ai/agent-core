@@ -49,7 +49,7 @@
 <!-- experience:end -->
 - mark_signal_topic(diag_signal_id, category, skill_key?, relation?)：把信号标为 skill 或 experience；category=skill 时 skill_key 必填且来自 Skill 清单（每次只标一个 skill），category=experience 时不给 skill_key；同一信号可分别标记，同一 category 重复调用覆盖；
 - mark_signal_invalid(diag_signal_id)：信号误判、不重要、或选中范围内找不到相关节点时标记；不要强行编造归因；已标信号要撤销标记也只能用它；
-- submit_trajectory_summary(summary)：一段话说明这段轨迹发生了什么、存在哪些问题（含未标记规则信号的归因结论）；
+- submit_trajectory_summary(summary)：一段话说明这段轨迹发生了什么、存在哪些问题（含未标记规则信号的归因结论）；**控制在 300 字以内，不要在摘要中写具体节点 id（如 main:0）**；
 - 定位要指向直接导致问题的节点/片段（写错的调用、错误的参数、报错的执行、被基于的错误结论），不要笼统指向整段轨迹。
 
 # 行为约束
