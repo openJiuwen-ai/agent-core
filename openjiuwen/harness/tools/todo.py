@@ -529,10 +529,19 @@ class TodoModifyTool(TodoTool):
                     )
                 results["message"] = await self._cancel_todos(session_id, ids, current_todos)
             elif action == "update":
-                todos_data = inputs.get("todos")
+                todos_data = self._require_todo_array(
+                    inputs.get("todos"),
+                    "update",
+                    '{"action":"update","todos":[{"id":"task_id","status":"completed"}]}',
+                )
                 results["message"] = await self._update_todos(session_id, todos_data, current_todos)
             elif action == "append":
-                todos_data = inputs.get("todos")
+                todos_data = self._require_todo_array(
+                    inputs.get("todos"),
+                    "append",
+                    '{"action":"append","todos":[{"id":"task_id","content":"...","activeForm":"...",'
+                    '"description":"...","status":"pending"}]}',
+                )
                 results["message"] = await self._append_todos(session_id, todos_data, current_todos)
             elif action == "insert_after":
                 todo_data = inputs.get("todo_data")
@@ -625,6 +634,27 @@ class TodoModifyTool(TodoTool):
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                 reason="More than one task is marked as 'in_progress' (only one allowed)"
             )
+
+    def _require_todo_array(self, todos_data: Any, action: str, example: str) -> List[Dict]:
+        """Reject a missing or wrongly shaped ``todos`` before it is iterated."""
+        if not isinstance(todos_data, list) or not todos_data:
+            raise build_error(
+                StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                reason=(
+                    f"Invalid input for {action}: 'todos' must be a non-empty array of task objects. "
+                    f"Example: {example}"
+                ),
+            )
+        for index, item in enumerate(todos_data):
+            if not isinstance(item, dict) or not str(item.get("id") or "").strip():
+                raise build_error(
+                    StatusCode.TOOL_TODOS_VALIDATION_INVALID,
+                    reason=(
+                        f"Invalid input for {action}: item {index} must be an object with 'id'. "
+                        f"Example: {example}"
+                    ),
+                )
+        return todos_data
 
     def _validate_single_todo_item(self, todo_data: Dict):
         validation_errors = []
