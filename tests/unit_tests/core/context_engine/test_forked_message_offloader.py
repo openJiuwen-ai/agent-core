@@ -187,6 +187,21 @@ class TestMessageOffloaderAddTrigger:
         assert not isinstance(message, OffloadMixin)
 
     @pytest.mark.asyncio
+    async def test_decision_count_uses_context_token_counter(self):
+        # The decision path must use the context's counter, not a private
+        # character estimate: it is the counter that is cached and bounded.
+        counter = _metadata_token_counter()
+        context = await create_context(context_window_tokens=100, token_counter=counter)
+        processor = context._processors[0]
+        message = ToolMessage(
+            content="x",
+            tool_call_id="tc-decision-count",
+            metadata={"test_token_count": 11},
+        )
+
+        assert processor._count_messages_tokens(context, [message]) == 11
+
+    @pytest.mark.asyncio
     async def test_triggers_above_default_character_capacity(self):
         context = await create_context(context_window_tokens=100)
 
@@ -403,7 +418,11 @@ class TestMessageOffloaderTtl:
     async def test_ttl_falls_back_to_offload_when_rule_compression_has_no_savings(self):
         counter = _metadata_token_counter()
         context = await create_context(
-            MessageSummaryOffloaderConfig(ttl_seconds=10),
+            MessageSummaryOffloaderConfig(
+                ttl_seconds=10,
+                # Keep the ADD pass out of rule compression; this test targets TTL.
+                add_message_threshold_ratio=1.0,
+            ),
             context_window_tokens=50002,
             token_counter=counter,
         )

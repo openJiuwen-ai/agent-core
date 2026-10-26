@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import json
 import re
+from typing import Any
+
+from json_repair import loads as repair_json_loads
 
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import RuleContext
+from openjiuwen.core.context_engine.token.encode_guard import estimate_tokens
 
+# json_repair walks character-by-character. Oversized tool blobs can stall the
+# event loop for minutes; keep every repair entrypoint under this shared cap.
+JSON_REPAIR_MAX_CHARS = 65_536
 
 ERROR_RE = re.compile(
     r"\b(error|failed|failure|traceback|exception|warn|warning)\b",
@@ -28,10 +36,30 @@ _DISPLAY_LINE_PREFIX_PRESERVE_WS_RE = re.compile(
 )
 
 
+def safe_repair_json_loads(content: str) -> Any | None:
+    """Parse JSON, optionally repairing small array-shaped blobs only.
+
+    Always try ``json.loads`` first. ``json_repair`` is only used for modest
+    ``[...]`` payloads that fail strict parsing; oversized inputs return None.
+    """
+    try:
+        return json.loads(content)
+    except (TypeError, ValueError):
+        pass
+    if not content.lstrip().startswith("["):
+        return None
+    if len(content) > JSON_REPAIR_MAX_CHARS:
+        return None
+    try:
+        return repair_json_loads(content)
+    except (TypeError, ValueError):
+        return None
+
+
 def count_tokens(text: str, ctx: RuleContext) -> int:
     if ctx.count_tokens is not None:
         return max(ctx.count_tokens(text), 1)
-    return max(len(text) // 3, 1)
+    return max(estimate_tokens(text), 1)
 
 
 def meets_savings_ratio(original: str, candidate: str, ctx: RuleContext) -> bool:
