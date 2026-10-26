@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
@@ -249,15 +250,19 @@ def _should_omit_authorization(model_client_config: ModelClientConfig) -> bool:
 
 
 def _normalize_openai_base_url(api_base: str) -> str:
-    """Normalize host /v1 /chat/completions forms to an OpenAI SDK base_url."""
+    """Normalize host /v1 /chat/completions forms to an OpenAI SDK base_url.
+
+    An api_base already ending in a version segment (e.g. ``/v2``) is
+    kept as-is; only version-less host/root forms get ``/v1`` appended.
+    """
     base = str(api_base or "").strip().rstrip("/")
     if not base:
         return base
     if base.endswith("/chat/completions"):
         base = base[: -len("/chat/completions")].rstrip("/")
-    if not base.endswith("/v1"):
-        base = f"{base}/v1"
-    return base
+    if re.search(r"/v\d+$", base):
+        return base
+    return f"{base}/v1"
 
 
 def _chat_completions_url(api_base: str) -> str:

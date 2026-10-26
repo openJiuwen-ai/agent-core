@@ -41,6 +41,8 @@ def _affinity_client(api_base: str = "https://example.test") -> OpenAIModelClien
         ("http://host:8000/v1", "http://host:8000/v1"),
         ("http://host:8000/v1/chat/completions", "http://host:8000/v1"),
         ("http://host:8000/chat/completions", "http://host:8000/v1"),
+        ("http://host:8000/v2", "http://host:8000/v2"),
+        ("http://host:8000/v2/chat/completions", "http://host:8000/v2"),
     ],
 )
 def test_normalize_openai_base_url(api_base, expected):
