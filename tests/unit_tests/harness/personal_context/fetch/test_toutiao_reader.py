@@ -5,6 +5,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 from urllib.parse import quote
 
 import aiohttp
@@ -172,6 +173,185 @@ async def test_toutiao_fetch_isolates_one_article_timeout_and_continues(
         "code": 154003,
         "message": "条目读取或解析失败",
     }
+
+
+@pytest.mark.asyncio
+async def test_toutiao_fetch_isolates_image_only_article_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = _article("image", 20)
+    image.pop("abstract", None)
+    good = _article("good", 10)
+    _set_responses(
+        monkeypatch,
+        {
+            "https://www.toutiao.com/c/user/token/demo": [
+                Response('<script id="RENDER_DATA">{"data":{"name":"Demo"}}</script>', content_type="text/html")
+            ],
+            "https://www.toutiao.com/api/pc/feed/": [Response({"data": [image, good]})],
+            "https://www.toutiao.com/article/image/": [
+                Response(
+                    '<script id="RENDER_DATA">'
+                    '{"data":{"content":"<p><img src=\\"https://p.example/a.jpg\\"/></p>"}}'
+                    "</script>",
+                    content_type="text/html",
+                )
+            ],
+            "https://www.toutiao.com/article/good/": [
+                Response(
+                    '<script id="RENDER_DATA">{"data":{"content":"<p>good body</p>"}}</script>',
+                    content_type="text/html",
+                )
+            ],
+        },
+    )
+
+    batches = await _batches(ToutiaoReaderFetchService(_config(), home=tmp_path))
+
+    assert batches[0].attempted_count == 2
+    assert batches[0].success_offsets == (1,)
+    assert [item.logical_id for item in batches[0].items] == ["toutiao_reader:article:good"]
+    assert batches[0].failures == (
+        {
+            "offset": 0,
+            "item_ref": "image",
+            "code": 154003,
+            "message": "条目读取或解析失败",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_toutiao_article_body_antibot_aborts_without_reading_next_article(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    blocked = _article("blocked", 20)
+    good = _article("good", 10)
+    _set_responses(
+        monkeypatch,
+        {
+            "https://www.toutiao.com/c/user/token/demo": [
+                Response('<script id="RENDER_DATA">{"data":{"name":"Demo"}}</script>', content_type="text/html")
+            ],
+            "https://www.toutiao.com/api/pc/feed/": [Response({"data": [blocked, good]})],
+            "https://www.toutiao.com/article/blocked/": [Response("captcha", content_type="text/html")],
+            "https://www.toutiao.com/article/good/": [
+                Response(
+                    '<script id="RENDER_DATA">{"data":{"content":"<p>good body</p>"}}</script>',
+                    content_type="text/html",
+                )
+            ],
+        },
+    )
+
+    with pytest.raises(BaseError) as caught:
+        await _batches(ToutiaoReaderFetchService(_config(), home=tmp_path))
+
+    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR
+    assert not any(url.endswith("/article/good/") for url, _params in Session.calls)
+
+
+@pytest.mark.asyncio
+async def test_toutiao_fetch_isolates_invalid_candidate_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ToutiaoReaderFetchService(_config(), home=tmp_path)
+
+    async def bootstrap(*_args, **_kwargs):
+        return None
+
+    async def body(_session, article, *, referer):
+        del referer
+        return "body", None, article["publish_time"], False, False
+
+    monkeypatch.setattr(toutiao_reader, "_bootstrap_profile", bootstrap)
+    monkeypatch.setattr(toutiao_reader, "_fetch_article_body", body)
+    broken = _fetch_candidate("broken")
+    broken["stable_id"] = ""
+
+    batch = await service.fetch(
+        run_id="run-1",
+        cursor=None,
+        candidates=(broken, _fetch_candidate("good")),
+    ).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.logical_id for item in batch.items] == ["toutiao_reader:article:good"]
+    assert batch.failures[0] == {
+        "offset": 0,
+        "item_ref": broken["locator"],
+        "code": 154003,
+        "message": "条目读取或解析失败",
+    }
+
+
+@pytest.mark.asyncio
+async def test_toutiao_fetch_isolates_non_mapping_candidate_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ToutiaoReaderFetchService(_config(), home=tmp_path)
+
+    async def bootstrap(*_args, **_kwargs):
+        return None
+
+    async def body(_session, article, *, referer):
+        del referer
+        return "body", None, article["publish_time"], False, False
+
+    monkeypatch.setattr(toutiao_reader, "_bootstrap_profile", bootstrap)
+    monkeypatch.setattr(toutiao_reader, "_fetch_article_body", body)
+
+    batch = await service.fetch(
+        run_id="run-1",
+        cursor=None,
+        candidates=cast(tuple[dict[str, object], ...], ("broken", _fetch_candidate("good"))),
+    ).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.logical_id for item in batch.items] == ["toutiao_reader:article:good"]
+    assert batch.failures[0] == {
+        "offset": 0,
+        "item_ref": "toutiao-candidate-0",
+        "code": 154003,
+        "message": "条目读取或解析失败",
+    }
+
+
+@pytest.mark.asyncio
+async def test_toutiao_fetch_aborts_on_article_403(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    denied = _article("denied", 20)
+    good = _article("good", 10)
+    _set_responses(
+        monkeypatch,
+        {
+            "https://www.toutiao.com/c/user/token/demo": [
+                Response('<script id="RENDER_DATA">{"data":{"name":"Demo"}}</script>', content_type="text/html")
+            ],
+            "https://www.toutiao.com/api/pc/feed/": [Response({"data": [denied, good]})],
+            "https://www.toutiao.com/article/denied/": [Response({}, status=403)],
+            "https://www.toutiao.com/article/good/": [
+                Response(
+                    '<script id="RENDER_DATA">{"data":{"content":"<p>good body</p>"}}</script>',
+                    content_type="text/html",
+                )
+            ],
+        },
+    )
+
+    with pytest.raises(BaseError) as caught:
+        await _batches(ToutiaoReaderFetchService(_config(), home=tmp_path))
+
+    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR
+    assert not any(url.endswith("/article/good/") for url, _params in Session.calls)
 
 
 async def _batches(
