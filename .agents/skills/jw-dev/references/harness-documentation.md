@@ -60,3 +60,11 @@
 - **N 多个小 feature 文档**：一次连贯的设计变动归档为**一份** feature 文档，不要拆碎。
 - **在元信息里写 commit hash**：spec / feature 元信息只写日期（`YYYY-MM-DD`）。
 
+
+## 决策与行为证据
+
+决策续写/替代按 [决策归属](../../jw-design/references/decision-records.md) 维护；本模块既有 spec/feature 归档与提交组织要求继续适用。
+按 [行为证据](behavior-evidence.md) 验证实际公开构造、manifest 装配、Rail 回调/热更新与受影响的 provider/adapter 路径；
+仅手工实例化 Rail 或绕过工厂的内部测试不能证明集成可用。模型可见内容从实际请求/工具结果核对，文件/进程副作用独立读取。
+影响到下游宿主时记录实际验证的版本与消费者，仓内测试不能证明所有应用渠道已通过。
+有证据支持的故障类别按 [防错模式](defensive-patterns.md) 更新本模块 AGENTS/spec，避免把某个 Rail 的异常或清理语义扩展到全部框架。
