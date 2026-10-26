@@ -1773,7 +1773,11 @@ class TeamBackend:
                 team.prompt = prompt
         return team
 
-    async def is_team_completed(self) -> Optional[TeamCompletionSnapshot]:
+    async def is_team_completed(
+        self,
+        *,
+        allow_empty_board: bool = False,
+    ) -> Optional[TeamCompletionSnapshot]:
         """Evaluate whether the whole team has reached a completed state.
 
         Returns a snapshot only when all three conditions hold at once,
@@ -1788,6 +1792,17 @@ class TeamBackend:
                from concluding. In group mode, only explicitly mentioned
                broadcasts count as pending input.
 
+        ``allow_empty_board`` is the round-settlement opt-in. A leader that
+        did the whole round itself creates no task at all (and may never have
+        called ``build_team``, so its own roster row is absent too), so the
+        default rules would keep such a team from ever concluding -- and a
+        persistent team that never concludes never auto-pauses, leaving its
+        leader stream open for good. Callers that are evaluating a *finished
+        round* (rather than asking whether the team still has work) may pass
+        ``True`` to treat a genuinely empty board -- and an empty roster --
+        as terminal; the unread-message condition still applies, and a
+        non-empty roster must still be settled.
+
         Read-only; safe to call repeatedly. Queries the member DAO directly
         so the leader itself is part of the roster check (``list_members``
         excludes the calling member).
@@ -1797,18 +1812,52 @@ class TeamBackend:
             otherwise ``None``.
         """
         tasks = await self.task_manager.list_tasks()
-        if not tasks:
+        if not tasks and not allow_empty_board:
             return None
         if any(task.status not in TASK_TERMINAL_STATUSES for task in tasks):
+            if allow_empty_board:
+                team_logger.debug(
+                    "[team] round-settled completion blocked by open tasks: team=%s total=%d",
+                    self.team_name,
+                    len(tasks),
+                )
             return None
 
         members = await self.db.member.get_team_members(self.team_name)
         if not members:
-            return None
+            if not allow_empty_board:
+                return None
+            # The leader's own row only materializes once ``build_team`` runs,
+            # and a solo leader round may never build a team. Under the
+            # round-settled opt-in an empty roster is therefore a legitimate
+            # completed state; the unread-message condition still applies.
+            if await self.message_manager.has_unread_messages(include_broadcast=True):
+                team_logger.debug(
+                    "[team] round-settled completion blocked by unread messages: team=%s",
+                    self.team_name,
+                )
+                return None
+            return TeamCompletionSnapshot(member_count=0, task_count=len(tasks))
         if any(member.status not in MEMBER_SETTLED_STATUSES for member in members):
+            if allow_empty_board:
+                team_logger.debug(
+                    "[team] round-settled completion blocked by unsettled members: "
+                    "team=%s members=%s",
+                    self.team_name,
+                    [
+                        f"{member.member_name}:{member.status}"
+                        for member in members
+                        if member.status not in MEMBER_SETTLED_STATUSES
+                    ],
+                )
             return None
 
         if await self.message_manager.has_unread_messages(include_broadcast=True):
+            if allow_empty_board:
+                team_logger.debug(
+                    "[team] round-settled completion blocked by unread messages: team=%s",
+                    self.team_name,
+                )
             return None
 
         return TeamCompletionSnapshot(member_count=len(members), task_count=len(tasks))

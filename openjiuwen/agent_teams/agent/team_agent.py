@@ -1284,6 +1284,13 @@ class TeamAgent(BaseAgent):
         settle trigger the completion check immediately instead of waiting
         for the next periodic POLL_TASK tick. Best-effort -- an absent or
         stopped event bus silently drops the enqueue.
+
+        ``payload["round_settled"]`` tells the handler this poll belongs to a
+        finished round, so an empty task board -- and an empty roster, since
+        a solo leader round may never call build_team -- counts as terminal.
+        A persistent team that never concludes would never auto-pause; its
+        leader stream would stay open indefinitely. Cycles that have not
+        settled a round keep the strict rules.
         """
         if self.role != TeamRole.LEADER or self.lifecycle != "persistent":
             return
@@ -1293,7 +1300,10 @@ class TeamAgent(BaseAgent):
         )
 
         await self._coordination.enqueue(
-            InnerEventMessage(event_type=InnerEventType.POLL_TASK),
+            InnerEventMessage(
+                event_type=InnerEventType.POLL_TASK,
+                payload={"round_settled": True},
+            ),
         )
 
     async def _reconcile_member_startup(self) -> None:
