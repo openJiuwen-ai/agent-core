@@ -19,6 +19,7 @@ Markdown 模板是团队 Agent 的行为契约。Python 侧只做装配（`secti
 
 | 模板文件 | 触发条件 | 装配位置 | 主要内容 |
 |---|---|---|---|
+| `org_root_aggregation.md` | Organization Leader | `organization/runtime.py` / `organization/tools.py` | Shared aggregation selection policy (cn/en) |
 | （无模板，Python 装配） | `member_name` 或 `member_prompt` 非空 | `messages.build_identity_text` → `build_team_identity_section` | **唯一的 per-member 内容**：自身 `member_name` 一行 + `## 私有工作约定` 子节（`member_prompt` 为空则只出名字）。正文只有一份（`build_identity_text`），section 只是它给外部 CLI 用的包装（P:10，`include_member_specific=True` 内联进静态 prompt）；**进程内成员经对话历史收到它**（`<team-context>`），留在系统提示词会让每个成员各占一份前缀 KV cache。见 [[F_68]] / [[F_70]] |
 | `leader_bootstrap.md` | `role == LEADER`，**常驻系统提示词** | `build_leader_bootstrap_section` | Leader 在系统提示词里唯一的团队内容（[[F_76]]）：身份定位 + `{{collaboration_mechanism}}` 槽 + 「先调 `build_team`，完整协同准则随它的返回结果下发」。**建队之前唯一成立的内容**，因此也只有它留在前缀 |
 | `leader_policy.md` | `role == LEADER`，**经 `build_team` 的 ToolResult 下发** | `build_team_role_section` → `build_leader_policy_disclosure` | Leader 的核心理念、职责、成果交接（通道由内容形态决定：短内容直接进消息正文，成型产物落盘、消息只传路径）、决策原则（禁止自执行 / 背景不清先建调研成员 / 无人认领时指派或 spawn / 整合总结交独立汇总成员）、响应节奏。**「任务状态流转」一节已移出**到下面按模式拆分的 `task_state_*.md`（[[F_76]]）——它是模式相关的，留在这份全模式共用的模板里必然要么写死一种模式、要么每行加 caveat。**纯静态无占位符**——分流规则已归 `leader_bootstrap.md` 独占，此处不再留槽（留着的槽早晚会被再填一次，两个消费者就重新长出来） |
@@ -54,6 +55,8 @@ Teammate 不消费 workflow / lifecycle 模板；`sections.py` 在 `role != LEAD
 6. **排版风格** — 顶层用 `##`（因为外层 Rail 已经提供 `#` 级标题），列表/代码块保持紧凑。避免使用 emoji 装饰。
 
 ## Runtime Assembly 路径
+
+Organization 的共享聚合规则使用 `org_root_aggregation.md`（cn/en 成对），由组织运行时的协作与认领后提示词、组织更新工具说明通过 `load_template` 读取；它不单独创建新的 Team section，也不进入未启用组织的普通 Team 提示词。
 
 Organization 的单次汇总收尾补偿使用 `org_summary_closeout.md`（cn/en 成对），由
 `OrganizationRuntimeManager` 在自然暂停且汇总尚未提交时投递到对话，动态字段为

@@ -5,9 +5,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
-from openjiuwen.agent_teams.organization.aggregation import ROOT_AGGREGATION_GUIDANCE
 from openjiuwen.agent_teams.organization.schema import (
     OrgSummaryExecutionStatus,
     OrgTaskAggregationMode,
@@ -20,6 +19,7 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgUnclaimedTaskPolicy,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager, _normalize_parent_task_id
+from openjiuwen.agent_teams.prompts.loader import load_template
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
@@ -633,8 +633,8 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
                 "output_context.description, output_context.result_uri, or output_abstract; "
                 "an output field is not supported. set_aggregation_mode lets the Root Leader "
                 "explicitly choose HIERARCHICAL or SUMMARY_TEAM after claiming a root task; "
-                + ROOT_AGGREGATION_GUIDANCE["en"]
-                + "revise_description lets the creator "
+                + cast(str, load_template("org_root_aggregation", "en").content).strip()
+                + " revise_description lets the creator "
                 "supplement an unclaimed task once when requested by the organization."
             ),
             manager=manager,

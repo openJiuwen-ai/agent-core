@@ -3351,9 +3351,9 @@ def test_claimed_root_prompt_distinguishes_aggregation_modes(active_organization
     assert len(scheduled) == 1
     prompt = scheduled[0]["prompt"]
     assert "HIERARCHICAL" in prompt
-    from openjiuwen.agent_teams.organization.aggregation import ROOT_AGGREGATION_GUIDANCE
+    from openjiuwen.agent_teams.prompts.loader import load_template
 
-    assert ROOT_AGGREGATION_GUIDANCE["en"] in prompt
+    assert str(load_template("org_root_aggregation", "en").content).strip() in prompt
     assert "its final output itself satisfies the root" in prompt
     assert "Domain orthogonality does not change this condition" in prompt
     assert "do not invent a final integrator" in prompt
@@ -4976,24 +4976,28 @@ async def test_drain_leader_turns_delivers_via_interact_when_running_idle(active
 
 def test_aggregation_guidance_is_shared_by_system_prompt_and_update_tool():
     """Keep mode selection consistent across language and tool entry points."""
-    from openjiuwen.agent_teams.organization.aggregation import ROOT_AGGREGATION_GUIDANCE
+    from openjiuwen.agent_teams.prompts.loader import load_template
     from openjiuwen.agent_teams.organization.runtime import _ORG_COLLABORATION_PROMPT
 
+    guidance = {
+        language: str(load_template("org_root_aggregation", language).content).strip()
+        for language in ("cn", "en")
+    }
     for language in ("cn", "en"):
-        assert ROOT_AGGREGATION_GUIDANCE[language] in _ORG_COLLABORATION_PROMPT[language]
+        assert guidance[language] in _ORG_COLLABORATION_PROMPT[language]
     tool = OrgUpdateTaskTool(SimpleNamespace(), "owner", "leader")
-    assert ROOT_AGGREGATION_GUIDANCE["en"] in tool.card.description
+    assert guidance["en"] in tool.card.description
     assert "must choose SUMMARY_TEAM" in tool.card.description
     assert "no specialist Team is responsible for the complete root deliverable" in tool.card.description
-    assert "不存在承担完整根交付的专业团队，且" in ROOT_AGGREGATION_GUIDANCE["cn"]
+    assert "不存在承担完整根交付的专业团队，且" in guidance["cn"]
     assert "the output is short, the task is small" in tool.card.description
     assert "time or overhead can be reduced" in tool.card.description
     assert "Choose HIERARCHICAL only" in tool.card.description
     assert "its final output itself satisfies the root" in tool.card.description
-    assert ROOT_AGGREGATION_GUIDANCE["en"].index("must choose SUMMARY_TEAM") < ROOT_AGGREGATION_GUIDANCE["en"].index(
+    assert guidance["en"].index("must choose SUMMARY_TEAM") < guidance["en"].index(
         "Choose HIERARCHICAL only"
     )
-    assert ROOT_AGGREGATION_GUIDANCE["cn"].index("必须选择 SUMMARY_TEAM") < ROOT_AGGREGATION_GUIDANCE["cn"].index(
+    assert guidance["cn"].index("必须选择 SUMMARY_TEAM") < guidance["cn"].index(
         "才选择 HIERARCHICAL"
     )
     mode_description = tool.card.input_params["properties"]["aggregation_mode"]["description"]
@@ -5001,10 +5005,10 @@ def test_aggregation_guidance_is_shared_by_system_prompt_and_update_tool():
     assert "parallel independent domain conclusions" in mode_description
     assert "regardless of length, time, overhead or conflicts" in mode_description
     assert "Owner compilation alone does not qualify" in mode_description
-    for guidance in ROOT_AGGREGATION_GUIDANCE.values():
-        assert "PPT" not in guidance
-        assert "例如" not in guidance
-        assert "such as" not in guidance
+    for text in guidance.values():
+        assert "PPT" not in text
+        assert "例如" not in text
+        assert "such as" not in text
 
 
 @pytest.mark.asyncio

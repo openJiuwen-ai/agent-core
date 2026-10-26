@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.messager.inprocess import InProcessMessager
-from openjiuwen.agent_teams.organization.aggregation import ROOT_AGGREGATION_GUIDANCE
 from openjiuwen.agent_teams.organization.events import (
     OrgEvent,
     OrgEventMessage,
@@ -55,6 +54,7 @@ from openjiuwen.agent_teams.organization.task_pool import (
     _is_supersedable_task,
 )
 from openjiuwen.agent_teams.organization.unclaimed import OrgUnclaimedTaskService
+from openjiuwen.agent_teams.prompts.loader import load_template
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
@@ -192,7 +192,7 @@ _ORG_COLLABORATION_PROMPT = {
         "认领、启动、完成该任务，也不得为绕过等待创建内容重复的替代子任务。结束当前回合并等待 "
         "完成事件；只有 FAILED、REJECTED 或 NEEDS_REVISION 时，才按既有修复流程创建修复子任务。\n"
         "认领根任务后，必须在拆分前显式选择汇总模式。"
-        + ROOT_AGGREGATION_GUIDANCE["cn"]
+        + cast(str, load_template("org_root_aggregation", "cn").content).strip()
         + "选择并启动根任务后，所有拆分工作都必须以该根任务为直接父任务，"
         "不能创建并列根任务；禁止对根任务调用 org_delegate_task，跨 Team 只通过子任务的 "
         "delegated_to_team_id 或对子任务 org_delegate_task。SUMMARY_TEAM 下，本 Team 自己的贡献也必须写成 "
@@ -217,8 +217,8 @@ _ORG_COLLABORATION_PROMPT = {
         "it, and do not create a duplicate replacement merely to bypass waiting. End the current turn and wait "
         "for its completion event. Create a repair child only after FAILED, REJECTED, or NEEDS_REVISION.\n"
         "After claiming a root, explicitly choose its aggregation mode before decomposition. "
-        + ROOT_AGGREGATION_GUIDANCE["en"]
-        + "After choosing and starting the root, create every work item as "
+        + cast(str, load_template("org_root_aggregation", "en").content).strip()
+        + " After choosing and starting the root, create every work item as "
         "its direct child, never as a parallel root; never org_delegate_task the root—cross-team work uses "
         "child delegated_to_team_id or org_delegate_task on that child only. In SUMMARY_TEAM mode, record your "
         "own contribution as a direct root child and have it accepted; an internal Team task alone is not a "
@@ -2091,8 +2091,8 @@ class OrganizationRuntimeManager:
             f"Your team claimed organization task {task_id} in {organization_id}. "
             "Inspect it with org_view_tasks(action='get'). If it is a root task whose mode has not yet been "
             "explicitly selected, choose its aggregation mode before decomposition. "
-            + ROOT_AGGREGATION_GUIDANCE["en"]
-            + "Call "
+            + cast(str, load_template("org_root_aggregation", "en").content).strip()
+            + " Call "
             "org_update_task(action='set_aggregation_mode') with that choice. "
             "Then call org_update_task(action='start') and execute the "
             "defined scope through your Team workflow. If an independent part requires another organization "
