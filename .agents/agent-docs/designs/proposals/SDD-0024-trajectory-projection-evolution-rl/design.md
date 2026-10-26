@@ -4,7 +4,6 @@ title: 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL �
 slug: trajectory-projection-evolution-rl
 status: draft
 stage: proposals
-owner: "@alan_cheng"
 reviewers: []
 created: 2026-09-15
 updated: 2026-09-15
@@ -31,6 +30,11 @@ implementation:
     - agent-core@2105c5e1c
     - agent-core@c61caeec3
   tracking: "agent-core: openjiuwen/agent_evolving/trajectory/ · openjiuwen/harness/rails/evolution/ · openjiuwen/agent_evolving/agent_rl/"
+author: '@alan_cheng'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL 输入

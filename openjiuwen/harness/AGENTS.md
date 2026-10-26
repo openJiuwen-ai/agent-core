@@ -128,14 +128,14 @@ harness/
 新 feature 使用分钟时间命名，历史文件名保留；spec 沿用已有编号。
 
 前置铁律——**文档先是设计的输入，才是提交的产出**。动手改任何代码设计**之前**，先 `grep` +
-读相关的 `.agents/agent-docs/specs/harness/S_NN_*`（现有契约 / 不变量 / 边界）与 `.agents/agent-docs/features/harness/F_YYYYMMDD_HHMM_*`（为什么长
+读相关的 `.agents/agent-docs/specs/harness/S_NN_*`（现有契约 / 不变量 / 边界）与 `.agents/agent-docs/features/F_YYYYMMDD_HHMM_*`（为什么长
 这样、当初拒绝了哪些方案），拿它们校准方案；方案定了**当场**同步改掉对应 S / F。先码后档、
 拖到提交前才补文档是把流程做反了。
 
 三条强制约束，提交时必查：
 
 1. **每次特性更新必须归档 feature 文档，且特性代码、测试代码、文档拆成三个连续提交**：在
-   `.agents/agent-docs/features/harness/` 下新增 `F_YYYYMMDD_HHMM_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。落地
+   `.agents/agent-docs/features/` 下新增 `F_YYYYMMDD_HHMM_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。落地
    顺序固定为三个紧邻的提交——提交 1 特性代码（`feat(harness): ...` 或对应 type），提交 2 单测
    （`test(harness): ...`），提交 3 文档（`docs(harness): ...`，含 `F_YYYYMMDD_HHMM_*.md` 新增 +
    `S_NN_*.md` 修订）。
@@ -170,3 +170,5 @@ footer 用 `Refs: #<issue>` 格式关联 issue。issue 号若无法从当前上�
 涉及 `.agents/agent-docs/features/harness/F_*` / `.agents/agent-docs/specs/harness/S_*` 文档更新的特性改动，**特性代码、测试代码、文档拆
 成三个连续提交**（`feat(harness)` → `test(harness)` → `docs(harness)`），细则见上文「设计文档
 归档与双向同步」约束 #1。
+
+新 F 文档直接放 `.agents/agent-docs/features/`，模块以 frontmatter modules 标注；历史子目录通过 features/INDEX.md 定位。作者使用 Git author，F/B 声明关联 designs，修改后按根 AGENTS.md 自动同步索引。

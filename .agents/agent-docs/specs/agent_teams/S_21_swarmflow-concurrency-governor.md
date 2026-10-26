@@ -1,3 +1,15 @@
+---
+title: Swarmflow 并发治理运行时规约
+author: chenchunzhou
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_21_swarmflow-concurrency-governor
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chenchunzhou1@huawei.com
+---
+
 # Swarmflow 并发治理运行时规约
 
 ## 元信息

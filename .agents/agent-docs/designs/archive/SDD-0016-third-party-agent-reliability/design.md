@@ -4,7 +4,6 @@ title: 三方 Agent 可靠性设计
 slug: third-party-agent-reliability
 status: shipped
 stage: archive
-owner: "@zhanglongmin"
 reviewers: ["@zhanglongmin"]
 created: 2026-08-21
 updated: 2026-08-31
@@ -29,6 +28,11 @@ implementation:
     - agent-core@f0160f813
     - agent-core@ddadc104b
   tracking: "openjiuwen/agent_teams/"
+author: '@zhanglongmin'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # 三方 Agent 可靠性设计

@@ -1,3 +1,15 @@
+---
+title: Session 文件数据存储（message/task 正文外置）
+author: hwxiajing
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_23_session-file-data-store
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: xiajing22@huawei.com
+---
+
 # Session 文件数据存储（message/task 正文外置）
 
 `openjiuwen.agent_teams.team_workspace.session_file_store` 子系统的设计规约：message/task 长正文从 SQLite 移入 session 目录文件，DB `content` 列只存占位符。本文描述"系统当前是什么样"。

@@ -4,7 +4,6 @@ title: SwarmFlow 有状态会话与人机交互编排
 slug: swarmflow-stateful-sessions-and-human
 status: shipped
 stage: archive
-owner: "@alan_cheng"
 reviewers: ["@arch-team"]
 created: 2026-06-08
 updated: 2026-06-24
@@ -33,6 +32,11 @@ implementation:
     - alan_cheng/agent-core@6b635c95
     - alan_cheng/agent-core@5af27ac9
     - alan_cheng/agent-core@0b8e4f54
+author: '@alan_cheng'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # SwarmFlow 有状态会话与人机交互编排

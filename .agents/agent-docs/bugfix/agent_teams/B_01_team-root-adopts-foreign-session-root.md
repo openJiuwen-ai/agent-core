@@ -1,3 +1,17 @@
+---
+title: Team 根 span 误认并发会话的 root，导致整条团队轨迹丢失
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: B_01_team-root-adopts-foreign-session-root
+type: B
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # Team 根 span 误认并发会话的 root，导致整条团队轨迹丢失
 
 ## 元信息

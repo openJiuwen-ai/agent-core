@@ -1,3 +1,15 @@
+---
+title: Member Spawn 与 Stream 控制
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_05_member-spawn-and-stream
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # Member Spawn 与 Stream 控制
 
 ## 元信息

@@ -1,3 +1,15 @@
+---
+title: Top-level Utilities
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_16_top-level-utilities
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # Top-level Utilities
 
 `agent_teams/` 顶层的几块基础设施：路径、上下文、运行时国际化串、时间渲染、保留名常量、

@@ -4,7 +4,6 @@ title: 原生 Harness 异步工具管控框架与磁盘溢写
 slug: native-harness-async-tool-control-and-spill
 status: shipped
 stage: archive
-owner: "@alan_cheng"
 reviewers: ["@arch-team", "@harness-owner"]
 created: 2026-06-22
 updated: 2026-06-24
@@ -25,6 +24,11 @@ implementation:
     - alan_cheng/agent-core@1844d907
     - alan_cheng/agent-core@2ed2fe35
     - alan_cheng/agent-core@738128ea
+author: '@alan_cheng'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # 原生 Harness 异步工具管控框架与磁盘溢写

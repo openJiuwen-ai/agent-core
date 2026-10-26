@@ -1,3 +1,15 @@
+---
+title: Swarmflow 引擎与 Worker 运行时规约
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_18_swarmflow-engine-and-worker
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # Swarmflow 引擎与 Worker 运行时规约
 
 ## 元信息

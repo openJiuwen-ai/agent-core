@@ -1,3 +1,17 @@
+---
+title: 团队中断关闭流后无恢复入口：裸文本恢复静默失效，recovery 流伪造 "None" 轮次
+author: wangcan103
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: B_07_team-interrupt-resume-entry-and-leader-ready
+type: B
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: wangcan103@huawei.com
+---
+
 # 团队中断关闭流后无恢复入口：裸文本恢复静默失效，recovery 流伪造 "None" 轮次
 
 ## 元信息

@@ -1,6 +1,6 @@
 # Harness 开发文档约定
 
-原规则迁自 `openjiuwen/harness/docs/AGENTS.md`。Harness 的长期文档位于仓库根 `.agents/agent-docs/specs/harness/` 与 `.agents/agent-docs/features/harness/`；代码看 `git log` / 模块内 AGENTS.md。
+原规则迁自 `openjiuwen/harness/docs/AGENTS.md`。Harness 的长期文档位于仓库根 `.agents/agent-docs/specs/harness/` 与 `.agents/agent-docs/features/`；代码看 `git log` / 模块内 AGENTS.md。
 
 ## 目录用途
 
@@ -14,7 +14,7 @@
 ## 命名与位置
 
 - spec：`.agents/agent-docs/specs/harness/S_NN_<slug>.md`，沿用已有编号；新增时取历史最大已用编号加一，不复用旧号。
-- feature：`.agents/agent-docs/features/harness/F_YYYYMMDD_HHMM_<slug>.md`，时间采用 Asia/Singapore，精确到分钟。
+- feature：`.agents/agent-docs/features/F_YYYYMMDD_HHMM_<slug>.md`，时间采用 Asia/Singapore，精确到分钟。
 - slug 使用小写英文与短横线，创建后标识不变；完整名称重名时确认是否同一记录，否则细化主题，不能覆盖。
 - 已有文件不重命名。修订 spec 更新最近修订日期，feature 记录归档日期；不分配新的 feature 递增号。
 

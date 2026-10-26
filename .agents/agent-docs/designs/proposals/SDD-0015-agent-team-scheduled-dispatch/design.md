@@ -4,7 +4,6 @@ title: AgentTeam 调度模式：任务图驱动的低通信协同与验证闭环
 slug: agent-team-scheduled-dispatch
 status: draft
 stage: proposals
-owner: "@alan_cheng"
 reviewers: []
 created: 2026-08-20
 updated: 2026-08-20
@@ -13,6 +12,11 @@ domain: scheduler
 modules: [agent_teams]
 tags: [agent-team, scheduled-dispatch, task-graph, verification]
 related: [SDD-0005]
+author: '@alan_cheng'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # AgentTeam 调度模式：任务图驱动的低通信协同与验证闭环

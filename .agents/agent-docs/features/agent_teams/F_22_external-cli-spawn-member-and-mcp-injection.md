@@ -1,3 +1,17 @@
+---
+title: External-CLI as a spawn_member Role + Static Spec Config + MCP Auto-Injection
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_22_external-cli-spawn-member-and-mcp-injection
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # External-CLI as a spawn_member Role + Static Spec Config + MCP Auto-Injection
 
 > **后续变更（F_26）**：本特性当时复用 `spawn_member` + `role_type` 区分、并明确拒绝独立工具；F_26 基于「降低 LLM 调用负担」反转该决策，把 spawn 按 role_type 拆为四个独立工具，外部 CLI 对应 `spawn_external_cli`。下文「复用 spawn_member」「拒绝独立工具」是当时的决策记录，现状以 F_26 / S_08 为准。

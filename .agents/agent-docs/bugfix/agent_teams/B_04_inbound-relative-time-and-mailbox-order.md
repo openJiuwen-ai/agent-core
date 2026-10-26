@@ -1,3 +1,17 @@
+---
+title: 被唤醒成员倒序读邮箱，入站消息的相对时间写死在历史里
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: B_04_inbound-relative-time-and-mailbox-order
+type: B
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # 被唤醒成员倒序读邮箱，入站消息的相对时间写死在历史里
 
 ## 元信息

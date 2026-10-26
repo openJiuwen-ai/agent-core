@@ -1,3 +1,17 @@
+---
+title: GenAI 工具 Span 标准化
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_02_genai-semconv-tool-spans
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # GenAI 工具 Span 标准化
 
 ## 元信息

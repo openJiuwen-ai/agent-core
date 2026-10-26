@@ -1,3 +1,17 @@
+---
+title: 成员 desc/prompt 二分与 spec 归一
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_49_member-desc-prompt-split-and-spec-unification
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # 成员 desc/prompt 二分与 spec 归一
 
 ## 元信息

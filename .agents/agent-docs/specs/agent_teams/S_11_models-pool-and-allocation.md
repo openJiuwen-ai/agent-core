@@ -1,3 +1,15 @@
+---
+title: Models Pool and Allocation
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_11_models-pool-and-allocation
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # Models Pool and Allocation
 
 ## 元信息

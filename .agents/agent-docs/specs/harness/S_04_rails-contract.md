@@ -1,3 +1,15 @@
+---
+title: S_04 Rails 契约
+author: yangzequ
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_04_rails-contract
+type: S
+modules:
+- openjiuwen/harness
+files: []
+author_email: yangzequ1@huawei.com
+---
+
 # S_04 Rails 契约
 
 ## 元信息

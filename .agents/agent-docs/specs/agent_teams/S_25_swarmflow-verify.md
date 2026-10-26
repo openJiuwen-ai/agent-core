@@ -1,3 +1,15 @@
+---
+title: Swarmflow verify 原语规约
+author: sodawlh
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_25_swarmflow-verify
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: 3240101939@zju.edu.cn
+---
+
 # Swarmflow verify 原语规约
 
 ## 元信息

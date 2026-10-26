@@ -1,3 +1,13 @@
+---
+title: 设计资产
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: README
+type: D
+modules: []
+files: []
+---
+
 # 设计资产
 
 本目录保存 core 各模块及跨仓设计。JiuwenSwarm 应用设计已迁出，当前维护位置见 [迁移说明](migration-20261026.md)。设计规则与模板由

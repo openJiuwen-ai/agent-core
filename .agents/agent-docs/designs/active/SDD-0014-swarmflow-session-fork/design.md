@@ -4,7 +4,6 @@ title: SwarmFlow 有状态会话 fork（agent_session 上下文继承）
 slug: swarmflow-session-fork
 status: in-development
 stage: active
-owner: "@sodawlh"
 reviewers: ["@sodawlh"]
 created: 2026-08-17
 updated: 2026-08-21
@@ -24,6 +23,11 @@ implementation:
   prs: []
   commits: []
   # tracking:
+author: '@sodawlh'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # SwarmFlow 有状态会话 fork（agent_session 上下文继承）

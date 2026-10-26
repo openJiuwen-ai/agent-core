@@ -4,7 +4,6 @@ title: SwarmFlow 中断恢复与崩溃可恢复状态持久化
 slug: swarmflow-interruption-recovery-and-durable-state
 status: shipped
 stage: archive
-owner: "@alan_cheng"
 reviewers: ["@arch-team"]
 created: 2026-06-08
 updated: 2026-06-24
@@ -35,6 +34,11 @@ implementation:
     - alan_cheng/agent-core@89255dc3
     - alan_cheng/agent-core@dcdd88fc
     - alan_cheng/agent-core@0126007c
+author: '@alan_cheng'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # SwarmFlow 中断恢复与崩溃可恢复状态持久化

@@ -87,3 +87,8 @@ description: 检视 agent-core/openJiuwen 代码的技术定位、模块约束�
 保持待审代码和文档不变；不自动提交、切分支、改写历史、启动多代理或操作远端平台。
 不运行格式化或静态检查，包括 ruff、pylint、mypy、make check、make format；
 模块文件中的同类命令不覆盖本仓禁止执行这些工具的约束。
+
+## 文档元数据与索引
+
+遵循 [作者、设计关联与索引规则](../jw-design/references/document-metadata.md)：受管文档以 frontmatter 标注 Git author，移除 owner；新 F 平铺在 features/，F/B 显式声明 designs。
+写作/修改后自动运行文档同步工具刷新索引；检视只报告缺口，不改写待审资料。

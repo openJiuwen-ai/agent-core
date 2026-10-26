@@ -1,10 +1,20 @@
+---
+title: SDD 编号台账 (REGISTRY)
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: REGISTRY
+type: D
+modules: []
+files: []
+---
+
 # SDD 编号台账 (REGISTRY)
 
 > 迁往 JiuwenSwarm 的设计位置见 [迁移说明](migration-20261026.md)，原编号记录保留。
 
 > 历史 SDD 编号台账，保留原有记录。新设计使用 `D-YYYYMMDD-HHMM-<slug>`，不再取号或追加登记。
 
-| id | slug | created | owner         | initial-PR |
+| id | slug | created | author         | initial-PR |
 |----|------|---------|---------------|------------|
 | SDD-0001 | sample-design | 2026-06-15 | @your-handle  | - |
 | SDD-0002 | swarmflow-stateful-sessions-and-human | 2026-06-08 | @alan_cheng   | - |

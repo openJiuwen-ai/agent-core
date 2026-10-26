@@ -1,3 +1,17 @@
+---
+title: Self-Only Stale-Task Nudge：收敛渲染、精简载荷、接续投递
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_53_self-only-stale-nudge-minimal-and-append
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # Self-Only Stale-Task Nudge：收敛渲染、精简载荷、接续投递
 
 ## 元信息

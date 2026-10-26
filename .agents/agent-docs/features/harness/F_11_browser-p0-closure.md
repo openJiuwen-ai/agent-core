@@ -1,3 +1,16 @@
+---
+title: Browser P0 closure after runtime simplification
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: F_11_browser-p0-closure
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Browser P0 closure after runtime simplification
 
 ## Metadata

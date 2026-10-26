@@ -1,3 +1,17 @@
+---
+title: Swarmflow run_id 隔离、缓存重建与双层 Budget
+author: chenchunzhou
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_87_swarmflow-run-id-isolation-and-dual-budget
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chenchunzhou1@huawei.com
+---
+
 # Swarmflow run_id 隔离、缓存重建与双层 Budget
 
 让每次 swarmflow run 在 journal 缓存、token 账本两个维度上都按 `run_id` 隔离，并引入

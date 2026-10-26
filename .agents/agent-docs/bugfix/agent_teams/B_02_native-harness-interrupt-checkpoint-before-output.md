@@ -1,3 +1,17 @@
+---
+title: NativeHarness 中断结果输出前未持久化恢复状态
+author: wangcan103
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: B_02_native-harness-interrupt-checkpoint-before-output
+type: B
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: wangcan103@huawei.com
+---
+
 # NativeHarness 中断结果输出前未持久化恢复状态
 
 ## 元信息

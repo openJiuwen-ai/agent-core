@@ -1,3 +1,15 @@
+---
+title: Interaction Views and HITT Runtime Surface
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_07_interaction-views-and-hitt
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # Interaction Views and HITT Runtime Surface
 
 ## 元信息

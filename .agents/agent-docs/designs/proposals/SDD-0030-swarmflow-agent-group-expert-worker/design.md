@@ -4,7 +4,6 @@ title: Swarmflow 专家 worker：agent_template 算子参数复用专家团成�
 slug: swarmflow-agent-group-expert-worker
 status: draft
 stage: proposals
-owner: "@chenchunzhou"
 reviewers: []
 created: 2026-10-14
 updated: 2026-10-15
@@ -13,6 +12,11 @@ domain: core
 modules: [agent_teams/workflow, agent_teams]
 tags: [swarmflow, agent-template, agent-group, expert, worker, persona, design-canvas, cache, observability]
 related: [SDD-0007, SDD-0013, SDD-0018, SDD-0020, SDD-0021]
+author: '@chenchunzhou'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # Swarmflow 专家 worker：agent_template 算子参数复用专家团成员

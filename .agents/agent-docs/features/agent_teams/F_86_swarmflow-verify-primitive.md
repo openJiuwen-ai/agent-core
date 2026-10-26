@@ -1,3 +1,17 @@
+---
+title: Swarmflow 验证原语 verify()：把任务验收机制抽象为可脚本调用的原语
+author: sodawlh
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_86_swarmflow-verify-primitive
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: 3240101939@zju.edu.cn
+---
+
 # Swarmflow 验证原语 verify()：把任务验收机制抽象为可脚本调用的原语
 
 为 Swarmflow 脚本引入 `verify()` 原语，把调度模式的验收语义（verdict 一票否决 + score 平均分门槛）复用为脚本可调用的多 reviewer 判定。设计草案见 swarm-design-docs 的 SDD-0017。

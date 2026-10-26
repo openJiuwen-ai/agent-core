@@ -1,3 +1,13 @@
+---
+title: 群聊设计
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: swarmchat_design
+type: D
+modules: []
+files: []
+---
+
 # 群聊设计
 
 最近修订：2026-09-30。本文描述当前 core 实现，以及 jiuwenswarm 接入 core 的消息协议；平台实际接入进度以 jiuwenswarm 代码为准。

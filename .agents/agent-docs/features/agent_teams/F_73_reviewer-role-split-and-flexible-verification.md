@@ -1,3 +1,17 @@
+---
+title: 判断者角色拆分与弹性验证
+author: openJiuwen-bot
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_73_reviewer-role-split-and-flexible-verification
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: cla@openjiuwen.com
+---
+
 # 判断者角色拆分与弹性验证
 
 ## 元信息

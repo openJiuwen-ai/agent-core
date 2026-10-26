@@ -4,7 +4,6 @@ title: SwarmFlow 脚本定义增强与 Claude Code 工具对齐
 slug: swarmflow-script-enhancement-and-cc-alignment
 status: shipped
 stage: archive
-owner: "@alan_cheng"
 reviewers: ["@arch-team", "@tooling-owner"]
 created: 2026-06-22
 updated: 2026-06-24
@@ -28,6 +27,11 @@ implementation:
     - alan_cheng/agent-core@7f7501dd
     - alan_cheng/agent-core@c5fa41c2
     - alan_cheng/agent-core@490bfc75
+author: '@alan_cheng'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # SwarmFlow 脚本定义增强与 Claude Code 工具对齐

@@ -4,7 +4,6 @@ title: Team 模式模型组接入与成员模型分配
 slug: team-model-group
 status: draft
 stage: proposals
-owner: "@<huanghao>"
 reviewers: []
 created: 2026-09-14
 updated: 2026-09-14
@@ -13,6 +12,11 @@ domain: core
 modules: [agent_teams]
 tags: [agent-team, model-group, intelli-router, model-pool, external-cli, recovery]
 related: []
+author: '@<huanghao>'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # Team 模式模型组接入与成员模型分配

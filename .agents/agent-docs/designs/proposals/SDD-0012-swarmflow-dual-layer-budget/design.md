@@ -4,7 +4,6 @@ title: Swarmflow 双层 Budget（workflow 级 + session 级）撞顶逻辑
 slug: swarmflow-dual-layer-budget
 status: draft
 stage: proposals
-owner: "@wangcan103"
 reviewers: []
 created: 2026-08-14
 updated: 2026-08-18
@@ -13,6 +12,11 @@ domain: scheduler
 modules: [agent_teams/workflow]
 tags: [swarmflow, budget, concurrency, enforcement]
 related: [SDD-0010]
+author: '@wangcan103'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # Swarmflow 双层 Budget（workflow 级 + session 级）撞顶逻辑

@@ -1,3 +1,15 @@
+---
+title: S_01 公开 API 表面与构造流
+author: yangzequ
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_01_public-api-and-construction
+type: S
+modules:
+- openjiuwen/harness
+files: []
+author_email: yangzequ1@huawei.com
+---
+
 # S_01 公开 API 表面与构造流
 
 ## 元信息

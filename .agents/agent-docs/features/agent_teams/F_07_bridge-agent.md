@@ -1,3 +1,16 @@
+---
+title: Bridge Agent — 桥接外部独立 Agent
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: F_07_bridge-agent
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Bridge Agent — 桥接外部独立 Agent
 
 > **后续变更（F_26）**：bridge 的动态 spawn 现走独立工具 `spawn_bridge_agent`（不再是 `spawn_member(role_type='bridge_agent')`）。下文相关表述是当时的设计记录，工具名与门控现状以 F_26 / S_08 为准。

@@ -4,7 +4,6 @@ title: Swarmflow Journal/WAL 按 run 拆分与 WAL 日志化治理
 slug: swarmflow-per-run-journal-wal-split
 status: shipped
 stage: archive
-owner: "@xiajing"
 reviewers: ["@xiajing"]
 created: 2026-09-16
 updated: 2026-09-16
@@ -30,6 +29,11 @@ implementation:
     - agent-core@045eea481
     - agent-core@11ba3d0ba
   tracking: "openjiuwen/agent_teams/workflow/（branch bugfix/swarmflow-wal-per-runid，基于 origin/develop f1d7fd692）"
+author: '@xiajing'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # Swarmflow Journal/WAL 按 run 拆分与 WAL 日志化治理

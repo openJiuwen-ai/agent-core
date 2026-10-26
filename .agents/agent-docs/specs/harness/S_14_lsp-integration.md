@@ -1,3 +1,15 @@
+---
+title: S_14 LSP 集成
+author: yangzequ
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_14_lsp-integration
+type: S
+modules:
+- openjiuwen/harness
+files: []
+author_email: yangzequ1@huawei.com
+---
+
 # S_14 LSP 集成
 
 ## 元信息

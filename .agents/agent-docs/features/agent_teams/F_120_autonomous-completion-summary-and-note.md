@@ -1,3 +1,17 @@
+---
+title: 自主模式接入完成摘要与详情，两种模式统一取消完成汇报
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_120_autonomous-completion-summary-and-note
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # 自主模式接入完成摘要与详情，两种模式统一取消完成汇报
 
 ## 元信息

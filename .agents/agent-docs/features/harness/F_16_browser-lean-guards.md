@@ -1,3 +1,16 @@
+---
+title: 'Browser lean guards: general guarantees instead of special cases'
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: F_16_browser-lean-guards
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # Browser lean guards: general guarantees instead of special cases
 
 ## Metadata

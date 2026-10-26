@@ -4,7 +4,6 @@ title: Swarmflow 渐进式工具暴露开关与三方 Agent 接入（tool_search
 slug: swarmflow-toolsearch-and-thirdparty-agent
 status: draft
 stage: proposals
-owner: "@chenchunzhou"
 reviewers: []
 created: 2026-09-18
 updated: 2026-09-29
@@ -13,6 +12,11 @@ domain: core
 modules: [agent_teams/workflow]
 tags: [swarmflow, tool-search, progressive-tool, third-party-agent, claude, codex, cache, fork, observability]
 related: [SDD-0002, SDD-0005, SDD-0007, SDD-0014, SDD-0016, SDD-0020]
+author: '@chenchunzhou'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # Swarmflow 渐进式工具暴露开关与三方 Agent 接入（tool_search + agent_type）

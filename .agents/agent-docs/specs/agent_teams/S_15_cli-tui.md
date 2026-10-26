@@ -1,3 +1,15 @@
+---
+title: Agent Teams CLI / TUI Spec
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_15_cli-tui
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # Agent Teams CLI / TUI Spec
 
 ## 元信息

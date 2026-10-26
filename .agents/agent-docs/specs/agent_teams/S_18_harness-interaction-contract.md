@@ -1,3 +1,15 @@
+---
+title: S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_18_harness-interaction-contract
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # S_18 Harness 交互契约（HarnessProtocol / MemberRuntime）
 
 最近一次修订日期：2026-10-10

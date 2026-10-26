@@ -1,3 +1,17 @@
+---
+title: 'Human-Agent Mailbox: Flip Auto-Read Off'
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_20_human-agent-mailbox-unread-flip
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # Human-Agent Mailbox: Flip Auto-Read Off
 
 ## 元信息

@@ -4,7 +4,6 @@ title: 示例设计文档（脚手架自带，可删除）
 slug: sample-design
 status: draft
 stage: proposals
-owner: "@your-handle"
 reviewers: []
 created: 2026-06-15
 updated: 2026-06-15
@@ -12,6 +11,12 @@ version: 1
 domain: core
 tags: [example, scaffold]
 related: []
+author: '@your-handle'
+author_note: 由历史 owner 字段原值迁移
+type: D
+modules: []
+files: []
+author_email: null
 ---
 
 # 示例设计文档（脚手架自带，可删除）

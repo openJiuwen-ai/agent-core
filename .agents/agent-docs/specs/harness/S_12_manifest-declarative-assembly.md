@@ -1,3 +1,15 @@
+---
+title: S_12 Manifest 声明式装配
+author: yangzequ
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_12_manifest-declarative-assembly
+type: S
+modules:
+- openjiuwen/harness
+files: []
+author_email: yangzequ1@huawei.com
+---
+
 # S_12 Manifest 声明式装配
 
 ## 元信息

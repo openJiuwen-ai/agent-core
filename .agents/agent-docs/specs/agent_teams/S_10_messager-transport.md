@@ -1,3 +1,15 @@
+---
+title: S_10 Messager 传输层与注册表
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_10_messager-transport
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # S_10 Messager 传输层与注册表
 
 ## 元信息

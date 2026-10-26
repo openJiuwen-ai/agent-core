@@ -4,7 +4,6 @@ title: Swarmflow 运行态控制意图（Early-Return / Pause-Resume / Stop）
 slug: swarmflow-runtime-control-intents
 status: shipped
 stage: archive
-owner: "@chenchunzhou"
 reviewers: ["@chenchunzhou"]
 created: 2026-08-15
 updated: 2026-09-18
@@ -24,6 +23,11 @@ implementation:
   prs: []
   commits: []
   tracking: []
+author: '@chenchunzhou'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # Swarmflow 运行态控制意图（Early-Return / Pause-Resume / Stop）

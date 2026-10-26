@@ -1,3 +1,15 @@
+---
+title: NativeHarness 异步工具框架运行时规约
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_20_native-harness-async-tool-framework
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # NativeHarness 异步工具框架运行时规约
 
 ## 元信息

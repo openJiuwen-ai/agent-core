@@ -1,3 +1,16 @@
+---
+title: DSH External Harness Adapter
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: F_95_dsh-external-harness-adapter
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # DSH External Harness Adapter
 
 ## 元信息

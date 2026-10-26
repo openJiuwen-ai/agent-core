@@ -1,3 +1,17 @@
+---
+title: Block C：成员目录链接器（member-directory linker）
+author: hwxiajing
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_85_block-c-member-directory-linker
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: xiajing22@huawei.com
+---
+
 # Block C：成员目录链接器（member-directory linker）
 
 ## 元信息

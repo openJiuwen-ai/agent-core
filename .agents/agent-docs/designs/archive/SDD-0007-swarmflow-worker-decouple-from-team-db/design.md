@@ -4,7 +4,6 @@ title: SwarmFlow Worker 去团队成员化与会话存储解耦
 slug: swarmflow-worker-decouple-from-team-db
 status: shipped
 stage: archive
-owner: "@alan_cheng"
 reviewers: ["@arch-team"]
 created: 2026-06-23
 updated: 2026-06-24
@@ -25,6 +24,11 @@ implementation:
     - alan_cheng/agent-core@e956586a
     - alan_cheng/agent-core@a15469dd
     - alan_cheng/agent-core@1d71d7af
+author: '@alan_cheng'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # SwarmFlow Worker 去团队成员化与会话存储解耦

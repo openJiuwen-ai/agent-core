@@ -1,3 +1,15 @@
+---
+title: S_01 公开 API 表面与 Spec 流
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_01_public-api-and-spec-flow
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # S_01 公开 API 表面与 Spec 流
 
 ## 元信息

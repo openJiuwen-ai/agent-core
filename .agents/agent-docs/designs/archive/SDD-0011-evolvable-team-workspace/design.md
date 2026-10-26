@@ -4,7 +4,6 @@ title: 可演进 Team 工作区
 slug: evolvable-team-workspace
 status: shipped
 stage: archive
-owner: "@xiajing"
 reviewers: ["@xiajing"]
 created: 2026-08-12
 updated: 2026-08-20
@@ -29,6 +28,11 @@ implementation:
     - agent-core@d35c5321c
     - agent-core@aa56c3ca8
   tracking: "openjiuwen/agent_teams/team_workspace/"
+author: '@xiajing'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # 可演进 Team 工作区

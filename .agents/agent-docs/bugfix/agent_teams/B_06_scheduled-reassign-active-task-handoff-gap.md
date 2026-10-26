@@ -1,3 +1,17 @@
+---
+title: 调度模式：改派一个已开工的任务给尚未启动的成员后，新 owner 永远收不到交接
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: B_06_scheduled-reassign-active-task-handoff-gap
+type: B
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # 调度模式：改派一个已开工的任务给尚未启动的成员后，新 owner 永远收不到交接
 
 ## 元信息

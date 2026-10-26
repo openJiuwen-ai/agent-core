@@ -1,3 +1,17 @@
+---
+title: F_113 三方 harness 成员的内置模型切换与 effort 调整
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_113_external-harness-builtin-model-selection
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # F_113 三方 harness 成员的内置模型切换与 effort 调整
 
 日期：2026-09-18

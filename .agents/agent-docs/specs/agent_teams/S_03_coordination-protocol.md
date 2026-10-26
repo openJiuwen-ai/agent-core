@@ -1,3 +1,15 @@
+---
+title: Coordination Protocol
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_03_coordination-protocol
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # Coordination Protocol
 
 `agent_teams.agent.coordination` 子系统的设计规约：事件总线 + 分发器 + 8 个场景 handler + kernel 装配。本文描述"系统当前是什么样"。

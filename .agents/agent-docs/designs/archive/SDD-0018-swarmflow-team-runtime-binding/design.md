@@ -4,7 +4,6 @@ title: Swarmflow 启停与 Team 生命周期联动（小飞机控灯 / 恢复裁
 slug: swarmflow-team-runtime-binding
 status: shipped
 stage: archive
-owner: "@chenchunzhou"
 reviewers: ["@chenchunzhou"]
 created: 2026-09-05
 updated: 2026-09-18
@@ -24,6 +23,11 @@ implementation:
   prs: []
   commits: []
   tracking: []
+author: '@chenchunzhou'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # Swarmflow 启停与 Team 生命周期联动（小飞机控灯 / 恢复裁决 / 冷启动续跑）

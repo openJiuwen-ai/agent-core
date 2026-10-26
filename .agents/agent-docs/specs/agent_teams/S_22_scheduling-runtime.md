@@ -1,3 +1,15 @@
+---
+title: Scheduling Runtime（调度模式运行时）
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_22_scheduling-runtime
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # Scheduling Runtime（调度模式运行时）
 
 `agent_teams.agent.scheduling` 子系统的设计规约：leader 侧调度决策引擎 + 评审投票。本文描述"系统当前是什么样"。

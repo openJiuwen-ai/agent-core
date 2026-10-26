@@ -1,3 +1,17 @@
+---
+title: Team.plan 团队计划模式
+author: weichenhao
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_21_team-plan
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: weichenhao3@huawei.com
+---
+
 # Team.plan 团队计划模式
 
 ## 元信息

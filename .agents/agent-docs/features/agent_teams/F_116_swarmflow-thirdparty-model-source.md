@@ -1,3 +1,17 @@
+---
+title: Swarmflow 三方节点的模型来源解析（`model` / `builtin_model` / `effort`，无回退）
+author: chenchunzhou
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_116_swarmflow-thirdparty-model-source
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chenchunzhou1@huawei.com
+---
+
 # Swarmflow 三方节点的模型来源解析（`model` / `builtin_model` / `effort`，无回退）
 
 ## 元信息

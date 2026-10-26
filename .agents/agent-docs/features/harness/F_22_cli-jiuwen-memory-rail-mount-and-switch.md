@@ -1,3 +1,17 @@
+---
+title: F_22 CLI 挂载 JiuwenMemoryRail 与启用开关
+author: huangyuzhe
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_22_cli-jiuwen-memory-rail-mount-and-switch
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: huangyuzhe6@huawei.com
+---
+
 # F_22 CLI 挂载 JiuwenMemoryRail 与启用开关
 
 ## 元信息

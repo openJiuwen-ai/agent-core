@@ -404,7 +404,7 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 所以本节的强制约束**只限于** `openjiuwen/agent_teams/` 子树，不上推到仓库其它模块。
 
 **前置铁律——文档先是设计的输入，才是提交的产出。** 动手改任何代码设计**之前**，先
-`grep` + 读相关的 `.agents/agent-docs/specs/agent_teams/S_NN_*`（现有契约 / 不变量 / 边界）与 `.agents/agent-docs/features/agent_teams/F_YYYYMMDD_HHMM_*`
+`grep` + 读相关的 `.agents/agent-docs/specs/agent_teams/S_NN_*`（现有契约 / 不变量 / 边界）与 `.agents/agent-docs/features/F_YYYYMMDD_HHMM_*`
 （为什么长这样、当初拒绝了哪些方案），拿它们校准方案——spec 说"系统是什么样"、feature 说
 "为什么这么改"，先读才不会撞坏既有契约、也不会重蹈已被拒绝的方案。方案定了**当场**同步改掉
 对应 S / F，让文档和方案一起成形。**先码后档、拖到提交前才补文档是把流程做反了**：那样文档
@@ -413,11 +413,11 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 
 三条强制约束，提交时必查：
 
-1. **每次特性更新必须归档 feature 文档，且 `feat` 改动的特性代码、测试代码、文档拆成三个连续提交**：在 `.agents/agent-docs/features/agent_teams/`
+1. **每次特性更新必须归档 feature 文档，且 `feat` 改动的特性代码、测试代码、文档拆成三个连续提交**：在 `.agents/agent-docs/features/`
    下新增一份 `F_YYYYMMDD_HHMM_<slug>.md`，记录决策、拒绝的方案、验证基线、已知遗留。commit message 只写
    what，feature 文档负责写 why / why-not。`feat` 改动落地顺序**固定为三个紧邻的提交**——提交 1 落特性代码
    （`feat(swarm): ...`），提交 2 落本次新增/改动的单测（`test(swarm): ...`），提交 3
-   落本次涉及的全部文档：`.agents/agent-docs/features/agent_teams/F_YYYYMMDD_HHMM_*.md` 新增 + 下面 #2 要求的 `.agents/agent-docs/specs/agent_teams/S_NN_*.md`
+   落本次涉及的全部文档：`.agents/agent-docs/features/F_YYYYMMDD_HHMM_*.md` 新增 + 下面 #2 要求的 `.agents/agent-docs/specs/agent_teams/S_NN_*.md`
    修订（`docs(swarm): ...`）。特性代码、测试、文档不再混进同一次 commit——既不让大段文档 diff 淹没
    代码评审，也让测试改动独立可审，还避免文档归档拖延导致设计上下文随时间漂移。
    **只有 `feat` 拆**：`fix` / `refactor` / `perf` 等其它类型的改动，代码、测试、文档（含 `.agents/agent-docs/bugfix/agent_teams/B_YYYYMMDD_HHMM_*.md`、
@@ -453,3 +453,5 @@ stdout 叙述经 `outputs()` surface 为 `TeamOutputSchema` chunk、与进程内
 footer 用 `Refs: #<issue>` 格式关联 issue。issue 号若无法从当前上下文明确，必须先询问用户，不要臆造或留空。
 
 **只有 `feat` 改动拆提交**：涉及 `.agents/agent-docs/features/agent_teams/F_*` / `.agents/agent-docs/specs/agent_teams/S_*` 文档更新的 `feat` 改动，特性代码、测试代码、文档拆成三个连续提交（提交 1 特性代码 `feat(swarm)`，提交 2 单测 `test(swarm)`，提交 3 文档 `docs(swarm)`），细则见上文「设计文档归档与双向同步」约束 #1。`fix` / `refactor` 等其它类型一律不拆，代码、测试、文档合并为一个对应 type 的提交。
+
+新 F 文档直接放 `.agents/agent-docs/features/`，模块以 frontmatter modules 标注；历史子目录通过 features/INDEX.md 定位。作者使用 Git author，F/B 声明关联 designs，修改后按根 AGENTS.md 自动同步索引。

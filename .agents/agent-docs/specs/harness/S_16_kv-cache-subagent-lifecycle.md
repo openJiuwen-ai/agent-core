@@ -1,3 +1,15 @@
+---
+title: S_16 KV Cache 子代理生命周期
+author: MengHan18
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_16_kv-cache-subagent-lifecycle
+type: S
+modules:
+- openjiuwen/harness
+files: []
+author_email: hanmeng22@huawei.com
+---
+
 # S_16 KV Cache 子代理生命周期
 
 ## 元信息

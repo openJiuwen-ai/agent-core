@@ -1,3 +1,17 @@
+---
+title: Session 动态表 DDL 收编进 DbSessions 写锁
+author: hwxiajing
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_83_session-ddl-under-write-lock
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: xiajing22@huawei.com
+---
+
 # Session 动态表 DDL 收编进 DbSessions 写锁
 
 bind-time 的 per-session 动态表 DDL 从 `engine.begin()` 直连改为经 `DbSessions.write()` 执行——修复并发 bind 时写池耗尽导致的 `QueuePool limit of size 2` 崩溃。本文记录决策与拒绝的方案。

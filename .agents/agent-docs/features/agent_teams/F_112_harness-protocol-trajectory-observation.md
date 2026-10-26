@@ -1,3 +1,17 @@
+---
+title: F_112 三方 harness 成员的轨迹观测：协议事件驱动
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_112_harness-protocol-trajectory-observation
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # F_112 三方 harness 成员的轨迹观测：协议事件驱动
 
 日期：2026-09-17

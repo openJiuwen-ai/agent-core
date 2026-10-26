@@ -1,3 +1,17 @@
+---
+title: Swarmflow Journal:program-order 落盘 + 崩溃durable WAL + 原子/异步 I/O
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_40_swarmflow-journal-wal-and-program-order
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # Swarmflow Journal:program-order 落盘 + 崩溃durable WAL + 原子/异步 I/O
 
 ## 元信息

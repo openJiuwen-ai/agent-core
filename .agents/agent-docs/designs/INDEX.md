@@ -1,5 +1,12 @@
+---
+title: 设计文档索引
+author: alan_cheng
+author_email: chengshuo5@huawei.com
+generated: true
+---
+
 <!-- 本文件由 .agents/skills/jw-design/scripts/generate_index.py 自动生成，请勿手改。重新生成：python .agents/skills/jw-design/scripts/generate_index.py -->
-<!-- generated-at: 2026-10-26T10:11+08:00 -->
+<!-- generated-at: 2026-10-26T21:35+08:00 -->
 
 # 设计文档索引 (INDEX)
 
@@ -24,7 +31,7 @@
 
 ### 开发前 (proposals)
 
-| ID | 标题 | 状态 | 负责人 | 领域 | 更新日期 |
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [SDD-0024](proposals/SDD-0024-trajectory-projection-evolution-rl/design.md) | 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL 输入 | draft | @alan_cheng | observability | 2026-09-15 |
 
@@ -34,7 +41,7 @@
 
 ### 开发前 (proposals)
 
-| ID | 标题 | 状态 | 负责人 | 领域 | 更新日期 |
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [SDD-0015](proposals/SDD-0015-agent-team-scheduled-dispatch/design.md) | AgentTeam 调度模式：任务图驱动的低通信协同与验证闭环 | draft | @alan_cheng | scheduler | 2026-08-20 |
 | [SDD-0019](proposals/SDD-0019-team-model-group/design.md) | Team 模式模型组接入与成员模型分配 | draft | @<huanghao> | core | 2026-09-14 |
@@ -43,7 +50,7 @@
 
 ### 开发后 (archive)
 
-| ID | 标题 | 状态 | 负责人 | 领域 | 更新日期 |
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [SDD-0011](archive/SDD-0011-evolvable-team-workspace/design.md) | 可演进 Team 工作区 | shipped | @xiajing | core | 2026-08-20 |
 | [SDD-0016](archive/SDD-0016-third-party-agent-reliability/design.md) | 三方 Agent 可靠性设计 | shipped | @zhanglongmin | core | 2026-08-31 |
@@ -55,7 +62,7 @@
 
 ### 开发前 (proposals)
 
-| ID | 标题 | 状态 | 负责人 | 领域 | 更新日期 |
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [SDD-0012](proposals/SDD-0012-swarmflow-dual-layer-budget/design.md) | Swarmflow 双层 Budget（workflow 级 + session 级）撞顶逻辑 | draft | @wangcan103 | scheduler | 2026-08-18 |
 | [SDD-0017](proposals/SDD-0017-swarmflow-verify-primitive/design.md) | Swarmflow 验证原语 verify()：把任务验收机制抽象为可脚本调用的原语 | draft | @sodawlh | core | 2026-08-26 |
@@ -65,13 +72,13 @@
 
 ### 开发中 (active)
 
-| ID | 标题 | 状态 | 负责人 | 领域 | 更新日期 |
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [SDD-0014](active/SDD-0014-swarmflow-session-fork/design.md) | SwarmFlow 有状态会话 fork（agent_session 上下文继承） | in-development | @sodawlh | core | 2026-08-21 |
 
 ### 开发后 (archive)
 
-| ID | 标题 | 状态 | 负责人 | 领域 | 更新日期 |
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [SDD-0002](archive/SDD-0002-swarmflow-stateful-sessions-and-human/design.md) | SwarmFlow 有状态会话与人机交互编排 | shipped | @alan_cheng | core | 2026-06-24 |
 | [SDD-0003](archive/SDD-0003-swarmflow-interruption-recovery-and-durable-state/design.md) | SwarmFlow 中断恢复与崩溃可恢复状态持久化 | shipped | @alan_cheng | core | 2026-06-24 |
@@ -89,7 +96,7 @@
 
 ### 开发前 (proposals)
 
-| ID | 标题 | 状态 | 负责人 | 领域 | 更新日期 |
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [SDD-0022](proposals/SDD-0022-trajectory-observability-framework/design.md) | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | draft | @alan_cheng | observability | 2026-09-15 |
 | [SDD-0023](proposals/SDD-0023-trajectory-export-langfuse-otel/design.md) | 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入） | draft | @alan_cheng | observability | 2026-09-15 |
@@ -100,14 +107,14 @@
 
 ### 开发前 (proposals)
 
-| ID | 标题 | 状态 | 负责人 | 领域 | 更新日期 |
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [SDD-0022](proposals/SDD-0022-trajectory-observability-framework/design.md) | 轨迹观测框架：基于 OTel GenAI 语义约定的 Harness 与 Team 轨迹采集和处理 | draft | @alan_cheng | observability | 2026-09-15 |
 | [SDD-0024](proposals/SDD-0024-trajectory-projection-evolution-rl/design.md) | 轨迹投影：把 OTel 标准轨迹投影为自演进与在线 AgentRL 输入 | draft | @alan_cheng | observability | 2026-09-15 |
 
 ### 开发后 (archive)
 
-| ID | 标题 | 状态 | 负责人 | 领域 | 更新日期 |
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [SDD-0006](archive/SDD-0006-native-harness-async-tool-control-and-spill/design.md) | 原生 Harness 异步工具管控框架与磁盘溢写 | shipped | @alan_cheng | harness | 2026-06-24 |
 
@@ -117,6 +124,6 @@
 
 ### 开发前 (proposals)
 
-| ID | 标题 | 状态 | 负责人 | 领域 | 更新日期 |
+| ID | 标题 | 状态 | 作者 | 领域 | 更新日期 |
 |---|---|---|---|---|---|
 | [SDD-0001](proposals/SDD-0001-sample-design/design.md) | 示例设计文档（脚手架自带，可删除） | draft | @your-handle | core | 2026-06-15 |

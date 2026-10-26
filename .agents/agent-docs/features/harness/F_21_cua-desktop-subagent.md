@@ -1,3 +1,17 @@
+---
+title: cua_agent desktop subagent
+author: kwangyyinc
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_21_cua-desktop-subagent
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chia.kwang.yang@h-partners.com
+---
+
 # cua_agent desktop subagent
 
 ## Metadata

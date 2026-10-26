@@ -1,3 +1,15 @@
+---
+title: 团队共享产物目录（Team Shared Deliverables）
+author: hwxiajing
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_26_team-shared-deliverables
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: xiajing22@huawei.com
+---
+
 # 团队共享产物目录（Team Shared Deliverables）
 
 ## 元信息

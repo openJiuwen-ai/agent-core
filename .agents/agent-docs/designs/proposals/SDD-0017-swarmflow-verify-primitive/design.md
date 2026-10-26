@@ -4,7 +4,6 @@ title: Swarmflow 验证原语 verify()：把任务验收机制抽象为可脚本
 slug: swarmflow-verify-primitive
 status: draft
 stage: proposals
-owner: "@sodawlh"
 reviewers: []
 created: 2026-08-26
 updated: 2026-08-26
@@ -13,6 +12,11 @@ domain: core
 modules: [agent_teams/workflow]
 tags: [swarmflow, verification, reviewer, primitive, orchestration]
 related: [SDD-0015]
+author: '@sodawlh'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # Swarmflow 验证原语 verify()：把任务验收机制抽象为可脚本调用的原语

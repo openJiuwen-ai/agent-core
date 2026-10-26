@@ -4,7 +4,6 @@ title: SwarmFlow 嵌套工作流调用与执行加固
 slug: swarmflow-nested-workflow-and-hardening
 status: shipped
 stage: archive
-owner: "@alan_cheng"
 reviewers: ["@arch-team"]
 created: 2026-06-16
 updated: 2026-06-24
@@ -25,6 +24,11 @@ implementation:
     - alan_cheng/agent-core@60400931
     - alan_cheng/agent-core@21de804b
     - alan_cheng/agent-core@a15f7531
+author: '@alan_cheng'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # SwarmFlow 嵌套工作流调用与执行加固

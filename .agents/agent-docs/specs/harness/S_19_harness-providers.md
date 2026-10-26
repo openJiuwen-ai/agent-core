@@ -1,3 +1,15 @@
+---
+title: S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂）
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_19_harness-providers
+type: S
+modules:
+- openjiuwen/harness
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # S_19 Harness Providers（协议实现、IO Adapter 与 Manifest 工厂）
 
 ## 元信息

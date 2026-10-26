@@ -1,3 +1,17 @@
+---
+title: 创建任务即拉起成员，round-idle 再对账一次
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_84_task-creation-starts-members
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # 创建任务即拉起成员，round-idle 再对账一次
 
 ## 元信息

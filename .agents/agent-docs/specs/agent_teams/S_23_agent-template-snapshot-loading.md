@@ -1,3 +1,15 @@
+---
+title: S_23 AgentTemplate 快照加载
+author: openJiuwen-bot
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_23_agent-template-snapshot-loading
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: cla@openjiuwen.com
+---
+
 # S_23 AgentTemplate 快照加载
 
 ## 元信息

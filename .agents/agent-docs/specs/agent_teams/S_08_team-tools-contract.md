@@ -1,3 +1,15 @@
+---
+title: Team Tools Contract
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_08_team-tools-contract
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: chengshuo5@huawei.com
+---
+
 # Team Tools Contract
 
 ## Organization 工具

@@ -4,7 +4,6 @@ title: 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL
 slug: trajectory-export-langfuse-otel
 status: draft
 stage: proposals
-owner: "@alan_cheng"
 reviewers: []
 created: 2026-09-15
 updated: 2026-09-15
@@ -26,6 +25,11 @@ implementation:
     - jiuwenswarm@cad7b35dc
     - jiuwenswarm@e9d1560a3
   tracking: "agent-core: openjiuwen/extensions/observability/{runtime.py,exporters/,file_exporter.py,otlp_codec.py} · jiuwenswarm: deploy/observability/"
+author: '@alan_cheng'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # 轨迹导出：Langfuse 适配与 OTel 兼容平台上报（含文件 WAL 与离线导入）

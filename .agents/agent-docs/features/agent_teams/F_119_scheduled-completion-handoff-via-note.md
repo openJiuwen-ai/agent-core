@@ -1,3 +1,17 @@
+---
+title: 调度模式完成交接改走任务行：成员不再汇报完成，完成说明拆为摘要与详情
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_119_scheduled-completion-handoff-via-note
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # 调度模式完成交接改走任务行：成员不再汇报完成，完成说明拆为摘要与详情
 
 ## 元信息

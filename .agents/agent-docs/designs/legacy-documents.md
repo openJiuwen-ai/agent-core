@@ -1,3 +1,13 @@
+---
+title: 旧格式设计资料
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: legacy-documents
+type: D
+modules: []
+files: []
+---
+
 # 旧格式设计资料
 
 以下资料按原正文保留，未自动补造编号、状态或审批信息；不纳入标准阶段设计索引。

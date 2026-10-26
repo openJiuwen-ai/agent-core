@@ -4,7 +4,6 @@ title: Swarmflow 并发治理模块（ConcurrencyGovernor）
 slug: swarmflow-concurrency-governor
 status: shipped
 stage: archive
-owner: "@chenchunzhou"
 reviewers: ["@chenchunzhou"]
 created: 2026-06-22
 updated: 2026-07-18
@@ -20,6 +19,11 @@ implementation:
   repos: [agent-core]
   prs: ["https://gitcode.com/openJiuwen/agent-core/pull/1770"]
   commits: ["d41b38c3269a9407cd8a6c9fa6728a7c9b71a6f2"]
+author: '@chenchunzhou'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # Swarmflow 并发治理模块（ConcurrencyGovernor）

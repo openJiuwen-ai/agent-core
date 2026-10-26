@@ -1,3 +1,15 @@
+---
+title: 可演进 workspace（A/B/C 三类文本演进机制）
+author: hwxiajing
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_24_evolvable-workspace
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: xiajing22@huawei.com
+---
+
 # 可演进 workspace（A/B/C 三类文本演进机制）
 
 `openjiuwen.agent_teams.team_workspace` 子系统的设计规约：A 提示词 / B DB 值 / C tool 描述三类文本统一 `frontmatter + body` 落盘、装配写基线、改文件 + 重启生效。本文描述"系统当前是什么样"。

@@ -1,3 +1,15 @@
+---
+title: S_17 Personal Context
+author: yangzequ
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_17_personal-context
+type: S
+modules:
+- openjiuwen/harness
+files: []
+author_email: yangzequ1@huawei.com
+---
+
 # S_17 Personal Context
 
 ## 元信息

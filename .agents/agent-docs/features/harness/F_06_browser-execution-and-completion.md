@@ -1,3 +1,17 @@
+---
+title: Browser Execution and Completion Boundaries
+author: m056838700
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_06_browser-execution-and-completion
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: xiangxiaoneng@h-partners.com
+---
+
 # Browser Execution and Completion Boundaries
 
 ## Metadata

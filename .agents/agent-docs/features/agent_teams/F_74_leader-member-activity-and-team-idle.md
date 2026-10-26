@@ -1,3 +1,17 @@
+---
+title: F_74 Leader 侧成员活动登记与 team-idle 信号
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_74_leader-member-activity-and-team-idle
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # F_74 Leader 侧成员活动登记与 team-idle 信号
 
 ## 元信息

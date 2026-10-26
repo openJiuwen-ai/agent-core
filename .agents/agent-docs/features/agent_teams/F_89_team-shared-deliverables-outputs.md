@@ -1,3 +1,17 @@
+---
+title: F_89：团队共享产物目录（outputs）与 .team 路由废止
+author: hwxiajing
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_89_team-shared-deliverables-outputs
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: xiajing22@huawei.com
+---
+
 # F_89：团队共享产物目录（outputs）与 .team 路由废止
 
 ## 元信息

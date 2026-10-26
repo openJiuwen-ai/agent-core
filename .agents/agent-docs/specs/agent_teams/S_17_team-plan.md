@@ -1,3 +1,15 @@
+---
+title: Team.plan 运行时规约
+author: weichenhao
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: S_17_team-plan
+type: S
+modules:
+- openjiuwen/agent_teams
+files: []
+author_email: weichenhao3@huawei.com
+---
+
 # Team.plan 运行时规约
 
 ## 元信息

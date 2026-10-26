@@ -1,3 +1,17 @@
+---
+title: Swarmflow 有状态会话（agent_session / human_session）与 human 参与点
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_37_swarmflow-stateful-sessions-and-human
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # Swarmflow 有状态会话（agent_session / human_session）与 human 参与点
 
 ## 元信息

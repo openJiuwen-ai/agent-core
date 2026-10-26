@@ -1,3 +1,17 @@
+---
+title: 条件命名任务状态机 + 验证闸（设计稿，待评审）
+author: alan_cheng
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_59_condition-named-task-state-machine-with-verify-gate
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: chengshuo5@huawei.com
+---
+
 # 条件命名任务状态机 + 验证闸（设计稿，待评审）
 
 ## 元信息

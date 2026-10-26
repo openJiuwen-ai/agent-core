@@ -4,7 +4,6 @@ title: Swarmflow 算子 options 参数治理（model 前置校验 + timeout 可�
 slug: swarmflow-operator-options
 status: draft
 stage: proposals
-owner: "@wangcan103"
 reviewers: []
 created: 2026-09-14
 updated: 2026-09-28
@@ -13,6 +12,11 @@ domain: core
 modules: [agent_teams/workflow]
 tags: [swarmflow, model-pool, timeout, fail-fast, observability, agent-session, engine]
 related: [SDD-0002, SDD-0007, SDD-0014, SDD-0019]
+author: '@wangcan103'
+author_note: 由历史 owner 字段原值迁移
+type: D
+files: []
+author_email: null
 ---
 
 # Swarmflow 算子 options 参数治理（model 前置校验 + timeout 可观测性）

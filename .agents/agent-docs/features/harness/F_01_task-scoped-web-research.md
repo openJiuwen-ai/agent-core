@@ -1,3 +1,17 @@
+---
+title: F_01 任务级 Web 检索配置
+author: l_x_d
+author_note: 按 Git 最早可追溯的文档新增提交署名；不代表代码 owner
+id: F_01_task-scoped-web-research
+type: F
+modules:
+- openjiuwen/harness
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+author_email: linxiangda@huawei.com
+---
+
 # F_01 任务级 Web 检索配置
 
 日期：2026-09-08

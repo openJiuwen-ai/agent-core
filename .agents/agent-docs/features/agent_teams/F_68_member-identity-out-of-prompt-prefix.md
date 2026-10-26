@@ -1,3 +1,16 @@
+---
+title: per-member 内容移出系统提示词前缀（team_identity attachment）
+author: null
+author_note: 历史作者待确认；缺少原 owner 和可靠创建署名
+id: F_68_member-identity-out-of-prompt-prefix
+type: F
+modules:
+- openjiuwen/agent_teams
+files: []
+designs: null
+design_note: 历史设计关联待核实，不等同于没有关联设计
+---
+
 # per-member 内容移出系统提示词前缀（team_identity attachment）
 
 ## 元信息
