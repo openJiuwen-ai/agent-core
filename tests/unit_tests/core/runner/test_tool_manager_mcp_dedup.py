@@ -162,10 +162,9 @@ async def test_add_tool_server_surfaces_connect_false_reason_as_connection_error
 
 
 @pytest.mark.asyncio
-async def test_add_tool_server_coerces_cancelled_error_into_base_error() -> None:
-    """A bare ``CancelledError`` from connect (anyio task-group teardown) must be
-    coerced into a ``BaseError`` so ``add_mcp_server`` can wrap it in an ``Error``
-    result and the frontend sees a connect failure instead of a silent cancel."""
+async def test_add_tool_server_propagates_cancelled_error() -> None:
+    """A caller cancellation must remain cancellation rather than becoming a
+    resource error, otherwise shutdown and request-timeout cancellation stalls."""
     mgr = ToolMgr()
     cfg = _make_server_config(server_id="cancel-srv")
 
@@ -174,16 +173,34 @@ async def test_add_tool_server_coerces_cancelled_error_into_base_error() -> None
     fake_client.disconnect = AsyncMock(return_value=True)
 
     with patch.object(ToolMgr, "_create_client", staticmethod(lambda c: fake_client)):
-        with pytest.raises(BaseError) as exc_info:
+        with pytest.raises(asyncio.CancelledError):
             await mgr.add_tool_server(cfg)
 
-    err = exc_info.value
-    assert err.status == StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR
-    # The original CancelledError is preserved on __cause__ for diagnosis.
-    assert isinstance(err.__cause__, asyncio.CancelledError)
-    # The surfaced reason must mention the server, not read as a bare "cancelled".
-    assert "cancel-srv" in err.message
     # connect() never returned True, so disconnect must not be attempted.
+    assert fake_client.disconnect.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_add_tool_server_propagates_cancelled_error_group() -> None:
+    """Cancellation nested in a BaseExceptionGroup must not be converted into
+    an ordinary MCP registration error."""
+    mgr = ToolMgr()
+    cfg = _make_server_config(server_id="cancel-group-srv")
+
+    cancelled_group = BaseExceptionGroup(
+        "cancelled group",
+        [asyncio.CancelledError("shutdown"), RuntimeError("transport failed")],
+    )
+    fake_client = MagicMock()
+    fake_client.connect = AsyncMock(side_effect=cancelled_group)
+    fake_client.disconnect = AsyncMock(return_value=True)
+
+    with patch.object(ToolMgr, "_create_client", staticmethod(lambda c: fake_client)):
+        with pytest.raises(BaseExceptionGroup) as exc_info:
+            await mgr.add_tool_server(cfg)
+
+    propagated_cancel, _ = exc_info.value.split(asyncio.CancelledError)
+    assert propagated_cancel is not None
     assert fake_client.disconnect.await_count == 0
 
 

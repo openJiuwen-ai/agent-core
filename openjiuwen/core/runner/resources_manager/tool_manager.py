@@ -140,8 +140,13 @@ class ToolMgr:
                 # escape ``except Exception``; coerce them into a ``BaseError`` so
                 # ``add_mcp_server`` wraps it in an ``Error`` and the real reason
                 # reaches the frontend instead of a silent "task cancelled".
-                if isinstance(e, KeyboardInterrupt):
+                if isinstance(e, (KeyboardInterrupt, asyncio.CancelledError)):
                     raise
+                if isinstance(e, BaseExceptionGroup):
+                    cancelled_group, _ = e.split(asyncio.CancelledError)
+                    keyboard_group, _ = e.split(KeyboardInterrupt)
+                    if cancelled_group is not None or keyboard_group is not None:
+                        raise
                 # ``connect()`` False path already raised CONNECTION_ERROR above;
                 # let it through to keep its status/reason.
                 if isinstance(e, BaseError) and e.status is StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR:
@@ -149,6 +154,17 @@ class ToolMgr:
                 if connected:
                     try:
                         await client.disconnect()
+                    except (KeyboardInterrupt, asyncio.CancelledError):
+                        raise
+                    except BaseExceptionGroup as disconnect_exc:
+                        cancelled_group, _ = disconnect_exc.split(asyncio.CancelledError)
+                        keyboard_group, _ = disconnect_exc.split(KeyboardInterrupt)
+                        if cancelled_group is not None or keyboard_group is not None:
+                            raise
+                        logger.warning(
+                            "add_tool_server cleanup failed: %s, server_id=%s",
+                            disconnect_exc, server_config.server_id,
+                        )
                     except BaseException as disconnect_exc:  # noqa: BLE001
                         logger.warning(
                             "add_tool_server cleanup failed: %s, server_id=%s",
@@ -156,11 +172,6 @@ class ToolMgr:
                         )
                 if isinstance(e, Exception) and not isinstance(e, asyncio.CancelledError):
                     cause = e
-                elif isinstance(e, asyncio.CancelledError):
-                    cause = RuntimeError(
-                        f"MCP server '{server_config.server_name}' connect/register cancelled "
-                        f"(anyio task-group teardown): {e}"
-                    )
                 elif isinstance(e, BaseExceptionGroup):
                     exc_subgroup, base_subgroup = e.split(Exception)
                     if exc_subgroup is not None and base_subgroup is None:
