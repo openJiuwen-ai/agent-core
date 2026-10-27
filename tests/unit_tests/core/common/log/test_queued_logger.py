@@ -560,3 +560,265 @@ def test_custom_level_drop_counters_are_bounded(make_logger, monkeypatch):
     for level in range(60, 1060):
         logger.log(level, "dropped")
     assert logger.get_queue_stats()["dropped_by_level"] == {logging.NOTSET: 1000}
+
+
+def test_console_setup_failure_closes_new_file_and_preserves_active_logger(make_logger, monkeypatch):
+    from openjiuwen.core.common.logging.default import default_impl
+
+    logger, stream = make_logger()
+    previous_config = logger.get_config()
+    previous_output = logger._queue_handler
+    created = []
+    file_handler = default_impl.SafeRotatingFileHandler
+
+    def track_file(*args, **kwargs):
+        handler = file_handler(*args, **kwargs)
+        created.append(handler)
+        return handler
+
+    def fail_console(*args, **kwargs):
+        raise OSError("console unavailable")
+
+    monkeypatch.setattr(default_impl, "SafeRotatingFileHandler", track_file)
+    monkeypatch.setattr(default_impl, "ConsoleHandler", fail_console)
+    with pytest.raises(OSError, match="console unavailable"):
+        logger.reconfigure({**previous_config, "output": ["file", "console"]})
+    assert len(created) == 1
+    assert created[0].stream is None
+    assert logger.get_config() == previous_config
+    assert logger._queue_handler is previous_output
+    assert not previous_output.stopping
+    logger.info("original output survives")
+    assert logger.flush()
+    assert stream.getvalue() == "original output survives\n"
+
+
+@pytest.mark.parametrize("phase", ["start", "stop"])
+def test_one_sink_close_failure_does_not_leak_other_sinks(tmp_path, monkeypatch, phase):
+    first = logging.FileHandler(tmp_path / "first.log")
+    second = logging.FileHandler(tmp_path / "second.log")
+    original_close = first.close
+
+    def fail_close():
+        original_close()
+        raise OSError("controlled close failure")
+
+    monkeypatch.setattr(first, "close", fail_close)
+    if phase == "start":
+
+        def fail_start(_listener):
+            raise RuntimeError("controlled start failure")
+
+        monkeypatch.setattr(queued_output.OutputListener, "start", fail_start)
+        with pytest.raises(RuntimeError, match="controlled start failure"):
+            queued_output.QueuedOutput([first, second])
+    else:
+        output = queued_output.QueuedOutput([first, second])
+        output.close()
+        assert not output.listener._thread.is_alive()
+        assert output.stats()["output_failures"] == 1
+    assert first.stream is None
+    assert second.stream is None
+
+
+def test_consumer_flush_never_waits_for_its_own_record(make_logger, monkeypatch):
+    logger, _ = make_logger()
+    output = logger._queue_handler
+    results = []
+    original_wait = output.condition.wait_for
+
+    def reject_consumer_wait(predicate, timeout):
+        assert threading.current_thread() is not output.listener._thread
+        return original_wait(predicate, timeout)
+
+    def emit(_record):
+        results.append(logger.flush())
+
+    monkeypatch.setattr(output.condition, "wait_for", reject_consumer_wait)
+    monkeypatch.setattr(output.listener.handlers[0], "emit", emit)
+    logger.info("reentrant flush")
+    assert logger.flush()
+    assert results == [False]
+    assert output.stats()["output_failures"] == 0
+
+
+def test_close_before_first_dequeue_does_not_leak_consumer(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    original_monitor = queued_output.OutputListener._monitor
+
+    def delayed_monitor(listener):
+        entered.set()
+        release.wait(3)
+        original_monitor(listener)
+
+    monkeypatch.setattr(queued_output.OutputListener, "_monitor", delayed_monitor)
+    output = queued_output.QueuedOutput([])
+    try:
+        assert entered.wait(2)
+        # Stop removes the sentinel while the consumer has not begun dequeuing.
+        assert output.stop(timeout=0) is False
+        assert output.queue.empty()
+        assert output.stats()["discarded_on_close"] == 0
+    finally:
+        release.set()
+        output.close()
+        output.listener._thread.join(3)
+    assert not output.listener._thread.is_alive()
+    assert output.queue.unfinished_tasks == 0
+    assert output.stats()["dropped_by_level"] == {}
+
+
+def test_listener_respects_each_output_level():
+    all_records: list[logging.LogRecord] = []
+    errors: list[logging.LogRecord] = []
+    all_sink = RecordHandler(all_records)
+    error_sink = RecordHandler(errors)
+    error_sink.setLevel(logging.ERROR)
+    output = queued_output.QueuedOutput([all_sink, error_sink])
+    try:
+        for level, message in [(logging.INFO, "info"), (logging.ERROR, "error")]:
+            output.handle(logging.makeLogRecord({"msg": message, "levelno": level}))
+        assert output.drain()
+        assert [record.msg for record in all_records] == ["info", "error"]
+        assert [record.msg for record in errors] == ["error"]
+    finally:
+        output.close()
+
+
+@pytest.mark.parametrize("encoding,errors", [("utf-8", "strict"), ("ascii", "backslashreplace")])
+def test_console_duplicate_preserves_encoding_and_stream_ownership(tmp_path, encoding, errors):
+    import io
+
+    path = tmp_path / "console.log"
+    with io.TextIOWrapper(io.BufferedWriter(io.FileIO(path, "w")), encoding=encoding, errors=errors) as stream:
+        handler = queued_output.ConsoleHandler(stream)
+        duplicate = handler.stream.fileno()
+        try:
+            assert duplicate != stream.fileno()
+            handler.handle(logging.makeLogRecord({"msg": "中文"}))
+        finally:
+            handler.close()
+        with pytest.raises(OSError):
+            os.fstat(duplicate)
+        assert not stream.closed
+        stream.write("original stream still works")
+    expected = ("中文" + os.linesep + "original stream still works").encode(encoding, errors)
+    assert path.read_bytes() == expected
+
+
+def test_console_wrapper_failure_closes_duplicated_descriptor(tmp_path, monkeypatch):
+    import io
+
+    duplicates = []
+    descriptors = []
+
+    class FailedRaw(queued_output._WriteAllFileIO):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            duplicates.append(self)
+            descriptors.append(self.fileno())
+
+        def writable(self):
+            raise OSError("cannot construct text wrapper")
+
+    with io.TextIOWrapper(io.FileIO(tmp_path / "console.log", "w")) as stream:
+        monkeypatch.setattr(queued_output, "_WriteAllFileIO", FailedRaw)
+        with pytest.raises(OSError, match="cannot construct text wrapper"):
+            queued_output.ConsoleHandler(stream)
+        assert len(duplicates) == 1
+        assert duplicates[0].closed
+        with pytest.raises(OSError):
+            os.fstat(descriptors[0])
+        assert not stream.closed
+
+
+def test_closed_stdout_failure_is_counted_without_recursive_stderr(tmp_path, capsys):
+    import io
+
+    stream = io.TextIOWrapper(io.FileIO(tmp_path / "closed.log", "w"))
+    stream.close()
+    output = queued_output.QueuedOutput([queued_output.ConsoleHandler(stream)])
+    try:
+        output.handle(logging.makeLogRecord({"msg": "closed output", "levelno": logging.ERROR}))
+        assert output.drain()
+        assert output.stats()["output_failures"] == 1
+    finally:
+        output.close()
+    assert not output.listener._thread.is_alive()
+    assert output.stats()["output_failures"] == 2  # emit and the final flush
+    assert capsys.readouterr().err == ""
+
+
+def test_shutdown_seals_all_outputs_and_uses_one_shared_deadline(monkeypatch):
+    from types import SimpleNamespace
+
+    streams = [GatedStream(), GatedStream()]
+    outputs = [queued_output.QueuedOutput([logging.StreamHandler(stream)]) for stream in streams]
+    timeouts = []
+    try:
+        for output, stream in zip(outputs, streams):
+            output.handle(logging.makeLogRecord({"msg": "blocked", "levelno": logging.INFO}))
+            assert stream.entered.wait(2)
+
+        def observe_stop(output):
+            stop = output.stop
+
+            def bounded_stop(timeout):
+                assert all(item.stopping for item in outputs)
+                timeouts.append(timeout)
+                return stop(timeout=0)
+
+            return bounded_stop
+
+        for output in outputs:
+            monkeypatch.setattr(output, "stop", observe_stop(output))
+        # Model elapsed shutdown time without sleeping or altering other clocks.
+        clock = iter([100.0, 100.75, 102.5])
+        monkeypatch.setattr(queued_output, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+        monkeypatch.setattr(queued_output, "DRAIN_TIMEOUT", 2.0)
+        monkeypatch.setattr(queued_output, "_OUTPUTS", outputs)
+        queued_output._shutdown_outputs()
+        assert timeouts == [1.25, 0.0]
+    finally:
+        for stream in streams:
+            stream.release.set()
+        for output in outputs:
+            output.close()
+            output.listener._thread.join(3)
+    assert all(not output.listener._thread.is_alive() for output in outputs)
+
+
+def test_consumer_close_does_not_join_itself_or_close_active_sink(make_logger, monkeypatch):
+    logger, stream = make_logger()
+    output = logger._queue_handler
+    sink = output.listener.handlers[0]
+    emit = sink.emit
+    entered = threading.Event()
+    release = threading.Event()
+    closed_during_emit = []
+
+    def close_while_emitting(record):
+        entered.set()
+        release.wait(3)
+        logger.close()
+        closed_during_emit.append(sink._closed)
+        emit(record)
+
+    monkeypatch.setattr(sink, "emit", close_while_emitting)
+    try:
+        logger.info("active")
+        assert entered.wait(2)
+        logger.info("pending")
+    finally:
+        release.set()
+        output.listener._thread.join(3)
+    assert not output.listener._thread.is_alive()
+    assert closed_during_emit == [False]
+    assert sink._closed
+    assert stream.getvalue() == "active\n"
+    stats = output.stats()
+    assert stats["accepted"] == stats["completed"] == 2
+    assert stats["discarded_on_close"] == 1
+    assert stats["dropped_by_level"] == {logging.INFO: 1}
+    assert stats["output_failures"] == 0
