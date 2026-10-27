@@ -489,7 +489,7 @@ async def force_recreate_jiuwenbox_sandbox(
 * **policy_mode**(str | None, 可选)：新沙箱的策略模式。默认值 `None`。
 * **timeout_seconds**(float, 可选)：HTTP 客户端超时（秒），默认值 `30.0`。
 * **preserve_files_upload**(Any, 可选)：copy 模式下需重新上传的文件/目录。默认值 `None`。
-* **extra_stale_sandbox_ids**(Sequence[str] | None, 可选)：创建后需额外删除的陈旧 ID 列表。默认值 `None`。
+* **extra_stale_sandbox_ids**(Sequence[str] | None, 可选)：创建替代实例前需额外删除的陈旧 ID 列表。默认值 `None`。
 * **lifecycle_hook**(Optional[Callable[[str, dict], None]], 可选)：`before_recreate` / `after_recreate` 事件的严格生命周期钩子。默认值 `None`。
 * **reason**(str, 可选)：钩子上下文中的重建原因，`"sandbox_lost"` 或 `"policy_changed"`。默认值 `"sandbox_lost"`。
 
@@ -498,6 +498,12 @@ async def force_recreate_jiuwenbox_sandbox(
 * **str**：新建沙箱的 `sandbox_id`。
 
 调用方取消不会隐藏已经发出的远端重建：重建任务在后台完成状态发布及清理，批量删除仍会等待它结束。
+
+同一 `base_url|isolation` 的首次自动创建、已有实例获取和主动重建共用生命周期互斥。重建期间的获取等待替代实例发布，随后复用新 ID；不会再并发创建一个多余实例并删除它，导致 Windows 共用目录的账户 ACL 被撤销。重建先等待在途首次创建完成，再严格删除旧实例、完成撤权，之后才创建替代实例。旧实例删除失败时不创建新实例，失败 ID 保留为 pending，需先重试删除；创建失败不会继续使用旧实例。该流程不跳过 ACL 撤销，也不增加共享目录授权。
+
+隔离作用域的重建必须传入与 provider 相同的 `shared_key`；不传时仍是兼容旧调用方的服务级缓存重建，不能代替某个隔离作用域的互斥。设置 `JIUWENBOX_SANDBOX_ID` 时，缓存复用不会先向 launcher 写入缓存 ID，从而遮蔽环境绑定；已有 launcher `extra_params["sandbox_id"]` 的优先级保持不变。pending 删除不会由 sandbox-lost 自动重试链路绕过，调用方需先重试 `delete_jiuwenbox_sandbox`，成功后再重建。
+
+异步工具调用和重建在等待该互斥时不占用线程池 worker；实际 HTTP 创建、删除仍在线程池执行，避免等待者占满重建自身所需的 worker。同步 `_get_sandbox_id` 调用保留同步互斥。弱引用锁表不能在缓存清理时强制移除仍被持有的锁，否则新调用会取得不同的锁并重新出现并发窗口。
 
 ### async delete_jiuwenbox_sandbox
 
@@ -524,7 +530,9 @@ async def delete_jiuwenbox_sandbox(
 * **timeout_seconds**(float, 可选)：HTTP 客户端超时（秒），默认值 `30.0`。
 * **raise_on_error**(bool, 可选)：为 `True` 时尝试全部匹配条目后，抛出包含首个远端删除原因的 `RuntimeError`，保留原异常链；默认记录远端删除失败并继续。生命周期钩子失败不受此开关控制，仍在遍历结束后严格抛出。
 
-远端删除失败时保留缓存与钩子，标记为待清理；显式重试删除成功前，不允许复用或自动重建该作用域沙箱。单条失败不跳过其余匹配条目，成功项立即收敛，失败项留待重试；批量严格清理最终仍报错，宿主不得进入创建阶段。重试不重复执行已成功的 `before_delete`，删除成功后执行一次 `after_delete`；后置钩子失败不恢复已删除条目。
+远端 DELETE 失败时在同一个删除任务内自动重试，最多尝试 3 次（首次加 2 次重试），两次尝试之间异步等待 1 秒。每次仍使用调用方的 `timeout_seconds`，总耗时包含各次 HTTP 等待，不限于额外的 2 秒间隔。整个重试期间保留缓存、钩子和 pending 状态，不允许复用或创建该作用域沙箱；并发删除调用共用同一轮重试，调用方取消也不会中断已经开始的清理。
+
+三次均失败后，严格调用返回包含尝试次数、最后原因及“replacement creation blocked”的错误，失败 ID 继续保留为 pending；普通调用记录失败并返回其余成功项。后续显式删除/重启可以再次触发一轮尝试，普通工具调用不会无限后台重试。单条失败不跳过其余匹配条目，成功项立即收敛；批量严格清理最终仍报错，宿主不得进入创建阶段。重试不重复执行已成功的 `before_delete`，删除成功后执行一次 `after_delete`；钩子本身失败不自动重试，后置钩子失败不恢复已删除条目。已确认服务停止的本地状态收敛不向旧端口发送重试请求。
 
 批量清理期间阻止新的沙箱获取，等待已经发出的首次创建和自动重建完成，再将其返回的 ID 纳入删除。external 服务同样适用：创建请求已经发出但尚未返回 ID 时，严格清理不能提前成功；DELETE 失败仍保留该 ID 为 pending，供重试。无论删除是否成功，都会释放 Gateway 的 endpoint / provider 缓存及其派生的 launcher ID，后续会话重建重新解析当前端口和策略，不再复活旧 provider。其他沙箱类型不受影响。
 

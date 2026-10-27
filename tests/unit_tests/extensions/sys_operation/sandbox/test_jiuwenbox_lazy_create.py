@@ -33,10 +33,14 @@ async def test_strict_delete_preserves_original_error(monkeypatch, failure):
     with pytest.raises(RuntimeError, match=str(failure)) as exc:
         await jb.delete_jiuwenbox_sandbox(shared_key=key, raise_on_error=True)
     assert exc.value.__cause__ is failure
+    assert "after 3 attempts" in str(exc.value)
+    assert "replacement creation blocked" in str(exc.value)
+    assert client.delete_sandbox.call_count == 3
 
 
 @pytest.fixture(autouse=True)
 def isolated_cache(monkeypatch):
+    monkeypatch.setattr(jb, "_SANDBOX_DELETE_RETRY_SLEEP_SECONDS", 0)
     for name in ("_shared_sandbox_ids", "_creation_locks", "_creation_failures", "_lifecycle_hooks",
                  "_pending_deletions", "_delete_tasks", "_idle_timeout_cache"):
         monkeypatch.setattr(jb._JiuwenBoxProviderMixin, name, {})
@@ -84,7 +88,7 @@ async def test_service_exit_recovers_failed_delete_without_retrying_dead_port(mo
     with pytest.raises(RuntimeError, match="old port is dead"):
         await jb.delete_jiuwenbox_sandbox(shared_key=key, raise_on_error=True)
     assert await jb.retire_jiuwenbox_service(url) == ["old"]
-    client.delete_sandbox.assert_called_once_with("old")
+    assert [args.args for args in client.delete_sandbox.call_args_list] == [("old",)] * 3
     assert not cls._pending_deletions and not cls._shared_sandbox_ids
     assert [call.args[0] for call in hook.call_args_list] == ["before_delete", "after_delete"]
 
@@ -173,7 +177,8 @@ async def test_service_retirement_drains_deletes_started_while_joining(monkeypat
             event.set()
     assert await late_task == []
     assert await retire_task == ["first", "late"]
-    assert requested == ["first", "late"]
+    assert requested[:2] == ["first", "late"]
+    assert sorted(requested) == ["first"] * 3 + ["late"] * 3
     assert not cls._shared_sandbox_ids and not cls._pending_deletions and not cls._delete_tasks
     for hook in hooks.values():
         assert [call.args[0] for call in hook.call_args_list] == ["before_delete", "after_delete"]
@@ -220,7 +225,7 @@ async def test_service_retirement_does_not_reuse_remote_task_started_during_loca
         release.set()
     assert await late_tasks[0] == ([] if remote_failure else ["late"])
     assert await retire_task == ["first", "late"]
-    client.delete_sandbox.assert_called_once_with("late")
+    assert client.delete_sandbox.call_count == (3 if remote_failure else 1)
     assert first_events == ["before_delete", "after_delete"]
     assert [call.args[0] for call in late_hook.call_args_list] == ["before_delete", "after_delete"]
     assert not cls._shared_sandbox_ids and not cls._pending_deletions and not cls._delete_tasks
@@ -275,7 +280,7 @@ async def test_strict_bulk_delete_attempts_all_entries_then_raises_first_cause(m
         await jb.delete_jiuwenbox_sandbox(delete_all=True, raise_on_error=True)
     assert caught.value.__cause__ is first_failure
     assert "2 entries" in caught.value.__notes__[0]
-    assert attempted == ["first", "healthy", "last"]
+    assert attempted == ["first"] * 3 + ["healthy"] + ["last"] * 3
     assert cls._shared_sandbox_ids == {keys[sid]: sid for sid in ("first", "last")}
     assert set(cls._pending_deletions) == {(keys[sid], sid) for sid in ("first", "last")}
     client.delete_sandbox.side_effect = None
@@ -399,7 +404,7 @@ async def test_failed_delete_blocks_reuse_and_recreation_until_retry(monkeypatch
     client = Mock()
     client.__enter__ = Mock(return_value=client)
     client.__exit__ = Mock(return_value=False)
-    client.delete_sandbox.side_effect = [httpx.ReadTimeout("ACL timeout"), None]
+    client.delete_sandbox.side_effect = [httpx.ReadTimeout("ACL timeout")] * 3 + [None]
     monkeypatch.setattr(jb, "_JiuwenBoxClient", Mock(return_value=client))
     assert await jb.delete_jiuwenbox_sandbox(shared_key=key) == []
     assert jb._JiuwenBoxProviderMixin._shared_sandbox_ids[key] == "old"
@@ -425,7 +430,7 @@ async def test_pending_delete_retry_keeps_original_hook(monkeypatch):
     cls.register_lifecycle_hook(key, old_hook)
     client = Mock(__enter__=Mock(), __exit__=Mock(return_value=False))
     client.__enter__.return_value = client
-    client.delete_sandbox.side_effect = [httpx.ReadTimeout("ACL timeout"), None]
+    client.delete_sandbox.side_effect = [httpx.ReadTimeout("ACL timeout")] * 3 + [None]
     monkeypatch.setattr(jb, "_JiuwenBoxClient", Mock(return_value=client))
     assert await jb.delete_jiuwenbox_sandbox(shared_key=key) == []
     cls._shared_sandbox_ids[key] = "new"
@@ -451,6 +456,58 @@ async def test_after_delete_hook_failure_does_not_restore_deleted_entry(monkeypa
         await jb.delete_jiuwenbox_sandbox(shared_key=key)
     assert key not in cls._shared_sandbox_ids
     assert not cls._pending_deletions
+    client.delete_sandbox.assert_called_once_with("old")
+
+
+@pytest.mark.asyncio
+async def test_delete_retry_keeps_scope_blocked_and_survives_caller_cancellation(monkeypatch):
+    key = "http://localhost:8321|one"
+    cls = jb._JiuwenBoxProviderMixin
+    cls.register_shared_sandbox_id(key, "old")
+    hook = Mock()
+    cls.register_lifecycle_hook(key, hook)
+    client = Mock(__enter__=Mock(), __exit__=Mock(return_value=False))
+    client.__enter__.return_value = client
+    client.delete_sandbox.side_effect = [httpx.ReadTimeout("ACL timeout"), None]
+    monkeypatch.setattr(jb, "_JiuwenBoxClient", Mock(return_value=client))
+    monkeypatch.setattr(jb, "_SANDBOX_DELETE_RETRY_SLEEP_SECONDS", 0.123)
+    entered, release = asyncio.Event(), asyncio.Event()
+    real_sleep = asyncio.sleep
+    waits = []
+
+    async def wait_for_retry(delay):
+        if delay == 0.123:
+            waits.append(delay)
+            entered.set()
+            await release.wait()
+        else:
+            await real_sleep(delay)
+
+    monkeypatch.setattr(jb.asyncio, "sleep", wait_for_retry)
+    first = asyncio.create_task(jb.delete_jiuwenbox_sandbox(shared_key=key, raise_on_error=True))
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        second = asyncio.create_task(jb.delete_jiuwenbox_sandbox(shared_key=key, raise_on_error=True))
+        await real_sleep(0)
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        with pytest.raises(RuntimeError, match="deletion is pending"):
+            Probe(client)._get_sandbox_id()
+        with pytest.raises(RuntimeError, match="deletion is pending"):
+            await jb.force_recreate_jiuwenbox_sandbox("http://localhost:8321", shared_key=key)
+        assert not second.done()
+        assert client.delete_sandbox.call_count == 1
+        client.create_sandbox.assert_not_called()
+        release.set()
+        assert await second == ["old"]
+        assert client.delete_sandbox.call_count == 2
+        assert waits == [0.123]
+        assert [call.args[0] for call in hook.call_args_list] == ["before_delete", "after_delete"]
+        cls.ensure_not_deleting(key)
+    finally:
+        release.set()
+        await asyncio.gather(*(task for task in (first, second) if task is not None), return_exceptions=True)
 
 
 @pytest.mark.asyncio

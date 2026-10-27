@@ -4,6 +4,7 @@
 import asyncio
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import httpx
@@ -13,12 +14,13 @@ from openjiuwen.core.sys_operation import OperationMode, SysOperation, SysOperat
 from openjiuwen.core.sys_operation.config import (
     ContainerScope, PreDeployLauncherConfig, SandboxGatewayConfig, SandboxIsolationConfig,
 )
-from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxGateway
+from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint, SandboxGateway
 from openjiuwen.extensions.sys_operation.sandbox.providers import jiuwenbox as jb
 
 
 @pytest.fixture
 def remote(monkeypatch):
+    monkeypatch.setattr(jb, "_SANDBOX_DELETE_RETRY_SLEEP_SECONDS", 0)
     cls = jb._JiuwenBoxProviderMixin
     for name in ("_shared_sandbox_ids", "_creation_locks", "_creation_failures", "_lifecycle_hooks",
                  "_pending_deletions", "_delete_tasks", "_idle_timeout_cache"):
@@ -30,7 +32,7 @@ def remote(monkeypatch):
     gateway = SandboxGateway()
     monkeypatch.setattr(SandboxGateway, "_instance", gateway)
     state = SimpleNamespace(
-        gateway=gateway, requests=[], created=[], active=set(), fail_delete=False, block_create=False,
+        gateway=gateway, requests=[], created=[], active=set(), fail_delete=False, delete_failures=0, block_create=False,
         entered=threading.Event(), release=threading.Event(), clients=[], lost=set(),
     )
 
@@ -47,7 +49,8 @@ def remote(monkeypatch):
             return httpx.Response(201, json={"id": sid})
         sid = request.url.path.split("/")[4]
         if request.method == "DELETE":
-            if state.fail_delete:
+            if state.fail_delete or state.delete_failures:
+                state.delete_failures = max(0, state.delete_failures - 1)
                 return httpx.Response(500, json={"detail": "ACL cleanup failed"})
             state.active.discard(sid)
             return httpx.Response(204)
@@ -213,3 +216,159 @@ async def test_bulk_cleanup_waits_for_gateway_automatic_recreation(remote, monke
     finally:
         remote.release.set()
         await asyncio.gather(*(t for t in (task, cleanup) if t is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bind_before_provider", [False, True])
+async def test_environment_binding_is_not_shadowed_by_cache_refill(remote, monkeypatch, bind_before_provider):
+    original = operation()
+    assert (await original.fs().read_file("/probe")).data.content == "sandbox-1"
+    if bind_before_provider:
+        monkeypatch.setenv("JIUWENBOX_SANDBOX_ID", "env-sandbox")
+    provider = jb.JiuwenBoxFSProvider(
+        SandboxEndpoint(base_url="http://localhost:8321", isolation_key=original.isolation_key_template),
+        SandboxGatewayConfig(launcher_config=PreDeployLauncherConfig(
+            base_url="http://localhost:8321", sandbox_type="jiuwenbox",
+        )),
+    )
+    monkeypatch.setenv("JIUWENBOX_SANDBOX_ID", "env-sandbox")
+    result = await provider.read_file("/probe")
+    assert result.code == 0
+    assert result.data.content == "env-sandbox"
+    assert len(remote.created) == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_launcher_binding_keeps_priority_over_environment_and_cache(remote, monkeypatch):
+    op = operation()
+    await op.fs().read_file("/probe")
+    monkeypatch.setenv("JIUWENBOX_SANDBOX_ID", "env-sandbox")
+    provider = jb.JiuwenBoxFSProvider(
+        SandboxEndpoint(base_url="http://localhost:8321", isolation_key=op.isolation_key_template),
+        SandboxGatewayConfig(launcher_config=PreDeployLauncherConfig(
+            base_url="http://localhost:8321", sandbox_type="jiuwenbox",
+            extra_params={"sandbox_id": "explicit-sandbox"},
+        )),
+    )
+    for _ in range(2):
+        assert (await provider.read_file("/probe")).data.content == "explicit-sandbox"
+    assert len(remote.created) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("waiter", ["read", "recreate"])
+async def test_lifecycle_waiters_leave_workers_available_for_rebuild(remote, waiter):
+    op = operation()
+    key = jb.build_jiuwenbox_shared_scope_key("http://localhost:8321", op.isolation_key_template)
+    # Simulate a rebuilding owner that needs another worker for DELETE/POST.
+    lock = jb._JiuwenBoxProviderMixin.scope_lifecycle_lock(key)
+    lock.acquire()
+    pool = ThreadPoolExecutor(max_workers=2)
+    asyncio.get_running_loop().set_default_executor(pool)
+    tasks = [asyncio.create_task(
+        op.fs().read_file("/probe") if waiter == "read" else
+        jb.force_recreate_jiuwenbox_sandbox("http://localhost:8321", shared_key=key)
+    ) for _ in range(4)]
+    try:
+        await asyncio.sleep(0.03)
+        assert not any(task.done() for task in tasks)
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: "worker available"), 1) == "worker available"
+    finally:
+        lock.release()
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks), 5)
+        finally:
+            pool.shutdown(wait=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_rebuild", [False, True])
+async def test_lazy_acquisition_joins_explicit_rebuild_without_creating_a_loser(remote, cancel_rebuild):
+    op = operation()
+    key = jb.build_jiuwenbox_shared_scope_key("http://localhost:8321", op.isolation_key_template)
+    remote.block_create = True
+    rebuild = asyncio.create_task(jb.force_recreate_jiuwenbox_sandbox(
+        "http://localhost:8321", shared_key=key, policy={"tag": "new"},
+    ))
+    read = None
+    try:
+        assert await asyncio.to_thread(remote.entered.wait, 2)
+        if cancel_rebuild:
+            rebuild.cancel()
+            await asyncio.gather(rebuild, return_exceptions=True)
+        read = asyncio.create_task(op.fs().read_file("/probe"))
+        await asyncio.sleep(0.02)
+        assert not read.done()
+        assert len([method for method, _ in remote.requests if method == "POST"]) == 1
+        remote.release.set()
+        result = await read
+        assert result.code == 0
+        assert result.data.content == "sandbox-1"
+        assert len(remote.created) == 1
+        assert remote.active == {"sandbox-1"}
+        assert not any(method == "DELETE" for method, _ in remote.requests)
+    finally:
+        remote.release.set()
+        await asyncio.gather(*(task for task in (read, rebuild) if task is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_rebuild_drains_initial_creation_and_revokes_before_replacement_grants(remote):
+    op = operation()
+    key = jb.build_jiuwenbox_shared_scope_key("http://localhost:8321", op.isolation_key_template)
+    remote.block_create = True
+    read = asyncio.create_task(op.fs().read_file("/probe"))
+    rebuild = None
+    try:
+        assert await asyncio.to_thread(remote.entered.wait, 2)
+        rebuild = asyncio.create_task(jb.force_recreate_jiuwenbox_sandbox(
+            "http://localhost:8321", shared_key=key, policy={"tag": "new"},
+        ))
+        await asyncio.sleep(0.02)
+        assert not rebuild.done()
+        assert len([method for method, _ in remote.requests if method == "POST"]) == 1
+        remote.release.set()
+        await read
+        assert await rebuild == "sandbox-2"
+        writes = [method for method, _ in remote.requests if method in {"POST", "DELETE"}]
+        assert writes == ["POST", "DELETE", "POST"]
+        assert remote.active == {"sandbox-2"}
+        # A retained provider must use the published replacement, not resurrect
+        # its old launcher/local ID after waiting for the lifecycle lock.
+        assert (await op.fs().read_file("/probe")).data.content == "sandbox-2"
+        assert len(remote.created) == 2
+    finally:
+        remote.release.set()
+        await asyncio.gather(*(task for task in (read, rebuild) if task is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failures", [1, 2])
+async def test_rebuild_retries_revocation_before_creating_replacement(remote, failures):
+    op = operation()
+    await op.fs().read_file("/probe")
+    key = jb.build_jiuwenbox_shared_scope_key("http://localhost:8321", op.isolation_key_template)
+    remote.delete_failures = failures
+    assert await jb.force_recreate_jiuwenbox_sandbox("http://localhost:8321", shared_key=key) == "sandbox-2"
+    writes = [method for method, _ in remote.requests if method in {"POST", "DELETE"}]
+    assert writes == ["POST"] + ["DELETE"] * (failures + 1) + ["POST"]
+    assert remote.active == {"sandbox-2"}
+    assert (await op.fs().read_file("/probe")).data.content == "sandbox-2"
+
+
+@pytest.mark.asyncio
+async def test_rebuild_does_not_create_after_old_acl_cleanup_fails(remote):
+    op = operation()
+    await op.fs().read_file("/probe")
+    key = jb.build_jiuwenbox_shared_scope_key("http://localhost:8321", op.isolation_key_template)
+    remote.fail_delete = True
+    with pytest.raises(RuntimeError, match="ACL cleanup failed"):
+        await jb.force_recreate_jiuwenbox_sandbox("http://localhost:8321", shared_key=key)
+    assert len(remote.created) == 1
+    assert remote.active == {"sandbox-1"}
+    assert len([method for method, _ in remote.requests if method == "DELETE"]) == 3
+    rejected = await operation().fs().read_file("/probe")
+    assert rejected.code != 0
+    remote.fail_delete = False
+    await jb.delete_jiuwenbox_sandbox(shared_key=key, raise_on_error=True)
+    assert await jb.force_recreate_jiuwenbox_sandbox("http://localhost:8321", shared_key=key) == "sandbox-2"

@@ -15,6 +15,7 @@ import threading
 import time
 from pathlib import Path, PurePosixPath
 from typing import Any, AsyncIterator, Awaitable, Callable, ClassVar, Dict, List, Optional, Sequence, Tuple, TypeVar
+from weakref import WeakValueDictionary
 
 import httpx
 
@@ -535,6 +536,8 @@ class _JiuwenBoxClient:
 # JIUWENBOX_SANDBOX_RECREATE_RETRIES overrides default; 0 disables retries.
 _DEFAULT_SANDBOX_RECREATE_RETRIES = 3
 _SANDBOX_RECREATE_RETRY_SLEEP_SECONDS = 1.0
+_SANDBOX_DELETE_MAX_ATTEMPTS = 3
+_SANDBOX_DELETE_RETRY_SLEEP_SECONDS = 1.0
 
 
 def _resolve_recreate_retries() -> int:
@@ -565,6 +568,9 @@ class _JiuwenBoxProviderMixin:
     _shared_sandbox_ids: Dict[str, str] = {}
     # Acquired only by worker threads; never hold the cache lock across HTTP.
     _creation_locks: ClassVar[Dict[str, threading.Lock]] = {}
+    # Survives cache invalidation while a creator/rebuilder still owns or waits
+    # for the scope. Weak entries disappear once the last caller releases them.
+    _scope_lifecycle_locks: ClassVar[WeakValueDictionary[str, threading.Lock]] = WeakValueDictionary()
     _creation_failures: ClassVar[Dict[str, Tuple[float, str]]] = {}
     # Cache shared_scope_key -> lifecycle_hook captured at create time, so teardown
     # (delete_jiuwenbox_sandbox) can fire delete hooks without being passed them.
@@ -820,7 +826,65 @@ class _JiuwenBoxProviderMixin:
             cls._creation_locks.clear()
         return entries
 
+    @classmethod
+    def scope_lifecycle_lock(cls, shared_key: str) -> threading.Lock:
+        """Serialize lazy creation and explicit recreation of the same scope."""
+        with cls._shared_lock:
+            lock = cls._scope_lifecycle_locks.get(shared_key)
+            if lock is None:
+                lock = threading.Lock()
+                cls._scope_lifecycle_locks[shared_key] = lock
+            return lock
+
+    @classmethod
+    async def acquire_scope_lifecycle_lock(cls, shared_key: str) -> threading.Lock:
+        """Wait without occupying workers needed by the current lock holder."""
+        lock = cls.scope_lifecycle_lock(shared_key)
+        while not lock.acquire(blocking=False):
+            await asyncio.sleep(0.01)
+        return lock
+
+    @classmethod
+    def cached_sandbox_ids(cls, base_url: str, shared_key: Optional[str]) -> list[str]:
+        """Snapshot IDs before recreation without dropping deletion ownership."""
+        with cls._shared_lock:
+            return list(dict.fromkeys(
+                sid for key, sid in cls._shared_sandbox_ids.items()
+                if key == shared_key or (shared_key is None and key.split("|", 1)[0] == base_url.rstrip("/"))
+            ))
+
     def _get_sandbox_id(self) -> str:
+        shared_key = self._shared_scope_key()
+        with self.scope_lifecycle_lock(shared_key):
+            return self._get_sandbox_id_locked()
+
+    async def _acquire_sandbox_id(self) -> str:
+        async def resolve() -> str:
+            lock = await self.acquire_scope_lifecycle_lock(self._shared_scope_key())
+            try:
+                return await asyncio.to_thread(self._get_sandbox_id_locked)
+            finally:
+                lock.release()
+
+        task = asyncio.create_task(resolve())
+        # Do not release the scope while a cancelled caller's worker still
+        # creates or publishes a remote sandbox. Consume abandoned failures.
+        task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        return await asyncio.shield(task)
+
+    def _get_sandbox_id_locked(self) -> str:
+        # A retained provider may have waited through a rebuild. Prefer its
+        # replacement over a derived local/launcher ID, but retain explicit
+        # launcher changes and the environment override.
+        with self._shared_lock:
+            cached = self._shared_sandbox_ids.get(self._shared_scope_key())
+        extra_id = self._sandbox_id_from_launcher_extra_params()
+        if cached and not os.environ.get("JIUWENBOX_SANDBOX_ID") and extra_id in (None, self._sandbox_id):
+            self._sandbox_id = cached
+            self._launcher_extra_params(create=True)["sandbox_id"] = cached
+        return self._get_or_create_sandbox_id()
+
+    def _get_or_create_sandbox_id(self) -> str:
         self._assert_not_deleting(self._shared_scope_key())
         env_sandbox_id = os.environ.get("JIUWENBOX_SANDBOX_ID")
         if env_sandbox_id and self._sandbox_id != env_sandbox_id:
@@ -976,7 +1040,7 @@ class _JiuwenBoxProviderMixin:
         """Track recreation until its worker finishes, even if the caller cancels."""
         with cls._shared_lock:
             cls._assert_not_deleting_locked(shared_key or base_url.rstrip("/"))
-            task = asyncio.create_task(_force_recreate_jiuwenbox_sandbox(
+            task = asyncio.create_task(cls._recreate_serialized(
                 base_url, shared_key=shared_key, policy=policy, policy_mode=policy_mode,
                 timeout_seconds=timeout_seconds, preserve_files_upload=preserve_files_upload,
                 extra_stale_sandbox_ids=extra_stale_sandbox_ids, lifecycle_hook=lifecycle_hook, reason=reason,
@@ -993,6 +1057,24 @@ class _JiuwenBoxProviderMixin:
         # Cancelling the caller cannot cancel a worker thread already creating a
         # remote sandbox. Keep its full publication/cleanup visible to bulk delete.
         return await asyncio.shield(task)
+
+    @classmethod
+    async def _recreate_serialized(
+        cls, base_url: str, *, shared_key: Optional[str], policy: dict | None, policy_mode: str | None,
+        timeout_seconds: float, preserve_files_upload: Any, extra_stale_sandbox_ids: Sequence[str] | None,
+        lifecycle_hook: Optional[Callable[[str, dict], None]], reason: str,
+    ) -> str:
+        lock = await cls.acquire_scope_lifecycle_lock(shared_key or base_url.rstrip("/"))
+        # The caller shields this whole task, including lock acquisition, so a
+        # cancelled caller cannot abandon an acquired scope lock.
+        try:
+            return await _force_recreate_jiuwenbox_sandbox(
+                base_url, shared_key=shared_key, policy=policy, policy_mode=policy_mode,
+                timeout_seconds=timeout_seconds, preserve_files_upload=preserve_files_upload,
+                extra_stale_sandbox_ids=extra_stale_sandbox_ids, lifecycle_hook=lifecycle_hook, reason=reason,
+            )
+        finally:
+            lock.release()
 
     @classmethod
     async def delete_all_sandboxes(cls, **kwargs) -> list[str]:
@@ -1135,13 +1217,27 @@ class _JiuwenBoxProviderMixin:
                 with cls._shared_lock:
                     cls._pending_deletions[identity] = (True, hook)
             if not service_stopped:
-                try:
-                    with _JiuwenBoxClient(
-                        base_url=shared_key.split("|", 1)[0], timeout_seconds=timeout_seconds,
-                    ) as client:
-                        await asyncio.to_thread(client.delete_sandbox, sandbox_id)
-                except Exception as exc:
-                    raise _DeleteTransportError(f"{type(exc).__name__}: {exc}") from exc
+                # Keep ownership and pending state across all attempts. Concurrent
+                # callers join this task; no replacement can bypass revocation.
+                for attempt in range(1, _SANDBOX_DELETE_MAX_ATTEMPTS + 1):
+                    try:
+                        with _JiuwenBoxClient(
+                            base_url=shared_key.split("|", 1)[0], timeout_seconds=timeout_seconds,
+                        ) as client:
+                            await asyncio.to_thread(client.delete_sandbox, sandbox_id)
+                        break
+                    except Exception as exc:
+                        if attempt == _SANDBOX_DELETE_MAX_ATTEMPTS:
+                            raise _DeleteTransportError(
+                                f"cleanup failed after {attempt} attempts; replacement creation blocked; "
+                                f"last error: {type(exc).__name__}: {exc}"
+                            ) from exc
+                        logger.warning(
+                            "[jiuwenbox] sandbox %s cleanup attempt %d/%d failed; retrying in %.1fs: %s",
+                            sandbox_id, attempt, _SANDBOX_DELETE_MAX_ATTEMPTS,
+                            _SANDBOX_DELETE_RETRY_SLEEP_SECONDS, exc,
+                        )
+                        await asyncio.sleep(_SANDBOX_DELETE_RETRY_SLEEP_SECONDS)
             with cls._shared_lock:
                 cls._pending_deletions.pop(identity, None)
                 if cls._shared_sandbox_ids.get(shared_key) == sandbox_id:
@@ -1168,7 +1264,7 @@ class _JiuwenBoxProviderMixin:
         """Run op with auto sandbox recreate on sandbox-not-found 404."""
         max_retries = _resolve_recreate_retries()
         last_exc: Optional[httpx.HTTPStatusError] = None
-        stale_sandbox_id = await asyncio.to_thread(self._get_sandbox_id)
+        stale_sandbox_id = await self._acquire_sandbox_id()
         for attempt in range(max_retries + 1):
             if attempt == 0:
                 sandbox_id = stale_sandbox_id
@@ -1255,7 +1351,7 @@ class _JiuwenBoxProviderMixin:
         when the pipeline failed and local fallback was not used.
         """
         max_retries = _resolve_recreate_retries()
-        stale_sandbox_id = await asyncio.to_thread(self._get_sandbox_id)
+        stale_sandbox_id = await self._acquire_sandbox_id()
         last_error: Optional[str] = None
 
         for attempt in range(max_retries + 1):
@@ -1523,7 +1619,7 @@ async def force_recreate_jiuwenbox_sandbox(
         policy / policy_mode: Security policy for the new sandbox.
         timeout_seconds: HTTP client timeout.
         preserve_files_upload: Files/dirs to re-upload in copy mode.
-        extra_stale_sandbox_ids: Additional stale IDs to delete after create.
+        extra_stale_sandbox_ids: Additional stale IDs to delete before replacement creation.
         lifecycle_hook: Strict lifecycle hook for before/after_recreate events.
         reason: Recreate reason in hook context ("sandbox_lost" or "policy_changed").
 
@@ -1551,13 +1647,9 @@ async def _force_recreate_jiuwenbox_sandbox(
     if shared_key is None:
         if _JiuwenBoxProviderMixin.deletion_pending_for_base_url(base_url):
             raise RuntimeError("jiuwenbox sandbox deletion is pending; retry deletion before recreation")
-        # Legacy single-tenant path: clear every cached sandbox under base_url.
-        stale_sandbox_ids = clear_jiuwenbox_shared_sandbox(base_url)
-        shared_key = base_url.rstrip("/")
     else:
         _JiuwenBoxProviderMixin.ensure_not_deleting(shared_key)
-        stale_id = _JiuwenBoxProviderMixin.clear_shared_sandbox_for_key(shared_key)
-        stale_sandbox_ids = [stale_id] if stale_id else []
+    stale_sandbox_ids = _JiuwenBoxProviderMixin.cached_sandbox_ids(base_url, shared_key)
 
     if extra_stale_sandbox_ids:
         seen = set(stale_sandbox_ids)
@@ -1572,6 +1664,21 @@ async def _force_recreate_jiuwenbox_sandbox(
             "before_recreate",
             {"reason": reason, "old_sandbox_id": old_id},
         )
+
+    # Windows instances share account ACLs. Complete old revocation before any
+    # replacement grant; create-before-delete can revoke the replacement's ACLs.
+    # Failed deletions stay pending and prevent a replacement from being created.
+    deleted = await _JiuwenBoxProviderMixin.delete_cached_sandboxes(
+        base_url=base_url if shared_key is None else None, shared_key=shared_key,
+        timeout_seconds=timeout_seconds, reason=reason, raise_on_error=True,
+    )
+    for old_id in stale_sandbox_ids:
+        if old_id not in deleted:
+            await delete_jiuwenbox_sandbox(
+                sandbox_id=old_id, shared_key=shared_key or base_url.rstrip("/"),
+                timeout_seconds=timeout_seconds, reason=reason, raise_on_error=True,
+            )
+    shared_key = shared_key or base_url.rstrip("/")
 
     with _JiuwenBoxClient(base_url=base_url, timeout_seconds=timeout_seconds) as client:
         sandbox_id = await asyncio.to_thread(
@@ -1588,23 +1695,6 @@ async def _force_recreate_jiuwenbox_sandbox(
                 "after_recreate",
                 {"reason": reason, "sandbox_id": sandbox_id, "old_sandbox_id": old_id},
             )
-
-        # Create before delete so a failed create leaves the stale sandbox in place.
-        for old_id in stale_sandbox_ids:
-            if old_id == sandbox_id:
-                # Skip delete if stale id equals the new sandbox id.
-                continue
-            try:
-                await asyncio.to_thread(client.delete_sandbox, old_id)
-                logger.info(
-                    "[jiuwenbox] force_recreate_jiuwenbox_sandbox: "
-                    "deleted stale sandbox %s", old_id,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "[jiuwenbox] force_recreate_jiuwenbox_sandbox: "
-                    "stale sandbox %s cleanup failed: %s", old_id, exc,
-                )
 
     logger.info(
         "[jiuwenbox] force_recreate_jiuwenbox_sandbox: new sandbox_id=%s for %s",
