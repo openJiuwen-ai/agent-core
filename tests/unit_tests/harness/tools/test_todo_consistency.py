@@ -13,6 +13,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.sys_operation import LocalWorkConfig, OperationMode
 from openjiuwen.core.sys_operation.local._rw_lock_manager import ReadWriteLockManager
 from openjiuwen.core.sys_operation.local.fs_operation import FsOperation
+from openjiuwen.harness.schema.task import TodoStatus
 from openjiuwen.harness.tools.todo import TodoCreateTool, TodoListTool, TodoModifyTool
 from openjiuwen.harness.tools.todo_store import _BINDING, bind_todo_batch, prepare_todo_batch
 
@@ -52,6 +53,37 @@ async def create(tool, session, **kwargs):
 
 async def update(tool, session, ident, **fields):
     return await tool.invoke({"action": "update", "todos": [{"id": ident, **fields}]}, session=session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["create", "modify"])
+async def test_relative_workspace_provider_reuses_transaction(env, monkeypatch, action):
+    from openjiuwen.harness.tools.todo_store import current_transaction, transact
+
+    c, m, _, session, path = env
+    if action == "modify":
+        await create(c, session)
+    monkeypatch.chdir(path.parent.parent)
+    provider = SimpleNamespace(
+        endpoint=SimpleNamespace(base_url="test://sandbox", sandbox_id="box", isolation_key="session"),
+        read_file=c.fs.read_file,
+        write_file=c.fs.write_file,
+    )
+    tool = c if action == "create" else m
+    tool.workspace = "."
+    tool.fs = provider
+
+    async def invoke_nested():
+        assert current_transaction(tool, "session") is not None
+        if action == "create":
+            return await create(tool, session)
+        return await update(tool, session, "A", status="completed")
+
+    result = await asyncio.wait_for(transact(tool, "session", invoke_nested), timeout=2)
+    assert result.todo_snapshot == json.loads(path.read_text())
+    assert result.todo_snapshot["revision"] == (1 if action == "create" else 2)
+    if action == "modify":
+        assert result.todo_snapshot["todos"][0]["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -219,6 +251,142 @@ async def test_conflict_recomputes_and_unknown_not_replayed(env, monkeypatch):
         await update(m, session, "B", status="completed")
     assert len(calls) == 3
     assert json.loads(path.read_text())["todos"][1]["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_conflict_revalidates_guard_and_reapplies_callback(env, monkeypatch):
+    c, m, _, session, path = env
+    await create(c, session)
+    write = m.fs.write_file
+    writes, registered, registrations = [], False, []
+    candidates, guards = [], []
+
+    async def guard(_session_id, snapshot, *, committing=False):
+        nonlocal registered
+        guards.append((snapshot.revision, committing))
+        if committing and not registered:
+            registered = True
+            registrations.append(snapshot.plan_id)
+
+    async def interfere(*args, **kwargs):
+        writes.append(kwargs["options"]["expected_content_sha256"])
+        if len(writes) == 1:
+            saved = json.loads(path.read_text())
+            saved["todos"][1]["content"] = "other writer"
+            saved["revision"] += 1
+            path.write_text(json.dumps(saved))
+        return await write(*args, **kwargs)
+
+    async def change(items):
+        candidates.append(items[1].content)
+        items[0].status = TodoStatus.COMPLETED
+
+    m.snapshot_guard = guard
+    monkeypatch.setattr(m.fs, "write_file", interfere)
+    await m.update_todos("session", change)
+    assert candidates == ["second", "other writer"]
+    assert guards == [(1, False), (1, True), (2, False), (2, True)]
+    assert len(registrations) == 1
+    assert len(writes) == 2 and writes[0] != writes[1]
+    saved = json.loads(path.read_text())
+    assert saved["revision"] == 3
+    assert saved["todos"][0]["status"] == "completed"
+    assert saved["todos"][1]["content"] == "other writer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expire_at", ["retry_guard", "after_guard"])
+async def test_retry_does_not_skip_owner_validation(env, monkeypatch, expire_at):
+    c, m, _, session, path = env
+    await create(c, session)
+    original = path.read_bytes()
+    guard_calls, write_calls, active = 0, 0, True
+
+    async def guard(_session_id, _snapshot, *, committing=False):
+        nonlocal guard_calls, active
+        if committing:
+            guard_calls += 1
+            if expire_at == "retry_guard" and guard_calls == 2:
+                raise ValueError("owner expired during retry")
+            if expire_at == "after_guard":
+                await asyncio.sleep(0)
+                active = False
+
+    async def conflict(*args, **kwargs):
+        nonlocal write_calls
+        write_calls += 1
+        return SimpleNamespace(code=1, data=SimpleNamespace(conflict=True))
+
+    def check_active():
+        if not active:
+            raise ValueError("owner expired during guard")
+
+    async def change(items):
+        items[0].status = TodoStatus.COMPLETED
+
+    m.snapshot_guard = guard
+    monkeypatch.setattr(m.fs, "write_file", conflict)
+    with pytest.raises(ValueError, match="owner expired"):
+        await m.update_todos("session", change, check_active=check_active)
+    assert guard_calls == (2 if expire_at == "retry_guard" else 1)
+    assert write_calls == (1 if expire_at == "retry_guard" else 0)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["aio", "yuanrong"])
+@pytest.mark.parametrize("tool_name", ["TodoCreateTool", "TodoListTool", "TodoGetTool", "TodoModifyTool"])
+async def test_unsupported_provider_todo_reports_contract_before_write(env, monkeypatch, provider_name, tool_name):
+    from unittest.mock import AsyncMock, Mock
+
+    from openjiuwen.core.sys_operation.sandbox.gateway.gateway import SandboxEndpoint
+    from openjiuwen.extensions.sys_operation.sandbox.providers.aio import AIOFSProvider
+    from openjiuwen.extensions.sys_operation.sandbox.providers.yuanrong import YuanrongFSProvider
+    from openjiuwen.harness.tools import todo
+
+    _, _, _, session, path = env
+    endpoint = SandboxEndpoint(base_url="test://sandbox", sandbox_id="box", isolation_key="session")
+    if provider_name == "aio":
+        provider = AIOFSProvider(endpoint)
+        client = SimpleNamespace(file=SimpleNamespace(read_file=Mock(
+            return_value=SimpleNamespace(data=SimpleNamespace(content="[]")))))
+        monkeypatch.setattr(provider, "_get_client", lambda: client)
+    else:
+        provider = YuanrongFSProvider(endpoint)
+        monkeypatch.setattr(provider, "_fs_read_sync", lambda *args, **kwargs: "[]")
+    write = AsyncMock()
+    monkeypatch.setattr(provider, "write_file", write)
+    tool = getattr(todo, tool_name)(SimpleNamespace(fs=lambda: provider), str(path.parent.parent))
+    with pytest.raises(FrameworkError, match="does not support snapshot reads.*exists and content_sha256"):
+        await tool.invoke({}, session=session)
+    write.assert_not_awaited()
+    assert not path.exists()
+
+
+@pytest.mark.parametrize("revision", [True, False, 1.0, "1", -1, 2**53])
+def test_snapshot_revision_rejects_non_safe_integer(revision):
+    from openjiuwen.harness.tools.todo_store import decode_snapshot
+
+    with pytest.raises(ValueError, match="Invalid Todo plan or revision"):
+        decode_snapshot({"plan_id": "plan", "revision": revision, "todos": []})
+
+
+def test_gateway_coordination_identity_resolves_session_without_launch(monkeypatch):
+    from openjiuwen.core.sys_operation.sandbox import sandbox_mixin
+    from openjiuwen.harness.tools.todo_store import object_key
+
+    fs = sandbox_mixin.SandboxGatewayClientMixin()
+    fs.mode = "sandbox"
+    launcher = SimpleNamespace(gateway_url="test://gateway", base_url="test://box", sandbox_type="jiuwenbox")
+    fs._init_client_context(SimpleNamespace(
+        config=SimpleNamespace(launcher_config=launcher), isolation_key_template="todo-{session_id}"), "fs")
+    monkeypatch.setattr(sandbox_mixin, "get_session_id", lambda: "first")
+    first = object_key(fs, "/todo/session/todo.json")
+    assert first[1][-1] == "todo-first"
+    assert object_key(fs, "/todo/session/./todo.json") == first
+    monkeypatch.setattr(sandbox_mixin, "get_session_id", lambda: "second")
+    assert object_key(fs, "/todo/session/todo.json") != first
+    assert not hasattr(fs, "_gateway_client")
 
 
 @pytest.mark.asyncio

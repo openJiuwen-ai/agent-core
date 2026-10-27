@@ -306,3 +306,7 @@ Local FS and the matching JiuwenBox backend support these optional operations; o
 - Sandbox snapshots return their existing `backend_id`. Passing it as `expected_backend_id` prevents a backend switch between read and commit without another network query.
 
 Replacement preserves existing write-access constraints, owner/group and ACL. Cancellation waits for an in-flight replacement to settle. This is not a power-loss durability guarantee; unsupported backends must not fall back to an ordinary overwrite.
+
+Local replacement flushes the Python buffer and renames the complete temporary file, but does not fsync the file or parent directory. Atomic visibility during normal operation does not guarantee durable content or directory entries after power failure or kernel crash; killing only the writer process does not test power-loss durability.
+
+Compatibility: the current AIO and Yuanrong providers do not implement the snapshot/conditional-replacement contract. All Todo tools, including list/get, require it and reject unsupported snapshot responses before attempting a write. Existing deployments using these providers must adapt and validate their backend before upgrading the Todo implementation. Ordinary filesystem operations retain their existing behavior.

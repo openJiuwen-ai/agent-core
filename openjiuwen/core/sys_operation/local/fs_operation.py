@@ -504,7 +504,8 @@ class FsOperation(BaseFsOperation):
                     raise OSError("Todo parent changed after validation")
                 atomic = bool(options and options.get("atomic_replace"))
                 expected_exists = options.get("expected_exists") if options else None
-                if atomic and (append or expected_hash is None or type(expected_exists) is not bool):
+                invalid_atomic_options = append or expected_hash is None or not isinstance(expected_exists, bool)
+                if atomic and invalid_atomic_options:
                     raise ValueError("Atomic replacement requires hash/existence and forbids append")
                 if expected_hash is not None:
                     try:

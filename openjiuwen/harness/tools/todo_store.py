@@ -48,7 +48,10 @@ def decode_snapshot(content, *, exists=True, content_sha256=None):
         snapshot = TodoSnapshot(data, "legacy", 0, True, content_sha256, False)
     elif isinstance(data, dict):
         plan, revision, todos = data.get("plan_id"), data.get("revision"), data.get("todos")
-        if not isinstance(plan, str) or not plan or type(revision) is not int or not 0 <= revision <= MAX_REVISION:
+        valid_revision_type = isinstance(revision, int) and not isinstance(revision, bool)
+        if not isinstance(plan, str) or not plan or not valid_revision_type:
+            raise ValueError("Invalid Todo plan or revision")
+        if not 0 <= revision <= MAX_REVISION:
             raise ValueError("Invalid Todo plan or revision")
         snapshot = TodoSnapshot(todos, plan, revision, True, content_sha256)
     else:
@@ -141,7 +144,7 @@ def object_key(fs, path):
         # Gateway isolation is stable across lazy creation. Runtime extras may
         # gain a sandbox_id and contain callbacks, so they are not a lock key.
         scope = (launcher.gateway_url, getattr(launcher, "base_url", ""),
-                 launcher.sandbox_type, fs._get_resolved_isolation_key())
+                 launcher.sandbox_type, fs.get_resolved_isolation_key())
     else:
         scope = id(fs)
     return ("sandbox", scope, os.path.normpath(path))
@@ -149,7 +152,7 @@ def object_key(fs, path):
 
 def current_transaction(tool, session_id):
     current = _TRANSACTION.get()
-    key = object_key(tool.fs, tool._get_file_path(session_id))
+    key = object_key(tool.fs, os.path.abspath(tool.get_file_path(session_id)))
     return current if current is not None and current.key == key else None
 
 
@@ -157,8 +160,13 @@ async def read_snapshot(fs, path):
     result = await fs.read_file(path, mode="text", options={"snapshot": True, "missing_ok": True})
     if result.code != 0 or result.data is None:
         raise RuntimeError(f"Todo snapshot read failed: {result.message}")
-    if type(result.data.exists) is not bool or not isinstance(result.data.content_sha256, str):
-        raise RuntimeError("Todo backend does not support snapshot reads")
+    supports_snapshot = isinstance(result.data.exists, bool) and isinstance(result.data.content_sha256, str)
+    if not supports_snapshot:
+        raise RuntimeError(
+            f"Todo backend does not support snapshot reads ({type(fs).__name__}): "
+            "read_file must return exists and content_sha256; "
+            "use a backend with Todo snapshot/conditional atomic replacement support"
+        )
     snapshot = decode_snapshot(
         result.data.content, exists=result.data.exists, content_sha256=result.data.content_sha256
     )
@@ -177,7 +185,7 @@ def observe_plan(tool, session_id, snapshot):
     binding = _BINDING.get()
     if binding is None:
         return
-    key = object_key(tool.fs, os.path.abspath(tool._get_file_path(session_id)))
+    key = object_key(tool.fs, os.path.abspath(tool.get_file_path(session_id)))
     reference = binding[0].setdefault(key, PlanReference())
     if reference.value is _UNRESOLVED:
         reference.value = snapshot.plan_id
@@ -185,7 +193,7 @@ def observe_plan(tool, session_id, snapshot):
 
 
 async def capture_plan(tool, session_id):
-    path = os.path.abspath(tool._get_file_path(session_id))
+    path = os.path.abspath(tool.get_file_path(session_id))
     key = object_key(tool.fs, path)
     binding = _BINDING.get()
     ref = binding[0].setdefault(key, PlanReference()) if binding else PlanReference()
@@ -201,7 +209,7 @@ async def capture_plan(tool, session_id):
 async def transact(
     tool, session_id, callback, *, expected_plan=_UNRESOLVED, check_active=None
 ):
-    path = os.path.abspath(tool._get_file_path(session_id))
+    path = os.path.abspath(tool.get_file_path(session_id))
     key = object_key(tool.fs, path)
     if current_transaction(tool, session_id) is not None:
         if check_active is not None:
@@ -267,7 +275,7 @@ async def transact(
                 if not response.data.atomic_replace:
                     raise RuntimeError("Todo backend did not confirm conditional publication")
             if tx.created:
-                tool._created_in_invoke.add(session_id)
+                tool.mark_created_in_invoke(session_id)
             if binding is not None:
                 binding[1][key] = committed.plan_id
             if isinstance(result, dict) and committed.exists:
@@ -295,11 +303,11 @@ def todo_operation(method):
             for group, optional_id in groups:
                 if isinstance(group, list):
                     for item in group:
-                        if (
-                            isinstance(item, dict)
-                            and (optional_id or "id" in item)
-                            and not str(item.get("id") or "").strip()
-                        ):
+                        if not isinstance(item, dict):
+                            continue
+                        if not optional_id and "id" not in item:
+                            continue
+                        if not str(item.get("id") or "").strip():
                             item["id"] = uuid.uuid4().hex
         try:
             return await transact(self, session.get_session_id(), lambda: method(self, data, **kwargs))

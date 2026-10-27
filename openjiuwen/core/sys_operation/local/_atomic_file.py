@@ -1,5 +1,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Publish one complete file without exposing a truncated destination."""
+"""Publish a complete file atomically for concurrent readers.
+
+This prevents partial visibility during normal operation, not data loss after
+power failure or kernel crash: file and parent directory are not fsynced.
+"""
 
 import asyncio
 import errno
@@ -8,6 +12,16 @@ import secrets
 import stat
 import sys
 from pathlib import Path
+
+_SE_FILE_OBJECT = 1
+_OWNER_SECURITY_INFORMATION = 0x00000001
+_GROUP_SECURITY_INFORMATION = 0x00000002
+_DACL_SECURITY_INFORMATION = 0x00000004
+_FILE_SECURITY_INFORMATION = _OWNER_SECURITY_INFORMATION | _GROUP_SECURITY_INFORMATION | _DACL_SECURITY_INFORMATION
+_PROTECTED_DACL_SECURITY_INFORMATION = 0x80000000
+_UNPROTECTED_DACL_SECURITY_INFORMATION = 0x20000000
+_SE_DACL_PROTECTED = 0x1000
+_SE_DACL_AUTO_INHERITED = 0x0400
 
 
 def _read_posix_access_acl(fd: int) -> bytes | None:
@@ -48,15 +62,15 @@ def _copy_windows_security(source: Path, destination: Path) -> None:
     put.argtypes = [wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD, *([ctypes.c_void_p] * 4)]
     put.restype = wintypes.DWORD
     owner, group, dacl, descriptor = (ctypes.c_void_p() for _ in range(4))
-    information = 7  # OWNER | GROUP | DACL
+    information = _FILE_SECURITY_INFORMATION
     error = get(
         str(source),
-        1,
+        _SE_FILE_OBJECT,
         information,
         ctypes.byref(owner),
         ctypes.byref(group),
         ctypes.byref(dacl),
-        None,
+        None,  # SACL auditing information is outside the copied access policy.
         ctypes.byref(descriptor),
     )
     if error:
@@ -68,9 +82,13 @@ def _copy_windows_security(source: Path, destination: Path) -> None:
         get_control.restype = wintypes.BOOL
         if not get_control(descriptor, ctypes.byref(control), ctypes.byref(revision)):
             raise ctypes.WinError(ctypes.get_last_error())
-        information |= 0x80000000 if control.value & 0x1000 else 0x20000000
-        if control.value & 0x0400:  # SE_DACL_AUTO_INHERITED
-            error = put(str(destination), 1, information, owner, group, dacl, None)
+        information |= (
+            _PROTECTED_DACL_SECURITY_INFORMATION
+            if control.value & _SE_DACL_PROTECTED
+            else _UNPROTECTED_DACL_SECURITY_INFORMATION
+        )
+        if control.value & _SE_DACL_AUTO_INHERITED:
+            error = put(str(destination), _SE_FILE_OBJECT, information, owner, group, dacl, None)
             if error:
                 raise ctypes.WinError(error)
         else:
@@ -86,11 +104,11 @@ def _copy_windows_security(source: Path, destination: Path) -> None:
             ]
             get_raw.restype = wintypes.BOOL
             needed = wintypes.DWORD()
-            get_raw(str(source), 7, None, 0, ctypes.byref(needed))
+            get_raw(str(source), _FILE_SECURITY_INFORMATION, None, 0, ctypes.byref(needed))
             if not needed.value:
                 raise ctypes.WinError(ctypes.get_last_error())
             raw = ctypes.create_string_buffer(needed.value)
-            if not get_raw(str(source), 7, raw, needed.value, ctypes.byref(needed)):
+            if not get_raw(str(source), _FILE_SECURITY_INFORMATION, raw, needed.value, ctypes.byref(needed)):
                 raise ctypes.WinError(ctypes.get_last_error())
             put_legacy = api.SetFileSecurityW
             put_legacy.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
@@ -119,7 +137,7 @@ def _replace_file(
     existing_acl = None
     try:
         if os.name != "nt":
-            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, mode=0o600)
             opened = os.fstat(parent_fd)
             if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
                 raise OSError("File parent changed before atomic write")
@@ -128,6 +146,7 @@ def _replace_file(
             target_fd = os.open(
                 path.name if parent_fd is not None else path,
                 os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+                mode=0o600,
                 **({"dir_fd": parent_fd} if parent_fd is not None else {}),
             )
         except FileNotFoundError:

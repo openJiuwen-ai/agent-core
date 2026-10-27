@@ -494,6 +494,7 @@ class TaskPlanningRail(DeepAgentRail):
 
         from openjiuwen.harness.tools.todo_store import bind_todo_batch, transact
         bind_todo_batch(ctx, self._find_todo_tool())
+
         async def apply():
             try:
                 todos = await tool.load_todos(session_id)

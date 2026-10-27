@@ -127,6 +127,10 @@ class TodoTool(Tool):
         """
         return os.path.join(self.workspace, f"./{session_id}/todo.json")
 
+    def get_file_path(self, session_id: str) -> str:
+        """Expose the Todo storage path to transaction coordination."""
+        return self._get_file_path(session_id)
+
     async def load_todos(self, session_id: str) -> List[TodoItem]:
         tx = current_transaction(self, session_id)
         if tx is not None:
@@ -155,6 +159,7 @@ class TodoTool(Tool):
         desired = todos.records(todos)
         original = {t["id"]: t for t in todos.snapshot.todos}
         wanted = {t["id"]: t for t in desired}
+
         async def apply():
             current = current_transaction(self, session_id)
             merged = []
@@ -187,6 +192,10 @@ class TodoTool(Tool):
             await self.save_todos(session_id, items)
             return result
         return await transact(self, session_id, apply, **kwargs)
+
+    def mark_created_in_invoke(self, session_id: str) -> None:
+        """Record successful creation after the transaction has committed."""
+        self._created_in_invoke.add(session_id)
 
     def reset_invoke_marker(self, session_id: str) -> None:
         """Mark the start of a new invoke: forget "already created" state.
