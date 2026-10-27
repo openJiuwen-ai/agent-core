@@ -568,7 +568,7 @@ class TeamBackend:
             try:
                 await self.startup_member(member.member_name, on_created)
             except Exception as e:
-                team_logger.error(
+                team_logger.exception(
                     "startup: failed to start member {} (left UNSTARTED for retry): {}",
                     member.member_name, e,
                 )
