@@ -4,6 +4,7 @@
 IntelliRouter Model Client — wraps intelli_router.ReliableRouter.
 """
 import atexit
+import asyncio
 import hashlib
 import inspect
 import json
@@ -95,8 +96,23 @@ class IntelliRouterClientConfig:
         )
 
 
+@dataclass
+class _RouterCacheEntry:
+    """A cached router plus the event loop its httpx pool is bound to.
+
+    ReliableRouter creates its httpx.AsyncClient lazily on first request, so
+    pooled connections bind to the loop that first invoked it; reusing that
+    router on another loop reuses dead connections ("Event loop is closed").
+    ``loop`` stays None until first use; a mismatch with the running loop
+    then triggers a rebuild (see _ensure_router_for_current_loop).
+    """
+
+    router: "ReliableRouter"
+    loop: Optional[asyncio.AbstractEventLoop] = None
+
+
 # Module-level router cache: same config -> same ReliableRouter instance
-_router_cache: dict[str, "ReliableRouter"] = {}
+_router_cache: dict[str, "_RouterCacheEntry"] = {}
 _router_cache_lock: Lock = Lock()
 
 # Track web servers for lifecycle management (keyed by router cache key)
@@ -230,9 +246,12 @@ class IntelliRouterModelClient(BaseModelClient):
         super().__init__(model_config, model_client_config)
         if router is not None:
             self._router = router
+            self._router_config = None
+            self._router_key = None
         else:
-            router_config = IntelliRouterClientConfig.from_model_client_config(model_client_config)
-            self._router = self._get_or_create_router(router_config)
+            self._router_config = IntelliRouterClientConfig.from_model_client_config(model_client_config)
+            self._router = self._get_or_create_router(self._router_config)
+            self._router_key = self._make_router_key(self._router_config)
 
     @staticmethod
     def _make_router_key(config: IntelliRouterClientConfig) -> str:
@@ -255,8 +274,15 @@ class IntelliRouterModelClient(BaseModelClient):
         if key not in _router_cache:
             with _router_cache_lock:
                 if key not in _router_cache:
-                    _router_cache[key] = cls._create_router(config, cache_key=key)
-        return _router_cache[key]
+                    try:
+                        loop = asyncio.get_running_loop()
+                    except RuntimeError:
+                        loop = None  # built from sync context; claimed on first use
+                    _router_cache[key] = _RouterCacheEntry(
+                        router=cls._create_router(config, cache_key=key),
+                        loop=loop,
+                    )
+        return _router_cache[key].router
 
     @classmethod
     def _create_router(cls, config: IntelliRouterClientConfig, cache_key: str = ""):
@@ -423,6 +449,39 @@ class IntelliRouterModelClient(BaseModelClient):
         }
         return {key: value for key, value in params.items() if value is not None}
 
+    async def _ensure_router_for_current_loop(self) -> None:
+        """Rebuild the cached router when the running event loop changed.
+
+        The cached router's httpx connection pool is bound to the loop that
+        first used it; loop-per-test runners (pytest-asyncio) carry dead
+        connections into a fresh loop, failing the first LLM call without a
+        real HTTP request. Concurrent use from multiple live loops is
+        unsupported (same as AsyncOpenAI); sequential reuse across retired
+        loops is the pattern guarded here.
+        """
+        if self._router_key is None:
+            return  # externally injected router: lifecycle owned by the caller
+        assert self._router_config is not None  # set together with _router_key
+        loop = asyncio.get_running_loop()
+        entry = _router_cache.get(self._router_key)
+        if entry is None:  # cache cleared underneath us: rebuild normally
+            self._router = self._get_or_create_router(self._router_config)
+            return
+        if entry.loop is loop:
+            self._router = entry.router  # follow a newer instance if replaced
+            return
+        if entry.loop is None:
+            entry.loop = loop  # first real use: clients not bound to any loop yet
+            self._router = entry.router
+            return
+        stale = _router_cache.pop(self._router_key, None)
+        if stale is not None:
+            try:
+                await stale.router.close()
+            except Exception as e:
+                logger.warning(f"Closing stale ReliableRouter failed: {e}")
+        self._router = self._get_or_create_router(self._router_config)
+
     # ------------------------------------------------------------------
     # Chat completion
     # ------------------------------------------------------------------
@@ -441,6 +500,7 @@ class IntelliRouterModelClient(BaseModelClient):
         timeout: float = None,
         **kwargs
     ) -> AssistantMessage:
+        await self._ensure_router_for_current_loop()
         converted_messages = self._convert_messages_to_dict(messages)
         model_name = model or self.model_config.model_name or "*"
         params = self._build_call_params(
@@ -475,6 +535,7 @@ class IntelliRouterModelClient(BaseModelClient):
         timeout: float = None,
         **kwargs
     ) -> AsyncIterator[AssistantMessageChunk]:
+        await self._ensure_router_for_current_loop()
         converted_messages = self._convert_messages_to_dict(messages)
         model_name = model or self.model_config.model_name or "*"
         accumulated_for_parser = ""
