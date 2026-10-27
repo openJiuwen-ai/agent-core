@@ -40,13 +40,16 @@ class GraphState:
 
 class Store(ABC):
     @abstractmethod
-    async def get(self, session_id: str, ns: str) -> Optional[GraphState]: ...
+    async def get(self, session_id: str, ns: str) -> Optional[GraphState]:
+        """Get graph state by session and namespace."""
 
     @abstractmethod
-    async def save(self, session_id: str, ns: str, state: GraphState) -> None: ...
+    async def save(self, session_id: str, ns: str, state: GraphState) -> None:
+        """Save graph state by session and namespace."""
 
     @abstractmethod
-    async def delete(self, session_id: str, ns: Optional[str] = None) -> None: ...
+    async def delete(self, session_id: str, ns: Optional[str] = None) -> None:
+        """Delete graph state by session and namespace."""
 
 
 def create_state(

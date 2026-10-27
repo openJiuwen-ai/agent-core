@@ -79,7 +79,7 @@ async def execute_single_component(
     # When context is None, it can still be initialized normally
     vertex.init(node_session, context=context)
 
-    # 5. Directly set _node_config attribute
+    # 5. Set node config via the public setter
     # Create simple configuration objects
     class SimpleIOConfig:
         def __init__(self, inputs_schema, outputs_schema=None):
@@ -94,7 +94,7 @@ async def execute_single_component(
 
             # Set input schema and output schema
 
-    vertex._node_config = SimpleNodeConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema)
+    vertex.set_node_config(SimpleNodeConfig(inputs_schema=inputs_schema, outputs_schema=outputs_schema))
 
     # 7. Create PregelConfig
     sub_workflow_comp = executable.graph_invoker() if hasattr(executable, "graph_invoker") else False
@@ -333,7 +333,7 @@ class BaseWorkflow:
         except Exception as e:
             raise build_error(
                 StatusCode.WORKFLOW_COMPILE_ERROR, cause=e, reason=str(e), workflow=self._workflow_config.card
-            )
+            ) from e
 
     @property
     def drawable(self):

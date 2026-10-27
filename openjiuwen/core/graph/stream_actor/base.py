@@ -17,13 +17,16 @@ from openjiuwen.core.workflow.components.base import ComponentAbility
 
 class StreamConsumer(ABC):
     @abstractmethod
-    async def stream_call(self, event: asyncio.Event, done_callback): ...
+    async def stream_call(self, event: asyncio.Event, done_callback):
+        """Start consuming stream messages until the event is set."""
 
     @abstractmethod
-    def should_handle_message(self) -> bool: ...
+    def should_handle_message(self) -> bool:
+        """Whether incoming messages should be handled."""
 
     @abstractmethod
-    def is_done(self) -> bool: ...
+    def is_done(self) -> bool:
+        """Whether the consumer has finished its work."""
 
 
 class StreamGraph:

@@ -83,6 +83,10 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         self._source_id: list = []
         self._log_message = {}
 
+    def set_node_config(self, node_config) -> None:
+        """Set node config directly for a lightweight Vertex built outside full node registration."""
+        self._node_config = node_config
+
     def init(self, session: BaseSession, **kwargs) -> bool:
         self._session = NodeSession(
             session, self._node_id, type(self._executable).__name__, self._executable.skip_trace()
@@ -737,10 +741,10 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                 result = await asyncio.wait_for(self._stream_done, timeout=stream_timeout)
                 if isinstance(result, Exception):
                     raise result
-            except asyncio.TimeoutError:
+            except asyncio.TimeoutError as exc:
                 raise build_error(
                     StatusCode.GRAPH_VERTEX_STREAM_CALL_TIMEOUT, timeout=stream_timeout, node_id=self._node_id
-                )
+                ) from exc
         elif self._has_stream_call and not self.is_end_node:
             # raise error when has stream call but no stream data in
             raise build_error(
