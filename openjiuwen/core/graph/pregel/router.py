@@ -1,11 +1,10 @@
 # -*- coding: UTF-8 -*-
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
-import asyncio
-import inspect
 from typing import Any, List, Union, Protocol
 
 from openjiuwen.core.graph.pregel.base import IRouter, Message, TriggerMessage, BarrierMessage
+from openjiuwen.core.graph.pregel.task import _callable_traits
 
 
 class StaticRouter(IRouter):
@@ -28,16 +27,18 @@ class ConditionalRouter(IRouter):
 
     def __init__(self, selector: SelectorProtocol):
         self.selector = selector
+        # Reflection traits are constants of the selector: resolve them once
+        # at build time instead of on every dispatch.
+        traits = _callable_traits(selector)
+        self._takes_state = traits.has_state
+        self._is_coroutine = traits.is_coroutine
 
     async def dispatch(self, source_node: str) -> List[Message]:
-        sig = inspect.signature(self.selector)
         kwargs = {}
+        if self._takes_state:
+            kwargs["state"] = None
 
-        if 'state' in sig.parameters:
-            kwargs['state'] = None
-
-        if asyncio.iscoroutinefunction(self.selector) or asyncio.iscoroutinefunction(
-                getattr(self.selector, "__call__", None)):
+        if self._is_coroutine:
             targets = await self.selector(**kwargs)
         else:
             targets = self.selector(**kwargs)

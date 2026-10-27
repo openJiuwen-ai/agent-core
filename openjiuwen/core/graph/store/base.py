@@ -41,26 +41,25 @@ class GraphState:
 class Store(ABC):
     @abstractmethod
     async def get(self, session_id: str, ns: str) -> Optional[GraphState]:
-        ...
+        """Get graph state by session and namespace."""
 
     @abstractmethod
     async def save(self, session_id: str, ns: str, state: GraphState) -> None:
-        ...
+        """Save graph state by session and namespace."""
 
     @abstractmethod
     async def delete(self, session_id: str, ns: Optional[str] = None) -> None:
-        ...
+        """Delete graph state by session and namespace."""
 
 
 def create_state(
-        ns: str,
-        step: int,
-        channel_snapshot: Dict[str, Any],
-        *,
-        pending_buffer: Optional[List["Message"]] = None,
-        pending_node: Optional[Dict[str, PendingNode]] = None,
-        node_version: Dict[str, int] = None
-
+    ns: str,
+    step: int,
+    channel_snapshot: Dict[str, Any],
+    *,
+    pending_buffer: Optional[List["Message"]] = None,
+    pending_node: Optional[Dict[str, PendingNode]] = None,
+    node_version: Dict[str, int] = None,
 ) -> GraphState:
     return GraphState(
         ns=ns,
@@ -85,7 +84,7 @@ class GraphStore(Store):
                     "Not found graph state for session",
                     event_type=LogEventType.GRAPH_STORE_GET,
                     session_id=session_id,
-                    graph_id=ns
+                    graph_id=ns,
                 )
             return state
         except Exception as e:
@@ -94,40 +93,44 @@ class GraphStore(Store):
                 event_type=LogEventType.GRAPH_STORE_GET,
                 session_id=session_id,
                 exception=e,
-                graph_id=ns
+                graph_id=ns,
             )
             raise
 
     async def save(self, session_id: str, ns: str, state: GraphState) -> None:
         """Save graph state to storage."""
         graph_logger.debug(
-            f"Begin to save graph state of super-step[{state.step}]",
+            "Begin to save graph state of super-step[%s]",
+            state.step,
             event_type=LogEventType.GRAPH_STORE_SAVE,
             session_id=session_id,
-            graph_id=ns
+            graph_id=ns,
         )
         try:
             await self._saver.save(session_id, ns, state)
             graph_logger.debug(
-                f"Succeed to save graph state of super-step[{state.step}]",
+                "Succeed to save graph state of super-step[%s]",
+                state.step,
                 event_type=LogEventType.GRAPH_STORE_SAVE,
                 session_id=session_id,
-                graph_id=ns
+                graph_id=ns,
             )
         except Exception as e:
             graph_logger.error(
-                f"Succeed to save graph state of super-step[{state.step}]",
+                "Failed to save graph state of super-step[%s]",
+                state.step,
                 event_type=LogEventType.GRAPH_STORE_SAVE,
                 session_id=session_id,
                 exception=e,
-                graph_id=ns
+                graph_id=ns,
             )
             raise
 
     async def delete(self, session_id: str, ns: Optional[str] = None) -> None:
         """Delete graph state from storage."""
         graph_logger.debug(
-            f"Begin to delete {ns if ns else 'all'} graph states for session",
+            "Begin to delete %s graph states for session",
+            ns if ns else "all",
             event_type=LogEventType.GRAPH_STORE_DELETE,
             session_id=session_id,
             graph_id=ns,
@@ -135,14 +138,16 @@ class GraphStore(Store):
         try:
             await self._saver.delete(session_id, ns)
             graph_logger.debug(
-                f"Succeed to delete {ns if ns else 'all'} graph states for session",
+                "Succeed to delete %s graph states for session",
+                ns if ns else "all",
                 event_type=LogEventType.GRAPH_STORE_DELETE,
                 session_id=session_id,
                 graph_id=ns,
             )
         except Exception as e:
             graph_logger.debug(
-                f"Failed delete {ns if ns else 'all'} graph states for session",
+                "Failed delete %s graph states for session",
+                ns if ns else "all",
                 event_type=LogEventType.GRAPH_STORE_DELETE,
                 session_id=session_id,
                 exception=e,

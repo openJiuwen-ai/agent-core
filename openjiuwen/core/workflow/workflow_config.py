@@ -1,12 +1,15 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from openjiuwen.core.workflow import WorkflowCard
 from openjiuwen.core.workflow.components.base import ComponentAbility
 from openjiuwen.core.session import Transformer
+
+if TYPE_CHECKING:
+    from openjiuwen.core.graph.stream_actor.manager import StreamStructure
 
 
 class CompIOConfig(BaseModel):
@@ -15,6 +18,7 @@ class CompIOConfig(BaseModel):
 
     Defines schemas and transformers for component data processing.
     """
+
     inputs_schema: Optional[Dict | Transformer] = None
     outputs_schema: Optional[Dict | Transformer] = None
 
@@ -26,6 +30,7 @@ class ExceptionConfig(BaseModel):
     Only ``handle_type`` is recognized by the framework. Users may attach
     arbitrary extra fields for their ``component_error_recovery`` handler.
     """
+
     model_config = {"extra": "allow"}
     handle_type: str = Field(default="interrupt")
 
@@ -37,6 +42,7 @@ class NodeSpec(BaseModel):
     Contains configuration for both regular and streaming I/O,
     along with component capabilities.
     """
+
     io_configs: CompIOConfig = None  # Configuration for regular (non-streaming) I/O
     stream_io_configs: CompIOConfig = None  # Configuration for streaming I/O
     abilities: List[ComponentAbility] = Field(default_factory=list)  # List of component abilities supported
@@ -52,23 +58,25 @@ class WorkflowSpec(BaseModel):
 
     Defines the graph structure, connections, and component configurations.
     """
+
     edges: Dict[str, list[str]] = Field(
-        default_factory=dict,
-        description="Regular data flow edges (source -> [targets])"
+        default_factory=dict, description="Regular data flow edges (source -> [targets])"
     )
     stream_edges: Dict[str, list[str]] = Field(
-        default_factory=dict,
-        description="Streaming data flow edges (source -> [targets])"
+        default_factory=dict, description="Streaming data flow edges (source -> [targets])"
     )
     comp_configs: Dict[str, NodeSpec] = Field(
-        default_factory=dict,
-        description="Configuration for each component in the workflow"
+        default_factory=dict, description="Configuration for each component in the workflow"
     )
     stream_source_groups: Dict[str, List[List[str]]] = Field(
-        default_factory=dict,
-        description="CNF source groups for streaming consumers, using producer_id-ABILITY keys"
+        default_factory=dict, description="CNF source groups for streaming consumers, using producer_id-ABILITY keys"
     )
     start_nodes: list[str] = Field(default_factory=list)
+
+    # 流式结构解析缓存（StreamStructure，见 ActorManager._parse_stream_structure）：
+    # 仅依赖构建期固定的 edges/comp_configs/stream_source_groups，首次执行期解析
+    # 后挂本属性复用；spec 结构构建完成后不应再变（与 compile 可重入前提一致）。
+    _stream_structure: Optional["StreamStructure"] = PrivateAttr(default=None)
 
 
 class WorkflowConfig(BaseModel):
