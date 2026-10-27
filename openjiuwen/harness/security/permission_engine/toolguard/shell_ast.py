@@ -118,10 +118,9 @@ def split_shell_for_grants(command: str) -> tuple[str, ...]:
     if not text or canonicalize_shell_command_for_permission(text) != text:
         return ()
     parsed = parse_shell_for_permission(text)
-    if (
-        parsed.kind != "simple" or not parsed.subcommands
-        or parsed.flags.has_input_redirection or parsed.flags.has_output_redirection
-    ):
+    if parsed.kind != "simple" or not parsed.subcommands:
+        return ()
+    if parsed.flags.has_input_redirection or parsed.flags.has_output_redirection:
         return ()
     source, cursor = text.encode("utf-8"), 0
     commands = []
