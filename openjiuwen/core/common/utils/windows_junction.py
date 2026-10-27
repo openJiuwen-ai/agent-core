@@ -39,6 +39,12 @@ _FILE_SHARE_ALL = 0x1 | 0x2 | 0x4
 _EXTENDED_LENGTH_PREFIX = "\\\\?\\"
 _NT_NATIVE_PREFIX = "\\??\\"
 
+# ``mklink /J`` cannot create a junction whose link path exceeds the classic
+# directory limit (MAX_PATH minus room for an 8.3 child name); cmd.exe does
+# not understand extended-length prefixes, so over-limit paths are
+# unreachable through it and must go straight to the reparse-point API.
+_MKLINK_LINK_PATH_LIMIT = 248
+
 
 def _extended_length_path(path: str) -> str:
     """Build a ``\\\\?\\``-prefixed path for the Win32 extended-length API."""
@@ -61,7 +67,10 @@ def _create_junction_via_mklink(target_path: str, link_path: str) -> None:
         shell=False,
     )
     if result.returncode != 0:
-        error_output = result.stderr.strip() or result.stdout.strip()
+        # Defensive: packaged/embedded runtimes may hand back None streams
+        stderr_text = (result.stderr or "").strip()
+        stdout_text = (result.stdout or "").strip()
+        error_output = stderr_text or stdout_text or f"exit code {result.returncode}"
         raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
 
 
@@ -129,14 +138,25 @@ def _create_junction_via_reparse(target_path: str, link_path: str) -> None:
 def create_windows_junction(target_path: str, link_path: str) -> None:
     """Create a directory junction, tolerating link paths beyond 248 chars.
 
-    Tries ``mklink /J`` first (unchanged legacy behavior); when that
-    fails, retries through the reparse-point API with extended-length
-    paths before giving up. Raises ``OSError`` only when both fail.
+    Over-limit link paths skip the doomed ``mklink`` spawn and go straight
+    to the reparse-point API; shorter paths try ``mklink /J`` first
+    (unchanged legacy behavior) and fall back to the reparse-point API on
+    ANY mklink-side failure — not just OSError: a crash inside mklink's
+    error reporting (e.g. a packaged runtime handing back ``None`` streams)
+    must not bypass the fallback. Raises ``OSError`` only when both fail.
     """
+    if len(os.path.normpath(link_path)) > _MKLINK_LINK_PATH_LIMIT:
+        _create_junction_via_reparse(target_path, link_path)
+        team_logger.info(
+            "Link path %s exceeds mklink's %d-char directory limit; created junction via reparse-point API",
+            link_path,
+            _MKLINK_LINK_PATH_LIMIT,
+        )
+        return
     try:
         _create_junction_via_mklink(target_path, link_path)
         return
-    except OSError as mklink_error:
+    except Exception as mklink_error:
         try:
             _create_junction_via_reparse(target_path, link_path)
         except OSError as reparse_error:

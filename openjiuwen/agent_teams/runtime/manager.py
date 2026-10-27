@@ -142,6 +142,40 @@ class TeamRuntimeManager:
                 session_id=pool_entry.current_session_id,
             )
             pool_entry = None
+        # PAUSING（pause 进行中）条目不再是误拒窗口——等 pause 落定
+        # 再定夺（pause_done 在成功 PAUSED / 失败回 RUNNING 时置位）。超时兜底
+        # 按现状走 dispatch（仍 PAUSING 则由 dispatch 当 RUNNING 拒绝，上层
+        # 零产出守卫拆除重建自愈）。
+        if pool_entry is not None and pool_entry.state == RuntimeState.PAUSING:
+            try:
+                await asyncio.wait_for(
+                    pool_entry.pause_done.wait(),
+                    timeout=_PAUSING_WAIT_TIMEOUT_SEC,
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                team_logger.warning(
+                    "activate: pause of team {} did not settle within {}s; dispatching as-is",
+                    team_name,
+                    _PAUSING_WAIT_TIMEOUT_SEC,
+                )
+            # 等待期间条目可能已被拆除（stop/delete）——重新取
+            pool_entry = await self._pool.get(team_name)
+            # 等待窗口内另一条会话的 activate 可能已 stop 掉旧条目并换上绑定
+            # 新会话的条目；dispatch 对跨会话条目是 invariant 违例（直接抛
+            # RuntimeError），这里按等待前的同款会话切换策略先拆掉再冷建。
+            if pool_entry is not None and pool_entry.current_session_id != target_session_id:
+                team_logger.info(
+                    "activate: pool entry for team {} moved to session {} during pause wait; "
+                    "stop+remove before rebuilding on session {}",
+                    team_name,
+                    pool_entry.current_session_id,
+                    target_session_id,
+                )
+                await self.stop_team(
+                    team_name=team_name,
+                    session_id=pool_entry.current_session_id,
+                )
+                pool_entry = None
         team_in_session, team_in_db, team_db_state = await self._inspect_session(
             spec,
             team_session,
@@ -204,9 +238,60 @@ class TeamRuntimeManager:
                 session_id,
             )
             return
-        agent = entry.agent
         try:
-            shutdown_requested = await agent.is_shutdown_requested()
+            # 决策前必须拿到「无在飞 pause」的条目视图：进入时已在 PAUSING，
+            # 或下方 is_shutdown_requested 的 await 窗口内被外部 pause()
+            # 抢跑翻转——两种窗口同一处理：等在飞落定后重取条目重决策。
+            # 不得直接跳过（本 finalize 仍背着 stop/pause 决策，跳过会把
+            # shutdown_requested/非持久条目泄漏为 PAUSED 挂池），更不得带
+            # 旧视图进 else 分支（会抢写 pause_done、与在飞 pause 并发
+            # pause_coordination、finally 抢先写 PAUSED 造成「已 resume 但
+            # pause 仍在收尾」的状态机错乱）。每次迭代都等一次真实落定
+            # （有进展）；外部 pause 对已 PAUSED 条目是 no-op，不会无限
+            # 翻转，上限仅防病态连发。
+            agent = None
+            shutdown_requested = False
+            for _settle_attempt in range(_FINALIZE_SETTLE_MAX_ATTEMPTS):
+                if entry.state == RuntimeState.PAUSING:
+                    team_logger.info(
+                        "finalize: team {} session {} pausing in flight; "
+                        "awaiting settle before deciding",
+                        team_name,
+                        session_id,
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            entry.pause_done.wait(),
+                            timeout=_PAUSING_WAIT_TIMEOUT_SEC,
+                        )
+                    except (asyncio.TimeoutError, TimeoutError):
+                        team_logger.warning(
+                            "finalize: in-flight pause of team {} session {} did not settle within {}s; skipping",
+                            team_name,
+                            session_id,
+                            _PAUSING_WAIT_TIMEOUT_SEC,
+                        )
+                        return
+                    entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
+                    if entry is None:
+                        return
+                    continue
+                agent = entry.agent
+                shutdown_requested = await agent.is_shutdown_requested()
+                if entry.state == RuntimeState.PAUSING:
+                    # is_shutdown_requested 的 await 窗口内被外部 pause()
+                    # 抢跑——回到等落定分支重决策（此前读到的
+                    # shutdown_requested 作废：落定期间条目可能已换 agent）
+                    continue
+                break
+            else:
+                team_logger.warning(
+                    "finalize: team {} session {} still PAUSING after {} settle awaits; skipping",
+                    team_name,
+                    session_id,
+                    _FINALIZE_SETTLE_MAX_ATTEMPTS,
+                )
+                return
             if shutdown_requested or agent.lifecycle != "persistent":
                 team_logger.info(
                     "finalize: stopping team {} session {} (shutdown_requested={}, lifecycle={})",
@@ -217,14 +302,37 @@ class TeamRuntimeManager:
                 )
                 await agent.stop_coordination()
                 await self._pool.remove(team_name)
+            elif entry.state == RuntimeState.PAUSED:
+                # 在飞 pause 已落定且本决策也是 pause——幂等跳过，不重复 pause
+                team_logger.debug(
+                    "finalize: team {} session {} already paused; nothing to do",
+                    team_name,
+                    session_id,
+                )
             else:
                 team_logger.info(
                     "finalize: pausing persistent team {} session {}",
                     team_name,
                     session_id,
                 )
-                await agent.pause_coordination()
-                entry.state = RuntimeState.PAUSED
+                # PAUSING 在 pause 启动时翻转（而非完成后）——
+                # 「pausing 中但池仍 RUNNING」是分钟级误拒窗口（锁库/慢写下
+                # pause 写密集被拉长）；撞窗的 activate 等 pause_done 再定夺。
+                entry.state = RuntimeState.PAUSING
+                entry.pause_done.clear()
+                pause_settled = False
+                try:
+                    await agent.pause_coordination()
+                    pause_settled = True
+                finally:
+                    # 成功翻 PAUSED；任何失败/取消（CancelledError 是
+                    # BaseException，except Exception 接不住）如实回 RUNNING——
+                    # 卡在 PAUSING 是永久态：dispatch 每次拒绝、重复 pause
+                    # 报假成功、finalize 永远跳过。
+                    entry.state = (
+                        RuntimeState.PAUSED if pause_settled else RuntimeState.RUNNING
+                    )
+                    entry.pause_done.set()
         except Exception as exc:
             team_logger.warning(
                 "Failed to finalize team {} on session {}: {}",
@@ -346,8 +454,54 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
-        await entry.agent.pause_coordination()
-        entry.state = RuntimeState.PAUSED
+        if entry.state == RuntimeState.PAUSING:
+            # 另一路 pause 在飞（防双 pause 互踩）——不叠加，但也不得假
+            # 成功：等在飞的落定后如实报告（在飞失败会回 RUNNING，此时
+            # 本调用若返回 True 就是「报成功但从未 pause」）。
+            team_logger.info(
+                "pause: team {} session {} already pausing; awaiting in-flight pause",
+                team_name,
+                session_id,
+            )
+            try:
+                await asyncio.wait_for(
+                    entry.pause_done.wait(),
+                    timeout=_PAUSING_WAIT_TIMEOUT_SEC,
+                )
+            except (asyncio.TimeoutError, TimeoutError):
+                team_logger.warning(
+                    "pause: in-flight pause of team {} session {} did not settle within {}s",
+                    team_name,
+                    session_id,
+                    _PAUSING_WAIT_TIMEOUT_SEC,
+                )
+                return False
+            settled = await self._resolve_entry(team_name=team_name, session_id=session_id)
+            return settled is not None and settled.state == RuntimeState.PAUSED
+        if entry.state == RuntimeState.PAUSED:
+            # 已 PAUSED = docstring 承诺的 no-op success：不得重跑
+            # pause_coordination——否则失败回滚会把本已 PAUSED 的条目
+            # 翻成 RUNNING（状态倒退）。
+            return True
+        # PAUSING 启动即翻转（而非完成后），撞窗的 activate 等
+        # pause_done 再定夺；失败/取消如实回原态
+        previous_state = entry.state
+        entry.state = RuntimeState.PAUSING
+        entry.pause_done.clear()
+        pause_settled = False
+        try:
+            await entry.agent.pause_coordination()
+            pause_settled = True
+        finally:
+            # CancelledError 继承 BaseException（except Exception 接不住）——
+            # 取消路径同样必须把状态翻回去，否则条目永卡 PAUSING
+            # （dispatch 永久拒绝 + 后续 pause 假成功）。回滚到进入前的
+            # 原态而非硬编码 RUNNING：本方法对任意非 PAUSING/PAUSED 态
+            # 条目可调，硬编码会把原态错误覆盖。
+            entry.state = (
+                RuntimeState.PAUSED if pause_settled else previous_state
+            )
+            entry.pause_done.set()
         team_logger.info("pause: team {} session {} paused", team_name, session_id)
         return True
 
@@ -1117,3 +1271,11 @@ _REJECT_KINDS = frozenset(
         RunActionKind.REJECT_INCONSISTENT,
     }
 )
+
+# activate 撞 PAUSING 条目时等 pause 落定的上限。留足一倍余量；超时后按现状走 dispatch（拒绝→上层自愈）。
+_PAUSING_WAIT_TIMEOUT_SEC = 300.0
+
+# finalize 决策前等「在飞 pause 落定」的最大迭代数。每次迭代都等一次真实
+# 落定（有进展），正常最多 2 次（进入时 PAUSING + await 窗口被抢跑各一）；
+# 上限仅防外部调用方病态连发 pause 造成的翻转风暴。
+_FINALIZE_SETTLE_MAX_ATTEMPTS = 3

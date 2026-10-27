@@ -144,6 +144,17 @@ def decide_run_action(
         )
     if pool_entry.state == RuntimeState.PAUSED:
         return RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False)
+    if pool_entry.state == RuntimeState.PAUSING:
+        # 超时兜底：activate 已等过 pause_done 仍 PAUSING（pause 超
+        # 5 分钟未落定）——按 RUNNING 拒绝，上层零产出守卫拆除重建自愈。
+        return RunAction(
+            kind=RunActionKind.REJECT_RUNNING,
+            require_spec=False,
+            reason=(
+                f"team {target_team_name!r} pause in progress (wait timed out) "
+                f"on session {target_session_id!r}"
+            ),
+        )
     return RunAction(
         kind=RunActionKind.REJECT_RUNNING,
         require_spec=False,

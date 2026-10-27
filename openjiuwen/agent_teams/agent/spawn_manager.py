@@ -281,7 +281,7 @@ class SpawnManager:
                 team_logger.info("Teammate {} restarted successfully", member_name)
                 return True
             except Exception as e:
-                team_logger.error("Restart attempt {} for {} failed: {}", attempt, member_name, e)
+                team_logger.exception("Restart attempt {} for {} failed: {}", attempt, member_name, e)
                 if attempt < max_retries:
                     await asyncio.sleep(2**attempt)
 

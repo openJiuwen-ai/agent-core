@@ -38,6 +38,7 @@ class RuntimeState(str, Enum):
     """Top-level state of an ActiveTeam in the pool."""
 
     RUNNING = "running"
+    PAUSING = "pausing"
     PAUSED = "paused"
 
 
@@ -50,6 +51,10 @@ class ActiveTeam:
     current_session_id: str
     state: RuntimeState = RuntimeState.RUNNING
     interact_gate: InteractGate = field(default_factory=InteractGate)
+    # pause 进行中标记。PAUSING 在 pause 启动时翻转（而非完成后），
+    # pause_done 在 pause 落定（成功 PAUSED / 失败回 RUNNING / 拆除）时置位——
+    # dispatch 撞 PAUSING 的 activate 等待它再定夺（等 pause 完成再 resume）。
+    pause_done: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 @dataclass(frozen=True, slots=True)
