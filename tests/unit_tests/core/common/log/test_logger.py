@@ -32,17 +32,6 @@ def thread_function(session_id, log_list, stdout_capture):
     """Thread function, used for testing thread isolation"""
     logger = LogManager.get_logger("common")
 
-    if not logger._logger.handlers:
-        handler = logging.StreamHandler(sys.stdout)
-        logger._logger.addHandler(handler)
-    else:
-        for handler in logger._logger.handlers:
-            if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
-                break
-        else:
-            handler = logging.StreamHandler(sys.stdout)
-            logger._logger.addHandler(handler)
-
     logger.set_level(logging.INFO)
 
     set_session_id(session_id)
@@ -153,46 +142,16 @@ def initialized_logger(mock_log_config, stdout_capture):
     LogManager.reset()
     LogManager.initialize()
 
-    from openjiuwen.core.common.logging.default.default_impl import ContextFilter
-
+    # stdout is patched before construction; built-in sinks now live on the
+    # listener. Do not install a synchronous stream bypass in the fixture.
     for log in LogManager.get_all_loggers().values():
-        for handler in log.logger().handlers[:]:
-            if isinstance(handler, logging.StreamHandler):
-                handler.stream = sys.stdout
-            elif hasattr(handler, "stream"):
-                try:
-                    handler.close()
-                except Exception:
-                    pass
-                log._logger.removeHandler(handler)
-
-        has_stream_handler = any(isinstance(h, logging.StreamHandler) for h in log.logger().handlers)
-        if not has_stream_handler:
-            handler = logging.StreamHandler(sys.stdout)
-            handler.add_filter(ContextFilter(log.log_type))
-            formatter = log._get_formatter()
-            handler.setFormatter(formatter)
-            handler.set_level(logging.DEBUG)
-            log.logger().addHandler(handler)
-
         log.logger().setLevel(logging.DEBUG)
 
     set_session_id()  # reset any session_id leaked by a previous test
     yield
 
     set_session_id()
-    try:
-        for logger in LogManager.get_all_loggers().values():
-            if hasattr(logger, "_logger"):
-                for handler in logger._logger.handlers[:]:
-                    try:
-                        handler.close()
-                    except Exception:
-                        pass
-                    logger._logger.removeHandler(handler)
-        LogManager.reset()
-    except Exception:
-        pass
+    LogManager.reset()
 
 
 class TestThreadSafety:
