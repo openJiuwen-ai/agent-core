@@ -43,6 +43,8 @@ class ContextProcessorStateInput:
     compact_summary: str = ""
     compression_usage: Optional[dict[str, Any]] = None
     overhead_tokens: int = 0
+    model_config: Any = None
+    model_client_config: Any = None
 
 
 @dataclass(frozen=True)
@@ -181,7 +183,13 @@ class ContextProcessorStateRecorder:
             status=state_input.status,
             phase=state_input.phase,
             processor=state_input.processor.processor_type() if state_input.processor is not None else "",
-            model=self._resolve_model_name(state_input.processor, state_input.trigger, state_input.force),
+            model=self._resolve_model_name(
+                state_input.processor,
+                state_input.trigger,
+                state_input.force,
+                model_config=state_input.model_config,
+                model_client_config=state_input.model_client_config,
+            ),
             before=before,
             after=after,
             statistic=self._build_statistic(statistic_messages),
@@ -366,17 +374,41 @@ class ContextProcessorStateRecorder:
             processor: Optional[ContextProcessor],
             trigger: str,
             force: bool,
+            *,
+            model_config: Any = None,
+            model_client_config: Any = None,
     ) -> str:
         _ = trigger, force
         config = getattr(processor, "config", None)
-        model_config = getattr(config, "model", None)
-        if model_config is not None:
-            for key in ("model_name", "model"):
-                value = getattr(model_config, key, None)
-                if isinstance(value, str) and value:
-                    return value
-        for key in ("model_name", "model"):
-            value = getattr(config, key, None)
-            if isinstance(value, str) and value:
-                return value
+        if config is None:
+            return ""
+        # Mirror PrefixCompactProcessor._auto_compression_executors: both passive
+        # and forced compaction run on the dedicated auto_compression model pair
+        # (primary = auto_compression.model_name, else the request model actually
+        # used). The per-call model_config/model_client_config override (e.g. from
+        # main-call overflow recovery) wins over the processor config, so the
+        # reported name matches the model that really ran.
+        auto_config = getattr(config, "auto_compression", None)
+        request_config = model_config or getattr(config, "model", None)
+        client_config = model_client_config or getattr(config, "model_client", None)
+        if auto_config is not None and request_config is not None and client_config is not None:
+            auto_primary = getattr(auto_config, "model_name", None)
+            if isinstance(auto_primary, str) and auto_primary.strip():
+                return auto_primary.strip()
+            resolved = _first_model_name(request_config)
+            if resolved:
+                return resolved
+            return ""
+        resolved = _first_model_name(getattr(config, "model", None)) or _first_model_name(config)
+        return resolved or ""
+
+
+def _first_model_name(obj: Any) -> str:
+    """Return the first non-empty string among ``obj.model_name`` / ``obj.model``."""
+    if obj is None:
         return ""
+    for key in ("model_name", "model"):
+        value = getattr(obj, key, None)
+        if isinstance(value, str) and value:
+            return value
+    return ""
