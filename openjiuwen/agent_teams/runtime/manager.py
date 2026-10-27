@@ -317,6 +317,8 @@ class TeamRuntimeManager:
         team_name: str,
         session_id: str,
         inputs: object,
+        on_payload=None,
+        on_activated=None,
     ) -> bool:
         """Run one background leader turn for organization coordination.
 
@@ -345,10 +347,14 @@ class TeamRuntimeManager:
             if activation.action.kind in _REJECT_KINDS or activation.agent is None:
                 return False
             ran_turn = True
+            if callable(on_activated):
+                await on_activated()
             stream = activation.agent.stream(inputs, session=activation.session)
             try:
                 async for chunk in stream:
                     payload = getattr(chunk, "payload", None)
+                    if callable(on_payload) and isinstance(payload, dict):
+                        await on_payload(payload)
                     if isinstance(payload, dict) and payload.get("event_type") in {
                         "team.idle",
                         "team.completed",
