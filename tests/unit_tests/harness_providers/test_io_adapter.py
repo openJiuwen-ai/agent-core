@@ -12,6 +12,7 @@ import pytest
 
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.interrupt import interrupt_answer
 from openjiuwen.harness_protocol import (
     AbortMode,
     DeliveryMode,
@@ -37,6 +38,7 @@ from openjiuwen.harness_protocol import (
     SendReceipt,
     ToolApprovalDecision,
     ToolApprovalRequest,
+    ToolApprovalResponse,
     ToolDefinition,
     ToolExecutionResult,
     ToolInvocation,
@@ -54,6 +56,7 @@ from openjiuwen.harness_providers.io_adapter import (
     INTERACTIVE_INPUT_KIND,
     TURN_LIFECYCLE,
     HarnessIOAdapter,
+    _response_for,
 )
 from tests.test_logger import logger
 
@@ -429,6 +432,8 @@ async def test_pending_interaction_can_be_answered_by_its_interrupt_id() -> None
     assert response.content["answers"]["favorite color?"] == "red"
     assert harness.sends == []
     await adapter.stop()
+    chunks = await _drain(adapter)
+    assert chunks[0].payload.value["interrupt_id"] == "ask-2"
 
 
 @pytest.mark.asyncio
@@ -468,6 +473,57 @@ async def test_tool_approval_is_auto_allowed_by_default_and_asked_when_disabled(
     assert denied.decision is ToolApprovalDecision.DENY
     assert denied.reason == "not now"
     await strict.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_approval_is_asked_even_when_tools_are_auto_approved() -> None:
+    adapter = HarnessIOAdapter(_FakeHarness())
+    await adapter.start(_context())
+    request = ToolApprovalRequest(
+        request_id="intr_1",
+        call_id="c1",
+        tool_name="delete_all",
+        provider_data={"kind": "permission", "interrupt_id": "intr_1"},
+    )
+    pending = asyncio.create_task(adapter.handle(request))
+    await asyncio.sleep(0.01)
+    assert not pending.done()
+    interactive = InteractiveInput()
+    interactive.answer("intr_1", interrupt_answer("permission", approved=True, remember=True))
+    await adapter.send(interactive)
+    assert (await pending).decision is ToolApprovalDecision.ALLOW_FOR_SESSION
+    await adapter.stop()
+
+
+def test_approval_answers_keep_their_decision() -> None:
+    request = ToolApprovalRequest(request_id="intr_1", call_id="c1", tool_name="simplify_skill_experiences")
+
+    def decision(value: Any) -> ToolApprovalDecision:
+        return _response_for(request, value).decision
+
+    assert decision(interrupt_answer("skill_evolution_approval", approved=False, feedback="no")) is (
+        ToolApprovalDecision.DENY
+    )
+    assert decision({"action": "allow_always"}) is ToolApprovalDecision.ALLOW_FOR_SESSION
+    assert decision({"action": "allow_once"}) is ToolApprovalDecision.ALLOW
+    assert decision({"feedback": "unclear"}) is ToolApprovalDecision.DENY
+    assert decision(True) is ToolApprovalDecision.ALLOW
+
+
+def test_approval_answers_read_typed_words_and_edits() -> None:
+    request = ToolApprovalRequest(request_id="intr_1", call_id="c1", tool_name="doc_tool")
+
+    def respond(value: Any) -> ToolApprovalResponse:
+        return _response_for(request, value)
+
+    assert respond("yes").decision is ToolApprovalDecision.ALLOW
+    assert respond("always").decision is ToolApprovalDecision.ALLOW_FOR_SESSION
+    assert respond("no").decision is ToolApprovalDecision.DENY
+    assert respond("not now").reason == "not now"
+    edited = respond({"updated_arguments": {"x": "SAFE"}})
+    assert edited.decision is ToolApprovalDecision.ALLOW and edited.updated_arguments == {"x": "SAFE"}
+    for value in ({}, 1, None):
+        assert respond(value).decision is ToolApprovalDecision.DENY
 
 
 @pytest.mark.asyncio
