@@ -242,6 +242,165 @@ def test_output_failure_does_not_kill_consumer_or_other_sink(make_logger, monkey
     assert "consumer survives" in (tmp_path / "test.log").read_text()
 
 
+@pytest.mark.parametrize("same_name", [False, True])
+def test_reconfiguration_timeout_keeps_old_output_writable(make_logger, monkeypatch, same_name):
+    monkeypatch.setattr(queued_output, "QUEUE_CAPACITY", 2)
+    stream = GatedStream()
+    logger, _ = make_logger(stream)
+    output = logger._queue_handler
+    config = logger.get_config()
+    logger.info("in flight")
+    assert stream.entered.wait(2)
+    logger.info("pending")
+    wait_for = output.condition.wait_for
+    stop = output.stop
+    with monkeypatch.context() as patch:
+        patch.setattr(output.condition, "wait_for", lambda predicate, timeout: wait_for(predicate, 0))
+        patch.setattr(output, "stop", lambda: stop(0))
+        for _ in range(2):
+            with pytest.raises(BaseError, match="still blocked"):
+                if same_name:
+                    make_logger(stream, format="new:%(message)s", level="ERROR")
+                else:
+                    logger.reconfigure({**config, "format": "new:%(message)s", "level": "ERROR"})
+            assert logger.get_config() == config
+            assert logger._queue_handler is output
+            assert not output.stopping
+            assert not output.listener.handlers[0]._closed
+        logger.info("after rejection")
+        # Rejecting again with a full queue must not discard its pending tail.
+        with pytest.raises(BaseError, match="still blocked"):
+            logger.reconfigure(config)
+        assert output.stats()["accepted"] == 3
+        assert output.stats()["discarded_on_close"] == 0
+        assert output.stats()["dropped_by_level"] == {}
+    stream.release.set()
+    assert logger.flush()
+    assert stream.getvalue().splitlines() == ["in flight", "pending", "after rejection"]
+    logger.reconfigure({**config, "format": "new:%(message)s"})
+    assert not output.listener._thread.is_alive()
+    logger.info("retry succeeded")
+    assert logger.flush()
+    assert stream.getvalue().endswith("new:retry succeeded\n")
+
+
+def test_reconfigure_accepts_producers_while_waiting_and_forwards_old_handler(make_logger, monkeypatch):
+    stream = GatedStream()
+    logger, _ = make_logger(stream)
+    previous = logger._queue_handler
+    logger.info("in flight")
+    assert stream.entered.wait(2)
+    waiting = threading.Event()
+    wait_for = previous.condition.wait_for
+    errors = []
+
+    def observe_wait(predicate, timeout):
+        waiting.set()
+        return wait_for(predicate, timeout)
+
+    def reconfigure():
+        try:
+            logger.reconfigure({**logger.get_config(), "format": "new:%(message)s"})
+        except Exception as error:  # noqa: BLE001 - report worker failures in the test thread
+            errors.append(error)
+
+    monkeypatch.setattr(previous.condition, "wait_for", observe_wait)
+    worker = threading.Thread(target=reconfigure)
+    worker.start()
+    try:
+        assert waiting.wait(2)
+        logger.info("during wait")
+        assert previous.stats()["accepted"] == 2
+    finally:
+        stream.release.set()
+        worker.join(3)
+    assert not worker.is_alive()
+    assert not errors
+    # logging.callHandlers may have obtained this handler before the list swap.
+    previous.handle(logging.makeLogRecord({"msg": "already selected", "levelno": logging.INFO}))
+    assert logger.flush()
+    assert stream.getvalue().splitlines() == ["in flight", "during wait", "new:already selected"]
+    assert previous.stats()["dropped_by_level"] == {}
+    assert not previous.listener._thread.is_alive()
+
+
+def test_reconfigure_listener_start_failure_keeps_old_output(make_logger, monkeypatch):
+    logger, stream = make_logger()
+    config = logger.get_config()
+    previous = logger._queue_handler
+
+    def fail_start(_listener):
+        raise RuntimeError("controlled replacement startup failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(queued_output.OutputListener, "start", fail_start)
+        with pytest.raises(RuntimeError, match="replacement startup failure"):
+            logger.reconfigure({**config, "level": "ERROR", "format": "new:%(message)s"})
+    assert logger.get_config() == config
+    assert logger._queue_handler is previous
+    assert not previous.stopping
+    logger.info("still working")
+    assert logger.flush()
+    assert stream.getvalue() == "still working\n"
+
+
+def test_stale_handler_does_not_retain_retired_queues(make_logger):
+    import gc
+    import weakref
+
+    first, stream = make_logger()
+    stale = first._queue_handler
+    current, _ = make_logger(stream)
+    retired = []
+    for _ in range(3):
+        retired.append(weakref.ref(current._queue_handler))
+        current.reconfigure(current.get_config())
+    gc.collect()
+    assert all(reference() is None for reference in retired)
+    stale.handle(logging.makeLogRecord({"msg": "latest queue", "levelno": logging.INFO}))
+    assert current.flush()
+    assert stream.getvalue() == "latest queue\n"
+
+
+def test_reconfigure_slow_retired_sink_close_bounds_consumer_count(make_logger, monkeypatch):
+    logger, stream = make_logger()
+    previous = logger._queue_handler
+    sink = previous.listener.handlers[0]
+    entered = threading.Event()
+    release = threading.Event()
+    close = sink.close
+    stop = previous.stop
+
+    def slow_close():
+        entered.set()
+        assert release.wait(5)
+        close()
+
+    monkeypatch.setattr(sink, "close", slow_close)
+    monkeypatch.setattr(previous, "stop", lambda: stop(0))
+    try:
+        logger.reconfigure({**logger.get_config(), "format": "new:%(message)s"})
+        assert entered.wait(2)
+        current = logger._queue_handler
+        for _ in range(2):
+            with pytest.raises(BaseError, match="still blocked"):
+                logger.reconfigure(logger.get_config())
+            assert logger._queue_handler is current
+            assert not current.stopping
+        logger.info("current still working")
+        assert logger.flush()
+        assert stream.getvalue() == "new:current still working\n"
+    finally:
+        release.set()
+        previous.listener._thread.join(3)
+    assert not previous.listener._thread.is_alive()
+    logger.reconfigure({**logger.get_config(), "format": "recovered:%(message)s"})
+    assert not current.listener._thread.is_alive()
+    logger.info("retry")
+    assert logger.flush()
+    assert stream.getvalue().endswith("recovered:retry\n")
+
+
 def test_repeated_setup_reconfigure_stale_close_and_filters(make_logger):
     first, stream = make_logger()
     old_thread = first._queue_handler.listener._thread
@@ -343,7 +502,7 @@ assert sink.entered.wait(2)
         assert (tmp_path / "exit.log").read_text() == "drain on exit\n"
 
 
-@pytest.mark.parametrize("invalid", [{"format": "invalid"}, {"log_file": "/etc/passwd"}])
+@pytest.mark.parametrize("invalid", [{"format": "invalid"}, {"log_file": "/etc/passwd"}, {"level": "BASIC_FORMAT"}])
 def test_failed_reconfigure_leaves_previous_output_active(make_logger, invalid):
     logger, stream = make_logger()
     previous = logger.get_config()
@@ -356,6 +515,29 @@ def test_failed_reconfigure_leaves_previous_output_active(make_logger, invalid):
     logger.info("still working")
     assert logger.flush()
     assert stream.getvalue() == "still working\n"
+
+
+def test_reconfigure_from_consumer_rejects_without_sealing_output(make_logger, monkeypatch):
+    logger, stream = make_logger()
+    output = logger._queue_handler
+    sink = output.listener.handlers[0]
+    emit = sink.emit
+    rejected = threading.Event()
+
+    def reentrant_emit(record):
+        with pytest.raises(BaseError, match="still blocked"):
+            logger.reconfigure(logger.get_config())
+        rejected.set()
+        emit(record)
+
+    monkeypatch.setattr(sink, "emit", reentrant_emit)
+    logger.info("before")
+    assert logger.flush()
+    assert rejected.is_set()
+    assert not output.stopping
+    logger.info("after")
+    assert logger.flush()
+    assert stream.getvalue() == "before\nafter\n"
 
 
 def test_mutable_raw_message_is_snapshotted_before_queue(make_logger):
@@ -885,7 +1067,7 @@ def test_failed_reconfiguration_preserves_error_if_new_sink_close_fails(tmp_path
         logger = DefaultLogger(f"cleanup_error_{tmp_path.name}", config)
         output = logger._queue_handler
         original_emit = output.listener.handlers[0].emit
-        original_stop = output.stop
+        wait_for = output.condition.wait_for
         console_handler = default_impl.ConsoleHandler
         file_handler = default_impl.SafeRotatingFileHandler
 
@@ -893,9 +1075,6 @@ def test_failed_reconfiguration_preserves_error_if_new_sink_close_fails(tmp_path
             entered.set()
             release.wait(3)
             original_emit(record)
-
-        def fail_stop():
-            return original_stop(timeout=0)
 
         def track_console(*args, **kwargs):
             handler = console_handler(*args, **kwargs)
@@ -919,7 +1098,7 @@ def test_failed_reconfiguration_preserves_error_if_new_sink_close_fails(tmp_path
             logger.info("in flight")
             assert entered.wait(2)
             with patch.context() as failure_patch:
-                failure_patch.setattr(output, "stop", fail_stop)
+                failure_patch.setattr(output.condition, "wait_for", lambda predicate, timeout: wait_for(predicate, 0))
                 failure_patch.setattr(default_impl, "ConsoleHandler", track_console)
                 failure_patch.setattr(default_impl, "SafeRotatingFileHandler", track_file)
                 with pytest.raises(BaseError) as exc_info:
@@ -932,10 +1111,17 @@ def test_failed_reconfiguration_preserves_error_if_new_sink_close_fails(tmp_path
             assert isinstance(new_sinks[0], default_impl.SafeRotatingFileHandler)
             assert new_sinks[0].stream is None
             assert not stream.closed
+            assert logger._queue_handler is output
+            assert not output.stopping
+            logger.info("after rejection")
+            release.set()
+            assert logger.flush()
+            assert output.stats()["dropped_by_level"] == {}
+            assert "after rejection" in (tmp_path / "stdout.log").read_text()
         finally:
             release.set()
-            output.listener._thread.join(3)
             logger.close()
+            output.listener._thread.join(3)
         assert not output.listener._thread.is_alive()
 
 

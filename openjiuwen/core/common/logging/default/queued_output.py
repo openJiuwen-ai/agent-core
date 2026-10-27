@@ -151,6 +151,10 @@ class QueuedOutput(QueueHandler):
         super().__init__(queue.Queue(maxsize=QUEUE_CAPACITY))
         self.condition = threading.Condition()
         self.stopping = False
+        # Shared by replacements: stale handlers find the latest queue without
+        # retaining a chain of every retired queue and its sinks.
+        self.route: list[QueuedOutput] = [self]
+        self.retiring_thread: threading.Thread | None = None
         self.accepted = 0
         self.completed = 0
         self.peak = 0
@@ -194,6 +198,11 @@ class QueuedOutput(QueueHandler):
 
     def enqueue(self, record):
         with self.condition:
+            target = self.route[0]
+            if target is not self:
+                # A producer may already hold the old handler during a swap.
+                target.enqueue(record)
+                return
             if not self.stopping:
                 try:
                     self.queue.put_nowait(record)
@@ -245,6 +254,22 @@ class QueuedOutput(QueueHandler):
     def flush(self):
         if not self.stopping:
             self.drain()
+
+    def ready_for_replacement(self, timeout=DRAIN_TIMEOUT):
+        """Wait without sealing or discarding; caller holds condition through swap.
+
+        Unlike drain's snapshot barrier, replacement needs every accepted record
+        complete. Concurrent producers may prevent this within the deadline.
+        """
+        if self.retiring_thread is not None and self.retiring_thread.is_alive():
+            return False
+        if self.stopping:
+            return not self.listener._thread.is_alive()  # pylint: disable=protected-access
+        if threading.current_thread() is self.listener._thread:  # pylint: disable=protected-access
+            return False
+        return self.condition.wait_for(lambda: self.stopping or self.completed == self.accepted, timeout) and not (
+            self.stopping
+        )
 
     def request_stop(self):
         """Seal ingress before draining; no sentinel space is required."""

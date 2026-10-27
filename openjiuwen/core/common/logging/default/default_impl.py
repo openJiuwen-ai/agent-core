@@ -18,6 +18,7 @@ import shutil
 import sys
 import threading
 from collections.abc import Mapping
+from contextlib import nullcontext
 from logging.handlers import RotatingFileHandler
 from typing import (
     Any,
@@ -347,42 +348,55 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
 
         Set log level, output targets, and formatter according to configuration.
         """
-        # Construct/validate before sealing the old pipeline. Failed configuration
-        # must leave its output working, not merely restore self.config.
+        # Validate and wait before sealing old output. A rejected replacement
+        # leaves its ingress, queued records and configuration untouched.
         handlers = self._create_output_handlers()
+        previous = next((handler for handler in self._logger.handlers if isinstance(handler, QueuedOutput)), None)
         try:
-            for handler in self._logger.handlers[:]:
-                if isinstance(handler, QueuedOutput):
-                    if not handler.stop():
-                        raise build_error(
-                            StatusCode.COMMON_LOG_CONFIG_INVALID,
-                            error_msg="previous log output is still blocked; retry after it recovers",
-                        )
-                    handler.close()
+            # Keep producers out only for the commit, not while waiting for I/O:
+            # Condition.wait_for releases the lock while the listener drains.
+            with previous.condition if previous is not None else nullcontext():
+                if previous is not None and not previous.ready_for_replacement():
+                    raise build_error(
+                        StatusCode.COMMON_LOG_CONFIG_INVALID,
+                        error_msg="previous log output is still blocked; retry after it recovers",
+                    )
+
+                level_config = self.config.get("level", "WARNING")
+                if isinstance(level_config, str):
+                    level = getattr(logging, level_config.upper(), logging.WARNING)
+                elif isinstance(level_config, int):
+                    level = level_config
+                else:
+                    level = logging.WARNING
+                level = logging._checkLevel(level)  # type: ignore[attr-defined]  # pylint: disable=protected-access
+
+                # Starting the consumer can fail too; old output remains live
+                # until its successor has successfully started.
+                output = QueuedOutput(handlers)
+                output.addFilter(ContextFilter(self.log_type))
+                self._logger.setLevel(level)
+                self._logger.propagate = self.config.get("propagate", True)
+                self._queue_handler = output
+                with logging._lock:  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    self._logger.handlers = [output] + [
+                        handler for handler in self._logger.handlers if not isinstance(handler, QueuedOutput)
+                    ]
+                if previous is not None:
+                    output.route = previous.route
+                    output.route[0] = output
+                    previous.request_stop()
         except Exception as error:
             _close_handlers_after_error(handlers, error)
             raise
 
-        # Parse log level
-        level_config = self.config.get("level", "WARNING")
-        if isinstance(level_config, str):
-            level = getattr(logging, level_config.upper(), logging.WARNING)
-        elif isinstance(level_config, int):
-            level = level_config
-        else:
-            level = logging.WARNING
-
-        self._logger.setLevel(level)
-        self._logger.propagate = self.config.get("propagate", True)
-
-        self._queue_handler = QueuedOutput(handlers)
-        self._queue_handler.addFilter(ContextFilter(self.log_type))
-        # Capture context before custom handlers, including after reconfiguration.
-        # Replace the list atomically so new calls always see one built-in route.
-        with logging._lock:  # type: ignore[attr-defined]  # pylint: disable=protected-access
-            self._logger.handlers = [self._queue_handler] + [
-                handler for handler in self._logger.handlers if not isinstance(handler, QueuedOutput)
-            ]
+        if previous is not None:
+            # The swap is committed. Slow final flush/close cannot turn success
+            # into a rejection with a sealed old route. Bound cleanup and reject
+            # another replacement until that retiring consumer has exited.
+            output.retiring_thread = previous.listener._thread  # pylint: disable=protected-access
+            previous.stop()
+            previous.close()
 
     def _create_output_handlers(self) -> list[logging.Handler]:
         """Create sinks owned and closed exclusively by the output consumer."""
