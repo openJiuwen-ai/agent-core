@@ -169,7 +169,9 @@ class QueuedOutput(QueueHandler):
         with logging._lock:  # type: ignore[attr-defined]  # pylint: disable=protected-access
             for reference in logging._handlerList[:]:  # type: ignore[attr-defined]  # pylint: disable=protected-access
                 if reference() in handlers:
-                    logging._removeHandlerRef(reference)  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                    logging._removeHandlerRef(  # type: ignore[attr-defined]  # pylint: disable=protected-access
+                        reference,
+                    )
         for handler in handlers:
             # StreamHandler and RotatingFileHandler swallow emit errors via
             # handleError. Count those too, without writing to stderr recursively.
