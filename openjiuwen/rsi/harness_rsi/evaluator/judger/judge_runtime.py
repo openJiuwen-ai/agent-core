@@ -15,7 +15,7 @@ from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.image_modality_probe import get_cached_image_support
 from openjiuwen.harness.rails._multimodal import build_read_image_multimodal_resolver
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
-from openjiuwen.harness.tools.filesystem import GlobTool, GrepTool, ListDirTool, ReadFileTool
+from openjiuwen.harness.tools.filesystem import GlobTool, ListDirTool, ReadFileTool
 from openjiuwen.rsi.harness_rsi.artifact_io import _io_path
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
@@ -25,10 +25,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.evidence_guard import (
     JudgeEvidenceTool,
     bound_tool_content,
 )
-from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import (
-    MissingJudgeVerdictError,
-    parse_judge_output,
-)
+from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_search import JudgeSearchTool
 from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import load_model_config_ref, without_inner_sdk_retries
 
 
@@ -55,10 +52,10 @@ class JudgeReadOnlyRail(SysOperationRail):
             ),
             ListDirTool(self.sys_operation, language, agent_id),
             GlobTool(self.sys_operation, language, agent_id),
-            GrepTool(self.sys_operation, language, agent_id),
         ]
         if self.evidence_workspace is not None:
-            self.tools.append(JudgeEvidenceTool(self.evidence_workspace, agent_id))
+            self.tools.extend([JudgeEvidenceTool(self.evidence_workspace, agent_id),
+                               JudgeSearchTool(self.evidence_workspace, agent_id)])
         for tool in self.tools:
             agent.ability_manager.add_ability(tool.card, tool)
 
@@ -165,6 +162,7 @@ def build_judge_agent(
         enable_task_planning=False,
         enable_skill_discovery=False,
         max_iterations=budget.iterations,
+        invocation_log_dir=str(log_path.parent / "runtime_logs"),
         language="en",
         rails=[JudgeReadOnlyRail(workspace), budget],
     )
@@ -191,13 +189,9 @@ async def run_judge_agent(
                     raise JudgeIterationLimitError("Judge reading iteration limit reached")
                 raise RuntimeError(str(result.get("output") or "evaluator agent failed"))
             result = result.get("output", result.get("answer", result))
-        raw = json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
-        try:
-            parse_judge_output(raw)
-        except MissingJudgeVerdictError as exc:
-            if budget.turns >= budget.iterations:
-                raise JudgeIterationLimitError("Judge reading iteration limit reached without a verdict") from exc
-        return raw
+        # The assessment loop owns persistence, parsing and bounded correction.
+        # A malformed verdict must reach it unchanged, including at the last turn.
+        return json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
     finally:
         for rail in agent.configured_rails():
             if isinstance(rail, JudgeReadOnlyRail):
@@ -206,7 +200,7 @@ async def run_judge_agent(
         Runner.resource_mgr.remove_sys_operation(f"{agent.card.name}_{agent.card.id}")
 
 
-async def run_judge_closeout(config: EvaluatorConfig, workspace: Path) -> str:
+async def run_judge_closeout(config: EvaluatorConfig, workspace: Path, *, feedback: str = "") -> str:
     """Grade once from the complete frozen snapshot without prior agent history."""
     model = _judge_model(config)
     payload = await asyncio.to_thread(
@@ -218,10 +212,10 @@ async def run_judge_closeout(config: EvaluatorConfig, workspace: Path) -> str:
     )
     if payload is None:  # ``required=True`` makes this defensive only.
         raise EvaluationInfrastructureError("Judge closeout evidence is unavailable; no score produced")
-    return await _invoke_complete_evidence(model, payload)
+    return await _invoke_complete_evidence(model, payload, feedback=feedback)
 
 
-async def _invoke_complete_evidence(model: Model, payload: str | list) -> str:
+async def _invoke_complete_evidence(model: Model, payload: str | list, *, feedback: str = "") -> str:
     if isinstance(payload, list):
         declared = getattr(model.model_client_config, "supports_vision", None)
         supported = declared if isinstance(declared, bool) else get_cached_image_support(model)
@@ -234,5 +228,8 @@ async def _invoke_complete_evidence(model: Model, payload: str | list) -> str:
     policy = "All grading evidence is supplied inline. Evaluate it directly.\nEvaluation policy:" + policy.split(
         "Evaluation policy:", 1,
     )[1]
-    response = await model.invoke(messages=[SystemMessage(content=policy), UserMessage(content=payload)], tools=None)
+    messages = [SystemMessage(content=policy), UserMessage(content=payload)]
+    if feedback:
+        messages.append(UserMessage(content=feedback))
+    response = await model.invoke(messages=messages, tools=None)
     return response.content or ""

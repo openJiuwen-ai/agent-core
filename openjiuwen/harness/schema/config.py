@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional, Union
 
 from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm.model import Model
@@ -219,6 +219,11 @@ class DeepAgentConfig:
         max_iterations: Maximum inner ReAct iterations per
             single invoke. ``None`` means unbounded. An explicit
             value is applied even when the outer task loop is enabled.
+        on_max_iterations: Exhaustion policy; error by default, or one tool-free
+            final_answer, or return_observations.
+        max_iterations_hard_limit: Optional positive host ceiling for single-round
+            execution; cannot be combined with the outer task loop.
+        invocation_log_dir: Optional directory for bounded per-invocation logs.
         subagents: Sub-agent specifications or Sub-agent instance.
         tools: Tool cards mounted on the agent.
         mcps: MCP server configs mounted on the agent.
@@ -318,6 +323,22 @@ class DeepAgentConfig:
     skill_budget_max_skills: Optional[int] = None
     skill_budget_max_total_chars: Optional[int] = None
 
+    on_max_iterations: Literal["error", "final_answer", "return_observations"] = "error"
+    max_iterations_hard_limit: int | None = None
+    invocation_log_dir: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.on_max_iterations not in ("error", "final_answer", "return_observations"):
+            raise ValueError("on_max_iterations must be error, final_answer, or return_observations")
+        ceiling = self.max_iterations_hard_limit
+        if ceiling is not None:
+            if self.enable_task_loop:
+                raise ValueError("max_iterations_hard_limit requires single-round mode (enable_task_loop=False)")
+            if type(ceiling) is not int or ceiling < 1:
+                raise ValueError("max_iterations_hard_limit must be a positive integer")
+            if self.max_iterations is None or type(self.max_iterations) is not int or not 1 <= self.max_iterations <= ceiling:
+                raise ValueError("max_iterations must be positive and within max_iterations_hard_limit")
+
 
 @dataclass
 class SubAgentConfig:
@@ -347,3 +368,4 @@ class SubAgentConfig:
     restrict_to_work_dir: bool = True
     display_name: Optional[str] = None
     role: Optional[str] = None
+    invocation_log_dir: str | None = None

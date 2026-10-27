@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from openjiuwen.rsi.harness_rsi.model_call import DEFAULT_MODEL_CALL_MAX_RETRIES
+from openjiuwen.rsi.harness_rsi.feedback import OutputRepairConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,15 +59,27 @@ class EvaluatorConfig:
     judge_agent_max_iterations: int = 20
     judge_timeout_sec: int = 900
     judge_max_retries: int = 2
+    output_repair: OutputRepairConfig = field(default_factory=OutputRepairConfig)
     judge_success_score: float = 0.8
     transient_case_retry_limit: int = 2
     solver_backend: str = "deep_agent"
+    solver_max_iterations: int = 300
     jiuwenswarm_executable: str = ""
     jiuwenswarm_python: str = ""
     jiuwenswarm_expected_version: str = ""
     jiuwenswarm_startup_timeout_sec: int = 120
     jiuwenswarm_runtime_timeout_sec: int = 3600
     jiuwenswarm_runtime_profile: str = "task86"
+    solver_on_max_iterations: str = "error"
+    solver_max_iterations_hard_limit: int = 300
+
+    def __post_init__(self) -> None:
+        if type(self.solver_max_iterations) is not int or self.solver_max_iterations < 1:
+            raise ValueError("evaluator.solver_max_iterations must be a positive integer")
+        if type(self.solver_max_iterations_hard_limit) is not int or self.solver_max_iterations_hard_limit < self.solver_max_iterations:
+            raise ValueError("evaluator.solver_max_iterations_hard_limit must be an integer >= solver_max_iterations")
+        if self.solver_on_max_iterations not in ("error", "return_observations"):
+            raise ValueError("evaluator.solver_on_max_iterations is invalid")
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EvaluatorConfig":
@@ -80,12 +93,18 @@ class EvaluatorConfig:
             ),
             judge_timeout_sec=_int_value(data.get("judge_timeout_sec"), default=900),
             judge_max_retries=_int_value(data.get("judge_max_retries"), default=2),
+            output_repair=OutputRepairConfig.from_dict(data.get("output_repair")),
             judge_success_score=float(data.get("judge_success_score", 0.8)),
             transient_case_retry_limit=_int_value(
                 data.get("transient_case_retry_limit"),
                 default=2,
             ),
             solver_backend=str(data.get("solver_backend", "deep_agent")),
+            solver_max_iterations=_solver_iteration_limit(data.get("solver_max_iterations")),
+            solver_on_max_iterations=str(data.get("solver_on_max_iterations", "error")),
+            solver_max_iterations_hard_limit=_solver_iteration_limit(
+                data.get("solver_max_iterations_hard_limit", max(300, _solver_iteration_limit(data.get("solver_max_iterations")))),
+            ),
             jiuwenswarm_executable=str(data.get("jiuwenswarm_executable", "")),
             jiuwenswarm_python=str(data.get("jiuwenswarm_python", "")),
             jiuwenswarm_expected_version=str(data.get("jiuwenswarm_expected_version", "")),
@@ -114,6 +133,7 @@ class EvaluationResultAnalyzerConfig:
     max_issues: int = 20
     evidence_limit_per_issue: int = 5
     output_filename: str = "issues.yaml"
+    output_repair: OutputRepairConfig = field(default_factory=OutputRepairConfig)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "EvaluationResultAnalyzerConfig":
@@ -139,6 +159,7 @@ class EvaluationResultAnalyzerConfig:
             max_issues=_int_value(data.get("max_issues"), default=20),
             evidence_limit_per_issue=_int_value(data.get("evidence_limit_per_issue"), default=5),
             output_filename=str(data.get("output_filename", "issues.yaml")),
+            output_repair=OutputRepairConfig.from_dict(data.get("output_repair")),
         )
 
 
@@ -174,11 +195,15 @@ class MemberOptimizerConfig:
     candidate_holdout_cases: int = 0
     candidate_holdout_max_regression: float = 0.0
     adapt_frozen_team_issues: bool = False
+    output_repair: OutputRepairConfig = field(default_factory=OutputRepairConfig)
+
+    runtime_iteration_hard_limit: int = 300
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MemberOptimizerConfig":
         return cls(
             model_config_ref=str(data.get("model_config_ref", "")),
+            runtime_iteration_hard_limit=_solver_iteration_limit(data.get("runtime_iteration_hard_limit", 300)),
             action_group_configs=_string_list(data.get("action_group_configs")),
             agent_skills_dirs=_string_list(data.get("agent_skills_dirs")),
             freeze=_bool_value(data.get("freeze"), default=False),
@@ -236,6 +261,7 @@ class MemberOptimizerConfig:
                 default=0.0,
             ),
             adapt_frozen_team_issues=_bool_value(data.get("adapt_frozen_team_issues"), default=False),
+            output_repair=OutputRepairConfig.from_dict(data.get("output_repair")),
         )
 
 
@@ -305,7 +331,10 @@ class AutoCoordinatingHarnessConfig:
             data_loader=DataLoaderConfig.from_dict(_mapping(data.get("data_loader"))),
             evaluator=replace(evaluator, model_config_ref=model_configs.evaluation),
             evaluation_result_analyzer=replace(analyzer, model_config_ref=model_configs.analysis),
-            member_optimizer=replace(optimizer, model_config_ref=model_configs.member_optimization),
+            member_optimizer=replace(
+                optimizer, model_config_ref=model_configs.member_optimization,
+                runtime_iteration_hard_limit=evaluator.solver_max_iterations_hard_limit,
+            ),
             scheduling=OrchestratorSchedulingConfig.from_dict(_mapping(data.get("scheduling"))),
         )
         config.validate()
@@ -373,6 +402,19 @@ def _int_value(value: Any, *, default: int) -> int:
     if isinstance(value, bool):
         raise ValueError(f"expected an integer value, got {value!r}")
     return int(value)
+
+
+def _solver_iteration_limit(value: Any) -> int:
+    if value is None:
+        return 300
+    if isinstance(value, str):
+        try:
+            value = int(value)
+        except ValueError as exc:
+            raise ValueError("evaluator.solver_max_iterations must be a positive integer") from exc
+    if type(value) is not int or value < 1:
+        raise ValueError("evaluator.solver_max_iterations must be a positive integer")
+    return value
 
 
 def _float_value(value: Any, *, default: float) -> float:

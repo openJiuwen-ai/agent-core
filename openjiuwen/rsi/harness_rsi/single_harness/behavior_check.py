@@ -10,13 +10,17 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import CaseReader
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import load_member_optimizer_model
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.output import parse_yaml_or_json_object_response
-from openjiuwen.rsi.harness_rsi.model_call import run_model_call_with_retries
+from openjiuwen.rsi.harness_rsi.model_call import is_retryable_model_call_failure
+from openjiuwen.rsi.harness_rsi.feedback import FeedbackTracker, OutputRepairConfig, correction_message
 from openjiuwen.rsi.usage import model_usage_stage
 
 _PROMPT = """Compare the frozen behavior check against source and candidate evidence.
@@ -73,7 +77,10 @@ def _evidence(eval_ref: str, case_id: str) -> dict[str, Any]:
     files = {"task": case.input, "response": case.response}
     omitted: list[str] = []
     root = Path(case.result_path).parent.resolve()
-    candidates = [root / "judge" / "normalized_trace.json", *sorted((root / "artifacts").rglob("*"))]
+    candidates = [
+        root / "runtime_config.json", root / "termination.json",
+        root / "judge" / "normalized_trace.json", *sorted((root / "artifacts").rglob("*")),
+    ]
     patch = case.evaluation_metadata.get("model_patch_path")
     if patch:
         candidates.insert(0, Path(patch))
@@ -139,12 +146,33 @@ def _validate_observation(raw: Any, evidence: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def feedback_route(observation: dict[str, Any], *, task_passed: bool) -> str:
+def _observation_errors(raw: dict[str, Any], checked: dict[str, Any]) -> list[str]:
+    """Return actionable schema/citation feedback without inventing observations."""
+    errors: list[str] = []
+    for key in ("source_check", "candidate_check", "behavior_changed"):
+        value = raw.get(key)
+        if value not in ("yes", "no", "unknown"):
+            errors.append(f"{key} must be yes/no/unknown")
+        elif value != "unknown" and checked[key] != value:
+            errors.append(
+                f"{key}={value!r} lacks valid verbatim evidence on the required side(s), "
+                "or contradicts identical source/candidate evidence; correct citations or return unknown"
+            )
+    citations = raw.get("evidence")
+    if not isinstance(citations, list) or any(not isinstance(item, dict) for item in citations):
+        errors.append("evidence must be a list of citation objects")
+    return errors
+
+
+def feedback_route(
+    observation: dict[str, Any], *, task_passed: bool, score_improved: bool | None = None,
+) -> str:
     """Keep score, availability and semantic evidence separate."""
     if observation.get("availability") == "no":
         return "repair_activation"
     if observation.get("source_check") == "no" and observation.get("candidate_check") == "yes":
-        return "verified" if task_passed else "investigate_residuals"
+        numerical_acceptance = task_passed if score_improved is None else score_improved
+        return "verified" if numerical_acceptance else "investigate_residuals"
     if observation.get("behavior_changed") == "no":
         return "repair_execution" if observation.get("availability") == "yes" else "collect_behavior_evidence"
     if observation.get("behavior_changed") == "yes" and observation.get("candidate_check") == "no":
@@ -160,8 +188,10 @@ async def check_candidate_behavior(
     capabilities: list[dict[str, Any]],
     model_config_ref: str,
     output_dir: Path,
+    output_repair: OutputRepairConfig | None = None,
 ) -> dict[str, dict[str, Any]]:
     """One bounded observation call per target; cache by exact evidence + contract."""
+    policy = output_repair or OutputRepairConfig()
     contracts: dict[str, list[dict[str, Any]]] = {}
     for capability in capabilities:
         for contract in capability.get("decision_contracts", []):
@@ -186,11 +216,13 @@ async def check_candidate_behavior(
         model_identity = (
             hashlib.sha256(model_path.read_bytes()).hexdigest() if model_path and model_path.is_file() else ""
         )
-        digest = hashlib.sha256((_PROMPT + model_identity + message).encode()).hexdigest()
+        digest = hashlib.sha256((_PROMPT + model_identity + message + json.dumps(asdict(policy))).encode()).hexdigest()
         path = output_dir / f"{digest}.json"
         if path.is_file():
-            results[case_id] = json.loads(path.read_text(encoding="utf-8"))
-            continue
+            cached = json.loads(path.read_text(encoding="utf-8"))
+            if cached.get("validation_status") == "completed":
+                results[case_id] = cached
+                continue
         result = _validate_observation({}, evidence)
         if (
             model_config_ref
@@ -198,21 +230,51 @@ async def check_candidate_behavior(
             and all(evidence.get(side, {}).get("files") for side in ("source", "candidate"))
         ):
 
-            async def invoke(message: str = message) -> str:
-                model = load_member_optimizer_model(model_config_ref)
-                async with asyncio.timeout(900):
-                    response = await model.invoke(
-                        messages=[{"role": "system", "content": _PROMPT}, {"role": "user", "content": message}],
-                        tools=None,
-                    )
-                return str(response.content)
-
-            try:
-                text = await run_model_call_with_retries(invoke, operation_name="behavior_check", max_retries=1)
+            tracker = FeedbackTracker(policy)
+            attempt_message = message
+            for attempt in range(tracker.max_attempts):
+                text = ""
+                errors: list[str] = []
+                try:
+                    model = load_member_optimizer_model(model_config_ref)
+                    async with asyncio.timeout(900):
+                        response = await model.invoke(
+                            messages=[{"role": "system", "content": _PROMPT},
+                                      {"role": "user", "content": attempt_message}],
+                            tools=None,
+                        )
+                    text = str(response.content or "")
+                    parsed = parse_yaml_or_json_object_response(text)
+                    checked = _validate_observation(parsed, evidence)
+                    errors = _observation_errors(parsed, checked)
+                    if not errors:
+                        result = checked
+                        result["validation_status"] = "completed"
+                except Exception as exc:
+                    if not isinstance(exc, (ValueError, TypeError, KeyError, yaml.YAMLError)) and not is_retryable_model_call_failure(exc):
+                        result["error_type"] = type(exc).__name__
+                        errors = [f"Observation unavailable: {type(exc).__name__}"]
+                        result["validation_status"] = "failed"
+                        (output_dir / f"{digest}.attempt_{attempt + 1}.json").write_text(
+                            json.dumps({"errors": errors, "stop_reason": "non_retryable_failure"}), encoding="utf-8",
+                        )
+                        break
+                    errors = [f"Invalid or unavailable observation: {exc}"]
+                can_retry = tracker.failed(errors, text) if errors else False
                 (output_dir / f"{digest}.raw.txt").write_text(text, encoding="utf-8")
-                result = _validate_observation(parse_yaml_or_json_object_response(text), evidence)
-            except Exception as exc:  # noqa: BLE001 - diagnostic failure must not fabricate task scores
-                result["error_type"] = type(exc).__name__
+                (output_dir / f"{digest}.attempt_{attempt + 1}.json").write_text(
+                    json.dumps({"raw_output": text, "errors": errors,
+                                "stop_reason": tracker.stop_reason if errors else "validated"}, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                if not errors:
+                    break
+                result["validation_status"] = "failed"
+                result["validation_errors"] = errors
+                result["output_repair"] = {"attempts": tracker.attempts, "stop_reason": tracker.stop_reason}
+                if not can_retry:
+                    break
+                attempt_message = correction_message(message, text, errors)
         result.update(
             {
                 "evidence_sha256": digest,

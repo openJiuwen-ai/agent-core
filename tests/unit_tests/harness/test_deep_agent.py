@@ -396,7 +396,8 @@ async def test_add_rail_lazy_register_on_first_invoke() -> None:
     assert rail.before_invoke_count == 1
     assert rail.after_invoke_count == 1
     assert agent.is_initialized is True
-    assert fake_react.invoke_calls[0]["inputs"] == {
+    assert {key: value for key, value in fake_react.invoke_calls[0]["inputs"].items()
+            if key != "_steering_queue"} == {
         "query": "hello",
         "conversation_id": "c1",
     }
@@ -522,7 +523,8 @@ async def test_stream_single_round_branch() -> None:
     chunks = [chunk async for chunk in agent.stream("stream_input")]
 
     assert [chunk["chunk"] for chunk in chunks] == [1, 2]
-    assert fake_react.stream_calls[0]["inputs"] == {
+    assert {key: value for key, value in fake_react.stream_calls[0]["inputs"].items()
+            if key != "_steering_queue"} == {
         "query": "stream_input",
     }
 

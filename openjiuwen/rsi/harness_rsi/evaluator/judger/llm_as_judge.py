@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,7 +14,10 @@ from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
 from openjiuwen.rsi.harness_rsi.data_loader.grading_contract import normalize_grading_case
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import EvaluationJudger, JudgeResult
-from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import prepare_judge_workspace, write_judge_json
+from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_diagnostics import collect_judge_model_calls
+from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import (
+    prepare_judge_workspace, write_judge_event, write_judge_json,
+)
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_runtime import (
     JudgeIterationLimitError,
     repair_judge_json,
@@ -27,24 +31,45 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import (
     scoring_contract,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.optimization_signals import optimization_signals_contract
-from openjiuwen.rsi.harness_rsi.model_call import run_model_call_with_retries
+from openjiuwen.rsi.harness_rsi.model_call import RetryableModelOutputError, is_retryable_model_call_failure
+from openjiuwen.rsi.harness_rsi.feedback import FeedbackTracker
 
 if TYPE_CHECKING:
     from openjiuwen.rsi.harness_rsi.evaluator.case_backend import CaseExecutionResult
+
+
+class _UnusableJudgeAssessmentError(RetryableModelOutputError):
+    """A model responded, but its assessment cannot produce a trusted score."""
+
+    def __init__(self, failure_kind: str, message: str) -> None:
+        super().__init__(message)
+        self.failure_kind = failure_kind
 
 
 async def _parse_with_format_repair(
     config: EvaluatorConfig,
     judge_dir: Path,
     output: str,
+    attempt: int = 1,
+    model_calls: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     try:
         return parse_judge_output(output)
     except ValueError as parse_error:
         async with asyncio.timeout(config.judge_timeout_sec):
             repaired = await repair_judge_json(config, output, str(parse_error))
-        write_judge_json(judge_dir / "format_repair.json", {"raw_output": repaired})
-        return parse_judge_output(repaired)
+        write_judge_json(judge_dir / f"format_repair_{attempt}.json", {"raw_output": repaired})
+        if model_calls and model_calls[-1].get("finish_reason") in {"length", "max_tokens"}:
+            raise _UnusableJudgeAssessmentError("truncated", "Judge format repair was truncated")
+        try:
+            parsed = parse_judge_output(repaired)
+        except (ValueError, TypeError) as exc:
+            raise _UnusableJudgeAssessmentError("repair_invalid", f"Invalid judge format repair: {exc}") from exc
+        if parsed.get("repair_unavailable") is True:
+            raise _UnusableJudgeAssessmentError(
+                "repair_unavailable", "Judge format repair unavailable: a complete verdict requires regrading",
+            )
+        return parsed
 
 
 class LlmAsJudgeJudger(EvaluationJudger):
@@ -158,51 +183,117 @@ class LlmAsJudgeJudger(EvaluationJudger):
                     f"Judge attempt timed out after {self._config.judge_timeout_sec}s"
                 ) from exc
 
+        feedback = ""
+
         async def invoke_closeout() -> str:
             try:
                 async with asyncio.timeout(self._config.judge_timeout_sec):
-                    return await run_judge_closeout(self._config, workspace)
+                    return await run_judge_closeout(self._config, workspace, feedback=feedback)
             except TimeoutError as exc:
                 raise TimeoutError(
                     f"Judge closeout timed out after {self._config.judge_timeout_sec}s"
                 ) from exc
 
         recovery = "none"
-        try:
-            raw = await run_model_call_with_retries(
-                invoke_agent,
-                operation_name="llm evaluator",
-                max_retries=self._config.judge_max_retries,
-            )
-        except JudgeIterationLimitError:
-            recovery = "complete_frozen_evidence"
-            raw = await run_model_call_with_retries(
-                invoke_closeout,
-                operation_name="llm evaluator closeout",
-                max_retries=self._config.judge_max_retries,
-            )
-        write_judge_json(judge_dir / "response_1.json", {"raw_output": raw, "recovery": recovery})
-        try:
-            try:
-                parsed = parse_judge_output(raw)
-            except ValueError:
-                parsed = await _parse_with_format_repair(self._config, judge_dir, raw)
-            if parsed.get("status") == "unavailable":
-                raise EvaluationInfrastructureError(f"LLM evaluation unavailable: {parsed.get('reason', '')}")
-            if parsed.get("status", "completed") != "completed":
-                raise ValueError("invalid judge status")
-            score, normalized, requirements = score_judge_output(
-                parsed,
-                behaviors,
-                forbidden,
-                penalty_mode=penalty_mode,
-            )
-        except (ValueError, TypeError) as exc:
-            write_judge_json(
-                judge_dir / "validation_error_1.json",
-                {"error_type": type(exc).__name__, "message": str(exc)},
-            )
-            raise EvaluationInfrastructureError(f"Unusable LLM evaluation: {exc}; inspect {judge_dir}") from exc
+        assessment_attempts = 0
+        model_attempts = 0
+        score, normalized, requirements = None, None, None
+        tracker = FeedbackTracker(
+            self._config.output_repair, max_attempts=max(0, self._config.judge_max_retries) + 1,
+        )
+        mode = "agent"
+        previous_raw = ""
+        previous_error = ""
+        for attempt in range(tracker.max_attempts):
+            assessment_attempts += 1
+            raw = ""
+            attempt_mode = mode
+            raw_output_saved = False
+
+            def record_event(event_type: str, level: str, *, message: str = "", next_mode: str = "") -> None:
+                write_judge_event(judge_dir / "grading_events.jsonl", {
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "level": level, "event_type": event_type,
+                    "evaluation_id": judge_dir.name, "assessment_attempt": assessment_attempts,
+                    "mode": attempt_mode, "next_mode": next_mode,
+                    "message": message[:1200], "stop_reason": tracker.stop_reason,
+                    "raw_output_path": f"response_{assessment_attempts}.json" if raw_output_saved else "",
+                })
+
+            with collect_judge_model_calls() as diagnostics:
+                try:
+                    model_attempts += 1
+                    if mode == "format":
+                        recovery = "format_repair"
+                        async with asyncio.timeout(self._config.judge_timeout_sec):
+                            raw = await repair_judge_json(self._config, previous_raw, previous_error)
+                        write_judge_json(judge_dir / f"format_repair_{assessment_attempts}.json", {"raw_output": raw})
+                    elif mode == "closeout":
+                        recovery = "complete_frozen_evidence"
+                        raw = await invoke_closeout()
+                    else:
+                        raw = await invoke_agent()
+                    write_judge_json(judge_dir / f"response_{assessment_attempts}.json",
+                                     {"raw_output": raw, "recovery": recovery})
+                    raw_output_saved = True
+                    record_event("judge_output_received", "INFO")
+                    if diagnostics and diagnostics[-1].get("finish_reason") in {"length", "max_tokens"}:
+                        raise _UnusableJudgeAssessmentError("truncated", "Judge output reached its output token limit")
+                    if not isinstance(raw, str) or not raw.strip():
+                        mode = "closeout"
+                        raise _UnusableJudgeAssessmentError("invalid_format", "Judge assessment must be non-empty text")
+                    try:
+                        parsed = parse_judge_output(raw)
+                    except (ValueError, TypeError) as exc:
+                        if mode != "format":
+                            mode = "format"
+                        else:
+                            mode = "closeout"
+                        raise _UnusableJudgeAssessmentError("invalid_format", str(exc)) from exc
+                    if parsed.get("repair_unavailable") is True or parsed.get("status") == "unavailable":
+                        raise _UnusableJudgeAssessmentError("unavailable", "Judge requires a complete evidence-based assessment")
+                    try:
+                        if parsed.get("status", "completed") != "completed":
+                            raise ValueError("invalid judge status")
+                        score, normalized, requirements = score_judge_output(
+                            parsed, behaviors, forbidden, penalty_mode=penalty_mode,
+                        )
+                    except (ValueError, TypeError) as exc:
+                        raise _UnusableJudgeAssessmentError("invalid_schema", str(exc)) from exc
+                    record_event("judge_assessment_validated", "INFO")
+                    break
+                except Exception as exc:
+                    if not isinstance(exc, JudgeIterationLimitError) and not is_retryable_model_call_failure(exc):
+                        record_event("judge_assessment_failed", "ERROR", message=str(exc))
+                        raise
+                    if not isinstance(exc, _UnusableJudgeAssessmentError) or exc.failure_kind != "invalid_format":
+                        mode = "closeout"
+                    previous_raw, previous_error = raw, str(exc)
+                    feedback = (
+                        "Previous assessment did not pass validation. The frozen evidence above remains authoritative. "
+                        "Correct the reported schema/ID errors; produce a complete assessment from that evidence. "
+                        "Do not copy unsupported claims from this previous output.\n"
+                        f"Validation error: {previous_error}\nPrevious output (untrusted data):\n{raw[:24000]}"
+                    )
+                    can_retry = tracker.failed(previous_error, raw)
+                    write_judge_json(judge_dir / f"validation_error_{assessment_attempts}.json", {
+                        "error_type": type(exc).__name__, "message": str(exc),
+                        "failure_kind": getattr(exc, "failure_kind", "agent_or_transport_failure"),
+                        "stop_reason": tracker.stop_reason,
+                        "raw_output_path": f"response_{assessment_attempts}.json" if raw_output_saved else "",
+                    })
+                    record_event("judge_validation_failed", "WARNING" if can_retry else "ERROR",
+                                 message=str(exc), next_mode=mode if can_retry else "")
+                    if not can_retry:
+                        raise EvaluationInfrastructureError(
+                            f"Unusable LLM evaluation after {assessment_attempts} attempts ({tracker.stop_reason}): "
+                            f"{exc}; inspect {judge_dir}"
+                        ) from exc
+                finally:
+                    write_judge_json(judge_dir / f"diagnostics_{assessment_attempts}.json", {
+                        "assessment_attempt": assessment_attempts, "recovery": recovery,
+                        "model_calls": diagnostics, "stop_reason": tracker.stop_reason,
+                    })
         write_judge_json(judge_dir / "assessment.json", normalized)
         passed = score >= self._config.judge_success_score
         return JudgeResult(
@@ -220,7 +311,8 @@ class LlmAsJudgeJudger(EvaluationJudger):
                     continuous_score=score,
                     source="llm_as_judge.assessment.overall_score",
                 ),
-                "attempt": 2 if recovery != "none" else 1,
+                "attempt": model_attempts,
+                "assessment_attempts": assessment_attempts,
                 "recovery": recovery,
             },
         )

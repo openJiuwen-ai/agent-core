@@ -70,7 +70,7 @@ async def test_large_native_closeout_chain(tmp_path, monkeypatch, mode):
     else:
         result = await judger.judge(**kwargs)
         assert result.metadata['parsed']['overall_score'] == .5
-        assert result.metadata['attempt'] == 2
+        assert result.metadata['attempt'] == (3 if mode.startswith('retry') else 2)
     assert len(calls) == (1 if mode == 'no_vision' else 3 if mode.startswith('retry') else 2)
     if mode.startswith('retry'):
         assert calls[1] == calls[2]

@@ -86,7 +86,9 @@ Evaluation policy:
   Do not fold its deduction into positive scores or invent weights/penalties.
 - Do not diagnose root causes, propose Harness changes or generate training data.
 
-Return only JSON, no Markdown. Successful evaluation:
+Return the grading JSON directly, with concise explanations inside its fields.
+Reserve enough output for every supplied criterion. Return only JSON, no Markdown.
+Successful evaluation:
 {
   "status": "completed",
   "overall_reason": "brief assessment",

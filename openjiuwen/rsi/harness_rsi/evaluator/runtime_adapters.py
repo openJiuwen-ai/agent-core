@@ -7,7 +7,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Mapping
 from typing import Any
+
+from openjiuwen.agent_evolving.trajectory import Trajectory, TrajectorySpanProcessor
+from openjiuwen.agent_evolving.trajectory.store import TrajectoryStore
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.runner import Runner
@@ -20,6 +24,8 @@ from openjiuwen.harness.rails._multimodal import (
     build_read_image_multimodal_resolver,
 )
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
+from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
+from openjiuwen.harness.rails.evolution.evolution_rail import _InvokeCapture
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.tools import BashTool, PowerShellTool
 from openjiuwen.harness.tools.code import CodeTool
@@ -35,6 +41,46 @@ from openjiuwen.harness.tools.skills.list_skill import ListSkillTool
 from openjiuwen.harness.tools.skills.skill_tool import SkillTool
 
 _ACTIVE_SKILL_SECTION = "rsi.active_skill"
+
+
+class RSITrajectoryRail(TrajectoryRail):
+    """Keep capture quality visible to the evaluation evidence consumer."""
+
+    def __init__(
+        self,
+        *,
+        trajectory_span_processor: TrajectorySpanProcessor,
+        trajectory_store: TrajectoryStore,
+    ) -> None:
+        super().__init__(
+            trajectory_span_processor=trajectory_span_processor,
+            trajectory_store=trajectory_store,
+        )
+        self.capture_issues: set[str] = set()
+        self.model_call_count = 0
+        self.tool_call_count = 0
+
+    def _drain_for_hook(
+        self,
+        ctx: AgentCallbackContext,
+        *,
+        required_category: str | None = None,
+        merge: bool = True,
+        capture: _InvokeCapture | None = None,
+    ) -> tuple[Trajectory | None, Trajectory | None, tuple[Mapping[str, object], ...]]:
+        result = super()._drain_for_hook(
+            ctx, required_category=required_category, merge=merge, capture=capture,
+        )
+        self.capture_issues.update(str(issue.get("code", "capture_error")) for issue in result[2])
+        return result
+
+    async def after_model_call(self, ctx: AgentCallbackContext) -> None:
+        self.model_call_count += 1
+        await super().after_model_call(ctx)
+
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
+        self.tool_call_count += 1
+        await super().after_tool_call(ctx)
 
 
 class RSIBashTool(BashTool):
