@@ -2,8 +2,9 @@
 
 """Object-scoped approvals, stored in the existing approval_overrides list.
 
-These records lift ASK (also UNDETERMINED in the opt-in strict host policy)
-after all guards have run; they never override DENY.
+Exact/file/URL records lift ASK (also UNDETERMINED in the opt-in strict host
+policy) after all guards have run. Split shell grants apply inside ToolGuard
+only, before the other guards are merged. Neither type overrides DENY.
 The scope is derived from tool arguments on the server, never supplied as a path
 or domain by the client. Legacy command patterns are left unchanged.
 """
@@ -26,6 +27,7 @@ from openjiuwen.harness.security.permission_engine.toolguard.tool_categories imp
 
 
 GRANT_MATCH_TYPE = "exact_operation"
+SHELL_GRANT_MATCH_TYPE = "shell_subcommand"
 _FETCH_TOOLS = {"mcp_fetch_webpage", "fetch_webpage", "web_fetch_webpage"}
 
 
@@ -85,6 +87,12 @@ def scope_options(subject: dict) -> list[dict[str, str]]:
         domain = _registrable_domain(subject["url"])
         if domain:
             options.append({"value": "domain", "label": "域名（含子域名）：" + domain})
+    elif subject["kind"] == "command" and "arguments" not in subject:
+        from openjiuwen.harness.security.permission_engine.toolguard.shell_ast import split_shell_for_grants
+
+        commands = split_shell_for_grants(subject["command"])
+        if commands:
+            options.append({"value": "subcommands", "label": "以下子命令可独立或组合复用：" + "；".join(commands)})
     return options
 
 
@@ -98,6 +106,8 @@ def build_operation_grant(
         raise ValueError("allow cannot widen the authorization scope")
     if scope != "exact" and scope not in {option["value"] for option in scope_options(subject)}:
         raise ValueError("Invalid authorization scope for this operation")
+    if scope == "subcommands":
+        raise ValueError("Use build_operation_grants for subcommand approvals")
     if scope == "parent":
         subject["accesses"] = sorted({(str(Path(p).parent), action) for p, action in subject["accesses"]})
     elif scope == "domain":
@@ -117,6 +127,40 @@ def build_operation_grant(
         "pattern": pattern,
         "action": "allow",
     }
+
+
+def build_operation_grants(
+    tool: str, args: dict, config: Mapping, workspace: Path | None = None, *, mode: str = "allow", scope: str = "exact"
+) -> list[dict]:
+    """Build a batch; every shell child keeps the original invocation context."""
+    if scope != "subcommands":
+        return [build_operation_grant(tool, args, config, workspace, mode=mode, scope=scope)]
+    subject = operation_subject(tool, args, config, workspace)
+    if mode != "allow_with_scope" or scope not in {option["value"] for option in scope_options(subject)}:
+        raise ValueError("Invalid authorization scope for this operation")
+    from openjiuwen.harness.security.permission_engine.toolguard.shell_ast import split_shell_for_grants
+
+    grants = []
+    for command in split_shell_for_grants(subject["command"]):
+        pattern = _json({"scope": "exact", "subject": {**subject, "command": command}})
+        grants.append({
+            "id": "shell_" + hashlib.sha256((tool + pattern).encode()).hexdigest()[:24],
+            "tools": [tool], "match_type": SHELL_GRANT_MATCH_TYPE, "pattern": pattern, "action": "allow",
+        })
+    return grants
+
+
+def has_shell_subcommand_grant(config: Mapping, tool: str, args: dict) -> bool:
+    """Match one literal child; never expose these grants to the final override."""
+    grants = config.get("approval_overrides") or []
+    if not any(isinstance(g, dict) and g.get("match_type") == SHELL_GRANT_MATCH_TYPE for g in grants):
+        return False
+    subject = operation_subject(tool, args, config)
+    return any(
+        isinstance(g, dict) and g.get("match_type") == SHELL_GRANT_MATCH_TYPE
+        and matches_operation_grant({**g, "match_type": GRANT_MATCH_TYPE}, tool, subject)
+        for g in grants
+    )
 
 
 def matches_operation_grant(grant: dict, tool: str, subject: dict) -> bool:

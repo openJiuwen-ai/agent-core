@@ -18,8 +18,8 @@ class ConfirmPayload(BaseModel):
     approved: bool
     feedback: str = Field(default="")
     auto_confirm: bool = Field(default=False)
-    authorization_mode: Literal["allow", "allow_with_scope"] = "allow"
-    authorization_scope: Literal["exact", "parent", "domain"] = "exact"
+    authorization_mode: Literal["allow", "allow_with_scope"] | None = None
+    authorization_scope: Literal["exact", "parent", "domain", "subcommands"] | None = None
     persist_allow: Optional[bool] = Field(
         default=None,
         description="Whether to persist the allow rule to disk. "

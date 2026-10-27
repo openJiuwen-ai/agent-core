@@ -146,8 +146,8 @@ async def test_rail_interrupt_resume_and_lifetime(tmp_path, choice):
     host = ToolPermissionHost(
         get_permissions_snapshot=snapshot,
         resolve_workspace_dir=lambda: tmp_path,
-        persist_allow_rule=lambda delta: persist(disk, delta),
-        persist_session_allow_rule=lambda delta: persist(session_cfg, delta),
+        persist_allow_rule=lambda delta, *, approval_grants: persist(disk, delta),
+        persist_session_allow_rule=lambda delta, *, approval_grants: persist(session_cfg, delta),
     )
     rail = PermissionInterruptRail(config=disk, host=host)
     session = SimpleNamespace(get_state=lambda key: state.get(key), update_state=state.update, session_id="one")
@@ -161,6 +161,7 @@ async def test_rail_interrupt_resume_and_lifetime(tmp_path, choice):
             "approved": choice != "reject",
             "auto_confirm": choice in {"session", "always"},
             "persist_allow": choice == "always",
+            "authorization_scope": "exact",
         },
     )
     assert isinstance(result, RejectResult if choice == "reject" else ApproveResult)

@@ -10,4 +10,6 @@
 
 全部防护合并后，新策略允许范围匹配的 `exact_operation` 授权复用到 `ASK` 和 `UNDETERMINED`。`DENY` 不可被授权覆盖。会话授权和旧命令审批记录保持既有范围与防护限制。Core 不负责云端交互，由宿主处理剩余未确定结果。
 
+`allow_with_scope/subcommands` 则生成多条 `shell_subcommand` 授权，在 Shell 命令检查内逐条复用，随后继续合并其他 Guard。子命令共享原调用的初始目录、工具和解释器；例如从 `E:\work` 调用 `cd repo && git status`，两条授权均绑定 `E:\work`。覆盖全部子命令后可解除 Shell 的 ASK/未确定结果，不能覆盖 DENY、更高优先级来源的 ASK 或整条命令的结构风险，也不解除 FileGuard 等其他 Guard 的 ASK。无法可靠拆分时只提供完整命令精确授权；客户端省略范围字段时由服务端默认选择可用范围，无法拆分则回退到 `exact`；显式 `exact` 保留完整命令授权。
+
 验证入口：`tests/unit_tests/harness/security/test_strict_tool_command_merge.py`。同时回归整个 `tests/unit_tests/harness/security`，确保未启用新策略的宿主、规则来源排序、授权和其他防护行为不变。
