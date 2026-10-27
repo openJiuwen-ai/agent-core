@@ -98,8 +98,9 @@ def _make_ctx(
     model_context.get_messages = MagicMock(return_value=list(pre_messages))
     model_context.get_context_window = AsyncMock(side_effect=_get_window)
     model_context.detect_context_window_change = MagicMock(return_value=None)
-    model_context.compress_context = AsyncMock(side_effect=_compress)
+    model_context.context_id = MagicMock(return_value="default_context_id")
     ctx.context = model_context
+    agent.context_engine.compress_context = AsyncMock(side_effect=_compress)
     return ctx
 
 
@@ -140,7 +141,7 @@ async def test_invoke_overflow_triggers_one_compaction_and_one_retry():
 
     assert result.content == "recovered"
     assert fake_llm.invoke.await_count == 2
-    ctx.context.compress_context.assert_awaited_once()
+    agent.context_engine.compress_context.assert_awaited_once()
 
     # The compaction must have happened between the two LLM calls and the
     # retry must have re-read the compacted window: the first call carried the
@@ -152,9 +153,12 @@ async def test_invoke_overflow_triggers_one_compaction_and_one_retry():
 
     # The forced compaction must carry the main-call credentials so the
     # dedicated auto_compression model pair reuses them.
-    kwargs = ctx.context.compress_context.await_args.kwargs
+    kwargs = agent.context_engine.compress_context.await_args.kwargs
     assert kwargs.get("model_config") is agent._config.model_config_obj
     assert kwargs.get("model_client_config") is agent._config.model_client_config
+
+    assert kwargs.get("context_id") == "default_context_id"
+    assert kwargs.get("session") is ctx.session
 
 
 async def test_invoke_overflow_dict_result_counts_as_compressed():
@@ -187,13 +191,13 @@ async def test_invoke_overflow_noop_compaction_does_not_retry(compress_result):
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     assert fake_llm.invoke.await_count == 1
-    ctx.context.compress_context.assert_awaited_once()
+    agent.context_engine.compress_context.assert_awaited_once()
 
 
 async def test_invoke_overflow_compaction_error_does_not_retry():
     agent = _make_agent()
     ctx = _make_ctx(agent)
-    ctx.context.compress_context = AsyncMock(side_effect=RuntimeError("lock wedged"))
+    agent.context_engine.compress_context = AsyncMock(side_effect=RuntimeError("lock wedged"))
     fake_llm = _make_llm()
     fake_llm.invoke = AsyncMock(side_effect=RuntimeError("413 context length exceeded"))
     agent.set_llm(fake_llm)
@@ -215,7 +219,7 @@ async def test_non_overflow_error_propagates_without_compaction():
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     assert fake_llm.invoke.await_count == 1
-    ctx.context.compress_context.assert_not_awaited()
+    agent.context_engine.compress_context.assert_not_awaited()
 
 
 async def test_text_containing_413_substring_but_not_overflow_does_not_compact():
@@ -239,7 +243,7 @@ async def test_text_containing_413_substring_but_not_overflow_does_not_compact()
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     assert fake_llm.invoke.await_count == 1
-    ctx.context.compress_context.assert_not_awaited()
+    agent.context_engine.compress_context.assert_not_awaited()
 
 
 async def test_tpm_overlap_text_does_not_trigger_destructive_compaction():
@@ -260,7 +264,7 @@ async def test_tpm_overlap_text_does_not_trigger_destructive_compaction():
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     assert fake_llm.invoke.await_count == 1
-    ctx.context.compress_context.assert_not_awaited()
+    agent.context_engine.compress_context.assert_not_awaited()
 
 
 async def test_text_containing_413_substring_but_not_overflow_stream_does_not_compact():
@@ -276,7 +280,7 @@ async def test_text_containing_413_substring_but_not_overflow_stream_does_not_co
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     assert fake_llm.stream.call_count == 1
-    ctx.context.compress_context.assert_not_awaited()
+    agent.context_engine.compress_context.assert_not_awaited()
 
 
 async def test_retry_still_overflow_propagates_original_error():
@@ -295,7 +299,7 @@ async def test_retry_still_overflow_propagates_original_error():
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     assert fake_llm.invoke.await_count == 2
-    ctx.context.compress_context.assert_awaited_once()
+    agent.context_engine.compress_context.assert_awaited_once()
 
 
 async def test_recovery_disabled_restores_legacy_behaviour():
@@ -309,7 +313,7 @@ async def test_recovery_disabled_restores_legacy_behaviour():
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     assert fake_llm.invoke.await_count == 1
-    ctx.context.compress_context.assert_not_awaited()
+    agent.context_engine.compress_context.assert_not_awaited()
 
 
 async def test_recovery_attempted_at_most_once_per_invoke():
@@ -326,7 +330,7 @@ async def test_recovery_attempted_at_most_once_per_invoke():
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     # The second call must not burn another forced compaction.
-    ctx.context.compress_context.assert_awaited_once()
+    agent.context_engine.compress_context.assert_awaited_once()
 
 
 async def test_recovery_budget_resets_for_new_invoke():
@@ -344,13 +348,14 @@ async def test_recovery_budget_resets_for_new_invoke():
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     # Second, brand-new invoke (fresh ctx.extra): a new recovery is allowed.
+    # Each _make_ctx() installs a fresh engine compress_context mock, so the
+    # second install replaces the first; verify the latest one exactly once.
     ctx2 = _make_ctx(agent, compress_result="noop")
+    engine_mock2 = agent.context_engine.compress_context
     with pytest.raises(RuntimeError, match="context length"):
         await agent.call_model_for_test(ctx=ctx2, context=ctx2.context)
 
-    # Two distinct invokes -> two forced compactions.
-    assert ctx.context.compress_context.await_count == 1
-    assert ctx2.context.compress_context.await_count == 1
+    assert engine_mock2.await_count == 1
 
 
 def _stream_outcome(*events):
@@ -392,7 +397,7 @@ async def test_stream_overflow_retries_once_with_compacted_window():
 
     assert result.content == "recovered"
     assert fake_llm.stream.call_count == 2
-    ctx.context.compress_context.assert_awaited_once()
+    agent.context_engine.compress_context.assert_awaited_once()
 
     # Compression must have happened between the two stream calls and the
     # retry must re-read the compacted window (second call used the new
@@ -418,7 +423,7 @@ async def test_stream_overflow_after_first_chunk_does_not_retry():
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     assert fake_llm.stream.call_count == 1
-    ctx.context.compress_context.assert_not_awaited()
+    agent.context_engine.compress_context.assert_not_awaited()
 
 
 async def test_stream_non_overflow_error_does_not_retry():
@@ -434,4 +439,4 @@ async def test_stream_non_overflow_error_does_not_retry():
         await agent.call_model_for_test(ctx=ctx, context=ctx.context)
 
     assert fake_llm.stream.call_count == 1
-    ctx.context.compress_context.assert_not_awaited()
+    agent.context_engine.compress_context.assert_not_awaited()
