@@ -226,9 +226,17 @@ Additional `DefaultLogger` methods, not requirements for other `LoggerProtocol` 
 tail. An in-flight OS write cannot safely be interrupted: its daemon closes the owned
 handlers and exits when the write returns. Normal interpreter exit shares a two-second
 drain deadline across default loggers; abnormal termination may lose the tail.
-Repeated setup/reconfiguration replaces built-in output only. Replacement is rejected
-while an old write is still blocked, preventing thread accumulation. Invalid configuration
-is checked before sealing old output. Closing a stale wrapper never closes its successor.
+Repeated setup/reconfiguration replaces built-in output only. It waits up to two seconds
+for old output to become idle, with ingress still open. If that wait times out (including
+under continuous production), replacement is rejected: the old configuration, consumer
+and queued records remain active. Normal capacity/drop limits still apply. Invalid
+configuration or a replacement consumer startup failure also leaves old output active.
+Once committed, producers already holding the old handler are forwarded to the new queue.
+Old sink cleanup gets a separate bounded two-second wait; slow final flush/close does not
+undo a successful swap. Further replacement is rejected until that retiring consumer
+exits, bounding consumers to one active plus at most one retiring per logger. An explicitly
+closed logger stays closed if replacement is rejected. Closing a stale wrapper never
+closes its successor.
 
 Plain file/pipe stdout uses an independently owned, unbuffered descriptor, preserving
 encoding/error handling and complete writes without holding the global stdout buffer
