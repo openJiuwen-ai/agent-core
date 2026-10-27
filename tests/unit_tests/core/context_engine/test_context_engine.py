@@ -128,6 +128,22 @@ class TestContextEngine:
     def engine(self):
         return ContextEngine(ContextEngineConfig(default_window_message_num=5))
 
+    def test_init_skips_tiktoken_warm_up_when_disabled(self):
+        with patch(
+            "openjiuwen.core.context_engine.token.tiktoken_counter.start_background_warm_up"
+        ) as warm_up:
+            ContextEngine(ContextEngineConfig(enable_tiktoken_counter=False))
+
+        warm_up.assert_not_called()
+
+    def test_init_starts_tiktoken_warm_up_when_enabled(self):
+        with patch(
+            "openjiuwen.core.context_engine.token.tiktoken_counter.start_background_warm_up"
+        ) as warm_up:
+            ContextEngine(ContextEngineConfig(enable_tiktoken_counter=True))
+
+        warm_up.assert_called_once_with()
+
     @pytest.mark.asyncio
     async def test_create_context_with_history_and_session(self, engine, session):
         history = [UserMessage(content="hello"), SystemMessage(content="sys")]

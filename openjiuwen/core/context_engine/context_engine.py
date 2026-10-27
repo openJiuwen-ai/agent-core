@@ -52,10 +52,14 @@ class ContextEngine:
         self._window_mutators: List[
             Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
         ] = []
-        # Pre-load the tiktoken vocabulary on a background thread so the
-        # first-use HTTPS download never lands on the event loop.
-        from openjiuwen.core.context_engine.token.tiktoken_counter import start_background_warm_up
-        start_background_warm_up()
+        if self._config.enable_tiktoken_counter:
+            # Pre-load the tiktoken vocabulary on a background thread so the
+            # first-use HTTPS download never lands on the event loop. Keep the
+            # warm-up behind the same switch as the counter itself: disabled
+            # deployments must not load or download tokenizer data.
+            from openjiuwen.core.context_engine.token.tiktoken_counter import start_background_warm_up
+
+            start_background_warm_up()
 
     def register_window_mutator(
             self,
