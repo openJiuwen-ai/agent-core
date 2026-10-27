@@ -25,15 +25,6 @@ session）之上，为编码场景提供**深度代理**：模型调用、工具
 **新增配置项一律走 `DeepAgentConfig` / Spec 拆分**，不是给 `create_deep_agent` 堆参数——
 扩参数列表永远是 hack，扩 config/装配才是设计（`S_01_public-api-and-construction`）。
 
-## 有界执行与调用日志
-
-`DeepAgentConfig` 的 `on_max_iterations` 控制内层 ReAct 耗尽策略，默认 `error`；
-`final_answer` 最多进行一次额外无工具收尾。`max_iterations_hard_limit` 是单轮模式的
-宿主硬上限，只支持 `enable_task_loop=False`，在调用生命周期回调前冻结。
-`invocation_log_dir` 启用每次调用的有界日志摘要；流式调用由独立 producer Task 驱动，
-确保 ContextVar 的进入、退出始终在同一个 Task，且消费者代码不继承 Agent 日志身份。
-详见 `S_01`、`S_02` 与 `F_26_bounded-runtime-and-invocation-logging`。
-
 ## 模块地图
 
 ```

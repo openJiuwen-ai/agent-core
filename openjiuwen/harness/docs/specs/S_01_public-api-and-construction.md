@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/__init__.py`、`openjiuwen/harness/factory.py`、`openjiuwen/harness/schema/config.py`、`openjiuwen/harness/extension_binder.py` |
-| 最近一次修订日期 | 2026-10-22 |
+| 最近一次修订日期 | 2026-08-23 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -187,18 +187,3 @@ def create_deep_agent(
   异步子代理运行时见 `S_10_subagent-runtime`。
 - 顶层懒加载 `__getattr__` 模式与 `task_loop/__init__.py` / `schema/__init__.py` 的子包懒加载
   同构，但各自独立维护，不共享实现。
-
-## 有界执行与日志配置
-
-`DeepAgentConfig` 增加以下有默认值的配置，经现有 config_kwargs 装配，初次创建与
-configure 重配置均校验并透传内层运行时：
-
-- `on_max_iterations`: error（默认）、final_answer、return_observations。
-- `max_iterations_hard_limit`: 默认 None；正整数时 max_iterations 必须为范围内正整数，
-  并要求 enable_task_loop=False。它限制单轮工具循环，普通未设置的 task-loop 配置保持原有行为。
-- `invocation_log_dir`: 默认 None；配置后为每次调用创建独立、有限大小的运行摘要 JSONL。
-
-工厂显式参数列表保持不变。运行时生命周期与收尾规则见 S_02。
-
-`SubAgentConfig.invocation_log_dir=None` 默认继承父 Agent 的日志目录；显式子目录覆盖继承。
-日志文件名按调用 UUID 区分，角色/session 标识位于记录内，避免并发覆盖。
