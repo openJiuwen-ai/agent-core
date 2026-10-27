@@ -481,9 +481,9 @@ class IntelliRouterModelClient(BaseModelClient):
         unsupported (same as AsyncOpenAI); sequential reuse across retired
         loops is the pattern guarded here.
         """
-        if self._router_key is None:
+        router_config = self._router_config
+        if router_config is None or self._router_key is None:
             return  # externally injected router: lifecycle owned by the caller
-        assert self._router_config is not None  # set together with _router_key
         loop = asyncio.get_running_loop()
         with _router_cache_lock:
             entry = _router_cache.get(self._router_key)
@@ -506,7 +506,7 @@ class IntelliRouterModelClient(BaseModelClient):
                 # Closing on a retired loop raises "Event loop is closed"; the
                 # pooled connections die with that loop either way.
                 logger.warning(f"Closing stale ReliableRouter failed: {e}")
-        self._router = self._get_or_create_router(self._router_config)
+        self._router = self._get_or_create_router(router_config)
 
     # ------------------------------------------------------------------
     # Chat completion
