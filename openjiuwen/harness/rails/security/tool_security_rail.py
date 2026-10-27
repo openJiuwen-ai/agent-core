@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import weakref
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable, Optional, cast
@@ -132,35 +133,206 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     def __init__(
         self,
+        config: Optional[PermissionsSection | dict[str, Any]] = None,
         tool_names: Optional[Iterable[str]] = None,
         llm: Any = None,
         model_name: str | None = None,
         host: ToolPermissionHost | None = None,
         permission_key: str | None = None,
     ) -> None:
-        """Create the rail.
+        """Create the rail and register ``config`` under ``permission_key``.
 
-        The rail owns no permission config.  It decides with the config the
-        host registered under ``permission_key`` in the process-wide permission
-        manager (``default`` when omitted); registering, replacing and removing
-        that config is the host's job.  A key nobody registered makes the
-        decision raise ``KeyError``.
+        Lifecycle is Agent-scoped on this rail instance: construct (or
+        :meth:`update_config`) publishes to the permission manager.  The first
+        :meth:`init` records the owning Agent (parent runs before inherited
+        subagents); :meth:`uninit` releases only when that owner drops the
+        rail.  Pass ``config`` whenever the rail is first created with a real
+        policy; omit it only in tests that stub the manager.
         """
         super().__init__(tool_names=tool_names)
         if permission_key is not None and (not isinstance(permission_key, str) or not permission_key.strip()):
             raise ValueError("permission_key must be a non-empty string")
         self._host = host or ToolPermissionHost()
         self._key = permission_key if permission_key is not None else DEFAULT_KEY
+        self._registration_released = False
+        self._owner_ref: weakref.ref[Any] | None = None
+        # Local mirror of the last published policy (incl. ``runtime``); hosts and
+        # Flash fingerprint / suspend paths still read ``_static_config``.
+        self._static_config: dict[str, Any] = {}
+        if config is not None:
+            self.update_config(config)
         logger.info(
-            "[PermissionEngine] permission.rail.init intercept=all_tools optional_tool_tags=%s key=%s",
+            "[PermissionEngine] permission.rail.init intercept=all_tools optional_tool_tags=%s key=%s registered=%s",
             sorted(self._tool_names),
             self._key,
+            config is not None,
         )
 
     @property
     def permission_key(self) -> str:
         """The key of the permission config this rail decides with."""
         return self._key
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the published policy currently enables permission checks."""
+        return bool(self._static_config.get("enabled", False))
+
+    def update_config(
+        self,
+        config: PermissionsSection | dict[str, Any],
+        tool_names: Optional[Iterable[str]] = None,
+    ) -> None:
+        """Publish ``config`` under this rail's key (create or replace).
+
+        Preserves a previously published ``runtime`` section when the incoming
+        dict omits it (HITL persist / yaml snapshots often lack runtime fields).
+        """
+        if not isinstance(config, dict):
+            raise TypeError("config must be a dict")
+        merged = dict(config)
+        if "runtime" not in merged:
+            existing_runtime = self._static_config.get("runtime")
+            if existing_runtime is None:
+                try:
+                    existing_runtime = get_permission_manager().get_config(self._key).get(
+                        "runtime"
+                    )
+                except KeyError:
+                    existing_runtime = None
+            if existing_runtime is not None:
+                merged["runtime"] = deepcopy(existing_runtime)
+        get_permission_manager().update_config(merged, self._key)
+        self._static_config = deepcopy(merged)
+        self._registration_released = False
+        if tool_names is not None:
+            self._tool_names = {str(x).strip() for x in tool_names if str(x).strip()}
+        logger.info(
+            "[PermissionEngine] permission.rail.config_updated intercept=all_tools "
+            "optional_tool_tags=%s key=%s",
+            sorted(self._tool_names),
+            self._key,
+        )
+
+    def set_trusted_dirs(self, trusted_dirs: Optional[Iterable[Any]]) -> None:
+        """Per-request hot update of trusted directories via ``runtime.trusted_dirs``.
+
+        Hosts (e.g. JiuWenSwarm adapter) call this when ``trusted_dirs`` arrives
+        with each request so file_guard treats these subtrees as trusted.
+        ``None``/empty clears the list.
+        """
+        normalized: list[str] = []
+        if trusted_dirs:
+            for d in trusted_dirs:
+                if not d:
+                    continue
+                try:
+                    normalized.append(str(Path(str(d)).expanduser().resolve(strict=False)))
+                except (OSError, RuntimeError):
+                    continue
+        cfg = self._config_for_runtime_patch()
+        runtime = dict(cfg.get("runtime") or {})
+        runtime["trusted_dirs"] = normalized
+        cfg["runtime"] = runtime
+        self.update_config(cfg)
+        logger.info(
+            "[PermissionEngine] permission.rail.trusted_dirs_updated count=%d key=%s",
+            len(normalized),
+            self._key,
+        )
+
+    def set_workspace_root(self, workspace: Any | None) -> None:
+        """Bind ``runtime.workspace_root`` for file_guard (Agent workspace sync)."""
+        cfg = self._config_for_runtime_patch()
+        runtime = dict(cfg.get("runtime") or {})
+        if workspace is None:
+            runtime.pop("workspace_root", None)
+        else:
+            runtime["workspace_root"] = str(Path(workspace))
+        cfg["runtime"] = runtime
+        self.update_config(cfg)
+
+    def _config_for_runtime_patch(self) -> dict[str, Any]:
+        """Baseline dict for runtime-only patches (trusted_dirs / workspace_root)."""
+        if self._static_config:
+            return deepcopy(self._static_config)
+        try:
+            return self._registered_config()
+        except KeyError:
+            return {}
+
+    def init(self, agent: Any) -> None:
+        """Bind the owning Agent on first call; later shared inits are ignored."""
+        if self._owner_ref is not None or getattr(self, "_owner_fallback", None) is not None:
+            return
+        if agent is None:
+            return
+        try:
+            self._owner_ref = weakref.ref(agent)
+        except TypeError:
+            # Non-weakrefable owner: strong ref so identity checks still work.
+            self._owner_fallback = agent
+        logger.debug(
+            "[PermissionEngine] permission.rail.owner_bound key=%s owner=%s",
+            self._key,
+            type(agent).__name__,
+        )
+
+    def uninit(self, agent: Any) -> None:
+        """Release only when the owning Agent drops this rail."""
+        owner = self._owner()
+        if owner is not None and agent is not owner:
+            logger.debug(
+                "[PermissionEngine] permission.rail.uninit_ignored key=%s reason=not_owner",
+                self._key,
+            )
+            return
+        self._release_registration()
+
+    def _owner(self) -> Any | None:
+        fallback = getattr(self, "_owner_fallback", None)
+        if fallback is not None:
+            return fallback
+        if self._owner_ref is None:
+            return None
+        return self._owner_ref()
+
+    def _release_registration(self) -> None:
+        if self._registration_released:
+            return
+        self._registration_released = True
+        manager = get_permission_manager()
+        if self._key == DEFAULT_KEY:
+            # ``default`` cannot be removed; clear it to an empty policy instead.
+            manager.update_config({}, self._key)
+            logger.info(
+                "[PermissionEngine] permission.rail.released key=%s mode=reset_default",
+                self._key,
+            )
+            return
+        removed = manager.remove_config(self._key)
+        logger.info(
+            "[PermissionEngine] permission.rail.released key=%s removed=%s",
+            self._key,
+            removed,
+        )
+
+    async def _check_tool_permission(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        ctx: AgentCallbackContext,
+    ) -> PermissionResult:
+        """Decide one tool call via the manager under this rail's key.
+
+        Subclasses (e.g. skill overlay) may override to pass a one-off
+        ``config=`` without registering a new key.
+        """
+        return await get_permission_manager().check_permission(
+            tool_name,
+            tool_args,
+            self._key,
+        )
 
     def _normalize_tool_name(self, tool_name: str) -> str:
         """Normalize tool name using aliases.
@@ -326,9 +498,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         if not ok_tool and not ok_ext:
             return False
 
-        # Whoever persists the rule refreshes the registered config.  A host
-        # callback does both; with the built-in yaml writer the rail is the
-        # persister, so it refreshes after a successful write.
+        # 1B: whoever persists also refreshes the manager.  Host callback must
+        # call ``rail.update_config`` itself on success; the built-in yaml path
+        # is persisted by this rail, so we publish here after a successful write.
         if self._host.persist_allow_rule is not None:
             try:
                 persisted = bool(
@@ -352,12 +524,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         return persisted
 
     def _publish_persisted(self, cfg: dict[str, Any]) -> None:
-        """Register ``cfg`` under this rail's key, keeping the registered ``runtime``."""
+        """Publish persisted cfg under this rail's key (keeps ``runtime`` via update_config)."""
         merged = dict(cfg)
-        runtime = self._registered_config().get("runtime")
+        runtime = self._static_config.get("runtime")
         if runtime is not None and "runtime" not in merged:
-            merged["runtime"] = runtime
-        get_permission_manager().update_config(merged, self._key)
+            merged["runtime"] = deepcopy(runtime)
+        self.update_config(merged)
 
     async def resolve_interrupt(
         self,
@@ -412,10 +584,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             if checks_active is not None and not checks_active():
                 return self.approve()
             try:
-                result = await get_permission_manager().check_permission(
+                result = await self._check_tool_permission(
                     normalized_name,
                     tool_args,
-                    self._key,
+                    ctx,
                 )
             except Exception:
                 logger.error(

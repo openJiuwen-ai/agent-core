@@ -85,7 +85,7 @@ def example_permission_host(workspace: Path, config_yaml: Path | None) -> ToolPe
 
 
 def register_demo_permissions(workspace: Path) -> None:
-    """本脚本自己持有配置，所以先把权限配置登记到权限管理器的 ``default``。"""
+    """直接打管理器的示例（不经 rail）。护栏路径请用 ``build_permission_interrupt_rail``。"""
     perms = example_permissions_dict()
     perms["runtime"] = {"workspace_root": str(workspace.resolve())}
     get_permission_manager().update_config(perms)

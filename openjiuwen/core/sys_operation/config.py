@@ -33,11 +33,6 @@ class LocalWorkConfig(BaseModel):
         description="When True, fs operations reject paths outside every sandbox_root entry. "
                     "If sandbox_root is None, falls back to [workspace, project_root] defaults.")
 
-    dangerous_patterns: Optional[List[str]] = Field(
-        default=None,
-        description="List of regex patterns for dangerous commands to block. "
-                    "If None, uses built-in default patterns.")
-
 
 class ContainerScope(str, Enum):
     """Container creation granularity

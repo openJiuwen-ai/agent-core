@@ -27,13 +27,7 @@ from openjiuwen.harness.tools.shell.bash._output import (
     render_tool_content,
     truncate_output,
 )
-from openjiuwen.harness.tools.shell.bash._permission import (
-    check_permission,
-    PermissionConfig,
-    PermissionMode,
-)
 from openjiuwen.harness.tools.shell.bash._security import (
-    check_injection,
     get_destructive_warning,
 )
 from openjiuwen.harness.tools.shell.bash._semantics import interpret_exit_code
@@ -89,11 +83,9 @@ class BashTool(Tool):
     ) -> None:
         super().__init__(build_tool_card("bash", "BashTool", language, agent_id=agent_id))
         self._operation = operation
-        self._permission = PermissionConfig(
-            mode=PermissionMode(permission_mode),
-            deny_patterns=PermissionConfig.compile_patterns(deny_patterns),
-            allow_patterns=PermissionConfig.compile_patterns(allow_patterns),
-        )
+        # Legacy tool-local permission knobs kept for call-site compat only;
+        # security decisions live in PermissionInterruptRail / agent_shield.
+        _ = (permission_mode, deny_patterns, allow_patterns)
 
     # ── input parsing ─────────────────────────────────────────
 
@@ -193,11 +185,6 @@ class BashTool(Tool):
 
         if not p.command:
             return ToolOutput(success=False, error="command cannot be empty")
-
-        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
-            guard = self._guard(p)
-            if guard is not None:
-                return guard
 
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
@@ -328,12 +315,6 @@ class BashTool(Tool):
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
 
-        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
-            guard = self._guard(p)
-            if guard is not None:
-                yield guard
-                return
-
         warning = get_destructive_warning(p.command)
 
         if p.description:
@@ -408,15 +389,3 @@ class BashTool(Tool):
             data={"content": content},
             error=content if is_error else None,
         )
-
-    def _guard(self, p: _BashInputs):
-        # tool-layer injection check (supplements sys_operation safety)
-        sec = check_injection(p.command)
-        if sec.blocked:
-            return ToolOutput(success=False, error=sec.reason)
-
-        # permission pipeline (deny/allow patterns + mode enforcement)
-        perm = check_permission(p.command, self._permission)
-        if not perm.allowed:
-            return ToolOutput(success=False, error=perm.reason)
-        return None

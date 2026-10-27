@@ -24,13 +24,7 @@ from openjiuwen.harness.tools.shell.powershell._output import (
     render_partial_on_failure,
     render_tool_content,
 )
-from openjiuwen.harness.tools.shell.powershell._permission import (
-    check_permission,
-    PermissionConfig,
-    PermissionMode,
-)
 from openjiuwen.harness.tools.shell.powershell._security import (
-    check_injection,
     get_destructive_warning,
 )
 from openjiuwen.harness.tools.shell.powershell._semantics import interpret_exit_code
@@ -69,11 +63,9 @@ class PowerShellTool(Tool):
     ) -> None:
         super().__init__(build_tool_card("powershell", "PowerShellTool", language, agent_id=agent_id))
         self._operation = operation
-        self._permission = PermissionConfig(
-            mode=PermissionMode(permission_mode),
-            deny_patterns=PermissionConfig.compile_patterns(deny_patterns),
-            allow_patterns=PermissionConfig.compile_patterns(allow_patterns),
-        )
+        # Legacy tool-local permission knobs kept for call-site compat only;
+        # security decisions live in PermissionInterruptRail / agent_shield.
+        _ = (permission_mode, deny_patterns, allow_patterns)
         self._agent_id = agent_id or "default"
 
     @staticmethod
@@ -141,11 +133,6 @@ class PowerShellTool(Tool):
 
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
-
-        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
-            guard = self._guard(p)
-            if guard is not None:
-                return guard
 
         warning = get_destructive_warning(p.command)
 
@@ -234,12 +221,6 @@ class PowerShellTool(Tool):
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
 
-        if os.getenv("OPENJIUWEN_BASH_STRICT") == "1":
-            guard = self._guard(p)
-            if guard is not None:
-                yield guard
-                return
-
         warning = get_destructive_warning(p.command)
 
         if p.description:
@@ -313,13 +294,3 @@ class PowerShellTool(Tool):
             data={"content": content},
             error=content if is_error else None,
         )
-
-    def _guard(self, p: _PowerShellInputs):
-        sec = check_injection(p.command)
-        if sec.blocked:
-            return ToolOutput(success=False, error=sec.reason)
-
-        perm = check_permission(p.command, self._permission)
-        if not perm.allowed:
-            return ToolOutput(success=False, error=perm.reason)
-        return None

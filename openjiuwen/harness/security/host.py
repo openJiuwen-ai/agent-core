@@ -70,11 +70,13 @@ class ToolPermissionHost:
     """自定义「总是允许」持久化；入参为护栏已合并好的整份 ``permissions`` dict（含
     ``external_directory`` 等）。
 
-    谁持久化，谁负责刷新：回调持久化成功后，须自行把新配置登记到权限管理器
-    （``get_permission_manager().update_config(cfg, key)``），返回 ``True``；护栏不会
-    替回调刷新，失败时返回 ``False`` 且不得登记，护栏也无需回滚。未设置本回调时由护栏
-    用 :func:`openjiuwen.harness.security.patterns.write_permissions_section_to_agent_config_yaml`
-    写入 ``permission_yaml_path``，写盘成功后护栏自己登记。
+    **谁落盘谁更新（1B）**：回调落盘成功后必须再调
+    ``rail.update_config(cfg)`` 同步权限管理器，然后返回 ``True``；失败返回
+    ``False`` 且不得更新管理器。护栏在宿主回调路径上**不会**替你登记。
+
+    未设置本回调时由护栏用
+    :func:`openjiuwen.harness.security.patterns.write_permissions_section_to_agent_config_yaml`
+    写盘，写成功后护栏自己 ``update_config``（护栏即落盘方）。
     """
 
     resolve_workspace_dir: Callable[[], Path] | None = None

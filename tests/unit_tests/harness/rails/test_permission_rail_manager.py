@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""PermissionInterruptRail decides through the permission manager and never owns config."""
+"""PermissionInterruptRail owns registration under its permission key."""
 
 from __future__ import annotations
 
@@ -34,7 +34,9 @@ _CONFIG = {
 @pytest.fixture(autouse=True)
 def _clean_key():
     yield
-    get_permission_manager().remove_config(_KEY)
+    manager = get_permission_manager()
+    if manager.has_config(_KEY):
+        manager.remove_config(_KEY)
 
 
 def _call(command: str) -> ToolCall:
@@ -55,15 +57,15 @@ def test_rail_rejects_invalid_key(bad) -> None:
         PermissionInterruptRail(permission_key=bad)
 
 
-def test_rail_does_not_register_anything() -> None:
-    PermissionInterruptRail(permission_key=_KEY)
-    assert not get_permission_manager().has_config(_KEY)
+def test_rail_registers_on_construct() -> None:
+    PermissionInterruptRail(config=_CONFIG, permission_key=_KEY)
+    assert get_permission_manager().has_config(_KEY)
+    assert get_permission_manager().get_config(_KEY)["tools"]["bash"] == "allow"
 
 
 @pytest.mark.asyncio
-async def test_decides_with_config_registered_under_its_key() -> None:
-    get_permission_manager().update_config(_CONFIG, _KEY)
-    rail = PermissionInterruptRail(permission_key=_KEY)
+async def test_decides_with_config_registered_at_construct() -> None:
+    rail = PermissionInterruptRail(config=_CONFIG, permission_key=_KEY)
 
     decision = await rail.resolve_interrupt(_ctx(), _call("ls"), None, {})
 
@@ -71,13 +73,11 @@ async def test_decides_with_config_registered_under_its_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_config_replaced_by_host_applies_to_next_decision() -> None:
-    manager = get_permission_manager()
-    manager.update_config(_CONFIG, _KEY)
-    rail = PermissionInterruptRail(permission_key=_KEY)
+async def test_update_config_applies_to_next_decision() -> None:
+    rail = PermissionInterruptRail(config=_CONFIG, permission_key=_KEY)
     deny = {**_CONFIG, "tools": {"bash": "deny"}}
 
-    manager.update_config(deny, _KEY)
+    rail.update_config(deny)
     decision = await rail.resolve_interrupt(_ctx(), _call("ls"), None, {})
 
     assert isinstance(decision, RejectResult)
@@ -103,49 +103,72 @@ async def test_inactive_checks_hook_skips_decision() -> None:
     assert isinstance(decision, ApproveResult)
 
 
+def test_uninit_releases_only_for_owner() -> None:
+    rail = PermissionInterruptRail(config=_CONFIG, permission_key=_KEY)
+    owner = MagicMock(name="owner")
+    child = MagicMock(name="subagent")
+
+    rail.init(owner)
+    rail.init(child)  # shared inherit: second init must not steal ownership
+
+    rail.uninit(child)
+    assert get_permission_manager().has_config(_KEY)
+
+    rail.uninit(owner)
+    assert not get_permission_manager().has_config(_KEY)
+
+    # Idempotent: a second owner uninit must not raise.
+    rail.uninit(owner)
+
+
 _ASK_BASH = {**_CONFIG, "tools": {"bash": "ask"}}
 
 
-def test_persist_through_host_callback_leaves_publishing_to_host() -> None:
+def test_persist_through_host_callback_requires_host_to_update_rail() -> None:
+    """1B: host persists; host must call rail.update_config (rail does not)."""
     manager = get_permission_manager()
-    manager.update_config(_ASK_BASH, _KEY)
     seen: list[dict] = []
+    rail_box: dict = {}
 
     def persist(cfg: dict) -> bool:
         seen.append(cfg)
+        rail_box["rail"].update_config(cfg)
         return True
 
-    rail = PermissionInterruptRail(permission_key=_KEY, host=ToolPermissionHost(persist_allow_rule=persist))
+    rail = PermissionInterruptRail(
+        config=_ASK_BASH,
+        permission_key=_KEY,
+        host=ToolPermissionHost(persist_allow_rule=persist),
+    )
+    rail_box["rail"] = rail
 
     assert rail._persist_allow_always("bash", {"command": "echo hi"}) is True
     assert seen
-    assert manager.get_config(_KEY) == _ASK_BASH  # the rail did not publish; the callback owns that
+    assert manager.get_config(_KEY)["approval_overrides"]
 
 
 def test_persist_by_rail_publishes_after_successful_yaml_write(tmp_path: Path) -> None:
-    manager = get_permission_manager()
-    manager.update_config({**_ASK_BASH, "runtime": {"workspace_root": str(tmp_path)}}, _KEY)
     yaml_path = tmp_path / "config.yaml"
     rail = PermissionInterruptRail(
+        config={**_ASK_BASH, "runtime": {"workspace_root": str(tmp_path)}},
         permission_key=_KEY,
         host=ToolPermissionHost(permission_yaml_path=yaml_path),
     )
 
     assert rail._persist_allow_always("bash", {"command": "echo hi"}) is True
 
-    published = manager.get_config(_KEY)
+    published = get_permission_manager().get_config(_KEY)
     assert published["approval_overrides"]
     assert published["runtime"] == {"workspace_root": str(tmp_path)}
     assert yaml_path.exists()
 
 
 def test_failed_persist_publishes_nothing() -> None:
-    manager = get_permission_manager()
-    manager.update_config(_ASK_BASH, _KEY)
     rail = PermissionInterruptRail(
+        config=_ASK_BASH,
         permission_key=_KEY,
         host=ToolPermissionHost(persist_allow_rule=lambda cfg: False),
     )
 
     assert rail._persist_allow_always("bash", {"command": "echo hi"}) is False
-    assert manager.get_config(_KEY) == _ASK_BASH
+    assert get_permission_manager().get_config(_KEY) == _ASK_BASH

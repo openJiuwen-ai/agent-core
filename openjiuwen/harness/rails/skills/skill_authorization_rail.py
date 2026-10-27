@@ -6,10 +6,9 @@ dev-stable 适配说明（相对 0708 ``jiuwenclaw...deep_agent/rails/skill_auth
 
 - 基类为 agent-core ``openjiuwen.harness.rails.interrupt.interrupt_base.BaseInterruptRail``；
   ``InterruptRequest`` 无 ``allow_auto_confirm`` 字段，审批请求不再携带该参数；
-- ``PermissionEngine`` 经构造注入（不再回落 0708 的进程级 ``get_permission_engine``）；
-  未注入时策略评估按失败处理（fail-closed，主 Agent 交还原权限 Rail，子 Agent 拒载）；
-- DENY 预判改用 agent-core ``PermissionEngine.evaluate_global_policy_directly``
-  （无 channel/session/overlay 参数；agent-core 引擎本身不感知 Skill overlay）；
+- 权限裁决走 ``agent_shield`` 管理器：与 PermissionInterruptRail 共用
+  ``permission_key``；DENY 预判用 ``evaluate_global_policy_directly(key)``
+  （无 channel/session/overlay 参数；引擎本身不感知 Skill overlay）；
 - trust 判定通过调用方注入的可信 Skill 目录完成，core 不感知产品安装账本；
 - file_guard 差分适配 native ``paths`` 条目口径（移植版
   ``effective_file_guard_axis_level(paths, raw_path, axis, *, defaults, workspace_root)``），
@@ -299,8 +298,8 @@ class _SkillApprovalCall:
 class SkillAuthorizationRail(BaseInterruptRail):
     """Skill 加载门禁 rail（priority=95，高于 PermissionInterruptRail 的 90）。
 
-    ``engine`` 由调用方构造注入（与 PermissionInterruptRail 同一实例）；未注入时
-    DENY 预判不可用，按策略评估失败处理（fail-closed）。
+    ``permission_key`` 与 PermissionInterruptRail 共用同一管理器 key；未设置时
+    DENY 预判走 ``default``。评估失败 fail-closed。
     """
 
     priority: int = 95
@@ -311,7 +310,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
     def __init__(
         self,
         *,
-        engine: Any = None,
+        permission_key: str | None = None,
         skill_resolver: SkillResolver | None = None,
         trust_resolver: TrustResolver | None = None,
         prebuilt_dirs_provider: Callable[[], Any] | None = None,
@@ -324,7 +323,13 @@ class SkillAuthorizationRail(BaseInterruptRail):
         agent_scope_id: str = MAIN_AGENT_SCOPE_ID,
     ) -> None:
         super().__init__(tool_names=[SKILL_TOOL_NAME, SKILL_COMPLETE_TOOL_NAME])
-        self._engine = engine
+        from openjiuwen.harness.security.permission_key import DEFAULT_KEY
+
+        self._permission_key = (
+            permission_key
+            if isinstance(permission_key, str) and permission_key.strip()
+            else DEFAULT_KEY
+        )
         self._skill_resolver = skill_resolver
         self._trust_resolver = (
             trust_resolver
@@ -582,7 +587,11 @@ class SkillAuthorizationRail(BaseInterruptRail):
         """
         base_paths, base_defaults = self._native_file_guard_parts(base)
         merged_paths, merged_defaults = self._native_file_guard_parts(merged)
-        ws_root = getattr(self._engine, "_workspace_root", None)
+        ws_root = None
+        runtime = base.get("runtime") if isinstance(base.get("runtime"), dict) else {}
+        raw_root = runtime.get("workspace_root")
+        if isinstance(raw_root, str) and raw_root.strip():
+            ws_root = raw_root
         return base_paths, merged_paths, base_defaults, merged_defaults, ws_root
 
     def _compute_permission_diff(
@@ -770,25 +779,21 @@ class SkillAuthorizationRail(BaseInterruptRail):
 
     # ---------- 门禁（before_tool_call） ----------
 
-    def _evaluate_skill_tool_deny(
+    async def _evaluate_skill_tool_deny(
         self,
         tool_args: dict[str, Any],
     ) -> str | None | object:
         """按原权限流程裁决 skill_tool；DENY 返回原因，否则返回 ``None``。
 
-        dev-stable：agent-core ``PermissionEngine`` 不感知 Skill overlay，
-        ``evaluate_global_policy_directly`` 天然等价 0708 的
-        ``apply_skill_overlay=False``；引擎未注入时按评估失败处理。
+        用不含 Skill overlay 的已登记 key 做 ``evaluate_global_policy_directly``。
         """
-        if self._engine is None:
-            logger.warning(
-                "[skill_authorization] gate policy evaluation skipped: engine not injected",
-            )
-            return _POLICY_EVALUATION_FAILED
+        from agent_shield.tool_permission import get_permission_manager
+
         try:
-            level, matched_rule = self._engine.evaluate_global_policy_directly(
+            level, matched_rule = await get_permission_manager().evaluate_global_policy_directly(
                 SKILL_TOOL_NAME,
                 tool_args,
+                self._permission_key,
             )
         except Exception:  # noqa: BLE001 — 调用方必须走原 Rail 或直接拒绝
             logger.warning("[skill_authorization] gate policy evaluation failed", exc_info=True)
@@ -851,7 +856,7 @@ class SkillAuthorizationRail(BaseInterruptRail):
         session_id = scope[0] if scope else _resolve_session_id(ctx)
 
         # 1. 原权限流程裁决：DENY 直接拒载，不弹卡。
-        deny_rule = self._evaluate_skill_tool_deny(tool_args)
+        deny_rule = await self._evaluate_skill_tool_deny(tool_args)
         if deny_rule is _POLICY_EVALUATION_FAILED:
             self._on_policy_evaluation_failed(ctx, tool_call, tool_name)
             return
@@ -1108,12 +1113,15 @@ class SkillAuthorizationRail(BaseInterruptRail):
     def _base_effective_config(self, session_id: str | None) -> dict[str, Any]:
         """差分基线：全局 + 会话 overlay（不含 Skill overlay）。
 
-        优先取注入引擎的实时配置（``engine.config``）；引擎未注入或配置形态
-        非法时回落 ``config_provider``。
+        优先取权限管理器中本 key 的配置；未登记时回落 ``config_provider``。
         """
+        from agent_shield.tool_permission import get_permission_manager
+
         base_source: Any = None
-        if self._engine is not None:
-            base_source = getattr(self._engine, "config", None)
+        try:
+            base_source = dict(get_permission_manager().get_config(self._permission_key))
+        except KeyError:
+            base_source = None
         if not isinstance(base_source, dict):
             try:
                 base_source = self._config_provider()
