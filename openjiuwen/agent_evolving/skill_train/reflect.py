@@ -73,8 +73,10 @@ _PROMPT_SUFFIX_BY_MODE = {
 }
 
 _FULL_REWRITE_FORMAT_NOTE = (
-    "Produce one complete replacement skill candidate for this minibatch. "
-    "Do not output edits, patches, or revise suggestions."
+    "Produce one complete replacement skill for this minibatch. "
+    "Do not output edits. Leave new_skill as an empty string in the JSON object. "
+    "After the JSON object, write a line that is exactly <<<SKILL>>> and then the "
+    "entire SKILL.md. Omit <<<SKILL>>> when skill_candidates is empty."
 )
 
 _TASK_KEYS = ("task_description", "instruction", "question")
@@ -152,6 +154,9 @@ _ATTACHMENTS: tuple[Attachment, ...] = (
         env_flag="REFLACT_JIUWENSWARM_TRACE_TO_OPTIMIZER",
         strip=True,
     ),
+    # The rendered transcript budget can elide middle steps, and the final
+    # answer is the one artifact the analyst can never afford to miss.
+    Attachment("Final Answer", item_key="response", strip=True),
     Attachment("Spreadsheet Preview", item_key="spreadsheet_preview", filename="spreadsheet_preview.txt"),
 )
 
@@ -236,6 +241,7 @@ class AnalystRequest:
     update_mode: str = "patch"
     skill_aware: bool = False
     emit_notes: bool = True
+    skill_names: list[str] = field(default_factory=list)
 
 
 def _resolve_system_prompt(custom: str | None, base_name: str, mode: str) -> str:
@@ -261,15 +267,38 @@ def _budget_section(message: UserMessage, mode: str, edit_budget: int) -> None:
     message.section(heading, f"Produce at most L={edit_budget} {plural}.")
 
 
+def _multi_skill_attribution_note(skill_names: list[str]) -> str:
+    if len(skill_names) <= 1:
+        return ""
+    listed = ", ".join(repr(name) for name in skill_names)
+    return (
+        "Multiple skills are active. Attribute every edit to exactly one skill by "
+        f"setting top-level JSON field skill_name to one of: {listed}. "
+        "Patches without a valid skill_name are discarded."
+    )
+
+
 def _analyst_message(role: AnalystRole, request: AnalystRequest, transcript: str) -> str:
     """Assemble the analyst user message for one minibatch."""
     mode = normalize_update_mode(request.update_mode)
     message = UserMessage().section("Current Skill", request.skill_content)
+    note = _multi_skill_attribution_note(request.skill_names)
+    if note:
+        message.section("Multi-Skill Attribution", note)
     _budget_section(message, mode, request.edit_budget)
     if request.memory_text.strip():
         message.section("Previous Steps in This Epoch", request.memory_text)
     message.verbatim(format_meta_skill_context(request.meta_skill_context))
     return message.section(f"{role.heading} ({len(request.items)} total)", transcript).render()
+
+
+def _stamp_skill_name(body: dict, skill_names: list[str]) -> dict:
+    """Ensure *body* carries skill_name when the run has a sole skill."""
+    if body.get("skill_name"):
+        return body
+    if len(skill_names) == 1:
+        body["skill_name"] = skill_names[0]
+    return body
 
 
 def _run_analyst(role: AnalystRole, request: AnalystRequest) -> dict | None:
@@ -289,15 +318,32 @@ def _run_analyst(role: AnalystRole, request: AnalystRequest) -> dict | None:
     if not transcript.strip():
         return None
 
+    user = _analyst_message(role, request, transcript)
     reply = ask_optimizer(
         OptimizerCall(
             stage="analyst",
             system=system,
-            user=_analyst_message(role, request, transcript),
+            user=user,
             max_tokens=token_budget(whole_document),
         ),
         trace=True,
     )
+    if whole_document and reply.body is None and not reply.crashed:
+        reply = ask_optimizer(
+            OptimizerCall(
+                stage="analyst",
+                system=system,
+                user=(
+                    user
+                    + "\n\nThe previous reply could not be read as a skill. "
+                    "Send the JSON object again with new_skill set to an empty string, "
+                    "then a line that is exactly <<<SKILL>>>, then the complete SKILL.md. "
+                    "Do not wrap the SKILL.md in a code fence."
+                ),
+                max_tokens=token_budget(True),
+            ),
+            trace=True,
+        )
     body = reply.body
     if not body:
         return None
@@ -309,17 +355,20 @@ def _run_analyst(role: AnalystRole, request: AnalystRequest) -> dict | None:
             truncate_payload(body["patch"], request.edit_budget, mode)
         if notes_wanted:
             body["appendix_notes"] = notes
-        return body
+        return _stamp_skill_name(body, request.skill_names)
 
     # Skill-aware runs may legitimately yield only execution-lapse notes with
     # no body edit. Emit a no-op patch so the notes still reach the trainer;
     # empty edit lists are dropped further down the body pipeline.
     if notes:
-        return {
-            "source_type": role.source_type,
-            "patch": {"reasoning": "execution-lapse only", "edits": []},
-            "appendix_notes": notes,
-        }
+        return _stamp_skill_name(
+            {
+                "source_type": role.source_type,
+                "patch": {"reasoning": "execution-lapse only", "edits": []},
+                "appendix_notes": notes,
+            },
+            request.skill_names,
+        )
     return None
 
 
@@ -367,6 +416,7 @@ class ReflectRequest:
     context_blocks: tuple[str, str, str, str]  # rejection, traj_mem, step_buf, meta
     update_mode: str = "patch"
     awareness: tuple[bool | None, str | None] = (None, None)
+    skill_names: list[str] = field(default_factory=list)
 
     @classmethod
     def assemble(
@@ -390,6 +440,7 @@ class ReflectRequest:
         update_mode: str = "patch",
         skill_aware_reflection: bool | None = None,
         skill_aware_appendix_source: str | None = None,
+        skill_names: list[str] | None = None,
     ) -> ReflectRequest:
         return cls(
             results=results,
@@ -406,6 +457,7 @@ class ReflectRequest:
             ),
             update_mode=update_mode,
             awareness=(skill_aware_reflection, skill_aware_appendix_source),
+            skill_names=list(skill_names or []),
         )
 
     @property
@@ -549,6 +601,7 @@ def _analyst_request_for(job: MinibatchJob, request: ReflectRequest, skill_aware
         update_mode=request.update_mode,
         skill_aware=skill_aware,
         emit_notes=True if failure_side else notes,
+        skill_names=list(request.skill_names),
     )
 
 

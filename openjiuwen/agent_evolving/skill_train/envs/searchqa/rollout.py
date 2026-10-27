@@ -16,8 +16,10 @@ from openjiuwen.agent_evolving.skill_train.envs.searchqa.evaluator import evalua
 from openjiuwen.agent_evolving.skill_train.jiuwenswarm_exec import (
     GatewayUnreachableError,
     default_exec_prompt,
+    default_exec_prompt_multi,
     exec_work_dir_for,
     prepare_workspace,
+    render_skill_bundle_mds,
     render_skill_md,
     run_jiuwenswarm_cli_exec,
 )
@@ -40,6 +42,7 @@ class SearchQAItemConfig:
     diagnostic_mode: bool = False
     diagnostic_instruction: str = ""
     diagnostic_trace_context: str = ""
+    skills: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -53,6 +56,7 @@ class SearchQABatchConfig:
     workers: int = 64
     max_completion_tokens: int = 16384
     task_timeout: int = 600
+    skills: dict[str, str] = field(default_factory=dict)
     diagnostic_mode: bool = False
     diagnostic_instruction: str = ""
     diagnostic_trace_context_by_id: dict[str, str] = field(default_factory=dict)
@@ -211,6 +215,7 @@ def _item_cfg_for(batch: SearchQABatchConfig, item_id: str) -> SearchQAItemConfi
         diagnostic_mode=batch.diagnostic_mode,
         diagnostic_instruction=batch.diagnostic_instruction,
         diagnostic_trace_context=traces.get(item_id, ""),
+        skills=dict(batch.skills or {}),
     )
 
 
@@ -234,12 +239,19 @@ def _run_exec_once(
 ) -> tuple[str, str, str]:
     """One jiuwenswarm CLI turn: prepare workspace, run, return (response, skill_md, task_text)."""
     work_dir = exec_work_dir_for(cfg.out_root, str(item["id"]))
-    skill_md = render_skill_md(cfg.skill_content)
     task_text = _exec_task_text(item, cfg, previous_response)
-    prepare_workspace(work_dir=work_dir, skill_md=skill_md, task_text=task_text)
+    if cfg.skills and len(cfg.skills) > 1:
+        skill_mds = render_skill_bundle_mds(cfg.skills)
+        skill_md = next(iter(skill_mds.values()))
+        prepare_workspace(work_dir=work_dir, skill_mds=skill_mds, task_text=task_text)
+        prompt = default_exec_prompt_multi("answer the SearchQA question.", list(cfg.skills.keys()))
+    else:
+        skill_md = render_skill_md(cfg.skill_content)
+        prepare_workspace(work_dir=work_dir, skill_md=skill_md, task_text=task_text)
+        prompt = default_exec_prompt("answer the SearchQA question.")
     response, raw = run_jiuwenswarm_cli_exec(
         work_dir=work_dir,
-        prompt=default_exec_prompt("answer the SearchQA question."),
+        prompt=prompt,
         timeout=cfg.exec_timeout,
     )
     return response or raw, skill_md, task_text

@@ -48,13 +48,13 @@ from openjiuwen.agent_evolving.skill_train.gate import (
     evaluate_gate,
     select_gate_score,
 )
+from openjiuwen.agent_evolving.skill_train.jiuwenswarm_exec import configure_jiuwenswarm_exec
 from openjiuwen.agent_evolving.skill_train.llm_client import (
     ChatLLMClient,
     make_llm_invoke_policy,
     set_optimizer_client,
     set_target_client,
 )
-from openjiuwen.agent_evolving.skill_train.jiuwenswarm_exec import configure_jiuwenswarm_exec
 from openjiuwen.agent_evolving.skill_train.longitudinal import normalise_longitudinal_pair_policy
 from openjiuwen.agent_evolving.skill_train.meta_skill import load_meta_skill_content
 from openjiuwen.agent_evolving.skill_train.model_compat import (
@@ -65,6 +65,14 @@ from openjiuwen.agent_evolving.skill_train.model_compat import (
 from openjiuwen.agent_evolving.skill_train.registry import get_env_adapter
 from openjiuwen.agent_evolving.skill_train.scoring import compute_score, skill_hash
 from openjiuwen.agent_evolving.skill_train.select import rank_and_select
+from openjiuwen.agent_evolving.skill_train.skill_bundle import (
+    SkillBundle,
+    copy_bundle,
+    format_skill_bundle,
+    group_patches_by_skill,
+    load_skill_bundle,
+    primary_skill,
+)
 from openjiuwen.agent_evolving.skill_train.skill_patch import apply_patch_with_report
 from openjiuwen.agent_evolving.skill_train.slow_update import (
     extract_slow_update_field,
@@ -90,6 +98,8 @@ class SkillTrainResult:
     current_score: float
     history: List[Dict[str, Any]] = field(default_factory=list)
     output_dir: str = ""
+    best_skills: Dict[str, str] = field(default_factory=dict)
+    current_skills: Dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -101,7 +111,7 @@ class TrainPlan:
     env_name: str
     adapter: EnvAdapter
     dataloader: Any
-    initial_skill: str
+    initial_skills: SkillBundle
     batch_size: int
     num_epochs: int
     steps_per_epoch: int
@@ -116,6 +126,15 @@ class TrainPlan:
     slow_gate_with_selection: bool
     slow_n: int
     pair_policy: str
+
+    @property
+    def initial_skill(self) -> str:
+        """Legacy single-document view of the initial bundle."""
+        return primary_skill(self.initial_skills)
+
+    @property
+    def skill_names(self) -> List[str]:
+        return list(self.initial_skills.keys())
 
     @property
     def total_steps(self) -> int:
@@ -231,26 +250,36 @@ class SkillReflACTTrainer:
 
     # ── Setup ────────────────────────────────────────────────────────────────
 
-    def _prepare(self, config: SkillTrainConfig, adapter: EnvAdapter | None) -> TrainPlan:
-        """Wire the clients, resolve the adapter and size the schedule."""
-        cfg = config.to_trainer_cfg()
-        out_root = os.path.abspath(config.output_dir)
-        os.makedirs(out_root, exist_ok=True)
+    def bind_clients(self, cfg: dict) -> str:
+        """Resolve the target backend and install this trainer's chat clients.
 
+        Shared by ``_prepare`` and the per-task SkillsBench loop so both wire
+        the module-level optimizer/target clients identically.
+        """
         backend = _configure_target_backend(cfg)
         if self._target_client is None and not is_target_exec_backend():
             raise ValueError(f"target_llm is required when target_backend={backend!r} (chat backend)")
         set_optimizer_client(self._optimizer_client)
         set_target_client(self._target_client)
         set_reasoning_effort(cfg.get("reasoning_effort"))
+        return backend
+
+    def _prepare(self, config: SkillTrainConfig, adapter: EnvAdapter | None) -> TrainPlan:
+        """Wire the clients, resolve the adapter and size the schedule."""
+        cfg = config.to_trainer_cfg()
+        out_root = os.path.abspath(config.output_dir)
+        os.makedirs(out_root, exist_ok=True)
+
+        backend = self.bind_clients(cfg)
         logger.info("[skill_train] target_backend=%s", backend)
 
         env_adapter = adapter or get_env_adapter(config.env_name, **config.env_kwargs)
         env_adapter.setup(cfg)
 
-        skill_init_path = cfg.get("skill_init") or config.skill_init
-        if not skill_init_path or not os.path.isfile(skill_init_path):
-            raise FileNotFoundError(f"skill_init not found: {skill_init_path}")
+        initial_skills = load_skill_bundle(
+            skill_init=str(cfg.get("skill_init") or config.skill_init or ""),
+            skill_inits=cfg.get("skill_inits") or config.skill_inits,
+        )
 
         batch_size = int(cfg.get("batch_size", 40))
         accumulation = max(1, int(cfg.get("accumulation", 1)))
@@ -267,7 +296,7 @@ class SkillReflACTTrainer:
             env_name=config.env_name,
             adapter=env_adapter,
             dataloader=dataloader,
-            initial_skill=Path(skill_init_path).read_text(encoding="utf-8"),
+            initial_skills=initial_skills,
             batch_size=batch_size,
             num_epochs=int(cfg.get("num_epochs", 4)),
             steps_per_epoch=math.ceil(train_size / (batch_size * accumulation)),
@@ -295,18 +324,22 @@ class SkillReflACTTrainer:
         )
         baseline_dir = os.path.join(plan.out_root, "selection_eval_baseline")
         logger.info(
-            "[SkillReflACTTrainer] selection/gate eval size=%s (valid_seen)",
+            "[SkillReflACTTrainer] selection/gate eval size=%s (valid_seen) skills=%s",
             selection_n or "all",
+            plan.skill_names,
         )
-        baseline = compute_score(plan.adapter.rollout(sel_env, plan.initial_skill, baseline_dir))
+        baseline_text = format_skill_bundle(plan.initial_skills)
+        baseline = compute_score(
+            plan.adapter.rollout(sel_env, baseline_text, baseline_dir, skills=plan.initial_skills)
+        )
         baseline_hard, baseline_soft = baseline
-        score = plan.gate_score(baseline_hard, baseline_soft, plan.initial_skill)
+        score = plan.gate_score(baseline_hard, baseline_soft, baseline_text)
 
         return TrainRuntime(
             progress=SkillProgress(
-                current_skill=plan.initial_skill,
+                current_skills=copy_bundle(plan.initial_skills),
                 current_score=score,
-                best_skill=plan.initial_skill,
+                best_skills=copy_bundle(plan.initial_skills),
                 best_score=score,
                 best_step=0,
             ),
@@ -317,7 +350,7 @@ class SkillReflACTTrainer:
                 min_lr=int(plan.cfg.get("min_edit_budget", 2)),
                 total_steps=max(plan.total_steps, 1),
             ),
-            sel_cache={skill_hash(plan.initial_skill): baseline},
+            sel_cache={skill_hash(baseline_text): baseline},
         )
 
     # ── Main loop ────────────────────────────────────────────────────────────
@@ -390,6 +423,48 @@ class SkillReflACTTrainer:
         self._close_epoch(plan, runtime, epoch, display_epoch)
 
     @staticmethod
+    def _apply_patches_per_skill(
+        plan: TrainPlan,
+        current: SkillBundle,
+        raw_patches: List[dict | None],
+        *,
+        edit_budget: int,
+        meta_skill: str,
+        step_dir: str,
+    ) -> tuple[SkillBundle, List[dict]]:
+        """Merge/select/apply patches grouped by ``skill_name``."""
+        by_skill = group_patches_by_skill(raw_patches, skill_names=current)
+        candidate = copy_bundle(current)
+        apply_reports: List[dict] = []
+        settings = plan.merge_settings(meta_skill)
+        for name, body in current.items():
+            skill_patches = by_skill.get(name) or []
+            if not skill_patches:
+                continue
+            merged = merge_patches(
+                body,
+                _split_by_source(skill_patches, "failure"),
+                _split_by_source(skill_patches, "success"),
+                settings,
+            )
+            ranked = rank_and_select(
+                body,
+                merged,
+                max_edits=edit_budget,
+                update_mode=plan.update_mode,
+                meta_skill_context=meta_skill,
+            )
+            updated, report = apply_patch_with_report(body, ranked)
+            candidate[name] = updated
+            for entry in report:
+                row = dict(entry)
+                row["skill_name"] = name
+                apply_reports.append(row)
+            Path(step_dir, f"candidate_skill__{name}.md").write_text(updated, encoding="utf-8")
+        Path(step_dir, "candidate_skill.md").write_text(format_skill_bundle(candidate), encoding="utf-8")
+        return candidate, apply_reports
+
+    @staticmethod
     def _run_step(plan: TrainPlan, runtime: TrainRuntime, step: StepId) -> Dict[str, Any]:
         """Rollout → reflect → aggregate → select → apply → gate for one step."""
         progress = runtime.progress
@@ -397,61 +472,61 @@ class SkillReflACTTrainer:
         step_dir = os.path.join(epoch_dir, f"step_{step.step_in_epoch:03d}")
         os.makedirs(step_dir, exist_ok=True)
 
+        current_bundle = progress.current_skills
+        current_text = format_skill_bundle(current_bundle)
+
         rollout_dir = os.path.join(step_dir, "rollout")
         train_env = plan.adapter.build_train_env(batch_size=plan.batch_size, seed=step.seed)
-        rollout_results = plan.adapter.rollout(train_env, progress.current_skill, rollout_dir)
+        rollout_results = plan.adapter.rollout(
+            train_env, current_text, rollout_dir, skills=current_bundle
+        )
 
         # Conversations live under rollout/predictions/<id>/
         raw_patches = plan.adapter.reflect(
             rollout_results,
-            progress.current_skill,
+            current_text,
             step_dir,
             prediction_dir=os.path.join(rollout_dir, "predictions"),
             patches_dir=os.path.join(step_dir, "patches"),
             random_seed=step.seed,
             meta_skill_context=runtime.meta_skill,
+            skills=current_bundle,
         )
-        merged_patch = merge_patches(
-            progress.current_skill,
-            _split_by_source(raw_patches, "failure"),
-            _split_by_source(raw_patches, "success"),
-            plan.merge_settings(runtime.meta_skill),
-        )
-
         edit_budget = runtime.scheduler.step()
-        ranked_patch = rank_and_select(
-            progress.current_skill,
-            merged_patch,
-            max_edits=edit_budget,
-            update_mode=plan.update_mode,
-            meta_skill_context=runtime.meta_skill,
+        candidate_bundle, apply_report = SkillReflACTTrainer._apply_patches_per_skill(
+            plan,
+            current_bundle,
+            raw_patches,
+            edit_budget=edit_budget,
+            meta_skill=runtime.meta_skill,
+            step_dir=step_dir,
         )
-        candidate_skill, apply_report = apply_patch_with_report(progress.current_skill, ranked_patch)
-        Path(step_dir, "candidate_skill.md").write_text(candidate_skill, encoding="utf-8")
+        candidate_text = format_skill_bundle(candidate_bundle)
 
         gate_dir = os.path.join(step_dir, "gate_eval")
-        cand_hard, cand_soft = compute_score(plan.adapter.rollout(runtime.sel_env, candidate_skill, gate_dir))
-        cand_score = plan.gate_score(cand_hard, cand_soft, candidate_skill)
+        cand_hard, cand_soft = compute_score(
+            plan.adapter.rollout(runtime.sel_env, candidate_text, gate_dir, skills=candidate_bundle)
+        )
+        cand_score = plan.gate_score(cand_hard, cand_soft, candidate_text)
 
         if plan.use_gate:
-            action = progress.adopt(
-                evaluate_gate(
-                    candidate_skill,
-                    cand_hard,
-                    progress.gate_state(),
-                    step.global_step,
-                    GateTuning(
-                        soft=cand_soft,
-                        metric=cast(GateMetric, plan.gate_metric),
-                        mixed_weight=plan.gate_mixed_weight,
-                    ),
-                )
+            verdict = evaluate_gate(
+                candidate_text,
+                cand_hard,
+                progress.gate_state(),
+                step.global_step,
+                GateTuning(
+                    soft=cand_soft,
+                    metric=cast(GateMetric, plan.gate_metric),
+                    mixed_weight=plan.gate_mixed_weight,
+                ),
             )
+            action = progress.adopt_bundle(candidate_bundle, verdict)
         else:
-            action = progress.promote(candidate_skill, cand_score, step.global_step)
+            action = progress.promote_bundle(candidate_bundle, cand_score, step.global_step)
 
-        runtime.sel_cache[skill_hash(candidate_skill)] = (cand_hard, cand_soft)
-        save_skill_version(plan.out_root, step.global_step, progress.current_skill)
+        runtime.sel_cache[skill_hash(candidate_text)] = (cand_hard, cand_soft)
+        save_skill_version(plan.out_root, step.global_step, progress.current_skills)
 
         rollout_hard, rollout_soft = compute_score(rollout_results)
         return {
@@ -471,6 +546,7 @@ class SkillReflACTTrainer:
             "best_step": progress.best_step,
             "n_edits_applied": _applied_count(apply_report),
             "skill_hash": skill_hash(progress.current_skill),
+            "skill_names": progress.skill_names(),
         }
 
     def _close_epoch(self, plan: TrainPlan, runtime: TrainRuntime, epoch: int, display_epoch: int) -> None:
@@ -502,15 +578,26 @@ class SkillReflACTTrainer:
                     gate_mixed_weight=plan.gate_mixed_weight,
                     sel_env=runtime.sel_env,
                     sel_cache=runtime.sel_cache,
+                    current_skills=copy_bundle(runtime.progress.current_skills),
+                    best_skills=copy_bundle(runtime.progress.best_skills),
                 )
             )
-            runtime.progress = SkillProgress(
-                current_skill=outcome.current_skill,
-                current_score=outcome.current_score,
-                best_skill=outcome.best_skill,
-                best_score=outcome.best_score,
-                best_step=outcome.best_step,
-            )
+            if outcome.current_skills is not None and outcome.best_skills is not None:
+                runtime.progress = SkillProgress(
+                    current_skills=copy_bundle(outcome.current_skills),
+                    current_score=outcome.current_score,
+                    best_skills=copy_bundle(outcome.best_skills),
+                    best_score=outcome.best_score,
+                    best_step=outcome.best_step,
+                )
+            else:
+                runtime.progress = SkillProgress.from_single(
+                    current_skill=outcome.current_skill,
+                    current_score=outcome.current_score,
+                    best_skill=outcome.best_skill,
+                    best_score=outcome.best_score,
+                    best_step=outcome.best_step,
+                )
             pairs = outcome.comparison_pairs
 
         if plan.use_meta:
@@ -534,7 +621,6 @@ class SkillReflACTTrainer:
     def _finalize(plan: TrainPlan, runtime: TrainRuntime, started: float) -> SkillTrainResult:
         """Persist the best skill and the run summary, then report the result."""
         progress = runtime.progress
-        Path(plan.out_root, "best_skill.md").write_text(progress.best_skill, encoding="utf-8")
         persist_runtime(plan.out_root, runtime.global_step, progress)
 
         warnings: List[str] = []
@@ -553,6 +639,7 @@ class SkillReflACTTrainer:
                 "gate_metric": plan.gate_metric,
                 "env": plan.env_name,
                 "current_score": progress.current_score,
+                "skill_names": progress.skill_names(),
                 "use_slow_update": plan.use_slow,
                 "use_meta_skill": plan.use_meta,
                 "reasoning_effort": plan.cfg.get("reasoning_effort"),
@@ -568,6 +655,8 @@ class SkillReflACTTrainer:
             current_score=progress.current_score,
             history=runtime.history,
             output_dir=plan.out_root,
+            best_skills=copy_bundle(progress.best_skills),
+            current_skills=copy_bundle(progress.current_skills),
         )
 
     # ── Epoch-boundary stages ────────────────────────────────────────────────

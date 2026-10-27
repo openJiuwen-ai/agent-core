@@ -137,10 +137,13 @@ class OfficeQAAdapter(DatasetEnvAdapter):
         skill_content: str,
         extras: dict,
     ) -> OfficeQABatchKnobs:
+        from openjiuwen.agent_evolving.skill_train.skill_bundle import resolve_rollout_skills
+
         cfg = self.settings
+        skill_view, _bundle = resolve_rollout_skills(skill_content, extras.get("skills"))
         return OfficeQABatchKnobs.from_flat(
             out_dir,
-            skill_content,
+            skill_view,
             workers=cfg.workers,
             task_timeout=cfg.task_timeout,
             max_tool_turns=cfg.max_tool_turns,

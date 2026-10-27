@@ -19,6 +19,7 @@ focusing on the highest-impact patterns. You may produce fewer if warranted.
 Respond ONLY with a valid JSON object (no markdown fences, no extra text):
 {
   "batch_size": <number of trajectories analysed>,
+  "skill_name": "<required when multiple skills are listed; omit for a single skill>",
   "failure_summary": [
     {"failure_type": "<type>", "count": <int>, "description": "<one-line>"}
   ],

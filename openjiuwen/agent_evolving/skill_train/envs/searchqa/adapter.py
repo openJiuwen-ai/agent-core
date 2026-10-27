@@ -70,11 +70,14 @@ class SearchQAAdapter(DatasetEnvAdapter):
         skill_content: str,
         rollout_extras: dict,
     ) -> SearchQABatchConfig:
+        from openjiuwen.agent_evolving.skill_train.skill_bundle import resolve_rollout_skills
+
         rt = self.runtime
         trace_map = rollout_extras.get("diagnostic_trace_context_by_id") or {}
+        skill_view, bundle = resolve_rollout_skills(skill_content, rollout_extras.get("skills"))
         return SearchQABatchConfig(
             out_root=out_dir,
-            skill_content=skill_content,
+            skill_content=skill_view,
             max_turns=rt.max_turns,
             exec_timeout=rt.exec_timeout,
             workers=rt.workers,
@@ -83,6 +86,7 @@ class SearchQAAdapter(DatasetEnvAdapter):
             diagnostic_instruction=str(rollout_extras.get("diagnostic_instruction", "")),
             diagnostic_trace_context_by_id=trace_map,
             task_timeout=rt.task_timeout,
+            skills=bundle,
         )
 
     def rollout(

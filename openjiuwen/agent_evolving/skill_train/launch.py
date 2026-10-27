@@ -25,7 +25,7 @@ from openjiuwen.agent_evolving.skill_train.model_compat import SUPPORTED_TARGET_
 from openjiuwen.agent_evolving.skill_train.paths import resolve_data_path, skill_train_root
 from openjiuwen.core.common.logging import logger
 
-SUPPORTED_ENVS: tuple[str, ...] = ("searchqa", "docvqa", "officeqa")
+SUPPORTED_ENVS: tuple[str, ...] = ("searchqa", "docvqa", "officeqa", "skillsbench")
 DEFAULT_EXEC_WORKERS = 4
 
 
@@ -102,6 +102,22 @@ def env_presets() -> dict[str, EnvPreset]:
                 "limit": 0,
             },
         ),
+        "skillsbench": EnvPreset(
+            env_name="skillsbench",
+            skill_relpath="envs/skillsbench/skills/initial.md",
+            split_relpath="skillsbench_tasks",
+            batch_size=1,
+            workers=1,
+            analyst_workers=2,
+            exec_timeout=900,
+            env_kwargs={
+                "split_mode": "ratio",
+                "split_ratio": "7:1:2",
+                "limit": 0,
+                # docker | local | wsl (override with SKILLSBENCH_VERIFIER_MODE)
+                "verifier_mode": _env("SKILLSBENCH_VERIFIER_MODE", default="local"),
+            },
+        ),
     }
 
 
@@ -118,6 +134,8 @@ class TrainLaunchOptions:
     env_name: str = "searchqa"
     target_backend: str = ""
     skill_init: str = ""
+    # name → path; when set, joint multi-skill training is enabled
+    skill_inits: dict[str, str] | None = None
     split_dir: str = ""
     data_root: str = ""
     output_dir: str = ""
@@ -256,6 +274,10 @@ def _resolve_split_dir(opts: TrainLaunchOptions, preset: EnvPreset) -> str:
     explicit = opts.split_dir or _env(f"{preset.env_name.upper()}_SPLIT_DIR", "SPLIT_DIR")
     if explicit:
         path = Path(explicit).expanduser()
+    elif preset.env_name == "skillsbench":
+        from openjiuwen.agent_evolving.skill_train.envs.skillsbench.dataloader import default_tasks_dir
+
+        path = default_tasks_dir()
     else:
         path = resolve_data_path(preset.split_relpath)
     if not path.exists():
@@ -282,11 +304,18 @@ def _officeqa_env_kwargs(env_kwargs: dict[str, Any]) -> dict[str, Any]:
     return {**env_kwargs, "data_dirs": [docs]}
 
 
-def build_train_config(opts: TrainLaunchOptions) -> ResolvedLaunch:
+def build_train_config(
+    opts: TrainLaunchOptions,
+    *,
+    require_optimizer: bool = True,
+) -> ResolvedLaunch:
     """Resolve *opts* against presets and the environment.
 
     Raises ``ValueError`` for an unknown env / backend or missing optimizer
     credentials and ``FileNotFoundError`` for missing data assets.
+
+    Set ``require_optimizer=False`` for exec-backend eval-only runs that never
+    call the analyst / optimizer (e.g. SkillsBench docker scoring).
     """
     if opts.env_name not in SUPPORTED_ENVS:
         raise ValueError(f"unsupported env {opts.env_name!r}; supported: {', '.join(SUPPORTED_ENVS)}")
@@ -294,6 +323,8 @@ def build_train_config(opts: TrainLaunchOptions) -> ResolvedLaunch:
     is_exec = backend in EXEC_TARGET_BACKENDS
     _apply_data_root(opts)
     preset = env_presets()[opts.env_name]
+    # SkillsBench trains one task at a time, which drives several defaults below.
+    per_task = opts.env_name == "skillsbench"
 
     skill_init = _resolve_skill_init(opts, preset)
     split_dir = _resolve_split_dir(opts, preset)
@@ -307,16 +338,22 @@ def build_train_config(opts: TrainLaunchOptions) -> ResolvedLaunch:
     optimizer_api_base = _env("OPTIMIZER_API_BASE", "OPTIMIZER_OPENAI_COMPATIBLE_BASE_URL", default=api_base)
     optimizer_provider = _env("OPTIMIZER_PROVIDER", default=provider)
 
-    missing: list[str] = []
-    for name, value in (
-        ("API_KEY / --api-key", optimizer_api_key),
-        ("API_BASE / --api-base", optimizer_api_base),
-        ("OPTIMIZER_MODEL / --optimizer-model", optimizer_model),
-    ):
-        if not value:
-            missing.append(name)
-    if missing:
-        raise ValueError("missing optimizer credentials: " + ", ".join(missing))
+    if require_optimizer:
+        missing: list[str] = []
+        for name, value in (
+            ("API_KEY / --api-key", optimizer_api_key),
+            ("API_BASE / --api-base", optimizer_api_base),
+            ("OPTIMIZER_MODEL / --optimizer-model", optimizer_model),
+        ):
+            if not value:
+                missing.append(name)
+        if missing:
+            raise ValueError("missing optimizer credentials: " + ", ".join(missing))
+    else:
+        # Placeholders so ResolvedLaunch fields stay non-empty for eval-only exec.
+        optimizer_api_key = optimizer_api_key or "unused-for-eval"
+        optimizer_api_base = optimizer_api_base or "http://127.0.0.1/unused-for-eval"
+        optimizer_model = optimizer_model or default_model or "unused-for-eval"
 
     target_model = "" if is_exec else (opts.target_model or _env("TARGET_MODEL", default=default_model))
     target_api_key = (
@@ -338,7 +375,13 @@ def build_train_config(opts: TrainLaunchOptions) -> ResolvedLaunch:
     workers = _int_opt(opts.workers, "WORKERS", default=default_workers)
     analyst_workers = _int_opt(opts.analyst_workers, "ANALYST_WORKERS", default=preset.analyst_workers)
     minibatch_size = _int_opt(opts.minibatch_size, "MINIBATCH_SIZE", default=8)
-    edit_budget = _int_opt(opts.edit_budget, "EDIT_BUDGET", default=preset.edit_budget)
+    edit_budget = _int_opt(
+        opts.edit_budget,
+        "EDIT_BUDGET",
+        # Per-task runs revise one document across few iterations, so the
+        # analyst needs a wider edit allowance than the batched trainer uses.
+        default=8 if per_task else preset.edit_budget,
+    )
     seed = int(opts.seed) if opts.seed is not None else int(_env("SEED", default="42"))
     failure_only = opts.failure_only if opts.failure_only is not None else _bool_env("FAILURE_ONLY", False)
 
@@ -358,6 +401,8 @@ def build_train_config(opts: TrainLaunchOptions) -> ResolvedLaunch:
     env_kwargs.update(preset.env_kwargs)
     if opts.env_name == "officeqa":
         env_kwargs = _officeqa_env_kwargs(env_kwargs)
+    if opts.env_name == "skillsbench" and not str(env_kwargs.get("data_path") or "").strip():
+        env_kwargs["data_path"] = env_kwargs.get("split_dir") or ""
     limit = _optional_int(opts.limit, "LIMIT")
     if limit is not None:
         env_kwargs["limit"] = int(limit)
@@ -375,16 +420,21 @@ def build_train_config(opts: TrainLaunchOptions) -> ResolvedLaunch:
     train_size = (
         opts.train_size if opts.train_size is not None else _int_opt(0, "TRAIN_SIZE", default=preset.train_size)
     )
-    use_gate = opts.use_gate if opts.use_gate is not None else _bool_env("USE_GATE", True)
+    use_gate = False if per_task else (opts.use_gate if opts.use_gate is not None else _bool_env("USE_GATE", True))
     selection_eval_size = _optional_int(opts.selection_eval_size, "SELECTION_EVAL_SIZE")
     if selection_eval_size is None:
-        selection_eval_size = 40
+        selection_eval_size = 0 if per_task else 40
+    # Per-task edits are incremental, so one more iteration is worth more than
+    # the longer batched-training default.
+    epoch_default = 3 if per_task else 4
 
+    skill_inits = dict(opts.skill_inits or {})
     config = SkillTrainConfig(
         env_name=opts.env_name,
         output_dir=str(Path(output_dir).expanduser()),
-        skill_init=skill_init,
-        num_epochs=_int_opt(opts.num_epochs, "NUM_EPOCHS", default=4),
+        skill_init="" if skill_inits else skill_init,
+        skill_inits=skill_inits,
+        num_epochs=_int_opt(opts.num_epochs, "NUM_EPOCHS", default=epoch_default),
         train_size=int(train_size),
         batch_size=_int_opt(opts.batch_size, "BATCH_SIZE", default=preset.batch_size),
         accumulation=_int_opt(opts.accumulation, "ACCUMULATION", default=preset.accumulation),
@@ -398,12 +448,15 @@ def build_train_config(opts: TrainLaunchOptions) -> ResolvedLaunch:
         use_gate=use_gate,
         selection_eval_size=selection_eval_size,
         seed=seed,
+        # Incremental edits keep the diff small and leave untouched sections
+        # byte-identical; set SKILL_UPDATE_MODE=full_rewrite_minibatch for a
+        # whole-document rewrite instead.
         skill_update_mode=_env("SKILL_UPDATE_MODE", default="patch"),
-        use_slow_update=_bool_env("USE_SLOW_UPDATE", True),
+        use_slow_update=False if per_task else _bool_env("USE_SLOW_UPDATE", True),
         slow_update_samples=int(_env("SLOW_UPDATE_SAMPLES", default="20")),
         slow_update_gate_with_selection=_bool_env("SLOW_UPDATE_GATE_WITH_SELECTION", False),
         longitudinal_pair_policy=_env("LONGITUDINAL_PAIR_POLICY", default="mixed"),
-        use_meta_skill=_bool_env("USE_META_SKILL", True),
+        use_meta_skill=False if per_task else _bool_env("USE_META_SKILL", True),
         reasoning_effort=(opts.reasoning_effort or _env("REASONING_EFFORT", default="medium")) or None,
         target_backend=backend,
         jiuwenswarm_trace_to_optimizer=opts.jiuwenswarm_trace_to_optimizer,
@@ -479,7 +532,11 @@ def build_trainer(resolved: ResolvedLaunch) -> Any:
 def run_offline_training(opts: TrainLaunchOptions) -> Any:
     """Resolve options, build the trainer and run the full ReflACT loop.
 
-    Returns :class:`~openjiuwen.agent_evolving.skill_train.trainer.SkillTrainResult`.
+    SkillsBench trains one skill per task (five iterations, no validation
+    gate). Every other env keeps the shared-skill :class:`SkillReflACTTrainer`.
+
+    Returns :class:`~openjiuwen.agent_evolving.skill_train.trainer.SkillTrainResult`
+    for the shared loop, or a summary dict for SkillsBench.
     """
     from openjiuwen.agent_evolving.skill_train.registry import get_env_adapter
 
@@ -487,7 +544,14 @@ def run_offline_training(opts: TrainLaunchOptions) -> Any:
     logger.info("[skill_train.launch] %s", json.dumps(resolved.summary(), ensure_ascii=False))
     trainer = build_trainer(resolved)
     config = resolved.config
-    return trainer.train(config=config, adapter=get_env_adapter(config.env_name, **config.env_kwargs))
+    adapter = get_env_adapter(config.env_name, **config.env_kwargs)
+    if config.env_name == "skillsbench":
+        from openjiuwen.agent_evolving.skill_train.envs.skillsbench.per_task_train import (
+            run_per_task_training,
+        )
+
+        return run_per_task_training(config=config, trainer=trainer, adapter=adapter)
+    return trainer.train(config=config, adapter=adapter)
 
 
 def run_offline_eval(opts: TrainLaunchOptions, *, split: str = "test", skill_path: str = "") -> dict[str, Any]:
@@ -500,7 +564,11 @@ def run_offline_eval(opts: TrainLaunchOptions, *, split: str = "test", skill_pat
     from openjiuwen.agent_evolving.skill_train.trainer import _configure_target_backend
 
     eval_opts = replace(opts, skill_init=skill_path or opts.skill_init)
-    resolved = build_train_config(eval_opts)
+    # Exec backends score via Gateway/agent only; optimizer credentials unused.
+    resolved = build_train_config(
+        eval_opts,
+        require_optimizer=eval_opts.resolved_backend() not in EXEC_TARGET_BACKENDS,
+    )
     config = resolved.config
     cfg = config.to_trainer_cfg()
     _configure_target_backend(cfg)
