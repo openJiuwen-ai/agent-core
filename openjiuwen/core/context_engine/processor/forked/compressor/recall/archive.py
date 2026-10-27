@@ -1,6 +1,3 @@
-# coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-
 """Filesystem archive for messages replaced by forked context compressors."""
 
 from __future__ import annotations
@@ -416,8 +413,8 @@ def _strip_channel_envelope(text: str) -> str:
 
 
 def _content_to_text(content: Any) -> str:
-    # Sanitized: this text is BM25-indexed and re-rendered into context on
-    # recall — raw base64 would poison the index and balloon retrieved chunks.
+    # This text is indexed and later re-rendered into model context; raw
+    # base64 would poison the index and balloon recalled chunks.
     if content is None:
         return ""
     return sanitize_content_for_text(content)

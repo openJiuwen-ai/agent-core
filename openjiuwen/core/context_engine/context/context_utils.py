@@ -13,7 +13,8 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ContextWindow
 from openjiuwen.core.context_engine.content_sanitize import sanitize_content_for_text
-from openjiuwen.core.foundation.llm import AssistantMessage, BaseMessage, ToolMessage
+from openjiuwen.core.foundation.llm import BaseMessage, ToolMessage, AssistantMessage
+
 
 CONTEXT_MESSAGE_ID_KEY = "context_message_id"
 DEFAULT_CONTEXT_MAX_TOKENS = 200000
@@ -221,9 +222,11 @@ class ContextUtils:
             else:
                 alias_tokens[alias] = context_length
 
-        fetched_tokens.update(
-            {alias: context_length for alias, context_length in alias_tokens.items() if alias not in ambiguous_aliases}
-        )
+        fetched_tokens.update({
+            alias: context_length
+            for alias, context_length in alias_tokens.items()
+            if alias not in ambiguous_aliases
+        })
         return fetched_tokens
 
     @staticmethod
@@ -342,11 +345,12 @@ class ContextUtils:
                 if not isinstance(msg, BaseMessage):
                     raise build_error(
                         StatusCode.CONTEXT_MESSAGE_INVALID,
-                        error_msg="messages should be a BaseMessage or a list of BaseMessage",
+                        error_msg="messages should be a BaseMessage or a list of BaseMessage"
                     )
             return
         raise build_error(
-            StatusCode.CONTEXT_MESSAGE_INVALID, error_msg="messages should be a BaseMessage or a list of BaseMessage"
+            StatusCode.CONTEXT_MESSAGE_INVALID,
+            error_msg="messages should be a BaseMessage or a list of BaseMessage"
         )
 
     @staticmethod
@@ -417,13 +421,20 @@ class ContextUtils:
     def is_compression_processor(processor: Any) -> bool:
         processor_type = processor.processor_type().lower()
         module_name = processor.__class__.__module__.lower()
-        return "compressor" in processor_type or "compact" in processor_type or ".processor.compressor." in module_name
+        return (
+            "compressor" in processor_type
+            or "compact" in processor_type
+            or ".processor.compressor." in module_name
+        )
 
     @staticmethod
     def is_offload_processor(processor: Any) -> bool:
         processor_type = processor.processor_type().lower()
         module_name = processor.__class__.__module__.lower()
-        return "offload" in processor_type or ".processor.offloader." in module_name
+        return (
+            "offload" in processor_type
+            or ".processor.offloader." in module_name
+        )
 
     @staticmethod
     def find_last_ai_message_without_tool_call(
@@ -448,10 +459,10 @@ class ContextUtils:
 
     @staticmethod
     def replace_messages(
-        messages: List[BaseMessage],
-        target_messages: List[BaseMessage],
-        start_index: int,
-        end_index: int,
+            messages: List[BaseMessage],
+            target_messages: List[BaseMessage],
+            start_index: int,
+            end_index: int,
     ) -> List[BaseMessage]:
         """
         Return a **new** list where the slice
@@ -464,8 +475,7 @@ class ContextUtils:
         if start_index < 0 or end_index >= len(messages) or start_index > end_index:
             raise IndexError("Invalid start/end index")
 
-        resume_index = end_index + 1
-        return messages[:start_index] + target_messages + messages[resume_index:]
+        return messages[:start_index] + target_messages + messages[end_index + 1:]
 
     @staticmethod
     def find_all_dialogue_round(messages: List[BaseMessage]) -> List[List[Optional[int]]]:
@@ -504,7 +514,11 @@ class ContextUtils:
                 # Found assistant, check if it has tool_calls
                 msg = messages[i]
                 # tool_calls indicated by content type or metadata (adapt as needed)
-                has_tool_calls = msg.role == "assistant" and hasattr(msg, "tool_calls") and msg.tool_calls
+                has_tool_calls = (
+                    msg.role == "assistant"
+                    and hasattr(msg, "tool_calls")
+                    and msg.tool_calls
+                )
 
                 if not has_tool_calls:
                     # This assistant closes a round
@@ -541,7 +555,10 @@ class ContextUtils:
         return rounds
 
     @staticmethod
-    def find_last_n_dialogue_round(messages: List[BaseMessage], n: int) -> int:
+    def find_last_n_dialogue_round(
+            messages: List[BaseMessage],
+            n: int
+    ) -> int:
         """
         Find the starting index of the n-th conversation round from the end.
 
