@@ -279,7 +279,7 @@ async def test_unmatched_rail_approval_lifetime_and_deny_priority(tmp_path, choi
             ],
         }
 
-    def persist(target, delta):
+    def persist(target, delta, *, approval_grants=None, session_id=None):
         target.update(deepcopy(delta))
         return True
 
@@ -290,8 +290,8 @@ async def test_unmatched_rail_approval_lifetime_and_deny_priority(tmp_path, choi
     host = ToolPermissionHost(
         get_permissions_snapshot=snapshot,
         resolve_workspace_dir=lambda: tmp_path,
-        persist_allow_rule=lambda delta: persist(disk, delta),
-        persist_session_allow_rule=lambda delta: persist(session_cfg, delta),
+        persist_allow_rule=lambda delta, **kwargs: persist(disk, delta, **kwargs),
+        persist_session_allow_rule=lambda delta, **kwargs: persist(session_cfg, delta, **kwargs),
         on_permission_evaluated=cloud_unavailable,
     )
     rail = PermissionInterruptRail(config=disk, host=host)

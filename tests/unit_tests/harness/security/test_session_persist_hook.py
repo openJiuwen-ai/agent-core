@@ -16,8 +16,8 @@ def test_session_remember_calls_session_persist_hook() -> None:
     session_calls: list[dict] = []
 
     host = ToolPermissionHost(
-        persist_allow_rule=lambda cfg: user_calls.append(cfg) or True,
-        persist_session_allow_rule=lambda cfg: session_calls.append(cfg) or True,
+        persist_allow_rule=lambda cfg, *, approval_grants: user_calls.append(cfg) or True,
+        persist_session_allow_rule=lambda cfg, *, approval_grants: session_calls.append(cfg) or True,
         get_permissions_snapshot=lambda: {
             "enabled": True,
             "tools": {"bash": "ask"},
@@ -49,8 +49,8 @@ def test_permanent_remember_calls_user_persist_hook() -> None:
     user_calls: list[dict] = []
     session_calls: list[dict] = []
     host = ToolPermissionHost(
-        persist_allow_rule=lambda cfg: user_calls.append(cfg) or True,
-        persist_session_allow_rule=lambda cfg: session_calls.append(cfg) or True,
+        persist_allow_rule=lambda cfg, *, approval_grants: user_calls.append(cfg) or True,
+        persist_session_allow_rule=lambda cfg, *, approval_grants: session_calls.append(cfg) or True,
         get_permissions_snapshot=lambda: {
             "enabled": True,
             "tools": {"bash": "ask"},
@@ -177,7 +177,7 @@ async def test_session_remember_stores_auto_confirm_when_session_persist_succeed
 
     session_calls: list[dict] = []
     rail, _disk = _ask_bash_rail(
-        persist_session=lambda cfg: session_calls.append(cfg) or True,
+        persist_session=lambda cfg, *, approval_grants: session_calls.append(cfg) or True,
     )
     session, stored = _session_store()
     ctx = AgentCallbackContext(agent=object(), session=session)
@@ -247,7 +247,7 @@ async def test_permanent_remember_does_not_store_auto_confirm_when_persist_succe
 
     user_calls: list[dict] = []
     rail, _disk = _ask_bash_rail(
-        persist_permanent=lambda cfg: user_calls.append(cfg) or True,
+        persist_permanent=lambda cfg, **kwargs: user_calls.append(cfg) or True,
     )
     session, stored = _session_store()
     ctx = AgentCallbackContext(agent=object(), session=session)
@@ -288,7 +288,7 @@ def test_session_persist_hook_receives_session_id_from_ctx() -> None:
     """Interrupt resume often has an empty ContextVar; rail must pass ctx.session id."""
     received: list[tuple[dict, str | None]] = []
 
-    def persist(cfg: dict, session_id: str | None = None) -> bool:
+    def persist(cfg: dict, session_id: str | None = None, *, approval_grants) -> bool:
         received.append((cfg, session_id))
         return True
 
@@ -325,7 +325,7 @@ def test_session_persist_hook_without_session_id_kwarg_still_works() -> None:
     """Existing one-arg host hooks must keep working."""
     session_calls: list[dict] = []
     host = ToolPermissionHost(
-        persist_session_allow_rule=lambda cfg: session_calls.append(cfg) or True,
+        persist_session_allow_rule=lambda cfg, *, approval_grants: session_calls.append(cfg) or True,
         get_permissions_snapshot=lambda: {
             "enabled": True,
             "tools": {"bash": "ask"},
@@ -360,7 +360,7 @@ async def test_session_remember_forwards_ctx_session_id_to_persist_hook() -> Non
 
     received: list[str | None] = []
 
-    def persist(cfg: dict, session_id: str | None = None) -> bool:
+    def persist(cfg: dict, session_id: str | None = None, *, approval_grants=None) -> bool:
         received.append(session_id)
         return True
 
@@ -434,7 +434,7 @@ def test_builtin_deny_does_not_persist_session_allow() -> None:
         }
     )
     host = ToolPermissionHost(
-        persist_session_allow_rule=lambda cfg: session_calls.append(cfg) or True,
+        persist_session_allow_rule=lambda cfg, *, approval_grants: session_calls.append(cfg) or True,
         get_permissions_snapshot=lambda: effective,
     )
     rail = PermissionInterruptRail(config=effective, host=host)

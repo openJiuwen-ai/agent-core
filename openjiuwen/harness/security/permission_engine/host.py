@@ -89,16 +89,17 @@ class ToolPermissionHost:
     会传入 ``ctx.session`` 解析出的 id，便于叠会话 overlay；不接受则保持无参调用。
     """
 
-    persist_allow_rule: Callable[[dict[str, Any]], bool] | None = None
+    persist_allow_rule: Callable[..., bool] | None = None
     """自定义「永久允许」写盘；入参为护栏已合并好的整份 ``permissions`` dict。
 
     调用顺序：护栏先 merge，再 ``update_config(merged)``，最后调用本回调；
     返回 ``False`` 时护栏会回滚内存配置。未设置本回调时则使用
     ``persist_rule_merge.write_permissions_section_to_agent_config_yaml``
     写入 ``permission_yaml_path``。产品层应写入 User 文件，不要整段覆盖 Global ``tools``。
-    若回调接受 ``approval_grant`` 关键字，另传本次对象授权记录，便于仅持久化
-    此记录，避免把快照中已有的会话授权一并提升为永久授权。
-    Shell 拆分授权改传 ``approval_grants`` 列表，宿主应整批保存，且只保存本次增量。
+    回调须接受 ``approval_grants`` 关键字列表，只持久化本次增量，避免将快照
+    中已有的会话授权提升为永久授权。单对象和 Shell 拆分都只调用一次回调；
+    单条 Shell 命令的批次同时包含子命令记录和该操作的精确记录，避免同一
+    命令反复触发其他 Guard 的 ASK。
     """
 
     persist_session_allow_rule: Callable[..., bool] | None = None

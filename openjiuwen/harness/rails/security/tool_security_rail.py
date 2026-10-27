@@ -400,6 +400,15 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         grants = build_operation_grants(normalized_name, tool_args, base_cfg,
                                         self._approval_workspace(), mode=authorization_mode,
                                         scope=authorization_scope)
+        if (
+            authorization_scope == "subcommands" and len(grants) == 1
+            and len(parse_shell_for_permission(tool_args.get("command") or "").subcommands) == 1
+        ):
+            # Keep combination reuse, while remembering the single complete
+            # operation that the user approved across all ASK guards.
+            grants.append(build_operation_grant(
+                normalized_name, tool_args, base_cfg, self._approval_workspace(),
+            ))
         cfg = deepcopy(base_cfg)
         overrides = list(cfg.get("approval_overrides") or [])
         grant_ids = {grant["id"] for grant in grants}
@@ -412,15 +421,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         if persist_hook is not None:
             try:
-                persisted = bool(
-                    self._invoke_permissions_hook(
-                        persist_hook,
-                        cast(dict[str, Any], cfg),
-                        session_id=session_id,
-                        **({"approval_grant": grants[0]} if authorization_scope != "subcommands"
-                           else {"approval_grants": grants}),
-                    )
-                )
+                persisted = bool(self._invoke_permissions_hook(
+                    persist_hook, cast(dict[str, Any], cfg),
+                    session_id=session_id, approval_grants=grants,
+                ))
             except Exception:
                 logger.warning(
                     "[PermissionEngine] permission.persist.host_failed",
@@ -689,7 +693,9 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     )
                     if self._should_store_auto_confirm(
                         approved=confirm_payload.approved,
-                        auto_confirm=confirm_payload.auto_confirm and confirm_payload.authorization_scope != "subcommands",
+                        auto_confirm=(
+                            confirm_payload.auto_confirm and confirm_payload.authorization_scope != "subcommands"
+                        ),
                         session=ctx.session,
                         auto_confirm_key=auto_confirm_key,
                         persisted=persisted,
@@ -946,22 +952,15 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         hook: Any,
         *args: Any,
         session_id: str | None = None,
-        approval_grant: dict[str, Any] | None = None,
         approval_grants: list[dict[str, Any]] | None = None,
     ) -> Any:
-        """Forward optional context without changing legacy callback signatures."""
+        """Forward the approval batch and optional session context."""
         kwargs: dict[str, Any] = {}
         if session_id and PermissionInterruptRail._hook_accepts_keyword(
             hook, "session_id"
         ):
             kwargs["session_id"] = session_id
-        if approval_grant is not None and PermissionInterruptRail._hook_accepts_keyword(
-            hook, "approval_grant"
-        ):
-            kwargs["approval_grant"] = approval_grant
-        if approval_grants is not None and PermissionInterruptRail._hook_accepts_keyword(
-            hook, "approval_grants"
-        ):
+        if approval_grants is not None:
             kwargs["approval_grants"] = approval_grants
         return hook(*args, **kwargs)
 

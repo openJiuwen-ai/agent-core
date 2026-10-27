@@ -17,7 +17,7 @@ from openjiuwen.harness.security.permission_engine.models import PermissionConfi
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind", ["file", "url", "shell", "unsupported"])
+@pytest.mark.parametrize("kind", ["file", "url", "shell", "single_file_shell", "single_url_shell", "unsupported"])
 @pytest.mark.parametrize("reply", ["omitted", "exact", "allow", "scope", "mode"])
 @pytest.mark.parametrize("hosted", [False, True])
 async def test_default_and_explicit_scope_round_trip(tmp_path, kind, reply, hosted):
@@ -34,6 +34,10 @@ async def test_default_and_explicit_scope_round_trip(tmp_path, kind, reply, host
                 {"url": "https://other.example.co.uk/b"}, "domain"),
         "shell": ("bash", {"command": "chmod --version && chown --version", "workdir": str(tmp_path)},
                   {"command": "chmod --version", "workdir": str(tmp_path)}, "subcommands"),
+        "single_file_shell": ("bash", {"command": "cat ./secret.txt", "workdir": str(tmp_path)},
+                              {"command": "cat ./other.txt", "workdir": str(tmp_path)}, "subcommands"),
+        "single_url_shell": ("bash", {"command": "curl https://api.example.co.uk/a", "workdir": str(tmp_path)},
+                             {"command": "curl https://api.example.co.uk/b", "workdir": str(tmp_path)}, "subcommands"),
         "unsupported": ("bash", {"command": "echo A > a.txt", "workdir": str(tmp_path)},
                         {"command": "echo B > a.txt", "workdir": str(tmp_path)}, "exact"),
     }[kind]
@@ -44,7 +48,7 @@ async def test_default_and_explicit_scope_round_trip(tmp_path, kind, reply, host
     response = {"approved": True, "auto_confirm": True, "persist_allow": False, **fields}
     writes = []
 
-    def save(updated):
+    def save(updated, *, approval_grants=None):
         cfg.update(deepcopy(updated))
         writes.append(updated)
         return True
@@ -75,9 +79,15 @@ async def test_default_and_explicit_scope_round_trip(tmp_path, kind, reply, host
     assert all(json.loads(grant["pattern"])["scope"] == (
         "exact" if expected == "subcommands" else expected
     ) for grant in grants)
-    assert all(grant["match_type"] == (
-        "shell_subcommand" if expected == "subcommands" else "exact_operation"
-    ) for grant in grants)
+    if expected == "subcommands" and kind.startswith("single_"):
+        assert [grant["match_type"] for grant in grants] == ["shell_subcommand", "exact_operation"]
+        assert not state
+    else:
+        assert all(grant["match_type"] == (
+            "shell_subcommand" if expected == "subcommands" else "exact_operation"
+        ) for grant in grants)
     engine = PermissionEngine(cfg, workspace_root=tmp_path)
     assert (await engine.check_permission(tool, args)).is_allowed
-    assert (await engine.check_permission(tool, reusable)).is_allowed == (expected != "exact")
+    assert (await engine.check_permission(tool, reusable)).is_allowed == (
+        expected != "exact" and not kind.startswith("single_")
+    )
