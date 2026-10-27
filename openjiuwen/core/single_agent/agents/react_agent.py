@@ -212,6 +212,10 @@ def log_llm_response(log: Any, ai_message: Any) -> None:
 _TOOLCALL_PROGRESS_GRACE_S = 15.0
 _TOOLCALL_PROGRESS_INTERVAL_S = 30.0
 
+# Ordinary reasoning-only / blank no-tool turns: one bounded same-round retry
+# after injecting [EMPTY_RESPONSE], then the explicit empty-response error.
+EMPTY_RESPONSE_MAX_RETRIES = 1
+
 
 def _maybe_toolcall_progress_output(
         *,
@@ -2268,6 +2272,7 @@ class ReActAgent(BaseAgent):
 
                 if invoke_inputs.result is None:
                     _truncation_retry_count = 0
+                    _empty_response_retry_count = 0
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
                         ctx.extra["_react_iteration"] = iteration + 1
@@ -2434,11 +2439,13 @@ class ReActAgent(BaseAgent):
                                 ).strip()
                                 # Reasoning-only (or fully blank) no-tool turns are not a
                                 # valid ReAct answer: they deliver nothing to the user /
-                                # team board. Treat as error so callers can retry instead
-                                # of silently ending with empty output (see 2026-09-11
-                                # team stall: OA.05000090). Leave a reject notice in
-                                # context for the next wake (e.g. stale-claim nudge);
-                                # do not call the model again in this same loop.
+                                # team board (see 2026-09-11 team stall: OA.05000090).
+                                # Retry once in-loop with an [EMPTY_RESPONSE] notice so
+                                # the model can recover; exhaust → explicit error (never
+                                # silent empty success). Only continue when another
+                                # for-loop iteration remains — otherwise continue falls
+                                # into for-else as "Max iterations reached" and loses
+                                # finish_reason / reasoning_present.
                                 if not content:
                                     await context.add_messages(
                                         UserMessage(
@@ -2450,6 +2457,25 @@ class ReActAgent(BaseAgent):
                                             ),
                                         )
                                     )
+                                    has_next_iteration = (
+                                        iteration + 1 < self._config.max_iterations
+                                    )
+                                    if (
+                                        _empty_response_retry_count < EMPTY_RESPONSE_MAX_RETRIES
+                                        and has_next_iteration
+                                    ):
+                                        _empty_response_retry_count += 1
+                                        logger.info(
+                                            "[ReActAgent] empty no-tool turn; "
+                                            "same-round retry=%s/%s session_id=%s "
+                                            "iteration=%s reasoning_present=%s",
+                                            _empty_response_retry_count,
+                                            EMPTY_RESPONSE_MAX_RETRIES,
+                                            session.get_session_id(),
+                                            iteration + 1,
+                                            bool(reasoning),
+                                        )
+                                        continue
                                     await self.context_engine.save_contexts(session)
                                     result = {
                                         "output": (
