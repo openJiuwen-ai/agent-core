@@ -16,16 +16,21 @@ runs, so this function never has to choose between "warm" and "cold"
 rebuild paths — stop+remove+cold-rebuild is the only cross-session
 path.
 
+Invariant: a same-session pool entry always wins over metadata-driven
+CREATE. ``pending_create`` / ``cleaned`` only recreate when the pool is
+empty; a PAUSED entry resumes (including pause-before-DB-row).
+
 ================ ================ ============== ==================== =======
 team_in_db       team_in_session  pool_entry     same_session?         kind
 ================ ================ ============== ==================== =======
+*                *                present        yes (PAUSED)         RESUME_FROM_PAUSE
+*                *                present        yes (RUNNING/STOPPING) REJECT_RUNNING
 False            False            None           —                    CREATE
-False            False            present        —                    REJECT_INCONSISTENT
-False            True             —              —                    REJECT_ORPHANED
+False            False            present        —                    (handled by pool row)
+False            True             None           pending_create/cleaned CREATE
+False            True             None           other                 REJECT_ORPHANED
 True             False            None           —                    NEW_TEAM_IN_SESSION
 True             True             None           —                    COLD_RECOVER
-True             True             present        yes (RUNNING)        REJECT_RUNNING
-True             True             present        yes (PAUSED)         RESUME_FROM_PAUSE
 ================ ================ ============== ==================== =======
 """
 
@@ -86,16 +91,41 @@ def decide_run_action(
         target_team_name: The team name being requested.
         team_db_state: Optional DB lifecycle state stored in the session
             bucket. ``pending_create`` and ``cleaned`` are recreatable
-            states when the DB row is absent.
+            states when the DB row is absent **and the pool is empty**.
 
     Returns:
         A :class:`RunAction` describing what the runtime should do.
     """
-    # Re-creatable: the checkpoint bucket describes a team whose DB row
-    # has not been created yet, or was intentionally cleaned.
-    # This check must come BEFORE the REJECT_INCONSISTENT check below,
-    # because a team in pending_create/cleaned state with a pool entry
-    # should be allowed to recreate, not rejected as inconsistent.
+    # Same-session pool occupancy wins. Never CREATE into an occupied slot
+    # (that races STOPPING cleanup / PAUSED resume and surfaces as 132005).
+    if pool_entry is not None:
+        if pool_entry.current_session_id != target_session_id:
+            raise RuntimeError(
+                f"dispatch invariant violated: pool entry for {target_team_name!r} "
+                f"on session {pool_entry.current_session_id!r} must be torn down "
+                f"before dispatching to session {target_session_id!r}",
+            )
+        if pool_entry.state is RuntimeState.PAUSED:
+            return RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False)
+        if pool_entry.state is RuntimeState.STOPPING:
+            return RunAction(
+                kind=RunActionKind.REJECT_RUNNING,
+                require_spec=False,
+                reason=(
+                    f"team {target_team_name!r} is still stopping on session "
+                    f"{target_session_id!r}; retry after cleanup completes"
+                ),
+            )
+        return RunAction(
+            kind=RunActionKind.REJECT_RUNNING,
+            require_spec=False,
+            reason=(
+                f"team {target_team_name!r} already running on session "
+                f"{target_session_id!r}; use interact"
+            ),
+        )
+
+    # Pool empty. Interpret DB / checkpoint metadata.
     if not team_in_db and team_in_session:
         if team_db_state in {
             TEAM_DB_STATE_PENDING_CREATE,
@@ -111,47 +141,14 @@ def decide_run_action(
             ),
         )
 
-    # Inconsistent: pool says active, DB says no row.
-    # This is only reached when team_db_state is NOT pending_create/cleaned.
-    if not team_in_db and pool_entry is not None:
-        return RunAction(
-            kind=RunActionKind.REJECT_INCONSISTENT,
-            require_spec=False,
-            reason=(
-                f"team {target_team_name!r} present in pool but missing from DB"
-            ),
-        )
-
     # Fresh team: needs a spec.
     if not team_in_db:
         return RunAction(kind=RunActionKind.CREATE, require_spec=True)
 
     # Cold paths (no pool entry, DB has team).
-    if pool_entry is None:
-        if team_in_session:
-            return RunAction(kind=RunActionKind.COLD_RECOVER, require_spec=False)
-        return RunAction(kind=RunActionKind.NEW_TEAM_IN_SESSION, require_spec=False)
-
-    # Pool entry exists. Manager.activate guarantees it belongs to
-    # ``target_session_id`` — cross-session entries are torn down before
-    # dispatch runs, so reaching this branch on a different session is a
-    # contract violation.
-    if pool_entry.current_session_id != target_session_id:
-        raise RuntimeError(
-            f"dispatch invariant violated: pool entry for {target_team_name!r} "
-            f"on session {pool_entry.current_session_id!r} must be torn down "
-            f"before dispatching to session {target_session_id!r}",
-        )
-    if pool_entry.state == RuntimeState.PAUSED:
-        return RunAction(kind=RunActionKind.RESUME_FROM_PAUSE, require_spec=False)
-    return RunAction(
-        kind=RunActionKind.REJECT_RUNNING,
-        require_spec=False,
-        reason=(
-            f"team {target_team_name!r} already running on session "
-            f"{target_session_id!r}; use interact"
-        ),
-    )
+    if team_in_session:
+        return RunAction(kind=RunActionKind.COLD_RECOVER, require_spec=False)
+    return RunAction(kind=RunActionKind.NEW_TEAM_IN_SESSION, require_spec=False)
 
 
 __all__ = ["RunAction", "RunActionKind", "decide_run_action"]

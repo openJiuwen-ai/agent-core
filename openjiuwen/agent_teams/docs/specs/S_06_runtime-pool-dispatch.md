@@ -35,7 +35,7 @@
 1. **pool key 唯一**：`TeamRuntimePool._teams` 以 `team_name` 为唯一键，同一 `team_name` 在内存中至多对应一个 `ActiveTeam` 实例。多 session 共用同一 team_name 不会产生两份 entry，切 session 由 `activate` 在 dispatch 前 `stop_team`+`pool.remove` 拆掉旧 entry，再走冷重建。
 2. **pool 只持 leader**：`base=False, member=False` 的 spec 路径是 pool 写入的**唯一**入口（`manager.activate` → `_apply_action` → `_pool.add`）。`member=True` 的 spawn 路径与 `base=True` 的 BaseTeam 路径都不写 pool。已删除的 `register_instance` 之类"已 build 实例 → pool"快捷入口不会回归。
 3. **派发决策无副作用**：`decide_run_action` 是纯函数，只读入参，不动 factory / pool / session / DB。任何副作用必须发生在 `_apply_action`。
-4. **派发决策完备**：truth table 7 个分支覆盖 `(team_in_db, team_in_session, pool_entry?)` 在 `activate` 已经做完 cross-session tear-down 之后的合法组合（即 `pool_entry` 一旦存在必然 `current_session_id == target_session_id`），无 `else: raise UnhandledCase`。具体见下文表。
+4. **派发决策完备**：truth table 覆盖 `(team_in_db, team_in_session, pool_entry?)` 在 `activate` 已经做完 cross-session tear-down 之后的合法组合（即 `pool_entry` 一旦存在必然 `current_session_id == target_session_id`），无 `else: raise UnhandledCase`。同 session 的 pool 占用优先于 metadata。具体见下文表。
 5. **跨 session pool entry 由 activate 在 dispatch 前拆除**：`activate` 看到 `pool_entry.current_session_id != target_session_id` 直接 `await stop_team(...)`，使 `decide_run_action` 永远不必处理跨 session 的 pool entry。如果调用方手动构造跨 session 的 `pool_entry` 调 `decide_run_action`，函数 `raise RuntimeError("dispatch invariant violated: ...")`——这是契约违反，不是合法分支。
 6. **REJECT 不入 pool / 不动 pool**：三类 REJECT 返回 `TeamRuntimeActivation` 时不增删 pool entry，已存在的 entry 状态不变（只读快照）。
 7. **session 一致性**：`_resolve_entry(team_name, session_id)` 命中要求 `entry.current_session_id == session_id`。session 不一致直接返回 `None`，相当于"该 team 当前不在你以为的 session 上"。
@@ -196,21 +196,21 @@ def decide_run_action(
 | # | team_in_db | team_in_session | team_db_state | pool_entry | pool_state | RunActionKind | `_apply_action` 副作用 |
 |---|---|---|---|---|---|---|---|
 | 1 | F | F | — | None | — | `CREATE` | `pre_run(inputs)` → `spec.build()` → 新 entry 入 pool |
-| 2 | F | T | `pending_create` / `cleaned` | * | * | `CREATE` | 同行 1（允许重新创建团队） |
-| 3 | F | T | 其他 | * | * | `REJECT_ORPHANED` | 不动 pool；返回 `reason` |
-| 4 | F | * | — | present | * | `REJECT_INCONSISTENT` | 不动 pool；返回 `reason` |
+| 2 | F | T | `pending_create` / `cleaned` | None | — | `CREATE` | 同行 1（仅空池时允许重建） |
+| 3 | F | T | 其他 | None | — | `REJECT_ORPHANED` | 不动 pool；返回 `reason` |
+| 4 | * | * | — | present | RUNNING / STOPPING | `REJECT_RUNNING` | 不动 pool；引导 caller 改用 `interact` / 稍后重试 |
 | 5 | T | F | — | None | — | `NEW_TEAM_IN_SESSION` | `pre_run(inputs)` → `spec.build()` → `agent.resume_for_new_session(session)` → 入 pool |
 | 6 | T | T | — | None | — | `COLD_RECOVER` | `TeamAgent.recover_from_session(session, team_name, runtime_spec=spec)` → `agent.recover_team()` → 入 pool |
-| 7 | T | * | — | present | RUNNING | `REJECT_RUNNING` | 不动 pool；引导 caller 改用 `interact` |
-| 8 | T | * | — | present | PAUSED | `RESUME_FROM_PAUSE` | `pre_run(inputs)` → `entry.state = RUNNING` → `gate.reset()` |
+| 7 | * | * | — | present | PAUSED | `RESUME_FROM_PAUSE` | `pre_run(inputs)` → `entry.state = RUNNING` → `gate.reset()` |
 
 注：
 
 - `team_db_state` 仅在 `team_in_session=True` 时有意义；标 `—` 表示该维度不参与判定，标 `*` 表示该维度不影响判定。
 - `pool_state` 在 `pool_entry is None` 时不参与判定（标 `—`）。
-- **行 2 是关键修复**：当 `team_db_state` 为 `pending_create` 或 `cleaned` 时，即使 `team_in_db=False` 且 `pool_entry` 存在，也允许重新创建团队。这解决了"Team 创建过程中被 pause 后无法恢复"的问题。
-- 行 4 是"内存说有，DB 说无"——如果 `team_db_state` 不是 `pending_create` / `cleaned`，说明状态机已腐化，直接 reject 拒绝继续。
-- 行 7 的语义不是"出错"，而是"这个 team 在这个 session 上正常运行中——别再 run 了，去 interact"。
+- **同 session 的 pool 占用优先于 metadata**：`pool_entry` 非空时先按 `pool_state` 走 `RESUME_FROM_PAUSE` / `REJECT_RUNNING`，不再因 `pending_create` / `cleaned` 走 `CREATE`（避免向已占用槽位再建一份，触发 132005）。
+- 行 2 仅在 **pool 为空** 时重建：`pending_create` / `cleaned` 表示 DB row 尚未落成或已清理，但 session bucket 仍可复用。
+- `REJECT_INCONSISTENT` 枚举保留以兼容调用方，但同 session pool 占用已并入行 4/7，dispatch 不再单独产出该 kind。
+- 行 4 的 RUNNING 语义不是"出错"，而是"这个 team 在这个 session 上正常运行中——别再 run 了，去 interact"；STOPPING 则提示稍后重试。
 - 旧 `WARM_RECOVER` / `NEW_TEAM_IN_SESSION_WARM` 两行已下架（见 F_05）。任何"跨 session 复用 in-memory `TeamAgent`"的诱惑——例如想避免重建 LLM client、想保留 contextvars——必须再次评估，不允许重新引入。
 
 ### `TeamRuntimeManager` 公共方法
@@ -385,7 +385,7 @@ def remove_team_namespace(session, team_name: str) -> bool: ...
                                          |          │
                                _inspect_session ─────┤  (DB + checkpoint)
                                          |          │
-                               decide_run_action  ◄──┘  (pure, 7-way)
+                               decide_run_action  ◄──┘  (pure, pool-first)
                                          |
                                    _apply_action
                           ┌──────────────┼──────────────┐

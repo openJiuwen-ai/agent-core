@@ -47,16 +47,17 @@ def test_create_when_team_missing_and_session_clean():
     assert action.require_spec is True
 
 
-def test_reject_inconsistent_when_pool_has_team_db_does_not():
+def test_reject_running_when_pool_present_without_db_row():
+    """Pool occupancy wins even when the DB row is missing."""
     action = decide_run_action(
         team_in_db=False,
         team_in_session=False,
-        pool_entry=_pool_entry(),
+        pool_entry=_pool_entry(session_id="s1"),
         target_session_id="s1",
         target_team_name="alpha",
     )
-    assert action.kind is RunActionKind.REJECT_INCONSISTENT
-    assert action.reason and "pool" in action.reason
+    assert action.kind is RunActionKind.REJECT_RUNNING
+    assert action.reason and "already running" in action.reason
 
 
 def test_reject_orphaned_when_session_bucket_exists_but_no_team_row():
@@ -89,6 +90,27 @@ def test_create_when_session_bucket_is_recreatable_without_team_row(team_db_stat
     )
     assert action.kind is RunActionKind.CREATE
     assert action.require_spec is True
+
+
+@pytest.mark.parametrize(
+    "team_db_state",
+    [
+        TEAM_DB_STATE_PENDING_CREATE,
+        TEAM_DB_STATE_CLEANED,
+    ],
+)
+def test_resume_when_recreatable_bucket_but_pool_paused(team_db_state: str):
+    """pending_create/cleaned must not CREATE into an occupied PAUSED slot."""
+    pool = _pool_entry(session_id="s1", state=RuntimeState.PAUSED)
+    action = decide_run_action(
+        team_in_db=False,
+        team_in_session=True,
+        pool_entry=pool,
+        target_session_id="s1",
+        target_team_name="alpha",
+        team_db_state=team_db_state,
+    )
+    assert action.kind is RunActionKind.RESUME_FROM_PAUSE
 
 
 def test_reject_orphaned_when_created_bucket_loses_team_row():
@@ -139,6 +161,19 @@ def test_reject_running_when_pool_active_on_same_session():
     assert action.reason and "interact" in action.reason
 
 
+def test_reject_running_when_pool_still_stopping():
+    pool = _pool_entry(team_name="alpha", session_id="s1", state=RuntimeState.STOPPING)
+    action = decide_run_action(
+        team_in_db=True,
+        team_in_session=True,
+        pool_entry=pool,
+        target_session_id="s1",
+        target_team_name="alpha",
+    )
+    assert action.kind is RunActionKind.REJECT_RUNNING
+    assert action.reason and "still stopping" in action.reason
+
+
 def test_resume_from_pause_when_pool_paused_on_same_session():
     pool = _pool_entry(team_name="alpha", session_id="s1", state=RuntimeState.PAUSED)
     action = decide_run_action(
@@ -166,18 +201,26 @@ def test_raises_when_pool_entry_on_other_session():
 
 
 @pytest.mark.parametrize(
-    "team_in_db,team_in_session,has_pool,session_match,paused,expected",
+    "team_in_db,team_in_session,has_pool,session_match,paused,team_db_state,expected",
     [
-        (False, False, False, False, False, RunActionKind.CREATE),
-        # REJECT_INCONSISTENT triggers on (not team_in_db && pool present)
-        # regardless of session match — keep session_match True so the
-        # cross-session assertion below does not preempt the case.
-        (False, False, True, True, False, RunActionKind.REJECT_INCONSISTENT),
-        (False, True, False, False, False, RunActionKind.REJECT_ORPHANED),
-        (True, False, False, False, False, RunActionKind.NEW_TEAM_IN_SESSION),
-        (True, True, False, False, False, RunActionKind.COLD_RECOVER),
-        (True, True, True, True, False, RunActionKind.REJECT_RUNNING),
-        (True, True, True, True, True, RunActionKind.RESUME_FROM_PAUSE),
+        (False, False, False, False, False, None, RunActionKind.CREATE),
+        # Pool-first: occupied RUNNING slot rejects even without a DB row.
+        (False, False, True, True, False, None, RunActionKind.REJECT_RUNNING),
+        (False, True, False, False, False, None, RunActionKind.REJECT_ORPHANED),
+        (True, False, False, False, False, None, RunActionKind.NEW_TEAM_IN_SESSION),
+        (True, True, False, False, False, None, RunActionKind.COLD_RECOVER),
+        (True, True, True, True, False, None, RunActionKind.REJECT_RUNNING),
+        (True, True, True, True, True, None, RunActionKind.RESUME_FROM_PAUSE),
+        # pending_create + PAUSED: pool wins over metadata-driven CREATE.
+        (
+            False,
+            True,
+            True,
+            True,
+            True,
+            TEAM_DB_STATE_PENDING_CREATE,
+            RunActionKind.RESUME_FROM_PAUSE,
+        ),
     ],
 )
 def test_truth_table_full_coverage(
@@ -186,6 +229,7 @@ def test_truth_table_full_coverage(
     has_pool: bool,
     session_match: bool,
     paused: bool,
+    team_db_state: str | None,
     expected: RunActionKind,
 ):
     target_session = "s1"
@@ -202,5 +246,6 @@ def test_truth_table_full_coverage(
         pool_entry=pool,
         target_session_id=target_session,
         target_team_name="alpha",
+        team_db_state=team_db_state,
     )
     assert action.kind is expected
