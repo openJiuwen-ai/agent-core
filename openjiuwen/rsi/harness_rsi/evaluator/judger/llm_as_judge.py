@@ -33,6 +33,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import (
     scoring_contract,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.optimization_signals import optimization_signals_contract
+from openjiuwen.rsi.harness_rsi.evaluator.transport import transient_transport_error
 from openjiuwen.rsi.harness_rsi.model_call import RetryableModelOutputError, is_retryable_model_call_failure
 from openjiuwen.rsi.harness_rsi.feedback import FeedbackTracker
 
@@ -112,7 +113,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
             raise EvaluationInfrastructureError("Baseline comparison is disabled for this evaluator")
         case = normalize_grading_case(case)
         if execution_result.execution_status != "passed":
-            return self._failure_result(execution_result.error)
+            return self._execution_failure_result(execution_result.error)
         if not output_dir:
             raise EvaluationInfrastructureError("llm_as_judge requires a case output directory")
         case_dir = await asyncio.to_thread(Path(output_dir).resolve)
@@ -148,6 +149,14 @@ class LlmAsJudgeJudger(EvaluationJudger):
         except Exception as exc:
             write_judge_json(judge_dir / "error.json", {"error_type": type(exc).__name__, "message": str(exc)})
             raise EvaluationInfrastructureError(f"LLM evaluator failed; inspect {judge_dir / 'error.json'}") from exc
+
+    def _execution_failure_result(self, error: str) -> JudgeResult:
+        """Score a solver crash as a continuous harness failure, except transport errors."""
+        reason = error or "case execution failed"
+        metadata: dict[str, Any] = {}
+        if self._config.score_mode == "continuous" and not transient_transport_error(reason):
+            metadata["score_mode"] = "continuous"
+        return JudgeResult(method=self.method, score=0.0, passed=False, reason=reason, metadata=metadata)
 
     async def _evaluate(
         self,

@@ -44,6 +44,12 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.agents.output import (
     parse_json_object_response,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.execution_contract import action_bundle_key
+from openjiuwen.rsi.harness_rsi.member_optimizer.package_registry import (
+    REGISTRY_GUIDANCE,
+    normalize_package_registries,
+    upsert_prompt_section,
+    validate_package_registries,
+)
 from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
     MemberActionExecutionResult,
     MemberActionMergeResult,
@@ -167,6 +173,9 @@ def _sync_skill_registry_for_written_files(
         raise ValueError(f"skill action must declare {registry_rel} so the skill can be mounted")
 
     registry_path = action_worktree.resolve() / registry_rel
+    report = normalize_package_registries(action_worktree, writable_paths=[registry_rel])
+    if report.issues:
+        raise ValueError("; ".join(issue.describe() for issue in report.issues))
     registry = _load_yaml_manifest(registry_path) if registry_path.is_file() else []
     existing = registry.get("skills", []) if isinstance(registry, dict) else registry
     if not isinstance(existing, list):
@@ -438,7 +447,8 @@ def _action_resource_guidance(action: MemberOptimizationAction) -> str:
         return (
             f"Keep `{target_path}` a valid package-local skill resource. If "
             "`skills/skills.yaml` is declared, keep it valid YAML and mount the "
-            "parent `skills` directory."
+            "actual skill directory (for example skills/foo), or its parent skills directory; "
+            "never mount the SKILL.md file."
         )
     if action.action_group == "subagent" and action.operation == "add":
         return (
@@ -719,6 +729,7 @@ class MemberActionExecutorAgent:
             action_worktree=action_worktree,
         )
         user_message += f"\nHost runtime iteration ceiling: {self._runtime_iteration_hard_limit}; runtime.yaml cannot change it."
+        user_message += "\n\n" + REGISTRY_GUIDANCE
         message = user_message
         last_response_text = ""
         last_error = ""
@@ -880,20 +891,22 @@ class MemberActionExecutorAgent:
         written_files: list[str],
     ) -> list[str]:
         root = action_worktree.resolve()
-        if action.action_group == "prompt" and action.operation == "add":
+        if action.action_group == "prompt" and action.operation in {"add", "modify"}:
             target_rel = _normalize_rel_path(action.target_path)
             manifest_rel = "prompt_sections/sections.yaml"
             if target_rel in written_files and target_rel.startswith("prompt_sections/files/"):
                 if not _path_allowed_by_declared(manifest_rel, declared_paths):
                     raise ValueError(f"prompt/add requires declared manifest {manifest_rel}")
-                _append_manifest_entry(
-                    root / manifest_rel,
-                    list_key="sections",
-                    entry={
-                        "name": str(action.constraints.get("section_name") or Path(target_rel).stem),
-                        "file": target_rel,
-                        "priority": _int_or_default(action.constraints.get("priority"), 30),
-                    },
+                upsert_prompt_section(
+                    root,
+                    name=str(action.constraints.get("section_name") or Path(target_rel).stem),
+                    file_ref=target_rel,
+                    priority=(
+                        _int_or_default(action.constraints["priority"], 30)
+                        if "priority" in action.constraints else None
+                    ),
+                    writable_paths=declared_paths,
+                    replace_existing=action.operation == "modify",
                 )
                 written_files = sorted(set([*written_files, manifest_rel]))
         written_files = _normalize_skill_frontmatter_name_for_written_files(
@@ -901,12 +914,16 @@ class MemberActionExecutorAgent:
             action=action,
             written_files=written_files,
         )
-        return _sync_skill_registry_for_written_files(
+        written_files = _sync_skill_registry_for_written_files(
             action_worktree=root,
             action=action,
             declared_paths=declared_paths,
             written_files=written_files,
         )
+        report = normalize_package_registries(root, writable_paths=declared_paths)
+        if report.issues:
+            raise ValueError("; ".join(issue.describe() for issue in report.issues))
+        return sorted(set([*written_files, *report.changed_files]))
 
     @staticmethod
     def _load_registry_list(path: Path, key: str) -> list[str]:
@@ -1557,6 +1574,9 @@ class MemberActionExecutor:
                     _remove_empty_parent_dirs(dst.parent, request.integration_dir)
                     merged_files.append(changed_file)
 
+        report = normalize_package_registries(request.integration_dir, writable_paths=merged_files)
+        merged_files = sorted(set([*merged_files, *report.changed_files]))
+        registry_issues = report.issues or validate_package_registries(request.integration_dir)
         merge_status = "merged" if merged_files else "failed"
         if not merged_files and request.results:
             conflicts.append("no files merged from successful actions")
@@ -1569,6 +1589,7 @@ class MemberActionExecutor:
             "status": merge_status,
             "merged_files": merged_files,
             "conflicts": conflicts,
+            "registry_issues": [issue.describe() for issue in registry_issues],
             "artifact_path": str(merge_artifact),
         }
         with open(merge_artifact, "w", encoding="utf-8") as f:
@@ -1691,7 +1712,7 @@ def _validate_generated_action_resources(
     runtime_iteration_hard_limit: int = 300,
 ) -> list[str]:
     """Run cheap action-local checks before merging generated resources."""
-    errors: list[str] = []
+    errors: list[str] = [issue.describe() for issue in validate_package_registries(worktree_dir)]
     if action.action_group == "config" and action.operation != "remove":
         try:
             read_runtime_policy(worktree_dir, default_max_iterations=min(300, runtime_iteration_hard_limit),

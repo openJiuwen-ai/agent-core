@@ -30,6 +30,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructure
 from openjiuwen.rsi.harness_rsi.evaluator.judger import build_judger
 from openjiuwen.rsi.harness_rsi.evaluator.judger.base import _is_execution_only_evaluation
 from openjiuwen.rsi.harness_rsi.evaluator.metrics_collector import MetricsCollector
+from openjiuwen.rsi.harness_rsi.evaluator.transport import transient_transport_error
 from openjiuwen.rsi.harness_rsi.schema import (
     DatasetArtifact,
     EvaluationCaseTraceRef,
@@ -37,30 +38,6 @@ from openjiuwen.rsi.harness_rsi.schema import (
 
 CASE_RESULTS_DIR_NAME = "cases"
 _EVALUATION_INPUT_FILE = "evaluation_input.json"
-_TRANSIENT_ERROR_MARKERS = (
-    "connection error",
-    "connection reset",
-    "connection refused",
-    "connection aborted",
-    "connectionerror",
-    "remoteprotocolerror",
-    "peer closed connection",
-    "incomplete chunked read",
-    "server disconnected",
-    "remotedisconnected",
-    "timed out",
-    "timeout",
-    "temporarily unavailable",
-    "temporary failure in name resolution",
-    "could not resolve host",
-    "service unavailable",
-    "rate limit",
-    "too many requests",
-    "http 429",
-    "http 502",
-    "http 503",
-    "http 504",
-)
 
 
 class TeamEvaluator:
@@ -198,7 +175,7 @@ class TeamEvaluator:
                             team_skill_ref_path=team_skill_ref_path, harness_refs=deepcopy(harness_refs),
                         )
                 except EvaluationInfrastructureError as exc:
-                    transient_error = _transient_transport_error(str(exc))
+                    transient_error = transient_transport_error(str(exc))
                     if not transient_error or attempt >= retry_limit:
                         raise
                     retry_history.append(
@@ -393,15 +370,7 @@ def _transient_case_error(case_ref: EvaluationCaseTraceRef) -> str:
     except (OSError, json.JSONDecodeError):
         return ""
     error = str(payload.get("error", "") or "").strip()
-    return _transient_transport_error(error)
-
-
-def _transient_transport_error(error: str) -> str:
-    """Return the original error when it describes a retryable transport failure."""
-    lowered = error.lower()
-    if any(marker in lowered for marker in _TRANSIENT_ERROR_MARKERS):
-        return error
-    return ""
+    return transient_transport_error(error)
 
 
 def _eval_id_from_dir(eval_dir: Path) -> str:

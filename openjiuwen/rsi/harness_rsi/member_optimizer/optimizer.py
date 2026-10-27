@@ -30,7 +30,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import MemberAc
 from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
     load_action_definitions,
 )
-from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import MemberActionPlanner
+from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import ActionPlanRejectedError, MemberActionPlanner
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     load_member_optimizer_model,
 )
@@ -137,7 +137,10 @@ class MemberOptimizer:
         self._role_attributor = role_attributor or RoleAttributor(output_repair=config.output_repair)
         self._mechanism_attributor = mechanism_attributor or MechanismAttributor(output_repair=config.output_repair)
         self._member_selector = member_selector or MemberSelector()
-        self._action_planner = action_planner or MemberActionPlanner(output_repair=config.output_repair)
+        self._action_planner = action_planner or MemberActionPlanner(
+            output_repair=config.output_repair,
+            max_attempts=config.action_planning_max_attempts,
+        )
         self._action_executor = action_executor or MemberActionExecutor(
             execution_concurrency=config.execution_concurrency,
             role_execution_concurrency=config.role_execution_concurrency,
@@ -1350,7 +1353,12 @@ def _write_current_harness_refs(
 
 def _is_action_plan_rejection(error: Exception) -> bool:
     """Treat an LLM plan that fails the action contract as a rejected candidate."""
-    return isinstance(error, RuntimeError) and str(error).startswith("Member action plan validation failed:")
+    if isinstance(error, ActionPlanRejectedError):
+        return True
+    # Keep compatibility with injected planners using the original error text.
+    return isinstance(error, RuntimeError) and str(error).startswith(
+        ("Member action plan validation failed:", "Member action plan validation failed ("),
+    )
 
 
 __all__ = [

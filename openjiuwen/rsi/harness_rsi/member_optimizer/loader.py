@@ -75,6 +75,7 @@ class AnalysisRef:
     issues: list[dict[str, Any]]
     issues_path: str | None
     metadata: dict[str, Any] = field(default_factory=dict)
+    analysis_ref_path: str = ""
 
     @property
     def diagnosis_incomplete(self) -> bool:
@@ -91,12 +92,46 @@ class AnalysisRef:
             raise AnalysisUnavailableError(
                 "Analyzer did not complete a usable diagnosis; this is not a no-issues result. "
                 "The evaluation is preserved. Inspect analysis_ref.yaml and per_case_diagnoses.json "
-                "before resuming analysis."
+                "before resuming analysis.",
+                analysis_ref_path=self.analysis_ref_path,
+                per_case_diagnoses_path=str(self.metadata.get("per_case_diagnoses_path") or ""),
             )
 
 
 class AnalysisUnavailableError(RuntimeError):
     """An incomplete diagnosis cannot be treated as an empty optimization result."""
+
+    def __init__(
+        self, message: str, *, analysis_ref_path: str = "", per_case_diagnoses_path: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.analysis_ref_path = analysis_ref_path
+        self.per_case_diagnoses_path = per_case_diagnoses_path
+
+    def details(self) -> dict[str, Any]:
+        """Preserve the original diagnostic failure without a fabricated issue."""
+        result: dict[str, Any] = {
+            "status": "unavailable", "error_type": type(self).__name__, "message": str(self),
+            "analysis_ref_path": self.analysis_ref_path,
+            "per_case_diagnoses_path": self.per_case_diagnoses_path,
+            "diagnosis_errors": [],
+        }
+        path = Path(self.per_case_diagnoses_path)
+        if self.per_case_diagnoses_path and not path.is_absolute() and self.analysis_ref_path:
+            path = Path(self.analysis_ref_path).parent / path
+        if self.per_case_diagnoses_path and path.is_file():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                rows = payload.get("per_case_diagnoses", []) if isinstance(payload, dict) else []
+                result["diagnosis_errors"] = [
+                    {key: row.get(key) for key in (
+                        "case_id", "diagnosis_status", "root_cause", "error", "output_repair",
+                    )}
+                    for row in rows if isinstance(row, dict) and row.get("analysis_failed")
+                ]
+            except (OSError, ValueError, TypeError) as exc:
+                result["evidence_read_error"] = str(exc)
+        return result
 
 
 @dataclass
@@ -153,7 +188,7 @@ def load_analysis_ref(analysis_result_path: str | Path) -> AnalysisRef:
     metadata = data.get("metadata") or {}
 
     if isinstance(inline_issues, list) and inline_issues:
-        return AnalysisRef(issues=inline_issues, issues_path=issues_path_str, metadata=metadata)
+        return AnalysisRef(issues=inline_issues, issues_path=issues_path_str, metadata=metadata, analysis_ref_path=str(path))
 
     if issues_path_str:
         issues_path = Path(str(issues_path_str)).expanduser()
@@ -163,9 +198,9 @@ def load_analysis_ref(analysis_result_path: str | Path) -> AnalysisRef:
                 issues_data = yaml.safe_load(f) or {}
             resolved_issues = issues_data.get("issues", [])
             if isinstance(resolved_issues, list) and resolved_issues:
-                return AnalysisRef(issues=resolved_issues, issues_path=str(issues_file), metadata=metadata)
+                return AnalysisRef(issues=resolved_issues, issues_path=str(issues_file), metadata=metadata, analysis_ref_path=str(path))
 
-    return AnalysisRef(issues=[], issues_path=None, metadata=metadata)
+    return AnalysisRef(issues=[], issues_path=None, metadata=metadata, analysis_ref_path=str(path))
 
 
 def resolve_team_issues(analysis_ref: AnalysisRef) -> list[TeamIssue]:

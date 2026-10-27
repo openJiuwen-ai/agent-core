@@ -33,6 +33,9 @@ must not become runtime rules on ANY surface.
 Each action binds exactly one issue. At most three necessary connected actions
 may implement the same intervention across surfaces; retain the same role and
 issue and connect them with depends_on. Do not bundle independent improvements.
+The structured attributed_issue_ids field defines the issue being repaired.
+Prose may compare or explicitly exclude other issues without adding them to
+that field. Such references do not authorize changes for those other issues.
 Use constraints.surface_choice_reason to explain the missing operation and why
 these components are necessary. expected_effect states a checkable behavior,
 not a promised score. A past score rise is not proof of that mechanism.

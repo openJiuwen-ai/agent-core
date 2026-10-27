@@ -33,6 +33,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     load_member_optimizer_model,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.output import (
+    StructuredOutputExhaustedError,
     invoke_member_optimizer_agent_structured,
     parse_yaml_or_json_object_response,
 )
@@ -60,6 +61,10 @@ _SOUL_SCOPES = frozenset({"durable_operating_principle"})
 _PROMPT_CORE_PATHS = frozenset({"identity.md", "soul.md"})
 _RUN_IF_VALUES = frozenset({"dependency_succeeded", "dependency_failed", "always"})
 _MAX_ACTIONS_PER_ISSUE = 3
+
+
+class ActionPlanRejectedError(RuntimeError):
+    """A candidate plan exhausted feedback without satisfying its contract."""
 
 
 def _validate_plan_structure(plan_data: dict[str, Any]) -> list[str]:
@@ -269,35 +274,8 @@ def _validate_action_issue_attribution(
             "separate causal mechanisms require separate actions"
         ]
     action["attributed_issue_ids"] = sorted(action_issue_ids)
-    return _validate_action_issue_text_scope(action, action_issue_ids)
-
-
-def _validate_action_issue_text_scope(
-    action: dict[str, Any],
-    action_issue_ids: set[str],
-) -> list[str]:
-    """Reject prose that silently merges diagnoses outside the declared issue."""
-    scope_fields = ("description", "rationale", "expected_effect", "risk_notes", "constraints")
-    scoped_fields = {key: action.get(key) for key in scope_fields}
-    text = yaml.safe_dump(scoped_fields, allow_unicode=True).lower()
-    merged_claims = (
-        "both attributed issues",
-        "both diagnosed issues",
-        "both issues",
-        "all attributed issues",
-        "all diagnosed issues",
-        "multiple diagnosed issues",
-        "two diagnosed issues",
-    )
-    if any(claim in text for claim in merged_claims):
-        return [
-            "action prose merges multiple diagnosed issues despite declaring exactly one; "
-            "keep every action field within attributed_issue_ids"
-        ]
-    referenced_issue_ids = set(re.findall(r"\bissue_[a-z0-9_-]+\b", text))
-    out_of_scope = referenced_issue_ids - action_issue_ids
-    if out_of_scope:
-        return [f"action prose references issues outside attributed_issue_ids: {sorted(out_of_scope)}"]
+    # Prose may compare or explicitly exclude other issues. Membership and
+    # dependency checks use structured attribution, never keyword occurrence.
     return []
 
 
@@ -710,7 +688,7 @@ class MemberActionPlannerAgent:
             agent_name="MemberActionPlannerAgent",
             user_message=user_message,
             session_id=_planner_session_id(optimization_experience),
-            retry_limit=self._retry_limit,
+            retry_limit=(feedback_tracker.max_attempts - 1 if feedback_tracker is not None else self._retry_limit),
             parse_response=parse_yaml_or_json_object_response,
             validate_response=_validate_plan_structure,
             feedback_tracker=feedback_tracker,
@@ -1344,9 +1322,12 @@ class MemberActionPlanner:
         self,
         planner_agent: MemberActionPlannerAgent | None = None,
         output_repair: OutputRepairConfig | None = None,
+        max_attempts: int | None = None,
     ) -> None:
         self._agent = planner_agent
-        self._output_repair = output_repair or OutputRepairConfig()
+        self._output_repair = output_repair or OutputRepairConfig(max_attempts=10)
+        if max_attempts is not None:
+            self._output_repair = replace(self._output_repair, max_attempts=max_attempts)
 
     def _get_agent(
         self,
@@ -1490,7 +1471,8 @@ class MemberActionPlanner:
         plan_data: dict[str, Any] = {}
         validation_errors: list[str] | None = None
         final_errors: list[str] = []
-        tracker = FeedbackTracker(self._output_repair, max_attempts=max(0, stage_retry_limit) + 1)
+        # One planner-specific budget covers parsing, schema and semantic corrections.
+        tracker = FeedbackTracker(self._output_repair)
         for _attempt in range(tracker.max_attempts):
             if tracker.stop_reason or tracker.attempts >= tracker.max_attempts:
                 break
@@ -1512,9 +1494,12 @@ class MemberActionPlanner:
                 create_plan_kwargs["optimization_experience"] = dict(optimization_experience or {})
             if "feedback_tracker" in inspect.signature(agent.create_plan).parameters:
                 create_plan_kwargs["feedback_tracker"] = tracker
-            plan_data = await agent.create_plan(
-                **create_plan_kwargs,
-            )
+            try:
+                plan_data = await agent.create_plan(
+                    **create_plan_kwargs,
+                )
+            except StructuredOutputExhaustedError as exc:
+                raise ActionPlanRejectedError(str(exc)) from exc
             structure_errors = _validate_plan_structure(plan_data)
             if structure_errors:
                 validation_errors = structure_errors
@@ -1556,7 +1541,7 @@ class MemberActionPlanner:
             tracker.failed(validation_errors, plan_data)
         if validation_errors and (tracker.stop_reason or tracker.attempts >= tracker.max_attempts):
             reported_errors = validation_errors or final_errors
-            raise RuntimeError(
+            raise ActionPlanRejectedError(
                 f"Member action plan validation failed ({tracker.stop_reason or 'attempt_limit_reached'}): "
                 + "; ".join(reported_errors)
             )

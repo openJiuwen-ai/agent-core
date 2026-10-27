@@ -554,7 +554,11 @@ def test_member_optimizer_agent_profiles_are_declared() -> None:
         ACTION_EXECUTION,
         VERIFICATION_REPAIR,
     )
-    assert ACTION_EXECUTION.max_iterations == 8
+    assert ROLE_ATTRIBUTION.max_iterations == 300
+    assert MECHANISM_ATTRIBUTION.max_iterations == 300
+    assert ACTION_PLANNING.max_iterations == 300
+    assert ACTION_EXECUTION.max_iterations == 300
+    assert VERIFICATION_REPAIR.max_iterations == 300
     assert ACTION_EXECUTION.enabled_skills == ()
     assert VERIFICATION_REPAIR.prompt_file == "verification_repair.md"
 

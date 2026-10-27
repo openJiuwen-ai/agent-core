@@ -125,7 +125,7 @@ def _judge_model(config: EvaluatorConfig) -> Model:
     loaded = load_model_config_ref(ref)
     data = without_inner_sdk_retries(loaded.get("model", loaded))
     request = dict(data.get("model_request_config") or {})
-    request.update(temperature=0.0)
+    request.update(temperature=1.0)
     data["model_request_config"] = request
     spec = TeamModelConfig.model_validate(data)
     return GuardedJudgeModel(spec.model_client_config, spec.model_request_config)

@@ -14,6 +14,7 @@ import asyncio
 import json
 from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import yaml
@@ -45,6 +46,14 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.execution_contract import (
     evaluate_role_execution,
     role_execution_errors,
 )
+from openjiuwen.rsi.harness_rsi.member_optimizer.package_registry import (
+    PROMPT_REGISTRY,
+    SKILL_REGISTRY,
+    REGISTRY_GUIDANCE,
+    normalize_package_registries,
+    resolve_registry_resource,
+    validate_package_registries,
+)
 from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
     MemberFixResult,
     MemberOptimizationPlan,
@@ -58,6 +67,8 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.worktree_coordinator import (
 )
 
 _REPAIRABLE_CHECK_PREFIXES = (
+    "package_registry:",
+    "prompt_section_binding:",
     "runtime_policy:",
     "integration_dir:",
     "yaml_parse:",
@@ -395,25 +406,7 @@ def _check_prompt_sections_manifest(role: str, integration_path: Path) -> list[V
 
 
 def _resolve_prompt_section_file(integration_path: Path, file_ref: str) -> Path:
-    raw = Path(file_ref)
-    if raw.is_absolute():
-        raise ValueError("prompt section file must be package-relative")
-    if ".." in raw.parts:
-        raise ValueError("prompt section file must not contain '..'")
-    direct = (integration_path / raw).resolve()
-    root = integration_path.resolve()
-    try:
-        direct.relative_to(root)
-    except ValueError as exc:
-        raise ValueError("prompt section file escapes package") from exc
-    if direct.is_file():
-        return direct
-    mounted = (integration_path / "prompt_sections" / "files" / raw).resolve()
-    try:
-        mounted.relative_to(root)
-    except ValueError as exc:
-        raise ValueError("prompt section file escapes package") from exc
-    return mounted
+    return integration_path.resolve() / resolve_registry_resource(integration_path, file_ref)
 
 
 def _check_skills_manifest(role: str, integration_path: Path) -> list[VerificationCheck]:
@@ -639,6 +632,26 @@ def _load_harness_plugin(integration_path: Path) -> Any:
     return load_plugin_package(find_plugin_manifest(integration_path))
 
 
+def _check_effective_prompt_binding(role: str, sections: list[Any]) -> VerificationCheck:
+    """Use the runtime binder on an isolated prompt builder, without agent hooks."""
+    from openjiuwen.harness.extension_binder import _bind_prompt_section
+    from openjiuwen.harness.prompts.builder import SystemPromptBuilder
+    from openjiuwen.harness.prompts.sections.identity import build_identity_section
+
+    try:
+        builder = SystemPromptBuilder(language="en")
+        builder.add_section(build_identity_section("en"))
+        preview = SimpleNamespace(
+            system_prompt_builder=builder,
+            apply_prompt_builder_to_react_agent=builder.build,
+        )
+        for section in sections:
+            _bind_prompt_section(preview, section)
+        return VerificationCheck(name=f"prompt_section_binding:{role}", status="passed")
+    except Exception as exc:
+        return VerificationCheck(name=f"prompt_section_binding:{role}", status="failed", error=str(exc))
+
+
 def _resource_file_path(spec: Any) -> str:
     params = getattr(spec, "params", None)
     if not isinstance(params, dict):
@@ -680,6 +693,13 @@ def _validate_role_integration_worktree(
         checks.append(VerificationCheck(name=f"runtime_policy:{role}", status="failed", error=str(exc)))
     checks.extend(_check_prompt_sections_manifest(role, integration_path))
     checks.extend(_check_skills_manifest(role, integration_path))
+    checks.extend(
+        VerificationCheck(
+            name=f"package_registry:{role}:{issue.manifest}:{issue.index}",
+            status="failed", error=issue.describe(),
+        )
+        for issue in validate_package_registries(integration_path)
+    )
 
     try:
         harness = _load_harness_plugin(integration_path)
@@ -732,6 +752,7 @@ def _validate_role_integration_worktree(
             checks.append(_check_resolved_harness_resources(role, integration_path, harness))
             checks.extend(_check_resolved_tool_schemas(role, harness))
             loaded = _resolve_harness_parts(harness)
+            checks.append(_check_effective_prompt_binding(role, loaded.prompt_sections))
             resolved_names = {
                 str(tool.card.name or tool.card.id)
                 for tool in loaded.tools
@@ -1135,9 +1156,11 @@ class HarnessRepairAgent:
         self,
         model_config_ref: str,
         agent_skills_dirs: list[str] | None = None,
+        runtime_iteration_hard_limit: int = 300,
     ) -> None:
         self._model_config_ref = model_config_ref
         self._agent_skills_dirs = list(agent_skills_dirs or [])
+        self._runtime_iteration_hard_limit = runtime_iteration_hard_limit
 
     async def repair_role(
         self,
@@ -1163,6 +1186,31 @@ class HarnessRepairAgent:
             }
 
         before = _snapshot_repair_files(role_integration_worktree)
+        normalization = normalize_package_registries(
+            role_integration_worktree, writable_paths=[PROMPT_REGISTRY, SKILL_REGISTRY],
+        )
+        if normalization.changed_files:
+            expected_tools = {
+                str(check["name"]).rsplit(":", 1)[-1] for check in failed_checks
+                if str(check.get("name", "")).startswith(f"tool_activation:{role}:")
+            }
+            current_checks = _validate_role_integration_worktree(
+                role, role_integration_worktree, expected_tools, self._runtime_iteration_hard_limit,
+            )
+            if not any(check.status == "failed" for check in current_checks):
+                return {
+                    "status": "attempted", "changed_files": normalization.changed_files,
+                    "repairs": [asdict(RepairItem(
+                        role=role, action="registry_normalization", status="attempted",
+                        description="; ".join(normalization.changes),
+                    ))],
+                }
+            repairable_checks = [asdict(check) for check in _repairable_failed_checks(current_checks)]
+        repairable_checks.extend(
+            {"name": f"package_registry:{role}:{issue.manifest}:{issue.index}",
+             "status": "failed", "error": issue.describe()}
+            for issue in normalization.issues
+        )
         agent = create_verification_repair_agent(
             model_config_ref=self._model_config_ref,
             workspace=role_integration_worktree,
@@ -1183,6 +1231,9 @@ class HarnessRepairAgent:
                 },
                 session=session,
             )
+        normalize_package_registries(
+            role_integration_worktree, writable_paths=[PROMPT_REGISTRY, SKILL_REGISTRY],
+        )
         after = _snapshot_repair_files(role_integration_worktree)
         forbidden = _enforce_repair_scope(role_integration_worktree, before, after)
         changed = [name for name in before.keys() | after.keys() if before.get(name) != after.get(name)]
@@ -1227,6 +1278,10 @@ current_harness_refs.yaml, or member_optimization_ref.yaml.
 ## Failed Checks
 
 {failed_summary}
+
+## Registry Contract
+
+{REGISTRY_GUIDANCE}
 
 ## Current Workspace Files
 
@@ -1276,6 +1331,7 @@ class HarnessChangeVerifier:
         return HarnessRepairAgent(
             model_config_ref=model_config_ref,
             agent_skills_dirs=self._agent_skills_dirs,
+            runtime_iteration_hard_limit=self._runtime_iteration_hard_limit,
         )
 
     async def verify(

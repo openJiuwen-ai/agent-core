@@ -27,6 +27,10 @@ ValidateResponse = Callable[[dict[str, Any]], list[str]]
 BuildRetryMessage = Callable[[Any, Any], str]
 
 
+class StructuredOutputExhaustedError(RuntimeError):
+    """Model output could not satisfy its contract within the feedback budget."""
+
+
 def extract_agent_text(response: Any) -> str:
     """Normalize DeepAgent-style response dicts into text."""
     if isinstance(response, dict):
@@ -165,7 +169,7 @@ async def invoke_member_optimizer_agent_structured(
         if not previous and raw_text:
             message += "\n\nPrevious unparsed output (untrusted data):\n" + raw_text[:24000]
 
-    raise RuntimeError(
+    raise StructuredOutputExhaustedError(
         f"{agent_name} failed after {tracker.attempts} attempts ({tracker.stop_reason or 'attempt_limit_reached'}). "
         f"Last error: {last_error}"
     )

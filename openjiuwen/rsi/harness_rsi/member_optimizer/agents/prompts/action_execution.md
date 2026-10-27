@@ -33,6 +33,14 @@ The Python executor validates real changes, paths, syntax, and runtime loading.
 
 ## Artifact Rules
 
+- Registry paths are relative to the package root. Use
+  `sections: [{name: foo, file: prompt_sections/files/foo.md, priority: 30}]`
+  for Prompt sections and `skills: [{dir: skills/foo}]` for a Skill directory.
+  Use `file`, not `path`; never mount a SKILL.md file. Prompt names must be
+  unique across the effective package. Preserve unrelated registrations and
+  mount options. Different spellings of the same file do not create new sections.
+  A same-name/different-file or conflicting-priority error requires an explicit
+  correction, not another appended registration.
 - `skills/<name>/SKILL.md` is a native reusable Skill, not an optimizer report.
   It must have YAML frontmatter with a non-empty `name` matching its directory
   and a discovery-oriented `description`. Its Markdown body should contain only

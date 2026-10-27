@@ -183,6 +183,11 @@ class CaseRunner:
                 execution_status=execution_result.execution_status,
                 judge_result=judge_result,
             )
+            published_execution_status = _published_execution_status(
+                execution_status=execution_result.execution_status,
+                final_status=final_status,
+                judge_result=judge_result,
+            )
 
             trajectory_events = _build_trajectory_events(
                 response=response,
@@ -215,7 +220,7 @@ class CaseRunner:
                 "started_at": started_at.isoformat(),
                 "finished_at": finished_at.isoformat(),
                 "status": final_status,
-                "execution_status": execution_result.execution_status,
+                "execution_status": published_execution_status,
                 "input": _case_inputs(case),
                 "response": response,
                 "error": execution_result.error,
@@ -234,7 +239,7 @@ class CaseRunner:
                 "case_id": case_id,
                 "session_id": session_id,
                 "status": final_status,
-                "execution_status": execution_result.execution_status,
+                "execution_status": published_execution_status,
                 "score": judge_result.score,
                 "evaluation": {
                     "method": judge_result.method,
@@ -268,7 +273,7 @@ class CaseRunner:
                 metadata={
                     "session_id": session_id,
                     "team_name": resolved_team_name,
-                    "execution_status": execution_result.execution_status,
+                    "execution_status": published_execution_status,
                     "evaluation_method": judge_result.method,
                     "evaluation_passed": judge_result.passed,
                     "score_mode": judge_result.metadata.get("score_mode", "binary"),
@@ -364,9 +369,27 @@ def _case_result_status(
     judge_result: JudgeResult,
 ) -> str:
     """Return final evaluation status, keeping execution completion separate."""
-    if execution_status != "passed":
-        return "error"
-    return "passed" if judge_result.passed else "failed"
+    if execution_status == "passed":
+        return "passed" if judge_result.passed else "failed"
+    if judge_result.metadata.get("score_mode") == "continuous":
+        return "failed"
+    return "error"
+
+
+def _published_execution_status(
+    *,
+    execution_status: str,
+    final_status: str,
+    judge_result: JudgeResult,
+) -> str:
+    """Publish a graded harness failure as failed so promotion can consume the score."""
+    if (
+        final_status == "failed"
+        and execution_status != "passed"
+        and judge_result.metadata.get("score_mode") == "continuous"
+    ):
+        return "failed"
+    return execution_status
 
 
 def _expected_artifact_files(case: dict[str, Any]) -> list[str]:

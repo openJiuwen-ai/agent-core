@@ -51,3 +51,55 @@ per-case deltas, full-check outcomes and official Best references. Only packages
 accepted by both stages and engineering checks can be published and installed.
 
 No runtime tests, builds or real-model experiments were run for this revision.
+
+Action Planner corrections have their own `member_optimizer.action_planning_max_attempts`
+budget (default 10, including the initial draft). Parsing, schema, and semantic
+feedback share this counter; the existing no-progress stop still applies.
+Keep this budget identical across both ablation groups.
+
+Planner issue membership is checked using `attributed_issue_ids` and action
+dependencies. Descriptive text may compare or exclude another issue; mentioning
+its ID does not expand the action's scope. Each action still declares exactly
+one diagnosed issue. Exhausted parsing, schema, or plan validation feedback is
+recorded as `planning_rejected`, allowing the run to continue with its unchanged
+parent package. Runtime/configuration failures still propagate as errors.
+
+Internal optimizer agents create only their working directory, without personal
+workspace templates. In particular, Action Execution and Repair must not generate
+`IDENTITY.md` or `SOUL.md` beside package files: these can be interpreted as
+loadable prompt sidecars, including through case-insensitive filename matching.
+Explicitly declared package identity/soul edits remain supported.
+
+Restart both the service front and resident Runtime Worker after changing code;
+an existing worker retains its already imported Planner configuration.
+
+### Candidate registry validation and repair
+
+RSI writes Prompt file references relative to the package root, for example
+`prompt_sections/files/foo.md`, and Skill mounts as directories such as
+`skills/foo`. Action execution and Repair share safe alias normalization and
+conflict validation. Equivalent registrations collapse; conflicting same-name
+Prompt registrations or Skill mount options require explicit correction.
+Unrelated entries and metadata are preserved. Ambiguous, missing, absolute or
+escaping paths are reported instead of guessed.
+
+The verifier checks effective Prompt bindings with the native binder and an
+isolated identity-bearing prompt builder; it does not run a case or candidate
+hooks. Repair remains bounded and succeeds only after verification passes.
+Generation failures retain their original status, errors and artifact paths as
+`candidate_generation_failed` (or the explicit planning/skip reason). They do not
+enter the valid-package trial cache or become `candidate_content_unchanged`.
+
+### Unavailable diagnosis
+
+An `AnalysisUnavailableError` is recorded at the attempt boundary instead of
+aborting the experiment. Source diagnosis failures consume the existing finite
+attempt budget; no candidate is generated from them. A rejected candidate whose
+follow-up diagnosis is unavailable keeps its original score and rejection, plus
+the diagnostic error, raw-attempt references and per-case failure details. It is
+not retained as a local repair parent. Remaining attempts/cases continue from the
+official parent Harness; neither scores nor promotion criteria are relaxed.
+
+Reports expose `analysis_unavailable_count` and `analysis_failures`. Unavailable
+diagnosis is never converted into a successful no-issues analysis. The legacy
+epoch path skips the affected analysis batch and continues later batches.

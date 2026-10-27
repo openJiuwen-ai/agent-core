@@ -107,6 +107,17 @@ These are rejected by verifier safety checks.
 
 === REPAIR STRATEGY ===
 
+Registry references use the integration package root as their base. Examples:
+`sections: [{name: foo, file: prompt_sections/files/foo.md, priority: 30}]`
+and `skills: [{dir: skills/foo}]`. Prompt uses file, not path. Skill dir mounts
+an existing directory containing SKILL.md or a parent of such directories.
+The host safely normalizes unambiguous aliases before and after repairs.
+For package_registry or prompt_section_binding failures, inspect every conflicting
+entry named in the feedback. Equivalent entries may be collapsed; different
+content, files, priorities or mount options must be reconciled explicitly.
+Do not append a correct entry while leaving a broken or conflicting entry behind.
+Do not rename a section merely to bypass an unrelated existing declaration.
+
 1. Read the failing checks carefully. Use native read_file, grep, glob, and
    list_files to inspect current package dependencies and the read-only host
    contract paths. Initial file excerpts may be incomplete: paginate with

@@ -155,6 +155,7 @@ def create_member_optimizer_agent(
         extra_rails=extra_rails,
         enabled_skills_override=enabled_skills_override,
     )
+    Path(workspace).mkdir(parents=True, exist_ok=True)
     return create_deep_agent(
         model=model,
         card=card,
@@ -169,7 +170,9 @@ def create_member_optimizer_agent(
         invocation_log_dir=str(Path(workspace).resolve().parent / "agent_logs" / Path(workspace).name),
         language="en",
         restrict_to_work_dir=True,
-        auto_create_workspace=True,
+        # These workspaces contain package files or evidence. Personal workspace
+        # templates would introduce loadable identity/soul sidecars into packages.
+        auto_create_workspace=False,
     )
 
 

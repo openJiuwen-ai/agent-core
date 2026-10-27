@@ -57,7 +57,7 @@ class EvaluatorConfig:
     backend: str = "single_harness"
     evaluation_method: str = "script-based"
     judge_model_config_ref: str = ""
-    judge_agent_max_iterations: int = 20
+    judge_agent_max_iterations: int = 300
     judge_timeout_sec: int = 900
     judge_max_retries: int = 2
     output_repair: OutputRepairConfig = field(default_factory=OutputRepairConfig)
@@ -147,7 +147,7 @@ class EvaluationResultAnalyzerConfig:
     diagnosis_agent_model_config_ref: str = ""
     diagnosis_agent_max_retries: int = DEFAULT_MODEL_CALL_MAX_RETRIES
     diagnosis_agent_max_concurrency: int = 5
-    diagnosis_agent_max_iterations: int = 20
+    diagnosis_agent_max_iterations: int = 300
     causal_investigation_required: bool = True
     max_issues: int = 20
     evidence_limit_per_issue: int = 5
@@ -169,7 +169,7 @@ class EvaluationResultAnalyzerConfig:
             ),
             diagnosis_agent_max_iterations=_int_value(
                 data.get("diagnosis_agent_max_iterations"),
-                default=20,
+                default=cls().diagnosis_agent_max_iterations,
             ),
             causal_investigation_required=_bool_value(
                 data.get("causal_investigation_required"),
@@ -194,6 +194,7 @@ class MemberOptimizerConfig:
     min_attribution_confidence: float = 0.5
     attribution_retry_limit: int = DEFAULT_MODEL_CALL_MAX_RETRIES
     stage_retry_limit: int = DEFAULT_MODEL_CALL_MAX_RETRIES
+    action_planning_max_attempts: int = 10
     max_cases_per_issue: int = 3
     max_trace_excerpt_chars: int = 4000
     max_result_excerpt_chars: int = 2000
@@ -218,6 +219,10 @@ class MemberOptimizerConfig:
 
     runtime_iteration_hard_limit: int = 300
 
+    def __post_init__(self) -> None:
+        if type(self.action_planning_max_attempts) is not int or self.action_planning_max_attempts < 1:
+            raise ValueError("member_optimizer.action_planning_max_attempts must be a positive integer")
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "MemberOptimizerConfig":
         return cls(
@@ -236,6 +241,7 @@ class MemberOptimizerConfig:
                 data.get("stage_retry_limit"),
                 default=DEFAULT_MODEL_CALL_MAX_RETRIES,
             ),
+            action_planning_max_attempts=data.get("action_planning_max_attempts", 10),
             max_cases_per_issue=_int_value(data.get("max_cases_per_issue"), default=3),
             max_trace_excerpt_chars=_int_value(data.get("max_trace_excerpt_chars"), default=4000),
             max_result_excerpt_chars=_int_value(data.get("max_result_excerpt_chars"), default=2000),

@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.baseline_context import baseline_conte
 from openjiuwen.rsi.harness_rsi.evaluator.task_identity import case_identity
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.member_optimizer.hypothesis import compile_optimization_hypotheses, load_optimization_hypotheses
+from openjiuwen.rsi.harness_rsi.member_optimizer.loader import AnalysisUnavailableError
 from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
     active_epoch_node_event, epoch_node_event, generate_stage_payload, progress_event,
 )
@@ -164,17 +166,49 @@ async def run_continuous(
                     continue
                 attempt_dir = directory / "attempts" / f"a{attempt_index:03d}"
                 analysis = record.get("analysis_ref")
-                if not analysis:
-                    analysis = await owner._analyze(
-                        eval_ref_path=repair_source, harness_refs_path=repair_refs,
-                        output_dir=attempt_dir / "analysis", node_ref=node, on_event=on_event,
-                        prior_candidate_feedback=_prior_candidate_feedback(state, cases),
+                try:
+                    if not analysis:
+                        analysis = await owner._analyze(
+                            eval_ref_path=repair_source, harness_refs_path=repair_refs,
+                            output_dir=attempt_dir / "analysis", node_ref=node, on_event=on_event,
+                            prior_candidate_feedback=_prior_candidate_feedback(state, cases),
+                        )
+                        record["analysis_ref"] = analysis
+                        save()
+                    hypotheses = compile_optimization_hypotheses(
+                        analysis_ref_path=analysis, cases=cases, output_path=attempt_dir / "optimization_hypotheses.yaml",
                     )
-                    record["analysis_ref"] = analysis
+                except AnalysisUnavailableError as exc:
+                    if not exc.analysis_ref_path:
+                        exc.analysis_ref_path = str(analysis or "")
+                    failure = {
+                        **exc.details(), "epoch": epoch, "batch_index": batch_index,
+                        "batch_attempt_index": attempt_index, "source_eval_ref_path": repair_source,
+                        "harness_refs_path": repair_refs,
+                        "target_case_ids": [str(case["case_id"]) for case in cases],
+                    }
+                    gate = {
+                        "accepted": False, "status": "inconclusive", "reason": "analysis_unavailable",
+                        "failure_class": "diagnosis_unavailable", "analysis_error": failure,
+                        "analysis_ref_path": exc.analysis_ref_path,
+                        "epoch": epoch, "batch_index": batch_index, "batch_attempt_index": attempt_index,
+                        "source_eval_ref_path": repair_source, "before_harness_refs_path": parent_refs,
+                        "candidate_harness_refs_path": "", "capabilities": [],
+                        "target_case_ids": failure["target_case_ids"], "primary_gate_accepted": False,
+                        "comparison_baseline_score": parent_score,
+                        "comparison_baseline_eval_ref_path": reference_eval,
+                        "policy_version": owner.config.promotion.policy_version,
+                    }
+                    repair_refs, repair_source, repair_caps = parent_refs, source, []
+                    record.update(
+                        done=True, gate=gate, analysis_failure=failure,
+                        repair_refs=repair_refs, repair_source=repair_source, repair_capabilities=[],
+                    )
+                    state.setdefault("analysis_failures", []).append(failure)
+                    _refresh_optimization_experience(state, output_dir)
                     save()
-                hypotheses = compile_optimization_hypotheses(
-                    analysis_ref_path=analysis, cases=cases, output_path=attempt_dir / "optimization_hypotheses.yaml",
-                )
+                    last_gate = gate
+                    continue
                 if not _analysis_issue_case_ids(analysis) or not load_optimization_hypotheses(hypotheses):
                     state["stop_reason"] = "no_executable_hypotheses"
                     break
@@ -193,6 +227,58 @@ async def run_continuous(
                     save()
                     await emit(on_event, NodeStageEvent(node_ref=node, stage=generate_stage_payload(1, 1, "done")))
                 member = _read_yaml(member_ref)
+                member_status = str(member.get("status", ""))
+                if member_status not in {"success", "candidate_ready", "published"}:
+                    role_results = member.get("role_results") or {}
+                    errors = [
+                        str(result["error"])
+                        for result in role_results.values()
+                        if isinstance(result, dict) and result.get("error")
+                    ] if isinstance(role_results, dict) else []
+                    verification_path = Path(member_ref).parent / "verification.json"
+                    generation_stage = "planning" if member_status == "planning_rejected" else "execution"
+                    if verification_path.is_file():
+                        verification = json.loads(verification_path.read_text(encoding="utf-8"))
+                        if verification.get("status") == "failed":
+                            generation_stage = "verification"
+                            errors.extend(
+                                f"{check.get('name', '')}: {check.get('error', '')}"
+                                for check in verification.get("checks", [])
+                                if isinstance(check, dict) and check.get("status") == "failed"
+                            )
+                    skipped = member_status in {"no_actions", "no_targets", "no_issues", "skipped"}
+                    gate = {
+                        "accepted": False, "status": "skipped" if skipped else "rejected",
+                        "reason": member_status if skipped or member_status == "planning_rejected"
+                        else "candidate_generation_failed",
+                        "failure_class": "not_applicable" if skipped else "candidate_generation_failure",
+                        "generation_status": member_status,
+                        "generation_stage": generation_stage,
+                        "generation_error": "; ".join(errors),
+                        "generation_evidence": [
+                            str(path) for path in (
+                                Path(member_ref), Path(member_ref).parent / "verification.json",
+                                Path(member_ref).parent / "fix_result.json",
+                                Path(member_ref).parent / "execution_results.json",
+                                Path(member_ref).parent / "action_planning_error.json",
+                            ) if path.is_file()
+                        ],
+                        "epoch": epoch, "batch_index": batch_index, "batch_attempt_index": attempt_index,
+                        "analysis_ref_path": analysis, "member_optimization_ref_path": member_ref,
+                        "source_eval_ref_path": source, "before_harness_refs_path": parent_refs,
+                        "candidate_harness_refs_path": "", "capabilities": _candidate_capabilities(member),
+                        "target_case_ids": [str(case["case_id"]) for case in cases],
+                        "primary_gate_accepted": False, "comparison_baseline_score": parent_score,
+                        "comparison_baseline_eval_ref_path": reference_eval,
+                        "policy_version": owner.config.promotion.policy_version,
+                    }
+                    record.update(done=True, gate=gate, target_gate=dict(gate))
+                    state["candidate_gates"].append(gate)
+                    _persist_promotion(member_ref, "", gate)
+                    _refresh_optimization_experience(state, output_dir)
+                    save()
+                    last_gate = gate
+                    continue
                 candidate_refs = str(member.get("optimized_harness_refs_path") or repair_refs)
                 capabilities = _merge_repair_capabilities(repair_caps, _candidate_capabilities(member))
                 identity_data = {
@@ -313,7 +399,10 @@ async def run_continuous(
                         gate.update(accepted=False, status="inconclusive", reason="evaluation_invalid", evaluation_error=str(exc))
                 if not gate.get("accepted") and gate.get("status") == "pending_full_evaluation":
                     gate["status"] = "rejected"
-                if not promoted and _candidate_can_continue_locally(gate, cases):
+                if gate.get("candidate_failure_analysis_status") == "unavailable":
+                    repair_refs, repair_source, repair_caps = parent_refs, source, []
+                    record.update(repair_refs=repair_refs, repair_source=repair_source, repair_capabilities=[])
+                elif not promoted and _candidate_can_continue_locally(gate, cases):
                     repair_refs, repair_source, repair_caps = candidate_refs, gate["candidate_eval_ref_path"], capabilities
                     record.update(repair_refs=repair_refs, repair_source=repair_source, repair_capabilities=repair_caps)
                 record.update(done=True, gate=gate)

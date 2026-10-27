@@ -52,7 +52,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.hypothesis import (
     compile_optimization_hypotheses,
     load_optimization_hypotheses,
 )
-from openjiuwen.rsi.harness_rsi.member_optimizer.loader import load_analysis_ref
+from openjiuwen.rsi.harness_rsi.member_optimizer.loader import AnalysisUnavailableError, load_analysis_ref
 from openjiuwen.rsi.harness_rsi.member_optimizer.path_layout import (
     MemberOptimizerPathLayout,
 )
@@ -486,26 +486,36 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         if analysis_round_index == 1
                         else batch_dir / "residual_analyses" / f"r{analysis_round_index:03d}"
                     )
-                    analysis_ref = analysis_ref if reuse_analysis else await self._analyze(
-                        eval_ref_path=attempt_source_eval_ref,
-                        harness_refs_path=repair_refs,
-                        output_dir=analysis_dir,
-                        node_ref=epoch_node_ref,
-                        source_stage=(
-                            "single_harness_batch" if analysis_round_index == 1 else "single_harness_residual_repair"
-                        ),
-                        prior_candidate_feedback=_prior_candidate_feedback(
-                            state,
-                            active_cases,
-                        ),
-                        on_event=on_event,
-                    )
+                    try:
+                        analysis_ref = analysis_ref if reuse_analysis else await self._analyze(
+                            eval_ref_path=attempt_source_eval_ref,
+                            harness_refs_path=repair_refs,
+                            output_dir=analysis_dir,
+                            node_ref=epoch_node_ref,
+                            source_stage=(
+                                "single_harness_batch" if analysis_round_index == 1 else "single_harness_residual_repair"
+                            ),
+                            prior_candidate_feedback=_prior_candidate_feedback(state, active_cases),
+                            on_event=on_event,
+                        )
+                        hypotheses_ref = compile_optimization_hypotheses(
+                            analysis_ref_path=analysis_ref,
+                            cases=active_cases,
+                            output_path=analysis_dir / "optimization_hypotheses.yaml",
+                        )
+                    except AnalysisUnavailableError as exc:
+                        if not exc.analysis_ref_path:
+                            exc.analysis_ref_path = analysis_ref
+                        analysis_ref = exc.analysis_ref_path
+                        analysis_refs.append(analysis_ref)
+                        state.setdefault("analysis_failures", []).append({
+                            **exc.details(), "epoch": epoch, "batch_index": batch_index,
+                            "source_eval_ref_path": attempt_source_eval_ref, "harness_refs_path": repair_refs,
+                            "target_case_ids": [str(case["case_id"]) for case in active_cases],
+                        })
+                        repair_stop_reason = "analysis_unavailable"
+                        break
                     reuse_analysis = False
-                    hypotheses_ref = compile_optimization_hypotheses(
-                        analysis_ref_path=analysis_ref,
-                        cases=active_cases,
-                        output_path=analysis_dir / "optimization_hypotheses.yaml",
-                    )
                     analysis_refs.append(analysis_ref)
                     hypotheses_refs.append(hypotheses_ref)
                     hypotheses = load_optimization_hypotheses(hypotheses_ref)
@@ -1674,6 +1684,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             failure_class = "behavior_evidence_inconclusive"
             target_confirmation["confirmed"] = False
         candidate_failure_analysis_ref = ""
+        candidate_failure_analysis_status = "not_requested"
+        candidate_failure_analysis_error: dict[str, Any] = {}
         candidate_failure_diagnoses: dict[str, list[dict[str, Any]]] = {}
         candidate_behavior_by_case = {
             case_id: {
@@ -1714,16 +1726,22 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     for case_id, delta in verifier_deltas_by_case.items()
                 }
             }
-            candidate_failure_analysis_ref = await self._analyze(
-                eval_ref_path=candidate_eval_ref,
-                harness_refs_path=candidate_harness_refs_path,
-                output_dir=output_dir / "failure_analysis",
-                source_stage="single_harness_candidate_failure",
-                prior_candidate_feedback=paired_feedback,
-                node_ref=node_ref or "h0",
-                on_event=on_event,
-            )
-            candidate_failure_diagnoses = _compact_analysis_diagnoses(candidate_failure_analysis_ref)
+            try:
+                candidate_failure_analysis_ref = await self._analyze(
+                    eval_ref_path=candidate_eval_ref,
+                    harness_refs_path=candidate_harness_refs_path,
+                    output_dir=output_dir / "failure_analysis",
+                    source_stage="single_harness_candidate_failure",
+                    prior_candidate_feedback=paired_feedback,
+                    node_ref=node_ref or "h0",
+                    on_event=on_event,
+                )
+                candidate_failure_diagnoses = _compact_analysis_diagnoses(candidate_failure_analysis_ref)
+                candidate_failure_analysis_status = "completed"
+            except AnalysisUnavailableError as exc:
+                candidate_failure_analysis_ref = exc.analysis_ref_path
+                candidate_failure_analysis_status = "unavailable"
+                candidate_failure_analysis_error = exc.details()
         return {
             "accepted": accepted,
             "status": (
@@ -1758,6 +1776,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             "verifier_deltas_by_case": verifier_deltas_by_case,
             "candidate_patch_excerpts_by_case": candidate_patch_excerpts_by_case,
             "candidate_failure_analysis_ref_path": (candidate_failure_analysis_ref),
+            "candidate_failure_analysis_status": candidate_failure_analysis_status,
+            "candidate_failure_analysis_error": candidate_failure_analysis_error,
             "candidate_failure_diagnoses": candidate_failure_diagnoses,
             "candidate_behavior_by_case": candidate_behavior_by_case,
             "task_acceptance_contracts": task_acceptance_contracts,
@@ -4150,6 +4170,18 @@ def _skill_names_match(planned: str, invoked: str) -> bool:
 
 def _build_report(state: dict[str, Any], dataset: DatasetArtifact) -> dict[str, Any]:
     accepted = [gate for gate in state["candidate_gates"] if gate.get("accepted") and gate.get("status") == "accepted"]
+    analysis_failures = list(state.get("analysis_failures", []))
+    analysis_failures.extend(
+        {
+            **gate["candidate_failure_analysis_error"],
+            "epoch": gate.get("epoch"), "batch_index": gate.get("batch_index"),
+            "batch_attempt_index": gate.get("batch_attempt_index"),
+            "candidate_eval_ref_path": gate.get("candidate_eval_ref_path", ""),
+            "target_case_ids": gate.get("target_case_ids", []),
+        }
+        for gate in state["candidate_gates"]
+        if gate.get("candidate_failure_analysis_status") == "unavailable"
+    )
     return {
         "task_id": state.get("task_id", ""),
         "mode": "single_harness_benchmark",
@@ -4165,6 +4197,8 @@ def _build_report(state: dict[str, Any], dataset: DatasetArtifact) -> dict[str, 
         "completed_batch_count": len(state["completed_batches"]),
         "candidate_count": len(state["candidate_gates"]),
         "accepted_candidate_count": len(accepted),
+        "analysis_unavailable_count": len(analysis_failures),
+        "analysis_failures": analysis_failures,
         "baseline_score": state.get("baseline_score"),
         "baseline_eval_ref_path": state.get("baseline_eval_ref_path", ""),
         "best_score": state.get("best_score"),
@@ -4382,6 +4416,8 @@ def _merge_repair_capabilities(
 
 def _candidate_can_continue_locally(gate: dict[str, Any], cases: list[dict[str, Any]]) -> bool:
     """Retain measured partial progress only inside the existing batch budget."""
+    if gate.get("candidate_failure_analysis_status") == "unavailable":
+        return False
     behavior = gate.get("candidate_behavior_by_case", {})
     local_repair = any(
         item.get("behavior_check", {}).get("next_action") == "investigate_residuals"
@@ -4419,6 +4455,8 @@ def _candidate_can_continue_locally(gate: dict[str, Any], cases: list[dict[str, 
 
 def _candidate_failure_supports_repair(gate: dict[str, Any]) -> bool:
     """Return whether a rejected candidate produced usable repair evidence."""
+    if gate.get("candidate_failure_analysis_status") == "unavailable":
+        return False
     if str(gate.get("status", "")) != "rejected":
         return False
     if _is_operational_repair(gate) or gate.get("candidate_failure_analysis_ref_path"):
