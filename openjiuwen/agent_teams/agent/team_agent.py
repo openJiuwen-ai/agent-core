@@ -1156,7 +1156,7 @@ class TeamAgent(BaseAgent):
         try:
             started = await backend.startup_member(member_name, on_created=self._on_teammate_created)
         except Exception as exc:
-            team_logger.error("auto_start_member({}) failed: {}", member_name, exc)
+            team_logger.exception("auto_start_member({}) failed: {}", member_name, exc)
             return False
         if started:
             team_logger.info("Auto-started member via interact: {}", member_name)

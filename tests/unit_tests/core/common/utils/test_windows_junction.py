@@ -70,6 +70,71 @@ def test_both_paths_failing_raises_with_both_reasons(monkeypatch, tmp_path):
     assert "reparse boom" in str(exc_info.value)
 
 
+@pytest.mark.level0
+def test_mklink_none_streams_do_not_crash_error_path(monkeypatch, tmp_path):
+    """打包运行时里 ``result.stderr`` 可能为 None，
+    mklink 失败后的错误报告行不得以 AttributeError 炸掉（彼时它穿透
+    ``except OSError``，把 reparse 兜底整体旁路，成员拉起/建团失败）。"""
+
+    class _FakeCompleted:
+        returncode = 1
+        stdout = None
+        stderr = None
+
+    monkeypatch.setattr(windows_junction.subprocess, "run", lambda *a, **k: _FakeCompleted())
+
+    with pytest.raises(OSError, match="Failed to create junction"):
+        windows_junction._create_junction_via_mklink(str(tmp_path / "t"), str(tmp_path / "l"))
+
+    # 经 create_windows_junction：mklink 侧任何异常（含非 OSError）都必须落到 reparse
+    monkeypatch.setattr(
+        windows_junction,
+        "_create_junction_via_mklink",
+        lambda t, l: (_ for _ in ()).throw(
+            AttributeError("'NoneType' object has no attribute 'strip'")
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        windows_junction,
+        "_create_junction_via_reparse",
+        lambda t, l: calls.append((t, l)),
+    )
+    target, link = str(tmp_path / "target"), str(tmp_path / "link")
+    create_windows_junction(target, link)
+    assert calls == [(target, link)]
+
+
+@pytest.mark.level0
+def test_over_limit_link_path_skips_mklink(monkeypatch, tmp_path):
+    """链接路径超过 mklink 目录上限（248）时不做必败的 mklink 调用，
+    直接走 reparse 长路径 API。"""
+    mklink_calls = []
+    reparse_calls = []
+    monkeypatch.setattr(
+        windows_junction,
+        "_create_junction_via_mklink",
+        lambda t, l: mklink_calls.append((t, l)),
+    )
+    monkeypatch.setattr(
+        windows_junction,
+        "_create_junction_via_reparse",
+        lambda t, l: reparse_calls.append((t, l)),
+    )
+
+    long_link = str(tmp_path) + "\\" + "x" * 248  # normpath 后 > 248
+    assert len(os.path.normpath(long_link)) > 248
+    create_windows_junction(str(tmp_path / "target"), long_link)
+    assert mklink_calls == []
+    assert reparse_calls == [(str(tmp_path / "target"), long_link)]
+
+    # 边界内仍走 mklink 优先
+    short_link = str(tmp_path / "link")
+    create_windows_junction(str(tmp_path / "target"), short_link)
+    assert mklink_calls == [(str(tmp_path / "target"), short_link)]
+
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="junction semantics are Windows-only")
 @pytest.mark.level0
 def test_reparse_junction_long_path_roundtrip(tmp_path):

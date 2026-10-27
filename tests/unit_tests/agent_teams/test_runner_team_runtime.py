@@ -95,8 +95,8 @@ def stateful_team_db():
     fake.team.delete_team = AsyncMock(return_value=True)
 
     with patch(
-        "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
-        return_value=fake,
+            "openjiuwen.agent_teams.spawn.shared_resources.get_shared_db",
+            return_value=fake,
     ):
         yield fake
 
@@ -198,8 +198,8 @@ def _runtime_spec(team_name: str) -> TeamAgentSpec:
 
 @pytest.mark.asyncio
 async def test_runner_run_agent_team_streaming_accepts_spec_and_emits_runtime_ready(
-    isolated_checkpointer,
-    stateful_team_db,
+        isolated_checkpointer,
+        stateful_team_db,
 ):
     await Runner.start()
     session_id = f"team_spec_{uuid.uuid4().hex}"
@@ -291,9 +291,9 @@ async def test_runner_run_agent_team_streaming_without_stream_logger(isolated_ch
 
 @pytest.mark.asyncio
 async def test_runner_team_plan_uses_leader_stream_without_outer_approval_gate(
-    isolated_checkpointer,
-    stateful_team_db,
-    tmp_path,
+        isolated_checkpointer,
+        stateful_team_db,
+        tmp_path,
 ):
     await Runner.start()
     session_id = f"team_plan_{uuid.uuid4().hex}"
@@ -368,8 +368,8 @@ async def test_runner_run_agent_team_streaming_with_stream_logger_writes_file(is
 
 @pytest.mark.asyncio
 async def test_team_harness_seeds_team_plan_mode_on_start(
-    isolated_checkpointer,
-    tmp_path,
+        isolated_checkpointer,
+        tmp_path,
 ):
     """Initial-plan-mode leader seeds plan mode on the child session at start.
 
@@ -643,9 +643,441 @@ async def test_team_runtime_manager_recreates_pending_session_bucket():
 
 
 @pytest.mark.asyncio
+async def test_activate_waits_for_in_flight_pause_then_resumes(isolated_checkpointer):
+    """activate 撞 PAUSING 条目应等 pause 落定再 resume（不误拒）。
+
+    触发缝（流末清注册 × 池仍 RUNNING）在 pause 慢/锁库下是分钟级误拒窗；
+    修复后撞窗请求等 pause 完成 → RESUME_FROM_PAUSE。
+    """
+    import asyncio as _asyncio
+
+    from openjiuwen.agent_teams.runtime.dispatch import RunActionKind
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.runtime.pool import RuntimeState
+
+    session_id = f"pausing_{uuid.uuid4().hex}"
+    spec = _runtime_spec("pausing_team")
+    agent = FakeTeamAgent("pausing_team", stream_label="team.chunk")
+
+    manager = TeamRuntimeManager()
+    await _activate_pool_entry(manager, "pausing_team", session_id, agent)
+    entry = await manager.pool.get("pausing_team")
+    entry.state = RuntimeState.PAUSING
+    entry.pause_done.clear()
+
+    async def _finish_pause() -> None:
+        await _asyncio.sleep(0.05)
+        entry.state = RuntimeState.PAUSED
+        entry.pause_done.set()
+
+    finisher = _asyncio.create_task(_finish_pause())
+    with patch.object(
+            TeamRuntimeManager,
+            "_inspect_session",
+            AsyncMock(return_value=(True, True, None)),
+    ):
+        activation = await manager.activate(spec, session_id, {"query": "follow up"})
+    await finisher
+
+    assert activation.action.kind is RunActionKind.RESUME_FROM_PAUSE
+    assert entry.state == RuntimeState.RUNNING  # resume 翻转回 RUNNING
+
+
+@pytest.mark.asyncio
+async def test_activate_pausing_timeout_falls_back_to_reject(isolated_checkpointer):
+    """超时兜底：pause 超过预算未落定 → 按 RUNNING 拒绝
+    （上层零产出守卫拆除重建自愈）。"""
+    from openjiuwen.agent_teams.runtime.dispatch import RunActionKind
+    from openjiuwen.agent_teams.runtime import manager as manager_mod
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.runtime.pool import RuntimeState
+
+    session_id = f"pausing_timeout_{uuid.uuid4().hex}"
+    spec = _runtime_spec("pausing_timeout_team")
+    agent = FakeTeamAgent("pausing_timeout_team", stream_label="team.chunk")
+
+    manager = TeamRuntimeManager()
+    await _activate_pool_entry(manager, "pausing_timeout_team", session_id, agent)
+    entry = await manager.pool.get("pausing_timeout_team")
+    entry.state = RuntimeState.PAUSING
+    entry.pause_done.clear()
+
+    with (
+        patch.object(
+            TeamRuntimeManager,
+            "_inspect_session",
+            AsyncMock(return_value=(True, True, None)),
+        ),
+        patch.object(manager_mod, "_PAUSING_WAIT_TIMEOUT_SEC", 0.01),
+    ):
+        activation = await manager.activate(spec, session_id, {"query": "follow up"})
+
+    assert activation.action.kind is RunActionKind.REJECT_RUNNING
+    assert "pause in progress" in (activation.action.reason or "")
+    # 拒绝是零副作用：条目仍在、状态未被改动
+    assert entry.state == RuntimeState.PAUSING
+
+
+@pytest.mark.asyncio
+async def test_pause_cancelled_midflight_rolls_back_to_running(isolated_checkpointer):
+    """pause 协程被取消（CancelledError 是 BaseException）不得把条目卡在 PAUSING。
+
+    修复前：state 只在 pause 成功后翻 PAUSED，取消穿透 except Exception →
+    永久 PAUSING（dispatch 恒拒、pause 报假成功、finalize 永远跳过）。
+    """
+    import asyncio as _asyncio
+
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.runtime.pool import RuntimeState
+
+    session_id = f"pause_cancel_{uuid.uuid4().hex}"
+
+    class _HangingPauseAgent(FakeTeamAgent):
+        def __init__(self, team_name: str):
+            super().__init__(team_name, stream_label="hang.chunk")
+            self.pause_started = _asyncio.Event()
+
+        async def pause_coordination(self) -> None:
+            self.pause_started.set()
+            await _asyncio.sleep(3600)
+
+    agent = _HangingPauseAgent("cancel_team")
+    manager = TeamRuntimeManager()
+    await _activate_pool_entry(manager, "cancel_team", session_id, agent)
+    entry = await manager.pool.get("cancel_team")
+
+    pause_task = _asyncio.create_task(
+        manager.pause(team_name="cancel_team", session_id=session_id)
+    )
+    await agent.pause_started.wait()
+    assert entry.state == RuntimeState.PAUSING
+    pause_task.cancel()
+    with pytest.raises(_asyncio.CancelledError):
+        await pause_task
+    assert entry.state == RuntimeState.RUNNING, "取消路径也必须把状态翻回 RUNNING"
+    assert entry.pause_done.is_set(), "取消路径同样要释放 pause 等待者"
+
+
+@pytest.mark.asyncio
+async def test_pause_on_paused_entry_is_noop_success(isolated_checkpointer):
+    """对已 PAUSED 条目 pause = no-op success（docstring 承诺）：不得重跑
+    pause_coordination——否则失败回滚会把本已 PAUSED 的条目翻成 RUNNING
+    （状态倒退，dispatch 侧表现为假复活）。"""
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.runtime.pool import RuntimeState
+
+    session_id = f"pause_paused_{uuid.uuid4().hex}"
+
+    class _FailingPauseAgent(FakeTeamAgent):
+        async def pause_coordination(self) -> None:
+            raise RuntimeError("must not be called on an already-PAUSED entry")
+
+    agent = _FailingPauseAgent("paused_team", stream_label="paused.chunk")
+    manager = TeamRuntimeManager()
+    await _activate_pool_entry(manager, "paused_team", session_id, agent)
+    entry = await manager.pool.get("paused_team")
+    entry.state = RuntimeState.PAUSED
+
+    result = await manager.pause(team_name="paused_team", session_id=session_id)
+    assert result is True, "已 PAUSED 条目幂等报成功"
+    assert entry.state == RuntimeState.PAUSED, "已 PAUSED 条目不得被翻态"
+
+
+@pytest.mark.asyncio
+async def test_finalize_cancelled_mid_pause_rolls_back_to_running(isolated_checkpointer):
+    """finalize 驱动的 pause 被取消同样回 RUNNING（与显式 pause 同规）。"""
+    import asyncio as _asyncio
+
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.runtime.pool import RuntimeState
+
+    session_id = f"fin_cancel_{uuid.uuid4().hex}"
+
+    class _HangingPauseAgent(FakeTeamAgent):
+        lifecycle = "persistent"
+
+        def __init__(self, team_name: str):
+            super().__init__(team_name, stream_label="hang.chunk")
+            self.pause_started = _asyncio.Event()
+
+        async def is_shutdown_requested(self) -> bool:
+            return False
+
+        async def pause_coordination(self) -> None:
+            self.pause_started.set()
+            await _asyncio.sleep(3600)
+
+    agent = _HangingPauseAgent("fin_cancel_team")
+    manager = TeamRuntimeManager()
+    await _activate_pool_entry(manager, "fin_cancel_team", session_id, agent)
+    entry = await manager.pool.get("fin_cancel_team")
+
+    finalize_task = _asyncio.create_task(
+        manager.finalize(team_name="fin_cancel_team", session_id=session_id)
+    )
+    await agent.pause_started.wait()
+    assert entry.state == RuntimeState.PAUSING
+    finalize_task.cancel()
+    with pytest.raises(_asyncio.CancelledError):
+        await finalize_task
+    assert entry.state == RuntimeState.RUNNING
+    assert entry.pause_done.is_set()
+
+
+@pytest.mark.asyncio
+async def test_activate_pause_wait_refetch_cross_session_entry_torn_down(isolated_checkpointer):
+    """等 pause 落定期间另一条会话抢走池条目：重取后必须识别跨会话并拆掉，
+    不得原样交给 dispatch（那里是 invariant 违例直接 RuntimeError）。"""
+    import asyncio as _asyncio
+
+    from openjiuwen.agent_teams.runtime.dispatch import RunActionKind
+    from openjiuwen.agent_teams.runtime.manager import (
+        TeamRuntimeActivation,
+        TeamRuntimeManager,
+    )
+    from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
+
+    session_a = f"swap_a_{uuid.uuid4().hex}"
+    session_b = f"swap_b_{uuid.uuid4().hex}"
+    spec = _runtime_spec("swap_team")
+    agent_a = FakeTeamAgent("swap_team", stream_label="a.chunk")
+    agent_b = FakeTeamAgent("swap_team", stream_label="b.chunk")
+
+    manager = TeamRuntimeManager()
+    await _activate_pool_entry(manager, "swap_team", session_a, agent_a)
+    entry_a = await manager.pool.get("swap_team")
+    entry_a.state = RuntimeState.PAUSING
+    entry_a.pause_done.clear()
+
+    async def _swap_to_session_b() -> None:
+        await _asyncio.sleep(0.05)
+        # 另一会话的 activate：拆掉 PAUSING 旧条目，换上绑定 session_b 的新条目
+        await manager.pool.remove("swap_team")
+        await manager.pool.add(
+            ActiveTeam(
+                team_name="swap_team",
+                agent=agent_b,
+                current_session_id=session_b,
+                state=RuntimeState.RUNNING,
+            )
+        )
+        entry_a.pause_done.set()
+
+    swapper = _asyncio.create_task(_swap_to_session_b())
+    captured: dict[str, Any] = {}
+
+    async def _fake_apply(self, action, **kwargs):
+        captured["pool_entry"] = kwargs.get("pool_entry")
+        return TeamRuntimeActivation(
+            agent=None,
+            session=kwargs["team_session"],
+            action=action,
+        )
+
+    with (
+        patch.object(
+            TeamRuntimeManager,
+            "_inspect_session",
+            AsyncMock(return_value=(True, True, None)),
+        ),
+        patch.object(TeamRuntimeManager, "_apply_action", _fake_apply),
+        patch.object(
+            TeamRuntimeManager, "stop_team", AsyncMock()
+        ) as stop_mock,
+    ):
+        activation = await manager.activate(spec, session_a, {"query": "follow up"})
+    await swapper
+
+    stop_mock.assert_awaited_once_with(team_name="swap_team", session_id=session_b)
+    assert captured["pool_entry"] is None, "跨会话条目拆除后必须按无条目冷路径 dispatch"
+    assert activation.action.kind is RunActionKind.COLD_RECOVER
+
+
+@pytest.mark.asyncio
+async def test_pause_on_pausing_entry_awaits_and_reports_truthfully(isolated_checkpointer):
+    """PAUSING 条目的重复 pause：等在飞的落定后如实报告结果——
+    在飞成功（PAUSED）→ True；在飞失败（回 RUNNING）→ False。
+    不得「报成功但从未 pause」（假成功）。"""
+    import asyncio as _asyncio
+
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.runtime.pool import RuntimeState
+
+    session_id = f"pause_dup_{uuid.uuid4().hex}"
+    agent = FakeTeamAgent("dup_pause_team", stream_label="x.chunk")
+    manager = TeamRuntimeManager()
+    await _activate_pool_entry(manager, "dup_pause_team", session_id, agent)
+    entry = await manager.pool.get("dup_pause_team")
+    entry.state = RuntimeState.PAUSING
+    entry.pause_done.clear()
+
+    # 在飞 pause 成功落定 → 重复 pause 等落定后报 True
+    async def _settle_ok() -> None:
+        await _asyncio.sleep(0.05)
+        entry.state = RuntimeState.PAUSED
+        entry.pause_done.set()
+
+    settle = _asyncio.create_task(_settle_ok())
+    assert await manager.pause(team_name="dup_pause_team", session_id=session_id) is True
+    await settle
+    assert agent.pause_calls == 0, "重复 pause 不得叠加触发 pause_coordination"
+
+    # 在飞 pause 失败回 RUNNING → 如实 False（调用方知道没停住）
+    entry.state = RuntimeState.PAUSING
+    entry.pause_done.clear()
+
+    async def _settle_fail() -> None:
+        await _asyncio.sleep(0.05)
+        entry.state = RuntimeState.RUNNING
+        entry.pause_done.set()
+
+    settle2 = _asyncio.create_task(_settle_fail())
+    assert await manager.pause(team_name="dup_pause_team", session_id=session_id) is False
+    await settle2
+
+
+@pytest.mark.asyncio
+async def test_finalize_pausing_wait_still_makes_stop_decision(isolated_checkpointer):
+    """finalize 撞 PAUSING：等在飞落定后仍须做 stop/pause 决策——
+    直接 return 会把 shutdown_requested/非持久团队泄漏为 PAUSED 挂池；
+    落定 PAUSED 且决策也是 pause 时幂等跳过（不重复 pause）。"""
+    import asyncio as _asyncio
+
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.runtime.pool import RuntimeState
+
+    # 形态一：在飞 pause 落定 PAUSED + shutdown_requested → 必须 stop 拆条目
+    class _ShutdownAgent(FakeTeamAgent):
+        lifecycle = "persistent"
+
+        async def is_shutdown_requested(self) -> bool:
+            return True
+
+    session_a = f"fin_stop_{uuid.uuid4().hex}"
+    agent = _ShutdownAgent("fin_wait_team", stream_label="x.chunk")
+    manager = TeamRuntimeManager()
+    await _activate_pool_entry(manager, "fin_wait_team", session_a, agent)
+    entry = await manager.pool.get("fin_wait_team")
+    entry.state = RuntimeState.PAUSING
+    entry.pause_done.clear()
+
+    async def _settle_paused() -> None:
+        await _asyncio.sleep(0.05)
+        entry.state = RuntimeState.PAUSED
+        entry.pause_done.set()
+
+    settle = _asyncio.create_task(_settle_paused())
+    await manager.finalize(team_name="fin_wait_team", session_id=session_a)
+    await settle
+    assert agent.stop_calls == 1, "shutdown_requested 必须 stop（即使撞过 PAUSING）"
+    assert await manager.pool.get("fin_wait_team") is None
+
+    # 形态二：在飞落定 PAUSED + 决策也是 pause → 幂等跳过（不重复 pause_coordination）
+    class _PersistentAgent(FakeTeamAgent):
+        lifecycle = "persistent"
+
+        async def is_shutdown_requested(self) -> bool:
+            return False
+
+    session_b = f"fin_keep_{uuid.uuid4().hex}"
+    agent2 = _PersistentAgent("fin_keep_team", stream_label="x.chunk")
+    manager2 = TeamRuntimeManager()
+    await _activate_pool_entry(manager2, "fin_keep_team", session_b, agent2)
+    entry2 = await manager2.pool.get("fin_keep_team")
+    entry2.state = RuntimeState.PAUSING
+    entry2.pause_done.clear()
+
+    async def _settle_paused2() -> None:
+        await _asyncio.sleep(0.05)
+        entry2.state = RuntimeState.PAUSED
+        entry2.pause_done.set()
+
+    settle_b = _asyncio.create_task(_settle_paused2())
+    await manager2.finalize(team_name="fin_keep_team", session_id=session_b)
+    await settle_b
+    assert agent2.pause_calls == 0, "已 PAUSED 不得重复 pause"
+    assert agent2.stop_calls == 0
+    assert (await manager2.pool.get("fin_keep_team")).state == RuntimeState.PAUSED
+
+
+@pytest.mark.asyncio
+async def test_finalize_rechecks_pausing_flipped_during_shutdown_probe(isolated_checkpointer):
+    """finalize 的 is_shutdown_requested await 窗口内被外部 pause() 抢跑：
+    必须回到等落定分支重决策——不得带旧视图进 else 分支。
+
+    旧实现的后果链：抢写 pause_done（抹掉在飞 pause 的所有权标记）→ 与
+    在飞 pause 并发 pause_coordination → 自己 finally 抢先写 PAUSED +
+    pause_done.set()，等待方把条目当 PAUSED resume，与仍在收尾的 pause
+    冲突（「已 resume 但 pause 仍在跑」状态机错乱）。本用例在旧实现上
+    必红：finalize 会自己再跑一次 pause_coordination（pause_calls=1）。
+    """
+    import asyncio as _asyncio
+
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.agent_teams.runtime.pool import RuntimeState
+
+    class _FlipPausingAgent(FakeTeamAgent):
+        """首次 is_shutdown_requested 探测期间模拟外部 pause() 抢跑。"""
+
+        lifecycle = "persistent"
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.shutdown_probe_calls = 0
+            self.pool_entry = None
+
+        async def is_shutdown_requested(self) -> bool:
+            self.shutdown_probe_calls += 1
+            if self.shutdown_probe_calls == 1:
+                self.pool_entry.state = RuntimeState.PAUSING
+                self.pool_entry.pause_done.clear()
+
+                async def _settle() -> None:
+                    await _asyncio.sleep(0.05)
+                    self.pool_entry.state = RuntimeState.PAUSED
+                    self.pool_entry.pause_done.set()
+
+                _asyncio.create_task(_settle())
+            return False
+
+    # 形态一：抢跑落定 PAUSED + 重决策仍是 pause → 幂等跳过，finalize
+    # 自己不得再跑 pause_coordination（重复 pause）
+    session_a = f"fin_flip_{uuid.uuid4().hex}"
+    agent = _FlipPausingAgent("fin_flip_team", stream_label="x.chunk")
+    manager = TeamRuntimeManager()
+    await _activate_pool_entry(manager, "fin_flip_team", session_a, agent)
+    agent.pool_entry = await manager.pool.get("fin_flip_team")
+
+    await manager.finalize(team_name="fin_flip_team", session_id=session_a)
+    entry = await manager.pool.get("fin_flip_team")
+    assert entry is not None and entry.state == RuntimeState.PAUSED
+    assert agent.pause_calls == 0, "撞在飞 pause 后 finalize 不得再跑 pause_coordination"
+    assert agent.shutdown_probe_calls == 2, "落定后必须重取条目重决策（作废旧读数）"
+    assert agent.stop_calls == 0
+
+    # 形态二：抢跑落定后重决策读到 shutdown_requested=True → 仍须 stop 拆
+    # 条目（不得因在飞 pause 跳过 stop 决策把条目泄漏为 PAUSED 挂池）
+    class _FlipThenShutdownAgent(_FlipPausingAgent):
+        async def is_shutdown_requested(self) -> bool:
+            await super().is_shutdown_requested()
+            return self.shutdown_probe_calls >= 2
+
+    session_b = f"fin_flip_stop_{uuid.uuid4().hex}"
+    agent2 = _FlipThenShutdownAgent("fin_flip_stop_team", stream_label="x.chunk")
+    manager2 = TeamRuntimeManager()
+    await _activate_pool_entry(manager2, "fin_flip_stop_team", session_b, agent2)
+    agent2.pool_entry = await manager2.pool.get("fin_flip_stop_team")
+
+    await manager2.finalize(team_name="fin_flip_stop_team", session_id=session_b)
+    assert agent2.stop_calls == 1, "重决策读到 shutdown_requested 必须 stop"
+    assert await manager2.pool.get("fin_flip_stop_team") is None
+    assert agent2.shutdown_probe_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_runner_session_switch_stops_and_rebuilds(
-    isolated_checkpointer,
-    stateful_team_db,
+        isolated_checkpointer,
+        stateful_team_db,
 ):
     """Switching sessions for the same team tears down the pool entry
     (stop_coordination + pool.remove) before redispatching cold.
@@ -740,9 +1172,249 @@ async def test_runner_same_session_streaming_short_circuits_and_skips_second_str
 
 
 @pytest.mark.asyncio
+async def test_runner_reject_running_does_not_finalize_healthy_team(isolated_checkpointer):
+    """REJECT 类调用零副作用——不得把健康在跑的团队误 pause。
+
+    修复前：被拒调用的 finally 无条件 finalize → 池条目被翻成 PAUSED
+    （锁库/慢写下还会拖出分钟级连锁故障）。修复后：池条目保持 RUNNING。
+    """
+    from openjiuwen.agent_teams.runtime.pool import RuntimeState
+    from openjiuwen.core.runner.team_runner import _global_runner
+
+    session_id = f"reject_{uuid.uuid4().hex}"
+    spec = _runtime_spec("reject_team")
+    agent = FakeTeamAgent("reject_team", stream_label="active.chunk")
+    await Runner.start()
+    try:
+        with patch.object(TeamAgentSpec, "build", return_value=agent):
+            first_chunks = [
+                chunk
+                async for chunk in Runner.run_agent_team_streaming(
+                    agent_team=spec,
+                    inputs={"query": "first"},
+                    session=session_id,
+                )
+            ]
+            assert first_chunks[0].payload["activation_kind"] == "create"
+            manager = _global_runner()._get_team_runtime_manager()
+            entry = await manager.pool.get("reject_team")
+            assert entry is not None and entry.state == RuntimeState.RUNNING
+
+            second_chunks = [
+                chunk
+                async for chunk in Runner.run_agent_team_streaming(
+                    agent_team=spec,
+                    inputs={"query": "same-session"},
+                    session=session_id,
+                )
+            ]
+            assert second_chunks == []  # reject_running 空流
+            entry = await manager.pool.get("reject_team")
+            assert entry is not None, "reject 不得移除池条目"
+            assert entry.state == RuntimeState.RUNNING, (
+                "reject 不得 finalize（误 pause 健康团队）"
+            )
+    finally:
+        await Runner.stop()
+        await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+async def test_runner_reject_closes_stream_without_committing_checkpoint(isolated_checkpointer):
+    """REJECT 路径只关自己的 stream emitter、绝不 commit checkpoint
+    （零持久化副作用）。
+
+    被拒调用的 session 是 _build_session 新建对象，其状态 = pre_run
+    （_inspect_session 无条件跑过）时刻从 checkpoint 恢复的旧快照，与在跑
+    团队共享 session_id；checkpointer save 是全量 last-writer-wins，而在
+    跑团队回合内持续 flush_checkpoint——reject 若 commit，旧快照会覆盖
+    较新状态、丢团队进度。（旧实现 reject 走 post_run 内含 commit：本
+    用例在旧实现上必红，commit_calls 会随每次 reject +1。）
+    """
+    from openjiuwen.core.session.agent_team import Session as TeamSessionWrapper
+
+    session_id = f"reject_nocommit_{uuid.uuid4().hex}"
+    spec = _runtime_spec("reject_nocommit_team")
+    agent = FakeTeamAgent("reject_nocommit_team", stream_label="active.chunk")
+    await Runner.start()
+    try:
+        real_close_stream = TeamSessionWrapper.close_stream
+        real_commit = TeamSessionWrapper.commit
+        close_stream_calls = 0
+        commit_calls = 0
+
+        async def _counting_close_stream(self):
+            nonlocal close_stream_calls
+            close_stream_calls += 1
+            await real_close_stream(self)
+
+        async def _counting_commit(self):
+            nonlocal commit_calls
+            commit_calls += 1
+            await real_commit(self)
+
+        with (
+            patch.object(TeamAgentSpec, "build", return_value=agent),
+            patch.object(TeamSessionWrapper, "close_stream", _counting_close_stream),
+            patch.object(TeamSessionWrapper, "commit", _counting_commit),
+        ):
+            first_chunks = [
+                chunk
+                async for chunk in Runner.run_agent_team_streaming(
+                    agent_team=spec,
+                    inputs={"query": "first"},
+                    session=session_id,
+                )
+            ]
+            assert first_chunks[0].payload["activation_kind"] == "create"
+            # 正常轮收尾 = post_run（close_stream+commit），另有 activate 期
+            # _flush_team_manifest 的一次 commit——不钉绝对值，记基线。
+            baseline_close = close_stream_calls
+            baseline_commit = commit_calls
+
+            rejected_chunks = [
+                chunk
+                async for chunk in Runner.run_agent_team_streaming(
+                    agent_team=spec,
+                    inputs={"query": "same-session"},
+                    session=session_id,
+                )
+            ]
+            assert rejected_chunks == []  # reject_running 空流
+            assert close_stream_calls == baseline_close + 1, (
+                "reject 仍须关闭自己 session 的 stream emitter（只开不收会泄漏）"
+            )
+            assert commit_calls == baseline_commit, (
+                "reject 不得 commit——旧快照会 last-writer-wins 覆盖在跑团队的新状态"
+            )
+
+            result = await Runner.run_agent_team(
+                agent_team=spec,
+                inputs={"query": "same-session invoke"},
+                session=session_id,
+            )
+            assert result is None  # invoke 路径同被拒
+            assert close_stream_calls == baseline_close + 2, "invoke 的 reject 路径同规"
+            assert commit_calls == baseline_commit, "invoke 的 reject 路径同规"
+    finally:
+        await Runner.stop()
+        await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+async def test_stream_cleanup_gate_failure_does_not_swallow_finalize_and_post_run(
+        isolated_checkpointer,
+        stateful_team_db,
+):
+    """流式收尾三步各自独立兜底：interact gate 关闭失败不得吞掉 finalize
+    （pause/stop 决策）与 post_run——否则池条目滞留 RUNNING，下一轮
+    activate 被误 REJECT。"""
+    from openjiuwen.agent_teams.runtime.gate import InteractGate
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.core.session.agent_team import Session as TeamSessionWrapper
+
+    session_id = f"cleanup_iso_{uuid.uuid4().hex}"
+    spec = _runtime_spec("cleanup_iso_team")
+    agent = FakeTeamAgent("cleanup_iso_team", stream_label="team.chunk")
+    await Runner.start()
+    try:
+        real_post_run = TeamSessionWrapper.post_run
+        post_run_calls = 0
+
+        async def _counting_post_run(self):
+            nonlocal post_run_calls
+            post_run_calls += 1
+            await real_post_run(self)
+
+        finalize_calls = []
+
+        async def _spy_finalize(self, *, team_name, session_id):
+            finalize_calls.append((team_name, session_id))
+
+        async def _failing_close_and_drain(self):
+            raise RuntimeError("gate close boom")
+
+        with (
+            patch.object(TeamAgentSpec, "build", return_value=agent),
+            patch.object(TeamSessionWrapper, "post_run", _counting_post_run),
+            patch.object(TeamRuntimeManager, "finalize", _spy_finalize),
+            patch.object(InteractGate, "close_and_drain", _failing_close_and_drain),
+        ):
+            chunks = [
+                chunk
+                async for chunk in Runner.run_agent_team_streaming(
+                    agent_team=spec,
+                    inputs={"query": "hello"},
+                    session=session_id,
+                )
+            ]
+            assert len(chunks) == 2, "gate 关闭失败不得影响已产出的流帧"
+            assert finalize_calls == [("cleanup_iso_team", session_id)], (
+                "gate 关闭失败不得吞掉 finalize"
+            )
+            assert post_run_calls == 1, "gate 关闭失败不得吞掉 post_run"
+    finally:
+        await Runner.stop()
+        await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+async def test_invoke_cleanup_gate_failure_does_not_swallow_finalize_and_post_run(
+        isolated_checkpointer,
+        stateful_team_db,
+):
+    """invoke 路径与流式同规：收尾三步各自独立兜底，interact gate 关闭失败
+    不得吞掉 finalize（pause/stop 决策）与 post_run。"""
+    from openjiuwen.agent_teams.runtime.gate import InteractGate
+    from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
+    from openjiuwen.core.session.agent_team import Session as TeamSessionWrapper
+
+    session_id = f"cleanup_invoke_{uuid.uuid4().hex}"
+    spec = _runtime_spec("cleanup_invoke_team")
+    agent = FakeTeamAgent("cleanup_invoke_team", stream_label="team.chunk")
+    await Runner.start()
+    try:
+        real_post_run = TeamSessionWrapper.post_run
+        post_run_calls = 0
+
+        async def _counting_post_run(self):
+            nonlocal post_run_calls
+            post_run_calls += 1
+            await real_post_run(self)
+
+        finalize_calls = []
+
+        async def _spy_finalize(self, *, team_name, session_id):
+            finalize_calls.append((team_name, session_id))
+
+        async def _failing_close_and_drain(self):
+            raise RuntimeError("gate close boom")
+
+        with (
+            patch.object(TeamAgentSpec, "build", return_value=agent),
+            patch.object(TeamSessionWrapper, "post_run", _counting_post_run),
+            patch.object(TeamRuntimeManager, "finalize", _spy_finalize),
+            patch.object(InteractGate, "close_and_drain", _failing_close_and_drain),
+        ):
+            result = await Runner.run_agent_team(
+                agent_team=spec,
+                inputs={"query": "hello"},
+                session=session_id,
+            )
+            assert result is not None, "gate 关闭失败不得影响 invoke 返回"
+            assert finalize_calls == [("cleanup_invoke_team", session_id)], (
+                "gate 关闭失败不得吞掉 finalize"
+            )
+            assert post_run_calls == 1, "gate 关闭失败不得吞掉 post_run"
+    finally:
+        await Runner.stop()
+        await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
 async def test_runner_same_session_after_pause_resumes_paused_runtime(
-    isolated_checkpointer,
-    stateful_team_db,
+        isolated_checkpointer,
+        stateful_team_db,
 ):
     session_id = f"paused_{uuid.uuid4().hex}"
     spec = _runtime_spec("paused_team")
@@ -787,8 +1459,8 @@ async def test_runner_same_session_after_pause_resumes_paused_runtime(
 
 @pytest.mark.asyncio
 async def test_runner_paused_same_session_resume_uses_same_prepared_session(
-    isolated_checkpointer,
-    stateful_team_db,
+        isolated_checkpointer,
+        stateful_team_db,
 ):
     session_id = f"paused_same_{uuid.uuid4().hex}"
     spec = _runtime_spec("paused_same_team")
@@ -845,9 +1517,9 @@ async def test_runner_interact_pause_and_delete_agent_team_route_through_team_ru
         patch("openjiuwen.agent_teams.spawn.shared_resources.get_shared_db", return_value=fake_db),
     ):
         async for _ in Runner.run_agent_team_streaming(
-            agent_team=spec,
-            inputs={"query": "hello"},
-            session=session_id,
+                agent_team=spec,
+                inputs={"query": "hello"},
+                session=session_id,
         ):
             pass
 
@@ -1229,10 +1901,6 @@ def test_team_agent_recover_from_session_builds_leader_member_handle():
     assert handle.member_name == "leader"
 
 
-
-
-
-
 @pytest.mark.asyncio
 async def test_team_session_forwards_child_stream_output_with_source_tags(isolated_checkpointer):
     session_id = f"stream_{uuid.uuid4().hex}"
@@ -1502,9 +2170,9 @@ class TestTeamRuntimeManagerInteract:
 
             with patch.object(TeamAgentSpec, "build", return_value=agent):
                 async for _ in Runner.run_agent_team_streaming(
-                    agent_team=spec,
-                    inputs={"query": "first"},
-                    session=session_id,
+                        agent_team=spec,
+                        inputs={"query": "first"},
+                        session=session_id,
                 ):
                     pass
 
@@ -1620,19 +2288,20 @@ class TestTeamRuntimeManagerStopTeam:
         caller_token = set_session_id("caller-session")
         try:
             with patch(
-                "openjiuwen.agent_teams.runtime.manager.create_monitor",
-                side_effect=_create_monitor,
+                    "openjiuwen.agent_teams.runtime.manager.create_monitor",
+                    side_effect=_create_monitor,
             ) as mocked:
                 assert await manager.get_monitor(team_name=team_name, session_id=session_id) == "monitor"
                 mocked.assert_called_once_with(fake_agent, hide_dm=False)
                 assert get_session_id() == "caller-session"
 
             with patch(
-                "openjiuwen.agent_teams.runtime.manager.create_monitor",
-                side_effect=_create_monitor,
+                    "openjiuwen.agent_teams.runtime.manager.create_monitor",
+                    side_effect=_create_monitor,
             ) as mocked:
                 assert (
-                    await manager.get_monitor(team_name=team_name, session_id=session_id, hide_dm=True) == "dm_hidden"
+                        await manager.get_monitor(team_name=team_name, session_id=session_id,
+                                                  hide_dm=True) == "dm_hidden"
                 )
                 mocked.assert_called_once_with(fake_agent, hide_dm=True)
                 assert get_session_id() == "caller-session"

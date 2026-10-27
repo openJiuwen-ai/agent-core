@@ -126,6 +126,16 @@ class _TeamRunnerMixin:
             self._team_runtime_manager = TeamRuntimeManager()
         return self._team_runtime_manager
 
+    def get_team_runtime_manager(self) -> "TeamRuntimeManager":
+        """Public accessor for the team runtime manager.
+
+        For embedders that need pool inspection (e.g. jiuwenswarm probing
+        for RUNNING entries after a rejected run — PM-55). Kept separate
+        from the underscore-named lazy factory to preserve the existing
+        internal call sites.
+        """
+        return self._get_team_runtime_manager()
+
     @staticmethod
     @contextmanager
     def _bind_interact_team_session(session_id: str):
@@ -196,18 +206,61 @@ class _TeamRunnerMixin:
                 return await activation.agent.invoke(inputs, session=activation.session)
             finally:
                 self._maybe_finalize_trace(team_name_for_finally)
-                try:
-                    await self._get_team_runtime_manager().finalize(
-                        team_name=spec.team_name,
-                        session_id=activation.session.get_session_id(),
-                    )
-                    await self._close_team_interact_gate(
-                        team_name=spec.team_name,
-                        session_id=activation.session.get_session_id(),
-                    )
-                    await activation.session.post_run()
-                except Exception:
-                    logger.exception("cleanup after invoke failed for team=%s", team_name_for_finally)
+                # 收尾三步各自独立兜底（与流式路径同规）：任一步失败不得吞掉
+                # 后续步骤——gate 关不上时 finalize（pause/stop 决策）与
+                # post_run 仍须执行，否则池条目滞留 RUNNING、下一轮 activate
+                # 被误 REJECT。
+                if _is_team_reject_kind(action.kind):
+                    # 不得 finalize（会把健康在跑的
+                    # 团队误 pause）、不动 interact gate；且**不得 commit**——
+                    # 本路径的 session 是 _build_session 新建的对象，其状态是
+                    # pre_run（_inspect_session 无条件跑过）时刻从 checkpoint
+                    # 恢复出的旧快照，与在跑团队共享 session_id；checkpointer
+                    # save 是全量 last-writer-wins（BaseSingleStateStorage 无
+                    # 版本守卫），而在跑团队回合内会 flush_checkpoint
+                    # （team_agent.py）持续提交新状态——此时 commit 会用旧
+                    # 快照覆盖较新 checkpoint，丢团队进度。REJECT 语义 = 零
+                    # 副作用，只关本对象自己的 stream emitter（未注册、无
+                    # 共享状态），持久化一行都不许写。
+                    try:
+                        await activation.session.close_stream()
+                    except Exception:
+                        logger.exception(
+                            "close stream after reject failed for team=%s",
+                            team_name_for_finally,
+                        )
+                else:
+                    try:
+                        # 顺序很关键：先关 gate 再 finalize——finalize 的
+                        # pause 落定即置位 pause_done，等着的 activate 随即
+                        # resume 并 reset gate；若先 finalize 后关 gate，
+                        # 本轮的 close 会盖掉新轮的 reset（gate 被误关）。
+                        await self._close_team_interact_gate(
+                            team_name=spec.team_name,
+                            session_id=activation.session.get_session_id(),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "close interact gate failed for team=%s",
+                            team_name_for_finally,
+                        )
+                    try:
+                        await self._get_team_runtime_manager().finalize(
+                            team_name=spec.team_name,
+                            session_id=activation.session.get_session_id(),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "finalize after invoke failed for team=%s",
+                            team_name_for_finally,
+                        )
+                    try:
+                        await activation.session.post_run()
+                    except Exception:
+                        logger.exception(
+                            "post_run after invoke failed for team=%s",
+                            team_name_for_finally,
+                        )
 
     async def run_agent_team_streaming(
         self,
@@ -279,18 +332,58 @@ class _TeamRunnerMixin:
                 if stream_logger is not None:
                     stream_logger.flush()
                 self._maybe_finalize_trace(team_name_for_finally)
-                try:
-                    await self._get_team_runtime_manager().finalize(
-                        team_name=spec.team_name,
-                        session_id=activation.session.get_session_id(),
-                    )
-                    await self._close_team_interact_gate(
-                        team_name=spec.team_name,
-                        session_id=activation.session.get_session_id(),
-                    )
-                    await activation.session.post_run()
-                except Exception:
-                    logger.exception("cleanup after stream failed for team=%s", team_name_for_finally)
+                # 收尾三步各自独立兜底：任一步失败不得吞掉后续步骤——gate 关
+                # 不上时 finalize（pause/stop 决策）与 post_run 仍须执行，否则
+                # 池条目滞留 RUNNING、下一轮 activate 被误 REJECT。
+                if _is_team_reject_kind(activation.action.kind):
+                    # 不得 finalize（会把健康在跑的团队
+                    # 误 pause，锁库下还拖出分钟级连锁故障）、不动 interact
+                    # gate；且**不得 commit**——本路径的 session 是
+                    # _build_session 新建的对象，状态是 pre_run 时刻从
+                    # checkpoint 恢复出的旧快照，与在跑团队共享 session_id；
+                    # save 是全量 last-writer-wins，在跑团队回合内持续
+                    # flush_checkpoint——commit 会用旧快照覆盖较新状态。
+                    # REJECT 语义 = 零副作用，只关本对象自己的 stream
+                    # emitter（与 invoke 路径同规）。
+                    try:
+                        await activation.session.close_stream()
+                    except Exception:
+                        logger.exception(
+                            "close stream after reject failed for team=%s",
+                            team_name_for_finally,
+                        )
+                else:
+                    try:
+                        # 顺序很关键：先关 gate 再 finalize——finalize 的
+                        # pause 落定即置位 pause_done，等着的 activate 随即
+                        # resume 并 reset gate；若先 finalize 后关 gate，
+                        # 本轮的 close 会盖掉新轮的 reset（gate 被误关）。
+                        await self._close_team_interact_gate(
+                            team_name=spec.team_name,
+                            session_id=activation.session.get_session_id(),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "close interact gate failed for team=%s",
+                            team_name_for_finally,
+                        )
+                    try:
+                        await self._get_team_runtime_manager().finalize(
+                            team_name=spec.team_name,
+                            session_id=activation.session.get_session_id(),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "finalize after stream failed for team=%s",
+                            team_name_for_finally,
+                        )
+                    try:
+                        await activation.session.post_run()
+                    except Exception:
+                        logger.exception(
+                            "post_run after stream failed for team=%s",
+                            team_name_for_finally,
+                        )
         finally:
             self._exit_root_task_group_context(token)
 
