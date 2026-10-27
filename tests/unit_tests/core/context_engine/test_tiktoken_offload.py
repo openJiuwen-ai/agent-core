@@ -105,8 +105,8 @@ def test_counter_falls_back_when_encoding_unavailable(monkeypatch):
     monkeypatch.setattr(tiktoken, "get_encoding", boom)
 
     counter = TiktokenCounter()
-    # Develop counter uses the three-character Unicode-length fallback when
-    # encoding init fails; keep that contract after reconciling warm-up/lock.
+    # Develop counter uses the character-based estimate when encoding init fails;
+    # keep that contract after reconciling warm-up/lock.
     assert counter.count("hello world") == len("hello world") // 3
 
 
