@@ -112,9 +112,15 @@ _UNSUPPORTED_DISABLED_THINKING_MARKERS = (
 _DISABLED_THINKING_VALUE_MARKERS = (
     "disabled",
     "disable",
-    "off",
     "关闭",
 )
+
+
+class _AffinityGatewayHTTPError(ValueError):
+    def __init__(self, status_code: int, body: str):
+        super().__init__(f"API returned error {status_code}: {body}")
+        self.status_code = status_code
+        self.body = body
 
 
 def _openrouter_model_provider(model: Optional[str]) -> Optional[str]:
@@ -548,7 +554,7 @@ class OpenAIModelClient(BaseModelClient):
             async with http_client.stream("POST", url, headers=headers, json=body) as response:
                 if response.status_code != 200:
                     error_text = (await response.aread()).decode("utf-8", errors="replace")
-                    raise ValueError(f"API returned error {response.status_code}: {error_text}")
+                    raise _AffinityGatewayHTTPError(response.status_code, error_text)
                 content_type = str(response.headers.get("Content-Type", "")).lower()
                 if "text/event-stream" in content_type:
                     async for raw_line in response.aiter_lines():
@@ -596,6 +602,40 @@ class OpenAIModelClient(BaseModelClient):
                 "affinity stream completed without model output, "
                 f"raw_samples={raw_samples!r}"
             )
+
+    async def _iter_affinity_gateway_stream_with_disabled_thinking_fallback(
+            self,
+            params: dict,
+            *,
+            timeout: Optional[float] = None,
+    ) -> AsyncIterator[AssistantMessageChunk]:
+        request_params = self._apply_disabled_thinking_cache(params)
+        emitted_chunk = False
+        try:
+            async for chunk in self._iter_affinity_gateway_stream(request_params, timeout=timeout):
+                emitted_chunk = True
+                yield chunk
+            return
+        except Exception as exc:
+            # Retrying after any output would duplicate an already-visible stream.
+            if emitted_chunk:
+                raise
+            retry_params = self._retry_params_without_disabled_thinking(request_params, exc)
+            if retry_params is None:
+                raise
+
+        async for chunk in self._iter_affinity_gateway_stream(retry_params, timeout=timeout):
+            yield chunk
+
+        model_key = self._disabled_thinking_model_key(request_params)
+        if model_key:
+            self._models_rejecting_disabled_thinking.add(model_key)
+        llm_logger.warning(
+            "OpenAI-compatible model rejected disabled thinking; request recovered with model defaults.",
+            model_name=model_key,
+            model_provider=self.model_client_config.client_provider,
+            is_stream=True,
+        )
 
     def supports_kv_cache_release(self) -> bool:
         return self._kv_cache_mode() == "release"
@@ -1284,20 +1324,35 @@ class OpenAIModelClient(BaseModelClient):
         seen.add(id(value))
 
         if isinstance(value, (str, int, float, bool)):
-            return [str(value)]
+            try:
+                return [str(value)]
+            except Exception:
+                return []
         if isinstance(value, MappingABC):
             parts: list[str] = []
-            for key, item in value.items():
+            try:
+                items = list(value.items())
+            except Exception:
+                items = ()
+            for key, item in items:
                 parts.extend(cls._collect_exception_text_parts(key, seen))
                 parts.extend(cls._collect_exception_text_parts(item, seen))
             return parts
         if isinstance(value, (list, tuple, set, frozenset)):
             parts = []
-            for item in value:
+            try:
+                items = list(value)
+            except Exception:
+                items = ()
+            for item in items:
                 parts.extend(cls._collect_exception_text_parts(item, seen))
             return parts
 
-        parts = [str(value)]
+        try:
+            rendered = str(value)
+        except Exception:
+            rendered = ""
+        parts = [rendered] if rendered else []
         for attr in ("message", "body", "code", "type", "param", "status_code", "response"):
             attr_value = cls._exception_attr(value, attr)
             if attr_value is value:
@@ -1323,9 +1378,6 @@ class OpenAIModelClient(BaseModelClient):
             return False
 
         error_text = cls._exception_text(exc).lower()
-        if "1210" in error_text:
-            return True
-
         mentions_thinking = "thinking" in error_text or "reasoning" in error_text or "思考" in error_text
         if not mentions_thinking:
             return False
@@ -1334,7 +1386,10 @@ class OpenAIModelClient(BaseModelClient):
         if not mentions_unsupported:
             return False
 
-        mentions_disable = any(marker in error_text for marker in _DISABLED_THINKING_VALUE_MARKERS)
+        mentions_disable = (
+            any(marker in error_text for marker in _DISABLED_THINKING_VALUE_MARKERS)
+            or re.search(r"\boff\b", error_text) is not None
+        )
         return mentions_disable or "parameter" in error_text or "参数" in error_text
 
     def _retry_params_without_disabled_thinking(
@@ -1363,18 +1418,17 @@ class OpenAIModelClient(BaseModelClient):
             if retry_params is None:
                 raise
 
+            response = await async_client.chat.completions.create(**retry_params)
             model_key = self._disabled_thinking_model_key(request_params)
             if model_key:
                 self._models_rejecting_disabled_thinking.add(model_key)
-
             llm_logger.warning(
-                "OpenAI-compatible model rejected disabled thinking; retrying with model defaults.",
-                event_type=LogEventType.LLM_CALL_ERROR,
+                "OpenAI-compatible model rejected disabled thinking; request recovered with model defaults.",
                 model_name=model_key,
                 model_provider=self.model_client_config.client_provider,
                 is_stream=is_stream,
             )
-            return await async_client.chat.completions.create(**retry_params)
+            return response
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """Acquire an ``AsyncOpenAI`` client for a request.
@@ -1756,7 +1810,7 @@ class OpenAIModelClient(BaseModelClient):
 
             final_message = None
             if self._uses_affinity_gateway() and not output_parser:
-                async for parsed_chunk in self._iter_affinity_gateway_stream(
+                async for parsed_chunk in self._iter_affinity_gateway_stream_with_disabled_thinking_fallback(
                         params,
                         timeout=timeout,
                 ):

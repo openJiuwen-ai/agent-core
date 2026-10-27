@@ -642,6 +642,83 @@ class TestDisabledThinkingCompatibility:
         assert "fallback failed" in str(exc_info.value)
         assert sdk_client.chat.completions.create.call_count == 2
 
+        # A failed compatibility retry must not poison subsequent requests.
+        assert "minimax-m3" not in client._models_rejecting_disabled_thinking
+
+    @pytest.mark.asyncio
+    async def test_unrelated_1210_text_and_offset_do_not_trigger_fallback(self):
+        client = _make_client()
+        error = _OpenAIStyleError(
+            "Bad request 12100: reasoning offset is invalid",
+            status_code=400,
+        )
+        sdk_client = _mock_sdk_client(error)
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with pytest.raises(BaseError):
+                await client.invoke("hello", **self._disabled_request_kwargs())
+
+        assert sdk_client.chat.completions.create.call_count == 1
+        assert "minimax-m3" not in client._models_rejecting_disabled_thinking
+
+    def test_hostile_exception_string_does_not_mask_original_error(self):
+        client = _make_client()
+
+        class _HostileError(Exception):
+            def __str__(self):
+                raise RuntimeError("broken __str__")
+
+        assert client._is_disabled_thinking_rejection(_HostileError()) is False
+
+        error = _OpenAIStyleError("bad request", status_code=400)
+
+        class _HostileMapping(dict):
+            def items(self):
+                raise RuntimeError("broken items")
+
+        error.body = _HostileMapping()
+        assert client._is_disabled_thinking_rejection(error) is False
+
+    @pytest.mark.asyncio
+    async def test_affinity_stream_retries_before_output_and_caches_after_success(self):
+        client = _make_client()
+        calls = []
+
+        async def _fake_stream(params, *, timeout=None):
+            calls.append(params)
+            if len(calls) == 1:
+                raise _unsupported_disabled_thinking_error()
+            yield _stream_chunk("fallback")
+
+        with patch.object(client, "_iter_affinity_gateway_stream", new=_fake_stream):
+            chunks = [chunk.content async for chunk in (
+                client._iter_affinity_gateway_stream_with_disabled_thinking_fallback(
+                    {"model": "MiniMax-M3", **self._disabled_request_kwargs()},
+                )
+            )]
+
+        assert chunks == ["fallback"]
+        assert len(calls) == 2
+        assert calls[0]["reasoning_effort"] == "off"
+        assert "reasoning_effort" not in calls[1]
+        assert "minimax-m3" in client._models_rejecting_disabled_thinking
+
+    @pytest.mark.asyncio
+    async def test_affinity_stream_does_not_retry_after_emitting_output(self):
+        client = _make_client()
+
+        async def _partial_stream(params, *, timeout=None):
+            yield _stream_chunk("partial")
+            raise _unsupported_disabled_thinking_error()
+
+        with patch.object(client, "_iter_affinity_gateway_stream", new=_partial_stream):
+            with pytest.raises(_OpenAIStyleError):
+                _ = [chunk async for chunk in client._iter_affinity_gateway_stream_with_disabled_thinking_fallback(
+                    {"model": "MiniMax-M3", **self._disabled_request_kwargs()},
+                )]
+
+        assert "minimax-m3" not in client._models_rejecting_disabled_thinking
+
 
 def test_deepseek_endpoint_profile_adds_reasoning_content_to_assistant_messages():
     client_config = ModelClientConfig(
