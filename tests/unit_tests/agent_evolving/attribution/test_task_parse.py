@@ -10,6 +10,7 @@ import pytest
 
 from openjiuwen.agent_evolving.attribution.model import TaskParseResult
 from openjiuwen.agent_evolving.attribution.nodes import TrajectoryNode
+from openjiuwen.agent_evolving.attribution.snapshot import slice_nodes_by_range
 from openjiuwen.agent_evolving.attribution.task_parse import (
     TaskParseError,
     build_task_parse_digest,
@@ -238,6 +239,37 @@ async def test_run_task_parse_happy_path() -> None:
     assert result.message_artifacts == [("main:1", "好的，报告如下")]
     assert result.file_artifacts == ["/w/report.md"]
     assert result.run_meta["attempts"] == 1
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        r"D:\test_dir\轨迹-1026\图片.jpg",
+        r"d:\TEST_DIR\轨迹-1026\图片.jpg",
+        "D:/test_dir/轨迹-1026/图片.jpg",
+    ],
+)
+async def test_windows_reported_file_matches_candidate_case_and_separators(reported: str) -> None:
+    sent = r"D:\Test_Dir\轨迹-1026\图片.JPG"
+    nodes = {
+        "main": [
+            _node(0, "user", "发送图片"),
+            _node(1, "assistant", calls=[_call("send_file_to_user", {"abs_file_path_list": json.dumps([sent])})]),
+            _node(2, "assistant", "图片已发送" + "。" * 40),
+        ]
+    }
+    sliced = slice_nodes_by_range(nodes, [("main", 0, 10_000)])
+    llm = _FakeLLM(
+        [
+            [
+                {"name": "report_task_description", "args": {"task": "发送图片"}},
+                {"name": "report_file_artifacts", "args": {"paths": [reported]}},
+            ]
+        ]
+    )
+    result = await run_task_parse(sliced, "zh", llm)
+    assert result.delivery_round_selected is True
+    assert result.file_artifacts == [r"d:\test_dir\轨迹-1026\图片.jpg"]
 
 
 async def test_run_task_parse_retry_then_success() -> None:
