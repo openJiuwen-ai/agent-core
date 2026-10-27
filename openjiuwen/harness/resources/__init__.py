@@ -1,44 +1,56 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Resource loading package (YAML loader + ExpertHarness resolve surface)."""
+"""Plugin / AgentTemplate package load and Spec resolve."""
 
-from openjiuwen.harness.resources.expert_harness_parts import (
-    ExpertHarnessParts,
+from openjiuwen.harness.resources.extension_loader import (
+    find_agent_template_manifest,
+    find_plugin_manifest,
+    load_agent_template_package,
+    load_plugin_package,
+    normalize_package_mcps,
+)
+from openjiuwen.harness.resources.extension_resolver import (
+    ExtensionParts,
     LoadRecord,
+    ResolvedPromptSection,
+    ResolvedSkill,
     ResourceKind,
     ResourceRef,
-    canonicalize_expert_harness_spec,
-    resolve_expert_harness_parts,
+    resolve_agent_template_parts,
+    resolve_plugin_parts,
 )
-from openjiuwen.harness.resources.loader import (
-    find_expert_harness_manifest,
-    load_expert_harness_spec,
-)
-from openjiuwen.harness.schema.expert_harness_spec import (
-    ExpertHarnessConfigSpec,
-    ExpertHarnessSpec,
-    FileSectionSpec,
+from openjiuwen.harness.schema.extension_spec import (
+    AgentTemplateSpec,
+    McpDirSpec,
     McpServerSpec,
+    MemorySpec,
+    PluginSpec,
     PromptSectionSpec,
-    ResourceSource,
+    RubricSpec,
     SkillSpec,
 )
 
 __all__ = [
-    "ExpertHarnessConfigSpec",
-    "ExpertHarnessParts",
-    "ExpertHarnessSpec",
-    "FileSectionSpec",
+    "AgentTemplateSpec",
+    "ExtensionParts",
     "LoadRecord",
+    "McpDirSpec",
     "McpServerSpec",
+    "MemorySpec",
+    "PluginSpec",
     "PromptSectionSpec",
+    "ResolvedPromptSection",
+    "ResolvedSkill",
     "ResourceKind",
     "ResourceRef",
-    "ResourceSource",
+    "RubricSpec",
     "SkillSpec",
-    "canonicalize_expert_harness_spec",
-    "find_expert_harness_manifest",
-    "load_expert_harness_spec",
-    "resolve_expert_harness_parts",
+    "find_agent_template_manifest",
+    "find_plugin_manifest",
+    "load_agent_template_package",
+    "load_plugin_package",
+    "normalize_package_mcps",
+    "resolve_agent_template_parts",
+    "resolve_plugin_parts",
 ]

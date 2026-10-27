@@ -224,3 +224,29 @@ def test_vision_model_config_from_env(monkeypatch):
     assert config.api_key == "vision-key"
     assert config.base_url == "https://openrouter.ai/api/v1"
     assert config.model == "google/gemini-2.5-pro"
+
+
+def test_normalize_headers_only_rewrites_auth_header():
+    from openjiuwen.harness.tools.multimodal.vision import _normalize_headers
+
+    assert _normalize_headers(None) is None
+    assert _normalize_headers({}) == {}
+
+    normalized = _normalize_headers(
+        {
+            "authorization": "Basic session-credential",
+            "OpenAI-Organization": "org-vision",
+            "OpenAI-Project": "proj-vision",
+            "x-custom-header": "kept-verbatim",
+        }
+    )
+
+    # The auth key is normalized so the custom credential overrides the SDK's
+    # built-in Authorization under the case-sensitive header merge.
+    assert normalized["Authorization"] == "Basic session-credential"
+    assert "authorization" not in normalized
+    # Org/project and other custom headers keep their exact spelling so they
+    # still override the SDK's own OpenAI-Organization / OpenAI-Project.
+    assert normalized["OpenAI-Organization"] == "org-vision"
+    assert normalized["OpenAI-Project"] == "proj-vision"
+    assert normalized["x-custom-header"] == "kept-verbatim"

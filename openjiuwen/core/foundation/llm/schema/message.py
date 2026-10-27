@@ -2,9 +2,13 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 from typing import Union, List, Optional, Any, Dict
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.llm.utf8_sanitize import (
+    sanitize_message_content,
+    sanitize_utf8_text,
+)
 
 
 OPENJIUWEN_MESSAGE_PROVENANCE_METADATA = "_openjiuwen_message_provenance"
@@ -65,6 +69,19 @@ class AssistantMessage(BaseMessage):
     provider_metadata: Dict[str, Any] = Field(default_factory=dict)
     provider_content: Optional[Any] = None
 
+    @field_validator("content", mode="before")
+    @classmethod
+    def _sanitize_inbound_content(cls, value: Any) -> Any:
+        """Inbound LLM reply content: replace lone surrogates with U+FFFD."""
+        return sanitize_message_content(value)
+
+    @field_validator("reasoning_content", mode="before")
+    @classmethod
+    def _sanitize_inbound_reasoning(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return sanitize_utf8_text(value)[0]
+        return value
+
     @model_validator(mode='before')
     @classmethod
     def convert_openai_tool_calls_format(cls, data: Any) -> Any:
@@ -97,18 +114,25 @@ class AssistantMessage(BaseMessage):
         return data
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
+        # Use getattr for optional fields: checkpoint-restored instances may
+        # predate newer schema keys (pydantic v2 fields are not class attrs,
+        # so a missing __dict__ key raises AttributeError and breaks callers
+        # such as context-usage.v1 analyze/token counting).
         result = {
             "role": self.role,
             "content": self.content,
         }
-        if self.name is not None:
-            result["name"] = self.name
-        if self.metadata:
-            result["metadata"] = self.metadata
-        if self.tool_calls:
-            tool_calls = []
-            for call in self.tool_calls:
-                tool_calls.append({
+        name = getattr(self, "name", None)
+        if name is not None:
+            result["name"] = name
+        metadata = getattr(self, "metadata", None) or {}
+        if metadata:
+            result["metadata"] = metadata
+        tool_calls = getattr(self, "tool_calls", None)
+        if tool_calls:
+            dumped_tool_calls = []
+            for call in tool_calls:
+                dumped_tool_calls.append({
                     "id": call.id,
                     "type": call.type,
                     "function": {
@@ -116,31 +140,43 @@ class AssistantMessage(BaseMessage):
                         "arguments": call.arguments
                     }
                 })
-                if call.response_item_id is not None:
-                    tool_calls[-1]["response_item_id"] = call.response_item_id
-            result["tool_calls"] = tool_calls
-        if self.usage_metadata is not None:
-            result["usage_metadata"] = self.usage_metadata.model_dump(**kwargs)
-        if self.finish_reason is not None:
-            result["finish_reason"] = self.finish_reason
-        if self.parser_content is not None:
-            result["parser_content"] = self.parser_content
-        if self.reasoning_content is not None:
-            result["reasoning_content"] = self.reasoning_content
-        if self.prompt_token_ids is not None:
-            result["prompt_token_ids"] = self.prompt_token_ids
-        if self.completion_token_ids is not None:
-            result["completion_token_ids"] = self.completion_token_ids
-        if self.logprobs is not None:
-            result["logprobs"] = self.logprobs
-        if self.response_id is not None:
-            result["response_id"] = self.response_id
-        if self.response_model is not None:
-            result["response_model"] = self.response_model
-        if self.provider_metadata:
-            result["provider_metadata"] = self.provider_metadata
-        if self.provider_content is not None:
-            result["provider_content"] = self.provider_content
+                response_item_id = getattr(call, "response_item_id", None)
+                if response_item_id is not None:
+                    dumped_tool_calls[-1]["response_item_id"] = response_item_id
+            result["tool_calls"] = dumped_tool_calls
+        usage_metadata = getattr(self, "usage_metadata", None)
+        if usage_metadata is not None:
+            result["usage_metadata"] = usage_metadata.model_dump(**kwargs)
+        finish_reason = getattr(self, "finish_reason", None)
+        if finish_reason is not None:
+            result["finish_reason"] = finish_reason
+        parser_content = getattr(self, "parser_content", None)
+        if parser_content is not None:
+            result["parser_content"] = parser_content
+        reasoning_content = getattr(self, "reasoning_content", None)
+        if reasoning_content is not None:
+            result["reasoning_content"] = reasoning_content
+        prompt_token_ids = getattr(self, "prompt_token_ids", None)
+        if prompt_token_ids is not None:
+            result["prompt_token_ids"] = prompt_token_ids
+        completion_token_ids = getattr(self, "completion_token_ids", None)
+        if completion_token_ids is not None:
+            result["completion_token_ids"] = completion_token_ids
+        logprobs = getattr(self, "logprobs", None)
+        if logprobs is not None:
+            result["logprobs"] = logprobs
+        response_id = getattr(self, "response_id", None)
+        if response_id is not None:
+            result["response_id"] = response_id
+        response_model = getattr(self, "response_model", None)
+        if response_model is not None:
+            result["response_model"] = response_model
+        provider_metadata = getattr(self, "provider_metadata", None) or {}
+        if provider_metadata:
+            result["provider_metadata"] = provider_metadata
+        provider_content = getattr(self, "provider_content", None)
+        if provider_content is not None:
+            result["provider_content"] = provider_content
         return result
 
 

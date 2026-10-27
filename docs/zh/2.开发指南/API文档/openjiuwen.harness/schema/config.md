@@ -107,7 +107,7 @@ class DeepAgentConfig:
     backend: Optional[Any] = None
     sys_operation: Optional[SysOperation] = None
     auto_create_workspace: bool = True
-    completion_timeout: float = 600.0
+    completion_timeout: Optional[float] = 600.0
     language: Optional[str] = None
     prompt_mode: Optional[str] = None
     vision_model_config: Optional[VisionModelConfig] = None
@@ -141,7 +141,7 @@ DeepAgent 运行时配置。
 | `backend` | `Optional[Any]` | `None` | 后端协议实例 |
 | `sys_operation` | `Optional[SysOperation]` | `None` | 系统操作实例 |
 | `auto_create_workspace` | `bool` | `True` | 是否自动创建工作区目录 |
-| `completion_timeout` | `float` | `600.0` | 单次任务循环迭代的最大等待秒数 |
+| `completion_timeout` | `Optional[float]` | `600.0` | 单次任务循环迭代的最大等待秒数；`None` 表示不限时 |
 | `language` | `Optional[str]` | `None` | 提示词语言 |
 | `prompt_mode` | `Optional[str]` | `None` | 提示词模式 |
 | `vision_model_config` | `Optional[VisionModelConfig]` | `None` | 视觉模型配置 |

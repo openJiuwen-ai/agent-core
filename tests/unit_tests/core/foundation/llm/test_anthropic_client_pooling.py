@@ -14,6 +14,7 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
 )
 from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import AnthropicModelClient
+from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
 
 
 def _build_mock_anthropic_response(text: str = "ok") -> MagicMock:
@@ -135,6 +136,21 @@ class TestAcloseConnections:
 
         assert client.close.call_count == 0
         assert AnthropicModelClient.connection_key(cfg) in AnthropicModelClient._client_cache
+
+    def test_connection_key_includes_auth_mode(self):
+        api_key_cfg = self._cfg("https://api.anthropic.com")
+        custom_headers_cfg = ModelClientConfig(
+            client_provider=ProviderType.Anthropic,
+            api_key="sk-ant",
+            api_base="https://api.anthropic.com",
+            auth_mode=LLMAuthMode.CustomHeaders,
+            verify_ssl=False,
+        )
+
+        assert (
+            AnthropicModelClient.connection_key(api_key_cfg)
+            != AnthropicModelClient.connection_key(custom_headers_cfg)
+        )
 
 
 class TestFallbackClient:

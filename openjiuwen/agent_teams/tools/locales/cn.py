@@ -172,7 +172,10 @@ STRINGS: dict[str, str] = {
     "create_task.tasks": "任务列表（单个任务也用数组包裹）",
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
-    "create_task.task.content": "任务详细内容，包含目标和验收标准",
+    "create_task.task.content": (
+        "任务详细内容，包含目标和验收标准；派发文档解析类任务时，"
+        "若已用 read_file 读过该文档，必须把嵌入图片信息（数量与文件名）转写进任务内容"
+    ),
     # Both create_task variants expose assignee_display_name. Autonomous treats
     # it as optional; scheduled requires it. DB still stores member_name.
     "create_task.task.assignee_display_name": (
@@ -266,6 +269,10 @@ STRINGS: dict[str, str] = {
         "'content' 过长（{actual} 字符，上限 {limit}）：这个体量的内容是产物，不是消息。"
         "先用 write_file 把正文写到团队共享工作空间 .team/ 下的文件，再重发本消息，"
         "content 里只写文件路径加一两句摘要。不要为了绕过本限制而把正文拆成多条消息。"
+    ),
+    "send_message.hint_mentioned_third_party": (
+        "注意：本消息仅会送达 {to}；正文中 @ 的 {mentioned} 不会收到任何系统通知——"
+        "@提及不构成送达。若需要这些成员接棒或参与，请分别用 send_message(to=该成员) 亲自送达。"
     ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============
     # send_message_scheduled._desc lives in descs/cn/send_message_scheduled.md

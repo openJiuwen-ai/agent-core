@@ -68,6 +68,7 @@ EXPECTED_CLASSES = {
     "CorpusMessage",
     "CorpusPort",
     "DistillCandidates",
+    "DistillCorpusBatch",
     "DistillRunResult",
     "FixtureCorpus",
     "LlmAnalyzer",

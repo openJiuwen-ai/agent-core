@@ -33,7 +33,8 @@ leader 的 DeepAgent，`$` 投给该 avatar，`$`/`#` 两类一致。
     `member_exists` 闭包，谓词归属调用方决定。
   - 已知 recipient 的点对点 payload 原样保留；未知 recipient 折回；god-view / avatar-drive /
     broadcast(`@all`/`@*`，无 named target)直接 passthrough。
-  - 全部已知 → 原样返回；否则返回 `<已知点对点 payloads> + [<一条折回的无 @ payload>]`。
+  - 全部已知 → 原样返回；否则返回 `<已知点对点 payloads> + <折回的无 @ payloads>`。共享正文的
+    未知 recipient 合并为一条；内联分段产生的不同正文分别折回，避免正文错配或丢失。
 - `router.py:_named_target(payload)`：取出 payload 的点对点 recipient；god-view / avatar-drive /
   broadcast 返回 `None`(它们不查 roster)。
 - `router.py:_fold_unknown_mentions(unknown)`：把未知 mention 重新拼回正文
@@ -55,6 +56,9 @@ leader 的 DeepAgent，`$` 投给该 avatar，`$`/`#` 两类一致。
   点对点 `on it`，**同时** leader 收到 `@ghost on it`。这是用户明确要求("无效的 @ 也同时投递给
   leader 或 $ 的成员，作为一般输入")。注意折回正文是"原文去掉已成功路由的 mention"——已路由的
   `@m1` 被消费，未路由的 `@ghost` 作为文本留下。
+- **内联分段只接受一个前缀 recipient**。`# @m1 body1 @m2 body2` 可拆成两条不同正文；但
+  `# @m1 @m2 body @m3 text` 的前两个 recipient 属于既有共享正文 multicast，无法无歧义地把首段正文
+  只归给其中一个，因此必须整体回退到 multicast，向 `m1`、`m2` 都投递完整正文，禁止静默丢人。
 - **校验落在 `interact`(组级)，不落在 `_dispatch_payload`(逐条)**。"一个都没匹配上才整体降级 /
   部分匹配如何拆分"需要看整组 recipient；逐条 dispatch 看不到兄弟 recipient。`_dispatch_payload`
   保持"哑路由"，只按 payload 类型分发——直接调它的单测仍然有效。

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import time
 from dataclasses import dataclass
 from typing import (
     TYPE_CHECKING,
@@ -105,6 +106,7 @@ class TeamSessionReleaseInfo:
 # abort() is a put + await ack with no internal timeout; a member supervisor
 # wedged in a non-cancellable await would otherwise hang the whole reset.
 _RESET_ABORT_TIMEOUT_SECONDS: float = 5.0
+_TEAM_STOP_TIMEOUT_SECONDS: float = 10.0
 
 
 async def _clear_inprocess_members_inflight(entry: "ActiveTeam") -> None:
@@ -130,6 +132,9 @@ async def _clear_inprocess_members_inflight(entry: "ActiveTeam") -> None:
     """
     spawn_mgr = getattr(getattr(entry, "agent", None), "spawn_manager", None)
     handles = getattr(spawn_mgr, "spawned_handles", None) or {}
+    if not handles:
+        return
+    abort_t0 = time.perf_counter()
     for member_name, handle in list(handles.items()):
         agent_ref = getattr(handle, "agent_ref", None)
         if agent_ref is None:
@@ -168,6 +173,10 @@ async def _clear_inprocess_members_inflight(entry: "ActiveTeam") -> None:
                 member_name,
                 e,
             )
+    team_logger.info(
+        "lifecycle_timing reset reset_member_abort duration_ms={:.0f}",
+        (time.perf_counter() - abort_t0) * 1000,
+    )
 
 
 def _live_team_session(entry: "ActiveTeam"):
@@ -211,6 +220,9 @@ class TeamRuntimeManager:
         team_name = spec.team_name
 
         pool_entry = await self._pool.get(team_name)
+        if pool_entry is not None and pool_entry.state is RuntimeState.STOPPING:
+            raise_error(StatusCode.AGENT_TEAM_BUSY_INVALID, team_name=team_name,
+                        session_id=pool_entry.current_session_id, reason="team runtime is still stopping")
         # Session switch policy: any pool entry on a different session is
         # torn down before dispatch. This collapses the old WARM_RECOVER /
         # NEW_TEAM_IN_SESSION_WARM paths (which reused the same TeamAgent
@@ -234,6 +246,7 @@ class TeamRuntimeManager:
             team_session,
             team_name,
         )
+        await self._check_activation_entry(team_name, pool_entry)
         action = decide_run_action(
             team_in_db=team_in_db,
             team_in_session=team_in_session,
@@ -291,9 +304,14 @@ class TeamRuntimeManager:
                 session_id,
             )
             return
+        if entry.state is RuntimeState.STOPPING:
+            return  # The explicit stop owns teardown; never re-pause its runtime.
         agent = entry.agent
+        finalize_t0 = time.perf_counter()
         try:
             shutdown_requested = await agent.is_shutdown_requested()
+            if entry.state is RuntimeState.STOPPING:
+                return
             if shutdown_requested or agent.lifecycle != "persistent":
                 team_logger.info(
                     "finalize: stopping team {} session {} (shutdown_requested={}, lifecycle={})",
@@ -302,22 +320,26 @@ class TeamRuntimeManager:
                     shutdown_requested,
                     agent.lifecycle,
                 )
-                await agent.stop_coordination()
-                await self._pool.remove(team_name)
+                await self.stop_team(team_name=team_name, session_id=session_id)
             else:
                 team_logger.info(
                     "finalize: pausing persistent team {} session {}",
                     team_name,
                     session_id,
                 )
-                await agent.pause_coordination()
-                entry.state = RuntimeState.PAUSED
+                await self._pause_entry(entry)
         except Exception as exc:
             team_logger.warning(
                 "Failed to finalize team {} on session {}: {}",
                 team_name,
                 session_id,
                 exc,
+            )
+        finally:
+            team_logger.info(
+                "[{}] lifecycle_timing finalize finalize_total duration_ms={:.0f}",
+                team_name,
+                (time.perf_counter() - finalize_t0) * 1000,
             )
 
     # team_member statuses that already encode a finalize-side outcome
@@ -398,6 +420,12 @@ class TeamRuntimeManager:
                 if member is not None:
                     await member.update_status(MemberStatus.SHUTDOWN)
                 return
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                # A cancelled member shell will not resume. Its resources must
+                # close even when the leader could not persist STOPPED/PAUSED.
+                await agent.stop_coordination()
+                return
             team_logger.info(
                 "finalize_member: pausing team member {}; marking READY for next assignment",
                 member_name,
@@ -433,7 +461,26 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
-        await entry.agent.pause_coordination()
+        return await self._pause_entry(entry)
+
+    async def _pause_entry(self, entry: ActiveTeam) -> bool:
+        team_name, session_id = entry.team_name, entry.current_session_id
+        if entry.state is RuntimeState.STOPPING:
+            return False
+        from openjiuwen.agent_teams.agent.coordination.kernel import PauseCleanupError
+
+        try:
+            await entry.agent.pause_coordination()
+        except PauseCleanupError:
+            # A partial pause must not accept new work while members may still
+            # be exiting. Reuse the owned stop task and its bounded caller wait.
+            try:
+                await self._stop_entry(entry)
+            except Exception as exc:
+                team_logger.warning("Failed to stop team {} after pause failure: {}", team_name, exc)
+            raise
+        if entry.state is RuntimeState.STOPPING:
+            return False
         entry.state = RuntimeState.PAUSED
         team_logger.info("pause: team {} session {} paused", team_name, session_id)
         return True
@@ -487,6 +534,8 @@ class TeamRuntimeManager:
         entry = await self._resolve_entry(team_name=team_name, session_id=session_id)
         if entry is None:
             return DeliverResult.failure("not_active")
+        if entry.state is RuntimeState.STOPPING:
+            return DeliverResult.failure("stopping")
 
         if isinstance(payload, InteractiveInput):
             # resume_interrupt delivers now if a matching interrupt is pending,
@@ -705,6 +754,8 @@ class TeamRuntimeManager:
                         await agent.auto_start_all()
                     else:
                         await agent.auto_start_member(payload.target)
+                elif payload.sender is not None:
+                    await agent.auto_start_member(payload.sender)
                 inbox = HumanAgentInbox(
                     backend,
                     backend.message_manager,
@@ -762,21 +813,33 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
-        try:
-            await entry.agent.stop_coordination()
-        except Exception as exc:
-            team_logger.warning(
-                "Failed to stop team {} on session {}: {}",
-                team_name,
-                session_id,
-                exc,
-            )
-        await self._pool.remove(team_name)
-        team_logger.info(
-            "stop_team: team {} session {} stopped and removed from pool",
-            team_name,
-            session_id,
-        )
+        return await self._stop_entry(entry)
+
+    async def _stop_entry(self, entry: ActiveTeam) -> bool:
+        team_name, session_id = entry.team_name, entry.current_session_id
+        entry.state = RuntimeState.STOPPING
+        retry_stop = False
+        if entry.stop_task is not None and entry.stop_task.done():
+            retry_stop = entry.stop_task.cancelled() or entry.stop_task.exception() is not None
+        if entry.stop_task is None or retry_stop:
+            async def stop_owned_runtime() -> None:
+                stop_t0 = time.perf_counter()
+                await entry.agent.stop_coordination()
+                await self._pool.remove(team_name, expected=entry)
+                team_logger.info(
+                    "[{}] lifecycle_timing stop stop_team_total duration_ms={:.0f}",
+                    team_name,
+                    (time.perf_counter() - stop_t0) * 1000,
+                )
+                team_logger.info("stop_team: team {} session {} stopped and removed from pool", team_name, session_id)
+
+            entry.stop_task = asyncio.create_task(stop_owned_runtime(), name=f"team-stop:{team_name}")
+            # A timed-out/cancelled caller must not abandon ownership of cleanup.
+            entry.stop_task.add_done_callback(lambda task: None if task.cancelled() else task.exception())
+        done, _ = await asyncio.wait({entry.stop_task}, timeout=_TEAM_STOP_TIMEOUT_SECONDS)
+        if not done:
+            raise TimeoutError(f"Team {team_name} is still stopping; runtime retained")
+        entry.stop_task.result()  # Propagate failures instead of falsely reporting a successful stop.
         return True
 
     async def get_monitor(
@@ -859,6 +922,16 @@ class TeamRuntimeManager:
                     session_id=entry.current_session_id,
                 )
 
+        async def _remove_team_directory() -> None:
+            """Best-effort removal shared by fresh and retried deletions."""
+            team_dir = team_home(team_name)
+            if team_dir.is_dir():
+                try:
+                    await asyncio.to_thread(shutil.rmtree, str(team_dir))
+                    team_logger.info("Removed team directory: {}", team_dir)
+                except Exception as exc:
+                    team_logger.warning("Failed to remove team directory {}: {}", team_dir, exc)
+
         checkpointer = CheckpointerFactory.get_checkpointer()
         if session_ids:
             existing_session_ids: list[str] = []
@@ -872,6 +945,7 @@ class TeamRuntimeManager:
                     session_ids,
                     type(checkpointer).__name__,
                 )
+                await _remove_team_directory()
                 return True
         else:
             existing_session_ids = []
@@ -907,20 +981,19 @@ class TeamRuntimeManager:
             await checkpointer.release(session_id)
 
         deleted = await db.team.delete_team(team_name)
+        if not deleted:
+            team_logger.info("Team {} already absent from team_info during delete", team_name)
 
         # Remove team filesystem directory (team_home) after database cleanup.
         # This covers the case where the caller has already stopped the runtime
         # (removing the pool entry) before calling delete_team, so we cannot
         # access TeamBackend._remove_cleanup_paths().
-        team_dir = team_home(team_name)
-        if team_dir.is_dir():
-            try:
-                await asyncio.to_thread(shutil.rmtree, str(team_dir))
-                team_logger.info("Removed team directory: {}", team_dir)
-            except Exception as exc:
-                team_logger.warning("Failed to remove team directory {}: {}", team_dir, exc)
+        await _remove_team_directory()
 
-        return deleted
+        # Reaching the desired terminal state is success even when a prior
+        # attempt already removed the team_info row.  The cleanup above is
+        # deliberately retried so partially-completed deletions can converge.
+        return True
 
     async def reset_session(
         self,
@@ -1338,6 +1411,15 @@ class TeamRuntimeManager:
             return None
         return entry
 
+    async def _check_activation_entry(self, team_name: str, expected: ActiveTeam | None) -> None:
+        current = await self._pool.get(team_name)
+        if current is not expected or (current is not None and current.state is RuntimeState.STOPPING):
+            raise_error(
+                StatusCode.AGENT_TEAM_BUSY_INVALID, team_name=team_name,
+                session_id=getattr(current or expected, "current_session_id", "?"),
+                reason="team runtime changed or is still stopping",
+            )
+
     async def _inspect_session(
         self,
         spec: "TeamAgentSpec",
@@ -1398,8 +1480,10 @@ class TeamRuntimeManager:
             if pool_entry is None:
                 raise RuntimeError(f"{kind.value} requires an active pool entry")
             await self._pre_run_with_inputs(team_session, inputs)
-            pool_entry.state = RuntimeState.RUNNING
+            await self._check_activation_entry(team_name, pool_entry)
             await pool_entry.interact_gate.reset()
+            await self._check_activation_entry(team_name, pool_entry)
+            pool_entry.state = RuntimeState.RUNNING
             return TeamRuntimeActivation(agent=pool_entry.agent, session=team_session, action=action)
 
         # Cold paths — no pool entry. ``activate`` has already torn down
@@ -1437,6 +1521,7 @@ class TeamRuntimeManager:
         else:
             raise RuntimeError(f"Unhandled RunActionKind: {kind!r}")
 
+        await self._check_activation_entry(team_name, None)
         await self._pool.add(
             ActiveTeam(
                 team_name=team_name,

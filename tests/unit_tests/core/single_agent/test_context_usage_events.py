@@ -1,0 +1,401 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import Termination
+from openjiuwen.core.context_engine import CacheAggregationKey, ContextEngineConfig, ContextWindow, RequestKVCacheUsage
+from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, UsageMetadata, UserMessage
+from openjiuwen.core.foundation.tool import ToolInfo
+from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.agent_team import create_agent_team_session
+from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
+from openjiuwen.core.single_agent.kv_cache.kv_cache_hooks import KVCacheRuntime
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ModelCallInputs
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+
+
+def _disabled_kv_cache_runtime() -> KVCacheRuntime:
+    """Stable-line KV hook shape (develop uses a narrower capabilities dataclass)."""
+    return KVCacheRuntime(
+        enable_release=False,
+        enable_affinity=False,
+        supports_release=False,
+        supports_affinity=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_react_agent_emits_one_post_context_usage_event() -> None:
+    agent = ReActAgent(AgentCard(name="usage-agent")).configure(
+        ReActAgentConfig(
+            model_name="deepseek-chat",
+            model_provider="deepseek",
+            context_engine_config=ContextEngineConfig(context_window_tokens=1_000),
+        )
+    )
+    session = Session(session_id="usage-session", card=agent.card)
+    session.write_stream = AsyncMock()
+    context = await agent.context_engine.create_context(session=session)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=InvokeInputs(query="hello"),
+        session=session,
+        context=context,
+    )
+    agent.add_prompt_builder_section("memory", "remember the environment", priority=20)
+    agent.add_prompt_builder_section(
+        "skills",
+        "use the selected skill",
+        priority=40,
+        category="skills",
+    )
+    window = ContextWindow(
+        system_messages=[SystemMessage(content="remember the environment")],
+        context_messages=[UserMessage(content="hello")],
+    )
+
+    agent._begin_context_usage_request(ctx)
+    await agent._emit_context_usage(
+        ctx,
+        window,
+        phase="post_call",
+        usage_metadata=UsageMetadata(
+            input_tokens=100,
+            cache_read_tokens=40,
+            cache_miss_tokens=60,
+            cache_status="partial_hit",
+            cache_source="provider_usage",
+            cache_authoritative=True,
+        ),
+    )
+
+    events = [call.args[0] for call in session.write_stream.await_args_list]
+    assert [event.type for event in events] == ["context.usage"]
+    assert events[0].payload["phase"] == "post_call"
+    assert events[0].payload["sequence"] == 0
+    assert events[0].payload["parts"]["skills"]["category"] == "skills"
+    assert events[0].payload["context_window"]["input_tokens"] == 100
+    assert events[0].payload["kv_cache"]["session"]["weighted_hit_rate"] == 0.4
+    assert events[0].payload["session_kv_cache_hit_rate"] == 0.4
+    assert sum(part["tokens"] for part in events[0].payload["parts"].values()) == 100
+    assert events[0].payload["parts"]["messages"]["source"] in {
+        "provider_usage_residual",
+        "provider_usage_proportional",
+    }
+
+
+@pytest.mark.asyncio
+async def test_railed_model_call_does_not_emit_pre_call_usage_event() -> None:
+    agent = ReActAgent(AgentCard(name="usage-call-agent")).configure(
+        ReActAgentConfig(
+            model_name="deepseek-chat",
+            model_provider="deepseek",
+            context_engine_config=ContextEngineConfig(context_window_tokens=1_000),
+        )
+    )
+    session = Session(session_id="usage-call-session", card=agent.card)
+    session.write_stream = AsyncMock()
+    context = await agent.context_engine.create_context(session=session)
+    response = AssistantMessage(
+        content="done",
+        usage_metadata=UsageMetadata(
+            input_tokens=20,
+            cache_read_tokens=10,
+            cache_miss_tokens=10,
+        ),
+    )
+    fake_llm = MagicMock()
+    fake_llm.invoke = AsyncMock(return_value=response)
+    agent._llm = fake_llm
+    agent._sync_prompt_attachments = AsyncMock()
+    agent._kv_cache_model_call_hook.resolve_runtime = MagicMock(
+        return_value=_disabled_kv_cache_runtime()
+    )
+    agent._kv_cache_model_call_hook.resolve_lineage = MagicMock(
+        return_value=(session.get_session_id(), None)
+    )
+    agent._kv_cache_model_call_hook.handle_context_window_change = AsyncMock()
+    agent._kv_cache_model_call_hook.build_invoke_kwargs = MagicMock(return_value={})
+
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(model_context=context),
+        session=session,
+        context=context,
+    )
+
+    result = await agent._railed_model_call(ctx)
+
+    assert result is response
+    usage_events = [
+        call.args[0]
+        for call in session.write_stream.await_args_list
+        if call.args[0].type == "context.usage"
+    ]
+    assert len(usage_events) == 1
+    assert usage_events[0].payload["phase"] == "post_call"
+    assert usage_events[0].payload["sequence"] == 0
+
+
+async def _prepare_streaming_railed_call(
+    *,
+    stream_side_effect: Exception,
+    messages: list | None = None,
+) -> tuple[ReActAgent, Session, AgentCallbackContext]:
+    agent = ReActAgent(AgentCard(name="usage-stream-agent")).configure(
+        ReActAgentConfig(
+            model_name="deepseek-chat",
+            model_provider="deepseek",
+            context_engine_config=ContextEngineConfig(context_window_tokens=1_000),
+        )
+    )
+    session = Session(session_id="usage-stream-session", card=agent.card)
+    session.write_stream = AsyncMock()
+    context = await agent.context_engine.create_context(session=session)
+    if messages:
+        await context.add_messages(messages)
+
+    async def _boom_stream(*_args, **_kwargs):
+        raise stream_side_effect
+        if False:  # pragma: no cover - keeps this an async generator
+            yield None
+
+    fake_llm = MagicMock()
+    fake_llm.stream = _boom_stream
+    agent._llm = fake_llm
+    agent._sync_prompt_attachments = AsyncMock()
+    agent._kv_cache_model_call_hook.resolve_runtime = MagicMock(
+        return_value=_disabled_kv_cache_runtime()
+    )
+    agent._kv_cache_model_call_hook.resolve_lineage = MagicMock(
+        return_value=(session.get_session_id(), None)
+    )
+    agent._kv_cache_model_call_hook.handle_context_window_change = AsyncMock()
+    agent._kv_cache_model_call_hook.build_invoke_kwargs = MagicMock(return_value={})
+
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ModelCallInputs(model_context=context),
+        session=session,
+        context=context,
+        extra={"_streaming": True},
+    )
+    return agent, session, ctx
+
+
+@pytest.mark.asyncio
+async def test_railed_model_call_emits_usage_on_streaming_image_unsupported() -> None:
+    image_message = UserMessage(
+        content=[
+            {"type": "text", "text": "describe"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aaa"}},
+        ]
+    )
+    agent, session, ctx = await _prepare_streaming_railed_call(
+        stream_side_effect=RuntimeError(
+            "NotFoundError: Error code: 404 - No endpoints found that support image input"
+        ),
+        messages=[image_message],
+    )
+
+    result = await agent._railed_model_call(ctx)
+
+    assert isinstance(result, AssistantMessage)
+    usage_events = [
+        call.args[0]
+        for call in session.write_stream.await_args_list
+        if call.args[0].type == "context.usage"
+    ]
+    assert len(usage_events) == 1
+    assert usage_events[0].payload["phase"] == "post_call"
+
+
+@pytest.mark.asyncio
+async def test_railed_model_call_emits_usage_on_streaming_soft_stop() -> None:
+    agent, session, ctx = await _prepare_streaming_railed_call(
+        stream_side_effect=Termination(
+            StatusCode.ERROR,
+            details={"soft_stop_needs_continue": True},
+        ),
+    )
+
+    result = await agent._railed_model_call(ctx)
+
+    assert isinstance(result, AssistantMessage)
+    usage_events = [
+        call.args[0]
+        for call in session.write_stream.await_args_list
+        if call.args[0].type == "context.usage"
+    ]
+    assert len(usage_events) == 1
+    assert usage_events[0].payload["phase"] == "post_call"
+
+
+@pytest.mark.asyncio
+async def test_build_context_usage_snapshot_for_manual_context_operation() -> None:
+    agent = ReActAgent(AgentCard(name="manual-usage-agent")).configure(
+        ReActAgentConfig(
+            model_name="deepseek-chat",
+            model_provider="deepseek",
+            context_engine_config=ContextEngineConfig(context_window_tokens=1_000),
+        )
+    )
+    session = Session(session_id="manual-usage-session", card=agent.card)
+    session.write_stream = AsyncMock()
+    context = await agent.context_engine.create_context(session=session)
+    await context.add_messages([UserMessage(content="after manual compact")])
+    cached_tool = ToolInfo(name="cached_tool", description="cached", parameters={})
+    agent._last_model_tools = [cached_tool]
+    list_tool_info = AsyncMock(return_value=[])
+
+    with patch.object(agent.ability_manager, "list_tool_info", list_tool_info):
+        payload = await agent.build_context_usage_snapshot(
+            context,
+            session=session,
+            request_id="compact-request",
+        )
+
+    assert payload is not None
+    assert payload["event_type"] == "context.usage"
+    assert payload["schema_version"] == "context-usage.v1"
+    assert payload["phase"] == "post_compact"
+    assert payload["request_id"] == "compact-request"
+    assert payload["product_session_id"] == "manual-usage-session"
+    assert set(payload["parts"]) == {"system_prompt", "skills", "tools", "messages"}
+    assert payload["context_window"]["input_tokens"] > 0
+    assert payload["context_window"]["tokens_source"] != "provider_usage"
+    assert payload["measurement"]["authoritative_total"] is False
+    assert payload["kv_cache"]["session"]["calls_total"] == 0
+    assert payload["parts"]["tools"]["tokens"] > 0
+    list_tool_info.assert_not_awaited()
+    assert session.write_stream.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_clear_session_keeps_usage_scope_for_reused_session_id() -> None:
+    agent = ReActAgent(AgentCard(name="usage-lifecycle-agent"))
+    session_id = "reused-session"
+    key = CacheAggregationKey(session_id, "deepseek", "deepseek-chat")
+    agent._context_usage_sequences[session_id] = 2
+    agent._context_usage_aggregator.record(
+        request_id="old-request",
+        scope_key=key,
+        usage=RequestKVCacheUsage(input_tokens=100, cache_read_tokens=50, cache_miss_tokens=50),
+    )
+    agent.context_engine.clear_context = AsyncMock()
+
+    with patch("openjiuwen.core.runner.Runner.release", new=AsyncMock()):
+        await agent.clear_session(session_id)
+
+    assert agent._context_usage_sequences[session_id] == 2
+    assert agent._context_usage_aggregator.snapshot(key).calls_total == 1
+
+
+@pytest.mark.asyncio
+async def test_team_member_usage_has_independent_owner_and_cache_identity() -> None:
+    agent = ReActAgent(AgentCard(id="reviewer-card", name="reviewer")).configure(
+        ReActAgentConfig(
+            model_name="deepseek-chat",
+            model_provider="deepseek",
+            context_engine_config=ContextEngineConfig(context_window_tokens=1_000),
+        )
+    )
+    team_session = create_agent_team_session(session_id="product-session", team_id="team-alpha")
+    # Stable create_agent_session has no member_name kwarg; seed attribution
+    # the same way host rails do when wiring a team member.
+    member_session = team_session.create_agent_session(
+        card=agent.card,
+        share_stream_writer=False,
+    )
+    member_session.write_stream = AsyncMock()
+    context = await agent.context_engine.create_context(session=member_session)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=InvokeInputs(query="hello"),
+        session=member_session,
+        context=context,
+    )
+    ctx.context_usage_attribution["member_name"] = "reviewer"
+
+    await agent._emit_context_usage(
+        ctx,
+        ContextWindow(system_messages=[SystemMessage(content="team rules")]),
+        phase="pre_call",
+    )
+
+    payload = member_session.write_stream.await_args.args[0].payload
+    assert payload["product_session_id"] == "product-session"
+    assert payload["execution_session_id"] == "product-session"
+    assert payload["team_id"] == "team-alpha"
+    assert payload["member_name"] == "reviewer"
+    assert payload["context_owner_id"].startswith("team-alpha|reviewer|")
+    assert payload["cache_identity"].startswith("team:product-session:team:team-alpha:member:")
+
+
+@pytest.mark.asyncio
+async def test_subagent_usage_uses_parent_product_session_but_child_execution_scope() -> None:
+    agent = ReActAgent(AgentCard(id="subagent-card", name="subagent")).configure(
+        ReActAgentConfig(
+            model_name="deepseek-chat",
+            model_provider="deepseek",
+            context_engine_config=ContextEngineConfig(context_window_tokens=1_000),
+        )
+    )
+    child_session = Session(
+        session_id="product-session_sub_task",
+        parent_session_id="product-session",
+        card=agent.card,
+    )
+    child_session.write_stream = AsyncMock()
+    context = await agent.context_engine.create_context(session=child_session)
+    ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=InvokeInputs(query="hello"),
+        session=child_session,
+        context=context,
+    )
+
+    await agent._emit_context_usage(
+        ctx,
+        ContextWindow(system_messages=[SystemMessage(content="subagent rules")]),
+        phase="pre_call",
+    )
+
+    payload = child_session.write_stream.await_args.args[0].payload
+    assert payload["session_id"] == "product-session"
+    assert payload["product_session_id"] == "product-session"
+    assert payload["execution_session_id"] == "product-session_sub_task"
+    assert payload["cache_identity"] == "product-session_sub_task"
+
+
+def test_context_usage_classifies_skills_section_by_name_without_category() -> None:
+    """SkillUseRail sections historically omit category; name must still map to skills."""
+    from openjiuwen.core.context_engine.usage.models import ContextCategory
+    from openjiuwen.core.single_agent.prompts.builder import PromptSection
+
+    agent = ReActAgent(AgentCard(name="usage-agent")).configure(
+        ReActAgentConfig(model_name="deepseek-chat", model_provider="deepseek")
+    )
+    agent.prompt_builder.add_section(
+        PromptSection(
+            name="skills",
+            content={"cn": "可用技能目录", "en": "skill catalog"},
+            priority=40,
+        )
+    )
+    agent.prompt_builder.add_section(
+        PromptSection(
+            name="identity",
+            content={"cn": "你是助手", "en": "you are an assistant"},
+            priority=10,
+        )
+    )
+
+    classified = agent._context_usage_prompt_sections()
+    by_category = {category: text for category, text, _carrier in classified}
+    assert by_category[ContextCategory.SKILLS] == "可用技能目录"
+    assert by_category[ContextCategory.SYSTEM_PROMPT] == "你是助手"

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from importlib import import_module
 from importlib.util import find_spec
-import re
+from threading import Lock
 from typing import Any
 
 from bs4 import BeautifulSoup, NavigableString, Tag
-
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.common import meets_savings_ratio
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.types import (
     ContentType,
@@ -162,7 +162,17 @@ _BLOCK_TAGS = {
 
 class HtmlCompressor:
     def __init__(self, extractor: HTMLExtractor | None = None) -> None:
-        self._extractor = extractor or HTMLExtractor()
+        self._extractor = extractor
+        self._extractor_lock = Lock()
+
+    def _get_extractor(self) -> HTMLExtractor:
+        # Context creation and report HTML do not need trafilatura. Initialize
+        # on the extraction worker, once even for concurrent first use.
+        if self._extractor is None:
+            with self._extractor_lock:
+                if self._extractor is None:
+                    self._extractor = HTMLExtractor()
+        return self._extractor
 
     def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
         if _looks_like_report_html(content):
@@ -173,7 +183,7 @@ class HtmlCompressor:
             )
         extractor_content = _remove_extractor_noise_html(content)
         try:
-            extracted = self._extractor.extract(extractor_content)
+            extracted = self._get_extractor().extract(extractor_content)
         except ModuleNotFoundError:
             return self._compress_with_beautifulsoup_fallback(content, ctx)
         except Exception:
@@ -382,11 +392,7 @@ _REPORT_ROW_DROP_RE = re.compile(r"\b(pass(?:ed)?|ok)\b", re.IGNORECASE)
 
 def _prune_report_result_rows(soup: BeautifulSoup) -> int:
     rows = [row for row in soup.find_all("tr") if isinstance(row, Tag)]
-    data_rows = [
-        row
-        for row in rows
-        if row.find_all("td", recursive=False)
-    ]
+    data_rows = [row for row in rows if row.find_all("td", recursive=False)]
     if not any(_REPORT_ROW_KEEP_RE.search(row.get_text(" ", strip=True)) for row in data_rows):
         return 0
 

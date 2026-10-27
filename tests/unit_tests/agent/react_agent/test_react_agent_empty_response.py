@@ -18,14 +18,18 @@ from openjiuwen.core.foundation.llm.schema.message import UsageMetadata
 
 from openjiuwen.core.single_agent.agents.react_agent import (
     EMPTY_RESPONSE_MAX_RETRIES,
+    EMPTY_RESPONSE_MSG,
     ReActAgent,
     ReActAgentConfig,
+    SOFT_STOP_FALLBACK_STEERING,
+    SOFT_STOP_MAX_CONTINUES,
+    SOFT_STOP_NEEDS_CONTINUE_KEY,
+    SOFT_STOP_RECOVERY_FAILED_MSG,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 from tests.unit_tests.fixtures.mock_llm import MockLLMModel
 
-EMPTY_RESPONSE_MSG = "模型未返回有效内容（空响应），请重试或检查上下文。"
 EMPTY_RESPONSE_NOTICE = "[EMPTY_RESPONSE]"
 
 
@@ -199,11 +203,11 @@ class TestEmptyNoToolTurn(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tool_calls", added[notice_idxs[0]].content)
 
     async def test_empty_on_last_iteration_keeps_empty_response_error(self):
-        """最后一轮 iteration 空帧不得 continue 漂成 max-iterations。
+        """最后一格 iteration 空帧不得 continue 漂成 max-iterations。
 
-        continue 在没有下一轮时会落入 for-else，误报
+        continue 在无下一轮时会落入 for-else，误报
         ``Max iterations reached without completion``，并丢失
-        finish_reason / reasoning_present；此处必须仍是 OA.05000090。
+        finish_reason / reasoning_present；此处必须仍走 OA.05000090。
         """
         agent, _, _ = self._make_agent_with_mocks(max_iterations=1)
 
@@ -220,7 +224,7 @@ class TestEmptyNoToolTurn(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_fully_empty_turn_is_error(self):
-        """content 与 reasoning 均空：耗尽同轮重试后仍是 error。"""
+        """content 与 reasoning 均空：耗尽同轮重试后仍为 error。"""
         agent, _, _ = self._make_agent_with_mocks()
 
         result, mock_llm, _ = await self._invoke(
@@ -260,7 +264,7 @@ class TestEmptyNoToolTurn(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mock_llm.call_count, 1)
 
     async def test_empty_content_with_tool_calls_is_not_error(self):
-        """有 tool_calls 但 content 为空是正常 ReAct 步骤，不得判为空回复错误。"""
+        """有 tool_calls 时 content 为空是正常 ReAct 步骤，不得判为空回复错误。"""
         agent, _, _ = self._make_agent_with_mocks(max_iterations=3)
 
         async def _fake_execute(ctx, tool_calls, session, context):
@@ -299,6 +303,109 @@ class TestEmptyNoToolTurn(unittest.IsolatedAsyncioTestCase):
             if getattr(c[0][0], "type", None) == "truncation_retry"
         ]
         self.assertTrue(truncation_schemas)
+
+    async def test_soft_stop_empty_continues_once_then_succeeds(self):
+        """RAS-style soft-stop empty partial: continue once, then accept answer."""
+        agent, _, context = self._make_agent_with_mocks(max_iterations=5)
+        calls = {"n": 0}
+
+        async def _fake_call_model(ctx, _context, _tools):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                ctx.extra[SOFT_STOP_NEEDS_CONTINUE_KEY] = True
+                return _reasoning_only_empty()
+            return _text_answer("recovered after soft-stop")
+
+        session = _mock_session()
+        with patch.object(agent, "_call_model", side_effect=_fake_call_model):
+            result = await agent.invoke({"query": "work"}, session=session)
+
+        self.assertEqual(result["result_type"], "answer")
+        self.assertEqual(result["output"], "recovered after soft-stop")
+        self.assertEqual(calls["n"], 2)
+        # Fallback steering injected when queue has no pending messages.
+        added = [c[0][0] for c in context.add_messages.call_args_list if c[0]]
+        steering = [
+            m for m in added
+            if isinstance(m, UserMessage)
+            and "[STEERING]" in (m.content or "")
+            and SOFT_STOP_FALLBACK_STEERING[:40] in (m.content or "")
+        ]
+        self.assertTrue(steering, "fallback steering required when queue empty")
+
+    async def test_soft_stop_empty_exhausts_as_explicit_error(self):
+        """Second soft-stop empty after N=1 continue must hard-fail (no silent success)."""
+        agent, _, _ = self._make_agent_with_mocks(max_iterations=5)
+        calls = {"n": 0}
+
+        async def _fake_call_model(ctx, _context, _tools):
+            calls["n"] += 1
+            ctx.extra[SOFT_STOP_NEEDS_CONTINUE_KEY] = True
+            return _reasoning_only_empty()
+
+        session = _mock_session()
+        with patch.object(agent, "_call_model", side_effect=_fake_call_model):
+            result = await agent.invoke({"query": "work"}, session=session)
+
+        self.assertEqual(result["result_type"], "error")
+        self.assertEqual(result["output"], SOFT_STOP_RECOVERY_FAILED_MSG)
+        self.assertTrue(result.get("soft_stop_recovery_exhausted"))
+        self.assertNotEqual(result["output"], EMPTY_RESPONSE_MSG)
+        # initial empty + one continue empty → stop (N=SOFT_STOP_MAX_CONTINUES)
+        self.assertEqual(calls["n"], SOFT_STOP_MAX_CONTINUES + 1)
+
+    async def test_soft_stop_uses_pending_steering_without_duplicate_fallback(self):
+        """When steering is already queued, continue without injecting fallback text."""
+        agent, _, context = self._make_agent_with_mocks(max_iterations=5)
+        calls = {"n": 0}
+
+        async def _fake_call_model(ctx, _context, _tools):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                ctx.extra[SOFT_STOP_NEEDS_CONTINUE_KEY] = True
+                ctx.bind_steering_queue(__import__("asyncio").Queue())
+                ctx.push_steering("already-queued recovery steer")
+                return _reasoning_only_empty()
+            return _text_answer("ok")
+
+        session = _mock_session()
+        with patch.object(agent, "_call_model", side_effect=_fake_call_model):
+            result = await agent.invoke({"query": "work"}, session=session)
+
+        self.assertEqual(result["result_type"], "answer")
+        self.assertEqual(calls["n"], 2)
+        added = [c[0][0] for c in context.add_messages.call_args_list if c[0]]
+        fallback = [
+            m for m in added
+            if isinstance(m, UserMessage)
+            and SOFT_STOP_FALLBACK_STEERING[:40] in (m.content or "")
+        ]
+        self.assertFalse(fallback, "must not duplicate fallback when queue has steering")
+
+    async def test_empty_retry_budget_independent_of_soft_stop(self):
+        """普通空响应重试预算与 soft-stop 续跑互相独立。"""
+        agent, _, _ = self._make_agent_with_mocks(max_iterations=8)
+        calls = {"n": 0}
+
+        async def _fake_call_model(ctx, _context, _tools):
+            calls["n"] += 1
+            # 1st: soft-stop empty → soft-stop continue
+            # 2nd: ordinary empty → EMPTY_RESPONSE retry
+            # 3rd: text answer
+            if calls["n"] == 1:
+                ctx.extra[SOFT_STOP_NEEDS_CONTINUE_KEY] = True
+                return _reasoning_only_empty()
+            if calls["n"] == 2:
+                return _reasoning_only_empty()
+            return _text_answer("ok after both budgets")
+
+        session = _mock_session()
+        with patch.object(agent, "_call_model", side_effect=_fake_call_model):
+            result = await agent.invoke({"query": "work"}, session=session)
+
+        self.assertEqual(result["result_type"], "answer")
+        self.assertEqual(result["output"], "ok after both budgets")
+        self.assertEqual(calls["n"], 3)
 
 
 if __name__ == "__main__":

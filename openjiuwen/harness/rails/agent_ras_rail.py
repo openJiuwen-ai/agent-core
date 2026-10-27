@@ -52,8 +52,9 @@ class AgentRASRail(DeepAgentRail):
     - tool/model hooks -> ``monitor.handle(signal, ctx)``
     - ``before_model_call`` registers ``inspect_stream_chunk`` on
       ``ctx.extra["_stream_chunk_inspectors"]`` (same list as LLMRetryRail)
-    - thinking-loop abort raises core ``Termination`` so ReActAgent can return a
-      partial AssistantMessage (no request_retry, no RAS knowledge in core)
+    - thinking-loop abort raises core ``Termination`` (details mark
+      soft_stop_needs_continue) so ReActAgent can return a partial
+      AssistantMessage and bounded-continue once if empty (no request_retry)
     - ``after_model_call`` also -> ``monitor.finalize_stream_recovery``
       (await/cancel L3 Reviewer; fail-open flush if still pending)
 
@@ -308,9 +309,12 @@ class AgentRASRail(DeepAgentRail):
         if getattr(monitor, "should_abort_stream", False):
             from openjiuwen.core.common.exception.codes import StatusCode
 
+            # Tag soft_stop_needs_continue so ReAct can bounded-continue when
+            # the partial is reasoning-only (empty content / no tool_calls).
             raise Termination(
                 StatusCode.CALLBACK_EXECUTION_ABORTED,
                 msg="Agent RAS stream abort: thinking-loop",
+                details={"soft_stop_needs_continue": True},
             )
         for field, chunk_type in (
             ("reasoning_content", "llm_reasoning"),

@@ -14,6 +14,16 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMPLETE_MAX_ATTEMPTS = 3
 DEFAULT_COMPLETE_BACKOFF_SECONDS = (1.0, 2.0)
 
+# Fixed request body for every distill completion. OpenAI-compatible servers
+# (GLM via thinking.type, vLLM-style chat templates via enable_thinking) default
+# thinking on when these keys are absent; non-streaming invoke then waits out
+# the 180s timeout. Not model-name branched: OpenAIModelClient and
+# DeepSeekModelClient both merge extra_body into the JSON payload.
+_DISTILL_THINKING_OFF = {
+    "thinking": {"type": "disabled"},
+    "chat_template_kwargs": {"enable_thinking": False},
+}
+
 _RETRYABLE_STATUS = {408, 409, 429, 500, 502, 503, 504}
 _NON_RETRYABLE_STATUS = {400, 401, 403, 404, 422}
 _HTTP_STATUS_IN_MESSAGE = re.compile(
@@ -150,6 +160,10 @@ class OpenJiuwenLlm:
         self._backoff_seconds = tuple(float(item) for item in backoff_seconds)
 
     async def complete(self, *, system: str, user: str) -> str:
+        logger.info(
+            "distill LLM thinking off attached extra_body=%s",
+            _DISTILL_THINKING_OFF,
+        )
         last_error: BaseException | None = None
         for attempt in range(1, self._max_attempts + 1):
             try:
@@ -158,6 +172,7 @@ class OpenJiuwenLlm:
                     temperature=self._temperature,
                     max_tokens=self._max_tokens,
                     timeout=self._timeout_seconds,
+                    extra_body=_DISTILL_THINKING_OFF,
                 )
                 return _extract_assistant_text(response)
             except BaseException as exc:  # noqa: BLE001 — classify then retry/raise

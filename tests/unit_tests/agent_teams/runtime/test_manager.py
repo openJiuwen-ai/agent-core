@@ -3,6 +3,7 @@
 
 """Unit tests for TeamRuntimeManager.finalize_member."""
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import (
     AsyncMock,
@@ -304,3 +305,151 @@ class TestExternalEventIngress:
 
         assert result.ok is False
         assert result.reason == "external_event_team_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_stop_timeout_retains_runtime_and_coalesces_until_exit(monkeypatch):
+    import openjiuwen.agent_teams.runtime.manager as module
+
+    monkeypatch.setattr(module, "_TEAM_STOP_TIMEOUT_SECONDS", 0.01)
+    manager = TeamRuntimeManager()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def stop():
+        entered.set()
+        await release.wait()
+
+    agent = SimpleNamespace(stop_coordination=AsyncMock(side_effect=stop))
+    entry = ActiveTeam(team_name="stop-test", agent=agent, current_session_id="s")
+    await manager.pool.add(entry)
+    try:
+        results = await asyncio.gather(
+            manager.stop_team(team_name="stop-test", session_id="s"),
+            manager.stop_team(team_name="stop-test", session_id="s"),
+            return_exceptions=True,
+        )
+        assert all(isinstance(result, TimeoutError) for result in results)
+        assert entered.is_set()
+        assert entry.state is RuntimeState.STOPPING
+        assert await manager.pool.get("stop-test") is entry
+        assert not entry.stop_task.done()
+        assert (await manager.interact("continue", team_name="stop-test", session_id="s")).reason == "stopping"
+        await manager.finalize(team_name="stop-test", session_id="s")
+        assert not await manager.pause(team_name="stop-test", session_id="s")
+        with pytest.raises(Exception, match="still stopping"):
+            await manager.activate(SimpleNamespace(team_name="stop-test"), "s", "continue")
+    finally:
+        release.set()
+        await entry.stop_task
+    agent.stop_coordination.assert_awaited_once()
+    assert await manager.pool.get("stop-test") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("stop failed"), asyncio.CancelledError("stop failed")])
+async def test_stop_failure_retains_runtime_and_can_retry(failure):
+    manager = TeamRuntimeManager()
+    agent = SimpleNamespace(stop_coordination=AsyncMock(side_effect=[failure, None]))
+    entry = ActiveTeam(team_name="stop-test", agent=agent, current_session_id="s")
+    await manager.pool.add(entry)
+    with pytest.raises(type(failure), match="stop failed"):
+        await manager.stop_team(team_name="stop-test", session_id="s")
+    assert await manager.pool.get("stop-test") is entry
+    assert entry.state is RuntimeState.STOPPING
+    assert await manager.stop_team(team_name="stop-test", session_id="s")
+    assert await manager.pool.get("stop-test") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finalize", [False, True])
+@pytest.mark.parametrize("stop_fails", [False, True])
+async def test_pause_failure_cannot_leave_a_partially_paused_runtime_accepting_work(finalize, stop_fails):
+    from openjiuwen.agent_teams.agent.coordination.kernel import PauseCleanupError
+
+    manager = TeamRuntimeManager()
+    agent = SimpleNamespace(
+        lifecycle="persistent", is_shutdown_requested=AsyncMock(return_value=False),
+        pause_coordination=AsyncMock(side_effect=PauseCleanupError("pause failed")),
+        stop_coordination=AsyncMock(side_effect=RuntimeError("still alive") if stop_fails else None),
+    )
+    entry = ActiveTeam(team_name="pause-test", agent=agent, current_session_id="s")
+    await manager.pool.add(entry)
+    if finalize:
+        await manager.finalize(team_name="pause-test", session_id="s")
+    else:
+        with pytest.raises(RuntimeError, match="pause failed"):
+            await manager.pause(team_name="pause-test", session_id="s")
+    agent.stop_coordination.assert_awaited_once()
+    if stop_fails:
+        assert await manager.pool.get("pause-test") is entry
+        assert entry.state is RuntimeState.STOPPING
+        assert (await manager.interact("continue", team_name="pause-test", session_id="s")).reason == "stopping"
+        agent.stop_coordination.side_effect = None
+        await manager.stop_team(team_name="pause-test", session_id="s")
+    assert await manager.pool.get("pause-test") is None
+
+
+@pytest.mark.asyncio
+async def test_pause_park_failure_keeps_the_rolled_back_runtime_running():
+    manager = TeamRuntimeManager()
+    agent = SimpleNamespace(pause_coordination=AsyncMock(side_effect=RuntimeError("park rolled back")),
+                            stop_coordination=AsyncMock())
+    entry = ActiveTeam(team_name="park-test", agent=agent, current_session_id="s")
+    await manager.pool.add(entry)
+    with pytest.raises(RuntimeError, match="park rolled back"):
+        await manager.pause(team_name="park-test", session_id="s")
+    agent.stop_coordination.assert_not_awaited()
+    assert entry.state is RuntimeState.RUNNING
+    assert await manager.pool.get("park-test") is entry
+
+
+@pytest.mark.asyncio
+async def test_failed_old_pause_never_stops_a_replacement_runtime():
+    from openjiuwen.agent_teams.agent.coordination.kernel import PauseCleanupError
+
+    manager = TeamRuntimeManager()
+    new_agent = SimpleNamespace(stop_coordination=AsyncMock())
+    replacement = ActiveTeam(team_name="same-team", agent=new_agent, current_session_id="s")
+    async def fail_old_pause():
+        await manager.pool.add(replacement)
+        raise PauseCleanupError("old member still stopping")
+    old_agent = SimpleNamespace(pause_coordination=AsyncMock(side_effect=fail_old_pause),
+                                stop_coordination=AsyncMock())
+    await manager.pool.add(ActiveTeam(team_name="same-team", agent=old_agent, current_session_id="s"))
+    with pytest.raises(PauseCleanupError):
+        await manager.pause(team_name="same-team", session_id="s")
+    old_agent.stop_coordination.assert_awaited_once()
+    new_agent.stop_coordination.assert_not_awaited()
+    assert await manager.pool.get("same-team") is replacement
+    assert replacement.state is RuntimeState.RUNNING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["inspect", "pre_run", "gate_reset"])
+async def test_resume_rechecks_stop_ownership_after_slow_await(monkeypatch, boundary):
+    manager = TeamRuntimeManager()
+    agent = SimpleNamespace(stop_coordination=AsyncMock())
+    entry = ActiveTeam(team_name="t", agent=agent, current_session_id="s", state=RuntimeState.PAUSED)
+    await manager.pool.add(entry)
+    session = SimpleNamespace(get_session_id=lambda: "s")
+    monkeypatch.setattr(TeamRuntimeManager, "_build_session", staticmethod(lambda value: session))
+
+    async def inspect(*args):
+        if boundary == "inspect":
+            entry.state = RuntimeState.STOPPING
+        return True, True, None
+
+    async def pre_run(*args):
+        if boundary == "pre_run":
+            entry.state = RuntimeState.STOPPING
+
+    async def reset():
+        if boundary == "gate_reset":
+            entry.state = RuntimeState.STOPPING
+
+    monkeypatch.setattr(manager, "_inspect_session", inspect)
+    monkeypatch.setattr(manager, "_pre_run_with_inputs", pre_run)
+    monkeypatch.setattr(entry.interact_gate, "reset", reset)
+    with pytest.raises(Exception, match="still stopping"):
+        await manager.activate(SimpleNamespace(team_name="t"), "s", "continue")
+    assert entry.state is RuntimeState.STOPPING

@@ -122,6 +122,36 @@ async def test_read_file_image_can_disable_multimodal_payload(sys_op, temp_dir):
     assert "native image multimodal input is disabled" in read_res.data["content"]
 
 
+def test_pptx_embedded_images_hint_maps_slide_layout_master_inheritance(temp_dir):
+    """Slide→layout→master inheritance：版式/母版上的图片要归属到使用它们的页。"""
+    import zipfile as _zipfile
+
+    file_path = os.path.join(temp_dir, "map.pptx")
+    with _zipfile.ZipFile(file_path, "w") as zf:
+        zf.writestr("ppt/media/image1.png", b"png")
+        zf.writestr("ppt/media/image2.jpg", b"jpg")
+        zf.writestr("ppt/media/image3.tiff", b"tiff")
+        zf.writestr(
+            "ppt/slides/_rels/slide1.xml.rels",
+            '<Relationship Target="../media/image1.png"/>'
+            '<Relationship Target="../slideLayouts/slideLayout1.xml"/>',
+        )
+        zf.writestr(
+            "ppt/slideLayouts/_rels/slideLayout1.xml.rels",
+            '<Relationship Target="../media/image2.jpg"/>'
+            '<Relationship Target="../slideMasters/slideMaster1.xml"/>',
+        )
+        zf.writestr(
+            "ppt/slideMasters/_rels/slideMaster1.xml.rels",
+            '<Relationship Target="../media/image3.tiff"/>',
+        )
+
+    hint = filesystem_module._pptx_embedded_images_hint(file_path)
+    assert "3 张嵌入图片" in hint
+    assert "Slide 1（image1.png、image2.jpg、image3.tiff）" in hint
+    assert "未挂载" not in hint
+
+
 def test_estimate_base64_tokens_matches_actual_encoding():
     for length in (0, 1, 2, 3, 4, 5, 100, 1000, 123457):
         data = b"a" * length
@@ -1062,6 +1092,7 @@ async def test_read_pdf_truncation_on_token_budget(sys_op, temp_dir, monkeypatch
     class _FakePage:
         def __init__(self, text: str):
             self._text = text
+            self.images = []  # pdfplumber 页对象契约：嵌入图片列表
 
         def extract_text(self):
             return self._text
@@ -1368,6 +1399,11 @@ async def test_read_pdf_offloads_extract_text_to_thread(sys_op, temp_dir, monkey
     extraction_duration_s = 0.5
 
     class _SlowPage:
+        def __init__(self):
+            # pdfplumber page contract: `images` must exist (may be empty) so the
+            # embedded-image enumeration takes the real path, not the except branch.
+            self.images: list = []
+
         def extract_text(self):
             time.sleep(extraction_duration_s)
             return "page text"
@@ -1392,12 +1428,145 @@ async def test_read_pdf_offloads_extract_text_to_thread(sys_op, temp_dir, monkey
         await asyncio.sleep(0.05)
         return loop.time() - started
 
-    _, elapsed = await asyncio.gather(
+    result, elapsed = await asyncio.gather(
         read_tool.invoke({"file_path": file_path}),
         _watchdog(),
     )
 
+    assert result.success, result.error
     assert elapsed < extraction_duration_s, (
         f"pdfplumber.extract_text blocked the event loop for {elapsed:.2f}s; "
         "it must run in a worker thread so WS ping/pong can proceed."
     )
+
+def test_pptx_image_hint_follows_presentation_order(tmp_path):
+    """slideN.xml 编号 ≠ 播放顺序：图片提示页码须按 presentation.xml sldIdLst。"""
+    import re
+    import zipfile
+
+    from pptx import Presentation
+    from pptx.util import Inches
+    from PIL import Image as PILImage
+
+    img = tmp_path / "pic.png"
+    PILImage.new("RGB", (40, 30), "red").save(img)
+    prs = Presentation()
+    for _ in range(3):
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        slide.shapes.add_picture(str(img), Inches(1), Inches(1), width=Inches(2))
+    path = tmp_path / "order.pptx"
+    prs.save(path)
+
+    # 把 slide3 挪到播放顺序最前（文件编号不变）
+    with zipfile.ZipFile(path) as zin:
+        items = {n: zin.read(n) for n in zin.namelist()}
+    pres = items["ppt/presentation.xml"].decode("utf-8")
+    sldids = re.findall(r"<p:sldId [^>]*/>", pres)
+    assert len(sldids) == 3
+    items["ppt/presentation.xml"] = pres.replace("".join(sldids), sldids[2] + sldids[0] + sldids[1]).encode("utf-8")
+    reordered = tmp_path / "reordered.pptx"
+    with zipfile.ZipFile(reordered, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in items.items():
+            zout.writestr(name, data)
+
+    from openjiuwen.harness.tools.filesystem import _pptx_presentation_order, _pptx_embedded_images_hint
+
+    with zipfile.ZipFile(reordered) as zf:
+        assert _pptx_presentation_order(zf) == [3, 1, 2]
+    hint = _pptx_embedded_images_hint(str(reordered))
+    assert "Slide 1" in hint
+
+    # 属性换序变体：Target 在 Id 前（正则按固定属性顺序匹配会漏，XML 解析不受影响）
+    rels_name = "ppt/_rels/presentation.xml.rels"
+    rels = items[rels_name].decode("utf-8")
+    for entry in re.findall(r"<Relationship [^>]+/>", rels):
+        rid = re.search(r'Id="(rId\d+)"', entry).group(1)
+        tgt = re.search(r'Target="([^"]+)"', entry).group(1)
+        typ = re.search(r'Type="([^"]+)"', entry).group(1)
+        rels = rels.replace(entry, f'<Relationship Target="{tgt}" Id="{rid}" Type="{typ}"/>')
+    items[rels_name] = rels.encode("utf-8")
+    swapped = tmp_path / "attr-swapped.pptx"
+    with zipfile.ZipFile(swapped, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, data in items.items():
+            zout.writestr(name, data)
+    with zipfile.ZipFile(swapped) as zf:
+        assert _pptx_presentation_order(zf) == [3, 1, 2], "attr order must not matter"
+    Presentation(str(swapped))  # python-pptx 仍能打开
+
+@pytest.mark.asyncio
+async def test_pdf_image_enumeration_swallows_pdfminer_errors(sys_op, temp_dir, monkeypatch):
+    """page.images 抛 pdfminer 异常族（PDFException 及子类）时按页降级，文本读取不失败。"""
+    from pdfplumber.utils.exceptions import PdfminerException
+
+    import openjiuwen.harness.tools.filesystem as fs_mod
+
+    file_path = os.path.join(temp_dir, "badimg.pdf")
+    with open(file_path, "wb") as fh:
+        fh.write(b"%PDF-1.4 fake content\n")
+
+    class _ExplodingImagesPage:
+        @property
+        def images(self):
+            raise PdfminerException("corrupt xobject")
+
+        def extract_text(self):
+            return "page text"
+
+    class _FakePdf:
+        def __init__(self):
+            self.pages = [_ExplodingImagesPage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(fs_mod.pdfplumber, "open", lambda *_a, **_kw: _FakePdf())
+    read_tool = ReadFileTool(sys_op)
+    result = await read_tool.invoke({"file_path": file_path})
+    assert result.success, result.error
+
+
+@pytest.mark.asyncio
+async def test_pdf_image_enumeration_is_scoped_to_the_read_range(sys_op, temp_dir, monkeypatch):
+    """分段读取只枚举读取范围内的页：范围外的 page.images 不被访问（免全篇解析开销）。"""
+    import openjiuwen.harness.tools.filesystem as fs_mod
+
+    file_path = os.path.join(temp_dir, "range.pdf")
+    with open(file_path, "wb") as fh:
+        fh.write(b"%PDF-1.4 fake content\n")
+
+    class _CountedPage:
+        def __init__(self, no):
+            self.no = no
+            self.images_accessed = 0
+
+        @property
+        def images(self):
+            self.images_accessed += 1
+            return []
+
+        def extract_text(self):
+            return f"p{self.no}"
+
+    pages = [_CountedPage(i) for i in range(1, 6)]
+
+    class _FakePdf:
+        def __init__(self):
+            self.pages = pages
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(fs_mod.pdfplumber, "open", lambda *_a, **_kw: _FakePdf())
+    read_tool = ReadFileTool(sys_op)
+    result = await read_tool.invoke({"file_path": file_path, "pages": "2-3"})
+    assert result.success, result.error
+    assert pages[0].images_accessed == 0, "page 1 (outside range) must not be enumerated"
+    assert pages[1].images_accessed == 1 and pages[2].images_accessed == 1
+    assert pages[3].images_accessed == 0 and pages[4].images_accessed == 0
+

@@ -157,8 +157,7 @@ class SseClient(McpClient):
         except Exception as e:
             logger.error("[SseClient] SSE connection failed to %s: %s: %r", self._server_path,
                          type(e).__name__, e)
-            # Clean up whatever partial state we have, but don't let cleanup
-            # exceptions mask the original connection error.
+            self._last_connect_error = e
             try:
                 await self._do_disconnect(timeout=NO_TIMEOUT)
             except Exception as cleanup_exc:
@@ -175,43 +174,57 @@ class SseClient(McpClient):
         # that must not block the caller for long, whereas a live call may
         # legitimately wait up to the full 60s for a slow server.
         actual_timeout = timeout if timeout != NO_TIMEOUT else 10.0
+
+        # Exit each context in this owner task. A per-context watchdog bounds
+        # the await without moving ``__aexit__`` into another task (which would
+        # violate anyio cancel-scope ownership). Its local marker distinguishes
+        # that timeout from cancellation requested by the caller.
+        owner_task = asyncio.current_task()
+        loop = asyncio.get_running_loop()
+
+        async def _exit_context(context: Any, label: str) -> bool:
+            watchdog_fired = False
+
+            def _cancel_owner() -> None:
+                nonlocal watchdog_fired
+                if owner_task is not None and not owner_task.done():
+                    watchdog_fired = True
+                    logger.warning(
+                        "[SseClient] %s __aexit__ timed out after %ss; "
+                        "cancelling owner task.",
+                        label,
+                        actual_timeout,
+                    )
+                    owner_task.cancel()
+
+            watchdog = loop.call_later(actual_timeout, _cancel_owner)
+            try:
+                await context.__aexit__(None, None, None)
+                return True
+            except asyncio.CancelledError:
+                if not watchdog_fired:
+                    raise
+                return False
+            except Exception as e:
+                logger.debug("[SseClient] %s __aexit__ raised %r (ignored)", label, e)
+                return False
+            finally:
+                watchdog.cancel()
+
         try:
+            clean = True
             if self._session is not None:
-                try:
-                    await asyncio.wait_for(
-                        self._session.__aexit__(None, None, None),
-                        timeout=actual_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[SseClient] session __aexit__ timed out after "
-                        "%ss; forcing cleanup. The receive_loop may be hung "
-                        "on a dead TCP connection after RST.",
-                        actual_timeout,
-                    )
-                except Exception as e:
-                    logger.debug("[SseClient] session __aexit__ raised %r (ignored)", e)
+                clean = await _exit_context(self._session, "session") and clean
             if self._client is not None:
-                try:
-                    await asyncio.wait_for(
-                        self._client.__aexit__(None, None, None),
-                        timeout=actual_timeout,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(
-                        "[SseClient] sse_client generator __aexit__ "
-                        "timed out after %ss; forcing cleanup.",
-                        actual_timeout,
-                    )
-                except Exception as e:
-                    logger.debug("[SseClient] sse_client generator __aexit__ raised %r (ignored)", e)
+                clean = await _exit_context(self._client, "transport") and clean
             self._session = None
             self._client = None
             self._read = None
             self._write = None
             self._is_disconnected = True
-            logger.info("[SseClient] SSE client disconnected successfully")
-            return True
+            if clean:
+                logger.info("[SseClient] SSE client disconnected successfully")
+            return clean
         except Exception as e:
             logger.error("[SseClient] SSE disconnection failed: %s: %r", type(e).__name__, e)
             return False

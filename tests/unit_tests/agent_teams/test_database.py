@@ -279,96 +279,52 @@ class TestTeamDatabaseInit:
             engine.dispose()
 
     @pytest.mark.level1
-    def test_message_migration_adds_meta_column(self):
-        """A pre-F_63 message table gains the meta column; legacy rows read NULL.
-
-        NULL meta is exactly "an ordinary message" to the delivery path, so a
-        legacy row keeps rendering its own content — the pre-F_63 behavior.
-        """
-        from openjiuwen.agent_teams.tools.database.engine import _ensure_message_meta_column
+    @pytest.mark.parametrize("existing", [(), ("protocol",), ("protocol", "meta")])
+    def test_message_migration_preserves_legacy_rows(self, existing):
+        from openjiuwen.agent_teams.tools.database.engine import _ensure_dynamic_table_columns
 
         engine = create_engine("sqlite:///:memory:")
+        definitions = {"protocol": "TEXT NOT NULL DEFAULT 'plain'", "meta": "TEXT"}
+        extra = "".join(f", {name} {definitions[name]}" for name in existing)
         try:
             with engine.begin() as conn:
                 conn.exec_driver_sql(
-                    """
-                    CREATE TABLE team_message_premeta (
-                        message_id TEXT PRIMARY KEY,
-                        team_name TEXT NOT NULL,
-                        from_member_name TEXT NOT NULL,
-                        to_member_name TEXT,
-                        content TEXT NOT NULL,
-                        timestamp BIGINT NOT NULL,
-                        broadcast BOOLEAN NOT NULL,
-                        protocol TEXT NOT NULL DEFAULT 'plain',
-                        is_read BOOLEAN
-                    )
-                    """
+                    "CREATE TABLE team_message_legacy "
+                    f"(message_id TEXT PRIMARY KEY, content TEXT{extra})"
                 )
                 conn.exec_driver_sql(
-                    "INSERT INTO team_message_premeta "
-                    "(message_id, team_name, from_member_name, content, timestamp, broadcast) "
-                    "VALUES ('m1', 'team', 'leader', 'hello', 1, 0)"
+                    "INSERT INTO team_message_legacy (message_id, content) VALUES ('m1', 'hello')"
                 )
-
-                _ensure_message_meta_column(conn)
-
-                columns = {col["name"] for col in inspect(conn).get_columns("team_message_premeta")}
-                row = conn.exec_driver_sql("SELECT content, meta FROM team_message_premeta").mappings().one()
-
-            assert "meta" in columns
-            assert row["meta"] is None
+                _ensure_dynamic_table_columns(conn)
+                _ensure_dynamic_table_columns(conn)  # Repeated startup migration is harmless.
+                row = conn.exec_driver_sql("SELECT * FROM team_message_legacy").mappings().one()
             assert row["content"] == "hello"
-        finally:
-            engine.dispose()
-
-    @pytest.mark.level1
-    def test_message_migration_adds_coordination_meta_column(self):
-        """Legacy messages gain a separate nullable coordination column."""
-        from openjiuwen.agent_teams.tools.database.engine import (
-            _ensure_message_coordination_meta_column,
-        )
-
-        engine = create_engine("sqlite:///:memory:")
-        try:
-            with engine.begin() as conn:
-                conn.exec_driver_sql(
-                    """
-                    CREATE TABLE team_message_predebate (
-                        message_id TEXT PRIMARY KEY,
-                        team_name TEXT NOT NULL,
-                        from_member_name TEXT NOT NULL,
-                        to_member_name TEXT,
-                        content TEXT NOT NULL,
-                        timestamp BIGINT NOT NULL,
-                        broadcast BOOLEAN NOT NULL,
-                        protocol TEXT NOT NULL DEFAULT 'plain',
-                        is_read BOOLEAN,
-                        meta TEXT
-                    )
-                    """
-                )
-                conn.exec_driver_sql(
-                    "INSERT INTO team_message_predebate "
-                    "(message_id, team_name, from_member_name, content, timestamp, broadcast) "
-                    "VALUES ('m1', 'team', 'leader', 'hello', 1, 0)"
-                )
-
-                _ensure_message_coordination_meta_column(conn)
-
-                columns = {
-                    col["name"]
-                    for col in inspect(conn).get_columns("team_message_predebate")
-                }
-                row = conn.exec_driver_sql(
-                    "SELECT meta, coordination_meta FROM team_message_predebate"
-                ).mappings().one()
-
-            assert "coordination_meta" in columns
-            assert row["coordination_meta"] is None
+            assert row["protocol"] == "plain"
             assert row["meta"] is None
+            assert row["coordination_meta"] is None
         finally:
             engine.dispose()
+
+    @pytest.mark.parametrize("dialect_name,quote", [("sqlite", '"'), ("postgresql", '"'), ("mysql", "`")])
+    def test_column_upgrade_uses_dialect_quotes_without_index_or_state_changes(self, monkeypatch, dialect_name, quote):
+        from unittest.mock import Mock
+        from sqlalchemy.dialects import registry
+        from openjiuwen.agent_teams.tools.database import engine as engine_module
+
+        inspector = Mock()
+        inspector.get_table_names.return_value = ["team_message_old", "team_task_old", "team_task_dependency_old"]
+        inspector.get_columns.return_value = [{"name": "id"}]
+        monkeypatch.setattr(engine_module, "inspect", lambda conn: inspector)
+        conn = Mock(dialect=registry.load(dialect_name)())
+        engine_module._ensure_dynamic_table_columns(conn)
+        statements = [call.args[0] for call in conn.exec_driver_sql.call_args_list]
+        assert len(statements) == 6
+        protocol_type = "VARCHAR(255)" if dialect_name == "mysql" else "TEXT"
+        assert any(f"protocol {protocol_type} NOT NULL DEFAULT 'plain'" in statement for statement in statements)
+        assert all(statement.startswith("ALTER TABLE ") and " ADD COLUMN " in statement for statement in statements)
+        for table in ("team_message_old", "team_task_old"):
+            assert any(statement.startswith(f"ALTER TABLE {quote}{table}{quote} ") for statement in statements)
+        inspector.get_indexes.assert_not_called()
 
     @pytest.mark.level1
     def test_message_coordination_meta_migration_is_concurrent_safe(
@@ -413,7 +369,7 @@ class TestTeamDatabaseInit:
 
         def migrate():
             with engine.begin() as conn:
-                engine_module._ensure_message_coordination_meta_column(conn)
+                engine_module._ensure_dynamic_table_columns(conn)
 
         try:
             with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
@@ -488,12 +444,19 @@ class TestTeamDatabaseInit:
                 await database.close()
 
     @pytest.mark.asyncio
-    async def test_postgresql_initialize_uses_asyncpg_engine(self, monkeypatch):
-        """Test PostgreSQL initialization uses asyncpg DSN and pool settings."""
+    @pytest.mark.parametrize("db_type,dsn,expected_url", [
+        (DatabaseType.POSTGRESQL, "postgresql://user:pass@localhost:5432/team_db",
+         "postgresql+asyncpg://user:pass@localhost:5432/team_db"),
+        (DatabaseType.MYSQL, "mysql://user:pass@localhost:3306/team_db",
+         "mysql+aiomysql://user:pass@localhost:3306/team_db"),
+    ])
+    async def test_network_database_initialize_uses_column_only_upgrade(self, monkeypatch, db_type, dsn, expected_url):
+        """Startup preserves driver/pool options and runs only column compatibility."""
         captured: dict = {}
 
         class _FakeConn:
             async def run_sync(self, _fn, *args, **kwargs):
+                captured.setdefault("initializers", []).append(_fn.__name__)
                 return None
 
         class _FakeBeginCtx:
@@ -529,14 +492,16 @@ class TestTeamDatabaseInit:
         )
 
         config = DatabaseConfig(
-            db_type=DatabaseType.POSTGRESQL,
-            connection_string="postgresql://user:pass@localhost:5432/team_db",
+            db_type=db_type,
+            connection_string=dsn,
         )
         database = TeamDatabase(config)
         try:
             await database.initialize()
             assert database._initialized is True
-            assert captured["url"] == "postgresql+asyncpg://user:pass@localhost:5432/team_db"
+            assert captured["url"] == expected_url
+            assert captured["initializers"][-1] == "_ensure_dynamic_table_columns"
+            assert "_ensure_dynamic_table_indexes" not in captured["initializers"]
             assert captured["kwargs"]["pool_size"] == 10
             assert captured["kwargs"]["max_overflow"] == 20
             assert captured["kwargs"]["pool_pre_ping"] is True

@@ -1695,6 +1695,68 @@ async def test_view_task_completion_marks_round_and_triggers_once_after_invoke()
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+_COMPLETED_VIEW_TASK = ToolCallInputs(
+    tool_name="view_task",
+    tool_args={},
+    tool_result="task-a completed\ntask-b completed",
+)
+
+
+@pytest.mark.asyncio
+async def test_view_task_completion_uses_the_capture_resolved_by_drain(tmp_path):
+    """A capture found only through the callback scope must still mark completion."""
+    rail = _team_skill_rail(
+        skills_dir=str(tmp_path),
+        llm=MockLLM(),
+        model="mock-model",
+        signal_trigger=True,
+        async_evolution=False,
+    )
+    rail._resolve_capture = Mock(return_value=SimpleNamespace(session_id="scoped-session"))
+
+    assert rail._current_capture() is None
+    await rail._on_after_tool_call(_MockCtx(inputs=_COMPLETED_VIEW_TASK), None)
+
+    assert rail._passive_evolution_pending is True
+    assert rail._host_completion_pending_session_id == "scoped-session"
+
+
+@pytest.mark.asyncio
+async def test_view_task_completion_is_ignored_without_a_resolvable_capture(tmp_path):
+    rail = _team_skill_rail(
+        skills_dir=str(tmp_path),
+        llm=MockLLM(),
+        model="mock-model",
+        signal_trigger=True,
+        async_evolution=False,
+    )
+    rail._resolve_capture = Mock(return_value=None)
+
+    await rail._on_after_tool_call(_MockCtx(inputs=_COMPLETED_VIEW_TASK), None)
+
+    assert rail._passive_evolution_pending is False
+    assert rail._host_completion_pending_session_id is None
+
+
+@pytest.mark.asyncio
+async def test_view_task_completion_is_marked_when_the_tool_increment_fails_quality_gate(tmp_path):
+    """Team completion comes from the view_task result, not from capture quality."""
+    rail = _team_skill_rail(
+        skills_dir=str(tmp_path),
+        llm=MockLLM(),
+        model="mock-model",
+        signal_trigger=True,
+        async_evolution=False,
+    )
+    await rail.before_invoke(_MockCtx(inputs=InvokeInputs(query="round 1", conversation_id="test-session")))
+    rail._drain_for_hook = Mock(return_value=(None, None, ({"code": "tool_payload_json_error"},)))
+
+    await rail.after_tool_call(_MockCtx(inputs=_COMPLETED_VIEW_TASK))
+
+    assert rail._passive_evolution_pending is True
+    assert rail._host_completion_pending_session_id == "test-session"
+
+
 @pytest.mark.asyncio
 async def test_team_after_tool_call_records_skill_tool_evolution_detail_read(tmp_path):
     skill_dir = tmp_path / "team-skill-a"

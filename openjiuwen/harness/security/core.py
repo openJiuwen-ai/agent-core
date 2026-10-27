@@ -24,15 +24,17 @@ from openjiuwen.harness.security.file_guard import (
     FileGuardChecker,
     build_file_guard_checker,
 )
-from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.security.models import (
     PermissionLevel,
     PermissionResult,
+    PermissionsSection,
 )
 from openjiuwen.harness.security.tiered_policy import (
-    evaluate_tiered_policy,
+    _evaluate_policy_with_shell_evidence,
     matched_rule_uses_approval_override,
     maybe_escalate_shell_operators,
+)
+from openjiuwen.harness.security.tiered_policy import (
     strictest as tiered_policy_strictest,
 )
 
@@ -136,11 +138,13 @@ class PermissionEngine:
             tool_args = {}
 
         matched_rule: str | None = None
-        permission, matched_rule = evaluate_tiered_policy(self.config, tool_name, tool_args)
+        permission, matched_rule, literal_allow = _evaluate_policy_with_shell_evidence(
+            self.config, tool_name, tool_args,
+        )
         if matched_rule == "tiered_policy:fallback(no_config)":
             permission = None
             matched_rule = None
-        elif not matched_rule_uses_approval_override(matched_rule):
+        elif not literal_allow and not matched_rule_uses_approval_override(matched_rule):
             permission = maybe_escalate_shell_operators(tool_name, tool_args, permission)
 
         if include_external_directory and self._file_guard is not None:

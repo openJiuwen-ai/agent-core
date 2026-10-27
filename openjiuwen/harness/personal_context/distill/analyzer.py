@@ -10,7 +10,6 @@ from openjiuwen.harness.personal_context.distill.types import CorpusMessage, Dis
 
 _PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 _MAX_CHARS_PER_MESSAGE = 400
-_MAX_MESSAGES_IN_PROMPT = 200
 
 
 def neutralize(text: str) -> str:
@@ -34,10 +33,11 @@ def render_message_block(
     messages: list[CorpusMessage],
     *,
     conversation_titles: dict[str, str] | None = None,
-) -> str:
+) -> tuple[str, int]:
+    """Render corpus lines and report how many messages were rendered."""
     titles = conversation_titles or {}
     lines: list[str] = []
-    for index, message in enumerate(messages[:_MAX_MESSAGES_IN_PROMPT], start=1):
+    for index, message in enumerate(messages, start=1):
         where = titles.get(message.conversation_id) or message.conversation_id or "未知会话"
         if message.is_self is True:
             who = "我"
@@ -49,7 +49,7 @@ def render_message_block(
             who = "他人"
         raw = neutralize((message.content_text or "")[:_MAX_CHARS_PER_MESSAGE])
         lines.append(f"#{index} [{where}] {who}: {raw}")
-    return "\n".join(lines)
+    return "\n".join(lines), len(lines)
 
 
 def _strip_fences(text: str) -> str:
@@ -131,7 +131,9 @@ class LlmAnalyzer:
         if not messages:
             return DistillCandidates(persona_md="", work_md="")
 
-        block = render_message_block(messages, conversation_titles=self._conversation_titles)
+        block, prompt_message_count = render_message_block(
+            messages, conversation_titles=self._conversation_titles
+        )
         materials = _materials_user_message(block, subject_name=self._subject_name)
         persona_md = await self._track(
             analyzer_system=self._persona_analyzer_prompt,
@@ -145,4 +147,9 @@ class LlmAnalyzer:
             materials_user=materials,
             track_label="work",
         )
-        return DistillCandidates(persona_md=persona_md, work_md=work_md)
+        return DistillCandidates(
+            persona_md=persona_md,
+            work_md=work_md,
+            prompt_message_count=prompt_message_count,
+            materials_chars=len(materials),
+        )

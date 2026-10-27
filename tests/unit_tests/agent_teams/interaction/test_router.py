@@ -83,6 +83,24 @@ def test_god_view_multi_recipient_fans_out():
 
 
 @pytest.mark.level0
+def test_god_view_inline_recipient_segments_fan_out_with_distinct_bodies():
+    payloads = parse_interact_str("# @m1 ship backend @m2 update docs")
+    assert payloads == [
+        OperatorMessage(body="ship backend", target="m1"),
+        OperatorMessage(body="update docs", target="m2"),
+    ]
+
+
+@pytest.mark.level0
+def test_multiple_prefix_recipients_do_not_drop_members_when_body_contains_at():
+    payloads = parse_interact_str("# @m1 @m2 ship backend @m3 update docs")
+    assert payloads == [
+        OperatorMessage(body="ship backend @m3 update docs", target="m1"),
+        OperatorMessage(body="ship backend @m3 update docs", target="m2"),
+    ]
+
+
+@pytest.mark.level0
 def test_god_view_at_all_collapses_to_broadcast():
     payloads = parse_interact_str("# @all heads up")
     assert payloads == [OperatorMessage(body="heads up")]
@@ -126,6 +144,32 @@ def test_human_agent_multi_recipient_fans_out():
     assert payloads == [
         HumanAgentMessage(body="status sync", sender="alice", target="m1"),
         HumanAgentMessage(body="status sync", sender="alice", target="m2"),
+    ]
+
+
+@pytest.mark.level0
+def test_human_agent_inline_recipient_segments_fan_out_with_distinct_bodies():
+    payloads = parse_interact_str("$alice @m1 query Hangzhou @m2 query Shanghai")
+    assert payloads == [
+        HumanAgentMessage(body="query Hangzhou", sender="alice", target="m1"),
+        HumanAgentMessage(body="query Shanghai", sender="alice", target="m2"),
+    ]
+
+
+@pytest.mark.level0
+def test_human_agent_multiple_prefix_recipients_preserve_shared_body():
+    payloads = parse_interact_str("$alice @m1 @m2 query Hangzhou @m3 query Shanghai")
+    assert payloads == [
+        HumanAgentMessage(
+            body="query Hangzhou @m3 query Shanghai",
+            sender="alice",
+            target="m1",
+        ),
+        HumanAgentMessage(
+            body="query Hangzhou @m3 query Shanghai",
+            sender="alice",
+            target="m2",
+        ),
     ]
 
 
@@ -268,6 +312,29 @@ async def test_resolve_targets_multiple_unknown_rejoin_in_one_message():
     payloads = parse_interact_str("# @g1 @g2 stand-up in 5")
     resolved = await resolve_targets(payloads, member_exists=_exists_in())
     assert resolved == [GodViewMessage(body="@g1 @g2 stand-up in 5")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_resolve_targets_multiple_unknown_preserves_distinct_bodies():
+    payloads = parse_interact_str("# @g1 ship backend @g2 update docs")
+    resolved = await resolve_targets(payloads, member_exists=_exists_in())
+    assert resolved == [
+        GodViewMessage(body="@g1 ship backend"),
+        GodViewMessage(body="@g2 update docs"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_resolve_targets_mixed_known_and_unknown_preserves_distinct_bodies():
+    payloads = parse_interact_str("# @m1 ship backend @g1 update docs @g2 write tests")
+    resolved = await resolve_targets(payloads, member_exists=_exists_in("m1"))
+    assert resolved == [
+        OperatorMessage(body="ship backend", target="m1"),
+        GodViewMessage(body="@g1 update docs"),
+        GodViewMessage(body="@g2 write tests"),
+    ]
 
 
 @pytest.mark.asyncio

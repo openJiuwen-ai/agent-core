@@ -613,7 +613,14 @@ class ViewTaskToolV2(TeamTool):
         # List view (list/claimable action) — mirrors TaskListTool
         tasks = d.get("tasks", [])
         if not tasks:
-            return "No tasks found"
+            # Soft next-step nudge (same pattern as claim_task completed).
+            # Role-neutral: teammates must not be told to create_task.
+            return (
+                "No tasks found.\n\n"
+                "Leader with an unfinished user goal: create_task "
+                "(or send_message for debate). "
+                "Member / waiting / done: stay idle."
+            )
         lines = []
         for task in tasks:
             parts = [f"#{task['task_id']} [{task['status']}] {task['title']}"]

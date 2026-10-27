@@ -3,6 +3,7 @@
 """Tests for openjiuwen.harness.tools.worktree.backend."""
 
 import pytest
+from unittest.mock import AsyncMock, patch
 
 from openjiuwen.harness.tools.worktree.backend import (
     GitBackend,
@@ -11,6 +12,7 @@ from openjiuwen.harness.tools.worktree.backend import (
     create_backend,
     register_worktree_backend,
 )
+from openjiuwen.harness.tools.worktree.git import GitError
 from openjiuwen.harness.tools.worktree.models import WorktreeConfig
 from tests.test_logger import logger
 
@@ -23,6 +25,66 @@ def _wt_target(tmp_path, slug: str) -> str:
 
 
 class TestGitBackendCreate:
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    @patch("openjiuwen.harness.tools.worktree.backend.worktree_add", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.backend.set_longpaths", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.backend.read_worktree_head_sha", new_callable=AsyncMock)
+    async def test_longpaths_failure_is_non_fatal_on_windows(
+        self,
+        mock_read_head,
+        mock_set_longpaths,
+        mock_worktree_add,
+        tmp_path,
+        monkeypatch,
+    ):
+        mock_read_head.return_value = None
+        mock_set_longpaths.side_effect = GitError(
+            ["config", "core.longpaths", "true"],
+            returncode=1,
+            stderr="config is locked",
+        )
+        monkeypatch.setattr("openjiuwen.harness.tools.worktree.backend._IS_WINDOWS", True)
+        backend = GitBackend(WorktreeConfig(longpaths_support=True))
+        backend._resolve_base = AsyncMock(return_value=("main", "abc123"))
+
+        result = await backend.create(
+            "longpaths-best-effort",
+            str(tmp_path),
+            _wt_target(tmp_path, "longpaths-best-effort"),
+        )
+
+        mock_set_longpaths.assert_awaited_once_with(str(tmp_path), enabled=True)
+        mock_worktree_add.assert_awaited_once()
+        assert result.head_commit == "abc123"
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    @patch("openjiuwen.harness.tools.worktree.backend.worktree_add", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.backend.set_longpaths", new_callable=AsyncMock)
+    @patch("openjiuwen.harness.tools.worktree.backend.read_worktree_head_sha", new_callable=AsyncMock)
+    async def test_longpaths_is_not_written_on_posix(
+        self,
+        mock_read_head,
+        mock_set_longpaths,
+        mock_worktree_add,
+        tmp_path,
+        monkeypatch,
+    ):
+        mock_read_head.return_value = None
+        monkeypatch.setattr("openjiuwen.harness.tools.worktree.backend._IS_WINDOWS", False)
+        backend = GitBackend(WorktreeConfig(longpaths_support=True))
+        backend._resolve_base = AsyncMock(return_value=("main", "abc123"))
+
+        await backend.create(
+            "no-posix-write",
+            str(tmp_path),
+            _wt_target(tmp_path, "no-posix-write"),
+        )
+
+        mock_set_longpaths.assert_not_awaited()
+        mock_worktree_add.assert_awaited_once()
+
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_create_new_worktree(self, tmp_git_repo: str, worktree_config: WorktreeConfig, tmp_path):

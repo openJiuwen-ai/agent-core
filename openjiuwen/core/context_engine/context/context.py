@@ -1,11 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
+import hashlib
 import json
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Awaitable, Callable, List, Optional, Tuple, Dict, Any
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -17,7 +18,8 @@ from openjiuwen.core.context_engine.context.processor_state_recorder import (
     ContextProcessorStateRecorder,
 )
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
-from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.token.base import TokenCounter, TokenMeasurement
+from openjiuwen.core.context_engine.usage.models import ContextWindowTokenReport
 from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig, ContextEngineConfig
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
 from openjiuwen.core.foundation.kv_cache import first_changed_index
@@ -90,6 +92,18 @@ class SessionModelContext(ModelContext):
         self._last_context_window_access_at: float | None = None
         self._last_llm_bound_context_window: ContextWindow | None = None
         self._offload_message_buffer = OffloadMessageBuffer()
+        self._message_revision = 0
+        self._last_message_mutation = "initial"
+        self._usage_measurement_cache: dict[str, TokenMeasurement] = {}
+        self._usage_report_cache: dict[str, ContextWindowTokenReport] = {}
+        self._last_usage_report: ContextWindowTokenReport | None = None
+        self._usage_component_revisions = {
+            "system_prompt": 0,
+            "skills": 0,
+            "attachments": 0,
+            "tools": 0,
+        }
+        self._usage_owner_id = f"{self._session_id}|{self._context_id}"
         self._configure_offload_message_buffer()
 
     def _configure_offload_message_buffer(self) -> None:
@@ -107,6 +121,331 @@ class SessionModelContext(ModelContext):
 
     def context_id(self) -> str:
         return self._context_id
+
+    def _get_last_assistant_usage_tokens(self, messages: List[BaseMessage]) -> Optional[int]:
+        """
+        Get cumulative input token count from the usage_metadata of the last AssistantMessage.
+        ``total_tokens`` includes output tokens and must not be used as the context
+        input size.
+
+        Returns:
+            input_tokens value (cumulative input tokens), or None if not available
+        """
+        # Search backwards for the last AssistantMessage
+        for msg in reversed(messages):
+            if ContextUtils.has_valid_usage_metadata(msg):
+                usage = msg.usage_metadata
+                if usage.input_tokens > 0:
+                    return usage.input_tokens
+        return None
+
+    def _stat_messages(self, stat: ContextStats, messages: List[BaseMessage]) -> bool:
+        stat.total_messages = len(messages)
+        stat.total_dialogues = len(ContextUtils.find_all_dialogue_round(messages))
+        for msg in messages:
+            if msg.role == "assistant":
+                stat.assistant_messages += 1
+            elif msg.role == "user":
+                stat.user_messages += 1
+            elif msg.role == "system":
+                stat.system_messages += 1
+            elif msg.role == "tool":
+                stat.tool_messages += 1
+
+        # Priority 1: Get cumulative tokens from usage_metadata of the last AssistantMessage
+        usage_tokens = self._get_last_assistant_usage_tokens(messages)
+
+        if usage_tokens is not None:
+            # usage_metadata.input_tokens is cumulative for entire conversation input, use directly
+            stat.total_tokens = usage_tokens
+            return True
+
+        # Priority 2/3: Count tokens message by message (TiktokenCounter or fallback)
+        for msg in messages:
+            msg_tokens = self._count_single_message_tokens(msg)
+            if msg.role == "assistant":
+                stat.assistant_message_tokens += msg_tokens
+            elif msg.role == "user":
+                stat.user_message_tokens += msg_tokens
+            elif msg.role == "system":
+                stat.system_message_tokens += msg_tokens
+            elif msg.role == "tool":
+                stat.tool_message_tokens += msg_tokens
+
+        stat.total_tokens += (
+            stat.assistant_message_tokens
+            + stat.user_message_tokens
+            + stat.system_message_tokens
+            + stat.tool_message_tokens
+        )
+        return False
+
+    def token_counter(self) -> TokenCounter:
+        return self._token_counter
+
+    def message_revision(self) -> int:
+        """Return the monotonic revision of the retained context messages."""
+        return self._message_revision
+
+    def _mark_message_changed(self, kind: str) -> None:
+        self._message_revision += 1
+        self._last_message_mutation = kind
+
+    def build_context_usage_report(
+        self,
+        context_window: ContextWindow,
+        *,
+        system_prompt_sections: Iterable[tuple[Any, str] | tuple[Any, str, str]] | None = None,
+        model: str | None = None,
+        provider: str | None = None,
+        deployment: str | None = None,
+        context_snapshot_id: str | None = None,
+        attribution: dict[str, Any] | None = None,
+    ) -> ContextWindowTokenReport:
+        """Build or reuse the local token report for a final ContextWindow.
+
+        Context processors and window mutators run before this method.  The
+        report cache only skips tokenizer calls; it never skips final-window
+        assembly or context processors.  The returned report contains copied
+        Pydantic values and can safely be retained by one model-call request
+        while this SessionModelContext moves on to a later window.
+        """
+        from openjiuwen.core.context_engine.usage.analyzer import ContextUsageAnalyzer
+
+        frozen_sections = tuple(system_prompt_sections or ())
+        signatures = self._usage_component_signatures(context_window, frozen_sections)
+        attribution = dict(attribution or {})
+        context_owner_id = str(attribution.get("context_owner_id") or self._usage_owner_id)
+        attribution["context_owner_id"] = context_owner_id
+        resolved_model = model or self._model_name or ""
+        measurement_counter = self._token_counter
+        if measurement_counter is None:
+            # ContextEngine normally installs a selector-backed counter.  A
+            # custom ModelContext may still omit one; usage telemetry must
+            # remain available with an explicitly estimated fallback.
+            from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
+
+            measurement_counter = StringLengthCounter(model=resolved_model, fallback_reason="counter_unavailable")
+        cache_identity = ":".join(
+            (
+                context_owner_id,
+                resolved_model,
+                provider or "",
+                deployment or "",
+                type(measurement_counter).__name__,
+                str(getattr(measurement_counter, "measurement_tokenizer", None) or ""),
+                str(self.context_window_tokens()),
+                json.dumps(signatures, ensure_ascii=False, sort_keys=True),
+            )
+        )
+        cache_key = hashlib.sha256(cache_identity.encode("utf-8")).hexdigest()
+        previous = self._last_usage_report
+        changes = self._usage_context_changes(previous, signatures)
+        component_revisions = self._update_usage_component_revisions(previous, signatures)
+        snapshot_id = context_snapshot_id or uuid.uuid4().hex
+
+        cached = self._usage_report_cache.get(cache_key)
+        if cached is not None:
+            report = cached.model_copy(
+                deep=True,
+                update={
+                    "context_snapshot_id": snapshot_id,
+                    "message_revision": self._message_revision,
+                    "component_signatures": signatures,
+                    "context_stats": context_window.statistic.model_copy(deep=True),
+                    "context_owner_id": context_owner_id,
+                    "product_session_id": attribution.get("product_session_id"),
+                    "execution_session_id": attribution.get("execution_session_id") or self._session_id,
+                    "agent_id": attribution.get("agent_id"),
+                    "team_id": attribution.get("team_id"),
+                    "member_name": attribution.get("member_name"),
+                    "invocation_id": attribution.get("invocation_id"),
+                    "parent_invocation_id": attribution.get("parent_invocation_id"),
+                    "delegation_id": attribution.get("delegation_id"),
+                    "agent_path": list(attribution.get("agent_path") or []),
+                    "depth": int(attribution.get("depth") or 0),
+                    "cache_identity": attribution.get("cache_identity"),
+                    "parent_cache_identity": attribution.get("parent_cache_identity"),
+                    "cache_mode": attribution.get("cache_mode"),
+                    "cache_scope": attribution.get("cache_scope"),
+                    "prompt_revision": component_revisions["system_prompt"],
+                    "skills_revision": component_revisions["skills"],
+                    "attachment_revision": component_revisions["attachments"],
+                    "tools_signature": signatures["tools"],
+                    "tokenizer_identity": str(getattr(measurement_counter, "measurement_tokenizer", None) or ""),
+                    "context_changes": changes,
+                    "measurement_cache": {
+                        "hit": "full",
+                        "reused_parts": sorted(
+                            name for name, part in cached.parts.items() if part.source != "not_reported"
+                        ),
+                        "recomputed_parts": [],
+                        "message_revision": self._message_revision,
+                        "measurement_version": cached.measurement.measurement_version,
+                    },
+                },
+            )
+            report.context_window.context_snapshot_id = snapshot_id
+            self._last_usage_report = report
+            return report
+
+        cache_info: dict[str, Any] = {}
+        snapshot = ContextUsageAnalyzer(
+            measurement_counter,
+            model=resolved_model,
+            context_window_limit=self.context_window_tokens(),
+        ).analyze(
+            context_window,
+            request_id="",
+            session_id=self._session_id,
+            phase="pre_call",
+            provider=provider,
+            provider_input_tokens=None,
+            system_prompt_sections=frozen_sections or None,
+            deployment=deployment,
+            measurement_cache=self._usage_measurement_cache,
+            measurement_cache_info=cache_info,
+            context_snapshot_id=snapshot_id,
+            context_changes=changes,
+            attribution=attribution,
+        )
+        report = ContextWindowTokenReport(
+            context_snapshot_id=snapshot_id,
+            context_id=self._context_id,
+            session_id=self._session_id,
+            product_session_id=attribution.get("product_session_id"),
+            execution_session_id=attribution.get("execution_session_id") or self._session_id,
+            context_owner_id=context_owner_id,
+            agent_id=attribution.get("agent_id"),
+            team_id=attribution.get("team_id"),
+            member_name=attribution.get("member_name"),
+            invocation_id=attribution.get("invocation_id"),
+            parent_invocation_id=attribution.get("parent_invocation_id"),
+            delegation_id=attribution.get("delegation_id"),
+            agent_path=list(attribution.get("agent_path") or []),
+            depth=int(attribution.get("depth") or 0),
+            cache_identity=attribution.get("cache_identity"),
+            parent_cache_identity=attribution.get("parent_cache_identity"),
+            cache_mode=attribution.get("cache_mode"),
+            cache_scope=attribution.get("cache_scope"),
+            message_revision=self._message_revision,
+            prompt_revision=component_revisions["system_prompt"],
+            skills_revision=component_revisions["skills"],
+            attachment_revision=component_revisions["attachments"],
+            tools_signature=signatures["tools"],
+            tokenizer_identity=str(getattr(measurement_counter, "measurement_tokenizer", None) or ""),
+            component_signatures=signatures,
+            context_window=snapshot.context_window,
+            parts=snapshot.parts,
+            context_stats=context_window.statistic.model_copy(deep=True),
+            measurement=snapshot.measurement,
+            context_changes=changes,
+            measurement_cache={
+                **snapshot.measurement_cache,
+                "message_revision": self._message_revision,
+                "measurement_version": snapshot.measurement.measurement_version,
+            },
+        )
+        self._usage_report_cache[cache_key] = report.model_copy(deep=True)
+        if len(self._usage_report_cache) > 32:
+            self._usage_report_cache.pop(next(iter(self._usage_report_cache)))
+        self._last_usage_report = report
+        if len(self._usage_measurement_cache) > 512:
+            for key in list(self._usage_measurement_cache)[:128]:
+                self._usage_measurement_cache.pop(key, None)
+        return report
+
+    def set_context_usage_owner(self, context_owner_id: str) -> None:
+        """Set the default namespace for this context's local usage cache."""
+        if isinstance(context_owner_id, str) and context_owner_id.strip():
+            self._usage_owner_id = context_owner_id.strip()
+
+    def _update_usage_component_revisions(
+        self,
+        previous: ContextWindowTokenReport | None,
+        signatures: dict[str, str],
+    ) -> dict[str, int]:
+        for name in self._usage_component_revisions:
+            if previous is None or previous.component_signatures.get(name) != signatures.get(name):
+                self._usage_component_revisions[name] += 1
+        return dict(self._usage_component_revisions)
+
+    def _usage_component_signatures(
+        self,
+        context_window: ContextWindow,
+        system_prompt_sections: tuple[tuple[Any, str] | tuple[Any, str, str], ...],
+    ) -> dict[str, str]:
+        attachment_messages: list[Any] = []
+        ordinary_messages: list[Any] = []
+        for message in context_window.context_messages:
+            metadata = getattr(message, "metadata", {}) or {}
+            if metadata.get("_context_usage_category") is not None:
+                attachment_messages.append(message)
+            else:
+                ordinary_messages.append(message)
+        return {
+            "system_prompt": self._usage_signature(
+                {"messages": context_window.system_messages, "sections": system_prompt_sections}
+            ),
+            "skills": self._usage_signature(
+                [
+                    section
+                    for section in system_prompt_sections
+                    if str(getattr(section[0], "value", section[0])) == "skills"
+                ]
+            ),
+            "attachments": self._usage_signature(attachment_messages),
+            "tools": self._usage_signature(context_window.tools),
+            "messages": self._usage_signature(ordinary_messages),
+        }
+
+    @classmethod
+    def _usage_signature(cls, value: Any) -> str:
+        payload = json.dumps(cls._usage_canonicalize(value), ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _usage_canonicalize(cls, value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            return cls._usage_canonicalize(value.model_dump(mode="json"))
+        if isinstance(value, dict):
+            return {
+                str(key): cls._usage_canonicalize(item)
+                for key, item in sorted(value.items(), key=lambda item: str(item[0]))
+            }
+        if isinstance(value, (list, tuple)):
+            return [cls._usage_canonicalize(item) for item in value]
+        if isinstance(value, set):
+            return sorted(cls._usage_canonicalize(item) for item in value)
+        return value
+
+    def _usage_context_changes(
+        self,
+        previous: ContextWindowTokenReport | None,
+        signatures: dict[str, str],
+    ) -> dict[str, Any]:
+        if previous is None:
+            event = "initial"
+            changed = {name: False for name in ("system_prompt", "skills", "attachments", "tools")}
+        else:
+            old = previous.component_signatures
+            changed = {
+                name: old.get(name) != signatures.get(name)
+                for name in ("system_prompt", "skills", "attachments", "tools")
+            }
+            event = self._last_message_mutation if old.get("messages") != signatures.get("messages") else "unchanged"
+            if event == "initial":
+                event = "replace"
+        return {
+            "message_event": event,
+            "system_prompt_changed": changed["system_prompt"],
+            "skills_changed": changed["skills"],
+            "attachments_changed": changed["attachments"],
+            "tools_changed": changed["tools"],
+            "stable_prefix_changed": any(changed.values()),
+        }
+
+
 
     def compression_recall_config(self) -> CompressionRecallConfig:
         return self._compression_recall_config
@@ -149,10 +488,8 @@ class SessionModelContext(ModelContext):
         waited = 0.0
         while True:
             try:
-                await asyncio.wait_for(
-                    self._processor_lock.acquire(),
-                    timeout=_PROCESSOR_LOCK_WARN_INTERVAL_SECONDS,
-                )
+                async with asyncio.timeout(_PROCESSOR_LOCK_WARN_INTERVAL_SECONDS):
+                    await self._processor_lock.acquire()
                 if waited:
                     logger.warning(
                         "context %s (session %s): %s acquired the processor lock "
@@ -198,6 +535,8 @@ class SessionModelContext(ModelContext):
         if self._active_compression_in_progress and self._processor_lock.locked():
             logger.info("skip passive compression because active compression is already in progress")
             self._message_buffer.add_back(messages_to_add)
+            if messages_to_add:
+                self._mark_message_changed("append")
             return messages_to_add
 
         async with self._guarded_processor_lock("add_messages"):
@@ -208,6 +547,8 @@ class SessionModelContext(ModelContext):
                 **kwargs,
             )
             self._message_buffer.add_back(messages_to_add)
+            if messages_to_add:
+                self._mark_message_changed("append")
             return messages_to_add
 
     async def compress_context(
@@ -325,6 +666,9 @@ class SessionModelContext(ModelContext):
 
         popped_messages = self._message_buffer.pop_back(size, with_history)
 
+        if popped_messages:
+            self._mark_message_changed("remove")
+
         return popped_messages
 
     def get_messages(self, size: Optional[int] = None, with_history: bool = True) -> List[BaseMessage]:
@@ -341,6 +685,7 @@ class SessionModelContext(ModelContext):
         ContextUtils.validate_messages(messages)
         messages = ContextUtils.ensure_context_message_ids(messages)
         self._message_buffer.set_messages(messages, with_history)
+        self._mark_message_changed("replace")
 
     def detect_context_window_change(
             self,
@@ -1127,7 +1472,15 @@ class SessionModelContext(ModelContext):
         messages = context_state.get("messages", [])
         ContextUtils.validate_messages(messages)
         messages = ContextUtils.ensure_context_message_ids(messages)
+        previous_messages = self._message_buffer.get_back()
         self._message_buffer.rebulid(messages)
+        if previous_messages != messages:
+            self._mark_message_changed("load")
+            # A restored context starts a new report lifecycle. Retaining a
+            # report keyed by identical message content would incorrectly
+            # make a post-load window look like the pre-load snapshot.
+            self._usage_report_cache.clear()
+            self._last_usage_report = None
         last_access_at = context_state.get("last_context_window_access_at")
         self._last_context_window_access_at = (
             float(last_access_at) if isinstance(last_access_at, (int, float)) else None

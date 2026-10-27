@@ -249,7 +249,11 @@ STRINGS: dict[str, str] = {
     "create_task.tasks": "Task list — wrap single tasks in an array too",
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
-    "create_task.task.content": "Task details including goals and acceptance criteria",
+    "create_task.task.content": (
+        "Task details including goals and acceptance criteria; when dispatching a "
+        "document-parsing task for a file you already read via read_file, carry over "
+        "the embedded-image info (count and file names) into the task content"
+    ),
     # Both create_task variants expose assignee_display_name. Autonomous treats
     # it as optional; scheduled requires it. DB still stores member_name.
     "create_task.task.assignee_display_name": (
@@ -383,6 +387,11 @@ STRINGS: dict[str, str] = {
         ".team/ with write_file, then resend this message carrying only the file path "
         "plus a one- or two-sentence summary. Do not split the body across several "
         "messages to get around this limit."
+    ),
+    "send_message.hint_mentioned_third_party": (
+        "Note: this message was delivered to {to} only; {mentioned} (mentioned with @ in "
+        "the body) receives no notification — an @-mention is not delivery. To hand the "
+        "turn to these members, deliver it to each of them with send_message(to=<member>)."
     ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============
     # send_message_scheduled._desc lives in descs/en/send_message_scheduled.md

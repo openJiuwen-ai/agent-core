@@ -115,7 +115,7 @@ async def test_ignores_non_debate_targets_other_tools_and_failed_results() -> No
     rail = _rail(cap=1)
     await rail._debate.activate_participant("round-1")
 
-    for target in ("leader", "user", "self", "", None):
+    for target in ("user", "self", "", None):
         await rail.after_tool_call(
             _context(to=target, result=ToolOutput(success=True)),
         )
@@ -230,7 +230,10 @@ async def test_only_explicit_final_report_to_leader_is_tagged() -> None:
         "round_id": "round-1",
         "message_role": "final_report",
     }
-    assert rail._count == 0
+    # The ordinary member→leader send is counted debate speech now (no
+    # open board tasks); only its meta tagging stays reserved for
+    # framework roles.
+    assert rail._count == 1
 
 
 @pytest.mark.asyncio
@@ -887,3 +890,225 @@ def test_configurator_does_not_mount_debate_rail_for_scheduled_mode(monkeypatch)
 
     rails = captured[0]["agent_spec"].rails
     assert all(rail.type != "core.team.debate_round_cap" for rail in rails)
+
+
+# ---------------------------------------------------------------------------
+# Relay-shape coverage — member→leader speech, leader relays,
+# hard rejection after the first cap notice, capped-member convergence.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_member_leader_report_counts_toward_the_same_cap() -> None:
+    rail = _rail(cap=1)
+    await rail._debate.activate_participant("round-1")
+
+    first = _context(to="leader", result=ToolOutput(success=True))
+    await rail.before_tool_call(first)
+    await rail.after_tool_call(first)
+    assert rail._count == 1
+    # counted speech stays untagged: meta is reserved for framework roles
+    assert "_team_debate_meta" not in first.inputs.tool_args
+
+    notice = _context(to="leader")
+    await rail.before_tool_call(notice)
+    assert notice.extra.get("_skip_tool") is None
+    assert "Data Analyst has reached" in notice.inputs.tool_args["content"]
+    assert normalize_debate_meta(notice.inputs.tool_args["_team_debate_meta"])[
+        "message_role"
+    ] == "cap_notice"
+    notice.inputs.tool_result = ToolOutput(success=True)
+    notice.inputs.tool_msg = ToolMessage(content="sent", tool_call_id="call-1")
+    await rail.after_tool_call(notice)
+    assert rail._count == 1  # the notice send is uncounted
+
+
+@pytest.mark.asyncio
+async def test_member_leader_report_skipped_while_board_tasks_are_open() -> None:
+    rail = _rail(cap=1)
+    await rail._debate.activate_participant("round-1")
+    rail._team.task_manager.list_tasks.return_value = [
+        SimpleNamespace(status="in_progress"),
+    ]
+
+    send = _context(to="leader", result=ToolOutput(success=True))
+    await rail.before_tool_call(send)
+    await rail.after_tool_call(send)
+
+    assert rail._count == 0
+    assert "_team_debate_meta" not in send.inputs.tool_args
+
+
+@pytest.mark.asyncio
+async def test_second_over_limit_send_is_rejected_outright() -> None:
+    rail = _rail(cap=1)
+    await rail._debate.activate_participant("round-1")
+    await rail.after_tool_call(_context(to="peer", result=ToolOutput(success=True)))
+
+    notice = _context(to="peer")
+    await rail.before_tool_call(notice)
+    assert notice.extra.get("_skip_tool") is None  # first breach: notice, not reject
+    notice.inputs.tool_result = ToolOutput(success=True)
+    notice.inputs.tool_msg = ToolMessage(content="sent", tool_call_id="call-1")
+    await rail.after_tool_call(notice)
+
+    retry = _context(to="peer")
+    await rail.before_tool_call(retry)
+
+    assert retry.extra["_skip_tool"] is True
+    assert "was rejected" in retry.inputs.tool_result["error"]
+    assert rail._count == 1
+
+
+@pytest.mark.asyncio
+async def test_cap_latch_resets_when_the_participant_round_changes() -> None:
+    rail = _rail(cap=1)
+    await rail._debate.activate_participant("round-1")
+    await rail.after_tool_call(_context(to="peer", result=ToolOutput(success=True)))
+    noticed = _context(to="peer")
+    await rail.before_tool_call(noticed)  # latches _capped for round-1
+
+    await rail._debate.activate_participant("round-2")
+    fresh = _context(to="peer", result=ToolOutput(success=True))
+    await rail.before_tool_call(fresh)
+    await rail.after_tool_call(fresh)
+
+    assert rail._count == 1
+    assert rail._capped is False
+
+
+def _leader_rail(cap: int = 2) -> DebateRoundCapRail:
+    return _rail(cap=cap, role=TeamRole.LEADER)
+
+
+async def _start_leader_round(rail: DebateRoundCapRail, call_id: str = "call-a") -> str:
+    call = ToolCall(
+        id=call_id,
+        type="function",
+        name="send_message",
+        arguments=json.dumps({"to": "member-a"}),
+    )
+    await rail.after_model_call(_model_context(call))
+    invite = _context(to="member-a", result=ToolOutput(success=True))
+    invite.inputs.tool_call.id = call_id
+    await rail.before_tool_call(invite)
+    await rail.after_tool_call(invite)
+    return rail._debate.round_id
+
+
+@pytest.mark.asyncio
+async def test_leader_relay_counts_and_breaches_notice_then_reject() -> None:
+    rail = _leader_rail(cap=2)
+    await _start_leader_round(rail)
+    assert rail._count == 0  # the enrollment batch is exempt
+
+    for _ in range(2):
+        relay = _context(to="member-a", result=ToolOutput(success=True))
+        await rail.before_tool_call(relay)
+        assert "_team_debate_meta" not in relay.inputs.tool_args
+        await rail.after_tool_call(relay)
+    assert rail._count == 2
+
+    # a send to the user is not a relay
+    await rail.after_tool_call(
+        _context(to="user", result=ToolOutput(success=True)),
+    )
+    assert rail._count == 2
+
+    breach = _context(to="member-b")
+    await rail.before_tool_call(breach)
+    assert breach.extra.get("_skip_tool") is None
+    assert "reached its limit" in breach.inputs.tool_args["content"]
+    assert normalize_debate_meta(breach.inputs.tool_args["_team_debate_meta"])[
+        "message_role"
+    ] == "cap_notice"
+    breach.inputs.tool_result = ToolOutput(success=True)
+    breach.inputs.tool_msg = ToolMessage(content="sent", tool_call_id="call-1")
+    await rail.after_tool_call(breach)
+    assert rail._count == 2  # the wrap-up notice is uncounted
+    assert "relay limit" in breach.inputs.tool_msg.content
+
+    retry = _context(to="member-b")
+    await rail.before_tool_call(retry)
+    assert retry.extra["_skip_tool"] is True
+    assert "was rejected" in retry.inputs.tool_result["error"]
+
+
+@pytest.mark.asyncio
+async def test_leader_relay_count_resets_on_a_new_round() -> None:
+    rail = _leader_rail(cap=2)
+    await _start_leader_round(rail)
+    relay = _context(to="member-a", result=ToolOutput(success=True))
+    await rail.before_tool_call(relay)
+    await rail.after_tool_call(relay)
+    assert rail._count == 1
+
+    await rail._debate.begin_round({"call-b": {"member-a"}})
+    fresh = _context(to="member-a", result=ToolOutput(success=True))
+    await rail.before_tool_call(fresh)
+    await rail.after_tool_call(fresh)
+
+    assert rail._count == 1
+    assert rail._leader_capped is False
+
+
+@pytest.mark.asyncio
+async def test_leader_relay_to_unreadable_roster_fails_open() -> None:
+    rail = _leader_rail(cap=1)
+    await _start_leader_round(rail)
+    rail._team.list_members.side_effect = RuntimeError("roster unavailable")
+
+    relay = _context(to="member-a", result=ToolOutput(success=True))
+    await rail.before_tool_call(relay)
+    await rail.after_tool_call(relay)
+
+    assert rail._count == 0
+    assert relay.extra.get("_skip_tool") is None
+
+
+@pytest.mark.asyncio
+async def test_capture_cap_notice_contributes_to_leader_finalization() -> None:
+    state = DebateRunState(language="en")
+    wake = AsyncMock(return_value=True)
+    state.bind_leader_wakeup(wake)
+    round_id = await state.begin_round({"call-a": {"member-a", "member-b"}})
+    await state.settle_invitation("call-a", succeeded=True)
+
+    accepted = await state.capture_cap_notice(round_id, "member-a")
+    assert accepted is True
+    assert state.capped_participants == {"member-a"}
+    wake.assert_not_awaited()  # member-b still pending
+
+    duplicate = await state.capture_cap_notice(round_id, "member-a")
+    assert duplicate is False
+
+    await state.capture_report(round_id, "member-b", "report B")
+
+    wake.assert_awaited_once()
+    assert "member-a" in wake.await_args.args[0]
+    assert "debate send cap" in wake.await_args.args[0]
+
+    # after finalization the round is closed for further captures
+    late = await state.capture_report(round_id, "member-a", "late report A")
+    assert late is False
+
+
+@pytest.mark.asyncio
+async def test_real_final_report_wins_over_an_earlier_cap_notice() -> None:
+    state = DebateRunState(language="en")
+    wake = AsyncMock(return_value=True)
+    state.bind_leader_wakeup(wake)
+    round_id = await state.begin_round({"call-a": {"member-a", "member-b"}})
+    await state.settle_invitation("call-a", succeeded=True)
+
+    await state.capture_cap_notice(round_id, "member-a")
+    await state.capture_report(round_id, "member-a", "real report A")
+
+    assert state.capped_participants == set()
+
+    await state.capture_report(round_id, "member-b", "report B")
+
+    wake.assert_awaited_once()
+    prompt = wake.await_args.args[0]
+    assert "real report A" in prompt
+    assert "debate send cap" not in prompt

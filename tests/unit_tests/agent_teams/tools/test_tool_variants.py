@@ -17,8 +17,9 @@ import pytest_asyncio
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
 from openjiuwen.agent_teams.schema.status import MemberMode, TaskStatus
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamRole
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -98,6 +99,34 @@ def _tool_names(tools) -> set[str]:
 
 def _by_name(tools, name: str):
     return next(tool for tool in tools if tool.card.name == name)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_swarmflow_guidance_matches_registered_tool(db, lang, enabled):
+    resolver = (lambda name: None) if enabled else None
+    tools = create_team_tools(
+        role="leader",
+        agent_team=_backend(db, LEADER_NAME, True),
+        lang=lang,
+        swarmflow_model_resolver=resolver,
+    )
+    static_prompt = build_team_member_system_prompt(
+        role=TeamRole.LEADER,
+        member_name=LEADER_NAME,
+        language=lang,
+    )
+    tool_names = _tool_names(tools)
+    model_input = static_prompt + "\n" + "\n".join(tool.card.description for tool in tools)
+
+    # Every always-present static section stays capability-neutral. Swarmflow
+    # guidance reaches the model only through the tool description, which is
+    # registered under the same resolver gate as the executable tool itself.
+    assert "swarmflow" not in static_prompt.lower()
+    assert ("swarmflow" in tool_names) is enabled
+    assert ("swarmflow" in model_input.lower()) is enabled
 
 
 # ---------------------------------------------------------------------------
@@ -941,3 +970,38 @@ async def test_update_task_cancel_all_ignores_assignee_display_name(db):
     )
     assert result.success, result.error
     assert result.data["cancelled_count"] == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_send_message_p2p_mentioning_third_party_returns_hint(db):
+    """A P2P body @-mentioning a teammate warns the sender it is not a delivery."""
+    tools = create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True))
+    send = _by_name(tools, "send_message")
+
+    result = await send.invoke({"to": DEV_1, "content": "请 @dev-2 接棒继续讨论"})
+
+    assert result.success
+    hint = result.data["hint"]
+    assert DEV_2 in hint
+    assert DEV_1 in hint
+    assert "send_message" in hint
+
+    # map_result appends the hint below the success line.
+    text = send.map_result(result)
+    assert hint in text
+    assert text.startswith("Message Already sent from")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_send_message_mentioning_only_recipient_has_no_hint(db):
+    """@-mentioning the recipient itself is a real delivery — no warning."""
+    tools = create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True))
+    send = _by_name(tools, "send_message")
+
+    result = await send.invoke({"to": DEV_1, "content": "@dev-1 请继续"})
+
+    assert result.success
+    assert "hint" not in result.data
+    assert "\n" not in send.map_result(result)

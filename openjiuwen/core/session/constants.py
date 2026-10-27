@@ -21,6 +21,12 @@ LOOP_NUMBER_MAX_LIMIT_DEFAULT = 1000
 # checkpointer control
 FORCE_DEL_WORKFLOW_STATE_KEY = "_force_del_workflow_state"
 
+# 单组件直调执行标记(execute_single_component):该路径不经过 Pregel 图
+# 引擎,中断状态只存 io 侧、无图侧快照;InteractiveInput 恢复校验
+# (Checkpointer.validate_interactive_resume)据此跳过图侧快照检查,
+# io 侧存在性校验仍然生效。
+SINGLE_COMPONENT_EXECUTION_KEY = "_single_component_execution"
+
 # env
 WORKFLOW_EXECUTE_TIMEOUT_ENV_KEY = "WORKFLOW_EXECUTE_TIMEOUT"
 WORKFLOW_STREAM_FRAME_TIMEOUT_ENV_KEY = "WORKFLOW_STREAM_FRAME_TIMEOUT"

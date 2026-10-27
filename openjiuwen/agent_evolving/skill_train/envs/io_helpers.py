@@ -18,11 +18,35 @@ _CONVERSATION_NAME = "conversation.json"
 
 
 def format_skill_section(skill_content: str) -> str:
-    """Wrap non-empty skill text as a markdown section; blank input stays empty."""
+    """Wrap non-empty skill text as a markdown section; blank input stays empty.
+
+    Already-formatted multi-skill documents (starting with ``## Skill``) are
+    returned as-is so joint bundles are not double-wrapped.
+    """
+    from openjiuwen.agent_evolving.skill_train.skill_bundle import (
+        format_skill_bundle,
+        normalize_skills,
+    )
+
+    # Accept a legacy string or (via normalize) a mapping passed as skill_content.
+    if not isinstance(skill_content, str):
+        return format_skill_bundle(normalize_skills(skill_content))
     body = skill_content.strip()
     if not body:
         return ""
+    if body.startswith("## Skill"):
+        return body if body.endswith("\n") else f"{body}\n"
     return f"## Skill\n{body}\n\n"
+
+
+def format_skills_for_prompt(skill_content: str = "", *, skills: dict | None = None) -> str:
+    """Render one or many skills for chat system prompts."""
+    from openjiuwen.agent_evolving.skill_train.skill_bundle import (
+        format_skill_bundle,
+        normalize_skills,
+    )
+
+    return format_skill_bundle(normalize_skills(skill_content, skills=skills))
 
 
 def _write_text(path: Path, text: str) -> None:

@@ -409,6 +409,10 @@ class AgentCallbackContext:
     exception: Optional[Exception] = None
     retry_attempt: int = 0
     retry_history: List[RetryRecord] = field(default_factory=list)
+    context_usage_report: Optional[Any] = None
+    context_usage_request_id: Optional[str] = None
+    context_usage_sequence: Optional[int] = None
+    context_usage_attribution: Dict[str, Any] = field(default_factory=dict)
     invoke_start_time: float = 0.0
     _retry_request: Optional[RetryRequest] = field(
         default=None, init=False, repr=False

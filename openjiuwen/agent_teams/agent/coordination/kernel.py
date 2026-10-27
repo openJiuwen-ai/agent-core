@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from collections.abc import Awaitable, Callable
+from inspect import isawaitable
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -28,6 +31,10 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import EventDispatcher
     from openjiuwen.agent_teams.agent.scheduling import TeamScheduler
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+
+
+class PauseCleanupError(RuntimeError):
+    """A pause could not finish tearing down its members; runtime is unsafe to resume."""
 
 
 class CoordinationKernel:
@@ -59,6 +66,10 @@ class CoordinationKernel:
         # pause/stop calls become no-ops so the Runner-level finally can
         # safely re-trigger them after an external stop_coordination.
         self._lifecycle_state: str = "idle"
+        self._lifecycle_lock = asyncio.Lock()
+        self._pausing_members: set[str] = set()
+        self._stop_requested = False
+        self._completed_cleanup: set[str] = set()
 
     def setup(self, *, role: TeamRole) -> None:
         """Construct the event bus and dispatcher for the given role.
@@ -248,6 +259,8 @@ class CoordinationKernel:
         # assignments, judge open reviews).
         if self._scheduler is not None and team_row_present:
             await self._scheduler.activate()
+        self._stop_requested = False
+        self._completed_cleanup.clear()
         self._lifecycle_state = "running"
         # Warm / cold resume: a lifecycle pause left this member's round
         # suspended at a clean boundary. Now that the session, stream and
@@ -296,6 +309,14 @@ class CoordinationKernel:
         await self._scheduler.activate()
 
     async def pause(self) -> None:
+        async with self._lifecycle_lock:
+            if not self._stop_requested:
+                try:
+                    await self._pause()
+                finally:
+                    self._pausing_members.clear()
+
+    async def _pause(self) -> None:
         # Idempotent: ignore if not currently running. Pause is only a valid
         # transition from running; paused/stopped/idle short-circuit so the
         # Runner-level finally can safely call pause even after an external
@@ -303,7 +324,12 @@ class CoordinationKernel:
         if self._lifecycle_state != "running":
             return
         host = self._host
-        team_logger.info("[{}] coordination pausing (persistent)", host.member_name or "?")
+        member = host.member_name or "?"
+        # Timing only on leader: member pause is nested under leader
+        # shutdown_all_handles and would spam one near-zero line set each.
+        time_pause = host.role == TeamRole.LEADER
+        pause_t0 = time.perf_counter() if time_pause else 0.0
+        team_logger.info("[{}] coordination pausing (persistent)", member)
         debate_state = self._leader_debate_state()
         if debate_state is not None:
             debate_state.suspend_terminal_grace()
@@ -312,6 +338,8 @@ class CoordinationKernel:
         )
         if self._dispatcher is not None:
             await self._dispatcher.deactivate()
+        if self._stop_requested:
+            return
         if self._scheduler is not None:
             self._scheduler.deactivate()
         # Park the round only while the harness is alive. ``finalize_round``
@@ -342,8 +370,23 @@ class CoordinationKernel:
             # concurrent finalizer stops native here, finish cold-pause
             # cleanup instead of aborting the persistent-team finalizer.
             try:
+                t_park = time.perf_counter()
                 await self.pause_agent_round()
+                if time_pause:
+                    team_logger.info(
+                        "[{}] lifecycle_timing pause pause_agent_round duration_ms={:.0f}",
+                        member,
+                        (time.perf_counter() - t_park) * 1000,
+                    )
             except Exception as exc:
+                if self._stop_requested:
+                    return
+                if time_pause:
+                    team_logger.info(
+                        "[{}] lifecycle_timing pause pause_agent_round duration_ms={:.0f}",
+                        member,
+                        (time.perf_counter() - t_park) * 1000,
+                    )
                 if getattr(harness, "state", None) is not HarnessState.TERMINATED:
                     if self._dispatcher is not None:
                         try:
@@ -351,23 +394,29 @@ class CoordinationKernel:
                         except Exception:
                             team_logger.exception(
                                 "[{}] failed to restore dispatcher after park failure",
-                                host.member_name or "?",
+                                member,
                             )
                     if self._scheduler is not None and scheduler_was_active:
+                        if self._stop_requested:
+                            return
                         try:
                             await self._scheduler.activate()
                         except Exception:
                             team_logger.exception(
                                 "[{}] failed to restore scheduler after park failure",
-                                host.member_name or "?",
+                                member,
                             )
                     if debate_state is not None:
+                        if self._stop_requested:
+                            return
                         await debate_state.resume_terminal_grace()
+                    if self._stop_requested:
+                        return
                     raise
                 park_raced_termination = True
                 team_logger.warning(
                     "[{}] park round failed; continuing with cold pause: {}",
-                    host.member_name or "?",
+                    member,
                     exc,
                 )
             else:
@@ -375,17 +424,48 @@ class CoordinationKernel:
                 paused_query = str(getattr(harness, "paused_query", None) or "")
                 if paused_query.strip():
                     resume_query = paused_query
+        if self._stop_requested:
+            return
         host.persist_allocator_state()
         # Extract team memories while the session is still bound and the DB
         # is accessible. Moved from finalize_round so extraction runs once
         # per run cycle instead of on every streaming round.
         memory_manager = host.resources.memory_manager
         if memory_manager:
+            t_extract = time.perf_counter()
             await memory_manager.extract_after_round()
+            self._completed_cleanup.add("memory_extract")
+            if time_pause:
+                team_logger.info(
+                    "[{}] lifecycle_timing pause extract_after_round duration_ms={:.0f}",
+                    member,
+                    (time.perf_counter() - t_extract) * 1000,
+                )
+        if self._stop_requested:
+            return
         if host.role == TeamRole.LEADER:
+            self._pausing_members.update(host.spawn_manager.spawned_handles)
             await self._mark_live_teammates(MemberStatus.PAUSED)
+            if self._stop_requested:
+                return
             await host.spawn_manager.cancel_recovery_tasks()
-            await host.spawn_manager.shutdown_all_handles()
+            if self._stop_requested:
+                return
+            t_shutdown = time.perf_counter()
+            try:
+                await host.spawn_manager.shutdown_all_handles()
+                self._completed_cleanup.add("members")
+            except Exception as exc:
+                if self._stop_requested:
+                    return
+                raise PauseCleanupError("Members are still stopping during pause") from exc
+            if self._stop_requested:
+                return
+            team_logger.info(
+                "[{}] lifecycle_timing pause shutdown_all_handles duration_ms={:.0f}",
+                member,
+                (time.perf_counter() - t_shutdown) * 1000,
+            )
             self._persist_team_lifecycle("paused")
             # Make a later cold start (pause -> stop -> start) continue this
             # round rather than idle waiting for a new message.
@@ -416,11 +496,14 @@ class CoordinationKernel:
                     )
                 except Exception as e:
                     team_logger.error("Failed to publish TEAM_STANDBY: {}", e)
-        await self.unsubscribe_transport()
-        if self._event_bus:
-            await self._event_bus.stop()
-        self.close_stream()
-        host.session_manager.release_session()
+        if self._stop_requested:
+            return
+        try:
+            await self._release_resources(permanent=False)
+        except Exception as exc:
+            raise PauseCleanupError("Pause resource cleanup failed") from exc
+        if self._stop_requested:
+            return
         # team_member status update is owned by ``TeamRuntimeManager.finalize_member``
         # so persistence-layer status (lives across restarts) stays decoupled
         # from kernel runtime teardown (volatile). External stop_coordination
@@ -428,8 +511,16 @@ class CoordinationKernel:
         # would trip the kernel.start ``all-SHUTDOWN -> clean_team`` guard and
         # delete a team that should be recoverable.
         self._lifecycle_state = "paused"
+        if time_pause:
+            team_logger.info(
+                "[{}] lifecycle_timing pause pause_total duration_ms={:.0f}",
+                member,
+                (time.perf_counter() - pause_t0) * 1000,
+            )
 
-    async def _mark_live_teammates(self, target_status: MemberStatus) -> None:
+    async def _mark_live_teammates(
+        self, target_status: MemberStatus, *, spawned_members: set[str] | None = None,
+    ) -> None:
         """Persist ``target_status`` for every spawned teammate before tearing down handles.
 
         Members that were never started (UNSTARTED) or already gone (SHUTDOWN)
@@ -444,7 +535,7 @@ class CoordinationKernel:
         team_name = host.team_name
         if not team_backend or not team_name:
             return
-        spawned = set(host.spawn_manager.spawned_handles.keys())
+        spawned = set(host.spawn_manager.spawned_handles) if spawned_members is None else spawned_members
         if not spawned:
             return
         leader = host.member_name
@@ -581,8 +672,17 @@ class CoordinationKernel:
         # are no-ops.
         if self._lifecycle_state in ("idle", "stopped"):
             return
+        self._stop_requested = True
         host = self._host
-        team_logger.info("[{}] coordination stopping", host.member_name or "?")
+        # A pause already joining members can remove their handles while stop
+        # waits for the lifecycle lock. Preserve their stop reason as well.
+        members_to_stop = set(host.spawn_manager.spawned_handles) | self._pausing_members
+        member = host.member_name or "?"
+        # Timing only on leader: member stop is nested under leader
+        # shutdown_all_handles (see real cancel logs: ~6 lines x N members).
+        time_stop = host.role == TeamRole.LEADER
+        stop_t0 = time.perf_counter() if time_stop else 0.0
+        team_logger.info("[{}] coordination stopping", member)
         debate_state = self._leader_debate_state()
         if debate_state is not None:
             debate_state.suspend_terminal_grace()
@@ -590,54 +690,137 @@ class CoordinationKernel:
             await self._dispatcher.deactivate()
         if self._scheduler is not None:
             self._scheduler.deactivate()
-        await self.drain_agent_task()
-        host.persist_allocator_state()
+        # Signal leader and all members without waiting for earlier members.
+        # Leader cancellation must not wait for pause's lifecycle lock: its
+        # abort ACK releases a pause parked at an iteration boundary.
+        t_cancel_join = time.perf_counter()
+        cleanup_errors: list[Exception] = []
+        results = await asyncio.gather(
+            self.drain_agent_task(), self._stop_members(members_to_stop, cleanup_errors),
+            return_exceptions=True,
+        )
+        stop_errors = [result for result in results if isinstance(result, BaseException)]
+        # An in-flight leader spawn may finish after the first handle snapshot.
+        # Attempt their cancellation even if another drain failed.
+        if not isinstance(results[1], BaseException) and host.spawn_manager.spawned_handles:
+            try:
+                await self._stop_members(set(host.spawn_manager.spawned_handles), cleanup_errors)
+            except Exception as exc:
+                stop_errors.append(exc)
+        # A failed drain cannot prove quiescence. Retain the runtime and its
+        # dependencies for retry; auxiliary metadata errors do not prevent teardown.
+        if stop_errors:
+            raise stop_errors[0]
+        if time_stop:
+            team_logger.info(
+                "[{}] lifecycle_timing stop cancel_and_join duration_ms={:.0f}",
+                member,
+                (time.perf_counter() - t_cancel_join) * 1000,
+            )
+        try:
+            host.persist_allocator_state()
+        except Exception as exc:
+            team_logger.warning("[{}] allocator persistence failed during stop: {}", member, exc)
+            cleanup_errors.append(exc)
         if on_quiesced is not None:
             try:
                 await on_quiesced()
             except Exception as exc:
-                team_logger.warning("[{}] quiesced stop hook failed: {}", host.member_name or "?", exc)
+                team_logger.warning("[{}] quiesced stop hook failed: {}", member, exc)
         # Final memory extraction before permanent teardown. Only extract
         # when transitioning directly from running (session still bound).
         # When coming from paused, extraction already happened in pause()
         # and the session is already released — the DB query would fail.
         memory_manager = host.resources.memory_manager
-        if memory_manager and self._lifecycle_state == "running":
-            await memory_manager.extract_after_round()
-        if host.role == TeamRole.LEADER:
-            # Mirror of the pause path: mark every spawned teammate so the
-            # persistence layer captures why the runtime went away. STOPPED
-            # is a non-disbanding teardown — ``recover_team`` re-spawns from
-            # here. Done before ``shutdown_all_handles`` so the in-process
-            # task cancellations cannot race with the status write.
-            await self._mark_live_teammates(MemberStatus.STOPPED)
-        await self.unsubscribe_transport()
-        await host.spawn_manager.cancel_recovery_tasks()
-        await host.spawn_manager.shutdown_all_handles()
-        if memory_manager:
-            await memory_manager.close()
-        if self._event_bus is not None:
-            await self._event_bus.stop()
-        self.close_stream()
-        # Permanent teardown (not round-end): stop the native and drop its
-        # process-global sys_operation so a stopped/discarded member does not
-        # leak it. The round-end ``finalize_round`` path only calls
-        # ``harness.stop`` (kept for reuse on the same session); this stop is
-        # where the runtime goes away. Done before ``release_session`` because
-        # ``dispose`` tears the native down over its bound session, and it does
-        # not always follow a ``finalize_round`` (e.g. external stop_team).
-        if host.resources.harness is not None:
-            await host.resources.harness.dispose()
-        messager = host.infra.messager
-        if messager is not None:
-            await messager.stop()
-        host.session_manager.release_session()
+        needs_extraction = not self._completed_cleanup.intersection(("memory_extract", "session"))
+        if memory_manager and self._lifecycle_state == "running" and needs_extraction:
+            t_extract = time.perf_counter()
+            try:
+                await memory_manager.extract_after_round()
+                self._completed_cleanup.add("memory_extract")
+            except Exception as exc:
+                team_logger.warning("[{}] memory extraction failed during stop: {}", member, exc)
+                cleanup_errors.append(exc)
+            if time_stop:
+                team_logger.info(
+                    "[{}] lifecycle_timing stop extract_after_round duration_ms={:.0f}",
+                    member,
+                    (time.perf_counter() - t_extract) * 1000,
+                )
+        await self._release_resources(permanent=True)
         # See pause(): team_member status update for the agent's own
         # ``team_member`` handle is owned by
         # ``TeamRuntimeManager.finalize_member`` so stop_coordination on a
         # teammate kernel only tears down runtime and leaves persisted
         # status alone — that is what makes stop -> recover possible.
         self._lifecycle_state = "stopped"
+        if time_stop:
+            team_logger.info(
+                "[{}] lifecycle_timing stop stop_total duration_ms={:.0f}",
+                member,
+                (time.perf_counter() - stop_t0) * 1000,
+            )
+        # Auxiliary failures are reported after teardown. Only failed resource
+        # releases leave this kernel nonterminal for an explicit cleanup retry.
+        if cleanup_errors:
+            raise cleanup_errors[0]
+
+    async def _stop_members(self, members_to_stop: set[str], cleanup_errors: list[Exception]) -> None:
+        async with self._lifecycle_lock:
+            # A pause rollback may have been awaiting dispatcher activation
+            # when stop took ownership. Close admission again after it exits.
+            if self._dispatcher is not None:
+                await self._dispatcher.deactivate()
+            if self._scheduler is not None:
+                self._scheduler.deactivate()
+            await self._host.spawn_manager.cancel_recovery_tasks()
+            if self._host.role == TeamRole.LEADER:
+                try:
+                    await self._mark_live_teammates(
+                        MemberStatus.STOPPED,
+                        spawned_members=members_to_stop | set(self._host.spawn_manager.spawned_handles),
+                    )
+                except Exception as exc:
+                    team_logger.warning("[{}] member stop status persistence failed: {}", self._host.member_name, exc)
+                    cleanup_errors.append(exc)
+            if "members" not in self._completed_cleanup or self._host.spawn_manager.spawned_handles:
+                await self._host.spawn_manager.shutdown_all_handles()
+                self._completed_cleanup.add("members")
+
+    async def _release_resources(self, *, permanent: bool) -> None:
+        """Finish independent cleanup steps; retain failures for explicit retry."""
+        host = self._host
+        steps: list[tuple[str, Callable[[], Any]]] = [("transport", self.unsubscribe_transport)]
+        if permanent and host.resources.memory_manager is not None:
+            steps.append(("memory_close", host.resources.memory_manager.close))
+        if self._event_bus is not None:
+            steps.append(("event_bus", self._event_bus.stop))
+        steps.append(("stream", self.close_stream))
+        if permanent and host.resources.harness is not None:
+            steps.append(("harness_dispose", host.resources.harness.dispose))
+        if permanent and host.infra.messager is not None:
+            steps.append(("messager_stop", host.infra.messager.stop))
+        steps.append(("session", host.session_manager.release_session))
+        errors: list[Exception] = []
+        for name, release in steps:
+            if name in self._completed_cleanup:
+                continue
+            started = time.perf_counter()
+            try:
+                result = release()
+                if isawaitable(result):
+                    await result
+                self._completed_cleanup.add(name)
+            except Exception as exc:
+                team_logger.warning("[{}] {} cleanup failed: {}", host.member_name or "?", name, exc)
+                errors.append(exc)
+            if permanent and host.role == TeamRole.LEADER and name in ("harness_dispose", "messager_stop"):
+                team_logger.info(
+                    "[{}] lifecycle_timing stop {} duration_ms={:.0f}",
+                    host.member_name or "?", name, (time.perf_counter() - started) * 1000,
+                )
+        if errors:
+            raise errors[0]
 
     async def subscribe_transport(self, team_name: str) -> None:
         host = self._host

@@ -2,25 +2,24 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
 import time
-from typing import Union, List, Optional, AsyncIterator
+from typing import AsyncIterator, List, Optional, Union
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import llm_logger, LogEventType
+from openjiuwen.core.common.logging import LogEventType, llm_logger
 from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
 from openjiuwen.core.foundation.llm.model_clients import create_model_client
-from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, UserMessage
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.llm.schema.generation_response import (
+    AudioGenerationResponse,
+    ImageGenerationResponse,
+    VideoGenerationResponse,
+)
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, ModelClientConfig
-from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
-from openjiuwen.core.foundation.llm.schema.generation_response import (
-    ImageGenerationResponse,
-    AudioGenerationResponse,
-    VideoGenerationResponse
-)
-from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import InferenceAffinityModelClient
 from openjiuwen.core.runner.callback import trigger
 
 
@@ -185,11 +184,8 @@ class Model:
         first_chunk_timeout = self._resolve_stream_timeout("stream_first_chunk_timeout")
         idle_timeout = self._resolve_stream_timeout("stream_idle_timeout")
 
-        # The scope is opened here, in the frame that drives the stream, and
-        # not further down inside the callback handlers: every ``__anext__``
-        # below runs in its own ``asyncio.wait_for`` task, and such a task
-        # copies the context, so an id bound inside a chunk callback would be
-        # gone by the time the next chunk arrives. See ``call_scope``.
+        # Bind one call id for the entire stream, including callbacks and
+        # timeout/error reporting, and restore the caller's context on exit.
         with LlmCallScope(unified_completion=True):
             stream_iterable = self._client.stream(
                 messages=messages,
@@ -215,10 +211,10 @@ class Model:
                 next_timeout = first_chunk_timeout if chunk_count == 0 else idle_timeout
 
                 try:
-                    if next_timeout is None:
+                    # wait_for can lose an external cancellation when its
+                    # child completes concurrently on Python 3.11.
+                    async with asyncio.timeout(next_timeout):
                         chunk = await stream_iterator.__anext__()
-                    else:
-                        chunk = await asyncio.wait_for(stream_iterator.__anext__(), timeout=next_timeout)
                 except StopAsyncIteration:
                     break
                 except asyncio.TimeoutError as exc:
@@ -313,6 +309,9 @@ class Model:
 
     def supports_kv_cache_release(self) -> bool:
         """Whether underlying client supports KV cache release."""
+        supports_fn = getattr(self._client, "supports_kv_cache_release", None)
+        if callable(supports_fn):
+            return bool(supports_fn())
         return callable(getattr(self._client, "release", None))
 
     def supports_kv_cache_affinity(self) -> bool:
@@ -337,15 +336,13 @@ class Model:
           - session_id: use session.get_session_id() if provided
           - enable_cache_sharing: follow enable_kv_cache_release
         """
-        if not isinstance(self._client, InferenceAffinityModelClient):
+        build_fn = getattr(self._client, "build_kv_cache_invoke_kwargs", None)
+        if not callable(build_fn):
             return {}
-
-        extra: dict = {}
-        if session is not None and hasattr(session, "get_session_id"):
-            extra["session_id"] = session.get_session_id()
-        if enable_kv_cache_release:
-            extra["enable_cache_sharing"] = True
-        return extra
+        return build_fn(
+            session=session,
+            enable_kv_cache_release=enable_kv_cache_release,
+        )
 
     def build_kv_cache_affinity_invoke_kwargs(
             self,

@@ -11,6 +11,7 @@ import pathlib
 import re
 import shlex
 import sys
+import zipfile
 import asyncio
 import shutil
 import threading
@@ -85,8 +86,212 @@ def _office_write_unsupported_error(file_path: str, tool_name: str) -> str:
     )
 
 
+def _detect_embedded_images(file_path: str, media_prefix: str) -> list[str]:
+    """List embedded media filenames inside a zip-based Office document.
+
+    Returns an empty list when the file is not a valid zip or has no media.
+    Best-effort signal only — does not extract or process the images.
+    """
+    try:
+        with zipfile.ZipFile(file_path) as zf:
+            return [
+                n.rsplit("/", 1)[-1]
+                for n in zf.namelist()
+                if n.startswith(media_prefix) and not n.endswith("/")
+            ]
+    except (zipfile.BadZipFile, OSError):
+        return []
+
+
+def _embedded_images_hint(file_path: str, media_prefix: str, doc_label: str) -> str:
+    """Build a hint appended to read_file output when embedded images exist."""
+    media = _detect_embedded_images(file_path, media_prefix)
+    if not media:
+        return ""
+    names = ", ".join(media[:10])
+    if len(media) > 10:
+        names += f", … (+{len(media) - 10} more)"
+    return (
+        f"\n\n[该{doc_label}包含 {len(media)} 张嵌入图片（{media_prefix}{names}）。"
+        f"如需理解图片内容，请先用 Python 解包提取"
+        f"（{doc_label}是 zip 格式，图片在 {media_prefix} 目录），"
+        f"然后调用 visual_question_answering 工具识别。]"
+    )
+
+
+_PPTX_SLIDE_RELS_RE = re.compile(r"^ppt/slides/_rels/slide(\d+)\.xml\.rels$")
+_PPTX_LAYOUT_RELS_RE = re.compile(r"^ppt/slideLayouts/_rels/slideLayout(\d+)\.xml\.rels$")
+_PPTX_MASTER_RELS_RE = re.compile(r"^ppt/slideMasters/_rels/slideMaster(\d+)\.xml\.rels$")
+_PPTX_MEDIA_TARGET_RE = re.compile(r'Target="[^"]*media/([^"]+)"')
+_PPTX_LAYOUT_TARGET_RE = re.compile(r'Target="[^"]*slideLayouts/slideLayout(\d+)\.xml"')
+_PPTX_MASTER_TARGET_RE = re.compile(r'Target="[^"]*slideMasters/slideMaster(\d+)\.xml"')
+
+
+def _media_targets(content: str) -> list[str]:
+    """Media file names referenced by a .rels XML blob."""
+    return _PPTX_MEDIA_TARGET_RE.findall(content)
+
+
+def _pptx_rels_tables(
+    zf: zipfile.ZipFile,
+) -> tuple[dict[int, list[str]], dict[int, int], dict[int, list[str]], dict[int, int], dict[int, list[str]]]:
+    """Parse slide/layout/master .rels into (slide_own, slide_layout, layout_media, layout_master, master_media)."""
+    names = zf.namelist()
+
+    def _read(name: str) -> str:
+        return zf.read(name).decode("utf-8", errors="ignore")
+
+    slide_own: dict[int, list[str]] = {}
+    slide_layout: dict[int, int] = {}
+    layout_media: dict[int, list[str]] = {}
+    layout_master: dict[int, int] = {}
+    master_media: dict[int, list[str]] = {}
+    for name in names:
+        m = _PPTX_SLIDE_RELS_RE.match(name)
+        if m:
+            content = _read(name)
+            no = int(m.group(1))
+            slide_own[no] = _media_targets(content)
+            lm = _PPTX_LAYOUT_TARGET_RE.search(content)
+            if lm:
+                slide_layout[no] = int(lm.group(1))
+            continue
+        m = _PPTX_LAYOUT_RELS_RE.match(name)
+        if m:
+            content = _read(name)
+            no = int(m.group(1))
+            layout_media[no] = _media_targets(content)
+            mm = _PPTX_MASTER_TARGET_RE.search(content)
+            if mm:
+                layout_master[no] = int(mm.group(1))
+            continue
+        m = _PPTX_MASTER_RELS_RE.match(name)
+        if m:
+            master_media[int(m.group(1))] = _media_targets(_read(name))
+    return slide_own, slide_layout, layout_media, layout_master, master_media
+
+
+def _merge_unique(*sources: list[str]) -> list[str]:
+    """Concatenate lists keeping first occurrence order (dedup)."""
+    out: list[str] = []
+    for source in sources:
+        for f in source:
+            if f not in out:
+                out.append(f)
+    return out
+
+
+_PPTX_PRESENTATION_RELS_RE = re.compile(r"^ppt/_rels/presentation\.xml\.rels$")
+
+
+def _pptx_presentation_order(zf: zipfile.ZipFile) -> list[int]:
+    """Slide FILE numbers in presentation order (from presentation.xml sldIdLst).
+
+    slideN.xml 的 N 不代表播放顺序：用户在 PowerPoint 里调页后，文件名不变、
+    presentation.xml 的 sldIdLst 顺序才是真实页序。返回按播放顺序排列的
+    slide 文件编号列表；解析失败返回空列表（调用方退回文件编号序）。
+
+    用命名空间感知的 XML 解析（xml.etree.ElementTree）而非正则——.rels 的
+    Relationship 元素属性顺序不保证（Id/Target 可换序），正则按固定顺序匹配
+    会漏掉合法文件。
+    """
+    import xml.etree.ElementTree as ET
+
+    if "ppt/presentation.xml" not in zf.namelist():
+        return []
+
+    # rId -> slide 文件编号（属性顺序无关）
+    rels_target: dict[str, int] = {}
+    for name in zf.namelist():
+        if not _PPTX_PRESENTATION_RELS_RE.match(name):
+            continue
+        try:
+            root = ET.fromstring(zf.read(name))
+        except ET.ParseError:
+            return []
+        for rel in root:
+            rid = rel.get("Id", "")
+            target = rel.get("Target", "")
+            match = re.search(r"slide(\d+)\.xml$", target)
+            if rid and match:
+                rels_target[rid] = int(match.group(1))
+        break
+    if not rels_target:
+        return []
+
+    # sldIdLst 顺序 = 播放顺序
+    try:
+        pres_root = ET.fromstring(zf.read("ppt/presentation.xml"))
+    except ET.ParseError:
+        return []
+    order: list[int] = []
+    for sldid in pres_root.iter("{http://schemas.openxmlformats.org/presentationml/2006/main}sldId"):
+        rid = sldid.get("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id", "")
+        slide_no = rels_target.get(rid)
+        if slide_no is not None and slide_no not in order:
+            order.append(slide_no)
+    return order
+
+
+def _pptx_embedded_images_hint(file_path: str) -> str:
+    """Per-slide image mapping for pptx — resolves the slide→layout→master inheritance.
+
+    Images often live on layouts/masters (backgrounds, logos) rather than the slide
+    itself; without the inheritance chain the model cannot tell which page shows
+    which image. Falls back to the flat hint when rels parsing fails.
+    """
+    try:
+        with zipfile.ZipFile(file_path) as zf:
+            media = [n for n in zf.namelist() if n.startswith("ppt/media/") and not n.endswith("/")]
+            if not media:
+                return ""
+            slide_own, slide_layout, layout_media, layout_master, master_media = _pptx_rels_tables(zf)
+            presentation_order = _pptx_presentation_order(zf)
+    except (zipfile.BadZipFile, OSError):
+        return ""
+
+    if not slide_own:
+        return _embedded_images_hint(file_path, "ppt/media/", "PPT 演示文稿")
+
+    # 每页有效图片 = 自有 + 版式继承 + 母版继承（去重保序）
+    slide_effective: dict[int, list[str]] = {}
+    for no in sorted(slide_own):
+        layout_no = slide_layout.get(no, 0)
+        master_no = layout_master.get(layout_no, 0)
+        slide_effective[no] = _merge_unique(
+            slide_own.get(no, []),
+            layout_media.get(layout_no, []),
+            master_media.get(master_no, []),
+        )
+    # 页序以 presentation.xml 的 sldIdLst 为准（文件编号 ≠ 播放顺序）；
+    # 解析失败退回文件编号序。正文提取（python-pptx）同样按播放顺序编号，
+    # 两边对齐后模型看到的页码才一致。
+    order = presentation_order or sorted(slide_own)
+    ordered_slides = [no for no in order if no in slide_effective]
+    ordered_slides += [no for no in sorted(slide_effective) if no not in order]
+    mapped = {f for files in slide_effective.values() for f in files}
+    orphan = [m.rsplit("/", 1)[-1] for m in media if m.rsplit("/", 1)[-1] not in mapped]
+    groups = "；".join(
+        f"Slide {pos}（{'、'.join(slide_effective[no])}）"
+        for pos, no in enumerate(ordered_slides, 1)
+        if slide_effective[no]
+    )
+    if orphan:
+        groups += f"；未挂载到具体页（{'、'.join(orphan[:8])}{'…' if len(orphan) > 8 else ''}）"
+    return (
+        f"\n\n[该PPT 演示文稿包含 {len(media)} 张嵌入图片，分布：{groups}。"
+        f"如需理解图片内容，请先用 Python 解包提取"
+        f"（PPT 演示文稿是 zip 格式，图片在 ppt/media/ 目录），"
+        f"然后调用 visual_question_answering 工具识别。]"
+    )
+
+
 def _read_docx_text(file_path: str) -> str:
-    """Extract text and tables from a .docx file as Markdown."""
+    """Pure text/table extraction from a .docx file (no presentation hints).
+
+    嵌入图片提示在 ReadFileTool 展示层包装处追加（_read_docx 等）——底层保持
+    纯提取，写入/编辑路径复用本函数时绝不会把提示文案写回文件。
+    """
     from docx import Document
 
     doc = Document(file_path)
@@ -124,7 +329,7 @@ def _read_docx_text(file_path: str) -> str:
 
 
 def _read_xlsx_text(file_path: str) -> str:
-    """Extract data from an .xlsx file as Markdown tables."""
+    """Pure data extraction from an .xlsx file (no presentation hints)."""
     from openpyxl import load_workbook
 
     parts: list[str] = []
@@ -151,7 +356,7 @@ def _read_xlsx_text(file_path: str) -> str:
 
 
 def _read_pptx_text(file_path: str) -> str:
-    """Extract text from a .pptx file as Markdown."""
+    """Pure text extraction from a .pptx file (no presentation hints)."""
     from pptx import Presentation
 
     prs = Presentation(file_path)
@@ -171,8 +376,9 @@ def _read_pptx_text(file_path: str) -> str:
                     header = [cell.text.replace("|", "\\|").strip() for cell in table.rows[0].cells]
                     parts.append("| " + " | ".join(header) + " |")
                     parts.append("| " + " | ".join("---" for _ in header) + " |")
-                    for row in table.rows[1:]:
-                        cells = [cell.text.replace("|", "\\|").strip() for cell in row.cells]
+                    # python-pptx table.rows does not support slicing ([1:]) — use index range.
+                    for row_idx in range(1, len(table.rows)):
+                        cells = [cell.text.replace("|", "\\|").strip() for cell in table.rows[row_idx].cells]
                         parts.append("| " + " | ".join(cells) + " |")
         parts.append("")
 
@@ -180,7 +386,11 @@ def _read_pptx_text(file_path: str) -> str:
 
 
 def _read_office_plain_text(file_path: str) -> str:
-    """Extract Office text in the same shape used by read_file (without cat -n)."""
+    """Extract Office plain text for write/edit baselines (no presentation hints).
+
+    底层提取函数均为纯提取（无图片提示），写入/编辑路径直接复用即可——
+    提示只在 ReadFileTool 展示层追加，绝无写回污染。
+    """
     _, ext = os.path.splitext(file_path.lower())
     if ext == ".docx":
         return _read_docx_text(file_path)
@@ -284,6 +494,8 @@ async def _write_office_document_async(file_path: str, content: str) -> None:
 
 
 @dataclass
+
+
 class _FileReadState:
     """State recorded when a file is read; used by EditFileTool for pre-read validation."""
     mtime_ns: int
@@ -302,6 +514,8 @@ class _FileReadState:
 
 
 @dataclass(frozen=True)
+
+
 class _ReadStateRecord:
     """Inputs needed to update read coverage for a file."""
 
@@ -313,6 +527,8 @@ class _ReadStateRecord:
 
 
 @dataclass
+
+
 class _RawTextState:
     content: str
     line_count: int
@@ -954,15 +1170,20 @@ class ReadFileTool(Tool):
 
     @staticmethod
     def _read_docx(file_path: str) -> str:
-        return _read_docx_text(file_path)
+        # 展示层追加嵌入图片提示；底层 _read_docx_text 保持纯提取（写回路径复用）
+        return _read_docx_text(file_path) + _embedded_images_hint(
+            file_path, "word/media/", "Word 文档"
+        )
 
     @staticmethod
     def _read_xlsx(file_path: str) -> str:
-        return _read_xlsx_text(file_path)
+        return _read_xlsx_text(file_path) + _embedded_images_hint(
+            file_path, "xl/media/", "Excel 工作簿"
+        )
 
     @staticmethod
     def _read_pptx(file_path: str) -> str:
-        return _read_pptx_text(file_path)
+        return _read_pptx_text(file_path) + _pptx_embedded_images_hint(file_path)
 
     async def _read_notebook(self, file_path: str) -> str:
         res = await self.operation.fs().read_file(file_path)
@@ -1073,6 +1294,48 @@ class ReadFileTool(Tool):
                     budget.spend(page_tokens)
                     parts.append(page_block)
                     extracted_count += 1
+
+                # Report embedded images within the READ RANGE only: page.images
+                # parses the full page layout, so enumerating every page of a
+                # long document (or re-enumerating on each range read) is a
+                # measurable cost. The model only sees the extracted range, so
+                # the hint is scoped to it as well.
+                # Best-effort: a single corrupt page must not fail the whole text read.
+                from pdfplumber.utils.exceptions import PdfminerException
+
+                page_image_counts: list[tuple[int, int]] = []
+                for page_no in range(start, end + 1):
+                    try:
+                        count = len(pdf.pages[page_no - 1].images)
+                    except (
+                        PdfminerException,
+                        ValueError,
+                        TypeError,
+                        KeyError,
+                        IndexError,
+                        AttributeError,
+                    ) as exc:
+                        # 损坏页的图片枚举按页降级，不影响文本读取。pdfplumber 把底层
+                        # pdfminer 的解析错误包装为 PdfminerException（它并不继承
+                        # pdfminer.PDFException，两者无继承关系，不能混用）。
+                        logger.debug("Failed to enumerate images on PDF page %s: %s", page_no, exc)
+                        continue
+                    if count > 0:
+                        page_image_counts.append((page_no, count))
+                total_images = sum(count for _, count in page_image_counts)
+                if total_images > 0:
+                    distribution = "、".join(f"第 {page_no} 页 {count} 张" for page_no, count in page_image_counts)
+                    scope = (
+                        "该PDF"
+                        if start == 1 and end == len(pdf.pages)
+                        else f"本次读取范围（第 {start}-{end} 页）"
+                    )
+                    parts.append(
+                        f"\n\n[{scope}包含 {total_images} 张嵌入图片（{distribution}）。"
+                    f"如需理解图片内容，请先用 Python 提取"
+                    f"（pdfplumber 或 PyMuPDF 均可），"
+                    f"然后调用 visual_question_answering 工具识别。]"
+                    )
                 return "\n\n".join(parts).strip()
 
         return await asyncio.to_thread(_extract_sync)

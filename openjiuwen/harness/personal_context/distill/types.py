@@ -24,3 +24,8 @@ class CorpusMessage:
 class DistillCandidates:
     persona_md: str
     work_md: str
+    # Honest provenance from the analyzer: how many messages actually reached
+    # the prompt, and how large the materials user message was (None = a
+    # custom analyzer that does not report).
+    prompt_message_count: int | None = None
+    materials_chars: int | None = None

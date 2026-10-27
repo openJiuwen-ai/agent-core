@@ -9,7 +9,7 @@ import pytest
 from openjiuwen.harness.personal_context.distill.analyzer import LlmAnalyzer
 from openjiuwen.harness.personal_context.distill.runner import run_distill_job
 from openjiuwen.harness.personal_context.distill.sqlite_corpus import SqliteImCorpus
-from openjiuwen.harness.personal_context.distill.store import get_cursor_ms
+from openjiuwen.harness.personal_context.distill.store import get_cursor_ms, get_job
 from openjiuwen.harness.personal_context.im.models import ImLearningMessage, ImLearningTarget
 from openjiuwen.harness.personal_context.im.normalize import normalize_batch
 from openjiuwen.harness.personal_context.im.persist import persist_batch
@@ -82,13 +82,15 @@ def test_sqlite_im_corpus_missing_db_returns_empty(tmp_path: Path):
     home = tmp_path / "pc-home"
     home.mkdir()
     corpus = SqliteImCorpus(str(home))
-    messages, sampled = corpus.list_messages(
+    batch = corpus.list_messages(
         window_start_ms=0,
         window_end_ms=WINDOW_END_MS,
         max_messages=800,
     )
-    assert messages == []
-    assert sampled is False
+    assert batch.messages == []
+    assert batch.sampled is False
+    assert batch.eligible_count == 0
+    assert batch.window_max_sent_at_ms is None
     assert corpus.count_eligible_since(cursor_ms=0, until_ms=WINDOW_END_MS) == 0
     assert not (home / "im" / "im_context.db").exists()
 
@@ -117,12 +119,15 @@ def test_sqlite_im_corpus_filters_eligible_window_empty_and_null(tmp_path: Path)
         conn.close()
 
     corpus = SqliteImCorpus(str(home))
-    messages, sampled = corpus.list_messages(
+    batch = corpus.list_messages(
         window_start_ms=BASE_MS,
         window_end_ms=WINDOW_END_MS,
         max_messages=800,
     )
-    assert sampled is False
+    assert batch.sampled is False
+    assert batch.eligible_count == 1
+    assert batch.window_max_sent_at_ms == BASE_MS + 1_000
+    messages = batch.messages
     assert [message.content_text for message in messages] == ["这块前端页面我来改"]
     assert messages[0].id
     assert messages[0].channel_id == "welink"
@@ -145,12 +150,12 @@ def test_sqlite_im_corpus_half_open_excludes_end_bound(tmp_path: Path):
         eligible_map={"inside": 1, "bound": 1},
     )
     corpus = SqliteImCorpus(str(home))
-    messages, _ = corpus.list_messages(
+    batch = corpus.list_messages(
         window_start_ms=BASE_MS,
         window_end_ms=end,
         max_messages=800,
     )
-    assert [message.content_text for message in messages] == ["窗内"]
+    assert [message.content_text for message in batch.messages] == ["窗内"]
 
 
 def test_sqlite_im_corpus_count_eligible_since_matches_filter(tmp_path: Path):
@@ -184,14 +189,17 @@ def test_sqlite_im_corpus_downsamples_uniformly(tmp_path: Path):
         eligible_map={f"m{i}": 1 for i in range(1, 5)},
     )
     corpus = SqliteImCorpus(str(home))
-    messages, sampled = corpus.list_messages(
+    batch = corpus.list_messages(
         window_start_ms=BASE_MS,
         window_end_ms=WINDOW_END_MS,
         max_messages=2,
     )
-    assert sampled is True
-    assert len(messages) == 2
-    assert [message.content_text for message in messages] == ["消息1", "消息3"]
+    assert batch.sampled is True
+    # Pre-downsample facts: 4 eligible, window max is m4's sent_at.
+    assert batch.eligible_count == 4
+    assert batch.window_max_sent_at_ms == BASE_MS + 4_000
+    assert len(batch.messages) == 2
+    assert [message.content_text for message in batch.messages] == ["消息1", "消息3"]
 
 
 @pytest.mark.asyncio
@@ -229,3 +237,39 @@ async def test_run_distill_job_consumes_sqlite_im_corpus(tmp_path: Path):
     assert (root / "persona.md").is_file()
     assert (root / "work.md").is_file()
     assert get_cursor_ms(home_str) == BASE_MS + 3_000 + 1
+
+
+@pytest.mark.asyncio
+async def test_run_distill_job_sampled_sqlite_window_parks_cursor_at_last_eligible(
+    tmp_path: Path,
+):
+    """Option C on the production corpus: a sampled window still advances the
+    cursor to the pre-downsample window max (snapshot-portrait semantics)."""
+    home = tmp_path / "pc-home"
+    home.mkdir()
+    _seed_messages(
+        home,
+        [
+            _message(f"m{i}", sent_at=BASE_MS + i * 1_000, text=f"消息{i}")
+            for i in range(1, 5)
+        ],
+        eligible_map={f"m{i}": 1 for i in range(1, 5)},
+    )
+    home_str = str(home)
+    result = await run_distill_job(
+        home_str,
+        window_end_ms=WINDOW_END_MS,
+        force_full_window=True,
+        max_messages=2,
+        corpus=SqliteImCorpus(home_str),
+        analyzer=LlmAnalyzer(_FakeLlm()),
+    )
+    assert result.status == "success"
+    assert result.sampled is True
+    assert result.message_count == 2
+    assert get_cursor_ms(home_str) == BASE_MS + 4_000 + 1
+    job = get_job(home_str, result.job_id)
+    assert job["eligible_count"] == 4
+    assert job["message_count"] == 2
+    assert job["prompt_message_count"] == 2
+    assert job["covered_through_ms"] == BASE_MS + 4_000 + 1

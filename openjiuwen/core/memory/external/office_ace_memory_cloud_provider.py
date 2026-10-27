@@ -24,7 +24,16 @@ class OfficeAceMemoryCloudProvider(AgentArtsMemoryProvider):
     :class:`AgentArtsMemoryProvider`). ``sync_turn`` is a no-op: cloud-side
     conversation reporting is handled by relay-claw CloudMemoryService, so the
     provider must not duplicate it.
+
+    TLS verification: the cloud-side memory endpoint uses a self-signed
+    certificate, so the constructor defaults ``verify_ssl=False`` (overriding
+    the base class default of ``True``). Pass ``verify_ssl=True`` explicitly to
+    enforce certificate validation when targeting a real CA-signed endpoint.
     """
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("verify_ssl", False)
+        super().__init__(**kwargs)
 
     @property
     def name(self) -> str:

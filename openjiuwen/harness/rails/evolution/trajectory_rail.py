@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import threading
 from typing import Any
 
@@ -33,6 +34,7 @@ class TrajectoryRail(EvolutionRail):
     """
 
     priority = 10
+    _trajectory_free_hooks = frozenset({EvolutionTriggerPoint.AFTER_INVOKE})
 
     def __init__(
         self,
@@ -133,7 +135,7 @@ class TrajectoryRail(EvolutionRail):
             return
         # Store.save is intentionally synchronous and at-most-once.  A backend
         # failure is isolated from the callback/evolution flow.
-        self._save_execution_archive(archive, capture)
+        await asyncio.to_thread(self._save_execution_archive, archive, capture)
 
     def uninit(self, agent: Any) -> None:
         with self._execution_lock:

@@ -90,6 +90,9 @@ def begin_job(
         "window_end_ms": int(window_end_ms),
         "message_count": None,
         "sampled": False,
+        "eligible_count": None,
+        "prompt_message_count": None,
+        "covered_through_ms": None,
         "error": None,
         "created_at_ms": now,
         "finished_at_ms": None,
@@ -107,6 +110,8 @@ def finish_job(
     sampled: bool = False,
     error: str | None = None,
     covered_through_ms: int | None = None,
+    eligible_count: int | None = None,
+    prompt_message_count: int | None = None,
 ) -> None:
     if status not in {"success", "failed"}:
         raise ValueError(f"invalid distill job status: {status}")
@@ -118,6 +123,9 @@ def finish_job(
             "status": status,
             "message_count": message_count,
             "sampled": bool(sampled),
+            "eligible_count": eligible_count,
+            "prompt_message_count": prompt_message_count,
+            "covered_through_ms": covered_through_ms,
             "error": error,
             "finished_at_ms": now,
         }

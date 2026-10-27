@@ -8,8 +8,10 @@ from openjiuwen.harness.personal_context.distill.analyzer import (
     LlmAnalyzer,
     load_prompt,
     neutralize,
+    render_message_block,
 )
 from openjiuwen.harness.personal_context.distill.corpus import default_fixture_messages
+from openjiuwen.harness.personal_context.distill.types import CorpusMessage
 
 
 class _FakeLlm:
@@ -61,3 +63,37 @@ async def test_analyzer_runs_four_completes_corpus_only_in_user():
     assert "#1" in llm.calls[0][1]
     assert "前端页面" in llm.calls[0][1] or "review" in llm.calls[0][1].lower()
     assert "analyzer 的分析结果" in llm.calls[1][1]
+
+
+def _bulk_messages(count: int) -> list[CorpusMessage]:
+    return [
+        CorpusMessage(
+            id=f"b{i}",
+            channel_id="welink",
+            conversation_id="conv-bulk",
+            content_text=f"批量消息{i}",
+            sent_at_ms=1_700_000_000_000 + i,
+            is_self=True,
+        )
+        for i in range(1, count + 1)
+    ]
+
+
+def test_render_message_block_renders_all_and_returns_count():
+    """The old 200-message prompt cap is gone: every message renders."""
+    block, count = render_message_block(_bulk_messages(250))
+    assert count == 250
+    assert "#1 " in block
+    assert "#250" in block
+    assert block.count("\n") == 249
+
+
+@pytest.mark.asyncio
+async def test_analyzer_reports_prompt_message_count_and_materials_chars():
+    llm = _FakeLlm()
+    analyzer = LlmAnalyzer(llm)
+    result = await analyzer.analyze(_bulk_messages(5))
+    assert result.prompt_message_count == 5
+    assert isinstance(result.materials_chars, int)
+    assert result.materials_chars > 0
+    assert "#5" in llm.calls[0][1]

@@ -3688,6 +3688,88 @@ async def test_run_evolution_all_skills_disabled(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_run_evolution_drops_disabled_skill_after_feedback_attribution(tmp_path):
+    """Feedback can name a disabled builtin; post-attribution must still skip it."""
+    rail = _make_rail(
+        tmp_path,
+        signal_trigger=True,
+        auto_save=True,
+        disabled_skills=["pptx-craft"],
+    )
+    messages = [{"role": "user", "content": "pptx-craft layout is wrong"}]
+    trajectory = _trajectory_with_messages(messages)
+
+    rail._evolution_store.list_skill_names = Mock(return_value=["custom-skill", "pptx-craft"])
+    rail._is_regular_skill = Mock(return_value=True)
+    rail._collect_messages = AsyncMock(return_value=messages)
+    rail._evolve_skill_with_sharing = AsyncMock(
+        return_value=_no_records_result("custom-skill")
+    )
+
+    feedback = [_make_signal("pptx-craft")]
+    detector = Mock()
+    detector.bind_llm = Mock(return_value=detector)
+    detector.collect_skills_from_messages = Mock(return_value={"pptx-craft"})
+    detector.detect_trajectory_signals = Mock(return_value=[])
+    detector.detect_user_intent = AsyncMock(return_value=feedback)
+
+    with patch(
+        "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
+        return_value=detector,
+    ):
+        await rail.run_evolution(_prepared_input(trajectory, messages=messages))
+
+    rail._evolve_skill_with_sharing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_run_evolution_drops_capabilities_builtin_without_disabled_list(tmp_path):
+    """Capabilities source:builtin must skip evolution without host deny-list."""
+    caps = tmp_path / "capabilities.json"
+    caps.write_text(
+        json.dumps(
+            {
+                "capabilities": [
+                    {
+                        "type": "skill",
+                        "id": "pptx-craft",
+                        "source": "builtin",
+                        "selfEvolution": "auto",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    rail = _make_rail(tmp_path, signal_trigger=True, auto_save=True, disabled_skills=None)
+    messages = [{"role": "user", "content": "pptx-craft layout is wrong"}]
+    trajectory = _trajectory_with_messages(messages)
+
+    rail._evolution_store.list_skill_names = Mock(return_value=["pptx-craft"])
+    rail._evolution_store.base_dirs = [tmp_path]
+    rail._is_regular_skill = Mock(return_value=True)
+    rail._collect_messages = AsyncMock(return_value=messages)
+    rail._evolve_skill_with_sharing = AsyncMock(
+        return_value=_no_records_result("pptx-craft")
+    )
+
+    feedback = [_make_signal("pptx-craft")]
+    detector = Mock()
+    detector.bind_llm = Mock(return_value=detector)
+    detector.collect_skills_from_messages = Mock(return_value={"pptx-craft"})
+    detector.detect_trajectory_signals = Mock(return_value=[])
+    detector.detect_user_intent = AsyncMock(return_value=feedback)
+
+    with patch(
+        "openjiuwen.harness.rails.evolution.skill_evolution_rail.SignalDetector",
+        return_value=detector,
+    ):
+        await rail.run_evolution(_prepared_input(trajectory, messages=messages))
+
+    rail._evolve_skill_with_sharing.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_external_signal_entry_uses_standard_optimizer_and_approval_path(tmp_path):
     rail = _make_rail(tmp_path, signal_trigger=False, auto_save=False)
     signal = _make_signal("skill-a")

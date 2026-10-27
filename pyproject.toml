@@ -38,13 +38,16 @@ dependencies = [
     # AI/LLM
     "openai>=1.108.0",
     "transformers>=4.52.4",
-    "tiktoken>=0.12.0",
+    "tiktoken>=0.14.0",
     "dashscope>=1.25.6",
     # Vector database (2.6.10 changed interface)
     "pymilvus>=2.6.2,<2.6.10",
     # MCP server
     "fastmcp>=2.14.2,<3.0",
     "mcp>=1.26.0",
+    # Shell command parsing
+    "tree-sitter>=0.25.0,<0.26.0",
+    "tree-sitter-bash>=0.25.0,<0.26.0",
     # Document processing
     "beautifulsoup4>=4.12.0",
     "trafilatura>=1.6.0",
@@ -144,6 +147,8 @@ test = [
     "aiosqlite>=0.22.1",
     # harness -> rails -> agent_evolving imports opentelemetry.sdk at module import time
     "opentelemetry-sdk>=1.25.0",
+    # extensions/observability/otlp_codec.py imports the otlp trace encoder at module import time
+    "opentelemetry-exporter-otlp-proto-common>=1.25.0",
 ]
 
 # Linting & formatting

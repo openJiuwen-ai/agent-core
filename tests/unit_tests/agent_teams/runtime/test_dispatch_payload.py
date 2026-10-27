@@ -135,6 +135,7 @@ async def test_human_agent_message_drives_avatar_when_no_target():
     )
 
     assert result.ok
+    agent.auto_start_member.assert_awaited_once_with("human_alice")
     agent._avatar.interact.assert_awaited_once_with("please summarise design.md")
     agent._avatar.deliver_input.assert_not_called()
     agent.team_backend.message_manager.send_message.assert_not_called()
@@ -220,6 +221,7 @@ async def test_interact_str_dollar_prefix_drives_human_agent():
     result = await manager.interact("$alice please summarise", team_name="alpha", session_id="s1")
 
     assert result.ok
+    agent.auto_start_member.assert_awaited_once_with("alice")
     agent._avatar.interact.assert_awaited_once_with("please summarise")
     agent._avatar.deliver_input.assert_not_called()
     agent.deliver_input.assert_not_called()

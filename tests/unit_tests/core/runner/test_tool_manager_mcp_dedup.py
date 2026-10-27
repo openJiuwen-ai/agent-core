@@ -16,6 +16,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
 from openjiuwen.core.runner.resources_manager.tool_manager import ToolMgr
 
@@ -132,3 +134,104 @@ async def test_add_tool_server_registers_distinct_server_ids_independently() -> 
     assert [c.name for c in cards_b] == ["y"]
     assert fake_client_a.connect.await_count == 1
     assert fake_client_b.connect.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_add_tool_server_surfaces_connect_false_reason_as_connection_error() -> None:
+    """connect() returning False must raise CONNECTION_ERROR carrying the real
+    underlying exception in reason, and must NOT be re-wrapped into ADD_ERROR
+    by the BaseException handler below."""
+    mgr = ToolMgr()
+    cfg = _make_server_config(server_id="false-srv")
+
+    fake_client = MagicMock()
+    fake_client.connect = AsyncMock(return_value=False)
+    fake_client._last_connect_error = TimeoutError("handshake timed out")
+    fake_client.disconnect = AsyncMock(return_value=True)
+
+    with patch.object(ToolMgr, "_create_client", staticmethod(lambda c: fake_client)):
+        with pytest.raises(BaseError) as exc_info:
+            await mgr.add_tool_server(cfg)
+
+    err = exc_info.value
+    # Status preserved as CONNECTION_ERROR, not re-wrapped to ADD_ERROR.
+    assert err.status == StatusCode.RESOURCE_MCP_SERVER_CONNECTION_ERROR
+    # Real exception surfaced in reason, not a bare or nested-wrapped message.
+    assert "TimeoutError" in err.message
+    assert "handshake timed out" in err.message
+
+
+@pytest.mark.asyncio
+async def test_add_tool_server_propagates_cancelled_error() -> None:
+    """A caller cancellation must remain cancellation rather than becoming a
+    resource error, otherwise shutdown and request-timeout cancellation stalls."""
+    mgr = ToolMgr()
+    cfg = _make_server_config(server_id="cancel-srv")
+
+    fake_client = MagicMock()
+    fake_client.connect = AsyncMock(side_effect=asyncio.CancelledError("teardown"))
+    fake_client.disconnect = AsyncMock(return_value=True)
+
+    with patch.object(ToolMgr, "_create_client", staticmethod(lambda c: fake_client)):
+        with pytest.raises(asyncio.CancelledError):
+            await mgr.add_tool_server(cfg)
+
+    # connect() never returned True, so disconnect must not be attempted.
+    assert fake_client.disconnect.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_add_tool_server_propagates_cancelled_error_group() -> None:
+    """Cancellation nested in a BaseExceptionGroup must not be converted into
+    an ordinary MCP registration error."""
+    mgr = ToolMgr()
+    cfg = _make_server_config(server_id="cancel-group-srv")
+
+    cancelled_group = BaseExceptionGroup(
+        "cancelled group",
+        [asyncio.CancelledError("shutdown"), RuntimeError("transport failed")],
+    )
+    fake_client = MagicMock()
+    fake_client.connect = AsyncMock(side_effect=cancelled_group)
+    fake_client.disconnect = AsyncMock(return_value=True)
+
+    with patch.object(ToolMgr, "_create_client", staticmethod(lambda c: fake_client)):
+        with pytest.raises(BaseExceptionGroup) as exc_info:
+            await mgr.add_tool_server(cfg)
+
+    propagated_cancel, _ = exc_info.value.split(asyncio.CancelledError)
+    assert propagated_cancel is not None
+    assert fake_client.disconnect.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_add_tool_server_coerces_exception_group_into_base_error() -> None:
+    """A ``BaseExceptionGroup`` mixing a regular ``Exception`` with a
+    ``GeneratorExit`` (the anyio task-group teardown shape) must be coerced into
+    a ``BaseError`` carrying a readable reason instead of escaping as a bare
+    cancel/silent teardown."""
+    mgr = ToolMgr()
+    cfg = _make_server_config(server_id="egroup-srv")
+
+    inner = RuntimeError("boom from list_tools")
+    # Mix a non-Exception BaseException (GeneratorExit) so the group stays a
+    # real BaseExceptionGroup rather than collapsing to ExceptionGroup.
+    fake_client = MagicMock()
+    fake_client.connect = AsyncMock(return_value=True)
+    fake_client.list_tools = AsyncMock(
+        side_effect=BaseExceptionGroup("group", [inner, GeneratorExit()])
+    )
+    fake_client.disconnect = AsyncMock(return_value=True)
+
+    with patch.object(ToolMgr, "_create_client", staticmethod(lambda c: fake_client)):
+        with pytest.raises(BaseError) as exc_info:
+            await mgr.add_tool_server(cfg)
+
+    err = exc_info.value
+    assert err.status == StatusCode.RESOURCE_MCP_SERVER_ADD_ERROR
+    # The ordinary exception is extracted even when teardown also contributes
+    # a non-Exception base exception, preserving the actionable root cause.
+    assert err.cause is inner
+    assert "boom from list_tools" in str(err.cause)
+    # connect() returned True, so disconnect cleanup must run on the failure path.
+    assert fake_client.disconnect.await_count == 1

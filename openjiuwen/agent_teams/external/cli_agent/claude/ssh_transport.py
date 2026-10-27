@@ -5,9 +5,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shlex
+from collections import deque
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from typing import Any
 
 from openjiuwen.agent_teams.external.cli_agent.claude.options import load_claude_sdk
@@ -18,6 +21,9 @@ from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 
 _REMOTE_CONNECTION_LOST = 255
+_STDERR_TAIL_LINES = 40
+_STDERR_TAIL_MAX_CHARS = 8000
+_STDERR_LINE_MAX_CHARS = 2000
 
 
 def _load_asyncssh() -> Any:
@@ -40,9 +46,16 @@ def _quote_argv(argv: list[str]) -> str:
     return " ".join(shlex.quote(part) for part in argv)
 
 
-def _build_remote_command(argv: list[str], *, env: dict[str, str], cwd: str | None) -> str:
+def _build_remote_command(
+    argv: list[str],
+    *,
+    env: dict[str, str],
+    cwd: str | None,
+    use_exec: bool,
+) -> str:
     """Build a remote shell command with cwd and team descriptor fallback."""
     command = _quote_argv(argv)
+    launch = f"exec {command}" if use_exec else command
     prefixes: list[str] = []
     join_descriptor = env.get(TEAM_JOIN_ENV)
     if join_descriptor:
@@ -50,8 +63,8 @@ def _build_remote_command(argv: list[str], *, env: dict[str, str], cwd: str | No
     if cwd:
         prefixes.append(f"cd {shlex.quote(cwd)}")
     if prefixes:
-        return "; ".join(prefixes) + f"; exec {command}"
-    return f"exec {command}"
+        return "; ".join(prefixes) + f"; {launch}"
+    return launch
 
 
 def build_claude_sdk_ssh_transport(
@@ -79,6 +92,8 @@ def build_claude_sdk_ssh_transport(
             self._config = transport_config
             self._asyncssh = _load_asyncssh()
             self._conn: Any | None = None
+            self._stderr_tail: deque[str] = deque(maxlen=_STDERR_TAIL_LINES)
+            self._stderr_task: Any | None = None
 
         async def connect(self) -> None:
             """Connect to SSH and start the SDK-built Claude command remotely."""
@@ -92,10 +107,16 @@ def build_claude_sdk_ssh_transport(
                 **self._options.env,
                 "CLAUDE_AGENT_SDK_VERSION": _sdk_version(),
             }
-            command = _build_remote_command(cmd, env=process_env, cwd=self._cwd)
+            command = _build_remote_command(
+                cmd,
+                env=process_env,
+                cwd=self._cwd,
+                use_exec=self._config.use_exec,
+            )
             conn = await self._ensure_connection()
             try:
                 self._process = await conn.create_process(command, env=process_env, encoding=None)
+                self._stderr_task = _spawn_stderr_reader(self._process, self._options, self._stderr_tail)
                 self._ready = True
             except Exception as exc:
                 raise_error(
@@ -147,7 +168,7 @@ def build_claude_sdk_ssh_transport(
                 raise sdk.ProcessError(
                     f"Remote Claude command failed with exit code {returncode}",
                     exit_code=returncode,
-                    stderr="Check remote stderr output for details",
+                    stderr=_render_stderr_tail(self._stderr_tail) or "Check remote stderr output for details",
                 )
 
         async def close(self) -> None:
@@ -155,6 +176,8 @@ def build_claude_sdk_ssh_transport(
             self._ready = False
             process = self._process
             self._process = None
+            stderr_task = self._stderr_task
+            self._stderr_task = None
             if process is not None:
                 try:
                     process.stdin.write_eof()
@@ -166,6 +189,10 @@ def build_claude_sdk_ssh_transport(
                     except Exception:
                         process.kill()
                 await self._wait_process(process)
+            if stderr_task is not None:
+                stderr_task.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await stderr_task
             if self._conn is not None:
                 conn = self._conn
                 self._conn = None
@@ -232,6 +259,40 @@ def build_claude_sdk_ssh_transport(
         transport_options=options,
         transport_config=config,
     )
+
+
+def _spawn_stderr_reader(process: Any, options: Any, stderr_tail: deque[str]) -> Any | None:
+    """Start a background task that forwards remote stderr into SDK callbacks."""
+    stderr = getattr(process, "stderr", None)
+    if stderr is None:
+        return None
+
+    async def _read_stderr() -> None:
+        while True:
+            raw = await stderr.readline()
+            if not raw:
+                return
+            line = raw.decode("utf-8", errors="replace").rstrip()
+            if not line:
+                continue
+            if len(line) > _STDERR_LINE_MAX_CHARS:
+                line = line[:_STDERR_LINE_MAX_CHARS] + "...[truncated]"
+            stderr_tail.append(line)
+            while len(_render_stderr_tail(stderr_tail)) > _STDERR_TAIL_MAX_CHARS and stderr_tail:
+                stderr_tail.popleft()
+            callback = getattr(options, "stderr", None)
+            if callable(callback):
+                try:
+                    callback(line)
+                except Exception:
+                    team_logger.exception("Remote Claude stderr callback failed")
+
+    return asyncio.create_task(_read_stderr())
+
+
+def _render_stderr_tail(stderr_tail: deque[str]) -> str:
+    """Render captured remote stderr lines."""
+    return "\n".join(stderr_tail)
 
 
 def _sdk_version() -> str:

@@ -7,7 +7,7 @@ Create team tasks (Leader only).
 ## Task Fields
 
 - **title**: Concise description of the goal (imperative form, e.g. "Implement user auth")
-- **content**: Goals, acceptance criteria, and constraints — not specific operations
+- **content**: Goals, acceptance criteria, and constraints — not specific operations. **When dispatching a document-parsing task for a file you already read via read_file, you must copy the embedded-image info (count and file-name list) from the read_file result into the task content** so the member knows the document contains images; never summarize text only
 - **assignee_display_name** (optional): Existing non-leader member's **display name** (exact roster match) who should carry this task. Omit it to put the task in the shared claim pool; when set, that member starts it with `claim_task`. **Do not pass member_name / agent_key**
 - **task_id** (required): Custom ID for dependency reference
 - **depends_on** (optional): **"who I depend on"** — prerequisite task IDs that must complete before this task can start; may reference in-batch or existing tasks. Veirfy that the task_id is correct before filling in this field.

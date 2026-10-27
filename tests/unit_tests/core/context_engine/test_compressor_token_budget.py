@@ -50,6 +50,14 @@ def test_shared_message_counter_falls_back_to_character_estimate(caplog):
     assert "[TestProcessor] token_counter failed" in caplog.text
 
 
+def test_glm53_builtin_context_window_is_1m():
+    from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+
+    assert ContextUtils.resolve_context_max(model_name="glm-5.3") == 1048576
+    assert ContextUtils.resolve_context_max(model_name="GLM-5.3") == 1048576
+    assert ContextUtils.resolve_context_max(model_name="glm-5.2") == 202752
+
+
 def test_shared_context_max_resolver_uses_config_model_mapping_and_default():
     configured = MagicMock()
     configured._context_window_tokens = 123

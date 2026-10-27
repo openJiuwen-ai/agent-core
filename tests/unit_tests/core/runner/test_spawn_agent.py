@@ -325,6 +325,24 @@ class TestChildInitiatedGracefulExit:
 class TestForceKillOnTimeout:
     """Test force kill on timeout scenario."""
 
+    @pytest.mark.parametrize("error", [None, RuntimeError("health failed"), asyncio.CancelledError()])
+    async def test_force_kill_handles_health_check_failure_without_swallowing_cancel(self, error):
+        from unittest.mock import AsyncMock, Mock
+        from openjiuwen.core.runner.spawn.process_manager import SpawnedProcessHandle
+
+        process = Mock(returncode=None)
+        process.wait = AsyncMock()
+        handle = SpawnedProcessHandle(process_id="test", process=process)
+        handle.stop_health_check = AsyncMock(side_effect=error)
+        if isinstance(error, asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError):
+                await handle.force_kill()
+            process.kill.assert_not_called()
+        else:
+            await handle.force_kill()
+            process.kill.assert_called_once()
+            process.wait.assert_awaited_once()
+
     async def test_force_kill_after_timeout(self, runner):
         spawn_config = SpawnConfig(
             shutdown_timeout=0.5,

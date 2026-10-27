@@ -213,14 +213,18 @@ class TeamDatabase:
         """Drop dynamic tables for current session."""
         if self.engine is None:
             return
-        await _drop_cur_session_tables(self.engine)
+        async with self._sessions.serialize_writes():
+            self._sessions.ready_session_ids.discard(get_session_id())
+            await _drop_cur_session_tables(self.engine)
 
     async def cleanup_all_runtime_state(self) -> tuple[list[str], list[str]]:
         """Delete all dynamic team tables and clear static team tables."""
         await self._ensure_initialized()
         if self.engine is None:
             return [], []
-        return await _cleanup_all_runtime_state(self.engine)
+        async with self._sessions.serialize_writes():
+            self._sessions.ready_session_ids.clear()
+            return await _cleanup_all_runtime_state(self.engine)
 
     async def drop_session_tables_by_id(self, session_id: str) -> list[str]:
         """Drop dynamic tables for a specific session without active context.
@@ -237,7 +241,9 @@ class TeamDatabase:
         await self._ensure_initialized()
         if self.engine is None:
             return []
-        return await _drop_session_tables_by_id(self.engine, session_id)
+        async with self._sessions.serialize_writes():
+            self._sessions.ready_session_ids.discard(session_id)
+            return await _drop_session_tables_by_id(self.engine, session_id)
 
     async def clear_session_task_board_by_id(self, session_id: str) -> int:
         """Clear the unfinished-task rows for a session without active context.
@@ -279,7 +285,7 @@ class TeamDatabase:
         await self.team.delete_team(team_name)
 
         try:
-            await _drop_cur_session_tables(self.engine)
+            await self.drop_cur_session_tables()
         except Exception as e:
             team_logger.error(
                 "Failed to drop current session tables for team %s: %s",

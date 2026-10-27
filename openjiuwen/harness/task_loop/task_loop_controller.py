@@ -94,7 +94,13 @@ class TaskLoopController(Controller):
         if resume_continuation:
             event.metadata["_resume_continuation"] = True
 
-        await self.publish_event_async(session, event)
+        # Register synchronously so the caller cannot start its completion
+        # timeout before a scheduler task exists. Keep input submission on the
+        # event queue so ordering, error wrapping, and event instrumentation are
+        # preserved; completion/failure use the same queue as before.
+        await self._event_queue.publish_event(
+            self._card.id, session, event
+        )
 
     async def wait_round_completion(
         self,

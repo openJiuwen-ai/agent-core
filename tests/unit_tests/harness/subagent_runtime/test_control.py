@@ -268,7 +268,7 @@ async def test_lru_evicts_idle_instance_when_full() -> None:
 
 @pytest.mark.asyncio
 async def test_lru_does_not_evict_running_instance() -> None:
-    config = SubagentRuntimeConfig(max_subagents=1, enable_lru_eviction=True)
+    config = SubagentRuntimeConfig(max_subagents=1, enable_lru_eviction=True, spawn_slot_wait_timeout_s=0)
     parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.2))
     async with _patched_control(parent=parent, config=config) as control:
         running = await control.spawn("explore", "slow")
@@ -278,6 +278,186 @@ async def test_lru_does_not_evict_running_instance() -> None:
             await control.spawn("explore", "blocked")
 
         assert control._manager.find(running.subagent_id) is not None
+        assert control._registry.count == 1
+
+
+@pytest.mark.asyncio
+async def test_spawn_waits_for_running_slot_and_keeps_evicted_result() -> None:
+    config = SubagentRuntimeConfig(max_subagents=1, enable_lru_eviction=True)
+    parent = ControlParentAgent(mock_agent=MockAgent(output="first done", delay_s=0.2))
+    async with _patched_control(parent=parent, config=config) as control:
+        first = await control.spawn("explore", "slow")
+        await asyncio.sleep(0.02)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        second = await control.spawn("explore", "queued")
+        assert loop.time() - started >= 0.1
+        assert control._manager.find(first.subagent_id) is None
+        result = await control.wait([first.subagent_id], timeout_ms=500)
+        assert result.statuses[first.subagent_id].kind is SubagentStatusKind.COMPLETED
+        assert result.results[first.subagent_id] == "first done"
+        assert control._registry.find_metadata(second.subagent_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_spawn_slot_wait_times_out_without_leaking_quota() -> None:
+    config = SubagentRuntimeConfig(max_subagents=1, enable_lru_eviction=True, spawn_slot_wait_timeout_s=0.15)
+    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=1.0))
+    async with _patched_control(parent=parent, config=config) as control:
+        await control.spawn("explore", "slow")
+        await asyncio.sleep(0.02)
+        with pytest.raises(ValidationError):
+            await control.spawn("explore", "blocked")
+        assert control._registry.count == 1
+        assert control._slot_waiters == []
+
+
+@pytest.mark.asyncio
+async def test_parallel_spawns_beyond_cap_all_succeed() -> None:
+    config = SubagentRuntimeConfig(max_subagents=2, max_concurrent_running=2, enable_lru_eviction=True)
+    parent = ControlParentAgent(mock_agent=MockAgent(output="ok", delay_s=0.1))
+    async with _patched_control(parent=parent, config=config) as control:
+        spawned = await asyncio.gather(*(control.spawn("explore", f"task {i}") for i in range(5)))
+        ids = [item.subagent_id for item in spawned]
+        assert len(set(ids)) == 5
+        assert control._registry.count <= 2
+        result = await control.wait(ids, timeout_ms=2000)
+        assert all(status.kind is SubagentStatusKind.COMPLETED for status in result.statuses.values())
+        assert set(result.results) == set(ids)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_slot_wait_leaves_no_reservation() -> None:
+    config = SubagentRuntimeConfig(max_subagents=1, enable_lru_eviction=True)
+    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=1.0))
+    async with _patched_control(parent=parent, config=config) as control:
+        await control.spawn("explore", "slow")
+        await asyncio.sleep(0.02)
+        pending = asyncio.create_task(control.spawn("explore", "blocked"))
+        await asyncio.sleep(0.05)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert control._registry.count == 1
+        assert control._slot_waiters == []
+
+
+@pytest.mark.asyncio
+async def test_concurrent_sticky_spawns_waiting_for_slot_create_one_instance() -> None:
+    config = SubagentRuntimeConfig(max_subagents=1, enable_lru_eviction=True)
+    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.1))
+    async with _patched_control(parent=parent, config=config) as control:
+        await control.spawn("explore", "slow")
+        await asyncio.sleep(0.02)
+        results = await asyncio.gather(
+            control.spawn("verification_agent", "a"),
+            control.spawn("verification_agent", "b"),
+            return_exceptions=True,
+        )
+        errors = [item for item in results if isinstance(item, Exception)]
+        assert len(errors) == 1
+        assert "subagent already live" in str(errors[0])
+        assert control._registry.count == 1
+        assert len(control._manager.list_ids()) == 1
+        assert control._claimed_sids == set()
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_fails_spawn_waiting_for_slot() -> None:
+    config = SubagentRuntimeConfig(max_subagents=1, enable_lru_eviction=True)
+    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=1.0))
+    async with _patched_control(parent=parent, config=config) as control:
+        await control.spawn("explore", "slow")
+        await asyncio.sleep(0.02)
+        pending = asyncio.create_task(control.spawn("explore", "blocked"))
+        await asyncio.sleep(0.05)
+        await control.cancel_all(reason="parent_ended")
+        with pytest.raises(Exception, match="subagent spawn cancelled"):
+            await pending
+        assert control._registry.count == 0
+        assert control._manager.list_ids() == []
+
+
+@pytest.mark.asyncio
+async def test_spawn_cancelled_after_slot_reserved_releases_reservation() -> None:
+    async with _patched_control() as control:
+        entered = asyncio.Event()
+        async def hanging_create(**kwargs):
+            entered.set()
+            await asyncio.sleep(10)
+        with patch.object(control._manager, "create", side_effect=hanging_create):
+            pending = asyncio.create_task(control.spawn("explore", "x"))
+            await entered.wait()
+            assert control._registry.count == 1
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        assert control._registry.count == 0
+        assert control._claimed_sids == set()
+
+
+@pytest.mark.asyncio
+async def test_resume_cancelled_after_slot_reserved_releases_reservation() -> None:
+    parent = ControlParentAgent(mock_agent=MockAgent())
+    async with _patched_control(parent=parent) as control:
+        spawned = await control.spawn("explore", "hello")
+        await _wait_for_turn(parent.mock_agent)
+        await control.wait([spawned.subagent_id], timeout_ms=500)
+        await control.close(spawned.subagent_id)
+        assert control._registry.count == 0
+        entered = asyncio.Event()
+        async def hanging_restore(**kwargs):
+            entered.set()
+            await asyncio.sleep(10)
+        with patch(
+            "openjiuwen.harness.subagent_runtime.control.CheckpointerFactory.get_checkpointer",
+        ) as get_checkpointer, patch.object(control._manager, "restore", side_effect=hanging_restore):
+            checkpointer = AsyncMock()
+            checkpointer.session_exists = AsyncMock(return_value=True)
+            get_checkpointer.return_value = checkpointer
+            pending = asyncio.create_task(control.resume(spawned.subagent_id))
+            await entered.wait()
+            assert control._registry.count == 1
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+        assert control._registry.count == 0
+        assert control._claimed_sids == set()
+        assert spawned.subagent_id in control._closed_records
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_during_create_discards_new_instance() -> None:
+    async with _patched_control() as control:
+        original_create = control._manager.create
+        entered = asyncio.Event()
+        gate = asyncio.Event()
+        async def gated_create(**kwargs):
+            entered.set()
+            await gate.wait()
+            return await original_create(**kwargs)
+        with patch.object(control._manager, "create", side_effect=gated_create):
+            pending = asyncio.create_task(control.spawn("explore", "x"))
+            await entered.wait()
+            await control.cancel_all(reason="parent_ended")
+            gate.set()
+            with pytest.raises(Exception, match="subagent spawn cancelled"):
+                await pending
+        assert control._manager.list_ids() == []
+        assert control._registry.count == 0
+
+
+@pytest.mark.asyncio
+async def test_waiting_spawn_takes_slot_when_turn_is_released() -> None:
+    config = SubagentRuntimeConfig(max_subagents=1, enable_lru_eviction=True)
+    parent = ControlParentAgent(mock_agent=MockAgent(delay_s=0.1))
+    async with _patched_control(parent=parent, config=config) as control:
+        await control.spawn("explore", "slow")
+        await asyncio.sleep(0.02)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await control.spawn("explore", "queued")
+        assert loop.time() - started < 0.5
 
 
 @pytest.mark.asyncio

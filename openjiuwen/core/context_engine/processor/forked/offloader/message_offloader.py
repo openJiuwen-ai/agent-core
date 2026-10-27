@@ -491,6 +491,12 @@ class MessageSummaryOffloader(ContextProcessor):
         return resolve_context_max(context)
 
     def _count_messages_tokens(self, context: ModelContext, messages: list[BaseMessage]) -> int:
+        """Count tokens with the context's counter (cached and cost-bounded).
+
+        The counter refuses to encode degenerate oversized pieces and caches
+        exact counts, so decision-path counting stays both accurate and cheap
+        (see ``context_engine.token.encode_guard``).
+        """
         return count_messages_tokens(messages, context.token_counter(), self.processor_type())
 
     def _head_tail_preview(self, content: str, *, description: str) -> str:

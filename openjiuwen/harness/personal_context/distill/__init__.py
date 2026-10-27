@@ -8,6 +8,7 @@ from openjiuwen.harness.personal_context.distill.analyzer import (
 )
 from openjiuwen.harness.personal_context.distill.corpus import (
     CorpusPort,
+    DistillCorpusBatch,
     FixtureCorpus,
     default_fixture_messages,
 )
@@ -47,6 +48,7 @@ __all__ = [
     "CorpusMessage",
     "CorpusPort",
     "DistillCandidates",
+    "DistillCorpusBatch",
     "DistillDueDecision",
     "DistillRunResult",
     "DistillRunnerPort",

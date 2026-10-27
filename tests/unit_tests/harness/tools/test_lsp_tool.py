@@ -2,6 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """单元测试：LSP Tool — 8种 LSP 操作"""
 
+import subprocess
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -40,6 +42,7 @@ from openjiuwen.harness.tools.lsp_tool._formatter import (
 # ============================================================================
 # 1. build_lsp_tool() 测试
 # ============================================================================
+
 
 class TestBuildLspTool:
     """测试 LSP Tool 定义构建"""
@@ -89,6 +92,7 @@ class TestBuildLspTool:
 # 2. LspOperation 枚举测试
 # ============================================================================
 
+
 class TestLspOperationEnum:
     """测试 LspOperation 枚举值"""
 
@@ -107,6 +111,7 @@ class TestLspOperationEnum:
 # ============================================================================
 # 3. Pydantic Schema 输入验证测试
 # ============================================================================
+
 
 class TestGoToDefinitionInput:
     """测试 goToDefinition 输入验证"""
@@ -280,6 +285,7 @@ class TestLspToolInputDiscriminatedUnion:
 # 4. 操作方法映射测试
 # ============================================================================
 
+
 class TestOperationToMethod:
     """测试操作枚举到 LSP 方法名的映射"""
 
@@ -299,10 +305,7 @@ class TestOperationToMethod:
         assert _operation_to_method(LspOperation.GO_TO_IMPLEMENTATION) == "textDocument/implementation"
 
     def test_prepare_call_hierarchy(self):
-        assert (
-            _operation_to_method(LspOperation.PREPARE_CALL_HIERARCHY)
-            == "textDocument/prepareCallHierarchy"
-        )
+        assert _operation_to_method(LspOperation.PREPARE_CALL_HIERARCHY) == "textDocument/prepareCallHierarchy"
 
     def test_incoming_calls(self):
         assert _operation_to_method(LspOperation.INCOMING_CALLS) == "callHierarchy/incomingCalls"
@@ -314,6 +317,7 @@ class TestOperationToMethod:
 # ============================================================================
 # 5. gitignore 过滤判断测试
 # ============================================================================
+
 
 class TestNeedsGitignoreFilter:
     """测试哪些操作需要 gitignore 过滤"""
@@ -336,6 +340,7 @@ class TestNeedsGitignoreFilter:
 # ============================================================================
 # 6. 格式化器测试
 # ============================================================================
+
 
 class TestSymbolKindMap:
     """测试 SymbolKind 映射表"""
@@ -389,10 +394,12 @@ class TestFormatGoToDefinition:
 
     def test_with_location(self):
         """有 Location 时应返回 'Defined in path:line:char'"""
-        result = format_go_to_definition({
-            "uri": "file:///path/to/file.py",
-            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
-        })
+        result = format_go_to_definition(
+            {
+                "uri": "file:///path/to/file.py",
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+            }
+        )
         assert "Defined in" in result
         assert "/path/to/file.py" in result
 
@@ -406,11 +413,22 @@ class TestFormatFindReferences:
 
     def test_with_locations(self):
         """有多个位置时应按文件分组"""
-        result = format_find_references([
-            {"uri": "file:///a.py", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}}},
-            {"uri": "file:///a.py", "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}}},
-            {"uri": "file:///b.py", "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 5}}},
-        ])
+        result = format_find_references(
+            [
+                {
+                    "uri": "file:///a.py",
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+                },
+                {
+                    "uri": "file:///a.py",
+                    "range": {"start": {"line": 1, "character": 0}, "end": {"line": 1, "character": 5}},
+                },
+                {
+                    "uri": "file:///b.py",
+                    "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 5}},
+                },
+            ]
+        )
         assert "/a.py" in result
         assert "/b.py" in result
         assert "1:1" in result  # 行号 0 转 1
@@ -426,32 +444,36 @@ class TestFormatDocumentSymbol:
 
     def test_flat_symbols(self):
         """平面符号列表应正确格式化"""
-        result = format_document_symbol([
-            {
-                "name": "MyClass",
-                "kind": 5,  # Class
-                "location": {
-                    "uri": "file:///path/to/file.py",
-                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 5, "character": 0}},
-                },
-                "containerName": "",
-            }
-        ])
+        result = format_document_symbol(
+            [
+                {
+                    "name": "MyClass",
+                    "kind": 5,  # Class
+                    "location": {
+                        "uri": "file:///path/to/file.py",
+                        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 5, "character": 0}},
+                    },
+                    "containerName": "",
+                }
+            ]
+        )
         assert "Class" in result
         assert "MyClass" in result
 
     def test_symbol_tree(self):
         """符号树应正确格式化（含缩进）"""
-        result = format_document_symbol([
-            {
-                "name": "MyClass",
-                "kind": 5,
-                "detail": "public",
-                "children": [
-                    {"name": "my_method", "kind": 6, "detail": "", "children": []}  # Method
-                ],
-            }
-        ])
+        result = format_document_symbol(
+            [
+                {
+                    "name": "MyClass",
+                    "kind": 5,
+                    "detail": "public",
+                    "children": [
+                        {"name": "my_method", "kind": 6, "detail": "", "children": []}  # Method
+                    ],
+                }
+            ]
+        )
         assert "Class" in result
         assert "my_method" in result
         assert "Method" in result
@@ -466,17 +488,19 @@ class TestFormatWorkspaceSymbol:
 
     def test_with_symbols(self):
         """符号结果应按文件分组"""
-        result = format_workspace_symbol([
-            {
-                "name": "my_func",
-                "kind": 12,  # Function
-                "location": {
-                    "uri": "file:///path/to/file.py",
-                    "range": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 10}},
-                },
-                "containerName": "MyClass",
-            }
-        ])
+        result = format_workspace_symbol(
+            [
+                {
+                    "name": "my_func",
+                    "kind": 12,  # Function
+                    "location": {
+                        "uri": "file:///path/to/file.py",
+                        "range": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 10}},
+                    },
+                    "containerName": "MyClass",
+                }
+            ]
+        )
         assert "Function" in result
         assert "my_func" in result
         assert "MyClass" in result
@@ -491,14 +515,16 @@ class TestFormatPrepareCallHierarchy:
 
     def test_single_item(self):
         """单个结果应显示为 'path:line: name'"""
-        result = format_prepare_call_hierarchy([
-            {
-                "name": "my_func",
-                "uri": "file:///path/to/file.py",
-                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 10}},
-                "originSelectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 10}},
-            }
-        ])
+        result = format_prepare_call_hierarchy(
+            [
+                {
+                    "name": "my_func",
+                    "uri": "file:///path/to/file.py",
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 10}},
+                    "originSelectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 10}},
+                }
+            ]
+        )
         assert "my_func" in result
         assert "1:" in result
 
@@ -533,6 +559,7 @@ class TestFormatResultRouter:
 # 7. 路径解析测试
 # ============================================================================
 
+
 class TestResolvePath:
     """测试路径解析"""
 
@@ -553,6 +580,7 @@ class TestResolvePath:
 # ============================================================================
 # 8. 集成测试（模拟 LSP 服务器）
 # ============================================================================
+
 
 @pytest.mark.asyncio
 class TestLspToolIntegration:
@@ -580,16 +608,25 @@ class TestLspToolIntegration:
         mock_manager.get_or_start_server = AsyncMock(return_value=mock_instance)
         mock_manager._extension_map = {".py": ["pyright"]}
 
-        with patch(
-            "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
-            return_value=mock_manager,
-        ), patch("openjiuwen.harness.tools.lsp_tool._tool.filter_git_ignored_locations", new_callable=AsyncMock, side_effect=lambda locs, cwd: locs):
-            result = await call_lsp_tool({
-                "operation": "goToDefinition",
-                "file_path": str(test_file),
-                "line": 3,
-                "character": 1,
-            })
+        with (
+            patch(
+                "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
+                return_value=mock_manager,
+            ),
+            patch(
+                "openjiuwen.harness.tools.lsp_tool._tool.filter_git_ignored_locations",
+                new_callable=AsyncMock,
+                side_effect=lambda locs, cwd: locs,
+            ),
+        ):
+            result = await call_lsp_tool(
+                {
+                    "operation": "goToDefinition",
+                    "file_path": str(test_file),
+                    "line": 3,
+                    "character": 1,
+                }
+            )
 
         assert result["success"] is True
         assert result["data"]["operation"] == "goToDefinition"
@@ -603,9 +640,18 @@ class TestLspToolIntegration:
         test_file.write_text("x = 1\ny = x + 1\nz = x * 2\n")
 
         mock_result = [
-            {"uri": f"file://{test_file}", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}},
-            {"uri": f"file://{test_file}", "range": {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 5}}},
-            {"uri": f"file://{test_file}", "range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 5}}},
+            {
+                "uri": f"file://{test_file}",
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+            },
+            {
+                "uri": f"file://{test_file}",
+                "range": {"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 5}},
+            },
+            {
+                "uri": f"file://{test_file}",
+                "range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 5}},
+            },
         ]
 
         mock_instance = MagicMock()
@@ -616,16 +662,25 @@ class TestLspToolIntegration:
         mock_manager.get_or_start_server = AsyncMock(return_value=mock_instance)
         mock_manager._extension_map = {".py": ["pyright"]}
 
-        with patch(
-            "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
-            return_value=mock_manager,
-        ), patch("openjiuwen.harness.tools.lsp_tool._tool.filter_git_ignored_locations", new_callable=AsyncMock, return_value=mock_result):
-            result = await call_lsp_tool({
-                "operation": "findReferences",
-                "file_path": str(test_file),
-                "line": 1,
-                "character": 5,
-            })
+        with (
+            patch(
+                "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
+                return_value=mock_manager,
+            ),
+            patch(
+                "openjiuwen.harness.tools.lsp_tool._tool.filter_git_ignored_locations",
+                new_callable=AsyncMock,
+                return_value=mock_result,
+            ),
+        ):
+            result = await call_lsp_tool(
+                {
+                    "operation": "findReferences",
+                    "file_path": str(test_file),
+                    "line": 1,
+                    "character": 5,
+                }
+            )
 
         assert result["success"] is True
         assert result["data"]["operation"] == "findReferences"
@@ -641,12 +696,18 @@ class TestLspToolIntegration:
             {
                 "name": "Foo",
                 "kind": 5,  # Class
-                "location": {"uri": f"file://{test_file}", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}}},
+                "location": {
+                    "uri": f"file://{test_file}",
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}},
+                },
             },
             {
                 "name": "bar",
                 "kind": 12,  # Function
-                "location": {"uri": f"file://{test_file}", "range": {"start": {"line": 2, "character": 0}, "end": {"line": 3, "character": 0}}},
+                "location": {
+                    "uri": f"file://{test_file}",
+                    "range": {"start": {"line": 2, "character": 0}, "end": {"line": 3, "character": 0}},
+                },
             },
         ]
 
@@ -662,10 +723,12 @@ class TestLspToolIntegration:
             "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
             return_value=mock_manager,
         ):
-            result = await call_lsp_tool({
-                "operation": "documentSymbol",
-                "file_path": str(test_file),
-            })
+            result = await call_lsp_tool(
+                {
+                    "operation": "documentSymbol",
+                    "file_path": str(test_file),
+                }
+            )
 
         assert result["success"] is True
         assert result["data"]["operation"] == "documentSymbol"
@@ -683,7 +746,10 @@ class TestLspToolIntegration:
             {
                 "name": "search",
                 "kind": 12,  # Function
-                "location": {"uri": f"file://{test_file}", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}}},
+                "location": {
+                    "uri": f"file://{test_file}",
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}},
+                },
             }
         ]
 
@@ -695,14 +761,23 @@ class TestLspToolIntegration:
         mock_manager.get_or_start_server = AsyncMock(return_value=mock_instance)
         mock_manager._extension_map = {".py": ["pyright"]}
 
-        with patch(
-            "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
-            return_value=mock_manager,
-        ), patch("openjiuwen.harness.tools.lsp_tool._tool.filter_git_ignored_locations", new_callable=AsyncMock, return_value=mock_result):
-            result = await call_lsp_tool({
-                "operation": "workspaceSymbol",
-                "query": "search",
-            })
+        with (
+            patch(
+                "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
+                return_value=mock_manager,
+            ),
+            patch(
+                "openjiuwen.harness.tools.lsp_tool._tool.filter_git_ignored_locations",
+                new_callable=AsyncMock,
+                return_value=mock_result,
+            ),
+        ):
+            result = await call_lsp_tool(
+                {
+                    "operation": "workspaceSymbol",
+                    "query": "search",
+                }
+            )
 
         assert result["success"] is True
         assert result["data"]["operation"] == "workspaceSymbol"
@@ -735,12 +810,14 @@ class TestLspToolIntegration:
             "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
             return_value=mock_manager,
         ):
-            result = await call_lsp_tool({
-                "operation": "prepareCallHierarchy",
-                "file_path": str(test_file),
-                "line": 1,
-                "character": 5,
-            })
+            result = await call_lsp_tool(
+                {
+                    "operation": "prepareCallHierarchy",
+                    "file_path": str(test_file),
+                    "line": 1,
+                    "character": 5,
+                }
+            )
 
         assert result["success"] is True
         assert result["data"]["operation"] == "prepareCallHierarchy"
@@ -754,7 +831,10 @@ class TestLspToolIntegration:
 
         mock_result = [
             {
-                "from": {"uri": f"file://{test_file}", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}}},
+                "from": {
+                    "uri": f"file://{test_file}",
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}},
+                },
                 "fromRanges": [{"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 11}}],
             }
         ]
@@ -771,12 +851,14 @@ class TestLspToolIntegration:
             "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
             return_value=mock_manager,
         ):
-            result = await call_lsp_tool({
-                "operation": "incomingCalls",
-                "file_path": str(test_file),
-                "line": 3,
-                "character": 5,
-            })
+            result = await call_lsp_tool(
+                {
+                    "operation": "incomingCalls",
+                    "file_path": str(test_file),
+                    "line": 3,
+                    "character": 5,
+                }
+            )
 
         assert result["success"] is True
         assert result["data"]["operation"] == "incomingCalls"
@@ -790,7 +872,10 @@ class TestLspToolIntegration:
 
         mock_result = [
             {
-                "from": {"uri": f"file://{test_file}", "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}}},
+                "from": {
+                    "uri": f"file://{test_file}",
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 1, "character": 0}},
+                },
                 "fromRanges": [{"start": {"line": 1, "character": 4}, "end": {"line": 1, "character": 10}}],
             }
         ]
@@ -807,12 +892,14 @@ class TestLspToolIntegration:
             "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
             return_value=mock_manager,
         ):
-            result = await call_lsp_tool({
-                "operation": "outgoingCalls",
-                "file_path": str(test_file),
-                "line": 1,
-                "character": 5,
-            })
+            result = await call_lsp_tool(
+                {
+                    "operation": "outgoingCalls",
+                    "file_path": str(test_file),
+                    "line": 1,
+                    "character": 5,
+                }
+            )
 
         assert result["success"] is True
         assert result["data"]["operation"] == "outgoingCalls"
@@ -830,12 +917,14 @@ class TestLspToolIntegration:
         from openjiuwen.harness.tools.lsp_tool._tool import call_lsp_tool
 
         with patch("openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance", return_value=None):
-            result = await call_lsp_tool({
-                "operation": "goToDefinition",
-                "file_path": "/path/to/file.py",
-                "line": 1,
-                "character": 1,
-            })
+            result = await call_lsp_tool(
+                {
+                    "operation": "goToDefinition",
+                    "file_path": "/path/to/file.py",
+                    "line": 1,
+                    "character": 1,
+                }
+            )
         assert result["success"] is False
         assert "not initialized" in result["error"]
 
@@ -851,12 +940,14 @@ class TestLspToolIntegration:
             "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
             return_value=mock_manager,
         ):
-            result = await call_lsp_tool({
-                "operation": "goToDefinition",
-                "file_path": "/path/to/unknown.xyz",
-                "line": 1,
-                "character": 1,
-            })
+            result = await call_lsp_tool(
+                {
+                    "operation": "goToDefinition",
+                    "file_path": "/path/to/unknown.xyz",
+                    "line": 1,
+                    "character": 1,
+                }
+            )
 
         assert result["success"] is False
         assert "No LSP server" in result["error"]
@@ -880,20 +971,158 @@ class TestLspToolIntegration:
             "openjiuwen.harness.tools.lsp_tool._tool.LSPServerManager.get_instance",
             return_value=mock_manager,
         ):
-            result = await call_lsp_tool({
-                "operation": "goToDefinition",
-                "file_path": str(test_file),
-                "line": 1,
-                "character": 1,
-            })
+            result = await call_lsp_tool(
+                {
+                    "operation": "goToDefinition",
+                    "file_path": str(test_file),
+                    "line": 1,
+                    "character": 1,
+                }
+            )
 
         assert result["success"] is False
         assert "error" in result
 
 
 # ============================================================================
-# 9. nearest_root tests (@registry.py)
+# 9. server registry and pyright command resolution
 # ============================================================================
+
+
+class TestServerConfigBuild:
+    @pytest.mark.asyncio
+    async def test_sync_spawn_runs_in_thread(self):
+        from openjiuwen.harness.lsp import InitializeOptions
+        from openjiuwen.harness.lsp.core.types import SpawnHandle
+        from openjiuwen.harness.lsp.servers.registry import BUILTIN_SERVERS, build_configs_async
+        from openjiuwen.harness.lsp.servers.types import ServerDefinition
+
+        cwd = "/workspace"
+        handle = SpawnHandle(command="pyright", args=["--stdio"])
+        sync_spawn = MagicMock(return_value=handle)
+        server = ServerDefinition(
+            id="sync-server",
+            extensions=[".sync"],
+            language_id="sync",
+            spawn=sync_spawn,
+        )
+
+        with (
+            patch.dict(BUILTIN_SERVERS, {server.id: server}, clear=True),
+            patch(
+                "openjiuwen.harness.lsp.servers.registry.asyncio.to_thread",
+                new_callable=AsyncMock,
+                return_value=handle,
+            ) as mock_to_thread,
+        ):
+            configs = await build_configs_async(InitializeOptions(), cwd)
+
+        mock_to_thread.assert_awaited_once_with(sync_spawn, cwd)
+        sync_spawn.assert_not_called()
+        assert configs[0].server_id == server.id
+        assert configs[0].command == handle.command
+        assert configs[0].args == handle.args
+
+    @pytest.mark.asyncio
+    async def test_async_spawn_keeps_async_semantics(self):
+        from openjiuwen.harness.lsp import InitializeOptions
+        from openjiuwen.harness.lsp.core.types import SpawnHandle
+        from openjiuwen.harness.lsp.servers.registry import BUILTIN_SERVERS, build_configs_async
+        from openjiuwen.harness.lsp.servers.types import ServerDefinition
+
+        cwd = "/workspace"
+        handle = SpawnHandle(command="async-server", args=["--stdio"])
+
+        async def async_spawn(root):
+            assert root == cwd
+            return handle
+
+        server = ServerDefinition(
+            id="async-server",
+            extensions=[".async"],
+            language_id="async",
+            spawn=async_spawn,
+        )
+
+        with (
+            patch.dict(BUILTIN_SERVERS, {server.id: server}, clear=True),
+            patch(
+                "openjiuwen.harness.lsp.servers.registry.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as mock_to_thread,
+        ):
+            configs = await build_configs_async(InitializeOptions(), cwd)
+
+        mock_to_thread.assert_not_awaited()
+        assert configs[0].server_id == server.id
+        assert configs[0].command == handle.command
+
+    @pytest.mark.asyncio
+    async def test_sync_spawn_returning_coroutine_is_awaited(self):
+        from openjiuwen.harness.lsp import InitializeOptions
+        from openjiuwen.harness.lsp.core.types import SpawnHandle
+        from openjiuwen.harness.lsp.servers.registry import BUILTIN_SERVERS, build_configs_async
+        from openjiuwen.harness.lsp.servers.types import ServerDefinition
+
+        cwd = "/workspace"
+        handle = SpawnHandle(command="wrapped-server", args=["--stdio"])
+
+        async def spawn_result():
+            return handle
+
+        sync_spawn = MagicMock(return_value=spawn_result())
+        server = ServerDefinition(
+            id="wrapped-server",
+            extensions=[".wrapped"],
+            language_id="wrapped",
+            spawn=sync_spawn,
+        )
+
+        with (
+            patch.dict(BUILTIN_SERVERS, {server.id: server}, clear=True),
+            patch(
+                "openjiuwen.harness.lsp.servers.registry.asyncio.to_thread",
+                new_callable=AsyncMock,
+                return_value=sync_spawn.return_value,
+            ) as mock_to_thread,
+        ):
+            configs = await build_configs_async(InitializeOptions(), cwd)
+
+        mock_to_thread.assert_awaited_once_with(sync_spawn, cwd)
+        assert configs[0].command == handle.command
+
+
+class TestPyrightCommandResolution:
+    def test_npm_probe_has_timeout_and_uses_fallback(self):
+        from openjiuwen.harness.lsp.servers.servers.python import _resolve_pyright_command
+
+        def which(name):
+            return {
+                "npm": "/usr/bin/npm",
+                "pyright-langserver": "/usr/local/bin/pyright-langserver",
+            }.get(name)
+
+        with (
+            patch("openjiuwen.harness.lsp.servers.servers.python.shutil.which", side_effect=which),
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="npm", timeout=8)) as mock_run,
+        ):
+            result = _resolve_pyright_command()
+
+        mock_run.assert_called_once_with(
+            ["/usr/bin/npm", "list", "-g", "--depth=0", "pyright"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+        )
+        assert result == ("/usr/local/bin/pyright-langserver", ["--stdio"])
+
+
+# ============================================================================
+# 10. nearest_root tests (@registry.py)
+# ============================================================================
+
 
 @pytest.mark.asyncio
 class TestNearestRoot:

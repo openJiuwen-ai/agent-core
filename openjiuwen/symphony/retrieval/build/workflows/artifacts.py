@@ -43,10 +43,11 @@ class BuildConfig:
     tree_postprocess_enabled: bool = True
     tree_postprocess_max_passes: int = 1
     tree_postprocess_min_skills: int = 6
-    tree_equiv_grouping_enabled: bool = True
+    tree_equiv_grouping_enabled: bool = False
     tree_equiv_max_groups_per_parent: int = 6
     tree_equiv_allow_singleton_groups: bool = True
     tree_equiv_min_lexical_similarity: float = 0.12
+    tree_equiv_max_candidate_pairs: int = 240
     tree_deterministic_prompts: bool = True
     tree_discovery_seed: int = 42
     tree_prompt_fingerprint_version: str = "v1"
@@ -93,6 +94,7 @@ class ResolvedBuildConfig:
     tree_equiv_max_groups_per_parent: int
     tree_equiv_allow_singleton_groups: bool
     tree_equiv_min_lexical_similarity: float
+    tree_equiv_max_candidate_pairs: int
     tree_deterministic_prompts: bool
     tree_discovery_seed: int
     tree_prompt_fingerprint_version: str
@@ -142,6 +144,7 @@ def resolve_build_config(
         tree_equiv_max_groups_per_parent=max(2, int(cfg.tree_equiv_max_groups_per_parent or 2)),
         tree_equiv_allow_singleton_groups=bool(cfg.tree_equiv_allow_singleton_groups),
         tree_equiv_min_lexical_similarity=max(0.0, min(1.0, float(cfg.tree_equiv_min_lexical_similarity))),
+        tree_equiv_max_candidate_pairs=max(0, int(cfg.tree_equiv_max_candidate_pairs or 0)),
         tree_deterministic_prompts=bool(cfg.tree_deterministic_prompts),
         tree_discovery_seed=int(cfg.tree_discovery_seed),
         tree_prompt_fingerprint_version=str(cfg.tree_prompt_fingerprint_version or "v1"),

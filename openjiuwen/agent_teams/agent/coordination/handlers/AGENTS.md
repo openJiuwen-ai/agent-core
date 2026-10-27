@@ -84,7 +84,9 @@ rail，团队状态平时搭下一条外发消息的车（`CliRuntimeBase.send`�
 ### `MessageHandler`（4 个事件，无状态）
 
 Leader 读取 mailbox 时先识别当前 `round_id` 的显式 debate `final_report`：匹配的报告按 sender
-去重并标记已读，不逐条喂 harness；全部参与者终态后才生成一次收束输入。wakeup 回调以 `bool`
+去重并标记已读，不逐条喂 harness；`CAP_NOTICE`（成员侧思辨上限通知）同样在 leader
+侧捕获——`capture_cap_notice` 把发送方计入 `capped_participants` 终态后标记已读，同样不喂
+harness，真实 final report 随后仍可取代该终态。全部参与者终态后才生成一次收束输入。wakeup 回调以 `bool`
 表示是否接受投递，pending interrupt 时返回 `false`、不调用 `deliver_input()`，由 interrupt 后的
 mailbox poll 重试。普通消息仍走下述原路径。
 

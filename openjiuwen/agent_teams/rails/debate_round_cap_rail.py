@@ -39,10 +39,26 @@ _OPEN_TASK_STATUSES = frozenset(
 )
 _ELIGIBILITY_KEY_PREFIX = "_team_debate_round_cap_eligible"
 _CAP_NOTICE_KEY_PREFIX = "_team_debate_round_cap_notice"
+_LEADER_RELAY_KEY_PREFIX = "_team_debate_leader_relay"
+_LEADER_NOTICE_KEY_PREFIX = "_team_debate_leader_notice"
 
 
 class DebateRoundCapRail(DeepAgentRail):
-    """Coordinate Leader invitations and cap teammate peer messages."""
+    """Coordinate Leader invitations and cap debate traffic in every shape.
+
+    Counted speech (per ``max_debate_rounds``, one active round at a time):
+
+    * teammate → teammate peer sends (the classic debate shape);
+    * teammate → leader procedural sends (the relay loop lived on this
+      exemption); ``final_report=True`` stays exempt;
+    * leader → teammate relays inside an active round; the enrollment
+      batch is exempt via ``invitation_meta``.
+
+    All three are skipped while any board task is open — progress reports on
+    real work are not debate. First over-limit send is transformed into a
+    cap notice (which doubles as the leader-side terminal signal); a second
+    over-limit send in the same round is rejected outright.
+    """
 
     priority = 55
 
@@ -77,6 +93,13 @@ class DebateRoundCapRail(DeepAgentRail):
         self._count = 0
         self._count_lock = asyncio.Lock()
         self._count_round_id: str | None = None
+        # rail-local breach latches; reset whenever the counted round changes.
+        # Rail-local (not DebateRunState) on purpose: teammate state on the
+        # shared backend is round-scoped across members, while the notice /
+        # reject decision must stay per-sender.
+        self._capped = False
+        self._leader_capped = False
+        self._leader_notice_pending = False
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Enroll valid Leader invitations emitted by one model response."""
@@ -125,6 +148,8 @@ class DebateRoundCapRail(DeepAgentRail):
             meta = await self._debate.invitation_meta(call_id)
             if meta is not None:
                 self._inject_meta(ctx, meta)
+                return
+            await self._guard_leader_relay(ctx)
             return
 
         self._sync_participant_round()
@@ -132,7 +157,8 @@ class DebateRoundCapRail(DeepAgentRail):
         if not round_id:
             return
         args = self._parse_args(ctx.inputs.tool_args)
-        if await self._is_leader_target(args.get("to")):
+        leader_target = await self._is_leader_target(args.get("to"))
+        if leader_target:
             if args.get("final_report") is True:
                 self._inject_meta(
                     ctx,
@@ -141,27 +167,38 @@ class DebateRoundCapRail(DeepAgentRail):
                         DebateMessageRole.FINAL_REPORT,
                     ),
                 )
-            return
-
-        eligibility_key = self._eligibility_key(ctx)
-        eligible = await self._should_apply(args)
-        ctx.extra[eligibility_key] = eligible
-        if eligible:
-            ctx.inputs.tool_args = args
-            if self._count >= self._max:
-                args["content"] = self._text(
-                    "debate.cap_notice",
-                    member_name=await self._display_name(),
-                )
-                self._inject_meta(
-                    ctx,
-                    make_debate_invocation_meta(
-                        round_id,
-                        DebateMessageRole.CAP_NOTICE,
-                    ),
-                )
-                ctx.extra[self._cap_notice_key(ctx)] = True
                 return
+            # A procedural member→leader send is debate speech too — the
+            # runaway relay lived exactly on this exempted shape. Progress
+            # reports while real work is open stay exempt.
+            if await self._has_open_tasks() is not False:
+                return
+            eligible = True
+        else:
+            eligible = await self._should_apply(args)
+        ctx.extra[self._eligibility_key(ctx)] = eligible
+        if not eligible:
+            return
+        ctx.inputs.tool_args = args
+        if self._count >= self._max:
+            if self._capped:
+                self._reject_tool(ctx, self._text("debate.member_cap_reject"))
+                return
+            args["content"] = self._text(
+                "debate.cap_notice",
+                member_name=await self._display_name(),
+            )
+            self._inject_meta(
+                ctx,
+                make_debate_invocation_meta(
+                    round_id,
+                    DebateMessageRole.CAP_NOTICE,
+                ),
+            )
+            ctx.extra[self._cap_notice_key(ctx)] = True
+            self._capped = True
+            return
+        if not leader_target:
             inactive = await self._inactive_targets(args.get("to"))
             if inactive:
                 self._reject_tool(ctx, self._inactive_target_text(inactive))
@@ -181,8 +218,43 @@ class DebateRoundCapRail(DeepAgentRail):
                 )
                 args["content"] = f"{content}\n\n{suffix}"
 
+    async def _guard_leader_relay(self, ctx: AgentCallbackContext) -> None:
+        """Count leader→member relays inside an active round.
+
+        The enrollment batch is exempt (tagged via ``invitation_meta``); every
+        further member-directed send is a relay. First breach transforms the
+        send into a wrap-up notice, a second over-limit relay in the same
+        round is rejected outright so the relay loop cannot continue.
+        """
+        self._sync_leader_round()
+        round_id = self._debate.round_id
+        if not round_id:
+            return
+        args = self._parse_args(ctx.inputs.tool_args)
+        if not await self._is_relay_target(args.get("to")):
+            return
+        if await self._has_open_tasks() is not False:
+            return
+        if self._count >= self._max:
+            if self._leader_capped or self._leader_notice_pending:
+                self._reject_tool(ctx, self._text("debate.leader_cap_reject"))
+                return
+            args["content"] = self._text("debate.leader_cap_notice")
+            self._inject_meta(
+                ctx,
+                make_debate_invocation_meta(
+                    round_id,
+                    DebateMessageRole.CAP_NOTICE,
+                ),
+            )
+            ctx.inputs.tool_args = args
+            ctx.extra[self._leader_notice_key(ctx)] = True
+            self._leader_notice_pending = True
+            return
+        ctx.extra[self._leader_relay_key(ctx)] = True
+
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Settle Leader invitations or count a successful teammate peer send."""
+        """Settle Leader invitations or count a successful debate send."""
         if not self._is_send_message(ctx.inputs.tool_name):
             return
         if self._role == TeamRole.LEADER:
@@ -198,6 +270,7 @@ class DebateRoundCapRail(DeepAgentRail):
                 succeeded=succeeded,
                 delivered_participants=delivered,
             )
+            await self._settle_leader_relay(ctx, succeeded)
             return
         if ctx.extra.get("_skip_tool"):
             return
@@ -207,15 +280,20 @@ class DebateRoundCapRail(DeepAgentRail):
         if not round_id:
             return
         args = self._parse_args(ctx.inputs.tool_args)
-        if await self._is_leader_target(args.get("to")):
-            if args.get("final_report") is True and self._tool_succeeded(ctx):
+        leader_target = await self._is_leader_target(args.get("to"))
+        if leader_target and args.get("final_report") is True:
+            if self._tool_succeeded(ctx):
                 await self._debate.complete_participant(round_id)
             return
         if ctx.extra.pop(self._cap_notice_key(ctx), False):
             return
         eligible = ctx.extra.pop(self._eligibility_key(ctx), None)
         if eligible is None:
-            eligible = await self._should_apply(ctx.inputs.tool_args)
+            # before_tool_call never ran for this call — recompute the gate.
+            if leader_target:
+                eligible = await self._has_open_tasks() is False
+            else:
+                eligible = await self._should_apply(ctx.inputs.tool_args)
         if not eligible or not self._tool_succeeded(ctx):
             return
 
@@ -230,6 +308,25 @@ class DebateRoundCapRail(DeepAgentRail):
                 ctx,
                 self._text("debate.cap_private_instruction"),
             )
+
+    async def _settle_leader_relay(self, ctx: AgentCallbackContext, succeeded: bool) -> None:
+        """Count one successful relay, or latch the notice on a breach send."""
+        if ctx.extra.pop(self._leader_notice_key(ctx), False):
+            if succeeded:
+                self._leader_notice_pending = False
+                self._leader_capped = True
+                self._append_tool_instruction(
+                    ctx,
+                    self._text("debate.leader_cap_private_instruction"),
+                )
+            return
+        if not ctx.extra.pop(self._leader_relay_key(ctx), False):
+            return
+        if not succeeded or ctx.extra.get("_skip_tool"):
+            return
+        async with self._count_lock:
+            if self._count < self._max:
+                self._count += 1
 
     async def _should_apply(self, tool_args: Any) -> bool:
         args = self._parse_args(tool_args)
@@ -416,6 +513,30 @@ class DebateRoundCapRail(DeepAgentRail):
         if round_id != self._count_round_id:
             self._count_round_id = round_id
             self._count = 0
+            self._capped = False
+
+    def _sync_leader_round(self) -> None:
+        round_id = self._debate.round_id
+        if round_id != self._count_round_id:
+            self._count_round_id = round_id
+            self._count = 0
+            self._leader_capped = False
+            self._leader_notice_pending = False
+
+    async def _is_relay_target(self, raw_target: Any) -> bool:
+        """Whether any target is a trackable teammate (leader→member relay)."""
+        targets = self._target_list(raw_target)
+        if not targets:
+            return False
+        if "*" in targets:
+            return True
+        snapshot = await self._trackable_participants()
+        if snapshot is None:
+            return False
+        trackable, _ = snapshot
+        leader = await self._leader_name()
+        excluded = {USER_PSEUDO_MEMBER_NAME, self._member_name, leader}
+        return any(target in trackable and target not in excluded for target in targets)
 
     @staticmethod
     def _inject_meta(ctx: AgentCallbackContext, meta: Any) -> None:
@@ -448,6 +569,14 @@ class DebateRoundCapRail(DeepAgentRail):
     @staticmethod
     def _cap_notice_key(ctx: AgentCallbackContext) -> str:
         return f"{_CAP_NOTICE_KEY_PREFIX}:{id(ctx)}"
+
+    @staticmethod
+    def _leader_relay_key(ctx: AgentCallbackContext) -> str:
+        return f"{_LEADER_RELAY_KEY_PREFIX}:{id(ctx)}"
+
+    @staticmethod
+    def _leader_notice_key(ctx: AgentCallbackContext) -> str:
+        return f"{_LEADER_NOTICE_KEY_PREFIX}:{id(ctx)}"
 
     async def _display_name(self) -> str:
         try:

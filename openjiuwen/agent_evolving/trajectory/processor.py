@@ -451,7 +451,18 @@ class TrajectorySpanProcessor(SpanProcessor):
                 state.pending.append(
                     _PendingSpan(
                         identity=identity,
-                        payload=deepcopy(payload),
+                        # 不再对每个订阅执行 deepcopy。
+                        # OTel 在 ``span.end()`` 的调用线程（业务协程所在的
+                        # 事件循环）同步回调 ``on_end``；旧实现"每帧 × 订阅
+                        # 数"次 deepcopy（含大 attributes）在 45,308 帧的
+                        # 专家团轨迹下曾把事件循环拖入秒级停摆，最终引发
+                        # 网关 keepalive 连续 miss 主动断连。
+                        # 安全性：payload 由 ``_span_to_otlp`` 每次新建、
+                        # 入队后按约定不可变；深拷贝责任移至消费端 ——
+                        # ``_merge_pending`` 与 ``Trajectory.__init__`` 的
+                        # ``_copy_json`` 均会全量深拷贝，多订阅共享同一
+                        # 只读对象是安全的。
+                        payload=payload,
                         end_time=_end_time(payload),
                     )
                 )

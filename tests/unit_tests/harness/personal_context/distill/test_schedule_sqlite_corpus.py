@@ -86,8 +86,8 @@ async def test_tick_volume_due_uses_sqlite_im_corpus_count(tmp_path: Path):
         eligible_map={"m1": 1, "m2": 1, "m3": 0},
     )
     home_str = str(home)
-    # Period not due; volume due via two eligible rows since cursor 0.
-    set_last_attempt_at_ms(home_str, BASE_MS + 100_000)
+    # Cool-down satisfied (never attempted) + volume via two eligible rows.
+    set_last_attempt_at_ms(home_str, 0)
     now_ms = BASE_MS + 5_000
     corpus = SqliteImCorpus(home_str)
     assert corpus.count_eligible_since(cursor_ms=0, until_ms=now_ms) == 2
@@ -134,7 +134,7 @@ async def test_tick_below_threshold_with_sqlite_im_corpus_skips(tmp_path: Path):
         eligible_map={"m1": 1},
     )
     home_str = str(home)
-    set_last_attempt_at_ms(home_str, BASE_MS + 100_000)
+    set_last_attempt_at_ms(home_str, 0)  # cool-down ok; volume fails
     runner = _FakeRunner()
     config = DistillScheduleConfig(
         enabled=True,
@@ -150,7 +150,7 @@ async def test_tick_below_threshold_with_sqlite_im_corpus_skips(tmp_path: Path):
         config=config,
     )
     assert result.action == "skipped"
-    assert result.reason == "not_due"
+    assert result.reason == "below_threshold"
     assert runner.calls == []
 
 

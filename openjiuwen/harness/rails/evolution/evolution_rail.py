@@ -403,6 +403,16 @@ class EvolutionTriggerPoint(Enum):
     NONE = "none"
 
 
+_TRAJECTORY_HOOK_NAMES: Mapping[EvolutionTriggerPoint, str] = MappingProxyType(
+    {
+        EvolutionTriggerPoint.AFTER_MODEL_CALL: "_on_after_model_call",
+        EvolutionTriggerPoint.AFTER_TOOL_CALL: "_on_after_tool_call",
+        EvolutionTriggerPoint.AFTER_TASK_ITERATION: "_on_after_task_iteration",
+        EvolutionTriggerPoint.AFTER_INVOKE: "_on_after_invoke",
+    }
+)
+
+
 class EvolutionRail(DeepAgentRail):
     """Base class for all evolution rails.
 
@@ -420,6 +430,11 @@ class EvolutionRail(DeepAgentRail):
 
     priority = 60  # Lower than security rails, higher than user rails
     _DEFAULT_MEMBER_ROLE: Optional[str] = None
+    # Hooks defined in this class body that never read their ``trajectory``
+    # argument; they receive ``None`` instead of a full-window projection.
+    # Only the class that defines a hook is consulted, so a subclass that
+    # overrides the hook must redeclare the point to keep skipping it.
+    _trajectory_free_hooks: frozenset[EvolutionTriggerPoint] = frozenset()
 
     def __init__(
         self,
@@ -546,18 +561,14 @@ class EvolutionRail(DeepAgentRail):
         """Drain the current subscription, enrich RL fields, then hook."""
         inputs = ctx.inputs
         capture = self._resolve_capture(ctx=ctx)
-        trajectory, increment, issues = self._drain_for_hook(
+        response = inputs.response if isinstance(inputs, ModelCallInputs) else None
+        trajectory = await asyncio.to_thread(
+            self._drain_model_call,
             ctx,
-            required_category="llm",
-            merge=False,
-            capture=capture,
+            capture,
+            response,
+            project=self._hook_needs_trajectory(EvolutionTriggerPoint.AFTER_MODEL_CALL),
         )
-        if capture is not None and isinstance(inputs, ModelCallInputs):
-            if increment is not None and not issues:
-                enriched_increment = await asyncio.to_thread(
-                    self._enrich_latest_llm, increment, inputs.response
-                )
-                trajectory = self._merge_clean_increment(capture, enriched_increment)
         await self._on_after_model_call(ctx, trajectory)
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_MODEL_CALL and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_MODEL_CALL, ctx
@@ -567,7 +578,12 @@ class EvolutionRail(DeepAgentRail):
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Drain the current subscription, then invoke the tool hook."""
-        trajectory, _, _ = self._drain_for_hook(ctx, required_category="tool")
+        trajectory, _, _ = await asyncio.to_thread(
+            self._drain_for_hook,
+            ctx,
+            required_category="tool",
+            project=self._hook_needs_trajectory(EvolutionTriggerPoint.AFTER_TOOL_CALL),
+        )
         await self._on_after_tool_call(ctx, trajectory)
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TOOL_CALL and self._allow_evolution_trigger(
             EvolutionTriggerPoint.AFTER_TOOL_CALL, ctx
@@ -577,7 +593,11 @@ class EvolutionRail(DeepAgentRail):
 
     async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Drain the current subscription, then invoke the iteration hook."""
-        trajectory, _, _ = self._drain_for_hook(ctx)
+        trajectory, _, _ = await asyncio.to_thread(
+            self._drain_for_hook,
+            ctx,
+            project=self._hook_needs_trajectory(EvolutionTriggerPoint.AFTER_TASK_ITERATION),
+        )
         await self._on_after_task_iteration(ctx, trajectory)
 
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_TASK_ITERATION and self._allow_evolution_trigger(
@@ -590,7 +610,12 @@ class EvolutionRail(DeepAgentRail):
         """Final-drain an invoke and release its isolated subscription."""
         capture = self._resolve_capture(ctx=ctx)
         try:
-            trajectory, _, _ = self._drain_for_hook(ctx, capture=capture)
+            trajectory, _, _ = await asyncio.to_thread(
+                self._drain_for_hook,
+                ctx,
+                project=self._hook_needs_trajectory(EvolutionTriggerPoint.AFTER_INVOKE),
+                capture=capture,
+            )
             await self._on_after_invoke(ctx, trajectory)
 
             # Trigger evolution if configured for after_invoke
@@ -870,7 +895,9 @@ class EvolutionRail(DeepAgentRail):
         self,
         capture: _InvokeCapture,
         increment: Trajectory,
-    ) -> Trajectory:
+        *,
+        project: bool = True,
+    ) -> Trajectory | None:
         # Incremental merge: the clean window is kept as a mutable, already
         # normalized OTLP payload, so a drained increment only appends its own
         # (small) span set.  The previous merge_trajectories()+trim_trajectory()
@@ -885,7 +912,49 @@ class EvolutionRail(DeepAgentRail):
                 merged = _append_increment(window, increment_payload)
             merged = _trim_window(merged, self._max_trajectory_spans)
             self._scope_windows[capture.scope_key] = merged
-        return self._project_window(capture)
+        return self._project_window(capture) if project else None
+
+    def _drain_model_call(
+        self,
+        ctx: AgentCallbackContext,
+        capture: _InvokeCapture | None,
+        response: Any,
+        *,
+        project: bool,
+    ) -> Trajectory | None:
+        """Drain one model-call increment, attach RL token fields, then merge it."""
+
+        _, increment, issues = self._drain_for_hook(
+            ctx,
+            required_category="llm",
+            merge=False,
+            project=False,
+            capture=capture,
+        )
+        if capture is None or increment is None or issues:
+            return None
+        if response is not None:
+            increment = self._enrich_latest_llm(increment, response)
+        return self._merge_clean_increment(capture, increment, project=project)
+
+    def _hook_needs_trajectory(self, point: EvolutionTriggerPoint) -> bool:
+        """Return whether ``point`` consumes a full-window projection.
+
+        A projection deep-copies the whole clean window, so it is only built for
+        the configured trigger point or for a hook override that may read it.
+        """
+
+        if self._evolution_trigger == point:
+            return True
+        hook_name = _TRAJECTORY_HOOK_NAMES.get(point)
+        if hook_name is None:
+            return True
+        for cls in type(self).__mro__:
+            if hook_name in cls.__dict__:
+                if cls is EvolutionRail:
+                    return False
+                return point not in cls.__dict__.get("_trajectory_free_hooks", frozenset())
+        return True
 
     def _reset_current_scope(self) -> None:
         """Discard the active scope window at an explicit lifecycle boundary."""
@@ -932,9 +1001,14 @@ class EvolutionRail(DeepAgentRail):
         *,
         required_category: str | None = None,
         merge: bool = True,
+        project: bool = True,
         capture: _InvokeCapture | None = None,
     ) -> tuple[Trajectory | None, Trajectory | None, tuple[Mapping[str, object], ...]]:
-        """Drain one subscription and apply the clean-window quality gate."""
+        """Drain one subscription and apply the clean-window quality gate.
+
+        ``project=False`` still merges a clean increment but returns ``None``
+        instead of a full-window projection.
+        """
 
         capture = capture or self._resolve_capture(ctx=ctx)
         if capture is None:
@@ -959,7 +1033,9 @@ class EvolutionRail(DeepAgentRail):
                     (MappingProxyType({"code": "missing_required_span", "category": required_category}),),
                 )
         if increment is not None and merge:
-            return self._merge_clean_increment(capture, increment), increment, ()
+            return self._merge_clean_increment(capture, increment, project=project), increment, ()
+        if not project:
+            return None, increment, ()
         if increment is not None:
             return self._project_window(capture), increment, ()
         return self._project_window(capture), None, ()

@@ -9,21 +9,23 @@ Author: huenrui1@huawei.com
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
-import asyncio
 import time
+import uuid
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Union
 
-from pydantic import Field, BaseModel
+from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.constants.constant import RESUME_SIGNAL
 from openjiuwen.core.common.exception.errors import BaseError, Termination
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.single_agent.schema.steering import SteeringInput
-from openjiuwen.core.common.logging import logger
+
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
         browser_agent_log_info,
@@ -31,59 +33,59 @@ try:
 except Exception:  # pragma: no cover - browser runtime is optional here
     browser_agent_log_info = None
 from openjiuwen.core.common.security.user_config import UserConfig
-from openjiuwen.core.foundation.prompt import PromptTemplate
-from openjiuwen.core.foundation.llm.schema.config import (
-    ModelClientConfig,
-    ModelRequestConfig
-)
-from openjiuwen.core.context_engine import (
-    ContextEngine,
-    ContextEngineConfig,
-    ModelContext
-)
-from openjiuwen.core.foundation.llm import (
-    AssistantMessage,
-    Model,
-    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
-    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
-    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
-    ToolMessage,
-    UserMessage,
-    SystemMessage
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ModelContext
+from openjiuwen.core.context_engine.usage import (
+    CacheAggregationKey,
+    ContextCategory,
+    ContextUsageAnalyzer,
+    SessionKVCacheAggregator,
+    request_usage_from_metadata,
 )
 from openjiuwen.core.foundation.kv_cache import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
     KVCacheAffinityConfig,
 )
-from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.foundation.llm import (
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+    AssistantMessage,
+    Model,
+    SystemMessage,
+    ToolMessage,
+    UserMessage,
+)
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
-from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.ability_manager import AbilityManager, illegal_tool_call_reason
-from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext
+from openjiuwen.core.single_agent.base import BaseAgent
+from openjiuwen.core.single_agent.interrupt.handler import ResumeContext, ToolInterruptHandler
 from openjiuwen.core.single_agent.interrupt.resume_guard import (
     should_abandon_unmatched_confirm_resume,
 )
 from openjiuwen.core.single_agent.interrupt.state import (
-    BaseInterruptionState,
+    INTERRUPTION_KEY,
     RESUME_START_ITERATION_KEY,
+    BaseInterruptionState,
     ToolInterruptionState,
-    INTERRUPTION_KEY
+)
+from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.single_agent.prompts.builder import (
+    PromptSection,
+    SystemPromptBuilder,
 )
 from openjiuwen.core.single_agent.rail.base import (
-    AgentCallbackEvent,
     AgentCallbackContext,
+    AgentCallbackEvent,
     InvokeInputs,
     ModelCallInputs,
     UserMessageInputs,
     rail,
-)
-from openjiuwen.core.single_agent.prompts.builder import (
-    PromptSection,
-    SystemPromptBuilder,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -212,9 +214,36 @@ def log_llm_response(log: Any, ai_message: Any) -> None:
 _TOOLCALL_PROGRESS_GRACE_S = 15.0
 _TOOLCALL_PROGRESS_INTERVAL_S = 30.0
 
-# Ordinary reasoning-only / blank no-tool turns: one bounded same-round retry
-# after injecting [EMPTY_RESPONSE], then the explicit empty-response error.
+# --- soft-stop (Termination) bounded continue --------------------------------
+# Rails (e.g. Agent RAS thinking-loop abort) raise Termination mid-stream and
+# may tag details.soft_stop_needs_continue. When the partial has no content and
+# no tool_calls, continue at most SOFT_STOP_MAX_CONTINUES times with steering;
+# then hard-fail. Non-tagged empty turns get one same-round EMPTY_RESPONSE
+# retry, then the OA.05000090 empty-response error (must not silent-succeed).
+SOFT_STOP_NEEDS_CONTINUE_KEY = "_soft_stop_needs_continue"
+SOFT_STOP_CONTINUE_COUNT_KEY = "_soft_stop_continue_count"
+SOFT_STOP_MAX_CONTINUES = 1
+SOFT_STOP_RECOVERY_FAILED_MSG = "思考循环恢复失败，请重试或简化任务。"
+SOFT_STOP_FALLBACK_STEERING = (
+    "Previous turn was interrupted during thinking with no user-visible "
+    "content and no tool calls. Continue the unfinished task now: call a "
+    "tool or reply with concrete user-facing content. Do not repeat the "
+    "same long reasoning loop."
+)
+EMPTY_RESPONSE_MSG = "模型未返回有效内容（空响应），请重试或检查上下文。"
+# Ordinary reasoning-only / blank no-tool turns (not RAS soft-stop): bounded
+# same-round retry after injecting [EMPTY_RESPONSE], then hard error.
 EMPTY_RESPONSE_MAX_RETRIES = 1
+
+
+def _termination_requests_soft_stop_continue(exc: Termination) -> bool:
+    """True when a soft-stop Termination asks ReAct for a bounded continue."""
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict) and details.get("soft_stop_needs_continue"):
+        return True
+    # Backward-compatible: older rails only set the thinking-loop message.
+    msg = getattr(exc, "message", None) or str(exc)
+    return "thinking-loop" in msg
 
 
 def _maybe_toolcall_progress_output(
@@ -590,10 +619,25 @@ class ReActAgent(BaseAgent):
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
         self._kv_cache_model_call_hook = kv_cache_hooks.KVCacheModelCallHook()
+        self._context_usage_aggregator = SessionKVCacheAggregator()
+        self._context_usage_sequences: dict[str, int] = {}
+        self._last_model_tools: list[ToolInfo] | None = None
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
         return ReActAgentConfig()
+
+    @staticmethod
+    def _resolve_context_engine_model_provider(config: ReActAgentConfig) -> str:
+        candidates = (
+            getattr(config, "model_provider", None),
+            getattr(getattr(config, "model_client_config", None), "model_provider", None),
+            getattr(getattr(config, "model_config_obj", None), "model_provider", None),
+        )
+        for candidate in candidates:
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+        return ""
 
     @staticmethod
     def _resolve_context_engine_model_name(config: ReActAgentConfig) -> str:
@@ -728,6 +772,7 @@ class ReActAgent(BaseAgent):
             content: Optional[str],
             *,
             priority: int,
+            category: Optional[str] = None,
     ) -> None:
         """Add/update one text section, or remove it when content is empty."""
         text = (content or "").strip()
@@ -739,6 +784,7 @@ class ReActAgent(BaseAgent):
             name=name,
             content={"cn": text, "en": text},
             priority=priority,
+            category=category,
         ))
 
     def _build_rendered_system_prompt(
@@ -948,6 +994,481 @@ class ReActAgent(BaseAgent):
 
         return context_window_kwargs
 
+    def _context_usage_prompt_sections(self) -> list[tuple[ContextCategory, str, str]]:
+        """Return builder sections using the four-category product taxonomy."""
+        sections: list[tuple[ContextCategory, str, str]] = []
+        get_sections_for_build = getattr(self.prompt_builder, "_get_sections_for_build", None)
+        prompt_sections = (
+            get_sections_for_build()
+            if callable(get_sections_for_build)
+            else self.prompt_builder.get_all_sections().values()
+        )
+        for section in prompt_sections:
+            name = getattr(section, "name", "")
+            content = section.render(self.prompt_builder.language)
+            if not content.strip():
+                continue
+            category = self._context_usage_section_category(section, name)
+            sections.append((category, content, str(getattr(section, "carrier", "system_message"))))
+        return sections
+
+    @staticmethod
+    def _context_usage_section_category(section: Any, name: Any) -> ContextCategory:
+        """Map a prompt section to context-usage.v1 parts.
+
+        Prefer an explicit ``section.category``. When unset (legacy
+        ``PromptSection``), treat names containing ``skill`` as the skills
+        catalog bucket so SkillUseRail's ``skills`` section is not folded
+        into ``system_prompt``.
+        """
+        raw_category = getattr(section, "category", None)
+        raw_category = getattr(raw_category, "value", raw_category)
+        name_lower = str(name or "").lower()
+        if raw_category:
+            try:
+                return ContextCategory(raw_category)
+            except ValueError:
+                pass
+        if "skill" in name_lower:
+            return ContextCategory.SKILLS
+        return ContextCategory.SYSTEM_PROMPT
+
+    @staticmethod
+    def _call_usage_identifier(target: Any, *method_names: str) -> str | None:
+        """Read an optional identifier from a session/context duck type."""
+        if target is None:
+            return None
+        for method_name in method_names:
+            getter = getattr(target, method_name, None)
+            if not callable(getter):
+                continue
+            try:
+                value = getter()
+            except Exception:  # telemetry must not affect model execution
+                continue
+            if value is not None:
+                identifier = str(value).strip()
+                if identifier:
+                    return identifier
+        return None
+
+    @classmethod
+    def _usage_session_id(cls, ctx: AgentCallbackContext) -> str:
+        """Resolve a session id across supported session/context implementations."""
+        session_id = cls._call_usage_identifier(ctx.session, "get_session_id", "session_id")
+        if session_id:
+            return session_id
+        context_id = cls._call_usage_identifier(ctx.context, "session_id")
+        return context_id or "default"
+
+    @classmethod
+    def _usage_context_id(cls, context: Any, fallback: str) -> str:
+        """Resolve a context id with a session-id fallback for lightweight contexts."""
+        return cls._call_usage_identifier(context, "context_id", "session_id") or fallback
+
+    def _context_usage_attribution(
+        self,
+        ctx: AgentCallbackContext,
+        session: Session,
+    ) -> dict[str, Any]:
+        """Resolve owner and invocation metadata for one model-call report.
+
+        The resolver is deliberately capability-based.  Core ``Session``
+        exposes cache identity and team sessions add source metadata, while a
+        plain standalone session still produces a complete single-agent
+        attribution without importing team or subagent packages.
+        """
+        usage_metadata_getter = getattr(session, "get_context_usage_metadata", None)
+        session_usage_metadata = (
+            usage_metadata_getter()
+            if callable(usage_metadata_getter)
+            else dict(getattr(session, "_context_usage_metadata", {}) or {})
+        )
+        values = {
+            **dict(session_usage_metadata or {}),
+            **dict(getattr(ctx, "context_usage_attribution", {}) or {}),
+        }
+        source_metadata_getter = getattr(session, "get_source_metadata", None)
+        source_metadata = (
+            source_metadata_getter()
+            if callable(source_metadata_getter)
+            else dict(getattr(session, "_source_metadata", {}) or {})
+        )
+        build_context = getattr(self, "_usage_build_context", None)
+        agent_id = (
+            values.get("agent_id")
+            or getattr(self, "_usage_agent_id", None)
+            or getattr(self.card, "id", None)
+            or getattr(self.card, "name", None)
+        )
+        team_id = (
+            values.get("team_id")
+            or source_metadata.get("source_team_id")
+            or getattr(session, "get_team_id", lambda: None)()
+        )
+        member_name = values.get("member_name") or source_metadata.get("source_member_name")
+        if not member_name and build_context is not None:
+            member_name = getattr(build_context, "member_name", None)
+        if not member_name:
+            member_name = getattr(self, "member_name", None)
+
+        execution_session_id = self._usage_session_id(ctx)
+        parent_session_id_getter = getattr(session, "get_parent_session_id", None)
+        parent_session_id = values.get("parent_session_id") or (
+            parent_session_id_getter() if callable(parent_session_id_getter) else None
+        )
+        if not parent_session_id:
+            get_env = getattr(session, "get_env", None)
+            if callable(get_env):
+                parent_session_id = get_env(KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV)
+        product_session_id = values.get("product_session_id") or parent_session_id or execution_session_id
+
+        cache_identity = values.get("cache_identity")
+        parent_cache_identity = values.get("parent_cache_identity")
+        identity_getter = getattr(session, "get_cache_identity", None)
+        if callable(identity_getter):
+            try:
+                identity = identity_getter()
+                cache_identity = cache_identity or getattr(identity, "cache_id", None)
+                parent_cache_identity = parent_cache_identity or getattr(identity, "parent_cache_id", None)
+            except Exception:  # pragma: no cover - defensive for third-party sessions
+                logger.debug("Failed to resolve session cache identity for usage telemetry", exc_info=True)
+
+        context_id = self._usage_context_id(ctx.context, execution_session_id)
+        context_owner_id = values.get("context_owner_id")
+        if not context_owner_id:
+            owner_parts = [team_id, member_name or agent_id or "agent", execution_session_id, context_id]
+            context_owner_id = "|".join(str(part) for part in owner_parts if part)
+
+        agent_path = list(values.get("agent_path") or [])
+        if not agent_path:
+            agent_path = [str(member_name or agent_id or "agent")]
+        return {
+            **values,
+            "product_session_id": str(product_session_id),
+            "execution_session_id": execution_session_id,
+            "context_owner_id": context_owner_id,
+            "agent_id": agent_id,
+            "team_id": team_id,
+            "member_name": member_name,
+            "agent_path": agent_path,
+            "depth": int(values.get("depth") or max(len(agent_path) - 1, 0)),
+            "cache_identity": cache_identity or execution_session_id,
+            "parent_cache_identity": parent_cache_identity or product_session_id,
+            "cache_mode": values.get("cache_mode") or "provider",
+            "cache_scope": values.get("cache_scope") or "session",
+        }
+
+    def _begin_context_usage_request(self, ctx: AgentCallbackContext) -> tuple[str, int]:
+        """Create the identity for one actual provider request.
+
+        The usage event is emitted after the provider returns, but request IDs
+        must be allocated before the call so debug records, retries, and the
+        post-call event all refer to the same request.  Calling this once at
+        the start of ``_railed_model_call`` also makes a recovery retry a new
+        request instead of reusing the failed attempt's sequence.
+        """
+        session = ctx.session
+        if session is None:
+            return "", 0
+        request_id = uuid.uuid4().hex
+        session_id = self._usage_session_id(ctx)
+        sequence = self._context_usage_sequences.get(session_id, 0)
+        self._context_usage_sequences[session_id] = sequence + 1
+        ctx.context_usage_request_id = request_id
+        ctx.context_usage_sequence = sequence
+        if isinstance(ctx.inputs, ModelCallInputs):
+            ctx.inputs.context_usage_request_id = request_id
+            ctx.inputs.context_usage_sequence = sequence
+        return request_id, sequence
+
+    async def _emit_context_usage(
+        self,
+        ctx: AgentCallbackContext,
+        context_window,
+        *,
+        phase: str,
+        usage_metadata=None,
+        emit_stream: bool = True,
+        record_session_usage: bool = True,
+    ) -> dict[str, Any] | None:
+        """Send a context usage snapshot without affecting model execution."""
+        session = ctx.session
+        if emit_stream and (session is None or not hasattr(session, "write_stream")):
+            return
+
+        context_config = self._config.context_engine_config
+        model_name = str(getattr(context_config, "model_name", None) or self._config.model_name or "")
+        model_provider = str(
+            getattr(context_config, "model_provider", None)
+            or self._resolve_context_engine_model_provider(self._config)
+            or ""
+        )
+
+        if phase == "pre_call":
+            # Kept for callers that used the old helper directly.  The
+            # built-in model-call path no longer emits this phase.
+            request_id, sequence = self._begin_context_usage_request(ctx)
+        elif ctx.context_usage_request_id:
+            request_id = ctx.context_usage_request_id
+            sequence = int(ctx.context_usage_sequence or 0)
+        else:
+            # Compatibility for integrations calling the post helper without
+            # the new explicit begin step.
+            request_id, sequence = self._begin_context_usage_request(ctx)
+
+        attribution = self._context_usage_attribution(ctx, session)
+        ctx.context_usage_attribution.clear()
+        ctx.context_usage_attribution.update(attribution)
+        if isinstance(ctx.inputs, ModelCallInputs):
+            ctx.inputs.context_usage_request_id = request_id
+            ctx.inputs.context_usage_sequence = sequence
+            ctx.inputs.context_usage_attribution = dict(attribution)
+
+        report = ctx.context_usage_report
+        if report is None and isinstance(ctx.inputs, ModelCallInputs):
+            report = ctx.inputs.context_usage_report
+        if report is None:
+            build_report = getattr(ctx.context, "build_context_usage_report", None)
+            if callable(build_report):
+                try:
+                    report = build_report(
+                        context_window,
+                        system_prompt_sections=tuple(self._context_usage_prompt_sections()),
+                        model=model_name,
+                        provider=model_provider or None,
+                        deployment=str(self._config.api_base or "") or None,
+                        attribution=attribution,
+                    )
+                    ctx.context_usage_report = report
+                    if isinstance(ctx.inputs, ModelCallInputs):
+                        ctx.inputs.context_usage_report = report
+                except Exception:
+                    logger.debug("Failed to build request-local context usage report", exc_info=True)
+
+        try:
+            request_usage = request_usage_from_metadata(usage_metadata)
+            session_id = self._usage_session_id(ctx)
+            scope_key = CacheAggregationKey(
+                session_id=session_id,
+                provider=model_provider,
+                model=model_name,
+                deployment=str(self._config.api_base or ""),
+                product_session_id=attribution.get("product_session_id"),
+                execution_session_id=attribution.get("execution_session_id"),
+                cache_identity=attribution.get("cache_identity"),
+                parent_cache_identity=attribution.get("parent_cache_identity"),
+                team_id=attribution.get("team_id"),
+                agent_id=attribution.get("agent_id"),
+                member_name=attribution.get("member_name"),
+                cache_mode=attribution.get("cache_mode") or "provider",
+                cache_scope=attribution.get("cache_scope") or "session",
+            )
+            if phase == "post_call" and record_session_usage:
+                session_usage = self._context_usage_aggregator.record(
+                    request_id=request_id,
+                    scope_key=scope_key,
+                    usage=request_usage,
+                )
+            else:
+                # A pre-call event also carries the aggregate from completed calls
+                # in this scope, so the value means "session to date" at every
+                # emission point rather than only on post-call events.  An
+                # out-of-band compact event likewise observes the aggregate but
+                # must not add a synthetic model call.
+                session_usage = self._context_usage_aggregator.snapshot(scope_key)
+
+            token_counter = ctx.context.token_counter()
+            if token_counter is None:
+                from openjiuwen.core.context_engine.token.string_length_counter import (
+                    StringLengthCounter,
+                )
+
+                token_counter = StringLengthCounter(
+                    model=model_name,
+                    fallback_reason="counter_unavailable",
+                )
+            analyzer = ContextUsageAnalyzer(
+                token_counter,
+                model=model_name,
+                context_window_limit=ctx.context.context_window_tokens(),
+            )
+            kv_cache = {
+                "request": (
+                    request_usage.model_dump(mode="json")
+                    if phase == "post_call"
+                    else {
+                        "status": "not_reported",
+                        "source": (
+                            "manual_context_operation" if phase == "post_compact" else "awaiting_provider_response"
+                        ),
+                    }
+                ),
+                "session": session_usage.model_dump(mode="json") if session_usage is not None else {},
+                "measurement_cache": getattr(report, "measurement_cache", {}) if report is not None else {},
+                "context_changes": getattr(report, "context_changes", {}) if report is not None else {},
+                "management": {},
+                "diagnostics": {"status": "not_collected"},
+            }
+            event_session_id = attribution.get("product_session_id") or session_id
+            if report is not None:
+                snapshot = analyzer.analyze_from_report(
+                    report,
+                    request_id=request_id,
+                    session_id=event_session_id,
+                    phase=phase,
+                    provider=model_provider or None,
+                    agent_id=attribution.get("agent_id") or getattr(self.card, "id", None),
+                    sequence=sequence,
+                    provider_input_tokens=request_usage.input_tokens if phase == "post_call" else None,
+                    kv_cache=kv_cache,
+                    deployment=str(self._config.api_base or "") or None,
+                    attribution=attribution,
+                )
+            else:
+                snapshot = analyzer.analyze(
+                    context_window,
+                    request_id=request_id,
+                    session_id=event_session_id,
+                    phase=phase,
+                    provider=model_provider or None,
+                    agent_id=attribution.get("agent_id") or getattr(self.card, "id", None),
+                    sequence=sequence,
+                    provider_input_tokens=request_usage.input_tokens if phase == "post_call" else None,
+                    system_prompt_sections=tuple(self._context_usage_prompt_sections()),
+                    kv_cache=kv_cache,
+                    deployment=str(self._config.api_base or "") or None,
+                    attribution=attribution,
+                )
+            snapshot_payload = snapshot.model_dump(mode="json")
+            if emit_stream:
+                await session.write_stream(
+                    OutputSchema(
+                        type="context.usage",
+                        index=sequence,
+                        payload=snapshot_payload,
+                    )
+                )
+                # Swarm's compatibility rail can emit a legacy snapshot for older
+                # core versions.  Mark the callback context after the complete
+                # core event is actually accepted by the session writer so that
+                # the compatibility rail never adds a second event.
+                ctx.extra["_context_usage_event_emitted"] = True
+            return snapshot_payload
+        except Exception as exc:  # telemetry must never fail an LLM call
+            logger.warning("Failed to emit context usage snapshot: %s", exc)
+            return None
+
+    async def build_context_usage_snapshot(
+        self,
+        context: ModelContext,
+        *,
+        session: Session | None = None,
+        tools: Optional[List[ToolInfo]] = None,
+        request_id: str | None = None,
+        phase: str = "post_compact",
+        attribution: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Build a local usage snapshot for an out-of-band context operation.
+
+        Manual context operations, such as a standalone ``/compact`` command,
+        run outside the normal model-call callback chain and therefore have no
+        provider ``usage_metadata``.  The returned ``post_compact`` event is
+        based on local measurement/estimation and is not an authoritative
+        provider token count.  The caller decides how to transport and persist
+        it.
+        """
+        if context is None:
+            return None
+
+        if session is None:
+            get_session_ref = getattr(context, "get_session_ref", None)
+            if callable(get_session_ref):
+                session = get_session_ref()
+
+        if tools is None:
+            if self._last_model_tools is not None:
+                tools = list(self._last_model_tools)
+            else:
+                try:
+                    tools = list(await self.ability_manager.list_tool_info() or [])
+                except Exception:  # usage telemetry must not block the caller
+                    logger.debug("Failed to collect tools for context usage snapshot", exc_info=True)
+                    tools = []
+
+        ctx = AgentCallbackContext(
+            agent=self,
+            inputs=ModelCallInputs(
+                messages=[],
+                tools=list(tools or []),
+                model_context=context,
+            ),
+            session=session,
+            context=context,
+        )
+        if isinstance(attribution, dict):
+            ctx.context_usage_attribution.update(attribution)
+
+        usage_prompt_sections = tuple(self._context_usage_prompt_sections())
+        final_system = [SystemMessage(content=self.prompt_builder.build())]
+        sync_attachments = getattr(self, "_sync_prompt_attachments", None)
+        if callable(sync_attachments):
+            await sync_attachments(ctx, context)
+
+        context_window = await context.get_context_window(
+            **self._build_context_window_kwargs(ctx, final_system)
+        )
+        ctx.inputs.messages = context_window.get_messages()
+        ctx.inputs.tools = context_window.get_tools()
+
+        if isinstance(request_id, str) and request_id.strip():
+            # Allocate the monotonic sequence through the normal request path,
+            # then replace only the identifier with the command's request id.
+            self._begin_context_usage_request(ctx)
+            ctx.context_usage_request_id = request_id.strip()
+            ctx.inputs.context_usage_request_id = request_id.strip()
+
+        usage_attribution = self._context_usage_attribution(ctx, session)
+        ctx.context_usage_attribution.clear()
+        ctx.context_usage_attribution.update(usage_attribution)
+        build_report = getattr(context, "build_context_usage_report", None)
+        if callable(build_report):
+            try:
+                context_config = self._config.context_engine_config
+                model_name = str(
+                    getattr(context_config, "model_name", None) or self._config.model_name or ""
+                )
+                model_provider = str(
+                    getattr(context_config, "model_provider", None)
+                    or self._resolve_context_engine_model_provider(self._config)
+                    or ""
+                )
+                ctx.context_usage_report = build_report(
+                    context_window,
+                    system_prompt_sections=usage_prompt_sections,
+                    model=model_name,
+                    provider=model_provider or None,
+                    deployment=str(self._config.api_base or "") or None,
+                    attribution=usage_attribution,
+                )
+                ctx.inputs.context_usage_report = ctx.context_usage_report
+                ctx.inputs.context_usage_attribution = dict(usage_attribution)
+            except NotImplementedError:
+                logger.debug("ModelContext does not provide a context usage report")
+            except Exception:
+                logger.warning(
+                    "Failed to build manual context usage report; using compatibility analyzer path",
+                    exc_info=True,
+                )
+
+        return await self._emit_context_usage(
+            ctx,
+            context_window,
+            phase=phase,
+            emit_stream=False,
+            record_session_usage=False,
+        )
+
     @rail(
         before=AgentCallbackEvent.BEFORE_MODEL_CALL,
         after=AgentCallbackEvent.AFTER_MODEL_CALL,
@@ -968,6 +1489,7 @@ class ReActAgent(BaseAgent):
         Uses llm.stream() when ctx.extra["_streaming"] is True,
         falls back to llm.invoke() otherwise.
         """
+        self._begin_context_usage_request(ctx)
         # --- Finalize system message and context window (post-rails) ---
         final_system = [SystemMessage(content=self.prompt_builder.build())]
         llm = self._get_llm()
@@ -987,6 +1509,7 @@ class ReActAgent(BaseAgent):
         # equally pass context_window.get_*() directly.)
         ctx.inputs.messages = context_window.get_messages()
         ctx.inputs.tools = context_window.get_tools()
+        self._last_model_tools = list(ctx.inputs.tools or [])
 
         log_llm_request(logger, ctx.inputs.messages, ctx.inputs.tools)
         # --- End context window finalization ---
@@ -1047,6 +1570,12 @@ class ReActAgent(BaseAgent):
                 else:
                     raise
             ctx.inputs.response = ai_message
+            await self._emit_context_usage(
+                ctx,
+                context_window,
+                phase="post_call",
+                usage_metadata=getattr(ai_message, "usage_metadata", None),
+            )
             return ai_message
 
         # Streaming path: accumulate chunks via __add__, write to session in real-time
@@ -1125,12 +1654,30 @@ class ReActAgent(BaseAgent):
                     index=chunk_index,
                     payload={"content": ai_message.content, "result_type": "answer"},
                 ))
+                # Match non-streaming invoke: emit window snapshot even on early return.
+                await self._emit_context_usage(
+                    ctx,
+                    context_window,
+                    phase="post_call",
+                    usage_metadata=getattr(ai_message, "usage_metadata", None),
+                )
                 return ai_message
             # Generic soft-stop (control-flow termination): keep partial for steering.
-            # Raised by reliability/other rails; core only knows the type, not the source.
+            # Raised by reliability/other rails; core only knows the type + optional
+            # details.soft_stop_needs_continue (bounded continue on empty partial).
             if isinstance(exc, Termination):
                 ai_message = self._assistant_message_from_chunk(accumulated_chunk)
                 ctx.inputs.response = ai_message
+                if _termination_requests_soft_stop_continue(exc):
+                    ctx.extra[SOFT_STOP_NEEDS_CONTINUE_KEY] = True
+                # Soft-stop still ends this model call; emit so legacy rails do not
+                # treat a missing v1 frame as "never sent".
+                await self._emit_context_usage(
+                    ctx,
+                    context_window,
+                    phase="post_call",
+                    usage_metadata=getattr(ai_message, "usage_metadata", None),
+                )
                 return ai_message
             raise
 
@@ -1158,6 +1705,12 @@ class ReActAgent(BaseAgent):
                     **perf_metrics,
                 },
             ))
+        await self._emit_context_usage(
+            ctx,
+            context_window,
+            phase="post_call",
+            usage_metadata=getattr(ai_message, "usage_metadata", None),
+        )
         return ai_message
 
     @staticmethod
@@ -1283,6 +1836,7 @@ class ReActAgent(BaseAgent):
             return AssistantMessage(content="", tool_calls=[])
         return AssistantMessage(
             content=chunk.content or "",
+            metadata=chunk.metadata,
             tool_calls=chunk.tool_calls or [],
             usage_metadata=chunk.usage_metadata,
             reasoning_content=chunk.reasoning_content,
@@ -1708,7 +2262,7 @@ class ReActAgent(BaseAgent):
 
     def _is_interrupted(self, tool_result: Any) -> bool:
         """Detect whether a tool result signals workflow interruption."""
-        from openjiuwen.core.workflow import WorkflowOutput, WorkflowExecutionState
+        from openjiuwen.core.workflow import WorkflowExecutionState, WorkflowOutput
         if isinstance(tool_result, WorkflowOutput):
             return tool_result.state == WorkflowExecutionState.INPUT_REQUIRED
         if isinstance(tool_result, list):
@@ -2417,6 +2971,7 @@ class ReActAgent(BaseAgent):
                             await context.add_messages(
                                 AssistantMessage(
                                     content=ai_message.content,
+                                    metadata=ai_message.metadata,
                                     tool_calls=ai_message.tool_calls,
                                     reasoning_content=ai_message.reasoning_content,
                                     usage_metadata=ai_message.usage_metadata,
@@ -2427,25 +2982,85 @@ class ReActAgent(BaseAgent):
                             )
 
                             if not ai_message.tool_calls:
+                                content = (getattr(ai_message, "content", None) or "").strip()
+                                reasoning = (
+                                    getattr(ai_message, "reasoning_content", None) or ""
+                                ).strip()
+                                soft_stop_continue = bool(
+                                    ctx.extra.pop(SOFT_STOP_NEEDS_CONTINUE_KEY, False)
+                                )
+
+                                # Soft-stop empty partial (e.g. RAS thinking-loop abort
+                                # mid-reasoning): bounded continue before empty-response
+                                # error or silent end. Check BEFORE close_steering_if_empty
+                                # so we do not close the steering inbox then fail to drain.
+                                if soft_stop_continue and not content:
+                                    used = int(
+                                        ctx.extra.get(SOFT_STOP_CONTINUE_COUNT_KEY, 0) or 0
+                                    )
+                                    if used < SOFT_STOP_MAX_CONTINUES:
+                                        ctx.extra[SOFT_STOP_CONTINUE_COUNT_KEY] = used + 1
+                                        if not ctx.has_pending_steering():
+                                            # Queue missing/stale or inject landed on
+                                            # context only — force a steer into context.
+                                            await context.add_messages(
+                                                UserMessage(
+                                                    content=(
+                                                        f"[STEERING] "
+                                                        f"{SOFT_STOP_FALLBACK_STEERING}"
+                                                    ),
+                                                )
+                                            )
+                                        logger.warning(
+                                            "[ReActAgent] soft-stop empty partial; "
+                                            "bounded continue recovery=%s/%s "
+                                            "session_id=%s reasoning_present=%s "
+                                            "pending_steering=%s",
+                                            used + 1,
+                                            SOFT_STOP_MAX_CONTINUES,
+                                            session.get_session_id(),
+                                            bool(reasoning),
+                                            ctx.has_pending_steering(),
+                                        )
+                                        continue
+                                    await context.add_messages(
+                                        UserMessage(
+                                            content=(
+                                                "[SOFT_STOP_RECOVERY_FAILED] Thinking-loop "
+                                                "soft-stop recovery exhausted after "
+                                                f"{SOFT_STOP_MAX_CONTINUES} continue(s)."
+                                            ),
+                                        )
+                                    )
+                                    await self.context_engine.save_contexts(session)
+                                    result = {
+                                        "output": SOFT_STOP_RECOVERY_FAILED_MSG,
+                                        "result_type": "error",
+                                        "finish_reason": getattr(
+                                            ai_message, "finish_reason", "null"
+                                        ),
+                                        "reasoning_present": bool(reasoning),
+                                        "soft_stop_recovery_exhausted": True,
+                                    }
+                                    invoke_inputs.result = result
+                                    break
+
                                 # If steering arrived while the
                                 # model was generating, continue
                                 # the loop so the next iteration
                                 # drains and injects it.
                                 if not ctx.close_steering_if_empty():
                                     continue
-                                content = (getattr(ai_message, "content", None) or "").strip()
-                                reasoning = (
-                                    getattr(ai_message, "reasoning_content", None) or ""
-                                ).strip()
                                 # Reasoning-only (or fully blank) no-tool turns are not a
                                 # valid ReAct answer: they deliver nothing to the user /
                                 # team board (see 2026-09-11 team stall: OA.05000090).
                                 # Retry once in-loop with an [EMPTY_RESPONSE] notice so
                                 # the model can recover; exhaust → explicit error (never
-                                # silent empty success). Only continue when another
-                                # for-loop iteration remains — otherwise continue falls
-                                # into for-else as "Max iterations reached" and loses
-                                # finish_reason / reasoning_present.
+                                # silent empty success). Soft-stop RAS empties are handled
+                                # above and do not consume this budget. Only continue when
+                                # another for-loop iteration remains — otherwise continue
+                                # falls into for-else as "Max iterations reached" and
+                                # loses EMPTY_RESPONSE / finish_reason / reasoning_present.
                                 if not content:
                                     await context.add_messages(
                                         UserMessage(
@@ -2478,10 +3093,7 @@ class ReActAgent(BaseAgent):
                                         continue
                                     await self.context_engine.save_contexts(session)
                                     result = {
-                                        "output": (
-                                            "模型未返回有效内容（空响应），"
-                                            "请重试或检查上下文。"
-                                        ),
+                                        "output": EMPTY_RESPONSE_MSG,
                                         "result_type": "error",
                                         "finish_reason": getattr(
                                             ai_message, "finish_reason", "null"

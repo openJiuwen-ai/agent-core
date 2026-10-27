@@ -112,10 +112,9 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
         removed_path_set = set(self._removed_paths)
         kept_catalog: list[CatalogRecord] = []
         for record in existing_catalog:
-            normalized_path = normalize_manifest_item_path(record.skill_path)
-            if normalized_path not in remaining_paths:
+            if not _record_matches_manifest_paths(record, remaining_paths):
                 continue
-            if normalized_path in removed_path_set:
+            if _record_matches_manifest_paths(record, removed_path_set):
                 continue
             kept_catalog.append(record)
 
@@ -172,7 +171,7 @@ class _IncrementalIndexBuildWorkflow(_IndexBuildWorkflow):
     ) -> tuple[list[dict[str, object]], list[CatalogRecord], set[str], set[str]]:
         removed_worker_ids: set[str] = set()
         for record in existing_catalog:
-            if normalize_manifest_item_path(record.skill_path) in removed_path_set:
+            if _record_matches_manifest_paths(record, removed_path_set):
                 removed_worker_ids.add(record.worker_id)
         affected_branch_cids = parent_branches_for_workers(existing_nodes, removed_worker_ids)
         nodes = prune_deleted_skills_from_tree(existing_nodes, removed_worker_ids=removed_worker_ids)
@@ -284,3 +283,10 @@ def _non_empty_strings(values: Sequence[str]) -> list[str]:
         if normalized:
             results.append(normalized)
     return results
+
+
+def _record_matches_manifest_paths(record: CatalogRecord, manifest_paths: set[str]) -> bool:
+    if normalize_manifest_item_path(record.skill_path) in manifest_paths:
+        return True
+    worker_id = str(record.worker_id or "").strip()
+    return bool(worker_id) and f"jsonl://skill/{worker_id}" in manifest_paths

@@ -228,6 +228,22 @@ class BridgeMemberSpec(TeamMemberSpec):
     """
 
 
+class ExternalCliModelConfig(BaseModel):
+    """Model endpoint configuration for SDK-backed external CLI agents."""
+
+    provider: str | None = Field(default=None, min_length=1)
+    """Logical provider name used by the target CLI runtime."""
+
+    model: str | None = Field(default=None, min_length=1)
+    """Model name passed to the target CLI runtime."""
+
+    api_base: str | None = Field(default=None, min_length=1)
+    """Base URL for the target model API."""
+
+    api_key: str | None = Field(default=None, min_length=1)
+    """API key injected into the target CLI subprocess environment."""
+
+
 class ExternalCliAgentSpec(BaseModel):
     """Static launch config for one kind of external CLI agent.
 
@@ -238,7 +254,7 @@ class ExternalCliAgentSpec(BaseModel):
     name (each member still gets its own subprocess and team-join identity).
     """
 
-    model_config = ConfigDict(protected_namespaces=())
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
     cli_agent: str
     """External agent kind identifier (``"claude"`` / ``"codex"`` /
@@ -254,11 +270,20 @@ class ExternalCliAgentSpec(BaseModel):
     and Codex uses :attr:`codex_bin` when a custom executable is required.
     """
 
-    codex_bin: str | None = None
+    cli_path: str | None = Field(default=None, min_length=1)
+    """Optional executable path for SDK-backed CLI agents.
+
+    For Claude this is passed to ``ClaudeAgentOptions.cli_path``. For Codex it
+    maps to ``CodexConfig.codex_bin``. Adapter-backed CLIs should continue to
+    use :attr:`command` when overriding the full launch argv.
+    """
+
+    codex_bin: str | None = Field(default=None, min_length=1)
     """Optional Codex executable path passed to ``CodexConfig.codex_bin``.
 
-    This field is valid only for ``cli_agent="codex"``. The Codex SDK remains
-    responsible for constructing its ``app-server`` arguments.
+    This legacy field is valid only for ``cli_agent="codex"``. Prefer
+    :attr:`cli_path` for new configuration. The Codex SDK remains responsible
+    for constructing its ``app-server`` arguments.
     """
 
     cwd: Optional[str] = None
@@ -311,6 +336,14 @@ class ExternalCliAgentSpec(BaseModel):
     """Extra environment variables for the CLI subprocess, merged over the
     inherited process env (the team-join descriptor is injected separately)."""
 
+    external_model_config: ExternalCliModelConfig | None = Field(default=None, alias="model_config")
+    """Optional model endpoint configuration for SDK-backed external CLI agents.
+
+    The public YAML key is ``model_config``. The Python attribute is named
+    ``external_model_config`` to avoid colliding with Pydantic's class-level
+    ``model_config`` setting.
+    """
+
     ssh_transport: SshTransportConfig | None = None
     """Optional ssh endpoint used to launch this CLI on a remote host.
 
@@ -325,8 +358,10 @@ class ExternalCliAgentSpec(BaseModel):
         """Keep SDK binary selection separate from adapter argv overrides."""
         if self.cli_agent == "codex" and self.command is not None:
             raise ValueError(
-                "Codex SDK config does not support command; use codex_bin to select a custom executable",
+                "Codex SDK config does not support command; use cli_path to select a custom executable",
             )
+        if self.cli_agent not in {"claude", "codex"} and self.cli_path is not None:
+            raise ValueError("cli_path is only valid when cli_agent is 'claude' or 'codex'")
         if self.cli_agent != "codex" and self.codex_bin is not None:
             raise ValueError("codex_bin is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.mcp_default_tools_approval_mode is not None:
@@ -341,6 +376,8 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("codex_turn_idle_timeout_s is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.codex_turn_idle_retries is not None:
             raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
+        if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
+            raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
         return self
 
 
@@ -478,6 +515,7 @@ __all__ = [
     "BridgeMailboxInjectMode",
     "BridgeMemberSpec",
     "ExternalCliAgentSpec",
+    "ExternalCliModelConfig",
     "MemberOpResult",
     "MemberSpecBase",
     "TeamCompletionSnapshot",

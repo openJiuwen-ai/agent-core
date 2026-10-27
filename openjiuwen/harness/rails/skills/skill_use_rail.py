@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import time
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -882,6 +883,22 @@ class SkillUseRail(DeepAgentRail):
 
         await self.refresh_skill_prompt(ctx)
 
+    @staticmethod
+    def _is_plain_skill_directory(item: Path) -> bool:
+        """Allow the lexical path only for a freshly checked ordinary directory."""
+        try:
+            info = item.lstat()
+        except OSError:
+            # This optional probe must not introduce a new failure mode.
+            return False
+        if not stat.S_ISDIR(info.st_mode):
+            return False
+        attributes = getattr(info, "st_file_attributes", None)
+        if attributes is not None:
+            return not bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        # Windows requires reparse-point metadata; unsupported platforms fall back.
+        return os.name == "posix"
+
     def _build_skills_snapshot_signature(self) -> Tuple[Tuple[str, float], ...]:
         """Build the same incremental-refresh signature used by _prepare_skills."""
         entries: List[Tuple[str, float]] = []
@@ -900,7 +917,12 @@ class SkillUseRail(DeepAgentRail):
                 if not skill_md_path.exists():
                     continue
 
-                entries.append((str(item.resolve()), skill_md_path.stat().st_mtime))
+                # Roots are resolved each scan; iterdir supplies the actual child name.
+                if self._is_plain_skill_directory(item):
+                    key = str(item)
+                else:
+                    key = str(item.resolve())
+                entries.append((key, skill_md_path.stat().st_mtime))
 
         return tuple(entries)
 

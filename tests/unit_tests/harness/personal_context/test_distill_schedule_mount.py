@@ -8,12 +8,20 @@ from pathlib import Path
 import pytest
 
 from openjiuwen.harness.personal_context.config import PersonalContextConfig
-from openjiuwen.harness.personal_context.distill.corpus import FixtureCorpus
+from openjiuwen.harness.personal_context.distill.corpus import (
+    FixtureCorpus,
+    default_fixture_messages,
+)
 from openjiuwen.harness.personal_context.distill.runner import DistillRunResult
 from openjiuwen.harness.personal_context.personal_context import PersonalContext
 
 
-def _pc_config(*, distill_enabled: bool, poll_seconds: float = 0.05) -> PersonalContextConfig:
+def _pc_config(
+    *,
+    distill_enabled: bool,
+    poll_seconds: float = 0.05,
+    message_threshold: int = 100,
+) -> PersonalContextConfig:
     return PersonalContextConfig.from_dict(
         {
             "collection_enabled": True,
@@ -25,7 +33,7 @@ def _pc_config(*, distill_enabled: bool, poll_seconds: float = 0.05) -> Personal
             "distill": {
                 "enabled": distill_enabled,
                 "interval_seconds": 0.001,
-                "message_threshold": 100,
+                "message_threshold": message_threshold,
                 "lease_seconds": 60,
                 "poll_seconds": poll_seconds,
             },
@@ -52,9 +60,12 @@ class _FakeRunner:
 @pytest.mark.asyncio
 async def test_personal_context_starts_distill_loop_when_enabled_and_injected(tmp_path: Path):
     pc = PersonalContext(home=tmp_path)
-    await pc.set_configuration(_pc_config(distill_enabled=True))
+    # Auto due requires volume + cooldown (AND); empty corpus no longer triggers via interval alone.
+    await pc.set_configuration(
+        _pc_config(distill_enabled=True, message_threshold=1),
+    )
     runner = _FakeRunner()
-    pc.set_distill_corpus(FixtureCorpus([]))
+    pc.set_distill_corpus(FixtureCorpus(default_fixture_messages()[:1]))
     pc.set_distill_runner(runner)
 
     await pc.activate_runtime()

@@ -6,7 +6,6 @@ from typing import Awaitable, Callable, Generic, TypeAlias, TypeVar
 from pydantic import BaseModel
 
 from openjiuwen.core.multi_agent import BaseTeam, TeamCard
-from openjiuwen.core.session.internal.agent_team import AgentTeamSession
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.legacy import LegacyBaseAgent as BaseAgent
 from openjiuwen.core.workflow import Workflow
@@ -292,6 +291,16 @@ class Error(Generic[E]):
 
         Note: Having both msg() and error() methods that return the same thing
               might be redundant. Consider consolidating to one method.
+        """
+        return self._error
+
+    @property
+    def error_message(self) -> E:
+        """Property alias for the error value (mirrors ``msg()``/``error()``).
+
+        Downstream callers commonly probe a Result via ``getattr(result,
+        "error_message", None)``; expose the value through that name so the
+        underlying error is reachable without calling a method.
         """
         return self._error
 

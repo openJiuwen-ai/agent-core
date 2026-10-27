@@ -1,26 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Serializable DeepAgent specifications for network distribution.
-
-All types in this module are Pydantic BaseModels that support full JSON
-round-trip via ``model_dump_json()`` / ``model_validate_json()``.
-Call ``build()`` on a spec to materialize the corresponding runtime object.
-
-This is the harness-level home for ``DeepAgentSpec`` and its leaf specs:
-``RailSpec`` / ``BuiltinToolSpec`` / ``SubAgentSpec``. It was relocated here
-from ``agent_teams/schema`` because every declaration in it depends only on
-``core.*`` + ``harness.*`` — it describes a single DeepAgent's runtime shape,
-not team topology. Keeping it under ``harness/schema`` lets
-``DeepAgent`` / ``factory`` / team code all reference one DeepAgent-level
-schema with the dependency direction ``agent_teams -> harness``.
-
-The flat route is the single source of truth here: ``DeepAgentSpec`` carries
-tools / mcps / rails / subagents / skills directly; ``resolve_parts`` /
-``build`` materialize them via the leaf ``Spec.build()`` chain. /
-Hot load uses ``ExpertHarnessSpec``
-→ ``resolve_expert_harness_parts`` → ``expert_harness_runtime.apply_expert_harness_hot``.
-"""
+"""Serializable DeepAgentSpec and leaf specs for cold construction."""
 
 from __future__ import annotations
 
@@ -164,6 +145,10 @@ class VisionModelSpec(BaseModel):
     base_url: str = DEFAULT_OPENAI_BASE_URL
     model: str = DEFAULT_OPENAI_VISION_MODEL
     max_retries: int = 3
+    #: Auth headers for session-mode accounts (mirror of the dataclass field);
+    #: without this the dataclass → spec → dataclass round-trip silently drops
+    #: the headers and team/member agents lose vision authentication.
+    default_headers: Optional[dict[str, str]] = None
 
     def build(self) -> VisionModelConfig:
         return VisionModelConfig(**self.model_dump())
@@ -488,7 +473,7 @@ class DeepAgentSpec(BaseModel):
     enable_task_planning: bool = False
     restrict_to_sandbox: bool = False
     auto_create_workspace: bool = True
-    completion_timeout: float = 600.0
+    completion_timeout: float | None = 600.0
     progressive_tool: Optional[ProgressiveToolSpec] = None
     approval_required_tools: Optional[list[str]] = None
     context_engine_config: Optional[Any] = None

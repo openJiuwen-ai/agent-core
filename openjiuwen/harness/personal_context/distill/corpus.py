@@ -2,9 +2,26 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
 
 from openjiuwen.harness.personal_context.distill.types import CorpusMessage
+
+
+@dataclass(frozen=True, slots=True)
+class DistillCorpusBatch:
+    """One corpus window: downsampled messages plus PRE-downsample facts.
+
+    ``eligible_count`` and ``window_max_sent_at_ms`` describe the full
+    eligible window (before ``max_messages`` downsampling), so the runner can
+    park the cursor at the last eligible message even when the window was
+    sampled down for the prompt.
+    """
+
+    messages: list[CorpusMessage]
+    sampled: bool
+    eligible_count: int
+    window_max_sent_at_ms: int | None
 
 
 class CorpusPort(Protocol):
@@ -14,8 +31,8 @@ class CorpusPort(Protocol):
         window_start_ms: int,
         window_end_ms: int,
         max_messages: int,
-    ) -> tuple[list[CorpusMessage], bool]:
-        """Return (messages, sampled) in [window_start_ms, window_end_ms)."""
+    ) -> DistillCorpusBatch:
+        """Return one window batch in [window_start_ms, window_end_ms)."""
 
     def count_eligible_since(self, *, cursor_ms: int, until_ms: int) -> int:
         """Count eligible non-empty messages in [cursor_ms, until_ms)."""
@@ -63,13 +80,19 @@ class FixtureCorpus:
         window_start_ms: int,
         window_end_ms: int,
         max_messages: int,
-    ) -> tuple[list[CorpusMessage], bool]:
+    ) -> DistillCorpusBatch:
         selected = _eligible_in_window(
             self._messages,
             window_start_ms=window_start_ms,
             window_end_ms=window_end_ms,
         )
-        return _downsample(selected, max_messages)
+        picked, sampled = _downsample(selected, max_messages)
+        return DistillCorpusBatch(
+            messages=picked,
+            sampled=sampled,
+            eligible_count=len(selected),
+            window_max_sent_at_ms=selected[-1].sent_at_ms if selected else None,
+        )
 
     def count_eligible_since(self, *, cursor_ms: int, until_ms: int) -> int:
         return len(

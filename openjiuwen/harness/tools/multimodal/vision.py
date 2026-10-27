@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, Optional
 from urllib.parse import urlparse
@@ -101,6 +103,47 @@ def _extract_response_text(response: Any) -> str:
     return str(content).strip()
 
 
+def _vision_default_headers_from_env() -> Optional[Dict[str, str]]:
+    """Auth headers injected by the host relay via VISION_DEFAULT_HEADERS (JSON).
+
+    Session-mode accounts authenticate with a custom Authorization header
+    instead of the placeholder bearer key; the OpenAI client merges
+    default_headers over its built-in Authorization, so the real header wins.
+    """
+    raw = (os.getenv("VISION_DEFAULT_HEADERS") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(parsed, dict) or not parsed:
+        return None
+    return {str(key): str(value) for key, value in parsed.items()}
+
+
+def _normalize_headers(headers: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Normalize only the auth header key; every other header name passes through.
+
+    Ensures a custom auth header (e.g. ``authorization``) correctly overrides
+    the SDK's built-in ``Authorization`` on ALL openai library versions. The
+    merge inside the SDK is a case-sensitive dict update, so ``authorization``
+    and ``Authorization`` would coexist as two headers (placeholder Bearer +
+    real session credential).
+
+    Other header names are preserved verbatim: rewriting them (e.g.
+    ``OpenAI-Organization`` → ``Openai-Organization``) would defeat the
+    override of the SDK's org/project headers and send both values in the
+    request.
+    """
+    if not headers:
+        return headers
+    return {
+        "Authorization" if key.lower() == "authorization" else key: value
+        for key, value in headers.items()
+    }
+
+
 def _invoke_chat_completion(
     config: VisionModelConfig,
     prompt: str,
@@ -111,7 +154,13 @@ def _invoke_chat_completion(
             "Vision model config missing api_key."
         )
 
-    client = OpenAI(api_key=config.api_key, base_url=config.base_url)
+    client = OpenAI(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        default_headers=_normalize_headers(
+            config.default_headers or _vision_default_headers_from_env()
+        ),
+    )
     response = client.chat.completions.create(
         model=config.model,
         messages=[

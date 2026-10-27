@@ -61,7 +61,6 @@ from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig
 
 
@@ -345,7 +344,7 @@ def make_card(name: str = "native_harness_test") -> AgentCard:
 def make_spec(
     card: AgentCard | None = None,
     *,
-    completion_timeout: float = 600.0,
+    completion_timeout: float | None = 600.0,
     rails: list[Any] | None = None,
 ) -> Any:
     """Build a fake DeepAgentSpec whose ``resolve_parts`` yields task-loop parts.
@@ -358,7 +357,8 @@ def make_spec(
 
     Args:
         card: Optional card for the spec (and thus the harness).
-        completion_timeout: Round completion timeout in seconds.
+        completion_timeout: Slow-round warning threshold in seconds; None
+            disables the warning.
 
     Returns:
         A fake spec exposing ``resolve_parts(context) -> DeepAgentParts``.

@@ -128,9 +128,15 @@ class SpawnManager:
             # third-party CLI binary is the subprocess driven via stdin.
             from openjiuwen.agent_teams.spawn.external_cli_spawn import external_cli_spawn
 
+            team_backend = self._configurator.team_backend
+            if team_backend is not None:
+                hitt_enabled = team_backend.hitt_enabled()
+            else:
+                hitt_enabled = False
             handle = await external_cli_spawn(
-                team_agent=self._get_team_agent(),
+                spec=spec,
                 ctx=ctx,
+                hitt_enabled=hitt_enabled,
                 initial_message=initial_message,
                 session_id=get_session_id() or session,
                 resume_external_backend=resume_external_backend,
@@ -214,15 +220,16 @@ class SpawnManager:
     def has_live_handle(self, member_name: str) -> bool:
         """Return whether ``member_name`` already has a registered spawn handle.
 
-        A present handle means the member was spawned in this runtime and has
-        not been cleaned up; ``recover_team`` uses this to skip re-spawning a
+        A live handle means the member is still running in this runtime;
+        ``recover_team`` uses this to skip re-spawning a
         teammate that is already running (unhealthy members are restarted via
         the ``on_unhealthy`` callback, not by ``recover_team``).
         """
-        return self.spawned_handles.get(member_name) is not None
+        handle = self.spawned_handles.get(member_name)
+        return handle is not None and handle.is_alive
 
     async def cleanup_teammate(self, member_name: str) -> None:
-        handle = self.spawned_handles.pop(member_name, None)
+        handle = self.spawned_handles.get(member_name)
         if handle is None:
             return
         # Detach chunk forwarder before tearing the task down so a
@@ -235,11 +242,21 @@ class SpawnManager:
                 agent_ref.stream_controller.remove_chunk_observer(forward)
             handle.chunk_forward = None
         try:
-            await handle.stop_health_check()
+            try:
+                await handle.stop_health_check()
+            except Exception as exc:
+                team_logger.warning("Error stopping health check for teammate {}: {}", member_name, exc)
             if handle.is_alive:
                 await handle.force_kill()
         except Exception as e:
             team_logger.error("Error cleaning up teammate {}: {}", member_name, e)
+            if handle.is_alive:
+                raise
+        finally:
+            if not handle.is_alive and self.spawned_handles.get(member_name) is handle:
+                self.spawned_handles.pop(member_name, None)
+        if handle.is_alive:
+            raise RuntimeError(f"Teammate {member_name} is still running after cleanup")
 
     async def restart_teammate(self, member_name: str, max_retries: int = 3) -> bool:
         if member_name in self._spawning:
@@ -430,12 +447,13 @@ class SpawnManager:
         # Route through cleanup_teammate so chunk forwarders are
         # detached the same way as the single-member teardown path —
         # otherwise inprocess observers would leak across team shutdowns.
-        for member_name in list(self.spawned_handles.keys()):
-            try:
-                await self.cleanup_teammate(member_name)
-            except Exception as e:
-                team_logger.error("Error shutting down teammate {}: {}", member_name, e)
-        self.spawned_handles.clear()
+        results = await asyncio.gather(
+            *(self.cleanup_teammate(name) for name in list(self.spawned_handles)),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def cancel_recovery_tasks(self) -> None:
         if self.recovery_tasks:

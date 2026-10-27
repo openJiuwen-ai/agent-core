@@ -12,6 +12,7 @@ from typing import (
     Dict,
     List,
     Optional,
+    Tuple,
     Union,
 )
 
@@ -19,12 +20,13 @@ from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import (
-    llm_logger,
     LogEventType,
+    llm_logger,
 )
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
     ModelClientConfig,
     ModelRequestConfig,
 )
@@ -40,6 +42,10 @@ from openjiuwen.core.foundation.llm.schema.message import (
     UserMessage,
 )
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.utf8_sanitize import (
+    sanitize_utf8_text,
+    sanitize_utf8_tree,
+)
 from openjiuwen.core.foundation.tool import ToolInfo
 
 
@@ -398,7 +404,12 @@ class BaseModelClient(ABC):
         """Validate configuration parameters (subclasses can optionally override)"""
         client_name = self._get_client_name()
 
-        if not self.model_client_config.api_key:
+        auth_mode = getattr(
+            self.model_client_config,
+            "auth_mode",
+            LLMAuthMode.ApiKey.value,
+        )
+        if auth_mode in (LLMAuthMode.ApiKey, LLMAuthMode.ApiKey.value) and not self.model_client_config.api_key:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg=f"model client config api_key is required for {client_name}.")
         if not self.model_client_config.api_base:
@@ -544,6 +555,16 @@ class BaseModelClient(ABC):
 
         return result
 
+    @staticmethod
+    def _sanitize_utf8_text(value: str) -> Tuple[str, int]:
+        """Replace UTF-16 surrogate code units so the text is UTF-8 encodable."""
+        return sanitize_utf8_text(value)
+
+    @classmethod
+    def _sanitize_utf8_tree(cls, value: Any) -> Tuple[Any, int]:
+        """Recursively sanitize string leaves in request payloads."""
+        return sanitize_utf8_tree(value)
+
     def _build_request_params(
             self,
             *,
@@ -632,6 +653,21 @@ class BaseModelClient(ABC):
         # Then add kwargs parameters (will override model_config params with same key)
         filtered_kwargs = {k: v for k, v in kwargs.items() if k not in internal_params}
         params.update(filtered_kwargs)
+
+        # Drop unpaired UTF-16 surrogates before OpenAI SDK JSON encode.
+        # Covers messages/tools/stop/extra string leaves for all OpenAI-compatible clients.
+        params, surrogate_hits = self._sanitize_utf8_tree(params)
+        messages_dict = params.get("messages", messages_dict)
+        tools_dict = params.get("tools", tools_dict)
+        if surrogate_hits:
+            llm_logger.warning(
+                "Stripped UTF-16 surrogate code units from LLM request params "
+                "before UTF-8 encode (count=%s).",
+                surrogate_hits,
+                event_type=LogEventType.LLM_CALL_START,
+                model_name=model if model else self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+            )
 
         # Logging
         client_name = self._get_client_name()

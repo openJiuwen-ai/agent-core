@@ -2,7 +2,9 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+from openjiuwen.core.foundation.llm.utf8_sanitize import sanitize_utf8_text
 
 
 class ToolCall(BaseModel):
@@ -23,3 +25,11 @@ class ToolCall(BaseModel):
     arguments: str
     index: Optional[int] = None
     response_item_id: Optional[str] = None
+
+    @field_validator("name", "arguments", mode="before")
+    @classmethod
+    def _sanitize_inbound_utf8(cls, value: object) -> object:
+        """Inbound LLM tool fragments: strip lone surrogates before persistence/WS."""
+        if isinstance(value, str):
+            return sanitize_utf8_text(value)[0]
+        return value

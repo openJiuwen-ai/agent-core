@@ -63,6 +63,7 @@ class SubagentSessionManager:
         activity_handler: Callable[[SubagentActivity], None] | None = None,
         transcript_handler: Callable[[SubagentMessage], Awaitable[None]] | None = None,
         chunk_handler: Callable[[str, Any], Awaitable[None]] | None = None,
+        turn_released_handler: Callable[[str], None] | None = None,
     ) -> None:
         self._parent_agent = parent_agent
         self._config = config
@@ -74,6 +75,7 @@ class SubagentSessionManager:
         # Host hook for raw child stream chunks (subagent_id, chunk). Runs before
         # activity/transcript projection so a host can mirror chunks verbatim.
         self._chunk_handler = chunk_handler
+        self._turn_released_handler = turn_released_handler
         self._instances: dict[str, SubagentInstance] = {}
         self._projectors: dict[str, ActivityProjector] = {}
         self._transcript_projectors: dict[str, TranscriptProjector] = {}
@@ -243,6 +245,9 @@ class SubagentSessionManager:
             on_turn_start=on_turn_start,
             on_turn_finished=on_turn_finished,
             on_status_changed=on_status_changed,
+            on_turn_released=(
+                (lambda: self._turn_released_handler(subagent_id)) if self._turn_released_handler is not None else None
+            ),
             on_chunk=on_chunk
             if (
                 self._activity_handler is not None

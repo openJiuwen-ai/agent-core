@@ -8,8 +8,47 @@ from openjiuwen.core.session.stream import StreamMode
 from openjiuwen.core.session.stream import StreamEmitter
 from openjiuwen.core.session.stream import StreamWriterManager
 from openjiuwen.core.session.stream import StreamWriter
+from openjiuwen.core.session.stream import AsyncStreamQueue
 
 pytestmark = pytest.mark.asyncio
+
+
+async def test_send_completion_does_not_swallow_external_cancel(monkeypatch):
+    queue = AsyncStreamQueue()
+    original_put = queue._stream_queue.put
+    sender = None
+
+    async def put_then_cancel(data):
+        await original_put(data)
+        asyncio.get_running_loop().call_soon(sender.cancel)
+
+    monkeypatch.setattr(queue._stream_queue, "put", put_then_cancel)
+    sender = asyncio.create_task(queue.send("frame"))
+    with pytest.raises(asyncio.CancelledError):
+        await sender
+    assert queue._stream_queue.get_nowait() == "frame"
+
+
+@pytest.mark.parametrize("attempt_timeout", [0, -1, 0.001])
+async def test_send_timeout_preserves_retry_limit(monkeypatch, attempt_timeout):
+    queue = AsyncStreamQueue(maxsize=1)
+    queue._stream_queue.put_nowait("full")
+    calls = []
+    from openjiuwen.core.session.stream import emitter
+    monkeypatch.setattr(emitter.session_logger, "error", lambda *args, **kwargs: calls.append(args[0]))
+    await queue.send("blocked", attempt_timeout=attempt_timeout, max_retries=2)
+    assert calls.count("Stream data send timeout") == 2
+    assert queue._sent_count == 0
+    assert queue._stream_queue.get_nowait() == "full"
+
+
+@pytest.mark.parametrize("attempt_timeout", [0, -1])
+async def test_nonpositive_send_timeout_does_not_enqueue(attempt_timeout):
+    queue = AsyncStreamQueue()
+    await queue.send("must-not-send", attempt_timeout=attempt_timeout, max_retries=1)
+    assert queue._stream_queue.empty()
+    assert queue._sent_count == 0
+
 
 class TestStreamOutput:
     @pytest.fixture(autouse=True)

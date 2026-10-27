@@ -23,8 +23,9 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
 
+from openjiuwen.agent_teams.constants import USER_PSEUDO_MEMBER_NAME
 from openjiuwen.agent_teams.context import get_session_id
-from openjiuwen.agent_teams.i18n import t
+from openjiuwen.agent_teams.i18n import STRINGS, t
 from openjiuwen.agent_teams.interaction.bridge_protocol import BridgeProtocolAdapter
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import (
@@ -80,6 +81,15 @@ class CapabilityOverrides:
     enable_hitt: bool | None = None
     enable_bridge: bool | None = None
     enable_task_verification: bool | None = None
+
+
+# Relay-turn guard. Bounds so the settle-time "someone was
+# @-mentioned/invited but never spoke" check can never become its own hang:
+# one nudge per trigger, a small session-wide budget, fail-open after both
+# are spent. The nudge itself is a tagged mailbox message (``relay_nudge``)
+# that the guard's scan skips, so a nudge never creates a new trigger.
+_RELAY_NUDGE_BUDGET = 8
+_RELAY_NUDGE_EXCERPT_CHARS = 160
 
 
 class TeamBackend:
@@ -200,6 +210,13 @@ class TeamBackend:
         self.db = db
         self.messager = messager
         self.debate_state = DebateRunState()
+        # Relay-turn guard state. ``_relay_nudged`` keys are
+        # ``(kind, trigger_id, member)`` so each mention/invitee nudge fires
+        # at most once per backend session; the budget is a hard session
+        # ceiling after which the guard fails open (see ``has_pending_relay_turn``).
+        self._relay_nudged: set[tuple[str, str, str]] = set()
+        self._relay_nudge_budget: int = _RELAY_NUDGE_BUDGET
+        self._relay_guard_lock = asyncio.Lock()
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator
@@ -1023,8 +1040,8 @@ class TeamBackend:
     async def is_team_completed(self) -> Optional[TeamCompletionSnapshot]:
         """Evaluate whether the whole team has reached a completed state.
 
-        Returns a snapshot only when all three conditions hold at once,
-        checked in order task -> member -> message:
+        Returns a snapshot only when all conditions hold at once,
+        checked in order task -> member -> message -> relay turn:
             1. No active task -- an empty board is valid; when tasks exist
                they must all be terminal (``TASK_TERMINAL_STATUSES``).
             2. Every member -- including the leader -- is in a settled
@@ -1033,14 +1050,19 @@ class TeamBackend:
                broadcasts included. Completion is judged strictly: any
                undelivered message -- direct or fan-out broadcast -- blocks
                the team from concluding.
+            4. No pending relay turn -- nobody was @-mentioned (or invited
+               into an active taskless debate round) and left without
+               producing any output.
 
         This is the single source of truth for round completion; the
         periodic POLL_TASK path closes the stream only when this returns
         a snapshot.
 
-        Read-only; safe to call repeatedly. Queries the member DAO directly
-        so the leader itself is part of the roster check (``list_members``
-        excludes the calling member).
+        Read-only except for the relay-turn guard, which may deliver at
+        most one wake nudge per pending turn (bounded, fail-open). Safe to
+        call repeatedly. Queries the member DAO directly so the leader
+        itself is part of the roster check (``list_members`` excludes the
+        calling member).
 
         Returns:
             A ``TeamCompletionSnapshot`` when the team is complete,
@@ -1059,7 +1081,277 @@ class TeamBackend:
         if await self.message_manager.has_unread_messages(include_broadcast=True):
             return None
 
+        # Relay-turn guard: a member @-mentioned in the mailbox (or invited
+        # into an active taskless debate round) that has produced no output
+        # since still owes a turn — the discussion is not over even though
+        # every mailbox is empty. Delivers one wake nudge and blocks this
+        # completion evaluation; bounded and fail-open.
+        if await self.has_pending_relay_turn():
+            return None
+
         return TeamCompletionSnapshot(member_count=len(members), task_count=len(tasks))
+
+    async def has_pending_relay_turn(self) -> bool:
+        """Detect an unanswered relay turn and nudge the pending member once.
+
+        Two triggers, evaluated against the team mailbox:
+
+          1. mention -- the newest message whose body @-mentions a current
+             roster member that never spoke afterwards.
+          2. invitee -- an active, unfinalized taskless debate round whose
+             invited participant produced no message output at all this
+             round (gated on an all-terminal task board, i.e. 思辨分支).
+
+        On a trigger the guard sends each pending member at most one unread
+        system nudge (P2P, tagged ``relay_nudge`` so the scan skips it) and
+        reports ``True`` so callers block settlement; the unread nudge wakes
+        the member through the normal mailbox path. Every trigger nudges
+        once and the guard holds a session-wide ``_RELAY_NUDGE_BUDGET``;
+        once a trigger was nudged or the budget is spent it fails open
+        (reports ``False``) so completion can never hang on the guard alone.
+
+        Returns:
+            ``True`` when a relay turn is pending (and a nudge was just
+            delivered), ``False`` otherwise.
+        """
+        async with self._relay_guard_lock:
+            return await self._has_pending_relay_turn_locked()
+
+    async def _has_pending_relay_turn_locked(self) -> bool:
+        wakeable = await self._relay_wakeable_roster()
+        if not wakeable:
+            return False
+        try:
+            messages = await self.message_manager.get_team_messages(self.team_name)
+        except Exception as exc:  # noqa: BLE001 - a guard must not break completion
+            team_logger.warning(f"[relay-guard] message scan failed: {exc}")
+            return False
+        if not messages:
+            return False
+        msgs = sorted(messages, key=lambda m: getattr(m, "timestamp", 0) or 0)
+        last_index: dict[str, int] = {}
+        for index, message in enumerate(msgs):
+            sender = str(getattr(message, "from_member_name", "") or "").strip()
+            if sender:
+                last_index[sender] = index
+
+        mention = self._latest_unanswered_mention(msgs, wakeable, last_index)
+        if mention is not None:
+            index, message, pending = mention
+            todo = [
+                name
+                for name in sorted(pending)
+                if ("mention", message.message_id, name) not in self._relay_nudged
+            ]
+            if not todo:
+                return False  # already nudged for this mention — fail open
+            delivered = await self._deliver_relay_nudges(
+                todo,
+                mentioner=str(getattr(message, "from_member_name", "") or "").strip()
+                or self.leader_member_name,
+                excerpt=str(getattr(message, "content", "") or ""),
+                kind="mention",
+                trigger_key=message.message_id,
+            )
+            return bool(delivered)
+
+        return await self._pending_silent_invitee(msgs, wakeable, last_index)
+
+    def _latest_unanswered_mention(
+        self,
+        msgs: list,
+        wakeable: dict[str, str],
+        last_index: dict[str, int],
+    ) -> Optional[tuple[int, Any, set[str]]]:
+        """Newest non-nudge mailbox message with an unanswered @-mention.
+
+        Scans newest-first and decides on the first mention-bearing message
+        only: older unresolved mentions are stale noise once a newer turn
+        started. Returns ``(index, message, pending_names)`` or ``None``.
+        """
+        for index in range(len(msgs) - 1, -1, -1):
+            message = msgs[index]
+            if self._is_relay_nudge(message):
+                continue
+            sender = str(getattr(message, "from_member_name", "") or "").strip()
+            content = str(getattr(message, "content", "") or "")
+            if not content:
+                continue
+            pending: set[str] = set()
+            for name, display in wakeable.items():
+                if name == sender:
+                    continue
+                if not self._mentions(content, name, display):
+                    continue
+                if last_index.get(name, -1) > index:
+                    continue
+                pending.add(name)
+            if pending:
+                return index, message, pending
+        return None
+
+    async def _pending_silent_invitee(
+        self,
+        msgs: list,
+        wakeable: dict[str, str],
+        last_index: dict[str, int],
+    ) -> bool:
+        """Invitee trigger: a taskless debate round with a silent participant.
+
+        Reads the leader-side ``debate_state`` (registered by
+        ``DebateRoundCapRail.begin_round``) via duck typing so this module
+        stays free of rail imports. An invitee counts as silent when its
+        last mailbox speech predates the round's first tagged message.
+        """
+        debate = getattr(self, "debate_state", None)
+        round_id = str(getattr(debate, "round_id", "") or "")
+        if not round_id or bool(getattr(debate, "finalized", True)):
+            return False
+        try:
+            tasks = await self.task_manager.list_tasks()
+        except Exception as exc:  # noqa: BLE001 - a guard must not break completion
+            team_logger.warning(f"[relay-guard] task scan failed: {exc}")
+            return False
+        if any(getattr(task, "status", None) not in TASK_TERMINAL_STATUSES for task in tasks or []):
+            return False
+
+        invited = set(getattr(debate, "expected_participants", None) or set())
+        for targets in (getattr(debate, "invitation_calls", None) or {}).values():
+            invited |= set(targets)
+        invited -= set(getattr(debate, "failed_participants", None) or set())
+        invited &= set(wakeable)
+        if not invited:
+            return False
+
+        round_start = len(msgs)
+        for index, message in enumerate(msgs):
+            meta = self._coordination_meta(message)
+            if meta and str(meta.get("round_id") or "") == round_id:
+                round_start = index
+                break
+        silent = [name for name in sorted(invited) if last_index.get(name, -1) < round_start]
+        todo = [
+            name
+            for name in silent
+            if ("invitee", round_id, name) not in self._relay_nudged
+        ]
+        if not todo:
+            return False
+        delivered = await self._deliver_relay_nudges(
+            todo,
+            mentioner=self.leader_member_name or self.member_name,
+            excerpt="",
+            kind="invitee",
+            trigger_key=round_id,
+        )
+        return bool(delivered)
+
+    async def _relay_wakeable_roster(self) -> dict[str, str]:
+        """Roster members a mailbox nudge can actually wake.
+
+        Excludes the ``user`` pseudo-member, external CLI members (no
+        harness mailbox to wake — nudging or blocking on them would only
+        hang the round) and members that already errored out.
+        """
+        try:
+            members = await self.db.member.get_team_members(self.team_name)
+        except Exception as exc:  # noqa: BLE001 - a guard must not break completion
+            team_logger.warning(f"[relay-guard] roster lookup failed: {exc}")
+            return {}
+        wakeable: dict[str, str] = {}
+        for member in members:
+            name = str(getattr(member, "member_name", "") or "").strip()
+            if not name or name == USER_PSEUDO_MEMBER_NAME:
+                continue
+            if self.is_external_cli_agent(name):
+                continue
+            if getattr(member, "status", None) == MemberStatus.ERROR.value:
+                continue
+            if getattr(member, "execution_status", None) == ExecutionStatus.FAILED.value:
+                continue
+            wakeable[name] = str(getattr(member, "display_name", "") or "").strip()
+        return wakeable
+
+    async def _deliver_relay_nudges(
+        self,
+        names: list[str],
+        *,
+        mentioner: str,
+        excerpt: str,
+        kind: str,
+        trigger_key: str,
+    ) -> int:
+        """Deliver one wake nudge per pending member; record + budget it.
+
+        The nudge is a plain P2P mailbox message from the mentioner (or the
+        leader for invitees) tagged ``relay_nudge`` in ``coordination_meta``
+        so the guard's scan never re-triggers on its own output.
+        """
+        if self._relay_nudge_budget <= 0:
+            team_logger.warning(
+                "[relay-guard] nudge budget exhausted; failing open (trigger=%s)",
+                trigger_key,
+            )
+            return 0
+        language = "en" if str(getattr(self.debate_state, "language", "cn")).startswith("en") else "cn"
+        string_key = "relay.nudge_mention" if kind == "mention" else "relay.nudge_invitee"
+        excerpt = excerpt[:_RELAY_NUDGE_EXCERPT_CHARS]
+        delivered = 0
+        for name in names:
+            content = STRINGS[language][string_key].format_map(
+                {"mentioner": mentioner, "excerpt": excerpt}
+            )
+            try:
+                message_id = await self.message_manager.send_message(
+                    content=content,
+                    to_member_name=name,
+                    from_member_name=mentioner,
+                    options=DirectMessageOptions(coordination_meta={"relay_nudge": True}),
+                )
+            except Exception as exc:  # noqa: BLE001 - a nudge must not break the guard
+                team_logger.warning(f"[relay-guard] nudge to {name} failed: {exc}")
+                continue
+            if not message_id:
+                continue
+            self._relay_nudged.add((kind, trigger_key, name))
+            self._relay_nudge_budget -= 1
+            delivered += 1
+            team_logger.info(
+                "[relay-guard] nudged %s (%s trigger=%s); budget left %d",
+                name,
+                kind,
+                trigger_key,
+                self._relay_nudge_budget,
+            )
+        return delivered
+
+    @staticmethod
+    def _coordination_meta(message: Any) -> Optional[dict]:
+        """Message ``coordination_meta`` as a dict, or ``None``.
+
+        The mailbox DAO persists ``coordination_meta`` JSON-dumped, so a row
+        read back from the database carries it as a string; in-memory
+        messages (and some fake backends) carry a real dict. Accept both.
+        """
+        meta = getattr(message, "coordination_meta", None)
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except (ValueError, TypeError):
+                return None
+        return meta if isinstance(meta, dict) else None
+
+    @staticmethod
+    def _is_relay_nudge(message: Any) -> bool:
+        meta = TeamBackend._coordination_meta(message)
+        return bool(meta and meta.get("relay_nudge"))
+
+    @staticmethod
+    def _mentions(content: str, name: str, display: str) -> bool:
+        """Whether ``content`` @-mentions the member by name or display name."""
+        if f"@{name}" in content:
+            return True
+        return bool(display) and f"@{display}" in content
 
     async def get_team_updated_at(self) -> int:
         """Probe ``team_info.updated_at`` for change detection.

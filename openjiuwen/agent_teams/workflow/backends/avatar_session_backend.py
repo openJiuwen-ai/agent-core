@@ -429,23 +429,33 @@ class AvatarSessionManager:
                     team_logger.debug("[swarmflow] structured_output detach failed for %s", state.member_name)
 
         state.turns_executed += 1
-        self._raise_on_interrupt_or_fail(state, result)
-
         turn_tokens = state.budget_rail.call_tokens - tokens_before
+
+        try:
+            self._raise_on_interrupt_or_fail(state, result)
+        except BackendError as e:
+            # Surface this turn's burned tokens on the failure so the run's
+            # token sum does not drop a budget-exhausted/failed session turn.
+            if e.tokens is None:
+                e.tokens = turn_tokens or None
+            raise
 
         if submit is not None:
             if not (submit.called and submit.captured is not None):
                 raise BackendError(
-                    f"session '{state.member_name}' did not submit a structured result via structured_output"
+                    f"session '{state.member_name}' did not submit a structured result via structured_output",
+                    tokens=turn_tokens or None,
                 )
             # Prefer free-text narration from the round; fall back to JSON capture.
-            text = prefer_natural_or_structured_text(_output_text(result), submit.captured)
+            text = prefer_natural_or_structured_text(
+                _output_text(result, tokens=turn_tokens or None), submit.captured
+            )
             return AgentResult(
                 text=text,
                 structured=submit.captured,
                 tokens=turn_tokens,
             )
-        text = _output_text(result)
+        text = _output_text(result, tokens=turn_tokens or None)
         return AgentResult(text=text, tokens=turn_tokens)
 
     @staticmethod
@@ -587,13 +597,13 @@ class AvatarSessionManager:
         return f"{prefix}-{slug}-{n}"
 
 
-def _output_text(result: Any) -> str:
+def _output_text(result: Any, *, tokens: int | None = None) -> str:
     """Extract the final output text from a round result dict."""
     if isinstance(result, dict):
         err = result.get("error")
         if err or result.get("result_type") == "error":
             msg = str(err or result.get("output") or "session turn failed")
-            raise BackendError(msg)
+            raise BackendError(msg, tokens=tokens)
         return str(result.get("output", ""))
     return str(result or "")
 

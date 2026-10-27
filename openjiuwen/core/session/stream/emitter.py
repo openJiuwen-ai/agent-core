@@ -48,14 +48,21 @@ class AsyncStreamQueue:
 
         for attempt in range(0, max_retries):
             try:
-                await asyncio.wait_for(self._stream_queue.put(data),
-                                       attempt_timeout)
+                if attempt_timeout is not None and attempt_timeout <= 0:
+                    raise asyncio.TimeoutError
+                # Keep external cancellation on this Task; wait_for's completed
+                # child branch can consume it on Python 3.11.
+                async with asyncio.timeout(attempt_timeout):
+                    await self._stream_queue.put(data)
                 self._sent_count += 1
                 log_stream_chunk(
                     "Stream data sent successfully",
                     timeout=attempt_timeout,
                     attempt=attempt + 1,
                 )
+                # An unbounded put may complete inline. Preserve the scheduling
+                # checkpoint previously provided by wait_for's child Task.
+                await asyncio.sleep(0)
                 return
             except asyncio.TimeoutError:
                 session_logger.error(
