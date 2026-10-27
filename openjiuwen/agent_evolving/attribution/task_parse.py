@@ -1267,7 +1267,8 @@ async def run_task_parse(
             if not isinstance(arguments, Mapping):
                 continue
             for path in arguments.get("paths") or ():
-                file_artifacts.append(str(path))
+                normalized = _normalize_path(str(path), workspace)
+                file_artifacts.append(normalized if normalized is not None else str(path))
         user_feedback = _user_feedback_texts(calls, user_requests)
         requirements = _requirements(calls)
         named_round = _named_user_message(calls, "report_delivery_round", user_requests)
