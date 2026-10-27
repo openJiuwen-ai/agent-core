@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set
 
 from pydantic import BaseModel
@@ -45,6 +46,16 @@ _DEFERRED_TOOL_CATALOG_FINGERPRINTS_STATE_KEY = "fingerprints"
 _DEFERRED_TOOL_REGISTRY_REVISION_METADATA_KEY = "registry_revision"
 _DEFERRED_TOOL_FULL_SNAPSHOT_INTERVAL = 10
 _NESTED_TOOL_CALL_KEY = "__progressive_nested_tool_call__"
+_PROGRESSIVE_DISCOVERY_PROPERTY = "progressive_discovery"
+
+
+@dataclass(frozen=True)
+class _DeferredToolDocument:
+    """Raw callable schema plus model-locale discovery metadata."""
+
+    tool_info: ToolInfo
+    extra_search_text: str = ""
+    display_description: str = ""
 
 
 def _relayed_result(target_result: Any) -> Dict[str, Any]:
@@ -89,9 +100,20 @@ class ProgressiveToolRail(DeepAgentRail):
         self._tool_search_index_revision: Optional[int] = None
         self._tool_search_registry: Any = None
 
+    def _resolve_catalog_language(self, agent: Any = None) -> str:
+        """Resolve the language shared by catalog content and rendering."""
+        builder = getattr(agent, "system_prompt_builder", None)
+        language = getattr(builder, "language", None) or getattr(
+            self._config,
+            "language",
+            "cn",
+        )
+        normalized = str(language or "cn").strip().lower()
+        return "en" if normalized == "en" else "cn"
+
     def init(self, agent) -> None:
         """Register progressive meta tools to resource manager and ability manager."""
-        language = getattr(self._config, "language", "cn") or "cn"
+        language = self._resolve_catalog_language(agent)
         agent_id = getattr(getattr(agent, "card", None), "id", None)
 
         tools = [
@@ -325,14 +347,18 @@ class ProgressiveToolRail(DeepAgentRail):
         """Return cached full tool inventory."""
         return list(self._cached_all_tool_infos or [])
 
-    def _list_registered_deferred_tool_infos(self, agent: Any) -> List[ToolInfo]:
-        """Build index documents from registered deferred ToolCards."""
+    def _list_registered_deferred_tool_documents(
+        self,
+        agent: Any,
+    ) -> List[_DeferredToolDocument]:
+        """Build raw deferred schemas with optional discovery-only metadata."""
         ability_manager = getattr(agent, "ability_manager", None) or self._tool_search_registry
         list_abilities = getattr(ability_manager, "list", None)
         if not callable(list_abilities):
             return []
 
-        documents: List[ToolInfo] = []
+        documents: List[_DeferredToolDocument] = []
+        language = self._resolve_catalog_language(agent)
         try:
             abilities = list_abilities() or []
         except Exception as exc:
@@ -354,7 +380,18 @@ class ProgressiveToolRail(DeepAgentRail):
                 continue
 
             try:
-                documents.append(card.tool_info())
+                tool_info = card.tool_info()
+                extra_search_text, display_description = (
+                    self._resolve_progressive_discovery(card, language=language)
+                )
+                documents.append(
+                    _DeferredToolDocument(
+                        tool_info=tool_info,
+                        extra_search_text=extra_search_text,
+                        display_description=display_description
+                        or str(getattr(tool_info, "description", "") or ""),
+                    )
+                )
             except Exception as exc:
                 logger.warning(
                     "[ProgressiveToolRail] failed to convert deferred card '%s' "
@@ -364,32 +401,103 @@ class ProgressiveToolRail(DeepAgentRail):
                 )
         return documents
 
+    def _list_registered_deferred_tool_infos(self, agent: Any) -> List[ToolInfo]:
+        """Return raw ToolInfos for compatibility with existing rail helpers."""
+        return [
+            document.tool_info
+            for document in self._list_registered_deferred_tool_documents(agent)
+        ]
+
+    def _resolve_progressive_discovery(
+        self,
+        card: ToolCard,
+        *,
+        language: str | None = None,
+    ) -> tuple[str, str]:
+        """Resolve optional aliases and localized catalog text from a ToolCard."""
+        properties = getattr(card, "properties", None)
+        metadata = (
+            properties.get(_PROGRESSIVE_DISCOVERY_PROPERTY)
+            if isinstance(properties, dict)
+            else None
+        )
+        if not isinstance(metadata, dict):
+            return "", ""
+
+        display = metadata.get("display")
+        display_values: list[str] = []
+        display_description = ""
+        if isinstance(display, dict):
+            display_values = [
+                str(value).strip()
+                for value in display.values()
+                if isinstance(value, str) and value.strip()
+            ]
+            language = language or self._resolve_catalog_language()
+            normalized_display = {
+                str(key).strip().lower(): value.strip()
+                for key, value in display.items()
+                if isinstance(value, str) and value.strip()
+            }
+            if language == "cn":
+                language_candidates = ("cn", "zh")
+            elif language == "zh":
+                language_candidates = ("zh", "cn")
+            else:
+                language_candidates = (language,)
+            for candidate in language_candidates:
+                localized = normalized_display.get(candidate)
+                if localized:
+                    display_description = localized
+                    break
+
+        aliases = metadata.get("aliases")
+        alias_values = (
+            [
+                str(value).strip()
+                for value in aliases
+                if isinstance(value, str) and value.strip()
+            ]
+            if isinstance(aliases, (list, tuple))
+            else []
+        )
+        return " ".join((*display_values, *alias_values)), display_description
+
     def _rebuild_tool_search_index(
         self,
         agent: Any = None,
-        tool_infos: Optional[List[ToolInfo]] = None,
+        documents: Optional[List[_DeferredToolDocument]] = None,
     ) -> None:
         """Build and store a new immutable BM25 index."""
-        if tool_infos is None:
-            tool_infos = self._list_registered_deferred_tool_infos(agent)
+        if documents is None:
+            documents = self._get_current_tool_search_documents(agent)
 
-        self._tool_search_index = BM25ToolIndex.build(tool_infos)
+        self._tool_search_index = BM25ToolIndex.build(
+            [document.tool_info for document in documents],
+            extra_search_texts=[document.extra_search_text for document in documents],
+        )
         ability_manager = getattr(agent, "ability_manager", None) or self._tool_search_registry
         revision = getattr(ability_manager, "registry_revision", None)
         self._tool_search_index_revision = (
             int(revision) if isinstance(revision, int) else None
         )
 
-    def _get_current_tool_search_documents(self, agent: Any = None) -> List[ToolInfo]:
+    def _get_current_tool_search_documents(
+        self,
+        agent: Any = None,
+    ) -> List[_DeferredToolDocument]:
         """Read the current deferred catalog used by BM25 and invalidation."""
         ability_manager = (
             getattr(agent, "ability_manager", None) or self._tool_search_registry
         )
         if callable(getattr(ability_manager, "list", None)):
-            return self._list_registered_deferred_tool_infos(agent)
+            return self._list_registered_deferred_tool_documents(agent)
 
         return [
-            tool
+            _DeferredToolDocument(
+                tool_info=tool,
+                display_description=str(getattr(tool, "description", "") or ""),
+            )
             for tool in self._cached_all_tool_infos
             if str(getattr(tool, "name", "") or "") not in self._meta_tool_names
         ]
@@ -402,7 +510,12 @@ class ProgressiveToolRail(DeepAgentRail):
         revision = getattr(ability_manager, "registry_revision", None)
         normalized_revision = int(revision) if isinstance(revision, int) else None
         current_documents = self._get_current_tool_search_documents(agent)
-        current_fingerprint = BM25ToolIndex.fingerprint(current_documents)
+        current_fingerprint = BM25ToolIndex.fingerprint(
+            [document.tool_info for document in current_documents],
+            extra_search_texts=[
+                document.extra_search_text for document in current_documents
+            ],
+        )
 
         if self._tool_search_index is not None and (
             self._tool_search_index.source_fingerprint == current_fingerprint
@@ -413,7 +526,7 @@ class ProgressiveToolRail(DeepAgentRail):
             # that do not advance that revision.
             return
 
-        self._rebuild_tool_search_index(agent, tool_infos=current_documents)
+        self._rebuild_tool_search_index(agent, documents=current_documents)
 
     async def _get_real_tool_infos(self) -> List[ToolInfo]:
         """Return non-meta tools from the cached inventory."""
@@ -805,11 +918,7 @@ class ProgressiveToolRail(DeepAgentRail):
         if not session_id:
             return
 
-        language = getattr(
-            self._get_prompt_builder(ctx),
-            "language",
-            getattr(self._config, "language", "cn") or "cn",
-        )
+        language = self._resolve_catalog_language(agent)
         current_tools = dict(
             current_tools
             if current_tools is not None
@@ -1173,11 +1282,11 @@ class ProgressiveToolRail(DeepAgentRail):
     def _collect_deferred_tool_descriptions(self, agent: Any = None) -> Dict[str, str]:
         """Read the current deferred-tool directory in deterministic order."""
         descriptions = {
-            str(getattr(tool, "name", "") or ""): str(
-                getattr(tool, "description", "") or ""
+            str(getattr(document.tool_info, "name", "") or ""): (
+                document.display_description
             )
-            for tool in self._list_registered_deferred_tool_infos(agent)
-            if str(getattr(tool, "name", "") or "")
+            for document in self._list_registered_deferred_tool_documents(agent)
+            if str(getattr(document.tool_info, "name", "") or "")
         }
         return dict(sorted(descriptions.items()))
 

@@ -18,8 +18,8 @@ author_email: yangzequ1@huawei.com
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-10-16 |
-| 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent |
+| 最近一次修订日期 | 2026-10-27 |
+| 关联 feature | `F_04_tool-result-llm-rendering.md`、`F_05_browser-task-integrity.md`、F_12_browser-jev-shared-observation、F_13_browser-local-decision-loop、F_21_cua-desktop-subagent、F_23_progressive-tool-discovery-metadata |
 
 ## 范围 / 边界
 
@@ -58,7 +58,14 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
 3. **工具发现**：`tool_discovery/` 提供 `ToolSearchTool` + bm25 检索
    （`tool_discovery/bm25.py`）以及固定的 `ToolCallTool` 包装器。模型先搜索并授权 deferred
    工具，再经 `tool_call` 交给原 `AbilityManager` 生命周期执行；`ListSkillTool` /
-   `SkillTool`（`tools/skills/`）负责技能类工具。
+   `SkillTool`（`tools/skills/`）负责技能类工具。工具卡可在
+   `properties["progressive_discovery"]` 中声明 `display` 语言摘要与 `aliases` 检索别名；
+   `display` 的语言键按去空白、小写化匹配，`cn` / `zh` 互为别名，缺少当前语言摘要时
+   回退原始工具描述而不跨语言选取。摘要选择与目录渲染共用 prompt builder 优先、rail
+   配置回退的 `cn` / `en` 语言结果。它们只扩充目录展示和 BM25 索引，不进入 `ToolInfo`、
+   调用 schema 或单工具授权指纹。
+   索引版本必须包含这些发现元数据，原地修改别名也会触发重建。未声明或格式错误时保持
+   原名称、描述和参数的旧检索行为。
 4. **工具分组簇**：
    - web：`create_web_tools()`（fetch / free_search / paid_search）+ `WebFreeSearchTool` /
      `WebFetchWebpageTool`；`is_free_search_enabled()` / `is_paid_search_enabled()` 门控。

@@ -1,7 +1,7 @@
 ---
 title: D/F/B/S 文档总索引
-author: alan_cheng
-author_email: chengshuo5@huawei.com
+author: MengHan18
+author_email: hanmeng22@huawei.com
 generated: true
 ---
 
@@ -9,7 +9,7 @@ generated: true
 
 由 sync_documents.py 从文档 frontmatter 自动生成；请修改源文档后重新生成，不手工维护。
 
-共 265 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
+共 266 篇文档，按模块分组；跨模块文档在各相关分组展示，总数按文档去重。
 
 ## 模块导航
 
@@ -19,7 +19,7 @@ generated: true
 | [agent_teams](#module-2) | 193 |
 | [agent_teams/workflow](#module-3) | 15 |
 | [extensions/observability](#module-4) | 2 |
-| [harness](#module-5) | 53 |
+| [harness](#module-5) | 54 |
 | [未分类](#module-6) | 6 |
 
 <a id="module-1"></a>
@@ -301,6 +301,7 @@ generated: true
 | [F_21_cua-desktop-subagent](features/harness/F_21_cua-desktop-subagent.md) | F | cua_agent desktop subagent | kwangyyinc | openjiuwen/harness | — | 待核实 |
 | [F_22_agent-template-card-and-async-loader](features/harness/F_22_agent-template-card-and-async-loader.md) | F | AgentTemplate 卡片与异步加载器 | alan_cheng | openjiuwen/harness | — | 待核实 |
 | [F_22_cli-jiuwen-memory-rail-mount-and-switch](features/harness/F_22_cli-jiuwen-memory-rail-mount-and-switch.md) | F | F_22 CLI 挂载 JiuwenMemoryRail 与启用开关 | huangyuzhe | openjiuwen/harness | — | 待核实 |
+| [F_23_progressive-tool-discovery-metadata](features/harness/F_23_progressive-tool-discovery-metadata.md) | F | 渐进式工具发现元数据 | MengHan18 | openjiuwen/harness | openjiuwen/harness/tools/tool_discovery/bm25.py, openjiuwen/harness/rails/progressive_tool_rail.py | 无独立 D：复用现有渐进式工具发现架构，仅增加向后兼容的卡片元数据扩展点 |
 | [S_01_public-api-and-construction](specs/harness/S_01_public-api-and-construction.md) | S | S_01 公开 API 表面与构造流 | yangzequ | openjiuwen/harness | — | — |
 | [S_02_deep-agent-architecture](specs/harness/S_02_deep-agent-architecture.md) | S | S_02 DeepAgent 架构 | yangzequ | openjiuwen/harness | — | — |
 | [S_03_task-loop](specs/harness/S_03_task-loop.md) | S | S_03 TaskLoop 事件体系 | yangzequ | openjiuwen/harness | — | — |
