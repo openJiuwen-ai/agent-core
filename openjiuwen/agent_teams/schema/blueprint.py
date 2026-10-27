@@ -370,7 +370,7 @@ class TeamAgentSpec(BaseModel):
     stops the automatic rework loop and escalates to the leader instead.
     See F_62.
     """
-    review_stall_timeout: int = 1800
+    review_stall_timeout: int = 2400
     """Seconds before a stalled review round escalates to the leader.
 
     A round that produced no verdict (including no votes at all) within

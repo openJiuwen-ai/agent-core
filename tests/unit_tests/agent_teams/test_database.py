@@ -3644,6 +3644,39 @@ async def test_has_unread_messages_honors_include_broadcast(db) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.level1
+async def test_has_unread_messages_ignores_recipients_without_a_member_row(db) -> None:
+    """A direct row to a non-member (temp reviewer) can never be read, so it must not block completion."""
+    await db.team.create_team(team_name="t1", display_name="T1", leader_member_name="leader")
+    for name, status in (("leader", "ready"), ("retired", "shut_down")):
+        await db.member.create_member(
+            member_name=name,
+            team_name="t1",
+            display_name=name,
+            agent_card=AgentCard().model_dump_json(),
+            status=status,
+        )
+    await db.message.create_message(
+        message_id="to-reviewer",
+        team_name="t1",
+        from_member_name="leader",
+        content="",
+        to_member_name="verifier_1",
+    )
+    await db.message.create_message(
+        message_id="to-retired",
+        team_name="t1",
+        from_member_name="leader",
+        content="bye",
+        to_member_name="retired",
+    )
+
+    # Nobody can mark the reviewer's row read, and it no longer counts.
+    assert await db.message.mark_message_read("to-reviewer", "verifier_1") is False
+    assert await db.message.has_unread_messages("t1") is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.level0
 async def test_update_member_status_invalid_transition_returns_false(db):
     """The guarded CAS update rejects an illegal member-status transition."""

@@ -10,6 +10,7 @@ You can **bring the owner into existence while planning the task**: write a `mem
 ```
 
 - `member_name` / `display_name` / `desc` / `prompt` / `model_name` mean exactly what they mean on `spawn_teammate` (naming rules and the public/private boundary apply); `member_name` must not collide with an existing member
+- Another task of the same call may name the inline member as its `assignee`, e.g. a later aggregation task owned by a member an earlier task creates
 - **`lifetime` is required** and decides how the member leaves once its work is done:
   - `shutdown`: shuts down automatically once every task on its board is terminal — the same as a manual `shutdown_member`; **the name cannot be reused**, number same-domain members instead
   - `dormant`: goes dormant automatically once its board is terminal — stays on the roster, processes no events, consumes nothing; **it wakes only when addressed directly** (`send_message(to=<member>)` / `targets` naming it / a new task assigned to it); broadcasts never wake it. After handling what woke it, it goes dormant again

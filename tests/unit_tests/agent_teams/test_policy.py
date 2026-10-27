@@ -184,15 +184,21 @@ def test_teammate_policy_omits_leader_collaboration_boundary():
 
 @pytest.mark.level0
 @pytest.mark.parametrize("lang", ["cn", "en"])
-def test_scheduled_prompts_describe_inline_members_and_dormancy(lang):
+def test_scheduled_prompts_describe_inline_members_and_dormancy(lang, monkeypatch):
+    from openjiuwen.agent_teams import constants
     from openjiuwen.agent_teams.prompts.loader import load_template
+    from openjiuwen.agent_teams.prompts.sections import build_team_dispatch_section
+    from openjiuwen.agent_teams.schema.team import TeamRole
 
-    leader = load_template("dispatch_scheduled_leader", lang).content
+    # The inline-member passage sits behind its hard switch (off in this release).
+    monkeypatch.setattr(constants, "INLINE_TASK_MEMBER_ENABLED", True)
+    leader = build_team_dispatch_section(role=TeamRole.LEADER, dispatch_mode="scheduled", language=lang).content[lang]
     teammate = load_template("dispatch_scheduled_teammate", lang).content
     start = load_template("scheduler_task_start", lang).content
     plan = load_template("scheduler_task_start_plan", lang).content
 
     assert "lifetime" in leader and "dormant" in leader
+    assert "{{" not in leader
     # The teammate no longer re-reads its own task; the handoff is self-sufficient.
     assert "view_task(action=get)" not in teammate
     assert "view_task(action=get, task_id=" in teammate

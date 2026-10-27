@@ -988,6 +988,19 @@ async def test_is_team_completed_unread_message_returns_none(agent_team, db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_is_team_completed_ignores_unread_direct_to_non_member(agent_team, db):
+    """A scheduled-dispatch temp reviewer has no member row and no mailbox; a row
+    addressed to it can never be read and must not hold the team open."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.READY.value)
+    await _drain_one_task(agent_team)
+    await agent_team.message_manager.send_message(content="", to_member_name="verifier_1")
+
+    assert await agent_team.is_team_completed() is not None
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_is_team_completed_ignores_unread_direct_to_shutdown_member(agent_team, db):
     """Unread direct messages to SHUTDOWN members do not block completion."""

@@ -226,7 +226,15 @@ STRINGS: dict[str, dict[str, str]] = {
         "scheduler.leader_escalation_stall": (
             "[调度器·需你处置] 任务 [{task_id}]「{title}」第 {round} 轮验收停摆超过 {minutes} 分钟："
             "已投票 {voted}；未投票 {pending}。任务停在 in_review。"
-            "可用 send_message 催促验证者，或 update_task 调整验证者/处置任务。"
+            "可用 update_task 调整验证者/处置任务。"
+        ),
+        "scheduler.leader_escalation_no_vote": (
+            "[调度器·需你处置] 任务 [{task_id}]「{title}」第 {round} 轮验收：验证者 {reviewer} "
+            "已连续 {runs} 次运行结束仍未投票（可能超时或运行出错），已停止自动重派，任务停在 in_review。"
+            "可用 update_task 调整验证者/处置任务。"
+        ),
+        "scheduler.reviewer_nudge": (
+            "[调度器] 本轮验收已进行 {elapsed} 分钟，请加快进度，尽快完成验收并调用 verify_task 投票。"
         ),
         "scheduler.leader_all_done": (
             "[调度器] 任务看板已全部终结（共 {count} 个任务）。请汇总团队执行结果，向用户交付最终结论。"
@@ -667,8 +675,17 @@ STRINGS: dict[str, dict[str, str]] = {
         "scheduler.leader_escalation_stall": (
             "[Scheduler · Action Needed] Task [{task_id}] \"{title}\" review round {round} has "
             "stalled for over {minutes} minute(s): voted {voted}; pending {pending}. The task "
-            "stays in_review. Nudge the reviewers via send_message, or adjust reviewers / settle "
-            "the task via update_task."
+            "stays in_review. Adjust reviewers / settle the task via update_task."
+        ),
+        "scheduler.leader_escalation_no_vote": (
+            "[Scheduler · Action Needed] Task [{task_id}] \"{title}\" review round {round}: "
+            "reviewer {reviewer} ended {runs} runs in a row without voting (likely a timeout or a "
+            "run error), so automatic re-dispatch has stopped. The task stays in_review. Adjust "
+            "reviewers / settle the task via update_task."
+        ),
+        "scheduler.reviewer_nudge": (
+            "[Scheduler] This review has been running for {elapsed} minutes. Please speed up, finish the "
+            "review and call verify_task to vote as soon as you can."
         ),
         "scheduler.leader_all_done": (
             "[Scheduler] Every task on the board is terminal ({count} task(s) total). Summarize "

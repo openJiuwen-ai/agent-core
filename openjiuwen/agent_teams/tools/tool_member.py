@@ -7,6 +7,7 @@ import json
 from abc import ABC
 from typing import TYPE_CHECKING, Any, Callable
 
+from openjiuwen.agent_teams import constants
 from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
@@ -1163,7 +1164,8 @@ class ShutdownMemberTool(TeamTool):
             dispatch_mode: How tasks reach members. ``"scheduled"`` keeps the
                 lifetime note; ``"autonomous"`` omits it.
         """
-        lifetime_enabled = dispatch_mode == "scheduled"
+        # Lifetimes exist only on inline members, which the hard switch can keep out.
+        lifetime_enabled = dispatch_mode == "scheduled" and constants.INLINE_TASK_MEMBER_ENABLED
         super().__init__(
             ToolCard(
                 id="team.shutdown_member",

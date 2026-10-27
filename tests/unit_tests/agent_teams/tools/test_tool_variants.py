@@ -36,6 +36,14 @@ DEV_1 = "dev-1"
 DEV_2 = "dev-2"
 
 
+@pytest.fixture
+def inline_members_on(monkeypatch):
+    """Turn on the inline-member hard switch for tests that exercise the feature itself."""
+    from openjiuwen.agent_teams import constants
+
+    monkeypatch.setattr(constants, "INLINE_TASK_MEMBER_ENABLED", True)
+
+
 @pytest_asyncio.fixture
 async def db():
     """In-memory team DB with a leader and two teammates."""
@@ -148,6 +156,7 @@ async def test_variants_keep_card_identity(db, dispatch_mode):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 async def test_create_task_variant_classes_and_schema(db):
     """Autonomous can pre-assign; scheduled requires owners and exposes review gates."""
     backend = _backend(db, LEADER_NAME, True)
@@ -1088,6 +1097,7 @@ def _inline(name: str, lifetime: str = "dormant", **extra) -> dict:
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 async def test_scheduled_create_task_declares_member_inline(db):
     """An inline member lands as an UNSTARTED roster row carrying its lifetime and owns the task."""
     from openjiuwen.agent_teams.schema.status import MemberStatus
@@ -1127,6 +1137,7 @@ async def test_scheduled_create_task_declares_member_inline(db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 async def test_scheduled_create_task_assignee_may_name_an_inline_member_of_the_batch(db):
     """A later task can be owned by a member an earlier task of the same call declares."""
     backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
@@ -1151,6 +1162,7 @@ async def test_scheduled_create_task_assignee_may_name_an_inline_member_of_the_b
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 async def test_scheduled_create_task_tolerates_assignee_repeating_inline_member(db):
     """An assignee equal to the inline member_name is redundant, not a conflict: created, with a note."""
     backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
@@ -1176,6 +1188,7 @@ async def test_scheduled_create_task_tolerates_assignee_repeating_inline_member(
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 async def test_scheduled_create_task_inline_member_alone_carries_no_note(db):
     """The canonical inline form renders without the redundancy note."""
     backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
@@ -1192,6 +1205,7 @@ async def test_scheduled_create_task_inline_member_alone_carries_no_note(db):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 async def test_scheduled_create_task_unknown_assignee_still_rejected_beside_inline_members(db):
     """Names outside both the roster and the batch's inline members stay rejected, with nothing written."""
     backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
@@ -1225,6 +1239,7 @@ async def test_scheduled_create_task_unknown_assignee_still_rejected_beside_inli
         ({"member_name": "api-dev", "display_name": "x", "lifetime": "shutdown"}, None, "member.desc"),
     ],
 )
+@pytest.mark.usefixtures("inline_members_on")
 async def test_scheduled_create_task_rejects_malformed_inline_member(db, member, assignee, needle):
     """Every inline-member rejection happens before any row or task is written."""
     backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
@@ -1244,6 +1259,7 @@ async def test_scheduled_create_task_rejects_malformed_inline_member(db, member,
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.usefixtures("inline_members_on")
 async def test_scheduled_create_task_rolls_back_inline_members_when_graph_fails(db):
     """The member row lands before add_graph; a rejected graph must not leave it behind."""
     backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
@@ -1283,7 +1299,38 @@ async def test_scheduled_create_task_member_property_gated_by_predefined_roster(
     result = await create_task.invoke({"tasks": [node]})
 
     assert not result.success
-    assert "predefined" in result.error
+    assert "'member'" in result.error
+    assert "assignee" in result.error
+    assert not await backend.member_exists("x")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("lang", ["cn", "en"])
+async def test_inline_members_are_off_by_default(db, lang):
+    """The hard switch is off in this release: no ``member`` property, no inline prose, a smuggled one is refused."""
+    from openjiuwen.agent_teams.prompts.sections import build_team_dispatch_section
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    backend = _backend(db, LEADER_NAME, True, dispatch_mode="scheduled")
+    tools = create_team_tools(role="leader", agent_team=backend, dispatch_mode="scheduled", lang=lang)
+    create_task = _by_name(tools, "create_task")
+    node = create_task.card.input_params["properties"]["tasks"]["items"]
+    assert "member" not in node["properties"]
+    assert "lifetime" not in create_task.card.description
+    assert "member=" not in create_task.card.description
+    assert "lifetime" not in _by_name(tools, "shutdown_member").card.description
+    leader_dispatch = build_team_dispatch_section(role=TeamRole.LEADER, dispatch_mode="scheduled", language=lang)
+    body = leader_dispatch.content[lang]
+    assert "lifetime" not in body
+    assert "member=" not in body
+    assert "{{" not in body
+
+    smuggled = {"task_id": "t1", "title": "t", "content": "c", "member": _inline("x")}
+    result = await create_task.invoke({"tasks": [smuggled]})
+
+    assert not result.success
+    assert "'member'" in result.error
     assert not await backend.member_exists("x")
 
 
@@ -1365,6 +1412,7 @@ async def test_create_task_assignee_prose_follows_dispatch_mode(db, lang):
 @pytest.mark.asyncio
 @pytest.mark.level0
 @pytest.mark.parametrize("lang", ["cn", "en"])
+@pytest.mark.usefixtures("inline_members_on")
 async def test_shutdown_member_lifetime_prose_follows_dispatch_mode(db, lang):
     """The DORMANT / lifetime note appears only where ``create_task`` can declare a lifetime."""
     backend = _backend(db, LEADER_NAME, True)

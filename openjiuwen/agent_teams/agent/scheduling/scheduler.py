@@ -33,8 +33,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Callable, Protocol, runtime_checkable
 
+from openjiuwen.agent_teams import constants
 from openjiuwen.agent_teams.agent.coordination.event_bus import (
     CoordinationEvent,
     InnerEventMessage,
@@ -59,11 +60,16 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
     from openjiuwen.agent_teams.agent.infra import TeamInfra
 
-# Seconds before a silent reviewer of an open round gets one reminder DM.
-# Package constant in the spirit of the stale-claim constants — the
-# escalation timeout (spec-configurable ``review_stall_timeout``) is the
-# knob; this softer step is not worth a spec field.
-_REVIEW_RENUDGE_SECONDS = 600
+# A temp reviewer run that ends without a vote (round timeout, crash, or the
+# model never calling verify_task) is dispatched again; once a reviewer has run
+# this many times in one round without voting, the leader decides instead.
+_MAX_REVIEW_RUNS_PER_ROUND = 2
+
+# Seconds into a reviewer run at which a still-voteless reviewer is steered to
+# wrap up and vote. Steered into the run itself, not mailed: a temp reviewer
+# has no mailbox. The run cap (reviewer_spec.REVIEWER_COMPLETION_TIMEOUT_SECONDS) ends the
+# run at twice this, so each run gets one reminder before it is replaced.
+_REVIEW_NUDGE_SECONDS = 600
 
 # Fixpoint bound for one scan: a settle unblocks dependents whose starts the
 # leader's own event echo would only pick up on the next wake; looping the
@@ -117,12 +123,12 @@ class TeamScheduler:
         self._default_max_rounds: int = spec.default_max_review_rounds
         self._stall_timeout_seconds: int = spec.review_stall_timeout
         self._active = False
-        # Per-(task_id, review_round) bookkeeping. All in-memory: a leader
-        # restart at worst re-sends one review request / escalation, which a
-        # reader can correlate; the board truth itself lives in the DB.
-        self._review_dispatched: set[tuple[str, int]] = set()
-        self._renudged_at: dict[tuple[str, int], int] = {}
-        self._escalated: set[tuple[str, int]] = set()
+        # Per-(task_id, review_round[, reviewer]) bookkeeping. All in-memory: a
+        # leader restart at worst re-sends one review request / escalation,
+        # which a reader can correlate; the board truth itself lives in the DB.
+        self._review_dispatched: set[tuple[str, int, str]] = set()
+        self._review_runs: dict[tuple[str, int, str], int] = {}
+        self._escalated: set[tuple[str, int, str]] = set()
         self._summary_requested: set[tuple[str, int]] = set()
         self._digested_tasks: set[str] = set()
         # (task_id, owner) pairs whose start handoff is known to sit in the
@@ -242,7 +248,12 @@ class TeamScheduler:
         * nothing unread — a just-woken DORMANT member is READY before it has
           read the message that woke it; requesting retirement in that window
           would settle it without a round and strand the message.
+
+        Lifetimes exist only on inline members, so the whole pass is off
+        behind ``constants.INLINE_TASK_MEMBER_ENABLED``.
         """
+        if not constants.INLINE_TASK_MEMBER_ENABLED:
+            return False
         backend = self._infra.team_backend
         message_manager = self._infra.message_manager
         if backend is None or message_manager is None:
@@ -374,7 +385,7 @@ class TeamScheduler:
         return sent
 
     async def _reconcile_reviews(self, task_manager) -> bool:
-        """Dispatch, judge, settle, escalate and re-nudge open review rounds."""
+        """Dispatch, judge, settle and escalate open review rounds."""
         backend = self._infra.team_backend
         if backend is not None and not backend.task_verification_enabled():
             return False
@@ -389,13 +400,17 @@ class TeamScheduler:
                 team_logger.warning("[scheduler] task %s is in_review without reviewers", task.task_id)
                 continue
 
-            round_key = (task.task_id, task.review_round)
-            if round_key not in self._review_dispatched:
-                self._review_dispatched.add(round_key)
-                for reviewer in reviewers:
-                    await self._dispatch_to_reviewer(reviewer, task)
-
+            # Dispatch per reviewer: a reviewer whose run ended without a vote
+            # has its mark released (``_follow_up_unvoted_reviewer``) and runs
+            # again, while those who already voted are never re-run.
             tally = await task_manager.get_review_tally(task)
+            for reviewer in reviewers:
+                dispatch_key = (task.task_id, task.review_round, reviewer)
+                if reviewer in tally["voted"] or dispatch_key in self._review_dispatched:
+                    continue
+                self._review_dispatched.add(dispatch_key)
+                await self._dispatch_to_reviewer(reviewer, task)
+
             verdict = settle_review_tally(tally)
             if verdict == VERDICT_PASS:
                 if await self._settle_pass(task_manager, task):
@@ -562,31 +577,26 @@ class TeamScheduler:
         return rail
 
     async def _handle_undecided(self, task, tally: dict, now_ms: int) -> None:
-        """Stall handling for an open round: soft re-nudge, then escalation."""
-        round_key = (task.task_id, task.review_round)
+        """Stall handling for an open round: escalate once it outlives the stall timeout.
+
+        Reviewers are one-shot harnesses with no mailbox, so there is no
+        reminder to send them; a run that ends voteless is re-dispatched by
+        ``_follow_up_unvoted_reviewer`` instead.
+        """
         age_ms = now_ms - (task.updated_at or now_ms)
-        if age_ms >= self._stall_timeout_seconds * 1000:
-            voted = list(tally["voted"])
-            pending = [name for name in task.reviewers() if name not in tally["voted"]]
-            await self._escalate(
+        if age_ms < self._stall_timeout_seconds * 1000:
+            return
+        voted = list(tally["voted"])
+        pending = [name for name in task.reviewers() if name not in tally["voted"]]
+        await self._escalate(
+            task,
+            render.render_leader_escalation_stall(
                 task,
-                render.render_leader_escalation_stall(
-                    task,
-                    minutes=age_ms // 60000,
-                    voted=voted,
-                    pending=pending,
-                ),
-            )
-            return
-        if age_ms < _REVIEW_RENUDGE_SECONDS * 1000:
-            return
-        last = self._renudged_at.get(round_key, 0)
-        if now_ms - last < _REVIEW_RENUDGE_SECONDS * 1000:
-            return
-        self._renudged_at[round_key] = now_ms
-        for reviewer in task.reviewers():
-            if reviewer not in tally["voted"]:
-                await self._send_as_leader(reviewer, render.meta_review_renudge(task))
+                minutes=age_ms // 60000,
+                voted=voted,
+                pending=pending,
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Delivery primitives
@@ -598,8 +608,8 @@ class TeamScheduler:
         The harness runs on the reviewer base spec (see
         :meth:`_spawn_temp_reviewer`) augmented with ``verify_task`` +
         ``view_task`` so it can inspect the deliverable and cast its vote.  The harness is built,
-        run once, and disposed — a crash is logged and the next scheduler
-        scan retries via ``_review_dispatched.discard()``.
+        run once, and disposed — a run that ends without a vote is followed
+        up by :meth:`_follow_up_unvoted_reviewer`.
         """
         team_logger.info("[scheduler] spawning temp harness", reviewer)
         asyncio.create_task(self._spawn_temp_reviewer(reviewer, task))
@@ -613,7 +623,9 @@ class TeamScheduler:
         ``verify_task`` to cast its vote and ``view_task`` as a fallback only,
         since the review request already carries what it needs. The harness
         is disposed immediately after ``run_once``, regardless of outcome; a
-        crash is logged and retried on the next scan.
+        run that ends without a vote (round timeout, crash, or no
+        ``verify_task`` call) is followed up by
+        :meth:`_follow_up_unvoted_reviewer`.
 
         For trajectory attribution the reviewer mounts the same observability
         rail pair as a team member and runs under its own execution subject per
@@ -673,6 +685,7 @@ class TeamScheduler:
 
         member_name = reviewer
         harness = None
+        nudge_task: asyncio.Task[None] | None = None
         try:
             # Resolve the reviewer's type and instruction from the task's
             # structured reviewer list so the correct prompt template is used.
@@ -725,6 +738,9 @@ class TeamScheduler:
                 upstream=upstream,
             )
             team_session_id = get_session_id() or ""
+            # One reminder per run, steered into whichever attempt's harness
+            # is live when it fires (the closure reads the current binding).
+            nudge_task = asyncio.create_task(self._nudge_unvoted_reviewer(lambda: harness, reviewer, task))
             # Retry transient model-call failures up to 3 times.
             # Each attempt builds a fresh harness and disposes the old
             # one — ``run_once`` tears down tools on every invocation.
@@ -797,9 +813,11 @@ class TeamScheduler:
                 task.task_id,
                 str(result)[:2000] if result else "",
             )
-            # If all retries exhausted, let the next scan re-dispatch.
-            if result is not None and "181001" in str(result):
-                self._review_dispatched.discard((task.task_id, task.review_round))
+        except asyncio.CancelledError:
+            # The leader stopped mid-review (pause / stop): not a missed vote.
+            # Release the mark so the next active scan runs this reviewer again.
+            self._review_dispatched.discard((task.task_id, task.review_round, reviewer))
+            raise
         except Exception:
             team_logger.error(
                 "[reviewer_fail] temp reviewer %s failed for task %s",
@@ -807,13 +825,111 @@ class TeamScheduler:
                 task.task_id,
                 exc_info=True,
             )
-            self._review_dispatched.discard((task.task_id, task.review_round))
         finally:
+            if nudge_task is not None:
+                nudge_task.cancel()
             if harness is not None:
                 try:
                     await harness.dispose()
                 except Exception:
                     team_logger.debug("[scheduler] temp reviewer dispose failed for %s", reviewer)
+        await self._follow_up_unvoted_reviewer(reviewer, task)
+
+    async def _nudge_unvoted_reviewer(self, current_harness: Callable[[], Any], reviewer: str, task: Any) -> None:
+        """Steer a reviewer that is still running without a vote to wrap up and vote.
+
+        Fires once, ``_REVIEW_NUDGE_SECONDS`` into the run. The text is steered
+        into the reviewer's own run and read before its next model call — a
+        temp reviewer has no mailbox, so a mailed reminder would never be read.
+        A reviewer blocked inside a long tool call only sees it once that call
+        returns; the run cap ends the run either way.
+        """
+        await asyncio.sleep(_REVIEW_NUDGE_SECONDS)
+        task_manager = self._infra.task_manager
+        harness = current_harness()
+        if task_manager is None or harness is None:
+            return
+        try:
+            tally = await task_manager.get_review_tally(task)
+            if reviewer in tally["voted"]:
+                return
+            await harness.get_deep_agent().steer(
+                render.render_reviewer_nudge(elapsed_minutes=_REVIEW_NUDGE_SECONDS // 60)
+            )
+            team_logger.info(
+                "[reviewer_nudge] reviewer %s task=%s round=%d still voteless after %ds; steered to vote",
+                reviewer,
+                task.task_id,
+                task.review_round,
+                _REVIEW_NUDGE_SECONDS,
+            )
+        except Exception:
+            team_logger.error(
+                "[scheduler] nudge of reviewer %s for task %s failed",
+                reviewer,
+                task.task_id,
+                exc_info=True,
+            )
+
+    async def _follow_up_unvoted_reviewer(self, reviewer: str, task: Any) -> None:
+        """Run a reviewer again when its run ended without a vote, or escalate.
+
+        A run ends voteless when the round times out, the harness crashes or
+        the model never calls ``verify_task``. The round's dispatch mark would
+        then keep the reviewer from ever running again and leave the task in
+        review until the stall escalation. Each voteless run releases the mark
+        and rescans, up to ``_MAX_REVIEW_RUNS_PER_ROUND`` runs per reviewer and
+        round; after that the leader decides.
+        """
+        task_manager = self._infra.task_manager
+        if task_manager is None:
+            return
+        try:
+            current = await task_manager.get(task.task_id)
+            if (
+                current is None
+                or current.status != TaskStatus.IN_REVIEW.value
+                or current.review_round != task.review_round
+            ):
+                return
+            tally = await task_manager.get_review_tally(current)
+            if reviewer in tally["voted"]:
+                return
+            run_key = (task.task_id, task.review_round, reviewer)
+            runs = self._review_runs.get(run_key, 0) + 1
+            self._review_runs[run_key] = runs
+            if runs < _MAX_REVIEW_RUNS_PER_ROUND:
+                team_logger.warning(
+                    "[reviewer_no_vote] reviewer %s task=%s round=%d run %d/%d ended without a vote; dispatching again",
+                    reviewer,
+                    task.task_id,
+                    task.review_round,
+                    runs,
+                    _MAX_REVIEW_RUNS_PER_ROUND,
+                )
+                self._review_dispatched.discard(run_key)
+                if self._active:
+                    await self._scan()
+                return
+            team_logger.warning(
+                "[reviewer_no_vote] reviewer %s task=%s round=%d ended without a vote %d times; escalating",
+                reviewer,
+                task.task_id,
+                task.review_round,
+                runs,
+            )
+            await self._escalate(
+                current,
+                render.render_leader_escalation_no_vote(current, reviewer=reviewer, runs=runs),
+                kind=f"no_vote:{reviewer}",
+            )
+        except Exception:
+            team_logger.error(
+                "[scheduler] follow-up of reviewer %s for task %s failed",
+                reviewer,
+                task.task_id,
+                exc_info=True,
+            )
 
     async def _send_as_leader(self, member_name: str, meta: dict) -> bool:
         """Leader-identity mailbox handoff + idempotent lazy member startup.
@@ -850,12 +966,25 @@ class TeamScheduler:
             team_logger.error("[scheduler] member startup after handoff to %s failed", member_name, exc_info=True)
         return bool(message_id)
 
-    async def _escalate(self, task, content: str) -> None:
-        """Inject an escalation into the leader once per (task, round)."""
-        round_key = (task.task_id, task.review_round)
-        if round_key in self._escalated:
+    async def _escalate(self, task, content: str, *, kind: str = "verdict") -> None:
+        """Inject an escalation into the leader once per (task, round, kind).
+
+        Round-ceiling and stall escalations share the ``verdict`` kind: both
+        report the same undecided round, and a decisive late vote after one of
+        them must not escalate again. A reviewer that keeps ending its run
+        voteless is a kind of its own (per reviewer), so an earlier stall
+        escalation of the same round does not swallow it.
+        """
+        escalation_key = (task.task_id, task.review_round, kind)
+        if escalation_key in self._escalated:
+            team_logger.debug(
+                "[scheduler] %s escalation for task %s round %s already sent; skipped",
+                kind,
+                task.task_id,
+                task.review_round,
+            )
             return
-        self._escalated.add(round_key)
+        self._escalated.add(escalation_key)
         team_logger.info(
             "[scheduler] escalating task %s round %s to the leader, message: %s",
             task.task_id,

@@ -10,6 +10,7 @@
 ```
 
 - `member_name` / `display_name` / `desc` / `prompt` / `model_name` 的含义与 `spawn_teammate` 完全相同（命名约束、公开/私有边界一并适用）；`member_name` 不能与现有成员重名
+- 同一次调用里，其他任务的 `assignee` 也可以填本次用 `member` 内联声明的成员，例如前面任务新建的成员再承担后置的汇总任务
 - **`lifetime` 必填**，决定这个成员干完活之后怎么退场：
   - `shutdown`：名下任务全部终态后自动关闭，等价于你手动 `shutdown_member`；**名字不可复用**，同领域再建人请编号
   - `dormant`：名下任务全部终态后自动休眠——保留在名册、不处理任何事件、不占用资源；**只有被点名才醒**（`send_message(to=该成员)` / `targets` 含它 / 给它派新任务），广播不会唤醒。醒来处理完又会再次休眠
