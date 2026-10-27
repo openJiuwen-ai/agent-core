@@ -23,7 +23,7 @@ present it writes `pending_create`. `TeamAgent._mark_team_built` and
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/session_manager.py`、`openjiuwen/agent_teams/agent/recovery_manager.py`、`openjiuwen/agent_teams/runtime/metadata.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-10-20 |
+| 最近一次修订日期 | 2026-10-26 |
 | 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_83_session-ddl-under-write-lock.md`、`B_07_team-interrupt-resume-entry-and-leader-ready.md` |
 
 ## 范围 / 边界
@@ -114,6 +114,11 @@ reset** contextvar——故意为之：
 `SessionManager` 自身不缓存"已建表"标记，幂等性由 backend 实现保证。
 DDL 在 `DbSessions` 进程级写锁内执行、与 DAO 写同锁串行——不允许经
 `engine.begin()` 直连绕过锁（并发 bind 耗尽写池的修复，见 F_83）。
+`create_cur_session_tables()` 返回 `True` 表示当前 session 的动态表已就绪，
+返回 `False` 表示无 session 上下文或重试耗尽；`bind_session` 必须检查结果。
+失败时清除本次 session contextvar token 与 live `team_session`，并抛出带
+稳定状态码的统一框架错误。Streaming 与非流式入口均沿现有框架异常路径传播，
+不在 Runner 中为 DB bind 失败单独构造聊天事件。
 
 ### I-6 Checkpoint 写入只走 namespace 入口
 
@@ -243,8 +248,10 @@ class SessionManager:
   2. `set_session_id(state.session_id)` 写当前协程 contextvar
   3. `state.team_session = session if isinstance(session, AgentTeamSession) else None`
      （I-2）
-  4. `team_backend` 存在 → `await team_backend.db.create_cur_session_tables()`
-  5. role==LEADER 且 spec 存在 → `recovery_manager.persist_leader_config(session)`
+  4. `team_backend` 存在 → await `create_cur_session_tables()`；返回 `False` 时
+     回滚本次 contextvar/live session 绑定并抛统一框架错误
+  5. 初始化成功且 role==LEADER 且 spec 存在 →
+     `recovery_manager.persist_leader_config(session)`
   传 None 是调用方 bug；语义不再"None 表示解绑"，那条路径走 `unbind_session`。
 
 - **`release_session()`**

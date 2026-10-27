@@ -364,12 +364,15 @@ class TestTeamDatabaseInit:
         """
         from openjiuwen.agent_teams.tools.database.engine import _ensure_message_meta_column
 
+        session_id = "premeta"
+        table_name = f"team_message_{_sanitize_session_id_for_table(session_id)}"
         engine = create_engine("sqlite:///:memory:")
+        token = set_session_id(session_id)
         try:
             with engine.begin() as conn:
                 conn.exec_driver_sql(
-                    """
-                    CREATE TABLE team_message_premeta (
+                    f"""
+                    CREATE TABLE {table_name} (
                         message_id TEXT PRIMARY KEY,
                         team_name TEXT NOT NULL,
                         from_member_name TEXT NOT NULL,
@@ -383,20 +386,23 @@ class TestTeamDatabaseInit:
                     """
                 )
                 conn.exec_driver_sql(
-                    "INSERT INTO team_message_premeta "
+                    f"INSERT INTO {table_name} "
                     "(message_id, team_name, from_member_name, content, timestamp, broadcast) "
                     "VALUES ('m1', 'team', 'leader', 'hello', 1, 0)"
                 )
 
                 _ensure_message_meta_column(conn)
 
-                columns = {col["name"] for col in inspect(conn).get_columns("team_message_premeta")}
-                row = conn.exec_driver_sql("SELECT content, meta FROM team_message_premeta").mappings().one()
+                columns = {col["name"] for col in inspect(conn).get_columns(table_name)}
+                row = conn.exec_driver_sql(
+                    f"SELECT content, meta FROM {table_name}"
+                ).mappings().one()
 
             assert "meta" in columns
             assert row["meta"] is None
             assert row["content"] == "hello"
         finally:
+            reset_session_id(token)
             engine.dispose()
 
     @pytest.mark.asyncio

@@ -34,7 +34,7 @@ from openjiuwen.agent_teams.schema.team import (
     TeamSpec,
 )
 from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.run_context import RunContext
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.agent_team import create_agent_team_session
@@ -297,6 +297,44 @@ async def test_runner_run_agent_team_streaming_without_stream_logger(isolated_ch
 
     await Runner.stop()
     await isolated_checkpointer.release(session_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_runner_stream_propagates_session_bind_failure(
+    isolated_checkpointer,
+    stateful_team_db,
+):
+    await Runner.start()
+    session_id = f"team_bind_error_{uuid.uuid4().hex}"
+    spec = _runtime_spec("bind_error_team")
+    agent = FakeTeamAgent("bind_error_team", stream_label="unused")
+
+    async def _failed_stream(inputs, session=None):
+        _ = inputs, session
+        raise build_error(
+            StatusCode.AGENT_TEAM_EXECUTION_ERROR,
+            error_msg="team session database initialization failed",
+        )
+        yield
+
+    agent.stream = _failed_stream
+    try:
+        with patch.object(TeamAgentSpec, "build", return_value=agent):
+            stream = Runner.run_agent_team_streaming(
+                agent_team=spec,
+                inputs={"query": "hello"},
+                session=session_id,
+            )
+            ready_chunk = await stream.__anext__()
+            assert ready_chunk.payload["event_type"] == "team.runtime_ready"
+            with pytest.raises(BaseError) as raised:
+                await stream.__anext__()
+
+        assert raised.value.status == StatusCode.AGENT_TEAM_EXECUTION_ERROR
+    finally:
+        await Runner.stop()
+        await isolated_checkpointer.release(session_id)
 
 
 @pytest.mark.asyncio

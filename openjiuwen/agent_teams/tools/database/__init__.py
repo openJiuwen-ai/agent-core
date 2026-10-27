@@ -206,7 +206,7 @@ class TeamDatabase:
             except Exception as e:
                 team_logger.warning("Background WAL checkpoint failed: %s", e)
 
-    async def create_cur_session_tables(self) -> None:
+    async def create_cur_session_tables(self) -> bool:
         """Create dynamic tables for current session.
 
         Runs under the ``DbSessions`` write lock (serialised with DAO writes
@@ -214,8 +214,8 @@ class TeamDatabase:
         ``engine.create_cur_session_tables``.
         """
         if self._sessions is None:
-            return
-        await _create_cur_session_tables(self._sessions)
+            return False
+        return await _create_cur_session_tables(self._sessions)
 
     async def drop_cur_session_tables(self) -> None:
         """Drop dynamic tables for current session."""
