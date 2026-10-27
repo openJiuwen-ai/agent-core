@@ -194,3 +194,55 @@ class openjiuwen.core.common.logging.protocol.LoggerProtocol
 **返回：**
 
 内部日志器对象。
+
+## 默认 backend 的异步输出与生命周期
+
+`DefaultLogger` 的内置控制台和文件输出使用进程内 `QueueHandler` / `QueueListener`。
+调用线程仍生成消息、捕获 session/trace、member、request 上下文并执行必要过滤；
+消费者线程执行最终格式化、写入、flush 和文件轮转。返回日志调用不代表记录已经输出。
+`error(..., exc_info=True)` 的 traceback 保留到消费者格式化，原始 `LogRecord` 不受队列准备操作修改。
+
+每个命名 logger 的队列固定容纳 **4096 条记录**，另有最多一条正在输出。
+这个容量用于吸收短时突发，例如每秒 1000 条日志约四秒的积压，不用于长期存储。
+队列满或已关闭时，DEBUG、INFO、WARNING、ERROR、CRITICAL **统一丢弃新记录**，
+不会等待空位，也不会回退到调用线程同步输出。错误级日志同样可能丢失。
+记录数量有界不等于字节数有界：大消息和异常 traceback 引用的对象仍可能占用较多内存。
+
+以下附加方法属于 `DefaultLogger`，不要求其他 `LoggerProtocol` 实现提供：
+
+- `flush(timeout: float = 2.0) -> bool`：最多等待指定秒数，确认此前接受的记录已处理。
+  这是显式阻塞操作，asyncio 调用者可使用 `await asyncio.to_thread(logger.flush)`。
+  返回 `True` 不表示每个输出端均成功，关闭时丢弃的记录也算处理完成。
+- `get_queue_stats() -> dict`：返回 `capacity`、`queued`、`peak`、`accepted`、`completed`、
+  `dropped_by_level`、`discarded_on_close`、`output_failures`。
+  `completed` 包含关闭时丢弃的记录；`output_failures` 按输出端失败次数统计。
+  丢弃计数按标准等级整数分类，非标准等级合并到键 `0`，避免计数表无限增长。
+  不向已过载的日志路径发送溢出警告；应用可以读取这些计数用于监控。
+
+`close()` 关闭入口并尽力排空，最多等待两秒；超时丢弃尚未开始输出的尾部。
+正在执行的系统写入不能被安全强杀，后台线程在写入恢复后关闭它持有的 handler 并退出。
+解释器正常退出使用所有默认 logger 共享的两秒排空预算；异常终止可能丢失队列尾部。
+重复创建同名 logger 或 `reconfigure()` 仅替换内置输出。它保持入口开放，最多等待两秒，
+直到旧输出空闲；等待超时（包括持续生产日志的情况）则拒绝替换，保留旧配置、消费者和排队记录。
+原有容量和满队列丢弃策略仍然适用。无效配置或新消费者启动失败也不会关闭旧输出。
+切换提交后，已持有旧 handler 的生产线程会将记录转发到新队列。旧 sink 的清理另有最多两秒
+等待预算；最终 flush/close 较慢不会把已成功的切换变成失败。清理线程退出前拒绝再次替换，
+每个 logger 最多保留一个活动消费者和一个退出中的消费者。若 logger 已被显式关闭，替换被拒绝
+不会重新打开它。旧实例的 `close()` 不关闭其后继实例的输出。
+
+对于标准文件／管道 stdout，消费者使用独立描述符和无缓冲输出，避免占住解释器退出时
+需要的全局 stdout 缓冲锁，同时保留编码、编码错误处理和写全语义。
+自定义流、带转换逻辑的流以及 Windows 原生控制台保持原有 `write` / `flush` 行为；
+这些流本身的阻塞和退出安全由其实现负责。
+
+兼容范围和使用边界：
+
+- `add_handler` / `remove_handler`、logger filter 和 `logger()` 仍操作原标准库 logger；
+  自定义 handler 保留同步语义，由调用者管理关闭，重配置不会关闭它们。
+- `propagate` 仍按配置执行。root/父 logger 的 handler 可能同步输出或与内置输出重复；
+  SDK 不静默关闭传播，也不接管外部 handler，需由应用分别配置其排队策略。
+- 初始化、路径校验、打开文件及重配置仍可能同步等待；本次隔离的是初始化后的内置输出。
+  显式排空、关闭及重配置应安排在应用生命周期阶段或工作线程。
+- 初始化日志后再 `fork` 不会复制消费者线程，因此不支持继承已初始化的默认日志队列。
+  使用启动新解释器的方式（如 `spawn`），或在 fork 前不初始化日志、由子进程首次初始化。
+  不要依赖 fork 后调用 reset/reconfigure 修复继承的线程锁。
