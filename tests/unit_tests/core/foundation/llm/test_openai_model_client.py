@@ -702,7 +702,7 @@ class TestDisabledThinkingCompatibility:
         assert len(calls) == 2
         assert calls[0]["reasoning_effort"] == "off"
         assert "reasoning_effort" not in calls[1]
-        assert "minimax-m3" in client._models_rejecting_disabled_thinking
+        assert "MiniMax-M3" in client._models_rejecting_disabled_thinking
 
     @pytest.mark.asyncio
     async def test_affinity_stream_does_not_retry_after_emitting_output(self):
