@@ -66,6 +66,13 @@ from openjiuwen.agent_teams.tools.task_manager import TeamTaskManager
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
+# build_team circuit breaker threshold: the DB layer already retries each
+# attempt 3x with backoff (~12s), so one LLM-level retry covers the genuinely
+# transient window. After this many consecutive failures the circuit opens:
+# further build_team calls are refused fast (no DB hit) with an explicit
+# degrade-to-solo instruction instead of burning another retry cycle.
+_BUILD_CIRCUIT_THRESHOLD = 2
+
 
 @dataclass
 class CapabilityOverrides:
@@ -116,6 +123,8 @@ class TeamBackend:
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_built: Callable[[], Awaitable[None]] | None = None,
+        on_team_build_failed: Callable[[str], Awaitable[None]] | None = None,
+        on_team_build_recovered: Callable[[], Awaitable[None]] | None = None,
         on_member_started: Callable[[str], Awaitable[None]] | None = None,
         member_reviver: Callable[[str], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
@@ -183,6 +192,18 @@ class TeamBackend:
                 is deleted, before best-effort cleanup and event publishing.
             on_team_built: Optional async callback fired exactly once after
                 ``build_team`` creates the team row and initial members.
+            on_team_build_failed: Optional async callback fired when a
+                ``build_team`` call fails (any exception escaping the
+                build). Fired by the tool wrapper via
+                ``notify_build_failed`` before the failure is returned to
+                the tool boundary as ``ToolOutput(success=False)`` (the
+                boundary renders it as an LLM-facing tool message), so the
+                hosting TeamAgent can latch the failure and surface it as a
+                degraded stream warning at round-chain end. The latch is
+                cleared by ``on_team_built`` when a later retry succeeds.
+            on_team_build_recovered: Optional async callback fired when a
+                build attempt failed but the team row already exists
+                (half-built path) — clears any stale never-built latch.
             on_member_started: Optional async callback that launches the agent
                 process for one member name. Supplied by the hosting
                 ``TeamAgent`` (leader side only) and consumed by
@@ -241,6 +262,12 @@ class TeamBackend:
         self._on_before_team_cleaned = on_before_team_cleaned
         self._on_team_cleaned = on_team_cleaned
         self._on_team_built = on_team_built
+        self._on_team_build_failed = on_team_build_failed
+        self._on_team_build_recovered = on_team_build_recovered
+        # Consecutive build_team failure counter for the circuit breaker
+        # (see the ``build_circuit_open`` property below).
+        self._consecutive_build_failures = 0
+        self._last_build_error: str | None = None
         # Spawns one member's agent process. The single injection point for
         # every auto-start path that goes through ``autostart_unstarted``.
         self._on_member_started = on_member_started
@@ -1282,6 +1309,78 @@ class TeamBackend:
         team_logger.info(f"Cancelled {len(cancelled_tasks)} tasks in team {self.team_name}")
         return len(cancelled_tasks)
 
+    async def notify_build_failed(self, error: str) -> None:
+        """Fire the ``on_team_build_failed`` callback for a failed build_team.
+
+        Called by the build_team tool wrapper when ``build_team`` raises,
+        before the failure is returned to the tool boundary as
+        ``ToolOutput(success=False)``. The tool boundary renders tool
+        failures as LLM-facing tool messages, so without this side channel a
+        failed build is invisible outside the round; the hosting TeamAgent
+        latches it and the leader's StreamController surfaces it as a
+        degraded task_failed chunk (warning semantics, not a round-failing
+        terminal error) when the round chain settles. Callback errors are
+        logged and swallowed — reporting must never mask the original build
+        failure.
+        """
+        if self._on_team_build_failed is None:
+            return
+        try:
+            await self._on_team_build_failed(error)
+        except Exception as e:
+            team_logger.error(f"on_team_build_failed callback failed for team {self.team_name}: {e}")
+
+    async def notify_build_recovered(self) -> None:
+        """Fire the ``on_team_build_recovered`` callback (half-built path).
+
+        Called by the build_team tool wrapper when a build attempt failed
+        but the team row already exists (half-built: the team is usable —
+        only member registration is incomplete). Any earlier never-built
+        latch is then stale: the degraded alert would contradict the
+        "team exists, continue" guidance. Callback errors are logged and
+        swallowed, mirroring ``notify_build_failed``.
+        """
+        if self._on_team_build_recovered is None:
+            return
+        try:
+            await self._on_team_build_recovered()
+        except Exception as e:
+            team_logger.error(f"on_team_build_recovered callback failed for team {self.team_name}: {e}")
+
+    # build_team circuit breaker (degrade-to-solo)
+    # The tool boundary feeds build failures back to the LLM as tool
+    # messages, and a cooperative LLM retries build_team indefinitely inside
+    # one never-ending round. The breaker bounds the loop: after
+    # ``_BUILD_CIRCUIT_THRESHOLD`` consecutive failures the circuit opens and
+    # the tool wrapper refuses further calls fast (no DB hit) with an
+    # explicit degrade-to-solo instruction, so the round can finish
+    # naturally with a leader-solo deliverable. The counter lives here (not
+    # on the tool/rail instance) so it survives rail/tool rebuilds within
+    # the session; a process restart resets it, which is correct — a fresh
+    # runtime deserves fresh attempts.
+    #
+    # Success path: ``build_team`` resets the counter itself (see the end of
+    # ``build_team``), so a recovered build re-arms the breaker.
+
+    @property
+    def build_circuit_open(self) -> bool:
+        """True once build_team has failed ``_BUILD_CIRCUIT_THRESHOLD`` times in a row."""
+        return self._consecutive_build_failures >= _BUILD_CIRCUIT_THRESHOLD
+
+    def note_build_failure(self, error: str) -> None:
+        """Record one consecutive build_team failure (called by the tool wrapper)."""
+        self._consecutive_build_failures += 1
+        self._last_build_error = error
+
+    @property
+    def consecutive_build_failures(self) -> int:
+        return self._consecutive_build_failures
+
+    @property
+    def last_build_error(self) -> str:
+        """The most recent build_team failure text (for circuit-open messages)."""
+        return self._last_build_error or "unknown"
+
     async def build_team(
         self,
         display_name: str,
@@ -1457,6 +1556,11 @@ class TeamBackend:
                 await self._on_team_built()
             except Exception as e:
                 team_logger.error(f"on_team_built callback failed for team {team_name}: {e}")
+
+        # Build succeeded — re-arm the circuit breaker (a recovered build
+        # proves the failure was transient).
+        self._consecutive_build_failures = 0
+        self._last_build_error = None
 
         # Publish team created event
         session_id = get_session_id()
