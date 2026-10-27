@@ -108,6 +108,14 @@ class FileGuardSection(TypedDict, total=False):
     paths: NotRequired[list[FileGuardPathEntry]]
 
 
+class SoftDeleteSection(TypedDict, total=False):
+    """Windows 软删除与批量删除审批。只有布尔 ``enabled: true`` 才开启。"""
+
+    enabled: bool
+    archive_dir: NotRequired[str]
+    batch_delete_threshold: NotRequired[int]
+
+
 class PermissionsSection(TypedDict, total=False):
     """与 agent YAML 中 ``permissions:`` 段落常见字段对齐的结构说明。
 
@@ -148,6 +156,7 @@ class PermissionsSection(TypedDict, total=False):
     rules: NotRequired[list[dict[str, Any]]]
     approval_overrides: NotRequired[list[ApprovalOverrideEntry]]
     file_guard: NotRequired[FileGuardSection]
+    soft_delete: NotRequired[SoftDeleteSection]
     external_directory: NotRequired[dict[str, str]]  # deprecated → file_guard
 
 
@@ -156,6 +165,7 @@ __all__ = [
     "FileGuardDefaults",
     "FileGuardPathEntry",
     "FileGuardSection",
+    "SoftDeleteSection",
     "PermissionConfirmResponse",
     "PermissionLevel",
     "PermissionResult",

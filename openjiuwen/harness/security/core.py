@@ -12,7 +12,8 @@
 
     result_A = evaluate_tiered_policy(...)          # 工具权限（始终）
     result_B = FileGuardChecker.evaluate(...)       # 路径防护（file_guard.enabled）
-    return strictest(result_A, result_B)
+    result_D = DeletionGuard.evaluate(...)          # 批量删除（soft_delete.enabled）
+    return strictest(result_A, result_B, result_D)
 """
 from __future__ import annotations
 
@@ -39,6 +40,25 @@ from openjiuwen.harness.security.tiered_policy import (
 )
 
 logger = logging.getLogger(__name__)
+_deletion_guard_cls: type | None = None
+_deletion_guard_import_failed = False
+
+
+def _resolve_deletion_guard_cls() -> type | None:
+    """批量删除判定器。安全包还没有该模块时跳过，不挡住权限引擎导入。"""
+    global _deletion_guard_cls, _deletion_guard_import_failed
+    if _deletion_guard_cls is not None or _deletion_guard_import_failed:
+        return _deletion_guard_cls
+    try:
+        from agent_shield.tool_permission.delguard.deletion_guard import DeletionGuard
+    except ImportError:
+        _deletion_guard_import_failed = True
+        logger.warning(
+            "[PermissionEngine] deletion guard unavailable; batch delete approval skipped",
+        )
+        return None
+    _deletion_guard_cls = DeletionGuard
+    return DeletionGuard
 
 
 class PermissionEngine:
@@ -65,8 +85,19 @@ class PermissionEngine:
             workspace_root=self._workspace_root,
             trusted_dirs=self._trusted_dirs,
         )
+        self._deletion_guard = self._build_deletion_guard()
 
     # ---------- 配置 ----------
+
+    def _build_deletion_guard(self) -> Any | None:
+        guard_cls = _resolve_deletion_guard_cls()
+        if guard_cls is None:
+            return None
+        root = self._workspace_root
+        return guard_cls(
+            permission_config=self.config,
+            workspace_root=str(root) if root is not None else None,
+        )
 
     def _rebuild_file_guard(self) -> None:
         self._file_guard = build_file_guard_checker(
@@ -74,6 +105,7 @@ class PermissionEngine:
             workspace_root=self._workspace_root,
             trusted_dirs=self._trusted_dirs,
         )
+        self._deletion_guard = self._build_deletion_guard()
 
     def update_config(self, config: PermissionsSection | dict[str, Any]) -> None:
         """热更新配置."""
@@ -247,10 +279,36 @@ class PermissionEngine:
                 tool_name,
             )
 
+        # 3. Pipeline D：批量删除审批。软删除未开、未达阈值或解析失败时不投票。
+        reason_override: str | None = None
+        deletion = (
+            self._deletion_guard.evaluate(tool_name, tool_args)
+            if self._deletion_guard is not None
+            else None
+        )
+        if deletion is not None:
+            deletion_level = PermissionLevel(deletion.permission.value)
+            logger.info(
+                "[PermissionEngine] permission.deletion_guard.result tool=%s permission=%s "
+                "matched_rule=%s count_paths=%s merged_with=%s",
+                tool_name,
+                deletion_level.value,
+                deletion.matched_rule,
+                len(deletion.external_paths or []),
+                permission.value,
+            )
+            permission = tiered_policy_strictest(permission, deletion_level)
+            if deletion.matched_rule:
+                matched_rule = f"{matched_rule}|{deletion.matched_rule}"
+            if deletion.external_paths:
+                external_paths = list(external_paths or []) + list(deletion.external_paths)
+            if deletion.reason and deletion_level == permission:
+                reason_override = deletion.reason
+
         result = PermissionResult(
             permission=permission,
             matched_rule=matched_rule,
-            reason=self._get_reason(permission, tool_name, matched_rule),
+            reason=reason_override or self._get_reason(permission, tool_name, matched_rule),
             external_paths=external_paths,
         )
 
