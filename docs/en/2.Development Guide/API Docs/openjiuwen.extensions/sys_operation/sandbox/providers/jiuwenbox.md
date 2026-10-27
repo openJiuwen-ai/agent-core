@@ -4,6 +4,12 @@ The JiuwenBox sandbox provider adapts SysOperation file-system, shell, and code-
 
 The first file or execution operation may lazily create a sandbox. Blocking creation runs in a worker thread, and concurrent operations in the same shared scope reuse one creation result. After creation fails, that scope returns the creation error immediately for 30 seconds instead of repeatedly waiting for timeouts. Creation can be retried after the cooldown expires or the shared cache is explicitly cleared.
 
+Lazy acquisition and explicit recreation share a lifecycle lock for each `base_url|isolation`. Acquisitions wait for an ongoing recreation and reuse its published replacement, including through retained providers. Recreation drains initial creation, strictly deletes old instances (including `extra_stale_sandbox_ids`), and completes ACL revocation before granting the replacement access. A failed delete leaves its ID pending and prevents replacement creation; a failed create does not restore the old instance. Caller cancellation does not abandon queued or running recreation. This prevents a duplicate instance's cleanup from revoking the surviving Windows instance's shared-directory ACLs, without skipping revocation or widening shared roots.
+
+Recreation requires the provider's explicit matching `shared_key`. Both creation and recreation use `build_jiuwenbox_shared_scope_key(base_url, isolation_key)`; providers without isolation use `build_jiuwenbox_shared_scope_key(base_url)`, which returns the normalized base URL. A missing/empty key, an empty isolation suffix, or a key for another service raises `ValueError` before any deletion or creation. This removes legacy service-wide recreation via `force_recreate_jiuwenbox_sandbox(base_url)`: existing callers must pass their actual scope key, and bulk policy application must rebuild each scope explicitly. `None` no longer deletes every scope and publishes a replacement under a different flat key. When `JIUWENBOX_SANDBOX_ID` is set, cache reuse does not first write a cached ID into the launcher and shadow the environment binding; existing launcher `extra_params["sandbox_id"]` priority remains unchanged. Sandbox-lost automatic retries do not bypass pending deletion: callers must retry `delete_jiuwenbox_sandbox` successfully before recreating.
+
+Async tool calls and recreations wait for this lock without occupying thread-pool workers. HTTP creation and deletion still run in workers, so waiters cannot exhaust the workers required by the rebuilding owner. Synchronous `_get_sandbox_id` calls retain synchronous locking. Cache cleanup must not evict still-held locks from the weak-reference table: a new caller would otherwise obtain a different lock and reopen the race.
+
 See [BaseFSProvider, BaseShellProvider, and BaseCodeProvider](../../../../openjiuwen.core/sys_operation/sandbox/providers/base_provider.md) for the base contracts. Return types are defined in [sys_operation.result](../../../../openjiuwen.core/sys_operation/result.md).
 
 ## Configuration Example
@@ -102,17 +108,17 @@ async force_recreate_jiuwenbox_sandbox(
 ) -> str
 ```
 
-Creates a new sandbox, updates the shared cache, and attempts to delete stale sandboxes. The new sandbox is created before stale sandboxes are deleted so that a failed creation does not prematurely remove the old sandbox.
+Serializes with acquisition on the explicit provider scope, completes stale-sandbox deletion and ACL revocation, then creates and publishes the replacement. Failed cleanup blocks creation; failed creation does not restore an already deleted old sandbox.
 
 **Parameters**:
 
 - **base_url** (str): JiuwenBox service URL.
-- **shared_key** (str, optional): Cache key made from the base URL and isolation key. If omitted, all cached entries for the URL are cleared for compatibility with single-tenant callers.
+- **shared_key** (str, required): The provider's cache key, built with `build_jiuwenbox_shared_scope_key(base_url, isolation_key)`, or with only `base_url` for a provider without isolation. Missing, empty, or mismatched keys raise `ValueError` before remote mutation. Only this scope is rebuilt.
 - **policy** (dict, optional): Security policy for the new sandbox.
 - **policy_mode** (str, optional): Policy mode.
 - **timeout_seconds** (float): HTTP timeout in seconds. Default: `30.0`.
 - **preserve_files_upload** (Any, optional): Local files or directories to upload after creation.
-- **extra_stale_sandbox_ids** (Sequence[str], optional): Additional stale sandbox IDs to clean up.
+- **extra_stale_sandbox_ids** (Sequence[str], optional): Additional stale sandbox IDs to delete before replacement creation.
 - **lifecycle_hook** (Callable, optional): Synchronous lifecycle callback. Recreation emits `before_recreate` and `after_recreate`.
 - **reason** (str): Recreation reason included in callback context. Default: `"sandbox_lost"`.
 
@@ -352,6 +358,8 @@ Retirement also invalidates Gateway endpoint/provider caches and derived launche
 Retirement repeatedly joins in-flight deletes for that URL, including tasks registered while a previous join was awaiting. If concurrent teardown reaches an identity during local batch cleanup, retirement waits for that task and then applies stopped-service semantics instead of inheriting its transport failure or repeating hooks for an already completed identity. Retirement initiates no HTTP request to the stopped endpoint; requests already issued by other callers are allowed to finish. It clears shared IDs, creation locks/failures, hooks, and idle-timeout state for that URL only, returning the retired sandbox IDs. Hooks retain their strict failure semantics. For ordinary disable/restart cleanup, use `delete_jiuwenbox_sandbox(delete_all=True, raise_on_error=True)` to include cached and pending entries across all process-known historical URLs. Failed remote deletions remain pending for retry.
 
 Bulk cleanup attempts every matching entry even if an earlier DELETE or lifecycle hook fails. Successful entries converge immediately; failed remote deletions retain their cache and pending state. Strict cleanup raises the first error after traversal, preserving its original cause, and still blocks replacement creation. Hook failures propagate after traversal regardless of `raise_on_error`.
+
+Failed remote DELETEs are retried within the same deletion task: at most three attempts (the initial attempt plus two retries), with a one-second async wait between attempts. Each attempt uses the caller's `timeout_seconds`; total duration includes HTTP waits as well as the two retry delays. Cache ownership, hooks, and pending state remain intact throughout, blocking acquisition and replacement creation. Concurrent callers share this retry budget, and caller cancellation does not abandon started cleanup. Exhaustion reports the attempt count, last cause, and `replacement creation blocked` to strict callers; ordinary callers log the failure and return other successful IDs. The failed identity stays pending for another explicit delete/restart, rather than retrying indefinitely in the background. A successful `before_delete` is not repeated, `after_delete` runs once after remote success, and hook failures themselves are not automatically retried. Confirmed stopped-service retirement performs local convergence without initiating requests to the dead endpoint.
 
 Provider methods generally convert file-system, shell, and code-execution exceptions into the corresponding error `*Result` rather than raising them directly. Automatic recreation occurs only for an HTTP 404 that can be identified specifically as “sandbox not found”; an ordinary missing-file or missing-directory 404 does not trigger recreation.
 

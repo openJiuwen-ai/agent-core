@@ -13,7 +13,7 @@ from openjiuwen.extensions.sys_operation.sandbox.providers import jiuwenbox as j
 def provider(monkeypatch):
     instance = object.__new__(jb.JiuwenBoxShellProvider)
     instance._launcher_extra_params = Mock(return_value={})
-    instance._get_sandbox_id = Mock(return_value="sandbox-a")
+    instance._acquire_sandbox_id = AsyncMock(return_value="sandbox-a")
     client = Mock()
     client.exec.return_value = {"stdout": "sandbox", "stderr": "", "exit_code": 0}
     client.exec_async = AsyncMock(side_effect=lambda *a, **kw: client.exec(*a, **kw))
