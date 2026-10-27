@@ -12,10 +12,11 @@ from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.clients import get_connector_pool_manager
 from openjiuwen.core.common.clients.ref_counted import BaseRefResourceMgr, RefCountedResource
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.utils.singleton import Singleton
 from openjiuwen.core.foundation.tool.service_api.response_parser import ParserRegistry
 from openjiuwen.core.common.clients.client_registry import BaseClient
-from openjiuwen.core.common.clients.connector_pool import ConnectorPoolConfig
+from openjiuwen.core.common.clients.connector_pool import ConnectorPool, ConnectorPoolConfig
 
 
 class SessionConfig(BaseModel):
@@ -138,21 +139,30 @@ class HttpSession(RefCountedResource):
     and cleanup when the session is no longer in use.
     """
 
-    def __init__(self, session: ClientSession, config: SessionConfig):
+    def __init__(self, session: ClientSession, config: SessionConfig,
+                 connector_pool: Optional[ConnectorPool] = None):
         """
         Initialize the HTTP session wrapper.
 
         Args:
             session: The underlying aiohttp ClientSession instance
             config: The configuration used to create this session
+            connector_pool: The connector pool whose reference this session holds.
+                It is released back to the ConnectorPoolManager when the session closes.
         """
         super().__init__()
         self._session = session
         self._config = config
+        self._connector_pool = connector_pool
 
     @property
     def config(self):
         return self._config
+
+    @property
+    def connector_pool(self) -> Optional[ConnectorPool]:
+        """The connector pool referenced by this session, if any."""
+        return self._connector_pool
 
     def session(self) -> ClientSession:
         """
@@ -173,10 +183,24 @@ class HttpSession(RefCountedResource):
         Perform the actual cleanup of the session.
 
         This method is called when the reference count reaches zero.
-        Closes the underlying aiohttp ClientSession.
+        Closes the underlying aiohttp ClientSession, then releases the
+        connector pool reference acquired when the session was created.
         """
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
+        try:
+            if self._session is not None and not self._session.closed:
+                await self._session.close()
+        finally:
+            await self._release_connector_pool()
+
+    async def _release_connector_pool(self):
+        """Release the connector pool reference held by this session (idempotent)."""
+        pool, self._connector_pool = self._connector_pool, None
+        if pool is None:
+            return
+        try:
+            await get_connector_pool_manager().release_connector_pool(pool.config)
+        except Exception as e:
+            logger.warning(f"Failed to release connector pool for http session: {e}", exc_info=True)
 
 
 class HttpSessionManager(BaseRefResourceMgr[HttpSession], metaclass=Singleton):
@@ -260,10 +284,14 @@ class HttpSessionManager(BaseRefResourceMgr[HttpSession], metaclass=Singleton):
         Returns:
             HttpSession: A new HTTP session instance
         """
+        # Acquire a connector pool reference; it is held by the HttpSession
+        # and released back to the manager when the session closes.
+        pool_manager = get_connector_pool_manager()
+        connector_pool = await pool_manager.get_connector_pool(config=config.connector_pool_config)
+
         # Build kwargs for aiohttp.ClientSession
         kwargs = {
-            'connector': (
-                await get_connector_pool_manager().get_connector_pool(config=config.connector_pool_config)).conn(),
+            'connector': connector_pool.conn(),
             'headers': config.headers,
             'proxy': config.proxy,
             'auth': config.auth,
@@ -281,8 +309,13 @@ class HttpSessionManager(BaseRefResourceMgr[HttpSession], metaclass=Singleton):
         kwargs.update({"connector_owner": False})  # Connector is managed by connector pool
         kwargs = {k: v for k, v in kwargs.items() if v is not None}
 
-        session = ClientSession(**kwargs)
-        return HttpSession(session, config)
+        try:
+            session = ClientSession(**kwargs)
+        except Exception:
+            # Session construction failed: give back the pool reference we just took.
+            await pool_manager.release_connector_pool(connector_pool.config)
+            raise
+        return HttpSession(session, config, connector_pool)
 
 
 _http_session_manager = HttpSessionManager()
