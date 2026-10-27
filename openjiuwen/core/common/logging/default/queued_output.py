@@ -76,11 +76,12 @@ class ConsoleHandler(logging.StreamHandler):
         super().__init__(stream)
 
     def close(self):
+        stream = self.stream
         try:
-            if self._owns_stream:
-                self.stream.close()
-        finally:
             super().close()
+        finally:
+            if self._owns_stream and stream is not None:
+                stream.close()
 
 
 class OutputListener(QueueListener):

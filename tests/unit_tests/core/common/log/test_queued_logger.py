@@ -822,3 +822,191 @@ def test_consumer_close_does_not_join_itself_or_close_active_sink(make_logger, m
     assert stats["discarded_on_close"] == 1
     assert stats["dropped_by_level"] == {logging.INFO: 1}
     assert stats["output_failures"] == 0
+
+
+def test_console_close_flushes_before_closing_owned_stream(tmp_path, monkeypatch):
+    """The owned stream must remain usable if a base close flushes and clears it."""
+    import io
+
+    with io.TextIOWrapper(io.FileIO(tmp_path / "console-close.log", "w")) as stream:
+        handler = queued_output.ConsoleHandler(stream)
+        owned_stream = handler.stream
+
+        def flushing_base_close(base_handler):
+            base_handler.flush()
+            logging.Handler.close(base_handler)
+            base_handler.stream = None
+
+        monkeypatch.setattr(logging.StreamHandler, "close", flushing_base_close)
+        handler.close()
+        handler.close()  # logging.shutdown may close a handler more than once.
+        assert handler._closed  # type: ignore[attr-defined]
+        assert owned_stream.closed
+        assert not stream.closed
+
+
+def test_normal_owned_console_close_has_no_output_failure(tmp_path, monkeypatch):
+    """Exercise the actual fd-backed console sink and its listener lifecycle."""
+    import io
+
+    with io.TextIOWrapper(io.FileIO(tmp_path / "console.log", "w")) as stream:
+        with monkeypatch.context() as patch:
+            patch.setattr(sys, "stdout", stream)
+            logger = DefaultLogger(
+                f"owned_console_{tmp_path.name}",
+                {"output": ["console"], "level": "DEBUG", "propagate": False, "format": "%(message)s"},
+            )
+            sink = logger._queue_handler.listener.handlers[0]
+            assert isinstance(sink, queued_output.ConsoleHandler)
+            assert sink._owns_stream
+            logger.debug("before close")
+            assert logger.flush()
+            logger.close()
+            assert sink._closed  # type: ignore[attr-defined]
+            assert sink.stream.closed
+            assert not stream.closed
+            assert logger.get_queue_stats()["output_failures"] == 0
+        assert (tmp_path / "console.log").read_text() == "before close\n"
+
+
+def test_failed_reconfiguration_preserves_error_if_new_sink_close_fails(tmp_path, monkeypatch):
+    """A cleanup failure must not hide the reconfiguration error or leak a sink."""
+    import io
+
+    from openjiuwen.core.common.exception.codes import StatusCode
+    from openjiuwen.core.common.logging.default import default_impl
+
+    entered = threading.Event()
+    release = threading.Event()
+    new_sinks: list[logging.Handler] = []
+    with io.TextIOWrapper(io.FileIO(tmp_path / "stdout.log", "w")) as stream, monkeypatch.context() as patch:
+        patch.setattr(sys, "stdout", stream)
+        config = {"output": ["console"], "level": "INFO", "propagate": False, "log_file": str(tmp_path / "log")}
+        logger = DefaultLogger(f"cleanup_error_{tmp_path.name}", config)
+        output = logger._queue_handler
+        original_emit = output.listener.handlers[0].emit
+        original_stop = output.stop
+        console_handler = default_impl.ConsoleHandler
+        file_handler = default_impl.SafeRotatingFileHandler
+
+        def blocked_emit(record):
+            entered.set()
+            release.wait(3)
+            original_emit(record)
+
+        def fail_stop():
+            return original_stop(timeout=0)
+
+        def track_console(*args, **kwargs):
+            handler = console_handler(*args, **kwargs)
+            close = handler.close
+
+            def fail_close():
+                close()
+                raise OSError("controlled console close failure")
+
+            patch.setattr(handler, "close", fail_close)
+            new_sinks.append(handler)
+            return handler
+
+        def track_file(*args, **kwargs):
+            handler = file_handler(*args, **kwargs)
+            new_sinks.append(handler)
+            return handler
+
+        try:
+            patch.setattr(output.listener.handlers[0], "emit", blocked_emit)
+            logger.info("in flight")
+            assert entered.wait(2)
+            with patch.context() as failure_patch:
+                failure_patch.setattr(output, "stop", fail_stop)
+                failure_patch.setattr(default_impl, "ConsoleHandler", track_console)
+                failure_patch.setattr(default_impl, "SafeRotatingFileHandler", track_file)
+                with pytest.raises(BaseError) as exc_info:
+                    logger.reconfigure({**config, "output": ["console", "file"]})
+            assert exc_info.value.code == StatusCode.COMMON_LOG_CONFIG_INVALID.code
+            assert "still blocked" in str(exc_info.value)
+            assert any("controlled console close failure" in note for note in exc_info.value.__notes__)
+            assert len(new_sinks) == 2
+            assert all(sink._closed for sink in new_sinks)  # type: ignore[attr-defined]
+            assert isinstance(new_sinks[0], default_impl.SafeRotatingFileHandler)
+            assert new_sinks[0].stream is None
+            assert not stream.closed
+        finally:
+            release.set()
+            output.listener._thread.join(3)
+            logger.close()
+        assert not output.listener._thread.is_alive()
+
+
+def test_console_setup_error_survives_file_handler_close_failure(make_logger, monkeypatch):
+    from openjiuwen.core.common.logging.default import default_impl
+
+    logger, stream = make_logger()
+    config = logger.get_config()
+    previous_output = logger._queue_handler
+    created = []
+    original_file_handler = default_impl.SafeRotatingFileHandler
+
+    def track_file(*args, **kwargs):
+        handler = original_file_handler(*args, **kwargs)
+        close = handler.close
+
+        def fail_close():
+            close()
+            raise OSError("controlled file close failure")
+
+        monkeypatch.setattr(handler, "close", fail_close)
+        created.append(handler)
+        return handler
+
+    def fail_console(*args, **kwargs):
+        raise OSError("controlled console setup failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(default_impl, "SafeRotatingFileHandler", track_file)
+        patch.setattr(default_impl, "ConsoleHandler", fail_console)
+        with pytest.raises(OSError, match="controlled console setup failure") as exc_info:
+            logger.reconfigure({**config, "output": ["file", "console"]})
+    assert any("controlled file close failure" in note for note in exc_info.value.__notes__)
+    assert len(created) == 1
+    assert created[0].stream is None
+    assert logger._queue_handler is previous_output
+    assert not previous_output.stopping
+    logger.info("still available")
+    assert logger.flush()
+    assert stream.getvalue() == "still available\n"
+
+
+def test_queue_handler_flush_waits_for_inflight_output(make_logger, monkeypatch):
+    """QueuedOutput.flush overrides Handler.flush and waits for the listener."""
+    stream = GatedStream()
+    logger, _ = make_logger(stream)
+    output = logger._queue_handler
+    logger.info("in flight")
+    assert stream.entered.wait(2)
+    entered_wait = threading.Event()
+    finished = threading.Event()
+    original_wait = output.condition.wait_for
+
+    def observe_wait(predicate, timeout):
+        assert not predicate()
+        entered_wait.set()
+        return original_wait(predicate, timeout)
+
+    def flush_handler():
+        output.flush()
+        finished.set()
+
+    monkeypatch.setattr(output.condition, "wait_for", observe_wait)
+    worker = threading.Thread(target=flush_handler)
+    worker.start()
+    try:
+        assert entered_wait.wait(2)
+        assert not finished.is_set()
+    finally:
+        stream.release.set()
+        worker.join(3)
+        monkeypatch.setattr(output.condition, "wait_for", original_wait)
+    assert finished.is_set()
+    assert stream.getvalue() == "in flight\n"

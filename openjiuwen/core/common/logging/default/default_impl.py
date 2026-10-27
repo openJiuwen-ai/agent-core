@@ -45,6 +45,15 @@ from openjiuwen.core.common.logging.utils import (
 )
 
 
+def _close_handlers_after_error(handlers: list[logging.Handler], error: Exception) -> None:
+    """Close every unused handler without replacing the original setup failure."""
+    for handler in handlers:
+        try:
+            handler.close()
+        except Exception as cleanup_error:  # noqa: BLE001 - preserve the original failure
+            error.add_note(f"Failed to close a log output handler: {cleanup_error}")
+
+
 class SafeRotatingFileHandler(RotatingFileHandler):
     """
     Secure log file rotation handler
@@ -350,9 +359,8 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
                             error_msg="previous log output is still blocked; retry after it recovers",
                         )
                     handler.close()
-        except Exception:
-            for handler in handlers:
-                handler.close()
+        except Exception as error:
+            _close_handlers_after_error(handlers, error)
             raise
 
         # Parse log level
@@ -430,9 +438,8 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
                 stream_handler = ConsoleHandler(stream=sys.stdout)
                 stream_handler.setFormatter(formatter)
                 handlers.insert(0, stream_handler)
-            except Exception:
-                for handler in handlers:
-                    handler.close()
+            except Exception as error:
+                _close_handlers_after_error(handlers, error)
                 raise
 
         return handlers

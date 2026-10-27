@@ -37,9 +37,6 @@ def thread_function(session_id, log_list, stdout_capture):
     set_session_id(session_id)
     logger.info(f"Thread started with session id {session_id}")
 
-    for handler in logger._logger.handlers:
-        handler.flush()
-
     log_list.append((session_id, get_session_id()))
 
 
@@ -151,7 +148,12 @@ def initialized_logger(mock_log_config, stdout_capture):
     yield
 
     set_session_id()
-    LogManager.reset()
+    try:
+        for log in LogManager.get_all_loggers().values():
+            if isinstance(log, DefaultLogger):
+                assert log.flush()
+    finally:
+        LogManager.reset()
 
 
 class TestThreadSafety:
@@ -173,6 +175,10 @@ class TestThreadSafety:
             t.start()
         for t in threads:
             t.join()
+
+        logger = LogManager.get_logger("common")
+        assert isinstance(logger, DefaultLogger)
+        assert logger.flush()
 
         for session_id, recorded_id in log_list:
             assert session_id == recorded_id, f"Thread session_id mismatch: expected {session_id}, actual {recorded_id}"
@@ -260,8 +266,7 @@ class TestLogManager:
 
         new_logger.warning("Test new logger type")
 
-        for handler in new_logger._logger.handlers:
-            handler.flush()
+        assert new_logger.flush()
 
         captured = capsys.readouterr()
         output = captured.out
@@ -609,8 +614,8 @@ class TestPerLoggerBehavior:
             agent_logger.debug("agent debug should be visible")
 
             for logger in (common_logger, agent_logger):
-                for handler in logger._logger.handlers:
-                    handler.flush()
+                assert isinstance(logger, DefaultLogger)
+                assert logger.flush()
 
         output = capsys.readouterr().out
         assert "common debug should stay hidden" not in output
@@ -624,14 +629,15 @@ class TestLogLevel:
         test_logger_instance = LogManager.get_logger("level_test")
 
         test_logger_instance.set_level(logging.DEBUG)
+        assert isinstance(test_logger_instance, DefaultLogger)
+        assert test_logger_instance._queue_handler.level == logging.NOTSET
 
         test_logger_instance.debug("Debug message")
         test_logger_instance.info("Info message")
         test_logger_instance.warning("Warning message")
         test_logger_instance.error("Error message")
 
-        for handler in test_logger_instance._logger.handlers:
-            handler.flush()
+        assert test_logger_instance.flush()
 
         captured = capsys.readouterr()
         output = captured.out
@@ -648,8 +654,7 @@ class TestLogLevel:
         test_logger_instance.warning("Should not appear warning")
         test_logger_instance.error("Should appear error")
 
-        for handler in test_logger_instance._logger.handlers:
-            handler.flush()
+        assert test_logger_instance.flush()
 
         captured = capsys.readouterr()
         output = captured.out
@@ -672,8 +677,8 @@ class TestLogFileOutput:
         test_message = "This is a test message for file output"
         interface_logger.info(test_message)
 
-        for handler in interface_logger._logger.handlers:
-            handler.flush()
+        assert isinstance(interface_logger, DefaultLogger)
+        assert interface_logger.flush()
 
         actual_log_file = interface_logger.config.get("log_file", "")
 
@@ -702,7 +707,7 @@ class TestLogFileOutput:
 class TestDefaultLogger:
     """Test the default logger function"""
 
-    def test_message_sanitization(self, initialized_logger, capsys):
+    def test_message_sanitization(self, initialized_logger, stdout_capture):
         """Test the message cleaning function (to prevent log injection)"""
         logger = LogManager.get_logger("common")
         logger.set_level(logging.INFO)
@@ -710,13 +715,13 @@ class TestDefaultLogger:
         test_message = "Test message\nwith newline\r\nand carriage return\r"
         logger.info(test_message)
 
-        for handler in logger._logger.handlers:
-            handler.flush()
+        assert isinstance(logger, DefaultLogger)
+        assert logger.flush()
 
-        captured = capsys.readouterr()
-        output = captured.out
+        output = stdout_capture.getvalue()
 
         lines = output.split("\n")
+        assert any("Test message" in line for line in lines)
         for line in lines:
             if "Test message" in line:
                 assert "\r" not in line
@@ -760,8 +765,8 @@ class TestDefaultLogger:
         logger.error("Error level message")
         logger.critical("Critical level message")
 
-        for handler in logger._logger.handlers:
-            handler.flush()
+        assert isinstance(logger, DefaultLogger)
+        assert logger.flush()
 
         output = stdout_capture.getvalue()
         assert "Debug level message" in output
@@ -783,8 +788,8 @@ class TestDefaultLogger:
         except ValueError:
             logger.exception("Exception occurred")
 
-        for handler in logger._logger.handlers:
-            handler.flush()
+        assert isinstance(logger, DefaultLogger)
+        assert logger.flush()
 
         output = stdout_capture.getvalue()
         assert "Exception occurred" in output
@@ -810,8 +815,8 @@ class TestDefaultLogger:
         except ValueError:
             logger.error("crash captured", exc_info=True)
 
-        for handler in logger._logger.handlers:
-            handler.flush()
+        assert isinstance(logger, DefaultLogger)
+        assert logger.flush()
 
         output = stdout_capture.getvalue()
         assert "crash captured" in output
@@ -828,8 +833,8 @@ class TestDefaultLogger:
 
         logger.error("plain error without exc info")
 
-        for handler in logger._logger.handlers:
-            handler.flush()
+        assert isinstance(logger, DefaultLogger)
+        assert logger.flush()
 
         output = stdout_capture.getvalue()
         assert "plain error without exc info" in output
@@ -882,10 +887,8 @@ class TestLogDirectoryCreation:
 
         logger.info("Test nested directory log")
 
-        # Access protected member for testing purposes
-        for handler in logger._logger.handlers:  # pylint: disable=protected-access
-            handler.flush()
-            handler.close()
+        assert logger.flush()
+        logger.close()
 
         assert os.path.exists(nested_log_file), f"Log file {nested_log_file} should be created"
 
@@ -924,10 +927,8 @@ class TestLogDirectoryCreation:
 
             logger.info("Test relative path log")
 
-            # Access protected member for testing purposes
-            for handler in logger._logger.handlers:  # pylint: disable=protected-access
-                handler.flush()
-                handler.close()
+            assert logger.flush()
+            logger.close()
 
             assert os.path.exists(abs_log_file), f"Log file {abs_log_file} should be created"
 
@@ -985,10 +986,8 @@ class TestLogDirectoryCreation:
 
         logger.info("Test existing directory")
 
-        # Access protected member for testing purposes
-        for handler in logger._logger.handlers:  # pylint: disable=protected-access
-            handler.flush()
-            handler.close()
+        assert logger.flush()
+        logger.close()
 
         assert os.path.exists(existing_log_file)
 
