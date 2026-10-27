@@ -17,6 +17,7 @@ from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     OpenAIModelClient,
 )
 from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 
 
 def _make_client() -> OpenAIModelClient:
@@ -688,7 +689,7 @@ class TestDisabledThinkingCompatibility:
             calls.append(params)
             if len(calls) == 1:
                 raise _unsupported_disabled_thinking_error()
-            yield _stream_chunk("fallback")
+            yield AssistantMessageChunk(content="fallback")
 
         with patch.object(client, "_iter_affinity_gateway_stream", new=_fake_stream):
             chunks = [chunk.content async for chunk in (
@@ -708,7 +709,7 @@ class TestDisabledThinkingCompatibility:
         client = _make_client()
 
         async def _partial_stream(params, *, timeout=None):
-            yield _stream_chunk("partial")
+            yield AssistantMessageChunk(content="partial")
             raise _unsupported_disabled_thinking_error()
 
         with patch.object(client, "_iter_affinity_gateway_stream", new=_partial_stream):
