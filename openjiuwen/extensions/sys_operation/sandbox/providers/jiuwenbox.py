@@ -651,11 +651,8 @@ class _JiuwenBoxProviderMixin:
         # Share sandbox across fs/shell/code for the same isolation, not across
         # different agents that share the same base_url. isolation_key is the
         # resolved key from SysOperation (via gateway SandboxEndpoint).
-        parts = [str(base_url).rstrip("/")]
         isolation_key = getattr(self.endpoint, "isolation_key", None)
-        if isinstance(isolation_key, str) and isolation_key:
-            parts.append(isolation_key)
-        return "|".join(parts)
+        return build_jiuwenbox_shared_scope_key(str(base_url), isolation_key)
 
     def _sandbox_id_from_launcher_extra_params(self) -> Optional[str]:
         extra_params = self._launcher_extra_params()
@@ -1038,8 +1035,15 @@ class _JiuwenBoxProviderMixin:
         lifecycle_hook: Optional[Callable[[str, dict], None]], reason: str,
     ) -> str:
         """Track recreation until its worker finishes, even if the caller cancels."""
+        base_key = build_jiuwenbox_shared_scope_key(base_url)
+        if not isinstance(shared_key, str) or not shared_key:
+            raise ValueError("shared_key is required for recreation; use build_jiuwenbox_shared_scope_key")
+        if shared_key != base_key and (
+            not shared_key.startswith(base_key + "|") or shared_key == base_key + "|"
+        ):
+            raise ValueError("shared_key must match the recreation base_url")
         with cls._shared_lock:
-            cls._assert_not_deleting_locked(shared_key or base_url.rstrip("/"))
+            cls._assert_not_deleting_locked(shared_key)
             task = asyncio.create_task(cls._recreate_serialized(
                 base_url, shared_key=shared_key, policy=policy, policy_mode=policy_mode,
                 timeout_seconds=timeout_seconds, preserve_files_upload=preserve_files_upload,
@@ -1060,11 +1064,11 @@ class _JiuwenBoxProviderMixin:
 
     @classmethod
     async def _recreate_serialized(
-        cls, base_url: str, *, shared_key: Optional[str], policy: dict | None, policy_mode: str | None,
+        cls, base_url: str, *, shared_key: str, policy: dict | None, policy_mode: str | None,
         timeout_seconds: float, preserve_files_upload: Any, extra_stale_sandbox_ids: Sequence[str] | None,
         lifecycle_hook: Optional[Callable[[str, dict], None]], reason: str,
     ) -> str:
-        lock = await cls.acquire_scope_lifecycle_lock(shared_key or base_url.rstrip("/"))
+        lock = await cls.acquire_scope_lifecycle_lock(shared_key)
         # The caller shields this whole task, including lock acquisition, so a
         # cancelled caller cannot abandon an acquired scope lock.
         try:
@@ -1430,9 +1434,10 @@ def clear_jiuwenbox_shared_sandbox(base_url: str) -> list[str]:
     return _JiuwenBoxProviderMixin.clear_shared_sandbox(base_url)
 
 
-def build_jiuwenbox_shared_scope_key(base_url: str, isolation_key: str) -> str:
-    """Build the provider shared-cache key for a base_url + isolation_key pair."""
-    return f"{base_url.rstrip('/')}|{isolation_key}"
+def build_jiuwenbox_shared_scope_key(base_url: str, isolation_key: Optional[str] = None) -> str:
+    """Build the provider key; omit the suffix for a provider without isolation."""
+    base_key = base_url.rstrip("/")
+    return f"{base_key}|{isolation_key}" if isinstance(isolation_key, str) and isolation_key else base_key
 
 
 async def retire_jiuwenbox_service(base_url: str) -> list[str]:
@@ -1614,8 +1619,9 @@ async def force_recreate_jiuwenbox_sandbox(
 
     Args:
         base_url: jiuwenbox service base URL.
-        shared_key: Scoped cache key (base_url|isolation). When set, only that
-            entry is cleared; other agents' sandboxes are untouched.
+        shared_key: Required explicit provider cache key (base_url|isolation,
+            or base_url for a provider without isolation). None/empty keys are
+            rejected before any deletion or creation; only this entry is rebuilt.
         policy / policy_mode: Security policy for the new sandbox.
         timeout_seconds: HTTP client timeout.
         preserve_files_upload: Files/dirs to re-upload in copy mode.
@@ -1634,7 +1640,7 @@ async def force_recreate_jiuwenbox_sandbox(
 
 
 async def _force_recreate_jiuwenbox_sandbox(
-    base_url: str, *, shared_key: str | None, policy: dict | None, policy_mode: str | None,
+    base_url: str, *, shared_key: str, policy: dict | None, policy_mode: str | None,
     timeout_seconds: float, preserve_files_upload: Any, extra_stale_sandbox_ids: Sequence[str] | None,
     lifecycle_hook: Optional[Callable[[str, dict], None]], reason: str,
 ) -> str:
@@ -1644,11 +1650,7 @@ async def _force_recreate_jiuwenbox_sandbox(
     if policy_mode is not None:
         create_options["policy_mode"] = policy_mode
 
-    if shared_key is None:
-        if _JiuwenBoxProviderMixin.deletion_pending_for_base_url(base_url):
-            raise RuntimeError("jiuwenbox sandbox deletion is pending; retry deletion before recreation")
-    else:
-        _JiuwenBoxProviderMixin.ensure_not_deleting(shared_key)
+    _JiuwenBoxProviderMixin.ensure_not_deleting(shared_key)
     stale_sandbox_ids = _JiuwenBoxProviderMixin.cached_sandbox_ids(base_url, shared_key)
 
     if extra_stale_sandbox_ids:
@@ -1669,17 +1671,15 @@ async def _force_recreate_jiuwenbox_sandbox(
     # replacement grant; create-before-delete can revoke the replacement's ACLs.
     # Failed deletions stay pending and prevent a replacement from being created.
     deleted = await _JiuwenBoxProviderMixin.delete_cached_sandboxes(
-        base_url=base_url if shared_key is None else None, shared_key=shared_key,
+        shared_key=shared_key,
         timeout_seconds=timeout_seconds, reason=reason, raise_on_error=True,
     )
     for old_id in stale_sandbox_ids:
         if old_id not in deleted:
             await delete_jiuwenbox_sandbox(
-                sandbox_id=old_id, shared_key=shared_key or base_url.rstrip("/"),
+                sandbox_id=old_id, shared_key=shared_key,
                 timeout_seconds=timeout_seconds, reason=reason, raise_on_error=True,
             )
-    shared_key = shared_key or base_url.rstrip("/")
-
     with _JiuwenBoxClient(base_url=base_url, timeout_seconds=timeout_seconds) as client:
         sandbox_id = await asyncio.to_thread(
             client.create_sandbox, policy=policy, policy_mode=policy_mode,

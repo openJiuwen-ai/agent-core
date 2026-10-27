@@ -1121,6 +1121,7 @@ async def test_lifecycle_hook_strict_propagates_exception(
             with pytest.raises(RuntimeError, match="boom-recreate"):
                 await jb.force_recreate_jiuwenbox_sandbox(
                     base_url,
+                    shared_key=jb.build_jiuwenbox_shared_scope_key(base_url, sys_op.isolation_key_template),
                     lifecycle_hook=raise_on_before_recreate,
                     reason="policy_changed",
                     extra_stale_sandbox_ids=["nonexistent-stale-id"],

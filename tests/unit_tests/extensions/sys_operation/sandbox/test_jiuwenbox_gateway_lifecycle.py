@@ -282,6 +282,69 @@ async def test_lifecycle_waiters_leave_workers_available_for_rebuild(remote, wai
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("creating", [False, True])
+async def test_legacy_rebuild_rejects_missing_scope_before_mutation(remote, creating):
+    op = operation()
+    remote.block_create = creating
+    read = asyncio.create_task(op.fs().read_file("/probe"))
+    try:
+        if creating:
+            assert await asyncio.to_thread(remote.entered.wait, 2)
+        else:
+            assert (await read).data.content == "sandbox-1"
+        with pytest.raises(ValueError, match="shared_key is required"):
+            await jb.force_recreate_jiuwenbox_sandbox("http://localhost:8321")
+        assert [method for method, _ in remote.requests if method in {"POST", "DELETE"}] == ["POST"]
+        remote.release.set()
+        assert (await read).data.content == "sandbox-1"
+        assert (await op.fs().read_file("/probe")).data.content == "sandbox-1"
+        assert len(remote.created) == 1
+        assert remote.active == {"sandbox-1"}
+    finally:
+        remote.release.set()
+        await asyncio.gather(read, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["", "http://localhost:83210|project", "http://localhost:8321|"])
+async def test_rebuild_rejects_invalid_scope_without_http(remote, key):
+    with pytest.raises(ValueError, match="shared_key"):
+        await jb.force_recreate_jiuwenbox_sandbox("http://localhost:8321", shared_key=key)
+    assert not remote.requests
+
+
+@pytest.mark.asyncio
+async def test_unisolated_provider_rebuild_uses_explicit_normalized_base_key(remote):
+    url = "http://localhost:8321"
+    provider = jb.JiuwenBoxFSProvider(
+        SandboxEndpoint(base_url=url + "/"),
+        SandboxGatewayConfig(launcher_config=PreDeployLauncherConfig(base_url=url, sandbox_type="jiuwenbox")),
+    )
+    assert (await provider.read_file("/probe")).data.content == "sandbox-1"
+    key = jb.build_jiuwenbox_shared_scope_key(url + "/")
+    assert key == url
+    assert await jb.force_recreate_jiuwenbox_sandbox(url + "/", shared_key=key) == "sandbox-2"
+    assert (await provider.read_file("/probe")).data.content == "sandbox-2"
+    assert remote.active == {"sandbox-2"}
+    assert len(remote.created) == 2
+
+
+@pytest.mark.asyncio
+async def test_scoped_rebuild_preserves_other_scope_on_same_service(remote):
+    first, other = operation(), operation(scope="other")
+    await first.fs().read_file("/probe")
+    await other.fs().read_file("/probe")
+    key = jb.build_jiuwenbox_shared_scope_key("http://localhost:8321", first.isolation_key_template)
+    assert await jb.force_recreate_jiuwenbox_sandbox("http://localhost:8321", shared_key=key) == "sandbox-3"
+    assert (await other.fs().read_file("/probe")).data.content == "sandbox-2"
+    assert (await first.fs().read_file("/probe")).data.content == "sandbox-3"
+    assert remote.active == {"sandbox-2", "sandbox-3"}
+    assert [url for method, url in remote.requests if method == "DELETE"] == [
+        "http://localhost:8321/api/v1/sandboxes/sandbox-1",
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_rebuild", [False, True])
 async def test_lazy_acquisition_joins_explicit_rebuild_without_creating_a_loser(remote, cancel_rebuild):
     op = operation()

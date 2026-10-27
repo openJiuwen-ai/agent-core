@@ -484,7 +484,7 @@ async def force_recreate_jiuwenbox_sandbox(
 **参数**：
 
 * **base_url**(str)：JiuwenBox 服务基础 URL。
-* **shared_key**(str | None, 可选)：作用域缓存键（`base_url|isolation`）；设置时仅清理该条，其他 agent 的沙箱不受影响。默认值 `None`。
+* **shared_key**(str, 必填)：与 provider 相同的作用域缓存键；使用 `build_jiuwenbox_shared_scope_key(base_url, isolation_key)` 构造，重建仅清理该条。无隔离的 provider 使用 `build_jiuwenbox_shared_scope_key(base_url)` 返回的规范 base URL。遗漏、空字符串、空隔离后缀或属于其他服务 URL 的 key 均在删除/创建前抛出 `ValueError`。
 * **policy**(dict | None, 可选)：新沙箱的安全策略。默认值 `None`。
 * **policy_mode**(str | None, 可选)：新沙箱的策略模式。默认值 `None`。
 * **timeout_seconds**(float, 可选)：HTTP 客户端超时（秒），默认值 `30.0`。
@@ -501,7 +501,7 @@ async def force_recreate_jiuwenbox_sandbox(
 
 同一 `base_url|isolation` 的首次自动创建、已有实例获取和主动重建共用生命周期互斥。重建期间的获取等待替代实例发布，随后复用新 ID；不会再并发创建一个多余实例并删除它，导致 Windows 共用目录的账户 ACL 被撤销。重建先等待在途首次创建完成，再严格删除旧实例、完成撤权，之后才创建替代实例。旧实例删除失败时不创建新实例，失败 ID 保留为 pending，需先重试删除；创建失败不会继续使用旧实例。该流程不跳过 ACL 撤销，也不增加共享目录授权。
 
-隔离作用域的重建必须传入与 provider 相同的 `shared_key`；不传时仍是兼容旧调用方的服务级缓存重建，不能代替某个隔离作用域的互斥。设置 `JIUWENBOX_SANDBOX_ID` 时，缓存复用不会先向 launcher 写入缓存 ID，从而遮蔽环境绑定；已有 launcher `extra_params["sandbox_id"]` 的优先级保持不变。pending 删除不会由 sandbox-lost 自动重试链路绕过，调用方需先重试 `delete_jiuwenbox_sandbox`，成功后再重建。
+重建必须明确传入与 provider 相同的 `shared_key`，其规范化构造与首次创建共用 `build_jiuwenbox_shared_scope_key`。旧的 `force_recreate_jiuwenbox_sandbox(base_url)` 调用现在直接报错，不再按服务 URL 批量清理 scope 后创建到扁平 key。旧调用方需补传实际 scope key；批量应用策略应逐个 scope 重建，不能用 `None` 代替。设置 `JIUWENBOX_SANDBOX_ID` 时，缓存复用不会先向 launcher 写入缓存 ID，从而遮蔽环境绑定；已有 launcher `extra_params["sandbox_id"]` 的优先级保持不变。pending 删除不会由 sandbox-lost 自动重试链路绕过，调用方需先重试 `delete_jiuwenbox_sandbox`，成功后再重建。
 
 异步工具调用和重建在等待该互斥时不占用线程池 worker；实际 HTTP 创建、删除仍在线程池执行，避免等待者占满重建自身所需的 worker。同步 `_get_sandbox_id` 调用保留同步互斥。弱引用锁表不能在缓存清理时强制移除仍被持有的锁，否则新调用会取得不同的锁并重新出现并发窗口。
 

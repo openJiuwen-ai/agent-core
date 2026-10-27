@@ -96,7 +96,7 @@ async def test_glob_backend_relative_results_use_search_root(tmp_path, monkeypat
         # Mixed backend representations must not duplicate the same file.
         paths.append(str(root / relative_path))
     provider = object.__new__(JiuwenBoxFSProvider)
-    provider._get_sandbox_id = Mock(return_value="sandbox-a")
+    provider._acquire_sandbox_id = AsyncMock(return_value="sandbox-a")
     client = Mock()
     client.search_files.return_value = [{"name": "result.txt", "path": p} for p in paths]
     provider._get_client = Mock(return_value=client)
