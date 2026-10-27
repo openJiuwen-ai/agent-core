@@ -352,7 +352,18 @@ class DeepAgent(BaseAgent):
         self._fresh_input_context_factory: Optional[FreshInputContextFactory] = None
         self._task_resource_prepares: list[Callable[[], Awaitable[None]]] = []
         self._task_resource_cleanups: list[Callable[[], Awaitable[None]]] = []
+        self._moa_scope_owner: Any = None
         super().__init__(card)
+
+    def _proposal_owner(self) -> Any:
+        """Resolve the in-memory advice owner only when MoA is configured."""
+        if self._deep_config is None or self._deep_config.moa is None:
+            return None
+        if self._moa_scope_owner is None:
+            from openjiuwen.harness.moa.integration import MoAProposalOwner
+
+            self._moa_scope_owner = MoAProposalOwner()
+        return self._moa_scope_owner
 
     def set_session_toolkit(self, toolkit: SessionToolkit | None) -> None:
         """Attach or clear the session toolkit (wired by SubagentRail async)."""
@@ -2866,13 +2877,20 @@ class DeepAgent(BaseAgent):
                     f", query={query_preview}",
                 )
 
-                await controller.submit_round(
-                    session, current_query,
-                    is_follow_up=is_follow_up,
-                    run_kind=modified.run_kind,
-                    run_context=round_run_context,
-                    turn_number=modified.turn_number,
-                )
+                from openjiuwen.harness.moa.state import active_moa_input_origin
+
+                origin_token = active_moa_input_origin.set("internal") if outer_round > 1 else None
+                try:
+                    await controller.submit_round(
+                        session, current_query,
+                        is_follow_up=is_follow_up,
+                        run_kind=modified.run_kind,
+                        run_context=round_run_context,
+                        turn_number=modified.turn_number,
+                    )
+                finally:
+                    if origin_token is not None:
+                        active_moa_input_origin.reset(origin_token)
                 result = await controller.wait_round_completion(timeout=timeout)
 
                 result_type = result.get("result_type", "N/A")
@@ -3211,6 +3229,13 @@ class DeepAgent(BaseAgent):
         session = await self._prepare_single_round_session(invoke_inputs, session)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
 
+        proposal_owner = self._proposal_owner()
+        proposal_binding = proposal_owner.begin_work(
+            session.get_session_id(), interaction_response=self._is_resume_input(invoke_inputs),
+        ) if proposal_owner is not None and session is not None else None
+        proposal_tokens = proposal_owner.activate(proposal_binding.identity) if proposal_binding is not None else None
+        proposal_succeeded = False
+
         self._invoke_active = True
         try:
             result: Dict[str, Any]
@@ -3232,8 +3257,14 @@ class DeepAgent(BaseAgent):
             if session is not None:
                 self.save_state(session)
                 self.clear_state(session)
+            proposal_succeeded = True
             return invoke_inputs.result
         finally:
+            if proposal_binding is not None:
+                proposal_owner.finish_work(
+                    proposal_binding.identity, result=invoke_inputs.result, succeeded=proposal_succeeded,
+                )
+                proposal_owner.reset(proposal_tokens)
             self._invoke_active = False
             if owns_session and session is not None:
                 await session.post_run()
@@ -3258,6 +3289,13 @@ class DeepAgent(BaseAgent):
         owns_session = session is None
         session = await self._prepare_single_round_session(invoke_inputs, session)
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
+
+        proposal_owner = self._proposal_owner()
+        proposal_binding = proposal_owner.begin_work(
+            session.get_session_id(), interaction_response=self._is_resume_input(invoke_inputs),
+        ) if proposal_owner is not None and session is not None else None
+        proposal_tokens = proposal_owner.activate(proposal_binding.identity) if proposal_binding is not None else None
+        proposal_succeeded = False
 
         self._invoke_active = True
         try:
@@ -3288,6 +3326,8 @@ class DeepAgent(BaseAgent):
                             chunk_type = chunk.get("type") if isinstance(chunk, dict) else getattr(chunk, "type", None)
                             interrupted = interrupted or chunk_type == INTERACTION
                             if chunk_type == INTERACTION:
+                                if proposal_binding is not None:
+                                    proposal_owner.suspend_work(proposal_binding.identity)
                                 stream_result = None
                                 terminal_chunk = None
                             yield chunk
@@ -3305,9 +3345,18 @@ class DeepAgent(BaseAgent):
                 self.clear_state(session)
                 if owns_session:
                     await session.post_run()
+            proposal_succeeded = True
             if invoke_inputs.result is not None:
                 yield self._finalized_answer_chunk(terminal_chunk, invoke_inputs.result)
         finally:
+            if proposal_binding is not None:
+                proposal_result = invoke_inputs.result
+                if proposal_succeeded and proposal_result is None and interrupted:
+                    proposal_result = {"result_type": "interrupt"}
+                proposal_owner.finish_work(
+                    proposal_binding.identity, result=proposal_result, succeeded=proposal_succeeded,
+                )
+                proposal_owner.reset(proposal_tokens)
             self._invoke_active = False
             if owns_session and session is not None:
                 await session.post_run()
@@ -3487,6 +3536,12 @@ class DeepAgent(BaseAgent):
             session: Parent session whose runtime subagents should be cancelled.
                 Falls back to the bound loop session when omitted.
         """
+        proposal_session = session or self._loop_session
+        if self._moa_scope_owner is not None:
+            if proposal_session is None:
+                self._moa_scope_owner.close_all("aborted")
+            else:
+                self._moa_scope_owner.close_session(proposal_session.get_session_id(), "aborted")
         coordinator = self._loop_coordinator
         controller = self._loop_controller
         if coordinator is not None and controller is not None:
@@ -3525,6 +3580,18 @@ class DeepAgent(BaseAgent):
         session: Session,
     ) -> RoundOutcome:
         """Execute one interaction work item and optionally propose follow-up work."""
+        # Passive work bypasses invoke()/stream(), so materialize pending rails
+        # before its first BEFORE_INVOKE callback, too.
+        await self._ensure_initialized()
+        proposal_owner = self._proposal_owner()
+        proposal_binding = proposal_owner.begin_work(
+            session.get_session_id(), work=work,
+            interaction_response=isinstance(work.query, InteractiveInput),
+        ) if proposal_owner is not None else None
+        proposal_tokens = proposal_owner.activate(proposal_binding.identity) if proposal_binding is not None else None
+        proposal_succeeded = False
+        proposal_result = None
+        next_work = None
         self._invoke_active = True
         try:
             coordinator, controller = await self.prepare_interaction_task_loop(session)
@@ -3574,6 +3641,7 @@ class DeepAgent(BaseAgent):
                     result = await controller.wait_round_completion(timeout=timeout)
                 await self._write_round_result_to_stream(result, session)
                 invoke_inputs.result = result
+                proposal_result = result
                 next_work = (
                     None
                     if is_resume_input
@@ -3588,6 +3656,7 @@ class DeepAgent(BaseAgent):
 
             self.save_state(session)
             self.clear_state(session)
+            proposal_succeeded = True
             return RoundOutcome(next_work=next_work)
         except Exception:
             logger.exception("[DeepAgent] interaction round execution failed")
@@ -3596,6 +3665,12 @@ class DeepAgent(BaseAgent):
                 error_message="interaction round execution failed",
             )
         finally:
+            if proposal_binding is not None:
+                proposal_owner.finish_work(
+                    proposal_binding.identity, result=proposal_result,
+                    succeeded=proposal_succeeded, continuing=next_work is not None,
+                )
+                proposal_owner.reset(proposal_tokens)
             self._invoke_active = False
 
     def _build_interaction_next_work(
@@ -3626,18 +3701,24 @@ class DeepAgent(BaseAgent):
             self.save_state(session, state)
             inputs = copy.deepcopy(work.inputs)
             inputs["query"] = query
-            return RoundWorkItem.user(
+            next_work = RoundWorkItem.user(
                 request_id=work.request_id,
                 inputs=inputs,
                 is_follow_up=True,
                 reset_loop=False,
             )
+            if self._moa_scope_owner is not None:
+                self._moa_scope_owner.inherit_work(work, next_work)
+            return next_work
         if self._has_remaining_tasks(session):
-            return RoundWorkItem.user(
+            next_work = RoundWorkItem.user(
                 request_id=work.request_id,
                 inputs=work.inputs,
                 reset_loop=False,
             )
+            if self._moa_scope_owner is not None:
+                self._moa_scope_owner.inherit_work(work, next_work)
+            return next_work
         return None
 
     @property
@@ -3754,6 +3835,8 @@ class DeepAgent(BaseAgent):
     async def _stop_interaction_locked(self) -> None:
         """Teardown helper; awaited callbacks must not re-enter start or stop."""
         self._fresh_input_context_factory = None
+        if self._moa_scope_owner is not None:
+            self._moa_scope_owner.close_all("interaction_stopped")
         self._try_transition_interaction_phase(InteractionPhase.TERMINATED)
         if not self._interaction_started:
             return
@@ -3971,6 +4054,7 @@ class DeepAgent(BaseAgent):
             detached = await self._interaction_output.detach(token)
             if not detached:
                 return
+            self._retire_detached_proposals("output_detached", abort_active_round=abort_active_round)
             self._event_manager.discard_all_work()
             if abort_active_round:
                 await self._cancel_active_round(reason="output_detached")
@@ -3980,9 +4064,24 @@ class DeepAgent(BaseAgent):
         if lease is None:
             return
         if await self._interaction_output.detach(lease.token):
+            self._retire_detached_proposals("output_replaced", abort_active_round=abort_active_round)
             self._event_manager.discard_all_work()
             if abort_active_round:
                 await self._cancel_active_round(reason="output_replaced")
+
+    def _retire_detached_proposals(self, reason: str, *, abort_active_round: bool) -> None:
+        owner = self._moa_scope_owner
+        session = self._interaction_session
+        if owner is None or session is None:
+            return
+        if abort_active_round:
+            owner.close_session(session.get_session_id(), reason)
+        else:
+            active = self._active_interaction_round
+            owner.discard_queued(
+                session.get_session_id(), reason,
+                active_work=active.work if active is not None else None,
+            )
 
     def _emit_interaction_event(self, event: InteractionEvent) -> None:
         # The callback is synchronous because rails can invoke it from several
@@ -4050,6 +4149,8 @@ class DeepAgent(BaseAgent):
             return
 
         logger.info("[DeepAgent] cancelling %s round: %s", active.run_kind, reason)
+        if self._moa_scope_owner is not None:
+            self._moa_scope_owner.close_work(active.work, reason)
         task_id = active.task_id
         controller = self.loop_controller
         scheduler = getattr(controller, "task_scheduler", None) if controller else None
@@ -4151,14 +4252,15 @@ class DeepAgent(BaseAgent):
         if controller is None or not controller.has_follow_up():
             return
         for query in controller.drain_follow_up():
-            self._event_manager.push_user(
-                RoundWorkItem.user(
-                    request_id=None,
-                    inputs={"query": query},
-                    is_follow_up=True,
-                    reset_loop=False,
-                )
+            work = RoundWorkItem.user(
+                request_id=None,
+                inputs={"query": query},
+                is_follow_up=True,
+                reset_loop=False,
             )
+            if self._moa_scope_owner is not None:
+                self._moa_scope_owner.mark_automatic(work)
+            self._event_manager.push_user(work)
 
     async def _close_idle_output_if_finished(self) -> None:
         """End an ordinary response stream after its final queued round."""
@@ -4235,6 +4337,8 @@ class DeepAgent(BaseAgent):
         self._interaction_round_forwarded = forwarded
         self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
         self._event_manager.mark_started(work)
+        continuation_enqueued = False
+        round_succeeded = False
         try:
             if session is None or not self._interaction_output.has_consumer():
                 return
@@ -4255,7 +4359,9 @@ class DeepAgent(BaseAgent):
                 return
             if outcome.next_work is not None:
                 self._event_manager.push_user(outcome.next_work)
+                continuation_enqueued = True
                 self._notify_work()
+            round_succeeded = outcome.error_code is None
             if outcome.error_code is not None:
                 self._emit_interaction_event(
                     InteractionEvent.execution_error(
@@ -4274,6 +4380,11 @@ class DeepAgent(BaseAgent):
                 )
             )
         finally:
+            owner = self._moa_scope_owner
+            if owner is not None:
+                suspended = session is not None and owner.is_suspended(work, session.get_session_id())
+                if not round_succeeded or (not continuation_enqueued and not suspended):
+                    owner.close_work(work, "work_not_continued")
             self._event_manager.mark_finished(work)
             if session is not None:
                 emitted = await self._emit_round_boundary(session)

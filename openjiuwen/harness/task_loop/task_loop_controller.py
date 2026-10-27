@@ -88,6 +88,12 @@ class TaskLoopController(Controller):
         event = InputEvent.from_user_input(query)
         event.metadata = event.metadata or {}
         event.metadata["_handler_round_id"] = round_id
+        from openjiuwen.harness.moa.state import active_moa_input_origin, active_moa_work_binding
+
+        moa_binding = active_moa_work_binding.get()
+        if moa_binding is not None:
+            event.metadata["_moa_work_binding"] = moa_binding
+            event.metadata["_moa_input_origin"] = active_moa_input_origin.get()
         if is_follow_up:
             event.metadata["is_follow_up"] = True
         if run_kind is not None:

@@ -75,7 +75,7 @@ async def consult(config: MoAConfig, messages: list[BaseMessage]) -> tuple[tuple
     for index, result in enumerate(results, 1):
         if isinstance(result, asyncio.CancelledError):
             raise result
-        if isinstance(result, BaseException) or not result:
+        if isinstance(result, BaseException) or not result.strip():
             continue
         success_count += 1
         if remaining > 0:
@@ -86,18 +86,35 @@ async def consult(config: MoAConfig, messages: list[BaseMessage]) -> tuple[tuple
 
 
 async def prepare_reference(
-    config: MoAConfig, state: MoAState, messages: list[BaseMessage], target: TurnKey | None
+    config: MoAConfig, state: MoAState, messages: list[BaseMessage], target: TurnKey | None,
+    *, epoch: int | None = None,
 ) -> int | None:
     """Spend one consultation batch and bind available proposals to their target.
 
     None means the batch budget is exhausted. A numeric result is the number
     of successful reference models, including zero when all references fail.
     """
+    store = state.proposals
+    epoch = store.epoch if epoch is None else epoch
+    if state.proposals is not store or not state.accepts_result(epoch):
+        return 0
     limit = config.jev.max_reference_calls if config.jev is not None else config.verifier.max_reference_calls
     if limit is not None and state.reference_calls >= limit:
         return None
     state.reference_calls += 1
+    store.issued_ticket += 1
+    ticket = store.issued_ticket
+    origin = state.active_key
     sources, success_count = await consult(config, messages)
-    if sources and target is not None:
-        state.pending = ProposalBatch(sources=sources, target=target)
+    if state.proposals is not store or not state.accepts_result(epoch):
+        return 0
+    if sources and target is not None and ticket > store.accepted_ticket:
+        store.accepted_ticket = ticket
+        batch = ProposalBatch(sources=sources, target=target, origin=origin)
+        if target == origin:
+            # Bootstrap runs before this work's first model request starts.
+            store.active = batch
+            store.ready = None
+        else:
+            store.ready = batch
     return success_count

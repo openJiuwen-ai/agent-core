@@ -209,8 +209,8 @@ async def test_jev_checks_every_three_completed_turns_and_delivers_to_next_turn(
         False,
         False,
         True,
-        False,
-        False,
+        True,
+        True,
         False,
     ]
     assert ["sixth-turn proposal" in request for request in requests] == [False] * 6 + [True]
@@ -614,7 +614,7 @@ async def test_missing_todo_state_uses_messages_only(kind):
 
 
 @pytest.mark.asyncio
-async def test_public_stream_delivers_periodic_proposal_once_and_keeps_history_private():
+async def test_public_stream_reuses_periodic_proposal_and_keeps_history_private():
     client = _client(_response(True), _response())
     primary_model = model()
     requests = []
@@ -632,7 +632,7 @@ async def test_public_stream_delivers_periodic_proposal_once_and_keeps_history_p
     deep = agent(primary_model, _config(client, reference, interval=1), tools=[Echo()])
     chunks = [chunk async for chunk in deep.stream("task", session=Session(session_id="jev-stream", card=deep.card))]
     assert chunks and client.system_one.await_count == 2
-    assert ["stream proposal" in str(request) for request in requests] == [False, True, False]
+    assert ["stream proposal" in str(request) for request in requests] == [False, True, True]
     assert "stream proposal" not in str(
         deep.react_agent.context_engine.get_context(session_id="jev-stream").get_messages()
     )
