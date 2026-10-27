@@ -1292,8 +1292,7 @@ class ReActAgent(BaseAgent):
             return False
         ctx.extra[_OVERFLOW_RECOVERY_USED_KEY] = True
 
-        compress = getattr(ctx.context, "compress_context", None)
-        if not callable(compress):
+        if not hasattr(ctx.context, "compress_context"):
             return False
 
         logger.warning(
@@ -1302,7 +1301,9 @@ class ReActAgent(BaseAgent):
             exc,
         )
         try:
-            result = await compress(
+            result = await self.context_engine.compress_context(
+                context_id=ctx.context.context_id(),
+                session=ctx.session,
                 model_config=self._config.model_config_obj,
                 model_client_config=self._config.model_client_config,
             )
