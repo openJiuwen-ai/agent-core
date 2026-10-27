@@ -193,7 +193,7 @@ class MoARail(DeepAgentRail):
                 (str(message.content) for message in inputs.messages if getattr(message, "role", None) == "user"),
                 "",
             )
-        if self._config.mode == "verifier_routed" and state.reference_calls == 0:
+        if self._config.mode in ("verifier_routed", "jev_routed") and state.reference_calls == 0:
             await prepare_reference(self._config, state, list(inputs.messages), key, epoch=epoch)
 
     async def _route_jev(
