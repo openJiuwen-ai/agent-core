@@ -129,6 +129,22 @@ def _shutdown_web_servers():
     _web_servers.clear()
 
 
+def _stop_web_server(cache_key: str) -> None:
+    """Stop the dashboard web server tied to an evicted router cache entry.
+
+    A rebuild re-runs _create_router for the same cache key; stopping the old
+    server first lets the replacement bind the dashboard port again and keeps
+    _web_servers free of orphans the atexit hook can no longer reach.
+    """
+    server = _web_servers.pop(cache_key, None)
+    if server is None:
+        return
+    try:
+        server.stop()
+    except (OSError, RuntimeError) as e:
+        logger.error(f"stop web server failed: {e}")
+
+
 atexit.register(_shutdown_web_servers)
 
 # Map each provider to the generation APIs it supports
@@ -271,18 +287,24 @@ class IntelliRouterModelClient(BaseModelClient):
     def _get_or_create_router(cls, config: IntelliRouterClientConfig) -> "ReliableRouter":
         """Get a ReliableRouter from cache or create & cache a new one."""
         key = cls._make_router_key(config)
-        if key not in _router_cache:
+        entry = _router_cache.get(key)
+        if entry is None:
             with _router_cache_lock:
-                if key not in _router_cache:
+                # Capture the entry under the lock and return it directly:
+                # another thread's eviction must not turn an unlocked
+                # ``_router_cache[key]`` read below into a KeyError.
+                entry = _router_cache.get(key)
+                if entry is None:
                     try:
                         loop = asyncio.get_running_loop()
                     except RuntimeError:
                         loop = None  # built from sync context; claimed on first use
-                    _router_cache[key] = _RouterCacheEntry(
+                    entry = _RouterCacheEntry(
                         router=cls._create_router(config, cache_key=key),
                         loop=loop,
                     )
-        return _router_cache[key].router
+                    _router_cache[key] = entry
+        return entry.router
 
     @classmethod
     def _create_router(cls, config: IntelliRouterClientConfig, cache_key: str = ""):
@@ -463,22 +485,26 @@ class IntelliRouterModelClient(BaseModelClient):
             return  # externally injected router: lifecycle owned by the caller
         assert self._router_config is not None  # set together with _router_key
         loop = asyncio.get_running_loop()
-        entry = _router_cache.get(self._router_key)
-        if entry is None:  # cache cleared underneath us: rebuild normally
-            self._router = self._get_or_create_router(self._router_config)
-            return
-        if entry.loop is loop:
-            self._router = entry.router  # follow a newer instance if replaced
-            return
-        if entry.loop is None:
-            entry.loop = loop  # first real use: clients not bound to any loop yet
-            self._router = entry.router
-            return
-        stale = _router_cache.pop(self._router_key, None)
-        if stale is not None:
+        with _router_cache_lock:
+            entry = _router_cache.get(self._router_key)
+            if entry is not None:
+                if entry.loop is None:
+                    entry.loop = loop  # first real use: pool not bound to any loop yet
+                    self._router = entry.router
+                    return
+                if entry.loop is loop:
+                    self._router = entry.router  # follow a newer instance if replaced
+                    return
+                # Evict exactly the entry observed above; a replacement that
+                # another consumer installed after our read stays in the cache.
+                del _router_cache[self._router_key]
+        if entry is not None:  # evicted on loop mismatch (or cache cleared: rebuild only)
+            _stop_web_server(self._router_key)  # dashboard follows its router
             try:
-                await stale.router.close()
-            except Exception as e:
+                await entry.router.close()  # outside the lock, best-effort
+            except (RuntimeError, OSError) as e:
+                # Closing on a retired loop raises "Event loop is closed"; the
+                # pooled connections die with that loop either way.
                 logger.warning(f"Closing stale ReliableRouter failed: {e}")
         self._router = self._get_or_create_router(self._router_config)
 

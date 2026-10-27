@@ -4,12 +4,13 @@
 Unit tests for IntelliRouterModelClient — wraps intelli_router.ReliableRouter.
 """
 import asyncio
+import contextlib
 import importlib.util
 import json
 import os
 import threading
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1505,6 +1506,9 @@ class _LocalCompletionHandler(BaseHTTPRequestHandler):
     """Local OpenAI-style chat-completion endpoint that keeps connections alive."""
 
     protocol_version = "HTTP/1.1"
+    # A keep-alive connection left open by a retired event loop must not pin
+    # its handler thread forever when the owning client is never closed.
+    timeout = 15
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -1589,8 +1593,13 @@ class TestCrossEventLoopRouterCache:
         if importlib.util.find_spec("intelli_router") is None:
             pytest.skip("intelli_router package not installed")
 
-        server = HTTPServer(("127.0.0.1", 0), _LocalCompletionHandler)
+        # One thread per connection: the routers' httpx pools are never closed
+        # in this test (each asyncio.run retires its loop), so keep-alive
+        # connections linger. A single-threaded server would block on them and
+        # hang server.shutdown(); a threading server just keeps accepting.
+        server = ThreadingHTTPServer(("127.0.0.1", 0), _LocalCompletionHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        clients = []
         try:
             port = server.server_address[1]
             client_config = ModelClientConfig(
@@ -1618,13 +1627,20 @@ class TestCrossEventLoopRouterCache:
 
             with patch.object(IntelliRouterModelClient, "_create_router", _REAL_CREATE_ROUTER):
                 client1 = IntelliRouterModelClient(request_config, client_config)
+                clients.append(client1)
                 result1 = asyncio.run(client1.invoke("hello"))
 
                 client2 = IntelliRouterModelClient(request_config, client_config)
+                clients.append(client2)
                 result2 = asyncio.run(client2.invoke("hello"))
 
             assert result1.content == "hi"
             assert result2.content == "hi"
         finally:
+            for client in clients:
+                # Best-effort release of pooled connections; a pool bound to a
+                # retired loop raises on close, which is fine to ignore here.
+                with contextlib.suppress(RuntimeError, OSError):
+                    asyncio.run(client._router.close())
             server.shutdown()
             server.server_close()
