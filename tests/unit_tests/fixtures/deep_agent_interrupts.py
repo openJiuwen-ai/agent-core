@@ -19,7 +19,10 @@ from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, Mode
 from openjiuwen.core.foundation.tool import Tool, ToolCard
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.single_agent.interrupt import InterruptKind
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.workflow import End, Start, Workflow, WorkflowCard, WorkflowComponent
+from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmInterruptRail
 from tests.unit_tests.fixtures.mock_llm import MockLLMModel
 
 os.environ.setdefault("LLM_SSL_VERIFY", "false")
@@ -71,6 +74,31 @@ def make_deep_agent(workspace, *, tools=None, rails=None, permissions=None, name
         max_iterations=10,
         system_prompt="Follow the scripted model.",
     )
+
+
+class UndeclaredConfirmRail(ConfirmInterruptRail):
+    """A confirm rail that declares no interrupt kind, as rails written before kinds existed."""
+
+    interrupt_kind = InterruptKind.UNDECLARED
+
+
+class _AskCity(WorkflowComponent):
+    async def invoke(self, inputs, session, context):
+        return {"city": await session.interact("Which city?")}
+
+
+def trip_workflow() -> WorkflowCard:
+    """Register a ``plan_trip`` workflow whose one step asks "Which city?" through ``session.interact``."""
+    card = WorkflowCard(id=f"plan_trip_{uuid.uuid4().hex[:6]}", name="plan_trip", version="1",
+                        description="Plan a trip", input_params={"type": "object", "properties": {}})
+    flow = Workflow(card=card)
+    flow.set_start_comp("start", Start(), inputs_schema={})
+    flow.add_workflow_comp("ask_city", _AskCity(), inputs_schema={})
+    flow.set_end_comp("end", End(), inputs_schema={"result": "${ask_city.city}"})
+    flow.add_connection("start", "ask_city")
+    flow.add_connection("ask_city", "end")
+    Runner.resource_mgr.add_workflow(card, lambda: flow)
+    return card
 
 
 def ask_permissions(*tool_names: str) -> dict:

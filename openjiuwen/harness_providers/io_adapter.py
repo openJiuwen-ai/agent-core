@@ -23,6 +23,8 @@ from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema
+from openjiuwen.core.single_agent.interrupt.answers import interrupt_answer
+from openjiuwen.core.single_agent.interrupt.response import InterruptKind
 from openjiuwen.core.single_agent.interrupt.state import PendingInterrupt, match_answers
 from openjiuwen.harness_protocol import (
     TERMINAL_TURN_EVENT_KINDS,
@@ -115,6 +117,8 @@ class HarnessIOAdapter:
         auto_approve_tools: When ``True`` provider tool-approval requests are
             allowed without asking; when ``False`` they surface as
             ``__interaction__`` chunks resolved by ``{"approved": bool}``.
+            An approval an agent's own interrupt asks for (its
+            ``provider_data`` carries an ``interrupt_id``) always surfaces.
         stop_on_unsupported_force_abort: Stop the whole cycle when the host asks
             for an immediate abort the provider cannot deliver.
         provider_interaction_handler: Optional coroutine answering provider
@@ -182,8 +186,14 @@ class HarnessIOAdapter:
 
     def _matched_answers(self, user_input: InteractiveInput) -> dict[str, Any]:
         # A pending interaction is keyed by its request id; callers may answer
-        # it with update() or answer().
-        pending = [PendingInterrupt(request_id, request_id, "") for request_id in self._pending]
+        # it with update() or answer(), or with update(tool_call_id) when the
+        # provider names the call (the native harness does).
+        pending: list[PendingInterrupt] = []
+        for request_id, interaction in self._pending.items():
+            pending.append(PendingInterrupt(request_id, request_id, ""))
+            call_id = interaction.request.provider_data.get("tool_call_id")
+            if call_id and call_id != request_id:
+                pending.append(PendingInterrupt(request_id, call_id, ""))
         return match_answers(user_input, pending).answers
 
     # ------------------------------------------------------------------
@@ -341,7 +351,11 @@ class HarnessIOAdapter:
     # ------------------------------------------------------------------
 
     async def handle(self, request: HarnessInteractionRequest) -> HarnessInteractionResponse:
-        if isinstance(request, ToolApprovalRequest) and self._auto_approve_tools:
+        if (
+            isinstance(request, ToolApprovalRequest)
+            and self._auto_approve_tools
+            and "interrupt_id" not in request.provider_data
+        ):
             return ToolApprovalResponse(request_id=request.request_id, decision=ToolApprovalDecision.ALLOW)
         if isinstance(request, McpElicitationRequest):
             return McpElicitationResponse(request_id=request.request_id, status=InteractionResponseStatus.DECLINED)
@@ -544,6 +558,7 @@ class HarnessIOAdapter:
         if isinstance(request, UserInputRequest):
             value: dict[str, Any] = {
                 "kind": "user_input",
+                "interrupt_id": request.request_id,
                 "prompt": request.prompt,
                 "choices": list(request.choices),
                 "provider_data": json_value_to_builtin(request.provider_data),
@@ -552,6 +567,7 @@ class HarnessIOAdapter:
             approval = request  # ToolApprovalRequest
             value = {
                 "kind": "tool_approval",
+                "interrupt_id": request.request_id,
                 "tool_name": approval.tool_name,
                 "arguments": json_value_to_builtin(approval.arguments),
                 "reason": approval.reason,
@@ -580,21 +596,48 @@ def to_harness_input(content: Any) -> HarnessInput:
 
 def _response_for(request: HarnessInteractionRequest, value: Any) -> HarnessInteractionResponse:
     if isinstance(request, ToolApprovalRequest):
-        approved = value.get("approved", True) if isinstance(value, dict) else bool(value)
-        decision = ToolApprovalDecision.ALLOW if approved else ToolApprovalDecision.DENY
-        updated = value.get("updated_arguments") if isinstance(value, dict) else None
-        feedback = value.get("feedback") if isinstance(value, dict) else None
+        answer = _approval_answer(value)
+        provider_data: dict[str, Any] = {}
+        if "action" in answer:  # a skill evolution approval
+            approved = answer["action"] in ("allow_once", "allow_always")
+            remember = answer["action"] == "allow_always"
+        else:
+            # Editing the arguments approves the edited call, as it always did.
+            approved = bool(answer.get("approved", "updated_arguments" in answer))
+            remember = bool(answer.get("auto_confirm"))
+            if remember and answer.get("persist_allow") is not False:
+                # auto_confirm without persist_allow=False allows permanently; the native harness honours it.
+                provider_data["persist_allow"] = True
+        if not approved:
+            decision = ToolApprovalDecision.DENY
+        elif remember:
+            decision = ToolApprovalDecision.ALLOW_FOR_SESSION
+        else:
+            decision = ToolApprovalDecision.ALLOW
+        updated = answer.get("updated_arguments")
+        feedback = answer.get("feedback")
         return ToolApprovalResponse(
             request_id=request.request_id,
             decision=decision,
             updated_arguments=updated if isinstance(updated, dict) else None,
             reason=str(feedback) if feedback else None,
+            provider_data=provider_data,
         )
     return UserInputResponse(
         request_id=request.request_id,
         status=InteractionResponseStatus.COMPLETED,
         content=_json_ready(value),
     )
+
+
+def _approval_answer(value: Any) -> dict[str, Any]:
+    """An approval answer as a dict: a typed word is read like ``interrupt_answer`` reads it."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        return interrupt_answer(InterruptKind.CONFIRM, text=value)
+    # A bool decides; any other value (None, numbers, lists) denies.
+    return {"approved": value is True}
 
 
 def _cancelled_response(request: HarnessInteractionRequest) -> HarnessInteractionResponse:

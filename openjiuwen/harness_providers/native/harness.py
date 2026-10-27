@@ -8,12 +8,22 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from typing import Any, Awaitable, Callable, Mapping
+from typing import Any, Awaitable, Callable, Mapping, cast
 
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema
 from openjiuwen.core.single_agent.ability_manager import resolve_tool_result_text
+from openjiuwen.core.single_agent.interrupt.answers import (
+    APPROVAL_CHOICES,
+    interrupt_answer,
+    is_approval_kind,
+)
+from openjiuwen.core.single_agent.interrupt.response import (
+    InterruptKind,
+    ToolCallInterruptRequest,
+    interrupt_kind_of,
+)
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail, ToolCallInputs
 from openjiuwen.harness.deep_agent import DeepAgent
@@ -40,6 +50,9 @@ from openjiuwen.harness_protocol import (
     OutputOperation,
     ProviderEvent,
     ResumePolicy,
+    ToolApprovalDecision,
+    ToolApprovalRequest,
+    ToolApprovalResponse,
     TurnError,
     TurnEventKind,
     TurnMessage,
@@ -47,6 +60,7 @@ from openjiuwen.harness_protocol import (
     TurnStatus,
     UnsupportedHarnessCapabilityError,
     UserInputRequest,
+    UserInputResponse,
     freeze_json_object,
     freeze_json_value,
     json_value_to_builtin,
@@ -170,8 +184,28 @@ class DeepAgentHarness(SerializedTurnHarness):
     One external Turn is one attached output stream: the input is dispatched
     through ``send_input`` and the turn ends when DeepAgent finishes the
     stream (its own task-loop continuations stay inside the turn).  An
-    ``ask_user`` interrupt keeps the turn open and is resolved through the
-    host ``UserInputRequest`` interaction before the round resumes.
+    interrupt keeps the turn open and is resolved through a host interaction
+    before the round resumes (``request_id`` = the interrupt id):
+
+    - approval kinds (permission, confirm, team tool and skill evolution
+      approvals) become ``ToolApprovalRequest`` when the host declared
+      ``TOOL_APPROVAL`` (and the card lists it), otherwise a
+      ``UserInputRequest`` offering allow / allow_always / deny; editing
+      arguments on approval is not supported (``updated_arguments`` denies
+      the call), ``ABORT`` or ``interrupt=True`` stops the turn, and
+      ``ALLOW_FOR_SESSION`` with ``provider_data["persist_allow"] is True``
+      allows permanently;
+    - every other kind (``ask_user``, undeclared kinds and kinds of other
+      rails) becomes ``UserInputRequest`` and is answered with the host's
+      content as is;
+    - a workflow interaction is no interrupt request: it becomes
+      ``UserInputRequest`` with ``request_id`` = its own id and empty
+      ``interrupt_id`` and ``kind``, and is answered by that id.
+
+    Requests carry ``kind``, ``interrupt_id`` and ``tool_call_id`` in
+    ``provider_data``. Every host with an interaction handler is asked,
+    whatever capabilities it declared; without a handler the turn stays
+    paused.
     """
 
     card = HarnessCard(
@@ -180,7 +214,10 @@ class DeepAgentHarness(SerializedTurnHarness):
         protocol_version=PROTOCOL_VERSION,
         compatible_protocol_versions=frozenset({PROTOCOL_VERSION}),
         capabilities=frozenset({HarnessCapability.STEER, HarnessCapability.FORCE_ABORT}),
-        optional_host_capabilities=frozenset({HostCapability.USER_INPUT}),
+        optional_host_capabilities=frozenset({
+            HostCapability.USER_INPUT,
+            HostCapability.TOOL_APPROVAL,
+        }),
     )
 
     def __init__(
@@ -424,24 +461,99 @@ class DeepAgentHarness(SerializedTurnHarness):
         )
 
     async def _resolve_interrupts(self, turn: PendingTurn, state: _TurnState) -> InteractiveInput | None:
-        """Ask the host for every pending interrupt; ``None`` leaves the turn open."""
+        """Ask the host for every pending interrupt; ``None`` leaves the turn open.
+
+        ``None`` never is an answer (``InteractiveInput`` rejects it).
+        """
 
         if not self._has_host_interactions():
             return None
         interactive_input = InteractiveInput()
-        for interrupt_id, value in state.pending_interrupts.items():
-            request = UserInputRequest(
-                request_id=interrupt_id,
-                prompt=_interrupt_prompt(value),
-                provider_session_id=self._session_id,
-                turn_id=turn.turn_id,
-                provider_data={"value": to_json_safe(value)},
-            )
-            response = await self._request_interaction(request)
-            if response is None or response.status is not InteractionResponseStatus.COMPLETED:
-                return None
-            interactive_input.update(interrupt_id, json_value_to_builtin(response.content))
+        for call_id, value in state.pending_interrupts.items():
+            if isinstance(value, ToolCallInterruptRequest):
+                answer = await self._answer_interrupt(turn, call_id, value)
+                if answer is None:
+                    return None
+                interactive_input.answer(value.interrupt_id, answer)
+            else:
+                answer = await self._request_user_input(turn, call_id, value)
+                if answer is None:
+                    return None
+                interactive_input.update(call_id, answer)
         return interactive_input
+
+    async def _answer_interrupt(self, turn: PendingTurn, call_id: str, request: ToolCallInterruptRequest) -> Any | None:
+        kind = interrupt_kind_of(request)
+        if kind == InterruptKind.UNDECLARED or not is_approval_kind(kind):
+            # An undeclared kind keeps this harness's earlier answer: the host's content as is.
+            return await self._request_user_input(turn, call_id, request)
+        if self._host_approves_tools():
+            return await self._request_approval(turn, call_id, kind, request)
+        content = await self._request_user_input(turn, call_id, request, choices=APPROVAL_CHOICES)
+        if content is None or isinstance(content, dict):
+            return content
+        # A text-only host answers an approval with a word; anything else, nothing included, rejects.
+        return interrupt_answer(kind, text=str(content))
+
+    def _host_approves_tools(self) -> bool:
+        capability = HostCapability.TOOL_APPROVAL
+        return (
+            capability in self.card.optional_host_capabilities
+            and capability in cast(HarnessContext, self._context).host_capabilities
+        )
+
+    async def _request_user_input(
+        self, turn: PendingTurn, call_id: str, value: Any, choices: tuple[str, ...] = ()
+    ) -> Any | None:
+        provider_data = _interrupt_provider_data(call_id, value)
+        request = UserInputRequest(
+            request_id=provider_data["interrupt_id"] or call_id,
+            prompt=_interrupt_prompt(value),
+            provider_session_id=self._session_id,
+            turn_id=turn.turn_id,
+            choices=choices,
+            provider_data=provider_data,
+        )
+        response = cast(UserInputResponse, await self._request_interaction(request))
+        if response.status is not InteractionResponseStatus.COMPLETED:
+            return None
+        # A completed response without content answers with empty text.
+        content = json_value_to_builtin(response.content)
+        return "" if content is None else content
+
+    async def _request_approval(
+        self, turn: PendingTurn, call_id: str, kind: str, value: ToolCallInterruptRequest
+    ) -> Any | None:
+        request = ToolApprovalRequest(
+            request_id=value.interrupt_id,
+            call_id=call_id,
+            tool_name=value.tool_name,
+            arguments=_tool_arguments(value.tool_args),
+            provider_session_id=self._session_id,
+            turn_id=turn.turn_id,
+            title=value.metadata.get("ask_title") or None,
+            description=value.message or None,
+            reason=value.metadata.get("ask_summary") or None,
+            provider_data=_interrupt_provider_data(call_id, value),
+        )
+        response = cast(ToolApprovalResponse, await self._request_interaction(request))
+        if response.decision is ToolApprovalDecision.ABORT or response.interrupt:
+            return None
+        if response.decision in (ToolApprovalDecision.ALLOW, ToolApprovalDecision.ALLOW_FOR_SESSION):
+            if response.updated_arguments is not None:
+                # Never run the original arguments after the host edited them.
+                return interrupt_answer(
+                    kind,
+                    approved=False,
+                    feedback="The host edited the tool arguments while approving; editing arguments is not "
+                    "supported, so the call was not run.",
+                )
+            remember = response.decision is ToolApprovalDecision.ALLOW_FOR_SESSION
+            answer = interrupt_answer(kind, approved=True, remember=remember)
+            if remember and response.provider_data.get("persist_allow") is True and "persist_allow" in answer:
+                answer["persist_allow"] = True
+            return answer
+        return interrupt_answer(kind, approved=False, feedback=response.reason or "Denied by the host.")
 
     def _build_result(
         self,
@@ -472,7 +584,12 @@ class DeepAgentHarness(SerializedTurnHarness):
         stop_reason = state.result_type or "answer"
         if state.pending_interrupts:
             stop_reason = "interrupt"
+            # Tool call ids (kept under this historical key) and, per call, its interrupt.
             provider_data["pending_interrupt_ids"] = list(state.pending_interrupts)
+            provider_data["pending_interrupts"] = [
+                {"tool_call_id": call_id, **_interrupt_identity(value)}
+                for call_id, value in state.pending_interrupts.items()
+            ]
         return TurnEventKind.FINISHED, TurnResult(
             status=TurnStatus.COMPLETED,
             stop_reason=stop_reason,
@@ -558,6 +675,26 @@ def _interaction_payload(payload: Any) -> tuple[str | None, Any]:
     if isinstance(payload, Mapping) and isinstance(payload.get("id"), str):
         return payload["id"], payload.get("value")
     return None, payload
+
+
+def _interrupt_identity(value: Any) -> dict[str, str]:
+    """``interrupt_id`` and ``kind`` of a pending value; both empty for a workflow interaction."""
+    if isinstance(value, ToolCallInterruptRequest):
+        return {"interrupt_id": value.interrupt_id, "kind": interrupt_kind_of(value)}
+    return {"interrupt_id": "", "kind": ""}
+
+
+def _interrupt_provider_data(call_id: str, value: Any) -> dict[str, Any]:
+    return {**_interrupt_identity(value), "tool_call_id": call_id, "value": to_json_safe(value)}
+
+
+def _tool_arguments(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return {"arguments": raw}
+    return dict(raw) if isinstance(raw, Mapping) else {}
 
 
 def _interrupt_prompt(value: Any) -> str:

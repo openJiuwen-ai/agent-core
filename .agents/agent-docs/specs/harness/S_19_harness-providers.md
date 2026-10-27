@@ -41,7 +41,7 @@ author_email: chengshuo5@huawei.com
 
    | provider | card | capabilities | optional host capabilities |
    |---|---|---|---|
-   | `native` | `deepagent` | STEER, FORCE_ABORT | USER_INPUT |
+   | `native` | `deepagent` | STEER, FORCE_ABORT | USER_INPUT, TOOL_APPROVAL |
    | `native_v2` | `native_v2` | STEER, GRACEFUL_ABORT, FORCE_ABORT, PAUSE_RESUME, CHECKPOINT, PERSISTENT_SESSION | USER_INPUT, CHECKPOINT_SINK |
    | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION, MODEL_REQUEST_OBSERVATION |
    | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION, MODEL_REQUEST_OBSERVATION |
@@ -68,6 +68,26 @@ author_email: chengshuo5@huawei.com
    `DeepAgentHarness._open_session` 必须在 `agent.start` 之前 `ensure_initialized()`：DeepAgent 的
    交互循环不会自行初始化 agent，pending rails（含观测 rail）与 cwd ContextVar 都在此时落定，
    随后创建的 supervisor / scheduler task 才能继承。
+   DeepAgent 的中断按 `interrupt_kind` 映射（`request_id` = `interrupt_id`，`provider_data` 带
+   `kind` / `interrupt_id` / `tool_call_id`）：审批类（`permission` / `confirm` / `team_tool_approval` /
+   `skill_evolution_approval`）在宿主声明 TOOL_APPROVAL 时为 `ToolApprovalRequest`——ALLOW 为本次允许，
+   ALLOW_FOR_SESSION 为会话内记住（进化审批为 `allow_always`；`provider_data.persist_allow=True` 时为永久允许），
+   DENY 带 `reason` 拒绝，ABORT 或 `interrupt=True` 结束 Turn 并保留中断，带 `updated_arguments` 的批准按拒绝处理；
+   否则为带 `choices=("allow", "allow_always", "deny")` 的 `UserInputRequest`，答复的词经 `interrupt_answer`
+   转换（字典原样交回），无内容或无法识别的词按拒绝处理。其余类型（`ask_user`、未声明类型及其他 Rail 自定义类型）
+   为 `UserInputRequest`，答复内容原样交回，与之前一致。工作流交互不是中断请求：为 `UserInputRequest`，`request_id`
+   为交互自身的 id，`interrupt_id` 与 `kind` 为空，按该 id 回答。与之前一样，只要宿主提供了交互处理器就会询问，
+   不看它声明了哪些能力；只有 TOOL_APPROVAL 决定审批走哪种请求。`native_v2` 的 card 未列 TOOL_APPROVAL，
+   审批总是 `UserInputRequest`。Turn 以中断结束时，
+   `provider_data.pending_interrupt_ids` 仍是**工具调用 id**（沿用旧键名），另有
+   `pending_interrupts=[{tool_call_id, interrupt_id, kind}]`。
+   `HarnessIOAdapter(auto_approve_tools=True)` 只自动批准第三方 provider 的工具审批；带 `interrupt_id`
+   的审批（DeepAgent 自己的中断）照常作为 `__interaction__` 交给调用方。调用方的审批答复按
+   `interrupt_answer` 的形状转换：文字按 `interrupt_answer` 的词表读，`auto_confirm` 与 `allow_always` 为
+   ALLOW_FOR_SESSION（`auto_confirm` 而未写 `persist_allow=False` 时带 `provider_data.persist_allow=True`，
+   native 据此永久允许，与之前一致），只带 `updated_arguments` 的字典按批准处理，`{}`、`None`、数字等为 DENY。
+   IO adapter 的交互值带 `interrupt_id`（= request id），可用 `answer(interrupt_id, ...)`、
+   `update(request_id, ...)` 或 `update(tool_call_id, ...)` 回答。
 7. **IO adapter 是唯一 DeepAgent 投影**：`HarnessIOAdapter` 输出 `llm_output` / `llm_reasoning` /
    `tool_call` / `tool_result` / `__interaction__`（`InteractionOutput(id=request_id, value=...)`）；
    `tool_result` 的 `result` 是结构化值，provider 提供模型可见文本时另带独立字段 `rendered_result`
