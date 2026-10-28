@@ -201,12 +201,15 @@ async def run_judge_agent(
                 raise RuntimeError(str(result.get("output") or "evaluator agent failed"))
             result = result.get("output", result.get("answer", result))
         # The assessment loop owns persistence, parsing and bounded correction.
-        # A malformed verdict must reach it unchanged, including at the last turn.
+        # Malformed JSON returns unchanged. Missing JSON is an iteration limit
+        # only after the reading budget has been spent.
         text = json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
         try:
             parse_judge_output(text)
         except MissingJudgeVerdictError as exc:
-            raise JudgeIterationLimitError("Judge reading iteration limit reached") from exc
+            if budget.turns >= budget.iterations:
+                raise JudgeIterationLimitError("Judge reading iteration limit reached") from exc
+            return text
         except ValueError:
             return text
         return text
