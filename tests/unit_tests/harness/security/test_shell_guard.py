@@ -178,6 +178,50 @@ def test_redirect_no_longer_asks_on_pipeline_a() -> None:
     assert "structure_guard" not in matched
 
 
+def test_extract_semicolon_chain_does_not_keep_separator_on_path(tmp_path: Path) -> None:
+    cmd = (
+        "ls -la ~/Desktop/a4p_scratch444.txt 2>&1; "
+        "rm -rf ~/Desktop/a4p_scratch444.txt; "
+        'echo "rm exit code: $?"; '
+        "ls -la ~/Desktop/a4p_scratch444.txt 2>&1"
+    )
+    accesses = extract_shell_path_accesses(cmd, tmp_path)
+    pairs = {(path.name, action) for path, action in accesses}
+    assert ("a4p_scratch444.txt", "read") in pairs
+    assert ("a4p_scratch444.txt", "write") in pairs
+    assert all(";" not in path.name and not path.name.endswith("&") for path, _ in accesses)
+    assert all(path.name != "1" for path, _ in accesses)
+
+
+def test_extract_keeps_protected_semicolon_in_filename(tmp_path: Path) -> None:
+    commands = (
+        'rm -rf "~/Desktop/backup;"',
+        "rm -rf '~/Desktop/backup;'",
+        "rm -rf ~/Desktop/backup\\;",
+        'cat "./backup;"',
+        'Set-Content -Path "C:/Users/hanzhibin/Desktop/backup;" -Value x',
+    )
+    for command in commands:
+        accesses = extract_shell_path_accesses(command, tmp_path)
+        assert any(path.name == "backup;" for path, _action in accesses), (
+            command,
+            [(path.name, action) for path, action in accesses],
+        )
+
+    plain = extract_shell_path_accesses("rm -rf ~/Desktop/backup;", tmp_path)
+    assert any(path.name == "backup" for path, _action in plain)
+    assert all(path.name != "backup;" for path, _action in plain)
+
+
+def test_extract_does_not_split_semicolon_inside_quotes(tmp_path: Path) -> None:
+    accesses = extract_shell_path_accesses(
+        "echo 'keep;together' && ls ~/Desktop/a4p_scratch444.txt",
+        tmp_path,
+    )
+    assert any(path.name == "a4p_scratch444.txt" and action == "read" for path, action in accesses)
+    assert all(path.name != "together" for path, _ in accesses)
+
+
 def test_extract_bare_redirect_target(tmp_path: Path) -> None:
     accesses = extract_shell_path_accesses("echo hi > output.txt", tmp_path)
     paths = {p.name for p, _act in accesses}

