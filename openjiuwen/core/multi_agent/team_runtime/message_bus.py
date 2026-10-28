@@ -189,14 +189,15 @@ class MessageBus:
         self._running = False
 
         async with self._subscription_lock:
-            for topic, subscription in list(self._active_subscriptions.items()):
+            # 只遍历 topic（subscription 已无他用）；unsubscribe 内含 deactivate，
+            # 日志文案对齐为 unsubscribed，避免 “Deactivated” 误导（评审 P3）。
+            for topic in list(self._active_subscriptions.keys()):
                 try:
-                    # unsubscribe 内含 deactivate，真正摘除 MQ 侧订阅
                     await self._mq.unsubscribe(topic)
-                    logger.debug(f"[{self.__class__.__name__}] Deactivated subscription: {topic}")
+                    logger.debug(f"[{self.__class__.__name__}] stop: unsubscribed {topic}")
                 except Exception as e:
                     logger.error(
-                        f"[{self.__class__.__name__}] Failed to deactivate subscription '{topic}': {e}",
+                        f"[{self.__class__.__name__}] stop: failed to unsubscribe '{topic}': {e}",
                         exc_info=True
                     )
             self._active_subscriptions.clear()
