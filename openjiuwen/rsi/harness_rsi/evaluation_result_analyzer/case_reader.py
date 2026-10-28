@@ -56,6 +56,7 @@ class CaseAnalysisInput:
     training_signal: dict[str, Any] = field(default_factory=dict)
     benchmark_test_contract: dict[str, Any] = field(default_factory=dict)
     termination_reason: str = ""
+    execution_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class CaseReader:
@@ -172,6 +173,11 @@ class CaseReader:
                     training_signal=training_signal,
                     benchmark_test_contract=benchmark_test_contract,
                     termination_reason=_read_termination_reason(trace_data, result_data),
+                    execution_metadata=(
+                        result_metadata.get("execution", {})
+                        if isinstance(result_metadata, dict) and isinstance(result_metadata.get("execution"), dict)
+                        else {}
+                    ),
                 )
             )
 

@@ -66,6 +66,20 @@ def with_rsi_output_budget(config_data: dict[str, Any]) -> dict[str, Any]:
     return data
 
 
+def rsi_output_options(options: dict[str, Any]) -> dict[str, Any]:
+    """Preserve explicit token limits and omit None controls on the wire."""
+    data = dict(options)
+    for values in (data, data.get("extra_body")):
+        if not isinstance(values, dict):
+            continue
+        if values is not data:
+            values = data["extra_body"] = dict(values)
+        for key in ("max_tokens", "max_completion_tokens"):
+            if key in values and values[key] is None:
+                values.pop(key)
+    return data
+
+
 def load_model_config_ref(model_config_ref: str) -> dict[str, Any]:
     """Load a YAML/JSON model config and expand ``${VAR}`` placeholders."""
     path = Path(model_config_ref).expanduser().resolve()

@@ -39,7 +39,7 @@ def test_explicit_window_and_output_override():
     rows = [{'role': 'user', 'content': 'x' * 300000}]
     assert _prepare(rows, window=1048576)[1] == {}
     small = [{'role': 'user', 'content': 'x' * 190000}]
-    assert 'max_tokens' not in _prepare(small, {'max_tokens': 20000})[1]
+    assert _prepare(small, {'max_tokens': 20000})[1]['max_tokens'] == 20000
     assert _prepare(rows)[0] == rows
 
 

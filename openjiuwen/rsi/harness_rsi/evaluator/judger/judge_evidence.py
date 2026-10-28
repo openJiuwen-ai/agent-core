@@ -87,6 +87,14 @@ def write_judge_json(path: Path, payload: dict[str, Any]) -> None:
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
 
 
+def write_judge_event(path: Path, payload: dict[str, Any]) -> None:
+    """Append grading lifecycle metadata; callers keep raw outputs in separate files."""
+    target = _io_path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with target.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps(payload, ensure_ascii=False, allow_nan=False) + "\n")
+
+
 def _copy_tree(source: Path, destination: Path) -> list[str]:
     root = _io_path(source).resolve()
     if not root.exists():
