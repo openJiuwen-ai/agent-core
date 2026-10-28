@@ -182,7 +182,7 @@ class OfficeAceMemoryPcProvider(MemoryProvider):
 
     def _build_search_request_body(self, query: str, args: dict[str, Any]) -> dict[str, Any]:
         """构造 SearchAppMemoriesRequestBody，原样透传可选字段，由服务端校验。"""
-        body: dict[str, Any] = {"query": query}
+        body: dict[str, Any] = {"query": query, "rerank": False}
         top_k = args.get("top_k")
         if top_k is not None:
             body["top_k"] = top_k
