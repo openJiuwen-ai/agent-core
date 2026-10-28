@@ -190,6 +190,9 @@ class TTSERail(EvolutionRail):
         # Auto-dream: count non-follow-up task iterations between silent runs.
         self._dream_non_followup_count: int = 0
         self._dream_task: Optional[asyncio.Task] = None
+        self._closing = False
+        self._catalog_sessions: set[str] = set()
+        self._close_waiters: set[asyncio.Task] = set()
         super().__init__(**kwargs)
 
     def init(self, agent) -> None:
@@ -200,6 +203,7 @@ class TTSERail(EvolutionRail):
         self._apply_catalog_guidance(getattr(agent, "system_prompt_builder", None))
 
     def uninit(self, agent) -> None:
+        self.begin_close()
         task = self._dream_task
         self._dream_task = None
         if task is not None and not task.done():
@@ -212,6 +216,75 @@ class TTSERail(EvolutionRail):
         self._agent = None
         self._attachment_manager = None
         super().uninit(agent)
+
+    @property
+    def closing(self) -> bool:
+        """Whether this instance has stopped admitting evolution work."""
+        return self._closing
+
+    def begin_close(self) -> None:
+        """Stop new induction and dream scheduling without discarding in-flight work."""
+        self._closing = True
+
+    async def clear_catalog(self, session_id: str | None = None) -> None:
+        """Remove only this rail's dynamic catalog attachments."""
+        manager = self._attachment_manager
+        sessions = {session_id} if session_id else set(self._catalog_sessions)
+        if manager is not None:
+            for sid in sessions:
+                await manager.clear_section(session_id=sid, section=_TTSE_CATALOG_SECTION)
+        self._catalog_sessions.difference_update(sessions)
+
+    async def aclose(self, *, timeout: float = 10.0, grace_timeout: float = 5.0) -> None:
+        """Drain induction and dream before unregistration.
+
+        Timeout leaves this rail closing, retaining handles for a later retry.
+        The host must keep its dependencies alive and must not replace its writer
+        until this method succeeds. Cancellation-resistant work is never treated
+        as stopped merely because the host's waiting budget expired.
+        """
+        if timeout < 0 or grace_timeout < 0:
+            raise ValueError("TTSE close timeouts must be non-negative")
+        self.begin_close()
+
+        async def wait_handle(handle) -> None:
+            try:
+                await handle.wait()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.warning("[TTSERail] background outcome during close: %s", exc)
+
+        # Repeated close attempts reuse their monitors instead of abandoning them.
+        if not self._close_waiters:
+            self._close_waiters.update(
+                asyncio.create_task(wait_handle(handle))
+                for handle in self._bg_tasks if not handle.done()
+            )
+            self._close_waiters.add(asyncio.create_task(self._ttse_store.flush_inject_metadata()))
+        dream = self._dream_task
+        tasks = set(self._close_waiters)
+        if dream is not None:
+            tasks.add(dream)
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=timeout)
+        else:
+            pending = set()
+        # Store saves use worker threads. Cancelling their asyncio awaiter does
+        # not stop a thread's write, so retain the actual work until it exits.
+        # The second budget is a grace period, not permission to lose a writer.
+        tasks.update(self._close_waiters)
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=grace_timeout if pending else 0)
+            for task in done:
+                if not task.cancelled():
+                    task.exception()
+        if pending or any(not handle.done() for handle in self._bg_tasks):
+            raise TimeoutError("TTSE closing_timeout: background work has not stopped")
+        self._close_waiters.clear()
+        self._bg_tasks.clear()
+        self._dream_task = None
+        await self.clear_catalog()
 
     def update_llm(self, llm: Model, model: str) -> None:
         """Hot-update induction and success-detection LLM clients."""
@@ -297,7 +370,7 @@ class TTSERail(EvolutionRail):
 
         Skip heartbeat/cron background runs so those do not grow the bank.
         """
-        if not self._ttse_config.evolve_enabled:
+        if self._closing or not self._ttse_config.evolve_enabled:
             return False
         if ctx is not None and self._is_background_run(ctx):
             return False
@@ -760,7 +833,7 @@ class TTSERail(EvolutionRail):
     ) -> None:
         """Count non-follow-up iterations and schedule a silent dream run."""
         del trajectory  # Dream scheduling is iteration-count based, not traj-based.
-        if not self._ttse_config.dream_enabled:
+        if self._closing or not self._ttse_config.dream_enabled:
             return
         if self._dream_iteration_blocked(ctx):
             return
@@ -792,6 +865,8 @@ class TTSERail(EvolutionRail):
 
     def _schedule_dream(self, ctx: Optional[AgentCallbackContext] = None) -> None:
         """Fire-and-forget dream; skip if a prior dream task is still running."""
+        if self._closing:
+            return
         if self._dream_task is not None and not self._dream_task.done():
             logger.info("[TTSERail] dream schedule skipped: prior dream still running")
             return
@@ -865,6 +940,8 @@ class TTSERail(EvolutionRail):
     # ------------------------------------------------------------------
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
+        if self._closing:
+            return
         await super().before_model_call(ctx)
         builder = getattr(getattr(ctx, "inputs", None), "system_prompt_builder", None)
         if builder is None:
@@ -918,6 +995,7 @@ class TTSERail(EvolutionRail):
         except ValueError as exc:
             logger.warning("[TTSERail] skip catalog attachment: %s", exc)
             return
+        self._catalog_sessions.add(session_id)
         live = {k: int(v) for k, v in (counts or {}).items() if int(v or 0) > 0}
         logger.info("[TTSERail] trailed catalog attachment session_id=%s counts=%s", session_id, live)
 
