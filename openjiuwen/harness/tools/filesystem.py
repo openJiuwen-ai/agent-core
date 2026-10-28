@@ -1281,9 +1281,9 @@ class WriteFileTool(Tool):
                 )
             persistent_expected_hash = persistent_condition.get("expected_content_sha256")
             persistent_create_if_absent = persistent_condition.get("create_if_absent", False) is True
-            if (persistent_expected_hash is not None and not isinstance(persistent_expected_hash, str)) or (
-                persistent_expected_hash is not None and persistent_create_if_absent
-            ):
+            hash_invalid = persistent_expected_hash is not None and not isinstance(persistent_expected_hash, str)
+            hash_with_create = persistent_expected_hash is not None and persistent_create_if_absent
+            if hash_invalid or hash_with_create:
                 return ToolOutput(
                     success=False,
                     data={"status": "unavailable"},
@@ -1760,9 +1760,9 @@ class EditFileTool(Tool):
                 )
             persistent_expected_hash = persistent_condition.get("expected_content_sha256")
             persistent_create_if_absent = persistent_condition.get("create_if_absent", False) is True
-            if (persistent_expected_hash is not None and not isinstance(persistent_expected_hash, str)) or (
-                persistent_expected_hash is not None and persistent_create_if_absent
-            ):
+            hash_invalid = persistent_expected_hash is not None and not isinstance(persistent_expected_hash, str)
+            hash_with_create = persistent_expected_hash is not None and persistent_create_if_absent
+            if hash_invalid or hash_with_create:
                 return ToolOutput(
                     success=False,
                     data={"status": "unavailable"},

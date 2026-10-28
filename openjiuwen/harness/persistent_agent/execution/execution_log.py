@@ -117,7 +117,9 @@ def _snapshot(returned, execution, execution_id: str) -> LogSnapshot:
     events: list[AgentEvent] = []
     duplicates = 0
     for seq in sorted(by_seq):
-        group = by_seq[seq]
+        group = by_seq.get(seq)
+        if not group:
+            continue
         # event_id hashes the invocation and local_seq, so one comparison per local_seq covers both.
         if len({event.proposal_digest() for event in group}) > 1:
             # Which of them was saved for real cannot be told; none is used.

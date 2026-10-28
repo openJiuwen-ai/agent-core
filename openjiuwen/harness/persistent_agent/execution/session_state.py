@@ -232,11 +232,13 @@ class WindowStore:
             archive = RecordWindowArchive.model_validate_json(raw)
         except (PydanticValidationError, TypeError, ValueError):
             raise invalid_record("window archive structure is not valid") from None
-        if (
-            archive.agent_id != agent_id
-            or archive.session_id != session_id
-            or archive.old_window_seq != window_seq
-            or archive.archive_ref != WindowStore._archive_ref(window_seq)
+        if any(
+            (
+                archive.agent_id != agent_id,
+                archive.session_id != session_id,
+                archive.old_window_seq != window_seq,
+                archive.archive_ref != WindowStore._archive_ref(window_seq),
+            )
         ):
             raise invalid_record("window archive identity does not match its Session key")
         normalized_messages = encode_messages(decode_messages(archive.messages))
@@ -277,16 +279,20 @@ class WindowStore:
         archive = await self.load_archive(agent_id, session_id, window_seq)
         if archive is None:
             return None
-        if (
-            checkpoint is None
-            or archive.old_window_id != current_window_id
-            or archive.request_id != request_id
-            or archive.request_id != checkpoint.request_id
-            or archive.execution_id != checkpoint.execution_id
-            or archive.execution_id != recovery_ref
-            or archive.spec_fingerprint != spec_fingerprint
-            or checkpoint.kind != ("request_start" if archive.trigger_kind == "request_entry" else "react_iteration")
-            or archive.iteration_seq != checkpoint.iteration_seq
+        expected_kind = "request_start" if archive.trigger_kind == "request_entry" else "react_iteration"
+        if checkpoint is None:
+            raise invalid_record("pending rollover does not match the active Session checkpoint")
+        if any(
+            (
+                archive.old_window_id != current_window_id,
+                archive.request_id != request_id,
+                archive.request_id != checkpoint.request_id,
+                archive.execution_id != checkpoint.execution_id,
+                archive.execution_id != recovery_ref,
+                archive.spec_fingerprint != spec_fingerprint,
+                checkpoint.kind != expected_kind,
+                archive.iteration_seq != checkpoint.iteration_seq,
+            )
         ):
             raise invalid_record("pending rollover does not match the active Session checkpoint")
         return archive
@@ -459,11 +465,15 @@ class WindowStore:
                 continue
             archives.append(archive)
             indexed_entry = indexed_by_seq.get(window_seq)
-            if indexed_entry is None or (
-                indexed_entry.archive_ref != archive.archive_ref
-                or indexed_entry.request_id != archive.request_id
-                or indexed_entry.execution_id != archive.execution_id
-                or indexed_entry.created_at != archive.created_at
+            if indexed_entry is None:
+                index_stale = True
+            elif any(
+                (
+                    indexed_entry.archive_ref != archive.archive_ref,
+                    indexed_entry.request_id != archive.request_id,
+                    indexed_entry.execution_id != archive.execution_id,
+                    indexed_entry.created_at != archive.created_at,
+                )
             ):
                 index_stale = True
 

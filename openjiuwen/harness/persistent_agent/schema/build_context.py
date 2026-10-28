@@ -139,13 +139,11 @@ class PersistentBuildContext(BuildContext):
     def validate_binding(self, agent: "DeepAgent") -> None:
         """Verify the exact constructed object and immutable invocation identity."""
         bound = self.binding
-        if (
-            bound.agent_ref is None
-            or bound.agent_ref() is not agent
-            or self.execution != bound.execution
-            or self.session is not bound.session
-            or self.ports is not bound.ports
-            or self.tool_owner_id != bound.owner_id
-            or self.session.get_session_id() != bound.execution.session_id
-        ):
+        if bound.agent_ref is None or bound.agent_ref() is not agent:
+            raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="construction binding mismatch")
+        if self.execution != bound.execution or self.session is not bound.session:
+            raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="construction binding mismatch")
+        if self.ports is not bound.ports or self.tool_owner_id != bound.owner_id:
+            raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="construction binding mismatch")
+        if self.session.get_session_id() != bound.execution.session_id:
             raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="construction binding mismatch")

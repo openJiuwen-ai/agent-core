@@ -86,11 +86,14 @@ def validate_read_scope(
     """Reject a scope that is not bound to the current immutable Execution identity."""
     if not isinstance(scope, WorkspaceReadScope):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid workspace access scope")
-    if (
-        scope.agent_id != execution.agent_id
-        or scope.session_id != execution.session_id
-        or (scope.principal_ref is not None and scope.principal_ref != execution.principal_ref)
-        or scope.policy_revision != execution.policy_revision
+    principal_mismatch = scope.principal_ref is not None and scope.principal_ref != execution.principal_ref
+    if any(
+        (
+            scope.agent_id != execution.agent_id,
+            scope.session_id != execution.session_id,
+            principal_mismatch,
+            scope.policy_revision != execution.policy_revision,
+        )
     ):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="workspace access scope mismatch")
     if permission_profile not in {"default", "automatic", "full_access"} or scope.host_wide != (
@@ -185,11 +188,14 @@ def validate_write_scope(
     """Reject a scope that is not bound to the current immutable Execution identity."""
     if not isinstance(scope, WorkspaceWriteScope):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="invalid workspace write scope")
-    if (
-        scope.agent_id != execution.agent_id
-        or scope.session_id != execution.session_id
-        or (scope.principal_ref is not None and scope.principal_ref != execution.principal_ref)
-        or scope.policy_revision != execution.policy_revision
+    principal_mismatch = scope.principal_ref is not None and scope.principal_ref != execution.principal_ref
+    if any(
+        (
+            scope.agent_id != execution.agent_id,
+            scope.session_id != execution.session_id,
+            principal_mismatch,
+            scope.policy_revision != execution.policy_revision,
+        )
     ):
         raise build_error(StatusCode.DEEPAGENT_CONTEXT_PARAM_ERROR, error_msg="workspace write scope mismatch")
     if permission_profile not in {"default", "automatic", "full_access"} or scope.host_wide != (

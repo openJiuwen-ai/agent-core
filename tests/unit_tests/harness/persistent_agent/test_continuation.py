@@ -256,20 +256,24 @@ class Harness:
         return STATE.WindowStore.state_key("business-agent", "session-a")
 
     async def store(self, messages, *, outcome="completed", request_id="request-0", interruption=None, **ending):
+        ending_body = {"outcome": outcome, "request_id": request_id, "execution_id": "execution-1", **ending}
+        # Waiting scenes must identify the published Spec (SessionStateRecord validator + resume check).
+        if outcome == "awaiting_confirmation":
+            ending_body.setdefault("spec_fingerprint", "a" * 64)
         record = {
             "schema_version": 1,
             "agent_id": "business-agent",
             "session_id": "session-a",
             "messages": RECORD.encode_messages(messages),
             "interruption": RECORD.encode_interruption(interruption) if interruption is not None else None,
-            "auto_confirm": ending.pop("auto_confirm", {}),
+            "auto_confirm": ending_body.pop("auto_confirm", {}),
             "deepagent_state": None,
             "checkpoint": None,
-            "last_group_message_id": ending.pop("last_group_message_id", None),
-            "current_window_id": ending.pop("current_window_id", None),
-            "window_seq": ending.pop("window_seq", None),
-            "last_rollover": ending.pop("last_rollover", None),
-            "ending": {"outcome": outcome, "request_id": request_id, "execution_id": "execution-1", **ending},
+            "last_group_message_id": ending_body.pop("last_group_message_id", None),
+            "current_window_id": ending_body.pop("current_window_id", None),
+            "window_seq": ending_body.pop("window_seq", None),
+            "last_rollover": ending_body.pop("last_rollover", None),
+            "ending": ending_body,
         }
         await self.backend.set(self.key(), json.dumps(record))
 
@@ -391,7 +395,6 @@ def waiting_scene(call_id="call-1"):
                 interrupt_requests={f"{call_id}-0": InterruptRequest(message="approve?", auto_confirm_key="remember")},
             )
         },
-        auto_confirm_mapping={f"{call_id}-0": "remember"},
     )
     window = [UserMessage(content=TASK), AssistantMessage(content="checking", tool_calls=[call(call_id)])]
     return window, state
@@ -503,6 +506,7 @@ async def test_a_stale_waiting_scene_is_settled_without_replaying_the_call(harne
         interruption=state,
         reply_target="chat-1",
         auto_confirm={"remember": True},
+        spec_fingerprint=spec.fingerprint(),
     )
     events = await harness.run(spec, ctx, scheduled())
     assert harness.tool.calls == 0, "the interrupted call is not replayed"
@@ -533,7 +537,12 @@ async def test_another_requests_waiting_scene_is_refused_and_left_as_it_is(harne
     ctx, host = harness.context(spec)
     window, state = waiting_scene()
     await harness.store(
-        window, outcome="awaiting_confirmation", request_id="request-0", interruption=state, reply_target="chat-0"
+        window,
+        outcome="awaiting_confirmation",
+        request_id="request-0",
+        interruption=state,
+        reply_target="chat-0",
+        spec_fingerprint=spec.fingerprint(),
     )
     before = await harness.backend.get(harness.key())
     with pytest.raises(BaseError) as exc_info:
@@ -764,6 +773,7 @@ async def test_files_listed_before_the_crash_are_not_handed_off_but_new_listings
         request_id="request-1",
         interruption=state,
         reply_target="chat-1",
+        spec_fingerprint=spec.fingerprint(),
     )
     harness.model.turns = [("share_file", json.dumps({"file_path": "reports/q4.md", "share_mode": "upload"}))]
     events = await harness.run(spec, ctx, scheduled())

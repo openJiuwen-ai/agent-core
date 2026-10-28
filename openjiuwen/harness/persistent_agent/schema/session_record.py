@@ -334,7 +334,6 @@ def encode_interruption(state: Any) -> dict:
         "iteration": state.iteration,
         "original_query": state.original_query,
         "interrupted_tools": tools,
-        "auto_confirm_mapping": dict(state.auto_confirm_mapping),
     }
 
 
@@ -359,7 +358,9 @@ class _EncodedInterruption(BaseModel):
     iteration: StrictInt
     original_query: StrictStr
     interrupted_tools: dict[StrictStr, _EncodedEntry]
-    auto_confirm_mapping: dict[StrictStr, StrictStr]
+    # Legacy field from before ToolInterruptionState dropped auto_confirm_mapping;
+    # session-scoped remembers live on SessionStateRecord.auto_confirm instead.
+    auto_confirm_mapping: dict[StrictStr, StrictStr] = Field(default_factory=dict)
 
 
 def decode_interruption(data: dict) -> ToolInterruptionState:
@@ -383,7 +384,6 @@ def decode_interruption(data: dict) -> ToolInterruptionState:
             iteration=encoded.iteration,
             original_query=encoded.original_query,
             interrupted_tools=tools,
-            auto_confirm_mapping=encoded.auto_confirm_mapping,
         )
     except (PydanticValidationError, TypeError, ValueError):
         raise invalid_record("interruption state cannot be restored") from None

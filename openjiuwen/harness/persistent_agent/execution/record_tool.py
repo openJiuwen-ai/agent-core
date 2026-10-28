@@ -71,12 +71,13 @@ def _failure(status: str) -> ToolOutput:
 
 def _part(seq: int, line: str, start: int, size: int) -> dict:
     """The piece of one event's JSON line a page carries; pieces of the same event join back into it."""
+    end = start + size
     return {
         "local_seq": seq,
         "from": start,
-        "to": start + size,
+        "to": end,
         "length": len(line),
-        "text": line[start : start + size],
+        "text": line[start:end],
     }
 
 

@@ -440,11 +440,10 @@ class FsOperation(BaseFsOperation):
                 "write_file", "create_if_absent must be a boolean", WriteFileResult,
                 _ErrorLogParams(method_name, method_params, start_time),
             )
-        if (
-            (expected_hash is not None and create_if_absent)
-            or ((expected_hash is not None or create_if_absent) and append)
-            or (create_if_absent and not create_if_not_exist)
-        ):
+        hash_with_create = expected_hash is not None and create_if_absent
+        conditional_with_append = (expected_hash is not None or create_if_absent) and append
+        create_without_create_flag = create_if_absent and not create_if_not_exist
+        if hash_with_create or conditional_with_append or create_without_create_flag:
             return self._create_error_result(
                 "write_file", "conditional write options are incompatible", WriteFileResult,
                 _ErrorLogParams(method_name, method_params, start_time),

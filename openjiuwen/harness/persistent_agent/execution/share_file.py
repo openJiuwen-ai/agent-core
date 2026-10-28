@@ -82,7 +82,14 @@ def _arguments(inputs: Any) -> tuple[str, str, str | None] | None:
     file_path, share_mode, caption = inputs.get("file_path"), inputs.get("share_mode"), inputs.get("caption")
     if isinstance(caption, str) and not caption.strip():
         caption = None
-    if not isinstance(file_path, str) or not file_path or share_mode not in SHARE_MODES or not valid_caption(caption):
+    if any(
+        (
+            not isinstance(file_path, str),
+            not file_path,
+            share_mode not in SHARE_MODES,
+            not valid_caption(caption),
+        )
+    ):
         return None
     return file_path, share_mode, caption
 

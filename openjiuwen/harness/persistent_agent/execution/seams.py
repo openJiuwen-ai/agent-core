@@ -90,7 +90,8 @@ def native_reply_adapter() -> NativeReplyAdapter:
     """Return the adapter from validated ConfirmReply items to native interrupt input."""
 
     class Adapter:
-        def to_native(self, response, request):
+        @staticmethod
+        def to_native(response, request):
             from openjiuwen.harness.rails.interrupt.ask_user_rail import AskUserPayload
             from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
 

@@ -55,9 +55,10 @@ def count_usage_tokens_with_tail(messages: list[BaseMessage]) -> int | None:
         if not ContextUtils.has_valid_usage_metadata(message):
             continue
         usage_tokens = message.usage_metadata.total_tokens
+        tail_start = index + 1
         tail_tokens = sum(
             len(sanitize_content_for_text(getattr(item, "content", ""))) // 3
-            for item in messages[index + 1 :]
+            for item in messages[tail_start:]
         )
         return usage_tokens + tail_tokens
     return None

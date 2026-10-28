@@ -121,7 +121,14 @@ def _message_groups(messages: list, start: int, stop: int) -> list[_MessageGroup
             if answered != set(call_names):
                 raise ValueError("assistant tool-call group has no complete result set")
             writes = [call for call in calls if not is_read_only_tool_name(call.name)]
-            write_call_ids = tuple(call.id for call in writes if not has_completed_tool_receipt(call, results[call.id]))
+            write_call_ids = []
+            for call in writes:
+                result = results.get(call.id)
+                if result is None:
+                    raise ValueError("assistant tool-call group has no complete result set")
+                if not has_completed_tool_receipt(call, result):
+                    write_call_ids.append(call.id)
+            write_call_ids = tuple(write_call_ids)
             protected = bool(write_call_ids or any(name in _PROTECTED_TOOL_NAMES for name in call_names.values()))
             completed_write = bool(writes) and not protected
         else:
@@ -248,13 +255,16 @@ def restore_rollover_candidate(
     group_by_ref = {_message_ref(group): group for group in groups}
     if candidate_version not in (1, 2):
         raise ValueError("unknown candidate version")
-    attachments_by_ref = {
-        f"message:{index}": deepcopy(message)
-        for index, message in enumerate(old_messages[header_index + 1 : group_end], start=header_index + 1)
-        if _prompt_attachment(message) or (
-            candidate_version == 2 and index < query_index and _part(message) == TEMPORARY_BACKGROUND
+    attachments_by_ref = {}
+    start = header_index + 1
+    for index, message in enumerate(old_messages[start:group_end], start=start):
+        keep_background = (
+            candidate_version == 2
+            and index < query_index
+            and _part(message) == TEMPORARY_BACKGROUND
         )
-    }
+        if _prompt_attachment(message) or keep_background:
+            attachments_by_ref[f"message:{index}"] = deepcopy(message)
     if len(retained_item_refs) != len(set(retained_item_refs)):
         raise ValueError("retained references contain duplicates")
     reference_set = set(retained_item_refs)
@@ -397,7 +407,8 @@ class WindowSwitchManager:
         control.safe_boundary_pending = False
         control.pending_iteration_seq = 0
 
-    def _count_request(self, ctx: "AgentCallbackContext") -> int | None:
+    @staticmethod
+    def _count_request(ctx: "AgentCallbackContext") -> int | None:
         try:
             counter = ctx.context.token_counter() if ctx.context is not None else None
         except Exception:  # noqa: BLE001 - failure to obtain the ContextEngine counter is unexpected
@@ -408,7 +419,8 @@ class WindowSwitchManager:
             ctx.inputs.tools,
         )
 
-    def _count_candidate(self, ctx: "AgentCallbackContext", messages: list) -> int | None:
+    @staticmethod
+    def _count_candidate(ctx: "AgentCallbackContext", messages: list) -> int | None:
         window = ctx.extra.get("_final_request_context_window")
         if window is None:
             return None
@@ -538,13 +550,16 @@ class WindowSwitchManager:
             for group in _message_groups(old_messages, group_start, group_end)
             if not any(_prompt_attachment(message) for message in group.messages)
         ]
-        prefix_items = [
-            (index, deepcopy(message))
-            for index, message in enumerate(old_messages[header_index + 1 : group_end], start=header_index + 1)
-            if _prompt_attachment(message) or (
-                query_index is not None and index < query_index and _part(message) == TEMPORARY_BACKGROUND
+        prefix_items = []
+        start = header_index + 1
+        for index, message in enumerate(old_messages[start:group_end], start=start):
+            keep_background = (
+                query_index is not None
+                and index < query_index
+                and _part(message) == TEMPORARY_BACKGROUND
             )
-        ]
+            if _prompt_attachment(message) or keep_background:
+                prefix_items.append((index, deepcopy(message)))
         seed_message = _handoff_message(old_messages, seed, candidate_version=2)
         base = [deepcopy(old_messages[header_index]), *(message for _, message in prefix_items),
                 seed_message, original_request]
@@ -579,7 +594,8 @@ class WindowSwitchManager:
 
     async def _finish_prepared(self, ctx: "AgentCallbackContext") -> dict | None:
         prepared = self._prepared
-        assert prepared is not None
+        if prepared is None:
+            raise ValueError("prepared rollover candidate is missing")
         control = self._context.binding.control
         needed = self._count_request(ctx)
         if needed is None:
@@ -646,7 +662,8 @@ class WindowSwitchManager:
             )
         return None
 
-    def _restore_old_context(self, ctx: "AgentCallbackContext", prepared: _PreparedRollover) -> None:
+    @staticmethod
+    def _restore_old_context(ctx: "AgentCallbackContext", prepared: _PreparedRollover) -> None:
         if ctx.context is not None:
             ctx.context.set_messages(list(prepared.old_messages))
 

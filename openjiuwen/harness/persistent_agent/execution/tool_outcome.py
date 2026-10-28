@@ -23,7 +23,7 @@ def _fingerprint(value) -> str | None:
     try:
         encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
-    except (TypeError, ValueError, UnicodeError):
+    except (TypeError, ValueError):
         return None
 
 
@@ -65,7 +65,8 @@ def record_tool_completion(message, call, result, exception, args_summary: str) 
         return
     message.metadata = dict(message.metadata or {})
     message.metadata.pop(_RECEIPT_KEY, None)
-    if call is None or message.tool_call_id != call.id or exception is not None or not _terminal_success(call, result):
+    bad_call = call is None or message.tool_call_id != call.id
+    if bad_call or exception is not None or not _terminal_success(call, result):
         return
     call_digest, content_digest = _call_fingerprint(call), _fingerprint(message.content)
     if call_digest is None or content_digest is None:
