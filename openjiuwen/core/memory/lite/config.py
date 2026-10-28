@@ -82,6 +82,10 @@ def create_memory_settings(
         if hasattr(settings, key):
             setattr(settings, key, value)
 
+    journal_mode = os.getenv("OPENJIUWEN_MEMORY_SQLITE_JOURNAL_MODE")
+    if journal_mode is not None and "journal_mode" not in settings.store:
+        settings.store["journal_mode"] = journal_mode
+
     return settings
 
 

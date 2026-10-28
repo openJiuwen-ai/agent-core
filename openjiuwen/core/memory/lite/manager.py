@@ -139,17 +139,25 @@ def blob_to_vector(blob: bytes) -> List[float]:
     return list(struct.unpack(f'{count}f', blob))
 
 
-def _open_database(db_path: str) -> sqlite3.Connection:
+def _open_database(db_path: str, *, journal_mode: str = "WAL") -> sqlite3.Connection:
     """Open SQLite database."""
+    if not isinstance(journal_mode, str) or journal_mode.strip().upper() not in {"WAL", "DELETE"}:
+        raise ValueError("SQLite journal_mode must be WAL or DELETE")
+    journal_mode = journal_mode.strip().upper()
     ensure_dir(os.path.dirname(db_path) or ".")
 
     conn = sqlite3.connect(db_path, timeout=5.0, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    # busy_timeout lets SQLite wait (up to ms) for a lock instead of failing
-    # immediately with "database is locked" when another process is writing.
-    conn.execute("PRAGMA busy_timeout=10000")
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    try:
+        conn.row_factory = sqlite3.Row
+        # busy_timeout lets SQLite wait for another process writing the database.
+        conn.execute("PRAGMA busy_timeout=10000")
+        actual = conn.execute(f"PRAGMA journal_mode={journal_mode}").fetchone()[0]
+        if actual.upper() != journal_mode:
+            raise sqlite3.OperationalError("could not select SQLite journal mode")
+        conn.execute("PRAGMA foreign_keys=ON")
+    except Exception:
+        conn.close()
+        raise
 
     return conn
 
@@ -319,7 +327,7 @@ class MemoryIndexManager:
             self._event_loop = None
 
         self.db_path = self._resolve_db_path()
-        self.db = _open_database(self.db_path)
+        self.db = _open_database(self.db_path, journal_mode=self.settings.store.get("journal_mode", "WAL"))
         self._ensure_schema()
         await self._initialize_provider()
         await self._load_vector_extension()
