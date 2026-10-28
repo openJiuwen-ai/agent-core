@@ -22,7 +22,14 @@ class _PromptBuilder:
         self.added_sections: list = []
 
     def add_section(self, section) -> None:
+        self.remove_section(section.name)
         self.added_sections.append(section)
+
+    def remove_section(self, name: str) -> None:
+        self.added_sections = [
+            section for section in self.added_sections
+            if section.name != name
+        ]
 
 
 def _make_ctx(
@@ -127,6 +134,48 @@ async def test_goal_round_falls_back_when_no_attachment_manager() -> None:
         builder.added_sections[0].render("cn")
         == _expected_protocol_content("cn")
     )
+
+
+@pytest.mark.asyncio
+async def test_normal_round_clears_fallback_system_section() -> None:
+    rail = TaskCompletionRail(goal_manager=object())
+    rail.attachment_manager = None
+    ctx_goal, agent, builder = _make_ctx(
+        run_kind="goal", attachment_manager=None
+    )
+    agent.prompt_attachment_manager = None
+    await rail.before_model_call(ctx_goal)
+    assert [section.name for section in builder.added_sections] == [
+        "goal_protocol"
+    ]
+
+    ctx_normal, agent, _ = _make_ctx(
+        run_kind="normal",
+        attachment_manager=None,
+        builder=builder,
+    )
+    agent.prompt_attachment_manager = None
+    await rail.before_model_call(ctx_normal)
+
+    assert builder.added_sections == []
+
+
+@pytest.mark.asyncio
+async def test_goal_round_falls_back_when_session_id_is_missing() -> None:
+    manager = PromptAttachmentManager()
+    rail = TaskCompletionRail(goal_manager=object())
+    rail.attachment_manager = manager
+    ctx, _, builder = _make_ctx(
+        run_kind="goal", attachment_manager=manager
+    )
+    ctx.session = None
+
+    await rail.before_model_call(ctx)
+
+    assert [section.name for section in builder.added_sections] == [
+        "goal_protocol"
+    ]
+    assert await manager.collect_for_session("sess1") == []
 
 
 @pytest.mark.asyncio

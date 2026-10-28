@@ -308,15 +308,16 @@ class TaskCompletionRail(DeepAgentRail):
 
         manager = self.attachment_manager
         if manager is None:
-            if want_goal:
+            if builder is not None and want_goal:
                 logger.warning(
                     "TaskCompletionRail: prompt attachment manager "
                     "is unavailable; fall back to system prompt section"
                 )
-                if builder is not None:
-                    builder.add_section(
-                        build_goal_protocol_section(language)
-                    )
+                builder.add_section(
+                    build_goal_protocol_section(language)
+                )
+            elif builder is not None:
+                builder.remove_section(SectionName.GOAL_PROTOCOL)
             return
 
         writer = manager.bind_context(ctx)
@@ -333,10 +334,19 @@ class TaskCompletionRail(DeepAgentRail):
             except ValueError as exc:
                 logger.warning(
                     "TaskCompletionRail: skip goal protocol "
-                    "prompt attachment: %s",
+                    "prompt attachment and fall back to system "
+                    "prompt section: %s",
                     exc,
                 )
+                if builder is not None:
+                    builder.add_section(section)
+            else:
+                if builder is not None:
+                    builder.remove_section(SectionName.GOAL_PROTOCOL)
             return
+
+        if builder is not None:
+            builder.remove_section(SectionName.GOAL_PROTOCOL)
 
         if writer.session_id is None:
             return
