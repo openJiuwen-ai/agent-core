@@ -167,25 +167,26 @@ def set_team_workspace(path: str) -> None:
 def get_agent_history_root(operation: Any = None) -> str:
     """Root directory for cross-session agent artifacts (e.g. ``.agent_history/``).
 
-    Unlike ``get_workspace()``/``get_cwd()``, this is anchored to the
-    jiuwenswarm host's system working directory rather than the current
-    project, so history is not scattered across every project checkout.
-    Honors ``JIUWENSWARM_DATA_DIR`` / ``JIUWENCLAW_DATA_DIR`` /
-    ``JIUWENSWARM_HOME`` -- the same
-    env vars the jiuwenswarm host sets for multi-instance isolation
-    (see jiuwenswarm.common.utils.get_user_workspace_dir) -- so agent-core
-    stays decoupled from that package while still landing in the same root.
+    A host can select a cross-project root through ``JIUWENSWARM_DATA_DIR``,
+    ``JIUWENCLAW_DATA_DIR``, or ``JIUWENSWARM_HOME``. Without those host
+    settings, preserve the SDK's workspace (or CWD) based history location.
+    A workspace outside the host root also stays isolated in that workspace.
+    Restricted operations always use a root within their sandbox boundary.
     """
     data_dir = (os.getenv("JIUWENSWARM_DATA_DIR") or os.getenv("JIUWENCLAW_DATA_DIR") or "").strip()
-    if data_dir:
-        root = Path(data_dir).expanduser().resolve()
-    else:
-        home = os.getenv("JIUWENSWARM_HOME")
+    home = os.getenv("JIUWENSWARM_HOME")
+    workspace = get_workspace()
+    if data_dir or home:
         try:
-            root = (Path(home).expanduser() if home else Path.home()) / ".jiuwenswarm"
-            root = root.resolve()
+            root = (Path(data_dir) if data_dir else Path(home) / ".jiuwenswarm").expanduser().resolve()
         except RuntimeError:
-            root = Path(get_workspace() or get_cwd()).resolve()
+            root = Path(workspace or get_cwd()).resolve()
+        if workspace:
+            workspace_path = Path(workspace).resolve()
+            if not workspace_path.is_relative_to(root):
+                root = workspace_path
+    else:
+        root = Path(workspace or get_cwd()).resolve()
 
     config = getattr(operation, "_run_config", None)
     mode = getattr(operation, "mode", None)

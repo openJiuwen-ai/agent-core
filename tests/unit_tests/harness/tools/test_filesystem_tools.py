@@ -8,7 +8,7 @@ import json
 import shutil
 import tempfile
 import unittest
-from types import MethodType
+from types import MethodType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -17,6 +17,7 @@ from PIL import Image
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
+from openjiuwen.core.sys_operation import cwd as cwd_state
 from openjiuwen.core.sys_operation.cwd import get_cwd, set_cwd, set_workspace
 from openjiuwen.harness.prompts.tools.filesystem import (
     get_glob_input_params,
@@ -1141,6 +1142,29 @@ def test_history_snapshot_is_written_in_private_directory(tmp_path):
         assert history_path.stat().st_mode & 0o777 == 0o600
 
 
+def test_write_history_path_stays_inside_restricted_sandbox(monkeypatch, tmp_path):
+    sandbox = tmp_path / "sandbox"
+    workspace = sandbox / "agent-workspace"
+    monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(tmp_path / "host-data"))
+    token = cwd_state._cwd_state.set(None)
+    try:
+        cwd_state.init_cwd(str(sandbox), workspace=str(workspace))
+        operation = SimpleNamespace(
+            mode="local",
+            _run_config=LocalWorkConfig(restrict_to_sandbox=True, sandbox_root=[str(sandbox)]),
+        )
+        session = MagicMock()
+        session.agent_id.return_value = "agent"
+        session.get_session_id.return_value = "session"
+
+        history_path = WriteFileTool(operation)._build_history_path(session)
+
+        assert os.path.commonpath((history_path, str(sandbox))) == str(sandbox)
+        assert history_path.startswith(str(workspace))
+    finally:
+        cwd_state._cwd_state.reset(token)
+
+
 class TestWriteFileToolHistoryPath(unittest.TestCase):
     """Unit tests for WriteFileTool._build_history_path — no Runner required."""
 
@@ -1169,8 +1193,9 @@ class TestWriteFileToolHistoryPath(unittest.TestCase):
     def test_jiuwenswarm_data_dir_is_base_dir(self):
         """JIUWENSWARM_DATA_DIR is used as the base directory, not the project workspace."""
         session = self._make_session("s1", agent_id="a")
-        workspace = tempfile.mkdtemp()
         data_dir = tempfile.mkdtemp()
+        workspace = os.path.join(data_dir, "workspace")
+        os.makedirs(workspace)
         try:
             set_workspace(workspace)
             with patch.dict(os.environ, {"JIUWENSWARM_DATA_DIR": data_dir}):
@@ -1180,7 +1205,6 @@ class TestWriteFileToolHistoryPath(unittest.TestCase):
                 assert not path.startswith(os.path.realpath(workspace))
                 assert ".agent_history" in path
         finally:
-            shutil.rmtree(workspace, ignore_errors=True)
             shutil.rmtree(data_dir, ignore_errors=True)
 
     def test_filename_pattern(self):
@@ -1220,8 +1244,9 @@ class TestEditFileToolHistoryPath(unittest.TestCase):
     def test_jiuwenswarm_data_dir_is_base_dir(self):
         """JIUWENSWARM_DATA_DIR is used as the base directory, not the project workspace."""
         session = self._make_session("s1", agent_id="a")
-        workspace = tempfile.mkdtemp()
         data_dir = tempfile.mkdtemp()
+        workspace = os.path.join(data_dir, "workspace")
+        os.makedirs(workspace)
         try:
             set_workspace(workspace)
             with patch.dict(os.environ, {"JIUWENSWARM_DATA_DIR": data_dir}):
@@ -1231,7 +1256,6 @@ class TestEditFileToolHistoryPath(unittest.TestCase):
                 assert not path.startswith(os.path.realpath(workspace))
                 assert ".agent_history" in path
         finally:
-            shutil.rmtree(workspace, ignore_errors=True)
             shutil.rmtree(data_dir, ignore_errors=True)
 
     def test_filename_pattern(self):

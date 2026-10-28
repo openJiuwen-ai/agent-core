@@ -324,8 +324,9 @@ class TestBashToolHistoryPath(unittest.TestCase):
     def test_jiuwenswarm_data_dir_is_base_dir(self):
         """JIUWENSWARM_DATA_DIR is used as the base directory, not the project workspace."""
         session = self._make_session("s1", agent_id="a")
-        workspace = tempfile.mkdtemp()
         data_dir = tempfile.mkdtemp()
+        workspace = os.path.join(data_dir, "workspace")
+        os.makedirs(workspace)
         try:
             set_workspace(workspace)
             with patch.dict(os.environ, {"JIUWENSWARM_DATA_DIR": data_dir}):
@@ -335,7 +336,6 @@ class TestBashToolHistoryPath(unittest.TestCase):
                 assert not path.startswith(os.path.realpath(workspace))
                 assert ".agent_history" in path
         finally:
-            shutil.rmtree(workspace, ignore_errors=True)
             shutil.rmtree(data_dir, ignore_errors=True)
 
     def test_filename_pattern(self):
