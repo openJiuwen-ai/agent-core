@@ -8,7 +8,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine.base import ModelContext
@@ -99,6 +99,33 @@ TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY = "tool_call_args_loop_compact_count"
 _CompactKind = Literal["reasoning_tools", "tool_args"]
 
 
+
+_WRAPPER_TOOL_NAMES = frozenset({"invoke_tool"})
+
+
+class _IgnoredToolCallRule(BaseModel):
+    """Local twin of harness IgnoredToolCallRule (no harness import)."""
+
+    tool_name: str = Field(min_length=1)
+    argument_equals: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Top-level argument key/value equals. Empty dict means name-only match. "
+            "Empty equals is forbidden for wrapper tools such as invoke_tool."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _reject_empty_equals_on_wrappers(self) -> "_IgnoredToolCallRule":
+        if not self.argument_equals and self.tool_name in _WRAPPER_TOOL_NAMES:
+            raise ValueError(
+                f"argument_equals cannot be empty for wrapper tool "
+                f"{self.tool_name!r}; name-only exemption would skip all "
+                f"lazy-loaded tools"
+            )
+        return self
+
+
 class ReasoningToolLoopCompactProcessorConfig(BaseModel):
     """Detect and compact consecutive identical reasoning/tool or tool/args rounds."""
 
@@ -164,6 +191,16 @@ class ReasoningToolLoopCompactProcessorConfig(BaseModel):
         ),
     )
 
+    ignored_tool_calls: List[_IgnoredToolCallRule] = Field(
+        default_factory=list,
+        description=(
+            "Tool call rules excluded from consecutive-loop compaction. "
+            "An exempt round acts as a wall (break), not a skip."
+        ),
+    )
+
+
+
 
 @dataclass(frozen=True)
 class _ToolRound:
@@ -175,6 +212,8 @@ class _ToolRound:
     args_fingerprint: Tuple[Tuple[str, str], ...]
     reasoning: str
     tool_names: Tuple[str, ...]
+    # True when every tool_call in the round matches an ignored_tool_calls rule.
+    exempt: bool = False
 
 
 @ContextEngine.register_processor()
@@ -331,9 +370,12 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
         if threshold < 2 or len(rounds) < threshold:
             return None
 
-        # Walk from the end; skip rounds whose fingerprint for this rule is None.
+        # Walk from the end. Exempt rounds are a wall (break), not a skip.
+        # Check exempt before fingerprint-is-None so reasoning walls stay opaque.
         eligible: List[_ToolRound] = []
         for round_info in reversed(rounds):
+            if round_info.exempt:
+                break
             fingerprint = getattr(round_info, fingerprint_attr)
             if fingerprint is None:
                 if eligible:
@@ -417,6 +459,9 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
                 index += 1
                 continue
 
+            exempt = bool(tool_calls) and all(
+                self._is_tool_call_exempt(tool_call) for tool_call in tool_calls
+            )
             rounds.append(
                 _ToolRound(
                     start=index,
@@ -425,6 +470,7 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
                     args_fingerprint=tuple(sorted(call_fps)),
                     reasoning=reasoning or "",
                     tool_names=tool_names,
+                    exempt=exempt,
                 )
             )
             index = cursor
@@ -500,6 +546,24 @@ class ReasoningToolLoopCompactProcessor(ContextProcessor):
             tool_results=tool_results,
             reasoning_preview=preview,
         ).strip()
+
+
+    def _is_tool_call_exempt(self, tool_call: Any) -> bool:
+        """Return True when tool_call matches an ignored_tool_calls rule."""
+        name = str(getattr(tool_call, "name", "") or "").strip()
+        if not name:
+            return False
+        args = _parse_tool_arguments(getattr(tool_call, "arguments", None))
+        for rule in self.config.ignored_tool_calls:
+            if name != rule.tool_name:
+                continue
+            if not rule.argument_equals:
+                return True
+            if not isinstance(args, dict):
+                continue
+            if all(args.get(key) == value for key, value in rule.argument_equals.items()):
+                return True
+        return False
 
     def _normalize_reasoning(self, raw: Any) -> Optional[str]:
         if not isinstance(raw, str):

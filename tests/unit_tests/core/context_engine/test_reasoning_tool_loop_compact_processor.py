@@ -514,3 +514,156 @@ class TestReasoningToolLoopCompactProcessor:
 
         assert len(_tool_args_loop_summary_messages(ctx.get_messages())) == 1
         assert session.get_state(TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY) is None
+
+
+def _poll_round(
+    index: int,
+    *,
+    run_id: str = "run-abc",
+    reasoning: str | None = None,
+    args_as_dict: bool = False,
+) -> list:
+    """One completed image_get_run round (direct call)."""
+    tool_id = f"poll-{index}"
+    args_obj = {"run_id": run_id}
+    arguments = args_obj if args_as_dict else json.dumps(args_obj, ensure_ascii=False)
+    kwargs = {
+        "content": f"poll status round-{index}",
+        "tool_calls": [_tool_call(tool_id, "image_get_run", arguments)],
+    }
+    if reasoning is not None:
+        kwargs["reasoning_content"] = reasoning
+    return [
+        AssistantMessage(**kwargs),
+        ToolMessage(
+            content=json.dumps({"status": "running", "run_id": run_id}, ensure_ascii=False),
+            tool_call_id=tool_id,
+        ),
+    ]
+
+
+def _write_file_round(index: int, *, path: str = "/tmp/out.txt", content: str = "x") -> list:
+    tool_id = f"write-{index}"
+    arguments = json.dumps({"path": path, "content": content}, ensure_ascii=False)
+    return [
+        AssistantMessage(
+            content=f"write file round-{index}",
+            tool_calls=[_tool_call(tool_id, "write_file", arguments)],
+        ),
+        ToolMessage(content=f"wrote {path}", tool_call_id=tool_id),
+    ]
+
+
+def _ignored_poll_config(**overrides) -> ReasoningToolLoopCompactProcessorConfig:
+    base = dict(
+        consecutive_threshold=99,
+        tool_args_consecutive_threshold=5,
+        tool_args_bailout_threshold=2,
+        ignored_tool_calls=[
+            {"tool_name": "image_get_run", "argument_equals": {}},
+            {
+                "tool_name": "invoke_tool",
+                "argument_equals": {"tool_name": "image_get_run"},
+            },
+        ],
+    )
+    base.update(overrides)
+    return ReasoningToolLoopCompactProcessorConfig.model_validate(base)
+
+
+class TestIgnoredToolCallsAndExemptWall:
+    """ignored_tool_calls exemption for async poll tools (break wall; no fold/bailout)."""
+
+    def test_invoke_tool_with_empty_argument_equals_is_rejected(self):
+        with pytest.raises(Exception) as exc_info:
+            ReasoningToolLoopCompactProcessorConfig.model_validate({
+                "ignored_tool_calls": [
+                    {"tool_name": "invoke_tool", "argument_equals": {}},
+                ],
+            })
+        err = str(exc_info.value).lower()
+        assert "invoke_tool" in err or "wrapper" in err or "argument_equals" in err
+
+    @pytest.mark.asyncio
+    async def test_direct_image_get_run_x12_does_not_compact_or_bailout(self):
+        config = _ignored_poll_config()
+        ctx = await _create_context(config)
+        session = _FakeSession()
+        ctx.set_session_ref(session)
+
+        await ctx.add_messages(UserMessage(content="poll creative poster"))
+        for index in range(1, 13):
+            await ctx.add_messages(_poll_round(index))
+
+        messages = ctx.get_messages()
+        assert not _tool_args_loop_summary_messages(messages)
+        assert not _loop_summary_messages(messages)
+        assert sum(
+            1 for msg in messages if isinstance(msg, AssistantMessage) and msg.tool_calls
+        ) == 12
+        assert session.get_state(TOOL_ARGS_LOOP_COMPACT_BAILOUT_STATE_KEY) is None
+        assert session.get_state(LOOP_COMPACT_BAILOUT_STATE_KEY) is None
+
+    @pytest.mark.asyncio
+    async def test_wall_fixture_a3_poll_n_a2_does_not_fold(self):
+        """write then exempt poll then write must not fold at threshold=5 (poll breaks streak)."""
+        config = _ignored_poll_config(tool_args_consecutive_threshold=5)
+        ctx = await _create_context(config)
+
+        await ctx.add_messages(UserMessage(content="do work then poll"))
+        for index in range(1, 4):
+            await ctx.add_messages(_write_file_round(index, content="same"))
+        for index in range(1, 6):
+            await ctx.add_messages(_poll_round(index))
+        for index in range(4, 6):
+            await ctx.add_messages(_write_file_round(index, content="same"))
+
+        messages = ctx.get_messages()
+        assert not _tool_args_loop_summary_messages(messages)
+        # 3 write + 5 poll + 2 write = 10 tool rounds still present
+        assert sum(
+            1 for msg in messages if isinstance(msg, AssistantMessage) and msg.tool_calls
+        ) == 10
+
+    @pytest.mark.asyncio
+    async def test_empty_ignored_keeps_original_compaction(self):
+        config = ReasoningToolLoopCompactProcessorConfig(
+            consecutive_threshold=99,
+            tool_args_consecutive_threshold=5,
+            ignored_tool_calls=[],
+        )
+        ctx = await _create_context(config)
+        await ctx.add_messages(UserMessage(content="poll"))
+        for index in range(1, 6):
+            await ctx.add_messages(_poll_round(index))
+
+        assert len(_tool_args_loop_summary_messages(ctx.get_messages())) == 1
+
+    @pytest.mark.asyncio
+    async def test_non_exempt_write_file_still_compacts(self):
+        config = _ignored_poll_config()
+        ctx = await _create_context(config)
+        await ctx.add_messages(UserMessage(content="write loop"))
+        for index in range(1, 6):
+            await ctx.add_messages(_write_file_round(index, content="same"))
+
+        assert len(_tool_args_loop_summary_messages(ctx.get_messages())) == 1
+
+    @pytest.mark.asyncio
+    async def test_identical_reasoning_with_exempt_poll_does_not_fold(self):
+        """identical reasoning with exempt poll must not fold via the reasoning consecutive rule."""
+        same_reasoning = "再查一次状态，确认创意海报是否完成渲染。" * 2
+        config = _ignored_poll_config(
+            consecutive_threshold=3,
+            tool_args_consecutive_threshold=99,
+        )
+        ctx = await _create_context(config)
+        await ctx.add_messages(UserMessage(content="poll with reasoning"))
+        for index in range(1, 4):
+            await ctx.add_messages(_poll_round(index, reasoning=same_reasoning))
+
+        messages = ctx.get_messages()
+        assert not _loop_summary_messages(messages)
+        assert sum(
+            1 for msg in messages if isinstance(msg, AssistantMessage) and msg.tool_calls
+        ) == 3
