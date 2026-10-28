@@ -322,7 +322,8 @@ class AutoCoordinatingHarnessConfig:
         model_configs = ModelConfigs.from_dict(_mapping(data.get("model_configs")))
         evaluator = EvaluatorConfig.from_dict(_mapping(data.get("evaluator")))
         analyzer = EvaluationResultAnalyzerConfig.from_dict(_mapping(data.get("evaluation_result_analyzer")))
-        optimizer = MemberOptimizerConfig.from_dict(_mapping(data.get("member_optimizer")))
+        member_data = _mapping(data.get("member_optimizer"))
+        optimizer = MemberOptimizerConfig.from_dict(member_data)
         model_configs = ModelConfigs(
             evaluation=model_configs.evaluation or evaluator.model_config_ref,
             analysis=model_configs.analysis or analyzer.model_config_ref,
@@ -337,7 +338,11 @@ class AutoCoordinatingHarnessConfig:
             evaluation_result_analyzer=replace(analyzer, model_config_ref=model_configs.analysis),
             member_optimizer=replace(
                 optimizer, model_config_ref=model_configs.member_optimization,
-                runtime_iteration_hard_limit=evaluator.solver_max_iterations_hard_limit,
+                runtime_iteration_hard_limit=(
+                    optimizer.runtime_iteration_hard_limit
+                    if "runtime_iteration_hard_limit" in member_data
+                    else evaluator.solver_max_iterations_hard_limit
+                ),
             ),
             scheduling=OrchestratorSchedulingConfig.from_dict(_mapping(data.get("scheduling"))),
         )

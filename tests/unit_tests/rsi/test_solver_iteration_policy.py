@@ -28,3 +28,19 @@ def test_changed_solver_budget_invalidates_cached_evaluation(tmp_path):
     assert configured.evaluator.solver_max_iterations == 240
     assert baseline["signature"] != changed["signature"]
     assert replace(configured.evaluator, solver_max_iterations=300) == EvaluatorConfig()
+
+
+def test_explicit_member_runtime_hard_limit_is_kept():
+    config = AutoCoordinatingHarnessConfig.from_dict({
+        "evaluator": {"solver_max_iterations_hard_limit": 400},
+        "member_optimizer": {"runtime_iteration_hard_limit": 50},
+    })
+    assert config.evaluator.solver_max_iterations_hard_limit == 400
+    assert config.member_optimizer.runtime_iteration_hard_limit == 50
+
+
+def test_omitted_member_runtime_hard_limit_follows_evaluator():
+    config = AutoCoordinatingHarnessConfig.from_dict({
+        "evaluator": {"solver_max_iterations_hard_limit": 400},
+    })
+    assert config.member_optimizer.runtime_iteration_hard_limit == 400
