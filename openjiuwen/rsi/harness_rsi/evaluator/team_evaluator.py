@@ -122,7 +122,11 @@ class TeamEvaluator:
             encoding="utf-8",
         )
 
-        harness_refs = _load_harness_refs(harness_refs_path) if harness_refs_path else {}
+        refs_path = str(harness_refs_path or "").strip()
+        try:
+            harness_refs = _load_harness_refs(refs_path) if refs_path else {}
+        except (OSError, ValueError, yaml.YAMLError):
+            harness_refs = {}
         total_cases = len(cases)
         completed_cases = 0
         stage_lock = asyncio.Lock()
@@ -279,8 +283,13 @@ def _evaluation_input_fingerprint(
     if baseline_contexts is not None:
         payload["baseline_contexts"] = {key: value.fingerprint for key, value in baseline_contexts.items()}
     packages = {}
-    if harness_refs_path:
-        for role, package_path in _load_harness_refs(harness_refs_path).items():
+    refs_path = str(harness_refs_path or "").strip()
+    if refs_path:
+        try:
+            loaded_refs = _load_harness_refs(refs_path)
+        except (OSError, ValueError, yaml.YAMLError):
+            loaded_refs = {}
+        for role, package_path in loaded_refs.items():
             package = Path(package_path).expanduser().resolve()
             packages[role] = _path_identity(str(package.parent if package.is_file() else package))
     payload["harness_packages"] = packages

@@ -3243,16 +3243,17 @@ class DeepAgent(BaseAgent):
             )
 
     @contextmanager
-    def _invocation_log_context(self, session: Session):
+    def _invocation_log_context(self, session: Session | None):
         """Capture this invocation without switching process-global log paths."""
         directory = self._deep_config.invocation_log_dir if self._deep_config is not None else None
         with ExitStack() as stack:
             scope = None
             if directory:
+                session_id = session.get_session_id() if session is not None else ""
                 try:
                     scope = stack.enter_context(invocation_log_scope(
                         directory, agent_id=self.card.id,
-                        session_id=session.get_session_id(), role=self.card.name,
+                        session_id=session_id, role=self.card.name,
                     ))
                 except Exception as exc:
                     logger.warning("Invocation log capture unavailable: %s", type(exc).__name__)
@@ -3329,43 +3330,10 @@ class DeepAgent(BaseAgent):
         session: Optional[Session] = None,
         stream_modes: Optional[List[StreamMode]] = None,
     ) -> AsyncIterator[Any]:
-        """Drive the invocation in one task so log contexts never cross yields."""
-        queue: asyncio.Queue = asyncio.Queue(maxsize=8)
-
-        async def produce() -> None:
-            async with aclosing(self._stream_with_context(inputs, session, stream_modes)) as chunks:
-                async for chunk in chunks:
-                    await queue.put(chunk)
-
-        producer = asyncio.create_task(produce())
-        pending_read: asyncio.Task | None = None
-        try:
-            while True:
-                if producer.done() and queue.empty():
-                    await producer
-                    break
-                pending_read = asyncio.create_task(queue.get())
-                done, _ = await asyncio.wait((pending_read, producer), return_when=asyncio.FIRST_COMPLETED)
-                if pending_read in done:
-                    value = pending_read.result()
-                    pending_read = None
-                    yield value
-                else:
-                    pending_read.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await pending_read
-                    pending_read = None
-                    # Surface producer cancellation/errors even when no chunk was emitted.
-                    await producer
-        finally:
-            if pending_read is not None:
-                pending_read.cancel()
-                with suppress(asyncio.CancelledError):
-                    await pending_read
-            if not producer.done():
-                producer.cancel()
-            with suppress(asyncio.CancelledError):
-                await producer
+        """Stream in this task so rails finish only after delivered chunks."""
+        async with aclosing(self._stream_with_context(inputs, session, stream_modes)) as chunks:
+            async for chunk in chunks:
+                yield chunk
 
     async def _stream_with_context(
         self,
