@@ -348,31 +348,49 @@ class CompiledGraph(ExecutableGraph):
                 raise exception
         except asyncio.CancelledError:
             if is_main:
-                # 取消不等于正常完成:传非 None exception 让 checkpointer 走异常
-                # 保存分支。语义澄清(2026-10-16 评审):该分支只保留"已存在"
-                # 的快照不被清除——如 HITL 暂停后取消、恢复运行中再取消,
-                # 此前落盘的中断/错误快照留存,resume 可继续。
-                # 全新执行的中途取消不会写入图侧快照:Pregel run_step 仅
-                # except Exception,CancelledError 属 BaseException 绕过
-                # _save_state_on_error(saver.save 唯一调用点),任务层
-                # _commit_failure 只改内存态不落盘。因此随后以
-                # InteractiveInput resume 会被 checkpointer 前置校验显式拒绝
-                # ("graph checkpoint is missing or empty"),而非从中断节点
-                # 续跑;引擎级取消路径持久化未实现(需求入 backlog)。
-                # 若传 ({}, None) 会被误判为正常完成而清除恢复现场,导致
-                # HITL 场景的既有快照也被毁掉。
-                # 代价:取消后不续跑的会话快照将存留(checkpointer 无 TTL/GC,
-                # 依赖 release/reset 或续跑清理),长驻部署需关注库体积增长
-                # (TTL/GC 已列入下游 backlog: 时间戳 sidecar 键 + 消费侧
-                # scan-claim 顺带清扫, 2026-10-15 评审)。
+                # 取消不等于正常完成:传 ({}, None) 会被 checkpointer 误判为
+                # 正常完成而清除恢复现场,毁掉 HITL 场景的既有快照。
+                # 按图侧快照分流(2026-10-26 检视评审):
+                # - 图侧已有可续跑快照(HITL 暂停后取消/恢复运行中再取消):
+                #   传非 None 异常走保存分支,现场留存,resume 可继续;代价是
+                #   取消后不续跑的会话快照存留(checkpointer 无 TTL/GC,依赖
+                #   release/reset 或续跑清理;TTL/GC 已入下游 backlog:
+                #   时间戳 sidecar 键 + 消费侧 scan-claim 顺带清扫)。
+                # - 图侧无快照(全新执行的中途取消,Pregel run_step 仅
+                #   except Exception,CancelledError 属 BaseException 绕过
+                #   _save_state_on_error):不触发 io 侧落盘,保留可重跑语义。
+                #   此前无条件走保存分支会写 io 侧快照形成孤儿状态,同一
+                #   session 既不能 InteractiveInput resume(图侧校验拒绝)
+                #   也不能普通输入重跑(workflow state exists 拒绝),只能
+                #   release() 清理。
                 try:
-                    await self._checkpointer.post_workflow_execute(
-                        session, {}, asyncio.CancelledError("workflow execution cancelled")
+                    graph_state = await self._checkpointer.graph_store().get(session_id, workflow_id)
+                except Exception as inspect_error:
+                    # 查询失败按不可续跑处理:不落盘也不清除,快照维持现状。
+                    graph_state = None
+                    graph_logger.warning(
+                        "Failed to inspect graph checkpoint on workflow cancellation",
+                        event_type=LogEventType.GRAPH_END,
+                        exception=inspect_error,
+                        metadata={"session_id": session_id, "workflow_id": workflow_id},
                     )
-                except asyncio.CancelledError:
-                    # checkpointer 的保存分支会 re-raise 传入的异常,
-                    # 吞掉以保留下方原始取消链的传播。
-                    pass
+                if graph_state is not None and graph_state.is_resumable():
+                    try:
+                        await self._checkpointer.post_workflow_execute(
+                            session, {}, asyncio.CancelledError("workflow execution cancelled")
+                        )
+                    except asyncio.CancelledError:
+                        # checkpointer 的保存分支会 re-raise 传入的异常,
+                        # 吞掉以保留下方原始取消链的传播。
+                        pass
+                    except Exception as save_error:
+                        # 保存分支的其他失败(如后端错误)同样不能顶替原始取消链。
+                        graph_logger.error(
+                            "Failed to preserve checkpoint on workflow cancellation",
+                            event_type=LogEventType.GRAPH_END,
+                            exception=save_error,
+                            metadata={"session_id": session_id, "workflow_id": workflow_id},
+                        )
             raise
 
     async def stream(self, inputs: Input, session: Session) -> AsyncIterator[Output]:

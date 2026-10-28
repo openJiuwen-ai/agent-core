@@ -35,8 +35,9 @@ class Checkpointer(ABC):
         content=None），并连带 error 分支 release 删除会话数据。这里
         显式校验并抛错，把静默降级变成可诊断错误：
         1) io 侧 workflow state 必须存在；
-        2) 图侧 graph checkpoint 必须存在且可续跑（与 PregelLoop
-           _is_resume 同口径），否则引擎仍会全新起跑。
+        2) 图侧 graph checkpoint 必须存在且可续跑（GraphState
+           .is_resumable()，与 PregelLoop._is_resume 共享同口径），
+           否则引擎仍会全新起跑。
 
         所有后端（Persistence/InMemory/Redis）的 pre_workflow_execute
         InteractiveInput 分支必须在本校验通过后才调用 recover()，保证
@@ -69,34 +70,27 @@ class Checkpointer(ABC):
                     f"exists for session {session.session_id()}"
                 ),
             )
-        graph_state = None
-        if not session.config().get_env(SINGLE_COMPONENT_EXECUTION_KEY, False):
+        if session.config().get_env(SINGLE_COMPONENT_EXECUTION_KEY, False):
             # 单组件直调(execute_single_component)不经过 Pregel 图引擎,
-            # 中断状态只存 io 侧、图侧快照本就不存在,图侧校验跳过;
-            # 完整图执行的中断恢复必须有图侧快照(否则引擎全新起跑)。
-            graph_state = await graph_store.get(session.session_id(), workflow_id)
-        graph_resumable = graph_state is not None and (
-            bool(graph_state.pending_node)
-            or bool(graph_state.pending_buffer)
-            or bool(graph_state.channel_values)
+            # 中断状态只存 io 侧、图侧快照本就不存在,io 侧校验已通过即放行。
+            return
+        # 完整图执行的中断恢复必须有图侧快照(否则引擎全新起跑)。
+        graph_state = await graph_store.get(session.session_id(), workflow_id)
+        if graph_state is not None and graph_state.is_resumable():
+            return
+        session_logger.error(
+            "Interactive resume rejected: graph checkpoint not resumable",
+            event_type=LogEventType.CHECKPOINT_ERROR,
+            **log_message,
         )
-        if not graph_resumable:
-            if session.config().get_env(SINGLE_COMPONENT_EXECUTION_KEY, False):
-                # io 侧校验已通过,单组件路径到此放行。
-                return
-            session_logger.error(
-                "Interactive resume rejected: graph checkpoint not resumable",
-                event_type=LogEventType.CHECKPOINT_ERROR,
-                **log_message,
-            )
-            raise build_error(
-                StatusCode.CHECKPOINTER_PRE_WORKFLOW_EXECUTION_ERROR,
-                workflow=workflow_id,
-                reason=(
-                    "interactive resume requested but graph checkpoint is "
-                    f"missing or empty for session {session.session_id()}"
-                ),
-            )
+        raise build_error(
+            StatusCode.CHECKPOINTER_PRE_WORKFLOW_EXECUTION_ERROR,
+            workflow=workflow_id,
+            reason=(
+                "interactive resume requested but graph checkpoint is "
+                f"missing or empty for session {session.session_id()}"
+            ),
+        )
 
     @abstractmethod
     async def pre_workflow_execute(self, session: BaseSession, inputs: InteractiveInput):
