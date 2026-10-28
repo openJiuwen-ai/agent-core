@@ -1137,6 +1137,20 @@ class ReActAgent(BaseAgent):
                     (call_last_token_time - call_first_token_time) / (output_tokens - 1) * 1000, 2
                 )
 
+            # Backfill latency onto usage_metadata so tracer consumers
+            # (OtelRail after_model_call -> on_llm_end) can stamp TTFT /
+            # inter-token latency on the LLM span (#1833); perf_metrics alone
+            # only reaches the UI stream channel below. first_token_time feeds
+            # gen_ai.response.time_to_first_chunk (GenAI semconv, seconds) so
+            # the ms measurement must be converted; inter_token_latency_ms
+            # targets a custom *_ms attribute and stays in milliseconds.
+            if "ttft_ms" in perf_metrics:
+                ai_message.usage_metadata.first_token_time = str(
+                    round(perf_metrics["ttft_ms"] / 1000, 6)
+                )
+            if "tpot_ms" in perf_metrics:
+                ai_message.usage_metadata.inter_token_latency_ms = perf_metrics["tpot_ms"]
+
             await session.write_stream(OutputSchema(
                 type="llm_usage",
                 index=0,
