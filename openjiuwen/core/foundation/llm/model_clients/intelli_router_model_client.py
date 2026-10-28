@@ -12,6 +12,12 @@ from threading import Lock
 from typing import List, Optional, AsyncIterator, Union, Dict, Any
 
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.routing.intelli_router_errors import (
+    ROUTER_ERROR_TYPES,
+    ROUTING_RECORD_EVENTS,
+    record_routing_event,
+    to_model_error,
+)
 from openjiuwen.core.foundation.llm.schema.message import (
     BaseMessage, AssistantMessage, UserMessage, UsageMetadata
 )
@@ -142,8 +148,12 @@ class _CoreRoutingEventBridge:
         return self.__class__.__name__
 
     async def handle_event(self, event: Any) -> None:
-        if self._event_type_value(event) == "request_retried":
+        event_type = self._event_type_value(event)
+        if event_type == "request_retried":
             self._log_route_failover(event)
+        if event_type in ROUTING_RECORD_EVENTS:
+            # The router keeps no failure reasons; record them for error messages.
+            record_routing_event(event)
         payload = self._payload_from_event(event)
         if payload is None:
             return
@@ -450,13 +460,18 @@ class IntelliRouterModelClient(BaseModelClient):
             stop=stop,
         )
 
-        result = await self._router.invoke(
-            messages=converted_messages,
-            tools=self._convert_tools_to_dict(tools),
-            model=model_name,
-            **params,
-            **kwargs
-        )
+        try:
+            result = await self._router.invoke(
+                messages=converted_messages,
+                tools=self._convert_tools_to_dict(tools),
+                model=model_name,
+                **params,
+                **kwargs
+            )
+        except ROUTER_ERROR_TYPES as exc:
+            raise to_model_error(
+                exc, router=self._router, model_name=model_name, output_emitted=False,
+            ) from exc
 
         # Map intelli_router types -> openjiuwen types
         return await self._to_ow_assistant_message(result, output_parser)
@@ -485,26 +500,34 @@ class IntelliRouterModelClient(BaseModelClient):
             stop=stop,
         )
 
-        async for chunk in self._router.stream(
-            messages=converted_messages,
-            tools=self._convert_tools_to_dict(tools),
-            model=model_name,
-            **params,
-            **kwargs
-        ):
-            converted = self._to_ow_chunk(chunk)
-            if output_parser and converted.content:
-                accumulated_for_parser += str(converted.content)
-                try:
-                    parsed = await output_parser.parse(accumulated_for_parser)
-                    if parsed is not None:
-                        converted = converted.model_copy(
-                            update={"parser_content": parsed}
-                        )
-                        accumulated_for_parser = ""
-                except Exception as exc:
-                    logger.debug(f"stream parser attempt failed: {exc}")
-            yield converted
+        output_emitted = False
+        try:
+            async for chunk in self._router.stream(
+                messages=converted_messages,
+                tools=self._convert_tools_to_dict(tools),
+                model=model_name,
+                **params,
+                **kwargs
+            ):
+                converted = self._to_ow_chunk(chunk)
+                if converted.carries_output_token():
+                    output_emitted = True
+                if output_parser and converted.content:
+                    accumulated_for_parser += str(converted.content)
+                    try:
+                        parsed = await output_parser.parse(accumulated_for_parser)
+                        if parsed is not None:
+                            converted = converted.model_copy(
+                                update={"parser_content": parsed}
+                            )
+                            accumulated_for_parser = ""
+                    except Exception as exc:
+                        logger.debug(f"stream parser attempt failed: {exc}")
+                yield converted
+        except ROUTER_ERROR_TYPES as exc:
+            raise to_model_error(
+                exc, router=self._router, model_name=model_name, output_emitted=output_emitted,
+            ) from exc
 
     async def generate_image(
         self,

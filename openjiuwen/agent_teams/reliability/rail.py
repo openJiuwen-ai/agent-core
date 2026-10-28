@@ -31,6 +31,26 @@ def _error_text(exc: Exception | None) -> str:
     return str(exc) if exc is not None else "error"
 
 
+_MODEL_FAILURE_FIELDS = ("route_case", "reason", "pinned_model", "failures", "usable", "user_action_required")
+
+
+def _model_failure(exc: BaseException | None) -> dict[str, Any] | None:
+    """Extract the routing verdict a model-group client attached to ``exc``.
+
+    Walks the cause chain and returns the first ``details`` carrying
+    ``route_case``; None for errors from other model clients.
+    """
+    seen: set[int] = set()
+    current = exc
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        details = getattr(current, "details", None)
+        if isinstance(details, dict) and details.get("route_case"):
+            return {key: details.get(key) for key in _MODEL_FAILURE_FIELDS}
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def _args_as_dict(tool_args: Any) -> dict[str, Any] | None:
     """Normalize dict or JSON-object tool args for stable hashing."""
     if isinstance(tool_args, dict):
@@ -151,6 +171,7 @@ class ReliabilityRail(DeepAgentRail):
                 kind=SignalKind.MODEL_EXCEPTION,
                 member_name=self._member,
                 error=_error_text(ctx.exception),
+                model_failure=_model_failure(ctx.exception),
             ),
             ctx,
         )
