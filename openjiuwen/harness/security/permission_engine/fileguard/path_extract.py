@@ -61,6 +61,12 @@ _READ_CMDS = frozenset({
     "cat", "ls", "dir", "type", "head", "tail", "more", "less",
     "get-content", "gc",
 })
+_BARE_PATH_OPERAND_COMMANDS = frozenset({
+    "cd", "rm", "cp", "mv", "mkdir", "touch", "cat", "type", "del",
+    "erase", "rd", "rmdir", "copy", "move", "md", "head", "tail",
+    "more", "less", "vim", "nano", "gedit", "notepad",
+})
+_HEAD_TAIL_VALUE_OPTIONS = frozenset({"-n", "--lines", "-c", "--bytes"})
 _WRITE_CMDS = frozenset({
     "rm", "mkdir", "touch", "chmod", "chown", "del", "erase", "rd", "rmdir", "md",
     "set-content", "add-content", "out-file", "tee-object", "sc",
@@ -256,11 +262,24 @@ def _path_aware_one_segment(
         except (OSError, RuntimeError):
             return
 
+    skip_next_head_tail_value = False
     for idx, tok in enumerate(tokens[1:]):
         tok = tok.strip().strip('"').strip("'")
+        if skip_next_head_tail_value:
+            skip_next_head_tail_value = False
+            continue
+        if cmd0 in {"head", "tail"} and tok.lower() in _HEAD_TAIL_VALUE_OPTIONS:
+            skip_next_head_tail_value = True
+            continue
         if not tok or _is_shell_flag_token(tok, cmd0=cmd0):
             continue
-        _append_path_token(tok, idx, require_path_shape=True)
+        if cmd0 in {"more", "less", "vim", "nano", "gedit", "notepad"} and tok.startswith("+"):
+            continue
+        _append_path_token(
+            tok,
+            idx,
+            require_path_shape=cmd0 not in _BARE_PATH_OPERAND_COMMANDS,
+        )
 
     if cmd0 in (
         "get-content", "gc", "set-content", "add-content", "out-file",
