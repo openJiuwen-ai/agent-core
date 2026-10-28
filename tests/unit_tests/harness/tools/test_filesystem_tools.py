@@ -1165,6 +1165,46 @@ def test_write_history_path_stays_inside_restricted_sandbox(monkeypatch, tmp_pat
         cwd_state._cwd_state.reset(token)
 
 
+@pytest.mark.asyncio
+async def test_restricted_file_history_stays_inside_sandbox(sys_op, monkeypatch, tmp_path):
+    sandbox = tmp_path / "sandbox"
+    workspace = sandbox / "agent-workspace"
+    workspace.mkdir(parents=True)
+    host_data = tmp_path / "host-data"
+    monkeypatch.setenv("JIUWENSWARM_DATA_DIR", str(host_data))
+    sys_op._run_config.restrict_to_sandbox = True
+    sys_op._run_config.sandbox_root = [str(sandbox)]
+    session = MagicMock()
+    session.agent_id.return_value = "agent"
+    session.get_session_id.return_value = "session"
+    monkeypatch.setattr(filesystem_module, "get_current_session", lambda: session)
+    token = cwd_state._cwd_state.set(None)
+    try:
+        cwd_state.init_cwd(str(sandbox), workspace=str(workspace))
+        target = sandbox / "document.txt"
+
+        result = await WriteFileTool(sys_op).invoke({"file_path": str(target), "content": "history proof"})
+
+        assert result.success is True
+        assert target.read_text(encoding="utf-8") == "history proof"
+        read_result = await ReadFileTool(sys_op).invoke({"file_path": str(target)})
+        assert read_result.success is True
+        edit_result = await EditFileTool(sys_op).invoke({
+            "file_path": str(target), "old_string": "proof", "new_string": "verified"
+        })
+        assert edit_result.success is True
+        history_path = workspace / ".agent_history" / "file_ops_agent_session.json"
+        await filesystem_module._record_rm_targets_before_deletion(str(history_path), [str(target)], sys_op)
+        entries = json.loads(history_path.read_text(encoding="utf-8"))[str(target)]
+        assert [entry["action"] for entry in entries] == ["write", "edit", "delete"]
+        assert entries[0]["new_content"] == "history proof"
+        assert entries[1]["new_content"] == "history verified"
+        assert entries[2]["old_content"] == "history verified"
+        assert not host_data.exists()
+    finally:
+        cwd_state._cwd_state.reset(token)
+
+
 class TestWriteFileToolHistoryPath(unittest.TestCase):
     """Unit tests for WriteFileTool._build_history_path — no Runner required."""
 
